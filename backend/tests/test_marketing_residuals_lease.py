@@ -60,6 +60,16 @@ RUN_DATE = date(2026, 9, 24)
 _BASE = datetime(2026, 9, 24, 20, 0, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def _declared_batch3_switches(monkeypatch):
+    """Batch 3: a kick reads the posting days at CALL time (`_select` → `selection.plan_for`) and the accepted write
+    reads MARKETING_VIDEO_EXTRA_PLATFORMS — pin the three new switches to their declared defaults, so a developer's
+    .env can never move a bound pinned here."""
+    monkeypatch.setattr(ss.settings, "MARKETING_VIDEO_EXTRA_PLATFORMS", "")
+    monkeypatch.setattr(ss.settings, "MARKETING_POST_WEEKDAYS", "mon,tue,thu,sat")
+    monkeypatch.setattr(ss.settings, "MARKETING_INSTAGRAM_TRIAL_MODE", "off")
+
+
 # ── a virtual clock: statements and back-offs cost time, nothing sleeps ───────────────────────
 
 
@@ -339,7 +349,7 @@ async def test_a_whole_worst_case_generation_fits_inside_owner_alive(clock, capl
     did not cover it.
 
     `accepted_image` is the longest path (drop-1 re-review, OWNER_ALIVE): an ACCEPTED package with
-    MARKETING_IMAGE_POSTS on and a holder that declared the post image adds `_holder_renders_images`'
+    MARKETING_IMAGE_POSTS on and a holder that declared the post image adds `_holder_image_block`'s
     run read between the last model call and the terminal write. Its virtual life is exactly
     `worst_case_generation_seconds()`; the content rejection never reads the holder, so it ends one
     statement short of the bound. Before that read was counted the bound was 4577 s, the accepted path

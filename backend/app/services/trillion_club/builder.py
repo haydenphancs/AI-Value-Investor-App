@@ -32,7 +32,15 @@ The steps, in order (each has a failure mode that has already bitten this codeba
    ``degraded``: its ``ipo_date`` is unknown, and a newly reported row with no known
    listing date must never be dressed up with ``newly_listed``.
 6. **Splits** via the shared ``thirteen_f_splits.resolve_13f_split_adjustments``; a
-   non-empty ``lookup_failed`` marks the build ``degraded``.
+   non-empty ``lookup_failed`` marks the build ``degraded``. The suspects the lookup cap
+   trimmed are recorded as :attr:`BuiltFiling.split_unchecked` (Batch 1, 2026-10-15) — NOT
+   a degraded reason: a rebuild cannot check more than the cap allows, so ``degraded``
+   would only make the daily job rebuild the quarter forever. The app keeps their raw diff
+   as before; the marketing adapter drops the filing's increased / decreased moves.
+   :func:`split_windows` / ``SplitWindow`` (``thirteen_f_splits``, the review of 2026-10-16) are
+   that adapter's door — it may import this module but not ``thirteen_f_splits``
+   (``tests/test_marketing_import_boundary.py``) — to re-check every increased / decreased row of
+   a built filing through the same seam and window. :func:`build_filing` never calls it.
 7. **Diff** by CUSIP with ``_whale_common.diff_13f_positions`` — share counts only.
 8. **Hash** (:func:`raw_hash_of`) every raw row's accession, CUSIP, shares, value, FMP
    symbol, issuer name, title of class, period and CIK, order-independent, so an
@@ -53,7 +61,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
 
 from app.schemas.trillion_club import (
     COMPARISON_FIRST_FILING,
@@ -61,7 +69,12 @@ from app.schemas.trillion_club import (
     COMPARISON_QUARTER,
 )
 from app.services._whale_common import diff_13f_positions
-from app.services.thirteen_f_splits import resolve_13f_split_adjustments
+from app.services.thirteen_f_splits import (
+    SplitWindow,
+    resolve_13f_split_adjustments,
+    split_suspects_over_cap,
+)
+from app.services.thirteen_f_splits import split_windows as _split_windows
 from app.services.trillion_club import rules
 
 logger = logging.getLogger(__name__)
@@ -516,7 +529,11 @@ def _assert_json_safe(value: Any, path: str) -> None:
 
 @dataclass
 class BuiltFiling:
-    """One ``trillion_club_filings`` row. ``degraded_reasons`` is NOT a column (logging)."""
+    """One ``trillion_club_filings`` row. ``degraded_reasons`` is NOT a column (logging), and
+    neither is ``split_unchecked`` (Batch 1, 2026-10-15): the symbols whose split lookup the
+    shared cap (`_whale_common.MAX_SPLIT_LOOKUPS`) trimmed, so their share change was never
+    checked against a split. It never touches ``build_status`` — the stored row and the app
+    are unchanged — and only a live caller (the marketing adapter) reads it."""
 
     cik: str
     period: str
@@ -534,6 +551,7 @@ class BuiltFiling:
     build_status: str
     source: str = SOURCE_FMP
     degraded_reasons: List[str] = field(default_factory=list)
+    split_unchecked: FrozenSet[str] = frozenset()
 
     def as_row(self) -> Dict[str, Any]:
         """The upsert payload: JSON-safe, finite floats only, matching the table CHECKs.
@@ -589,6 +607,47 @@ class BuiltFiling:
         if row["total_value"] < 0 or row["position_count"] < 0 or row["excluded_rows"] < 0:
             raise ValueError("trillion club filing row: negative total/count")
         return row
+
+
+def _split_input(rows: Sequence[Any]) -> List[Mapping[str, Any]]:
+    """The rows `build_filing` hands the split check: a dict with a symbol (str), as
+    ``[h for h in holdings if h["symbol"]]`` selects them there."""
+    return [h for h in rows if isinstance(h, Mapping) and isinstance(h.get("symbol"), str) and h["symbol"]]
+
+
+def stored_split_unchecked(current_holdings: Sequence[Any], previous_holdings: Sequence[Any]) -> FrozenSet[str]:
+    """:attr:`BuiltFiling.split_unchecked` re-derived for a STORED build (Batch 1, 2026-10-15).
+
+    The stored row keeps no record of the lookup cap (it is not a column, and Batch 1 adds no
+    migration), so the marketing adapter re-runs the cap over the two stored books — the quarter's
+    ``holdings`` and the previous quarter's — with the SAME suspect rule and the same row
+    selection as :func:`build_filing` (`thirteen_f_splits.split_suspects_over_cap`). Pure, zero
+    calls. The previous quarter's stored book stands in for the build's own normalisation of that
+    extract: both normalise the same rows (a changed previous extract cascades a rebuild of the
+    quarter after it), but a CUSIP whose symbol only one of the two builds resolved by lookup is a
+    suspect on one side only — a rare edge the re-derivation does not see (the cap is 25 suspects).
+
+    Raises ``TypeError`` for a book that is not a list: the caller decides what an unreadable
+    book means (the adapter fails closed), never this helper by reading it as "no suspects"."""
+    for name, rows in (("current_holdings", current_holdings), ("previous_holdings", previous_holdings)):
+        if not isinstance(rows, list):
+            raise TypeError(f"stored_split_unchecked: {name} must be a list, got {type(rows).__name__}")
+    return frozenset(split_suspects_over_cap(_split_input(current_holdings), _split_input(previous_holdings)))
+
+
+async def split_windows(
+    symbols: Sequence[str], prev_end: str, period_end: str, *, actions: Any, log_ctx: str,
+) -> Dict[str, SplitWindow]:
+    """``thirteen_f_splits.split_windows`` with :func:`build_filing`'s seam default (the review of
+    2026-10-16): ``actions`` None → ``corporate_actions_source(None)``, resolved here exactly as the
+    build resolves it — the shared module never reaches for the singleton
+    (``tests/test_thirteen_f_splits_characterisation.py``). For the marketing adapter's per-row
+    split re-check of a built filing; ``prev_end`` / ``period_end`` are the two quarter-end ISO
+    dates the build diffed. Never raises for a lookup problem (see the shared helper)."""
+    if actions is None:
+        from app.services.corporate_actions_service import corporate_actions_source
+        actions = corporate_actions_source(None)
+    return await _split_windows(symbols, prev_end, period_end, actions=actions, log_ctx=log_ctx)
 
 
 # ── Build ──────────────────────────────────────────────────────────────────────────────
@@ -814,20 +873,32 @@ async def build_filing(
     # Splits + diff -----------------------------------------------------------------------
     split_ratios: Dict[str, float] = {}
     unclassified: Set[str] = set()
+    # Suspects the shared lookup cap trimmed (never looked up, never armed: their raw diff
+    # stands). Recorded, never a degraded reason — see `BuiltFiling.split_unchecked`.
+    split_unchecked: Set[str] = set()
     if comparison == COMPARISON_QUARTER and prev_norm is not None:
         if actions is None:
             from app.services.corporate_actions_service import corporate_actions_source
             actions = corporate_actions_source(None)
         split_ratios, unclassified, split_failed = await resolve_13f_split_adjustments(
-            [h for h in holdings if h["symbol"]],
-            [r for r in prev_norm.rows if r["symbol"]],
+            # `_split_input`: the one row selection `stored_split_unchecked` re-derives with
+            _split_input(holdings),
+            _split_input(prev_norm.rows),
             rules.quarter_end(*prev_yq).isoformat(),
             period_end.isoformat(),
             actions=actions,
             log_ctx=log_ctx,
+            capped=split_unchecked,
         )
         if split_failed:
             degraded.append("split_lookup_failed:" + ",".join(sorted(split_failed)))
+        if split_unchecked:
+            logger.warning(
+                "trillion club build (%s): %d split suspect(s) past the lookup cap were never "
+                "checked (%s) — their raw share change stands; recorded as split_unchecked, the "
+                "build status is unaffected", log_ctx, len(split_unchecked),
+                ",".join(sorted(split_unchecked)),
+            )
     changes = diff_13f_positions(
         holdings,
         prev_norm.rows if prev_norm is not None else None,
@@ -856,6 +927,7 @@ async def build_filing(
         build_status=status,
         source=SOURCE_FMP,
         degraded_reasons=degraded,
+        split_unchecked=frozenset(split_unchecked),
     )
     log = logger.warning if degraded else logger.info
     log(
@@ -871,6 +943,8 @@ __all__ = [
     "MAX_ROWS", "PROFILE_CHUNK", "UNRESOLVED_RETRY_DAYS", "SMALL_WEIGHT", "US_EXCHANGES",
     "HASH_VERSION", "BUILD_COMPLETE", "BUILD_DEGRADED", "FilingRefused", "FilingUnavailable",
     "NormalizedFiling", "BuiltFiling", "normalize_rows", "raw_hash_of", "names_match",
-    "display_name",
+    "display_name", "stored_split_unchecked",
     "build_filing",
+    # re-exported for the marketing adapter (see step 6 of the module docstring)
+    "SplitWindow", "split_windows",
 ]

@@ -31,6 +31,7 @@ import ast
 import asyncio
 import logging
 import uuid
+from collections import Counter
 from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -62,6 +63,14 @@ TUE_CONGRESS = date(2026, 12, 8)    # the December Congress Count Tuesday, still
 SAT = date(2026, 11, 21)
 assert (MON.weekday(), MON_NEXT.weekday(), THU.weekday(), TUE_CONGRESS.weekday(), SAT.weekday()) == (
     0, 0, 3, 1, 5)
+
+
+@pytest.fixture(autouse=True)
+def _declared_post_weekdays(monkeypatch):
+    """Batch 3: the posting days are the web setting MARKETING_POST_WEEKDAYS, read at CALL time by `plan_for` — pin
+    it to its declared default (Mon/Tue/Thu/Sat), so a developer's .env can never move a chain pinned here. A test
+    that wants another cadence sets its own."""
+    monkeypatch.setattr(selection.settings, "MARKETING_POST_WEEKDAYS", "mon,tue,thu,sat")
 
 
 def _errors(caplog, logger_name: str) -> List[str]:
@@ -577,3 +586,95 @@ async def test_with_the_classes_unset_the_switch_is_never_read_and_every_day_is_
     assert seen > 60
     assert not [r for r in caplog.records if "MARKETING_NEWS_SERIES" in r.getMessage()]
     assert not [r for r in caplog.records if "news_series=" in r.getMessage()]
+
+
+# ══ Batch 3 (2026-10-20): the chains at seven posting days a week ══════════════════════════════════
+#
+# MARKETING_POST_WEEKDAYS (default mon,tue,thu,sat) is read by `plan_for` at call time. At seven days Wednesday and
+# Friday get Thursday's calendar (earnings in season, then the Money Map tail) and Sunday the Money Map tail alone —
+# earnings leads Wed/Thu/Fri only (owner decision 3). The default cadence's chains do not move.
+
+_SEVEN_DAYS = "mon,tue,wed,thu,fri,sat,sun"
+#: The owner's production list at switch-on (plan, owner decision 5): every series except theme_explainer.
+PRODUCTION_RAW = "ceo_buys,insider_buys,thirteen_f,money_map,earnings,company_stakes,congress_count"
+WED_IN_SEASON, FRI_IN_SEASON, SUN_IN_SEASON = date(2026, 11, 4), date(2026, 11, 6), date(2026, 11, 8)
+WED_OFF, FRI_OFF, SUN_OFF = date(2026, 12, 2), date(2026, 12, 4), date(2026, 12, 6)
+assert [d.weekday() for d in (WED_IN_SEASON, FRI_IN_SEASON, SUN_IN_SEASON, WED_OFF, FRI_OFF, SUN_OFF)] == [
+    2, 4, 6, 2, 4, 6]
+
+
+def _chains(raw_series: str, days, cadence: str, monkeypatch) -> Dict[date, tuple]:
+    monkeypatch.setattr(selection.settings, "MARKETING_POST_WEEKDAYS", cadence)
+    shipped = selection.parse_news_series(raw_series)
+    return {d: selection.enabled_chain(selection.plan_for(d).chain, frozenset({"A", "C", "F"}), shipped=shipped)
+            for d in days}
+
+
+def _two_years():
+    return [date(2026, 10, 19) + timedelta(days=i) for i in range(2 * 365)]
+
+
+def test_batch3_seven_days_under_the_default_series_list(monkeypatch):
+    """The switch's default lists no earnings (a 2b series): Wednesday, Friday and Sunday run Money Map → lesson, in
+    season or not; Saturday is the lesson; Monday, Tuesday and Thursday walk exactly the chains of the default
+    cadence. And at the default cadence Wednesday, Friday and Sunday stay rest days — nothing is asked for."""
+    lesson = selection.LESSON
+    seven = _chains(DEFAULT_RAW, _two_years(), _SEVEN_DAYS, monkeypatch)
+    four = _chains(DEFAULT_RAW, _two_years(), "mon,tue,thu,sat", monkeypatch)
+    for d in (WED_IN_SEASON, FRI_IN_SEASON, SUN_IN_SEASON, WED_OFF, FRI_OFF, SUN_OFF):
+        assert seven[d] == ("money_map", lesson) and four[d] == (), d
+    for d, chain in seven.items():
+        if d.weekday() in (0, 1, 3, 5):
+            assert chain == four[d], d
+        else:
+            assert chain == ("money_map", lesson) and four[d] == (), d
+    assert seven[SAT] == (lesson,) == four[SAT]
+
+
+def test_batch3_seven_days_under_the_owners_production_list(monkeypatch):
+    """With earnings listed, it leads Wednesday, Thursday AND Friday in earnings season (and only then), then Money Map;
+    Sunday is Money Map → lesson every week of two years — never earnings, even in season."""
+    lesson = selection.LESSON
+    seven = _chains(PRODUCTION_RAW, _two_years(), _SEVEN_DAYS, monkeypatch)
+    for d in (WED_IN_SEASON, THU, FRI_IN_SEASON):
+        assert seven[d] == ("earnings", "money_map", lesson), d
+    for d in (WED_OFF, FRI_OFF, SUN_OFF, SUN_IN_SEASON):
+        assert seven[d] == ("money_map", lesson), d
+    earnings_days = Counter()
+    for d, chain in seven.items():
+        season = selection.in_earnings_season(d)
+        if d.weekday() in (2, 3, 4):
+            assert (chain[0] == "earnings") is season, d
+            earnings_days[d.weekday()] += season
+        else:
+            assert "earnings" not in chain, d
+    assert set(earnings_days) == {2, 3, 4} and min(earnings_days.values()) >= 25, earnings_days     # not vacuous
+    # the same list at the default cadence: earnings only ever on a Thursday
+    four = _chains(PRODUCTION_RAW, _two_years(), "mon,tue,thu,sat", monkeypatch)
+    assert {d.weekday() for d, chain in four.items() if "earnings" in chain} == {3}
+
+
+@pytest.mark.parametrize("day, asked, plan", [
+    (WED_IN_SEASON, ["earnings", "money_map"], "wednesday_earnings"),
+    (FRI_OFF, ["money_map"], "friday_off"),
+    (SUN_IN_SEASON, ["money_map"], "sunday"),
+])
+@pytest.mark.asyncio
+async def test_batch3_a_seven_day_build_asks_for_the_new_days_series(world, monkeypatch, day, asked, plan):
+    """Through `script_service._select`: at seven days a Wednesday / Friday / Sunday is a template day whose build
+    walks its new chain (the plan reason recorded in the selection block) and still ends in the lesson; at the
+    default cadence the same day is a rest day and the company-news source is never asked."""
+    _, runs = world
+    monkeypatch.setattr(ss.settings, "MARKETING_NEWS_SERIES", PRODUCTION_RAW)
+    monkeypatch.setattr(selection.settings, "MARKETING_POST_WEEKDAYS", _SEVEN_DAYS)
+    news = EmptyNews()
+    row = await _select(runs, news, day)
+    assert news.calls == asked
+    block = row["fact_sheet"]["selection"]
+    assert block["plan"] == plan and block["chain"] == [*asked, selection.LESSON]
+    assert [t["series"] for t in block["trail"]] == [*asked, selection.LESSON]
+    assert row["template_id"] in selection.LESSON_TEMPLATE_IDS
+    monkeypatch.setattr(selection.settings, "MARKETING_POST_WEEKDAYS", "mon,tue,thu,sat")
+    news = EmptyNews()
+    rest = await _select(runs, news, day + timedelta(days=7))
+    assert rest["status"] == "rest_day" and rest.get("source_ref") is None and news.calls == []

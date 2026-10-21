@@ -20,6 +20,14 @@ What is pinned here, strongest first:
 * **The closed schema refuses** what the server refuses (unknown keys, over-cap counts, NaN /
   out-of-range ratios, unknown logo keys, unshipped layouts…) — each case also refused by the
   server's validator, so the two cannot drift silently.
+* **Every cover fits with its chip** (news-v19, Batch 1): the period chips the earnings, Money Map
+  and symbol-less 13F covers carry now ("Quarter ended …", "Reported …", "Fiscal …"), at their
+  widest over every date, on each series' tallest cover — and the Form 4 cover's single headline
+  form — lay out with the worker's own opening-card code before the floor.
+* **The data card is the post image, legible, or nothing** (Batch 2, 2026-10-19): the same picture laid
+  out in the video card's text zone, every drawn line at least DATA_CARD_MIN_PX (a wordmark plate
+  exempt), whole, inside the zone — a dense picture is refused (CardOverflow: the text card stays), and
+  the search stops at the first illegible step. The post image itself did not move a pixel (goldens).
 
 Hermetic: Pillow, the vendored Inter Bold and generated PNGs; no network. `app.*` is imported by the
 TESTS only (the worker package never imports it).
@@ -754,6 +762,353 @@ def test_the_visibility_count_is_linear_and_exact():
     assert lg.visible_pixels(im) == 3_700 + 100
 
 
+# ── LIVE-LOGO-1 / LIVE-LOGO-2 (2026-10-20 live review): a logo that shows only part of itself, or a baked ──
+# checkerboard, on the white plate is a wordmark. Real FMP logos are not checked in (no binaries): these are
+# their shapes, built in code — GameStop's white "G" + red "S" and Amazon's white "a" + orange smile (made
+# for a dark background), Boston Scientific's editor checkerboard behind its name.
+
+
+def _png_of(im: "Image.Image") -> bytes:
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _dark_theme_logo(shape: str) -> "Image.Image":
+    """A 250×250 logo made for a dark background, on real transparency: white artwork + one accent."""
+    from PIL import ImageDraw
+
+    im = Image.new("RGBA", (250, 250), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    if shape == "gme":          # a white "G" (left), a red "S" (right) — as tall as each other
+        d.rectangle((0, 30, 120, 220), outline=(255, 255, 255, 255), width=28)
+        for y in (30, 111, 192):
+            d.rectangle((130, y, 250, y + 28), fill=(235, 0, 0, 255))
+        d.rectangle((130, 30, 158, 139), fill=(235, 0, 0, 255))
+        d.rectangle((222, 111, 250, 220), fill=(235, 0, 0, 255))
+    elif shape == "amzn":       # a big white "a", a thin orange smile under it
+        d.ellipse((60, 19, 190, 170), outline=(255, 255, 255, 255), width=34)
+        d.arc((0, 120, 250, 231), start=20, end=160, fill=(255, 153, 0, 255), width=14)
+    else:
+        raise AssertionError(shape)
+    return im
+
+
+@pytest.mark.parametrize("shape, low, high", [("gme", 0.40, 0.55), ("amzn", 0.15, 0.40)])
+def test_a_logo_made_for_a_dark_background_is_refused_and_drawn_as_its_wordmark(shape, low, high, tmp_path, caplog):
+    """LIVE-LOGO-1: FMP's GameStop and Amazon logos are white artwork + one coloured accent on transparency.
+    Visible enough for LOGO-1 (the accent), they drew as a lone red "S" / a lone orange smile on the white
+    plate — the 500 ms cover. The visible ink spans too little of the opaque box: refused, wordmark drawn."""
+    import hashlib
+
+    im = _dark_theme_logo(shape)
+    assert lg.visible_pixels(im) >= lg.MIN_VISIBLE_FRACTION * 250 * 250       # LOGO-1 alone keeps it
+    share = lg.visible_box_share(im)
+    assert share is not None and low < share < high < lg.MIN_VISIBLE_BOX_SHARE, share   # the real ones: 0.49 / 0.27
+    data = _png_of(im)
+    problem = lg.decode_problem(data, "png")
+    assert problem and "dark background" in problem, problem
+    sha = hashlib.sha256(data).hexdigest()
+    url = f"https://sb.example/storage/v1/object/public/marketing-media/logos/{sha[:32]}.png"
+    entry = {"key": "GME", "name": "GameStop", "url": url, "sha256": sha, "bytes": len(data), "width": 250,
+             "height": 250}
+    dest = tmp_path / "out"
+    dest.mkdir()
+    caplog.set_level(logging.WARNING, logger="marketing.logos")
+    out = lg.resolve_logos({"logos": [entry]}, bucket_origin="sb.example", download=lambda u, **k: data,
+                           dest_dir=dest)
+    assert out == {"GME": None} and not list(dest.iterdir())
+    assert any(r.levelno == logging.WARNING and "GME" in r.getMessage() and "dark background" in r.getMessage()
+               for r in caplog.records)
+    # the wordmark the card draws instead names the company — a string the server allows for every logo
+    art = cards.logo_table({"logos": [entry]}, out)["GME"]
+    assert art.wordmark and cards.wordmark_lines(art, (0, 0, 240, 240), FONT, "basic")
+
+
+def test_a_logo_on_its_own_opaque_ground_or_whole_on_the_plate_is_kept():
+    """The rule needs REAL transparency: a small dark mark on its own opaque white tile (FMP's Eaton, Almirall,
+    Cerebras: box shares 0.22-0.32, 0 % transparent) is the design, drawn as it is. A transparent logo whose
+    visible ink spans its solid box (every coloured mark; Boston Scientific's text, 0.81) is kept too."""
+    from PIL import ImageDraw
+
+    tile = Image.new("RGB", (250, 250), (255, 255, 255))
+    ImageDraw.Draw(tile).rectangle((95, 95, 155, 155), fill=(10, 60, 140))
+    assert lg.visible_box_share(tile.convert("RGBA")) is None                 # exempt: no transparency
+    buf = io.BytesIO()
+    tile.save(buf, format="JPEG")
+    assert lg.decode_problem(buf.getvalue(), "jpg") is None
+    assert lg.decode_problem(_png_of(tile), "png") is None
+    mark = Image.new("RGBA", (250, 250), (0, 0, 0, 0))
+    ImageDraw.Draw(mark).ellipse((20, 20, 230, 230), fill=(10, 60, 140, 255))
+    assert lg.visible_box_share(mark) == 1.0 and lg.decode_problem(_png_of(mark), "png") is None
+    # a white band behind a dark name that spans most of it (Boston Scientific's shape): kept
+    named = Image.new("RGBA", (300, 200), (0, 0, 0, 0))
+    named.paste((255, 255, 255, 255), (0, 50, 300, 150))
+    named.paste((20, 48, 92, 255), (10, 60, 290, 140))
+    assert lg.visible_box_share(named) == pytest.approx(280 * 80 / (300 * 100))
+    assert lg.decode_problem(_png_of(named), "png") is None
+
+
+@pytest.mark.parametrize("ink_w, side, transparent, refused", [
+    (60, 200, True, False), (59, 200, True, True),   # the box share's bound: 60 % kept, 59 % refused
+    (40, 120, True, True),                           # 30.6 % transparent: the rule applies (VAC-1: GME is 42.9 %)
+    (40, 119, False, False), (40, 115, False, False),  # 29.4 % / 24.4 %: exempt, whatever the share
+])
+def test_the_dark_background_rule_s_bounds(ink_w, side, transparent, refused):
+    """A 100×100 opaque white square with a dark band `ink_w` px wide on a `side`² canvas that is 75 %, 30.6 %,
+    29.4 % or 24.4 % transparent: the share is ink_w / 100, refused only below 0.60 — and only with real
+    transparency, the bound pinned on both sides of TRANSPARENT_SHARE_MIN (review VAC-1: raised to 0.44 with
+    every test green, it exempted FMP's GameStop logo, 42.9 % transparent, the case the rule was written for)."""
+    im = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    im.paste((255, 255, 255, 255), (0, 0, 100, 100))
+    im.paste((15, 15, 15, 255), (0, 0, ink_w, 100))
+    clear = 1 - 100 * 100 / side ** 2
+    assert (clear >= lg.TRANSPARENT_SHARE_MIN) == transparent
+    share = lg.visible_box_share(im)
+    assert (share is None) == (not transparent)
+    if transparent:
+        assert share == pytest.approx(ink_w / 100)
+    problem = lg.decode_problem(_png_of(im), "png")
+    assert bool(problem) == refused, problem
+
+
+def _blue_disc() -> "Image.Image":
+    from PIL import ImageDraw
+
+    im = Image.new("RGBA", (250, 250), (0, 0, 0, 0))
+    ImageDraw.Draw(im).ellipse((75, 75, 175, 175), fill=(20, 60, 200, 255))
+    return im
+
+
+def test_a_faint_stray_pixel_or_glow_does_not_widen_the_logo_s_box():
+    """Review RR-B2F-3: the box the visible ink is measured against is the SOLID pixels' (alpha ≥ 128). Two
+    alpha-20 pixels in opposite corners (a resampling speck), or a faint glow around a fully visible mark,
+    stretched the old alpha ≥ 16 box to the whole canvas: the disc was refused as "made for a dark background"
+    (17 % / 28 %) and drawn as its wordmark although every pixel of it shows."""
+    from PIL import ImageDraw
+
+    stray = _blue_disc()
+    stray.putpixel((1, 1), (0, 0, 0, 20))
+    stray.putpixel((248, 248), (0, 0, 0, 20))
+    glow = Image.new("RGBA", (250, 250), (0, 0, 0, 0))
+    ImageDraw.Draw(glow).ellipse((30, 30, 220, 220), fill=(255, 255, 255, 60))
+    glow.alpha_composite(_blue_disc())
+    for im in (stray, glow):
+        assert lg.visible_box_share(im) == pytest.approx(1.0)
+        assert lg.decode_problem(_png_of(im), "png") is None
+
+
+@pytest.mark.parametrize("ring_alpha, refused", [(127, False), (128, True)])
+def test_white_artwork_counts_in_the_box_from_half_opacity(ring_alpha, refused):
+    """…while white artwork that is half opaque or more IS the logo's shape: a white ring around the disc (made
+    for a dark background, invisible on the white plate) is refused from alpha 128; under it, it is a glow."""
+    from PIL import ImageDraw
+
+    im = _blue_disc()
+    ring = Image.new("RGBA", im.size, (0, 0, 0, 0))
+    ImageDraw.Draw(ring).ellipse((25, 25, 225, 225), outline=(255, 255, 255, ring_alpha), width=8)
+    im.alpha_composite(ring)
+    share = lg.visible_box_share(im)
+    assert share == pytest.approx(100 * 100 / (200 * 200) if refused else 1.0, abs=0.01), share
+    problem = lg.decode_problem(_png_of(im), "png")
+    assert bool(problem) == refused and (not refused or "dark background" in problem), problem
+
+
+def _checker_logo(levels=(247, 244), square: int = 4, size=(300, 200), band=(50, 150), text: bool = True):
+    """FMP's Boston Scientific shape: transparency above and below an opaque band holding a baked editor
+    checkerboard (`levels`, `square`-px squares) behind a dark name — letters as 8 px bars, 40 px apart,
+    spanning the band (BSX: 61 % transparent, the name over 80 % of the band's box)."""
+    from PIL import ImageDraw
+
+    im = Image.new("RGBA", size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    for y in range(band[0], band[1], square):
+        for x in range(0, size[0], square):
+            light = levels[((x // square) + ((y - band[0]) // square)) % 2]
+            d.rectangle((x, y, x + square - 1, min(y + square, band[1]) - 1), fill=(light, light, light, 255))
+    if text:
+        for x in range(10, size[0] - 10, 40):
+            d.rectangle((x, band[0] + 14, x + 7, band[1] - 15), fill=(19, 48, 92, 255))
+        d.rectangle((10, band[0] + 14, size[0] - 11, band[0] + 21), fill=(19, 48, 92, 255))
+    return im
+
+
+@pytest.mark.parametrize("levels, square", [((247, 244), 4), ((254, 237), 6), ((250, 242), 8), ((248, 245), 2),
+                                            ((255, 204), 8), ((255, 204), 16), ((255, 221), 10)])
+def test_a_baked_checkerboard_is_refused_and_drawn_as_its_wordmark(levels, square):
+    """LIVE-LOGO-2: an editor's "transparent" grid saved into the pixels (FMP's Boston Scientific: 254/237 in
+    6 px squares, 247/244 in its middle) would be drawn as a faint chequer behind the name on every plate — and
+    the editors' standard light grid (255/204, Photoshop's and GIMP's "light checks"; 255/221) as a plainly
+    visible one: review RR-B2F-2 found the old light floor (230) never tested its darker squares."""
+    im = _checker_logo(levels, square)
+    assert lg.visible_box_share(im) >= lg.MIN_VISIBLE_BOX_SHARE                # not the dark-background rule
+    found = lg.checker_share(im)
+    assert found is not None, levels
+    side, across, down = found
+    assert side % square == 0 and (side // square) % 2 == 1                  # the square (or an odd multiple)
+    assert across >= lg.CHECKER_SHARE_MIN and down >= lg.CHECKER_SHARE_MIN
+    problem = lg.decode_problem(_png_of(im), "png")
+    assert problem and "checkerboard" in problem, problem
+
+
+#: The resampled board's blend phases: a square's last row / column is the blend toward its neighbour at a phase
+#: that drifts, as when a grid is scaled by a non-integer factor (the real logo: 250/241, 242/250, 247/245 rows).
+_RESAMPLED_ROW_PHASES = (0.24, 0.29, 0.44, 0.59, 0.41, 0.35, 0.47, 0.53)
+_RESAMPLED_COL_PHASES = (0.12, 0.06, 0.12, 0.29, 0.12, 0.06, 0.47, 0.12, 0.06, 0.12, 0.35, 0.12)
+
+
+def _resampled_checker_logo() -> "Image.Image":
+    """FMP's Boston Scientific logo as it really is, not a perfect board: 6 px squares of 254/237 whose last row
+    and column are RESAMPLING blends at drifting phases (so ~13 % of the light pixels do not alternate), behind
+    a dark name whose strokes leave about half of the light pixels testable — measured 0.875 across / 0.854 down,
+    cover 0.51, light share 0.72 (the real logo: 0.867 / 0.856, 0.50, 0.71)."""
+    size, band, sq, levels = (250, 250), (76, 174), 6, (254, 237)
+    im = Image.new("RGBA", size, (0, 0, 0, 0))
+    px = im.load()
+
+    def level(i: int, j: int, rx: int) -> float:
+        v = float(levels[(i + j) % 2])
+        if rx == sq - 1:
+            v += (levels[(i + j + 1) % 2] - v) * _RESAMPLED_COL_PHASES[j % len(_RESAMPLED_COL_PHASES)]
+        return v
+
+    for y in range(*band):
+        i, ry = divmod(y - band[0], sq)
+        for x in range(size[0]):
+            j, rx = divmod(x, sq)
+            v = level(i, j, rx)
+            if ry == sq - 1:
+                v += (level(i + 1, j, rx) - v) * _RESAMPLED_ROW_PHASES[i % len(_RESAMPLED_ROW_PHASES)]
+            px[x, y] = (round(v),) * 3 + (255,)
+    _draw_band_name(im)
+    return im
+
+
+def _draw_band_name(im: "Image.Image") -> None:
+    """The dark name across the 250×250 band (76..174) of `_resampled_checker_logo`: strokes on two lines."""
+    from PIL import ImageDraw
+
+    d = ImageDraw.Draw(im)
+    for x in (8, 38, 70, 100, 130, 160, 196, 226):
+        d.rectangle((x, 86, x + 8, 122), fill=(19, 48, 92, 255))
+    for x in (4, 34, 64, 94, 124, 154, 184, 214):
+        d.rectangle((x, 128, x + 8, 166), fill=(19, 48, 92, 255))
+    for box in ((8, 86, 60, 93), (120, 114, 180, 121), (30, 158, 100, 166), (150, 128, 230, 135)):
+        d.rectangle(box, fill=(19, 48, 92, 255))
+
+
+def test_a_resampled_checkerboard_like_the_real_one_is_refused_at_its_margin(monkeypatch):
+    """Review VAC-2: every board above is perfect (it alternates 100 %), so CHECKER_SHARE_MIN could be raised to
+    0.90 or CHECKER_COVER_MIN to 0.60 with every test green — and the real Boston Scientific logo (0.87 / 0.86 of
+    its testable pixels alternating, cover 0.50) would be drawn with its chequer again. This board measures what
+    the real one does, so the rule is pinned at the real logo's margin, not at 1.0."""
+    im = _resampled_checker_logo()
+    assert lg.visible_box_share(im) >= lg.MIN_VISIBLE_BOX_SHARE                # not the dark-background rule
+    found = lg.checker_share(im)
+    assert found is not None
+    side, across, down = found
+    assert side == 6 and 0.80 < across < 0.90 and 0.80 < down < 0.90, found
+    problem = lg.decode_problem(_png_of(im), "png")
+    assert problem and "checkerboard" in problem, problem
+    monkeypatch.setattr(lg, "CHECKER_COVER_MIN", 0.55)                         # …and its cover is the real ~0.5
+    assert lg.checker_share(im) is None
+
+
+def test_a_clean_band_behind_a_thin_name_is_kept():
+    """The same name on a PLAIN white band (Boston Scientific's shape without the chequer) draws as it is: its ink
+    spans most of the band's box, though it inks under a third of the band's pixels — the dark-background rule
+    measures where the ink reaches, never how much of the solid area it covers (review RR-B2F-3 proposed a
+    coverage bar of ~0.4: it would refuse this logo, and still pass a white wordmark inside a thin ring)."""
+    im = Image.new("RGBA", (250, 250), (0, 0, 0, 0))
+    im.paste((255, 255, 255, 255), (0, 76, 250, 174))
+    _draw_band_name(im)
+    assert lg.visible_box_share(im) >= lg.MIN_VISIBLE_BOX_SHARE
+    assert lg.visible_pixels(im) < 0.35 * 250 * 98
+    assert lg.checker_share(im) is None and lg.decode_problem(_png_of(im), "png") is None
+
+
+def _stripes(axis: str) -> "Image.Image":
+    """Two light greys in 6 px bands — alternating one way only (a design, not an editor's grid)."""
+    im = Image.new("RGBA", (300, 200), (0, 0, 0, 0))
+    for k in range(0, 300 if axis == "x" else 80, 6):
+        light = 247 if (k // 6) % 2 else 240
+        box = (k, 60, k + 6, 140) if axis == "x" else (0, 60 + k, 300, 66 + k)
+        im.paste((light, light, light, 255), box)
+    for x in range(12, 288, 22):
+        im.paste((19, 48, 92, 255), (x, 72, x + 7, 128))
+    return im
+
+
+def _two_tone() -> "Image.Image":
+    """A light-grey tile with a white inner panel and a dark name: two light levels, no alternation."""
+    im = Image.new("RGBA", (300, 200), (0, 0, 0, 0))
+    im.paste((240, 240, 240, 255), (0, 40, 300, 160))
+    im.paste((255, 255, 255, 255), (20, 60, 280, 140))
+    im.paste((19, 48, 92, 255), (40, 80, 260, 120))
+    return im
+
+
+def _dither() -> "Image.Image":
+    """A near-white ground dithered 1 px by 1 px between 255 and 248 (an old GIF export)."""
+    im = _checker_logo((255, 248), square=1, text=False)
+    im.paste((19, 48, 92, 255), (20, 80, 280, 120))
+    return im
+
+
+def _black_white_flag() -> "Image.Image":
+    """A chequered flag drawn as the logo itself: black and white squares — only one light level."""
+    return _checker_logo((255, 0), square=10, text=False)
+
+
+def _checker_detail_among_light_dots() -> "Image.Image":
+    """A dotted design (3×3 white dots on a 6 px grid, a quarter of an opaque dark tile) with a small checker
+    patch: the patch alternates perfectly, but it is under CHECKER_COVER_MIN of the light pixels (the dots
+    cannot be tested at its side) — a detail of the design, never "most of the logo"."""
+    im = Image.new("RGBA", (300, 300), (19, 48, 92, 255))
+    for y in range(0, 300, 6):
+        for x in range(0, 300, 6):
+            im.paste((255, 255, 255, 255), (x, y, x + 3, y + 3))
+    patch = _checker_logo((247, 244), 4, size=(80, 80), band=(0, 80), text=False)
+    im.paste(patch, (110, 110))
+    return im
+
+
+def _red_mark_with_a_checker_strip() -> "Image.Image":
+    """A big red mark with a thin strip of light checker under it: the light pixels are under a quarter of the
+    opaque ones — a detail, never "most of the logo"."""
+    im = _checker_logo((247, 244), 4, size=(300, 300), band=(250, 262), text=False)
+    im.paste((220, 20, 20, 255), (0, 0, 300, 240))
+    return im
+
+
+@pytest.mark.parametrize("build", [lambda: _stripes("x"), lambda: _stripes("y"), _two_tone, _dither,
+                                   _black_white_flag, lambda: _checker_logo((247, 246), 4),
+                                   _red_mark_with_a_checker_strip, _checker_detail_among_light_dots],
+                         ids=["stripes_across", "stripes_down", "two_tone_tile", "dither_1px", "black_white_flag",
+                              "levels_1_apart", "a_thin_strip_of_checker", "a_checker_detail_among_dots"])
+def test_a_light_logo_that_is_not_a_baked_checkerboard_is_kept(build):
+    """Conservative: two light greys alone are not a checkerboard — they must alternate in squares, both
+    ways, over most of the light pixels, and be at least CHECKER_STEP_MIN apart. Stripes, a two-tone tile, a
+    1 px dither, a black-and-white flag (one light level), greys 1 apart, a checker strip too small to be
+    most of the logo's light area and a checker patch among light dots are all drawn as they are."""
+    im = build()
+    assert lg.checker_share(im) is None
+    problem = lg.decode_problem(_png_of(im), "png")
+    assert problem is None or "checkerboard" not in problem, problem
+
+
+def test_a_near_white_logo_with_a_light_ground_is_kept():
+    """A flat near-white ground (one level), and a JPEG of one (its noise is many levels, none alternating):
+    neither qualifies for the checkerboard test, and both draw."""
+    flat = Image.new("RGB", (250, 250), (247, 247, 247))
+    flat.paste((200, 30, 30), (60, 60, 190, 190))
+    assert lg.checker_share(flat.convert("RGBA")) is None
+    buf = io.BytesIO()
+    flat.save(buf, format="JPEG", quality=70)
+    assert lg.decode_problem(buf.getvalue(), "jpg") is None
+    assert lg.decode_problem(_png_of(flat), "png") is None
+
+
 # ── review round 2: the Money Map's near-break-even figure fits every frame it is drawn on ──────────
 
 
@@ -1309,7 +1664,11 @@ def test_the_company_stake_image_and_video_fit(engine, investee_logo, shipped_pa
     tall["image_spec"]["left"]["name"], tall["image_spec"]["right"]["name"] = inv, ee
     tall["image_spec"]["label"] = "committed up to"                         # the widest label
     tall["logo_refs"] = [{"key": r["key"], "name": inv if r["key"] == "MMMMM-A" else ee} for r in out["logo_refs"]]
-    tall["opening_card"]["headline"] = T.LEXICON["st.open.committed_up_to"].format(inv=inv, ee=ee)
+    # news-v19 (Batch 1): the investee is a noun phrase there — "the" + the name for a descriptive name
+    # (`company_news_rules.takes_name_article`), the longer form, so the one laid out here
+    tall["opening_card"]["headline"] = T.LEXICON["st.open.committed_up_to"].format(
+        inv=inv, ee_np=T.LEXICON["st.ee.the"].format(ee=ee))
+    assert tall["opening_card"]["headline"].endswith(f" to the {ee}")
     assert _lay_out_everything(tall, engine) >= _F13_HEADROOM_PX
 
 
@@ -1437,6 +1796,197 @@ def test_without_the_card_title_cap_a_long_name_word_overflows_the_card(engine, 
         cards.layout_card(cards.cards_for_script(script, table)[1], font_path=FONT, layout_engine=engine)
 
 
+# ── news-v19 (Batch 1, plan item 5): the covers' period chips, laid out by the worker ─────────────────
+#
+# The earnings, Money Map and symbol-less 13F covers carry a chip now — one more LABEL line under the logo:
+# "Quarter ended Sep 30, 2026" / "Reported Nov 10, 2026" (earnings: a verified quarter / the report day),
+# "Fiscal 2025" (Money Map), "Quarter ended Sep 30, 2026" (a 13F filer with no symbol). A Form 4, Congress
+# or listed-filer 13F cover keeps its ticker, a stake its basis and date. Each new chip is proved with the
+# worker's OWN opening-card code (`cards.opening_spec` + `cards.layout_card`: no worker change) at its
+# WIDEST — the rendering widest in pixels over every day of 2025-2035 (every fiscal year 1990-2099), at the
+# label's start and floor sizes — on the tallest cover of its series, every logo a wordmark: the chip is
+# drawn whole, as the server allows it, and the cover keeps the room to spare every cover keeps.
+
+from dataclasses import replace  # noqa: E402
+from datetime import timedelta  # noqa: E402
+
+#: The opening card's column (`cards._stack_for`: the safe zone, centred, no panel).
+_COVER_COLUMN = cards.SAFE_X[1] - cards.SAFE_X[0]
+_CHIP_KINDS = ("er.open.chip.period", "er.open.chip.report", "f13.open.chip", "mm.open.chip")
+
+
+@lru_cache(maxsize=None)
+def _every_chip(kind: str) -> tuple:
+    """Every chip of `kind` the templates can write: each day of 2025-2035, or each fiscal year 1990-2099."""
+    if kind == "mm.open.chip":
+        return tuple(T.LEXICON[kind].format(fy=str(y)) for y in range(1990, 2100))
+    day, out = date(2025, 1, 1), []
+    while day.year <= 2035:
+        out.append(T.LEXICON[kind].format(period_img=T.date_image(day), report_img=T.date_image(day)))
+        day += timedelta(days=1)
+    return tuple(out)
+
+
+@lru_cache(maxsize=None)
+def _widest_chips(kind: str, engine: str) -> tuple:
+    """The chip widest in pixels at the label's START size and at its FLOOR size (one string or two)."""
+    out: List[str] = []
+    for step in (0, cards.RAMP_STEPS):
+        font = cards._font(FONT, cards.LABEL_STYLE.size(step), engine)
+        widest = max(_every_chip(kind), key=lambda s: (font.getlength(s), s))
+        if widest not in out:
+            out.append(widest)
+    return tuple(out)
+
+
+def _lay_cover(card: Dict[str, Any], names: Dict[str, str], engine: str):
+    """The cover laid out by the worker, every logo a wordmark of its company name (the widest case)."""
+    logos = [{"key": k, "name": n, "url": None, "sha256": None} for k, n in names.items()]
+    table = cards.logo_table({"logos": logos}, {})
+    assert tos.validate_opening_card(card, tos.logo_keys(logos)) is None          # the server would accept it
+    return cards.layout_card(cards.opening_spec(card, table), font_path=FONT, layout_engine=engine)
+
+
+def _assert_the_chip_fits(card: Dict[str, Any], names: Dict[str, str], engine: str) -> int:
+    """The cover lays out with room to spare and draws its chip whole — exactly what the server allows;
+    without the chip it is never taller (the chip is really drawn: its line costs room). Returns the step."""
+    layout = _lay_cover(card, names, engine)
+    assert layout.step < cards.RAMP_STEPS, (card["chip"], card["headline"], layout.step)
+    assert " ".join(layout.field_lines("label")) == card["chip"]
+    logos = [{"key": k, "name": n, "url": None, "sha256": None} for k, n in names.items()]
+    assert card["chip"] in tos.opening_strings(card, logos)
+    bare = {k: v for k, v in card.items() if k != "chip"}
+    assert _lay_cover(bare, names, engine).step <= layout.step
+    return layout.step
+
+
+@pytest.mark.parametrize("engine", _F13_ENGINES)
+def test_every_period_chip_is_one_label_line_within_the_cap(engine):
+    """No period chip is longer than OPENING_CHIP_MAX_CHARS (the server's own cap, 36: a stake's "Committed up
+    to · as of Nov 18, 2025"), and the widest of each kind is ONE label line in the cover's column at the
+    label's start size and at its floor — so it adds exactly one line, whatever the date."""
+    assert T.OPENING_CHIP_MAX_CHARS == tos.OPENING_CHIP_MAX_CHARS == 36
+    for kind in _CHIP_KINDS:
+        chips = _every_chip(kind)
+        assert max(len(c) for c in chips) <= T.OPENING_CHIP_MAX_CHARS, kind
+        for step in (0, cards.RAMP_STEPS):
+            font = cards._font(FONT, cards.LABEL_STYLE.size(step), engine)
+            for chip in _widest_chips(kind, engine):
+                assert _lines(chip, font, _COVER_COLUMN) == 1, (kind, step, chip)
+
+
+@pytest.mark.parametrize("engine", _F13_ENGINES)
+def test_the_earnings_cover_fits_with_its_widest_chip(engine):
+    """Both earnings chips — "Quarter ended …" (a verified quarter) and "Reported …" (none: the adapter's
+    scale-check contingency) — on the tallest earnings cover (the 2b fit test's record: the widest figures)."""
+    name = "W" * 20 + " " + "W" * 11
+    rec = R.EarningsReport(series="earnings", company=_co("MMMMM-A", name), report_date=date(2026, 11, 5),
+                           period_end=date(2026, 9, 30), eps_actual=-12_345.67, eps_estimate=-12_000.12,
+                           revenue_actual=999_940_000_000.0, revenue_estimate=998_900_000_000.0)
+    for period_end, kind in ((date(2026, 9, 30), "er.open.chip.period"), (None, "er.open.chip.report")):
+        out = _compose(replace(rec, period_end=period_end), date(2026, 11, 12))
+        assert out["opening_card"]["chip"] == T.LEXICON[kind].format(period_img="Sep 30, 2026",
+                                                                     report_img="Nov 5, 2026")
+        for chip in _widest_chips(kind, engine):
+            _assert_the_chip_fits(dict(out["opening_card"], chip=chip), {"MMMMM-A": name}, engine)
+
+
+@pytest.mark.parametrize("engine", _F13_ENGINES)
+def test_the_money_map_cover_fits_with_its_widest_chip(engine):
+    """"Fiscal {fy}" on the tallest Money Map covers: a 32-character company name (the name cap) packed into
+    the most headline lines at the step before the floor (the exact DP), and the widest word the 2b covers
+    allow (NAME_WORD_MAX_CHARS "W"s), under the widest figures ("under $0.01", "$100.00"), profit and loss."""
+    step = cards.RAMP_STEPS - 1
+    font = cards._font(FONT, cards.OPENING_HEADLINE_STYLE.size(step), engine)
+    for head_id in ("mm.open.profit", "mm.open.loss"):
+        before, after = T.LEXICON[head_id].split("{co}")
+        _lines_, packed = _worst_filer(R.COMPANY_NAME_CHARS[1], before=before, after=after, own_glue=False,
+                                       font=font, width=_COVER_COLUMN)
+        for name in (packed, "W" * T.NAME_WORD_MAX_CHARS + " " + "W" * 11):
+            for figure in (T.SUB_CENT, "$100.00"):
+                for chip in _widest_chips("mm.open.chip", engine):
+                    card = {"kicker": "MONEY MAP", "logos": ["MMMMM-A"], "chip": chip, "figure": figure,
+                            "headline": T.LEXICON[head_id].format(co=name)}
+                    _assert_the_chip_fits(card, {"MMMMM-A": name}, engine)
+    # the composed cover carries it (a fiscal year's chip, never the ticker)
+    out = _money_map_near_zero(-1.0)
+    assert out["opening_card"]["chip"] == "Fiscal 2025" and out["opening_card"]["logos"] == ["COST"]
+
+
+@pytest.mark.parametrize("engine", _F13_ENGINES)
+def test_the_13f_cover_without_a_symbol_fits_with_its_widest_chip(engine):
+    """"Quarter ended …" on every 13F cover headline of a filer with no symbol (two holdings' logos, the
+    5-digit figure), each with the 60-character filer packed into the most lines at the step before the
+    floor (the exact DP). A filer WITH a symbol keeps its ticker (the existing 13F fit test lays it out)."""
+    names = _worst_names(engine)
+    step = cards.RAMP_STEPS - 1
+    font = cards._font(FONT, cards.OPENING_HEADLINE_STYLE.size(step), engine)
+    heads = [k for k in T.LEXICON if k.startswith("f13.open.") and k != "f13.open.chip"]
+    assert len(heads) == 8
+    for head_id in heads:
+        own_glue = head_id.endswith(".of")
+        out = _compose(_worst_13f(_F13_FILERS["long_of" if own_glue else "long_poss"][0], None, names), _F13_RUN)
+        assert out["opening_card"]["chip"] == "Quarter ended Sep 30, 2026" and len(out["opening_card"]["logos"]) == 2
+        template = T.LEXICON[head_id].replace("{holdings}", "holdings")
+        if own_glue:
+            before, after = template.split("{filer}")
+        else:
+            before, after = template.split("{filer_s}")
+            after = "'s" + after
+        _lines_, filer = _worst_filer(R.FILER_NAME_CHARS[1], before=before, after=after, own_glue=own_glue,
+                                      font=font, width=_COVER_COLUMN)
+        names_of = {r["key"]: r["name"] for r in out["logo_refs"] if r["key"] in out["opening_card"]["logos"]}
+        for chip in _widest_chips("f13.open.chip", engine):
+            card = dict(out["opening_card"], chip=chip, figure="99999", headline=before + filer + after)
+            _assert_the_chip_fits(card, names_of, engine)
+
+
+@pytest.mark.parametrize("engine", _F13_ENGINES)
+def test_the_form4_cover_fits_with_its_one_headline_form(engine):
+    """news-v19 (Batch 1, plan item 5): a Form 4 cover has ONE headline form — its length fallback left with
+    the second company name — and since the review of 2026-10-16 (INS-1) it is number-neutral, "{subj}
+    disclosed buying stock" ("shares" read wrong above a spotlight's "1 purchase · 1 share"). Each subject
+    form ("A director of X", "The CFO of X", "X's CFO") with a 32-character company name (the name cap) packed
+    into the most headline lines at the step before the floor (the exact DP, words of at most
+    NAME_WORD_MAX_CHARS), the widest window kicker and the ticker chip, keeps the room to spare every cover
+    keeps."""
+    step = cards.RAMP_STEPS - 1
+    font = cards._font(FONT, cards.OPENING_HEADLINE_STYLE.size(step), engine)
+    tail = T.LEXICON["ins.open.head"].replace("{subj}", "").strip()
+    assert tail == "disclosed buying stock"
+    forms = [(T.LEXICON["ins.subj.dir"].split("{co}")[0].strip(), " " + tail),
+             (T.LEXICON["ins.subj.of"].format(role="CFO", co="{co}").split("{co}")[0].strip(), " " + tail),
+             ("", "'s CFO " + tail)]
+    for before, after in forms:
+        _lines_, name = _worst_filer(R.COMPANY_NAME_CHARS[1], before=before, after=after, own_glue=False,
+                                     font=font, width=_COVER_COLUMN)
+        head = (f"{before} " if before else "") + name + after
+        card = {"kicker": "FILED NOV 29–DEC 5 · FORM 4", "logos": ["MMMMM-A"], "chip": "MMMMM-A",
+                "figure": "$999.9M", "headline": head}
+        layout = _lay_cover(card, {"MMMMM-A": name}, engine)
+        assert layout.step < cards.RAMP_STEPS, (head, layout.step)
+        assert " ".join(layout.field_lines("title")) == head
+
+
+def test_the_cover_room_is_finite_so_the_chip_fit_is_no_vacuous_pass():
+    """Anti-vacuity: the room-to-spare assertion above can fail — a chip several times the cap (six of the
+    widest 13F chips joined) takes the tallest symbol-less 13F cover to the floor."""
+    names = _worst_names("basic")
+    out = _compose(_worst_13f(_F13_FILERS["long_of"][0], None, names), _F13_RUN)
+    font = cards._font(FONT, cards.OPENING_HEADLINE_STYLE.size(cards.RAMP_STEPS - 1), "basic")
+    before = T.LEXICON["f13.open.fewer.of"].replace("{holdings}", "holdings").split("{filer}")[0]
+    _lines_, filer = _worst_filer(R.FILER_NAME_CHARS[1], before=before, after="", own_glue=True, font=font,
+                                  width=_COVER_COLUMN)
+    chip = " · ".join(_widest_chips("f13.open.chip", "basic")[:1] * 6)
+    card = dict(out["opening_card"], chip=chip, figure="99999", headline=before + filer)
+    _img, table = _f13_image(out)
+    try:
+        step = cards.layout_card(cards.opening_spec(card, table), font_path=FONT, layout_engine="basic").step
+    except cards.CardOverflow:
+        step = cards.RAMP_STEPS + 1
+    assert len(chip) > 4 * T.OPENING_CHIP_MAX_CHARS and step >= cards.RAMP_STEPS
+
+
 # ── review R9 (low): a 16-bit greyscale PNG logo would be drawn with its greys erased ──────────────
 
 
@@ -1507,3 +2057,196 @@ def test_other_16_bit_pngs_still_decode_and_draw_their_greys(colour, tmp_path):
     cards.draw_plate(canvas, (20, 20, 220, 220), cards.LogoArt("K", "Kay", str(path)))
     greys = [px for px in canvas.getdata() if 100 <= px[0] <= 160 and px[0] == px[1] == px[2]]
     assert greys, "the grey band must survive the draw"
+
+
+# ── Batch 2 (2026-10-19, "first seconds"): the DATA CARD — the post image in the video card's text zone ──
+#
+# A template video's last text card may be replaced by the day's post image (the frozen feature `data_card`;
+# cards.cards_for_script decides, see tests/test_marketing_cards.py). It is the SAME picture — the same
+# TemplateImage, placers and strings — laid out in DATA_CARD_FRAME (cards.SAFE_X × cards.TEXT_ZONE_Y, clear
+# of the platforms' chrome and of the caption band) instead of the 4:5 page, and only when every line it
+# draws is at least DATA_CARD_MIN_PX. It is never a bitmap scale of the JPEG: at 0.71 the kicker and the
+# footer (30 px) would be 21 px and the chips and notes 20 px — refused at every step.
+
+#: The post image's bytes, measured on Pillow 12.0.0 (basic engine) when Batch 2 moved `_place` onto a
+#: Frame (2026-10-19: 10 template specs of this file and test_marketing_layouts_2b × logos/wordmarks ×
+#: basic/raqm, and every existing card, were compared before and after the refactor — identical).
+_POST_IMAGE_GOLDEN = {
+    "bars": "716e721c45351388141ec68c7542849ae241016a3e1f06819efe5e4ee10d9f73",
+    "rows": "a4d13ed5f8916ecf63177ebcbaee6c6c97cb7dfef87095a0c94191420485570b",
+    "spotlight": "4b32749614feb052010c4402ef246d9ed12867d8d7a494bd333da5a61bd80990",
+}
+
+
+@pytest.mark.skipif(PIL.__version__ != "12.0.0", reason="the golden bytes were measured on Pillow 12.0.0")
+def test_the_post_image_did_not_move_a_pixel_when_the_data_card_frame_arrived():
+    import hashlib
+
+    got = {name: hashlib.sha256(nl.render_template_image(_image(SPECS[name](), _table()), font_path=FONT,
+                                                         layout_engine="basic").data).hexdigest()
+           for name in sorted(SPECS)}
+    assert got == _POST_IMAGE_GOLDEN
+
+
+def test_the_two_frames():
+    """The post image's frame is its page minus the margins (drop 2a's geometry); the data card's is the
+    video card's text zone with a text card's panel padding — its panel lines up with the text cards'."""
+    m = cards.IMAGE_MARGIN
+    assert nl.POST_IMAGE_FRAME == nl.Frame("template", (1080, 1350), (m, m, 1080 - m, 1350 - m),
+                                           cards.IMAGE_PANEL_PAD_X, cards.IMAGE_PANEL_PAD_Y)
+    assert nl.DATA_CARD_FRAME == nl.Frame("data", (cards.WIDTH, cards.HEIGHT),
+                                          (cards.SAFE_X[0], cards.TEXT_ZONE_Y[0], cards.SAFE_X[1], cards.TEXT_ZONE_Y[1]),
+                                          cards.PANEL_PAD_X, cards.PANEL_PAD_Y)
+    assert nl.DATA_CARD_FRAME.box[3] < cards.CAPTION_BAND_Y[0]           # never under the burned captions
+    assert nl._place.__defaults__ == (nl.POST_IMAGE_FRAME, 0)            # the post image keeps its frame
+    assert nl.DATA_CARD_MIN_PX == 22
+    # the floor is above what a 0.71 bitmap scale would draw for the post image's smallest start sizes
+    scale = (cards.TEXT_ZONE_Y[1] - cards.TEXT_ZONE_Y[0]) / cards.IMAGE_HEIGHT
+    assert round(scale, 2) == 0.71
+    for style in (nl.KICKER_STYLE, cards.IMAGE_FOOTER_STYLE, nl.CHIP_STYLE, nl.NOTE_STYLE, nl.GRID_LINE_STYLE):
+        assert style.start * scale < nl.DATA_CARD_MIN_PX, style
+
+
+def _pair_spec() -> Dict[str, Any]:
+    return {"layout": "pair", "version": 1, "kicker": "COMPANY STAKES", "footer": FOOTER,
+            "left": {"logo": "NVDA", "name": "NVIDIA"}, "right": {"logo": "AMZN", "name": "Amazon"},
+            "figure": "$777.4M", "label": "invested", "lines": ["As of Mar 27, 2026", "Source: Form S-1"]}
+
+
+def _grid_spec(n: int = 4, *, lines: bool = True) -> Dict[str, Any]:
+    tiles = [{"logo": KEYS[i], "name": NAMES[i], **({"line": f"Cloud services · {10 + i}%"} if lines else {})}
+             for i in range(n)]
+    return {"layout": "grid", "version": 1, "kicker": "INSIDE A THEME", "footer": FOOTER, "title": "AI chips",
+            "subtitle": f"What {n} of its companies sell, by largest revenue segment", "tiles": tiles}
+
+
+#: Sparse pictures — a legible data card: (spec, the step it lays out at on the basic engine).
+_LEGIBLE = {
+    "spotlight": (_spotlight_spec, 4),
+    "rows_1": (lambda: _rows_spec(1), 3),
+    "rows_3": (lambda: _rows_spec(3), 11),
+    "rows_4_no_header": (lambda: _rows_spec(4, header=False), 8),
+    "pair": (_pair_spec, 7),
+    "grid_4": (_grid_spec, 0),
+    "grid_8": (lambda: _grid_spec(8), 6),
+    "grid_6_no_lines": (lambda: _grid_spec(6, lines=False), 0),
+}
+#: Dense ones — no data card (the text card stays): the 13F season's 8 rows, five rows under a header, a
+#: 7-segment Money Map, a full 12-tile theme with caption lines.
+_DENSE = {"rows_8": lambda: _rows_spec(8), "rows_5": lambda: _rows_spec(5), "bars": _bars_spec,
+          "grid_12": lambda: _grid_spec(12)}
+
+
+def _assert_data_card_inside(layout) -> None:
+    zone = nl.DATA_CARD_FRAME.box
+    panel = layout.panel
+    assert cards._within(panel, zone) and (panel[0], panel[2]) == (cards.SAFE_X[0], cards.SAFE_X[1])
+    for ln in layout.lines:
+        if ln.field == "footer":
+            assert cards._within(ln.ink, zone) and ln.ink[1] >= panel[3] + cards.IMAGE_FOOTER_GAP, ln
+        else:
+            assert cards._within(ln.ink, panel), (ln.field, ln.ink, panel)
+    for box in [t[0] for t in layout.tiles] + [r.box for r in layout.rects]:
+        assert cards._within(box, panel)
+
+
+@pytest.mark.parametrize("name", sorted(_LEGIBLE))
+@pytest.mark.parametrize("engine", _F13_ENGINES)
+def test_a_sparse_picture_is_a_legible_data_card_drawing_exactly_its_strings(name, engine, shipped_pair_grid):
+    make, basic_step = _LEGIBLE[name]
+    spec = make()
+    assert tos.validate_image_spec(spec, tos.logo_keys(_entries()), footer=FOOTER) is None
+    image = _image(spec, _table())
+    layout = nl.layout_data_card(image, font_path=FONT, layout_engine=engine)
+    assert layout.kind == f"data:{spec['layout']}" and layout.engine == engine
+    if engine == "basic":
+        assert layout.step == basic_step
+    assert nl.illegible_lines(layout) == [] and min(
+        ln.size for ln in layout.lines if not ln.field.startswith("wordmark:")) >= nl.DATA_CARD_MIN_PX
+    (_assert_2b_draws_its_strings if spec["layout"] in ("pair", "grid") else _assert_draws_exactly_its_strings)(
+        image, layout)
+    _assert_data_card_inside(layout)
+    # the same strings as the post image, never more: what the video declares for the card
+    assert list(image.strings) == list(tos.image_strings(spec, _entries()))
+
+
+def test_a_wordmark_plate_is_exempt_from_the_floor():
+    """A row's wordmark plate draws the company name small (sized by its plate, as on the post image) — it
+    stands in for the logo, so it does not refuse the card."""
+    layout = nl.layout_data_card(_image(_rows_spec(2), _table()), font_path=FONT, layout_engine="basic")
+    small = [ln for ln in layout.lines if ln.size < nl.DATA_CARD_MIN_PX]
+    assert small and all(ln.field.startswith("wordmark:") for ln in small)
+    assert nl.illegible_lines(layout) == [] and nl.illegible_lines(layout, 999) != []
+
+
+@pytest.mark.parametrize("name", sorted(_DENSE))
+def test_a_dense_picture_is_no_data_card(name, shipped_pair_grid):
+    image = _image(_DENSE[name](), _table())
+    with pytest.raises(cards.CardOverflow, match="data card"):
+        nl.layout_data_card(image, font_path=FONT, layout_engine="basic")
+    with pytest.raises(cards.CardOverflow):
+        nl.draw_data_card(image, font_path=FONT, layout_engine="basic")
+    with pytest.raises(cards.CardOverflow):
+        cards.render_card(cards.CardSpec("data", image=image), font_path=FONT, layout_engine="basic")
+    nl.layout_template(image, font_path=FONT, layout_engine="basic")      # …while the post image still fits
+
+
+def test_the_floor_is_what_refuses_a_picture_that_would_fit_small(monkeypatch):
+    """Anti-vacuity: five rows under a header fit the card's zone — from a step where a row's middle cell is
+    drawn at 21 px. Only the floor refuses them: without it the same picture lays out, illegibly."""
+    image = _image(_rows_spec(5), _table())
+    with pytest.raises(cards.CardOverflow, match="legibility floor"):
+        nl.layout_data_card(image, font_path=FONT, layout_engine="basic")
+    monkeypatch.setattr(nl, "DATA_CARD_MIN_PX", 0)
+    layout = nl.layout_data_card(image, font_path=FONT, layout_engine="basic")
+    assert layout.step > 12 and nl.illegible_lines(layout, 22)
+
+
+def test_the_search_stops_at_the_first_illegible_step(monkeypatch):
+    """Every size steps down together: once a step draws a line under the floor, no later step can be
+    legible, so the data card's search ends there — it never lays out every remaining step."""
+    calls: List[int] = []
+    real = nl._place
+
+    def spy(image, step, *a, **k):
+        calls.append(step)
+        return real(image, step, *a, **k)
+
+    monkeypatch.setattr(nl, "_place", spy)
+    with pytest.raises(cards.CardOverflow, match="legibility floor"):
+        nl.layout_data_card(_image(_rows_spec(8), _table()), font_path=FONT, layout_engine="basic")
+    # the middle cell's style reaches 21 px at step 12: steps 0-12 tried, 13-16 never laid out
+    assert calls == list(range(13)) and nl.CELL_SECONDARY_STYLE.size(12) == 21 == nl.CELL_SECONDARY_STYLE.size(11) - 1
+
+
+@pytest.mark.parametrize("name", ["spotlight", "pair", "grid_4"])
+def test_the_data_card_draws_only_inside_the_zone_neutrally_and_deterministically(name, logo_files, shipped_pair_grid):
+    image = _image(_LEGIBLE[name][0](), _table(logo_files))
+    img, layout = nl.draw_data_card(image, font_path=FONT, layout_engine="basic")
+    assert img.size == (cards.WIDTH, cards.HEIGHT) and img.mode == "RGB"
+    px = np.asarray(img)
+    page = np.array(cards._rgb(cards.PAGE))
+    x0, y0, x1, y1 = nl.DATA_CARD_FRAME.box
+    for region in (px[:y0], px[y1:], px[:, :x0], px[:, x1:]):          # chrome, caption band, side margins
+        assert (region == page).all()
+    mask = np.ones(px.shape[:2], dtype=bool)
+    for box, _art in layout.tiles:
+        mask[box[1]:box[3], box[0]:box[2]] = False
+    assert _not_neutral(px)[~mask].any(), "the red/green test logos were not drawn — the check is vacuous"
+    assert not (_not_neutral(px) & mask).any()
+    data = cards.render_card(cards.CardSpec("data", image=image), font_path=FONT, layout_engine="basic")
+    cards._font.cache_clear()
+    cards._fit_wordmark.cache_clear()
+    assert cards.render_card(cards.CardSpec("data", image=image), font_path=FONT, layout_engine="basic") == data
+    decoded = Image.open(io.BytesIO(data))
+    decoded.load()
+    assert decoded.tobytes() == img.tobytes()                            # the PNG is exactly the drawn card
+
+
+def test_the_post_check_still_refuses_what_the_canvas_would_let_through(monkeypatch):
+    """Defence in depth: the canvas stops the search as it measures, but the footer is not the canvas's,
+    and a later placer could draw text without measuring it — the laid-out lines are checked again. With
+    the canvas's own check disabled, the dense picture is still no data card."""
+    monkeypatch.setattr(nl._Canvas, "legible", lambda self, size, what: None)
+    with pytest.raises(cards.CardOverflow, match="legibility floor"):
+        nl.layout_data_card(_image(_rows_spec(5), _table()), font_path=FONT, layout_engine="basic")

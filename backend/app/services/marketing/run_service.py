@@ -50,8 +50,14 @@ from app.schemas.marketing import (
     ASSET_EXTENSIONS,
     ASSET_KIND_EXTENSIONS,
     ASSET_KINDS,
+    EXTRA_FORMATS_KEY,
+    EXTRA_POST_FORMATS_BY_PLATFORM,
+    EXTRA_VIDEO_PLATFORMS,
+    FIRST_COMMENT_PLATFORMS,
     FROZEN_POST_FORMATS,
+    IMAGE_FALLBACK_REASONS,
     IMAGE_ROLE_POST,
+    LESSON_VIDEO_FEATURES,
     MEDIA_REQUIRED_FORMATS,
     NEWS_CLASSES,
     POST_FORMATS,
@@ -59,6 +65,9 @@ from app.schemas.marketing import (
     POST_IMAGE_EXT,
     POST_IMAGE_MAX_BYTES,
     POST_MEDIA_KINDS,
+    POST_METADATA_FIRST_COMMENT,
+    POST_METADATA_IMAGE_FALLBACK,
+    POST_METADATA_VIDEO_FEATURES,
     POST_PLATFORMS,
     POST_STATUSES,
     RUN_STAGES,
@@ -66,16 +75,25 @@ from app.schemas.marketing import (
     RUN_WORKER_CAPABILITIES_KEY,
     SERVER_OWNED_RUN_METADATA,
     TEMPLATE_AUTHORSHIP,
+    TEMPLATE_VIDEO_FEATURES,
+    THREADS_VIDEO_CAPTION_MAX_BYTES,
     VIDEO_BRAND_TEXT,
+    VIDEO_END_CARD_CTA,
+    VIDEO_FEATURE_DATA_CARD,
+    VIDEO_FEATURE_HOOK_CARD,
+    VIDEO_FEATURES_KEY,
+    VIDEO_POSTS_KEY,
     WORKER_CAPABILITIES,
     WORKER_RUN_STATUSES,
+    is_extra_format,
     normalize_image_post,
     parse_content_classes,
 )
 # Company Weekly (drop 2): the class a script's frozen template id decides, the template re-check and
-# the on-screen allow-lists of a template's video and post image, the per-post AI flag, the logo path.
+# the on-screen allow-lists of a template's video and post image, the per-post AI flag, the logo path;
+# Batch 2: the hook card's stand-alone compliance scan (`hook_card_problem`).
 # All pure and FMP-free (tests/test_marketing_import_boundary.py PURE_MODULES).
-from app.services.marketing import news_templates, post_copy, selection, template_onscreen
+from app.services.marketing import compliance, news_templates, post_copy, selection, template_onscreen
 from app.services.marketing.logo_check import LogoInfo, logo_path
 from app.utils.market_hours import ET
 from app.utils.postgrest_paging import PAGE_SIZE as POSTGREST_MAX_ROWS
@@ -383,6 +401,242 @@ def frozen_post_formats(output: Any) -> Optional[Dict[str, str]]:
     return out
 
 
+def frozen_extra_formats(output: Any, formats: Optional[Dict[str, str]]) -> Dict[str, Dict[str, Any]]:
+    """The accepted output's frozen EXTRA posts (Batch 3, 2026-10-20: written once, at write time, by
+    `script_service.freeze_extra_formats`) as `{platform: {"format": "video", "caption": str}}`, in
+    EXTRA_VIDEO_PLATFORMS order — {} when the output carries neither EXTRA_FORMATS_KEY nor VIDEO_POSTS_KEY:
+    every output written before Batch 3, or with MARKETING_VIDEO_EXTRA_PLATFORMS empty. `formats` is the
+    output's frozen PRIMARY formats (`frozen_post_formats`). Pure.
+
+    Raises ValueError when they are present but do not read back (a hand-edited row; the freeze writes both,
+    and only when non-empty): one key without the other; not objects, or empty; the two naming different
+    platforms; a platform outside EXTRA_VIDEO_PLATFORMS (x and bluesky included) or a format outside its
+    EXTRA_POST_FORMATS_BY_PLATFORM; a post that is not exactly `{"title": None, "caption": <non-empty str>}`;
+    no frozen primary formats, or no video among them (the extras ride on the day's one video); a platform
+    whose primary post is not frozen as image or text. Never guessed: `create_posts` then records no extra
+    post — and every primary one."""
+    if not isinstance(output, dict) or (EXTRA_FORMATS_KEY not in output and VIDEO_POSTS_KEY not in output):
+        return {}
+    if EXTRA_FORMATS_KEY not in output or VIDEO_POSTS_KEY not in output:
+        raise ValueError(f"{EXTRA_FORMATS_KEY} and {VIDEO_POSTS_KEY} are written together, but only one is there")
+    extra, video_posts = output[EXTRA_FORMATS_KEY], output[VIDEO_POSTS_KEY]
+    if not isinstance(extra, dict) or not isinstance(video_posts, dict) or not extra or not video_posts:
+        raise ValueError(f"{EXTRA_FORMATS_KEY} / {VIDEO_POSTS_KEY} are not non-empty objects")
+    if set(extra) != set(video_posts):
+        raise ValueError(f"{EXTRA_FORMATS_KEY} and {VIDEO_POSTS_KEY} name different platforms")
+    if formats is None:
+        raise ValueError("extra posts without frozen post_formats")
+    if "video" not in formats.values():
+        raise ValueError("extra posts on a day whose frozen formats hold no video")
+    out: Dict[str, Dict[str, Any]] = {}
+    for platform in extra:
+        if not isinstance(platform, str) or platform not in EXTRA_VIDEO_PLATFORMS:
+            raise ValueError(f"{EXTRA_FORMATS_KEY} names {str(platform)[:40]!r}, which takes no extra post")
+        fmt = extra[platform]
+        if not isinstance(fmt, str) or fmt not in EXTRA_POST_FORMATS_BY_PLATFORM[platform]:
+            raise ValueError(f"{EXTRA_FORMATS_KEY}[{platform!r}] = {str(fmt)[:40]!r} is not an extra format of "
+                             f"{platform}")
+        post = video_posts[platform]
+        if (not isinstance(post, dict) or set(post) != {"title", "caption"} or post.get("title") is not None
+                or not isinstance(post.get("caption"), str) or not post["caption"].strip()):
+            raise ValueError(f"{VIDEO_POSTS_KEY}[{platform!r}] is not a title-less post with a caption")
+        if formats.get(platform) not in ("image", "text"):
+            raise ValueError(f"an extra {platform} post, but {platform}'s primary post is frozen as "
+                             f"{str(formats.get(platform))[:20]!r}")
+    for platform in EXTRA_VIDEO_PLATFORMS:
+        if platform in extra:
+            out[platform] = {"format": extra[platform], "caption": video_posts[platform]["caption"]}
+    return out
+
+
+def frozen_video_features(output: Any, *, template: bool, run_id: Any = None) -> Tuple[str, ...]:
+    """The accepted output's frozen `video_features` (Batch 2, 2026-10-19: written once, at write time, by
+    `script_service.freeze_video_features`) as a sorted tuple — () when it carries none: a run frozen
+    without features, or a script accepted before Batch 2 (today's video). Pure but for logging; never
+    raises.
+
+    `template`: is the script a Company Weekly template? Only the features of that kind read back
+    (TEMPLATE_VIDEO_FEATURES / LESSON_VIDEO_FEATURES). A value that does not read back — not a list, a
+    non-string, a duplicate, an entry outside VIDEO_FEATURES or a feature of the OTHER kind (a hook card on
+    a template, a data card on a lesson: a hand-edited row) — is logged at ERROR and read as () WHOLE, never
+    half-trusted: a feature only ever ALLOWS more on-screen text, so the safe reading of a row nobody can
+    explain is today's video. The script read-back (`script_service.worker_video_fields`) and the on-screen
+    check (`_check_onscreen_text`) both read it here, so the worker is never sent a feature the check
+    would not allow."""
+    if not isinstance(output, dict):
+        return ()
+    raw = output.get(VIDEO_FEATURES_KEY)
+    if raw is None:
+        return ()
+    applicable = TEMPLATE_VIDEO_FEATURES if template else LESSON_VIDEO_FEATURES
+    if (not isinstance(raw, list) or not all(isinstance(f, str) for f in raw) or len(set(raw)) != len(raw)
+            or not set(raw) <= set(applicable)):
+        logger.error("marketing run_id=%s: the accepted output's video_features do not read back for a %s "
+                     "(%s) — read as none: today's video", run_id, "template" if template else "lesson",
+                     str(raw)[:80])
+        return ()
+    return tuple(sorted(raw))
+
+
+def hook_card_problem(output: Any) -> Optional[str]:
+    """Why the accepted hook cannot be a LESSON video's HOOK CARD (Batch 2), worded to follow "the accepted
+    hook " in a log line — or None when it can. Two reasons, each fail closed:
+
+    * it is not one on-screen string (`template_onscreen.drawable_problem`: not a string, blank, padded, over
+      ONSCREEN_TEXT_MAX_CHARS, more than one line, not canonical, a link or a hash);
+    * B2-COMPL-1 (2026-10-20): it passes the compliance checks only BESIDE its first narration line. The
+      writer scans the hook with `video_script[0]` as the field a reader meets next (round 3, W3CB-2): a
+      closing claim that line debunks ("Index funds are risk-free." → "Not always. …") is exempt, as by a
+      next sentence. A hook card draws the hook ALONE — card 0, its burned captions hidden, the platforms'
+      pinned 500 ms cover — and the debunk is heard only after the card leaves. So a compliance hit the hook
+      draws alone but not beside line 0 (`compliance.scan_text`, the SAME default arguments on both sides: a
+      row the writer ran differently — strict instruments, the item's company and fact-sheet words — fires on
+      both or neither, and cancels) refuses the card: the video opens as before, on its first card. No line 0
+      (a missing or malformed `video_script`) is no context to lean on: both scans are the hook alone.
+      RR-B2F-1 (2026-10-20): a HIT is its (code, detail) pair, never the code alone — a strict-only row of the
+      same code ("reward patient investors", class_b_forward) firing on both scans used to hide a leaning hit
+      of that code ("a recession is coming", debunked only by line 0), and the card froze.
+
+    The codes are named, never the text (model text stays out of the logs). Pure; never raises."""
+    hook = output.get("hook") if isinstance(output, dict) else None
+    problem = template_onscreen.drawable_problem(hook)
+    if problem is not None:
+        return f"is not one drawable string ({problem})"
+    lines = output.get("video_script")
+    first = lines[0] if isinstance(lines, list) and lines and isinstance(lines[0], str) else ""
+    alone = {(v.code, v.detail) for v in compliance.scan_text("hook", hook)}
+    beside = {(v.code, v.detail) for v in compliance.scan_text("hook", hook, next_text=first)}
+    leaning = sorted({code for code, _detail in alone - beside})
+    if leaning:
+        return f"passes the compliance checks only beside its first narration line ({', '.join(leaning)})"
+    return None
+
+
+def hook_card_text(output: Any) -> Optional[str]:
+    """What a LESSON video's HOOK CARD (Batch 2) draws: the accepted hook, verbatim — or None when
+    `hook_card_problem` names a reason (not one on-screen string, or compliant only beside its first narration
+    line). The ONE predicate: `freeze_video_features` freezes `hook_card` only when this is not None, the
+    read-back sends it only then, and the on-screen check allows the hook only then. Pure; never raises."""
+    return output["hook"] if hook_card_problem(output) is None else None
+
+
+def data_card_strings(output: Any) -> Optional[List[str]]:
+    """What a TEMPLATE video's DATA CARD (Batch 2) may draw: the day's post image exactly as the server
+    allows it on the post itself (`_check_template_image_text`) — its closed `image_spec`'s strings with each
+    referenced logo's company name (the wordmark tile of a missing logo), the code-owned `image_footer` last
+    (`template_onscreen.image_strings`). Never `image_post`: on a template that is the alt text.
+
+    None when the run's script read-back cannot carry that picture to the worker, so no data card can be
+    drawn from it: the frozen post formats do not read back (`script_service.worker_script` then sends no
+    `image_footer`), there is no footer, or the spec does not validate against the run's own logos and that
+    footer. `freeze_video_features` freezes `data_card` only when this is not None, and the on-screen check
+    allows these strings only then. Pure; never raises."""
+    if not isinstance(output, dict):
+        return None
+    try:
+        if frozen_post_formats(output) is None:
+            return None
+    except ValueError:
+        return None
+    footer = output.get("image_footer")
+    if not isinstance(footer, str) or not footer.strip():
+        return None
+    spec, logos = output.get("image_spec"), output.get("logos")
+    if template_onscreen.validate_image_spec(spec, template_onscreen.logo_keys(logos), footer=footer) is not None:
+        return None
+    return template_onscreen.image_strings(spec, logos) or None
+
+
+def _video_draws_picture(output: Any, video_asset: Any) -> bool:
+    """Does the run's verified video draw the day's PICTURE (B3-LIVE-1)? True only when the accepted output froze
+    `data_card` (`frozen_video_features`, read as a template's) AND the video asset itself says which text card the
+    data card replaced (`metadata.data_card_slot`, an int — the worker records None when it kept the text card:
+    a picture that would not fit legibly, an older worker). A template's EXTRA video post whose caption speaks of
+    the picture's rows (a Form 4 roundup) is recorded only then (`news_templates.extra_video_problems`). Pure;
+    never raises."""
+    if VIDEO_FEATURE_DATA_CARD not in frozen_video_features(output, template=True):
+        return False
+    meta = video_asset.get("metadata") if isinstance(video_asset, dict) else None
+    slot = meta.get("data_card_slot") if isinstance(meta, dict) else None
+    return isinstance(slot, int) and not isinstance(slot, bool)
+
+
+#: The platforms that could post the day's picture at all (an `image` format in the map): the only ones an
+#: `image_fallback` may name.
+_PICTURE_CAPABLE = frozenset(p for p, fmts in POST_FORMATS_BY_PLATFORM.items() if "image" in fmts)
+#: Platforms MARKETING_FIRST_COMMENT_PLATFORMS may never list (schemas.FIRST_COMMENT_PLATFORMS: on X a
+#: comment is another billed post; Bluesky is direct and its caption already carries a tappable link).
+_NEVER_FIRST_COMMENT = frozenset({"x", "bluesky"})
+
+
+def parse_first_comment_platforms(raw: Any) -> frozenset:
+    """MARKETING_FIRST_COMMENT_PLATFORMS as the set of platforms whose posts carry the automatic first
+    comment (Batch 1, 2026-10-15) — members of FIRST_COMMENT_PLATFORMS only. Re-validated here, at call
+    time: the Settings validator normalises a deployed value, but a value set on the live object (a
+    console, a test) skips it — so "x" / "bluesky" (refused) and unknown tokens are dropped with an ERROR
+    here too, and a non-string is no platform (no comment: the fail-closed side). Never raises."""
+    if not isinstance(raw, str):
+        logger.error("marketing create_posts: MARKETING_FIRST_COMMENT_PLATFORMS is not a string (%s) — no first "
+                     "comment", type(raw).__name__)
+        return frozenset()
+    tokens = {t.strip().lower() for t in raw.split(",") if t.strip()}
+    refused = sorted(tokens & _NEVER_FIRST_COMMENT)
+    if refused:
+        logger.error("marketing create_posts: MARKETING_FIRST_COMMENT_PLATFORMS lists %s — refused, never a first "
+                     "comment there", ",".join(refused))
+    unknown = sorted(tokens - set(FIRST_COMMENT_PLATFORMS) - _NEVER_FIRST_COMMENT)
+    if unknown:
+        logger.error("marketing create_posts: MARKETING_FIRST_COMMENT_PLATFORMS ignored unknown platform(s) %s",
+                     ",".join(t[:24] for t in unknown[:10]))
+    return frozenset(tokens & set(FIRST_COMMENT_PLATFORMS))
+
+
+def image_fallback_of(output: Any, *, run_id: Any = None) -> Optional[Tuple[str, frozenset]]:
+    """The accepted output's `image_fallback` (Batch 1, 2026-10-15: written at write time by
+    `script_service.freeze_post_formats`, or `_frozen_output` when the freeze raised) as (reason code,
+    platforms), or None when it carries none. One that does not read back — not an object, a reason
+    outside IMAGE_FALLBACK_REASONS, `platforms` not a list — is logged at ERROR and read as None; a
+    platform entry that could never post a picture (not an image-capable post platform) is dropped
+    (ERROR). The note explains a text day to
+    the owner and never gates anything: a hand-edited row costs the stamp, never the posts. Pure but for
+    logging."""
+    # The OUTPUT key `script_service.IMAGE_FALLBACK_KEY` (that module imports this one, so the name is
+    # spelled here; the end-to-end tests freeze with the real function and stamp with this one).
+    if not isinstance(output, dict) or output.get("image_fallback") is None:
+        return None
+    raw = output["image_fallback"]
+    reason = raw.get("reason") if isinstance(raw, dict) else None
+    platforms = raw.get("platforms") if isinstance(raw, dict) else None
+    if not isinstance(reason, str) or reason not in IMAGE_FALLBACK_REASONS or not isinstance(platforms, list):
+        logger.error("marketing create_posts run_id=%s: the accepted output's image_fallback does not read back "
+                     "(reason=%r) — no post is stamped with it", run_id, str(reason)[:40])
+        return None
+    bad = [p for p in platforms if not (isinstance(p, str) and p in _PICTURE_CAPABLE)]
+    if bad:
+        logger.error("marketing create_posts run_id=%s: the accepted output's image_fallback names %d entr(ies) "
+                     "that could never post a picture — dropped", run_id, len(bad))
+    return reason, frozenset(p for p in platforms if isinstance(p, str) and p in _PICTURE_CAPABLE)
+
+
+def video_features_note(output: Any, *, template: bool, run_id: Any = None) -> Optional[List[str]]:
+    """The note `create_posts` stamps on each VIDEO post as `metadata[POST_METADATA_VIDEO_FEATURES]` (Batch 2,
+    B2-METRICS-ATTRIBUTION): the run's frozen video features, a sorted list (`frozen_video_features`, read with
+    the script's own kind). None — nothing stamped — when the output carries none (absent, null or []: those
+    rows stay byte-identical to a run before Batch 2) or when the stored list does not read back
+    (`frozen_video_features` logs the ERROR; a WARNING here says the posts go without the note). It explains a
+    video to the measure step and the digest and never gates anything: a hand-edited row costs the note,
+    never a post. Pure but for logging."""
+    raw = output.get(VIDEO_FEATURES_KEY) if isinstance(output, dict) else None
+    if raw is None or (isinstance(raw, list) and not raw):
+        return None
+    features = frozen_video_features(output, template=template, run_id=run_id)
+    if not features:
+        logger.warning("marketing create_posts run_id=%s: the accepted output's video_features do not read back — "
+                       "no video_features note on its video posts", run_id)
+        return None
+    return list(features)
+
+
 def _template_script(run_id: str, script: Dict[str, Any], output: Dict[str, Any], *, what: str) -> bool:
     """Is the accepted script a Company Weekly TEMPLATE (drop 2)? Decided by the SCRIPT's frozen
     `template_id` (`selection.content_class_of`: a news series → C/F), never by the run's mirror or the
@@ -588,6 +842,41 @@ def charges_by_op_since(post: Dict[str, Any], since: datetime) -> Dict[str, int]
     for op, micros in _dated_charges(post, since):
         out[op] = out.get(op, 0) + micros
     return out
+
+
+def journal_entries(charge: Any = None, charges: Any = ()) -> Tuple[Tuple[str, int, Optional[Any]], ...]:
+    """The cost-journal entries ONE `transition_post` writes, as (op, micros, at) — the writer's half of
+    the reading rule above, checked BEFORE any I/O. `charge` is one entry and `charges` a list of them
+    (Batch 1, 2026-10-15: an X image post journals its media upload AND its alt text in one fenced write,
+    so a lost write can never leave half of them journaled); pass one or the other. An entry is
+    `(op, micros)` or `(op, micros, at)`: op a non-empty string of at most `_CHARGE_OP_MAX_CHARS`
+    characters (the readers keep no more), micros an int — negative for a refund or a correction, never a
+    bool (True would journal one micro-dollar) — and `at` the instant a reversal is dated at (the charge
+    it reverses; None or empty = the write's own time). Anything else raises ValueError: the journal is
+    the X cap's ledger of record, and a guessed amount in it is worse than a refused write. Pure."""
+    if charge is not None and charges:
+        raise ValueError("transition_post: pass charge OR charges, not both")
+    if charge is not None:
+        raw: Tuple[Any, ...] = (charge,)
+    elif charges is None:
+        raw = ()
+    elif isinstance(charges, (str, bytes, bytearray, dict)) or not isinstance(charges, (tuple, list)):
+        raise ValueError(f"transition_post: charges must be a list of (op, micros[, at]) entries, not "
+                         f"{type(charges).__name__}")
+    else:
+        raw = tuple(charges)
+    out = []
+    for entry in raw:
+        if not isinstance(entry, (tuple, list)) or len(entry) not in (2, 3):
+            raise ValueError(f"transition_post: charge {str(entry)[:80]!r} is not (op, micros) or (op, micros, at)")
+        op, micros = entry[0], entry[1]
+        if not isinstance(op, str) or not op.strip() or len(op) > _CHARGE_OP_MAX_CHARS:
+            raise ValueError(f"transition_post: charge op {str(op)[:80]!r} is not a non-empty string of at most "
+                             f"{_CHARGE_OP_MAX_CHARS} characters")
+        if not isinstance(micros, int) or isinstance(micros, bool):
+            raise ValueError(f"transition_post: charge {op} micros {str(micros)[:40]!r} is not an int")
+        out.append((op, micros, entry[2] if len(entry) > 2 and entry[2] else None))
+    return tuple(out)
 
 
 def metrics_rev(metrics: Any) -> Tuple[Optional[str], int]:
@@ -1500,7 +1789,19 @@ class MarketingRunService:
         card (`VIDEO_BRAND_TEXT`) — and the disclaimer card MUST be among them. The burned
         captions are the narration's timed words, so the video must name a ready, checked audio
         asset of the run (`metadata.voice_asset_id`). The server still cannot read pixels; this bounds what a
-        well-behaved worker can claim, and it is what a later media auto-publish rests on."""
+        well-behaved worker can claim, and it is what a later media auto-publish rests on.
+
+        Batch 2 (2026-10-19): the run's FROZEN video features (`frozen_video_features`, read with the
+        script's own class) widen the allow-list, never the requirements — a LESSON with `hook_card` may
+        also draw the accepted hook verbatim (its hook card) when it can stand alone (`hook_card_text`: one
+        drawable string, not compliant only beside its first narration line — B2-COMPL-1; a row frozen
+        before that check keeps the flag and the hook is refused here), a TEMPLATE with `data_card` may also
+        draw the day's post image (`data_card_strings`: its image_spec's strings, logo names and footer,
+        never the alt text — whichever card the read-back's `data_card_slot` names it replaces). Without the
+        feature frozen, those strings are refused like any other (422). The end card
+        may be either CTA of VIDEO_BRAND_TEXT; the App Store one on a run whose accepted output is not on
+        the store (store state prelaunch) is allowed but logged WARNING — owner decision 6 shows it only
+        while the app is on the store, and the read-back named the legacy one (`end_card_cta`)."""
         run_id = run["id"]
         script = await self.get_script(run_id)
         output = (script or {}).get("output")
@@ -1510,6 +1811,7 @@ class MarketingRunService:
         if not isinstance(drawn, list) or not drawn:   # the request schema requires it; defence in depth
             raise MarketingRequestInvalid(f"run {run_id}: a video must declare metadata.onscreen_text")
         template = _template_script(run_id, script, output, what="video")
+        features = frozen_video_features(output, template=template, run_id=run_id)
         allowed = set(VIDEO_BRAND_TEXT)
         for card in output.get("cards") or []:
             if isinstance(card, dict):
@@ -1517,6 +1819,25 @@ class MarketingRunService:
         disclaimer = str(output.get("disclaimer_card") or "")
         if disclaimer:
             allowed.add(disclaimer)
+        # What a frozen feature lets this video draw besides (Batch 2) — named in the 422 below.
+        feature_sources: List[str] = []
+        if not template and VIDEO_FEATURE_HOOK_CARD in features:
+            hook = hook_card_text(output)
+            if hook is None:
+                # A hand-edited row, or one frozen before B2-COMPL-1: the hook cannot stand alone on a card
+                logger.error("marketing video run_id=%s: hook_card is frozen, but the accepted hook %s — the hook "
+                             "is not allowed on screen", run_id, hook_card_problem(output))
+            else:
+                allowed.add(hook)
+                feature_sources.append("its hook card")
+        if template and VIDEO_FEATURE_DATA_CARD in features:
+            data = data_card_strings(output)
+            if data is None:
+                logger.error("marketing video run_id=%s: data_card is frozen, but the accepted template's post "
+                             "image cannot be drawn from its read-back — no data-card string is allowed", run_id)
+            else:
+                allowed.update(data)
+                feature_sources.append("its data card")
         opening: Dict[str, Any] = {}
         if template:
             # Drop 2 (contract D12): a template video also draws its OPENING card — the kicker, each
@@ -1535,10 +1856,11 @@ class MarketingRunService:
             allowed.update(template_onscreen.opening_strings(opening, output.get("logos")))
         extra = [t for t in drawn if t not in allowed]
         if extra:
+            sources = "".join(f", {s}" for s in (["its opening card"] if template else []) + feature_sources)
             raise MarketingRequestInvalid(
                 f"run {run_id}: the video declares {len(extra)} on-screen string(s) that are not the "
-                f"accepted script's cards, its disclaimer card{', its opening card' if template else ''} or "
-                f"the end card (first: {str(extra[0])[:80]!r})")
+                f"accepted script's cards, its disclaimer card{sources} or the end card "
+                f"(first: {str(extra[0])[:80]!r})")
         if not disclaimer or disclaimer not in drawn:
             raise MarketingRequestInvalid(f"run {run_id}: the video does not draw the disclaimer card")
         if template:
@@ -1565,6 +1887,11 @@ class MarketingRunService:
             raise MarketingRequestInvalid(
                 f"run {run_id}: the video's captions must come from a ready, checked narration of this "
                 f"run (voice_asset_id={voice_id!r})")
+        if VIDEO_END_CARD_CTA in drawn and post_copy.search_line(output.get("store_state")) is None:
+            logger.warning("marketing video run_id=%s draws the App Store end card while the accepted output's "
+                           "store state is %r — allowed (VIDEO_BRAND_TEXT), but owner decision 6 shows it only "
+                           "while the app is on the store: the worker should draw the read-back's end_card_cta",
+                           run_id, str(output.get("store_state"))[:20])
 
     async def _check_post_image_text(self, run: Dict[str, Any], metadata: Dict[str, Any], *,
                                      ext: str, size_bytes: int) -> None:
@@ -1940,16 +2267,41 @@ class MarketingRunService:
         A `video` post is pinned the same way, to exactly the run's verified `metadata.video_asset_id`
         (without frozen formats its video posts must at least all name the same assets): the review
         bundle shows ONE video and one tap approves every video post.
-        At most one post per (run, platform), in the request and against the ledger (a read before
-        the INSERTs — not atomic with them, but the claim fence makes the holder the only writer and
-        the frozen formats leave each platform one valid format anyway).
+        At most one PRIMARY post per (run, platform), in the request and against the ledger (a read
+        before the INSERTs — not atomic with them, but the claim fence makes the holder the only writer
+        and the frozen formats leave each platform one valid format anyway); Batch 3's frozen extras
+        (below) are a platform's only other row.
 
         Drop 2 (contract D12): the post gate is dispatched on the SCRIPT's class (its frozen
         `template_id`): "A" → the judge gate; "C"/"F" (a Company Weekly template) → the class switch, the
         per-series switch (drop 2b), the template authorship and `news_templates.revalidate` (409
         `MarketingTemplateRefused` on a miss; 422 for the authorship);
         anything else → 422. A template post is never auto-approved. Every post's metadata records its
-        `content_class`, `series`, `authorship`, `series_trail` and its `made_with_ai` flag."""
+        `content_class`, `series`, `authorship`, `series_trail` and its `made_with_ai` flag.
+
+        Batch 1 (2026-10-15), two notes that never gate anything: `first_comment` (the code-owned
+        `post_copy.SEARCH_LINE`) on each post whose platform is in MARKETING_FIRST_COMMENT_PLATFORMS —
+        read now — while the accepted output's store state is live or preorder; and `image_fallback` (the
+        reason code) on each text post of a platform the output's `image_fallback` names. Batch 2
+        (B2-METRICS-ATTRIBUTION) adds a third: `video_features` (`video_features_note`, the run's frozen
+        features as a sorted list) on each VIDEO post — only when there are some.
+
+        Batch 3 (2026-10-20, owner decision 2): ONE PRIMARY post per (run, platform) — the worker's specs,
+        validated exactly as above against POST_FORMATS_BY_PLATFORM — PLUS the platform's frozen EXTRA posts
+        (`frozen_extra_formats`: the accepted output's `extra_post_formats` / `video_posts`, written at write
+        time; MARKETING_VIDEO_EXTRA_PLATFORMS is never read here). The server appends those ITSELF, after every
+        spec passed and before the first INSERT: a Facebook / LinkedIn / Threads post of the run's one verified
+        video (`metadata.video_asset_id`, key `<run_date>:<platform>:video`), always `pending_review`, its
+        caption re-derived now (`post_copy.extra_video_caption` of the platform's accepted caption) and equal
+        to the frozen one — and, for a template, re-checked (`news_templates.extra_video_problems`, told whether
+        the run's video draws the day's picture: `_video_draws_picture`, B3-LIVE-1); its notes
+        are the primary posts' plus `made_with_ai` of a video, the platform's first comment and the video
+        features. A worker spec naming an extra pair is still a 422 (it is not in the primary map); an extra
+        that does not hold — no verified video, a caption that does not re-derive, a failed re-check, a
+        conflicting ledger row, extras that do not read back — is skipped with an ERROR (WARNING for a missing
+        video) and never costs the day's other posts. The ledger's other-format check subtracts the frozen
+        extra format, so a retry adopts both of a platform's rows. An output without the keys records exactly
+        the posts it did, with the same reads."""
         run = await self.get_run(run_id)
         if run is None:
             raise MarketingRunNotFound(f"run {run_id} not found")
@@ -2073,11 +2425,19 @@ class MarketingRunService:
             raise MarketingRequestInvalid(
                 f"run {run_id}: the accepted script's post_formats do not read back ({e}); nothing recorded"
             ) from e
+        # Batch 3: the EXTRA posts frozen at write time ({} for an output without them — every output before
+        # Batch 3, or with the switch empty). Extras that do not read back cost the extras only.
+        try:
+            extras = frozen_extra_formats(output, formats)
+        except ValueError as e:
+            logger.error("marketing create_posts run_id=%s: the accepted script's extra formats do not read back "
+                         "(%s) — no extra video post (the day's other posts are recorded)", run_id, e)
+            extras = {}
         wants_assets = any(spec.get("asset_ids") for spec in specs)
         wants_image = any(spec.get("format") == "image" for spec in specs)
         wants_video = any(spec.get("format") == "video" for spec in specs)
         asset_rows = (await self.list_assets(run_id)
-                      if (wants_assets or wants_image or (wants_video and formats is not None)) else [])
+                      if (wants_assets or wants_image or (wants_video and formats is not None) or extras) else [])
         assets = {a.get("id"): a for a in asset_rows}
         ready_rows = [a for a in asset_rows if a.get("status") == "ready"]
         # The ONE image every image post of the run carries: the run's verified post-image pointer
@@ -2090,9 +2450,10 @@ class MarketingRunService:
         # `_check_onscreen_text` checked). The review bundle shows the owner ONE video for all the
         # video posts and one "Approve all" decides them — the server cannot read pixels, so a second
         # ready video on another post would be approved unseen. A script accepted before drop 1 (no
-        # frozen formats) is not pinned to the pointer, but its video posts must still agree.
+        # frozen formats) is not pinned to the pointer, but its video posts must still agree. The frozen
+        # EXTRA posts (Batch 3) carry the same one video.
         video_id = (self._verified_pointer(run, ready_rows, "video_asset_id", "video")
-                    if wants_video and formats is not None else None)
+                    if (wants_video or extras) and formats is not None else None)
         video_lists: set = set()
         # At most ONE post per (run, platform): the ledger's UNIQUE is (run, platform, format), so
         # a platform already recorded in another format would otherwise take a second post.
@@ -2137,7 +2498,9 @@ class MarketingRunService:
             if previous != tuple(asset_ids):
                 bad_media.append(f"{platform}/{fmt} named twice with different assets")
             formats_named.setdefault(platform, set()).add(fmt)
-            other = sorted(recorded.get(platform, set()) - {fmt})
+            # A platform's frozen EXTRA format (Batch 3) is its second post of the run, never "another format".
+            extra_fmt = {extras[platform]["format"]} if platform in extras else set()
+            other = sorted(recorded.get(platform, set()) - {fmt} - extra_fmt)
             if other:
                 bad_media.append(f"{platform}/{fmt}: this run already recorded {platform} as {other}")
             if fmt == "image" and formats is not None:
@@ -2187,19 +2550,85 @@ class MarketingRunService:
         if bad_media:
             raise MarketingRequestInvalid(f"run {run_id}: {sorted(set(bad_media))}")
 
+        # ── Batch 3: the frozen EXTRA posts, appended by the server — every spec above already passed ──
+        # Each is checked again NOW (its caption re-derived, a template's re-run, the run's verified video,
+        # the ledger) and SKIPPED, logged, when one does not hold: an extra never costs the day's other posts.
+        extra_planned: List[Tuple[str, str, Dict[str, Any], List[str]]] = []
+        for platform in EXTRA_VIDEO_PLATFORMS:
+            frozen = extras.get(platform)
+            if frozen is None:
+                continue
+            try:
+                caption, why, level = self._extra_post_caption(
+                    platform, frozen, run_date=run_date, klass=klass, authorship=authorship, output=output,
+                    script=script, formats=formats or {}, copy_by_platform=copy_by_platform, video_id=video_id,
+                    recorded=recorded, video_asset=assets.get(video_id) if video_id is not None else None)
+                if caption is not None:
+                    ai_flags[(platform, frozen["format"])] = post_copy.made_with_ai(authorship, frozen["format"])
+            except Exception as e:  # noqa: BLE001 — an extra post never costs the day's other posts
+                logger.error("marketing create_posts run_id=%s: the extra %s video post could not be checked "
+                             "(%s: %s) — SKIPPED (the day's other posts are recorded)", run_id, platform,
+                             type(e).__name__, e, exc_info=True)
+                continue
+            if caption is None:
+                logger.log(level, "marketing create_posts run_id=%s: the extra %s video post is SKIPPED — %s (the "
+                           "day's other posts are recorded)", run_id, platform, why)
+                continue
+            extra_planned.append((platform, frozen["format"], {"title": None, "caption": caption}, [video_id]))
+        extra_pairs = {(p, f) for p, f, _copy, _ids in extra_planned}
+
         # A dry-run RUN never auto-approves, whatever the web process's switch says: the
         # worker's rehearsal must not become a real post because a different service flipped
         # MARKETING_AUTO_PUBLISH. The flag rides on every row so the publisher sees it too.
         run_dry = bool(run.get("dry_run"))
         auto = settings.MARKETING_AUTO_PUBLISH and not run_dry
+        # Batch 1 (2026-10-15): two notes per post, decided HERE from the accepted output and the switch
+        # read now — never from the worker — and read by the review message and the weekly digest:
+        # * `first_comment` — the code-owned App Store search line, on each post whose platform is in
+        #   MARKETING_FIRST_COMMENT_PLATFORMS, only while the output's store state (the one its captions
+        #   were worded with) says the app is on the store, live or preorder (`post_copy.search_line`).
+        #   The Upload-Post outlet sends exactly this text as the platform's automatic first comment.
+        # * `image_fallback` — on each TEXT post of a platform the output says should have posted the
+        #   day's picture but froze as text: the reason code (schemas.IMAGE_FALLBACK_REASONS).
+        comment = post_copy.search_line(output.get("store_state"))
+        comment_platforms = parse_first_comment_platforms(settings.MARKETING_FIRST_COMMENT_PLATFORMS)
+        if comment is None and comment_platforms:
+            logger.info("marketing create_posts run_id=%s: no first comment for %s — the accepted output's store "
+                        "state is %r (the search line rides only while the app is on the store)", run_id,
+                        ",".join(sorted(comment_platforms)), str(output.get("store_state"))[:20])
+        fallback = image_fallback_of(output, run_id=run_id)
+        # Batch 2 (B2-METRICS-ATTRIBUTION): a third note, on each VIDEO post — the run's frozen video features,
+        # so the measure step and the digest can tell a first-seconds video from an older one (never a gate).
+        video_note = video_features_note(output, template=klass in NEWS_CLASSES, run_id=run_id)
         out: List[Dict[str, Any]] = []
-        for platform, fmt, copy, asset_ids in planned:
+        for platform, fmt, copy, asset_ids in [*planned, *extra_planned]:
             # Only a media-less TEXT post of a class-A (judged) script is born approved: the server
             # has verified every word of it, and the format map allows `text` only on text-native
-            # outlets. A template post (C/F) is NEVER auto-approved — a human approves every one.
-            initial = ("approved" if (auto and fmt == "text" and not asset_ids and klass == "A")
+            # outlets. A template post (C/F) is NEVER auto-approved — a human approves every one; so
+            # is every EXTRA post (Batch 3): its video is reviewed with the day's other video posts.
+            initial = ("approved" if (auto and fmt == "text" and not asset_ids and klass == "A"
+                                      and (platform, fmt) not in extra_pairs)
                        else "pending_review")
             key = idempotency_key_for(run_date, platform, fmt)
+            metadata: Dict[str, Any] = {
+                "dry_run": run_dry,
+                "generation_id": script.get("generation_id"),
+                "source_ref": script.get("source_ref"),
+                "template_id": script.get("template_id"),
+                # Drop 2: what the post is (the script decides) and the platform AI flag it
+                # carries (`post_copy.made_with_ai`; the X outlet ANDs it with its setting).
+                "content_class": klass,
+                "series": series,
+                "authorship": authorship,
+                "series_trail": [dict(step) for step in series_trail],   # flat str entries
+                "made_with_ai": ai_flags[(platform, fmt)],
+            }
+            if comment is not None and platform in comment_platforms:
+                metadata[POST_METADATA_FIRST_COMMENT] = comment
+            if fallback is not None and fmt == "text" and platform in fallback[1]:
+                metadata[POST_METADATA_IMAGE_FALLBACK] = fallback[0]
+            if video_note is not None and fmt == "video":
+                metadata[POST_METADATA_VIDEO_FEATURES] = list(video_note)
             row = {
                 "run_id": run_id,
                 "platform": platform,
@@ -2209,19 +2638,7 @@ class MarketingRunService:
                 "caption": copy["caption"],
                 "asset_ids": asset_ids,
                 "idempotency_key": key,
-                "metadata": {
-                    "dry_run": run_dry,
-                    "generation_id": script.get("generation_id"),
-                    "source_ref": script.get("source_ref"),
-                    "template_id": script.get("template_id"),
-                    # Drop 2: what the post is (the script decides) and the platform AI flag it
-                    # carries (`post_copy.made_with_ai`; the X outlet ANDs it with its setting).
-                    "content_class": klass,
-                    "series": series,
-                    "authorship": authorship,
-                    "series_trail": [dict(step) for step in series_trail],   # flat str entries
-                    "made_with_ai": ai_flags[(platform, fmt)],
-                },
+                "metadata": metadata,
                 "approved_at": _now_iso() if initial == "approved" else None,
                 "approved_by": "auto" if initial == "approved" else None,
                 "updated_at": _now_iso(),
@@ -2240,11 +2657,67 @@ class MarketingRunService:
             if created is None:
                 raise MarketingRunError(f"create_posts: no row for {key}")
             out.append(created)
+        # What the recorded rows carry (an adopted existing row keeps its own notes, whatever this call
+        # would have stamped).
+        notes = [(r.get("platform"), r["metadata"]) for r in out if isinstance(r.get("metadata"), dict)]
         logger.info(
-            "marketing posts recorded run_id=%s n=%d auto_publish=%s class=%s series=%s authorship=%s",
+            "marketing posts recorded run_id=%s n=%d auto_publish=%s class=%s series=%s authorship=%s "
+            "first_comment=%s image_fallback=%s video_features=%s extras=%s",
             run_id, len(out), auto, klass, series, authorship,
+            ",".join(str(p) for p, m in notes if m.get(POST_METADATA_FIRST_COMMENT)) or "-",
+            ",".join(f"{p}:{m[POST_METADATA_IMAGE_FALLBACK]}" for p, m in notes
+                     if m.get(POST_METADATA_IMAGE_FALLBACK)) or "-",
+            ",".join(sorted({str(p) for p, m in notes if m.get(POST_METADATA_VIDEO_FEATURES)})) or "-",
+            ",".join(p for p, _f, _copy, _ids in extra_planned) or "-",
         )
         return out
+
+    @staticmethod
+    def _extra_post_caption(platform: str, frozen: Dict[str, Any], *, run_date: date, klass: str, authorship: str,
+                            output: Dict[str, Any], script: Dict[str, Any], formats: Dict[str, str],
+                            copy_by_platform: Dict[str, Any], video_id: Optional[str],
+                            recorded: Dict[str, set], video_asset: Optional[Dict[str, Any]] = None
+                            ) -> Tuple[Optional[str], str, int]:
+        """(caption, "", 0) when `platform`'s frozen EXTRA post (Batch 3, `frozen_extra_formats`) may be recorded
+        now; else (None, why, the log level). Checked in this order: the platform's accepted copy exists; its
+        caption re-derives as the video caption (`post_copy.extra_video_caption`) and equals the frozen one; a
+        Threads caption fits THREADS_VIDEO_CAPTION_MAX_BYTES UTF-8 bytes; the run has its one verified video
+        (WARNING when not: a request reaches here without it only when it names no video post); a template's
+        video caption passes `news_templates.extra_video_problems` against the script's stored fact sheet, told
+        whether that video draws the day's picture (`_video_draws_picture`, B3-LIVE-1: a Form 4 roundup's
+        caption speaks of the picture's rows — without the picture in the video that is `picture_caption`,
+        WARNING: the worker kept the text card, a designed degradation); and the ledger holds no other row of
+        the platform than its primary and extra formats (a hand-made conflicting row). ERROR for every other
+        miss. Never names caption text."""
+        primary = copy_by_platform.get(platform)
+        accepted = primary.get("caption") if isinstance(primary, dict) else None
+        if not isinstance(accepted, str) or not accepted:
+            return None, "the accepted script carries no copy for the platform", logging.ERROR
+        try:
+            derived = post_copy.extra_video_caption(platform, accepted, run_date, authorship)
+        except ValueError as e:
+            return None, f"its accepted caption does not re-derive as a video caption ({str(e)[:200]})", logging.ERROR
+        if derived != frozen["caption"]:
+            return None, "the frozen video caption is not the one its accepted caption re-derives", logging.ERROR
+        if platform == "threads" and len(derived.encode("utf-8")) > THREADS_VIDEO_CAPTION_MAX_BYTES:
+            why = f"the Threads video caption is over {THREADS_VIDEO_CAPTION_MAX_BYTES} UTF-8 bytes"
+            return None, why, logging.ERROR
+        if video_id is None:
+            return None, "the run has no verified video", logging.WARNING
+        if klass in NEWS_CLASSES:
+            problems = news_templates.extra_video_problems(
+                output, fact_sheet=script.get("fact_sheet"), run_date=run_date, platform=platform, caption=derived,
+                video_draws_picture=_video_draws_picture(output, video_asset))
+            if problems:
+                codes = sorted({str(p.get("code"))[:40] for p in problems if isinstance(p, dict)})
+                if codes == ["picture_caption"]:
+                    return None, ("the template's caption speaks of the picture's rows, and the run's video does "
+                                  "not draw the picture (no data card)"), logging.WARNING
+                return None, f"the template's video caption fails its re-check (codes {codes})", logging.ERROR
+        conflicting = sorted(recorded.get(platform, set()) - {frozen["format"], formats.get(platform)})
+        if conflicting:
+            return None, f"this run already recorded {platform} as {conflicting}", logging.ERROR
+        return derived, "", 0
 
     async def list_posts(
         self, status: str, *, limit: int = 50, platforms: Optional[List[str]] = None,
@@ -2535,8 +3008,8 @@ class MarketingRunService:
     @staticmethod
     def _merged_post_patch(
         row: Dict[str, Any], *, status: Optional[str], meta: Optional[Dict[str, Any]],
-        publish: Optional[Dict[str, Any]], unset: Tuple[str, ...], charge: Optional[Tuple[Any, ...]],
-        fields: Dict[str, Any],
+        publish: Optional[Dict[str, Any]], unset: Tuple[str, ...],
+        charges: Tuple[Tuple[str, int, Optional[Any]], ...], fields: Dict[str, Any],
     ) -> Dict[str, Any]:
         now = _now_iso()
         merged = dict(row["metadata"]) if isinstance(row.get("metadata"), dict) else {}
@@ -2550,17 +3023,18 @@ class MarketingRunService:
             pub.update(publish)
             merged["publish"] = pub
         patch: Dict[str, Any] = {"metadata": merged, "updated_at": now, **fields}
-        if charge is not None:
-            # (op, micros) or (op, micros, at): a refund or correction is dated at the charge it
-            # REVERSES, so a reversal written just after 00:00 UTC on the 1st lands in the same month
-            # as its charge — otherwise the new month would start below zero.
-            op, micros = charge[0], charge[1]
-            at = charge[2] if len(charge) > 2 and charge[2] else now
+        if charges:
+            # `journal_entries` checked them: (op, micros, at). A refund or correction is dated at the
+            # charge it REVERSES, so a reversal written just after 00:00 UTC on the 1st lands in the same
+            # month as its charge — otherwise the new month would start below zero. Every entry lands in
+            # THIS write, in order, and `cost_micros` moves by their sum: the journal and the column never
+            # disagree, and a write-ahead of several billed calls is all or nothing.
             journal = merged.get("charges")
             journal = list(journal) if isinstance(journal, list) else []
-            journal.append({"at": at, "op": str(op), "micros": int(micros)})
+            for op, micros, at in charges:
+                journal.append({"at": at or now, "op": op, "micros": micros})
             merged["charges"] = journal
-            patch["cost_micros"] = int(row.get("cost_micros") or 0) + int(micros)
+            patch["cost_micros"] = int(row.get("cost_micros") or 0) + sum(micros for _op, micros, _at in charges)
         if status is not None:
             patch["status"] = status
         return patch
@@ -2569,7 +3043,7 @@ class MarketingRunService:
         self, post_id: str, *, expect_status: Any, observed: Optional[Dict[str, Any]] = None,
         status: Optional[str] = None, meta: Optional[Dict[str, Any]] = None,
         publish: Optional[Dict[str, Any]] = None, unset: Tuple[str, ...] = (),
-        charge: Optional[Tuple[Any, ...]] = None, retries: int = 1, **fields: Any,
+        charge: Optional[Tuple[Any, ...]] = None, retries: int = 1, charges: Any = (), **fields: Any,
     ) -> Optional[Dict[str, Any]]:
         """Move a post (or just annotate it) ONLY while it is still in `expect_status` (a status or
         a tuple of them) and unchanged since it was read: one UPDATE fenced on `status` AND the
@@ -2580,6 +3054,9 @@ class MarketingRunService:
         * `charge=(op, micros)` appends `{at, op, micros}` to `metadata.charges` (the cost journal
           the X spend cap sums) and adds `micros` to `cost_micros` in the same write;
           `charge=(op, micros, at)` dates a reversal at the charge it reverses.
+        * `charges=[…]` (Batch 1) journals SEVERAL such entries, in order, in this one write — all or
+          none (the publisher's pre-send write-ahead of an X image post: its upload and its alt text).
+          Pass `charge` or `charges`, not both; `journal_entries` checks every entry before any I/O.
         * `fields` are columns from `_POST_WRITABLE`.
 
         Returns the updated row, or None when the post is gone or no longer in `expect_status`.
@@ -2598,7 +3075,10 @@ class MarketingRunService:
             raise ValueError(f"transition_post: not writable: {sorted(unknown)}")
         if status is not None and status not in POST_STATUSES:
             raise ValueError(f"unknown post status {status!r}")
-        if charge is not None and "cost_micros" in fields:
+        # Checked ONCE, before any read or write; every retry journals exactly these entries again on the
+        # fresh row (the lost attempt wrote nothing).
+        entries = journal_entries(charge, charges)
+        if entries and "cost_micros" in fields:
             raise ValueError("transition_post: pass a charge OR cost_micros, not both")
         expected = (expect_status,) if isinstance(expect_status, str) else tuple(expect_status)
         row = observed
@@ -2608,7 +3088,7 @@ class MarketingRunService:
             if row is None or row.get("status") not in expected:
                 return None
             patch = self._merged_post_patch(row, status=status, meta=meta, publish=publish,
-                                            unset=tuple(unset), charge=charge, fields=fields)
+                                            unset=tuple(unset), charges=entries, fields=fields)
             query = self.sb.table(POSTS).update(patch).eq("id", post_id).eq("status", row["status"])
             if row.get("updated_at"):
                 query = query.eq("updated_at", _ts_filter(row["updated_at"]))
@@ -2670,7 +3150,15 @@ class MarketingRunService:
                 # A post the owner APPROVED that never went out: say so in Telegram (the publish feed
                 # sends `alert_*`), never close it silently.
                 pub = meta.get("publish") if isinstance(meta.get("publish"), dict) else {}
-                why = pub.get("category") or row.get("last_error") or "publishing was off, dry-run, capped or not wired"
+                why = pub.get("category") or row.get("last_error")
+                if (not why and is_extra_format(row.get("platform"), row.get("format"))
+                        and settings.MARKETING_ENABLED and not settings.MARKETING_DRY_RUN):
+                    # B3S-2: a held extra is never claimed, so it carries no publish record — say what it waited for.
+                    # Only the publisher's LIVE pass holds one (MARKETING_ENABLED, and never in web dry run — B3S-3):
+                    # with publishing off or in dry run it was never held, so it keeps the generic reason its primary
+                    # carries (round 2, RR2-DRY-EXPIRY-ALERT). Read now, as the publisher reads them on each tick.
+                    why = await self._extra_wait_reason(row)
+                why = why or "publishing was off, dry-run, capped or not wired"
                 patch_meta.update({
                     "alert_kind": "expired",
                     "alert_text": (f"⏰ {str(row.get('platform')).upper()} post expired UNPUBLISHED (run "
@@ -2693,6 +3181,47 @@ class MarketingRunService:
                 logger.info("marketing post EXPIRED post_id=%s platform=%s key=%s was=%s",
                             row["id"], row.get("platform"), row.get("idempotency_key"), row.get("status"))
         return closed
+
+    #: B3S-2: how the expiry alert names the state an extra's primary post was left in when the day ended.
+    _PRIMARY_LEFT = {"pending_review": "waiting for your review", "approved": "approved but not yet sent",
+                     "queued": "sent with its outcome still unknown"}
+
+    async def _extra_wait_reason(self, row: Dict[str, Any]) -> Optional[str]:
+        """Why an approved, live EXTRA post (Batch 3) with no publish record never went out (B3S-2) — or None when
+        one read cannot say, and the alert keeps its generic reason. The publisher holds an extra while its
+        platform's PRIMARY post of the run is open (pending review, approved, or sent with its outcome open: the
+        publisher's D8 hold) and writes nothing on it then, so the primary is read once: open, or expired at the
+        day's end from an open state (`expired_from` — the expiry closes the older primary first) → "it waited for
+        its <PLATFORM> picture/text post, …". A read that fails is logged (WARNING) and changes nothing else;
+        never raises but for a cancellation. Never names caption text. Asked only while the publisher's LIVE pass
+        runs (MARKETING_ENABLED and not MARKETING_DRY_RUN): no other pass holds an extra (RR2-DRY-EXPIRY-ALERT)."""
+        platform, run_id, post_id = row.get("platform"), row.get("run_id"), row.get("id")
+        try:
+            if not run_id:
+                raise ValueError("the post names no run")
+            res = await _exec(self.sb.table(POSTS).select("id,format,status,metadata").eq("run_id", str(run_id))
+                              .eq("platform", str(platform)), op="expire_extra_siblings", post_id=post_id)
+            rows = getattr(res, "data", None)
+            if not isinstance(rows, list):
+                raise ValueError(f"the read answered {type(rows).__name__}, not a list of rows")
+        except Exception as e:  # noqa: BLE001 — the alert still goes out, with the generic reason
+            logger.warning("marketing post expiry post_id=%s platform=%s run_id=%s: its picture/text post could not "
+                           "be read (%s: %s) — the alert gives the generic reason", post_id, platform, run_id,
+                           type(e).__name__, e)
+            return None
+        for sib in rows:
+            if (not isinstance(sib, dict) or str(sib.get("id")) == str(post_id)
+                    or is_extra_format(platform, sib.get("format"))):
+                continue
+            status = sib.get("status")
+            sib_meta = sib.get("metadata") if isinstance(sib.get("metadata"), dict) else {}
+            if status == "skipped" and sib_meta.get("skip_reason") == "expired":
+                status = sib_meta.get("expired_from")
+            left = self._PRIMARY_LEFT.get(status) if isinstance(status, str) else None
+            if left is not None:
+                return (f"it waited for its {str(platform).upper()} picture/text post, which goes first and was "
+                        f"still {left} when the day ended")
+        return None
 
     async def demote_auto_approved(self, *, limit: int = 50) -> int:
         """Send every `approved_by = "auto"` post back to `pending_review` (approval cleared), so the

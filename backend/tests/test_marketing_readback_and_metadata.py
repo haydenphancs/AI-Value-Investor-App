@@ -258,6 +258,23 @@ async def test_timed_words_without_an_accepted_script_are_refused(svc):
                                  metadata={"words": _words("a b")}, claim=_holder(run))
 
 
+# ── the script read-back's data-card slot (Batch 2 fix CARDS-B2-1, 2026-10-20) ─────
+
+
+def test_the_script_read_back_declares_the_data_card_slot_as_an_optional_int():
+    """The wire contract both halves match: `data_card_slot`, an int or None, None by default (an older web's
+    read-back has no such key) — and declared, because Pydantic drops an undeclared key from the response."""
+    from typing import Optional
+
+    field = sch.WorkerScript.model_fields["data_card_slot"]
+    assert field.annotation == Optional[int] and field.default is None
+    base = {"hook": "h", "video_script": [], "cards": [], "carousel_slides": [], "disclaimer_card": "d"}
+    assert sch.WorkerScript.model_validate(base).data_card_slot is None
+    sent = sch.ScriptKickResponse.model_validate({"status": "accepted", "script": {
+        **base, "video_features": ["data_card"], "data_card_slot": 3}})
+    assert json.loads(sent.model_dump_json())["script"]["data_card_slot"] == 3
+
+
 def test_spoken_words_fold_case_and_edge_punctuation_only():
     assert mrs.spoken_words("“Mr. Market,” he said — U.S. S&P 500!") == [
         "mr", "market", "he", "said", "u.s", "s&p", "500"]

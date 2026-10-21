@@ -314,9 +314,13 @@ class BackendClient:
     #: lesson. "layouts_2b" (drop 2b): this image also draws the `pair` and `grid` template images
     #: (cards.SHIPPED_LAYOUTS lists them) — without it the server drops company_stakes and
     #: theme_explainer from the day's chain (a drop-2a image would refuse their image and fail the day).
+    #: "video_v2" (Batch 2, 2026-10-19): this image draws the VIDEO FEATURES the server freezes into
+    #: the run (`video_features` in the script read-back: a lesson's hook card, a template's data card,
+    #: the push-in on card 0) and the end card the read-back names (`end_card_cta`) — the server
+    #: freezes features only for a run whose holder declared it; an older image keeps today's video.
     #: Mirrors app.schemas.marketing.WORKER_CAPABILITIES (standalone: no `app.*` import);
     #: tests/test_marketing_worker.py pins the two equal.
-    WORKER_CAPABILITIES = ("post_image", "news_templates", "layouts_2b")
+    WORKER_CAPABILITIES = ("post_image", "news_templates", "layouts_2b", "video_v2")
 
     def claim_run(
         self, run_date: date, worker_version: str, dry_run: bool, *,
@@ -474,8 +478,11 @@ def voice_readiness(fonts_dir: str) -> Dict[str, Any]:
             "hf_offline": os.environ.get("HF_HUB_OFFLINE") == "1", "revisions": revisions}
 
 
-#: The ffmpeg filters the render needs (Debian bookworm's 5.1 build has them all).
-RENDER_FILTERS = ("ass", "xfade", "loop", "apad")
+#: The ffmpeg filters the render needs (Debian bookworm's 5.1 build has them all): EVERY filter name
+#: `video.build_argv` can emit — the card chains, the crossfades, the captions, the padded audio and (Batch 2)
+#: the push-in's upscale → zoompan → tpad. tests/test_marketing_worker.py parses the filtergraph of a push-in
+#: render and fails on a name missing here (VR-1: a slimmed ffmpeg without zoompan passed this preflight).
+RENDER_FILTERS = ("setsar", "scale", "format", "loop", "setpts", "fps", "xfade", "ass", "apad", "zoompan", "tpad")
 
 
 def render_readiness(fonts_dir: str) -> Dict[str, Any]:

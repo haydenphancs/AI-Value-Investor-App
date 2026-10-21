@@ -37,6 +37,31 @@ Why each piece is shaped the way it is:
   logo draws no wordmark. So the decode composites it onto the plate's white and counts the pixels
   that visibly differ from it (darkest channel below VISIBLE_CHANNEL_BELOW, one linear histogram);
   under MIN_VISIBLE_FRACTION of the area it is refused, and the wordmark is drawn instead (WARNING).
+* **Whole on its plate** (LIVE-LOGO-1, 2026-10-20). A logo made for a DARK background — white
+  artwork plus one coloured accent, on real transparency — is visible on the white plate, but only
+  its accent: FMP's GameStop drew as a lone red "S", Amazon's as a lone orange smile, on the 500 ms
+  platform cover. Such a logo is refused (wordmark) when at least TRANSPARENT_SHARE_MIN of its
+  pixels are transparent and the bounding box of its VISIBLE ink covers less than
+  MIN_VISIBLE_BOX_SHARE of the bounding box of its solid pixels (alpha ≥ BOX_ALPHA_MIN, so a faint
+  stray pixel, glow or shadow tail never widens that box — review RR-B2F-3: two alpha-20 corner
+  pixels refused a fully visible disc; white artwork under half opacity is read as a glow too;
+  `visible_box_share`). Measured on the 30 real logos of the 2026-10-20 live review: GME 0.49 and
+  AMZN 0.27 are refused; the lowest kept transparent logo is BSX at 0.81. A logo with no real
+  transparency is exempt: its ground is part of the design (ETN, ALMR and CBRS draw a small mark on
+  their own white tile, 0.22-0.32). Accepted over-refusal: a white tile with a small mark on a
+  transparent canvas reads as the same shape, and draws its wordmark. Known gap (a box test, not a
+  shape test): white artwork whose coloured accents span its whole box — a white wordmark between a
+  coloured underline and a dot, or inside a thin coloured ring — passes and draws only the accents;
+  no real logo reviewed has that shape, and every template post is reviewed before it goes out.
+* **No baked checkerboard** (LIVE-LOGO-2). An editor's "transparent" grid saved INTO the pixels —
+  two light neutral greys alternating in squares (FMP's Boston Scientific: 254/237 in 6 px squares
+  behind the name; the editors' standard light grid is 255/204, Photoshop's and GIMP's "light
+  checks") — would be drawn as a chequer on every plate. Refused (wordmark) when most of the logo's
+  light neutral pixels (darkest channel ≥ CHECKER_LIGHT_MIN = 200) that can be tested alternate on
+  one fixed square side in BOTH directions (`checker_share`; conservative, and only tried when the
+  two commonest light levels each hold a real share of them): on the 30 real logos BSX reaches 0.86
+  and no other logo even qualifies for the test. A mid-tone grid (GIMP's default 153/102) is not
+  light and is not caught.
 * **Bounded time — a real wall clock.** All downloads share LOGOS_BUDGET_SECONDS (MAX_LOGOS ×
   LOGO_DOWNLOAD_TIMEOUT_SECONDS = 60 s). Each one is given a SHARE of at most half of what is left;
   httpx bounds each phase separately (connect, TLS, write, every read — never the whole request).
@@ -65,7 +90,7 @@ import re
 import time
 import warnings
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 logger = logging.getLogger("marketing.logos")
 
@@ -127,6 +152,35 @@ PLATE_RGB = (255, 255, 255)
 VISIBLE_CHANNEL_BELOW = 225
 #: A logo with fewer visible pixels than this fraction of its area draws as a blank plate: refused.
 MIN_VISIBLE_FRACTION = 0.005
+#: LIVE-LOGO-1 (module doc): a pixel is TRANSPARENT below this alpha (and opaque from it — a fainter one
+#: composites to ≥ 240 on the plate, never visible); a logo with at least TRANSPARENT_SHARE_MIN of its
+#: pixels transparent whose visible ink spans less than MIN_VISIBLE_BOX_SHARE of its SOLID box — the
+#: bounding box of its pixels of alpha ≥ BOX_ALPHA_MIN, so a faint stray pixel, glow or shadow tail never
+#: widens it (RR-B2F-3) — is refused.
+OPAQUE_ALPHA_MIN = 16
+BOX_ALPHA_MIN = 128
+TRANSPARENT_SHARE_MIN = 0.30
+MIN_VISIBLE_BOX_SHARE = 0.60
+#: LIVE-LOGO-2 (module doc): a baked checkerboard's pixels are LIGHT (darkest channel ≥ CHECKER_LIGHT_MIN —
+#: BSX's darker squares are 237, the editors' standard light grid's 204: RR-B2F-2), NEUTRAL (channels
+#: within CHECKER_NEUTRAL_SPREAD) and fully opaque (alpha ≥ CHECKER_OPAQUE_MIN). The test runs only
+#: when those pixels are at least CHECKER_AREA_SHARE_MIN of
+#: the opaque ones and their two commonest levels, CHECKER_STEP_MIN or more apart, each hold
+#: CHECKER_LEVEL_SHARE_MIN of them. A pixel ALTERNATES at square side s when the pixel s further on (all
+#: three light) differs by ≥ CHECKER_STEP_MIN and the one 2·s on matches within CHECKER_SAME_MAX; the logo is
+#: refused when, for one side s in CHECKER_SIDES, at least CHECKER_SHARE_MIN of the testable pixels
+#: alternate in BOTH directions and they make up CHECKER_COVER_MIN of its light pixels — unless they already
+#: alternate at a side of 1 px (a dither between two greys, which reads as one flat grey, not a grid).
+CHECKER_LIGHT_MIN = 200
+CHECKER_NEUTRAL_SPREAD = 3
+CHECKER_OPAQUE_MIN = 250
+CHECKER_AREA_SHARE_MIN = 0.25
+CHECKER_LEVEL_SHARE_MIN = 0.10
+CHECKER_STEP_MIN = 3
+CHECKER_SAME_MAX = 1
+CHECKER_SIDES: Tuple[int, ...] = tuple(range(2, 17))
+CHECKER_SHARE_MIN = 0.60
+CHECKER_COVER_MIN = 0.25
 #: The decode bound: a logo is a small picture; Pillow's own bomb guard is ~89 M pixels.
 MAX_IMAGE_PIXELS = 2048 * 2048
 #: The public bucket every logo lives in (app.config MARKETING_MEDIA_BUCKET's default; the
@@ -192,8 +246,9 @@ def decode_problem(data: bytes, ext: str) -> Optional[str]:
     are read from the HEADER before any pixel is decoded; then `verify()` and a full decode of a
     fresh handle; then the logo must be VISIBLE on the white plate (`visible_pixels` ≥
     MIN_VISIBLE_FRACTION of its area — review LOGO-1: a white-on-transparent, transparent or white logo
-    would draw an empty plate and no wordmark). Any Pillow error (a truncated file, a bomb warning) is a
-    problem, never a raise."""
+    would draw an empty plate and no wordmark), WHOLE on it (`visible_box_share` — LIVE-LOGO-1: a logo
+    made for a dark background shows only its accent) and free of a baked checkerboard (`checker_share`
+    — LIVE-LOGO-2). Any Pillow error (a truncated file, a bomb warning) is a problem, never a raise."""
     from PIL import Image
 
     want = _EXT_FORMAT.get(ext)
@@ -227,22 +282,136 @@ def decode_problem(data: bytes, ext: str) -> Optional[str]:
             if visible < MIN_VISIBLE_FRACTION * w * h:
                 return (f"an invisible logo on the white plate ({visible} visible pixels of {w}x{h}; "
                         f"needs {MIN_VISIBLE_FRACTION:.1%})")
+            box_share = visible_box_share(rgba)
+            if box_share is not None and box_share < MIN_VISIBLE_BOX_SHARE:
+                return (f"only part of the logo shows on the white plate (its visible ink spans {box_share:.0%} "
+                        f"of its solid box, needs {MIN_VISIBLE_BOX_SHARE:.0%}: a logo made for a dark background)")
+            checker = checker_share(rgba)
+            if checker is not None:
+                side, across, down = checker
+                return (f"a baked checkerboard in the logo ({across:.0%} / {down:.0%} of its light pixels "
+                        f"alternate in {side} px squares): it would be drawn on the plate")
     except Exception as e:  # noqa: BLE001 — any decode failure is a wordmark, reported by type
         return f"{type(e).__name__}: {str(e)[:120]}"
     return None
+
+
+def _lut(keep: Callable[[int], bool]) -> List[int]:
+    """A 256-entry lookup table for `Image.point` on an 8-bit band: 255 where `keep(value)`, else 0 (built
+    once per call from the 256 values, never per pixel)."""
+    return [255 if keep(v) else 0 for v in range(256)]
+
+
+def _darkest_on_plate(rgba: Any) -> Any:
+    """The darkest channel ("L") of `rgba` composited onto the plate exactly as cards.draw_plate does
+    (alpha over PLATE_RGB)."""
+    from PIL import Image, ImageChops
+
+    plate = Image.new("RGBA", rgba.size, PLATE_RGB + (255,))
+    plate.alpha_composite(rgba)
+    r, g, b, _a = plate.split()
+    return ImageChops.darker(ImageChops.darker(r, g), b)
 
 
 def visible_pixels(rgba: Any) -> int:
     """How many pixels of the RGBA image `rgba` visibly differ from the plate once composited onto it
     exactly as cards.draw_plate does (alpha over PLATE_RGB): those whose darkest channel is below
     VISIBLE_CHANNEL_BELOW. Linear: two channel-wise minimums and one histogram, no Python pixel loop."""
+    return sum(_darkest_on_plate(rgba).histogram()[:VISIBLE_CHANNEL_BELOW])
+
+
+def _box_area(box: Any) -> int:
+    return (box[2] - box[0]) * (box[3] - box[1])
+
+
+def visible_box_share(rgba: Any) -> Optional[float]:
+    """LIVE-LOGO-1: the area of the bounding box of the RGBA logo's VISIBLE ink on the plate (darkest
+    channel below VISIBLE_CHANNEL_BELOW once composited, as `visible_pixels` counts it) over the area of the
+    bounding box of its SOLID pixels (alpha ≥ BOX_ALPHA_MIN: a faint stray pixel, glow or shadow tail is not
+    part of the logo's shape, and never widens the box — RR-B2F-3) — about 1.0 when everything solid shows
+    (above 1.0 when visible anti-aliasing reaches past the solid pixels), low when white artwork made for a
+    dark background vanishes into the plate around a coloured accent. None — exempt — for a logo with less
+    than TRANSPARENT_SHARE_MIN of its pixels transparent (alpha below OPAQUE_ALPHA_MIN: its ground is part of
+    the design) or with nothing solid or visible. Linear: two lookup-table passes and two bounding boxes
+    (`Image.point` / `getbbox`), no Python pixel loop."""
+    w, h = rgba.size
+    alpha = rgba.getchannel("A")
+    if sum(alpha.histogram()[:OPAQUE_ALPHA_MIN]) < TRANSPARENT_SHARE_MIN * w * h:
+        return None
+    solid_box = alpha.point(_lut(lambda v: v >= BOX_ALPHA_MIN)).getbbox()
+    visible_box = _darkest_on_plate(rgba).point(_lut(lambda v: v < VISIBLE_CHANNEL_BELOW)).getbbox()
+    if not solid_box or not visible_box:
+        return None
+    return _box_area(visible_box) / _box_area(solid_box)
+
+
+def checker_share(rgba: Any) -> Optional[Tuple[int, float, float]]:
+    """LIVE-LOGO-2: (square side px, share across, share down) when the RGBA logo carries a baked
+    fake-transparency CHECKERBOARD — two light neutral greys alternating in squares — else None.
+
+    Only LIGHT pixels count (darkest channel ≥ CHECKER_LIGHT_MIN, channels within CHECKER_NEUTRAL_SPREAD,
+    alpha ≥ CHECKER_OPAQUE_MIN). The test runs only when they are at least CHECKER_AREA_SHARE_MIN of the
+    opaque pixels and their two commonest levels are CHECKER_STEP_MIN or more apart and each hold
+    CHECKER_LEVEL_SHARE_MIN of them — a white or flat light ground, a JPEG's near-white noise and an
+    anti-aliased edge never qualify. A light pixel is TESTABLE at side s across when the pixels s and 2·s to
+    its right are light too, and ALTERNATES when the first differs from it by ≥ CHECKER_STEP_MIN and the
+    second matches it within CHECKER_SAME_MAX (down: the same, below it). The side with the highest share
+    across (CHECKER_SIDES) is checked down too: a checkerboard alternates both ways, stripes one way only.
+    A board needs ≥ CHECKER_SHARE_MIN of the testable pixels alternating BOTH ways, and those to be ≥
+    CHECKER_COVER_MIN of all its light pixels; pixels that already alternate at a side of 1 px are a dither
+    (it alternates at every odd side too), never a board. Linear image passes only (crop / difference /
+    point / multiply / histogram — about 15 per side tried, len(CHECKER_SIDES) + 2 sides), no Python pixel
+    loop: ≤ 12 ms on each of the 30 real logos, ~0.8 s for a 2048² one that reaches the test."""
     from PIL import Image, ImageChops
 
-    plate = Image.new("RGBA", rgba.size, PLATE_RGB + (255,))
-    plate.alpha_composite(rgba)
-    r, g, b, _a = plate.split()
+    r, g, b, a = rgba.split()
     darkest = ImageChops.darker(ImageChops.darker(r, g), b)
-    return sum(darkest.histogram()[:VISIBLE_CHANNEL_BELOW])
+    spread = ImageChops.subtract(ImageChops.lighter(ImageChops.lighter(r, g), b), darkest)
+    light = ImageChops.multiply(
+        ImageChops.multiply(darkest.point(_lut(lambda v: v >= CHECKER_LIGHT_MIN)),
+                            spread.point(_lut(lambda v: v <= CHECKER_NEUTRAL_SPREAD))),
+        a.point(_lut(lambda v: v >= CHECKER_OPAQUE_MIN)))
+    n_light = light.histogram()[255]
+    n_opaque = sum(a.histogram()[OPAQUE_ALPHA_MIN:])
+    if not n_light or n_light < CHECKER_AREA_SHARE_MIN * n_opaque:
+        return None
+    levels = Image.composite(darkest, Image.new("L", rgba.size, 0), light).histogram()
+    (_c1, v1), (c2, v2) = sorted(((levels[v], v) for v in range(CHECKER_LIGHT_MIN, 256)), reverse=True)[:2]
+    if c2 < CHECKER_LEVEL_SHARE_MIN * n_light or abs(v1 - v2) < CHECKER_STEP_MIN:
+        return None
+    w, h = rgba.size
+    flips, repeats = _lut(lambda v: v >= CHECKER_STEP_MIN), _lut(lambda v: v <= CHECKER_SAME_MAX)
+
+    def alternating(side: int, across: bool) -> Tuple[int, int]:
+        """(alternating pixels, testable pixels) at square side `side`, across or down."""
+        n = (w if across else h) - 2 * side
+        if n <= 0:
+            return 0, 0
+        boxes = [(k * side, 0, k * side + n, h) if across else (0, k * side, w, k * side + n) for k in range(3)]
+        g0, g1, g2 = (darkest.crop(box) for box in boxes)
+        m0, m1, m2 = (light.crop(box) for box in boxes)
+        testable = ImageChops.multiply(ImageChops.multiply(m0, m1), m2)
+        hits = ImageChops.multiply(testable, ImageChops.multiply(ImageChops.difference(g0, g1).point(flips),
+                                                                 ImageChops.difference(g0, g2).point(repeats)))
+        return hits.histogram()[255], testable.histogram()[255]
+
+    hits_1, testable_1 = alternating(1, True)
+    if testable_1 and hits_1 >= CHECKER_SHARE_MIN * testable_1:
+        return None                     # a 1 px dither: one flat grey on the plate, not an editor's grid
+    best: Optional[Tuple[float, int, int]] = None
+    for side in CHECKER_SIDES:
+        hits, testable = alternating(side, True)
+        if testable and (best is None or hits / testable > best[0]):
+            best = (hits / testable, side, hits)
+    if best is None:
+        return None
+    across, side, hits_across = best
+    hits_down, testable_down = alternating(side, False)
+    down = hits_down / testable_down if testable_down else 0.0
+    if (min(across, down) >= CHECKER_SHARE_MIN
+            and min(hits_across, hits_down) >= CHECKER_COVER_MIN * n_light):
+        return side, across, down
+    return None
 
 
 def _key_of(entry: Any) -> Optional[str]:

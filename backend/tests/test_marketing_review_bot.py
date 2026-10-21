@@ -21,7 +21,11 @@ What must never regress:
   * reject reasons (2026-10-01): only ❌ swaps the buttons for the reason keyboard (a new message when
     the edit fails); a reason tap records once (a repeat writes nothing, a later different reason
     wins), only on a rejected post, only from the owner;
-  * the bot token (it is in the URL PATH) never appears in a log record or an exception message.
+  * the bot token (it is in the URL PATH) never appears in a log record or an exception message;
+  * Quiet Telegram (2026-10-15): `disable_notification` is in a payload only when asked for; the per-post
+    flow shows its video (or its link) silently and every review message — a decision — rings;
+  * "DRY RUN" is the posts' label (`is_rehearsal`, the publisher's own rule) — on each post's message and
+    on the video that leads them — never the run row's, which every re-claim rewrites (2026-10-16).
 
 Mutation-tested by hand on 2026-09-29 (see the final report of the change): dropping the
 `compare_digest` check in `_verify_telegram_webhook_secret`, and dropping the `chat_id == allowed`
@@ -141,6 +145,11 @@ def configured(monkeypatch):
     monkeypatch.setattr(settings, "MARKETING_ENABLED", True)
     monkeypatch.setattr(settings, "MARKETING_DRY_RUN", False)
     monkeypatch.setattr(rs.outlets, "retract_capable", lambda _platform: True)
+    # Batch 3: the three new switches at their declared defaults (no extra video post, the four posting days, no
+    # trial Reels), whatever this machine's environment says — a test that wants another value sets its own.
+    monkeypatch.setattr(settings, "MARKETING_VIDEO_EXTRA_PLATFORMS", "")
+    monkeypatch.setattr(settings, "MARKETING_POST_WEEKDAYS", "mon,tue,thu,sat")
+    monkeypatch.setattr(settings, "MARKETING_INSTAGRAM_TRIAL_MODE", "off")
 
 
 @pytest.fixture
@@ -913,6 +922,30 @@ async def test_the_dry_run_label_reaches_the_message(ledger, tg):
     await rs.review_cycle()
     assert "· DRY RUN" in tg.of("sendVideo")[0]["caption"]
     assert tg.of("sendMessage")[0]["text"].splitlines()[0] == "TIKTOK · video · run 2026-09-28 · DRY RUN"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("run_dry, flags, video_labelled", [
+    (True, (False,), False),         # re-claimed in dry run after the post was recorded LIVE (Batch 1 review F2)
+    (False, (True,), True),          # re-claimed live after a rehearsal: still never sent
+    (True, (True,), True),
+    (False, (False,), False),
+    (True, (False, True), False),    # a mixed set: the video is never called a rehearsal while a post goes out
+    (False, (None, "false"), True),  # flags that are not exactly False are rehearsals (the publisher's rule)
+])
+async def test_the_per_post_videos_dry_run_label_comes_from_its_posts_not_the_run(ledger, tg, run_dry, flags,
+                                                                               video_labelled):
+    """The per-post flow's video caption reads its label from the posts that follow it (`dry_run_label`), never
+    the run row — a re-claim rewrites the run's flag, the posts keep theirs. Each post's own message keeps
+    labelling itself from its own flag, as always."""
+    _seed_run(ledger, dry_run=run_dry)
+    platforms = ("tiktok", "youtube")
+    for platform, flag in zip(platforms, flags):
+        _seed_post(ledger, RUN_A, platform, "video", asset_ids=[VIDEO], meta={"dry_run": flag})
+    await rs.review_cycle()
+    assert ("DRY RUN" in tg.of("sendVideo")[0]["caption"]) is video_labelled
+    for msg, flag in zip(tg.of("sendMessage"), flags):
+        assert ("· DRY RUN" in msg["text"].splitlines()[0]) is (flag is not False)
 
 
 @pytest.mark.asyncio
@@ -2439,3 +2472,146 @@ def test_the_x_image_remedy_names_only_a_control_the_message_carries(configured,
     two = rs.compose_bundle_decision_text("post", [x_post, {**_x_image_post(), "platform": "bluesky"}], [],
                                           "2026-10-09", False, [])
     assert f"⚠️ {_X_IMAGES_OFF}: {_X_IMAGES_OFF_BEFORE_DROP}" in two.split("\n")
+
+
+# ── 2026-10-15 (plan Batch 1 item 9): Quiet Telegram ──────────────────────────────────────────────────
+#
+# `disable_notification` ("Sends the message silently. Users will receive a notification with no sound.",
+# Bot API, verified 2026-10-15) is sent ONLY when asked for, so every payload that does not ask is exactly
+# what it was. The per-post flow shows its video silently and rings once per review message (each is a
+# decision). Mutation-checked by hand on 2026-10-15: always adding the key in `telegram._silence`, and
+# sending the per-post review message silently, each turned a test here red; restored.
+
+_SEND_METHODS = [
+    ("sendMessage", lambda **kw: telegram.send_message(OWNER, "hi", **kw)),
+    ("sendVideo", lambda **kw: telegram.send_video(OWNER, "https://example.invalid/v.mp4", caption="c", **kw)),
+    ("sendPhoto", lambda **kw: telegram.send_photo(OWNER, "https://example.invalid/p.jpg", caption="c", **kw)),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method, send", _SEND_METHODS, ids=[m for m, _s in _SEND_METHODS])
+async def test_disable_notification_is_in_the_payload_only_when_asked(tg, configured, method, send):
+    await send()
+    await send(disable_notification=False)
+    await send(disable_notification=True)
+    default, explicit_false, silent = tg.of(method)
+    assert "disable_notification" not in default and explicit_false == default
+    assert silent == {**default, "disable_notification": True}
+    assert all("parse_mode" not in p for p in (default, explicit_false, silent))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value, sent", [(0, False), (None, False), ("", False), (1, True)])
+async def test_disable_notification_is_always_a_json_true_or_absent(tg, configured, value, sent):
+    await telegram.send_message(OWNER, "hi", disable_notification=value)
+    (payload,) = tg.of("sendMessage")
+    if sent:
+        assert payload["disable_notification"] is True
+    else:
+        assert "disable_notification" not in payload
+
+
+@pytest.mark.asyncio
+async def test_a_silent_send_keeps_the_rest_of_the_message_payload(tg, configured):
+    await telegram.send_message(OWNER, "hi", reply_markup=rs.review_keyboard(_PID), reply_to_message_id=7,
+                                disable_notification=True)
+    (payload,) = tg.of("sendMessage")
+    assert payload == {"chat_id": OWNER, "text": "hi", "link_preview_options": {"is_disabled": True},
+                       "reply_markup": rs.review_keyboard(_PID),
+                       "reply_parameters": {"message_id": 7, "allow_sending_without_reply": True},
+                       "disable_notification": True}
+
+
+@pytest.mark.asyncio
+async def test_the_per_post_flow_shows_its_video_silently_and_rings_for_each_review_message(ledger, tg):
+    _seed_run(ledger)
+    _seed_post(ledger, RUN_A, "tiktok", "video", asset_ids=[VIDEO])
+    _seed_post(ledger, RUN_A, "linkedin", "text", caption="Run A text")
+    counters = await rs.review_cycle()
+    assert counters["sent"] == 2 and counters["videos"] == 1
+    (video,) = tg.of("sendVideo")
+    assert video["disable_notification"] is True
+    messages = tg.of("sendMessage")
+    assert len(messages) == 2
+    for msg in messages:                      # each carries Approve / Reject: a decision rings
+        assert "disable_notification" not in msg and "reply_markup" in msg
+
+
+@pytest.mark.asyncio
+async def test_a_long_review_message_rings_on_every_chunk(ledger, tg):
+    """A split review message is still the decision: no chunk is silenced (only its last carries the
+    buttons, as before)."""
+    _seed_run(ledger, video_id=None)
+    _seed_post(ledger, RUN_A, "linkedin", "text", caption="word " * 2000, title=None)
+    await rs.review_cycle()
+    chunks = tg.of("sendMessage")
+    assert len(chunks) >= 2 and all("disable_notification" not in c for c in chunks)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", ["oversized", "refused", "ambiguous"])
+async def test_a_video_link_fallback_is_silent_and_the_review_message_still_rings(ledger, tg, how):
+    _seed_run(ledger, video_bytes=25 * 1024 * 1024 if how == "oversized" else 5_000_000)
+    _seed_post(ledger, asset_ids=[VIDEO])
+    if how == "refused":
+        tg.script["sendVideo"] = [(400, {"ok": False, "description": "Bad Request: failed to get HTTP URL content"})]
+    elif how == "ambiguous":
+        tg.script["sendVideo"] = [(503, b"")]
+    counters = await rs.review_cycle()
+    assert counters["sent"] == 1
+    link, review = tg.of("sendMessage")
+    assert link["text"].startswith("VIDEO · run 2026-09-28") and link["disable_notification"] is True
+    assert "reply_markup" in review and "disable_notification" not in review
+    assert all(p.get("disable_notification") is True for p in tg.of("sendVideo"))
+
+
+@pytest.mark.asyncio
+async def test_a_preview_in_the_per_post_flow_keeps_todays_behaviour(ledger, tg, monkeypatch):
+    """The per-post flow is unchanged apart from its media: a read-only preview message is sent as before."""
+    monkeypatch.setattr(rs.outlets, "enabled_platforms", lambda: ["x"])
+    _seed_run(ledger, video_id=None)
+    _seed_post(ledger, RUN_A, "threads", "text", caption="Preview words", title=None)
+    await rs.review_cycle()
+    (msg,) = tg.of("sendMessage")
+    assert "reply_markup" not in msg and "disable_notification" not in msg
+
+
+def test_the_webhook_replies_after_a_tap_keep_their_payloads(client, ledger, tg):
+    """Out of the Quiet-Telegram scope on purpose: what the bot sends right after the owner's own tap (a
+    reason keyboard that could not be edited in) is unchanged — the owner is looking at the chat."""
+    pid = _seed_post(ledger, RUN_A, "x", "text", title=None, caption="Live words")
+    tg.script["editMessageText"] = [(400, {"ok": False, "description": "Bad Request: message to edit not found"})]
+    assert _post_hook(client, _tap(pid, verb="r", text="X · text · run 2026-09-28\n\nLive words")).status_code == 200
+    (msg,) = tg.of("sendMessage")
+    assert msg["text"] == "Why was the X post rejected? Tap a reason (optional)."
+    assert "disable_notification" not in msg
+
+
+# ── Batch 3 (2026-10-20): an EXTRA video post in the per-post flow ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_batch3_an_extra_video_arrives_as_its_own_facebook_video_message_with_buttons(ledger, tg, monkeypatch):
+    """MARKETING_REVIEW_BUNDLES off: the run's Facebook VIDEO post (its EXTRA, beside the Facebook picture/text
+    post) is one more post — after the run's one video, its own "FACEBOOK · video" message with Approve / Reject
+    and the run's video under Media, stamped notified on its own; the Facebook text post keeps its message."""
+    monkeypatch.setattr(settings, "MARKETING_REVIEW_BUNDLES", False)
+    _seed_run(ledger)
+    tiktok = _seed_post(ledger, RUN_A, "tiktok", "video", asset_ids=[VIDEO])
+    fb_text = _seed_post(ledger, RUN_A, "facebook", "text", title=None, caption="Facebook words")
+    fb_video = _seed_post(ledger, RUN_A, "facebook", "video", title=None, caption="Facebook words, narrated",
+                          asset_ids=[VIDEO])
+    counters = await rs.review_cycle()
+    assert counters == {"pending": 3, "sent": 3, "stamped": 3, "videos": 1, "failed": 0, "rate_limited": 0}
+    assert [m for m, _ in tg.calls] == ["sendVideo", "sendMessage", "sendMessage", "sendMessage"]
+    msgs = tg.of("sendMessage")
+    assert msgs[1]["text"] == "FACEBOOK · text · run 2026-09-28\n\nFacebook words"
+    head, media = msgs[2]["text"].split("\n\nMedia:\n")
+    assert head == "FACEBOOK · video · run 2026-09-28\n\nFacebook words, narrated"
+    assert media == "video: " + ledger.public_url(f"2026-09-28/video/{'a' * 64}.mp4")
+    for msg, pid in zip(msgs, (tiktok, fb_text, fb_video)):
+        assert msg["reply_markup"] == rs.review_keyboard(pid) and "disable_notification" not in msg
+        meta = _post(ledger, pid)["metadata"]
+        assert meta["review_notified_at"] and meta["review_message_id"] and "review_bundle" not in meta
+    assert len({_post(ledger, pid)["metadata"]["review_message_id"] for pid in (tiktok, fb_text, fb_video)}) == 3

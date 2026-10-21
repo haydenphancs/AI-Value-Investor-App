@@ -16,6 +16,14 @@ What is pinned here:
   branch of `create_posts` (class from the SCRIPT, the switch, the re-check, never auto-approved, the post
   metadata and its `made_with_ai`), and the template branches of the on-screen checks.
 * the timing constants against the worker's own (an AST read of marketing/main.py).
+* Batch 2 fix round (2026-10-20): on every series, a `video_v2` holder's day freezes the data card, the
+  read-back names the card it replaces (`data_card_slot`: the decided fact card, never a kept hedge card),
+  the worker's declared strings pass the server's check, and every VIDEO post carries the run's frozen
+  `video_features` (B2-METRICS-ATTRIBUTION).
+* Batch 3 (2026-10-20): on every series, with MARKETING_VIDEO_EXTRA_PLATFORMS listing Facebook / LinkedIn /
+  Threads, the real build freezes the EXTRA video posts (re-checked by `news_templates.extra_video_problems`),
+  the stored output still re-checks clean, the worker never reads them, and create_posts appends them after the
+  worker's primary specs; with the switch empty a template day records exactly its primary posts.
 
 Hermetic: the in-memory PostgREST fake of test_marketing_script_flow.py plus a Storage fake, a fake
 company-news source (the adapter's public surface), real records / templates / on-screen checks.
@@ -214,9 +222,19 @@ def tworld(monkeypatch):
     monkeypatch.setattr(mrs.settings, "MARKETING_AUTO_PUBLISH", False)
     monkeypatch.setattr(mrs.settings, "MARKETING_RUN_STALE_SECONDS", 2700)
     monkeypatch.setattr(mrs.settings, "MARKETING_CONTENT_CLASSES", "A,C,F")
+    # The news series at their declared default, whatever this machine's environment says (review of 2026-10-20,
+    # the HYG-1 twin): with the planned production list (it adds earnings) a Thursday's trail gained an
+    # `earnings: no_candidates` step first. The tests that need another list set it themselves.
+    from app.config import Settings
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", Settings.model_fields["MARKETING_NEWS_SERIES"].default)
     monkeypatch.setattr(mrs.settings, "MARKETING_IMAGE_POSTS", True)
     monkeypatch.setattr(mrs.settings, "MARKETING_X_IMAGES", False)
     monkeypatch.setattr(mrs.settings, "MARKETING_X_ALLOW_URLS", False)
+    # Batch 3: the three new switches at their declared defaults (no extra video, the four posting days, no
+    # trial Reels), whatever this machine's environment says.
+    monkeypatch.setattr(mrs.settings, "MARKETING_VIDEO_EXTRA_PLATFORMS", "")
+    monkeypatch.setattr(mrs.settings, "MARKETING_POST_WEEKDAYS", "mon,tue,thu,sat")
+    monkeypatch.setattr(mrs.settings, "MARKETING_INSTAGRAM_TRIAL_MODE", "off")
     monkeypatch.setattr(mrs.settings, "SUPABASE_URL", _SB_PUBLIC)
     monkeypatch.setattr(ss.smart_link, "store_state", lambda: "live")
     monkeypatch.setattr(ss, "_FINISH_BACKOFF_SECONDS", 0.0)
@@ -477,6 +495,258 @@ async def test_the_first_candidate_refused_lets_the_next_one_post(tworld, monkey
     assert _script(sb, rid)["fact_sheet"]["selection"]["trail"] == [{"series": "money_map", "outcome": "chosen"}]
 
 
+# ══ RR2-MM-TEMPLATE-WALL (the round-2 review of 2026-10-20): a template refusal is reported back to the source ═══
+#
+# Nothing fed a template refusal back to the adapter: a Money Map record the template refused was rebuilt and offered
+# first every day, and three of them at the head of the pool ended the series every day. `_build_template_day` now
+# reports each refused candidate (`_report_template_refusal` → the adapter's `remember_template_refusal`).
+
+
+class ReportingNews(FakeNews):
+    """A source with the adapter's `remember_template_refusal` hook: each call is recorded as (ledger key, codes,
+    run date); ``fail`` makes the hook raise after recording."""
+
+    def __init__(self, answers: Dict[str, Any], *, fail: Optional[BaseException] = None, **kw) -> None:
+        super().__init__(answers, **kw)
+        self.reported: List[tuple] = []
+        self.fail = fail
+
+    def remember_template_refusal(self, record, codes=(), *, run_date):
+        self.reported.append((R.ledger_key(record), tuple(codes), run_date))
+        if self.fail is not None:
+            raise self.fail
+        return True
+
+
+def loss_costco() -> R.MoneyMap:
+    """Valid as a record, refused by its template: a net loss larger than revenue (`implausible_figures`)."""
+    return costco(company=co("LOSS", "Lossmaker"), net_income_usd=-300_000_000_000.0)
+
+
+def domain_costco() -> R.MoneyMap:
+    """Valid as a record, refused by its template: a segment named like a web address (`slot_rejected`)."""
+    return costco(company=co("BKNG", "Booking"), segments=(
+        R.Segment("Booking.com", 200_000_000_000.0), R.Segment("Canada", 38_500_000_000.0),
+        R.Segment("Other International", 36_700_000_000.0)))
+
+
+@pytest.mark.asyncio
+async def test_a_refused_candidate_is_reported_back_to_its_source_and_the_next_one_posts(tworld, monkeypatch):
+    """The refused record — and only it — is reported with its own refusal code and the run date; the next record
+    posts as before. Mutation-checked (2026-10-20): without the `_report_template_refusal` call nothing is
+    reported."""
+    sb, runs = tworld
+    _today(monkeypatch, THU)
+    news = ReportingNews({"money_map": cands("money_map", stale_costco(), costco())})
+    svc = _svc(runs, news)
+    rid = _run(sb, THU)
+    state = await svc.kick(rid, claim=_claim(sb, rid))
+    assert state["status"] == "accepted" and state["source_ref"] == "news:money_map:COST:2025"
+    assert news.reported == [("news:money_map:COST:2022", ("stale_source",), THU)]
+
+
+@pytest.mark.asyncio
+async def test_every_refused_candidate_is_reported_and_the_day_falls_to_the_lesson(tworld, monkeypatch):
+    """Three records the template refuses, each for its own reason: each is reported once with that reason (in the
+    order offered), the series falls back `all_refused` and the day goes to the lesson."""
+    sb, runs = tworld
+    _today(monkeypatch, THU)
+    news = ReportingNews({"money_map": cands("money_map", stale_costco(), loss_costco(), domain_costco())})
+    svc = _svc(runs, news)
+    rid = _run(sb, THU)
+    state = await svc.kick(rid, claim=_claim(sb, rid))
+    assert state["template_id"] in selection.LESSON_TEMPLATE_IDS
+    assert news.reported == [("news:money_map:COST:2022", ("stale_source",), THU),
+                             ("news:money_map:LOSS:2025", ("implausible_figures",), THU),
+                             ("news:money_map:BKNG:2025", ("slot_rejected",), THU)]
+    trail = _script(sb, rid)["fact_sheet"]["selection"]["trail"]
+    assert trail[0] == {"series": "money_map", "outcome": "all_refused", "reason": "implausible_figures"}
+    assert trail[-1] == {"series": "lesson", "outcome": "chosen"}
+    await _drain(svc)
+
+
+@pytest.mark.asyncio
+async def test_a_report_hook_that_raises_never_costs_the_day_its_next_candidate(tworld, monkeypatch, caplog):
+    """The report is best effort: a hook that raises is logged at WARNING (the series, the symbol, the code) and the
+    next candidate still posts. Mutation-checked (2026-10-20): without the guard the build crashes."""
+    sb, runs = tworld
+    _today(monkeypatch, THU)
+    caplog.set_level(logging.WARNING, logger=ss.__name__)
+    news = ReportingNews({"money_map": cands("money_map", stale_costco(), costco())}, fail=RuntimeError("memo down"))
+    svc = _svc(runs, news)
+    rid = _run(sb, THU)
+    state = await svc.kick(rid, claim=_claim(sb, rid))
+    assert state["status"] == "accepted" and state["source_ref"] == "news:money_map:COST:2025"
+    assert len(news.reported) == 1
+    assert ("marketing series money_map: the template refusal of COST (stale_source) could not be reported to the "
+            "company-news source") in caplog.text and "RuntimeError: memo down" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_stake_refusal_the_hook_cannot_record_is_logged_by_its_stake_id(tworld, monkeypatch, caplog):
+    """RR3-STAKES-TEMPLATE-WALL: stakes are reported back too. A stake the template refuses ("%" in its source title)
+    is reported with its code and the run date; a hook that raises is logged at WARNING naming the STAKE ID (a stake
+    has no company symbol), and the next stake still posts. Mutation-checked (2026-10-20, in memory): without the
+    stake-id fallback the line says "a record"."""
+    import test_marketing_news_templates as NT
+
+    sb, runs = tworld
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", "company_stakes")
+    _today(monkeypatch, NT.STAKES_RUN)
+    caplog.set_level(logging.WARNING, logger=ss.__name__)
+    refused = NT.stake(stake_id="0b8f3c2e-1d4a-4e6b-8c9d-2a7e5f1b3c04", source_title="Nscale Form S-1 (a 9% stake)")
+    news = ReportingNews({"company_stakes": cands("company_stakes", refused, NT.nscale())},
+                         fail=RuntimeError("memo down"))
+    svc = _svc(runs, news)
+    rid = _run(sb, NT.STAKES_RUN)
+    state = await svc.kick(rid, claim=_claim(sb, rid))
+    await _drain(svc)
+    assert state["status"] == "accepted" and state["source_ref"] == R.ledger_key(NT.nscale())
+    assert news.reported == [(R.ledger_key(refused), ("slot_rejected",), NT.STAKES_RUN)]
+    assert ("marketing series company_stakes: the template refusal of 0b8f3c2e-1d4a-4e6b-8c9d-2a7e5f1b3c04 "
+            "(slot_rejected) could not be reported") in caplog.text
+
+
+class _AdapterNews(FakeNews):
+    """The REAL adapter's Money Map walk over the adapter suite's fakes and its REAL `remember_template_refusal`; any
+    other series answers "nothing qualified". Records each walk's breakdown reads."""
+
+    def __init__(self, fmp, world) -> None:
+        super().__init__({})
+        from app.services.marketing import company_news_adapter as A
+
+        self.A, self.fmp, self.world = A, fmp, world
+        self.MarketingNewsUnavailable = A.MarketingNewsUnavailable
+        self.reads: List[List[str]] = []
+
+    async def candidates(self, series, *, run_date, exclude, limit, deadline):
+        if series != "money_map":
+            return await super().candidates(series, run_date=run_date, exclude=exclude, limit=limit,
+                                            deadline=deadline)
+        import test_marketing_company_news_adapter as TA
+
+        self.world["revenue"].calls.clear()
+        got = await self.A.candidates(series, run_date=run_date, exclude=exclude, limit=limit, deadline=deadline,
+                                      deps=self.A.NewsDeps(fmp=self.fmp, actions=TA.SplitActions(), **self.world))
+        self.reads.append(list(self.world["revenue"].calls))
+        return got
+
+    def remember_template_refusal(self, record, codes=(), *, run_date):
+        return self.A.remember_template_refusal(record, codes, run_date=run_date)
+
+
+@pytest.mark.asyncio
+async def test_the_real_walk_stops_offering_first_a_company_its_template_refused(tworld, monkeypatch):
+    """End to end through the REAL `_build_template_day` and the REAL adapter walk: three never-posted companies whose
+    largest segment is named like a web address (`slot_rejected`, a refusal only the template makes) head the pool,
+    a publishable one behind them. The first Thursday the three records are refused and the day falls to the lesson;
+    the build reports them, so the next Thursday's walk reads the publishable company FIRST, answers the three from
+    the memo, and the day posts it. Mutation-checked (2026-10-20): without the report the second Thursday reads the
+    same three first and falls to the lesson again."""
+    import test_marketing_company_news_adapter as TA
+    from app.services.marketing import company_news_adapter as A
+
+    sb, runs = tworld
+    A.clear_memo()
+    try:
+        monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", False)
+        fmp, world, set_day = TA._template_wall_pool(monkeypatch, ("WA", "WB", "WC"), ("PA",), (),
+                                                     segment="Booking.com")
+        news = _AdapterNews(fmp, world)
+        svc = _svc(runs, news)
+        first, second = THU, THU + timedelta(days=7)
+        _today(monkeypatch, first)
+        set_day(first)
+        rid = _run(sb, first)
+        state = await svc.kick(rid, claim=_claim(sb, rid))
+        assert state["template_id"] in selection.LESSON_TEMPLATE_IDS
+        assert _script(sb, rid)["fact_sheet"]["selection"]["trail"][0] == {
+            "series": "money_map", "outcome": "all_refused", "reason": "slot_rejected"}
+        await _drain(svc)
+        _today(monkeypatch, second)
+        set_day(second)
+        rid2 = _run(sb, second)
+        state = await svc.kick(rid2, claim=_claim(sb, rid2))
+        assert state["status"] == "accepted" and state["source_ref"] == "news:money_map:PA:2025"
+        assert news.reads == [["WA", "WB", "WC"], ["PA", "WA", "WB"]]
+        assert _script(sb, rid2)["fact_sheet"]["rejections"] == {"template_refused": 2}
+    finally:
+        A.clear_memo()
+
+
+class _AdapterStakesNews(FakeNews):
+    """The REAL adapter's company_stakes walk over the adapter suite's stakes fakes (`stakes_world`) and its REAL
+    `remember_template_refusal`; any other series answers "nothing qualified". Records the investees each walk
+    offered."""
+
+    def __init__(self, rows) -> None:
+        super().__init__({})
+        from app.services.marketing import company_news_adapter as A
+
+        self.A, self.rows = A, rows
+        self.MarketingNewsUnavailable = A.MarketingNewsUnavailable
+        self.offered: List[List[str]] = []
+
+    async def candidates(self, series, *, run_date, exclude, limit, deadline):
+        if series != "company_stakes":
+            return await super().candidates(series, run_date=run_date, exclude=exclude, limit=limit,
+                                            deadline=deadline)
+        import test_marketing_company_news_adapter as TA
+
+        club, sb, fmp = TA.stakes_world(self.rows)
+        got = await self.A.candidates(series, run_date=run_date, exclude=exclude, limit=limit, deadline=deadline,
+                                      deps=self.A.NewsDeps(fmp=fmp, club=club, sb=sb, actions=TA.SplitActions()))
+        self.offered.append([r.investee_name for r in got.records])
+        return got
+
+    def remember_template_refusal(self, record, codes=(), *, run_date):
+        return self.A.remember_template_refusal(record, codes, run_date=run_date)
+
+
+@pytest.mark.asyncio
+async def test_the_real_stakes_walk_stops_offering_first_a_stake_its_template_refused(tworld, monkeypatch):
+    """The round-3 review of 2026-10-20 (RR3-STAKES-TEMPLATE-WALL), end to end through the REAL `_build_template_day`
+    and the REAL adapter walk: five stakes only the template refuses (a "%" in their shared source title — a slot rule
+    the read does not apply) head the newest-first walk, a publishable stake behind them. The first Tuesday all five
+    are refused and the day falls to the lesson; the build reports them (`_report_template_refusal`), so the next
+    Tuesday's walk offers the publishable stake FIRST and the day posts it. Mutation-checked (2026-10-20, in memory):
+    with the adapter's stake branch of `remember_template_refusal` a no-op, the second Tuesday offers the same five
+    first and falls to the lesson again."""
+    import test_marketing_company_news_adapter as TA
+    from app.services.marketing import company_news_adapter as A
+
+    sb, runs = tworld
+    A.clear_memo()
+    try:
+        monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", True)
+        monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", "company_stakes")
+        five = ["Nscale", "Ayar Labs", "Lambda", "Crusoe", "Figure"]
+        rows = [TA.stake("nvidia", n, as_of=f"2026-11-{10 + i:02d}", source_title="NVIDIA 10-Q (a 9% stake)")
+                for i, n in enumerate(five)]
+        rows.append(TA.stake("amazon", "OpenAI", disclosed_value_usd=50e9, as_of="2026-07-31",
+                             source_title="Amazon 10-Q (quarter ended Jun 30, 2026)"))
+        news = _AdapterStakesNews(rows)
+        svc = _svc(runs, news)
+        first, second = date(2026, 12, 29), date(2027, 1, 5)
+        assert selection.plan_for(first).chain[0] == selection.plan_for(second).chain[0] == "company_stakes"
+        _today(monkeypatch, first)
+        rid = _run(sb, first)
+        state = await svc.kick(rid, claim=_claim(sb, rid))
+        await _drain(svc)
+        assert state["template_id"] in selection.LESSON_TEMPLATE_IDS
+        assert _script(sb, rid)["fact_sheet"]["selection"]["trail"][0] == {
+            "series": "company_stakes", "outcome": "all_refused", "reason": "slot_rejected"}
+        _today(monkeypatch, second)
+        rid2 = _run(sb, second)
+        state = await svc.kick(rid2, claim=_claim(sb, rid2))
+        await _drain(svc)
+        assert state["status"] == "accepted" and state["source_ref"] == f"news:company_stakes:{rows[-1]['id']}"
+        newest_first = list(reversed(five))
+        assert news.offered == [newest_first, ["OpenAI"] + newest_first[:4]]
+    finally:
+        A.clear_memo()
+
+
 # ══ the background build: generating, join, race, shutdown ═══════════════════════════════════════
 
 
@@ -642,7 +912,9 @@ def _worker_constant(name: str) -> float:
     raise AssertionError(f"marketing/main.py defines no {name}")
 
 
-def test_the_template_timing_constants_fit_the_workers_own():
+def test_the_template_timing_constants_fit_the_workers_own(monkeypatch):
+    from app.config import Settings
+
     backend_timeout = _worker_constant("BACKEND_TIMEOUT_SECONDS")
     poll_budget = _worker_constant("SCRIPT_POLL_BUDGET_SECONDS")
     assert (backend_timeout, poll_budget) == (30.0, 900.0)      # the values the contract was written against
@@ -656,6 +928,10 @@ def test_the_template_timing_constants_fit_the_workers_own():
     assert ss.LOGO_FETCH_TIMEOUT_SECONDS < ss.TEMPLATE_BUILD_BUDGET_SECONDS
     assert set(ss.SERIES_BUDGET_SECONDS) <= set(selection.SERIES_BY_ID)
     assert ss.NEWS_RECENT_LIMIT == ss.RECENT_LIMIT * len(selection.POST_WEEKDAYS) == 240
+    # Batch 3 (D17): the call-time read the build and the lesson make equals that constant at the declared default
+    monkeypatch.setattr(selection.settings, "MARKETING_POST_WEEKDAYS",
+                        Settings.model_fields["MARKETING_POST_WEEKDAYS"].default)
+    assert ss.NEWS_RECENT_LIMIT == 240 == selection.news_recent_limit()
     assert ss.SERIES_TRAIL_MAX == mrs.SERIES_TRAIL_MAX == 8
 
 
@@ -1568,3 +1844,306 @@ async def test_odd_candidate_answers_are_refused_never_crash_the_build(tworld, m
     assert row["fact_sheet"]["rejections"] == {"already_posted": 1}
     assert [(t["series"], t["outcome"]) for t in row["fact_sheet"]["selection"]["trail"]] == [
         ("ceo_buys", "no_candidates"), ("insider_buys", "all_refused"), ("money_map", "chosen")]
+
+
+
+# ══ Batch 2 fix round (2026-10-20): every series' data card, from the build to the posts ═════════════════
+
+
+def _every_case(series: str):
+    """(record, run day) of each series — the templates' own samples, on a day whose chain reaches it."""
+    import test_marketing_news_templates as NT
+
+    return {"ceo_buys": (NT.ceo_roundup(), NT.MON), "insider_buys": (NT.insider_mixed(), NT.MON),
+            "thirteen_f": (NT.berkshire(), NT.TUE), "money_map": (NT.costco(), NT.THU),
+            "congress_count": (NT.congress(), NT.CONGRESS_RUN), "company_stakes": (NT.nscale(), NT.STAKES_RUN),
+            "earnings": (NT.earnings(), NT.EARNINGS_RUN), "theme_explainer": (NT.ai_chips(), NT.THEME_RUN)}[series]
+
+
+#: The card each series' data card replaces (CARDS-B2-1): the decided fact card, by its words. news-v21: an earnings
+#: post has no "Revenue" card (the revenue estimate's basis is unknown), so its date card is the slot.
+_DECIDED_SLOT = {"ceo_buys": (1, "The purchases"), "insider_buys": (1, "The purchase"),
+                 "thirteen_f": (1, "Newly reported"), "money_map": (1, "Revenue mix"),
+                 "congress_count": (1, "Counted once"), "company_stakes": (0, "As of"),
+                 "earnings": (0, "Quarter ended"), "theme_explainer": (0, "NVIDIA")}
+
+
+@pytest.mark.parametrize("series", sorted(_DECIDED_SLOT))
+@pytest.mark.asyncio
+async def test_every_series_freezes_its_data_card_names_its_slot_and_stamps_its_video_posts(tworld, monkeypatch,
+                                                                                        series):
+    sb, runs = tworld
+    rec, day = _every_case(series)
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", EVERY_SERIES)
+    monkeypatch.setattr(ss.settings, "MARKETING_VIDEO_FEATURES", "data_card,push_in")
+    _today(monkeypatch, day)
+    svc = _svc(runs, FakeNews({series: cands(series, rec)}))
+    rid = _run(sb, day, caps=[*DROP2_CAPS, "video_v2"])
+    state = await svc.kick(rid, claim=_claim(sb, rid))
+    await _drain(svc)
+    assert state["status"] == "accepted" and state["template_id"] == series
+    out = _script(sb, rid)["output"]
+    assert out["video_features"] == ["data_card", "push_in"] and "data_card_slot" not in out    # never stored
+    script = state["script"]
+    assert script["video_features"] == ["data_card", "push_in"]
+    slot = script["data_card_slot"]
+    assert (slot, script["cards"][slot]["title"]) == _DECIDED_SLOT[series]
+    kept = {news_templates.LEXICON[i] for i in onscreen.DATA_CARD_KEEPS[series]}
+    assert script["cards"][slot]["title"] not in kept
+    # what the worker declares — the opening card, every text card but the slot, the picture, the disclaimer,
+    # the end card — is exactly inside the server's allow-list
+    texts = [c[k] for i, c in enumerate(out["cards"]) if i != slot for k in ("title", "body")]
+    drawn = list(dict.fromkeys([*onscreen.opening_strings(out["opening_card"], out["logos"]), *texts,
+                                *onscreen.image_strings(out["image_spec"], out["logos"]), out["disclaimer_card"],
+                                script["end_card_cta"]]))
+    await runs._check_onscreen_text(_run_row(sb, rid), {"onscreen_text": drawn, "voice_asset_id": _voice(sb, rid)})
+    # every VIDEO post says which features its video was asked for; the picture and text posts say nothing
+    video, card = _ready(sb, rid, "video"), _ready(sb, rid, "card", image_role="post_image")
+    _run_row(sb, rid)["metadata"].update({"video_asset_id": video, "image_asset_id": card})
+    specs = [{"platform": p, "format": f, **({"asset_ids": [video if f == "video" else card]} if f != "text" else {})}
+             for p, f in sorted(out["post_formats"].items())]
+    posts = await runs.create_posts(rid, specs, claim=_claim(sb, rid))
+    assert {p["format"] for p in posts} >= {"video", "text"}
+    for p in posts:
+        assert p["metadata"].get("video_features") == (["data_card", "push_in"] if p["format"] == "video" else None)
+
+
+_WORKER_FONT = str(_BACKEND / "marketing" / "assets" / "fonts" / "Inter-Bold.ttf")
+#: The series whose sample picture fits the data card legibly (the worker's 22 px floor, DATA_CARD_MIN_PX —
+#: measured the same with the basic and the raqm layout engine). Costco's Money Map bars and the AI-chips grid
+#: draw a cell / a tile line at 21 px: the worker keeps the slot's TEXT card there (WARNING), the designed
+#: degraded path — never a data card in another place.
+_PICTURE_FITS = frozenset(_DECIDED_SLOT) - {"money_map", "theme_explainer"}
+
+
+@pytest.mark.parametrize("series", sorted(_DECIDED_SLOT))
+@pytest.mark.asyncio
+async def test_the_real_worker_draws_every_series_data_card_at_the_read_backs_slot(tworld, monkeypatch, caplog,
+                                                                                 series):
+    """The slot contract end to end on every series (the real-worker e2e days reach five): the web's read-back
+    as it crosses the wire (WorkerScript → JSON) drawn by the REAL worker cards — the data card exactly at the
+    slot the read-back names (specs[slot + 1]) or, where the picture cannot fit legibly, nowhere (the text
+    card stays, said at WARNING); every other content card a text card in its own place (the series' kept
+    hedge cards among them); and what the worker declares inside the real server's allow-list."""
+    pytest.importorskip("PIL")
+    from marketing import cards
+
+    sb, runs = tworld
+    rec, day = _every_case(series)
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", EVERY_SERIES)
+    monkeypatch.setattr(ss.settings, "MARKETING_VIDEO_FEATURES", "data_card,push_in")
+    _today(monkeypatch, day)
+    svc = _svc(runs, FakeNews({series: cands(series, rec)}))
+    rid = _run(sb, day, caps=[*DROP2_CAPS, "video_v2"])
+    state = await svc.kick(rid, claim=_claim(sb, rid))
+    await _drain(svc)
+    assert state["status"] == "accepted" and state["template_id"] == series
+    sent = json.loads(WorkerScript(**state["script"]).model_dump_json())
+    slot = sent["data_card_slot"]
+    assert (slot, sent["cards"][slot]["title"]) == _DECIDED_SLOT[series]
+    with caplog.at_level(logging.WARNING, logger="marketing.cards"):
+        specs = cards.cards_for_script(sent, font_path=_WORKER_FONT, layout_engine="basic")
+    unfit = [r for r in caplog.records if r.name == "marketing.cards" and "does not fit legibly" in r.getMessage()]
+    kinds = ["opening", *["text"] * len(sent["cards"]), "disclaimer"]
+    if series in _PICTURE_FITS:
+        kinds[slot + 1] = "data"
+        assert unfit == []
+    else:
+        assert len(unfit) == 1 and repr(sent["cards"][slot]["title"]) in unfit[0].getMessage()
+    assert [s.kind for s in specs] == kinds
+    assert cards.applied_data_card_slot(specs) == (slot if series in _PICTURE_FITS else None)
+    assert [s.title for s in specs if s.kind == "text"] == [c["title"] for i, c in enumerate(sent["cards"])
+                                                             if i != slot or series not in _PICTURE_FITS]
+    kept = {news_templates.LEXICON[i] for i in onscreen.DATA_CARD_KEEPS[series]}
+    assert sent["cards"][slot]["title"] not in kept
+    drawn = list(dict.fromkeys(t for s in specs for t in cards.onscreen_strings(s)))
+    assert {c["title"] for c in sent["cards"] if c["title"] in kept} <= set(drawn)
+    await runs._check_onscreen_text(_run_row(sb, rid), {"onscreen_text": drawn, "voice_asset_id": _voice(sb, rid)})
+
+
+# ══ Batch 3 (2026-10-20, contract): the ledger read follows the posting-day switch ═══════════════════════
+
+
+@pytest.mark.asyncio
+async def test_batch3_a_seven_day_cadence_reads_420_rows(tworld, monkeypatch):
+    """D17: the day's ledger read is RECENT_WINDOW posting days of history at the cadence in force NOW
+    (`selection.news_recent_limit()`, read per call) — 420 rows at seven days a week — on both of its readers:
+    the template build (its exclude set, and the lesson it may fall to) and the lesson-only `_select`. With
+    fewer rows a seven-day week would let the lesson rotation and the news exclude set see less history than
+    the default four days do."""
+    sb, runs = tworld
+    monkeypatch.setattr(selection.settings, "MARKETING_POST_WEEKDAYS", "mon,tue,wed,thu,fri,sat,sun")
+    reads: List[tuple] = []
+    real = runs.recent_source_refs
+
+    async def spy(before, limit):
+        reads.append((before, limit))
+        return await real(before, limit)
+
+    monkeypatch.setattr(runs, "recent_source_refs", spy)
+    # a Monday news build (class C on, `tworld`)
+    _today(monkeypatch, MON)
+    news = FakeNews({"ceo_buys": cands("ceo_buys", ceo_week())})
+    rid = _run(sb, MON)
+    state = await _svc(runs, news).kick(rid, claim=_claim(sb, rid))
+    assert state["status"] == "accepted" and state["template_id"] == "ceo_buys"
+    assert reads == [(MON, 420)]
+    # a lesson-only day (Saturday's plan is the lesson alone), through `_select`
+    reads.clear()
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
+    row = await svc._select({"id": str(uuid.uuid4()), "run_date": SAT.isoformat()})
+    assert row["status"] == "selected" and reads == [(SAT, 420)]
+    # back at the declared default, the same reads are today's 240 rows
+    monkeypatch.setattr(selection.settings, "MARKETING_POST_WEEKDAYS", "mon,tue,thu,sat")
+    reads.clear()
+    await svc._select({"id": str(uuid.uuid4()), "run_date": (SAT + timedelta(days=7)).isoformat()})
+    assert reads == [(SAT + timedelta(days=7), 240)] and ss.NEWS_RECENT_LIMIT == 240
+
+
+# ══ Batch 3 (2026-10-20): a template day with EXTRA video posts, from the build to create_posts ══════════════
+
+
+@pytest.mark.parametrize("series", sorted(_DECIDED_SLOT))
+@pytest.mark.asyncio
+async def test_batch3_a_template_day_with_extras_from_build_to_create_posts(tworld, monkeypatch, series):
+    """MARKETING_VIDEO_EXTRA_PLATFORMS=facebook,linkedin,threads at write time: the REAL build freezes the extras
+    (each caption the platform's accepted caption under the template's narrated-video disclaimer, re-checked by
+    `news_templates.extra_video_problems` against the record's fact sheet), the stored output still re-checks
+    clean (`revalidate`, as create_posts runs it) with the keys present, the worker's read-back never carries them,
+    and create_posts — given the worker's PRIMARY specs only — appends the three video posts on the run's video:
+    pending review, made with AI (the narration), TEMPLATE_NOTE_VIDEO + NON_AFFILIATION, never an AI-written
+    line."""
+    sb, runs = tworld
+    rec, day = _every_case(series)
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", EVERY_SERIES)
+    monkeypatch.setattr(ss.settings, "MARKETING_VIDEO_EXTRA_PLATFORMS", "facebook,linkedin,threads")
+    # B3-LIVE-1: a Form 4 roundup's caption speaks of the picture's rows — its extras ride only a video that
+    # draws the picture, so its day freezes the data card (a `video_v2` holder) and the video says it drew it
+    roundup = series in _PICTURE_BOUND_SAMPLES
+    if roundup:
+        monkeypatch.setattr(ss.settings, "MARKETING_VIDEO_FEATURES", "data_card,push_in")
+    _today(monkeypatch, day)
+    svc = _svc(runs, FakeNews({series: cands(series, rec)}))
+    rid = _run(sb, day, caps=[*DROP2_CAPS, "video_v2"] if roundup else None)
+    state = await svc.kick(rid, claim=_claim(sb, rid))
+    await _drain(svc)
+    assert state["status"] == "accepted" and state["template_id"] == series
+    row = _script(sb, rid)
+    out = row["output"]
+    assert out["extra_post_formats"] == {"facebook": "video", "linkedin": "video", "threads": "video"}
+    assert news_templates.revalidate(out, fact_sheet=row["fact_sheet"], run_date=day) == []
+    for p, post in out["video_posts"].items():
+        assert post == {"title": None, "caption": post_copy.extra_video_caption(p, out["posts"][p]["caption"], day,
+                                                                                 "template")}
+        assert news_templates.extra_video_problems(out, fact_sheet=row["fact_sheet"], run_date=day, platform=p,
+                                                   caption=post["caption"], video_draws_picture=True) == []
+        plain = news_templates.extra_video_problems(out, fact_sheet=row["fact_sheet"], run_date=day, platform=p,
+                                                    caption=post["caption"])
+        assert [v["code"] for v in plain] == (["picture_caption"] if roundup else [])
+    script = state["script"]
+    assert not {"extra_post_formats", "video_posts"} & set(script)
+    assert not {"extra_post_formats", "video_posts"} & set(json.loads(WorkerScript(**script).model_dump_json()))
+    video = _ready(sb, rid, "video", metadata={"data_card_slot": script["data_card_slot"]} if roundup else None)
+    card = _ready(sb, rid, "card", image_role="post_image")
+    _run_row(sb, rid)["metadata"].update({"video_asset_id": video, "image_asset_id": card})
+    specs = [{"platform": p, "format": f, **({"asset_ids": [video if f == "video" else card]} if f != "text" else {})}
+             for p, f in sorted(out["post_formats"].items())]
+    posts = await runs.create_posts(rid, specs, claim=_claim(sb, rid))
+    assert [(p["platform"], p["format"]) for p in posts[:len(specs)]] == [(s["platform"], s["format"]) for s in specs]
+    extra = posts[len(specs):]
+    assert [(p["platform"], p["format"]) for p in extra] == [("facebook", "video"), ("linkedin", "video"),
+                                                             ("threads", "video")]
+    for p in extra:
+        assert p["status"] == "pending_review" and p["asset_ids"] == [video] and p["title"] is None
+        assert p["caption"] == out["video_posts"][p["platform"]]["caption"]
+        note = post_copy.TEMPLATE_NOTE_VIDEO if p["platform"] != "threads" else "Narration voiced with AI."
+        assert note in p["caption"] and p["caption"].count(post_copy.NON_AFFILIATION) == 1
+        assert not any(line.casefold() in p["caption"].casefold() for line in post_copy.AI_DISCLOSURES)
+        md = p["metadata"]
+        assert md["made_with_ai"] is True
+        assert (md["content_class"], md["series"], md["authorship"]) == (R.SERIES_CLASS[series], series, "template")
+        # the picture / text post of the same platform keeps its own caption and its template flag
+        primary = next(q for q in posts[:len(specs)] if q["platform"] == p["platform"])
+        assert primary["caption"] == out["posts"][p["platform"]]["caption"] and primary["metadata"]["made_with_ai"] is False
+        assert p["caption"].split("\n", 1)[0] == primary["caption"].split("\n", 1)[0]
+    # a retry adopts every row
+    again = await runs.create_posts(rid, specs, claim=_claim(sb, rid))
+    assert [p["id"] for p in again] == [p["id"] for p in posts]
+
+
+#: The `_every_case` samples whose Facebook / LinkedIn / Threads caption speaks of the picture's rows (B3-LIVE-1):
+#: the two Form 4 roundups.
+_PICTURE_BOUND_SAMPLES = frozenset({"ceo_buys", "insider_buys"})
+
+
+@pytest.mark.parametrize("series", sorted(_PICTURE_BOUND_SAMPLES))
+@pytest.mark.parametrize("how", ["no_data_card_frozen", "the_worker_kept_the_text_card"])
+@pytest.mark.asyncio
+async def test_batch3_a_roundups_extras_never_ride_a_video_without_the_picture(tworld, monkeypatch, caplog, series,
+                                                                                how):
+    """B3-LIVE-1 / B3-FR-1 (2026-10-20): the Form 4 roundup's Facebook / LinkedIn / Threads caption is built from the
+    PICTURE parts ("The purchases: <every row>", "The largest of these: …" — news-v20's format-neutral wording; before,
+    "The purchases shown", "The largest here") while the video names only the lead
+    row's company. With no data card frozen (MARKETING_VIDEO_FEATURES without it, or a holder without video_v2) the
+    build freezes no extra (WARNING naming `picture_caption`); with it frozen but the video drawn without it (the
+    worker kept the text card: `data_card_slot` None) create_posts skips the extras (WARNING). Either way the day's
+    primary posts are all recorded, and no video post claims rows its video does not show. Mutation-checked
+    (2026-10-20): without `_video_draws_picture`'s asset check the second case records three extras."""
+    sb, runs = tworld
+    rec, day = _every_case(series)
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", EVERY_SERIES)
+    monkeypatch.setattr(ss.settings, "MARKETING_VIDEO_EXTRA_PLATFORMS", "facebook,linkedin,threads")
+    frozen_card = how == "the_worker_kept_the_text_card"
+    if frozen_card:
+        monkeypatch.setattr(ss.settings, "MARKETING_VIDEO_FEATURES", "data_card,push_in")
+    _today(monkeypatch, day)
+    svc = _svc(runs, FakeNews({series: cands(series, rec)}))
+    rid = _run(sb, day, caps=[*DROP2_CAPS, "video_v2"] if frozen_card else None)
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        state = await svc.kick(rid, claim=_claim(sb, rid))
+        await _drain(svc)
+    assert state["status"] == "accepted" and state["template_id"] == series
+    out = _script(sb, rid)["output"]
+    if not frozen_card:
+        assert "extra_post_formats" not in out and "video_posts" not in out
+        assert any("picture_caption" in r.getMessage() and rid in r.getMessage() for r in caplog.records)
+        assert "The purchases: " in out["posts"]["facebook"]["caption"]     # the picture caption itself is untouched
+    else:
+        assert set(out["extra_post_formats"]) == {"facebook", "linkedin", "threads"}
+    caplog.clear()
+    video = _ready(sb, rid, "video", metadata={"data_card_slot": None, "video_features": ["data_card", "push_in"]}
+                   if frozen_card else None)
+    card = _ready(sb, rid, "card", image_role="post_image")
+    _run_row(sb, rid)["metadata"].update({"video_asset_id": video, "image_asset_id": card})
+    specs = [{"platform": p, "format": f, **({"asset_ids": [video if f == "video" else card]} if f != "text" else {})}
+             for p, f in sorted(out["post_formats"].items())]
+    with caplog.at_level(logging.WARNING, logger=mrs.logger.name):
+        posts = await runs.create_posts(rid, specs, claim=_claim(sb, rid))
+    assert [(p["platform"], p["format"]) for p in posts] == [(s["platform"], s["format"]) for s in specs]
+    for p in posts:
+        if p["format"] == "video":
+            # no video post carries the picture's rows (the roundup's picture caption is the extras' caption)
+            assert "The purchases: " not in p["caption"] and "The largest of these: " not in p["caption"]
+    if frozen_card:
+        skipped = [r for r in caplog.records if "SKIPPED" in r.getMessage() and r.levelno == logging.WARNING]
+        assert len(skipped) == 3 and all("does not draw the picture" in r.getMessage() for r in skipped)
+
+
+@pytest.mark.asyncio
+async def test_batch3_with_the_switch_empty_a_template_day_records_exactly_its_primary_posts(tworld, monkeypatch):
+    sb, runs = tworld
+    _today(monkeypatch, MON)
+    assert mrs.settings.MARKETING_VIDEO_EXTRA_PLATFORMS == ""            # `tworld` pins the declared default
+    svc = _svc(runs, FakeNews({"ceo_buys": cands("ceo_buys", ceo_week())}))
+    rid = _run(sb, MON)
+    state = await svc.kick(rid, claim=_claim(sb, rid))
+    await _drain(svc)
+    assert state["status"] == "accepted"
+    out = _script(sb, rid)["output"]
+    assert "extra_post_formats" not in out and "video_posts" not in out
+    video, card = _ready(sb, rid, "video"), _ready(sb, rid, "card", image_role="post_image")
+    _run_row(sb, rid)["metadata"].update({"video_asset_id": video, "image_asset_id": card})
+    specs = [{"platform": p, "format": f, **({"asset_ids": [video if f == "video" else card]} if f != "text" else {})}
+             for p, f in sorted(out["post_formats"].items())]
+    posts = await runs.create_posts(rid, specs, claim=_claim(sb, rid))
+    assert [(p["platform"], p["format"]) for p in posts] == [(s["platform"], s["format"]) for s in specs]

@@ -198,6 +198,7 @@ def x_on(monkeypatch):
     # Image posts are pinned off here (never the .env's); the image tests turn them on.
     monkeypatch.setattr(outlet_x.settings, "MARKETING_X_IMAGES", False)
     monkeypatch.setattr(outlet_x.settings, "MARKETING_X_IMAGE_POST_MICROS", 200_000)
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_MEDIA_UPLOAD_MICROS", 15_000)
 
 
 @pytest.fixture
@@ -1600,6 +1601,74 @@ def test_prepared_is_immutable():
     prepared = Prepared(payload={"text": "t"}, text_sha256="abc")
     with pytest.raises(Exception):
         prepared.reserve_micros = 1  # type: ignore[misc]
+    with pytest.raises(AttributeError):
+        prepared.pre_send_charges = (("x_media_alt", 1),)  # type: ignore[misc]
+    with pytest.raises(AttributeError):
+        prepared.pre_send_charge = ("x_media_alt", 1)  # type: ignore[misc]
+
+
+# ── Prepared.pre_send_charges (Batch 1, 2026-10-15: the X media upload became a second charge) ────────
+
+
+def test_prepared_pre_send_charges_are_normalised_summed_and_keep_their_order():
+    prepared = Prepared(payload={}, text_sha256="abc",
+                        pre_send_charges=[["x_media_upload", 15_000], ("x_media_alt", 5_000)])
+    assert prepared.pre_send_charges == (("x_media_upload", 15_000), ("x_media_alt", 5_000))
+    assert all(type(c) is tuple for c in prepared.pre_send_charges)        # a frozen copy, never the list
+    assert prepared.pre_send_micros == 20_000
+    # The legacy single-charge view (drop 1) is the FIRST charge — never a total.
+    assert prepared.pre_send_charge == ("x_media_upload", 15_000)
+    zero = Prepared(payload={}, text_sha256="abc", pre_send_charges=(("x_media_upload", 0),))
+    assert zero.pre_send_micros == 0 and zero.pre_send_charges == (("x_media_upload", 0),)
+
+
+@pytest.mark.parametrize("none", [(), [], None])
+def test_prepared_without_pre_send_charges(none):
+    prepared = Prepared(payload={}, text_sha256="abc", pre_send_charges=none)
+    assert prepared.pre_send_charges == () and prepared.pre_send_micros == 0 and prepared.pre_send_charge is None
+    assert Prepared(payload={}, text_sha256="abc").pre_send_charges == ()
+
+
+@pytest.mark.parametrize("bad", [
+    pytest.param(("x_media_alt", 5_000), id="a-bare-pair-never-read-as-two-charges"),
+    pytest.param("x_media_alt", id="str"), pytest.param(b"x_media_alt", id="bytes"),
+    pytest.param({"x_media_alt": 5_000}, id="dict"), pytest.param({("x_media_alt", 5_000)}, id="set"),
+    pytest.param(5_000, id="int"),
+    pytest.param([("x_media_alt",)], id="one-item"), pytest.param([("x_media_alt", 5_000, "at")], id="three-items"),
+    pytest.param([("", 5_000)], id="empty-op"), pytest.param([("   ", 5_000)], id="blank-op"),
+    pytest.param([(None, 5_000)], id="none-op"), pytest.param([(7, 5_000)], id="int-op"),
+    pytest.param([("x" * 65, 5_000)], id="op-over-64"),
+    pytest.param([("x_media_alt", -1)], id="negative"), pytest.param([("x_media_alt", True)], id="bool"),
+    pytest.param([("x_media_alt", 5.0)], id="float"), pytest.param([("x_media_alt", "5000")], id="str-micros"),
+    pytest.param([("x_media_alt", None)], id="none-micros"),
+    pytest.param([("x_media_upload", 15_000), ("x_media_alt", False)], id="one-bad-entry-refuses-all"),
+])
+def test_prepared_refuses_a_malformed_pre_send_charge(bad):
+    # An adapter bug: the publisher logs it as a prepare() BUG and skips the post before any claim or spend.
+    with pytest.raises(ValueError, match="pre_send_charges"):
+        Prepared(payload={}, text_sha256="abc", pre_send_charges=bad)
+
+
+def test_prepared_accepts_an_op_of_exactly_64_characters():
+    op = "x" * outlet_base.PRE_SEND_OP_MAX_CHARS
+    assert Prepared(payload={}, text_sha256="abc", pre_send_charges=((op, 1),)).pre_send_charges == ((op, 1),)
+
+
+def test_the_pre_send_op_cap_mirrors_the_journals_op_cap():
+    # outlet_base stays import-pure (no run_service at module level), so the bound is spelled twice: an op
+    # Prepared accepts must be one the journal writer accepts and its readers keep whole.
+    assert outlet_base.PRE_SEND_OP_MAX_CHARS == mrs._CHARGE_OP_MAX_CHARS == 64
+    op = "x" * outlet_base.PRE_SEND_OP_MAX_CHARS
+    assert mrs.journal_entries(None, [(op, 1)]) == ((op, 1, None),)
+    with pytest.raises(ValueError):
+        mrs.journal_entries(None, [(op + "x", 1)])
+
+
+def test_prepared_no_longer_takes_the_drop1_single_charge_argument():
+    """`pre_send_charge=` was a constructor argument in drop 1; an adapter still passing it must fail at
+    once (TypeError), never construct a Prepared whose charge the publisher would not journal."""
+    with pytest.raises(TypeError):
+        Prepared(payload={}, text_sha256="abc", pre_send_charge=("x_media_alt", 5_000))  # type: ignore[call-arg]
 
 
 # ── adversarial review 2026-09-30: fixes pinned ───────────────────────────────
@@ -2023,10 +2092,16 @@ def _x_img_post(caption: str = X_CAPTION, **over: Any) -> Dict[str, Any]:
 def test_x_prepare_an_image_post(x_images):
     prepared = outlet_x.ADAPTER.prepare(_x_img_post())
     assert prepared.payload["image"] == {**_pic().meta(), "alt": ALT}
-    assert prepared.reserve_micros == 200_000 and prepared.pre_send_charge == ("x_media_alt", 5_000)
+    assert prepared.reserve_micros == 200_000
+    # Batch 1: the upload is its own pre-send charge, before the alt text — the order the send makes them.
+    assert prepared.pre_send_charges == (("x_media_upload", 15_000), ("x_media_alt", 5_000))
+    assert prepared.pre_send_micros == 20_000
+    assert prepared.pre_send_charge == ("x_media_upload", 15_000)     # the legacy view: the first one
     x_meta = prepared.publish_meta["x"]
-    assert x_meta["image"] == _pic().meta() and x_meta["alt_micros"] == 5_000 and "alt" not in x_meta
-    assert "x image" in prepared.summary and PIC_TITLE not in prepared.summary
+    assert x_meta["image"] == _pic().meta() and "alt" not in x_meta
+    assert (x_meta["upload_micros"], x_meta["alt_micros"]) == (15_000, 5_000)
+    assert "x image" in prepared.summary and "cost_micros=200000+15000+5000" in prepared.summary
+    assert PIC_TITLE not in prepared.summary
 
 
 @pytest.mark.parametrize("setting, allow_urls, caption, reserve", [
@@ -2059,8 +2134,8 @@ def test_x_prepare_refuses_a_bad_image_post(x_images, over, why):
 
 def test_x_text_post_is_unchanged_while_images_are_on(x_images):
     prepared = outlet_x.ADAPTER.prepare(_x_post())
-    assert prepared.reserve_micros == 15_000 and prepared.pre_send_charge is None
-    assert "image" not in prepared.payload
+    assert prepared.reserve_micros == 15_000 and prepared.pre_send_charges == () and prepared.pre_send_charge is None
+    assert "image" not in prepared.payload and "upload_micros" not in prepared.publish_meta["x"]
 
 
 def _x_paths(fake: FakeX) -> List[str]:
@@ -2076,6 +2151,12 @@ async def _x_img_send(post: Optional[Dict[str, Any]] = None):
 
 UPLOADED = (200, {"data": {"id": MEDIA_ID, "media_key": f"3_{MEDIA_ID}", "size": len(IMG)}})
 ALT_SET = (200, {"data": {"id": MEDIA_ID}})
+#: What one X image post has journaled when its send starts, at the pinned prices: the claim's `x_create`
+#: ($0.20), then the publisher's pre-send write — the upload ($0.015) and the alt text ($0.005). Each
+#: refund below is written as what STAYS journaled after it (`kept`): refund_micros == kept - ALL.
+ALL = 200_000 + 15_000 + 5_000
+UPLOAD = 15_000
+ALT_MICROS = 5_000
 
 
 @pytest.mark.asyncio
@@ -2101,7 +2182,8 @@ async def test_x_image_send_never_uploads_a_picture_that_is_not_the_one_reviewed
     pics.body = body
     prepared, outcome = await _x_img_send()
     assert outcome.kind == kind and outcome.category == "media" and outcome.alert == "failed"
-    assert outcome.refund_micros == -(200_000 + 5_000)       # nothing was billed
+    assert prepared.reserve_micros + prepared.pre_send_micros == ALL
+    assert outcome.refund_micros == -ALL       # nothing was billed: the post, the upload and the alt text
     assert fake.requests == []
 
 
@@ -2110,31 +2192,39 @@ async def test_x_image_send_download_failure_is_not_sent(monkeypatch, x_images, 
     fake = _x(monkeypatch)
     pics.status = 503
     _prepared, outcome = await _x_img_send()
-    assert outcome.kind == NOT_SENT and outcome.category == "media" and outcome.refund_micros == -205_000
+    assert outcome.kind == NOT_SENT and outcome.category == "media" and outcome.refund_micros == -ALL
     assert fake.requests == []
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("answer, kind, category, alert", [
-    (_raise(httpx.ConnectError), NOT_SENT, "transport", None),
-    (_raise(httpx.ReadTimeout), NOT_SENT, "media", None),          # the MEDIA may exist; the post cannot
-    ((503, {"title": "Service Unavailable"}), NOT_SENT, "media", None),
-    ((400, {"title": "Invalid Request", "detail": "bad image"}), NOT_SENT, "media", None),
-    ((403, {"title": "Forbidden"}), NOT_SENT, "media", None),
+@pytest.mark.parametrize("answer, kind, category, alert, kept", [
+    # The upload never left, or X turned it away at the gate: EVERYTHING is refunded (Batch 1 matrix).
+    (_raise(httpx.ConnectError), NOT_SENT, "transport", None, 0),
     (lambda request: httpx.Response(429, json={"title": "Too Many Requests"},   # reset read at REQUEST time
                                     headers={"x-rate-limit-reset": str(int(time.time()) + 900)}),
-     NOT_SENT, "rate_limited", None),
-    ((401, {"title": "Unauthorized"}), NOT_SENT, "auth", "auth"),
-    ((402, {"title": "Payment Required"}), REFUSED, "credits", "failed"),
-    ((200, {"data": {"id": MEDIA_ID, "processing_info": {"state": "pending"}}}), NOT_SENT, "media", None),
-    ((200, {"data": {"id": MEDIA_ID, "processing_info": {"state": "failed"}}}), NOT_SENT, "media", None),
+     NOT_SENT, "rate_limited", None, 0),
+    ((401, {"title": "Unauthorized"}), NOT_SENT, "auth", "auth", 0),
+    ((402, {"title": "Payment Required"}), REFUSED, "credits", "failed", 0),
+    # X may have processed it — the outcome unknown or a refusal: the UPLOAD charge is kept, the post and
+    # the alt text are refunded (the MEDIA may exist; the post cannot).
+    (_raise(httpx.ReadTimeout), NOT_SENT, "media", None, UPLOAD),
+    ((503, {"title": "Service Unavailable"}), NOT_SENT, "media", None, UPLOAD),
+    ((200, {"data": {}}), NOT_SENT, "media", None, UPLOAD),                     # a 2xx without a media id
+    ((400, {"title": "Invalid Request", "detail": "bad image"}), NOT_SENT, "media", None, UPLOAD),
+    ((403, {"title": "Forbidden"}), NOT_SENT, "media", None, UPLOAD),
+    ((200, {"data": {"id": MEDIA_ID, "processing_info": {"state": "failed"}}}), NOT_SENT, "media", None, UPLOAD),
+    # Uploaded (a media id) but still processing: the upload succeeded — kept; nothing else is sent.
+    ((200, {"data": {"id": MEDIA_ID, "processing_info": {"state": "pending"}}}), NOT_SENT, "media", None, UPLOAD),
+    ((200, {"data": {"id": MEDIA_ID, "processing_info": {"state": "in_progress"}}}), NOT_SENT, "media", None,
+     UPLOAD),
 ])
-async def test_x_image_upload_failure_ends_before_any_post_and_refunds_everything(monkeypatch, x_images, pics,
-                                                                                  answer, kind, category, alert):
+async def test_x_image_upload_failure_ends_before_any_post_and_refunds_what_was_not_billed(
+        monkeypatch, x_images, pics, answer, kind, category, alert, kept):
     fake = _x(monkeypatch, answer)
-    _prepared, outcome = await _x_img_send()
+    prepared, outcome = await _x_img_send()
     assert (outcome.kind, outcome.category, outcome.alert) == (kind, category, alert)
-    assert outcome.refund_micros == -205_000                   # an upload has no price; nothing else ran
+    assert prepared.reserve_micros + prepared.pre_send_micros == ALL
+    assert outcome.refund_micros == kept - ALL
     assert _x_paths(fake) == ["/2/media/upload"]
     _no_secret(outcome.error)
     if category == "rate_limited":
@@ -2142,36 +2232,68 @@ async def test_x_image_upload_failure_ends_before_any_post_and_refunds_everythin
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("answer, kind, category, refund", [
-    (_raise(httpx.ConnectError), NOT_SENT, "transport", -205_000),     # never left: not billed
-    (_raise(httpx.ReadTimeout), NOT_SENT, "media", -200_000),          # may have been billed: kept
-    ((503, {"title": "Service Unavailable"}), NOT_SENT, "media", -200_000),
-    ((400, {"title": "Invalid Request"}), NOT_SENT, "media", -200_000),
-    ((429, {"title": "Too Many Requests"}), NOT_SENT, "rate_limited", -200_000),
-    ((401, {"title": "Unauthorized"}), NOT_SENT, "auth", -200_000),
-    ((402, {"title": "Payment Required"}), REFUSED, "credits", -205_000),
-    ((200, {"data": {"id": "1880000000000000009"}}), NOT_SENT, "media", -200_000),   # another media's id
+@pytest.mark.parametrize("status, kept", [
+    (None, 0),          # refused by THIS process before sending (no bytes, over 5 MB): it never left
+    (400, UPLOAD),      # refused by X: it may be billed
+])
+async def test_x_image_upload_refused_before_it_left_refunds_the_upload_too(monkeypatch, x_images, pics, status, kept):
+    async def refused(data: bytes, **_kw: Any) -> Dict[str, Any]:
+        raise x_api.XApiRefusedError("x upload_media: refused", method="upload_media", status=status)
+
+    fake = _x(monkeypatch)
+    monkeypatch.setattr(x_api, "upload_media", refused)
+    _prepared, outcome = await _x_img_send()
+    assert (outcome.kind, outcome.category, outcome.alert) == (NOT_SENT, "media", None)
+    assert outcome.refund_micros == kept - ALL and fake.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer, kind, category, kept", [
+    # After a successful upload its charge is ALWAYS kept; the alt text follows the drop-1 rules.
+    (_raise(httpx.ConnectError), NOT_SENT, "transport", UPLOAD),               # the alt text never left
+    (_raise(httpx.ReadTimeout), NOT_SENT, "media", UPLOAD + ALT_MICROS),       # may have been billed: kept
+    ((503, {"title": "Service Unavailable"}), NOT_SENT, "media", UPLOAD + ALT_MICROS),
+    ((400, {"title": "Invalid Request"}), NOT_SENT, "media", UPLOAD + ALT_MICROS),
+    ((429, {"title": "Too Many Requests"}), NOT_SENT, "rate_limited", UPLOAD + ALT_MICROS),
+    ((401, {"title": "Unauthorized"}), NOT_SENT, "auth", UPLOAD + ALT_MICROS),
+    ((402, {"title": "Payment Required"}), REFUSED, "credits", UPLOAD),
+    ((200, {"data": {"id": "1880000000000000009"}}), NOT_SENT, "media", UPLOAD + ALT_MICROS),   # another media's id
 ])
 async def test_x_image_alt_text_failure_ends_before_the_post(monkeypatch, x_images, pics, answer, kind, category,
-                                                             refund):
+                                                             kept):
     fake = _x(monkeypatch, UPLOADED, answer)
     _prepared, outcome = await _x_img_send()
-    assert (outcome.kind, outcome.category, outcome.refund_micros) == (kind, category, refund)
+    assert (outcome.kind, outcome.category, outcome.refund_micros) == (kind, category, kept - ALL)
     assert _x_paths(fake) == ["/2/media/upload", "/2/media/metadata"]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("answer, kind, refund", [
-    (_raise(httpx.ConnectError), NOT_SENT, -200_000),      # the create never left; the alt text did
-    ((402, {"title": "Payment Required"}), REFUSED, -200_000),
-    ((503, {"title": "Service Unavailable"}), AMBIGUOUS, 0),
-    (_raise(httpx.ReadTimeout), AMBIGUOUS, 0),
-    ((429, {"title": "Too Many Requests"}), NOT_SENT, 0),  # as for a text post: a refused create may be billed
+async def test_x_image_alt_text_not_configured_keeps_only_the_upload(monkeypatch, x_images, pics):
+    """The upload went out; then a credential vanished before the alt text (a hand-edited setting): the
+    alt-text call never left — refunded with the post; the upload charge stays."""
+    _x(monkeypatch, UPLOADED)
+
+    async def unconfigured(media_id: str, *, alt_text: str) -> Dict[str, Any]:
+        raise x_api.XApiNotConfiguredError("x create_media_metadata: not configured", method="create_media_metadata")
+
+    monkeypatch.setattr(x_api, "create_media_metadata", unconfigured)
+    _prepared, outcome = await _x_img_send()
+    assert (outcome.kind, outcome.category, outcome.alert) == (NOT_SENT, "auth", "auth")
+    assert outcome.refund_micros == UPLOAD - ALL
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer, kind, kept", [
+    (_raise(httpx.ConnectError), NOT_SENT, UPLOAD + ALT_MICROS),   # the create never left; the upload and alt did
+    ((402, {"title": "Payment Required"}), REFUSED, UPLOAD + ALT_MICROS),
+    ((503, {"title": "Service Unavailable"}), AMBIGUOUS, ALL),
+    (_raise(httpx.ReadTimeout), AMBIGUOUS, ALL),
+    ((429, {"title": "Too Many Requests"}), NOT_SENT, ALL),  # as for a text post: a refused create may be billed
 ])
-async def test_x_image_create_failure_keeps_the_text_post_rules(monkeypatch, x_images, pics, answer, kind, refund):
+async def test_x_image_create_failure_keeps_the_text_post_rules(monkeypatch, x_images, pics, answer, kind, kept):
     fake = _x(monkeypatch, UPLOADED, ALT_SET, answer)
     prepared, outcome = await _x_img_send()
-    assert outcome.kind == kind and outcome.refund_micros == refund
+    assert outcome.kind == kind and outcome.refund_micros == kept - ALL
     assert _x_paths(fake) == ["/2/media/upload", "/2/media/metadata", "/2/tweets"]
     if kind == AMBIGUOUS:
         # Whatever may be live names its media, merged with the claim's own `x` record.
@@ -2217,20 +2339,101 @@ async def test_x_text_reconcile_never_strips_a_trailing_link(monkeypatch, x_on):
     assert (await outlet_x.ADAPTER.reconcile(_queued_x())).kind == ABSENT
 
 
-@pytest.mark.parametrize("images, allow_urls, setting, per_post", [
-    (False, False, 200_000, 15_000),
-    (False, True, 200_000, 200_000),
-    (True, False, 200_000, 205_000),
-    (True, True, 200_000, 205_000),
-    (True, False, 15_000, 20_000),           # a confirmed $0.015 image post + its $0.005 alt text
-    (True, True, 15_000, 205_000),
+@pytest.mark.parametrize("images, allow_urls, setting, upload, per_post", [
+    (False, False, 200_000, 15_000, 15_000),
+    (False, True, 200_000, 15_000, 200_000),
+    (False, False, 200_000, 200_000, 15_000),     # X images off: the upload never counts
+    (True, False, 200_000, 15_000, 220_000),      # $0.20 + the $0.015 upload + the $0.005 alt text (Batch 1)
+    (True, True, 200_000, 15_000, 220_000),
+    (True, False, 15_000, 15_000, 35_000),        # a confirmed $0.015 image post + its upload + its alt text
+    (True, True, 15_000, 15_000, 220_000),
+    (True, False, 200_000, 0, 205_000),           # uploads confirmed free: the drop-1 figure
+    (True, False, 200_000, 200_000, 405_000),     # the upload setting's ceiling
 ])
 def test_x_metrics_headroom_prices_image_posts_while_they_are_on(monkeypatch, x_on, images, allow_urls, setting,
-                                                                 per_post):
+                                                                 upload, per_post):
     monkeypatch.setattr(outlet_x.settings, "MARKETING_X_IMAGES", images)
     monkeypatch.setattr(outlet_x.settings, "MARKETING_X_ALLOW_URLS", allow_urls)
     monkeypatch.setattr(outlet_x.settings, "MARKETING_X_IMAGE_POST_MICROS", setting)
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_MEDIA_UPLOAD_MICROS", upload)
     assert outlet_x.metrics_headroom_micros() == 4 * per_post
+
+
+def test_x_metrics_headroom_reads_the_upload_price_at_call_time(monkeypatch, x_images):
+    for upload, expected in ((15_000, 880_000), (0, 820_000), (100_000, 1_220_000), (15_000, 880_000)):
+        monkeypatch.setattr(outlet_x.settings, "MARKETING_X_MEDIA_UPLOAD_MICROS", upload)
+        assert outlet_x.metrics_headroom_micros() == expected
+
+
+@pytest.mark.parametrize("allow_urls", [False, True])
+@pytest.mark.parametrize("setting", [0, 15_000, 200_000, 500_000])
+@pytest.mark.parametrize("upload", [0, 1, 15_000, 200_000])
+def test_x_metrics_headroom_is_four_image_posts_at_what_prepare_would_journal(monkeypatch, x_images, allow_urls,
+                                                                              setting, upload):
+    """The headroom and `prepare` price an image post the same way — its claim reserve plus EVERY pre-send
+    charge it journals — so "posting always wins" holds by exactly four posts whatever the switches (a
+    headroom that left out the upload would let reads spend what a pending image post needs)."""
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_ALLOW_URLS", allow_urls)
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_IMAGE_POST_MICROS", setting)
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_MEDIA_UPLOAD_MICROS", upload)
+    caption = f"{X_CAPTION} {post_copy.LINK_BASE_URL}/x" if allow_urls else X_CAPTION   # URLs on: the /go link rides
+    prepared = outlet_x.ADAPTER.prepare(_x_img_post(caption))
+    text_price = outlet_x.URL_POST_MICROS if allow_urls else outlet_x.POST_MICROS
+    assert outlet_x.metrics_headroom_micros() == 4 * max(text_price,
+                                                         prepared.reserve_micros + prepared.pre_send_micros)
+
+
+@pytest.mark.parametrize("setting, charges", [
+    (15_000, (("x_media_upload", 15_000), ("x_media_alt", 5_000))),
+    (0, (("x_media_alt", 5_000),)),               # X confirmed uploads free: no upload entry at all
+    (1, (("x_media_upload", 1), ("x_media_alt", 5_000))),
+    (200_000, (("x_media_upload", 200_000), ("x_media_alt", 5_000))),
+    # Above the Field's bound (only a live edit can set it): honoured — over-reserving is the safe side.
+    (300_000, (("x_media_upload", 300_000), ("x_media_alt", 5_000))),
+])
+def test_x_image_upload_charge_is_the_setting_read_at_prepare_time(monkeypatch, x_images, setting, charges):
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_MEDIA_UPLOAD_MICROS", setting)
+    prepared = outlet_x.ADAPTER.prepare(_x_img_post())
+    assert prepared.pre_send_charges == charges
+    assert prepared.publish_meta["x"]["upload_micros"] == setting
+    assert f"cost_micros=200000+{setting}+5000" in prepared.summary
+
+
+@pytest.mark.parametrize("junk", [-1, -15_000, True, False, "15000", 1.5, None, float("nan"), [15_000]])
+def test_x_image_upload_price_unreadable_on_the_live_object_reads_as_the_url_price(monkeypatch, x_images, caplog,
+                                                                                    junk):
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_MEDIA_UPLOAD_MICROS", junk)
+    with caplog.at_level(logging.WARNING, logger=outlet_x.__name__):
+        assert outlet_x.media_upload_micros() == outlet_x.URL_POST_MICROS == 200_000
+        prepared = outlet_x.ADAPTER.prepare(_x_img_post())
+    assert prepared.pre_send_charges == (("x_media_upload", 200_000), ("x_media_alt", 5_000))
+    assert [r for r in caplog.records if "MARKETING_X_MEDIA_UPLOAD_MICROS is unreadable" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_x_image_refunds_reverse_what_was_journaled_never_the_setting_at_send_time(monkeypatch, x_images, pics):
+    """The publisher journals `prepared.pre_send_charges` between prepare and send, and the price may change
+    in that window (a deploy, a console edit): every refund reverses the JOURNALED amounts."""
+    _x(monkeypatch, _raise(httpx.ConnectError))
+    post = _x_img_post()
+    prepared = outlet_x.ADAPTER.prepare(post)                         # the upload journaled at $0.015
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_MEDIA_UPLOAD_MICROS", 200_000)
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_IMAGE_POST_MICROS", 500_000)
+    outcome = await outlet_x.ADAPTER.send({k: v for k, v in post.items() if k != POST_IMAGE_KEY}, prepared)
+    assert outcome.kind == NOT_SENT and outcome.refund_micros == -ALL
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer, refund", [
+    (_raise(httpx.ReadTimeout), -(200_000 + 5_000)),       # nothing to keep: no upload charge was journaled
+    (_raise(httpx.ConnectError), -(200_000 + 5_000)),
+])
+async def test_x_image_with_a_free_upload_keeps_no_upload_charge(monkeypatch, x_images, pics, answer, refund):
+    monkeypatch.setattr(outlet_x.settings, "MARKETING_X_MEDIA_UPLOAD_MICROS", 0)
+    _x(monkeypatch, answer)
+    prepared, outcome = await _x_img_send()
+    assert prepared.pre_send_charges == (("x_media_alt", 5_000),)
+    assert outcome.kind == NOT_SENT and outcome.refund_micros == refund
 
 
 # ── Bluesky: the image post ─────────────────────────────────────────────────────────────────────
@@ -2262,7 +2465,7 @@ def test_bluesky_prepare_an_image_post_names_its_blob_before_any_upload(bsky_on)
     meta = prepared.publish_meta["bluesky"]
     assert meta["record"] == record and meta["image"] == prepared.payload["image"]
     assert prepared.payload["rkey"] == outlet_bluesky.tid_for(B_IMG_KEY, 0, RUN_DAY)
-    assert prepared.reserve_micros == 0 and prepared.pre_send_charge is None
+    assert prepared.reserve_micros == 0 and prepared.pre_send_charges == () and prepared.pre_send_charge is None
     assert f"cid={IMG_CID}" in prepared.summary and PIC_TITLE not in prepared.summary
 
 

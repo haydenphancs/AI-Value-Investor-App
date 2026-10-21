@@ -35,7 +35,11 @@ The rules every output obeys (`validate_package`, run at the end of `compose` an
   of any other caption, a title, a hashtag or the CTA. The video says the role, possessed by the
   company ("GameStop's chief executive", "the company's chief financial officer"), and its
   narration is the same whether or not the record carries a name. A person whose name collides
-  with restricted text is rendered role-only in the captions too.
+  with restricted text is rendered role-only in the captions too. Inside the members-elect window
+  (news-v19, owner decision 4: an even year's Election Day through January 3, judged over every day a
+  run's posts can go out — the run date and the two after it, `company_news_rules.members_elect_for_run`)
+  no one is named at all — every row role-only, `persons` empty, and no record person in any
+  public string (`validate_package`).
 * **Members of Congress** are never named: a row whose rendered name is a member is dropped, and
   every output string is scanned against the block-list. A Congress Count (2b) is a count of ≥ 2
   distinct members who "disclosed purchases" of one company's stock, dated by the disclosure month:
@@ -44,20 +48,32 @@ The rules every output obeys (`validate_package`, run at the end of `compose` an
   name masked).
 * **2b series name companies only** (`persons` is always empty): a stake says its own verb and
   basis ("invested", "committed up to", a carrying or fair value) with its as-of date, never
-  "bet" / "worth"; earnings state the reported EPS beside the analyst estimate on the analysts'
+  "bet" / "worth", and is refused when its drawn source title, local listing or UNLISTED investee name
+  names a person (Batch 1, `_stake_person_problem`; the record's own companies masked first); a
+  DESCRIPTIVE investee name ("Louisiana data center venture") takes "the" in running text, never on a
+  drawn label (`company_news_rules.takes_name_article`); the catalogue's background stays out of the
+  captions unless STAKE_BACKGROUND_IN_CAPTIONS (off); earnings state the reported EPS beside the
+  analyst estimate on the analysts'
   basis, its sign a word or a "-" — never "earned" / "lost" / "earnings of" (the calendar's figure is
   not the official accounting result) and never "expected" / "beat" / "miss" / "surprise"
-  (`EARNINGS_BANNED_RE`) — and the revenue pair at ONE shared precision (`revenue_pair`) or not at
-  all; a theme lists every member in the long captions and narrates at most THEME_NARRATED_MAX
+  (`EARNINGS_BANNED_RE`) — and no revenue figure at all (news-v21, `EARNINGS_REVENUE_IN_POSTS`: the feed
+  never says which basis a revenue ESTIMATE is on), though a record WITHOUT a plausible revenue pair is
+  still refused (news-v19: the pair is the quarter check, never printed); a theme lists every member in the long
+  captions and narrates at most THEME_NARRATED_MAX
   segment facts, says "{n} of its {m} companies" wherever it gives the count when the record's
   `theme_size` is larger than its members (a completeness claim only when the two are equal), and
   its title — Caydex's own wording — passes the news ban and `THEME_TITLE_BANNED_RE`, unmasked.
-* **Counts and articles** — a Form 4 roundup's row count is a lower bound ("At least 3 CEOs …"),
-  never the week's total (the record holds at most five rows, after the adapter's gates), and a
-  count of distinct PEOPLE: a record whose rows name one person twice (one person, two issuers) is
-  refused `record_invalid`; no "a" /
+* **Counts and articles** — a Form 4 roundup's row count is a lower bound ("At least 3 CEOs …",
+  "At least one more …"), never the week's total (the record holds at most five rows, after the
+  adapter's gates), and a count of distinct PEOPLE: a record whose rows name one person twice (one
+  person, two issuers) is refused `record_invalid`; a sentence whose subject names the company never
+  names it again ("GameStop's CEO disclosed buying … of the company's stock"); no "a" /
   "an" stands before a company name or a figure (its sound would decide it), only before a role
   word whose sound is fixed ("A CEO", "A director of Oracle").
+* **Covers** — the video's opening card carries a chip under its logo, at most OPENING_CHIP_MAX_CHARS
+  long: a Form 4, Congress or listed-filer 13F cover the ticker; a stake its basis and as-of date;
+  news-v19 (Batch 1) dates the figure on the other covers — earnings "Quarter ended …" for a verified
+  quarter, else "Reported …"; Money Map "Fiscal {fy}"; a 13F filer with no symbol "Quarter ended …".
 * **Banned words (A8)** — `copy_rules.BANNED_COPY` + `FORECAST_COPY` + `NEWS_BANNED_RE` on every
   output string (company, filer, segment and person names masked: they are names, not our words;
   the slots pass their own, smaller list), plus the structural rules: no emoji, no cashtag, no "#"
@@ -69,6 +85,15 @@ The rules every output obeys (`validate_package`, run at the end of `compose` an
   Variants are tried long → short, then trailing paragraphs are dropped, then the outlet is
   (`over_budget`). Fewer than
   `NEWS_MIN_OUTLETS` survivors → `too_few_outlets`.
+* **Extra video posts** (Batch 3, 2026-10-20) — Facebook / LinkedIn / Threads may also post the day's
+  video, captioned with the platform's own accepted caption under the narrated-video disclaimer
+  (`post_copy.extra_video_caption`). `extra_video_problems` re-checks such a caption with this
+  module's own rules (the word scan, placement, the members-elect window) at write time and again at
+  create_posts; `compose`, `revalidate`, `COMPARED_FIELDS` and TEMPLATE_VERSION are untouched by it.
+  B3-LIVE-1: a Form 4 ROUNDUP's Facebook / LinkedIn / Threads caption speaks of the picture's rows ("The
+  purchases: …", "The largest of these: …" — format-neutral since news-v20, but the rows only the picture
+  draws) while the video is about the lead row, so it rides the video only when the video draws the picture
+  (its data card) — `picture_caption` otherwise (`_Parts.picture_bound`).
 
 Pure: stdlib + the pure marketing modules (`company_news_rules`, `post_copy`, `template_onscreen`,
 `compliance`) + `trillion_club.copy_rules` + `schemas.marketing`. FMP-free (`PURE_MODULES`).
@@ -216,7 +241,74 @@ logger = logging.getLogger(__name__)
 #: says "the source says", never "the investor's accounts"; the Form 4 spotlight's alt text states its share
 #: figure as the TOTAL ("in 2 purchases, 3M shares in total", `ins.alt.spot.many`), never "2 purchases of 3M
 #: shares" (read as 3M each) — one purchase keeps "of" (`ins.alt.spot.one`).
-TEMPLATE_VERSION = "news-v18"
+#: news-v19 (Batch 1, 2026-10-15; later Batch-1 template edits keep this version): an earnings record without a
+#: revenue pair is refused (`implausible_figures`) — the pair is the only sign the calendar row is the quarter
+#: the estimate is for, and the adapter now refuses such a report whole (`revenue_implausible`) and sets the
+#: quarter's end from the statements (`company_news_rules.earnings_period`), which the "quarter that ended …"
+#: wording already reads; and the members-elect window (owner decision 4: an even year's Election Day through
+#: January 3, `company_news_rules.members_elect_window`, the RUN date) names no person in a Form 4 post — every
+#: row role-only — with `validate_package` refusing a name there in `persons` or any public string. These two
+#: changes (plan items 1 and 6) add or change no lexicon sentence; a later Batch-1 wording edit re-pins its own.
+#: Money Map (plan item 2, same version, lexicon re-pinned): the breakdown is neutral — "How fiscal {fy} revenue
+#: broke down: …" (`mm.p.segments`, `mm.alt.segments` "Bars show how revenue broke down: …"), "by region" only
+#: when EVERY named part is on `company_news_rules.REGION_NAMES` (`.region` twins), never "by product or
+#: business line" (McDonald's parts are markets, Costco's countries) — and narration L2 is "{s} made up {sh} of
+#: {basis}", never "Its {s} business"; a `REGION_ARTICLE` name reads "the United States" in running text
+#: (`mm.region.the`, ".cap" opening a sentence), never on a bar, card or alt-text label; the figures are the
+#: "annual results" (`mm.img.subtitle`) that "come from the company's annual financial statements"
+#: (`mm.p.source`), never "as reported" — FMP fills gross profit as revenue minus cost of revenue for an issuer
+#: with no gross subtotal (Amazon) — and a map showing a gross line adds "Gross profit is revenue minus the
+#: cost of sales." (`mm.p.gross`); the eliminations sentence says "parts of the company", not "business lines".
+#: (McDonald's parts above: since the review of 2026-10-16 its retired "High-Growth Markets" label is shown as
+#: its International Operated Markets — `company_news_rules.SEGMENT_SYMBOL_OVERRIDES`.)
+#: Stakes (plan item 4, same version, no lexicon change): a record whose source title, local listing or UNLISTED
+#: investee name names a person ("Jensen Huang keynote", "Warren Buffett's 2025 shareholder letter") is refused
+#: `slot_rejected` — those texts are drawn on every stake post, and a person is named only in body text.
+#: Names and wording (plan item 5, same version, lexicon re-pinned): a single-row Form 4 headline, its YouTube
+#: title and its cover never name the company twice ("GameStop's CEO disclosed buying $74.4 million of the
+#: company's stock …", cover "GameStop's CEO disclosed buying stock" — `ins.open.head.min` and the cover's
+#: length fallback are gone with the second name); "Some of the shares" in the narration and on the card, as the
+#: caption says; the lower bound's "one" is a word ("At least one more …"); a DESCRIPTIVE investee name takes
+#: "the" in running text (`st.ee.the`, the `{ee_np}` / `{ee_np_cap}` slots, `company_news_rules.
+#: takes_name_article`); the catalogue background leaves the captions (STAKE_BACKGROUND_IN_CAPTIONS, off); and
+#: the covers' chips date their figures — earnings "Quarter ended {d}" for a verified quarter, else "Reported
+#: {d}"; Money Map "Fiscal {fy}"; a 13F filer with no symbol "Quarter ended {d}" — each at most
+#: OPENING_CHIP_MAX_CHARS, the widest laid out by the worker's own code (tests/test_marketing_news_layouts.py).
+#: The review of 2026-10-16 (same version — Batch 1 is undeployed; lexicon re-pinned): the Form 4 cover and spotlight
+#: headline is number-neutral, "{subj} disclosed buying stock" (INS-1: "shares" above "1 purchase · 1 share"); an
+#: earnings record whose EPS and estimate PRINT as one figure ("$0.10 vs $0.10") is refused `implausible_figures`
+#: (ER-1; the adapter's `clear_surprise` judges the printed figures too); and the members-elect window is judged
+#: over every day a run's posts can go out — the run date and the two after it
+#: (`company_news_rules.members_elect_for_run`, ME-1), in `_insider_parts` and `validate_package` alike.
+#: Money Map, stakes and names (the same review, same version, lexicon re-pinned): the rest bar and its caption
+#: item say "Everything else" (F6: "Other or not broken out" was false for lines the company DOES break out that
+#: the post cannot name, and a plain "Other" reads as a reported line); "by region" also needs the rest to be at
+#: most MONEY_MAP_REGION_MAX_OTHER_SHARE of revenue (MM-6); a gross LOSS is explained by `mm.p.gross.loss` (MM-5);
+#: more region names take "the" in running text ("The U.S. made up …", "the rest of the world" — MM-3, data in
+#: `company_news_rules.REGION_ARTICLE`); a stake text naming a person on the stake-source surname list is
+#: refused (ST-1, `company_news_rules.stake_person_surname_hits`); a theme's revenue line is "a product, business or
+#: region" with a region fact read "the United States" (TH-1, `th.explainer`, `th.region.the`, `th.ch.long*`); a 13F
+#: record that states no more / fewer count says the post does not show those changes — since the re-review of
+#: 2026-10-19 (F13-1-R) in every headline (`f13.ch.*.withheld`; the paragraph `f13.p.withheld` is gone);
+#: and the Form 4 and Money Map templates refuse a company-name word the cover cannot draw, as the others did.
+#: news-v20 (the round-3 review of 2026-10-20 — the carried open question on the Form 4 roundup's wording, lexicon
+#: re-pinned): a roundup's caption parts are FORMAT-NEUTRAL — "The purchases: {rows}." / "More purchases: {rows}."
+#: (`ins.p.rows`, `ins.p.rows2`) and "… The largest of these: {co}, {amt}." (`ins.ch.many.long`), never "The
+#: purchases shown", "Also shown" or "The largest here": they ride TEXT posts too (X is text only; Facebook, LinkedIn,
+#: Threads and Bluesky post text when no picture goes out), where nothing is shown. Every sentence is true with or
+#: without the picture: the two row paragraphs together list every row of the record (Facebook / LinkedIn drop the
+#: flag and Form 4 paragraphs before the second one — pinned), and "of these" keeps the superlative to the rows the
+#: count is about (a larger purchase an adapter gate dropped is never claimed). The B3-LIVE-1 rule is unchanged: the
+#: caption still lists rows the video never draws, so a roundup's extra video post needs its data card.
+#: news-v21 (main-session decision of 2026-10-20, owner-delegated; no lexicon change): an earnings post prints NO
+#: revenue comparison — no narration line, card, picture row, alt-text sentence, headline or caption paragraph
+#: (`EARNINGS_REVENUE_IN_POSTS`, off): the feed never says which basis its revenue ESTIMATE is on (GE Aerospace's
+#: consensus is its adjusted revenue, its calendar actual the GAAP figure — "revenue of $12.2 billion vs $10.4
+#: billion" in Q3 2025 held on neither basis). Its post is the no-revenue one the unwritable pair always took —
+#: narration L2 / card 2 the estimate definition, L4 / card 4 the quarterly explainer, the picture's EPS row only,
+#: the headlines without revenue — and its data card replaces the date card (`template_onscreen.DATA_CARD_SLOTS`).
+#: The record must still carry a plausible revenue pair (`implausible_figures`): the quarter check, never printed.
+TEMPLATE_VERSION = "news-v21"
 AUTHORSHIP = post_copy.AUTHORSHIP_TEMPLATE
 NEWS_SCRIPT_LINES = 4
 HOOK_WORDS: Tuple[int, int] = (5, 14)
@@ -227,9 +319,12 @@ NEWS_MIN_OUTLETS = 3
 CARD_TITLE_MAX_WORDS = 8
 CARD_BODY_MAX_WORDS = 28
 VIDEO_LAYOUT = "per_line"
-#: The opening card's and the spotlight's headline are drawn large: the first variant at most
-#: this long wins, else the shortest.
-OPEN_HEADLINE_MAX_CHARS = 64
+#: The video cover's chip (`opening_card.chip`, drawn under the logo) is at most this long:
+#: `template_onscreen.OPENING_CHIP_MAX_CHARS` refuses a longer one. The longest a template writes is a
+#: stake's "Committed up to · as of Nov 18, 2025" (36); news-v19's period chips are at most 26
+#: ("Quarter ended Sep 30, 2026"). tests/test_marketing_news_layouts.py lays the widest of each out with
+#: the worker's own code.
+OPENING_CHIP_MAX_CHARS = onscreen.OPENING_CHIP_MAX_CHARS
 #: Ratios in a `bars` image are rounded to this many places (JSONB re-serialises numbers).
 RATIO_PLACES = 4
 
@@ -248,6 +343,11 @@ INSIDER_LATE_BUSINESS_DAYS = 2
 THIRTEEN_F_MAX_AGE_DAYS = 120
 #: ~18 months: the adapter's `money_map_stale` gate, kept here as the template's own floor.
 MONEY_MAP_MAX_AGE_DAYS = 550
+#: A Money Map reads "by region" only while its rest bar ("Everything else": unattributed revenue plus lines
+#: the post cannot name) is at most this share of revenue (the review of 2026-10-16, MM-6): a larger rest is
+#: not shown to be regions — Coca-Cola's 22% "Unallocated" is mostly businesses — so the neutral wording,
+#: true of anything, is used instead. Exact at the boundary (Decimal).
+MONEY_MAP_REGION_MAX_OTHER_SHARE = Decimal("0.10")
 #: Congress Count (2b): the count is read at least this long after its disclosure month ends (the
 #: adapter's `congress_not_due` gate) and no more than CONGRESS_MAX_AGE_DAYS before the run; the
 #: month is always the calendar month before the run (`selection.congress_disclosure_month`).
@@ -264,6 +364,13 @@ STAKE_MAX_AS_OF_AGE_DAYS = 3 * 365
 STAKE_NAME_MAX_CHARS = 40
 STAKE_SOURCE_MAX_CHARS = 80
 STAKE_BACKGROUND_MAX_CHARS = 300
+#: news-v19 (Batch 1, plan item 5): whether a stake's catalogue BACKGROUND may be a long-caption paragraph
+#: (`_stake_background` still decides when it is on). Off: the live preview of 2026-10-14 printed the
+#: hand-kept fragments as they are ("Paid $30.0M for a convertible note …", "Rest of a $20.0B facility …"),
+#: in their own number style beside the headline's "$35 million" — notes for the catalogue's reviewer, not
+#: copy. A code constant, never a setting: `revalidate` recomposes the stored output, so turning it on is a
+#: template change — bump TEMPLATE_VERSION with it, once the backgrounds are rewritten as full sentences.
+STAKE_BACKGROUND_IN_CAPTIONS = False
 #: Name words the worker must draw whole, in characters (every bound proved in the widest glyph, "W",
 #: at the floor size against marketing/news_layouts.py by tests/test_marketing_news_layouts.py):
 #: a header's company name, a theme title and the cover's headline (NAME_WORD_MAX_CHARS); a stake's
@@ -292,6 +399,18 @@ EARNINGS_MAX_AGE_DAYS = 7
 EARNINGS_MAX_REPORT_LAG_DAYS = 120
 #: |actual − estimate| above this many times |estimate| is a feed error (`eps_gap_implausible`).
 EARNINGS_MAX_GAP_RATIO = 10.0
+#: news-v21 (main-session decision of 2026-10-20, owner-delegated): whether an earnings post may print its REVENUE
+#: against the revenue estimate (narration L2, card 2, the picture's Revenue row, the alt text, the ".long"
+#: headlines and their paragraph). Off: FMP gives no way to know which basis a revenue ESTIMATE is on. GE Aerospace's
+#: consensus is its ADJUSTED revenue (run-off insurance excluded) while the calendar's revenue ACTUAL is usually the
+#: GAAP figure (the statement's): Q3 2025's "revenue of $12.2 billion vs $10.4 billion" (+17.7%) held on neither
+#: basis. A gate reading the issuer's earlier calendar actuals (2026-10-20, removed) caught only the quarters whose
+#: ACTUALS change basis in the feed, never GE's or Travelers' 2025 ones. The pair stays REQUIRED (`implausible_figures`
+#: here; the adapter's `revenue_implausible` and its period check): the data-quality and quarter check, never printed.
+#: A code constant, never a setting: `revalidate` recomposes the stored output, so turning it on is a template change
+#: — bump TEMPLATE_VERSION with it, and only once a source states the estimate's basis. The revenue copy stays in
+#: LEXICON (pinned) for that day; tests/test_marketing_news_templates.py keeps the dormant path tested.
+EARNINGS_REVENUE_IN_POSTS = False
 #: Theme Explainer (2b): the member list is at most this old (the adapter's `theme_stale`); a member's
 #: segment fact is drawn and narrated only when its fiscal year is recent and its name is short
 #: enough for a grid tile line; narration covers at most THEME_NARRATED_MAX facts, the image at most
@@ -430,7 +549,9 @@ LEXICON: Dict[str, str] = {
     "ins.l2.many.many": "They report {k} purchases, {shares_w} {share_noun} in total, for {amt}.",
     "ins.l2.neutral.many": "{k} purchases are reported, {shares_w} {share_noun} in total, for {amt}.",
     "ins.l3.indirect.all": "The shares are reported as held indirectly, not in the {role_sp}'s own name.",
-    "ins.l3.indirect.some": "Part of the shares are reported as held indirectly.",
+    # news-v19 (Batch 1): "Some of the shares", as the caption says (`ins.p.flag.indirect.some`) — "Part of the
+    # shares are" read as a typo beside it
+    "ins.l3.indirect.some": "Some of the shares are reported as held indirectly.",
     "ins.l3.amended": "The figures shown here include an amended Form 4.",
     "ins.l3.explainer": "Officers and directors must file a Form 4 within two business days of a trade.",
     # news-v12: the explainer's late twin. A row whose earliest trade is more than INSIDER_LATE_BUSINESS_DAYS
@@ -447,8 +568,9 @@ LEXICON: Dict[str, str] = {
     # "At least {m} more …" line after it covers the late row, whose trade the rule would date to its filing)
     "ins.l3.form4": "A Form 4 is the report officers and directors file on their own trades.",
     # A count of rows is a LOWER BOUND, never the week's total (review round 9): the record holds at most
-    # INSIDER_MAX_ROWS rows, after the adapter's dollar, listing, cap, role and amendment gates.
-    "ins.l4.more.one": "At least 1 more {role_sp} disclosed buying their own company's stock in the same week.",
+    # INSIDER_MAX_ROWS rows, after the adapter's dollar, listing, cap, role and amendment gates. news-v19
+    # (Batch 1): the bound's "one" is a word ("At least one more"), never "1" — still a bound, never "One more".
+    "ins.l4.more.one": "At least one more {role_sp} disclosed buying their own company's stock in the same week.",
     "ins.l4.more.many": "At least {m} more {roles_sp} disclosed buying their own company's stock in the same week.",
     # news-v15: "each filing's", as the caption says (`ins.p.form4`) — never "the filing's" beside a row
     # whose purchases may come from several Form 4s
@@ -464,7 +586,7 @@ LEXICON: Dict[str, str] = {
     "ins.c3.indirect.all.title": "Held indirectly",
     "ins.c3.indirect.all.body": "Not in the {role}'s own name, per the filing",
     "ins.c3.indirect.some.title": "Partly held indirectly",
-    "ins.c3.indirect.some.body": "Part of the shares, per the filing",
+    "ins.c3.indirect.some.body": "Some of the shares, per the filing",
     "ins.c3.amended.title": "Amended filing",
     "ins.c3.amended.body": "The figures include an amended Form 4 (Form 4/A)",
     "ins.c3.explainer.title": "What a Form 4 is",
@@ -474,12 +596,14 @@ LEXICON: Dict[str, str] = {
     "ins.c3.late.window.title": "Trade dates",
     "ins.c3.late.body": "{trade_window_img} · filed {filed_window_img}",
     "ins.c4.more.title": "Same week",
-    "ins.c4.more.one": "At least 1 more {role} disclosed buying their own company's stock",
+    "ins.c4.more.one": "At least one more {role} disclosed buying their own company's stock",
     "ins.c4.more.many": "At least {m} more {roles} disclosed buying their own company's stock",
     "ins.c4.amounts.title": "How the amount is counted",
     "ins.c4.amounts.body": "Shares times the cost of each share, per the filing",
-    "ins.open.head": "{subj} disclosed buying {co} stock",
-    "ins.open.head.min": "{subj} disclosed buying stock",
+    # news-v19 (Batch 1): the subject already names the company ("GameStop's CEO"), so the cover never says it
+    # twice ("… disclosed buying GameStop stock"); one form, so no shorter twin is needed. Number-neutral (review
+    # of 2026-10-16, INS-1): "shares" read wrong above a spotlight's "1 purchase · 1 share" (one BRK-A share)
+    "ins.open.head": "{subj} disclosed buying stock",
     "ins.img.title.many": "At least {n} {roles} disclosed buying their own company's stock",
     # news-v12: it is the SHARES that are held, not the purchases (never "shares bought": "bought" is
     # off the verb table)
@@ -491,18 +615,24 @@ LEXICON: Dict[str, str] = {
     "ins.img.flag.indirect.all": "Held indirectly",
     "ins.img.flag.indirect.some": "Partly held indirectly",
     "ins.img.flag.amended": "Amended filing (Form 4/A)",
+    # news-v20: format-neutral — "of these", never "here": X posts this as text, and the picture platforms fall
+    # back to text without their picture; "of these" keeps the superlative to the rows the count is about
     "ins.ch.many.long": "At least {n} {roles} disclosed buying their own company's stock in Form 4s filed "
-                        "{window_cap}. The largest here: {co}, {amt}.",
+                        "{window_cap}. The largest of these: {co}, {amt}.",
     "ins.ch.many.short": "At least {n} {roles} disclosed buying their own company's stock in Form 4s filed "
                          "{window_cap}.",
     "ins.ch.many.min": "At least {n} {roles} disclosed buying their own company's stock.",
-    "ins.ch.one.long.one": "{subj} disclosed buying {amt} of {co} stock in a Form 4 filed {filed_cap}.",
-    "ins.ch.one.long.many": "{subj} disclosed buying {amt} of {co} stock in Form 4s filed {filed_window_cap}.",
-    "ins.ch.one.long.neutral": "{subj} disclosed buying {amt} of {co} stock on Form 4, filed {filed_cap}.",
+    # news-v19 (Batch 1): "of the company's stock" — the subject names the company, so the headline never names
+    # it twice ("Accelevation Holdings' CEO disclosed buying $3.7 million of Accelevation Holdings stock")
+    "ins.ch.one.long.one": "{subj} disclosed buying {amt} of the company's stock in a Form 4 filed {filed_cap}.",
+    "ins.ch.one.long.many": "{subj} disclosed buying {amt} of the company's stock in Form 4s filed "
+                            "{filed_window_cap}.",
+    "ins.ch.one.long.neutral": "{subj} disclosed buying {amt} of the company's stock on Form 4, filed {filed_cap}.",
     "ins.ch.one.short": "{subj} disclosed buying {amt} of the company's stock.",
     "ins.ch.one.min": "A {role} disclosed buying {amt} of their company's stock.",
-    "ins.p.rows": "The purchases shown: {rows}.",
-    "ins.p.rows2": "Also shown: {rows}.",
+    # news-v20: never "shown" — the paragraphs ride text posts too; together they list every row of the record
+    "ins.p.rows": "The purchases: {rows}.",
+    "ins.p.rows2": "More purchases: {rows}.",
     "ins.row.name": "{co}, {role} {person}, {amt}",
     "ins.row.noname": "{co}, {role}, {amt}",
     "ins.p.one.name.one": "The filing names {person}, {role_np} of {co}.",
@@ -532,11 +662,11 @@ LEXICON: Dict[str, str] = {
                                   "{last_trade_cap}.",
     "ins.p.form4.late": "A Form 4 is the report a company's officers and directors file on their own trades. Amounts "
                         "are each filing's share count times the cost it reports for each share.",
-    "ins.vp.more.one": "At least 1 more {role} disclosed buying their own company's stock in Form 4s filed the "
+    "ins.vp.more.one": "At least one more {role} disclosed buying their own company's stock in Form 4s filed the "
                        "same week.",
     "ins.vp.more.many": "At least {m} more {roles} disclosed buying their own company's stock in Form 4s filed the "
                         "same week.",
-    "ins.yt.long": "{subj} disclosed buying {amt_s} of {co} stock",
+    "ins.yt.long": "{subj} disclosed buying {amt_s} of the company's stock",
     "ins.yt.short": "{subj} disclosed buying {amt_s} of stock",
     "ins.yt.min": "A {role} disclosed buying {amt_s} of stock",
     # news-v15: a row is one buyer's TOTAL over all their purchase lines in the window, never one purchase
@@ -620,6 +750,9 @@ LEXICON: Dict[str, str] = {
     "f13.open.more.of": "{holdings} with more shares in the 13F of {filer}",
     "f13.open.fewer.poss": "{holdings} with fewer shares in {filer_s} 13F",
     "f13.open.fewer.of": "{holdings} with fewer shares in the 13F of {filer}",
+    # news-v19 (Batch 1, plan item 5): the cover's chip of a filer with NO symbol of its own (Pershing Square,
+    # ARK) — its logos are two holdings', so the chip says which quarter the filing covers, never a ticker
+    "f13.open.chip": "Quarter ended {period_img}",
     # Caption counts: the lead kind first, carrying the noun (".first"; "f13.cnt.new" is the new
     # kind's), then the rest without it.
     "f13.cnt.new": "{n} newly reported {holdings}",
@@ -636,6 +769,20 @@ LEXICON: Dict[str, str] = {
     "f13.ch.long.poss": "{filer_s} 13F for the quarter ended {period_cap}: {counts}.",
     "f13.ch.long.of": "The 13F of {filer} for the quarter ended {period_cap}: {counts}.",
     "f13.ch.short": "{subj}: {lead}.",
+    # news-v19 (the review of 2026-10-16, F13-1; the re-review of 2026-10-19, F13-1-R): a record carrying NO count of
+    # holdings with more or fewer shares — the adapter leaves both out when it cannot vouch for them: the filing's
+    # split lookups were capped or a row could not be re-checked (`split_unchecked`), or its re-check found a split
+    # the build did not restate (`split_in_window`) — says so IN ITS HEADLINES: X, Bluesky and Threads carry the
+    # headline alone and TikTok one paragraph, where the caption's counts ("1 newly reported holding, 1 no longer
+    # reported") read as the filing's whole change list (it was a paragraph, on the four long captions only).
+    # Worded without "more shares" / "fewer shares": such a post makes no claim of either kind (the adapter's test).
+    "f13.ch.long.poss.withheld": "{filer_s} 13F for the quarter ended {period_cap}: {counts}. This post does not "
+                                 "show share-count changes in holdings kept from the quarter before.",
+    "f13.ch.long.of.withheld": "The 13F of {filer} for the quarter ended {period_cap}: {counts}. This post does not "
+                               "show share-count changes in holdings kept from the quarter before.",
+    # the shortest captions (X 123, Bluesky 108 characters of body) cannot hold that sentence: a compact twin of the
+    # short headline, then the plain one ("{subj}: {lead}." names the lead kind alone — no change list to read as whole)
+    "f13.ch.short.withheld": "{subj}: {lead}; share-count changes in kept holdings not shown.",
     "f13.p.new": "Newly reported, with the value the filing gives at the quarter's end: {items}.",
     "f13.p.gone": "No longer reported: {items}.",
     "f13.p.more": "Reported more shares of: {items}.",
@@ -665,9 +812,14 @@ LEXICON: Dict[str, str] = {
     "mm.hook.loss.tiny": "{co_sp}: net loss {per100} per $100 of revenue.",
     "mm.l1": "{co_sp} reported revenue of {rev} in fiscal {fy}.",
     # news-v12: the breakdown is FMP's product segmentation — product or service lines for some companies,
-    # reportable segments for others — so no line calls a part a "segment" (Apple's iPhone is not one)
-    "mm.l2.two": "Its {s1} business made up {sh1} of {basis}, and {s2} made up {sh2} of {basis}.",
-    "mm.l2.one": "Its {s1} business made up {sh1} of {basis} that year.",
+    # reportable segments for others — so no line calls a part a "segment" (Apple's iPhone is not one).
+    # news-v19 (Batch 1): nor a "business" — McDonald's parts are markets, Costco's are countries — so the
+    # line says only the part's name; a region name that takes "the" says it in running text
+    # (`mm.region.the`, "The" when it opens the sentence), never on a bar, a card or the alt text.
+    "mm.l2.two": "{s1} made up {sh1} of {basis}, and {s2} made up {sh2} of {basis}.",
+    "mm.l2.one": "{s1} made up {sh1} of {basis} that year.",
+    "mm.region.the": "the {name}",
+    "mm.region.the.cap": "The {name}",
     "mm.basis.revenue": "revenue",
     "mm.basis.segments": "combined sales",
     "mm.word.profit": "profit",
@@ -695,8 +847,14 @@ LEXICON: Dict[str, str] = {
     "mm.c4.loss.title": "Net loss",
     "mm.c4.body": "{ni_s} in fiscal {fy}",
     "mm.img.title": "How {co} makes money",
-    "mm.img.subtitle": "Fiscal {fy} · as reported",
-    "mm.bar.other": "Other or not broken out",
+    # news-v19 (Batch 1): never "as reported" — FMP fills gross profit as revenue minus cost of revenue for a
+    # company that reports no gross subtotal (Amazon), so the figures are the annual results, explained
+    "mm.img.subtitle": "Fiscal {fy} · annual results",
+    # the rest bar (review of 2026-10-16, live preview F6): it holds revenue the breakdown never attributes AND
+    # lines the company does break out that the post cannot name (a code, a label too long to draw, a sixth
+    # line) — "not broken out" was false for the second, and a plain "Other" reads as a reported "Other" line
+    # (the 2026-10-10 sweep); "Everything else" is true of both
+    "mm.bar.other": "Everything else",
     "mm.bar.elim": "Intersegment eliminations",
     "mm.flow.revenue": "Revenue",
     "mm.flow.gross.profit": "Gross profit",
@@ -709,25 +867,36 @@ LEXICON: Dict[str, str] = {
     "mm.img.callout.loss": "For every $100 of revenue, the net loss was {per100}",
     "mm.open.profit": "of every $100 of {co} revenue was net income",
     "mm.open.loss": "net loss for every $100 of {co} revenue",
+    # news-v19 (Batch 1, plan item 5): the cover's chip says which fiscal year the figure is for (it said the
+    # ticker, which the logo already shows)
+    "mm.open.chip": "Fiscal {fy}",
     "mm.ch.long.profit": "How {co} makes money: {rev} of revenue in fiscal {fy}, and {per100} of every $100 kept "
                          "as net income.",
     "mm.ch.long.loss": "How {co} makes money: {rev} of revenue in fiscal {fy}, and a net loss of {per100} for "
                        "every $100.",
     "mm.ch.short": "How {co} makes money, from its fiscal {fy} results.",
-    "mm.p.segments": "Revenue by product or business line in fiscal {fy}: {items}.",
-    "mm.p.elim": "Sales between its own business lines, {elim}, are taken out of that total.",
+    # news-v19 (Batch 1): the neutral breakdown — true of product lines and of markets alike; "by region" only
+    # when EVERY named part is on `company_news_rules.REGION_NAMES` (Costco's countries), never a guess
+    "mm.p.segments": "How fiscal {fy} revenue broke down: {items}.",
+    "mm.p.segments.region": "How fiscal {fy} revenue broke down by region: {items}.",
+    "mm.p.elim": "Sales between parts of the company, {elim}, are taken out of that total.",
     "mm.item": "{name}, {value}",
-    "mm.item.other": "other or not broken out, {value}",
+    "mm.item.other": "everything else, {value}",
     "mm.p.costs.both": "After the cost of sales, gross {gp_word} was {gp}. After operating costs, operating "
                        "{op_word} was {op}.",
     "mm.p.costs.gross": "After the cost of sales, gross {gp_word} was {gp}.",
     "mm.p.costs.operating": "After operating costs, operating {op_word} was {op}.",
     "mm.p.net.profit": "Net income was {ni}: {per100} of every $100 of revenue.",
     "mm.p.net.loss": "The net loss was {ni}: {per100} for every $100 of revenue.",
-    "mm.p.source": "Figures are as reported in the company's annual financial statements for fiscal {fy}.",
+    "mm.p.source": "Figures come from the company's annual financial statements for fiscal {fy}.",
+    # appended to `mm.p.source` whenever the map shows gross profit — or, for a gross LOSS, its twin (review of
+    # 2026-10-16, MM-5: a post showing only "Gross loss" defined "gross profit")
+    "mm.p.gross": "Gross profit is revenue minus the cost of sales.",
+    "mm.p.gross.loss": "Gross profit or loss is revenue minus the cost of sales.",
     "mm.yt": "How {co} makes money: fiscal {fy} results",
     "mm.yt.short": "How {co} makes money",
-    "mm.alt.segments": "Bars show revenue by product or business line: {items}.",
+    "mm.alt.segments": "Bars show how revenue broke down: {items}.",
+    "mm.alt.segments.region": "Bars show revenue by region: {items}.",
     "mm.alt.flow": "A second set of bars shows {items}.",
     "mm.alt.item": "{label} {value}",
     "mm.alt.callout": "{callout}.",
@@ -773,8 +942,14 @@ LEXICON: Dict[str, str] = {
     # disclosed dollar amount (an ownership share alone is never posted: its basis is not recorded).
     "st.kicker": "COMPANY STAKES",
     "st.asof": "As of {as_of_img}",
-    "st.h.invested": "{inv} invested {amt} in {ee}",
-    "st.h.committed_up_to": "{inv} committed up to {amt} to {ee}",
+    # news-v19 (Batch 1, plan item 5): the investee as a NOUN PHRASE — `{ee_np}`, and `{ee_np_cap}` opening a
+    # sentence — is the name, or "the {ee}" for a DESCRIPTIVE name (`company_news_rules.takes_name_article`:
+    # "As of that date, the Louisiana data center venture was not listed …"). `{ee}` stays the bare name where
+    # a determiner already stands ("{inv_s} {ee} stake", "The {ee} stake of …") and on every drawn label.
+    "st.ee.the": "the {ee}",
+    "st.ee.the.cap": "The {ee}",
+    "st.h.invested": "{inv} invested {amt} in {ee_np}",
+    "st.h.committed_up_to": "{inv} committed up to {amt} to {ee_np}",
     # news-v17: a carrying or fair value names no filer. The source may be ANOTHER filer's document (the
     # catalogue's Berkshire Hathaway Energy 10-Q rows sit under the investor Berkshire Hathaway), so no
     # entry says "{inv} reported its …" or "{inv} carried its …": the figure is the source's — the
@@ -791,10 +966,10 @@ LEXICON: Dict[str, str] = {
     "st.l2.committed_up_to": "That is the most the agreement allows; the source says up to that amount.",
     "st.l2.carrying_value": "Carrying value is the amount the source says the stake was recorded at on that date.",
     "st.l2.fair_value": "Fair value is the amount the source says the stake was measured at on that date.",
-    "st.l3.private": "As of that date, {ee} was not listed on a public exchange.",
-    "st.l3.non_us": "As of that date, shares of {ee} traded on an exchange outside the U.S.",
-    "st.l3.us": "Shares of {ee} are listed on a U.S. exchange.",
-    "st.l3.listed": "{ee} has been listed on an exchange since {month_sp}.",
+    "st.l3.private": "As of that date, {ee_np} was not listed on a public exchange.",
+    "st.l3.non_us": "As of that date, shares of {ee_np} traded on an exchange outside the U.S.",
+    "st.l3.us": "Shares of {ee_np} are listed on a U.S. exchange.",
+    "st.l3.listed": "{ee_np_cap} has been listed on an exchange since {month_sp}.",
     "st.l3.commitment": "A commitment is money agreed to be invested, which may be paid over time.",
     "st.l3.source": "The figure comes from a company filing or an official company release.",
     "st.l4": "Companies disclose stakes like this in filings and official releases.",
@@ -833,17 +1008,17 @@ LEXICON: Dict[str, str] = {
     # says "as of" — the date is the source's or the period's, never the deal's ("Invested · Jul 31, 2026"
     # read as the day of the investment, "Committed up to · Jun 30, 2026" as a deadline)
     "st.open.chip": "{basis_title} · as of {as_of_img}",
-    "st.open.invested": "{inv} invested in {ee}",
-    "st.open.committed_up_to": "{inv} committed up to this amount to {ee}",
-    "st.open.dated.poss": "{inv_s} stake in {ee} as of that date",
-    "st.open.dated.of": "The stake of {inv} in {ee} as of that date",
+    "st.open.invested": "{inv} invested in {ee_np}",
+    "st.open.committed_up_to": "{inv} committed up to this amount to {ee_np}",
+    "st.open.dated.poss": "{inv_s} stake in {ee_np} as of that date",
+    "st.open.dated.of": "The stake of {inv} in {ee_np} as of that date",
     # the undated twins: the alt title's and the YouTube title's last fallback (never the cover)
-    "st.open.value.poss": "{inv_s} stake in {ee}",
-    "st.open.value.of": "The stake of {inv} in {ee}",
+    "st.open.value.poss": "{inv_s} stake in {ee_np}",
+    "st.open.value.of": "The stake of {inv} in {ee_np}",
     "st.ch.long": "{h}, as of {as_of_cap}. Source: {source}.",
     "st.ch.short": "{h}, as of {as_of_cap}.",
     "st.p.source": "Source: {source}, as of {as_of_cap}.",
-    "st.alt.body": "The image shows {inv} and {ee}, with {amt_s} labelled {label}.",
+    "st.alt.body": "The image shows {inv} and {ee_np}, with {amt_s} labelled {label}.",
     # Earnings vs Estimates (2b-3). The reported EPS beside the analyst estimate; never "expected",
     # "beat", "miss" or "surprise"; no "adjusted" claim (contract A1): the basis note says the figure
     # can be on a different basis. Review round 9: the calendar's EPS is the figure on the basis
@@ -877,6 +1052,10 @@ LEXICON: Dict[str, str] = {
     "er.c4.quarterly.title": "Each quarter",
     "er.c4.quarterly.body": "Results are reported; analysts publish estimates first",
     "er.open.head": "EPS vs an analyst estimate of {est_s}",
+    # news-v19 (Batch 1, plan item 5): the cover's chip dates the figures — the quarter's end when the adapter
+    # verified it against the statements (`EarningsReport.period_end`), else the report day; never the ticker
+    "er.open.chip.period": "Quarter ended {period_img}",
+    "er.open.chip.report": "Reported {report_img}",
     "er.img.title": "Reported vs analyst estimates",
     "er.img.sub.period": "Quarter ended {period_img} · reported {report_img}",
     "er.img.sub.report": "Reported {report_img}",
@@ -925,7 +1104,11 @@ LEXICON: Dict[str, str] = {
     # news-v12: the fact's own fiscal year — up to THEME_FACT_MAX_YEARS old, so never "its latest reported year"
     "th.one.poss": "{m1_s} largest revenue line in fiscal {fy} was {g1}.",
     "th.one.of": "The largest revenue line of {m1} in fiscal {fy} was {g1}.",
-    "th.explainer": "A revenue line is one product or business in a company's breakdown of its revenue.",
+    # news-v19 (the review of 2026-10-16, TH-1): a member's breakdown can be regional (Costco's countries), so a
+    # revenue line is a product, a business OR a region — "one product or business" was false for it — and a
+    # region fact reads "the United States" in the narrated sentence (`th.region.the`, the Money Map rule)
+    "th.explainer": "A revenue line is one product, business or region in a company's revenue breakdown.",
+    "th.region.the": "the {name}",
     "th.grouping": "This grouping is Caydex's own; its members can change.",
     # news-v16: a card stays on screen for its whole line, so it keeps the line's fiscal year
     "th.c.pair.title": "{m1} and {m2}",
@@ -937,7 +1120,7 @@ LEXICON: Dict[str, str] = {
     "th.c.one.title.min": "Largest revenue line",
     "th.c.one.body.min": "{m1}, fiscal {fy}: {g1}",
     "th.c.explainer.title": "What a revenue line is",
-    "th.c.explainer.body": "One product or business in a revenue breakdown",
+    "th.c.explainer.body": "One product, business or region in a revenue breakdown",
     "th.c.grouping.title": "A Caydex grouping",
     "th.c.grouping.body": "Its members can change",
     "th.img.sub": "{n} companies, by largest revenue line",
@@ -952,13 +1135,13 @@ LEXICON: Dict[str, str] = {
     "th.open.head": "companies in {theme}, by largest revenue line",
     "th.open.head.part": "of the {m} companies in {theme}, by largest revenue line",
     # "each one's" only when every listed member has its revenue-line fact in the post
-    "th.ch.long": "{theme}: where {n} companies get their revenue, by largest product or business line.",
-    "th.ch.long.each": "{theme}: where {n} companies get their revenue, by each one's largest product or "
-                       "business line.",
-    "th.ch.long.part": "{theme}: where {n} of its {m} companies get their revenue, by largest product or "
-                       "business line.",
+    # news-v19 (the review of 2026-10-16, TH-1): "revenue line", as the explainer defines it — never "product or
+    # business line", false for a member whose breakdown is regional
+    "th.ch.long": "{theme}: where {n} companies get their revenue, by largest revenue line.",
+    "th.ch.long.each": "{theme}: where {n} companies get their revenue, by each one's largest revenue line.",
+    "th.ch.long.part": "{theme}: where {n} of its {m} companies get their revenue, by largest revenue line.",
     "th.ch.long.part.each": "{theme}: where {n} of its {m} companies get their revenue, by each one's largest "
-                            "product or business line.",
+                            "revenue line.",
     "th.ch.short": "{theme}: where {n} companies get their revenue.",
     "th.ch.short.part": "{theme}: where {n} of its {m} companies get their revenue.",
     # "{theme}: {n} companies." reads as the theme's size: offered only when the record says it is
@@ -988,9 +1171,21 @@ LEXICON: Dict[str, str] = {
 }
 
 
+#: A plain slot directly before a period of the entry: "… was {g2}." (the re-review of 2026-10-19, TH-PUNCT-1).
+_SLOT_PERIOD_RE = re.compile(r"\{([A-Za-z0-9_]+)\}\.")
+
+
 def _t(entry_id: str, **fills: Any) -> str:
-    """LEXICON[entry_id] with its slots filled. A missing slot is a bug (KeyError), never a gap."""
-    return LEXICON[entry_id].format_map(fills)
+    """LEXICON[entry_id] with its slots filled. A missing slot is a bug (KeyError), never a gap. A filled value that
+    already ENDS in a period ("Walmart U.S.", "the U.S.") and stands before the entry's own period ends the sentence
+    itself (the re-review of 2026-10-19, TH-PUNCT-1: "… and Walmart's was Walmart U.S.." was narrated and burned
+    into the captions) — the lexicon entry is unchanged, only the doubled stop is not written."""
+    template = LEXICON[entry_id]
+    if "}." in template:
+        template = _SLOT_PERIOD_RE.sub(
+            lambda m: ("{" + m.group(1) + "}" if isinstance(fills.get(m.group(1)), str)
+                       and fills[m.group(1)].endswith(".") else m.group(0)), template)
+    return template.format_map(fills)
 
 
 # ── numbers and dates (Kokoro reads the caption/narration forms well) ─────────
@@ -1217,6 +1412,7 @@ def eps_words(value: float) -> str:
 #: grow from 1 to REVENUE_MAX_PLACES until the gap the pair SHOWS is within REVENUE_GAP_TOLERANCE of
 #: the true gap (so it has the true sign, reads equal only when the figures are equal, and is not
 #: far off in size); when no precision does, `revenue_pair` is None and the post leaves revenue out.
+#: news-v21: written only while `EARNINGS_REVENUE_IN_POSTS` is on (off: the estimate's basis is unknown).
 REVENUE_MAX_PLACES = 3
 REVENUE_GAP_TOLERANCE = Decimal("0.1")
 #: The pair's units (the image's suffix, the words' unit): the same scale in both forms. A pair
@@ -1523,13 +1719,13 @@ class _Parts:
     #: Congress count's "each member once", a Form 4 row's role and company. Empty for the series whose
     #: headlines never repeat a paragraph (13F, Money Map, Theme): their captions are unchanged.
     stated_by_headline: Dict[str, FrozenSet[str]] = field(default_factory=dict)
-
-
-def _first_fit(variants: Sequence[str], limit: int) -> str:
-    for v in variants:
-        if len(v) <= limit:
-            return v
-    return min(variants, key=len)
+    #: B3-LIVE-1 (2026-10-20): the PICTURE parts speak of what only the picture shows — a Form 4 roundup's rows
+    #: ("The largest of these: …", "The purchases: …", "More purchases: …", worded format-neutrally since
+    #: news-v20: they ride text posts too) — while the video is about the lead row
+    #: alone. The Facebook / LinkedIn / Threads captions are built from the picture parts (`_caption_bodies`), so
+    #: such a caption may ride the day's VIDEO as an extra post only when the video draws the picture (its data
+    #: card): `extra_video_problems`. Never part of the composed output.
+    picture_bound: bool = False
 
 
 def _role(role: str, form: str) -> str:
@@ -1647,15 +1843,21 @@ def _insider_parts(rec: rules.InsiderBuysWeek, run_date: date, suppressed: Froze
     rows = [r for r in rec.rows if not (r.person_name and rules.is_congress_name(r.person_name))]
     if not rows:
         raise NewsTemplateRefused("too_few_rows", "every row named a member of Congress")
-    names_ok = rules.person_names_allowed()
+    # news-v19 (owner decision 4, 2026-10-15): from an even year's Election Day through January 3 the
+    # roster (the SITTING Congress) cannot know a member-elect, so no person is named — every row is
+    # role-only, the post still runs. Read from the RUN date: `revalidate` recomposes on the same date,
+    # so a stored output and its re-check agree. The member drop above still runs on the record's names.
+    # Review of 2026-10-16 (ME-1): judged over every day the run's posts can go out (`members_elect_for_run`:
+    # the run date and the two after it — a Monday-before-Election-Day post can go out on Election Day).
+    names_ok = rules.person_names_allowed() and not rules.members_elect_for_run(run_date)
 
     def person(r: rules.InsiderPurchase) -> Optional[str]:
         return r.person_name if (names_ok and r.person_name and r.person_name not in suppressed) else None
 
     for r in rows:
-        problem = _slot_problem(r.company.name)
-        if problem:
-            raise NewsTemplateRefused("slot_rejected", f"company name: {problem}")
+        # the review of 2026-10-16: no word the cover's headline cannot draw whole (the record refuses it too,
+        # `company_news_rules.COMPANY_NAME_WORD_MAX_CHARS`; this stands behind it, as the other series' checks do)
+        _name_slot(r.company.name, "company name")
     r0, n = rows[0], len(rows)
     co, sym = r0.company.name, r0.company.symbol
     co_sp = spoken_company(co)
@@ -1767,9 +1969,9 @@ def _insider_parts(rec: rules.InsiderBuysWeek, run_date: date, suppressed: Froze
             l4 = [_t(f"ins.l3.{l4_key}")]
             c4 = (_t(f"ins.c3.{l4_key}.title"), _t(f"ins.c3.{l4_key}.body"))
 
-    # opening card + image
-    head = _first_fit([_t("ins.open.head", subj=subj, co=co), _t("ins.open.head.min", subj=subj)],
-                      OPEN_HEADLINE_MAX_CHARS)
+    # opening card + image (news-v19: one headline form — the subject names the company, so no shorter twin
+    # without a second company name is needed)
+    head = _t("ins.open.head", subj=subj)
     opening = {"kicker": kicker, "logos": [sym], "chip": sym, "figure": amt_s, "headline": head}
     indirect_all, amended_all = _ins_flags(rows)
     if n >= 2:
@@ -1887,7 +2089,7 @@ def _insider_parts(rec: rules.InsiderBuysWeek, run_date: date, suppressed: Froze
                   source=rules.source_label(rec), as_of=as_of,
                   image_headlines=image_heads, image_paragraphs=image_paras,
                   video_headlines=one_heads, video_paragraphs=video_paras, youtube_titles=yt,
-                  persons=persons, names=names, stated_by_headline=one_stated)
+                  persons=persons, names=names, stated_by_headline=one_stated, picture_bound=n >= 2)
 
 
 # ── 13F Season ────────────────────────────────────────────────────────────────
@@ -2145,8 +2347,13 @@ def _thirteen_f_parts(rec: rules.ThirteenFFiling, run_date: date) -> _Parts:
     opening: Dict[str, Any] = {"kicker": _t("f13.kicker"), "logos": open_logos,
                                "figure": str(n_lead),
                                "headline": _t(head_id, holdings=_holdings(n_lead), filer=filer, filer_s=poss)}
+    # The chip under the logo: the filer's own ticker beside its own logo; news-v19 (Batch 1, plan item 5): a
+    # filer with no symbol (its logos are two holdings') gets the quarter the filing covers — the cover said
+    # no date at all, and the figure ("7" holdings) read as current
     if rec.filer_symbol is not None:
         opening["chip"] = rec.filer_symbol
+    else:
+        opening["chip"] = _t("f13.open.chip", period_img=period_img)
 
     # captions: the counts lead with the lead kind, carrying the noun
     count_phrases = []
@@ -2161,9 +2368,17 @@ def _thirteen_f_parts(rec: rules.ThirteenFFiling, run_date: date) -> _Parts:
     lead_txt = (_t("f13.cnt.new", n=n_lead, holdings=_holdings(n_lead)) if lead == "newly_reported"
                 else _t(f"f13.lead.{short}", n=n_lead, holdings=_holdings(n_lead)))
     period_cap = date_caption(rec.period_end, run_date)
-    long_head = (_t("f13.ch.long.of", filer=filer, period_cap=period_cap, counts=counts_txt) if poss is None
-                 else _t("f13.ch.long.poss", filer_s=poss, period_cap=period_cap, counts=counts_txt))
-    heads = [long_head, _t("f13.ch.short", subj=subj, lead=lead_txt)]
+    # the review of 2026-10-16 (F13-1) and the re-review of 2026-10-19 (F13-1-R): when the record states no count of
+    # more / fewer shares at all (their keys left out, never 0: the adapter's `split_unchecked`, `split_in_window`),
+    # every headline that lists the counts says the post does not show them — every caption field carries a headline,
+    # and X, Bluesky and Threads carry nothing else; the compact short twin says it where the long one cannot fit,
+    # and the plain short headline (the lead kind alone, no change list) is the last fallback
+    withheld = all(k not in counts and not by[k] for k in ("increased", "decreased"))
+    tail = ".withheld" if withheld else ""
+    long_head = (_t(f"f13.ch.long.of{tail}", filer=filer, period_cap=period_cap, counts=counts_txt) if poss is None
+                 else _t(f"f13.ch.long.poss{tail}", filer_s=poss, period_cap=period_cap, counts=counts_txt))
+    heads = [long_head] + ([_t("f13.ch.short.withheld", subj=subj, lead=lead_txt)] if withheld else []) + [
+        _t("f13.ch.short", subj=subj, lead=lead_txt)]
 
     def items(kind: str, *, value: bool) -> str:
         """Every move of `kind` the record carries, then (news-v15) how many of the kind's count it leaves
@@ -2187,7 +2402,8 @@ def _thirteen_f_parts(rec: rules.ThirteenFFiling, run_date: date) -> _Parts:
                "no_longer_reported": lambda: _t("f13.p.gone", items=items("no_longer_reported", value=False)),
                "increased": lambda: _t("f13.p.more", items=items("increased", value=False)),
                "decreased": lambda: _t("f13.p.fewer", items=items("decreased", value=False))}
-    # one paragraph per kind with moves, the lead's first (TikTok carries only that one)
+    # one paragraph per kind with moves, the lead's first (TikTok carries only that one); the withheld sentence is in
+    # every headline (above), never a paragraph of its own
     paras = [para_of[k]() for k in ranked[:3]] + [_t("f13.p.explainer")]
     yt = ([_t("f13.yt.of", filer=filer, lead=lead_txt)] if poss is None
           else [_t("f13.yt.poss", filer_s=poss, lead=lead_txt)]) + [_t("f13.yt.min", lead=lead_txt)]
@@ -2213,6 +2429,9 @@ def _money_map_parts(rec: rules.MoneyMap, run_date: date) -> _Parts:
         problem = _slot_problem(value)
         if problem:
             raise NewsTemplateRefused("slot_rejected", f"name: {problem}")
+    # the review of 2026-10-16: no company-name word the cover's headline cannot draw whole (the record refuses
+    # it too, `company_news_rules.COMPANY_NAME_WORD_MAX_CHARS`; this stands behind it, as the other series' do)
+    _name_slot(co, "company name")
     rev = _dec(rec.revenue_usd)
     ni = _dec(rec.net_income_usd)
     gp = None if rec.gross_profit_usd is None else _dec(rec.gross_profit_usd)
@@ -2230,6 +2449,20 @@ def _money_map_parts(rec: rules.MoneyMap, run_date: date) -> _Parts:
     else:
         basis, denom = _t("mm.basis.segments"), seg_total
     sh = [pct(float(_dec(s.value_usd) / denom)) for s in segs]
+    # news-v19 (Batch 1): "by region" only when EVERY named part is a region by its exact name — else the
+    # neutral wording, true of product lines and markets alike (the rest bar is never a named part). The review
+    # of 2026-10-16 (MM-6): and only while the rest is small — Coca-Cola's live map held $10.4B (22%)
+    # "Unallocated", mostly its Bottling Investments and Global Ventures businesses, which "by region" passed
+    # off as unassigned regions
+    by_region = all(rules.is_region_name(s.name) for s in segs) and other <= MONEY_MAP_REGION_MAX_OTHER_SHARE * rev
+
+    def said(name: str, *, opens: bool = False) -> str:
+        """A part's name in RUNNING TEXT: "the United States" for a `REGION_ARTICLE` name ("The …" when it
+        opens the sentence), else the name as drawn. Never on a bar label, a card or the alt text."""
+        if not rules.takes_region_article(name):
+            return name
+        return _t("mm.region.the.cap" if opens else "mm.region.the", name=name)
+
     fy = rec.fiscal_year
     co_sp = spoken_company(co)
     profit = ni >= 0
@@ -2252,8 +2485,9 @@ def _money_map_parts(rec: rules.MoneyMap, run_date: date) -> _Parts:
         # hooks keeps exactly them, and `_pick_script` can never step down to this one.
         hook.append(_t("mm.hook.profit.tiny" if profit else "mm.hook.loss.tiny", co_sp=co_sp, per100=per100))
     l1 =[_t("mm.l1", co_sp=co_sp, rev=rev_w, fy=fy)]
-    l2 = [_t("mm.l2.two", s1=segs[0].name, sh1=sh[0], s2=segs[1].name, sh2=sh[1], basis=basis),
-          _t("mm.l2.one", s1=segs[0].name, sh1=sh[0], basis=basis)]
+    l2 = [_t("mm.l2.two", s1=said(segs[0].name, opens=True), sh1=sh[0], s2=said(segs[1].name), sh2=sh[1],
+             basis=basis),
+          _t("mm.l2.one", s1=said(segs[0].name, opens=True), sh1=sh[0], basis=basis)]
     c2_body = [_t("mm.c2.two", s1=segs[0].name, sh1=sh[0], s2=segs[1].name, sh2=sh[1], basis=basis),
                _t("mm.c2.one", s1=segs[0].name, sh1=sh[0], basis=basis)]
     gp_fill = {} if gp is None else {"gp_word": word[gp >= 0], "gp": money_words(float(abs(gp))),
@@ -2305,24 +2539,31 @@ def _money_map_parts(rec: rules.MoneyMap, run_date: date) -> _Parts:
         "header": {"logo": sym, "name": co}, "title": title, "subtitle": _t("mm.img.subtitle", fy=fy),
         "segments": segments, "flow": flow, "callout": callout,
     }
-    opening = {"kicker": _t("mm.kicker"), "logos": [sym], "chip": sym, "figure": per100,
+    # news-v19 (Batch 1, plan item 5): the chip says the fiscal year the "per $100" figure is for (the logo
+    # already names the company, and a year-free cover read as this year's)
+    opening = {"kicker": _t("mm.kicker"), "logos": [sym], "chip": _t("mm.open.chip", fy=fy), "figure": per100,
                "headline": _t("mm.open.profit" if profit else "mm.open.loss", co=co)}
     # captions
-    seg_items = [_t("mm.item", name=s.name, value=money_words(s.value_usd)) for s in segs]
+    seg_items = [_t("mm.item", name=said(s.name), value=money_words(s.value_usd)) for s in segs]
     if other > 0:
         seg_items.append(_t("mm.item.other", value=money_words(float(other))))
-    seg_para = _t("mm.p.segments", fy=fy, items="; ".join(seg_items))
+    seg_para = _t("mm.p.segments.region" if by_region else "mm.p.segments", fy=fy, items="; ".join(seg_items))
     if elim < 0:
         seg_para += " " + _t("mm.p.elim", elim=money_words(float(abs(elim))))
     paras = [seg_para]
     if costs != "none":
         paras.append(_t(f"mm.p.costs.{costs}", **gp_fill, **op_fill))
     paras.append(_t("mm.p.net.profit" if profit else "mm.p.net.loss", ni=ni_w, per100=per100))
-    paras.append(_t("mm.p.source", fy=fy))
+    # news-v19 (Batch 1): where the figures come from — never "as reported" — and, whenever a gross line is
+    # shown, what gross profit is (FMP's own revenue − cost of revenue where the company reports no subtotal)
+    source_para = _t("mm.p.source", fy=fy)
+    if gp is not None:
+        source_para += " " + _t("mm.p.gross" if gp >= 0 else "mm.p.gross.loss")
+    paras.append(source_para)
     heads = [_t("mm.ch.long.profit" if profit else "mm.ch.long.loss", co=co, rev=rev_w, fy=fy, per100=per100),
              _t("mm.ch.short", co=co, fy=fy)]
-    alt = [_t("mm.alt.segments", items="; ".join(_t("mm.alt.item", label=b["label"], value=b["value"])
-                                                  for b in segments)),
+    alt = [_t("mm.alt.segments.region" if by_region else "mm.alt.segments",
+              items="; ".join(_t("mm.alt.item", label=b["label"], value=b["value"]) for b in segments)),
            _t("mm.alt.flow", items="; ".join(_t("mm.alt.item", label=b["label"], value=b["value"]) for b in flow)),
            _t("mm.alt.callout", callout=callout)]
     as_of = _t("mm.asof", fy=fy, period_img=date_image(rec.period_end))
@@ -2450,9 +2691,42 @@ def _names_a_person(text: str) -> bool:
     return any(t[0].isupper() and t.lower() in known and nxt[0].isupper() for t, nxt in zip(toks, toks[1:]))
 
 
+def _stake_person_problem(rec: rules.CompanyStake, source: str) -> Optional[str]:
+    """Batch 1 (2026-10-15, plan item 4): which drawn stake text names a person, or None.
+
+    The source title (the image's source line, card 4, every caption) and the local listing (card 3)
+    are drawn on every post, and an UNLISTED investee's name heads it — the cover, the hook, the
+    YouTube title. Under the 2026-10-09 rules a person is named only in written body text, and a stake
+    post has none, so a hand-kept "Jensen Huang keynote (Mar 18, 2026)" or "Warren Buffett's 2025
+    shareholder letter" refuses the record. Three checks, fail closed: `_names_a_person` (a given name
+    before a capitalised word), the compliance scan's ``person_named`` (the person lexicons, a lone
+    surname such as "Huang keynote") and — the review of 2026-10-16, ST-1 — the stake-source surnames
+    (`company_news_rules.stake_person_surname_hits`: "Dario Amodei essay", "Altman blog", "Abel letter",
+    which the lesson lexicons missed). The record's own COMPANIES are masked first — the investor, and a
+    listed investee under both its names — so a company named for a person stays a company ("Eli Lilly
+    2025 Form 10-K"; a listed "Charles Schwab", whose name is never checked: its profile verified it).
+    An unlisted investee's own name is never masked: it is the text checked."""
+    companies = [rec.investor.name]
+    if rec.investee is not None:
+        companies += [rec.investee.name, rec.investee_name]
+    rx = _mask_re(companies)
+    fields: List[Tuple[str, Optional[str]]] = [("source title", source), ("local listing", rec.local_listing)]
+    if rec.investee is None:
+        fields.append(("investee name", rec.investee_name))
+    for what, value in fields:
+        if not value:
+            continue
+        masked = _masked(value, rx)
+        if (_names_a_person(masked) or rules.stake_person_surname_hits(masked)
+                or any(v.code == "person_named" for v in scan_text(f"stake.{what.replace(' ', '_')}", masked))):
+            return what
+    return None
+
+
 def _stake_background(text: Any, names: Sequence[str]) -> Optional[str]:
     """The stake's background line when every rule passes, else None (it is dropped, never fixed:
-    hand-written free text with unnormalised numbers — A3: only ever a long-caption paragraph)."""
+    hand-written free text with unnormalised numbers — A3: only ever a long-caption paragraph, and since
+    news-v19 only while STAKE_BACKGROUND_IN_CAPTIONS is on — off by default)."""
     if not isinstance(text, str) or not text or len(text) > STAKE_BACKGROUND_MAX_CHARS or not text.isascii():
         return None
     if _slot_problem(text) or not text[0].isupper() or not text.endswith("."):
@@ -2505,8 +2779,25 @@ def _stake_parts(rec: rules.CompanyStake, run_date: date) -> _Parts:
         problem = _slot_problem(value)
         if problem or len(value) > cap or _longest_word(value) > NAME_WORD_MAX_CHARS:
             raise NewsTemplateRefused("slot_rejected", f"{what}: {problem or 'too long to draw whole'}")
+    # Batch 1 (2026-10-15): no drawn stake text names a person (the detail names the field, never the text)
+    named = _stake_person_problem(rec, source)
+    if named is not None:
+        raise NewsTemplateRefused("slot_rejected", f"{named}: names a person")
     inv_sp, ee_sp = spoken_company(inv), spoken_company(ee)
     amt, amt_s = money_words(rec.value_usd), money_image(rec.value_usd)
+    # news-v19 (Batch 1, plan item 5): a DESCRIPTIVE investee name ("Louisiana data center venture") is a
+    # noun phrase that takes "the" in running text — decided once, on the display name, for every form
+    article = rules.takes_name_article(ee)
+
+    def ee_fills(name: str) -> Dict[str, str]:
+        """The investee's three forms: `ee` the bare name (after a determiner — "{inv_s} {ee} stake" — and on
+        every drawn label), `ee_np` the noun phrase ("the {ee}" for a descriptive name) and `ee_np_cap` the
+        same opening a sentence. A company's own name is all three."""
+        if not article:
+            return {"ee": name, "ee_np": name, "ee_np_cap": name}
+        return {"ee": name, "ee_np": _t("st.ee.the", ee=name), "ee_np_cap": _t("st.ee.the.cap", ee=name)}
+
+    ee_said, ee_spoken = ee_fills(ee), ee_fills(ee_sp)
     # news-v17: a carrying or fair value is the SOURCE's figure, never "{inv} reported its …" (the source may
     # be another filer's: a subsidiary's 10-Q) — the stake's possessive form, its ".of" twin for "Moody's"
     poss = "of" if possessive(inv) is None else "poss"
@@ -2516,9 +2807,9 @@ def _stake_parts(rec: rules.CompanyStake, run_date: date) -> _Parts:
         h_ids = [f"st.h.fair_value.{poss}"]
     else:
         h_ids = [f"st.h.{basis}"]
-    h_sp = [_t(i, inv=inv_sp, inv_s=possessive(inv_sp), ee=ee_sp, amt=amt) for i in h_ids]
-    h_cap = [_t(i, inv=inv, inv_s=possessive(inv), ee=ee, amt=amt) for i in h_ids]
-    h_img = [_t(i, inv=inv, inv_s=possessive(inv), ee=ee, amt=amt_s) for i in h_ids]
+    h_sp = [_t(i, inv=inv_sp, inv_s=possessive(inv_sp), amt=amt, **ee_spoken) for i in h_ids]
+    h_cap = [_t(i, inv=inv, inv_s=possessive(inv), amt=amt, **ee_said) for i in h_ids]
+    h_img = [_t(i, inv=inv, inv_s=possessive(inv), amt=amt_s, **ee_said) for i in h_ids]
     as_of_img = date_image(rec.as_of)
     as_of = _t("st.asof", as_of_img=as_of_img)
     as_of_cap = date_caption(rec.as_of, run_date)
@@ -2538,8 +2829,8 @@ def _stake_parts(rec: rules.CompanyStake, run_date: date) -> _Parts:
         l3_key = "source"
     month_fill = ({"month_sp": month_words(rec.listed_since), "month_img": month_image(rec.listed_since)}
                   if rec.listed_since is not None else {})
-    l3_sp = _t(f"st.l3.{l3_key}", ee=ee_sp, **month_fill)
-    l3_cap = _t(f"st.l3.{l3_key}", ee=ee, **month_fill)
+    l3_sp = _t(f"st.l3.{l3_key}", **ee_spoken, **month_fill)
+    l3_cap = _t(f"st.l3.{l3_key}", **ee_said, **month_fill)
     c3_body = (rec.local_listing if l3_key == "non_us" and rec.local_listing
                else _t(f"st.c3.{l3_key}.body", **month_fill))
     hook = [_t("st.hook", h=h) for h in h_sp]
@@ -2561,22 +2852,25 @@ def _stake_parts(rec: rules.CompanyStake, run_date: date) -> _Parts:
         "lines": [as_of, _t("st.img.source", source=source)],
     }
     inv_s = possessive(inv)
-    value_head = (_t("st.open.value.poss", inv_s=inv_s, ee=ee) if inv_s is not None
-                  else _t("st.open.value.of", inv=inv, ee=ee))
+    value_head = (_t("st.open.value.poss", inv_s=inv_s, **ee_said) if inv_s is not None
+                  else _t("st.open.value.of", inv=inv, **ee_said))
     # news-v12: the cover (TikTok's and Instagram's pinned frame) carries the basis and as-of date in its
     # chip, drawn over the figure ("Committed up to · as of Nov 18, 2025" — news-v13: "as of", the date is
     # the source's or the period's, never the deal's or a deadline), and a headline that never reads as
     # the stake's value today ("… committed up to this amount to …", "… stake in … as of that date")
     if basis in ("invested", "committed_up_to"):
-        head = _t(f"st.open.{basis}", inv=inv, ee=ee)
+        head = _t(f"st.open.{basis}", inv=inv, **ee_said)
     else:
-        head = (_t("st.open.dated.poss", inv_s=inv_s, ee=ee) if inv_s is not None
-                else _t("st.open.dated.of", inv=inv, ee=ee))
+        head = (_t("st.open.dated.poss", inv_s=inv_s, **ee_said) if inv_s is not None
+                else _t("st.open.dated.of", inv=inv, **ee_said))
     chip = _t("st.open.chip", basis_title=_t(f"st.c2.{basis}.title"), as_of_img=as_of_img)
     opening = {"kicker": _t("st.kicker"), "logos": [inv_sym], "chip": chip, "figure": amt_s, "headline": head}
     long_heads = [_t("st.ch.long", h=h, as_of_cap=as_of_cap, source=source) for h in h_cap]
     heads = long_heads + [_t("st.ch.short", h=h, as_of_cap=as_of_cap) for h in h_cap]
-    background = _stake_background(rec.background, [inv, ee, source] + ([investee.name] if investee else []))
+    # news-v19 (Batch 1, plan item 5): the catalogue background stays out of the captions unless
+    # STAKE_BACKGROUND_IN_CAPTIONS — see the switch for why; the rules below still decide when it is on
+    background = (_stake_background(rec.background, [inv, ee, source] + ([investee.name] if investee else []))
+                  if STAKE_BACKGROUND_IN_CAPTIONS else None)
     source_para = _t("st.p.source", source=source, as_of_cap=as_of_cap)
     paras = ([background] if background else []) + [_t(f"st.l2.{basis}"), l3_cap, source_para]
     # review round 11: a ".long" headline cites the source and its as-of date, so `st.p.source` is left
@@ -2584,7 +2878,7 @@ def _stake_parts(rec: rules.CompanyStake, run_date: date) -> _Parts:
     stated = {h: frozenset({source_para}) for h in long_heads}
     return _Parts(hook=hook, lines=lines, cards=cards, opening=opening, image_spec=spec,
                   alt_title=_alt_title(h_img + [value_head]),
-                  alt_paragraphs=[_t("st.alt.body", inv=inv, ee=ee, amt_s=amt_s, label=label)],
+                  alt_paragraphs=[_t("st.alt.body", inv=inv, amt_s=amt_s, label=label, **ee_said)],
                   source=source, as_of=as_of, image_headlines=heads, image_paragraphs=paras,
                   video_headlines=heads, video_paragraphs=paras, youtube_titles=h_img + [value_head],
                   persons=[], names=names, stated_by_headline=stated)
@@ -2604,24 +2898,38 @@ def _earnings_parts(rec: rules.EarningsReport, run_date: date) -> _Parts:
     a, e = rec.eps_actual, rec.eps_estimate
     if abs(e) < rules.EPS_MIN_ABS_ESTIMATE:
         raise NewsTemplateRefused("implausible_figures", "an estimate under ten cents")
+    # the owner-delegated EPS ceiling (2026-10-19), as the adapter and the record apply it: defence in depth
+    if abs(a) > rules.EPS_MAX_ABS or abs(e) > rules.EPS_MAX_ABS:
+        raise NewsTemplateRefused("implausible_figures", "a per-share figure above $1,000,000")
     if a != 0 and _q(abs(_dec(a)), 2) == 0:
         raise NewsTemplateRefused("implausible_figures", "a non-zero EPS that would read $0.00")
     if eps_digit_shift_suspect(a, e):
         raise NewsTemplateRefused("implausible_figures", "a dropped or added digit")
     if abs(a - e) > EARNINGS_MAX_GAP_RATIO * abs(e):
         raise NewsTemplateRefused("implausible_figures", "an EPS gap ten times the estimate")
-    # The revenue pair, written at one shared precision (`revenue_pair`); None = left out, never two
-    # figures rounded on their own that misstate the gap.
-    rev_fill: Optional[Dict[str, str]] = None
-    if rec.revenue_actual is not None or rec.revenue_estimate is not None:
-        ra, rv = rec.revenue_actual, rec.revenue_estimate
-        lo, hi = rules.REVENUE_RATIO_BAND
-        if ra is None or rv is None or not (ra > 0 and rv > 0 and lo <= ra / rv <= hi):
-            raise NewsTemplateRefused("implausible_figures", "revenue outside the plausible band")
-        rev_fill = revenue_pair(ra, rv)
-        if rev_fill is None:
-            logger.info("news template: earnings %s revenue left out — no shared precision up to %d places "
-                        "shows its gap within %s of the true one", sym, REVENUE_MAX_PLACES, REVENUE_GAP_TOLERANCE)
+    # Review of 2026-10-16 (ER-1): the post prints both figures at two places ("$0.10 vs $0.10" for 0.095 against
+    # 0.10, a 5.0% gap in the feed): figures that PRINT as one say nothing — refused, as `revenue_pair` leaves out
+    # a revenue pair whose shown gap is not the true one. The adapter's `clear_surprise` judges the printed figures
+    # too; this is defence in depth for a record built any other way.
+    if eps_image(a) == eps_image(e):
+        raise NewsTemplateRefused("implausible_figures", "the EPS and its estimate print as the same figure")
+    # news-v19 (Batch 1, 2026-10-15): no revenue pair, no post. The pair is the only sign the calendar row
+    # is the quarter the estimate is for (Progressive's one-MONTH row read "$1.08 vs an estimate of $4.35"),
+    # so the adapter refuses a report without one (`revenue_implausible`) and this refuses the record too —
+    # defence in depth, never EPS alone. news-v21: the pair is CHECKED, never written (`EARNINGS_REVENUE_IN_POSTS`
+    # off — the feed never says which basis its revenue estimate is on), so every earnings post takes the
+    # no-revenue lines below; with the switch on, the pair is written at one shared precision (`revenue_pair`)
+    # and, when no precision shows its gap truly, only its WRITING is left out (the figures were checked).
+    ra, rv = rec.revenue_actual, rec.revenue_estimate
+    if ra is None or rv is None:
+        raise NewsTemplateRefused("implausible_figures", "no revenue pair: the report's quarter is unchecked")
+    lo, hi = rules.REVENUE_RATIO_BAND
+    if not (ra > 0 and rv > 0 and lo <= ra / rv <= hi):
+        raise NewsTemplateRefused("implausible_figures", "revenue outside the plausible band")
+    rev_fill: Optional[Dict[str, str]] = revenue_pair(ra, rv) if EARNINGS_REVENUE_IN_POSTS else None
+    if EARNINGS_REVENUE_IN_POSTS and rev_fill is None:
+        logger.info("news template: earnings %s revenue left out — no shared precision up to %d places "
+                    "shows its gap within %s of the true one", sym, REVENUE_MAX_PLACES, REVENUE_GAP_TOLERANCE)
     co_sp = spoken_company(co)
 
     def spoken(v: float) -> str:
@@ -2648,6 +2956,7 @@ def _earnings_parts(rec: rules.EarningsReport, run_date: date) -> _Parts:
     estimate_card = (_t("er.c.estimate.title"), _t("er.c.estimate.body"))
     rows = [{"cells": [_t("er.img.eps"), _t("er.img.vs", x=est_s), eps_s]}]
     if rev_fill is not None:
+        # the DORMANT revenue copy (`EARNINGS_REVENUE_IN_POSTS` on only); news-v21 posts take the `else` lines
         l2, c2 = [_t("er.l2.revenue", **rev_fill)], (_t("er.c2.revenue.title"), _t("er.c2.revenue.body", **rev_fill))
         l4, c4 = [_t("er.estimate")], estimate_card
         # the REPORTED figure is the last cell (the right-aligned accent figure), the estimate the muted one
@@ -2662,7 +2971,11 @@ def _earnings_parts(rec: rules.EarningsReport, run_date: date) -> _Parts:
         "header": {"logo": sym, "name": co, "chip": sym}, "title": _t("er.img.title"), "subtitle": subtitle,
         "sections": [{"rows": rows}], "notes": [_t("er.img.note")],
     }
-    opening = {"kicker": kicker, "logos": [sym], "chip": sym, "figure": eps_s,
+    # news-v19 (Batch 1, plan item 5): the chip dates the figures — "Quarter ended …" only for a quarter the
+    # adapter verified against the statements (`period_end`), else the report day; never the ticker
+    chip = (_t("er.open.chip.period", period_img=date_image(rec.period_end)) if rec.period_end is not None
+            else _t("er.open.chip.report", report_img=report_img))
+    opening = {"kicker": kicker, "logos": [sym], "chip": chip, "figure": eps_s,
                "headline": _t("er.open.head", est_s=est_s)}
     figs = dict(co=co, eps_s=eps_s, est_s=est_s, **(rev_fill or {}))
     # long → short: the basis note in the headline wherever one with it fits (X / Bluesky / Threads
@@ -2754,7 +3067,12 @@ def _theme_parts(rec: rules.ThemeExplainer, run_date: date) -> _Parts:
 
     def sp(fact: Tuple[rules.ThemeMember, str, Optional[str]]) -> Tuple[str, Optional[str], str]:
         name = spoken_company(fact[0].company.name)
-        return name, possessive(name), spoken_company(fact[1])
+        line = spoken_company(fact[1])
+        # news-v19 (the review of 2026-10-16, TH-1): "… was the United States", as Money Map says it (a line is
+        # never the sentence's first word here, so never "The")
+        if rules.takes_region_article(fact[1]):
+            line = _t("th.region.the", name=line)
+        return name, possessive(name), line
 
     def line_of(group: Sequence[Tuple[rules.ThemeMember, str, Optional[str]]]) -> str:
         m1, m1_s, g1 = sp(group[0])
@@ -3274,6 +3592,32 @@ def _leaking_persons(output: Mapping[str, Any], record: Any) -> FrozenSet[str]:
     return frozenset(p for _f, p in _placement_hits(output, record))
 
 
+def _withheld_name_hits(output: Mapping[str, Any], record: Any) -> List[Tuple[str, str]]:
+    """(field, person) for every Form 4 person of ``record`` whose full name or "first last" appears in
+    ANY public string (news-v19: inside the members-elect window no one is named anywhere — the record may
+    still carry a name, e.g. one built before the window; the output must not). Never a bare surname: the
+    templates only ever write a whole rendered name, and a surname alone ("Price", "Cash") would refuse an
+    honest post."""
+    if not isinstance(record, rules.InsiderBuysWeek):
+        return []
+    patterns: List[Tuple[str, List["re.Pattern[str]"]]] = []
+    for name in dict.fromkeys(r.person_name for r in record.rows if r.person_name):
+        toks = fold(name).split()
+        if len(toks) < 2:
+            continue
+        forms = dict.fromkeys((" ".join(toks), f"{toks[0]} {toks[-1]}"))
+        patterns.append((name, [re.compile(r"(?<![a-z0-9])" + re.escape(f) + r"(?![a-z0-9])") for f in forms]))
+    hits: List[Tuple[str, str]] = []
+    if not patterns:
+        return hits
+    for f, text, _is_body in _public_strings(output):
+        if not isinstance(text, str) or not text or len(text) > MAX_STRING_CHARS:
+            continue
+        folded = fold(text)
+        hits += [(f, name) for name, pats in patterns if any(p.search(folded) for p in pats)]
+    return hits
+
+
 def _public_strings(output: Mapping[str, Any]) -> List[Tuple[str, str, bool]]:
     """(field, text, is_body) for every public string: is_body is False only for a composed caption
     (its code-owned suffix carries hashtags and a link)."""
@@ -3368,6 +3712,15 @@ def _validate(output: Any, record: Any, v: Callable[..., None]) -> None:
 
     _validate_script(output, v)
     persons = _validate_persons(output, v)
+    # news-v19 (owner decision 4, 2026-10-15): the members-elect window names NO ONE — not through
+    # `persons`, and no Form 4 person of the record written anywhere public (a code path that bypassed
+    # `_insider_parts`' `person()` would put the name in a caption the placement rule allows). The same
+    # run check as the composer (`members_elect_for_run`, review of 2026-10-16): compose and re-check agree.
+    if rules.members_elect_for_run(run_date):
+        if output["persons"]:
+            v("persons", "placement", "no person is named in the members-elect window")
+        for f, _person in _withheld_name_hits(output, record):
+            v(f, "placement", "a person named in the members-elect window")
     keys = _validate_logos(output, v)
     # opening card, image, alt text, disclaimer, footer
     problem = onscreen.validate_opening_card(output["opening_card"], keys)
@@ -3678,6 +4031,87 @@ def revalidate(output: Mapping[str, Any], *, fact_sheet: Mapping[str, Any], run_
     return out
 
 
+def _picture_bound(record: Any, spec: SeriesSpec, run_date: date) -> bool:
+    """Do the record's PICTURE caption parts speak of what only its picture shows (`_Parts.picture_bound`,
+    B3-LIVE-1)? Re-derived with the series' own builder (the person suppression `compose` may apply never changes
+    it). A builder that refuses raises: the caller reads that as a violation, never as a pass."""
+    builder = _BUILDERS[spec.series]
+    parts = builder(record, run_date, frozenset()) if builder is _insider_parts else builder(record, run_date)
+    return bool(parts.picture_bound)
+
+
+def extra_video_problems(output: Any, *, fact_sheet: Any, run_date: Any, platform: Any, caption: Any,
+                         video_draws_picture: bool = False) -> List[Dict[str, str]]:
+    """[] when `caption` may be `platform`'s EXTRA video post (Batch 3, 2026-10-20) of the template `output`;
+    otherwise the violations. Run when the extras are frozen (`script_service.freeze_extra_formats`) and again
+    by create_posts, after `revalidate` passed on the output itself. Never raises.
+
+    The record is re-derived from the stored fact sheet (as `revalidate` does). The caption must be exactly
+    the platform's own accepted caption under the narrated-video disclaimer (`post_copy.extra_video_caption`
+    of `output.posts[platform]`, template authorship) — else `caption_invalid`. B3-LIVE-1 (2026-10-20): that
+    caption is built from the PICTURE parts, and a Form 4 roundup's picture parts speak of the rows only its
+    picture shows ("The purchases: …", "The largest of these: …") while the video is about the lead row — so a
+    picture-bound record (`_picture_bound`) is `picture_caption` unless the caller says the video draws the
+    picture (`video_draws_picture` exactly True: the frozen data card at the freeze, and at create_posts also the
+    verified video's own word that it drew it); fail closed by default. It is then checked as a public
+    string of the output: a PROBE — the output with `posts` holding only this video post — goes through the
+    word scan (`_validate_words`: banned / forecast / news words, structure, Congress names), the placement
+    rule (`_placement_hits`: no person in its first line or its code-owned suffix — the whole caption on
+    Threads) and, inside the members-elect window, the withheld-names scan (`_withheld_name_hits`); each hit is
+    reported on `video_posts.<platform>…`. An unreadable output or fact sheet is a violation (logged), never a
+    pass."""
+    out: List[Dict[str, str]] = []
+
+    def v(field_: str, code: str, detail: str = "") -> None:
+        if field_.startswith("posts."):      # the probe's post is the EXTRA one: say so
+            field_ = "video_" + field_
+        out.append({"field": field_, "code": code, "detail": detail[:200]})
+
+    try:
+        if not isinstance(output, Mapping):
+            v("package", "schema", "not an object")
+            return out
+        try:
+            record = rules.record_from_fact_sheet(fact_sheet)
+        except ValueError as e:
+            v("fact_sheet", "facts_invalid", str(e))
+            return out
+        if not isinstance(run_date, date) or isinstance(run_date, datetime):
+            v("run_date", "provenance", "not a date")
+            return out
+        spec = SERIES_SPECS.get(output.get("series"))
+        if spec is None or getattr(record, "series", None) != spec.series:
+            v("series", "provenance", "not the record's series")
+            return out
+        name = str(platform)[:20]
+        posts = output.get("posts") if isinstance(output.get("posts"), Mapping) else {}
+        primary = posts.get(platform) if isinstance(platform, str) else None
+        accepted = primary.get("caption") if isinstance(primary, Mapping) else None
+        try:
+            derived = post_copy.extra_video_caption(platform, accepted, run_date, AUTHORSHIP)
+        except ValueError as e:
+            v(f"posts.{name}", "caption_invalid", str(e))
+            return out
+        if caption != derived:
+            v(f"posts.{name}", "caption_invalid", "not its accepted caption under the narrated-video disclaimer")
+            return out
+        probe = {**output, "posts": {platform: {"platform": platform, "title": None, "caption": caption}}}
+        persons = _validate_persons(probe, lambda *_a, **_k: None)
+        _validate_words(probe, spec, record, persons, v)
+        for f, _person in _placement_hits(probe, record):
+            v(f, "placement", "a person in a restricted field")
+        if rules.members_elect_for_run(run_date):
+            for f, _person in _withheld_name_hits(probe, record):
+                v(f, "placement", "a person named in the members-elect window")
+        if video_draws_picture is not True and _picture_bound(record, spec, run_date):
+            v(f"posts.{name}", "picture_caption",
+              "its caption speaks of the picture's rows, and the video does not draw the picture (no data card)")
+    except Exception as e:  # noqa: BLE001 — a malformed stored row must read as a violation, not a 500
+        logger.exception("news template: extra_video_problems failed (%s: %s)", type(e).__name__, e)
+        v("package", "schema", f"unreadable ({type(e).__name__})")
+    return out
+
+
 def logo_refs(output: Mapping[str, Any]) -> List[Dict[str, str]]:
     """The `{key, name}` logos script_service fetches for a composed output, in draw order (image
     then opening card), at most `template_onscreen.MAX_LOGOS`. Each becomes one `output.logos`
@@ -3709,4 +4143,12 @@ __all__ = [
     "INSIDER_LATE_BUSINESS_DAYS",
     # news-v16
     "THEME_FACT_SPREAD_YEARS", "THEME_FACT_LATE_MONTH", "STAKE_CLAIM_ROWS", "STAKE_CLAIM_RE",
+    # news-v19 (Batch 1, plan item 5)
+    "STAKE_BACKGROUND_IN_CAPTIONS", "OPENING_CHIP_MAX_CHARS",
+    # news-v19 (the review of 2026-10-16)
+    "MONEY_MAP_REGION_MAX_OTHER_SHARE",
+    # Batch 3 (2026-10-20): the extra video posts' re-check
+    "extra_video_problems",
+    # news-v21 (main-session decision of 2026-10-20): an earnings post prints no revenue comparison
+    "EARNINGS_REVENUE_IN_POSTS",
 ]

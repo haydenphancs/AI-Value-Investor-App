@@ -14,7 +14,13 @@ Pinned promises:
   LAYOUTS); a layout dropped from SHIPPED_LAYOUTS is refused as `layout_not_shipped` and allows
   NOTHING (the worker cannot draw it — fail closed);
 * every allowed string is declarable as on-screen text (`schemas.marketing.validate_onscreen_text`),
-  and the worst case of every layout stays under ONSCREEN_TEXT_MAX.
+  and the worst case of every layout stays under ONSCREEN_TEXT_MAX;
+* Batch 1 (2026-10-15): an opening card's chip is at most OPENING_CHIP_MAX_CHARS (36) — exact at the
+  cap, refused one character over (`chip_too_long`, allowing nothing), still optional.
+* Batch 2 fix (CARDS-B2-1, 2026-10-20): `data_card_slot` — the ONE content card a video's data card
+  replaces. Over every series and variant the templates compose it is a FACT card whose facts the post
+  picture draws, never a hedge, caveat, explainer or source card (DATA_CARD_KEEPS, pinned by their words);
+  a theme member card only when the grid draws its members; None — no data card — for anything else.
 
 Category 1 (pure): no network, no Supabase.
 """
@@ -200,6 +206,8 @@ def test_the_contract_constants_are_pinned():
     assert tuple(tos.LAYOUT_KEYS) == tos.LAYOUTS
     assert tos.COMMON_KEYS == ("layout", "version", "kicker", "footer")
     assert tos.OPENING_KEYS == (("kicker", "logos", "headline"), ("chip", "figure"))
+    # Batch 1 (2026-10-15): the longest chip a template writes is a stake's "Committed up to · as of Nov 18, 2025"
+    assert tos.OPENING_CHIP_MAX_CHARS == 36 == len("Committed up to · as of Nov 18, 2025")
     for layout, (required, optional) in tos.LAYOUT_KEYS.items():
         assert not set(required) & set(optional), layout
         assert not (set(required) | set(optional)) & set(tos.COMMON_KEYS), layout
@@ -604,6 +612,9 @@ _OPENING_REFUSALS = [
     ("a person slot", ("person",), "Ryan Cohen", "unknown_key"),
     ("a logo url", ("logo_url",), URL, "unknown_key"),
     ("blank chip", ("chip",), " ", "bad_string"),
+    # Batch 1 (2026-10-15): a chip one character over OPENING_CHIP_MAX_CHARS (a period chip is at most 26)
+    ("over-cap chip", ("chip",), "Committed up to · as of Sept 18, 2025", "chip_too_long"),
+    ("numeric chip", ("chip",), 2026, "bad_string"),
     ("numeric figure", ("figure",), 74.4, "bad_string"),
     ("two-line headline", ("headline",), "GameStop\nCEO", "bad_string"),
     ("url headline", ("headline",), URL, "bad_string"),
@@ -616,6 +627,28 @@ def test_a_malformed_opening_card_is_refused(why, path, value, code):
     bad = _mut(OPENING, path, value)
     assert _code(tos.validate_opening_card(bad, KEYS)) == code, why
     assert tos.opening_strings(bad, LOGOS) == []
+
+
+def test_the_chip_cap_is_exact():
+    """Batch 1 (2026-10-15): OPENING_CHIP_MAX_CHARS is the server's bound on the chip — the worker lays out
+    whatever it is given, so a longer chip (a wrap that could push the cover to CardOverflow, a skipped day)
+    must never reach it. At the cap a chip validates and is drawable; one character over, the card allows
+    nothing. Every period chip a template writes (at most 26 characters) is far under it. Mutation-checked by
+    hand (2026-10-15): with the check removed from `_walk_opening`, the 37-character row turned red."""
+    at_cap = "Committed up to · as of Nov 18, 2025"
+    assert len(at_cap) == tos.OPENING_CHIP_MAX_CHARS
+    card = dict(OPENING, chip=at_cap)
+    assert tos.validate_opening_card(card, KEYS) is None
+    assert at_cap in tos.opening_strings(card, LOGOS)
+    over = dict(OPENING, chip=at_cap.replace("Nov", "Sept"))
+    assert len(over["chip"]) == tos.OPENING_CHIP_MAX_CHARS + 1
+    assert _code(tos.validate_opening_card(over, KEYS)) == "chip_too_long"
+    assert tos.opening_strings(over, LOGOS) == []
+    for chip in ("Quarter ended Sep 30, 2026", "Reported Nov 10, 2026", "Fiscal 2025", "BRK-B"):
+        assert tos.validate_opening_card(dict(OPENING, chip=chip), KEYS) is None, chip
+    # an absent or null chip is still optional (a theme cover draws none)
+    assert tos.validate_opening_card({k: v for k, v in OPENING.items() if k != "chip"}, KEYS) is None
+    assert tos.validate_opening_card(dict(OPENING, chip=None), KEYS) is None
 
 
 @pytest.mark.parametrize("card", [None, [], "card", 3])
@@ -651,6 +684,264 @@ def test_the_template_footer_is_drawable():
         footer = post_copy.image_footer(date(2026, 11, 16), "template", source=source, as_of=as_of)
         assert tos.drawable_problem(footer) is None
         assert tos.validate_image_spec(dict(ROWS_CEO, footer=footer), KEYS, footer=footer) is None
+
+
+# ── the data card's slot (Batch 2 fix CARDS-B2-1, 2026-10-20) ─────────────────
+#
+# A template card stays on screen for its whole narration line, so since news-v12 each one carries its own
+# line's hedges. The data card (the day's post image drawn in the video) replaces ONE content card — the
+# read-back's `data_card_slot` — and that card must be a FACT card whose facts the picture already shows:
+# the shipped worker replaced the LAST card, which for Congress, 13F, earnings, stakes and Form 4 days is
+# exactly the hedge the lexicon put on screen on purpose.
+
+#: The cards a data card never replaces, by their words (DATA_CARD_KEEPS read through the lexicon).
+_INSIDER_KEPT = ["Held indirectly", "Partly held indirectly", "Amended filing", "What a Form 4 is", "Trade date",
+                 "Trade dates", "How the amount is counted", "Same week"]
+KEPT_TITLES = {
+    "ceo_buys": _INSIDER_KEPT, "insider_buys": _INSIDER_KEPT,
+    "thirteen_f": ["About 13F filings", "First appears", "What a 13F shows"],
+    "money_map": ["What revenue is"],
+    "congress_count": ["What the reports cover", "Reporting delay"],
+    "earnings": ["The estimate", "About the figures", "Each quarter"],
+    "company_stakes": ["Invested", "Committed up to", "Carrying value", "Fair value", "A commitment",
+                       "Where it comes from", "Source"],
+    "theme_explainer": ["What a revenue line is", "A Caydex grouping"],
+}
+#: The cards it replaces, by their words, in preference order (a theme member card's title is its names).
+SLOT_TITLES = {
+    "ceo_buys": [["The purchase", "The purchases"]], "insider_buys": [["The purchase", "The purchases"]],
+    "thirteen_f": [["Newly reported", "Reported more shares", "Reported fewer shares", "No longer reported"]],
+    "money_map": [["Revenue mix"]],
+    "congress_count": [["Counted once"]],
+    "earnings": [["Revenue"], ["Quarter ended", "Reported"]],
+    "company_stakes": [["As of"]],
+    "theme_explainer": [["{m1} and {m2}", "{m1}"]],
+}
+
+
+@pytest.fixture
+def _fresh_slot_rules():
+    """`_slot_rules` caches what it reads from the lexicon: a test that edits the tables starts and ends clean."""
+    tos._slot_rules.cache_clear()
+    yield
+    tos._slot_rules.cache_clear()
+
+
+def test_the_slot_tables_are_pinned_by_their_words_and_never_overlap():
+    from app.services.marketing import news_templates as T
+
+    assert set(tos.DATA_CARD_SLOTS) == set(tos.DATA_CARD_KEEPS) == set(T.SERIES_SPECS)
+    assert {s: [T.LEXICON[i] for i in ids] for s, ids in tos.DATA_CARD_KEEPS.items()} == KEPT_TITLES
+    assert {s: [[T.LEXICON[i] for i in g] for g in groups]
+            for s, groups in tos.DATA_CARD_SLOTS.items()} == SLOT_TITLES
+    for series, groups in tos.DATA_CARD_SLOTS.items():
+        slot_ids = {i for g in groups for i in g}
+        assert not slot_ids & set(tos.DATA_CARD_KEEPS[series]), series
+        assert not {T.LEXICON[i] for i in slot_ids} & set(KEPT_TITLES[series]), series
+        assert all("{" not in T.LEXICON[i] for i in tos.DATA_CARD_KEEPS[series]), series   # matched exactly
+
+
+def _composed_variants():
+    """(name, composed output) for every sample the templates' own tests compose — every series and the
+    variants that change a series' cards — plus the card variants those samples do not reach."""
+    import test_marketing_news_templates as NT
+
+    extra = [
+        ("ceo_spotlight_plain", lambda: NT.week(NT.buy("NKE", "Nike", "ceo", None, 1_250_000.0, 18_500.0, 1,
+                                                       [date(2026, 11, 10)])), NT.MON),
+        ("ceo_spotlight_amended", lambda: NT.week(NT.SBUX), NT.MON),
+        ("ceo_spotlight_partly_indirect", lambda: NT.week(NT.buy(
+            "CTSO", "Contoso", "ceo", None, 640_000.0, 2_600.0, 3, [date(2026, 11, 12), date(2026, 11, 13)],
+            holding="mixed")), NT.MON),
+        ("insider_late_one_date", lambda: NT.week(NT.late(traded=(date(2026, 10, 14),)), series="insider_buys"),
+         NT.MON),
+        ("stake_source_only", lambda: NT.stake(kind="us_listed_off_13f", investee=None), NT.STAKES_RUN),
+        ("insider_roundup_late_other", lambda: NT.week(
+            NT.buy("NKE", "Nike", "cfo", None, 1_250_000.0, 18_500.0, 1, [date(2026, 11, 10)]), NT.late(),
+            series="insider_buys"), NT.MON),
+        ("thirteen_f_one_kind", lambda: NT.berkshire(
+            moves=tuple(m for m in NT.berkshire().moves if m.move == "newly_reported"),
+            counts=(("newly_reported", 3),)), NT.TUE),
+        ("money_map_no_costs", lambda: NT.costco(gross_profit_usd=None, operating_profit_usd=None), NT.THU),
+        ("earnings_reported_only", lambda: NT.earnings(period_end=None), NT.EARNINGS_RUN),
+        ("theme_two_groups", lambda: NT.theme(rows=[
+            ("NVDA", "NVIDIA", "Data Center", 0.88, "2025"), ("AMD", "AMD", "Data Center", 0.48, "2025"),
+            ("QCOM", "Qualcomm", "QCT", 0.84, "2025"), ("ARM", "Arm Holdings", None, None, None),
+            ("INTC", "Intel", None, None, None), ("KLAC", "KLA", None, None, None)], theme_size=6), NT.THEME_RUN),
+    ]
+    return [(name, NT.compose(factory(), day)) for name, factory, day in [*NT.SAMPLES, *extra]]
+
+
+_VARIANTS = _composed_variants()
+
+
+def _picture(out):
+    return tos.image_strings(out["image_spec"], out["logo_refs"])
+
+
+def _shows_purchase(card, out, picture):
+    *count, amount = card["body"].split(" · ")          # count · shares · amount
+    assert amount in picture                             # the spotlight's figure, or the lead row's cell
+    if out["image_spec"]["layout"] == "spotlight":
+        assert " · ".join(count) in picture              # the spotlight's count line too
+
+
+def _shows_moves(card, out, picture):
+    (section,) = [s for s in out["image_spec"]["sections"] if s.get("heading") == card["title"]]
+    names = [row["cells"][0] for row in section["rows"]]
+    assert names and all(n in card["body"] and n in picture for n in names)
+
+
+def _shows_mix(card, out, picture):
+    labels = [piece.split(": ")[0] for piece in card["body"].split(" · ")]
+    assert len(labels) == 2 and all(label in picture for label in labels)        # the bars' own labels
+
+
+def _shows_count(card, out, picture):
+    from app.services.marketing import news_templates as T
+
+    once = T.LEXICON["cg.img.once"]                      # "Each member counted once"
+    assert once in picture and card["title"].lower() in once.lower()
+
+
+def _shows_earnings(card, out, picture):
+    from app.services.marketing import news_templates as T
+
+    if card["title"] == T.LEXICON["er.c2.revenue.title"]:
+        actual, estimate = card["body"].split(" vs an estimate of ")
+        assert actual in picture and T.LEXICON["er.img.vs"].format(x=estimate) in picture   # the Revenue row
+    else:
+        assert f"{card['title']} {card['body']}" in picture                                # the subtitle
+
+
+def _shows_as_of(card, out, picture):
+    assert f"{card['title']} {card['body']}" in picture                                    # "As of {date}"
+
+
+def _shows_members(card, out, picture):
+    from app.services.marketing import news_templates as T
+
+    tiles = {t["name"]: t.get("line") for t in out["image_spec"]["tiles"]}
+    pairs = {T.LEXICON["th.c.pair.title"].format(m1=a, m2=b): (a, b) for a in tiles for b in tiles if a != b}
+    members = pairs.get(card["title"]) or ((card["title"],) if card["title"] in tiles else ())
+    assert members and all(m in picture for m in members)
+    for segment in card["body"].split(": ", 1)[1].split(" · "):                       # each member's line
+        assert any(line in (segment, None) or line.startswith(f"{segment} · ") for line in
+                   (tiles[m] for m in members)), segment
+
+
+_FACTS_SHOWN = {"ceo_buys": _shows_purchase, "insider_buys": _shows_purchase, "thirteen_f": _shows_moves,
+                "money_map": _shows_mix, "congress_count": _shows_count, "earnings": _shows_earnings,
+                "company_stakes": _shows_as_of, "theme_explainer": _shows_members}
+
+
+def test_the_variants_reach_every_series_and_every_kind_of_card():
+    assert {out["series"] for _n, out in _VARIANTS} == set(tos.DATA_CARD_SLOTS)
+    seen = {c["title"] for _n, out in _VARIANTS for c in out["cards"]}
+    # every kept card a composition can carry is reached, so the next test proves each one stays
+    assert set().union(*KEPT_TITLES.values()) <= seen
+    # both earnings date cards (the slot); news-v21: no earnings post has a "Revenue" card (its revenue copy is
+    # dormant, `news_templates.EARNINGS_REVENUE_IN_POSTS` off) — Money Map's own "Revenue" card is another series'
+    earnings_titles = {c["title"] for _n, out in _VARIANTS if out["series"] == "earnings" for c in out["cards"]}
+    assert {"Reported", "Quarter ended"} <= earnings_titles and "Revenue" not in earnings_titles
+
+
+@pytest.mark.parametrize("name, out", _VARIANTS, ids=[n for n, _ in _VARIANTS])
+def test_every_template_replaces_a_fact_card_the_picture_shows_never_a_hedge(name, out):
+    series, cards, picture = out["series"], out["cards"], _picture(out)
+    slot = tos.data_card_slot(series, cards, picture)
+    assert type(slot) is int and 0 <= slot < len(cards), slot
+    card = cards[slot]
+    assert card["title"] not in KEPT_TITLES[series]
+    # every hedge, caveat, explainer and source card of the composition stays a text card
+    assert all(i != slot for i, c in enumerate(cards) if c["title"] in KEPT_TITLES[series])
+    if series != "theme_explainer":
+        assert card["title"] in {t for group in SLOT_TITLES[series] for t in group}
+    _FACTS_SHOWN[series](card, out, picture)
+    # deterministic, and the same after the JSONB round trip the stored output takes
+    assert tos.data_card_slot(series, json.loads(json.dumps(cards)), list(reversed(picture))) == slot
+
+
+def test_the_picks_per_series_are_the_decided_cards():
+    """The decision (2026-10-20), by card position — for reading, the titles decide (a variant moves them). news-v21:
+    every earnings post's slot is its date card (card 1), the revenue card being dormant."""
+    picks = {name: tos.data_card_slot(out["series"], out["cards"], _picture(out)) for name, out in _VARIANTS}
+    assert {n: p for n, p in picks.items() if p != 1} == {
+        n: 0 for n in picks if n.startswith(("stake_", "theme_", "earnings_"))}
+
+
+def test_a_theme_member_card_whose_member_the_grid_leaves_off_is_never_the_slot():
+    """A member name too long for a tile is left off the grid ("+1 more"): the card that names it is not the
+    slot — the next member card is — and with no member card the grid draws, there is no slot at all."""
+    import test_marketing_news_templates as NT
+
+    rows = [("IBM", "International Business Machines", "Software", 0.42, "2025"),
+            ("NVDA", "NVIDIA", "Data Center", 0.88, "2025"), ("AMD", "AMD", "Data Center", 0.48, "2025"),
+            ("QCOM", "Qualcomm", "QCT", 0.84, "2025"), ("ARM", "Arm Holdings", None, None, None),
+            ("INTC", "Intel", None, None, None), ("KLAC", "KLA", None, None, None)]
+    out = NT.compose(NT.theme(rows=rows, theme_size=7), NT.THEME_RUN)
+    picture = _picture(out)
+    assert "International Business Machines" not in picture and out["image_spec"]["more"] == "+1 more"
+    assert [c["title"] for c in out["cards"]][:2] == ["International Business Machines and NVIDIA",
+                                                      "AMD and Qualcomm"]
+    assert tos.data_card_slot("theme_explainer", out["cards"], picture) == 1
+    _shows_members(out["cards"][1], out, picture)
+    assert tos.data_card_slot("theme_explainer", out["cards"],
+                              [s for s in picture if s not in ("AMD", "Qualcomm")]) is None
+    # a member's name inside another drawn string is not that member drawn
+    assert tos.data_card_slot("theme_explainer", [{"title": "Data", "body": "x"}], ["Data Center"]) is None
+
+
+@pytest.mark.parametrize("cards, slot", [
+    ([{"title": "The purchases", "body": "2 purchases · 3M shares · $74.4M"}], 0),
+    ([{"title": "Who filed", "body": "x"}, {"title": "The purchase", "body": "y"},
+      {"title": "The purchases", "body": "z"}], 1),                                     # the first of its titles
+    ([{"title": "The purchases", "body": None}, {"title": "The purchase", "body": "y"}], 1),   # not a text card
+    ([{"title": "The purchases"}], None),
+    ([{"title": "  ", "body": "y"}], None),
+    ([{"title": 7, "body": "y"}], None),
+    (["The purchases"], None),
+    ([{"title": "The Purchases", "body": "y"}], None),                                 # exact words only
+    ([{"title": "The purchases ", "body": "y"}], None),
+    ([], None), (None, None), ("The purchases", None), ({"title": "The purchases", "body": "y"}, None),
+])
+def test_a_slot_is_a_well_formed_text_card_of_the_series_titles(cards, slot):
+    assert tos.data_card_slot("ceo_buys", cards, []) == slot
+
+
+@pytest.mark.parametrize("series", [None, "", "lesson", "checklist", "Ceo_buys", 7, ("ceo_buys",)])
+def test_a_series_the_table_does_not_name_has_no_slot(series):
+    assert tos.data_card_slot(series, [{"title": "The purchases", "body": "y"}], []) is None
+
+
+@pytest.mark.parametrize("picture", [None, "Revenue", 3, {"x": 1}])
+def test_a_static_title_needs_no_picture_but_a_member_card_does(picture):
+    assert tos.data_card_slot("earnings", [{"title": "Revenue", "body": "$1 vs an estimate of $2"}], picture) == 0
+    assert tos.data_card_slot("theme_explainer", [{"title": "NVIDIA", "body": "x"}], picture) is None
+
+
+def test_a_kept_card_is_never_the_slot_even_when_the_table_names_it(monkeypatch, _fresh_slot_rules):
+    """Mutation-style guard: a table edited to name a hedge card selects nothing — the kept check runs first."""
+    out = next(o for n, o in _VARIANTS if n == "congress_accenture")
+    assert tos.data_card_slot("congress_count", out["cards"], _picture(out)) == 1
+    monkeypatch.setitem(tos.DATA_CARD_SLOTS, "congress_count", (("cg.c4.title", "cg.c3.title"),))
+    tos._slot_rules.cache_clear()
+    assert tos.data_card_slot("congress_count", out["cards"], _picture(out)) is None
+
+
+def test_a_table_id_the_lexicon_lacks_is_no_slot_and_an_error(monkeypatch, caplog, _fresh_slot_rules):
+    monkeypatch.setitem(tos.DATA_CARD_SLOTS, "money_map", (("mm.c9.title",),))
+    tos._slot_rules.cache_clear()
+    with caplog.at_level(logging.ERROR, logger=tos.logger.name):
+        assert tos.data_card_slot("money_map", [{"title": "Revenue mix", "body": "y"}], []) is None
+    assert any("mm.c9.title" in r.getMessage() and "money_map" in r.getMessage() for r in caplog.records)
+
+
+def test_the_slot_reader_never_imports_the_lexicon_at_module_import():
+    """news_templates imports this module; the slot table reads its lexicon only when called (no cycle)."""
+    src = (BACKEND / "app" / "services" / "marketing" / "template_onscreen.py").read_text(encoding="utf-8")
+    top_level = [line for line in src.splitlines() if line.startswith(("import ", "from "))]
+    assert not [line for line in top_level if "news_templates" in line]
 
 
 # ── purity ───────────────────────────────────────────────────────────────────

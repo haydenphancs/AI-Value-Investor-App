@@ -118,10 +118,64 @@ class Prepared:
     publish_meta: Dict[str, Any] = field(default_factory=dict)
     #: One log line describing the payload — what a dry run prints instead of sending.
     summary: str = ""
-    #: A second write-ahead charge `(op, micros)` the publisher journals AFTER the claim and BEFORE
-    #: `send` — a billed call the send makes besides the post itself (X: the image's alt text,
-    #: `x_media_alt`). The spend cap is checked for `reserve_micros` plus it, before the claim.
-    pre_send_charge: Optional[Tuple[str, int]] = None
+    #: The write-ahead charges `(op, micros)` the publisher journals AFTER the claim and BEFORE `send`,
+    #: all of them in ONE fenced write — the calls the send makes besides the post itself that X may
+    #: bill, in the order it makes them (an X image post: the media upload `x_media_upload`, then the
+    #: alt text `x_media_alt`). The spend cap is checked for `reserve_micros` plus their sum
+    #: (`pre_send_micros`) before the claim. Batch 1 (2026-10-15) made this a tuple: drop 1 had ONE such
+    #: charge (`pre_send_charge`, now a read-only view of the first). Checked here — each entry an
+    #: (op, micros) pair, op a non-empty string of at most 64 characters, micros a non-negative int
+    #: (never a bool) — or ValueError: an adapter bug, which the publisher logs as a prepare() BUG and
+    #: skips BEFORE any claim or spend. A refund is never a pre-send charge (`Outcome.refund_micros`).
+    pre_send_charges: Tuple[Tuple[str, int], ...] = ()
+
+    def __post_init__(self) -> None:
+        # Frozen: the checked, normalised tuple replaces whatever sequence the adapter passed.
+        object.__setattr__(self, "pre_send_charges", _checked_pre_send_charges(self.pre_send_charges))
+
+    @property
+    def pre_send_micros(self) -> int:
+        """The sum of `pre_send_charges`: what the spend cap adds to `reserve_micros` before the claim."""
+        return sum(micros for _op, micros in self.pre_send_charges)
+
+    @property
+    def pre_send_charge(self) -> Optional[Tuple[str, int]]:
+        """LEGACY read-only view (drop 1 had one pre-send charge): the FIRST of `pre_send_charges`, or
+        None when there is none. Never sum or journal it — a post may carry several (an X image post:
+        the upload AND the alt text); the publisher reads `pre_send_charges`. No longer a constructor
+        argument: pass `pre_send_charges`."""
+        return self.pre_send_charges[0] if self.pre_send_charges else None
+
+
+#: A pre-send charge's op becomes a journal op; the journal's readers keep at most 64 characters of one
+#: (`run_service._CHARGE_OP_MAX_CHARS`), so a longer op would be counted under a truncated name.
+PRE_SEND_OP_MAX_CHARS = 64
+
+
+def _checked_pre_send_charges(raw: Any) -> Tuple[Tuple[str, int], ...]:
+    """`Prepared.pre_send_charges` as a tuple of (op, micros) pairs, or ValueError naming what is wrong.
+    None reads as no charge. A bare pair passed without its enclosing tuple (`("x_media_alt", 5000)`) is
+    refused, never read as two charges; so is a str, a dict, a non-pair entry, an op that is not a
+    non-empty string of at most PRE_SEND_OP_MAX_CHARS characters, and an amount that is not a
+    non-negative int (a bool is refused: True would journal one micro-dollar). Pure."""
+    if raw is None:
+        return ()
+    if isinstance(raw, (str, bytes, bytearray, dict)) or not isinstance(raw, (tuple, list)):
+        raise ValueError(f"Prepared.pre_send_charges must be a tuple of (op, micros) pairs, not "
+                         f"{type(raw).__name__}")
+    out = []
+    for entry in raw:
+        if not isinstance(entry, (tuple, list)) or len(entry) != 2:
+            raise ValueError(f"Prepared.pre_send_charges: {str(entry)[:80]!r} is not an (op, micros) pair")
+        op, micros = entry
+        if not isinstance(op, str) or not op.strip() or len(op) > PRE_SEND_OP_MAX_CHARS:
+            raise ValueError(f"Prepared.pre_send_charges: op {str(op)[:80]!r} is not a non-empty string of at "
+                             f"most {PRE_SEND_OP_MAX_CHARS} characters")
+        if not isinstance(micros, int) or isinstance(micros, bool) or micros < 0:
+            raise ValueError(f"Prepared.pre_send_charges: {op} micros {str(micros)[:40]!r} is not a non-negative "
+                             f"int")
+        out.append((op, micros))
+    return tuple(out)
 
 
 @dataclass(frozen=True)

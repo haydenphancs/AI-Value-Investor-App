@@ -3,7 +3,8 @@ Upload-Post adapters for the marketing publisher (design doc §12.10, Stage 2; r
 
 ONE middleman API (`app/integrations/upload_post.py`) publishes to six outlets — TikTok, YouTube and
 Instagram get the day's verified MP4 (by its public URL; Upload-Post fetches it), Facebook, LinkedIn
-and Threads get text. One adapter instance per platform, one Upload-Post request per post row.
+and Threads get text (or the day's picture, or — Batch 3 — the day's video as a second post; both
+below). One adapter instance per platform, one Upload-Post request per post row.
 
 What makes this outlet different (docs.upload-post.com, verified 2026-10-01):
 
@@ -32,11 +33,20 @@ What makes this outlet different (docs.upload-post.com, verified 2026-10-01):
 * **AI disclosure** (rules/marketing.md §1): TikTok `is_aigc`, Instagram `is_ai_generated`, YouTube
   `containsSyntheticMedia`; TikTok also carries "Your brand" (`brand_organic_toggle`) — undisclosed
   self-promotion is For-You-ineligible. Facebook / LinkedIn / Threads text has no API-level AI flag;
-  the caption's disclaimer is the disclosure.
+  the caption's disclaimer is the disclosure (a Facebook Reel carries `facebook_is_ai_generated`, Batch 3).
 * **The cover is the opening card** (review round 2): every video pins TikTok's `cover_timestamp` and
   Instagram's `thumb_offset` to VIDEO_COVER_MS, inside the first card (the owner's 2026-10-09
   "Role-only video" decision: no video frame names a person, so the pin keeps the designed opening
   card, not a name guard). YouTube Shorts take no reliable pin.
+
+* **The App Store first comment** (owner decision 6, 2026-10-15): a post `create_posts` stamped with
+  `metadata.first_comment` (the code-owned search line, only on a platform in
+  MARKETING_FIRST_COMMENT_PLATFORMS while the run's store state was live or preorder) sends it as
+  `<platform>_first_comment` on whichever route it takes (video, photo, text). Upload-Post: the first
+  comment "never fails the publish" — what goes wrong comes back as an answer `warnings` entry, and a
+  posted one as `first_comment_posted: true`. Both are kept on the post under
+  `metadata.publish.upload_post` (`warnings`: scrubbed, at most 5 × 200 characters, logged at WARNING)
+  through the publisher's fenced merge. Only the code-owned text is ever sent (`FIRST_COMMENT_TEXTS`).
 
 Free-tier verification: each successful submit records Upload-Post's account usage before and after
 (`metadata.publish.upload_post.usage_before/after`), which answers the one undocumented quota
@@ -51,20 +61,47 @@ not it is REFUSED, a download that failed is NOT_SENT. Everything else — the I
 resend window, SUBMITTED → poll — is the video/text path's. No AI flag: Upload-Post forwards one only
 to Instagram, TikTok, YouTube and X; the caption's disclaimer is the disclosure. TikTok photo posts are
 out of scope (TikTok stays video); YouTube is not a photo platform; Instagram stays Reels.
+
+VIDEO posts on Facebook, LinkedIn and Threads (Batch 3, 2026-10-20; owner decision 2, 2026-10-15): a run may give
+those platforms a SECOND post, the day's narrated video beside their picture/text post
+(`schemas.EXTRA_POST_FORMATS_BY_PLATFORM`; `create_posts` records it, frozen per run from
+MARKETING_VIDEO_EXTRA_PLATFORMS). The route follows the POST's format, not the platform: a `video` post goes to
+POST /upload with the verified MP4, like TikTok's. Its caption is never sent as `title` (Upload-Post would make it
+a Reel's 255-character title, or LinkedIn's media title cut at 400): Facebook gets a Reel (`facebook_media_type`
+REELS, the caption as `facebook_description`, `facebook_is_ai_generated`), LinkedIn the caption as the commentary
+above the video (`linkedin_description`, `visibility` PUBLIC), Threads its one text (`threads_title`, at most
+THREADS_VIDEO_CAPTION_MAX_BYTES UTF-8 bytes: the video route has no "one post, never a split" field, so a longer
+caption is refused before the claim). None takes a cover pin (a Reel's cover cannot be pinned), and LinkedIn and
+Threads have no AI field: the caption's narrated-video disclaimer is the disclosure. The text and photo routes
+are unchanged. A synchronous answer's post id is also read from `video_reel_id` / `video_urn`, so a Reel or a
+LinkedIn video answered at once can still be retracted.
+
+Instagram TRIAL REELS (Batch 3): MARKETING_INSTAGRAM_TRIAL_MODE is read at SEND time, in `prepare` (distribution,
+not content, like the page ids), and maps to Upload-Post's `share_mode` (`schemas.INSTAGRAM_TRIAL_MODES`). A Trial
+Reel drops `share_to_feed` (regular Reels only) and records its mode as `metadata.publish.upload_post.share_mode`;
+"off" (the default, and what an unknown value reads as) sends exactly a regular Reel's fields.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Union
 
 from app.config import settings
 from app.integrations import upload_post
-from app.schemas.marketing import POST_FORMATS_BY_PLATFORM
+from app.schemas.marketing import (
+    FIRST_COMMENT_PLATFORMS,
+    INSTAGRAM_TRIAL_MODES,
+    INSTAGRAM_TRIAL_OFF,
+    POST_METADATA_FIRST_COMMENT,
+    THREADS_VIDEO_CAPTION_MAX_BYTES,
+    recordable_formats,
+)
 from app.services.marketing import outlet_base
-from app.services.marketing.post_copy import FORBIDDEN_CHARS
+from app.services.marketing.post_copy import FORBIDDEN_CHARS, SEARCH_LINE
 from app.services.marketing.outlet_base import (
     ABSENT,
     AMBIGUOUS,
@@ -172,9 +209,78 @@ def _first_id(value: Any) -> Optional[str]:
     return str(value) if value not in (None, "") else None
 
 
+#: The texts an automatic first comment may say (owner decision 6, 2026-10-15): code-owned and pinned by
+#: tests/test_marketing_post_copy.py — nothing scans a comment at runtime, so the outlet sends only these.
+FIRST_COMMENT_TEXTS = frozenset({SEARCH_LINE})
+
+
+def first_comment_of(platform: str, post: Dict[str, Any]) -> Optional[str]:
+    """The post's automatic first comment — `metadata.first_comment`, stamped by `create_posts` only on a
+    platform listed in MARKETING_FIRST_COMMENT_PLATFORMS while the run's store state was live or
+    preorder — or None. A stamp that is not exactly one of FIRST_COMMENT_TEXTS, or on a platform outside
+    FIRST_COMMENT_PLATFORMS (a hand-edited row), is logged at ERROR and sends NO comment: the publish
+    goes ahead without it — a first comment never decides a post (Upload-Post: it "never fails the
+    publish")."""
+    text = _meta(post).get(POST_METADATA_FIRST_COMMENT)
+    if text is None:
+        return None
+    if platform not in FIRST_COMMENT_PLATFORMS or not isinstance(text, str) or text not in FIRST_COMMENT_TEXTS:
+        logger.error("marketing upload-post: post_id=%s (%s) carries a first comment that is not the code-owned "
+                     "search line, or on a platform that takes none — sent WITHOUT a comment",
+                     post.get("id"), platform)
+        return None
+    return text
+
+
+def parse_instagram_trial_mode(raw: Any) -> Optional[str]:
+    """Upload-Post's `share_mode` for a MARKETING_INSTAGRAM_TRIAL_MODE value (Batch 3, D14) — the
+    INSTAGRAM_TRIAL_MODES value of a known mode — or None: "off", blank, and anything that is not a known mode
+    (a regular Reel, today's fields — the fail-closed side). The config validator already normalised the
+    setting; this re-check covers a value put on the live settings object past it, logged at ERROR. Never
+    raises; memoised on the raw string, so a bad live value logs once, not on every Instagram post."""
+    if not isinstance(raw, str):
+        logger.error("marketing upload-post: MARKETING_INSTAGRAM_TRIAL_MODE is not a string (%s) — off (a regular "
+                     "Reel)", type(raw).__name__)
+        return None
+    return _parse_instagram_trial_mode_text(raw)
+
+
+@functools.lru_cache(maxsize=16)
+def _parse_instagram_trial_mode_text(raw: str) -> Optional[str]:
+    """`parse_instagram_trial_mode` for a string: cached, so its logging happens once per distinct value."""
+    mode = raw.strip().lower()
+    if not mode or mode == INSTAGRAM_TRIAL_OFF:
+        return None
+    if mode in INSTAGRAM_TRIAL_MODES:
+        return INSTAGRAM_TRIAL_MODES[mode]
+    logger.error("marketing upload-post: MARKETING_INSTAGRAM_TRIAL_MODE %r is not a known mode — off (a regular "
+                 "Reel); the modes are %s", mode[:24], ",".join((INSTAGRAM_TRIAL_OFF, *INSTAGRAM_TRIAL_MODES)))
+    return None
+
+
+def instagram_share_mode() -> Optional[str]:
+    """The Instagram `share_mode` NOW (None = a regular Reel): MARKETING_INSTAGRAM_TRIAL_MODE read from the
+    settings object at CALL time — at send time, in `prepare` — and parsed by `parse_instagram_trial_mode`."""
+    return parse_instagram_trial_mode(settings.MARKETING_INSTAGRAM_TRIAL_MODE)
+
+
 def platform_fields(platform: str, post: Dict[str, Any]) -> Dict[str, Any]:
-    """The per-platform form fields of one request (pure; pinned by tests). A VIDEO post's cover is
-    pinned to its opening card where Upload-Post can (VIDEO_COVER_MS); no other format carries it."""
+    """The per-platform form fields of one request (pinned by tests): `_own_fields`, plus — when the post
+    carries its automatic first comment (`first_comment_of`) — `<platform>_first_comment` with that text
+    (Upload-Post: it overrides a generic `first_comment` for its platform; the video, photo and text
+    routes all take it). Every format carries it: a video, a picture or a text post."""
+    fields = _own_fields(platform, post)
+    comment = first_comment_of(platform, post)
+    return {**fields, f"{platform}_first_comment": comment} if comment is not None else fields
+
+
+def _own_fields(platform: str, post: Dict[str, Any]) -> Dict[str, Any]:
+    """The platform's own form fields — the post's FORMAT picks them, not only its platform (Batch 3: a
+    Facebook / LinkedIn / Threads post may be a video). A VIDEO post's cover is pinned to its opening card
+    where Upload-Post can (VIDEO_COVER_MS: TikTok, Instagram); no other format carries it. No video post on
+    Facebook, LinkedIn or Threads is ever given the caption as `title`: it goes in that platform's description
+    / commentary / text field. Reads the page ids and the Instagram trial mode from the settings at call time;
+    otherwise pure."""
     caption = str(post.get("caption") or "")
     video = post.get("format") == "video"
     if platform == "tiktok":
@@ -183,7 +289,11 @@ def platform_fields(platform: str, post: Dict[str, Any]) -> Dict[str, Any]:
                   "is_aigc": True}
         return {**fields, "cover_timestamp": VIDEO_COVER_MS} if video else fields
     if platform == "instagram":
-        fields = {"title": caption, "instagram_title": caption, "media_type": "REELS", "share_to_feed": True,
+        # Batch 3 (D14): a Trial Reel sends `share_mode` IN PLACE of `share_to_feed` (regular Reels only);
+        # off keeps today's dict, key order included.
+        share_mode = instagram_share_mode()
+        reel = {"share_to_feed": True} if share_mode is None else {"share_mode": share_mode}
+        fields = {"title": caption, "instagram_title": caption, "media_type": "REELS", **reel,
                   "is_ai_generated": True}
         return {**fields, "thumb_offset": str(VIDEO_COVER_MS)} if video else fields
     if platform == "youtube":
@@ -193,19 +303,35 @@ def platform_fields(platform: str, post: Dict[str, Any]) -> Dict[str, Any]:
                 "privacyStatus": "public", "containsSyntheticMedia": True, "categoryId": YOUTUBE_CATEGORY_ID,
                 "selfDeclaredMadeForKids": False}
     if platform == "facebook":
-        return {"facebook_page_id": (settings.MARKETING_UPLOAD_POST_FACEBOOK_PAGE_ID or "").strip()}
+        page = {"facebook_page_id": (settings.MARKETING_UPLOAD_POST_FACEBOOK_PAGE_ID or "").strip()}
+        if video:
+            # A Reel (Batch 3): the caption as its description — `title` / `facebook_title` would become the
+            # Reel's title (255 characters) — and Facebook's own AI label (`is_ai_generated` does not reach it).
+            return {**page, "facebook_media_type": "REELS", "facebook_description": caption,
+                    "facebook_is_ai_generated": True}
+        return page
     if platform == "linkedin":
-        return {"target_linkedin_page_id": (settings.MARKETING_UPLOAD_POST_LINKEDIN_PAGE_ID or "").strip()}
+        page = {"target_linkedin_page_id": (settings.MARKETING_UPLOAD_POST_LINKEDIN_PAGE_ID or "").strip()}
+        if video:
+            # The caption is the commentary shown above the video (Batch 3) — never `title` / `linkedin_title`,
+            # the video's media title (cut at 400). `visibility` is sent: the API spec marks it required.
+            return {**page, "linkedin_description": caption, "visibility": "PUBLIC"}
+        return page
     if platform == "threads":
+        if video:
+            # Its one text (Batch 3). The video route documents no `threads_long_text_as_post`: `prepare`
+            # refuses a caption over THREADS_VIDEO_CAPTION_MAX_BYTES instead, so it is never split.
+            return {"threads_title": caption}
         # One post, never an auto-split thread (Upload-Post splits over 500 BYTES by default).
         return {"threads_long_text_as_post": True}
     return {}
 
 
 def photo_fields(platform: str, post: Dict[str, Any], alt: str) -> Dict[str, Any]:
-    """The per-platform form fields of one IMAGE post (pure; pinned by tests): the text post's own
-    (the Facebook / LinkedIn page id; Threads' no-split flag, harmless if the photo route ignores it)
-    plus the picture's alt text as `<platform>_alt_text`."""
+    """The per-platform form fields of one IMAGE post (pinned by tests): the text post's own
+    (the Facebook / LinkedIn page id; Threads' no-split flag, harmless if the photo route ignores it;
+    the automatic `<platform>_first_comment` when the post carries one — `platform_fields`) plus the
+    picture's alt text as `<platform>_alt_text`."""
     return {**platform_fields(platform, post), f"{platform}_alt_text": alt}
 
 
@@ -218,6 +344,8 @@ class UploadPostAdapter(Adapter):
     def __init__(self, platform: str) -> None:
         self.platform = platform
         self.retractable = platform in DELETE_PLATFORMS
+        #: A PRIMARY video platform (TikTok, YouTube, Instagram). Whether one post is a video is its format's
+        #: call since Batch 3 (`prepare`): Facebook, LinkedIn and Threads may post a video as a second post.
         self.video = platform in VIDEO_PLATFORMS
 
     def configured(self) -> bool:
@@ -235,20 +363,31 @@ class UploadPostAdapter(Adapter):
 
     def prepare(self, post: Dict[str, Any]) -> Prepared:
         platform = self.platform
-        expected = tuple(f for f in POST_FORMATS_BY_PLATFORM.get(platform, ())
+        # Every format the server records for the platform — its primary ones, then (Batch 3) its EXTRA video
+        # — minus a picture where this outlet has no photo route.
+        expected = tuple(f for f in recordable_formats(platform)
                          if f != "image" or platform in PHOTO_PLATFORMS)
         fmt = post.get("format")
         if fmt not in expected:
             raise MarketingPublishRefused(f"{platform}: format {fmt!r} is not published here "
                                           f"(expected {'/'.join(expected) or 'none'})")
+        video = fmt == "video"
         caption = post.get("caption") if isinstance(post.get("caption"), str) else ""
         if not caption.strip():
             raise MarketingPublishRefused(f"{platform}: the post has no caption")
         if len(caption) > CAPTION_LIMITS[platform]:
             raise MarketingPublishRefused(f"{platform}: {len(caption)} characters > {CAPTION_LIMITS[platform]}")
+        # Counted without ever raising (a lone surrogate counts its 3 bytes; the client refuses it later).
+        n_bytes = len(caption.encode("utf-8", "surrogatepass")) if video and platform == "threads" else 0
+        if n_bytes > THREADS_VIDEO_CAPTION_MAX_BYTES:
+            # Belt and braces behind the freeze (which never keeps such a caption): the video route has no
+            # "one post" field, so a longer text could be split into a thread.
+            raise MarketingPublishRefused(f"threads: the video caption is {n_bytes} UTF-8 bytes > "
+                                          f"{THREADS_VIDEO_CAPTION_MAX_BYTES} (the video route cannot keep a longer "
+                                          "text in one post)")
         asset_ids = [str(a) for a in (post.get("asset_ids") or []) if a]
         image = None
-        if self.video:
+        if video:
             if len(asset_ids) != 1:
                 raise MarketingPublishRefused(f"{platform}: a video post needs exactly one video asset, "
                                               f"it has {len(asset_ids)}")
@@ -285,21 +424,29 @@ class UploadPostAdapter(Adapter):
                 raise MarketingPublishRefused(f"{platform}: unreadable attempt count") from None
             request_id = f"{post.get('idempotency_key')}:a{attempt}"
             first_sent_at = datetime.now(timezone.utc).isoformat()
-        kind = "video" if self.video else "photo" if image is not None else "text"
+        kind = "video" if video else "photo" if image is not None else "text"
         payload = {"kind": kind, "request_id": request_id,
                    "external_id": str(post.get("id") or ""), "text": caption,
-                   "asset_id": asset_ids[0] if self.video or image is not None else None,
+                   "asset_id": asset_ids[0] if video or image is not None else None,
                    "image": image.meta() if image is not None else None,
                    "fields": (photo_fields(platform, post, image.alt(PHOTO_ALT_MAX)) if image is not None
                               else platform_fields(platform, post))}
         up_meta = {**stored, "request_id": request_id, "first_sent_at": first_sent_at}
         if image is not None:
             up_meta["image"] = image.meta()
+        # The Trial Reel mode THIS request asks for (Batch 3), recorded only when on — never one carried over
+        # from an earlier attempt sent under another setting.
+        share_mode = payload["fields"].get("share_mode")
+        up_meta.pop("share_mode", None)
+        if share_mode is not None:
+            up_meta["share_mode"] = share_mode
         return Prepared(
             payload=payload, text_sha256=sha, reserve_micros=0,
             publish_meta={"upload_post": up_meta},
             summary=(f"{platform} via upload-post kind={payload['kind']} request_id={request_id} "
                      + (f"image={image.asset_id} bytes={image.size} " if image is not None else "")
+                     + ("first_comment=1 " if f"{platform}_first_comment" in payload["fields"] else "")
+                     + (f"share_mode={share_mode} " if share_mode is not None else "")
                      + f"chars={len(caption)} sha256={sha[:12]}"),
         )
 
@@ -394,6 +541,7 @@ class UploadPostAdapter(Adapter):
         usage_after = await self._usage()
         meta = {**base_meta, "usage_before": usage_before, "usage_after": usage_after,
                 "submitted_at": datetime.now(timezone.utc).isoformat()}
+        self._keep_notes(post, payload, res, meta)
         if res.get("request_id") and str(res["request_id"]) != payload["request_id"]:
             # Upload-Post's own id for the job, used ONLY to poll it; `request_id` (our
             # Idempotency-Key) is never overwritten.
@@ -407,7 +555,10 @@ class UploadPostAdapter(Adapter):
         if not isinstance(result, dict):
             return Outcome(SUBMITTED, publish_meta={"upload_post": meta})
         url = result.get("url") or result.get("post_url")
-        pid = _first_id(result.get("post_id") or result.get("platform_post_id") or result.get("video_id"))
+        # Batch 3 (D13): a Facebook Reel / LinkedIn video answered at once may name its id only as
+        # `video_reel_id` / `video_urn` — read after the usual keys, so it can still be retracted.
+        pid = _first_id(result.get("post_id") or result.get("platform_post_id") or result.get("video_id")
+                        or result.get("video_reel_id") or result.get("video_urn"))
         if result.get("skipped"):
             return Outcome(REFUSED, "not_connected", alert="failed", publish_meta={"upload_post": meta},
                            error=f"{platform} is not connected to the Upload-Post profile (skipped)")
@@ -418,6 +569,40 @@ class UploadPostAdapter(Adapter):
             return Outcome(REFUSED, "platform", alert="failed", publish_meta={"upload_post": meta},
                            error=scrub(_failure_text(platform, result)))
         return Outcome(SUBMITTED, publish_meta={"upload_post": meta})
+
+    def _keep_notes(self, post: Dict[str, Any], payload: Dict[str, Any], res: Dict[str, Any],
+                    meta: Dict[str, Any]) -> None:
+        """What the upload answer said beside its outcome (2026-10-15), into `meta` — the post's
+        `metadata.publish.upload_post`, written through the publisher's fenced merge with the outcome:
+        Upload-Post's `warnings` (an ignored field; a first comment it skipped or could not post — "the
+        first comment never fails the publish"), already scrubbed and capped by the client, logged at
+        WARNING; and `first_comment_posted`, when the answer says. A note from an earlier attempt is
+        never carried over. Neither changes the outcome — not even by failing here: the upload already
+        went out, so a raise would read as an unknown outcome (logged instead)."""
+        platform = self.platform
+        meta.pop("warnings", None)
+        meta.pop("first_comment_posted", None)
+        try:
+            raw = res.get("warnings")
+            warnings = ([w for w in raw if isinstance(w, str)][:upload_post.MAX_WARNINGS]
+                        if isinstance(raw, list) else [])
+            if warnings:
+                meta["warnings"] = warnings
+                logger.warning("marketing upload-post: %s answered with %d warning(s) post_id=%s request_id=%s — %s",
+                               platform, len(warnings), post.get("id"), payload.get("request_id"),
+                               " | ".join(warnings))
+            posted = res.get("first_comment_posted")
+            if isinstance(posted, bool):
+                meta["first_comment_posted"] = posted
+            fields = payload.get("fields")
+            if isinstance(fields, dict) and f"{platform}_first_comment" in fields:
+                (logger.warning if posted is False else logger.info)(
+                    "marketing upload-post: %s first comment requested post_id=%s request_id=%s posted=%s",
+                    platform, post.get("id"), payload.get("request_id"),
+                    posted if isinstance(posted, bool) else "not reported")
+        except Exception as e:  # noqa: BLE001 — a note never costs the outcome of a sent upload
+            logger.warning("marketing upload-post: could not keep the answer's notes post_id=%s (%s: %s)",
+                           post.get("id") if isinstance(post, dict) else None, type(e).__name__, scrub(e))
 
     async def reconcile(self, post: Dict[str, Any]) -> ReconcileResult:
         platform = self.platform

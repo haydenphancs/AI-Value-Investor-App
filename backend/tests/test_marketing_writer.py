@@ -644,12 +644,19 @@ def test_precondition_each_store_state_asks_for_its_own_x_budget():
 
 
 def _assert_value_line_on_every_post(pkg: Dict[str, Any], state: str) -> None:
-    line = post_copy.value_line(state)
     posts = pkg["posts"]
     assert set(posts) == set(post_copy.PLATFORMS), sorted(posts)   # all eight: none goes unchecked
     for platform, post in posts.items():
         field = "youtube_description" if platform == "youtube" else platform
         caption = post["caption"]
+        # The YouTube description carries the claim-free product line in every state, its search line
+        # saying where while the app is on the store (review F7, 2026-10-16: never "on the App Store"
+        # twice); every other caption the run's own value line.
+        line = post_copy.PRODUCT_LINE if platform == "youtube" else post_copy.value_line(state)
+        if platform == "youtube":
+            suffix = caption[len(pkg["captions"][field]):]   # the code-owned part after the model's body
+            assert suffix.count(post_copy.SEARCH_LINE) == (0 if state == post_copy.STORE_PRELAUNCH else 1), suffix
+            assert suffix.count("App Store") == (0 if state == post_copy.STORE_PRELAUNCH else 1), suffix
         # Exactly once, and no OTHER state's line (every line opens with VALUE_PRODUCT).
         assert caption.count(line) == 1, (platform, caption)
         assert caption.count(post_copy.VALUE_PRODUCT) == 1, (platform, caption)
@@ -980,6 +987,11 @@ def test_precondition_the_shape_tables_script_total_sits_inside_every_other_limi
     rest = _MID - wp.SCRIPT_LINE_MAX_WORDS - 1
     assert rest >= 6 and -(-rest // 6) <= wp.SCRIPT_LINE_MAX_WORDS
     assert wp.SCRIPT_MIN_LINES <= 7 <= wp.SCRIPT_MAX_LINES
+    # B3-LIVE-2: the most lines still leave every line at the per-line FLOOR (`script_lines_over` stays one
+    # violation), and one short line plus six ordinary ones keeps the total inside the window.
+    assert _MID // (wp.SCRIPT_MAX_LINES + 1) >= ws.SCRIPT_LINE_MIN_WORDS
+    short_rest = _MID - (ws.SCRIPT_LINE_MIN_WORDS - 1)
+    assert ws.SCRIPT_LINE_MIN_WORDS <= short_rest // 6 and -(-short_rest // 6) <= wp.SCRIPT_LINE_MAX_WORDS
 
 
 _SHAPE_CASES = [
@@ -1002,6 +1014,13 @@ _SHAPE_CASES = [
      ("video_script[0]", "too_long")),
     ("script_line_at_max", lambda: _with_shared(
         video_script=[_n_words(wp.SCRIPT_LINE_MAX_WORDS)] + _script(_MID - wp.SCRIPT_LINE_MAX_WORDS, 6)),
+     None),
+    # B3-LIVE-2 (2026-10-20): a stray short line (production's "cards") is refused; the floor itself passes
+    ("script_line_too_short", lambda: _with_shared(
+        video_script=[_n_words(ws.SCRIPT_LINE_MIN_WORDS - 1)] + _script(_MID - ws.SCRIPT_LINE_MIN_WORDS + 1, 6)),
+     ("video_script[0]", "length")),
+    ("script_line_at_min", lambda: _with_shared(
+        video_script=[_n_words(ws.SCRIPT_LINE_MIN_WORDS)] + _script(_MID - ws.SCRIPT_LINE_MIN_WORDS, 6)),
      None),
     ("hook_too_long", lambda: _with_shared(hook=_n_words(wp.HOOK_MAX_WORDS + 1)), ("hook", "too_long")),
     ("hook_at_max", lambda: _with_shared(hook=_n_words(wp.HOOK_MAX_WORDS)), None),
@@ -1054,6 +1073,78 @@ def test_each_shape_limit_fires_alone_and_its_boundary_passes(build, expected):
         assert not vr.ok
         # Its OWN guard, and nothing else: a combined verdict would hide which guard fired.
         assert got == [expected], got
+
+
+# ── B3-LIVE-2 (2026-10-20): a stray narration line — production's "cards" ────────────────────────────────
+#
+# Production's ACCEPTED lesson of 2026-10-17 (money_moves:microsofts-cloud-metamorphosis, prompt 2026-10-09.1)
+# carried seven narration lines, the last the single word "cards" — a schema key leaked into the list. The
+# validator only bounded the line count, the total and a per-line MAXIMUM, so it passed; the judge passed it, the
+# owner approved it, and Kokoro said "cards" (burned into the captions) 31.6 s into the TikTok, Instagram and
+# YouTube videos. A line is now at least `SCRIPT_LINE_MIN_WORDS` words, and a bare field name is `schema`.
+
+
+@pytest.mark.parametrize("stray, at", [
+    ("cards", -1), ("Cards", -1), ("cards.", -1), ("carousel_slides", -1), ("Video script:", -1),
+    ("image_post", -1), ("captions", 3), ("hook", 0),
+], ids=["cards", "Cards", "cards_dot", "carousel_slides", "video_script_label", "image_post", "mid_script",
+        "first"])
+def test_a_leaked_schema_key_in_the_narration_is_refused(stray, at):
+    """The 2026-10-17 shape: the clean script with one more line that is a bare field name. Refused as `schema`
+    (not only by the word floor) — the repair hint is "follow the JSON schema exactly". Mutation-checked
+    (2026-10-20): without the key check the line is refused as `length`; without both, nothing fires."""
+    pkg = copy.deepcopy(_clean_package())
+    lines = pkg["video_script"]
+    lines.insert(len(lines) if at == -1 else at, stray)
+    vr = ws.validate_package(pkg, _item(), RUN_DATE)
+    i = len(lines) - 1 if at == -1 else at
+    assert not vr.ok
+    assert [(v.field, v.code) for v in vr.shared] == [(f"video_script[{i}]", "schema")], vr.shared
+    assert "follow the JSON schema" in wp.REPAIR_HINTS["schema"]
+
+
+@pytest.mark.parametrize("short", ["Stay patient.", "Okay.", "Next card", "Let's see why."])
+def test_a_short_stray_line_is_refused_by_the_word_floor(short):
+    """Not a field name, but no spoken sentence either: under `SCRIPT_LINE_MIN_WORDS` words is a `length`
+    violation whose detail says how much to add (its repair hint covers lengthening a line or dropping it).
+    Mutation-checked (2026-10-20): without the floor every row passes validation."""
+    pkg = copy.deepcopy(_clean_package())
+    pkg["video_script"].append(short)
+    vr = ws.validate_package(pkg, _item(), RUN_DATE)
+    i, n = len(pkg["video_script"]) - 1, len(short.split())
+    assert [(v.field, v.code) for v in vr.shared] == [(f"video_script[{i}]", "length")], vr.shared
+    detail = vr.shared[0].detail
+    assert f"a narration line needs at least {ws.SCRIPT_LINE_MIN_WORDS}" in detail
+    assert f"add at least {ws.SCRIPT_LINE_MIN_WORDS - n} words" in detail
+
+
+def test_the_line_floor_refuses_no_honest_line_of_the_real_corpora():
+    """No over-block: every narration line the real writer produced — the 2026-09-24 real-draft corpus (the floor
+    IS its shortest line, 4 words) and the 40 judged packages of 2026-09-26 — clears the floor and is no field
+    name."""
+    from pathlib import Path
+
+    data = Path(__file__).resolve().parent / "data"
+    honest = json.loads((data / "marketing_real_drafts_2026_09_24.json").read_text("utf-8"))["honest"]
+    lines = [row[2] for row in honest if row[1] == "video_script"]
+    for package in json.loads((data / "marketing_judge_packages_2026_09_26.json").read_text("utf-8"))["packages"]:
+        lines += [text for label, text in package["fields"] if label.startswith("video_script[")]
+    assert len(lines) >= 700                                       # anti-vacuity: both corpora are read
+    assert min(len(line.split()) for line in lines) == ws.SCRIPT_LINE_MIN_WORDS == 4
+    assert [line for line in lines if ws._bare_schema_key(clean(line)) is not None] == []
+
+
+@pytest.mark.parametrize("text, key", [
+    ("cards", "cards"), ("CARDS", "cards"), (" cards. ", "cards"), ("Video script:", "video_script"),
+    ("video-script", "video_script"), ("youtube_description", "youtube_description"), ("X", "x"),
+    ("paragraphs", "paragraphs"), ("Title", "title"),
+    ("The cards", None), ("Cards matter here", None), ("Mr. Market", None), ("cardinal", None), ("", None),
+    ("cards " * 40, None), ("c" * 65, None),
+])
+def test_bare_schema_key_folds_case_spaces_and_punctuation_and_nothing_longer(text, key):
+    assert ws._bare_schema_key(text) == key
+    assert {"hook", "video_script", "cards", "carousel_slides", "captions", "image_post", "title", "body",
+            "paragraphs", "tiktok", "youtube_title"} <= ws._SCHEMA_KEYS
 
 
 def test_an_emoji_in_a_caption_is_allowed():
@@ -1561,6 +1652,9 @@ _IMAGE_SHAPE_CASES = [
         _paras()[0] + " business-partner-business", _paras()[1]]), ("image_post.paragraphs[0]", "too_long")),
     ("paragraph_word_at_max", lambda: _img(paragraphs=[
         _paras()[0] + " partner-business-partner", _paras()[1]]), None),
+    # B3-LIVE-2 (2026-10-20): a leaked schema key would be DRAWN on the picture as a paragraph
+    ("paragraph_a_field_name", lambda: _img(paragraphs=[_paras()[0], "captions"]),
+     ("image_post.paragraphs[1]", "schema")),
 ]
 
 

@@ -2,25 +2,39 @@
 """
 marketing_news_preview.py — read a Company Weekly day before it goes live (drop 2a, contract D16).
 
-Composes each news record EXACTLY as a template day stores it (`script_service._compose_candidate`'s
-steps: the record's JSON round trip, its fact sheet, `news_templates.compose`, `revalidate`, the logos,
-`freeze_post_formats` with image posts on, `revalidate` as stored, `worker_script`) and writes, per
-record, under `backend/marketing/out/news-preview/<stamp>/<series>-<n>/` (gitignored):
+Composes each news record as a template day stores it (`script_service._compose_candidate`'s steps: the
+record's JSON round trip, its fact sheet, `news_templates.compose`, `revalidate`, the logos, the REAL
+write-time freeze `MarketingScriptService._frozen_output` — the post formats, the video features and the
+extra video posts — `revalidate` as stored, `worker_script`) and writes, per record, under
+`backend/marketing/out/news-preview/<stamp>/<series>-<n>/` (gitignored):
 
-    post.md        what a reviewer reads: headline, narration, cards, image text, every caption
+    post.md        what a reviewer reads: headline, narration, cards, image text, every caption — the
+                   extra VIDEO posts' captions (Facebook / LinkedIn / Threads) and the video features
+                   included — and the switches it was frozen with
     script.json    the worker's script, exactly as the run would send it
     logos/         the logos the worker would draw, named by their bucket content address
     (--render)     preview.mp4 + post_image.jpg + report.json from the worker's own preview
                    (`python -m marketing.preview … --logos-dir … --phonemes`, venv_marketing)
 
-It writes NOTHING else: no marketing_runs / marketing_scripts row, no bucket object, no post.
+The freeze reads its switches the way production does, at write time — but from THIS environment
+(backend/.env, or a variable set on the command line, which wins): MARKETING_IMAGE_PLATFORMS,
+MARKETING_X_IMAGES, MARKETING_VIDEO_FEATURES and MARKETING_VIDEO_EXTRA_PLATFORMS. To read a day as the
+Railway web service would store it, set them as production has them, e.g.
+`MARKETING_VIDEO_EXTRA_PLATFORMS=facebook,linkedin MARKETING_VIDEO_FEATURES=data_card,push_in
+./venv/bin/python scripts/marketing_news_preview.py --fixture`. Two things are fixed, as production runs
+them: image posts are on (MARKETING_IMAGE_POSTS, live since 2026-10-15), and the worker holding the run is
+today's (`PreviewHolder`: every capability the current worker declares).
+
+It writes NOTHING else (but the --record FILE you name): no marketing_runs / marketing_scripts row, no
+bucket object, no post, no cache row — enforced, not just intended: every mode runs under
+`supabase_read_only_guard` (below).
 
 Usage (from backend/):
     ./venv/bin/python scripts/marketing_news_preview.py --series ceo_buys --fixture            # built-in samples
-    ./venv/bin/python scripts/marketing_news_preview.py --series money_map --fixture day.json --render
     ./venv/bin/python scripts/marketing_news_preview.py --candidates                          # next posting day
     ./venv/bin/python scripts/marketing_news_preview.py --candidates --date 2026-11-16 --series ceo_buys \\
-        --record day.json --logos --render
+        --record marketing/out/news-preview/day.json --logos --render
+    ./venv/bin/python scripts/marketing_news_preview.py --fixture marketing/out/news-preview/day.json --render
 
 --fixture without a file uses BUILT-IN SAMPLE records about FICTIONAL companies (Contoso, Fabrikam, …) on
 symbols that are no listing (ZQCT, ZQFB, … — `SAMPLE_COMPANIES`), labelled "SAMPLE DATA" in post.md (the
@@ -34,28 +48,63 @@ theme_explainer) included, although production runs them only once MARKETING_NEW
 
 --candidates is LIVE and READ-ONLY: it asks the one adapter (`company_news_adapter.candidates`) for the
 series the weekday calendar picks for --date (default: the next posting day, ET), or for --series. That
-is FMP and Supabase READS with the app's own keys (backend/.env); the revenue / profit services it reuses
-may refresh their own `*_cache` rows, exactly as the app does. Already-posted items are NOT excluded (a
+is FMP and Supabase READS with the app's own keys (backend/.env). Already-posted items are NOT excluded (a
 real run skips them). --logos fetches each company's FMP logo (`fetch_logo` + `logo_check`) into the
-output folder — never the bucket. --record FILE saves the records for a later --fixture FILE replay.
+output folder — never the bucket. --record FILE saves the records to FILE (its folder created) for a
+later --fixture FILE replay; the examples name one under marketing/out/, which is gitignored — any other
+path is a file left wherever you named it (from backend/, `--record day.json` is backend/day.json).
+
+The read-only guard: the services the adapter reuses refresh PRODUCTION cache rows as a side effect of a
+read — company facts, revenue breakdown and profit power (company_profile_cache, revenue_breakdown_cache,
+profit_power_cache) and, for the 13F series' split check, corporate actions (corporate_action_cache) —
+so before anything else runs, `main` patches httpx's `Client.send` and `AsyncClient.send` (the HTTP layer
+every Supabase sub-client and the FMP client send through) to refuse every request to the Supabase host
+(SUPABASE_URL's, and any *.supabase.co / .in) that is not GET or HEAD: by HOST, never by table, so a
+writer missing from that list is refused too. A refusal raises `SupabaseWriteRefused`, a RuntimeError
+those services already treat as a failed cache write, and logs one WARNING naming the method and the
+path (never a header, so never a key); the run ends with a count of what was refused. A Ctrl-C ends it
+with the guard still INSTALLED until the process exits (one WARNING says so): a cache write a worker
+thread still had pending is refused, never sent. No host in SUPABASE_URL → exit 2, never an unguarded
+run. The --render child (venv_marketing) is another process, outside the guard: the worker's own
+preview, which reads logos from the local folder and makes no Supabase call.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import json
+import logging
 import subprocess
 import sys
+import threading
+from collections import Counter
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+
+import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.schemas.marketing import (  # noqa: E402
+    EXTRA_FORMATS_KEY,
+    EXTRA_VIDEO_PLATFORMS,
+    IMAGE_FALLBACK_REASONS,
+    RUN_WORKER_CAPABILITIES_KEY,
+    VIDEO_FEATURES_KEY,
+    VIDEO_POSTS_KEY,
+    WORKER_CAPABILITIES,
+)
 from app.services.marketing import company_news_rules as R  # noqa: E402
 from app.services.marketing import logo_check, news_templates, selection  # noqa: E402
-from app.services.marketing.script_service import freeze_post_formats, worker_script  # noqa: E402
+from app.services.marketing.script_service import (  # noqa: E402
+    IMAGE_FALLBACK_KEY,
+    MarketingScriptService,
+    worker_script,
+)
 from app.utils.market_hours import ET  # noqa: E402
 
 BACKEND = Path(__file__).resolve().parents[1]
@@ -73,6 +122,167 @@ SAMPLE_DAY_HORIZON_DAYS = 400
 CANDIDATES_LIMIT = 5
 CANDIDATES_BUDGET_SECONDS = 180.0
 LOGO_TIMEOUT_SECONDS = 10.0
+#: The run id (and generation id) the preview freezes under: log context only — no run row exists.
+PREVIEW_RUN_ID = "preview"
+#: The write-time switches `MarketingScriptService._frozen_output` reads NOW (this environment's), named in
+#: post.md so a reader knows which day it shows (B3-LIVE-3).
+FREEZE_SWITCHES: Tuple[str, ...] = ("MARKETING_IMAGE_PLATFORMS", "MARKETING_X_IMAGES", "MARKETING_VIDEO_FEATURES",
+                                    "MARKETING_VIDEO_EXTRA_PLATFORMS")
+#: A fixed name, like the other scripts' loggers (`__name__` is "__main__" when this runs as a script).
+logger = logging.getLogger("marketing_news_preview")
+
+
+# ── the read-only guard ─────────────────────────────────────────────────────────
+
+#: The only methods the guard lets through to Supabase: reads. PostgREST writes are POST (insert,
+#: upsert), PATCH (update) and DELETE; Storage writes are POST / PUT. Everything that is not on this
+#: list is refused, OPTIONS and junk included — and so are the two READS that travel as POST, an RPC
+#: and a Storage listing: the adapter's path calls neither (checked 2026-10-15), and one added later
+#: degrades that read loudly (a WARNING per refusal) rather than letting a write through.
+READ_ONLY_METHODS = frozenset({"GET", "HEAD"})
+#: A host under one of these is Supabase too (another project, a storage subdomain): its writes are
+#: refused as well — a stricter net than SUPABASE_URL's host alone, never a looser one.
+SUPABASE_HOST_SUFFIXES: Tuple[str, ...] = (".supabase.co", ".supabase.in")
+#: A refused path is logged and counted at most this long (PostgREST's is /rest/v1/<table>).
+GUARD_PATH_CHARS = 200
+
+
+class SupabaseWriteRefused(RuntimeError):
+    """A request the read-only guard refused: anything but GET/HEAD to the Supabase host.
+
+    A RuntimeError on purpose, never an httpx error: every cache writer the adapter reaches
+    (`company_facts_service._merge_write`, the revenue / profit `_upsert_supabase_cache_safe`,
+    `corporate_actions_service._db_put`) wraps its write in ``except Exception`` and logs it as a failed
+    best-effort write, the answer already in hand;
+    an httpx transport type would instead read as a transient blip to
+    `supabase_errors.is_transient_supabase_error` and be retried. The message names the method and the
+    path only — never a header, so never a key."""
+
+
+def _norm_host(host: Any) -> str:
+    """Lower case, no surrounding space, no trailing root dot ("x.supabase.co." is the same host)."""
+    if isinstance(host, bytes):
+        host = host.decode("ascii", "replace")
+    return str(host or "").strip().rstrip(".").lower()
+
+
+def supabase_host(url: Optional[str] = None) -> str:
+    """The host the guard protects: SUPABASE_URL's (this environment's settings unless `url` is given),
+    normalized. ValueError when there is none — a guard that cannot name the host protects nothing, so
+    the preview refuses to run rather than run unguarded. The URL itself is never echoed."""
+    if url is None:
+        from app.config import settings
+
+        url = settings.SUPABASE_URL
+    try:
+        host = _norm_host(httpx.URL(str(url or "")).host)
+    except Exception as e:  # noqa: BLE001 — any URL httpx cannot parse names no host
+        raise ValueError(f"SUPABASE_URL does not parse as a URL ({type(e).__name__})") from e
+    if not host:
+        raise ValueError("SUPABASE_URL names no host (expected https://<project>.supabase.co)")
+    return host
+
+
+class ReadOnlyGuard:
+    """The check `supabase_read_only_guard` puts in front of every httpx request, and its tally."""
+
+    def __init__(self, host: str) -> None:
+        self.host = _norm_host(host)
+        if not self.host:
+            raise ValueError("the read-only guard needs the Supabase host")
+        #: "METHOD /path" → times refused. Locked: the sync writes arrive from worker threads
+        #: (`asyncio.to_thread`), several at once.
+        self.refused: Counter = Counter()
+        self._lock = threading.Lock()
+
+    def covers(self, host: Any) -> bool:
+        """True for the Supabase host (any case, a trailing dot) and every *.supabase.co / .in host."""
+        h = _norm_host(host)
+        return bool(h) and (h == self.host or h.endswith(SUPABASE_HOST_SUFFIXES))
+
+    def check(self, request: Any) -> None:
+        """Return for a read, or for a request to another host; for a write to Supabase, log one WARNING
+        and raise `SupabaseWriteRefused`. A method that cannot be read is not a read: refused."""
+        method = getattr(request, "method", "")
+        if isinstance(method, bytes):
+            method = method.decode("ascii", "replace")
+        method = str(method or "").strip().upper()
+        if method in READ_ONLY_METHODS:
+            return
+        url = getattr(request, "url", None)
+        if not self.covers(getattr(url, "host", "")):
+            return
+        path = " ".join(str(getattr(url, "path", "") or "/").split())[:GUARD_PATH_CHARS]
+        what = f"{method or '?'} {path}"
+        with self._lock:
+            self.refused[what] += 1
+        logger.warning("marketing preview is READ-ONLY: refused %s on Supabase — a write; the caller sees "
+                       "a failed write (a cache refresh skipped), nothing reaches the database", what)
+        raise SupabaseWriteRefused(f"marketing_news_preview is read-only: {what} to Supabase refused")
+
+    def summary(self) -> str:
+        if not self.refused:
+            return "Read-only guard: no Supabase write was attempted."
+        rows = "\n".join(f"  {what} ×{n}" for what, n in sorted(self.refused.items()))
+        return (f"Read-only guard: refused {sum(self.refused.values())} Supabase write(s) — the cache "
+                f"refreshes a live read would make; nothing was written:\n{rows}")
+
+
+@contextmanager
+def supabase_read_only_guard(host: Optional[str] = None) -> Iterator[ReadOnlyGuard]:
+    """Run the body with every httpx request checked by a `ReadOnlyGuard` for `host` (default:
+    `supabase_host()`, so ValueError before anything is patched when SUPABASE_URL names none).
+
+    WHY the HTTP layer: the writes happen deep inside services, through supabase-py → postgrest →
+    `httpx.Client`, behind bindings that differ per module (`company_facts_service._db` imports
+    `get_supabase` inside the function, the revenue / profit services hold the client they built in
+    `__init__`) — patching a service or one `get_supabase` binding would miss the next writer
+    (testing.md's binding trap). Every Supabase sub-client (postgrest, storage, auth) and the FMP client
+    send through these two methods, patched on the CLASS so clients built before the guard (the module
+    singletons) are covered too.
+
+    Restored when the body returns or raises an ordinary error (an `Exception`): `main` holds the guard
+    around `asyncio.run`, which has drained its default executor before either, so no write the body
+    started is still pending. Any BaseException that is NOT an Exception (Ctrl-C, SystemExit) leaves the
+    guard INSTALLED, with one WARNING: the process is ending, and that is exactly when a write can still
+    be pending (review PREVIEW-GUARD-1) — Python 3.11's `asyncio.run` puts the default SIGINT handler back
+    BEFORE `close()` drains the executor, so a Ctrl-C during the drain escapes it, `loop.close()` shuts
+    the executor down without waiting, and the interpreter's exit join lets the thread finish its upsert.
+    Tests run `main` in-process; theirs put httpx back themselves."""
+    guard = ReadOnlyGuard(supabase_host() if host is None else host)
+    orig_sync, orig_async = httpx.Client.send, httpx.AsyncClient.send
+
+    @functools.wraps(orig_sync)
+    def send(self: httpx.Client, request: httpx.Request, *args: Any, **kwargs: Any) -> httpx.Response:
+        guard.check(request)
+        return orig_sync(self, request, *args, **kwargs)
+
+    @functools.wraps(orig_async)
+    async def send_async(self: httpx.AsyncClient, request: httpx.Request, *args: Any,
+                         **kwargs: Any) -> httpx.Response:
+        guard.check(request)
+        return await orig_async(self, request, *args, **kwargs)
+
+    httpx.Client.send = send  # type: ignore[method-assign]
+    httpx.AsyncClient.send = send_async  # type: ignore[method-assign]
+    # False until the body ended in a way that leaves no write pending behind it — set on a return or an
+    # ordinary error, never by a Ctrl-C landing anywhere in between (a second press included).
+    restore = False
+    try:
+        yield guard
+        restore = True
+    except Exception:
+        restore = True
+        raise
+    except BaseException as e:
+        logger.warning("marketing preview interrupted (%s): the read-only guard stays installed until this "
+                       "process exits — a cache write still pending in a worker thread is refused (a WARNING "
+                       "each), never sent", type(e).__name__)
+        raise
+    finally:
+        if restore:
+            httpx.Client.send = orig_sync  # type: ignore[method-assign]
+            httpx.AsyncClient.send = orig_async  # type: ignore[method-assign]
 
 
 # ── built-in SAMPLE records: fictional companies, invented figures ──────────────
@@ -200,13 +410,16 @@ def sample_records(series: str, run_date: date) -> List[Any]:
                                source_title="Contoso 10-Q", background=None, listed_since=None,
                                local_listing=None, is_new=True)]
     if series == "earnings":
+        # Both carry a revenue pair: since Batch 1 a report without one is refused whole (the adapter's
+        # `revenue_implausible`, the template's `implausible_figures`). Tailspin keeps no quarter end — the
+        # "reported on <date>" shape the period contingency (`EARNINGS_ALLOW_SCALE_CHECK`) would publish.
         report = run_date - timedelta(days=2)
         return [R.EarningsReport(series="earnings", company=_co("northwind"), report_date=report,
                                  period_end=_quarter_end_before(report), eps_actual=-0.05, eps_estimate=-0.12,
                                  revenue_actual=551_900_000.0, revenue_estimate=543_600_000.0),
                 R.EarningsReport(series="earnings", company=_co("tailspin"),
                                  report_date=run_date - timedelta(days=4), period_end=None, eps_actual=1.42,
-                                 eps_estimate=1.3, revenue_actual=None, revenue_estimate=None)]
+                                 eps_estimate=1.3, revenue_actual=1_284_600_000.0, revenue_estimate=1_251_300_000.0)]
     if series == "theme_explainer":
         fy = str(run_date.year - 1)
         rows = (("contoso", "Robotics systems", 0.62), ("fabrikam", "Automation software", 0.48),
@@ -254,9 +467,33 @@ def logo_entries(output: Dict[str, Any], logos_in: Optional[Path], logos_out: Pa
     return out
 
 
+class PreviewHolder:
+    """The `runs` the real write-time freeze (`MarketingScriptService._frozen_output`) reads its ONE row from —
+    the run as its holder's claim left it — answered without a database: the holder is TODAY's worker, every
+    capability it declares (`schemas.WORKER_CAPABILITIES`, pinned equal to marketing/main.py's), so the formats,
+    video features and extra video posts freeze as on a run the current worker holds."""
+
+    async def get_run(self, run_id: str) -> Dict[str, Any]:
+        return {"id": run_id, "worker_version": "preview", "attempts": 1,
+                "metadata": {RUN_WORKER_CAPABILITIES_KEY: list(WORKER_CAPABILITIES)}}
+
+
+def freeze_switches() -> Dict[str, str]:
+    """FREEZE_SWITCHES as this environment holds them — what `compose_stored`'s freeze just read."""
+    from app.config import settings
+
+    return {name: str(getattr(settings, name)) for name in FREEZE_SWITCHES}
+
+
 def compose_stored(rec: Any, run_date: date, *, logos_in: Optional[Path], logos_out: Path,
                    store_state: str = "live", allow_x_url: bool = False) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """(stored output, worker script) of one record — PreviewRefused when a real day would refuse it."""
+    """(stored output, worker script) of one record — PreviewRefused when a real day would refuse it.
+
+    The freeze is production's own (`_compose_candidate` → `MarketingScriptService._frozen_output`, B3-LIVE-3):
+    the post formats under MARKETING_IMAGE_PLATFORMS / MARKETING_X_IMAGES, the video features
+    (MARKETING_VIDEO_FEATURES) and the extra video posts (MARKETING_VIDEO_EXTRA_PLATFORMS, re-checked against the
+    record's fact sheet), every switch read NOW from this environment, image posts on, the holder today's worker
+    (`PreviewHolder`)."""
     rec = R.record_from_dict(json.loads(json.dumps(R.record_to_dict(rec), allow_nan=False)))
     sheet = json.loads(json.dumps(R.fact_sheet(rec, rejections={}, selection={"preview": True}), allow_nan=False))
     try:
@@ -267,22 +504,35 @@ def compose_stored(rec: Any, run_date: date, *, logos_in: Optional[Path], logos_
     if problems:
         raise PreviewRefused(f"own re-check failed: {sorted({str(p.get('code')) for p in problems})}")
     out["logos"] = logo_entries(out, logos_in, logos_out)
-    out = freeze_post_formats(out, run_date, image_posts=True, x_images=True, run_id="preview")
+    svc = MarketingScriptService(runs=PreviewHolder())   # type: ignore[arg-type] — the one method the freeze reads
+    out = asyncio.run(svc._frozen_output(out, run_date, run_id=PREVIEW_RUN_ID, gen_id=PREVIEW_RUN_ID,
+                                         image_posts=True, fact_sheet=sheet))
     stored = json.loads(json.dumps(out, allow_nan=False))
     problems = news_templates.revalidate(stored, fact_sheet=sheet, run_date=run_date)
     if problems:
         raise PreviewRefused(f"re-check as stored failed: {problems[:3]}")
-    return stored, worker_script(stored)
+    return stored, worker_script(stored, run_id=PREVIEW_RUN_ID)
 
 
 # ── what a reviewer reads ──────────────────────────────────────────────────────
 
-def post_markdown(stored: Dict[str, Any], *, series: str, ref: str, run_date: date, sample: bool) -> str:
+def post_markdown(stored: Dict[str, Any], *, series: str, ref: str, run_date: date, sample: bool,
+                  switches: Optional[Dict[str, str]] = None) -> str:
+    """The reviewer's page: every post the day would record — the PRIMARY posts (`posts`, each in its frozen
+    format) and the EXTRA video posts (`video_posts`, decided with the video) — the frozen video features, a
+    picture fallback, and (`switches`) the write-time switches the freeze read."""
     lines: List[str] = [f"# {series} · {run_date:%a %b %-d, %Y}", ""]
     if sample:
         lines += ["> **SAMPLE DATA** — fictional companies, invented figures. Never post this.", ""]
-    lines += [f"`{ref}` · template {stored.get('prompt_version') or news_templates.TEMPLATE_VERSION}", "",
-              "## Video", "", f"**Hook (spoken over the opening card):** {stored.get('hook')}", ""]
+    lines += [f"`{ref}` · template {stored.get('prompt_version') or news_templates.TEMPLATE_VERSION}", ""]
+    if switches:
+        lines += ["_Frozen as a template day stores it, with this environment's switches: "
+                  + ", ".join(f"{k}={v if v else '(empty)'}" for k, v in switches.items())
+                  + " · image posts on · the worker holding the run is today's._", ""]
+    features = stored.get(VIDEO_FEATURES_KEY) or []
+    lines += ["## Video", "",
+              f"**Video features:** {', '.join(map(str, features)) if features else 'none (the video as before)'}", "",
+              f"**Hook (spoken over the opening card):** {stored.get('hook')}", ""]
     opening = stored.get("opening_card") or {}
     if opening:
         lines += ["**Opening card:** " + " · ".join(f"{k}: {v}" for k, v in opening.items()
@@ -304,6 +554,34 @@ def post_markdown(stored: Dict[str, Any], *, series: str, ref: str, run_date: da
         if post.get("title"):
             lines += [f"**Title:** {post['title']}", ""]
         lines += ["```", str(post.get("caption") or "").strip(), "```", ""]
+    extras = stored.get(VIDEO_POSTS_KEY) or {}
+    # A platform the switch lists that the freeze did not keep is named, never silently missing (`freeze_extra_formats`:
+    # a Threads caption over its byte limit, a Form 4 roundup whose frozen video features lack the data card
+    # (`picture_caption`, B3-LIVE-1), or a caption that does not re-derive or fails its re-check — WARNING).
+    listed = {p.strip() for p in str((switches or {}).get("MARKETING_VIDEO_EXTRA_PLATFORMS") or "").split(",")}
+    missing = [p for p in EXTRA_VIDEO_PLATFORMS if p in listed and p not in extras]
+    if extras or missing:
+        extra_formats = stored.get(EXTRA_FORMATS_KEY) or {}
+        order = ([p for p in EXTRA_VIDEO_PLATFORMS if p in extras]
+                 + sorted(p for p in extras if p not in EXTRA_VIDEO_PLATFORMS))
+        lines += ["## Extra video posts", "",
+                  "_The day's video, posted again on these platforms with their own caption "
+                  "(MARKETING_VIDEO_EXTRA_PLATFORMS) — decided in the VIDEO approval._", ""]
+        if missing:
+            lines += [f"_Listed but NOT frozen today: {', '.join(missing)} — a Threads caption over its byte limit, "
+                      "a Form 4 roundup without the data card in its video (picture_caption: its caption speaks of "
+                      "the picture's rows), or a caption that fails its re-check (a WARNING on stderr names the "
+                      "codes)._", ""]
+        for platform in order:
+            post = extras.get(platform) or {}
+            lines += [f"### {platform} ({extra_formats.get(platform, 'video')}, extra)", "",
+                      "```", str(post.get("caption") or "").strip(), "```", ""]
+    fallback = stored.get(IMAGE_FALLBACK_KEY)
+    if isinstance(fallback, dict) and fallback:
+        reason = str(fallback.get("reason"))
+        lines += ["## Picture not used", "",
+                  f"{IMAGE_FALLBACK_REASONS.get(reason, reason)} ({reason}) — posted as text: "
+                  f"{', '.join(map(str, fallback.get('platforms') or [])) or '?'}", ""]
     dropped = stored.get("dropped_outlets") or {}
     if dropped:
         lines += ["## Dropped outlets", "", "```json", json.dumps(dropped, indent=1), "```", ""]
@@ -335,7 +613,7 @@ def write_one(rec: Any, run_date: date, folder: Path, *, logos_in: Optional[Path
     (folder / "script.json").write_text(json.dumps(script, indent=1, ensure_ascii=False), encoding="utf-8")
     (folder / "stored_output.json").write_text(json.dumps(stored, indent=1, ensure_ascii=False), encoding="utf-8")
     (folder / "post.md").write_text(post_markdown(stored, series=rec.series, ref=ref, run_date=run_date,
-                                                  sample=sample), encoding="utf-8")
+                                                  sample=sample, switches=freeze_switches()), encoding="utf-8")
     print(f"- {ref}: composed → {folder}")
     if do_render:
         (folder / "logos").mkdir(exist_ok=True)
@@ -415,6 +693,10 @@ def record_symbols(rec: Any) -> List[str]:
 
 
 def save_records(path: Path, run_date: date, by_series: Dict[str, List[Any]]) -> None:
+    """The --record dump, written to the file named, its folder created: the documented one sits under
+    the gitignored marketing/out/news-preview/, which a fresh checkout lacks — and this runs only after
+    the whole live fetch. Anything in the way (a FILE where the folder should be) raises."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"run_date": run_date.isoformat(),
                                 "series": {s: [R.record_to_dict(r) for r in recs] for s, recs in by_series.items()}},
                                indent=1, allow_nan=False), encoding="utf-8")
@@ -444,6 +726,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--out", type=Path, help="output root (default: marketing/out/news-preview/<stamp>)")
     args = ap.parse_args(argv)
 
+    # The guard goes on BEFORE anything else runs — the adapter, its lazy import, a logo fetch — and
+    # covers every mode; without a Supabase host to protect, nothing runs at all.
+    try:
+        host = supabase_host()
+    except ValueError as e:
+        print(f"refused: {e} — the preview never runs without its read-only guard", file=sys.stderr)
+        return 2
+    with supabase_read_only_guard(host) as guard:
+        code = _run(args)
+    if args.candidates or guard.refused:
+        print("\n" + guard.summary())
+    return code
+
+
+def _run(args: argparse.Namespace) -> int:
+    """`main`'s work, under the read-only guard."""
     today = datetime.now(ET).date()
     out_root = args.out or (OUT_ROOT / datetime.now(ET).strftime("%Y%m%d-%H%M%S"))
     logos_in: Optional[Path] = args.logos_dir
@@ -458,6 +756,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             logos_in = out_root / "fetched-logos"
         print(f"# Live candidates for {run_date:%a %Y-%m-%d} ({plan.reason}): "
               f"{', '.join(series_marked(series_list)) or 'none'}\n")
+        # `asyncio.run`, never a bare loop: it drains the default executor before it returns, so a cache
+        # write a service fires and forgets (profit / revenue: `run_in_executor(None, …)`; company facts:
+        # `ensure_future(to_thread(…))`) is still attempted INSIDE the guard. `loop.close()` does not wait
+        # for that executor — a write landing after `main` left the guard would reach production. A Ctrl-C
+        # during that drain escapes it with the thread alive: the guard then stays installed until the
+        # process exits (`supabase_read_only_guard`), so that write is refused all the same.
         found = asyncio.run(live_candidates(series_list, run_date, logos_dir=logos_in))
         by_series = {s: v["records"] for s, v in found.items()}
         for s, v in found.items():

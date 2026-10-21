@@ -63,18 +63,33 @@ import re
 import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Set, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Set, Tuple
 
 from app.config import settings
 from app.schemas.marketing import (
     CONTENT_CLASSES,
+    EXTRA_FORMATS_KEY,
+    EXTRA_VIDEO_PLATFORMS,
+    IMAGE_FALLBACK_REASONS,
+    IMAGE_PLATFORMS,
+    LESSON_VIDEO_FEATURES,
     POST_FORMATS_BY_PLATFORM,
     SCRIPT_REJECT_REASONS,
     TEMPLATE_AUTHORSHIP,
+    TEMPLATE_VIDEO_FEATURES,
+    THREADS_VIDEO_CAPTION_MAX_BYTES,
+    VIDEO_END_CARD_CTA,
+    VIDEO_FEATURE_DATA_CARD,
+    VIDEO_FEATURE_HOOK_CARD,
+    VIDEO_FEATURES,
+    VIDEO_FEATURES_KEY,
     VIDEO_LAYOUT_PER_LINE,
+    VIDEO_LEGACY_CTA,
+    VIDEO_POSTS_KEY,
     WORKER_CAPABILITY_LAYOUTS_2B,
     WORKER_CAPABILITY_NEWS_TEMPLATES,
     WORKER_CAPABILITY_POST_IMAGE,
+    WORKER_CAPABILITY_VIDEO_V2,
     WORKER_LAYOUTS_2B,
     image_post_problem,
     normalize_image_post,
@@ -98,9 +113,13 @@ from app.services.marketing.run_service import (
     MarketingRunNotHeld,
     MarketingRunService,
     claim_problem,
+    data_card_strings,
     frozen_post_formats,
+    frozen_video_features,
     get_marketing_run_service,
     held_problem,
+    hook_card_problem,
+    hook_card_text,
     run_date_et,
     run_worker_capabilities,
 )
@@ -168,10 +187,11 @@ _REFRESH_BACKOFF_SECONDS = 0.5
 _FINISH_BACKOFF_SECONDS = 1.0
 #: Statements a generation's task issues outside the model calls, refreshes and terminal write:
 #: `_acquire` reads the row and takes it with one conditional UPDATE; `_run_date_of` reads the run
-#: when the script row carries no run_date; `_holder_renders_images` reads the run once more on the
-#: ACCEPTED path while MARKETING_IMAGE_POSTS is on (drop 1) — after the last model call and before the
-#: terminal write, so it counts on every generation's worst case (it was missing: 4577 s against a
-#: real 4697 s, past OWNER_ALIVE_SECONDS' 4637 s).
+#: when the script row carries no run_date; `_frozen_output` reads the run once more on the ACCEPTED
+#: path (`_read_holder`) while MARKETING_IMAGE_POSTS is on (drop 1) or a MARKETING_VIDEO_FEATURES feature
+#: applies (Batch 2) — ONE read serving both capability decisions — after the last model call and before
+#: the terminal write, so it counts on every generation's worst case (it was missing: 4577 s against a
+#: real 4697 s, past OWNER_ALIVE_SECONDS' 4637 s). A second read here would need this to be 2.
 _ACQUIRE_STATEMENTS = 2
 _RUN_DATE_STATEMENTS = 1
 _HOLDER_STATEMENTS = 1
@@ -201,8 +221,8 @@ def worst_case_terminal_write_seconds() -> float:
 def worst_case_generation_seconds() -> float:
     """The longest ONE generation task (`_generate`) can live: acquire (read + conditional
     UPDATE) + the run-date read + MODEL_CALLS_PER_GENERATION × (one lease refresh + one model
-    call, each at its worst) + the holder-capability read of an accepted package (image posts on)
-    + one terminal write at its worst. 4697 s at defaults with four model calls —
+    call, each at its worst) + the holder-capability read of an accepted package (image posts or a
+    video feature on — one read for both) + one terminal write at its worst. 4697 s at defaults with four model calls —
     (2 + 1 + 1) × 120 + 4 × (572 + 361.5) + 483 (it was ~2710 s with two calls, which
     OWNER_ALIVE_SECONDS = 3 × the lease = 1896 s did not cover). Every await in it is bounded by one
     of those terms; the cancel paths share the 5-s shutdown budget. A crash after a WRITTEN terminal
@@ -275,8 +295,11 @@ MAX_CANDIDATES_PER_SERIES = 5
 LOGO_FETCH_TIMEOUT_SECONDS = 8.0
 #: Logo fetches in flight at once.
 LOGO_FETCH_CONCURRENCY = 4
-#: The ledger read a news day makes: every posting day of the recent window (news refs included, so the
-#: adapter's ledger check sees them); the lesson rotation filters it with `selection.lesson_refs`.
+#: The ledger read a news day makes, at the DEFAULT cadence: every posting day of the recent window (news refs
+#: included, so the adapter's ledger check sees them); the lesson rotation filters it with `selection.lesson_refs`.
+#: Since Batch 3 (2026-10-20) the posting days are a switch, so `_select` and `_build_template_day` read
+#: `selection.news_recent_limit()` at call time (RECENT_WINDOW × the posting days a week: 240 at the default
+#: four, 420 at seven); this constant stays that default's value (240).
 NEWS_RECENT_LIMIT = RECENT_LIMIT * len(selection.POST_WEEKDAYS)
 #: A series' outcome in the day's fallback trail (`fact_sheet.selection.trail`, run `series_trail`).
 SERIES_OUTCOMES = ("chosen", "no_candidates", "all_recent", "all_refused", "unavailable", "timeout",
@@ -422,7 +445,7 @@ def _spent(exc: BaseException) -> int:
         return 0
 
 
-def worker_script(output: Dict[str, Any]) -> Dict[str, Any]:
+def worker_script(output: Dict[str, Any], *, run_id: Optional[str] = None) -> Dict[str, Any]:
     """The subset the WORKER needs to voice and render (Phases 3-4). Captions are not in it:
     they are server-authored and reach the ledger only through `create_posts`.
 
@@ -430,7 +453,11 @@ def worker_script(output: Dict[str, Any]) -> Dict[str, Any]:
     all three None for an output accepted before image posts existed (the worker then falls back to
     its own POST_FORMAT, exactly as before). Frozen formats that do not read back (a hand-edited row)
     are sent as None too, logged: `create_posts` refuses every post of such a run, so the day fails
-    loudly there rather than on a guess here."""
+    loudly there rather than on a guess here.
+
+    Batch 2 adds `video_features` and `end_card_cta` (`worker_video_fields`) — on EVERY read-back, even
+    as [] (their presence tells a Batch 2 worker this web knows the new end card) — and `data_card_slot`
+    (CARDS-B2-1): which of `cards` the data card replaces, None unless `video_features` carries data_card."""
     try:
         formats = frozen_post_formats(output)
     except ValueError as e:
@@ -438,7 +465,7 @@ def worker_script(output: Dict[str, Any]) -> Dict[str, Any]:
                      "the worker gets none; create_posts will refuse this run's posts", e)
         formats = None
     footer = output.get("image_footer")
-    return {
+    script = {
         "hook": output.get("hook") or "",
         "video_script": list(output.get("video_script") or []),
         "cards": list(output.get("cards") or []),
@@ -450,6 +477,55 @@ def worker_script(output: Dict[str, Any]) -> Dict[str, Any]:
         "image_footer": footer if formats is not None and isinstance(footer, str) and footer else None,
         **_worker_template_fields(output),
     }
+    script.update(worker_video_fields(output, script, run_id=run_id))
+    return script
+
+
+def end_card_cta(output: Any) -> str:
+    """The CTA the video's end card draws (owner decision 6, 2026-10-15): VIDEO_END_CARD_CTA ("Search Caydex
+    on the App Store") only while the accepted output's store state — the one its captions were worded
+    with, frozen at write time — says the app is on the store (live or preorder: `post_copy.search_line`,
+    the same predicate as the YouTube description's search line and the first comment); VIDEO_LEGACY_CTA
+    otherwise (prelaunch — now a mistyped store URL — or an output without a store state). Pure."""
+    state = output.get("store_state") if isinstance(output, dict) else None
+    return VIDEO_END_CARD_CTA if post_copy.search_line(state) is not None else VIDEO_LEGACY_CTA
+
+
+def worker_video_fields(output: Dict[str, Any], sent: Mapping[str, Any], *,
+                        run_id: Optional[str] = None) -> Dict[str, Any]:
+    """Batch 2's read-back fields: `video_features` — the run's frozen features
+    (`run_service.frozen_video_features`, read with the output's own kind), minus any the read-back
+    `sent` cannot carry: a hook card without a hook that can stand alone (`hook_card_text`: not one drawable
+    string, or compliant only beside its first narration line — B2-COMPL-1), a data card without the
+    post image it draws (`data_card_strings`, and the `image_spec` / `image_footer` this read-back actually
+    sends — a logo entry the worker's copy drops can leave the spec unsent) or without a content card it may
+    replace — each drop logged ERROR (a hand-edited row, or one frozen before that check: the freeze never
+    stores one now); `end_card_cta` (`end_card_cta`); and `data_card_slot` (CARDS-B2-1, 2026-10-20) — the
+    0-based index into `sent["cards"]` of the ONE card the data card replaces
+    (`template_onscreen.data_card_slot` on the read-back's own series and cards and the picture's strings: a
+    fact card the picture already shows, never a hedge card), set exactly when `video_features` carries
+    data_card, else None. Never raises for a dict output."""
+    template = output.get("authorship") == TEMPLATE_AUTHORSHIP
+    features = list(frozen_video_features(output, template=template, run_id=run_id))
+    if VIDEO_FEATURE_HOOK_CARD in features and hook_card_text(output) is None:
+        logger.error("marketing script run_id=%s: hook_card is frozen but the accepted hook %s — the worker is "
+                     "not sent it (today's opening)", run_id, hook_card_problem(output))
+        features.remove(VIDEO_FEATURE_HOOK_CARD)
+    picture = data_card_strings(output) if VIDEO_FEATURE_DATA_CARD in features else None
+    if VIDEO_FEATURE_DATA_CARD in features and (
+            picture is None or sent.get("image_spec") is None or sent.get("image_footer") is None):
+        logger.error("marketing script run_id=%s: data_card is frozen but this read-back cannot carry the post "
+                     "image it draws — the worker is not sent it (today's text cards)", run_id)
+        features.remove(VIDEO_FEATURE_DATA_CARD)
+    slot: Optional[int] = None
+    if VIDEO_FEATURE_DATA_CARD in features:
+        slot = template_onscreen.data_card_slot(sent.get("series"), sent.get("cards"), picture)
+        if slot is None:
+            logger.error("marketing script run_id=%s: data_card is frozen but none of the read-back's cards is one "
+                         "a data card may replace (series %s) — the worker is not sent it (today's text cards)",
+                         run_id, str(sent.get("series"))[:40])
+            features.remove(VIDEO_FEATURE_DATA_CARD)
+    return {"video_features": features, "end_card_cta": end_card_cta(output), "data_card_slot": slot}
 
 
 #: The keys of an `output.logos` entry the worker reads (`marketing/logos.py`), and nothing else.
@@ -549,16 +625,60 @@ def _worker_template_fields(output: Dict[str, Any]) -> Dict[str, Any]:
 #: the flag on the photo route.
 THREADS_IMAGE_CAPTION_MAX_BYTES = 500
 
+#: `output.image_fallback` (Batch 1, 2026-10-15): written by `freeze_post_formats` (or by `_frozen_output`
+#: when the freeze itself raised) ONLY on a day that should have carried the picture and froze some of
+#: those platforms as text instead — `{"reason": <schemas.IMAGE_FALLBACK_REASONS code>, "platforms":
+#: [...]}`. `run_service.create_posts` stamps the code on those platforms' text posts; the POSTS decision
+#: message and the weekly digest name it in the owner's words. Never read back by the worker.
+IMAGE_FALLBACK_KEY = "image_fallback"
+
+
+def parse_image_platforms(raw: Any) -> Tuple[str, ...]:
+    """MARKETING_IMAGE_PLATFORMS as the platforms that may post the day's picture, in IMAGE_PLATFORMS
+    order (Batch 1, 2026-10-15). Re-validated here: the Settings validator normalises a deployed value, but
+    a value set on the live object (a console, a test) skips it — so "x" (X posts the picture only through
+    MARKETING_X_IMAGES) and an unknown token are dropped with an ERROR here too, and a non-string is no
+    platform at all (text posts: the fail-closed side). Never raises."""
+    if not isinstance(raw, str):
+        logger.error("marketing script: MARKETING_IMAGE_PLATFORMS is not a string (%s) — no platform posts the "
+                     "picture", type(raw).__name__)
+        return ()
+    tokens = {t.strip().lower() for t in raw.split(",") if t.strip()}
+    if "x" in tokens:
+        logger.error("marketing script: MARKETING_IMAGE_PLATFORMS lists x — dropped (X posts the picture only "
+                     "through MARKETING_X_IMAGES)")
+    unknown = sorted(tokens - set(IMAGE_PLATFORMS) - {"x"})
+    if unknown:
+        logger.error("marketing script: MARKETING_IMAGE_PLATFORMS ignored unknown platform(s) %s",
+                     ",".join(t[:24] for t in unknown[:10]))
+    return tuple(p for p in IMAGE_PLATFORMS if p in tokens)
+
+
+def image_platforms_setting() -> Tuple[str, ...]:
+    """MARKETING_IMAGE_PLATFORMS, read when called — at WRITE time, like MARKETING_X_IMAGES."""
+    return parse_image_platforms(settings.MARKETING_IMAGE_PLATFORMS)
+
+
+def _picture_platforms(output: Any, listed: FrozenSet[str], x_images: bool) -> List[str]:
+    """The platforms the output carries copy for that should post the day's picture: an image-capable
+    platform listed in `listed` (MARKETING_IMAGE_PLATFORMS), or X while `x_images` is on. Sorted; tolerant
+    of a malformed `posts` (that may be why a freeze failed) — never raises for a dict output."""
+    posts = output.get("posts") if isinstance(output, dict) and isinstance(output.get("posts"), dict) else {}
+    return sorted(p for p in posts if isinstance(p, str) and "image" in POST_FORMATS_BY_PLATFORM.get(p, ())
+                  and (bool(x_images) if p == "x" else p in listed))
+
 
 def freeze_post_formats(output: Dict[str, Any], run_date: date, *, image_posts: bool, x_images: bool,
-                        run_id: Optional[str] = None) -> Dict[str, Any]:
+                        run_id: Optional[str] = None, image_platforms: Optional[Iterable[str]] = None,
+                        image_blocked: Optional[str] = None) -> Dict[str, Any]:
     """The accepted output as it is stored (drop 1, contract C3): a COPY of the writer's package with
     the run's formats frozen into it, decided ONCE at write time like the store state — the worker
     learns them only from the script read-back, and `create_posts` records each platform only in its
     frozen format. Pure but for logging; never raises on a malformed `image_post`.
 
     * `post_formats`: for every platform the package carries copy for — the video platforms
-      "video"; the others "image" iff `image_posts` and (not X, or `x_images`) and the package has a
+      "video"; the others "image" iff `image_posts` and the platform may post the picture (in
+      `image_platforms`; X: `x_images`) and nothing blocks it (`image_blocked`) and the package has a
       usable `image_post` (and, for Threads, its caption fits THREADS_IMAGE_CAPTION_MAX_BYTES); else
       "text".
     * `image_post`: the writer's `{title, paragraphs}` reduced to exactly those keys, or None when
@@ -569,8 +689,36 @@ def freeze_post_formats(output: Dict[str, Any], run_date: date, *, image_posts: 
     — composed with the record's source and as-of date, and compared by `news_templates.revalidate` at
     create_posts, so it stays whatever the formats are (a missing one is a ValueError, never replaced)
     — and a platform is "image" only when its `image_spec` also validates against the output's logos
-    and that footer (`template_onscreen.validate_image_spec`); otherwise that day's posts are text."""
+    and that footer (`template_onscreen.validate_image_spec`); otherwise that day's posts are text.
+
+    Batch 1 (2026-10-15):
+    * `image_platforms` — the platforms that may post the picture (MARKETING_IMAGE_PLATFORMS, read by
+      `_frozen_output` at write time). Default None = every one of `schemas.IMAGE_PLATFORMS`, i.e.
+      exactly the drop-1 decision, so a caller that does not pass it freezes the same formats as before.
+      Only members of IMAGE_PLATFORMS count: X follows `x_images` alone, and any other name is ignored.
+      A platform left off is TEXT on purpose — never a fallback. A string (not a collection of names)
+      is a ValueError.
+    * `image_blocked` — an IMAGE_FALLBACK_REASONS code the caller already knows stops every picture
+      today (`_frozen_output`: the worker holding the run cannot draw it, or the run could not be read);
+      every platform freezes as text with that reason. Any other value is a ValueError.
+    * `image_fallback` (IMAGE_FALLBACK_KEY) — written ONLY when `image_posts` is on and a platform that
+      should have posted the picture (`_picture_platforms`) froze as text anyway: `{"reason": code,
+      "platforms": [...]}`, one reason, the first that applies — `image_blocked`; `image_dropped` (no
+      usable `image_post`: the writer dropped it — its `dropped_image` says why — or it does not read);
+      `image_spec_invalid` (a template whose `image_spec` does not validate); else
+      `threads_caption_long` (the one per-platform rule: Threads alone). Never carried over from the
+      input. With image posts off, or with every listed platform posting the picture, there is none."""
+    if image_platforms is None:
+        listed = frozenset(IMAGE_PLATFORMS)
+    elif isinstance(image_platforms, (str, bytes)):
+        raise ValueError("image_platforms is a collection of platform names, not one string")
+    else:
+        listed = frozenset(p for p in image_platforms if isinstance(p, str) and p in IMAGE_PLATFORMS)
+    if image_blocked is not None and image_blocked not in IMAGE_FALLBACK_REASONS:
+        raise ValueError(f"image_blocked {str(image_blocked)[:40]!r} is not an image-fallback reason "
+                         f"(one of {sorted(IMAGE_FALLBACK_REASONS)})")
     out = dict(output)
+    out.pop(IMAGE_FALLBACK_KEY, None)   # this freeze's own verdict, never a copied one
     template = output.get("authorship") == TEMPLATE_AUTHORSHIP
     template_footer = output.get("image_footer")
     if template and (not isinstance(template_footer, str) or not template_footer.strip()):
@@ -583,22 +731,35 @@ def freeze_post_formats(output: Dict[str, Any], run_date: date, *, image_posts: 
                        "stored as None; that day's image formats fall back to text", run_id,
                        image_post_problem(raw))
     out["image_post"] = image_post
-    image_ok = image_post is not None
-    if template and image_ok:
+    spec_ok = True
+    if template and image_post is not None:
         problem = template_onscreen.validate_image_spec(
             output.get("image_spec"), template_onscreen.logo_keys(output.get("logos")), footer=template_footer)
         if problem is not None:
             logger.warning("marketing script: the template's image_spec does not validate run_id=%s (%s) — "
                            "that day's image formats fall back to text", run_id, str(problem)[:200])
-            image_ok = False
+            spec_ok = False
+    # What stops EVERY picture today, in the order the owner is told (one reason per day). None = the
+    # picture can go out (or image posts are off), and only Threads' caption size can still keep one
+    # platform on text.
+    blocked: Optional[str] = None
+    if image_posts:
+        if image_blocked is not None:
+            blocked = image_blocked
+        elif image_post is None:
+            blocked = "image_dropped"
+        elif not spec_ok:
+            blocked = "image_spec_invalid"
+    pictured = frozenset(_picture_platforms(output, listed, x_images)) if image_posts else frozenset()
     posts = output.get("posts") if isinstance(output.get("posts"), dict) else {}
     formats: Dict[str, str] = {}
+    fallen: List[str] = []
+    threads_long = False
     for platform in sorted(posts):
         allowed = POST_FORMATS_BY_PLATFORM.get(platform, ())
         if "video" in allowed:
             formats[platform] = "video"
-        elif ("image" in allowed and image_posts and image_ok
-              and (platform != "x" or x_images)):
+        elif platform in pictured and blocked is None:
             caption = posts[platform].get("caption") if isinstance(posts[platform], dict) else None
             size = len(caption.encode("utf-8")) if isinstance(caption, str) else 0
             if platform == "threads" and size > THREADS_IMAGE_CAPTION_MAX_BYTES:
@@ -607,6 +768,7 @@ def freeze_post_formats(output: Dict[str, Any], run_date: date, *, image_posts: 
                             "no-split flag works, and that flag is verified only on its text route)",
                             size, THREADS_IMAGE_CAPTION_MAX_BYTES, run_id)
                 formats[platform] = "text"
+                threads_long = True
             else:
                 formats[platform] = "image"
         elif "text" in allowed:
@@ -615,7 +777,18 @@ def freeze_post_formats(output: Dict[str, Any], run_date: date, *, image_posts: 
             # create_posts refuses a platform outside the format map anyway; say so once, here.
             logger.warning("marketing script: the accepted package carries copy for %r, which has no "
                            "recordable format run_id=%s — no format frozen for it", platform, run_id)
+        if platform in pictured and formats.get(platform) != "image":
+            fallen.append(platform)
     out["post_formats"] = formats
+    if fallen:
+        reason = blocked if blocked is not None else "threads_caption_long" if threads_long else None
+        if reason is None:   # unreachable: a pictured platform is text only for a reason above
+            logger.error("marketing script: %s froze as TEXT for no known reason run_id=%s — recorded as "
+                         "freeze_failed", fallen, run_id)
+            reason = "freeze_failed"
+        out[IMAGE_FALLBACK_KEY] = {"reason": reason, "platforms": fallen}
+        logger.info("marketing script: image posts are on, but %s froze as TEXT run_id=%s reason=%s — recorded "
+                    "as image_fallback (stamped on those posts)", ",".join(fallen), run_id, reason)
     if template:
         out["image_footer"] = template_footer
     elif "image" in formats.values():
@@ -623,6 +796,196 @@ def freeze_post_formats(output: Dict[str, Any], run_date: date, *, image_posts: 
     else:
         out.pop("image_footer", None)
     return out
+
+
+# ── Batch 2 (2026-10-19, "first seconds"): the run's frozen VIDEO features ─────────────────────────────
+
+
+def parse_video_features(raw: Any) -> Tuple[str, ...]:
+    """MARKETING_VIDEO_FEATURES as the video features it switches on, in VIDEO_FEATURES order. Re-validated
+    here, at call time: the Settings validator normalises a deployed value, but a value set on the live
+    object (a console, a test) skips it — so an unknown token is dropped with an ERROR here too, and a
+    non-string is no feature (today's video: the fail-closed side). Never raises; every logged token is
+    bounded."""
+    if not isinstance(raw, str):
+        logger.error("marketing script: MARKETING_VIDEO_FEATURES is not a string (%s) — no video feature",
+                     type(raw).__name__)
+        return ()
+    tokens = {t.strip().lower() for t in raw.split(",") if t.strip()}
+    unknown = sorted(tokens - set(VIDEO_FEATURES))
+    if unknown:
+        logger.error("marketing script: MARKETING_VIDEO_FEATURES ignored unknown feature(s) %s",
+                     ",".join(t[:24] for t in unknown[:10]))
+    return tuple(f for f in VIDEO_FEATURES if f in tokens)
+
+
+def video_features_setting() -> Tuple[str, ...]:
+    """MARKETING_VIDEO_FEATURES, read when called — at WRITE time, like MARKETING_IMAGE_PLATFORMS."""
+    return parse_video_features(settings.MARKETING_VIDEO_FEATURES)
+
+
+def freeze_video_features(output: Dict[str, Any], *, switch: Iterable[str], holder_v2: bool,
+                          run_id: Optional[str] = None) -> List[str]:
+    """`output.video_features` (VIDEO_FEATURES_KEY) as `_frozen_output` stores it, decided ONCE at write time
+    from the stored output (formats already frozen): sorted(`switch` ∩ what applies to the output's kind) —
+    a lesson LESSON_VIDEO_FEATURES (hook_card, push_in), a template (`authorship == "template"`)
+    TEMPLATE_VIDEO_FEATURES (data_card, push_in) — and ONLY when `holder_v2` (the worker holding the run
+    declared WORKER_CAPABILITY_VIDEO_V2 on its claim); [] otherwise, and for an empty switch. A card
+    feature is frozen only when the stored output can draw it — `hook_card` needs a hook that can stand
+    ALONE on a card (`run_service.hook_card_text`: one drawable string, and not compliant only beside its
+    first narration line — B2-COMPL-1), `data_card` a post image the read-back carries
+    (`run_service.data_card_strings`) and a content card it may replace (`template_onscreen.data_card_slot`,
+    CARDS-B2-1) — else it is left out (WARNING, naming why) and the video keeps today's card.
+    A switch entry outside VIDEO_FEATURES is ignored (the setting's readers drop it first). Pure but for
+    logging; never raises for a dict output. A string `switch` (not a collection) is a ValueError."""
+    if isinstance(switch, (str, bytes)):
+        raise ValueError("switch is a collection of video feature names, not one string")
+    wanted = frozenset(f for f in switch if isinstance(f, str) and f in VIDEO_FEATURES)
+    if not wanted or not holder_v2:
+        return []
+    template = output.get("authorship") == TEMPLATE_AUTHORSHIP
+    features = sorted(wanted & set(TEMPLATE_VIDEO_FEATURES if template else LESSON_VIDEO_FEATURES))
+    if VIDEO_FEATURE_HOOK_CARD in features and hook_card_text(output) is None:
+        logger.warning("marketing script run_id=%s: MARKETING_VIDEO_FEATURES lists hook_card, but the accepted "
+                       "hook %s — no hook card this run (a hook card shows the hook alone; the video opens as "
+                       "before)", run_id, hook_card_problem(output))
+        features.remove(VIDEO_FEATURE_HOOK_CARD)
+    picture = data_card_strings(output) if VIDEO_FEATURE_DATA_CARD in features else None
+    if VIDEO_FEATURE_DATA_CARD in features and picture is None:
+        logger.warning("marketing script run_id=%s: MARKETING_VIDEO_FEATURES lists data_card, but the template's "
+                       "post image cannot be drawn from the read-back (its formats, footer or image_spec) — no "
+                       "data card this run (the text cards stay)", run_id)
+        features.remove(VIDEO_FEATURE_DATA_CARD)
+    if (VIDEO_FEATURE_DATA_CARD in features
+            and template_onscreen.data_card_slot(output.get("series"), output.get("cards"), picture) is None):
+        logger.warning("marketing script run_id=%s: MARKETING_VIDEO_FEATURES lists data_card, but none of the "
+                       "template's cards is one a data card may replace (series %s) — no data card this run "
+                       "(the text cards stay)", run_id, str(output.get("series"))[:40])
+        features.remove(VIDEO_FEATURE_DATA_CARD)
+    return features
+
+
+# ── Batch 3 (2026-10-20, owner decision 2 of 2026-10-15): the run's frozen EXTRA video posts ──────────────
+
+
+def parse_video_extra_platforms(raw: Any) -> Tuple[str, ...]:
+    """MARKETING_VIDEO_EXTRA_PLATFORMS as the platforms that also post the day's video as an EXTRA post, in
+    EXTRA_VIDEO_PLATFORMS order. Re-validated here, at call time: the Settings validator normalises a deployed
+    value, but a value set on the live object (a console, a test) skips it — so "x" (X never posts two
+    formats), "bluesky" (its video is not built: deferred to the week-4 review) and an unknown token are
+    dropped with an ERROR here too, and a non-string is no platform (no extra video: the fail-closed side).
+    Never raises; every logged token is bounded."""
+    if not isinstance(raw, str):
+        logger.error("marketing script: MARKETING_VIDEO_EXTRA_PLATFORMS is not a string (%s) — no extra video",
+                     type(raw).__name__)
+        return ()
+    tokens = {t.strip().lower() for t in raw.split(",") if t.strip()}
+    if "x" in tokens:
+        logger.error("marketing script: MARKETING_VIDEO_EXTRA_PLATFORMS lists x — dropped (X never posts two "
+                     "formats)")
+    if "bluesky" in tokens:
+        logger.error("marketing script: MARKETING_VIDEO_EXTRA_PLATFORMS lists bluesky — dropped (Bluesky video is "
+                     "not built: deferred to the week-4 review)")
+    unknown = sorted(tokens - set(EXTRA_VIDEO_PLATFORMS) - {"x", "bluesky"})
+    if unknown:
+        logger.error("marketing script: MARKETING_VIDEO_EXTRA_PLATFORMS ignored unknown platform(s) %s",
+                     ",".join(t[:24] for t in unknown[:10]))
+    return tuple(p for p in EXTRA_VIDEO_PLATFORMS if p in tokens)
+
+
+def video_extra_platforms_setting() -> Tuple[str, ...]:
+    """MARKETING_VIDEO_EXTRA_PLATFORMS, read when called — at WRITE time, like MARKETING_IMAGE_PLATFORMS."""
+    return parse_video_extra_platforms(settings.MARKETING_VIDEO_EXTRA_PLATFORMS)
+
+
+def freeze_extra_formats(output: Dict[str, Any], run_date: date, *, platforms: Iterable[str],
+                         run_id: Optional[str] = None, fact_sheet: Any = None) -> Dict[str, Any]:
+    """The run's EXTRA video posts as `_frozen_output` stores them, decided ONCE at write time from the stored
+    output (its formats already frozen): {} — nothing stored, the output keeps exactly today's keys — or
+    `{EXTRA_FORMATS_KEY: {platform: "video"}, VIDEO_POSTS_KEY: {platform: {"title": None, "caption": str}}}`
+    for the platforms kept, in EXTRA_VIDEO_PLATFORMS order. `create_posts` appends those posts itself, after
+    re-deriving every caption; the worker never reads either key.
+
+    `platforms` is MARKETING_VIDEO_EXTRA_PLATFORMS as read at write time (`video_extra_platforms_setting`);
+    only members of EXTRA_VIDEO_PLATFORMS count (never x, never bluesky), and a string (not a collection of
+    names) is a ValueError. A listed platform is kept only when:
+
+    * the day's frozen PRIMARY formats hold a video — the unchanged worker renders it then (its
+      `render.video_needed` reads `post_formats`); otherwise none is (INFO: no video today);
+    * its own primary post is frozen as image or text — a platform the judge dropped has no format and no
+      copy (INFO);
+    * its caption re-derives (`post_copy.extra_video_caption`): the platform's OWN accepted caption with only
+      its code-owned disclaimer swapped for the narrated-video one — no new model text, no judge call
+      (WARNING naming why not; never the text);
+    * Threads: that caption fits THREADS_VIDEO_CAPTION_MAX_BYTES UTF-8 bytes — the /upload route documents
+      no long-text field, and a split post would put the disclaimer in a reply (INFO);
+    * a TEMPLATE (`authorship == "template"`): the caption passes `news_templates.extra_video_problems` against
+      the record's stored `fact_sheet` (None: WARNING, no extra) — told whether the video will draw the day's
+      picture: the output's frozen `video_features` (read here, already frozen by `freeze_video_features`) hold
+      `data_card`. A Form 4 roundup's caption speaks of the picture's rows (B3-LIVE-1, `picture_caption`), so
+      without the data card it freezes no extra (WARNING).
+
+    Pure but for logging; never raises for a dict output but the ValueError above."""
+    if isinstance(platforms, (str, bytes)):
+        raise ValueError("platforms is a collection of platform names, not one string")
+    listed = frozenset(p for p in platforms if isinstance(p, str))
+    wanted = [p for p in EXTRA_VIDEO_PLATFORMS if p in listed]
+    if not wanted:
+        return {}
+    formats = output.get("post_formats")
+    if not isinstance(formats, dict) or "video" not in formats.values():
+        logger.info("marketing script run_id=%s: MARKETING_VIDEO_EXTRA_PLATFORMS lists %s, but there is no video "
+                    "today (the frozen formats hold none) — no extra video post", run_id, ",".join(wanted))
+        return {}
+    authorship = output.get("authorship", post_copy.AUTHORSHIP_AI)
+    if not isinstance(authorship, str) or authorship not in post_copy.AUTHORSHIPS:
+        logger.error("marketing script run_id=%s: the accepted output's authorship %r is unknown — no extra video "
+                     "post", run_id, str(authorship)[:20])
+        return {}
+    template = authorship == TEMPLATE_AUTHORSHIP
+    # B3-LIVE-1: will the video draw the day's picture? Only a frozen data card says so (the worker may still keep
+    # the text card: create_posts asks the verified video again).
+    draws_picture = template and VIDEO_FEATURE_DATA_CARD in frozen_video_features(output, template=True,
+                                                                                  run_id=run_id)
+    posts = output.get("posts") if isinstance(output.get("posts"), dict) else {}
+    kept: Dict[str, Dict[str, Any]] = {}
+    for platform in wanted:
+        if formats.get(platform) not in ("image", "text"):
+            logger.info("marketing script run_id=%s: %s has no picture or text post today (the judge dropped it, "
+                        "or it has no copy) — no extra video post for it", run_id, platform)
+            continue
+        post = posts.get(platform)
+        accepted = post.get("caption") if isinstance(post, dict) else None
+        try:
+            caption = post_copy.extra_video_caption(platform, accepted, run_date, authorship)
+        except ValueError as e:
+            logger.warning("marketing script run_id=%s: the %s caption does not re-derive as a video caption (%s) — "
+                           "no extra video post for it", run_id, platform, str(e)[:200])
+            continue
+        size = len(caption.encode("utf-8"))
+        if platform == "threads" and size > THREADS_VIDEO_CAPTION_MAX_BYTES:
+            logger.info("marketing script run_id=%s: the Threads video caption is %d UTF-8 bytes > %d — no extra "
+                        "Threads video today (Upload-Post's video route documents no long-text field)", run_id,
+                        size, THREADS_VIDEO_CAPTION_MAX_BYTES)
+            continue
+        if template:
+            if fact_sheet is None:
+                logger.warning("marketing script run_id=%s: a template's %s video caption cannot be re-checked "
+                               "without its fact sheet — no extra video post for it", run_id, platform)
+                continue
+            problems = news_templates.extra_video_problems(output, fact_sheet=fact_sheet, run_date=run_date,
+                                                           platform=platform, caption=caption,
+                                                           video_draws_picture=draws_picture)
+            if problems:
+                logger.warning("marketing script run_id=%s: the template's %s video caption fails its re-check "
+                               "codes=%s — no extra video post for it", run_id, platform,
+                               sorted({str(p.get("code"))[:40] for p in problems}))
+                continue
+        kept[platform] = {"title": None, "caption": caption}
+    if not kept:
+        return {}
+    logger.info("marketing script run_id=%s: extra video posts frozen for %s", run_id, ",".join(kept))
+    return {EXTRA_FORMATS_KEY: {p: "video" for p in kept}, VIDEO_POSTS_KEY: kept}
 
 
 def _fact_sheet_snapshot(item: content_pool.ContentItem) -> Dict[str, Any]:
@@ -672,6 +1035,12 @@ def _trail_text(trail: List[Dict[str, str]]) -> str:
     """A trail for one log line: `ceo_buys:no_candidates(ceo_none_qualified) > insider_buys:unavailable(…)`."""
     return " > ".join(f"{t.get('series')}:{t.get('outcome')}" + (f"({t['reason']})" if t.get("reason") else "")
                       for t in trail) or "-"
+
+
+def _extras_text(output: Any) -> str:
+    """The ACCEPTED lines' `extras=` (Batch 3): the platforms whose extra video post was frozen, or "-"."""
+    extras = output.get(EXTRA_FORMATS_KEY) if isinstance(output, dict) else None
+    return ",".join(str(p)[:20] for p in extras) if isinstance(extras, dict) and extras else "-"
 
 
 class MarketingScriptService:
@@ -867,7 +1236,7 @@ class MarketingScriptService:
                 WORKER_CAPABILITY_LAYOUTS_2B, "it is" if len(cannot_draw) == 1 else "they are")
             chain = tuple(s for s in chain if s not in LAYOUTS_2B_SERIES)
         if chain == (selection.LESSON,) or not chain:
-            recent = await self.runs.recent_source_refs(run_date, NEWS_RECENT_LIMIT)
+            recent = await self.runs.recent_source_refs(run_date, selection.news_recent_limit())
             return await self._select_lesson(run, run_date, recent, classes=classes, selection_block=None)
         return await self._await_template_build(run, run_date, plan, chain, classes)
 
@@ -972,7 +1341,9 @@ class MarketingScriptService:
 
         Each record is composed from its JSON ROUND TRIP (what the fact sheet stores and create_posts
         re-reads), so compose-time and re-check-time inputs are identical; the output is re-checked with
-        `news_templates.revalidate` after the logos and the frozen formats are attached, as stored.
+        `news_templates.revalidate` after the logos and the frozen formats are attached, as stored. A record
+        the template refuses is reported back to the source (`_report_template_refusal`, the round-2 review of
+        2026-10-20), so the adapter's walk stops offering it first every day.
 
         It starts by reading the day's row: a kick whose "no row yet" read raced a build that had just
         finished (its INSERT committed, its done-callback ran) starts a new build — which ADOPTS that row
@@ -988,7 +1359,7 @@ class MarketingScriptService:
             return existing
         started = _mono()
         deadline = started + TEMPLATE_BUILD_BUDGET_SECONDS
-        recent = await self.runs.recent_source_refs(run_date, NEWS_RECENT_LIMIT)
+        recent = await self.runs.recent_source_refs(run_date, selection.news_recent_limit())
         exclude = frozenset(r for r in recent if isinstance(r, str))
         try:
             news = self._news_source_fn()
@@ -1046,11 +1417,14 @@ class MarketingScriptService:
             rejections = dict(rejections) if isinstance(rejections, Mapping) else {}
             refused: List[str] = []
             for rec in records:
+                seen = len(refused)
                 built = await self._compose_candidate(
                     run, run_date, series, rec, rejections, block({"series": series, "outcome": "chosen"}),
                     store_state=store_state, allow_x_url=allow_x_url, image_posts=image_posts,
                     deadline=deadline, news=news, refused=refused)
                 if built is None:
+                    self._report_template_refusal(news, series, rec, refused[seen:], run_date=run_date,
+                                                  run_id=run_id)
                     continue
                 output, sheet, ref = built
                 row, ours = await self.runs.insert_script({
@@ -1061,8 +1435,9 @@ class MarketingScriptService:
                 })
                 if ours:
                     logger.info("marketing template ACCEPTED run_id=%s series=%s class=%s source=%s trail=%s "
-                                "formats=%s logos=%d/%d in %.1fs", run_id, series, output.get("content_class"),
-                                ref, _trail_text(trail), output.get("post_formats"),
+                                "formats=%s video_features=%s extras=%s logos=%d/%d in %.1fs", run_id, series,
+                                output.get("content_class"), ref, _trail_text(trail), output.get("post_formats"),
+                                output.get(VIDEO_FEATURES_KEY) or [], _extras_text(output),
                                 sum(1 for lg in output.get("logos") or () if lg.get("url")),
                                 len(output.get("logos") or ()), _mono() - started)
                 else:
@@ -1085,6 +1460,34 @@ class MarketingScriptService:
                      "lesson", list(chain), run_id)
         return await self._select_lesson(run, run_date, recent, classes=classes,
                                          selection_block=block({"series": selection.LESSON, "outcome": "chosen"}))
+
+    @staticmethod
+    def _report_template_refusal(news: Any, series: str, rec: Any, codes: List[str], *, run_date: date,
+                                 run_id: str) -> None:
+        """Tell the company-news source that the template refused a record it offered (the round-2 review of
+        2026-10-20, RR2-MM-TEMPLATE-WALL): `company_news_adapter.remember_template_refusal` remembers a Money Map
+        record's refusal for its fiscal year, so the walk tries that company AFTER every candidate that can
+        publish instead of offering it first — and spending one of its three attempts on it — every day. Before,
+        nothing fed a template refusal back: three never-posted companies the template refuses at the head of the
+        pool ended the series every day (each day `all_refused`, the lesson), and no posted company's new fiscal
+        year was reached. The round-3 review (RR3-STAKES-TEMPLATE-WALL): a company stake is remembered too, by
+        its stake id, and offered after every other stake (five refused ones at the head of the newest-first walk
+        ended that series every day). Best effort and synchronous (a memo write): a source without the hook (a
+        test fake) is skipped, and one that raises is logged at WARNING — never a reason to lose the day's next
+        candidate."""
+        remember = getattr(news, "remember_template_refusal", None)
+        if not callable(remember):
+            return
+        try:
+            remember(rec, tuple(codes), run_date=run_date)
+        except Exception as e:  # noqa: BLE001 — a memo write must never cost the day its next candidate
+            # the record's company symbol (a Money Map) or its stake id (a stake) — never a person's name
+            which = (getattr(getattr(rec, "company", None), "symbol", None) or getattr(rec, "stake_id", None)
+                     or "a record")
+            logger.warning("marketing series %s: the template refusal of %s (%s) could not be reported to the "
+                           "company-news source run_id=%s (%s: %s) — the record may be offered first again",
+                           series, which, ",".join(sorted(set(codes))) or "-", run_id,
+                           type(e).__name__, e, exc_info=True)
 
     @staticmethod
     def _fell_back(run_id: str, trail: List[Dict[str, str]], series: str, outcome: str, reason: str,
@@ -1138,7 +1541,7 @@ class MarketingScriptService:
             return None
         out["logos"] = await self._attach_logos(out, deadline=deadline, news=news, run_id=run_id)
         out = await self._frozen_output(out, run_date, run_id=run_id, gen_id=f"template:{series}",
-                                        image_posts=image_posts)
+                                        image_posts=image_posts, fact_sheet=sheet)
         try:
             stored = json.loads(json.dumps(out, allow_nan=False))   # what JSONB will hold
         except (TypeError, ValueError) as e:
@@ -1222,7 +1625,7 @@ class MarketingScriptService:
         if status == REST_DAY:
             return {"status": REST_DAY, **base}
         if status == ACCEPTED and isinstance(row.get("output"), dict):
-            return {"status": ACCEPTED, **base, "script": worker_script(row["output"])}
+            return {"status": ACCEPTED, **base, "script": worker_script(row["output"], run_id=run_id)}
         if status == REJECTED:
             return self._rejected_body(row)
 
@@ -1906,10 +2309,11 @@ class MarketingScriptService:
             })
             if outcome == WRITTEN:
                 logger.info("marketing script ACCEPTED run_id=%s generation=%s source=%s outlets=%s "
-                            "dropped=%s formats=%s tokens=%d in %.1fs", run_id, gen_id, source_ref,
-                            sorted((result.package.get("posts") or {}).keys()),
+                            "dropped=%s formats=%s video_features=%s extras=%s tokens=%d in %.1fs", run_id, gen_id,
+                            source_ref, sorted((result.package.get("posts") or {}).keys()),
                             sorted((result.package.get("dropped_outlets") or {}).keys()),
-                            output.get("post_formats"), _int(result.tokens_used), elapsed)
+                            output.get("post_formats"), output.get(VIDEO_FEATURES_KEY) or [],
+                            _extras_text(output), _int(result.tokens_used), elapsed)
             else:
                 logger.error("marketing script: an ACCEPTED package was NOT recorded run_id=%s "
                              "generation=%s source=%s (%s) tokens=%d — a later generation re-bills it",
@@ -1936,7 +2340,7 @@ class MarketingScriptService:
                          "generation=%s (%s) codes=%s", run_id, gen_id, outcome, _codes(result.violations))
 
     async def _frozen_output(self, package: Dict[str, Any], run_date: date, *, run_id: str,
-                             gen_id: str, image_posts: bool) -> Dict[str, Any]:
+                             gen_id: str, image_posts: bool, fact_sheet: Any = None) -> Dict[str, Any]:
         """`freeze_post_formats` at write time, once. `image_posts` is MARKETING_IMAGE_POSTS as the
         caller read it ONCE when the generation started — the very value the writer was given
         (drop-1 review, server:F4), so it is never read again here; MARKETING_X_IMAGES and the
@@ -1946,69 +2350,191 @@ class MarketingScriptService:
         posts existed (every post text or video, as before).
 
         With MARKETING_IMAGE_POSTS on, `image` is frozen only when the worker that HOLDS the run now
-        declared it can render the post image (`_holder_renders_images`): an older worker image sends
+        declared it can render the post image (`_holder_image_block`): an older worker image sends
         text specs, and `create_posts` would refuse every post of the day — the videos included — if
         the formats said image. With the switch off the run is not read at all (as before). A TEMPLATE
         output's image is its `image_spec`, which only a holder that also declared
         WORKER_CAPABILITY_NEWS_TEMPLATES can draw (a re-claim by an older image during the build) — and,
-        for a drop-2b layout (WORKER_LAYOUTS_2B: `pair`, `grid`), WORKER_CAPABILITY_LAYOUTS_2B too."""
+        for a drop-2b layout (WORKER_LAYOUTS_2B: `pair`, `grid`), WORKER_CAPABILITY_LAYOUTS_2B too.
+
+        Batch 1 (2026-10-15): MARKETING_IMAGE_PLATFORMS is read NOW too (`image_platforms_setting`), and a
+        day that should have carried the picture never loses it silently: a holder that cannot draw it
+        passes its reason to the freeze as `image_blocked` (with image posts still on), so the output
+        records `image_fallback` — and a freeze that RAISES records `freeze_failed` (the holder's reason
+        first, when it had one) beside the formats-free package, for every platform that would have posted
+        the picture. `create_posts` stamps that code on those posts.
+
+        Batch 2 (2026-10-19): MARKETING_VIDEO_FEATURES is read NOW too (`video_features_setting`), and the
+        features that apply to the package's kind are frozen into whichever output is stored (the
+        formats-free one of a failed freeze included) as `video_features` (`freeze_video_features`) — only
+        when the worker holding the run can draw them (`_holder_video_features`: video_v2; a data card also
+        needs what drawing the template's picture needs). A
+        `video_features` key in the package is never carried over. ONE run read serves every capability
+        decision (`_read_holder`; the generation's worst case counts it once, _HOLDER_STATEMENTS), made only
+        while image posts are on or a listed feature applies — with both off, no read, as before.
+
+        Batch 3 (2026-10-20): MARKETING_VIDEO_EXTRA_PLATFORMS is read NOW too (`video_extra_platforms_setting`),
+        and only while it lists a platform are the run's EXTRA video posts frozen into whichever output is stored
+        (`freeze_extra_formats`: `extra_post_formats` + `video_posts`; `fact_sheet` — the record's, for a
+        template's re-check). With the switch empty (the default) nothing is frozen or added: the stored output
+        is byte for byte what it was. Neither key in the package is ever carried over; no run read (the video
+        they carry is one the worker renders anyway); a freeze that raises is logged at ERROR and costs the
+        extras only, never the paid package."""
         image_posts = bool(image_posts)
+        x_images = bool(settings.MARKETING_X_IMAGES)
+        platforms = image_platforms_setting()
+        template = package.get("authorship") == TEMPLATE_AUTHORSHIP
+        video_wanted = tuple(f for f in video_features_setting()
+                             if f in (TEMPLATE_VIDEO_FEATURES if template else LESSON_VIDEO_FEATURES))
+        holder = await self._read_holder(run_id) if (image_posts or video_wanted) else None
+        spec = package.get("image_spec") if template else None
+        image_layout = spec.get("layout") if isinstance(spec, Mapping) else None
+        blocked: Optional[str] = None
         if image_posts:
-            template = package.get("authorship") == TEMPLATE_AUTHORSHIP
-            spec = package.get("image_spec") if template else None
-            image_posts = await self._holder_renders_images(
-                run_id, gen_id, template=template,
-                image_layout=spec.get("layout") if isinstance(spec, Mapping) else None)
+            blocked = await self._holder_image_block(
+                run_id, gen_id, template=template, image_layout=image_layout, holder=holder)
+        video_can: Tuple[str, ...] = ()
+        holder_v2 = False
+        if video_wanted:
+            video_can = self._holder_video_features(run_id, gen_id, holder, video_wanted, image_layout=image_layout)
+            holder_v2 = bool(video_can)
         try:
-            return freeze_post_formats(
-                package, run_date, image_posts=image_posts,
-                x_images=bool(settings.MARKETING_X_IMAGES), run_id=run_id,
+            stored = freeze_post_formats(
+                package, run_date, image_posts=image_posts, x_images=x_images, run_id=run_id,
+                image_platforms=platforms, image_blocked=blocked,
             )
         except Exception as e:
             logger.error("marketing script: could not freeze the post formats run_id=%s generation=%s "
                          "(%s: %s) — storing the package without them (no image posts this run)",
                          run_id, gen_id, type(e).__name__, e, exc_info=True)
             # A template's own image_footer is part of what create_posts re-checks: never dropped here.
-            drop = (("post_formats",) if package.get("authorship") == TEMPLATE_AUTHORSHIP
-                    else ("post_formats", "image_footer"))
-            return {k: v for k, v in package.items() if k not in drop}
+            drop = (("post_formats", IMAGE_FALLBACK_KEY) if template
+                    else ("post_formats", "image_footer", IMAGE_FALLBACK_KEY))
+            stored = {k: v for k, v in package.items() if k not in drop}
+            fallen = _picture_platforms(package, frozenset(platforms), x_images) if image_posts else []
+            if fallen:
+                reason = blocked or "freeze_failed"
+                stored[IMAGE_FALLBACK_KEY] = {"reason": reason, "platforms": fallen}
+                logger.warning("marketing script: %s will post TEXT run_id=%s generation=%s reason=%s — recorded "
+                               "as image_fallback", ",".join(fallen), run_id, gen_id, reason)
+        stored.pop(VIDEO_FEATURES_KEY, None)   # this freeze's own decision, never a copied one
+        try:
+            features = freeze_video_features(stored, switch=video_can, holder_v2=holder_v2, run_id=run_id)
+        except Exception as e:  # noqa: BLE001 — a video feature must never cost a paid, accepted package
+            logger.error("marketing script: could not freeze the video features run_id=%s generation=%s (%s: %s) "
+                         "— none this run (today's video)", run_id, gen_id, type(e).__name__, e, exc_info=True)
+            features = []
+        if features:
+            stored[VIDEO_FEATURES_KEY] = features
+            logger.info("marketing script: video features frozen run_id=%s generation=%s features=%s", run_id,
+                        gen_id, ",".join(features))
+        stored.pop(EXTRA_FORMATS_KEY, None)   # this freeze's own decision, never a copied one
+        stored.pop(VIDEO_POSTS_KEY, None)
+        extra_platforms = video_extra_platforms_setting()
+        if extra_platforms:
+            try:
+                stored.update(freeze_extra_formats(stored, run_date, platforms=extra_platforms, run_id=run_id,
+                                                   fact_sheet=fact_sheet))
+            except Exception as e:  # noqa: BLE001 — an extra video post must never cost a paid, accepted package
+                logger.error("marketing script: could not freeze the extra video posts run_id=%s generation=%s "
+                             "(%s: %s) — none this run (the day's other posts are unchanged)", run_id, gen_id,
+                             type(e).__name__, e, exc_info=True)
+        return stored
 
-    async def _holder_renders_images(self, run_id: str, gen_id: str, *, template: bool = False,
-                                     image_layout: Any = None) -> bool:
-        """Did the worker that holds `run_id` declare WORKER_CAPABILITY_POST_IMAGE on its claim (the
+    async def _read_holder(self, run_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[Exception]]:
+        """(the run as its holder's claim left it, None) — or (None, the error) when the read raised; (None,
+        None) when there is no such run. ONE read at write time serves every capability decision of
+        `_frozen_output` (`_holder_image_block`, `_holder_video_features`), each of which logs a failure in the
+        words of what it then decides. Never raises but for a cancellation."""
+        try:
+            return await self.runs.get_run(run_id), None
+        except Exception as e:  # noqa: BLE001 — the deciding caller logs it (WARNING) and fails closed
+            return None, e
+
+    def _holder_video_features(self, run_id: str, gen_id: str, holder: Any, wanted: Tuple[str, ...], *,
+                               image_layout: Any = None) -> Tuple[str, ...]:
+        """The features of `wanted` the worker that holds `run_id` can draw, from its claim's declaration (the
+        server-owned `metadata.worker_capabilities`, replaced by every claim that takes the run), read at
+        write time from `holder` (`_read_holder`): every one needs WORKER_CAPABILITY_VIDEO_V2, and a
+        `data_card` — the template's post image drawn into the video — also what drawing that picture needs
+        (WORKER_CAPABILITY_NEWS_TEMPLATES, plus WORKER_CAPABILITY_LAYOUTS_2B for a drop-2b `image_layout`), as
+        the post image itself does (`_holder_image_block`). () — no video feature this run: the video stays
+        today's, which every worker renders — when the holder lacks video_v2 or the run cannot be read; each
+        loss logged WARNING naming the worker, or the read that failed (a ledger blip is never blamed on the
+        worker)."""
+        run, error = holder if isinstance(holder, tuple) and len(holder) == 2 else (None, None)
+        listed = ",".join(wanted)
+        if error is not None:
+            logger.warning("marketing script: could not read run_id=%s generation=%s to check its worker can "
+                           "render the video features %s (%s: %s) — no video feature this run", run_id, gen_id,
+                           listed, type(error).__name__, error)
+            return ()
+        if run is None:
+            logger.warning("marketing script: run_id=%s generation=%s not found when its video features were "
+                           "frozen — no video feature this run", run_id, gen_id)
+            return ()
+        declared = run_worker_capabilities(run)
+        if WORKER_CAPABILITY_VIDEO_V2 not in declared:
+            logger.warning("marketing script: MARKETING_VIDEO_FEATURES lists %s, but the worker holding run_id=%s "
+                           "(worker_version=%r, attempt %s) did not declare %r on its claim — an older worker image; "
+                           "no video feature this run, today's video (deploy the Batch 2 marketing worker)", listed,
+                           run_id, str(run.get("worker_version") or "")[:64], run.get("attempts"),
+                           WORKER_CAPABILITY_VIDEO_V2)
+            return ()
+        can = tuple(wanted)
+        if VIDEO_FEATURE_DATA_CARD in can:
+            needed = [WORKER_CAPABILITY_NEWS_TEMPLATES] + (
+                [WORKER_CAPABILITY_LAYOUTS_2B] if image_layout in WORKER_LAYOUTS_2B else [])
+            missing = [c for c in needed if c not in declared]
+            if missing:
+                logger.warning("marketing script: the worker holding run_id=%s (worker_version=%r) declared %r but "
+                               "not %s — it cannot draw this template's %r picture; no data card this run",
+                               run_id, str(run.get("worker_version") or "")[:64], WORKER_CAPABILITY_VIDEO_V2,
+                               " + ".join(repr(c) for c in missing), str(image_layout)[:20])
+                can = tuple(f for f in can if f != VIDEO_FEATURE_DATA_CARD)
+        return can
+
+    async def _holder_image_block(self, run_id: str, gen_id: str, *, template: bool = False,
+                                  image_layout: Any = None, holder: Any = None) -> Optional[str]:
+        """None when the worker that holds `run_id` declared WORKER_CAPABILITY_POST_IMAGE on its claim (the
         server-owned `metadata.worker_capabilities`, replaced by every claim that takes the run) — and,
         for a `template` output, WORKER_CAPABILITY_NEWS_TEMPLATES too (only that worker draws an
         `image_spec`; an older one would draw the alt text, which the server refuses), plus
         WORKER_CAPABILITY_LAYOUTS_2B when its `image_layout` is a drop-2b layout (WORKER_LAYOUTS_2B: a
-        drop-2a image refuses a `pair` / `grid` loudly, failing the day)? Read at write
-        time, so a re-claim by another worker during a slow generation is honoured. False — text posts,
-        which every worker makes — when it did not, or when the run cannot be read (both logged
-        WARNING)."""
-        try:
-            run = await self.runs.get_run(run_id)
-        except Exception as e:
+        drop-2a image refuses a `pair` / `grid` loudly, failing the day). Read at write time, so a
+        re-claim by another worker during a slow generation is honoured.
+
+        Otherwise the IMAGE_FALLBACK_REASONS code that freezes the run's posts as TEXT — the posts every
+        worker makes — and that the freeze records (`image_fallback`), both logged WARNING:
+        "worker_capability" when the holder did not declare what the picture needs, "freeze_failed" when
+        the run cannot be read at all (a ledger blip is never blamed on the worker).
+
+        `holder` (Batch 2): the `_read_holder` answer `_frozen_output` already has — its one write-time
+        read serves this check and the video one; None (a direct call) reads the run here."""
+        run, error = holder if isinstance(holder, tuple) and len(holder) == 2 else await self._read_holder(run_id)
+        if error is not None:
             logger.warning("marketing script: could not read run_id=%s generation=%s to check its worker can "
                            "render the post image (%s: %s) — this run's posts are frozen as text",
-                           run_id, gen_id, type(e).__name__, e)
-            return False
+                           run_id, gen_id, type(error).__name__, error)
+            return "freeze_failed"
         if run is None:
             logger.warning("marketing script: run_id=%s generation=%s not found when its formats were frozen — "
                            "this run's posts are frozen as text", run_id, gen_id)
-            return False
+            return "freeze_failed"
         declared = run_worker_capabilities(run)
         layouts_2b = template and image_layout in WORKER_LAYOUTS_2B
         needed = ([WORKER_CAPABILITY_POST_IMAGE] + ([WORKER_CAPABILITY_NEWS_TEMPLATES] if template else [])
                   + ([WORKER_CAPABILITY_LAYOUTS_2B] if layouts_2b else []))
         missing = [c for c in needed if c not in declared]
         if not missing:
-            return True
+            return None
         drop = ("drop-2b" if WORKER_CAPABILITY_LAYOUTS_2B in missing else "drop-2" if template else "drop-1")
         logger.warning("marketing script: MARKETING_IMAGE_POSTS is on, but the worker holding run_id=%s "
                        "(worker_version=%r, attempt %s) did not declare %s on its claim — an older worker "
                        "image; this run's posts are frozen as TEXT (deploy the %s marketing worker)",
                        run_id, str(run.get("worker_version") or "")[:64], run.get("attempts"),
                        " + ".join(repr(c) for c in missing), drop)
-        return False
+        return "worker_capability"
 
     async def _record_failure(self, run_id: str, row: Dict[str, Any], gen_id: str, e: Exception) -> None:
         """A generation that ended without a content verdict. Counts against MAX_WRITER_FAILURES

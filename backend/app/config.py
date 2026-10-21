@@ -1235,10 +1235,13 @@ class Settings(BaseSettings):
     # point at the landing page at `/`. Only an https apps.apple.com URL is accepted; anything
     # else logs ERROR once and falls back (services/marketing/smart_link.py). A VALID URL also
     # switches every new caption's code-owned value line from the claim-free "Caydex: AI research on
-    # public companies." to "… — on the App Store." (post_copy.value_line, read at WRITE time).
+    # public companies." to "… — on the App Store." (post_copy.value_line, read at WRITE time) — all but
+    # the YouTube description, which keeps that claim-free line and adds "Search Caydex on the App Store."
+    # (post_copy.cta_for; Batch 1 review F7: "on the App Store" once, and no link Shorts cannot tap).
     MARKETING_APP_STORE_URL: str = ""
     # True while the App Store page is a PRE-ORDER: the landing button reads "Pre-order Caydex for
-    # iPhone" and new captions say "pre-order on the App Store". Honoured ONLY while
+    # iPhone" and new captions say "pre-order on the App Store" (not the YouTube description: its
+    # search line finds the pre-order page). Honoured ONLY while
     # MARKETING_APP_STORE_URL is valid (smart_link.store_state); it never changes where /go points.
     # Read at WRITE time — an accepted caption keeps its words until its post expires (run day + 1,
     # ET). Set it False on release day. Fail-closed. Web only (the worker never composes captions).
@@ -1357,6 +1360,51 @@ class Settings(BaseSettings):
     # the real price (the text-post price is outlet_x's own constant). 0..$1.00; anything else fails
     # the deploy at boot.
     MARKETING_X_IMAGE_POST_MICROS: int = Field(200_000, ge=0, le=1_000_000)
+    # What an X image post's media UPLOAD (POST /2/media/upload) is journaled at, in micro-dollars — its
+    # own write-ahead charge `x_media_upload`, beside the alt text's `x_media_alt` (Batch 1, 2026-10-15).
+    # X's pricing page has no line for an upload; one developer-forum report says it is billed, and our
+    # ledger is the only X spend cap that holds, so it is reserved at $0.015 until the OWNER_TASKS 14.5
+    # live test lists every X usage event. 0 = journal no upload charge (X confirmed it free). Dormant
+    # while MARKETING_X_IMAGES is off (only an X image post uploads). Read at publish time by
+    # outlet_x.prepare and at measure time by outlet_x.metrics_headroom_micros. 0..$0.20; anything else
+    # fails the deploy at boot.
+    MARKETING_X_MEDIA_UPLOAD_MICROS: int = Field(15_000, ge=0, le=200_000)
+    # ── Batch 1 (2026-10-15): which platforms post the day's PICTURE, on top of MARKETING_IMAGE_POSTS ──
+    # Comma-separated, case- and space-insensitive, normalised to the sorted set; the members may be
+    # bluesky, facebook, linkedin, threads (schemas.marketing.IMAGE_PLATFORMS). X is NOT one: it keeps its
+    # own switch, MARKETING_X_IMAGES — an "x" here is dropped and logged at ERROR, like an unknown token
+    # (never a failed deploy). Empty = no platform posts the picture (every such post is text). Read at
+    # WRITE time with the other image switches (script_service._frozen_output) and frozen into the
+    # accepted output's `post_formats`: a platform left off is text ON PURPOSE, never an `image_fallback`.
+    # The default is every image platform — exactly the drop-1 behaviour.
+    MARKETING_IMAGE_PLATFORMS: str = "bluesky,facebook,linkedin,threads"
+
+    @field_validator("MARKETING_IMAGE_PLATFORMS", mode="before")
+    @classmethod
+    def _image_platforms_fail_closed(cls, value: object) -> str:
+        """Normalise `MARKETING_IMAGE_PLATFORMS` to the sorted, comma-joined set of image platforms. The
+        inline literal mirrors `schemas.marketing.IMAGE_PLATFORMS` (config imports no app module;
+        tests/test_marketing_script_flow.py pins the two equal). "x" and unknown tokens are dropped with
+        an ERROR; a non-string is no platform (text posts — the fail-closed side)."""
+        import logging
+
+        known = ("bluesky", "facebook", "linkedin", "threads")
+        if not isinstance(value, str):
+            logging.getLogger(__name__).error(
+                "MARKETING_IMAGE_PLATFORMS: not a string (%s) — no platform posts the picture",
+                type(value).__name__)
+            return ""
+        tokens = {t.strip().lower() for t in value.split(",") if t.strip()}
+        if "x" in tokens:
+            logging.getLogger(__name__).error(
+                "MARKETING_IMAGE_PLATFORMS: dropped x — X posts the picture only through MARKETING_X_IMAGES")
+        unknown = sorted(tokens - set(known) - {"x"})
+        if unknown:
+            logging.getLogger(__name__).error(
+                "MARKETING_IMAGE_PLATFORMS: ignored unknown platform(s) %s",
+                ",".join(t[:24] for t in unknown[:10]))
+        return ",".join(sorted(tokens & set(known)))
+
     # ── Drop 2 (Company Weekly, 2026-10-09): which content classes selection may pick ───────────
     # "A" = the Learn lesson (writer + judge); "C" = filings templates (CEO Buys, Insider Buys, 13F
     # Season, Congress Count); "F" = fundamentals templates (Company Stakes, Earnings vs Estimates,
@@ -1426,6 +1474,200 @@ class Settings(BaseSettings):
                 "MARKETING_NEWS_SERIES: ignored unknown series %s",
                 ",".join(t[:24] for t in unknown[:10]))
         return ",".join(sorted(tokens & set(known)))
+
+    # ── Batch 1 (2026-10-15): the App Store FIRST COMMENT (owner decision 6) ──────────────────────
+    # Which platforms' posts carry the automatic first comment "Search Caydex on the App Store."
+    # (post_copy.SEARCH_LINE), sent through Upload-Post (`<platform>_first_comment`; it "never fails the
+    # publish" — a refused comment comes back as an Upload-Post warning). Members: youtube, instagram,
+    # facebook, threads, linkedin, tiktok (schemas.marketing.FIRST_COMMENT_PLATFORMS; TikTok posts it only
+    # once the account was reconnected with the comments capability). "x" (a comment is another billed
+    # post) and "bluesky" (direct, and its caption already carries a tappable link) are refused, an
+    # unknown token is dropped — each logged at ERROR, never a failed deploy. Comma-separated, case- and
+    # space-insensitive, normalised to the sorted set. Read at call time by `run_service.create_posts`,
+    # which stamps the text on each listed platform's post only while the run's accepted output says the
+    # app is on the store (store state live or preorder). Empty (the default) = no first comment.
+    MARKETING_FIRST_COMMENT_PLATFORMS: str = ""
+
+    @field_validator("MARKETING_FIRST_COMMENT_PLATFORMS", mode="before")
+    @classmethod
+    def _first_comment_platforms_fail_closed(cls, value: object) -> str:
+        """Normalise `MARKETING_FIRST_COMMENT_PLATFORMS` to the sorted, comma-joined set of platforms that
+        may carry the first comment. The inline literal mirrors `schemas.marketing.FIRST_COMMENT_PLATFORMS`
+        (config imports no app module; tests/test_marketing_run_service.py pins the two equal). A
+        non-string is no platform (no comment — the fail-closed side)."""
+        import logging
+
+        known = ("youtube", "instagram", "facebook", "threads", "linkedin", "tiktok")
+        if not isinstance(value, str):
+            logging.getLogger(__name__).error(
+                "MARKETING_FIRST_COMMENT_PLATFORMS: not a string (%s) — no first comment", type(value).__name__)
+            return ""
+        tokens = {t.strip().lower() for t in value.split(",") if t.strip()}
+        refused = sorted(tokens & {"x", "bluesky"})
+        if refused:
+            logging.getLogger(__name__).error(
+                "MARKETING_FIRST_COMMENT_PLATFORMS: refused %s — never a first comment there (X: a comment is "
+                "another billed post; Bluesky: its caption already carries a tappable link)", ",".join(refused))
+        unknown = sorted(tokens - set(known) - {"x", "bluesky"})
+        if unknown:
+            logging.getLogger(__name__).error(
+                "MARKETING_FIRST_COMMENT_PLATFORMS: ignored unknown platform(s) %s",
+                ",".join(t[:24] for t in unknown[:10]))
+        return ",".join(sorted(tokens & set(known)))
+
+    # ── Batch 2 (2026-10-19, "first seconds"): what the worker may add to the day's VIDEO ──────────
+    # Members: hook_card (a lesson video opens on a card drawing its hook), data_card (in a template video,
+    # the day's post image replaces the card named by data_card_slot — a fact card, never a hedge card —
+    # template_onscreen.data_card_slot), push_in (card 0 zooms in slowly) —
+    # schemas.marketing.VIDEO_FEATURES. Comma-separated, case- and space-insensitive, normalised to the
+    # sorted set; an unknown token is dropped and logged at ERROR (never a failed deploy); a non-string is
+    # no feature. Read at WRITE time (script_service._frozen_output, like MARKETING_IMAGE_PLATFORMS) and
+    # frozen into the accepted output as `video_features` — only the features that apply to the day's
+    # script (a lesson: hook_card, push_in; a template: data_card, push_in), and only when the worker
+    # holding the run declared `video_v2` on its claim (an older worker gets none and renders today's
+    # video). Empty (the default) = no feature: today's video. Deploy the web first, then the worker.
+    MARKETING_VIDEO_FEATURES: str = ""
+
+    @field_validator("MARKETING_VIDEO_FEATURES", mode="before")
+    @classmethod
+    def _video_features_fail_closed(cls, value: object) -> str:
+        """Normalise `MARKETING_VIDEO_FEATURES` to the sorted, comma-joined set of known video features. The
+        inline literal mirrors `schemas.marketing.VIDEO_FEATURES` (config imports no app module;
+        tests/test_marketing_script_flow.py pins the two equal). A non-string is no feature (today's video
+        — the fail-closed side)."""
+        import logging
+
+        known = ("hook_card", "data_card", "push_in")
+        if not isinstance(value, str):
+            logging.getLogger(__name__).error(
+                "MARKETING_VIDEO_FEATURES: not a string (%s) — no video feature", type(value).__name__)
+            return ""
+        tokens = {t.strip().lower() for t in value.split(",") if t.strip()}
+        unknown = sorted(tokens - set(known))
+        if unknown:
+            logging.getLogger(__name__).error(
+                "MARKETING_VIDEO_FEATURES: ignored unknown feature(s) %s",
+                ",".join(t[:24] for t in unknown[:10]))
+        return ",".join(sorted(tokens & set(known)))
+
+    # ── Batch 3 (2026-10-20, "more surfaces, more days"): three switches, each defaulting to today ──
+    # Which platforms post the day's narrated VIDEO as an EXTRA post, beside their picture/text post (owner
+    # decision 2, 2026-10-15): facebook, linkedin, threads (schemas.marketing.EXTRA_VIDEO_PLATFORMS). "x" is
+    # refused (X never posts two formats), so is "bluesky" (Bluesky video is not built — deferred to the week-4
+    # review), and an unknown token is dropped — each logged at ERROR, never a failed deploy. Comma-separated,
+    # case- and space-insensitive, normalised to the sorted set. Read at WRITE time (script_service._frozen_output,
+    # like MARKETING_IMAGE_PLATFORMS) and frozen into the accepted output (`extra_post_formats` + `video_posts`),
+    # only on a day that has a video; `create_posts` appends those posts itself, always for review. A change acts
+    # from the next run's script: a video already frozen is stopped at its review (drop or Reject). Empty (the
+    # default) = no extra post anywhere — today's posts, byte for byte.
+    MARKETING_VIDEO_EXTRA_PLATFORMS: str = ""
+
+    @field_validator("MARKETING_VIDEO_EXTRA_PLATFORMS", mode="before")
+    @classmethod
+    def _video_extra_platforms_fail_closed(cls, value: object) -> str:
+        """Normalise `MARKETING_VIDEO_EXTRA_PLATFORMS` to the sorted, comma-joined set of platforms that may post
+        an extra video. The inline literal mirrors `schemas.marketing.EXTRA_VIDEO_PLATFORMS` (config imports no
+        app module; tests/test_marketing_run_service.py pins the two equal). "x", "bluesky" and unknown tokens
+        are dropped with an ERROR; a non-string is no platform (no extra video — the fail-closed side)."""
+        import logging
+
+        known = ("facebook", "linkedin", "threads")
+        if not isinstance(value, str):
+            logging.getLogger(__name__).error(
+                "MARKETING_VIDEO_EXTRA_PLATFORMS: not a string (%s) — no extra video", type(value).__name__)
+            return ""
+        tokens = {t.strip().lower() for t in value.split(",") if t.strip()}
+        if "x" in tokens:
+            logging.getLogger(__name__).error(
+                "MARKETING_VIDEO_EXTRA_PLATFORMS: dropped x — X never posts two formats")
+        if "bluesky" in tokens:
+            logging.getLogger(__name__).error(
+                "MARKETING_VIDEO_EXTRA_PLATFORMS: dropped bluesky — Bluesky video is not built (deferred to the "
+                "week-4 review)")
+        unknown = sorted(tokens - set(known) - {"x", "bluesky"})
+        if unknown:
+            logging.getLogger(__name__).error(
+                "MARKETING_VIDEO_EXTRA_PLATFORMS: ignored unknown platform(s) %s",
+                ",".join(t[:24] for t in unknown[:10]))
+        return ",".join(sorted(tokens & set(known)))
+
+    # The POSTING DAYS (owner decision 3, 2026-10-15): three-letter day tokens — mon, tue, wed, thu, fri, sat,
+    # sun (selection.WEEKDAY_TOKENS) — comma-separated, case- and space-insensitive, normalised to weekday order.
+    # An unknown token is dropped and logged at ERROR; an empty value, one with no known day left, or a
+    # non-string is the default with an ERROR — never a failed deploy, never a week without a posting day. A
+    # week without "sat" (the weekly lesson day) is WARNED, not forced. Read at CALL time through
+    # selection.post_weekdays() — the posting calendar, the posting ordinal, the series plan, the digest and the
+    # run-health timing — and by selection.news_recent_limit(), the ledger read: 60 posting days of history, so
+    # 240 rows at four days a week and 420 at seven. Change it only in the morning ET (never between 16:00 ET
+    # and the day's media_ready), and never to seven days while MARKETING_CONTENT_CLASSES is "A" alone (the
+    # lesson pool would start repeating within weeks). The default is today's Mon/Tue/Thu/Sat, byte for byte.
+    MARKETING_POST_WEEKDAYS: str = "mon,tue,thu,sat"
+
+    @field_validator("MARKETING_POST_WEEKDAYS", mode="before")
+    @classmethod
+    def _post_weekdays_fail_closed(cls, value: object) -> str:
+        """Normalise `MARKETING_POST_WEEKDAYS` to its known day tokens, comma-joined in weekday order (mon first).
+        The inline literal mirrors `selection.WEEKDAY_TOKENS` (config imports no app module;
+        tests/test_marketing_selection.py pins the two equal). An unknown token is dropped with an ERROR; an empty
+        value, one with no known day left or a non-string is the default with an ERROR; no "sat" is a WARNING."""
+        import logging
+
+        known = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+        if not isinstance(value, str):
+            logging.getLogger(__name__).error(
+                "MARKETING_POST_WEEKDAYS: not a string (%s) — using the default mon,tue,thu,sat",
+                type(value).__name__)
+            return "mon,tue,thu,sat"
+        tokens = {t.strip().lower() for t in value.split(",") if t.strip()}
+        unknown = sorted(tokens - set(known))
+        if unknown:
+            logging.getLogger(__name__).error(
+                "MARKETING_POST_WEEKDAYS: ignored unknown day(s) %s — the tokens are mon,tue,wed,thu,fri,sat,sun",
+                ",".join(t[:24] for t in unknown[:10]))
+        days = [day for day in known if day in tokens]
+        if not days:
+            logging.getLogger(__name__).error(
+                "MARKETING_POST_WEEKDAYS: no posting day left — using the default mon,tue,thu,sat")
+            return "mon,tue,thu,sat"
+        if "sat" not in days:
+            logging.getLogger(__name__).warning(
+                "MARKETING_POST_WEEKDAYS: %s has no sat — Saturday is the week's one lesson-only day; without it a "
+                "news week posts the lesson only when a news day falls through to it", ",".join(days))
+        return ",".join(days)
+
+    # Instagram TRIAL REELS (shown to non-followers first): off | share_if_liked | dont_share, mapped to
+    # Upload-Post's `share_mode` (TRIAL_REELS_SHARE_TO_FOLLOWERS_IF_LIKED / TRIAL_REELS_DONT_SHARE_TO_FOLLOWERS —
+    # schemas.marketing.INSTAGRAM_TRIAL_MODES). Case- and space-insensitive; blank is off; an unknown value or a
+    # non-string is off with an ERROR (never a failed deploy). Read at SEND time by the Upload-Post outlet (it is
+    # distribution, not content — like the page ids), so a change acts on the next Instagram post sent; a trial
+    # mode also drops `share_to_feed` (it applies to regular Reels only). Upload-Post documents Trial Reels for
+    # accounts with at least 1,000 followers: check the in-app Trial toggle first — a refusal fails that day's
+    # Instagram post. Off (the default) = today's fields, byte for byte.
+    MARKETING_INSTAGRAM_TRIAL_MODE: str = "off"
+
+    @field_validator("MARKETING_INSTAGRAM_TRIAL_MODE", mode="before")
+    @classmethod
+    def _instagram_trial_mode_fail_closed(cls, value: object) -> str:
+        """Normalise `MARKETING_INSTAGRAM_TRIAL_MODE` to one known mode. The inline literal mirrors
+        `schemas.marketing.INSTAGRAM_TRIAL_OFF` + `INSTAGRAM_TRIAL_MODES` (config imports no app module;
+        tests/test_marketing_outlet_upload_post.py pins them equal). Blank is "off"; an unknown value or a
+        non-string is "off" with an ERROR (a regular Reel — the fail-closed side)."""
+        import logging
+
+        known = ("off", "share_if_liked", "dont_share")
+        if not isinstance(value, str):
+            logging.getLogger(__name__).error(
+                "MARKETING_INSTAGRAM_TRIAL_MODE: not a string (%s) — off (a regular Reel)", type(value).__name__)
+            return "off"
+        mode = value.strip().lower()
+        if not mode:
+            return "off"
+        if mode not in known:
+            logging.getLogger(__name__).error(
+                "MARKETING_INSTAGRAM_TRIAL_MODE: ignored unknown mode %r — off (a regular Reel); the modes are %s",
+                mode[:24], ",".join(known))
+            return "off"
+        return mode
 
     # ── Caydex Fair Value Estimate (DCF, model dcf-v1) ─────────────────────────────────────
     # Two fail-CLOSED switches (documents/OWNER_TASKS.md §2.1 has the rollout order):

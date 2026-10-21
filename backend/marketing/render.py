@@ -49,6 +49,30 @@ Why each piece is shaped the way it is:
 * **Nothing is uploaded before every refusal is known**: the glyph checks, the image's layout and
   byte cap and the video's cards all run before the first registration, so a day skipped for its
   content leaves no public object behind.
+* **The video features** (Batch 2, 2026-10-19, "first seconds"): the server freezes them per run and
+  the script read-back carries them (`video_features`, read ONLY through `cards.video_features`) —
+  `cards_for_script` draws a lesson's HOOK card or a template's DATA card from them (each checked
+  with this stage's font and layout engine, and left out — today's card — when it cannot be drawn),
+  the timeline shows card 0 alone over the hook whenever it is a hook or an opening card
+  (`cards.opens_on_hook_card`), the hook's burned captions are not drawn under a hook card that
+  shows the same words (`captions.without_hook_card_words`), and `push_in` zooms card 0
+  (`video.push_in_filters`). The end card draws the CTA the read-back names (`end_card_cta`; an
+  older web names none and the card keeps "caydexinvest.com"). Every string a feature card drew is
+  declared in `metadata.onscreen_text` like any other, and the reuse key carries the frozen
+  features, the card kinds and the data card's slot (`cards.applied_data_card_slot`: the text card
+  it replaced — the one the read-back's `data_card_slot` names). A read-back without the features (an
+  older web, a run frozen without them) renders exactly today's video, with drop 1's call.
+* **The push-in never costs the day** (B2-PUSHIN-NO-FALLBACK, 2026-10-20). It is frozen into the run at
+  write time, so switching MARKETING_VIDEO_FEATURES off cannot rescue a run already written. When the
+  push-in render fails — ffmpeg exits non-zero (`video.RenderFailed`) or its output fails the gate
+  (`video.RenderRejected`), but NOT a timeout or the memory limit (`RenderTimeout` / `RenderOOM`: a
+  still card would hit them too) — the stage logs an ERROR naming the fallback and renders ONCE more
+  without it: card 0 still, the same cards and strings, its own reuse key (the frozen features minus
+  `push_in`), and `metadata.push_in` False with `push_in_fallback` saying why. The two renders share
+  ONE ffmpeg budget (the fallback gets RENDER_TIMEOUT_SECONDS minus everything the first attempt took,
+  and is not tried with less than PUSH_IN_FALLBACK_MIN_SECONDS), so the stage's worst case
+  (`worst_case_seconds`) still holds. The local preview never falls back: it is how a host's ffmpeg is
+  checked.
 
 Heavy imports (Pillow via cards.py) live inside the functions. Nothing here imports app.*
 (tests/test_marketing_worker.py scans it). `skip`, `uploader` and `hasher` are injected from
@@ -64,10 +88,14 @@ import math
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger("marketing.render")
+
+# The clock the push-in fallback's shared budget is read from (tests replace it at this binding).
+_monotonic = time.monotonic
 
 #: The format each outlet is recorded in when the accepted script froze none (a script accepted
 #: before drop 1). Every pair must be one the server records (`POST_FORMATS_BY_PLATFORM`);
@@ -103,14 +131,22 @@ RENDER_THREADS_MAX = 4
 #: v2 (drop 1): videos open on the first content card (`video.timeline(..., hook_card=False)`);
 #: the post image joined the stage. v3 (drop 2a): template (news) scripts — the opening card over
 #: the hook (`hook_card=True`), one card per line, company logos, the template image layouts; the
-#: keys carry the logos, `image_spec`, `opening_card` and `video_layout`.
-RENDER_STAGE_VERSION = "render/v3"
+#: keys carry the logos, `image_spec`, `opening_card` and `video_layout`. v4 (Batch 2): the frozen
+#: video features — the hook card (and its hook captions left out), the data card, the push-in —
+#: and the end card's CTA; the video key carries the features and the card kinds. v5 (the Batch 2
+#: fix round, 2026-10-20): the caption file keeps a figure with its scale word (LIVE-CAP-1), the data
+#: card replaces the card the read-back names (the key carries its slot), the push-in falls back to a
+#: still card 0.
+RENDER_STAGE_VERSION = "render/v5"
 #: The values the server freezes into an accepted script's `post_formats` (mirrors
 #: app.schemas.marketing.FROZEN_POST_FORMATS; tests/test_marketing_worker.py pins them equal).
 FROZEN_FORMATS: Tuple[str, ...] = ("video", "image", "text")
 #: The post image's share of the stage's worst case: laying it out (≤ RAMP_STEPS + 1 tries) and up
 #: to len(JPEG_QUALITIES) encodes of a 1080×1350 frame, generously, on a slow vCPU.
 IMAGE_RENDER_SECONDS = 20
+#: The push-in fallback (module doc) is not tried with less ffmpeg time than this left of the shared
+#: RENDER_TIMEOUT_SECONDS — a ~60 s video encodes in well under it; with less, the first failure stands.
+PUSH_IN_FALLBACK_MIN_SECONDS = 60.0
 
 
 class RenderInputError(RuntimeError):
@@ -156,7 +192,9 @@ def worst_case_seconds(upload_timeout: float) -> float:
     shared LOGOS_BUDGET_SECONDS = MAX_LOGOS × LOGO_DOWNLOAD_TIMEOUT_SECONDS, which every download ends
     inside (each one at most `logos.worst_case_download_seconds(share)` = 1.75 × a share of at most
     half of what was left), plus a connect cap's worth of headroom for the last logo's sha, decode and
-    write). tests/test_marketing_worker.py pins it inside STAGE_START_MARGINS["rendered"]."""
+    write). A push-in fallback (`_render_media`) adds nothing: its ffmpeg run gets what is left of the failed
+    render's RENDER_TIMEOUT_SECONDS, so both renders together fit one render's share of the video's worst
+    case. tests/test_marketing_worker.py pins it inside STAGE_START_MARGINS["rendered"]."""
     from marketing import logos, video
 
     return (video.worst_case_seconds(upload_timeout) + IMAGE_RENDER_SECONDS + float(upload_timeout)
@@ -257,15 +295,27 @@ def _template_inputs(logos: Optional[Sequence[Sequence[Any]]], image_spec: Any, 
 def render_key(*, audio_sha256: str, words: Sequence[Dict[str, Any]], card_texts: Sequence[Sequence[str]],
                threads: int, card_version: str, video_version: str, max_seconds: float,
                layout_engine: str, logos: Optional[Sequence[Sequence[Any]]] = None, image_spec: Any = None,
-               opening_card: Any = None, video_layout: Any = None) -> str:
+               opening_card: Any = None, video_layout: Any = None, video_features: Sequence[str] = (),
+               card_kinds: Optional[Sequence[str]] = None, data_card_slot: Optional[int] = None) -> str:
     """Identity of a render: everything that decides its bytes — including Pillow's text layout
     engine (raqm and basic measure, wrap and draw differently; the cards AND the caption phrase
-    splits depend on it), and (drop 2a) the logos drawn, the opening card and the video layout."""
+    splits depend on it), (drop 2a) the logos drawn, the opening card and the video layout, and
+    (Batch 2) the run's frozen video features (the push-in moves card 0; a hook card hides the
+    hook's captions), each card's KIND (a hook card and a text card can draw the same string) and the
+    data card's slot (`cards.applied_data_card_slot`: which text card it replaced; None — none drawn).
+    A push-in fallback is keyed with the features it really rendered (the frozen ones minus push_in)."""
+    if isinstance(video_features, (str, bytes)):
+        raise ValueError("video_features is a collection of feature names, not one string")
+    if data_card_slot is not None and (isinstance(data_card_slot, bool) or not isinstance(data_card_slot, int)):
+        raise ValueError(f"data_card_slot must be an int or None, not {data_card_slot!r}")
     payload = {
         "stage": RENDER_STAGE_VERSION, "audio": audio_sha256, "words": list(words),
         "cards": [list(t) for t in card_texts], "threads": int(threads),
         "card_version": card_version, "video_version": video_version, "max_seconds": float(max_seconds),
         "layout_engine": layout_engine, **_template_inputs(logos, image_spec, opening_card, video_layout),
+        "video_features": sorted(str(f) for f in video_features),
+        "card_kinds": None if card_kinds is None else [str(k) for k in card_kinds],
+        "data_card_slot": data_card_slot,
     }
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -376,20 +426,39 @@ def download(url: str, *, max_bytes: int, timeout: float, max_seconds: Optional[
 def produce_video(*, workdir: Path, specs: Sequence[Any], words: Sequence[Dict[str, Any]],
                   narration_seconds: float, audio_file: str, fonts_dir: str, logo_path: Optional[str],
                   threads: int, heartbeat: Optional[Callable[[], None]], run_id: str,
-                  max_seconds: float, layout_engine: str, hook_card: bool = False) -> Tuple[bytes, float, List[int]]:
+                  max_seconds: float, layout_engine: str, hook_card: Optional[bool] = None,
+                  push_in: bool = False, ffmpeg_timeout: Optional[float] = None) -> Tuple[bytes, float, List[int]]:
     """Cards → PNGs, words → captions.ass, then ONE ffmpeg call. Returns (mp4 bytes, duration from
     ffprobe, the card indices the timeline actually shows). `audio_file` is relative to workdir.
-    `hook_card=True` for a template (per-line) video: card 0 is its opening card, alone over the
-    hook, and every narration line opens its own card; a lesson keeps the drop-1 opening."""
+    `ffmpeg_timeout` (the push-in fallback's share of the stage's ffmpeg budget) bounds the ffmpeg run;
+    None is video.RENDER_TIMEOUT_SECONDS.
+
+    The opening follows the cards (`cards.opens_on_hook_card`): card 0 is shown ALONE over the hook
+    (`video.timeline(..., hook_card=True)`) when it is a template's opening card (drop 2a) or a
+    lesson's hook card (Batch 2); otherwise the first content card opens at frame 0 (drop 1).
+    `hook_card` may be passed (drop 2a's callers do), and must then say the same — a ValueError
+    otherwise, never a timeline that disagrees with its cards. Under a HOOK card the hook line's
+    burned captions are left out while it shows (`captions.without_hook_card_words`: the card says
+    the same words); an opening card shows other words, so the hook stays captioned under it.
+    `push_in` (Batch 2) zooms card 0 (`video.push_in_filters`)."""
     from marketing import captions, cards, video, voice
 
+    opens_alone = cards.opens_on_hook_card(specs)
+    if hook_card is None:
+        hook_card = opens_alone
+    elif not isinstance(hook_card, bool) or hook_card != opens_alone:
+        raise ValueError(f"hook_card={hook_card!r} but card 0 is a {getattr(specs[0], 'kind', '?') if specs else '?'} "
+                         f"card (cards.opens_on_hook_card says {opens_alone}): the timeline must match the cards")
+    if not isinstance(push_in, bool):
+        raise ValueError(f"push_in must be a bool, got {push_in!r}")
     font = str(Path(fonts_dir) / "Inter-Bold.ttf")
     # libass is given a RELATIVE fontsdir (no filtergraph escaping): the face is copied beside
     # the job.
     (workdir / "fonts").mkdir(exist_ok=True)
     shutil.copyfile(font, workdir / "fonts" / "Inter-Bold.ttf")
-    # A lesson (hook_card=False): the first content card opens the video at frame 0 (drop 1) — no
-    # brand card. A template (hook_card=True): the company's opening card over the hook (drop 2a).
+    # A lesson without a hook card (hook_card=False): the first content card opens the video at
+    # frame 0 (drop 1) — no brand card. A template's opening card (drop 2a) or a lesson's hook card
+    # (Batch 2) is shown alone over the hook (hook_card=True).
     segments = video.timeline(words, len(specs), narration_seconds, voice.DISCLAIMER_CARD_SECONDS,
                               hook_card=hook_card)
     shown = sorted({seg.card for seg in segments})
@@ -398,12 +467,18 @@ def produce_video(*, workdir: Path, specs: Sequence[Any], words: Sequence[Dict[s
         names[i] = f"card{i:02d}.png"
         (workdir / names[i]).write_bytes(
             cards.render_card(specs[i], font_path=font, logo_path=logo_path, layout_engine=layout_engine))
-    (workdir / "captions.ass").write_text(captions.build_ass(words, captions.font_measurer(font)),
+    caption_words: Sequence[Dict[str, Any]] = words
+    if specs[0].kind == "hook":
+        caption_words = captions.without_hook_card_words(words, specs[0].title, segments[0].end)
+        logger.info("render run_id=%s: the video opens on its hook card (%.2fs) — %d hook word(s) not captioned "
+                    "under it", run_id, segments[0].end, len(words) - len(caption_words))
+    (workdir / "captions.ass").write_text(captions.build_ass(caption_words, captions.font_measurer(font)),
                                           encoding="utf-8")
     data, probe = video.render_video(
         workdir=str(workdir), card_files=[names[seg.card] for seg in segments], segments=segments,
         audio_file=audio_file, ass_file="captions.ass", fonts_dir="fonts", threads=threads,
         heartbeat=heartbeat, run_id=run_id, max_seconds=max_seconds, max_bytes=VIDEO_MAX_BYTES,
+        push_in=push_in, **({} if ffmpeg_timeout is None else {"timeout": ffmpeg_timeout}),
     )
     return data, float(probe.duration or 0.0), shown
 
@@ -453,6 +528,19 @@ def _render_post_image(run_id: str, spec: Any, *, font: str, engine: str,
     return image
 
 
+def _produce(render_args: Dict[str, Any], opening: Dict[str, Any], *, run_id: Any,
+             skip: Callable[[str], BaseException]) -> Tuple[bytes, float, List[int]]:
+    """One `produce_video` call (read at call time: the tests replace it). A card that cannot fit at the
+    floor size is the day's content, not the attempt's: `unrenderable_text`, never retried."""
+    from marketing import cards
+
+    try:
+        return produce_video(**render_args, **opening)
+    except cards.CardOverflow as e:
+        logger.warning("render run_id=%s: a card cannot fit (%s) — skipping the day", run_id, e)
+        raise skip("unrenderable_text") from e
+
+
 def _logo_table(script: Dict[str, Any], listing: Dict[str, Any], *, template: bool, dest_dir: Path,
                 run_id: str) -> Dict[str, Any]:
     """{key: cards.LogoArt} for a template script: its `logos` resolved ONCE for the stage (the
@@ -494,6 +582,11 @@ def stage_render(api: Any, run: Dict[str, Any], ctx: Dict[str, Any], *,
     video is [opening card] + one card per narration line + [disclaimer], timed with
     `hook_card=True`; its post image is its `image_spec` drawn by `news_layouts` (never the
     `image_post`, which is alt text on a template). A lesson renders exactly as in drop 1.
+
+    Batch 2: the run's frozen video features (`cards.video_features`) add a lesson's hook card
+    (timed `hook_card=True`, its hook captions left out), a template's data card and the push-in on
+    card 0; without them — an older web, or a run frozen without features — both kinds render as
+    before (the end card follows the read-back's `end_card_cta`).
 
     Order: work out each medium and whether a `ready` asset already IS it (reuse by render key);
     check every glyph; render what is missing (image, then video); only then register and upload
@@ -569,25 +662,50 @@ def _render_media(api: Any, run: Dict[str, Any], ctx: Dict[str, Any], *, listing
     words: List[Dict[str, Any]] = []
     specs: List[Any] = []
     threads, limit = 0, 0.0
-    video_key = video_reuse = None
+    video_key = video_reuse = fallback_key = None
     per_line = False
+    features: Tuple[str, ...] = ()
+    hook_card = push_in = False
+    data_slot: Optional[int] = None
     if need_video:
         threads, limit = render_threads(), max_video_seconds()
         voice_row = _voice_row(listing)
         words = voice_row["metadata"]["words"]
         try:
-            specs = cards.cards_for_script(script, logos=table)
+            # Batch 2: the run's frozen video features, read through cards' ONE reader — the cards
+            # below draw from the same reading, so what is drawn, what moves and what is keyed agree.
+            features = cards.video_features(script)
+            # The feature cards (a hook card, a data card) are checked with THIS stage's font and
+            # layout engine; one that cannot be drawn is left out there (today's card, never a skip).
+            specs = cards.cards_for_script(script, logos=table, font_path=font, layout_engine=engine)
         except ValueError as e:
             # The server always supplies the disclaimer card; a script without one must not render.
             raise RenderInputError(f"run {run_id}: {e}") from e
         per_line = script.get("video_layout") == cards.VIDEO_LAYOUT_PER_LINE
-        video_key = render_key(
-            audio_sha256=str(voice_row["sha256"]), words=words,
-            card_texts=[cards.onscreen_strings(s) for s in specs], threads=threads,
-            card_version=cards.CARD_RENDER_VERSION, video_version=video.VIDEO_RENDER_VERSION,
-            max_seconds=limit, layout_engine=engine, **extra_key,
-        )
+        hook_card = cards.opens_on_hook_card(specs)
+        push_in = cards.VIDEO_FEATURE_PUSH_IN in features
+        data_slot = cards.applied_data_card_slot(specs)
+
+        def key_for(rendered_features: Sequence[str]) -> str:
+            return render_key(
+                audio_sha256=str(voice_row["sha256"]), words=words,
+                card_texts=[cards.onscreen_strings(s) for s in specs], threads=threads,
+                card_version=cards.CARD_RENDER_VERSION, video_version=video.VIDEO_RENDER_VERSION,
+                max_seconds=limit, layout_engine=engine, video_features=rendered_features,
+                card_kinds=[s.kind for s in specs], data_card_slot=data_slot, **extra_key,
+            )
+
+        video_key = key_for(features)
         video_reuse = _reusable(listing, video_key)
+        if push_in:
+            # The push-in fallback's own key (the features it really renders): an earlier attempt's
+            # fallback video IS this render — never a second failing push-in, never a second object.
+            fallback_key = key_for([f for f in features if f != cards.VIDEO_FEATURE_PUSH_IN])
+            if not video_reuse:
+                video_reuse = _reusable(listing, fallback_key)
+                if video_reuse:
+                    logger.warning("render run_id=%s: reusing an earlier attempt's push-in FALLBACK video %s (the "
+                                   "push-in render failed then)", run_id, video_reuse)
 
     # ── every glyph, before anything is drawn or uploaded ─────────────────────
     try:
@@ -609,6 +727,7 @@ def _render_media(api: Any, run: Dict[str, Any], ctx: Dict[str, Any], *, listing
     if image_spec is not None and not image_reuse:
         image = _render_post_image(run_id, image_spec, font=font, engine=engine, skip=SkipRun, template=template)
     rendered_video: Optional[Tuple[bytes, float, List[int]]] = None
+    push_in_fallback: Optional[str] = None
     if need_video and not video_reuse:
         logo: Optional[str] = brand_logo_path(fonts_dir)
         if not os.path.isfile(logo):
@@ -621,8 +740,14 @@ def _render_media(api: Any, run: Dict[str, Any], ctx: Dict[str, Any], *, listing
             except Exception as e:  # noqa: BLE001 — a missed beat is logged, the render goes on
                 logger.warning("render heartbeat failed run_id=%s: %s: %s", run_id, type(e).__name__, e)
 
-        # Only a template passes hook_card (a lesson's call is drop 1's, keyword for keyword).
-        opening = {"hook_card": True} if per_line else {}
+        # Only a video whose card 0 is shown alone over the hook (a template's opening card, a
+        # lesson's hook card) passes hook_card, and only a frozen push-in passes push_in: a lesson
+        # without features calls with drop 1's keywords, keyword for keyword.
+        opening: Dict[str, Any] = {}
+        if hook_card:
+            opening["hook_card"] = True
+        if push_in:
+            opening["push_in"] = True
         with tempfile.TemporaryDirectory(prefix="render-") as tmp:
             work = Path(tmp)
             audio = download(str(voice_row["public_url"]), max_bytes=AUDIO_MAX_BYTES,
@@ -631,16 +756,35 @@ def _render_media(api: Any, run: Dict[str, Any], ctx: Dict[str, Any], *, listing
                 raise RenderInputError(f"run {run_id}: the downloaded narration does not match its "
                                        f"row's sha256 ({voice_row['id']})")
             (work / "narration.m4a").write_bytes(audio)
+            render_args: Dict[str, Any] = dict(
+                workdir=work, specs=specs, words=words,
+                narration_seconds=float(voice_row["duration_seconds"]), audio_file="narration.m4a",
+                fonts_dir=fonts_dir, logo_path=logo, threads=threads, heartbeat=heartbeat,
+                run_id=str(run_id), max_seconds=limit, layout_engine=engine,
+            )
+            started = _monotonic()
             try:
-                rendered_video = produce_video(
-                    workdir=work, specs=specs, words=words,
-                    narration_seconds=float(voice_row["duration_seconds"]), audio_file="narration.m4a",
-                    fonts_dir=fonts_dir, logo_path=logo, threads=threads, heartbeat=heartbeat,
-                    run_id=str(run_id), max_seconds=limit, layout_engine=engine, **opening,
-                )
-            except cards.CardOverflow as e:
-                logger.warning("render run_id=%s: a card cannot fit (%s) — skipping the day", run_id, e)
-                raise SkipRun("unrenderable_text") from e
+                rendered_video = _produce(render_args, opening, run_id=run_id, skip=SkipRun)
+            except (video.RenderFailed, video.RenderRejected) as e:
+                if not push_in or isinstance(e, (video.RenderTimeout, video.RenderOOM)):
+                    raise
+                # B2-PUSHIN-NO-FALLBACK: the frozen push-in must not cost the day. ONE more render, card 0
+                # still, inside what is left of the shared ffmpeg budget (module doc).
+                left = video.RENDER_TIMEOUT_SECONDS - (_monotonic() - started)
+                if left < PUSH_IN_FALLBACK_MIN_SECONDS:
+                    logger.error("render run_id=%s: the push-in render failed (%s: %s) and only %.0fs of the ffmpeg "
+                                 "budget is left (the fallback needs %.0fs) — NO fallback: the render fails", run_id,
+                                 type(e).__name__, str(e)[:300], left, PUSH_IN_FALLBACK_MIN_SECONDS)
+                    raise
+                push_in_fallback = f"{type(e).__name__}: {str(e)[:200]}"
+                logger.error("render run_id=%s: the push-in render failed (%s) — FALLBACK: rendering ONCE more "
+                             "WITHOUT the push-in (card 0 still; the run froze push_in, this video will not move; "
+                             "%.0fs of ffmpeg budget left)", run_id, push_in_fallback, left)
+                opening.pop("push_in")
+                push_in = False
+                video_key = fallback_key
+                rendered_video = _produce(dict(render_args, ffmpeg_timeout=left), opening, run_id=run_id,
+                                          skip=SkipRun)
 
     # ── register + upload (image first) ───────────────────────────────────────
     produced: Dict[str, Any] = {}
@@ -678,13 +822,23 @@ def _render_media(api: Any, run: Dict[str, Any], ctx: Dict[str, Any], *, listing
                         "render_version": RENDER_STAGE_VERSION, "card_version": cards.CARD_RENDER_VERSION,
                         "video_version": video.VIDEO_RENDER_VERSION, "threads": threads,
                         "layout_engine": engine,
-                        "cards_shown": len(shown), "template_id": ctx.get("template_id")}
+                        "cards_shown": len(shown), "template_id": ctx.get("template_id"),
+                        # Batch 2: what the run froze, and the cards the video really shows (a feature
+                        # card that could not be drawn was left out — read the two side by side), the text
+                        # card a data card replaced, and whether card 0 really pushes in (a fallback says why
+                        # it does not although the run froze it).
+                        "video_features": list(features), "card_kinds": [specs[i].kind for i in shown],
+                        "data_card_slot": data_slot, "push_in": push_in}
+            if push_in_fallback is not None:
+                metadata["push_in_fallback"] = push_in_fallback
             if per_line:
                 metadata["video_layout"] = cards.VIDEO_LAYOUT_PER_LINE
             asset = _register(api, run_id, ctx, data, uploader=uploader, hasher=sha256_hex,
                               kind="video", ext="mp4", duration_seconds=round(duration, 3), metadata=metadata)
-            logger.info("video READY run_id=%s asset=%s duration=%.1fs bytes=%d cards=%d threads=%d%s",
-                        run_id, asset["id"], duration, len(data), len(shown), threads,
+            logger.info("video READY run_id=%s asset=%s duration=%.1fs bytes=%d cards=%d threads=%d "
+                        "features=%s kinds=%s push_in=%s%s data_slot=%s end_cta=%r%s", run_id, asset["id"], duration,
+                        len(data), len(shown), threads, ",".join(features) or "none", ",".join(metadata["card_kinds"]),
+                        push_in, " (FALLBACK)" if push_in_fallback else "", data_slot, specs[-1].end_cta,
                         " layout=per_line" if per_line else "")
             produced["video_asset_id"] = asset["id"]
     return produced

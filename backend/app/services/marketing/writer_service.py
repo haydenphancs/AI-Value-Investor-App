@@ -218,6 +218,48 @@ def _has_words(text: str) -> bool:
 _HAS_ALNUM_RE = re.compile(r"[^\W_]")
 
 
+#: B3-LIVE-2 (2026-10-20): the fewest words a NARRATION line may have. The OUTPUT spec asks for 11-13 a line
+#: (`writer_prompts`, unchanged); this floor only catches a STRAY line. Production's accepted lesson of
+#: 2026-10-17 ended its script on the bare word "cards" (a schema key leaked into the list): the judge passed
+#: it, the owner approved it, and Kokoro narrated it — burned into the captions — 31.6 s into three published
+#: videos. 4 is the shortest honest line of the real-draft corpus ("Opportunities often feel uncomfortable.",
+#: tests/data/marketing_real_drafts_2026_09_24.json); never raise it past what that corpus holds. A shorter line
+#: is a `length` violation (its repair hint already says how to lengthen a line or drop it).
+SCRIPT_LINE_MIN_WORDS = 4
+
+
+def _schema_property_names(node: Any) -> List[str]:
+    """Every property name `writer_prompts.RESPONSE_SCHEMA` declares, at any depth."""
+    out: List[str] = []
+    if isinstance(node, dict):
+        props = node.get("properties")
+        if isinstance(props, dict):
+            for key, sub in props.items():
+                out.append(key)
+                out.extend(_schema_property_names(sub))
+        out.extend(_schema_property_names(node.get("items")))
+    return out
+
+
+#: The response schema's field names (hook, video_script, cards, title, body, captions, the caption fields,
+#: image_post, paragraphs, …), folded as `_bare_schema_key` folds a text.
+_SCHEMA_KEYS = frozenset(_schema_property_names(wp.RESPONSE_SCHEMA))
+_KEY_FOLD_RE = re.compile(r"[^a-z0-9]+")
+#: A field name is one or two words; a longer text is never folded (bounded, linear on any input).
+_BARE_KEY_MAX_WORDS, _BARE_KEY_MAX_CHARS = 3, 64
+
+
+def _bare_schema_key(text: str) -> Optional[str]:
+    """The response-schema field name a WHOLE text is ("cards", "Video script:", "image_post") — a key the
+    model leaked into a list of narration or paragraphs (B3-LIVE-2), never content — or None. Case, spaces and
+    punctuation are folded; a text of more than `_BARE_KEY_MAX_WORDS` words or `_BARE_KEY_MAX_CHARS` characters
+    is never one. Pure."""
+    if len(text) > _BARE_KEY_MAX_CHARS or len(text.split()) > _BARE_KEY_MAX_WORDS:
+        return None
+    folded = _KEY_FOLD_RE.sub("_", text.casefold()).strip("_")
+    return folded if folded in _SCHEMA_KEYS else None
+
+
 def _over_words(n: int, limit: int) -> str:
     """A length detail the repair prompt can act on: the count, the limit, and the cut."""
     return f"{n} words - the limit is {limit}; cut at least {n - limit} words"
@@ -338,6 +380,10 @@ def _image_text(obj: Dict[str, Any]) -> Tuple[str, List[str], List[Violation]]:
         text = _flat(p)
         if not _has_words(text):
             out.append(Violation(pname, "empty", "paragraph has no words" if text else "paragraph is empty"))
+        elif (key := _bare_schema_key(text)) is not None:
+            # B3-LIVE-2: a leaked field name ("captions") would be DRAWN on the post image as a paragraph
+            out.append(Violation(pname, "schema", f"the paragraph is the bare field name \"{key}\", not text "
+                                                  f"for the picture - remove it"))
         if len(text) > wp.IMAGE_PARAGRAPH_MAX_CHARS:
             out.append(Violation(pname, "too_long",
                                  _over_len(len(text), wp.IMAGE_PARAGRAPH_MAX_CHARS, "characters")))
@@ -413,10 +459,22 @@ def validate_package(obj: Dict[str, Any], item: ContentItem, run_date: date, *,
                 f"{words} words - the minimum is {wp.SCRIPT_MIN_WORDS}; add at least "
                 f"{wp.SCRIPT_MIN_WORDS - words} words (lengthen the shortest lines or add one)"))
         for i, line in enumerate(script):
+            n_line = _words(line)
             if not _has_words(line):
                 # A pause line ("…") would be narrated as silence and counted as a line.
                 shared.append(Violation(f"video_script[{i}]", "empty", "line has no words"))
-            if _words(line) > wp.SCRIPT_LINE_MAX_WORDS:
+            elif (key := _bare_schema_key(line)) is not None:
+                # B3-LIVE-2: a leaked field name ("cards") is narrated and burned like any line
+                shared.append(Violation(f"video_script[{i}]", "schema",
+                                        f"the line is the bare field name \"{key}\", not narration - remove "
+                                        f"it (every line is one spoken sentence)"))
+            elif n_line < SCRIPT_LINE_MIN_WORDS:
+                shared.append(Violation(f"video_script[{i}]", "length",
+                                        f"{n_line} word{'' if n_line == 1 else 's'} - a narration line needs at "
+                                        f"least {SCRIPT_LINE_MIN_WORDS}; add at least "
+                                        f"{SCRIPT_LINE_MIN_WORDS - n_line} words to make it one full spoken "
+                                        f"sentence, or remove it"))
+            if n_line > wp.SCRIPT_LINE_MAX_WORDS:
                 shared.append(Violation(f"video_script[{i}]", "too_long",
                                         _over_words(_words(line), wp.SCRIPT_LINE_MAX_WORDS)))
     # Every narrated word becomes one entry of the audio asset's timing table, which the server

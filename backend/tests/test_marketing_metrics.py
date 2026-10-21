@@ -82,6 +82,7 @@ import pytest
 
 from app.config import settings
 from app.integrations import bluesky, telegram, upload_post, x_api
+from app.schemas.marketing import IMAGE_FALLBACK_REASONS
 from app.services import notification_jobs
 from app.services.marketing import digest_service as ds
 from app.services.marketing import metrics_service as ms
@@ -206,6 +207,24 @@ def _fresh_process_state(monkeypatch):
     monkeypatch.setattr(ms, "_STOPPED", {})
     monkeypatch.setattr(ms, "_LOGGED", {})
     monkeypatch.setattr(ms, "_LAST", {})
+
+
+@pytest.fixture(autouse=True)
+def _declared_max_video_seconds(monkeypatch):
+    """The average watch time bound is read from MARKETING_MAX_VIDEO_SECONDS at call time (MD-4): pin it to its
+    DECLARED default (75 → a 150 s bound), so a developer's .env can never move an expected value. A test that
+    wants another length sets its own."""
+    monkeypatch.setattr(settings, "MARKETING_MAX_VIDEO_SECONDS",
+                        type(settings).model_fields["MARKETING_MAX_VIDEO_SECONDS"].default)
+
+
+@pytest.fixture(autouse=True)
+def _declared_post_weekdays(monkeypatch):
+    """Batch 3: the posting days (MARKETING_POST_WEEKDAYS) are read at call time by the run-health timing, the
+    digest's Runs rows and the runway — pin them to their DECLARED default (Mon/Tue/Thu/Sat), so a developer's .env
+    can never move a pinned date or hour. A test that wants another cadence sets its own (`_cadence`)."""
+    monkeypatch.setattr(settings, "MARKETING_POST_WEEKDAYS",
+                        type(settings).model_fields["MARKETING_POST_WEEKDAYS"].default)
 
 
 # ── the post ledger ─────────────────────────────────────────────────────────────────────────────
@@ -668,6 +687,7 @@ def env(monkeypatch, caplog, ledger, jobs):
     monkeypatch.setattr(ms.settings, "MARKETING_X_ALLOW_URLS", False)
     monkeypatch.setattr(ms.settings, "MARKETING_X_IMAGES", False)
     monkeypatch.setattr(ms.settings, "MARKETING_X_IMAGE_POST_MICROS", 200_000)
+    monkeypatch.setattr(ms.settings, "MARKETING_X_MEDIA_UPLOAD_MICROS", 15_000)
     monkeypatch.setattr(x_api, "configured", lambda: True)
     monkeypatch.setattr(x_api, "user_id_from_access_token", lambda: X_USER)
     monkeypatch.setattr(outlet_x, "budget_micros", lambda: e.budget)
@@ -834,6 +854,303 @@ def test_the_x_read_window_is_centred_on_xs_own_creation_time_when_it_agrees():
     for junk in (None, "", "12a", "9" * 26, 12345, "1" * 25):
         assert ms.x_post_time(junk) is None or junk == "1" * 25
     assert ms.x_read_center(ext, None) is None
+
+
+# video measures (Batch 1 item 8a, 2026-10-15) ─────────────────────────────────
+
+#: TikTok's documented per-post object (docs.upload-post.com/api/get-analytics, read 2026-10-15), every
+#: field the page lists for it — `retention` one point per second, `second` a STRING.
+TIKTOK_DOC_METRICS: Dict[str, Any] = {
+    "views": 5200, "likes": 120, "comments": 8, "shares": 4, "favorites": 3, "reach": 4100,
+    "new_followers": 128, "profile_views": 903, "average_time_watched": 7.4, "total_time_watched": 297613,
+    "full_video_watched_rate": 0.184,
+    "retention": [{"second": str(s), "percentage": round(1 - s / 40, 4)} for s in range(0, 38)],
+    "impression_sources": [{"impression_source": "For You", "percentage": 0.977}],
+    "audience_types": [{"audience_type": "New viewers", "percentage": 0.881}], "is_ai_generated": True,
+}
+
+
+@pytest.mark.parametrize("raw, lo, hi, expected", [
+    (7.4, 0, 3600, 7.4), (0, 0, 1, 0.0), (1, 0, 1, 1.0), (0.184, 0, 1, 0.184), (3600, 0, 3600, 3600.0),
+    (297613, 0, 1e10, 297613.0), (10 ** 10, 0, 1e10, 1e10), (0.123456789, 0, 1, 0.1235),
+    (-0.0, 0, 1, 0.0), (5e-9, 0, 1, 0.0), (135.5, 0, 1000, 135.5),       # a looping Short passes 100
+    # omitted, never 0 — and never clamped or rescaled
+    (None, 0, 1, None), (True, 0, 1, None), (False, 0, 1, None), ("7.4", 0, 3600, None), ("1", 0, 1, None),
+    ("", 0, 1, None), (math.nan, 0, 1, None), (math.inf, 0, 3600, None), (-math.inf, 0, 1, None),
+    (-0.01, 0, 1, None), (-1, 0, 3600, None), (1.0001, 0, 1, None), (18.4, 0, 1, None),   # a % for a fraction
+    (3600.5, 0, 3600, None), (10 ** 10 + 1, 0, 1e10, None),
+    pytest.param(10 ** 400, 0, 1e10, None, id="int_beyond_any_float"),                   # no OverflowError
+    ([7.4], 0, 3600, None), ({"v": 7.4}, 0, 3600, None), (b"7", 0, 3600, None),
+])
+def test_normalize_measure_keeps_only_honest_bounded_numbers(raw, lo, hi, expected):
+    got = ms.normalize_measure(raw, lo, hi)
+    assert got == expected
+    if got is not None:
+        assert type(got) is float and lo <= got <= hi and math.copysign(1.0, got) == 1.0
+
+
+def test_retention_is_cut_to_fixed_seconds_from_the_documented_shape():
+    curve = ms.retention_points(TIKTOK_DOC_METRICS["retention"])
+    assert curve == {"1": 0.975, "3": 0.925, "5": 0.875, "10": 0.75, "15": 0.625, "30": 0.25}
+    assert list(curve) == ["1", "3", "5", "10", "15", "30"]            # the fixed seconds, in order
+    # an int second reads too; an unordered curve is still one curve; a short video keeps what it reaches
+    assert ms.retention_points([{"second": 3, "percentage": 0.5}, {"second": "1", "percentage": 0.9}]) == {
+        "1": 0.9, "3": 0.5}
+    assert ms.retention_points([{"second": "2", "percentage": 0.5}]) == {}     # no kept second reached
+
+
+@pytest.mark.parametrize("bad", [
+    None, "not a list", {"1": 0.9}, [], [None], ["0.9"], [[1, 0.9]],
+    [{"second": "1", "percentage": 0.9}, {"second": "1", "percentage": 0.8}],    # a second given twice
+    [{"second": "1", "percentage": 0.9}, {"second": "3", "percentage": 75}],     # a percentage, not a fraction
+    [{"second": "1", "percentage": 1.01}], [{"second": "1", "percentage": -0.1}],
+    [{"second": "1", "percentage": "0.9"}], [{"second": "1", "percentage": None}],
+    [{"second": "1", "percentage": True}], [{"second": "1", "percentage": math.nan}],
+    [{"second": "1.5", "percentage": 0.9}], [{"second": 1.0, "percentage": 0.9}], [{"second": True, "percentage": 0.9}],
+    [{"second": "-1", "percentage": 0.9}], [{"second": " 1", "percentage": 0.9}], [{"second": "", "percentage": 0.9}],
+    [{"second": "123456", "percentage": 0.9}], [{"percentage": 0.9}], [{"second": "1"}],
+    [{"second": str(s), "percentage": 0.5} for s in range(ms.RETENTION_MAX_POINTS + 1)],   # not one of our videos
+])
+def test_a_malformed_retention_curve_is_omitted_whole(bad):
+    """One unreadable point and the curve is not trusted at all — a unit change upstream must leave
+    nothing, never a wrong-scale survivor."""
+    assert ms.retention_points(bad) == {}
+    if isinstance(bad, list) and 0 < len(bad) < 5:
+        # a good point beside the bad one does not rescue the curve
+        assert ms.retention_points(bad + [{"second": "3", "percentage": 0.6}]) == {}
+
+
+def test_extract_video_metrics_keeps_each_platforms_own_fields_and_omits_the_rest():
+    tiktok = ms.extract_video_metrics(TIKTOK_DOC_METRICS, "tiktok")
+    assert tiktok == {"new_followers": 128, "profile_views": 903, "average_time_watched": 7.4,
+                      "total_time_watched": 297613.0, "full_video_watched_rate": 0.184,
+                      "retention": {"1": 0.975, "3": 0.925, "5": 0.875, "10": 0.75, "15": 0.625, "30": 0.25}}
+    # nothing beyond the documented fields, and nothing of another platform's
+    youtube_like = {**TIKTOK_DOC_METRICS, "average_view_percentage": 64.2, "watch_time_minutes": 12}
+    assert "average_view_percentage" not in ms.extract_video_metrics(youtube_like, "tiktok")
+    assert ms.extract_video_metrics({"views": 109, "likes": 2, "comments": 0, "favorites": 0}, "youtube") == {}
+    assert ms.extract_video_metrics({"views": 109, "average_view_duration_seconds": 11.25,
+                                     "average_view_percentage": 135.5, "watch_time_minutes": 20.4},
+                                    "youtube") == {"average_view_duration_seconds": 11.25,
+                                                   "average_view_percentage": 135.5, "watch_time_minutes": 20.4}
+    assert ms.extract_video_metrics({"views": 12, "crossposted_views": 21400, "facebook_views": None},
+                                    "instagram") == {"crossposted_views": 21400}       # null: omitted, never 0
+    assert ms.extract_video_metrics(TIKTOK_DOC_METRICS, "facebook") == {}              # no video fields there
+    for junk_input, platform in ((None, "tiktok"), ([1], "tiktok"), ("x", "tiktok"), (TIKTOK_DOC_METRICS, None),
+                                 (TIKTOK_DOC_METRICS, 7)):
+        assert ms.extract_video_metrics(junk_input, platform) == {}
+
+
+def test_a_missing_or_unreadable_video_field_is_omitted_never_zero():
+    outliers = {"new_followers": -1, "profile_views": "lots", "average_time_watched": "7.4",
+                "total_time_watched": math.inf, "full_video_watched_rate": 18.4, "retention": "flat"}
+    assert ms.extract_video_metrics(outliers, "tiktok") == {}
+    one = ms.extract_video_metrics({"new_followers": 0, "average_time_watched": True}, "tiktok")
+    assert one == {"new_followers": 0}                     # a REPORTED 0 is a count; a bool is not a time
+
+
+def test_video_measures_round_trip_through_the_snapshot_and_its_re_validation():
+    video = ms.extract_video_metrics(TIKTOK_DOC_METRICS, "tiktok")
+    snap = ms.build_snapshot(ms.extract_counts(TIKTOK_DOC_METRICS, ms.UPLOAD_POST_FIELDS), now=THU,
+                             published_at=THU - timedelta(days=3, hours=1), cp=3, video=video)
+    assert snap["video"] == video and snap["cp"] == 3 and snap["views"] == 5200
+    assert ms._clean_snapshot(snap) == snap                               # idempotent: nothing lost, nothing added
+    doc = ms.apply_measurement({}, platform="tiktok", today=THU.date(), status="ok", snapshot=snap)
+    assert doc["last"]["video"] == video and doc["history"][-1]["video"] == video
+    # a hand-edited snapshot: every unreadable video value is dropped on the way in, the rest kept
+    tampered = copy.deepcopy(snap)
+    tampered["video"].update({"new_followers": True, "average_time_watched": 99_999, "unknown_field": 5,
+                              "full_video_watched_rate": "0.5"})
+    tampered["video"]["retention"] = {"1": 0.9, "2": 0.8, "3": 1.5, "30": "0.2", "x": 0.1}
+    clean = ms.apply_measurement({}, platform="tiktok", today=THU.date(), status="ok",
+                                 snapshot=tampered)["last"]["video"]
+    assert clean == {"profile_views": 903, "total_time_watched": 297613.0, "retention": {"1": 0.9}}
+    # nothing readable: no `video` key at all
+    assert "video" not in ms.build_snapshot({"views": 3}, now=THU, published_at=None, video={"x": 1})
+    assert "video" not in ms.build_snapshot({"views": 3}, now=THU, published_at=None, video="junk")
+    assert "video" not in ms._clean_snapshot({"views": 3, "video": {"retention": {"1": 7}}})
+
+
+def test_video_measures_alone_are_not_counts():
+    """`snapshot_has_counts` is unchanged: a read with video measures but no count is `error` /
+    `no_metrics` and adds no history (never a snapshot of zeros)."""
+    snap = ms.build_snapshot({}, now=THU, published_at=THU - timedelta(days=2), video={"new_followers": 3})
+    assert snap["video"] == {"new_followers": 3} and not ms.snapshot_has_counts(snap)
+    doc = ms.apply_measurement({}, platform="tiktok", today=THU.date(), status="ok", snapshot=snap)
+    assert (doc["status"], doc["note"]) == ("error", "no_metrics") and "last" not in doc and "history" not in doc
+
+
+def test_the_video_field_names_never_collide_and_every_bound_is_sane():
+    names = [k for keys in ms.VIDEO_COUNT_FIELDS.values() for k in keys] + [
+        k for fields in ms.VIDEO_MEASURE_FIELDS.values() for k in fields]
+    assert len(names) == len(set(names)) == len(ms.VIDEO_KEY_BOUNDS)
+    assert not set(names) & set(ms.COUNT_KEYS) and ms.RETENTION_KEY not in names
+    for fields in ms.VIDEO_MEASURE_FIELDS.values():
+        for lo, hi in fields.values():
+            assert 0 <= lo < hi and math.isfinite(hi)
+    assert ms.VIDEO_MEASURE_FIELDS["tiktok"]["full_video_watched_rate"] == (0, 1)        # a FRACTION
+    assert ms.VIDEO_MEASURE_FIELDS["youtube"]["average_view_percentage"] == (0, 1000)    # loops pass 100
+    assert ms.RETENTION_SECONDS == (1, 3, 5, 10, 15, 30)
+    assert ms.AVERAGE_WATCH_KEYS <= set(ms.VIDEO_KEY_BOUNDS) and ms.WATCH_SECONDS_LOOPS == 2
+
+
+def test_an_average_watch_time_is_kept_only_up_to_twice_the_longest_video(monkeypatch):
+    """MD-4 (2026-10-16): the 3,600 s bound kept a watch time in MILLISECONDS (7,400 for 7.4 s) as seconds. No
+    video of ours is longer than MARKETING_MAX_VIDEO_SECONDS, so an average past twice it is omitted — never
+    rescaled or clamped. The bound is read at call time, and the digest re-validates with the same one."""
+    assert ms.max_watch_seconds() == 150.0                                   # the declared 75 s, twice
+    for key in ("average_time_watched", "average_view_duration_seconds"):
+        assert ms.measure_bounds(key) == (0, 150.0)
+    assert ms.measure_bounds("average_view_percentage") == (0, 1000)         # untouched
+    assert ms.measure_bounds("total_time_watched") == (0, 1e10)
+    assert ms.measure_bounds("watch_time_minutes") == (0, 1e9)
+    for not_a_measure in ("new_followers", "crossposted_views", "retention", "nope", None, 7, True):
+        assert ms.measure_bounds(not_a_measure) is None
+    tiktok = {"views": 9, "average_time_watched": 7400, "full_video_watched_rate": 0.2}
+    assert ms.extract_video_metrics(tiktok, "tiktok") == {"full_video_watched_rate": 0.2}          # ms: omitted
+    for kept in (0, 7.4, 149.99, 150):
+        assert ms.extract_video_metrics({"average_time_watched": kept}, "tiktok") == {
+            "average_time_watched": float(kept)}
+        assert ms.extract_video_metrics({"average_view_duration_seconds": kept}, "youtube") == {
+            "average_view_duration_seconds": float(kept)}
+    for dropped in (150.01, 151, 3599.9, 7400, 297613):
+        assert ms.extract_video_metrics({"average_time_watched": dropped}, "tiktok") == {}
+        assert ms.extract_video_metrics({"average_view_duration_seconds": dropped}, "youtube") == {}
+    # the stored side (`_clean_video`) and the digest's re-validation use the same bound
+    assert "average_time_watched" not in ms._clean_video({"average_time_watched": 3599.9, "new_followers": 2})
+    assert ds._video_measure({"average_time_watched": 3599.9}, "average_time_watched") is None
+    assert ds._video_measure({"average_time_watched": 149.9}, "average_time_watched") == 149.9
+    # read at call time: a shorter longest video tightens it, for both sides
+    monkeypatch.setattr(settings, "MARKETING_MAX_VIDEO_SECONDS", 60)
+    assert ms.max_watch_seconds() == 120.0
+    assert ms.extract_video_metrics({"average_time_watched": 130}, "tiktok") == {}
+    assert ds._video_measure({"average_time_watched": 130}, "average_time_watched") is None
+    assert ms.extract_video_metrics({"average_time_watched": 119}, "tiktok") == {"average_time_watched": 119.0}
+
+
+@pytest.mark.parametrize("bad", [0, -5, None, "75", True, 75.0, 3601, 10 ** 6])
+def test_an_unreadable_longest_video_setting_bounds_with_the_default_never_zero(monkeypatch, caplog, bad):
+    """Settings declares no bound for MARKETING_MAX_VIDEO_SECONDS: a 0 must never omit every watch time, and a
+    junk value never crashes the read — the declared default stands, logged once a day."""
+    caplog.set_level(logging.WARNING, logger=MS_LOGGER)
+    monkeypatch.setattr(settings, "MARKETING_MAX_VIDEO_SECONDS", bad)
+    assert ms.max_watch_seconds() == 150.0 and ms.max_watch_seconds() == 150.0
+    assert ms.extract_video_metrics({"average_time_watched": 7.4}, "tiktok") == {"average_time_watched": 7.4}
+    assert len(_messages(caplog, "MARKETING_MAX_VIDEO_SECONDS", logging.WARNING)) == 1
+
+
+#: YouTube's documented watch fields for a 58.4 s Short read at ~1.6 days: 22 s watched on average, 37.7%.
+_YT_WATCH = {"views": 109, "average_view_duration_seconds": 22, "average_view_percentage": 37.7,
+             "watch_time_minutes": 40}
+
+
+@pytest.mark.parametrize("share, seconds, kept", [
+    (37.7, 58.4, True),                 # 22 / 58.4 = 37.67%: agrees
+    (37.0, 58.4, True), (42.6, 58.4, True),           # inside the larger of 5 points and half the expected
+    (0.377, 58.4, False),               # a FRACTION for the percentage (Upload-Post's retention "percentage")
+    (3.77, 58.4, False),                # ten times too small
+    (377.0, 58.4, False),               # ten times too large
+    (135.5, 16.236, True),              # a looping Short: 22 s over 16.2 s = 135.5%
+    (37.7, None, True), (37.7, 0, True), (37.7, -58.4, True), (37.7, math.nan, True), (37.7, math.inf, True),
+    (37.7, "58.4", True), (37.7, True, True), (37.7, 4000, True),     # the length unknown: kept as bounded
+])
+def test_youtube_view_share_is_checked_against_duration_over_the_videos_length(share, seconds, kept):
+    """MD-4: a share on another scale (0.377 for 37.7%) sits inside 0-1000 — the bounds cannot see it. With the
+    average duration and the video's own length known, a share that disagrees is omitted; the duration (its
+    key names its unit, its bound is tight) is kept; with the length unknown both are kept as bounded."""
+    video = ms.extract_video_metrics({**_YT_WATCH, "average_view_percentage": share}, "youtube")
+    before = copy.deepcopy(video)
+    out = ms.check_view_share(video, seconds)
+    assert video == before                                                    # pure: the input is untouched
+    assert ("average_view_percentage" in out) is kept
+    assert out["average_view_duration_seconds"] == 22.0 and out["watch_time_minutes"] == 40.0
+    if kept:
+        assert out == video
+
+
+def test_a_view_share_check_needs_both_watch_fields_and_never_invents_one():
+    for video in ({}, {"average_view_percentage": 0.377}, {"average_view_duration_seconds": 22.0},
+                  {"average_view_percentage": "0.377", "average_view_duration_seconds": 22.0},
+                  {"average_view_percentage": 0.377, "average_view_duration_seconds": True}):
+        assert ms.check_view_share(video, 58.4) == video
+    assert ms.check_view_share("junk", 58.4) == {} and ms.check_view_share(None, 58.4) == {}
+    # a zero duration with a small share is rounding (YouTube's whole seconds); with a large one it is not
+    assert "average_view_percentage" in ms.check_view_share(
+        {"average_view_duration_seconds": 0.0, "average_view_percentage": 0.9}, 30.0)
+    assert "average_view_percentage" not in ms.check_view_share(
+        {"average_view_duration_seconds": 0.0, "average_view_percentage": 45.0}, 30.0)
+    # TikTok's measures never meet the check (only YouTube carries both keys)
+    tiktok = ms.extract_video_metrics(TIKTOK_DOC_METRICS, "tiktok")
+    assert ms.check_view_share(tiktok, 1.0) == tiktok
+
+
+@pytest.mark.parametrize("age,cps,largest,video", [
+    # (age, stored cps, the largest crossed checkpoint not yet used, what a VIDEO is due for: only within
+    # a day of crossing it — MD-2, 2026-10-16: a 29-day-old video used to be read "for 7")
+    (timedelta(hours=23, minutes=59), [], None, None),
+    (timedelta(days=1), [], 1, 1),
+    (timedelta(days=1, hours=23, minutes=59), [], 1, 1),               # the last minute of the window
+    (timedelta(days=2), [], 1, None),                                  # a day late: a rotation read
+    (timedelta(days=2), [1], None, None),
+    (timedelta(days=3, hours=2), [1], 3, 3),
+    (timedelta(days=3, hours=2), [], 3, 3),                            # 1 was missed; 3 is on time
+    (timedelta(days=4), [1], 3, None),
+    (timedelta(days=7, hours=14), [1, 3], 7, 7),                       # the 06:00 ET read of a 16:20 post
+    (timedelta(days=8), [], 7, None),                                  # several crossed, all late
+    (timedelta(days=8), [1, 3, 7], None, None),
+    (timedelta(days=15), [], 7, None),                                 # the deploy day's backlog
+    (timedelta(days=29), [1, 3, 7], None, None),                       # 28 is X's, never a video's
+    (timedelta(days=29), [1, 3], 7, None),
+])
+def test_a_video_is_due_at_1_3_and_7_days_and_only_within_a_day(age, cps, largest, video):
+    # the generic rule (X's, any `days`): the largest crossed, however late
+    assert ms.due_checkpoint(THU - age, THU, cps, ms.VIDEO_CHECKPOINT_DAYS) == largest
+    row = {"format": "video", "published_at": (THU - age).isoformat(), "metrics": {"cps": cps}}
+    assert ms.video_due_checkpoint(row, THU) == video
+    # only a VIDEO post has these checkpoints; X's default days are unchanged
+    assert ms.video_due_checkpoint({**row, "format": "image"}, THU) is None
+    assert ms.video_due_checkpoint({**row, "published_at": None}, THU) is None
+    assert ms.x_due_checkpoint(THU - timedelta(days=29), THU, [1, 3, 7]) == 28
+    assert ms.x_due_checkpoint(THU - timedelta(days=60), THU, [1, 3, 7]) == 28        # X: no tolerance
+    assert ms.VIDEO_CHECKPOINT_TOLERANCE == timedelta(days=1)
+
+
+@pytest.mark.parametrize("age,cps,passed", [
+    (timedelta(hours=20), [], []),                       # nothing crossed
+    (timedelta(days=1, hours=2), [], [1]),               # on time: uses 1
+    (timedelta(days=2, hours=2), [1], []),               # all crossed are used: nothing to mark
+    (timedelta(days=4, hours=12), [1], [1, 3]),          # read late for 3: 3 is used (and 1 again, harmless)
+    (timedelta(days=15), [], [1, 3, 7]),                 # the deploy day's backlog: every one it crossed
+    (timedelta(days=15), [1, 3, 7], []),
+    (timedelta(days=15), ["7", True, 7.0, None], [1, 3, 7]),   # junk is not "used"
+])
+def test_a_video_read_uses_up_every_checkpoint_it_crossed(age, cps, passed):
+    row = {"format": "video", "published_at": (THU - age).isoformat(), "metrics": {"cps": cps}}
+    assert ms.video_passed_checkpoints(row, THU) == passed
+    for other in ({**row, "format": "image"}, {**row, "format": "text"}, {**row, "published_at": None},
+                  {**row, "published_at": "junk"}):
+        assert ms.video_passed_checkpoints(other, THU) == []
+
+
+def test_cps_are_tracked_only_where_asked():
+    stored = {"cps": [1], "measured_day": "2026-10-07"}
+    tracked = ms.apply_measurement(stored, platform="tiktok", today=THU.date(), status="error", cps=[1, 3, 99],
+                                   track_cps=True)
+    assert tracked["cps"] == [1, 3]
+    # a non-checkpoint read leaves a stored `cps` exactly as it was — and adds none where there was none
+    assert ms.apply_measurement(stored, platform="tiktok", today=THU.date(), status="ok", cps=[3])["cps"] == [1]
+    assert "cps" not in ms.apply_measurement({}, platform="tiktok", today=THU.date(), status="ok", cps=[1])
+    assert ms.valid_checkpoints([1, 3, 7, 28, 2, "3"]) == [1, 3, 7, 28]
+
+
+def test_the_key_set_names_keys_only_never_values():
+    line = ms._key_set({**TIKTOK_DOC_METRICS, "bad key\nforged": 1, "x" * 70: 2, "secret=Bearer abc": 3})
+    assert line.startswith("?,") and "average_time_watched" in line and "retention" in line
+    for value in ("5200", "0.184", "297613", "For You", "forged", "Bearer", "xxxxxxx"):
+        assert value not in line
+    assert ms._key_set({}) == ""
+    many = ms._key_set({f"k{i:03d}": i for i in range(70)})
+    assert many.endswith(",+10 more") and many.count(",") == ms._KEY_SET_MAX
 
 
 # the step: switches, schedule, the day ───────────────────────────────────────
@@ -1257,8 +1574,9 @@ async def test_an_x_read_exactly_at_the_headroom_limit_is_allowed(env, monkeypat
 
 
 #: Drop 1: while MARKETING_X_IMAGES is on, a post is priced as an image post — MARKETING_X_IMAGE_POST_MICROS
-#: ($0.20 by default) plus its $0.005 alt text — so four posts of headroom are $0.82.
-IMAGE_HEADROOM = 4 * (200_000 + 5_000)
+#: ($0.20) plus its pre-send charges, the $0.015 media upload (MARKETING_X_MEDIA_UPLOAD_MICROS, Batch 1) and
+#: the $0.005 alt text: four posts are $0.88.
+IMAGE_HEADROOM = 4 * (200_000 + 15_000 + 5_000)
 
 
 @pytest.mark.asyncio
@@ -1266,7 +1584,7 @@ IMAGE_HEADROOM = 4 * (200_000 + 5_000)
                                           (2_000_000 - RESERVE - IMAGE_HEADROOM + 1, 0)])
 async def test_with_x_images_on_metric_reads_leave_four_image_posts_of_headroom(env, monkeypatch, spent, reads):
     monkeypatch.setattr(ms.settings, "MARKETING_X_IMAGES", True)
-    assert outlet_x.metrics_headroom_micros() == IMAGE_HEADROOM == 820_000
+    assert outlet_x.metrics_headroom_micros() == IMAGE_HEADROOM == 880_000
     env.x_account_holder(THU)
     pid = env.ledger.post("x", published_at=THU - timedelta(days=1, hours=1))
     ext = env.ledger.raw(pid)["external_id"]
@@ -1276,7 +1594,7 @@ async def test_with_x_images_on_metric_reads_leave_four_image_posts_of_headroom(
     assert len(env.x.reads) == reads
     assert env.ledger.metrics(pid)["status"] == ("ok" if reads else "capped")
     if not reads:
-        assert env.ledger.metrics(pid)["note"] == "the monthly X cap keeps 4 posts of headroom ($0.820) — not read"
+        assert env.ledger.metrics(pid)["note"] == "the monthly X cap keeps 4 posts of headroom ($0.880) — not read"
 
 
 @pytest.mark.asyncio
@@ -2212,17 +2530,446 @@ async def test_the_upload_post_plan_pause_outlives_the_refused_post_leaving_the_
 
 
 @pytest.mark.asyncio
-async def test_upload_post_reads_at_most_ten_posts_a_day(env):
+async def test_upload_post_reads_at_most_forty_posts_a_day(env):
+    assert ms.UPLOAD_POST_DAILY_READS == 40
     env.up_configured = True
-    pids = [env.ledger.post("tiktok", published_at=THU - timedelta(days=1, hours=i)) for i in range(12)]
+    pids = [env.ledger.post("tiktok", published_at=THU - timedelta(days=1, hours=i % 20, minutes=i))
+            for i in range(42)]
     env.up.default = up_answer("tiktok")
     await env.measure(THU)
-    assert len(env.up.calls) == 10
+    assert len(env.up.calls) == 40
     unread = [p for p in pids if not env.ledger.metrics(p)]
     assert len(unread) == 2
     await env.measure(THU + timedelta(days=1))                         # the two never read come first
-    assert len(env.up.calls) == 20
+    assert len(env.up.calls) == 80
     assert all(env.ledger.metrics(p)["measured_day"] == "2026-10-09" for p in unread)
+
+
+def _measured_doc(day: str, *, cps: Optional[List[int]] = None, views: int = 10) -> Dict[str, Any]:
+    doc = {"v": 1, "rev": 1, "status": "ok", "measured_day": day, "note": None, "unavailable_until": None,
+           "last": _entry(day, views=views), "history": [_entry(day, views=views)]}
+    if cps is not None:
+        doc["cps"] = cps
+    return doc
+
+
+@pytest.mark.asyncio
+async def test_a_video_due_at_1_3_or_7_days_is_read_first_inside_the_cap(env):
+    """45 never-measured picture posts would take all 40 reads in today's order; the three videos that
+    crossed a fixed age go first anyway, each read for ITS checkpoint (`cp`), which joins its `cps`."""
+    env.up_configured = True
+    fillers = [env.ledger.post("facebook", published_at=THU - timedelta(days=2, minutes=i), format="image")
+               for i in range(45)]
+    day1 = env.ledger.post("tiktok", published_at=THU - timedelta(days=1, hours=1), format="video")
+    day3 = env.ledger.post("youtube", published_at=THU - timedelta(days=3, hours=1), format="video",
+                           metrics=_measured_doc("2026-10-07", cps=[1]))
+    day7 = env.ledger.post("instagram", published_at=THU - timedelta(days=7, hours=1), format="video",
+                           metrics=_measured_doc("2026-10-07", cps=[1, 3]))
+    not_due = env.ledger.post("tiktok", published_at=THU - timedelta(days=2, hours=1), format="video",
+                              metrics=_measured_doc("2026-10-07", cps=[1]))
+    env.up.default = up_answer("facebook")
+    for pid, platform in ((day1, "tiktok"), (day3, "youtube"), (day7, "instagram"), (not_due, "tiktok")):
+        job = env.ledger.row(pid)["metadata"]["publish"]["upload_post"]["poll_id"]
+        env.up.answers[job] = up_answer(platform)
+    await env.measure(THU)
+    assert len(env.up.calls) == 40
+    # first the due videos, each group in today's order (never measured first, then newest published)
+    assert [c[1] for c in env.up.calls[:3]] == ["tiktok", "youtube", "instagram"]
+    for pid, cp, cps in ((day1, 1, [1]), (day3, 3, [1, 3]), (day7, 7, [1, 3, 7])):
+        m = env.ledger.metrics(pid)
+        assert (m["status"], m["last"]["cp"], m["cps"]) == ("ok", cp, cps), pid
+    assert env.ledger.metrics(not_due)["measured_day"] == "2026-10-07"     # not due: waits its turn
+    assert sum(1 for p in fillers if env.ledger.metrics(p)) == 37
+    assert env.jobs.finishes[-1]["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_video_is_read_at_each_fixed_age_and_a_picture_post_never_gets_checkpoints(env):
+    env.up_configured = True
+    published = et(2026, 10, 8, 16, 20)                                        # Thu 16:20 ET, like a real run
+    video = env.ledger.post("tiktok", published_at=published, format="video")
+    image = env.ledger.post("threads", published_at=published, format="image")
+    env.up.answers = {"up-job-0001": up_answer("tiktok"), "up-job-0002": up_answer("threads")}
+    cps_seen: List[Optional[int]] = []
+    for day in range(0, 9):                                                    # the 06:00 ET measure, daily
+        await env.measure(et(2026, 10, 9 + day, 6, 5))
+        cps_seen.append(env.ledger.metrics(video)["last"]["cp"])
+    # read every day (forty reads leave room), but only the reads AT a fixed age carry it
+    assert cps_seen == [None, 1, None, 3, None, None, None, 7, None]
+    assert env.ledger.metrics(video)["cps"] == [1, 3, 7]
+    assert [h["cp"] for h in env.ledger.metrics(video)["history"]].count(None) == 6
+    assert "cps" not in env.ledger.metrics(image)
+    assert all(h["cp"] is None for h in env.ledger.metrics(image)["history"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [
+    upload_post.UploadPostAmbiguousError("upload-post get_post_analytics: HTTP 502", method="m", status=502),
+    RuntimeError("a bug in our own code"),
+], ids=["ambiguous", "bug"])
+async def test_a_failing_checkpoint_read_uses_its_checkpoint_up_and_never_heads_the_queue_again(env, error):
+    """A due video goes first, and an unknown outcome stops Upload-Post for the tick. If the failed read
+    did not use its checkpoint up, the post would stay due — first in line every day, stopping every tick
+    there — and no other Upload-Post post would be read for 30 days."""
+    env.up_configured = True
+    others = [env.ledger.post("linkedin", published_at=THU - timedelta(days=2, minutes=i), format="image")
+              for i in range(3)]
+    failing = env.ledger.post("tiktok", published_at=THU - timedelta(days=1, hours=1), format="video")
+    env.up.default = up_answer("linkedin")
+    env.up.answers = {"up-job-0004": error}
+    await env.measure(THU)
+    assert env.up.calls == [("up-job-0004", "tiktok")]                        # first, and it stopped the tick
+    bad = env.ledger.metrics(failing)
+    assert (bad["status"], bad["cps"]) == ("error", [1]) and "last" not in bad
+    assert all(env.ledger.metrics(p) == {} for p in others)
+    await env.measure(THU + timedelta(days=1))                                 # no longer due: the others first
+    assert [c[0] for c in env.up.calls[1:4]] == ["up-job-0001", "up-job-0002", "up-job-0003"]
+    assert all(env.ledger.metrics(p)["status"] == "ok" for p in others)
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_about_upload_post_itself_never_uses_a_checkpoint_up(env):
+    env.up_configured = True
+    pid = env.ledger.post("tiktok", published_at=THU - timedelta(days=1, hours=1), format="video")
+    env.up.default = upload_post.UploadPostRateLimitError("upload-post: HTTP 429", method="m", status=429)
+    await env.measure(THU)
+    assert env.ledger.metrics(pid) == {}                                      # nothing recorded: still due
+    env.up.default = up_answer("tiktok")
+    await env.measure(THU + timedelta(hours=20))                              # the next ET day
+    assert env.ledger.metrics(pid)["last"]["cp"] == 1 and env.ledger.metrics(pid)["cps"] == [1]
+
+
+@pytest.mark.asyncio
+async def test_the_video_measures_land_through_the_one_writer_and_the_fence_is_untouched(env):
+    env.up_configured = True
+    pid = env.ledger.post("tiktok", published_at=THU - timedelta(days=1, hours=2), format="video")
+    before = env.ledger.row(pid)
+    env.up.default = up_answer("tiktok", metrics=copy.deepcopy(TIKTOK_DOC_METRICS))
+    await env.measure(THU)
+    after = env.ledger.row(pid)
+    assert after["metadata"] == before["metadata"] and after["updated_at"] == before["updated_at"]
+    last = after["metrics"]["last"]
+    assert last["video"] == ms.extract_video_metrics(TIKTOK_DOC_METRICS, "tiktok") and last["cp"] == 1
+    assert last["views"] == 5200 and after["metrics"]["history"][-1] == last
+    # a YouTube read whose live answer carries only the four counts stores no `video` at all
+    yt = env.ledger.post("youtube", published_at=THU - timedelta(days=1, hours=2), format="video")
+    env.up.answers = {"up-job-0002": up_answer("youtube", metrics={"views": 109, "likes": 2, "comments": 0,
+                                                                     "favorites": 0})}
+    await env.measure(THU + timedelta(days=1))
+    assert "video" not in env.ledger.metrics(yt)["last"] and env.ledger.metrics(yt)["last"]["views"] == 109
+
+
+@pytest.mark.asyncio
+async def test_the_post_metrics_key_set_is_logged_once_a_day_per_platform_never_a_value(env, caplog):
+    env.up_configured = True
+    for platform, age in (("tiktok", 2), ("tiktok", 3), ("youtube", 2)):
+        env.ledger.post(platform, published_at=THU - timedelta(days=age), format="video")
+    hostile = {**TIKTOK_DOC_METRICS, "secret token=abc\nforged": 77_777}
+    env.up.answers = {"up-job-0001": up_answer("tiktok", metrics=hostile), "up-job-0002": up_answer("tiktok"),
+                      "up-job-0003": up_answer("youtube", metrics={"views": 109, "likes": 2, "comments": 0,
+                                                                     "favorites": 0})}
+    await env.measure(THU)
+    lines = _messages(caplog, "post_metrics keys for", logging.INFO)
+    assert len(lines) == 2
+    by_platform = {ln.split("keys for ")[1].split(" ")[0]: ln for ln in lines}
+    assert by_platform["youtube"].endswith(": comments,favorites,likes,views")
+    assert "(1 read(s), aged 48.0-48.0 h;" in by_platform["youtube"]
+    tiktok = by_platform["tiktok"]
+    assert "average_time_watched" in tiktok and "retention" in tiktok and "?" in tiktok
+    assert "(2 read(s), aged 48.0-72.0 h;" in tiktok                         # BOTH TikTok reads, one line
+    for value in ("5200", "0.184", "77777", "77,777", "forged", "token", "For You"):
+        assert value not in tiktok
+    await env.measure(THU + timedelta(days=1))                                 # a new ET day: logged again
+    assert len(_messages(caplog, "post_metrics keys for", logging.INFO)) == 4
+
+
+@pytest.mark.asyncio
+async def test_the_key_set_line_is_the_union_so_an_older_videos_watch_fields_show(env, caplog):
+    """MD-5 (2026-10-16): only the FIRST read of a day was logged, and due videos go first — so a day's YouTube
+    line was its youngest video's, at ~1.6 days, often before YouTube's Analytics report exists. The owner reads
+    this line to decide whether to build the cached-route read: the union of every read must show the watch
+    fields an older video carries."""
+    env.up_configured = True
+    young = env.ledger.post("youtube", published_at=THU - timedelta(days=1, hours=14), format="video")   # due: first
+    old = env.ledger.post("youtube", published_at=THU - timedelta(days=12), format="video",
+                          metrics=_measured_doc("2026-10-07", cps=[1, 3, 7]))
+    env.up.answers = {
+        "up-job-0001": up_answer("youtube", metrics={"views": 3, "likes": 0, "comments": 0, "favorites": 0}),
+        "up-job-0002": up_answer("youtube", metrics={"views": 109, "likes": 2, "comments": 0, "favorites": 0,
+                                                     "average_view_duration_seconds": 22, "watch_time_minutes": 40,
+                                                     "average_view_percentage": 37.7}),
+    }
+    await env.measure(THU)
+    assert [c[0] for c in env.up.calls] == ["up-job-0001", "up-job-0002"]   # the young one was read first
+    (line,) = _messages(caplog, "post_metrics keys for youtube", logging.INFO)
+    assert line.endswith(": average_view_duration_seconds,average_view_percentage,comments,favorites,likes,views,"
+                         "watch_time_minutes")
+    assert "(2 read(s), aged 38.0-288.0 h;" in line
+    for value in ("109", "37.7", "22", "40"):
+        assert value not in line.rsplit(": ", 1)[1]
+    assert env.ledger.metrics(young)["status"] == "ok" and env.ledger.metrics(old)["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_the_union_is_logged_even_when_upload_post_stops_mid_run_and_stays_bounded(env, caplog):
+    """The line comes from a `finally`: a read that stops the tick (an unknown outcome) still leaves the line
+    for what was read. A hostile answer with thousands of plain keys cannot grow the union without bound,
+    nor crowd out the fields this module reads (listed first)."""
+    env.up_configured = True
+    for i in range(3):
+        env.ledger.post("tiktok", published_at=THU - timedelta(days=2, minutes=i))
+    flood = {f"k{i:05d}": i for i in range(5_000)}
+    env.up.answers = {"up-job-0001": up_answer("tiktok", metrics={**flood, "views": 5, "likes": 1}),
+                      "up-job-0002": upload_post.UploadPostAmbiguousError("upload-post: HTTP 502", method="m",
+                                                                           status=502)}
+    await env.measure(THU)
+    assert len(env.up.calls) == 2                                             # the 502 stopped the tick
+    (line,) = _messages(caplog, "post_metrics keys for tiktok", logging.INFO)
+    shown = line.rsplit(": ", 1)[1].split(",")
+    assert shown[:2] == ["likes", "views"]                                   # the read fields first, never crowded out
+    assert shown[-1].startswith("+") and shown[-1].endswith(" more") and len(shown) == ms._KEY_SET_MAX + 1
+    assert len(line) < 1_000
+
+
+@pytest.mark.asyncio
+async def test_a_late_video_read_is_never_labelled_with_a_checkpoint_it_missed(env):
+    """MD-2 (2026-10-16): on the deploy day no video had `cps`, so every video since launch was read FIRST and
+    labelled with the largest checkpoint it had crossed — a 15-day-old video stored as a 7-day read, the input
+    the week-4 review compares on. A video more than a day past its checkpoint now waits its turn in the
+    rotation, is stored with `cp` None, and uses up every checkpoint it crossed; one inside its window goes
+    first and keeps its label — and a late one is labelled again at its NEXT checkpoint, on time."""
+    env.up_configured = True
+    backlog = env.ledger.post("youtube", published_at=THU - timedelta(days=15), format="video",
+                              metrics=_measured_doc("2026-10-05"))              # read before Batch 1: no cps
+    four = env.ledger.post("tiktok", published_at=THU - timedelta(days=4, hours=12), format="video",
+                           metrics=_measured_doc("2026-10-05"))
+    fresh = env.ledger.post("instagram", published_at=THU - timedelta(days=1, hours=2), format="video")
+    seven = env.ledger.post("youtube", published_at=THU - timedelta(days=7, hours=14), format="video",
+                            metrics=_measured_doc("2026-10-05", cps=[1, 3]))
+    for pid in (backlog, four, fresh, seven):
+        row = env.ledger.row(pid)
+        env.up.answers[row["metadata"]["publish"]["upload_post"]["poll_id"]] = up_answer(row["platform"])
+    jobs = {pid: env.ledger.row(pid)["metadata"]["publish"]["upload_post"]["poll_id"]
+            for pid in (backlog, four, fresh, seven)}
+    await env.measure(THU)
+    # the two inside their windows first (never measured first), then the late ones in the rotation
+    assert [c[0] for c in env.up.calls] == [jobs[fresh], jobs[seven], jobs[four], jobs[backlog]]
+    for pid, cp, cps in ((fresh, 1, [1]), (seven, 7, [1, 3, 7]), (four, None, [1, 3]), (backlog, None, [1, 3, 7])):
+        m = env.ledger.metrics(pid)
+        assert (m["status"], m["last"]["cp"], m["cps"]) == ("ok", cp, cps), pid
+        assert m["history"][-1]["cp"] == cp
+    # three days on, `four` is 7.5 days old: its 7-day read is on time and labelled
+    await env.measure(THU + timedelta(days=3))
+    m = env.ledger.metrics(four)
+    assert (m["last"]["cp"], m["cps"]) == (7, [1, 3, 7])
+    assert env.ledger.metrics(backlog)["cps"] == [1, 3, 7] and env.ledger.metrics(backlog)["last"]["cp"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_checkpoint_missed_on_a_stopped_day_is_read_later_unlabelled(env):
+    """A due read that Upload-Post refused for the day (a 429 records nothing) is a day late tomorrow: read in
+    the rotation, stored with `cp` None — never as the 1-day read it was not — and the next one is on time."""
+    env.up_configured = True
+    pid = env.ledger.post("tiktok", published_at=et(2026, 10, 7, 16, 20), format="video")
+    env.up.default = upload_post.UploadPostRateLimitError("upload-post: HTTP 429", method="m", status=429)
+    await env.measure(et(2026, 10, 9, 6, 5))                    # 1.6 days: due for 1, but rate limited
+    assert env.ledger.metrics(pid) == {}
+    env.up.default = up_answer("tiktok")
+    await env.measure(et(2026, 10, 10, 6, 5))                   # 2.6 days: a day late for 1
+    m = env.ledger.metrics(pid)
+    assert (m["status"], m["last"]["cp"], m["cps"]) == ("ok", None, [1])
+    await env.measure(et(2026, 10, 11, 6, 5))                   # 3.6 days: the 3-day read, on time
+    m = env.ledger.metrics(pid)
+    assert (m["last"]["cp"], m["cps"]) == (3, [1, 3])
+    assert [h["cp"] for h in m["history"]] == [None, 3]
+
+
+def _up_job(env: Env, pid: str) -> str:
+    return env.ledger.row(pid)["metadata"]["publish"]["upload_post"]["poll_id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refusal", [
+    upload_post.UploadPostReauthError("upload-post get_post_analytics: HTTP 400 [tiktok_reconnect_required]",
+                                      method="m", status=400, error_code="tiktok_reconnect_required"),
+    upload_post.UploadPostReauthError("upload-post get_post_analytics: HTTP 403 [account_checkpoint_required]",
+                                      method="m", status=403, error_code="account_checkpoint_required"),
+    upload_post.UploadPostRateLimitError("upload-post get_post_analytics: HTTP 403 [account_restricted] "
+                                         "(retry_at=None)", method="m", status=403, error_code="account_restricted"),
+    upload_post.UploadPostRateLimitError("upload-post get_post_analytics: HTTP 429 [Account_Restricted] "
+                                         "(retry_at=None)", method="m", status=429, error_code=" Account_Restricted"),
+    # the client's own text for a 400 `invalid_platforms` (`upload_post._raise_for`)
+    upload_post.UploadPostNotConnectedError("upload-post get_post_analytics: HTTP 400: Some platforms are not "
+                                            "connected (invalid_platforms: tiktok: Profile caydex has no Tiktok "
+                                            "account configured)", method="m", status=400,
+                                            detail="Some platforms are not connected"),
+], ids=["reconnect", "meta_checkpoint", "restricted", "restricted_any_case", "not_connected"])
+async def test_a_refused_social_account_skips_only_its_own_platform(env, refusal):
+    """MD-3 (2026-10-16): a refusal about ONE social account stopped every Upload-Post read for the day — and
+    the refused due video headed the queue again the next day, so a TikTok that needed reconnecting starved
+    YouTube, Instagram and the rest of their 1/3/7-day reads until the owner acted. Now only that platform is
+    skipped (its other posts without a call), the others are read, nothing is recorded on the refused posts
+    (their checkpoints are not used), and the job's note names the account to fix. A platform not connected
+    to the profile (400 `invalid_platforms`) is the same kind of refusal (2026-10-19): it used to record
+    `error` on every post of that platform, one call each a day, using up their checkpoints."""
+    env.up_configured = True
+    tiktok = [env.ledger.post("tiktok", published_at=THU - timedelta(days=1, hours=h), format="video") for h in (1, 2)]
+    others = [env.ledger.post(p, published_at=THU - timedelta(days=1, hours=3), format=f)
+              for p, f in (("youtube", "video"), ("instagram", "video"), ("facebook", "image"))]
+    for pid in others:
+        env.up.answers[_up_job(env, pid)] = up_answer(env.ledger.row(pid)["platform"])
+    for pid in tiktok:
+        env.up.answers[_up_job(env, pid)] = refusal
+    await env.measure(THU)
+    assert [c[1] for c in env.up.calls].count("tiktok") == 1                  # the second TikTok: no call
+    assert all(env.ledger.metrics(p) == {} for p in tiktok)                   # nothing recorded, nothing used
+    for pid in others:
+        m = env.ledger.metrics(pid)
+        assert m["status"] == "ok", pid
+    assert env.ledger.metrics(others[0])["last"]["cp"] == 1 and env.ledger.metrics(others[1])["cps"] == [1]
+    fin = env.jobs.finishes[-1]
+    assert fin["success"] is True
+    # the platform and the refusal's class lead the note, so the NOTE_MAX cap never cuts what to fix
+    assert fin["error"] == ms.clean_note(f"upload_post tiktok stopped for 2026-10-08: {type(refusal).__name__}: "
+                                         f"{refusal}")
+    assert fin["error"].startswith(f"upload_post tiktok stopped for 2026-10-08: {type(refusal).__name__}: ")
+    # another attempt the same ET day (e.g. the day held open by X): TikTok is skipped WITHOUT a call, and the
+    # note still names it
+    env.jobs.rows[ms.JOB_METRICS]["run_day"] = None
+    ms._DAY_JOBS.clear()
+    calls = len(env.up.calls)
+    await env.measure(THU + timedelta(hours=2))
+    assert len(env.up.calls) == calls and env.jobs.finishes[-1]["error"] == fin["error"]
+    # the next ET day TikTok is asked again — one call, then skipped again while the account is refused
+    await env.measure(THU + timedelta(days=1))
+    assert [c[1] for c in env.up.calls[calls:]].count("tiktok") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [
+    upload_post.UploadPostAuthError("upload-post: HTTP 401", method="m", status=401),
+    upload_post.UploadPostQuotaError("upload-post: HTTP 429 (usage 10/10)", method="m", status=429),
+    upload_post.UploadPostRateLimitError("upload-post: HTTP 429 [rate_limited]", method="m", status=429,
+                                         error_code="rate_limited"),
+    upload_post.UploadPostRateLimitError("upload-post: HTTP 429", method="m", status=429),
+], ids=["auth", "quota", "429_other_code", "429_no_code"])
+async def test_a_refusal_about_upload_post_itself_still_stops_every_platform(env, error):
+    """The other side of MD-3: a refused key, the monthly quota, or a plain 429 is Upload-Post-wide — after
+    it, no other platform is called this run."""
+    env.up_configured = True
+    first = env.ledger.post("tiktok", published_at=THU - timedelta(days=1, hours=1), format="video")
+    env.ledger.post("youtube", published_at=THU - timedelta(days=1, hours=2), format="video")
+    env.up.default = up_answer("youtube")
+    env.up.answers = {_up_job(env, first): error}
+    await env.measure(THU)
+    assert len(env.up.calls) == 1 and env.ledger.metrics(first) == {}
+    assert env.jobs.finishes[-1]["success"] is True
+
+
+def test_the_parked_account_code_is_the_clients_own():
+    assert ms._ACCOUNT_RESTRICTED == upload_post._RESTRICTED_CODE
+    reauth = upload_post.UploadPostReauthError("x", method="m", status=400)
+    assert ms._account_refusal(reauth)                                        # any reconnect, with or without a code
+    assert ms._account_refusal(upload_post.UploadPostNotConnectedError("x", method="m", status=400))
+    # a refusal the client did not type as one account's stays Upload-Post-wide (or about the post)
+    for other in (upload_post.UploadPostRefusedError("x", method="m", status=400),
+                  upload_post.UploadPostPlanError("x", method="m", status=403)):
+        assert not ms._account_refusal(other)
+    for code, expected in (("account_restricted", True), ("ACCOUNT_RESTRICTED ", True), ("rate_limited", False),
+                           (None, False), (7, False), ("", False)):
+        e = upload_post.UploadPostRateLimitError("x", method="m", status=429, error_code=code)
+        assert ms._account_refusal(e) is expected, code
+    # the code alone on another class is not a parked account (a refused credential stays Upload-Post-wide)
+    for other in (upload_post.UploadPostAuthError("x", method="m", status=401, error_code="account_restricted"),
+                  upload_post.UploadPostAmbiguousError("x", method="m", status=502, error_code="account_restricted"),
+                  RuntimeError("account_restricted")):
+        assert not ms._account_refusal(other)
+
+
+def _youtube_video_post(env: Env, *, seconds: Any, share: Any, asset_status: str = "ready",
+                        asset_ids: Any = _AUTO) -> str:
+    """A YouTube video post whose run holds its video asset (`duration_seconds` = `seconds`), and an answer
+    carrying both watch fields (22 s on average, `share` %)."""
+    run_id, vid = str(uuid.uuid4()), str(uuid.uuid4())
+    env.ledger.fake.tables[mrs.ASSETS].rows.append({"id": vid, "run_id": run_id, "kind": "video",
+                                                    "status": asset_status, "duration_seconds": seconds,
+                                                    "storage_path": f"x/{vid}.mp4", "metadata": {}})
+    pid = env.ledger.post("youtube", published_at=THU - timedelta(days=1, hours=14), format="video", run_id=run_id,
+                          asset_ids=[vid] if asset_ids is _AUTO else asset_ids)
+    env.up.answers[_up_job(env, pid)] = up_answer("youtube", metrics={**_YT_WATCH, "average_view_percentage": share})
+    return pid
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("share, kept", [(37.7, True), (0.377, False), (135.5, False)])
+async def test_a_youtube_share_that_disagrees_with_the_videos_own_length_is_omitted(env, caplog, share, kept):
+    """MD-4 at the measure step: the video's length comes from its run's ready video asset (one read of ours,
+    only when both watch fields arrived); a share on another scale is omitted — and said so — while the
+    duration and the counts land as read."""
+    env.up_configured = True
+    pid = _youtube_video_post(env, seconds=58.4, share=share)
+    await env.measure(THU)
+    video = env.ledger.metrics(pid)["last"]["video"]
+    assert video["average_view_duration_seconds"] == 22.0 and env.ledger.metrics(pid)["last"]["views"] == 109
+    assert ("average_view_percentage" in video) is kept
+    warned = _messages(caplog, "disagrees with its average view duration", logging.WARNING)
+    assert (len(warned) == 0) is kept
+    if not kept:
+        assert pid in warned[0] and str(share) in warned[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["no_asset_ids", "asset_not_ready", "length_unreadable", "two_videos",
+                                  "read_fails"])
+async def test_a_youtube_share_whose_video_length_is_unknown_is_kept_as_bounded(env, caplog, monkeypatch, case):
+    """"Otherwise keep it": with no trustworthy length the share is stored as its bounds left it — and a
+    failed length read is logged, never a failed day."""
+    env.up_configured = True
+    kw: Dict[str, Any] = {"seconds": 58.4, "share": 0.377}
+    if case == "no_asset_ids":
+        kw["asset_ids"] = []
+    elif case == "asset_not_ready":
+        kw["asset_status"] = "pending_upload"
+    elif case == "length_unreadable":
+        kw["seconds"] = None
+    pid = _youtube_video_post(env, **kw)
+    if case == "two_videos":
+        row = env.ledger.raw(pid)
+        second = str(uuid.uuid4())
+        env.ledger.fake.tables[mrs.ASSETS].rows.append({"id": second, "run_id": row["run_id"], "kind": "video",
+                                                        "status": "ready", "duration_seconds": 30.0,
+                                                        "storage_path": "x/2.mp4", "metadata": {}})
+        row["asset_ids"] = row["asset_ids"] + [second]
+    if case == "read_fails":
+        monkeypatch.setattr(env.ledger.svc, "list_assets",
+                            _Exploding(mrs.MarketingRunError("list_assets: PostgREST 503")))
+    await env.measure(THU)
+    m = env.ledger.metrics(pid)
+    assert m["status"] == "ok" and m["last"]["video"]["average_view_percentage"] == 0.377
+    assert env.jobs.finishes[-1]["success"] is True
+    if case == "read_fails":
+        assert _messages(caplog, "could not be read (list_assets", logging.WARNING)
+
+
+@pytest.mark.asyncio
+async def test_the_video_length_is_read_only_for_a_youtube_answer_with_both_watch_fields(env, monkeypatch):
+    env.up_configured = True
+    reads: List[str] = []
+    original = env.ledger.svc.list_assets
+
+    async def counting(run_id):
+        reads.append(run_id)
+        return await original(run_id)
+
+    monkeypatch.setattr(env.ledger.svc, "list_assets", counting)
+    env.ledger.post("tiktok", published_at=THU - timedelta(days=1, hours=2), format="video", asset_ids=["a"])
+    env.up.answers["up-job-0001"] = up_answer("tiktok", metrics=copy.deepcopy(TIKTOK_DOC_METRICS))
+    yt = env.ledger.post("youtube", published_at=THU - timedelta(days=1, hours=2), format="video", asset_ids=["b"])
+    env.up.answers[_up_job(env, yt)] = up_answer("youtube", metrics={"views": 109, "likes": 2, "comments": 0,
+                                                                     "favorites": 0, "average_view_percentage": 0.4})
+    await env.measure(THU)
+    assert reads == []                                    # TikTok, and a YouTube answer with one watch field
+    assert env.ledger.metrics(yt)["last"]["video"] == {"average_view_percentage": 0.4}
 
 
 @pytest.mark.asyncio
@@ -2233,6 +2980,8 @@ async def test_upload_post_reads_at_most_ten_posts_a_day(env):
     (upload_post.UploadPostAuthError("upload-post: HTTP 401", method="m", status=401), False),
     (upload_post.UploadPostReauthError("upload-post: HTTP 400 [account_reauth_required]", method="m", status=400),
      False),
+    (upload_post.UploadPostNotConnectedError("upload-post: HTTP 400: none (invalid_platforms: linkedin: not "
+                                             "connected)", method="m", status=400), False),
     # About THIS post's read (an unknown outcome, or a bug of ours): recorded, so it rotates to the back.
     (upload_post.UploadPostAmbiguousError("upload-post: HTTP 502", method="m", status=502), True),
     (upload_post.UploadPostAmbiguousError("upload-post: HTTP 200 with success: false", method="m", status=200),
@@ -2254,12 +3003,15 @@ async def test_no_upload_post_failure_holds_the_day_open(env, error, recorded):
         assert m["measured_day"] == "2026-10-08" and counters["errors"] == 1
     else:
         assert env.ledger.metrics(pid) == {}
-    # A refused credential stops Upload-Post for the day, and the job's note says so; a passing failure
-    # (a rate limit, a request that never left, one post's unknown outcome) is not a stop.
-    stopped = isinstance(error, (upload_post.UploadPostAuthError, upload_post.UploadPostReauthError))
+    # A refused credential stops Upload-Post for the day, and the job's note says so; a refused social ACCOUNT
+    # (a reconnect, a platform not connected to the profile) stops only its own platform (MD-3) — the second
+    # LinkedIn post is skipped without a call; a passing failure (a rate limit, a request that never left, one
+    # post's unknown outcome) is not a stop.
     note = env.jobs.finishes[-1]["error"]
-    if stopped:
+    if isinstance(error, upload_post.UploadPostAuthError):
         assert note == f"upload_post stopped for 2026-10-08: {type(error).__name__}: {error}"
+    elif isinstance(error, (upload_post.UploadPostReauthError, upload_post.UploadPostNotConnectedError)):
+        assert note == f"upload_post linkedin stopped for 2026-10-08: {type(error).__name__}: {error}"
     else:
         assert note is None
 
@@ -2498,6 +3250,169 @@ async def test_a_ledger_failure_listing_posts_leaves_the_day_open(env, monkeypat
     counters = await env.measure(THU)
     assert counters["incomplete"] == 1 and _no_platform_call(env)
     assert env.jobs.finishes[-1]["success"] is False and "PostgREST 503" in env.jobs.finishes[-1]["error"]
+
+
+# the published-posts read, in pages (MD-7, 2026-10-16) ───────────────────────
+
+
+class _Pages:
+    """Counts the pages a read takes through the REAL `list_measurable_posts` (oldest first, `published_at` at or
+    after `since`, LIMIT) over the PostgREST fake."""
+
+    def __init__(self, svc: Any) -> None:
+        self.svc, self.calls = svc, []
+        self.original = svc.list_measurable_posts
+
+    async def list_measurable_posts(self, **kw: Any) -> List[Dict[str, Any]]:
+        self.calls.append(kw)
+        return await self.original(**kw)
+
+
+def _published_rows(ledger: Ledger, times: List[datetime], platform: str = "bluesky") -> List[str]:
+    return [ledger.post(platform, published_at=t) for t in times]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("n, pages", [(0, 1), (1, 1), (299, 1), (300, 2), (301, 2), (700, 3)])
+async def test_the_paged_read_returns_every_post_oldest_first_and_never_twice(ledger, n, pages):
+    since = THU - timedelta(days=30)
+    pids = _published_rows(ledger, [since + timedelta(minutes=5 * i) for i in range(n)])
+    read = _Pages(ledger.svc)
+    rows, capped = await ms.list_published_posts(read, since=since, page_limit=300, max_pages=4, what="test")
+    assert [r["id"] for r in rows] == pids and capped is False                 # every one, oldest first, once
+    assert len(read.calls) == pages and read.calls[0]["since"] == since
+
+
+@pytest.mark.asyncio
+async def test_posts_sharing_the_page_boundary_instant_are_neither_lost_nor_doubled(ledger):
+    """A page ends inside a run of posts published at ONE instant: the next page starts AT that instant
+    (inclusive), so the ones the limit cut are read, and the ones already read are kept once."""
+    since = THU - timedelta(days=30)
+    tied = since + timedelta(days=10)
+    times = ([since + timedelta(minutes=i) for i in range(8)] + [tied] * 5
+             + [tied + timedelta(minutes=i + 1) for i in range(8)])
+    pids = _published_rows(ledger, times)
+    read = _Pages(ledger.svc)
+    rows, capped = await ms.list_published_posts(read, since=since, page_limit=10, max_pages=5, what="test")
+    assert sorted(r["id"] for r in rows) == sorted(pids) and len(rows) == len(pids) == 21 and capped is False
+    assert [mrs._parse_ts(r["published_at"]) for r in rows] == sorted(times)    # still oldest first
+    assert [c["since"] for c in read.calls][1] == tied                          # page 2 starts AT the tie
+
+
+@pytest.mark.asyncio
+async def test_a_read_past_its_pages_is_capped_loudly_and_keeps_what_it_read(ledger, caplog):
+    caplog.set_level(logging.ERROR, logger=MS_LOGGER)
+    since = THU - timedelta(days=30)
+    pids = _published_rows(ledger, [since + timedelta(minutes=i) for i in range(50)])
+    rows, capped = await ms.list_published_posts(_Pages(ledger.svc), since=since, page_limit=10, max_pages=3,
+                                                 what="test")
+    assert capped is True and [r["id"] for r in rows] == pids[:28]             # 10 + 9 + 9: the newest missing
+    assert _messages(caplog, "full pages of 10 published posts", logging.ERROR)
+
+
+@pytest.mark.asyncio
+async def test_a_full_page_at_one_instant_cannot_loop_forever(ledger, caplog):
+    caplog.set_level(logging.ERROR, logger=MS_LOGGER)
+    since = THU - timedelta(days=30)
+    at = since + timedelta(days=1)
+    _published_rows(ledger, [at] * 7)
+    read = _Pages(ledger.svc)
+    rows, capped = await ms.list_published_posts(read, since=since, page_limit=5, max_pages=50, what="test")
+    assert capped is True and len(rows) == 5 and len(read.calls) == 2           # one retry AT the instant, then stop
+    assert _messages(caplog, "cannot move the read on", logging.ERROR)
+
+
+class _Scripted:
+    """`list_measurable_posts` answering scripted pages (a list, an exception, or junk), in order."""
+
+    def __init__(self, *answers: Any) -> None:
+        self.answers, self.calls = list(answers), 0
+
+    async def list_measurable_posts(self, **_kw: Any) -> Any:
+        self.calls += 1
+        answer = self.answers.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+
+@pytest.mark.asyncio
+async def test_the_paged_read_fails_loudly_on_a_failed_or_junk_page_and_a_timeless_full_page_is_capped(caplog):
+    since = THU - timedelta(days=30)
+    late = (since + timedelta(days=1)).isoformat()
+    first = [{"id": f"p{i}", "published_at": late} for i in range(2)]
+    with pytest.raises(mrs.MarketingRunError):                                 # a failed page: the caller's path
+        await ms.list_published_posts(_Scripted(first, mrs.MarketingRunError("503")), since=since,
+                                      page_limit=2, max_pages=3, what="test")
+    for junk in (None, {"rows": []}, "[]"):                                    # never read as "no more posts"
+        with pytest.raises(TypeError):
+            await ms.list_published_posts(_Scripted(junk), since=since, page_limit=2, max_pages=3, what="test")
+    # a full page with no readable time cannot move the read on: capped, the rows it had kept
+    timeless = [{"id": "a", "published_at": None}, {"id": "b", "published_at": "junk"}]
+    rows, capped = await ms.list_published_posts(_Scripted(timeless), since=since, page_limit=2, max_pages=3,
+                                                 what="test")
+    assert capped is True and [r["id"] for r in rows] == ["a", "b"]
+    # junk rows inside a short page are skipped, never a crash
+    rows, capped = await ms.list_published_posts(_Scripted([None, "x", {"id": "c", "published_at": late}]),
+                                                 since=since, page_limit=5, max_pages=3, what="test")
+    assert [r["id"] for r in rows] == ["c"] and capped is False
+    for bad in (0, -1, None, 2.0, True):
+        with pytest.raises(ValueError):
+            await ms.list_published_posts(_Scripted([]), since=since, page_limit=bad, max_pages=3, what="test")
+
+
+@pytest.mark.asyncio
+async def test_yesterdays_video_is_measured_when_the_window_holds_more_than_one_page(env, monkeypatch):
+    """MD-7: `list_measurable_posts` answers OLDEST first, so the old single read of 300 dropped the NEWEST posts
+    once 30 days held more — at Batch 3's cadence (~11 a day, every day) that is yesterday's posts and their
+    1-day checkpoints. 320 older posts (already measured today) and yesterday's TikTok video: it is read, for 1."""
+    today = {"v": 1, "rev": 1, "status": "ok", "measured_day": "2026-10-08", "note": None,
+             "unavailable_until": None}
+    for i in range(320):
+        env.ledger.post("bluesky", published_at=THU - timedelta(days=29) + timedelta(minutes=100 * i),
+                        metrics=dict(today))
+    env.up_configured = True
+    video = env.ledger.post("tiktok", published_at=THU - timedelta(days=1, hours=2), format="video")
+    env.up.answers[_up_job(env, video)] = up_answer("tiktok")
+    read = _Pages(env.ledger.svc)
+    monkeypatch.setattr(env.ledger.svc, "list_measurable_posts", read.list_measurable_posts)
+    await env.measure(THU)
+    assert len(read.calls) == 2 and env.up.calls == [(_up_job(env, video), "tiktok")]
+    m = env.ledger.metrics(video)
+    assert (m["status"], m["last"]["cp"], m["cps"]) == ("ok", 1, [1])
+    assert env.jobs.finishes[-1]["error"] is None                            # not capped: nothing to name
+
+
+@pytest.mark.asyncio
+async def test_a_capped_measure_read_is_named_in_the_jobs_note(env, monkeypatch):
+    monkeypatch.setattr(ms, "MEASURE_SCAN_LIMIT", 5)
+    monkeypatch.setattr(ms, "MEASURE_SCAN_PAGES", 2)
+    for i in range(12):
+        env.ledger.post("bluesky", published_at=THU - timedelta(days=20) + timedelta(hours=i))
+    await env.measure(THU)
+    fin = env.jobs.finishes[-1]
+    assert fin["success"] is True
+    assert fin["error"] == "the published-posts read stopped at 9 rows — the newest posts were not read"
+
+
+def test_the_paged_reads_hold_every_post_the_schema_allows():
+    """MD-7 — the record of why the paged reads cannot drop the NEWEST posts. One run a day
+    (`marketing_runs.run_date` UNIQUE) records at most one post per (platform, format) (`marketing_posts`
+    UNIQUE (run_id, platform, format) over POST_FORMATS_BY_PLATFORM plus, since Batch 3, the extra videos of
+    EXTRA_POST_FORMATS_BY_PLATFORM: 13 + 3 = 16 pairs); a post goes out on its run day or the next (a week of
+    slack covers a late reconcile). So a window of D days holds at most (D + 7) × pairs published posts — inside
+    pages × page size for both reads, with room kept for one more pair (17). Widen the maps past it and this
+    fails: raise the page count with it."""
+    from app.schemas.marketing import EXTRA_POST_FORMATS_BY_PLATFORM, POST_FORMATS_BY_PLATFORM
+
+    pairs = len({(platform, fmt) for formats_by in (POST_FORMATS_BY_PLATFORM, EXTRA_POST_FORMATS_BY_PLATFORM)
+                 for platform, formats in formats_by.items() for fmt in formats})
+    assert pairs >= 16                       # the extras are counted (a later pair only tightens the bound below)
+    for days, page, pages in ((ms.MEASURE_MAX_AGE.days, ms.MEASURE_SCAN_LIMIT, ms.MEASURE_SCAN_PAGES),
+                              (ds.FOLLOWER_LOOKBACK.days, ds.MEASURED_POST_LIMIT, ds.MEASURED_POST_PAGES)):
+        assert (days + 7) * max(pairs, 17) <= page * pages, (days, pairs, page, pages)
+        assert 0 < page < 1_000                  # under PostgREST's max-rows: a page it cut would pass for the last
+    assert ds.MEASURED_POST_MAX == ds.MEASURED_POST_LIMIT * ds.MEASURED_POST_PAGES
 
 
 @pytest.mark.asyncio
@@ -2872,6 +3787,195 @@ def test_a_failure_before_any_stage_completed_says_so():
     assert "after stage ? (the last completed stage)" in _health(_run("failed", stage="no\nsuch", attempts=6))
 
 
+#: Batch 1 item 10 (2026-10-15): what a run that failed AFTER its posts were recorded says instead — worded
+#: (MD-1, 2026-10-16) to stay true however the owner acted since: the bot offers them at once, so by 22:00 they
+#: may be approved and live, or rejected. Never "still offers them for your decision".
+POSTS_RECORDED = ("Its posts were recorded before it failed, so they go to the review chat like any day's; anything "
+                  "still undecided waits there.")
+#: The phrases MD-1 retired: each claimed the posts were still undecided, from the run row alone.
+STALE_POST_CLAIMS = ("still offers them for your decision", "waiting for review", "await your decision")
+
+
+def test_a_run_that_failed_after_its_posts_were_recorded_says_the_review_bot_offers_them():
+    """`assets_ready` is checkpointed only after `create_posts` answered: every post of the day exists and
+    the review bot offers a failed run's posts at that stage — "will not go out" would be false."""
+    at_cap = _health(_run("failed", stage="assets_ready", attempts=6, last_error="PATCH media_ready: HTTP 503"))
+    assert at_cap == ("⚠️ Marketing run Sat 2026-10-03 FAILED after stage assets_ready (the last completed stage): all "
+                      f"6 attempts used. {POSTS_RECORDED} Last error: PATCH media_ready: HTTP 503. Check the "
+                      "marketing-worker logs.")
+    below = _health(_run("failed", stage="assets_ready", attempts=2, last_error=None))
+    assert below == ("⚠️ Marketing run Sat 2026-10-03 FAILED after stage assets_ready (the last completed stage): "
+                     "attempt 2 of 6; the worker retries hourly until midnight ET and resumes it on tomorrow's early "
+                     f"ticks — a final word comes tomorrow after 16:00 ET. {POSTS_RECORDED} Last error: (none "
+                     "recorded). Check the marketing-worker logs.")
+    unknown = _health(_run("failed", stage="assets_ready", attempts=None))
+    assert "attempt ? of 6 — the attempt count is unreadable" in unknown and POSTS_RECORDED in unknown
+    for msg in (at_cap, below, unknown):
+        assert "will not go out" not in msg and "\n" not in msg
+    # one stage earlier the posts were never recorded: the day is lost, said as before
+    for stage in ("rendered", "voiced", "scripted", "selected", "planned", None, "assets_ready\n", ["assets_ready"]):
+        msg = _health(_run("failed", stage=stage, attempts=6))
+        assert "this day's posts will not go out" in msg and POSTS_RECORDED not in msg, stage
+    # never on a run that did not fail: a live one at that stage is still running, a finished one is silent
+    assert POSTS_RECORDED not in _health(_run("in_progress", stage="assets_ready", attempts=1,
+                                              updated_at=_iso_of(SAT_22 - timedelta(minutes=1))))
+    assert _health(_run("media_ready", stage="assets_ready")) is None
+
+
+def test_the_final_word_on_a_run_that_failed_after_its_posts_were_recorded_never_says_they_will_not_go_out():
+    ended = _final_word(_run("failed", stage="assets_ready", attempts=6, last_error="boom",
+                             updated_at=_iso_of(SAT_22 + timedelta(minutes=80))))
+    assert ended == ("⚠️ Marketing run Sat 2026-10-03 ended FAILED after stage assets_ready (the last completed "
+                     f"stage): all 6 attempts used. {POSTS_RECORDED} Last error: boom.")
+    unchanged = _final_word(_run("failed", stage="assets_ready", attempts=2, last_error="boom",
+                                 updated_at=_iso_of(SAT_22 - timedelta(minutes=20))))
+    assert unchanged == ("⚠️ Marketing run Sat 2026-10-03 is still FAILED after stage assets_ready (the last completed "
+                         "stage), attempt 2 of 6: no retry happened — check the marketing-worker cron (hourly at :15) "
+                         f"and its last logs. {POSTS_RECORDED} Last error: boom.")
+    no_check = _final_word(_run("failed", stage="assets_ready", attempts=6,
+                                updated_at=_iso_of(SAT_22 - timedelta(minutes=20))), checked_at=None)
+    assert POSTS_RECORDED in no_check
+    for msg in (ended, unchanged, no_check):
+        assert "will not go out" not in msg
+    # one stage earlier: as before
+    assert "This day's posts will not go out." in _final_word(
+        _run("failed", stage="rendered", attempts=6, updated_at=_iso_of(SAT_22 + timedelta(minutes=80))))
+
+
+#: …and what a run ABANDONED at that stage says — a tick that died between the `assets_ready` checkpoint and
+#: the `media_ready` write: the review bot offers a run's posts at that stage whatever its status
+#: (`review_service.bundle_offerable`), so "the day is lost" would be false.
+POSTS_RECORDED_STOPPED = ("Its posts were recorded before it stopped, so they go to the review chat like any day's; "
+                          "anything still undecided waits there.")
+
+
+@pytest.mark.parametrize("status", ["planned", "in_progress"])
+def test_a_run_abandoned_after_its_posts_were_recorded_says_the_review_bot_offers_them(status):
+    stale = _iso_of(SAT_22 - timedelta(hours=1))
+    below = _health(_run(status, stage="assets_ready", attempts=3, updated_at=stale))
+    assert below == (f"⚠️ Marketing run Sat 2026-10-03 is not finished yet: {status} after stage assets_ready (the "
+                     f"last completed stage) — attempt 3 of 6 was abandoned; the worker retries hourly. "
+                     f"{POSTS_RECORDED_STOPPED} A final word comes tomorrow after 16:00 ET.")
+    at_cap = _health(_run(status, stage="assets_ready", attempts=6, last_error="PATCH media_ready: HTTP 503",
+                          updated_at=stale))
+    assert at_cap == (f"⚠️ Marketing run Sat 2026-10-03 is not finished yet: {status} after stage assets_ready (the "
+                      f"last completed stage) — the last allowed attempt was abandoned; no retries remain — the day "
+                      f"will close failed; last error: PATCH media_ready: HTTP 503. {POSTS_RECORDED_STOPPED} A final "
+                      f"word comes tomorrow after 16:00 ET.")
+    # still alive at that stage: it is just running — no word about its posts yet
+    alive = _health(_run(status, stage="assets_ready", attempts=3, updated_at=_iso_of(SAT_22 - timedelta(minutes=2))))
+    assert "still running (attempt 3 of 6)" in alive and POSTS_RECORDED_STOPPED not in alive
+    # one stage earlier the posts were never recorded: exactly as before
+    earlier = _health(_run(status, stage="rendered", attempts=3, updated_at=stale))
+    assert earlier.endswith("— attempt 3 of 6 was abandoned; the worker retries hourly. A final word comes tomorrow "
+                            "after 16:00 ET.")
+    for msg in (below, at_cap, alive, earlier):
+        assert POSTS_RECORDED not in msg and "\n" not in msg
+
+
+@pytest.mark.parametrize("status", ["planned", "in_progress"])
+def test_the_final_word_on_a_run_abandoned_after_its_posts_were_recorded_never_says_the_day_is_lost(status):
+    changed = _final_word(_run(status, stage="assets_ready", attempts=3,
+                               updated_at=_iso_of(SAT_22 + timedelta(hours=5, minutes=30))))     # Sun 03:30 EDT
+    assert changed == (f"⚠️ Marketing run Sat 2026-10-03 never finished: {status} after stage assets_ready (the last "
+                       f"completed stage), attempt 3 of 6 was abandoned and no retry is left (the worker resumes a day "
+                       f"only until 16:00 ET the next day). {POSTS_RECORDED_STOPPED} Check the marketing-worker logs.")
+    unchanged = _final_word(_run(status, stage="assets_ready", attempts=6,
+                                 updated_at=_iso_of(SAT_22 - timedelta(minutes=20))))            # Sat 21:40 EDT
+    assert unchanged == (f"⚠️ Marketing run Sat 2026-10-03 never finished: {status} after stage assets_ready (the last "
+                         f"completed stage), attempt 6 of 6, untouched since 10-03 21:40 ET. {POSTS_RECORDED_STOPPED} "
+                         f"Check the marketing-worker cron and its last logs.")
+    no_check = _final_word(_run(status, stage="assets_ready", attempts=6,
+                                updated_at=_iso_of(SAT_22 - timedelta(minutes=20))), checked_at=None)
+    assert no_check.startswith(f"⚠️ Marketing run Sat 2026-10-03 never finished: {status} after stage assets_ready")
+    assert POSTS_RECORDED_STOPPED in no_check
+    for msg in (changed, unchanged, no_check):
+        assert "the day is lost" not in msg and POSTS_RECORDED not in msg
+    # one stage earlier, or a stage that only LOOKS like it: the day is lost, said as before
+    for stage in ("rendered", None, "assets_ready ", ["assets_ready"]):
+        msg = _final_word(_run(status, stage=stage, attempts=6, updated_at=_iso_of(SAT_22 - timedelta(minutes=20))))
+        assert "never finished — the day is lost" in msg and POSTS_RECORDED_STOPPED not in msg, stage
+
+
+@pytest.mark.parametrize("status", ["failed", "planned", "in_progress"])
+@pytest.mark.parametrize("attempts", [2, 6, None])
+def test_no_run_health_text_claims_a_recorded_runs_posts_still_await_a_decision(status, attempts):
+    """MD-1 / review F1 (2026-10-16): the review bot offers an `assets_ready` run's posts as soon as the checkpoint
+    lands, whatever the run's status — so by 22:00, and surely by the next day's 16:00, the owner may have
+    approved them (and they went out) or rejected them. The health jobs read the run row only: no text may say
+    the posts still wait. Every text that names them says only that they go to the review chat like any day's
+    and that whatever is undecided waits there — true however the owner acted."""
+    stale = _iso_of(SAT_22 - timedelta(hours=1))
+    texts = [
+        _health(_run(status, stage="assets_ready", attempts=attempts, updated_at=stale)),
+        _final_word(_run(status, stage="assets_ready", attempts=attempts, updated_at=_iso_of(AFTER_22))),
+        _final_word(_run(status, stage="assets_ready", attempts=attempts, updated_at=_iso_of(BEFORE_22))),
+        _final_word(_run(status, stage="assets_ready", attempts=attempts, updated_at=stale), checked_at=None),
+        # recovered after the check: its posts may have been decided overnight, too
+        _final_word(_run("media_ready", stage="assets_ready", attempts=attempts, finished_at=_iso_of(AFTER_22))),
+    ]
+    spoken = [t for t in texts if t is not None]
+    named = [t for t in spoken if "review chat" in t]
+    assert named and texts[-1] in named                                      # the sweep is not vacuous
+    for text in spoken:
+        for claim in STALE_POST_CLAIMS:
+            assert claim not in text, text
+    for text in named:
+        assert "anything still undecided waits there" in text, text
+
+
+@pytest.mark.parametrize("status", ["failed", "planned", "in_progress"])
+def test_a_checkpoint_that_recorded_no_post_is_said_like_an_earlier_stages_failure(status):
+    """Review F1 (live regression): the worker's `stage_posts` checkpoints `assets_ready` with
+    {"posts_recorded": 0} when the script names no outlet it posts to. Nothing is in the review chat and nothing
+    will go out: the texts say what they say for a run that failed before its posts — never "its posts were
+    recorded", never "go to the review chat"."""
+    none = {"posts_recorded": 0}
+    stale = _iso_of(SAT_22 - timedelta(hours=1))
+    if status == "failed":
+        texts = [_health(_run("failed", stage="assets_ready", attempts=6, metadata=none)),
+                 _final_word(_run("failed", stage="assets_ready", attempts=6, metadata=none,
+                                  updated_at=_iso_of(AFTER_22)))]
+        assert "all 6 attempts used; this day's posts will not go out." in texts[0]
+        assert "This day's posts will not go out." in texts[1]
+        below = _health(_run("failed", stage="assets_ready", attempts=2, metadata=none))
+        assert below == ("⚠️ Marketing run Sat 2026-10-03 FAILED after stage assets_ready (the last completed stage): "
+                         "attempt 2 of 6; the worker retries hourly until midnight ET and resumes it on tomorrow's "
+                         "early ticks — a final word comes tomorrow after 16:00 ET. Last error: (none recorded). "
+                         "Check the marketing-worker logs.")
+        texts.append(below)
+    else:
+        texts = [_health(_run(status, stage="assets_ready", attempts=3, metadata=none, updated_at=stale)),
+                 _final_word(_run(status, stage="assets_ready", attempts=3, metadata=none,
+                                  updated_at=_iso_of(AFTER_22)))]
+        assert texts[0].endswith("— attempt 3 of 6 was abandoned; the worker retries hourly. A final word comes "
+                                 "tomorrow after 16:00 ET.")
+        assert "never finished — the day is lost" in texts[1]
+    for text in texts:
+        assert "review chat" not in text and "posts were recorded" not in text, text
+
+
+def test_a_recovered_run_that_recorded_no_post_says_so():
+    msg = _final_word(_run("media_ready", stage="assets_ready", metadata={"posts_recorded": 0},
+                           finished_at=_iso_of(AFTER_22)))
+    assert msg == ("✅ Marketing run Sat 2026-10-03 recovered at 10-03 23:20 ET — it recorded no posts, so nothing "
+                   "will be posted for this day.")
+
+
+@pytest.mark.parametrize("count", [None, 3, 1, True, False, "0", 0.0, -1, [0], {"n": 0}, "junk"])
+def test_only_an_exact_zero_count_says_no_post_was_recorded(count):
+    """`metadata.posts_recorded` is worker-written: only the exact int 0 means "none". A missing key (a run from
+    before the count), a positive count or any junk keeps the recorded-posts wording — never a guess that
+    there is nothing to review."""
+    meta = {} if count is None else {"posts_recorded": count}
+    failed = _health(_run("failed", stage="assets_ready", attempts=6, metadata=meta))
+    assert POSTS_RECORDED in failed and "will not go out" not in failed
+    recovered = _final_word(_run("media_ready", stage="assets_ready", metadata=meta, finished_at=_iso_of(AFTER_22)))
+    assert recovered.endswith(f"— {RECOVERED_POSTS}.")
+    # metadata that is not an object reads as no count at all
+    assert POSTS_RECORDED in _health(_run("failed", stage="assets_ready", attempts=6, metadata="junk"))
+
+
 def test_a_hostile_last_error_is_scrubbed_folded_onto_one_line_and_capped():
     hostile = ("Traceback (most recent call last):\n  bot " + TOKEN_LIKE + "\r\nAuthorization: Bearer "
                + "b" * 40 + " \u2028forged line\u202e\x00\ud83d " + "Z" * 10_000)
@@ -3130,10 +4234,14 @@ def test_the_nightly_window_opens_at_22_et_on_the_run_date_across_dst():
     assert ds.health_opens_at(date(2026, 11, 2)) == datetime(2026, 11, 3, 3, 0, tzinfo=timezone.utc)    # EST
 
 
+#: What a recovered `media_ready` run's final word says about its posts (MD-1): true however the owner acted.
+RECOVERED_POSTS = "its posts go to the review chat like any day's; anything still undecided waits there"
+
+
 @pytest.mark.parametrize("status", ["media_ready", "published"])
 def test_a_run_that_finished_after_the_check_recovered(status):
     msg = _final_word(_run(status, finished_at=_iso_of(AFTER_22), updated_at=_iso_of(AFTER_22)))
-    what = "its posts are waiting for review" if status == "media_ready" else "its posts went out"
+    what = RECOVERED_POSTS if status == "media_ready" else "its posts went out"
     assert msg == f"✅ Marketing run Sat 2026-10-03 recovered at 10-03 23:20 ET — {what}."
 
 
@@ -3315,7 +4423,7 @@ def test_a_verdict_the_check_delivered_after_22_is_never_repeated_or_called_a_re
         # …while a check that really ran at 22:00:00 would have missed both, and is told so
         assert _final_word(run, checked_at=SAT_22) is not None
     assert _final_word(finished_late, checked_at=SAT_22) == ("✅ Marketing run Sat 2026-10-03 recovered at 10-03 "
-                                                             "22:04 ET — its posts are waiting for review.")
+                                                             f"22:04 ET — {RECOVERED_POSTS}.")
 
 
 def test_a_write_at_the_check_instant_counts_as_seen_and_one_after_it_does_not():
@@ -3866,7 +4974,8 @@ def test_an_empty_week_is_one_short_honest_message():
     for d in ("Mon 09-28", "Tue 09-29", "Thu 10-01", "Sat 10-03"):
         assert f"• {d} no run (a posting day)" in text
     assert "Fri 10-02" not in text and "Sun 10-04" not in text
-    assert "Engagement: no live published posts this week" in text
+    assert "Scorecard, 4 weeks (09-07 → 10-04): no published posts" in text.splitlines()
+    assert "Top post this week" not in text and "Picture not used" not in text
     assert "/go taps (approximate): none" in text.splitlines() and "Review time: no decisions this week" in text
     assert "first minutes after posting" not in text and "⚠️ Usage" not in text
     assert "Outcome unknown: none waiting for your answer" in text
@@ -3956,35 +5065,418 @@ def test_failed_rows_carry_a_scrubbed_one_line_error_and_never_a_token():
     assert TOKEN_SECRET not in text
 
 
-def test_engagement_sums_only_readable_counts_and_links_the_top_post():
+def test_one_top_post_line_names_the_weeks_best_post_by_interactions_never_its_text():
     s = _summary(_full_week())
-    x, bsky = s["engagement"]["x"], s["engagement"]["bluesky"]
-    # the junk-count post is live but measured nothing; the retracted post is not engagement
-    assert x == {"live": 2, "measured": 1, "totals": {"likes": 7, "reposts": 2, "replies": 0, "impressions": 450},
-                 "statuses": {"ok": 1, "error": 1},
-                 "top": {"score": 9, "url": f"https://x.com/i/web/status/{X_ID}",
-                         "counts": {"likes": 7, "reposts": 2, "replies": 0}}}
-    assert bsky["live"] == 2 and bsky["measured"] == 1 and bsky["statuses"] == {"missing": 1}
-    assert bsky["top"]["url"] == "https://bsky.app/profile/d/post/r2"
+    # X's 7 likes + 2 reposts beat Bluesky's 7 interactions; the retracted post (99 likes) and the rehearsal
+    # row (1,000 likes) are not this week's posts; the junk-count post has no readable count
+    assert s["top_post"] == {"score": 9, "url": f"https://x.com/i/web/status/{X_ID}",
+                             "counts": {"likes": 7, "reposts": 2, "replies": 0}}
     text = ds.compose_digest(s)
-    assert "• X — 1 of 2 measured: 450 impressions · 7 likes · 2 reposts · 0 replies" in text
-    assert f"  Top: https://x.com/i/web/status/{X_ID} (7 likes · 2 reposts · 0 replies)" in text
-    assert "  Measure: error 1 · ok 1" in text
-    assert "• BLUESKY — 1 of 2 measured: 3 likes · 1 repost · 2 replies · 0 quotes · 1 bookmark" in text
-    assert "1000" not in text and "99 like" not in text and "12 like" not in text
+    assert f"Top post this week: https://x.com/i/web/status/{X_ID} (7 likes · 2 reposts · 0 replies)" in text.splitlines()
+    assert text.count("Top post") == 1 and "1000" not in text and "99 like" not in text and "12 like" not in text
+    _assert_no_model_text(text)
 
 
-def test_a_week_with_no_engagement_shows_no_top_post():
-    posts = [_post("x", "published", external_id=X_ID,
-                   metrics={"status": "ok", "last": {"likes": 0, "impressions": 3}})]
-    text = _digest(posts)
-    assert "• X — 1 of 1 measured: 3 impressions · 0 likes" in text and "Top:" not in text
+def test_a_tie_for_top_post_goes_to_the_first_and_no_interaction_means_no_line():
+    first = _post("bluesky", "published", external_url="https://bsky.app/profile/d/post/first",
+                  metrics={"status": "ok", "last": {"likes": 3, "reposts": 2}})
+    second = _post("x", "published", external_id=X_ID, metrics={"status": "ok", "last": {"likes": 5}})
+    assert _summary([first, second])["top_post"]["url"] == "https://bsky.app/profile/d/post/first"
+    quiet = [_post("x", "published", external_id=X_ID, metrics={"status": "ok", "last": {"likes": 0, "impressions": 3}}),
+             _post("<b>x</b>", "published", metrics={"status": "ok", "last": {"likes": 9}})]      # no platform
+    assert _summary(quiet)["top_post"] is None and "Top post" not in _digest(quiet)
 
 
-def test_metrics_off_says_so_instead_of_an_empty_engagement_section():
-    text = _digest(_full_week(), metrics_enabled=False)
-    assert "Engagement: not measured — MARKETING_ENABLED and MARKETING_METRICS_ENABLED must both be on" in text
+def test_metrics_off_says_so_instead_of_a_scorecard():
+    text = _digest(_full_week(), metrics_enabled=False, measured=_scorecard_week())
+    assert "Scorecard: not measured — MARKETING_ENABLED and MARKETING_METRICS_ENABLED must both be on" in text
     assert "Metrics job: off (MARKETING_ENABLED and MARKETING_METRICS_ENABLED must both be on)" in text
+    assert "• TIKTOK video:" not in text and "Scorecard, 4 weeks" not in text
+
+
+# ── the 4-week scorecard (Batch 1 item 8b, 2026-10-15) ────────────────────────
+
+SCORE_HEADER = ("Scorecard, 4 weeks (09-07 → 10-04), by follower gain — views, watch and % are medians over "
+                "posts read at 24 h or older:")
+
+
+def _snap(age_h: Any = 48.0, **counts: Any) -> Dict[str, Any]:
+    """A stored latest snapshot (`metrics.last`); a `video=` object rides in `counts`."""
+    return {"day": "2026-10-04", "at": "2026-10-04T10:00:00+00:00", "age_h": age_h, "cp": None, **counts}
+
+
+def _acct(followers: Any, at: str) -> Dict[str, Any]:
+    return {"followers": followers, "at": at, "source": "test"}
+
+
+def _scored(platform: str, fmt: str, published: str, *, last: Any = None, status: Any = "ok", account: Any = None,
+            post_status: str = "published", **kw: Any) -> Dict[str, Any]:
+    """A post as the digest's 35-day read returns it, published at `published` (UTC ISO)."""
+    metrics: Dict[str, Any] = {"v": 1}
+    if status is not None:
+        metrics["status"] = status
+    if last is not None:
+        metrics["last"] = last
+    if account is not None:
+        metrics["account"] = account
+    return _post(platform, post_status, run_date=published[:10], created=published, metrics=metrics,
+                 format=fmt, published_at=published, **kw)
+
+
+def _scorecard_week() -> List[Dict[str, Any]]:
+    """Four platforms over the 4 weeks Mon 09-07 → Sun 10-04 — every row shape the scorecard draws."""
+    return [
+        _scored("tiktok", "video", "2026-09-08T20:30:00+00:00", account=_acct(10, "2026-09-09T10:00:00+00:00"),
+                last=_snap(72.0, views=40, likes=1, video={"new_followers": 2, "profile_views": 9,
+                                                           "average_time_watched": 6.0,
+                                                           "full_video_watched_rate": 0.3})),
+        _scored("tiktok", "video", "2026-09-22T20:30:00+00:00", account=_acct(20, "2026-09-23T10:00:00+00:00"),
+                last=_snap(72.0, views=80, video={"new_followers": 3, "profile_views": 12,
+                                                  "average_time_watched": 7.0, "full_video_watched_rate": 0.4})),
+        _scored("tiktok", "video", "2026-10-03T20:30:00+00:00", account=_acct(30, "2026-10-05T10:00:00+00:00"),
+                last=_snap(34.0, views=60, video={"new_followers": 0, "profile_views": 1,
+                                                  "average_time_watched": 8.0, "full_video_watched_rate": 0.2,
+                                                  "retention": {"1": 0.9}})),
+        _scored("youtube", "video", "2026-09-15T20:30:00+00:00", last=_snap(48.0, views=31)),
+        _scored("youtube", "video", "2026-09-29T20:30:00+00:00", last=_snap(48.0, views=109)),
+        _scored("youtube", "video", "2026-10-01T20:30:00+00:00", status="error"),              # never read ok
+        # Sat 09-05 is before the 4 weeks: not a scorecard post — but its follower snapshot is X's baseline
+        _scored("x", "text", "2026-09-05T20:30:00+00:00", last=_snap(72.0, impressions=999),
+                account=_acct(12, "2026-09-07T12:00:00+00:00")),
+        _scored("x", "text", "2026-09-29T20:30:00+00:00", last=_snap(48.0, impressions=4)),
+        _scored("x", "text", "2026-10-01T20:30:00+00:00", last=_snap(72.0, impressions=21),
+                account=_acct(12, "2026-10-05T10:00:00+00:00")),
+        _scored("bluesky", "image", "2026-09-26T20:30:00+00:00", last=_snap(48.0, likes=2),
+                account=_acct(5, "2026-09-28T10:00:00+00:00")),
+        _scored("bluesky", "image", "2026-10-03T20:30:00+00:00", last=_snap(34.0, likes=1),
+                account=_acct(7, "2026-10-05T10:00:00+00:00")),
+    ]
+
+
+def _score_lines(text: str) -> List[str]:
+    lines = text.splitlines()
+    i = lines.index(SCORE_HEADER)
+    return lines[i + 1: next(j for j in range(i + 1, len(lines)) if not lines[j].startswith("• "))]
+
+
+def test_the_scorecard_layout_is_pinned():
+    s = _summary([], measured=_scorecard_week())
+    text = ds.compose_digest(s)
+    assert _score_lines(text) == [
+        # +20 against 09-09, the snapshot closest to 4 weeks before the newest (10-05); 5 follows and 22
+        # profile visits from the three posts; medians 60 views, 7 s, 30% (0.3 of a fraction)
+        "• TIKTOK video: 3 posts · followers 30 (+20 since 09-09) · follows from posts 5 · profile visits 22 · "
+        "views median 60, best 80 (3 at 24 h+) · avg watch 7 s · watched to the end 30%",
+        "• BLUESKY image: 2 posts · followers 7 (+2 since 09-28) · no view counts",
+        "• X text: 2 posts · followers 12 (±0 since 09-07) · impressions median 12.5, best 21 (2 at 24 h+)",
+        # no follower snapshot and no watch fields on the live route: n/a, never 0 — sorted last
+        "• YOUTUBE video: 3 posts · followers n/a · views median 70, best 109 (2 at 24 h+) · avg watch n/a · "
+        "avg viewed n/a · reads: 1 error",
+    ]
+    lines = text.splitlines()
+    i = lines.index(SCORE_HEADER)
+    # the scorecard sits where the engagement block was: after the posts section, before the Followers line
+    assert lines[i - 1] == "" and lines[i + 5].startswith("Followers: ")
+    assert "Followers: BLUESKY 7 (+2 since 09-28; as of 10-05) · TIKTOK 30 (+10 since 09-23; as of 10-05) · " \
+           "X 12 (±0 since 09-07; as of 10-05)" in lines
+    (tiktok,) = [r for r in s["scorecard"]["rows"] if r["platform"] == "tiktok"]
+    assert (tiktok["gain"], tiktok["sums"], tiktok["watch_s"], tiktok["reach_n"]) == (
+        20, {"new_followers": 5, "profile_views": 22}, 7.0, 3)
+    assert (s["scorecard"]["first"], s["scorecard"]["last"]) == (date(2026, 9, 7), date(2026, 10, 4))
+    assert "999" not in text                      # the post before the 4 weeks is no scorecard post
+
+
+def test_the_scorecard_splits_each_platform_by_format_and_shares_its_followers():
+    measured = [
+        _scored("facebook", "text", "2026-09-08T20:30:00+00:00", last=_snap(48.0, views=5),
+                account=_acct(90, "2026-09-09T10:00:00+00:00")),
+        _scored("facebook", "image", "2026-09-29T20:30:00+00:00", last=_snap(48.0, views=50)),
+        _scored("facebook", "image", "2026-10-01T20:30:00+00:00", last=_snap(48.0, views=70),
+                account=_acct(100, "2026-10-05T10:00:00+00:00")),
+        _scored("linkedin", "image", "2026-09-29T20:30:00+00:00", last=_snap(48.0, impressions=30)),
+        _scored("linkedin", "text", "2026-09-15T20:30:00+00:00", last=_snap(48.0, views=3)),
+        _scored("linkedin", "text", "2026-09-16T20:30:00+00:00", last=_snap(48.0, impressions=9)),
+    ]
+    assert _score_lines(_digest([], measured=measured)) == [
+        # one platform, two formats: the same followers on both rows; within it, by median reach
+        "• FACEBOOK image: 2 posts · followers 100 (+10 since 09-09) · views median 60, best 70 (2 at 24 h+)",
+        "• FACEBOOK text: 1 post · followers 100 (+10 since 09-09) · views median 5, best 5 (1 at 24 h+)",
+        "• LINKEDIN image: 1 post · followers n/a · impressions median 30, best 30 (1 at 24 h+)",
+        # each post's own count, named as the mix it is
+        "• LINKEDIN text: 2 posts · followers n/a · views/impressions median 6, best 9 (2 at 24 h+)",
+    ]
+
+
+_NEWEST = datetime(2026, 10, 5, 10, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("snapshots, base, base_days", [
+    # (days before the newest snapshot, followers); the newest is (0, 50)
+    ([(0, 50), (28 - 1 / 24, 30), (28 + 2 / 24, 31), (20, 40), (5, 45)], 30, 28 - 1 / 24),   # closest to 4 weeks
+    ([(0, 50), (28 - 1 / 24, 30), (28 + 1 / 24, 31)], 31, 28 + 1 / 24),                      # a tie: the older one
+    ([(0, 50), (7, 44), (14, 40), (21, 35), (28 - 10 / 86400, 30)], 30, 28 - 10 / 86400),     # X weekly, 10 s late
+    ([(0, 50), (33, 20)], 20, 33),                                       # only an older one: dated by its own day
+    ([(0, 50), (10, 45)], 45, 10),                                       # a young account: its 10 days, dated
+    ([(0, 50), (6, 46)], 46, 6),                                         # exactly 6 days older counts
+    ([(0, 50), (6 - 1 / 86400, 46), (1, 49)], None, None),               # nothing 6+ days older: no change
+    ([(0, 50)], None, None),
+])
+def test_the_scorecards_follower_change_is_against_the_snapshot_closest_to_four_weeks_earlier(snapshots, base,
+                                                                                           base_days):
+    posts = [_post("tiktok", "published", metrics={"v": 1, "account": _acct(n, (_NEWEST - timedelta(days=d)).isoformat())})
+             for d, n in snapshots]
+    f = ds._followers(posts, now=NOW)["tiktok"]
+    assert (f["followers"], f["at"]) == (50, _NEWEST)
+    assert f["four_week_base"] == base
+    assert f["four_week_base_at"] == (None if base_days is None else _NEWEST - timedelta(days=base_days))
+    # the Followers line keeps its own rule: the LATEST snapshot at least 6 days older
+    older = [(d, n) for d, n in snapshots if d >= 6]
+    assert f["baseline"] == (min(older)[1] if older else None)
+
+
+def test_a_follower_count_without_a_baseline_or_a_fresh_read_says_so():
+    measured = [_scored("x", "text", "2026-09-29T20:30:00+00:00", last=_snap(48.0, impressions=4),
+                        account=_acct(12, "2026-10-01T10:00:00+00:00"))]
+    (line,) = _score_lines(_digest([], measured=measured))
+    assert line == ("• X text: 1 post · followers 12 (change n/a, as of 10-01) · impressions median 4, best 4 "
+                    "(1 at 24 h+)")
+    # a loss is signed; a read under two days old carries no date
+    measured = [_scored("x", "text", "2026-09-29T20:30:00+00:00", last=_snap(48.0, impressions=4),
+                        account=_acct(12, "2026-10-04T10:00:00+00:00")),
+                _scored("x", "text", "2026-09-08T20:30:00+00:00", account=_acct(15, "2026-09-08T22:00:00+00:00"))]
+    assert "followers 12 (-3 since 09-08) ·" in _score_lines(_digest([], measured=measured))[0]
+
+
+def test_a_figure_no_post_gave_is_n_a_and_a_reported_zero_is_zero():
+    measured = [
+        _scored("tiktok", "video", "2026-10-04T20:30:00+00:00", last=_snap(3.0, views=500)),   # read at 3 h
+        _scored("youtube", "video", "2026-10-02T20:30:00+00:00", status=None),                  # never read
+    ]
+    assert _score_lines(_digest([], measured=measured)) == [
+        "• TIKTOK video: 1 post · followers n/a · follows from posts n/a · profile visits n/a · views n/a · "
+        "avg watch n/a · watched to the end n/a",
+        "• YOUTUBE video: 1 post · followers n/a · views n/a · avg watch n/a · avg viewed n/a · reads: 1 unread",
+    ]
+    zeros = [_scored("tiktok", "video", "2026-10-01T20:30:00+00:00", account=_acct(0, "2026-10-05T10:00:00+00:00"),
+                     last=_snap(48.0, views=0, video={"new_followers": 0, "average_time_watched": 0.0,
+                                                      "full_video_watched_rate": 0.0}))]
+    assert _score_lines(_digest([], measured=zeros)) == [
+        "• TIKTOK video: 1 post · followers 0 (change n/a) · follows from posts 0 · profile visits n/a · "
+        "views median 0, best 0 (1 at 24 h+) · avg watch 0 s · watched to the end 0%"]
+
+
+def test_a_sum_only_some_posts_gave_is_a_floor_never_the_total():
+    """Three TikTok posts; the follows of only two are known (one never read, one read without the field —
+    or with junk in it): the sum is a FLOOR, "≥ 5". Passing it off as the row's total would understate it."""
+    measured = [
+        _scored("tiktok", "video", "2026-09-29T20:30:00+00:00",
+                last=_snap(48.0, views=10, video={"new_followers": 2, "profile_views": 4})),
+        _scored("tiktok", "video", "2026-09-30T20:30:00+00:00",
+                last=_snap(48.0, views=20, video={"new_followers": 3, "profile_views": 6})),
+        _scored("tiktok", "video", "2026-10-01T20:30:00+00:00", status=None),               # never read
+    ]
+    (line,) = _score_lines(_digest([], measured=measured))
+    assert line.startswith("• TIKTOK video: 3 posts · followers n/a · follows from posts ≥ 5 · profile visits ≥ 10 · ")
+    (row,) = _summary([], measured=measured)["scorecard"]["rows"]
+    assert (row["sums"], row["sum_n"]) == ({"new_followers": 5, "profile_views": 10},
+                                           {"new_followers": 2, "profile_views": 2})
+    # the third post read, but its follows unreadable (junk) and its profile visits known: one floor, one total
+    measured[2] = _scored("tiktok", "video", "2026-10-01T20:30:00+00:00",
+                          last=_snap(48.0, views=30, video={"new_followers": True, "profile_views": 1}))
+    (line,) = _score_lines(_digest([], measured=measured))
+    assert "follows from posts ≥ 5 · profile visits 11 · " in line
+    # every post gave it: the plain total (a reported 0 counts as given)
+    measured[2] = _scored("tiktok", "video", "2026-10-01T20:30:00+00:00",
+                          last=_snap(48.0, views=30, video={"new_followers": 0, "profile_views": 1}))
+    (line,) = _score_lines(_digest([], measured=measured))
+    assert "follows from posts 5 · profile visits 11 · " in line and "≥" not in line
+    # a hand-edited row (no `sum_n`) never claims a total
+    assert ds._sum_text({"posts": 2, "sums": {"new_followers": 4}}, "new_followers") == "≥ 4"
+    assert ds._sum_text({"posts": 2, "sums": {"new_followers": 4}, "sum_n": {"new_followers": "2"}},
+                        "new_followers") == "≥ 4"
+    assert ds._sum_text({"posts": 2, "sums": {"new_followers": "4"}, "sum_n": {"new_followers": 2}},
+                        "new_followers") == "n/a"
+
+
+@pytest.mark.parametrize("age", [23.9, None, True, "48", math.nan, math.inf, -5])
+def test_only_a_snapshot_read_at_24_h_or_older_counts_toward_reach_and_watch(age):
+    measured = [
+        _scored("tiktok", "video", "2026-10-03T20:30:00+00:00",
+                last=_snap(age, views=1000, video={"new_followers": 4, "average_time_watched": 30.0,
+                                                   "full_video_watched_rate": 0.9})),
+        _scored("tiktok", "video", "2026-09-29T20:30:00+00:00",
+                last=_snap(48.0, views=10, video={"new_followers": 1, "average_time_watched": 5.0,
+                                                  "full_video_watched_rate": 0.1})),
+    ]
+    (line,) = _score_lines(_digest([], measured=measured))
+    # the young post's follows count (a follow is a follow); its reach and watch do not
+    assert line == ("• TIKTOK video: 2 posts · followers n/a · follows from posts 5 · profile visits n/a · "
+                    "views median 10, best 10 (1 at 24 h+) · avg watch 5 s · watched to the end 10%")
+
+
+def test_the_scorecard_counts_only_live_published_posts_of_its_four_new_york_weeks():
+    edges = {
+        "2026-09-07T03:59:59+00:00": False,   # Sun 09-06 23:59:59 EDT
+        "2026-09-07T04:00:00+00:00": True,    # Mon 09-07 00:00 EDT
+        "2026-10-05T03:59:59+00:00": True,    # Sun 10-04 23:59:59 EDT
+        "2026-10-05T04:00:00+00:00": False,   # Mon 10-05 00:00 EDT — this week
+    }
+    measured = [_scored("x", "text", at, last=_snap(48.0, impressions=1)) for at in edges]
+    junk_time = _scored("x", "text", "2026-09-29T20:30:00+00:00", last=_snap(48.0, impressions=1))
+    junk_time["published_at"] = "yesterday"
+    no_time = _scored("x", "text", "2026-09-29T20:30:00+00:00", last=_snap(48.0, impressions=1))
+    no_time["published_at"] = None
+    measured += [junk_time, no_time, "junk", None,
+                 _scored("x", "text", "2026-09-29T20:30:00+00:00", live=False, last=_snap(48.0, impressions=1)),
+                 _scored("x", "text", "2026-09-29T20:30:00+00:00", post_status="retracted"),
+                 _scored("<b>x</b>", "text", "2026-09-29T20:30:00+00:00", last=_snap(48.0, impressions=1))]
+    (row,) = _summary([], measured=measured)["scorecard"]["rows"]
+    assert (row["platform"], row["posts"], row["reach_n"]) == ("x", sum(edges.values()), 2)
+    # the November week: the window follows the New York clock (the extra hour is in)
+    nov = [_scored("x", "text", "2026-11-02T04:59:59+00:00", last=_snap(48.0, impressions=1)),   # Sun 23:59:59 EST
+           _scored("x", "text", "2026-11-02T05:00:00+00:00", last=_snap(48.0, impressions=1)),   # Mon 00:00 EST
+           _scored("x", "text", "2026-10-05T03:59:59+00:00", last=_snap(48.0, impressions=1)),   # Sun 10-04 EDT
+           _scored("x", "text", "2026-10-05T04:00:00+00:00", last=_snap(48.0, impressions=1))]   # Mon 10-05 EDT
+    s = ds.summarize_week(now=datetime(2026, 11, 2, 14, 0, tzinfo=timezone.utc), week_start=date(2026, 10, 26),
+                          week_end=date(2026, 11, 1), posts=[], measured=nov, metrics_enabled=True)
+    assert s["scorecard"]["first"] == date(2026, 10, 5) and s["scorecard"]["rows"][0]["posts"] == 2
+
+
+def test_junk_stored_measures_are_ignored_never_shown():
+    measured = [
+        _scored("tiktok", "video", "2026-09-29T20:30:00+00:00", last=_snap(48.0, views="12", video={
+            "new_followers": -1, "profile_views": 1.5, "average_time_watched": True,
+            "full_video_watched_rate": 18.4})),
+        _scored("tiktok", "video", "2026-09-30T20:30:00+00:00", last=_snap(48.0, views=True, video=[1, 2])),
+        _scored("youtube", "video", "2026-09-29T20:30:00+00:00", last=_snap(48.0, views=-1, video={
+            "average_view_duration_seconds": "12", "average_view_percentage": math.nan})),
+        _scored("youtube", "video", "2026-09-30T20:30:00+00:00", status=["ok"], last="not a snapshot"),
+    ]
+    text = _digest([], measured=measured)
+    assert _score_lines(text) == [
+        "• TIKTOK video: 2 posts · followers n/a · follows from posts n/a · profile visits n/a · views n/a · "
+        "avg watch n/a · watched to the end n/a",
+        "• YOUTUBE video: 2 posts · followers n/a · views n/a · avg watch n/a · avg viewed n/a · reads: 1 other",
+    ]
+    assert "1,840" not in text and "18.4" not in text
+
+
+#: The ten rows of a busy 4 weeks (every platform, the picture platforms in two formats).
+_TEN_ROWS = (("tiktok", "video"), ("youtube", "video"), ("instagram", "video"), ("facebook", "image"),
+             ("facebook", "text"), ("linkedin", "image"), ("linkedin", "text"), ("threads", "image"),
+             ("x", "text"), ("bluesky", "image"))
+
+
+def _busy_scorecard(posts_per_row: int = 28, followers: int = 99_999, views: int = 999_999,
+                    per_post: int = 9_999, failing: tuple = ("error",)) -> List[Dict[str, Any]]:
+    """Every field of every row present and wide — a follower change on each platform, every video measure,
+    a failed read on every row (`failing`: one post per status; None = never read, so no snapshot at all and
+    TikTok's sums become floors, "≥") — at magnitudes far past today's (followers in single digits, views
+    under 200 a post): `followers` per platform, `views` a post, `per_post` follows and visits a post."""
+    out: List[Dict[str, Any]] = []
+    first = datetime(2026, 9, 7, 20, 30, tzinfo=timezone.utc)
+    for platform, fmt in _TEN_ROWS:
+        for i in range(posts_per_row):
+            published = (first + timedelta(days=i % 28, minutes=i)).isoformat()
+            status = failing[i] if i < len(failing) else "ok"
+            # The widest watch time the bound admits (MD-4: twice MARKETING_MAX_VIDEO_SECONDS, 150 s by default).
+            video = {"new_followers": per_post, "profile_views": per_post, "average_time_watched": 149.9,
+                     "full_video_watched_rate": 0.9999, "average_view_duration_seconds": 149.9,
+                     "average_view_percentage": 999.9}
+            account = None
+            if i == 0:
+                account = _acct(followers // 2, "2026-09-08T10:00:00+00:00")
+            elif i == posts_per_row - 1:
+                account = _acct(followers, "2026-10-05T10:00:00+00:00")
+            last = None if status is None else _snap(48.0 + i, views=views - i, impressions=views - 2 * i, likes=i,
+                                                     video=video)
+            out.append(_scored(platform, fmt, published, status=status, account=account, last=last))
+    return out
+
+
+def test_a_busy_week_with_ten_scorecard_rows_fits_one_message_with_every_row_whole():
+    """The plan's worst case: ten (platform, format) rows with every field at a wide value, in a week busy
+    everywhere else too (every post status, rejections and failures, two fallback days, a fallback trail
+    on three days, every /go campaign) — it fits ONE message, every scorecard row whole, nothing cut. When
+    a week is busier still, the other lists shrink first (`_PASSES`)."""
+    trail = [{"series": "ceo_buys", "outcome": "no_candidates"}, {"series": "insider_buys", "outcome": "unavailable"},
+             {"series": "money_map", "outcome": "chosen"}]
+    runs = [_run("published", run_date=d, metadata={"series": "money_map", "series_trail": trail})
+            for d in ("2026-09-28", "2026-09-29", "2026-10-01")] + [_run("published", run_date="2026-10-03")]
+    fallbacks = [_post(p, "published", run_date=d, meta={"image_fallback": code})
+                 for d, code in (("2026-10-01", "image_dropped"), ("2026-10-03", "worker_capability"))
+                 for p in ("facebook", "linkedin", "threads", "bluesky")]
+    # one post per row whose read failed and one never read (so TikTok's sums are floors, "≥") — the widest rows
+    s = _summary(_full_week() + fallbacks, runs=runs, measured=_busy_scorecard(failing=("error", None)),
+                 link_hits=[{"campaign": c, "day": "2026-10-01", "hits": 9_999} for c in
+                            ("x", "bluesky", "tiktok", "youtube", "instagram", "threads", "facebook", "linkedin")],
+                 spend={"x_create": 450_000, "x_metrics_read": 60_000, "x_account_read": 10_000},
+                 escalated=[_post("x", "queued", meta={"escalated_at": "2026-10-03T20:40:00+00:00"})])
+    text = ds.compose_digest(s)
+    assert utf16_len(text) <= ds.MAX_DIGEST_UNITS and ds._CUT_MARKER not in text
+    rows = _score_lines(text)
+    assert len(rows) == 10 and all("… and" not in r for r in rows)
+    assert rows == [ds._score_line(r, s["now"]) for r in s["scorecard"]["rows"]]
+    tiktok = next(r for r in rows if r.startswith("• TIKTOK"))
+    # 27 of the 28 posts were read: their 27 × 9,999 follows are a floor; the median is over those 27
+    assert tiktok == ("• TIKTOK video: 28 posts · followers 99,999 (+50,000 since 09-08) · follows from posts "
+                      "≥ 269,973 · profile visits ≥ 269,973 · views median 999,985, best 999,999 (27 at 24 h+) · "
+                      "avg watch 149.9 s · watched to the end 100% · reads: 1 unread, 1 error")
+    assert "Failed 2:" in text.splitlines() and "Rejected 7: " in text     # the other sections keep their counts
+    text.encode("utf-16-le")
+    _assert_no_model_text(text)
+
+
+@pytest.mark.parametrize("followers, views, per_post", [(99_999, 999_999, 9_999), (9_999_999, 99_999_999, 9_999_999),
+                                                        (10 ** 15 - 1, 10 ** 15 - 1, 10 ** 13)])
+def test_a_scorecard_beyond_any_real_week_is_trimmed_last_and_still_fits(followers, views, per_post):
+    """Every row at absurd widths, every not-ok status on every row, in that busy week: the other lists
+    shrink to their counts first, then the scorecard ("… and N more"); it is still ONE message, never cut
+    mid-line."""
+    s = _summary(_full_week(), measured=_busy_scorecard(followers=followers, views=views, per_post=per_post,
+                                                        failing=("error", "unavailable", "missing", None)))
+    text = ds.compose_digest(s)
+    assert utf16_len(text) <= ds.MAX_DIGEST_UNITS
+    lines = text.splitlines()
+    i = lines.index(SCORE_HEADER)
+    shown = [ln for ln in lines[i + 1:] if ln.startswith("• ")]
+    assert shown and all(ln in [ds._score_line(r, s["now"]) for r in s["scorecard"]["rows"]] for ln in shown)
+    if len(shown) < 10:
+        assert lines[i + 1 + len(shown)] == f"… and {10 - len(shown)} more"
+    text.encode("utf-16-le")
+
+
+def test_an_absurd_scorecard_still_fits_and_never_cuts_a_line():
+    """Sixty rows (a corrupt ledger of junk platforms): the scorecard is trimmed last and the message still
+    fits, ending on a whole line."""
+    measured = [_scored(f"p{i:03d}", "video", "2026-09-29T20:30:00+00:00",
+                        last=_snap(48.0, views=10 ** 14 + i), account=_acct(10 ** 14, "2026-10-05T10:00:00+00:00"))
+                for i in range(60)]
+    s = _summary(_full_week(), measured=measured)
+    text = ds.compose_digest(s)
+    assert utf16_len(text) <= ds.MAX_DIGEST_UNITS
+    assert SCORE_HEADER in text.splitlines()
+    text.encode("utf-16-le")
+
+
+def test_an_unreadable_or_capped_read_says_so_never_an_empty_scorecard():
+    assert "Scorecard: unreadable (see the web logs)" in _digest([], measured=None).splitlines()
+    assert "Followers: unreadable (see the web logs)" in _digest([], measured=None).splitlines()
+    week = _scorecard_week()
+    capped = _digest([], measured=week, measured_capped=True)
+    # the count the read took in — never the page bound, which a read stuck on one instant never reaches
+    assert (f"  (the published-posts read stopped after {len(week):,} posts — the newest may be missing)"
+            in capped.splitlines())
+    assert "read stopped after" not in _digest([], measured=_scorecard_week())
+    # a hand-built report without the count still says it was capped, never a made-up number
+    s = _summary([], measured=_scorecard_week(), measured_capped=True)
+    for junk in (None, -1, True, "12", 3.0):
+        s["scorecard"]["read"] = junk
+        assert ("  (the published-posts read stopped after ? posts — the newest may be missing)"
+                in ds.compose_digest(s).splitlines()), junk
+    # paged (MD-7): 4 pages of 300, never one capped read of 300 that lost the newest week
+    assert (ds.MEASURED_POST_LIMIT, ds.MEASURED_POST_PAGES, ds.MEASURED_POST_MAX) == (300, 4, 1_200)
+    assert ds.FOLLOWER_LOOKBACK == timedelta(days=35)
 
 
 def _snapshot_post(platform: str, at: Any, followers: Any) -> Dict[str, Any]:
@@ -4363,6 +5855,54 @@ def test_a_ledger_time_the_new_york_clock_cannot_show_never_breaks_the_digest():
     assert "Metrics job: last completed 2026-10-05" in text and "last attempt" not in text
 
 
+@pytest.mark.parametrize("edge, local", [
+    ("0001-01-01T06:00:00+00:00", "01-01"),   # in HEAD's 6-day window: `at - FOLLOWER_BASELINE_AGE` raised already
+    ("0001-01-03T00:00:00+00:00", "01-02"),
+    ("0001-01-20T00:00:00+00:00", "01-19"),   # Batch 1's 28-day window: `at - FOLLOWER_CHANGE_TARGET` raised
+    ("0001-01-28T23:59:59-05:00", "01-29"),   # the window's last second, on a New York offset
+])
+def test_a_platforms_only_snapshot_in_the_first_weeks_of_year_one_never_breaks_the_digest(edge, local):
+    """OPS-R2-1 (re-review 2026-10-19): the New York clock CAN show a hand-edited time in the first weeks of
+    year 1, so `_et_local` keeps it — and as a platform's NEWEST (here its only) snapshot it raised
+    OverflowError out of summarize_week through `at - FOLLOWER_CHANGE_TARGET` (the scorecard's 4-week base),
+    on every Monday tick and the Tuesday catch-up: the week's digest never went out. The other test above
+    always pairs the edge value with a newer one, so it never made it `at`. Now the value costs only the
+    change it would anchor: its count shows with no change, and every other platform's figures are intact."""
+    measured = [
+        _scored("threads", "text", "2026-09-29T20:30:00+00:00", last=_snap(48.0, views=7), account=_acct(99, edge)),
+        _scored("bluesky", "image", "2026-10-01T20:30:00+00:00", last=_snap(48.0),
+                account=_acct(40, "2026-10-05T10:00:00+00:00")),
+        _scored("bluesky", "image", "2026-09-08T20:30:00+00:00", account=_acct(30, "2026-09-28T10:00:00+00:00")),
+    ]
+    s = _summary([], measured=measured)
+    f = s["followers"]["threads"]
+    assert (f["followers"], f["baseline"], f["four_week_base"]) == (99, None, None)
+    text = _digest([], measured=measured)
+    assert ("Followers: BLUESKY 40 (+10 since 09-28; as of 10-05) · "
+            f"THREADS 99 (as of {local}; no snapshot 6+ days older yet)") in text.splitlines()
+    assert _score_lines(text) == [
+        "• BLUESKY image: 2 posts · followers 40 (+10 since 09-28) · no view counts",
+        f"• THREADS text: 1 post · followers 99 (change n/a, as of {local}) · views median 7, best 7 (1 at 24 h+)",
+    ]
+
+
+def test_a_year_one_newest_snapshot_keeps_the_change_its_older_snapshots_give():
+    """OPS-R2-1's fix measures distances from the newest snapshot instead of computing `at - span`, so a
+    year-1 newest snapshot with an older one 10 days before it keeps both changes, exactly as any other
+    week's — never a guess, never an OverflowError (Batch 1 raised here; HEAD showed the +9)."""
+    measured = [_scored("threads", "text", "2026-09-29T20:30:00+00:00", last=_snap(48.0, views=7),
+                        account=_acct(99, "0001-01-20T00:00:00+00:00")),
+                _scored("threads", "text", "2026-09-28T20:30:00+00:00", last=_snap(48.0, views=3),
+                        account=_acct(90, "0001-01-10T00:00:00+00:00"))]
+    f = _summary([], measured=measured)["followers"]["threads"]
+    assert (f["followers"], f["baseline"], f["four_week_base"]) == (99, 90, 90)
+    assert f["baseline_at"] == f["four_week_base_at"] == datetime(1, 1, 10, tzinfo=timezone.utc)
+    text = _digest([], measured=measured)
+    assert "Followers: THREADS 99 (+9 since 01-09; as of 01-19)" in text.splitlines()
+    assert _score_lines(text) == ["• THREADS text: 2 posts · followers 99 (+9 since 01-09, as of 01-19) · views "
+                                  "median 5, best 7 (2 at 24 h+)"]
+
+
 def test_runs_of_the_week_with_skip_reasons_and_the_memory_peak():
     runs = [_run("published", run_date="2026-09-28", timings={"voiced_cgroup_peak_mb": 2587.3}),
             _run("skipped", run_date="2026-09-29", metadata={"skip_reason": "writer_unavailable"}),
@@ -4383,6 +5923,23 @@ def test_runs_of_the_week_with_skip_reasons_and_the_memory_peak():
                               _run("skipped", run_date="2026-10-01", metadata={"closed": {"reason": "approved_unsent"}})])
     assert ("• Mon 09-28 failed before any stage completed\n• Tue 09-29 failed after ?\n"
             "• Thu 10-01 skipped — approved_unsent") in early
+
+
+def test_a_runs_row_for_a_run_that_failed_after_its_posts_were_recorded_never_reads_as_a_lost_day():
+    """Review F1 (live regression, 2026-10-16): the review bot offers an `assets_ready` run's posts whatever its
+    status, so a day that ends `failed` there may well have posted — "failed after assets_ready" alone read as a
+    lost day. The row says its posts were recorded, and nothing more (no review state is read here); a
+    checkpoint that recorded NO post, or any earlier stage, keeps the plain row."""
+    runs = [_run("failed", run_date="2026-09-28", stage="assets_ready"),
+            _run("failed", run_date="2026-09-29", stage="assets_ready", metadata={"posts_recorded": 0}),
+            _run("failed", run_date="2026-10-01", stage="rendered"),
+            _run("failed", run_date="2026-10-03", stage="assets_ready", metadata={"posts_recorded": 4})]
+    text = _digest([], runs=runs)
+    assert ("Runs:\n• Mon 09-28 failed after assets_ready — its posts were recorded\n"
+            "• Tue 09-29 failed after assets_ready\n• Thu 10-01 failed after rendered\n"
+            "• Sat 10-03 failed after assets_ready — its posts were recorded\n") in text
+    for claim in STALE_POST_CLAIMS + ("review chat", "lost"):
+        assert claim not in text.split("Runs:\n", 1)[1].split("\n\n", 1)[0], claim
 
 
 def test_a_300_post_week_full_of_emoji_still_fits_one_message():
@@ -5166,7 +6723,8 @@ def _seed_week(svc) -> Dict[str, Any]:
     t = svc.fake.tables
     inside = _post("x", "published", external_id=X_ID, created="2026-10-03T20:30:00+00:00",
                    published_at="2026-10-03T21:00:00+00:00",
-                   metrics={"v": 1, "status": "ok", "last": {"likes": 4, "impressions": 90},
+                   # read Mon 10-05 06:00 ET, 37 h after it went out
+                   metrics={"v": 1, "status": "ok", "last": {"likes": 4, "impressions": 90, "age_h": 37.0},
                             "account": {"followers": 12, "at": "2026-10-05T10:00:00+00:00"}},
                    meta={"charges": [{"at": "2026-10-03T20:59:00+00:00", "op": "x_create", "micros": 15_000},
                                      {"at": "2026-10-05T10:00:00+00:00", "op": "x_metrics_read", "micros": 5_000},
@@ -5229,7 +6787,12 @@ async def test_gather_reads_only_our_ledger_for_the_previous_week(digest_ledger,
     assert (report["week_start"], report["week_end"]) == (WEEK_START, WEEK_END)
     # the week's posts only: the escalated row was created inside it too; last week's and today's are out
     assert report["live"] == 2 and report["status_totals"] == {"published": 1, "queued": 1}
-    assert report["engagement"]["x"]["totals"] == {"likes": 4, "impressions": 90}
+    assert report["top_post"] == {"score": 4, "url": f"https://x.com/i/web/status/{X_ID}", "counts": {"likes": 4}}
+    # the scorecard comes from the SAME 35-day read as the followers: both published posts are in its 4 weeks
+    rows = {(r["platform"], r["format"]): r for r in report["scorecard"]["rows"]}
+    assert set(rows) == {("x", "text"), ("bluesky", "text")}
+    assert (rows[("x", "text")]["reach_median"], rows[("bluesky", "text")]["reads"]) == (90, {"unread": 1})
+    assert report["scorecard"]["capped"] is False and report["image_fallback"] == []
     assert report["followers"]["x"]["followers"] == 12 and report["followers"]["bluesky"]["followers"] == 7
     # the early row is summed apart (and last week's early row is not this digest's)
     assert report["taps"]["rows"] == [("bluesky", 2)]
@@ -5397,20 +6960,46 @@ _SEED_WEEK_TEXT_AT_EBA8DDCC = "\n".join([
     "Metrics job: last completed 2026-10-05 · last attempt 10-05 06:00 ET · 2 posts written",
 ])
 
+#: eba8ddcc's this-week engagement block, and the 4-week scorecard that replaced it (Batch 1 item 8b,
+#: 2026-10-15) — the ONLY lines of the lessons-only digest that moved.
+_EBA8DDCC_ENGAGEMENT = [
+    "Engagement (latest snapshot of this week's published posts):",
+    "• X — 1 of 1 measured: 90 impressions · 4 likes",
+    f"  Top: https://x.com/i/web/status/{X_ID} (4 likes)",
+]
+_SEED_WEEK_SCORECARD = [
+    SCORE_HEADER,
+    "• X text: 1 post · followers 12 (change n/a) · impressions median 90, best 90 (1 at 24 h+)",
+    "• BLUESKY text: 1 post · followers 7 (change n/a, as of 09-28) · no view counts · reads: 1 unread",
+    f"Top post this week: https://x.com/i/web/status/{X_ID} (4 likes)",
+]
+
+
+def _swap_block(text: str, old: List[str], new: List[str]) -> str:
+    lines = text.split("\n")
+    i = lines.index(old[0])
+    assert lines[i:i + len(old)] == old
+    return "\n".join(lines[:i] + new + lines[i + len(old):])
+
+
+#: `compose_digest` of `_seed_week` at NOW today: eba8ddcc's text with only the engagement block swapped.
+_SEED_WEEK_TEXT = _swap_block(_SEED_WEEK_TEXT_AT_EBA8DDCC, _EBA8DDCC_ENGAGEMENT, _SEED_WEEK_SCORECARD)
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("classes", ["A", "", " a ,"])
-async def test_lessons_only_the_digest_text_is_byte_identical_to_eba8ddcc(digest_ledger, monkeypatch, caplog,
-                                                                         classes):
+async def test_lessons_only_the_digest_text_is_pinned_byte_for_byte(digest_ledger, monkeypatch, caplog, classes):
     """MARKETING_CONTENT_CLASSES unset in production (its default "A"; any spelling that parses to A): the whole
-    message is what the deployed digest sent. The per-series switch is not even read (junk in it logs nothing),
-    exactly as `script_service._select` leaves it alone while the classes are A."""
+    message is pinned, and every line but the scorecard block is what the deployed digest (eba8ddcc) sent. The
+    per-series switch is not even read (junk in it logs nothing), exactly as `script_service._select` leaves it
+    alone while the classes are A."""
     monkeypatch.setattr(settings, "MARKETING_CONTENT_CLASSES", classes)
     monkeypatch.setattr(settings, "MARKETING_NEWS_SERIES", "junk,not_a_series")
     _seed_week(digest_ledger)
     with caplog.at_level(logging.DEBUG):
         text = ds.compose_digest(await ds.gather_digest(digest_ledger, NOW))
-    assert text == _SEED_WEEK_TEXT_AT_EBA8DDCC
+    assert text == _SEED_WEEK_TEXT
+    assert _swap_block(text, _SEED_WEEK_SCORECARD, _EBA8DDCC_ENGAGEMENT) == _SEED_WEEK_TEXT_AT_EBA8DDCC
     assert not [r for r in caplog.records if "MARKETING_NEWS_SERIES" in r.getMessage()]
 
 
@@ -5480,6 +7069,45 @@ async def test_a_secondary_read_failure_says_unreadable_never_zero(digest_ledger
     assert report["live"] == 2   # the rest of the digest is intact
     assert "unreadable" in ds.compose_digest(report)
     assert any(f"{method} 503" in r.getMessage() and r.levelname == "WARNING" for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_the_digest_reads_past_one_page_so_the_newest_week_is_never_the_one_missing(digest_ledger):
+    """MD-7 (2026-10-16): the 35-day read answered OLDEST first under one LIMIT of 300 — once the window held
+    more (Batch 3: ~11 posts a day, every day), the scorecard lost its NEWEST posts and the follower line its
+    newest snapshot. Read in pages, both are there, and nothing is called capped."""
+    rows = digest_ledger.fake.tables[mrs.POSTS].rows
+    start = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+    for i in range(330):
+        rows.append(_scored("x", "text", (start + timedelta(minutes=90 * i)).isoformat(),
+                            last=_snap(48.0, impressions=1)))
+    rows.append(_scored("bluesky", "image", "2026-10-03T20:30:00+00:00", last=_snap(34.0, likes=1),
+                        account=_acct(77, "2026-10-05T10:00:00+00:00")))         # the NEWEST published post
+    report = await ds.gather_digest(digest_ledger, NOW)
+    assert report["followers"]["bluesky"]["followers"] == 77
+    assert [r["platform"] for r in report["scorecard"]["rows"]].count("bluesky") == 1
+    assert report["scorecard"]["capped"] is False and report["scorecard"]["read"] == 331
+    assert "read stopped after" not in ds.compose_digest(report)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stuck", [False, True], ids=["past_its_pages", "a_full_page_at_one_instant"])
+async def test_a_capped_digest_read_names_the_count_it_really_read(digest_ledger, monkeypatch, stuck):
+    """The capped line names how many posts the read took in, never the page bound: past its pages that is
+    5 + 4 (the page boundary's row is read twice and kept once), and a read stuck on a full page of posts at
+    ONE instant stops at its first page — "the first 1,200" would be false both ways."""
+    monkeypatch.setattr(ds, "MEASURED_POST_LIMIT", 5)
+    monkeypatch.setattr(ds, "MEASURED_POST_PAGES", 2)
+    rows = digest_ledger.fake.tables[mrs.POSTS].rows
+    start = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
+    for i in range(12):
+        at = start if stuck else start + timedelta(hours=i)
+        rows.append(_scored("x", "text", at.isoformat(), last=_snap(48.0, impressions=1)))
+    report = await ds.gather_digest(digest_ledger, NOW)
+    read = 5 if stuck else 9
+    assert report["scorecard"]["capped"] is True and report["scorecard"]["read"] == read
+    assert (f"  (the published-posts read stopped after {read} posts — the newest may be missing)"
+            in ds.compose_digest(report).splitlines())
 
 
 @pytest.mark.asyncio
@@ -5749,6 +7377,8 @@ def digest_jobs(monkeypatch):
     monkeypatch.setattr(notification_jobs, "finish_scheduled", fake.finish_scheduled)
     monkeypatch.setattr(notification_jobs, "scheduled_job_state", fake.scheduled_job_state)
     monkeypatch.setattr(ms, "_DAY_JOBS", {})
+    # B3PD-2: the in-process memo of the owed-final-word look (`_final_owed`) is per test too.
+    monkeypatch.setattr(ds, "_FINAL_OWED", {})
     return fake
 
 
@@ -5915,7 +7545,8 @@ async def test_the_digest_over_the_november_change(bot, digest_jobs, digest_ledg
     assert (await _digest_at(digest_jobs, datetime(2026, 11, 2, 14, 0, tzinfo=timezone.utc)))["sent"] == 1
     text = _sends(bot)[-1]["text"]
     assert text.splitlines()[1] == "Mon 2026-10-26 → Sun 2026-11-01 (ET)"
-    assert "Posts: 1 live — published 1" in text and "rejected" not in text.split("Engagement")[0]
+    assert "Scorecard" in text
+    assert "Posts: 1 live — published 1" in text and "rejected" not in text.split("Scorecard")[0]
     assert digest_jobs.rows[ds.JOB_DIGEST]["run_day"] == date(2026, 11, 2)
 
 
@@ -6103,7 +7734,8 @@ async def test_a_run_fine_at_22_gets_no_final_word_and_the_day_is_settled(bot, d
 @pytest.mark.asyncio
 async def test_a_recovery_after_the_22_alert_is_reported_the_next_day(bot, digest_jobs, digest_ledger):
     """The whole story: 22:00 says the 4th attempt was abandoned and the worker retries; the 23:15 tick
-    finishes the run; Sunday 16:00 says it recovered and its posts wait for review."""
+    finishes the run; Sunday 16:00 says it recovered and its posts went to the review chat — never that they
+    still wait: the owner may have decided them overnight (MD-1)."""
     run = _seed_health_run(digest_ledger, _run("in_progress", run_date="2026-10-03", stage="voiced", attempts=4,
                                         updated_at=_iso_of(_et(2026, 10, 3, 21, 0))))
     await _health_at(digest_jobs, _et(2026, 10, 3, 22, 0))
@@ -6111,8 +7743,7 @@ async def test_a_recovery_after_the_22_alert_is_reported_the_next_day(bot, diges
     run.update(status="media_ready", stage="assets_ready", attempts=5, finished_at=_iso_of(_et(2026, 10, 3, 23, 41)),
                updated_at=_iso_of(_et(2026, 10, 3, 23, 41)))
     await _health_at(digest_jobs, _et(2026, 10, 4, 16, 0))
-    assert _sends(bot)[1]["text"] == ("✅ Marketing run Sat 2026-10-03 recovered at 10-03 23:41 ET — its posts are "
-                                      "waiting for review.")
+    assert _sends(bot)[1]["text"] == f"✅ Marketing run Sat 2026-10-03 recovered at 10-03 23:41 ET — {RECOVERED_POSTS}."
     assert [c[0] for c in digest_jobs.claims] == [ds.JOB_HEALTH, ds.JOB_HEALTH_FINAL]
 
 
@@ -6346,8 +7977,7 @@ async def test_a_check_overwritten_by_a_later_failed_attempt_judges_from_the_ear
     state = digest_jobs.rows[ds.JOB_HEALTH]
     assert state["run_day"] == date(2026, 10, 5) and state["last_run_at"] == _et(2026, 10, 6, 22, 0)
     assert (await _health_at(digest_jobs, _et(2026, 10, 6, 22, 10)))["sent"] == 2
-    assert _sends(bot)[3]["text"] == ("✅ Marketing run Mon 2026-10-05 recovered at 10-05 22:41 ET — its posts are "
-                                      "waiting for review.")
+    assert _sends(bot)[3]["text"] == f"✅ Marketing run Mon 2026-10-05 recovered at 10-05 22:41 ET — {RECOVERED_POSTS}."
     assert _sends(bot)[4]["text"].startswith("⚠️ Marketing: no run for Tue 2026-10-06")
     assert any("no longer says when" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
 
@@ -6660,6 +8290,67 @@ def test_a_week_without_live_posts_has_no_formats_line():
     assert "Formats:" not in text and "Posts: none this week" in text
 
 
+# ── Batch 1 item 11 (2026-10-15): the days whose picture was not used ─────────
+
+
+def test_the_digest_names_the_days_whose_picture_was_not_used_in_the_owners_words():
+    posts = [
+        _post("facebook", "published", run_date="2026-10-01", meta={"image_fallback": "image_dropped"}),
+        _post("linkedin", "rejected", run_date="2026-10-01", meta={"image_fallback": "image_dropped"}),
+        _post("threads", "published", run_date="2026-10-01", meta={"image_fallback": "threads_caption_long"}),
+        _post("bluesky", "published", run_date="2026-09-28", meta={"image_fallback": "worker_capability"}),
+        # a code this digest does not know, and one that is not a string: fixed words, never the value
+        _post("facebook", "published", run_date="2026-10-03", meta={"image_fallback": "<b>new_code</b>\nforged"}),
+        _post("linkedin", "published", run_date="2026-10-03", meta={"image_fallback": {"code": "image_dropped"}}),
+        # no fallback at all
+        _post("threads", "published", run_date="2026-10-03", meta={"image_fallback": ""}),
+        _post("bluesky", "published", run_date="2026-10-03", meta={"image_fallback": None}),
+        _post("x", "published", run_date="2026-10-03", meta={"image_fallback": False}),
+        _post("x", "published", run_date="2026-10-03"),
+        # a rehearsal row never counts
+        _post("facebook", "published", run_date="2026-10-02", live=False, meta={"image_fallback": "freeze_failed"}),
+    ]
+    s = _summary(posts)
+    unknown = "a reason this digest does not know"
+    assert s["image_fallback"] == [
+        (date(2026, 9, 28), [("the worker that ran the day cannot draw this picture", 1)]),
+        (date(2026, 10, 1), [("the picture text did not pass the checks", 2),
+                             ("the Threads caption is too long for a picture post", 1)]),
+        (date(2026, 10, 3), [(unknown, 2)]),
+    ]
+    text = ds.compose_digest(s)
+    lines = text.splitlines()
+    # "text posts instead", never "posted as text": the LinkedIn member of 10-01 was rejected, not posted
+    i = lines.index("🖼 Picture not used on 3 days (text posts instead):")
+    assert lines[i + 1:i + 4] == [
+        "  Mon 09-28: the worker that ran the day cannot draw this picture (1 post)",
+        "  Thu 10-01: the picture text did not pass the checks (2 posts); the Threads caption is too long for a "
+        "picture post (1 post)",
+        f"  Sat 10-03: {unknown} (2 posts)",
+    ]
+    # it closes the posts section, above the scorecard
+    assert i < lines.index("Scorecard, 4 weeks (09-07 → 10-04): no published posts")
+    for raw in ("<b>", "new_code", "forged", "image_fallback", "the picture could not be prepared", "Fri 10-02"):
+        assert raw not in text
+    _assert_no_model_text(text)
+
+
+@pytest.mark.parametrize("code", list(IMAGE_FALLBACK_REASONS))
+def test_every_picture_fallback_code_reads_in_its_own_words(code):
+    text = _digest([_post("facebook", "published", run_date="2026-10-01", meta={"image_fallback": code})])
+    assert f"  Thu 10-01: {IMAGE_FALLBACK_REASONS[code]} (1 post)" in text.splitlines()
+    assert code not in text
+
+
+def test_a_picture_fallback_without_a_readable_run_day_is_still_named_and_none_says_nothing():
+    post = _post("threads", "published", meta={"image_fallback": "image_spec_invalid"}, idempotency_key="garbage")
+    lines = _digest([post]).splitlines()
+    assert lines[lines.index("🖼 Picture not used on 1 day (text posts instead):") + 1] == (
+        "  an unreadable day: the picture layout did not validate (1 post)")
+    assert "Picture not used" not in _digest(_full_week())
+    assert ds.POST_METADATA_IMAGE_FALLBACK == "image_fallback"
+
+
 # ══ Drop 2 (contract D13): the template refusal's hint, the series note ═════════════════════════════
 
 
@@ -6732,10 +8423,11 @@ def _with_series(series: Any, trail: Any) -> Dict[str, Any]:
 
 @pytest.mark.parametrize("series, trail, note", [
     ("money_map", [{"series": "money_map", "outcome": "chosen"}], "Money Map"),
+    # OBS-1 (2026-10-15): the later series' outage is named too — it used to hide behind the first step
     ("money_map", [{"series": "ceo_buys", "outcome": "no_candidates", "reason": "ceo_none_qualified"},
                    {"series": "insider_buys", "outcome": "unavailable", "reason": "insider_feed_unavailable"},
                    {"series": "money_map", "outcome": "chosen"}],
-     "Money Map (fell back from CEO Buys: nothing qualified)"),
+     "Money Map (fell back from CEO Buys: nothing qualified; Insider Buys: its data source was unavailable)"),
     ("lesson", [{"series": "thirteen_f", "outcome": "timeout"}, {"series": "lesson", "outcome": "chosen"}],
      "Lesson (fell back from 13F Season: its data source timed out)"),
     ("ceo_buys", [], "CEO Buys"),
@@ -6764,6 +8456,51 @@ def test_the_series_note_of_a_run_without_metadata_is_empty(run):
     assert ds._series_note(run) == ""
 
 
+_TUESDAY_13F = ("congress_count", "thirteen_f", "company_stakes", "money_map")
+
+
+@pytest.mark.parametrize("outcomes, note", [
+    # four steps, one outage at the END of the chain: it is named, the last content step is counted
+    (("no_candidates", "all_recent", "no_candidates", "timeout"),
+     "Lesson (fell back from Congress Count: nothing qualified; 13F Season: everything was already posted; "
+     "Money Map: its data source timed out; and 1 more)"),
+    # every infrastructure outcome outranks every content one
+    (("no_candidates", "budget", "all_refused", "error"),
+     "Lesson (fell back from Congress Count: nothing qualified; 13F Season: out of time; Money Map: an error; "
+     "and 1 more)"),
+    # four outages: the first three in trail order
+    (("unavailable", "timeout", "error", "budget"),
+     "Lesson (fell back from Congress Count: its data source was unavailable; 13F Season: its data source timed "
+     "out; Big Company Bets: an error; and 1 more)"),
+    # content only: the first three
+    (("no_candidates", "all_recent", "all_refused", "no_candidates"),
+     "Lesson (fell back from Congress Count: nothing qualified; 13F Season: everything was already posted; "
+     "Big Company Bets: every candidate failed the template checks; and 1 more)"),
+])
+def test_the_series_note_names_an_infrastructure_failure_ahead_of_content(outcomes, note):
+    trail = [{"series": s, "outcome": o} for s, o in zip(_TUESDAY_13F, outcomes)]
+    assert ds._series_note(_with_series("lesson", trail + [{"series": "lesson", "outcome": "chosen"}])) == note
+
+
+def test_the_series_note_survives_hand_edited_trails():
+    def note(trail: Any) -> str:
+        return ds._series_note(_with_series("money_map", trail))
+
+    # a series twice is named once (its first entry); exactly three steps need no "more"
+    assert note([{"series": "ceo_buys", "outcome": "no_candidates"}, {"series": "ceo_buys", "outcome": "error"}]) == \
+        "Money Map (fell back from CEO Buys: nothing qualified)"
+    three = [{"series": s, "outcome": "timeout"} for s in ("ceo_buys", "insider_buys", "thirteen_f")]
+    assert note(three).count(": its data source timed out") == 3 and "more" not in note(three)
+    # an unhashable or odd outcome never raises and never shows: fixed words
+    for odd in (["error"], {"error": 1}, None, 7, True, "<b>x</b>"):
+        assert note([{"series": "ceo_buys", "outcome": odd}]) == "Money Map (fell back from CEO Buys: it did not post)"
+    # every outcome selection can write has owner words, and the infrastructure set is inside it
+    from app.services.marketing.script_service import SERIES_OUTCOMES
+
+    assert set(SERIES_OUTCOMES) - {"chosen"} == set(ds._SERIES_OUTCOME_WORDS)
+    assert ds._INFRA_OUTCOMES <= set(SERIES_OUTCOMES)
+
+
 def test_the_digest_day_line_carries_the_series_note():
     mon, tue = date(2026, 11, 16), date(2026, 11, 17)
     runs = [
@@ -6780,3 +8517,383 @@ def test_the_digest_day_line_carries_the_series_note():
     # a run from before drop 2 (no series) keeps exactly its old line
     rows, _peak = ds._run_rows([_run("published", run_date=mon.isoformat())], mon, mon)
     assert rows == [(mon, "published")]
+
+
+# ── Batch 3 (2026-10-20, WP-C): the posting days are a switch ────────────────
+#
+# MARKETING_POST_WEEKDAYS (default mon,tue,thu,sat; pinned above by `_declared_post_weekdays`) is read at CALL time by
+# `selection.is_posting_day` / `plan_for` / `news_recent_limit`, so the run-health timing, the digest's Runs rows and
+# the pool's runway follow it with no code of their own — and stay today's at the default.
+
+_SEVEN_DAYS = "mon,tue,wed,thu,fri,sat,sun"
+WED, FRI_10_09, SUN = date(2026, 10, 7), date(2026, 10, 9), date(2026, 10, 11)
+
+
+def _cadence(monkeypatch, raw: str) -> None:
+    monkeypatch.setattr(settings, "MARKETING_POST_WEEKDAYS", raw)
+
+
+@pytest.mark.parametrize("day", [WED, FRI_10_09, SUN], ids=["wed", "fri", "sun"])
+def test_batch3_run_health_on_new_posting_days(monkeypatch, day):
+    """At seven days a Wednesday, Friday or Sunday is a posting day for run health too: its nightly check is due from
+    22:00 ET that day and its final word from 16:00 ET the next — at the default cadence neither is (rest days), and
+    switching back restores that."""
+    nxt = day + timedelta(days=1)
+    for cadence, due in (("mon,tue,thu,sat", False), (_SEVEN_DAYS, True), ("mon,tue,thu,sat", False)):
+        _cadence(monkeypatch, cadence)
+        assert ds.health_due(_et(day.year, day.month, day.day, 21, 59)) is False
+        assert ds.health_due(_et(day.year, day.month, day.day, 22, 0)) is due
+        assert ds.health_due(_et(day.year, day.month, day.day, 23, 59)) is due
+        assert ds.final_due(_et(nxt.year, nxt.month, nxt.day, 15, 59)) is False
+        assert ds.final_due(_et(nxt.year, nxt.month, nxt.day, 16, 0)) is due
+        assert ds.health_opens_at(day) == datetime(day.year, day.month, day.day, 22, tzinfo=ET)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cadence, jobs", [("mon,tue,thu,sat", [ds.JOB_HEALTH_FINAL]),
+                                           (_SEVEN_DAYS, [ds.JOB_HEALTH_FINAL, ds.JOB_HEALTH])],
+                         ids=["default", "seven_days"])
+async def test_batch3_the_nightly_check_follows_the_posting_days(bot, digest_jobs, digest_ledger, monkeypatch,
+                                                                cadence, jobs):
+    """Through the real `health_cycle` at Wed 22:30 ET with no run: the default claims only Tuesday's final word (a
+    rest day never gets a nightly check); at seven days Wednesday's own check is claimed too and says "no run"."""
+    _cadence(monkeypatch, cadence)
+    await _health_at(digest_jobs, _et(2026, 10, 7, 22, 30))
+    assert digest_jobs.claims == [(job, WED) for job in jobs]
+    nightly = [m["text"] for m in _sends(bot) if m["text"].startswith("⚠️ Marketing: no run for Wed 2026-10-07, a posting day")]
+    assert len(nightly) == (ds.JOB_HEALTH in jobs)
+
+
+def test_batch3_a_rest_day_skip_reads_as_rest_after_a_flip(monkeypatch):
+    """D18: a run skipped `rest_day` is a rest day in the Runs rows whatever TODAY's calendar says. The owner moved to
+    seven days on Thursday morning: Monday-Wednesday ran on the old calendar (Wednesday skipped as a rest day), Thursday
+    on the new one; the digest reads the week on today's seven days — no "skipped — rest_day" row, while a posting day
+    with no run at all still says so and any other skip is still named. Under an unchanged calendar the rows are
+    exactly today's."""
+    week = [date(2026, 10, 5) + timedelta(days=i) for i in range(7)]
+    rest = {"skip_reason": "rest_day"}
+    runs = [_run("published", run_date=week[0].isoformat()), _run("published", run_date=week[1].isoformat()),
+            _run("skipped", run_date=week[2].isoformat(), metadata=rest),
+            _run("published", run_date=week[3].isoformat()),
+            _run("skipped", run_date=week[5].isoformat(), metadata={"skip_reason": "template_refused"})]
+    _cadence(monkeypatch, _SEVEN_DAYS)
+    rows, _peak = ds._run_rows(runs, week[0], week[-1])
+    assert rows == [(week[0], "published"), (week[1], "published"), (week[3], "published"),
+                    (week[4], "no run (a posting day)"), (week[5], "skipped — template_refused"),
+                    (week[6], "no run (a posting day)")]
+    assert not any("rest_day" in text for _d, text in rows)
+    # the way back (7 → 4 on Thursday): Wednesday ran on seven days, Friday and Sunday rested on four
+    runs = [_run("published", run_date=week[2].isoformat()), _run("published", run_date=week[3].isoformat()),
+            _run("skipped", run_date=week[4].isoformat(), metadata=rest),
+            _run("skipped", run_date=week[6].isoformat(), metadata=rest)]
+    _cadence(monkeypatch, "mon,tue,thu,sat")
+    rows, _peak = ds._run_rows(runs, week[0], week[-1])
+    assert rows == [(week[0], "no run (a posting day)"), (week[1], "no run (a posting day)"),
+                    (week[2], "published"), (week[3], "published"), (week[5], "no run (a posting day)")]
+    # an unchanged default calendar: the rows as before Batch 3 (rest-day skips fall only on rest days)
+    runs = [_run("published", run_date=d.isoformat()) if d.weekday() in selection.POST_WEEKDAYS
+            else _run("skipped", run_date=d.isoformat(), metadata=rest) for d in week]
+    rows, _peak = ds._run_rows(runs, week[0], week[-1])
+    assert rows == [(d, "published") for d in week if d.weekday() in selection.POST_WEEKDAYS]
+
+
+# ── B3PD-2 (2026-10-20): a PAST day is judged a posting day by its own record, not only by today's calendar ──
+
+_REST = {"skip_reason": "rest_day"}
+WED_11_04, THU_11_05 = date(2026, 11, 4), date(2026, 11, 5)
+
+
+@pytest.mark.parametrize("run, shown", [
+    (None, False),
+    ("not a row", False),
+    ({}, False),
+    (_run("skipped", stage="planned", metadata=_REST), False),                  # a rest day's run, as it closes
+    (_run("skipped", stage="planned", metadata=_REST, source_ref="x"), False),  # rest_day decides, whatever else
+    (_run("failed", stage="planned"), False),                 # stopped before its first kick decided anything
+    (_run("in_progress", stage="planned"), False),
+    (_run("skipped", stage="planned"), False),                # skipped with no reason recorded
+    (_run("skipped", stage="planned", metadata={"skip_reason": "Rest_Day"}), False),   # not a code: no reason
+    (_run("failed", stage="planned", source_ref="   "), False),
+    (_run("failed", stage="PLANNED"), False),
+    (_run("failed", stage="selected"), True),                 # a rest day never completes a stage
+    (_run("failed", stage="scripted"), True),
+    (_run("in_progress", stage="voiced"), True),
+    (_run("failed", stage="assets_ready"), True),
+    (_run("media_ready", stage="?"), True),
+    (_run("published", stage=None), True),
+    (_run("skipped", stage="planned", metadata={"skip_reason": "content_rejected"}), True),   # the kick selected
+    (_run("skipped", stage="planned", metadata={"skip_reason": "template_refused"}), True),
+    (_run("in_progress", stage="planned", source_ref="journey:7"), True),   # the selection mirror
+])
+def test_b3pd2_ran_as_posting_day_reads_only_what_the_row_shows(run, shown):
+    assert ds.ran_as_posting_day(run) is shown
+
+
+def test_b3pd2_judged_posting_day_takes_todays_calendar_then_the_days_own_record(monkeypatch):
+    """Today's calendar first (an unchanged one decides every day as before); a day it no longer lists is a posting
+    day only when its nightly check succeeded for it (that check runs on posting days alone) or its run row shows a
+    posting day's work — never on a guess (no check, a rest-day skip, or nothing at all)."""
+    rest_run = _run("skipped", run_date=WED_11_04.isoformat(), stage="planned", metadata=_REST)
+    worked = _run("failed", run_date=WED_11_04.isoformat(), stage="scripted")
+    _cadence(monkeypatch, _SEVEN_DAYS)
+    for nightly in (ds.NIGHTLY_CHECKED, ds.NIGHTLY_TIME_UNKNOWN, ds.NIGHTLY_NEVER, ds.NIGHTLY_LATER_DAY):
+        for run in (None, rest_run, worked):
+            assert ds.judged_posting_day(WED_11_04, nightly=nightly, run=run) is True
+    _cadence(monkeypatch, "mon,tue,thu,sat")
+    for nightly in (ds.NIGHTLY_CHECKED, ds.NIGHTLY_TIME_UNKNOWN):
+        assert ds.judged_posting_day(WED_11_04, nightly=nightly, run=None) is True
+    for nightly in (ds.NIGHTLY_NEVER, ds.NIGHTLY_LATER_DAY):
+        assert ds.judged_posting_day(WED_11_04, nightly=nightly, run=worked) is True
+        assert ds.judged_posting_day(WED_11_04, nightly=nightly, run=rest_run) is False
+        assert ds.judged_posting_day(WED_11_04, nightly=nightly, run=None) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage, where", [
+    ("scripted", "after stage scripted (the last completed stage)"),
+    # stopped before any stage completed: the run row cannot show what the day was — the nightly check's record does
+    ("planned", "before any stage completed"),
+])
+async def test_b3pd2_a_morning_switch_from_seven_days_to_four_keeps_the_promised_final_word(bot, digest_jobs,
+                                                                                         digest_ledger, monkeypatch,
+                                                                                         stage, where):
+    """The finding: at seven days Wednesday 2026-11-04's run fails on attempt 2 of 6, and its 22:00 check promises a
+    final word tomorrow after 16:00 ET. Thursday morning the owner switches to Mon/Tue/Thu/Sat — MARKETING_POST_WEEKDAYS'
+    own advice is to change it in the morning ET. Wednesday is a rest day on TODAY's calendar, so `final_due` alone
+    says no; but the nightly check's own record (its job state: run_day = Wednesday) says Wednesday was a posting day,
+    so the promised word still goes out at 16:00 — once, under the final word's own claim."""
+    _cadence(monkeypatch, _SEVEN_DAYS)
+    # Tuesday posted fine (at seven days Wednesday 22:00 also owes Tuesday's final word — nothing to add to it)
+    _seed_health_run(digest_ledger, _run("media_ready", run_date="2026-11-03",
+                                         finished_at=_iso_of(_et(2026, 11, 3, 17, 5)),
+                                         updated_at=_iso_of(_et(2026, 11, 3, 17, 5))))
+    _seed_health_run(digest_ledger, _run("failed", run_date=WED_11_04.isoformat(), stage=stage, attempts=2,
+                                         last_error="writer 503", updated_at=_iso_of(_et(2026, 11, 4, 21, 40))))
+    assert (await _health_at(digest_jobs, _et(2026, 11, 4, 22, 0)))["sent"] == 1
+    assert "a final word comes tomorrow after 16:00 ET" in _sends(bot)[0]["text"]
+    _cadence(monkeypatch, "mon,tue,thu,sat")                   # Thursday 09:00 ET
+    at = _et(2026, 11, 5, 16, 0)
+    assert ds.final_due(at) is False                           # the calendar alone would cancel the promise
+    assert await _health_at(digest_jobs, at) == {"checked": 1, "sent": 1, "failed": 0, "rate_limited": 0}
+    assert _sends(bot)[1]["text"] == (
+        f"⚠️ Marketing run Wed 2026-11-04 is still FAILED {where}, attempt 2 of 6: no retry happened — check the "
+        "marketing-worker cron (hourly at :15) and its last logs. This day's posts will not go out. Last error: "
+        "writer 503.")
+    assert digest_jobs.claims == [(ds.JOB_HEALTH_FINAL, WED_11_04), (ds.JOB_HEALTH, WED_11_04),
+                                  (ds.JOB_HEALTH_FINAL, THU_11_05)]
+    for later in (_et(2026, 11, 5, 16, 10), _et(2026, 11, 5, 21, 59)):    # once a day, like any final word
+        assert await _health_at(digest_jobs, later) == {"checked": 0, "sent": 0, "failed": 0, "rate_limited": 0}
+    assert len(_sends(bot)) == 2 and len(digest_jobs.claims) == 3
+
+
+@pytest.mark.asyncio
+async def test_b3pd2_with_no_nightly_check_the_run_row_is_the_days_record(bot, digest_jobs, digest_ledger,
+                                                                          monkeypatch):
+    """The same switch, but Wednesday's nightly check never went out (nothing in its job state). Wednesday's run row
+    is its own record: it completed stage `scripted`, which a rest day's run never does (it closes `rest_day` at its
+    first kick) — so Thursday's final word reports the day, like any final word with no check before it."""
+    _cadence(monkeypatch, "mon,tue,thu,sat")
+    _seed_health_run(digest_ledger, _run("failed", run_date=WED_11_04.isoformat(), stage="scripted", attempts=6,
+                                         last_error="ffmpeg exited 137", updated_at=_iso_of(_et(2026, 11, 4, 21, 40))))
+    assert await _health_at(digest_jobs, _et(2026, 11, 5, 16, 0)) == {"checked": 1, "sent": 1, "failed": 0,
+                                                                      "rate_limited": 0}
+    assert _sends(bot)[0]["text"] == (
+        "⚠️ Marketing run Wed 2026-11-04 ended FAILED after stage scripted (the last completed stage): all 6 attempts "
+        "used. This day's posts will not go out. Last error: ffmpeg exited 137.")
+    assert digest_jobs.claims == [(ds.JOB_HEALTH_FINAL, THU_11_05)]
+
+
+@pytest.mark.asyncio
+async def test_b3pd2_an_unchanged_calendar_looks_once_claims_nothing_and_sends_nothing(bot, digest_jobs, digest_ledger,
+                                                                                       monkeypatch):
+    """At the default calendar the day after a rest day (Thursday 2026-10-08, after Wednesday's `rest_day` skip) is
+    exactly as before — no claim, no message, `checked` 0 — and the look at its records costs ONE job-state read and
+    ONE run read per process per day: none before 16:00 ET, none on a later tick that day."""
+    _seed_health_run(digest_ledger, _run("skipped", run_date="2026-10-07", stage="planned", metadata=_REST))
+    state_reads: List[str] = []
+    run_reads: List[Any] = []
+    real_state, real_run = ds._job_state, digest_ledger.get_run_for_date
+
+    async def state_spy(svc: Any, job: str) -> Dict[str, Any]:
+        state_reads.append(job)
+        return await real_state(svc, job)
+
+    async def run_spy(run_date: Any) -> Any:
+        run_reads.append(run_date)
+        return await real_run(run_date)
+
+    monkeypatch.setattr(ds, "_job_state", state_spy)
+    monkeypatch.setattr(digest_ledger, "get_run_for_date", run_spy)
+    assert (await _health_at(digest_jobs, _et(2026, 10, 8, 15, 59)))["checked"] == 0
+    assert state_reads == [] and run_reads == []
+    for at in (_et(2026, 10, 8, 16, 0), _et(2026, 10, 8, 16, 10), _et(2026, 10, 8, 21, 59)):
+        assert await _health_at(digest_jobs, at) == {"checked": 0, "sent": 0, "failed": 0, "rate_limited": 0}
+    assert state_reads == [ds.JOB_HEALTH] and run_reads == [date(2026, 10, 7)]
+    assert digest_jobs.claims == [] and digest_jobs.state_reads == 0 and _sends(bot) == []
+
+
+@pytest.mark.asyncio
+async def test_b3pd2_the_look_reads_nothing_while_the_bot_is_off_or_telegram_holds_us_off(bot, digest_jobs,
+                                                                                         digest_ledger, monkeypatch):
+    """`_ready` would take no claim then — so the look reads nothing either (the next tick asks again)."""
+    def no_read(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("the records were read")
+
+    monkeypatch.setattr(ds, "_job_state", no_read)
+    monkeypatch.setattr(digest_ledger, "get_run_for_date", no_read)
+    monkeypatch.setattr(rs, "_rate_limited_until", time.monotonic() + 600)
+    assert (await _health_at(digest_jobs, _et(2026, 10, 8, 16, 0)))["checked"] == 0
+    monkeypatch.setattr(rs, "_rate_limited_until", 0.0)
+    monkeypatch.setattr(settings, "MARKETING_TELEGRAM_BOT_TOKEN", None)
+    assert (await _health_at(digest_jobs, _et(2026, 10, 8, 16, 5)))["checked"] == 0
+    assert ds._FINAL_OWED == {} and digest_jobs.claims == [] and _sends(bot) == []
+
+
+@pytest.mark.asyncio
+async def test_b3pd2_a_failed_look_is_logged_and_retried_never_a_guess(bot, digest_jobs, digest_ledger, monkeypatch,
+                                                                       caplog):
+    """A ledger error while looking: no word on a guess (WARNING naming the day), no claim, and the next try waits
+    FINAL_OWED_RETRY_SECONDS — then the look runs again and the promised word goes out."""
+    _cadence(monkeypatch, "mon,tue,thu,sat")
+    _seed_health_run(digest_ledger, _run("failed", run_date=WED_11_04.isoformat(), stage="scripted", attempts=6,
+                                         updated_at=_iso_of(_et(2026, 11, 4, 21, 40))))
+    real_run = digest_ledger.get_run_for_date
+    fail = {"on": True}
+
+    async def flaky(run_date: Any) -> Any:
+        if fail["on"]:
+            raise mrs.MarketingRunError("runs 503")
+        return await real_run(run_date)
+
+    monkeypatch.setattr(digest_ledger, "get_run_for_date", flaky)
+    caplog.set_level(logging.WARNING, logger=ds.__name__)
+    assert (await _health_at(digest_jobs, _et(2026, 11, 5, 16, 0)))["checked"] == 0
+    assert any("2026-11-04" in r.getMessage() and "runs 503" in r.getMessage() and r.levelno == logging.WARNING
+               for r in caplog.records)
+    fail["on"] = False
+    assert (await _health_at(digest_jobs, _et(2026, 11, 5, 16, 5)))["checked"] == 0    # waits out the retry
+    assert digest_jobs.claims == [] and _sends(bot) == []
+    ds._FINAL_OWED["retry_at"] = 0.0                                                # the wait is over
+    assert (await _health_at(digest_jobs, _et(2026, 11, 5, 16, 15)))["sent"] == 1
+    assert _sends(bot)[0]["text"].startswith("⚠️ Marketing run Wed 2026-11-04 ended FAILED after stage scripted")
+
+
+@pytest.mark.asyncio
+async def test_b3pd2_a_switch_to_seven_days_reads_a_rest_day_skip_as_rest(bot, digest_jobs, digest_ledger, monkeypatch):
+    """The other direction (D18's final-word twin): at four days Wednesday rested (`rest_day`); Thursday morning the
+    owner moves to seven. Thursday's final word is due on today's calendar, finds no nightly check and a rest-day
+    skip — and says nothing."""
+    _seed_health_run(digest_ledger, _run("skipped", run_date=WED_11_04.isoformat(), stage="planned", metadata=_REST))
+    _cadence(monkeypatch, _SEVEN_DAYS)
+    assert await _health_at(digest_jobs, _et(2026, 11, 5, 16, 0)) == {"checked": 1, "sent": 0, "failed": 0,
+                                                                      "rate_limited": 0}
+    assert digest_jobs.claims == [(ds.JOB_HEALTH_FINAL, THU_11_05)] and _sends(bot) == []
+
+
+@pytest.mark.asyncio
+async def test_b3pd2_the_default_calendar_claims_and_says_exactly_what_it_did_for_two_weeks(bot, digest_jobs,
+                                                                                           digest_ledger):
+    """Two weeks at the default calendar, every rest day closed `rest_day` and every posting day fine, ticked at 16:00
+    and 22:00 ET each day: the final word is claimed only on the day after a posting day and the nightly check only
+    on a posting day — the claims before B3PD-2 — and nothing is sent."""
+    start = date(2026, 10, 5)
+    days = [start + timedelta(days=i) for i in range(14)]
+    for d in days:
+        if d.weekday() in selection.POST_WEEKDAYS:
+            _seed_health_run(digest_ledger, _run("media_ready", run_date=d.isoformat(),
+                                                 finished_at=_iso_of(_et(d.year, d.month, d.day, 17, 5)),
+                                                 updated_at=_iso_of(_et(d.year, d.month, d.day, 17, 5))))
+        else:
+            _seed_health_run(digest_ledger, _run("skipped", run_date=d.isoformat(), stage="planned", metadata=_REST))
+    for d in days:
+        for hh in (16, 22):
+            await _health_at(digest_jobs, _et(d.year, d.month, d.day, hh, 0))
+    expected = []
+    for d in days:
+        if (d - timedelta(days=1)).weekday() in selection.POST_WEEKDAYS:
+            expected.append((ds.JOB_HEALTH_FINAL, d))
+        if d.weekday() in selection.POST_WEEKDAYS:
+            expected.append((ds.JOB_HEALTH, d))
+    assert digest_jobs.claims == expected and _sends(bot) == []
+
+
+def test_batch3_pool_runway_follows_the_switch(monkeypatch):
+    """The runway counts the lesson days of the posting days in force NOW. Lessons only (classes A): every day at seven
+    days. Company Weekly on: still Saturday alone, as Money Map runs Wednesday, Friday and Sunday — unless its class
+    is off, when those days are lessons too. At the default the dates are today's, before and after a switch."""
+    mon = date(2026, 10, 5)
+    pool = [str(i) for i in range(10)]
+    news = dict(classes=_NEWS_CLASSES, news_series=_NEWS_SERIES)
+    default = ds.pool_runway(pool, [], today=mon, today_picked=False)
+    # Mon, Tue, Thu, Sat ×2, then Mon and Tue take the ten — the next Thursday repeats
+    assert default == {"pool": 10, "unused": 10, "first_repeat": date(2026, 10, 22)}
+    default_news = ds.pool_runway(["a", "b", "c"], [], today=mon, today_picked=False, **news)
+    _cadence(monkeypatch, _SEVEN_DAYS)
+    # Mon 10-05 .. Wed 10-14 take the ten: Thu 10-15 repeats
+    assert ds.pool_runway(pool, [], today=mon, today_picked=False) == {
+        "pool": 10, "unused": 10, "first_repeat": date(2026, 10, 15)}
+    # Sat 10-10, 10-17, 10-24 take a, b, c — Sat 10-31 repeats: the seven-day news week has one lesson day too
+    assert ds.pool_runway(["a", "b", "c"], [], today=mon, today_picked=False, **news) == default_news == {
+        "pool": 3, "unused": 3, "first_repeat": date(2026, 10, 31), "no_later_than": True}
+    for offset in range(21):
+        day = ds.pool_runway(["a", "b", "c"], ["b"], today=mon + timedelta(days=offset), today_picked=False,
+                             **news)["first_repeat"]
+        assert day.weekday() == 5, day
+    # class F off: Wednesday-Sunday's chains are the lesson alone (Monday stays CEO / insider buys; Tuesday 10-06 is
+    # out of the 13F season, so it is the lesson too) — Tue 10-06, Wed, Thu take a, b, c and Fri 10-09 repeats
+    assert ds.pool_runway(["a", "b", "c"], [], today=mon, today_picked=False, classes=frozenset({"A", "C"}),
+                          news_series=_NEWS_SERIES)["first_repeat"] == date(2026, 10, 9)
+    # a week without Saturday has no lesson-only day while Money Map is on: no date, never a guessed one
+    _cadence(monkeypatch, "mon,tue,wed,thu,fri")
+    assert ds.pool_runway(["a", "b", "c"], [], today=mon, today_picked=False, **news) == {
+        "pool": 3, "unused": 3, "first_repeat": None, "no_later_than": True}
+    _cadence(monkeypatch, "mon,tue,thu,sat")
+    assert ds.pool_runway(pool, [], today=mon, today_picked=False) == default
+    assert ds.pool_runway([f"journey:{i}" for i in range(34)], ["journey:3", "journey:7"], today=date(2026, 10, 1),
+                          today_picked=True) == {"pool": 34, "unused": 32, "first_repeat": date(2026, 11, 28)}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cadence, limit", [("mon,tue,thu,sat", 240), (_SEVEN_DAYS, 420)], ids=["default", "seven"])
+async def test_batch3_the_runway_reads_news_recent_limit_rows(digest_ledger, monkeypatch, cadence, limit):
+    """D17: the digest's runway reads what selection reads — `selection.news_recent_limit()` rows, at the posting days
+    in force NOW (240 at four a week, 420 at seven), read once for both of its reads — never script_service's constant."""
+    _cadence(monkeypatch, cadence)
+    reads: List[tuple] = []
+    real = digest_ledger.recent_source_refs
+
+    async def spy(before, n):
+        reads.append((before, n))
+        return await real(before, n)
+
+    monkeypatch.setattr(digest_ledger, "recent_source_refs", spy)
+    report = await ds.gather_digest(digest_ledger, NOW)
+    today = NOW.astimezone(ET).date()
+    assert reads == [(today + timedelta(days=1), limit), (today, limit)]
+    assert report["runway"]["pool"] == 10
+
+
+@pytest.mark.asyncio
+async def test_batch3_at_seven_days_the_runway_sees_every_lesson_of_a_long_news_ledger(digest_ledger, monkeypatch):
+    """Why the read must scale: 70 weeks at seven days with Company Weekly on — six news rows and one Saturday lesson a
+    week — and a pool of 45 that every lesson has used. 420 rows hold 60 Saturdays, so the runway says what is true:
+    no lesson unused. 240 rows (the four-day read) would hold 35 and report 10 of 45 unused."""
+    from app.services.marketing import content_pool
+
+    pool = [f"journey:{i:02d}" for i in range(45)]
+    monkeypatch.setattr(settings, "MARKETING_CONTENT_CLASSES", "A,C,F")
+    monkeypatch.setattr(content_pool, "eligible_keys", lambda: list(pool))
+    _cadence(monkeypatch, _SEVEN_DAYS)
+    today = NOW.astimezone(ET).date()
+    rows = digest_ledger.fake.tables[mrs.SCRIPTS].rows
+    day, lessons = today - timedelta(days=70 * 7), 0
+    while day < today:
+        ref = pool[lessons % 45] if day.weekday() == 5 else f"news:money_map:T{day.toordinal()}:2026"
+        lessons += day.weekday() == 5
+        rows.append({"run_id": str(uuid.uuid4()), "run_date": day.isoformat(), "source_ref": ref, "tokens_used": 0})
+        day += timedelta(days=1)
+    report = await ds.gather_digest(digest_ledger, NOW)
+    assert report["runway"]["pool"] == 45 and report["runway"]["unused"] == 0
+    seen_by_240 = selection.lesson_refs([ref for _d, ref in sorted(((r["run_date"], r["source_ref"]) for r in rows),
+                                                                   reverse=True)][:240])
+    assert 45 - len(set(seen_by_240)) == 10

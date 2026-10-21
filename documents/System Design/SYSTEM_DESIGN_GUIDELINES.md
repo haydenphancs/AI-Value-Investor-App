@@ -4545,8 +4545,9 @@ forbidden line; each entry must match exactly one sentence. The user's rule for 
 historical case studies; no real person, share price, valuation, cheap/expensive, buy/sell or
 prediction, ever.
 
-**Cadence and rotation** (`app/services/marketing/selection.py`, pure): four posting days a week;
-posting days are numbered from a fixed epoch so rest days do not burn picks;
+**Cadence and rotation** (`app/services/marketing/selection.py`, pure): the posting days are a switch
+(`MARKETING_POST_WEEKDAYS`, default Mon/Tue/Thu/Sat, read at call time — §12.17; the owner may run all seven);
+posting days are numbered from a fixed epoch on the current calendar so rest days do not burn picks;
 `daily_rotation.pick_for_day` walks the pool in disjoint cycles; anything used by the last
 runs is skipped, because the rotation reshuffles whenever the pool changes. Five templates
 rotate independently (`case_story` is Money Moves only).
@@ -4923,8 +4924,10 @@ accept); the `assets_ready` stage then records the day's posts and the run close
   #60A5FA accent, white): since 2026-10-09 (owner: never open on our logo) the video opens on the
   accepted script's FIRST card while the hook is spoken — the hook itself is still shown only by the
   burned captions, because the validators never checked a hook→card reading chain (before that date a
-  BRAND card, the logo and the wordmark, played under the hook) — then the rest of the script's cards
-  (title and body always together, in order), then the DISCLAIMER card (the server-supplied text, the logo and `caydexinvest.com`).
+  BRAND card, the logo and the wordmark, played under the hook; since Batch 2 a lesson MAY open on a hook card
+  that shows the hook alone, but only a hook that does not lean on its first narration line — §12.16) — then the rest of the script's cards
+  (title and body always together, in order), then the DISCLAIMER card (the server-supplied text, the logo and the read-back's
+  `end_card_cta`: "Search Caydex on the App Store" while the store state is live/pre-order, else `caydexinvest.com` — §12.16).
   Text is wrapped greedily and shrunk to fit, never truncated; a card that cannot fit, or a glyph
   the font lacks, is `SkipRun("unrenderable_text")` — it would fail the same way on every retry.
   Card text stays above the caption band and inside the 920-px safe width (the platforms' UI
@@ -4961,7 +4964,9 @@ accept); the `assets_ready` stage then records the day's posts and the run close
   pairs and refuses a Facebook/LinkedIn video or an Instagram carousel whatever the worker asks
   (the worker's `render.POST_FORMAT` mirrors it; tests pin both against the disclaimer). A day
   with no video outlet is neither narrated nor rendered. The Instagram carousel waits until the
-  disclaimer is composed per format.
+  disclaimer is composed per format. (Since then: picture posts, §12.12; the disclaimer is per FORMAT,
+  `disclaimer_for(..., video=True)`; and Facebook/LinkedIn/Threads may carry the day's video as an EXTRA post that
+  `create_posts` records itself, §12.17 — the primary map still refuses a worker-specified Facebook/LinkedIn video.)
 - **The stages re-derive, never remember** (§12.2): the render reads the verified narration back,
   downloads it with a byte cap and checks its sha256 against the row; the posts stage reads the
   verified `video_asset_id` back (written in the same PATCH as `stage=rendered`) and fails loudly
@@ -5079,7 +5084,8 @@ whether its posts get Approve buttons in Telegram or arrive as a read-only previ
   entryway or AppView mirror (a lagging "not found" could close a live post or license a resend).
 - **Stage 2 — Upload-Post** (`app/integrations/upload_post.py`, `app/services/marketing/outlet_upload_post.py`,
   2026-10-01): one middleman API for TikTok, YouTube and Instagram (the day's verified MP4, fetched by
-  its public URL) and Facebook, LinkedIn and Threads (text) — one adapter per platform, one request
+  its public URL) and Facebook, LinkedIn and Threads (their picture/text post and, while
+  `MARKETING_VIDEO_EXTRA_PLATFORMS` lists them, the day's video as an extra post — §12.17) — one adapter per platform, one request
   per post row. An accepted request is only SUBMITTED (the row stays `queued`); reconcile polls the
   job (status for progress, history for the verdict; by Upload-Post's own id when it answered one,
   kept apart as `poll_id`) and marks it `published` only with a post URL or a platform post id; a
@@ -5129,7 +5135,9 @@ its pure helpers and the shared day-job runner) and `app/services/marketing/dige
   and a job is marked done only after its work — and its Telegram send — succeeded, so a failure
   is retried on a later tick: at most three claimed attempts per ET day per process
   (`metrics_service.run_day_job`), and no database read at all for a job that is not due, that
-  this process already finished today, or that has used its three attempts. A job whose `enabled`
+  this process already finished today, or that has used its three attempts (one exception since Batch 3: on the
+  day after a day the posting calendar no longer lists, `_final_owed` reads the nightly job state, and possibly
+  that day's run row, once per process to decide whether a final word is owed). A job whose `enabled`
   is false in `notification_job_state` is skipped without a deploy (re-read every 30 minutes); an
   unreadable state skips the tick. An error the work returns WITH success is kept as the job's
   `last_error`: a note on a day that succeeded (the measure step names there every platform it
@@ -5472,16 +5480,179 @@ Built and shipped in code, OFF in production until the owner lists each series i
   season or on a Congress Tuesday it runs only when those produce nothing): the Trillion Club stakes, the published
   catalogue included (an owner-revertible night decision), a named investee with a disclosed figure, the
   stake's own value basis as the verb; a "pair" image (investor → investee).
-- **earnings** (class F, Thursdays in earnings season): one ET day per calendar call, a digit-shift guard,
+- **earnings** (class F, Thursdays in earnings season — Wed/Thu/Fri when those days post, §12.17): one ET day per calendar call, a digit-shift guard,
   a minimum estimate size, a USD REPORTING currency (the trading currency is not enough), profile batches
   until enough large companies qualify; the copy states the reported EPS beside the analysts' estimate on
-  the same basis — never "earned", "expected", "beat" or "miss" — with revenue at a common precision.
+  the same basis — never "earned", "expected", "beat" or "miss"; since news-v21 (2026-10-20) no revenue figure
+  is printed (the revenue pair is a check only — §12.17).
 - **theme_explainer** (class F, a fallback on Monday, Tuesday and Thursday; Saturday is the lesson only): Emerging Frontiers theme names and members with
   each member's largest filed segment, never performance, momentum, ETF reasons or generated text; a
   "grid" image; "{n} of its {m} companies" when the company gate dropped members.
 - The "pair" and "grid" layouts are drawn only by a worker that declares the `layouts_2b` capability; without
   it the server drops company_stakes and theme_explainer from that day's chain. Release order: migration 190
   → web → worker (the committed web predates worker capabilities).
+
+### 12.15 Batch 1 (2026-10-16/19): Company Weekly made safe, measured, quieter
+
+Web only — no migration, no worker change, no new required variable; ships with the next web deploy. Why: the
+first live production read (2026-10-14) showed reach only on video and nothing converting to follows, and Company
+Weekly had never run; a read-only review of ~50 agents (a skeptic per finding) then found template sentences that
+were pinned in the lexicon yet FALSE for producible records. Everything below fails closed — a refused record
+never becomes a degraded post, only a fallback to the next series.
+
+- **Earnings is refused whole, never half-published.** A missing, disagreeing, ≤ 0 or out-of-band revenue pair
+  (`revenue_implausible` — FMP's 2026-10-14 Progressive row was ONE month against a quarterly estimate); a
+  surprise under 5% judged on the feed figures AND on the two-place printed figures (`surprise_unclear`); a
+  statement period that is not quarter-shaped (77-119 days after the previous period end) or whose revenue is
+  not within 3% of the calendar's (`period_mismatch` / `period_unverified` — US banks and brokers are mostly
+  refused because their statement revenue is gross while the calendar's is net; accepted); Real Estate / REIT
+  issuers, whose calendar "EPS" mixes FFO with GAAP (`eps_basis_reit`; Prologis $1.60 vs a $0.78 GAAP-scale
+  estimate); an actual that is off-basis against the statement's diluted EPS while the estimate is on it
+  (`eps_basis_mixed`); a failed statement read (`statement_unavailable`; all reads failed → the series is
+  UNAVAILABLE, so the decision message names an outage rather than "nothing qualified"). One record per issuer
+  (NASDAQ preferred shapes refused, share-class twins deduped to the shortest symbol), and the largest company
+  with a clear surprise leads — the widest ratio used to lead with one-offs.
+- **Members-elect window** (owner decision 2026-10-15): from an even year's Election Day through Jan 3, Form 4
+  posts are role-only — no person's name anywhere — checked over the run date and the two days after it,
+  because posts can go out the next day and Upload-Post may resend, at every call site (adapter, template,
+  validator, revalidate). A newly elected member is not on the sitting-Congress block-list.
+- **Money Map truth.** FMP's "product segmentation" is sometimes regions (McDonald's, PepsiCo), so the copy is
+  neutral ("How fiscal {fy} revenue broke down") or "by region" only when every line is a region and the rest
+  is small; the rest is "Everything else"; gross profit is explained as revenue minus the cost of sales (FMP
+  derives it for issuers that report none); a stale feed label is corrected per (symbol, label) only; a
+  company whose next annual report is due (fiscal year ended ≥ 364 days ago) waits for it, as a date fact that
+  never uses up the series' content budget.
+- **13F.** Every increased/decreased row of a filing — not only the moves a post shows, because its counts are
+  public — is re-checked against corporate actions for the quarter (`split_in_window` / `split_unchecked`
+  drop both kinds and their counts), on the registry and the club path; a club build stored as anything but
+  complete is refused; Pershing Square is read from its successor filer with the hand-over quarter refused
+  (`successor_transition`); Berkshire Hathaway leads the season.
+- **Measurement for the week-4 review.** The measure step keeps the TikTok and YouTube watch fields Upload-Post
+  already returned (average watch time, % watched to the end, new followers, profile views, YouTube % viewed —
+  bounded, cross-checked, omitted never 0), reads each video at 1, 3 and 7 days (labelled only within a day of
+  that age), up to 40 Upload-Post reads a day, and a refusal about ONE social account skips only that platform
+  for the day. The Monday digest shows a 4-week follows-first scorecard per (platform, format). Auto-pause on
+  zero reach was rejected: it saves cents and removes surfaces; the scorecard informs the owner instead.
+- **Quiet, honest Telegram.** Media, caption messages and "Posted" replies are silent — only the two decisions
+  and alerts ring; a run that recorded its posts and then failed is still offered; the "DRY RUN" label comes
+  from the posts, never the run row (a re-claim rewrites the row); the POSTS decision names why a picture was not
+  used and where a first comment was requested.
+- **Install path.** The YouTube description ends "Search Caydex on the App Store." (Shorts description links
+  cannot be tapped); `MARKETING_FIRST_COMMENT_PLATFORMS` adds the same line as an automatic first comment.
+  `MARKETING_IMAGE_PLATFORMS` turns the picture off for one platform without turning it off for all; X media
+  uploads are journaled as their own pre-send charge until X prices them. The Company Weekly preview refuses
+  every Supabase write, so it is truly read-only.
+- **Re-review round (2026-10-19).** A second adversarial pass attacked the fixes themselves. Earnings now dedupes
+  by issuer across twins and class lines and refuses a family whose listings disagree on the actuals or do not
+  all show the same clear surprise (otherwise the post could pick the friendliest consensus); an EPS above
+  $1,000,000 a share is a feed error (`eps_implausible`); a report re-dated into the next weekly window is still
+  `already_posted`. 13F refuses a club filer whose stored build is not complete, and re-checks splits up to a week
+  past the quarter end (a split paid on the last session is booked on the payable date by some filers) and under
+  every symbol a CUSIP carried (renames). Stake source titles must pass a positive word list, because a surname
+  list can never be complete. An Upload-Post platform that is not connected skips only that platform's reads for
+  the day, like a lapsed login.
+
+### 12.16 Batch 2 (2026-10-19/20): the first seconds of every video
+
+Worker + web, no migration. Why: production reach came almost only from video, and the first second decides a
+swipe; the 0.5 s TikTok/Instagram cover is a frame we choose. Owner decisions 2026-10-15: a lesson may open on a
+hook card (amending "the hook is never a card"), and videos end on "Search Caydex on the App Store".
+
+- **One switch, frozen per run, gated by a capability.** `MARKETING_VIDEO_FEATURES` (hook_card, data_card,
+  push_in; default none) is read when the day's script is written and frozen as `output.video_features` — only
+  for a run held by a worker that declared `video_v2`, and only the features that apply to the script's kind
+  (lesson: hook_card, push_in; template: data_card, push_in). An old worker, an old output or a switch flip after
+  the write all mean today's video. The read-back always carries `video_features` and `end_card_cta`; a list
+  the reader cannot trust means no feature on both sides.
+- **The server allows, never requires.** A frozen feature WIDENS the video's on-screen allow-list (the hook
+  verbatim; the post image's own strings and footer) and never adds a requirement, so no feature can turn a
+  valid video into a 422. `VIDEO_BRAND_TEXT` became a superset (the old end-card line stays allowed for
+  rollback). The end card follows the output's store state (the App Store line only while it is live or
+  pre-order) — this changes at the deploy, before any switch, because production lessons are written "live".
+- **The hook card stands alone, so the hook must too.** The writer and the judge read a hook together with the
+  first narration line ("Index funds are risk-free." followed by "Not quite…" passes), but a hook card shows the
+  hook alone and becomes the cover. `run_service.hook_card_problem` therefore refuses the card when the hook ALONE
+  raises a compliance hit — a (code, detail) pair — that it does not raise beside line 0 (both scans use the same
+  defaults, so a hit on both cancels); then no hook card is frozen, sent or allowed. All 76
+  real hooks on file keep their card. Residual: a semantic myth the regex cannot see still relies on the judge's
+  context reading, so the owner's look at the VIDEO bundle's first frame remains the gate.
+- **The data card replaces a fact, never a hedge.** Template cards carry their own line's caveat ("a card stays
+  on screen for its whole line"), so the picture replaces only the card the read-back's `data_card_slot` names:
+  a fact card it already shows ("The purchases", "Revenue mix", "Counted once", "As of"…), never a
+  `DATA_CARD_KEEPS` card ("Reporting delay", "About the figures", "Source"…). The slot is recomputed from the
+  stored cards on each read-back; no slot means no data card. It is the post image laid out natively in the
+  card's text zone with a 22 px legibility floor, so dense pictures (seven Money Map bars, a long 13F list) keep
+  their text card.
+- **The push-in** zooms card 0 by 3% over 45 frames on a bit-exact 2× upscale and holds the last frame. It was
+  checked frame for frame against production's ffmpeg 5.1.10 (built from source): identical. Production's 5.1
+  cross-fade is one frame shorter per fade than 7.0 — a pre-existing difference, card switches up to ~0.1 s early,
+  captions unaffected. A push-in render that fails renders once more without it inside the same ffmpeg budget.
+- **Found by real-data renders:** logos designed for dark backgrounds (GameStop's, Amazon's) drew as a lone
+  accent on the white plate and a baked "transparency" checkerboard showed on Boston Scientific's — both now draw
+  the company wordmark (the visible ink is measured against the logo's SOLID box, and any light editor grid with
+  both squares ≥ 200 counts; known gap: white artwork whose coloured accents span its whole box still draws only
+  the accents, so the owner's review is the backstop); a caption could end on "$50" before "billion" exactly at the cover frame — a figure now
+  always travels with its scale word. Video posts record the run's frozen features (`metadata.video_features`)
+  so the scorecard can be read against the switch date.
+
+### 12.17 Batch 3 (2026-10-20): more surfaces, more days
+
+Web only, no migration (posts were already UNIQUE per (run, platform, format)); every default is today's
+behaviour byte for byte, proven by tests that pin every Telegram message and Upload-Post request of a default day.
+
+- **A second post on one platform.** Picture posts lifted LinkedIn and Threads, and video is what travels, so
+  Facebook and LinkedIn may post BOTH (owner, 2026-10-15), still behind two Telegram decisions.
+  `EXTRA_POST_FORMATS_BY_PLATFORM` sits beside the unchanged primary map; `MARKETING_VIDEO_EXTRA_PLATFORMS` is
+  frozen at write time as `extra_post_formats` + `video_posts`, only on a day that renders a video anyway. Each
+  extra caption is the platform's own accepted caption with only the code-owned disclaimer swapped for the
+  narrated one — no new model text, no judge call — and templates are re-checked against their fact sheet.
+  `create_posts` appends the extras itself, pinned to the run's one verified video, re-deriving each caption;
+  a broken extra is skipped, never a refused day. A Form 4 roundup's picture caption lists the picture's rows
+  while its video shows only the lead purchase, so its extras are frozen only when the video draws the data card
+  (`picture_caption`; the review found the spec's "the bodies are equal" premise false for these two series).
+  X never posts two formats; Threads video is behind its own
+  token; Bluesky video was researched (a plain `uploadBlob` + `app.bsky.embed.video` keeps the record-key
+  idempotency) and deferred to the week-4 review — 3-4 days of work touching the live picture path, for ~1 follower.
+- **Primary first.** Upload-Post refuses "similar content within 48 h" without documenting "similar", and a
+  video caption differs from its picture's only in the disclaimer. The publisher therefore holds an extra while
+  its platform's primary post of the run is still open (pending, approved or queued), failing closed on a bad
+  read, so within one day it is always the video that takes the risk, never the post that works today. The hold applies only to
+  the live pass (a dry-run rehearsal prepares every extra); the alerts say what happened — an expired extra
+  names the picture post it waited for, an escalated picture post adds that its video waits for the answer,
+  and a decision whose platform holds both posts says that rejecting or dropping the picture lets the approved
+  video go out alone.
+- **Per-format fields.** The outlet picks the route by the post's format: a Facebook video is a Reel
+  (`facebook_media_type` REELS, the caption as `facebook_description`, `facebook_is_ai_generated` — the general
+  AI flag does not reach Facebook), LinkedIn sends `linkedin_description` with `visibility` PUBLIC, Threads sends
+  `threads_title` within 500 bytes; none sends the caption as `title` (it would become a 255-character Reel title
+  or LinkedIn's media title). Instagram Trial Reels (`share_mode`) are a send-time switch, off: Upload-Post
+  documents them for accounts with 1,000+ followers.
+- **The cadence is a switch.** `MARKETING_POST_WEEKDAYS` (default Mon/Tue/Thu/Sat) is read at call time.
+  Wednesday and Friday take Thursday's calendar (earnings in season, then Money Map), Sunday the Money Map tail
+  (never earnings), Saturday stays the week's lesson. The rotation is proven by simulation, including mid-week
+  flips: once the ledger read (60 posting days) holds pool − 1 lessons every pick is forced, so a flip never
+  repeats or skips a lesson; the one accepted gap is a pool above ~36 right after going from seven days back to
+  four. Cost at seven days: about $0.3/month more on X; Upload-Post Basic has no upload cap. Whether a PAST
+  day was a posting day is judged first on today's calendar; when the switch no longer lists the day, its own
+  record decides (its nightly check succeeded, or its run row shows posting-day work), so a morning flip from
+  seven days to four cannot cancel the final word a nightly alert promised. A day with no record is judged on
+  today's calendar. Untested risk, watched live: at seven days consecutive days post the same template to the same
+  accounts, and Upload-Post's "similar content within 48 h" check might then refuse a PRIMARY post too.
+- **Found by the review rounds (2026-10-20), outside Batch 3's own code.** Money Map remembered no refusal, so a
+  few refused seed companies could hold the head of the walk forever; each refusal its read makes is now
+  remembered (process-local, re-read after 28 days or a deploy), a loss larger than revenue is refused at the
+  read, where the template would refuse it anyway, and every other template refusal is reported back. Company
+  stakes got the same: the template's row limits applied at the read, and a stake the template refused is
+  remembered and offered last. The writer accepted a one-word narration line: production's 10-17 video ends with
+  the narrator saying "cards" (a field name); a line now needs at least four words and a bare field name is
+  refused. Earnings compared a GAAP revenue actual with an ADJUSTED-revenue consensus for issuers like GE
+  Aerospace (the post read +9.6% for a like-for-like +3.2%). FMP never says which basis a revenue estimate is
+  on, and a gate built on the issuer's earlier quarters was shown to miss GE's and Travelers' 2025 reports, so
+  since news-v21 earnings posts print EPS against the estimate only; the revenue pair stays a required
+  data-quality and quarter check that is never printed. The same doubt can touch EPS when the feed's actual is
+  the GAAP figure and the consensus is not (a one-off gain): the template's caveat names the EPS basis, and the
+  owner's review of a very large "surprise" is the gate. The Form 4 roundup captions became format-neutral
+  ("The purchases: …"; news-v20) because they also ride text posts.
 
 ## Appendix A: Where things live
 

@@ -100,6 +100,14 @@ text, `/llms-full.txt` and `/openapi.json`, not memory):
     500. The live per-post reads are "limited to 100 requests per 5 minutes". No plan rule is
     documented for this route: a 403 reads as a plan refusal like every 403 here.
     https://docs.upload-post.com/api/get-analytics (VERIFIED 2026-10-01, the page's markdown)
+  * `first_comment` / `<platform>_first_comment` (the latter overrides the former for its platform):
+    "The first comment never fails the publish" — "anything that goes wrong comes back as a plain-string
+    entry in the response's `warnings` array" (also an ignored field), and "when it does go through, the
+    response carries `first_comment_posted: true`"; TikTok needs the account reconnected with the
+    `comments` capability. The page does not say where either key sits, so both are read at the top level
+    and in the platform's sync result (`_upload_notes`). The status page names neither: an ASYNC upload's
+    later comment outcome is not visible here. https://docs.upload-post.com/api/upload-video/
+    (VERIFIED 2026-10-15)
 """
 
 from __future__ import annotations
@@ -701,10 +709,69 @@ def _check_external_id(method: str, external_id: Any) -> Optional[str]:
     return eid
 
 
-def _upload_result(method: str, platform: str, request_id: str, status: int, body: Any) -> Dict[str, Any]:
-    """Normalise a 2xx upload answer (sync results, async ack or scheduled job)."""
+#: How much of an upload answer's `warnings` is kept (2026-10-15): at most this many entries, each one
+#: line of at most WARNING_MAX_CHARS characters after the scrub.
+MAX_WARNINGS = 5
+WARNING_MAX_CHARS = 200
+#: Control characters (C0, DEL, C1, the Unicode line separators) a kept warning never carries: it is
+#: logged and stored, so it is one plain line.
+_WARNING_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def _warnings(sources: Iterable[Any], key: Optional[_ApiKey]) -> List[str]:
+    """Upload-Post's `warnings` — "a plain-string entry in the response's `warnings` array" (an ignored
+    field, a first comment it skipped or could not post) — from each source in order, as at most
+    MAX_WARNINGS distinct entries, each folded onto one line (control characters become spaces), scrubbed
+    of the key and every other secret shape and cut to WARNING_MAX_CHARS. A lone string is read as one
+    entry; a non-string or blank entry, and a source that is neither a list nor a string, is skipped — a
+    warning never decides an outcome."""
+    out: List[str] = []
+    for raw in sources:
+        items = [raw] if isinstance(raw, str) else raw if isinstance(raw, (list, tuple)) else ()
+        for item in items:
+            if len(out) >= MAX_WARNINGS:
+                return out
+            if not isinstance(item, str):
+                continue
+            text = _scrub(" ".join(_WARNING_CONTROL_RE.sub(" ", item).split()), key, WARNING_MAX_CHARS).strip()
+            if text and text not in out:
+                out.append(text)
+    return out
+
+
+def _upload_notes(body: Dict[str, Any], platform: str, key: Optional[_ApiKey]) -> Dict[str, Any]:
+    """What an upload answer says BESIDE its outcome (2026-10-15), each key present only when Upload-Post
+    sent it: `warnings` (`_warnings`) and `first_comment_posted` — "when it does go through, the response
+    carries `first_comment_posted: true`" (the upload-video page, VERIFIED 2026-10-15; it says the first
+    comment "never fails the publish": anything that goes wrong is a `warnings` entry). The page pins
+    neither key's place, so both are read at the top level AND in the platform's own sync result (its
+    entry first for the flag, the top level first for the warnings); a flag that is not a real bool is
+    not one. Neither ever changes the outcome."""
+    entry = body.get("results").get(platform) if isinstance(body.get("results"), dict) else None
+    entry = entry if isinstance(entry, dict) else {}
+    notes: Dict[str, Any] = {}
+    warnings = _warnings((body.get("warnings"), entry.get("warnings")), key)
+    if warnings:
+        notes["warnings"] = warnings
+    for source in (entry, body):
+        posted = source.get("first_comment_posted")
+        if isinstance(posted, bool):
+            notes["first_comment_posted"] = posted
+            break
+    return notes
+
+
+def _upload_result(method: str, platform: str, request_id: str, status: int, body: Any,
+                   key: Optional[_ApiKey] = None) -> Dict[str, Any]:
+    """Normalise a 2xx upload answer (sync results, async ack or scheduled job), plus the answer's
+    `warnings` / `first_comment_posted` when it carries them (`_upload_notes`, scrubbed with `key`)."""
     if not isinstance(body, dict):
         raise _ambiguous(method, status, "with an unreadable body")
+    return {**_upload_outcome(method, platform, request_id, status, body), **_upload_notes(body, platform, key)}
+
+
+def _upload_outcome(method: str, platform: str, request_id: str, status: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    """The outcome half of `_upload_result` (a dict `body`)."""
     results = body.get("results")
     answered_id = body.get("request_id") if isinstance(body.get("request_id"), str) and body["request_id"] else None
     if answered_id is not None and not _REQUEST_ID_RE.fullmatch(answered_id):
@@ -750,7 +817,7 @@ async def _upload(method: str, path: str, *, platform: str, media: List[Tuple[st
                   fields: Mapping[str, Any], request_id: str, external_id: str) -> Dict[str, Any]:
     """`media` = the route's own content parts, in order (`video`; `title`; `title` + `photos[]`…) —
     a caller's `fields` may set none of their names."""
-    _credentials(method)  # not configured → raised before any argument work, nothing sent
+    key, _profile = _credentials(method)  # not configured → raised before any argument work, nothing sent
     p = _check_platform(method, platform)
     rid = _check_request_id(method, request_id)
     eid = _check_external_id(method, external_id)
@@ -764,7 +831,7 @@ async def _upload(method: str, path: str, *, platform: str, media: List[Tuple[st
     ]
     form = _form(method, own, fields, _OWN_FIELDS | {name for name, _ in media})
     status, body = await _call(method, "POST", path, form=form, idempotency_key=rid)
-    return _upload_result(method, p, rid, status, body)
+    return _upload_result(method, p, rid, status, body, key=key)
 
 
 # ── API methods ────────────────────────────────────────────────────────

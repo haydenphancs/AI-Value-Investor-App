@@ -13,8 +13,14 @@ weight is appended here, by code, from constants a test can pin — never truste
   Store." during a pre-order, and the claim-free "Caydex: AI research on public companies." while
   the store URL is unset or invalid — by the store state threaded in from `smart_link`): TikTok/
   Instagram captions are not clickable ("Link in bio"); X is link-free unless `allow_x_url` (a URL
-  makes an X post cost $0.20 instead of $0.015); everything else carries its own `/go/<platform>`
-  smart link so arrivals are attributable. Nothing scans this copy at runtime, so tests pin it.
+  makes an X post cost $0.20 instead of $0.015); the YouTube description carries no link since
+  2026-10-15 (a Shorts description link cannot be tapped) — while the app is on the store (live or
+  pre-order), the claim-free PRODUCT LINE ("Caydex: AI research on public companies.") then the
+  code-owned SEARCH LINE ("Search Caydex on the App Store.", owner decision 6), which says where on
+  its own, so "on the App Store" is said once (review F7, 2026-10-16); in prelaunch the value line
+  alone; everything else carries its own `/go/<platform>` smart link so arrivals are attributable.
+  The same search line is the automatic FIRST COMMENT `create_posts` stamps for the Upload-Post
+  platforms the owner lists. Nothing scans this copy at runtime, so tests pin it.
 * **Hashtags** from a curated list (a model-written hashtag is how tickers and names get in).
 
 Order is fixed: body → hashtags → CTA → disclaimer, and `check_composed` asserts the result ENDS
@@ -29,6 +35,17 @@ whose words come from a fixed template filled with public data). Template copy n
 data." (+ "; narration voiced with AI." wherever a video is narrated) and always carries
 NON_AFFILIATION. An unknown authorship raises ValueError — never a disclaimer that drops (or
 invents) an AI line.
+
+**Per-FORMAT disclaimer** (Batch 3, 2026-10-20; owner decision 2 of 2026-10-15): a caption's disclaimer
+is composed per PLATFORM (`disclaimer_for`: the video platforms say the narration is AI), so Facebook,
+LinkedIn and Threads — whose PRIMARY post is a picture or text — may also post the day's narrated video
+only under the narrated-video disclaimer. `disclaimer_for(..., video=True)` words it (the long form's
+"Script and narration generated with AI." / the template's narration note; the short form's new
+narrated variants), and `extra_video_caption` makes such an EXTRA post's caption from the platform's
+OWN accepted caption by swapping ONLY that code-owned disclaimer: the body, hashtags, value line and
+link are the accepted ones, character for character, so no new model text and no judge call — and the
+names-placement rules hold by construction. `video=None` (the default everywhere) is exactly the
+per-platform rule above, byte for byte.
 
 Pure; stdlib only (plus the Violation type).
 """
@@ -158,9 +175,17 @@ def disclaimer_long(run_date: date, *, video: bool = False, authorship: str = AU
     )
 
 
-def disclaimer_short(authorship: str = AUTHORSHIP_AI) -> str:
+def disclaimer_short(authorship: str = AUTHORSHIP_AI, *, video: bool = False) -> str:
+    """The short disclaimer (X / Threads / Bluesky). `video` (Batch 3): the NARRATED-video variant a
+    Threads extra video post carries — an "ai" lesson says its script and narration are AI, a template
+    says its narration is voiced with AI (its words are a template's) and keeps NON_AFFILIATION. Off,
+    today's strings, byte for byte."""
     if _authorship(authorship, "disclaimer_short") == AUTHORSHIP_TEMPLATE:
+        if video:
+            return f"Educational only, not investment advice. Narration voiced with AI. {NON_AFFILIATION} {PUBLISHER}"
         return f"Educational only, not investment advice. {NON_AFFILIATION} {PUBLISHER}"
+    if video:
+        return f"Educational only, not investment advice. Script and narration generated with AI. {PUBLISHER}"
     return f"Educational only, not investment advice. AI-assisted. {PUBLISHER}"
 
 
@@ -245,14 +270,39 @@ def made_with_ai(authorship: str, fmt: str) -> bool:
     return fmt == "video"
 
 
-def disclaimer_for(field: str, run_date: date, authorship: str = AUTHORSHIP_AI) -> Optional[str]:
+#: The caption fields whose every post is a narrated video (the PRIMARY format map's video platforms):
+#: `disclaimer_for` words them with the narrated-video disclaimer unless told otherwise.
+NARRATED_FIELDS: Tuple[str, ...] = ("tiktok", "youtube_description", "instagram")
+#: The caption fields an EXTRA video post may be captioned from (Batch 3, 2026-10-20) — the platforms whose
+#: primary post is a picture or text and that may also post the day's video. Mirrors
+#: `schemas.marketing.EXTRA_VIDEO_PLATFORMS` (a test pins them equal): never x (X never posts two formats),
+#: never bluesky (its video is deferred), never a narrated field (its primary post already is the video).
+EXTRA_VIDEO_FIELDS: Tuple[str, ...] = ("facebook", "linkedin", "threads")
+#: The fields `video=True` can never word: a 280-character X post never carries the narrated video, and the
+#: YouTube title carries no disclaimer at all.
+_NEVER_NARRATED = frozenset({"x", "youtube_title"})
+
+
+def disclaimer_for(field: str, run_date: date, authorship: str = AUTHORSHIP_AI, *,
+                   video: Optional[bool] = None) -> Optional[str]:
+    """The disclaimer a caption FIELD ends with. `video` (Batch 3): None — the per-platform rule, exactly as
+    before (the narrated-video wording on NARRATED_FIELDS, the text wording elsewhere); True — the
+    narrated-video wording on any field that can carry the video (an EXTRA video post's caption); False —
+    the text wording. ValueError for `video` that is not None or a bool, for True on X or the YouTube title,
+    and for False on a narrated field (it would under-disclose the narration) — never a guessed line."""
     _authorship(authorship, "disclaimer_for")
+    if video is not None and not isinstance(video, bool):
+        raise ValueError(f"disclaimer_for: video must be None or a bool, not {type(video).__name__}")
+    if video is True and field in _NEVER_NARRATED:
+        raise ValueError(f"disclaimer_for: {str(field)[:40]!r} never carries the narrated-video disclaimer")
+    if video is False and field in NARRATED_FIELDS:
+        raise ValueError(f"disclaimer_for: every {str(field)[:40]!r} post is a narrated video")
     if field == "youtube_title":
         return None  # the description carries it; a 100-char title cannot
+    narrated = field in NARRATED_FIELDS if video is None else video
     if field in _COMPUTED_BUDGET:
-        return disclaimer_short(authorship)
-    return disclaimer_long(run_date, video=field in ("tiktok", "youtube_description", "instagram"),
-                           authorship=authorship)
+        return disclaimer_short(authorship, video=narrated)
+    return disclaimer_long(run_date, video=narrated, authorship=authorship)
 
 
 def hashtags_for(field: str, category: str) -> List[str]:
@@ -274,16 +324,22 @@ STORE_PREORDER = "preorder"
 STORE_LIVE = "live"
 STORE_STATES: Tuple[str, ...] = (STORE_PRELAUNCH, STORE_PREORDER, STORE_LIVE)
 #: The one sentence every caption but the YouTube title carries about what Caydex is (owner wording,
-#: 2026-10-05). Nothing scans code-owned copy at runtime — compliance, grounding and the judge read
-#: only model text — so tests/test_marketing_post_copy.py pins every line verbatim and runs it through
-#: the public-copy scan. "on the App Store" stays true on a pre-order page too, so a forgotten flag
-#: never makes a false claim; it never says "now", "available", "download" or "free". The PRELAUNCH
-#: line makes no availability claim at all (2026-10-07): the app has been on the App Store since
-#: 2026-10-05, so prelaunch is now reached only by an unset or mistyped URL — and "coming soon" would
-#: then be false.
+#: 2026-10-05) — the YouTube description carries the claim-free PRODUCT_LINE in its place while its
+#: search line says where (`cta_for`). Nothing scans code-owned copy at runtime — compliance, grounding
+#: and the judge read only model text — so tests/test_marketing_post_copy.py pins every line verbatim
+#: and runs it through the public-copy scan. "on the App Store" stays true on a pre-order page too, so a
+#: forgotten flag never makes a false claim; it never says "now", "available", "download" or "free".
+#: The PRELAUNCH line makes no availability claim at all (2026-10-07): the app has been on the App Store
+#: since 2026-10-05, so prelaunch is now reached only by an unset or mistyped URL — and "coming soon"
+#: would then be false.
 VALUE_PRODUCT = "Caydex: AI research on public companies"
+#: The claim-free PRODUCT LINE: what Caydex is, and nothing about where or when. It is the prelaunch value
+#: line, and the line the YouTube description's CTA opens with in EVERY state (review F7, 2026-10-16): there
+#: the search line that follows says where to find the app, so the live / pre-order value line before it
+#: would say "on the App Store" twice in one breath.
+PRODUCT_LINE = f"{VALUE_PRODUCT}."
 _VALUE_LINES: Dict[str, str] = {
-    STORE_PRELAUNCH: f"{VALUE_PRODUCT}.",
+    STORE_PRELAUNCH: PRODUCT_LINE,
     STORE_PREORDER: f"{VALUE_PRODUCT} — pre-order on the App Store.",
     STORE_LIVE: f"{VALUE_PRODUCT} — on the App Store.",
 }
@@ -300,11 +356,37 @@ def value_line(store_state: Any = STORE_PRELAUNCH) -> str:
     return _VALUE_LINES[normalize_store_state(store_state)]
 
 
+#: The App Store SEARCH LINE (owner decision 6, 2026-10-15): where a link cannot be tapped, the post
+#: tells the reader what to search for instead — Apple: most downloads follow a search. Code-owned and
+#: pinned verbatim like the value line (tests/test_marketing_post_copy.py runs it through the public-copy
+#: scan: the brand is all it may find). Owner wording rule: never "now", "available", "download" or
+#: "free". Two places carry it, and only while the store state is live or preorder (SEARCH_LINE_STATES —
+#: a pre-order page is found by the same search; prelaunch means an unset or mistyped store URL, so
+#: nothing points at the store then): the YouTube description's CTA (`cta_for`: after the claim-free
+#: PRODUCT_LINE, never after a value line that already says "on the App Store" — review F7, 2026-10-16)
+#: and the automatic first comment `run_service.create_posts` stamps for the platforms in
+#: MARKETING_FIRST_COMMENT_PLATFORMS (`schemas.marketing.POST_METADATA_FIRST_COMMENT`; `outlet_upload_post`
+#: sends it). As a comment it must fit the tightest comment limit of those platforms (TikTok's 150
+#: characters; a test pins it).
+SEARCH_LINE = "Search Caydex on the App Store."
+SEARCH_LINE_STATES: Tuple[str, ...] = (STORE_PREORDER, STORE_LIVE)
+
+
+def search_line(store_state: Any = STORE_PRELAUNCH) -> Optional[str]:
+    """SEARCH_LINE while `store_state` is live or preorder; None in prelaunch — and for anything that is
+    not one of the three exact names, which reads as prelaunch (`normalize_store_state`)."""
+    return SEARCH_LINE if normalize_store_state(store_state) in SEARCH_LINE_STATES else None
+
+
 def cta_for(field: str, *, allow_x_url: bool = False, store_state: Any = STORE_PRELAUNCH) -> Optional[str]:
     """The code-owned call to action of a caption field: the value line, then where to go. TikTok and
     Instagram captions are not clickable ("Link in bio."); X is link-free unless `allow_x_url` (a URL
-    makes an X post cost $0.20 instead of $0.015); everything else carries its own `/go/<platform>`
-    smart link. The YouTube title carries none (the description does)."""
+    makes an X post cost $0.20 instead of $0.015); the YouTube description carries NO link (a Shorts
+    description link cannot be tapped, 2026-10-15): while the store state is live or preorder, the
+    claim-free PRODUCT_LINE then SEARCH_LINE — the search line alone says where, so "on the App Store"
+    is said once (review F7, 2026-10-16) — and in prelaunch the value line alone (that state's value line
+    IS the product line), with no search line; everything else carries its own `/go/<platform>` smart
+    link. The YouTube title carries none (the description does)."""
     if field == "youtube_title":
         return None
     line = value_line(store_state)
@@ -312,8 +394,10 @@ def cta_for(field: str, *, allow_x_url: bool = False, store_state: Any = STORE_P
         return f"{line} Link in bio."
     if field == "x":
         return f"{line} {go_link('x')}" if allow_x_url else line
-    platform = "youtube" if field == "youtube_description" else field
-    return f"{line} Learn more: {go_link(platform)}"
+    if field == "youtube_description":
+        search = search_line(store_state)
+        return f"{PRODUCT_LINE} {search}" if search else line
+    return f"{line} Learn more: {go_link(field)}"
 
 
 def go_link(platform: str) -> str:
@@ -328,10 +412,12 @@ _SLUG_TAIL_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWX
 def carries_go_link(platform: Any, caption: Any) -> bool:
     """Does `caption` carry `platform`'s OWN smart link — `go_link(platform)` not followed by another
     slug character, so `/go/x` is never `/go/xyz`? Pure; False for a non-string caption or an empty or
-    non-string platform. Link-bearing today: bluesky, facebook, linkedin, threads and the YouTube
-    description (campaign `youtube`); X only when its caption was composed with `allow_x_url`;
-    TikTok and Instagram say "Link in bio.". The publisher opens a campaign's /go early window
-    (`publish_clock`) only for such a post."""
+    non-string platform. Link-bearing today: bluesky, facebook, linkedin and threads; X only when its
+    caption was composed with `allow_x_url`. TikTok and Instagram say "Link in bio.", and the YouTube
+    description has carried the App Store search line instead of `/go/youtube` since 2026-10-15 — a
+    YouTube caption composed before that still carries the link and still reads True here. The
+    publisher opens a campaign's /go early window (`publish_clock`) only for such a post, so a new
+    YouTube post opens none: nothing in it can be tapped, so no scanner fetches a link of it."""
     if not isinstance(platform, str) or not platform or not isinstance(caption, str):
         return False
     link = go_link(platform)
@@ -519,15 +605,18 @@ def _forbidden_chars(field: str, text: Optional[str]) -> List[Violation]:
     return [Violation(field, "platform_forbidden_char", "; ".join(fixes))]
 
 
-def check_composed(post: ComposedPost, run_date: date, authorship: str = AUTHORSHIP_AI) -> List[Violation]:
+def check_composed(post: ComposedPost, run_date: date, authorship: str = AUTHORSHIP_AI, *,
+                   video: Optional[bool] = None) -> List[Violation]:
     """The composed caption ends with its disclaimer (the one `authorship` words) exactly once,
     fits the platform, and carries no character the platform's API refuses (`FORBIDDEN_CHARS`).
     A template post also must not carry an AI line ("authorship_mismatch"): it would claim an AI
-    wrote what a template wrote. The "ai" checks are unchanged."""
+    wrote what a template wrote. The "ai" checks are unchanged. `video` (Batch 3) picks the
+    disclaimer as `disclaimer_for` does — None, the per-platform rule (every caller before Batch 3);
+    True, the narrated-video one an EXTRA video post ends with."""
     who = _authorship(authorship, "check_composed")
     out: List[Violation] = []
     field = "youtube_description" if post.platform == "youtube" else post.platform
-    disc = disclaimer_for(field, run_date, who)
+    disc = disclaimer_for(field, run_date, who, video=video)
     if disc and (not post.caption.endswith(disc) or post.caption.count(disc) != 1):
         out.append(Violation(post.platform, "disclaimer_missing", "must end with the disclaimer once"))
     n = measured_length(field, post.caption)
@@ -545,4 +634,34 @@ def check_composed(post: ComposedPost, run_date: date, authorship: str = AUTHORS
         if said:
             out.append(Violation(post.platform, "authorship_mismatch",
                                  f"a template post says {said[0]!r} - its words are a template's"))
+    return out
+
+
+def extra_video_caption(platform: str, caption: str, run_date: date, authorship: str = AUTHORSHIP_AI) -> str:
+    """The caption of `platform`'s EXTRA video post (Batch 3, 2026-10-20): its OWN accepted `caption` — the one
+    `compose` wrote and `check_composed` passed — with ONLY the code-owned disclaimer at its end swapped for the
+    narrated-video one (`disclaimer_for(..., video=True)`). The body, hashtags, value line and link are kept
+    character for character: no new model text, nothing for the judge to read, and the first line (where the
+    template rules forbid a person's name) is the accepted one.
+
+    ValueError — never a guessed caption — when `platform` is not one of EXTRA_VIDEO_FIELDS; when `caption` is
+    not a string ending, exactly once, with the disclaimer `authorship` words for `run_date` (a caption this
+    module did not compose, another day's, the other authorship's); or when the swapped caption fails
+    `check_composed(video=True)` (the codes are named: a Threads caption the longer disclaimer pushes over its
+    500 characters is `over_platform_limit`). Pure; the messages never carry caption text."""
+    who = _authorship(authorship, "extra_video_caption")
+    if not isinstance(platform, str) or platform not in EXTRA_VIDEO_FIELDS:
+        raise ValueError(f"extra_video_caption: {str(platform)[:40]!r} takes no extra video post "
+                         f"(one of {EXTRA_VIDEO_FIELDS})")
+    if not isinstance(run_date, date):
+        raise ValueError(f"extra_video_caption: run_date must be a date, not {type(run_date).__name__}")
+    text = disclaimer_for(platform, run_date, who)
+    if not isinstance(caption, str) or not text or not caption.endswith(text) or caption.count(text) != 1:
+        raise ValueError(f"extra_video_caption: the {platform} caption does not end, once, with its {who} "
+                         f"disclaimer of {run_date.isoformat()}")
+    out = caption[:len(caption) - len(text)] + disclaimer_for(platform, run_date, who, video=True)
+    problems = check_composed(ComposedPost(platform, None, out), run_date, who, video=True)
+    if problems:
+        raise ValueError(f"extra_video_caption: the {platform} video caption fails its checks "
+                         f"({', '.join(sorted({v.code for v in problems}))})")
     return out

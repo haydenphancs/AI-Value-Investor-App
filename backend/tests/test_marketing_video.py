@@ -244,6 +244,24 @@ def T(words, n_cards, narration, tail=4.0):
     return vid.timeline(words, n_cards, narration, tail, hook_card=False)
 
 
+def _lesson_specs(n_text: int = 3, *, hook: str = ""):
+    """A lesson's cards as cards_for_script builds them: [hook card?] + n text cards + the disclaimer."""
+    from marketing import cards
+
+    specs = [cards.CardSpec("text", title=f"Card {i}", body="A body.") for i in range(n_text)]
+    specs.append(cards.CardSpec("disclaimer", body="Educational only. Caydex"))
+    return ([cards.CardSpec("hook", title=hook)] if hook else []) + specs
+
+
+def _template_specs(n_text: int = 4):
+    """A template's cards: [opening] + one text card per line + the disclaimer."""
+    from marketing import cards
+
+    opening = cards.CardSpec("opening", badge="FILED LAST WEEK", title="A headline",
+                             logos=(cards.LogoArt("GME", "GameStop"),))
+    return [opening] + _lesson_specs(n_text)
+
+
 def test_the_render_asks_the_timeline_for_the_content_opening(monkeypatch, tmp_path):
     """The stage's own call (render.produce_video), not a re-statement of it: the timeline is asked
     for hook_card=False with every card the stage built (no brand card in front)."""
@@ -260,7 +278,7 @@ def test_the_render_asks_the_timeline_for_the_content_opening(monkeypatch, tmp_p
 
     monkeypatch.setattr(vid, "timeline", spy)
     with pytest.raises(Stop):
-        rd.produce_video(workdir=tmp_path, specs=[object()] * 4, words=[], narration_seconds=5.0,
+        rd.produce_video(workdir=tmp_path, specs=_lesson_specs(3), words=[], narration_seconds=5.0,
                          audio_file="a.m4a", fonts_dir=str(_FONT.parent), logo_path=None, threads=2,
                          heartbeat=None, run_id="r", max_seconds=75.0, layout_engine="basic")
     assert seen == {"hook_card": False, "n_cards": 4}
@@ -899,6 +917,56 @@ def test_render_video_returns_the_bytes_and_the_probe(monkeypatch, tmp_path):
     assert calls == ["narration.m4a", "ffmpeg", "video.mp4"]
 
 
+def test_render_video_bounds_ffmpeg_by_its_timeout(monkeypatch, tmp_path):
+    """B2-PUSHIN-NO-FALLBACK: a push-in fallback shares ONE ffmpeg budget with the failed render before it
+    (render.py), so the render takes its ffmpeg timeout — RENDER_TIMEOUT_SECONDS unless told less. A timeout
+    that is not a positive finite number is refused before any probe or ffmpeg run."""
+    seen = []
+
+    def probe(ffprobe, path, *, cwd, run_id):
+        if path == "narration.m4a":
+            return vid.ProbeResult(audio_codec="aac", sample_rate=48000, channels=2, duration=2.0)
+        return _good_probe()
+
+    def run(argv, *, cwd, timeout, heartbeat, run_id):
+        seen.append(timeout)
+        (tmp_path / argv[-1]).write_bytes(_MOOV_FIRST)
+
+    monkeypatch.setattr(vid, "_probe", probe)
+    monkeypatch.setattr(vid, "run_ffmpeg", run)
+    kw = _workdir(tmp_path)
+    vid.render_video(**kw)
+    vid.render_video(**kw, timeout=42.5)
+    assert seen == [vid.RENDER_TIMEOUT_SECONDS, 42.5]
+    for bad in (0, -1.0, float("nan"), float("inf"), True, "60", None):
+        with pytest.raises(ValueError, match="timeout"):
+            vid.render_video(**kw, timeout=bad)
+    assert len(seen) == 2
+
+
+def test_produce_video_hands_the_fallback_budget_to_ffmpeg_and_nothing_more(monkeypatch, tmp_path):
+    """render.produce_video passes `ffmpeg_timeout` as the render's `timeout` — and, without one, calls the
+    render keyword for keyword as before (a stage that never falls back changes nothing)."""
+    from marketing import render as rd
+
+    seen = []
+
+    def fake_render(**kw):
+        seen.append(kw)
+        return b"mp4", vid.ProbeResult(duration=kw["segments"][-1].end)
+
+    monkeypatch.setattr(vid, "render_video", fake_render)
+    words = [W("Hello", 0.2, 0.6, 0), W("there.", 0.7, 1.1, 0), W("Line", 1.4, 1.8, 1), W("one.", 1.9, 2.4, 1)]
+    kw = dict(words=words, narration_seconds=3.0, audio_file="a.m4a", fonts_dir=str(_FONT.parent), logo_path=None,
+              threads=2, heartbeat=None, run_id="r", max_seconds=75.0, layout_engine="basic")
+    for name, extra in (("plain", {}), ("budget", {"ffmpeg_timeout": 123.0}), ("none", {"ffmpeg_timeout": None})):
+        work = tmp_path / name
+        work.mkdir()
+        rd.produce_video(workdir=work, specs=_lesson_specs(2), **kw, **extra)
+    assert "timeout" not in seen[0] and seen[1]["timeout"] == 123.0 and "timeout" not in seen[2]
+    assert set(seen[0]) == set(seen[2]) == set(seen[1]) - {"timeout"}
+
+
 def test_render_video_rejects_a_trailing_moov(monkeypatch, tmp_path):
     kw = _workdir(tmp_path)
     _fake_render(monkeypatch, tmp_path, out_bytes=_MDAT_FIRST, out_probe=_good_probe())
@@ -1076,8 +1144,11 @@ def test_a_per_line_video_with_uneven_lines_still_gives_every_line_its_card():
 
 
 def test_the_render_passes_hook_card_only_for_a_template(monkeypatch, tmp_path):
-    """render.produce_video forwards `hook_card` to the timeline: True for a per-line (template) video,
-    False — the drop-1 opening — by default."""
+    """render.produce_video asks the timeline for `hook_card=True` exactly when card 0 is shown alone
+    over the hook — a template's opening card (drop 2a) or a lesson's hook card (Batch 2) — whether the
+    caller says so or not; the drop-1 opening (False) for a lesson's text card. A caller that says
+    otherwise than the cards is refused before anything is drawn (a timeline that disagrees with its
+    cards would show the hook card over lines 1-2)."""
     from marketing import render as rd
 
     class Stop(Exception):
@@ -1090,13 +1161,23 @@ def test_the_render_passes_hook_card_only_for_a_template(monkeypatch, tmp_path):
         raise Stop
 
     monkeypatch.setattr(vid, "timeline", spy)
-    kw = dict(workdir=tmp_path, specs=[object()] * 6, words=[], narration_seconds=5.0, audio_file="a.m4a",
+    kw = dict(workdir=tmp_path, words=[], narration_seconds=5.0, audio_file="a.m4a",
               fonts_dir=str(_FONT.parent), logo_path=None, threads=2, heartbeat=None, run_id="r",
               max_seconds=75.0, layout_engine="basic")
-    for extra in ({"hook_card": True}, {}):
+    for specs, extra in ((_template_specs(), {"hook_card": True}), (_template_specs(), {}),
+                         (_lesson_specs(3), {}), (_lesson_specs(3), {"hook_card": False}),
+                         (_lesson_specs(3, hook="Meet Mr. Market."), {}),
+                         (_lesson_specs(3, hook="Meet Mr. Market."), {"hook_card": True})):
         with pytest.raises(Stop):
-            rd.produce_video(**kw, **extra)
-    assert seen == [{"hook_card": True}, {"hook_card": False}]
+            rd.produce_video(specs=specs, **kw, **extra)
+    assert seen == [{"hook_card": True}, {"hook_card": True}, {"hook_card": False}, {"hook_card": False},
+                    {"hook_card": True}, {"hook_card": True}]
+    for specs, extra in ((_template_specs(), {"hook_card": False}), (_lesson_specs(3), {"hook_card": True}),
+                         (_lesson_specs(3, hook="Meet Mr. Market."), {"hook_card": False}),
+                         (_lesson_specs(3), {"hook_card": 1}), (_lesson_specs(3), {"push_in": 1})):
+        with pytest.raises(ValueError, match="hook_card|push_in"):
+            rd.produce_video(specs=specs, **kw, **extra)
+    assert len(seen) == 6                                       # refused before the timeline
 
 
 # ── review round 2: the platforms' pinned cover frame is the opening card ─────────────────────────────
@@ -1137,3 +1218,303 @@ def test_the_pinned_cover_frame_is_always_the_opening_card(hook_card):
         assert first.card == 0 and first.start == 0.0
         assert first.end >= cover + 1.0 / vid.FPS, segs             # the cover instant is card 0's, alone
         assert vid._frame(cover) < vid._frame(first.end)
+
+
+# ── Batch 2 (2026-10-19, "first seconds"): the hook card's timeline, the push-in, the captions ──────
+
+
+def test_a_lessons_hook_card_opens_alone_and_the_card_pairs_still_follow_the_prompt():
+    """A lesson with the frozen `hook_card`: [hook card] + 3 text cards + [disclaimer], timed
+    `hook_card=True` — the hook card alone over the hook, then the writer's pairs exactly where the
+    prompt promises them (lines 1-2, 3-4, 5-6), the same switches as today's opening without it."""
+    starts = [0.0] + [2.5 + 4.0 * i for i in range(6)]      # hook, then lines 1..6
+    segs = vid.timeline(_table(starts), 5, 26.0, 4.0, hook_card=True)
+    assert [s.card for s in segs] == [0, 1, 2, 3, 4]
+    assert [s.start for s in segs] == [0.0, 2.5, 10.5, 18.5, 26.0]    # hook alone, lines 1, 3, 5, disclaimer
+    _assert_well_formed(segs, 5, 26.0, 4.0)
+    today = T(_table(starts), 4, 26.0)
+    assert [s.start for s in segs[2:]] == [s.start for s in today[1:]]  # the pairs did not move
+
+
+def test_the_cover_frame_is_the_hook_card_mid_push_in():
+    """The platforms' pinned cover (VIDEO_COVER_MS, 500 ms) on a hook-card lesson: card 0 — the hook
+    card, shown at least MIN_SEGMENT_SECONDS — alone on screen, mid-zoom (the push-in's 45 frames are
+    still running), and never inside the first crossfade."""
+    cover_frame = vid._frame(_cover_ms() / 1000.0)
+    starts = [0.0] + [2.5 + 4.0 * i for i in range(6)]
+    for hook_end in (0.3, 0.9, 2.4):                          # a hook ending before, at and after the minimum
+        table = [W("Meet", 0.0, hook_end / 2, 0), W("Mr.", hook_end / 2, hook_end, 0)] + _table(starts)[2:]
+        segs = vid.timeline(table, 5, 26.0, 4.0, hook_card=True)
+        assert segs[0].card == 0 and segs[0].end >= vid.MIN_SEGMENT_SECONDS
+        assert cover_frame < vid._frame(segs[0].end)          # the xfade starts at card 1's own boundary
+        assert 0 < cover_frame < vid.PUSH_IN_FRAMES           # the zoom is under way, not finished
+
+
+def test_the_push_in_filters_zoom_from_the_upscale_then_hold_the_last_frame():
+    f = vid.push_in_filters(80)
+    assert [part.split("=", 1)[0] for part in f.split(",")] == [
+        "setsar", "scale", "format", "zoompan", "setsar", "scale", "format", "tpad"]
+    up, zoom, down, hold = f.split(",format=yuv444p,")[0], f.split(",")[3], f.split(",")[5], f.split(",")[7]
+    assert up == ("setsar=1,scale=w=2160:h=3840:flags=bicubic+accurate_rnd+full_chroma_int+bitexact"
+                  ":out_color_matrix=bt709:out_range=tv")
+    assert zoom == "zoompan=z=1+0.0300*on/44:x=(iw-iw/zoom)*540/1080:y=(ih-ih/zoom)*640/1920:d=45:s=1080x1920:fps=30"
+    # 4:4:4 → 4:2:0 with the matrix and range stated on BOTH sides: a chroma step, never a colour shift.
+    assert down == ("scale=flags=bicubic+accurate_rnd+full_chroma_int+bitexact:in_color_matrix=bt709:in_range=tv"
+                    ":out_color_matrix=bt709:out_range=tv")
+    assert f.split(",")[6] == "format=yuv420p" and hold == "tpad=stop_mode=clone:stop=35"
+    # No quoting is needed: no option value holds a filtergraph metacharacter.
+    assert not set("'\";[]\\") & set(f)
+    for part in f.split(","):
+        name, _, opts = part.partition("=")
+        assert all(o.count("=") == 1 for o in opts.split(":")) or name in ("setsar", "format"), part
+    # Never `loop` with a start frame: ffmpeg's loop filter counts it one off (start=44 repeats frame 43).
+    assert "loop=" not in f
+
+
+@pytest.mark.parametrize("count", [1, 9, 44, 45, 46, 300])
+def test_the_push_in_makes_exactly_its_streams_frames(count):
+    f = vid.push_in_filters(count)
+    d = int(re.search(r":d=(\d+):", f).group(1))
+    stop = int(re.search(r"tpad=stop_mode=clone:stop=(\d+)$", f).group(1))
+    assert d == min(vid.PUSH_IN_FRAMES, count) and d + stop == count
+    assert "on/44:" in f                                      # a short stream stops part-way at the same speed
+
+
+@pytest.mark.parametrize("count", [0, -1, True, 2.0, "45", None])
+def test_the_push_in_refuses_a_bad_frame_count(count):
+    with pytest.raises(ValueError, match="count"):
+        vid.push_in_filters(count)
+
+
+def test_the_push_in_changes_only_the_first_stream_of_the_command():
+    plain, pushed = _argv(), _argv(push_in=True)
+    g_plain, g_pushed = _graph(plain).split(";"), _graph(pushed).split(";")
+    assert g_pushed[1:] == g_plain[1:]                        # every other stream, the fades, captions, audio
+    assert [a for a in pushed if a != _graph(pushed)] == [a for a in plain if a != _graph(plain)]
+    frames = [round(s.start * 30) for s in SEGS] + [round(SEGS[-1].end * 30)]
+    count = frames[1] - frames[0] + vid.XFADE_FRAMES
+    assert g_pushed[0] == f"[0:v]{vid.push_in_filters(count)},setpts=N/(30*TB),fps=30[v0]"
+    assert "zoompan" not in _graph(plain) and "tpad" not in _graph(plain)
+    assert _graph(pushed).count("zoompan") == 1
+    # one segment: the push-in on the only (disclaimer-less) stream, which carries no fade frames
+    (one,) = _graph(_argv([S(0, 0.0, 2.0)], card_files=["c.png"], push_in=True)).split(";")[:1]
+    assert one.startswith("[0:v]") and "tpad=stop_mode=clone:stop=15," in one
+
+
+@pytest.mark.parametrize("bad", [1, 0, None, "yes"])
+def test_push_in_must_be_a_bool(bad):
+    with pytest.raises(ValueError, match="push_in"):
+        _argv(push_in=bad)
+
+
+def test_the_push_in_anchor_is_the_text_zones_centre_and_keeps_card_text_above_the_captions():
+    """The zoom's fixed point is the middle of the cards' text zone (every card draws inside it), and
+    at full zoom no pixel of that zone reaches the caption band or leaves the frame."""
+    from marketing import cards
+
+    assert vid.SIZE == (cards.WIDTH, cards.HEIGHT)
+    assert vid.PUSH_IN_ANCHOR == ((cards.SAFE_X[0] + cards.SAFE_X[1]) // 2,
+                                  (cards.TEXT_ZONE_Y[0] + cards.TEXT_ZONE_Y[1]) // 2)
+    (ax, ay), z = vid.PUSH_IN_ANCHOR, vid.PUSH_IN_ZOOM
+
+    def at(v: float, a: float) -> float:
+        return a + (v - a) * z
+
+    assert at(cards.TEXT_ZONE_Y[1], ay) < cards.CAPTION_BAND_Y[0]          # ≈ 1134 < 1170
+    assert at(cards.TEXT_ZONE_Y[0], ay) >= 0
+    assert at(cards.SAFE_X[0], ax) >= 0 and at(cards.SAFE_X[1], ax) <= vid.SIZE[0]
+    assert 1.0 < z <= 1.05 and vid.PUSH_IN_FRAMES == 45 and vid.PUSH_IN_UPSCALE >= 2
+    # the pipeline version names the push-in's parameters (they change the bytes)
+    assert f"push{z:g}x{vid.PUSH_IN_FRAMES}up{vid.PUSH_IN_UPSCALE}" in vid.VIDEO_RENDER_VERSION
+    assert vid.VIDEO_RENDER_VERSION.endswith("/v2")
+
+
+def test_the_render_leaves_the_hook_captions_out_only_under_a_hook_card(monkeypatch, tmp_path):
+    """render.produce_video burns the narration's hook line under every opening EXCEPT a hook card,
+    which shows those very words (Batch 2); an opening card or a lesson's first text card keeps them.
+    The other lines are captioned either way, and the push-in reaches the render untouched."""
+    from marketing import render as rd
+
+    seen = {}
+
+    def fake_render(*, workdir, card_files, segments, ass_file, push_in, **_kw):
+        seen.update(ass=(Path(workdir) / ass_file).read_text(encoding="utf-8"), segments=segments,
+                    push_in=push_in, card_files=list(card_files))
+        return b"mp4", vid.ProbeResult(duration=segments[-1].end)
+
+    monkeypatch.setattr(vid, "render_video", fake_render)
+    hook = "Meet your moody business partner."
+    lines = [hook] + [f"Line {i} keeps its own caption words." for i in range(1, 7)]
+    words, t = [], 0.25
+    for li, line in enumerate(lines):
+        for w in line.split():
+            words.append(W(w, round(t, 3), round(t + 0.3, 3), li))
+            t += 0.36
+        t += 0.28
+    narration = round(t, 3)
+    kw = dict(words=words, narration_seconds=narration, audio_file="a.m4a", fonts_dir=str(_FONT.parent),
+              logo_path=None, threads=2, heartbeat=None, run_id="r", max_seconds=75.0, layout_engine="basic")
+
+    def dialogue() -> str:
+        return "\n".join(ln for ln in seen["ass"].splitlines() if ln.startswith("Dialogue:"))
+
+    for name, specs, push, hidden in (("hook", _lesson_specs(3, hook=hook), True, True),
+                                      ("lesson", _lesson_specs(3), False, False),
+                                      ("template", _template_specs(6), True, False)):
+        work = tmp_path / name
+        work.mkdir()
+        rd.produce_video(workdir=work, specs=specs, push_in=push, **kw)
+        assert seen["push_in"] is push
+        text = dialogue()
+        assert ("moody" in text) is not hidden and ("partner." in text) is not hidden, name
+        assert "Line 1" in text and "Line 6" in text and "caption" in text           # the rest stays
+        if hidden:
+            assert seen["segments"][0].card == 0 and seen["card_files"][0] == "card00.png"
+            assert seen["segments"][0].end >= max(w["e"] for w in words if w["line"] == 0)
+
+
+# ── ONE real push-in render ──────────────────────────────────────────────────
+
+
+def _gray_frames(path: Path, frames: List[int]) -> List[bytes]:
+    """The luma plane of each listed frame (presentation order)."""
+    select = "+".join(f"eq(n,{n})" for n in frames)
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-vf", f"select='{select}'",
+                          "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                         capture_output=True, check=True, timeout=60).stdout
+    size = vid.SIZE[0] * vid.SIZE[1]
+    assert len(raw) == size * len(frames), (len(raw), size)
+    return [raw[i * size:(i + 1) * size] for i in range(len(frames))]
+
+
+@pytest.mark.skipif(not HAVE_FFMPEG, reason="needs ffmpeg + ffprobe")
+def test_a_real_push_in_zooms_card_0_only_stays_above_the_captions_and_is_bit_exact(tmp_path):
+    """Through the local ffmpeg: card 0 grows from 1.00 to PUSH_IN_ZOOM over its first PUSH_IN_FRAMES
+    frames about the text zone's middle and then holds; the text zone's bottom edge moves down but stays
+    above the caption band; the opening frame is the card as drawn (no colour shift); the next card and
+    the disclaimer tail are untouched; and two renders are byte-identical (this host)."""
+    from PIL import Image, ImageDraw
+
+    from marketing import cards
+
+    page = (23, 27, 38)
+    card0 = Image.new("RGB", vid.SIZE, page)
+    d = ImageDraw.Draw(card0)
+    d.rectangle([300, 400, 779, 799], fill=(255, 255, 255))                          # 480 × 400 px
+    d.rectangle([cards.SAFE_X[0], cards.TEXT_ZONE_Y[1] - 20, cards.SAFE_X[1] - 1, cards.TEXT_ZONE_Y[1] - 1],
+                fill=(255, 255, 255))                                                # the zone's bottom rows
+    card0.save(tmp_path / "card00.png")
+    _png(tmp_path / "card01.png", colour=(59, 130, 246))
+    _png(tmp_path / "card02.png", colour=(200, 200, 200))
+    narration = 3.2
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    f"sine=frequency=440:sample_rate=48000:duration={narration}", "-ac", "2", "-c:a", "aac",
+                    "-b:a", "160k", "-fflags", "+bitexact", "-flags:a", "+bitexact",
+                    str(tmp_path / "narration.m4a")], check=True, capture_output=True, timeout=30)
+    words = [W("Meet", 0.0, 0.4, 0), W("Mr.", 0.4, 0.9, 0), W("Start", 2.0, 2.4, 1), W("small.", 2.4, 3.0, 1)]
+    (tmp_path / "captions.ass").write_text(cap.build_ass([]), encoding="utf-8")       # card pixels only
+    (tmp_path / "fonts").mkdir()
+    shutil.copyfile(_FONT, tmp_path / "fonts" / "Inter-Bold.ttf")
+    segs = vid.timeline(words, 3, narration, 1.0, hook_card=True)
+    assert segs == [S(0, 0.0, 2.0), S(1, 2.0, 3.2), S(2, 3.2, 4.2)]
+    kw = dict(workdir=str(tmp_path), card_files=[f"card{s.card:02d}.png" for s in segs], segments=segs,
+              audio_file="narration.m4a", ass_file="captions.ass", fonts_dir="fonts", threads=2,
+              run_id="push", max_seconds=75.0)
+    data, probe = vid.render_video(**kw, push_in=True)
+    vid.check_probe(probe, expected_seconds=4.2, max_seconds=75.0, max_bytes=10 ** 9)
+    assert probe.r_frame_rate == "30/1" and probe.avg_frame_rate == "30/1"
+    again, _ = vid.render_video(**{**kw, "out_file": "video2.mp4"}, push_in=True)
+    assert again == data                                                       # bit-exact on this host
+    plain, _ = vid.render_video(**{**kw, "out_file": "plain.mp4"})
+    assert plain != data
+    counts = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames",
+                             "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0",
+                             str(tmp_path / "video.mp4")], capture_output=True, text=True, timeout=30)
+    assert int(counts.stdout.strip()) == round(4.2 * vid.FPS)
+
+    w = vid.SIZE[0]
+    f0, f15, f44, f52 = _gray_frames(tmp_path / "video.mp4", [0, 15, 44, 52])
+    (p0,) = _gray_frames(tmp_path / "plain.mp4", [0])
+    bg, white = f0[20 * w + 20], f0[600 * w + 540]
+    assert white - bg > 150
+
+    def cover(f: bytes, idx) -> float:                       # sub-pixel ink length along a row/column
+        return sum(min(max((f[i] - bg) / (white - bg), 0.0), 1.0) for i in idx)
+
+    def box_w(f):
+        return cover(f, range(600 * w + 150, 600 * w + 930))
+
+    def box_h(f):
+        return cover(f, range(250 * w + 540, 950 * w + 540, w))
+
+    def bottom_ink_row(f) -> int:
+        return max(y for y in range(1000, vid.SIZE[1]) if f[y * w + 540] - bg > (white - bg) / 2)
+
+    z15, z44, z52 = (box_w(f) / box_w(f0) for f in (f15, f44, f52))
+    assert z15 == pytest.approx(1 + (vid.PUSH_IN_ZOOM - 1) * 15 / 44, abs=0.004)
+    assert z44 == pytest.approx(vid.PUSH_IN_ZOOM, abs=0.004) and z52 == pytest.approx(z44, abs=0.002)
+    assert box_h(f44) / box_h(f0) == pytest.approx(vid.PUSH_IN_ZOOM, abs=0.004)
+    # the zone's bottom edge moved down with the zoom, and stayed above the caption band
+    assert bottom_ink_row(f0) == cards.TEXT_ZONE_Y[1] - 1
+    assert cards.TEXT_ZONE_Y[1] + 5 < bottom_ink_row(f44) < cards.CAPTION_BAND_Y[0]
+    for f in (f0, f15, f44, f52):
+        band = f[cards.CAPTION_BAND_Y[0] * w:cards.CAPTION_BAND_Y[1] * w]
+        assert max(band) - bg <= 2                                             # nothing drawn in the band
+    # The opening frame is the card as drawn: the plain render's pixels wherever the card is flat (the
+    # 2× bicubic round trip only rings by a few levels on a hard edge — measured mean |Δ| 0.09).
+    def flat_at(i: int) -> bool:
+        y, x = divmod(i, w)
+        return 4 <= x < w - 4 and 4 <= y < vid.SIZE[1] - 4 and all(
+            abs(p0[i + dy * w + dx] - p0[i]) <= 2 for dx in range(-4, 5) for dy in range(-4, 5))
+
+    flat = [i for i in range(0, len(f0), 997) if flat_at(i)]
+    assert len(flat) > 1500 and max(abs(f0[i] - p0[i]) for i in flat) <= 4     # x264 noise included
+    assert sum(abs(a - b) for a, b in zip(f0[::7], p0[::7])) / len(f0[::7]) < 0.5
+    # the push-in touches card 0 only: card 1 and the disclaimer tail are today's
+    for at, colour in ((2.6, (59, 130, 246)), (4.0, (200, 200, 200))):
+        got = _pixel(tmp_path / "video.mp4", at)
+        assert all(abs(g - c) <= 6 for g, c in zip(got, colour)), (at, tuple(got), colour)
+
+
+@pytest.mark.skipif(not HAVE_FFMPEG, reason="needs ffmpeg + ffprobe")
+def test_a_real_hook_card_video_shows_the_hook_once_then_captions_the_script(tmp_path):
+    """The whole render path (real cards, captions and ffmpeg — render.produce_video): a lesson that opens
+    on its HOOK card shows no burned caption under it (the card already says the hook) and captions the
+    script lines after it; the same lesson without the hook card captions its hook over the first card.
+    The caption band is read in pixels."""
+    from marketing import cards
+    from marketing import render as rd
+
+    hook = "Meet your moody business partner."
+    lines = [hook, "He names a price every day.", "His price follows his mood."]
+    words, t = [], 0.25
+    for li, line in enumerate(lines):
+        for word in line.split():
+            words.append(W(word, round(t, 3), round(t + 0.3, 3), li))
+            t += 0.34
+        t += 0.28
+    narration = round(t, 3)
+    line1 = next(w["s"] for w in words if w["line"] == 1)
+    band = cards.CAPTION_BAND_Y
+    w = vid.SIZE[0]
+    for with_hook in (True, False):
+        work = tmp_path / ("hook" if with_hook else "plain")
+        work.mkdir()
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i",
+                        f"sine=frequency=440:sample_rate=48000:duration={narration}", "-ac", "2", "-c:a", "aac",
+                        "-b:a", "160k", str(work / "narration.m4a")], check=True, capture_output=True, timeout=30)
+        specs = _lesson_specs(2, hook=hook if with_hook else "")
+        data, duration, shown = rd.produce_video(
+            workdir=work, specs=specs, words=words, narration_seconds=narration, audio_file="narration.m4a",
+            fonts_dir=str(_FONT.parent), logo_path=None, threads=2, heartbeat=None, run_id="e2e", max_seconds=75.0,
+            layout_engine=cards.resolve_layout_engine(None), push_in=with_hook)
+        assert shown == list(range(len(specs))) and duration == pytest.approx(narration + 4.0, abs=0.2)
+        (work / "out.mp4").write_bytes(data)
+        under_hook, under_line1 = _gray_frames(work / "out.mp4", [vid._frame(1.0), vid._frame(line1 + 0.2)])
+        bg = under_hook[20 * w + 20]
+
+        def ink(f: bytes) -> int:
+            return max(f[band[0] * w:band[1] * w]) - bg
+
+        assert (ink(under_hook) < 40) is with_hook, (with_hook, ink(under_hook))     # the hook, captioned or not
+        assert ink(under_line1) > 150                                                  # line 1 is captioned

@@ -16,7 +16,31 @@ Pinned here:
   the "%" rule, number / date formatting boundaries, script shape, the caption budget matrix
   (every sample × store state × allow_x_url through `check_composed(authorship="template")`),
   `revalidate` (untouched → []; tampering any public string, the facts or the version → a
-  violation; JSONB round trips → []), and the name-free alt text.
+  violation; JSONB round trips → []), and the name-free alt text;
+* news-v19, Money Map (Batch 1 plan item 2): the neutral "How fiscal {fy} revenue broke down" and "by
+  region" only when every named part is on `REGION_NAMES` (Coca-Cola- and Costco-shaped maps; McDonald's
+  live markets, a business line among regions and a region word inside a label stay neutral), no "Its …
+  business", "the United States" in running text but never on a bar, card, cover or alt-text label, "annual
+  results" and "Figures come from …" — never "as reported" — and the gross-profit definition exactly when a
+  gross line is shown (Amazon's FMP-filled gross profit); the three new samples run every matrix above.
+* news-v19, names and wording (Batch 1 plan item 5): a single-row Form 4 headline, YouTube title and cover
+  name the company once ("… of the company's stock", "… disclosed buying stock"); "Some of the shares";
+  "At least one more"; a descriptive investee ("Louisiana data center venture") takes "the" in running
+  text, never on a drawn label; the catalogue background stays out of every caption by default
+  (STAKE_BACKGROUND_IN_CAPTIONS); and every cover's chip — the period chips dating the earnings, Money Map
+  and symbol-less 13F figures — within OPENING_CHIP_MAX_CHARS, the guards mutation-checked.
+* news-v19, the review of 2026-10-16 (same version, lexicon re-pinned): Money Map's rest says "Everything
+  else" (F6); "by region" also needs the rest at most 10% of revenue (MM-6: Coca-Cola now reads neutral); a
+  gross LOSS has its own definition (MM-5); every region name that needs "the" gets it in running text ("The
+  U.S. made up …", "the Rest of the World" — MM-3, MM-2's acronyms too); McDonald's part is its International
+  Operated Markets (MM-1); a stake text naming a stake-source person is refused (ST-1); a theme's revenue line
+  can be a region, read "the United States" (TH-1); a 13F record without its more / fewer counts says the post
+  does not show those changes (F13-1); and the Form 4 and Money Map templates refuse a company-name word the
+  cover cannot draw, as the others did.
+* Batch 3 (2026-10-20): `extra_video_problems` — an EXTRA video post's caption (the platform's own accepted
+  caption under the narrated-video disclaimer) passes on every sample, a CEO in the body paragraphs included,
+  and is refused for a person in its first line or code-owned suffix, a banned word, a name inside the
+  members-elect window, or anything but the derivation; it never raises, and composes nothing new.
 
 Hermetic: pure functions over records built in the test. The Congress block-list is the real
 committed roster (`company_news_rules` loads it from `backend/data/`).
@@ -178,6 +202,58 @@ def comcast(**kw):
     return R.MoneyMap(**base)
 
 
+# news-v19 (Batch 1, plan item 2): the breakdown's wording follows its PARTS, never a guess.
+
+def coca_cola(**kw):
+    """A KO-shaped ALL-REGIONAL breakdown (Coca-Cola reports regional operating segments; here only regions,
+    each by its exact `REGION_NAMES` name): the one shape that reads "by region"."""
+    base = dict(series="money_map", company=co("KO", "Coca-Cola"), fiscal_year="2025", period_end=date(2025, 12, 31),
+                segments=(R.Segment("North America", 19_200_000_000.0),
+                          R.Segment("Europe, Middle East and Africa", 8_100_000_000.0),
+                          R.Segment("Latin America", 6_900_000_000.0), R.Segment("Asia Pacific", 5_200_000_000.0)),
+                other_usd=8_400_000_000.0, eliminations_usd=None, revenue_usd=47_800_000_000.0,
+                gross_profit_usd=29_300_000_000.0, operating_profit_usd=13_100_000_000.0,
+                net_income_usd=12_100_000_000.0)
+    base.update(kw)
+    return R.MoneyMap(**base)
+
+
+def mcdonalds(**kw):
+    """McDonald's fiscal 2025 as the adapter builds it from FMP's product segmentation (read live 2026-10-15):
+    FMP labels $13.63B "High-Growth Markets" — a segment of McDonald's 2015-2018 structure — which the adapter
+    shows as the International Operated Markets McDonald's has reported since 2019 (the review of 2026-10-16,
+    MM-1, checked on EDGAR: `R.SEGMENT_SYMBOL_OVERRIDES`, for McDonald's only; a group of markets it runs, no
+    region); "UNITED STATES" $10.82B (shown "United States", `SEGMENT_DISPLAY_OVERRIDES`); and "International
+    Developmental Licensed Markets and Corporate" $2.43B (over the 40-character cap: the adapter folds it into
+    the rest — "Everything else", true of a line the company breaks out). Mixed, so the NEUTRAL wording."""
+    base = dict(series="money_map", company=co("MCD", "McDonald's"), fiscal_year="2025", period_end=date(2025, 12, 31),
+                segments=(R.Segment("International Operated Markets", 13_630_000_000.0),
+                          R.Segment("United States", 10_820_000_000.0)),
+                other_usd=2_430_000_000.0, eliminations_usd=None, revenue_usd=26_880_000_000.0,
+                gross_profit_usd=15_100_000_000.0, operating_profit_usd=12_300_000_000.0,
+                net_income_usd=8_500_000_000.0)
+    base.update(kw)
+    return R.MoneyMap(**base)
+
+
+def amazon(**kw):
+    """An Amazon-shaped fiscal 2025 (the 2026-10-09 live preview: Online Stores $269.3B, Third-Party Seller
+    Services $172.2B, "Amazon Web Services" $128.7B …) with its cloud line under the short name Amazon itself
+    uses, "AWS" (`SEGMENT_ACRONYMS_OK` keeps it wherever a feed writes it so), and a gross profit FMP FILLS as
+    revenue minus cost of revenue — Amazon reports no gross subtotal — which is why the post explains gross
+    profit and never says "as reported"."""
+    base = dict(series="money_map", company=co("AMZN", "Amazon"), fiscal_year="2025", period_end=date(2025, 12, 31),
+                segments=(R.Segment("Online Stores", 270_000_000_000.0),
+                          R.Segment("Third-Party Seller Services", 170_000_000_000.0),
+                          R.Segment("AWS", 128_000_000_000.0), R.Segment("Advertising Services", 69_000_000_000.0),
+                          R.Segment("Subscription Services", 49_000_000_000.0)),
+                other_usd=31_000_000_000.0, eliminations_usd=None, revenue_usd=717_000_000_000.0,
+                gross_profit_usd=360_000_000_000.0, operating_profit_usd=80_000_000_000.0,
+                net_income_usd=77_000_000_000.0)
+    base.update(kw)
+    return R.MoneyMap(**base)
+
+
 # ── drop 2b records ───────────────────────────────────────────────────────────
 
 CONGRESS_RUN = date(2026, 12, 8)     # Tue, day 8..14: the first Congress Count day (contract §0, 2b-1)
@@ -277,9 +353,13 @@ def earnings(**kw):
 
 
 def earnings_profit():
-    """Fictional Fabrikam: earnings, no revenue estimate, no period end."""
+    """Fictional Fabrikam: earnings, no period end (the adapter's scale-check contingency), and a revenue pair
+    the post cannot WRITE — $2.3456B vs $2.3455B: a $100K gap no shared precision up to three places shows
+    (`revenue_pair` is None), so revenue is left out of every string. news-v19: a record WITHOUT a revenue pair
+    is refused (`test_earnings_refusals[no_revenue]`); this one has a checked pair, and its composition is
+    byte-identical to the news-v18 golden (no revenue line anywhere)."""
     return earnings(company=co("FBKM", "Fabrikam"), report_date=date(2026, 11, 10), period_end=None, eps_actual=4.86,
-                    eps_estimate=4.5, revenue_actual=None, revenue_estimate=None)
+                    eps_estimate=4.5, revenue_actual=2_345_600_000.0, revenue_estimate=2_345_500_000.0)
 
 
 #: (symbol, name, largest segment, its share of revenue, fiscal year) — 14 members: 12 tiles and
@@ -332,6 +412,20 @@ def _pair_and_grid_validate(monkeypatch):
     monkeypatch.setattr(onscreen, "SHIPPED_LAYOUTS", onscreen.LAYOUTS)
 
 
+#: The REAL members-elect window (owner decision 4), kept before the autouse fixture below replaces it.
+REAL_MEMBERS_ELECT_WINDOW = R.members_elect_window
+
+
+@pytest.fixture(autouse=True)
+def _names_outside_the_members_elect_window(monkeypatch):
+    """news-v19 (owner decision 4): the Form 4 samples run on Mon Nov 16, 2026 — INSIDE the members-elect
+    window (Election Day Nov 3, 2026 through Jan 3, 2027), where every row is role-only. The goldens and the
+    placement matrices pin the NAMED composition (what any day outside the window composes), so the window
+    is switched off here; the members-elect tests below restore the real one (`REAL_MEMBERS_ELECT_WINDOW`)
+    and pin the role-only composition, the boundaries and the validator against it."""
+    monkeypatch.setattr(R, "members_elect_window", lambda day: False)
+
+
 #: (name, record factory, run date) — every sample the matrices walk.
 SAMPLES = [
     ("ceo_roundup", ceo_roundup, MON),
@@ -344,6 +438,10 @@ SAMPLES = [
     ("costco_money_map", costco, THU),
     ("rivian_money_map", rivian, THU),
     ("comcast_money_map", comcast, THU),
+    # news-v19 (Batch 1): all regions → "by region"; mixed markets → neutral; Amazon's AWS and gross line
+    ("coca_cola_money_map", coca_cola, THU),
+    ("mcdonalds_money_map", mcdonalds, THU),
+    ("amazon_money_map", amazon, THU),
     # drop 2b
     ("congress_accenture", congress, CONGRESS_RUN),
     ("stake_nscale", nscale, STAKES_RUN),
@@ -396,7 +494,7 @@ GOLDEN = {
                       'logos': ['GME'],
                       'chip': 'GME',
                       'figure': '$74.4M',
-                      'headline': "GameStop's CEO disclosed buying GameStop stock"},
+                      'headline': "GameStop's CEO disclosed buying stock"},
      'image_spec': {'layout': 'rows',
                     'version': 1,
                     'kicker': 'FILED LAST WEEK · FORM 4',
@@ -424,10 +522,11 @@ GOLDEN = {
                    {'key': 'SBUX', 'name': 'Starbucks'}],
      'source_ref': 'news:ceo_buys:2026-11-09',
      'x': "At least 3 CEOs disclosed buying their own company's stock in Form 4s filed Nov 9-15.",
+     # news-v20: format-neutral — the caption also rides a text post (no picture), where nothing is "shown"
      'linkedin': "At least 3 CEOs disclosed buying their own company's stock in Form 4s filed Nov "
-                 '9-15. The largest here: GameStop, $74.4 million.\n'
+                 '9-15. The largest of these: GameStop, $74.4 million.\n'
                  '\n'
-                 "The purchases shown: GameStop, CEO Ryan Cohen, $74.4 million; Lowe's, CEO, $2.3 "
+                 "The purchases: GameStop, CEO Ryan Cohen, $74.4 million; Lowe's, CEO, $2.3 "
                  'million; Starbucks, CEO, $410,000.\n'
                  '\n'
                  # news-v12: a roundup's flag paragraph speaks of several buyers (no singular "buyer's")
@@ -437,11 +536,11 @@ GOLDEN = {
                  "A Form 4 is the report a company's officers and directors file within two business "
                  "days of a trade. Amounts are each filing's share count times the cost it reports for "
                  'each share.',
-     'tiktok': "GameStop's CEO disclosed buying $74.4 million of GameStop stock in Form 4s filed Nov "
+     'tiktok': "GameStop's CEO disclosed buying $74.4 million of the company's stock in Form 4s filed Nov "
                '10-11.\n'
                '\n'
                'The filings name Ryan Cohen, the CEO of GameStop.',
-     'youtube_title': "GameStop's CEO disclosed buying $74.4M of GameStop stock"},
+     'youtube_title': "GameStop's CEO disclosed buying $74.4M of the company's stock"},
     'ceo_spotlight': {'hook': "GameStop's chief executive disclosed buying $74.4 million of the company's stock.",
      'video_script': ["The filings are by the company's chief executive and were filed from November 10th "
                       'to November 11th.',
@@ -459,10 +558,10 @@ GOLDEN = {
                       'logos': ['GME'],
                       'chip': 'GME',
                       'figure': '$74.4M',
-                      'headline': "GameStop's CEO disclosed buying GameStop stock"},
+                      'headline': "GameStop's CEO disclosed buying stock"},
      'persons': ['Ryan Cohen'],
-     'x': "GameStop's CEO disclosed buying $74.4 million of GameStop stock in Form 4s filed Nov 10-11.",
-     'linkedin': "GameStop's CEO disclosed buying $74.4 million of GameStop stock in Form 4s filed Nov "
+     'x': "GameStop's CEO disclosed buying $74.4 million of the company's stock in Form 4s filed Nov 10-11.",
+     'linkedin': "GameStop's CEO disclosed buying $74.4 million of the company's stock in Form 4s filed Nov "
                  '10-11.\n'
                  '\n'
                  'The filings name Ryan Cohen, the CEO of GameStop.\n'
@@ -470,14 +569,14 @@ GOLDEN = {
                  "A Form 4 is the report a company's officers and directors file within two business "
                  "days of a trade. Amounts are each filing's share count times the cost it reports for "
                  'each share.',
-     'tiktok': "GameStop's CEO disclosed buying $74.4 million of GameStop stock in Form 4s filed Nov "
+     'tiktok': "GameStop's CEO disclosed buying $74.4 million of the company's stock in Form 4s filed Nov "
                '10-11.\n'
                '\n'
                'The filings name Ryan Cohen, the CEO of GameStop.',
-     'youtube_title': "GameStop's CEO disclosed buying $74.4M of GameStop stock",
+     'youtube_title': "GameStop's CEO disclosed buying $74.4M of the company's stock",
      # news-v17 (review round 17): the share figure is the TOTAL of the 2 purchases, never "2 purchases of
      # 3M shares" (read as 3M each), as the narration says it
-     'image_post': {'title': "GameStop's CEO disclosed buying GameStop stock",
+     'image_post': {'title': "GameStop's CEO disclosed buying stock",
                     'paragraphs': ['It shows $74.4M in 2 purchases, 3M shares in total.',
                                    'Source: SEC Form 4 filings. Filed Nov 9–15, 2026.']}},
     'ceo_spotlight_of_twin': {'hook': "The chief executive of Lowe's disclosed buying $2.3 million of the company's stock.",
@@ -495,11 +594,11 @@ GOLDEN = {
                       'logos': ['LOW'],
                       'chip': 'LOW',
                       'figure': '$2.3M',
-                      'headline': "The CEO of Lowe's disclosed buying Lowe's stock"},
+                      'headline': "The CEO of Lowe's disclosed buying stock"},
      'persons': [],
-     'x': "The CEO of Lowe's disclosed buying $2.3 million of Lowe's stock in a Form 4 filed Nov 12.",
+     'x': "The CEO of Lowe's disclosed buying $2.3 million of the company's stock in a Form 4 filed Nov 12.",
      # news-v11 (review round 11): the headline names the role and company, so no "The filing is by …"
-     'linkedin': "The CEO of Lowe's disclosed buying $2.3 million of Lowe's stock in a Form 4 filed "
+     'linkedin': "The CEO of Lowe's disclosed buying $2.3 million of the company's stock in a Form 4 filed "
                  'Nov 12.\n'
                  '\n'
                  "The shares are reported as held indirectly rather than in the buyer's own name.\n"
@@ -507,15 +606,15 @@ GOLDEN = {
                  "A Form 4 is the report a company's officers and directors file within two business "
                  "days of a trade. Amounts are each filing's share count times the cost it reports for "
                  'each share.',
-     'tiktok': "The CEO of Lowe's disclosed buying $2.3 million of Lowe's stock in a Form 4 filed Nov "
+     'tiktok': "The CEO of Lowe's disclosed buying $2.3 million of the company's stock in a Form 4 filed Nov "
                '12.\n'
                '\n'
                "A Form 4 is the report a company's officers and directors file within two business "
                "days of a trade. Amounts are each filing's share count times the cost it reports for "
                'each share.',
-     'youtube_title': "The CEO of Lowe's disclosed buying $2.3M of Lowe's stock",
+     'youtube_title': "The CEO of Lowe's disclosed buying $2.3M of the company's stock",
      # news-v17: one purchase keeps "of" (the narration's "one purchase of 9,812 shares")
-     'image_post': {'title': "The CEO of Lowe's disclosed buying Lowe's stock",
+     'image_post': {'title': "The CEO of Lowe's disclosed buying stock",
                     'paragraphs': ['It shows $2.3M in 1 purchase of 9,812 shares.', 'Held indirectly.',
                                    'Source: SEC Form 4 filings. Filed Nov 9–15, 2026.']}},
     'insider_mixed': {'hook': "Nike's chief financial officer disclosed buying $1.3 million of the company's stock.",
@@ -535,7 +634,7 @@ GOLDEN = {
                       'logos': ['NKE'],
                       'chip': 'NKE',
                       'figure': '$1.3M',
-                      'headline': "Nike's CFO disclosed buying Nike stock"},
+                      'headline': "Nike's CFO disclosed buying stock"},
      'image_spec': {'layout': 'rows',
                     'version': 1,
                     'kicker': 'FILED LAST WEEK · FORM 4',
@@ -562,9 +661,9 @@ GOLDEN = {
      'x': "At least 3 company insiders disclosed buying their own company's stock in Form 4s filed Nov "
           '9-15.',
      'linkedin': "At least 3 company insiders disclosed buying their own company's stock in Form 4s "
-                 'filed Nov 9-15. The largest here: Nike, $1.3 million.\n'
+                 'filed Nov 9-15. The largest of these: Nike, $1.3 million.\n'
                  '\n'
-                 'The purchases shown: Nike, CFO, $1.3 million; Contoso, director Anna Smith-Jones, '
+                 'The purchases: Nike, CFO, $1.3 million; Contoso, director Anna Smith-Jones, '
                  '$640,000; Hershey, director, $150,000.\n'
                  '\n'
                  'Some of the shares are reported as held indirectly.\n'
@@ -572,12 +671,12 @@ GOLDEN = {
                  "A Form 4 is the report a company's officers and directors file within two business "
                  "days of a trade. Amounts are each filing's share count times the cost it reports for "
                  'each share.',
-     'tiktok': "Nike's CFO disclosed buying $1.3 million of Nike stock in a Form 4 filed Nov 10.\n"
+     'tiktok': "Nike's CFO disclosed buying $1.3 million of the company's stock in a Form 4 filed Nov 10.\n"
                '\n'
                "A Form 4 is the report a company's officers and directors file within two business "
                "days of a trade. Amounts are each filing's share count times the cost it reports for "
                'each share.',
-     'youtube_title': "Nike's CFO disclosed buying $1.3M of Nike stock"},
+     'youtube_title': "Nike's CFO disclosed buying $1.3M of the company's stock"},
     # news-v12: a late filing — its trade dates (Oct 14-17) are said in place of the two-business-day rule
     'insider_late': {'hook': "A director of Hershey disclosed buying $150,000 of the company's stock.",
      # news-v15: one filing DATE and 2 purchases — maybe one Form 4, maybe two filed that day: no line counts them
@@ -594,22 +693,22 @@ GOLDEN = {
                       'logos': ['HSY'],
                       'chip': 'HSY',
                       'figure': '$150K',
-                      'headline': 'A director of Hershey disclosed buying Hershey stock'},
+                      'headline': 'A director of Hershey disclosed buying stock'},
      'persons': [],
-     'x': 'A director of Hershey disclosed buying $150,000 of Hershey stock on Form 4, filed Nov 12.',
-     'linkedin': 'A director of Hershey disclosed buying $150,000 of Hershey stock on Form 4, filed Nov 12.\n'
+     'x': "A director of Hershey disclosed buying $150,000 of the company's stock on Form 4, filed Nov 12.",
+     'linkedin': "A director of Hershey disclosed buying $150,000 of the company's stock on Form 4, filed Nov 12.\n"
                  '\n'
                  "The purchases are reported with trade dates from Oct 14 to Oct 17. A Form 4 is the report a "
                  "company's officers and directors file on their own trades. Amounts are each filing's share "
                  'count times the cost it reports for each share.',
-     'tiktok': 'A director of Hershey disclosed buying $150,000 of Hershey stock on Form 4, filed Nov 12.\n'
+     'tiktok': "A director of Hershey disclosed buying $150,000 of the company's stock on Form 4, filed Nov 12.\n"
                '\n'
                "The purchases are reported with trade dates from Oct 14 to Oct 17. A Form 4 is the report a "
                "company's officers and directors file on their own trades. Amounts are each filing's share "
                'count times the cost it reports for each share.',
-     'youtube_title': 'A director of Hershey disclosed buying $150K of Hershey stock',
+     'youtube_title': "A director of Hershey disclosed buying $150K of the company's stock",
      # news-v17: the share figure is the TOTAL of the 2 purchases
-     'image_post': {'title': 'A director of Hershey disclosed buying Hershey stock',
+     'image_post': {'title': 'A director of Hershey disclosed buying stock',
                     'paragraphs': ['It shows $150K in 2 purchases, 812 shares in total.',
                                    'Source: SEC Form 4 filings. Filed Nov 9–15, 2026.']}},
     'berkshire_13f': {'hook': "Berkshire Hathaway's latest 13F lists 3 newly reported holdings.",
@@ -693,8 +792,10 @@ GOLDEN = {
                {'title': 'Reported more shares', 'body': 'Uber'},
                {'title': 'Reported fewer shares', 'body': 'Chipotle Mexican Grill'},
                {'title': 'First appears', 'body': 'CoreWeave, listed Aug 2026'}],
+     # news-v19 (Batch 1, plan item 5): a filer with no symbol — the chip says the quarter
      'opening_card': {'kicker': '13F SEASON',
                       'logos': ['UBER'],
+                      'chip': 'Quarter ended Sep 30, 2026',
                       'figure': '1',
                       'headline': "holding with more shares in Pershing Square Capital Management's 13F"},
      'persons': [],
@@ -718,8 +819,7 @@ GOLDEN = {
      'youtube_title': "Pershing Square Capital Management's 13F: more shares of 1 holding"},
     'costco_money_map': {'hook': 'For every $100 of revenue in fiscal 2025, Costco kept $2.94 as net income.',
      'video_script': ['Costco reported revenue of $275.2 billion in fiscal 2025.',
-                      'Its United States business made up 73% of revenue, and Canada made up 14% of '
-                      'revenue.',
+                      'The United States made up 73% of revenue, and Canada made up 14% of revenue.',
                       'After the cost of sales, gross profit was $35.4 billion; after operating costs, '
                       'operating profit was $10.4 billion.',
                       'After interest, taxes and everything else, net income was $8.1 billion.'],
@@ -729,7 +829,7 @@ GOLDEN = {
                {'title': 'Net income', 'body': '$8.1B in fiscal 2025'}],
      'opening_card': {'kicker': 'MONEY MAP',
                       'logos': ['COST'],
-                      'chip': 'COST',
+                      'chip': 'Fiscal 2025',
                       'figure': '$2.94',
                       'headline': 'of every $100 of Costco revenue was net income'},
      'image_spec': {'layout': 'bars',
@@ -737,7 +837,7 @@ GOLDEN = {
                     'kicker': 'MONEY MAP',
                     'header': {'logo': 'COST', 'name': 'Costco'},
                     'title': 'How Costco makes money',
-                    'subtitle': 'Fiscal 2025 · as reported',
+                    'subtitle': 'Fiscal 2025 · annual results',
                     'segments': [{'label': 'United States',
                                   'value': '$200B',
                                   'ratio': 1.0,
@@ -768,7 +868,7 @@ GOLDEN = {
                               'statements · Fiscal 2025, ended Aug 31, 2025 · Caydex · Not affiliated '
                               'with anyone named'},
      'image_post': {'title': 'How Costco makes money',
-                    'paragraphs': ['Bars show revenue by product or business line: United States $200B; Canada $38.5B; '
+                    'paragraphs': ['Bars show revenue by region: United States $200B; Canada $38.5B; '
                                    'Other International $36.7B.',
                                    'A second set of bars shows Revenue $275.2B; Gross profit $35.4B; '
                                    'Operating profit $10.4B; Net income $8.1B.',
@@ -785,7 +885,7 @@ GOLDEN = {
      'linkedin': 'How Costco makes money: $275.2 billion of revenue in fiscal 2025, and $2.94 of every '
                  '$100 kept as net income.\n'
                  '\n'
-                 'Revenue by product or business line in fiscal 2025: United States, $200 billion; Canada, $38.5 '
+                 'How fiscal 2025 revenue broke down by region: the United States, $200 billion; Canada, $38.5 '
                  'billion; Other International, $36.7 billion.\n'
                  '\n'
                  'After the cost of sales, gross profit was $35.4 billion. After operating costs, '
@@ -793,18 +893,18 @@ GOLDEN = {
                  '\n'
                  'Net income was $8.1 billion: $2.94 of every $100 of revenue.\n'
                  '\n'
-                 "Figures are as reported in the company's annual financial statements for fiscal "
-                 '2025.',
+                 "Figures come from the company's annual financial statements for fiscal 2025. Gross profit "
+                 'is revenue minus the cost of sales.',
      'tiktok': 'How Costco makes money: $275.2 billion of revenue in fiscal 2025, and $2.94 of every '
                '$100 kept as net income.\n'
                '\n'
-               'Revenue by product or business line in fiscal 2025: United States, $200 billion; Canada, $38.5 billion; '
-               'Other International, $36.7 billion.',
+               'How fiscal 2025 revenue broke down by region: the United States, $200 billion; Canada, $38.5 '
+               'billion; Other International, $36.7 billion.',
      'youtube_title': 'How Costco makes money: fiscal 2025 results'},
     'rivian_money_map': {'hook': 'Rivian Automotive had a net loss of $66.38 for every $100 of revenue.',
      'video_script': ['Rivian Automotive reported revenue of $5.8 billion in fiscal 2025.',
-                      'Its Automotive business made up 80% of revenue, and Software and services made '
-                      'up 20% of revenue.',
+                      'Automotive made up 80% of revenue, and Software and services made up 20% of '
+                      'revenue.',
                       'After the cost of sales, gross loss was $80 million; after operating costs, '
                       'operating loss was $4 billion.',
                       'After interest, taxes and everything else, the net loss was $3.9 billion.'],
@@ -815,7 +915,7 @@ GOLDEN = {
                {'title': 'Net loss', 'body': '$3.9B in fiscal 2025'}],
      'opening_card': {'kicker': 'MONEY MAP',
                       'logos': ['RIVN'],
-                      'chip': 'RIVN',
+                      'chip': 'Fiscal 2025',
                       'figure': '$66.38',
                       'headline': 'net loss for every $100 of Rivian Automotive revenue'},
      'persons': [],
@@ -824,7 +924,7 @@ GOLDEN = {
      'linkedin': 'How Rivian Automotive makes money: $5.8 billion of revenue in fiscal 2025, and a net '
                  'loss of $66.38 for every $100.\n'
                  '\n'
-                 'Revenue by product or business line in fiscal 2025: Automotive, $4.6 billion; Software and services, '
+                 'How fiscal 2025 revenue broke down: Automotive, $4.6 billion; Software and services, '
                  '$1.2 billion.\n'
                  '\n'
                  'After the cost of sales, gross loss was $80 million. After operating costs, '
@@ -832,17 +932,20 @@ GOLDEN = {
                  '\n'
                  'The net loss was $3.9 billion: $66.38 for every $100 of revenue.\n'
                  '\n'
-                 "Figures are as reported in the company's annual financial statements for fiscal "
-                 '2025.',
+                 # the review of 2026-10-16 (MM-5): a gross LOSS is explained by its own twin
+                 "Figures come from the company's annual financial statements for fiscal 2025. Gross profit "
+                 'or loss is revenue minus the cost of sales.',
      'tiktok': 'How Rivian Automotive makes money: $5.8 billion of revenue in fiscal 2025, and a net '
                'loss of $66.38 for every $100.\n'
                '\n'
-               'Revenue by product or business line in fiscal 2025: Automotive, $4.6 billion; Software and services, '
+               'How fiscal 2025 revenue broke down: Automotive, $4.6 billion; Software and services, '
                '$1.2 billion.',
      'youtube_title': 'How Rivian Automotive makes money: fiscal 2025 results'},
     'comcast_money_map': {'hook': 'For every $100 of revenue in fiscal 2025, Comcast kept $13.10 as net income.',
      'video_script': ['Comcast reported revenue of $123.7 billion in fiscal 2025.',
-                      'Its Connectivity and Platforms business made up 64% of combined sales that year.',
+                      # news-v19: without "Its … business" the two-part line fits LINE_WORDS (19 words)
+                      'Connectivity and Platforms made up 64% of combined sales, and Content and '
+                      'Experiences made up 34% of combined sales.',
                       'After all operating costs, operating profit was $23.3 billion that year.',
                       'After interest, taxes and everything else, net income was $16.2 billion.'],
      'cards': [{'title': 'Revenue', 'body': '$123.7B in fiscal 2025'},
@@ -853,7 +956,7 @@ GOLDEN = {
                {'title': 'Net income', 'body': '$16.2B in fiscal 2025'}],
      'opening_card': {'kicker': 'MONEY MAP',
                       'logos': ['CMCSA'],
-                      'chip': 'CMCSA',
+                      'chip': 'Fiscal 2025',
                       'figure': '$13.10',
                       'headline': 'of every $100 of Comcast revenue was net income'},
      'persons': [],
@@ -862,28 +965,166 @@ GOLDEN = {
      'linkedin': 'How Comcast makes money: $123.7 billion of revenue in fiscal 2025, and $13.10 of '
                  'every $100 kept as net income.\n'
                  '\n'
-                 'Revenue by product or business line in fiscal 2025: Connectivity and Platforms, $82 billion; Content '
-                 'and Experiences, $43.4 billion; other or not broken out, $2.6 billion. Sales between its own business lines, '
-                 '$4.3 billion, are taken out of that total.\n'
+                 'How fiscal 2025 revenue broke down: Connectivity and Platforms, $82 billion; Content '
+                 'and Experiences, $43.4 billion; everything else, $2.6 billion. Sales between parts of the '
+                 'company, $4.3 billion, are taken out of that total.\n'
                  '\n'
                  'After operating costs, operating profit was $23.3 billion.\n'
                  '\n'
                  'Net income was $16.2 billion: $13.10 of every $100 of revenue.\n'
                  '\n'
-                 "Figures are as reported in the company's annual financial statements for fiscal "
-                 '2025.',
+                 "Figures come from the company's annual financial statements for fiscal 2025.",
      'tiktok': 'How Comcast makes money: $123.7 billion of revenue in fiscal 2025, and $13.10 of every '
                '$100 kept as net income.\n'
                '\n'
-               'Revenue by product or business line in fiscal 2025: Connectivity and Platforms, $82 billion; Content '
-               'and Experiences, $43.4 billion; other or not broken out, $2.6 billion. Sales between its own business lines, '
-               '$4.3 billion, are taken out of that total.',
+               'How fiscal 2025 revenue broke down: Connectivity and Platforms, $82 billion; Content '
+               'and Experiences, $43.4 billion; everything else, $2.6 billion. Sales between parts of the '
+               'company, $4.3 billion, are taken out of that total.',
      'youtube_title': 'How Comcast makes money: fiscal 2025 results'},
+    # news-v19 (Batch 1, plan item 2): an all-regional map reads "by region" (Costco, above); a mixed one
+    # (McDonald's markets) the neutral wording, "the United States" in running text only; Amazon keeps AWS and
+    # explains its FMP-filled gross profit. The review of 2026-10-16: Coca-Cola's parts are all regions, but its
+    # rest ($8.4B, 18% of revenue — 22% live, mostly businesses) is over MONEY_MAP_REGION_MAX_OTHER_SHARE, so it
+    # reads the neutral wording too (MM-6); the rest is "Everything else" (F6); McDonald's retired "High-Growth
+    # Markets" label is its International Operated Markets (MM-1).
+    'coca_cola_money_map': {'hook': 'For every $100 of revenue in fiscal 2025, Coca-Cola kept $25.31 as net income.',
+     'video_script': ['Coca-Cola reported revenue of $47.8 billion in fiscal 2025.',
+                      'North America made up 40% of revenue, and Europe, Middle East and Africa made up 17% of '
+                      'revenue.',
+                      'After the cost of sales, gross profit was $29.3 billion; after operating costs, '
+                      'operating profit was $13.1 billion.',
+                      'After interest, taxes and everything else, net income was $12.1 billion.'],
+     'cards': [{'title': 'Revenue', 'body': '$47.8B in fiscal 2025'},
+               {'title': 'Revenue mix',
+                'body': 'North America: 40% of revenue · Europe, Middle East and Africa: 17% of revenue'},
+               {'title': 'After costs', 'body': 'Gross profit $29.3B · operating profit $13.1B'},
+               {'title': 'Net income', 'body': '$12.1B in fiscal 2025'}],
+     'image_post': {'title': 'How Coca-Cola makes money',
+                    'paragraphs': ['Bars show how revenue broke down: North America $19.2B; Europe, Middle East '
+                                   'and Africa $8.1B; Latin America $6.9B; Asia Pacific $5.2B; Everything else '
+                                   '$8.4B.',
+                                   'A second set of bars shows Revenue $47.8B; Gross profit $29.3B; Operating '
+                                   'profit $13.1B; Net income $12.1B.',
+                                   'For every $100 of revenue, $25.31 was net income.',
+                                   'Source: company financial statements. Fiscal 2025, ended Dec 31, 2025.']},
+     'persons': [],
+     'source_ref': 'news:money_map:KO:2025',
+     'x': 'How Coca-Cola makes money: $47.8 billion of revenue in fiscal 2025, and $25.31 of every $100 kept '
+          'as net income.',
+     'linkedin': 'How Coca-Cola makes money: $47.8 billion of revenue in fiscal 2025, and $25.31 of every $100 '
+                 'kept as net income.\n'
+                 '\n'
+                 'How fiscal 2025 revenue broke down: North America, $19.2 billion; Europe, Middle '
+                 'East and Africa, $8.1 billion; Latin America, $6.9 billion; Asia Pacific, $5.2 billion; '
+                 'everything else, $8.4 billion.\n'
+                 '\n'
+                 'After the cost of sales, gross profit was $29.3 billion. After operating costs, operating '
+                 'profit was $13.1 billion.\n'
+                 '\n'
+                 'Net income was $12.1 billion: $25.31 of every $100 of revenue.\n'
+                 '\n'
+                 "Figures come from the company's annual financial statements for fiscal 2025. Gross profit is "
+                 'revenue minus the cost of sales.',
+     'tiktok': 'How Coca-Cola makes money: $47.8 billion of revenue in fiscal 2025, and $25.31 of every $100 '
+               'kept as net income.\n'
+               '\n'
+               'How fiscal 2025 revenue broke down: North America, $19.2 billion; Europe, Middle '
+               'East and Africa, $8.1 billion; Latin America, $6.9 billion; Asia Pacific, $5.2 billion; everything '
+               'else, $8.4 billion.',
+     'youtube_title': 'How Coca-Cola makes money: fiscal 2025 results'},
+    'mcdonalds_money_map': {'hook': "For every $100 of revenue in fiscal 2025, McDonald's kept $31.62 as net income.",
+     'video_script': ["McDonald's reported revenue of $26.9 billion in fiscal 2025.",
+                      'International Operated Markets made up 51% of revenue, and the United States made up 40% '
+                      'of revenue.',
+                      'After the cost of sales, gross profit was $15.1 billion; after operating costs, '
+                      'operating profit was $12.3 billion.',
+                      'After interest, taxes and everything else, net income was $8.5 billion.'],
+     'cards': [{'title': 'Revenue', 'body': '$26.9B in fiscal 2025'},
+               {'title': 'Revenue mix',
+                'body': 'International Operated Markets: 51% of revenue · United States: 40% of revenue'},
+               {'title': 'After costs', 'body': 'Gross profit $15.1B · operating profit $12.3B'},
+               {'title': 'Net income', 'body': '$8.5B in fiscal 2025'}],
+     'image_post': {'title': "How McDonald's makes money",
+                    'paragraphs': ['Bars show how revenue broke down: International Operated Markets $13.6B; '
+                                   'United States $10.8B; Everything else $2.4B.',
+                                   'A second set of bars shows Revenue $26.9B; Gross profit $15.1B; Operating '
+                                   'profit $12.3B; Net income $8.5B.',
+                                   'For every $100 of revenue, $31.62 was net income.',
+                                   'Source: company financial statements. Fiscal 2025, ended Dec 31, 2025.']},
+     'persons': [],
+     'source_ref': 'news:money_map:MCD:2025',
+     'x': "How McDonald's makes money: $26.9 billion of revenue in fiscal 2025, and $31.62 of every $100 kept "
+          'as net income.',
+     'linkedin': "How McDonald's makes money: $26.9 billion of revenue in fiscal 2025, and $31.62 of every "
+                 '$100 kept as net income.\n'
+                 '\n'
+                 'How fiscal 2025 revenue broke down: International Operated Markets, $13.6 billion; the United '
+                 'States, $10.8 billion; everything else, $2.4 billion.\n'
+                 '\n'
+                 'After the cost of sales, gross profit was $15.1 billion. After operating costs, operating '
+                 'profit was $12.3 billion.\n'
+                 '\n'
+                 'Net income was $8.5 billion: $31.62 of every $100 of revenue.\n'
+                 '\n'
+                 "Figures come from the company's annual financial statements for fiscal 2025. Gross profit is "
+                 'revenue minus the cost of sales.',
+     'tiktok': "How McDonald's makes money: $26.9 billion of revenue in fiscal 2025, and $31.62 of every $100 "
+               'kept as net income.\n'
+               '\n'
+               'How fiscal 2025 revenue broke down: International Operated Markets, $13.6 billion; the United '
+               'States, $10.8 billion; everything else, $2.4 billion.',
+     'youtube_title': "How McDonald's makes money: fiscal 2025 results"},
+    'amazon_money_map': {'hook': 'For every $100 of revenue in fiscal 2025, Amazon kept $10.74 as net income.',
+     'video_script': ['Amazon reported revenue of $717 billion in fiscal 2025.',
+                      'Online Stores made up 38% of revenue, and Third-Party Seller Services made up 24% of '
+                      'revenue.',
+                      'After the cost of sales, gross profit was $360 billion; after operating costs, '
+                      'operating profit was $80 billion.',
+                      'After interest, taxes and everything else, net income was $77 billion.'],
+     'cards': [{'title': 'Revenue', 'body': '$717B in fiscal 2025'},
+               {'title': 'Revenue mix',
+                'body': 'Online Stores: 38% of revenue · Third-Party Seller Services: 24% of revenue'},
+               {'title': 'After costs', 'body': 'Gross profit $360B · operating profit $80B'},
+               {'title': 'Net income', 'body': '$77B in fiscal 2025'}],
+     'image_post': {'title': 'How Amazon makes money',
+                    'paragraphs': ['Bars show how revenue broke down: Online Stores $270B; Third-Party Seller '
+                                   'Services $170B; AWS $128B; Advertising Services $69B; Subscription '
+                                   'Services $49B; Everything else $31B.',
+                                   'A second set of bars shows Revenue $717B; Gross profit $360B; Operating '
+                                   'profit $80B; Net income $77B.',
+                                   'For every $100 of revenue, $10.74 was net income.',
+                                   'Source: company financial statements. Fiscal 2025, ended Dec 31, 2025.']},
+     'persons': [],
+     'source_ref': 'news:money_map:AMZN:2025',
+     'x': 'How Amazon makes money: $717 billion of revenue in fiscal 2025, and $10.74 of every $100 kept as '
+          'net income.',
+     'linkedin': 'How Amazon makes money: $717 billion of revenue in fiscal 2025, and $10.74 of every $100 '
+                 'kept as net income.\n'
+                 '\n'
+                 'How fiscal 2025 revenue broke down: Online Stores, $270 billion; Third-Party Seller '
+                 'Services, $170 billion; AWS, $128 billion; Advertising Services, $69 billion; Subscription '
+                 'Services, $49 billion; everything else, $31 billion.\n'
+                 '\n'
+                 'After the cost of sales, gross profit was $360 billion. After operating costs, operating '
+                 'profit was $80 billion.\n'
+                 '\n'
+                 'Net income was $77 billion: $10.74 of every $100 of revenue.\n'
+                 '\n'
+                 "Figures come from the company's annual financial statements for fiscal 2025. Gross profit is "
+                 'revenue minus the cost of sales.',
+     'tiktok': 'How Amazon makes money: $717 billion of revenue in fiscal 2025, and $10.74 of every $100 kept '
+               'as net income.\n'
+               '\n'
+               'How fiscal 2025 revenue broke down: Online Stores, $270 billion; Third-Party Seller Services, '
+               '$170 billion; AWS, $128 billion; Advertising Services, $69 billion; Subscription Services, $49 '
+               'billion; everything else, $31 billion.',
+     'youtube_title': 'How Amazon makes money: fiscal 2025 results'},
 }
 
 
 #: Drop 2b goldens (news-v9; earnings_loss's LinkedIn / TikTok captions news-v10; the LinkedIn captions of
-#: congress_accenture, every stake_* and both earnings_* news-v11): one per 2b sample,
+#: congress_accenture, every stake_* and both earnings_* news-v11; earnings_loss's narration, cards, picture,
+#: alt text and LinkedIn / TikTok captions news-v21 — no revenue): one per 2b sample,
 #: pinned verbatim — regenerate only with a TEMPLATE_VERSION bump, after reading every string.
 GOLDEN_2B = {
     'congress_accenture': {'hook': '3 members of Congress disclosed purchases of Accenture stock in November 2026.',
@@ -980,16 +1221,15 @@ GOLDEN_2B = {
      'x': 'NVIDIA invested $777.4 million in Nscale, as of Mar 27. Source: Nscale Form S-1 (Sep 18, 2026).',
      'bluesky': 'NVIDIA invested $777.4 million in Nscale, as of Mar 27. Source: Nscale Form S-1 (Sep 18, 2026).',
      # news-v11 (review round 11): the headline cites the source, so `st.p.source` is not said again
+     # news-v19 (Batch 1): the catalogue background is no caption paragraph (STAKE_BACKGROUND_IN_CAPTIONS)
      'linkedin': 'NVIDIA invested $777.4 million in Nscale, as of Mar 27. Source: Nscale Form S-1 (Sep 18, 2026).\n'
-                 '\n'
-                 'For Series C shares; NVIDIA also paid $400.0M for Series B shares on Oct 8, 2025.\n'
                  '\n'
                  'That is the amount the source reports as invested, not a figure for today.\n'
                  '\n'
                  'As of that date, Nscale was not listed on a public exchange.',
      'tiktok': 'NVIDIA invested $777.4 million in Nscale, as of Mar 27. Source: Nscale Form S-1 (Sep 18, 2026).\n'
                '\n'
-               'For Series C shares; NVIDIA also paid $400.0M for Series B shares on Oct 8, 2025.',
+               'That is the amount the source reports as invested, not a figure for today.',
      'youtube_title': 'NVIDIA invested $777.4M in Nscale'},
     'stake_anthropic_commitment': {'hook': 'Nvidia committed up to $10 billion to Anthropic.',
      'video_script': ['The figure is as of November 18th, 2025, from the source named in this post.',
@@ -1192,15 +1432,13 @@ GOLDEN_2B = {
      'linkedin': ("Berkshire Hathaway's Iroquois Gas Transmission System stake had a carrying value of $597 million, "
                   'as of Jun 30. Source: Berkshire Hathaway Energy 10-Q (quarter ended Jun 30, 2026).\n'
                   '\n'
-                  "Held by BHE's Eastern Energy Gas; the $597M was BHE's consolidated carrying value.\n"
-                  '\n'
                   'Carrying value is the amount the source says the stake was recorded at on that date.\n'
                   '\n'
                   'As of that date, Iroquois Gas Transmission System was not listed on a public exchange.'),
      'tiktok': ("Berkshire Hathaway's Iroquois Gas Transmission System stake had a carrying value of $597 million, "
                 'as of Jun 30. Source: Berkshire Hathaway Energy 10-Q (quarter ended Jun 30, 2026).\n'
                 '\n'
-                "Held by BHE's Eastern Energy Gas; the $597M was BHE's consolidated carrying value."),
+                'Carrying value is the amount the source says the stake was recorded at on that date.'),
      'youtube_title': "Berkshire Hathaway's Iroquois Gas Transmission System stake had a carrying value of $597M"},
     # news-v17: a fair value is the source's figure — the headline names no filer
     'stake_itochu_non_us': {'hook': "Berkshire Hathaway's Itochu Corporation stake had a fair value of $8.9 billion.",
@@ -1245,15 +1483,13 @@ GOLDEN_2B = {
      'linkedin': "Berkshire Hathaway's ITOCHU Corporation stake had a fair value of $8.9 billion, as of Dec 31, "
                  '2025. Source: Berkshire Hathaway 2025 shareholder letter.\n'
                  '\n'
-                 'Cost basis was $4.17B, per the letter.\n'
-                 '\n'
                  'Fair value is the amount the source says the stake was measured at on that date.\n'
                  '\n'
                  'As of that date, shares of ITOCHU Corporation traded on an exchange outside the U.S.',
      'tiktok': "Berkshire Hathaway's ITOCHU Corporation stake had a fair value of $8.9 billion, as of Dec 31, "
                '2025. Source: Berkshire Hathaway 2025 shareholder letter.\n'
                '\n'
-               'Cost basis was $4.17B, per the letter.',
+               'Fair value is the amount the source says the stake was measured at on that date.',
      'youtube_title': "Berkshire Hathaway's ITOCHU Corporation stake had a fair value of $8.9B"},
     'stake_intel_us': {'hook': 'Nvidia invested $5 billion in Intel.',
      'video_script': ['The figure is as of December 26th, 2025, from the source named in this post.',
@@ -1293,28 +1529,30 @@ GOLDEN_2B = {
      # news-v11 (review round 11): the headline cites the source, so `st.p.source` is not said again
      'linkedin': 'NVIDIA invested $5 billion in Intel, as of Dec 26, 2025. Source: Intel 8-K (Dec 29, 2025).\n'
                  '\n'
-                 'Agreed on Sep 15, 2025, alongside a product collaboration with NVIDIA.\n'
-                 '\n'
                  'That is the amount the source reports as invested, not a figure for today.\n'
                  '\n'
                  'Shares of Intel are listed on a U.S. exchange.',
      'tiktok': 'NVIDIA invested $5 billion in Intel, as of Dec 26, 2025. Source: Intel 8-K (Dec 29, 2025).\n'
                '\n'
-               'Agreed on Sep 15, 2025, alongside a product collaboration with NVIDIA.',
+               'That is the amount the source reports as invested, not a figure for today.',
      'youtube_title': 'NVIDIA invested $5B in Intel'},
+    # news-v21 (main-session decision of 2026-10-20): the record carries a writable revenue pair ($551.9M vs
+    # $543.6M) and the post prints none of it — the no-revenue lines, card, picture row and captions of
+    # earnings_profit (`T.EARNINGS_REVENUE_IN_POSTS` off: the revenue estimate's basis is unknown)
     'earnings_loss': {'hook': 'Northwind Fitness reported negative $0.05 a share; analysts estimated negative $0.12.',
      'video_script': ['These figures cover the quarter that ended September 30th, reported on November 5th.',
-                      'Revenue was $551.9 million, against an analyst estimate of $543.6 million.',
+                      'An analyst estimate is the average figure analysts published before the report.',
                       'The estimate is the analyst consensus; the reported figure can be on a different basis '
                       'from the official accounting result.',
-                      'An analyst estimate is the average figure analysts published before the report.'],
+                      'Companies report results each quarter, and analysts publish their estimates before each '
+                      'report.'],
      'cards': [{'title': 'Quarter ended', 'body': 'Sep 30, 2026 · reported Nov 5, 2026'},
-               {'title': 'Revenue', 'body': '$551.9M vs an estimate of $543.6M'},
+               {'title': 'The estimate', 'body': 'The average analyst figure published before the report'},
                {'title': 'About the figures', 'body': 'The consensus basis can differ from the official accounts'},
-               {'title': 'The estimate', 'body': 'The average analyst figure published before the report'}],
+               {'title': 'Each quarter', 'body': 'Results are reported; analysts publish estimates first'}],
      'opening_card': {'kicker': 'EARNINGS VS ESTIMATES',
                       'logos': ['NWFT'],
-                      'chip': 'NWFT',
+                      'chip': 'Quarter ended Sep 30, 2026',
                       'figure': '-$0.05',
                       'headline': 'EPS vs an analyst estimate of -$0.12'},
      'image_spec': {'layout': 'rows',
@@ -1323,15 +1561,13 @@ GOLDEN_2B = {
                     'header': {'logo': 'NWFT', 'name': 'Northwind Fitness', 'chip': 'NWFT'},
                     'title': 'Reported vs analyst estimates',
                     'subtitle': 'Quarter ended Sep 30, 2026 · reported Nov 5, 2026',
-                    'sections': [{'rows': [{'cells': ['EPS', 'vs -$0.12 estimate', '-$0.05']},
-                                           {'cells': ['Revenue', 'vs $543.6M estimate', '$551.9M']}]}],
+                    'sections': [{'rows': [{'cells': ['EPS', 'vs -$0.12 estimate', '-$0.05']}]}],
                     'notes': ['The estimate is the analyst consensus; its basis can differ from the official '
                               'accounts.'],
                     'footer': 'Educational only · not investment advice · Source: company results and analyst '
                               'consensus · Reported Nov 5, 2026 · Caydex · Not affiliated with anyone named'},
      'image_post': {'title': 'Northwind Fitness: reported vs analyst estimates',
-                    'paragraphs': ['The image shows EPS of -$0.05 against an analyst estimate of -$0.12. It shows '
-                                   'revenue of $551.9M against an estimate of $543.6M.',
+                    'paragraphs': ['The image shows EPS of -$0.05 against an analyst estimate of -$0.12.',
                                    'Source: company results and analyst consensus. Reported Nov 5, 2026.']},
      'image_footer': 'Educational only · not investment advice · Source: company results and analyst consensus · '
                      'Reported Nov 5, 2026 · Caydex · Not affiliated with anyone named',
@@ -1341,16 +1577,16 @@ GOLDEN_2B = {
      'x': 'Northwind Fitness: EPS of -$0.05 vs an analyst estimate of -$0.12; its basis can differ from official '
           'accounts.',
      'bluesky': 'Northwind Fitness reported EPS of -$0.05 vs an analyst estimate of -$0.12.',
-     # news-v10 (review round 10): the long headline states the revenue pair, so no paragraph repeats it;
-     # news-v11 (review round 11): nor the basis note its ".basis" headline states (the definition stays)
-     'linkedin': 'Northwind Fitness reported EPS of -$0.05 vs an analyst estimate of -$0.12, and revenue of '
-                 '$551.9 million vs $543.6 million. The EPS basis can differ from the official accounts.\n'
+     # news-v11 (review round 11): no paragraph repeats the basis note its ".basis" headline states (the
+     # definition stays); news-v21: no headline states revenue (the ".long" ones are the dormant copy)
+     'linkedin': 'Northwind Fitness reported EPS of -$0.05 vs an analyst estimate of -$0.12. The EPS basis can '
+                 'differ from the official accounts.\n'
                  '\n'
                  'These figures cover the quarter that ended Sep 30, reported on Nov 5.\n'
                  '\n'
                  'An analyst estimate is the average figure analysts published before the report.',
-     'tiktok': 'Northwind Fitness reported EPS of -$0.05 vs an analyst estimate of -$0.12, and revenue of $551.9 '
-               'million vs $543.6 million. The EPS basis can differ from the official accounts.\n'
+     'tiktok': 'Northwind Fitness reported EPS of -$0.05 vs an analyst estimate of -$0.12. The EPS basis can differ '
+               'from the official accounts.\n'
                '\n'
                'These figures cover the quarter that ended Sep 30, reported on Nov 5.',
      'youtube_title': 'Northwind Fitness results vs estimates: EPS -$0.05 vs -$0.12'},
@@ -1368,7 +1604,7 @@ GOLDEN_2B = {
                {'title': 'Each quarter', 'body': 'Results are reported; analysts publish estimates first'}],
      'opening_card': {'kicker': 'EARNINGS VS ESTIMATES',
                       'logos': ['FBKM'],
-                      'chip': 'FBKM',
+                      'chip': 'Reported Nov 10, 2026',
                       'figure': '$4.86',
                       'headline': 'EPS vs an analyst estimate of $4.50'},
      'image_spec': {'layout': 'rows',
@@ -1405,6 +1641,8 @@ GOLDEN_2B = {
                '\n'
                'The company reported these figures on Nov 10.',
      'youtube_title': 'Fabrikam results vs estimates: EPS $4.86 vs $4.50'},
+    # news-v19 (the review of 2026-10-16, TH-1): the headlines say "by largest revenue line" — "product or business
+    # line" was false for a member whose breakdown is regional
     'theme_ai_chips': {'hook': 'Where do 14 companies in AI chips get their revenue?',
      # news-v16: a pair is two facts of ONE fiscal year and says it; a card keeps its line's year
      'video_script': ["Nvidia's largest revenue line in fiscal 2026 was Data Center.",
@@ -1466,9 +1704,9 @@ GOLDEN_2B = {
                    {'key': 'SNPS', 'name': 'Synopsys'},
                    {'key': 'CDNS', 'name': 'Cadence Design Systems'}],
      'source_ref': 'news:theme_explainer:ai-chips:2026-11-01',
-     'x': 'AI chips: where 14 companies get their revenue, by largest product or business line.',
-     'bluesky': 'AI chips: where 14 companies get their revenue, by largest product or business line.',
-     'linkedin': 'AI chips: where 14 companies get their revenue, by largest product or business line.\n'
+     'x': 'AI chips: where 14 companies get their revenue, by largest revenue line.',
+     'bluesky': 'AI chips: where 14 companies get their revenue, by largest revenue line.',
+     'linkedin': 'AI chips: where 14 companies get their revenue, by largest revenue line.\n'
                  '\n'
                  'The 14 companies in AI chips: NVIDIA; Broadcom; AMD; Marvell Technology; Qualcomm; Arm Holdings; '
                  'Micron Technology; Intel; Texas Instruments; Analog Devices; Synopsys; Cadence Design Systems; '
@@ -1484,7 +1722,7 @@ GOLDEN_2B = {
                  'fiscal 2025 revenue; Lam Research, Systems, 66% of fiscal 2025 revenue.\n'
                  '\n'
                  "This grouping is Caydex's own; its members can change.",
-     'tiktok': 'AI chips: where 14 companies get their revenue, by largest product or business line.\n'
+     'tiktok': 'AI chips: where 14 companies get their revenue, by largest revenue line.\n'
                '\n'
                'The 14 companies in AI chips: NVIDIA; Broadcom; AMD; Marvell Technology; Qualcomm; Arm Holdings; '
                'Micron Technology; Intel; Texas Instruments; Analog Devices; Synopsys; Cadence Design Systems; Lam '
@@ -1550,9 +1788,9 @@ GOLDEN_2B = {
                    {'key': 'SNPS', 'name': 'Synopsys'},
                    {'key': 'CDNS', 'name': 'Cadence Design Systems'}],
      'source_ref': 'news:theme_explainer:ai-chips:2026-11-01',
-     'x': 'AI chips: where 14 of its 16 companies get their revenue, by largest product or business line.',
-     'bluesky': 'AI chips: where 14 of its 16 companies get their revenue, by largest product or business line.',
-     'linkedin': 'AI chips: where 14 of its 16 companies get their revenue, by largest product or business line.\n'
+     'x': 'AI chips: where 14 of its 16 companies get their revenue, by largest revenue line.',
+     'bluesky': 'AI chips: where 14 of its 16 companies get their revenue, by largest revenue line.',
+     'linkedin': 'AI chips: where 14 of its 16 companies get their revenue, by largest revenue line.\n'
                  '\n'
                  '14 of the 16 companies in AI chips: NVIDIA; Broadcom; AMD; Marvell Technology; Qualcomm; Arm '
                  'Holdings; Micron Technology; Intel; Texas Instruments; Analog Devices; Synopsys; Cadence Design '
@@ -1568,7 +1806,7 @@ GOLDEN_2B = {
                  'fiscal 2025 revenue; Lam Research, Systems, 66% of fiscal 2025 revenue.\n'
                  '\n'
                  "This grouping is Caydex's own; its members can change.",
-     'tiktok': 'AI chips: where 14 of its 16 companies get their revenue, by largest product or business line.\n'
+     'tiktok': 'AI chips: where 14 of its 16 companies get their revenue, by largest revenue line.\n'
                '\n'
                '14 of the 16 companies in AI chips: NVIDIA; Broadcom; AMD; Marvell Technology; Qualcomm; Arm '
                'Holdings; Micron Technology; Intel; Texas Instruments; Analog Devices; Synopsys; Cadence Design '
@@ -1598,7 +1836,7 @@ def test_every_sample_composes_a_valid_deterministic_json_package(name, factory,
     assert T.validate_package(a, record=factory()) == []
     assert T.validate_package(a) == []          # without the record: stricter, still clean
     assert a["authorship"] == "template" and a["video_layout"] == "per_line"
-    assert a["template_version"] == T.TEMPLATE_VERSION == "news-v18"
+    assert a["template_version"] == T.TEMPLATE_VERSION == "news-v21"
     assert a["content_class"] == R.SERIES_CLASS[a["series"]] == selection.SERIES_BY_ID[a["series"]].content_class
     assert a["source_ref"] == R.ledger_key(factory())
     assert a["carousel_slides"] == [] and a["dropped_outlets"] == {}
@@ -1612,7 +1850,7 @@ def test_every_sample_composes_a_valid_deterministic_json_package(name, factory,
 def test_the_lexicon_is_pinned_verbatim_and_versioned():
     doc = json.loads(LEXICON_PATH.read_text(encoding="utf-8"))
     assert set(doc) == {"_about", "version", "entries"}
-    assert doc["version"] == T.TEMPLATE_VERSION == "news-v18"
+    assert doc["version"] == T.TEMPLATE_VERSION == "news-v21"
     assert doc["entries"] == T.LEXICON
     assert list(doc["entries"]) == list(T.LEXICON)
 
@@ -1651,6 +1889,8 @@ NEUTRAL = dict(
     trade_window_img="Oct 17–24, 2026", basis_title="Committed up to",
     # news-v16: the theme image's fiscal years
     fys="2025 or 2026",
+    # news-v19 (Batch 1, plan item 5): a stake's investee as a noun phrase (a company's own name: no article)
+    ee_np="Fabrikam", ee_np_cap="Fabrikam",
 )
 #: The 13F subjects are the filer's latest 13F, not a person (their own neutral fills).
 NEUTRAL_13F = dict(NEUTRAL, subj="Northwind Capital's latest 13F", subj_sp="Northwind Capital's latest 13F")
@@ -1708,7 +1948,7 @@ PERSON_NAMED_IDS = frozenset({
     "ins.l1.role.one", "ins.l1.role.many", "ins.l1.role.short.one", "ins.l1.role.short.many",
     "ins.l3.indirect.all", "ins.l4.more.one",
     "ins.c1.noname.officer", "ins.c3.indirect.all.body", "ins.c4.more.one",
-    "ins.open.head", "ins.open.head.min",
+    "ins.open.head",
     "ins.ch.one.long.one", "ins.ch.one.long.many", "ins.ch.one.short", "ins.ch.one.min",
     "ins.p.rows", "ins.p.rows2", "ins.row.name", "ins.row.noname",
     "ins.p.one.name.one", "ins.p.one.name.many", "ins.p.one.noname.one", "ins.p.one.noname.many",
@@ -1725,6 +1965,12 @@ CLASS_B_VALUATION_IDS = frozenset({"st.h.fair_value.poss", "st.h.fair_value.of",
                                    "st.c2.fair_value.title"})
 #: `brand_mention` only on the theme's grouping lines: the grouping IS Caydex's, and says so.
 BRAND_MENTION_IDS = frozenset({"th.grouping", "th.c.grouping.title"})
+
+
+def test_every_exempted_id_is_a_live_entry():
+    """news-v19: `ins.open.head.min` left the lexicon with the cover's second company name; an exemption for
+    an id that no longer exists would silently stand ready for a new entry of that name."""
+    assert PERSON_NAMED_IDS | CLASS_B_VALUATION_IDS | BRAND_MENTION_IDS <= set(T.LEXICON)
 
 
 @pytest.mark.parametrize("entry_id", sorted(T.LEXICON))
@@ -1885,13 +2131,14 @@ def test_pct(share, out):
 def test_a_near_whole_segment_never_reads_100_percent_beside_less_than_1():
     """compliance:F4 — 99.6% / 0.4% used to narrate "made up 100% of revenue, and Licensing made up
     less than 1% of revenue": two figures that cannot both be true. Mutation-checked by hand
-    (2026-10-09): without the "more than 99%" guard in `pct` this turns red."""
-    rec = costco(segments=(R.Segment("Products", 274_100_000_000.0), R.Segment("Licensing", 1_100_000_000.0)))
+    (2026-10-09): without the "more than 99%" guard in `pct` this turns red. news-v19: the near-whole line is
+    "Hardware" (the adapter now folds a generic "Products" into the rest) and L2 says no "Its … business"."""
+    rec = costco(segments=(R.Segment("Hardware", 274_100_000_000.0), R.Segment("Licensing", 1_100_000_000.0)))
     out = compose(rec, THU)
     for text in [out["video_script"][1], out["cards"][1]["body"]]:
         assert "100% of" not in text, text
         assert "more than 99% of revenue" in text and "less than 1% of revenue" in text, text
-    assert out["video_script"][1] == ("Its Products business made up more than 99% of revenue, and Licensing made up "
+    assert out["video_script"][1] == ("Hardware made up more than 99% of revenue, and Licensing made up "
                                       "less than 1% of revenue.")
     assert T.validate_package(out, record=rec) == []
 
@@ -2097,7 +2344,7 @@ def test_spoken_company(display, spoken):
 def test_the_of_twins_replace_every_possessive():
     out = compose(week(LOW), MON)
     assert out["hook"].startswith("The chief executive of Lowe's ")
-    assert out["opening_card"]["headline"] == "The CEO of Lowe's disclosed buying Lowe's stock"
+    assert out["opening_card"]["headline"] == "The CEO of Lowe's disclosed buying stock"
     assert "Lowe's's" not in json.dumps(out) and "Lowe's'" not in json.dumps(out)
     f13 = compose(berkshire(filer_name="Moody's"), TUE)
     assert f13["hook"].startswith("The latest 13F of Moody's ")
@@ -2226,13 +2473,13 @@ def test_form4_roles_subjects_and_plurals():
     director = buy("HSY", "Hershey", "director", None, 300_000.0, 1_500.0, 1, [date(2026, 11, 11)])
     out = compose(week(cfo, series="insider_buys"), MON)
     assert out["hook"] == "Nike's chief financial officer disclosed buying $1 million of the company's stock."
-    assert out["opening_card"]["headline"] == "Nike's CFO disclosed buying Nike stock"
+    assert out["opening_card"]["headline"] == "Nike's CFO disclosed buying stock"
     out = compose(week(director, series="insider_buys"), MON)
     assert out["hook"] == "A director of Hershey disclosed buying $300,000 of the company's stock."
     assert out["cards"][0] == {"title": "Who filed", "body": "A director of Hershey"}
     out = compose(week(cfo, director, series="insider_buys"), MON)
     assert out["image_spec"]["title"] == "At least 2 company insiders disclosed buying their own company's stock"
-    assert out["video_script"][3] == ("At least 1 more director disclosed buying their own company's stock in the "
+    assert out["video_script"][3] == ("At least one more director disclosed buying their own company's stock in the "
                                       "same week.")
     two_dirs = compose(week(director, replace(director, company=co("CTSO", "Contoso"), amount_usd=200_000.0),
                             series="insider_buys"), MON)
@@ -2312,7 +2559,9 @@ def test_a_director_is_a_director_of_the_company_whatever_its_first_sound(sym, n
     rec = week(buy(sym, name, "director", None, 1_000_000.0, 5_000.0, 1, [date(2026, 11, 11)]), series="insider_buys")
     out = compose(rec, MON)
     assert out["hook"] == f"A director of {name} disclosed buying $1 million of the company's stock."
-    assert out["captions"]["x"].startswith(f"A director of {name} disclosed buying $1 million of {name} stock")
+    # news-v19 (Batch 1): the subject names the company, so the headline says "of the company's stock"
+    assert out["captions"]["x"].startswith(f"A director of {name} disclosed buying $1 million of the company's stock")
+    assert out["captions"]["x"].count(name) == 1
     assert out["opening_card"]["headline"].startswith(f"A director of {name} disclosed buying")
     assert out["captions"]["youtube_title"].startswith(("A director of ", "A director disclosed"))
     for s in _strings(out):
@@ -2572,7 +2821,9 @@ def test_thirteen_f_without_a_filer_symbol_opens_on_its_holdings():
     out = compose(pershing(), TUE)
     # only the lead kind's holding: Uber (increased, the largest move) never sits beside CoreWeave
     # (newly reported) on a "holding with more shares" cover
-    assert out["opening_card"]["logos"] == ["UBER"] and "chip" not in out["opening_card"]
+    assert out["opening_card"]["logos"] == ["UBER"]
+    # news-v19 (Batch 1, plan item 5): no ticker of its own, so the chip says the quarter the filing covers
+    assert out["opening_card"]["chip"] == "Quarter ended Sep 30, 2026"
     assert out["image_footer"].startswith("Educational only · not investment advice · Source: SEC Form 13F-HR/A · ")
     assert out["video_script"][0].endswith("an amended version was filed on November 14th.")
     assert out["video_script"][3] == "CoreWeave first appears in this filing; it was listed in August 2026."
@@ -2764,8 +3015,10 @@ LIVE_GOLDEN = {
                    "body": "Space Exploration Technologies, Cerebras Systems, X-Energy and 12 more"},
                   {"title": "No longer reported", "body": "Brera Holdings and 5 more"},
                   {"title": "First appears", "body": "Space Exploration Technologies, listed Jun 2026"}],
+        # news-v19 (Batch 1, plan item 5): no symbol of its own — the chip says the quarter
         "opening_card": {"kicker": "13F SEASON", "logos": ["SPCX", "CBRS"], "figure": "15",
-                         "headline": "newly reported holdings in ARK Invest's 13F"},
+                         "headline": "newly reported holdings in ARK Invest's 13F",
+                         "chip": "Quarter ended Jun 30, 2026"},
         "image_spec": {
             "layout": "rows", "version": 1, "kicker": "13F SEASON", "title": "ARK Invest's latest 13F",
             "subtitle": "15 newly reported · 6 no longer reported · 78 with more shares · 94 with fewer shares",
@@ -2970,20 +3223,26 @@ def test_a_name_word_too_long_to_draw_whole_is_refused(where):
     is wider than the cover headline's column at the worker's floor in wide glyphs (a CardOverflow
     skips the DAY at render, after the build was accepted): the record is refused `slot_rejected` —
     one post lost. Every move is checked, drawn or not (it is narrated or listed in the captions).
-    A 20-character word composes."""
+    A 20-character word composes. Since the review of 2026-10-16 a holding's `CompanyRef` refuses such a name
+    itself (`R.COMPANY_NAME_WORD_MAX_CHARS`), so the holding is built UNCHECKED here: the template's own
+    refusal still stands behind the record's."""
     word = "Biopharmaceuticalsxyz"                                  # 21 characters
-    assert len(word) == T.F13_MAX_WORD_CHARS + 1
+    assert len(word) == T.F13_MAX_WORD_CHARS + 1 == R.COMPANY_NAME_WORD_MAX_CHARS + 1
     base = [_valued("STZ", "Constellation Brands", "newly_reported", value=9e8),
             _valued("DPZ", "Domino's Pizza", "newly_reported", value=8e8),
             _valued("LEN", "Lennar", "newly_reported", value=7e8),
             _valued("CB", "Chubb", "newly_reported", value=6e8)]
     filer = "Berkshire Hathaway"
+
+    def renamed(mv, name):
+        return replace(mv, company=_unchecked(mv.company, name=name))
+
     if where == "filer":
         filer = f"{word} Capital"
     elif where == "drawn_holding":
-        base[0] = _valued("STZ", f"{word} Inc", "newly_reported", value=9e8)
+        base[0] = renamed(base[0], f"{word} Inc")
     else:                                                           # the 4th new move: "+1 more" on the image
-        base[3] = _valued("CB", f"{word} Group", "newly_reported", value=6e8)
+        base[3] = renamed(base[3], f"{word} Group")
     rec = replace(f13(*base), filer_name=filer)
     with pytest.raises(T.NewsTemplateRefused) as e:
         compose(rec, TUE)
@@ -2995,6 +3254,44 @@ def test_a_name_word_too_long_to_draw_whole_is_refused(where):
           "listed_only_in_captions": replace(rec, moves=(*rec.moves[:3], replace(rec.moves[3],
                                                                                   company=co("CB", f"{fits} Group"))))}
     assert T.validate_package(compose(ok[where], TUE), record=ok[where]) == []
+
+
+def test_a_filing_without_its_more_or_fewer_counts_says_the_post_does_not_show_them():
+    """The review of 2026-10-16 (F13-1): when a filing's split lookups were capped the adapter drops every more /
+    fewer shares move and leaves BOTH counts out (`split_unchecked`), and the caption "Berkshire Hathaway's 13F for
+    the quarter ended …: 1 newly reported holding, 1 no longer reported." read as the filing's whole change list.
+    The captions now say the post does not show those changes — without ever writing "more shares" or "fewer
+    shares" (the adapter's split test). A record that states either count (0 included) never says it. Since the
+    re-review of 2026-10-19 (F13-1-R) the note is in the HEADLINES (`f13.ch.*.withheld`): X, Bluesky and Threads
+    carry nothing else. Mutation-checked by hand (2026-10-19): the headline twins never used, the compact twin never
+    offered (X and Bluesky fall back to the plain headline), and "all" made "any" each turn this red."""
+    moves = (_valued("CB", "Chubb", "newly_reported", value=6e8),
+             _valued("OXY", "Occidental", "no_longer_reported", value=5e8))
+    sentence = "This post does not show share-count changes in holdings kept from the quarter before."
+    withheld = f13(*moves, counts=(("newly_reported", 1), ("no_longer_reported", 1)))
+    out = compose(withheld, TUE)
+    # the re-review of 2026-10-19 (F13-1-R): in EVERY caption field's headline — X, Bluesky and Threads carry the
+    # headline alone, TikTok one paragraph — never only in a long caption's paragraph; the shortest bodies (X 123,
+    # Bluesky 108 characters) carry the compact twin, and no outlet is dropped for it
+    assert out["dropped_outlets"] == {}
+    counted = [f for f in out["captions"] if f != "youtube_title"]
+    assert set(counted) == {"x", "bluesky", "threads", "tiktok", "facebook", "linkedin", "instagram",
+                            "youtube_description"}
+    compact = "Berkshire Hathaway's latest 13F: 1 newly reported holding; share-count changes in kept holdings not shown."
+    for f in counted:
+        first = out["captions"][f].split("\n\n")[0]
+        if f in ("x", "bluesky"):
+            assert out["captions"][f] == compact, f
+        else:
+            assert first.endswith(sentence) and "1 newly reported holding, 1 no longer reported" in first, f
+            assert out["captions"][f].count(sentence) == 1, f                # never a paragraph repeating it
+    text = json.dumps(out)
+    assert "more shares" not in text and "fewer shares" not in text
+    assert T.validate_package(out, record=withheld) == []
+    for counts in ((("newly_reported", 1), ("increased", 0), ("decreased", 0), ("no_longer_reported", 1)),
+                   (("newly_reported", 1), ("increased", 0), ("no_longer_reported", 1)),        # one stated
+                   (("newly_reported", 1), ("decreased", 3), ("no_longer_reported", 1))):
+        assert sentence not in json.dumps(compose(f13(*moves, counts=counts), TUE)), counts
 
 
 def test_rows_and_the_cover_go_largest_first_whatever_the_record_order():
@@ -3251,13 +3548,17 @@ def test_money_map_eliminations_change_the_basis_and_draw_an_outline_bar():
     out = compose(comcast(), THU)
     assert "of combined sales" in out["video_script"][1]
     bars = out["image_spec"]["segments"]
-    assert bars[-2]["label"] == "Other or not broken out" and bars[-1] == {
+    assert bars[-2]["label"] == "Everything else" and bars[-1] == {
         "label": "Intersegment eliminations", "value": "-$4.3B", "ratio": 0.0524, "style": "outline"}
     assert out["video_script"][2] == "After all operating costs, operating profit was $23.3 billion that year."
     assert all(0 <= b["ratio"] <= 1 for b in bars + out["image_spec"]["flow"])
-    # eliminations None (the adapter publishes none it cannot verify): no string claims any
+    assert "Sales between parts of the company, $4.3 billion, are taken out of that total." in \
+        out["captions"]["linkedin"]
+    # eliminations None (the adapter publishes none it cannot verify): no string claims any (news-v19: the
+    # sentence says "parts of the company" — a region map's parts are no business lines)
     plain = json.dumps(compose(costco(), THU)).lower()
-    assert "elimination" not in plain and "between its own business lines" not in plain
+    assert "elimination" not in plain and "between parts of the company" not in plain
+    assert "business line" not in json.dumps(out).lower() and "business line" not in plain
 
 
 @pytest.mark.parametrize("gp, op, l3", [
@@ -3279,6 +3580,188 @@ def test_money_map_implausible_figures_are_refused():
     with pytest.raises(T.NewsTemplateRefused) as e:
         compose(rivian(net_income_usd=-6_000_000_000.0), THU)       # a loss larger than revenue
     assert e.value.code == "implausible_figures"
+
+
+# ── news-v19: Money Map wording (Batch 1, plan item 2) ────────────────────────
+
+_MM_SEG_PARA = re.compile(r"How fiscal \d{4} revenue broke down( by region)?: ")
+
+
+def _seg_para(out):
+    (para,) = [p for p in out["captions"]["linkedin"].split("\n\n") if _MM_SEG_PARA.match(p)]
+    return para
+
+
+def _regions_with_rest(rest_usd):
+    """All-regional parts summing to $270B and a rest of ``rest_usd``: at $30B the rest is EXACTLY 10% of revenue."""
+    return costco(segments=(R.Segment("United States", 180_000_000_000.0), R.Segment("Canada", 45_000_000_000.0),
+                            R.Segment("Other International", 45_000_000_000.0)),
+                  other_usd=rest_usd, revenue_usd=270_000_000_000.0 + rest_usd)
+
+
+@pytest.mark.parametrize("factory, regional", [
+    # every named part a region by its exact name, but the rest is 18% of revenue (MM-6: Coca-Cola's live rest is
+    # mostly businesses) — the neutral wording
+    (coca_cola, False),
+    (lambda: coca_cola(other_usd=None, revenue_usd=39_400_000_000.0), True),   # the same regions, no rest
+    (costco, True),                     # countries, and Costco's own "Other International"
+    (lambda: costco(other_usd=1_000_000_000.0, revenue_usd=276_200_000_000.0), True),   # the rest bar is no part
+    (lambda: _regions_with_rest(30_000_000_000.0), True),             # the rest at exactly 10%: still regional
+    (lambda: _regions_with_rest(30_000_000_100.0), False),            # a hundred dollars past it: neutral
+    (lambda: _regions_with_rest(0.0), True),
+    (mcdonalds, False),                 # International Operated Markets: markets McDonald's runs, not one place
+    (lambda: costco(segments=(R.Segment("United States", 200_000_000_000.0), R.Segment("Canada", 38_500_000_000.0),
+                              R.Segment("Membership Fees", 36_700_000_000.0))), False),    # one business line
+    (lambda: costco(segments=(R.Segment("Frito-Lay North America", 200_000_000_000.0),
+                              R.Segment("Latin America", 75_200_000_000.0))), False),      # a region word inside
+    (rivian, False), (comcast, False), (amazon, False), (lambda: apple(), False),     # apple(): defined below
+], ids=["coca_cola_large_rest", "coca_cola_no_rest", "costco", "costco_with_rest", "rest_at_10_percent",
+        "rest_past_10_percent", "rest_zero", "mcdonalds", "one_business_line", "region_word_inside",
+        "rivian", "comcast", "amazon", "apple"])
+def test_money_map_reads_by_region_only_when_every_named_part_is_a_region(factory, regional):
+    """Batch 1 (plan item 2): every map said "Revenue by product or business line" — false for McDonald's
+    (markets) and Costco (countries). Now the neutral "How fiscal 2025 revenue broke down", and "by region" only
+    when EVERY named part is on `R.REGION_NAMES` by its exact name; the alt text follows the same rule.
+    Mutation-checked by hand (2026-10-15, in memory): `by_region` forced False turns the regional rows red, forced
+    True the neutral rows. The review of 2026-10-16 (MM-6): and only while the rest ("Everything else") is at most
+    `T.MONEY_MAP_REGION_MAX_OTHER_SHARE` of revenue — exact at the boundary. Mutation-checked by hand (2026-10-19):
+    the share clause dropped turns the two large-rest rows red; `<=` made `<` turns the 10% row red."""
+    rec = factory()
+    out = compose(rec, THU)
+    assert T.validate_package(out, record=rec) == []
+    para, alt = _seg_para(out), out["image_post"]["paragraphs"][0]
+    if regional:
+        assert para.startswith("How fiscal 2025 revenue broke down by region: "), para
+        assert alt.startswith("Bars show revenue by region: "), alt
+    else:
+        assert para.startswith("How fiscal 2025 revenue broke down: "), para
+        assert alt.startswith("Bars show how revenue broke down: "), alt
+    text = json.dumps(out)
+    assert ("by region" in text) is regional
+    assert "business line" not in text and "Its " not in " ".join(out["video_script"])
+
+
+def test_a_region_takes_the_in_running_text_and_never_on_a_label():
+    """"the United States" in the narration and the caption list ("The …" opening a sentence), never on what
+    is drawn or labelled: the bars, the cards, the cover and the alt text keep the name as the company writes
+    it. Mutation-checked by hand (2026-10-15, in memory): with `said()` returning the bare name the narration
+    asserts turn red; with the article on the bar labels the label asserts do."""
+    out = compose(mcdonalds(), THU)
+    assert out["video_script"][1] == ("International Operated Markets made up 51% of revenue, and the United States "
+                                      "made up 40% of revenue.")
+    assert "; the United States, $10.8 billion; " in _seg_para(out)
+    assert [b["label"] for b in out["image_spec"]["segments"]] == [
+        "International Operated Markets", "United States", "Everything else"]
+    assert out["cards"][1]["body"] == "International Operated Markets: 51% of revenue · United States: 40% of revenue"
+    drawn = json.dumps([out["image_spec"], out["cards"], out["opening_card"], out["image_post"]])
+    assert "the United States" not in drawn.replace("The United States", "") and "The United States" not in drawn
+    for s in onscreen.image_strings(out["image_spec"], out["logo_refs"]):
+        assert not s.lower().startswith("the united states"), s
+    # the sentence-opening form
+    lead = compose(costco(), THU)
+    assert lead["video_script"][1].startswith("The United States made up 73% of revenue, and Canada made up ")
+    assert "by region: the United States, $200 billion; Canada, $38.5 billion;" in _seg_para(lead)
+    # "the Americas" too; a region with no article ("Canada", "Asia Pacific") stays bare
+    americas = compose(costco(segments=(R.Segment("Americas", 150_000_000_000.0), R.Segment("Asia Pacific",
+                                                                                            125_200_000_000.0))), THU)
+    assert americas["video_script"][1].startswith("The Americas made up 55% of revenue, and Asia Pacific made up ")
+    assert _seg_para(americas).startswith("How fiscal 2025 revenue broke down by region: the Americas, $150 billion; "
+                                          "Asia Pacific, $125.2 billion.")
+    assert T.validate_package(out, record=mcdonalds()) == [] and T.validate_package(americas) == []
+    # the one-part line opens on the article too: a "combined sales" map whose two-part line runs to 21 words
+    rec = costco(segments=(R.Segment("United States", 200_000_000_000.0),
+                           R.Segment("Europe, Middle East and Africa", 42_400_000_000.0),
+                           R.Segment("Other International", 38_500_000_000.0)), eliminations_usd=-5_700_000_000.0)
+    one = compose(rec, THU)
+    assert one["video_script"][1] == "The United States made up 71% of combined sales that year."
+    assert _seg_para(one).startswith("How fiscal 2025 revenue broke down by region: the United States, $200 billion; ")
+    assert _seg_para(one).endswith("Sales between parts of the company, $5.7 billion, are taken out of that total.")
+    assert T.validate_package(one, record=rec) == []
+
+
+def _two_parts(first, second, *, first_usd=150_000_000_000.0, second_usd=125_200_000_000.0):
+    return costco(segments=(R.Segment(first, first_usd), R.Segment(second, second_usd)))
+
+
+@pytest.mark.parametrize("first, second, line, item", [
+    # the review of 2026-10-16 (MM-3): since Batch 1 the name OPENS narration line 2, so a name that needs "the"
+    # must get it — "U.S. made up 50% of revenue" was narrated and burned into the captions
+    ("U.S.", "International", "The U.S. made up 55% of revenue, and International made up 45% of revenue.",
+     "by region: the U.S., $150 billion; International, $125.2 billion."),
+    # (the two-part line would run to 21 words: the one-part line, as for any long pair)
+    ("United States and Canada", "Rest of the World",
+     "The United States and Canada made up 55% of revenue that year.",
+     "by region: the United States and Canada, $150 billion; the Rest of the World, $125.2 billion."),
+    ("Europe", "Rest of World", "Europe made up 55% of revenue, and the Rest of World made up 45% of revenue.",
+     "by region: Europe, $150 billion; the Rest of World, $125.2 billion."),
+    # MM-2: an acronym region is named (never folded) and reads "the" too
+    ("US", "Asia Pacific", "The US made up 55% of revenue, and Asia Pacific made up 45% of revenue.",
+     "by region: the US, $150 billion; Asia Pacific, $125.2 billion."),
+    ("UK", "EU", "The UK made up 55% of revenue, and the EU made up 45% of revenue.",
+     "by region: the UK, $150 billion; the EU, $125.2 billion."),
+    ("Greater China", "Rest of Asia Pacific",
+     "Greater China made up 55% of revenue, and the Rest of Asia Pacific made up 45% of revenue.",
+     "by region: Greater China, $150 billion; the Rest of Asia Pacific, $125.2 billion."),
+    # a product or business line is a name: it opens the line as written
+    ("iPhone", "Services", "iPhone made up 55% of revenue, and Services made up 45% of revenue.",
+     "broke down: iPhone, $150 billion; Services, $125.2 billion."),
+], ids=["us_dotted", "us_canada_rest_of_the_world", "rest_of_world", "us_acronym", "uk_eu", "rest_of_asia_pacific",
+        "product_lines"])
+def test_every_region_name_that_needs_the_article_gets_it_in_running_text(first, second, line, item):
+    """Narration line 2 and the caption list say the article; every drawn label (bars, cards, alt text) keeps the
+    name as the company writes it. Mutation-checked by hand (2026-10-19): with `REGION_ARTICLE` back to its four
+    Batch 1 names, the U.S., US, UK/EU, rest-of rows turn red."""
+    rec = _two_parts(first, second)
+    out = compose(rec, THU)
+    assert out["video_script"][1] == line
+    assert item in _seg_para(out), _seg_para(out)
+    assert [b["label"] for b in out["image_spec"]["segments"]] == [first, second]
+    assert out["cards"][1]["body"].startswith(f"{first}: 55% of revenue")
+    drawn = json.dumps([out["image_spec"], out["cards"], out["opening_card"], out["image_post"]])
+    assert f"the {first}" not in drawn and f"The {first}" not in drawn
+    assert T.validate_package(out, record=rec) == []
+
+
+@pytest.mark.parametrize("factory", [costco, rivian, comcast, coca_cola, mcdonalds, amazon, lambda: apple(),
+                                     lambda: amazon(gross_profit_usd=None),
+                                     lambda: costco(gross_profit_usd=None, operating_profit_usd=None),
+                                     lambda: rivian(gross_profit_usd=-1_000_000.0),
+                                     lambda: rivian(gross_profit_usd=-5_700_000_000.0, operating_profit_usd=None)],
+                         ids=["costco", "rivian_gross_loss", "comcast_no_gross", "coca_cola", "mcdonalds", "amazon",
+                              "apple", "amazon_no_gross", "costco_no_cost_lines", "tiny_gross_loss",
+                              "gross_loss_near_revenue"])
+def test_money_map_never_says_as_reported_and_explains_a_gross_line(factory):
+    """Batch 1 (plan item 2): "as reported" was false — FMP fills gross profit as revenue minus cost of revenue
+    for a company that reports no gross subtotal (Amazon). The image says "annual results", the source paragraph
+    says the figures "come from the company's annual financial statements", and whenever a gross line (profit
+    or loss) is shown the same paragraph says what gross profit is — never otherwise. Mutation-checked by hand
+    (2026-10-15, in memory): the definition on every map, or on none, turns this red. The review of 2026-10-16
+    (MM-5): a gross LOSS is explained by its twin, "Gross profit or loss is …" (a loss year showed only "Gross
+    loss" and defined "gross profit"); a gross profit of exactly 0 keeps the plain sentence. Mutation-checked by
+    hand (2026-10-19): the twin never chosen turns the loss rows red."""
+    rec = factory()
+    out = compose(rec, THU)
+    text = json.dumps(out)
+    assert "as reported" not in text.lower()
+    assert out["image_spec"]["subtitle"] == f"Fiscal {rec.fiscal_year} · annual results"
+    source = T.LEXICON["mm.p.source"].format(fy=rec.fiscal_year)
+    gp = rec.gross_profit_usd
+    gross = T.LEXICON["mm.p.gross" if gp is None or gp >= 0 else "mm.p.gross.loss"]
+    other = T.LEXICON["mm.p.gross.loss" if gp is None or gp >= 0 else "mm.p.gross"]
+    last = out["captions"]["linkedin"].split("\n\n")[-1]
+    assert last == (f"{source} {gross}" if gp is not None else source), last
+    assert (gross in text) is (gp is not None) and other not in text
+    assert ("Gross profit" in [b["label"] for b in out["image_spec"]["flow"]]) is (gp is not None and gp >= 0)
+    assert ("Gross loss" in [b["label"] for b in out["image_spec"]["flow"]]) is (gp is not None and gp < 0)
+    assert T.validate_package(out, record=rec) == []
+
+
+def test_amazons_aws_line_is_named_everywhere_it_is_drawn():
+    """AWS is on `R.SEGMENT_ACRONYMS_OK` (the adapter keeps it): the template draws and lists it like any line."""
+    out = compose(amazon(), THU)
+    assert "AWS" in [b["label"] for b in out["image_spec"]["segments"]]
+    assert "; AWS, $128 billion; " in _seg_para(out)
+    assert "AWS $128B" in out["image_post"]["paragraphs"][0]
 
 
 # ── refusals ──────────────────────────────────────────────────────────────────
@@ -3879,6 +4362,46 @@ def test_the_2b_age_bounds_are_the_adapters():
     assert T.THEME_MIN_FACTS <= R.THEME_MIN_FACTS and R.CONGRESS_MIN_MEMBERS == 2
 
 
+def test_the_stake_draw_bounds_are_the_adapters():
+    """The round-3 review of 2026-10-20 (RR3-STAKES-TEMPLATE-WALL): the adapter refuses at the read every stake text
+    this template cannot draw, from COPIES in `company_news_rules` (the adapter may not import this module), pinned
+    equal here — a bound changed on one side alone turns this red, never five refused stakes walling the walk again.
+    Behaviourally too: at each copied bound the template draws the text, one character past it refuses it, and the
+    word measure is the template's own (a run between whitespace)."""
+    assert R.STAKE_SOURCE_DRAW_MAX_CHARS == T.STAKE_SOURCE_MAX_CHARS == 80
+    assert R.STAKE_TEXT_WORD_MAX_CHARS == T.NAME_WORD_MAX_CHARS == 20
+    assert R.STAKE_PAIR_NAME_WORD_MAX_CHARS == T.PAIR_NAME_WORD_MAX_CHARS == 15
+    for text in ("", "   ", "NVIDIA 10-Q", "Sherwin-Williams Ventures", "a  bb\tccc\nd", "10-Q/A-Exhibit-99.1-Supplement"):
+        assert R.longest_word(text) == T._longest_word(text), text
+    assert R.longest_word(None) == 0
+
+    def refused(**kw):
+        try:
+            compose(stake(**kw), STAKES_RUN)
+        except T.NewsTemplateRefused as e:
+            return e.code
+        return None
+
+    cap, word, pair = R.STAKE_SOURCE_DRAW_MAX_CHARS, R.STAKE_TEXT_WORD_MAX_CHARS, R.STAKE_PAIR_NAME_WORD_MAX_CHARS
+    title = "Nscale Form S-1 " + " ".join(c * word for c in "abc")
+    title += " " + "d" * (cap - len(title) - 1)
+    assert len(title) == cap and R.longest_word(title) == word
+    assert refused(source_title=title) is None and refused(source_title=title + "c") == "slot_rejected"
+    assert refused(source_title="Nscale Form S-1 " + "a" * (word + 1)) == "slot_rejected"
+    assert refused(investee_name="A" * pair + " Labs") is None
+    assert refused(investee_name="A" * (pair + 1) + " Labs") == "slot_rejected"
+    local = "Taiwan " + "a" * word
+    local += " " + "b" * (R.COMPANY_NAME_CHARS[1] - len(local) - 1)
+    assert len(local) == R.COMPANY_NAME_CHARS[1] and R.longest_word(local) == word
+    assert refused(kind="non_us_listed", local_listing=local) is None
+    assert refused(kind="non_us_listed", local_listing=local + "a") == "slot_rejected"
+    assert refused(kind="non_us_listed", local_listing="Taiwan " + "a" * (word + 1)) == "slot_rejected"
+    # the two record gates the read now applies too: "committed up to" only on a commitment; never dated after the run
+    assert refused(value_basis="committed_up_to") == "record_invalid"
+    assert refused(verified_on=STAKES_RUN) is None
+    assert refused(verified_on=STAKES_RUN + timedelta(days=1)) == "stale_source"
+
+
 # ── Congress Count ────────────────────────────────────────────────────────────
 
 
@@ -3925,7 +4448,10 @@ def test_congress_hooks_fall_to_shorter_variants_for_longer_names(name, hook):
     (congress(fetched_on=date(2026, 12, 9)), CONGRESS_RUN, "stale_source"),  # read after the run
     (congress(fetched_on=date(2026, 12, 7)), date(2026, 12, 15), "stale_source"),  # read 8 days before the run
     (congress(company=_unchecked(co("ACN", "Accenture"), name="Signal Hill")), CONGRESS_RUN, "slot_rejected"),
-    (congress(company=co("ACN", "Supercalifragilisticex Co")), CONGRESS_RUN, "slot_rejected"),  # a 21-char word
+    # a 21-char word: since the review of 2026-10-16 the record refuses it too (`R.COMPANY_NAME_WORD_MAX_CHARS`),
+    # so it is built unchecked here to prove the template's own refusal still stands behind it
+    (congress(company=_unchecked(co("ACN", "Accenture"), name="Supercalifragilisticex Co")), CONGRESS_RUN,
+     "slot_rejected"),
 ], ids=["one_member", "zero", "bool", "over_535", "older_month", "month_later", "read_too_early", "read_after_run",
         "read_too_long_ago", "slot_word", "word_too_long"])
 def test_congress_refusals(rec, run_date, code):
@@ -4090,6 +4616,151 @@ def test_stake_refusals(rec, run_date, code):
     assert e.value.code == code
 
 
+# ── Batch 1 (2026-10-15, plan item 4): no drawn stake text names a person ──────────────────────────
+#
+# The source title (the image's source line, card 4, every caption), the local listing (card 3) and an
+# UNLISTED investee's name (the cover, the hook, the YouTube title) are drawn on every stake post, and under
+# the 2026-10-09 rules a person is named only in written body text. Each case below is caught by exactly
+# the check its comment names (both mutation-checked); the record's own companies are masked first.
+
+
+@pytest.mark.parametrize("rec, field", [
+    # `_names_a_person` and the person lexicon both
+    (stake(source_title="Jensen Huang keynote (Mar 18, 2026)"), "source title"),
+    (stake(source_title="Warren Buffett's 2025 shareholder letter"), "source title"),
+    # the person lexicon alone: a lone surname
+    (stake(source_title="Huang keynote (Mar 18, 2026)"), "source title"),
+    # `_names_a_person` alone: a given name before a capitalised word, in no lexicon
+    (stake(kind="non_us_listed", local_listing="Masayoshi Son"), "local listing"),
+    # an unlisted investee is the text checked (nothing verified it is a company)
+    (stake(investee_name="Charles Schwab"), "investee name"),
+    (stake(investee_name="Bezos Expeditions"), "investee name"),
+], ids=["given_name_and_surname", "possessive_letter", "lone_surname", "local_listing", "unlisted_investee",
+        "surname_in_a_name"])
+def test_a_stake_whose_drawn_text_names_a_person_is_refused(rec, field):
+    with pytest.raises(T.NewsTemplateRefused) as e:
+        compose(rec, STAKES_RUN)
+    assert (e.value.code, e.value.detail) == ("slot_rejected", f"{field}: names a person")
+    assert not any(w in str(e.value) for w in ("Jensen", "Huang", "Buffett", "Masayoshi", "Schwab", "Bezos"))
+
+
+@pytest.mark.parametrize("rec", [
+    # a LISTED investee keeps its profile name (its listing verified it is a company) …
+    stake(investee_name="Charles Schwab", investee=co("SCHW", "Charles Schwab"), kind="us_listed_off_13f"),
+    # … and its own name in the source title is masked, as is the investor's
+    stake(investee_name="Charles Schwab", investee=co("SCHW", "Charles Schwab"), kind="us_listed_off_13f",
+          source_title="Charles Schwab 8-K (Dec 1, 2026)"),
+    stake(investor=co("LLY", "Eli Lilly"), source_title="Eli Lilly 2025 Form 10-K"),
+    stake(investor=co("MS", "Morgan Stanley"), source_title="Morgan Stanley 10-Q (Sep 30, 2026)"),
+    # the review of 2026-10-16 (ST-1): a listed company named with a stake-source surname is masked like any
+    # other ("Gates" is on `R.STAKE_SOURCE_PERSON_SURNAMES`)
+    stake(investee_name="Gates Industrial", investee=co("GTES", "Gates Industrial"), kind="us_listed_off_13f",
+          source_title="Gates Industrial 2025 Form 10-K"),
+], ids=["listed_investee", "listed_investee_in_source", "investor_in_source", "investor_given_name",
+        "listed_investee_with_a_listed_surname"])
+def test_a_company_named_for_a_person_is_still_a_company(rec):
+    out = compose(rec, STAKES_RUN)
+    assert out["image_spec"]["right"]["name"] == rec.investee_name
+
+
+def test_every_shipped_stake_sample_passes_the_person_check():
+    for rec in (nscale(), anthropic_commitment(), tesla_spacex(), berkadia(), iroquois_bhe(), itochu(),
+                intel_stake()):
+        assert T._stake_person_problem(rec, rec.source_title) is None, rec.investee_name
+
+
+@pytest.mark.parametrize("rec, field", [
+    # the review of 2026-10-16 (ST-1): every one of these passed `_names_a_person` and the lesson lexicons (the
+    # review's probe) — the stake-source surnames catch them, in all three drawn texts
+    (stake(source_title="Dario Amodei essay (Oct 2, 2026)"), "source title"),
+    (stake(source_title="Amodei essay (Oct 2, 2026)"), "source title"),
+    (stake(source_title="Altman blog (Sep 3, 2026)"), "source title"),
+    (stake(source_title="Mira Murati interview"), "source title"),
+    (stake(source_title="Ilya Sutskever interview"), "source title"),
+    (stake(source_title="Ellison interview (Jun 12, 2026)"), "source title"),
+    (stake(source_title="Abel letter (Feb 28, 2026)"), "source title"),
+    (stake(kind="non_us_listed", local_listing="Altman Holdings"), "local listing"),
+    (stake(investee_name="Gates Industrial"), "investee name"),        # unlisted: never masked, so refused
+], ids=["dario_amodei", "amodei", "altman", "murati", "sutskever", "ellison", "abel", "local_listing",
+        "unlisted_investee"])
+def test_a_stake_naming_a_stake_source_person_is_refused(rec, field):
+    """The source line is drawn on the image, card 4 and every caption — and a person is never drawn (marketing.md
+    §1 decision 2). Mutation-checked by hand (2026-10-19): with `stake_person_surname_hits` dropped from
+    `_stake_person_problem`, every row here composes."""
+    with pytest.raises(T.NewsTemplateRefused) as e:
+        compose(rec, STAKES_RUN)
+    assert (e.value.code, e.value.detail) == ("slot_rejected", f"{field}: names a person")
+    assert not any(w in str(e.value) for w in ("Amodei", "Altman", "Murati", "Sutskever", "Ellison", "Abel", "Gates"))
+
+
+# ── the review of 2026-10-16: a theme's regional fact; the cover's word cap in every template ──────────
+
+
+def test_a_themes_regional_fact_reads_as_a_region_and_the_explainer_says_so():
+    """TH-1: a member whose breakdown is regional (Costco's countries) was narrated "… largest revenue line in
+    fiscal 2026 was United States." under an explainer calling a revenue line "one product or business". Now the
+    explainer names regions too, the narrated fact takes "the" (`R.REGION_ARTICLE`), and every drawn label — the
+    tile, the card — keeps the name as written. Mutation-checked by hand (2026-10-19): with the article dropped
+    from `sp()`, the narration assert turns red."""
+    rows = _members(6, seg=lambda i: "United States" if i == 0 else ("Cloud" if i < 3 else None),
+                    share=lambda i: 0.73 if i == 0 else (0.5 if i < 3 else None))
+    rec = theme(rows, theme_size=6)
+    out = compose(rec, THEME_RUN)
+    script = " ".join(out["video_script"])
+    assert "largest revenue line in fiscal 2026 was the United States" in script, script
+    assert T.LEXICON["th.explainer"] in out["video_script"]
+    assert "region" in T.LEXICON["th.explainer"] and "region" in T.LEXICON["th.c.explainer.body"]
+    tile = next(t for t in out["image_spec"]["tiles"] if t["logo"] == rows[0][0])
+    assert tile["line"] == "United States · 73%"
+    drawn = json.dumps([out["image_spec"], out["cards"], out["opening_card"], out["image_post"]])
+    assert "the United States" not in drawn and "The United States" not in drawn
+    assert "product or business" not in json.dumps(out) and "product or business" not in json.dumps(_offered(rec))
+    assert T.validate_package(out, record=rec) == []
+
+
+def test_a_period_final_revenue_line_never_doubles_the_stop():
+    """The re-review of 2026-10-19 (TH-PUNCT-1): a narration line ends on its revenue line and the entry's own period
+    ("… and {m2_s} was {g2}."), so Walmart's "Walmart U.S." (the F5 label override) and the article path's "the U.S."
+    printed "Walmart U.S.." and "the U.S..", narrated and burned into the video's captions. `_t` lets a period-final
+    value end the sentence itself; the lexicon is unchanged, and a mid-sentence label keeps its comma. Mutation-
+    checked by hand (2026-10-19): `_t` back to a plain `format_map` turned the narration asserts red."""
+    rows = [("COST", "Costco", "Food and Sundries", 0.39, "2025"), ("WMT", "Walmart", "Walmart U.S.", 0.68, "2025"),
+            ("NKE", "Nike", "U.S.", 0.42, "2025"), ("TGT", "Target", "Food & beverage", 0.23, "2025"),
+            ("KR", "Kroger", "Grocery", 0.5, "2025"), ("DG", "Dollar General", "Consumables", 0.82, "2025")]
+    rec = theme(rows, title="Big retail", slug="big-retail", theme_size=6)
+    out = compose(rec, THEME_RUN)
+    assert out["video_script"][0] == ("Costco's largest revenue line in fiscal 2025 was Food and Sundries, and "
+                                      "Walmart's was Walmart U.S.")
+    assert out["video_script"][1] == ("Nike's largest revenue line in fiscal 2025 was the U.S., and Target's was "
+                                      "Food & beverage.")
+    assert ".." not in json.dumps(out) and T.validate_package(out, record=rec) == []
+    # one fact on its line: "{g1}." ends the line too
+    assert T._t("th.one.poss", m1_s="Walmart's", fy="2025", g1="Walmart U.S.") == (
+        "Walmart's largest revenue line in fiscal 2025 was Walmart U.S.")
+    assert T._t("th.one.poss", m1_s="Costco's", fy="2025", g1="Food and Sundries") == (
+        "Costco's largest revenue line in fiscal 2025 was Food and Sundries.")
+    with pytest.raises(KeyError):                                     # a missing slot is still a bug, never a gap
+        T._t("th.one.poss", m1_s="Costco's", fy="2025")
+
+
+def test_a_company_name_word_the_cover_cannot_draw_is_refused_by_every_template():
+    """The record refuses a company-name word longer than `R.COMPANY_NAME_WORD_MAX_CHARS` (a CardOverflow on the
+    cover skips the whole day); the Form 4 and Money Map templates now refuse it too, as 13F and the 2b series
+    did — built unchecked here, the shape of a record that slipped past the gate. A 20-letter word composes.
+    Mutation-checked by hand (2026-10-19): either template's `_name_slot` call removed turns its row red."""
+    assert T.NAME_WORD_MAX_CHARS == T.F13_MAX_WORD_CHARS == R.COMPANY_NAME_WORD_MAX_CHARS == 20
+    long = "Supercalifragilisticex Co"                          # a 22-letter word
+    for rec, run in ((costco(company=_unchecked(co("COST", "Costco"), name=long)), THU),
+                     (week(replace(GME, company=_unchecked(GME.company, name=long))), MON)):
+        with pytest.raises(T.NewsTemplateRefused) as e:
+            compose(rec, run)
+        assert e.value.code == "slot_rejected" and "20 characters" in e.value.detail, e.value.detail
+    fits = "Electrometallurgical Co"                            # 20 letters
+    for rec, run in ((costco(company=co("COST", fits)), THU), (week(replace(GME, company=co("GME", fits))), MON)):
+        out = compose(rec, run)
+        assert T.validate_package(out, record=rec) == []
+
+
 #: (background, kept?) — hand-written free text: kept only when every rule passes, else dropped
 #: (never fixed, never a reason to refuse the stake).
 BACKGROUNDS = [
@@ -4120,11 +4791,13 @@ BACKGROUNDS = [
 
 
 @pytest.mark.parametrize("background, kept", BACKGROUNDS, ids=[str(i) for i in range(len(BACKGROUNDS))])
-def test_a_stake_background_is_caption_text_only_and_only_when_every_rule_passes(background, kept):
+def test_a_stake_background_is_caption_text_only_and_only_when_every_rule_passes(background, kept, monkeypatch):
     """A3: the background (hand-written, unnormalised) appears only in long-caption paragraphs —
     never drawn, narrated, carded or used as alt text. Mutation-checked by hand (2026-10-10, in memory):
     without `_PER_SHARE_RE` in `_stake_background` case 2 ("at $414.79 a share") turned red — case 3
-    is refused by its "Acquired" as well."""
+    is refused by its "Acquired" as well. news-v19: only while STAKE_BACKGROUND_IN_CAPTIONS is on — the
+    rules here are what that switch would run (its default, off, is pinned below)."""
+    monkeypatch.setattr(T, "STAKE_BACKGROUND_IN_CAPTIONS", True)
     rec = stake(background=background)
     out = compose(rec, STAKES_RUN)
     assert T.validate_package(out, record=rec) == []
@@ -4137,6 +4810,28 @@ def test_a_stake_background_is_caption_text_only_and_only_when_every_rule_passes
     video_and_image = json.dumps([out["hook"], out["video_script"], out["cards"], out["opening_card"],
                                   out["image_spec"], out["image_post"]])
     assert background not in video_and_image
+
+
+def test_by_default_no_stake_background_reaches_any_caption():
+    """news-v19 (Batch 1, plan item 5): the live preview of 2026-10-14 printed the catalogue's hand-kept
+    fragments as caption paragraphs ("Paid $30.0M for a convertible note …", "Rest of a $20.0B facility …"),
+    in their own number style. STAKE_BACKGROUND_IN_CAPTIONS is off by default: every stake — each sample, and a
+    sample carrying EVERY background of the real catalogue the rules would keep — composes exactly as it does
+    with no background at all. Mutation-checked by hand (2026-10-15): with the switch's default set to True,
+    this turned red (the Nscale, Intel, ITOCHU and Iroquois samples' captions carried their backgrounds)."""
+    assert T.STAKE_BACKGROUND_IN_CAPTIONS is False
+    seed = json.loads((_BACKEND / "data" / "trillion_club_seed.json").read_text(encoding="utf-8"))
+    kept = [b for b in (s.get("background") for s in seed["stakes"]) if isinstance(b, str)
+            and T._stake_background(b, ["NVIDIA", "Nscale", "Nscale Form S-1 (Sep 18, 2026)"]) is not None]
+    assert len(kept) >= 20                     # the catalogue really has backgrounds the rules keep
+    recs = [f() for f in (nscale, anthropic_commitment, tesla_spacex, berkadia, iroquois_bhe, itochu, intel_stake)]
+    recs += [stake(background=b) for b in kept]
+    for rec in recs:
+        out = compose(rec, STAKES_RUN)
+        assert out == compose(replace(rec, background=None), STAKES_RUN), rec.investee_name
+        if rec.background:
+            assert rec.background not in json.dumps(out, ensure_ascii=False), rec.investee_name
+        assert T.validate_package(out, record=rec) == []
 
 
 @pytest.mark.parametrize("kind, investee, local, listed, l3, c3", [
@@ -4235,7 +4930,18 @@ def test_earnings_state_the_signed_figure_on_the_analysts_basis_never_a_profit_o
     assert "-" not in " ".join([out["hook"], *out["video_script"]])         # narration: magnitudes in words
 
 
-def test_earnings_revenue_row_and_lines_only_when_present():
+@pytest.fixture
+def revenue_copy_on(monkeypatch):
+    """The DORMANT revenue copy (`T.EARNINGS_REVENUE_IN_POSTS`, off since news-v21: the feed never says which basis
+    a revenue ESTIMATE is on) switched on in memory, so its reviewed mechanics — one shared precision, said once,
+    never under a headline that states it — stay tested for the day a source states that basis. Production never
+    runs it; every test without this fixture runs the shipped default."""
+    monkeypatch.setattr(T, "EARNINGS_REVENUE_IN_POSTS", True)
+
+
+def test_earnings_revenue_row_and_lines_only_when_present(revenue_copy_on):
+    """The dormant copy: a writable pair gets its row, line and card; an unwritable one none (the shipped default:
+    `test_news_v21_no_earnings_post_prints_revenue_anywhere`)."""
     with_rev = compose(earnings(), EARNINGS_RUN)
     assert [r["cells"][0] for r in with_rev["image_spec"]["sections"][0]["rows"]] == ["EPS", "Revenue"]
     assert with_rev["video_script"][1] == "Revenue was $551.9 million, against an analyst estimate of $543.6 million."
@@ -4243,6 +4949,11 @@ def test_earnings_revenue_row_and_lines_only_when_present():
     assert [r["cells"][0] for r in without["image_spec"]["sections"][0]["rows"]] == ["EPS"]
     assert "revenue" not in json.dumps({k: without[k] for k in ("hook", "video_script", "cards", "image_spec",
                                                                  "captions", "image_post")}).lower()
+    # the data card replaces the Revenue card there (its first slot group), the date card where there is none
+    for out, slot, title in ((with_rev, 1, "Revenue"), (without, 0, "Reported")):
+        picture = onscreen.image_strings(out["image_spec"], out["logo_refs"])
+        assert onscreen.data_card_slot("earnings", out["cards"], picture) == slot
+        assert out["cards"][slot]["title"] == title
 
 
 @pytest.mark.parametrize("rec, run_date, code", [
@@ -4256,12 +4967,40 @@ def test_earnings_revenue_row_and_lines_only_when_present():
     (_unchecked(earnings(), revenue_actual=900e6), EARNINGS_RUN, "implausible_figures"),       # outside the band
     (_unchecked(earnings(), revenue_estimate=None), EARNINGS_RUN, "implausible_figures"),
     (earnings(company=_unchecked(co("NWFT", "Northwind"), name="Shocking Fitness")), EARNINGS_RUN, "slot_rejected"),
+    # news-v19: a VALID record without a revenue pair (the record class still admits one) is refused — the pair
+    # is the only check that the row is the quarter the estimate is for (Progressive's one-month row)
+    (earnings(revenue_actual=None, revenue_estimate=None), EARNINGS_RUN, "implausible_figures"),
+    (earnings(revenue_actual=None, revenue_estimate=None, period_end=None), EARNINGS_RUN, "implausible_figures"),
+    # review of 2026-10-16 (ER-1): figures that PRINT as one — "$0.10 vs $0.10", "$0.14 vs $0.14", "-$0.10 vs
+    # -$0.10" — say nothing, whatever gap the feed's figures had (0.095 vs 0.10 is 5.0% as written)
+    (earnings(eps_actual=0.095, eps_estimate=0.10), EARNINGS_RUN, "implausible_figures"),
+    (earnings(eps_actual=0.1449, eps_estimate=0.1376), EARNINGS_RUN, "implausible_figures"),
+    (earnings(eps_actual=-0.095, eps_estimate=-0.10), EARNINGS_RUN, "implausible_figures"),
+    (earnings(eps_actual=4.504, eps_estimate=4.5), EARNINGS_RUN, "implausible_figures"),
+    # the owner-delegated EPS ceiling (2026-10-19): a record that slipped past the adapter and the record's own
+    # check is refused here too ("a per-share figure above $1,000,000")
+    (_unchecked(earnings(), eps_actual=1_500_000.0, eps_estimate=1_400_000.0), EARNINGS_RUN, "implausible_figures"),
+    (_unchecked(earnings(), eps_estimate=1_000_000.5), EARNINGS_RUN, "implausible_figures"),
 ], ids=["old", "same_day", "digit_shift", "gap", "sub_cent", "tiny_estimate", "period_old", "revenue_band",
-        "revenue_one_sided", "slot_word"])
+        "revenue_one_sided", "slot_word", "no_revenue", "no_revenue_no_period", "prints_equal_0.10",
+        "prints_equal_0.14", "prints_equal_negative", "prints_equal_4.50", "eps_above_ceiling",
+        "estimate_above_ceiling"])
 def test_earnings_refusals(rec, run_date, code):
     with pytest.raises(T.NewsTemplateRefused) as e:
         compose(rec, run_date)
     assert e.value.code == code
+
+
+@pytest.mark.parametrize("a, e", [(0.095, 0.10), (0.1449, 0.1376), (-0.095, -0.10), (4.504, 4.5), (-4.5049, -4.5)])
+def test_earnings_figures_that_print_as_one_are_refused_by_that_rule(a, e):
+    """ER-1: the refusal comes from the printed-figure rule itself (not a neighbouring check), and one cent apart
+    still composes. Mutation-checked by hand (2026-10-16): without the `eps_image(a) == eps_image(e)` check the
+    record composed "Fabrikam reported EPS of $0.10 vs an analyst estimate of $0.10" (red)."""
+    with pytest.raises(T.NewsTemplateRefused) as err:
+        compose(earnings(company=co("FBKM", "Fabrikam"), eps_actual=a, eps_estimate=e), EARNINGS_RUN)
+    assert err.value.code == "implausible_figures" and "print as the same figure" in err.value.detail
+    out = compose(earnings(company=co("FBKM", "Fabrikam"), eps_actual=0.11, eps_estimate=0.10), EARNINGS_RUN)
+    assert out["opening_card"]["figure"] == "$0.11" and out["opening_card"]["headline"].endswith("$0.10")
 
 
 @pytest.mark.parametrize("word", ["beat", "missed", "expected", "surprise", "topped", "exceeded", "fell short",
@@ -4292,13 +5031,14 @@ def test_earnings_never_puts_a_verdict_beside_the_figures(word):
     # one unit, the larger figure's (never "$1.2 billion vs $900 million")
     (1_200_000_000.0, 900_000_000.0, ("$1.2 billion", "$0.9 billion"), ("$1.2B", "$0.9B")),
 ], ids=["shortfall_0.09pct", "shortfall_large_co", "gap_2.6pct", "equal", "golden", "rollup_edge", "one_unit"])
-def test_the_revenue_pair_is_written_at_one_shared_precision(ra, rv, words, image):
+def test_the_revenue_pair_is_written_at_one_shared_precision(ra, rv, words, image, revenue_copy_on):
     """Review round 9 (medium): revenue_actual and revenue_estimate were rounded on their own, so a
     near-match read as a miss or a beat for a named company. They are now written as ONE pair: the
     larger figure's unit, decimals grown from one to REVENUE_MAX_PLACES until the shown gap is within
     REVENUE_GAP_TOLERANCE of the true gap — the same strings in narration, card, image, captions and
     alt text. Mutation-checked (2026-10-10, in memory): with each figure formatted alone again
-    (`money_words` / `money_image`), the shortfall, gap and roll-up cases turned red."""
+    (`money_words` / `money_image`), the shortfall, gap and roll-up cases turned red. news-v21: the
+    dormant copy (`revenue_copy_on`) — no shipped post writes the pair."""
     pair = T.revenue_pair(ra, rv)
     assert (pair["ra"], pair["re"]) == words and (pair["ra_s"], pair["re_s"]) == image
     out = compose(earnings(revenue_actual=ra, revenue_estimate=rv), EARNINGS_RUN)
@@ -4314,9 +5054,10 @@ def test_the_revenue_pair_is_written_at_one_shared_precision(ra, rv, words, imag
     (5_000_000_001.0, 5_000_000_000.0),       # a one-dollar gap: no shared precision can show it
     (900_000.0, 800_000.0),                   # under $1 million: never written as a pair
 ])
-def test_a_revenue_gap_no_shared_precision_can_show_is_left_out(ra, rv):
+def test_a_revenue_gap_no_shared_precision_can_show_is_left_out(ra, rv, revenue_copy_on):
     """Fail closed: when no precision up to REVENUE_MAX_PLACES shows the gap within the tolerance, the
-    post leaves revenue out (the no-revenue lines) — never a pair that reads equal, or the wrong size."""
+    post leaves revenue out (the no-revenue lines) — never a pair that reads equal, or the wrong size
+    (the dormant copy; news-v21 leaves every pair out)."""
     assert T.revenue_pair(ra, rv) is None
     out = compose(earnings(revenue_actual=ra, revenue_estimate=rv), EARNINGS_RUN)
     assert [r["cells"][0] for r in out["image_spec"]["sections"][0]["rows"]] == ["EPS"]
@@ -4359,14 +5100,199 @@ def test_a_shown_revenue_pair_always_keeps_the_true_gap_sign_and_size():
     assert shown > 3000
 
 
-def test_no_article_stands_before_an_earnings_figure():
+@pytest.mark.parametrize("revenue_copy", [False, True], ids=["shipped", "dormant_revenue_copy"])
+def test_no_article_stands_before_an_earnings_figure(revenue_copy, monkeypatch):
     """An "a" before a figure would depend on how it is read ("an $8.1B estimate"): every earnings
-    string says "an analyst estimate of {figure}" / "an estimate of {figure}" instead."""
+    string says "an analyst estimate of {figure}" / "an estimate of {figure}" instead — the dormant revenue
+    copy's too."""
+    monkeypatch.setattr(T, "EARNINGS_REVENUE_IN_POSTS", revenue_copy)
     for factory in (earnings, earnings_profit,
                     lambda: earnings(eps_actual=8.1, eps_estimate=8.05, revenue_actual=18e9, revenue_estimate=18.2e9)):
         out = compose(factory(), EARNINGS_RUN)
         for s in _strings(out):
             assert not re.search(r"\b[Aa]n?\s+-?\$", s), s
+
+
+# ── news-v21 (main-session decision of 2026-10-20): no earnings post prints a revenue comparison ─────────────
+
+#: GE Aerospace's Q3 2025 report (FMP's calendar, the read-only probe of 2026-10-20): EPS $1.66 against $1.46, and
+#: revenue $12.221B — the GAAP total, the statement's figure — against a $10.385B estimate, the consensus for its
+#: ADJUSTED revenue (run-off insurance excluded). "Revenue of $12.2 billion vs $10.4 billion" (+17.7%) held on
+#: neither basis, and FMP's rows of the quarters before it sat on the statement basis too: no read of the feed
+#: tells such a pair apart. Travelers' quarter is the same shape.
+GE_RUN = date(2025, 10, 23)        # Thursday; reports Oct 16 .. 22
+
+
+def ge_aerospace_2025(**kw):
+    base = dict(series="earnings", company=co("GE", "GE Aerospace"), report_date=date(2025, 10, 21),
+                period_end=date(2025, 9, 30), eps_actual=1.66, eps_estimate=1.46, revenue_actual=12.221e9,
+                revenue_estimate=10.385e9)
+    base.update(kw)
+    return R.EarningsReport(**base)
+
+
+def travelers_2025():
+    return ge_aerospace_2025(company=co("TRV", "Travelers"), report_date=date(2025, 10, 16), eps_actual=8.14,
+                             eps_estimate=6.39, revenue_actual=12.470e9, revenue_estimate=11.688e9)
+
+
+#: Records that carry a plausible revenue pair — every one a pair the DORMANT copy would write but one: the
+#: template's sample, the two two-basis 2025 quarters, a pair on one basis (RTX: the basis still cannot be read
+#: from the feed), the trillion scale, both inclusive band edges, and Fabrikam's unwritable $100K gap.
+_REVENUE_CASES = [
+    ("northwind_sample", earnings, EARNINGS_RUN),
+    ("ge_aerospace_q3_2025", ge_aerospace_2025, GE_RUN),
+    ("travelers_q3_2025", travelers_2025, GE_RUN),
+    ("rtx_one_basis", lambda: earnings(company=co("RTX", "RTX"), eps_actual=2.26, eps_estimate=1.78,
+                                       revenue_actual=24.965e9, revenue_estimate=24.109e9), EARNINGS_RUN),
+    ("trillion_scale", lambda: earnings(revenue_actual=999_940_000_000.0, revenue_estimate=998_900_000_000.0),
+     EARNINGS_RUN),
+    ("band_low_edge", lambda: earnings(revenue_actual=500_000_000.0, revenue_estimate=1_000_000_000.0), EARNINGS_RUN),
+    ("band_high_edge", lambda: earnings(revenue_actual=1_500_000_000.0, revenue_estimate=1_000_000_000.0),
+     EARNINGS_RUN),
+    ("unwritable_pair", earnings_profit, EARNINGS_RUN),
+]
+
+
+def _revenue_forms(rec):
+    """Every way a template writes the record's revenue figures: the dormant pair's four strings (when writable)
+    and each figure's own word and image forms ("$12.2 billion", "$12.2B")."""
+    pair = T.revenue_pair(rec.revenue_actual, rec.revenue_estimate)
+    forms = set(pair.values()) if pair is not None else set()
+    for v in (rec.revenue_actual, rec.revenue_estimate):
+        forms |= {T.money_words(v), T.money_image(v)}
+    return forms
+
+
+def _every_earnings_string(out, rec, run_date):
+    """Every string the output carries (`_strings`: hook, narration, cards, opening card, picture spec, alt text,
+    captions, posts) + what the picture and the cover DRAW (with the logos' names) + each EXTRA video caption of
+    Facebook / LinkedIn / Threads (Batch 3: the accepted caption under the narrated-video disclaimer, re-checked by
+    `extra_video_problems`)."""
+    texts = list(_strings(out))
+    picture = onscreen.image_strings(out["image_spec"], out["logo_refs"])
+    cover = onscreen.opening_strings(out["opening_card"], out["logo_refs"])
+    assert picture and cover
+    texts += picture + cover
+    extras = 0
+    for platform in post_copy.EXTRA_VIDEO_FIELDS:
+        caption = post_copy.extra_video_caption(platform, out["posts"][platform]["caption"], run_date, T.AUTHORSHIP)
+        assert T.extra_video_problems(out, fact_sheet=sheet(rec), run_date=run_date, platform=platform,
+                                      caption=caption) == []
+        texts.append(caption)
+        extras += 1
+    assert extras == 3
+    return texts
+
+
+@pytest.mark.parametrize("name, factory, run_date", _REVENUE_CASES, ids=[c[0] for c in _REVENUE_CASES])
+def test_news_v21_no_earnings_post_prints_revenue_anywhere(name, factory, run_date):
+    """news-v21: a record WITH a revenue pair composes the no-revenue post — narration L2 the estimate definition,
+    L4 the quarterly explainer, the picture's EPS row alone, the date card under the data card — and no string of
+    any field (narration, cards, cover, picture, alt text, every caption and post, the YouTube description, the
+    extra video captions), at any store state or URL setting, says "revenue" or any form of either figure; nor does
+    any variant the builder OFFERS. Mutation-checked (2026-10-20, in memory): `EARNINGS_REVENUE_IN_POSTS` forced on
+    turned every writable case red."""
+    rec = factory()
+    assert rec.revenue_actual is not None and rec.revenue_estimate is not None       # the pair is there, checked
+    forms = _revenue_forms(rec)
+    for store_state in post_copy.STORE_STATES:
+        for allow in (False, True):
+            out = compose(rec, run_date, store_state, allow)
+            for s in _every_earnings_string(out, rec, run_date):
+                assert "revenue" not in s.lower(), (name, store_state, allow, s)
+                assert not [f for f in forms if f in s], (name, store_state, allow, s)
+            a_s, e_s = T.eps_image(rec.eps_actual), T.eps_image(rec.eps_estimate)
+            assert out["image_spec"]["sections"] == [{"rows": [{"cells": ["EPS", f"vs {e_s} estimate", a_s]}]}]
+            assert out["video_script"][1:] == [T.LEXICON["er.estimate"], T.LEXICON["er.l3.basis"],
+                                               T.LEXICON["er.l4.quarterly"]]
+            assert [c["title"] for c in out["cards"]][1:] == ["The estimate", "About the figures", "Each quarter"]
+            assert out["image_post"]["paragraphs"][0] == T.LEXICON["er.alt.eps"].format(eps_s=a_s, est_s=e_s)
+            picture = onscreen.image_strings(out["image_spec"], out["logo_refs"])
+            assert onscreen.data_card_slot("earnings", out["cards"], picture) == 0          # the date card
+            assert out["cards"][0]["title"] in (T.LEXICON["er.c1.period.title"], T.LEXICON["er.c1.report.title"])
+    p = _parts(rec, run_date)
+    offered = [*p.hook, *(v for g in p.lines for v in g), *(t for c in p.cards for t in c), *p.image_headlines,
+               *p.video_headlines, *p.image_paragraphs, *p.video_paragraphs, *p.youtube_titles, *p.alt_paragraphs,
+               p.opening["headline"], p.image_spec["subtitle"]]
+    assert not [s for s in offered if "revenue" in s.lower() or any(f in s for f in forms)]
+    assert all(not ({x for x in said if "revenue" in x.lower()}) for said in p.stated_by_headline.values())
+
+
+def test_news_v21_ge_aerospaces_two_basis_quarter_composes_eps_only(monkeypatch):
+    """The counterexample that ended the revenue comparison, composed: GE Aerospace's Q3 2025 post states its EPS
+    beside the analyst estimate and nothing of the $12.2 billion vs $10.4 billion pair. The dormant copy, switched on
+    in memory, would have printed it — so this test reads the switch, not an accident of the figures."""
+    rec = ge_aerospace_2025()
+    out = compose(rec, GE_RUN)
+    assert out["hook"] == "GE Aerospace reported $1.66 a share on the analysts' basis; the estimate was $1.46."
+    assert out["video_script"] == [
+        "These figures cover the quarter that ended September 30th, reported on October 21st.",
+        T.LEXICON["er.estimate"], T.LEXICON["er.l3.basis"], T.LEXICON["er.l4.quarterly"]]
+    assert out["cards"][0] == {"title": "Quarter ended", "body": "Sep 30, 2025 · reported Oct 21, 2025"}
+    assert out["image_spec"]["sections"] == [{"rows": [{"cells": ["EPS", "vs $1.46 estimate", "$1.66"]}]}]
+    assert out["image_post"]["paragraphs"] == ["The image shows EPS of $1.66 against an analyst estimate of $1.46.",
+                                               "Source: company results and analyst consensus. Reported Oct 21, 2025."]
+    assert out["captions"]["x"] == ("GE Aerospace reported EPS of $1.66 vs an analyst estimate of $1.46. The EPS "
+                                    "basis can differ from the official accounts.")
+    assert out["captions"]["linkedin"] == (
+        "GE Aerospace reported EPS of $1.66 vs an analyst estimate of $1.46. The EPS basis can differ from the "
+        "official accounts.\n\nThese figures cover the quarter that ended Sep 30, reported on Oct 21.\n\n"
+        "An analyst estimate is the average figure analysts published before the report.")
+    assert out["captions"]["youtube_title"] == "GE Aerospace results vs estimates: EPS $1.66 vs $1.46"
+    blob = json.dumps(out)
+    assert "revenue" not in blob.lower() and "$12.2" not in blob and "$10.4" not in blob and "billion" not in blob
+    # anti-vacuity: the pair IS writable, and the dormant copy would have said it
+    assert T.revenue_pair(rec.revenue_actual, rec.revenue_estimate) == {
+        "ra": "$12.2 billion", "re": "$10.4 billion", "ra_s": "$12.2B", "re_s": "$10.4B"}
+    monkeypatch.setattr(T, "EARNINGS_REVENUE_IN_POSTS", True)
+    dormant = compose(rec, GE_RUN)
+    assert "revenue of $12.2 billion vs $10.4 billion" in dormant["captions"]["linkedin"]
+    assert dormant["video_script"][1] == "Revenue was $12.2 billion, against an analyst estimate of $10.4 billion."
+
+
+@pytest.mark.parametrize("revenue_copy", [False, True], ids=["shipped", "dormant_revenue_copy"])
+@pytest.mark.parametrize("rec", [
+    earnings(revenue_actual=None, revenue_estimate=None),
+    earnings(revenue_actual=None, revenue_estimate=None, period_end=None),
+    ge_aerospace_2025(revenue_actual=None, revenue_estimate=None),
+    _unchecked(earnings(), revenue_estimate=None),
+    _unchecked(earnings(), revenue_actual=None),
+    _unchecked(earnings(), revenue_actual=499_999_999.0, revenue_estimate=1_000_000_000.0),
+    _unchecked(earnings(), revenue_actual=1_500_000_001.0, revenue_estimate=1_000_000_000.0),
+    _unchecked(earnings(), revenue_actual=0.0),
+    _unchecked(earnings(), revenue_actual=-551_900_000.0),
+    _unchecked(earnings(), revenue_estimate=0.0),
+    _unchecked(earnings(), revenue_actual=float("nan")),
+    _unchecked(earnings(), revenue_actual=float("inf")),
+], ids=["no_pair", "no_pair_no_period", "ge_no_pair", "estimate_only_missing", "actual_only_missing",
+        "below_band", "above_band", "zero_actual", "negative_actual", "zero_estimate", "nan_actual", "inf_actual"])
+def test_news_v21_the_revenue_pair_is_still_required_though_never_printed(rec, revenue_copy, monkeypatch):
+    """The revenue pair is the data-quality and quarter check (news-v19): a record without one, or with one outside
+    `REVENUE_RATIO_BAND` (or not a positive finite pair), is refused `implausible_figures` — whether or not the
+    revenue copy is switched on, so printing and checking are independent (the band's edges compose:
+    `test_news_v21_no_earnings_post_prints_revenue_anywhere`)."""
+    monkeypatch.setattr(T, "EARNINGS_REVENUE_IN_POSTS", revenue_copy)
+    with pytest.raises(T.NewsTemplateRefused) as err:
+        compose(rec, GE_RUN if rec.company.symbol == "GE" else EARNINGS_RUN)
+    assert err.value.code == "implausible_figures" and "revenue" in err.value.detail, err.value.detail
+
+
+def test_news_v21_the_revenue_copy_stays_pinned_and_the_switch_ships_off():
+    """The dormant copy keeps its reviewed wording in the lexicon (pinned by the fixture) and the switch is off in
+    the shipped module: a news-v21 output and its fact sheet revalidate clean, and the same output tampered to
+    carry the revenue line is refused (`revalidate` recomposes it)."""
+    assert T.EARNINGS_REVENUE_IN_POSTS is False
+    for entry_id in ("er.l2.revenue", "er.c2.revenue.title", "er.c2.revenue.body", "er.img.revenue",
+                     "er.ch.long.basis", "er.ch.long", "er.alt.revenue"):
+        assert entry_id in T.LEXICON
+    rec = ge_aerospace_2025()
+    out = compose(rec, GE_RUN)
+    stored = json.loads(json.dumps(out))
+    facts = json.loads(json.dumps(sheet(rec)))
+    assert T.revalidate(stored, fact_sheet=facts, run_date=GE_RUN) == []
+    stored["video_script"][1] = "Revenue was $12.2 billion, against an analyst estimate of $10.4 billion."
+    assert T.revalidate(stored, fact_sheet=facts, run_date=GE_RUN) != []
 
 
 # ── Theme Explainer ───────────────────────────────────────────────────────────
@@ -4485,10 +5411,10 @@ def test_theme_says_each_ones_segment_only_when_every_member_has_one():
         assert out["image_post"]["paragraphs"][0].endswith(
             " It gives the largest revenue line in fiscal 2025 or 2026 for 10 of them.")
     out = compose(theme(_members(8), theme_size=8), THEME_RUN)
-    assert out["captions"]["x"] == "AI chips: where 8 companies get their revenue, by each one's largest product or business line."
+    assert out["captions"]["x"] == "AI chips: where 8 companies get their revenue, by each one's largest revenue line."
     out = compose(theme(_members(8), theme_size=10), THEME_RUN)
     assert out["captions"]["x"] == ("AI chips: where 8 of its 10 companies get their revenue, by each one's largest "
-                                    "product or business line.")
+                                    "revenue line.")
     # no drawn tile with a fact (the three facts sit past the twelfth tile): no segment sentence at all
     rows = _members(15, seg=lambda i: "Cloud" if i >= 12 else None, share=lambda i: 0.5 if i >= 12 else None)
     out = compose(theme(rows, theme_size=15), THEME_RUN)
@@ -4682,8 +5608,9 @@ def test_no_caption_paragraph_repeats_a_figure_pair_its_headline_states(name, fa
                 assert _repeated_pairs(body) == [], (store_state, allow, f)
 
 
-def test_the_earnings_revenue_pair_is_said_once_in_every_long_caption():
-    """…and the revenue pair is not lost: said exactly once — in the headline or in a paragraph."""
+def test_the_earnings_revenue_pair_is_said_once_in_every_long_caption(revenue_copy_on):
+    """…and the revenue pair is not lost: said exactly once — in the headline or in a paragraph (the dormant
+    copy: since news-v21 no shipped caption says it at all)."""
     out = compose(earnings(), EARNINGS_RUN)
     pair = {"$551.9 million", "$543.6 million"}
     for f in ("tiktok", "instagram", "facebook", "linkedin", "youtube_description"):
@@ -4694,10 +5621,11 @@ def test_the_earnings_revenue_pair_is_said_once_in_every_long_caption():
                                                           "reported on Nov 5.")
 
 
-def test_a_headline_without_the_revenue_pair_keeps_the_revenue_paragraph_at_every_budget(monkeypatch):
+def test_a_headline_without_the_revenue_pair_keeps_the_revenue_paragraph_at_every_budget(monkeypatch,
+                                                                                         revenue_copy_on):
     """The fit sweep (every caption field, budgets 40..1,200): no body ever repeats the headline's pair;
     a headline that states revenue never has the revenue paragraph under it; and a shorter headline
-    without revenue still takes the revenue paragraph where it fits."""
+    without revenue still takes the revenue paragraph where it fits (the dormant copy, news-v21)."""
     rec = earnings()
     parts = _parts(rec, EARNINGS_RUN)
     rev_para = "Revenue was $551.9 million, against an analyst estimate of $543.6 million."
@@ -4978,13 +5906,13 @@ def test_the_restatement_check_sees_each_shape_it_names():
         "3 members of Congress disclosed purchases of Accenture stock in November 2026, counting each member "
         "once.", "Each member is counted once, however many reports they filed that month.")] == ["counted_once"]
     assert [r for r, _p in _restatements(
-        "The CEO of Lowe's disclosed buying $2.3 million of Lowe's stock in a Form 4 filed Nov 12.",
+        "The CEO of Lowe's disclosed buying $2.3 million of the company's stock in a Form 4 filed Nov 12.",
         "The filing is by the CEO of Lowe's.")] == ["adds_nothing"]
     # honest: a definition, a name the headline lacks, the next fact, a single figure beside a new one
     for head, para in [
         ("Fabrikam reported EPS of $4.86 vs an analyst estimate of $4.50. The EPS basis can differ from the "
          "official accounts.", "An analyst estimate is the average figure analysts published before the report."),
-        ("GameStop's CEO disclosed buying $74.4 million of GameStop stock in Form 4s filed Nov 10-11.",
+        ("GameStop's CEO disclosed buying $74.4 million of the company's stock in Form 4s filed Nov 10-11.",
          "The filings name Ryan Cohen, the CEO of GameStop."),
         ("3 members of Congress disclosed purchases of Accenture stock in November 2026.",
          "Each member is counted once, however many reports they filed that month."),
@@ -5144,16 +6072,22 @@ def test_the_worker_draws_a_stake_covers_chip_exactly_as_the_server_allows(facto
         assert layout.step < cards.RAMP_STEPS                          # the cover keeps room to spare
 
 
-def _worst_cover_headline(template, font, width, cap):
+def _worst_cover_headline(template, font, width, cap, *, article=False):
     """The cover headline `template` with the investor (32 characters) and investee (40) names of "W"
     words of at most `cap` characters, single-spaced, whose greedy wrap (the worker's `_wrap`) at `font`
-    / `width` takes the MOST lines — exact, a DP over every word-length sequence. Returns (lines, text)."""
+    / `width` takes the MOST lines — exact, a DP over every word-length sequence. Returns (lines, text).
+    news-v19: the investee's noun-phrase slot `{ee_np}` is the name, or "the" + the name when `article`
+    (a descriptive name, `st.ee.the`); a token the slots below do not know fails the test — a renamed slot
+    must never be read as a literal word (the probe would then prove nothing about the investee)."""
     from functools import lru_cache
 
     segs = []
     for tok in template.split():
-        m = re.fullmatch(r"\{(inv|inv_s|ee)\}", tok)
-        segs.append(("name", R.COMPANY_NAME_CHARS[1] if m.group(1) != "ee" else T.STAKE_NAME_MAX_CHARS,
+        m = re.fullmatch(r"\{(inv|inv_s|ee|ee_np)\}", tok)
+        assert m or "{" not in tok, f"an unknown slot in the cover template: {tok}"
+        if m and m.group(1) == "ee_np" and article:
+            segs.append(("word", T.LEXICON["st.ee.the"].split()[0]))
+        segs.append(("name", R.COMPANY_NAME_CHARS[1] if m.group(1) not in ("ee", "ee_np") else T.STAKE_NAME_MAX_CHARS,
                      m.group(1) == "inv_s") if m else ("word", tok))
     space = font.getlength("W W") - 2 * font.getlength("W")
 
@@ -5194,7 +6128,12 @@ def test_every_stake_cover_fits_with_its_chip_and_room_to_spare(entry_id):
     chip, a 12-character date, the widest figure, the investor and investee names whose words pack the
     headline into the most lines at the step before the floor (a superset: such names fail the hook's
     word bound) — still lays out before the floor. Every other headline wraps to no more lines at that
-    size, so every stake cover keeps the room to spare the other covers keep."""
+    size, so every stake cover keeps the room to spare the other covers keep. news-v19: WITH the article a
+    descriptive investee name takes ("… stake in the Louisiana data center venture …") — the superset of
+    the bare name: a greedy wrap is monotone (a word inserted before the name only moves every later word
+    to the same or a later line position), so the article never costs fewer lines and the bare headline
+    lays out at the same step or an earlier one."""
+    article = True
     pytest.importorskip("PIL")
     from marketing import cards
     out = compose(tesla_spacex(), STAKES_RUN)
@@ -5205,8 +6144,10 @@ def test_every_stake_cover_fits_with_its_chip_and_room_to_spare(entry_id):
     for engine in ["basic"] + (["raqm"] if cards.raqm_available() else []):
         step = cards.RAMP_STEPS - 1
         font = cards._font(_WORKER_FONT, cards.OPENING_HEADLINE_STYLE.size(step), engine)
-        lines, headline = _worst_cover_headline(T.LEXICON[entry_id], font, width, T.PAIR_NAME_WORD_MAX_CHARS)
+        lines, headline = _worst_cover_headline(T.LEXICON[entry_id], font, width, T.PAIR_NAME_WORD_MAX_CHARS,
+                                                article=article)
         assert len(cards._wrap(headline.split(), font, width, 99, "probe")) == lines
+        assert " the W" in headline and "{" not in headline, headline
         card = dict(out["opening_card"], chip=chip, figure="$999.9B", headline=headline)
         logos = [dict(e, name="W" * T.PAIR_NAME_WORD_MAX_CHARS) for e in _logo_entries(out)]
         layout = cards.layout_card(cards.opening_spec(card, cards.logo_table({"logos": logos}, {})),
@@ -5242,10 +6183,11 @@ def test_money_map_never_calls_a_line_of_its_breakdown_a_segment(factory):
     assert out["cards"][1]["title"] == "Revenue mix"
     assert T.validate_package(out, record=rec) == []
     if factory is apple:
-        assert out["video_script"][1] == ("Its iPhone business made up 50% of revenue, and Services made up 26% of "
-                                          "revenue.")
+        # news-v19 (Batch 1): no "Its … business" (a part may be a market or a country), and the neutral
+        # "How fiscal … revenue broke down" — Apple's lines are no regions
+        assert out["video_script"][1] == "iPhone made up 50% of revenue, and Services made up 26% of revenue."
         assert out["captions"]["linkedin"].split("\n\n")[1] == (
-            "Revenue by product or business line in fiscal 2025: iPhone, $209.6 billion; Services, $109.2 billion; "
+            "How fiscal 2025 revenue broke down: iPhone, $209.6 billion; Services, $109.2 billion; "
             "Wearables, Home and Accessories, $35.7 billion; Mac, $33.7 billion; iPad, $28 billion.")
 
 
@@ -5483,9 +6425,11 @@ def test_a_theme_never_calls_a_revenue_line_a_segment():
         "revenue; ")
     assert out["opening_card"]["headline"] == "companies in AI chips, by largest revenue line"
     three = compose(_theme_shapes()[5], THEME_RUN)
-    assert three["video_script"][2] == "A revenue line is one product or business in a company's breakdown of its revenue."
+    # news-v19 (the review of 2026-10-16, TH-1): a revenue line can be a region too (a member's breakdown can be
+    # regional), so the explainer says so
+    assert three["video_script"][2] == "A revenue line is one product, business or region in a company's revenue breakdown."
     assert three["cards"][2] == {"title": "What a revenue line is",
-                                 "body": "One product or business in a revenue breakdown"}
+                                 "body": "One product, business or region in a revenue breakdown"}
     assert compose(_theme_shapes()[3], THEME_RUN)["cards"][0]["title"] == "Largest revenue lines"
 
 
@@ -5533,7 +6477,8 @@ def test_an_insider_roundup_with_only_a_later_row_late_draws_no_rule():
     rec = week(nke, late(traded=(date(2026, 10, 20),), filings=(date(2026, 11, 13),), k=1), series="insider_buys")
     out = compose(rec, MON)
     assert out["video_script"][2] == T.LEXICON["ins.l3.form4"]
-    assert out["video_script"][3] == "At least 1 more director disclosed buying their own company's stock in the same week."
+    assert out["video_script"][3] == ("At least one more director disclosed buying their own company's stock in the "
+                                      "same week.")
     assert out["cards"][2]["body"] == T.LEXICON["ins.c3.form4.body"]
     assert "two business days" not in json.dumps(out)
     assert T.validate_package(out, record=rec) == []
@@ -5704,7 +6649,7 @@ def test_one_filing_date_with_several_purchases_never_counts_its_filings(person,
             assert phrase not in text, phrase
     assert out["video_script"][0] == "The filer is the company's chief executive, and the filing date is November 10th."
     assert out["video_script"][1] == "3 purchases are reported, 3 million shares in total, for $74.4 million."
-    assert out["captions"]["x"] == ("GameStop's CEO disclosed buying $74.4 million of GameStop stock on Form 4, "
+    assert out["captions"]["x"] == ("GameStop's CEO disclosed buying $74.4 million of the company's stock on Form 4, "
                                     "filed Nov 10.")
     if person:
         assert "The filer is Ryan Cohen, the CEO of GameStop." in out["captions"]["linkedin"]
@@ -5978,9 +6923,15 @@ def test_a_stake_figure_is_never_attributed_to_the_investor(factory):
     assert out["captions"]["linkedin"].split("\n", 1)[0].endswith(f"Source: {source}."), out["captions"]["linkedin"]
 
 
-def test_the_iroquois_probe_reads_as_the_sources_figure():
+def test_the_iroquois_probe_reads_as_the_sources_figure(monkeypatch):
     """The finding's own probe, verbatim: compose(run_date=2026-12-29) on the catalogue's Iroquois row (investor
-    Berkshire Hathaway, source BHE's 10-Q). The headline is source-neutral and the caption names BHE's 10-Q."""
+    Berkshire Hathaway, source BHE's 10-Q). The headline is source-neutral and the caption names BHE's 10-Q.
+    news-v19: the background is a caption paragraph only while STAKE_BACKGROUND_IN_CAPTIONS is on (off by
+    default — the caption's own "Source: Berkshire Hathaway Energy 10-Q …" credits the figure either way), so
+    the probe runs with it on, the state in which a background could contradict the headline."""
+    assert "Source: Berkshire Hathaway Energy 10-Q (quarter ended Jun 30, 2026)." in (
+        compose(iroquois_bhe(), STAKES_RUN)["captions"]["linkedin"])
+    monkeypatch.setattr(T, "STAKE_BACKGROUND_IN_CAPTIONS", True)
     out = compose(iroquois_bhe(), STAKES_RUN)
     probe = ("Berkshire Hathaway reported its Iroquois Gas Transmission System stake at a carrying value of "
              "$597 million")
@@ -6042,12 +6993,704 @@ def test_the_post_commit_sweep_wordings_hold():
     """Post-commit sweep (2026-10-10): (1) a theme never says HOW Caydex groups companies — the rotation
     weighs signals §1 forbids naming, so "based on each company's business" was false; (2) Money Map's rest
     bar can hold revenue the breakdown never attributes, so it never reads as a plain reported "Other";
-    (3) a carrying value is dated like its sibling bases, never an undated present-tense value."""
+    (3) a carrying value is dated like its sibling bases, never an undated present-tense value.
+
+    The review of 2026-10-16 (live preview F6) on (2): the rest ALSO holds lines the company does break out that
+    the post cannot name (a code, a label too long to draw, a sixth line — Alphabet's "Google subscriptions,
+    platforms, and devices" sat in a $49.6B rest), so "not broken out" was false for them. It says "Everything
+    else" now — true of both, and still never a plain "Other"."""
     lex = T.LEXICON
     for key in ("th.grouping", "th.c.grouping.body"):
         text = lex[key].casefold()
         assert "based on" not in text and "business" not in text, (key, lex[key])
-    assert "not broken out" in lex["mm.bar.other"] and "not broken out" in lex["mm.item.other"]
-    assert lex["mm.bar.other"] != "Other"
+    assert lex["mm.bar.other"] == "Everything else" and lex["mm.item.other"] == "everything else, {value}"
+    for key in ("mm.bar.other", "mm.item.other"):
+        assert "not broken out" not in lex[key] and lex[key].split(",")[0].casefold() != "other", key
     assert "on that date" in lex["st.c2.carrying_value.body"]
     assert "in the accounts" not in lex["st.c2.carrying_value.body"]
+
+
+# ── news-v19: the members-elect window (owner decision 4, 2026-10-15) ─────────
+
+
+def _without_names(rec):
+    return replace(rec, rows=tuple(replace(r, person_name=None) for r in rec.rows))
+
+
+def _name_forms(rec):
+    """Every way a record's persons could be written: the full name, first + last, the surname alone."""
+    out = set()
+    for r in rec.rows:
+        if r.person_name:
+            toks = fold(r.person_name).split()
+            out |= {" ".join(toks), f"{toks[0]} {toks[-1]}", toks[-1]}
+    return out
+
+
+def _says(text, form):
+    return re.search(r"(?<![a-z0-9])" + re.escape(form) + r"(?![a-z0-9])", text) is not None
+
+
+@pytest.mark.parametrize("factory", [ceo_roundup, lambda: week(GME), insider_mixed],
+                         ids=["roundup", "spotlight", "insider_mixed"])
+def test_inside_the_members_elect_window_a_form4_post_names_no_one(monkeypatch, factory):
+    """Owner decision 4: Mon Nov 16, 2026 is inside the window (Election Day Nov 3, 2026 through Jan 3, 2027).
+    A NAMED record composes role-only — byte-identical to the same record with no names, no name, first +
+    last or surname in any string — and passes validate_package and revalidate (the re-check recomposes on
+    the same run date). Mutation-checked (2026-10-15): `names_ok` without its window term turned it red."""
+    monkeypatch.setattr(R, "members_elect_window", REAL_MEMBERS_ELECT_WINDOW)
+    rec = factory()
+    forms = _name_forms(rec)
+    assert forms                                                            # anti-vacuity: someone is named
+    out = compose(rec, MON)
+    assert out["persons"] == []
+    text = fold(json.dumps(out, ensure_ascii=False))
+    assert not [f for f in forms if _says(text, f)]
+    assert out == compose(_without_names(rec), MON)
+    assert T.validate_package(out, record=rec) == [] and T.validate_package(out) == []
+    assert T.revalidate(json.loads(json.dumps(out)), fact_sheet=sheet(rec), run_date=MON) == []
+    # control: the same record outside the window names its person in the body paragraphs
+    monkeypatch.setattr(R, "members_elect_window", lambda day: False)
+    named = compose(rec, MON)
+    assert named["persons"] and named != out
+    assert any(_says(fold(json.dumps(named, ensure_ascii=False)), f) for f in forms)
+
+
+@pytest.mark.parametrize("run_date, named", [
+    # Review of 2026-10-16 (ME-1): judged over every day a run's posts can go out — the run date and the two
+    # after it (`R.members_elect_for_run`): a post composed on the Monday before Election Day can be approved on
+    # Tuesday night or resent on Wednesday, so the Sunday and Monday runs are role-only too.
+    (date(2026, 10, 31), True),      # its posts go out Oct 31 .. Nov 2: before Election Day (Tue Nov 3, 2026)
+    (date(2026, 11, 1), False),
+    (date(2026, 11, 2), False),      # the Monday before Election Day (named before the review)
+    (date(2026, 11, 3), False),      # Election Day: the window opens
+    (date(2026, 12, 31), False),
+    (date(2027, 1, 3), False),       # the new Congress is sworn in: the last day of the window
+    (date(2027, 1, 4), True),
+    (date(2027, 11, 2), True),       # an odd year's Election Day: no federal general election, no window
+    (date(2028, 11, 4), True),       # Election Day 2028 is Tue Nov 7 (Nov 1 is a Wednesday)
+    (date(2028, 11, 5), False),
+    (date(2028, 11, 7), False),
+], ids=["oct_31", "nov_1", "nov_2_monday_before", "election_day", "december", "jan_3", "jan_4", "odd_year",
+        "2028_nov_4", "2028_nov_5", "2028"])
+def test_the_window_boundaries_decide_the_names(monkeypatch, run_date, named):
+    """Mutation-checked by hand (2026-10-16): `_insider_parts` reading `members_elect_window(run_date)` again
+    turned nov_1 / nov_2_monday_before / 2028_nov_5 red (named)."""
+    monkeypatch.setattr(R, "members_elect_window", REAL_MEMBERS_ELECT_WINDOW)
+    start, end = R.insider_window(run_date)
+    row = buy("GME", "GameStop", "ceo", "Ryan Cohen", 74_400_000.0, 3_000_000.0, 2,
+              [end - timedelta(days=4), end - timedelta(days=3)])
+    rec = week(row, start=start, end=end)
+    out = compose(rec, run_date)
+    assert (out["persons"] == ["Ryan Cohen"]) is named
+    assert _says(fold(json.dumps(out, ensure_ascii=False)), "ryan cohen") is named
+    assert T.validate_package(out, record=rec) == []
+    assert T.revalidate(json.loads(json.dumps(out)), fact_sheet=sheet(rec), run_date=run_date) == []
+
+
+def test_the_validator_refuses_a_name_inside_the_window(monkeypatch):
+    """Defence in depth: an in-window output that names a person — in `persons`, or in a caption body while
+    `persons` is empty (a path that bypassed `person()`) — is a `placement` violation; outside the window the
+    same body paragraph breaks no placement rule (A7 allows a name there). Mutation-checked (2026-10-15):
+    removing the window block in `_validate` turned it red."""
+    monkeypatch.setattr(R, "members_elect_window", REAL_MEMBERS_ELECT_WINDOW)
+    rec = week(GME)
+    out = compose(rec, MON)
+    listed = copy.deepcopy(out)
+    listed["persons"] = ["Ryan Cohen"]
+    assert ("persons", "placement") in {(v["field"], v["code"]) for v in T.validate_package(listed, record=rec)}
+    body = copy.deepcopy(out)
+    body["captions"]["linkedin"] += "\n\nThe filings name Ryan Cohen, the CEO of GameStop."
+    assert ("captions.linkedin", "placement") in {(v["field"], v["code"])
+                                                   for v in T.validate_package(body, record=rec)}
+    monkeypatch.setattr(R, "members_elect_window", lambda day: False)
+    assert not [v for v in T.validate_package(body, record=rec) if v["code"] == "placement"]
+
+
+def test_the_validator_judges_the_same_days_as_the_composer(monkeypatch):
+    """Review of 2026-10-16 (ME-1): the validator uses the composer's own run check (`members_elect_for_run`):
+    an output of Mon Nov 2, 2026 — outside the window itself, but its posts can go out on Election Day — composes
+    role-only, passes validate_package and revalidate (compose and re-check agree), and a name written into a
+    caption body of it is a `placement` violation. Mutation-checked by hand (2026-10-16): `_validate` reading
+    `members_elect_window(run_date)` let the named body through on Nov 2 (red)."""
+    monkeypatch.setattr(R, "members_elect_window", REAL_MEMBERS_ELECT_WINDOW)
+    run_date = date(2026, 11, 2)
+    assert not R.members_elect_window(run_date) and R.members_elect_for_run(run_date)
+    start, end = R.insider_window(run_date)
+    rec = week(buy("GME", "GameStop", "ceo", "Ryan Cohen", 74_400_000.0, 3_000_000.0, 2,
+                   [end - timedelta(days=4), end - timedelta(days=3)]), start=start, end=end)
+    out = compose(rec, run_date)
+    assert out["persons"] == [] and not _says(fold(json.dumps(out, ensure_ascii=False)), "ryan cohen")
+    assert T.validate_package(out, record=rec) == []
+    assert T.revalidate(json.loads(json.dumps(out)), fact_sheet=sheet(rec), run_date=run_date) == []
+    body = copy.deepcopy(out)
+    body["captions"]["linkedin"] += "\n\nThe filings name Ryan Cohen, the CEO of GameStop."
+    assert ("captions.linkedin", "placement") in {(v["field"], v["code"]) for v in T.validate_package(body, record=rec)}
+
+
+def test_a_one_share_spotlight_never_says_shares_above_one_share():
+    """INS-1 (review of 2026-10-16): the cover and spotlight headline said "{subj} disclosed buying shares" for
+    every record, right above "1 purchase · 1 share" on the same image (a director's one-share BRK-A purchase,
+    about $712K, passes every gate). The headline is number-neutral — "… disclosed buying stock" — and the line
+    below keeps its own count. Mutation-checked by hand (2026-10-16): restoring "shares" in `ins.open.head`
+    turned this red."""
+    rec = week(buy("BRK-A", "Berkshire Hathaway", "director", None, 712_000.0, 1.0, 1, [date(2026, 11, 12)]),
+               series="insider_buys")
+    out = compose(rec, MON)
+    assert T.validate_package(out, record=rec) == []
+    head = "A director of Berkshire Hathaway disclosed buying stock"
+    assert out["opening_card"]["headline"] == out["image_spec"]["headline"] == head
+    assert out["image_spec"]["lines"][0] == "1 purchase · 1 share"
+    for text in (out["opening_card"]["headline"], out["image_spec"]["headline"], out["image_post"]["title"]):
+        assert not re.search(r"\bshares\b", text), text
+    assert T.LEXICON["ins.open.head"] == "{subj} disclosed buying stock"
+
+
+def test_inside_the_window_a_members_row_is_still_dropped_never_shown_role_only(monkeypatch):
+    """The window turns names OFF; it never turns the Congress drop off: a member's row (filed under a legal
+    name) is dropped — not shown as "A director of Fox" — and the week goes on with the other row."""
+    monkeypatch.setattr(R, "members_elect_window", REAL_MEMBERS_ELECT_WINDOW)
+    member = buy("FOX", "Fox", "director", "Joshua S. Gottheimer", 900_000.0, 30_000.0, 1, [date(2026, 11, 12)])
+    other = buy("HSY", "Hershey", "director", None, 150_000.0, 812.0, 1, [date(2026, 11, 14)])
+    out = compose(week(member, other, series="insider_buys"), MON)
+    assert [r["key"] for r in out["logo_refs"]] == ["HSY"]
+    assert "Fox" not in json.dumps(out) and out["persons"] == []
+
+
+@pytest.mark.parametrize("name, factory, run_date", SAMPLES, ids=[s[0] for s in SAMPLES])
+def test_the_members_elect_window_changes_nothing_but_form4_names(monkeypatch, name, factory, run_date):
+    """news-v19 sweep: the window (forced ON here, whatever the sample's date) withholds Form 4 NAMES and
+    nothing else. Every other series composes byte-identically to the same day outside it; a Form 4 sample
+    composes exactly as its record with every name removed. Both still pass validate_package (with and
+    without the record) and revalidate after a JSONB round trip — so no series is refused from Election Day
+    through January 3 by the window check in `_validate` (only Form 4 parts ever fill `persons`)."""
+    rec = factory()
+    form4 = rec.series in ("ceo_buys", "insider_buys")
+    expected = compose(_without_names(rec) if form4 else rec, run_date)       # outside the window
+    monkeypatch.setattr(R, "members_elect_window", lambda day: True)
+    inside = compose(rec, run_date)
+    assert inside == expected
+    assert inside["persons"] == []
+    assert T.validate_package(inside, record=rec) == [] and T.validate_package(inside) == []
+    assert T.revalidate(_jsonb(inside), fact_sheet=_jsonb(sheet(rec)), run_date=run_date) == []
+    if form4:
+        text = fold(json.dumps(inside, ensure_ascii=False))
+        assert not [f for f in _name_forms(rec) if len(f.split()) > 1 and _says(text, f)]
+
+
+def test_the_window_sweep_is_not_vacuous():
+    """Anti-vacuity for the sweep above: most Form 4 samples name someone outside the window (two are
+    role-only by construction), and each of those differs once the window withholds the name."""
+    named = [(n, f, d) for n, f, d in SAMPLES if f().series in ("ceo_buys", "insider_buys") and _name_forms(f())]
+    assert len(named) >= 3
+    for _n, f, d in named:
+        assert compose(f(), d) != compose(_without_names(f()), d)
+
+
+# ── news-v19 (Batch 1, plan item 5): names and wording ────────────────────────────────────────────
+#
+# The live preview of 2026-10-14 and its verifier (wf_355df13b-cc8) found, all cosmetic, all public: a single
+# Form 4 headline naming its company twice ("Accelevation Holdings' CEO disclosed buying $3.7 million of
+# Accelevation Holdings stock"), "Part of the shares" beside the caption's "Some of the shares", "At least 1
+# more", a descriptive investee without its article ("As of that date, Louisiana data center venture was not
+# listed …", narrated, so burned into the video), the catalogue's background fragments pasted into captions,
+# and covers whose chip was a ticker the logo already shows while the figure carried no date.
+
+
+#: The single-row Form 4 samples: (record, the company's display name).
+_ONE_ROW = [
+    (lambda: week(GME), "GameStop"),
+    (lambda: week(LOW), "Lowe's"),
+    (lambda: week(buy("NKE", "Nike", "cfo", None, 1_250_000.0, 18_500.0, 1, [date(2026, 11, 10)]),
+                  series="insider_buys"), "Nike"),
+    (insider_late, "Hershey"),
+    (lambda: week(buy("ACCV", "Accelevation Holdings", "ceo", "Michael Rubiera", 3_700_000.0, 205_000.0, 1,
+                      [date(2026, 11, 13)])), "Accelevation Holdings"),
+]
+
+
+@pytest.mark.parametrize("factory, co_name", _ONE_ROW, ids=["gme", "lowes_of_twin", "nike_cfo", "hershey_director",
+                                                            "accelevation"])
+def test_a_single_row_form4_headline_names_its_company_once(factory, co_name):
+    """The subject already names the company ("GameStop's CEO", "The CEO of Lowe's", "A director of Hershey"), so
+    every single-row headline — X / Bluesky / Threads whole, every caption's first line, the YouTube title, the
+    cover and the spotlight image — names it ONCE and says "of the company's stock" / "disclosed buying stock".
+    Mutation-checked by hand (2026-10-15): restoring "of {co} stock" in `ins.ch.one.long.one` /
+    `ins.yt.long`, or "{co} stock" in `ins.open.head`, turned this red."""
+    rec = factory()
+    out = compose(rec, MON)
+    assert T.validate_package(out, record=rec) == []
+    heads = [out["captions"]["x"], out["captions"]["youtube_title"], out["opening_card"]["headline"],
+             out["image_spec"]["headline"], out["image_post"]["title"]]
+    heads += [body.split("\n", 1)[0] for body in out["captions"].values()]
+    for head in heads:
+        assert head.count(co_name) == 1, head
+        assert f"{co_name} stock" not in head.replace(f"{co_name}'s", ""), head
+    assert "of the company's stock" in out["captions"]["x"]
+    assert out["opening_card"]["headline"].endswith(" disclosed buying stock")
+    assert out["captions"]["youtube_title"].endswith(" of the company's stock")
+
+
+def test_some_of_the_shares_and_at_least_one_more_are_words():
+    """"Some of the shares" in the narration and on the card, as the caption says; the lower bound's "one" is a
+    word on the line, the card and the video paragraph — still a bound ("At least …"), never "One more"."""
+    lead = buy("CTSO", "Contoso", "director", None, 640_000.0, 2_600.0, 1, [date(2026, 11, 12)], holding="mixed")
+    other = buy("HSY", "Hershey", "director", None, 150_000.0, 812.0, 1, [date(2026, 11, 14)])
+    rec = week(lead, other, series="insider_buys")
+    out = compose(rec, MON)
+    assert out["video_script"][2] == "Some of the shares are reported as held indirectly."
+    assert out["cards"][2] == {"title": "Partly held indirectly", "body": "Some of the shares, per the filing"}
+    assert out["video_script"][3] == ("At least one more director disclosed buying their own company's stock in the "
+                                      "same week.")
+    assert out["cards"][3]["body"] == "At least one more director disclosed buying their own company's stock"
+    assert ("At least one more director disclosed buying their own company's stock in Form 4s filed the same week."
+            in out["captions"]["youtube_description"])
+    assert T.validate_package(out, record=rec) == []
+    for entry_id, text in T.LEXICON.items():
+        assert not re.search(r"\bAt least 1\b", text), entry_id
+        assert not re.search(r"\bPart of the shares\b", text), entry_id
+
+
+# the covers' chips ─────────────────────────────────────────────────────────────────────────────────
+
+#: (sample, the cover's chip) — every series: a ticker where the cover shows the company's own logo and
+#: nothing dates the figure (Form 4, Congress, a listed 13F filer), a stake's basis and date, and the news-v19
+#: period chips; a theme cover draws none.
+_COVER_CHIPS = [
+    ("ceo_spotlight", "GME"), ("insider_mixed", "NKE"), ("berkshire_13f", "BRK-B"),
+    ("pershing_13f", "Quarter ended Sep 30, 2026"), ("costco_money_map", "Fiscal 2025"),
+    ("rivian_money_map", "Fiscal 2025"), ("congress_accenture", "ACN"),
+    ("stake_nscale", "Invested · as of Mar 27, 2026"), ("earnings_loss", "Quarter ended Sep 30, 2026"),
+    ("earnings_profit", "Reported Nov 10, 2026"), ("theme_ai_chips", None),
+]
+
+
+@pytest.mark.parametrize("name, chip", _COVER_CHIPS, ids=[c[0] for c in _COVER_CHIPS])
+def test_every_cover_chip(name, chip):
+    """The chip each cover draws under its logo (`opening_card.chip`), within OPENING_CHIP_MAX_CHARS and among
+    the strings the server lets the worker draw. Mutation-checked by hand (2026-10-15): dating an earnings cover
+    by `period_end or report_date` turned `earnings_profit` red ("Quarter ended Nov 10, 2026" — a report day
+    is no quarter's end), and the old ticker chips turned the Money Map and Pershing rows red."""
+    factory, run_date = next((f, d) for n, f, d in SAMPLES if n == name)
+    out = compose(factory(), run_date)
+    card = out["opening_card"]
+    assert card.get("chip") == chip
+    if chip is not None:
+        assert len(chip) <= T.OPENING_CHIP_MAX_CHARS
+        assert chip in onscreen.opening_strings(card, _logo_entries(out))
+        assert onscreen.validate_opening_card(card, {r["key"] for r in out["logo_refs"]}) is None
+
+
+@pytest.mark.parametrize("name, factory, run_date", SAMPLES, ids=[s[0] for s in SAMPLES])
+def test_no_sample_cover_chip_is_over_the_cap(name, factory, run_date):
+    chip = compose(factory(), run_date)["opening_card"].get("chip")
+    assert chip is None or 1 <= len(chip) <= T.OPENING_CHIP_MAX_CHARS, (name, chip)
+
+
+def test_a_period_chip_is_the_quarter_or_year_the_figure_is_for():
+    """The 13F chip is the period's end — never the filing or amendment date; an earnings chip says "Quarter
+    ended" only for the quarter the adapter VERIFIED (`period_end`), else the report day; a Money Map chip is
+    the record's own fiscal year. A filer WITH a symbol keeps its ticker beside its own logo."""
+    amended = pershing(amended_on=date(2026, 11, 14))
+    assert compose(amended, TUE)["opening_card"]["chip"] == "Quarter ended Sep 30, 2026"
+    q2 = berkshire(filer_symbol=None, period="2026-Q2", period_end=date(2026, 6, 30), filed_on=date(2026, 8, 14))
+    assert compose(q2, date(2026, 8, 18))["opening_card"]["chip"] == "Quarter ended Jun 30, 2026"
+    assert compose(berkshire(), TUE)["opening_card"]["chip"] == "BRK-B"
+    assert compose(earnings(period_end=date(2026, 8, 31)), EARNINGS_RUN)["opening_card"]["chip"] == \
+        "Quarter ended Aug 31, 2026"
+    assert compose(earnings(period_end=None), EARNINGS_RUN)["opening_card"]["chip"] == "Reported Nov 5, 2026"
+    assert compose(costco(fiscal_year="2024", period_end=date(2024, 9, 1)), date(2024, 11, 21))[
+        "opening_card"]["chip"] == "Fiscal 2024"
+
+
+def test_a_stored_cover_chip_over_the_cap_or_edited_is_refused():
+    """Defence in depth: `validate_package` refuses a stored cover whose chip is over the cap (the server's
+    `template_onscreen` check), and `revalidate` refuses any edited chip (it recomposes)."""
+    rec = earnings()
+    out = compose(rec, EARNINGS_RUN)
+    long_chip = copy.deepcopy(out)
+    long_chip["opening_card"]["chip"] = "Quarter ended Sep 30, 2026 · reported Nov 5"
+    assert ("opening_card", "opening_card_invalid") in {(v["field"], v["code"])
+                                                        for v in T.validate_package(long_chip, record=rec)}
+    ticker = copy.deepcopy(out)
+    ticker["opening_card"]["chip"] = "NWFT"
+    assert ("opening_card", "field_mismatch") in {
+        (v["field"], v["code"]) for v in T.revalidate(_jsonb(ticker), fact_sheet=_jsonb(sheet(rec)),
+                                                      run_date=EARNINGS_RUN)}
+
+
+# a descriptive investee takes "the" ────────────────────────────────────────────────────────────────
+
+
+def louisiana(**kw):
+    """The catalogue's Meta row (`data/trillion_club_seed.json`, sort_order 3): a DESCRIPTIVE investee name —
+    what is held, not a company's name — at a carrying value from Meta's 10-Q."""
+    base = dict(stake_id="3a5c7e9b-1d3f-4b5d-8f7a-9c1e3a5b7d09", investor=co("META", "Meta"),
+                investee_name="Louisiana data center venture", investee=None, kind="private",
+                value_usd=2_920_000_000.0, value_basis="carrying_value", ownership_pct=20.0, as_of=date(2026, 6, 30),
+                source_title="Meta 10-Q (quarter ended Jun 30, 2026)",
+                background="Partners committed pro rata to about $27B of costs; Meta signed leases on the campus.")
+    base.update(kw)
+    return stake(**base)
+
+
+_VENTURE = "Louisiana data center venture"
+
+
+def test_a_descriptive_investee_takes_the_in_running_text_never_on_a_label():
+    """The verifier's probe (2026-10-14), composed: the narration said "As of that date, Louisiana data center
+    venture was not listed on a public exchange." and the cover "Meta's stake in Louisiana data center venture
+    as of that date". Now every running-text place says "the …" — the narration (burned captions), the cover,
+    the alt text, the captions — while the pair image's plate keeps the name as drawn, and "{inv_s} {ee} stake"
+    (a determiner already there) stays bare. Mutation-checked by hand (2026-10-15): with `takes_name_article`
+    answering False, and with `ee_fills` ignoring it, this turned red."""
+    rec = louisiana()
+    out = compose(rec, STAKES_RUN)
+    assert out["video_script"][2] == f"As of that date, the {_VENTURE} was not listed on a public exchange."
+    assert out["opening_card"]["headline"] == f"Meta's stake in the {_VENTURE} as of that date"
+    assert out["image_spec"]["right"]["name"] == _VENTURE                      # a drawn label: the name as is
+    assert out["image_post"]["paragraphs"][0] == (f"The image shows Meta and the {_VENTURE}, with $2.9B labelled "
+                                                  "carrying value.")
+    assert out["hook"] == f"Meta's {_VENTURE} stake had a carrying value of $2.9 billion."
+    assert f"\n\nAs of that date, the {_VENTURE} was not listed on a public exchange." in out["captions"]["linkedin"]
+    every = list(_strings(out))
+    for s in every:
+        for m in re.finditer(re.escape(_VENTURE), s):
+            before = s[:m.start()]
+            assert before.endswith(("the ", "Meta's ")) or before == "", (s, before[-20:])
+        assert "the the" not in s.lower() and f"The {_VENTURE} stake" not in s, s
+    assert T.validate_package(out, record=rec) == []
+    assert T.revalidate(_jsonb(out), fact_sheet=_jsonb(sheet(rec)), run_date=STAKES_RUN) == []
+
+
+@pytest.mark.parametrize("kw, hook, l3, head", [
+    (dict(value_basis="invested"), f"Meta invested $2.9 billion in the {_VENTURE}.",
+     f"As of that date, the {_VENTURE} was not listed on a public exchange.", f"Meta invested in the {_VENTURE}"),
+    (dict(kind="commitment", value_basis="committed_up_to"), f"Meta committed up to $2.9 billion to the {_VENTURE}.",
+     "A commitment is money agreed to be invested, which may be paid over time.",
+     f"Meta committed up to this amount to the {_VENTURE}"),
+    (dict(value_basis="invested", kind="non_us_listed", listed_since=date(2025, 3, 3)),
+     f"Meta invested $2.9 billion in the {_VENTURE}.",
+     f"The {_VENTURE} has been listed on an exchange since March 2025.",
+     f"Meta invested in the {_VENTURE}"),
+    (dict(value_basis="invested", kind="non_us_listed"), f"Meta invested $2.9 billion in the {_VENTURE}.",
+     f"As of that date, shares of the {_VENTURE} traded on an exchange outside the U.S.",
+     f"Meta invested in the {_VENTURE}"),
+], ids=["invested", "committed_up_to", "listed_since_opens_the_sentence", "non_us"])
+def test_every_descriptive_form_reads_with_its_article(kw, hook, l3, head):
+    rec = louisiana(**kw)
+    out = compose(rec, STAKES_RUN)
+    assert out["hook"] == hook and out["video_script"][2] == l3 and out["opening_card"]["headline"] == head
+    assert out["image_spec"]["right"]["name"] == _VENTURE
+    assert T.validate_package(out, record=rec) == []
+
+
+@pytest.mark.parametrize("name", ["Nscale", "SK hynix", "Iroquois Gas Transmission System", "ONE Store Korea",
+                                  "Louisiana Data Center Venture"])
+def test_a_company_name_takes_no_article(name):
+    """A company's own name — capitalised, or styled in lower case on purpose ("SK hynix") — reads as it is."""
+    out = compose(stake(investee_name=name), STAKES_RUN)
+    assert out["video_script"][2] == f"As of that date, {name} was not listed on a public exchange."
+    assert f"the {name}" not in json.dumps(out) and f"The {name}" not in json.dumps(out)
+
+
+# ══ Batch 3 (2026-10-20): the EXTRA video post's caption, re-checked by the template rules ═══════════════════
+#
+# Facebook / LinkedIn / Threads may also post the day's video (owner decision 2, 2026-10-15): its caption is the
+# platform's own accepted caption under the narrated-video disclaimer (`post_copy.extra_video_caption`), and
+# `extra_video_problems` re-checks it as a public string of the output — the word scan, the placement rule (no
+# person in its first line or its code-owned suffix; the whole caption on Threads) and the members-elect window
+# — when the extras are frozen and again at create_posts. compose / revalidate / COMPARED_FIELDS / the version
+# are untouched by it.
+
+_EXTRA_FIELDS = post_copy.EXTRA_VIDEO_FIELDS
+
+
+def _video_caption(out, platform, run_date):
+    return post_copy.extra_video_caption(platform, out["posts"][platform]["caption"], run_date, T.AUTHORSHIP)
+
+
+_DERIVE = object()
+
+
+def _problems(out, rec, run_date, platform, caption=_DERIVE, *, draws_picture=True):
+    """The re-check as create_posts runs it on a video that DOES draw the day's picture (the data card) — the
+    rules these tests are about; the B3-LIVE-1 picture rule has its own tests below (`draws_picture=False`)."""
+    caption = _video_caption(out, platform, run_date) if caption is _DERIVE else caption
+    return T.extra_video_problems(out, fact_sheet=sheet(rec), run_date=run_date, platform=platform, caption=caption,
+                                  video_draws_picture=draws_picture)
+
+
+@pytest.mark.parametrize("name, factory, run_date", SAMPLES, ids=[s[0] for s in SAMPLES])
+def test_batch3_extra_video_problems_pass_for_every_series_fixture(name, factory, run_date):
+    rec = factory()
+    checked = 0
+    for state, allow in (("live", False), ("preorder", True), ("prelaunch", False)):
+        out = compose(rec, run_date, state, allow)
+        for platform in _EXTRA_FIELDS:
+            if platform not in out["posts"]:
+                continue
+            caption = _video_caption(out, platform, run_date)
+            assert caption.endswith(post_copy.disclaimer_for(platform, run_date, "template", video=True))
+            assert _problems(out, rec, run_date, platform, caption) == []
+            # as JSONB hands them back: the stored output and fact sheet re-check the same
+            assert T.extra_video_problems(_jsonb(out), fact_sheet=_jsonb(sheet(rec)), run_date=run_date,
+                                          platform=platform, caption=caption, video_draws_picture=True) == []
+            # B3-LIVE-1: on a video that does NOT draw the picture only a Form 4 ROUNDUP is refused (its caption
+            # speaks of the picture's rows); every other sample's caption suits any video
+            plain = _problems(out, rec, run_date, platform, caption, draws_picture=False)
+            roundup = rec.series in ("ceo_buys", "insider_buys") and len(rec.rows) >= 2
+            assert plain == ([{"field": f"video_posts.{platform}", "code": "picture_caption", "detail": plain[0]["detail"]}]
+                             if roundup else []), (name, plain)
+            checked += 1
+    assert checked >= 6, name     # anti-vacuity: Facebook / LinkedIn (and Threads) are really re-checked
+
+
+# B3-LIVE-1 / B3-FR-1 (2026-10-20): a Form 4 ROUNDUP's Facebook / LinkedIn / Threads caption is built from the PICTURE
+# parts — "The largest of these: …", "The purchases: <every row>", "More purchases: …" (news-v20: format-neutral, they
+# ride text posts too; before, "The largest here" / "The purchases shown" / "Also shown") — while the video names only
+# the lead row's company (cards, narration, the opening card's logo) and the others by role ("At least 2 more CEOs …").
+# Such a caption may ride the video only when the video draws the picture (the data card replaces "The purchases").
+
+
+@pytest.mark.parametrize("factory", [ceo_roundup, insider_mixed], ids=["ceo_roundup", "insider_mixed"])
+@pytest.mark.parametrize("platform", _EXTRA_FIELDS)
+def test_batch3_a_roundups_extra_needs_the_picture_in_its_video(factory, platform):
+    """Mutation-checked (2026-10-20): with the check removed (or `picture_bound` never set) both rows turn red."""
+    rec = factory()
+    out = compose(rec, MON)
+    caption = _video_caption(out, platform, MON)
+    if platform != "threads":
+        # the defect itself: the caption lists rows the video never shows — it names the other companies (news-v20
+        # words them format-neutrally, "The purchases: …", but the rows are still the picture's alone)
+        assert "The purchases: " in caption and all(r.company.name in caption for r in rec.rows), caption
+        assert not any(r.company.name in " ".join(out["video_script"]) for r in rec.rows[1:])
+    refused = _problems(out, rec, MON, platform, caption, draws_picture=False)
+    assert [(v["field"], v["code"]) for v in refused] == [(f"video_posts.{platform}", "picture_caption")]
+    # never the caption's text: no company of the record in the detail
+    assert "picture" in refused[0]["detail"] and not any(r.company.name in refused[0]["detail"] for r in rec.rows)
+    # only exactly True says the video draws it: a truthy stand-in is no answer (fail closed)
+    for not_true in (1, "yes", None):
+        assert [v["code"] for v in _problems(out, rec, MON, platform, caption, draws_picture=not_true)] == [
+            "picture_caption"]
+    assert _problems(out, rec, MON, platform, caption, draws_picture=True) == []
+    # the default (a caller that does not say) is the refusal
+    assert [v["code"] for v in T.extra_video_problems(out, fact_sheet=sheet(rec), run_date=MON, platform=platform,
+                                                      caption=caption)] == ["picture_caption"]
+
+
+@pytest.mark.parametrize("platform", _EXTRA_FIELDS)
+def test_batch3_a_single_form4_rows_extra_needs_no_picture(platform):
+    """One row: the picture caption and the video tell the same purchase — any video may carry it."""
+    rec = week(GME)
+    out = compose(rec, MON)
+    assert T._picture_bound(rec, T.SERIES_SPECS[rec.series], MON) is False
+    assert _problems(out, rec, MON, platform, draws_picture=False) == []
+
+
+def test_batch3_only_a_form4_roundup_is_picture_bound():
+    bound = {name for name, factory, run_date in SAMPLES
+             if T._picture_bound(factory(), T.SERIES_SPECS[factory().series], run_date)}
+    assert bound == {name for name, factory, _d in SAMPLES
+                     if factory().series in ("ceo_buys", "insider_buys") and len(factory().rows) >= 2}
+    assert {"ceo_roundup", "insider_mixed"} <= bound           # anti-vacuity
+    # never part of the composed output: compose / revalidate / COMPARED_FIELDS are untouched
+    assert "picture_bound" not in compose(ceo_roundup(), MON)
+
+
+def _widest_roundup(n: int = R.INSIDER_MAX_ROWS):
+    """The widest Form 4 roundup a record admits, for the caption budgets: ``n`` rows of a 32-character company name
+    and a 40-character person, a CFO among directors ("company insiders", the longest group noun), billion-dollar
+    amounts, every row LATE (the longest Form 4 paragraph: the trade dates) and both flags (indirect, amended)."""
+    rows = []
+    for i in range(n):
+        name = f"Northwind Traders Holdings {'ABCDE'[i]}corp"          # 32 characters, words of at most 8
+        person = f"Bartholome{'vwxyz'[i]}s Q. Featherstone-Worthington"  # 40 characters, 5 distinct people
+        assert len(name) == R.COMPANY_NAME_CHARS[1] and len(person) == R.PERSON_NAME_MAX
+        rows.append(R.InsiderPurchase(
+            company=co(f"NW{'ABCDE'[i]}", name), role="cfo" if i == 0 else "director", person_name=person,
+            amount_usd=4_987_654_321.0 - i * 1e9, shares=123_456_789.0, purchases=9_999,
+            earliest_trade_date=date(2026, 11, 9) - timedelta(days=R.INSIDER_MAX_FILING_LAG_DAYS),
+            latest_trade_date=date(2026, 11, 13), filing_dates=(date(2026, 11, 9), date(2026, 11, 13)),
+            holding="indirect" if i % 2 else "direct", amended=True))
+    return week(*rows, series="insider_buys")
+
+
+@pytest.mark.parametrize("n", [2, 3, 4, R.INSIDER_MAX_ROWS])
+def test_news_v20_a_roundups_captions_are_true_with_or_without_the_picture(n):
+    """news-v20 (the carried open question of the round-3 review, 2026-10-20): a Form 4 roundup's caption parts ride
+    TEXT posts too — X is text only, and Facebook / LinkedIn / Threads / Bluesky post text when no picture goes out —
+    so no caption of any platform says "shown" or "here". The headline's superlative is scoped ("The largest of
+    these") to the rows counted, and on Facebook / LinkedIn the row paragraphs ("The purchases: …", then "More
+    purchases: …" past three rows) travel together and name every row: the widest roundup a record admits keeps both
+    (its trailing flag and Form 4 paragraphs are what a budget drops first). Mutation-checked (2026-10-20, in
+    memory): the news-v19 `ins.p.rows` / `ins.p.rows2` / `ins.ch.many.long` turn the first assertion red."""
+    for rec in (ceo_roundup(), insider_mixed(), _widest_roundup(n)):
+        out = compose(rec, MON)
+        for field, body in out["captions"].items():
+            assert not re.search(r"\b(?:shown|here)\b", body, re.IGNORECASE), (field, body)
+        for field in ("facebook", "linkedin"):
+            body = out["captions"][field]
+            head = body.split("\n", 1)[0]
+            assert head.endswith(f"The largest of these: {rec.rows[0].company.name}, "
+                                 f"{T.money_words(rec.rows[0].amount_usd)}.") or "The largest" not in head, head
+            assert ("The purchases: " in body) and (("More purchases: " in body) is (len(rec.rows) > 3)), body
+            assert all(r.company.name in body for r in rec.rows), body
+    # anti-vacuity: the widest roundup really reaches Facebook's budget — the fit drops its trailing Form 4 paragraph
+    # (headline + 3 paragraphs, not 4) and still keeps both row lists
+    wide = compose(_widest_roundup(), MON)["captions"]["facebook"]
+    assert "More purchases: " in wide and wide.count("\n\n") == 3 and "A Form 4 is" not in wide
+
+
+def test_batch3_a_ceo_named_in_the_body_paragraphs_passes():
+    """A7 allows a person in the long captions' body paragraphs (never their first line): the Facebook / LinkedIn
+    video caption keeps that body word for word — and still passes."""
+    rec = week(GME)
+    out = compose(rec, MON)
+    assert out["persons"] == ["Ryan Cohen"]
+    for platform in ("facebook", "linkedin"):
+        caption = _video_caption(out, platform, MON)
+        head, rest = caption.split("\n", 1)
+        assert "Cohen" not in head and "Ryan Cohen" in rest
+        assert _problems(out, rec, MON, platform, caption) == []
+    assert "Cohen" not in _video_caption(out, "threads", MON)        # the Threads caption is headline-only
+
+
+def _named(out, platform):
+    """The output with "Ryan Cohen" at the head of `platform`'s caption body AND its composed post, kept consistent
+    so the video caption still re-derives and only the first-line rule can see it."""
+    out["captions"][platform] = "Ryan Cohen " + out["captions"][platform]
+    out["posts"][platform]["caption"] = "Ryan Cohen " + out["posts"][platform]["caption"]
+    return out
+
+
+def _in_suffix(out, platform):
+    """The name inside the code-owned SUFFIX (just before the disclaimer) — the caption still ends with its
+    disclaimer once, so it re-derives; only the suffix rule can see it."""
+    disc = post_copy.disclaimer_for(platform, MON, "template")
+    cap = out["posts"][platform]["caption"]
+    out["posts"][platform]["caption"] = cap.replace("\n\n" + disc, "\n\nRyan Cohen\n\n" + disc)
+    assert out["posts"][platform]["caption"] != cap
+    return out
+
+
+@pytest.mark.parametrize("platform, tamper, field", [
+    ("facebook", _named, "video_posts.facebook[0]"),
+    ("linkedin", _named, "video_posts.linkedin[0]"),
+    ("facebook", _in_suffix, "video_posts.facebook.suffix"),
+    ("linkedin", _in_suffix, "video_posts.linkedin.suffix"),
+    ("threads", _in_suffix, "video_posts.threads"),          # the whole Threads caption is restricted
+], ids=["facebook_first_line", "linkedin_first_line", "facebook_suffix", "linkedin_suffix", "threads"])
+def test_batch3_extra_video_problems_refuse_a_person_in_the_first_line_or_suffix(platform, tamper, field):
+    rec = week(GME)
+    out = tamper(compose(rec, MON), platform)
+    found = {(v["field"], v["code"]) for v in _problems(out, rec, MON, platform)}
+    assert (field, "placement") in found, found
+
+
+@pytest.mark.parametrize("platform", _EXTRA_FIELDS)
+@pytest.mark.parametrize("word", ["Smart money moves.", "It soared.", "Insiders bought."])
+def test_batch3_extra_video_problems_refuse_a_banned_word_in_the_caption(platform, word):
+    rec = ceo_roundup()
+    out = compose(rec, MON)
+    out["posts"][platform]["caption"] = f"{word} " + out["posts"][platform]["caption"]
+    codes = {(v["field"], v["code"]) for v in _problems(out, rec, MON, platform)}
+    assert any(f == f"video_posts.{platform}.caption" and c in ("banned_word", "off_table_verb") for f, c in codes), codes
+    # the untouched output's video caption is clean: the word is what was found
+    assert _problems(compose(rec, MON), rec, MON, platform) == []
+
+
+def test_batch3_extra_video_problems_members_elect_window_refuses_a_named_person(monkeypatch):
+    """A named Form 4 record composed outside the window (its body names the CEO) whose video caption is re-checked
+    for a run date inside it (Mon Nov 16, 2026): `_withheld_name_hits` refuses the name in the video caption —
+    nobody is named anywhere in the window. Outside the window the same caption passes (A7 allows the body)."""
+    rec = week(GME)
+    out = compose(rec, MON)                                     # the autouse fixture: the window is off
+    assert out["persons"] == ["Ryan Cohen"]
+    caption = _video_caption(out, "facebook", MON)
+    assert _problems(out, rec, MON, "facebook", caption) == []
+    monkeypatch.setattr(R, "members_elect_window", REAL_MEMBERS_ELECT_WINDOW)
+    assert R.members_elect_for_run(MON)
+    found = {(v["field"], v["code"]) for v in _problems(out, rec, MON, "facebook", caption)}
+    assert ("video_posts.facebook.caption", "placement") in found, found
+    # the in-window composition names no one, and its video caption passes inside the window
+    inside = compose(rec, MON)
+    assert inside["persons"] == [] and _problems(inside, rec, MON, "facebook") == []
+
+
+@pytest.mark.parametrize("platform", _EXTRA_FIELDS)
+def test_batch3_extra_video_problems_refuse_a_caption_that_is_not_the_derivation(platform):
+    rec = ceo_roundup()
+    out = compose(rec, MON)
+    good = _video_caption(out, platform, MON)
+    assert _problems(out, rec, MON, platform, good) == []
+    ai = post_copy.disclaimer_for(platform, MON, "ai", video=True)
+    for label, caption in [
+        ("the text post's own caption", out["posts"][platform]["caption"]),
+        ("one character more", good + "."),
+        ("another body", good.replace(out["captions"][platform], "Another body.", 1)),
+        ("the ai narrated disclaimer",
+         good[:len(good) - len(post_copy.disclaimer_for(platform, MON, "template", video=True))] + ai),
+        ("None", None),
+    ]:
+        codes = {(v["field"], v["code"]) for v in _problems(out, rec, MON, platform, caption)}
+        assert codes == {(f"video_posts.{platform}", "caption_invalid")}, (label, codes)
+    # a platform that takes no extra post, or an output whose primary post is missing: caption_invalid
+    for other in ("x", "bluesky", "tiktok", "instagram"):
+        codes = {v["code"] for v in _problems(out, rec, MON, other, good)}
+        assert codes == {"caption_invalid"}, other
+    gone = copy.deepcopy(out)
+    del gone["posts"][platform]
+    assert {v["code"] for v in T.extra_video_problems(gone, fact_sheet=sheet(rec), run_date=MON, platform=platform,
+                                                      caption=good)} == {"caption_invalid"}
+    # another run day: the long disclaimer is dated, so a Facebook / LinkedIn caption does not re-derive; the short
+    # one is undated (the output's own run date is `revalidate`'s to check, and create_posts runs it first)
+    other_day = {v["code"] for v in T.extra_video_problems(out, fact_sheet=sheet(rec), run_date=MON + timedelta(days=1),
+                                                           platform=platform, caption=good)}
+    assert ("caption_invalid" in other_day) is (platform != "threads"), other_day
+
+
+@pytest.mark.parametrize("output, fact_sheet, run_date, platform, caption, code", [
+    (None, "SHEET", MON, "facebook", "c", "schema"),
+    ([], "SHEET", MON, "facebook", "c", "schema"),
+    ("text", "SHEET", MON, "facebook", "c", "schema"),
+    ("OUT", None, MON, "facebook", "c", "facts_invalid"),
+    ("OUT", {}, MON, "facebook", "c", "facts_invalid"),
+    ("OUT", "SHEET", "2026-11-16", "facebook", "c", "provenance"),
+    ("OUT", "SHEET", None, "facebook", "c", "provenance"),
+    ("OUT", "OTHER_SHEET", MON, "facebook", "c", "provenance"),            # another series' record
+    ("NO_POSTS", "SHEET", MON, "facebook", "c", "caption_invalid"),
+    ("NO_PERSONS", "SHEET", MON, "facebook", "VIDEO", "schema"),           # unreadable: logged, never a pass
+    ("OUT", "SHEET", MON, None, "c", "caption_invalid"),
+    ("OUT", "SHEET", MON, ["facebook"], "c", "caption_invalid"),
+], ids=["none", "list", "text", "no_sheet", "empty_sheet", "date_string", "no_date", "other_series", "no_posts",
+        "no_persons", "no_platform", "list_platform"])
+def test_batch3_extra_video_problems_never_raise(output, fact_sheet, run_date, platform, caption, code, caplog):
+    rec = ceo_roundup()
+    out = compose(rec, MON)
+    outputs = {"OUT": out, "NO_POSTS": {k: v for k, v in out.items() if k != "posts"},
+               "NO_PERSONS": {k: v for k, v in out.items() if k != "persons"}}
+    sheets = {"SHEET": sheet(rec), "OTHER_SHEET": sheet(costco())}
+    got = T.extra_video_problems(outputs.get(output, output) if isinstance(output, str) else output,
+                                 fact_sheet=sheets.get(fact_sheet, fact_sheet) if isinstance(fact_sheet, str)
+                                 else fact_sheet,
+                                 run_date=run_date, platform=platform,
+                                 caption=_video_caption(out, "facebook", MON) if caption == "VIDEO" else caption)
+    assert got and {v["code"] for v in got} == {code}, got
+    assert all(set(v) == {"field", "code", "detail"} and len(v["detail"]) <= 200 for v in got)
+
+
+def test_batch3_extra_video_problems_is_exported_and_composes_nothing_new():
+    assert "extra_video_problems" in T.__all__
+    rec = ceo_roundup()
+    out = compose(rec, MON)
+    before = copy.deepcopy(out)
+    for platform in _EXTRA_FIELDS:
+        _problems(out, rec, MON, platform)
+    assert out == before                          # the probe never writes into the output
+    # the extras' keys never disturb the output's own re-check (create_posts runs both)
+    stored = _jsonb(out)
+    stored["extra_post_formats"] = {"facebook": "video", "linkedin": "video"}
+    stored["video_posts"] = {p: {"title": None, "caption": _video_caption(out, p, MON)} for p in ("facebook", "linkedin")}
+    assert T.revalidate(stored, fact_sheet=_jsonb(sheet(rec)), run_date=MON) == []
+    assert not {"extra_post_formats", "video_posts"} & set(T.COMPARED_FIELDS)

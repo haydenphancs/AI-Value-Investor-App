@@ -7,14 +7,16 @@ Both are the LAST steps of the publisher tick (`publisher_service.publisher_tick
 sweep and the feed, so they never delay a post or a review message. Both are day-keyed jobs on the ET
 calendar run through `metrics_service.run_day_job` (the claim is
 `notification_jobs.claimed_scheduled_job`; at most three claimed attempts per ET day per process; no
-database read at all while a job is not due or after this process finished it today):
+database read at all while a job is not due or after this process finished it today — but for the one
+read-only look at the records `_final_owed` takes, once per process, on a day after a rest day: below):
 
 * `health_cycle()` — two day jobs, each at most one message per ET day. Their hours follow the
   worker's run hour, MARKETING_RUN_HOUR_ET: a worker variable this process cannot read, MIRRORED by
   the web setting of the same name (the owner sets both; a test pins the two defaults equal), read at
   call time (`run_hour_et`):
   - `marketing_run_health`, the first tick at/after `health_hour_et()` on a POSTING day
-    (`selection.is_posting_day`): the run hour plus MARKETING_MAX_RUN_ATTEMPTS, capped at 23 — 22:00
+    (`selection.is_posting_day`: MARKETING_POST_WEEKDAYS, read at call time — Batch 3; the final word
+    below follows it the same way): the run hour plus MARKETING_MAX_RUN_ATTEMPTS, capped at 23 — 22:00
     ET with the defaults 16 and 6, when the six hourly attempts from 16:15 ET are spent (~21:30 ET).
     That holds ONLY for a day with no missed tick and an uncapped sum: a retry after a failure, or a
     sum past 23, carries attempts past the check, and the worker resumes a day's failed or abandoned
@@ -36,7 +38,11 @@ database read at all while a job is not due or after this process finished it to
     failed, or the bot was not set up that night): every outcome but a good day, once — never a
     silent failed day. An unreadable job state skips the tick (fail closed: no word on a guess). Its
     own job key: `run_day_job` keys a day by the ET day it RUNS on, so sharing `marketing_run_health`
-    would mark that day's own nightly check done.
+    would mark that day's own nightly check done. A PAST day is judged a posting day by its own record
+    too (B3PD-2, `judged_posting_day`): when today's MARKETING_POST_WEEKDAYS no longer lists yesterday
+    but its nightly check succeeded for it, or its run row shows a posting day's work, the final word is
+    still due (`_final_owed`: one read-only look at those two records, once per process on a day after a
+    rest day; under an unchanged calendar they always say no, so nothing is claimed or sent).
 * `digest_cycle()` — job `marketing_digest_weekly` (MARKETING_DIGEST_ENABLED, checked here as well as
   in the tick), Monday at/after 09:00 ET with a Tuesday catch-up
   when Monday's never succeeded (`owed_since` = this week's Monday). It covers the previous
@@ -48,7 +54,19 @@ database read at all while a job is not due or after this process finished it to
   on an old post lands in the week it was billed), Gemini / the worker / the Upload-Post plan fee as
   labelled estimates (≈), the week before beside it, and a ⚠️ line when last week's usage (X + Gemini +
   worker) passed MARKETING_WEEKLY_COST_WARN_USD. Each part degrades alone to "unreadable" and the total
-  then reads "≥" — never a wrong number, never a silent 0.
+  then reads "≥" — never a wrong number, never a silent 0. In place of the old this-week engagement
+  block sits the follows-first 4-WEEK SCORECARD (`scorecard`, 2026-10-15): one row per (platform,
+  format) over the published posts of the 4 ET weeks ending that Sunday — posts; followers and their
+  change against the snapshot closest to 4 weeks earlier (dated); TikTok's follows and profile visits
+  from posts (a floor, "≥", when only some posts gave them); the median and best views / impressions
+  over posts whose latest snapshot was taken at 24 h or older; a video row's median watch time and
+  share watched; the posts not measured `ok` — sorted by follower gain, then median reach, with "n/a"
+  (never 0) for a figure no post gave and ONE "Top post this week" link line under it. It is fed by the
+  same 35-day read as the follower line, read in pages oldest first (`metrics_service.list_published_posts`,
+  MD-7) so the newest posts are never the ones a limit cuts; a read that still stops early is said under
+  the scorecard with the count it took in. The posts section also names the days whose posts were made
+  as text where the picture should have gone (`metadata.image_fallback`), each reason in the owner's
+  words.
 
 Delivery follows `publish_feed.feed_cycle`: the review bot configured + its review chat, the shared
 Telegram flood back-off (`review_service._rate_limited_until` — while it is open no claim is taken, and
@@ -60,7 +78,9 @@ CancelledError).
 
 What may reach a message: counts, dates, statuses, platform names, post formats (video / image / text —
 a "Formats:" line under the per-platform counts, and the format closing each rejected / failed row;
-drop 1), links to our own posts, and
+drop 1), measures (seconds, percentages) re-validated against the measure step's bounds, fixed owner
+words for a code (a picture fallback, a series outcome — never the stored string), links to our own
+posts, and
 SCRUBBED (`outlet_base.scrub`), single-line, length-capped server strings — never a caption, a title or
 any other model text. A value that cannot be read is left out or reported "unreadable"; it is never
 shown as 0.
@@ -81,7 +101,13 @@ from typing import Any, Awaitable, Dict, FrozenSet, Iterable, List, Optional, Tu
 from app.config import settings
 from app.integrations import telegram
 from app.integrations.telegram import MAX_MESSAGE_CHARS, TelegramException, TelegramRateLimitException
-from app.schemas.marketing import POST_FORMATS, RUN_STAGES, parse_content_classes
+from app.schemas.marketing import (
+    IMAGE_FALLBACK_REASONS,
+    POST_FORMATS,
+    POST_METADATA_IMAGE_FALLBACK,
+    RUN_STAGES,
+    parse_content_classes,
+)
 from app.services.marketing import metrics_service, outlets, review_service, selection, smart_link
 from app.services.marketing.outlet_base import scrub
 from app.services.marketing.outlet_upload_post import PLATFORMS as UPLOAD_POST_PLATFORMS
@@ -128,15 +154,42 @@ JOB_STALE_SECONDS = 600
 MEMORY_ALERT_MB = 3200
 #: The followers change is measured against the latest snapshot at least this much older than now's.
 FOLLOWER_BASELINE_AGE = timedelta(days=6)
-#: Follower snapshots are read from posts published this recently (`metrics.account`).
-FOLLOWER_LOOKBACK = timedelta(days=21)
+#: The published posts of this many days back are read ONCE and feed both the follower snapshots
+#: (`metrics.account`) and the 4-week scorecard (2026-10-15: 21 → 35 days): the scorecard's 28 days plus
+#: room for the post holding the snapshot ~4 weeks before the newest — a snapshot lives on the post that
+#: was the newest of its platform when it was taken, published up to days before it.
+FOLLOWER_LOOKBACK = timedelta(days=35)
+
+#: The scorecard covers the 4 ET weeks (these many days) ending on the digest week's Sunday.
+SCORECARD_DAYS = 28
+#: The scorecard's follower change is measured against the snapshot CLOSEST to this long before the newest
+#: (among those at least FOLLOWER_BASELINE_AGE older; the older one on a tie) and dated by its own day, so
+#: a sparse history (X reads its account weekly) or a younger account never claims a full 4 weeks.
+FOLLOWER_CHANGE_TARGET = timedelta(days=28)
+#: A follower count older than this at the digest carries its own date ("as of MM-DD") in the scorecard.
+FOLLOWER_STALE = timedelta(days=2)
+#: Views, impressions, watch time and % come only from a latest snapshot taken when its post was at least
+#: this many hours old (`age_h`): a post read at 2 h would pull a median down for nothing.
+SCORE_MIN_AGE_H = 24.0
 
 #: Bounded reads (the digest runs on the single uvicorn worker).
 WEEK_POST_LIMIT = 500
-MEASURED_POST_LIMIT = 200
+#: The 35-day published-posts read, in pages of this many rows (`metrics_service.list_published_posts`,
+#: MD-7, 2026-10-16): it answers oldest first, so ONE capped read lost the NEWEST posts — the scorecard's
+#: latest week. 8 platforms × 4 posting days × 5 weeks ≈ 160 today; at Batch 3's seven days with its three
+#: extra videos (Facebook, LinkedIn, Threads) ~11 posts a day × 7 × 5 weeks ≈ 385 — more than one page.
+MEASURED_POST_LIMIT = 300
+#: At most this many pages: 37 days of runs × 16 (platform, format) pairs (the 13 of POST_FORMATS_BY_PLATFORM
+#: plus Batch 3's 3 of EXTRA_POST_FORMATS_BY_PLATFORM) = 592 published posts at the most (one run a day, one
+#: post per pair, published on its run day or the next), against 1,200 — a test derives the bound from the
+#: two maps. Past it the scorecard says the newest may be missing (never silent).
+MEASURED_POST_PAGES = 4
+#: The most published posts the 35-day read takes in.
+MEASURED_POST_MAX = MEASURED_POST_LIMIT * MEASURED_POST_PAGES
 ESCALATED_LIMIT = 20
 #: The X journal read behind the cost line (`list_charge_rows_since` RAISES past it: never a partial
-#: sum). About 20-40 X rows are touched in two weeks at four posts a week. Its probe (limit + 1) must
+#: sum). About 20-40 X rows are touched in two weeks at four posts a week, about double at Batch 3's seven
+#: (X never posts a second format, so the extra videos add none). Its probe (limit + 1) must
 #: fit in one PostgREST response (max-rows ≈1,000): at 1,000 the probe row could never arrive.
 X_CHARGE_ROW_LIMIT = 500
 
@@ -172,6 +225,13 @@ _MICROS_BOUND = 10 ** 12
 MAX_DIGEST_UNITS = MAX_MESSAGE_CHARS
 #: Per-section row caps tried in order until the digest fits; then a hard cut.
 _ROW_CAPS = (8, 4, 2, 0)
+#: The scorecard's row caps (None = every row): it is the digest's headline, so it stays whole until the
+#: other list sections are down to their counts, and only then shrinks (2026-10-15).
+_SCORECARD_CAPS: Tuple[Optional[int], ...] = (None, 8, 4, 2)
+#: Every (other sections' cap, scorecard's cap) pass `compose_digest` tries, in order.
+_PASSES: Tuple[Tuple[int, Optional[int]], ...] = (
+    tuple((cap, _SCORECARD_CAPS[0]) for cap in _ROW_CAPS)
+    + tuple((_ROW_CAPS[-1], score_cap) for score_cap in _SCORECARD_CAPS[1:]))
 _CUT_MARKER = "\n… (cut to fit one Telegram message)"
 
 _ERROR_CAP = 120          # a failed post's error, per digest row
@@ -213,6 +273,11 @@ _SERIES_OUTCOME_WORDS: Dict[str, str] = {
     "error": "an error",
     "budget": "out of time",
 }
+#: The fallback outcomes that are about the data source or the machinery, not about the week's content
+#: (OBS-1, 2026-10-15): `_series_note` never lets one hide behind a content outcome ("nothing qualified").
+_INFRA_OUTCOMES = frozenset({"unavailable", "timeout", "error", "budget"})
+#: At most this many fallback steps are named in a series note; the rest are counted ("and N more").
+_SERIES_NOTE_STEPS = 3
 
 _STATUS_ORDER = ("published", "retracted", "rejected", "failed", "skipped", "queued", "approved",
                  "pending_review")
@@ -303,26 +368,52 @@ def _series_name(series: Any) -> Optional[str]:
     return known.name if known is not None else None
 
 
+def _step_words(outcome: Any) -> str:
+    """A fallback step's outcome in the owner's words; an outcome missing from _SERIES_OUTCOME_WORDS is its
+    sanitised code (`_key`), anything else fixed words."""
+    words = _SERIES_OUTCOME_WORDS.get(outcome) if isinstance(outcome, str) else None
+    return words or _key(outcome) or "it did not post"
+
+
 def _series_note(run: Any) -> str:
     """What the day posted, from the server-owned run metadata the selection mirror writes (drop 2,
     contract D13): "Money Map", or "Money Map (fell back from CEO Buys: nothing qualified)" when the day's
     first series did not post. "" when the run records no known series (a lesson-only plan, or a run from
     before drop 2). Pure; only operator labels and fixed words reach the text — never a stored string —
-    so it is safe in the digest day line and in a review-bundle message."""
+    so it is safe in the digest day line and in a review-bundle message.
+
+    Every step that fell back is named, in the trail's order, each known series once — at most
+    _SERIES_NOTE_STEPS, then "and N more". When there are more than that, the INFRASTRUCTURE outcomes
+    (_INFRA_OUTCOMES: a data source unavailable or timed out, an error, the time budget) are kept ahead of
+    the content ones (OBS-1, 2026-10-15): naming only the first step hid a later series' outage behind
+    "CEO Buys: nothing qualified", and a series that never heads a chain (Insider Buys) could fail every
+    week with nothing in Telegram."""
     meta = run.get("metadata") if isinstance(run, dict) and isinstance(run.get("metadata"), dict) else {}
     series = meta.get("series")
     name = _series_name(series)
     if name is None:
         return ""
     trail = meta.get("series_trail") if isinstance(meta.get("series_trail"), list) else []
-    first = next((t for t in trail if isinstance(t, dict) and t.get("outcome") != "chosen"
-                  and t.get("series") != series and _series_name(t.get("series")) is not None), None)
-    if first is None:
+    steps: List[Dict[str, Any]] = []
+    seen: set = set()
+    for t in trail:
+        if not isinstance(t, dict) or t.get("outcome") == "chosen" or t.get("series") == series:
+            continue
+        step_name = _series_name(t.get("series"))
+        if step_name is None or step_name in seen:   # an unknown id is never shown; a repeat once
+            continue
+        seen.add(step_name)
+        steps.append(t)
+    if not steps:
         return name
-    outcome = first.get("outcome")
-    words = _SERIES_OUTCOME_WORDS.get(outcome) if isinstance(outcome, str) else None
-    why = words or _key(outcome) or "it did not post"
-    return f"{name} (fell back from {_series_name(first.get('series'))}: {why})"
+    # isinstance first: a hand-edited outcome may be a list, and a list in a frozenset raises TypeError.
+    infra = [i for i, t in enumerate(steps) if isinstance(t.get("outcome"), str) and t["outcome"] in _INFRA_OUTCOMES]
+    content = [i for i in range(len(steps)) if i not in infra]
+    shown = sorted((infra + content)[:_SERIES_NOTE_STEPS])   # infrastructure first, then shown in trail order
+    parts = [f"{_series_name(steps[i].get('series'))}: {_step_words(steps[i].get('outcome'))}" for i in shown]
+    more = len(steps) - len(shown)
+    tail = f"; and {_n(more)} more" if more else ""
+    return f"{name} (fell back from {'; '.join(parts)}{tail})"
 
 
 def _platform(row: Dict[str, Any]) -> Optional[str]:
@@ -499,7 +590,9 @@ def health_due(now: datetime) -> bool:
 
 
 def final_due(now: datetime) -> bool:
-    """The day after a posting day (ET), at/after `final_hour_et()`."""
+    """The day after a posting day (ET), at/after `final_hour_et()` — a posting day on the posting days in
+    force NOW. Pure (it runs before any I/O). The day after one they no longer list, but whose own record says
+    it was one, is `_final_owed`'s (B3PD-2)."""
     et = _aware(now).astimezone(ET)
     return et.hour >= final_hour_et() and selection.is_posting_day(et.date() - timedelta(days=1))
 
@@ -633,6 +726,43 @@ def _unexpected_text(facts: Dict[str, Any], day: str) -> str:
             f"{facts['attempt']}. Check the ledger.")
 
 
+#: What the run-health texts say, instead of "this day's posts will not go out", about a run that FAILED
+#: after its posts were recorded: its last completed stage is the last stage, `assets_ready` — the
+#: worker checkpoints it only after `create_posts` answered, so every post of the day exists, and the
+#: review bot offers a failed run's posts at that stage just as it offers a `media_ready` run's.
+#: Worded to stay TRUE however the owner has acted since (MD-1, 2026-10-16): the bot offers those posts as
+#: soon as the checkpoint lands (`review_service.bundle_offerable`; the per-post review never waited for the
+#: run at all), so by the nightly check — and surely by the next day's final word — they may already be
+#: approved and published, or rejected. Neither this text nor the recovered line may say they are still
+#: waiting: the health jobs read the run row only, never its posts.
+_POSTS_RECORDED = ("Its posts were recorded before it failed, so they go to the review chat like any day's; "
+                   "anything still undecided waits there.")
+#: The same for a run ABANDONED at that stage (still `in_progress` / `planned`, its liveness stale — a tick
+#: that died between the `assets_ready` checkpoint and the `media_ready` write): the review bot offers a run's
+#: posts at that stage whatever its status (`review_service.bundle_offerable`), so "the day is lost" is false.
+_POSTS_RECORDED_STOPPED = ("Its posts were recorded before it stopped, so they go to the review chat like any "
+                           "day's; anything still undecided waits there.")
+#: What the "recovered" final word says about a `media_ready` run's posts — the same truth (MD-1): never
+#: "waiting for review", which was false the moment the owner decided them.
+_RECOVERED_POSTS = "its posts go to the review chat like any day's; anything still undecided waits there"
+
+
+def _recorded_none(run: Dict[str, Any]) -> bool:
+    """True when the run's `assets_ready` checkpoint says it recorded NO post: the worker's `stage_posts`
+    answers {"posts_recorded": 0} when the accepted script names no outlet it posts to, and still
+    checkpoints — that dict rides in the checkpoint PATCH into the run's `metadata` (marketing/main.py
+    `run_pipeline`, merged by `update_run`). Only that exact count says so: a missing key (a run from
+    before the count existed), a junk value or a positive count is never "none"."""
+    return _count(_meta(run).get("posts_recorded")) == 0
+
+
+def _posts_recorded(run: Dict[str, Any]) -> bool:
+    """True when the run's last COMPLETED stage is the last stage (`assets_ready`) — its posts exist — and
+    its checkpoint does not say it recorded none (`_recorded_none`: with no post there is nothing in the
+    review chat, and "this day's posts will not go out" is the truth, as for a run that failed earlier)."""
+    return _key(run.get("stage")) == RUN_STAGES[-1] and not _recorded_none(run)
+
+
 def _with_memory(text: Optional[str], memory: Optional[str]) -> Optional[str]:
     if text is None:
         return memory
@@ -652,7 +782,12 @@ def evaluate_run_health(
     as the LAST COMPLETED one ("after stage X"). `failed` → "all M attempts used; this day's posts will
     not go out" at the attempts cap, otherwise "attempt N of M" and that the worker retries hourly
     until midnight ET and resumes it on tomorrow's early ticks, with a final word after
-    `final_hour_et()` tomorrow (`evaluate_run_final`). `skipped` for any reason but `rest_day` → the
+    `final_hour_et()` tomorrow (`evaluate_run_final`). A run that failed AFTER stage `assets_ready` (its
+    posts were recorded) never says its posts will not go out: it says they go to the review chat like any
+    day's (`_POSTS_RECORDED`), at the cap and below it — never that they still wait for a decision, which
+    the owner may already have made (MD-1) — and a run abandoned there says the same
+    (`_POSTS_RECORDED_STOPPED`); a checkpoint that recorded no post (`_recorded_none`) is said like an
+    earlier stage's failure. `skipped` for any reason but `rest_day` → the
     reason and where to look. `planned` / `in_progress` → still running while its liveness is fresh;
     once stale, abandoned — with no retries left at the cap (the day will close failed), else retried
     hourly. An unreadable attempt count is "?" and promises neither. `media_ready` / `published` →
@@ -672,14 +807,18 @@ def evaluate_run_health(
     if status in ("media_ready", "published"):
         return memory
     if status == "failed":
+        recorded = _posts_recorded(run)
         if facts["exhausted"]:
-            outlook = f"all {_n(facts['cap'])} attempts used; this day's posts will not go out"
+            outlook = f"all {_n(facts['cap'])} attempts used"
+            if not recorded:
+                outlook += "; this day's posts will not go out"
         elif facts["unknown"]:
             outlook = (f"{attempt} — the attempt count is unreadable, so whether the worker retries is unknown; "
                        f"{final_word}")
         else:
             outlook = f"{attempt}; {_retries()} — {final_word}"
-        text: Optional[str] = (f"⚠️ Marketing run {day} FAILED {where}: {outlook}. Last error: "
+        posts = f" {_POSTS_RECORDED}" if recorded else ""
+        text: Optional[str] = (f"⚠️ Marketing run {day} FAILED {where}: {outlook}.{posts} Last error: "
                                f"{last_error or '(none recorded)'}. Check the marketing-worker logs.")
     elif status == "skipped":
         text = _skip_text(run, facts, day)
@@ -697,7 +836,10 @@ def evaluate_run_health(
         text = f"{mark} Marketing run {day} is not finished yet: {status} {where} — {outlook}"
         if last_error:
             text += f"; last error: {last_error}"
-        text += f". {final_word[0].upper()}{final_word[1:]}."
+        text += "."
+        if not facts["fresh"] and _posts_recorded(run):
+            text += f" {_POSTS_RECORDED_STOPPED}"
+        text += f" {final_word[0].upper()}{final_word[1:]}."
     else:
         text = _unexpected_text(facts, day)
     return _with_memory(text, memory)
@@ -768,6 +910,46 @@ def nightly_check_time(state: Any, run_date: date) -> Tuple[Optional[datetime], 
     return health_opens_at(run_date), NIGHTLY_TIME_UNKNOWN
 
 
+def ran_as_posting_day(run: Any) -> bool:
+    """True when a run row ITSELF shows that its day was a posting day when it ran — on the posting days in
+    force THEN, whatever MARKETING_POST_WEEKDAYS says now (B3PD-2, 2026-10-20). Pure.
+
+    A rest day's run is closed at its first script kick — `skipped` with skip_reason `rest_day`, its stage
+    still `planned` (marketing/main.py `stage_select`) — so a run that completed a stage (its `stage` past
+    `planned`), reached `media_ready` / `published`, mirrors a selection (`source_ref`), or was skipped for
+    any reason but `rest_day` ran as a posting day. False for everything that does not show it: a `rest_day`
+    skip, no run, an unreadable row, and a run that stopped before its first kick decided anything (failed or
+    abandoned at `planned` with nothing selected, or skipped with no reason) — on those the posting days in
+    force now decide (`judged_posting_day`), exactly as before."""
+    if not isinstance(run, dict):
+        return False
+    status = _key(run.get("status"))
+    reason = _key(_meta(run).get("skip_reason"))
+    if status == "skipped" and reason == "rest_day":
+        return False
+    if status in ("media_ready", "published") or _key(run.get("stage")) in RUN_STAGES[1:]:
+        return True
+    if status == "skipped" and reason is not None:
+        return True
+    ref = run.get("source_ref")
+    return isinstance(ref, str) and bool(ref.strip())
+
+
+def judged_posting_day(run_date: date, *, nightly: str, run: Any) -> bool:
+    """Whether `run_date` — a PAST day — was a posting day, judged from its own record whenever today's posting
+    days say it was not (B3PD-2, 2026-10-20). Pure but for the setting it reads.
+
+    True when the posting days in force NOW list it (`selection.is_posting_day` — every answer of an unchanged
+    calendar); else when its nightly check SUCCEEDED for it (`nightly` is NIGHTLY_CHECKED or
+    NIGHTLY_TIME_UNKNOWN, `nightly_check_time`: that check runs only on a posting day — and it may have promised
+    the final word); else when its run row shows a posting day's work (`ran_as_posting_day`). So a switch that
+    drops a weekday (seven days to four, made the morning after a failed day — MARKETING_POST_WEEKDAYS' own
+    advice) never cancels the final word that day's alert promised. A day with no record of its own (no
+    successful check, no run row that shows it) is judged on today's calendar alone, as before."""
+    return (selection.is_posting_day(run_date) or nightly in (NIGHTLY_CHECKED, NIGHTLY_TIME_UNKNOWN)
+            or ran_as_posting_day(run))
+
+
 def _check_stamp(checked: datetime) -> str:
     local = _et_local(checked)
     return f"{local:%H:%M} ET" if local is not None else "nightly"
@@ -789,7 +971,9 @@ def evaluate_run_final(
     * `media_ready` / `published` → "recovered at <ET time>" when it finished (`finished_at`, else
       `updated_at`; never a time more than an hour in the future) AFTER `checked_at`; None when it
       finished at or before it (the check saw it fine) or no finish time can be read (never a guessed
-      time).
+      time). A `media_ready` run's posts "go to the review chat like any day's" (`_RECOVERED_POSTS`) —
+      never "are waiting for review": by now the owner may have decided them (MD-1) — or it "recorded no
+      posts" (`_recorded_none`).
     * Changed after `checked_at` (its liveness, the later of `started_at` / `updated_at` — every run
       write moves `updated_at`) → one line on where it ended, in the nightly check's terms (the stage as
       the last completed one, attempt N of M, the scrubbed last error) and the truth that no retry of the
@@ -812,7 +996,10 @@ def evaluate_run_final(
 
     A stage's memory peak above MEMORY_ALERT_MB rides along on the recovered and terminal lines (it may be
     new since the check, or the check never went out); an unchanged run's peak was in the nightly message
-    already."""
+    already. A `failed` run whose last completed stage is `assets_ready` never says "This day's posts will
+    not go out": its posts were recorded and go to the review chat like any day's (`_POSTS_RECORDED`),
+    exactly as the nightly check says; a run that never finished but stopped at that stage is never "the
+    day is lost" (`_POSTS_RECORDED_STOPPED`) — unless its checkpoint recorded no post (`_recorded_none`)."""
     if not posting_day:
         return None
     now = _aware(now)
@@ -834,6 +1021,10 @@ def evaluate_run_final(
     memory = _memory_line(run, day)
     error_tail = f"Last error: {last_error or '(none recorded)'}."
     no_retry = _no_retry()
+    recorded = _posts_recorded(run)
+    posts_fate = _POSTS_RECORDED if recorded else "This day's posts will not go out."
+    # An abandoned run at `assets_ready` is not a lost day: its posts exist and the review bot offers them.
+    lost, stopped_tail = ("", f" {_POSTS_RECORDED_STOPPED}") if recorded else (" — the day is lost", "")
 
     if status in ("media_ready", "published"):
         if checked is None:
@@ -843,7 +1034,12 @@ def evaluate_run_final(
                          if t is not None and t <= horizon), None)
         if finished is None or finished <= checked:
             return None
-        what = "its posts are waiting for review" if status == "media_ready" else "its posts went out"
+        if status == "published":
+            what = "its posts went out"
+        elif _recorded_none(run):
+            what = "it recorded no posts, so nothing will be posted for this day"
+        else:
+            what = _RECOVERED_POSTS   # never "waiting for review": the owner may have decided them (MD-1)
         return _with_memory(f"✅ Marketing run {day} recovered at {_et_stamp(finished)} — {what}.", memory)
 
     touched = facts["touched"]
@@ -851,8 +1047,8 @@ def evaluate_run_final(
         if status == "failed":
             outlook = (f"all {_n(facts['cap'])} attempts used" if facts["exhausted"]
                        else f"{attempt}; {no_retry}")
-            text: Optional[str] = (f"⚠️ Marketing run {day} ended FAILED {where}: {outlook}. This day's posts "
-                                   f"will not go out. {error_tail}")
+            text: Optional[str] = (f"⚠️ Marketing run {day} ended FAILED {where}: {outlook}. {posts_fate} "
+                                   f"{error_tail}")
         elif status == "skipped":
             text = _skip_text(run, facts, day)
         elif status in ("planned", "in_progress") and facts["fresh"]:
@@ -860,8 +1056,8 @@ def evaluate_run_final(
             text = (f"⏳ Marketing run {day} is still running {where}, {attempt}{resumed} — if this attempt "
                     f"fails, {no_retry}.")
         elif status in ("planned", "in_progress"):
-            text = (f"⚠️ Marketing run {day} never finished — the day is lost: {status} {where}, {attempt} was "
-                    f"abandoned and {no_retry}. Check the marketing-worker logs.")
+            text = (f"⚠️ Marketing run {day} never finished{lost}: {status} {where}, {attempt} was "
+                    f"abandoned and {no_retry}.{stopped_tail} Check the marketing-worker logs.")
         else:
             text = _unexpected_text(facts, day)
         return _with_memory(text, memory)
@@ -869,12 +1065,11 @@ def evaluate_run_final(
     # Unchanged since the nightly check: speak only where that verdict could not be final.
     if status == "failed" and not facts["exhausted"]:
         return (f"⚠️ Marketing run {day} is still FAILED {where}, {attempt}: no retry happened — check the "
-                f"marketing-worker cron (hourly at :15) and its last logs. This day's posts will not go out. "
-                f"{error_tail}")
+                f"marketing-worker cron (hourly at :15) and its last logs. {posts_fate} {error_tail}")
     if status in ("planned", "in_progress"):
         since = _et_stamp(touched) if touched is not None else "an unreadable time"
-        return (f"⚠️ Marketing run {day} never finished — the day is lost: {status} {where}, {attempt}, "
-                f"untouched since {since}. Check the marketing-worker cron and its last logs.")
+        return (f"⚠️ Marketing run {day} never finished{lost}: {status} {where}, {attempt}, "
+                f"untouched since {since}.{stopped_tail} Check the marketing-worker cron and its last logs.")
     return None
 
 
@@ -893,15 +1088,18 @@ def pool_runway(pool: Iterable[Any], used: Iterable[Any], *, today: date, today_
     the (unused + 1)-th lesson day from the next one without a pick: today when it is a lesson day
     whose pick is still to come, else tomorrow onward. `first_repeat` is None for an empty pool.
 
-    Which days are lesson days follows the content classes, as `script_service._select` reads them:
-    - `classes` None or {"A"} (MARKETING_CONTENT_CLASSES unset — lessons only): every posting day. The
-      result is exactly the three keys `pool` / `unused` / `first_repeat`, as before Company Weekly.
+    Which days are lesson days follows the content classes, as `script_service._select` reads them, on the
+    posting days in force NOW (MARKETING_POST_WEEKDAYS, `selection.post_weekdays()` — Batch 3):
+    - `classes` None or {"A"} (MARKETING_CONTENT_CLASSES unset — lessons only): every posting day (seven a
+      week at seven days). The result is exactly the three keys `pool` / `unused` / `first_repeat`, as
+      before Company Weekly.
     - a news class on: only a day whose enabled chain is the lesson alone
       (`selection.enabled_chain(plan_for(day).chain, classes, news_series) == (LESSON,)` — Saturday under
-      the default calendar; `news_series` is the per-series switch, None = every shipped series). A news
-      day uses a lesson only when its whole chain falls through, which brings the repeat FORWARD, so the
-      date is an upper bound: the result also carries `"no_later_than": True` and the digest words it so.
-      No lesson-only day in reach → `first_repeat` None."""
+      the default calendar, and still Saturday alone at seven days while Money Map is on (Wednesday,
+      Friday and Sunday run its tail); `news_series` is the per-series switch, None = every shipped
+      series). A news day uses a lesson only when its whole chain falls through, which brings the repeat
+      FORWARD, so the date is an upper bound: the result also carries `"no_later_than": True` and the
+      digest words it so. No lesson-only day in reach → `first_repeat` None."""
     keys = {k for k in pool if isinstance(k, str) and k}
     seen = {r for r in used if isinstance(r, str)}
     unused = len(keys - seen)
@@ -910,7 +1108,7 @@ def pool_runway(pool: Iterable[Any], used: Iterable[Any], *, today: date, today_
     news_on = enabled != frozenset({"A"})
     if news_on:
         out["no_later_than"] = True
-    if not keys or not selection.POST_WEEKDAYS:
+    if not keys or not selection.post_weekdays():
         return out
 
     def lesson_day(d: date) -> bool:
@@ -924,8 +1122,9 @@ def pool_runway(pool: Iterable[Any], used: Iterable[Any], *, today: date, today_
     wanted = unused + 1
     found = 0
     try:
-        # every 7 days hold at least one posting day — and, with a news class on, one lesson-only day
-        # (Saturday's chain is the lesson alone); a calendar without one leaves `first_repeat` None
+        # every 7 days hold at least one posting day (`post_weekdays()` is never empty) — and, with a news
+        # class on, one lesson-only day while the posting days keep Saturday (its chain is the lesson alone);
+        # a calendar without one (no "sat", every other day a news day) leaves `first_repeat` None
         for _ in range(7 * wanted + 7):
             if lesson_day(day):
                 found += 1
@@ -998,42 +1197,29 @@ def _last_counts(post: Dict[str, Any]) -> Dict[str, int]:
     return out
 
 
-def _engagement(posts: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """Per platform, over the week's live `published` posts: how many were measured, the summed latest
-    counts (a count only over the posts that HAVE it), the measure statuses, and the top post by
-    interactions (its link only)."""
-    out: Dict[str, Dict[str, Any]] = {}
+def _top_post(posts: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The week's ONE top post across every platform: the live `published` post whose latest snapshot has
+    the most interactions (`_ENGAGEMENT_KEYS` — never reach), as its link and those counts (never its
+    text). None when no post has an interaction; on a tie the first one read wins (deterministic)."""
+    top: Optional[Dict[str, Any]] = None
     for post in posts:
-        if post.get("status") != "published":
+        if post.get("status") != "published" or _platform(post) is None:
             continue
-        platform = _platform(post)
-        if platform is None:
-            continue
-        entry = out.setdefault(platform, {"live": 0, "measured": 0, "totals": {}, "statuses": {}, "top": None})
-        entry["live"] += 1
-        status = _metrics(post).get("status")
-        if status is not None:
-            key = status if status in _MEASURE_STATUSES else "other"
-            entry["statuses"][key] = entry["statuses"].get(key, 0) + 1
         counts = _last_counts(post)
-        if not counts:
-            continue
-        entry["measured"] += 1
-        for k, v in counts.items():
-            entry["totals"][k] = entry["totals"].get(k, 0) + v
         score = sum(counts.get(k, 0) for k in _ENGAGEMENT_KEYS)
-        top = entry["top"]
         if score > 0 and (top is None or score > top["score"]):
-            entry["top"] = {"score": score, "url": _post_link(post),
-                            "counts": {k: counts[k] for k in _ENGAGEMENT_KEYS if k in counts}}
-    return out
+            top = {"score": score, "url": _post_link(post),
+                   "counts": {k: counts[k] for k in _ENGAGEMENT_KEYS if k in counts}}
+    return top
 
 
 def _followers(posts: List[Dict[str, Any]], *, now: datetime) -> Dict[str, Dict[str, Any]]:
-    """Per platform: the newest `metrics.account` follower snapshot and the latest one at least
-    FOLLOWER_BASELINE_AGE older (the measure step stores the account snapshot on the newest post of a
-    platform, so the older posts keep the earlier ones). A snapshot without a readable time or count,
-    dated in the future, or at a time the New York clock cannot show (`_et_local`), is ignored."""
+    """Per platform: the newest `metrics.account` follower snapshot; the latest one at least
+    FOLLOWER_BASELINE_AGE older (`baseline`, the Followers line's change); and the one CLOSEST to
+    FOLLOWER_CHANGE_TARGET before the newest among those (`four_week_base`, the scorecard's change — the
+    older one on a tie). The measure step stores the account snapshot on the newest post of a platform,
+    so the older posts keep the earlier ones. A snapshot without a readable time or count, dated in the
+    future, or at a time the New York clock cannot show (`_et_local`), is ignored."""
     snaps: Dict[str, List[Tuple[datetime, int]]] = {}
     horizon = now + timedelta(hours=1)
     for post in posts:
@@ -1048,10 +1234,175 @@ def _followers(posts: List[Dict[str, Any]], *, now: datetime) -> Dict[str, Dict[
     out: Dict[str, Dict[str, Any]] = {}
     for platform, rows in snaps.items():
         at, followers = max(rows)
-        older = [r for r in rows if r[0] <= at - FOLLOWER_BASELINE_AGE]
+        # Distances from `at` (a timedelta), never `at - span`: a hand-edited newest time in the first weeks of
+        # year 1 passes `_et_local` (the New York clock can show it), yet `at - FOLLOWER_CHANGE_TARGET` has no
+        # date — it raised OverflowError out of the whole digest (OPS-R2-1). The same comparisons, no edge.
+        older = [r for r in rows if at - r[0] >= FOLLOWER_BASELINE_AGE]
         base = max(older) if older else None
+        four = min(older, key=lambda r: (abs(r[0] - at + FOLLOWER_CHANGE_TARGET), r[0])) if older else None
         out[platform] = {"followers": followers, "at": at,
-                         "baseline": base[1] if base else None, "baseline_at": base[0] if base else None}
+                         "baseline": base[1] if base else None, "baseline_at": base[0] if base else None,
+                         "four_week_base": four[1] if four else None, "four_week_base_at": four[0] if four else None}
+    return out
+
+
+# ── the 4-week scorecard (pure) ───────────────────────────────────────────────
+
+#: The reach count a scorecard row reads from a post's latest snapshot, first readable one wins: X reports
+#: impressions; Bluesky's AppView reports no view count at all ("no view counts"); Upload-Post's platforms
+#: views, else impressions (Instagram's `impressions` aliases its views).
+_REACH_KEYS: Dict[str, Tuple[str, ...]] = {"x": ("impressions",), "bluesky": ()}
+_DEFAULT_REACH_KEYS: Tuple[str, ...] = ("views", "impressions")
+#: The video rows (format `video` on these platforms) carry watch figures: the stored `video` key of the
+#: average watch time in seconds, and of the share watched — (key, factor to a percentage, its label).
+#: TikTok's completion rate is a FRACTION (0.184 = 18.4%); YouTube's average view percentage is already one.
+_WATCH_KEYS: Dict[str, str] = {"tiktok": "average_time_watched", "youtube": "average_view_duration_seconds"}
+_SHARE_KEYS: Dict[str, Tuple[str, float, str]] = {
+    "tiktok": ("full_video_watched_rate", 100.0, "watched to the end"),
+    "youtube": ("average_view_percentage", 1.0, "avg viewed"),
+}
+#: TikTok's per-post follows and profile visits, SUMMED over a row's posts (from every post's latest
+#: snapshot, whatever its age: a young post's follows are follows) — (stored key, label). A sum over only
+#: SOME of the row's posts (one never read, or read without the field) is a floor and reads "≥ N", like the
+#: cost line's partial total — never passed off as the row's total.
+_SUM_KEYS: Tuple[Tuple[str, str], ...] = (("new_followers", "follows from posts"), ("profile_views", "profile visits"))
+#: A row's "reads:" — how many of its posts are not measured `ok` (never read yet first; "other" = a status
+#: the digest does not know).
+_READ_ORDER: Tuple[str, ...] = ("unread",) + tuple(s for s in _MEASURE_STATUSES if s != "ok") + ("other",)
+#: An `image_fallback` code that is not in IMAGE_FALLBACK_REASONS, in fixed words: the stored value never
+#: reaches the message.
+_UNKNOWN_FALLBACK = "a reason this digest does not know"
+
+
+def _read_at_24h(last: Dict[str, Any]) -> bool:
+    """Was this snapshot taken when its post was at least SCORE_MIN_AGE_H old (`age_h`)? An unreadable age
+    (missing, a bool, text, NaN) is not — never a guess in the flattering direction."""
+    age = last.get("age_h")
+    return (not isinstance(age, bool) and isinstance(age, (int, float)) and math.isfinite(age)
+            and age >= SCORE_MIN_AGE_H)
+
+
+def _video_measure(video: Dict[str, Any], key: Optional[str]) -> Optional[float]:
+    """A stored video measure re-validated against the measure step's own bounds, as they are NOW
+    (`metrics_service.measure_bounds`: an average watch time at most twice MARKETING_MAX_VIDEO_SECONDS) —
+    the digest trusts the ledger no more than the measure step trusts a platform."""
+    bounds = metrics_service.measure_bounds(key) if key else None
+    return metrics_service.normalize_measure(video.get(key), *bounds) if bounds else None
+
+
+def _reach_label(platform: str, used: set) -> Optional[str]:
+    """What a row's reach is called: None for a platform that reports no view count (Bluesky); the one
+    count its posts used ("views" / "impressions"), "views/impressions" when they mixed, else the
+    platform's first choice."""
+    keys = _REACH_KEYS.get(platform, _DEFAULT_REACH_KEYS)
+    if not keys:
+        return None
+    if len(used) > 1:
+        return "/".join(k for k in keys if k in used)
+    return next(iter(used)) if used else keys[0]
+
+
+def _format_rank(fmt: str) -> Tuple[int, str]:
+    return (_FORMAT_ORDER.index(fmt), "") if fmt in _FORMAT_ORDER else (len(_FORMAT_ORDER), fmt)
+
+
+def scorecard(posts: List[Dict[str, Any]], *, week_end: date,
+              followers: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """The follows-first 4-week scorecard: one row per (platform, format) over the live `published` posts
+    published in the SCORECARD_DAYS ET days ending `week_end` (`posts` = the 35-day read). Pure.
+
+    Each row: its posts; the platform's followers and their change against `four_week_base` (`_followers`
+    — a platform-wide figure, the same on each of its format rows); the median and best reach over the
+    posts whose latest snapshot was taken at SCORE_MIN_AGE_H or older (`_read_at_24h`) and the number of
+    those posts; on a TikTok / YouTube video row the median watch time and share watched over the same
+    posts, and on TikTok the summed follows and profile visits from posts with the number of posts each
+    sum covers (`sum_n`: below `posts`, the sum is a floor); and how many posts are not measured `ok`. A
+    figure no post can give is None — "n/a" in the message, never 0. Rows sort by follower gain, then
+    median reach (an unknown one last), then platform and format."""
+    first = week_end - timedelta(days=SCORECARD_DAYS - 1)
+    start, end = week_bounds(first, week_end)
+    acc: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for post in posts:
+        if not isinstance(post, dict) or post.get("status") != "published" or review_service.is_rehearsal(post):
+            continue
+        platform, published = _platform(post), _parse_ts(post.get("published_at"))
+        if platform is None or published is None or not start <= published < end:
+            continue
+        fmt = _post_format(post)
+        row = acc.setdefault((platform, fmt), {"posts": 0, "reach": [], "used": set(), "sums": {}, "sum_n": Counter(),
+                                               "watch": [], "share": [], "reads": Counter()})
+        row["posts"] += 1
+        doc = _metrics(post)
+        status = doc.get("status")
+        if status is None:
+            row["reads"]["unread"] += 1
+        elif status != "ok":
+            row["reads"][status if isinstance(status, str) and status in _MEASURE_STATUSES else "other"] += 1
+        last = doc.get("last") if isinstance(doc.get("last"), dict) else {}
+        video = last.get("video") if isinstance(last.get("video"), dict) else {}
+        for key, _label_words in _SUM_KEYS:
+            n = _count(video.get(key))
+            if n is not None:
+                row["sums"][key] = row["sums"].get(key, 0) + n
+                row["sum_n"][key] += 1
+        if not _read_at_24h(last):
+            continue
+        for key in _REACH_KEYS.get(platform, _DEFAULT_REACH_KEYS):
+            n = _count(last.get(key))
+            if n is not None:
+                row["reach"].append(n)
+                row["used"].add(key)
+                break
+        watch = _video_measure(video, _WATCH_KEYS.get(platform))
+        if watch is not None:
+            row["watch"].append(watch)
+        share_key, factor, _share_words = _SHARE_KEYS.get(platform, (None, 1.0, ""))
+        share = _video_measure(video, share_key)
+        if share is not None:
+            row["share"].append(share * factor)
+    rows: List[Dict[str, Any]] = []
+    for (platform, fmt), row in acc.items():
+        f = followers.get(platform) if isinstance(followers, dict) else None
+        count = f.get("followers") if isinstance(f, dict) else None
+        base = f.get("four_week_base") if isinstance(f, dict) else None
+        reach = row["reach"]
+        rows.append({
+            "platform": platform, "format": fmt, "posts": row["posts"],
+            "followers": count, "followers_at": f.get("at") if isinstance(f, dict) else None,
+            "base": base, "base_at": f.get("four_week_base_at") if isinstance(f, dict) else None,
+            "gain": count - base if count is not None and base is not None else None,
+            "reach_label": _reach_label(platform, row["used"]), "reach_n": len(reach),
+            "reach_median": statistics.median(reach) if reach else None, "reach_best": max(reach) if reach else None,
+            "sums": dict(row["sums"]), "sum_n": dict(row["sum_n"]),
+            "watch_s": statistics.median(row["watch"]) if row["watch"] else None,
+            "share_pct": statistics.median(row["share"]) if row["share"] else None,
+            "reads": dict(row["reads"]),
+        })
+    rows.sort(key=lambda r: (r["gain"] is None, -(r["gain"] or 0), r["reach_median"] is None,
+                             -(r["reach_median"] or 0), r["platform"], _format_rank(r["format"])))
+    return {"first": first, "last": week_end, "rows": rows}
+
+
+def _image_fallbacks(posts: List[Dict[str, Any]]) -> List[Tuple[Optional[date], List[Tuple[str, int]]]]:
+    """The run days whose live posts carry `metadata.image_fallback` (POST_METADATA_IMAGE_FALLBACK — a code
+    `create_posts` stamps on each post frozen as text where the day's picture should have gone), each with
+    (the reason in the owner's words, its posts): IMAGE_FALLBACK_REASONS' words in that order, an unknown
+    code as fixed words last — never the stored value. A post without a readable run day is under None,
+    listed last. Pure."""
+    by_day: Dict[Optional[date], Counter] = {}
+    for post in posts:
+        code = _meta(post).get(POST_METADATA_IMAGE_FALLBACK)
+        if not code:
+            continue
+        known = code if isinstance(code, str) and code in IMAGE_FALLBACK_REASONS else None
+        by_day.setdefault(post_run_date(post), Counter())[known] += 1
+    out: List[Tuple[Optional[date], List[Tuple[str, int]]]] = []
+    for day in sorted(by_day, key=lambda d: (d is None, d or date.min)):
+        counts = by_day[day]
+        reasons = [(IMAGE_FALLBACK_REASONS[c], counts[c]) for c in IMAGE_FALLBACK_REASONS if counts.get(c)]
+        if counts.get(None):
+            reasons.append((_UNKNOWN_FALLBACK, counts[None]))
+        out.append((day, reasons))
     return out
 
 
@@ -1100,7 +1451,12 @@ def _latency(posts: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def _run_rows(runs: List[Dict[str, Any]], week_start: date, week_end: date) -> Tuple[List[Tuple[date, str]], Optional[Tuple[float, date, str]]]:
     """One (day, text) per posting day and per rest day with something other than a rest-day skip;
-    plus the week's highest stage memory peak (MB, day, stage)."""
+    plus the week's highest stage memory peak (MB, day, stage). A run skipped `rest_day` is a rest day
+    whatever TODAY's calendar says (Batch 3): the posting days are a switch, and a week that changed them
+    must not list its old rest days as "skipped — rest_day" (under an unchanged calendar nothing moves —
+    selection skips a day as a rest day only when it is one). Every other run row is listed whatever today's
+    calendar says — its own record, as `judged_posting_day` reads one; only a day with NO run row is judged
+    on today's calendar ("no run (a posting day)"), as nothing else records what that day was."""
     by_day: Dict[date, Dict[str, Any]] = {}
     for run in runs:
         if not isinstance(run, dict):
@@ -1126,7 +1482,7 @@ def _run_rows(runs: List[Dict[str, Any]], week_start: date, week_end: date) -> T
                 reason = _key(meta.get("skip_reason"))
                 closed = meta.get("closed") if isinstance(meta.get("closed"), dict) else {}
                 why = reason or _key(closed.get("reason"))
-                if reason == "rest_day" and not posting:
+                if reason == "rest_day":
                     text = ""
                 elif why:
                     text = f"skipped — {why}"
@@ -1135,6 +1491,12 @@ def _run_rows(runs: List[Dict[str, Any]], week_start: date, week_end: date) -> T
                 stage = _key(run.get("stage"))
                 text = ("failed before any stage completed" if stage == RUN_STAGES[0]
                         else f"failed after {stage or '?'}")
+                if _posts_recorded(run):
+                    # Review F1 (live regression, 2026-10-16): its posts exist and were offered like any day's,
+                    # so the day may well have posted — never let the row read as a lost day. Nothing more is
+                    # claimed: the digest reads no post of the run here, and a run resumed after midnight
+                    # records its posts on the next day (into next week's Posts section).
+                    text += " — its posts were recorded"
             note = _series_note(run) if text else ""
             if note:
                 # Drop 2: which series the day took, and what it fell back from.
@@ -1377,12 +1739,14 @@ def summarize_week(
     metrics_enabled: bool = False, store: str = "prelaunch", posts_capped: bool = False,
     charge_rows: Optional[List[Dict[str, Any]]] = None, prev_runs: Optional[List[Dict[str, Any]]] = None,
     script_rows: Optional[List[Dict[str, Any]]] = None, upload_post_fee_micros: Any = 0,
-    cost_warn_micros: Any = 0,
+    cost_warn_micros: Any = 0, measured_capped: bool = False,
 ) -> Dict[str, Any]:
     """The digest's numbers from the rows the gather read. Pure. A section whose rows could not be read
     is passed as None and stays None ("unreadable" in the message) — never an empty or zero section.
     The cost line's inputs (`charge_rows`, `prev_runs`, `script_rows`) follow the same rule: None makes
-    only their part of the cost "unreadable"."""
+    only their part of the cost "unreadable". `measured` (the 35-day published posts) feeds both the
+    follower snapshots and the 4-week `scorecard`; `measured_capped` says that read hit its limit (its
+    newest rows are the missing ones). The week's top post and the picture fallbacks come from `posts`."""
     now = _aware(now)
     runs, measured, link_hits, escalated = (_listed(runs), _listed(measured), _listed(link_hits),
                                             _listed(escalated))
@@ -1461,13 +1825,23 @@ def summarize_week(
         upload_post_fee_micros=upload_post_fee_micros, cost_warn_micros=cost_warn_micros)
 
     run_rows, peak = _run_rows(runs, week_start, week_end) if runs is not None else (None, None)
+    measured_rows = [p for p in measured if isinstance(p, dict)] if measured is not None else None
+    followers = _followers(measured_rows, now=now) if measured_rows is not None else None
+    score = None
+    if measured_rows is not None and followers is not None:
+        score = scorecard(measured_rows, week_end=week_end, followers=followers)
+        score["capped"] = bool(measured_capped)
+        # How many published posts that read took in: the capped line names THIS count, never the page
+        # bound — a read stuck on a full page of one instant stops at 300, and boundary rows read twice are
+        # kept once (`list_published_posts`), so "the first 1,200" could be false either way.
+        score["read"] = len(measured_rows)
     return {
         "now": now, "week_start": week_start, "week_end": week_end, "posts_capped": bool(posts_capped),
         "rehearsal": len(rows) - len(live), "live": len(live), "status_totals": _status_counts(live),
         "by_platform": by_platform, "by_format": _format_counts(live), "expired": dict(expired),
         "rejections": {"by_reason": dict(reasons), "rows": rejected_rows}, "failed_rows": failed_rows,
-        "engagement": _engagement(live), "metrics_enabled": bool(metrics_enabled),
-        "followers": _followers([p for p in measured if isinstance(p, dict)], now=now) if measured is not None else None,
+        "image_fallback": _image_fallbacks(live), "scorecard": score, "top_post": _top_post(live),
+        "metrics_enabled": bool(metrics_enabled), "followers": followers,
         "taps": _taps(link_hits) if link_hits is not None else None, "store": store,
         "spend": spend_out, "latency": _latency(live), "runway": runway, "escalated": escalated_rows,
         "metrics_job": metrics_job, "runs": run_rows, "memory_peak": peak, "cost": cost,
@@ -1549,7 +1923,109 @@ def _cost_lines(cost: Any) -> List[str]:
     return lines
 
 
-def _render_digest(r: Dict[str, Any], cap: int) -> str:
+def _num(value: float) -> str:
+    """A median or a measure, as a count when whole after rounding ("1,234"), else with one decimal."""
+    rounded = round(float(value), 1)
+    return _n(int(rounded)) if rounded.is_integer() else f"{rounded:,.1f}"
+
+
+def _mmdd(at: Any) -> str:
+    local = _et_local(at) if isinstance(at, datetime) else None
+    return local.strftime("%m-%d") if local is not None else "?"
+
+
+def _follower_text(row: Dict[str, Any], now: datetime) -> str:
+    """"followers 23 (+18 since 09-07)" — the change dated by its own baseline; "change n/a" without one;
+    ", as of MM-DD" when the newest count is older than FOLLOWER_STALE; "followers n/a" without a count."""
+    count = row.get("followers")
+    if type(count) is not int:
+        return "followers n/a"
+    base = row.get("base")
+    if type(base) is int:
+        delta = count - base
+        sign = "+" if delta > 0 else ("±" if delta == 0 else "-")
+        notes = [f"{sign}{_n(abs(delta))} since {_mmdd(row.get('base_at'))}"]
+    else:
+        notes = ["change n/a"]
+    at = row.get("followers_at")
+    if isinstance(at, datetime) and now - at > FOLLOWER_STALE:
+        notes.append(f"as of {_mmdd(at)}")
+    return f"followers {_n(count)} ({', '.join(notes)})"
+
+
+def _reach_text(row: Dict[str, Any]) -> str:
+    label = row.get("reach_label")
+    if label is None:
+        return "no view counts"
+    if row.get("reach_median") is None:
+        return f"{label} n/a"
+    return (f"{label} median {_num(row['reach_median'])}, best {_n(row['reach_best'])} "
+            f"({_n(row['reach_n'])} at 24 h+)")
+
+
+def _sum_text(row: Dict[str, Any], key: str) -> str:
+    """A summed TikTok figure: "n/a" when no post gave it, "≥ N" when only some of the row's posts did (the
+    others' share is unknown — a floor, never the total), else "N"."""
+    sums, covered = row.get("sums") or {}, row.get("sum_n") or {}
+    total = sums.get(key)
+    if type(total) is not int:
+        return "n/a"
+    n = covered.get(key)
+    return f"≥ {_n(total)}" if type(n) is not int or n < row["posts"] else _n(total)
+
+
+def _score_line(row: Dict[str, Any], now: datetime) -> str:
+    """One scorecard row: platform and format, posts, followers, TikTok's follows and profile visits from
+    posts, reach, a video row's watch figures, and the posts not measured `ok`. A figure no post gave is
+    "n/a" — never 0; a sum only some posts gave is a floor ("≥ N")."""
+    platform, fmt = row["platform"], row["format"]
+    parts = [_plural(row["posts"], "post", "posts"), _follower_text(row, now)]
+    video = fmt == "video" and platform in _WATCH_KEYS
+    if video and platform == "tiktok":
+        parts += [f"{words} {_sum_text(row, key)}" for key, words in _SUM_KEYS]
+    parts.append(_reach_text(row))
+    if video:
+        watch, share = row.get("watch_s"), row.get("share_pct")
+        parts.append(f"avg watch {_num(watch) + ' s' if watch is not None else 'n/a'}")
+        parts.append(f"{_SHARE_KEYS[platform][2]} {_num(share) + '%' if share is not None else 'n/a'}")
+    reads = row.get("reads") or {}
+    shown = [f"{_n(reads[s])} {s}" for s in _READ_ORDER if reads.get(s)]
+    if shown:
+        parts.append("reads: " + ", ".join(shown))
+    return f"• {_label(platform)} {fmt}: " + " · ".join(parts)
+
+
+def _scorecard_lines(r: Dict[str, Any], score_cap: Optional[int]) -> List[str]:
+    """The scorecard block: its header (the 4 weeks, the sort, what the medians are over), its rows —
+    every one while `score_cap` is None (`_PASSES` trims the other sections first), else capped — and the
+    week's ONE top-post link line (never its text)."""
+    unreadable = "unreadable (see the web logs)"
+    score = r.get("scorecard")
+    if not r.get("metrics_enabled"):
+        lines = ["Scorecard: not measured — MARKETING_ENABLED and MARKETING_METRICS_ENABLED must both be on"]
+    elif not isinstance(score, dict):
+        lines = [f"Scorecard: {unreadable}"]
+    else:
+        # Month-day only: a weekday here would read like one of the Runs rows ("• Sun 10-04 …").
+        window = f"{score['first'].strftime('%m-%d')} → {score['last'].strftime('%m-%d')}"
+        if not score["rows"]:
+            lines = [f"Scorecard, 4 weeks ({window}): no published posts"]
+        else:
+            lines = [f"Scorecard, 4 weeks ({window}), by follower gain — views, watch and % are medians over "
+                     f"posts read at 24 h or older:"]
+            rows = [_score_line(row, r["now"]) for row in score["rows"]]
+            lines += rows if score_cap is None else _capped(rows, score_cap, indent="")
+        if score.get("capped"):
+            read = score.get("read")
+            shown = _n(read) if type(read) is int and read >= 0 else "?"
+            lines.append(f"  (the published-posts read stopped after {shown} posts — the newest may be missing)")
+    top = r.get("top_post")
+    if top:
+        lines.append(f"Top post this week: {top['url']} ({_join_counts(top['counts'])})")
+    return lines
+
+
+def _render_digest(r: Dict[str, Any], cap: int, score_cap: Optional[int] = None) -> str:
     unreadable = "unreadable (see the web logs)"
     lines: List[str] = [
         "📊 Caydex marketing — weekly digest",
@@ -1603,28 +2079,20 @@ def _render_digest(r: Dict[str, Any], cap: int) -> str:
         if r["failed_rows"]:
             lines.append(f"Failed {_n(len(r['failed_rows']))}:")
             lines += _capped([f"✖ {p} · run {d} · {why} · {fmt}" for p, d, why, fmt in r["failed_rows"]], cap)
+        fallbacks = r.get("image_fallback") or []
+        if fallbacks:
+            # Codes only, in the owner's words (IMAGE_FALLBACK_REASONS). "text posts instead", never "posted as
+            # text": a member may have been rejected or expired, not posted.
+            lines.append(f"🖼 Picture not used on {_plural(len(fallbacks), 'day', 'days')} (text posts instead):")
+            lines += _capped([f"{_day(d) if d is not None else 'an unreadable day'}: "
+                              + "; ".join(f"{words} ({_plural(n, 'post', 'posts')})" for words, n in reasons)
+                              for d, reasons in fallbacks], cap)
     if r.get("rehearsal"):
         lines.append(f"(+{_n(r['rehearsal'])} rehearsal rows — dry run, never publishable; not counted)")
     lines.append("")
 
-    # engagement + followers
-    if not r.get("metrics_enabled"):
-        lines.append("Engagement: not measured — MARKETING_ENABLED and MARKETING_METRICS_ENABLED must both be on")
-    elif not r["engagement"]:
-        lines.append("Engagement: no live published posts this week")
-    else:
-        lines.append("Engagement (latest snapshot of this week's published posts):")
-        platforms = sorted(r["engagement"].items())
-        for platform, e in platforms[:cap]:
-            totals = _join_counts(e["totals"])
-            lines.append(f"• {_label(platform)} — {_n(e['measured'])} of {_n(e['live'])} measured"
-                         + (f": {totals}" if totals else ""))
-            if e["top"]:
-                lines.append(f"  Top: {e['top']['url']} ({_join_counts(e['top']['counts'])})")
-            if e["statuses"] and set(e["statuses"]) != {"ok"}:
-                lines.append("  Measure: " + " · ".join(f"{k} {_n(v)}" for k, v in sorted(e["statuses"].items())))
-        if len(platforms) > cap:
-            lines.append(f"… and {_n(len(platforms) - cap)} more platform(s)")
+    # the 4-week scorecard (follows first) + this week's top post, then followers
+    lines += _scorecard_lines(r, score_cap)
     followers = r.get("followers")
     if followers is None:
         lines.append(f"Followers: {unreadable}")
@@ -1775,11 +2243,11 @@ def _metrics_job_line(job: Optional[Dict[str, Any]], enabled: Any) -> str:
 
 def compose_digest(report: Dict[str, Any]) -> str:
     """The digest as ONE plain-text Telegram message of at most MAX_DIGEST_UNITS UTF-16 units. Pure.
-    Rows are capped first (each list section shows fewer rows, with "… and N more"); only if that is
-    not enough is the text cut at a line break, with a marker saying so."""
+    Rows are capped first (each list section shows fewer rows, with "… and N more" — the scorecard last,
+    `_PASSES`); only if that is not enough is the text cut at a line break, with a marker saying so."""
     text = ""
-    for cap in _ROW_CAPS:
-        text = _render_digest(report, cap)
+    for cap, score_cap in _PASSES:
+        text = _render_digest(report, cap, score_cap)
         # Defence in depth: a lone surrogate cannot be encoded (or sent); every dynamic string is
         # already cleaned, so this changes nothing unless a future section forgets to.
         text = "".join("\ufffd" if 0xD800 <= ord(ch) <= 0xDFFF else ch for ch in text)
@@ -1810,21 +2278,24 @@ async def _optional(what: str, coro: Awaitable[Any]) -> Any:
 
 async def _runway(svc: Any, today: date) -> Dict[str, Any]:
     """The pool's runway, from the ledger read exactly as selection reads it (`script_service._select` /
-    `_select_lesson`): the newest NEWS_RECENT_LIMIT refs, of which only the LESSON refs count
-    (`selection.lesson_refs`), on the calendar of the content classes and the per-series switch read NOW
-    (the switch only while a news class is on, as there). An unfiltered `len(pool) + RECENT_WINDOW` read
-    let Company Weekly's `news:` refs push older lessons out of the window: after 39 lesson picks from a
-    pool of 34 it still said "10 of 34 lessons unused". With the classes at "A" the line is unchanged."""
+    `_select_lesson`): the newest `selection.news_recent_limit()` refs — RECENT_WINDOW posting days of
+    history at the posting days in force NOW (Batch 3: 240 at the default four a week, 420 at seven) — of
+    which only the LESSON refs count (`selection.lesson_refs`), on the calendar of the posting days, the
+    content classes and the per-series switch read NOW (the switch only while a news class is on, as
+    there). An unfiltered `len(pool) + RECENT_WINDOW` read let Company Weekly's `news:` refs push older
+    lessons out of the window: after 39 lesson picks from a pool of 34 it still said "10 of 34 lessons
+    unused". With the classes at "A" and the default posting days the line is unchanged. Imports nothing
+    from script_service: the limit is selection's, read once so both reads below take the same rows."""
     from app.services.marketing import content_pool
-    from app.services.marketing.script_service import NEWS_RECENT_LIMIT
 
     # The corpus load is CPU work (cached per process after the first call): off the event loop.
     pool = await asyncio.to_thread(content_pool.eligible_keys)
     classes = parse_content_classes(settings.MARKETING_CONTENT_CLASSES)
     news_series = (selection.parse_news_series(settings.MARKETING_NEWS_SERIES)
                    if classes != frozenset({"A"}) else frozenset())
-    with_today = list(await svc.recent_source_refs(today + timedelta(days=1), NEWS_RECENT_LIMIT))
-    before_today = list(await svc.recent_source_refs(today, NEWS_RECENT_LIMIT))
+    limit = selection.news_recent_limit()
+    with_today = list(await svc.recent_source_refs(today + timedelta(days=1), limit))
+    before_today = list(await svc.recent_source_refs(today, limit))
     # Today has a row exactly when the two reads differ (the later bound shifts every row by one), and it
     # is the newest; it used a lesson only when that row is one — a news day's row never did. (Comparing
     # the two lesson-FILTERED lists instead would call a news day "picked" once the ledger outgrows the
@@ -1882,11 +2353,13 @@ async def gather_digest(svc: Any, now: datetime) -> Dict[str, Any]:
     prev_start = week_bounds(prev_week_start, prev_week_end)[0]
     posts = await svc.list_posts_created_between(start, end, limit=WEEK_POST_LIMIT)
     runs = await _optional("the week's runs", svc.list_runs_between(week_start, week_end))
-    measured = await _optional("follower snapshots",
-                               svc.list_measurable_posts(since=now - FOLLOWER_LOOKBACK, limit=MEASURED_POST_LIMIT))
-    if measured is not None and len(measured) >= MEASURED_POST_LIMIT:
-        logger.warning("marketing digest: %d published posts in %s — the follower snapshots of the newest may "
-                       "be missing", len(measured), FOLLOWER_LOOKBACK)
+    # ONE paged read for the follower snapshots AND the 4-week scorecard (oldest first, page by page, so the
+    # NEWEST posts are never the ones a single limit cuts — MD-7; past MEASURED_POST_MAX the read logs an
+    # ERROR and the scorecard says the newest may be missing).
+    read = await _optional("the scorecard's published posts", metrics_service.list_published_posts(
+        svc, since=now - FOLLOWER_LOOKBACK, page_limit=MEASURED_POST_LIMIT, max_pages=MEASURED_POST_PAGES,
+        what="digest"))
+    measured, measured_capped = read if read is not None else (None, False)
     link_hits = await _optional("/go taps", svc.link_hits_between(week_start, week_end))
     spend = await _optional("X spend", _spend(svc, now))
     # The cost line: X posts touched since the week before began (every charge — a metrics read on an
@@ -1908,6 +2381,7 @@ async def gather_digest(svc: Any, now: datetime) -> Dict[str, Any]:
         store=_store_state(), posts_capped=len(posts) >= WEEK_POST_LIMIT,
         charge_rows=charge_rows, prev_runs=prev_runs, script_rows=script_rows,
         upload_post_fee_micros=upload_post_fee_micros(), cost_warn_micros=weekly_cost_warn_micros(),
+        measured_capped=measured_capped,
     )
 
 
@@ -2008,8 +2482,9 @@ async def _final_work(chat_id: int, at: datetime, counters: Dict[str, int]) -> T
                     "every outcome but a good day is reported", run_date)
     run = await svc.get_run_for_date(run_date)
     counters["checked"] += 1
-    text = evaluate_run_final(run, run_date=run_date, posting_day=selection.is_posting_day(run_date), now=at,
-                              max_attempts=settings.MARKETING_MAX_RUN_ATTEMPTS,
+    # B3PD-2: a past day is a posting day by its own record too — never only by TODAY's posting days.
+    text = evaluate_run_final(run, run_date=run_date, posting_day=judged_posting_day(run_date, nightly=how, run=run),
+                              now=at, max_attempts=settings.MARKETING_MAX_RUN_ATTEMPTS,
                               stale_seconds=settings.MARKETING_RUN_STALE_SECONDS, checked_at=checked_at,
                               nightly=how)
     if text is None:
@@ -2020,6 +2495,78 @@ async def _final_work(chat_id: int, at: datetime, counters: Dict[str, int]) -> T
     sent, why, limited = await _send_one(chat_id, text, what=f"final run-health word for {run_date}")
     _tally(counters, sent, limited)
     return (True, 1, None) if sent else (False, 0, why)
+
+
+#: B3PD-2 (2026-10-20): what `_final_owed` decided for the ET day it ran on — {"day", "owed": True/False}, or
+#: after a failed read {"day", "owed": None, "retry_at": monotonic} — so a day after a rest day costs at most ONE
+#: read of the records per process (two rows), never one per tick.
+_FINAL_OWED: Dict[str, Any] = {}
+#: How long a failed `_final_owed` read waits before it is tried again (a ledger outage is logged this often).
+FINAL_OWED_RETRY_SECONDS = 600
+
+
+async def _final_owed(at: datetime) -> bool:
+    """True when YESTERDAY's final word is owed although `final_due` says no: yesterday is a rest day on the
+    posting days in force NOW, but its own record says it was a posting day (`judged_posting_day`) —
+    MARKETING_POST_WEEKDAYS dropped its weekday since (B3PD-2). A switch from seven days to four made the
+    morning after a failed day (the setting's own advice: change it in the morning ET) would otherwise cancel
+    the final word that day's nightly alert promised.
+
+    No I/O at all before `final_hour_et()`, on a day `final_due` already covers, while the review bot is not
+    configured or Telegram's flood back-off is open (the next tick asks again), or once this process decided
+    the day (`_FINAL_OWED`). Otherwise ONE read of the records: the nightly check's job state, then — unless that
+    already decides — yesterday's run. Under an unchanged calendar both say no (a rest day has no nightly check,
+    and its run closes `skipped` `rest_day` at its first kick), so nothing is claimed or sent: the default days
+    stay as before but for these reads. A failed read is logged (WARNING) and retried after
+    FINAL_OWED_RETRY_SECONDS — never a word on a guess. Never raises but CancelledError."""
+    et = _aware(at).astimezone(ET)
+    if et.hour < final_hour_et():
+        return False
+    today = et.date()
+    run_date = today - timedelta(days=1)
+    if selection.is_posting_day(run_date):
+        return False   # `final_due`'s own day
+    memo = _FINAL_OWED
+    if memo.get("day") == today:
+        if memo.get("owed") is not None:
+            return bool(memo["owed"])
+        if time.monotonic() < memo.get("retry_at", 0.0):
+            return False
+    if (not review_service.is_configured() or review_service.review_chat_id() is None
+            or time.monotonic() < review_service._rate_limited_until):
+        return False   # `_ready` would take no claim: read nothing either
+    try:
+        svc = get_marketing_run_service()
+        _checked_at, how = nightly_check_time(await _job_state(svc, JOB_HEALTH), run_date)
+        owed = how in (NIGHTLY_CHECKED, NIGHTLY_TIME_UNKNOWN)
+        run = None if owed else await svc.get_run_for_date(run_date)
+        owed = owed or ran_as_posting_day(run)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        _FINAL_OWED.clear()
+        _FINAL_OWED.update(day=today, owed=None, retry_at=time.monotonic() + FINAL_OWED_RETRY_SECONDS)
+        logger.warning("marketing run health (final) %s: not a posting day on today's MARKETING_POST_WEEKDAYS, and "
+                       "whether its own record says it was one could not be read (%s: %s) — no final word for it "
+                       "this tick; retried in %d s", run_date, type(e).__name__, e, FINAL_OWED_RETRY_SECONDS)
+        return False
+    _FINAL_OWED.clear()
+    _FINAL_OWED.update(day=today, owed=owed)
+    if owed:
+        logger.info("marketing run health (final) %s: not a posting day on today's MARKETING_POST_WEEKDAYS, but its "
+                    "own record says it was one (nightly check: %s; run status %s) — the posting days changed "
+                    "since; its final word is due", run_date, how,
+                    run.get("status") if isinstance(run, dict) else "not read")
+    return owed
+
+
+def _final_owed_due(now: datetime) -> bool:
+    """`final_due`, or the day `_final_owed` found a final word owed on (read from its memo, no I/O): the `due`
+    test the owed final word runs under — `run_day_job` calls it first, before its own claim."""
+    if final_due(now):
+        return True
+    et = _aware(now).astimezone(ET)
+    return et.hour >= final_hour_et() and _FINAL_OWED.get("day") == et.date() and _FINAL_OWED.get("owed") is True
 
 
 #: (job, due, work) of the two run-health jobs, in the order a tick runs them: yesterday's final word
@@ -2038,7 +2585,11 @@ async def health_cycle(*, now: Optional[datetime] = None) -> Dict[str, int]:
     ET day; one tick may run both (a web service down from 16:00 to 22:00), the final word FIRST — it
     reads the nightly check's job state before today's check can claim it. Each runs behind the Telegram
     back-off check, and a failure in one job never stops the other. Never raises (except
-    CancelledError)."""
+    CancelledError).
+
+    B3PD-2 (2026-10-20): the final word is also due — under the same job and claim — on the day after a day
+    the posting days in force NOW call a rest day but whose own record says was a posting day (`_final_owed`,
+    one read of the records per process on such a day): MARKETING_POST_WEEKDAYS dropped that weekday since."""
     counters = {"checked": 0, "sent": 0, "failed": 0, "rate_limited": 0}
     try:
         at = _aware(now)   # ONE instant for both jobs, so a tick cannot straddle an hour between them
@@ -2049,7 +2600,10 @@ async def health_cycle(*, now: Optional[datetime] = None) -> Dict[str, int]:
     for job, due, work in _HEALTH_JOBS:
         try:
             if not due(at):
-                continue
+                # B3PD-2: the final word on a day the posting days no longer list, owed by its own record.
+                if job != JOB_HEALTH_FINAL or not await _final_owed(at):
+                    continue
+                due = _final_owed_due
             chat_id = _ready(counters)
             if chat_id is None:
                 break   # not configured, or the shared flood back-off is open: no claim at all

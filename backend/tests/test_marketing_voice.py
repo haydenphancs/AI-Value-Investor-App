@@ -206,6 +206,93 @@ def test_ass_time_format():
     assert cap.ts(0) == "0:00:00.00" and cap.ts(61.234) == "0:01:01.23" and cap.ts(3600) == "1:00:00.00"
 
 
+# ── Batch 2: the hook card's words are not captioned twice ───────────────────
+
+
+_HOOK = "Meet your moody business partner."
+
+
+def _hook_table() -> List[dict]:
+    """The hook (line 0) at 0.25-2.0 s, then two script lines — timings' own word split."""
+    hook = [dict(w, s=round(w["s"] + 0.25, 3), e=round(w["e"] + 0.25, 3)) for w in _timed(_HOOK, line=0, step=0.35)]
+    one = [dict(w, s=round(w["s"] + 2.3, 3), e=round(w["e"] + 2.3, 3)) for w in _timed("He names a price.", line=1)]
+    two = [dict(w, s=round(w["s"] + 4.0, 3), e=round(w["e"] + 4.0, 3)) for w in _timed("Moods are not value.", line=2)]
+    return hook + one + two
+
+
+def test_the_hook_cards_words_leave_the_captions_while_it_shows():
+    words = _hook_table()
+    before = [dict(w) for w in words]
+    out = cap.without_hook_card_words(words, _HOOK, 2.3)
+    assert [w["w"] for w in out] == "He names a price. Moods are not value.".split()
+    assert words == before                                       # the stage's table is never mutated
+    text = cap.build_ass(out)
+    assert "moody" not in text and "partner." not in text and "price." in text and "value." in text
+    # The other lines' captions are exactly the ones they get without the hook line at all.
+    assert text == cap.build_ass([w for w in words if w["line"] != cap.HOOK_LINE])
+
+
+def test_a_script_line_spoken_while_the_hook_card_still_shows_keeps_its_captions():
+    """A short hook: the timeline keeps the hook card up for its MIN_SEGMENT_SECONDS, into line 1 — the
+    card does not show line 1's words, so they stay captioned; only the hook's go."""
+    words = [{"w": "Look.", "s": 0.0, "e": 0.4, "line": 0},
+             {"w": "Prices", "s": 0.6, "e": 0.9, "line": 1}, {"w": "swing.", "s": 0.9, "e": 1.3, "line": 1}]
+    out = cap.without_hook_card_words(words, "Look.", 1.2)
+    assert [w["w"] for w in out] == ["Prices", "swing."]
+    assert "Prices" in cap.build_ass(out) and "Look." not in cap.build_ass(out)
+
+
+def test_a_hook_word_spoken_after_the_card_left_keeps_its_caption():
+    words = _hook_table()
+    late = [w["w"] for w in words if w["line"] == 0 and w["s"] >= 1.0]
+    assert late == ["business", "partner."]
+    out = cap.without_hook_card_words(words, _HOOK, 1.0)          # the card left at 1.0 s
+    assert [w["w"] for w in out if w["line"] == 0] == late
+    assert [w["w"] for w in cap.without_hook_card_words(words, _HOOK, 0.0) if w["line"] == 0] == _HOOK.split()
+    # B2V-4: the bound is STRICT — a word that starts exactly as the card leaves is not on the card any
+    # more (the timeline's backward clamp can land a boundary on a word's start), so it keeps its caption
+    business = next(w for w in words if w["w"] == "business")
+    at_start = cap.without_hook_card_words(words, _HOOK, business["s"])
+    assert [w["w"] for w in at_start if w["line"] == 0] == ["business", "partner."]
+    just_after = cap.without_hook_card_words(words, _HOOK, business["s"] + 0.001)
+    assert [w["w"] for w in just_after if w["line"] == 0] == ["partner."]
+
+
+@pytest.mark.parametrize("hook, table", [
+    ("Meet your moody partner.", None),                            # the card shows another text
+    ("Meet  your moody business partner. ", None),                 # the same words: still the hook
+    (_HOOK, "no_hook_line"),                                       # nothing narrated as line 0
+    (_HOOK, "empty"),
+    (None, None),
+])
+def test_a_caption_is_hidden_only_for_words_the_card_really_shows(hook, table, caplog):
+    import logging
+
+    words = _hook_table()
+    if table == "no_hook_line":
+        words = [w for w in words if w["line"] != 0]
+    elif table == "empty":
+        words = []
+    caplog.set_level(logging.WARNING, logger="marketing.captions")
+    out = cap.without_hook_card_words(words, hook, 2.3)
+    if isinstance(hook, str) and hook.split() == _HOOK.split() and table is None:
+        assert [w["w"] for w in out if w["line"] == 0] == []     # whitespace never decides it
+        assert not caplog.records
+    else:
+        assert out == words                                      # every caption kept…
+        assert any("every caption is kept" in r.getMessage() for r in caplog.records)   # …and said so
+
+
+@pytest.mark.parametrize("until", [float("nan"), None, True, "2.3"])
+def test_no_usable_card_time_keeps_every_caption(until, caplog):
+    import logging
+
+    words = _hook_table()
+    caplog.set_level(logging.WARNING, logger="marketing.captions")
+    assert cap.without_hook_card_words(words, _HOOK, until) == words
+    assert any("no usable time" in r.getMessage() for r in caplog.records)
+
+
 def test_the_vendored_font_draws_the_brand_copy():
     font = str(_PKG / "assets" / "fonts" / "Inter-Bold.ttf")
     assert cap.missing_glyphs(font, ["Meet “Mr. Market” — it’s 7.5% of S&P 500!"]) == []
@@ -479,23 +566,34 @@ def _code_references(path: Path) -> List[str]:
     return out
 
 
-def test_the_worker_never_references_the_non_commercial_aligner_or_the_scripts_tree():
+def _banned_reference(ref: str) -> bool:
+    """The non-commercial aligner (MMS_FA, forced_align) or the scripts tree."""
+    low = ref.lower()
+    return "mms_fa" in low or "forced_align" in low or low == "scripts" or low.startswith("scripts.")
+
+
+def test_the_worker_never_references_the_non_commercial_aligner_or_the_scripts_tree(tmp_path):
     files = [p for p in _PKG.rglob("*.py") if "out" not in p.relative_to(_PKG).parts[:1]]
     assert len(files) >= 5
-    bad = []
-    for f in files:
-        for ref in _code_references(f):
-            low = ref.lower()
-            if "mms_fa" in low or "forced_align" in low or low == "scripts" or low.startswith("scripts."):
-                bad.append((f.name, ref))
+    bad = [(f.name, ref) for f in files for ref in _code_references(f) if _banned_reference(ref)]
     assert bad == [], bad
-    # Anti-vacuity: the scanner sees a real reference when there is one.
-    probe = _PKG.parent / "tests" / "_mms_probe.py"
-    try:
-        probe.write_text("from torchaudio.pipelines import MMS_FA\n")
-        assert "MMS_FA" in _code_references(probe)
-    finally:
-        probe.unlink(missing_ok=True)
+    # Anti-vacuity, in pytest's own tmp_path — never the shared checkout, where a probe file is seen by
+    # every other session's scan and `git status`, and survives a killed run. The scanner sees a real
+    # reference when there is one and the predicate flags EACH banned shape (the aligner by name, the
+    # aligner call, the scripts tree by `from` and by dotted import); a docstring that only NAMES them
+    # does not count.
+    probe = tmp_path / "_mms_probe.py"
+    probe.write_text("from torchaudio.pipelines import MMS_FA\n"
+                     "from scripts import align_journey_audio\n"
+                     "import scripts.clone_learn_audio\n"
+                     "torchaudio.functional.forced_align(emission, tokens)\n", encoding="utf-8")
+    refs = _code_references(probe)
+    assert "MMS_FA" in refs
+    assert sorted(r for r in refs if _banned_reference(r)) == sorted(
+        ["MMS_FA", "scripts", "scripts.clone_learn_audio", "forced_align"])
+    named_only = tmp_path / "_named_only.py"
+    named_only.write_text('"""MMS_FA, forced_align and scripts.x are only named here."""\n', encoding="utf-8")
+    assert not [r for r in _code_references(named_only) if _banned_reference(r)]
 
 
 # ── review fixes (2026-09-26, M9) ─────────────────────────────────────────────
@@ -544,6 +642,105 @@ def test_sentence_ends_behind_quotes_and_short_answers_end_a_phrase(text, groups
         assert got == groups, got
     else:
         assert not any(g.endswith("Mr.") or g.endswith("U.S.") for g in got), got
+
+
+# ── LIVE-CAP-1 (2026-10-20): a figure is never captioned apart from the word it is read with ──────────
+# The company_stakes hook "Amazon invested $50 billion in OpenAI." is 1095 px as one phrase (the safe width
+# is 920), and the cut fell after "$50": "Amazon invested $50" was the caption on the 500 ms platform cover.
+
+
+_REAL_NEWS_LINES = [   # narrated by the 2026-10-20 live renders (company_stakes, earnings, money_map, insider_buys)
+    "Amazon invested $50 billion in OpenAI.",
+    "Eli Lilly invested $35 million in Scribe Therapeutics.",
+    "Microsoft invested $11.9 billion in OpenAI Group PBC.",
+    "Berkshire Hathaway's Berkadia Commercial Mortgage stake had a carrying value of $461 million.",
+    "Revenue was $12.4 billion, against an analyst estimate of $11.4 billion.",
+    "Revenue was $2.7 billion, against an analyst estimate of $2.6 billion.",
+    "Alcoa reported $1.82 a share on the analysts' basis; the estimate was $1.51.",
+    "Travelers reported $9.18 a share on the analysts' basis; the estimate was $7.39.",
+    "Amazon reported revenue of $716.9 billion in fiscal 2025.",
+    "They report 4 purchases, about 5.3 million shares in total, for $25.1 million.",
+]
+
+
+def _groups(text: str, measure=None) -> List[str]:
+    return [" ".join(w["w"] for w in g) for g in cap.phrases(_timed(text), measure or cap.font_measurer(_FONT))]
+
+
+@pytest.mark.parametrize("text, groups", [
+    ("Amazon invested $50 billion in OpenAI.", ["Amazon invested", "$50 billion in OpenAI."]),
+    ("Eli Lilly invested $35 million in Scribe Therapeutics.",
+     ["Eli Lilly invested", "$35 million in Scribe", "Therapeutics."]),
+])
+def test_the_stakes_hooks_keep_their_figure_with_its_scale_word(text, groups):
+    got = _groups(text)
+    assert got == groups, got
+    m = cap.font_measurer(_FONT)
+    assert all(m(g) <= cap.SAFE_WIDTH for g in got)                  # still one line each, never shrunk
+
+
+@pytest.mark.parametrize("text", _REAL_NEWS_LINES)
+def test_no_real_news_line_strands_a_figure_from_its_scale_word(text):
+    words = _timed(text)
+    pos = 0
+    for group in cap.phrases(words, cap.font_measurer(_FONT)):
+        pos += len(group)
+        assert not (pos < len(words) and cap._binds_forward(group[-1], words[pos:pos + 2])), (text, group)
+    assert " ".join(_groups(text)) == text                            # every word, in order, once
+
+
+@pytest.mark.parametrize("figure, following, binds", [
+    ("$50", ["billion"], True), ("$11.9", ["billion"], True), ("12", ["percent."], True),
+    ("5.3", ["million", "shares"], True), ("1,000", ["thousand"], True), ("€3", ["million"], True),
+    ("£2.5", ["Trillion"], True), ("$9.18", ["a", "share"], True), ("$9.18", ["per", "share,"], True),
+    ("$4.10", ["per-share"], True), ("$50", ["billion-dollar"], True), ("“$50", ["billion”"], True),
+    ("$50", ["shares"], False), ("1,000,000", ["shares"], False), ("$9.18", ["a", "day"], False),
+    ("$9.18", ["a"], False), ("10%", ["of"], False), ("$50,", ["billion"], False),      # a clause mark ends it
+    ("$50.", ["Billion"], False), ("fifty", ["billion"], False), ("2025.", ["Revenue"], False),
+    ("$", ["billion"], False), ("50", [], False),
+])
+def test_what_a_figure_is_read_with(figure, following, binds):
+    word = {"w": figure, "s": 0.0, "e": 0.2, "line": 0}
+    assert cap._binds_forward(word, [{"w": f, "s": 0.0, "e": 0.2, "line": 0} for f in following]) is binds
+
+
+def test_a_figure_alone_before_its_scale_word_is_kept_whole_even_past_the_safe_width():
+    """The width edge: when even "<figure> <scale word>" is wider than the frame, the two stay ONE phrase
+    (shrunk horizontally, like one long word) — never "$12.4" on its own; the word before it may be left as a
+    phrase of one."""
+    wide = {"$12.4", "billion"}
+
+    def measure(text: str) -> float:                    # any phrase holding both words overflows
+        return 2000.0 if wide <= set(text.split()) else 100.0 * len(text.split())
+
+    assert _groups("Revenue was $12.4 billion today.", measure) == ["Revenue was", "$12.4 billion", "today."]
+    assert _groups("$12.4 billion today.", measure) == ["$12.4 billion", "today."]
+    evs = cap.events(_timed("$12.4 billion today."), measure)
+    assert "\\fscx" in evs[0].text and "$12.4" in evs[0].text and "billion" in evs[0].text
+
+
+def test_the_figure_carry_takes_the_function_word_before_it_but_keeps_the_two_word_floor():
+    """"…revenue of | $716.9 billion": the figure is carried, and a function word before it only while the
+    phrase it leaves keeps two words (the drop-1 rule); a figure no scale word follows splits as before."""
+    def at(n):                                           # overflow at the n-th word, whatever it is
+        return lambda text: 1000.0 if len(text.split()) >= n else 10.0
+
+    assert _groups("Amazon reported revenue of $716.9 billion", at(6)) == [
+        "Amazon reported revenue", "of $716.9 billion"]
+    assert _groups("Revenue of $716.9 billion", at(4)) == ["Revenue of", "$716.9 billion"]
+    assert _groups("They bought 1,000,000 shares in total", at(4)) == ["They bought 1,000,000", "shares in total"]
+
+
+def test_a_figure_ending_a_narrated_line_is_never_carried_toward_the_next_line():
+    """Phrases never cross a narrated line, so the words that make a figure's pair are looked for on ITS line
+    only: "a" ending line 0 does not pair with "share" opening line 1 (carrying "$9.18" could not reunite
+    them anyway — it would only reshuffle line 0)."""
+    def measure(text: str) -> float:                    # "$9.18" and "a" together overflow
+        return 2000.0 if {"$9.18", "a"} <= set(text.split()) else 10.0
+
+    words = _timed("It costs $9.18 a") + [dict(w, s=w["s"] + 2.0, e=w["e"] + 2.0) for w in _timed("share today.", 1)]
+    got = [" ".join(w["w"] for w in g) for g in cap.phrases(words, measure)]
+    assert got == ["It costs $9.18", "a", "share today."], got
 
 
 def test_quantized_events_never_overlap_or_collapse():

@@ -24,8 +24,10 @@ import pytest
 
 from test_iap_entitlement import (
     _ANCHOR, _MAX, _PRO, _USER, FakeSupabase, _Racy, _jws, _ms, _row_of, _service, _txn,
+    service_clock,  # noqa: F401  (a fixture)
 )
 
+from app.config import settings
 from app.services import iap_service as svc
 
 
@@ -1700,3 +1702,663 @@ def test_a_failed_balance_read_on_a_reversal_is_its_own_line_not_d6(caplog):
     assert _d6_lines(caplog) == []
     assert any("could not tell whether another paid period is in force" in r.getMessage()
                for r in caplog.records)
+
+
+# ── IAP audit, 2026-10-17 (phase 1): the composed code's own high findings ───────────────────
+#
+# A read-only audit of how five sessions' changes compose (.claude/session-state/9edb4eca-…-iap-
+# audit.md) found these against the live 56dcb662. Each test is that audit's reproduction, turned
+# around to assert the fixed outcome; the legacy twin runs where the shape exists before 198.
+
+# F03 + F04 — the superseded pre-upgrade renewal. Pro P1 ends E1; Apple's EARLY renewal P2 (Pro,
+# ends E2) is signed ~24 h before E1; the user upgrades to Max inside that overlap, so Max ends a
+# little BEFORE E2. Apple refunds P2 pro rata at the upgrade, yet its saved JWS and its DID_RENEW
+# retries still read "active", later than Max's end.
+
+_F03_OTID = "txn-p1"
+_F03_S1 = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
+_F03_E1 = datetime(2026, 12, 1, 12, 0, tzinfo=timezone.utc)
+_F03_P2_SIGNED = _F03_E1 - timedelta(hours=24)
+_F03_E2 = datetime(2027, 1, 1, 12, 0, tzinfo=timezone.utc)
+_F03_U = _F03_E1 - timedelta(hours=12)
+_F03_E_MAX = datetime(2027, 1, 1, 0, 0, tzinfo=timezone.utc)
+_F03_GRACE_SIGNED = _F03_E_MAX + timedelta(minutes=5)
+
+
+def _f03_payload(product, txn_id, expires, signed, **extra):
+    return {"transactionId": txn_id, "originalTransactionId": _F03_OTID, "productId": product,
+            "bundleId": settings.IAP_BUNDLE_ID, "environment": "Production",
+            "expiresDate": _ms(expires), "signedDate": _ms(signed), **extra}
+
+
+def _f03_row(sb) -> dict:
+    rows = [r for r in sb.db["subscriptions"] if r.get("original_transaction_id") == _F03_OTID]
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def _f03_max_in_grace_after_an_overlap_upgrade(sb, move, monkeypatch):
+    """P1 bought → early renewal P2 applied (and saved by the app) → Max bought inside the
+    overlap → 5000 spent → Max's renewal fails into billing grace (balance HELD). P2 carries NO
+    `transactionReason`, so only the grace-recovery guard (F03) can refuse its relay."""
+    monkeypatch.setattr(settings, "IAP_BILLING_GRACE_DAYS", 28)
+    s = _service(sb)
+    move(sb, _F03_S1)
+    s.apply_verified_transaction(_USER, _f03_payload(_PRO, "txn-p1", _F03_E1, _F03_S1))
+
+    move(sb, _F03_P2_SIGNED + timedelta(minutes=1))
+    p2 = _f03_payload(_PRO, "txn-p2", _F03_E2, _F03_P2_SIGNED)
+    s.apply_notification({"notificationType": "DID_RENEW", "signedDate": _ms(_F03_P2_SIGNED)},
+                         dict(p2))
+    s.apply_verified_transaction(_USER, dict(p2))
+    assert _f03_row(sb)["tier"] == "pro"
+
+    move(sb, _F03_U)
+    m1 = _f03_payload(_MAX, "txn-m1", _F03_E_MAX, _F03_U)
+    s.apply_verified_transaction(_USER, dict(m1))
+    s.apply_notification({"notificationType": "DID_CHANGE_RENEWAL_PREF", "subtype": "UPGRADE",
+                          "signedDate": _ms(_F03_U + timedelta(seconds=5))}, dict(m1))
+    assert _f03_row(sb)["tier"] == "premium"
+    assert (_F03_OTID, _F03_E2) not in sb.periods, "the superseded early renewal was never granted"
+    sb.credits["used"] = 5000
+
+    move(sb, _F03_E_MAX + timedelta(hours=1))
+    s.apply_notification({"notificationType": "DID_FAIL_TO_RENEW", "subtype": "GRACE_PERIOD",
+                          "signedDate": _ms(_F03_GRACE_SIGNED)},
+                         {**m1, "signedDate": _ms(_F03_GRACE_SIGNED)})
+    row = _f03_row(sb)
+    assert (row["status"], row["tier"], sb._tier()) == ("grace_period", "premium", "premium")
+    assert sb.model.paid_period["end"] == _F03_E_MAX, "the Max period is HELD"
+    return s, p2
+
+
+@pytest.mark.parametrize("schema", ["lineage", "legacy"])
+def test_f03_a_saved_superseded_renewal_cannot_replace_a_max_row_in_grace(
+        schema, service_clock, monkeypatch):
+    """F03: the grace-recovery bypass (lineage only) compared only the period end — not the tier.
+    The saved JWS of the superseded Pro renewal skipped the signedDate check, replaced the Max row
+    in grace, wrote off the held Max balance and started a fresh Pro allocation for a renewal Apple
+    had refunded at the upgrade. Rule D's lower-tier guard now applies to the bypass too."""
+    sb = FakeSupabase(schema=schema)
+    assert sb.lineage is (schema == "lineage")
+    s, p2 = _f03_max_in_grace_after_an_overlap_upgrade(sb, service_clock, monkeypatch)
+    held = sb.remaining
+    assert held == 180
+
+    service_clock(sb, _F03_E_MAX + timedelta(hours=6))
+    prior = dict(_f03_row(sb))
+    assert svc._grace_recovery_reason(
+        prior, status="active", payload_revoked=False, tier="pro", environment="Production",
+        original_transaction_id=_F03_OTID, period_end=_F03_E2) is None
+    out = s.apply_verified_transaction(_USER, dict(p2))
+
+    assert out["refused_by"] == "stale"
+    row = _f03_row(sb)
+    assert (row["tier"], row["status"]) == ("premium", "grace_period") and sb._tier() == "premium"
+    assert sb.remaining == held and sb.model.paid_period["end"] == _F03_E_MAX
+    assert (_F03_OTID, _F03_E2) not in sb.periods
+
+
+def _f04_payloads(now, e1, e2, em, *, reason="RENEWAL"):
+    extra = {"transactionReason": reason} if reason else {}
+    p1 = _jws(product=_PRO, txn_id="txn-t1", original="txn-g",
+              signed_at=now - timedelta(days=29, hours=4), expires_in_days=None,
+              expiresDate=_ms(e1), appAccountToken=_USER)
+    p2 = _txn(product=_PRO, txn_id="txn-t2", expires_in_days=None, expiresDate=_ms(e2),
+              originalTransactionId="txn-g", signedDate=_ms(now - timedelta(hours=3)),
+              appAccountToken=_USER, **extra)
+    m = _jws(product=_MAX, txn_id="txn-t3", original="txn-g", signed_at=now - timedelta(hours=1),
+             expires_in_days=None, expiresDate=_ms(em), appAccountToken=_USER,
+             transactionReason="PURCHASE")
+    return p1, p2, m
+
+
+def _f04_history(schema, now, *, reason="RENEWAL", heal_before_refund=False):
+    """P1 bought; P2's DID_RENEW first delivery fails; the user upgrades to Max inside the overlap
+    (the app's verify lands, the UPGRADE webhook fails); Apple's retry of DID_RENEW(P2) lands; then
+    Apple REFUNDs the Max. Returns (sb, the P2 retry's result, the refund's result)."""
+    e1, e2 = _ANCHOR + timedelta(hours=20), _ANCHOR + timedelta(days=31)
+    em = e2 - timedelta(hours=4, minutes=30)
+    sb = FakeSupabase(schema=schema)
+    if schema == "lineage":
+        _register_began(sb, now - timedelta(days=40))
+    s = _service(sb)
+    p1, p2, m = _f04_payloads(now, e1, e2, em, reason=reason)
+    s.apply_verified_transaction(_USER, dict(p1))
+    s.apply_notification({"notificationType": "SUBSCRIBED", "signedDate": _ms(
+        now - timedelta(days=29, hours=4) + timedelta(minutes=1)), "data": {"status": 1}}, dict(p1))
+    sb.credits["used"] = 200
+    s.apply_verified_transaction(_USER, dict(m))
+    assert _row_of(sb, "txn-g")["tier"] == "premium" and sb._tier() == "premium"
+
+    results = []
+    real = s.apply_transaction
+    s.apply_transaction = lambda *a, **k: results.append(real(*a, **k)) or results[-1]
+    s.apply_notification({"notificationType": "DID_RENEW", "signedDate": _ms(
+        now - timedelta(hours=3)), "data": {"status": 1}}, dict(p2))
+    retry = results[-1]
+    if heal_before_refund:
+        s.apply_notification({"notificationType": "DID_CHANGE_RENEWAL_PREF", "subtype": "UPGRADE",
+                              "signedDate": _ms(now - timedelta(hours=1))}, dict(m))
+    s.apply_notification({"notificationType": "REFUND", "signedDate": _ms(now),
+                          "data": {"status": 5}},
+                         dict(m, revocationDate=_ms(now), signedDate=_ms(now)))
+    return sb, retry, results[-1], (e2, em)
+
+
+def test_f04_the_refund_of_a_recorded_overlap_upgrade_applies(caplog):
+    """F04: Apple's retry of the superseded Pro renewal (signed before the upgrade, a later end)
+    overwrote the recorded Max; Rule E then refused Apple's REFUND of the Max as an older period,
+    and its keyed clawback started the never-granted Pro key: a refunded user kept Pro and got a
+    fresh 1200 allocation. A system RENEWAL of a lower tier ending inside the overlap after the
+    higher tier's end is now refused as superseded, so the Max stays on the row and its refund
+    is about the period in force."""
+    now = datetime.now(timezone.utc)
+    with caplog.at_level(logging.WARNING, logger="app.services.iap_service"):
+        sb, retry, refund, (e2, em) = _f04_history("lineage", now)
+
+    assert retry["refused_by"] == "superseded_renewal"
+    assert any("superseded" in r.getMessage() and "txn-t2" in r.getMessage()
+               for r in caplog.records)
+    assert refund["was_stale"] is False
+    row = _row_of(sb, "txn-g")
+    assert (row["tier"], row["status"]) == ("premium", "revoked")
+    assert svc._parse_iso(row["current_period_end"]) == em
+    assert sb._tier() == "free"
+    assert sb.model.paid_period is None and sb.remaining == 50
+    assert ("txn-g", e2) not in sb.periods, "the superseded renewal's period never started"
+
+
+def test_f04_legacy_twin_and_the_healed_control_end_free():
+    now = datetime.now(timezone.utc)
+    sb, _, refund, _ = _f04_history("legacy", now)
+    assert refund["was_stale"] is False and _row_of(sb, "txn-g")["status"] == "revoked"
+    assert sb._tier() == "free" and sb.model.paid_period is None and sb.remaining == 50
+
+    sb, _, refund, _ = _f04_history("lineage", now, heal_before_refund=True)
+    assert refund["was_stale"] is False and _row_of(sb, "txn-g")["status"] == "revoked"
+    assert sb._tier() == "free" and sb.model.paid_period is None and sb.remaining == 50
+
+
+def test_f04_a_renewal_without_a_transaction_reason_keeps_the_old_ordering():
+    """No `transactionReason` (a payload this cannot classify) → no refusal: exactly as before,
+    so the pre-existing overwrite still happens (SYSTEM_DESIGN_GUIDELINES §9b.12 known gaps)."""
+    now = datetime.now(timezone.utc)
+    sb, retry, _, _ = _f04_history("lineage", now, reason=None)
+    assert retry.get("refused_by") is None
+
+
+def test_the_superseded_renewal_edges():
+    """Pure edges of `_superseded_renewal_reason`: only Apple's own RENEWAL of a LOWER tier of the
+    same lineage, ending inside the overlap bound after an entitling higher-tier row, Production."""
+    end = datetime(2026, 12, 1, 0, 0, tzinfo=timezone.utc)
+    row = {"original_transaction_id": "otid", "status": "active", "tier": "premium",
+           "current_period_end": end.isoformat()}
+
+    def reason(prior=row, *, status="active", revoked=False, tier="pro", env="Production",
+               otid="otid", period_end=end + timedelta(hours=12), why="RENEWAL"):
+        return svc._superseded_renewal_reason(
+            prior, status=status, payload_revoked=revoked, tier=tier, environment=env,
+            original_transaction_id=otid, period_end=period_end, transaction_reason=why)
+
+    assert reason() is not None and end.isoformat() in reason()
+    for status in ("grace_period", "billing_retry"):
+        assert reason(prior={**row, "status": status}) is not None, status
+    for status in ("expired", "revoked", "", None):
+        assert reason(prior={**row, "status": status}) is None, status
+    assert reason(status="expired") is None and reason(status="revoked") is None
+    assert reason(revoked=True) is None
+    # Apple: an upgrade (and any customer purchase) is PURCHASE; no reason → not classified.
+    for why in ("PURCHASE", "", None, "renewal "):
+        assert reason(why=why) is None, why
+    assert reason(why="renewal") is not None, "Apple's enum, compared case-insensitively"
+    assert reason(tier="premium") is None and reason(tier="free") is not None
+    assert reason(prior={**row, "tier": "pro"}) is None, "same tier"
+    assert reason(env="Sandbox") is None, "a Sandbox month lasts minutes: no overlap bound"
+    assert reason(otid="another") is None and reason(otid="") is None
+    assert reason(prior=None) is None and reason(period_end=None) is None
+    # A downgrade renews on the renewal date: its period ends a whole period after the stored one.
+    assert reason(period_end=end + timedelta(days=7)) is not None
+    assert reason(period_end=end + timedelta(days=7, seconds=1)) is None
+    assert reason(period_end=end - timedelta(seconds=59)) is not None, "same period, drift"
+    assert reason(period_end=end - timedelta(seconds=60)) is None, "an OLDER period: R1's business"
+    assert reason(prior={**row, "current_period_end": "junk"}) is None
+
+
+def test_a_superseded_renewal_retry_cannot_overwrite_a_recorded_upgrade():
+    """The RENEWAL twin of `test_a_never_refunded_upgrade_overwritten_by_a_stale_renewal_still_
+    heals`: the overwrite that test sets up is now refused, so there is nothing to heal."""
+    now = datetime.now(timezone.utc)
+    sb = _lineage()
+    s, _ = _pro_early_renewal_then_upgraded(sb, now)
+    out = _notify(s, "DID_RENEW", _txn(product=_PRO, txn_id="txn-t2", expires_in_days=31,
+                                       originalTransactionId="txn-g",
+                                       signedDate=_ms(now - timedelta(hours=3)),
+                                       transactionReason="RENEWAL"),
+                  at=now - timedelta(hours=3))
+    assert out[0] == "applied:DID_RENEW"
+    assert _row_of(sb, "txn-g")["tier"] == "premium" and sb._tier() == "premium"
+
+
+# F08 — Rule E's refund evidence from BEFORE 198. Max M1 (lineage g) refunded while 198 was not
+# applied (production until 2026-10-16): 196 clawed its credit period back, but no register row
+# records the refund. The user resubscribed to Pro on the same lineage, then 198 was applied.
+
+_F08_PRO_DAYS = 30
+
+
+def _f08_refunded_max_then_pro(now, *, max_days, apply_198):
+    """`apply_198="after"`: the refund and the resubscribe happen in legacy mode, then the owner
+    applies 198 (a fresh service). `"before"`: the control, 198 applied from the start."""
+    sb = FakeSupabase(schema="lineage" if apply_198 == "before" else "legacy")
+    s = _service(sb)
+    if apply_198 == "before":
+        _register_began(sb, now - timedelta(days=5))
+    s.apply_verified_transaction(_USER, _jws(txn_id="txn-m1", original="txn-g",
+                                             signed_at=now - timedelta(days=4),
+                                             expires_in_days=max_days))
+    assert _period(sb, "txn-g", max_days) is not None
+    sb.credits["used"] = 200
+    refunded = now - timedelta(days=3)
+    _notify(s, "REFUND", _jws(txn_id="txn-m1", original="txn-g", signed_at=refunded,
+                              expires_in_days=max_days, revocationDate=_ms(refunded)), at=refunded)
+    assert sb._tier() == "free" and _period(sb, "txn-g", max_days)["revoked_at"] is not None
+    s.apply_verified_transaction(_USER, _jws(product=_PRO, txn_id="txn-p1", original="txn-g",
+                                             signed_at=now - timedelta(days=2),
+                                             expires_in_days=_F08_PRO_DAYS))
+    assert sb._tier() == "pro"
+    if apply_198 == "after":
+        assert sb.register == {}, "no register before 198: nothing recorded the refund"
+        sb.schema = "lineage"
+        s = _service(sb)
+        _register_began(sb, now - timedelta(days=1))
+    return sb, s
+
+
+@pytest.mark.parametrize("max_days", [25, 10], ids=["max-ends-5d-before-pro", "max-ends-20d-before-pro"])
+@pytest.mark.parametrize("apply_198", ["after", "before"], ids=["refund-before-198", "refund-after-198"])
+def test_f08_a_reversed_max_refund_never_overwrites_the_pro_resubscription(
+        apply_198, max_days, caplog, service_clock):
+    """F08: Rule E saw only refunds recorded after 198. The reversal of a Max refunded before 198
+    found no refund evidence, so the higher tier counted as an unrecorded upgrade and overwrote
+    the paid Pro row — and the account fell to Free when the Max period ended, with Pro paid for
+    weeks more. 196's clawback mark on the Max's own credit period now counts as that evidence."""
+    now = datetime.now(timezone.utc)
+    sb, s = _f08_refunded_max_then_pro(now, max_days=max_days, apply_198=apply_198)
+    pro_period = sb.model.paid_period
+    with caplog.at_level(logging.WARNING, logger="app.services.iap_service"):
+        outcome, user = _notify(s, "REFUND_REVERSED", _jws(
+            txn_id="txn-m1", original="txn-g", signed_at=now, expires_in_days=max_days), at=now)
+
+    assert (outcome, user) == ("applied:REFUND_REVERSED", _USER)
+    row = _row_of(sb, "txn-g")
+    assert (row["tier"], row["status"]) == ("pro", "active")
+    assert svc._parse_iso(row["current_period_end"]) == _ANCHOR + timedelta(days=_F08_PRO_DAYS)
+    msgs = [r.getMessage() for r in caplog.records]
+    assert len([m for m in msgs if "REFUND_REVERSED tier NOT reinstated" in m]) == 1
+    assert len([m for m in msgs if "IGNORING a delivery about an OLDER period" in m]) == 1
+    assert sb.model.paid_period is pro_period
+    # D2 (owner, 2026-10-17, "No, one allocation"): the Pro resubscription keeps the allocation;
+    # the Max credits are NOT restored by hand beside it — a WARNING, never the D6 ERROR.
+    assert _d6_lines(caplog) == []
+    assert len([m for m in msgs if "one allocation (D2)" in m]) == 1
+
+    service_clock(sb, _ANCHOR + timedelta(days=max_days + 1))
+    assert s.reconcile_user_tier(_USER) == "pro" and sb._tier() == "pro"
+
+
+@pytest.mark.parametrize("max_days", [25, 10], ids=["max-ends-5d-before-pro", "max-ends-20d-before-pro"])
+@pytest.mark.parametrize("apply_198", ["after", "before"], ids=["refund-before-198", "refund-after-198"])
+def test_f08_a_relay_of_the_reversed_max_never_overwrites_the_pro_resubscription(
+        apply_198, max_days, service_clock):
+    """The client-relay variant: the app relays the Max's post-reversal JWS (no revocation, signed
+    after the clawback). With no reversal on record it logs no tier ERROR — Apple's own
+    REFUND_REVERSED does — but it must not overwrite the paid Pro either."""
+    now = datetime.now(timezone.utc)
+    sb, s = _f08_refunded_max_then_pro(now, max_days=max_days, apply_198=apply_198)
+    out = s.apply_verified_transaction(_USER, _jws(txn_id="txn-m1", original="txn-g",
+                                                   signed_at=now + timedelta(minutes=5),
+                                                   expires_in_days=max_days))
+    assert out["was_stale"] is True and out["refused_by"] == "older_period"
+    assert _row_of(sb, "txn-g")["tier"] == "pro"
+    service_clock(sb, _ANCHOR + timedelta(days=max_days + 1))
+    assert s.reconcile_user_tier(_USER) == "pro"
+
+
+def test_f08_a_current_upgrade_never_pays_the_clawback_read():
+    """Rule E's extra evidence is read only for a higher tier ending BEFORE the stored period (an
+    older one): an upgrade bought now, ending later, adds no read beyond Rule A′'s own."""
+    now = datetime.now(timezone.utc)
+    sb = _lineage()
+    _register_began(sb, now - timedelta(days=5))
+    s = _service(sb)
+    s.apply_verified_transaction(_USER, _jws(product=_PRO, txn_id="txn-p1", original="txn-g",
+                                             signed_at=now - timedelta(days=2), expires_in_days=20))
+    reads: list = []
+    table = sb.table
+
+    def counting(name):
+        if name == "subscription_credit_periods":
+            reads.append(name)
+        return table(name)
+
+    sb.table = counting
+    out = s.apply_verified_transaction(_USER, _jws(txn_id="txn-m1", original="txn-g",
+                                                   signed_at=now, expires_in_days=30))
+    assert out["was_stale"] is False and _row_of(sb, "txn-g")["tier"] == "premium"
+    assert len(reads) == 1, "Rule A′'s read only"
+
+
+# F05 + F12 — `_warn_unreinstated_reversal`, the D6 check on a reversed refund.
+
+class _FlakyPeriods(FakeSupabase):
+    """The next `fail_next_period_reads` reads of subscription_credit_periods fail once each (a
+    PostgREST 520 or timeout), unlike `sb._fail`, which fails every one."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.fail_next_period_reads = 0
+
+    def table(self, name):
+        q = super().table(name)
+        if name == "subscription_credit_periods":
+            owner, inner = self, q.execute
+
+            def execute():
+                if owner.fail_next_period_reads > 0:
+                    owner.fail_next_period_reads -= 1
+                    raise RuntimeError("520 transient: upstream connect error")
+                return inner()
+
+            q.execute = execute
+        return q
+
+
+def _d6_period_refunded_after_its_early_renewal(sb, now):
+    s = _early_renewed_max(sb, now)
+    _notify(s, "REFUND", _jws(txn_id="txn-1", original="txn-1", signed_at=now, expires_in_days=1,
+                              revocationDate=_ms(now)), at=now)
+    assert _period(sb, "txn-1", 1)["revoked_remaining"] == 3700
+    assert sb.model.paid_period["end"] == _ANCHOR + timedelta(days=31)
+    return s
+
+
+def test_f05_a_failed_read_in_the_d6_check_answers_503_and_the_redelivery_flags_it(caplog):
+    """F05: the D6 check swallowed a failed credit-period read and the REFUND_REVERSED answered
+    200, so Apple never redelivered it and the hand restore never happened — the only trace was a
+    generic lookup line with no user. Now it is its own ERROR and a 503."""
+    now = datetime.now(timezone.utc)
+    sb = _FlakyPeriods(schema="lineage")
+    s = _d6_period_refunded_after_its_early_renewal(sb, now)
+    reversal = _jws(txn_id="txn-1", original="txn-1", signed_at=now + timedelta(hours=1),
+                    expires_in_days=1)
+    sb.fail_next_period_reads = 1
+    with caplog.at_level(logging.INFO, logger="app.services.iap_service"):
+        with pytest.raises(svc.IAPError):
+            _notify(s, "REFUND_REVERSED", dict(reversal), at=now + timedelta(hours=1))
+    assert sb.fail_next_period_reads == 0
+    msgs = [(r.levelno, r.getMessage()) for r in caplog.records]
+    line = [m for lvl, m in msgs if lvl == logging.ERROR and "check could not run" in m]
+    assert len(line) == 1 and f"user={_USER}" in line[0] and "txn=txn-1" in line[0]
+    assert any("failed to apply" in m for _, m in msgs)
+    assert _d6_lines(caplog) == []
+    assert _period(sb, "txn-1", 1)["revoked_at"] is not None and _ledger(sb, "plan_reinstated") == []
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="app.services.iap_service"):
+        assert _notify(s, "REFUND_REVERSED", dict(reversal), at=now + timedelta(hours=1)) == (
+            "applied:REFUND_REVERSED", _USER)
+    assert len(_d6_lines(caplog)) == 1
+
+
+def test_f05_a_failed_read_on_a_client_relay_is_a_warning_not_a_failed_restore(caplog):
+    """A Restore relaying the transaction after its refund is reversal evidence too; a failed
+    diagnostic read there must not fail the user's Restore. Apple's REFUND_REVERSED runs it."""
+    now = datetime.now(timezone.utc)
+    sb = _FlakyPeriods(schema="lineage")
+    s = _d6_period_refunded_after_its_early_renewal(sb, now)
+    sb.fail_next_period_reads = 1
+    with caplog.at_level(logging.INFO, logger="app.services.iap_service"):
+        out = s.apply_verified_transaction(_USER, _jws(
+            txn_id="txn-1", original="txn-1", signed_at=now + timedelta(hours=1), expires_in_days=1))
+    assert out["refused_by"] == "older_period" and sb.fail_next_period_reads == 0
+    msgs = [(r.levelno, r.getMessage()) for r in caplog.records]
+    assert any(lvl == logging.WARNING and "check skipped on a client relay" in m
+               and f"user={_USER}" in m for lvl, m in msgs)
+    assert not [m for lvl, m in msgs if "check could not run" in m]
+    assert _d6_lines(caplog) == []
+
+
+def test_d2_a_downgrade_renewal_started_early_keeps_the_d6_error(caplog):
+    """D2's WARNING is for a RESUBSCRIPTION that overlaps the reversed period. A Max period whose
+    early renewal was a downgrade to Pro is D6's own case — the clawback only started the
+    lineage's next period early — so it keeps the 'restore by hand' ERROR."""
+    now = datetime.now(timezone.utc)
+    sb = _lineage()
+    s = _service(sb)
+    s.apply_verified_transaction(_USER, _jws(txn_id="txn-1", signed_at=now - timedelta(days=29),
+                                             expires_in_days=1))
+    sb.credits["used"] = 300
+    _notify(s, "DID_RENEW", _txn(product=_PRO, txn_id="txn-2", expires_in_days=31,
+                                 originalTransactionId="txn-1"), at=now - timedelta(hours=2))
+    _notify(s, "REFUND", _jws(txn_id="txn-1", original="txn-1", signed_at=now, expires_in_days=1,
+                              revocationDate=_ms(now)), at=now)
+    with caplog.at_level(logging.WARNING, logger="app.services.iap_service"):
+        _notify(s, "REFUND_REVERSED", _jws(txn_id="txn-1", original="txn-1",
+                                           signed_at=now + timedelta(hours=1), expires_in_days=1),
+                at=now + timedelta(hours=1))
+    msgs = [r.getMessage() for r in caplog.records]
+    assert len([m for m in msgs if "REFUND_REVERSED tier NOT reinstated" in m]) == 1
+    assert len(_d6_lines(caplog)) == 1
+    assert not [m for m in msgs if "one allocation (D2)" in m]
+
+
+# F12: two Production lineages on one account (D2). B is Pro on Apple ID 2 and renews on `b_day`;
+# A is Max on Apple ID 1 and renews on the 20th. A's Oct 20 → Nov 20 period P_A is refunded on
+# Oct 25 (B's held-back period P_B starts) and the refund is reversed on Oct 27.
+
+_F12_OTA, _F12_OTB = "otA", "otB"
+
+
+def _f12_at(m, d, h=12):
+    return datetime(2026, m, d, h, 0, tzinfo=timezone.utc)
+
+
+def _f12_sub(product, otid, txn, *, purchased, signed, expires, **extra):
+    return {"transactionId": txn, "originalTransactionId": otid, "productId": product,
+            "bundleId": settings.IAP_BUNDLE_ID, "environment": "Production",
+            "type": "Auto-Renewable Subscription", "purchaseDate": _ms(purchased),
+            "signedDate": _ms(signed), "expiresDate": _ms(expires), "appAccountToken": _USER,
+            **extra}
+
+
+def _f12_note(ntype, signed, *, status):
+    return {"notificationType": ntype, "subtype": "", "signedDate": _ms(signed),
+            "data": {"status": status}}
+
+
+def _f12_two_lineages_then_reversed(b_day, move, caplog):
+    sb = _lineage()
+    s = _service(sb)
+    _register_began(sb, _f12_at(8, 1))
+    e_a1, e_a2 = _f12_at(10, 20), _f12_at(11, 20)
+    if b_day < 20:
+        b_ends, b_buy = [_f12_at(10, b_day), _f12_at(11, b_day), _f12_at(12, b_day)], _f12_at(9, b_day)
+    else:
+        b_ends = [_f12_at(9, b_day), _f12_at(10, b_day), _f12_at(11, b_day), _f12_at(12, b_day)]
+        b_buy = _f12_at(8, b_day)
+    plus = timedelta(minutes=1)
+
+    move(sb, b_buy)
+    s.apply_verified_transaction(_USER, _f12_sub(_PRO, _F12_OTB, "b-1", purchased=b_buy,
+                                                 signed=b_buy, expires=b_ends[0]))
+    move(sb, _f12_at(9, 20))
+    s.apply_verified_transaction(_USER, _f12_sub(_MAX, _F12_OTA, "a-1", purchased=_f12_at(9, 20),
+                                                 signed=_f12_at(9, 20), expires=e_a1))
+    events = sorted([(b_ends[i], "B", i) for i in range(len(b_ends) - 1)
+                     if b_ends[i] < _f12_at(10, 25)] + [(e_a1, "A", 1)])
+    for t, who, i in events:
+        move(sb, t + plus)
+        if who == "B":
+            s.apply_notification(_f12_note("DID_RENEW", t + plus, status=1), _f12_sub(
+                _PRO, _F12_OTB, f"b-{i + 2}", purchased=b_ends[i], signed=t + plus,
+                expires=b_ends[i + 1]))
+        else:
+            s.apply_notification(_f12_note("DID_RENEW", t + plus, status=1), _f12_sub(
+                _MAX, _F12_OTA, "a-2", purchased=e_a1, signed=t + plus, expires=e_a2))
+    b_held = next(e for e in b_ends if e > _f12_at(10, 25))
+    move(sb, _f12_at(10, 23))
+    sb.rpc("ensure_credit_period", {"p_user_id": _USER}).execute()
+    assert sb.model.spend_credits(1000, reason="report_charge", ref_id="r") == 3000
+
+    move(sb, _f12_at(10, 25))
+    s.apply_notification(_f12_note("REFUND", _f12_at(10, 25), status=5), _f12_sub(
+        _MAX, _F12_OTA, "a-2", purchased=e_a1, signed=_f12_at(10, 25), expires=e_a2,
+        revocationDate=_ms(_f12_at(10, 25)), revocationReason=0))
+    assert sb.model.paid_period["otid"] == _F12_OTB, "B's held-back period starts at the refund"
+
+    move(sb, _f12_at(10, 27))
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="app.services.iap_service"):
+        s.apply_notification(_f12_note("REFUND_REVERSED", _f12_at(10, 27), status=1), _f12_sub(
+            _MAX, _F12_OTA, "a-2", purchased=e_a1, signed=_f12_at(10, 27), expires=e_a2))
+    logged = [(r.levelno, r.getMessage()) for r in caplog.records]
+    assert _row_of(sb, _F12_OTA)["status"] == "active" and sb._tier() == "premium"
+    return sb, s, logged, b_held, e_a2
+
+
+def test_f12_another_lineages_period_ending_first_is_reinstated_by_itself(service_clock, caplog):
+    """F12: the D6 ERROR fired although 198 reinstates P_A by itself once P_B ends — and a hand
+    correction made per the runbook was then granted a second time. A WARNING now, naming when."""
+    sb, s, logged, b_held, e_a2 = _f12_two_lineages_then_reversed(5, service_clock, caplog)
+    assert not [m for lvl, m in logged if "credits NOT reinstated" in m]
+    auto = [m for lvl, m in logged if lvl == logging.WARNING and "reinstates it by itself" in m]
+    assert len(auto) == 1 and "do not correct by hand" in auto[0] and "txn=a-2" in auto[0]
+    assert _ledger(sb, "plan_reinstated") == []
+
+    service_clock(sb, b_held + timedelta(minutes=1))
+    s.apply_notification(_f12_note("DID_RENEW", b_held + timedelta(minutes=1), status=1), _f12_sub(
+        _PRO, _F12_OTB, "b-next", purchased=b_held, signed=b_held + timedelta(minutes=1),
+        expires=b_held + timedelta(days=30)))
+    sb.rpc("ensure_credit_period", {"p_user_id": _USER}).execute()
+    assert [(r["delta"], r["ref_id"]) for r in _ledger(sb, "plan_reinstated")] == [(3000, _F12_OTA)]
+    assert (sb.model.paid_period["otid"], sb.model.paid_period["end"]) == (_F12_OTA, e_a2)
+
+
+def test_f12_an_in_force_period_that_outlasts_the_reversed_one_keeps_the_d6_error(
+        service_clock, caplog):
+    """The control: B's period ends after A's, so 198 never reinstates P_A — the ERROR is true,
+    and it now names the period in force."""
+    sb, s, logged, b_held, e_a2 = _f12_two_lineages_then_reversed(22, service_clock, caplog)
+    d6 = [m for lvl, m in logged if lvl == logging.ERROR and "credits NOT reinstated" in m]
+    assert len(d6) == 1 and f"in force: lineage {_F12_OTB}" in d6[0]
+    assert not [m for lvl, m in logged if "reinstates it by itself" in m]
+
+
+# F01 — the K02 window (198 applied; a client JWS signed before the register's first record).
+# Account U pays for Pro on Apple ID 1 (lineage L1) and buys Max on Apple ID 2 (lineage L2). L2's
+# SUBSCRIBED is not bound by its token while L1 entitles (review #11), and once L1 gets a
+# later-signed notification Rule A″ refuses L2's delayed verify as stale: a paid purchase applied
+# by neither path. The refusal stays (owner, 2026-10-17: "Log + docs only"); it is now an ERROR
+# a person can act on, instead of a WARNING that read like routine ordering.
+
+def _f01_pro_l1_then_198(now):
+    sb = FakeSupabase(schema="legacy")
+    s = _service(sb)
+    bought = now - timedelta(days=10)
+    l1 = _jws(product=_PRO, txn_id="L1", signed_at=bought, expires_in_days=20,
+              appAccountToken=_USER)
+    s.apply_verified_transaction(_USER, dict(l1))
+    _notify(s, "SUBSCRIBED", dict(l1), at=bought + timedelta(minutes=1))
+    sb.schema = "lineage"
+    s = _service(sb)
+    assert s._register_since() is None
+    return sb, s
+
+
+def _f01_lineages(sb):
+    return sorted(r["original_transaction_id"] for r in sb.db["subscriptions"])
+
+
+def _f01_cancel_l1(s, at):
+    _notify(s, "DID_CHANGE_RENEWAL_STATUS", _jws(product=_PRO, txn_id="L1", signed_at=at,
+                                                 expires_in_days=20, appAccountToken=_USER),
+            at=at, subtype="AUTO_RENEW_DISABLED")
+
+
+def test_f01_a_new_lineage_purchase_refused_in_the_k02_window_is_an_error(caplog):
+    now = datetime.now(timezone.utc)
+    sb, s = _f01_pro_l1_then_198(now)
+    t0 = now - timedelta(hours=3)
+    l2 = _jws(product=_MAX, txn_id="L2", signed_at=t0, expires_in_days=30, appAccountToken=_USER,
+              purchaseDate=_ms(t0))
+    sb._fail.add("subscriptions")
+    with pytest.raises(svc.IAPError):
+        s.apply_verified_transaction(_USER, dict(l2))          # the purchase's own verify: a 503
+    sb._fail.discard("subscriptions")
+    assert _notify(s, "SUBSCRIBED", dict(l2), at=t0 + timedelta(seconds=30)) == (
+        "ignored_unknown_transaction", None)
+    _f01_cancel_l1(s, now - timedelta(hours=1))
+    assert t0 < s._register_since()
+
+    with caplog.at_level(logging.WARNING, logger="app.services.iap_service"):
+        out = s.apply_verified_transaction(_USER, dict(l2))
+
+    assert out["was_stale"] is True and out["refused_by"] == "stale"      # unchanged: refused
+    assert _f01_lineages(sb) == ["L1"] and sb._tier() == "pro"
+    errors = [r.getMessage() for r in caplog.records
+              if r.levelno == logging.ERROR and "IAP PURCHASE NOT APPLIED" in r.getMessage()]
+    assert len(errors) == 1
+    for needle in (f"user={_USER}", "txn=L2", "original=L2", "lineage L1", t0.isoformat(),
+                   "App Store Connect"):
+        assert needle in errors[0], needle
+
+
+def test_f01_a_refused_relay_of_a_known_lineage_stays_a_warning(caplog):
+    """Rule A″ refusing an older JWS of a lineage the account already holds is ordinary ordering:
+    no purchase is missing, so no ERROR."""
+    now = datetime.now(timezone.utc)
+    sb, s = _f01_pro_l1_then_198(now)
+    _f01_cancel_l1(s, now - timedelta(hours=1))
+    old = _jws(product=_PRO, txn_id="L1-old", original="L1", signed_at=now - timedelta(hours=3),
+               expires_in_days=20, appAccountToken=_USER)
+    with caplog.at_level(logging.WARNING, logger="app.services.iap_service"):
+        out = s.apply_verified_transaction(_USER, old)
+    assert out["refused_by"] == "stale"
+    assert any("signed before the transaction register began" in r.getMessage()
+               for r in caplog.records)
+    assert not [r for r in caplog.records if "PURCHASE NOT APPLIED" in r.getMessage()]
+
+
+def test_the_auto_reinstatement_edges():
+    """Pure edges of `_reinstated_automatically` (F12): only when 198's winner must be the reversed
+    lineage's row, still at the reversed period, once the other lineage's period has ended."""
+    end = datetime(2026, 11, 20, 12, 0, tzinfo=timezone.utc)
+    period = {"id": 7, "user_id": _USER, "revoked_at": "2026-10-25T12:00:00+00:00"}
+    a = {"original_transaction_id": "otA", "status": "active", "tier": "premium",
+         "environment": "Production", "current_period_end": end.isoformat()}
+    b = {"original_transaction_id": "otB", "status": "active", "tier": "pro",
+         "environment": "Production", "current_period_end": "2026-11-05T12:00:00+00:00"}
+    s = _service(_lineage())
+
+    def auto(rows=None, *, comp="free", who=_USER, in_force_end=datetime(2026, 11, 5, 12, 0,
+                                                                        tzinfo=timezone.utc)):
+        s._account_rows = lambda _uid: [dict(r) for r in (rows if rows is not None else [a, b])]
+        s.comp_tier = lambda _uid: comp
+        return s._reinstated_automatically(
+            _USER, period={**period, "user_id": who}, original_txn_id="otA", period_end=end,
+            in_force_end=in_force_end)
+
+    assert auto() is True
+    assert auto([a, {**b, "tier": "premium"}]) is False, "a tie: the ORDER BY falls to the ends"
+    assert auto([a, b, {**b, "original_transaction_id": "otC", "status": "expired",
+                        "tier": "premium"}]) is False, "any other row of that tier may come back"
+    assert auto(comp="premium") is False and auto(comp="pro") is True
+    assert auto(who="someone-else") is False
+    for change in ({"status": "grace_period"}, {"environment": "Sandbox"},
+                   {"current_period_end": (end + timedelta(days=30)).isoformat()},
+                   {"current_period_end": None}):
+        assert auto([{**a, **change}, b]) is False, change
+    assert auto([b]) is False, "the reversed lineage's row is gone"
+    assert auto(in_force_end=end - timedelta(hours=24)) is True
+    assert auto(in_force_end=end - timedelta(hours=23)) is False, "inside Apple's early renewal"

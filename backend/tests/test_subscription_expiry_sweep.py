@@ -23,12 +23,17 @@ No network, no Supabase.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from app.config import settings
+from app.services import entitlements
 from app.services import iap_service as svc
+from test_iap_entitlement import FakeSupabase as _LedgerFake
+from test_iap_entitlement import _Q as _LedgerQ
+from test_iap_entitlement import service_clock  # noqa: F401  (a fixture)
 
 
 _USER = "aaaabbbb-cccc-4ddd-8eee-ffff00001111"
@@ -54,6 +59,7 @@ class _Q:
         self._eq: dict = {}
         self._in: tuple | None = None
         self._lt: tuple | None = None
+        self._gte: tuple | None = None
 
     def select(self, *_a, **_k):
         self._op = "select"; return self
@@ -74,6 +80,9 @@ class _Q:
     def lt(self, col, val):
         self._lt = (col, val); return self
 
+    def gte(self, col, val):
+        self._gte = (col, val); return self
+
     def limit(self, n):
         self._limit = n; return self
 
@@ -93,6 +102,10 @@ class _Q:
         if self._lt:
             v = r.get(self._lt[0])
             if v is None or str(v) >= self._lt[1]:
+                return False
+        if self._gte:
+            v = r.get(self._gte[0])
+            if v is None or str(v) < self._gte[1]:
                 return False
         return all(r.get(k) == v for k, v in self._eq.items())
 
@@ -450,3 +463,262 @@ def test_a_row_that_no_longer_qualified_is_not_logged_as_expired(caplog):
     with caplog.at_level(logging.WARNING, logger="app.services.iap_service"):
         _service(sb).sweep_expired_subscriptions()
     assert not any("IAP sweep: EXPIRED" in r.getMessage() for r in caplog.records)
+
+
+# ── A reconcile that fails AFTER the row expired is retried (IAP audit F02, 2026-10-17) ──────
+#
+# The sweep's UPDATE commits `expired`, then `reconcile_user_tier` hits a transient PostgREST
+# error. No later pass selects an `expired` row, so before the fix nothing ever reconciled that
+# user again: `users.tier` (the gate for paid features) kept the paid tier for good, and the ERROR
+# promised a self-heal that never came. Driven through test_iap_entitlement's FakeSupabase — both
+# schema modes, the credit model behind every rpc — with the filters the sweep sends.
+
+class _SweepQ(_LedgerQ):
+    """`_LedgerQ` plus the sweep's filters (`in_`, `lt`, `gte`, `not_.is_(col, "null")`), each
+    evaluated per row on PARSED timestamps and narrowing a SELECT and an UPDATE alike, as the SQL
+    WHERE does."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self._extra = []
+        self._neg = False
+
+    def in_(self, col, vals):
+        vals = list(vals)
+        self._extra.append(lambda r, c=col, v=vals: r.get(c) in v)
+        return self
+
+    def _cmp(self, col, val, ok):
+        def pred(r, c=col, v=val):
+            a, b = svc._parse_iso(r.get(c)), svc._parse_iso(v)
+            return a is not None and b is not None and ok(a, b)
+        self._extra.append(pred)
+        return self
+
+    def lt(self, col, val):
+        return self._cmp(col, val, lambda a, b: a < b)
+
+    def gte(self, col, val):
+        return self._cmp(col, val, lambda a, b: a >= b)
+
+    @property
+    def not_(self):
+        self._neg = True
+        return self
+
+    def is_(self, col, val):
+        assert self._neg and str(val).lower() == "null", "only .not_.is_(col, 'null') is modelled"
+        self._neg = False
+        self._extra.append(lambda r, c=col: r.get(c) is not None)
+        return self
+
+    def execute(self):
+        if self._extra and self._op in ("select", "update"):
+            real = self._db
+            narrowed = [r for r in real.setdefault(self._table, [])
+                        if all(p(r) for p in self._extra)]
+            self._db = {self._table: narrowed}      # the same row dicts: an UPDATE writes through
+            try:
+                return super().execute()
+            finally:
+                self._db = real
+        return super().execute()
+
+
+class _Sweepable(_LedgerFake):
+    """`down(table, op)` True → that call raises a transient error before executing.
+    `lose_reply` = {(table, op)}: that write COMMITS, then raises (its reply lost).
+    `after_write(table, op)` runs right after a write executed."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.down = lambda table, op: False
+        self.after_write = None
+        self.lose_reply: set = set()
+
+    def table(self, name):
+        q = _SweepQ(self.db, self.log, name, self._fail, owner=self)
+        original = q.execute
+
+        def execute():
+            if self.down(name, q._op):
+                raise RuntimeError(f"transient: {name} {q._op} -> 503 Service Unavailable")
+            out = original()
+            if q._op in ("insert", "update"):
+                if self.after_write:
+                    self.after_write(name, q._op)
+                if (name, q._op) in self.lose_reply:
+                    self.lose_reply.discard((name, q._op))
+                    raise RuntimeError(f"transient: reply to {name} {q._op} lost (it committed)")
+            return out
+
+        q.execute = execute
+        return q
+
+
+def _lapsed_max(mode, now, *, end_ago=timedelta(days=3)):
+    """A Production Max row whose EXPIRED never arrived, past the sweep's 24 h window; users.tier
+    still mirrors the paid tier it had while the period ran."""
+    end = now - end_ago
+    row = {"id": "sub-1", "user_id": _USER, "tier": "premium", "status": "active",
+           "current_period_end": end.isoformat(), "original_transaction_id": "otx-1",
+           "environment": "Production", "updated_at": (end - timedelta(days=30)).isoformat()}
+    sb = _Sweepable(subscriptions=[row], schema=mode)
+    assert sb.lineage is (mode == "lineage")
+    sb.db["users"][0]["tier"] = "premium"
+    return sb
+
+
+def _outage_after_the_expiry(sb, *, hits):
+    """The blip starts right after the sweep's subscriptions UPDATE committed; `hits(table, op)`
+    says which later calls it breaks. Returns the callable that ends it."""
+    state = {"on": False}
+
+    def after_write(table, op):
+        if table == "subscriptions" and op == "update":
+            state["on"] = True
+
+    sb.after_write = after_write
+    sb.down = lambda table, op: state["on"] and hits(table, op)
+
+    def clear():
+        state["on"] = False
+        sb.after_write = None
+        sb.down = lambda table, op: False
+    return clear
+
+
+def _ledger_service(sb):
+    s = svc.IAPService.__new__(svc.IAPService)
+    s.supabase = sb
+    return s
+
+
+def _users_writes(sb):
+    return [e for e in sb.log if e[:2] == ("update", "users")]
+
+
+_RECONCILE_FAILURE_POINTS = {
+    # reconcile_user_tier's FIRST effective_tier: winning_tier's subscriptions read ...
+    "subs_read": lambda t, op: t == "subscriptions" and op == "select",
+    # ... then comp_tier's users read ...
+    "comp_tier_read": lambda t, op: t == "users" and op == "select",
+    # ... then the users.tier mirror write.
+    "users_write": lambda t, op: t == "users" and op == "update",
+}
+
+
+@pytest.mark.parametrize("point", sorted(_RECONCILE_FAILURE_POINTS))
+@pytest.mark.parametrize("mode", ["legacy", "lineage"])
+def test_a_reconcile_that_failed_after_the_expiry_is_retried_by_the_next_pass(
+        mode, point, service_clock, caplog):
+    caplog.set_level(logging.INFO)
+    start = datetime.now(timezone.utc).replace(microsecond=0)
+    sb = _lapsed_max(mode, start)
+    service_clock(sb, start)
+    s = _ledger_service(sb)
+    clear = _outage_after_the_expiry(sb, hits=_RECONCILE_FAILURE_POINTS[point])
+
+    first = s.sweep_expired_subscriptions()
+    assert sb.db["subscriptions"][0]["status"] == "expired"           # the UPDATE committed
+    # The same outage also fails the pass's own re-check read when it breaks subscriptions reads.
+    errors = 2 if point == "subs_read" else 1
+    assert first == {"scanned": 1, "expired": 1, "users_reconciled": 0, "errors": errors}, first
+    assert sb.db["users"][0]["tier"] == "premium"
+    failed = [r.getMessage() for r in caplog.records if "reconcile FAILED" in r.getMessage()]
+    assert len(failed) == 1
+    # The old line promised "until the next sweep" — no later pass ever selected the row again.
+    assert "until the next sweep" not in failed[0]
+    assert "re-checks" in failed[0] and "last 7 days" in failed[0]
+
+    clear()                                                            # the blip is over
+    caplog.clear()
+    service_clock(sb, start + timedelta(hours=1))
+    second = s.sweep_expired_subscriptions()
+    assert second == {"scanned": 0, "expired": 0, "users_reconciled": 1, "errors": 0}, second
+    assert s.effective_tier(_USER) == "free" and sb.db["users"][0]["tier"] == "free"
+    assert not entitlements.whale_detail_unlocked(sb.db["users"][0]["tier"])
+    assert any("differed from the effective tier" in r.getMessage() for r in caplog.records)
+
+    # Settled: the next passes re-read it and write nothing.
+    writes = len(_users_writes(sb))
+    for later in (timedelta(hours=2), timedelta(days=6)):
+        service_clock(sb, start + later)
+        assert s.sweep_expired_subscriptions() == {
+            "scanned": 0, "expired": 0, "users_reconciled": 0, "errors": 0}
+    assert len(_users_writes(sb)) == writes
+
+
+@pytest.mark.parametrize("mode", ["legacy", "lineage"])
+def test_a_lost_expiry_reply_and_the_same_outage_heal_on_the_next_pass(
+        mode, service_clock, caplog):
+    """K75's case: the UPDATE commits, its reply is lost, the except arm reconciles anyway, and
+    that reconcile hits the SAME outage (every call fails until it clears)."""
+    caplog.set_level(logging.INFO)
+    start = datetime.now(timezone.utc).replace(microsecond=0)
+    sb = _lapsed_max(mode, start)
+    service_clock(sb, start)
+    s = _ledger_service(sb)
+    sb.lose_reply = {("subscriptions", "update")}
+    clear = _outage_after_the_expiry(sb, hits=lambda t, op: True)
+
+    first = s.sweep_expired_subscriptions()
+    assert sb.db["subscriptions"][0]["status"] == "expired"
+    # The lost reply, the reconcile, and the pass's own re-check read: all inside the outage.
+    assert first == {"scanned": 1, "expired": 0, "users_reconciled": 0, "errors": 3}, first
+    assert sb.db["users"][0]["tier"] == "premium"
+
+    clear()
+    service_clock(sb, start + timedelta(hours=1))
+    second = s.sweep_expired_subscriptions()
+    assert second["users_reconciled"] == 1 and second["errors"] == 0, second
+    assert sb.db["users"][0]["tier"] == "free"
+
+
+@pytest.mark.parametrize("mode", ["legacy", "lineage"])
+def test_the_recheck_leaves_a_settled_paid_tier_alone(mode, service_clock):
+    """A complimentary floor keeps the account on Pro after its Max row expired: users.tier is
+    already the effective tier, so the re-check reads it and writes nothing."""
+    start = datetime.now(timezone.utc).replace(microsecond=0)
+    sb = _lapsed_max(mode, start)
+    sb.db["users"][0]["comp_tier"] = "pro"
+    service_clock(sb, start)
+    s = _ledger_service(sb)
+    first = s.sweep_expired_subscriptions()
+    assert first["users_reconciled"] == 1 and sb.db["users"][0]["tier"] == "pro"
+
+    writes = len(_users_writes(sb))
+    service_clock(sb, start + timedelta(hours=1))
+    assert s.sweep_expired_subscriptions() == {
+        "scanned": 0, "expired": 0, "users_reconciled": 0, "errors": 0}
+    assert len(_users_writes(sb)) == writes and sb.db["users"][0]["tier"] == "pro"
+
+
+def test_the_recheck_waits_for_a_renewal_verdict_that_is_not_in_yet(service_clock):
+    """`winning_tier` drops an `active` row the moment its period ends, while the sweep gives
+    Apple 24 h for the renewal. The re-check must not demote an account early because of such a
+    row (its own reconcile would, and nothing does that today): it waits, as the sweep does."""
+    start = datetime.now(timezone.utc).replace(microsecond=0)
+    sb = _lapsed_max("lineage", start)
+    pending_end = start + timedelta(minutes=30)
+    sb.db["subscriptions"].append({
+        "id": "sub-2", "user_id": _USER, "tier": "pro", "status": "active",
+        "current_period_end": pending_end.isoformat(), "original_transaction_id": "otx-2",
+        "environment": "Production", "updated_at": (start - timedelta(days=29)).isoformat()})
+    service_clock(sb, start)
+    s = _ledger_service(sb)
+    clear = _outage_after_the_expiry(sb, hits=_RECONCILE_FAILURE_POINTS["users_write"])
+    assert s.sweep_expired_subscriptions()["errors"] == 1
+    assert sb.db["users"][0]["tier"] == "premium"
+    clear()
+
+    # Pro's period ended 30 min ago and its DID_RENEW is not in yet: held, as the sweep holds it.
+    service_clock(sb, pending_end + timedelta(minutes=30))
+    assert s.sweep_expired_subscriptions()["users_reconciled"] == 0
+    assert sb.db["users"][0]["tier"] == "premium"
+
+    # Past the sweep's own window the sweep expires Pro and reconciles the account itself.
+    service_clock(sb, pending_end + timedelta(hours=25))
+    out = s.sweep_expired_subscriptions()
+    assert out["expired"] == 1 and out["users_reconciled"] == 1
+    assert sb.db["users"][0]["tier"] == "free"

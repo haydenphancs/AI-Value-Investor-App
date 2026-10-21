@@ -333,8 +333,8 @@ class FakeSupabase:
         elif table == "subscription_credit_periods":
             self.db[table] = [
                 {"id": p.get("id"), "user_id": _USER, "original_transaction_id": otid,
-                 "period_end": iso(end), "revoked_at": iso(p.get("revoked_at")),
-                 "tier": p.get("tier")}
+                 "period_start": iso(p.get("start")), "period_end": iso(end),
+                 "revoked_at": iso(p.get("revoked_at")), "tier": p.get("tier")}
                 for (otid, end), p in self.periods.items()]
 
     def _user(self) -> dict:
@@ -3765,10 +3765,10 @@ def test_the_grace_recovery_bypass_edges():
            "current_period_end": end.isoformat()}
 
     def reason(prior=row, *, status="active", revoked=False, otid="otid",
-               period_end=end + timedelta(days=30)):
+               period_end=end + timedelta(days=30), tier="premium", env="Production"):
         return svc._grace_recovery_reason(
-            prior, status=status, payload_revoked=revoked, original_transaction_id=otid,
-            period_end=period_end)
+            prior, status=status, payload_revoked=revoked, tier=tier, environment=env,
+            original_transaction_id=otid, period_end=period_end)
 
     assert reason() is not None and end.isoformat() in reason()
     for status in ("grace_period", "billing_retry", "Grace_Period"):
@@ -3785,6 +3785,15 @@ def test_the_grace_recovery_bypass_edges():
     assert reason(period_end=end + timedelta(seconds=60)) is not None
     assert reason(period_end=end - timedelta(days=30)) is None, "an OLDER period: R1's business"
     assert reason(prior={**row, "current_period_end": "junk"}) is None
+    # Rule D's lower-tier guard (IAP audit F03): a lower tier ending inside the overlap bound
+    # after the period in grace is the renewal an upgrade superseded; a downgrade's recovery ends
+    # a whole period later. A higher tier always counts; Sandbox never takes a lower one as newer.
+    assert reason(tier="pro", period_end=end + timedelta(hours=12)) is None
+    assert reason(tier="pro", period_end=end + timedelta(days=7)) is None
+    assert reason(tier="pro", period_end=end + timedelta(days=7, seconds=1)) is not None
+    assert reason(tier="pro", period_end=end + timedelta(days=30), env="Sandbox") is None
+    assert reason(prior={**row, "tier": "pro"}, tier="premium",
+                  period_end=end + timedelta(hours=12)) is not None
 
 
 def test_a_late_higher_tier_grace_notice_cannot_rewind_a_downgrade_recovery(service_clock):

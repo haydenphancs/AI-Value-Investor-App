@@ -21,7 +21,7 @@ from app.api.chart_history_http import (
     FMP_HISTORY_INTERVAL_PATTERN,
     chart_history_response,
 )
-from app.schemas.chart_history import ChartHistoryResponse
+from app.schemas.chart_history import ChartHistoryResponse, ChartPricesResponse
 from app.services.price_history_service import ASSET_INDEX, MAX_PAGE_LIMIT
 from typing import Optional, Dict, Any
 import logging
@@ -220,6 +220,44 @@ async def get_index_chart_history(
     return await chart_history_response(
         ASSET_INDEX, symbol, interval=interval, before=before, limit=limit
     )
+
+
+@router.get("/{symbol}/chart", response_model=ChartPricesResponse)
+async def get_index_chart(
+    symbol: str,
+    chart_range: str = Query("3M", alias="range", pattern="^(1D|1W|3M|6M|1Y|5Y|ALL)$"),
+    interval: Optional[str] = Query(None, alias="interval", pattern="^(1min|5min|15min|30min|1hour|4hour|daily|weekly|monthly|quarterly)$"),
+):
+    """One range's chart bars alone (see `GET /etfs/{symbol}/chart`) — the SAME builder
+    as `GET /indices/{symbol}` (`_get_chart`, the proxy ETF's own series)."""
+    raw_symbol = symbol
+    symbol = _normalize_index_symbol(symbol)
+    if not _INDEX_SYMBOL_RE.match(symbol):
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            status_code=422,
+            message=f"Invalid index symbol for chart: {raw_symbol[:32]!r}",
+            user_message="That symbol isn't valid.",
+            details={"symbol": raw_symbol[:32]},
+        )
+    try:
+        return await get_index_service().get_index_chart(
+            symbol, chart_range=chart_range, interval=interval
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "Index chart failed for %s %s %s: %s: %s",
+            symbol, chart_range, interval, type(e).__name__, e, exc_info=True,
+        )
+        if (resp := upstream_error_response(e, ticker=symbol, step="index_chart")) is not None:
+            return resp
+        return make_error_response(
+            ErrorCode.FMP_UNAVAILABLE,
+            message=f"{type(e).__name__} building the {chart_range} index chart",
+            details={"ticker": symbol, "step": "index_chart", "range": chart_range},
+        )
 
 
 @router.get("/{symbol}/core", response_model=IndexCoreResponse)

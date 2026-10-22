@@ -1484,6 +1484,15 @@ pinches toward its left edge. First paint is unchanged.
   use full-resolution bars.
 - **1D** stays one session laid out by time, with pan and pinch off. **1W** pages back through
   older intraday bars.
+- **A 3M+ first paint never waits for the full detail.** Every `GET …/core` first-paint route
+  carries bars for 1D/1W only (`fast_only`), and a screen reopens on the range the user
+  last picked. So a screen that opens on 3M or longer requests the bars alone right after
+  core lands; a range tapped before the full detail lands is fetched the same way. The
+  bars-only routes are `GET /stocks/{t}/chart` and `GET /crypto/{s}/chart`, plus
+  `GET /{etfs|indices|commodities}/{symbol}/chart` (added 2026-10-21). Each uses the same
+  `_get_chart` as its detail, so both draw identical bars. They answer in ~0.1-1.4 s cold,
+  against 2-11 s for a cold full detail or overview. Their `GET …/quote` slice is a
+  projection of the full build, which is why it is not used for this.
 
 ### 7.3 Benchmark & report caching
 

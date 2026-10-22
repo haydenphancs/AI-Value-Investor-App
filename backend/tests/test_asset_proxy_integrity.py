@@ -263,9 +263,9 @@ def test_a_served_commodity_is_not_refused(root):
 
 
 def test_the_entry_points_all_guard_against_a_withdrawn_symbol():
-    """Three routes reach a commodity; `get_commodity_quote` projects from the detail
-    build, so the guard has to sit on the other two."""
-    for fn in ("get_commodity_core", "_build_commodity_detail"):
+    """Four routes reach a commodity; `get_commodity_quote` projects from the detail
+    build, so the guard has to sit on the other three (the bars-only chart, 2026-10-21)."""
+    for fn in ("get_commodity_core", "_build_commodity_detail", "get_commodity_chart"):
         body = _src_without_comments(getattr(COM.CommodityService, fn))
         assert "_raise_if_withdrawn(" in body, f"{fn} serves a withdrawn commodity"
 

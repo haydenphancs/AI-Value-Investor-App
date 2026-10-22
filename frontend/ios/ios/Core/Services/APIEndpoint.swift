@@ -294,6 +294,12 @@ enum APIEndpoint: Sendable {
     /// `extended_hours` only on the stocks route — the other four backends fetch the regular
     /// session only (`ChartAssetContext.supportsExtendedHours`).
     case getChartHistory(asset: ChartHistoryAsset, symbol: String, interval: String, before: String, limit: Int?, extendedHours: Bool)
+    /// One range's bars alone — `{symbol, prices}`, the `StockChartResponse` shape — for the
+    /// ETF, index and commodity screens (`.etfs` / `.indices` / `.commodities`). Their
+    /// `/core` carries no 3M+ bars and their `/quote` is a projection of the full build, so
+    /// a screen opening on a remembered 3M+ (or a pill tapped during the cold first load)
+    /// waited 2-5 s for the whole detail to draw a chart this answers in ~0.1-0.7 s.
+    case getAssetChart(asset: ChartHistoryAsset, symbol: String, range: String, interval: String?)
 
     // MARK: - Watchlist
     case getWatchlist
@@ -638,6 +644,8 @@ enum APIEndpoint: Sendable {
         // like every detail path above (`URLComponents.path` percent-encodes `^GSPC`).
         case .getChartHistory(let asset, let symbol, _, _, _, _):
             return "/api/v1/\(asset.rawValue)/\(symbol)/chart/history"
+        case .getAssetChart(let asset, let symbol, _, _):
+            return "/api/v1/\(asset.rawValue)/\(symbol)/chart"
 
         // Watchlist
         case .getWatchlist:
@@ -933,7 +941,8 @@ enum APIEndpoint: Sendable {
             if let interval = interval { params["interval"] = interval }
             return params
 
-        case .getCryptoChart(_, let range, let interval):
+        case .getCryptoChart(_, let range, let interval),
+             .getAssetChart(_, _, let range, let interval):
             var params = ["range": range]
             if let interval = interval { params["interval"] = interval }
             return params
@@ -1284,7 +1293,7 @@ enum APIEndpoint: Sendable {
         // Older chart bars for all five detail screens. Every one of the five routers is
         // strict at the router level (`get_current_user_id`), and the bars are the same
         // licensed price data as the detail payloads they extend.
-        case .getChartHistory:
+        case .getChartHistory, .getAssetChart:
             return .signInRequired
 
         // Home, Updates, themes, and the research meta lists.

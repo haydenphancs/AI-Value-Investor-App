@@ -7,6 +7,8 @@
 //  and maps the response DTO to display models.
 //  Range/interval taps and the 30 s refresh use the light GET /api/v1/etfs/{symbol}/quote;
 //  older bars come from GET /api/v1/etfs/{symbol}/chart/history (via ChartHistoryLoader).
+//  Until the full detail lands, a 3M+ first paint and a range tap also ask the bars-only
+//  GET /api/v1/etfs/{symbol}/chart (see `fetchBarsOnlyChart`).
 //
 
 import Foundation
@@ -111,6 +113,12 @@ class ETFDetailViewModel: ObservableObject {
     /// each captures the token before awaiting and applies its result only if still
     /// current, so a slow earlier range can't clobber the chart the user has since switched to.
     private var chartRequestToken = 0
+    /// Monotonic token for `fetchBarsOnlyChart`, in the same style as `chartRequestToken` but
+    /// its OWN counter: the bars-only answer is an accelerator BESIDE the full fetch, so it must
+    /// never supersede (or be superseded by) the full fetch's token — the full detail still owns
+    /// the chart, `isChartLoading` and the error path. Each bars-only ask bumps it, so an older
+    /// answer landing after a newer tap's ask drops itself.
+    private var barsOnlyChartToken = 0
     /// True while the range sink assigns the range's default interval, so the
     /// interval sink doesn't ALSO reload (one range change would otherwise fire two
     /// identical fetches when the range crosses an interval boundary).
@@ -319,8 +327,18 @@ class ETFDetailViewModel: ObservableObject {
         // chart is interactive before it lands): there is no model to merge a slice into,
         // so re-request the full payload for the new range, as before. Its token bump
         // supersedes the first fetch, so this is now the screen's load.
+        //
+        // The full payload is 2-5 s cold, so the bars-only route runs BESIDE it and paints
+        // the new range's chart on the core model as soon as it answers (~0.1-0.7 s). The
+        // full fetch still owns the chart once it lands, `isChartLoading` and the error UI;
+        // the bars-only answer drops itself if the full model beat it, the pills moved on,
+        // or a newer tap asked again (see `fetchBarsOnlyChart`). Awaited, never left to the
+        // implicit cancel at scope exit: if the full fetch FAILS first, the bars can still
+        // land and replace its "Couldn't load this range" note with this range's chart.
         guard etfData != nil else {
+            async let barsOnly: () = self.fetchBarsOnlyChart(range: range, interval: interval)
             await fetchETFDetail(range: range, interval: interval)
+            await barsOnly
             return
         }
 
@@ -483,7 +501,8 @@ class ETFDetailViewModel: ObservableObject {
     /// `try?` on purpose: core is an accelerator, so a core failure must be invisible —
     /// the full response is already in flight and owns the error path. It also
     /// deliberately does NOT touch `errorMessage` or bump any request token, both of
-    /// which belong to the full fetch.
+    /// which belong to the full fetch. (The bars-only follow-up below is NOT a `try?`: it
+    /// is just as invisible to the user, but logs its failure.)
     private func loadCore() async {
         // What this request asks for, captured before the await: its bars are stamped with it.
         let range = selectedChartRange
@@ -504,10 +523,84 @@ class ETFDetailViewModel: ObservableObject {
             // selection and would sit under the new pill (or over its failure note).
             model.chartPricePoints = []
             coreData = model
+            // That tap started its own bars-only ask, but if it answered BEFORE core there
+            // was no model to paint on and it dropped itself. Ask again for the selection
+            // the pills hold now: a repository cache hit when that answer already landed
+            // (the client cache keeps it), one extra request in the rarer case it is still
+            // in flight — whose own answer then drops itself on the newer token.
+            await fetchBarsOnlyChart(range: selectedChartRange, interval: chartSettings.selectedInterval)
             return
         }
         coreData = model
         didWriteChartBars(model.chartPricePoints, range: range, interval: interval)
+        // `/core` carries bars for 1D/1W only, so a screen opening on a remembered 3M/6M/1Y/
+        // 5Y/ALL would sit on the chart placeholder until the FULL detail landed (2-5 s
+        // cold). Ask the bars-only route for exactly this selection now. Keyed on "core
+        // brought no bars", not on the range, so it costs nothing when core does carry them.
+        if model.chartPricePoints.isEmpty {
+            await fetchBarsOnlyChart(range: range, interval: interval)
+        }
+    }
+
+    /// Paint one selection's bars from the bars-only `GET /etfs/{symbol}/chart` onto the
+    /// fast-core model while the FULL detail is still in flight.
+    ///
+    /// Why: the first paint (`/core`) carries no 3M+ bars, and a pill tapped before the full
+    /// detail lands re-requests the whole detail — both left the chart on its placeholder
+    /// for the 2-5 s a cold full build takes. This route answers in ~0.1-0.7 s with the SAME
+    /// builder and bars as the detail's `chart_data`, so the full model's later write carries
+    /// the same stamp and keeps the user's window.
+    ///
+    /// Applied only if, when it lands, ALL of these still hold — else dropped:
+    ///  - it is still the newest bars-only ask (`barsOnlyChartToken`): a newer tap wins;
+    ///  - the full model has NOT landed (`etfData == nil`): from then on the full detail owns
+    ///    the chart, and a range tap uses the light `/quote` slice;
+    ///  - the pills still ask for `range` / `interval`: never another selection's bars under
+    ///    the current pill;
+    ///  - a core model is on screen to paint on (stamping bars that nothing draws would make
+    ///    the stamp lie about what is shown);
+    ///  - the answer carries bars. An empty one is left to the full detail, which owns the
+    ///    "No chart data" / "Couldn't load this range" outcome.
+    ///
+    /// The write goes through `didWriteChartBars`, like every other chart write. A failure is
+    /// silent to the USER — the full detail is still coming and owns the error banner — but
+    /// always logged: a route failing on every open would otherwise look exactly like "the
+    /// chart is just slow", the report this fixes.
+    private func fetchBarsOnlyChart(range: ChartTimeRange, interval: ChartInterval) async {
+        barsOnlyChartToken += 1
+        let token = barsOnlyChartToken
+        let startTime = CFAbsoluteTimeGetCurrent()
+        let response: StockChartResponse
+        do {
+            response = try await repository.getAssetChart(
+                asset: .etfs,
+                symbol: etfSymbol,
+                range: range.rawValue,
+                interval: interval.rawValue
+            )
+        } catch {
+            // APIClient wraps a cancellation into APIError.networkError, so `catch is
+            // CancellationError` never matches — a cancelled ask is not a failure to report.
+            guard !Task.isCancelled else { return }
+            log.warning("ETF bars-only chart failed for \(self.etfSymbol, privacy: .public) range \(range.rawValue, privacy: .public) interval \(interval.rawValue, privacy: .public) — \(String(describing: type(of: error)), privacy: .public): \(String(describing: error), privacy: .public)")
+            return
+        }
+        let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+        guard token == barsOnlyChartToken,
+              etfData == nil,
+              coreData != nil,
+              range == selectedChartRange,
+              interval == chartSettings.selectedInterval else {
+            log.debug("ETF bars-only chart for \(self.etfSymbol, privacy: .public) \(range.rawValue, privacy: .public) \(interval.rawValue, privacy: .public) dropped after \(String(format: "%.2f", elapsed), privacy: .public)s — superseded, full model landed, or no core on screen")
+            return
+        }
+        guard !response.prices.isEmpty else {
+            log.debug("ETF bars-only chart for \(self.etfSymbol, privacy: .public) \(range.rawValue, privacy: .public) \(interval.rawValue, privacy: .public) answered no bars — left to the full detail")
+            return
+        }
+        coreData?.chartPricePoints = response.prices
+        didWriteChartBars(response.prices, range: range, interval: interval)
+        log.debug("ETF bars-only chart painted for \(self.etfSymbol, privacy: .public) \(range.rawValue, privacy: .public) \(interval.rawValue, privacy: .public) — \(response.prices.count) bars in \(String(format: "%.2f", elapsed), privacy: .public)s")
     }
 
     // MARK: - Fallback Data

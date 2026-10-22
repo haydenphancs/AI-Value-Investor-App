@@ -1397,6 +1397,17 @@ class IndexService:
         finally:
             _inflight.pop(cache_key, None)
 
+    async def get_index_chart(
+        self, symbol: str, chart_range: str = "3M", interval: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """`{symbol, prices}` for one range — the chart alone (see
+        `etf_service.get_etf_chart`). The SAME builder as the detail's `chart_data`
+        (`_get_chart`, which maps the index to its proxy); its points are response models,
+        dumped to plain rows here."""
+        bars = await self._get_chart(symbol, chart_range, interval)
+        rows = [b.model_dump() if hasattr(b, "model_dump") else b for b in (bars or [])]
+        return {"symbol": symbol, "prices": rows}
+
     async def get_index_quote(
         self,
         symbol: str,

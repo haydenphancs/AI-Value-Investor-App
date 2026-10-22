@@ -291,6 +291,9 @@ def test_strict_endpoints_are_signInRequired(case_name):
         # and the crypto range-switch chart (`/crypto/{symbol}/chart`), 2026-10-20: FMP /
         # CoinGecko price history behind the router-level strict dependency — born gated.
         "getChartHistory", "getCryptoChart",
+        # The ETF / index / commodity bars-only chart (`/{asset}/{symbol}/chart`, 2026-10-21):
+        # the same licensed price bars as their detail payloads — born gated.
+        "getAssetChart",
     ],
 )
 def test_account_only_endpoints_are_gated(case_name):

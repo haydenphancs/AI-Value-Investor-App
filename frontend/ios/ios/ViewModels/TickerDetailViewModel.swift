@@ -194,6 +194,12 @@ class TickerDetailViewModel: ObservableObject {
     private var lastChartStamp: ChartBarsStamp?
     /// Whether that write carried any bars (see `recordChartWrite`).
     private var lastChartWriteHadBars = false
+    /// The stamp whose bars the bars-only FIRST PAINT drew (core had none for a 3M+ open),
+    /// until the full overview lands. Those bars come from `/stocks/{t}/chart`, which keeps
+    /// today's unfinished daily bar, while the overview's 3M/6M/1Y chart stops at the last
+    /// settled close: replacing them dropped the newest candle a few seconds after it drew.
+    /// A range tap draws from the same route, so the first-paint bars are the consistent ones.
+    private var firstPaintChartStamp: ChartBarsStamp?
     private let log = Logger(subsystem: "com.caydex.ios", category: "TickerDetailViewModel")
 
     // MARK: - Initialization
@@ -395,10 +401,22 @@ class TickerDetailViewModel: ObservableObject {
                 if self.tickerData == nil {
                     let coreData = core.toCoreData()
                     self.coreData = coreData
-                    self.recordChartWrite(
-                        coreData.chartPricePoints,
-                        stamp: ChartBarsStamp(range: coreRange, interval: coreInterval, extendedHours: ext)
-                    )
+                    let coreStamp = ChartBarsStamp(range: coreRange, interval: coreInterval, extendedHours: ext)
+                    self.recordChartWrite(coreData.chartPricePoints, stamp: coreStamp)
+                    // Core carries bars for 1D/1W only (the server's `fast_only`). A screen
+                    // that opens on a remembered 3M+ sat on the placeholder until the full
+                    // overview landed (2-11 s cold); the bars-only route answers in
+                    // ~0.1-0.7 s. Only while the pills still ask for core's stamp: a tap
+                    // during the core fetch already fetched its own bars.
+                    if coreData.chartPricePoints.isEmpty, self.selectedChartStamp == coreStamp {
+                        // Advisory: the overview is still in flight and owns the chart's
+                        // error state; a failed ask here must not put "Couldn't load this
+                        // range" over the shimmer while the real answer is coming.
+                        await self.fetchChartData(ticker, range: coreRange, reportFailure: false)
+                        if self.tickerData == nil, self.lastChartStamp == coreStamp, self.lastChartWriteHadBars {
+                            self.firstPaintChartStamp = coreStamp
+                        }
+                    }
                 }
             }
 
@@ -435,8 +453,15 @@ class TickerDetailViewModel: ObservableObject {
                 //    third one) under the veil; the catch-up below fetches the current one;
                 //  - the overview came back with NO bars for the stamp already on screen (a
                 //    pull-to-refresh blip): no reason to blank a good chart.
+                //  - the bars-only first paint already drew THIS stamp (see `firstPaintChartStamp`):
+                //    the same route a range tap uses, with today's unfinished bar the
+                //    overview's daily slice leaves out.
+                let drewFirstPaint = self.firstPaintChartStamp == requestedStamp
+                    && self.lastChartStamp == requestedStamp && !shownBars.isEmpty
+                self.firstPaintChartStamp = nil
                 let keepShownBars = self.lastChartStamp != nil
                     && (selectionChanged
+                        || drewFirstPaint
                         || (display.chartPricePoints.isEmpty && self.lastChartStamp == requestedStamp && !shownBars.isEmpty))
                 if keepShownBars {
                     display.chartPricePoints = shownBars
@@ -444,12 +469,18 @@ class TickerDetailViewModel: ObservableObject {
                 } else {
                     self.tickerData = display
                     self.recordChartWrite(display.chartPricePoints, stamp: requestedStamp)
+                    // The overview's bars won the race for this stamp: a first-paint
+                    // `/chart` answer still in flight must not land over them afterwards.
+                    if !display.chartPricePoints.isEmpty { self.chartRequestGen += 1 }
                 }
                 if selectionChanged {
                     await self.fetchChartData(ticker, range: self.selectedChartRange)
                 }
                 self.log.debug("overview loaded for \(ticker, privacy: .public)")
             } catch {
+                // The fallback below owns the chart from here; a later refresh must not keep
+                // bars because of this load's first paint.
+                self.firstPaintChartStamp = nil
                 self.log.error("overview failed for \(ticker, privacy: .public), falling back to separate calls: \(String(describing: error), privacy: .public)")
                 // Fallback: use existing separate API calls + sample data for missing sections
                 await withTaskGroup(of: Void.self) { group in
@@ -1567,7 +1598,10 @@ class TickerDetailViewModel: ObservableObject {
     /// Fetches the bars for `range` and the CURRENT interval / extended-hours flag. Shared by
     /// the range / interval / extended-hours sinks, the overview's catch-up refetch, the
     /// fallback load and the 30 s chart refresh.
-    private func fetchChartData(_ ticker: String, range: ChartTimeRange) async {
+    /// `reportFailure: false` is the first-paint follow-up after core: a failed or empty
+    /// answer is only logged, because the full overview still in flight owns the chart's
+    /// error state (it writes this range's bars or reports the failure itself).
+    private func fetchChartData(_ ticker: String, range: ChartTimeRange, reportFailure: Bool = true) async {
         let rangeString = range.rawValue  // e.g. "3M", "1Y", "1D"
         chartRequestGen += 1
         let gen = chartRequestGen
@@ -1591,6 +1625,10 @@ class TickerDetailViewModel: ObservableObject {
             let pricePoints = chartResponse.prices
             log.debug("got \(pricePoints.count) chart bars for \(ticker, privacy: .public) range=\(rangeString, privacy: .public)")
             guard !pricePoints.isEmpty else {
+                guard reportFailure else {
+                    log.warning("first-paint chart for \(ticker, privacy: .public) range=\(rangeString, privacy: .public) came back empty — leaving the chart to the overview")
+                    return
+                }
                 // An empty answer is not a failed load: the canvas says "No chart data".
                 chartFetchFailed(requested, ticker: ticker, reason: "no bars", failed: false)
                 return
@@ -1605,6 +1643,10 @@ class TickerDetailViewModel: ObservableObject {
             // APIClient wraps cancellation into `.networkError`: a cancelled timer tick is
             // not a failed load.
             guard !Task.isCancelled else { return }
+            guard reportFailure else {
+                log.warning("first-paint chart for \(ticker, privacy: .public) range=\(rangeString, privacy: .public) failed — leaving the chart to the overview: \(String(describing: error), privacy: .public)")
+                return
+            }
             chartFetchFailed(requested, ticker: ticker, reason: String(describing: error), failed: true)
         }
     }

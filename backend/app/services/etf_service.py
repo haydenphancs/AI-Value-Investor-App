@@ -1142,6 +1142,21 @@ class ETFService:
             chart_data=chart_data,
         )
 
+    async def get_etf_chart(
+        self, symbol: str, chart_range: str = "3M", interval: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """`{symbol, prices}` for one range — the chart alone.
+
+        `/core` never carries 3M+ bars (`fast_only`) and `/quote` is a PROJECTION of the
+        full build, so a screen opening on a remembered 3M+ (or a pill tapped during the
+        cold first load) waited for the whole detail — 2-5 s cold — to draw a chart this
+        returns in ~0.1-0.7 s. The SAME builder as the detail's `chart_data`
+        (`_get_chart`), so the bars match whichever surface drew them first.
+        """
+        symbol = symbol.upper().strip()
+        bars = await self._get_chart(symbol, chart_range, interval)
+        return {"symbol": symbol, "prices": list(bars or [])}
+
     async def get_etf_quote(
         self,
         symbol: str,

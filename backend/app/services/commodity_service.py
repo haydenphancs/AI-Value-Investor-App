@@ -669,6 +669,21 @@ class CommodityService:
             chart_data=chart_data,
         )
 
+    async def get_commodity_chart(
+        self, symbol: str, chart_range: str = "3M", interval: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """`{symbol, prices}` for one range — the chart alone (see
+        `etf_service.get_etf_chart`). The SAME symbol mapping and builder as the detail's
+        `chart_data` (`_resolve_fmp_symbol`, then `_get_chart`: the ETF ref's regular
+        session, or FRED's daily spot, which has no intraday)."""
+        display = symbol.upper().strip()
+        # Like every other commodity entry point: a withdrawn screen is refused with the
+        # contractual FMP_NOT_ENTITLED, never served an empty chart that invites a retry.
+        _raise_if_withdrawn(display)
+        fmp_symbol = _resolve_fmp_symbol(display)
+        bars = await self._get_chart(fmp_symbol, chart_range, interval)
+        return {"symbol": display, "prices": list(bars or [])}
+
     async def get_commodity_quote(
         self,
         symbol: str,

@@ -60,6 +60,8 @@ protocol StockRepositoryProtocol {
     // crypto screen's bars-only range switch.
     func getChartHistory(asset: ChartHistoryAsset, symbol: String, interval: String, before: String, limit: Int?, extendedHours: Bool) async throws -> ChartHistoryResponse
     func getCryptoChart(symbol: String, range: String, interval: String?) async throws -> StockChartResponse
+    // The ETF / index / commodity screens' bars-only fetch (a 3M+ first paint, a range tap).
+    func getAssetChart(asset: ChartHistoryAsset, symbol: String, range: String, interval: String?) async throws -> StockChartResponse
 }
 
 // MARK: - Stock Repository
@@ -633,6 +635,26 @@ final class StockRepository: StockRepositoryProtocol {
 
         let chart = try await apiClient.request(
             endpoint: .getCryptoChart(symbol: symbol, range: range, interval: interval),
+            responseType: StockChartResponse.self
+        )
+
+        setCache(cacheKey, value: chart)
+        return chart
+    }
+
+    /// The ETF / index / commodity screens' bars-only fetch: a screen opening on a
+    /// remembered 3M+ (their `/core` carries no 3M+ bars) and a range tap. Same TTLs as
+    /// `getStockChart` (`chartTTL`): these are equity-session bars, not round-the-clock.
+    func getAssetChart(asset: ChartHistoryAsset, symbol: String, range: String, interval: String?) async throws -> StockChartResponse {
+        // Segments split on "_" so `invalidate(symbol:)` (pull-to-refresh) finds the symbol.
+        let cacheKey = "asset_chart_\(asset.rawValue)_\(symbol.uppercased())_\(range)_\(interval ?? "default")"
+
+        if let cached: StockChartResponse = getCached(cacheKey, maxAge: chartTTL(range: range, interval: interval)) {
+            return cached
+        }
+
+        let chart = try await apiClient.request(
+            endpoint: .getAssetChart(asset: asset, symbol: symbol, range: range, interval: interval),
             responseType: StockChartResponse.self
         )
 
@@ -3511,6 +3533,10 @@ final class MockStockRepository: StockRepositoryProtocol {
     }
 
     func getCryptoChart(symbol: String, range: String, interval: String?) async throws -> StockChartResponse {
+        throw APIError.networkError(NSError(domain: "Mock", code: 0))
+    }
+
+    func getAssetChart(asset: ChartHistoryAsset, symbol: String, range: String, interval: String?) async throws -> StockChartResponse {
         throw APIError.networkError(NSError(domain: "Mock", code: 0))
     }
 

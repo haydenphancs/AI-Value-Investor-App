@@ -10,6 +10,9 @@
 //  Chart: range / interval changes and the 30 s live tick use the light
 //  GET /api/v1/indices/{symbol}/quote slice; older bars are paged in from
 //  GET /api/v1/indices/{symbol}/chart/history (via ChartHistoryLoader) as the user pans left.
+//  Until the full detail has landed, a 3M+ open and every range / interval change also ask
+//  the bars-only GET /api/v1/indices/{symbol}/chart (`loadChartBarsOnly`), which answers in
+//  ~0.1-0.7 s against the full build's 2-5 s cold.
 //
 
 import Foundation
@@ -26,8 +29,9 @@ class IndexDetailViewModel: ObservableObject {
     /// ~0.3s from the cheap cached sections, and rendered by the header/chart gate as
     /// `indexData ?? coreData`.
     ///
-    /// Written ONLY while `indexData` is still nil (see `loadCore`), so a slow core
-    /// response can never overwrite the full model. Mirrors `TickerDetailViewModel`.
+    /// Written ONLY while `indexData` is still nil (see `loadCore`, and `loadChartBarsOnly`,
+    /// which paints a range's bars on it), so a slow core response can never overwrite the
+    /// full model. Mirrors `TickerDetailViewModel`.
     @Published var coreData: IndexCoreData?
 
     /// What the header + chart render: the full model when it has landed, the fast-core
@@ -114,6 +118,16 @@ class IndexDetailViewModel: ObservableObject {
     /// before awaiting and only apply their result if still current, so a slow earlier
     /// response can't clobber a newer range's chart. The 30 s tick only OBSERVES it.
     private var chartRequestToken = 0
+    /// Monotonic generation for the bars-only fetches (`loadChartBarsOnly`): the first paint
+    /// of a 3M+ open, and each range / interval change made before the full detail landed.
+    /// The CALLER bumps it, synchronously, before anything awaits, and an answer is written
+    /// only while it is still current — so a newer tap's answer always wins, even when an
+    /// older one lands after it.
+    ///
+    /// Its own counter, not `chartRequestToken`: advancing that token would discard the
+    /// in-flight full detail (and nothing would then ever set `indexData`), and merely
+    /// observing it would drop a good answer whenever pull-to-refresh re-requests the detail.
+    private var chartBarsOnlyGeneration = 0
     /// True while the range sink is assigning the range's default interval, so the
     /// interval sink doesn't ALSO reload (a single range change would otherwise fire
     /// two identical fetches when the range crosses an interval boundary).
@@ -535,7 +549,8 @@ class IndexDetailViewModel: ObservableObject {
     /// `try?` on purpose: core is an accelerator, so a core failure must be invisible —
     /// the full response is already in flight and owns the error path. It also
     /// deliberately does NOT touch `errorMessage` or bump `chartRequestToken`, both of
-    /// which belong to the full fetch.
+    /// which belong to the full fetch. Its bars-only follow-up (a 3M+ open) keeps the same
+    /// discipline: a failure there is logged, never shown.
     private func loadCore() async {
         // Captured BEFORE the await: the stamp is what these bars were fetched for, even
         // if the pill moves while they are in flight.
@@ -553,6 +568,20 @@ class IndexDetailViewModel: ObservableObject {
         let slice = core.toCoreData()
         coreData = slice
         didWriteChartBars(slice.chartPricePoints, range: requestedRange, interval: requestedInterval)
+        // Core carries bars for 1D/1W only (the server's `fast_only` never pulls the daily
+        // history for it), so a screen opening on a remembered 3M+ sat on the placeholder
+        // until the full detail landed (2-5 s cold). The bars-only route answers in
+        // ~0.1-0.7 s. Only while the pills still ask for core's own request: a change made
+        // since then fetches its own bars (`loadChartData`). Awaited AFTER core's write, so
+        // the two can never land out of order. An empty core on 1D/1W asks too, mirroring
+        // the stock screen: one cheap call, and it recovers a cold intraday blip.
+        if slice.chartPricePoints.isEmpty,
+           selectedChartRange == requestedRange,
+           chartSettings.selectedInterval == requestedInterval {
+            chartBarsOnlyGeneration += 1
+            let generation = chartBarsOnlyGeneration
+            await loadChartBarsOnly(range: requestedRange, interval: requestedInterval, generation: generation)
+        }
     }
 
     private func fetchIndexDetail() async {
@@ -692,8 +721,26 @@ class IndexDetailViewModel: ObservableObject {
         // full payload for the new range instead. Bumping the token here and then finding
         // no model would discard the in-flight full response, and nothing would ever set
         // `indexData` — the Overview tab would shimmer for the life of the screen.
+        //
+        // The bars-only route runs ALONGSIDE that re-request: it answers in ~0.1-0.7 s
+        // against the full build's 2-5 s cold, so the new range's chart is painted on the
+        // core model as soon as it answers instead of waiting under an "awaiting" veil. The
+        // full detail still owns the error UI, and replaces the core model when it lands
+        // under the same stamp, so the chart keeps the window the user is on.
+        //
+        // The PILL, not `range`: `fetchIndexDetail` reads the pill too, and this Task may
+        // run after a newer tap moved it — the two requests stay one pair. The generation
+        // is bumped HERE, before either await (an `async let` initializer runs later, in its
+        // child task, possibly after a newer tap's bump).
         guard indexData != nil else {
+            let barsRange = selectedChartRange
+            let barsInterval = chartSettings.selectedInterval
+            chartBarsOnlyGeneration += 1
+            let generation = chartBarsOnlyGeneration
+            async let barsOnly: () = self.loadChartBarsOnly(range: barsRange, interval: barsInterval, generation: generation)
             await fetchIndexDetail()
+            // Explicit: an `async let` left un-awaited is CANCELLED at scope exit.
+            _ = await barsOnly
             return
         }
         let startTime = CFAbsoluteTimeGetCurrent()
@@ -750,11 +797,67 @@ class IndexDetailViewModel: ObservableObject {
         }
     }
 
+    /// One range's bars ALONE (`GET /indices/{symbol}/chart` — the same builder and bars as
+    /// the detail's `chart_data`), painted on the fast-core model while the full detail is
+    /// still in flight. Two callers: `loadCore` (a 3M+ open, which core carries no bars for)
+    /// and `loadChartData` (a range / interval change before the full detail landed).
+    ///
+    /// Either way the full detail is ALSO in flight: it owns the chart once it lands and the
+    /// error path throughout. So this never writes `errorMessage`, never touches
+    /// `chartRequestToken`, and a failure is logged, never shown — the user still gets the
+    /// full detail's answer (its bars, or its "chart unavailable" note) moments later.
+    ///
+    /// `generation` is bumped by the CALLER, synchronously (see `chartBarsOnlyGeneration`).
+    /// The answer is written only while ALL of these hold, re-checked after the await:
+    ///  - it is the newest bars-only request (a newer tap's answer always wins);
+    ///  - the full model has not landed (it then owns the chart, and the core model this
+    ///    would paint on is no longer on screen);
+    ///  - the pills still ask for this range + interval (never another range's bars under
+    ///    the current pill);
+    ///  - the core model is on screen (there is nothing else to paint bars on — the chart
+    ///    and its pills render only once core or the full model is in hand);
+    ///  - it carries bars (an empty answer leaves the chart to the full detail, which owns
+    ///    the "no bars" note).
+    private func loadChartBarsOnly(range: ChartTimeRange, interval: ChartInterval, generation: Int) async {
+        let startTime = CFAbsoluteTimeGetCurrent()
+        let symbol = indexSymbol
+        do {
+            let chart = try await StockRepository.shared.getAssetChart(
+                asset: .indices,
+                symbol: symbol,
+                range: range.rawValue,
+                interval: interval.rawValue
+            )
+            let elapsed = String(format: "%.2f", CFAbsoluteTimeGetCurrent() - startTime)
+            let bars = chart.prices
+            guard !bars.isEmpty else {
+                log.warning("index bars-only chart for \(symbol, privacy: .public) range \(range.rawValue, privacy: .public) interval \(interval.rawValue, privacy: .public) returned no bars after \(elapsed, privacy: .public)s — left to the full detail")
+                return
+            }
+            guard generation == chartBarsOnlyGeneration,
+                  indexData == nil,
+                  selectedChartRange == range,
+                  chartSettings.selectedInterval == interval,
+                  var core = coreData else {
+                log.debug("index bars-only chart for \(symbol, privacy: .public) range \(range.rawValue, privacy: .public) interval \(interval.rawValue, privacy: .public) dropped after \(elapsed, privacy: .public)s — superseded")
+                return
+            }
+            core.chartPricePoints = bars
+            coreData = core
+            didWriteChartBars(bars, range: range, interval: interval)
+            log.debug("index bars-only chart for \(symbol, privacy: .public) range \(range.rawValue, privacy: .public) interval \(interval.rawValue, privacy: .public) painted in \(elapsed, privacy: .public)s: \(bars.count) bars")
+        } catch {
+            // Handled and degraded: the full detail is still coming and owns the error UI.
+            let elapsed = String(format: "%.2f", CFAbsoluteTimeGetCurrent() - startTime)
+            log.warning("index bars-only chart failed for \(symbol, privacy: .public) range \(range.rawValue, privacy: .public) interval \(interval.rawValue, privacy: .public) after \(elapsed, privacy: .public)s: \(String(describing: type(of: error)), privacy: .public): \(String(describing: error), privacy: .public)")
+        }
+    }
+
     // MARK: - Chart Writes
 
-    /// The bookkeeping after EVERY write of the chart bars — core, full detail, range or
-    /// interval change, 30 s tick. `range` / `interval` are what the bars were REQUESTED
-    /// for (captured before the await), never the pill at landing time.
+    /// The bookkeeping after EVERY write of the chart bars — core, the bars-only route, full
+    /// detail, range or interval change, 30 s tick. `range` / `interval` are what the bars
+    /// were REQUESTED for (captured before the await), never the pill at landing time.
     private func didWriteChartBars(_ bars: [StockPricePoint], range: ChartTimeRange, interval: ChartInterval) {
         if chartDataRange != range { chartDataRange = range }
         if chartDataInterval != interval { chartDataInterval = interval }

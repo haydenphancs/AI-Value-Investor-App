@@ -735,6 +735,68 @@ def test_1d_bars_are_one_interval_wide_and_a_flat_window_is_centred():
     assert "let onLeft = x < size.width / 2" in update
 
 
+# ── 12. A 3M+ first paint never waits for the full overview (2026-10-21) ──────
+
+
+def test_a_stock_screen_opening_on_3m_plus_fetches_its_bars_right_after_core():
+    """Core carries 1D/1W bars only (`fast_only`). A screen opening on a remembered 3M+ sat
+    on the placeholder until the FULL overview landed (measured 5-11 s cold) while the
+    bars-only route answers in ~0.1-0.7 s."""
+    vm = _code(_IOS / "ViewModels" / "TickerDetailViewModel.swift")
+    write = "self.recordChartWrite(coreData.chartPricePoints, stamp: coreStamp)"
+    assert write in vm, "guard is stale — the core write moved"
+    after = vm[vm.index(write):]
+    branch = _block(after, "if coreData.chartPricePoints.isEmpty, self.selectedChartStamp == coreStamp")
+    # Advisory: the overview still in flight owns the chart's error state, so a failed ask
+    # must not put "Couldn't load this range" over the shimmer.
+    assert "await self.fetchChartData(ticker, range: coreRange, reportFailure: false)" in branch
+    assert "self.firstPaintChartStamp = coreStamp" in branch
+    fetch = _block(vm, "private func fetchChartData(_ ticker: String, range: ChartTimeRange, reportFailure: Bool = true) async")
+    assert fetch.count("guard reportFailure else {") == 2, "both the empty and the failed answer must stay silent"
+    # The overview must not replace the first-paint bars for the same stamp (they carry
+    # today's unfinished daily bar; the overview's daily slice stops at the last close), and
+    # a first-paint answer landing AFTER the overview's bars is dropped.
+    assert "|| drewFirstPaint" in vm
+    assert "if !display.chartPricePoints.isEmpty { self.chartRequestGen += 1 }" in vm
+    # Inside the core task's `tickerData == nil` branch: a full model already on screen
+    # owns the chart.
+    owners = []
+    start = 0
+    while (i := vm.find("if self.tickerData == nil {", start)) != -1:
+        owners.append(_walk(vm, vm.index("{", i)))
+        start = i + 1
+    assert any(write in blk and "await self.fetchChartData(ticker, range: coreRange, reportFailure: false)" in blk for blk in owners), (
+        "the first-paint fetch must sit in the core task's `tickerData == nil` branch"
+    )
+
+
+@pytest.mark.parametrize("vm_name,asset,helper", [
+    ("ETFDetailViewModel", ".etfs", "fetchBarsOnlyChart"),
+    ("IndexDetailViewModel", ".indices", "loadChartBarsOnly"),
+    ("CommodityDetailViewModel", ".commodities", "paintBarsOnlyChart"),
+])
+def test_etf_index_commodity_paint_3m_plus_bars_without_waiting_for_the_detail(vm_name, asset, helper):
+    """Their `/core` carries no 3M+ bars and `/quote` is a projection of the FULL build: a
+    screen opening on a remembered 3M+ (or a pill tapped during the cold first load) waited
+    2-5 s for the whole detail. The bars-only route paints it in ~0.1-0.7 s — through the
+    ONE bar-write function, so the history loader still absorbs from one place."""
+    vm = _code(_IOS / "ViewModels" / f"{vm_name}.swift")
+    assert vm.count("getAssetChart(") == 1, f"{vm_name}: one bars-only call site, in {helper}"
+    call = _call(vm, "getAssetChart(")
+    assert re.search(rf"\basset:\s*\{asset}\b", call), f"{vm_name} asks the wrong router"
+    body = _block(vm, f"private func {helper}(")
+    assert "getAssetChart(" in body and "didWriteChartBars(" in body, f"{helper} must write through didWriteChartBars"
+    core = _block(vm, "private func loadCore() async")
+    after_write = core[core.rindex("didWriteChartBars("):]
+    assert f"{helper}(" in after_write, (
+        f"{vm_name}.loadCore no longer paints a 3M+ chart right after core's own (empty) write"
+    )
+    others = vm.replace(core, "").replace(body, "")
+    assert re.search(rf"async let \w+: \(\) = self\.{helper}\(", others), (
+        f"{vm_name}: a range tap before the full detail landed must fetch its bars alongside the detail"
+    )
+
+
 # ── anti-vacuity for the helpers ──────────────────────────────────────────────
 
 

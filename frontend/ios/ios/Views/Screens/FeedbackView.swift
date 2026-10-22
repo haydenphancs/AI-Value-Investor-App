@@ -59,20 +59,22 @@ import PhotosUI
 /// Every user-facing string that mentions the reward, in one place.
 ///
 /// Credits are NEVER automatic: the owner confirms a report by hand and only then grants them
-/// with a script. So this copy promises a review, not a reward — no amount, no time frame, and
-/// it says plainly that not every report qualifies. It is never tied to ratings or reviews
+/// with a script. So this copy promises a review first — the one amount it names is the
+/// script's default grant (20, owner's wording 2026-10-21), there is no time frame, and it says
+/// plainly that not every report qualifies. It is never tied to ratings or reviews
 /// either (App Store Guideline 3.2.2), which is why `FeedbackView(showsReward: false)` shows
 /// none of it on the path that starts at the rating prompt.
 ///
-/// `test_ios_feedback_flow.py` pins the required phrases, the banned ones (numbers, "instantly",
-/// "rating", …) and that no other literal in this file mentions credits.
+/// `test_ios_feedback_flow.py` pins the required phrases, the banned ones (any other number,
+/// "instantly", "rating", …), the amount against the script's default, and that no other
+/// literal in this file mentions credits.
 enum FeedbackRewardCopy {
     static let rowSubtitle = "Report an issue · earn free credits"
-    static let callout = "Earn free credits. We review every report. If we can confirm the issue, we'll add credits to your account and get back to you as soon as we've reviewed it. Not every report qualifies — for example, duplicates or issues we can't reproduce."
+    static let callout = "Earn free credits. We review every report. If we can confirm the issue, we'll add 20 credits to your account and get back to you as soon as we've reviewed it. Not every report qualifies — for example, duplicates or issues we can't reproduce."
     static let guestNote = "Confirmed reports from signed-in accounts can earn free credits. We add them to an account, so sign in before you send if you'd like to be eligible."
     static let reviewStepTitle = "We review it"
-    static let reviewStepDetail = "If we can confirm the issue, we'll add free credits to your account and get back to you as soon as we've reviewed it. Duplicates and issues we can't reproduce don't qualify."
-    static let thankYou = "Your report is on its way. We review every report. If we can confirm the issue, we'll add credits to your account and get back to you as soon as we've reviewed it."
+    static let reviewStepDetail = "If we can confirm the issue, we'll add 20 free credits to your account and get back to you as soon as we've reviewed it. Duplicates and issues we can't reproduce don't qualify."
+    static let thankYou = "Your report is on its way. We review every report. If we can confirm the issue, we'll add 20 credits to your account and get back to you as soon as we've reviewed it."
     static let composerCaption = "We'll include your app version, device model, account ID and a report code, so we know which build to look at and which account to credit. You can see and edit all of it before it sends."
 }
 

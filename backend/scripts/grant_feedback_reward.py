@@ -2,7 +2,8 @@
 """Reward ONE confirmed Help Us Improve report with free credits (migration 199).
 
 THE ONLY WAY A REPORT REWARD IS EVER GRANTED. The app says "We review every report. If we can
-confirm the issue, we'll add credits to your account", so nothing in app/ or the iOS app grants
+confirm the issue, we'll add 20 credits to your account" (20 = DEFAULT_CREDITS below; a test holds
+the copy to it, so grant at least that), so nothing in app/ or the iOS app grants
 anything: a report arrives by email, the owner reproduces it, and only then runs this with
 `--apply`. Not every report qualifies (duplicates, issues we can't reproduce), and the reward
 is never tied to App Store ratings (Guideline 3.2.2).

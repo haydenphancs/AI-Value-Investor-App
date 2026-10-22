@@ -43,6 +43,8 @@ from pathlib import Path
 
 import pytest
 
+from scripts import grant_feedback_reward as gfr
+
 _IOS = Path(__file__).resolve().parents[2] / "frontend/ios/ios"
 _FEEDBACK = _IOS / "Views/Screens/FeedbackView.swift"
 _PROFILE = _IOS / "Views/Screens/ProfileView.swift"
@@ -293,11 +295,17 @@ _REWARD_KEYS = ("rowSubtitle", "callout", "guestNote", "reviewStepTitle", "revie
 _REWARD_REQUIRED = ("we review every report", "if we can confirm the issue",
                     "as soon as we've reviewed it", "duplicates", "can't reproduce")
 
-# Never said by any reward string. An amount or a time frame is a promise a manual review may
-# not keep, and any mention of ratings would make the reward read as payment for one, which
-# Guideline 3.2.2 forbids. "review" on its own stays legal: "we review every report" is the promise.
+# The ONE amount the copy may name (owner, 2026-10-21: "say \"we'll add 20 credits to your...\"").
+# It is the grant script's DEFAULT, so the promise and the usual grant cannot drift apart: change
+# `DEFAULT_CREDITS` and the copy test fails until the copy says the new figure.
+_PROMISED_AMOUNT = re.compile(rf"\b{gfr.DEFAULT_CREDITS} (?:free )?credits\b")
+
+# Never said by any reward string. Any OTHER number (another amount, a time frame) is a promise a
+# manual review may not keep, and any mention of ratings would make the reward read as payment for
+# one, which Guideline 3.2.2 forbids. "review" on its own stays legal: "we review every report" is
+# the promise.
 _REWARD_BANNED = (
-    (r"\d", "a number (no amount, no time frame)"),
+    (r"\d", "a number other than the promised amount (no other amount, no time frame)"),
     (r"right away", "a time promise"),
     (r"instantly", "a time promise"),
     (r"immediately", "a time promise"),
@@ -333,11 +341,13 @@ def _string_literals(src: str) -> list[str]:
 
 
 def _copy_violations(texts: list[str]) -> list[str]:
+    # The promised amount is taken out first, so the number ban still catches every other digit
+    # in the same sentence ("20 credits within 24 hours" fails on the 24).
     return [
         f"{why}: {pattern!r} in {text!r}"
         for text in texts
         for pattern, why in _REWARD_BANNED
-        if re.search(pattern, text.lower())
+        if re.search(pattern, _PROMISED_AMOUNT.sub("credits", text.lower()))
     ]
 
 
@@ -368,6 +378,25 @@ def test_the_reward_copy_promises_a_review_not_credits():
     )
 
 
+def test_the_reward_names_the_scripts_default_grant():
+    """Owner, 2026-10-21: the reward sentence says "we'll add 20 credits to your account". The
+    figure is the one `grant_feedback_reward.py` grants unless told otherwise, and every place
+    the copy repeats that sentence says the same figure."""
+    enum = _balanced(_source(_FEEDBACK), "enum FeedbackRewardCopy {")
+    promise = f"we'll add {gfr.DEFAULT_CREDITS} credits to your account"
+    for key in ("callout", "thankYou"):
+        m = re.search(rf"static let {key} = " + _ONE_LINE_LITERAL, enum)
+        assert m, f"FeedbackRewardCopy.{key} is gone"
+        assert promise in m.group(1).replace("’", "'"), (
+            f"FeedbackRewardCopy.{key} no longer says {promise!r} — the owner's wording, tied to "
+            f"the script's DEFAULT_CREDITS"
+        )
+    m = re.search(r"static let reviewStepDetail = " + _ONE_LINE_LITERAL, enum)
+    assert m and f"we'll add {gfr.DEFAULT_CREDITS} free credits" in m.group(1).replace("’", "'"), (
+        "the review step must name the same amount as the callout"
+    )
+
+
 def test_the_row_subtitle_is_the_agreed_wording():
     enum = _balanced(_source(_FEEDBACK), "enum FeedbackRewardCopy {")
     m = re.search(r"static let rowSubtitle = " + _ONE_LINE_LITERAL, enum)
@@ -395,6 +424,15 @@ def test_the_copy_guards_are_not_vacuous():
     flagged = " ".join(_copy_violations(literals))
     for why in ("a number", "a time promise", "ratings", "star ratings", "the App Store"):
         assert why in flagged, f"the {why!r} ban did not fire"
+    amount = gfr.DEFAULT_CREDITS
+    assert not _copy_violations([f"we'll add {amount} credits", f"we'll add {amount} free credits"]), (
+        "the promised amount itself must stay legal"
+    )
+    for wrong in (f"we'll add {amount + 30} credits", f"we'll add {amount} credits within 24 hours",
+                  f"we'll add {amount}0 credits", f"we'll add 1{amount} credits"):
+        assert any("a number" in v for v in _copy_violations([wrong])), (
+            f"the number ban let {wrong!r} through — only the exact promised amount may pass"
+        )
     assert _copy_violations(["Leave a review"]) and _copy_violations(["Your reviews help"])
     assert not _copy_violations(["We review every report and reply once we've reviewed it."]), (
         "'review' on its own is the promise itself and must stay legal"

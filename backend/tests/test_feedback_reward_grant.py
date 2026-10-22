@@ -1,7 +1,8 @@
 """The issue report reward is granted BY HAND, once per report, and only by the owner.
 
 Profile → Help Us Improve now reads "Report an issue · earn free credits". The app promises
-"If we can confirm the issue, we'll add credits to your account", which is true only while the
+"If we can confirm the issue, we'll add 20 credits to your account" (the script's DEFAULT_CREDITS;
+`test_ios_feedback_flow.py` holds the copy to it), which is true only while the
 one path that moves credits is the owner running `scripts/grant_feedback_reward.py --apply`
 after confirming a report. Three things are pinned here:
 

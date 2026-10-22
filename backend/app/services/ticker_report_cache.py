@@ -301,7 +301,15 @@ TABLE_NAME = "ticker_report_cache"
 #     Services company is compared with its own industry from 10 companies or with no peer —
 #     never the FS sector median. Cached collections carry the old peer lines and verdicts. This
 #     ONE bump supersedes every instant above.
-CACHE_SCHEMA_FLOOR = datetime(2026, 10, 22, 1, 35, 0, tzinfo=timezone.utc)
+# 2026-10-22 (22:01 UTC = 18:01 ET, after the close; the push that merges the feedback branch into
+#     main, the owner's go): the re-stamp the entry above asked for. That deploy never ran, so these
+#     fixes reach production only now. The bump also covers the SEC buyback check (migration 202:
+#     a quarter the filing explains as tax withholding no longer charts as a buyback) and the Moat
+#     card's measured-only market row (migration 203: no projected value, its real growth window).
+#     Cached collections carry the old peer lines, buyback bars and projected market rows. The full
+#     suite ran on the exact merge tree BEFORE this literal was written. This ONE bump supersedes
+#     every instant above.
+CACHE_SCHEMA_FLOOR = datetime(2026, 10, 22, 22, 1, 0, tzinfo=timezone.utc)
 
 # The internal report key carrying the Financials sections a report lost to a degraded
 # upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.

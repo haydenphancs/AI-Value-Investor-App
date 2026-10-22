@@ -120,13 +120,14 @@ final class AppState {
     /// Device-global with no user id, so it is cleared in `discardDataForEndedSession()`.
     var pendingResearchTicker: String?
 
-    /// A Home Screen widget tap (`caydex://ticker/<SYMBOL>`), parked by `iosApp`'s
-    /// `.onOpenURL` and consumed by `ContentView`, which opens that asset's detail screen.
+    /// A Home Screen widget tap (`caydex://ticker/<SYMBOL>` or `caydex://updates/market`),
+    /// parked by `iosApp`'s `.onOpenURL` and consumed by `ContentView`, which opens that
+    /// asset's detail screen or the Updates tab's Market chip.
     ///
     /// Parked because the URL usually arrives before anything could show it. A cold launch
     /// delivers it during the splash, and a signed-out tap delivers it behind the sign-in wall
     /// (`ContentView` does not exist there). Parking is what turns a signed-out tap into "sign
-    /// in, then land on the ticker". See `DeepLinkRouter`.
+    /// in, then land on what you tapped". See `DeepLinkRouter`.
     ///
     /// ⚠️ Deliberately NOT cleared in `discardDataForEndedSession()`, unlike the two intents
     /// above. A parked tap is the CURRENT holder's request, not the ended account's data. The

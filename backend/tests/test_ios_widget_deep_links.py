@@ -1,4 +1,6 @@
-"""Source-scan guards for the widget → app deep link (`caydex://ticker/<SYMBOL>[?type=…]`).
+"""Source-scan guards for the widget → app deep links: `caydex://ticker/<SYMBOL>[?type=…]` (a
+Holdings tap → that asset's detail) and `caydex://updates/market` (a Market tap → the Updates tab
+on its Market chip; owner, 2026-10-22).
 
 There is no XCTest target, so these read the Swift source. They pin four things:
 
@@ -8,14 +10,15 @@ There is no XCTest target, so these read the Swift source. They pin four things:
    grammar, a `type` allow-list, and no unknown query keys. Any app or web page can open a
    `caydex://` URL, so this is untrusted input.
 2. THE OAUTH CALLBACK IS LEFT ALONE. `caydex` is also `APIConfig.oauthCallbackScheme`
-   (`caydex://auth-callback`). The parser recognises only the `ticker` host, and the scheme is
-   one value in all three places that name it.
+   (`caydex://auth-callback`). The parser recognises only the `ticker` and `updates` hosts, and
+   the scheme is one value in all three places that name it.
 3. SIGN-IN GATED (auth.md §1a). `.onOpenURL` only PARKS the link. `ContentView`, which exists
    only past the sign-in wall, opens it, and only once `DeepLinkRouter.canPresent` allows it
    plus the disclaimer and onboarding gates. A signed-out tap therefore lands on `SignInView`
    and never draws FMP data.
-4. THE WIDGET LINKS what it says it links: `.widgetURL` on the Small headline, a `Link` per row
-   on Medium/Large, market assets only when the server named their class.
+4. THE WIDGET LINKS what it says it links: `.widgetURL` once — the Holdings headline, or the
+   Updates Market chip in Market mode — and a `Link` per Holdings row on Medium/Large. Market
+   rows carry no `Link`: the whole Market tile opens Updates → Market.
 
 Every scan strips comments first and brace-bounds the declaration it means (testing.md §3).
 The explanatory comments beside this code name every token asserted here.
@@ -156,20 +159,68 @@ def test_the_scheme_is_one_value_in_all_three_places():
     )
 
 
-def test_the_parser_recognises_only_the_ticker_host():
+def test_the_parser_recognises_only_its_two_hosts():
     src = _read(_GRAMMAR)
     assert _string_constant(src, "tickerHost") == "ticker"
+    assert _string_constant(src, "updatesHost") == "updates"
+    assert _string_constant(src, "updatesMarketPath") == "/market"
     parse = _block(src, "public static func parse(_ url: URL) -> ParseResult")
-    assert "components.host?.lowercased() == tickerHost" in parse, (
-        "parse no longer pins the host: an OAuth `caydex://auth-callback` could be read as a ticker"
+    pin = "host == tickerHost || host == updatesHost"
+    # The condition must END there: `… || host == updatesHost || true` would still hold the pin.
+    assert re.search(
+        r"components\.scheme\?\.lowercased\(\) == scheme,\s*"
+        r"let host = components\.host\?\.lowercased\(\),\s*"
+        r"host == tickerHost \|\| host == updatesHost\s*else \{ return \.notOurLink \}",
+        parse,
+    ), (
+        "parse no longer pins the host to exactly its two: an OAuth `caydex://auth-callback` "
+        "could be read as a link of ours"
     )
-    guard = parse[parse.index("components.host?.lowercased() == tickerHost"):]
-    assert guard.index("else { return .notTickerLink }") < guard.index("return .ticker("), (
-        "a non-ticker host no longer short-circuits to .notTickerLink before a ticker is built"
+    guard = parse[parse.index(pin):]
+    not_ours = guard.index("else { return .notOurLink }")
+    assert not_ours < guard.index("return .ticker(") and not_ours < guard.index("return .updatesMarket"), (
+        "a foreign host no longer short-circuits to .notOurLink before any destination is built"
     )
     assert "auth-callback" not in src, (
         "the grammar special-cases the OAuth callback. It must not know about it at all: "
-        "anything that is not the ticker host is simply not ours"
+        "anything that is not one of its hosts is simply not ours"
+    )
+
+
+def test_an_updates_link_is_exactly_the_market_chip():
+    """`caydex://updates/market` and nothing near it: any app can open a caydex:// URL."""
+    parse = _block(_read(_GRAMMAR), "public static func parse(_ url: URL) -> ParseResult")
+    assert re.search(
+        r"guard components\.user == nil, components\.password == nil,\s*"
+        r"components\.port == nil, components\.fragment == nil\s*"
+        r'else \{ return \.malformed\(reason: "unexpected_component"\) \}',
+        parse,
+    ), "the credentials/port/fragment check lost a component: `caydex://u:p@updates/market#x` would open"
+    shared = parse.index('.malformed(reason: "unexpected_component")')
+    assert re.search(r"\n\s*if host == updatesHost \{", parse), (
+        "the updates branch's condition was widened: a ticker link entering it fails the path check "
+        "and every Holdings tap would open the app root"
+    )
+    branch = _block(parse, "if host == updatesHost")
+    branch_end = parse.index(branch) + len(branch)
+    assert parse.index("return .ticker(") > branch_end, "the ticker path no longer follows the updates branch"
+    assert branch.count("return .updatesMarket") == 1 and \
+        branch.index("return .updatesMarket") > branch.index("unknown_updates_path"), (
+        "the updates branch can answer .updatesMarket before both of its checks ran"
+    )
+    assert parse.index("if host == updatesHost") > shared, (
+        "the updates branch runs before the credentials/port/fragment check, so "
+        "`caydex://user@updates/market#x` would open"
+    )
+    assert 'guard components.query == nil else { return .malformed(reason: "unknown_query_key") }' in branch, (
+        "an updates link accepts a query (or a bare `?`): the grammar must be exact"
+    )
+    assert 'guard components.path == updatesMarketPath else {' in branch and \
+        '.malformed(reason: "unknown_updates_path")' in branch, (
+        "an updates link no longer pins its one path: `/research` or `/MARKET` would open"
+    )
+    assert branch.rstrip("}").rstrip().endswith("return .updatesMarket"), (
+        "the updates branch reaches something other than .updatesMarket"
     )
 
 
@@ -200,7 +251,8 @@ def test_the_query_is_an_allow_list():
     )
     parse = _block(src, "public static func parse(_ url: URL) -> ParseResult")
     for reason in ("unknown_query_key", "duplicate_type", "unknown_type", "extra_path",
-                   "invalid_symbol", "unexpected_component", "url_too_long"):
+                   "invalid_symbol", "unexpected_component", "url_too_long",
+                   "unknown_updates_path"):
         assert f'.malformed(reason: "{reason}")' in parse, (
             f"parse no longer refuses `{reason}`: a link outside the grammar would be coerced "
             "into the nearest valid one"
@@ -217,15 +269,21 @@ def test_links_are_built_only_by_the_grammar():
         "tickerURL no longer validates the symbol or no longer percent-encodes via URLComponents "
         "(`^GSPC` needs `%5E` in a path)"
     )
+    market = _block(_read(_GRAMMAR), "public static var updatesMarketURL: URL?")
+    for part in ("URLComponents()", "components.host = updatesHost",
+                 "components.path = updatesMarketPath", "components.scheme = scheme"):
+        assert part in market, f"updatesMarketURL no longer builds from the grammar's own constants ({part})"
     offenders = []
     for root in (_APP, _SHARED, _WIDGETS):
         for path in _swift_files(root):
             if path == _GRAMMAR:
                 continue
             code = _strip_comments(path.read_text(encoding="utf-8"))
-            if re.search(r'"caydex://ticker', code) or re.search(r'URL\(string:\s*"caydex://', code):
+            if re.search(r'"caydex://(?:ticker|updates)', code) or re.search(r'URL\(string:\s*"caydex://', code):
                 offenders.append(str(path.relative_to(_ROOT)))
-    assert not offenders, f"hand-built caydex:// ticker URLs (use CaydexDeepLink.tickerURL): {offenders}"
+    assert not offenders, (
+        f"hand-built caydex:// URLs (use CaydexDeepLink.tickerURL / .updatesMarketURL): {offenders}"
+    )
 
 
 # ── 2. The app parks, then opens behind the wall ─────────────────────────────
@@ -254,17 +312,28 @@ def test_there_is_exactly_one_open_url_handler():
     assert hits == ["ios/iosApp.swift"], f"expected one .onOpenURL in iosApp.swift, found {hits}"
 
 
-def test_the_router_declines_everything_but_a_ticker_link():
-    body = _block(_read(_ROUTER), "static func pendingLink(for url: URL")
+def test_the_router_parks_only_its_two_destinations():
+    router = _read(_ROUTER)
+    destination = _block(router, "enum Destination: Equatable")
+    cases = re.findall(r"^\s*case (\w+)", destination, re.M)
+    assert cases == ["ticker", "updatesMarket"], (
+        f"PendingDeepLink.Destination is {cases}: a link may open a ticker detail or the Updates "
+        "Market chip, nothing else (never a report, a chat or a credit)"
+    )
+    body = _block(router, "static func pendingLink(for url: URL")
     assert "CaydexDeepLink.parse(url)" in body
-    ticker = body[body.index("case .ticker(let ticker):"):body.index("case .notTickerLink:")]
+    ticker = body[body.index("case .ticker(let ticker):"):body.index("case .updatesMarket:")]
     assert "MarketTickerType.resolve(" in ticker, (
         "the router picks the screen by its own rule. It must use the resolver search results "
         "use, which sends `BTCUSD` to the crypto screen even when typed `stock`"
     )
-    not_ours = body[body.index("case .notTickerLink:"):body.index("case .malformed")]
+    market = body[body.index("case .updatesMarket:"):body.index("case .notOurLink:")]
+    assert "PendingDeepLink(destination: .updatesMarket, receivedAt: now)" in market and "log.info(" in market, (
+        "an updates/market link is no longer parked (and logged) like a ticker link"
+    )
+    not_ours = body[body.index("case .notOurLink:"):body.index("case .malformed")]
     assert "return nil" in not_ours and "log." in not_ours, (
-        "a non-ticker URL (e.g. the OAuth callback) is no longer ignored-and-logged"
+        "a URL that is not ours (e.g. the OAuth callback) is no longer ignored-and-logged"
     )
     malformed = body[body.index("case .malformed"):]
     assert "log.warning(" in malformed and "return nil" in malformed, (
@@ -324,8 +393,18 @@ def test_content_view_consumes_the_link_once_every_gate_is_open():
     assert "DeepLinkRouter.freshLink(parked)" in handler, "an expired parked link would still open"
 
 
-def test_present_tears_down_then_opens_a_ticker_destination():
+def test_present_dispatches_every_destination_exhaustively():
     body = _block(_read(_CONTENT), "private func presentDeepLink(_ link: PendingDeepLink)")
+    assert "switch link.destination {" in body and "default" not in body, (
+        "presentDeepLink no longer switches exhaustively on the destination"
+    )
+    assert "case .ticker(let symbol, let assetType):" in body and \
+        "presentTickerLink(symbol: symbol, assetType: assetType)" in body
+    assert "case .updatesMarket:" in body and "openUpdatesMarket()" in body
+
+
+def test_present_tears_down_then_opens_a_ticker_destination():
+    body = _block(_read(_CONTENT), "private func presentTickerLink(symbol: String, assetType: MarketTickerType)")
     assert "destination: .default" in body and "target: .ticker(" in body, (
         "a widget tap opens something other than the ticker detail"
     )
@@ -340,6 +419,96 @@ def test_present_tears_down_then_opens_a_ticker_destination():
     )
     assert ".alertDestinationCover($openedPushDestination)" in _read(_CONTENT), (
         "the shell's destination cover is gone: the deep link would assign into nothing"
+    )
+
+
+_UPDATES_VIEW = _APP / "Views" / "Screens" / "UpdatesView.swift"
+_UPDATES_VM = _APP / "ViewModels" / "UpdatesViewModel.swift"
+
+
+def test_a_market_link_tears_down_then_opens_updates_on_the_market_chip():
+    content = _read(_CONTENT)
+    body = _block(content, "private func openUpdatesMarket()")
+    opened = _block(body, "let open = {")
+    assert "selectedTab = .updates" in opened and "updatesMarketFocusSeq &+= 1" in opened, (
+        "a Market widget tap no longer lands on the Updates tab with a fresh focus request"
+    )
+    for banned in (".report(", "openedPushDestination", "isAIChatPresented"):
+        assert banned not in body, f"a Market widget tap reaches `{banned}`; it only opens Updates"
+    assert opened.index("AudioManager.shared.collapsePlayer()") < opened.index("selectedTab = .updates"), (
+        "the expanded audio player is not collapsed first: it is a ZStack layer the presentation "
+        "probe never sees, so the tab would switch underneath it"
+    )
+    fast = _block(body, "guard ModalPresentationProbe.isAnythingPresented else")
+    assert "open()" in fast and "return" in fast, "the nothing-presented fast path no longer opens and returns"
+    assert body.count("open()") == 2, "open() runs somewhere other than the fast path and after the teardown"
+    teardown = body.index("appState.dismissAllPresentations()")
+    before = body[:teardown].replace(fast, "")
+    assert "open()" not in before, (
+        "Updates opens before the teardown: it would change UNDER an open cover and the user "
+        "would land nowhere visible"
+    )
+    wait = body.index("waitUntilNothingPresented()")
+    assert teardown < wait < body.rindex("open()"), (
+        "the tab switches before the presentations are down: Updates would change UNDER an open "
+        "cover and the user would land nowhere visible"
+    )
+    assert "UpdatesView(selectedTab: $selectedTab, marketFocusSeq: updatesMarketFocusSeq)" in content, (
+        "ContentView no longer hands the focus request to the Updates tab"
+    )
+
+
+def test_the_updates_tab_selects_market_and_scrolls_to_the_insight_card():
+    view = _read(_UPDATES_VIEW)
+    handler = _block(view, ".onChange(of: marketFocusSeq)")
+    assert "viewModel.focusMarket()" in handler and "scrollProxy.scrollTo(Self.feedTopID, anchor: .top)" in handler, (
+        "a Market widget tap no longer selects the Market chip and scrolls to the top, where the "
+        "Market Insight card leads"
+    )
+    stack = _block(view, "LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders])")
+    anchor = stack.index(".id(Self.feedTopID)")
+    assert anchor < stack.index("InsightsSummaryCard("), (
+        "the scroll anchor is no longer above the Insights card, so the tap would land below it"
+    )
+    assert "Color.clear\n" in stack[:anchor] and ".frame(height: 0)" in stack[:anchor], (
+        "the top anchor is no longer a zero-height, never-resizing child of the LazyVStack"
+    )
+
+    reset = _block(view, ".onPresentationReset {")
+    for cleared in ("browserLink = nil", "viewModel.watchlistError = nil", "showSearch = false",
+                    "insightSources = nil"):
+        assert cleared in reset, (
+            f"Updates' presentation reset no longer clears `{cleared}`: a Market widget tap lands on "
+            "this tab and anything left up covers it"
+        )
+
+    strip = _read(_APP / "Views" / "Organisms" / "UpdatesTabBar.swift")
+    chips = _block(strip, "ForEach(tabs) { tab in")
+    assert ".id(tab.scope)" in chips, "the chips carry no scroll id by scope"
+    follow = _block(strip, ".onChange(of: selectedTab?.scope)")
+    assert "proxy.scrollTo(scope)" in follow and "anchor" not in follow, (
+        "the chip strip no longer brings a code-made selection into view (or jumps a visible chip "
+        "with an anchor): the Market chip could stay scrolled off-screen"
+    )
+    reveal = _block(strip, ".onChange(of: marketRevealSeq)")
+    assert "proxy.scrollTo(UpdatesScope.market)" in reveal, (
+        "a Market widget tap no longer reveals the Market chip when it was ALREADY selected (no "
+        "selection change, so the scope handler never fires)"
+    )
+    assert "marketRevealSeq: marketFocusSeq" in view, "UpdatesView no longer hands the tap to the chip strip"
+
+    focus = _block(_read(_UPDATES_VM), "func focusMarket()")
+    assert "pendingScope = UpdatesScope.market" in focus, (
+        "focusMarket no longer re-points the session-heal stash: it outranks the selection, so "
+        "/tabs would carry the user straight back to the chip they left"
+    )
+    assert focus.index("pendingScope = UpdatesScope.market") < focus.index("selectedTab = market"), (
+        "the stash must move before the selection fires its load"
+    )
+    assert "filterTabs.first(where: { $0.isMarketTab }) ?? Self.marketTabFallback" in focus
+    assert "loadFeed" not in focus, (
+        "focusMarket loads the feed itself: the view's .onChange(of: selectedTab) → selectTab "
+        "already does, so it would load twice"
     )
 
 
@@ -381,13 +550,19 @@ def test_one_widget_url_set_on_the_root_to_the_holdings_headline():
     body = _block(_block(src, "struct MoversWidgetView: View"), "var body: some View")
     assert ".widgetURL(tileURL)" in body, "the tile-wide URL is no longer set on the root view"
     tile = _block(src, "private var tileURL: URL?")
-    for cond in ("!entry.isSignedOut", "entry.mode == .portfolio", 'snap.mode == "portfolio"',
+    for cond in ("entry.mode == .portfolio", 'snap.mode == "portfolio"',
                  "let headline = snap.headlineMover"):
         assert cond in tile, (
             f"tileURL lost `{cond}`: a Small tile would link a mover the user does not hold "
-            "(a market payload standing in for Holdings), or link while signed out"
+            "(a market payload standing in for Holdings)"
         )
     assert "return headline.deepLink" in tile
+    signed_out = tile.index("guard !entry.isSignedOut else { return nil }")
+    market = tile.index("if entry.mode == .market {")
+    assert signed_out < market, "a signed-out tile links somewhere: the signed-out check must come first"
+    assert "return CaydexDeepLink.updatesMarketURL" in _block(tile[market:], "if entry.mode == .market {"), (
+        "a Market tile tap no longer opens the Updates tab's Market chip (owner, 2026-10-22)"
+    )
 
 
 def test_rows_link_through_on_medium_and_large():
@@ -401,12 +576,20 @@ def test_rows_link_through_on_medium_and_large():
     assert ".tapThrough($0.deepLink)" in _block(src, "private struct MoverColumn: View"), (
         "a Large rising/falling row no longer links to its ticker"
     )
-    assert ".tapThrough(assets[i].deepLink)" in _block(src, "private struct AssetGrid: View"), (
-        "a Medium market cell no longer links to its asset"
+    holdings = side.count(".tapThrough(") + _block(src, "private struct MoverColumn: View").count(".tapThrough(")
+    assert src.count(".tapThrough(") == holdings == 5, (
+        f"{src.count('.tapThrough(')} `.tapThrough(` calls, {holdings} of them in the Holdings rows: a "
+        "row link appeared outside SidePanel/MoverColumn. The whole Market tile opens Updates → "
+        "Market (owner, 2026-10-22); on Medium/Large its rows cover most of the tile"
     )
-    assert ".tapThrough($0.deepLink)" in _block(src, "private struct AssetPriceList: View"), (
-        "a Large market row no longer links to its asset"
-    )
+    for m in re.finditer(r"(?:private |fileprivate )?struct (\w+)[^{\n]*\{", src):
+        decl = _block(src[m.start():], m.group(0))
+        if "WidgetIndex" in decl:
+            for link in ("tapThrough(", "tickerURL(", "Link(destination"):
+                assert link not in decl, (
+                    f"{m.group(1)} draws a market asset and links it (`{link}`): a Market row would "
+                    "take the tap from Updates → Market, and an unclassified SPY opens the STOCK screen"
+                )
 
 
 def test_links_are_drawn_only_where_widgetkit_honours_them():
@@ -427,12 +610,11 @@ def test_links_are_drawn_only_where_widgetkit_honours_them():
     )
 
 
-def test_asset_classes_come_from_the_server_and_markets_never_guess():
+def test_asset_classes_come_from_the_server():
     src = _read(_WIDGET)
-    index_link = _block(_block(src, "private extension WidgetIndex"), "var deepLink: URL?")
-    assert "guard let assetClass = CaydexDeepLink.AssetClass(wire: assetType) else { return nil }" in index_link, (
-        "a market asset links with no server-named class: SPY/ONEQ/DIA would resolve to the "
-        "STOCK screen. No link beats a wrong screen"
+    assert "private extension WidgetIndex" not in src, (
+        "a market asset links again. If market rows ever link, the old rule returns with them: "
+        "ONLY with a server-named class — an unclassified SPY resolves to the STOCK screen"
     )
     mover_link = _block(_block(src, "private extension WidgetMover"), "var deepLink: URL?")
     assert "CaydexDeepLink.tickerURL(symbol: ticker, assetClass: CaydexDeepLink.AssetClass(wire: assetType))" in mover_link

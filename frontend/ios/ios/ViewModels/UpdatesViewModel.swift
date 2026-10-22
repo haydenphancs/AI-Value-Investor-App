@@ -741,6 +741,24 @@ final class UpdatesViewModel: ObservableObject {
         Task { await loadFeed(for: tab, force: false) }
     }
 
+    /// The Market chip — a Market widget tap (`caydex://updates/market`, owner 2026-10-22).
+    ///
+    /// The stash first: while `pendingScope` is set (a session heal, before a live /tabs) it
+    /// OUTRANKS the selection — `loadTabs` re-selects from `selectedTab?.scope ?? pendingScope`
+    /// and `handleIdentityChange` keeps the stash over the selection — so a stash left on a
+    /// ticker chip would carry the user straight back off Market. Then the selection, through
+    /// the view's `.onChange(of: selectedTab)` → `selectTab` → `loadFeed`, the path a chip tap
+    /// takes; already on Market, nothing reloads. Before any /tabs answer this is the same
+    /// seeded Market chip `loadTabs` falls back to, which /tabs then keeps (an equal scope).
+    func focusMarket() {
+        if pendingScope != nil {
+            pendingScope = UpdatesScope.market
+        }
+        let market = filterTabs.first(where: { $0.isMarketTab }) ?? Self.marketTabFallback
+        guard selectedTab?.scope != market.scope else { return }
+        selectedTab = market
+    }
+
     func openFilterOptions() {
         showFilterSheet = true
     }

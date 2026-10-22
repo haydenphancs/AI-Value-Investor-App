@@ -493,6 +493,11 @@ The `CaydexWidgets` extension answers two different questions, and each has its 
   Never a single stock. The extension fetches `GET /widget/market-mover` itself with the
   market-scoped widget token (auth.md §8a). The equities ride the payload's own batch quote,
   and Bitcoin comes from the Home pulse's 600 s crypto tile, never a fresh CoinGecko call.
+  A tap anywhere on a Market tile (every family) opens `caydex://updates/market`: the Updates
+  tab on its Market chip, scrolled to the Market Insight card (owner, 2026-10-22). Its asset
+  rows carry no link of their own. A Holdings tap still opens `caydex://ticker/<SYMBOL>` (the
+  headline mover, or the tapped row on Medium/Large). Both links go through the one grammar
+  (`Shared/CaydexDeepLink.swift`) and are parked behind the sign-in gate (`DeepLinkRouter`).
 - **Holdings** — the user's active group: the biggest ABSOLUTE % mover with its deterministic
   cause, ▲/▼ counts over every holding, and the top gainers and losers. Since 2026-10-14 the
   cause can also be the session's Updates Insights card ("Bearish News" + its headline), but

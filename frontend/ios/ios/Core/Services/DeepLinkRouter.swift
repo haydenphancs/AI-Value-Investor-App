@@ -15,13 +15,29 @@ import OSLog
 /// could present it. A cold launch from a widget tap delivers it while the splash is up (auth
 /// `.unknown` / `.loading`). A signed-out tap delivers it behind the sign-in wall. The
 /// consumer, `ContentView`, only exists once the user is past the wall. So parking it here is
-/// what turns "signed out" into "sign in, then land on the ticker you tapped".
+/// what turns "signed out" into "sign in, then land on what you tapped".
 struct PendingDeepLink: Equatable {
-    /// So a second tap on the same ticker is still a CHANGE that `onChange` observes.
+    /// Where a widget tap goes. A closed set: the grammar (`CaydexDeepLink`) has nowhere to
+    /// name anything else, so no link can reach a report, a chat or a credit.
+    enum Destination: Equatable {
+        /// A Holdings tap: that asset's detail screen.
+        case ticker(symbol: String, assetType: MarketTickerType)
+        /// A Market tap: the Updates tab on its Market chip, the Market Insight card first.
+        case updatesMarket
+    }
+
+    /// So a second tap on the same destination is still a CHANGE that `onChange` observes.
     let id = UUID()
-    let symbol: String
-    let assetType: MarketTickerType
+    let destination: Destination
     let receivedAt: Date
+
+    /// For the deeplink log lines.
+    var logLabel: String {
+        switch destination {
+        case .ticker(let symbol, _): return "ticker=\(symbol)"
+        case .updatesMarket: return "updates/market"
+        }
+    }
 
     /// How long a parked tap stays meaningful. Past this the link is dropped, not opened: a
     /// sign-in that took the whole afternoon must not end on a screen the user no longer
@@ -38,8 +54,9 @@ enum DeepLinkRouter {
 
     /// `.onOpenURL` → the link to park, or nil (always logged) for anything that is not one.
     ///
-    /// Only ever opens a ticker DETAIL screen. No link can generate a report, start a chat or
-    /// spend a credit, because the grammar has nowhere to say so.
+    /// Only ever opens a ticker DETAIL screen or the Updates tab's Market chip. No link can
+    /// generate a report, start a chat or spend a credit, because the grammar has nowhere to
+    /// say so.
     static func pendingLink(for url: URL, now: Date = Date()) -> PendingDeepLink? {
         switch CaydexDeepLink.parse(url) {
         case .ticker(let ticker):
@@ -50,11 +67,17 @@ enum DeepLinkRouter {
                 ticker.assetClass?.rawValue, symbol: ticker.symbol
             )
             log.info("deep link parked: ticker=\(ticker.symbol, privacy: .public) type=\(assetType.rawValue, privacy: .public)")
-            return PendingDeepLink(symbol: ticker.symbol, assetType: assetType, receivedAt: now)
-        case .notTickerLink:
+            return PendingDeepLink(
+                destination: .ticker(symbol: ticker.symbol, assetType: assetType), receivedAt: now
+            )
+        case .updatesMarket:
+            // Behind the same gates as a ticker: every Updates request is `.signInRequired`.
+            log.info("deep link parked: updates/market")
+            return PendingDeepLink(destination: .updatesMarket, receivedAt: now)
+        case .notOurLink:
             // Another scheme, or another `caydex` host such as the OAuth `auth-callback`.
             // Not ours: left for whoever owns it, and never navigated on.
-            log.info("open URL ignored: not a ticker link (scheme=\(url.scheme ?? "-", privacy: .public) host=\(url.host ?? "-", privacy: .public))")
+            log.info("open URL ignored: not a widget link (scheme=\(url.scheme ?? "-", privacy: .public) host=\(url.host ?? "-", privacy: .public))")
             return nil
         case .malformed(let reason):
             log.warning("deep link declined: \(reason, privacy: .public) (host=\(url.host ?? "-", privacy: .public))")
@@ -66,7 +89,7 @@ enum DeepLinkRouter {
     static func freshLink(_ link: PendingDeepLink, now: Date = Date()) -> PendingDeepLink? {
         guard link.isExpired(now: now) else { return link }
         let waited = Int(now.timeIntervalSince(link.receivedAt))
-        log.info("deep link dropped: parked \(waited, privacy: .public)s, past maxAge (ticker=\(link.symbol, privacy: .public))")
+        log.info("deep link dropped: parked \(waited, privacy: .public)s, past maxAge (\(link.logLabel, privacy: .public))")
         return nil
     }
 

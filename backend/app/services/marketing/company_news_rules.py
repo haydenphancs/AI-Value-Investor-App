@@ -494,7 +494,7 @@ THIRTEEN_F_AMENDED_LABEL = "SEC Form 13F-HR/A"
 MONEY_MAP_SEED: Tuple[str, ...] = (
     "AAPL", "MSFT", "AMZN", "GOOGL", "META", "NVDA", "COST", "WMT", "KO", "PEP",
     "MCD", "NKE", "SBUX", "DIS", "NFLX", "PG", "JNJ", "TSLA", "HD", "TGT",
-    "CAT", "DE", "BA", "HON", "UPS", "FDX", "XOM", "CVX", "T", "VZ",
+    "CAT", "DE", "BA", "HON", "UPS", "FDX", "XOM", "CVX", "VZ",
     "CMCSA", "ADBE", "CRM", "ORCL", "INTC", "AMD", "QCOM", "CSCO", "IBM", "UBER",
     "ABNB", "BKNG", "YUM", "HSY", "MDLZ", "CL", "KMB", "LLY", "PFE", "ABBV",
     "MRK", "AMGN", "ABT", "TMO", "EA", "INTU",
@@ -508,6 +508,11 @@ MONEY_MAP_EXCLUDED_SYMBOLS: FrozenSet[str] = frozenset({
     "UNH", "CVS", "CI", "ELV", "HUM", "CNC", "MOH", "MET", "PRU", "AIG", "ALL", "PGR", "TRV",
     "CB", "AFL",
     "AMT", "PLD", "SPG", "O", "EQIX", "PSA", "CCI", "WELL", "DLR", "CBRE", "VICI",
+    # Bad feed data, not a sector rule (owner, 2026-10-21): FMP's AT&T product segmentation files ~$24.5B
+    # (likely equipment sales) under "Other Capitalized Property Plant and Equipment", and its FY2025 "IP
+    # Broadband" / "Legacy Voice and Data" lines look swapped against FY2024 ($11.2B → $3.5B, $1.5B → $10.4B).
+    # No label override can fix swapped figures, so AT&T never gets a Money Map until the feed is verified.
+    "T",
 })
 
 

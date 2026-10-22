@@ -169,14 +169,19 @@ is shown for at most 96 h, and is replaced by the live answer as soon as that la
 └─────────────────┘        └─────────────────┘        └─────────────────┘
 ```
 
-**Integrations** (`backend/app/integrations/`, **17** modules): `fmp`, `gemini`, `coingecko`, `fred`,
+**Integrations** (`backend/app/integrations/`, **18** modules): `fmp`, `gemini`, `coingecko`, `fred`,
 `finra_short_interest`, `apewisdom`, `alternative_me`, `census`, `openfda`, `uspto`, `app_store`,
 `openai_compat`, `telegram` (the marketing review bot, §12.9), `x_api`, `bluesky` and `upload_post`
 (the marketing publisher's platforms, §12.10), and `brave_search` (the Brave Search API behind report
 chat's `web_search` tool, offered only on a turn where the user explicitly asks to search, look up or
 verify; called only by `app/services/chat_web_search_service.py`, which holds the gate, the per-turn
 single search, the fail-closed daily budget and a per-user transient cache — no Supabase tier and no
-cross-user cache, because Brave's terms allow transient storage only).
+cross-user cache, because Brave's terms allow transient storage only), and `sec_edgar` (SEC EDGAR
+XBRL `companyconcept` facts, 2026-10-22: the check on Signal of Confidence buybacks, called only by
+`app/services/sec_concept_service.py`, which owns the two-tier cache `sec_concept_cache`. SEC's
+fair-access policy needs a declared `SEC_EDGAR_USER_AGENT` ("Company contact@email"; blank or not
+printable ASCII turns the check off) and at most 10 requests/second per client — the client paces itself at
+`SEC_EDGAR_MAX_RPS` (5) per process and treats a 403 as throttling, with a 10-minute circuit).
 **No Google Search grounding** (retired 2026-10-02). Gemini's `google_search` tool is not used
 anywhere: the Gemini API Additional Terms let a grounded answer be shown only to the end user who
 sent the prompt, together with Google's Search Suggestions, unmodified, and never cached, stored or
@@ -1353,7 +1358,21 @@ Power or Signal of Confidence adds nothing to `degraded` — the calendar only s
 Supabase write (`_earnings_common.CALENDAR_UNKNOWN`), so a row is never stored without its
 key. A Signal of Confidence quarter whose cash-flow row is missing ships
 `cash_flow_reported: false` (its cash fields are 0.0 placeholders that iOS prints as "—");
-`cash_flow_row` in `degraded` now means only "the newest quarter's row has not landed". The
+`cash_flow_row` in `degraded` now means only "the newest quarter's row has not landed".
+Signal of Confidence's buybacks are checked against the company's SEC filing (2026-10-22,
+`_buyback_verification`): FMP's `commonStockRepurchased` carried employee tax withholding or
+preferred redemptions in 11 of 120 surveyed quarters (INTC's "$617M buybacks" were RSU
+withholdings). The check only LOWERS a figure, and only where the filing explains the excess;
+it runs only when a row the chart can read carries a buyback. When SEC fails or runs past 10 s
+and no cached filing data of at most 30 days is left — or the cached data ends before a quarter
+it left unchecked — the build keeps FMP's figures and is degraded `buyback_check` (blocking for
+the report, and chat states no buyback figure); a company SEC has no data for, no CIK, or the
+check switched off is a steady state, not degradation. The deep door's research tools never
+hand the model FMP's raw dividend or buyback lines either (`fmp_tools`, 2026-10-22: INTC's
+Q2 2026 −$14.3B "dividend" was a payment to a minority partner): a cash-flow tool result for
+the report's own ticker carries its Signal of Confidence figures (`shareholder_returns_block`,
+yields only on a USD statement; a degraded or missing build is "unavailable", never zero), and
+for any other ticker a note that they were left out. The
 earnings, growth, profit-power, health-check, revenue-breakdown and SoC rows carry a
 `payload_version` inside their JSON, bumped whenever a field or a FORMULA changes, so rows
 written by the previous code are rebuilt on first read. A plausibility REPAIR (the earnings
@@ -5877,7 +5896,7 @@ backend/
 │   │       ├── api.py            # router registration
 │   │       └── endpoints/        # 24 modules; HTTP surface only (marketing_internal.py is worker-facing, §12)
 │   ├── core/security.py          # (config and dependencies are NOT here — see below)
-│   ├── integrations/             # 17 thin HTTP clients + fmp_entitlements (data only)
+│   ├── integrations/             # 18 thin HTTP clients + fmp_entitlements (data only)
 │   ├── models/                   # EMPTY. Vestigial. There is no ORM — CLAUDE.md invariant #5
 │   ├── schemas/                  # Pydantic v2 request/response models
 │   ├── services/
@@ -5931,6 +5950,7 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | Jun 2026 | Separate weekly TTM job vs quarterly fiscal recompute; period-type-scoped freshness | TTM drifts daily, fiscal only on earnings; non-overlapping windows avoid FMP contention | One combined recompute job |
 | Jul 2026 | `_spawn` supervision + a reconciliation sweeper, rather than a task queue | Makes "tasks don't survive restarts" survivable: a strong handle is retained, `add_done_callback` logs a dying loop, and `research_reconciliation_service` re-refunds work a dead worker abandoned | Celery, RQ, Dramatiq (all still rejected) |
 | Jul 2026 | Flat string error codes (`INSUFFICIENT_CREDITS`), not numbered (`BIZ_2001`) | Greppable across backend + iOS; the code IS the name, so a mismatch is visible at the call site | Numbered enum per the original §6.2 sketch |
+| Oct 2026 | Buybacks checked against SEC XBRL, remove-only (`_buyback_verification`, `sec_edgar`) | FMP filed employee tax withholding / preferred redemptions as `commonStockRepurchased` in 11 of 120 surveyed quarters (INTC charted $617M of "buybacks" with none made); where a filing has a non-zero repurchase line FMP matched it 67 of 67, so only an EXPLAINED excess is removed and a figure is never raised | FMP minus SEC withholding (wrong for the 67 correct rows); FMP's as-reported statements (not on the Order Form, and INTC's rows lack the tags); a relabel only; a per-ticker override table |
 | Jul 2026 | `key_prefix` namespacing on the agent dedup key | The deep and direct report pipelines produce DIFFERENT reports for the same `(ticker, persona)`; one namespace would let a deep caller attach to a direct leader and be charged deep price for a shallow report | One shared dedup namespace |
 | Jul 2026 | Repository pattern landed as ONE repository, no protocol layer, no DI | `StockRepository` is the only one that caches; four others are thin. The Jan 2026 decision is honoured in spirit, not in the shape that entry implies | Full protocol + injection per the original sketch |
 | Aug 2026 | Two credit pools — granted (expires) + purchased (never expires) | App Store Guideline 3.1.1 forbids purchased credits expiring; three existing RPCs each destroyed or mishandled a cash-bought balance | One pool with an expiry flag (violates 3.1.1) |

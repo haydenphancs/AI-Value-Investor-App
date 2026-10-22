@@ -1514,11 +1514,16 @@ def _dividends_block(soc: Any, kf: Optional[Dict[str, Any]]) -> Optional[Dict[st
             else (f"{_text(key_row, 40)} (annual dividend per share in {_trading_label(kf)}, "
                   "and its yield at the live price)"))
     degraded = _get(soc, "degraded") or []
+    legs = [d for d in degraded if isinstance(d, str)] if isinstance(degraded, (list, tuple)) else []
+    # `buyback_check` (the SEC check on FMP's buyback figure could not run) says nothing
+    # about dividends: only the OTHER reasons make the dividend unconfirmed.
+    buyback_unchecked = "buyback_check" in legs
+    dividend_legs = [d for d in legs if d != "buyback_check"]
     info = _get(soc, "dividend_info")
     summary = _get(soc, "summary")
     if info is None:
         block["dividend"] = (
-            "could not be confirmed in this build" if degraded
+            "could not be confirmed in this build" if dividend_legs
             else "Caydex's records show no current dividend")
     else:
         # Yields to 2 dp — the precision Key Stats prints (0.45%, never rounded to 0.5%). A
@@ -1560,7 +1565,12 @@ def _dividends_block(soc: Any, kf: Optional[Dict[str, Any]]) -> Optional[Dict[st
         if pay:
             block["latest_payment_date"] = pay
     by = _pct(_get(summary, "buyback_yield"), signed=False, digits=2)
-    if by and _num(_get(summary, "buyback_yield")) != 0:
+    if buyback_unchecked:
+        # FMP's unchecked figure can be employee tax withholding (INTC's "buybacks"): the
+        # report refuses such a build, and chat must not state its yield either.
+        block["buybacks"] = ("could not be checked against the company's filing in this "
+                             "build - do not state a buyback figure, and never treat it as zero")
+    elif by and _num(_get(summary, "buyback_yield")) != 0:
         block["buyback_yield_ttm"] = by
     if _get(summary, "share_count_change_known") is True:
         scc = _pct(_get(summary, "share_count_change"))

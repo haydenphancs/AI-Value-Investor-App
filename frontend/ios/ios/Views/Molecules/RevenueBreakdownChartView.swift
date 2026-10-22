@@ -23,14 +23,23 @@ struct RevenueBreakdownChartView: View {
     private let minimumNetBarHeight: CGFloat = 2
     /// Closest two axis labels may sit (one `caption` line) before they print on each other.
     private let minimumLabelGap: CGFloat = 16
+    /// The green credit lane on the right of the cost column. The column keeps its width:
+    /// a fourth column would leave only 2–17pt between three 55pt bars on a phone.
+    private let creditLaneWidth: CGFloat = 18
+    /// Gap between the cost lane and the credit lane inside the cost column.
+    private let laneGap: CGFloat = 2
+    /// A credit never vanishes: a sliver of other income still gets a visible step.
+    private let minimumCreditStepHeight: CGFloat = 2
 
     // MARK: - Bounds — sized from what is DRAWN, one rule for profit and loss
     //
     // Three columns are drawn: the revenue stack from 0 up to `totalRevenue`, the cost
-    // waterfall from `totalRevenue` DOWN by `drawnWaterfallTotal` (credits are skipped), and
-    // the net bar from 0 to `netProfit`. The plot must contain all three plus the net bar's
-    // caption. It used to be sized from `max(totalRevenue, totalCosts)` with a floor fixed at
-    // 0 in a profit year, so:
+    // column, and the net bar from 0 to `netProfit`. The cost column holds two lanes: the
+    // costs, from `totalRevenue` DOWN by `drawnWaterfallTotal`, and — when the year has
+    // credits — a green lane that rises from the costs' foot by `drawnCreditTotal` to
+    // `creditStepTop` (net income, given the backend's plug). The plot must contain all of
+    // it plus the net bar's caption. It used to be sized from `max(totalRevenue, totalCosts)`
+    // with a floor fixed at 0 in a profit year, so:
     //   • an operating loss rescued by other income (a profit year whose drawn costs exceed
     //     revenue) ran the cost column out of the bottom of the frame, into the legend;
     //   • net income above revenue (a divestiture gain) drew the profit bar ~380pt tall in
@@ -45,8 +54,10 @@ struct RevenueBreakdownChartView: View {
     /// (top − NI)·h ≥ l·(top − bottom)  ⇔  top ≥ (NI·h − l·bottom) / (h − l).
     /// Only a PROFIT bar carries its caption above it. NB: in a profit year
     /// `chartBottomValue` does not read this property, so the two never recurse.
+    /// `creditStepTop` is net income whenever the backend sent its plug; without one (an
+    /// older deploy) a tax benefit can end the credit lane higher, and the top must hold it.
     private var chartTopValue: Double {
-        let ceiling = max(data.totalRevenue, data.netProfit, data.drawnWaterfallTotal, 0) * 1.1
+        let ceiling = max(data.totalRevenue, data.netProfit, data.drawnWaterfallTotal, data.creditStepTop, 0) * 1.1
         guard data.isProfit else { return ceiling }
         let h = Double(chartHeight)
         let l = Double(captionAllowance)
@@ -54,10 +65,11 @@ struct RevenueBreakdownChartView: View {
         return needed.isFinite ? max(ceiling, needed) : ceiling
     }
 
-    /// Bottom of the plot: below the LOWER of the reported net result and where the drawn
-    /// waterfall actually lands — in BOTH branches. The waterfall skips credit lines (income
-    /// is not a cost), so with a credit it ends BELOW net income — INTC FY2025 lands at
-    /// −1.55B against a −0.27B loss — and in a profit year it can still end below zero.
+    /// Bottom of the plot: below the LOWER of the reported net result and where the cost
+    /// lane actually lands — in BOTH branches. The cost lane stacks only costs (a credit is
+    /// income, and rises in the green lane from this foot), so with a credit it ends BELOW
+    /// net income — INTC FY2025 lands at −3.745B against a −0.267B loss — and in a profit
+    /// year it can still end below zero. The credit lane's foot is this same point.
     /// A loss bar's caption hangs under it; reserved in closed form:
     /// (NI − bottom)·h ≥ l·(top − bottom)  ⇔  bottom ≤ (NI·h − l·top) / (h − l).
     /// NB: in a loss year `chartTopValue` does not read this property.
@@ -155,6 +167,10 @@ struct RevenueBreakdownChartView: View {
                 rightYAxis
                     .frame(width: rightAxisWidth)
             }
+            // One sentence for VoiceOver instead of ten bare axis ticks; the bars carry no
+            // text of their own, so the credit lane would otherwise be silent too.
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(data.chartAccessibilityLabel)
         } else {
             noRevenuePlaceholder
         }
@@ -249,6 +265,12 @@ struct RevenueBreakdownChartView: View {
                 // Cost waterfall bar (center) - descends FROM TOP of the revenue stack
                 costWaterfallBar(height: height, barWidth: barWidth)
                     .position(x: width * 0.50, y: height / 2)
+
+                // Credit lane (same column, right-hand lane) - rises from the costs' foot
+                if data.drawnCreditTotal > 0 {
+                    creditStepBar(height: height, barWidth: barWidth)
+                        .position(x: width * 0.50, y: height / 2)
+                }
 
                 // Net profit/loss bar (right side)
                 netProfitBar(height: height, barWidth: barWidth)
@@ -347,13 +369,16 @@ struct RevenueBreakdownChartView: View {
         // Driven by `data.costItems` rather than three hardcoded lines, so the bar and the
         // legend cannot disagree about what the segments ARE. Two consequences:
         //   • "Interest & Other" appears once the backend sends the composition;
-        //   • a CREDIT is excluded — it is income, not a cost, so it has no business in a
-        //     cost bar. The `max(h, 0)` clamp above used to be the only thing hiding it,
-        //     which silently made the drawn bar disagree with the totals.
+        //   • a CREDIT is not stacked in this lane — it is income, not a cost. It is drawn
+        //     in the green lane beside it (`creditStepBar`), rising from this lane's foot.
+        //     Before that lane existed a credit was drawn NOWHERE while the legend listed
+        //     it in green (INTC FY2025's 3.5B of other income).
         // `waterfallItems`, not `costItems`: a gross stack gets the eliminations bridge as
         // its first step, so the waterfall starts at the segment total and the costs are
         // measured from reported revenue — the level the 100% grid line marks.
         let costSegments = data.waterfallItems.filter { !$0.isCredit }
+        // The column keeps its 55pt; with credits the costs give up its right-hand lane.
+        let costLaneWidth = data.drawnCreditTotal > 0 ? barWidth - laneGap - creditLaneWidth : barWidth
 
         // Top of cost bar aligns with top of revenue bar
         let rawRevenueTopY = CGFloat(chartTopValue - data.totalRevenue) * pixelsPerUnit
@@ -367,7 +392,7 @@ struct RevenueBreakdownChartView: View {
                 ForEach(costSegments) { item in
                     Rectangle()
                         .fill(item.chartColor)
-                        .frame(width: barWidth, height: barHeight(item.value))
+                        .frame(width: costLaneWidth, height: barHeight(item.value))
                 }
             }
             .clipShape(
@@ -378,7 +403,66 @@ struct RevenueBreakdownChartView: View {
                     topTrailingRadius: 6
                 )
             )
+            .frame(width: barWidth, alignment: .leading)
             .offset(y: revenueTopY)
+        }
+        .frame(width: barWidth, height: height, alignment: .top)
+    }
+
+    // MARK: - Credit Lane (rises from the cost lane's foot)
+
+    /// The year's credits — other income, a tax benefit, other operating income — as one
+    /// green lane on the right of the cost column. It starts where the cost lane ends and
+    /// rises by the credits, stacked bottom-up in waterfall order with a hairline between
+    /// them; with the backend's plug its top is exactly net income, level with the net bar.
+    private func creditStepBar(height: CGFloat, barWidth: CGFloat) -> some View {
+        let pixelsPerUnit = height / chartRange
+
+        // A credit step is never thinner than the minimum, so one listed in the legend is
+        // always visible. The lane then ends up to that much above `creditStepTop` — only
+        // for a credit too small to measure against the plot anyway.
+        func stepHeight(_ value: Double) -> CGFloat {
+            let h = CGFloat(value) * pixelsPerUnit
+            return h.isFinite ? max(h, minimumCreditStepHeight) : minimumCreditStepHeight
+        }
+
+        // The VStack draws top-down, so reversing puts the FIRST credit at the foot.
+        let steps = Array(data.creditItems.reversed())
+        let laneHeight = steps.reduce(CGFloat(0)) { $0 + stepHeight($1.value) }
+        // The cost lane's foot: its top (the same expression `costWaterfallBar` uses) plus
+        // its drawn height, so the two lanes start from one point.
+        let rawCostTopY = CGFloat(chartTopValue - data.totalRevenue) * pixelsPerUnit
+        let costTopY = rawCostTopY.isFinite ? max(rawCostTopY, 0) : 0
+        let rawFootY = costTopY + CGFloat(data.drawnWaterfallTotal) * pixelsPerUnit
+        let footY = rawFootY.isFinite ? rawFootY : height
+
+        return ZStack(alignment: .top) {
+            VStack(spacing: 0) {
+                ForEach(Array(steps.enumerated()), id: \.element.id) { index, item in
+                    Rectangle()
+                        .fill(item.chartColor)
+                        .frame(width: creditLaneWidth, height: stepHeight(item.value))
+                        .overlay(alignment: .top) {
+                            // Every step but the top one shares an edge with the step
+                            // above it; one green would read as a single credit.
+                            if index > 0 {
+                                Rectangle()
+                                    .fill(AppColors.cardBackground)
+                                    .frame(height: 1)
+                            }
+                        }
+                }
+            }
+            .clipShape(
+                UnevenRoundedRectangle(
+                    topLeadingRadius: 4,
+                    bottomLeadingRadius: 0,
+                    bottomTrailingRadius: 0,
+                    topTrailingRadius: 4
+                )
+            )
+            .frame(width: barWidth, alignment: .trailing)
+            .offset(y: footY - laneHeight)
         }
         .frame(width: barWidth, height: height, alignment: .top)
     }
@@ -399,8 +483,10 @@ struct RevenueBreakdownChartView: View {
             // Profit bar - grows UP from the zero line; caption overlaid above it
             return AnyView(
                 ZStack(alignment: .top) {
+                    // A chart fill takes the 3:1 graphic token, never a text token — the
+                    // same family as the credit lane it sits level with.
                     Rectangle()
-                        .fill(AppColors.bullish)
+                        .fill(AppColors.gainGraphic)
                         .frame(width: barWidth, height: netProfitHeight)
                         .clipShape(
                             UnevenRoundedRectangle(
@@ -428,7 +514,7 @@ struct RevenueBreakdownChartView: View {
             return AnyView(
                 ZStack(alignment: .top) {
                     Rectangle()
-                        .fill(AppColors.loss)
+                        .fill(AppColors.lossGraphic)
                         .frame(width: barWidth, height: netProfitHeight)
                         .clipShape(
                             UnevenRoundedRectangle(
@@ -515,6 +601,26 @@ struct RevenueBreakdownChartView: View {
                     .font(AppTypography.headingSmall)
 
                 RevenueBreakdownChartView(data: RevenueBreakdownData.sampleSmallLoss)
+                    .padding()
+                    .background(AppColors.cardBackground)
+                    .cornerRadius(AppCornerRadius.large)
+
+                // Credit lane: it starts at the cost column's foot and ends level with the
+                // net bar.
+                Text("Gross stack, loss rescued by other income (sample)")
+                    .foregroundColor(AppColors.textOnAccent)
+                    .font(AppTypography.headingSmall)
+
+                RevenueBreakdownChartView(data: RevenueBreakdownData.sampleGrossLossWithCredit)
+                    .padding()
+                    .background(AppColors.cardBackground)
+                    .cornerRadius(AppCornerRadius.large)
+
+                Text("Two credits, stacked (sample)")
+                    .foregroundColor(AppColors.textOnAccent)
+                    .font(AppTypography.headingSmall)
+
+                RevenueBreakdownChartView(data: RevenueBreakdownData.sampleMultipleCredits)
                     .padding()
                     .background(AppColors.cardBackground)
                     .cornerRadius(AppCornerRadius.large)

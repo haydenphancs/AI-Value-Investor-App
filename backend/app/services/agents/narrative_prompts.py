@@ -1382,7 +1382,7 @@ def _key_management_insight_prompt(
     2. Insider activity: recent buy/sell flow, applying the BUY/SELL signal
        asymmetry (open-market buys carry more signal than sales).
     3. Capital allocation: dividends plus whether the company is returning
-       capital or NET-diluting (stock-comp issuance outpacing buybacks).
+       capital or NET-diluting (share issuance outpacing buybacks).
     """
     km = shell.get("key_management", {}) or {}
     # `top_holders` is the curated 10%+ list from `_build_key_management`
@@ -1441,7 +1441,8 @@ def _key_management_insight_prompt(
     # Topic 3: capital allocation (now part of this section). INTERPRET the
     # stewardship signal, don't restate the card's figures. Net share-count
     # change is the tell — a company can buy back stock yet still dilute when
-    # stock-comp issuance outpaces it.
+    # share issuance outpaces it. "Share", not "stock-comp": the cause is not known here
+    # (INTC's 2025 dilution was equity SOLD to the US government, SoftBank and Nvidia).
     ca = insider.get("capital_allocation") or {}
     if not ca:
         capital_line = "Data unavailable; cover only ownership and insider flow."
@@ -1462,7 +1463,7 @@ def _key_management_insight_prompt(
             steward = (
                 "is NET-DILUTING: the share count is rising"
                 + (
-                    " even though it buys back some stock, so stock-comp "
+                    " even though it buys back some stock, so new share "
                     "issuance is outpacing repurchases"
                     if newest_bb > 0
                     else " and it is not repurchasing stock"

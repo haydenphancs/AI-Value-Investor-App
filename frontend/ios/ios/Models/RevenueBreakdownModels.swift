@@ -275,14 +275,62 @@ struct RevenueBreakdownData {
         (eliminationsWaterfallStep.map { [$0] } ?? []) + costItems
     }
 
-    /// Total height of the cost column, in value units: the eliminations bridge plus every
-    /// NON-credit cost. A credit is income, so the bar skips it — which is why the drawn
-    /// waterfall can end BELOW net income (an operating loss rescued by other income or a
-    /// tax benefit), and why the chart sizes itself from this rather than `totalCosts`,
-    /// whose credits are netted in. Same expression as the floor in
+    /// Total height of the cost LANE, in value units: the eliminations bridge plus every
+    /// NON-credit cost. A credit is income, not a cost, so it is not stacked here — it rises
+    /// in its own green lane beside this one (`creditItems`, `creditStepTop`). The cost lane
+    /// on its own can therefore end BELOW net income (an operating loss rescued by other
+    /// income or a tax benefit), and the chart sizes itself from this rather than
+    /// `totalCosts`, whose credits are netted in. Same expression as the floor in
     /// `RevenueBreakdownChartView.chartBottomValue` (pinned equal by a test).
     var drawnWaterfallTotal: Double {
         waterfallItems.filter { !$0.isCredit }.reduce(0) { $0 + $1.value }
+    }
+
+    /// The credits, in waterfall order — what the chart's green lane stacks bottom-up.
+    ///
+    /// They used to be listed in the legend and drawn nowhere: INTC FY2025's legend showed a
+    /// green "Other Income, net 3.5B" beside a chart with no green in it, and the cost column
+    /// ended at −3.7B under a −0.27B net-loss bar with nothing explaining the gap.
+    var creditItems: [CostItem] {
+        waterfallItems.filter { $0.isCredit }
+    }
+
+    /// Height of the green credit lane, in value units (each credit is a positive magnitude).
+    var drawnCreditTotal: Double {
+        creditItems.reduce(0) { $0 + $1.value }
+    }
+
+    /// Where the credit lane ends: it rises from the cost lane's foot by the credits.
+    ///
+    /// The backend's "Interest & Other" is the plug `revenue − CoS − OpEx − tax − NI`, so
+    /// this is net income EXACTLY when the segments net to reported revenue, and within the
+    /// ±3% segment band otherwise — which is why the lane ends level with the net bar. An
+    /// older backend sends no plug, so a tax benefit alone may end elsewhere; the chart's
+    /// top reads this value too, so the lane stays inside the plot either way.
+    var creditStepTop: Double {
+        totalRevenue - drawnWaterfallTotal + drawnCreditTotal
+    }
+
+    /// One VoiceOver sentence for the whole chart, in the order it is drawn: revenue, the
+    /// costs taken off it, the credits added back, the bottom line. The chart's own texts are
+    /// bare axis ticks, which read as a list of unrelated numbers.
+    var chartAccessibilityLabel: String {
+        var sentences = [fiscalYear.isEmpty ? "How \(tickerSymbol) makes money"
+                                            : "How \(tickerSymbol) makes money, fiscal \(fiscalYear)"]
+        if let intersegmentEliminations, intersegmentEliminations > 0 {
+            sentences.append("Segments \(CompactNumberFormat.string(totalRevenue)), "
+                             + "less intersegment eliminations \(CompactNumberFormat.string(intersegmentEliminations))")
+        }
+        sentences.append("Revenue \(formattedTotalRevenue)")
+        let costs = costItems.filter { !$0.isCredit }.map { "\($0.name) \($0.formattedValue)" }
+        if !costs.isEmpty {
+            sentences.append("Costs: " + costs.joined(separator: ", "))
+        }
+        for credit in creditItems {
+            sentences.append("\(credit.name) adds back \(credit.formattedValue)")
+        }
+        sentences.append("\(netProfitLabel) \(formattedNetProfit)")
+        return sentences.joined(separator: ". ") + "."
     }
 
     /// False when nothing the chart would draw reaches a dollar — no revenue, no drawn cost,
@@ -389,19 +437,9 @@ struct RevenueBreakdownData {
         return netRevenue / chartMaxValue
     }
 
-    /// Calculate cumulative position for waterfall chart
-    func waterfallPosition(for index: Int) -> (start: Double, end: Double) {
-        var currentPosition = netRevenue
-
-        for i in 0..<index {
-            currentPosition -= costItems[i].value
-        }
-
-        let start = currentPosition
-        let end = currentPosition - costItems[index].value
-
-        return (start, end)
-    }
+    // NB: a `waterfallPosition(for:)` used to sit here. Nothing called it, and it subtracted
+    // a credit as if it were a cost — the chart's geometry lives in the view, from
+    // `drawnWaterfallTotal` and `creditStepTop`.
 
     // NB: the private `formatLargeNumber` that used to live here is gone — it was the third
     // byte-identical copy of a formatter whose millions tier was hardcoded `%.1f`, which is
@@ -515,6 +553,43 @@ extension RevenueBreakdownData {
         reportedNetIncome: -500_000_000,
         reportedRevenue: 50_000_000_000,
         otherExpense: 500_000_000
+    )
+
+    /// A gross segment stack, a loss, and other income that rescues most of it — the INTC
+    /// FY2025 shape. The cost lane ends near −3.7B; the green lane rises from there to the
+    /// −0.27B net loss.
+    static let sampleGrossLossWithCredit = RevenueBreakdownData(
+        tickerSymbol: "SAMPLE",
+        fiscalYear: "2025",
+        revenueSources: [
+            RevenueSource(name: "Client", value: 32_200_000_000, color: RevenueSource.iPhoneColor),
+            RevenueSource(name: "Foundry", value: 17_800_000_000, color: RevenueSource.servicesColor),
+            RevenueSource(name: "Data Center", value: 16_900_000_000, color: RevenueSource.macColor),
+            RevenueSource(name: "Other", value: 3_600_000_000, color: RevenueSource.otherColor)
+        ],
+        costOfSales: 34_500_000_000,
+        operatingExpense: 20_600_000_000,
+        tax: 1_500_000_000,
+        reportedNetIncome: -270_000_000,
+        reportedRevenue: 52_900_000_000,
+        otherExpense: -3_430_000_000,
+        intersegmentEliminations: 17_600_000_000
+    )
+
+    /// Two credits (a tax benefit, then other income) stacked bottom-up in one green lane:
+    /// an operating loss that ends as a small profit, so the lane crosses the zero line.
+    static let sampleMultipleCredits = RevenueBreakdownData(
+        tickerSymbol: "SAMPLE",
+        fiscalYear: "2024",
+        revenueSources: [
+            RevenueSource(name: "Products", value: 8_000_000_000, color: RevenueSource.iPhoneColor)
+        ],
+        costOfSales: 5_000_000_000,
+        operatingExpense: 4_200_000_000,
+        tax: -600_000_000,
+        reportedNetIncome: 400_000_000,
+        reportedRevenue: 8_000_000_000,
+        otherExpense: -1_000_000_000
     )
 
     /// The backend's "no revenue data at all" placeholder: nothing to chart.

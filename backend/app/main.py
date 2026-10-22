@@ -29,6 +29,7 @@ from app.integrations.finra_short_interest import close_finra_client
 from app.integrations.fmp import close_fmp_client
 from app.integrations.openai_compat import close_openai_compat_client
 from app.integrations.openfda import close_openfda_client
+from app.integrations.sec_edgar import close_sec_edgar_client
 from app.integrations.telegram import close_telegram_client
 from app.integrations.x_api import close_x_client
 from app.integrations.bluesky import close_bluesky_client
@@ -690,6 +691,7 @@ async def lifespan(app: FastAPI):
     await close_coingecko_client()
     await close_openfda_client()
     await close_uspto_client()
+    await close_sec_edgar_client()
     await close_finra_client()
     await close_openai_compat_client()
     await close_telegram_client()

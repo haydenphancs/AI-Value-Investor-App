@@ -170,6 +170,17 @@ class Settings(BaseSettings):
     # contribute. Register at https://search.patentsview.org/docs/
     USPTO_API_KEY: str = ""
 
+    # SEC EDGAR XBRL API (app/integrations/sec_edgar.py) — the company's own filing facts,
+    # used by sec_concept_service to verify the Signal of Confidence buyback figure (FMP's
+    # commonStockRepurchased is sometimes employee tax withholding or a preferred
+    # redemption). Public data, no key, but SEC's fair-access policy REQUIRES a declared
+    # User-Agent of the form "Company contact@email" and caps a client at 10 requests/s.
+    # A blank User-Agent turns the check OFF (the client raises SECConfigException before
+    # any request). The value carries a contact address: never log it.
+    SEC_EDGAR_BASE_URL: str = "https://data.sec.gov"
+    SEC_EDGAR_USER_AGENT: str = ""
+    SEC_EDGAR_MAX_RPS: float = Field(5.0, gt=0, le=10)
+
     # Vector/RAG
     EMBEDDING_DIMENSION: int = 1536
     VECTOR_SIMILARITY_THRESHOLD: float = 0.7

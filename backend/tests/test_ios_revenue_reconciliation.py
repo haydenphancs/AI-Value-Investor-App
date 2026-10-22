@@ -127,8 +127,9 @@ def test_cay_ai_revenue_mix_uses_the_cards_denominator_and_names_the_elimination
 
 
 def test_the_loss_floor_covers_where_the_waterfall_actually_lands():
-    """The waterfall skips credit lines, so with a credit it ends BELOW net income; a floor
-    from net income alone let the bar bleed out of the frame (INTC FY2025 fixture)."""
+    """The cost lane stacks no credit lines (they rise in the green credit lane from its
+    foot), so with a credit the cost lane ends BELOW net income; a floor from net income alone
+    let the bar bleed out of the frame (INTC FY2025 fixture)."""
     body = _decl_body(_code(_CHART), "private var chartBottomValue: Double")
     assert "waterfallItems.filter { !$0.isCredit }" in body
     assert re.search(r"min\(data\.netProfit,\s*waterfallBottom,\s*0\)\s*\*\s*1\.2", body), body

@@ -234,6 +234,7 @@ class _Gem:
 class _Out:
     ticker = "AAPL"
     profile = {"companyName": "Apple Inc."}
+    signal_of_confidence = None
 
 
 def _agent(gem, fmp, monkeypatch, handlers=None) -> ResearchAgent:
@@ -242,7 +243,7 @@ def _agent(gem, fmp, monkeypatch, handlers=None) -> ResearchAgent:
     agent.persona = get_persona_config("warren_buffett")
     monkeypatch.setattr(ra, "build_fmp_tool_declarations", lambda: object())
     if handlers is not None:
-        monkeypatch.setattr(ra, "build_tool_handlers", lambda f: handlers)
+        monkeypatch.setattr(ra, "build_tool_handlers", lambda f, **_kw: handlers)
     return agent
 
 

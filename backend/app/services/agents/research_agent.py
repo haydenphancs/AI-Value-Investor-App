@@ -254,7 +254,12 @@ class ResearchAgent:
         ticker = out.ticker
         company_name = out.profile.get("companyName", ticker)
         tools = build_fmp_tool_declarations()
-        handlers = build_tool_handlers(self.fmp)
+        # Dividends and buybacks reach the model only as this report's own checked Signal of
+        # Confidence figures, never FMP's raw cash-flow lines (INTC's "buybacks" were RSU
+        # tax withholding) — fmp_tools, "never the raw cash-flow lines".
+        handlers = build_tool_handlers(
+            self.fmp, subject_ticker=ticker, signal_of_confidence=out.signal_of_confidence,
+        )
 
         persona_instruction = (
             f"{self.persona.system_prompt}\n\n"

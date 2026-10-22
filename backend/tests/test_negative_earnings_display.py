@@ -560,9 +560,11 @@ def test_the_gemini_statement_tools_request_live_field_names():
         "commonStockRepurchased": -8.0e10,
     }
     cf_row = _compress_financial_data([live_cf], "cash_flow")["data"][0]
-    assert cf_row.get("netDividendsPaid") == -1.5e10, (
-        "the cash-flow tool drops dividends — `dividendsPaid` was renamed"
-    )
+    assert cf_row.get("freeCashFlow") == 1.09e11 and cf_row.get("operatingCashFlow") == 1.2e11
+    # 2026-10-22: the raw dividend and buyback lines are left out ON PURPOSE (INTC's
+    # "buybacks" were RSU tax withholding); the checked figures ride in
+    # `shareholder_returns` — tests/test_research_agent.py.
+    assert "netDividendsPaid" not in cf_row and "commonStockRepurchased" not in cf_row
     assert cf_row.get("fiscalYear") == 2025
 
 

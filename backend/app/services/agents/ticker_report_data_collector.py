@@ -729,6 +729,9 @@ _FROZEN_FINANCIALS_IGNORABLE: Dict[str, frozenset] = {
     # interior or leading-edge gap emits no reason at all (P19, 2026-10-01): its point
     # is kept for the share line and ships `cash_flow_reported=False` (0.0 placeholders,
     # forwarded by `model_dump()` in `_build_capital_allocation_block`), never a measured $0.
+    # `buyback_check` stays BLOCKING on purpose: SEC could not answer and no cached filing
+    # data was left, so the buybacks are FMP's unchecked figures — INTC's tax withholding
+    # would freeze into the report as "Buybacks $617M".
     "signal_of_confidence": frozenset({"cash_flow_row"}),
     # Refusing a breakdown whose SEGMENT feed failed sends the Revenue Engine down the
     # failed-fetch path (rebuild from raw segments) instead of freezing the income-only
@@ -10349,8 +10352,10 @@ def build_financial_context(out: CollectedTickerData) -> str:
         parts.append(
             f"\nOperating CF: {_format_money_compact(cf.get('operatingCashFlow', 0), cur)}")
         parts.append(f"Free CF: {_format_money_compact(cf.get('freeCashFlow', 0), cur)}")
-        parts.append(
-            f"Buybacks: {_format_money_compact(cf.get('commonStockRepurchased', 0), cur)}")
+        # No "Buybacks:" line from the raw annual row (removed 2026-10-22): FMP's
+        # `commonStockRepurchased` is sometimes employee tax withholding or preferred
+        # redemptions (INTC, META, AMD, JPM). The report's capital-allocation block carries
+        # the SEC-checked figures from Signal of Confidence instead.
 
     statement_codes = _non_usd_statement_codes(
         list(income[:3] if income else []) + list(balance[:1] if balance else [])

@@ -66,6 +66,15 @@ struct SignalOfConfidenceInfoSheet: View {
                 .font(AppTypography.body)
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            // Hedged on purpose: the backend check (signal_of_confidence_service `_verify_buybacks`)
+            // does not run without SEC_EDGAR_USER_AGENT, for a company with no CIK or no SEC
+            // data (a 20-F filer), while SEC is unavailable, or for a quarter the filing does
+            // not break out — those keep the vendor's figure. INTC's "buybacks" were withholding.
+            Text("Where a company's SEC filing breaks them out, cash spent on shares withheld to cover employees' taxes when stock awards vest, and on preferred-stock redemptions, is not counted as a buyback.")
+                .font(AppTypography.body)
+                .foregroundColor(AppColors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

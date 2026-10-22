@@ -405,6 +405,9 @@ _CURATED_TABLES = {
     # 196) — since 198 one row per Apple LINEAGE, the winning one. Curated so the prose and the
     # table stay coupled.
     "subscriptions",
+    # 2026-10-22: §9b.12's D6 hand-grant rule names the per-period grant ledger (migration 196)
+    # whose `revoked_at` / `period_end` decide when the grant must wait.
+    "subscription_credit_periods",
     # 2026-09-18: the benchmark-scheduling invariants name the durable claim ledger the
     # quarterly chain and weekly TTM job hold their per-phase claims in (migration 147).
     "notification_job_state",

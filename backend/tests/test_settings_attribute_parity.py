@@ -157,3 +157,34 @@ def test_the_chat_budgets_sit_under_the_ios_timeouts_that_bound_them():
     # The stream is kept alive by keepalives, so its wall-clock budget may exceed the
     # client's IDLE timeout — but the keepalive interval itself must sit well under it.
     assert settings.CHAT_STREAM_KEEPALIVE_SECONDS < ios_stream / 2
+
+
+def _upper_names_read_outside_config() -> set:
+    """Every attribute name and whole-string constant in app/ outside config.py (the AST, so a
+    name that survives only in a comment never counts)."""
+    names: set = set()
+    for path in sorted(APP_ROOT.rglob("*.py")):
+        if path.name == "config.py" and path.parent == APP_ROOT:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+            if isinstance(node, ast.Attribute):
+                names.add(node.attr)
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                names.add(node.value)
+    return names
+
+
+def test_every_iap_setting_is_read_under_app():
+    """The reverse direction, for the IAP_ family (IAP audit F24): a declared setting nothing
+    reads is a promise with no code behind it. IAP_WEBHOOK_SHARED_SECRET's comment said the
+    webhook "additionally requires it" — nothing ever read it, and App Store Server
+    Notifications V2 carry no secret at all."""
+    from app.config import Settings
+
+    iap = sorted(n for n in Settings.model_fields if n.startswith("IAP_"))
+    read = _upper_names_read_outside_config()
+    assert len(iap) >= 9, f"only {len(iap)} IAP_ settings declared — scan drifted"
+    assert {"IAP_ENVIRONMENT", "IAP_BILLING_GRACE_DAYS", "IAP_ROOT_CERT_DIR"} <= read, \
+        "the scan no longer sees settings it knows are read"
+    unread = [n for n in iap if n not in read]
+    assert unread == [], f"IAP_ settings that nothing under app/ reads: {unread}"

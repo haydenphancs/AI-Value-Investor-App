@@ -68,6 +68,162 @@ def _func_body(src: str, signature: str) -> str:
     return src[start:start + len(signature) + (nxt.start() if nxt else len(src))]
 
 
+# A one-line "..." literal (escapes honoured) | `//` to the end of the line | `/*` (Swift nests).
+_SWIFT_SCAN = re.compile(r'"(?:\\.|[^"\\\n])*"|//[^\n]*|/\*')
+_SWIFT_BLOCK = re.compile(r"/\*|\*/")
+
+
+def _code(src: str, *, blank_strings: bool = True) -> str:
+    """`src` with every `//` and `/* */` comment removed — and, by default, every one-line string
+    literal blanked to `""` — in ONE left-to-right pass, as the Swift lexer reads it.
+
+    The single pass is the point (IAP audit F18). `_strip_comments` alone reads the `//` of
+    `print("see https://x"); await transaction.finish()` as a comment and drops the finish after
+    it; removing `/* */` first lets a `/*` inside a `//` line swallow the code up to a later `*/`;
+    and a `/* await transaction.finish() */` that `_strip_comments` keeps counts as a real finish.
+    Here whichever construct opens first wins. Lines are kept (a block comment becomes its
+    newlines, trailing blanks are trimmed), so line-anchored patterns still work. Multi-line
+    `\"\"\"` strings are not handled: neither file this reads has one.
+    """
+    out, pos = [], 0
+    while (m := _SWIFT_SCAN.search(src, pos)):
+        out.append(src[pos:m.start()])
+        tok = m.group()
+        if tok.startswith('"'):
+            out.append('""' if blank_strings else tok)
+            pos = m.end()
+        elif tok.startswith("//"):
+            pos = m.end()                                   # the newline stays
+        else:
+            depth, j = 1, m.end()
+            while depth:
+                b = _SWIFT_BLOCK.search(src, j)
+                assert b, f"unterminated /* comment at offset {m.start()}"
+                depth += 1 if b.group() == "/*" else -1
+                j = b.end()
+            out.append("\n" * src.count("\n", m.start(), j) or " ")
+            pos = j
+    out.append(src[pos:])
+    return "\n".join(line.rstrip() for line in "".join(out).split("\n"))
+
+
+def _brace_block(src: str, at: int) -> tuple[int, int]:
+    """(start, end) of the body of the first `{ … }` at or after `at`, so `src[start:end]` is what
+    the braces enclose. Run it on `_code(...)` text, where no brace hides in a string or comment."""
+    i = src.index("{", at)
+    depth = 0
+    for j in range(i, len(src)):
+        depth += (src[j] == "{") - (src[j] == "}")
+        if depth == 0:
+            return i + 1, j
+    raise AssertionError(f"unbalanced braces after offset {at}")
+
+
+# The verify failures `handle()` may FINISH: terminal, and never grantable to anyone. A new one
+# changes this set, `StoreKitService.handle`, the AppError half below and the SDG §9b.3 table in
+# ONE change; the mutant table pins that nothing else finishes.
+_FINISHABLE = {"purchaseAlreadyLinked": "PURCHASE_ALREADY_LINKED", "purchaseRevoked": "PURCHASE_REVOKED"}
+_FINISH = re.compile(r"\bfinish\s*\(")
+_FLAG = "isTerminalAndFinishable"
+
+
+def _finish_policy_violations(swift_src: str) -> list[str]:
+    """Why `StoreKitService.handle` breaks the finish policy; empty when it holds. Read on the
+    comment-stripped, string-blanked, brace-bound function:
+
+      * an `.unverified` transaction is never finished;
+      * nothing is finished before /billing/verify answers, and nothing beside the one catch;
+      * a FAILED verify finishes ONLY for a code in `_FINISHABLE`. Every other failure — 400
+        INVALID_INPUT (bad signature, unknown product), 409 PURCHASE_ACCOUNT_MISMATCH, 503
+        SYSTEM_BUSY, a network or decode error — is rethrown with the transaction UNFINISHED, so
+        Apple redelivers it. Finishing one of those loses the purchase for good: for a credit
+        pack the webhook handles only REFUND and REVOKE, so nothing would ever grant it;
+      * a successful verify finishes exactly once.
+
+    The shape is pinned on purpose: `var isTerminalAndFinishable = false`, one
+    `if case .<code> = mapped { isTerminalAndFinishable = true }` line per finishable code, one
+    `if isTerminalAndFinishable { … }` gate. A legitimate refactor (a `switch`, a computed
+    property) fails here loudly — update this checker and its mutant table with it.
+    """
+    body = _code(_func_body(swift_src, "private func handle("))
+    v_at = body.find("case .verified")
+    if v_at < 0:
+        return ["no-verified-arm"]
+    out = []
+    if _FINISH.search(body[:v_at]):
+        out.append("finish-in-the-unverified-arm")
+    verified = body[v_at:]
+    call = verified.find("verifyPurchase(signedTransaction: signed)")
+    catch_kw = verified.find("} catch {", call) if call >= 0 else -1
+    if call < 0 or catch_kw < 0:
+        return out + ["no-verify-call-or-catch"]
+    c0, c1 = _brace_block(verified, catch_kw + 1)
+    pre, around, catch, post = verified[:call], verified[call:catch_kw], verified[c0:c1], verified[c1 + 1:]
+    if _FINISH.search(pre):
+        out.append("finish-before-verify")
+    if _FINISH.search(around) or re.search(r"\bcatch\b", around):
+        out.append("another-catch-or-finish-around-the-verify-call")
+    if len(_FINISH.findall(post)) != 1:
+        out.append(f"success-path-finish-count={len(_FINISH.findall(post))}")
+    if "let mapped = AppError.from(error)" not in catch:
+        out.append("mapped-is-not-AppError.from(error)")
+
+    decls = re.findall(rf"\b(?:var|let)\s+{_FLAG}\b[^\n]*", catch)
+    if decls != [f"var {_FLAG} = false"]:
+        out.append(f"flag-declaration={decls!r}")
+    allowed = re.findall(rf"^[ \t]*if case \.(\w+) = mapped \{{ {_FLAG} = true \}}$", catch, re.M)
+    if sorted(allowed) != sorted(_FINISHABLE):
+        out.append(f"finishable-codes={sorted(allowed)!r}")
+    gates = list(re.finditer(rf"^[ \t]*if\s+{_FLAG}\s*\{{", catch, re.M))
+    # Every mention of the flag is the declaration, an allowed line or the gate. Anything else —
+    # a bare `= true`, `.toggle()`, `|| true`, `!flag`, a tuple or inout write — can make any
+    # failure finishable without touching the lines above.
+    mentions = len(re.findall(rf"\b{_FLAG}\b", body))
+    if mentions != 1 + len(allowed) + len(gates):
+        out.append(f"flag-used-elsewhere(mentions={mentions})")
+    if len(gates) != 1:
+        return out + [f"gate-count={len(gates)}"]
+    g0, g1 = _brace_block(catch, gates[0].start())
+    gate, head, tail = catch[g0:g1], catch[:gates[0].start()], catch[g1 + 1:]
+    if len(_FINISH.findall(gate)) != 1:
+        out.append(f"gate-finish-count={len(_FINISH.findall(gate))}")
+    if not re.search(r"^\s*throw error$", gate, re.M):
+        out.append("gate-does-not-rethrow")
+    if _FINISH.search(head) or _FINISH.search(tail):
+        out.append("finish-outside-the-gate")
+    if not re.search(r"(?:^|\n)\s*throw error$", tail.rstrip()):
+        out.append("the-unfinished-path-does-not-end-in-throw")
+    if "purchaseAccountMismatch" in body:
+        out.append("mismatch-named")
+    return out
+
+
+def _finishable_mapping_violations(err_src: str, others: dict[str, str] | None = None) -> list[str]:
+    """The AppError half: `mapped` can be a finishable case ONLY for its own backend code. Each
+    finishable case is built exactly once in the whole iOS tree (`others`: path -> source of every
+    other Swift file), inside `if code == "<CODE>" { … }` in `mapAPIError`. Without this, mapping
+    SYSTEM_BUSY to `.purchaseRevoked` would finish every 503 while handle() looked perfect.
+    """
+    src = _code(err_src, blank_strings=False)
+    sig = src.find("private static func mapAPIError(")
+    if sig < 0:
+        return ["no-mapAPIError"]
+    f0, f1 = _brace_block(src, sig)
+    out = []
+    for case, code in _FINISHABLE.items():
+        build = re.compile(rf"\.{case}\(\s*message\s*:")
+        elsewhere = sorted(p for p, s in (others or {}).items() if build.search(s) and build.search(_code(s)))
+        builds = [m.start() for m in build.finditer(src)]
+        gates = [m.start() for m in re.finditer(rf'^[ \t]*if code == "{code}" \{{', src, re.M)]
+        if elsewhere or len(builds) != 1 or len(gates) != 1:
+            out.append(f"{case}: built {len(builds)}x in AppError, also in {elsewhere}; gated {len(gates)}x")
+            continue
+        g0, g1 = _brace_block(src, gates[0])
+        if not (f0 <= gates[0] < f1 and g0 <= builds[0] < g1):
+            out.append(f'{case} is not built only under `if code == "{code}"` in mapAPIError')
+    return out
+
+
 # ── Defect 1: the purchase error must not ride the catalog-gated channel ──────────────
 
 
@@ -163,15 +319,23 @@ def test_the_purchase_error_is_not_shown_to_the_user_raw():
     assert "ns.domain" not in vm and "localizedDescription" not in vm
 
 
-# ── Defect 3: only ONE of the two 409s may finish the transaction ─────────────────────
+# ── Defect 3: only the two never-grantable terminal codes may finish the transaction ──
+#
+# The backend answers a failed verify with three 409s and several 400/503s. Two of the 409s can
+# never become grantable to anyone, so `handle()` finishes them and Apple stops redelivering:
+# PURCHASE_ALREADY_LINKED (recorded against ANOTHER account — somebody was credited) and
+# PURCHASE_REVOKED (Apple refunded it). Everything else must stay UNFINISHED, so Apple redelivers
+# it and it is granted once the cause clears; finishing one loses the purchase for good.
 
 
 def test_only_purchase_already_linked_finishes_the_transaction():
-    """`handle()` must finish a terminal 409 ONLY when the server actually recorded it.
+    """`handle()` must not finish PURCHASE_ACCOUNT_MISMATCH, the 409 that recorded nothing.
 
-    The backend raises two structurally different 409s. `PURCHASE_ALREADY_LINKED` means the
+    The backend raises structurally different 409s. `PURCHASE_ALREADY_LINKED` means the
     transaction IS recorded against another account — somebody was credited, the condition can
-    never clear, so finishing it is right and stops Apple redelivering forever.
+    never clear, so finishing it is right and stops Apple redelivering forever (as is finishing
+    `PURCHASE_REVOKED`, a refunded transaction that can never be granted; see
+    `test_handle_finishes_only_the_two_never_grantable_codes` for the whole policy).
     `PURCHASE_ACCOUNT_MISMATCH` is refused BEFORE any grant: no `credit_purchases` row, nobody
     credited. Finishing THAT one deletes a purchase the user paid for, with no redelivery left
     to repair it — it must fall through to the "leave unfinished" branch so the same transaction
@@ -206,6 +370,159 @@ def test_the_two_purchase_409_codes_map_to_distinct_apperror_cases():
         "PURCHASE_ACCOUNT_MISMATCH must have its OWN AppError case — falling through to "
         ".apiError would lose the distinction handle() depends on"
     )
+
+
+_POLICY_HINT = (
+    "StoreKitService.handle finishes a failed verify only for PURCHASE_ALREADY_LINKED and "
+    "PURCHASE_REVOKED (SDG §9b.3); every other failure must stay unfinished so Apple redelivers it. "
+    "A NEW finishable code changes `_FINISHABLE`, this file's mutant table, the AppError half and "
+    "the SDG table in the same change."
+)
+
+
+def test_handle_finishes_only_the_two_never_grantable_codes():
+    """IAP audit F18: the two guards before this one passed `var isTerminalAndFinishable = true`
+    (every failed verify finished) and an `await transaction.finish()` before the final `throw` —
+    they checked only that the linked case existed and came before the FIRST finish."""
+    violations = _finish_policy_violations(_read(_SERVICE))
+    assert violations == [], f"{violations}. {_POLICY_HINT}"
+
+
+def test_each_finishable_apperror_case_is_built_only_under_its_own_code():
+    err_path = _ROOT / "Core/Utilities/AppError.swift"
+    others = {str(p.relative_to(_ROOT)): p.read_text() for p in sorted(_ROOT.rglob("*.swift"))
+              if p != err_path}
+    assert len(others) > 100, f"the iOS tree scan found only {len(others)} Swift files"
+    violations = _finishable_mapping_violations(_read(err_path), others)
+    assert violations == [], f"{violations}. {_POLICY_HINT}"
+
+
+# The checkers' own non-vacuity (testing.md rule 3), as a STANDING test rather than a one-off
+# hand edit: each mutant below is built in memory from the real Swift source and must make the
+# checker report a violation, and each benign edit must not. Nothing on disk changes. An anchor
+# that stops matching fails as "anchor drifted", so an edit to these lines forces this table to
+# be re-derived instead of letting it go quietly vacuous.
+
+_IND = " " * 16
+_LINKED = "if case .purchaseAlreadyLinked = mapped { isTerminalAndFinishable = true }"
+_REVOKED = "if case .purchaseRevoked = mapped { isTerminalAndFinishable = true }"
+_SUCCESS = ("// Recorded server-side — now safe to tell Apple we've handled it.\n"
+            "            await transaction.finish()\n")
+
+
+def _once(src: str, old: str, new: str) -> str:
+    assert src.count(old) == 1, f"anchor drifted: {old!r} found {src.count(old)}x — re-derive this mutant"
+    return src.replace(old, new)
+
+
+def _before_tail_throw(src: str, line: str) -> str:
+    """`line` inserted just before the final `throw error` of the leave-unfinished path."""
+    i = src.index("leaving unfinished")
+    j = src.index("throw error", i)
+    ls = src.rindex("\n", 0, j) + 1
+    return src[:ls] + src[ls:j] + line + "\n" + src[ls:]
+
+
+def _after_revoked(src: str, line: str) -> str:
+    return _once(src, _REVOKED, _REVOKED + "\n" + _IND + line)
+
+
+_HANDLE_MUTANTS = {
+    "M1 default true": lambda s: _once(s, "var isTerminalAndFinishable = false",
+                                       "var isTerminalAndFinishable = true"),
+    "M2 finish before the final throw": lambda s: _before_tail_throw(s, "await transaction.finish()"),
+    "M3 .apiError finishable (SYSTEM_BUSY, 400s)": lambda s: _after_revoked(
+        s, "if case .apiError = mapped { isTerminalAndFinishable = true }"),
+    "M4 finish before verify": lambda s: _once(
+        s, "            let applied: PurchaseApplied\n",
+        "            await transaction.finish()\n            let applied: PurchaseApplied\n"),
+    "M5 gate || true": lambda s: _once(s, "if isTerminalAndFinishable {", "if isTerminalAndFinishable || true {"),
+    "M6 unconditional assignment": lambda s: _after_revoked(s, "isTerminalAndFinishable = true"),
+    "M7 Task { finish } on the unfinished path": lambda s: _before_tail_throw(
+        s, "Task { await transaction.finish() }"),
+    "M8 mismatch finishable": lambda s: _after_revoked(
+        s, "if case .purchaseAccountMismatch = mapped { isTerminalAndFinishable = true }"),
+    "M9 linked line deleted": lambda s: _once(s, _IND + _LINKED + "\n", ""),
+    "M10 revoked line deleted (refunds redeliver forever)": lambda s: _once(s, _IND + _REVOKED + "\n", ""),
+    "M11 gate negated": lambda s: _once(s, "if isTerminalAndFinishable {", "if !isTerminalAndFinishable {"),
+    "M12 M1 + M2": lambda s: _before_tail_throw(
+        _once(s, "var isTerminalAndFinishable = false", "var isTerminalAndFinishable = true"),
+        "await transaction.finish()"),
+    "M13 finish in the DEBUG block": lambda s: _once(
+        s, "leaving unfinished: \\(error)\")\n",
+        "leaving unfinished: \\(error)\")\n" + _IND + "await transaction.finish()\n"),
+    "M14 success finish removed": lambda s: _once(
+        s, _SUCCESS, "// Recorded server-side — now safe to tell Apple we've handled it.\n"),
+    "M15 .validationFailed finishable (400 INVALID_INPUT)": lambda s: _after_revoked(
+        s, "if case .validationFailed = mapped { isTerminalAndFinishable = true }"),
+    "M16 finish after a // inside a string": lambda s: _before_tail_throw(
+        s, "print(\"see https://x\"); await transaction.finish()"),
+    "M17 finish in the unverified arm": lambda s: _once(
+        s, "throw StoreKitError.unverified(underlying: error)",
+        "await verificationResult.unsafePayloadValue.finish()\n"
+        "            throw StoreKitError.unverified(underlying: error)"),
+    "M18 a typed catch that finishes": lambda s: _once(
+        s, "            } catch {\n                // TERMINAL",
+        "            } catch let e as URLError {\n                await transaction.finish()\n"
+        "                throw e\n            } catch {\n                // TERMINAL"),
+    "M19 success finish only in a block comment": lambda s: _once(
+        s, _SUCCESS, "// Recorded server-side — now safe to tell Apple we've handled it.\n"
+                     "            /* await transaction.finish() */\n"),
+    "M20 a /* inside a // line must not hide a finish": lambda s: _before_tail_throw(
+        s, "// see /api/v1/admin/*\n" + _IND + "await transaction.finish() /* x */"),
+    "M21 flag toggled": lambda s: _after_revoked(s, "isTerminalAndFinishable.toggle()"),
+}
+
+_HANDLE_BENIGN = {
+    "B1 prose naming finish and = true": lambda s: _before_tail_throw(
+        s, "// do NOT await transaction.finish() here; isTerminalAndFinishable = true is wrong"),
+    "B2 a print string naming finish()": lambda s: _once(
+        s, "leaving unfinished: \\(error)", "leaving unfinished (no finish() call): \\(error)"),
+    "B3 a block comment naming finish": lambda s: _before_tail_throw(
+        s, "/* never `await transaction.finish()` here:\n   Apple must redeliver it */"),
+    "B4 a URL in a print string": lambda s: _before_tail_throw(s, "print(\"see https://x\")"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_HANDLE_MUTANTS))
+def test_the_finish_policy_check_catches_each_mutant(case):
+    src = _read(_SERVICE)
+    assert _finish_policy_violations(src) == [], "the real source must pass before a mutant can mean anything"
+    mutated = _HANDLE_MUTANTS[case](src)
+    assert mutated != src
+    assert _finish_policy_violations(mutated), f"{case} slipped past the finish-policy check — it is vacuous"
+
+
+@pytest.mark.parametrize("case", sorted(_HANDLE_BENIGN))
+def test_the_finish_policy_check_ignores_prose_and_strings(case):
+    src = _read(_SERVICE)
+    mutated = _HANDLE_BENIGN[case](src)
+    assert mutated != src
+    assert _finish_policy_violations(mutated) == [], f"{case} is not code, but the check flagged it"
+
+
+_BUSY = 'if code == "SYSTEM_BUSY" || code == "TOO_MANY_CONCURRENT_REPORTS" {\n'
+_MAPPING_MUTANTS = {
+    "SYSTEM_BUSY mapped to .purchaseRevoked": lambda e: _once(
+        e, _BUSY, 'if code == "SYSTEM_BUSY" {\n                return .purchaseRevoked(message: message)\n'
+                  "            }\n            " + _BUSY),
+    "the linked gate widened to SYSTEM_BUSY": lambda e: _once(
+        e, 'if code == "PURCHASE_ALREADY_LINKED" {',
+        'if code == "PURCHASE_ALREADY_LINKED" || code == "SYSTEM_BUSY" {'),
+    "PURCHASE_ACCOUNT_MISMATCH mapped to .purchaseAlreadyLinked": lambda e: _once(
+        e, "return .purchaseAccountMismatch(message: message)", "return .purchaseAlreadyLinked(message: message)"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_MAPPING_MUTANTS))
+def test_the_mapping_check_catches_each_mutant(case):
+    err = _read(_ROOT / "Core/Utilities/AppError.swift")
+    assert _finishable_mapping_violations(err) == []
+    assert _finishable_mapping_violations(_MAPPING_MUTANTS[case](err)), f"{case} slipped past the mapping check"
+    # ...and a build of a finishable case in ANOTHER file (a service throwing it directly, which
+    # `AppError.from` passes through unchanged) is caught by the tree scan.
+    other = {"Core/Services/X.swift": "throw AppError.purchaseRevoked(message: m)\n"}
+    assert _finishable_mapping_violations(err, other)
 
 
 # ── Defect 4: exactly ONE card may say "Processing…" ──────────────────────────────────

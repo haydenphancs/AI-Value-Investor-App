@@ -419,7 +419,10 @@ REFUND_FAILURE_OUTCOMES = ("no_matching_debit", "no_credits_row", "capped_to_zer
 # report call sites ask, the one-shot `is_refunded` CAS is already burned — so a malformed
 # reply meant the user silently lost 20 credits AND the REFUND LEAK alert never fired. A
 # false alert costs a human one look; a missed one is permanent. Fail toward alerting.
-REFUND_SETTLED_OUTCOMES = ("refunded", "already_refunded", "guest", "invalid")
+#
+# `covered_by_clawback` (migration 200, IAP audit F15): the charge was made in a subscription
+# period Apple refunded, and that clawback already wrote the spend off — nothing is owed.
+REFUND_SETTLED_OUTCOMES = ("refunded", "already_refunded", "covered_by_clawback", "guest", "invalid")
 
 
 def refund_did_not_happen(outcome) -> bool:
@@ -817,8 +820,10 @@ class CreditService:
 
         Returns the RPC's outcome payload, or **None strictly for a transport fault** — the
         same contract as `revoke_purchased`, so `None` can never be confused with a business
-        outcome. `outcome` is one of: refunded | already_refunded | no_matching_debit | guest |
-        invalid | no_credits_row, with `refunded` carrying the amount ACTUALLY moved.
+        outcome. `outcome` is one of: refunded | already_refunded | covered_by_clawback |
+        no_matching_debit | capped_to_zero | guest | invalid | no_credits_row, or `partial`
+        (minted here), with `refunded` carrying the amount ACTUALLY moved and `covered` (migration
+        200, only when above 0) the part an Apple-refund clawback had already paid for.
 
         ⚠️ Why this reports outcomes at all (migration 142). Before it, every branch returned
         `spendable`, so a refund that moved ZERO was byte-identical to one that worked, and
@@ -893,18 +898,56 @@ class CreditService:
         payload = data if isinstance(data, dict) else {}
         outcome = payload.get("outcome")
         refunded = payload.get("refunded")
+        # migration 200: how much of the charge an Apple-refund clawback had already paid for.
+        # Present only when above 0; anything else reads as 0, so a malformed key can never make
+        # a short refund look whole.
+        covered = payload.get("covered")
+        covered = covered if isinstance(covered, int) and not isinstance(covered, bool) and covered > 0 else 0
+        # migration 200: on a replay (`already_refunded`), what the earlier refund left unsettled.
+        short = payload.get("short")
+        short = short if isinstance(short, int) and not isinstance(short, bool) and short > 0 else 0
 
+        if outcome == "already_refunded" and short:
+            # A replay of a refund that settled LESS than the charge — a partial refund, or a
+            # partly covered one whose rest was capped — whose first reply was lost (the retry is
+            # what answers here). Read as a benign replay, the rest would never page: relabelled
+            # `partial`, like the first reply would have been.
+            logger.error(
+                "REFUND LEAK: PARTIAL REFUND — a replay found the charge for user=%s ref_id=%s "
+                "reason=%s already refunded, but short by %s of %s credits; the user is OWED %s "
+                "credits and the one-shot refund guard is already burned; manual credit "
+                "correction needed.",
+                user_id, ref_id, reason, short, amount, short,
+            )
+            return {**payload, "outcome": "partial", "requested": amount}
+
+        if outcome == "capped_to_zero" and covered:
+            # A clawback covered part of the charge and the pools absorbed none of the rest. The
+            # RPC paired the debit (a 0-credit row), so a replay answers `already_refunded`:
+            # relabelled `partial`, which that replay may never overwrite.
+            logger.error(
+                "REFUND LEAK: PARTIAL REFUND — a clawback of a refunded subscription period covered "
+                "%s of %s credits for user=%s ref_id=%s reason=%s and the credit pools absorbed none "
+                "of the rest; the user is OWED %s credits and the one-shot refund guard is already "
+                "burned; manual credit correction needed. Most likely the charge and the refund "
+                "straddled a period boundary.",
+                covered, amount, user_id, ref_id, reason, amount - covered,
+            )
+            return {**payload, "outcome": "partial", "requested": amount}
         if outcome == "capped_to_zero":
-            # A debit WAS matched but the pools absorbed none of it. The reachable path is the
-            # month boundary: `ensure_credit_period` resets `used` to 0, so a report charged in
-            # month M and refunded in M+1 — which the reconciliation sweep does on its own
-            # schedule — finds nothing to give back. Same consequence as a missing debit: the
-            # user is owed and the one-shot guard is spent.
+            # A debit WAS matched but the pools absorbed none of it. The reachable path is a
+            # period boundary: `ensure_credit_period` resets `used` to 0 on the ET 1st and at a
+            # paid period's start, so a report charged before it and refunded after — which the
+            # reconciliation sweep does on its own schedule — finds nothing to give back. Since
+            # migration 200 the RPC rolls the period first, so this fires whether or not anything
+            # else touched the balance in between (IAP audit F10). Same consequence as a missing
+            # debit: the user is owed and the one-shot guard is spent.
             logger.error(
                 "REFUND LEAK: refund_credits matched the debit for user=%s ref_id=%s but the "
                 "credit pools absorbed none of the %s credits (reason=%s) — the user is OWED "
                 "and the one-shot refund guard is already burned; manual correction needed. "
-                "Most likely the charge and the refund straddled a monthly reset.",
+                "Most likely the charge and the refund straddled a period boundary (the ET 1st, "
+                "or the start of a paid renewal).",
                 user_id, ref_id, amount, reason,
             )
         elif outcome == "no_matching_debit" and quiet_no_match:
@@ -941,6 +984,17 @@ class CreditService:
                 "refunded — no double refund",
                 user_id, ref_id, amount,
             )
+        elif outcome == "covered_by_clawback":
+            # Benign (migration 200): the charge came out of a subscription period Apple refunded,
+            # and that clawback already wrote the spend off. Paying it back again would have come
+            # out of the calendar floor (IAP audit F15). The covered credits went to the period's
+            # revoked_remaining, so a REFUND_REVERSED gives them back.
+            logger.info(
+                "refund_credits: charge for user=%s ref_id=%s amount=%s (reason=%s) was already "
+                "paid for by the clawback of a refunded subscription period (covered=%s) — "
+                "nothing owed, nothing moved",
+                user_id, ref_id, amount, reason, covered,
+            )
         elif outcome in ("guest", "invalid"):
             logger.info(
                 "refund_credits no-op (outcome=%s) for user=%s amount=%s reason=%s",
@@ -960,7 +1014,7 @@ class CreditService:
                 "the refund moved; the one-shot guard is already burned; manual check needed",
                 outcome, sorted(payload.keys()), user_id, ref_id, amount, reason,
             )
-        elif isinstance(refunded, int) and 0 < refunded < amount:
+        elif isinstance(refunded, int) and 0 < refunded and refunded + covered < amount:
             # The LEAST() caps can move less than requested — the reachable case is a charge
             # and a refund that straddle a monthly reset with a SMALL new-period `used`
             # (charged 20 at 23:50, one chat turn after midnight, the sweep refunds 1). The
@@ -969,12 +1023,14 @@ class CreditService:
             # which every report site read as settled — the phone was told "your 20 credits
             # have been returned" and nothing paged. Re-labelled `partial` so the allow-list
             # predicate flips all three sites to their leak branch with no further edits.
+            # `covered` (migration 200) is the part a clawback already paid for: not owed.
             logger.error(
                 "REFUND LEAK: PARTIAL REFUND — refund_credits moved %s of %s credits for "
-                "user=%s ref_id=%s reason=%s; the user is OWED %s credits and the one-shot "
-                "refund guard is already burned; manual credit correction needed. Most likely "
-                "the charge and the refund straddled a monthly reset.",
-                refunded, amount, user_id, ref_id, reason, amount - refunded,
+                "user=%s ref_id=%s reason=%s (a clawback covered %s); the user is OWED %s "
+                "credits and the one-shot refund guard is already burned; manual credit "
+                "correction needed. Most likely the charge and the refund straddled a period "
+                "boundary.",
+                refunded, amount, user_id, ref_id, reason, covered, amount - refunded - covered,
             )
             return {**payload, "outcome": "partial", "requested": amount}
         elif isinstance(refunded, int) and refunded == 0 and amount > 0:
@@ -988,8 +1044,9 @@ class CreditService:
             )
         else:
             logger.info(
-                "Refunded %s credits to user=%s (reason=%s), spendable=%s",
-                refunded, user_id, reason, payload.get("spendable"),
+                "Refunded %s credits to user=%s (reason=%s), spendable=%s, covered by a "
+                "clawback=%s",
+                refunded, user_id, reason, payload.get("spendable"), covered,
             )
 
         return payload

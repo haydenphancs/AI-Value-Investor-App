@@ -74,8 +74,24 @@
 --
 -- ⚠️ A `refunded: 0` with no matched debit (no ref_id supplied) stays a success. There is no
 -- debit to point at, so "owed" is unprovable — claiming it would be a false alarm.
+--
+-- ⚠️ Never after 200 (200_credit_refund_roll_late_renewal_clawback_cover.sql). 200 redefines
+-- refund_credits (it rolls the period first and absorbs charges an Apple-refund clawback already
+-- paid for); this file's DROP + CREATE applied again would put back the body without either and
+-- re-own the function. The guard below refuses that (added 2026-10-21, IAP audit phase 2): once
+-- 200's column subscription_credit_periods.revoked_ledger_id exists, this file raises and changes
+-- nothing. On a first apply, or a re-run before 200, it is a no-op.
 
 BEGIN;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'subscription_credit_periods'
+                  AND column_name = 'revoked_ledger_id') THEN
+        RAISE EXCEPTION '142 must not be applied after 200: it would replace 200''s refund_credits and re-own it. Re-apply 200 instead.';
+    END IF;
+END $$;
 
 -- hook note: `.claude/hooks/post-tool-use-sql.sh` warns "CREATE FUNCTION without OR REPLACE".
 -- That warning is wrong here and non-blocking: changing a return type REQUIRES DROP + CREATE

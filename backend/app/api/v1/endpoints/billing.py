@@ -111,7 +111,9 @@ async def verify_purchase(
     Idempotent by design. StoreKit replays `Transaction.updates` on every launch, restore
     re-submits, and the webhook can arrive for the same purchase, so this is called far more
     often than a purchase happens. Entitlement is keyed on `originalTransactionId`, and
-    credits come from the monthly allocation rather than per-delivery, so a replay cannot
+    credits are granted once per Apple paid period for a subscription (migration 196:
+    `subscription_credit_periods`, keyed (original transaction, period end)) and once per
+    (environment, transaction id) for a credit pack, never per delivery, so a replay cannot
     mint credits.
 
     Guests are rejected: entitlement has to attach to a real account, and the shared guest
@@ -230,7 +232,11 @@ async def verify_purchase(
             message="Transaction is bound to a different account",
         )
     except IAPError as e:
-        logger.error("IAP entitlement failed for user=%s: %s", user_id, e)
+        logger.error(
+            "IAP entitlement failed for user=%s txn=%s original=%s product=%s env=%s: %s",
+            user_id, payload.get("transactionId"), payload.get("originalTransactionId"),
+            payload.get("productId"), payload.get("environment"), e,
+        )
         return make_error_response(
             ErrorCode.SYSTEM_BUSY,
             status_code=503,

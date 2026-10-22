@@ -469,3 +469,17 @@ def test_every_error_arm_matches_the_api_error_response_shape(monkeypatch, verif
     assert all(
         isinstance(v, (str, int, float, bool, type(None))) for v in body["details"].values()
     ), f"nested value in details: {body['details']!r}"
+
+
+def test_a_failed_entitlement_names_the_transaction(monkeypatch, caplog):
+    """IAP audit F22: the 503's ERROR named only the user, so the purchase it was about could not
+    be found from the line. It now names the transaction, its original, the product and env."""
+    with caplog.at_level("ERROR", logger="app.api.v1.endpoints.billing"):
+        status, _ = _error(_call(monkeypatch,
+                                 service=_FakeIAPService(raises=IAPError("supabase insert failed"))))
+    assert status == 503
+    lines = [r.getMessage() for r in caplog.records if "IAP entitlement failed" in r.getMessage()]
+    assert len(lines) == 1
+    for part in ("txn=2000000123456789", "original=2000000123456789",
+                 "product=com.phan.caydex.pro.monthly", "env=Sandbox"):
+        assert part in lines[0], (part, lines[0])

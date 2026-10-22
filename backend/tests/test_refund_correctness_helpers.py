@@ -55,7 +55,9 @@ from app.services.credit_service import (
 # predicate must split it. Spelled out as LITERALS on purpose: parametrising over
 # `REFUND_FAILURE_OUTCOMES` itself would pass after someone shrinks it.
 _OWED_OUTCOMES = ("no_matching_debit", "no_credits_row", "capped_to_zero")
-_BENIGN_OUTCOMES = ("refunded", "already_refunded", "guest", "invalid")
+# `covered_by_clawback` (migration 200, IAP audit F15): an Apple-refund clawback already paid for
+# the charge — nothing is owed.
+_BENIGN_OUTCOMES = ("refunded", "already_refunded", "covered_by_clawback", "guest", "invalid")
 _RPC_OUTCOMES = _OWED_OUTCOMES + _BENIGN_OUTCOMES
 
 # Captured at collection time — the same moment `recon` computed
@@ -261,7 +263,7 @@ def test_the_owed_set_is_exactly_these_three():
     assert set(REFUND_FAILURE_OUTCOMES) == set(_OWED_OUTCOMES)
 
 
-def test_the_settled_set_is_exactly_these_four():
+def test_the_settled_set_is_exactly_these_five():
     """The ALLOW-list the predicate actually reads (2026-09-10). Parametrised over literals for
     the same reason as the owed set: widening it to a new name would let that name fall open
     again, and this is the line that stops it."""
@@ -290,7 +292,7 @@ def test_a_refund_that_worked_is_not_a_leak(payload):
     assert refund_did_not_happen(payload) is False
 
 
-@pytest.mark.parametrize("outcome", ["already_refunded", "guest", "invalid"])
+@pytest.mark.parametrize("outcome", ["already_refunded", "covered_by_clawback", "guest", "invalid"])
 def test_a_benign_no_op_is_not_a_leak(outcome):
     """Deliberate: a replayed settlement (`already_refunded`) and the RPC's own guards are
     INFO at the source, and escalating them here would trade a silent-money bug for a noisy

@@ -211,7 +211,10 @@ CURATION: dict[str, TableDoc] = {
                 "balance after it.",
         key=("user_id", "delta", "reason", "granted_delta", "purchased_delta", "reverses_id"),
         note="`granted_delta`/`purchased_delta` record HOW a spend split across the two pools; "
-             "a refund reverses the recorded split, not the current balance."),
+             "a refund reverses the recorded split, not the current balance. `covered` "
+             "(migration 200), on a refund row: what an Apple-refund clawback had already paid "
+             "for of the charge — delta + covered is what the refund settled, and a replay "
+             "reports any shortfall."),
     "public.credit_purchases": T("billing",
         purpose="One row per consumable App Store purchase, and the exactly-once guard for it.",
         key=("user_id", "transaction_id", "environment", "product_id", "credits", "revoked_at"),
@@ -239,13 +242,17 @@ CURATION: dict[str, TableDoc] = {
                 "exactly-once guard for paid allowances (migration 196).",
         key=("user_id", "original_transaction_id", "period_end", "tier", "allocation", "carried",
              "source"),
-        note="UNIQUE(original_transaction_id, period_end): a period is granted at most once, "
-             "ever, and an older one is never re-applied. Written by ensure_credit_period, "
-             "revoke_tier_credits, and since 198 revoke_paid_period (claws a refunded period back "
-             "by this key: revoke_requested_at, the carry stamps) and reinstate_paid_carry; "
-             "user_credits.paid_period_id points at the one in force. An upgrade records "
-             "carried_from_period_id; a period the register still holds a refund of is never "
-             "reinstated."),
+        note="UNIQUE(original_transaction_id, period_end): a period is granted at most once "
+             "per account (the rows go with the account, so a token-less replay into a new "
+             "account can grant the key again: SDG §9b.12), and an older one is never re-applied. "
+             "Written by ensure_credit_period, revoke_tier_credits, and since 198 "
+             "revoke_paid_period (claws a refunded period back by this key: revoke_requested_at, "
+             "the carry stamps) and reinstate_paid_carry; since 200 refund_credits (revoked_cover, "
+             "revoked_remaining). user_credits.paid_period_id points at the one in force. An "
+             "upgrade records carried_from_period_id; a period the register still holds a refund "
+             "of is never reinstated. revoked_cover / revoked_ledger_id (200): what a clawback "
+             "covered above the floor and the ledger mark a reinstatement deducts the window's "
+             "spend after."),
     "public.subscription_transactions": T("billing",
         purpose="One row per Apple subscription transaction iap_service has seen: when it was "
                 "applied to a lineage row, and the latest signedDate of a refund of it and of "
@@ -257,7 +264,11 @@ CURATION: dict[str, TableDoc] = {
              "Refuses replays of refunded transactions (even of lineages never bound to an "
              "account: user_id NULL), lets a reversal through in either order, and keeps a "
              "refunded period from being reinstated. Written only by "
-             "record_subscription_transaction."),
+             "record_subscription_transaction. user_id = the bound account, or the account an "
+             "unbound refund's appAccountToken names (never binding the lineage). Rows go with "
+             "the account: owned ones by ON DELETE CASCADE, ownerless ones of its lineages by the "
+             "users BEFORE DELETE trigger (migration 201); rows recorded after a deletion stay, "
+             "holding no account id."),
     "public.guest_report_budget": T("billing",
         key=("bucket_key", "period_month", "report_count"),
         note="LEGACY. AI generation went account-only; a client-chosen header meant rotating it "

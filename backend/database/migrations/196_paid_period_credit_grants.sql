@@ -110,7 +110,7 @@ SET LOCAL lock_timeout = '5s';
 DO $$
 BEGIN
     IF to_regclass('public.subscription_transactions') IS NOT NULL THEN
-        RAISE EXCEPTION '196 must not be applied after 198: it would replace 198''s ensure_credit_period and revoke_tier_credits. Re-apply 198 instead.';
+        RAISE EXCEPTION '196 must not be applied after 198: it would replace 198''s ensure_credit_period and revoke_tier_credits. Re-apply 198 instead (once 200 is applied, 198 refuses too: re-apply 200 for ensure_credit_period, and ask for a new migration that redefines revoke_tier_credits).';
     END IF;
 END $$;
 

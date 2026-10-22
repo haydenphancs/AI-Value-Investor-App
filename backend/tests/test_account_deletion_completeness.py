@@ -524,3 +524,122 @@ def test_purge_list_has_no_stale_entries():
     known = _tables_with_user_id_column()
     stale = [t for t in users_ep._UNLINKED_USER_TABLES if t not in known]
     assert not stale, f"listed for purge but not in the schema: {stale}"
+
+
+# ── The transaction register's ownerless rows (migration 201, IAP audit F17) ─────────────────
+#
+# subscription_transactions rows with a NULL owner never match the FK cascade, so the rows of a
+# deleted account's lineages recorded with no owner used to survive the deletion. 201's BEFORE
+# DELETE trigger on public.users purges them. Read through the shared SQL reader (comments of both
+# kinds stripped, the LATEST definition, a later DROP fails loudly).
+
+_PURGE_FN = "purge_ownerless_subscription_transactions"
+_PURGE_TRIGGER = re.compile(
+    r"CREATE\s+TRIGGER\s+users_purge_ownerless_subscription_transactions\s+BEFORE\s+DELETE\s+ON\s+"
+    r"public\.users\s+FOR\s+EACH\s+ROW\s+EXECUTE\s+FUNCTION\s+public\.purge_ownerless_subscription_transactions\(\)\s*;",
+    re.I)
+_DROP_TRIGGER = re.compile(
+    r"DROP\s+TRIGGER\s+(?:IF\s+EXISTS\s+)?users_purge_ownerless_subscription_transactions\b", re.I)
+
+
+_DISABLE_TRIGGER = re.compile(
+    r"ALTER\s+TABLE\s+(?:ONLY\s+)?(?:public\.)?users\s+DISABLE\s+TRIGGER\s+"
+    r"(?:users_purge_ownerless_subscription_transactions|ALL|USER)\b", re.I)
+
+# The live body, EXACT (whitespace-normalised): an `EXISTS` for a `NOT EXISTS`, a broken
+# correlation (`s2.original_transaction_id IS NOT NULL`), an early `RETURN NULL` or a dropped
+# exception handler all keep every fragment a substring check looks for (review of 201,
+# 2026-10-21).
+_PURGE_BODY = (
+    "BEGIN DELETE FROM public.subscription_transactions t WHERE t.user_id IS NULL "
+    "AND t.original_transaction_id IN ("
+    "SELECT s.original_transaction_id FROM public.subscriptions s "
+    "WHERE s.user_id = OLD.id AND s.original_transaction_id IS NOT NULL "
+    "UNION SELECT p.original_transaction_id FROM public.subscription_credit_periods p "
+    "WHERE p.user_id = OLD.id "
+    "UNION SELECT o.original_transaction_id FROM public.subscription_transactions o "
+    "WHERE o.user_id = OLD.id) "
+    "AND NOT EXISTS (SELECT 1 FROM public.subscriptions s2 "
+    "WHERE s2.original_transaction_id = t.original_transaction_id AND s2.user_id <> OLD.id) "
+    "AND NOT EXISTS (SELECT 1 FROM public.subscription_credit_periods p2 "
+    "WHERE p2.original_transaction_id = t.original_transaction_id AND p2.user_id <> OLD.id) "
+    "AND NOT EXISTS (SELECT 1 FROM public.subscription_transactions o2 "
+    "WHERE o2.original_transaction_id = t.original_transaction_id AND o2.user_id IS NOT NULL "
+    "AND o2.user_id <> OLD.id); "
+    "RETURN OLD; "
+    "EXCEPTION WHEN OTHERS THEN RAISE WARNING 'purge_ownerless_subscription_transactions: could not "
+    "purge the ownerless register rows of user % (%: %) — the account is still deleted; the rows "
+    "stay', OLD.id, SQLSTATE, SQLERRM; RETURN OLD; END;")
+
+
+def test_ownerless_register_rows_of_an_account_are_purged_before_its_cascade():
+    """Every lineage source, the exclusions that keep another live account's evidence, and RETURN
+    OLD on every path. A NULL return from a BEFORE DELETE trigger under auth.users' cascade does not
+    raise: it silently skips the public.users delete (orphaned data, the deletion reported done —
+    App Store 5.1.1(v)); an error would fail every deletion, so it is caught and logged. The
+    trigger is created after its last DROP and never disabled, so it is live."""
+    from _migration_sql import latest_definition, migration_sources, norm_sql, strip_sql_comments
+
+    d = latest_definition(_PURGE_FN)
+    assert re.search(r"\bSECURITY\s+DEFINER\b", d.header, re.I), d.header
+    assert re.search(r"SET\s+search_path\s*=\s*public,\s*pg_temp", d.header, re.I), d.header
+    assert re.search(r"SET\s+row_security\s*=\s*off", d.header, re.I), (
+        f"{d.file}: without row_security = off the purge filters (or raises) on RLS")
+    assert norm_sql(d.body) == _PURGE_BODY, f"{d.file}: the purge changed:\n  {norm_sql(d.body)}"
+    returns = re.findall(r"\bRETURN\s+(\w+)", d.body, re.I)
+    assert returns and {r.upper() for r in returns} == {"OLD"}, (
+        f"{d.file}: every path must RETURN OLD: {returns}")
+
+    created = dropped = disabled = None
+    for i, (_name, text) in enumerate(migration_sources()):
+        stripped = strip_sql_comments(text)
+        for m in _DROP_TRIGGER.finditer(stripped):
+            dropped = (i, m.start())
+        for m in _PURGE_TRIGGER.finditer(stripped):
+            created = (i, m.start())
+        for m in _DISABLE_TRIGGER.finditer(stripped):
+            disabled = (i, m.start())
+    assert created is not None, "no migration creates the users BEFORE DELETE purge trigger"
+    assert dropped is None or created > dropped, "the purge trigger is dropped after it was created"
+    assert disabled is None or created > disabled, "the purge trigger is disabled after it was created"
+
+
+_MUTATIONS = [
+    ("RETURN OLD;", "RETURN NULL;"),                                   # orphans the account's data
+    ("AND p2.user_id <> OLD.id", "AND TRUE"),                          # purges another account's evidence
+    ("WHERE s.user_id = OLD.id AND s.original_transaction_id IS NOT NULL",
+     "WHERE s.original_transaction_id IS NOT NULL"),                   # purges every account's rows
+    ("AND NOT EXISTS (SELECT 1 FROM public.subscriptions s2",
+     "AND EXISTS (SELECT 1 FROM public.subscriptions s2"),             # inverts an exclusion
+    ("WHERE s2.original_transaction_id = t.original_transaction_id",
+     "WHERE s2.original_transaction_id IS NOT NULL"),                  # breaks the correlation
+    ("BEGIN\n    DELETE", "BEGIN\n    IF OLD.id IS NOT NULL THEN RETURN NULL; END IF;\n    DELETE"),
+    ("EXCEPTION WHEN OTHERS THEN", "-- (handler removed)\n    IF FALSE THEN"),  # an error fails deletion
+    ("SET row_security = off\n", ""),
+]
+
+
+@pytest.mark.parametrize("old,new", _MUTATIONS)
+def test_the_purge_guard_turns_red_on_a_later_broken_redefinition(old, new, monkeypatch):
+    import _migration_sql
+
+    real = _migration_sql.migration_sources()
+    text = next(t for n, t in real if n.startswith("201_"))
+    start = text.index("CREATE OR REPLACE FUNCTION public.purge_ownerless_subscription_transactions()")
+    fn = text[start:text.index("$$;", text.index("AS $$", start)) + 3]
+    assert old in fn, f"the mutation anchor {old!r} is gone — re-derive it"
+    later = "BEGIN;\n" + fn.replace(old, new, 1) + "\nCOMMIT;\n"
+    monkeypatch.setattr(_migration_sql, "migration_sources", lambda: real + [("999_synthetic.sql", later)])
+    with pytest.raises(AssertionError):
+        test_ownerless_register_rows_of_an_account_are_purged_before_its_cascade()
+
+
+def test_the_purge_guard_turns_red_when_a_later_migration_disables_the_trigger(monkeypatch):
+    import _migration_sql
+
+    real = _migration_sql.migration_sources()
+    later = ("BEGIN;\nALTER TABLE public.users DISABLE TRIGGER "
+             "users_purge_ownerless_subscription_transactions;\nCOMMIT;\n")
+    monkeypatch.setattr(_migration_sql, "migration_sources", lambda: real + [("999_synthetic.sql", later)])
+    with pytest.raises(AssertionError, match="disabled"):
+        test_ownerless_register_rows_of_an_account_are_purged_before_its_cascade()

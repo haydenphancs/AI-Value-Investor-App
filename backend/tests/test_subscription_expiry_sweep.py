@@ -86,8 +86,11 @@ class _Q:
     def limit(self, n):
         self._limit = n; return self
 
-    def order(self, col, *_a, **_k):
-        self._order = col; return self
+    def order(self, col, *_a, desc=False, **_k):
+        self._orders = getattr(self, "_orders", []) + [(col, desc)]; return self
+
+    def range(self, start, end):
+        self._range = (start, end); return self
 
     @property
     def not_(self):
@@ -113,11 +116,14 @@ class _Q:
         rows = self._db.setdefault(self._table, [])
         if self._op == "select":
             out = [dict(r) for r in rows if self._matches(r)]
-            # Model the server: an ORDER BY when asked, else storage order, then the LIMIT.
-            if getattr(self, "_order", None):
-                out.sort(key=lambda r: str(r.get(self._order)))
+            # Model the server: an ORDER BY when asked (every key, first key first), else storage
+            # order, then the LIMIT and the RANGE (OFFSET .. end, inclusive).
+            for col, desc in reversed(getattr(self, "_orders", [])):
+                out.sort(key=lambda r, c=col: str(r.get(c)), reverse=desc)
             if getattr(self, "_limit", None) is not None:
                 out = out[: self._limit]
+            if getattr(self, "_range", None) is not None:
+                out = out[self._range[0]: self._range[1] + 1]
             return type("R", (), {"data": out})()
         if self._op == "update":
             # The rows it touched, as PostgREST returns by default (return=representation):
@@ -482,6 +488,16 @@ class _SweepQ(_LedgerQ):
         super().__init__(*a, **k)
         self._extra = []
         self._neg = False
+        self._orders: list = []
+        self._range = None
+
+    def order(self, col, desc=False):
+        self._orders.append((col, desc))
+        return super().order(col, desc=desc)
+
+    def range(self, start, end):
+        self._range = (start, end)
+        return self
 
     def in_(self, col, vals):
         vals = list(vals)
@@ -513,6 +529,18 @@ class _SweepQ(_LedgerQ):
         return self
 
     def execute(self):
+        if self._op == "select" and (len(self._orders) > 1 or self._range is not None):
+            # Every ORDER BY key (first key first) and the RANGE, which `_LedgerQ` does not model.
+            if self._table in self._fail:
+                raise RuntimeError(f"{self._table} unavailable")
+            out = [dict(r) for r in self._db.setdefault(self._table, [])
+                   if all(p(r) for p in self._extra)
+                   and all(r.get(k) == v for k, v in self._filters.items())]
+            for col, desc in reversed(self._orders):
+                out.sort(key=lambda r, c=col: str(r.get(c)), reverse=desc)
+            if self._range is not None:
+                out = out[self._range[0]: self._range[1] + 1]
+            return type("R", (), {"data": out})()
         if self._extra and self._op in ("select", "update"):
             real = self._db
             narrowed = [r for r in real.setdefault(self._table, [])
@@ -722,3 +750,185 @@ def test_the_recheck_waits_for_a_renewal_verdict_that_is_not_in_yet(service_cloc
     out = s.sweep_expired_subscriptions()
     assert out["expired"] == 1 and out["users_reconciled"] == 1
     assert sb.db["users"][0]["tier"] == "free"
+
+
+# ── Review round 2 (2026-10-20): the re-check's own edges ────────────────────────────────────
+
+def _expired_row(rid, user, *, updated, tier="premium"):
+    return {"id": rid, "user_id": user, "tier": tier, "status": "expired",
+            "current_period_end": (updated - timedelta(days=1)).isoformat(),
+            "original_transaction_id": f"otx-{rid}", "environment": "Production",
+            "updated_at": updated.isoformat()}
+
+
+@pytest.mark.parametrize("age, rechecked", [
+    (timedelta(days=8), False), (timedelta(days=7) - timedelta(minutes=1), True),
+], ids=["8-days-old", "just-inside-7-days"])
+@pytest.mark.parametrize("mode", ["legacy", "lineage"])
+def test_the_recheck_reads_only_the_last_seven_days_of_expiries(mode, age, rechecked, service_clock):
+    """The window is the documented bound of the re-check and its side effects (a lowered comp
+    floor reaches users.tier): an older expired row is never re-checked."""
+    start = datetime.now(timezone.utc).replace(microsecond=0)
+    sb = _Sweepable(subscriptions=[_expired_row("sub-1", _USER, updated=start - age)], schema=mode)
+    sb.db["users"][0]["tier"] = "premium"
+    service_clock(sb, start)
+    out = _ledger_service(sb).sweep_expired_subscriptions()
+    assert out["users_reconciled"] == (1 if rechecked else 0)
+    assert sb.db["users"][0]["tier"] == ("free" if rechecked else "premium")
+    assert bool(_users_writes(sb)) is rechecked
+
+
+def test_the_pending_renewal_check_reads_the_clock_per_account(service_clock):
+    """Review round 2: the pending test used the pass's start time while `winning_tier` reads a
+    fresh clock, so a row ending DURING the pass was demoted at once. The account is skipped now,
+    as the sweep would wait for Apple's renewal verdict."""
+    start = datetime.now(timezone.utc).replace(microsecond=0)
+    sb = _Sweepable(subscriptions=[_expired_row("sub-1", _USER, updated=start - timedelta(hours=1))],
+                    schema="lineage")
+    sb.db["subscriptions"].append({
+        "id": "sub-2", "user_id": _USER, "tier": "pro", "status": "active",
+        # Past the one-minute look-ahead at the pass's start, so only the per-account clock helps.
+        "current_period_end": (start + timedelta(seconds=90)).isoformat(),
+        "original_transaction_id": "otx-2", "environment": "Production",
+        "updated_at": (start - timedelta(days=29)).isoformat()})
+    sb.db["users"][0]["tier"] = "premium"
+    service_clock(sb, start)
+    s = _ledger_service(sb)
+    real = s._account_rows
+
+    def rows_then_the_clock_moves(uid):
+        out = real(uid)
+        service_clock(sb, start + timedelta(minutes=3))      # Pro's period ends meanwhile
+        return out
+    s._account_rows = rows_then_the_clock_moves
+
+    out = s.sweep_expired_subscriptions()
+    assert out["users_reconciled"] == 0 and sb.db["users"][0]["tier"] == "premium"
+
+
+def test_the_recheck_waits_for_a_row_ending_within_the_next_minute(service_clock):
+    """The pending test looks one minute ahead: `winning_tier` reads its own clock a moment later,
+    and a row ending in between would be dropped."""
+    start = datetime.now(timezone.utc).replace(microsecond=0)
+    sb = _Sweepable(subscriptions=[_expired_row("sub-1", _USER, updated=start - timedelta(hours=1))],
+                    schema="lineage")
+    sb.db["subscriptions"].append({
+        "id": "sub-2", "user_id": _USER, "tier": "pro", "status": "active",
+        "current_period_end": (start + timedelta(seconds=30)).isoformat(),
+        "original_transaction_id": "otx-2", "environment": "Production",
+        "updated_at": (start - timedelta(days=29)).isoformat()})
+    sb.db["users"][0]["tier"] = "premium"
+    service_clock(sb, start)
+    out = _ledger_service(sb).sweep_expired_subscriptions()
+    assert out["users_reconciled"] == 0 and sb.db["users"][0]["tier"] == "premium"
+
+
+def test_the_recheck_reaches_a_stale_account_behind_more_than_a_page_of_expiries(service_clock):
+    """Review round 2: only the newest `limit` expired rows were read, so a wave of ordinary
+    expiries (accounts already reconciled to free) pushed a stale account out for good."""
+    start = datetime.now(timezone.utc).replace(microsecond=0)
+    rows = [_expired_row("sub-u", _USER, updated=start - timedelta(days=2))]
+    rows += [_expired_row(f"sub-{i}", f"other-{i}", updated=start - timedelta(hours=1), tier="pro")
+             for i in range(3)]
+    sb = _Sweepable(subscriptions=rows, schema="lineage")
+    sb.db["users"] = [{"id": _USER, "tier": "premium"}] + [
+        {"id": f"other-{i}", "tier": "free"} for i in range(3)]
+    service_clock(sb, start)
+    out = _ledger_service(sb).sweep_expired_subscriptions(limit=2)
+    assert out["users_reconciled"] == 1 and sb.db["users"][0]["tier"] == "free"
+
+
+class _TiesReshuffle(_Sweepable):
+    """Postgres returns rows that tie on every ORDER BY key in whatever order it meets them, and that
+    order can change between two paged reads. Modelled by reversing the subscriptions heap after
+    each ranged read: paging without a unique last key then skips or repeats tied rows."""
+
+    def table(self, name):
+        q = super().table(name)
+        inner = q.execute
+
+        def execute():
+            out = inner()
+            if name == "subscriptions" and q._op == "select" and getattr(q, "_range", None):
+                self.db["subscriptions"].reverse()
+            return out
+
+        q.execute = execute
+        return q
+
+
+def test_the_recheck_pages_on_a_unique_key_when_expiries_tie(service_clock):
+    """One sweep pass stamps the SAME `updated_at` on every row it expires, so a stale account's
+    row ties with a whole wave. The re-check pages newest first by `updated_at`, then by the unique
+    `id`; without that tiebreaker the second page of the reshuffled heap repeats the first and the
+    stale account is never read."""
+    start = datetime.now(timezone.utc).replace(microsecond=0)
+    tied = start - timedelta(hours=1)
+    rows = [_expired_row(f"sub-{c}", f"other-{c}", updated=tied, tier="pro") for c in "abc"]
+    rows.append(_expired_row("sub-u", _USER, updated=tied))
+    sb = _TiesReshuffle(subscriptions=rows, schema="lineage")
+    sb.db["users"] = [{"id": _USER, "tier": "premium"}] + [
+        {"id": f"other-{c}", "tier": "free"} for c in "abc"]
+    service_clock(sb, start)
+    out = _ledger_service(sb).sweep_expired_subscriptions(limit=2)
+    assert out["users_reconciled"] == 1 and sb.db["users"][0]["tier"] == "free"
+
+
+def test_at_the_page_cap_the_freshest_expiry_is_still_read(service_clock, caplog, monkeypatch):
+    """A hit cap leaves out the OLDEST expiries, never the newest: the stale account's row expired
+    minutes ago and carries the highest id. Ordered on the random uuid `id` alone, the same
+    high-id rows fell past the cap on every pass, and a reconcile that had just failed was never
+    re-checked (review round 3)."""
+    monkeypatch.setattr(svc, "_SWEEP_RECHECK_MAX_PAGES", 2)
+    start = datetime.now(timezone.utc).replace(microsecond=0)
+    rows = [_expired_row(f"sub-{i}", f"other-{i}", updated=start - timedelta(days=2), tier="pro")
+            for i in range(5)]
+    rows.append(_expired_row("sub-zz", _USER, updated=start - timedelta(minutes=5)))
+    sb = _Sweepable(subscriptions=rows, schema="lineage")
+    sb.db["users"] = [{"id": _USER, "tier": "premium"}] + [
+        {"id": f"other-{i}", "tier": "free"} for i in range(5)]
+    service_clock(sb, start)
+    caplog.set_level(logging.WARNING)
+    out = _ledger_service(sb).sweep_expired_subscriptions(limit=2)
+    assert any("stopped paging" in r.getMessage() for r in caplog.records), "the cap was hit"
+    assert out["users_reconciled"] == 1 and sb.db["users"][0]["tier"] == "free"
+
+
+def test_the_recheck_says_when_it_stops_at_its_page_cap(service_clock, caplog, monkeypatch):
+    monkeypatch.setattr(svc, "_SWEEP_RECHECK_MAX_PAGES", 2)
+    start = datetime.now(timezone.utc).replace(microsecond=0)
+    rows = [_expired_row("sub-u", _USER, updated=start - timedelta(days=2))]
+    rows += [_expired_row(f"sub-{i}", f"other-{i}", updated=start - timedelta(hours=1), tier="pro")
+             for i in range(5)]
+    sb = _Sweepable(subscriptions=rows, schema="lineage")
+    sb.db["users"] = [{"id": _USER, "tier": "premium"}] + [
+        {"id": f"other-{i}", "tier": "free"} for i in range(5)]
+    service_clock(sb, start)
+    caplog.set_level(logging.WARNING)
+    out = _ledger_service(sb).sweep_expired_subscriptions(limit=2)
+    assert out["users_reconciled"] == 0 and sb.db["users"][0]["tier"] == "premium"
+    assert any("stopped paging" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("subtype", [None, "DOWNGRADE"])
+@pytest.mark.parametrize("mode", ["legacy", "lineage"])
+def test_f14_an_offer_redeemed_after_the_sweep_lets_the_grace_notice_back_in(
+        mode, subtype, service_clock, monkeypatch):
+    """IAP audit F14 in its likelier order: the grace notice's first delivery fails, the hourly
+    sweep expires the row at its end + 24 h, then an OFFER_REDEEMED about the period in grace
+    (data.status 4) arrives. It used to store its signedDate, so Apple's late grace notice was
+    refused as stale and the subscriber stayed on Free for the rest of grace."""
+    from test_iap_entitlement import (_GRACE_END, _grace_notice_retried, _grace_txn,
+                                      _max_past_its_end, _notify, _row)
+    monkeypatch.setattr(settings, "IAP_BILLING_GRACE_DAYS", 28)
+    sb = _Sweepable(schema=mode)
+    s = _max_past_its_end(sb, service_clock, minutes=24 * 60 + 30)
+    s.sweep_expired_subscriptions()
+    assert _row(sb)["status"] == "expired"
+    offer_at = _GRACE_END + timedelta(hours=25)
+    service_clock(sb, offer_at)
+    _notify(s, "OFFER_REDEEMED", subtype, offer_at, _grace_txn(), apple_status=4)
+    assert _row(sb).get("last_event_at") != offer_at.isoformat()
+    service_clock(sb, _GRACE_END + timedelta(hours=37))
+    _grace_notice_retried(s)
+    assert (_row(sb)["status"], sb._tier()) == ("grace_period", "premium")

@@ -16,7 +16,7 @@ and delegates here, so the error contract is written once:
 Lives beside `error_response.py`, not under `endpoints/`, because it declares no routes.
 """
 
-import logging
+import logging 
 from typing import Any, Dict, Optional, Union
 
 from fastapi.responses import JSONResponse

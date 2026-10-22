@@ -1461,7 +1461,10 @@ pinches toward its left edge. First paint is unchanged.
   hourly bars come from one 90-day series. Every tier is in process memory, bounded by bytes,
   with `_inflight` dedup (the §10 row explains why there is no Supabase tier).
   `chart_helper.fetch_chart_data` reads the same history, which gives every range its warm-up:
-  at least 210 bars before the first visible bar, including intraday and crypto 1W.
+  at least 210 bars before the first visible bar, including intraday and crypto 1W. FMP answers
+  only the newest 7 / 42 / 28 / 89 days of one intraday request (5min / 15min / 30min / 1hour,
+  probed 2026-10-21), so a longer intraday read is stitched from newest-first requests
+  (`chart_helper._fetch_intraday_span`); intraday paging reaches 15 years back.
 - **Client.** `ChartHistoryLoader` (one per detail ViewModel) keeps a contiguous, date-ordered
   store of the bars older than the current payload, with these rules:
   - a strict "older than the payload's first bar" merge;

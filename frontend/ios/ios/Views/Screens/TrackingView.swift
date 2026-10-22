@@ -312,6 +312,10 @@ struct TrackingContentViewWithBinding: View {
             // `onDismiss` does `openedAlertDestination = pendingAlertDestination`, which runs
             // AFTER the animation. Clearing `selectedAlert` without clearing the pending value
             // would re-present the destination cover on top of the Research tab.
+            //
+            // The six view-model sheets as well (add asset, sort, the three portfolio editors,
+            // manage tickers): none has an `onDismiss`, so closing one only drops its draft. The
+            // whale paywall is presented by `WhalesTabContent` / `AllWhalesView`, which clear it.
             .onPresentationReset {
                 pendingAlertDestination = nil
                 openedAlertDestination = nil
@@ -322,6 +326,12 @@ struct TrackingContentViewWithBinding: View {
                 viewModel.selectedTradeGroup = nil
                 showProfile = false
                 showSearch = false
+                viewModel.showAddAssetSheet = false
+                viewModel.showSortSheet = false
+                viewModel.showPortfolioConfigSheet = false
+                viewModel.showNewPortfolioSheet = false
+                viewModel.showEditPortfolioSheet = false
+                viewModel.showManageTickersSheet = false
             }
             .fullScreenCover(isPresented: $showProfile) {
                 ProfileView()
@@ -735,6 +745,11 @@ struct WhalesTabContent: View {
         .sheet(isPresented: $viewModel.showWhalePaywall) {
             PaywallView(context: .whaleFollowLimit)
                 .environment(\.appState, appState)
+        }
+        // This view, not the tab root, presents the paywall; `AllWhalesView` presents the same
+        // flag from its push and clears it there too.
+        .onPresentationReset {
+            viewModel.showWhalePaywall = false
         }
     }
 }

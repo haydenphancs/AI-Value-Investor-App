@@ -185,6 +185,11 @@ struct ScannerCard: View {
                                 .frame(maxWidth: 260)
                                 .presentationCompactAdaptation(.popover)
                         }
+                        // A real popover is a presentation on Home, which no root's reset
+                        // reaches: a widget or push tap could not open over it.
+                        .onPresentationReset {
+                            showInfo = false
+                        }
                     }
                 }
                 // Subtitle is optional — an empty string (e.g. the Top Movers card)

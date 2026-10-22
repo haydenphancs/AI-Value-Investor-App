@@ -104,6 +104,11 @@ struct MoneyMovesDetailView: View {
             MoneyMoveArticleDetailView(article: article)
                 .environmentObject(audioManager)
         }
+        // A PUSH that Learn keeps on a widget or push tap, so Learn's reset never reaches this
+        // cover: without its own, the tap would land underneath the open article.
+        .onPresentationReset {
+            selectedArticle = nil
+        }
         .onAppear {
             loadSampleData()
         }

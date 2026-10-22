@@ -105,6 +105,11 @@ struct GlobalAudioOverlay: ViewModifier {
                 audioManager.setCompactMode(false, reason: token)
             }
             .narratedCoreReader(item: $readerRoute)
+            // This modifier sits on screens no tab root resets — Money Moves is a push Learn
+            // keeps — so it clears its own reader cover for a widget or push tap.
+            .onPresentationReset {
+                readerRoute = nil
+            }
     }
 
     /// Same book → jump the reader already on screen. Anything else → present the narrated

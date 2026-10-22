@@ -60,6 +60,11 @@ struct GlobalHeaderView: View {
         .fullScreenCover(isPresented: $showSloganSheet) {
             CaydexSloganView()
         }
+        // The header is not a tab root, so no root's reset reaches this cover: a widget or push
+        // tap would otherwise land under the quote on whichever tab showed it.
+        .onPresentationReset {
+            showSloganSheet = false
+        }
     }
 }
 

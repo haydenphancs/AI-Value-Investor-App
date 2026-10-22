@@ -96,7 +96,14 @@ class InvestorJourneyViewModel: ObservableObject {
     func dismissLessonStory() {
         showLessonStory = false
         selectedLesson = nil
-        // A lesson may have just been completed inside the story; refresh the grid + progress.
+    }
+
+    /// The story cover's `onDismiss`: every way it closes ends here — its own close button, a
+    /// CTA, Ask AI, and a widget or push tap's presentation reset, which only flips
+    /// `showLessonStory`. A lesson may have just been completed inside the story, so the grid
+    /// and progress are rebuilt here rather than in `dismissLessonStory`, which the reset skips.
+    func lessonStoryDidClose() {
+        selectedLesson = nil
         rebuildJourney()
     }
 

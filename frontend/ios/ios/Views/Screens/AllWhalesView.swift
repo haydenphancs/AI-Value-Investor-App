@@ -274,6 +274,11 @@ struct AllWhalesView: View {
             PaywallView(context: .whaleFollowLimit)
                 .environment(\.appState, appState)
         }
+        // A kept push (Tracking pops only its own destinations), so its sheet needs its own
+        // reset or a widget or push tap lands underneath it.
+        .onPresentationReset {
+            viewModel.showWhalePaywall = false
+        }
     }
 
     // MARK: - Search

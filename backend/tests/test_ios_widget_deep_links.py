@@ -2,7 +2,7 @@
 Holdings tap → that asset's detail) and `caydex://updates/market` (a Market tap → the Updates tab
 on its Market chip; owner, 2026-10-22).
 
-There is no XCTest target, so these read the Swift source. They pin four things:
+There is no XCTest target, so these read the Swift source. They pin five things:
 
 1. ONE GRAMMAR. `Shared/CaydexDeepLink.swift` compiles into both targets. The widget builds
    links only through `CaydexDeepLink.tickerURL` and `CaydexDeepLink.updatesMarketURL`, and the
@@ -20,6 +20,11 @@ There is no XCTest target, so these read the Swift source. They pin four things:
    headline, or the Updates Market chip in Market mode, and nothing on WidgetKit's placeholder
    render — and a `Link` per Holdings row on Medium/Large. Market rows carry no `Link`: the
    whole Market tile opens Updates → Market.
+5. NOTHING LEFT UP (section 3). A tap tears down every presentation before it opens, so every
+   view a tab root reaches — found by a walk from `RootView`, not by a list — clears each
+   presentation it owns in its `.onPresentationReset`: headers, atoms, the pushes Learn and
+   Tracking keep, and RootView's own Buy Credits / sign-in sheets. Shared by push taps and the
+   AI Deep Research handoff, which run the same teardown.
 
 Every Swift scan strips comments first and brace-bounds the declaration it means (testing.md
 §3), except the deliberate whole-file ones: the one-`.widgetURL` and `TapThrough(` counts, the
@@ -37,6 +42,7 @@ already-fixed bugs back). Editing one of those functions means editing its pin h
 from __future__ import annotations
 
 import ast
+import functools
 import plistlib
 import re
 from pathlib import Path
@@ -636,7 +642,10 @@ def test_a_market_focus_selects_the_chip_and_scrolls_to_the_insight_card():
 _PRESENTATIONS = ("sheet", "fullScreenCover", "popover", "alert", "confirmationDialog",
                   "inAppBrowser", "aiChatCover", "alertDestinationCover", "navigationDestination",
                   "narratedCoreReader")
-_NOT_PRESENTATIONS: frozenset[str] = frozenset()
+# Modifiers that take a `$binding` and present nothing: a focus binding, and the Alerts inbox's
+# row builder (`NotificationInboxSection.rows`), whose bindings are the selection that
+# `AlertsTabContent` presents and resets itself.
+_NOT_PRESENTATIONS: frozenset[str] = frozenset({"focused", "rows"})
 
 
 def _call_args(src: str, open_paren: int) -> str:
@@ -652,26 +661,74 @@ def _call_args(src: str, open_paren: int) -> str:
     raise AssertionError("unbalanced parentheses")
 
 
-def _presented_bindings(view: str) -> set[str]:
-    """The state behind every presentation in `view`. Fails on a presentation it cannot read and
-    on a `$binding` given to a modifier it does not know, instead of skipping either."""
-    names: set[str] = set()
+def _block_end(src: str, open_brace: int) -> int:
+    """The index just past the `}` matching the `{` at `open_brace`."""
+    depth = 0
+    for i in range(open_brace, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    raise AssertionError("unbalanced braces")
+
+
+def _presentations(view: str, where: str) -> list[tuple[str, str, int, int]]:
+    """`(modifier, state, start, end)` for every presentation in `view`: the state behind it, and
+    the span of the call with its trailing closures (`} message: {` included). Fails on a
+    presentation it cannot read and on a `$binding` given to a modifier it does not know, instead
+    of skipping either."""
+    found = []
     for call in re.finditer(r"\.(\w+)\(", view):
         modifier, args = call.group(1), _call_args(view, call.end() - 1)
         binding = re.search(r"\$([A-Za-z_][\w.]*)", args)
         if modifier in _PRESENTATIONS:
-            optional = re.search(r"get:\s*\{\s*([\w.]+)\s*!=\s*nil\s*\}", args)
+            # `Binding(get: { x != nil }, …)` (a Bool) or `Binding(get: { x }, …)` (an item).
+            optional = re.search(r"get:\s*\{\s*([\w.]+)\s*(?:!=\s*nil\s*)?\}", args)
             assert binding or optional, (
-                f"`.{modifier}(` in UpdatesView presents from state this guard cannot read "
+                f"`.{modifier}(` in {where} presents from state this guard cannot read "
                 f"({args.strip()[:80]!r}): teach it, do not skip it"
             )
-            names.add(binding.group(1) if binding else optional.group(1))
+            end = call.end() + len(args) + 1
+            first = True
+            while True:
+                rest = view[end:]
+                closure = re.match(r"\s*\{", rest) if first else re.match(r"\s*\w+\s*:\s*\{", rest)
+                if not closure:
+                    break
+                end = _block_end(view, end + closure.end() - 1)
+                first = False
+            found.append((modifier, binding.group(1) if binding else optional.group(1), call.start(), end))
         else:
             assert not binding or modifier in _NOT_PRESENTATIONS, (
-                f"`.{modifier}(` in UpdatesView takes `${binding.group(1)}`: if it presents "
+                f"`.{modifier}(` in {where} takes `${binding.group(1)}`: if it presents "
                 "anything, add it to _PRESENTATIONS (and reset it); if not, to _NOT_PRESENTATIONS"
             )
-    return names
+    return found
+
+
+def _presented_bindings(view: str) -> set[str]:
+    """The state behind every presentation in UpdatesView (see `_presentations`)."""
+    return {state for _, state, _, _ in _presentations(view, "UpdatesView")}
+
+
+def _cleared_by_reset(view: str, where: str) -> list[str]:
+    """What `view`'s `.onPresentationReset` blocks clear, in order. Each statement must be an
+    unconditional `x = false` / `x = nil`."""
+    cleared = []
+    for at in [m.start() for m in re.finditer(r"\.onPresentationReset\s*\{", view)]:
+        block = _block(view[at:], ".onPresentationReset")
+        statements = [s.strip() for s in re.split(r"[\n;]", block[1:-1]) if s.strip()]
+        for statement in statements:
+            m = re.fullmatch(r"([\w.]+)\s*=\s*(false|nil)", statement)
+            assert m, (
+                f"{where}'s presentation reset runs `{statement}`: it must be nothing but "
+                "unconditional clears — a condition or early return leaves a presentation up over "
+                "the widget or push tap"
+            )
+            cleared.append(m.group(1))
+    return cleared
 
 
 def test_updates_presentation_reset_clears_every_presentation_it_owns():
@@ -679,16 +736,7 @@ def test_updates_presentation_reset_clears_every_presentation_it_owns():
     view = _block(_read(_UPDATES_VIEW), "struct UpdatesView: View")
     names = _presented_bindings(view)
     assert view.count(".onPresentationReset {") == 1
-    block = _block(view, ".onPresentationReset {")
-    statements = [s.strip() for s in block[1:-1].splitlines() if s.strip()]
-    cleared = []
-    for statement in statements:
-        m = re.fullmatch(r"([\w.]+)\s*=\s*(false|nil)", statement)
-        assert m, (
-            f"Updates' presentation reset runs `{statement}`: it must be nothing but unconditional "
-            "clears — a condition or early return leaves a presentation up over the Market tap"
-        )
-        cleared.append(m.group(1))
+    cleared = _cleared_by_reset(view, "UpdatesView")
     missing = sorted(names - set(cleared))
     assert not missing, (
         f"Updates' presentation reset no longer clears {missing}: a Market widget tap lands on "
@@ -846,6 +894,241 @@ def test_a_parked_link_expires_and_is_kept_across_a_session_end():
         "with a parked tap is a cold launch on an expired session (restore → dead credential → "
         "wall), so clearing it drops the tap in exactly the flow parking exists for. "
         "PendingDeepLink.maxAge bounds it instead"
+    )
+
+
+# ── 3. Every view a tab root reaches takes its presentations down ────────────
+#
+# A widget or push tap runs `dismissAllPresentations()`, waits for UIKit to report nothing
+# presented (1.5 s at most), then opens. Only views observing `.onPresentationReset` take their
+# presentations down. A tab root's reset unwinds every cover it presents, with everything inside
+# it — but not what its ON-SCREEN children present (a header's logo cover, an atom's sheet, a
+# popover on a Home card), nor the covers of a push the tab keeps (Learn keeps Money Moves, the
+# Library and the Journey; Tracking keeps "see all whales"). Any of those left up and the tap
+# lands underneath it: nothing changes until the user closes the screen by hand.
+#
+# So the reach is COMPUTED, never listed (a list misses the next organism): a walk from
+# `RootView` through every view the tree draws, stepping over the content of every presentation
+# its owner's reset clears, and into the destination of every push its owner keeps. Each view it
+# reaches must clear every presentation it owns. A view is a struct conforming to `View` or
+# `ViewModifier` (plus its extensions); `extension View` helpers are followed into the modifier
+# they apply. Previews are left out.
+
+_ROOT_VIEW = "RootView"
+# Drawn by RootView only while a widget link must wait, so no link ever tears down over them.
+# Each still has to be drawn by RootView, or its entry is stale.
+_GATES = {
+    "SplashView": "auth is still resolving: ContentView, the only caller of the teardown, does "
+                  "not exist yet",
+    "SignInView": "the sign-in wall (auth.md §1a): ContentView does not exist behind it, and a "
+                  "link waits for DeepLinkRouter.canPresent",
+    "DisclaimerAcknowledgementView": "first-run gate: a link waits for it (isReadyForDeepLink)",
+    "OnboardingView": "first-run gate: a link waits for it (isReadyForDeepLink)",
+}
+
+_TYPE_DECL = re.compile(
+    r"\b(struct|extension)\s+([A-Z]\w*)(?:<[^>{]*>)?\s*(?::\s*([^{]*?))?(?:\s*\bwhere\b[^{]*)?\s*\{"
+)
+_TYPE_REF = re.compile(r"\b([A-Z]\w*)(?:\s*[({]|\.init\b)")
+_UNDOTTED_PRESENTATION = re.compile(rf"(?<![\w.])(?:{'|'.join(_PRESENTATIONS)})\(")
+
+
+@functools.lru_cache(maxsize=None)
+def _clean_swift(raw: str) -> str:
+    return _without_previews(_strip_comments(raw))
+
+
+@functools.lru_cache(maxsize=None)
+def _file_types(src: str) -> tuple[tuple[str, str, str, bool, str], ...]:
+    """`(kind, name, conformances, is_private, body)` for every struct and extension in `src`
+    (comments and previews already gone). A type nested in another is cut out of the outer
+    body: it is a type of its own."""
+    found = []
+    for m in _TYPE_DECL.finditer(src):
+        open_brace = m.end() - 1
+        line = src[src.rfind("\n", 0, m.start()) + 1:m.start()]
+        found.append((m.group(1), m.group(2), m.group(3) or "", bool(re.search(r"\b(?:file)?private\b", line)),
+                      m.start(), open_brace, _block_end(src, open_brace)))
+    out = []
+    for kind, name, conformances, private, _, open_brace, end in found:
+        inner = [(s, e) for _, _, _, _, s, _, e in found if open_brace < s and e <= end]
+        outermost = [(s, e) for s, e in inner if not any(s2 < s and e <= e2 for s2, e2 in inner)]
+        body = src[open_brace:end]
+        for s, e in sorted(outermost, reverse=True):
+            body = body[:s - open_brace] + body[e - open_brace:]
+        out.append((kind, name, conformances, private, body))
+    return tuple(out)
+
+
+def _view_index() -> tuple[dict[str, list[dict]], dict[str, list[tuple[Path, str]]]]:
+    """Every View / ViewModifier struct by name (its extensions folded in), and every
+    `extension View` function's body by name."""
+    types: dict[str, list[dict]] = {}
+    extensions: list[tuple[str, Path, str]] = []
+    for path in sorted(_swift_files(_APP)):
+        for kind, name, conformances, private, body in _file_types(_clean_swift(path.read_text(encoding="utf-8"))):
+            if kind == "extension":
+                extensions.append((name, path, body))
+            else:
+                types.setdefault(name, []).append({
+                    "name": name, "path": path, "body": body, "private": private,
+                    "view": bool(re.search(r"\b(?:View|ViewModifier)\b", conformances)),
+                })
+    helpers: dict[str, list[tuple[Path, str]]] = {}
+    for name, path, body in extensions:
+        if name == "View":
+            for f in re.finditer(r"\bfunc\s+(\w+)\s*(?:<[^>]*>)?\(", body):
+                params = _call_args(body, f.end() - 1)
+                brace = body.index("{", f.end() + len(params))
+                helpers.setdefault(f.group(1), []).append((path, body[brace:_block_end(body, brace)]))
+            continue
+        owners = types.get(name, [])
+        for decl in [d for d in owners if d["path"] == path] or owners:
+            decl["body"] += "\n" + body
+    return types, helpers
+
+
+def _resolve(types: dict[str, list[dict]], name: str, from_path: Path) -> list[dict]:
+    """The view a reference names: one declared in the same file first, else a non-private one."""
+    views = [d for d in types.get(name, []) if d["view"]]
+    return [d for d in views if d["path"] == from_path] or [d for d in views if not d["private"]]
+
+
+def _where(view: dict) -> str:
+    return f"{view['name']} ({view['path'].relative_to(_ROOT)})"
+
+
+def _drawn_and_owned(view: dict) -> tuple[str, set[str]]:
+    """What `view` keeps drawn — its source minus the content of every presentation, except a
+    push it keeps (`navigationDestination` its reset does not clear), whose destination stays
+    in the tree — and the state of every presentation it owns: all but pushes, and all but those
+    nested inside another presentation's content, which go down with it."""
+    where = _where(view)
+    body = view["body"]
+    cleared = set(_cleared_by_reset(body, where))
+    found = _presentations(body, where)
+    cut = sorted((start, end) for modifier, state, start, end in found
+                 if modifier != "navigationDestination" or state in cleared)
+    owned = {state for modifier, state, start, end in found
+             if modifier != "navigationDestination"
+             and not any(s < start and end <= e for s, e in cut)}
+    drawn, at = [], 0
+    for start, end in cut:
+        if start >= at:  # a span nested in one already cut goes with it
+            drawn.append(body[at:start])
+            at = end
+    drawn.append(body[at:])
+    return "".join(drawn), owned
+
+
+def _reachable_views() -> list[tuple[dict, str]]:
+    """`(view, how it was reached)` for every view drawn without crossing a presentation its
+    owner's reset clears, walking from RootView."""
+    types, helpers = _view_index()
+    roots = _resolve(types, _ROOT_VIEW, _IOS_APP)
+    assert len(roots) == 1, f"{_ROOT_VIEW} not found exactly once in {_IOS_APP.name}: {len(roots)}"
+    reached: dict[tuple[str, Path], tuple[dict, str]] = {}
+    stack = [(roots[0], "the app root")]
+    while stack:
+        view, via = stack.pop()
+        key = (view["name"], view["path"])
+        if key in reached or view["name"] in _GATES:
+            continue
+        reached[key] = (view, via)
+        drawn, _ = _drawn_and_owned(view)
+        refs = [(m.group(1), view["path"]) for m in _TYPE_REF.finditer(drawn)]
+        for helper in {m.group(1) for m in re.finditer(r"\.(\w+)\(", drawn)} & set(helpers):
+            if helper in _PRESENTATIONS:
+                continue  # its content IS the presentation, owned by the caller's `$binding`
+            for path, body in helpers[helper]:
+                assert not _UNDOTTED_PRESENTATION.search(body), (
+                    f"`extension View.{helper}` presents from its parameters: add `{helper}` to "
+                    "_PRESENTATIONS so its callers' bindings are checked"
+                )
+                refs += [(m.group(1), path) for m in _TYPE_REF.finditer(body)]
+        for name, from_path in refs:
+            for child in _resolve(types, name, from_path):
+                stack.append((child, f"drawn by {view['name']}"))
+    return list(reached.values())
+
+
+def test_every_view_a_tab_root_reaches_resets_what_it_presents():
+    """Every presentation a reached view owns is cleared by its own reset. Pushes it keeps are
+    exempt (they do not cover the window; their destinations are walked instead)."""
+    problems = []
+    for view, via in _reachable_views():
+        where = _where(view)
+        _, owned = _drawn_and_owned(view)
+        missing = sorted(owned - set(_cleared_by_reset(view["body"], where)))
+        if missing:
+            problems.append(f"{where}, {via}: {missing}")
+    assert not problems, (
+        "a presentation reset no longer clears every presentation its view owns — a widget or "
+        "push tap would land underneath it, and nothing changes until the user closes it by "
+        "hand. Add `.onPresentationReset { … }` clearing each one in that view:\n  "
+        + "\n  ".join(problems)
+    )
+
+
+# The walk must reach these: each owns a presentation no tab root's reset unwinds. A parser that
+# stopped seeing them would leave the test above green over every one of the old gaps.
+_MUST_REACH = {
+    "RootView", "RootContainerView", "ContentView", "HomeDashboardView", "UpdatesView",
+    "ResearchViewWithBinding", "TrackingContentViewWithBinding", "LearnContentView",
+    "GlobalHeaderView", "ResearchHeader", "WhalesTabContent", "AllWhalesView",
+    "MoneyMovesDetailView", "BookLibraryView", "InvestorJourneyView", "GlobalAudioOverlay",
+    "FullScreenAudioPlayer", "LearnAudioPaywallModifier", "InlineDisclaimerNotice", "ScannerCard",
+    "AlertsTabContent",
+}
+
+
+def test_the_walk_reaches_every_view_it_must_guard():
+    reached = {view["name"] for view, _ in _reachable_views()}
+    lost = sorted(_MUST_REACH - reached)
+    assert not lost and len(reached) >= 150, (
+        f"the presentation walk no longer reaches {lost} ({len(reached)} views in all): a view "
+        "it cannot see is a view whose presentations nobody checks"
+    )
+    root = _block(_read(_IOS_APP), "struct RootView: View")
+    for gate, why in _GATES.items():
+        assert f"{gate}()" in root, (
+            f"_GATES exempts {gate} ({why}), but RootView no longer draws it: drop the entry, or "
+            "the walk skips a view the user can now reach"
+        )
+    assert not reached & set(_GATES), f"the walk reached a gate: {sorted(reached & set(_GATES))}"
+
+
+_JOURNEY_VIEW = _APP / "Views" / "Screens" / "InvestorJourneyView.swift"
+_JOURNEY_VM = _APP / "ViewModels" / "InvestorPathViewModel.swift"
+# The views the mutation rows below break (each owns a presentation no tab root unwinds).
+_HEADER = _APP / "Views" / "Organisms" / "GlobalHeaderView.swift"
+_RESEARCH_HEADER = _APP / "Views" / "Organisms" / "ResearchHeader.swift"
+_TRACKING = _APP / "Views" / "Screens" / "TrackingView.swift"
+_ALL_WHALES = _APP / "Views" / "Screens" / "AllWhalesView.swift"
+_LEARN = _APP / "Views" / "Screens" / "LearnView.swift"
+_MONEY_MOVES = _APP / "Views" / "Screens" / "MoneyMovesDetailView.swift"
+_LIBRARY = _APP / "Views" / "Screens" / "BookLibraryView.swift"
+_AUDIO_OVERLAY = _APP / "Views" / "Modifiers" / "GlobalAudioOverlay.swift"
+_PLAYER = _APP / "Views" / "Screens" / "FullScreenAudioPlayer.swift"
+_AUDIO_PAYWALL = _APP / "Views" / "Modifiers" / "LearnAudioPaywall.swift"
+_DISCLAIMER_ATOM = _APP / "Views" / "Atoms" / "InlineDisclaimerNotice.swift"
+_SCANNER = _APP / "Views" / "Molecules" / "ScannerCard.swift"
+
+
+def test_the_journey_story_refreshes_its_grid_however_it_closes():
+    """The reset only flips `showLessonStory`, so the rebuild after a lesson completed inside the
+    story must hang off the cover's dismissal, not off the story's own close button."""
+    view = _read(_JOURNEY_VIEW)
+    at = view.index(".fullScreenCover(isPresented: $viewModel.showLessonStory")
+    args = _call_args(view, view.index("(", at))
+    assert re.search(r"onDismiss:\s*\{\s*viewModel\.lessonStoryDidClose\(\)\s*\}", args), (
+        "the lesson story cover no longer rebuilds the Journey on every dismissal: a widget or "
+        "push tap that closes it would leave a just-completed lesson unticked"
+    )
+    _assert_pinned(
+        _block(_read(_JOURNEY_VM), "func lessonStoryDidClose()"),
+        "{ selectedLesson = nil rebuildJourney() }",
+        "lessonStoryDidClose no longer clears the lesson and rebuilds the grid",
     )
 
 
@@ -1066,6 +1349,14 @@ def _chain(*mutations: Callable[[str], str]) -> Callable[[str], str]:
             src = m(src)
         return src
     return mutate
+
+
+def _drop_line(line: str) -> Callable[[str], str]:
+    """Delete one whole line, matched with its indentation."""
+    return _replace(f"\n{line}\n", "\n")
+
+
+_REACH = "test_every_view_a_tab_root_reaches_resets_what_it_presents"
 
 
 _MUTATIONS: list[tuple[str, Path, Callable[[str], str], str, str]] = [
@@ -1344,6 +1635,81 @@ _MUTATIONS: list[tuple[str, Path, Callable[[str], str], str, str]] = [
     ("placeholder-default-flipped", _WIDGET,
      _replace("var isPlaceholderRender: Bool = false", "var isPlaceholderRender: Bool = true"),
      "test_one_widget_url_on_the_root_holdings_headline_or_updates_market", "no longer defaults"),
+    # ── the teardown gaps: every view a tab root reaches (2026-10-22) ──
+    ("header-logo-cover-kept", _HEADER, _drop_line("            showSloganSheet = false"),
+     _REACH, "no longer clears every presentation"),
+    ("research-header-cover-kept", _RESEARCH_HEADER, _drop_line("            showSloganSheet = false"),
+     _REACH, "no longer clears every presentation"),
+    ("root-sign-in-prompt-kept", _IOS_APP, _drop_line("            appState.signInPrompt = nil"),
+     _REACH, "no longer clears every presentation"),
+    ("root-buy-credits-kept", _IOS_APP, _drop_line("            showPaywallFromError = false"),
+     _REACH, "no longer clears every presentation"),
+    ("research-delete-alert-kept", _CONTENT, _drop_line("            viewModel.showDeleteConfirm = false"),
+     _REACH, "no longer clears every presentation"),
+    ("research-error-alert-kept", _CONTENT, _drop_line("            viewModel.error = nil"),
+     _REACH, "no longer clears every presentation"),
+    ("tracking-sort-sheet-kept", _TRACKING, _drop_line("                viewModel.showSortSheet = false"),
+     _REACH, "no longer clears every presentation"),
+    ("whales-paywall-unreset", _TRACKING,
+     _replace("        .onPresentationReset {\n            viewModel.showWhalePaywall = false\n        }\n", ""),
+     _REACH, "no longer clears every presentation"),
+    ("all-whales-paywall-kept", _ALL_WHALES, _drop_line("            viewModel.showWhalePaywall = false"),
+     _REACH, "no longer clears every presentation"),
+    ("money-moves-article-kept", _MONEY_MOVES, _drop_line("            selectedArticle = nil"),
+     _REACH, "no longer clears every presentation"),
+    ("library-chat-kept", _LIBRARY, _drop_line("            showBookChat = false"),
+     _REACH, "no longer clears every presentation"),
+    ("journey-story-kept", _JOURNEY_VIEW, _drop_line("            viewModel.showLessonStory = false"),
+     _REACH, "no longer clears every presentation"),
+    ("audio-reader-kept", _AUDIO_OVERLAY, _drop_line("                readerRoute = nil"),
+     _REACH, "no longer clears every presentation"),
+    ("player-share-sheet-kept", _PLAYER, _drop_line("            showShareSheet = false"),
+     _REACH, "no longer clears every presentation"),
+    ("narration-paywall-kept", _AUDIO_PAYWALL, _drop_line("                showPaywall = false"),
+     _REACH, "no longer clears every presentation"),
+    ("disclaimer-atom-kept", _DISCLAIMER_ATOM, _drop_line("            showDisclaimers = false"),
+     _REACH, "no longer clears every presentation"),
+    ("scanner-popover-kept", _SCANNER, _drop_line("                            showInfo = false"),
+     _REACH, "no longer clears every presentation"),
+    ("new-header-organism-with-a-sheet", _HEADER,
+     _chain(_replace("            AskCayAIButton { appState.requestAIChat() }\n",
+                     "            AskCayAIButton { appState.requestAIChat() }\n            HeaderProbeBadge()\n"),
+            _append("\nstruct HeaderProbeBadge: View {\n    @State private var showNote = false\n"
+                    "    var body: some View {\n        Button(\"i\") { showNote = true }\n"
+                    "            .sheet(isPresented: $showNote) { Text(\"note\") }\n    }\n}\n")),
+     _REACH, "HeaderProbeBadge"),
+    ("new-kept-push-with-a-cover", _LEARN,
+     _chain(_replace("        .navigationDestination(isPresented: $showingBookLibrary) {\n",
+                     "        .navigationDestination(isPresented: $showingProbe) {\n            ProbeDetailScreen()\n        }\n"
+                     "        .navigationDestination(isPresented: $showingBookLibrary) {\n"),
+            _append("\nprivate struct ProbeDetailScreen: View {\n    @State private var showCover = false\n"
+                    "    var body: some View {\n        Text(\"probe\")\n"
+                    "            .fullScreenCover(isPresented: $showCover) { Text(\"cover\") }\n    }\n}\n")),
+     _REACH, "ProbeDetailScreen"),
+    ("push-reset-conditional", _MONEY_MOVES,
+     _replace("\n            selectedArticle = nil\n", "\n            if featured == nil { selectedArticle = nil }\n"),
+     _REACH, "must be nothing but unconditional"),
+    ("push-binding-modifier-unknown", _LIBRARY,
+     _replace("        .aiChatCover(isPresented: $showBookChat, viewModel: bookChatViewModel)\n",
+              "        .aiChatCover(isPresented: $showBookChat, viewModel: bookChatViewModel)\n"
+              "        .storyReader(item: $openedStory)\n"),
+     _REACH, "add it to _PRESENTATIONS"),
+    ("helper-presents-from-its-parameters", _AUDIO_OVERLAY,
+     _replace("        modifier(GlobalAudioOverlay(\n",
+              "        sheet(isPresented: .constant(forceCompact)) { EmptyView() }.modifier(GlobalAudioOverlay(\n"),
+     _REACH, "presents from its parameters"),
+    ("walk-loses-a-kept-push", _LEARN,
+     _replace("            MoneyMovesDetailView()\n", "            EmptyView()\n"),
+     "test_the_walk_reaches_every_view_it_must_guard", "no longer reaches"),
+    ("gate-entry-stale", _IOS_APP,
+     _replace("                OnboardingView()\n", "                OnboardingFlowView()\n"),
+     "test_the_walk_reaches_every_view_it_must_guard", "RootView no longer draws it"),
+    ("journey-rebuild-only-on-its-button", _JOURNEY_VIEW,
+     _replace(", onDismiss: {\n            viewModel.lessonStoryDidClose()\n        }) {", ") {"),
+     "test_the_journey_story_refreshes_its_grid_however_it_closes", "no longer rebuilds"),
+    ("journey-close-skips-the-rebuild", _JOURNEY_VM,
+     _replace("        selectedLesson = nil\n        rebuildJourney()\n    }", "        selectedLesson = nil\n    }"),
+     "test_the_journey_story_refreshes_its_grid_however_it_closes", "lessonStoryDidClose no longer"),
 ]
 
 
@@ -1386,6 +1752,9 @@ _MUTATION_COVERED = {
     "test_one_widget_url_on_the_root_holdings_headline_or_updates_market",
     "test_holdings_rows_link_and_market_rows_do_not",
     "test_asset_classes_come_from_the_server",
+    "test_every_view_a_tab_root_reaches_resets_what_it_presents",
+    "test_the_walk_reaches_every_view_it_must_guard",
+    "test_the_journey_story_refreshes_its_grid_however_it_closes",
 }
 
 
@@ -1429,6 +1798,27 @@ _HARMLESS: list[tuple[str, Path, Callable[[str], str], str]] = [
             _replace("            open()\n            return\n", "            land()\n            return\n"),
             _replace("waitUntilNothingPresented()\n            open()\n", "waitUntilNothingPresented()\n            land()\n")),
      "test_a_market_link_tears_down_then_opens_updates_on_the_market_chip"),
+    ("one-line-reset", _HEADER,
+     _replace(".onPresentationReset {\n            showSloganSheet = false\n        }",
+              ".onPresentationReset { showSloganSheet = false }"),
+     _REACH),
+    ("semicolon-reset", _LIBRARY,
+     _replace("            selectedBook = nil\n            showBookChat = false\n",
+              "            selectedBook = nil; showBookChat = false\n"),
+     _REACH),
+    ("comment-in-a-reset", _ALL_WHALES,
+     _replace("        .onPresentationReset {\n            viewModel.showWhalePaywall = false\n",
+              "        .onPresentationReset {\n            // the plan sheet\n            viewModel.showWhalePaywall = false\n"),
+     _REACH),
+    ("reset-split-in-two", _PLAYER,
+     _replace("            showSleepTimer = false\n            showShareSheet = false\n        }",
+              "            showSleepTimer = false\n        }\n        .onPresentationReset {\n"
+              "            showShareSheet = false\n        }"),
+     _REACH),
+    ("cover-with-on-dismiss", _HEADER,
+     _replace(".fullScreenCover(isPresented: $showSloganSheet) {",
+              ".fullScreenCover(isPresented: $showSloganSheet, onDismiss: { }) {"),
+     _REACH),
     ("reflowed-query-guard", _GRAMMAR,
      _replace('            guard components.query == nil else { return .malformed(reason: "unknown_query_key") }\n',
               "            guard components.query == nil else {\n"

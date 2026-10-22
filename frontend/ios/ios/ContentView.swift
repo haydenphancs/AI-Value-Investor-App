@@ -526,6 +526,8 @@ struct ResearchViewWithBinding: View {
         }
         // This tab is the DESTINATION of the research handoff, so it must be clear when the user
         // arrives — landing on Research behind a report cover is the same bug, one screen along.
+        // The two alerts too: an alert is a presentation like any sheet, and a cover cannot open
+        // over one. Closing the delete confirmation deletes nothing — it is the Cancel answer.
         .onPresentationReset {
             selectedReport = nil
             selectedTrendingAnalysis = nil
@@ -533,6 +535,8 @@ struct ResearchViewWithBinding: View {
             viewModel.showCreditsSheet = false
             viewModel.showPersonasSheet = false
             viewModel.showTargetSearchSheet = false
+            viewModel.showDeleteConfirm = false
+            viewModel.error = nil
         }
         .fullScreenCover(item: $selectedReport) { report in
             NavigationStack {

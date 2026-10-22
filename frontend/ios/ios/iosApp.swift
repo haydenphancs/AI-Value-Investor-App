@@ -537,6 +537,16 @@ struct RootView: View {
             SignInRequiredSheet(feature: prompt.feature)
                 .environment(appState)
         }
+        // A widget or push tap takes all three down, like every other presentation. Nothing here
+        // is lost: closing Buy Credits or either sign-in sheet is the user's own "Not now", and a
+        // purchase or sign-in already sent finishes on its own. It cannot open a door the wall
+        // shuts either — the teardown runs only from `ContentView`, which exists only past the
+        // sign-in wall, so a signed-out user's link still waits for `SignInView` (auth.md §1a).
+        .onPresentationReset {
+            showPaywallFromError = false
+            showSignInFromError = false
+            appState.signInPrompt = nil
+        }
         .overlay {
             // Global toast messages
             if let toast = appState.toastMessage {

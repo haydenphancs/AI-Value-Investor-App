@@ -144,6 +144,13 @@ struct FullScreenAudioPlayer: View {
         .sheet(isPresented: $showShareSheet) {
             ShareSheet(items: shareItems)
         }
+        // The player is a ZStack layer, not a presentation, so no reset dismisses it — but its
+        // three sheets ARE presentations, and a widget or push tap cannot open over one.
+        .onPresentationReset {
+            showSpeedPicker = false
+            showSleepTimer = false
+            showShareSheet = false
+        }
     }
 
     // MARK: - Share

@@ -147,7 +147,15 @@ struct InvestorJourneyView: View {
         }
         .navigationBarHidden(true)
         .aiChatCover(isPresented: $showChat, viewModel: chatViewModel)
-        .fullScreenCover(isPresented: $viewModel.showLessonStory) {
+        // A PUSH that Learn keeps on a widget or push tap, so Learn's reset never reaches these
+        // two covers: without its own, the tap would land underneath the lesson or the chat.
+        .onPresentationReset {
+            showChat = false
+            viewModel.showLessonStory = false
+        }
+        .fullScreenCover(isPresented: $viewModel.showLessonStory, onDismiss: {
+            viewModel.lessonStoryDidClose()
+        }) {
             if let lesson = viewModel.selectedLesson {
                 LessonTopicCardView(
                     storyContent: viewModel.getStoryContent(for: lesson),

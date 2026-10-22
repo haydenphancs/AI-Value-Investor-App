@@ -77,6 +77,10 @@ struct ResearchHeader: View {
         .fullScreenCover(isPresented: $showSloganSheet) {
             CaydexSloganView()
         }
+        // Same as `GlobalHeaderView`: no tab root's reset reaches a header's own cover.
+        .onPresentationReset {
+            showSloganSheet = false
+        }
     }
 }
 

@@ -139,6 +139,12 @@ struct BookLibraryView: View {
                 .environmentObject(audioManager)
         }
         .aiChatCover(isPresented: $showBookChat, viewModel: bookChatViewModel)
+        // A PUSH that Learn keeps on a widget or push tap, so Learn's reset never reaches these
+        // two covers: without its own, the tap would land underneath the open book or chat.
+        .onPresentationReset {
+            selectedBook = nil
+            showBookChat = false
+        }
         // Narration is Pro/Max: the audio ENGINE refuses a locked episode and asks for
         // an upgrade, so this presenter is what turns that into the plan sheet. Needed on
         // each screen because these are fullScreenCovers — a modifier on the presenter

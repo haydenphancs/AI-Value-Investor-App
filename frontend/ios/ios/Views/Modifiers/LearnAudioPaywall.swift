@@ -35,6 +35,11 @@ private struct LearnAudioPaywallModifier: ViewModifier {
                 PaywallView(context: .learnAudio)
                     .environment(\.appState, appState)
             }
+            // Each instance owns its sheet, on screens no tab root resets (Learn's kept pushes),
+            // so each clears it for a widget or push tap.
+            .onPresentationReset {
+                showPaywall = false
+            }
     }
 }
 

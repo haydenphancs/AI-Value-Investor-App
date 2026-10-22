@@ -153,7 +153,8 @@ final class AppState {
     ///
     /// Observers are the five tab ROOTS, via `.onPresentationReset` — clearing a root's own
     /// presentation state unwinds every cover nested beneath it in one go, so a screen presented
-    /// three deep needs no code of its own.
+    /// three deep needs no code of its own. Views a root reaches WITHOUT one of those covers (its
+    /// header, a kept push, `RootView`'s sheets) observe it too; see `PresentationReset`.
     ///
     /// ⚠️ **Deliberately NOT reset in `discardDataForEndedSession()`**, unlike every `pending*`
     /// field above. Those are parked INSTRUCTIONS that fire later, so one left behind executes

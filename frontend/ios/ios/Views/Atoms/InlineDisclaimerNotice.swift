@@ -95,6 +95,11 @@ struct InlineDisclaimerNotice: View {
                     }
             }
         }
+        // This atom sits on tab roots too (Home, Tracking's insights), where no root's reset
+        // reaches its sheet: a widget or push tap would land underneath the disclaimers.
+        .onPresentationReset {
+            showDisclaimers = false
+        }
     }
 }
 

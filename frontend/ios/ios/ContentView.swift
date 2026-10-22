@@ -330,12 +330,16 @@ struct ContentView: View {
     ///
     /// The expanded audio player too. `RootContainerView` draws it as a layer of its own ZStack,
     /// not a presentation, so the probe never sees it and no reset reaches it — the tab would
-    /// switch underneath it. Collapsing keeps the narration playing in the mini player.
+    /// switch underneath it. Collapsing keeps the narration playing in the mini player. It is
+    /// collapsed FIRST, before the teardown: a player expanded inside a cover is drawn twice
+    /// (by the cover's `GlobalAudioOverlay` and by that root layer), so collapsing only after
+    /// the wait let the root's copy show through the dismissed cover and slide away a second
+    /// time. Collapsed here, both copies go down with the cover in one motion.
     private func openUpdatesMarket() {
+        if AudioManager.shared.showFullScreenPlayer {
+            AudioManager.shared.collapsePlayer()
+        }
         let open = {
-            if AudioManager.shared.showFullScreenPlayer {
-                AudioManager.shared.collapsePlayer()
-            }
             selectedTab = .updates
             updatesMarketFocusSeq &+= 1
         }

@@ -136,12 +136,24 @@ EXPECTED: dict[str, int] = {
     #   191 replaced news_sentiment_daily. 195 only adds research_reports.refund_outcome and an
     #   index. The Supabase platform narrowed anon/authenticated on storage.* from ALL to
     #   SELECT/INSERT/UPDATE/DELETE in the same window (grants are not counted here).
-    "tables": 151,
-    "public": 112,
-    "fk": 31,
-    "policies": 120,
-    "rls": 112,
-    "functions": 52,
+    # Refreshed 2026-10-22 after the owner applied 203 and re-dumping (the snapshot was 197-202
+    # stale). Every delta accounted for:
+    #   +2 tables / +2 public / +2 rls / +2 policies -> subscription_transactions (198) and
+    #                          sec_concept_cache (202), each with one service_role policy
+    #   +2 fk                  -> subscription_transactions.user_id and
+    #                          subscription_credit_periods.carried_from_period_id (198)
+    #   +6 functions           -> record_subscription_transaction, subscriptions_keep_max_period_end,
+    #                          reinstate_paid_carry, revoke_paid_period (198); grant_feedback_reward
+    #                          (199); purge_ownerless_subscription_transactions (201 — applied to
+    #                          Supabase, its file is on origin/main)
+    #   203 adds only columns (industry_dossier.cagr_start_year, .concentration_basis): no
+    #   counted delta.
+    "tables": 153,
+    "public": 114,
+    "fk": 33,
+    "policies": 122,
+    "rls": 114,
+    "functions": 58,
     "enums": 14,
     "views": 1,
 }

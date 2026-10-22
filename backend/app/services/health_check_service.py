@@ -108,7 +108,12 @@ _CACHE_TTL = 300  # 5 minutes
 #     (`CURATED_WITHHELD_ROWS`: FMP's split and its interest expense are not WU's). A v8
 #     row of V / MA / PYPL / GPN compared P/E and ROE with lenders; a v8 row of WU (local
 #     runs only — v8 never shipped) carries its made-up rows; TREE / PMTS lacked theirs.
-_HC_PAYLOAD_VERSION = 9
+# 10 (2026-10-21): a Financial Services company with an industry is compared with its OWN
+#     industry's median from 10 companies, or judged on the absolute bands — never against
+#     the bank-dominated Financial Services sector median (owner decision 2026-10-20). A v9
+#     row of MCO read its P/E "Richly valued vs peers" against banks' 12.35, and one of RKT
+#     its D/E red against 0.46.
+_HC_PAYLOAD_VERSION = 10
 _HC_VERSION_KEY = "payload_version"
 
 # ── Fund-shaped empty builds (2026-10-01) ─────────────────────────────────────────

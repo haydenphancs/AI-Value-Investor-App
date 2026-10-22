@@ -59,7 +59,10 @@ def _distinct(sym: str) -> List[Dict[str, Any]]:
     seed = zlib.crc32(sym.encode("utf-8")) + 1
     return [{"grossProfitMarginTTM": 0.3 + seed / 2**34, "operatingProfitMarginTTM": 0.1 + seed / 2**35,
              "netProfitMarginTTM": 0.05 + seed / 2**36, "currentRatioTTM": 1.5,
-             "debtToEquityRatioTTM": 0.8}]
+             "debtToEquityRatioTTM": 0.8,
+             # A real answer also carries P/S: the build refuses a scan whose revenues
+             # cover under 80% of kept tickers (2026-10-22, revenue-share concentration).
+             "priceToSalesRatioTTM": 3.0, "revenuePerShareTTM": 10.0}]
 
 
 class _FakeFMP:

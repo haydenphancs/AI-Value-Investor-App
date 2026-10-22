@@ -10,7 +10,19 @@ Frontend:
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
-from app.dependencies import StandardRateLimit, get_current_user_id, MarketRateLimit
+from app.dependencies import (
+    MarketFanoutRateLimit,
+    MarketRateLimit,
+    StandardRateLimit,
+    get_current_user_id,
+)
+from app.api.chart_history_http import (
+    BEFORE_MAX_LENGTH,
+    FMP_HISTORY_INTERVAL_PATTERN,
+    chart_history_response,
+)
+from app.schemas.chart_history import ChartHistoryResponse, ChartPricesResponse
+from app.services.price_history_service import ASSET_COMMODITY, MAX_PAGE_LIMIT
 from typing import Optional, Dict, Any
 import logging
 import re
@@ -191,6 +203,73 @@ async def enrich_commodity_news(
 
 
 # ── Main detail endpoint (catch-all /{symbol} MUST be last) ──
+
+
+@router.get("/{symbol}/chart/history", response_model=ChartHistoryResponse)
+async def get_commodity_chart_history(
+    symbol: str,
+    interval: str = Query(..., pattern=FMP_HISTORY_INTERVAL_PATTERN),
+    before: str = Query(..., max_length=BEFORE_MAX_LENGTH),
+    limit: Optional[int] = Query(None, ge=1, le=MAX_PAGE_LIMIT),
+    _fanout: None = MarketFanoutRateLimit,
+):
+    """Older bars for the commodity chart: the ETF ref (regular session) or, for CL/NG,
+    FRED's daily spot — which has no intraday, so an intraday page answers
+    ``bars: [], has_more: false``. Contract: `GET /stocks/{ticker}/chart/history`."""
+    root = symbol.upper().strip()
+    if len(root) > 3 and root.endswith("USD"):
+        root = root[:-3]
+    if not _COMMODITY_SYMBOL_RE.match(root):
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            status_code=422,
+            message=f"Invalid commodity symbol for chart history: {symbol[:32]!r}",
+            user_message="That symbol isn't valid.",
+            details={"symbol": symbol[:32]},
+        )
+    return await chart_history_response(
+        ASSET_COMMODITY, root, interval=interval, before=before, limit=limit
+    )
+
+
+@router.get("/{symbol}/chart", response_model=ChartPricesResponse)
+async def get_commodity_chart(
+    symbol: str,
+    chart_range: str = Query("3M", alias="range", pattern="^(1D|1W|3M|6M|1Y|5Y|ALL)$"),
+    interval: Optional[str] = Query(None, alias="interval", pattern="^(1min|5min|15min|30min|1hour|4hour|daily|weekly|monthly|quarterly)$"),
+):
+    """One range's chart bars alone (see `GET /etfs/{symbol}/chart`) — the SAME symbol
+    mapping and builder as `GET /commodities/{symbol}` (the ETF ref's regular session, or
+    FRED's daily spot, which has no intraday and answers ``prices: []`` on 1D/1W)."""
+    symbol = symbol.upper().strip()
+    if len(symbol) > 3 and symbol.endswith("USD"):
+        symbol = symbol[:-3]
+    if not _COMMODITY_SYMBOL_RE.match(symbol):
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            status_code=422,
+            message=f"Invalid commodity symbol for chart: {symbol[:32]!r}",
+            user_message="That symbol isn't valid.",
+            details={"symbol": symbol[:32]},
+        )
+    try:
+        return await get_commodity_service().get_commodity_chart(
+            symbol, chart_range=chart_range, interval=interval
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "Commodity chart failed for %s %s %s: %s: %s",
+            symbol, chart_range, interval, type(e).__name__, e, exc_info=True,
+        )
+        if (resp := upstream_error_response(e, ticker=symbol, step="commodity_chart")) is not None:
+            return resp
+        return make_error_response(
+            ErrorCode.FMP_UNAVAILABLE,
+            message=f"{type(e).__name__} building the {chart_range} commodity chart",
+            details={"ticker": symbol, "step": "commodity_chart", "range": chart_range},
+        )
 
 
 @router.get("/{symbol}/core", response_model=CommodityCoreResponse)

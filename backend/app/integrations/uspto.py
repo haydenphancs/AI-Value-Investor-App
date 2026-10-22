@@ -14,6 +14,10 @@ API: https://api.uspto.gov/api/v1/patent/applications/search
   - When the key is absent, this integration silently no-ops (returns
     an empty result) so the rest of the report still renders without
     the patents driver contributing.
+  - Only `count` is read, so the search asks for ONE record. Every record
+    is a full file wrapper (11-141 KB each on 2026-10-21), and the old
+    100-record page went over the API's 6 MB response cap for Google,
+    Tesla, NIKE, Lucid and Archer Aviation: HTTP 413 on every collection.
 
 Public methods are async + return plain Python dicts. The service
 layer (ip_intel_service.py) owns caching, _inflight dedup, and the
@@ -49,7 +53,30 @@ class USPTOTimeoutException(USPTOException):
     """Raised when the upstream request times out."""
 
 
+class USPTORejectedException(USPTOException):
+    """A definite refusal: a 4xx other than 404 (no matches), 408 and 429.
+    The same query is refused again, so the caller may stop asking for a
+    while (a 413 was the live case: the response went over the 6 MB cap)."""
+
+    def __init__(self, message: str, *, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class USPTOUnavailableException(USPTOException):
+    """Transient: a 5xx or 408, a network error, or a 200 whose body has no
+    usable `count`. Worth asking again on the next collection."""
+
+    def __init__(self, message: str, *, status_code: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 # ── Client ─────────────────────────────────────────────────────────────
+
+
+# The search's page size. Only `count` is read, and it comes with any page.
+COUNT_PAGE_LIMIT = 1
 
 
 class USPTOClient:
@@ -79,14 +106,13 @@ class USPTOClient:
     def _api_key(self) -> Optional[str]:
         return getattr(settings, "USPTO_API_KEY", None) or None
 
-    async def get_patents_for_assignee(
+    async def count_patents_for_assignee(
         self,
         assignee_name: str,
         *,
         since_year: Optional[int] = None,
-        page_size: int = 100,
     ) -> Dict[str, Any]:
-        """Fetch recent patents granted to a given assignee organization.
+        """Count the patent applications of a given assignee organization.
 
         Args:
             assignee_name: Company name as registered with USPTO (e.g.
@@ -94,18 +120,21 @@ class USPTOClient:
             since_year: When set, restrict to patents filed in or after
                 this year (used to compute the "recent 5y" count via the
                 `applicationMetaData.filingDate` field).
-            page_size: Max patents to return per page. ODP caps at 100.
 
         Returns:
-            dict with keys:
-              - "total_hits": int — total assignee patent count
-              - "patents":   list[dict] — page of patents (subset)
-              - "since_year": echoed input for caller's reference
-            When the API key is missing or the call fails, returns
-            {"total_hits": 0, "patents": [], "error": "<reason>"}.
+            {"total_hits": int, "since_year": <echoed input>}; a 404 (no
+            matches) is a total of 0. Without an API key or an assignee no
+            call is made: {"total_hits": None, ..., "error": "<reason>"}.
+
+        Raises:
+            USPTORateLimitException: 429.
+            USPTOTimeoutException: the request timed out.
+            USPTORejectedException: any other 4xx but 408 (definite).
+            USPTOUnavailableException: 5xx, 408, network error, or a 200
+                without a usable `count` (transient).
         """
         if not assignee_name or not isinstance(assignee_name, str):
-            return {"total_hits": 0, "patents": [], "error": "empty_assignee"}
+            return {"total_hits": None, "since_year": since_year, "error": "empty_assignee"}
 
         api_key = self._api_key()
         if not api_key:
@@ -113,7 +142,7 @@ class USPTOClient:
                 "USPTO: USPTO_API_KEY not set — skipping patent fetch for %s",
                 assignee_name,
             )
-            return {"total_hits": 0, "patents": [], "error": "no_api_key"}
+            return {"total_hits": None, "since_year": since_year, "error": "no_api_key"}
 
         # ODP search accepts an OpenSearch-style `q` string. Quoting the
         # assignee name lets multi-word organizations match as a phrase;
@@ -124,10 +153,11 @@ class USPTOClient:
             q_parts.append(
                 f'applicationMetaData.filingDate:[{int(since_year)}-01-01 TO 2099-12-31]'
             )
+        # One record, never more: `count` is the whole answer and comes with
+        # any page size (module docstring: 100 records answered 413).
         body: Dict[str, Any] = {
             "q": " AND ".join(q_parts),
-            "pagination": {"offset": 0, "limit": min(int(page_size), 100)},
-            "sort": [{"field": "applicationMetaData.filingDate", "order": "desc"}],
+            "pagination": {"offset": 0, "limit": COUNT_PAGE_LIMIT},
         }
 
         url = f"{self.BASE_URL}{self.SEARCH_PATH}"
@@ -140,43 +170,49 @@ class USPTOClient:
             raise USPTOTimeoutException(
                 f"USPTO request timed out for {assignee_name}"
             )
-        except Exception as exc:
-            logger.warning(
-                "USPTO: request failed for %s: %s: %s",
-                assignee_name, type(exc).__name__, exc,
-            )
-            return {"total_hits": 0, "patents": [], "error": str(exc)}
+        except httpx.HTTPError as exc:
+            raise USPTOUnavailableException(
+                f"USPTO request failed for {assignee_name}: {type(exc).__name__}: {exc}"
+            ) from exc
 
-        if resp.status_code == 429:
+        status = resp.status_code
+        if status == 429:
             raise USPTORateLimitException(
                 f"USPTO returned 429 for {assignee_name}"
             )
         # ODP returns 404 with a JSON body when an assignee has zero
         # matches — that's a legitimate "no patents" answer, not an
         # outage. Treat as empty result rather than an error.
-        if resp.status_code == 404:
-            return {"total_hits": 0, "patents": [], "since_year": since_year}
-        if resp.status_code != 200:
-            return {
-                "total_hits": 0, "patents": [],
-                "error": f"http_{resp.status_code}: {resp.text[:200]}",
-            }
+        if status == 404:
+            return {"total_hits": 0, "since_year": since_year}
+        if status != 200:
+            # The body names the reason (the 413's says "Response payload
+            # exceeds allowed limit of 6MB"); folded onto one line and capped.
+            detail = " ".join(resp.text[:200].split())
+            message = f"USPTO answered HTTP {status} for {assignee_name}: {detail}"
+            if 400 <= status < 500 and status != 408:
+                raise USPTORejectedException(message, status_code=status)
+            raise USPTOUnavailableException(message, status_code=status)
 
         try:
             data = resp.json()
-        except Exception as exc:
-            return {"total_hits": 0, "patents": [], "error": f"json_parse: {exc}"}
+        except ValueError as exc:
+            raise USPTOUnavailableException(
+                f"USPTO answered 200 with a body that is not JSON for "
+                f"{assignee_name}: {type(exc).__name__}",
+                status_code=status,
+            ) from exc
 
         # ODP response shape: {count, patentFileWrapperDataBag, requestIdentifier}.
-        total_hits = int(data.get("count") or 0)
-        patents = data.get("patentFileWrapperDataBag") or []
-        if not isinstance(patents, list):
-            patents = []
-        return {
-            "total_hits": total_hits,
-            "patents": patents,
-            "since_year": since_year,
-        }
+        # A missing or odd count is an unknown, never a count of 0.
+        count = data.get("count") if isinstance(data, dict) else None
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise USPTOUnavailableException(
+                f"USPTO answered 200 without a usable count for "
+                f"{assignee_name}: {repr(count)[:80]}",
+                status_code=status,
+            )
+        return {"total_hits": count, "since_year": since_year}
 
 
 # ── Singleton ──────────────────────────────────────────────────────────

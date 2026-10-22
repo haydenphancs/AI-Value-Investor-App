@@ -54,7 +54,9 @@ def _distinct_ratios(sym: str) -> List[Dict[str, Any]]:
     seed = zlib.crc32(sym.encode("utf-8")) + 1
     return [{"grossProfitMarginTTM": 0.3 + seed / 2**34, "operatingProfitMarginTTM": 0.1 + seed / 2**35,
              "netProfitMarginTTM": 0.05 + seed / 2**36, "currentRatioTTM": 1.5,
-             "debtToEquityRatioTTM": 0.8}]
+             "debtToEquityRatioTTM": 0.8,
+             # revenue-share concentration (2026-10-22): revenue = cap ÷ P/S
+             "priceToSalesRatioTTM": 4.0, "revenuePerShareTTM": 10.0}]
 
 class _FakeFMP:
     """`_make_request` double: industries from a list, screener rows per industry.
@@ -563,9 +565,12 @@ async def test_output_format_is_unchanged_and_the_real_reader_loads_it(tmp_path,
     assert payload["market_cap_floor"] == FLOOR
     assert payload["industry_count"] == 2 and payload["ticker_count"] == 3
     for entry in payload["industries"]:
-        assert set(entry) == {"industry", "sector", "tickers", "market_caps"}
+        assert set(entry) == {"industry", "sector", "tickers", "market_caps", "revenues"}
         assert entry["tickers"] == sorted(entry["market_caps"])
         assert all(isinstance(c, float) for c in entry["market_caps"].values())
+        # TTM USD revenue = screener cap ÷ priceToSalesRatioTTM, from the scan's own answers.
+        assert entry["revenues"] == {s: pytest.approx(c / 4.0) for s, c in entry["market_caps"].items()}
+    assert "priceToSalesRatioTTM" in payload["source"]
     assert [e["industry"] for e in payload["industries"]] == ["Asset Management",
                                                                "Banks - Regional"]
 

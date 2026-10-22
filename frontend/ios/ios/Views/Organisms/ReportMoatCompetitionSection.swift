@@ -54,98 +54,137 @@ struct ReportMoatCompetitionSection: View {
                 .multilineTextAlignment(.center)
 
             // 3-column metrics — `.top` alignment so the value rows of all
-            // three columns share a baseline. The TAM column's year row
-            // (current → future) hangs below its value row without
-            // shifting the other two columns out of alignment.
+            // three columns share a baseline. Measured only (owner decision
+            // 2026-10-22): the market size at ITS year, the average yearly growth
+            // over its real window, no projected value — so no calendar is read.
             HStack(alignment: .top, spacing: AppSpacing.sm) {
-                // Column 1: CAGR — shows "—" when source data is missing
-                marketMetricColumn(
-                    label: "CAGR (5Yr)",
-                    value: data.marketDynamics.formattedCAGR,
-                    valueColor: data.marketDynamics.cagrColor,
-                    subtitle: nil
-                )
-                .frame(maxWidth: 70)
+                growthColumn
+                    .frame(maxWidth: 70)
 
-                Divider()
-                    .frame(height: 40)
-                    .background(AppColors.cardBackgroundLight)
+                columnDivider
 
-                // Column 2: Market Size (TAM) — value row uses the same
-                // `labelSmall` 12pt-bold font as CAGR / Concentration so
-                // the three values share a baseline. The year row below
-                // shows current → future and is projected forward to
-                // today's year via the CAGR (see
-                // MarketDynamics.displayedCurrentYear in
-                // TickerReportModels.swift) so stale Census source years
-                // don't show on a report opened years later.
-                VStack(alignment: .center, spacing: AppSpacing.xxs) {
-                    // Scope-prefixed header: "US - Market Size (TAM)" /
-                    // "Global - Market Size (TAM)" so the market size is never
-                    // ambiguous. lineLimit + minimumScaleFactor keep the longer
-                    // "Global" variant on one line; the side columns are trimmed
-                    // a little to give this middle column room.
-                    Text(data.marketDynamics.tamHeaderLabel)
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
+                marketSizeColumn
+                    .frame(maxWidth: .infinity)
 
-                    if data.marketDynamics.tamIsAvailable {
-                        HStack(spacing: AppSpacing.xxs) {
-                            Text(data.marketDynamics.formattedDisplayedCurrentTAM)
-                                .font(AppTypography.labelSmall).fontWeight(.bold)
-                                .foregroundColor(AppColors.textPrimary)
+                columnDivider
 
-                            Text("→")
-                                .font(AppTypography.labelSmall).fontWeight(.bold)
-                                .foregroundColor(AppColors.textSecondary)
-
-                            Text(data.marketDynamics.formattedDisplayedFutureTAM)
-                                .font(AppTypography.labelSmall).fontWeight(.bold)
-                                .foregroundColor(AppColors.textPrimary)
-                        }
-
-                        HStack(spacing: AppSpacing.xxs) {
-                            Text("(\(data.marketDynamics.displayedCurrentYear))")
-                                .font(AppTypography.caption)
-                                .foregroundColor(AppColors.textMuted)
-
-                            Spacer()
-                                .frame(width: 14)
-
-                            Text("(\(data.marketDynamics.displayedFutureYear))")
-                                .font(AppTypography.caption)
-                                .foregroundColor(AppColors.textMuted)
-                        }
-                    } else {
-                        Text("—")
-                            .font(AppTypography.labelSmall).fontWeight(.bold)
-                            .foregroundColor(AppColors.textMuted)
-                    }
-                }
-                .frame(maxWidth: .infinity)
-
-                Divider()
-                    .frame(height: 40)
-                    .background(AppColors.cardBackgroundLight)
-
-                // Column 3: Concentration — plain WHITE text, same labelSmall
-                // bold as CAGR / TAM (no badge, no color). Concentration is an
-                // industry-structure fact (HHI across all firms in the
-                // industry), who-agnostic — a bullish-green "Monopoly" can
-                // mislead when the focal company isn't the dominant firm, so it
-                // renders as a neutral value like the others.
-                marketMetricColumn(
-                    label: "Concentration",
-                    value: data.marketDynamics.concentration.rawValue,
-                    valueColor: AppColors.textPrimary,
-                    subtitle: nil
-                )
-                .frame(maxWidth: 92)
+                concentrationColumn
+                    .frame(maxWidth: 92)
             }
             .padding(.top, AppSpacing.sm)
 
+            sourceCaption
+        }
+    }
+
+    // Column 1: average yearly growth — label above the value because
+    // "Avg/yr 2017–24" on one line (73pt) is wider than the 70pt column; the
+    // window rides below as the subtitle. Neutral ink: a realized industry rate
+    // is not a verdict, and a -0.2% in red read as "shrinking".
+    private var growthColumn: some View {
+        let md = data.marketDynamics
+        return marketMetricColumn(
+            label: "Avg/yr",
+            value: md.formattedGrowth,
+            valueColor: md.cagr5Yr == nil ? AppColors.textMuted : AppColors.textPrimary,
+            subtitle: md.growthWindowLabel
+        )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(md.growthAccessibilityLabel)
+    }
+
+    private var columnDivider: some View {
+        // `.background` is inert on a Divider; `.overlay` paints it.
+        Divider()
+            .frame(height: 40)
+            .overlay(AppColors.divider)
+    }
+
+    // Column 2: market size. A measured figure shows one value at its own
+    // year; only a company's earnings-call quote with a STATED target shows
+    // the arrow pair.
+    private var marketSizeColumn: some View {
+        VStack(alignment: .center, spacing: AppSpacing.xxs) {
+            // Scope-prefixed header: "US - Market Size (TAM)" so the market
+            // size is never ambiguous; unprefixed for a company quote.
+            Text(data.marketDynamics.tamHeaderLabel)
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+
+            if data.marketDynamics.tamIsAvailable {
+                marketSizeValues
+            } else {
+                Text("—")
+                    .font(AppTypography.labelSmall).fontWeight(.bold)
+                    .foregroundColor(AppColors.textMuted)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var marketSizeValues: some View {
+        let md = data.marketDynamics
+        if let target = md.formattedTargetTAM, let targetYear = md.targetYearLabel {
+            HStack(spacing: AppSpacing.xxs) {
+                metricValueText(md.formattedCurrentTAM)
+                Text("→")
+                    .font(AppTypography.labelSmall).fontWeight(.bold)
+                    .foregroundColor(AppColors.textSecondary)
+                metricValueText(target)
+            }
+            HStack(spacing: AppSpacing.xxs) {
+                yearText(md.measuredYearLabel ?? "")
+                Spacer()
+                    .frame(width: 14)
+                yearText(targetYear)
+            }
+        } else {
+            metricValueText(md.formattedCurrentTAM)
+            if let year = md.measuredYearLabel {
+                yearText(year)
+            }
+        }
+    }
+
+    private func metricValueText(_ value: String) -> some View {
+        Text(value)
+            .font(AppTypography.labelSmall).fontWeight(.bold)
+            .foregroundColor(AppColors.textPrimary)
+    }
+
+    private func yearText(_ value: String) -> some View {
+        Text(value)
+            .font(AppTypography.caption)
+            .foregroundColor(AppColors.textMuted)
+    }
+
+    // Column 3: Concentration — plain text, same labelSmall bold as the
+    // other values (no badge, no colour). It is REVENUE shares of the
+    // industry's US-listed constituents, so it tops out at "Oligopoly"; "—"
+    // when it could not be measured.
+    private var concentrationColumn: some View {
+        let md = data.marketDynamics
+        return marketMetricColumn(
+            label: "Concentration",
+            value: md.concentration.rawValue,
+            valueColor: md.concentration == .unknown ? AppColors.textMuted : AppColors.textPrimary,
+            subtitle: md.concentrationSubtitle
+        )
+    }
+
+    // Where the market size comes from. Wraps (2-3 lines): cutting it would
+    // hide the NAICS codes a composite figure is summed from.
+    @ViewBuilder
+    private var sourceCaption: some View {
+        if let caption = data.marketDynamics.sourceCaption {
+            Text(caption)
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -185,6 +224,8 @@ struct ReportMoatCompetitionSection: View {
                 Text(subtitle)
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
         }
         .frame(maxWidth: .infinity)
@@ -385,6 +426,23 @@ struct ReportMoatCompetitionSection: View {
     ScrollView {
         ReportMoatCompetitionSection(
             data: TickerReportData.sampleOracle.moatCompetition
+        )
+        .padding()
+    }
+    .background(AppColors.cardBackground)
+}
+
+#Preview("Measured industry figure") {
+    let oracle = TickerReportData.sampleOracle.moatCompetition
+    ScrollView {
+        ReportMoatCompetitionSection(
+            data: ReportMoatCompetitionData(
+                marketDynamics: MarketDynamics.sampleMeasured,
+                dimensions: oracle.dimensions,
+                durabilityNote: oracle.durabilityNote,
+                competitors: oracle.competitors,
+                competitiveInsight: oracle.competitiveInsight
+            )
         )
         .padding()
     }

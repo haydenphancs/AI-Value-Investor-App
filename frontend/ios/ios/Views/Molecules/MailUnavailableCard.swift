@@ -76,6 +76,11 @@ struct MailUnavailableCard: View {
     /// the kind of quiet lie this screen exists to stop.
     var shareAttachments: [Any] = []
 
+    /// Called when the share sheet closes, whatever the user did in it — `UIActivityViewController`
+    /// inside a SwiftUI sheet cannot tell this view whether anything was actually sent. The
+    /// Feedback screen uses it to give the next report its own report code.
+    var onShareDismissed: (() -> Void)? = nil
+
     @State private var didCopy = false
     @State private var isSharing = false
 
@@ -105,7 +110,7 @@ struct MailUnavailableCard: View {
                     filled(title: label, icon: "square.and.arrow.up")
                 }
                 .buttonStyle(PlainButtonStyle())
-                .sheet(isPresented: $isSharing) {
+                .sheet(isPresented: $isSharing, onDismiss: onShareDismissed) {
                     ShareSheet(items: [payload] + shareAttachments)
                 }
             }

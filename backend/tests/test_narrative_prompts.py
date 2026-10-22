@@ -401,3 +401,217 @@ def test_a_tie_for_the_biggest_threat_names_the_first_row():
     rows = [_comp("AAA", 6.0, "moderate"), _comp("BBB", 6.0, "moderate")]
     assert "Biggest threat: AAA Inc (6.0/10, moderate)" in "\n".join(
         np_._digest_moat(_moat_shell("threat", rows)))
+
+
+# ── Market structure: a measured growth rate, never a "CAGR" forecast (2026-10-22) ──
+#
+# RKLB's stored bear case read the A&D "industry CAGR -0.2%" + "declining" as a shrinking
+# market: the rate was a backward 2017→2024 Census change (a peak-to-trough window), labelled
+# as a 5-year CAGR. Owner decision "Measured only": the digest names the rate for what it is —
+# a nominal US industry rate over its measured window — and the lifecycle as a reading OF it.
+
+def _structure_line(**md) -> str:
+    lines = np_._digest_moat({"moat_competition": {"market_dynamics": md}})
+    return next((ln for ln in lines if "Market structure" in ln), "")
+
+
+_AD_MEASURED = dict(
+    concentration="fragmented", concentration_basis="revenue_share", cagr_5yr=0.9,
+    cagr_start_year=2017, cagr_end_year=2024, lifecycle_phase="mature",
+    current_tam=342.8, future_tam=359.3, current_year="2024", future_year="2029",
+    tam_basis="measured", tam_year=2024, tam_scope="us",
+)
+
+
+def test_the_moat_digest_line_is_the_owner_approved_wording():
+    assert _structure_line(**_AD_MEASURED) == (
+        "  Market structure: fragmented by revenue share of listed companies; "
+        "US industry growth +0.9%/yr nominal 2017-24; lifecycle by that rate: mature"
+    )
+
+
+def test_the_moat_digest_scopes_the_growth_rate():
+    line = _structure_line(**{**_AD_MEASURED, "cagr_5yr": -0.2})
+    for want in ("%/yr", "2017", "24", "nominal", "US", "-0.2"):
+        assert want in line, want
+    assert "CAGR" not in line and "declining" not in line
+    # Never a TAM figure: neither the measured size nor the legacy projection.
+    for figure in ("342", "343", "359", "2029"):
+        assert figure not in line, figure
+
+
+@pytest.mark.parametrize("conc", ["unknown", "Unknown", " UNKNOWN ", "", None, 3, ["x"]])
+def test_the_moat_digest_skips_an_unknown_concentration(conc):
+    line = _structure_line(**{**_AD_MEASURED, "concentration": conc})
+    assert line.startswith("  Market structure: US industry growth +0.9%/yr"), line
+    assert "unknown" not in line.lower() and "listed companies" not in line
+
+
+@pytest.mark.parametrize("basis,want", [
+    ("revenue_share", "oligopoly by revenue share of listed companies"),
+    ("market_cap", "oligopoly by market cap of listed companies"),
+    (None, "Market structure: oligopoly; "),          # a report stored before the key
+    ("other", "Market structure: oligopoly; "),
+])
+def test_the_concentration_names_what_it_was_measured_on(basis, want):
+    assert want in _structure_line(**{**_AD_MEASURED, "concentration": "oligopoly",
+                                      "concentration_basis": basis})
+
+
+@pytest.mark.parametrize("rate,want", [
+    (-0.04, "+0.0%/yr"),        # never "-0.0" (it reads as a decline)
+    (-0.0, "+0.0%/yr"),
+    (0, "+0.0%/yr"),
+    (-1.0, "-1.0%/yr"),
+    (15.04, "+15.0%/yr"),
+])
+def test_the_growth_rate_is_rounded_without_a_negative_zero(rate, want):
+    line = _structure_line(**{**_AD_MEASURED, "cagr_5yr": rate})
+    assert want in line and "-0.0" not in line
+
+
+@pytest.mark.parametrize("rate", [None, float("nan"), float("inf"), -float("inf"), True, False,
+                                  "0.9", 5000.0, {"v": 1}])
+def test_no_usable_rate_says_neither_growth_nor_a_lifecycle(rate):
+    """Without a rate the phase is the classifier's no-signal default: naming it would invent
+    a lifecycle reading."""
+    line = _structure_line(**{**_AD_MEASURED, "cagr_5yr": rate})
+    assert "growth" not in line and "lifecycle" not in line
+    assert "nan" not in line.lower() and "inf" not in line.lower()
+    assert line == "  Market structure: fragmented by revenue share of listed companies"
+
+
+@pytest.mark.parametrize("start,end,want", [
+    (2017, 2024, " 2017-24;"),
+    ("2017", "2024", " 2017-24;"),
+    (2017.0, 2024.0, " 2017-24;"),
+    (1998, 2003, " 1998-2003;"),              # across a century: the 4-digit end
+    (2099, 2100, " 2099-2100;"),
+    (2024, 2017, "nominal;"),                 # start after end: no window
+    (2024, 2024, "nominal;"),
+    (None, 2024, "nominal;"),
+    (float("nan"), 2024, "nominal;"),
+    (True, 2024, "nominal;"),
+    ("FY17", "2024", "nominal;"),
+    (2017.5, 2024, "nominal;"),
+    (2568, 2569, "nominal;"),                 # a Buddhist-calendar year is not a window
+])
+def test_the_growth_window_is_stated_only_when_valid(start, end, want):
+    line = _structure_line(**{**_AD_MEASURED, "cagr_start_year": start, "cagr_end_year": end})
+    assert want in line, line
+
+
+def test_a_legacy_global_row_is_not_called_a_us_rate():
+    line = _structure_line(**{**_AD_MEASURED, "tam_scope": "global", "tam_basis": None})
+    assert "; industry growth +0.9%/yr nominal" in line and "US industry" not in line
+
+
+def test_the_lifecycle_rides_only_beside_the_rate():
+    line = _structure_line(**{**_AD_MEASURED, "lifecycle_phase": "secular_growth",
+                              "cagr_5yr": 18.0})
+    assert line.endswith("; lifecycle by that rate: secular growth")
+    for bad in (None, "", 5, "  "):
+        assert "lifecycle" not in _structure_line(**{**_AD_MEASURED, "lifecycle_phase": bad})
+
+
+@pytest.mark.parametrize("md", [None, "", "garbage", [], {}])
+def test_a_missing_market_block_gives_no_structure_line(md):
+    lines = np_._digest_moat({"moat_competition": {"market_dynamics": md}})
+    assert not any("Market structure" in ln for ln in lines)
+
+
+def _fully_populated_report() -> dict:
+    """Every digest module at realistic full length: long segment names, five pillars, five
+    competitors with segments, four insider rows, two material macro risks, a published
+    estimate and analyst momentum, Congress and short selling."""
+    pillars = ["Switching Costs", "Network Effects", "Brand Power", "Cost Advantage",
+               "Intangible Assets"]
+    return {
+        "price_action": {"change_pct": -12.4, "window_label": "30 days", "tier": "unusual",
+                         "z_score": 2.7, "event": {"tag": "earnings guidance cut"}},
+        "revenue_engine": {"reporting_currency": "USD", "segments": [
+            {"name": "Launch Services and Space Systems Integration", "current_revenue": 245_000.0,
+             "previous_revenue": 180_000.0},
+            {"name": "Space Systems Components and Spacecraft Buses", "current_revenue": 190_000.0,
+             "previous_revenue": 150_000.0},
+            {"name": "Government Mission Solutions and Engineering", "current_revenue": 120_000.0,
+             "previous_revenue": 95_000.0},
+        ]},
+        "fundamental_metrics": [
+            {"title": f"Card {c}", "star_rating": 3,
+             "metrics": [{"label": f"Metric {c}{m} (1.20x sector avg 57.4%)", "value": "68.82%"}
+                         for m in range(6)]}
+            for c in range(4)
+        ],
+        "overall_assessment": {"average_rating": 3.4, "strong_count": 9, "weak_count": 6},
+        "revenue_forecast": {"cagr": 31.2, "eps_growth": 44.8, "management_guidance": "raised",
+                             "beat_summary": "Beat 6 of 8"},
+        "insider_data": {
+            "sentiment": "net selling", "timeframe": "last 12 months",
+            "transactions": [{"type": t, "count": 14, "value": "$12.4M"}
+                             for t in ("Informative Buy", "Informative Sell",
+                                       "Planned Sell (10b5-1)", "Option Exercise")],
+            "capital_allocation": {
+                "buyback_status": "none", "dividend_yield": 0.0, "share_count_change": 9.8,
+                "data_points": [{"period": "Q3 2024", "shares_outstanding": 480.0},
+                                {"period": "Q2 2026", "shares_outstanding": 527.0}],
+            },
+        },
+        "moat_competition": {
+            "dimensions": [{"name": p, "score": 6.5, "peer_score": 5.8} for p in pillars],
+            "market_dynamics": {**_AD_MEASURED, "cagr_5yr": -0.2},
+            "competitor_order": "direct",
+            "competitors": [
+                _comp(t, s, lv, "Small-launch and medium-lift orbital launch services")
+                for t, s, lv in (("FLY", 6.1, "moderate"), ("LUNR", 5.4, "moderate"),
+                                 ("BA", 7.8, "high"), ("LMT", 8.2, "high"),
+                                 ("NOC", 7.0, "high"))
+            ],
+        },
+        "macro_data": {"overall_threat_level": "high", "risk_factors": [
+            {"title": "US defense budget continuing resolution delays", "severity": "high",
+             "impact": 0.8},
+            {"title": "Launch-site range congestion and FAA licensing backlog",
+             "severity": "elevated", "impact": 0.6},
+        ]},
+        "wall_street_consensus": {
+            "rating": "strong_buy", "current_price": 58.25, "target_price": 72.0,
+            "momentum_upgrades": 7, "momentum_downgrades": 3,
+            "caydex_fair_value": {"status": "ok", "fair_value": 41.37, "range_low": 33.1,
+                                  "range_high": 52.9},
+        },
+        "hidden_market_signals": {
+            "congress": {"num_buyers": 4, "num_sellers": 2, "net_direction": "buying",
+                         "period": "Last 12 Months"},
+            "short_interest": {"percent_of_float": 14.6, "days_to_cover": 5.3, "change_3m": -8.0},
+        },
+    }
+
+
+def test_a_fully_populated_digest_keeps_its_later_lines_within_the_verdicts_cap():
+    """The longer market-structure line (owner wording, ~150 chars instead of ~40) must not
+    push MACRO / WALL STREET / HIDDEN SIGNALS — the last three modules — out of the
+    executive summary's 2,200-character verdicts block. Real formatters, no stubs."""
+    report = _fully_populated_report()
+    digest = np_.build_module_digest(report)
+    # Anti-vacuity: every module produced its line(s).
+    for head in ("PRICE MOVEMENT", "REVENUE ENGINE", "FUNDAMENTALS & GROWTH", "FUTURE FORECAST",
+                 "INSIDER (", "MOAT (0-10", "  Market structure: fragmented by revenue share",
+                 "MACRO threat: high", "WALL STREET:", "HIDDEN SIGNALS:"):
+        assert head in digest, head
+    budgeted = [ln for ln in digest.splitlines() if not ln.upper().startswith("FUNDAMENTALS")]
+    assert sum(len(ln) + 1 for ln in budgeted) <= np_._VERDICTS_CHAR_CAP, \
+        "a fully populated digest no longer fits: the trailing modules would fall off"
+    prompt = np_._executive_summary_text_prompt(PERSONA, "EVIDENCE", report)
+    block = prompt.split("REPORT VERDICTS", 1)[1]
+    for later in ("MACRO threat: high", "WALL STREET:", "HIDDEN SIGNALS:"):
+        assert later in block, later
+    assert "US industry growth -0.2%/yr nominal 2017-24" in block
+    assert "CAGR -0.2" not in block and "declining" not in block
+
+
+def test_the_moat_digest_names_a_peer_set_concentration_as_peers():
+    from app.services.agents.narrative_prompts import _market_structure_bits
+
+    bits = _market_structure_bits({"concentration": "oligopoly", "concentration_basis": "peer_revenue_share"})
+    assert bits[0] == "oligopoly by revenue share of a peer set"

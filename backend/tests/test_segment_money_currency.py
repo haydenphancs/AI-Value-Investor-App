@@ -250,7 +250,8 @@ def test_a_twd_filers_statement_lines_carry_twd_never_dollars():
     assert "Total Assets: TWD 7T" in block and "Total Debt: TWD 950B" in block
     assert "Cash: TWD 2.1T" in block
     assert "Operating CF: TWD 2.3T" in block and "Free CF: TWD 1T" in block
-    assert "Buybacks: -TWD 394M" in block
+    # The raw annual buyback line is gone (2026-10-22): FMP's figure can be tax withholding.
+    assert "Buybacks:" not in block
     assert "(Statement amounts above are in TWD as reported, not converted to US dollars.)" \
         in block
     assert not _DOLLAR_AMOUNT.search(block), block
@@ -270,7 +271,8 @@ def test_usd_or_unknown_statement_currency_prints_exactly_as_before(cur):
             row["reportedCurrency"] = cur
     block = _statements(_stmt_context([_income(cur)], [balance], [cash_flow]))
     assert "[2025] Revenue: $3.8T | Net Income: $1.7T" in block
-    assert "Total Assets: $7T" in block and "Buybacks: -$394M" in block
+    assert "Total Assets: $7T" in block and "Free CF: $1T" in block
+    assert "Buybacks:" not in block
     assert "not converted" not in block and "TWD" not in block
 
 

@@ -148,11 +148,13 @@ struct ValuationSnapshotCard: View {
 
                     // Key metrics row
                     HStack(spacing: 0) {
-                        ValuationMetricPill(label: "P/E (TTM)", value: valuation.peDisplay)
+                        // One US-market composite, the same on every index screen — never
+                        // this index's own P/E (no licensed source), so the label says so.
+                        ValuationMetricPill(label: "Market P/E (TTM)", value: valuation.peDisplay)
                         Spacer()
                         ValuationMetricPill(label: "Fwd P/E", value: valuation.forwardPEDisplay)
                         Spacer()
-                        ValuationMetricPill(label: "10Y Avg", value: String(format: "%.0fx", valuation.historicalAvgPE))
+                        ValuationMetricPill(label: "10Y Avg", value: valuation.historicalAvgDisplay)
                     }
 
                     // Story
@@ -539,7 +541,7 @@ struct IndexSnapshotsInfoSheet: View {
                             SnapshotBulletPoint(
                                 icon: "tag.fill",
                                 title: "Valuation",
-                                description: "Compares the index P/E ratio against historical averages to gauge whether the market is cheap or expensive."
+                                description: "Shows a US market P/E, the average of the sector median P/Es and the same on every index screen, beside its own 10-year average."
                             )
 
                             SnapshotBulletPoint(
@@ -580,7 +582,7 @@ struct IndexSnapshotsInfoSheet: View {
 
                             ProTipCard(
                                 icon: "chart.bar.fill",
-                                tip: "A market trading below its historical P/E average may present value opportunities, but always consider the macro backdrop."
+                                tip: "The market P/E is the same on every index screen. It averages the sector median P/Es, so it differs from any single index's own P/E."
                             )
                         }
                     }

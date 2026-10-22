@@ -22,14 +22,17 @@ Two endpoints used:
      404 also means "this vintage isn't published", the whole Census tier
      went silently dead — every mapped industry fell through to FRED. A
      snapshot that finds NO AIES year now logs a WARNING. A future vintage
-     may switch its parameter to `NAICS2022`; that shows up the same way.
+     may switch its parameter to `NAICS2022`; Census then answers HTTP 400
+     "unknown predicate variable", which is logged at ERROR and treated as an
+     unpublished vintage, so the probe steps back to the previous year.
 
   2. **Economic Census (ecnbasic)** — the every-5-years comprehensive
      industry census, used as the CAGR baseline. 2017 has full coverage
      under NAICS 2017 codes. 2022 also exists but uses NAICS 2022 codes
      (different vintage — software publishers moved from 5112 → 5132,
-     etc.) so we'd need a NAICS-vintage crosswalk; the 2017→2023 window
-     gives a usable 6-year CAGR without it.
+     etc.) so we'd need a NAICS-vintage crosswalk; the 2017→2024 window
+     gives a usable 7-year rate without it (Census's own spliced series,
+     /timeseries/aies/historical, holds the same 2017 and 2024 values).
 
 Both endpoints accept NAICS 2017 codes and return revenue in $1,000s.
 """
@@ -39,7 +42,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -124,7 +127,8 @@ class CensusRevenueSnapshot:
     `revenue_usd_baseline` and `baseline_year` come from the 2017
     Economic Census (or the closest older snapshot we have). `years_apart`
     is what the caller divides into the log ratio to get an annualized
-    rate — usually 6 (latest=2023, baseline=2017).
+    rate — 7 as of 2026-10 (latest=2024, baseline=2017); it grows by one
+    each time a newer AIES vintage is published.
 
     `revenue_usd_baseline` is None when the baseline call failed — caller
     must skip CAGR and only show TAM in that case.
@@ -165,7 +169,7 @@ class CensusClient:
         return bool(self.api_key)
 
     async def _http_get_rows(
-        self, url: str, params: Dict[str, str],
+        self, url: str, params: Dict[str, str], *, allow_schema_skip: bool = False,
     ) -> Optional[list]:
         """One-row response parser. Returns the data row (list) when the
         Census API returns its standard 2D array [header, row], None when the
@@ -191,6 +195,23 @@ class CensusClient:
                 payload = resp.json()
         except httpx.HTTPStatusError as e:
             status = e.response.status_code if e.response is not None else "?"
+            if allow_schema_skip and status == 400 and _is_schema_mismatch(e.response):
+                # AIES vintage probe ONLY: the vintage exists but its schema does not
+                # take this request — e.g. a future AIES that switches `NAICS2017=` to
+                # `NAICS2022=` answers 400 "unknown predicate variable". That is "this
+                # vintage is not usable", not a transient outage: answer "no data" so the
+                # probe tries the year before (raising here would freeze every Census
+                # industry on one year's schema change). Loud, because it needs a code
+                # change to read the new vintage. The fixed 2017 Economic Census baseline
+                # has no earlier year to step to, so there a 400 still raises (uncached):
+                # a cached miss would make the quarterly recompute null every CAGR.
+                logger.error(
+                    "Census AIES %s params=%s: HTTP 400 unknown predicate/variable — this "
+                    "vintage's schema does not match the request (a NAICS2022 switch?); "
+                    "treated as unpublished, the probe steps back to the previous year",
+                    url, safe_params,
+                )
+                return None
             logger.warning(f"Census fetch failed for {url} params={safe_params}: HTTP {status}")
             raise CensusUnavailableException(f"Census HTTP {status} for {url}") from None
         except httpx.HTTPError as e:
@@ -229,7 +250,7 @@ class CensusClient:
             "for": "us:*",
             "key": self.api_key,
         }
-        rows = await self._http_get_rows(url, params)
+        rows = await self._http_get_rows(url, params, allow_schema_skip=True)
         if rows is None:
             _cache_set(cache_key, _MISS_SENTINEL)
             return None
@@ -296,6 +317,34 @@ class CensusClient:
         _cache_set(cache_key, point)
         return point
 
+    def aies_probe_years(self) -> List[int]:
+        """The AIES vintages to probe, newest first (last year back `_AIES_PROBE_YEARS`).
+        The one place the clock is read, so the snapshot and the per-year reads agree."""
+        current_year = datetime.now(timezone.utc).year
+        return [current_year - offset for offset in range(1, 1 + _AIES_PROBE_YEARS)]
+
+    async def get_aies_revenue(
+        self, naics: str, year: int,
+    ) -> Optional[CensusRevenuePoint]:
+        """One AIES (year, NAICS) revenue point — thin, no aggregation. None when the
+        cell is unpublished, suppressed or the client is unconfigured; raises
+        `CensusUnavailableException` on a transient failure. Shares the snapshot's
+        24 h cache entry ("aies", code, year)."""
+        if not self.is_configured:
+            _warn_unconfigured_once()
+            return None
+        return await self._fetch_aies_year(naics, year)
+
+    async def get_ecn_revenue(
+        self, naics: str, year: int = _ECN_BASELINE_YEAR,
+    ) -> Optional[CensusRevenuePoint]:
+        """One Economic Census (year, NAICS) revenue point, with its NAICS label — the
+        CAGR baseline. Same semantics and cache entry as the snapshot's baseline read."""
+        if not self.is_configured:
+            _warn_unconfigured_once()
+            return None
+        return await self._fetch_ecnbasic(naics, year)
+
     async def get_industry_revenue_snapshot(
         self, naics: str,
     ) -> Optional[CensusRevenueSnapshot]:
@@ -309,8 +358,7 @@ class CensusClient:
             _warn_unconfigured_once()
             return None
 
-        current_year = datetime.now(timezone.utc).year
-        probed = [current_year - offset for offset in range(1, 1 + _AIES_PROBE_YEARS)]
+        probed = self.aies_probe_years()
         latest: Optional[CensusRevenuePoint] = None
         for candidate in probed:
             point = await self._fetch_aies_year(naics, candidate)
@@ -341,6 +389,19 @@ class CensusClient:
             ),
             baseline_year=(baseline.year if baseline else None),
         )
+
+
+def _is_schema_mismatch(response: Optional[httpx.Response]) -> bool:
+    """A Census 400 whose body names an unknown predicate or variable — the request's
+    shape does not exist in that vintage. Reads at most the first 500 characters and
+    never raises (an unreadable body is not a mismatch)."""
+    if response is None:
+        return False
+    try:
+        body = (response.text or "")[:500].lower()
+    except Exception:  # noqa: BLE001 — a body we cannot decode is just "not a mismatch"
+        return False
+    return "unknown predicate" in body or "unknown variable" in body
 
 
 def _parse_revenue(raw: Any) -> Optional[float]:

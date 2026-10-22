@@ -76,6 +76,14 @@ class ValuationSnapshotResponse(BaseModel):
     # it on the wire, so iOS re-derived a different answer from the sentinel.
     # Same pattern as `benchmark_available` / `estimates_available` / `money_flow_index_known`.
     pe_known: bool = True
+    # `pe_ratio` is ONE US-market composite (the mean of the sector median TTM P/Es), the
+    # same on every index, and `historical_avg_pe` is that SAME composite's own 10-year
+    # average (2026-10-21; it used to be a hard-coded per-index figure, 21 / 25 / 18, so the
+    # one number read as "a premium" on two screens and "below average" on the third).
+    # False → `historical_avg_pe` is the 0 sentinel (too few usable years, a failed read):
+    # render "—" and make no comparison. Fail-closed default; additive — shipped builds
+    # ignore the key and decode `historical_avg_pe` as a plain Double.
+    historical_avg_pe_known: bool = False
 
 
 class SectorPerformanceEntryResponse(BaseModel):

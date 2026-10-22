@@ -85,6 +85,7 @@ from app.services.sector_benchmark_service import (
     rate_limit_run,
     revenue_backed_margin,
 )
+from app.utils.margins import free_cash_flow_reading
 from app.utils.period_labels import (
     BENCHMARK_REPORTING_LAG_DAYS,
     benchmark_period_complete,
@@ -582,7 +583,9 @@ def _extract_ttm(r0: Dict[str, Any], k0: Dict[str, Any]) -> Dict[str, Optional[f
     out: Dict[str, Optional[float]] = {}
     for name, (src, field, _pos, _cap) in _TTM_METRICS.items():
         if src == "compute":  # fcf_margin = FCF/share ÷ revenue/share
-            fcf = _num(r0, "freeCashFlowPerShareTTM")
+            # An exact 0 is FMP's fill for missing cash-flow data, not a figure
+            # (`free_cash_flow_reading`, 2026-10-21).
+            fcf = free_cash_flow_reading(_num(r0, "freeCashFlowPerShareTTM"))
             rev = _num(r0, "revenuePerShareTTM")
             # Require rev > 0 — MATCHES the fiscal path (sector_benchmark_service
             # ._compute_ratio_values: `fcf is not None and rev and rev > 0`). The old

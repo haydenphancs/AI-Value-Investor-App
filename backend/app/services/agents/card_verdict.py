@@ -16,7 +16,7 @@ NOTE: this is ONLY the short comment under each card. The separate "✨ Insight"
 block (overall_assessment) stays AI-generated and is untouched.
 """
 
-from typing import List, Optional, Tuple
+from typing import AbstractSet, List, Optional, Tuple
 
 # Per-card metric weights — mirror the snapshot services' rating weights so the
 # label anchors on the metric that actually moved the rating (tie-break only).
@@ -100,6 +100,7 @@ def generate_card_verdict(
     scored_metrics: List[Tuple[Optional[str], Optional[int]]],
     *,
     peer_compared: bool = True,
+    peer_free_metrics: Optional[AbstractSet[str]] = None,
 ) -> Tuple[str, str]:
     """Return (label, sentiment) for one card.
 
@@ -133,6 +134,12 @@ def generate_card_verdict(
     peer-free twin (`_PEER_FREE_VOCAB`: "High P/E", not "Pricey vs Industry"). Every other
     phrase names no peer and is unchanged. The default (``True``) keeps every direct
     caller's output exactly as before.
+
+    `peer_free_metrics` (2026-10-20, the Financial Services rule): the metric keys of THIS
+    card that were judged without a peer median while other rows were compared — a Data &
+    Stock Exchanges P/E on its absolute bands beside a P/B against the industry. Each of
+    them takes its peer-free twin ("Low P/E", not "Cheaper Than Industry"); the card-wide
+    words stay as `peer_compared` says. None (the default) changes nothing.
     """
     if star_rating is None or star_rating <= 0:
         return _NOT_RATED
@@ -161,7 +168,10 @@ def generate_card_verdict(
     )
 
     def phrase(key: str, strong: bool) -> str:
-        vocab = _VOCAB if peer_compared or key not in _PEER_FREE_VOCAB else _PEER_FREE_VOCAB
+        row_peer_free = not peer_compared or (
+            peer_free_metrics is not None and key in peer_free_metrics
+        )
+        vocab = _PEER_FREE_VOCAB if row_peer_free and key in _PEER_FREE_VOCAB else _VOCAB
         return vocab[key][0 if strong else 1].replace("{peer}", peer)
 
     if strengths and drags:

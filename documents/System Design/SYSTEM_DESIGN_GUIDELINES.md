@@ -169,14 +169,19 @@ is shown for at most 96 h, and is replaced by the live answer as soon as that la
 └─────────────────┘        └─────────────────┘        └─────────────────┘
 ```
 
-**Integrations** (`backend/app/integrations/`, **17** modules): `fmp`, `gemini`, `coingecko`, `fred`,
+**Integrations** (`backend/app/integrations/`, **18** modules): `fmp`, `gemini`, `coingecko`, `fred`,
 `finra_short_interest`, `apewisdom`, `alternative_me`, `census`, `openfda`, `uspto`, `app_store`,
 `openai_compat`, `telegram` (the marketing review bot, §12.9), `x_api`, `bluesky` and `upload_post`
 (the marketing publisher's platforms, §12.10), and `brave_search` (the Brave Search API behind report
 chat's `web_search` tool, offered only on a turn where the user explicitly asks to search, look up or
 verify; called only by `app/services/chat_web_search_service.py`, which holds the gate, the per-turn
 single search, the fail-closed daily budget and a per-user transient cache — no Supabase tier and no
-cross-user cache, because Brave's terms allow transient storage only).
+cross-user cache, because Brave's terms allow transient storage only), and `sec_edgar` (SEC EDGAR
+XBRL `companyconcept` facts, 2026-10-22: the check on Signal of Confidence buybacks, called only by
+`app/services/sec_concept_service.py`, which owns the two-tier cache `sec_concept_cache`. SEC's
+fair-access policy needs a declared `SEC_EDGAR_USER_AGENT` ("Company contact@email"; blank or not
+printable ASCII turns the check off) and at most 10 requests/second per client — the client paces itself at
+`SEC_EDGAR_MAX_RPS` (5) per process and treats a 403 as throttling, with a 10-minute circuit).
 **No Google Search grounding** (retired 2026-10-02). Gemini's `google_search` tool is not used
 anywhere: the Gemini API Additional Terms let a grounded answer be shown only to the end user who
 sent the prompt, together with Google's Search Suggestions, unmodified, and never cached, stored or
@@ -317,7 +322,7 @@ The two-tier cache-aside pattern (CLAUDE.md invariant #4) — **not Redis**:
   it to its own TTL on read); the other 9 carry an expiry column the read query filters on (`expires_at`
   in 8, `soft_expires_at` / `hard_expires_at` on `ai_insight_cache`). The reference implementation,
   `profit_power_cache`, is `cached_at`-based. Budgets range from 24 h and close-aligned for market data
-  to 180 days for `ip_intel_cache` (USPTO / FDA counts) and permanent for `crypto_coin_id_cache`
+  to 180 days for `ip_intel_cache` (USPTO / FDA counts; 1 day for a row built while one source failed) and permanent for `crypto_coin_id_cache`
   (the Gemini grounded-research caches — `competitor_intel_cache`, `moat_intel_cache`,
   `price_catalyst_cache`, `geopolitical_macro_cache` — were retired 2026-10-02, §2 "No Google Search grounding", and are empty); §7.1's rule is about WHAT may be stored,
   not for how long. §7.1 states the rule for what may go in here; the short version is that **a live price may
@@ -493,6 +498,11 @@ The `CaydexWidgets` extension answers two different questions, and each has its 
   Never a single stock. The extension fetches `GET /widget/market-mover` itself with the
   market-scoped widget token (auth.md §8a). The equities ride the payload's own batch quote,
   and Bitcoin comes from the Home pulse's 600 s crypto tile, never a fresh CoinGecko call.
+  A tap anywhere on a Market tile (every family) opens `caydex://updates/market`: the Updates
+  tab on its Market chip, scrolled to the Market Insight card (owner, 2026-10-22). Its asset
+  rows carry no link of their own. A Holdings tap still opens `caydex://ticker/<SYMBOL>` (the
+  headline mover, or the tapped row on Medium/Large). Both links go through the one grammar
+  (`Shared/CaydexDeepLink.swift`) and are parked behind the sign-in gate (`DeepLinkRouter`).
 - **Holdings** — the user's active group: the biggest ABSOLUTE % mover with its deterministic
   cause, ▲/▼ counts over every holding, and the top gainers and losers. Since 2026-10-14 the
   cause can also be the session's Updates Insights card ("Bearish News" + its headline), but
@@ -1348,7 +1358,21 @@ Power or Signal of Confidence adds nothing to `degraded` — the calendar only s
 Supabase write (`_earnings_common.CALENDAR_UNKNOWN`), so a row is never stored without its
 key. A Signal of Confidence quarter whose cash-flow row is missing ships
 `cash_flow_reported: false` (its cash fields are 0.0 placeholders that iOS prints as "—");
-`cash_flow_row` in `degraded` now means only "the newest quarter's row has not landed". The
+`cash_flow_row` in `degraded` now means only "the newest quarter's row has not landed".
+Signal of Confidence's buybacks are checked against the company's SEC filing (2026-10-22,
+`_buyback_verification`): FMP's `commonStockRepurchased` carried employee tax withholding or
+preferred redemptions in 11 of 120 surveyed quarters (INTC's "$617M buybacks" were RSU
+withholdings). The check only LOWERS a figure, and only where the filing explains the excess;
+it runs only when a row the chart can read carries a buyback. When SEC fails or runs past 10 s
+and no cached filing data of at most 30 days is left — or the cached data ends before a quarter
+it left unchecked — the build keeps FMP's figures and is degraded `buyback_check` (blocking for
+the report, and chat states no buyback figure); a company SEC has no data for, no CIK, or the
+check switched off is a steady state, not degradation. The deep door's research tools never
+hand the model FMP's raw dividend or buyback lines either (`fmp_tools`, 2026-10-22: INTC's
+Q2 2026 −$14.3B "dividend" was a payment to a minority partner): a cash-flow tool result for
+the report's own ticker carries its Signal of Confidence figures (`shareholder_returns_block`,
+yields only on a USD statement; a degraded or missing build is "unavailable", never zero), and
+for any other ticker a note that they were left out. The
 earnings, growth, profit-power, health-check, revenue-breakdown and SoC rows carry a
 `payload_version` inside their JSON, bumped whenever a field or a FORMULA changes, so rows
 written by the previous code are rebuilt on first read. A plausibility REPAIR (the earnings
@@ -1418,7 +1442,9 @@ values; there is no `CachePolicy` or `CacheKey` type.
 | Class | TTL | Rationale |
 |---|---|---|
 | volatile (quote, header) | 120 s | a price is only ever briefly true |
-| chart | 25 s | redraw cadence, not data cadence |
+| chart (intraday interval) | 25 s | redraw cadence, not data cadence |
+| chart (daily / weekly / monthly) | 300 s | only the last bar moves, and no timer refreshes these ranges |
+| chart history page | 3600 s | settled bars; kept in their own bounded store (`chartHistoryPages`, 64 pages), never in the shared dict, and dropped as soon as a page arrives under a new `settled_through` |
 | news | 60 s | the backend already caches it for hours; this only collapses tab-flipping |
 | analysis | 1800 s | recomputed on the server far less often than that |
 | fundamental | 86400 s | quarterly data |
@@ -1435,6 +1461,62 @@ Eviction drops the 20 oldest **by insertion time** once the entry cap is reached
 LRU — `getCached` does not touch the timestamp — and the code comment saying "LRU" is wrong. It has
 not mattered, because the cap is generous relative to a session's working set; if it ever does, the
 fix is one line in `getCached`.
+
+### 7.2a Asset-detail chart history (scroll back to the first trading day)
+
+The shared detail chart (`TickerChartView`, on the stock, ETF, index, crypto and commodity
+screens) opens on the range the user picked and pages in older bars only once the user pans or
+pinches toward its left edge. First paint is unchanged.
+
+- **Route.** `GET /{stocks|etfs|indices|commodities|crypto}/{symbol}/chart/history` lives on each
+  of the five guarded routers, so it is account-only (auth.md §1a). It takes `interval`,
+  `before` (exclusive), `limit` (≤ 5,000) and `extended_hours` (stocks only), and answers
+  bars oldest first plus `has_more`, `settled_through` and `reached_start`. The shared handler is
+  `app/api/chart_history_http.py` and the schema is `app/schemas/chart_history.py`.
+  `has_more: false` means paging has nothing older to give. `reached_start: true` means more: the
+  page holds the symbol's FIRST bar. That is false at the intraday look-back bound, at
+  CoinGecko's plan cap, and in the 90-day hourly crypto series. An intraday page ending on empty
+  windows counts only when the stock's daily history begins that same day. A failed or empty
+  source is a typed 502 (`FMP_UNAVAILABLE`, or `COINGECKO_UNAVAILABLE` on crypto) and never reads
+  as "start of history".
+- **Service.** `price_history_service.py` keeps one settled daily history per symbol. Weekly and
+  monthly bars are aggregated from that full history BEFORE windowing, so the first bucket is
+  complete. Intraday pages come from calendar-grid windows that every user shares, and crypto
+  hourly bars come from one 90-day series. Every tier is in process memory, bounded by bytes,
+  with `_inflight` dedup (the §10 row explains why there is no Supabase tier).
+  `chart_helper.fetch_chart_data` reads the same history, which gives every range its warm-up:
+  at least 210 bars before the first visible bar, including intraday and crypto 1W. FMP answers
+  only the newest 7 / 42 / 28 / 89 days of one intraday request (5min / 15min / 30min / 1hour,
+  probed 2026-10-21), so a longer intraday read is stitched from newest-first requests
+  (`chart_helper._fetch_intraday_span`); intraday paging reaches 15 years back.
+- **Client.** `ChartHistoryLoader` (one per detail ViewModel) keeps a contiguous, date-ordered
+  store of the bars older than the current payload, with these rules:
+  - a strict "older than the payload's first bar" merge;
+  - a seam check that drops the store on a split or a `settled_through` change;
+  - single flight, with a 10 s back-off after a failure.
+
+  `ChartSeries` merges the store and the payload and computes every indicator ONCE over the
+  merged bars (off the main thread past 4,000 bars). `ChartViewportState` holds a right-anchored,
+  fractional window, so a prepended page never moves the chart.
+- **Correctness floor.** Unless the backend said `reached_start`, the window cannot go further
+  left than `ChartWarmup.bars` (210). Every visible value then matches the full-history value: SMA
+  and Bollinger exactly, and the EMA/Wilder seeds (MACD, RSI) to about 1e-7. Paging that merely
+  stopped (a bound, a cap, a refused page) keeps the floor. At the symbol's first bar, the window
+  reaches it, and each indicator starts at its textbook first index. The floor is read from the
+  series that was BUILT, so a long merge still building in the background never re-floors the
+  bars on screen. Decimation (one min/max envelope per pixel column) is for drawing only; readouts
+  use full-resolution bars.
+- **1D** stays one session laid out by time, with pan and pinch off. **1W** pages back through
+  older intraday bars.
+- **A 3M+ first paint never waits for the full detail.** Every `GET …/core` first-paint route
+  carries bars for 1D/1W only (`fast_only`), and a screen reopens on the range the user
+  last picked. So a screen that opens on 3M or longer requests the bars alone right after
+  core lands; a range tapped before the full detail lands is fetched the same way. The
+  bars-only routes are `GET /stocks/{t}/chart` and `GET /crypto/{s}/chart`, plus
+  `GET /{etfs|indices|commodities}/{symbol}/chart` (added 2026-10-21). Each uses the same
+  `_get_chart` as its detail, so both draw identical bars. They answer in ~0.1-1.4 s cold,
+  against 2-11 s for a cold full detail or overview. Their `GET …/quote` slice is a
+  projection of the full build, which is why it is not used for this.
 
 ### 7.3 Benchmark & report caching
 
@@ -1453,13 +1535,21 @@ out to compute peer medians per request:
   `MATURE_SAMPLE_FLOOR` (20) companies, else the **same period's** sector row when that one
   does, else whichever exists. A period never borrows another period's median (2026-10-07: the
   old "hold back to the last mature period" froze small industries' lines at one old sector value).
+  **Financial Services is the exception** (owner decision 2026-10-20; `fs_industry_only` /
+  `peer_floor`, `financials_metric_gate.FS_INDUSTRY_PEER_FLOOR`): an FS company with an industry
+  is compared with its OWN industry's median from **10** companies, and with **no peer** below
+  that — never with the FS SECTOR median, a bank-dominated pool (exchanges read "richly valued"
+  against banks' P/E of 12.35; JPM's EV/EBITDA at n=19 fell to it and decided its Price rating).
+  Only the industry layer is read; a direct sector read (`industry = ''`: competitor scoring, the
+  moat scorer, an FS company FMP gives no industry) is unchanged.
   That per-period pick serves single values. CHART LINES (Growth, Profit Power, the report
   drill-down — whose metrics carry their line's level, `sector_annual_level` /
   `sector_quarterly_level`; Profit Power's `peer_group_levels` names the net-margin line per tab
   plus one key per margin, e.g. `annual.fcf_margin`) read `get_benchmark_series` instead: every point of a metric's line comes from ONE
   peer group — the industry when it has a mature cell at the newest period, else the sector — so
   the line never steps between populations where n crosses 20, and its legend, tooltip and Cay
-  AI's peer sentence name the group every point belongs to.
+  AI's peer sentence name the group every point belongs to. An FS industry's line keeps only its
+  own periods from 10 companies (none → no line).
 - **Three live `period_type` kinds:**
   - `annual` + `calendar_quarter` — **history** (the chart lines + the growth series). Annual rows
     are keyed by the year of the period end (`period_labels.annual_benchmark_key`: an end on
@@ -1482,11 +1572,19 @@ out to compute peer medians per request:
   value — never an earlier period's. The producer applies the same gate before writing. A `ttm` row
   older than 21 days (`TTM_MAX_AGE_DAYS`: its group fell below 5 companies, or the weekly job
   stopped) is not current and is not served; historical rows have no age limit (the producer
-  fetches 16 annual records, so the oldest years legitimately stop being rewritten).
+  fetches 16 annual records, so the oldest years legitimately stop being rewritten). A **margin
+  median of exactly 0** (`MARGIN_METRICS` in `app/utils/margins.py`) is never served, in any period type
+  (2026-10-21): it is FMP's "0 when there is no revenue" counted as a figure. The producers drop
+  that 0 since 2026-10-11, but the 2026-10-04 fiscal rows held 1,113 of them — Healthcare's sector
+  net margin read 0.0% for every year 2016-2025 on the Profit Power line, the report drill-down,
+  Stage B and Cay AI's grounding (only the Profitability card had a guard) — and rows no later run
+  rewrites keep theirs. Negative medians are real and kept.
 - **Read path** (`sector_benchmark_lookup.py`, 1-hour in-memory cache): `get_current_benchmarks()`
   answers the single-value "vs avg" comparisons: the industry TTM median when it has ≥ 20
   companies → the sector TTM median when it does → the newest complete annual year with a mature
-  median → **none** (no comparison is shown; a thin cell never decides one).
+  median → **none** (no comparison is shown; a thin cell never decides one). Financial Services:
+  the industry TTM median from 10 companies → the industry's NEWEST complete year when it pools
+  10 (never an older year) → none.
 - **Write path** (`industry_benchmark_service.py`): each recompute covers the **top 300** constituents
   per industry by market cap (`TOP_TICKERS_PER_INDUSTRY`) — medians stabilise well below that and it
   bounds the FMP budget; the **median** (not mean) protects against 1–2 outlier reporters. Values are
@@ -1501,7 +1599,7 @@ out to compute peer medians per request:
 
 | Job | Cadence | Writes | Why separate |
 |-----|---------|--------|--------------|
-| Fiscal recompute | Quarterly — first Sunday of Jan/Apr/Jul/Oct, ~04:00 UTC | `annual` + `calendar_quarter` rows + the `''` sector aggregate | Fiscal data only changes on earnings |
+| Fiscal recompute | Quarterly — first Sunday of Jan/Apr/Jul/Oct, ~03:30 UTC (before the moat phase, which scores peers against these medians) | `annual` + `calendar_quarter` rows + the `''` sector aggregate | Fiscal data only changes on earnings |
 | TTM refresh | Weekly — Sunday 06:00 UTC | `ttm` rows + the `''` sector aggregate for the TTM period | price ÷ TTM earnings drifts daily for every company, so the current-snapshot median goes stale as a whole |
 
 Operational invariants:
@@ -1517,7 +1615,8 @@ Operational invariants:
   `calendar_quarter` (migration 184 unapplied), those rows are skipped for the run with an ERROR
   and `calendar_quarter_blocked: true` in the summary, while the annual rows are still written.
 - Both jobs **survive a redeploy inside their window** (2026-09-18). Each phase of the quarterly
-  chain (dossier → IP intel → moat → benchmarks; the competitor-intel phase was retired 2026-10-02)
+  chain (dossier → IP intel → benchmarks → moat; the competitor-intel phase was retired 2026-10-02;
+  medians before moat since 2026-10-21, and the moat phase waits while the medians are unsettled)
   and the weekly TTM run holds
   its own durable, day-keyed claim in `notification_job_state` (migration 147's
   `claim_scheduled_job`, via `main._run_claimed_phase`, with a 3 h stale window that outlasts the
@@ -1586,10 +1685,15 @@ segments. Stored reports keep their fields, and the schema keeps them Optional.
   always name the biggest threat (the highest score over the full list, taken before any slice)
   and name a closest rival only under `direct`.
 
-#### Industry TAM / CAGR — `industry_dossier` (2026-10-01)
+#### Industry TAM / growth — `industry_dossier` (2026-10-01; measured-only 2026-10-22)
 
-The Moat card's market size and 5-year CAGR come from one row per FMP industry in
-`industry_dossier`, written by the quarterly chain's first phase (`recompute_all`). Phase A
+The Moat card's market size and average yearly growth come from one row per FMP industry in
+`industry_dossier`, written by the quarterly chain's first phase (`recompute_all`). The card
+shows the latest PUBLISHED market size at its own year and the growth over its measured window
+("Avg/yr 2017–24"), never a projection (owner decision 2026-10-22, "Measured only"): RKLB's
+card had read "CAGR (5Yr) −0.2%, $246B (2026) → $244B (2031)" — a 2017-peak-to-2024-trough
+Census rate pushed forward twice and relabelled. `future_tam` / `future_year` stay on the wire
+only for iOS builds ≤ 1.1, which still re-anchor to the device year. Phase A
 resolves a US figure through Census AIES (the per-vintage aiesbasic dataset queried with `NAICS2017=`; the older
 time-series AIES dataset went 404 and silently disabled the whole tier until this date),
 then industry-mapped FRED/BEA, sector FRED, all-industry FRED. (A Phase B that wrote
@@ -1604,19 +1708,47 @@ grounding, §2 "No Google Search grounding"; a stored `tam_scope='global'` row r
   instead of an airline's "TAM" being all of US manufacturing GDP (owner decision, 2026-10-01).
   The dossier's concentration still applies; it comes from the industry's constituents.
 - **Lifecycle comes from the growth rate alone** (owner decision 2026-10-09): CAGR > 15% →
-  secular growth, < 0% → declining, else mature. The old "fewer than 5 constituents = emerging"
+  secular growth, ≤ −1%/yr → declining, else mature — the ±1%/yr dead band (owner decision
+  2026-10-22): a flat nominal rate is not a decline (A&D's −0.16%/yr cost every A&D ticker two
+  points on the moat Network Effects input). Applied on read, so stored rows need no recompute. The old "fewer than 5 constituents = emerging"
   rule measured FMP's coverage (and the US-only roster), not maturity, so it is retired in both
   copies (`classify_lifecycle`, `_classify_lifecycle`), a stored row's phase is re-derived from its
   CAGR on read, and a broad dossier contributes no phase at all.
 - **Coverage is one NAICS argument per industry.** 85 of the 153 universe industries (the US-only
   file of 2026-10-08) have an industry-level source: Census AIES revenue for 84 (3- to 6-digit
   NAICS 2017 codes) and the BEA rail series for Railroads, which the Economic Census does not
-  cover. The other 68 show "—":
+  cover. One industry is a `CensusComposite` (owner decision 2026-10-22, "Aerospace + defense
+  mfg"): Aerospace & Defense sums NAICS 3364 + 334511 + 336992 + 332992/3/4 — $342.8B in 2024,
+  +0.9%/yr 2017–24 (3364 alone: $247.0B, −0.2%). All-or-nothing per year (a code missing in the
+  newest vintage steps the whole composite back a year; a missing 2017 code means no growth
+  rate), and a gross shipments sum: components shipped into finished systems count again, so it
+  is a growth proxy, not a net market. A Census HTTP 400 "unknown predicate/variable" (a vintage
+  whose schema changed, e.g. a NAICS2022 switch) is logged at ERROR and read as unpublished, so
+  the probe steps back a year. The other 68 show "—":
   mixed constituents, import-heavy markets that US
   plant shipments undercount, or AIES publishing mining and construction only at 3 digits.
   Every mapped Census code and allow-listed BEA series is pinned to a live-verified figure in
   `tests/fixtures/industry_tam/`, and `test_industry_tam_narrow_sources.py` lists each deliberately
   unmapped industry with its reason.
+- **Shown as measured.** `MarketDynamicsResponse` carries `tam_basis` ('measured' | 'company_quote'),
+  `tam_year`, `tam_target_year`, `cagr_start_year`, `cagr_end_year`, `growth_source_label` and
+  `concentration_basis` (migration 203 stores the window's start year and the basis). A
+  company's earnings-call pair keeps only the years its stored quote states verbatim and gets no
+  "US" prefix (with Phase B retired every dossier is 'us', and a company TAM is usually global).
+- **Concentration is a revenue-share HHI** of the universe constituents (owner decision
+  2026-10-22, "Revenue-share HHI"): revenue = screener cap ÷ `priceToSalesRatioTTM`, captured
+  by the universe build's existing ratios-ttm pass (`app/utils/implied_revenue.py`; no extra FMP
+  call, USD-consistent). On market cap SpaceX's $1.9T made A&D an "oligopoly"; on revenue it is
+  "fragmented" (HHI ≈ 867). Measured only with ≥ 3 positive revenues, ≥ 90% of the listed cap
+  covered and a plausible leader (P/S ≥ 0.05); otherwise NULL in the table and the sentinel
+  "unknown" on the wire (never null: old builds decode it non-optionally and show Fragmented).
+  Never monopoly / duopoly. A universe file without `revenues` (built before 2026-10-22) KEEPS
+  the stored concentration on recompute — never recomputed on market cap — with one ERROR (so does
+  a `revenues` map covering none of its tickers; the universe build refuses to write when fewer
+  than 80% of kept tickers got a revenue). The dossier's measured label applies whichever TAM
+  source won. The report's live peer fallback uses revenue too, but is measured only with ≥ 7
+  firms (below that HHI ≥ 10,000/n ≥ 1,500 for any shares) and carries its own basis,
+  `peer_revenue_share` ("By peer revenue"), never presented as the industry's listed companies.
 - **A grounded global row is never protected** (`tam_scope='global'`, the retired Phase B). The
   read path withdraws its TAM, CAGR and lifecycle (`_withdraw_grounded_tam`, concentration kept)
   so the self-heal serves a live Census/FRED figure instead, and Phase A's zero-guard and grain
@@ -1673,7 +1805,7 @@ whether any of it runs:
 | social snapshot | one per UTC day, hourly retry | — |
 | Home dashboard warmer: pulse, screener universe, scanners, themes, signals, Trillion, each rebuilt before its TTL (§3.4). FMP cost: in the regular session ~6 small sparkline calls a minute plus the universe sweeps (~1 a minute, 2 calls each); outside it a pulse rebuild costs ~0 FMP chart calls (a finished session's bars are memoized), and in a closed window the universe lives 15 min | a tick every `HOME_WARM_TICK_SECONDS` (10 s), all hours; due at 40 s / 45 s (840 s in a closed window: overnight, weekends, holidays) / 900 s / 480 s / 2400 s / 480 s; starts once the boot warm opens the gate | `SCANNER_PREWARM_ENABLED` (on; off = it idles) |
 | news / report / index pre-warmers | 2 h / 1 h / 30 min | `*_PREWARM_ENABLED` (on) |
-| quarterly chain: dossier → competitor → IP → moat → industry benchmarks | first Sunday of Jan/Apr/Jul/Oct, 02:00 UTC, +30 min each | per-phase claim |
+| quarterly chain: dossier → IP → industry benchmarks → moat (competitor retired 2026-10-02; medians before moat since 2026-10-21) | first Sunday of Jan/Apr/Jul/Oct, 02:00 UTC; IP +60, medians +90, moat +120 min | per-phase claim |
 | TTM benchmarks | Sunday 06:00 UTC | claim |
 | volatility precompute | daily 08:00 UTC | — |
 | whale hydration | politicians every 6 h; full sweep daily ≥ 02:00 UTC (3 h claim) | claim |
@@ -1713,7 +1845,14 @@ off the event loop (`asyncio.to_thread`). The sweeps also retry an FMP 429 with 
 wait out FMP's per-minute window together (one shared 60 s window, at most 20 minutes per run;
 `call_with_rate_limit_retry`), with a breaker only after three windows in a row and 20 exhausted
 calls with no success, count fetch failures per
-industry into the run summary, and download the benchmark universe file from the
+industry into the run summary (the moat recompute too since 2026-10-21: every peer request and the
+dossier sample's profile go through the same helper inside one `rate_limit_run("moat")`; the dossier
+sample falls back to the next of the industry's 5 largest companies; a peer whose profile failed, or
+whose statement call failed TRANSIENTLY, is left out rather than scored on half its data, and is
+counted — `fetch_failures_by_kind`, `companies_fetch_lost`, `industries_fetch_lost`,
+`industries_tam_unavailable`, `rate_limit_windows` — with a WARNING naming the industries; the
+transcript read is not wrapped, because it is refused before any HTTP call and its "success" would
+close the shared window), and download the benchmark universe file from the
 `universe-data` bucket at the start of every run (an upload needs no redeploy; the operator
 script can name a local file instead, and an unreadable named file stops the run; any writing
 run from the script — a full sweep or one `--sector` — takes the same claim as the scheduled job
@@ -1724,7 +1863,10 @@ lenders). Readers go further, permanently: a financial company's current ratio, 
 interest coverage are never compared with the Financial Services SECTOR median at all (what remains
 of it is shell companies, exchanges and developers) — only with a mature industry median, else
 judged on absolute bands (`health_check_service._bank_pooled_sector_cell`, also applied to the
-report drill-down lines). One industry is MIXED: `Financial - Credit Services` holds card networks
+report drill-down lines). Since 2026-10-20 the lookup itself goes further for every metric: an FS
+company with an industry gets its own industry's median from 10 companies or none, never the FS
+sector's (see the dimensions bullet above); `_bank_pooled_sector_cell` stays as the backstop for a
+direct sector read. One industry is MIXED: `Financial - Credit Services` holds card networks
 and fee businesses beside lenders, so every member is gated as a lender except a CURATED non-lender
 (`financials_metric_gate.NON_LENDER_MEMBERS`: the payment networks V, MA, PYPL, WU, GPN and the fee
 businesses TREE, PMTS — owner decisions 2026-10-08/09; the list is the only way in, and a member is
@@ -1754,7 +1896,8 @@ name), and refuses a floor change, a large shrink or a vanished industry without
 The industry universe file (moat, dossier and competitor rosters) is the same builder at floor 0
 (`scripts/discover_industries.py`).
 Moat industries with too few scorable peers never write and are not failures, so a
-same-day re-run that attempts only those settles. Fresh-skips, the industries-only validation
+same-day re-run that attempts only those settles — unless the peers left out by a transient FMP
+failure would have brought them to the floor: that industry FAILED (`peers lost to FMP failures`). Fresh-skips, the industries-only validation
 path and `dry_run` still return. The owner-facing
 view of all of this — what runs itself and what must be done by hand — is
 `documents/OWNER_TASKS.md`.
@@ -2155,6 +2298,28 @@ expression is written out, and must stay that way.)*
 > `ensure_credit_period` now writes a `monthly_expired` row (`-(total - used)`, granted only,
 > `ref_id` NULL so no refund can ever pair with it) before the reset row; the history shows it as
 > "Unused monthly credits expired". Migration 196 builds on 194's body and keeps that row.
+
+> **Migration 199 adds a third function that writes the purchased pool** (2026-10-17). Until then
+> `add_purchased_credits` (a verified consumable purchase) raised `purchased_total` and
+> `revoke_purchased_credits` (an Apple refund) lowered it. `grant_feedback_reward` raises it for a
+> Help Us Improve report the owner has confirmed by hand ("Report an issue · earn free credits").
+> - **Manual only.** Its one caller is `scripts/grant_feedback_reward.py`, and only with `--apply`
+>   (the default is a dry run that makes no call). Nothing in `app/` or the iOS app calls it, and
+>   EXECUTE is granted to `service_role` alone. The app promises credits only for an issue the owner
+>   has confirmed, so a grant that fired on its own would make that copy false.
+> - **Idempotent per `(user_id, ref_id)`**, where `ref_id` is the report code from the email. The
+>   replay lookup runs under the balance row's `FOR UPDATE` lock (taken by `ensure_credit_period`),
+>   so two concurrent grants of one report serialise. A partial unique index on
+>   `credit_transactions (user_id, ref_id) WHERE reason = 'feedback_reward'` is the second line of
+>   defence. A repeat returns `replay` and changes nothing.
+> - **One `feedback_reward` ledger row** (`granted_delta` 0, `purchased_delta` N), which Credit
+>   History shows as "Issue report reward". **No `credit_purchases` row**: a reward is not revenue.
+> - The purchased pool, not the granted one, because `ensure_credit_period` overwrites the granted
+>   pool at every reset. A reward therefore never expires.
+>
+> `scripts/seed_testflight_testers.py` also writes `purchased_total`, by an unlocked
+> read-then-overwrite, so a grant that lands between its read and its write is lost. Never run the
+> two at the same time. Source: `database/migrations/199_feedback_reward_credits.sql`.
 
 ### 9b.2 Spend order and refund order are not inverses
 
@@ -4471,6 +4636,7 @@ What follows is the set with no other home.
 | Gap | Real state | Why it is this way |
 |---|---|---|
 | No backend repository / data-access layer | Services call `supabase.table(...)` directly | Deliberate — Appendix B, Feb 2026. Still holds; the cost is that service math is harder to unit-test without a live client. |
+| The full daily price history behind chart scroll-back is memory-only | `price_history_service` keeps one settled history per symbol in a byte-bounded in-process LRU with `_inflight` dedup; a stock seeds from the overview bundle's already-fetched history when it is in memory, else pages FMP (1-3 calls per symbol per close cycle). ETF / index / commodity reuse their services' own histories. No Supabase tier | The same call the ETF and index services made (§7.1): reading a multi-MB raw history back from Supabase is slower than re-fetching it from FMP, and the overview bundle already persists the newest 5,000 stock rows. The cost is one paged FMP fetch per symbol after a deploy. |
 | No Redis | Tier 1 in-process dict + Tier 2 Supabase `*_cache` (§7.1) | Sufficient today. **The condition that changes it is horizontal scale:** the Tier-1 dict is per-process, so a second Railway instance stops sharing it and the cache-hit rate halves per instance added. |
 | Request correlation is partial | The middleware stack is exactly **five** entries — CORS, GZip, `_security_headers`, `cap_json_body`, `add_process_time`. (`_security_headers` was added 2026-09-12: the privacy, terms and support pages and the AASA file are real browser-reachable responses on this host and carried no `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` or HSTS. The same block documents why `allow_credentials` is now dropped whenever `ALLOWED_ORIGINS` is its `["*"]` default — Starlette answers that spec-illegal pair by echoing the caller's Origin back as trusted, verified live against production.) The last sets `request.state.request_id` and emits `X-Request-ID`, but the id is a millisecond timestamp (collides under concurrency), is read nowhere else, is absent from log records, and is not forwarded upstream | Enough to correlate a client report with one response; not enough to trace a request through the logs. Fixing it is a small, well-bounded change. |
 | Report status is polled while chat streams | SSE ships for chat; report status is a 3s poll with a 300s client deadline | Not an oversight. Per §5.4 the client deadline is deliberately *not* a failure — the server keeps generating and a list poll reconciles — which a stream would complicate rather than simplify. |
@@ -4489,6 +4655,7 @@ What follows is the set with no other home.
 | GoTrue verbs ran ON the single worker's loop by design | Until 2026-09-17 every sign-in / sign-up / OTP / admin password write in `app/api/v1/endpoints/auth.py` was a synchronous httpx round trip on the event loop (`_BLOCKING_BY_DESIGN` in `test_crud_paths_off_the_event_loop.py`), because supabase-py's auth-state listener rewrites the process-wide client's shared `Authorization` header on every sign-in and the loop's serialisation was what kept two sign-ins from interleaving. A handful of addresses sending wrong passwords (a server-side bcrypt each, ~0.4–0.9 s) stalled every chat stream, report poll and credit read in the process. `database.run_gotrue` now keeps the serialisation (one `asyncio.Lock` per loop, service_role re-asserted INSIDE it right before the verb) and runs the verb in a worker thread, so a login flood queues LOGINS, not the app; sign-in secrets and tokens are length-bounded at the schema (`SIGN_IN_SECRET_MAX_LENGTH`, `TOKEN_MAX_LENGTH`) so a multi-megabyte "password" is a 422 with no upstream call. | The per-request GoTrue client the SDK's constructor allows would remove the lock too; deferred because the memoized singleton is what `test_auth_client_is_memoized` pins against per-request sockets. `users.py`'s `auth.admin.delete_user` is the one verb still on the loop. |
 | Sentry received the FMP key in every event's breadcrumbs | The httpx integration records `http.query` (no leading `?`) on every outbound call, and `redact_secrets` anchored only on `[?&]`; on an FMP `HTTPStatusError` the frame locals additionally carried `e=…apikey=<key>` and `params={'apikey': …}`. `scrub_sentry_event` now drops `http.query`/`http.fragment` from breadcrumb data, walks every breadcrumb `data`, `extra` and stack-frame `vars` tree (key-aware: a credential-named key is blanked, every string is regex-redacted), and `sentry_sdk.init` carries `EventScrubber(recursive=True)` as the client-side belt. | Value-based regexes are the robust layer; the key denylist is defence in depth. `include_local_variables` stays on — the locals are what make a report diagnosable from Sentry alone. |
 | The marketing engine publishes text to X and Bluesky only | Phases 1-4 are built (§12.2-§12.9), and Phase 5's first stage (§12.10): the publisher sends approved X and Bluesky text posts, reconciles unknown outcomes, and deletes on a confirmed Retract. TikTok, YouTube, Instagram, Facebook, LinkedIn and Threads have adapters (Upload-Post, Stage 2; its credentials were set on 2026-10-01) but none is listed in `MARKETING_PUBLISH_PLATFORMS`, so their posts reach Telegram as read-only previews and expire until the owner's Free-tier checks pass. The judge misses its calibration gate (present-tense restatements of a past deal price), so `MARKETING_AUTO_PUBLISH` stays off, and the publisher refuses an auto-approved row: a human approves every post. The server cannot read a video's pixels: it checks what the worker declares it drew (§12.8), so every media post is born `pending_review`. X takes no idempotency key: an unknown X outcome is never retried automatically, it goes to the owner | Deliberate sequencing (Phases 5-8 of the approved plan). Every switch defaults OFF / dry-run, and no platform is listed by default. Migrations 170, 173 and 176 are applied; Phase 5 needs none. The worker's first production tick ran on 2026-10-01 (46 s; production cgroup peak 2,587 MB of the 3,814 MiB limit, against 1,563 MB on 09-29 — the cgroup figure includes page cache; the run-health alert reports any stage peak above 3,200 MB, §12.11). |
+| Old app builds still project the Moat card's market size | iOS 1.0 / 1.01 / 1.1 re-anchor `current_tam` / `future_tam` to the device year by `cagr_5yr` (and read the year from `Calendar.current`, so a Buddhist-calendar phone shows "(2569)"); persisted `research_reports`, stored PDFs and chat transcripts keep the pre-2026-10-22 prose (RKLB: "fragmented, declining industry, −0.2% CAGR") | The measured-only contract (§7.3) is additive Optional fields; no report route reads the app version, and a non-numeric `current_year` hack was rejected. Builds from 2026-10-22 show the measured figure; `CACHE_SCHEMA_FLOOR` rebuilds only the shared caches. |
 
 Note on what is deliberately **not** a gap: there is no Core Data / SwiftData / local database, and
 none is planned (§7.1, §9.2). Earlier revisions of this document listed it as a pending task, which
@@ -6062,7 +6229,7 @@ backend/
 │   │       ├── api.py            # router registration
 │   │       └── endpoints/        # 24 modules; HTTP surface only (marketing_internal.py is worker-facing, §12)
 │   ├── core/security.py          # (config and dependencies are NOT here — see below)
-│   ├── integrations/             # 17 thin HTTP clients + fmp_entitlements (data only)
+│   ├── integrations/             # 18 thin HTTP clients + fmp_entitlements (data only)
 │   ├── models/                   # EMPTY. Vestigial. There is no ORM — CLAUDE.md invariant #5
 │   ├── schemas/                  # Pydantic v2 request/response models
 │   ├── services/
@@ -6116,6 +6283,7 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | Jun 2026 | Separate weekly TTM job vs quarterly fiscal recompute; period-type-scoped freshness | TTM drifts daily, fiscal only on earnings; non-overlapping windows avoid FMP contention | One combined recompute job |
 | Jul 2026 | `_spawn` supervision + a reconciliation sweeper, rather than a task queue | Makes "tasks don't survive restarts" survivable: a strong handle is retained, `add_done_callback` logs a dying loop, and `research_reconciliation_service` re-refunds work a dead worker abandoned | Celery, RQ, Dramatiq (all still rejected) |
 | Jul 2026 | Flat string error codes (`INSUFFICIENT_CREDITS`), not numbered (`BIZ_2001`) | Greppable across backend + iOS; the code IS the name, so a mismatch is visible at the call site | Numbered enum per the original §6.2 sketch |
+| Oct 2026 | Buybacks checked against SEC XBRL, remove-only (`_buyback_verification`, `sec_edgar`) | FMP filed employee tax withholding / preferred redemptions as `commonStockRepurchased` in 11 of 120 surveyed quarters (INTC charted $617M of "buybacks" with none made); where a filing has a non-zero repurchase line FMP matched it 67 of 67, so only an EXPLAINED excess is removed and a figure is never raised | FMP minus SEC withholding (wrong for the 67 correct rows); FMP's as-reported statements (not on the Order Form, and INTC's rows lack the tags); a relabel only; a per-ticker override table |
 | Jul 2026 | `key_prefix` namespacing on the agent dedup key | The deep and direct report pipelines produce DIFFERENT reports for the same `(ticker, persona)`; one namespace would let a deep caller attach to a direct leader and be charged deep price for a shallow report | One shared dedup namespace |
 | Jul 2026 | Repository pattern landed as ONE repository, no protocol layer, no DI | `StockRepository` is the only one that caches; four others are thin. The Jan 2026 decision is honoured in spirit, not in the shape that entry implies | Full protocol + injection per the original sketch |
 | Aug 2026 | Two credit pools — granted (expires) + purchased (never expires) | App Store Guideline 3.1.1 forbids purchased credits expiring; three existing RPCs each destroyed or mishandled a cash-bought balance | One pool with an expiry flag (violates 3.1.1) |
@@ -6174,6 +6342,7 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | 2026-10-20 | IAP audit, phase 1 review round 2 (§9b.12, §9b.3): D2 is decided from the period's shape — the same lineage's period in force ends after the reversed one but more than an hour before that period's own renewal would (its end + one calendar month), any tier — and the "tier NOT reinstated" ERROR fires on the stale refusal too; F12's WARNING needs the in-force period to end ≥ 48 h before the reversed one (a ≥ 24 h reinstatement window) and says what happens without a credit read; a lower-tier renewal is "superseded" when Apple charged it (`purchaseDate`) more than 48 h before the stored end, the end-distance rule only without one (F04 refusal, Rule D, grace bypass), except (Rule D only) a `transactionReason` PURCHASE charged at or after the stored transaction's recorded refund; the expiry re-check pages newest first through every recent expiry (`fetch_all_rows` with a unique `then_by` tiebreaker, `id`) and reads its clock per account; the D6 ERROR says what to do for the lineage in force (same lineage: check for a purchase after the refund; another lineage: 198 may still reinstate it by itself until this period's end and never after, so no hand correction before then, and the period's own credit-period row then says what is owed); F01's ERROR names the plan and its period end, and its runbook bounds any comp floor by that instant | The adversarial review of the phase-1 diff (workflow wf_c51a0e33-7a7: 15 confirmed, 3 contested, 2 refuted; every one re-checked on `main` 658de4d8), then a second review of these fixes (workflow wf_bfa6b55e-9b5), which found that the first D2 rule measured delivery order, and a third (wf_4b02510c-f29: 10 confirmed, all low — the PURCHASE case, the page-cap order, the D6 and comp-floor runbook timing), and a fourth of those fixes (wf_ea57f916-918: 2 confirmed, 1 contested, all low — every PURCHASE exempted was too broad, the "198 cannot reinstate" branch was false after a refund of the other lineage), and a fifth (wf_8e17e32a-210: 2 confirmed, 1 contested, all low — the round-4 line promised a reinstatement that a same-plan renewal of the other lineage prevents, and its mark-it-reinstated recipe lost the credits), and a sixth (wf_4c69d7f5-23e: 3 confirmed, all low — `plan_reinstated` is lineage-scoped, a hand grant's pool, the column parser unpinned). Owner, 2026-10-20: "Yes, any tier" for D2; work in a worktree off `main`. `purchaseDate` (rejected for storing on 2026-10-14 as undocumented for an ordinary renewal) is only compared here, never stored, against a 48 h lead that holds on either reading — the charge (≤ 24 h before the period starts) or the period start | D2 by `applied_at` > `revoked_at` (delivery order: a resubscription relayed before the refund's retry is granted in the clawback's own transaction and read as D6, and the lineage's renewal delivered after the clawback read as D2); D2 by `period_start < end − 3 d` (198's `end − 1 month` drifts ~3 days at month ends; it missed a resubscription in the last 3 days); `last_event_at` as the discriminator (delivery order too); paging the re-check on `updated_at` alone (one sweep pass stamps the same instant on every row it expires, so OFFSET pages skip or repeat rows) or on the random uuid `id` alone (a hit cap left the same accounts out on every pass, a just-failed reconcile among them); a join on `users.tier` for the re-check (paging is simpler to fake and reason about); exempting every `transactionReason` PURCHASE from the superseded test (the pre-upgrade lower-tier purchase is one; round 4), or exempting it in the grace bypass at all; telling the owner to wait, or that 198 "cannot" reinstate, by the other lineage's end alone (a refund of it reinstates too); promising that 198 "still reinstates" it (a same-plan renewal of the other lineage, this lineage's early renewal or a comp floor prevent it); an early hand grant plus marking the period reinstated by hand (the grant lands in the other lineage's pool, which its refund or roll wipes, while the mark stops 198's own reinstatement); deciding what is owed by a `plan_reinstated` row (its `ref_id` names the lineage, not the period); prescribing the purchased pool for a hand grant (an owner's call: that pool carries App Store 3.1.1 rules); offerPeriod arithmetic for F04 (absent before App Store Server API 1.15) |
 | 2026-10-21 | IAP audit, phase 2 (§9b.2, §9b.3, §9b.6, §9b.12): migration 200 — (F10) `refund_credits` rolls the period first, so a boundary-straddling refund always takes the paged `capped_to_zero` path; (F11) the in-force lineage's own later period is a new key whatever its row's status, unless the register holds a refund of it; (F15) a clawback records its cover and ledger mark, `refund_credits` absorbs a covered charge (`covered_by_clawback`, `covered`), and a reinstatement deducts the window's granted-pool spend; 142/198 refuse after 200. Migration 201 — (F17) ownerless register rows of a deleted account's lineages are purged by a BEFORE DELETE trigger on public.users, and an unbound refund is recorded under the account its token names. Code — (F04b) a recorded upgrade's refund heals a row the superseded renewal overwrote, decided from the row's own `applied_at`; (F06) EXPIRED is refused as an older period when the row holds another, later transaction; (F07) an early grace notice holds later same-period deliveries; (F14) an explicit `active` about an ended period stores no ordering key; (F13) a refused webhook delivery answers `unapplied:{rule}:{type}`; (F16) `scripts/set_comp_tier.py` reconciles every change; (F22) the pack-reversal and 503 ERRORs carry the ids and the amount owed; (F24) the dead `IAP_WEBHOOK_SHARED_SECRET` removed; (F18-F20) one shared SQL reader for the source-scan guards; (F09, F21, F23) docs corrected | The 2026-10-17 composition audit's remaining findings (`.claude/session-state/9edb4eca-…-iap-audit.md`), each repro turned into a test that fails before its fix; the three SQL repros replayed on a local Postgres 17 with 200 loaded, plus 36 asserting edge checks and the re-run guards. Owner, 2026-10-21: "phase 2"; F06 "Refuse it"; F10 "Documented 'owed' path"; F17 "Purge them at deletion"; F15's scope and the old-migration guards as recommended (the full SQL fix; refuse re-runs after 200) | A timer, pg_cron or sweep rolling periods at renewal instants (§7.4 rules out background jobs); an after-loop start block for F11 (breaks "every key decision inside the loop"); granting every skipped period backwards (only the row's current key is visible); three migrations 200/201/202 for F10/F11/F15 (each re-copying a ~430-line body; F10 alone makes F15's false-OWED shape deterministic); F10 option B (relabelling the refund without rolling); F15 (c) only (leaves the double payback); a register column for F04b (NULL on every row it should heal; its only backfill, `last_event_at`, reopens K19); F06 as an end-only rule (breaks legacy fixtures and legacy mode); storing the client JWS's `signedDate` as the ordering key (Apple's earlier-signed notifications would read as stale); writing F07's delivery while keeping `grace_period` (stores an ordering key the hold never stores); F14 written as `expired` (lapses the held balance at once); F16 by lowering `tier` inside `plan_change` (it cannot see subscriptions and would demote a payer); F17 by keeping the rows and changing the privacy policy (reverses D3), or by a purge in `users.py` (misses Studio/scripts and breaks the deletion-scope tests); F09 by making the revoked-in-overlap exemption lineage-only (reopens K67's refund half in legacy mode, unreachable in production since 2026-10-16) |
 | 2026-10-21 | IAP audit phase 2, final review (§9b.12, OWNER_TASKS §2.4): every D6 owner text hands over the register half of "still owed?" (`iap_service.py::_d6_still_owed`: owed only while the period's `revoked_at` is set AND `subscription_transactions` holds no unreversed refund of that original transaction and period end, REINSTATE's own condition); REFUND LEAK 3b(a) lists each pack refunded after the charge with what it reclaimed and leaves the amount to Claude; the F04b one-off check sends every row whose higher plan was refunded to Claude ("CHECK": the rows cannot tell a renewal from a purchase) and calls a row "ok" only for a downgrade renewal or a lower plan ending more than 5 days after the higher one; a D6 hand grant is keyed (`d6:<original>:<period_end>`) and the owed test checks it; a step-4 correction rolls the period first; a step-4 correction is a refund row of its charge (refund-kind reason, `reverses_id` = the charge), never a system reason; migration 200's comments say "once per clawback" and the adjusted amount; the F06 known gap restated; a standing owner rule to tell Claude before creating any subscription offer; then (last verification pass, 2026-10-22) step 4 starts with `refund_credits` itself (it absorbs a post-200 clawback's cover), the D6 grant waits while another refunded period of the account still runs with nothing in force (a `plan_reinstated` row ends that period's reinstatement window), a could-not-tell line whose account has no period in force is owed after the period's end only if another paid period was in force at the line's time, and the `IAP webhook applied` line names its own transaction (`transaction=`) | A read-only review of the last stretch, each finding verified twice and PG-proven against migration 200: a period reinstated then refunded AGAIN re-stamps `revoked_at`, so the row alone would have granted a full allocation for a standing refund; a pack refund writes off nothing when the user's other pack credits cover the spend, so "any pack refund after the charge" withheld credits still owed; a superseded renewal that LANDED after the refund read as a purchase made after it (and, once that was fixed, one following a refund before the old period's end still did, while a genuine month-end purchase read as the leak); one reversal logs its D6 line once per delivery and a hand grant changes neither the row nor the register (two grants for one period); a correction written into an un-rolled month expired at the next roll; a correction under `grant` / `tester_grant` expires at a reinstatement (1170, not 1195) | An exact 3b(a) formula in the runbook (several packs and later spends make the owner's arithmetic error-prone; Claude computes it); registering a new `manual_correction` reason (a grant kind would be forced onto the system list by `test_credit_paid_periods.py`, which would lose it); deciding the F04b verdict from delivery order alone (it cannot tell a late-landing renewal from a purchase), or from the row's computed period start (a refund before the old period's end and month-end clamping defeat it); a new `manual_grant` reason for the D6 grant (a grant kind must join the system list, and the history screen already labels `plan_reinstated` "Plan credits restored") |
+| 2026-10-22 | The Moat card's market row is MEASURED, not projected (§7.3): the published value at its own year, growth labelled with its real window, a source caption, no future value ("Measured only"); a rate within ±1%/yr of zero is mature ("±1%/yr dead band"); concentration is a revenue-share HHI ("Revenue-share HHI"); Aerospace & Defense = NAICS 3364 + 334511 + 336992 + 332992/3/4 ("Aerospace + defense mfg") — migration 203 | RKLB read "CAGR (5Yr) −0.2%, $246B (2026) → $244B (2031)" for a market growing again: a 2017-peak → 2024-strike Census rate over 7 years, projected forward by the backend and again by iOS; "declining" cut every A&D ticker's moat Network Effects and was written into the bear case; market-cap HHI was about to flip A&D to "oligopoly" on SpaceX's cap | A longer 2012 baseline (its sign depends on the start year); an M3-extended 2025 estimate (mixed methods, ~15 codes); hiding A&D until a better measure; keeping market-cap HHI; keeping NAICS 3364 alone |
 
 ---
 

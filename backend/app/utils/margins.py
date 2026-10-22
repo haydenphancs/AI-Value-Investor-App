@@ -15,7 +15,27 @@ and, in addition, requires the TTM revenue per share to be present.
 """
 
 import math
-from typing import Optional
+from typing import Any, Optional
+
+#: The `sector_benchmarks` metrics that are a margin of revenue. A STORED median of exactly
+#: 0 for one of them is the no-revenue answer above counted as a figure: the fiscal rows the
+#: 2026-10-04 run wrote (before this rule reached the producers) held 1,113 of them, drawn as
+#: a 0.0% peer line on Profit Power, the report drill-down and Cay AI's grounding (Healthcare
+#: sector net margin 0.0% for every year 2016-2025, n ~440). The lookup never serves one
+#: (`sector_benchmark_lookup.servable_benchmark_rows`, 2026-10-21).
+MARGIN_METRICS = frozenset({"gross_margin", "operating_margin", "net_margin", "fcf_margin"})
+
+
+def is_zero_median(value: Any) -> bool:
+    """True when a stored median reads as exactly 0 (``0``, ``0.0``, ``-0.0``,
+    ``"0.000000"``). Anything that is not a number is False: unreadable values are another
+    gate's job, and guessing would hide real rows."""
+    if isinstance(value, bool):
+        return False
+    try:
+        return float(value) == 0.0
+    except (TypeError, ValueError):
+        return False
 
 
 def revenue_backed_margin(
@@ -40,6 +60,22 @@ def revenue_backed_margin(
     ):
         return None
     return margin
+
+
+def free_cash_flow_reading(value: Optional[float]) -> Optional[float]:
+    """Free cash flow (a total or per share) that can be a real figure, else None.
+
+    FMP fills a cash-flow statement it does not have with zeros: HSBC, a half-year filer,
+    reads freeCashFlow = operatingCashFlow = capitalExpenditure = 0 for every quarter, and
+    JPM's newest, not-yet-filed quarter read the same (live 2026-10-21). Counted as a figure,
+    that 0 drew a flat 0.0% FCF-margin line for the company and set 77 calendar-quarter
+    FCF-margin MEDIANS to exactly 0 on the 2026-10-21 recompute (Banks - Diversified alone
+    23). A true free cash flow of exactly 0 to the last unit is vanishingly rare, so an exact
+    0 is no reading — the same rule as `revenue_backed_margin`. A non-finite value is no
+    reading either; a negative one is real (kept)."""
+    if value is None or not math.isfinite(value) or value == 0:
+        return None
+    return value
 
 
 def revenue_scaled_ratio(value: Optional[float]) -> Optional[float]:

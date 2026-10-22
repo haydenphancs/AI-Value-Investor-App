@@ -142,7 +142,8 @@ async def test_intraday_ranges_are_never_aggregated(monkeypatch, range_code, int
 
     monkeypatch.setattr(cs, "get_crypto_service", lambda: _Svc())
     out = await ch._fetch_crypto_chart_data("BTCUSD", range_code, interval)
-    assert seen["intraday"] is True and seen["days"] == {"1D": 1, "1W": 7}[range_code]
+    # The visible window (`_INTRADAY_RANGES`) plus its warm-up (`_INTRADAY_WARMUP_DAYS`).
+    assert seen["intraday"] is True and seen["days"] == {"1D": 1, "1W": 16}[range_code]
     assert [r["close"] for r in out] == [r["close"] for r in bars], "intraday bars were resampled"
 
 

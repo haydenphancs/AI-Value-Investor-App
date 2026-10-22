@@ -208,6 +208,7 @@ from app.integrations.fmp import (  # noqa: E402
     FMPRateLimitException,
 )
 from app.log_redaction import SecretRedactingFilter, redact_secrets  # noqa: E402
+from app.utils.implied_revenue import implied_ttm_revenue_usd  # noqa: E402
 from app.schemas.stock import StockSearchResult  # noqa: E402
 # The ticker-search listing grammar, REUSED rather than re-derived: it was built from a live
 # sweep of FMP's own rows for exactly these families (dash and NASDAQ 5th-letter preferreds,
@@ -1221,6 +1222,10 @@ class _FingerprintScan(NamedTuple):
     not_called: List[str]                  # left uncalled once the failure share was exceeded
     planned: int                           # the symbols the scan was asked for
     seconds: float
+    # symbol → (priceToSalesRatioTTM, revenuePerShareTTM) for every answered row, fingerprinted
+    # or not — the revenue the industry dossier's revenue-share concentration reads
+    # (`_aggregate`). Last, with a default: tests build the tuple positionally.
+    sales: Optional[Dict[str, Tuple[Optional[float], Optional[float]]]] = None
 
 
 def _twin_failures_fatal(failed: int, planned: int) -> bool:
@@ -1272,6 +1277,7 @@ async def _fetch_statement_fingerprints(
     uninformative: List[str] = []
     failed: Dict[str, str] = {}
     not_called: List[str] = []
+    sales: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
     started = clock()
 
     def _fail(sym: str, reason: str, exc: Optional[BaseException] = None) -> None:
@@ -1305,6 +1311,9 @@ async def _fetch_statement_fingerprints(
             _fail(sym, f"UnusableAnswerError: ratios-ttm row is {type(answer[0]).__name__}, "
                        f"expected an object")
             return
+        # The same answer carries what revenue-share concentration needs — no extra call.
+        sales[sym] = (_twin_slot(answer[0].get("priceToSalesRatioTTM")),
+                      _twin_slot(answer[0].get("revenuePerShareTTM")))
         fp = _statement_fingerprint(answer[0])
         if fp is None:
             uninformative.append(sym)
@@ -1314,7 +1323,7 @@ async def _fetch_statement_fingerprints(
     await asyncio.gather(*[_one(s) for s in ordered])
     return _FingerprintScan(fingerprints, sorted(no_statements), sorted(uninformative),
                             dict(sorted(failed.items())), sorted(not_called), len(ordered),
-                            max(0.0, clock() - started))
+                            max(0.0, clock() - started), dict(sorted(sales.items())))
 
 
 def _log_fingerprint_scan(scan: _FingerprintScan) -> None:
@@ -1431,8 +1440,20 @@ def _log_statement_twins(outcome: _TwinOutcome) -> None:
         )
 
 
-def _aggregate(by_industry: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-    """Resolve (industry → screener rows) → {industry, sector(modal), tickers, market_caps}."""
+def _aggregate(
+    by_industry: Dict[str, List[Dict[str, Any]]],
+    sales: Optional[Dict[str, Tuple[Optional[float], Optional[float]]]] = None,
+) -> List[Dict[str, Any]]:
+    """Resolve (industry → screener rows) → {industry, sector(modal), tickers, market_caps}
+    plus, when the statement-twin scan ran (`sales` given), `revenues`: TTM USD revenue =
+    cap ÷ P/S for every kept ticker whose ratios gave a usable answer (0.0 for a company FMP
+    shows with no revenue; a ticker without a usable answer is left out, never 0). Always a
+    dict when the scan ran, possibly {}; no key at all without the scan (--skip-twin-scan,
+    the pre-scan guard pass)."""
+    norm_sales = (
+        {k.strip().upper(): v for k, v in sales.items() if isinstance(k, str)}
+        if sales is not None else None
+    )
     out: List[Dict[str, Any]] = []
     for industry, rows in by_industry.items():
         if not rows:
@@ -1454,14 +1475,77 @@ def _aggregate(by_industry: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, A
             max(sector_counts.items(), key=lambda kv: kv[1])[0]
             if sector_counts else "Unknown"
         )
-        out.append({
+        entry: Dict[str, Any] = {
             "industry": industry,
             "sector": sector,
             "tickers": sorted(caps.keys()),
             "market_caps": caps,
-        })
+        }
+        if norm_sales is not None:
+            revenues: Dict[str, float] = {}
+            for sym, cap in caps.items():
+                pair = norm_sales.get(sym)
+                if pair is None:
+                    continue
+                rev = implied_ttm_revenue_usd(cap, pair[0], pair[1])
+                if rev is not None:
+                    revenues[sym] = rev
+            entry["revenues"] = revenues
+        out.append(entry)
     out.sort(key=lambda d: (d["sector"], d["industry"]))
     return out
+
+
+# A healthy build has a usable revenue (zeros included) for nearly every kept ticker
+# (2026-10-22 A&D: 91 of 93). Under this share FMP renamed or emptied
+# `priceToSalesRatioTTM` — the fingerprint sanity check would not notice.
+_REVENUE_MIN_COVERED_SHARE = 0.8
+
+
+def _revenue_coverage_problem(aggregated: List[Dict[str, Any]]) -> Optional[str]:
+    """Why the captured revenues prove nothing, or None when they are sane. Judged only on a
+    build of at least `_TWIN_SANITY_MIN_ROWS` kept tickers (a test or one-industry run has
+    too few to judge)."""
+    kept = sum(len(e.get("market_caps") or {}) for e in aggregated if isinstance(e, dict))
+    covered = sum(len(e.get("revenues") or {}) for e in aggregated if isinstance(e, dict))
+    if kept < _TWIN_SANITY_MIN_ROWS:
+        return None
+    if covered < kept * _REVENUE_MIN_COVERED_SHARE:
+        return (f"only {covered} of {kept} kept tickers got a usable revenue from "
+                f"priceToSalesRatioTTM (under {_REVENUE_MIN_COVERED_SHARE:.0%}) — FMP renamed "
+                f"or emptied the field?")
+    return None
+
+
+def _log_revenue_leaders(
+    aggregated: List[Dict[str, Any]],
+    sales: Optional[Dict[str, Tuple[Optional[float], Optional[float]]]],
+) -> None:
+    """One INFO per industry naming its top-3 revenue holders with their P/S, so a human
+    reads the concentration inputs before uploading; ONE WARNING naming (up to 20) kept
+    tickers whose ratios answered but gave no usable revenue."""
+    if sales is None:
+        return
+    unusable: List[str] = []
+    for entry in aggregated:
+        revenues = entry.get("revenues")
+        if not isinstance(revenues, dict):
+            continue
+        caps = entry.get("market_caps") or {}
+        top = sorted(((r, s) for s, r in revenues.items() if r > 0), reverse=True)[:3]
+        if top:
+            logger.info(
+                "benchmark universe: revenue leaders %-40s %s", entry.get("industry"),
+                ", ".join(f"{s} ${r / 1e9:.1f}B (P/S {caps.get(s, 0) / r:.2f})" for r, s in top),
+            )
+        answered = {k.strip().upper() for k in sales if isinstance(k, str)}
+        unusable.extend(s for s in caps if s in answered and s not in revenues)
+    if unusable:
+        logger.warning(
+            "benchmark universe: %d kept ticker(s) answered ratios-ttm without a usable "
+            "revenue (P/S missing, negative or inconsistent) — left out of revenue-share "
+            "concentration: %s", len(unusable), _named(sorted(unusable)[:20]),
+        )
 
 
 def _ticker_count(industries: List[Any]) -> int:
@@ -1974,6 +2058,7 @@ async def main(
         # Filtered only now that every industry is in: the twin rules read the whole market.
         filtered = _filter_market(raw_by_industry, floor)
         twin_counts: Optional[Tuple[int, int]] = None
+        sales: Optional[Dict[str, Tuple[Optional[float], Optional[float]]]] = None
         # The twin pass only REMOVES rows, so a shrink or missing-industry refusal is already
         # certain before it: refuse now, before ~3,000 ratios-ttm calls (the guards run again,
         # logged, on the final rows below).
@@ -2025,6 +2110,7 @@ async def main(
                 )
                 return EXIT_BUILD_FAILED
             twin_counts = (len(scan.fingerprints), scan.planned)
+            sales = scan.sales if scan.sales is not None else {}
             if scan.failed:
                 logger.warning(
                     "benchmark universe: %d of %d ratios-ttm call(s) failed (within the %d%% "
@@ -2044,7 +2130,16 @@ async def main(
         _log_suspect_rows(by_industry)
         _log_owner_call_keeps(by_industry)
         _log_unreviewed_mixed_members(by_industry)
-        aggregated = _aggregate(by_industry)
+        aggregated = _aggregate(by_industry, sales)
+        _log_revenue_leaders(aggregated, sales)
+        problem = _revenue_coverage_problem(aggregated) if sales is not None else None
+        if problem is not None:
+            logger.error(
+                "benchmark universe: revenue capture proved nothing — %s. Nothing written: an "
+                "upload would make the next industry_dossier recompute read every industry's "
+                "concentration as unmeasured. Re-run once ratios-ttm answers normally.", problem,
+            )
+            return EXIT_BUILD_FAILED
         total = _ticker_count(aggregated)
         logger.info("Industries with constituents: %d  Total tickers: %d", len(aggregated), total)
         if not aggregated:
@@ -2082,6 +2177,8 @@ async def main(
                         f"{twin_counts[0]} of {twin_counts[1]} rows fingerprinted)"
                    if twin_counts is not None
                    else " + /stable/ratios-ttm (one vote per set of statements)")
+                + ("" if skip_twin_scan
+                   else " + revenues = marketCap ÷ priceToSalesRatioTTM (TTM, USD)")
             ),
             "market_cap_floor": floor,
             "industry_count": len(aggregated),

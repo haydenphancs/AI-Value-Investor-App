@@ -29,6 +29,7 @@ from app.integrations.finra_short_interest import close_finra_client
 from app.integrations.fmp import close_fmp_client
 from app.integrations.openai_compat import close_openai_compat_client
 from app.integrations.openfda import close_openfda_client
+from app.integrations.sec_edgar import close_sec_edgar_client
 from app.integrations.telegram import close_telegram_client
 from app.integrations.x_api import close_x_client
 from app.integrations.bluesky import close_bluesky_client
@@ -464,7 +465,7 @@ async def lifespan(app: FastAPI):
         # NOTE: the old weekly sector-only benchmark job was RETIRED here.
         # Sector + industry medians are now computed together by the
         # industry-benchmark recompute chained into the quarterly batch
-        # (`_run_industry_dossier_job`, base+120 min). Running both would let
+        # (`_run_industry_dossier_job`, base+90 min). Running both would let
         # two writers race on the industry='' sector-aggregate rows. Manual
         # refresh remains available via POST /api/v1/admin/refresh-industry-benchmarks.
 
@@ -690,6 +691,7 @@ async def lifespan(app: FastAPI):
     await close_coingecko_client()
     await close_openfda_client()
     await close_uspto_client()
+    await close_sec_edgar_client()
     await close_finra_client()
     await close_openai_compat_client()
     await close_telegram_client()
@@ -1474,7 +1476,7 @@ async def _run_research_reconciliation_job():
 # NOTE: `_run_sector_benchmark_job` (weekly Sunday 1 AM, sector-only over the
 # S&P 500) was RETIRED in the industry-benchmark migration. Sector + industry
 # medians are now produced in one pass by the industry-benchmark recompute
-# chained into `_run_industry_dossier_job` (base+120 min). The old
+# chained into `_run_industry_dossier_job` (base+90 min). The old
 # `sector_benchmark_service.compute_all_benchmarks` is now called by NOTHING:
 # `POST /admin/refresh-sector-benchmarks` was re-pointed at
 # `industry_benchmark_service.recompute_all` (2026-09), because the old path
@@ -1485,9 +1487,10 @@ async def _run_research_reconciliation_job():
 
 # TTM weekly refresh fires at 06:00 UTC Sunday — deliberately AFTER the quarterly
 # fiscal recompute window so the two FMP-heavy jobs never overlap. The dossier chain
-# runs the fiscal recompute at base 02:00 + 120 min = 04:00 UTC (first Sunday of
-# Jan/Apr/Jul/Oct), with the moat job at base+90 running up to ~05:00. 06:00 clears
-# both, so on those 4 quarter-start Sundays the jobs no longer race on FMP rate budget.
+# runs the fiscal recompute at base 02:00 + 90 min = 03:30 UTC (first Sunday of
+# Jan/Apr/Jul/Oct; ~30 min on 2026-10-04) and the moat job after it at base+120, running
+# up to ~05:00-05:30. 06:00 clears both, so on those 4 quarter-start Sundays the jobs do
+# not race on FMP rate budget (a medians retry can push the moat later — then they share it).
 _TTM_WEEKLY_HOUR_UTC = 6
 
 
@@ -1676,8 +1679,8 @@ async def _run_ttm_benchmark_job():
     in the last day) rather than redo everything after a dyno restart.
 
     Fires at 06:00 UTC (not 04:00) to avoid colliding with the quarterly fiscal
-    recompute that runs at ~04:00 UTC on quarter-start Sundays — see
-    `_next_weekly_ttm_run`.
+    recompute (from 03:30 UTC) and the moat job after it (from 04:00 UTC) on
+    quarter-start Sundays — see `_next_weekly_ttm_run`.
     """
     from datetime import datetime, timezone
 
@@ -1903,8 +1906,14 @@ async def _run_industry_dossier_job():
     #
     #   base + 0   min → industry_dossier
     #   base + 60  min → ip_intel.refresh_top_tickers
-    #   base + 90  min → industry_moat_benchmark.recompute_all  (longest)
-    #   base + 120 min → industry_benchmark.recompute_all (sector + industry medians)
+    #   base + 90  min → industry_benchmark.recompute_all (sector + industry medians)
+    #   base + 120 min → industry_moat_benchmark.recompute_all  (longest; reads the medians)
+    #
+    # Medians BEFORE moat (2026-10-21): the moat scorer reads the stored ANNUAL sector
+    # medians, so in the old order (moat +90, medians +120) every quarter's peer averages
+    # were scored against the previous quarter's medians — on 2027-01-03 the pre-US-only,
+    # zero-margin rows of 2026-10-04. The moat phase runs only after the medians phase
+    # settled on this pass; otherwise it waits for the same-day retry.
     #
     # If a sub-job overruns its 30-min window, the next one starts as
     # soon as the previous awaits return — _wait_until clamps to "at
@@ -1964,36 +1973,16 @@ async def _run_industry_dossier_job():
             return await get_ip_intel_service().refresh_top_tickers()
         settled &= await _run_claimed_phase(JOB_IP_INTEL_QUARTERLY, "IP intel quarterly batch", _ip)
 
-        # ── Industry moat benchmarks (Peer Avg overlay) @ base + 90 min ──
-        # Heaviest job in the chain (~140k FMP calls, ~60-90 min wall-clock
-        # at 3000/min). Started last so any failures don't block the
-        # upstream refreshes. `skip_if_fresh_hours=24` prevents the
-        # quarterly run from blowing through FMP quota redoing rows
-        # the operator already triggered manually within the last day.
-        await _wait_until(next_run + _td(minutes=90))
-
-        async def _moat():
-            from app.services.industry_moat_benchmark_service import (
-                get_industry_moat_benchmark_service,
-            )
-            return await get_industry_moat_benchmark_service().recompute_all(
-                skip_if_fresh_hours=24,
-            )
-        settled &= await _run_claimed_phase(
-            JOB_INDUSTRY_MOAT_QUARTERLY, "Industry moat benchmark quarterly batch", _moat,
-        )
-
-        # ── Sector + industry benchmarks (vs-industry overlay) @ base + 120 min ──
+        # ── Sector + industry benchmarks (vs-industry overlay) @ base + 90 min ──
         # Replaces the retired weekly sector-only job: ONE pass computes every
         # industry median AND the industry='' sector aggregate over the broad
-        # ~$500M-floor universe (`benchmark_universe.json`). Started last (after
-        # moat) so its FMP burst can't overlap the upstream refreshes.
-        # `skip_if_fresh_hours=24` keeps the quarterly run from redoing rows an
-        # operator already triggered manually within the last day. The universe
-        # file is regenerated out-of-band (manual `python -m
-        # scripts.build_benchmark_universe`) — industries shift slowly, so the
-        # committed universe is stable between quarterly recomputes.
-        await _wait_until(next_run + _td(minutes=120))
+        # ~$500M-floor universe (`benchmark_universe.json`). Runs BEFORE the moat
+        # phase, which reads its annual sector medians. `skip_if_fresh_hours=24` keeps
+        # the quarterly run from redoing rows an operator already triggered manually
+        # within the last day. The universe file is regenerated out-of-band (manual
+        # `python -m scripts.build_benchmark_universe`) — industries shift slowly, so
+        # the committed universe is stable between quarterly recomputes.
+        await _wait_until(next_run + _td(minutes=90))
 
         async def _benchmarks():
             from app.services.industry_benchmark_service import (
@@ -2002,9 +1991,39 @@ async def _run_industry_dossier_job():
             return await get_industry_benchmark_service().recompute_all(
                 skip_if_fresh_hours=24,
             )
-        settled &= await _run_claimed_phase(
+        medians_settled = await _run_claimed_phase(
             JOB_INDUSTRY_BENCHMARK_QUARTERLY, "Industry benchmark quarterly batch", _benchmarks,
         )
+        settled &= medians_settled
+
+        # ── Industry moat benchmarks (Peer Avg overlay) @ base + 120 min ──
+        # Heaviest job in the chain (~29k FMP calls on the 2026-10-08 universe, ~50-90
+        # min). Started last, after the medians it scores peers against. It is skipped
+        # while the medians phase is unsettled on this pass (left unsettled itself, so
+        # the same-day retry runs it once the medians land): scoring against a half-
+        # rewritten table, and then being skipped by its own claim on the retry, would
+        # pin a quarter of peer averages to it. `recompute_all` clears the lookup's
+        # in-memory cache first. `skip_if_fresh_hours=24` prevents the quarterly run
+        # from redoing rows the operator already triggered manually within the last day.
+        await _wait_until(next_run + _td(minutes=120))
+
+        async def _moat():
+            from app.services.industry_moat_benchmark_service import (
+                get_industry_moat_benchmark_service,
+            )
+            return await get_industry_moat_benchmark_service().recompute_all(
+                skip_if_fresh_hours=24,
+            )
+        if medians_settled:
+            settled &= await _run_claimed_phase(
+                JOB_INDUSTRY_MOAT_QUARTERLY, "Industry moat benchmark quarterly batch", _moat,
+            )
+        else:
+            logger.warning(
+                "Industry moat benchmark quarterly batch: deferred — the medians phase is "
+                "unsettled on this pass, so the moat waits for the same-day retry (it scores "
+                "peers against those medians)"
+            )
         if await _retry_unsettled_run("Industry dossier job (quarterly)", settled, retries):
             entered = None  # re-enter this quarter's chain while its catch-up window is open
 

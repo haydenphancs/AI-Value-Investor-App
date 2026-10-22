@@ -1,0 +1,72 @@
+{
+ "verified_on": "2026-10-22",
+ "how": "Read-only GETs with the backend/.env Census key (never recorded). api.census.gov/data/{2024,2023}/aiesbasic (RCPT_TOT_VAL,NAICS2017_LABEL; NAICS2017=<code>; for=us:*) and /data/2017/ecnbasic (RCPTOT,NAICS2017_LABEL; the default all-establishments row); values in $1,000s exactly as returned. Cross-checked against Census's spliced /data/timeseries/aies/historical, whose 2017/2023/2024 points are identical. Same schema as verified_sources_2026_10_01.json for the 'census' block; the 10-01 file keeps 3364 (its keys are disjoint from this file's).",
+ "census": {
+  "334511": {
+   "label": "Search, detection, navigation, guidance, aeronautical, and nautical system and instrument manufacturing",
+   "aies_2024_thousands": 66586086,
+   "aies_2023_thousands": 61342096,
+   "ecn_2017_thousands": 51591093
+  },
+  "336992": {
+   "label": "Military armored vehicle, tank, and tank component manufacturing",
+   "aies_2024_thousands": 8720665,
+   "aies_2023_thousands": 7697206,
+   "ecn_2017_thousands": 6404574
+  },
+  "332992": {
+   "label": "Small arms ammunition manufacturing",
+   "aies_2024_thousands": 5429417,
+   "aies_2023_thousands": 5677802,
+   "ecn_2017_thousands": 4117687
+  },
+  "332993": {
+   "label": "Ammunition (except small arms) manufacturing",
+   "aies_2024_thousands": 4559706,
+   "aies_2023_thousands": 4452177,
+   "ecn_2017_thousands": 2855739
+  },
+  "332994": {
+   "label": "Small arms, ordnance, and ordnance accessories manufacturing",
+   "aies_2024_thousands": 10562977,
+   "aies_2023_thousands": 10628871,
+   "ecn_2017_thousands": 6282988
+  }
+ },
+ "census_extra_years": {
+  "3364": {
+   "label": "Aerospace product and parts manufacturing",
+   "aies_2023_thousands": 239248154
+  }
+ },
+ "census_composites": {
+  "Aerospace & Defense": {
+   "label": "Aerospace & defense manufacturing",
+   "codes": [
+    "3364",
+    "334511",
+    "336992",
+    "332992",
+    "332993",
+    "332994"
+   ],
+   "aies_2024_thousands": 342824394,
+   "aies_2023_thousands": 329046306,
+   "ecn_2017_thousands": 321045908,
+   "note": "Owner decision 2026-10-22 ('Aerospace + defense mfg'). A gross US shipments sum (components shipped into finished systems count again); +0.94%/yr 2017->2024."
+  }
+ },
+ "census_not_mapped": {
+  "336611": {
+   "label": "Ship building and repairing",
+   "aies_2024_thousands": null,
+   "aies_2023_thousands": 32303257,
+   "ecn_2017_thousands": 25099590,
+   "why": "Outside the owner's 2026-10-22 A&D scope, and suppressed (null) in AIES 2024."
+  },
+  "336612": {
+   "label": "Boat building",
+   "why": "Recreational boats, not defense."
+  }
+ }
+}

@@ -230,7 +230,8 @@ struct BuyCreditsView: View {
                     Text("·")
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
-                    Text("\(purchased) purchased")
+                    // "never expire", not "purchased": reward credits share this balance.
+                    Text("\(purchased) never expire")
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.gain)
                 }

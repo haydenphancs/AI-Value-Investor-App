@@ -4,140 +4,82 @@
 //
 //  Draws MA lines and Bollinger Bands on top of the main chart
 //
+//  Values come from `ChartSeries`, computed ONCE over the whole merged series — so a line
+//  that exists at a bar is drawn at that bar, from the left edge, whatever the viewport.
+//  (This used to recompute every overlay twice per frame over "the bars before the
+//  viewport + the visible bars", which started lines partway in near the first loaded bar
+//  and, on 1D, averaged across a multi-day hole.)
+//
 
 import SwiftUI
 
 struct OverlayRenderer: View {
     let overlays: [TechnicalIndicatorType]
-    let pricePoints: [StockPricePoint]
-    let coord: ChartCoordinateSystem
-    /// Close prices preceding the visible range, used as warm-up
-    /// so MA lines start from the left edge of the chart.
-    var lookbackCloses: [Double] = []
+    let series: ChartSeries
+    let frame: ChartFrame
+    let yRange: ChartYRange
 
     var body: some View {
-        let visibleCloses = pricePoints.map { $0.close }
-        let allCloses = lookbackCloses + visibleCloses
-        let offset = lookbackCloses.count
+        Canvas { context, size in
+            let range = frame.drawRange
+            guard !range.isEmpty, range.upperBound <= series.count else { return }
+            let coord = ChartCoordinateSystem(width: size.width, height: size.height, yRange: yRange, frame: frame)
 
-        ForEach(overlays) { indicator in
-            switch indicator {
-            case .ma20:
-                MALineOverlay(values: sliceAfterOffset(TechnicalIndicatorCalculator.sma(closes: allCloses, period: 20), offset: offset), coord: coord, color: indicator.defaultColor)
-            case .ma50:
-                MALineOverlay(values: sliceAfterOffset(TechnicalIndicatorCalculator.sma(closes: allCloses, period: 50), offset: offset), coord: coord, color: indicator.defaultColor)
-            case .ma200:
-                MALineOverlay(values: sliceAfterOffset(TechnicalIndicatorCalculator.sma(closes: allCloses, period: 200), offset: offset), coord: coord, color: indicator.defaultColor)
-            case .bollingerBands:
-                let full = TechnicalIndicatorCalculator.bollingerBands(closes: allCloses)
-                let sliced = BollingerBandData(
-                    upper: sliceAfterOffset(full.upper, offset: offset),
-                    middle: sliceAfterOffset(full.middle, offset: offset),
-                    lower: sliceAfterOffset(full.lower, offset: offset)
-                )
-                BollingerBandOverlay(data: sliced, coord: coord)
-            default:
-                EmptyView()
-            }
-        }
-    }
-
-    /// Strip the lookback portion so the result aligns with the visible coordinate system.
-    private func sliceAfterOffset(_ values: [Double?], offset: Int) -> [Double?] {
-        guard offset > 0, values.count > offset else { return values }
-        return Array(values[offset...])
-    }
-}
-
-// MARK: - MA Line
-
-struct MALineOverlay: View {
-    let values: [Double?]
-    let coord: ChartCoordinateSystem
-    let color: Color
-
-    var body: some View {
-        Path { path in
-            var started = false
-            for (index, value) in values.enumerated() {
-                guard let v = value else { continue }
-                let x = coord.xPosition(for: index)
-                let y = coord.yPosition(for: v)
-                if !started {
-                    path.move(to: CGPoint(x: x, y: y))
-                    started = true
-                } else {
-                    path.addLine(to: CGPoint(x: x, y: y))
+            for indicator in overlays {
+                switch indicator {
+                case .ma20, .ma50, .ma200:
+                    let values = series.movingAverage(indicator)
+                    guard values.count == series.count else { continue }
+                    let path = ChartPath.line(range: range, coord: coord) { values[$0] }
+                    context.stroke(path, with: .color(indicator.defaultColor),
+                                   style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+                case .bollingerBands:
+                    drawBands(context: context, range: range, coord: coord)
+                case .volume, .rsi14, .macd, .stochastic:
+                    break
                 }
             }
         }
-        .stroke(color, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
     }
-}
 
-// MARK: - Bollinger Bands
-
-struct BollingerBandOverlay: View {
-    let data: BollingerBandData
-    let coord: ChartCoordinateSystem
-
-    var body: some View {
-        ZStack {
-            // Fill between upper and lower
-            bandFill
-
-            // Upper band
-            bandLine(values: data.upper)
-                .stroke(AppColors.accentGraphic.opacity(0.7), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
-
-            // Lower band
-            bandLine(values: data.lower)
-                .stroke(AppColors.accentGraphic.opacity(0.7), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+    private func drawBands(context: GraphicsContext, range: Range<Int>, coord: ChartCoordinateSystem) {
+        // Fill between the bands, one polygon per contiguous run where both exist. Zoomed
+        // out, each column contributes its HIGHEST upper and LOWEST lower so the envelope
+        // is never narrower than the data.
+        var fill = Path()
+        var upperPts: [CGPoint] = [], lowerPts: [CGPoint] = []
+        func flush() {
+            guard let first = upperPts.first else { return }
+            fill.move(to: first)
+            for p in upperPts.dropFirst() { fill.addLine(to: p) }
+            for p in lowerPts.reversed() { fill.addLine(to: p) }
+            fill.closeSubpath()
+            upperPts.removeAll(keepingCapacity: true)
+            lowerPts.removeAll(keepingCapacity: true)
         }
-    }
-
-    private var bandFill: some View {
-        Path { path in
-            // Upper line forward
-            var upperPoints: [(Int, Double)] = []
-            var lowerPoints: [(Int, Double)] = []
-            for (i, u) in data.upper.enumerated() {
-                if let uVal = u, let lVal = data.lower[i] {
-                    upperPoints.append((i, uVal))
-                    lowerPoints.append((i, lVal))
+        let bucket = coord.bucket
+        ChartPath.forEachBucket(range, bucket: bucket) { lo, hi in
+            var up = -Double.infinity, low = Double.infinity
+            var any = false
+            for j in lo..<hi {
+                if let u = series.bbUpper[j], let l = series.bbLower[j] {
+                    up = max(up, u); low = min(low, l); any = true
                 }
             }
-            guard !upperPoints.isEmpty else { return }
-
-            // Draw upper line forward
-            let first = upperPoints[0]
-            path.move(to: CGPoint(x: coord.xPosition(for: first.0), y: coord.yPosition(for: first.1)))
-            for point in upperPoints.dropFirst() {
-                path.addLine(to: CGPoint(x: coord.xPosition(for: point.0), y: coord.yPosition(for: point.1)))
-            }
-            // Draw lower line backward
-            for point in lowerPoints.reversed() {
-                path.addLine(to: CGPoint(x: coord.xPosition(for: point.0), y: coord.yPosition(for: point.1)))
-            }
-            path.closeSubpath()
+            guard any else { flush(); return }
+            let x = bucket > 1
+                ? (coord.xPosition(for: lo) + coord.xPosition(for: hi - 1)) / 2
+                : coord.xPosition(for: lo)
+            upperPts.append(CGPoint(x: x, y: coord.yPosition(for: up)))
+            lowerPts.append(CGPoint(x: x, y: coord.yPosition(for: low)))
         }
-        .fill(AppColors.accentGraphic.opacity(0.12))
-    }
+        flush()
+        context.fill(fill, with: .color(AppColors.accentGraphic.opacity(0.12)))
 
-    private func bandLine(values: [Double?]) -> Path {
-        Path { path in
-            var started = false
-            for (index, value) in values.enumerated() {
-                guard let v = value else { continue }
-                let x = coord.xPosition(for: index)
-                let y = coord.yPosition(for: v)
-                if !started {
-                    path.move(to: CGPoint(x: x, y: y))
-                    started = true
-                } else {
-                    path.addLine(to: CGPoint(x: x, y: y))
-                }
-            }
-        }
+        let dash = StrokeStyle(lineWidth: 1, dash: [4, 3])
+        let upper = ChartPath.line(range: range, coord: coord) { series.bbUpper[$0] }
+        let lower = ChartPath.line(range: range, coord: coord) { series.bbLower[$0] }
+        context.stroke(upper, with: .color(AppColors.accentGraphic.opacity(0.7)), style: dash)
+        context.stroke(lower, with: .color(AppColors.accentGraphic.opacity(0.7)), style: dash)
     }
 }

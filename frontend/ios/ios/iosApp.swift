@@ -114,7 +114,8 @@ struct iosApp: App {
                     // Buffered events would otherwise be lost when iOS suspends us.
                     if phase == .background { Analytics.shared.flushNow() }
                 }
-                // Home Screen widget taps: `caydex://ticker/<SYMBOL>` → that asset's detail.
+                // Home Screen widget taps: `caydex://ticker/<SYMBOL>` → that asset's detail;
+                // `caydex://updates/market` → the Updates tab on its Market chip.
                 //
                 // PARK ONLY. Never navigate from here. On a cold launch this fires during the
                 // splash, and signed out it fires behind the sign-in wall. `ContentView` opens
@@ -123,8 +124,8 @@ struct iosApp: App {
                 //
                 // The OAuth callback shares the scheme (`caydex://auth-callback`), but
                 // `ASWebAuthenticationSession` consumes it before it can reach this handler. If
-                // one ever did arrive, `pendingLink(for:)` answers nil for any host but `ticker`,
-                // so this handler never touches it.
+                // one ever did arrive, `pendingLink(for:)` answers nil for any host but `ticker`
+                // and `updates`, so this handler never touches it.
                 .onOpenURL { url in
                     guard let link = DeepLinkRouter.pendingLink(for: url) else { return }
                     appState.pendingDeepLink = link
@@ -178,6 +179,9 @@ struct iosApp: App {
                     // Assert every palette token clears its WCAG floor in BOTH
                     // appearances. Compiled out of release; ~1ms in debug.
                     ThemeContrastAudit.run()
+                    // Same contract for the chart's indicator maths: the O(n) code must
+                    // equal the naive textbook definitions, or the app stops here.
+                    IndicatorSelfCheck.run()
                     #endif
 
                     // Enable 401 → refresh → retry BEFORE auth restore runs, so the

@@ -755,6 +755,9 @@ struct MarketOverviewWidgetData: Codable, Identifiable, Sendable {
     let valuationLevel: String
     let earningsYield: Double
     let historicalAvgPe: Double
+    /// `false` → `historicalAvgPe` is the 0 placeholder (the market composite's own 10-year
+    /// average is unknown); render "—". Optional so older backends (no key) decode as known.
+    let historicalAvgPeKnown: Bool?
     let sectors: [MarketOverviewSectorEntry]
     let advancing: Int
     let declining: Int
@@ -764,6 +767,9 @@ struct MarketOverviewWidgetData: Codable, Identifiable, Sendable {
     /// `0` is the unknown sentinel on this wire, exactly as for `forwardPe`.
     var hasKnownPE: Bool { (peKnown ?? true) && peRatio > 0 }
 
+    /// Same rule for the composite's own 10-year average.
+    var hasKnownHistoricalAvg: Bool { (historicalAvgPeKnown ?? true) && historicalAvgPe > 0 }
+
     enum CodingKeys: String, CodingKey {
         case widgetType = "widget_type"
         case peRatio = "pe_ratio"
@@ -772,6 +778,7 @@ struct MarketOverviewWidgetData: Codable, Identifiable, Sendable {
         case valuationLevel = "valuation_level"
         case earningsYield = "earnings_yield"
         case historicalAvgPe = "historical_avg_pe"
+        case historicalAvgPeKnown = "historical_avg_pe_known"
         case sectors, advancing, declining
         case macroIndicators = "macro_indicators"
     }

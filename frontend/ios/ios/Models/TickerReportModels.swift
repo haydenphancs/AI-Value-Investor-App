@@ -1114,24 +1114,9 @@ enum MarketConcentration: String {
     case duopoly = "Duopoly"
     case oligopoly = "Oligopoly"
     case fragmented = "Fragmented"
-
-    var color: Color {
-        switch self {
-        case .monopoly: return AppColors.bullish
-        case .duopoly: return AppColors.neutral
-        case .oligopoly: return AppColors.textSecondary
-        case .fragmented: return AppColors.alertOrange
-        }
-    }
-
-    var backgroundColor: Color {
-        switch self {
-        case .monopoly: return AppColors.bullish.opacity(0.15)
-        case .duopoly: return AppColors.neutral.opacity(0.15)
-        case .oligopoly: return AppColors.textSecondary.opacity(0.15)
-        case .fragmented: return AppColors.alertOrange.opacity(0.15)
-        }
-    }
+    /// Not measured — the backend's "unknown" (2026-10-22): too few listed constituents with
+    /// revenue, or too little of the industry covered. Renders as "—", never a guessed label.
+    case unknown = "—"
 }
 
 enum LifecyclePhase: String {
@@ -1139,55 +1124,44 @@ enum LifecyclePhase: String {
     case secularGrowth = "Secular Growth"
     case mature = "Mature"
     case declining = "Declining"
-
-    var color: Color {
-        switch self {
-        case .emerging: return AppColors.bullish
-        case .secularGrowth: return AppColors.primaryBlue
-        case .mature: return AppColors.neutral
-        case .declining: return AppColors.bearish
-        }
-    }
-
-    var backgroundColor: Color {
-        switch self {
-        case .emerging: return AppColors.bullish.opacity(0.15)
-        case .secularGrowth: return AppColors.primaryBlue.opacity(0.15)
-        case .mature: return AppColors.neutral.opacity(0.15)
-        case .declining: return AppColors.bearish.opacity(0.15)
-        }
-    }
 }
 
+/// The Moat card's market row. Owner decision 2026-10-22, "Measured only": the published
+/// market size at its OWN year, its average yearly growth over the real window, a source
+/// caption, and no projected value. Builds up to 1.1 re-anchored the source year to the
+/// device year by compounding a backward Census rate (and read the year from
+/// `Calendar.current`, so a Buddhist-calendar phone showed "(2569)"); this type reads no
+/// calendar and never compounds.
 struct MarketDynamics {
-    let industry: String                    // "Cloud Computing"
-    let concentration: MarketConcentration  // .oligopoly
-    // Nil when no source could produce a CAGR (cache miss + no peers);
-    // iOS renders "—" rather than a misleading "+0.0%".
+    let industry: String                    // "Aerospace & Defense"
+    let concentration: MarketConcentration  // revenue shares of listed constituents
+    // The industry's realized average yearly growth (cagrStartYear → cagrEndYear). Nil when
+    // no source produced one; renders "—".
     let cagr5Yr: Double?
-    let currentTAM: Double                  // 900 (in billions); 0 when unknown
-    let futureTAM: Double                   // 1600 (in billions); 0 when unknown
-    let currentYear: String                 // "2025"
-    let futureYear: String                  // "2030"
-    let lifecyclePhase: LifecyclePhase      // .secularGrowth
-    // Verbatim quote from the earnings transcript / company description
-    // that the AI used to derive `currentTAM` / `futureTAM`. Nil when
-    // TAM came from FRED proxy or wasn't sourced at all.
+    let currentTAM: Double                  // billions, at its own year; 0 when unknown
+    let futureTAM: Double                   // a company quote's target only; never shown for a measured row
+    let currentYear: String                 // "2024"
+    let futureYear: String                  // legacy (builds <= 1.1)
+    let lifecyclePhase: LifecyclePhase
+    // Verbatim quote from the earnings transcript the AI used for a company's TAM pair.
     let tamSourceQuote: String?
-    // Caption shown under the TAM row: "Earnings call quote" when AI
-    // extracted it from the transcript, "BEA <Sector> value-added (via
-    // FRED)" when FRED proxy was used, nil when TAM is 0 (UI hides).
+    // Source of the TAM: "Earnings call quote", or the Census / BEA source label — shown
+    // as the row's caption.
     let tamSourceLabel: String?
-    // Grain of the source data: "industry" | "sector" | "all_industry".
-    // Drives `tamGrainWarning` so the UI can flag when the TAM/CAGR is
-    // sourced from a broader bucket than the company's own industry
-    // (e.g., we fell back to the sector-level FRED series because no
-    // industry-specific NAICS was mapped). Nil for AI-quote sourced TAM.
+    // Grain of the source data: "industry" | "sector" | "all_industry" (not rendered).
     let sourceGrain: String?
-    // Scope of the TAM figure: "us" or "global". Drives the explicit "US"/
-    // "Global" pill next to the market size. Nil when TAM wasn't populated
-    // (older cached reports / no source) → no pill shown.
+    // Scope of the TAM figure: "us" for a measured Census/FRED figure. Nil when TAM wasn't
+    // populated or the figure is a company's quote.
     let tamScope: String?
+    // Measured-only fields (backend 2026-10-22). `var` with defaults so the memberwise init
+    // stays source-compatible; nil on a report stored before them.
+    var tamBasis: String? = nil             // "measured" | "company_quote"
+    var tamYear: Int? = nil                 // year currentTAM was measured / stated
+    var tamTargetYear: Int? = nil           // a company quote's stated target year
+    var cagrStartYear: Int? = nil
+    var cagrEndYear: Int? = nil
+    var growthSourceLabel: String? = nil    // source of cagr5Yr when it differs from the TAM's
+    var concentrationBasis: String? = nil   // "revenue_share" | "market_cap"
 
     /// "Global" / "US" scope label, or nil when scope is unknown.
     var scopeLabel: String? {
@@ -1208,110 +1182,193 @@ struct MarketDynamics {
         return "\(s) - Market Size (TAM)"
     }
 
-    var formattedCAGR: String {
-        guard let cagr = cagr5Yr else { return "—" }
-        let sign = cagr >= 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.1f", cagr))%"
-    }
-
-    var cagrColor: Color {
-        guard let cagr = cagr5Yr else { return AppColors.textMuted }
-        return cagr >= 0 ? AppColors.bullish : AppColors.bearish
-    }
-
-    var formattedCurrentTAM: String {
-        if currentTAM >= 1000 {
-            return String(format: "$%.1fT", currentTAM / 1000)
-        } else {
-            return String(format: "$%.0fB", currentTAM)
-        }
-    }
-
-    var formattedFutureTAM: String {
-        if futureTAM >= 1000 {
-            return String(format: "$%.1fT", futureTAM / 1000)
-        } else {
-            return String(format: "$%.0fB", futureTAM)
-        }
-    }
-
     /// True when no TAM source has populated either bound — view hides
     /// the entire "Market Size (TAM)" column in that case.
     var tamIsAvailable: Bool {
         currentTAM > 0 || futureTAM > 0
     }
 
-    var formattedTAMRange: String {
-        guard tamIsAvailable else { return "—" }
-        return "\(formattedCurrentTAM) → \(formattedFutureTAM)"
-    }
+    // MARK: - Basis
 
-    // MARK: - Today-aligned projection
-    //
-    // Phase A (Census/FRED) data is typically a year or two stale —
-    // e.g., Census AIES "Software publishers" data is 2023 even when a
-    // user opens the report in 2026. To keep the displayed years
-    // current AND the math honest, project the source TAM forward to
-    // today using the source CAGR. If the source is already current
-    // (Gemini overrides, FMP transcript quotes), `yearsToProject` is 0
-    // and the displayed values equal the raw source values.
+    private enum Basis { case measured, companyQuote, unknown }
 
-    private var todayYear: Int {
-        Calendar.current.component(.year, from: Date())
-    }
-
-    private var sourceYearInt: Int? { Int(currentYear) }
-    private var futureYearInt: Int? { Int(futureYear) }
-
-    private var yearsToProject: Int {
-        guard let src = sourceYearInt else { return 0 }
-        return max(0, todayYear - src)
-    }
-
-    private var projectionMultiplier: Double {
-        guard yearsToProject > 0, let cagr = cagr5Yr else { return 1.0 }
-        return pow(1.0 + (cagr / 100.0), Double(yearsToProject))
-    }
-
-    /// Year shown in the UI as "current". Bumped forward to today when
-    /// the underlying data is older than today.
-    var displayedCurrentYear: String {
-        guard yearsToProject > 0 else { return currentYear }
-        return String(todayYear)
-    }
-
-    /// Future year shown in the UI. Preserves the source data's
-    /// (future − current) span (typically 5 years) but anchored to
-    /// `displayedCurrentYear` rather than the stale source year.
-    var displayedFutureYear: String {
-        guard let src = sourceYearInt, let fut = futureYearInt else {
-            return futureYear
+    /// The stored `tamBasis`; for a report stored before it, the earnings-call label is a
+    /// company quote, a "global" scope is a retired grounded figure whose basis cannot be
+    /// stated (no caption, no year), anything else a Census/FRED measurement.
+    private var basis: Basis {
+        switch tamBasis {
+        case "measured"?: return .measured
+        case "company_quote"?: return .companyQuote
+        case .some: return .unknown
+        case nil:
+            if tamSourceLabel == "Earnings call quote" { return .companyQuote }
+            if tamScope?.lowercased() == "global" { return .unknown }
+            return .measured
         }
-        let span = fut - src
-        let anchor = Int(displayedCurrentYear) ?? src
-        return String(anchor + span)
     }
 
-    /// Current TAM projected forward to `displayedCurrentYear` using CAGR.
-    var displayedCurrentTAM: Double { currentTAM * projectionMultiplier }
+    var isCompanyQuote: Bool { basis == .companyQuote }
 
-    /// Future TAM projected forward by the same multiplier so the
-    /// implied CAGR over (displayedFuture − displayedCurrent) is unchanged.
-    var displayedFutureTAM: Double { futureTAM * projectionMultiplier }
-
-    var formattedDisplayedCurrentTAM: String {
-        let v = displayedCurrentTAM
-        return v >= 1000
-            ? String(format: "$%.1fT", v / 1000)
-            : String(format: "$%.0fB", v)
+    private static func validYear(_ year: Int?) -> Int? {
+        guard let year, (1990...2100).contains(year) else { return nil }
+        return year
     }
 
-    var formattedDisplayedFutureTAM: String {
-        let v = displayedFutureTAM
-        return v >= 1000
-            ? String(format: "$%.1fT", v / 1000)
-            : String(format: "$%.0fB", v)
+    /// `year` only when the quote states it as a whole number ("2030", not "20301").
+    private static func stated(_ year: Int?, in quote: String?) -> Int? {
+        guard let year, let quote else { return nil }
+        let pattern = "(?<![0-9])\(year)(?![0-9])"
+        return quote.range(of: pattern, options: .regularExpression) == nil ? nil : year
     }
+
+    // MARK: - Years
+
+    private var measuredYear: Int? {
+        switch basis {
+        case .measured:
+            return Self.validYear(tamYear) ?? Self.validYear(Int(currentYear))
+        case .companyQuote:
+            if tamBasis != nil { return Self.validYear(tamYear) }
+            return Self.stated(Self.validYear(Int(currentYear)), in: tamSourceQuote)
+        case .unknown:
+            return nil
+        }
+    }
+
+    /// A company quote's stated target year, later than its own year. Never for a measured
+    /// row: its legacy future value is a projection the card no longer shows.
+    private var targetYear: Int? {
+        guard basis == .companyQuote, futureTAM > 0 else { return nil }
+        let year: Int?
+        if tamBasis != nil {
+            year = Self.validYear(tamTargetYear)
+        } else {
+            year = Self.stated(Self.validYear(Int(futureYear)), in: tamSourceQuote)
+        }
+        guard let year else { return nil }
+        if let measured = measuredYear, year <= measured { return nil }
+        return year
+    }
+
+    /// "(2024)" under the market size; nil when the year is unknown.
+    var measuredYearLabel: String? {
+        guard let year = measuredYear else { return nil }
+        return "(\(year))"
+    }
+
+    /// "(2035)" under a company quote's target; nil for every measured row.
+    var targetYearLabel: String? {
+        guard let year = targetYear else { return nil }
+        return "(\(year))"
+    }
+
+    /// "(2017–24)" under the growth figure — only with a rate and a valid start < end.
+    var growthWindowLabel: String? {
+        guard cagr5Yr != nil,
+              let start = Self.validYear(cagrStartYear),
+              let end = Self.validYear(cagrEndYear),
+              start < end else { return nil }
+        if start / 100 == end / 100 {
+            return "(\(start)–\(String(format: "%02d", end % 100)))"
+        }
+        return "(\(start)–\(end))"
+    }
+
+    // MARK: - Formatting
+
+    /// "+0.9%" / "0.0%" / "-3.0%". Rounded to 1 dp BEFORE the sign is chosen, so -0.04
+    /// never prints "+-0.0%".
+    var formattedGrowth: String {
+        guard let cagr = cagr5Yr, cagr.isFinite else { return "—" }
+        let rounded = (cagr * 10).rounded() / 10
+        if rounded == 0 { return "0.0%" }
+        return String(format: "%+.1f%%", rounded)
+    }
+
+    var growthAccessibilityLabel: String {
+        guard let cagr = cagr5Yr, cagr.isFinite else { return "Average yearly growth: not available" }
+        let rounded = (cagr * 10).rounded() / 10
+        let window: String
+        if let start = Self.validYear(cagrStartYear), let end = Self.validYear(cagrEndYear), start < end {
+            window = ", \(start) to \(end)"
+        } else {
+            window = ""
+        }
+        let sign = rounded > 0 ? "plus " : (rounded < 0 ? "minus " : "")
+        return "Average yearly growth\(window): \(sign)\(String(format: "%.1f", abs(rounded))) percent"
+    }
+
+    /// A TAM in billions as "$343B" / "$1.2T" / "$4.5B" / "<$0.1B"; "—" when not positive.
+    /// The unit is chosen AFTER rounding, so 999.6 is "$1.0T", never "$1000B".
+    static func formatTAM(_ billions: Double) -> String {
+        guard billions.isFinite, billions > 0 else { return "—" }
+        if billions >= 999.5 { return String(format: "$%.1fT", billions / 1000) }
+        if billions >= 9.95 { return String(format: "$%.0fB", billions) }
+        if billions >= 0.05 { return String(format: "$%.1fB", billions) }
+        return "<$0.1B"
+    }
+
+    var formattedCurrentTAM: String { Self.formatTAM(currentTAM) }
+
+    /// A company quote's stated target value; nil whenever `targetYearLabel` is nil.
+    var formattedTargetTAM: String? {
+        guard targetYear != nil else { return nil }
+        return Self.formatTAM(futureTAM)
+    }
+
+    /// The caption under the row: where the market size (and, beside a company quote, the
+    /// growth rate) comes from. Nil when no TAM is shown or its basis cannot be stated.
+    var sourceCaption: String? {
+        guard tamIsAvailable else { return nil }
+        switch basis {
+        case .measured:
+            guard let label = tamSourceLabel?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !label.isEmpty else { return nil }
+            return "Source: \(label)"
+        case .companyQuote:
+            var text = "Market size: company estimate (earnings call)"
+            if let growth = growthSourceLabel?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !growth.isEmpty {
+                text += " · Growth: \(growth)"
+            }
+            return text
+        case .unknown:
+            return nil
+        }
+    }
+
+    /// "By revenue" under a measured concentration label.
+    var concentrationSubtitle: String? {
+        guard concentration != .unknown else { return nil }
+        switch concentrationBasis {
+        case "revenue_share"?: return "By revenue"
+        case "market_cap"?: return "By market cap"
+        case "peer_revenue_share"?: return "By peer revenue"
+        default: return nil
+        }
+    }
+
+    /// A measured A&D-like row for previews.
+    static let sampleMeasured = MarketDynamics(
+        industry: "Aerospace & Defense",
+        concentration: .fragmented,
+        cagr5Yr: 0.9,
+        currentTAM: 342.8,
+        futureTAM: 359.3,
+        currentYear: "2024",
+        futureYear: "2029",
+        lifecyclePhase: .mature,
+        tamSourceQuote: nil,
+        tamSourceLabel: "US Census AIES — Aerospace & defense manufacturing (NAICS 3364, 334511, 336992, 332992, 332993, 332994)",
+        sourceGrain: "industry",
+        tamScope: "us",
+        tamBasis: "measured",
+        tamYear: 2024,
+        cagrStartYear: 2017,
+        cagrEndYear: 2024,
+        growthSourceLabel: "US Census AIES — Aerospace & defense manufacturing (NAICS 3364, 334511, 336992, 332992, 332993, 332994)",
+        concentrationBasis: "revenue_share"
+    )
 }
 
 enum MoatOverallRating: String {
@@ -1891,7 +1948,10 @@ extension TickerReportData {
                 tamSourceQuote: "We see a $900B addressable cloud market today expanding to $1.6T by 2030.",
                 tamSourceLabel: "Earnings call quote",
                 sourceGrain: nil,
-                tamScope: "global"
+                tamScope: nil,
+                tamBasis: "company_quote",
+                tamTargetYear: 2030,
+                growthSourceLabel: "US Census AIES — Software publishers (NAICS 5112)"
             ),
             dimensions: [
                 MoatDimension(name: "Switching Costs", score: 9.2, peerScore: 6.5),

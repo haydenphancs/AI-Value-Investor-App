@@ -125,6 +125,9 @@ struct IndexValuationSnapshot {
     let storyTemplate: String
     /// See `ValuationSnapshotDTO.peKnown`. `false` means `peRatio` is the 0 sentinel.
     let peKnown: Bool
+    /// See `ValuationSnapshotDTO.historicalAvgPeKnown`. `false` means `historicalAvgPE` is the
+    /// 0 sentinel.
+    let historicalAvgKnown: Bool
 
     /// `nil` when the P/E could not be computed — the caller must render no badge.
     ///
@@ -149,6 +152,11 @@ struct IndexValuationSnapshot {
     var peDisplay: String { peKnown && peRatio > 0 ? String(format: "%.1fx", peRatio) : "—" }
     var forwardPEDisplay: String { peKnown && forwardPE > 0 ? String(format: "%.1fx", forwardPE) : "—" }
 
+    /// The market composite's own 10-year average, or "—". Never "0x".
+    var historicalAvgDisplay: String {
+        historicalAvgKnown && historicalAvgPE > 0 ? String(format: "%.0fx", historicalAvgPE) : "—"
+    }
+
     var tiers: [ValuationTier] {
         let current = level
         return [
@@ -170,7 +178,7 @@ struct IndexValuationSnapshot {
             .replacingOccurrences(of: "{FORWARD_PE}", with: forwardPEDisplay)
             .replacingOccurrences(of: "{EARNINGS_YIELD}", with: earningsYield > 0 ? String(format: "%.2f%%", earningsYield) : "—")
             .replacingOccurrences(of: "{VALUATION_LABEL}", with: level?.rawValue ?? "not available")
-            .replacingOccurrences(of: "{HISTORICAL_AVG_PE}", with: String(format: "%.0fx", historicalAvgPE))
+            .replacingOccurrences(of: "{HISTORICAL_AVG_PE}", with: historicalAvgDisplay)
             .replacingOccurrences(of: "{HISTORICAL_PERIOD}", with: historicalPeriod)
     }
 }
@@ -398,13 +406,14 @@ struct IndexAISuggestion: Identifiable {
 
 extension IndexValuationSnapshot {
     static let sampleData = IndexValuationSnapshot(
-        peRatio: 28.5,
-        forwardPE: 22.1,
-        earningsYield: 3.51,
-        historicalAvgPE: 21,
+        peRatio: 21.2,
+        forwardPE: 0,
+        earningsYield: 4.72,
+        historicalAvgPE: 22.1,
         historicalPeriod: "10-year",
-        storyTemplate: "The S&P 500 is trading at {PE_RATIO} earnings, which is considered {VALUATION_LABEL}. That's a hefty premium to the {HISTORICAL_PERIOD} average of {HISTORICAL_AVG_PE} — investors are clearly pricing in strong future growth. The forward P/E of {FORWARD_PE} tells a slightly better story, suggesting analysts expect earnings to catch up.",
-        peKnown: true
+        storyTemplate: "The US market composite (the average of 11 sector median P/Es, the same on every index screen) trades at {PE_RATIO} earnings, in line with its own {HISTORICAL_PERIOD} average of about {HISTORICAL_AVG_PE}.",
+        peKnown: true,
+        historicalAvgKnown: true
     )
 }
 

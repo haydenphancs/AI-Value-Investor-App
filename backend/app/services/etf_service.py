@@ -745,7 +745,24 @@ class ETFService:
 
         Deliberately Tier-1 only: ~1 MB per symbol, and reading that back out of Supabase
         is slower than the FMP call it would replace.
+
+        A failed fetch is `[]` here (the screen degrades section by section); the paged
+        chart history calls `_get_history_strict`, which raises instead — an empty list
+        must never read there as "this ETF has no older bars".
         """
+        try:
+            return await self._get_history_strict(symbol)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(
+                "ETF history fetch failed for %s: %s: %s", symbol, type(e).__name__, e
+            )
+            return []
+
+    async def _get_history_strict(self, symbol: str) -> List[Dict]:
+        """`_get_history` without the swallow: the same cache and the same shared
+        fetch, but a failure RAISES (an empty-but-answered history is still `[]`)."""
         key = f"etf:hist:{symbol}"
         # Close-cycle aligned: the list is served RAW (its last row may be today's
         # in-progress bar, which the price-recovery fallback in `_build_etf_detail`
@@ -766,14 +783,8 @@ class ETFService:
         fut: asyncio.Future = loop.create_future()
         _inflight[key] = fut
         try:
-            try:
-                from app.services.chart_helper import _fetch_all_daily
-                historical = await _fetch_all_daily(self.fmp, symbol)
-            except Exception as e:
-                logger.warning(
-                    "ETF history fetch failed for %s: %s: %s", symbol, type(e).__name__, e
-                )
-                historical = []
+            from app.services.chart_helper import _fetch_all_daily
+            historical = await _fetch_all_daily(self.fmp, symbol)
             if historical:
                 # `date` may be an explicit JSON null; `or ""` avoids a None<str TypeError.
                 historical.sort(key=lambda p: p.get("date") or "")
@@ -1130,6 +1141,21 @@ class ETFService:
             market_status=_get_market_status(),
             chart_data=chart_data,
         )
+
+    async def get_etf_chart(
+        self, symbol: str, chart_range: str = "3M", interval: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """`{symbol, prices}` for one range — the chart alone.
+
+        `/core` never carries 3M+ bars (`fast_only`) and `/quote` is a PROJECTION of the
+        full build, so a screen opening on a remembered 3M+ (or a pill tapped during the
+        cold first load) waited for the whole detail — 2-5 s cold — to draw a chart this
+        returns in ~0.1-0.7 s. The SAME builder as the detail's `chart_data`
+        (`_get_chart`), so the bars match whichever surface drew them first.
+        """
+        symbol = symbol.upper().strip()
+        bars = await self._get_chart(symbol, chart_range, interval)
+        return {"symbol": symbol, "prices": list(bars or [])}
 
     async def get_etf_quote(
         self,

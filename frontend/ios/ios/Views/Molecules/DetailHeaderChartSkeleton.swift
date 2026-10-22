@@ -5,8 +5,9 @@
 //  Molecule: instant-render placeholder for the price-header + chart region of the
 //  asset detail screens, shown while the first data loads — replacing the old
 //  full-screen blocking spinner (which also intercepted the back tap). Reuses the
-//  ShimmerEffect atom. The chart block matches the real chart's height footprint so
-//  there is no layout jump when live data swaps in.
+//  ShimmerEffect atom. The chart block matches the real chart's height footprint —
+//  including one pane per sub-chart the user has enabled — so there is no layout jump
+//  when live data swaps in.
 //
 //  WHY THERE IS A CAPTION: a shimmer on its own is a weak signal. A TestFlight tester
 //  sat through a 5-7s cold open on AVGO and reported that the screen said nothing at
@@ -30,6 +31,27 @@ struct DetailHeaderChartSkeleton: View {
     var slowThresholdSeconds: Double = 2.5
 
     @State private var isSlow = false
+
+    /// The persisted chart settings, read exactly as the real chart reads them, for the
+    /// sub-panes the user has enabled. Without it a user with Volume + RSI on watched the
+    /// screen grow by two 78 pt panes the moment the bars landed. A `@StateObject` so the
+    /// store is read once per skeleton rather than on every parent re-render; its
+    /// cross-screen sync keeps the count live if another screen changes a pane meanwhile.
+    @StateObject private var chartSettings = ChartSettings()
+
+    // TickerChartView's fixed geometry (its stack spacing is `AppSpacing.sm`): the 140 pt
+    // canvas, the 14 pt x-axis row (ChartXAxisLabels) and one 78 pt pane per enabled
+    // sub-chart (SubChartCanvas). Change these with those views.
+    private static let mainChartHeight: CGFloat = 140
+    private static let xAxisHeight: CGFloat = 14
+    private static let subPaneHeight: CGFloat = 78
+
+    /// Panes the real chart will draw. It also drops a pane its asset class or its bars
+    /// cannot draw (Stoch on crypto); the skeleton cannot know either yet, so it reserves
+    /// every enabled one — one pane too tall is a smaller jump than every pane missing.
+    private var subPaneCount: Int {
+        chartSettings.activeSubCharts.count
+    }
 
     private var bar: some View {
         RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -80,11 +102,21 @@ struct DetailHeaderChartSkeleton: View {
                 bar.frame(width: 90, height: 14)
             }
 
-            // Chart placeholder (same height footprint as TickerChartView).
-            RoundedRectangle(cornerRadius: AppCornerRadius.medium, style: .continuous)
-                .fill(AppColors.cardBackgroundLight)
-                .frame(height: 180)
-                .padding(.top, AppSpacing.sm)
+            // Chart placeholder, the same footprint as TickerChartView: the canvas and its
+            // x-axis row as one block, then one block per enabled sub-pane, spaced as the
+            // real chart stacks them. It used to be a fixed 180 pt whatever was enabled.
+            VStack(spacing: AppSpacing.sm) {
+                RoundedRectangle(cornerRadius: AppCornerRadius.medium, style: .continuous)
+                    .fill(AppColors.cardBackgroundLight)
+                    .frame(height: Self.mainChartHeight + AppSpacing.sm + Self.xAxisHeight)
+
+                ForEach(0..<subPaneCount, id: \.self) { _ in
+                    RoundedRectangle(cornerRadius: AppCornerRadius.medium, style: .continuous)
+                        .fill(AppColors.cardBackgroundLight)
+                        .frame(height: Self.subPaneHeight)
+                }
+            }
+            .padding(.top, AppSpacing.sm)
 
             // Range-selector pills. Seven fixed 34pt capsules are 286pt of rigid width, and
             // the navigation push proposes a RAMP of widths (measured 284 → 402pt) to the

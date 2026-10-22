@@ -84,9 +84,10 @@ _CONSTITUENTS_UNENTITLED_LOGGED: set = set()
 # a +2.54pp 1-year gap — four times ONEQ's tracking error, and wrong index besides. ONEQ
 # (Fidelity Nasdaq Composite Index ETF) is entitled and tracks the right thing.
 #
-# `historical_avg_pe` stays an INDEX statistic — it anchors the valuation snapshot's
-# "vs 10-year average" line, the fund's own P/E is the same number by construction, and
-# it is a long-run average rather than a licensed live level.
+# No per-index P/E statistic lives here any more. The profiles carried a hard-coded
+# `historical_avg_pe` (21 / 25 / 18) that the valuation snapshot set beside ONE market-wide
+# composite, so the three screens drew opposite conclusions from the same number. The
+# comparison is now the composite's own history (`_index_pe_history`, 2026-10-21).
 _INDEX_PROFILES: Dict[str, Dict[str, Any]] = {
     "^GSPC": {
         "proxy_symbol": "SPY",
@@ -104,8 +105,6 @@ _INDEX_PROFILES: Dict[str, Dict[str, Any]] = {
         "inception_date": "January 22, 1993",
         "index_provider": "State Street Global Advisors",
         "website": "www.ssga.com",
-        "historical_avg_pe": 21.0,
-        "historical_period": "10-year",
     },
     "^IXIC": {
         "proxy_symbol": "ONEQ",
@@ -123,8 +122,6 @@ _INDEX_PROFILES: Dict[str, Dict[str, Any]] = {
         "inception_date": "September 25, 2003",
         "index_provider": "Fidelity Investments",
         "website": "www.fidelity.com",
-        "historical_avg_pe": 25.0,
-        "historical_period": "10-year",
     },
     "^DJI": {
         "proxy_symbol": "DIA",
@@ -141,8 +138,6 @@ _INDEX_PROFILES: Dict[str, Dict[str, Any]] = {
         "inception_date": "January 14, 1998",
         "index_provider": "State Street Global Advisors",
         "website": "www.ssga.com",
-        "historical_avg_pe": 18.0,
-        "historical_period": "10-year",
     },
 }
 
@@ -200,6 +195,20 @@ _PE_PAGE = 1000
 _PE_MAX_PAGES = 20
 # Fewer sectors than this with a mature TTM P/E median → the index P/E is unknown.
 _INDEX_PE_MIN_SECTORS = 8
+
+# The index P/E is ONE US-market composite, the same number on ^GSPC, ^IXIC and ^DJI, so it
+# is compared only with its OWN history (owner decision 2026-10-21). It used to sit beside
+# each index's hard-coded 10-year average (21x / 25x / 18x), so the same 21.2x read as "a
+# premium" on the S&P and the Dow and "below average — suggesting potential value" on the
+# Nasdaq. The history is the same composite (mean of the mature sector medians) per stored
+# ANNUAL period, averaged over the newest 10 usable years — 22.14x for 2016-2025 on
+# 2026-10-21. Fewer than 8 usable years in that window → no comparison at all.
+_ANNUAL_PERIOD_TYPE = "annual"
+_INDEX_PE_HISTORY_PERIOD = "10-year"
+_INDEX_PE_HISTORY_YEARS = 10
+_INDEX_PE_HISTORY_MIN_YEARS = 8
+# Within ±5% of that average the story says "in line with", never "above" / "below".
+_INDEX_PE_IN_LINE_BAND = 0.05
 
 _CONSTITUENTS_TTL = 43_200  # 12h — index membership changes quarterly at most
 
@@ -358,9 +367,8 @@ def _spawn_background(coro, *, name: str) -> None:
 # needs a new CATEGORY and no migration.
 
 def _ai_stories_to_tier2(result) -> Dict[str, Any]:
-    valuation, sector, macro, indicators = result
+    sector, macro, indicators = result
     return {
-        "valuation": valuation,
         "sector": sector,
         "macro": macro,
         "indicators": [i.model_dump() for i in indicators],
@@ -368,22 +376,26 @@ def _ai_stories_to_tier2(result) -> Dict[str, Any]:
 
 
 def _ai_stories_from_tier2(payload: Any, symbol: str):
-    """Rebuild the story tuple from a persisted row, or None if it is unusable.
+    """Rebuild the (sector, macro, indicators) tuple from a persisted row, or None if it
+    is unusable.
 
     Re-validated rather than trusted: a Tier-2 row is JSON that a PREVIOUS deploy wrote,
     and a `Model(**row)` raising out of the middle of a build 500s the whole screen for
     the life of the row. Drop it loudly and let the caller rebuild instead.
+
+    A row written before 2026-10-21 also carries a `valuation` story — the model's
+    comparison of the market composite with a per-index average. It is ignored: the
+    valuation sentence is `_valuation_story`, built per response.
     """
     if not isinstance(payload, dict):
         return None
     try:
-        valuation = payload["valuation"]
         sector = payload["sector"]
         macro = payload["macro"]
         raw = payload.get("indicators") or []
-        if not (isinstance(valuation, str) and isinstance(sector, str) and isinstance(macro, str)):
+        if not (isinstance(sector, str) and isinstance(macro, str)):
             raise TypeError("story fields must be strings")
-        if not (valuation and sector and macro):
+        if not (sector and macro):
             raise ValueError("empty story field")
         if not isinstance(raw, list) or not raw:
             raise ValueError("no macro indicators")
@@ -394,7 +406,7 @@ def _ai_stories_from_tier2(payload: Any, symbol: str):
             symbol, type(e).__name__, e,
         )
         return None
-    return (valuation, sector, macro, indicators)
+    return (sector, macro, indicators)
 
 
 # ── Helpers ──────────────────────────────────────────────────────
@@ -523,11 +535,33 @@ def _compute_index_pe_from_sectors(now: Optional[datetime] = None) -> Optional[f
             sum(dropped.values()), TTM_MAX_AGE_DAYS,
         )
 
-    # One median per sector. The table is unique per (sector, industry, metric, period),
-    # so a duplicate means a malformed read: keep the newest computed one.
+    medians, thin = _mature_sector_medians(servable)
+    if len(medians) < _INDEX_PE_MIN_SECTORS:
+        logger.info(
+            "index P/E: only %d sector(s) carry a mature TTM P/E median (need %d; thin: "
+            "%s) — P/E reported unknown",
+            len(medians), _INDEX_PE_MIN_SECTORS, ", ".join(sorted(thin)) or "none",
+        )
+        return None
+    pes = list(medians.values())
+    avg_pe = sum(pes) / len(pes)
+    logger.info("Index PE computed from %d sector TTM medians: %.2f", len(pes), avg_pe)
+    return round(avg_pe, 2)
+
+
+def _mature_sector_medians(
+    rows: List[Dict[str, Any]],
+) -> Tuple[Dict[str, float], List[str]]:
+    """One P/E median per sector from rows that already passed the serving gate, and the
+    sectors held back as thin (sample under MATURE_SAMPLE_FLOOR).
+
+    The table is unique per (sector, industry, metric, period), so a duplicate means a
+    malformed read: the newest computed one wins. The composite and its history both go
+    through here, so "a sector counts" means the same thing on both sides of the comparison.
+    """
     per_sector: Dict[str, Tuple[str, float]] = {}
     thin: List[str] = []
-    for row in servable:
+    for row in rows:
         sector = row.get("sector")
         if not isinstance(sector, str) or not sector.strip():
             continue
@@ -542,18 +576,135 @@ def _compute_index_pe_from_sectors(now: Optional[datetime] = None) -> Optional[f
         held = per_sector.get(sector)
         if held is None or computed > held[0]:
             per_sector[sector] = (computed, value)
+    return {sector: value for sector, (_computed, value) in per_sector.items()}, thin
 
-    if len(per_sector) < _INDEX_PE_MIN_SECTORS:
+
+def _index_pe_history(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The composite's own 10-year average, from servable ANNUAL sector P/E rows. Pure.
+
+    Per year: the mean of the mature sector medians, kept only when at least
+    _INDEX_PE_MIN_SECTORS sectors carry one (the bar the current figure must clear). The
+    window is the newest usable year and the nine before it; fewer than
+    _INDEX_PE_HISTORY_MIN_YEARS usable years in it → None, never an average of a few years.
+    A label that is not a 4-digit year is skipped.
+    """
+    by_year: Dict[int, List[Dict[str, Any]]] = {}
+    for row in rows:
+        label = row.get("period_label")
+        if not isinstance(label, str) or not (len(label.strip()) == 4 and label.strip().isdigit()):
+            continue
+        by_year.setdefault(int(label.strip()), []).append(row)
+
+    composites: Dict[int, float] = {}
+    for year, year_rows in by_year.items():
+        medians, _thin = _mature_sector_medians(year_rows)
+        if len(medians) >= _INDEX_PE_MIN_SECTORS:
+            composites[year] = sum(medians.values()) / len(medians)
+    if not composites:
+        return None
+    last = max(composites)
+    window = {
+        year: value for year, value in composites.items()
+        if last - _INDEX_PE_HISTORY_YEARS < year <= last
+    }
+    if len(window) < _INDEX_PE_HISTORY_MIN_YEARS:
         logger.info(
-            "index P/E: only %d sector(s) carry a mature TTM P/E median (need %d; thin: "
-            "%s) — P/E reported unknown",
-            len(per_sector), _INDEX_PE_MIN_SECTORS, ", ".join(sorted(thin)) or "none",
+            "index P/E history: only %d usable year(s) in %d-%d (need %d) — no comparison",
+            len(window), last - _INDEX_PE_HISTORY_YEARS + 1, last, _INDEX_PE_HISTORY_MIN_YEARS,
         )
         return None
-    pes = [value for _computed, value in per_sector.values()]
-    avg_pe = sum(pes) / len(pes)
-    logger.info("Index PE computed from %d sector TTM medians: %.2f", len(pes), avg_pe)
-    return round(avg_pe, 2)
+    return {
+        "avg": round(sum(window.values()) / len(window), 2),
+        "years": len(window),
+        "first_year": min(window),
+        "last_year": last,
+    }
+
+
+def _compute_index_pe_basis(now: Optional[datetime] = None) -> Dict[str, Any]:
+    """What the index P/E IS, for the words around it. Never raises.
+
+    `sectors`: how many mature sector TTM medians the composite averages (None when the
+    composite itself is unknown). `history`: `_index_pe_history` over the servable annual
+    rows (None when unknown). One paged read of both period types — about 200 rows.
+    """
+    basis: Dict[str, Any] = {"sectors": None, "history": None}
+    try:
+        supabase = get_supabase()
+        rows: List[Dict[str, Any]] = fetch_all_rows(
+            lambda: supabase.table("sector_benchmarks")
+            .select("sector, period_type, period_label, median_value, sample_size, computed_at")
+            .eq("metric_name", "pe_ratio")
+            .in_("period_type", [TTM_PERIOD_TYPE, _ANNUAL_PERIOD_TYPE])
+            .eq("industry", ""),
+            order_by="id",
+            what="index P/E basis: sector TTM + annual P/E medians",
+            page_size=_PE_PAGE,
+            max_pages=_PE_MAX_PAGES,
+        )
+    except Exception as e:
+        logger.warning(
+            "index P/E basis: sector P/E read failed: %s: %s — no 10-year comparison",
+            type(e).__name__, e,
+        )
+        return basis
+
+    ttm, _ = servable_benchmark_rows(
+        [r for r in rows if r.get("period_type") == TTM_PERIOD_TYPE], TTM_PERIOD_TYPE, now=now,
+    )
+    medians, _thin = _mature_sector_medians(ttm)
+    if len(medians) >= _INDEX_PE_MIN_SECTORS:
+        basis["sectors"] = len(medians)
+
+    annual, dropped = servable_benchmark_rows(
+        [r for r in rows if r.get("period_type") == _ANNUAL_PERIOD_TYPE],
+        _ANNUAL_PERIOD_TYPE, now=now,
+    )
+    if dropped:
+        logger.info("index P/E history: held back %s annual row(s)", dict(dropped))
+    basis["history"] = _index_pe_history(annual)
+    logger.info(
+        "Index PE basis: %s sector TTM medians, history %s", basis["sectors"], basis["history"],
+    )
+    return basis
+
+
+def _valuation_story(
+    *, pe: Optional[float], pe_sectors: Optional[int], pe_history: Optional[Dict[str, Any]],
+) -> str:
+    """The valuation sentence. Code-owned, never the model's (owner decision 2026-10-21).
+
+    Wording approved by the owner: the figure is named as the US market composite, and it
+    is set only against the SAME composite's own 10-year average — "in line with" within
+    ±5%, else "above" / "below". No verdict on top ("potential value", "pricing in
+    growth", "a premium"): the badge carries the level. The placeholders are resolved on
+    the device, as before (`IndexValuationSnapshot.resolvedStory`).
+    """
+    if not (pe and pe > 0):
+        return (
+            "The US market P/E isn't available right now. It's the average of the sector "
+            "median P/Es, and not enough sectors reported this period for the figure to be "
+            "meaningful. The rest of this snapshot is unaffected."
+        )
+    what = (
+        f"the average of {pe_sectors} sector median P/Es" if pe_sectors
+        else "the average of the sector median P/Es"
+    )
+    head = (
+        f"The US market composite ({what}, the same on every index screen) trades at "
+        "{PE_RATIO} earnings"
+    )
+    avg = (pe_history or {}).get("avg")
+    if not (isinstance(avg, (int, float)) and math.isfinite(avg) and avg > 0):
+        return head + "."
+    ratio = pe / avg
+    if ratio > 1 + _INDEX_PE_IN_LINE_BAND:
+        relation = "above"
+    elif ratio < 1 - _INDEX_PE_IN_LINE_BAND:
+        relation = "below"
+    else:
+        relation = "in line with"
+    return f"{head}, {relation} its own {{HISTORICAL_PERIOD}} average of about {{HISTORICAL_AVG_PE}}."
 
 
 def _finite_positive(value: Any) -> Optional[float]:
@@ -795,7 +946,25 @@ class IndexService:
 
         Deliberately Tier-1 only: reading ~1 MB back from Supabase is slower than the FMP
         call it would replace.
+
+        A failed fetch is `[]` here (the screen degrades section by section); the paged
+        chart history calls `_get_history_strict`, which raises instead — an empty list
+        must never read there as "this index has no older bars".
         """
+        try:
+            return await self._get_history_strict(symbol)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(
+                "Index history fetch failed for %s (proxy %s): %s: %s",
+                symbol, _proxy_for(symbol), type(e).__name__, e,
+            )
+            return []
+
+    async def _get_history_strict(self, symbol: str) -> List[Dict]:
+        """`_get_history` without the swallow: the same cache and the same shared
+        fetch of the proxy's history, but a failure RAISES."""
         key = f"idx:hist:{symbol}"
         # Close-cycle aligned: the list is served RAW (its last row may be today's
         # in-progress bar, which the price-recovery fallback in `_build_index_detail`
@@ -816,15 +985,8 @@ class IndexService:
         fut: asyncio.Future = loop.create_future()
         _inflight[key] = fut
         try:
-            try:
-                from app.services.chart_helper import _fetch_all_daily
-                historical = await _fetch_all_daily(self.fmp, _proxy_for(symbol))
-            except Exception as e:
-                logger.warning(
-                    "Index history fetch failed for %s (proxy %s): %s: %s",
-                    symbol, _proxy_for(symbol), type(e).__name__, e,
-                )
-                historical = []
+            from app.services.chart_helper import _fetch_all_daily
+            historical = await _fetch_all_daily(self.fmp, _proxy_for(symbol))
             if historical:
                 # `date` may be an explicit JSON null; `or ""` avoids a None<str TypeError.
                 historical.sort(key=lambda p: p.get("date") or "")
@@ -1039,6 +1201,22 @@ class IndexService:
             _cache_set(key, pe, _DERIVED_TTL)
         return pe or 0
 
+    async def _get_pe_basis(self) -> Dict[str, Any]:
+        """`_compute_index_pe_basis`, symbol-independent like `_get_pe`. Never raises.
+
+        A complete basis is held as long as the P/E; a partial one (a failed read, too few
+        usable years) only for the default TTL, so a recovery shows within minutes rather
+        than leaving the comparison off for 12 hours.
+        """
+        key = "idx:pe_basis"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+        basis = await asyncio.to_thread(_compute_index_pe_basis)
+        complete = bool(basis.get("sectors")) and bool(basis.get("history"))
+        _cache_set(key, basis, _DERIVED_TTL if complete else _CACHE_TTL_SECONDS)
+        return basis
+
     async def _get_chart(
         self, symbol: str, chart_range: str, interval: Optional[str],
         fast_only: bool = False,
@@ -1219,6 +1397,17 @@ class IndexService:
         finally:
             _inflight.pop(cache_key, None)
 
+    async def get_index_chart(
+        self, symbol: str, chart_range: str = "3M", interval: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """`{symbol, prices}` for one range — the chart alone (see
+        `etf_service.get_etf_chart`). The SAME builder as the detail's `chart_data`
+        (`_get_chart`, which maps the index to its proxy); its points are response models,
+        dumped to plain rows here."""
+        bars = await self._get_chart(symbol, chart_range, interval)
+        rows = [b.model_dump() if hasattr(b, "model_dump") else b for b in (bars or [])]
+        return {"symbol": symbol, "prices": rows}
+
     async def get_index_quote(
         self,
         symbol: str,
@@ -1381,7 +1570,8 @@ class IndexService:
         # `news_raw` stays `[]`: news comes from `GET /indices/{symbol}/news`. The key still
         # ships (schema default `[]`) because the Swift DTO is non-optional and omitting it
         # fails the whole screen's decode.
-        quote, chart_data, sector_raw, live_constituents, derived, pe_from_sectors = (
+        (quote, chart_data, sector_raw, live_constituents, derived, pe_from_sectors,
+         pe_basis) = (
             await asyncio.gather(
                 self._get_quote(symbol),
                 self._get_chart(symbol, chart_range, interval),
@@ -1391,6 +1581,7 @@ class IndexService:
                 ),
                 self._get_derived(symbol),
                 self._get_pe(),
+                self._get_pe_basis(),
             )
         )
         news_raw: List[Dict[str, Any]] = []
@@ -1496,8 +1687,11 @@ class IndexService:
         change_pct = _finite_or_none(quote.get("changePercentage"))
         if change_pct is None:
             change_pct = _finite_or_none(quote.get("changesPercentage"))
-        # FMP doesn't return PE for indices — compute from sector benchmarks
-        pe = _q("pe") or pe_from_sectors or 0
+        # FMP doesn't return PE for indices — compute from sector benchmarks. ONLY the
+        # composite: every screen now names this figure the US market composite and sets
+        # it against the composite's own history, so a quote-borne `pe` (the proxy ETF's,
+        # were `_shape` ever to carry one) must not slip in under that name.
+        pe = pe_from_sectors or 0
         # `eps` was read here and never used. `_shape` has no `eps` key (and `/stable/quote`,
         # which had one, is blocked), so it could only ever be 0 — a dead read of a field
         # that cannot exist. Removed rather than left to look like a live input.
@@ -1553,7 +1747,8 @@ class IndexService:
         # `forwardPEDisplay` as "—" when `forwardPE <= 0` (IndexDetailModels.swift), and the
         # `{FORWARD_PE}` placeholder in the story resolves to the same "—". So this needs no
         # schema change and no new client build; what it needs is for the SENTENCE that
-        # asserted the estimate to go, which it has (see `_build_story_templates`).
+        # asserted the estimate to go, which it has: `_valuation_story` never mentions a
+        # forward multiple.
         forward_pe = 0.0
         earnings_yield = (1 / pe * 100) if pe and pe > 0 else 0
 
@@ -1593,8 +1788,7 @@ class IndexService:
             pe=pe,
             forward_pe=forward_pe,
             earnings_yield=earnings_yield,
-            historical_avg_pe=profile_meta.get("historical_avg_pe", 21),
-            historical_period=profile_meta.get("historical_period", "10-year"),
+            pe_basis=pe_basis if isinstance(pe_basis, dict) else {},
             sector_raw=sector_raw if isinstance(sector_raw, list) else [],
             index_name=index_name,
         )
@@ -1754,10 +1948,17 @@ class IndexService:
     # ── Snapshots builder (with Gemini AI) ───────────────────────
 
     async def _build_snapshots(
-        self, *, symbol, pe, forward_pe, earnings_yield,
-        historical_avg_pe, historical_period, sector_raw, index_name,
+        self, *, symbol, pe, forward_pe, earnings_yield, sector_raw, index_name,
+        pe_basis: Optional[Dict[str, Any]] = None,
     ) -> IndexSnapshotsDataResponse:
-        """Build the three snapshot cards with AI-generated story templates."""
+        """Build the three snapshot cards. The valuation sentence is code-owned
+        (`_valuation_story`); the model writes only the sector and macro stories.
+
+        `pe_basis` is `_get_pe_basis()`: the sector count behind `pe` and the composite's
+        own 10-year average. Absent or partial → the sentence names no count / makes no
+        comparison, and `historical_avg_pe_known` is False.
+        """
+        pe_basis = pe_basis or {}
 
         # Parse sector performance
         sectors = []
@@ -1784,33 +1985,24 @@ class IndexService:
         # Sort sectors by change (best first)
         sectors.sort(key=lambda s: s.change_percent, reverse=True)
 
-        # Determine valuation label
-        if pe and pe > 0:
-            if pe < 18:
-                val_label = "Bargain"
-            elif pe < 24:
-                val_label = "Fair Value"
-            elif pe < 30:
-                val_label = "Expensive"
-            else:
-                val_label = "Overheated"
-        else:
-            val_label = "Unknown"
+        # No valuation label here any more: it existed only for the model's valuation
+        # prompt, and the badge was never on the wire (iOS derives it from `pe_ratio`).
 
         # ── Generate AI stories (or use templates) ────────────────
-        valuation_story, sector_story, macro_story, macro_indicators = (
-            await self._generate_ai_stories(
-                symbol=symbol,
-                index_name=index_name,
-                pe=pe,
-                forward_pe=forward_pe,
-                earnings_yield=earnings_yield,
-                val_label=val_label,
-                historical_avg_pe=historical_avg_pe,
-                historical_period=historical_period,
-                sectors=sectors,
-            )
+        sector_story, macro_story, macro_indicators = await self._generate_ai_stories(
+            symbol=symbol,
+            index_name=index_name,
+            sectors=sectors,
         )
+
+        # Built per response, never cached with the prose: it reads the live `pe` and the
+        # basis, and a Tier-2 `ai_stories` row written before 2026-10-21 still carries the
+        # model's old per-index comparison, which this replaces on every read.
+        pe_history = pe_basis.get("history") or None
+        valuation_story = _valuation_story(
+            pe=pe, pe_sectors=pe_basis.get("sectors"), pe_history=pe_history,
+        )
+        historical_avg_pe = _finite_positive((pe_history or {}).get("avg"))
 
         today_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
 
@@ -1823,8 +2015,12 @@ class IndexService:
                 pe_ratio=round(pe, 1) if pe else 0,
                 forward_pe=round(forward_pe, 1) if forward_pe else 0,
                 earnings_yield=round(earnings_yield, 2) if earnings_yield else 0,
-                historical_avg_pe=historical_avg_pe,
-                historical_period=historical_period,
+                # The composite's OWN 10-year average, the same on every index. Unknown →
+                # the 0 sentinel plus `historical_avg_pe_known=False` (shipped builds decode
+                # a plain Double, so it cannot be null).
+                historical_avg_pe=round(historical_avg_pe, 1) if historical_avg_pe else 0.0,
+                historical_period=_INDEX_PE_HISTORY_PERIOD,
+                historical_avg_pe_known=historical_avg_pe is not None,
                 story_template=valuation_story,
             ),
             sector_performance=SectorPerformanceSnapshotResponse(
@@ -1840,10 +2036,13 @@ class IndexService:
         )
 
     async def _generate_ai_stories(
-        self, *, symbol, index_name, pe, forward_pe, earnings_yield,
-        val_label, historical_avg_pe, historical_period, sectors,
-    ) -> Tuple[str, str, str, List[MacroForecastItemResponse]]:
-        """Story templates for this index, WITHOUT ever blocking on Gemini.
+        self, *, symbol, index_name, sectors,
+    ) -> Tuple[str, str, List[MacroForecastItemResponse]]:
+        """Sector and macro story templates for this index, WITHOUT ever blocking on Gemini.
+
+        No valuation story: since 2026-10-21 that sentence is code-owned
+        (`_valuation_story`), so the model can never set the market composite against a
+        per-index average or attach a verdict ("suggesting potential value") to it.
 
         Lookup order — the crypto `_build_snapshots` shape, which has always done this:
           1. Tier-1 in-process dict
@@ -1859,7 +2058,7 @@ class IndexService:
         already sit, and a Gemini stall can no longer hold the screen for up to
         `GEMINI_REQUEST_TIMEOUT_SECONDS` (90s) waiting for prose we already have.
 
-        Returns (valuation_story, sector_story, macro_story, macro_indicators).
+        Returns (sector_story, macro_story, macro_indicators).
         """
         cache_key = f"ai_stories_{symbol}"
         cached = _cache_get(cache_key)
@@ -1880,13 +2079,7 @@ class IndexService:
         macro_cached = await asyncio.to_thread(self._check_macro_cache, symbol)
         has_macro = macro_cached is not None
 
-        result = self._build_story_templates(
-            pe=pe,
-            forward_pe=forward_pe,
-            historical_avg_pe=historical_avg_pe,
-            sectors=sectors,
-            macro_cached=macro_cached,
-        )
+        result = self._build_story_templates(sectors=sectors, macro_cached=macro_cached)
 
         # SHORT TTL on the fallback, on purpose. The long `_AI_CACHE_TTL_SECONDS` belongs
         # to real AI prose; pinning a template for an hour would mean a Gemini blip costs
@@ -1899,12 +2092,6 @@ class IndexService:
             _spawn_background(
                 self._refresh_ai_stories(
                     symbol=symbol,
-                    pe=pe,
-                    forward_pe=forward_pe,
-                    earnings_yield=earnings_yield,
-                    val_label=val_label,
-                    historical_avg_pe=historical_avg_pe,
-                    historical_period=historical_period,
                     sectors=sectors,
                     has_macro=has_macro,
                     fallback=result,
@@ -1916,38 +2103,11 @@ class IndexService:
 
     @staticmethod
     def _build_story_templates(
-        *, pe, forward_pe, historical_avg_pe, sectors, macro_cached,
-    ) -> Tuple[str, str, str, List[MacroForecastItemResponse]]:
-        """The deterministic prose. Pure, no I/O, always works — which is what makes it
-        safe to answer with while Gemini runs behind the response."""
-        # ── Build default templates (always work) ─────────────────
-        #
-        # 🔴 With no P/E there is nothing to say about valuation, and the template below
-        # would say it anyway: every branch is a ternary on `pe`, and the falsy arms read
-        # "below the average — suggesting potential value". Against `pe = 0` that renders
-        # "The market is trading at 0.0x earnings, which is considered Bargain. That's below
-        # the 10-year average of 21x — suggesting potential value." — investment language
-        # asserted from a number the service knows it failed to compute.
-        if not (pe and pe > 0):
-            valuation_template = (
-                "Index-level P/E isn't available right now. It's derived from the sector "
-                "benchmark medians, and not enough sectors reported this period for the "
-                "figure to be meaningful. The rest of this snapshot is unaffected."
-            )
-        else:
-            valuation_template = (
-                f"The market is trading at {{PE_RATIO}} earnings, "
-                f"which is considered {{VALUATION_LABEL}}. "
-                f"That's {'a premium to' if pe and pe > historical_avg_pe else 'below'} "
-                f"the {{HISTORICAL_PERIOD}} average of {{HISTORICAL_AVG_PE}} — "
-                f"{'investors are pricing in strong future growth' if pe and pe > historical_avg_pe else 'suggesting potential value'}. "
-            )
-            # NO forward-P/E sentence. It read "The forward P/E of {FORWARD_PE} tells a
-            # slightly better story, suggesting analysts expect earnings to catch up" —
-            # narrating a number that was `trailing × 0.85`, i.e. an invented claim about
-            # analyst expectations. Forward estimates are an unpurchased FMP package; when
-            # one exists, add the sentence back WITH the source.
-
+        *, sectors, macro_cached,
+    ) -> Tuple[str, str, List[MacroForecastItemResponse]]:
+        """The deterministic sector and macro prose. Pure, no I/O, always works — which is
+        what makes it safe to answer with while Gemini runs behind the response. The
+        valuation sentence is `_valuation_story`, built per response."""
         advancing = sum(1 for s in sectors if s.change_percent >= 0)
         sector_template = (
             f"{{TOP_SECTOR}} led the way at {{TOP_SECTOR_CHANGE}}, "
@@ -1991,21 +2151,24 @@ class IndexService:
         if macro_cached is not None:
             macro_template, default_macro_indicators = macro_cached
 
-        return (valuation_template, sector_template, macro_template, default_macro_indicators)
+        return (sector_template, macro_template, default_macro_indicators)
 
     async def _refresh_ai_stories(
-        self, *, symbol, pe, forward_pe, earnings_yield, val_label,
-        historical_avg_pe, historical_period, sectors, has_macro, fallback,
+        self, *, symbol, sectors, has_macro, fallback,
     ) -> None:
-        """Background: ask Gemini for the stories and write BOTH tiers.
+        """Background: ask Gemini for the sector (and, uncached, macro) stories and write
+        BOTH tiers.
 
         Nobody awaits this. It must therefore never raise into the void — `_spawn_background`
         gives it a strong reference and a done-callback, and the `except` below keeps a
         Gemini failure at WARNING with the symbol attached. On any failure the short-TTL
         template entry written by the caller simply expires and the next viewer retries.
+
+        The model gets no P/E and writes no valuation story (2026-10-21): it used to be
+        handed the composite beside a per-index 10-year average and told to compare them.
         """
         cache_key = f"ai_stories_{symbol}"
-        valuation_template, sector_template, macro_template, default_macro_indicators = fallback
+        sector_template, macro_template, default_macro_indicators = fallback
         advancing = sum(1 for s in sectors if s.change_percent >= 0)
         result = fallback
         # ── Try Gemini for stories ────────────────────────────────
@@ -2023,20 +2186,10 @@ class IndexService:
 IMPORTANT: Do NOT mention any specific index names like "S&P 500", "Dow Jones", or "Nasdaq". Use "the market" instead.
 
 Current data:
-- P/E Ratio (TTM): {pe:.1f}x
-- Earnings Yield: {earnings_yield:.2f}%
-- Historical Avg P/E ({historical_period}): {historical_avg_pe}x
-- Valuation Level: {val_label}
 - Top sectors today: {sector_text}
 - Advancing sectors: {advancing} of {len(sectors)}
 
-Generate exactly 2 items separated by "---":
-
-1. VALUATION STORY (2-3 sentences about the market valuation — do NOT name any index. Use "the market" instead. Mention the P/E ratio and how it compares to the historical average. There is NO forward-earnings input, so do NOT mention a forward P/E or any analyst estimate of future earnings. Use these placeholders in your text: {{PE_RATIO}}, {{EARNINGS_YIELD}}, {{VALUATION_LABEL}}, {{HISTORICAL_AVG_PE}}, {{HISTORICAL_PERIOD}})
-
----
-
-2. SECTOR STORY (2-3 sentences about sector performance.
+Write exactly 1 item, the SECTOR STORY (2-3 sentences about sector performance.
 CRITICAL: You MUST use these exact placeholder tokens — do NOT replace them with actual sector names or numbers:
   {{TOP_SECTOR}} = best performing sector name
   {{TOP_SECTOR_CHANGE}} = its % change (e.g. "+1.6%")
@@ -2053,20 +2206,12 @@ Write in a conversational, confident tone. Be specific and data-driven."""
 IMPORTANT: Do NOT mention any specific index names like "S&P 500", "Dow Jones", or "Nasdaq". Use "the market" instead.
 
 Current data:
-- P/E Ratio (TTM): {pe:.1f}x
-- Earnings Yield: {earnings_yield:.2f}%
-- Historical Avg P/E ({historical_period}): {historical_avg_pe}x
-- Valuation Level: {val_label}
 - Top sectors today: {sector_text}
 - Advancing sectors: {advancing} of {len(sectors)}
 
-Generate exactly 3 items separated by "---":
+Generate exactly 2 items separated by "---":
 
-1. VALUATION STORY (2-3 sentences about the market valuation — do NOT name any index. Use "the market" instead. Mention the P/E ratio and how it compares to the historical average. There is NO forward-earnings input, so do NOT mention a forward P/E or any analyst estimate of future earnings. Use these placeholders in your text: {{PE_RATIO}}, {{EARNINGS_YIELD}}, {{VALUATION_LABEL}}, {{HISTORICAL_AVG_PE}}, {{HISTORICAL_PERIOD}})
-
----
-
-2. SECTOR STORY (2-3 sentences about sector performance.
+1. SECTOR STORY (2-3 sentences about sector performance.
 CRITICAL: You MUST use these exact placeholder tokens — do NOT replace them with actual sector names or numbers:
   {{TOP_SECTOR}} = best performing sector name
   {{TOP_SECTOR_CHANGE}} = its % change (e.g. "+1.6%")
@@ -2079,7 +2224,7 @@ WRONG example: "Technology led at +0.8%." — NEVER hardcode names or values!)
 
 ---
 
-3. MACRO ITEMS (provide 4 current economic indicators as a JSON array. Each indicator should have a 1-2 sentence analysis based on the latest economic data):
+2. MACRO ITEMS (provide 4 current economic indicators as a JSON array. Each indicator should have a 1-2 sentence analysis based on the latest economic data):
 [{{"title": "indicator name", "description": "1-2 sentence analysis", "signal": "positive|neutral|cautious"}}]
 
 Write in a conversational, confident tone. Be specific and data-driven."""
@@ -2103,32 +2248,13 @@ Write in a conversational, confident tone. Be specific and data-driven."""
             text = ai_response.get("text", "")
             parts = text.split("---")
 
-            min_parts = 2 if has_macro else 3
+            min_parts = 1 if has_macro else 2
             if len(parts) >= min_parts:
-                ai_valuation = parts[0].strip()
-                ai_sector = parts[1].strip()
+                ai_sector = parts[0].strip()
 
                 # Clean up section headers
-                for header in ["1.", "2.", "3.", "VALUATION STORY", "SECTOR STORY", "MACRO ITEMS"]:
-                    ai_valuation = ai_valuation.replace(header, "").strip()
+                for header in ["1.", "2.", "SECTOR STORY", "MACRO ITEMS"]:
                     ai_sector = ai_sector.replace(header, "").strip()
-
-                if ai_valuation and len(ai_valuation) > 20:
-                    if not (pe and pe > 0):
-                        # 🔴 No P/E, so there is nothing to narrate. The deterministic
-                        # fallback already says so honestly; accepting Gemini's prose here
-                        # would put the fabricated valuation back on screen by the other
-                        # door — it is prompted WITH the placeholders and will happily write
-                        # "trading at {PE_RATIO}, which is considered {VALUATION_LABEL}",
-                        # which resolves against the 0 sentinel client-side.
-                        logger.info(
-                            "index %s: P/E unavailable — keeping the honest valuation "
-                            "template and discarding the AI one", symbol,
-                        )
-                    elif "{PE_RATIO}" in ai_valuation and "{VALUATION_LABEL}" in ai_valuation:
-                        valuation_template = ai_valuation
-                    else:
-                        logger.warning("Gemini valuation story missing placeholders, using default")
 
                 if ai_sector and len(ai_sector) > 20:
                     has_placeholders = (
@@ -2141,9 +2267,9 @@ Write in a conversational, confident tone. Be specific and data-driven."""
                         logger.warning("Gemini sector story missing placeholders, using default")
 
                 # Parse macro from Gemini only if NOT cached
-                if not has_macro and len(parts) >= 3:
-                    ai_macro_raw = parts[2].strip()
-                    for header in ["3.", "MACRO ITEMS"]:
+                if not has_macro and len(parts) >= 2:
+                    ai_macro_raw = parts[1].strip()
+                    for header in ["2.", "MACRO ITEMS"]:
                         ai_macro_raw = ai_macro_raw.replace(header, "").strip()
 
                     import json
@@ -2176,7 +2302,7 @@ Write in a conversational, confident tone. Be specific and data-driven."""
                     except (json.JSONDecodeError, KeyError, TypeError) as e:
                         logger.warning(f"Failed to parse Gemini macro indicators: {e}")
 
-                result = (valuation_template, sector_template, macro_template, default_macro_indicators)
+                result = (sector_template, macro_template, default_macro_indicators)
                 _cache_set(cache_key, result, _AI_CACHE_TTL_SECONDS)
                 # Persist so a redeploy, a new Railway instance or the next hour does
                 # not re-pay for this. 12h via `_TIER2_TTL_HOURS`, up from 1h in-process.

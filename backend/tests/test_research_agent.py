@@ -107,6 +107,7 @@ class _Gem:
 class _Out:
     ticker = "AAPL"
     profile = {"companyName": "Apple Inc."}
+    signal_of_confidence = None
 
 
 def _agent(gem: _Gem, monkeypatch, handlers: Dict[str, Any] | None = None) -> ResearchAgent:
@@ -115,7 +116,7 @@ def _agent(gem: _Gem, monkeypatch, handlers: Dict[str, Any] | None = None) -> Re
     agent.fmp = object()
     agent.persona = get_persona_config("warren_buffett")
     monkeypatch.setattr(ra, "build_fmp_tool_declarations", lambda: object())
-    monkeypatch.setattr(ra, "build_tool_handlers", lambda fmp: handlers or {})
+    monkeypatch.setattr(ra, "build_tool_handlers", lambda fmp, **_kw: handlers or {})
     return agent
 
 
@@ -407,3 +408,341 @@ async def test_an_in_loop_research_complete_prefers_prose_over_summary(monkeypat
     agent = _agent(gem, monkeypatch)
     assert await agent._agentic_research(_Out(), "EVIDENCE") == "PROSE"
     assert gem.fallback_calls == []
+
+
+# ── dividends and buybacks: the checked figures, never FMP's raw lines (2026-10-22) ──
+#
+# The deep door's cash-flow tools handed Gemini FMP's raw `commonStockRepurchased` /
+# `commonDividendsPaid` / `netDividendsPaid` / `dividendsPaid`. On INTC those are RSU tax
+# withholding (−$617M Q2 2026, −$181M Q2 2025: Intel bought back nothing) and a −$14.3B
+# payment to a minority partner booked as a "dividend" — read by the model as cash returned
+# to shareholders, in the free text that feeds Stage A. These drive the REAL loop and the
+# REAL handlers: only the fetch and the model are fake.
+
+import copy  # noqa: E402
+
+from app.schemas.signal_of_confidence import (  # noqa: E402
+    AnnualDividendSchema,
+    DividendInfoSchema,
+    SignalOfConfidenceDataPointSchema,
+    SignalOfConfidenceResponse,
+    SignalOfConfidenceSummarySchema,
+)
+from app.services.agents import fmp_tools  # noqa: E402
+
+_RAW_RETURN_LINES = ("commonStockRepurchased", "commonDividendsPaid", "netDividendsPaid", "dividendsPaid")
+
+
+def _cf_row(date, fy, period, *, buyback, dividend, cur="USD", **extra):
+    return {
+        "date": date, "symbol": "X", "reportedCurrency": cur, "fiscalYear": fy, "period": period,
+        "operatingCashFlow": 2_345_000_000, "capitalExpenditure": -1_234_000_000,
+        "freeCashFlow": 1_111_000_000, "commonStockRepurchased": buyback,
+        "commonDividendsPaid": dividend, "netDividendsPaid": dividend, **extra,
+    }
+
+
+# FMP's rows as served: newest first, the two lines as FMP files them.
+_INTC_ROWS = [
+    _cf_row("2026-06-27", "2026", "Q2", buyback=-617_000_000, dividend=-14_300_000_000,
+            dividendsPaid=-14_300_000_000),  # legacy spelling too: it must not leak either
+    _cf_row("2026-03-28", "2026", "Q1", buyback=0, dividend=0),
+    _cf_row("2025-06-28", "2025", "Q2", buyback=-181_000_000, dividend=0),
+]
+# Every magnitude those lines carry, in every spelling json.dumps can give a float/int.
+_INTC_RAW_FIGURES = ("14300000000", "1.43e+10", "617000000", "6.17e+08", "181000000",
+                     "1.81e+08", "14300.0", "617.0", "181.0")
+
+
+def _soc(symbol, quarters, *, div_yield=0.0, bb_yield=0.0, bb_status="Low", div_status=None,
+         dps=(), share_change=0.0, share_known=True, degraded=()):
+    """A Signal of Confidence build as the service serves it (amounts in millions)."""
+    return SignalOfConfidenceResponse(
+        symbol=symbol,
+        data_points=[
+            SignalOfConfidenceDataPointSchema(
+                period=p, dividend_amount=d, buyback_amount=b, cash_flow_reported=reported,
+            )
+            for p, d, b, reported in quarters
+        ],
+        summary=SignalOfConfidenceSummarySchema(
+            dividend_yield=div_yield, buyback_yield=bb_yield, total_yield=div_yield + bb_yield,
+            share_count_change=share_change, share_count_change_known=share_known,
+            buyback_status=bb_status,
+        ),
+        dividend_info=(
+            DividendInfoSchema(
+                status=div_status,
+                annual_dividends=[AnnualDividendSchema(year=y, per_share=v) for y, v in dps],
+            )
+            if div_status else None
+        ),
+        degraded=list(degraded),
+    )
+
+
+# INTC as the service builds it: the SEC check zeroed the withholding "buybacks" and the
+# payer verdict (no common dividend since Q3 2024) refused the −14.3B line.
+_INTC_SOC = _soc(
+    "INTC",
+    [("Q2 '25", 0.0, 0.0, True), ("Q3 '25", 0.0, 0.0, True), ("Q4 '25", 0.0, 0.0, True),
+     ("Q1 '26", 0.0, 0.0, True), ("Q2 '26", 0.0, 0.0, True)],
+    bb_status="Diluting (Mild)", div_status="Low", share_change=2.4,
+    dps=[("2022", 1.4598), ("2023", 0.737), ("2024", 0.3736), ("2025", 0.0)],
+)
+_KO_ROWS = [_cf_row("2026-06-27", "2026", "Q2", buyback=-480_000_000, dividend=-2_196_000_000)]
+_KO_SOC = _soc(
+    "KO", [("Q1 '26", 2189.0, 410.0, True), ("Q2 '26", 2196.0, 480.0, True)],
+    div_yield=2.95, bb_yield=0.41, bb_status="Low", div_status="Fair", share_change=-0.3,
+    dps=[("2024", 1.94), ("2025", 2.0402)],
+)
+_AAPL_ROWS = [_cf_row("2026-06-27", "2026", "Q3", buyback=-25_100_000_000, dividend=-3_870_000_000)]
+_AAPL_SOC = _soc(
+    "AAPL", [("Q2 '26", 3810.0, 23_400.0, True), ("Q3 '26", 3870.0, 25_100.0, True)],
+    div_yield=0.44, bb_yield=2.71, bb_status="High", div_status="Low", share_change=-2.6,
+    dps=[("2024", 0.98), ("2025", 1.02)],
+)
+
+
+class _CashFlowFMP:
+    """Serves FMP-shaped statements per ticker; records every fetch."""
+
+    def __init__(self, rows: Dict[str, List[Dict[str, Any]]]):
+        self.rows, self.calls = rows, []
+
+    async def get_cash_flow_statement(self, ticker, period, limit):
+        self.calls.append(("cash_flow", ticker, period, limit))
+        return copy.deepcopy(self.rows.get(ticker, []))
+
+    async def get_income_statement(self, ticker, period, limit):
+        self.calls.append(("income", ticker, period, limit))
+        return [{"date": "2026-06-27", "fiscalYear": "2026", "period": "Q2", "revenue": 1.0,
+                 "commonStockRepurchased": -617_000_000}]
+
+
+class _AgentOut:
+    def __init__(self, ticker, soc, name="Co"):
+        self.ticker, self.signal_of_confidence = ticker, soc
+        self.profile = {"companyName": name}
+
+
+def _real_agent(gem: _Gem, fmp, monkeypatch) -> ResearchAgent:
+    """`_agent` without the handler stub: the REAL `build_tool_handlers`."""
+    agent = ResearchAgent.__new__(ResearchAgent)
+    agent.gemini, agent.fmp = gem, fmp
+    agent.persona = get_persona_config("warren_buffett")
+    monkeypatch.setattr(ra, "build_fmp_tool_declarations", lambda: object())
+    return agent
+
+
+def _fed_payloads(chat: _ScriptedChat, round_index: int = 1) -> List[str]:
+    """The serialized tool results the model received in a follow-up — the exact text."""
+    return [r["result"] for r in _fed_back(chat, round_index)]
+
+
+def _assert_no_raw_lines(payload: str) -> None:
+    for key in _RAW_RETURN_LINES:
+        assert f'"{key}"' not in payload, f"FMP's raw `{key}` reached the model"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool,args", [
+    ("fetch_quarterly_financials", {"ticker": "INTC", "statement_type": "cash_flow", "limit": 8}),
+    ("fetch_extended_financials", {"ticker": "INTC", "statement_type": "cash_flow"}),
+])
+async def test_intc_shaped_rows_never_reach_the_model_as_a_dividend_or_buyback(
+    monkeypatch, tool, args,
+):
+    fmp = _CashFlowFMP({"INTC": _INTC_ROWS})
+    gem = _Gem([fc(tool, **args), text("INTC findings")])
+    agent = _real_agent(gem, fmp, monkeypatch)
+
+    assert await agent._agentic_research(_AgentOut("INTC", _INTC_SOC, "Intel"), "EV") == "INTC findings"
+    (payload,) = _fed_payloads(gem.chat)
+    _assert_no_raw_lines(payload)
+    for figure in _INTC_RAW_FIGURES:
+        assert figure not in payload, f"INTC's raw {figure} reached the model"
+
+    result = json.loads(payload)
+    assert [r["operatingCashFlow"] for r in result["data"]] == [2_345_000_000] * 3, (
+        "the statement itself still reaches the model — only the two lines are gone"
+    )
+    returns = result["shareholder_returns"]
+    assert returns["available"] is True and returns["amounts_in"] == "USD millions"
+    newest = {q["period"]: q for q in returns["quarters"]}["Q2 '26"]
+    assert newest == {"period": "Q2 '26", "dividends_paid": 0.0, "buybacks": 0.0}
+    assert returns["trailing_12_months"]["buyback_status"] == "Diluting (Mild)"
+    assert returns["annual_dividends_per_share"][-1] == {"fiscal_year": "2025", "per_share": 0.0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ticker,rows,soc,div_q,bb_q,yields", [
+    ("KO", _KO_ROWS, _KO_SOC, 2196.0, 480.0, (2.95, 0.41, "Fair", "Low")),
+    ("AAPL", _AAPL_ROWS, _AAPL_SOC, 3870.0, 25_100.0, (0.44, 2.71, "Low", "High")),
+])
+async def test_a_real_payer_and_repurchaser_keep_their_checked_figures(
+    monkeypatch, ticker, rows, soc, div_q, bb_q, yields,
+):
+    fmp = _CashFlowFMP({ticker: rows})
+    gem = _Gem([fc("fetch_quarterly_financials", ticker=ticker, statement_type="cash_flow"),
+                text(f"{ticker} findings")])
+    agent = _real_agent(gem, fmp, monkeypatch)
+
+    assert await agent._agentic_research(_AgentOut(ticker, soc), "EV") == f"{ticker} findings"
+    (payload,) = _fed_payloads(gem.chat)
+    _assert_no_raw_lines(payload)
+    returns = json.loads(payload)["shareholder_returns"]
+    assert returns["available"] is True
+    assert returns["quarters"][-1]["dividends_paid"] == div_q
+    assert returns["quarters"][-1]["buybacks"] == bb_q
+    t12 = returns["trailing_12_months"]
+    div_yield, bb_yield, div_status, bb_status = yields
+    assert (t12["dividend_yield_pct"], t12["buyback_yield_pct"]) == (div_yield, bb_yield)
+    assert (t12["dividend_status"], t12["buyback_status"]) == (div_status, bb_status)
+    assert t12["total_yield_pct"] == round(div_yield + bb_yield, 2)
+    assert returns["annual_dividends_per_share"], "a payer's per-share record reaches the model"
+    assert "never another cash-flow line" in returns["note"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["fetch_quarterly_financials", "fetch_extended_financials"])
+async def test_another_tickers_cash_flow_carries_no_figure_at_all(tool):
+    """A competitor the model looks up has no checked build here: its raw lines are left
+    out and it says so — never an empty list that reads as "pays nothing"."""
+    handlers = fmp_tools.build_tool_handlers(
+        _CashFlowFMP({"AMD": _INTC_ROWS}), subject_ticker="INTC", signal_of_confidence=_INTC_SOC,
+    )
+    out = await handlers[tool]({"ticker": "AMD", "statement_type": "cash_flow"})
+    _assert_no_raw_lines(json.dumps(out))
+    assert out["shareholder_returns"] == {
+        "available": False, "note": fmp_tools._RETURNS_OTHER_TICKER_NOTE,
+    }
+    assert "Make no claim" in out["shareholder_returns"]["note"]
+    assert len(out["data"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_no_subject_at_all_strips_every_ticker():
+    """The default (no subject) is the fail-closed one: nobody gets figures."""
+    handlers = fmp_tools.build_tool_handlers(_CashFlowFMP({"INTC": _INTC_ROWS}))
+    out = await handlers["fetch_quarterly_financials"]({"ticker": "INTC", "statement_type": "cash_flow"})
+    _assert_no_raw_lines(json.dumps(out))
+    assert out["shareholder_returns"]["available"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_missing_build_is_unavailable_not_zero():
+    handlers = fmp_tools.build_tool_handlers(
+        _CashFlowFMP({"INTC": _INTC_ROWS}), subject_ticker="INTC", signal_of_confidence=None,
+    )
+    out = await handlers["fetch_quarterly_financials"]({"ticker": "INTC", "statement_type": "cash_flow"})
+    _assert_no_raw_lines(json.dumps(out))
+    returns = out["shareholder_returns"]
+    assert returns == {"available": False, "note": fmp_tools._RETURNS_UNAVAILABLE_NOTE}
+    assert "Unavailable is not zero" in returns["note"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("degraded,available", [
+    (["buyback_check"], False),          # SEC unreachable: FMP's UNCHECKED buybacks
+    (["income", "cash_flow_row"], False),
+    (["cash_flow_row"], True),           # a lagging newest quarter: the service trimmed it
+    ([], True),
+])
+async def test_a_degraded_build_is_withheld_and_logged(caplog, degraded, available):
+    soc = _soc("INTC", [("Q2 '26", 0.0, 617.0, True)], degraded=degraded)
+    handlers = fmp_tools.build_tool_handlers(
+        _CashFlowFMP({"INTC": _INTC_ROWS}), subject_ticker="INTC", signal_of_confidence=soc,
+    )
+    with caplog.at_level("WARNING", logger=fmp_tools.__name__):
+        out = await handlers["fetch_quarterly_financials"](
+            {"ticker": "INTC", "statement_type": "cash_flow"}
+        )
+    assert out["shareholder_returns"]["available"] is available
+    refused = [r.getMessage() for r in caplog.records if "research-tool-returns-refused" in r.getMessage()]
+    if available:
+        assert not refused
+    else:
+        assert "617" not in json.dumps(out), "an unchecked build's buyback reached the model"
+        assert len(refused) == 1 and "INTC" in refused[0]
+        assert all(r in refused[0] for r in degraded if r != "cash_flow_row"), refused[0]
+
+
+def test_a_quarter_with_no_cash_flow_row_reads_null_not_zero():
+    """`cash_flow_reported=False` points carry 0.0 PLACEHOLDERS (non-Optional on shipped
+    iOS); handed to the model as 0.0 they would read as "paid nothing that quarter"."""
+    soc = _soc("KO", [("Q1 '26", 0.0, 0.0, False), ("Q2 '26", 2196.0, 480.0, True)],
+               div_status="Fair")
+    returns = fmp_tools.shareholder_returns_block(soc, "USD")
+    assert returns["quarters"][0] == {"period": "Q1 '26", "dividends_paid": None, "buybacks": None}
+    assert returns["quarters"][1]["dividends_paid"] == 2196.0
+
+
+def test_an_unknown_share_count_change_is_null_not_flat():
+    soc = _soc("KO", [("Q2 '26", 1.0, 1.0, True)], share_change=0.0, share_known=False)
+    assert fmp_tools.shareholder_returns_block(soc, "USD")["trailing_12_months"][
+        "share_count_change_pct"] is None
+
+
+@pytest.mark.parametrize("rows,label,cur", [
+    ([_cf_row("2026-06-30", "2026", "Q2", buyback=0, dividend=-9e10, cur="TWD")],
+     "TWD millions", "TWD"),
+    ([{**_cf_row("2026-06-30", "2026", "Q2", buyback=0, dividend=0), "reportedCurrency": None}],
+     "millions, in the statement's reporting currency", "an unknown reporting currency"),
+    ([_cf_row("2026-06-30", "2026", "Q2", buyback=0, dividend=0, cur="USD"),
+      _cf_row("2026-03-31", "2026", "Q1", buyback=0, dividend=0, cur="TWD")],
+     "millions, in the statement's reporting currency", "an unknown reporting currency"),
+    ([], "millions, in the statement's reporting currency", "an unknown reporting currency"),
+])
+def test_yields_ride_only_on_a_usd_statement(rows, label, cur):
+    """The service divides reporting-currency amounts by a US-dollar market cap: on TSM's
+    TWD statements every yield (and the verdicts built on it) is ~30x off."""
+    returns = fmp_tools.shareholder_returns_block(_KO_SOC, fmp_tools._statement_currency(rows))
+    assert returns["available"] is True and returns["amounts_in"] == label
+    t12 = returns["trailing_12_months"]
+    assert set(t12) == {"share_count_change_pct"}, "a yield or verdict escaped the USD gate"
+    assert cur in returns["yields_note"]
+    assert returns["quarters"][-1]["dividends_paid"] == 2196.0, "the amounts themselves stay"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("subject,asked", [("BRK-B", "brk.b"), ("BRK.B", "BRK-B"), ("ko", " KO ")])
+async def test_the_subject_matches_across_share_class_spellings(subject, asked):
+    handlers = fmp_tools.build_tool_handlers(
+        _CashFlowFMP({asked.strip().upper(): _KO_ROWS}),
+        subject_ticker=subject, signal_of_confidence=_KO_SOC,
+    )
+    out = await handlers["fetch_quarterly_financials"]({"ticker": asked, "statement_type": "cash_flow"})
+    assert out["shareholder_returns"]["available"] is True
+
+
+@pytest.mark.asyncio
+async def test_income_and_balance_results_are_unchanged():
+    handlers = fmp_tools.build_tool_handlers(
+        _CashFlowFMP({}), subject_ticker="INTC", signal_of_confidence=_INTC_SOC,
+    )
+    out = await handlers["fetch_quarterly_financials"]({"ticker": "INTC", "statement_type": "income"})
+    assert "shareholder_returns" not in out
+    assert "commonStockRepurchased" not in out["data"][0], "the income select never took it"
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_build_costs_the_figures_not_the_tool(caplog):
+    class _Broken:
+        symbol, degraded, data_points = "INTC", [], [object()]   # no `period` / amounts
+
+    handlers = fmp_tools.build_tool_handlers(
+        _CashFlowFMP({"INTC": _INTC_ROWS}), subject_ticker="INTC", signal_of_confidence=_Broken(),
+    )
+    with caplog.at_level("WARNING", logger=fmp_tools.__name__):
+        out = await handlers["fetch_quarterly_financials"](
+            {"ticker": "INTC", "statement_type": "cash_flow"}
+        )
+    assert "error" not in out and len(out["data"]) == 3, "the statement still reached the model"
+    assert out["shareholder_returns"] == {"available": False, "note": fmp_tools._RETURNS_UNAVAILABLE_NOTE}
+    assert any("research-tool-returns-malformed" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), True, "617", None])
+def test_a_non_numeric_amount_is_null(value):
+    assert fmp_tools._rounded(value) is None

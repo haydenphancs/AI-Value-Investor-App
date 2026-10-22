@@ -11,6 +11,7 @@ Uses google.genai types for Gemini-compatible function declarations.
 """
 
 import logging
+import math
 from typing import Dict, Any, Callable, Awaitable, Optional
 
 import httpx
@@ -94,6 +95,156 @@ def _ticker_arg(args: Dict[str, Any]) -> str:
 
 
 _NO_TICKER = "ticker is required"
+
+
+# ── Dividends and buybacks: never the raw cash-flow lines ─────────────────────
+#
+# FMP's `commonStockRepurchased`, `commonDividendsPaid`, `netDividendsPaid` and legacy
+# `dividendsPaid` are not reliably what their names say (2026-10-22). INTC's −$181M / −$617M
+# "repurchases" (Q2 2025 / Q2 2026) are employee RSU tax withholding — Intel has bought back
+# nothing since 2021 — and its Q2 2026 −$14.3B `commonDividendsPaid` is a payment to a
+# minority partner (SEC `PaymentsToMinorityShareholders`, the Apollo Ireland fab stake). A
+# survey of 15 issuers x 8 quarters found 11 of 120 repurchase rows that were something else.
+# Handed to the model raw, they read as "Intel returned ~$15B to shareholders" in the free
+# text that feeds Stage A.
+#
+# So the cash-flow tools never select those lines (`_compress_financial_data`). The report's
+# OWN ticker gets the Signal of Confidence figures instead — buybacks checked against the SEC
+# filing (`services/_buyback_verification.py`), dividends counted only in a fiscal year the
+# company paid a common dividend per share — the very object the report's capital-allocation
+# card is built from, so the narrative and the card cannot disagree. Any other ticker (a
+# competitor the model looked up) gets an explicit "left out" note: no figure, and no empty
+# list a model would read as "pays nothing". A raw line merely ANNOTATED was rejected: the
+# model reads the number, not the caveat.
+
+_RETURNS_SOURCE_NOTE = (
+    "Use these, never another cash-flow line, for dividends and buybacks. They are the "
+    "figures the report's capital-allocation card shows: buybacks are checked against the "
+    "company's SEC filings where available (employee tax withholding and preferred "
+    "redemptions taken out), and dividends count only in fiscal years the company paid a "
+    "common dividend per share. A null amount is a quarter whose cash flow was not "
+    "reported, not a zero."
+)
+_RETURNS_OTHER_TICKER_NOTE = (
+    "Dividend and buyback lines are left out of this statement on purpose: the raw lines "
+    "can hold employee tax withholding, preferred-stock redemptions or payments to minority "
+    "partners. Make no claim about this company's dividends or buybacks from it."
+)
+_RETURNS_UNAVAILABLE_NOTE = (
+    "Checked dividend and buyback figures are unavailable for this company in this report. "
+    "Unavailable is not zero: make no claim about its dividends or buybacks."
+)
+_RETURNS_NON_USD_NOTE = (
+    "Yields and verdicts are withheld: the amounts are in {cur}, and the yields were "
+    "measured against a US-dollar market cap."
+)
+
+#: Signal of Confidence `degraded` reasons that leave its figures intact — the collector's
+#: `_FROZEN_FINANCIALS_IGNORABLE["signal_of_confidence"]`, which already refuses (None) a
+#: build carrying any other reason. Re-checked here so an unsettled build (a `buyback_check`
+#: that could not reach SEC = FMP's unchecked figures) never reaches the model as checked.
+_RETURNS_TOLERATED_DEGRADATION = frozenset({"cash_flow_row"})
+
+
+def _listing_key(ticker: Any) -> str:
+    """`BRK.B` and `BRK-B` name one listing (FMP uses the dash)."""
+    return str(ticker or "").strip().upper().replace(".", "-")
+
+
+def _statement_currency(rows: Any) -> Optional[str]:
+    """The one `reportedCurrency` the fetched statement rows declare, else None (none
+    declared, or rows that disagree)."""
+    codes = {
+        r["reportedCurrency"].strip().upper()
+        for r in (rows if isinstance(rows, list) else [])
+        if isinstance(r, dict)
+        and isinstance(r.get("reportedCurrency"), str)
+        and r["reportedCurrency"].strip()
+    }
+    return codes.pop() if len(codes) == 1 else None
+
+
+def _rounded(value: Any, places: int = 2) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return round(float(value), places) if math.isfinite(value) else None
+
+
+def shareholder_returns_block(soc: Any, currency: Optional[str]) -> Dict[str, Any]:
+    """What a cash-flow tool result says about dividends and buybacks for the report's own
+    ticker, from its Signal of Confidence build ``soc`` (None = refused or failed).
+
+    Amounts are the service's per-quarter millions, in the statement's reporting currency
+    (the service converts nothing). Its yields divide those amounts by a US-dollar market
+    cap, so they — and the yield-based verdicts — are given only when ``currency`` is USD.
+    Never raises: anything malformed is "unavailable", logged.
+    """
+    if soc is None:
+        return {"available": False, "note": _RETURNS_UNAVAILABLE_NOTE}
+    symbol = getattr(soc, "symbol", "?")
+    try:
+        degraded = getattr(soc, "degraded", None) or []
+        blocking = [str(r) for r in degraded if str(r) not in _RETURNS_TOLERATED_DEGRADATION]
+        if blocking:
+            logger.warning(
+                "[research-tool-returns-refused] ticker=%s: Signal of Confidence build is "
+                "degraded (%s) — dividends/buybacks withheld from the model, not handed over "
+                "unchecked", symbol, ", ".join(blocking),
+            )
+            return {"available": False, "note": _RETURNS_UNAVAILABLE_NOTE}
+
+        quarters = []
+        for dp in soc.data_points or []:
+            reported = getattr(dp, "cash_flow_reported", True) is not False
+            quarters.append({
+                "period": dp.period,
+                "dividends_paid": _rounded(dp.dividend_amount) if reported else None,
+                "buybacks": _rounded(dp.buyback_amount) if reported else None,
+            })
+
+        s = soc.summary
+        div = soc.dividend_info
+        usd = currency == "USD"
+        trailing: Dict[str, Any] = {
+            "share_count_change_pct": (
+                _rounded(s.share_count_change)
+                if getattr(s, "share_count_change_known", True) else None
+            ),
+        }
+        if usd:
+            trailing.update({
+                "dividend_yield_pct": _rounded(s.dividend_yield),
+                "buyback_yield_pct": _rounded(s.buyback_yield),
+                "total_yield_pct": _rounded(s.total_yield),
+                "buyback_status": s.buyback_status,
+                # "None" for a non-payer, as the report's card says — never a verdict on a
+                # payout that does not exist.
+                "dividend_status": div.status if div else "None",
+            })
+        block: Dict[str, Any] = {
+            "available": True,
+            "note": _RETURNS_SOURCE_NOTE,
+            "amounts_in": f"{currency} millions" if currency else (
+                "millions, in the statement's reporting currency"
+            ),
+            "quarters": quarters,
+            "trailing_12_months": trailing,
+            "annual_dividends_per_share": [
+                {"fiscal_year": a.year, "per_share": _rounded(a.per_share, 4)}
+                for a in (div.annual_dividends if div else [])
+            ],
+        }
+        if not usd:
+            block["yields_note"] = _RETURNS_NON_USD_NOTE.format(
+                cur=currency or "an unknown reporting currency"
+            )
+        return block
+    except Exception as e:  # a malformed build must cost the figures, never the tool
+        logger.warning(
+            "[research-tool-returns-malformed] ticker=%s: %s: %s — dividends/buybacks "
+            "withheld from the model", symbol, type(e).__name__, e, exc_info=True,
+        )
+        return {"available": False, "note": _RETURNS_UNAVAILABLE_NOTE}
 
 
 # ── Gemini Function Declarations ──────────────────────────────────────────────
@@ -254,8 +405,32 @@ def build_fmp_tool_declarations() -> types.Tool:
 # ── Tool Handlers ─────────────────────────────────────────────────────────────
 
 
-def build_tool_handlers(fmp: FMPClient) -> Dict[str, Callable[..., Awaitable[Dict[str, Any]]]]:
-    """Build async handler functions for each FMP tool."""
+def build_tool_handlers(
+    fmp: FMPClient,
+    *,
+    subject_ticker: str = "",
+    signal_of_confidence: Any = None,
+) -> Dict[str, Callable[..., Awaitable[Dict[str, Any]]]]:
+    """Build async handler functions for each FMP tool.
+
+    ``subject_ticker`` / ``signal_of_confidence``: the report's own ticker and its Signal of
+    Confidence build (None when the collector refused or lost it). A cash-flow result for
+    that ticker carries the build's checked dividends and buybacks; any other ticker's says
+    they were left out ("Dividends and buybacks: never the raw cash-flow lines" above).
+    """
+    subject = _listing_key(subject_ticker)
+
+    def _cash_flow_result(ticker: str, data: Any) -> Dict[str, Any]:
+        result = _compress_financial_data(data, "cash_flow")
+        if subject and _listing_key(ticker) == subject:
+            result["shareholder_returns"] = shareholder_returns_block(
+                signal_of_confidence, _statement_currency(data)
+            )
+        else:
+            result["shareholder_returns"] = {
+                "available": False, "note": _RETURNS_OTHER_TICKER_NOTE,
+            }
+        return result
 
     async def fetch_quarterly_financials(args: Dict[str, Any]) -> Dict[str, Any]:
         ticker = _ticker_arg(args)
@@ -271,6 +446,7 @@ def build_tool_handlers(fmp: FMPClient) -> Dict[str, Callable[..., Awaitable[Dic
                 data = await fmp.get_balance_sheet(ticker, "quarter", limit)
             elif statement == "cash_flow":
                 data = await fmp.get_cash_flow_statement(ticker, "quarter", limit)
+                return _cash_flow_result(ticker, data)
             else:
                 return {"error": f"Unknown statement type: {statement}"}
 
@@ -360,6 +536,7 @@ def build_tool_handlers(fmp: FMPClient) -> Dict[str, Callable[..., Awaitable[Dic
                 data = await fmp.get_balance_sheet(ticker, "annual", 10)
             elif statement == "cash_flow":
                 data = await fmp.get_cash_flow_statement(ticker, "annual", 10)
+                return _cash_flow_result(ticker, data)
             else:
                 return {"error": f"Unknown statement type: {statement}"}
             return _compress_financial_data(data, statement)
@@ -394,12 +571,16 @@ def _compress_financial_data(
     # ⚠️ These are SELECT lists — `{k: item[k] for k in fields if k in item}` below — so a
     # name `/stable` no longer returns is not an error, it is a FIELD THAT SILENTLY
     # VANISHES from what the model is handed. Verified against a live AAPL payload:
-    # `calendarYear` → `fiscalYear` (all three statements), `epsdiluted` → `epsDiluted`,
-    # `dividendsPaid` → `netDividendsPaid`. So Cay AI asked for an income statement and
-    # got back no EPS and no year label at all.
+    # `calendarYear` → `fiscalYear` (all three statements), `epsdiluted` → `epsDiluted`.
+    # So Cay AI asked for an income statement and got back no EPS and no year label at all.
     #
     # BOTH spellings are listed rather than swapped: the select is presence-based, so the
     # dead name costs nothing and an upstream revert keeps working.
+    #
+    # ⚠️ Never add a dividend or buyback line to `cash_flow` (`commonStockRepurchased`,
+    # `commonDividendsPaid`, `netDividendsPaid`, `dividendsPaid`): the handlers attach the
+    # checked figures under `shareholder_returns` instead ("Dividends and buybacks: never
+    # the raw cash-flow lines" above).
     key_fields = {
         "income": [
             "date", "fiscalYear", "calendarYear", "period", "revenue", "grossProfit",
@@ -414,8 +595,7 @@ def _compress_financial_data(
         ],
         "cash_flow": [
             "date", "fiscalYear", "calendarYear", "period", "operatingCashFlow",
-            "capitalExpenditure", "freeCashFlow", "netDividendsPaid",
-            "commonDividendsPaid", "dividendsPaid", "commonStockRepurchased",
+            "capitalExpenditure", "freeCashFlow",
         ],
     }
 

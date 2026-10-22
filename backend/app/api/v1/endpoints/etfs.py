@@ -7,7 +7,19 @@ Frontend: GET /api/v1/etfs/{symbol}?range=3M&interval=daily
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
-from app.dependencies import StandardRateLimit, get_current_user_id, MarketRateLimit
+from app.dependencies import (
+    MarketFanoutRateLimit,
+    MarketRateLimit,
+    StandardRateLimit,
+    get_current_user_id,
+)
+from app.api.chart_history_http import (
+    BEFORE_MAX_LENGTH,
+    FMP_HISTORY_INTERVAL_PATTERN,
+    chart_history_response,
+)
+from app.schemas.chart_history import ChartHistoryResponse, ChartPricesResponse
+from app.services.price_history_service import ASSET_ETF, MAX_PAGE_LIMIT
 from typing import Optional, Dict, Any
 import logging
 import re
@@ -63,6 +75,73 @@ def _invalid_news_symbol(raw: str) -> JSONResponse:
         user_message="That symbol isn't valid.",
         details={"symbol": raw[:32]},
     )
+
+
+@router.get("/{symbol}/chart/history", response_model=ChartHistoryResponse)
+async def get_etf_chart_history(
+    symbol: str,
+    interval: str = Query(..., pattern=FMP_HISTORY_INTERVAL_PATTERN),
+    before: str = Query(..., max_length=BEFORE_MAX_LENGTH),
+    limit: Optional[int] = Query(None, ge=1, le=MAX_PAGE_LIMIT),
+    _fanout: None = MarketFanoutRateLimit,
+):
+    """Older bars for the chart a user is panning back through — strictly older than
+    the EXCLUSIVE ``before`` cursor, oldest first. Regular session only, like the ETF's
+    own range charts. Contract: `GET /stocks/{ticker}/chart/history`."""
+    symbol = symbol.upper().strip()
+    if not _ETF_SYMBOL_RE.match(symbol):
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            status_code=422,
+            message=f"Invalid ETF symbol for chart history: {symbol[:32]!r}",
+            user_message="That symbol isn't valid.",
+            details={"symbol": symbol[:32]},
+        )
+    return await chart_history_response(
+        ASSET_ETF, symbol, interval=interval, before=before, limit=limit
+    )
+
+
+@router.get("/{symbol}/chart", response_model=ChartPricesResponse)
+async def get_etf_chart(
+    symbol: str,
+    chart_range: str = Query("3M", alias="range", pattern="^(1D|1W|3M|6M|1Y|5Y|ALL)$"),
+    interval: Optional[str] = Query(None, alias="interval", pattern="^(1min|5min|15min|30min|1hour|4hour|daily|weekly|monthly|quarterly)$"),
+):
+    """One range's chart bars alone — what a range tap or a 3M+ first paint needs.
+
+    ``{symbol, prices}``, oldest first, with the indicator warm-up in front of the
+    visible window; the SAME builder as `GET /etfs/{symbol}` (`_get_chart`). `/core`
+    carries no 3M+ bars and `/quote` is a projection of the full build (2-5 s cold), so
+    without this a screen opening on a remembered 3M+ waited for the whole detail.
+    """
+    symbol = symbol.upper().strip()
+    if not _ETF_SYMBOL_RE.match(symbol):
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            status_code=422,
+            message=f"Invalid ETF symbol for chart: {symbol[:32]!r}",
+            user_message="That symbol isn't valid.",
+            details={"symbol": symbol[:32]},
+        )
+    try:
+        return await get_etf_service().get_etf_chart(
+            symbol, chart_range=chart_range, interval=interval
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "ETF chart failed for %s %s %s: %s: %s",
+            symbol, chart_range, interval, type(e).__name__, e, exc_info=True,
+        )
+        if (resp := upstream_error_response(e, ticker=symbol, step="etf_chart")) is not None:
+            return resp
+        return make_error_response(
+            ErrorCode.FMP_UNAVAILABLE,
+            message=f"{type(e).__name__} building the {chart_range} ETF chart",
+            details={"ticker": symbol, "step": "etf_chart", "range": chart_range},
+        )
 
 
 @router.get("/{symbol}/core", response_model=ETFCoreResponse)

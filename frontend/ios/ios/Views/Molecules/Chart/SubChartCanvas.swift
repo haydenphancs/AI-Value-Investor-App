@@ -3,55 +3,23 @@
 //  ios
 //
 //  Container for sub-chart indicator panes (Volume, RSI, MACD, Stoch).
-//  Indicators are computed from the full dataset to avoid warm-up gaps,
-//  then only the visible portion is rendered.
+//  Indicators come from `ChartSeries`, computed ONCE over the whole merged series; a pane
+//  draws only the bars of the shared `ChartFrame`, at the same x as the price chart.
+//
+//  The pane itself is `Equatable` and never observes the crosshair: a scrub step re-renders
+//  only the label readout and the crosshair line (`SubChartCrosshairLine`), not the pane —
+//  it used to recompute RSI/MACD/Stoch over every loaded bar on every scrub frame, twice.
 //
 
 import SwiftUI
 
-/// Maps a visible-slice index → x-position. On the 1D intraday chart the main
-/// price chart positions points by time-of-session (non-linear) via
-/// `timeFractions`, with pre/after-hours points clamped to 0/1; the sub-panes
-/// (volume/RSI/MACD/Stoch) and the sub-chart crosshair must use the SAME mapping
-/// or they drift from the price line — volume bars stretch and the crosshair
-/// lands on a different bar than the main-chart price dot for the same point.
-/// `timeFractions == nil` (every non-1D range) preserves the original linear
-/// index mapping exactly, so this is a no-op off the 1D intraday path.
-private func subChartX(_ index: Int, width: CGFloat, count: Int, timeFractions: [CGFloat]?) -> CGFloat {
-    if let f = timeFractions, index >= 0, index < f.count {
-        return f[index] * width
-    }
-    return CGFloat(index) * width / CGFloat(max(1, count - 1))
-}
-
 struct SubChartCanvas: View {
-    /// Used by `crosshairValueText` to prefix the VOLUME readout with a direction glyph;
-    /// the bars themselves read it in `VolumeBarRenderer`.
-    @Environment(\.differentiateWithoutColor) private var differentiate
-
     let indicator: TechnicalIndicatorType
-    let pricePoints: [StockPricePoint]          // visible slice (for rendering positions)
-    var allPricePoints: [StockPricePoint]? = nil // full dataset (for indicator computation)
-    var visibleStartIndex: Int = 0               // where visible slice starts in allPricePoints
-    @ObservedObject var crosshairState: CrosshairState
-
-    /// 1D intraday time-of-session x-positions for the visible slice — the SAME
-    /// array the main price chart + crosshair use. nil on every non-1D range,
-    /// where sub-panes fall back to linear index mapping (unchanged behavior).
-    var timeFractions: [CGFloat]? = nil
-
-    /// The data used for indicator calculation (full dataset if available)
-    private var computePoints: [StockPricePoint] {
-        allPricePoints ?? pricePoints
-    }
-
-    /// The range of indices (in computePoints) that correspond to the visible slice
-    private var visibleRange: Range<Int> {
-        let start = max(0, min(visibleStartIndex, computePoints.count))
-        let end = min(start + pricePoints.count, computePoints.count)
-        guard start < end else { return 0..<0 }
-        return start..<end
-    }
+    let series: ChartSeries
+    let frame: ChartFrame
+    /// Passed down, not observed: only the readout and the crosshair line re-render on a
+    /// scrub step.
+    let crosshairState: CrosshairState
 
     var body: some View {
         VStack(spacing: 0) {
@@ -61,66 +29,16 @@ struct SubChartCanvas: View {
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(AppColors.textMuted)
 
-                if crosshairState.isDragging, let idx = crosshairState.selectedIndex,
-                   idx >= 0, idx < pricePoints.count {
-                    Text(crosshairValueText(for: idx))
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundColor(AppColors.textPrimary)
-                }
+                SubChartReadout(indicator: indicator, series: series, crosshairState: crosshairState)
 
                 Spacer()
             }
             .padding(.horizontal, AppSpacing.lg)
 
-            // Chart content with crosshair overlay
             ZStack {
-                GeometryReader { geometry in
-                    let size = geometry.size
-                    ZStack {
-                        switch indicator {
-                        case .volume:
-                            VolumeBarRenderer(
-                                pricePoints: pricePoints,
-                                size: size,
-                                timeFractions: timeFractions
-                            )
-                        case .rsi14:
-                            RSIRenderer(
-                                allCloses: computePoints.map { $0.close },
-                                visibleRange: visibleRange,
-                                size: size,
-                                timeFractions: timeFractions
-                            )
-                        case .macd:
-                            MACDRenderer(
-                                allCloses: computePoints.map { $0.close },
-                                visibleRange: visibleRange,
-                                size: size,
-                                timeFractions: timeFractions
-                            )
-                        case .stochastic:
-                            StochasticRenderer(
-                                allPricePoints: computePoints,
-                                visibleRange: visibleRange,
-                                size: size,
-                                timeFractions: timeFractions
-                            )
-                        default:
-                            EmptyView()
-                        }
-
-                        // Crosshair vertical line on sub-chart
-                        if crosshairState.isDragging, let idx = crosshairState.selectedIndex,
-                           idx >= 0, idx < pricePoints.count {
-                            let x = subChartX(idx, width: size.width, count: pricePoints.count, timeFractions: timeFractions)
-                            Path { path in
-                                path.move(to: CGPoint(x: x, y: 0))
-                                path.addLine(to: CGPoint(x: x, y: size.height))
-                            }
-                            .stroke(AppColors.textMuted.opacity(0.6), style: StrokeStyle(lineWidth: 0.5, dash: [4, 3]))
-                        }
-                    }
-                }
+                SubChartPane(indicator: indicator, series: series, frame: frame)
+                    .equatable()
+                SubChartCrosshairLine(series: series, frame: frame, crosshairState: crosshairState)
             }
             .frame(height: 60)
             .clipped()
@@ -128,49 +46,49 @@ struct SubChartCanvas: View {
         }
         .frame(height: 78)
     }
+}
 
-    /// Returns a formatted string for the indicator value at the given visible index
-    private func crosshairValueText(for visibleIndex: Int) -> String {
+/// The value under the crosshair — an O(1) read of the precomputed arrays.
+private struct SubChartReadout: View {
+    /// Used to prefix the VOLUME readout with a direction glyph (the bars read it in
+    /// `SubChartPane`).
+    @Environment(\.differentiateWithoutColor) private var differentiate
+
+    let indicator: TechnicalIndicatorType
+    let series: ChartSeries
+    @ObservedObject var crosshairState: CrosshairState
+
+    var body: some View {
+        if crosshairState.isDragging, let i = crosshairState.index(in: series) {
+            Text(text(at: i))
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundColor(AppColors.textPrimary)
+        }
+    }
+
+    private func text(at i: Int) -> String {
         switch indicator {
         case .volume:
-            guard visibleIndex < pricePoints.count,
-                  let vol = pricePoints[visibleIndex].volume else { return "" }
-            // Prefix the direction. This readout printed magnitude only, so a user who
-            // reads the value rather than the bar shape had NO access to up-vs-down —
-            // the MACD case below prints signed values, which is the standard this
-            // matches. Only under DWC, so the default readout stays unchanged.
-            let prev = visibleIndex > 0 ? pricePoints[visibleIndex - 1].close
-                                        : pricePoints[visibleIndex].close
-            let up = pricePoints[visibleIndex].close >= prev
-            return AppSentiment.marker(isPositive: up, differentiate: differentiate)
-                 + formatVolume(vol)
+            guard let vol = series.volume[i] else { return "" }
+            // Prefix the direction. The readout printed magnitude only, so a user who reads
+            // the value rather than the bar shape had NO access to up-vs-down. Only under
+            // DWC, so the default readout stays unchanged. Direction is vs the PREVIOUS
+            // LOADED bar, so the leftmost visible bar is not always "up".
+            let prev = i > 0 ? series.close[i - 1] : series.close[i]
+            return AppSentiment.marker(isPositive: series.close[i] >= prev, differentiate: differentiate)
+                + formatVolume(vol)
         case .rsi14:
-            let allCloses = computePoints.map { $0.close }
-            let rsiData = TechnicalIndicatorCalculator.rsi(closes: allCloses, period: 14)
-            let globalIndex = visibleStartIndex + visibleIndex
-            guard globalIndex >= 0, globalIndex < rsiData.values.count,
-                  let val = rsiData.values[globalIndex] else { return "" }
-            return String(format: "%.1f", val)
+            return series.rsi14[i].map { String(format: "%.1f", $0) } ?? ""
         case .macd:
-            let allCloses = computePoints.map { $0.close }
-            let macdData = TechnicalIndicatorCalculator.macd(closes: allCloses)
-            let globalIndex = visibleStartIndex + visibleIndex
-            guard globalIndex >= 0, globalIndex < macdData.macdLine.count else { return "" }
-            let m = macdData.macdLine[globalIndex].map { String(format: "%.2f", $0) } ?? "-"
-            let s = macdData.signalLine[globalIndex].map { String(format: "%.2f", $0) } ?? "-"
-            let h = macdData.histogram[globalIndex].map { String(format: "%.2f", $0) } ?? "-"
+            let m = series.macdLine[i].map { String(format: "%.2f", $0) } ?? "-"
+            let s = series.macdSignal[i].map { String(format: "%.2f", $0) } ?? "-"
+            let h = series.macdHistogram[i].map { String(format: "%.2f", $0) } ?? "-"
             return "M:\(m) S:\(s) H:\(h)"
         case .stochastic:
-            let closes = computePoints.map { $0.close }
-            let highs = computePoints.map { $0.high ?? $0.close }
-            let lows = computePoints.map { $0.low ?? $0.close }
-            let stochData = TechnicalIndicatorCalculator.stochastic(highs: highs, lows: lows, closes: closes)
-            let globalIndex = visibleStartIndex + visibleIndex
-            guard globalIndex >= 0, globalIndex < stochData.kValues.count else { return "" }
-            let k = stochData.kValues[globalIndex].map { String(format: "%.1f", $0) } ?? "-"
-            let d = stochData.dValues[globalIndex].map { String(format: "%.1f", $0) } ?? "-"
+            let k = series.stochK[i].map { String(format: "%.1f", $0) } ?? "-"
+            let d = series.stochD[i].map { String(format: "%.1f", $0) } ?? "-"
             return "%K:\(k) %D:\(d)"
-        default:
+        case .ma20, .ma50, .ma200, .bollingerBands:
             return ""
         }
     }
@@ -188,266 +106,215 @@ struct SubChartCanvas: View {
     }
 }
 
-// MARK: - Volume Bar Renderer
+private struct SubChartCrosshairLine: View {
+    let series: ChartSeries
+    let frame: ChartFrame
+    @ObservedObject var crosshairState: CrosshairState
 
-struct VolumeBarRenderer: View {
-    let pricePoints: [StockPricePoint]
-    let size: CGSize
-    var timeFractions: [CGFloat]? = nil
+    var body: some View {
+        GeometryReader { geometry in
+            if crosshairState.isDragging, let i = crosshairState.index(in: series), frame.visibleRange.contains(i) {
+                let x = frame.x(i, width: geometry.size.width)
+                Path { path in
+                    path.move(to: CGPoint(x: x, y: 0))
+                    path.addLine(to: CGPoint(x: x, y: geometry.size.height))
+                }
+                .stroke(AppColors.textMuted.opacity(0.6), style: StrokeStyle(lineWidth: 0.5, dash: [4, 3]))
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
 
-    /// Up-volume vs down-volume is encoded by HUE ALONE here, and unlike every other
-    /// renderer in this file there is no second channel already doing the work: bars
-    /// always grow up from the baseline and their height is VOLUME, so position says
-    /// nothing about direction. There is no volume axis and no legend, and the crosshair
-    /// readout prints magnitude only (the MACD readout prints signed values — which is
-    /// exactly why MACD needs no cue and this does).
-    ///
-    /// HATCH, not a hollow body. `barWidth` is `width / count * 0.7`: on a ~350pt canvas
-    /// that is 11.7pt at 1M but **1.0pt at 1Y**, and a hollow 1pt rect stroked at 1.5pt is
-    /// a filled 1pt rect — the cue would vanish exactly where the bars are densest. A
-    /// clipped 45° hatch renders as visible texture at every density.
-    ///
-    /// Channel check: dash is spent app-wide on reference lines and benchmark series,
-    /// opacity on extended hours, outline-vs-fill on candle direction. Hatch had no other
-    /// meaning anywhere.
+/// One pane. Up-vs-down volume is encoded by HUE ALONE in the default style, and unlike
+/// every other pane there is no second channel already doing the work: bars always grow up
+/// from the baseline and their height is VOLUME, so position says nothing about direction.
+/// Under Differentiate Without Color the DOWN bars are hatched.
+///
+/// HATCH, not a hollow body: at 1Y a bar is ~1 pt wide, and a hollow 1 pt rect stroked at
+/// 1.5 pt is a filled rect — the cue would vanish exactly where the bars are densest. Dash
+/// is spent app-wide on reference lines, opacity on extended hours, outline-vs-fill on
+/// candle direction; hatch has no other meaning anywhere.
+private struct SubChartPane: View, Equatable {
     @Environment(\.differentiateWithoutColor) private var differentiate
 
+    let indicator: TechnicalIndicatorType
+    let series: ChartSeries
+    let frame: ChartFrame
+
+    static func == (lhs: SubChartPane, rhs: SubChartPane) -> Bool {
+        lhs.indicator == rhs.indicator
+            && lhs.series.revision == rhs.series.revision
+            && lhs.series.count == rhs.series.count
+            && lhs.frame == rhs.frame
+    }
+
     var body: some View {
-        Canvas { context, canvasSize in
-            let count = pricePoints.count
-            guard count > 0 else { return }
-
-            let volumes = pricePoints.compactMap { $0.volume }
-            guard !volumes.isEmpty else { return }
-            let maxVol = volumes.max() ?? 1
-
-            let barWidth = max(1, canvasSize.width / CGFloat(count) * 0.7)
-
-            for (index, point) in pricePoints.enumerated() {
-                guard let vol = point.volume, vol > 0 else { continue }
-                let x = subChartX(index, width: canvasSize.width, count: count, timeFractions: timeFractions)
-                let barHeight = CGFloat(vol / maxVol) * canvasSize.height * 0.9
-
-                let previousClose = index > 0 ? pricePoints[index - 1].close : point.close
-                let isBullish = point.close >= previousClose
-                let color = isBullish ? AppColors.bullish.opacity(0.6) : AppColors.bearish.opacity(0.6)
-
-                let rect = CGRect(
-                    x: x - barWidth / 2,
-                    y: canvasSize.height - barHeight,
-                    width: barWidth,
-                    height: barHeight
-                )
-                context.fill(Path(rect), with: .color(color))
-
-                // Hatch the DOWN bars only. Hatching both would make the texture
-                // decorative and encode nothing — the cue has to be a difference.
-                if differentiate && !isBullish {
-                    context.drawLayer { layer in
-                        layer.clip(to: Path(rect))
-                        layer.stroke(AppSentiment.hatch(in: rect, differentiate: true, spacing: 4),
-                                     with: .color(color), lineWidth: 0.75)
-                    }
-                }
+        Canvas { context, size in
+            let range = frame.drawRange
+            guard !range.isEmpty, range.upperBound <= series.count, size.width > 0 else { return }
+            switch indicator {
+            case .volume:     drawVolume(context: context, size: size, range: range)
+            case .rsi14:      drawOscillator(context: context, size: size, range: range, lines: [(series.rsi14, AppColors.cautionGraphic, 1.5)], bands: (30, 70), shadeBand: true)
+            case .stochastic: drawOscillator(context: context, size: size, range: range, lines: [(series.stochK, AppColors.primaryGraphic, 1.5), (series.stochD, AppColors.cautionGraphic, 1)], bands: (20, 80), shadeBand: false)
+            case .macd:       drawMACD(context: context, size: size, range: range)
+            case .ma20, .ma50, .ma200, .bollingerBands: break
             }
         }
     }
-}
 
-// MARK: - RSI Renderer
-
-struct RSIRenderer: View {
-    let allCloses: [Double]
-    let visibleRange: Range<Int>
-    let size: CGSize
-    var timeFractions: [CGFloat]? = nil
-
-    var body: some View {
-        let rsiData = TechnicalIndicatorCalculator.rsi(closes: allCloses, period: 14)
-        let safeRange = visibleRange.clamped(to: 0..<rsiData.values.count)
-        let visibleValues = Array(rsiData.values[safeRange])
-        let count = visibleValues.count
-
-        Canvas { context, canvasSize in
-            guard count > 0 else { return }
-
-            // Reference lines at 30 and 70
-            let y30 = canvasSize.height * (1 - 30.0 / 100.0)
-            let y70 = canvasSize.height * (1 - 70.0 / 100.0)
-
-            // Overbought/oversold zones
-            let zoneRect = CGRect(x: 0, y: y70, width: canvasSize.width, height: y30 - y70)
-            context.fill(Path(zoneRect), with: .color(AppColors.cautionGraphic.opacity(0.08)))
-
-            // 30 line
-            var line30 = Path()
-            line30.move(to: CGPoint(x: 0, y: y30))
-            line30.addLine(to: CGPoint(x: canvasSize.width, y: y30))
-            context.stroke(line30, with: .color(AppColors.chartGridline), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
-
-            // 70 line
-            var line70 = Path()
-            line70.move(to: CGPoint(x: 0, y: y70))
-            line70.addLine(to: CGPoint(x: canvasSize.width, y: y70))
-            context.stroke(line70, with: .color(AppColors.chartGridline), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
-
-            // RSI line
-            var rsiPath = Path()
-            var started = false
-            for (index, value) in visibleValues.enumerated() {
-                guard let v = value else { continue }
-                let x = subChartX(index, width: canvasSize.width, count: count, timeFractions: timeFractions)
-                let y = canvasSize.height * (1 - CGFloat(v) / 100.0)
-                if !started {
-                    rsiPath.move(to: CGPoint(x: x, y: y))
-                    started = true
-                } else {
-                    rsiPath.addLine(to: CGPoint(x: x, y: y))
-                }
-            }
-            context.stroke(rsiPath, with: .color(AppColors.cautionGraphic), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
-        }
+    private func coord(_ size: CGSize, min lo: Double, max hi: Double) -> ChartCoordinateSystem {
+        // Panes use the full height (no 5% padding) for 0–100 oscillators; the y mapping
+        // below converts directly.
+        ChartCoordinateSystem(width: size.width, height: size.height, yRange: ChartYRange(minValue: lo, maxValue: hi), frame: frame)
     }
-}
 
-// MARK: - MACD Renderer
+    // MARK: Volume
 
-struct MACDRenderer: View {
-    let allCloses: [Double]
-    let visibleRange: Range<Int>
-    let size: CGSize
-    var timeFractions: [CGFloat]? = nil
+    private func drawVolume(context: GraphicsContext, size: CGSize, range: Range<Int>) {
+        let c = coord(size, min: 0, max: 1)
+        let bucket = c.bucket
+        // Scaled to the bars on screen; the partly visible edge bars are drawn, not measured.
+        var maxVol = 0.0
+        for i in frame.visibleRange { if let v = series.volume[i], v > maxVol { maxVol = v } }
+        guard maxVol > 0 else { return }
+        let barWidth = max(1, c.slotWidth * CGFloat(bucket) * 0.7)
 
-    var body: some View {
-        let macdData = TechnicalIndicatorCalculator.macd(closes: allCloses)
-        let safeRange = visibleRange.clamped(to: 0..<macdData.macdLine.count)
-        let visibleMACD = Array(macdData.macdLine[safeRange])
-        let visibleSignal = Array(macdData.signalLine[safeRange])
-        let visibleHistogram = Array(macdData.histogram[safeRange])
-        let count = visibleMACD.count
-
-        Canvas { context, canvasSize in
-            guard count > 0 else { return }
-
-            let allValues = (visibleMACD + visibleSignal + visibleHistogram).compactMap { $0 }
-            guard !allValues.isEmpty else { return }
-            // Clamp away from 0: a flat/halted stock yields all-zero MACD, so
-            // `.max()` is 0 and `value / maxVal` = 0/0 = NaN, producing NaN Path
-            // coordinates. A tiny floor keeps every bar/line at y = midY instead.
-            let maxVal = max(allValues.map { abs($0) }.max() ?? 1, 1e-9)
-            let midY = canvasSize.height / 2
-
-            func yPos(_ value: Double) -> CGFloat {
-                midY - CGFloat(value / maxVal) * midY * 0.9
+        var up = Path(), down = Path()
+        ChartPath.forEachBucket(range, bucket: bucket) { lo, hi in
+            var vol = 0.0
+            for j in lo..<hi { if let v = series.volume[j], v > vol { vol = v } }
+            guard vol > 0 else { return }
+            // Direction vs the bar BEFORE the column — the previous LOADED bar, so the
+            // leftmost visible bar is not always drawn "up".
+            let prevClose = lo > 0 ? series.close[lo - 1] : series.close[lo]
+            let isBullish = series.close[hi - 1] >= prevClose
+            let x = bucket > 1 ? (c.xPosition(for: lo) + c.xPosition(for: hi - 1)) / 2 : c.xPosition(for: lo)
+            let h = CGFloat(min(vol / maxVol, 1)) * size.height * 0.9
+            let rect = CGRect(x: x - barWidth / 2, y: size.height - h, width: barWidth, height: h)
+            if isBullish { up.addRect(rect) } else { down.addRect(rect) }
+        }
+        let upColor = AppColors.bullish.opacity(0.6), downColor = AppColors.bearish.opacity(0.6)
+        context.fill(up, with: .color(upColor))
+        context.fill(down, with: .color(downColor))
+        // Hatch the DOWN bars only — the cue has to be a difference. One clip, one stroke.
+        if differentiate, !down.isEmpty {
+            context.drawLayer { layer in
+                layer.clip(to: down)
+                layer.stroke(AppSentiment.hatch(in: down.boundingRect, differentiate: true, spacing: 4),
+                             with: .color(downColor), lineWidth: 0.75)
             }
-
-            // Zero line
-            var zeroLine = Path()
-            zeroLine.move(to: CGPoint(x: 0, y: midY))
-            zeroLine.addLine(to: CGPoint(x: canvasSize.width, y: midY))
-            context.stroke(zeroLine, with: .color(AppColors.chartGridline), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
-
-            // Histogram bars
-            let barWidth = max(1, canvasSize.width / CGFloat(count) * 0.5)
-            for (index, value) in visibleHistogram.enumerated() {
-                guard let v = value else { continue }
-                let x = subChartX(index, width: canvasSize.width, count: count, timeFractions: timeFractions)
-                let barY = yPos(v)
-                let rect = CGRect(
-                    x: x - barWidth / 2,
-                    y: min(midY, barY),
-                    width: barWidth,
-                    height: abs(barY - midY)
-                )
-                let color = v >= 0 ? AppColors.bullish.opacity(0.4) : AppColors.bearish.opacity(0.4)
-                context.fill(Path(rect), with: .color(color))
-            }
-
-            // MACD line. Apple's `.green` is 2.22:1 on white and does not adapt — these
-            // were bare system hues, invisible to both guards because they arrive as a
-            // LABELLED ARGUMENT rather than a `.foregroundColor(...)` modifier.
-            drawLine(context: context, values: visibleMACD, count: count, canvasWidth: canvasSize.width, yPos: yPos, color: AppColors.gainGraphic, lineWidth: 1.5)
-
-            // Signal line
-            drawLine(context: context, values: visibleSignal, count: count, canvasWidth: canvasSize.width, yPos: yPos, color: AppColors.lossGraphic, lineWidth: 1)
         }
     }
 
-    private func drawLine(context: GraphicsContext, values: [Double?], count: Int, canvasWidth: CGFloat, yPos: (Double) -> CGFloat, color: Color, lineWidth: CGFloat) {
-        var path = Path()
-        var started = false
-        for (index, value) in values.enumerated() {
-            guard let v = value else { continue }
-            let x = subChartX(index, width: canvasWidth, count: count, timeFractions: timeFractions)
+    // MARK: RSI / Stochastic (fixed 0–100 scale)
+
+    private func drawOscillator(
+        context: GraphicsContext,
+        size: CGSize,
+        range: Range<Int>,
+        lines: [([Double?], Color, CGFloat)],
+        bands: (Double, Double),
+        shadeBand: Bool
+    ) {
+        let yLow = size.height * (1 - bands.0 / 100.0)
+        let yHigh = size.height * (1 - bands.1 / 100.0)
+        if shadeBand {
+            context.fill(Path(CGRect(x: 0, y: yHigh, width: size.width, height: yLow - yHigh)),
+                         with: .color(AppColors.cautionGraphic.opacity(0.08)))
+        }
+        var refs = Path()
+        refs.move(to: CGPoint(x: 0, y: yLow)); refs.addLine(to: CGPoint(x: size.width, y: yLow))
+        refs.move(to: CGPoint(x: 0, y: yHigh)); refs.addLine(to: CGPoint(x: size.width, y: yHigh))
+        context.stroke(refs, with: .color(AppColors.chartGridline), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
+
+        // A 0–100 value maps to the FULL pane height (y = h·(1 − v/100)), as before.
+        // `ChartYRange` keeps a 5% margin top and bottom, so the range that reproduces the
+        // full-height mapping exactly is [5, 95].
+        let c = coord(size, min: 5, max: 95)
+        for (values, color, width) in lines where values.count == series.count {
+            let path = ChartPath.line(range: range, coord: c) { values[$0] }
+            context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round))
+        }
+    }
+
+    // MARK: MACD (symmetric scale around a centred zero line)
+
+    private func drawMACD(context: GraphicsContext, size: CGSize, range: Range<Int>) {
+        guard series.macdLine.count == series.count else { return }
+        var maxAbs = 0.0
+        var priceLevel = 0.0
+        func take(_ v: Double?) {
+            if let v, v.isFinite { maxAbs = max(maxAbs, abs(v)) }
+        }
+        for i in frame.visibleRange {
+            take(series.macdLine[i])
+            take(series.macdSignal[i])
+            take(series.macdHistogram[i])
+            let c = series.close[i]
+            if c.isFinite { priceLevel = max(priceLevel, abs(c)) }
+        }
+        // A floor RELATIVE to the price: MACD is in price units, so an absolute floor flattened
+        // every coin priced below ~1e-6, while no floor let a flat series' rounding noise
+        // (~1e-15 of the price) fill the pane edge to edge. All zero → a stand-in scale (0/0
+        // would be NaN coordinates and blank the pane).
+        let noiseFloor = priceLevel * 1e-12
+        if !(maxAbs > noiseFloor) { maxAbs = noiseFloor > 0 ? noiseFloor : 1 }
+        let midY = size.height / 2
+
+        var zero = Path()
+        zero.move(to: CGPoint(x: 0, y: midY)); zero.addLine(to: CGPoint(x: size.width, y: midY))
+        context.stroke(zero, with: .color(AppColors.chartGridline), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
+
+        func yPos(_ v: Double) -> CGFloat { midY - CGFloat(v / maxAbs) * midY * 0.9 }
+        let line = ChartCoordinateSystem(width: size.width, height: size.height, yRange: .unit, frame: frame)
+        let bucket = line.bucket
+        let barWidth = max(1, line.slotWidth * CGFloat(bucket) * 0.5)
+
+        var pos = Path(), neg = Path()
+        ChartPath.forEachBucket(range, bucket: bucket) { lo, hi in
+            // A column shows its most extreme histogram value.
+            var pick: Double? = nil
+            for j in lo..<hi {
+                if let v = series.macdHistogram[j], v.isFinite, abs(v) > abs(pick ?? 0) || pick == nil { pick = v }
+            }
+            guard let v = pick else { return }
+            let x = bucket > 1 ? (line.xPosition(for: lo) + line.xPosition(for: hi - 1)) / 2 : line.xPosition(for: lo)
             let y = yPos(v)
-            if !started {
-                path.move(to: CGPoint(x: x, y: y))
-                started = true
-            } else {
-                path.addLine(to: CGPoint(x: x, y: y))
-            }
+            let rect = CGRect(x: x - barWidth / 2, y: min(midY, y), width: barWidth, height: abs(y - midY))
+            if v >= 0 { pos.addRect(rect) } else { neg.addRect(rect) }
         }
-        context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
+        context.fill(pos, with: .color(AppColors.bullish.opacity(0.4)))
+        context.fill(neg, with: .color(AppColors.bearish.opacity(0.4)))
+
+        // MACD and signal lines. Apple's `.green` is 2.22:1 on white and does not adapt —
+        // these were bare system hues once; they stay app tokens.
+        let scale = MACDScale(midY: midY, maxAbs: maxAbs, frame: frame, width: size.width)
+        context.stroke(scale.path(range: range) { series.macdLine[$0] }, with: .color(AppColors.gainGraphic),
+                       style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+        context.stroke(scale.path(range: range) { series.macdSignal[$0] }, with: .color(AppColors.lossGraphic),
+                       style: StrokeStyle(lineWidth: 1, lineCap: .round, lineJoin: .round))
     }
 }
 
-// MARK: - Stochastic Renderer
+/// MACD's symmetric y mapping expressed as a `ChartYRange`, so its lines go through the same
+/// decimated `ChartPath.line` as every other series.
+private struct MACDScale {
+    let coord: ChartCoordinateSystem
 
-struct StochasticRenderer: View {
-    let allPricePoints: [StockPricePoint]
-    let visibleRange: Range<Int>
-    let size: CGSize
-    var timeFractions: [CGFloat]? = nil
-
-    var body: some View {
-        let closes = allPricePoints.map { $0.close }
-        let highs = allPricePoints.map { $0.high ?? $0.close }
-        let lows = allPricePoints.map { $0.low ?? $0.close }
-        let stochData = TechnicalIndicatorCalculator.stochastic(highs: highs, lows: lows, closes: closes)
-        let safeRange = visibleRange.clamped(to: 0..<stochData.kValues.count)
-        let visibleK = Array(stochData.kValues[safeRange])
-        let visibleD = Array(stochData.dValues[safeRange])
-        let count = visibleK.count
-
-        Canvas { context, canvasSize in
-            guard count > 0 else { return }
-
-            // Reference lines at 20 and 80
-            let y20 = canvasSize.height * (1 - 20.0 / 100.0)
-            let y80 = canvasSize.height * (1 - 80.0 / 100.0)
-
-            var line20 = Path()
-            line20.move(to: CGPoint(x: 0, y: y20))
-            line20.addLine(to: CGPoint(x: canvasSize.width, y: y20))
-            context.stroke(line20, with: .color(AppColors.chartGridline), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
-
-            var line80 = Path()
-            line80.move(to: CGPoint(x: 0, y: y80))
-            line80.addLine(to: CGPoint(x: canvasSize.width, y: y80))
-            context.stroke(line80, with: .color(AppColors.chartGridline), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
-
-            // %K line. Same bare-system-hue defect as the MACD pair above.
-            drawStochLine(context: context, values: visibleK, count: count, canvasSize: canvasSize, color: AppColors.primaryGraphic, lineWidth: 1.5)
-
-            // %D line
-            drawStochLine(context: context, values: visibleD, count: count, canvasSize: canvasSize, color: AppColors.cautionGraphic, lineWidth: 1)
-        }
+    init(midY: CGFloat, maxAbs: Double, frame: ChartFrame, width: CGFloat) {
+        // The histogram maps y(v) = h/2 − (v/maxAbs)·(h/2)·0.9. `ChartYRange` maps
+        // y(v) = h − ((v − lo)/(hi − lo))·0.9h − 0.05h, and with [lo, hi] = [−maxAbs, maxAbs]
+        // that is exactly 0.5h − 0.45h·v/maxAbs — the same line.
+        coord = ChartCoordinateSystem(
+            width: width,
+            height: midY * 2,
+            yRange: ChartYRange(minValue: -maxAbs, maxValue: maxAbs),
+            frame: frame
+        )
     }
 
-    private func drawStochLine(context: GraphicsContext, values: [Double?], count: Int, canvasSize: CGSize, color: Color, lineWidth: CGFloat) {
-        var path = Path()
-        var started = false
-        for (index, value) in values.enumerated() {
-            guard let v = value else { continue }
-            let x = subChartX(index, width: canvasSize.width, count: count, timeFractions: timeFractions)
-            let y = canvasSize.height * (1 - CGFloat(v) / 100.0)
-            if !started {
-                path.move(to: CGPoint(x: x, y: y))
-                started = true
-            } else {
-                path.addLine(to: CGPoint(x: x, y: y))
-            }
-        }
-        context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
+    func path(range: Range<Int>, value: (Int) -> Double?) -> Path {
+        ChartPath.line(range: range, coord: coord, value: value)
     }
 }

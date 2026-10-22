@@ -334,7 +334,7 @@ async def _start_claimed_benchmark_refresh(
     route's `recompute_all` call) in the background under it.
 
     Both manual triggers used to start `recompute_all` with no claim, so one could run on top
-    of the chain's own medians phase (first Sunday of Jan/Apr/Jul/Oct from 04:00 UTC) — two
+    of the chain's own medians phase (first Sunday of Jan/Apr/Jul/Oct from 03:30 UTC) — two
     ~47k-call FMP bursts racing on the same rows. Mirrors `POST /refresh-industry-dossier`:
     a refusal answers `SYSTEM_BUSY` (409, or 503 when the ledger is unreadable) and starts
     nothing; a scheduled phase that finds the claim held waits, and skips when this run

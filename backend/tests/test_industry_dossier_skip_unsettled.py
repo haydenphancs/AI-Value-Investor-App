@@ -71,7 +71,7 @@ def _install(monkeypatch, *, universe, fred: bool, census: bool):
     monkeypatch.setattr(fred_mod, "get_fred_client", lambda: SimpleNamespace(is_configured=fred))
     monkeypatch.setattr(census_mod, "get_census_client", lambda: SimpleNamespace(is_configured=census))
 
-    async def _compute(self, industry, sector, tickers, caps_by_ticker):
+    async def _compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         computed.append(industry)
         return IndustryDossier(
             current_tam=708.9, future_tam=900.0, current_year="2024", future_year="2029",

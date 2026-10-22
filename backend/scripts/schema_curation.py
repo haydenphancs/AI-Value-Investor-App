@@ -579,6 +579,16 @@ CURATION: dict[str, TableDoc] = {
     "public.signal_of_confidence_cache": T("market-cache",
         purpose="The composite confidence signal shown on the detail screen.",
         key=("ticker", "response_json", "next_earnings_date")),
+    "public.sec_concept_cache": T("market-cache",
+        purpose="Tier-2 (24 h) cache of SEC EDGAR XBRL companyconcept facts, used to verify "
+                "the Signal of Confidence buyback figure against the company's own filing.",
+        key=("cik", "concept", "found", "facts", "newest_end", "fetched_at"),
+        note="Migration 202. FMP's commonStockRepurchased is sometimes RSU tax withholding or "
+             "a preferred redemption (INTC's $181M / $617M). found=false caches SEC's 404 — "
+             "the company never used the concept, never a zero. facts is trimmed to 10-Q/10-K "
+             "USD rows. A row trailing the charted quarter by > 7 days is refetched (at most "
+             "hourly); while SEC fails a row up to 30 days old is served as stale. Public "
+             "SEC data, still service_role only. Owner: sec_concept_service.py."),
     "public.ticker_volatility_cache": T("market-cache",
         purpose="Daily sigma per ticker, used to decide whether a price move is notable enough "
                 "to explain.",
@@ -709,8 +719,9 @@ CURATION: dict[str, TableDoc] = {
         purpose="Sector-level size and concentration — revenue, CAGR, HHI, top-holder shares.",
         key=("sector", "total_revenue_usd", "cagr_5yr_pct", "hhi", "num_constituents")),
     "public.industry_dossier": T("benchmarks",
-        purpose="Per-industry structure: TAM now and future, growth, lifecycle phase and "
-                "concentration. The Moat section's TAM comes from here.",
+        purpose="Per-industry measured market size (latest published year), its average "
+                "yearly growth window, lifecycle phase and revenue-share concentration. The "
+                "Moat section reads it.",
         key=("industry", "sector", "current_tam_b", "future_tam_b", "cagr_5y_pct",
              "lifecycle_phase", "hhi", "tam_scope"),
         note="TAM is scoped per INDUSTRY, not per company, and the unit is BILLIONS."),

@@ -89,6 +89,11 @@ async def main() -> None:
 
     total_tickers = sum(len(e.get("tickers", [])) for e in entries)
     print(f"# Verification — {len(entries)} industries / {total_tickers} tickers", file=sys.stderr)
+    without_revenues = sum(1 for e in entries if not isinstance(e.get("revenues"), dict))
+    if without_revenues:
+        print(f"# NOTE: {without_revenues} industries carry no 'revenues' (universe built before "
+              "2026-10-22) — their concentration shows as unmeasured here; the recompute keeps "
+              "the stored value for them", file=sys.stderr)
     print(f"# Using pre-captured market caps from universe file", file=sys.stderr)
     print(f"# Computing dossiers (FRED + Census calls per industry)...", file=sys.stderr)
 
@@ -105,6 +110,11 @@ async def main() -> None:
                     sector=entry["sector"],
                     tickers=entry.get("tickers", []),
                     caps_by_ticker=entry.get("market_caps") or {},
+                    # Revenue-share concentration (2026-10-22): a universe file built
+                    # before then has no 'revenues', and concentration reads unmeasured.
+                    revenues_by_ticker=(
+                        entry.get("revenues") if isinstance(entry.get("revenues"), dict) else None
+                    ),
                 )
                 results.append((entry, dossier))
             except Exception as exc:

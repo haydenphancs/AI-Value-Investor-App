@@ -9,7 +9,7 @@ Frontend: GET /stocks/search, /stocks/{ticker}, /stocks/{ticker}/quote,
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.responses import JSONResponse
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
+from datetime import datetime
 import asyncio
 import logging
 import math
@@ -45,6 +45,13 @@ from app.services.stock_search_service import (  # noqa: F401 — re-exported, s
     _secondary_base_symbol,
 )
 from app.schemas.stock_overview import StockOverviewResponse, StockOverviewCoreResponse
+from app.schemas.chart_history import ChartHistoryResponse, ChartPricesResponse
+from app.api.chart_history_http import (
+    BEFORE_MAX_LENGTH,
+    FMP_HISTORY_INTERVAL_PATTERN,
+    chart_history_response,
+)
+from app.services.price_history_service import MAX_PAGE_LIMIT
 from app.schemas.analyst import AnalystAnalysisResponse
 from app.schemas.sentiment import SentimentAnalysisResponse
 from app.schemas.technical_analysis import (
@@ -861,41 +868,12 @@ async def get_stock_fundamentals(ticker: str, _fanout: None = MarketFanoutRateLi
         raise HTTPException(status_code=502, detail="Fundamentals service unavailable")
 
 
-# ── Date-range helpers for the chart endpoint ──────────────────────
+# ── Chart endpoints ────────────────────────────────────────────────
 
-_RANGE_DELTAS = {
-    "1D": timedelta(days=5),   # Fetch ~5 calendar days to guarantee 2 trading days
-    "1W": timedelta(weeks=1),
-    "3M": timedelta(days=90),
-    "6M": timedelta(days=180),
-    "1Y": timedelta(days=365),
-    "5Y": timedelta(days=365 * 5),
-}
-
-
-def _chart_date_range(range_code: str):
-    """Return (from_date, to_date) ISO strings for the given range code."""
-    today = datetime.utcnow().date()
-    to_date = today.isoformat()
-
-    if range_code == "ALL":
-        # FMP caps results when from_date is omitted; use explicit old date
-        return "1970-01-01", to_date
-
-    delta = _RANGE_DELTAS.get(range_code)
-    if delta is None:
-        return None, None
-
-    from_date = (today - delta).isoformat()
-    return from_date, to_date
-
-
-# ── Chart endpoint ─────────────────────────────────────────────────
-
-@router.get("/{ticker}/chart")
+@router.get("/{ticker}/chart", response_model=ChartPricesResponse)
 async def get_stock_chart(
     ticker: str,
-    range: str = Query("3M", regex="^(1D|1W|3M|6M|1Y|5Y|ALL)$"),
+    range: str = Query("3M", pattern="^(1D|1W|3M|6M|1Y|5Y|ALL)$"),
     interval: Optional[str] = Query(
         None,
         alias="interval",
@@ -910,6 +888,7 @@ async def get_stock_chart(
     Optional interval: 1min, 5min, 15min, 30min, 1hour, 4hour, daily, weekly, monthly, quarterly.
     Defaults: 1D→5min, 1W→1hour, others→daily.
     Set extended_hours=true to include pre-market and after-hours data (intraday only).
+    Every range carries its indicator warm-up bars in front of the visible window.
     """
     from app.services.chart_helper import fetch_chart_data
 
@@ -921,10 +900,56 @@ async def get_stock_chart(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Chart data failed for {ticker}: {e}", exc_info=True)
+        logger.error(
+            "Chart data failed for %s %s %s: %s: %s",
+            ticker, range, interval, type(e).__name__, e, exc_info=True,
+        )
         if (resp := upstream_error_response(e, ticker=ticker, step="chart")) is not None:
             return resp
-        raise HTTPException(status_code=502, detail="Chart data service unavailable")
+        # Typed (invariant #3), never a bare 502: an unclassified failure here is an
+        # upstream data failure, not the REPORT_GENERATION_FAILED fallback.
+        return make_error_response(
+            ErrorCode.FMP_UNAVAILABLE,
+            message=f"{type(e).__name__} building the {range} chart",
+            details={"ticker": ticker, "step": "chart", "range": range},
+        )
+
+
+@router.get("/{ticker}/chart/history", response_model=ChartHistoryResponse)
+async def get_stock_chart_history(
+    ticker: str,
+    interval: str = Query(..., pattern=FMP_HISTORY_INTERVAL_PATTERN),
+    before: str = Query(..., max_length=BEFORE_MAX_LENGTH),
+    limit: Optional[int] = Query(None, ge=1, le=MAX_PAGE_LIMIT),
+    extended_hours: bool = Query(False, alias="extended_hours"),
+    _fanout: None = MarketFanoutRateLimit,
+):
+    """Older bars for the chart a user is panning back through.
+
+    Bars strictly older than ``before`` (EXCLUSIVE: ``YYYY-MM-DD`` for daily / weekly /
+    monthly, the oldest bar's ``YYYY-MM-DD HH:MM:SS`` for intraday), oldest first, at
+    most ``limit``. Daily and coarser come from one settled full history per symbol, so
+    pages are contiguous back to the first trading day; ``has_more`` is false only there.
+    ``extended_hours`` applies to intraday pages only. A crypto pair is served from
+    CoinGecko, as `/chart` does.
+    """
+    from app.services.asset_class import uses_coingecko_price
+    from app.services.price_history_service import ASSET_CRYPTO, ASSET_STOCK
+
+    ticker = _validate_ticker(ticker)
+    if uses_coingecko_price(ticker) and str(
+        getattr(settings, "CRYPTO_PRICE_SOURCE", "coingecko") or ""
+    ).lower() != "fmp":
+        # The crypto screen reads `/stocks/{pair}/chart`, so its pages may arrive here:
+        # FMP 402s every pair, so route it exactly as `fetch_chart_data` does.
+        return await chart_history_response(
+            ASSET_CRYPTO, ticker, interval=interval, before=before, limit=limit,
+            display_symbol=ticker,
+        )
+    return await chart_history_response(
+        ASSET_STOCK, ticker, interval=interval, before=before, limit=limit,
+        extended_hours=extended_hours, fmp=get_fmp_client(),
+    )
 
 
 # ── Full financials endpoint ───────────────────────────────────────

@@ -1382,7 +1382,7 @@ def _key_management_insight_prompt(
     2. Insider activity: recent buy/sell flow, applying the BUY/SELL signal
        asymmetry (open-market buys carry more signal than sales).
     3. Capital allocation: dividends plus whether the company is returning
-       capital or NET-diluting (stock-comp issuance outpacing buybacks).
+       capital or NET-diluting (share issuance outpacing buybacks).
     """
     km = shell.get("key_management", {}) or {}
     # `top_holders` is the curated 10%+ list from `_build_key_management`
@@ -1441,7 +1441,8 @@ def _key_management_insight_prompt(
     # Topic 3: capital allocation (now part of this section). INTERPRET the
     # stewardship signal, don't restate the card's figures. Net share-count
     # change is the tell — a company can buy back stock yet still dilute when
-    # stock-comp issuance outpaces it.
+    # share issuance outpaces it. "Share", not "stock-comp": the cause is not known here
+    # (INTC's 2025 dilution was equity SOLD to the US government, SoftBank and Nvidia).
     ca = insider.get("capital_allocation") or {}
     if not ca:
         capital_line = "Data unavailable; cover only ownership and insider flow."
@@ -1462,7 +1463,7 @@ def _key_management_insight_prompt(
             steward = (
                 "is NET-DILUTING: the share count is rising"
                 + (
-                    " even though it buys back some stock, so stock-comp "
+                    " even though it buys back some stock, so new share "
                     "issuance is outpacing repurchases"
                     if newest_bb > 0
                     else " and it is not repurchasing stock"
@@ -2581,6 +2582,73 @@ def _digest_hidden_signals(report: Dict[str, Any]) -> List[str]:
     return out
 
 
+# What a concentration label was measured on, said beside it so the model never reads a
+# market-cap or revenue-share HHI of LISTED companies as the whole industry's structure.
+_CONCENTRATION_BASIS_WORDS = {
+    "revenue_share": "by revenue share of listed companies",
+    "peer_revenue_share": "by revenue share of a peer set",
+    "market_cap": "by market cap of listed companies",
+}
+# %/yr. A stored rate beyond this is a corrupt value, not an industry's growth.
+_MARKET_GROWTH_MAX_ABS = 1000.0
+
+
+def _window_year(v: Any) -> Optional[int]:
+    """A calendar year (1900-2100) from an int, an integral float or a 4-digit string; else None."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, float):
+        if not math.isfinite(v) or not v.is_integer():
+            return None
+        v = int(v)
+    elif isinstance(v, str):
+        s = v.strip()
+        if not (len(s) == 4 and s.isascii() and s.isdigit()):
+            return None
+        v = int(s)
+    if not isinstance(v, int):
+        return None
+    return v if 1900 <= v <= 2100 else None
+
+
+def _market_structure_bits(md: Dict[str, Any]) -> List[str]:
+    """The moat digest's market-structure pieces (owner decision 2026-10-22, "Measured only").
+
+    The growth rate is said as what it is — a nominal US industry rate over its measured window
+    ("US industry growth +0.9%/yr nominal 2017-24") — never "CAGR", which the bear case read as
+    a forward market forecast, and never a TAM figure (the card shows the measured one; a
+    projection here would put a number in the thesis the reader never sees). The lifecycle is
+    named as a reading OF that rate, and only beside it: without a rate the phase is the
+    classifier's no-signal default. An 'unknown' concentration is left out — it is not a
+    structure, and "fragmented" used to double as "unknown"."""
+    bits: List[str] = []
+    conc = md.get("concentration")
+    conc = conc.strip() if isinstance(conc, str) else ""
+    if conc and conc.lower() != "unknown":
+        basis = _CONCENTRATION_BASIS_WORDS.get(md.get("concentration_basis"))
+        bits.append(f"{conc} {basis}" if basis else conc)
+
+    rate = md.get("cagr_5yr")
+    growth: Optional[float] = None
+    if isinstance(rate, (int, float)) and not isinstance(rate, bool):
+        f = float(rate)
+        if math.isfinite(f) and abs(f) <= _MARKET_GROWTH_MAX_ABS:
+            growth = round(f, 1) or 0.0   # never "-0.0" (it reads as a decline)
+    if growth is not None:
+        # A legacy 'global' row is a retired grounded figure: its rate was not a US one.
+        scope = "" if str(md.get("tam_scope") or "").strip().lower() == "global" else "US "
+        start = _window_year(md.get("cagr_start_year"))
+        end = _window_year(md.get("cagr_end_year"))
+        window = ""
+        if start is not None and end is not None and start < end:
+            window = f" {start}-{end % 100:02d}" if start // 100 == end // 100 else f" {start}-{end}"
+        bits.append(f"{scope}industry growth {growth:+.1f}%/yr nominal{window}")
+        phase = md.get("lifecycle_phase")
+        if isinstance(phase, str) and phase.strip():
+            bits.append(f"lifecycle by that rate: {phase.strip().replace('_', ' ')}")
+    return bits
+
+
 def _digest_moat(report: Dict[str, Any]) -> List[str]:
     """Industry & Competitive Moat."""
     out: List[str] = []
@@ -2601,16 +2669,9 @@ def _digest_moat(report: Dict[str, Any]) -> List[str]:
         out.append("MOAT (0-10, focal vs peer): " + ", ".join(dim_strs))
     md = moat.get("market_dynamics") or {}
     if isinstance(md, dict):
-        mbits: List[str] = []
-        if md.get("concentration"):
-            mbits.append(str(md["concentration"]))
-        if md.get("lifecycle_phase"):
-            mbits.append(str(md["lifecycle_phase"]).replace("_", " "))
-        c5 = _f_num(md.get("cagr_5yr"), "{:+.1f}")
-        if c5 is not None:
-            mbits.append(f"industry CAGR {c5}%")
+        mbits = _market_structure_bits(md)
         if mbits:
-            out.append("  Market structure: " + ", ".join(mbits))
+            out.append("  Market structure: " + "; ".join(mbits))
     comp_strs: List[str] = []
     rows = _competitor_rows(moat)
     for cp in rows[:3]:

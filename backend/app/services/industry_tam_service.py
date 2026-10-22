@@ -13,19 +13,27 @@ Priority chain (best precision first):
      Requires FRED_API_KEY. The fallback when Census isn't configured or
      doesn't cover the industry.
 
-Returned values are industry-level proxies, not company-specific TAM.
-The iOS UI shows a small attribution caption so users know which source
-produced the figure.
+Returned values are industry-level figures, not company-specific TAM.
+They are MEASURED: the card shows `current_tam` at its own year and the
+average yearly growth over `cagr_start_year`→`current_year` (owner decision
+2026-10-22, "Measured only"); iOS builds from 2026-10-22 show `source_label`
+as a caption under the row. `future_tam` / `future_year` (a 5-year trailing-rate
+extension) are kept only because iOS builds up to 1.1 still read them.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-from app.integrations.census import CensusUnavailableException, get_census_client
+from app.integrations.census import (
+    CensusRevenueSnapshot,
+    CensusUnavailableException,
+    get_census_client,
+)
 from app.integrations.fred import get_fred_client
 
 logger = logging.getLogger(__name__)
@@ -167,14 +175,16 @@ INDUSTRY_TO_FRED_SERIES: Dict[str, str] = {
 #     NAICS 23 (plus 5413 engineering); homebuilders, ~40% of the sector, are a
 #     separate FMP industry.
 #   A BEA backup for a Census-mapped industry must give the card the SAME
-#     lifecycle label as its Census figure (`classify_lifecycle`: declining below
-#     0%, secular growth above 15%). BEA is value added, so it moves with margins
-#     rather than sales; these three would flip the label on a Census outage
-#     (2018→2025 BEA vs 2017→2024 Census, recorded 2026-10-01):
-#     "Oil & Gas Refining & Marketing" (324) −0.6% vs +4.0% → "declining";
-#     "Oil & Gas Equipment & Services" (213) −1.2% vs +1.9% → "declining";
-#     "Aerospace & Defense" (3364-3369) +3.4% vs −0.2% → "mature" (its card
-#     shows Phase B's global row anyway). They show "—" while Census is down.
+#     lifecycle label as its Census figure (`classify_lifecycle`: declining at or
+#     below −1%/yr, secular growth above 15% — the ±1%/yr dead band is the owner's
+#     2026-10-22 decision). BEA is value added, so it moves with margins rather than
+#     sales. "Oil & Gas Equipment & Services" (213) still flips the label on a Census
+#     outage (2018→2025 BEA −1.2% vs 2017→2024 Census +1.9% → "declining").
+#     Two more stay off for SCOPE, though their labels now agree under the band:
+#     "Oil & Gas Refining & Marketing" (BEA 324 incl. coal products −0.6%, value
+#     added, vs Census refineries 324110 +4.0%) and "Aerospace & Defense" (BEA
+#     3364-3369 incl. rail/ship/boat +3.4%, value added, vs the Census six-code
+#     aerospace + defense composite). They show "—" while Census is down.
 FRED_SERIES_MATCHES_INDUSTRY: frozenset[str] = frozenset({
     "Electrical Equipment & Parts",   # USELCEQAPMANNGSP = NAICS 335 itself
     "Restaurants",                    # USFOODDPNGSP = NAICS 722 food services & drinking places
@@ -228,9 +238,51 @@ def fred_mapping_grain(industry: str) -> str:
 # apparel, footwear) fail the second test — Census counts US plant
 # shipments, not the US market — and are listed as deliberately unmapped
 # in that test file. A code shared by several FMP industries is their SUM
-# and lifts Phase B's floor for each (see `census_naics_is_shared`).
+# (5112 covers the three Software industries).
+#
+# A value is a NAICS code string, or — for an industry no single code measures — a
+# `CensusComposite` of disjoint codes whose revenues are SUMMED (one today: Aerospace &
+# Defense, owner decision 2026-10-22). Read codes through `census_codes()`, never by
+# treating the value as a str: Census answers 204 (cached as a 24 h miss) to a joined code
+# list, which would silently drop the industry to its hidden BEA backup.
 
-INDUSTRY_TO_CENSUS: Dict[str, str] = {
+
+@dataclass(frozen=True)
+class CensusComposite:
+    """Several NAICS 2017 codes summed into one industry figure. All-or-nothing per year:
+    the composite has a year only when every code has a positive value for it, and a growth
+    rate only when every code has its 2017 baseline (`_census_composite_snapshot`)."""
+    label: str
+    codes: Tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.label or not self.label.strip():
+            raise ValueError("CensusComposite needs a label")
+        if len(self.codes) < 2:
+            raise ValueError(f"CensusComposite {self.label!r} needs at least 2 codes, got {self.codes!r}")
+        if len(set(self.codes)) != len(self.codes):
+            raise ValueError(f"CensusComposite {self.label!r} repeats a code: {self.codes!r}")
+        for code in self.codes:
+            if not isinstance(code, str) or not code.isdigit():
+                raise ValueError(f"CensusComposite {self.label!r}: {code!r} is not a NAICS code")
+        for a in self.codes:
+            for b in self.codes:
+                if a != b and b.startswith(a):
+                    # A parent and its child (3364 + 336411) would count the child twice.
+                    raise ValueError(f"CensusComposite {self.label!r}: {b} is nested in {a}")
+
+
+CensusMapping = Union[str, CensusComposite]
+
+
+def census_codes(mapping: CensusMapping) -> Tuple[str, ...]:
+    """The NAICS codes a mapping reads — a plain code gives a 1-tuple."""
+    if isinstance(mapping, CensusComposite):
+        return mapping.codes
+    return (mapping,)
+
+
+INDUSTRY_TO_CENSUS: Dict[str, CensusMapping] = {
     # Software Publishers (NAICS 5112) — 2023 ≈ $526B, 2017 = $276B
     # (vs. FRED's broader Information sector ≈ $1.7T).
     "Software - Infrastructure": "5112",
@@ -384,9 +436,28 @@ INDUSTRY_TO_CENSUS: Dict[str, str] = {
     #   2024: $259.5B, +3.0%/yr since 2017.
     "Medical - Pharmaceuticals": "3254",
     # ── Industrials ──
-    # NAICS 3364 aerospace product & parts mfg — BA, RTX, GE, LMT, TDG (Phase B curated: global row wins).
-    #   2024: $247.0B, -0.2%/yr since 2017.
-    "Aerospace & Defense": "3364",
+    # Aerospace + defense manufacturing (owner decision 2026-10-22, "Aerospace + defense
+    # mfg") — the SUM of six NAICS codes, because the FMP industry holds the defense primes
+    # as well as the airframers, and NAICS 3364 alone ($247.0B 2024, -0.2%/yr since 2017,
+    # driven by the 2017-peak → 2024-strike airliner code 336411) mislabelled the industry
+    # 'declining':
+    #   3364   aerospace product & parts — BA, RTX, GE, TDG, HWM, LMT (aircraft, missiles, space)
+    #   334511 search, detection, navigation & guidance instruments — LHX, DRS, MRCY
+    #          (includes civil avionics and nautical instruments)
+    #   336992 military armored vehicles, tanks & components — GD land systems
+    #   332992/332993/332994 small-arms ammunition, ammunition, small arms & ordnance —
+    #          RGR, SWBI, POWW, NPK
+    #   Excluded: 336611 ship building (HII, GD Electric Boat) — outside the owner's scope
+    #   and suppressed in AIES 2024; 336612 is recreational boats.
+    #   A GROSS US shipments sum: components shipped into finished systems (avionics in an
+    #   aircraft, engines into an airframe) are counted again, inside 3364 and across codes,
+    #   so read it as a growth proxy, not a net market. Verified live 2026-10-22 in
+    #   tests/fixtures/industry_tam/verified_sources_2026_10_22.json.
+    #   2024: $342.8B, +0.9%/yr since 2017.
+    "Aerospace & Defense": CensusComposite(
+        label="Aerospace & defense manufacturing",
+        codes=("3364", "334511", "336992", "332992", "332993", "332994"),
+    ),
     # NAICS 3331 agriculture, construction & mining machinery mfg — DE, CAT, CNH, AGCO.
     #   2024: $107.5B, +4.1%/yr since 2017.
     "Agricultural - Machinery": "3331",
@@ -469,28 +540,18 @@ def expects_industry_grain(industry: str) -> bool:
     return industry in INDUSTRY_TO_CENSUS or industry in FRED_SERIES_MATCHES_INDUSTRY
 
 
-def census_naics_is_shared(industry: str) -> bool:
-    """True when the industry's Census NAICS code is also mapped to another
-    FMP industry (5112 Software Publishers covers Software - Infrastructure,
-    - Application AND - Services). Such a figure is the SUM of several FMP
-    industries, so it is no lower bound for any one of them — Phase B's
-    "global ≥ US Census" floor must not apply to it."""
-    naics = INDUSTRY_TO_CENSUS.get(industry)
-    if not naics:
-        return False
-    return sum(1 for code in INDUSTRY_TO_CENSUS.values() if code == naics) > 1
-
-
 @dataclass
 class IndustryTAM:
     """Industry-size projection from a public-data source.
 
     `current_tam` and `future_tam` are in **billions USD** (already
     normalized from the source's native unit — FRED reports in $M, Census
-    in $K, both get converted here). `cagr_5y_pct` is the realized 5-year
-    CAGR from the underlying source, exposed so the response's
-    `market_dynamics.cagr_5yr` can fall back to it when the SectorAggregates
-    batch hasn't run. `source_label` is shown verbatim under the TAM row.
+    in $K, both get converted here). `cagr_5y_pct` is the realized average
+    yearly growth over `cagr_start_year` → `current_year` (7 years as of
+    2026-10, despite the "5y" name; None when there is no usable base, never
+    a fake 0). `source_label` is shown verbatim under the TAM row.
+    `future_tam` / `future_year` extend that trailing rate 5 years; the
+    current card never shows them — they exist for iOS builds up to 1.1.
     """
     current_tam: float
     future_tam: float
@@ -498,6 +559,9 @@ class IndustryTAM:
     future_year: str
     source_label: str
     cagr_5y_pct: Optional[float] = None
+    # First year of the growth window (Census: the 2017 Economic Census; FRED: the
+    # oldest valid observation). None exactly when cagr_5y_pct is None.
+    cagr_start_year: Optional[int] = None
 
 
 _FRED_SOURCE_LABELS: Dict[str, str] = {
@@ -552,6 +616,15 @@ def _project_5y(latest_value: float, cagr_decimal: float) -> float:
     return latest_value * math.pow(1.0 + clamped, 5)
 
 
+def _pct_1dp(rate_decimal: Optional[float]) -> Optional[float]:
+    """A decimal growth rate as a 1-dp percentage. None for None / non-finite.
+    `+ 0.0` turns a rounded `-0.0` into `0.0`, so a −0.04%/yr rate can never
+    render as "+-0.0%"; an exact 0.0 stays 0.0 (it used to become None)."""
+    if rate_decimal is None or not math.isfinite(rate_decimal):
+        return None
+    return round(rate_decimal * 100, 1) + 0.0
+
+
 async def fred_tam_for_series(
     series_id: str,
     source_label: Optional[str] = None,
@@ -594,15 +667,18 @@ async def fred_tam_for_series(
     # The span comes from the observation DATES, so a gap in a series cannot
     # mis-annualize the rate. No valid base → no CAGR (None), never a fake 0.0.
     cagr_decimal: Optional[float] = None
+    base_year: Optional[int] = None
     for base in reversed(obs[1:]):
         if not math.isfinite(base.value) or base.value <= 0:
             continue
         try:
-            years = int(current_year) - int(base.date.split("-", 1)[0])
+            candidate_year = int(base.date.split("-", 1)[0])
         except (AttributeError, ValueError, IndexError):
             continue
+        years = int(current_year) - candidate_year
         if years > 0:
             cagr_decimal = (latest.value / base.value) ** (1.0 / years) - 1.0
+            base_year = candidate_year
             break
 
     current_b = latest.value / 1000.0
@@ -614,7 +690,8 @@ async def fred_tam_for_series(
         current_year=current_year,
         future_year=str(int(current_year) + 5),
         source_label=source_label or _fred_source_label(series_id),
-        cagr_5y_pct=round(cagr_decimal * 100, 1) if cagr_decimal is not None else None,
+        cagr_5y_pct=_pct_1dp(cagr_decimal),
+        cagr_start_year=base_year if cagr_decimal is not None else None,
     )
 
 
@@ -629,6 +706,106 @@ async def _try_fred_tam(industry: str) -> Optional[IndustryTAM]:
     return await fred_tam_for_series(series_id)
 
 
+def _raise_first_failure(
+    results: Sequence[Any], industry: str, comp: "CensusComposite", what: str, year: int,
+) -> None:
+    """Inspect EVERY gathered result before raising: a transient Census failure wins (the
+    read path retries it, the quarterly run keeps the stored row), a cancellation is
+    re-raised as is, any other exception is logged with its stack and re-raised. Never sum
+    a partial set."""
+    failures = [(code, r) for code, r in zip(comp.codes, results) if isinstance(r, BaseException)]
+    if not failures:
+        return
+    # Every unexpected failure is logged with its stack BEFORE any re-raise, so one hidden
+    # behind a simultaneous transient error (which wins the raise) still leaves a trace.
+    for code, r in failures:
+        if not isinstance(r, (CensusUnavailableException, asyncio.CancelledError)):
+            logger.error(
+                "Census composite %r (%s) for %r: %s %d read for NAICS %s failed — %s: %s",
+                comp.label, ",".join(comp.codes), industry, what, year, code,
+                type(r).__name__, r, exc_info=r,
+            )
+    for code, r in failures:
+        if isinstance(r, CensusUnavailableException):
+            raise r
+    for code, r in failures:
+        if isinstance(r, asyncio.CancelledError):
+            raise r
+    raise failures[0][1]
+
+
+async def _census_composite_snapshot(
+    client: Any, industry: str, comp: "CensusComposite",
+) -> Optional[CensusRevenueSnapshot]:
+    """Sum a composite's codes into one snapshot. Year alignment and summing live HERE (the
+    integration stays thin: one (code, year) per read). The codes are read concurrently.
+
+      * Latest year: the newest probed AIES year in which EVERY code has a positive value.
+        A year with only some codes is skipped with a WARNING naming the missing ones —
+        never a mixed-year or partial sum. No such year → WARNING, None (falls through to
+        the hidden BEA backup, like an uncovered single code).
+      * Baseline: the 2017 Economic Census for EVERY code, else no baseline (TAM without a
+        growth rate; `_try_census_tam` logs it).
+      * A transient failure on any code raises `CensusUnavailableException`.
+    """
+    latest: Optional[List[Any]] = None
+    latest_year: Optional[int] = None
+    for year in client.aies_probe_years():
+        results = await asyncio.gather(
+            *(client.get_aies_revenue(code, year) for code in comp.codes),
+            return_exceptions=True,
+        )
+        _raise_first_failure(results, industry, comp, "AIES", year)
+        present = [r for r in results if r is not None and r.revenue_usd > 0]
+        if len(present) == len(comp.codes):
+            latest, latest_year = present, year
+            break
+        if present:
+            missing = [code for code, r in zip(comp.codes, results)
+                       if r is None or not r.revenue_usd > 0]
+            logger.warning(
+                "Census composite %r for %r: NAICS %s missing in AIES %d (suppressed or "
+                "unpublished) — the whole composite steps back a year",
+                comp.label, industry, ", ".join(missing), year,
+            )
+    if latest is None or latest_year is None:
+        logger.warning(
+            "Census composite %r for %r: no AIES year in which every code (%s) has revenue — "
+            "industry TAM falls through to FRED",
+            comp.label, industry, ", ".join(comp.codes),
+        )
+        return None
+
+    base_results = await asyncio.gather(
+        *(client.get_ecn_revenue(code) for code in comp.codes),
+        return_exceptions=True,
+    )
+    _raise_first_failure(base_results, industry, comp, "ECN", 2017)
+    base_present = [r for r in base_results if r is not None and r.revenue_usd > 0]
+    baseline_usd: Optional[float] = None
+    baseline_year: Optional[int] = None
+    if len(base_present) == len(comp.codes) and len({r.year for r in base_present}) == 1:
+        baseline_usd = sum(r.revenue_usd for r in base_present)
+        baseline_year = base_present[0].year
+    else:
+        missing = [code for code, r in zip(comp.codes, base_results)
+                   if r is None or not r.revenue_usd > 0]
+        logger.warning(
+            "Census composite %r for %r: no complete Economic Census baseline (missing NAICS %s) "
+            "— TAM shown without a growth rate",
+            comp.label, industry, ", ".join(missing) or "none (mixed years)",
+        )
+
+    return CensusRevenueSnapshot(
+        revenue_usd=sum(r.revenue_usd for r in latest),
+        year=latest_year,
+        naics="+".join(comp.codes),   # informational, never sent back to Census
+        naics_label=comp.label,
+        revenue_usd_baseline=baseline_usd,
+        baseline_year=baseline_year,
+    )
+
+
 async def _try_census_tam(industry: str) -> Optional[IndustryTAM]:
     """Census branch: NAICS-precise revenue from AIES (latest) +
     Economic Census 2017 (baseline for CAGR).
@@ -640,23 +817,27 @@ async def _try_census_tam(industry: str) -> Optional[IndustryTAM]:
     propagate: falling through to a broader FRED series on a blip would
     swap an industry-grain figure for a hidden sector one.
     """
-    naics = INDUSTRY_TO_CENSUS.get(industry)
-    if not naics:
+    mapping = INDUSTRY_TO_CENSUS.get(industry)
+    if not mapping:
         return None
 
     client = get_census_client()
     if not client.is_configured:
         return None
 
-    snapshot = await client.get_industry_revenue_snapshot(naics)
+    if isinstance(mapping, CensusComposite):
+        snapshot = await _census_composite_snapshot(client, industry, mapping)
+        naics, naics_label = ", ".join(mapping.codes), mapping.label
+    else:
+        snapshot = await client.get_industry_revenue_snapshot(mapping)
+        naics, naics_label = mapping, (snapshot.naics_label if snapshot else "")
     if snapshot is None:
         return None
 
-    # CAGR over `years_apart` years (7 = 2024 AIES - 2017 ECN as of 2026-10;
-    # shown under the "5Yr" CAGR label — an annualized rate either way).
-    # `years_apart` is None when the baseline call failed; we still emit
-    # TAM in that case, just without a CAGR.
-    cagr_decimal: float = 0.0
+    # Average yearly growth over `years_apart` years (7 = 2024 AIES - 2017 ECN as
+    # of 2026-10). With no usable baseline (missing, suppressed, or not older) we
+    # still emit the TAM, without a growth rate — WARNING, never a fake 0.
+    cagr_decimal: Optional[float] = None
     if (
         snapshot.revenue_usd_baseline
         and snapshot.revenue_usd_baseline > 0
@@ -668,38 +849,22 @@ async def _try_census_tam(industry: str) -> Optional[IndustryTAM]:
             ** (1.0 / snapshot.years_apart)
             - 1.0
         )
+    else:
+        logger.warning(
+            "Census TAM for %r (NAICS %s): no usable 2017 Economic Census baseline — "
+            "TAM shown without a growth rate", industry, snapshot.naics,
+        )
 
     current_b = snapshot.revenue_usd / 1e9
-    future_b = _project_5y(current_b, cagr_decimal)
+    # Flat (never 0) without a rate: iOS builds up to 1.1 render a 0 future as "$X → $0B".
+    future_b = _project_5y(current_b, cagr_decimal or 0.0)
 
     return IndustryTAM(
         current_tam=round(current_b, 1),
         future_tam=round(future_b, 1),
         current_year=str(snapshot.year),
         future_year=str(snapshot.year + 5),
-        source_label=_census_source_label(naics, snapshot.naics_label),
-        cagr_5y_pct=round(cagr_decimal * 100, 1) if cagr_decimal else None,
+        source_label=_census_source_label(naics, naics_label),
+        cagr_5y_pct=_pct_1dp(cagr_decimal),
+        cagr_start_year=snapshot.baseline_year if cagr_decimal is not None else None,
     )
-
-
-async def get_industry_tam(industry: Optional[str]) -> Optional[IndustryTAM]:
-    """Resolve TAM for the given FMP industry using the cascading chain
-    Census (NAICS-precise) → FRED (sector-level) → None.
-
-    Returns None when no source can produce a positive TAM value.
-    """
-    if not industry:
-        return None
-
-    try:
-        census_tam = await _try_census_tam(industry)
-    except CensusUnavailableException as exc:
-        logger.warning(
-            "industry TAM: Census unavailable for %r (%s) — falling through to FRED",
-            industry, exc,
-        )
-        census_tam = None
-    if census_tam is not None and census_tam.current_tam > 0:
-        return census_tam
-
-    return await _try_fred_tam(industry)

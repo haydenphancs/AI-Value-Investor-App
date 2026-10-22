@@ -5,10 +5,16 @@
 //  ViewModel for the Crypto Detail screen
 //  Fetches real data from FastAPI backend → FMP + Gemini AI
 //
+//  Chart bars come from three requests that land in any order — the full detail (first
+//  load, pull-to-refresh), the bars-only `GET /crypto/{symbol}/chart` (first load, range /
+//  interval tap, the 30 s tick) — and older bars from `GET /crypto/{symbol}/chart/history`
+//  (via ChartHistoryLoader, as the user pans left).
+//
 
 import Foundation
 import SwiftUI
 import Combine
+import os
 
 @MainActor
 class CryptoDetailViewModel: ObservableObject {
@@ -84,7 +90,28 @@ class CryptoDetailViewModel: ObservableObject {
     /// The ONE place this screen names its asset class: the screen passes it to
     /// `TickerChartView`, and init resolves the remembered range/interval against it.
     let chartAssetContext: ChartAssetContext = .crypto
+    /// Bumped ONLY when the bars in hand belong to a different (range, interval) than the
+    /// previous write — a user range or interval change — or the chart goes from no bars to
+    /// some. Never on a 30 s tick, the core→full swap or pull-to-refresh: the chart keeps the
+    /// user's pan across those and resets to the range's default window only on a bump. It
+    /// used to bump on EVERY write, so a panned chart snapped back on every tick (24/7 here).
     @Published var chartDataVersion: Int = 0
+    /// The range / interval the bars in hand were REQUESTED for — captured before the await,
+    /// never the pill at landing time. The pill flips on the tap and the bars arrive later;
+    /// the chart maps the bars by these, and veils itself while they differ from the pill.
+    @Published var chartDataRange: ChartTimeRange?
+    @Published var chartDataInterval: ChartInterval?
+    /// The bars for the current selection are on their way (first load, a range or interval
+    /// tap). The screen shimmers an EMPTY chart frame only while this holds, so a load that
+    /// ends without bars never leaves a shimmer that cannot resolve.
+    @Published private(set) var isChartLoading: Bool = false
+    /// The last range / interval tap (or the first load) failed or came back with no bars.
+    /// The chart then says so in its own frame instead of drawing the previous range's bars
+    /// under the new pill.
+    @Published private(set) var chartLoadFailed: Bool = false
+    /// Older bars for the chart, paged in as the user pans left. Fed at every write of the
+    /// chart bars (`didWriteChartBars`) so its store stays contiguous with them.
+    let chartHistory: ChartHistoryLoader
 
     // MARK: - Private Properties
 
@@ -93,14 +120,39 @@ class CryptoDetailViewModel: ObservableObject {
     private let stockRepository: StockRepository = .shared
     private var chartRefreshTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
-    /// Monotonic token for full-detail fetches (initial load / refresh / chart-range
-    /// change). Each fetch captures the current value before awaiting and only applies
-    /// its result if still current — so a slow out-of-order response can't clobber a
-    /// newer one (e.g. rapid range switching showing a chart for the wrong range).
+    /// Monotonic token for full-detail fetches (initial load / refresh). Each fetch captures
+    /// the current value before awaiting and only applies its result if still current — so
+    /// a slow out-of-order response can't clobber a newer one. A range tap no longer bumps
+    /// it: a tap fetches the bars alone, and bumping here would drop the first load's full
+    /// model and leave the tabs on a skeleton. The BARS are ordered by `chartRequestSeq`.
     private var detailRequestGen = 0
+    /// Chart-bar ordering. Every request that carries bars takes a number when it is SENT;
+    /// its bars are painted only while no later-sent request's bars are on screen and no
+    /// range / interval tap was sent after it (`acceptsChartBars`). So the full detail can
+    /// never put an older range's bars back under the chart, and a tick that began before a
+    /// tap never paints over the tap's range.
+    private var chartRequestSeq = 0
+    /// The request whose bars are on screen (0 = none yet).
+    private var chartBarsSeq = 0
+    /// The latest SELECTION: a range / interval tap, or the first load.
+    private var selectionChartSeq = 0
+    /// The bars on screen. Always equal to the shown model's `chartPricePoints`, so a model
+    /// that lands later (core, full) is handed these rather than older ones of its own.
+    private var chartBars: [StockPricePoint] = []
+    /// What the last write of the chart bars was fetched for. Crypto has no extended session,
+    /// so (range, interval) is the whole data stamp; `hasBars` is there because the chart
+    /// commits a window for an EMPTY write, and bars landing under that same stamp would open
+    /// on its 10-bar minimum instead of the range's default window.
+    private struct ChartBarsStamp: Equatable {
+        let range: ChartTimeRange
+        let interval: ChartInterval
+        let hasBars: Bool
+    }
+    private var lastChartStamp: ChartBarsStamp?
+    private let log = Logger(subsystem: "com.caydex.ios", category: "CryptoDetailViewModel")
     /// True while the range sink assigns the range's default interval, so the
     /// interval sink doesn't ALSO reload (one range change would otherwise fire two
-    /// identical getCryptoDetail calls when the range crosses an interval boundary).
+    /// identical getCryptoChart calls when the range crosses an interval boundary).
     private var suppressIntervalReload = false
 
     // News pagination
@@ -123,6 +175,9 @@ class CryptoDetailViewModel: ObservableObject {
         // `"\(cryptoSymbol)USD"` site below then built "BTCUSDUSD", a symbol that
         // does not exist. See `CryptoSymbol`.
         self.cryptoSymbol = CryptoSymbol.bare(cryptoSymbol)
+        // No repository is injected into this view model (it reads `StockRepository.shared`
+        // throughout), so the loader takes the same default.
+        self.chartHistory = ChartHistoryLoader(asset: .crypto)
 
         // Open on the user's last range and that range's interval, resolved for CRYPTO:
         // a 5Y/ALL picked elsewhere opens 2Y (the CoinGecko cap), and a stock's 1D = 1 min
@@ -158,6 +213,11 @@ class CryptoDetailViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // The screen reads `chartHistory.state` through this view model, so the loader's
+        // changes must re-publish here — an older page landing has to redraw the chart.
+        chartHistory.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
     }
 
     // MARK: - Data Loading
@@ -168,6 +228,18 @@ class CryptoDetailViewModel: ObservableObject {
 
         detailRequestGen += 1
         let gen = detailRequestGen
+        // Captured NOW: both requests below carry bars, stamped with what was asked for —
+        // never with a pill the user changes while they are in flight.
+        let range = selectedChartRange
+        let interval = chartSettings.selectedInterval
+        // The full detail is numbered first, the bars-only route second: when both land, the
+        // later-sent one's bars win, and the first load counts as a selection, so anything
+        // sent before it (a previous visit's tick) can no longer paint.
+        let detailSeq = nextChartSeq()
+        let chartSeq = nextChartSeq()
+        selectionChartSeq = detailSeq
+        if chartLoadFailed { chartLoadFailed = false }
+        isChartLoading = true
 
         Task { [weak self] in
             guard let self = self else { return }
@@ -187,51 +259,59 @@ class CryptoDetailViewModel: ObservableObject {
             // refresh. Only the cryptoData paint stays gen-guarded (mirrors Commodity VM).
             self.startLivePriceUpdates()
             self.startChartRefreshTimer()
-            // Fast core, in parallel with the full detail below: whichever lands
-            // first paints. Deliberately NOT gen-guarded on its own — `loadCore`
-            // drops itself the moment `cryptoData` exists, which is the stronger
+            // Fast core, the bars-only chart and the full detail below, ALL in parallel:
+            // whichever lands first paints. This used to `await` core before even SENDING
+            // the full detail, and core never carries bars, so the chart waited for two
+            // round trips in a row. Core is deliberately NOT gen-guarded on its own —
+            // `loadCore` drops itself the moment `cryptoData` exists, which is the stronger
             // check here (a superseded load still leaves cryptoData nil).
             async let coreTask: () = self.loadCore()
+            async let chartTask: () = self.loadChartBars(
+                range: range, interval: interval, seq: chartSeq, reportsFailure: false
+            )
             async let newsTask: () = self.fetchCryptoNews()
             async let analysisTask: () = self.fetchCryptoAnalysis()
             async let watchlistTask: () = self.checkWatchlistStatus()
-            _ = await coreTask
 
+            let symbol = self.cryptoSymbol
+            let shape = "\(range.rawValue)/\(interval.rawValue)"
             do {
-                print("🪙 [CryptoDetail] Fetching data for \(self.cryptoSymbol) range=\(self.selectedChartRange.rawValue)")
+                self.log.debug("loading \(symbol, privacy: .public) \(shape, privacy: .public)")
 
                 let response = try await self.apiClient.request(
                     endpoint: .getCryptoDetail(
-                        symbol: self.cryptoSymbol,
-                        range: self.selectedChartRange.rawValue,
-                        interval: self.chartSettings.selectedInterval.rawValue
+                        symbol: symbol,
+                        range: range.rawValue,
+                        interval: interval.rawValue
                     ),
                     responseType: CryptoDetailResponse.self
                 )
 
                 // Only paint the detail snapshot if it's still the latest — a newer
-                // load/refresh/range-change may have superseded it. The setup above
-                // already ran regardless of supersession.
+                // load/refresh may have superseded it. The setup above already ran
+                // regardless of supersession. Its BARS are ordered separately
+                // (`applyFullModel`), so a range tap during the load keeps its own bars.
                 if gen == self.detailRequestGen {
-                    print("✅ [CryptoDetail] Loaded \(response.name) — $\(response.currentPrice)")
-                    print("   📊 Chart points: \(response.chartData.count)")
-                    print("   📰 News articles: \(response.newsArticles.count)")
-                    print("   🔗 Related cryptos: \(response.relatedCryptos.count)")
-                    print("   📸 Snapshots: \(response.snapshots.count)")
+                    let barCount = response.chartData.count
+                    self.log.debug("loaded \(symbol, privacy: .public) \(shape, privacy: .public): \(barCount) chart bars")
 
                     // Map API response → UI models
-                    self.cryptoData = response.toModel()
-                    self.chartDataVersion += 1
+                    self.applyFullModel(response, range: range, interval: interval, seq: detailSeq)
                     self.isLoading = false
                     self.errorMessage = nil
                 }
             } catch {
                 // Only surface the error if this load is still the latest.
                 if gen == self.detailRequestGen {
-                    print("❌ [CryptoDetail] Failed to load \(self.cryptoSymbol): \(error)")
+                    let reason = String(describing: error)
+                    self.log.error("detail load failed for \(symbol, privacy: .public) \(shape, privacy: .public): \(reason, privacy: .public)")
                     self.handleLoadError(error)
                 }
             }
+
+            // Both requests that carry bars have answered: settle the chart frame.
+            _ = await (coreTask, chartTask)
+            self.settleFirstChartLoad(range: range, interval: interval, seq: detailSeq)
 
             // Await the independent setup tasks so they aren't cancelled early.
             _ = await (newsTask, analysisTask, watchlistTask)
@@ -253,21 +333,26 @@ class CryptoDetailViewModel: ObservableObject {
         errorMessage = nil
         detailRequestGen += 1
         let gen = detailRequestGen
+        // Captured before the await: these stamp the bars that land. Same stamp as the bars
+        // on screen, so the refreshed bars merge in place (no version bump): the chart keeps
+        // the user's pan and the older history it already paged in.
+        let range = selectedChartRange
+        let interval = chartSettings.selectedInterval
+        let seq = nextChartSeq()
+        let symbol = cryptoSymbol
 
         do {
-            print("🪙 [CryptoDetail] Refreshing \(cryptoSymbol)...")
+            log.debug("refreshing \(symbol, privacy: .public)")
             let response = try await apiClient.request(
                 endpoint: .getCryptoDetail(
-                    symbol: cryptoSymbol,
-                    range: selectedChartRange.rawValue,
-                    interval: chartSettings.selectedInterval.rawValue
+                    symbol: symbol,
+                    range: range.rawValue,
+                    interval: interval.rawValue
                 ),
                 responseType: CryptoDetailResponse.self
             )
             guard gen == self.detailRequestGen else { return }
-            print("✅ [CryptoDetail] Refreshed \(response.name)")
-            self.cryptoData = response.toModel()
-            self.chartDataVersion += 1
+            self.applyFullModel(response, range: range, interval: interval, seq: seq)
             self.isLoading = false
 
             // Refresh news + analysis data (includes TA gauge)
@@ -280,10 +365,12 @@ class CryptoDetailViewModel: ObservableObject {
             await fetchCryptoNews()
             await fetchCryptoAnalysis()
         } catch {
-            print("❌ [CryptoDetail] Refresh failed: \(error)")
+            let reason = String(describing: error)
+            log.error("refresh failed for \(symbol, privacy: .public): \(reason, privacy: .public)")
             // Gen-guard the failure the same way the success path is (line above):
-            // a superseded refresh (user switched range mid-refresh) must not stamp a
-            // false error banner over the newer request's correct data.
+            // a superseded refresh (a newer load / refresh started mid-refresh) must not
+            // stamp a false error banner over the newer request's correct data. A range
+            // tap no longer supersedes it: a tap fetches the bars alone.
             guard gen == self.detailRequestGen else { return }
             handleLoadError(error)
         }
@@ -307,7 +394,11 @@ class CryptoDetailViewModel: ObservableObject {
         // The race guard: a core response landing after the full one must be dropped, or
         // the screen would step backwards from the complete model to the header-only one.
         guard cryptoData == nil else { return }
-        coreData = core.toCoreData()
+        // Core carries no bars. If the bars-only route already answered, the slice shows
+        // its bars: what is on screen is always `chartBars`, already absorbed and stamped.
+        var slice = core.toCoreData()
+        slice.chartPricePoints = chartBars
+        coreData = slice
     }
 
     // MARK: - Chart Range Change
@@ -316,31 +407,155 @@ class CryptoDetailViewModel: ObservableObject {
         selectedChartRange = range
     }
 
-    /// Called by Combine observer when selectedChartRange changes.
+    /// Called by the Combine observers when the range or the interval changes: the bars
+    /// alone, from `/crypto/{symbol}/chart`. The header keeps the model it has — a range
+    /// changes the bars, not the price. This used to re-download the whole uncached detail
+    /// (fundamentals, snapshots, benchmark) for every pill tap.
     private func fetchChartForRange() async {
         let range = selectedChartRange
-        print("🪙 [CryptoDetail] Updating chart range to \(range.rawValue)")
-        detailRequestGen += 1
-        let gen = detailRequestGen
+        let interval = chartSettings.selectedInterval
+        let seq = nextChartSeq()
+        selectionChartSeq = seq
+        if chartLoadFailed { chartLoadFailed = false }
+        isChartLoading = true
+        await loadChartBars(range: range, interval: interval, seq: seq, reportsFailure: true)
+    }
 
+    /// The chart panned toward the oldest bar in hand, or the user tapped Retry
+    /// (`userInitiated`, which skips the loader's post-failure back-off).
+    func loadOlderChartBars(userInitiated: Bool) {
+        chartHistory.requestOlder(force: userInitiated)
+    }
+
+    // MARK: - Chart Bars Bookkeeping
+
+    private func nextChartSeq() -> Int {
+        chartRequestSeq += 1
+        return chartRequestSeq
+    }
+
+    /// May the bars of request `seq` replace the bars on screen? Only when nothing sent
+    /// after it has painted, and no range / interval tap was sent after it.
+    private func acceptsChartBars(seq: Int) -> Bool {
+        seq > chartBarsSeq && seq >= selectionChartSeq
+    }
+
+    /// The bars-only route: the first load's parallel bars and every range / interval tap.
+    ///
+    /// `reportsFailure` is false on the first load, whose full detail is still in flight and
+    /// owns the error path (`settleFirstChartLoad` settles the frame once both answered).
+    private func loadChartBars(range: ChartTimeRange, interval: ChartInterval, seq: Int, reportsFailure: Bool) async {
+        let symbol = cryptoSymbol
+        let shape = "\(range.rawValue)/\(interval.rawValue)"
         do {
-            let response = try await apiClient.request(
-                endpoint: .getCryptoDetail(
-                    symbol: cryptoSymbol,
-                    range: range.rawValue,
-                    interval: chartSettings.selectedInterval.rawValue
-                ),
-                responseType: CryptoDetailResponse.self
+            let response = try await stockRepository.getCryptoChart(
+                symbol: symbol,
+                range: range.rawValue,
+                interval: interval.rawValue
             )
-
-            // Drop a stale range response so rapid switching can't clobber a newer range.
-            guard gen == self.detailRequestGen else { return }
-            self.cryptoData = response.toModel()
-            self.chartDataVersion += 1
-            print("✅ [CryptoDetail] Chart range updated — \(response.chartData.count) data points")
+            let bars = response.prices
+            guard !bars.isEmpty else {
+                log.warning("chart for \(symbol, privacy: .public) \(shape, privacy: .public) came back with no bars")
+                if reportsFailure { showChartUnavailable(range: range, interval: interval, seq: seq) }
+                return
+            }
+            // Superseded: a later request's bars are already on screen, or a later tap owns
+            // the chart. Dropped, so rapid switching can't clobber a newer range.
+            guard acceptsChartBars(seq: seq) else { return }
+            paintChartBars(bars, range: range, interval: interval, seq: seq)
+            log.debug("chart for \(symbol, privacy: .public) \(shape, privacy: .public): \(bars.count) bars")
         } catch {
-            print("⚠️ [CryptoDetail] Chart range update failed — \(error)")
+            guard !Task.isCancelled else { return }
+            // Classified for the log; the frame shows one fixed, honest note either way.
+            let kind = String(describing: AppError.from(error))
+            let reason = String(describing: error)
+            log.error("chart for \(symbol, privacy: .public) \(shape, privacy: .public) failed (\(kind, privacy: .public)): \(reason, privacy: .public)")
+            if reportsFailure { showChartUnavailable(range: range, interval: interval, seq: seq) }
         }
+    }
+
+    /// A range / interval tap failed or came back empty. Never leave the previous range's
+    /// bars under the new pill: clear them, stamped with what was asked for, and say so.
+    private func showChartUnavailable(range: ChartTimeRange, interval: ChartInterval, seq: Int) {
+        // A later tap owns the chart now.
+        guard seq == selectionChartSeq else { return }
+        if isChartLoading { isChartLoading = false }
+        // A tick sent after this tap may already have painted this selection's bars.
+        guard acceptsChartBars(seq: seq) else { return }
+        // The bars on screen already ARE this selection's (the user tapped away and back
+        // before the other range answered): they are not stale, so they stay — clearing
+        // them would trade a correct chart for the "Chart unavailable" note. Same rule as
+        // the ETF VM's `clearChartAfterFailedRequest`.
+        if let shown = lastChartStamp, shown.range == range, shown.interval == interval, shown.hasBars {
+            return
+        }
+        paintChartBars([], range: range, interval: interval, seq: seq)
+        chartLoadFailed = true
+    }
+
+    /// Both first-load requests that carry bars have answered. If neither painted any for
+    /// the requested range / interval (both failed, or both came back empty), the frame says
+    /// so instead of shimmering forever.
+    private func settleFirstChartLoad(range: ChartTimeRange, interval: ChartInterval, seq: Int) {
+        // A range tap since the load owns the chart's state.
+        guard selectionChartSeq == seq else { return }
+        if isChartLoading { isChartLoading = false }
+        if let shown = lastChartStamp, shown.range == range, shown.interval == interval {
+            // This selection's bars — or its empty answer — are what is on screen.
+            if !shown.hasBars, !chartLoadFailed { chartLoadFailed = true }
+            return
+        }
+        // Nothing for this selection landed, yet bars of ANOTHER one may still be on screen:
+        // a reload (the screen reappearing) after a range tap whose answer it superseded.
+        // Never leave them under the pill — clear them, stamped with what was asked for.
+        if acceptsChartBars(seq: seq) { paintChartBars([], range: range, interval: interval, seq: seq) }
+        if !chartLoadFailed { chartLoadFailed = true }
+    }
+
+    /// The full model landed (first load, pull-to-refresh). Its bars are painted only when
+    /// they are the newest for the current selection; otherwise the model is handed the bars
+    /// already on screen, so the full response can never put an older range's bars — or
+    /// older bars of the same range — back under the chart. An empty payload never wipes bars.
+    private func applyFullModel(_ response: CryptoDetailResponse, range: ChartTimeRange, interval: ChartInterval, seq: Int) {
+        var model = response.toModel()
+        let bars = model.chartPricePoints
+        let paints = acceptsChartBars(seq: seq) && (!bars.isEmpty || chartBars.isEmpty)
+        if !paints { model.chartPricePoints = chartBars }
+        cryptoData = model
+        if paints { didWriteChartBars(bars, range: range, interval: interval, seq: seq) }
+    }
+
+    /// Writes bars into whichever model the header gate shows (the full one, else core),
+    /// then the bookkeeping. Before either has landed the bars wait in `chartBars`, and the
+    /// model that lands first is handed them.
+    private func paintChartBars(_ bars: [StockPricePoint], range: ChartTimeRange, interval: ChartInterval, seq: Int) {
+        if cryptoData != nil {
+            cryptoData?.chartPricePoints = bars
+        } else if coreData != nil {
+            coreData?.chartPricePoints = bars
+        }
+        didWriteChartBars(bars, range: range, interval: interval, seq: seq)
+    }
+
+    /// Bookkeeping for EVERY write of the chart bars — the full detail, the bars-only route
+    /// and the 30 s tick — with what those bars were REQUESTED for. Call it in the same
+    /// main-actor turn as the write into the model, so the chart never sees new bars with
+    /// the previous stamp or history.
+    private func didWriteChartBars(_ bars: [StockPricePoint], range: ChartTimeRange, interval: ChartInterval, seq: Int) {
+        chartBars = bars
+        chartBarsSeq = seq
+        if chartDataRange != range { chartDataRange = range }
+        if chartDataInterval != interval { chartDataInterval = interval }
+        // Crypto has no pre/after-hours session, and the crypto routes take the bare symbol.
+        chartHistory.absorb(bars, symbol: cryptoSymbol, range: range, interval: interval, extendedHours: false)
+        if !bars.isEmpty {
+            if isChartLoading { isChartLoading = false }
+            if chartLoadFailed { chartLoadFailed = false }
+        }
+        let stamp = ChartBarsStamp(range: range, interval: interval, hasBars: !bars.isEmpty)
+        guard stamp != lastChartStamp else { return }
+        lastChartStamp = stamp
+        chartDataVersion += 1
     }
 
     // MARK: - Error Handling
@@ -596,28 +811,31 @@ class CryptoDetailViewModel: ObservableObject {
         chartRefreshTask = nil
     }
 
-    /// Lightweight chart-only refresh — bypasses cache for fresh intraday data
+    /// Lightweight chart-only refresh on an intraday interval — the same bars-only route
+    /// (`/crypto/{symbol}/chart`, under the repository's 25 s chart TTL) the range tap uses,
+    /// so every payload the history loader absorbs comes from ONE series builder. It used to
+    /// poll `/stocks/{pair}/chart`, a second builder for the same coin.
     private func refreshChartOnly() async {
-        let fmpSymbol = CryptoSymbol.pair(cryptoSymbol)
-        // Capture the request generation so a range change during the await
-        // invalidates this background refresh (last-write-wins), mirroring
-        // fetchChartForRange. Do NOT bump the gen — this is a timer refresh, not a
-        // user selection; without this a stale 1D refresh could clobber a chart the
-        // user just switched to 1Y (and, being non-intraday, never self-correct).
+        // Capture the load generation AND a chart sequence number, so a load / refresh or a
+        // range tap during the await invalidates this background refresh (last-write-wins).
+        // Do NOT bump the gen, and never make this a selection — this is a timer refresh;
+        // without the check a stale 1D refresh could clobber a chart the user just switched
+        // to 1Y (and, being non-intraday, never self-correct).
         let gen = detailRequestGen
+        let range = selectedChartRange
+        let interval = chartSettings.selectedInterval
+        let seq = nextChartSeq()
+        let symbol = cryptoSymbol
         do {
-            let chartResponse = try await apiClient.request(
-                endpoint: .getStockChart(
-                    ticker: fmpSymbol,
-                    range: selectedChartRange.rawValue,
-                    interval: chartSettings.selectedInterval.rawValue,
-                    extendedHours: true
-                ),
-                responseType: StockChartResponse.self
+            let chartResponse = try await stockRepository.getCryptoChart(
+                symbol: symbol,
+                range: range.rawValue,
+                interval: interval.rawValue
             )
             guard gen == self.detailRequestGen else { return }
             let pricePoints = chartResponse.prices
-            if !pricePoints.isEmpty, var data = self.cryptoData {
+            // An empty tick never wipes the bars on screen; a superseded one never paints.
+            if !pricePoints.isEmpty, acceptsChartBars(seq: seq), var data = self.cryptoData {
                 data.chartPricePoints = pricePoints
                 // Update current price from the latest candle AND keep priceChange /
                 // priceChangePercent consistent with it. They drive the header %/change
@@ -633,10 +851,15 @@ class CryptoDetailViewModel: ObservableObject {
                         : data.priceChangePercent
                 }
                 self.cryptoData = data
-                self.chartDataVersion += 1
+                // Same stamp as the bars on screen → a tail merge, no version bump: a chart
+                // the user panned or pinched stays where they left it.
+                self.didWriteChartBars(pricePoints, range: range, interval: interval, seq: seq)
             }
         } catch {
-            print("⚠️ [CryptoDetail] Chart refresh failed: \(error)")
+            // Leaving the screen cancels the timer mid-request: not a failure worth an error.
+            guard !Task.isCancelled else { return }
+            let reason = String(describing: error)
+            log.error("chart tick failed for \(symbol, privacy: .public): \(reason, privacy: .public)")
         }
     }
 

@@ -293,7 +293,23 @@ TABLE_NAME = "ticker_report_cache"
 #     deterministic Brand Power / Cost Advantage of 0.0/10 on the moat radar, the Stage B moat
 #     prompt, the executive-summary digest and report chat. Markets are closed, so only the
 #     reports cached since Friday's close rebuild. This ONE bump supersedes every instant above.
-CACHE_SCHEMA_FLOOR = datetime(2026, 10, 11, 19, 22, 0, tzinfo=timezone.utc)
+# 2026-10-21 (re-stamped 2026-10-22 01:35 UTC, the owner's go; after the production fiscal + moat recomputes; RE-STAMP to the push
+#     moment before deploying — reports cached between this instant and the deploy come from the
+#     old code): the history readers no longer serve a margin median of exactly 0 (the 10-04
+#     fiscal rows drew "industry/sector 0.0%" lines and Stage B "above sector 0.0%" for ~446
+#     companies), a zero-filled free cash flow is no reading (HSBC's quarters), and a Financial
+#     Services company is compared with its own industry from 10 companies or with no peer —
+#     never the FS sector median. Cached collections carry the old peer lines and verdicts. This
+#     ONE bump supersedes every instant above.
+# 2026-10-22 (22:01 UTC = 18:01 ET, after the close; the push that merges the feedback branch into
+#     main, the owner's go): the re-stamp the entry above asked for. That deploy never ran, so these
+#     fixes reach production only now. The bump also covers the SEC buyback check (migration 202:
+#     a quarter the filing explains as tax withholding no longer charts as a buyback) and the Moat
+#     card's measured-only market row (migration 203: no projected value, its real growth window).
+#     Cached collections carry the old peer lines, buyback bars and projected market rows. The full
+#     suite ran on the exact merge tree BEFORE this literal was written. This ONE bump supersedes
+#     every instant above.
+CACHE_SCHEMA_FLOOR = datetime(2026, 10, 22, 22, 1, 0, tzinfo=timezone.utc)
 
 # The internal report key carrying the Financials sections a report lost to a degraded
 # upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.

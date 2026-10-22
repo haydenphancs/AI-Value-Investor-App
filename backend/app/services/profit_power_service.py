@@ -26,6 +26,7 @@ from app.services._earnings_common import (
 )
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
+from app.utils.margins import free_cash_flow_reading
 from app.integrations.fmp import get_fmp_client
 from app.utils.period_labels import (
     annual_benchmark_key,
@@ -89,7 +90,13 @@ _DEGRADED_CACHE_TTL = 60
 # industry's median (a lenders' yardstick): no margin peer line, `peer_group_levels` empty,
 # no benchmark read (`comparable_peer_metrics`) — so Cay AI's peer net-margin sentence is
 # gone for them too. A v7 row of V drew the lenders' margins beside V's.
-_PP_PAYLOAD_VERSION = 8
+# v9 (2026-10-21): the lookup never serves a margin median of exactly 0 (the fiscal rows of
+#     2026-10-04 held 1,113 — Healthcare's sector net margin read 0.0% for 2016-2025), a
+#     zero-filled free cash flow is no reading (HSBC's quarters drew a flat 0.0% FCF line), and
+#     a Financial Services company with an industry gets its OWN industry's line from 10
+#     companies per period, or no line — never the sector's (owner decision 2026-10-20). A v8
+#     row drew LLY's peer net margin as a flat 0.0% line.
+_PP_PAYLOAD_VERSION = 9
 _VERSION_KEY = "payload_version"
 
 # The margin whose peer line the live Profit Power card draws (and Cay AI quotes): its
@@ -367,9 +374,11 @@ def _build_margin_points(
         operating_income = _safe_float(rec, "operatingIncome")
         net_income = _safe_float(rec, "netIncome")
 
-        # Match cash flow by date for FCF
+        # Match cash flow by date for FCF. An exact 0 is FMP's fill for a cash-flow
+        # statement it does not have (HSBC's every quarter, an unfiled newest quarter) —
+        # no reading, never a 0.0% FCF margin (`free_cash_flow_reading`, 2026-10-21).
         cf_rec = cf_by_date.get(rec.get("date") or "", {})
-        free_cash_flow = _safe_float(cf_rec, "freeCashFlow")
+        free_cash_flow = free_cash_flow_reading(_safe_float(cf_rec, "freeCashFlow"))
 
         point = {
             "period": label,                 # fiscal label (display)

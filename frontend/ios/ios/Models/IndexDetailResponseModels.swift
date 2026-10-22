@@ -176,6 +176,12 @@ struct ValuationSnapshotDTO: Decodable {
     /// so a 0 sentinel rendered a green **"Bargain"** badge with the gauge pinned hard-left.
     /// The backend already knew it could not compute the figure — it just had no way to say so.
     let peKnown: Bool?
+    /// Is `historicalAvgPe` the market composite's OWN 10-year average (2026-10-21)? `false`
+    /// means it is the 0 sentinel: render "—". `peRatio` is one US-market composite, the same
+    /// on every index, and this average is that same composite's — it used to be a hard-coded
+    /// per-index figure, so one number read "a premium" on two screens and "below" on the third.
+    /// Optional like `peKnown`: an older backend decodes as `nil`, the pre-existing behaviour.
+    let historicalAvgPeKnown: Bool?
 
     enum CodingKeys: String, CodingKey {
         case peRatio = "pe_ratio"
@@ -185,6 +191,7 @@ struct ValuationSnapshotDTO: Decodable {
         case historicalPeriod = "historical_period"
         case storyTemplate = "story_template"
         case peKnown = "pe_known"
+        case historicalAvgPeKnown = "historical_avg_pe_known"
     }
 }
 
@@ -395,7 +402,8 @@ extension IndexDetailResponse {
             historicalPeriod: snapshotsData.valuation.historicalPeriod,
             storyTemplate: snapshotsData.valuation.storyTemplate,
             // `nil` (older backend) means "assume known" — the pre-existing behaviour.
-            peKnown: snapshotsData.valuation.peKnown ?? true
+            peKnown: snapshotsData.valuation.peKnown ?? true,
+            historicalAvgKnown: snapshotsData.valuation.historicalAvgPeKnown ?? true
         )
 
         let sectorEntries = snapshotsData.sectorPerformance.sectors.map { s in

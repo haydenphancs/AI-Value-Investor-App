@@ -89,7 +89,10 @@ _CACHE_TTL = 300  # 5 minutes
 #     the metrics it may compare (`comparable_peer_metrics`) and none at all for a listed
 #     member, so a lookup failure no longer degrades a peer-free card. A v7 row of WU may
 #     carry its made-up rows (local runs only); one of TREE / PMTS lacks theirs.
-_SNAPSHOT_PAYLOAD_VERSION = 8
+# 9 (2026-10-21): the Financial Services peer rule (own industry from 10 companies, else no
+#     peer — never the sector median; owner decision 2026-10-20). A v8 fallback row of a
+#     small FS industry compared D/E with the bank-dominated sector.
+_SNAPSHOT_PAYLOAD_VERSION = 9
 _VERSION_KEY = "_schema_v"
 
 

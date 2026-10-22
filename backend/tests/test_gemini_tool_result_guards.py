@@ -264,6 +264,7 @@ async def test_the_research_loop_passes_its_own_budget(monkeypatch):
     class _Out:
         ticker = "AAPL"
         profile = {"companyName": "Apple Inc."}
+        signal_of_confidence = None
 
     text = await agent._agentic_research(_Out(), "EVIDENCE")
     assert text == "findings"

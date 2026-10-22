@@ -37,18 +37,16 @@ from _price_fakes import PriceFromFMPFake
 
 
 class _RecordingGemini:
-    """Answers with a well-formed two-part story and records every call."""
+    """Answers with a well-formed sector + macro story and records every call."""
 
     def __init__(self, text=None, delay=0.0):
         self.calls: list[dict] = []
         self._delay = delay
-        # THREE parts, because with no cached macro the prompt asks for three. A
-        # two-part answer is (correctly) rejected by the parser, which is how the first
-        # draft of this file silently proved nothing.
+        # TWO parts, because with no cached macro the prompt asks for two (sector, macro;
+        # the valuation sentence is code-owned since 2026-10-21). A one-part answer is
+        # (correctly) rejected by the parser, which is how the first draft of this file
+        # silently proved nothing.
         self._text = text if text is not None else (
-            "The market trades at {PE_RATIO} against a {HISTORICAL_PERIOD} average of "
-            "{HISTORICAL_AVG_PE}, which reads {VALUATION_LABEL}. Forward {FORWARD_PE}."
-            "\n---\n"
             "{TOP_SECTOR} led at {TOP_SECTOR_CHANGE} while {BOTTOM_SECTOR} lagged at "
             "{BOTTOM_SECTOR_CHANGE}; {ADVANCING_COUNT} advanced and {DECLINING_COUNT} fell."
             "\n---\n"
@@ -83,11 +81,7 @@ _SECTORS = [
     SectorPerformanceEntryResponse(sector="Utilities", change_percent=-0.3),
 ]
 
-_STORY_ARGS = dict(
-    symbol="^GSPC", index_name="S&P 500", pe=26.4, forward_pe=22.4,
-    earnings_yield=3.79, val_label="Expensive", historical_avg_pe=21,
-    historical_period="10-year", sectors=_SECTORS,
-)
+_STORY_ARGS = dict(symbol="^GSPC", index_name="S&P 500", sectors=_SECTORS)
 
 
 def _index_service(monkeypatch, gemini, tier2=None, macro=None):
@@ -129,14 +123,13 @@ async def test_index_stories_return_templates_without_awaiting_gemini(monkeypatc
 
     loop = asyncio.get_running_loop()
     t0 = loop.time()
-    valuation, sector, macro, indicators = await svc._generate_ai_stories(**_STORY_ARGS)
+    sector, macro, indicators = await svc._generate_ai_stories(**_STORY_ARGS)
     elapsed = loop.time() - t0
 
     # Returned BEFORE Gemini could possibly have answered.
     assert elapsed < 0.05, f"the request path waited {elapsed:.3f}s on Gemini"
     assert gem.calls == [], "Gemini must not have been called on the request path yet"
     # …and what came back is the deterministic template, fully formed.
-    assert "{PE_RATIO}" in valuation and "{VALUATION_LABEL}" in valuation
     assert "{TOP_SECTOR}" in sector and "{ADVANCING_COUNT}" in sector
     assert macro and len(indicators) == 4
     await _drain()
@@ -164,8 +157,8 @@ async def test_a_gemini_stall_cannot_hold_the_response(monkeypatch):
 async def test_index_stories_never_await_gemini_even_when_it_fails(monkeypatch):
     gem = _ExplodingGemini()
     mod, svc, _ = _index_service(monkeypatch, gem)
-    valuation, _, _, _ = await svc._generate_ai_stories(**_STORY_ARGS)
-    assert "{PE_RATIO}" in valuation
+    sector, _, _ = await svc._generate_ai_stories(**_STORY_ARGS)
+    assert "{TOP_SECTOR}" in sector
     await _drain()
     # The failure happened in the background and left the templates in place.
     assert len(gem.calls) == 1
@@ -187,17 +180,24 @@ async def test_the_background_refresh_persists_to_tier2(monkeypatch):
         "category — this is the whole reason a redeploy stops costing a Gemini call"
     )
     payload = puts[0][2]
-    assert set(payload) == {"valuation", "sector", "macro", "indicators"}
+    assert set(payload) == {"sector", "macro", "indicators"}
     assert isinstance(payload["indicators"], list) and payload["indicators"]
     # Tier-1 now holds the AI version, not the template.
     cached = mod._cache_get("ai_stories_^GSPC")
-    assert cached is not None and "{TOP_SECTOR}" in cached[1]
-    assert "led at" in cached[1], "the Gemini story should have replaced the template"
+    assert cached is not None and "{TOP_SECTOR}" in cached[0]
+    assert "led at" in cached[0], "the Gemini story should have replaced the template"
+    # The model is handed no P/E and asked for no valuation story (2026-10-21): it used to
+    # compare the market composite with a per-index 10-year average.
+    prompt = gem.calls[0]["prompt"]
+    for gone in ("P/E", "VALUATION", "Historical Avg", "{{PE_RATIO}}", "{PE_RATIO}"):
+        assert gone not in prompt, f"the story prompt still carries {gone!r}"
 
 
 @pytest.mark.asyncio
 async def test_a_tier2_hit_serves_without_calling_gemini(monkeypatch):
     gem = _RecordingGemini()
+    # A row written before 2026-10-21 still carries the model's valuation story; it must
+    # restore (its sector and macro are fine) and the stale valuation must be dropped.
     stored = {
         "valuation": "{PE_RATIO} vs {VALUATION_LABEL} — persisted.",
         "sector": "{TOP_SECTOR} led, {ADVANCING_COUNT} advanced — persisted.",
@@ -207,10 +207,11 @@ async def test_a_tier2_hit_serves_without_calling_gemini(monkeypatch):
         ],
     }
     mod, svc, _ = _index_service(monkeypatch, gem, tier2=stored)
-    valuation, sector, macro, indicators = await svc._generate_ai_stories(**_STORY_ARGS)
+    restored = await svc._generate_ai_stories(**_STORY_ARGS)
     await _drain()
 
-    assert valuation == stored["valuation"]
+    assert len(restored) == 3 and stored["valuation"] not in restored
+    sector, macro, indicators = restored
     assert sector == stored["sector"]
     assert macro == stored["macro"]
     assert [i.title for i in indicators] == ["GDP"]
@@ -224,20 +225,19 @@ async def test_a_tier2_hit_serves_without_calling_gemini(monkeypatch):
     "not-a-dict",
     {},                                                     # no keys
     {"valuation": "v", "sector": "s"},                      # missing macro
-    {"valuation": "", "sector": "s", "macro": "m", "indicators": [{"title": "t"}]},
-    {"valuation": 1, "sector": "s", "macro": "m", "indicators": [{"title": "t"}]},
-    {"valuation": "v", "sector": "s", "macro": "m", "indicators": []},
-    {"valuation": "v", "sector": "s", "macro": "m", "indicators": "nope"},
-    {"valuation": "v", "sector": "s", "macro": "m",
-     "indicators": [{"nope": "wrong shape"}]},
+    {"sector": "", "macro": "m", "indicators": [{"title": "t"}]},
+    {"sector": 1, "macro": "m", "indicators": [{"title": "t"}]},
+    {"sector": "s", "macro": "m", "indicators": []},
+    {"sector": "s", "macro": "m", "indicators": "nope"},
+    {"sector": "s", "macro": "m", "indicators": [{"nope": "wrong shape"}]},
 ])
 async def test_an_unusable_tier2_row_rebuilds_instead_of_raising(monkeypatch, bad):
     """A tier-2 row is JSON a PREVIOUS deploy wrote. `Model(**row)` raising out of the
     middle of a build 500s the screen for the life of the row — drop it and rebuild."""
     gem = _RecordingGemini()
     mod, svc, _ = _index_service(monkeypatch, gem, tier2=bad)
-    valuation, _, _, indicators = await svc._generate_ai_stories(**_STORY_ARGS)
-    assert "{PE_RATIO}" in valuation      # fell back to the template
+    sector, _, indicators = await svc._generate_ai_stories(**_STORY_ARGS)
+    assert "{TOP_SECTOR}" in sector       # fell back to the template
     assert len(indicators) == 4
     await _drain()
 

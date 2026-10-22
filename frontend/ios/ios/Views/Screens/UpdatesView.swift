@@ -19,6 +19,9 @@ struct UpdatesView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @StateObject private var viewModel = UpdatesViewModel()
     @Binding var selectedTab: HomeTab
+    /// `ContentView.updatesMarketFocusSeq`: bumped on every Market widget tap. A change selects
+    /// the Market chip and scrolls back to the top, where the Market Insight card leads.
+    var marketFocusSeq: Int = 0
     @State private var showManageAssetsSheet = false
     @State private var showProfile = false
     @State private var showSearch = false
@@ -37,6 +40,9 @@ struct UpdatesView: View {
     /// Set by the detail sheet's "Ask Cay AI". A full-screen cover cannot present over the
     /// sheet, so the chat opens from the sheet's `onDismiss`.
     @State private var pendingChatFocus: UpdatesChatFocus?
+
+    /// The feed's top anchor (see `marketFocusSeq`).
+    private static let feedTopID = "updates.feed.top"
 
     var body: some View {
         NavigationStack {
@@ -65,7 +71,8 @@ struct UpdatesView: View {
                         // nothing left to buy.
                         lockedCount: viewModel.showsUpgradeChip ? viewModel.lockedTickerCount : 0,
                         onManageAssets: handleManageAssets,
-                        onLockedTap: { viewModel.showPaywall = true }
+                        onLockedTap: { viewModel.showPaywall = true },
+                        marketRevealSeq: marketFocusSeq
                     )
 
                     // Static "Live News" Header (non-scrolling, stays at top)
@@ -123,104 +130,120 @@ struct UpdatesView: View {
                     // emitted inline via `newsSections()` — a @ViewBuilder, NOT a
                     // child View struct, so the Sections stay direct children of
                     // THIS stack and `pinnedViews` can pin their headers.
-                    ScrollView(showsIndicators: false) {
-                        LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
-                            // Insights Summary Card (scrollable, non-section child).
-                            // Tapping it opens the sources screen when the card
-                            // carries sources. A snapshot card is drawn on the ACTIVE tab
-                            // only, and offers no "Ask Cay AI": that chat is grounded on the
-                            // server's current card, not this saved one, and a send costs a
-                            // credit.
-                            //
-                            // The snapshot card keeps the pill's SLOT (`askCayPillReserve`, below
-                            // the card): without it the live card grew by the pill row the moment
-                            // it replaced the snapshot, dropping every story while the user read.
-                            // `.id(summary.id)`: a new card is a remove + insert, never an in-place
-                            // resize of a LazyVStack child (the 100%-CPU layout hang).
-                            if let summary = viewModel.insightSummary,
-                               isActiveTab || viewModel.snapshotSavedAt == nil {
-                                VStack(alignment: .leading, spacing: AppSpacing.md) {
-                                    InsightsSummaryCard(
-                                        summary: summary,
-                                        onOpenSources: { insightSources = summary },
-                                        onAskCay: viewModel.snapshotSavedAt == nil ? { openUpdatesChat(focus: .card) } : nil
-                                    )
-                                    if viewModel.snapshotSavedAt != nil {
-                                        askCayPillReserve
+                    ScrollViewReader { scrollProxy in
+                        ScrollView(showsIndicators: false) {
+                            LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
+                                // The top of the feed, for a Market widget tap to scroll back to.
+                                // Zero height and never resized, so it adds nothing to the stack's
+                                // layout (a resizing LazyVStack child is the 100%-CPU hang).
+                                Color.clear
+                                    .frame(height: 0)
+                                    .id(Self.feedTopID)
+
+                                // Insights Summary Card (scrollable, non-section child).
+                                // Tapping it opens the sources screen when the card
+                                // carries sources. A snapshot card is drawn on the ACTIVE tab
+                                // only, and offers no "Ask Cay AI": that chat is grounded on the
+                                // server's current card, not this saved one, and a send costs a
+                                // credit.
+                                //
+                                // The snapshot card keeps the pill's SLOT (`askCayPillReserve`, below
+                                // the card): without it the live card grew by the pill row the moment
+                                // it replaced the snapshot, dropping every story while the user read.
+                                // `.id(summary.id)`: a new card is a remove + insert, never an in-place
+                                // resize of a LazyVStack child (the 100%-CPU layout hang).
+                                if let summary = viewModel.insightSummary,
+                                   isActiveTab || viewModel.snapshotSavedAt == nil {
+                                    VStack(alignment: .leading, spacing: AppSpacing.md) {
+                                        InsightsSummaryCard(
+                                            summary: summary,
+                                            onOpenSources: { insightSources = summary },
+                                            onAskCay: viewModel.snapshotSavedAt == nil ? { openUpdatesChat(focus: .card) } : nil
+                                        )
+                                        if viewModel.snapshotSavedAt != nil {
+                                            askCayPillReserve
+                                        }
                                     }
+                                    .padding(.horizontal, AppSpacing.lg)
+                                    .padding(.vertical, AppSpacing.sm)
+                                    .id(summary.id)
                                 }
-                                .padding(.horizontal, AppSpacing.lg)
-                                .padding(.vertical, AppSpacing.sm)
-                                .id(summary.id)
-                            }
 
-                            // News-tone chart — a plain child of THIS LazyVStack, like the
-                            // card above: not a Section, not wrapped with `newsSections()`.
-                            // `visibleTrend` holds the gates (see there).
-                            if let trend = visibleTrend {
-                                NewsSentimentTrendChart(
-                                    trend: trend,
-                                    window: Binding(
-                                        get: { viewModel.trendWindow },
-                                        set: { viewModel.setTrendWindow($0) }
-                                    ),
-                                    buildingStalled: viewModel.trendPollExhausted
-                                )
-                                .padding(.horizontal, AppSpacing.lg)
-                                .padding(.vertical, AppSpacing.sm)
-                            }
+                                // News-tone chart — a plain child of THIS LazyVStack, like the
+                                // card above: not a Section, not wrapped with `newsSections()`.
+                                // `visibleTrend` holds the gates (see there).
+                                if let trend = visibleTrend {
+                                    NewsSentimentTrendChart(
+                                        trend: trend,
+                                        window: Binding(
+                                            get: { viewModel.trendWindow },
+                                            set: { viewModel.setTrendWindow($0) }
+                                        ),
+                                        buildingStalled: viewModel.trendPollExhausted
+                                    )
+                                    .padding(.horizontal, AppSpacing.lg)
+                                    .padding(.vertical, AppSpacing.sm)
+                                }
 
-                            // The account gate is checked BEFORE loading/error, and
-                            // `isReconnecting` before `requiresSignIn` — during a restore we
-                            // hold a credential, so "sign in" would be a false statement
-                            // (auth.md §5). Same branch order as `ReportsListSection.body`.
-                            //
-                            // This is what replaces `errorState`'s dead end: signed out, that
-                            // read "Couldn't load the news / Sign in to use this feature." over
-                            // a **Try Again** button re-firing a request `APIClient` refuses
-                            // before it leaves the device.
-                            if viewModel.isReconnecting {
-                                AccountGateEmptyState(
-                                    headline: "Reconnecting…",
-                                    subtitle: "Getting your news feed. This usually takes a moment.",
-                                    mode: .reconnecting
-                                )
-                            } else if viewModel.requiresSignIn {
-                                AccountGateEmptyState(
-                                    headline: "Sign in to see your news",
-                                    subtitle: "Your feed follows the tickers you track, so it "
-                                        + "lives on your account rather than on this device.",
-                                    mode: .signedOut(onSignIn: {
-                                        appState.requestSignIn(for: "see your news feed")
-                                    })
-                                )
-                            } else if viewModel.isLoading && viewModel.groupedNews.isEmpty {
-                                // Skeleton rows, not a blocking overlay: the old
-                                // full-screen LoadingOverlay swallowed taps
-                                // (including Back) — the same problem already
-                                // fixed on the asset-detail screens.
-                                loadingSkeleton
-                            } else if let message = viewModel.error, viewModel.groupedNews.isEmpty {
-                                errorState(message)
-                            } else if viewModel.groupedNews.isEmpty {
-                                emptyState
-                            } else {
-                                newsSections()
-                            }
+                                // The account gate is checked BEFORE loading/error, and
+                                // `isReconnecting` before `requiresSignIn` — during a restore we
+                                // hold a credential, so "sign in" would be a false statement
+                                // (auth.md §5). Same branch order as `ReportsListSection.body`.
+                                //
+                                // This is what replaces `errorState`'s dead end: signed out, that
+                                // read "Couldn't load the news / Sign in to use this feature." over
+                                // a **Try Again** button re-firing a request `APIClient` refuses
+                                // before it leaves the device.
+                                if viewModel.isReconnecting {
+                                    AccountGateEmptyState(
+                                        headline: "Reconnecting…",
+                                        subtitle: "Getting your news feed. This usually takes a moment.",
+                                        mode: .reconnecting
+                                    )
+                                } else if viewModel.requiresSignIn {
+                                    AccountGateEmptyState(
+                                        headline: "Sign in to see your news",
+                                        subtitle: "Your feed follows the tickers you track, so it "
+                                            + "lives on your account rather than on this device.",
+                                        mode: .signedOut(onSignIn: {
+                                            appState.requestSignIn(for: "see your news feed")
+                                        })
+                                    )
+                                } else if viewModel.isLoading && viewModel.groupedNews.isEmpty {
+                                    // Skeleton rows, not a blocking overlay: the old
+                                    // full-screen LoadingOverlay swallowed taps
+                                    // (including Back) — the same problem already
+                                    // fixed on the asset-detail screens.
+                                    loadingSkeleton
+                                } else if let message = viewModel.error, viewModel.groupedNews.isEmpty {
+                                    errorState(message)
+                                } else if viewModel.groupedNews.isEmpty {
+                                    emptyState
+                                } else {
+                                    newsSections()
+                                }
 
-                            // Bottom spacing for tab bar
-                            Spacer()
-                                .frame(height: 100)
+                                // Bottom spacing for tab bar
+                                Spacer()
+                                    .frame(height: 100)
+                            }
+                        }
+                        .refreshable {
+                            await viewModel.refresh()
+                        }
+                        // The tab bar switches tabs inside `withAnimation`, and the snapshot rows
+                        // are gated on `isActiveTab`: without this the gate's swap is cross-faded
+                        // over 0.2 s, so the first frame after a tap is half-blank. The tab's own
+                        // fade (ContentView's opacity) is an ancestor and is unaffected.
+                        .transaction(value: isActiveTab) { $0.animation = nil }
+                        // A Market widget tap (`caydex://updates/market`): the Market chip, from the
+                        // top, so the Market Insight card is what the user lands on — whichever chip
+                        // they left the tab on and however far down they had scrolled.
+                        .onChange(of: marketFocusSeq) { _, _ in
+                            viewModel.focusMarket()
+                            scrollProxy.scrollTo(Self.feedTopID, anchor: .top)
                         }
                     }
-                    .refreshable {
-                        await viewModel.refresh()
-                    }
-                    // The tab bar switches tabs inside `withAnimation`, and the snapshot rows
-                    // are gated on `isActiveTab`: without this the gate's swap is cross-faded
-                    // over 0.2 s, so the first frame after a tap is half-blank. The tab's own
-                    // fade (ContentView's opacity) is an ancestor and is unaffected.
-                    .transaction(value: isActiveTab) { $0.animation = nil }
 
                     // Tab Bar
                     CustomTabBar(selectedTab: $selectedTab)
@@ -360,6 +383,10 @@ struct UpdatesView: View {
                 showProfile = false
                 showSearch = false
                 showManageAssetsSheet = false
+                // A feed article's in-app browser and the watchlist alert too: a Market widget tap
+                // (`caydex://updates/market`) lands on THIS tab, and anything left up covers it.
+                browserLink = nil
+                viewModel.watchlistError = nil
                 // Before `insightSources`: its onDismiss must not reopen the chat.
                 pendingChatFocus = nil
                 insightSources = nil

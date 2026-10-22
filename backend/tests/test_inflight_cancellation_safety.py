@@ -183,6 +183,16 @@ _INFLIGHT_MODULES = [
     # futures — two series of one template build share the insider walk, and a series whose budget
     # runs out leaves the walk running to warm the memo instead of cancelling it for the others.
     "marketing/company_news_adapter.py",
+    # Added 2026-10-20 with the paged chart history: ONE shared-build map behind the full
+    # daily histories, the bucketed series, the intraday windows, the crypto hourly series
+    # and `fetch_chart_data`'s result cache. Builds run as their own tasks, so a viewer
+    # who leaves cannot cancel a multi-page history every other viewer is waiting on.
+    "price_history_service.py",
+    # Added 2026-10-22 with the Signal of Confidence buyback check. Future-based,
+    # profit_power shape, keyed on (cik, sorted tags): concurrent chart builds for one
+    # company share one round of SEC XBRL fetches; joiners attach through `asyncio.shield`,
+    # and a cancelled leader fails the future with a RuntimeError before re-raising.
+    "sec_concept_service.py",
 ]
 
 

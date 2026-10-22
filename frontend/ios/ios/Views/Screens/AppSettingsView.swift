@@ -76,7 +76,8 @@ struct AppSettingsView: View {
             // This screen is pushed inside ProfileView's NavigationStack — the same stack that
             // pushes FeedbackView from "Help Us Improve".
             .navigationDestination(isPresented: $showFeedback) {
-                FeedbackView()
+                // No reward copy: this starts at a rating prompt, and Apple forbids rewarding ratings.
+                FeedbackView(showsReward: false)
             }
             .alert("Clear Cache", isPresented: $showClearCacheConfirmation) {
                 Button("Cancel", role: .cancel) {}

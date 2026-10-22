@@ -91,7 +91,9 @@ def _src_without_comments(obj) -> str:
     # — `async def _get_quote(self, symbol: str)` matched a bare "get_quote(" and made
     # the first version of this guard fail on the fix rather than on the bug.
     ("_get_quote", ".get_quote("),
-    ("_get_history", "_fetch_all_daily("),
+    # The fetch lives in `_get_history_strict` (the swallowing `_get_history` delegates
+    # to it), which the paged chart history calls directly.
+    ("_get_history_strict", "_fetch_all_daily("),
     ("_get_chart", "fetch_chart_data("),
 ])
 def test_every_upstream_call_passes_the_proxy_not_the_index_symbol(fn, call):
@@ -103,6 +105,38 @@ def test_every_upstream_call_passes_the_proxy_not_the_index_symbol(fn, call):
             f"{fn} passes a raw symbol to {call}: {args.strip()!r} — a `^` symbol there "
             "is refused by `is_blocked_symbol` and the screen degrades silently"
         )
+
+
+def _index_branch_of_resolve_symbol() -> str:
+    """The body of `PriceHistoryService.resolve_symbol`'s `asset == ASSET_INDEX` branch,
+    unparsed from the AST (comments and docstrings cannot survive an unparse), so the scan
+    reads only that branch's executable code."""
+    import ast
+    import textwrap
+
+    from app.services.price_history_service import PriceHistoryService
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(PriceHistoryService.resolve_symbol)))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and "ASSET_INDEX" in ast.unparse(node.test):
+            return "\n".join(ast.unparse(n) for n in node.body)
+    raise AssertionError("resolve_symbol has no `asset == ASSET_INDEX` branch — scan drifted")
+
+
+def test_the_paged_chart_history_maps_an_index_to_its_proxy():
+    """The paged chart history (`price_history_service`) is a SIXTH index path to FMP.
+    Its intraday pages call FMP directly, so the index branch must resolve the proxy; a
+    raw `^GSPC` there is refused by `is_blocked_symbol` and the page would fail."""
+    body = _index_branch_of_resolve_symbol()
+    assert "_proxy_for(" in body, f"the index branch no longer maps to the proxy: {body!r}"
+
+    from app.services.price_history_service import ASSET_INDEX, PriceHistoryService
+
+    for sym, profile in _INDEX_PROFILES.items():
+        history_symbol, upstream = PriceHistoryService.resolve_symbol(ASSET_INDEX, sym)
+        assert history_symbol == sym, "the daily history is keyed on the index symbol"
+        assert upstream == profile["proxy_symbol"], (sym, upstream)
+        assert not is_blocked_symbol(upstream)
 
 
 # ── The labels describe the instrument whose number is shown ─────────────────
@@ -229,9 +263,9 @@ def test_a_served_commodity_is_not_refused(root):
 
 
 def test_the_entry_points_all_guard_against_a_withdrawn_symbol():
-    """Three routes reach a commodity; `get_commodity_quote` projects from the detail
-    build, so the guard has to sit on the other two."""
-    for fn in ("get_commodity_core", "_build_commodity_detail"):
+    """Four routes reach a commodity; `get_commodity_quote` projects from the detail
+    build, so the guard has to sit on the other three (the bars-only chart, 2026-10-21)."""
+    for fn in ("get_commodity_core", "_build_commodity_detail", "get_commodity_chart"):
         body = _src_without_comments(getattr(COM.CommodityService, fn))
         assert "_raise_if_withdrawn(" in body, f"{fn} serves a withdrawn commodity"
 

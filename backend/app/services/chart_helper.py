@@ -13,7 +13,12 @@ from app.integrations.fmp import FMPClient
 from app.services.asset_class import uses_coingecko_price
 
 logger = logging.getLogger(__name__)
-from app.utils.market_hours import ET, US_MARKET_EARLY_CLOSES, previous_trading_day
+from app.utils.market_hours import (
+    ET,
+    US_MARKET_EARLY_CLOSES,
+    is_trading_day,
+    previous_trading_day,
+)
 
 
 def _finite_or_none(v: Any) -> Optional[float]:
@@ -298,10 +303,69 @@ _WARMUP_DATA_POINTS = 210
 _WARMUP_CALENDAR_DAYS = 320
 
 
+#: Minutes per bar of each intraday interval FMP serves.
+_INTRADAY_INTERVAL_MINUTES = {
+    "1min": 1, "5min": 5, "15min": 15, "30min": 30, "1hour": 60, "4hour": 240,
+}
+# Session lengths in minutes: the regular bell, and FMP's `extended=true` 04:00-20:00. A
+# half-day closes the bell at 13:00 and its after-hours at 17:00.
+_REGULAR_SESSION_MINUTES = _REGULAR_CLOSE_MINUTE - _REGULAR_OPEN_MINUTE      # 390
+_EARLY_REGULAR_SESSION_MINUTES = _EARLY_CLOSE_MINUTE - _REGULAR_OPEN_MINUTE  # 210
+_EXTENDED_SESSION_MINUTES = 16 * 60                                           # 960
+_EARLY_EXTENDED_SESSION_MINUTES = 13 * 60                                     # 780
+#: The calendar floor every intraday warm-up keeps, whatever its bar count. It is what the
+#: 5-minute chart (and the sparkline split off it) has always fetched, so 5min/1min
+#: windows do not move.
+_INTRADAY_WARMUP_FLOOR_DAYS = 7
+#: Headroom over `_WARMUP_DATA_POINTS` for halts, missing prints and closures the
+#: calendar does not know: counting sessions only ever OVER-estimates the bars FMP has.
+_INTRADAY_WARMUP_HEADROOM = 1.1
+
+
+def _session_bars(day: date_type, interval: str, extended_hours: bool) -> int:
+    """How many ``interval`` bars one session on ``day`` yields (a 6.5 h bell is 7
+    hourly bars: 09:30 … 15:30)."""
+    minutes = _INTRADAY_INTERVAL_MINUTES.get(interval) or 5
+    early = (day.year, day.month, day.day) in US_MARKET_EARLY_CLOSES
+    if extended_hours:
+        session = _EARLY_EXTENDED_SESSION_MINUTES if early else _EXTENDED_SESSION_MINUTES
+    else:
+        session = _EARLY_REGULAR_SESSION_MINUTES if early else _REGULAR_SESSION_MINUTES
+    return max(1, math.ceil(session / minutes))
+
+
+def _intraday_warmup_from(
+    range_start: date_type, interval: str, extended_hours: bool
+) -> date_type:
+    """First calendar day to fetch so ≥ `_WARMUP_DATA_POINTS` bars precede ``range_start``.
+
+    A flat 7 days used to be the warm-up for EVERY bar size: ~7 sessions of 1-hour bars
+    is ~49 bars, so MA(200) could never draw on 15m/30m/1h and MA(50) barely on 1h.
+    This walks back whole trading sessions (half-days counted short) until they hold the
+    warm-up plus headroom, and never fetches less than the 7-day floor — which is all a
+    5-minute chart needs, so its window is unchanged.
+    """
+    floor = range_start - timedelta(days=_INTRADAY_WARMUP_FLOOR_DAYS)
+    need = math.ceil(_WARMUP_DATA_POINTS * _INTRADAY_WARMUP_HEADROOM)
+    have = 0
+    day = range_start
+    # Bounded: 1-hour regular bars need ~33 sessions; 400 is far past any real walk.
+    for _ in range(400):
+        day = previous_trading_day(day)
+        have += _session_bars(day, interval, extended_hours)
+        if have >= need:
+            break
+    return min(floor, day)
+
+
 def _warmup_calendar_days(interval: str) -> int:
-    """Calendar days of extra history to fetch for indicator warm-up."""
+    """Calendar days of extra history to fetch for indicator warm-up.
+
+    Intraday answers the 7-day FLOOR only; the bar-count warm-up `fetch_chart_data`
+    actually applies is `_intraday_warmup_from`.
+    """
     if interval in INTRADAY_INTERVALS:
-        return 7   # a few extra trading days of intraday bars
+        return _INTRADAY_WARMUP_FLOOR_DAYS
     if interval in DAILY_INTERVALS:
         return _WARMUP_CALENDAR_DAYS
     if interval == "weekly":
@@ -431,41 +495,99 @@ def window_by_range(
     return [b for b in bars if (b.get("date") or "") >= cutoff]
 
 
-async def _fetch_all_daily(fmp: FMPClient, symbol: str) -> List[Dict]:
+#: FMP's row cap on one `historical-price-eod/full` response; a page this long may have
+#: older rows behind it (FMP keeps the NEWEST rows of the requested window).
+FMP_DAILY_PAGE_ROWS = 5000
+
+
+def _daily_page_rows(raw: Any, symbol: str, page_no: int) -> List[Dict]:
+    """One `historical-price-eod/full` page as rows, oldest first, or a typed error.
+
+    A list (the `/stable` shape) or the legacy ``{"historical": [...]}`` dict is a page;
+    an empty list is a real "nothing older". Anything else — FMP's ``{"Error Message":
+    ...}`` body on a 200, a bare string — RAISES. `_parse_historical` reads such a body
+    as ``[]``, and a paged reader then took it for the END of the history: a blip on page
+    2 of INTC cut the series at ~2006, and the ETF/index services cached that truncated
+    list for 12 h. A failed page must never look like the first trading day.
+    """
+    from app.integrations.fmp import FMPUnavailableException
+
+    if isinstance(raw, list):
+        rows = raw
+    elif isinstance(raw, dict) and isinstance(raw.get("historical"), list):
+        rows = raw["historical"]
+    else:
+        raise FMPUnavailableException(
+            f"historical-price-eod/full page {page_no} for {symbol} returned a "
+            f"{type(raw).__name__}, not a list of rows"
+        )
+    rows = [r for r in rows if isinstance(r, dict)]
+    rows.sort(key=lambda p: p.get("date") or "")
+    return rows
+
+
+async def _iter_daily_pages(
+    fmp: FMPClient,
+    symbol: str,
+    *,
+    from_date: str = "1970-01-01",
+    to_date: Optional[str] = None,
+    max_pages: int = 5,
+):
+    """Yield FMP daily pages NEWEST first (each oldest-first), until the history ends.
+
+    Each request asks for ``[from_date, to_date]``; FMP answers the newest
+    `FMP_DAILY_PAGE_ROWS` rows of it, so a full page means there may be more, and the
+    next request ends the day before that page's earliest row. A short page, an empty
+    page or reaching ``from_date`` ends the walk. A malformed page raises
+    (`_daily_page_rows`), so a consumer never mistakes a failure for the start of the
+    history.
+    """
+    to = to_date or datetime.now(tz=timezone.utc).date().isoformat()
+    for page_no in range(1, max_pages + 1):
+        raw = await fmp.get_historical_prices(symbol, from_date, to)
+        page = _daily_page_rows(raw, symbol, page_no)
+        if not page:
+            return
+        yield page
+        if len(page) < FMP_DAILY_PAGE_ROWS:
+            return
+        # The first DATED row (rows sort oldest-first, a dateless one first of all): a
+        # single row without a date must not read as "no earliest date" and end the walk.
+        earliest = next((str(r.get("date"))[:10] for r in page if r.get("date")), "")
+        if not earliest or earliest <= from_date:
+            return
+        try:
+            to = (date_type.fromisoformat(earliest) - timedelta(days=1)).isoformat()
+        except ValueError:
+            return
+    logger.warning(
+        "daily history for %s still had older rows after %d pages (%d rows each) — "
+        "served as far back as the page budget reaches",
+        symbol, max_pages, FMP_DAILY_PAGE_ROWS,
+    )
+
+
+async def _fetch_all_daily(
+    fmp: FMPClient,
+    symbol: str,
+    *,
+    from_date: str = "1970-01-01",
+    to_date: Optional[str] = None,
+) -> List[Dict]:
     """
     Fetch full daily history by paginating through FMP's 5000-point limit.
 
     Makes multiple requests, each fetching up to 5000 data points,
-    working backwards from today until no more data is returned.
+    working backwards from today until no more data is returned. A malformed page
+    raises (see `_daily_page_rows`) instead of silently ending the history there.
     """
     all_data: List[Dict] = []
-    today = datetime.now(tz=timezone.utc).date()
-    to_date = today.isoformat()
-    from_date = "1970-01-01"
-    max_pages = 5  # Safety: at most 5 requests (up to 25000 data points)
-
-    for _ in range(max_pages):
-        raw = await fmp.get_historical_prices(symbol, from_date, to_date)
-        page = _parse_historical(raw)
-        if not page:
-            break
-
+    # Safety: at most 5 requests (up to 25000 data points)
+    async for page in _iter_daily_pages(
+        fmp, symbol, from_date=from_date, to_date=to_date, max_pages=5
+    ):
         all_data = page + all_data  # page is sorted oldest-first, prepend
-
-        # If we got fewer than 5000, we have all the data
-        if len(page) < 5000:
-            break
-
-        # Next request: fetch everything before the earliest date in this page
-        earliest = (page[0].get("date") or "")[:10]
-        if not earliest or earliest <= from_date:
-            break
-        # Set to_date to day before earliest to avoid overlap
-        try:
-            earliest_dt = datetime.strptime(earliest, "%Y-%m-%d").date()
-            to_date = (earliest_dt - timedelta(days=1)).isoformat()
-        except ValueError:
-            break
 
     # Deduplicate by date (in case of overlap) and sort
     seen = set()
@@ -484,9 +606,12 @@ async def _fetch_crypto_chart_data(
 ) -> List[Dict[str, Any]]:
     """Chart rows for a crypto pair, from CoinGecko, in the FMP row shape.
 
-    Mirrors `crypto_service`'s own branch so both surfaces draw the SAME series:
-    intraday ranges take `market_chart?days=1|7` (5-minute / hourly), everything else
-    takes the daily series windowed by `daily_range_days`.
+    Mirrors `crypto_service`'s own branch so both surfaces draw the SAME series — both
+    end in `crypto_service.crypto_chart_rows`: intraday ranges take `market_chart`
+    5-minute (1D) / hourly (1W, plus `_INTRADAY_WARMUP_DAYS` of warm-up) bars, daily
+    takes the daily series windowed by `daily_range_days`, and weekly/monthly are
+    bucketed from the WHOLE capped series before they are windowed (a bucket built from
+    a mid-week window start is incomplete).
 
     ⚠️ Branch on the RANGE, not on `resolved_interval != "daily"`: `DEFAULT_INTERVALS`
     maps 5Y→"weekly" and ALL→"monthly", so an interval test sends those down the
@@ -495,10 +620,12 @@ async def _fetch_crypto_chart_data(
     Returns [] rather than raising when CoinGecko cannot serve it — an empty chart is
     the same degrade every other failure in this function produces.
     """
-    from datetime import date as _date
-
     from app.services.coingecko_adapter import crypto_base_symbol
-    from app.services.crypto_service import _INTRADAY_RANGES
+    from app.services.crypto_service import (
+        _INTRADAY_RANGES,
+        _INTRADAY_WARMUP_DAYS,
+        crypto_chart_rows,
+    )
 
     base = crypto_base_symbol(symbol)
     # The SAME table `crypto_service` uses, so the chat card and the detail screen can
@@ -507,7 +634,13 @@ async def _fetch_crypto_chart_data(
     # CoinGecko Basic caps history at CRYPTO_HISTORY_YEARS; asking past it is refused
     # locally by the client rather than spending a call.
     cap_days = max(1, int(getattr(settings, "CRYPTO_HISTORY_YEARS", 2)) * 365)
-    days = intraday_days if intraday_days else min(daily_range_days(range_code), cap_days)
+    if intraday_days:
+        # The visible window stays `_INTRADAY_RANGES`; the warm-up rides in front of it.
+        days = intraday_days + _INTRADAY_WARMUP_DAYS.get(range_code, 0)
+    elif resolved_interval in AGGREGATED_INTERVALS:
+        days = cap_days
+    else:
+        days = min(daily_range_days(range_code), cap_days)
 
     try:
         # ⚠️ Go through `_cg_history`, NOT the client directly — it is the CACHED reader
@@ -530,16 +663,90 @@ async def _fetch_crypto_chart_data(
             symbol, range_code, type(e).__name__, e,
         )
         return []
-    if intraday_days:
-        return rows
-    # Daily: trim to the requested window (the fetch is capped, not windowed).
-    cutoff = (_date.today() - timedelta(days=daily_range_days(range_code))).isoformat()
-    rows = [r for r in rows if (r.get("date") or "") >= cutoff]
-    if resolved_interval in AGGREGATED_INTERVALS:
-        # Honour a weekly/monthly request the way the FMP branch always did. Close-only
-        # rows aggregate to close-only bars — open/high/low stay None.
-        rows = _aggregate_prices(rows, resolved_interval)
-    return rows
+    # Daily is trimmed to the requested window (the fetch is capped, not windowed);
+    # weekly/monthly honour the request the way the FMP branch always did, and close-only
+    # rows aggregate to close-only bars — open/high/low stay None.
+    return crypto_chart_rows(rows, range_code, resolved_interval, cap_days=cap_days)
+
+
+#: How far before an aggregated chart's window the daily history must reach so its
+#: OLDEST kept bucket is complete: one full bucket (a quarter is the longest, 92 days).
+_BUCKET_COVER_MARGIN_DAYS = 95
+
+
+async def _fetch_equity_chart_rows(
+    fmp: FMPClient,
+    symbol: str,
+    range_code: str,
+    resolved_interval: str,
+    from_date: Optional[str],
+    to_date: str,
+    extended_hours: bool,
+) -> List[Dict[str, Any]]:
+    """The FMP-served chart rows behind `fetch_chart_data` (cache-free; see its caller).
+
+    * intraday — one bounded `historical-chart` read, warm-up already in ``from_date``;
+    * daily, non-ALL — one bounded `historical-price-eod/full` read, so today's
+      in-progress bar is still drawn;
+    * weekly / monthly — bucketed from the SHARED settled daily history
+      (`price_history_service`), then windowed with the interval's warm-up kept. The
+      old single windowed call (a) started its first bucket mid-week/mid-month, so that
+      candle carried part of a period, and (b) was cut at FMP's 5,000-row cap, so 5Y
+      monthly (~22 years) lost MA(200) on its first ~21 visible months. Settled bars
+      only, like every other asset class's aggregated chart;
+    * ALL — the whole shared history.
+    """
+    from app.services.price_history_service import (
+        EmptyPriceHistory,
+        get_price_history_service,
+    )
+
+    if resolved_interval in INTRADAY_INTERVALS:
+        if range_code == "1D" or not from_date:
+            # 1D draws only the latest session, and FMP's newest-first answer (the last
+            # 7 days of 5-minute bars at worst) already holds several sessions of warm-up
+            # in front of it: one request, as it always was.
+            return await _fetch_intraday_bars(
+                fmp, symbol, resolved_interval, from_date, to_date, extended_hours
+            )
+        # 1W asks for more than one FMP request carries (5min: 17 days against 7; 30min:
+        # ~36 against 28), so it is stitched — or the warm-up never arrives.
+        return await _fetch_intraday_span(
+            fmp, symbol, resolved_interval, from_date, to_date, extended_hours
+        )
+
+    history = get_price_history_service()
+    if resolved_interval in AGGREGATED_INTERVALS or range_code == "ALL":
+        covering: Optional[date_type] = None
+        if range_code != "ALL" and from_date:
+            try:
+                covering = date_type.fromisoformat(from_date) - timedelta(
+                    days=_BUCKET_COVER_MARGIN_DAYS
+                )
+            except ValueError:
+                covering = None
+        try:
+            if resolved_interval in AGGREGATED_INTERVALS:
+                bars = await history.aggregated_rows(
+                    fmp, symbol, resolved_interval, covering=covering
+                )
+            else:
+                bars = await history.daily_rows(fmp, symbol)
+        except EmptyPriceHistory as e:
+            # The source answered with no rows (a symbol with no EOD history yet). An
+            # empty chart, as the single windowed call always gave — the paged history
+            # route is the surface that must refuse to call this "start of history".
+            logger.info("chart %s %s %s: %s — empty chart", symbol, range_code,
+                        resolved_interval, e)
+            return []
+        if range_code != "ALL" and resolved_interval in AGGREGATED_INTERVALS:
+            bars = window_by_range(bars, range_code, resolved_interval)
+        return bars
+
+    # Daily (EOD) data
+    raw = await fmp.get_historical_prices(symbol, from_date, to_date)
+    historical = _parse_historical(raw)
+    return _normalize_prices(historical)
 
 
 async def fetch_chart_data(
@@ -578,39 +785,39 @@ async def fetch_chart_data(
         return await _fetch_crypto_chart_data(symbol, range_code, resolved_interval)
 
     from_date, to_date = compute_date_range(range_code)
+    intraday = resolved_interval in INTRADAY_INTERVALS
 
     # Extend from_date to include extra data for indicator warm-up
     # (MACD, RSI, etc. need preceding data points to produce values).
     # The frontend trims the warm-up portion from the displayed chart.
     if from_date and from_date != "1970-01-01":
         try:
-            from_dt = datetime.strptime(from_date, "%Y-%m-%d").date()
-            warmup = _warmup_calendar_days(resolved_interval)
-            from_date = (from_dt - timedelta(days=warmup)).isoformat()
+            from_dt = date_type.fromisoformat(from_date)
+            if intraday:
+                from_dt = _intraday_warmup_from(from_dt, resolved_interval, extended_hours)
+            else:
+                from_dt -= timedelta(days=_warmup_calendar_days(resolved_interval))
+            from_date = from_dt.isoformat()
         except ValueError:
             pass
 
-    if resolved_interval in INTRADAY_INTERVALS:
-        return await _fetch_intraday_bars(
-            fmp, symbol, resolved_interval, from_date, to_date, extended_hours
-        )
+    # One shared fetch per (symbol, interval, session, window): `/overview/core`,
+    # `/overview` and `/chart` all ask for the same bars at the same moment, and nothing
+    # deduplicated them. 30 s for intraday; see `cached_chart_rows` for the rest.
+    from app.services.price_history_service import get_price_history_service
 
-    elif resolved_interval in AGGREGATED_INTERVALS:
-        if range_code == "ALL":
-            historical = await _fetch_all_daily(fmp, symbol)
-        else:
-            raw = await fmp.get_historical_prices(symbol, from_date, to_date)
-            historical = _parse_historical(raw)
-        return _aggregate_prices(historical, resolved_interval)
-
-    else:
-        # Daily (EOD) data
-        if range_code == "ALL":
-            historical = await _fetch_all_daily(fmp, symbol)
-        else:
-            raw = await fmp.get_historical_prices(symbol, from_date, to_date)
-            historical = _parse_historical(raw)
-        return _normalize_prices(historical)
+    key = (
+        symbol.upper(), range_code, resolved_interval,
+        bool(extended_hours) if intraday else False, from_date, to_date,
+    )
+    return await get_price_history_service().cached_chart_rows(
+        fmp,
+        key,
+        intraday=intraday,
+        build=lambda: _fetch_equity_chart_rows(
+            fmp, symbol, range_code, resolved_interval, from_date, to_date, extended_hours
+        ),
+    )
 
 
 async def _fetch_intraday_bars(
@@ -620,13 +827,20 @@ async def _fetch_intraday_bars(
     from_date: Optional[str],
     to_date: str,
     extended_hours: bool,
+    *,
+    strict: bool = False,
 ) -> List[Dict[str, Any]]:
     """One FMP intraday read, normalised: oldest first, regular session unless asked.
 
     Shared by the detail chart (`fetch_chart_data`, which widens ``from_date`` by its
     indicator warm-up) and the holdings-card sparkline (`fetch_sparkline_bars`, which
     does not). Extracted unchanged from `fetch_chart_data`'s intraday branch, so both
-    paths forward ``extended`` and filter the same way. A non-list answer is ``[]``.
+    paths forward ``extended`` and filter the same way. A non-list answer is ``[]`` —
+    or, with ``strict``, an `FMPUnavailableException` (the paged history reads an empty
+    window as "no older bars", so an FMP error body must not look like one).
+
+    ⚠️ ONE request: FMP answers at most `FMP_INTRADAY_SPAN_DAYS` of it (the newest
+    part). A longer window goes through `_fetch_intraday_span`.
     """
     # `extended` MUST reach the FMP call: the endpoint serves the regular session
     # only unless asked (see `FMPClient.get_intraday_prices`). Skipping the
@@ -639,6 +853,8 @@ async def _fetch_intraday_bars(
     }
     if extended_hours:
         intraday_kwargs["extended"] = True
+    if strict:
+        intraday_kwargs["strict"] = True
     raw = await fmp.get_intraday_prices(symbol, **intraday_kwargs)
     if isinstance(raw, list):
         raw.sort(key=lambda p: p.get("date") or "")
@@ -649,6 +865,87 @@ async def _fetch_intraday_bars(
             prices = _filter_regular_hours(prices)
         return prices
     return []
+
+
+#: FMP's per-request cap on `historical-chart/{interval}`: a request answers at most this
+#: many calendar days back from its `to` date — the NEWEST part, the older part silently
+#: dropped. Probed live 2026-10-21 (INTC, a 370-day request): 5min returned the last 7
+#: days, 15min 42, 30min 28, 1hour 89 — the same sessions with `extended=true` (2.5x the
+#: rows), so it is a calendar cap, not a row cap. 1min / 4hour were not probed.
+#: Re-probe with `scripts/probe_fmp_intraday_depth.py` if FMP's plan changes.
+FMP_INTRADAY_SPAN_DAYS = {"5min": 7, "15min": 42, "30min": 28, "1hour": 89}
+#: The most requests one stitched intraday read may make (a 1W 5-minute chart with its
+#: warm-up is 3; a paged window that FMP answers whole is 1).
+_MAX_INTRADAY_CHUNKS = 6
+
+
+def _first_trading_day_on_or_after(day: date_type) -> date_type:
+    """The first session on or after ``day`` (bounded walk; see `previous_trading_day`)."""
+    probe = day
+    for _ in range(10):
+        if is_trading_day(probe):
+            return probe
+        probe += timedelta(days=1)
+    return day
+
+
+async def _fetch_intraday_span(
+    fmp: FMPClient,
+    symbol: str,
+    interval: str,
+    from_date: str,
+    to_date: str,
+    extended_hours: bool,
+    *,
+    strict: bool = False,
+) -> List[Dict[str, Any]]:
+    """`_fetch_intraday_bars` over ANY window: stitched from newest-first requests.
+
+    One request is answered with at most `FMP_INTRADAY_SPAN_DAYS` (its newest part), so a
+    window longer than that — a 1W 5-minute chart with its warm-up is ~17 days — lost its
+    oldest days, and with them every warm-up bar the chart's indicators needed. Each next
+    request ends ON the oldest day the previous one returned (inclusive; rows are
+    de-duplicated by stamp, so a day cut mid-way is re-read whole), until the window's
+    first session is reached, a request answers nothing, or nothing older came back (a
+    listing inside the window, or a closure the calendar does not know). A window FMP
+    answers whole costs exactly one request, as before.
+    """
+    try:
+        start = date_type.fromisoformat(from_date)
+        to = date_type.fromisoformat(to_date)
+    except (TypeError, ValueError):
+        return await _fetch_intraday_bars(
+            fmp, symbol, interval, from_date, to_date, extended_hours, strict=strict
+        )
+    span = FMP_INTRADAY_SPAN_DAYS.get(interval)
+    first_session = _first_trading_day_on_or_after(start)
+    merged: Dict[str, Dict[str, Any]] = {}
+    oldest: Optional[date_type] = None
+    for _ in range(_MAX_INTRADAY_CHUNKS):
+        chunk_from = start if span is None else max(start, to - timedelta(days=span))
+        rows = await _fetch_intraday_bars(
+            fmp, symbol, interval, chunk_from.isoformat(), to.isoformat(), extended_hours,
+            strict=strict,
+        )
+        dated = [r for r in rows if isinstance(r.get("date"), str) and len(r["date"]) >= 10]
+        if not dated:
+            break
+        for r in dated:
+            merged.setdefault(r["date"], r)
+        try:
+            earliest = date_type.fromisoformat(dated[0]["date"][:10])
+        except ValueError:
+            break
+        if earliest <= first_session or (oldest is not None and earliest >= oldest):
+            break
+        oldest = earliest
+        to = earliest
+    else:
+        logger.warning(
+            "intraday %s %s %s..%s: still short of the window start after %d requests",
+            symbol, interval, from_date, to_date, _MAX_INTRADAY_CHUNKS,
+        )
+    return [merged[k] for k in sorted(merged)]
 
 
 # ── Holdings-card sparkline (Tracking) ─────────────────────────────────────────
@@ -740,13 +1037,29 @@ def _parse_historical(raw) -> List[Dict]:
     return historical
 
 
+def _positive_or_none(v: Any) -> Optional[float]:
+    """A finite price > 0, else None. An open/high/low of 0 (or below) is a missing
+    print, not a price: drawn, it stretches the candle's wick to the axis and drags the
+    Stochastic's 14-bar low to zero."""
+    f = _finite_or_none(v)
+    return f if f is not None and f > 0 else None
+
+
+def _volume_or_none(v: Any) -> Optional[float]:
+    """A finite volume ≥ 0, else None. 0 is a reported (halted) session; a negative
+    count is malformed and is not a volume at all."""
+    f = _finite_or_none(v)
+    return f if f is not None and f >= 0 else None
+
+
 def _normalize_prices(prices: List[Dict]) -> List[Dict]:
     """Extract standard OHLCV fields from price data.
 
     Rows with a missing/blank ``date`` or a non-finite / non-positive ``close``
     are dropped: a ``date=None`` crashes ``_filter_regular_hours`` (``len(None)``)
     and downstream schemas that require ``date: str``, and a non-finite close
-    poisons a REQUIRED numeric field with an invalid JSON token.
+    poisons a REQUIRED numeric field with an invalid JSON token. An open/high/low
+    ≤ 0 becomes None (never fabricated from the close), and so does a negative volume.
     """
     result = []
     for p in prices:
@@ -758,11 +1071,11 @@ def _normalize_prices(prices: List[Dict]) -> List[Dict]:
             continue
         result.append({
             "date": date,
-            "open": _finite_or_none(p.get("open")),
-            "high": _finite_or_none(p.get("high")),
-            "low": _finite_or_none(p.get("low")),
+            "open": _positive_or_none(p.get("open")),
+            "high": _positive_or_none(p.get("high")),
+            "low": _positive_or_none(p.get("low")),
             "close": close,
-            "volume": _finite_or_none(p.get("volume")),
+            "volume": _volume_or_none(p.get("volume")),
         })
     return result
 
@@ -770,22 +1083,32 @@ def _normalize_prices(prices: List[Dict]) -> List[Dict]:
 def _aggregate_prices(
     daily_prices: List[Dict], period: str
 ) -> List[Dict]:
-    """Aggregate daily prices into weekly/monthly/quarterly OHLCV bars."""
+    """Aggregate daily prices into weekly/monthly/quarterly OHLCV bars.
+
+    A bucket's ``date`` is its LAST trading day. ``volume`` is None when no row in the
+    bucket reports one (FRED's close-only spot rows): a summed 0 would draw a confident
+    zero-volume bar where no volume was ever observed. An open/high/low ≤ 0 is a missing
+    print and takes no part in the bucket's range.
+    """
     if not daily_prices:
         return []
 
     groups: Dict[str, List[Dict]] = {}
     for p in daily_prices:
+        if not isinstance(p, dict):
+            continue
         date_str = (p.get("date") or "")[:10]
         try:
-            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            # `fromisoformat`, not `strptime`: ~5x faster per row, and this runs over a
+            # whole multi-decade history on the event loop.
+            dt = date_type.fromisoformat(date_str)
         except ValueError:
             continue
 
         if period == "weekly":
-            key = (dt - timedelta(days=dt.weekday())).strftime("%Y-%m-%d")
+            key = (dt - timedelta(days=dt.weekday())).isoformat()
         elif period == "monthly":
-            key = dt.strftime("%Y-%m")
+            key = date_str[:7]
         elif period == "quarterly":
             q = (dt.month - 1) // 3 + 1
             key = f"{dt.year}-Q{q}"
@@ -797,14 +1120,16 @@ def _aggregate_prices(
     result = []
     for key in sorted(groups.keys()):
         candles = groups[key]
-        opens = [f for f in (_finite_or_none(c.get("open")) for c in candles) if f is not None]
-        highs = [f for f in (_finite_or_none(c.get("high")) for c in candles) if f is not None]
-        lows = [f for f in (_finite_or_none(c.get("low")) for c in candles) if f is not None]
+        opens = [f for f in (_positive_or_none(c.get("open")) for c in candles) if f is not None]
+        highs = [f for f in (_positive_or_none(c.get("high")) for c in candles) if f is not None]
+        lows = [f for f in (_positive_or_none(c.get("low")) for c in candles) if f is not None]
         closes = [
             f for f in (_finite_or_none(c.get("close") or c.get("adjClose")) for c in candles)
             if f is not None and f > 0
         ]
-        volumes = [f for f in (_finite_or_none(c.get("volume")) for c in candles) if f]
+        volumes = [
+            f for f in (_volume_or_none(c.get("volume")) for c in candles) if f is not None
+        ]
 
         if closes:
             result.append({
@@ -813,6 +1138,34 @@ def _aggregate_prices(
                 "high": max(highs) if highs else None,
                 "low": min(lows) if lows else None,
                 "close": closes[-1],
-                "volume": sum(volumes),
+                "volume": sum(volumes) if volumes else None,
             })
     return result
+
+
+def drop_partial_leading_bucket(
+    bars: List[Dict], daily_rows: List[Dict], period: str
+) -> List[Dict]:
+    """Drop the first aggregated bucket when the daily series starts mid-bucket.
+
+    For a series cut by a PROVIDER cap (CoinGecko Basic's 730 days) the first daily row
+    is an arbitrary day, so the first weekly/monthly bucket holds only part of its
+    period — its volume is short and its range is not the period's. A listing's own
+    first week is different (the first day IS the start), so callers use this only for
+    capped series. Crypto trades every calendar day, so "starts mid-bucket" is exact:
+    the first row is not a Monday (weekly) or not the 1st (monthly / quarterly).
+    """
+    if not bars or not daily_rows:
+        return bars
+    first = _row_day(daily_rows[0])
+    if first is None:
+        return bars
+    if period == "weekly":
+        starts_bucket = first.weekday() == 0
+    elif period == "monthly":
+        starts_bucket = first.day == 1
+    elif period == "quarterly":
+        starts_bucket = first.day == 1 and first.month in (1, 4, 7, 10)
+    else:
+        return bars
+    return bars if starts_bucket else bars[1:]

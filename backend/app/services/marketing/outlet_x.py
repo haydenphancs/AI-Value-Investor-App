@@ -27,11 +27,15 @@ a run that froze "image" for X while it was on is REFUSED if it was turned off s
   asset row), uploads it (POST /2/media/upload), sets its alt text — the image's title and whole
   paragraphs (POST /2/media/metadata) — and posts the same caption with the media id. The upload and
   the alt text are not a post: ANY failure before the create is NOT_SENT (the post cannot exist), and
-  every resend uploads again (a media id expires; uploads are unpriced).
+  every resend uploads again (a media id expires; each upload is journaled again).
 * Money: the claim reserves the post at MARKETING_X_IMAGE_POST_MICROS (`image_post_micros`, never
-  below the text or URL price) as `x_create`; the alt text is journaled `x_media_alt` ($0.005) by
-  the publisher AFTER the claim and BEFORE the send (`Prepared.pre_send_charge`). Each NOT_SENT /
-  credits-depleted refusal refunds exactly what provably was not billed (`Outcome.refund_micros`).
+  below the text or URL price) as `x_create`; the publisher then journals, AFTER the claim and BEFORE
+  the send and in ONE fenced write (`Prepared.pre_send_charges`), the media upload `x_media_upload`
+  at MARKETING_X_MEDIA_UPLOAD_MICROS (`media_upload_micros`, $0.015 by default — X's pricing page has
+  no line for an upload, one forum report says it is billed, and our ledger is the cap that holds;
+  Batch 1, 2026-10-15) and the alt text `x_media_alt` ($0.005). Each NOT_SENT / credits-depleted
+  refusal refunds exactly what provably was not billed (`Outcome.refund_micros`, computed from what
+  was journaled — `_upload_image` has the matrix).
 * Reconcile: X stores a post with media with the media's t.co link appended, so an image post's
   timeline copy is matched with that trailing link removed (and as stored, in case X changes).
 """
@@ -82,9 +86,12 @@ OWNED_READ_MICROS = 1_000       # per post returned by GET /2/users/{me}/tweets 
 DELETE_MICROS = 10_000          # bucket undocumented ($0.005 or $0.010) — budget the larger
 #: POST /2/media/metadata (an image's alt text): "Media Metadata $0.005 per request" — the pricing page
 #: maps no row to an endpoint, so this mapping is an inference (research 2026-10-09). A media upload
-#: has no price line.
+#: has no price line: it is journaled apart at MARKETING_X_MEDIA_UPLOAD_MICROS (`media_upload_micros`).
 MEDIA_ALT_MICROS = 5_000
 MEDIA_ALT_OP = "x_media_alt"
+#: POST /2/media/upload — its own pre-send charge (Batch 1, 2026-10-15): one developer-forum report says
+#: an upload is billed, X documents no price, and our ledger is the X spend cap that holds.
+MEDIA_UPLOAD_OP = "x_media_upload"
 RECONCILE_MAX_RESULTS = 5       # the endpoint's minimum page size
 #: Look back this far before the send's start when reading our timeline (X documents no
 #: read-after-write ordering; created_at can differ from our clock).
@@ -151,21 +158,37 @@ def image_post_micros(links: bool) -> int:
     return max(configured, URL_POST_MICROS if links else POST_MICROS)
 
 
+def media_upload_micros() -> int:
+    """What one X image post's media upload is journaled at (`MEDIA_UPLOAD_OP`):
+    MARKETING_X_MEDIA_UPLOAD_MICROS, read at call time — 0 means no upload charge at all (X confirmed
+    uploads free). The Field refuses a bad value at boot, so only a value set on the live object can be
+    unreadable: anything but a non-negative int (a bool, a str, a float, a negative) reads as the URL
+    price, $0.20 — the setting's ceiling and the largest price X documents — with a WARNING. An
+    over-reserve can only pause X early; an under-reserve could spend past the cap."""
+    raw = settings.MARKETING_X_MEDIA_UPLOAD_MICROS
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+        return raw
+    logger.warning("marketing x: MARKETING_X_MEDIA_UPLOAD_MICROS is unreadable (%r) — an upload is journaled at "
+                   "the URL price (%d micros)", str(raw)[:20], URL_POST_MICROS)
+    return URL_POST_MICROS
+
+
 def metrics_headroom_micros() -> int:
     """The spend a metrics read must leave under the monthly cap beyond its own reserve:
     `METRICS_HEADROOM_POSTS` posts at the price a post would reserve right now — $0.20 each while
     MARKETING_X_ALLOW_URLS is on (read at CALL time, like `prepare`: the switch may change between
     reads), else $0.015; while MARKETING_X_IMAGES is on, an image post's price instead when it is
-    higher (`image_post_micros` plus its $0.005 alt text — $0.205 at the default setting).
+    higher: `image_post_micros` plus its pre-send charges, the media upload (`media_upload_micros`,
+    read at call time too) and the $0.005 alt text — $0.22 at the default settings, $0.88 for the four.
 
     Deliberately keyed on MARKETING_X_IMAGES ALONE, not also on MARKETING_IMAGE_POSTS (review money:F1,
     kept as a fail-safe choice): with IMAGE_POSTS off and X_IMAGES on, NEW runs freeze X as "text"
     (`script_service.freeze_post_formats` needs both switches), yet a post frozen as "image" before
     IMAGE_POSTS was switched off is still published by `prepare` (which checks X_IMAGES only) until it
     expires — its run day or the next, ET (`run_service.is_fresh`). Pricing the headroom at the text
-    price then would let metrics reads spend what that pending $0.205 post needs. The cost of the
-    choice: while that switch combination lasts, every read reserves the image headroom ($0.82 instead
-    of $0.06 for 4 text posts), so X metrics reads record `capped` about $0.76 earlier in the month;
+    price then would let metrics reads spend what that pending $0.22 post needs. The cost of the
+    choice: while that switch combination lasts, every read reserves the image headroom ($0.88 instead
+    of $0.06 for 4 text posts), so X metrics reads record `capped` about $0.82 earlier in the month;
     a `capped` record writes no checkpoint, so the post stays due and is read on a later day the
     headroom allows (a checkpoint is lost only if a later one is crossed first, or the post leaves the
     30-day listing). It never spends more — it only defers measurement. Fix the switch pair (turn
@@ -173,9 +196,10 @@ def metrics_headroom_micros() -> int:
     urls = bool(settings.MARKETING_X_ALLOW_URLS)
     per_post = URL_POST_MICROS if urls else POST_MICROS
     # X_IMAGES alone, on purpose (see the docstring): an image post frozen before MARKETING_IMAGE_POSTS
-    # was switched off may still be pending, so over-reserve rather than starve its publish.
+    # was switched off may still be pending, so over-reserve rather than starve its publish. Priced like
+    # `prepare` prices one: the claim's reserve plus every pre-send charge it journals.
     if settings.MARKETING_X_IMAGES:
-        per_post = max(per_post, image_post_micros(urls) + MEDIA_ALT_MICROS)
+        per_post = max(per_post, image_post_micros(urls) + media_upload_micros() + MEDIA_ALT_MICROS)
     return METRICS_HEADROOM_POSTS * per_post
 
 
@@ -307,13 +331,19 @@ class XAdapter(Adapter):
                          f"cost_micros={reserve} sha256={sha[:12]}"),
             )
         reserve = image_post_micros(bool(links))
+        upload = media_upload_micros()
         payload["image"] = {**image.meta(), "alt": image.alt(x_api.ALT_TEXT_MAX)}
-        meta.update({"image": image.meta(), "alt_micros": MEDIA_ALT_MICROS})
+        # The billed calls the send makes before the post, in the order it makes them: journaled by the
+        # publisher in ONE fenced write after the claim (`_upload_image` refunds from exactly these
+        # amounts). An upload priced 0 (X confirmed it free) journals nothing.
+        charges = ((MEDIA_UPLOAD_OP, upload),) if upload else ()
+        charges += ((MEDIA_ALT_OP, MEDIA_ALT_MICROS),)
+        meta.update({"image": image.meta(), "upload_micros": upload, "alt_micros": MEDIA_ALT_MICROS})
         return Prepared(
             payload=payload, text_sha256=sha, reserve_micros=reserve, publish_meta={"x": meta},
-            pre_send_charge=(MEDIA_ALT_OP, MEDIA_ALT_MICROS),
+            pre_send_charges=charges,
             summary=(f"x image weighted_len={weighted} links={len(links)} made_with_ai={payload['made_with_ai']} "
-                     f"asset={image.asset_id} bytes={image.size} cost_micros={reserve}+{MEDIA_ALT_MICROS} "
+                     f"asset={image.asset_id} bytes={image.size} cost_micros={reserve}+{upload}+{MEDIA_ALT_MICROS} "
                      f"sha256={sha[:12]}"),
         )
 
@@ -321,53 +351,74 @@ class XAdapter(Adapter):
         """The image's media id on X — downloaded from its public URL and checked, uploaded, its alt
         text set — or the Outcome that ends this attempt. Nothing here creates a post, so every
         failure is NOT_SENT (or a definite refusal of the picture / the account), and each refunds
-        exactly what provably was not billed: before the alt-text call nothing was (an upload has no
-        price), after it the alt text may have been."""
+        exactly what provably was not billed, computed from what the publisher JOURNALED before the
+        send (`prepared.pre_send_charges` — never the setting read again: it may have changed since):
+
+        * before the upload (the download, a picture that is not the one reviewed), or an upload that
+          never left (a connect failure; a refusal this process made before sending — status None) or
+          that X turned away at the gate (429, 401, a missing credential, 402 credits) → EVERYTHING is
+          refunded: the post, the upload and the alt text;
+        * an upload X may have processed — its outcome unknown (a timeout after sending, a 5xx, an
+          unreadable answer) or refused (a 400 / 403, a failed processing state) — KEEPS the upload
+          charge (one forum report says uploads are billed); the post and the alt text are refunded;
+        * after a successful upload (a media id — even one still processing, which is not attached:
+          the post would go out without its picture) the upload charge is always kept, and the alt
+          text follows the drop-1 rules: it never left, no credential, or 402 → refunded; a 429, a
+          401 or anything else → kept (the write may have been billed)."""
         image = prepared.payload["image"]
-        post_only = -int(prepared.reserve_micros)               # the create was never made
-        nothing_billed = post_only - MEDIA_ALT_MICROS           # …nor the alt text
+        upload = sum(micros for op, micros in prepared.pre_send_charges if op == MEDIA_UPLOAD_OP)
+        alt = sum(micros for op, micros in prepared.pre_send_charges if op == MEDIA_ALT_OP)
+        refund_all = -(int(prepared.reserve_micros) + prepared.pre_send_micros)   # nothing was billed
+        refund_but_upload = refund_all + upload        # the upload may be billed; the alt text and the post not
+        refund_post = refund_but_upload + alt          # the upload and the alt text may be billed; the post not
         data = await outlet_base.fetch_post_image(image["url"], size=image["size"], sha256=image["sha256"])
         if isinstance(data, MediaProblem):
             if data.definite:
-                return Outcome(REFUSED, "media", error=scrub(f"x: {data.error}"), refund_micros=nothing_billed,
+                return Outcome(REFUSED, "media", error=scrub(f"x: {data.error}"), refund_micros=refund_all,
                                alert="failed")
-            return Outcome(NOT_SENT, "media", error=scrub(f"x: {data.error}"), refund_micros=nothing_billed)
+            return Outcome(NOT_SENT, "media", error=scrub(f"x: {data.error}"), refund_micros=refund_all)
         try:
             uploaded = await x_api.upload_media(data)
         except x_api.XApiNotSentError as e:
-            return Outcome(NOT_SENT, "transport", error=scrub(e), refund_micros=nothing_billed)
+            return Outcome(NOT_SENT, "transport", error=scrub(e), refund_micros=refund_all)
         except x_api.XApiRateLimitError as e:
             return Outcome(NOT_SENT, "rate_limited", error=scrub(e), retry_at=getattr(e, "retry_at", None),
-                           refund_micros=nothing_billed)
+                           refund_micros=refund_all)
         except (x_api.XApiAuthError, x_api.XApiNotConfiguredError) as e:
-            return Outcome(NOT_SENT, "auth", error=scrub(e), refund_micros=nothing_billed, alert="auth",
+            return Outcome(NOT_SENT, "auth", error=scrub(e), refund_micros=refund_all, alert="auth",
                            retry_at=datetime.now(timezone.utc) + timedelta(seconds=AUTH_BACKOFF_SECONDS))
         except x_api.XApiCreditsDepletedError as e:
-            return Outcome(REFUSED, "credits", error=scrub(e), refund_micros=nothing_billed, alert="failed")
+            return Outcome(REFUSED, "credits", error=scrub(e), refund_micros=refund_all, alert="failed")
+        except x_api.XApiRefusedError as e:
+            # A refusal this process made before sending (no bytes, over 5 MB — status None) never left;
+            # one X answered (a 400 / 403, a failed processing state) may be billed.
+            never_left = getattr(e, "status", None) is None
+            return Outcome(NOT_SENT, "media", error=scrub(e),
+                           refund_micros=refund_all if never_left else refund_but_upload)
         except x_api.XApiException as e:
-            # Refused, forbidden, ambiguous: the media may or may not exist on X, the POST cannot.
-            return Outcome(NOT_SENT, "media", error=scrub(e), refund_micros=nothing_billed)
+            # Ambiguous: the media may or may not exist on X (and be billed); the POST cannot.
+            return Outcome(NOT_SENT, "media", error=scrub(e), refund_micros=refund_but_upload)
         if uploaded.get("state") in ("pending", "in_progress"):
-            return Outcome(NOT_SENT, "media", refund_micros=nothing_billed,
+            return Outcome(NOT_SENT, "media", refund_micros=refund_but_upload,
                            error=f"x: media {uploaded.get('id')} is still processing ({uploaded.get('state')})")
         media_id = str(uploaded["id"])
         try:
             await x_api.create_media_metadata(media_id, alt_text=image["alt"])
         except (x_api.XApiNotSentError, x_api.XApiNotConfiguredError) as e:
             category = "transport" if isinstance(e, x_api.XApiNotSentError) else "auth"
-            return Outcome(NOT_SENT, category, error=scrub(e), refund_micros=nothing_billed,
+            return Outcome(NOT_SENT, category, error=scrub(e), refund_micros=refund_but_upload,
                            alert="auth" if category == "auth" else None)
         except x_api.XApiRateLimitError as e:
             return Outcome(NOT_SENT, "rate_limited", error=scrub(e), retry_at=getattr(e, "retry_at", None),
-                           refund_micros=post_only)
+                           refund_micros=refund_post)
         except x_api.XApiAuthError as e:
-            return Outcome(NOT_SENT, "auth", error=scrub(e), refund_micros=post_only, alert="auth",
+            return Outcome(NOT_SENT, "auth", error=scrub(e), refund_micros=refund_post, alert="auth",
                            retry_at=datetime.now(timezone.utc) + timedelta(seconds=AUTH_BACKOFF_SECONDS))
         except x_api.XApiCreditsDepletedError as e:
-            return Outcome(REFUSED, "credits", error=scrub(e), refund_micros=nothing_billed, alert="failed")
+            return Outcome(REFUSED, "credits", error=scrub(e), refund_micros=refund_but_upload, alert="failed")
         except x_api.XApiException as e:
             # The alt-text call may have been billed (an ambiguous or refused write) — kept.
-            return Outcome(NOT_SENT, "media", error=scrub(e), refund_micros=post_only)
+            return Outcome(NOT_SENT, "media", error=scrub(e), refund_micros=refund_post)
         return media_id
 
     async def send(self, post: Dict[str, Any], prepared: Prepared) -> Outcome:
@@ -386,7 +437,8 @@ class XAdapter(Adapter):
                                           made_with_ai=bool(prepared.payload.get("made_with_ai")),
                                           media_ids=media_ids)
         except x_api.XApiNotSentError as e:
-            # Never left: X did not bill the create (an image post's alt text, before it, may be).
+            # Never left: X did not bill the create (an image post's upload and alt text, made before it,
+            # may be — both kept).
             return Outcome(NOT_SENT, "transport", error=scrub(e),
                            refund_micros=-int(prepared.reserve_micros) if image else 0)
         except x_api.XApiRateLimitError as e:

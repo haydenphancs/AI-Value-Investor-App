@@ -11,16 +11,24 @@ Pinned promises (module docstring, rules/marketing.md §1, Phase 2 plan §6):
   store state threaded in (prelaunch the claim-free "Caydex: AI research on public companies.",
   preorder "… — pre-order on the App Store.", live "… — on the App Store."; anything unknown words
   as prelaunch, the line that claims least): TikTok/Instagram the line + "Link in bio."; X the line alone, link-free
-  unless allowed; everything else the line + its own https://caydexinvest.com/go/<platform>
-  smart link; the YouTube title carries none. Nothing scans the value line at runtime
-  (compliance, grounding and the judge read only model text), so it is pinned verbatim here and
-  run through the public-copy scan — those tests are its ONLY guard;
+  unless allowed; the YouTube description NO link since 2026-10-15 (a Shorts description link cannot be
+  tapped) — while live/preorder the claim-free PRODUCT LINE ("Caydex: AI research on public
+  companies.") + the App Store SEARCH LINE, which says where on its own, so "on the App Store" is said
+  once (review F7, 2026-10-16), and in prelaunch the line alone; everything else the line + its own
+  https://caydexinvest.com/go/<platform> smart link; the YouTube title carries none. Nothing scans the
+  value line, the product line or the search line at runtime (compliance, grounding and the judge read
+  only model text), so they are pinned verbatim here and run through the public-copy scan — those
+  tests are their ONLY guard;
 * `carries_go_link` is exactly the set of captions that carry their own /go link (the publisher
-  opens a campaign's early /go window only for those);
+  opens a campaign's early /go window only for those) — no longer the YouTube description;
 * hashtags only from the curated constants (a model-written tag is how names and tickers get in);
 * the X/Threads/Bluesky body budget is the platform limit minus the code-owned suffix (value line
   included, so it depends on the store state), measured the way the platform counts (X: URL = 23,
-  CJK/emoji = 2), and nothing is ever sliced.
+  CJK/emoji = 2), and nothing is ever sliced;
+* Batch 3 (2026-10-20): the per-FORMAT disclaimer — `disclaimer_for(video=True)` and the two short narrated
+  variants, pinned verbatim and scanned; `extra_video_caption` swaps ONLY the code-owned disclaimer of a
+  Facebook / LinkedIn / Threads caption (refusing anything else); `video=None` keeps every ai AND template
+  output byte for byte (two digests computed before Batch 3).
 
 A test marked `# BUG:` asserts the promised behaviour and fails today.
 
@@ -249,15 +257,27 @@ def test_x_is_link_free_unless_allowed(state):
 
 
 @pytest.mark.parametrize("state", STATES)
-def test_youtube_title_has_no_cta_and_description_uses_the_youtube_campaign(state):
+def test_youtube_title_has_no_cta_and_the_description_carries_the_search_line_never_a_link(state):
+    """Owner decision 6 (2026-10-15): a Shorts description link cannot be tapped, so the description
+    says what to search for instead — while the app is on the store (live / preorder) the claim-free
+    product line, then the search line, which says where on its own (review F7, 2026-10-16: the live /
+    pre-order value line before it said "on the App Store" twice); in prelaunch (an unset or mistyped
+    store URL) the value line alone, which is the product line."""
     assert pc.cta_for("youtube_title", store_state=state) is None
     assert pc.cta_for("youtube_title", allow_x_url=True, store_state=state) is None
-    assert pc.cta_for("youtube_description", store_state=state) == (
-        f"{pc.value_line(state)} Learn more: https://caydexinvest.com/go/youtube")
+    expected = (pc.value_line(state) if state == pc.STORE_PRELAUNCH
+                else "Caydex: AI research on public companies. Search Caydex on the App Store.")
+    for allow in (False, True):
+        cta = pc.cta_for("youtube_description", allow_x_url=allow, store_state=state)
+        assert cta == expected
+        assert cta.startswith(pc.PRODUCT_LINE)
+        assert "http" not in cta and "caydexinvest" not in cta and "/go/" not in cta
+        assert pc.x_link_tokens(cta) == []
+        assert not any(c in cta for c in pc.FORBIDDEN_CHARS["youtube_description"])
 
 
 @pytest.mark.parametrize("field, campaign", [
-    ("youtube_description", "youtube"), ("facebook", "facebook"), ("threads", "threads"),
+    ("facebook", "facebook"), ("threads", "threads"),
     ("bluesky", "bluesky"), ("linkedin", "linkedin"), ("x", "x"),
 ])
 @pytest.mark.parametrize("state", STATES)
@@ -350,19 +370,38 @@ def test_the_default_value_line_is_prelaunch():
     assert pc.normalize_store_state(pc.STORE_PRELAUNCH) == "prelaunch"
 
 
+def test_the_product_line_is_the_claim_free_prelaunch_line():
+    """The PRODUCT_LINE opens the YouTube description's CTA in EVERY state (review F7, 2026-10-16), so it
+    must claim nothing about where or when: it is the prelaunch value line, character for character —
+    which test_the_prelaunch_line_makes_no_availability_claim and the scans below hold to that."""
+    assert pc.PRODUCT_LINE == "Caydex: AI research on public companies." == _VALUE_GOLDEN["prelaunch"]
+    assert pc.PRODUCT_LINE == pc.value_line(pc.STORE_PRELAUNCH) == pc.VALUE_PRODUCT + "."
+    for state in (pc.STORE_PREORDER, pc.STORE_LIVE):   # never a store-claiming line
+        assert pc.PRODUCT_LINE != pc.value_line(state) and "App Store" in pc.value_line(state)
+
+
 #: What follows the value line in each caption field's CTA (design WORDING, 2026-10-05), as
 #: (allow_x_url off, allow_x_url on): TikTok and Instagram " Link in bio."; X the line ALONE, or the
-#: line + " " + its /go link only with allow_x_url; every other field " Learn more: " + its own /go
-#: link (the YouTube description's campaign is "youtube"). The YouTube title has no CTA at all.
+#: line + " " + its /go link only with allow_x_url; every other field but the YouTube description
+#: " Learn more: " + its own /go link. The YouTube description has its own whole CTA
+#: (`_YOUTUBE_CTA_GOLDEN`); the YouTube title has no CTA at all.
 _CTA_TAILS = {
     "tiktok": (" Link in bio.", " Link in bio."),
     "instagram": (" Link in bio.", " Link in bio."),
     "x": ("", " https://caydexinvest.com/go/x"),
-    "youtube_description": (" Learn more: https://caydexinvest.com/go/youtube",) * 2,
     "facebook": (" Learn more: https://caydexinvest.com/go/facebook",) * 2,
     "threads": (" Learn more: https://caydexinvest.com/go/threads",) * 2,
     "bluesky": (" Learn more: https://caydexinvest.com/go/bluesky",) * 2,
     "linkedin": (" Learn more: https://caydexinvest.com/go/linkedin",) * 2,
+}
+#: The YouTube description's whole CTA per state, with no link (owner decision 6, 2026-10-15): while the
+#: app is on the store (live / preorder) the claim-free product line + the search line — the search line
+#: alone says where, so "on the App Store" is said ONCE (review F7, 2026-10-16: the value line before it
+#: said it too) — and in prelaunch the value line alone (the product line), with no search line.
+_YOUTUBE_CTA_GOLDEN = {
+    "prelaunch": "Caydex: AI research on public companies.",
+    "preorder": "Caydex: AI research on public companies. Search Caydex on the App Store.",
+    "live": "Caydex: AI research on public companies. Search Caydex on the App Store.",
 }
 
 
@@ -372,10 +411,13 @@ def test_every_cta_is_pinned_verbatim(state, allow_x_url):
     """Every field's whole CTA, character for character, in every state. The computed budgets pin
     only the X / Threads / Bluesky CTA LENGTHS; this pins the words of the Facebook, LinkedIn and
     YouTube-description CTAs too — code-owned copy nothing scans at runtime."""
-    assert set(_CTA_TAILS) | {"youtube_title"} == set(pc.CAPTION_FIELDS)
+    assert set(_CTA_TAILS) | {"youtube_title", "youtube_description"} == set(pc.CAPTION_FIELDS)
+    assert set(_YOUTUBE_CTA_GOLDEN) == set(pc.STORE_STATES)
     for field, tails in _CTA_TAILS.items():
         assert pc.cta_for(field, allow_x_url=allow_x_url, store_state=state) == (
             _VALUE_GOLDEN[state] + tails[allow_x_url]), field
+    assert pc.cta_for("youtube_description", allow_x_url=allow_x_url, store_state=state) == (
+        _YOUTUBE_CTA_GOLDEN[state])
     assert pc.cta_for("youtube_title", allow_x_url=allow_x_url, store_state=state) is None
 
 
@@ -439,10 +481,200 @@ def test_every_value_line_scans_clean_under_every_items_own_settings(state):
         assert [(v.code, v.detail) for v in got] == _VALUE_SCAN[state], (state, item.key)
 
 
-def _parts(caption: str, body: str, state: str, disclaimer: str):
-    line = pc.value_line(state)
+# ── the search line: what to search for where a link cannot be tapped (2026-10-15) ────────────
+#
+# Code-owned copy like the value line, carried in two places and only while the store state is live or
+# preorder: the YouTube description's CTA (a Shorts description link cannot be tapped) and the automatic
+# first comment `create_posts` stamps for the Upload-Post platforms the owner lists. Nothing scans
+# either at runtime — these tests are its only guard.
+
+#: Owner wording (decision 6, 2026-10-15; never "now", "available", "download" or "free"). Changing it
+#: must be a deliberate edit HERE, and the new line must pass the scans below unchanged.
+_SEARCH_GOLDEN = "Search Caydex on the App Store."
+#: What the public-copy scan may find in it: the brand, and nothing else, in every mode.
+_SEARCH_SCAN = [("brand_mention", "caydex")]
+
+
+def test_the_search_line_is_pinned_verbatim():
+    assert pc.SEARCH_LINE == _SEARCH_GOLDEN
+    assert pc.SEARCH_LINE_STATES == (pc.STORE_PREORDER, pc.STORE_LIVE)
+
+
+@pytest.mark.parametrize("state, expected", [
+    ("live", _SEARCH_GOLDEN), ("preorder", _SEARCH_GOLDEN), ("prelaunch", None),
+])
+def test_the_search_line_rides_only_while_the_app_is_on_the_store(state, expected):
+    assert pc.search_line(state) == expected
+    assert pc.search_line(store_state=state) == expected
+
+
+@pytest.mark.parametrize("junk", [None, "", "LIVE", " live", "live\n", "Preorder", "pre-order", "available",
+                                  1, True, 0, b"live", ["live"], {"live": 1}, 1.5])
+def test_an_unknown_store_state_never_carries_the_search_line(junk):
+    """Anything but the three exact names reads as prelaunch — the state that claims least — so no
+    search line, in the CTA or as a comment; never a raise (a list or dict must not reach a lookup)."""
+    assert pc.search_line(junk) is None
+    assert pc.search_line() is None
+    assert pc.cta_for("youtube_description", store_state=junk) == _VALUE_GOLDEN["prelaunch"]
+
+
+@pytest.mark.parametrize("kw", [dict(allow_emoji=True), dict(allow_emoji=False, strict_instruments=True),
+                                dict(allow_emoji=False, strict_instruments=False)])
+def test_the_search_line_passes_the_public_copy_scan(kw):
+    line = pc.SEARCH_LINE
+    assert [(v.code, v.detail) for v in scan_text("f", clean(line), **kw)] == _SEARCH_SCAN
+    assert clean(line) == line                       # what is stored is what was pinned
+    assert not re.search(r"[0-9%$]", line)           # no number, no price, no percentage
+    assert pc.x_link_tokens(line) == [] and "http" not in line and "/" not in line
+    assert not any(c in line for c in pc.FORBIDDEN_CHARS["youtube_title"])
+    assert line.count("\n") == 0 and line == line.strip()
+    low = line.lower()
+    for word in _VALUE_DENYLIST:
+        assert not re.search(rf"(?<![a-z]){re.escape(word)}", low), word
+    # As an automatic first comment it must fit the tightest comment limit of the platforms that can
+    # carry one (schemas.FIRST_COMMENT_PLATFORMS): TikTok's 150 characters.
+    assert len(line) <= 150
+
+
+def test_the_search_line_scans_clean_under_every_items_own_settings():
+    """It rides on EVERY item's YouTube description and first comments, so it must pass the scan
+    exactly as a body of that item would be scanned (the item's strict-instrument mode, company terms
+    and fact-sheet words) — see the value line's twin above."""
+    from app.services.marketing import content_pool
+
+    line = clean(pc.SEARCH_LINE)
+    items = [content_pool.get_item(k) for k in content_pool.eligible_keys()]
+    assert len(items) >= 30 and any(i.company_terms for i in items)   # anti-vacuity
+    for item in items:
+        got = scan_text("x", line, allow_emoji=True,
+                        strict_instruments=content_pool.strict_instruments(item.kind),
+                        company_terms=item.company_terms, sheet_words=item.grounding.tokens)
+        assert [(v.code, v.detail) for v in got] == _SEARCH_SCAN, item.key
+
+
+@pytest.mark.parametrize("state", STATES)
+@pytest.mark.parametrize("allow_x_url", [False, True])
+@pytest.mark.parametrize("authorship", ["ai", "template"])
+@pytest.mark.parametrize("category", ["blueprints", "foundation", "unknown-category", "news:ceo_buys"])
+def test_the_composed_youtube_description_carries_the_search_line_and_no_link(state, allow_x_url, authorship,
+                                                                             category):
+    post = pc.compose("youtube", BODIES, category=category, run_date=DATE, allow_x_url=allow_x_url,
+                      store_state=state, authorship=authorship)
+    caption = post.caption
+    assert pc.x_link_tokens(caption) == [] and "caydexinvest" not in caption and "/go/" not in caption
+    assert not pc.carries_go_link("youtube", caption)
+    assert caption.count(pc.SEARCH_LINE) == (0 if state == pc.STORE_PRELAUNCH else 1)
+    disc = pc.disclaimer_for("youtube_description", DATE, authorship)
+    if state != pc.STORE_PRELAUNCH:   # right after the claim-free product line, before the disclaimer
+        assert f"\n\n{pc.PRODUCT_LINE} {pc.SEARCH_LINE}\n\n{disc}" in caption
+    else:                             # the value line (the product line) alone, then the disclaimer
+        assert f"\n\n{pc.value_line(state)}\n\n{disc}" in caption
+    assert caption.endswith(disc)
+    # Review F7 (2026-10-16): "App Store" once while the app is on the store (BODIES never name it), never
+    # in prelaunch; and no store-claiming value line — the search line alone says where.
+    assert caption.count("App Store") == (0 if state == pc.STORE_PRELAUNCH else 1)
+    assert pc.value_line(pc.STORE_LIVE) not in caption and pc.value_line(pc.STORE_PREORDER) not in caption
+    assert "pre-order" not in caption.lower() and caption.count(pc.VALUE_PRODUCT) == 1
+    assert pc.check_composed(post, DATE, authorship) == []
+
+
+@pytest.mark.parametrize("state", STATES)
+@pytest.mark.parametrize("authorship", ["ai", "template"])
+@pytest.mark.parametrize("body", [
+    # A case study may name its own company's App Store (writer_prompts: "a case study's own App Store is
+    # fine"), even twice, even with the store's own words in it.
+    "Apple's App Store takes a cut of every app sale, and the App Store fee shapes how developers price.",
+    "Why apps on the App Store cost what they cost.",
+])
+def test_the_youtube_cta_says_where_once_whatever_the_body_says(state, authorship, body):
+    """Review F7 (2026-10-16) is about the CODE-OWNED part: whatever the body says, the part after it says
+    "App Store" exactly once while the app is on the store (live / preorder) and never in prelaunch, opens
+    with the claim-free product line, carries no store-claiming value line and no link — the body never
+    changes the CTA, and nothing of the body is touched (never sliced, never de-duplicated)."""
+    bodies = {**BODIES, "youtube_description": body}
+    post = pc.compose("youtube", bodies, category="battles", run_date=DATE, store_state=state,
+                      authorship=authorship)
+    assert post.caption.startswith(body + "\n\n")
+    suffix = post.caption[len(body):]
+    on_store = state != pc.STORE_PRELAUNCH
+    assert suffix.count("App Store") == suffix.count(pc.SEARCH_LINE) == (1 if on_store else 0)
+    assert suffix.count(pc.VALUE_PRODUCT) == suffix.count(pc.PRODUCT_LINE) == 1
+    assert pc.value_line(pc.STORE_LIVE) not in suffix and pc.value_line(pc.STORE_PREORDER) not in suffix
+    assert pc.x_link_tokens(suffix) == [] and not pc.carries_go_link("youtube", post.caption)
+    assert pc.check_composed(post, DATE, authorship) == []
+
+
+#: What the public-copy scan finds in the YouTube description's WHOLE CTA, read as one text exactly as it
+#: is published (review F7, 2026-10-16): the brand — once per "Caydex" — and nothing else, in every mode;
+#: never the pre-order line's store claim, which the YouTube CTA no longer carries.
+_YOUTUBE_CTA_SCAN = {
+    "prelaunch": [("brand_mention", "caydex")],
+    "preorder": [("brand_mention", "caydex"), ("brand_mention", "caydex")],
+    "live": [("brand_mention", "caydex"), ("brand_mention", "caydex")],
+}
+
+
+@pytest.mark.parametrize("state", STATES)
+def test_the_youtube_cta_says_on_the_app_store_once_and_passes_the_public_copy_scan(state):
+    """Review F7 (2026-10-16): the live / pre-order YouTube description read "Caydex: AI research on public
+    companies — on the App Store. Search Caydex on the App Store." The search line says where on its own,
+    so the line before it is the claim-free product line: "App Store" once (none in prelaunch), never
+    "pre-order", and the owner's wording rule (never "now", "available", "download" or "free") over the
+    WHOLE CTA, not just its parts. Scanned as one text, the way it is published."""
+    cta = pc.cta_for("youtube_description", store_state=state)
+    assert set(_YOUTUBE_CTA_SCAN) == set(pc.STORE_STATES)
+    for kw in (dict(allow_emoji=True), dict(allow_emoji=False, strict_instruments=True),
+               dict(allow_emoji=False, strict_instruments=False)):
+        assert [(v.code, v.detail) for v in scan_text("f", clean(cta), **kw)] == _YOUTUBE_CTA_SCAN[state], kw
+    assert clean(cta) == cta and cta == cta.strip() and "\n" not in cta
+    assert not re.search(r"[0-9%$]", cta)
+    assert cta.count("App Store") == cta.count("on the App Store") == (0 if state == pc.STORE_PRELAUNCH else 1)
+    assert cta.count("Caydex") == (1 if state == pc.STORE_PRELAUNCH else 2)
+    assert "order" not in cta.lower() and "—" not in cta    # no store-claiming value line inside it
+    assert not contains_banned_copy(cta) and not contains_forecast(cta)
+    low = cta.lower()
+    for word in _VALUE_DENYLIST:
+        assert not re.search(rf"(?<![a-z]){re.escape(word)}", low), (state, word)
+
+
+def test_the_youtube_cta_scans_clean_under_every_items_own_settings():
+    """It rides on EVERY lesson's YouTube description, so it is scanned as a body of that item would be —
+    the item's strict-instrument mode, company terms and fact-sheet words (see the value line's twin)."""
+    from app.services.marketing import content_pool
+
+    items = [content_pool.get_item(k) for k in content_pool.eligible_keys()]
+    assert len(items) >= 30 and any(i.company_terms for i in items)   # anti-vacuity
+    for state in STATES:
+        cta = clean(pc.cta_for("youtube_description", store_state=state))
+        for item in items:
+            got = scan_text("x", cta, allow_emoji=True,
+                            strict_instruments=content_pool.strict_instruments(item.kind),
+                            company_terms=item.company_terms, sheet_words=item.grounding.tokens)
+            assert [(v.code, v.detail) for v in got] == _YOUTUBE_CTA_SCAN[state], (state, item.key)
+
+
+def test_no_other_caption_carries_the_search_line():
+    """Only the YouTube description says it: every other platform keeps its own CTA (a /go link, or
+    "Link in bio." where captions cannot be tapped)."""
+    for state in STATES:
+        for allow in (False, True):
+            for platform in pc.PLATFORMS:
+                caption = pc.compose(platform, BODIES, category="blueprints", run_date=DATE, allow_x_url=allow,
+                                     store_state=state).caption
+                assert (pc.SEARCH_LINE in caption) is (platform == "youtube" and state != pc.STORE_PRELAUNCH), \
+                    (platform, state, allow)
+
+
+def _parts(caption: str, body: str, line: str, disclaimer: str):
     assert caption.startswith(body)
     return caption.index(line), len(body), caption.rindex(disclaimer)
+
+
+def _caption_line(platform: str, state: str) -> str:
+    """The line about the app a composed caption carries: the run's value line — but on the YouTube
+    description the claim-free product line in every state (review F7, 2026-10-16: its search line says
+    where; in prelaunch the two lines are the same)."""
+    return pc.PRODUCT_LINE if platform == "youtube" else pc.value_line(state)
 
 
 @pytest.mark.parametrize("platform", pc.PLATFORMS)
@@ -453,12 +685,13 @@ def test_every_caption_but_the_youtube_title_carries_the_value_line_once(platfor
                       allow_x_url=allow_x_url, store_state=state)
     field = _field(platform)
     disc = pc.disclaimer_for(field, DATE)
+    line = _caption_line(platform, state)
     assert post.caption.count(pc.VALUE_PRODUCT) == 1
-    assert post.caption.count(pc.value_line(state)) == 1
+    assert post.caption.count(line) == 1
     for other in STATES:   # the run's state is the one worded — never another state's claim
-        if other != state:
-            assert pc.value_line(other) not in post.caption, (state, other)
-    at, body_end, disc_at = _parts(post.caption, BODIES[field], state, disc)
+        if pc.value_line(other) != line:
+            assert pc.value_line(other) not in post.caption, (platform, state, other)
+    at, body_end, disc_at = _parts(post.caption, BODIES[field], line, disc)
     assert body_end <= at < disc_at                  # after the body, before the disclaimer
     for tag in re.finditer(r"#\w+", post.caption):   # hashtags come before it
         assert tag.start() < at
@@ -527,10 +760,11 @@ def test_the_link_bearing_platforms_are_exactly_those_whose_caption_carries_its_
     got = {p for p in pc.PLATFORMS
            if pc.carries_go_link(p, pc.compose(p, BODIES, category=category, run_date=DATE,
                                                allow_x_url=allow_x_url, store_state=state).caption)}
-    assert got == {"bluesky", "facebook", "linkedin", "threads", "youtube"} | ({"x"} if allow_x_url else set())
+    # Not YouTube since 2026-10-15: its description carries the search line, not /go/youtube.
+    assert got == {"bluesky", "facebook", "linkedin", "threads"} | ({"x"} if allow_x_url else set())
 
 
-@pytest.mark.parametrize("platform", [p for p in pc.PLATFORMS if p not in ("tiktok", "instagram")])
+@pytest.mark.parametrize("platform", [p for p in pc.PLATFORMS if p not in ("tiktok", "instagram", "youtube")])
 def test_go_link_is_the_tail_of_its_cta(platform):
     cta = pc.cta_for(_field(platform), allow_x_url=True)
     assert pc.go_link(platform) == f"https://caydexinvest.com/go/{platform}"
@@ -556,7 +790,11 @@ _X = "https://caydexinvest.com/go/x"
     ("x", "https://caydexinvest.com/go/bluesky", False),  # another platform's link
     ("threads", "Learn more: https://caydexinvest.com/go/bluesky", False),
     ("bluesky", "Learn more: https://caydexinvest.com/go/bluesky", True),
+    # A YouTube caption composed BEFORE 2026-10-15 still carries its link (and still opens the window).
     ("youtube", "Learn more: https://caydexinvest.com/go/youtube", True),
+    # …one composed since carries no link: the product line + the search line, or the line alone in prelaunch.
+    ("youtube", _YOUTUBE_CTA_GOLDEN["live"], False),
+    ("youtube", _YOUTUBE_CTA_GOLDEN["prelaunch"], False),
     ("tiktok", f"{_VALUE_GOLDEN['live']} Link in bio.", False),
     ("x", "", False),
     ("x", None, False),
@@ -1208,12 +1446,49 @@ def _ai_digest(**kw) -> str:
 #: (2026-10-09). Any change to an ai-authored output — a disclaimer, the footer, a suffix, a budget,
 #: a composed caption or a violation — fails here: Learn's copy stays byte for byte what it was.
 _AI_DIGEST_BEFORE_AUTHORSHIP = "2300ab6a9d9db454f974f9189e0c9536225fcafa5d3cf18c1dd0aabec2be794e"
+#: …and since the search line (owner decision 6, 2026-10-15) — the ONE deliberate change: the YouTube
+#: description's CTA lost its /go link and, while the app is on the store, opens with the claim-free
+#: product line before the search line (review F7, 2026-10-16: never "on the App Store" twice).
+#: `_as_before_the_search_line` writes the old CTA back and must reproduce the digest above exactly, so
+#: nothing else moved.
+_AI_DIGEST_SEARCH_LINE = "cee49707caa89f7c33955dc18ecb489951ce66f2c1dcc1732ac20f88d210ddc2"
+#: What the YouTube-description CTA said after the value line before 2026-10-15.
+_OLD_YOUTUBE_TAIL = " Learn more: https://caydexinvest.com/go/youtube"
 
 
-def test_every_ai_output_is_byte_identical_to_before_authorship():
-    assert len(_ai_outputs()) == 6584   # anti-vacuity: the whole matrix is really walked
-    assert _ai_digest() == _AI_DIGEST_BEFORE_AUTHORSHIP
-    assert _ai_digest(authorship="ai") == _AI_DIGEST_BEFORE_AUTHORSHIP
+def _as_before_the_search_line(rows):
+    """A deep copy of `_ai_outputs()` rows with every YouTube-description CTA written back as it was
+    before 2026-10-15 (the value line + " Learn more: <its /go link>"), and how many rows that touched.
+    The CTA is a "\\n\\n"-separated part of the suffix, so the replacement cannot reach anything else."""
+    out, touched = json.loads(json.dumps(rows, ensure_ascii=False)), 0
+    for row in out:
+        if row[0] == "suffix" and row[4] == "youtube_description":
+            slot = (row, 5)
+        elif row[0] == "compose" and row[4] == "youtube":
+            slot = (row[5], "caption")
+        else:
+            continue
+        holder, key = slot
+        state = row[2]
+        new = f"\n\n{pc.cta_for('youtube_description', store_state=state)}\n\n"
+        old = f"\n\n{pc.value_line(state)}{_OLD_YOUTUBE_TAIL}\n\n"
+        assert holder[key].count(new) == 1, (row[:5], holder[key])
+        holder[key] = holder[key].replace(new, old)
+        touched += 1
+    return out, touched
+
+
+def test_every_ai_output_is_byte_identical_to_before_authorship_but_the_youtube_cta():
+    rows = _ai_outputs()
+    assert len(rows) == 6584   # anti-vacuity: the whole matrix is really walked
+    assert _ai_digest() == _AI_DIGEST_SEARCH_LINE
+    assert _ai_digest(authorship="ai") == _AI_DIGEST_SEARCH_LINE
+    before, touched = _as_before_the_search_line(rows)
+    # 16 categories × 4 states × 2 X-URL settings: one suffix row, and 2 bodies × 2 check dates of composed
+    # YouTube captions — every one of them, and nothing else, differs from the pre-2026-10-15 module.
+    assert touched == 16 * 4 * 2 * (1 + 2 * 2)
+    blob = json.dumps(before, ensure_ascii=False, sort_keys=True)
+    assert hashlib.sha256(blob.encode("utf-8")).hexdigest() == _AI_DIGEST_BEFORE_AUTHORSHIP
 
 
 def test_the_authorship_names_and_lines_are_pinned():
@@ -1333,6 +1608,7 @@ def _template_copy_strings():
     out = list(_template_disclaimers(DATE).values())
     out.append(pc.image_footer(DATE, TEMPLATE, source="SEC Form 4 filings", as_of="Filed Oct 5–9, 2026"))
     out += [pc.value_line(s) for s in STATES]
+    out.append(pc.SEARCH_LINE)   # the YouTube CTA's tail and the automatic first comment
     out += [c for f in pc.CAPTION_FIELDS for s in STATES for a in (False, True)
             if (c := pc.cta_for(f, allow_x_url=a, store_state=s))]
     out += [pc._CATEGORY_TAG[c] for c in NEWS_CATEGORIES]
@@ -1374,7 +1650,8 @@ def test_a_template_caption_ends_with_the_template_disclaimer_once(platform, cat
     disc = pc.disclaimer_for(field, DATE, TEMPLATE)
     assert post.caption.startswith(BODIES[field])                 # never sliced
     assert post.caption.endswith(disc) and post.caption.count(disc) == 1
-    assert post.caption.count(pc.value_line(state)) == 1
+    assert post.caption.count(_caption_line(platform, state)) == 1
+    assert post.caption.count(pc.VALUE_PRODUCT) == 1
     assert pc.check_composed(post, DATE, TEMPLATE) == []
     assert pc.check_composed(post, DATE, authorship=TEMPLATE) == []
     for line in pc.AI_DISCLOSURES:
@@ -1643,3 +1920,293 @@ def test_the_ai_image_footer_refuses_a_source_or_as_of(kw):
         pc.image_footer(DATE, **kw)
     with pytest.raises(ValueError):
         pc.image_footer(DATE, "ai", **kw)
+
+
+# ══ Batch 3 (2026-10-20): the per-FORMAT disclaimer of an EXTRA video post ══════════════════════════════
+#
+# Owner decision 2 (2026-10-15): Facebook, LinkedIn and Threads may also post the day's narrated video. Their
+# caption's disclaimer is composed per PLATFORM (the text wording), so their EXTRA video post carries the
+# platform's OWN accepted caption with only that code-owned disclaimer swapped for the narrated-video one
+# (`extra_video_caption`). Nothing scans this copy at runtime: these tests are its guard. `video=None` — every
+# caller before Batch 3 — must stay byte for byte what it was.
+
+from datetime import timedelta  # noqa: E402
+
+from app.schemas import marketing as schemas  # noqa: E402
+
+_SHORT_VIDEO_GOLDEN = {
+    "ai": "Educational only, not investment advice. Script and narration generated with AI. Caydex",
+    "template": ("Educational only, not investment advice. Narration voiced with AI. Not affiliated with anyone "
+                 "named. Caydex"),
+}
+_RISK = ("Caydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. "
+         "Investing involves risk, including loss of principal. ")
+#: Today's literals (2026-10-20, before Batch 3), per (authorship, kind); "{d}" is the run date's label.
+_TODAY = {
+    ("ai", "long"): _RISK + "Written with AI assistance. {d}.",
+    ("ai", "long_video"): _RISK + "Script and narration generated with AI. {d}.",
+    ("ai", "short"): "Educational only, not investment advice. AI-assisted. Caydex",
+    ("template", "long"): _RISK + "Built by a fixed template from public data. Not affiliated with anyone named. {d}.",
+    ("template", "long_video"): (_RISK + "Built by a fixed template from public data; narration voiced with AI. "
+                                 "Not affiliated with anyone named. {d}."),
+    ("template", "short"): "Educational only, not investment advice. Not affiliated with anyone named. Caydex",
+}
+_BATCH3_DATES = {date(2026, 9, 23): "Sep 23, 2026", date(2027, 1, 5): "Jan 5, 2027",
+                 date(2028, 2, 29): "Feb 29, 2028"}
+
+
+@pytest.mark.parametrize("authorship", ["ai", TEMPLATE])
+def test_batch3_short_video_disclaimers_are_pinned_verbatim_and_pass_the_public_copy_scan(authorship):
+    text = pc.disclaimer_short(authorship, video=True)
+    assert text == _SHORT_VIDEO_GOLDEN[authorship]
+    assert pc.disclaimer_short(authorship=authorship, video=True) == text
+    assert pc.disclaimer_for("threads", DATE, authorship, video=True) == text
+    # what the scan finds is exactly what it finds in today's short disclaimer: its own legal phrase and the brand
+    for kw in ({"allow_emoji": True}, {"allow_emoji": False, "strict_instruments": True},
+               {"allow_emoji": False, "strict_instruments": False}):
+        assert [(v.code, v.detail) for v in scan_text("f", clean(text), **kw)] == _FOOTER_SCAN, kw
+    assert clean(text) == text and "\n" not in text and pc.x_link_tokens(text) == []
+    assert not re.search(r"[%$#]", text) and not re.search(r"caydex,?\s+inc", text.lower())
+    assert text.endswith(f" {pc.PUBLISHER}") and "not investment advice" in text
+    assert len(re.findall(r"\bAI\b", text)) == 1 and "narration" in text.lower()
+    assert not contains_banned_copy(text) and not contains_forecast(text)
+    if authorship == TEMPLATE:
+        assert text.count(pc.NON_AFFILIATION) == 1
+        for line in pc.AI_DISCLOSURES:          # a template's words are a template's: only its voice is AI
+            assert line.casefold() not in text.casefold()
+    else:
+        assert pc.AI_DISCLOSURES[2] in text     # the long video form's own phrase, reused
+    # the short video form is still short: under every long one, and its extra 27 / 26 characters are measured
+    assert len(text) < len(pc.disclaimer_long(DATE, video=True, authorship=authorship))
+    assert len(text) - len(pc.disclaimer_short(authorship)) == {"ai": 27, TEMPLATE: 26}[authorship]
+
+
+def test_batch3_the_short_video_disclaimers_scan_clean_under_every_items_own_settings():
+    from app.services.marketing import content_pool
+
+    items = [content_pool.get_item(k) for k in content_pool.eligible_keys()]
+    assert len(items) >= 30
+    for authorship in ("ai", TEMPLATE):
+        text = clean(pc.disclaimer_short(authorship, video=True))
+        for item in items:
+            got = scan_text("threads", text, allow_emoji=True,
+                            strict_instruments=content_pool.strict_instruments(item.kind),
+                            company_terms=item.company_terms, sheet_words=item.grounding.tokens)
+            assert [(v.code, v.detail) for v in got] == _FOOTER_SCAN, (authorship, item.key)
+
+
+@pytest.mark.parametrize("authorship", ["ai", TEMPLATE])
+@pytest.mark.parametrize("run_date", sorted(_BATCH3_DATES))
+def test_batch3_disclaimer_for_without_video_is_unchanged(authorship, run_date):
+    label = _BATCH3_DATES[run_date]
+    for field in pc.CAPTION_FIELDS:
+        if field == "youtube_title":
+            want = None
+        elif field in COMPUTED:
+            want = _TODAY[(authorship, "short")]
+        else:
+            want = _TODAY[(authorship, "long_video" if field in VIDEO_FIELDS else "long")].format(d=label)
+        assert pc.disclaimer_for(field, run_date, authorship) == want, field
+        assert pc.disclaimer_for(field, run_date, authorship, video=None) == want, field
+        if field not in VIDEO_FIELDS and field != "youtube_title":   # False is the text wording, explicitly
+            assert pc.disclaimer_for(field, run_date, authorship, video=False) == want, field
+    assert pc.disclaimer_short(authorship) == pc.disclaimer_short(authorship, video=False) == _TODAY[(authorship, "short")]
+    assert pc.NARRATED_FIELDS == VIDEO_FIELDS
+    # check_composed is unchanged: the same verdicts with and without video=None, on clean and broken captions
+    category = "news:ceo_buys" if authorship == TEMPLATE else "blueprints"
+    bad = dict(BODIES, youtube_title="Price > value\nnow", x="a" * 300, youtube_description="Patience > timing.")
+    for platform in pc.PLATFORMS:
+        for bodies in (BODIES, bad):
+            post = pc.compose(platform, bodies, category=category, run_date=run_date, store_state="live",
+                              authorship=authorship)
+            for checked_on in (run_date, run_date + timedelta(days=1)):
+                plain = [v.as_dict() for v in pc.check_composed(post, checked_on, authorship)]
+                assert [v.as_dict() for v in pc.check_composed(post, checked_on, authorship, video=None)] == plain
+            assert pc.check_composed(post, run_date, authorship) == [] or bodies is bad
+
+
+#: sha256 of `_template_outputs()` computed on the module BEFORE Batch 3 (2026-10-20): every template-authored
+#: disclaimer, budget, suffix, composed caption and verdict. The ai outputs are pinned above
+#: (`_AI_DIGEST_SEARCH_LINE`); together they say the per-format disclaimer changed nothing a caller already
+#: had.
+_TEMPLATE_DIGEST_BEFORE_BATCH3 = "fb0f9906fd5bd2c688cabbca9687362354f8c1ac6ac791680b08b5648c29906c"
+
+
+def _template_outputs():
+    rows = []
+    for d in sorted(_BATCH3_DATES):
+        rows.append(["long", str(d), pc.disclaimer_long(d, authorship=TEMPLATE)])
+        rows.append(["long_video", str(d), pc.disclaimer_long(d, video=True, authorship=TEMPLATE)])
+        rows.append(["card", str(d), pc.disclaimer_card(d, TEMPLATE)])
+        for field in pc.CAPTION_FIELDS:
+            rows.append(["disclaimer_for", field, str(d), pc.disclaimer_for(field, d, TEMPLATE)])
+    rows.append(["short", pc.disclaimer_short(TEMPLATE)])
+    bad_bodies = dict(BODIES, youtube_title="Price > value\nnow", x="a" * 300, youtube_description="Patience > timing.")
+    for category in NEWS_CATEGORIES + CATEGORIES[:2]:
+        for state in STATES + ("junk",):
+            for allow in (False, True):
+                for field in pc.CAPTION_FIELDS:
+                    rows.append(["budget", category, state, allow, field,
+                                 pc.body_budget(field, category, DATE, allow_x_url=allow, store_state=state,
+                                                authorship=TEMPLATE)])
+                    rows.append(["suffix", category, state, allow, field,
+                                 pc._suffix(field, category, DATE, allow, state, authorship=TEMPLATE)])
+                for platform in pc.PLATFORMS:
+                    for bodies in (BODIES, bad_bodies):
+                        post = pc.compose(platform, bodies, category=category, run_date=DATE, allow_x_url=allow,
+                                          store_state=state, authorship=TEMPLATE)
+                        for checked_on in (DATE, date(2026, 9, 24)):
+                            rows.append(["compose", category, state, allow, platform, post.as_dict(),
+                                         [v.as_dict() for v in pc.check_composed(post, checked_on, TEMPLATE)]])
+    return rows
+
+
+def test_batch3_every_template_output_is_byte_identical_to_before_batch3():
+    rows = _template_outputs()
+    assert len(rows) == 4037   # anti-vacuity: the whole matrix is really walked
+    blob = json.dumps(rows, ensure_ascii=False, sort_keys=True)
+    assert hashlib.sha256(blob.encode("utf-8")).hexdigest() == _TEMPLATE_DIGEST_BEFORE_BATCH3
+    # and the ai outputs, through the authorship digest the drop-2 test already pins
+    assert _ai_digest() == _AI_DIGEST_SEARCH_LINE
+
+
+@pytest.mark.parametrize("authorship", ["ai", TEMPLATE])
+def test_batch3_video_true_is_refused_on_x_and_the_youtube_title(authorship):
+    for field in ("x", "youtube_title"):
+        with pytest.raises(ValueError, match="never carries"):
+            pc.disclaimer_for(field, DATE, authorship, video=True)
+    x_post = pc.compose("x", BODIES, category="blueprints", run_date=DATE, authorship=authorship)
+    with pytest.raises(ValueError):
+        pc.check_composed(x_post, DATE, authorship, video=True)
+    # every other field words the narrated form — the narrated fields as they always did
+    for field in [f for f in pc.CAPTION_FIELDS if f not in ("x", "youtube_title")]:
+        text = pc.disclaimer_for(field, DATE, authorship, video=True)
+        assert "narration" in text.lower(), field
+        if field in VIDEO_FIELDS:
+            assert text == pc.disclaimer_for(field, DATE, authorship)
+    # False on a narrated field would under-disclose the narration; a non-bool is never read as one
+    for field in VIDEO_FIELDS:
+        with pytest.raises(ValueError, match="narrated video"):
+            pc.disclaimer_for(field, DATE, authorship, video=False)
+    for junk in ("yes", 1, 0, "", [], "True"):
+        with pytest.raises(ValueError, match="None or a bool"):
+            pc.disclaimer_for("facebook", DATE, authorship, video=junk)
+
+
+def _fits_threads_to_the_limit(authorship: str, state: str) -> str:
+    """A Threads body whose composed TEXT caption is exactly 500 characters (its limit)."""
+    category = "news:ceo_buys" if authorship == TEMPLATE else "blueprints"
+    budget = pc.body_budget("threads", category, DATE, store_state=state, authorship=authorship)
+    return "a" * budget
+
+
+@pytest.mark.parametrize("platform", pc.EXTRA_VIDEO_FIELDS)
+@pytest.mark.parametrize("authorship", ["ai", TEMPLATE])
+@pytest.mark.parametrize("state", ["live", "prelaunch"])
+@pytest.mark.parametrize("allow_x_url", [False, True])
+def test_batch3_extra_video_caption_swaps_only_the_disclaimer(platform, authorship, state, allow_x_url):
+    category = "news:ceo_buys" if authorship == TEMPLATE else "blueprints"
+    post = pc.compose(platform, BODIES, category=category, run_date=DATE, allow_x_url=allow_x_url,
+                      store_state=state, authorship=authorship)
+    assert pc.check_composed(post, DATE, authorship) == []
+    text = pc.disclaimer_for(platform, DATE, authorship)
+    video = pc.disclaimer_for(platform, DATE, authorship, video=True)
+    got = pc.extra_video_caption(platform, post.caption, DATE, authorship)
+    prefix = post.caption[:len(post.caption) - len(text)]
+    assert got == prefix + video                                      # the swap, and nothing else
+    assert got.startswith(BODIES[platform]) and got.split("\n", 1)[0] == post.caption.split("\n", 1)[0]
+    assert got.endswith(video) and got.count(video) == 1 and text not in got
+    assert got.count(pc.VALUE_PRODUCT) == post.caption.count(pc.VALUE_PRODUCT) == 1
+    assert re.findall(r"#\w+", got) == re.findall(r"#\w+", post.caption)
+    assert pc.carries_go_link(platform, got) and got.count(pc.go_link(platform)) == 1
+    assert "narration" in video.lower() and "narration" not in text.lower()
+    if authorship == TEMPLATE:
+        for line in pc.AI_DISCLOSURES:
+            assert line.casefold() not in got.casefold()
+        assert got.count(pc.NON_AFFILIATION) == 1
+    assert pc.measured_length(platform, got) <= pc.LIMITS[platform]
+    assert pc.check_composed(pc.ComposedPost(platform, None, got), DATE, authorship, video=True) == []
+    # read as the platform's text post it lacks that disclaimer: the two can never be confused
+    assert "disclaimer_missing" in [v.code for v in pc.check_composed(pc.ComposedPost(platform, None, got), DATE,
+                                                                      authorship)]
+    assert pc.extra_video_caption(platform, post.caption, DATE, authorship) == got     # pure, deterministic
+    assert pc.extra_video_caption(platform, post.caption, DATE, authorship=authorship) == got
+
+
+@pytest.mark.parametrize("authorship", ["ai", TEMPLATE])
+def test_batch3_extra_video_caption_refuses(authorship):
+    other = "ai" if authorship == TEMPLATE else TEMPLATE
+    category = "news:ceo_buys" if authorship == TEMPLATE else "blueprints"
+    posts = {p: pc.compose(p, BODIES, category=category, run_date=DATE, store_state="live", authorship=authorship)
+             for p in pc.PLATFORMS}
+    for platform in pc.EXTRA_VIDEO_FIELDS:
+        caption = posts[platform].caption
+        video = pc.extra_video_caption(platform, caption, DATE, authorship)
+        refused = [
+            ("not composed by post_copy", f"copy {platform}", DATE, authorship),
+            ("the disclaimer cut", caption[:-5], DATE, authorship),
+            ("text after the disclaimer", caption + " More.", DATE, authorship),
+            ("the disclaimer twice", caption + "\n\n" + pc.disclaimer_for(platform, DATE, authorship), DATE,
+             authorship),
+            ("already the video caption", video, DATE, authorship),
+            ("the other authorship", caption, DATE, other),
+            ("not a string", None, DATE, authorship),
+            ("bytes", caption.encode("utf-8"), DATE, authorship),
+            ("a date string", caption, DATE.isoformat(), authorship),
+        ]
+        if platform != "threads":   # the long disclaimer is dated; the short one is not
+            refused.append(("another date", caption, DATE + timedelta(days=1), authorship))
+        for label, cap, day, who in refused:
+            with pytest.raises(ValueError):
+                pc.extra_video_caption(platform, cap, day, who)
+    for junk in ("ai ", "AI", None, 1, "human"):
+        with pytest.raises(ValueError):
+            pc.extra_video_caption("facebook", posts["facebook"].caption, DATE, junk)
+    # never a platform whose PRIMARY post is the video, never X (two formats), never Bluesky (deferred)
+    for platform, caption in [("tiktok", posts["tiktok"].caption), ("instagram", posts["instagram"].caption),
+                              ("youtube", posts["youtube"].caption), ("youtube_description", posts["youtube"].caption),
+                              ("x", posts["x"].caption), ("bluesky", posts["bluesky"].caption),
+                              ("FACEBOOK", posts["facebook"].caption), (None, posts["facebook"].caption),
+                              (7, posts["facebook"].caption)]:
+        with pytest.raises(ValueError, match="takes no extra video post"):
+            pc.extra_video_caption(platform, caption, DATE, authorship)
+    # a Threads caption at its 500-character limit cannot take the longer narrated disclaimer: refused by name
+    for state in ("live", "prelaunch"):
+        bodies = dict(BODIES, threads=_fits_threads_to_the_limit(authorship, state))
+        full = pc.compose("threads", bodies, category=category, run_date=DATE, store_state=state,
+                          authorship=authorship)
+        assert len(full.caption) == pc.LIMITS["threads"] == 500 and pc.check_composed(full, DATE, authorship) == []
+        with pytest.raises(ValueError, match="over_platform_limit"):
+            pc.extra_video_caption("threads", full.caption, DATE, authorship)
+
+
+def test_batch3_a_refusal_never_carries_caption_text():
+    secret = "Northwind Capital disclosed nothing"
+    for cap in (secret, f"{secret}\n\n" + pc.disclaimer_for("facebook", DATE) + " tail"):
+        with pytest.raises(ValueError) as ei:
+            pc.extra_video_caption("facebook", cap, DATE)
+        assert "Northwind" not in str(ei.value)
+    long_body = "Northwind " + "a" * 600
+    full = pc.compose("threads", dict(BODIES, threads=long_body[:pc.body_budget("threads", "blueprints", DATE)]),
+                      category="blueprints", run_date=DATE)
+    with pytest.raises(ValueError) as ei:
+        pc.extra_video_caption("threads", full.caption, DATE)
+    assert "Northwind" not in str(ei.value) and "over_platform_limit" in str(ei.value)
+
+
+def test_batch3_extra_video_fields_mirror_the_schema():
+    assert pc.EXTRA_VIDEO_FIELDS == schemas.EXTRA_VIDEO_PLATFORMS == ("facebook", "linkedin", "threads")
+    assert set(pc.EXTRA_VIDEO_FIELDS) == set(schemas.EXTRA_POST_FORMATS_BY_PLATFORM)
+    assert set(pc.EXTRA_VIDEO_FIELDS) <= set(pc.PLATFORMS) & set(pc.CAPTION_FIELDS)
+    assert not set(pc.EXTRA_VIDEO_FIELDS) & set(pc.NARRATED_FIELDS)
+    # the narrated fields are exactly the PRIMARY map's video platforms (YouTube's caption is its description)
+    video_platforms = {p for p, fmts in schemas.POST_FORMATS_BY_PLATFORM.items() if "video" in fmts}
+    assert {("youtube" if f == "youtube_description" else f) for f in pc.NARRATED_FIELDS} == video_platforms
+    # a Threads video caption is capped in BYTES at the number Threads caps its text in characters
+    assert schemas.THREADS_VIDEO_CAPTION_MAX_BYTES == pc.LIMITS["threads"] == 500
+    # every extra pair says narration in its caption's disclaimer, for both authorships
+    for platform, fmts in schemas.EXTRA_POST_FORMATS_BY_PLATFORM.items():
+        assert fmts == ("video",)
+        for authorship in pc.AUTHORSHIPS:
+            assert "narration" in pc.disclaimer_for(platform, DATE, authorship, video=True).lower()
+            assert "narration" not in pc.disclaimer_for(platform, DATE, authorship).lower()

@@ -12,6 +12,9 @@ What is pinned here, strongest first:
 * **The strings are the server's**: `onscreen_strings` returns the accepted script's strings
   verbatim and exactly what the card draws, and passes the server's own allow-list logic.
 * **Deterministic bytes**, glyph refusal, the palette, the badge, the logo, both layout engines.
+* **Batch 2 (2026-10-19, "first seconds")**: the HOOK card and the DATA card are drawn only when the run
+  FROZE their video feature, each falls back to today's card (never a skipped day), and the end card
+  draws the read-back's `end_card_cta` — the legacy CTA against a web that names none.
 
 Hermetic: the vendored Inter Bold and logo only; ffmpeg (for the libass check) runs locally and is
 skipped when absent. `app.*` is imported by the TESTS only (to pin the mirrored constants).
@@ -52,6 +55,10 @@ _DATA = _BACKEND / "tests" / "data"
 DISCLAIMER = post_copy.disclaimer_card(date(2026, 9, 29))
 PAGE_RGB = cards._rgb(cards.PAGE)
 
+#: Batch 2: a real hook, and the writer's longest (writer_prompts.HOOK_MAX_WORDS = 14) in long words.
+HOOK = "What does a smart first investor do differently?"
+MAX_HOOK = ("Understanding Extraordinary International Diversification Throughout Unpredictable Economic "
+            "Environments Requires Institutional Discipline Patience Documentation Everywhere")
 #: The writer's maxima (writer_prompts.CARD_TITLE_MAX_WORDS / CARD_BODY_MAX_WORDS = 8 / 28), with
 #: deliberately long words: the worst a legal card can be.
 MAX_TITLE = "Understanding Extraordinary International Diversification Throughout Unpredictable Economic Environments"
@@ -116,8 +123,27 @@ def _words(s: str) -> List[str]:
 
 
 def test_brand_text_mirrors_the_server_allow_list():
-    assert cards.BRAND_TEXT == sch.VIDEO_BRAND_TEXT == (cards.WORDMARK, cards.CTA)
+    """Batch 2: VIDEO_BRAND_TEXT is a SUPERSET — the wordmark, the legacy CTA (older workers, rollbacks) and
+    the App Store one (owner decision 6: post_copy.SEARCH_LINE without its full stop)."""
+    assert cards.BRAND_TEXT == sch.VIDEO_BRAND_TEXT == (cards.WORDMARK, cards.LEGACY_CTA, cards.CTA)
+    assert cards.CTA == sch.VIDEO_END_CARD_CTA == post_copy.SEARCH_LINE.rstrip(".") == "Search Caydex on the App Store"
+    assert cards.LEGACY_CTA == sch.VIDEO_LEGACY_CTA == "caydexinvest.com"
+    assert cards.END_CARD_CTAS == (cards.LEGACY_CTA, cards.CTA) and set(cards.END_CARD_CTAS) < set(cards.BRAND_TEXT)
     assert cards.MAX_STRING_CHARS == sch.ONSCREEN_TEXT_MAX_CHARS
+    assert cards.ONSCREEN_TEXT_MAX == sch.ONSCREEN_TEXT_MAX
+
+
+def test_the_video_features_mirror_the_server():
+    assert cards.VIDEO_FEATURES == sch.VIDEO_FEATURES == ("hook_card", "data_card", "push_in")
+    assert cards.LESSON_VIDEO_FEATURES == sch.LESSON_VIDEO_FEATURES == ("hook_card", "push_in")
+    assert cards.TEMPLATE_VIDEO_FEATURES == sch.TEMPLATE_VIDEO_FEATURES == ("data_card", "push_in")
+    assert (cards.VIDEO_FEATURE_HOOK_CARD, cards.VIDEO_FEATURE_DATA_CARD, cards.VIDEO_FEATURE_PUSH_IN) == (
+        sch.VIDEO_FEATURE_HOOK_CARD, sch.VIDEO_FEATURE_DATA_CARD, sch.VIDEO_FEATURE_PUSH_IN)
+    # the read-back's own field names (WorkerScript declares them: Pydantic drops undeclared keys)
+    assert sch.VIDEO_FEATURES_KEY == "video_features"
+    assert {"video_features", "end_card_cta"} <= set(sch.WorkerScript.model_fields)
+    assert cards.KINDS == ("brand", "text", "stat", "disclaimer", "opening", "hook", "data")
+    assert cards.HOOK_CARD_KINDS == ("opening", "hook") and cards.CARD_RENDER_VERSION == "cards/v4"
 
 
 def test_geometry_constants():
@@ -179,7 +205,19 @@ def test_the_caption_band_covers_what_libass_really_inks(tmp_path):
 
 
 @pytest.mark.parametrize("kwargs, exc", [
+    # Batch 2 made "hook" a KIND (the lesson hook card): a bare one is still refused — it needs its hook.
     ({"kind": "hook"}, ValueError),
+    ({"kind": "hook", "title": "  "}, ValueError),
+    ({"kind": "hook", "title": "h", "body": "b"}, ValueError),               # a hook card draws only the hook
+    ({"kind": "hook", "title": "h", "badge": "Sample data"}, ValueError),
+    ({"kind": "hook", "title": "h", "logos": (cards.LogoArt("A", "Alpha"),)}, ValueError),
+    ({"kind": "data"}, TypeError),                                            # no picture
+    ({"kind": "data", "image": {"layout": "rows"}}, TypeError),               # not a TemplateImage
+    ({"kind": "text", "title": "t", "image": "x"}, ValueError),               # only a data card has a picture
+    ({"kind": "disclaimer", "body": "d", "cta": "Buy now"}, ValueError),      # a CTA outside END_CARD_CTAS
+    ({"kind": "disclaimer", "body": "d", "cta": "Caydex"}, ValueError),       # the wordmark is not a CTA
+    ({"kind": "text", "title": "t", "cta": "caydexinvest.com"}, ValueError),  # only the end card has a CTA
+    ({"kind": "disclaimer", "body": "d", "cta": None}, TypeError),
     ({"kind": "Text", "title": "x"}, ValueError),
     ({"kind": ""}, ValueError),
     ({"kind": "brand", "title": "x"}, ValueError),            # a brand card draws no title
@@ -208,6 +246,10 @@ def test_cardspec_accepts_every_kind():
     cards.CardSpec("text", title="t", body="b", badge="Sample data")
     cards.CardSpec("stat", figure="$6.9 billion", label="l", body="b", badge="Sample data")
     cards.CardSpec("disclaimer", body=DISCLAIMER)
+    for cta in ("", cards.LEGACY_CTA, cards.CTA):
+        assert cards.CardSpec("disclaimer", body=DISCLAIMER, cta=cta).end_cta == (cta or cards.LEGACY_CTA)
+    assert cards.CardSpec("hook", title="What does a smart first investor do differently?").end_cta == ""
+    assert hash(cards.CardSpec("text", title="t")) == hash(cards.CardSpec("text", title="t"))   # still hashable
 
 
 # ── cards_for_script ─────────────────────────────────────────────────────────
@@ -240,6 +282,9 @@ def test_cards_for_script_opens_on_the_first_text_card_never_the_brand_card():
 
 
 def test_the_hook_and_the_wordmark_are_never_drawn_when_there_are_text_cards():
+    """…unless the run FROZE `hook_card` (Batch 2: the hook card, below). Without it the hook is the burned
+    captions' alone — also against a read-back that carries the feature list empty."""
+    assert cards.cards_for_script(_script()) == cards.cards_for_script(_script(video_features=[]))
     specs = cards.cards_for_script(_script())
     drawn = [t for s in specs for t in cards.onscreen_strings(s)]
     assert all("smart first investor" not in t for t in drawn)
@@ -295,7 +340,7 @@ def test_the_disclaimer_is_kept_verbatim():
     odd = DISCLAIMER + "  "
     specs = cards.cards_for_script(_script(disclaimer_card=odd))
     assert specs[-1].body == odd
-    assert cards.onscreen_strings(specs[-1]) == [odd, cards.CTA]
+    assert cards.onscreen_strings(specs[-1]) == [odd, cards.LEGACY_CTA]   # a read-back naming no CTA
 
 
 # ── onscreen_strings ─────────────────────────────────────────────────────────
@@ -322,7 +367,9 @@ def test_onscreen_strings_are_verbatim_and_exactly_what_is_drawn():
     (cards.CardSpec("stat", figure="$6.9 billion", label="Deal value", body="As filed.", badge="Sample data"),
      ["$6.9 billion", "Deal value", "As filed.", "Sample data"], {"figure", "label", "body", "badge"}),
     (cards.CardSpec("stat", figure="42"), ["42"], {"figure"}),
-    (cards.CardSpec("disclaimer", body="D"), ["D", cards.CTA], {"body", "cta"}),
+    (cards.CardSpec("disclaimer", body="D"), ["D", cards.LEGACY_CTA], {"body", "cta"}),
+    (cards.CardSpec("disclaimer", body="D", cta=cards.CTA), ["D", cards.CTA], {"body", "cta"}),
+    (cards.CardSpec("hook", title="Why do fees matter so much?"), ["Why do fees matter so much?"], {"title"}),
 ])
 def test_onscreen_strings_per_kind_match_the_drawn_fields(spec, expected, fields):
     assert cards.onscreen_strings(spec) == expected
@@ -377,12 +424,17 @@ def _assert_all_words_in_order(layout: cards.CardLayout, spec: cards.CardSpec) -
 
 
 def _assert_ink_inside(layout: cards.CardLayout) -> None:
+    """Every line, box and plate inside the card's panel (or the text zone when it has none). A DATA card's
+    layout (Batch 2, a news_layouts.TemplateLayout) keeps its footer on the page under its panel — inside
+    the zone — and its bars, pills and plates in the panel."""
     zone = (cards.SAFE_X[0], cards.TEXT_ZONE_Y[0], cards.SAFE_X[1], cards.TEXT_ZONE_Y[1])
     bounds = layout.panel or zone
     assert cards._within(bounds, zone)
+    data = layout.kind.startswith("data:")
     for ln in layout.lines:
-        assert cards._within(ln.ink, bounds), (ln.field, ln.text, ln.ink, bounds)
-    for b in (layout.rule, layout.badge, layout.logo):
+        assert cards._within(ln.ink, zone if data and ln.field == "footer" else bounds), (ln.field, ln.text, ln.ink)
+    for b in (getattr(layout, "rule", None), getattr(layout, "badge", None), getattr(layout, "logo", None),
+              *(t[0] for t in layout.tiles), *(r.box for r in getattr(layout, "rects", ()))):
         if b:
             assert cards._within(b, bounds)
 
@@ -476,7 +528,8 @@ def test_pathological_inputs_under_the_cap_end_quickly():
 
 def test_sizes_step_from_start_to_floor_in_bounded_integer_steps():
     for style in (cards.TITLE_STYLE, cards.BODY_STYLE, cards.FIGURE_STYLE, cards.LABEL_STYLE,
-                  cards.STAT_BODY_STYLE, cards.DISCLAIMER_STYLE, cards.CTA_STYLE, cards.WORDMARK_STYLE):
+                  cards.STAT_BODY_STYLE, cards.DISCLAIMER_STYLE, cards.CTA_STYLE, cards.WORDMARK_STYLE,
+                  cards.STORE_CTA_STYLE, cards.HOOK_STYLE):
         sizes = [style.size(i) for i in range(cards.RAMP_STEPS + 1)]
         assert sizes[0] == style.start and sizes[-1] == style.floor
         assert sizes == sorted(sizes, reverse=True) and all(isinstance(s, int) for s in sizes)
@@ -498,6 +551,11 @@ _KINDS_TO_RENDER = {
                                    body=MAX_BODY), None),
     "disclaimer (logo)": (cards.CardSpec("disclaimer", body=DISCLAIMER), LOGO),
     "disclaimer (no logo)": (cards.CardSpec("disclaimer", body=DISCLAIMER), None),
+    # Batch 2: the App Store end card and the lesson hook card
+    "disclaimer (App Store CTA, logo)": (cards.CardSpec("disclaimer", body=DISCLAIMER, cta=cards.CTA), LOGO),
+    "disclaimer (App Store CTA, no logo)": (cards.CardSpec("disclaimer", body=DISCLAIMER, cta=cards.CTA), None),
+    "hook": (cards.CardSpec("hook", title=HOOK), None),
+    "hook (writer max)": (cards.CardSpec("hook", title=MAX_HOOK), None),
 }
 
 
@@ -760,7 +818,8 @@ F, L, D = sys.argv[1], sys.argv[2], sys.argv[3]
 page = cards._rgb(cards.PAGE)
 specs = [cards.CardSpec("brand"), cards.CardSpec("text", title=sys.argv[4], body=sys.argv[5]),
          cards.CardSpec("stat", figure="$6.9 billion", label="Deal value", body="As filed.", badge="Sample data"),
-         cards.CardSpec("disclaimer", body=D)]
+         cards.CardSpec("disclaimer", body=D), cards.CardSpec("disclaimer", body=D, cta=cards.CTA),
+         cards.CardSpec("hook", title=sys.argv[4])]
 for s in specs:
     a = cards.render_card(s, font_path=F, logo_path=L, layout_engine="raqm")
     assert a == cards.render_card(s, font_path=F, logo_path=L, layout_engine="raqm")
@@ -859,7 +918,7 @@ def test_the_post_image_constants_mirror_the_server():
     assert cards.IMAGE_WIDTH * 5 == cards.IMAGE_HEIGHT * 4                      # 4:5
     q = cards.JPEG_QUALITIES
     assert list(q) == sorted(set(q), reverse=True) and all(1 <= v <= 95 for v in q)
-    assert cards.CARD_RENDER_VERSION == "cards/v3"     # v3: drop 2a (opening card, logos, news layouts)
+    assert cards.CARD_RENDER_VERSION == "cards/v4"     # v4: Batch 2 (hook card, data card, App Store end card)
 
 
 def test_image_for_script_reads_the_worker_script_verbatim():
@@ -1213,10 +1272,12 @@ _TPL_LINES = ["GameStop's chief executive disclosed buying about seventy four mi
               "The filings came in between November ninth and November thirteenth this year.",
               "The purchases covered one million shares across three separate trades.",
               "Form four filings are public, and the figures here are as filed."]
+#: A ceo_buys day's cards, in the lexicon's own order and words (news_templates ins.c1 … ins.c4): the fact
+#: card "The purchases" (the picture's own line) and two hedges the template keeps on screen on purpose.
 _TPL_CARDS = [{"title": "Who filed", "body": "GameStop's CEO, on SEC Form 4."},
-              {"title": "When", "body": "Filed Nov 9 to Nov 13, 2026."},
-              {"title": "How much", "body": "1,000,000 shares across 3 purchases."},
-              {"title": "About the figures", "body": "Amounts as filed; not adjusted."}]
+              {"title": "The purchases", "body": "3 purchases · 1,000,000 shares · $74.4M"},
+              {"title": "What a Form 4 is", "body": "Filed within two business days of an insider's trade"},
+              {"title": "How the amount is counted", "body": "Shares times the cost of each share, per the filing"}]
 TEMPLATE_DISCLAIMER = post_copy.disclaimer_card(date(2026, 11, 16), authorship="template")
 
 
@@ -1237,7 +1298,7 @@ def _red_logo(path: Path) -> str:
 
 
 def test_the_opening_kind_and_the_template_mirrors():
-    assert "opening" in cards.KINDS and cards.CARD_RENDER_VERSION == "cards/v3"
+    assert "opening" in cards.KINDS and cards.CARD_RENDER_VERSION == "cards/v4"
     assert cards.LAYOUTS == tos.LAYOUTS and cards.OPENING_KEYS == tos.OPENING_KEYS
     assert cards.MAX_OPENING_LOGOS == tos.MAX_OPENING_LOGOS == 2
     assert cards.TEMPLATE_AUTHORSHIP == sch.TEMPLATE_AUTHORSHIP and cards.VIDEO_LAYOUT_PER_LINE == sch.VIDEO_LAYOUT_PER_LINE
@@ -1415,3 +1476,670 @@ def test_a_lesson_renders_byte_identical_to_drop_1():
             font_path=FONT, layout_engine="basic").data,
     }
     assert {k: hashlib.sha256(v).hexdigest() for k, v in got.items()} == _DROP1_GOLDEN
+
+
+# ── Batch 2 (2026-10-19, "first seconds"): the hook card, the data card, the App Store end card ─────────
+# Owner decision 7 amended rules §5: a lesson video may OPEN on a hook card. The server freezes the video
+# features per run (`output.video_features`, sent in the read-back) and ALLOWS a feature card's strings only
+# while it is frozen (run_service._check_onscreen_text). The worker draws a feature card only when the
+# read-back carries it, checks it with the render's own font and engine (glyphs, fit, legibility, the
+# 64-string cap) and otherwise keeps today's card — never a skipped day. The end card draws the read-back's
+# `end_card_cta`; a read-back that names none (an older web) keeps the legacy CTA.
+
+import importlib  # noqa: E402
+
+from marketing import news_layouts as nl  # noqa: E402
+
+
+def _rs():
+    """The server's run_service — imported where a test reads its allow-list (a lazy import: a module in
+    another track's hands mid-edit fails only these tests, never the whole file's collection)."""
+    return importlib.import_module("app.services.marketing.run_service")
+
+
+_TPL_FOOTER = post_copy.image_footer(date(2026, 11, 16), "template", source="SEC Form 4 filings", as_of="Nov 16, 2026")
+_TPL_IMAGE_SPEC = {"layout": "spotlight", "version": 1, "kicker": "FILED LAST WEEK · FORM 4", "footer": _TPL_FOOTER,
+                   "header": {"logo": "GME", "name": "GameStop", "chip": "GME"}, "figure": "$74.4M",
+                   "headline": "GameStop's CEO disclosed buying GameStop stock",
+                   "lines": ["1,000,000 shares across 3 purchases", "Filed Nov 9 to Nov 13, 2026"]}
+_TPL_ALT = {"title": "A purchase disclosed on SEC Form 4",
+            "paragraphs": ["The largest was 74.4 million dollars.", "Source: SEC Form 4 filings."]}
+
+
+def _hook_script(**over):
+    """A lesson read-back from a Batch 2 web with `hook_card` (and the push-in) frozen."""
+    s = _script(video_features=["hook_card", "push_in"], end_card_cta=cards.CTA)
+    s.update(over)
+    return s
+
+
+#: The fixture's FACT card the post picture already shows ("The purchases": "1,000,000 shares across 3
+#: purchases" is the picture's own line) — the slot the web names (template_onscreen.data_card_slot);
+#: cards 2-3 are the hedges a template keeps on screen for their whole line.
+_TPL_DATA_SLOT = 1
+
+
+def _data_script(**over):
+    """A template read-back from a Batch 2 web with `data_card` (and the push-in) frozen, the slot the data
+    card replaces (`data_card_slot`), its post image (`image_spec` + `image_footer`) and its frozen formats,
+    as script_service.worker_script sends them."""
+    s = _template_script(image_spec=json.loads(json.dumps(_TPL_IMAGE_SPEC)), image_footer=_TPL_FOOTER,
+                         image_post=dict(_TPL_ALT), post_formats={"tiktok": "video", "bluesky": "image"},
+                         video_features=["data_card", "push_in"], end_card_cta=cards.CTA,
+                         data_card_slot=_TPL_DATA_SLOT)
+    s.update(over)
+    return s
+
+
+#: [opening, text × 4, disclaimer] with the data card at the slot (specs[slot + 1]).
+_DATA_KINDS = ["opening", "text", "data", "text", "text", "disclaimer"]
+_TEXT_KINDS = ["opening", "text", "text", "text", "text", "disclaimer"]
+
+
+def _cards(script, **kw):
+    return cards.cards_for_script(script, font_path=FONT, layout_engine="basic", **kw)
+
+
+def _server_allowed(script) -> set:
+    """run_service._check_onscreen_text's allow-list for this run, from the server's OWN readers (the
+    read-back carries the accepted output's keys): brand text, the cards, the disclaimer, a template's
+    opening card — and a frozen feature's strings ONLY while it is frozen (`frozen_video_features`,
+    `hook_card_text`, `data_card_strings`)."""
+    rs = _rs()
+    template = script.get("authorship") == "template"
+    allowed = set(sch.VIDEO_BRAND_TEXT) | {c[k] for c in script["cards"] for k in ("title", "body") if c.get(k)}
+    allowed.add(script["disclaimer_card"])
+    features = rs.frozen_video_features(script, template=template)
+    if template:
+        allowed |= set(tos.opening_strings(script["opening_card"], script["logos"]))
+        if sch.VIDEO_FEATURE_DATA_CARD in features:
+            allowed |= set(rs.data_card_strings(script) or ())
+    elif sch.VIDEO_FEATURE_HOOK_CARD in features and rs.hook_card_text(script):
+        allowed.add(rs.hook_card_text(script))
+    return allowed
+
+
+def _declared(specs) -> List[str]:
+    out: List[str] = []
+    for spec in specs:
+        for t in cards.onscreen_strings(spec):
+            if t not in out:
+                out.append(t)
+    return out
+
+
+# the read-back's two fields: the frozen features and the end card's CTA
+
+@pytest.mark.parametrize("authorship, raw, expected", [
+    (None, None, ()), (None, [], ()), ("template", [], ()),
+    (None, ["push_in", "hook_card"], ("hook_card", "push_in")), (None, ["push_in"], ("push_in",)),
+    (None, ["hook_card"], ("hook_card",)), ("ai", ["hook_card"], ("hook_card",)),
+    ("template", ["push_in", "data_card"], ("data_card", "push_in")), ("template", ["data_card"], ("data_card",)),
+    # never half-trusted: anything that does not read back is NONE of it (the server's own reading)
+    (None, "hook_card", ()), (None, {"hook_card": True}, ()), (None, ["hook_card", "hook_card"], ()),
+    (None, ["hook_card", 1], ()), (None, ["zoom"], ()), (None, ["hook_card", "zoom"], ()),
+    (None, ["data_card"], ()), (None, ["hook_card", "data_card"], ()),           # a template feature on a lesson
+    ("template", ["hook_card"], ()), ("template", ["hook_card", "push_in"], ()),  # a lesson feature on a template
+    (None, [None], ()), (None, ["Hook_Card"], ()),
+])
+def test_video_features_read_back_whole_or_not_at_all_like_the_server(authorship, raw, expected, caplog):
+    caplog.set_level(logging.ERROR, logger="marketing.cards")
+    script = _script(authorship=authorship) if raw is None else _script(authorship=authorship, video_features=raw)
+    if raw is None:
+        script.pop("video_features", None)
+    assert cards.video_features(script) == expected
+    template = authorship == "template"
+    # the server's reading of the same value (what it froze, what it allows) is the worker's
+    assert _rs().frozen_video_features(script, template=template) == expected
+    bad = raw not in (None, []) and expected == ()
+    worker = [r for r in caplog.records if r.name == "marketing.cards" and "video_features" in r.getMessage()]
+    assert bool(worker) == bad and all(r.levelno == logging.ERROR for r in worker), (raw, caplog.records)
+
+
+def test_video_features_refuses_only_what_is_not_a_script():
+    with pytest.raises(ValueError):
+        cards.video_features(["not", "a", "dict"])  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="authorship"):
+        cards.video_features(_script(authorship="robot", video_features=["push_in"]))
+
+
+@pytest.mark.parametrize("over, expected, logged", [
+    ({}, cards.LEGACY_CTA, False),                              # an older web: no key at all
+    ({"end_card_cta": None}, cards.LEGACY_CTA, False),
+    ({"end_card_cta": cards.LEGACY_CTA}, cards.LEGACY_CTA, False),   # the web says prelaunch
+    ({"end_card_cta": cards.CTA}, cards.CTA, False),            # the web says the app is on the store
+    ({"end_card_cta": "Caydex"}, cards.LEGACY_CTA, True),       # brand text, but not a CTA
+    ({"end_card_cta": "Download Caydex now"}, cards.LEGACY_CTA, True),
+    ({"end_card_cta": cards.CTA + "."}, cards.LEGACY_CTA, True),
+    ({"end_card_cta": ""}, cards.LEGACY_CTA, True),
+    ({"end_card_cta": 5}, cards.LEGACY_CTA, True),
+    # the new CTA needs the web's word for it: a feature list alone (no end_card_cta) is not that
+    ({"video_features": ["hook_card"]}, cards.LEGACY_CTA, False),
+])
+def test_the_end_card_draws_the_read_backs_cta_or_the_legacy_one(over, expected, logged, caplog):
+    caplog.set_level(logging.ERROR, logger="marketing.cards")
+    for script in (_script(**over), _template_script(**over)):
+        assert cards.end_card_cta(script) == expected
+        specs = cards.cards_for_script(script, font_path=FONT, layout_engine="basic")
+        assert specs[-1].kind == "disclaimer" and specs[-1].end_cta == expected
+        assert cards.onscreen_strings(specs[-1]) == [script["disclaimer_card"], expected]
+        assert expected in sch.VIDEO_BRAND_TEXT                       # both webs allow it
+    assert any(r.name == "marketing.cards" and r.levelno == logging.ERROR and "end_card_cta" in r.getMessage()
+               for r in caplog.records) == logged
+
+
+def test_every_cta_the_web_can_name_is_one_the_worker_draws():
+    ss = importlib.import_module("app.services.marketing.script_service")
+    named = {ss.end_card_cta({"store_state": state}) for state in ("live", "preorder", "prelaunch", None, "bogus")}
+    named.add(ss.end_card_cta(None))
+    assert named == set(cards.END_CARD_CTAS)
+
+
+def test_the_app_store_cta_is_one_line_at_every_step_where_the_legacy_size_would_wrap():
+    """STORE_CTA_STYLE keeps "Search Caydex on the App Store" on ONE line in the end card's column at every
+    ramp step (CTA_STYLE's 60 px would leave "Store" alone on a second line); the legacy CTA keeps its
+    drop-1 style and bytes (`test_a_lesson_renders_byte_identical_to_drop_1`)."""
+    column = cards.SAFE_X[1] - cards.SAFE_X[0]
+    for engine in ["basic"] + (["raqm"] if cards.raqm_available() else []):
+        assert cards._font(FONT, cards.CTA_STYLE.start, engine).getlength(cards.CTA) > column    # anti-vacuity
+        for step in range(cards.RAMP_STEPS + 1):
+            font = cards._font(FONT, cards.STORE_CTA_STYLE.size(step), engine)
+            assert font.getlength(cards.CTA) <= column, (engine, step)
+    layout = cards.layout_card(cards.CardSpec("disclaimer", body=DISCLAIMER, cta=cards.CTA), font_path=FONT,
+                               layout_engine="basic")
+    assert layout.field_lines("cta") == [cards.CTA] and layout.step == 0
+    assert all(ln.size == cards.STORE_CTA_STYLE.start and ln.fill == cards._rgb(cards.ACCENT)
+               for ln in layout.lines if ln.field == "cta")
+    legacy = cards.layout_card(cards.CardSpec("disclaimer", body=DISCLAIMER), font_path=FONT, layout_engine="basic")
+    assert legacy.field_lines("cta") == [cards.LEGACY_CTA]
+    assert {ln.size for ln in legacy.lines if ln.field == "cta"} == {cards.CTA_STYLE.start}
+
+
+# the hook card (a lesson with `hook_card` frozen)
+
+def test_a_lesson_with_hook_card_frozen_opens_on_the_hook_verbatim():
+    script = _hook_script()
+    specs = _cards(script)
+    assert [s.kind for s in specs] == ["hook", "text", "text", "text", "disclaimer"]
+    assert specs[0] == cards.CardSpec("hook", title=script["hook"]) and specs[0].title is script["hook"]
+    assert specs[1:] == _cards(_script(end_card_cta=cards.CTA))           # the rest is today's video
+    assert cards.opens_on_hook_card(specs) and not cards.opens_on_hook_card(_cards(_script()))
+    assert cards.opens_on_hook_card(_cards(_template_script())) and not cards.opens_on_hook_card([])
+    assert cards.onscreen_strings(specs[0]) == [script["hook"]]
+    # a lesson ignores any logos it is given, with or without the feature
+    assert _cards(script, logos=cards.logo_table(_template_script())) == specs
+    # what the video declares is what the server allows for THIS run — the hook only because it is frozen
+    drawn = _declared(specs)
+    allowed = _server_allowed(script)
+    assert set(drawn) <= allowed and script["hook"] in drawn and cards.CTA in drawn
+    assert script["hook"] not in _server_allowed(_hook_script(video_features=["push_in"]))
+    assert script["hook"] not in _server_allowed(_hook_script(video_features=[]))
+
+
+def test_the_hook_card_is_the_hook_big_and_centred_under_an_accent_rule(monkeypatch):
+    monkeypatch.setattr(cards, "_warned", set())
+    spec = cards.CardSpec("hook", title=HOOK)
+    layout = cards.layout_card(spec, font_path=FONT, layout_engine="basic")
+    _assert_all_words_in_order(layout, spec)
+    _assert_ink_inside(layout)
+    assert layout.step == 0 and layout.panel is None and layout.badge is None and layout.logo is None
+    assert {ln.field for ln in layout.lines} == {"title"}
+    assert all(ln.anchor == "ma" and ln.x == cards.WIDTH // 2 and ln.size == cards.HOOK_STYLE.start
+               and ln.fill == cards._rgb(cards.TEXT) for ln in layout.lines)
+    rx0, ry0, rx1, ry1 = layout.rule
+    assert (rx1 - rx0, ry1 - ry0) == (cards.RULE_W, cards.RULE_H) and rx0 + rx1 == cards.WIDTH       # centred
+    assert ry1 + cards.HOOK_RULE_GAP == layout.lines[0].y                                          # above the hook
+    im = _assert_nothing_outside_the_zone(cards.render_card(spec, font_path=FONT, layout_engine="basic"), "hook")
+    assert cards._rgb(cards.ACCENT) in {c for _n, c in im.getcolors(1 << 20)}                     # the rule
+    # the zone is vertically centred on the card's content (it is the video's first frame)
+    zone_mid = (cards.TEXT_ZONE_Y[0] + cards.TEXT_ZONE_Y[1]) / 2
+    assert abs((ry0 + layout.lines[-1].ink[3]) / 2 - zone_mid) < cards.HOOK_STYLE.start
+
+
+def test_every_real_hook_fits_its_card_at_the_start_size_and_the_writers_longest_fits_too():
+    raw = json.loads((_DATA / "marketing_judge_packages_2026_09_26.json").read_text(encoding="utf-8"))
+    hooks = {v for pkg in raw["packages"] for k, v in pkg["fields"] if k == "hook"}
+    drafts = json.loads((_DATA / "marketing_real_drafts_2026_09_24.json").read_text(encoding="utf-8"))
+    hooks |= {r[2] for r in drafts["honest"] if r[1] == "hook"}
+    assert len(hooks) > 50, "the fixtures changed shape — this test would go vacuous"
+    for hook in sorted(hooks):
+        spec = cards.CardSpec("hook", title=hook)
+        layout = cards.layout_card(spec, font_path=FONT, layout_engine="basic")
+        assert layout.step == 0, hook
+        _assert_all_words_in_order(layout, spec)
+    assert len(MAX_HOOK.split()) == 14                                       # writer_prompts.HOOK_MAX_WORDS
+    spec = cards.CardSpec("hook", title=MAX_HOOK)
+    layout = cards.layout_card(spec, font_path=FONT, layout_engine="basic")
+    assert layout.step < cards.RAMP_STEPS and min(ln.size for ln in layout.lines) >= cards.HOOK_STYLE.floor
+    _assert_all_words_in_order(layout, spec)
+    _assert_ink_inside(layout)
+
+
+@pytest.mark.parametrize("hook, why", [
+    ("W" * 40, "CardOverflow"),                      # one word wider than the column at the floor
+    ("A " + "Pneumonoultramicroscopicsilicovolcanoconiosis" + " case", "CardOverflow"),
+    ("Growth 🚀 ahead of the market", "MissingGlyphs"),
+    ("  Padded hook", "drawable"), ("Two\nlines", "drawable"), ("", "drawable"), ("   ", "drawable"),
+    (None, "drawable"), (7, "drawable"), ("x" * 601, "drawable"),
+])
+def test_a_hook_card_that_cannot_be_drawn_opens_on_the_first_card_never_skips_the_day(hook, why, caplog):
+    caplog.set_level(logging.WARNING, logger="marketing.cards")
+    specs = _cards(_hook_script(hook=hook))
+    assert specs == _cards(_script(hook=hook, end_card_cta=cards.CTA))     # today's video, nothing raised
+    assert [s.kind for s in specs] == ["text", "text", "text", "disclaimer"]
+    warned = " ".join(r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+    assert "hook card" in warned and (why in warned or why == "drawable"), warned
+
+
+def test_a_lesson_without_text_cards_still_opens_on_its_hook_card():
+    specs = _cards(_hook_script(cards=[]))
+    assert [s.kind for s in specs] == ["hook", "brand", "disclaimer"]
+
+
+def test_a_hook_card_that_would_take_the_video_past_the_string_cap_is_left_out(monkeypatch, caplog):
+    """B2V-3: the hook card adds one declared string; a video it would take past ONSCREEN_TEXT_MAX (the
+    server refuses more) opens on its first card instead — WARNING, never a 422 at registration."""
+    caplog.set_level(logging.WARNING, logger="marketing.cards")
+    script = _hook_script()
+    with_hook = _declared(_cards(script))
+    today = _declared(_cards(_hook_script(video_features=["push_in"])))
+    assert with_hook == [HOOK, *today]
+    monkeypatch.setattr(cards, "ONSCREEN_TEXT_MAX", len(today))          # one string short of the hook card
+    specs = _cards(script)
+    assert [s.kind for s in specs] == ["text", "text", "text", "disclaimer"] and _declared(specs) == today
+    assert any("no hook card" in r.getMessage() and "on-screen strings" in r.getMessage() for r in caplog.records)
+    monkeypatch.setattr(cards, "ONSCREEN_TEXT_MAX", len(with_hook))      # exactly at the cap: drawn
+    assert [s.kind for s in _cards(script)] == ["hook", "text", "text", "text", "disclaimer"]
+
+
+# the data card (a template with `data_card` frozen)
+
+def test_the_fixture_post_image_is_one_the_server_accepts():
+    assert tos.validate_image_spec(_TPL_IMAGE_SPEC, tos.logo_keys(_TPL_ENTRIES), footer=_TPL_FOOTER) is None
+    assert _rs().data_card_strings(_data_script()) == tos.image_strings(_TPL_IMAGE_SPEC, _TPL_ENTRIES)
+
+
+@pytest.mark.parametrize("resolved", [False, True], ids=["wordmark", "logo"])
+def test_a_template_with_data_card_frozen_draws_its_post_image_in_place_of_the_card_the_web_names(resolved,
+                                                                                                tmp_path):
+    files = {"GME": tmp_path / "gme.png"} if resolved else {}
+    if resolved:
+        _red_logo(files["GME"])
+    script = _data_script()
+    table = cards.logo_table(script, files)
+    specs = _cards(script, logos=table)
+    at = _TPL_DATA_SLOT + 1                                                   # specs[0] is the opening card
+    assert [s.kind for s in specs] == _DATA_KINDS and cards.applied_data_card_slot(specs) == _TPL_DATA_SLOT
+    today = _cards(_data_script(video_features=["push_in"]), logos=table)
+    assert [s.kind for s in today] == _TEXT_KINDS and cards.applied_data_card_slot(today) is None
+    assert specs[:at] == today[:at] and specs[at + 1:] == today[at + 1:]      # only the NAMED card changed
+    assert cards.opens_on_hook_card(specs) and specs[-1].end_cta == cards.CTA
+    image = nl.template_image_for_script(script, table)
+    assert specs[at] == cards.CardSpec("data", image=image)
+    assert cards.onscreen_strings(specs[at]) == list(image.strings)
+    texts = [v for kind, _path, v in nl.walk(script["image_spec"], table) if kind == "text"]
+    if resolved:
+        assert list(image.strings) == list(dict.fromkeys(texts))            # a verified logo adds no name
+    # the replaced card is not drawn any more, the closing hedge still is; everything drawn is allowed
+    drawn = _declared(specs)
+    assert not {_TPL_CARDS[_TPL_DATA_SLOT]["title"], _TPL_CARDS[_TPL_DATA_SLOT]["body"]} & set(drawn)
+    assert {_TPL_CARDS[-1]["title"], _TPL_CARDS[-1]["body"]} <= set(drawn)
+    assert set(drawn) <= _server_allowed(script) and _TPL_FOOTER in drawn
+    unfrozen = _server_allowed(_data_script(video_features=["push_in"]))
+    assert not {_TPL_FOOTER, *_TPL_IMAGE_SPEC["lines"]} & unfrozen           # allowed only while frozen
+    cards.check_glyphs(specs, FONT)
+    layout = cards.layout_card(specs[at], font_path=FONT, layout_engine="basic")
+    assert layout.kind == "data:spotlight" and nl.illegible_lines(layout) == []
+    _assert_ink_inside(layout)
+    data = cards.render_card(specs[at], font_path=FONT, layout_engine="basic")
+    im = _assert_nothing_outside_the_zone(data, "data card")
+    assert not _pure_page(im, (cards.SAFE_X[0], cards.TEXT_ZONE_Y[0], cards.SAFE_X[1], cards.TEXT_ZONE_Y[1]))
+    cards._font.cache_clear()
+    assert cards.render_card(specs[at], font_path=FONT, layout_engine="basic") == data            # deterministic
+    reds = [c for _n, c in im.getcolors(1 << 20) if c[0] - max(c[1], c[2]) > 40]
+    assert bool(reds) == resolved                       # the logo, unaltered, on its plate — nothing else is red
+    if not resolved:
+        off = [c for _n, c in im.getcolors(1 << 20) if not _on_palette(c)]
+        assert off == [], off[:5]
+
+
+def _tall_headline_spec() -> Dict:
+    """The fixture's picture with a 600-character headline: it fits the card's text zone only from a step
+    where the chip is drawn under DATA_CARD_MIN_PX — no legible data card."""
+    spec = json.loads(json.dumps(_TPL_IMAGE_SPEC))
+    spec["headline"] = " ".join(["Disclosed"] * 60)
+    assert len(spec["headline"]) <= cards.MAX_STRING_CHARS
+    assert tos.validate_image_spec(spec, tos.logo_keys(_TPL_ENTRIES), footer=_TPL_FOOTER) is None
+    return spec
+
+
+@pytest.mark.parametrize("over, level, needle", [
+    ({"image_spec": _tall_headline_spec()}, logging.WARNING, "legibility"),
+    ({"image_spec": {**_TPL_IMAGE_SPEC, "lines": ["Growth 🚀 ahead"]}}, logging.WARNING, "MissingGlyphs"),
+    ({"image_spec": None}, logging.ERROR, "image_spec"),
+    ({"image_footer": None}, logging.ERROR, "image_footer"),
+    ({"image_spec": {**_TPL_IMAGE_SPEC, "footer": _TPL_FOOTER + " ·"}}, logging.ERROR, "footer"),
+    ({"image_spec": {**_TPL_IMAGE_SPEC, "layout": "pie"}}, logging.ERROR, "layout"),
+    ({"image_spec": {**_TPL_IMAGE_SPEC, "header": {"logo": "ZZZ", "name": "Z", "chip": "Z"}}}, logging.ERROR, "logo"),
+])
+def test_a_data_card_that_cannot_be_drawn_keeps_its_text_card_never_skips_the_day(over, level, needle, caplog):
+    caplog.set_level(logging.WARNING, logger="marketing.cards")
+    specs = _cards(_data_script(**over))
+    assert specs == _cards(_data_script(video_features=["push_in"], **over))   # today's video, nothing raised
+    assert [s.kind for s in specs] == _TEXT_KINDS
+    said = [r.getMessage() for r in caplog.records if r.levelno == level and "data card" in r.getMessage()]
+    assert said and needle in said[0], [r.getMessage() for r in caplog.records]
+    assert _TPL_CARDS[_TPL_DATA_SLOT]["title"] in said[0]                      # names the card it kept
+
+
+def test_a_data_card_that_would_take_the_video_past_the_string_cap_is_left_out(monkeypatch, caplog):
+    """The video declares every string it draws, at most ONSCREEN_TEXT_MAX (the server refuses more): the
+    data card adds its picture's strings, so a video it would take past the cap keeps its text card."""
+    caplog.set_level(logging.WARNING, logger="marketing.cards")
+    script = _data_script()
+    with_data, today = _declared(_cards(script)), _declared(_cards(_data_script(video_features=["push_in"])))
+    assert len(with_data) > len(today)
+    monkeypatch.setattr(cards, "ONSCREEN_TEXT_MAX", len(with_data) - 1)
+    specs = _cards(script)
+    assert [s.kind for s in specs] == _TEXT_KINDS and len(_declared(specs)) == len(today)
+    assert any("on-screen strings" in r.getMessage() for r in caplog.records)
+    monkeypatch.setattr(cards, "ONSCREEN_TEXT_MAX", len(with_data))                   # exactly at the cap: drawn
+    assert [s.kind for s in _cards(script)] == _DATA_KINDS
+
+
+def test_a_feature_card_needs_the_renders_font_but_the_push_in_alone_does_not():
+    for script in (_hook_script(), _data_script()):
+        with pytest.raises(ValueError, match="font_path"):
+            cards.cards_for_script(script)
+    for script, base in ((_hook_script(video_features=["push_in"]), _script(end_card_cta=cards.CTA)),
+                         (_data_script(video_features=["push_in"]), _data_script(video_features=[]))):
+        assert cards.cards_for_script(script) == cards.cards_for_script(base)        # no card, no font needed
+    # a feature list that does not read back is none of it: no font needed, today's cards
+    assert cards.cards_for_script(_script(video_features=["data_card"])) == cards.cards_for_script(_script())
+    assert cards.cards_for_script(_template_script(video_features=["hook_card"])) == cards.cards_for_script(
+        _template_script())
+
+
+def test_a_template_never_draws_a_hook_card_and_a_lesson_never_a_data_card(caplog):
+    caplog.set_level(logging.ERROR, logger="marketing.cards")
+    lesson = _cards(_script(video_features=["data_card", "push_in"], image_spec=dict(_TPL_IMAGE_SPEC),
+                            image_footer=_TPL_FOOTER, logos=[dict(e) for e in _TPL_ENTRIES], data_card_slot=0))
+    assert [s.kind for s in lesson] == ["text", "text", "text", "disclaimer"]
+    template = _cards(_data_script(video_features=["hook_card", "push_in"]))
+    assert [s.kind for s in template] == _TEXT_KINDS
+    assert len([r for r in caplog.records if r.name == "marketing.cards" and "video_features" in r.getMessage()]) == 2
+
+
+# CARDS-B2-1 (2026-10-20): the data card replaces the ONE text card the web names (`data_card_slot`, an
+# index into the read-back's `cards`) — a fact card the picture already shows, never the hedge a template
+# keeps on screen for its whole line. No usable slot, no data card: the worker never guesses at a card.
+
+
+@pytest.mark.parametrize("slot", [0, 1, 2, 3])
+def test_the_data_card_replaces_exactly_the_card_the_slot_names(slot):
+    specs = _cards(_data_script(data_card_slot=slot))
+    today = _cards(_data_script(video_features=["push_in"]))
+    kinds = ["opening", "text", "text", "text", "text", "disclaimer"]
+    kinds[slot + 1] = "data"
+    assert [s.kind for s in specs] == kinds and cards.applied_data_card_slot(specs) == slot
+    assert [s for i, s in enumerate(specs) if i != slot + 1] == [s for i, s in enumerate(today) if i != slot + 1]
+    assert cards.data_card_slot(_data_script(data_card_slot=slot)) == slot
+    drawn = set(_declared(specs))
+    for i, card in enumerate(_TPL_CARDS):                    # only the named card leaves the screen
+        assert ({card["title"], card["body"]} <= drawn) == (i != slot), (i, slot)
+
+
+def test_the_closing_hedge_card_stays_on_screen_when_the_web_names_the_fact_card():
+    """The point of the slot: the fixture's last cards are its hedges ("What a Form 4 is", "How the amount is
+    counted"); the picture replaces the fact card it repeats, and each hedge keeps its whole line."""
+    specs = _cards(_data_script())
+    hedge = _TPL_CARDS[-1]
+    assert specs[-2] == cards.CardSpec("text", title=hedge["title"], body=hedge["body"])
+    assert specs[_TPL_DATA_SLOT + 1].kind == "data"
+
+
+@pytest.mark.parametrize("raw, level, needle", [
+    (None, logging.WARNING, "names no data_card_slot"),          # a web that predates the slot
+    (True, logging.ERROR, "not an index"), (False, logging.ERROR, "not an index"),
+    ("2", logging.ERROR, "not an index"), (2.0, logging.ERROR, "not an index"),
+    (-1, logging.ERROR, "not an index"),                          # never the opening card
+    (4, logging.ERROR, "not an index"),                           # never the disclaimer card
+    (99, logging.ERROR, "not an index"), ([2], logging.ERROR, "not an index"),
+])
+def test_without_a_usable_slot_no_data_card_is_drawn_and_it_is_said(raw, level, needle, caplog):
+    caplog.set_level(logging.WARNING, logger="marketing.cards")
+    script = _data_script(data_card_slot=raw)
+    if raw is None:
+        script.pop("data_card_slot")
+    assert cards.data_card_slot(script) is None
+    caplog.clear()
+    specs = _cards(script)
+    assert specs == _cards(_data_script(video_features=["push_in"]))         # today's text cards, nothing raised
+    assert [s.kind for s in specs] == _TEXT_KINDS and cards.applied_data_card_slot(specs) is None
+    said = [r for r in caplog.records if r.name == "marketing.cards" and "data_card_slot" in r.getMessage()]
+    assert said and all(r.levelno == level for r in said) and needle in said[0].getMessage(), caplog.records
+    assert not {_TPL_FOOTER, *_TPL_IMAGE_SPEC["lines"]} & set(_declared(specs))   # nothing of the picture drawn
+
+
+def test_a_slot_without_a_frozen_data_card_is_ignored(caplog):
+    caplog.set_level(logging.WARNING, logger="marketing.cards")
+    for features in (["push_in"], []):
+        script = _data_script(video_features=features, data_card_slot=_TPL_DATA_SLOT)
+        assert cards.data_card_slot(script) is None
+        assert [s.kind for s in _cards(script)] == _TEXT_KINDS
+    assert any("without a frozen data_card" in r.getMessage() and r.levelno == logging.WARNING
+               for r in caplog.records)
+    lesson = _script(data_card_slot=0)                               # a lesson never has a data card
+    assert cards.data_card_slot(lesson) is None and [s.kind for s in _cards(lesson)] == [
+        "text", "text", "text", "disclaimer"]
+
+
+def test_a_slot_that_lands_on_a_card_that_is_not_text_replaces_nothing(caplog):
+    """Defence in depth: the read-back's index is checked against the specs it lands on — never the opening
+    card, never the disclaimer card, whatever list `_with_data_card` is handed."""
+    caplog.set_level(logging.ERROR, logger="marketing.cards")
+    script = _data_script()
+    table = cards.logo_table(script)
+    opening = cards.opening_spec(script["opening_card"], table)
+    end = cards.CardSpec("disclaimer", body=TEMPLATE_DISCLAIMER, cta=cards.CTA)
+    text = cards.CardSpec("text", title="When", body="Filed Nov 9 to Nov 13, 2026.")
+    for specs in ([opening, text, end], [opening, end, end, end, end], [opening, text, opening, text, text, end]):
+        out = cards._with_data_card(script, table, list(specs), FONT, "basic")
+        assert out == specs
+    assert len([r for r in caplog.records if "does not name a text card" in r.getMessage()]) == 3
+
+
+def test_the_feature_cards_declare_what_the_server_allows_and_render_inside_the_zone():
+    """The whole Batch 2 video of each kind, card by card: every card renders inside the text zone, every
+    glyph is the face's, and the declared strings are the server's allow-list for the run — at most 64."""
+    for script in (_hook_script(), _data_script()):
+        specs = _cards(script)
+        cards.check_glyphs(specs, FONT)
+        drawn = _declared(specs)
+        assert set(drawn) <= _server_allowed(script) and len(drawn) <= sch.ONSCREEN_TEXT_MAX
+        sch.validate_onscreen_text(drawn)
+        for spec in specs:
+            _assert_nothing_outside_the_zone(cards.render_card(spec, font_path=FONT, logo_path=LOGO,
+                                                               layout_engine="basic"), spec.kind)
+
+
+_RAQM_FEATURE_CHECK = r"""
+import io, json, sys
+from PIL import Image
+from marketing import cards
+assert cards.raqm_available(), "no raqm"
+F = sys.argv[1]
+for name in ("lesson", "template"):
+    script = json.loads(sys.argv[2 if name == "lesson" else 3])
+    specs = cards.cards_for_script(script, font_path=F, layout_engine="raqm")
+    kinds = [s.kind for s in specs]
+    assert (kinds[0] == "hook") if name == "lesson" else (kinds[script["data_card_slot"] + 1] == "data"), kinds
+    page = cards._rgb(cards.PAGE)
+    for s in specs:
+        a = cards.render_card(s, font_path=F, layout_engine="raqm")
+        assert a == cards.render_card(s, font_path=F, layout_engine="raqm")
+        im = Image.open(io.BytesIO(a)); im.load()
+        for box in [(0, 0, 1080, cards.TEXT_ZONE_Y[0]), (0, cards.TEXT_ZONE_Y[1], 1080, 1920),
+                    (0, 0, cards.SAFE_X[0], 1920), (cards.SAFE_X[1], 0, 1080, 1920)]:
+            assert im.crop(box).getextrema() == tuple((c, c) for c in page), (s.kind, box)
+        assert cards.layout_card(s, font_path=F, layout_engine="raqm").engine == "raqm"
+print("RAQM-FEATURES-OK")
+"""
+
+
+def test_raqm_draws_the_feature_cards_too():
+    env = _raqm_env()
+    if env is None:
+        pytest.skip("libraqm not available to Pillow")
+    env.pop("PYTHONPATH", None)
+    proc = subprocess.run([sys.executable, "-c", _RAQM_FEATURE_CHECK, FONT, json.dumps(_hook_script()),
+                           json.dumps(_data_script())], cwd=_BACKEND, env=env, capture_output=True, text=True,
+                          timeout=180)
+    if proc.returncode != 0 and "no raqm" in proc.stderr:
+        pytest.skip("libraqm not loadable in a subprocess either")
+    assert proc.returncode == 0 and "RAQM-FEATURES-OK" in proc.stdout, proc.stderr[-2000:]
+
+
+def test_a_one_line_template_with_data_card_frozen_draws_the_picture_as_its_only_text_card():
+    script = _data_script(video_script=_TPL_LINES[:1], cards=[dict(_TPL_CARDS[0])], data_card_slot=0)
+    specs = _cards(script)
+    assert [s.kind for s in specs] == ["opening", "data", "disclaimer"]
+    assert [s.kind for s in _cards(dict(script, data_card_slot=1))] == ["opening", "text", "disclaimer"]
+    assert set(_declared(specs)) <= _server_allowed(script) and _TPL_CARDS[0]["title"] not in _declared(specs)
+
+
+@pytest.mark.parametrize("state, cta", [("live", cards.CTA), ("preorder", cards.CTA), ("prelaunch", cards.LEGACY_CTA)])
+def test_the_webs_own_read_back_draws_the_frozen_feature_cards(state, cta):
+    """Contract: an accepted output with features frozen, sent through the web's own read-back
+    (script_service.worker_script → the WorkerScript response model → JSON), is drawn by the worker with
+    its feature card and the end card the web named for the output's store state."""
+    ss = importlib.import_module("app.services.marketing.script_service")
+
+    def sent(output):
+        return json.loads(sch.WorkerScript(**ss.worker_script(output, run_id="run-b2")).model_dump_json())
+
+    lesson = {"hook": HOOK, "video_script": ["Line one.", "Line two."], "cards": _script()["cards"],
+              "carousel_slides": [], "disclaimer_card": DISCLAIMER, "posts": {"tiktok": {}, "x": {}},
+              "video_features": ["hook_card", "push_in"], "store_state": state}
+    specs = _cards(sent(lesson))
+    assert [s.kind for s in specs] == ["hook", "text", "text", "text", "disclaimer"] and specs[0].title == HOOK
+    assert specs[-1].end_cta == cta
+    template = {k: v for k, v in _data_script().items()
+                if k not in ("video_features", "end_card_cta", "data_card_slot")}
+    template.update(posts={"tiktok": {}, "bluesky": {}}, video_features=["data_card", "push_in"], store_state=state)
+    back = sent(template)
+    # CARDS-B2-1: the web names the slot from the cards' own lexicon titles — the fact card, never a hedge
+    assert back["data_card_slot"] == _TPL_DATA_SLOT and back["cards"][_TPL_DATA_SLOT]["title"] == "The purchases"
+    tspecs = _cards(back)
+    assert [s.kind for s in tspecs] == _DATA_KINDS and cards.applied_data_card_slot(tspecs) == _TPL_DATA_SLOT
+    assert tspecs[-1].end_cta == cta
+    # a day whose cards hold no card the slot table names reads back WITHOUT the data card (the web drops it)
+    hedges_only = dict(template, cards=[dict(c) for c in _TPL_CARDS[:1] + _TPL_CARDS[2:]] + [dict(_TPL_CARDS[0])])
+    back = sent(hedges_only)
+    assert back["data_card_slot"] is None and "data_card" not in back["video_features"]
+    assert "data" not in [s.kind for s in _cards(back)]
+    # …and a run frozen WITHOUT features reads back as today's video, the end card still the web's
+    lesson.pop("video_features")
+    assert [s.kind for s in cards.cards_for_script(sent(lesson))] == ["text", "text", "text", "disclaimer"]
+
+
+# ── the local preview draws what the rendered stage draws (Batch 2 integration) ──────────────────────
+# marketing/preview.py called cards_for_script without the render's font and layout engine — a read-back
+# with a frozen hook or data card raised ValueError there — and never passed the push-in. It now makes the
+# rendered stage's own calls: features read through cards.video_features, the feature cards checked with
+# its font and engine, the opening derived by produce_video from the cards, push_in only when frozen.
+
+
+def _run_preview(monkeypatch, tmp_path, script):
+    """`marketing.preview.main` on `script`, with the narration (Kokoro, the AAC encode), the render and the
+    ffprobe faked: (the produce_video calls' keywords, report.json)."""
+    from marketing import preview, render, timings, voice
+
+    calls: List[Dict] = []
+    monkeypatch.setenv("MARKETING_PREVIEW_REEXEC", "1")              # never re-exec itself under pytest
+    monkeypatch.setattr(preview.shutil, "which", lambda name: f"/usr/bin/{name}")
+    seconds = 2.0 * len(timings.narrated_lines(script))
+
+    def synthesize(lines, **_k):
+        per_line = [(timings.proportional(line.split(), 0.0, 1.0), 1.0) for line in lines]
+        words = timings.as_table(timings.assemble(lines, per_line))
+        return voice.Narration(tmp_path / "narration.wav", words, seconds, 1.0, len(lines))
+
+    def produce(**kw):
+        calls.append(kw)
+        return b"mp4", kw["narration_seconds"] + voice.DISCLAIMER_CARD_SECONDS, list(range(len(kw["specs"])))
+
+    monkeypatch.setattr(voice, "synthesize_fitting", synthesize)
+    monkeypatch.setattr(voice, "encode_m4a", lambda wav, out: (b"m4a", seconds))
+    monkeypatch.setattr(render, "produce_video", produce)
+    monkeypatch.setattr(preview, "_ffprobe", lambda path: {})
+    path = tmp_path / "script.json"
+    path.write_text(json.dumps(script), encoding="utf-8")
+    assert preview.main([str(path), "--out", str(tmp_path / "out")]) == 0
+    return calls, json.loads((tmp_path / "out" / "report.json").read_text(encoding="utf-8"))
+
+
+def test_the_preview_draws_a_frozen_hook_card_and_its_push_in_like_the_rendered_stage(monkeypatch, tmp_path):
+    calls, report = _run_preview(monkeypatch, tmp_path, _hook_script())
+    (kw,) = calls
+    assert [s.kind for s in kw["specs"]] == ["hook", "text", "text", "text", "disclaimer"]
+    assert kw["specs"][0].title == HOOK and kw["push_in"] is True
+    assert "hook_card" not in kw                     # produce_video derives the opening from the cards
+    assert kw["layout_engine"] == cards.resolve_layout_engine(None)
+    assert report["video_features"] == ["hook_card", "push_in"] and report["push_in"] is True
+    assert report["card_kinds"][0] == "hook" and report["end_card_cta"] == cards.CTA
+    assert HOOK in report["onscreen_text"] and cards.CTA in report["onscreen_text"]
+
+
+def test_the_preview_draws_a_frozen_data_card_like_the_rendered_stage(monkeypatch, tmp_path):
+    calls, report = _run_preview(monkeypatch, tmp_path, _data_script())
+    (kw,) = calls
+    assert [s.kind for s in kw["specs"]] == _DATA_KINDS
+    assert kw["push_in"] is True and "hook_card" not in kw
+    assert report["template"] is True and report["card_kinds"] == _DATA_KINDS
+    assert report["data_card_slot"] == _TPL_DATA_SLOT
+    assert _TPL_FOOTER in report["onscreen_text"] and report["post_image"]["layout"] == "spotlight"
+
+
+def test_the_preview_of_a_script_without_features_makes_todays_call(monkeypatch, tmp_path):
+    calls, report = _run_preview(monkeypatch, tmp_path, _script())
+    (kw,) = calls
+    assert [s.kind for s in kw["specs"]] == ["text", "text", "text", "disclaimer"]
+    assert "push_in" not in kw and "hook_card" not in kw
+    assert report["video_features"] == [] and report["push_in"] is False
+    assert report["end_card_cta"] == cards.LEGACY_CTA and HOOK not in report["onscreen_text"]
+
+
+@pytest.mark.parametrize("features", [["hook_card"], ["data_card"]])
+def test_the_preview_never_pushes_in_unless_push_in_itself_is_frozen(monkeypatch, tmp_path, features):
+    """B2V-2: the preview's push-in follows push_in ITSELF, like the rendered stage — a day frozen with the
+    cards alone (MARKETING_VIDEO_FEATURES="hook_card,data_card") previews with a still card 0."""
+    script = _hook_script(video_features=features) if features == ["hook_card"] else _data_script(
+        video_features=features)
+    calls, report = _run_preview(monkeypatch, tmp_path, script)
+    (kw,) = calls
+    assert "push_in" not in kw and report["push_in"] is False and report["video_features"] == features
+    kinds = [s.kind for s in kw["specs"]]
+    assert kinds == (["hook", "text", "text", "text", "disclaimer"] if features == ["hook_card"] else _DATA_KINDS)
+
+
+def test_the_preview_never_falls_back_from_a_failed_push_in(monkeypatch, tmp_path):
+    """The rendered stage renders a failed push-in once more without it (render.py); the preview does NOT —
+    it is how a host's ffmpeg is checked before the switch is set, so the failure must show."""
+    from marketing import render, video
+
+    _run_preview(monkeypatch, tmp_path, _script())                       # wires the fakes
+    calls: List[Dict] = []
+
+    def produce(**kw):
+        calls.append(kw)
+        raise video.RenderFailed("run preview: No such filter: 'zoompan'")
+
+    monkeypatch.setattr(render, "produce_video", produce)
+    path = tmp_path / "push.json"
+    path.write_text(json.dumps(_hook_script()), encoding="utf-8")
+    from marketing import preview
+
+    with pytest.raises(video.RenderFailed, match="zoompan"):
+        preview.main([str(path), "--out", str(tmp_path / "out2")])
+    assert len(calls) == 1 and calls[0]["push_in"] is True

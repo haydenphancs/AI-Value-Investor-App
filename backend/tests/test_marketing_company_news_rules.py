@@ -12,7 +12,18 @@ Pinned here:
 * ledger keys and source labels, verbatim;
 * the record ↔ dict round trip after a JSONB-style key shuffle and numeric re-serialisation, the
   strictness of `record_from_dict`, the fact sheet, and NaN / ±inf refusals everywhere;
-* the reason-code sets, `SERIES_CLASS`, and the Money Map pool (owner decision 2).
+* the reason-code sets, `SERIES_CLASS`, and the Money Map pool (owner decision 2);
+* Batch 1 (2026-10-15): the members-elect window (owner decision 4: an even year's Election Day through
+  January 3 — the edges, 2022 / 2026 / 2028, odd years, a 20-year sweep) and the earnings gates
+  (`earnings_revenue_pair`, `clear_surprise` exact at 5%, `statement_currency`, `earnings_period` with
+  Delta's and Progressive's live figures, the stale-statement lag and the scale-check contingency); the
+  Money Map labels (plan item 2): the live overrides ("UNITED STATES", "Latin America (Segment)", exact
+  only), `segment_fold_reason` (1-4 capital codes off `SEGMENT_ACRONYMS_OK`, generic labels exact after
+  case and spacing, never a word inside a name) and the strict region list (`region_key`, `is_region_name`,
+  `takes_region_article`; never a region by a word inside a label), every new guard mutation-checked; and
+  names (plan item 5): the "Nautilus Biotechnolgy" override, a depositary-share NAME refused for the
+  insider purpose (AgomAb, `isAdr` False), and `takes_name_article` (only the catalogue's descriptive
+  "Louisiana data center venture" takes "the"; a lower-case brand never does).
 
 Hermetic: no network, no Supabase. The roster / registry tests point the module at temp files and
 clear its cache (the `_fresh_congress` fixture restores the real state afterwards).
@@ -23,8 +34,10 @@ import json
 import logging
 import math
 import random
+import re
 from dataclasses import fields, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -494,17 +507,82 @@ _UNVERIFIED_13F_FILERS = frozenset({"0001489933", "0001352662"})
 
 def test_every_registry_13f_filer_has_a_verified_entity_or_is_listed_unverified():
     """r9 #9 / #23 drift guard: a filer added to the registry fails here until its EDGAR filer is
-    in `THIRTEEN_F_FILERS` (an entity name, or None for a person) or on the unverified list."""
+    in `THIRTEEN_F_FILERS` (an entity name, or None for a person) or on the unverified list. Batch 1
+    (2026-10-15): a successor filer (`THIRTEEN_F_SUCCESSORS`) is the one entry that is not a registry
+    CIK — it is reached only through the registry CIK it succeeds."""
     rows = json.loads(R.WHALE_REGISTRY_PATH.read_text(encoding="utf-8"))
     ciks = {R.cik10(r["cik"]) for r in rows if r.get("data_source") == "13f" and r.get("category") == "investors"}
     assert ciks - set(R.THIRTEEN_F_FILERS) == _UNVERIFIED_13F_FILERS
-    assert set(R.THIRTEEN_F_FILERS) <= ciks
+    assert set(R.THIRTEEN_F_FILERS) <= ciks | set(R.THIRTEEN_F_SUCCESSORS.values())
+    assert set(R.THIRTEEN_F_FILERS) - ciks == {"0002026053"}
     assert {c for c, n in R.THIRTEEN_F_FILERS.items() if n is None} == {"0000921669", "0000898382"}
     for cik, name in R.THIRTEEN_F_FILERS.items():
         assert R.cik10(cik) == cik
         if name is not None:
             assert R.filer_name_problem(name) is None and not R.filer_looks_like_person(name), name
     assert R.THIRTEEN_F_FILERS["0001549575"] == "Dalal Street"          # not "Pabrai Investment Funds"
+
+
+def test_thirteen_f_successors_and_lead_filers_are_well_formed():
+    """Batch 1 (2026-10-15): Pershing Square's holdings are filed by CIK 0002026053 ("PERSHING SQUARE
+    INC.") since its old CIK 0001336528 filed only a 13F-NT for 2026-Q2; Berkshire is read first. A
+    successor is one hop from a registry filer (the registry keeps the old CIK), a verified entity, never
+    a registry CIK of its own and never the start of a chain; a lead filer is a registry filer whose (own
+    or successor) filer is a verified entity."""
+    rows = json.loads(R.WHALE_REGISTRY_PATH.read_text(encoding="utf-8"))
+    ciks = {R.cik10(r["cik"]) for r in rows if r.get("data_source") == "13f" and r.get("category") == "investors"}
+    assert dict(R.THIRTEEN_F_SUCCESSORS) == {"0001336528": "0002026053"}
+    assert R.THIRTEEN_F_FILERS["0002026053"] == "Pershing Square"
+    for old, new in R.THIRTEEN_F_SUCCESSORS.items():
+        assert R.cik10(old) == old and R.cik10(new) == new and old != new
+        assert old in ciks, "a successor replaces a registry filer"
+        assert new not in ciks, "the registry now lists the successor itself — retire the successor entry"
+        assert R.THIRTEEN_F_FILERS.get(new), "a successor must be a verified entity in THIRTEEN_F_FILERS"
+        assert new not in R.THIRTEEN_F_SUCCESSORS, "one hop, never a chain"
+    assert R.THIRTEEN_F_LEAD_FILERS == ("0001067983",)
+    assert len(set(R.THIRTEEN_F_LEAD_FILERS)) == len(R.THIRTEEN_F_LEAD_FILERS)
+    for cik in R.THIRTEEN_F_LEAD_FILERS:
+        assert cik in ciks and R.THIRTEEN_F_FILERS.get(R.THIRTEEN_F_SUCCESSORS.get(cik, cik))
+    assert "split_unchecked" in R.REJECTION_REASONS
+
+
+def test_every_successor_has_its_first_full_book():
+    """The review of 2026-10-16 (live preview F2): `THIRTEEN_F_SUCCESSOR_SINCE` names, for every successor entry
+    and only those, the first quarter whose FULL book the successor filed — a valid "YYYY-Qn" (an entry without
+    one would refuse its filer every quarter, `successor_transition`). Pershing Square: 2026-Q2 (its 2026-Q1 book
+    held Howard Hughes alone)."""
+    assert dict(R.THIRTEEN_F_SUCCESSOR_SINCE) == {"0001336528": "2026-Q2"}
+    assert set(R.THIRTEEN_F_SUCCESSOR_SINCE) == set(R.THIRTEEN_F_SUCCESSORS)
+    for since in R.THIRTEEN_F_SUCCESSOR_SINCE.values():
+        assert R.period_label(*map(int, since.split("-Q"))) == since and R.period_end_of(since)
+    assert {"split_in_window", "successor_transition"} <= R.REJECTION_REASONS
+    assert {"successor_transition", "THIRTEEN_F_SUCCESSOR_SINCE"} <= set(R.__all__)
+
+
+@pytest.mark.parametrize("cik, period, refused", [
+    ("0001336528", "2026-Q2", True),        # the hand-over quarter: Q2 against the successor's own Q1
+    ("0001336528", "2026-Q1", True),
+    ("0001336528", "2025-Q4", True),
+    ("0001336528", "2026-Q3", False),       # Q3 against Q2: two full books
+    ("0001336528", "2027-Q1", False),
+    ("0001336528", "2026-Q5", True),        # malformed: fail closed
+    ("0001336528", None, True),
+    ("0001336528", "", True),
+    ("0001067983", "2026-Q2", False),       # no successor: its own filer, never a hand-over
+    ("0001067983", "junk", False),
+    (None, "2026-Q2", False),
+])
+def test_successor_transition(cik, period, refused):
+    assert R.successor_transition(cik, period) is refused
+
+
+@pytest.mark.parametrize("since", [None, "", "2026-Q5", "2026Q2", 2026, ["2026-Q2"]])
+def test_a_successor_without_a_readable_first_full_book_is_refused_every_quarter(monkeypatch, since):
+    monkeypatch.setitem(R.THIRTEEN_F_SUCCESSOR_SINCE, "0001336528", since)
+    for period in ("2026-Q2", "2026-Q3", "2030-Q4"):
+        assert R.successor_transition("0001336528", period) is True
+    monkeypatch.delitem(R.THIRTEEN_F_SUCCESSOR_SINCE, "0001336528")
+    assert R.successor_transition("0001336528", "2030-Q4") is True
 
 
 @pytest.mark.parametrize("name, person", [
@@ -695,6 +773,159 @@ def test_company_from_profile_accepts_a_clean_profile_and_carries_nothing_else(p
 def test_company_from_profile_reasons(profile, symbol, purpose, reason):
     assert R.company_from_profile(profile, symbol, purpose=purpose) == reason
     assert reason in R.REJECTION_REASONS
+
+
+# ── the review of 2026-10-16: no company-name word longer than the video cover can draw ──────────────
+
+_W20, _W21 = "W" * 20, "W" * 21
+
+
+@pytest.mark.parametrize("raw, ok", [
+    (f"{_W20} Inc.", True),                                  # exactly the cap: the cover proves it fits
+    (f"{_W21} Inc.", False),                                 # one character more: refused
+    (f"Acme {_W21}", False),                                 # any word, not only the first
+    ("Supercalifragilisticex Corp.", False),                 # 22 letters
+    ("Biopharmaceuticals Holdings Inc.", True),              # 18: the longest word seen live
+    ("Sherwin-Williams Company", True),                      # a hyphenated word counts whole: 16
+    ("Sherwin-Williams-Xyzabc Co", False),                   # 23 with its hyphens: one word
+    ("Taiwan Semiconductor Manufacturing Company", True),    # its override "TSMC"
+])
+@pytest.mark.parametrize("purpose", R.PROFILE_PURPOSES)
+def test_a_name_word_the_cover_cannot_draw_is_refused_at_the_profile_gate(raw, ok, purpose):
+    """A word longer than `R.COMPANY_NAME_WORD_MAX_CHARS` overflowed the video cover at render — a CardOverflow
+    that skips the whole DAY (the Form 4 and Money Map templates checked no word length). Every purpose refuses
+    it as ``company_name_unusable`` at the profile gate, so one candidate is lost instead."""
+    got = R.company_from_profile(_profile(companyName=raw), "GME", purpose=purpose)
+    if ok:
+        assert isinstance(got, R.CompanyRef) and not R.company_name_word_too_long(got.name)
+    else:
+        assert got == "company_name_unusable"
+
+
+def test_the_word_cap_is_held_by_every_record_and_never_by_the_matching_helpers():
+    """`CompanyRef` refuses such a name itself (a stored fact sheet included), while `display_company_name` and
+    `company_name_problem` — which key the 13F share-class tie and the earnings issuer dedupe — still read it:
+    a name that cannot be drawn must still MATCH its own other listing. Mutation-checked by hand (2026-10-19):
+    the `CompanyRef` clause removed turns the record rows red; the cap moved into `company_name_problem`
+    turns the matching rows red."""
+    assert R.COMPANY_NAME_WORD_MAX_CHARS == 20
+    assert R.CompanyRef("GME", f"{_W20} Co").name == f"{_W20} Co"
+    for name in (f"{_W21} Co", "Supercalifragilisticex", f"Acme {_W21}"):
+        with pytest.raises(ValueError, match="longer than 20 characters"):
+            R.CompanyRef("GME", name)
+        d = R.record_to_dict(money_map())                        # a stored fact sheet holding such a name
+        d["company"]["name"] = name
+        with pytest.raises(ValueError, match="longer than 20 characters"):
+            R.record_from_dict(json.loads(json.dumps(d)))
+    assert R.display_company_name("Supercalifragilisticex Corp.") == "Supercalifragilisticex"
+    assert R.company_name_problem("Supercalifragilisticex") is None
+    for junk in (None, 7, b"x" * 30, ["W" * 30]):
+        assert R.company_name_word_too_long(junk) is False
+    assert R.company_name_word_too_long(f"Tab\t{_W21}") is True          # any whitespace splits a word
+
+
+def test_every_display_override_fits_the_word_cap():
+    for value in R.DISPLAY_OVERRIDES.values():
+        assert not R.company_name_word_too_long(value), value
+
+
+@pytest.mark.parametrize("purpose", R.PROFILE_PURPOSES)
+def test_archer_daniels_midland_is_shown_as_adm_never_refused(purpose):
+    """The re-review of 2026-10-19 (NAME-CAP-1): "Archer-Daniels-Midland" is one 22-character word, so the word cap
+    refused ADM ($38.8B, the only such name among 3,686 NYSE / NASDAQ / AMEX companies of $250M or more) for every
+    purpose — a Form 4 or an earnings post lost. The company's own brand is shown. Mutation-checked by hand
+    (2026-10-19): with the override row removed every purpose turned red (the 22-character word is back)."""
+    assert R.display_company_name("Archer-Daniels-Midland Company") == "ADM"
+    profile = dict(symbol="ADM", companyName="Archer-Daniels-Midland Company", exchange="NYSE", isEtf=False,
+                   isFund=False, isActivelyTrading=True, isAdr=False, currency="USD", marketCap=38.8e9, price=60.0)
+    assert R.company_from_profile(profile, "ADM", purpose=purpose) == R.CompanyRef(symbol="ADM", name="ADM")
+
+
+# ── the review of 2026-10-16 (ST-1): the people a stake's source is likeliest to cite ────────────────
+
+
+@pytest.mark.parametrize("text, hits", [
+    # the review's misses, each through the lesson lexicons
+    ("Dario Amodei essay (Oct 2, 2026)", ["Amodei"]), ("Amodei essay", ["Amodei"]), ("Altman blog", ["Altman"]),
+    ("Mira Murati interview", ["Murati"]), ("Ilya Sutskever interview", ["Sutskever"]),
+    ("Ellison interview", ["Ellison"]), ("Abel letter", ["Abel"]),
+    # the forms a hand-kept title takes
+    ("BUFFETT letter", ["BUFFETT"]), ("Buffett's 2025 shareholder letter", ["Buffett"]),
+    ("Altman-led round (May 2026)", ["Altman"]), ("Fink and Dimon letters", ["Fink", "Dimon"]),
+    ("Masayoshi Son interview", ["Son"]), ("Tim Cook keynote", ["Cook"]),
+    # never inside a longer word, never a lower-case word, never a company's own document
+    ("Abelson report", []), ("Johnson & Sons annual report", []), ("Cookware maker 10-K", []),
+    ("cook book", []), ("son of a filing", []), ("Anthropic Series F announcement", []),
+    ("Alphabet 2025 Form 10-K", []), ("Microsoft 8-K (Jan 28, 2026)", []), ("Tankers ltd", []), ("", []),
+    (None, []), (7, []), (["Altman"], []),
+])
+def test_stake_person_surname_hits(text, hits):
+    assert R.stake_person_surname_hits(text) == hits
+
+
+_KNOWN = R.stake_known_words(["NVIDIA", "Meta", "Microsoft", "Eli Lilly", "Berkshire Hathaway", "Scale AI",
+                              "Mistral AI", "CoreWeave", "Nebius Group", "Tokio Marine Holdings"])
+
+
+@pytest.mark.parametrize("text, unknown", [
+    # the re-review's probes (ST-1-R): names off the surname list, a first name alone, a surname alone
+    ("Alexandr Wang memo (Jun 12, 2025)", ["Alexandr", "Wang"]), ("Wang memo", ["Wang"]),
+    ("Jensen keynote (Mar 18, 2026)", ["Jensen"]), ("Elon post on X (Mar 2, 2026)", ["Elon"]),
+    ("Mensch interview", ["Mensch"]), ("Intrator letter", ["Intrator"]), ("Volozh interview", ["Volozh"]),
+    ("Warren Buffett's 2025 shareholder letter", ["Warren", "Buffett"]), ("WANG memo", ["WANG"]),
+    # the catalogue's shapes: a known company, document words, dates, codes, single letters, lower-case words
+    ("NVIDIA 10-Q (quarter ended Jul 26, 2026)", []), ("Berkshire Hathaway 2025 shareholder letter", []),
+    ("Microsoft, NVIDIA and Anthropic release (Nov 18, 2025)", ["Anthropic"]),     # not a known name here
+    ("Mistral AI Series D announcement (Sep 8, 2026)", []), ("Lilly Schedule 13G/A (Jul 24, 2026)", []),
+    ("NICO large shareholding report to Japan's FSA (Jul 1, 2026)", []), ("CME Group 8-K Ex. 99.1", ["CME"]),
+    ("Tokio Marine Holdings release on NICO share allotment (Mar 23, 2026)", []), ("Meta 10-K (FY2025)", []),
+    ("Sony and TSMC joint release, TSMC 6-K (Aug 11, 2026)", ["TSMC", "TSMC"]),    # TSMC: not known here
+    ("Korea (KOSDAQ)", []), ("Taiwan Stock Exchange", []), ("China (Shenzhen)", []),
+    ("nvidia 10-q", []), ("", []), (None, []), (7, []), (["Wang"], []),
+], ids=lambda v: str(v)[:24])
+def test_stake_text_unknown_words(text, unknown):
+    """The re-review of 2026-10-19 (ST-1-R): a POSITIVE list for the source title and the local listing — the
+    surname list is a denylist, and every probe of the first row passed it. Mutation-checked by hand (2026-10-20):
+    with every word allowed, the probes turned red."""
+    assert R.stake_text_unknown_words(text, _KNOWN) == unknown
+
+
+def test_every_live_catalogue_source_and_local_listing_passes_the_positive_list():
+    """Over-block check against the real catalogue (`data/trillion_club_seed.json`, 132 stakes): with the club's and
+    the catalogue's company names known — what the adapter passes — every source title and local listing passes.
+    A new source shape that fails names its word in `R.STAKE_SOURCE_WORDS` (or a company of the catalogue)."""
+    seed = json.loads((Path(__file__).resolve().parents[1] / "data" / "trillion_club_seed.json")
+                      .read_text(encoding="utf-8"))
+    known = R.stake_known_words([c["display_name"] for c in seed["companies"]]
+                                + [s["investee_name"] for s in seed["stakes"]])
+    assert len(seed["stakes"]) >= 100
+    for s in seed["stakes"]:
+        for field in ("source_title", "local_listing"):
+            assert R.stake_text_unknown_words(s.get(field), known) == [], (field, s.get(field))
+    assert all(w == w.casefold() for w in R.STAKE_SOURCE_WORDS)
+    assert not {n.casefold() for n in R.STAKE_SOURCE_PERSON_SURNAMES} & R.STAKE_SOURCE_WORDS
+    # a long hostile text stays linear and bounded
+    import time
+    t0 = time.perf_counter()
+    assert R.stake_text_unknown_words("Wang " * 50_000, known) == ["Wang"] * 80          # capped at 400 characters
+    assert time.perf_counter() - t0 < 1.0
+
+
+def test_the_stake_surname_list_is_well_formed():
+    assert {"Amodei", "Altman", "Murati", "Sutskever", "Ellison", "Abel", "Huang", "Musk", "Nadella", "Pichai",
+            "Zuckerberg", "Bezos", "Jassy", "Cook", "Son", "Buffett", "Munger", "Dimon", "Fink", "Dalio",
+            "Ackman", "Icahn"} <= R.STAKE_SOURCE_PERSON_SURNAMES      # the review's list, all of it
+    for s in R.STAKE_SOURCE_PERSON_SURNAMES:
+        assert re.fullmatch(r"[A-Z][a-z]{2,}", s), s                  # Title form, ASCII letters, 3+
+        assert R.stake_person_surname_hits(f"{s} interview") == [s]
+        assert R.stake_person_surname_hits(f"{s.upper()} interview") == [s.upper()]
+        assert R.stake_person_surname_hits(f"{s}x interview") == []   # whole words only
+    # a long hostile text stays linear (one alternation of literals)
+    import time
+    t0 = time.perf_counter()
+    assert len(R.stake_person_surname_hits("Altman " * 20_000)) == 20_000
+    assert R.stake_person_surname_hits("Altmanx" * 20_000) == []
+    assert time.perf_counter() - t0 < 2.0
 
 
 def test_listing_purpose_skips_the_insider_and_earnings_gates():
@@ -1050,7 +1281,9 @@ def test_reason_sets_are_pinned():
         "earnings_calendar_truncated", "profiles_unavailable", "club_unavailable", "stakes_truncated",
         "thirteen_f_unavailable", "congress_feed_unavailable", "congress_window_uncovered",
         "congress_feed_unordered", "revenue_unavailable", "themes_unavailable", "budget_exhausted",
-        "internal_error"}
+        "internal_error",
+        # review of 2026-10-16 (ER-2): every quarterly-statement read of an earnings call failed
+        "earnings_statements_unavailable"}
     assert R.SKIP_REASONS == {
         "ceo_none_qualified", "insider_none_qualified", "earnings_none_qualified", "stakes_feature_off",
         "stakes_none_new", "stakes_none_unposted", "thirteen_f_off_season", "thirteen_f_none_qualified",
@@ -1094,7 +1327,35 @@ def test_reason_sets_are_pinned():
                                           "count_uncertain",
                                           # review round 10 (2026-10-10): one Form 4 person on two
                                           # issuers is one row of the week
-                                          "same_person"}
+                                          "same_person",
+                                          # Batch 1 (2026-10-15): earnings refuse the WHOLE report — no
+                                          # plausible revenue pair, no clear surprise, a statement that
+                                          # disagrees with the quarter or cannot place it
+                                          "revenue_implausible", "surprise_unclear", "period_mismatch",
+                                          "period_unverified",
+                                          # Batch 1 (2026-10-15): a Money Map whose next fiscal year
+                                          # has ended (its annual report is due)
+                                          "money_map_next_year_due",
+                                          # Batch 1 (2026-10-15): a 13F more / fewer shares move of a
+                                          # filing whose split lookups the cap trimmed
+                                          "split_unchecked",
+                                          # review of 2026-10-16: a failed earnings statement read; a REIT
+                                          # (or unknown-sector) issuer; an actual and estimate on two bases
+                                          "statement_unavailable", "eps_basis_reit", "eps_basis_mixed",
+                                          # review of 2026-10-16: a 13F more / fewer move beside a split,
+                                          # an unnameable adjustment or a failed lookup in its quarter the
+                                          # build did not restate; a successor's hand-over quarter
+                                          "split_in_window", "successor_transition",
+                                          # owner-delegated (2026-10-19): an EPS above $1,000,000 a share
+                                          "eps_implausible",
+                                          # the re-review of 2026-10-19 (ST-1-R): a stake source word on no list
+                                          "stake_source_unverified",
+                                          # the round-2 review of 2026-10-20 (RR2-MM-TEMPLATE-WALL): a Money Map
+                                          # loss larger than revenue, refused at the read; a record its template
+                                          # refused, reported back and remembered
+                                          "money_map_loss_above_revenue", "template_refused"}
+    # `revenue_dropped` lost its producer in Batch 1 and stays (append-only: older fact sheets carry it).
+    assert "revenue_dropped" in R.REJECTION_REASONS
     # Round 7 replaced rounds 1-6's amendment matchers with one person-level rule: their codes
     # have no producer left, so they are gone (a stored fact sheet only checks a code's shape).
     assert not {"amendment_unmatched", "amendment_partial", "amended_after_window",
@@ -1280,9 +1541,63 @@ def test_a_stored_fact_sheet_with_an_out_of_quarter_listing_is_refused_on_read()
     ("linked in corporation", "linked in corporation"), ("iPhone", "iPhone"), ("AWS", "AWS"),
     ("Server Products And Cloud Services", "Server Products And Cloud Services"),
     (None, None), (7, 7),
+    # Batch 1 (2026-10-15), live FMP labels: McDonald's capitals, PepsiCo's XBRL suffix — exact only
+    ("UNITED STATES", "United States"), (" UNITED STATES ", "United States"), ("United States", "United States"),
+    ("UNITED  STATES", "UNITED  STATES"), ("Latin America (Segment)", "Latin America"),
+    ("Latin America (segment)", "Latin America (segment)"), ("Europe (Segment)", "Europe (Segment)"),
+    # the review of 2026-10-16 (live preview F5): Walmart's labels with the feed's punctuation stripped
+    ("Walmart U S", "Walmart U.S."), (" Walmart U S ", "Walmart U.S."), ("Sams Club", "Sam's Club"),
+    ("Walmart U.S.", "Walmart U.S."), ("Sam's Club", "Sam's Club"), ("SAMS CLUB", "SAMS CLUB"),
+    ("Walmart US", "Walmart US"), ("Sams Clubs", "Sams Clubs"),
+    # a company-scoped row never applies without its company (MM-1)
+    ("High-Growth Markets", "High-Growth Markets"),
 ])
 def test_segment_display_names_are_exact_overrides(raw, shown):
     assert R.segment_display_name(raw) == shown
+
+
+@pytest.mark.parametrize("raw, symbol, shown", [
+    # the review of 2026-10-16 (MM-1, confirmed on EDGAR): McDonald's FY2025 breakdown carries its 2015-2018
+    # label for what it has reported since 2019 as International Operated Markets — for McDonald's ONLY
+    ("High-Growth Markets", "MCD", "International Operated Markets"),
+    (" High-Growth Markets ", "MCD", "International Operated Markets"),
+    ("High-Growth Markets", "mcd", "International Operated Markets"),        # the symbol is canonicalised
+    ("High-Growth Markets", " MCD ", "International Operated Markets"),
+    ("High-Growth Markets", "YUM", "High-Growth Markets"),                    # another company may use the name
+    ("High-Growth Markets", None, "High-Growth Markets"),
+    ("High Growth Markets", "MCD", "High Growth Markets"),                    # exact label only
+    ("HIGH-GROWTH MARKETS", "MCD", "HIGH-GROWTH MARKETS"),
+    # the label-only table still answers for the company's other labels
+    ("UNITED STATES", "MCD", "United States"), ("Linked In Corporation", "MSFT", "LinkedIn"),
+    # the re-review of 2026-10-19 (checked on EDGAR): PepsiCo's realigned EMEA under the pre-2025 AMESA name, and
+    # its 10-K's "International Beverages Franchise" — for PepsiCo ONLY
+    ("Africa, Middle East and South Asia", "PEP", "Europe, Middle East and Africa"),
+    ("Africa, Middle East and South Asia", "KO", "Africa, Middle East and South Asia"),
+    ("Africa, Middle East and South Asia", None, "Africa, Middle East and South Asia"),
+    ("International Beverage Franchise", "PEP", "International Beverages Franchise"),
+    ("International Beverage Franchise", "KDP", "International Beverage Franchise"),
+    ("Latin America (Segment)", "PEP", "Latin America"),                       # the label-only row still answers
+    # junk symbols never raise and never match
+    ("High-Growth Markets", "", "High-Growth Markets"), ("High-Growth Markets", 7, "High-Growth Markets"),
+    ("High-Growth Markets", "MCD-WT", "High-Growth Markets"), ("High-Growth Markets", ["MCD"], "High-Growth Markets"),
+    (None, "MCD", None), (7, "MCD", 7),
+])
+def test_company_scoped_segment_overrides(raw, symbol, shown):
+    assert R.segment_display_name(raw, symbol=symbol) == shown
+
+
+def test_every_company_scoped_override_is_a_valid_unfolded_name_and_never_label_only():
+    """Each row is keyed by a canonical symbol and the label exactly as the feed spells it (stripped), shows a
+    drawable `Segment` name that is never folded right back — and its label is NEVER also a label-only row,
+    which would rename another company's real segment of that name."""
+    assert ("MCD", "High-Growth Markets") in R.SEGMENT_SYMBOL_OVERRIDES
+    assert ("PEP", "Africa, Middle East and South Asia") in R.SEGMENT_SYMBOL_OVERRIDES
+    for (sym, raw), shown in R.SEGMENT_SYMBOL_OVERRIDES.items():
+        assert R.canonical_symbol(sym) == sym and raw == raw.strip() and raw != shown
+        assert R.Segment(shown, 1.0).name == shown
+        assert R.segment_fold_reason(shown) is None, shown
+        assert raw not in R.SEGMENT_DISPLAY_OVERRIDES, raw
+    assert not R.is_region_name(R.SEGMENT_SYMBOL_OVERRIDES[("MCD", "High-Growth Markets")])  # markets it runs
 
 
 def test_every_segment_override_is_a_valid_segment_name():
@@ -1290,6 +1605,108 @@ def test_every_segment_override_is_a_valid_segment_name():
     for raw, shown in R.SEGMENT_DISPLAY_OVERRIDES.items():
         assert raw != shown and raw == raw.strip()
         assert R.Segment(shown, 1.0).name == shown
+        assert R.segment_fold_reason(shown) is None, shown     # Batch 1: never folded right back
+
+
+# ── Batch 1 (2026-10-15, plan item 2): labels that name nothing; the regions ──
+
+
+@pytest.mark.parametrize("name, reason", [
+    # company codes: the WHOLE label 1-4 capitals (Qualcomm's QCT / QTL / QSI, PepsiCo's PBNA / PFNA / IBF)
+    ("QCT", "code"), ("QTL", "code"), ("NXE", "code"), ("CMBU", "code"), ("PBNA", "code"), ("IBF", "code"),
+    (" QCT ", "code"), ("IT", "code"), ("A", "code"),
+    # the allow-list: the company's own public name for the line, and the region names written in capitals
+    ("AWS", None), ("EMEA", None), ("APAC", None),
+    # the review of 2026-10-16 (MM-2): a country or union a reader knows is a region, never a company code
+    ("US", None), ("USA", None), ("UK", None), ("EU", None), ("UAE", None), (" US ", None), ("Us", None),
+    ("USX", "code"), ("UKX", "code"), ("EUR", "code"),
+    # not the code shape: mixed case, digits, punctuation, 5+ capitals ("UNITED STATES" has its override)
+    ("Xbox", None), ("iPad", None), ("IoT", None), ("5G", None), ("U.S.", None), ("R&D", None), ("QCTX", "code"),
+    ("QCTXY", None), ("AWS Cloud", None), ("aws", None), ("XBOX", "code"),
+    # generic labels, exact after case and spacing
+    ("Product", "generic"), ("Products", "generic"), ("PRODUCTS", "generic"), (" products ", "generic"),
+    ("Segment", "generic"), ("segments", "generic"), ("Revenue", "generic"), ("Revenues", "generic"),
+    ("Sales", "generic"), ("Net sales", "generic"), ("NET  SALES", "generic"), ("Total", "generic"),
+    ("TOTAL", "generic"),
+    # a word INSIDE a real name is no generic label
+    ("Product Revenue", None), ("Server Products And Cloud Services", None), ("Total Gas & Power", None),
+    ("Services", None), ("Net Sales Growth", None),
+    # not a string: the caller's own gates refuse it
+    (None, None), (7, None), (b"QCT", None),
+])
+def test_segment_fold_reason(name, reason):
+    assert R.segment_fold_reason(name) == reason
+
+
+def test_the_acronym_allow_list_holds_only_live_code_shapes():
+    """An allow-list entry that does not match the code shape could never be folded, so it would be dead."""
+    for code in R.SEGMENT_ACRONYMS_OK:
+        assert R._SEGMENT_CODE_RE.fullmatch(code), code
+        assert R.segment_fold_reason(code) is None
+    assert "AWS" in R.SEGMENT_ACRONYMS_OK            # Amazon's own name for the line (the plan's must)
+    for label in R.GENERIC_SEGMENT_LABELS:
+        assert label == " ".join(label.casefold().split()), label      # stored in the compared form
+
+
+@pytest.mark.parametrize("name, key", [
+    ("United States", "united states"), ("UNITED STATES", "united states"), ("  United   States ", "united states"),
+    ("Asia-Pacific", "asia pacific"), ("Asia–Pacific", "asia pacific"), ("Europe, Middle East & Africa",
+                                                                         "europe middle east and africa"),
+    ("Rest of World", "rest of world"), ("Rest of the World", "rest of the world"), ("U.S.", "u s"),
+    ("Ｊａｐａｎ", "japan"), (None, ""), (7, ""),
+])
+def test_region_key(name, key):
+    assert R.region_key(name) == key
+
+
+@pytest.mark.parametrize("name, region, article", [
+    ("United States", True, True), ("UNITED STATES", True, True), ("Canada", True, False),
+    ("Americas", True, True), ("North America", True, False), ("Latin America", True, False),
+    ("Europe, Middle East and Africa", True, False), ("EMEA", True, False), ("Asia Pacific", True, False),
+    ("Asia-Pacific", True, False), ("Greater China", True, False), ("Japan", True, False),
+    ("International", True, False), ("Other International", True, False),
+    ("United Kingdom", True, True), ("Middle East and Africa", True, True),
+    # the review of 2026-10-16: the acronyms are regions (MM-2), and every name that needs "the" in a sentence
+    # takes it (MM-3: "U.S. made up 50% of revenue" was narrated and burned into the captions)
+    ("U.S.", True, True), ("US", True, True), ("USA", True, True), ("U.S.A.", True, True), ("UK", True, True),
+    ("U.K.", True, True), ("EU", True, True), ("UAE", True, True), ("United States and Canada", True, True),
+    ("U.S. and Canada", True, True), ("US & Canada", True, True), ("Rest of the World", True, True),
+    ("Rest of World", True, True), ("Rest of Asia Pacific", True, True),
+    # never a region by a word inside it (McDonald's markets it runs; PepsiCo's retired AMESA label — shown for
+    # PepsiCo as its realigned "Europe, Middle East and Africa" since the re-review of 2026-10-19)
+    ("High-Growth Markets", False, False), ("Frito-Lay North America", False, False),
+    ("International Operated Markets", False, False), ("Africa, Middle East and South Asia", False, False),
+    ("The Americas", False, False), ("U.S. Retail", False, False), ("Walmart U.S.", False, False),
+    ("USA Today", False, False), ("Domestic", False, False),
+    ("Other", False, False), ("", False, False), (None, False, False), (["United States"], False, False),
+])
+def test_region_names_are_exact(name, region, article):
+    assert R.is_region_name(name) is region
+    assert R.takes_region_article(name) is article
+
+
+def test_region_sets_are_consistent():
+    assert R.REGION_ARTICLE <= R.REGION_NAMES
+    acronyms = {"emea", "apac", "us", "usa", "uk", "eu", "uae"}       # the region names written as acronyms
+    assert acronyms <= R.REGION_NAMES
+    for key in R.REGION_NAMES:
+        assert R.region_key(key) == key, key                          # stored in the compared form
+        # a region name the fold removes would be dead — in capitals too ("ASIA" is code-shaped)
+        for form in (key.upper(), key.title()):
+            assert R.segment_fold_reason(form) is None, form
+    assert {k.upper() for k in acronyms} <= R.SEGMENT_ACRONYMS_OK
+    for key in R.REGION_ARTICLE:
+        assert R.Segment(key.title(), 1.0)                            # drawable as a segment name
+
+
+def test_a_region_is_never_folded_even_off_the_allow_list(monkeypatch):
+    """The review of 2026-10-16 (MM-2): `segment_fold_reason` reads the region list itself, so a region acronym
+    can never fold into the rest even if the allow-list loses it. Mutation-checked by hand (2026-10-19): with the
+    `is_region_name` clause removed, "US" folds as a code here."""
+    monkeypatch.setattr(R, "SEGMENT_ACRONYMS_OK", frozenset({"AWS"}))
+    for label in ("US", "USA", "UK", "EU", "UAE", "EMEA", "APAC"):
+        assert R.segment_fold_reason(label) is None, label
+    assert R.segment_fold_reason("QCT") == "code"
 
 
 # ── review round 8: an exit's previous-quarter value; a leading "The" ─────────
@@ -1383,11 +1800,50 @@ def test_the_common_purpose_and_the_non_common_name(profile, purpose, reason):
 def test_the_common_purpose_has_no_cap_floor_and_listing_keeps_adrs():
     assert R.company_from_profile(_profile(marketCap=None), "GME", purpose="common") == R.CompanyRef("GME", "GameStop")
     assert R.company_from_profile(_profile(marketCap=1.0), "GME", purpose="common") == R.CompanyRef("GME", "GameStop")
-    # A non-common NAME is refused only for earnings / common: the 2a purposes are unchanged.
-    for purpose in ("listing", "insider"):
+    # A non-common NAME is kept only for "listing" (a 13F holding, a Money Map, a stake's investor, a theme
+    # member — an ADR included); Batch 1 (2026-10-15) refuses it for "insider" too, with earnings / common.
+    assert R.company_from_profile(_profile(companyName="GameStop Units"), "GME", purpose="listing") == \
+        R.CompanyRef("GME", "GameStop Units")
+    for purpose in ("insider", "earnings", "common"):
         assert R.company_from_profile(_profile(companyName="GameStop Units"), "GME", purpose=purpose) == \
-            R.CompanyRef("GME", "GameStop Units")
+            "non_common_listing", purpose
     assert R.PROFILE_PURPOSES == ("insider", "earnings", "listing", "common")
+
+
+#: AgomAb Therapeutics as FMP's profile gave it (the insider_buys preview of 2026-10-12): a depositary-share
+#: line by its NAME while `isAdr` is False — the post would have said "disclosed buying … of the company's
+#: stock" about American Depositary Shares.
+_AGOMAB = dict(symbol="AGMB", exchange="NASDAQ", isAdr=False, marketCap=6.2e8,
+               companyName="AgomAb Therapeutics N.V. American Depositary Shares")
+
+
+def test_an_insider_issuer_whose_line_is_a_depositary_share_is_refused():
+    """Batch 1 (2026-10-15, plan item 5): the "insider" purpose refuses a non-common NAME like earnings and
+    common do — the only gate for a depositary line FMP does not flag `isAdr`. The listing purpose (a 13F
+    holding, a Money Map) still names it, its class tail stripped. Mutation-checked by hand (2026-10-15):
+    with "insider" out of the purpose tuple again, the first assertion turned red."""
+    assert R.company_from_profile(_profile(**_AGOMAB), "AGMB", purpose="insider") == "non_common_listing"
+    assert R.company_from_profile(_profile(**_AGOMAB), "AGMB", purpose="listing") == \
+        R.CompanyRef("AGMB", "AgomAb Therapeutics")
+    # the order of the gates is unchanged: an ADR flag, a currency and the cap floor are read first
+    assert R.company_from_profile(_profile(**dict(_AGOMAB, isAdr=True)), "AGMB", purpose="insider") == "adr"
+    assert R.company_from_profile(_profile(**dict(_AGOMAB, marketCap=1.0)), "AGMB", purpose="insider") == \
+        "below_cap_floor"
+    # an ordinary common-stock issuer still passes, and the reason is a counted rejection
+    assert R.company_from_profile(_profile(), "GME", purpose="insider") == R.CompanyRef("GME", "GameStop")
+    assert "non_common_listing" in R.REJECTION_REASONS
+
+
+def test_a_vendor_typo_in_a_company_name_is_shown_as_the_company_spells_itself():
+    """FMP's NAUT profile reads "Nautilus Biotechnolgy, Inc." (the SEC's own name is spelled right): a
+    `DISPLAY_OVERRIDES` row shows it as "Nautilus Biotechnology" everywhere a profile names it."""
+    assert R.display_company_name("Nautilus Biotechnolgy, Inc.") == "Nautilus Biotechnology"
+    assert R.display_company_name("NAUTILUS BIOTECHNOLGY INC") == "Nautilus Biotechnology"
+    assert R.display_company_name("Nautilus Biotechnology, Inc.") == "Nautilus Biotechnology"   # already right
+    naut = _profile(symbol="NAUT", exchange="NASDAQ", companyName="Nautilus Biotechnolgy, Inc.", marketCap=3.0e8)
+    for purpose in ("insider", "listing", "common"):          # (earnings' $2B floor is above NAUT's cap)
+        assert R.company_from_profile(naut, "NAUT", purpose=purpose) == \
+            R.CompanyRef("NAUT", "Nautilus Biotechnology"), purpose
 
 
 @pytest.mark.parametrize("name, hit", [
@@ -1441,6 +1897,10 @@ def test_the_2b_constants_are_pinned():
     assert (R.THEME_MIN_FACTS, R.THEME_STALE_DAYS, R.THEME_MEMBERS) == (4, 70, (6, 24))
     assert R.COMPANY_WEEKLY_LAUNCH == date(2026, 11, 16)
     assert R.REVENUE_RATIO_BAND == (0.5, 1.5) and R.EPS_MIN_ABS_ESTIMATE == 0.10
+    # Batch 1 (2026-10-15): the earnings gates; the scale check is a contingency, OFF.
+    assert (R.EARNINGS_CLEAR_SURPRISE, R.EARNINGS_PERIOD_WINDOW_DAYS, R.EARNINGS_PERIOD_MAX_LAG_DAYS,
+            R.EARNINGS_PERIOD_REVENUE_TOLERANCE) == (0.05, 120, 90, 0.03)
+    assert R.EARNINGS_ALLOW_SCALE_CHECK is False and R.EARNINGS_SCALE_BAND == (0.75, 1.33)
 
 
 # ── the shared contract (2026-10-10): `ThemeExplainer.theme_size` ─────────────
@@ -1511,3 +1971,510 @@ def _p(sym, name, cik):
 ])
 def test_theme_company_count_counts_issuers_not_tickers(tickers, profiles, n):
     assert R.theme_company_count(tickers, profiles) == n
+
+
+# ── Batch 1 (2026-10-15): the members-elect window (owner decision 4) ─────────
+
+@pytest.mark.parametrize("day, inside", [
+    (date(2026, 11, 2), False), (date(2026, 11, 3), True),        # Election Day 2026: Tue Nov 3
+    (date(2026, 12, 31), True), (date(2027, 1, 1), True),
+    (date(2027, 1, 3), True), (date(2027, 1, 4), False),          # the new Congress is sworn in on Jan 3
+    (date(2022, 11, 7), False), (date(2022, 11, 8), True),        # Nov 1, 2022 was a Tuesday
+    (date(2028, 11, 6), False), (date(2028, 11, 7), True),        # Nov 1, 2028 is a Wednesday
+    (date(2027, 11, 2), False), (date(2027, 12, 31), False),      # an odd year: no federal general election
+    (date(2028, 1, 2), False),                                    # Jan 1-3 after an odd year
+    (date(2026, 10, 15), False), (date(2026, 6, 30), False),
+])
+def test_the_members_elect_window(day, inside):
+    assert R.members_elect_window(day) is inside
+
+
+def test_election_day_is_the_tuesday_after_the_first_monday_of_november_for_twenty_years():
+    known = {2020: date(2020, 11, 3), 2022: date(2022, 11, 8), 2024: date(2024, 11, 5), 2026: date(2026, 11, 3),
+             2028: date(2028, 11, 7), 2030: date(2030, 11, 5), 2032: date(2032, 11, 2)}
+    for year in range(2020, 2040):
+        e = R.general_election_day(year)
+        assert e.weekday() == 1 and date(year, 11, 2) <= e <= date(year, 11, 8), (year, e)
+        first_monday = e - timedelta(days=1)
+        assert first_monday.weekday() == 0 and first_monday.day <= 7
+        if year in known:
+            assert e == known[year]
+        # the window opens ON Election Day of an even year, never the day before, never in an odd year
+        assert R.members_elect_window(e) is (year % 2 == 0)
+        assert R.members_elect_window(e - timedelta(days=1)) is False
+        assert R.members_elect_window(date(year + 1, 1, 3)) is (year % 2 == 0)
+        assert R.members_elect_window(date(year + 1, 1, 4)) is False
+
+
+@pytest.mark.parametrize("bad", [datetime(2026, 11, 16, 12, 0), "2026-11-16", None, 20261116])
+def test_the_window_reads_a_date_never_a_datetime_or_text(bad):
+    with pytest.raises(ValueError):
+        R.members_elect_window(bad)
+
+
+@pytest.mark.parametrize("bad", [True, 2026.0, "2026", None])
+def test_election_day_needs_an_int_year(bad):
+    with pytest.raises(ValueError):
+        R.general_election_day(bad)
+
+
+@pytest.mark.parametrize("run_date, role_only", [
+    # review of 2026-10-16 (ME-1): a run's posts can go out on the run day, the next ET day, and (an Upload-Post
+    # resend of an unacknowledged job, ≤ 20 h after the first send) the day after — so the window is judged over
+    # the run date and the two days after it. Election Day 2026 is Tue Nov 3.
+    (date(2026, 10, 31), False),                 # its posts go out Oct 31 .. Nov 2: before the window
+    (date(2026, 11, 1), True), (date(2026, 11, 2), True),       # a post of theirs can go out on Election Day
+    (date(2026, 11, 3), True), (date(2026, 12, 31), True),
+    (date(2027, 1, 3), True),                    # the last day of the window itself
+    (date(2027, 1, 4), False),                   # the new Congress is sworn in (Jan 3): its posts are after
+    (date(2028, 11, 4), False), (date(2028, 11, 5), True),      # Election Day 2028 is Tue Nov 7
+    (date(2027, 10, 31), False), (date(2027, 11, 1), False),    # an odd year: no federal general election
+    (date(2027, 12, 30), False),                 # Jan 1 2028 follows an ODD year: no window
+    (date(2026, 12, 30), True), (date(2027, 1, 2), True),
+])
+def test_the_members_elect_check_covers_every_day_a_runs_posts_can_go_out(run_date, role_only):
+    """Mutation-checked by hand (2026-10-16): judging the run date alone (`members_elect_window(run_date)`)
+    turned the Nov 1 / Nov 2 and 2028-11-05 rows red."""
+    assert R.MEMBERS_ELECT_PUBLISH_DAYS == 2
+    assert R.members_elect_for_run(run_date) is role_only
+    span = [run_date + timedelta(days=i) for i in range(R.MEMBERS_ELECT_PUBLISH_DAYS + 1)]
+    assert role_only is any(R.members_elect_window(d) for d in span)        # the two ends decide every day
+
+
+def test_the_run_check_reads_the_window_at_call_time(monkeypatch):
+    """The helper calls `members_elect_window` through the module at call time: the suites that switch the
+    window off (or on) switch the run check with it — one switch, no second path that could disagree."""
+    monkeypatch.setattr(R, "members_elect_window", lambda day: False)
+    assert R.members_elect_for_run(date(2026, 11, 2)) is False
+    monkeypatch.setattr(R, "members_elect_window", lambda day: True)
+    assert R.members_elect_for_run(date(2026, 6, 30)) is True
+
+
+@pytest.mark.parametrize("bad", [datetime(2026, 11, 2, 12, 0), "2026-11-02", None, 20261102])
+def test_the_run_check_reads_a_date_never_a_datetime_or_text(bad):
+    with pytest.raises(ValueError):
+        R.members_elect_for_run(bad)
+
+
+# ── Batch 1 (2026-10-15): the earnings gates ──────────────────────────────────
+
+@pytest.mark.parametrize("pairs, out", [
+    ([(1.1e9, 1.0e9)], (1.1e9, 1.0e9)),
+    ([(1.1e9, 1.0e9), (1.1e9, 1.0e9)], (1.1e9, 1.0e9)),               # every row agrees
+    ([(1.5e9, 1.0e9)], (1.5e9, 1.0e9)), ([(0.5e9, 1.0e9)], (0.5e9, 1.0e9)),   # the band, inclusive
+    ([(1.51e9, 1.0e9)], None), ([(0.49e9, 1.0e9)], None),
+    ([(7.16e9, 22.6e9)], None),                                        # Progressive's one-month row
+    ([(673e6, 24e6)], None),                                           # Nurix's one-off revenue
+    ([(1.1e9, 1.0e9), (1.2e9, 1.0e9)], None),                          # rows that disagree
+    ([(1.1e9, 1.0e9), (None, None)], None),                            # a row without revenue beside one with it
+    ([(None, None)], None), ([(1.1e9, None)], None), ([(None, 1.0e9)], None),
+    ([(0.0, 1.0e9)], None), ([(1.0e9, 0.0)], None), ([(-1.0e9, 1.0e9)], None), ([(1.0e9, -1.0e9)], None),
+    ([(NAN, 1.0e9)], None), ([(1.0e9, INF)], None), ([(True, 1.0e9)], None), ([("1e9", 1.0e9)], None),
+    ([(10 ** 400, 1.0e9)], None),
+    ([], None), (None, None), ("x", None), ([[1.1e9, 1.0e9]], None), ([(1.1e9,)], None),
+])
+def test_earnings_revenue_pair(pairs, out):
+    assert R.earnings_revenue_pair(pairs) == out
+
+
+@pytest.mark.parametrize("actual, estimate, clear", [
+    (1.05, 1.00, True), (1.0499, 1.00, False), (0.95, 1.00, True), (0.9501, 1.00, False),
+    (0.21, 0.20, True), (0.2099, 0.20, False),          # exact on the figures: the float quotient is 0.0499…
+    (-0.95, -1.00, True), (-0.951, -1.00, False), (4.73, -0.60, True), (1.00, 1.00, False),
+    (1.72, 1.77, False),                                 # Delta's live pair (2.8%)
+    (1.08, 4.35, True),
+    (1.0, 0.0, False), (NAN, 1.0, False), (1.0, INF, False), (True, 1.0, False), ("1.1", 1.0, False),
+    (None, 1.0, False), (10 ** 400, 1.0, False),
+    # review of 2026-10-16 (ER-1): clear as written but NOT as printed (two places, half-up — what the post
+    # shows): "$0.10 vs $0.10", "$0.14 vs $0.14", "-$0.10 vs -$0.10" and "$0.30 vs $0.29" (3.4%)
+    (0.095, 0.10, False), (0.1449, 0.1376, False), (-0.095, -0.10, False), (0.3049, 0.2895, False),
+    # ... and clear as printed but not as written: 4.99% stays refused ("$1.05 vs $1.00" on the post)
+    (1.0499, 1.00, False), (0.2099, 0.20, False),
+    # clear both ways, at the printed edge: "$0.21 vs $0.20" (5.0%), "$0.105" prints "$0.11" vs "$0.10"
+    (0.105, 0.10, True), (-0.105, -0.10, True), (0.315, 0.30, True),
+    # an estimate that prints "$0.00" is never a base (the record gates refuse it first)
+    (0.004, 0.001, False),
+])
+def test_clear_surprise(actual, estimate, clear):
+    assert R.clear_surprise(actual, estimate) is clear
+
+
+def test_the_printed_eps_is_the_templates_eps_image():
+    """`R.printed_eps` (the clear-surprise gate's printed figure) is exactly the figure `news_templates.eps_image`
+    writes — half-up on the magnitude, the sign put back — over a sweep of edges and random figures. A drift
+    would judge one figure and print another."""
+    import random
+
+    from app.services.marketing import news_templates as T
+
+    rng = random.Random(20261016)
+    values = [0.095, -0.095, 0.105, -0.105, 0.005, -0.005, 0.0049, 1.005, 2.675, -2.675, 0.1449, 0.1376, 4.35,
+              1234.565, 0.0, 12.0, 0.2895, 0.3049]
+    values += [round(rng.uniform(-50, 50), rng.choice((2, 3, 4))) for _ in range(2000)]
+    for v in values:
+        p = R.printed_eps(v)
+        shown = T.eps_image(v)
+        assert shown == (f"-${abs(p):,.2f}" if p < 0 else f"${abs(p):,.2f}"), (v, p, shown)
+    assert R.EPS_PRINT_PLACES == 2
+
+
+@pytest.mark.parametrize("actual, estimate, clear", [
+    (1e26, 9e25, True), (1e26, 9.9e25, False), (1e300, 1e299, True), (-1e300, -1e299, True),
+    (1.7976931348623157e308, 1e308, True), (1e308, 1.7976931348623157e308, True), (10 ** 30, 9 * 10 ** 29, True),
+    (5e-324, 0.1, True), (0.1, 5e-324, False),
+])
+def test_the_eps_gates_are_exact_and_never_raise_on_an_extreme_figure(actual, estimate, clear):
+    """Hardening of the ER-1 printed-figure gate (review of 2026-10-16): `printed_eps` quantized in the default
+    28-digit Decimal context, which cannot hold a figure of 1e26 or more — `clear_surprise` raised
+    `decimal.InvalidOperation`, and the adapter turns any exception into ``internal_error`` for the whole earnings
+    series. Both now compute in `R.EPS_DECIMAL_PRECISION` digits: exact for every finite float, never raising, and
+    leaving the caller's Decimal context as it found it. Mutation-checked by hand (2026-10-16): with ``ctx.prec =
+    28`` every row from 1e26 up raised (red)."""
+    import decimal
+
+    before = decimal.getcontext().prec
+    assert R.clear_surprise(actual, estimate) is clear
+    for v in (actual, estimate):
+        p = R.printed_eps(v)
+        assert p.as_tuple().exponent == -R.EPS_PRINT_PLACES
+        assert abs(p - decimal.Decimal(repr(float(v)))) <= decimal.Decimal("0.005"), v
+    assert decimal.getcontext().prec == before
+    assert R.EPS_DECIMAL_PRECISION >= len(str(int(1.7976931348623157e308))) + R.EPS_PRINT_PLACES + 2
+
+
+@pytest.mark.parametrize("rows, code", [
+    ([{"date": "2026-12-31", "reportedCurrency": "USD"}], "USD"),
+    ([{"date": "2026-12-31", "reportedCurrency": " usd "}], "USD"),
+    ([{"date": "2026-09-30", "reportedCurrency": "USD"}, {"date": "2026-12-31", "reportedCurrency": "EUR"}], "EUR"),
+    ([{"date": "2026-12-31", "reportedCurrency": "USD"}, {"date": "2026-12-31", "reportedCurrency": "USD"}], "USD"),
+    ([{"date": "2026-12-31", "reportedCurrency": "USD"}, {"date": "2026-12-31", "reportedCurrency": "CAD"}], None),
+    ([{"date": "2026-12-31"}], None), ([{"date": "2026-12-31", "reportedCurrency": ""}], None),
+    ([{"date": "2026-12-31", "reportedCurrency": 840}], None),
+    ([{"reportedCurrency": "USD"}], None),                               # no period end to rank it by
+    ([{"date": "zzzz-99-99", "reportedCurrency": "EUR"}, {"date": "2026-12-31", "reportedCurrency": "USD"}], "USD"),
+    ([], None), (None, None), ({"x": 1}, None), ([7, "x"], None),
+])
+def test_statement_currency_is_the_newest_readable_periods(rows, code):
+    assert R.statement_currency(rows) == code
+
+
+_REPORT = date(2026, 10, 9)
+
+
+def _q(*quarters):
+    return [{"date": d, "revenue": rev, "reportedCurrency": "USD"} for d, rev in quarters]
+
+
+#: The quarter before Delta's Sep 30 quarter (92 days earlier): every case below that is not about the
+#: quarter's SHAPE carries it, so the newest row is a quarter (review of 2026-10-16, ER-4).
+_JUN = ("2026-06-30", 16_650_000_000)
+
+
+@pytest.mark.parametrize("rows, actual, out", [
+    # Delta (live, 2026-10-15): the statement's $20.186B vs the calendar's $20.2B → the quarter ended Sep 30
+    (_q(("2026-09-30", 20_186_000_000), _JUN), 20.2e9, (date(2026, 9, 30), None)),
+    # the order of the rows does not matter
+    (_q(_JUN, ("2026-09-30", 20_186_000_000)), 20.2e9, (date(2026, 9, 30), None)),
+    # within 3%, both ways, inclusive; past it, a mismatch
+    (_q(("2026-09-30", 20_806_000_000), _JUN), 20.2e9, (date(2026, 9, 30), None)),
+    (_q(("2026-09-30", 19_594_000_000), _JUN), 20.2e9, (date(2026, 9, 30), None)),
+    (_q(("2026-09-30", 20_807_000_000), _JUN), 20.2e9, (None, "period_mismatch")),
+    # Progressive's one-month row against its quarter's statement
+    (_q(("2026-09-30", 23_180_000_000), _JUN), 7.16e9, (None, "period_mismatch")),
+    # the newest row decides — an older matching row in the window is not the reported quarter
+    (_q(("2026-09-30", 30_000_000_000), ("2026-06-30", 20_200_000_000)), 20.2e9, (None, "period_mismatch")),
+    # the reported quarter is missing: the newest row ended 101 days before the report (the quarter before)
+    (_q(("2026-06-30", 20_200_000_000), ("2026-03-31", 19_000_000_000)), 20.2e9, (None, "period_unverified")),
+    # exactly 90 days before is still the reported quarter (its own span is 91 days); 91 is not
+    (_q(("2026-07-11", 20_200_000_000), ("2026-04-11", 19_000_000_000)), 20.2e9, (date(2026, 7, 11), None)),
+    (_q(("2026-07-10", 20_200_000_000), ("2026-04-10", 19_000_000_000)), 20.2e9, (None, "period_unverified")),
+    # nothing in [report - 120, report); a period ending on (or after) the report day
+    (_q(("2026-06-10", 20_200_000_000), ("2026-03-10", 19_000_000_000)), 20.2e9, (None, "period_unverified")),
+    (_q(("2026-10-09", 20_200_000_000), ("2026-09-30", 20_186_000_000)), 20.2e9, (None, "period_unverified")),
+    (_q(("2026-12-31", 20_200_000_000), ("2026-09-30", 20_186_000_000)), 20.2e9, (None, "period_unverified")),
+    # rows on the newest period must all agree
+    (_q(("2026-09-30", 20_186_000_000), ("2026-09-30", 20_190_000_000), _JUN), 20.2e9, (date(2026, 9, 30), None)),
+    (_q(("2026-09-30", 20_186_000_000), ("2026-09-30", 25_000_000_000), _JUN), 20.2e9, (None, "period_mismatch")),
+    # unreadable figures and rows
+    (_q(("2026-09-30", None), _JUN), 20.2e9, (None, "period_unverified")),
+    (_q(("2026-09-30", "20186000000"), _JUN), 20.2e9, (None, "period_unverified")),
+    (_q(("2026-09-30", 0), _JUN), 20.2e9, (None, "period_unverified")),
+    (_q(("2026-09-30", -5), _JUN), 20.2e9, (None, "period_unverified")),
+    (_q(("2026-09-30", True), _JUN), 20.2e9, (None, "period_unverified")),
+    (_q(("2026-09-30", NAN), _JUN), 20.2e9, (None, "period_unverified")),
+    (_q(("2026-09-30", 10 ** 400), _JUN), 20.2e9, (None, "period_unverified")),
+    (_q(("2026-09-3", 20_186_000_000), _JUN), 20.2e9, (None, "period_unverified")),     # only Jun 30 dated: stale
+    (_q((datetime(2026, 9, 30, 0, 0), 20_186_000_000), _JUN), 20.2e9, (None, "period_unverified")),
+    (_q((date(2026, 9, 30), 20_186_000_000), (date(2026, 6, 30), 16_650_000_000)), 20.2e9, (date(2026, 9, 30), None)),
+    ([], 20.2e9, (None, "period_unverified")), (None, 20.2e9, (None, "period_unverified")),
+    ([7, None, "x", {"date": None}], 20.2e9, (None, "period_unverified")),
+    # a calendar revenue that is no figure
+    (_q(("2026-09-30", 20_186_000_000), _JUN), None, (None, "period_unverified")),
+    (_q(("2026-09-30", 20_186_000_000), _JUN), 0.0, (None, "period_unverified")),
+    (_q(("2026-09-30", 20_186_000_000), _JUN), NAN, (None, "period_unverified")),
+])
+def test_earnings_period(rows, actual, out):
+    assert R.earnings_period(rows, report_date=_REPORT, revenue_actual=actual) == out
+
+
+@pytest.mark.parametrize("rows, report, actual, out", [
+    # ER-4 (a): a semiannual reporter whose FMP "quarters" are HALF-YEARS: the calendar's H1 revenue matches the
+    # H1 row within 3%, and the post would say "the quarter that ended June 30" about six months of figures
+    (_q(("2026-06-30", 25.0e9), ("2025-12-31", 26.1e9)), date(2026, 8, 18), 25.2e9, (None, "period_unverified")),
+    (_q(("2026-06-30", 25.0e9), ("2025-12-31", 26.1e9), ("2025-06-30", 24.0e9)), date(2026, 8, 18), 25.2e9,
+     (None, "period_unverified")),
+    # ER-4 (b): a 12-week quarter ending Jun 13, reported Sep 10 — 89 days on, inside the 90-day lag, but its
+    # NEXT 12-week quarter (ending Sep 5) had ended by then: the row may be the quarter before the reported one
+    (_q(("2026-06-13", 10.0e9), ("2026-03-21", 9.9e9)), date(2026, 9, 10), 10.1e9, (None, "period_unverified")),
+    # ... the same company reporting that quarter promptly is placed
+    (_q(("2026-06-13", 10.0e9), ("2026-03-21", 9.9e9)), date(2026, 6, 25), 10.1e9, (date(2026, 6, 13), None)),
+    # a report exactly one span after its row (lag == span) is refused; one day less is kept
+    (_q(("2026-07-11", 20.2e9), ("2026-04-12", 19.0e9)), date(2026, 10, 9), 20.2e9, (None, "period_unverified")),
+    (_q(("2026-07-11", 20.2e9), ("2026-04-11", 19.0e9)), date(2026, 10, 9), 20.2e9, (date(2026, 7, 11), None)),
+    # a single row: no older period, so nothing shows it is a quarter
+    (_q(("2026-09-30", 20_186_000_000)), date(2026, 10, 9), 20.2e9, (None, "period_unverified")),
+    # two rows on ONE date and nothing older: still a single period
+    (_q(("2026-09-30", 20_186_000_000), ("2026-09-30", 20_190_000_000)), date(2026, 10, 9), 20.2e9,
+     (None, "period_unverified")),
+    # the span's edges, inclusive: 77 and 119 days are quarters; 76 and 120 are not
+    (_q(("2026-09-30", 20.2e9), ("2026-07-15", 19.0e9)), date(2026, 10, 9), 20.2e9, (date(2026, 9, 30), None)),
+    (_q(("2026-09-30", 20.2e9), ("2026-07-16", 19.0e9)), date(2026, 10, 9), 20.2e9, (None, "period_unverified")),
+    (_q(("2026-09-30", 20.2e9), ("2026-06-03", 19.0e9)), date(2026, 10, 9), 20.2e9, (date(2026, 9, 30), None)),
+    (_q(("2026-09-30", 20.2e9), ("2026-06-02", 19.0e9)), date(2026, 10, 9), 20.2e9, (None, "period_unverified")),
+    # a 16-week first quarter (Kroger-like, 112 days) reported 27 days on is a quarter
+    (_q(("2026-05-24", 45.0e9), ("2026-02-01", 34.0e9)), date(2026, 6, 20), 45.1e9, (date(2026, 5, 24), None)),
+    # the next-older row may sit OUTSIDE the 120-day window (it only shows the span); an unreadable one is no row
+    (_q(("2026-07-11", 20.2e9), ("2026-04-11", 19.0e9)), date(2026, 10, 9), 20.2e9, (date(2026, 7, 11), None)),
+    (_q(("2026-09-30", 20.2e9), ("2026-06-3x", 19.0e9)), date(2026, 10, 9), 20.2e9, (None, "period_unverified")),
+    (_q(("2026-09-30", 20.2e9)) + [{"date": None, "revenue": 1.0}, 7], date(2026, 10, 9), 20.2e9,
+     (None, "period_unverified")),
+], ids=["half_year", "half_years", "twelve_week_lag", "twelve_week_prompt", "lag_equals_span", "lag_under_span",
+        "single_row", "one_date_twice", "span_77", "span_76", "span_119", "span_120", "sixteen_weeks",
+        "older_outside_window", "older_unreadable", "older_junk"])
+def test_the_placed_row_must_be_a_quarter(rows, report, actual, out):
+    """Review of 2026-10-16 (ER-4 / money_map_copy ER-1): `earnings_period` placed the NEWEST row in the window
+    without asking whether it covered a quarter — a half-year row, or a row a whole quarter older than the report,
+    became "the quarter that ended …". The row must sit `R.EARNINGS_QUARTER_SPAN_DAYS` after the company's
+    previous period end, and the report must come less than that span after it. Mutation-checked by hand
+    (2026-10-16): dropping the span bounds turned half_year / half_years / span_76 / span_120 red, dropping the
+    lag-vs-span clause turned twelve_week_lag / lag_equals_span red, and a missing older row read as a quarter
+    turned single_row / one_date_twice / older_unreadable / older_junk red."""
+    assert R.EARNINGS_QUARTER_SPAN_DAYS == (77, 119)
+    assert R.earnings_period(rows, report_date=report, revenue_actual=actual) == out
+
+
+@pytest.mark.parametrize("stale, out", [
+    (17_000_000_000, (None, None)),                     # ×1.19 a quarter's scale: kept without a period
+    (15_200_000_000, (None, None)), (26_900_000_000, (None, None)),   # ×1.33 and ×0.75, inclusive-ish
+    (60_000_000_000, (None, "period_unverified")),      # ×0.34: a month
+    (10_000_000_000, (None, "period_unverified")),      # ×2.02: a half-year
+])
+def test_the_scale_check_contingency_never_sets_a_period(monkeypatch, stale, out):
+    # the quarter before (the statement has not caught up), with ITS quarter before: a quarter-shaped row
+    rows = _q(("2026-06-30", stale), ("2026-03-31", 15_000_000_000))
+    assert R.earnings_period(rows, report_date=_REPORT, revenue_actual=20.2e9) == (None, "period_unverified")
+    monkeypatch.setattr(R, "EARNINGS_ALLOW_SCALE_CHECK", True)
+    assert R.earnings_period(rows, report_date=_REPORT, revenue_actual=20.2e9) == out
+    # review of 2026-10-16: under the contingency too, a row that is not quarter-shaped (a single row, a
+    # half-year span) is never "a quarter's scale"
+    for shapeless in (_q(("2026-06-30", stale)), _q(("2026-06-30", stale), ("2025-12-31", 15_000_000_000))):
+        assert R.earnings_period(shapeless, report_date=_REPORT, revenue_actual=20.2e9) == (None, "period_unverified")
+    # a reported quarter (inside the lag) that disagrees is still a mismatch under the contingency
+    assert R.earnings_period(_q(("2026-09-30", stale), _JUN), report_date=_REPORT, revenue_actual=20.2e9) == (
+        None, "period_mismatch")
+
+
+@pytest.mark.parametrize("bad", [datetime(2026, 10, 9, 9, 0), "2026-10-09", None])
+def test_earnings_period_needs_a_report_date(bad):
+    with pytest.raises(ValueError):
+        R.earnings_period([], report_date=bad, revenue_actual=1.0)
+
+
+# ── review of 2026-10-16: the EPS basis (live preview F1) ─────────────────────
+
+
+@pytest.mark.parametrize("profile, problem", [
+    ({"sector": "Real Estate", "industry": "REIT - Industrial"}, "eps_basis_reit"),      # Prologis
+    ({"sector": " Real Estate ", "industry": "Real Estate - Services"}, "eps_basis_reit"),  # CBRE: over-block
+    ({"sector": "Financial Services", "industry": "REIT - Mortgage"}, "eps_basis_reit"),   # a mortgage REIT
+    ({"sector": "Financial Services", "industry": "reit - specialty"}, "eps_basis_reit"),  # any case
+    # an unknown sector cannot be shown not to be a REIT (fail closed, as the Money Map sector gate)
+    ({"sector": None, "industry": "Software"}, "eps_basis_reit"), ({"sector": "", "industry": "x"}, "eps_basis_reit"),
+    ({"sector": "  ", "industry": "x"}, "eps_basis_reit"), ({"sector": 7}, "eps_basis_reit"), ({}, "eps_basis_reit"),
+    ({"sector": "x" * 201}, "eps_basis_reit"), (None, "eps_basis_reit"), ("Real Estate", "eps_basis_reit"),
+    # kept: an ordinary sector; a missing or junk industry alone decides nothing; "Reinsurance" is no REIT
+    ({"sector": "Technology", "industry": "Software - Infrastructure"}, None),
+    ({"sector": "Financial Services", "industry": "Asset Management"}, None),               # BlackRock
+    ({"sector": "Healthcare", "industry": None}, None), ({"sector": "Industrials", "industry": 5}, None),
+    ({"sector": "Financial Services", "industry": "Insurance - Reinsurance"}, None),
+    ({"sector": "Financial Services", "industry": "Reinsurance"}, None),
+])
+def test_earnings_sector_problem(profile, problem):
+    """Mutation-checked by hand (2026-10-16): without the industry prefix the mortgage-REIT rows went green as
+    kept (red here); answering None for an unreadable sector turned the fail-closed rows red."""
+    assert R.earnings_sector_problem(profile) == problem
+    assert R.EARNINGS_EXCLUDED_SECTORS == {"Real Estate"} and R.EARNINGS_EXCLUDED_INDUSTRY_PREFIX == "REIT"
+
+
+def _stmt(day="2026-09-30", **eps):
+    return {"date": day, "revenue": 2_387_518_000, "reportedCurrency": "USD", **eps}
+
+
+@pytest.mark.parametrize("rows, actual, estimate, mixed", [
+    # Prologis (live, 2026-10-15 calendar): actual 1.60 (Core-FFO scale, 1.86x GAAP), estimate 0.777 (0.90x)
+    ([_stmt(epsDiluted=0.86, eps=0.86)], 1.60, 0.777, True),
+    # BlackRock: 15.93 (1.507x GAAP 10.57) beside 14.32 (1.35x): the estimate is off the GAAP scale too — kept
+    ([_stmt(epsDiluted=10.57)], 15.93, 14.32, False),
+    # the held records of the live preview: actual within [0.67, 1.5] of GAAP — kept whatever the estimate
+    ([_stmt(epsDiluted=4.56)], 4.69, 4.40, False),                          # UNH
+    ([_stmt(epsDiluted=2.85)], 2.85, 2.60, False),                          # C
+    ([_stmt(epsDiluted=1.81)], 1.82, 1.55, False),                          # AA
+    ([_stmt(epsDiluted=9.04)], 9.18, 8.10, False),                          # TRV
+    ([_stmt(epsDiluted=1.91)], 2.09, 1.80, False),                          # CMC
+    ([_stmt(epsDiluted=5.67)], 4.85, 4.40, False),                          # a PGR-like adjusted actual (0.855x)
+    # the band's edges, inclusive (exact on the figures): 0.67x and 1.5x are inside; just past them is not
+    ([_stmt(epsDiluted=1.00)], 1.50, 1.00, False), ([_stmt(epsDiluted=1.00)], 1.5001, 1.00, True),
+    ([_stmt(epsDiluted=1.00)], 0.67, 1.00, False), ([_stmt(epsDiluted=1.00)], 0.6699, 1.00, True),
+    # the estimate's tolerance, inclusive: ±25% of GAAP is "on its scale"; past it the gate does not apply
+    ([_stmt(epsDiluted=1.00)], 2.00, 1.25, True), ([_stmt(epsDiluted=1.00)], 2.00, 1.2501, False),
+    ([_stmt(epsDiluted=1.00)], 2.00, 0.75, True), ([_stmt(epsDiluted=1.00)], 2.00, 0.7499, False),
+    ([_stmt(epsDiluted=1.00)], -0.50, 0.95, True),                          # a negative actual, GAAP-scale estimate
+    # never when the statement EPS is missing, not a number or not positive (a loss quarter): no basis to judge
+    ([_stmt()], 1.60, 0.777, False), ([_stmt(epsDiluted=None, eps=None)], 1.60, 0.777, False),
+    ([_stmt(epsDiluted="0.86")], 1.60, 0.777, False), ([_stmt(epsDiluted=0.0, eps=0.86)], 1.60, 0.777, False),
+    ([_stmt(epsDiluted=-0.86)], 1.60, -0.777, False), ([_stmt(epsDiluted=NAN)], 1.60, 0.777, False),
+    ([_stmt(epsDiluted=True)], 1.60, 0.777, False), ([_stmt(epsDiluted=10 ** 400)], 1.60, 0.777, False),
+    # `eps` stands in only when `epsDiluted` is absent or not a number (presence, not truthiness)
+    ([_stmt(eps=0.86)], 1.60, 0.777, True), ([_stmt(epsDiluted="n/a", eps=0.86)], 1.60, 0.777, True),
+    # only the PLACED quarter's row(s) count — an older row, another date, a row without a date is not read
+    ([_stmt(day="2026-06-30", epsDiluted=0.86), _stmt(epsDiluted=1.55)], 1.60, 0.777, False),
+    ([_stmt(day="2026-06-30", epsDiluted=0.86)], 1.60, 0.777, False),
+    ([{"revenue": 1.0, "epsDiluted": 0.86}, 7, None], 1.60, 0.777, False),
+    # two rows on the placed date: any one that shows the mix refuses (fail closed)
+    ([_stmt(epsDiluted=1.55), _stmt(epsDiluted=0.86)], 1.60, 0.777, True),
+    # junk around the figures
+    ([], 1.60, 0.777, False), (None, 1.60, 0.777, False), ([_stmt(epsDiluted=0.86)], None, 0.777, False),
+    ([_stmt(epsDiluted=0.86)], 1.60, NAN, False), ([_stmt(epsDiluted=0.86)], True, 0.777, False),
+], ids=["prologis", "blackrock", "unh", "c", "aa", "trv", "cmc", "pgr_like", "band_hi_edge", "band_hi_past",
+        "band_lo_edge", "band_lo_past", "tol_hi_edge", "tol_hi_past", "tol_lo_edge", "tol_lo_past", "negative_actual",
+        "no_eps", "none_eps", "string_eps", "zero_diluted", "loss_quarter", "nan_eps", "bool_eps", "huge_eps",
+        "basic_eps", "basic_eps_fallback", "another_quarter", "not_the_placed_quarter", "undated", "two_rows",
+        "no_rows", "rows_none", "no_actual", "nan_estimate", "bool_actual"])
+def test_earnings_basis_mixed(rows, actual, estimate, mixed):
+    """Mutation-checked by hand (2026-10-16): without the estimate clause BlackRock (and every pgr-like / tol_*_past
+    row) turned red; with the band check removed UNH..CMC turned red; reading `eps` before `epsDiluted` turned
+    zero_diluted red."""
+    assert R.EARNINGS_BASIS_ACTUAL_BAND == (0.67, 1.5) and R.EARNINGS_BASIS_ESTIMATE_TOLERANCE == 0.25
+    assert R.earnings_basis_mixed(rows, period_end=date(2026, 9, 30), actual=actual, estimate=estimate) is mixed
+
+
+def test_the_basis_check_needs_a_period_date():
+    rows = [_stmt(epsDiluted=0.86)]
+    for bad in ("2026-09-30", datetime(2026, 9, 30), None):
+        assert R.earnings_basis_mixed(rows, period_end=bad, actual=1.60, estimate=0.777) is False
+
+
+# ── review of 2026-10-16: NASDAQ preferred lines (live preview F3) ────────────
+
+
+def test_the_nasdaq_preferred_shape_is_the_search_services_own():
+    """Parity: the rule is COPIED from `stock_search_service._NASDAQ_PREFERRED_RE` (that module loads the FMP
+    client; the rules stay pure) — the two patterns are one."""
+    from app.services import stock_search_service
+
+    assert R.NASDAQ_PREFERRED_SYMBOL_RE.pattern == stock_search_service._NASDAQ_PREFERRED_RE.pattern
+    assert R.NASDAQ_PREFERRED_SYMBOL_RE.flags == stock_search_service._NASDAQ_PREFERRED_RE.flags
+
+
+@pytest.mark.parametrize("sym, preferred", [
+    ("WAFDP", True), ("HBANP", True), ("HBANM", True), ("AGNCO", True), ("AGNCN", True), ("ACGLO", True),
+    ("SLMBP", True), ("FITBO", True), ("NTRSO", True),
+    # four letters (SNAP, RAMP, NTBP), other fifth letters (a class, GOOGL's L, FITBI's I), dashes: not this rule
+    ("SNAP", False), ("RAMP", False), ("NTBP", False), ("GOOGL", False), ("FITBI", False), ("HBANL", False),
+    ("LBRDA", False), ("FWONK", False), ("BRK-B", False), ("WAFD", False), ("P", False), ("ABCDEP", False),
+    ("wafdp", False), (None, False), (5, False),
+])
+def test_nasdaq_preferred_symbol(sym, preferred):
+    assert R.nasdaq_preferred_symbol(sym) is preferred
+
+
+@pytest.mark.parametrize("purpose, refused", [("earnings", True), ("insider", True), ("common", True),
+                                              ("listing", False)])
+def test_a_plain_named_nasdaq_preferred_line_is_never_a_common_stock(purpose, refused):
+    """WaFd's preferred line WAFDP (live, 2026-10-15): FMP profiles it as "WaFd, Inc.", NASDAQ, no ADR flag, a
+    $2.19B cap — the name gate passed it as the company, and its calendar row carried 0.76 against the common's
+    0.85. The earnings, insider and common purposes refuse it (`non_common_listing`); "listing" (a 13F holding,
+    a theme member) is named by its listing and keeps it. Mutation-checked by hand (2026-10-16): without the
+    symbol clause in `company_from_profile` every refused row turned red."""
+    profile = dict(symbol="WAFDP", companyName="WaFd, Inc.", exchange="NASDAQ", isEtf=False, isFund=False,
+                   isActivelyTrading=True, isAdr=False, currency="USD", marketCap=2.188e9 * 2, price=20.0)
+    got = R.company_from_profile(profile, "WAFDP", purpose=purpose)
+    assert (got == "non_common_listing") is refused
+    if not refused:
+        assert got == R.CompanyRef(symbol="WAFDP", name="WaFd")
+    # the common itself, and a 5-letter class share, pass every purpose
+    for sym in ("WAFD", "GOOGL", "LBRDK"):
+        assert isinstance(R.company_from_profile(dict(profile, symbol=sym), sym, purpose=purpose), R.CompanyRef)
+
+
+def test_a_figure_too_large_for_a_float_is_no_number_and_never_raises():
+    assert R._is_num(10 ** 400) is False and R._is_num(10 ** 15) is True
+    with pytest.raises(ValueError):
+        earnings(revenue_actual=10 ** 400)
+
+
+@pytest.mark.parametrize("actual, estimate, valid", [
+    (1_000_000.0, 900_000.0, True),             # exactly the ceiling: kept
+    (-1_000_000.0, -900_000.0, True),
+    (7_089.43, 8_259.23, True),                 # Berkshire Hathaway Class A, 2026-03-02 (live): far inside it
+    (20_000.0, 18_000.0, True),
+    (1_000_000.01, 900_000.0, False),           # a cent above it
+    (900_000.0, 1_000_000.5, False),            # the estimate above it
+    (-1_500_000.0, -1_200_000.0, False),        # the magnitude, whatever the sign
+    (1e20, 1.1e20, False), (1e300, 1e299, False),
+], ids=["ceiling", "neg_ceiling", "brk_a", "20k", "cent_above", "estimate_above", "negative", "1e20", "1e300"])
+def test_the_eps_ceiling_holds_the_record_too(actual, estimate, valid):
+    """The owner-delegated ceiling (2026-10-19): a per-share figure above $1,000,000 is a feed error. The record
+    refuses it too, so a stored fact sheet is held to the rule — never only the adapter's row gate.
+    Mutation-checked by hand (2026-10-19): the record loop removed turns every refused row red."""
+    assert R.EPS_MAX_ABS == 1_000_000.0 and "eps_implausible" in R.REJECTION_REASONS
+    if valid:
+        assert earnings(eps_actual=actual, eps_estimate=estimate).eps_actual == actual
+    else:
+        with pytest.raises(ValueError, match="above 1,000,000 a share"):
+            earnings(eps_actual=actual, eps_estimate=estimate)
+
+
+# ── Batch 1 (2026-10-15, plan item 5): a descriptive stake name takes "the" ─────────────────────────
+
+
+@pytest.mark.parametrize("name, article", [
+    ("Louisiana data center venture", True),               # the catalogue's Meta row
+    ("Stateline Power joint venture", True), ("Meta data center campus", True), ("Texas solar farms", True),
+    ("Data center venture", True),
+    # a company's own name: capitalised, or styled in lower case on purpose — never an article
+    ("Louisiana Data Center Venture", False), ("Iroquois Gas Transmission System", False), ("SK hynix", False),
+    ("bluebird bio", False), ("Mitsui & Co.", False), ("Nscale", False), ("Anthropic", False),
+    ("Berkadia Commercial Mortgage", False), ("Globalstar Licensee LLC", False), ("ONE store", False),
+    # one word, already opened by "the", a hyphen, a digit, punctuation: none is a head noun here
+    ("venture", False), ("The Louisiana data center venture", False), ("the Louisiana venture", False),
+    ("Louisiana data-center", False), ("Project venture2", False), ("Louisiana venture.", False),
+    # not a name at all, or too long to be one
+    (None, False), ("", False), ("   ", False), (5, False), (["a venture"], False), ("a " * 150 + "venture", False),
+])
+def test_takes_name_article(name, article):
+    assert R.takes_name_article(name) is article
+
+
+def test_only_the_descriptive_catalogue_name_takes_the_article():
+    """Over-block check against the real catalogue (`data/trillion_club_seed.json`): of every investee name
+    the stake records may carry, exactly the descriptive one takes "the" — no company name does. (The head-noun
+    list is what keeps a lower-case brand out: mutation-checked by hand, 2026-10-15 — answering True for ANY
+    lower-case last word turned the "SK hynix", "bluebird bio" and "ONE store" rows of `test_takes_name_article`
+    red.)"""
+    seed = json.loads((Path(__file__).resolve().parents[1] / "data" / "trillion_club_seed.json")
+                      .read_text(encoding="utf-8"))
+    names = {s["investee_name"] for s in seed["stakes"]}
+    assert len(names) >= 100
+    assert {n for n in names if R.takes_name_article(n)} == {"Louisiana data center venture"}
+    assert all(h == h.lower() and h.isalpha() for h in R.DESCRIPTIVE_NAME_HEADS)

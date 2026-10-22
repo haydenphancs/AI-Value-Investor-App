@@ -61,6 +61,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 
+from app.integrations import x_api
 from app.schemas.marketing import POST_PLATFORMS
 from app.services.marketing import outlet_base, outlet_x, outlets, post_copy, publish_clock
 from app.services.marketing import publisher_service as pub
@@ -158,8 +159,9 @@ class FakeAdapter(Adapter):
         self.retract_configured = True
         self.is_available = True
         self.refuse: Optional[MarketingPublishRefused] = None
-        #: A second write-ahead charge the publisher journals after the claim (X's alt text).
-        self.pre_send: Optional[tuple] = None
+        #: The write-ahead charges the publisher journals after the claim, in ONE write (an X image post:
+        #: its upload and its alt text) — `Prepared.pre_send_charges`.
+        self.pre_send: tuple = ()
         self.prepare_posts: List[Dict[str, Any]] = []
         self.on_prepare: Optional[Callable[[Dict[str, Any]], None]] = None
         self.on_send: Optional[Callable[[Dict[str, Any]], None]] = None
@@ -193,7 +195,7 @@ class FakeAdapter(Adapter):
             payload={"text": text}, text_sha256=text_sha256(text), reserve_micros=self.reserve,
             publish_meta={self.platform: {"rkey": f"rk-{post.get('id')}"}},
             summary=f"{self.platform} fake payload chars={len(text)}",
-            pre_send_charge=self.pre_send,
+            pre_send_charges=self.pre_send,
         )
         self.prepared.append(prepared)
         return prepared
@@ -323,6 +325,10 @@ def env(monkeypatch, caplog):
     monkeypatch.setattr(pub.settings, "MARKETING_PUBLISH_RECONCILE_AFTER_SECONDS", 600)
     monkeypatch.setattr(pub.settings, "MARKETING_X_ACCESS_TOKEN", None)
     monkeypatch.setattr(pub.settings, "MARKETING_TELEGRAM_BOT_TOKEN", None)
+    # Batch 3: the three new switches at their declared defaults, whatever this machine's environment says.
+    monkeypatch.setattr(pub.settings, "MARKETING_VIDEO_EXTRA_PLATFORMS", "")
+    monkeypatch.setattr(pub.settings, "MARKETING_POST_WEEKDAYS", "mon,tue,thu,sat")
+    monkeypatch.setattr(pub.settings, "MARKETING_INSTAGRAM_TRIAL_MODE", "off")
     monkeypatch.setattr(pub, "_escalation_logged", {})
     monkeypatch.setitem(outlets.ADAPTERS, "x", e.x)
     monkeypatch.setitem(outlets.ADAPTERS, "bluesky", e.bsky)
@@ -1974,7 +1980,9 @@ async def test_an_x_post_stamps_only_when_its_caption_carries_go_x(env, monkeypa
 @pytest.mark.asyncio
 @pytest.mark.parametrize("platform, kind, seconds, status", [
     ("linkedin", SUBMITTED, 300, "queued"),     # an async Upload-Post job: live seconds later
-    ("youtube", SUBMITTED, 300, "queued"),      # the YouTube DESCRIPTION carries /go/youtube
+    # A YouTube DESCRIPTION written before Batch 1 (2026-10-15) carries /go/youtube; one composed since
+    # carries the App Store search line instead and opens nothing (the composed-captions test below).
+    ("youtube", SUBMITTED, 300, "queued"),
     ("facebook", PUBLISHED, 240, "published"),  # a synchronous Upload-Post answer: live now
 ])
 async def test_an_upload_post_job_opens_its_window_by_how_it_answered(env, monkeypatch, caplog, platform, kind,
@@ -2321,20 +2329,25 @@ _COMPOSE_BODIES = {
 async def test_the_composed_captions_open_exactly_the_link_bearing_campaigns(env, monkeypatch, caplog, allow_x_url,
                                                                              store_state):
     """End to end over the REAL composed copy, one post per outlet in one publish pass: bluesky,
-    facebook, linkedin, threads and youtube (its description) carry their own /go link and open their
-    window; TikTok and Instagram say "Link in bio."; X opens one only when its caption was composed
-    with allow_x_url. The value line's store state changes none of it."""
+    facebook, linkedin and threads carry their own /go link and open their window; TikTok and Instagram
+    say "Link in bio."; X opens one only when its caption was composed with allow_x_url. YouTube's
+    description carries NO link since Batch 1 (owner decision 6, 2026-10-15: "Search Caydex on the App
+    Store." replaced the untappable link, and only while the app is on the store), so it opens none. The
+    value line's store state changes nothing else."""
     for platform in ("tiktok", "youtube", "instagram", "facebook", "threads", "linkedin"):
         _up_adapter(env, monkeypatch, platform)
     for platform in post_copy.PLATFORMS:
         composed = post_copy.compose(platform, _COMPOSE_BODIES, category="blueprints", run_date=mrs.run_date_et(),
                                      allow_x_url=allow_x_url, store_state=store_state)
         env.seed(platform=platform, caption=composed.caption, title=composed.title)
+        if platform == "youtube":
+            assert "/go/" not in composed.caption and not post_copy.carries_go_link("youtube", composed.caption)
+            assert (post_copy.SEARCH_LINE in composed.caption) is (store_state in ("preorder", "live"))
     t0 = time.time()
     counters = await pub.publish_cycle()
     t1 = time.time()
     assert counters["published"] == len(post_copy.PLATFORMS) == 8
-    expected = {"bluesky", "facebook", "linkedin", "threads", "youtube"} | ({"x"} if allow_x_url else set())
+    expected = {"bluesky", "facebook", "linkedin", "threads"} | ({"x"} if allow_x_url else set())
     assert set(_windows()) == expected
     for campaign in expected:
         _assert_window(campaign, t0, t1, 240)
@@ -2620,8 +2633,12 @@ async def test_the_real_late_steps_do_each_days_work_once_in_order_and_call_no_p
     health, digest = sends[0]["text"], sends[1]["text"]
     assert health.startswith("⚠️ Marketing: no run for Mon 2026-10-05, a posting day — the worker never claimed it.")
     assert digest.startswith("📊 Caydex marketing — weekly digest\nMon 2026-09-28 → Sun 2026-10-04 (ET)\n")
-    assert "\n• BLUESKY — 1 of 1 measured: 7 likes · 2 reposts · 1 reply · 0 quotes\n" in digest
-    assert f"\n  Top: {row['external_url']} (" in digest
+    # The counts AND the follower snapshot measured minutes earlier in the SAME tick reach the digest.
+    # (Batch 1, 2026-10-15: the 4-week follows-first scorecard replaced the per-platform engagement
+    # block; the week's top post keeps its counts.)
+    digest_lines = digest.splitlines()
+    assert f"Top post this week: {row['external_url']} (7 likes · 2 reposts · 1 reply · 0 quotes)" in digest_lines
+    assert any(line.startswith("• BLUESKY text: 1 post · followers 42") for line in digest_lines)
     assert "\nFollowers: BLUESKY 42 (as of 10-05;" in digest
     # The job the measure step finished minutes earlier, read back by name: ONE post written (its counts
     # and its account snapshot are two writes).
@@ -2722,7 +2739,7 @@ def _seed_image(env: Env, **kw: Any) -> str:
 
 @pytest.mark.asyncio
 async def test_a_pre_send_charge_is_journaled_after_the_claim_and_before_the_send(env, pictures):
-    env.x.pre_send = ("x_media_alt", X_ALT)
+    env.x.pre_send = (("x_media_alt", X_ALT),)
     pid = _seed_image(env)
     seen: Dict[str, Any] = {}
     env.x.on_send = lambda post: seen.update(arg=copy.deepcopy(post), stored=env.row(pid))
@@ -2742,7 +2759,7 @@ async def test_a_pre_send_charge_is_journaled_after_the_claim_and_before_the_sen
 @pytest.mark.asyncio
 @pytest.mark.parametrize("over, capped", [(0, False), (1, True)])
 async def test_the_cap_counts_the_pre_send_charge_before_the_claim(env, pictures, over, capped):
-    env.x.pre_send = ("x_media_alt", X_ALT)
+    env.x.pre_send = (("x_media_alt", X_ALT),)
     env.spend_row(env.budget - X_POST - X_ALT + over)   # exactly at the limit is allowed; one micro over is not
     pid = _seed_image(env)
     before = env.row(pid)
@@ -2761,12 +2778,12 @@ async def test_the_cap_counts_the_pre_send_charge_before_the_claim(env, pictures
 
 @pytest.mark.asyncio
 async def test_a_failed_pre_send_write_sends_nothing_and_refunds_the_claim(env, pictures, monkeypatch, caplog):
-    env.x.pre_send = ("x_media_alt", X_ALT)
+    env.x.pre_send = (("x_media_alt", X_ALT),)
     pid = _seed_image(env)
     real = env.svc.transition_post
 
     async def flaky(post_id, **kw):
-        if kw.get("charge") and kw["charge"][0] == "x_media_alt":
+        if kw.get("charges"):
             raise RuntimeError("ledger hiccup")
         return await real(post_id, **kw)
 
@@ -2782,12 +2799,12 @@ async def test_a_failed_pre_send_write_sends_nothing_and_refunds_the_claim(env, 
 
 @pytest.mark.asyncio
 async def test_a_row_moved_before_its_pre_send_charge_is_left_alone(env, pictures, monkeypatch, caplog):
-    env.x.pre_send = ("x_media_alt", X_ALT)
+    env.x.pre_send = (("x_media_alt", X_ALT),)
     pid = _seed_image(env)
     real = env.svc.transition_post
 
     async def moved(post_id, **kw):
-        if kw.get("charge") and kw["charge"][0] == "x_media_alt":
+        if kw.get("charges"):
             return None        # someone else moved the row out of `queued`
         return await real(post_id, **kw)
 
@@ -2812,7 +2829,7 @@ async def test_a_row_moved_before_its_pre_send_charge_is_left_alone(env, picture
      [("x_create", X_POST), ("x_media_alt", X_ALT), ("refund", -(X_POST + X_ALT))], 0),
 ])
 async def test_an_adapters_refund_replaces_the_default_not_sent_refund(env, pictures, outcome, journal, cost):
-    env.x.pre_send = ("x_media_alt", X_ALT)
+    env.x.pre_send = (("x_media_alt", X_ALT),)
     env.x.outcomes = [outcome]
     pid = _seed_image(env)
     await pub.publish_cycle()
@@ -3039,9 +3056,1050 @@ async def test_a_reconcile_resend_that_cannot_be_prepared_goes_to_the_owner(env,
     if why == "definite_picture":
         pictures["answers"] = [MediaProblem("no asset card-1 in the ledger", definite=True)]
     else:
-        env.bsky.pre_send = ("bluesky_extra", 1)
+        env.bsky.pre_send = (("bluesky_extra", 1),)
     pid = env.seed_queued(platform="bluesky", started_ago=700, format="image", asset_ids=["card-1"])
     env.bsky.reconcile_results = [ReconcileResult(ABSENT, resend_safe=True)]
     counters = await pub.reconcile_cycle()
     assert counters["escalated"] == 1 and env.bsky.sends == []
     assert env.row(pid)["metadata"]["alert_kind"] == "unknown"
+
+
+# ── Batch 1 (2026-10-15): the X media upload is its own pre-send charge — several charges, ONE write ───
+#
+# An X image post makes two calls X may bill before the post itself: the media upload (journaled
+# `x_media_upload` at MARKETING_X_MEDIA_UPLOAD_MICROS — X prices no upload, one forum report says it is
+# billed) and the alt text (`x_media_alt`, $0.005). The publisher journals both in ONE fenced write after
+# the claim and before the send (all or none), the X cap counts both before the claim, and the cycle's
+# running total adds both.
+
+X_UPLOAD = 15_000        # outlet_x's default MARKETING_X_MEDIA_UPLOAD_MICROS
+X_IMAGE = 200_000        # the default MARKETING_X_IMAGE_POST_MICROS: what an X image post's claim reserves
+UPLOAD_AND_ALT = (("x_media_upload", X_UPLOAD), ("x_media_alt", X_ALT))
+
+
+def _spy_post_updates(env: Env, monkeypatch) -> List[Dict[str, Any]]:
+    """Every UPDATE payload the ledger sends to marketing_posts, in order."""
+    table = env.posts
+    real = table.update
+    calls: List[Dict[str, Any]] = []
+
+    def spy(payload):
+        calls.append(copy.deepcopy(payload))
+        return real(payload)
+
+    monkeypatch.setattr(table, "update", spy)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_every_pre_send_charge_is_journaled_in_one_write_after_the_claim_and_before_the_send(
+        env, pictures, monkeypatch):
+    env.x.pre_send = UPLOAD_AND_ALT
+    pid = _seed_image(env)
+    seen: Dict[str, Any] = {}
+    env.x.on_send = lambda post: seen.update(arg=copy.deepcopy(post), stored=env.row(pid))
+    calls = _spy_post_updates(env, monkeypatch)
+    counters = await pub.publish_cycle()
+    assert counters["published"] == 1
+    # The claim, ONE pre-send write carrying both charges, the outcome — never a write per charge.
+    assert len(calls) == 3
+    pre = calls[1]["metadata"]["charges"]
+    assert [(c["op"], c["micros"]) for c in pre] == [("x_create", X_POST), *UPLOAD_AND_ALT]
+    assert pre[1]["at"] == pre[2]["at"] == calls[1]["updated_at"]        # one write, one instant
+    assert calls[1]["cost_micros"] == X_POST + X_UPLOAD + X_ALT
+    # Both are in the ledger BEFORE the send runs, and send() got that row (its fence).
+    assert _journal(seen["stored"]) == [("x_create", X_POST), *UPLOAD_AND_ALT]
+    assert seen["stored"]["status"] == "queued" and seen["arg"]["updated_at"] == seen["stored"]["updated_at"]
+    row = env.row(pid)
+    assert row["status"] == "published" and row["cost_micros"] == X_POST + X_UPLOAD + X_ALT
+    _assert_journal_balances(row)
+    _assert_review_kept(row)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("room, capped", [
+    (X_POST + X_UPLOAD + X_ALT, False),         # exactly the reserve plus BOTH charges: allowed
+    (X_POST + X_UPLOAD + X_ALT - 1, True),      # one micro short
+    (X_POST + X_UPLOAD, True),                  # room for the FIRST charge only (the legacy single view)
+    (X_POST + X_ALT, True),                     # room for the drop-1 alt text only
+])
+async def test_the_cap_counts_every_pre_send_charge_before_the_claim(env, pictures, room, capped):
+    env.x.pre_send = UPLOAD_AND_ALT
+    env.spend_row(env.budget - room)
+    pid = _seed_image(env)
+    counters = await pub.publish_cycle()
+    assert counters["capped"] == (1 if capped else 0)
+    row = env.row(pid)
+    if capped:
+        assert env.x.sends == [] and row["status"] == "approved" and row["attempts"] == 0 and _journal(row) == []
+    else:
+        assert len(env.x.sends) == 1 and row["status"] == "published"
+        _assert_journal_balances(row)
+
+
+@pytest.mark.asyncio
+async def test_the_cycles_running_total_adds_every_pre_send_charge(env, pictures):
+    """Two X image posts in one cycle (yesterday's and today's are both fresh): the second is capped once
+    the first's claim AND both its pre-send charges used the room. A running total that added only the
+    claim — or only one charge — would let it through."""
+    env.x.pre_send = UPLOAD_AND_ALT
+    each = X_POST + X_UPLOAD + X_ALT
+    env.spend_row(env.budget - 2 * each + 1)
+    _seed_image(env)
+    day = mrs.run_date_et() - timedelta(days=1)
+    env.seed(format="image", asset_ids=["card-1"], day=day, key=f"{day.isoformat()}:x:image")
+    counters = await pub.publish_cycle()
+    assert (counters["published"], counters["capped"], len(env.x.sends)) == (1, 1, 1)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_pre_send_write_journals_none_of_its_charges(env, pictures, monkeypatch, caplog):
+    env.x.pre_send = UPLOAD_AND_ALT
+    pid = _seed_image(env)
+    real = env.svc.transition_post
+
+    async def flaky(post_id, **kw):
+        if kw.get("charges"):
+            raise RuntimeError("ledger hiccup")
+        return await real(post_id, **kw)
+
+    monkeypatch.setattr(env.svc, "transition_post", flaky)
+    counters = await pub.publish_cycle()
+    assert env.x.sends == [] and counters["retry"] == 1
+    row = env.row(pid)
+    assert row["status"] == "approved" and row["metadata"]["publish"]["category"] == "ledger"
+    assert _journal(row) == [("x_create", X_POST), ("refund_not_sent", -X_POST)] and row["cost_micros"] == 0
+    assert "x_media_upload+x_media_alt" in row["last_error"]
+    assert _messages(caplog, "pre-send charge x_media_upload+x_media_alt NOT journaled", logging.ERROR)
+
+
+@pytest.mark.asyncio
+async def test_an_adapter_with_a_malformed_pre_send_charge_is_a_prepare_bug_never_claimed(env, pictures, caplog):
+    """The drop-1 shape — a bare (op, micros) pair — is refused by `Prepared` itself: a prepare() BUG,
+    logged with its stack, the post skipped BEFORE any claim, charge or platform call."""
+    env.x.pre_send = ("x_media_alt", X_ALT)
+    pid = _seed_image(env)
+    before = env.row(pid)
+    counters = await pub.publish_cycle()
+    assert counters["skipped"] == 1 and env.x.sends == [] and env.row(pid) == before
+    bug = [r for r in caplog.records if "prepare() BUG" in r.getMessage()]
+    assert bug and bug[0].exc_info is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome, cost", [
+    # Nothing billed (the upload never left / was turned away at the gate): everything refunded.
+    (Outcome(NOT_SENT, "transport", error="connect", refund_micros=-(X_POST + X_UPLOAD + X_ALT)), 0),
+    # An unknown or refused upload: its charge stays, the post and the alt text are refunded.
+    (Outcome(NOT_SENT, "media", error="timeout", refund_micros=-(X_POST + X_ALT)), X_UPLOAD),
+    # A failed alt-text write after the upload: both may be billed.
+    (Outcome(NOT_SENT, "media", error="alt 503", refund_micros=-X_POST), X_UPLOAD + X_ALT),
+    # 402 on the upload: nothing billed, refused.
+    (Outcome(REFUSED, "credits", error="402", refund_micros=-(X_POST + X_UPLOAD + X_ALT), alert="failed"), 0),
+])
+async def test_an_image_posts_refund_leaves_exactly_the_calls_that_may_be_billed(env, pictures, outcome, cost):
+    env.x.pre_send = UPLOAD_AND_ALT
+    env.x.outcomes = [outcome]
+    pid = _seed_image(env)
+    await pub.publish_cycle()
+    row = env.row(pid)
+    op = "refund" if outcome.kind == REFUSED else "refund_not_sent"
+    assert _journal(row) == [("x_create", X_POST), *UPLOAD_AND_ALT, (op, outcome.refund_micros)]
+    assert row["cost_micros"] == cost and row["status"] == ("failed" if outcome.kind == REFUSED else "approved")
+    _assert_journal_balances(row)
+
+
+# ── the REAL X adapter behind the real publisher: what stays journaled after each outcome ──────────────
+
+
+@pytest.fixture
+def real_x(env, pictures, monkeypatch) -> Dict[str, Any]:
+    """The real `outlet_x.ADAPTER` registered for X, X images on at the default prices, the picture
+    download and the three X calls scripted at the client functions: `script[step]` (upload / alt /
+    create) is an exception FACTORY to raise there, or None to succeed."""
+    monkeypatch.setitem(outlets.ADAPTERS, "x", outlet_x.ADAPTER)
+    for name, value in (("MARKETING_X_IMAGES", True), ("MARKETING_X_ALLOW_URLS", False),
+                        ("MARKETING_X_MADE_WITH_AI", True), ("MARKETING_X_IMAGE_POST_MICROS", X_IMAGE),
+                        ("MARKETING_X_MEDIA_UPLOAD_MICROS", X_UPLOAD)):
+        monkeypatch.setattr(outlet_x.settings, name, value)
+    script: Dict[str, Any] = {"upload": None, "alt": None, "create": None, "calls": []}
+
+    def step(name: str, ok: Dict[str, Any]) -> Dict[str, Any]:
+        script["calls"].append(name)
+        if script[name] is not None:
+            raise script[name]()
+        return ok
+
+    async def fetch(url, *, size, sha256):
+        script["calls"].append("download")
+        return b"\xff\xd8 the reviewed picture \xff\xd9"
+
+    async def upload_media(data, **_kw):
+        return step("upload", {"id": "1880000000000000001", "media_key": None, "size": len(data), "state": None})
+
+    async def create_media_metadata(media_id, *, alt_text):
+        return step("alt", {"id": media_id})
+
+    async def create_post(text, *, made_with_ai=False, media_ids=None):
+        return step("create", {"id": "1790000000000000001", "text": text, "errors": []})
+
+    monkeypatch.setattr(outlet_base, "fetch_post_image", fetch)
+    monkeypatch.setattr(x_api, "upload_media", upload_media)
+    monkeypatch.setattr(x_api, "create_media_metadata", create_media_metadata)
+    monkeypatch.setattr(x_api, "create_post", create_post)
+    return script
+
+
+def _xe(cls_name: str, status: Optional[int] = None) -> Callable[[], Exception]:
+    """A factory for one x_api exception (built when raised, never shared between cases)."""
+    def make() -> Exception:
+        return getattr(x_api, cls_name)(f"x scripted {cls_name}", method="scripted", status=status)
+    return make
+
+
+_ALL_X = X_IMAGE + X_UPLOAD + X_ALT
+
+#: (the failing step, its exception, the row's status after the tick, the calls made, what stays journaled)
+_REAL_X_MONEY = [
+    pytest.param(None, None, "published", ["download", "upload", "alt", "create"], _ALL_X, id="published"),
+    pytest.param("upload", _xe("XApiNotSentError"), "approved", ["download", "upload"], 0, id="upload-not-sent"),
+    pytest.param("upload", _xe("XApiRefusedError"), "approved", ["download", "upload"], 0,
+                 id="upload-refused-before-sending"),
+    pytest.param("upload", _xe("XApiRateLimitError", 429), "approved", ["download", "upload"], 0, id="upload-429"),
+    pytest.param("upload", _xe("XApiAuthError", 401), "approved", ["download", "upload"], 0, id="upload-401"),
+    pytest.param("upload", _xe("XApiCreditsDepletedError", 402), "failed", ["download", "upload"], 0,
+                 id="upload-402"),
+    pytest.param("upload", _xe("XApiAmbiguousError", 503), "approved", ["download", "upload"], X_UPLOAD,
+                 id="upload-ambiguous"),
+    pytest.param("upload", _xe("XApiRefusedError", 400), "approved", ["download", "upload"], X_UPLOAD,
+                 id="upload-400"),
+    pytest.param("upload", _xe("XApiForbiddenError", 403), "approved", ["download", "upload"], X_UPLOAD,
+                 id="upload-403"),
+    pytest.param("alt", _xe("XApiNotSentError"), "approved", ["download", "upload", "alt"], X_UPLOAD,
+                 id="alt-not-sent"),
+    pytest.param("alt", _xe("XApiCreditsDepletedError", 402), "failed", ["download", "upload", "alt"], X_UPLOAD,
+                 id="alt-402"),
+    pytest.param("alt", _xe("XApiAmbiguousError", 503), "approved", ["download", "upload", "alt"],
+                 X_UPLOAD + X_ALT, id="alt-ambiguous"),
+    pytest.param("create", _xe("XApiNotSentError"), "approved", ["download", "upload", "alt", "create"],
+                 X_UPLOAD + X_ALT, id="create-not-sent"),
+    pytest.param("create", _xe("XApiCreditsDepletedError", 402), "failed", ["download", "upload", "alt", "create"],
+                 X_UPLOAD + X_ALT, id="create-402"),
+    pytest.param("create", _xe("XApiRateLimitError", 429), "approved", ["download", "upload", "alt", "create"],
+                 _ALL_X, id="create-429"),
+    pytest.param("create", _xe("XApiAmbiguousError", 503), "queued", ["download", "upload", "alt", "create"],
+                 _ALL_X, id="create-ambiguous"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing, error, status, calls, kept", _REAL_X_MONEY)
+async def test_the_real_x_adapter_leaves_exactly_the_billable_calls_journaled(env, real_x, failing, error, status,
+                                                                             calls, kept):
+    """End to end over the real adapter and the real ledger: the claim journals the post ($0.20), the
+    pre-send write the upload ($0.015) and the alt text ($0.005), and the outcome's refund leaves
+    journaled exactly the calls that may have been billed — the X cap's ledger of record."""
+    if failing is not None:
+        real_x[failing] = error
+    pid = _seed_image(env)
+    await pub.publish_cycle()
+    row = env.row(pid)
+    assert real_x["calls"] == calls and row["status"] == status
+    journal = _journal(row)
+    assert journal[:3] == [("x_create", X_IMAGE), ("x_media_upload", X_UPLOAD), ("x_media_alt", X_ALT)]
+    assert row["cost_micros"] == kept
+    assert len(journal) == (3 if kept == _ALL_X else 4)        # one refund entry, only when one is due
+    assert row["metadata"]["publish"]["x"]["upload_micros"] == X_UPLOAD
+    _assert_journal_balances(row)
+
+
+# ── run_service.transition_post(charges=…): several journal entries in ONE fenced write ──────────────
+
+
+@pytest.mark.asyncio
+async def test_transition_post_journals_several_charges_in_one_write_in_order(env, monkeypatch):
+    t0 = "2026-10-01T00:00:00+00:00"
+    pid = env.seed(status="queued", cost_micros=15_000,
+                   meta=_review_meta(charges=[{"at": t0, "op": "x_create", "micros": 15_000}]))
+    calls = _spy_post_updates(env, monkeypatch)
+    out = await env.svc.transition_post(pid, expect_status="queued", observed=env.row(pid),
+                                        charges=[("x_media_upload", 15_000), ("x_media_alt", 5_000),
+                                                 ("x_read_correction", -2_000, t0)])
+    assert len(calls) == 1
+    assert _journal(out) == [("x_create", 15_000), ("x_media_upload", 15_000), ("x_media_alt", 5_000),
+                             ("x_read_correction", -2_000)]
+    entries = out["metadata"]["charges"]
+    assert entries[1]["at"] == entries[2]["at"] == out["updated_at"]       # the write's own instant
+    assert entries[3]["at"] == t0                                            # a reversal keeps its date
+    assert out["cost_micros"] == 15_000 + 15_000 + 5_000 - 2_000
+    _assert_journal_balances(out)
+    _assert_review_kept(out)
+
+
+@pytest.mark.asyncio
+async def test_transition_post_charges_after_a_lost_fence_land_once_on_the_fresh_row(env, monkeypatch):
+    pid = env.seed(status="queued")
+    seen = env.row(pid)
+    live = env.raw(pid)
+    live["updated_at"] = _now().isoformat()                       # someone wrote in between …
+    live["metadata"] = {**live["metadata"], "posted_notified_at": "stamped"}
+    calls = _spy_post_updates(env, monkeypatch)
+    out = await env.svc.transition_post(pid, expect_status="queued", observed=seen, retries=1,
+                                        charges=UPLOAD_AND_ALT)
+    assert len(calls) == 2                                        # the stale fence lost, the fresh one won
+    assert _journal(out) == list(UPLOAD_AND_ALT) and out["cost_micros"] == X_UPLOAD + X_ALT
+    assert out["metadata"]["posted_notified_at"] == "stamped"    # … and that write is kept
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("charges", [(), [], None])
+async def test_transition_post_without_charges_journals_nothing_and_leaves_the_cost_alone(env, monkeypatch,
+                                                                                          charges):
+    pid = env.seed(status="queued", cost_micros=7)
+    calls = _spy_post_updates(env, monkeypatch)
+    out = await env.svc.transition_post(pid, expect_status="queued", observed=env.row(pid), charges=charges,
+                                        meta={"note": 1})
+    assert len(calls) == 1 and "cost_micros" not in calls[0]
+    assert "charges" not in out["metadata"] and out["cost_micros"] == 7 and out["metadata"]["note"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kwargs, match", [
+    ({"charge": ("x_create", 15_000), "charges": [("x_media_alt", 5_000)]}, "charge OR charges"),
+    ({"charges": [("x_media_alt", 5_000)], "cost_micros": 0}, "a charge OR cost_micros"),
+    ({"charges": ("x_media_alt", 5_000)}, r"is not \(op, micros\)"),       # a bare pair, not a list of pairs
+    ({"charges": "x_media_alt"}, "must be a list"),
+    ({"charges": {"x_media_alt": 5_000}}, "must be a list"),
+    ({"charges": 5_000}, "must be a list"),
+    ({"charges": [("x_media_alt",)]}, r"is not \(op, micros\)"),
+    ({"charges": [("x_media_alt", 5_000, None, "extra")]}, r"is not \(op, micros\)"),
+    ({"charges": [("", 5_000)]}, "non-empty string"),
+    ({"charges": [("   ", 5_000)]}, "non-empty string"),
+    ({"charges": [(None, 5_000)]}, "non-empty string"),
+    ({"charges": [("x" * 65, 5_000)]}, "non-empty string"),
+    ({"charges": [("x_media_alt", True)]}, "not an int"),
+    ({"charges": [("x_media_alt", 5_000.0)]}, "not an int"),
+    ({"charges": [("x_media_alt", "5000")]}, "not an int"),
+    ({"charges": [("x_media_alt", None)]}, "not an int"),
+    ({"charges": [("x_media_upload", 15_000), ("x_media_alt", False)]}, "not an int"),   # one bad entry: none land
+    # The single-charge path is checked by the same rule now (it used to journal int(True) == 1).
+    ({"charge": ("x_create", True)}, "not an int"),
+    ({"charge": ("x_create", 1.5)}, "not an int"),
+    ({"charge": ()}, r"is not \(op, micros\)"),
+])
+async def test_transition_post_refuses_a_malformed_charge_before_any_io(env, monkeypatch, kwargs, match):
+    pid = env.seed(status="queued")
+    before = env.row(pid)
+    calls = _spy_post_updates(env, monkeypatch)
+    with pytest.raises(ValueError, match=match):
+        await env.svc.transition_post(pid, expect_status="queued", observed=env.row(pid), **kwargs)
+    assert calls == [] and env.row(pid) == before
+
+
+def test_journal_entries_reads_one_charge_or_a_list_and_keeps_a_reversals_date():
+    assert mrs.journal_entries(("x_create", 15_000)) == (("x_create", 15_000, None),)
+    assert mrs.journal_entries(None, [["x_media_upload", 15_000], ("x_read_correction", -1, "t0")]) == (
+        ("x_media_upload", 15_000, None), ("x_read_correction", -1, "t0"))
+    assert mrs.journal_entries(("refund", -5, "")) == (("refund", -5, None),)          # empty = the write's time
+    assert mrs.journal_entries(None, ()) == mrs.journal_entries() == mrs.journal_entries(None, None) == ()
+    assert mrs.journal_entries(("x" * 64, 0)) == (("x" * 64, 0, None),)
+
+
+# ── Batch 3 (2026-10-20, D8): PRIMARY FIRST — an EXTRA video waits for its platform's picture/text post ──────
+#
+# Facebook / LinkedIn / Threads may post the run's video as a SECOND post: the pair (platform, "video") alone
+# makes it an extra (`schemas.is_extra_format`, no stamp). The publisher claims it only once that platform's
+# PRIMARY post of the same run has left pending_review / approved / queued (`publisher_service._PRIMARY_OPEN`),
+# read ONCE per extra at its own turn in the pass (so a primary sent earlier in the same pass counts as sent);
+# a read that fails holds it too. A held extra counts as `retry`, is written nothing, and expires with its day.
+# A primary post never makes the read.
+
+from app.schemas.marketing import is_extra_format  # noqa: E402
+from test_marketing_run_service import _Query  # noqa: E402
+
+B3_VIDEO = "33333333-3333-4333-8333-333333333333"
+
+
+def _held_lines(caplog, platform: str = "facebook") -> List[str]:
+    return [r.getMessage() for r in caplog.records if r.name == PUB_LOGGER and r.levelno == logging.INFO
+            and f"HELD: waits for its {platform} picture/text post" in r.getMessage()]
+
+
+def _extra_pair(env: Env, monkeypatch, *, platform: str = "facebook", primary: Optional[str] = "approved",
+                primary_format: str = "text", primary_publish: Optional[Dict[str, Any]] = None,
+                adapter: Optional[FakeAdapter] = None, day: Optional[date] = None,
+                primary_caption: Optional[str] = None, extra_caption: Optional[str] = None,
+                extra_status: str = "approved") -> tuple:
+    """(adapter, primary id or None, extra id, run id): the run's PRIMARY post on `platform` — in status
+    `primary`, or none at all — seeded FIRST (older, as create_posts records it), then its EXTRA video on the run's
+    video, both behind one Upload-Post-shaped fake adapter (registered and enabled)."""
+    adapter = adapter or _up_adapter(env, monkeypatch, platform)
+    run_id = str(uuid.uuid4())
+    day_s = (day or mrs.run_date_et()).isoformat()
+    pid = None
+    if primary is not None:
+        meta = _review_meta(publish=primary_publish) if primary_publish is not None else _review_meta()
+        pid = env.seed(platform=platform, status=primary, format=primary_format, run_id=run_id, meta=meta,
+                       key=f"{day_s}:{platform}:{primary_format}", caption=primary_caption,
+                       asset_ids=["card-1"] if primary_format == "image" else [],
+                       approved_by=None if primary == "pending_review" else OWNER)
+    extra = env.seed(platform=platform, status=extra_status, format="video", run_id=run_id,
+                     key=f"{day_s}:{platform}:video", asset_ids=[B3_VIDEO], caption=extra_caption,
+                     approved_by=None if extra_status == "pending_review" else OWNER)
+    return adapter, pid, extra, run_id
+
+
+def _future(minutes: int = 60) -> str:
+    return (_now() + timedelta(minutes=minutes)).isoformat()
+
+
+# (primary status, its metadata.publish, what the primary's own send answers this pass, the extra is held)
+_PAIR_CASES = {
+    "pending_review": ("pending_review", None, None, True),
+    "approved-then-submitted-this-pass": ("approved", None, "submitted", True),
+    "approved-then-not-sent-this-pass": ("approved", None, "not_sent", True),
+    "approved-backed-off": ("approved", {"next_attempt_at": "FUTURE"}, None, True),
+    "queued-submitted": ("queued", {"state": "submitted"}, None, True),
+    "queued-unknown": ("queued", {"state": "unknown"}, None, True),
+    "queued-escalated": ("queued", {"state": "escalated"}, None, True),
+    "approved-then-published-this-pass": ("approved", None, "published", False),
+    "published": ("published", {"state": "published"}, None, False),
+    "failed": ("failed", {"state": "refused"}, None, False),
+    "rejected": ("rejected", None, None, False),
+    "skipped-expired": ("skipped", None, None, False),
+    "retracted": ("retracted", {"state": "published"}, None, False),
+    "no-primary": (None, None, None, False),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("primary_format", ["text", "image"])
+@pytest.mark.parametrize("case", list(_PAIR_CASES))
+async def test_batch3_an_extra_waits_for_its_primary(env, monkeypatch, caplog, pictures, case, primary_format):
+    status, publish, answer, held = _PAIR_CASES[case]
+    if publish and publish.get("next_attempt_at") == "FUTURE":
+        publish = {"next_attempt_at": _future()}
+    up, primary, extra, _run = _extra_pair(env, monkeypatch, primary=status, primary_format=primary_format,
+                                           primary_publish=publish)
+    if answer == "submitted":
+        up.outcomes = [Outcome(SUBMITTED, publish_meta={"upload_post": _up_meta()})]
+    elif answer == "not_sent":
+        up.outcomes = [Outcome(NOT_SENT, "transport", error="ConnectError: connection refused")]
+    before = env.row(extra)
+    counters = await pub.publish_cycle()
+    primary_sent = answer is not None
+    assert [p for p in up.prepare_ids if p == primary] == ([primary] if primary_sent else [])
+    if held:
+        assert env.row(extra) == before                               # nothing written: no claim, no stamp
+        assert extra not in up.prepare_ids and all(s[0]["id"] != extra for s in up.sends)
+        held_lines = _held_lines(caplog)
+        assert len(held_lines) == 1 and f"post_id={extra} " in held_lines[0]
+        # one `retry` for the held extra (plus the primary's own, when it went back to approved or waits)
+        assert counters["retry"] == 1 + (answer == "not_sent") + (case == "approved-backed-off")
+    else:
+        assert env.row(extra)["status"] == "published" and env.row(extra)["attempts"] == 1
+        assert [s[0]["id"] for s in up.sends][-1] == extra             # the extra goes AFTER its primary
+        assert _held_lines(caplog) == []
+    if primary is not None and not primary_sent:
+        assert primary not in up.prepare_ids                          # an untouched primary stays untouched
+
+
+@pytest.mark.asyncio
+async def test_batch3_only_its_own_run_and_platform_hold_an_extra(env, monkeypatch, caplog):
+    """The read is the extra's own run on its own platform: an open primary of ANOTHER run on that platform, an
+    open post of the same run on ANOTHER platform, and another extra of the run never hold it."""
+    up, primary, extra, run_id = _extra_pair(env, monkeypatch, primary="published")
+    day = mrs.run_date_et().isoformat()
+    env.seed(platform="facebook", status="pending_review", run_id=str(uuid.uuid4()), key=f"{day}:facebook:text:x",
+             approved_by=None)                                        # another run's open Facebook post
+    env.seed(platform="linkedin", status="pending_review", run_id=run_id, key=f"{day}:linkedin:text",
+             approved_by=None)                                        # the same run, another platform
+    env.seed(platform="threads", status="pending_review", format="video", run_id=run_id, approved_by=None,
+             key=f"{day}:threads:video")                              # the run's other (still open) extra
+    counters = await pub.publish_cycle()
+    assert counters["published"] == 1 and env.row(extra)["status"] == "published"
+    assert _held_lines(caplog) == [] and up.prepare_ids == [extra]
+
+
+@pytest.mark.asyncio
+async def test_batch3_a_failed_sibling_read_holds_the_extra(env, monkeypatch, caplog):
+    """Fail closed: a sibling read that fails holds the extra (WARNING with its ids) and writes nothing; the
+    rest of the pass goes on, and the next tick that can read sends it."""
+    up, primary, extra, run_id = _extra_pair(env, monkeypatch, primary="published")
+    other = env.seed(platform="bluesky")                              # a primary elsewhere in the same pass
+    real = pub._exec
+    broken = {"on": True}
+
+    async def flaky(query, *, op, **ids):
+        if broken["on"]:
+            raise mrs.MarketingRunError(f"{op} failed (run_id={ids.get('run_id')}): APIError: PostgREST 520")
+        return await real(query, op=op, **ids)
+
+    monkeypatch.setattr(pub, "_exec", flaky)
+    before = env.row(extra)
+    counters = await pub.publish_cycle()
+    assert env.row(extra) == before and extra not in up.prepare_ids
+    assert counters["retry"] == 1 and counters["published"] == 1 and env.row(other)["status"] == "published"
+    warnings = [r.getMessage() for r in caplog.records if r.name == PUB_LOGGER and r.levelno == logging.WARNING
+                and "could not be read" in r.getMessage()]
+    assert len(warnings) == 1 and extra in warnings[0] and run_id in warnings[0] and "PostgREST 520" in warnings[0]
+    assert len(_held_lines(caplog)) == 1
+    broken["on"] = False
+    counters = await pub.publish_cycle()
+    assert counters["published"] == 1 and env.row(extra)["status"] == "published"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("data", [None, {"id": "x", "format": "text", "status": "published"}, "rows"])
+async def test_batch3_a_sibling_read_of_an_unexpected_shape_holds_the_extra(env, monkeypatch, caplog, data):
+    """A read that answers anything but a list of rows is unreadable, never "no sibling": the extra is held."""
+    _up, _primary, extra, _run = _extra_pair(env, monkeypatch, primary=None)
+
+    class _Odd:
+        def __init__(self, value: Any) -> None:
+            self.data = value
+
+    async def odd(query, *, op, **ids):
+        return _Odd(data)
+
+    monkeypatch.setattr(pub, "_exec", odd)
+    before = env.row(extra)
+    counters = await pub.publish_cycle()
+    assert env.row(extra) == before and counters["retry"] == 1 and len(_held_lines(caplog)) == 1
+    assert any("not a list of rows" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("run_id", [None, ""])
+async def test_batch3_an_extra_that_names_no_run_is_held(env, monkeypatch, caplog, run_id):
+    _up, _primary, extra, _run = _extra_pair(env, monkeypatch, primary=None)
+    env.raw(extra)["run_id"] = run_id                                 # a hand-edited row: nothing to read by
+    before = env.row(extra)
+    counters = await pub.publish_cycle()
+    assert env.row(extra) == before and counters["retry"] == 1
+    assert any("names no run" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+
+
+@pytest.mark.asyncio
+async def test_batch3_the_sibling_read_reads_its_rows_fail_closed(env):
+    """`_extra_waits` directly: the post itself never counts; another EXTRA never holds it; a sibling whose format
+    cannot be read is taken for a primary (it holds while open); a non-dict row is skipped."""
+    run_id = str(uuid.uuid4())
+    day = mrs.run_date_et().isoformat()
+    extra = env.seed(platform="linkedin", format="video", run_id=run_id, key=f"{day}:linkedin:video")
+    row = env.row(extra)
+    assert await pub._extra_waits(env.svc, row) is False             # alone: its own open row never holds it
+    junk = env.seed(platform="linkedin", status="queued", format=None, run_id=run_id, key=f"{day}:linkedin:?")
+    assert await pub._extra_waits(env.svc, row) is True               # unreadable format: a primary, open
+    env.raw(junk)["status"] = "failed"
+    assert await pub._extra_waits(env.svc, row) is False
+    for status in pub._PRIMARY_OPEN:
+        env.raw(junk)["status"] = status
+        assert await pub._extra_waits(env.svc, row) is True
+    assert pub._PRIMARY_OPEN == ("pending_review", "approved", "queued")
+    assert is_extra_format("linkedin", "video") and not is_extra_format("linkedin", "text")
+
+
+def _spy_ledger_ops(env: Env, monkeypatch) -> List[tuple]:
+    """Every query the in-memory ledger executes, in order, as (table, op, columns read, filters, rows) —
+    nothing per-row (ids, times), so two runs of the same day compare equal."""
+    names = {id(t): name for name, t in env.fake.tables.items()}
+    log: List[tuple] = []
+    real_select, real_execute = _Table.select, _Query.execute
+
+    def select(self, *cols):
+        query = real_select(self, *cols)
+        query._b3_cols = cols
+        return query
+
+    def execute(self):
+        res = real_execute(self)
+        log.append((names.get(id(self.t)), self.op, getattr(self, "_b3_cols", None), len(self.filters),
+                    len(res.data) if isinstance(res.data, list) else None))
+        return res
+
+    monkeypatch.setattr(_Table, "select", select)
+    monkeypatch.setattr(_Query, "execute", execute)
+    return log
+
+
+async def _a_primary_only_day(monkeypatch, *, today: bool) -> tuple:
+    """One publish pass over a PRIMARY-ONLY day (no extra anywhere) in a fresh ledger: the real publisher, or —
+    `today` — one that knows of no extra format (the publisher as it was before Batch 3). Returns the ledger's op
+    log and the publisher's own `_exec` calls."""
+    e = Env()
+    calls: List[str] = []
+    real = pub._exec
+
+    async def recording(query, *, op, **ids):
+        calls.append(op)
+        return await real(query, op=op, **ids)
+
+    with monkeypatch.context() as m:
+        m.setattr(pub, "get_marketing_run_service", lambda: e.svc)
+        m.setattr(pub, "_exec", recording)
+        ups = {p: FakeAdapter(p, resend_safe=True, retractable=False, schedule=UP_SCHEDULE)
+               for p in ("facebook", "linkedin", "threads", "tiktok", "youtube", "instagram")}
+        for platform, adapter in {"x": e.x, "bluesky": e.bsky, **ups}.items():
+            m.setitem(outlets.ADAPTERS, platform, adapter)
+        m.setattr(outlets, "enabled_platforms", lambda: ["x", "bluesky", *ups])
+        if today:
+            m.setattr(pub, "is_extra_format", lambda *_a: False)
+        log = _spy_ledger_ops(e, m)
+        run_id = str(uuid.uuid4())
+        day = mrs.run_date_et().isoformat()
+        for platform in ("x", "bluesky", "facebook", "linkedin", "threads"):
+            e.seed(platform=platform, run_id=run_id, key=f"{day}:{platform}:text")
+        for platform in ("tiktok", "youtube", "instagram"):
+            e.seed(platform=platform, format="video", run_id=run_id, key=f"{day}:{platform}:video",
+                   asset_ids=[B3_VIDEO])
+        ups["linkedin"].outcomes = [Outcome(SUBMITTED, publish_meta={"upload_post": _up_meta()})]
+        counters = await pub.publish_cycle()
+    return log, calls, counters
+
+
+@pytest.mark.asyncio
+async def test_batch3_primary_posts_never_read_siblings(env, monkeypatch):
+    """A day without an extra makes exactly the ledger calls it made before Batch 3: the same op log as a
+    publisher that knows of no extra format, and not one sibling read."""
+    now_log, now_calls, now_counters = await _a_primary_only_day(monkeypatch, today=False)
+    then_log, then_calls, then_counters = await _a_primary_only_day(monkeypatch, today=True)
+    assert now_counters == then_counters and now_counters["published"] == 7 and now_counters["submitted"] == 1
+    assert now_log == then_log and len(now_log) > 10
+    assert now_calls == then_calls == []
+    assert not [entry for entry in now_log if entry[2] == ("id,format,status",)]
+
+
+@pytest.mark.asyncio
+async def test_batch3_two_facebook_posts_have_their_own_claims_keys_and_outcomes(env, monkeypatch, caplog):
+    """The picture/text post and the video of one run on Facebook: two rows, two claims, two Idempotency-Keys
+    (the REAL Upload-Post prepare derives each from its own key), two outcomes — the video only after the
+    picture/text post was published, and neither ever writes on the other."""
+    up = _up_adapter(env, monkeypatch, "facebook", cls=_RealPrepareFake)
+    _up, primary, extra, _run = _extra_pair(env, monkeypatch, adapter=up, primary="approved")
+    day = mrs.run_date_et().isoformat()
+    up.on_send = lambda post: up.outcomes.append(Outcome(SUBMITTED, publish_meta=up.sends[-1][1].publish_meta))
+
+    counters = await pub.publish_cycle()                               # pass 1: the primary only
+    assert counters["submitted"] == 1 and counters["retry"] == 1 and up.prepare_ids == [primary]
+    first = env.row(primary)
+    assert first["status"] == "queued" and first["attempts"] == 1
+    assert first["metadata"]["publish"]["upload_post"]["request_id"] == f"{day}:facebook:text:a1"
+    assert env.row(extra)["status"] == "approved" and env.row(extra)["attempts"] == 0
+
+    assert (await pub.publish_cycle())["retry"] == 1                  # still queued: still held
+    _backdate(env, primary, 660)
+    up.reconcile_results = [ReconcileResult(FOUND, external_id="fb-pic-1", external_url="https://fb.example/p/1")]
+    assert (await pub.reconcile_cycle())["found"] == 1
+    published_primary = env.row(primary)
+    assert published_primary["status"] == "published"
+
+    counters = await pub.publish_cycle()                               # pass 3: the video goes
+    assert counters["submitted"] == 1 and counters["retry"] == 0 and up.prepare_ids[-1] == extra
+    video = env.row(extra)
+    assert video["status"] == "queued" and video["attempts"] == 1
+    assert video["metadata"]["publish"]["upload_post"]["request_id"] == f"{day}:facebook:video:a1"
+    assert video["idempotency_key"] == f"{day}:facebook:video" != published_primary["idempotency_key"]
+    assert [h["kind"] for h in video["metadata"]["publish"]["history"]] == [SUBMITTED]
+    assert env.row(primary) == published_primary                      # the video's claim wrote nothing on it
+
+    _backdate(env, extra, 660)
+    up.reconcile_results = [ReconcileResult(FOUND, external_id="fb-reel-1", external_url="https://fb.example/r/1")]
+    assert (await pub.reconcile_cycle())["found"] == 1
+    assert (env.row(primary)["external_id"], env.row(extra)["external_id"]) == ("fb-pic-1", "fb-reel-1")
+    assert len(up.sends) == 2 and [s[0]["id"] for s in up.sends] == [primary, extra]
+    _assert_review_kept(env.row(extra))
+
+
+@pytest.mark.asyncio
+async def test_batch3_expiry_closes_both(env, monkeypatch):
+    """A held extra never outlives its day: the expiry step closes it with its primary — approved or still
+    pending — like any post, and the publish pass skips it once its day is over (it never reads the siblings)."""
+    two_days_ago = mrs.run_date_et() - timedelta(days=2)
+    _up, approved_primary, approved_extra, _r1 = _extra_pair(env, monkeypatch, day=two_days_ago)
+    up = outlets.ADAPTERS["facebook"]
+    _u, pending_primary, pending_extra, _r2 = _extra_pair(env, monkeypatch, adapter=up, day=two_days_ago,
+                                                         primary="pending_review", extra_status="pending_review")
+    reads: List[str] = []
+    real = pub._exec
+
+    async def recording(query, *, op, **ids):
+        reads.append(op)
+        return await real(query, op=op, **ids)
+
+    monkeypatch.setattr(pub, "_exec", recording)
+    counters = await pub.publish_cycle()
+    assert counters["skipped"] == 2 and up.prepare_ids == [] and reads == []
+    assert (await pub._expire_step())["expired"] == 4
+    for pid in (approved_primary, approved_extra, pending_primary, pending_extra):
+        row = env.row(pid)
+        assert row["status"] == "skipped" and row["metadata"]["skip_reason"] == "expired"
+    # B3S-2, through the real publisher step: the approved extra's alert names what it waited for — its primary,
+    # approved but never sent, expired first (the older row) — never the generic configuration reason, which its
+    # primary keeps. The pair the owner never decided alerts nothing.
+    key = env.row(approved_extra)["idempotency_key"]
+    assert env.row(approved_extra)["metadata"]["alert_text"] == (
+        f"⏰ FACEBOOK post expired UNPUBLISHED (run {key[:10]}) — it was approved but never went out (it waited for "
+        "its FACEBOOK picture/text post, which goes first and was still approved but not yet sent when the day "
+        "ended).")
+    assert env.row(approved_primary)["metadata"]["alert_text"].endswith(
+        "(publishing was off, dry-run, capped or not wired).")
+    assert {"alert_kind", "alert_text"}.isdisjoint(env.row(pending_primary)["metadata"])
+    assert {"alert_kind", "alert_text"}.isdisjoint(env.row(pending_extra)["metadata"])
+
+
+@pytest.mark.asyncio
+async def test_batch3_both_posts_open_or_extend_the_go_early_window(env, monkeypatch, caplog):
+    """Both Facebook posts carry /go/facebook: the picture/text post opens the campaign's early window when it is
+    sent, and the video — sent later, once that post is published — extends it (never shortens it)."""
+    clock = {"t": float(int(time.time()))}
+    monkeypatch.setattr(publish_clock, "_wall", lambda: clock["t"])
+    start = clock["t"]
+    up, primary, extra, _run = _extra_pair(env, monkeypatch, primary_caption=_linked("facebook"),
+                                           extra_caption=_linked("facebook"))
+    up.outcomes = [Outcome(SUBMITTED, publish_meta={"upload_post": _up_meta()})]
+    await pub.publish_cycle()
+    assert publish_clock.open_until("facebook") == start + 300 and env.row(extra)["status"] == "approved"
+
+    clock["t"] = start + 100
+    _backdate(env, primary, 660)
+    up.reconcile_results = [ReconcileResult(FOUND, external_id="fb-pic-1")]
+    await pub.reconcile_cycle()                                       # a reconcile FOUND opens nothing
+    assert publish_clock.open_until("facebook") == start + 300
+
+    up.outcomes = [Outcome(SUBMITTED, publish_meta={"upload_post": _up_meta()})]
+    await pub.publish_cycle()
+    assert env.row(extra)["status"] == "queued"
+    assert publish_clock.open_until("facebook") == start + 400 and set(_windows()) == {"facebook"}
+    assert [line.rsplit("post_id=", 1)[1] for line in _window_lines(caplog)] == [primary, extra]
+
+
+# Round-1 fix B3S-3 (2026-10-20): a REHEARSAL is never held. A dry pass sends nothing, so there is no order to keep —
+# and its primary, never written, stays `approved`, so a hold there kept the extra HELD on every tick until expiry:
+# the rehearsal never prepared it, and its prepare-time guards (one video asset, the Threads 500-byte cap, the
+# format route) first ran on the live day. Now a rehearsal extra is prepared like any post, makes no sibling read,
+# and its "would publish" line ends with the live rule; the primary's line is unchanged, and nothing is written.
+
+
+def _sibling_reads(monkeypatch) -> List[Dict[str, Any]]:
+    """Every `publish_extra_siblings` read the publisher makes (its own `_exec` binding)."""
+    reads: List[Dict[str, Any]] = []
+    real = pub._exec
+
+    async def spy(query, *, op, **ids):
+        if op == "publish_extra_siblings":
+            reads.append(ids)
+        return await real(query, op=op, **ids)
+
+    monkeypatch.setattr(pub, "_exec", spy)
+    return reads
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rehearsal", ["dry-run switch", "rehearsal row, live switch"])
+async def test_batch3_a_rehearsal_extra_is_prepared_never_held_and_writes_nothing(env, monkeypatch, caplog,
+                                                                                  rehearsal):
+    """In DRY RUN — or for a rehearsal ROW under a live switch (a string "false" passes the query filter;
+    `is_rehearsal` stops it) — an extra whose primary is still open is NOT held: it is prepared, logs "would publish"
+    with DRY_RUN_EXTRA_NOTE, makes no sibling read, counts as `skipped` (a rehearsal), and nothing is written."""
+    reads = _sibling_reads(monkeypatch)
+    if rehearsal == "dry-run switch":
+        monkeypatch.setattr(pub.settings, "MARKETING_DRY_RUN", True)
+        up, primary, extra, _run = _extra_pair(env, monkeypatch, primary="approved")
+        expected_prepared = [primary, extra]
+    else:
+        # The primary is still pending review: live, the extra would be HELD — as a rehearsal row it never is.
+        up, primary, extra, _run = _extra_pair(env, monkeypatch, primary="pending_review")
+        env.raw(extra)["metadata"] = _review_meta(dry_run="false")
+        expected_prepared = [extra]
+    before = env.snapshot()
+    counters = await pub.publish_cycle()
+    assert env.posts.rows == before and up.sends == [] and reads == []
+    assert up.prepare_ids == expected_prepared and _held_lines(caplog) == []
+    assert counters["skipped"] == len(expected_prepared) and counters["retry"] == 0
+    lines = _messages(caplog, "DRY_RUN: would publish")
+    assert len(lines) == len(expected_prepared)
+    (extra_line,) = [m for m in lines if f"post_id={extra} " in m]
+    note = pub.DRY_RUN_EXTRA_NOTE.format(platform="facebook")
+    assert note == " (live: held until its facebook picture/text post is published or closed)"
+    assert extra_line.endswith("facebook fake payload chars=" + str(len(env.raw(extra)["caption"])) + note)
+    # The primary's line is the line of before, byte for byte: no note on a post that is not an extra.
+    others = [m for m in lines if f"post_id={extra} " not in m]
+    assert len(others) == len(expected_prepared) - 1
+    for line in others:
+        assert f"post_id={primary} " in line
+        assert line.endswith(f"facebook fake payload chars={len(env.raw(primary)['caption'])}")
+
+
+@pytest.mark.asyncio
+async def test_batch3_the_live_twin_of_a_rehearsal_extra_is_still_held(env, monkeypatch, caplog):
+    """The fix moved nothing in a live pass: the same pair under a live switch, both rows live, holds the extra
+    (one sibling read, HELD, `retry`) and sends only the primary."""
+    reads = _sibling_reads(monkeypatch)
+    up, primary, extra, run_id = _extra_pair(env, monkeypatch, primary="approved")
+    up.outcomes = [Outcome(SUBMITTED, publish_meta={"upload_post": _up_meta()})]
+    before = env.row(extra)
+    counters = await pub.publish_cycle()
+    assert env.row(extra) == before and up.prepare_ids == [primary] and [s[0]["id"] for s in up.sends] == [primary]
+    assert len(_held_lines(caplog)) == 1 and counters["retry"] == 1 and counters["submitted"] == 1
+    assert reads == [{"post_id": extra, "run_id": run_id}]
+    assert _messages(caplog, "DRY_RUN") == []
+
+
+@pytest.mark.asyncio
+async def test_batch3_a_dry_run_rehearses_each_extra_through_the_real_prepare(env, monkeypatch, caplog):
+    """What the rehearsal is for (B3S-3): with the REAL Upload-Post prepare, a dry pass logs the Facebook video's
+    own request (kind=video, its own key and request id) with the live rule, and REFUSES a Threads video whose
+    caption is over 500 UTF-8 bytes — on the rehearsal day, not on the live one. Nothing is written or sent."""
+    monkeypatch.setattr(pub.settings, "MARKETING_DRY_RUN", True)
+    reads = _sibling_reads(monkeypatch)
+    fb = _up_adapter(env, monkeypatch, "facebook", cls=_RealPrepareFake)
+    th = _up_adapter(env, monkeypatch, "threads", cls=_RealPrepareFake)
+    _f, fb_primary, fb_extra, _r1 = _extra_pair(env, monkeypatch, adapter=fb, platform="facebook")
+    _t, th_primary, th_extra, _r2 = _extra_pair(env, monkeypatch, adapter=th, platform="threads",
+                                                extra_caption="é" * 251)     # 251 characters, 502 UTF-8 bytes
+    before = env.snapshot()
+    counters = await pub.publish_cycle()
+    assert env.posts.rows == before and fb.sends == th.sends == [] and reads == []
+    assert fb.prepare_ids == [fb_primary, fb_extra] and th.prepare_ids == [th_primary, th_extra]
+    assert counters["skipped"] == 4 and counters["retry"] == counters["failed"] == 0
+    assert _held_lines(caplog) == _held_lines(caplog, "threads") == []
+    day = mrs.run_date_et().isoformat()
+    (fb_line,) = [m for m in _messages(caplog, "DRY_RUN: would publish") if f"post_id={fb_extra} " in m]
+    assert f"facebook via upload-post kind=video request_id={day}:facebook:video:a1 " in fb_line
+    assert fb_line.endswith(pub.DRY_RUN_EXTRA_NOTE.format(platform="facebook"))
+    (refused,) = _messages(caplog, "DRY_RUN: would REFUSE")
+    assert f"post_id={th_extra} platform=threads" in refused and "502 UTF-8 bytes > 500" in refused
+
+
+# Round 2 (2026-10-20), RR2-DRY-EXPIRY-ALERT — the seam between B3S-3 and B3S-2: the publisher holds an extra only in
+# its LIVE pass (never in web dry run, and with publishing off there is no pass at all), so an extra that expires
+# unsent then was never held, and its expiry alert must not say it waited for its picture/text post. The live twin is
+# test_batch3_expiry_closes_both. The gate is in `run_service.expire_stale_posts`.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("switch", ["web dry run", "publishing off"])
+async def test_batch3_an_extra_the_publisher_never_held_expires_with_the_generic_reason(env, monkeypatch, caplog,
+                                                                                        switch):
+    """LIVE rows the owner approved, never sent: in web dry run the day's pass prepares the extra and logs "would
+    publish" (B3S-3, never HELD, nothing written); with publishing off no pass runs. Two days later both expire, and
+    the extra's alert gives the reason its primary gives — never "it waited for its FACEBOOK picture/text post", which
+    no hold made true — with no sibling read for it."""
+    day = mrs.run_date_et()
+    if switch == "web dry run":
+        monkeypatch.setattr(pub.settings, "MARKETING_DRY_RUN", True)
+    else:
+        monkeypatch.setattr(pub.settings, "MARKETING_ENABLED", False)
+    up, primary, extra, _run = _extra_pair(env, monkeypatch, day=day)
+    if switch == "web dry run":
+        before = env.snapshot()
+        counters = await pub.publish_cycle()
+        assert env.posts.rows == before and up.sends == [] and up.prepare_ids == [primary, extra]
+        assert counters["retry"] == 0 and _held_lines(caplog) == []
+        assert any(f"post_id={extra} " in m for m in _messages(caplog, "DRY_RUN: would publish"))
+    ops: List[str] = []
+    real = mrs._exec
+
+    async def spy(query, *, op, **ids):
+        ops.append(op)
+        return await real(query, op=op, **ids)
+
+    monkeypatch.setattr(mrs, "_exec", spy)
+    monkeypatch.setattr(pub, "run_date_et", lambda *_a, **_k: day + timedelta(days=2))
+    assert (await pub._expire_step())["expired"] == 2
+    for pid in (primary, extra):
+        row = env.row(pid)
+        assert row["status"] == "skipped" and row["metadata"]["skip_reason"] == "expired"
+        assert row["metadata"]["alert_kind"] == "expired"
+    generic = "(publishing was off, dry-run, capped or not wired)."
+    key = env.row(extra)["idempotency_key"]
+    assert env.row(extra)["metadata"]["alert_text"] == (
+        f"⏰ FACEBOOK post expired UNPUBLISHED (run {key[:10]}) — it was approved but never went out {generic}")
+    assert env.row(primary)["metadata"]["alert_text"].endswith(generic)
+    assert "expire_extra_siblings" not in ops
+
+
+# Round-1 integration (2026-10-20), B3S-2's second half: when reconcile ESCALATES a platform's PRIMARY post and the
+# run has an APPROVED, live extra video on that platform, the "outcome UNKNOWN" alert ends with
+# ESCALATION_EXTRA_NOTE — `_extra_waits` holds that video while the primary is queued, so the owner's answer is what
+# lets it go (if the day ends first, the expiry alert names its primary: B3S-2's first half). One read, only for a
+# primary on a platform that can carry an extra; a read that fails costs the line (WARNING), never the escalation;
+# every other escalation reads exactly as before.
+
+
+def _escalation_reads(monkeypatch) -> List[Dict[str, Any]]:
+    """Every `escalate_extra_siblings` read the publisher makes (its own `_exec` binding)."""
+    reads: List[Dict[str, Any]] = []
+    real = pub._exec
+
+    async def spy(query, *, op, **ids):
+        if op == "escalate_extra_siblings":
+            reads.append(ids)
+        return await real(query, op=op, **ids)
+
+    monkeypatch.setattr(pub, "_exec", spy)
+    return reads
+
+
+_SPENT_ERROR = "no platform result yet"
+
+
+def _escalating(env: Env, platform: str, *, run_id: Optional[str] = None, fmt: str = "text",
+                error: str = _SPENT_ERROR) -> str:
+    """A queued `platform` post of run `run_id` whose whole check schedule is spent on unknown results: the next
+    reconcile escalates it ("<n> checks could not confirm it; last check: unknown — <error>")."""
+    run_id = run_id or str(uuid.uuid4())
+    pid = env.seed_queued(platform=platform, started_ago=90_000, state="submitted", run_id=run_id, format=fmt,
+                          key=f"{mrs.run_date_et().isoformat()}:{platform}:{fmt}:{run_id[:8]}")
+    env.raw(pid)["metadata"]["publish"]["reconcile"] = {
+        "n": len(outlets.ADAPTERS[platform].reconcile_schedule), "last_at": _now().isoformat(),
+        "last_result": UNKNOWN, "error": error}
+    return pid
+
+
+def _old_escalation(platform: str, *, error: str = _SPENT_ERROR) -> str:
+    """The "outcome UNKNOWN" alert as `_escalate` wrote it before this change, byte for byte."""
+    n = len(outlets.ADAPTERS[platform].reconcile_schedule)
+    return (f"⚠️ {platform.upper()} post — outcome UNKNOWN ({n} checks could not confirm it; last check: unknown — "
+            f"{error}). It may or may not be live.\n"
+            "Tap “It's live” if you can see it, or “Not posted” if it is not there. "
+            "It will NOT be resent automatically.")
+
+
+def _seed_extra(env: Env, platform: str, run_id: str, *, status: str = "approved", meta: Any = _DEFAULT) -> str:
+    return env.seed(platform=platform, status=status, format="video", run_id=run_id, asset_ids=[B3_VIDEO],
+                    key=f"{mrs.run_date_et().isoformat()}:{platform}:video:{run_id[:8]}", meta=meta)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["facebook", "linkedin", "threads"])
+async def test_r1_an_escalated_picture_post_says_its_approved_video_waits_for_the_answer(env, monkeypatch, platform):
+    """The primary of a run whose extra video is approved and live: its alert is the old text plus
+    "\\nIts <PLATFORM> video waits for this answer." after ONE sibling read. Its twin in the same pass — a run with
+    no extra — reads exactly as before, and the extra itself is untouched (still approved, still held)."""
+    _up_adapter(env, monkeypatch, platform)
+    reads = _escalation_reads(monkeypatch)
+    run_id = str(uuid.uuid4())
+    primary = _escalating(env, platform, run_id=run_id)
+    extra = _seed_extra(env, platform, run_id)
+    lone = _escalating(env, platform)
+    extra_before = env.row(extra)
+    counters = await pub.reconcile_cycle()
+    assert counters["escalated"] == 2
+    note = pub.ESCALATION_EXTRA_NOTE.format(platform=platform.upper())
+    assert note == f"\nIts {platform.upper()} video waits for this answer."
+    for pid, text in ((primary, _old_escalation(platform) + note), (lone, _old_escalation(platform))):
+        meta = env.row(pid)["metadata"]
+        assert meta["alert_kind"] == "unknown" and meta["alert_text"] == text
+        assert env.row(pid)["status"] == "queued" and meta["publish"]["state"] == "escalated"
+    assert env.row(extra) == extra_before
+    assert sorted(r["post_id"] for r in reads) == sorted([primary, lone])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status, meta", [
+    ("pending_review", None),            # it still waits for its own review too: the line would say too little
+    ("published", None), ("failed", None), ("rejected", None), ("skipped", None), ("retracted", None),
+    ("approved", {"dry_run": True}),     # a rehearsal row is never held (B3S-3)
+    ("approved", {"dry_run": "false"}),  # nor is anything that is not exactly False
+], ids=["pending_review", "published", "failed", "rejected", "skipped", "retracted", "rehearsal",
+        "dry_run-string"])
+async def test_r1_no_waiting_line_unless_the_extra_is_approved_and_live(env, monkeypatch, status, meta):
+    """The line is said only of an extra the publisher would actually hold: approved and live."""
+    _up_adapter(env, monkeypatch, "facebook")
+    reads = _escalation_reads(monkeypatch)
+    run_id = str(uuid.uuid4())
+    primary = _escalating(env, "facebook", run_id=run_id)
+    _seed_extra(env, "facebook", run_id, status=status, meta=_review_meta(**meta) if meta else _DEFAULT)
+    assert (await pub.reconcile_cycle())["escalated"] == 1
+    assert env.row(primary)["metadata"]["alert_text"] == _old_escalation("facebook")
+    assert [r["post_id"] for r in reads] == [primary]
+
+
+@pytest.mark.asyncio
+async def test_r1_another_platforms_video_of_the_run_never_counts(env, monkeypatch):
+    """The read is the run's posts on the escalated post's OWN platform: the run's approved TikTok video (a primary
+    there) and its approved LinkedIn extra video wait for nothing on Facebook — no line on Facebook's alert."""
+    _up_adapter(env, monkeypatch, "facebook")
+    reads = _escalation_reads(monkeypatch)
+    run_id = str(uuid.uuid4())
+    primary = _escalating(env, "facebook", run_id=run_id)
+    env.seed(platform="tiktok", status="approved", format="video", run_id=run_id, asset_ids=[B3_VIDEO],
+             key=f"{mrs.run_date_et().isoformat()}:tiktok:video:{run_id[:8]}")
+    _seed_extra(env, "linkedin", run_id)
+    assert (await pub.reconcile_cycle())["escalated"] == 1
+    assert env.row(primary)["metadata"]["alert_text"] == _old_escalation("facebook")
+    assert [r["post_id"] for r in reads] == [primary]
+
+
+@pytest.mark.asyncio
+async def test_r1_only_a_primary_on_an_extra_platform_reads_its_siblings(env, monkeypatch):
+    """X, Bluesky, TikTok, Instagram and YouTube carry no extra, and an escalated EXTRA has no video waiting behind
+    it (its primary is not one): none of them makes the read, each beside an approved video row of its own run, and
+    each alert reads exactly as before."""
+    for platform in ("tiktok", "instagram", "youtube", "facebook"):
+        _up_adapter(env, monkeypatch, platform)
+    reads = _escalation_reads(monkeypatch)
+    plain = {}
+    for platform in ("x", "bluesky", "tiktok", "instagram", "youtube"):
+        run_id = str(uuid.uuid4())
+        plain[_escalating(env, platform, run_id=run_id, fmt="video" if platform in ("tiktok", "instagram",
+                                                                                    "youtube") else "text")] = platform
+        env.seed(platform=platform, status="approved", format="video", run_id=run_id, asset_ids=[B3_VIDEO],
+                 key=f"{mrs.run_date_et().isoformat()}:{platform}:video-twin:{run_id[:8]}")
+    run_id = str(uuid.uuid4())
+    env.seed(platform="facebook", status="approved", format="text", run_id=run_id,
+             key=f"{mrs.run_date_et().isoformat()}:facebook:text:{run_id[:8]}")
+    escalated_extra = _escalating(env, "facebook", run_id=run_id, fmt="video")
+    counters = await pub.reconcile_cycle()
+    assert counters["escalated"] == 6 and reads == []
+    for pid, platform in plain.items():
+        assert env.row(pid)["metadata"]["alert_text"] == _old_escalation(platform)
+    assert env.row(escalated_extra)["metadata"]["alert_text"] == _old_escalation("facebook")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["raises", "no list"])
+async def test_r1_a_sibling_read_that_fails_costs_only_the_line(env, monkeypatch, caplog, failure):
+    """A read that raises (a ledger blip) or answers no list: the escalation is recorded as before, without the
+    line, and a WARNING names the post — never an escalation lost to a courtesy line."""
+    _up_adapter(env, monkeypatch, "facebook")
+    run_id = str(uuid.uuid4())
+    primary = _escalating(env, "facebook", run_id=run_id)
+    _seed_extra(env, "facebook", run_id)
+    real = pub._exec
+
+    class _NoRows:
+        data = None
+
+    async def broken(query, *, op, **ids):
+        if op == "escalate_extra_siblings":
+            if failure == "raises":
+                raise mrs.MarketingRunError("ledger down")
+            return _NoRows()
+        return await real(query, op=op, **ids)
+
+    monkeypatch.setattr(pub, "_exec", broken)
+    assert (await pub.reconcile_cycle())["escalated"] == 1
+    row = env.row(primary)
+    assert row["status"] == "queued" and row["metadata"]["publish"]["state"] == "escalated"
+    assert row["metadata"]["alert_text"] == _old_escalation("facebook")
+    (warning,) = _messages(caplog, "its extra video post could not be read", logging.WARNING)
+    assert f"post_id={primary} platform=facebook run_id={run_id}" in warning
+
+
+@pytest.mark.asyncio
+async def test_r1_the_line_is_left_out_rather_than_cut_by_the_alerts_cap(env, monkeypatch):
+    """`scrub` caps an alert at ERROR_TEXT_MAX characters. When the text fits but the line would not, the line is
+    left out — never half of it — and the text is the old one, whole."""
+    _up_adapter(env, monkeypatch, "facebook")
+    room = outlet_base.ERROR_TEXT_MAX - len(_old_escalation("facebook", error=""))
+    error = "e" * (room - 10)                      # 10 characters to spare: less than the line's 45
+    assert len(pub.ESCALATION_EXTRA_NOTE.format(platform="FACEBOOK")) > 10
+    run_id = str(uuid.uuid4())
+    primary = _escalating(env, "facebook", run_id=run_id, error=error)
+    _seed_extra(env, "facebook", run_id)
+    assert (await pub.reconcile_cycle())["escalated"] == 1
+    text = env.row(primary)["metadata"]["alert_text"]
+    assert text == _old_escalation("facebook", error=error) and len(text) == outlet_base.ERROR_TEXT_MAX - 10

@@ -38,9 +38,11 @@ rejected post (`run_service.record_reject_reason`: fenced, a repeat writes nothi
 reason wins) and closes the keyboard. The weekly digest lists them; the judge round calibrates on them.
 
 Review BUNDLES (drop 1, 2026-10-09; MARKETING_REVIEW_BUNDLES, read every cycle — off = everything
-above, unchanged): two decisions a posting day instead of one per post. A run is offered only once it
-reached `media_ready` (all its posts exist), as at most two bundles — "video" (its video posts) and
-"post" (its image / text posts):
+above, unchanged): two decisions a posting day instead of one per post. A run is offered only once all
+its posts exist — it reached `media_ready`, OR its stage checkpoint is `assets_ready`, which the worker
+writes only after `create_posts` answered (2026-10-15: a run that closed `failed` after that checkpoint
+is offered too, instead of letting its finished posts expire unseen; `bundle_offerable`) — as at most
+two bundles — "video" (its video posts) and "post" (its image / text posts):
   1. every member is stamped `metadata.review_bundle` = {id, kind, members, caption_sha} with the
      fenced, merging `transition_post` BEFORE anything is sent (any stamp that does not land holds the
      whole bundle for the next cycle — nothing has been sent yet);
@@ -59,7 +61,41 @@ a small message of its own, threaded under the decision message. A video bundle 
 member that does not carry exactly that video is left out of it (logged at ERROR, a ⚠️ line on the
 decision message), so Approve all never covers a video the owner was not shown. Platforms that cannot publish yet ride
 along as "not sent" previews (stamped `review_preview_at`) and are never part of a decision. Bundle
-taps are honoured whatever the switch says now: they decide only what the owner was shown.
+taps are honoured whatever the switch says now: they decide only what the owner was shown. The decision
+message also says which members post TEXT instead of the day's picture, and why (`image_fallback`, in
+the owner words of `schemas.IMAGE_FALLBACK_REASONS` — never the raw code), and which get an automatic
+first comment (`first_comment`) — both read from what `create_posts` stamped on them (2026-10-15). Those
+notes are best effort (`bundle_extras_lines`): a bug in them costs a ⚠️ line, never the decision.
+Batch 3 (2026-10-20): the VIDEO bundle may also carry the Facebook / LinkedIn / Threads video posts — a
+platform's EXTRA post beside its picture/text post (`schemas.is_extra_format`), on the run's one video like the
+others — so a day is still two decisions; its decision message names them on one more note line, "Goes out
+after its picture/text post is decided: …" (the publisher sends each only after that platform's primary post,
+`publisher_service._extra_waits`). In the per-post flow an extra arrives as its own "<PLATFORM> · video"
+message with its buttons, like any post. On a platform the run gives two posts (`paired_platforms`), a ✂ drop
+rejects ONE post, never the platform, so both decisions say so (round-1 fix DEPLOY-B3-DROP-TEXT): its button
+names the format ("✂ drop FACEBOOK video" / "✂ drop FACEBOOK image" — `drop_label`, kept by a keyboard rebuilt
+after a drop and by that drop's toast and line, `_shown_paired`), and the closing line reads "reject that one
+post" plus which platforms' other post a drop there leaves alone (`drop_lines`). Rejecting a picture/text post
+there in ANY way — ✂ drop, ❌ Reject all, or the ❌ Reject all of a one-member decision, which has no drop —
+releases an approved video, which then goes out alone; so the POSTS decision says so, naming only the reject
+buttons it carries, with one member or many (`released_video_lines`, round-2 send fix, 2026-10-20). A day without
+an extra reads exactly as before.
+A bundle's "DRY RUN" label is read from its POSTS alone — every member a rehearsal row, `is_rehearsal`,
+the publisher's own rule (`dry_run_label`) — never from the run row, whose `dry_run` every re-claim
+rewrites while the posts keep the flag `create_posts` stamped (Batch 1 review, 2026-10-16: a run
+re-claimed in dry run read "DRY RUN" over LIVE posts that Approve all then published). When the run's
+flag disagrees with the posts, or the members disagree among themselves, a ⚠️ line under the decision's
+header says so (`dry_run_lines`).
+
+Quiet Telegram (2026-10-15, plan Batch 1 item 9): in the bundle flow only a DECISION makes the owner's
+phone ring — a bundle's decision message (it carries the buttons). What only SHOWS something — the
+video, the image card, their link fallbacks and a bundle's caption messages — is sent with
+`disable_notification` (Telegram: "a notification with no sound"), so a bundle day rings twice (its two
+decisions), not once per message, and a preview-only bundle rings for nothing. The per-post flow keeps
+today's behaviour apart from its video (and that video's link), which is silent: every per-post message
+rings — a review message (it carries Approve / Reject) and a read-only preview alike. The publish feed
+does the same for its "Posted" replies and keeps its alerts loud. What the bot sends in answer to the
+owner's own tap (the webhook) is unchanged.
 
 Plain text only: no `parse_mode` anywhere, so a caption (model text) can never be read as markup.
 """
@@ -73,7 +109,7 @@ import time
 import uuid
 from collections import OrderedDict
 from datetime import datetime
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import AbstractSet, Any, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
 
 from app.config import settings
 from app.integrations import telegram
@@ -87,8 +123,18 @@ from app.integrations.telegram import (
     TelegramRateLimitException,
     TelegramRequestError,
 )
-from app.schemas.marketing import IMAGE_ROLE_POST, POST_FORMATS
+from app.schemas.marketing import (
+    IMAGE_FALLBACK_REASONS,
+    IMAGE_ROLE_POST,
+    POST_FORMATS,
+    POST_METADATA_FIRST_COMMENT,
+    POST_METADATA_IMAGE_FALLBACK,
+    is_extra_format,
+)
 from app.services.marketing import outlets, publisher_wake
+# The first comment's SENDER rule (Batch 1 item 7). `outlets` imports this module already, so this adds
+# no import edge; the decision message then names exactly what the outlet will send.
+from app.services.marketing.outlet_upload_post import first_comment_of
 from app.services.marketing.run_service import (
     POSTS,
     REVIEW_BUNDLE_KINDS,
@@ -292,9 +338,26 @@ def reject_reason_keyboard(post_id: str) -> Dict[str, Any]:
     ]}
 
 
-def bundle_keyboard(bundle_id: str, members: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _is_paired(post: Dict[str, Any], paired: AbstractSet[str]) -> bool:
+    """Is `post` on a platform the run gives TWO posts (`paired_platforms`)? Never raises on a junk platform value."""
+    platform = post.get("platform")
+    return isinstance(platform, str) and platform in paired
+
+
+def drop_label(post: Dict[str, Any], paired: AbstractSet[str] = frozenset()) -> str:
+    """A ✂ drop button's text: "✂ drop FACEBOOK" — or, on a platform the run gives two posts (`paired`, Batch 3:
+    its picture/text post AND its extra video), "✂ drop FACEBOOK video" / "✂ drop FACEBOOK image": that button
+    rejects that ONE post, never the platform (round-1 fix DEPLOY-B3-DROP-TEXT, 2026-10-20). `paired` empty — every
+    day without an extra — gives exactly the label of before."""
+    name = _platform_name(post)
+    return f"✂ drop {name} {_fmt(post)}" if _is_paired(post, paired) else f"✂ drop {name}"
+
+
+def bundle_keyboard(bundle_id: str, members: List[Dict[str, Any]], *,
+                    paired: AbstractSet[str] = frozenset()) -> Dict[str, Any]:
     """The decision message's buttons: ✅ Approve all (n) / ❌ Reject all, then — when two or more
-    members are still open — one ✂ drop <PLATFORM> per member (a per-post reject; optional)."""
+    members are still open — one ✂ drop <PLATFORM> per member (a per-post reject; optional), its format
+    named on a platform the run gives two posts (`drop_label`, `paired`)."""
     rows: List[List[Dict[str, str]]] = [
         [{"text": f"✅ Approve all ({len(members)})", "callback_data": callback_data("bundle_approve", bundle_id)}],
         [{"text": "❌ Reject all", "callback_data": callback_data("bundle_reject", bundle_id)}],
@@ -304,7 +367,7 @@ def bundle_keyboard(bundle_id: str, members: List[Dict[str, Any]]) -> Dict[str, 
             pid = canonical_post_id(post.get("id"))
             if pid is None:
                 raise ValueError(f"bundle {bundle_id}: member id {post.get('id')!r} is not a uuid")
-            rows.append([{"text": f"✂ drop {_platform_name(post)}", "callback_data": callback_data("bundle_drop", pid)}])
+            rows.append([{"text": drop_label(post, paired), "callback_data": callback_data("bundle_drop", pid)}])
     return {"inline_keyboard": rows}
 
 
@@ -354,6 +417,19 @@ def is_rehearsal(post: Dict[str, Any]) -> bool:
     (`create_posts` writes it on every row; a row without it is never sent)."""
     meta = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
     return meta.get("dry_run") is not False
+
+
+def dry_run_label(posts: List[Dict[str, Any]]) -> bool:
+    """Does "· DRY RUN" belong on a message about `posts` (a bundle's members — its previews when it has
+    none — or the posts that follow the per-post flow's video)? Only when EVERY one is a rehearsal row:
+    `is_rehearsal`, the publisher's own rule, read on each POST — never on the run row. The run's
+    `dry_run` is rewritten by every re-claim (`run_service.claim_run`: the claiming worker's switch),
+    while each post keeps the flag `create_posts` stamped on it, and the publisher reads only the post's
+    (`dry = MARKETING_DRY_RUN or is_rehearsal(post)`). So a run re-claimed in dry run after its posts were
+    recorded LIVE must not read "DRY RUN": Approve all would publish them for real (Batch 1 review,
+    2026-10-16). One live post among them drops the label — never call a post that goes out a rehearsal
+    — and `dry_run_lines` names the rehearsal rows of such a mixed set. Nothing to label → False."""
+    return bool(posts) and all(is_rehearsal(p) for p in posts)
 
 
 def _notified(post: Dict[str, Any]) -> bool:
@@ -408,7 +484,9 @@ def web_send_block(post: Dict[str, Any]) -> Optional[SendBlock]:
     off counts too: `outlet_x.prepare` reads that switch at publish time and refuses the post (it is
     never downgraded to text), so its consequence is a failure, not an expiry."""
     if is_rehearsal(post):
-        return None   # a rehearsal row says "DRY RUN" already
+        # A rehearsal row is never sent and says so already: "DRY RUN" in its header (`compose_post_text`,
+        # `dry_run_label`), or — one rehearsal among live members — its own `dry_run_lines` line.
+        return None
     if not settings.MARKETING_ENABLED:
         return SendBlock("publishing is OFF on the web", _BLOCKED_STAYS_APPROVED)
     if settings.MARKETING_DRY_RUN:
@@ -536,18 +614,250 @@ def _run_series_note(run: Any, run_id: str) -> str:
         return ""
 
 
+#: The decision message's words for an `image_fallback` value outside IMAGE_FALLBACK_REASONS (a newer web
+#: wrote a code this one does not know, or a damaged row): a generic phrase, NEVER the raw value — it is
+#: ledger data, not owner words. The value itself goes to the log (`_image_fallback_words`).
+IMAGE_FALLBACK_UNKNOWN_WORDS = "a reason this version does not recognise (see the logs)"
+#: How much of an unexpected metadata value a log line repeats (it is ledger data of unknown size).
+_LOG_VALUE_CAP = 80
+
+
+def _meta_of(post: Dict[str, Any]) -> Dict[str, Any]:
+    return post["metadata"] if isinstance(post.get("metadata"), dict) else {}
+
+
+def _image_fallback_words(post: Dict[str, Any]) -> Optional[str]:
+    """Why `post` posts TEXT instead of the day's picture, in owner words — or None when it carries no
+    fallback. `create_posts` stamps the CODE (`metadata[POST_METADATA_IMAGE_FALLBACK]`, a key of the closed
+    set IMAGE_FALLBACK_REASONS) on each post frozen as text for a fallback; absent or None = no fallback.
+    Only a TEXT post can have one: a member that carries the picture (image) or is a video never reads
+    "Picture not used", whatever its metadata holds (logged at WARNING — the stamp contradicts the format).
+    A value that is not a known code (an unknown string, a number, a dict) is named generically
+    (IMAGE_FALLBACK_UNKNOWN_WORDS) and logged, never echoed."""
+    code = _meta_of(post).get(POST_METADATA_IMAGE_FALLBACK)
+    if code is None:
+        return None
+    if _fmt(post) != "text":
+        logger.warning("marketing review: post_id=%s platform=%s is a %s post but carries %s=%.*r — the "
+                       "decision message does not call its picture unused", post.get("id"), post.get("platform"),
+                       _fmt(post), POST_METADATA_IMAGE_FALLBACK, _LOG_VALUE_CAP, code)
+        return None
+    words = IMAGE_FALLBACK_REASONS.get(code) if isinstance(code, str) else None
+    if words is None:
+        logger.warning("marketing review: post_id=%s platform=%s carries %s=%.*r, not a code of "
+                       "IMAGE_FALLBACK_REASONS — the decision message names a generic reason", post.get("id"),
+                       post.get("platform"), POST_METADATA_IMAGE_FALLBACK, _LOG_VALUE_CAP, code)
+        return IMAGE_FALLBACK_UNKNOWN_WORDS
+    return words
+
+
+def _gets_first_comment(post: Dict[str, Any]) -> bool:
+    """Will `post` carry an automatic first comment? `create_posts` stamps the exact comment TEXT
+    (`metadata[POST_METADATA_FIRST_COMMENT]`) on each post that will carry one, and the answer is the
+    SENDER's own rule — `outlet_upload_post.first_comment_of`: only the code-owned text, only on a
+    FIRST_COMMENT_PLATFORMS platform (all of which publish through Upload-Post; X and Bluesky never take
+    one) — so the decision message names exactly the platforms whose comment will be sent, never one the
+    outlet would drop. A hand-edited or misplaced stamp is not named (that function logs it at ERROR)."""
+    platform = post.get("platform")
+    if not isinstance(platform, str) or _meta_of(post).get(POST_METADATA_FIRST_COMMENT) is None:
+        return False
+    return first_comment_of(platform, post) is not None
+
+
+#: The line that stands in for the notes when they could not be built (a bug — logged at ERROR with the
+#: stack): the decision still goes out, and says what it cannot tell the owner.
+BUNDLE_EXTRAS_UNAVAILABLE_LINE = ("⚠️ Could not list which platforms post text instead of the picture or get a "
+                                  "first comment (logged).")
+
+
+def bundle_extras_lines(members: List[Dict[str, Any]]) -> List[str]:
+    """The decision message's notes on what Approve all sends (2026-10-15, plan Batch 1 items 7 and 11):
+    "Picture not used today: <owner words> (<PLATFORMS>)" — one line per reason, in member order — and
+    "First comment requested on: <PLATFORMS>": the REQUEST `create_posts` stamped, never an outcome (an
+    async Upload-Post upload reports none — review CTA-2, 2026-10-16), so the owner is never told a comment
+    WAS posted. Batch 3 (2026-10-20): "Goes out after its picture/text post is decided: <PLATFORMS>" names the
+    members that are a platform's EXTRA post (`schemas.is_extra_format` — the Facebook / LinkedIn / Threads
+    video): the publisher holds each until that platform's picture/text post of the run has gone out or been
+    closed (primary first, `publisher_service._extra_waits`), so an approved video still waits for the POSTS
+    decision. Members only: a preview is never sent. [] when none applies — so a day without an extra reads
+    exactly as before.
+
+    Best effort, like the series note (`_run_series_note`): the notes only DESCRIBE what Approve all sends,
+    and the decision message is composed AFTER the media and caption messages went out — a raise here would
+    fail the whole bundle, which the next cycle re-stamps and re-sends (video, picture, captions) and fails
+    again, every cycle until its posts expire, never asking. A bug here, or in the sender's rule these notes
+    read (`outlet_upload_post.first_comment_of`, another module), costs only the notes: logged at ERROR with
+    the stack, and BUNDLE_EXTRAS_UNAVAILABLE_LINE in their place."""
+    try:
+        return _bundle_extras(members)
+    except Exception as e:  # noqa: BLE001 — a note must never hold the day's decision
+        post_ids = [str(p.get("id")) for p in members if isinstance(p, dict)] if isinstance(members, list) else []
+        logger.error("marketing review: the decision notes (picture fallback, first comment) could not be built "
+                     "for post_ids=%s (%s: %s) — the decision message goes out with a warning line instead",
+                     post_ids, type(e).__name__, e, exc_info=True)
+        return [BUNDLE_EXTRAS_UNAVAILABLE_LINE]
+
+
+def _bundle_extras(members: List[Dict[str, Any]]) -> List[str]:
+    """`bundle_extras_lines` without its safety net (it may raise on a bug)."""
+    no_picture: "OrderedDict[str, List[str]]" = OrderedDict()
+    commented: List[str] = []
+    waiting: List[str] = []
+    for post in members:
+        words = _image_fallback_words(post)
+        if words is not None:
+            no_picture.setdefault(words, []).append(_platform_name(post))
+        if _gets_first_comment(post):
+            commented.append(_platform_name(post))
+        if is_extra_format(post.get("platform"), post.get("format")):
+            waiting.append(_platform_name(post))
+    lines = [f"Picture not used today: {words} ({', '.join(names)})" for words, names in no_picture.items()]
+    if commented:
+        lines.append("First comment requested on: " + ", ".join(commented))
+    if waiting:
+        lines.append("Goes out after its picture/text post is decided: " + ", ".join(waiting))
+    return lines
+
+
+def paired_platforms(rows: Any) -> FrozenSet[str]:
+    """The platforms on which a run gives TWO posts, read from `rows` (EVERY post of the run, any status — the
+    sweep's `_run_posts`): an EXTRA video (`schemas.is_extra_format` — Batch 3, Facebook / LinkedIn / Threads)
+    beside a post of that platform that is not one (its picture/text post). Each sits in a different decision
+    (the VIDEO one and the POSTS one), so on such a platform a ✂ drop rejects ONE post, never the platform: the
+    other is decided apart, and rejecting the picture/text post — ✂ drop or ❌ Reject all alike — RELEASES an
+    approved video, which then goes out alone (`publisher_service._extra_waits` holds it only while that post is
+    open; `released_video_lines`). An extra with no other post on its platform is not paired: dropping it does
+    leave the platform out. Empty on a day without an extra (MARKETING_VIDEO_EXTRA_PLATFORMS empty, the default),
+    so every decision text and keyboard is then byte-identical to before (round-1 fix DEPLOY-B3-DROP-TEXT,
+    2026-10-20). Pure; junk rows are skipped."""
+    posts = [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+    extras = {r["platform"] for r in posts if is_extra_format(r.get("platform"), r.get("format"))}
+    return frozenset(p for p in extras
+                     if any(r.get("platform") == p and not is_extra_format(p, r.get("format")) for r in posts))
+
+
+#: The decision message's last line when it carries ✂ drop buttons (two or more members) and no member's platform
+#: has a second post in the run — every day without an extra (the text of before, byte for byte).
+DROP_LINE = "✂ drop = reject that one platform and keep the rest (optional)."
+#: …and when a member's platform does (`paired_platforms`): a drop rejects ONE post — "that one platform" would
+#: be untrue — followed by `drop_lines`' note on what happens to that platform's other post.
+DROP_LINE_PAIRED = "✂ drop = reject that one post and keep the rest (optional)."
+#: The reject buttons a decision message carries, named as they read (`bundle_keyboard`): ❌ Reject all always, ✂ drop
+#: only with two or more members. A note names only a button the message really carries (re-review r3's rule for
+#: the X-image remedy).
+REJECT_BUTTONS_ONE = "❌ Reject all"
+REJECT_BUTTONS_MANY = "❌ Reject all or ✂ drop"
+
+
+def released_video_lines(members: List[Dict[str, Any]], paired: AbstractSet[str] = frozenset(), *,
+                         can_drop: bool) -> List[str]:
+    """What rejecting a picture/text post does to its platform's video, for a decision whose members include a
+    picture/text post on a `paired` platform (`paired_platforms`: the run also gives that platform an EXTRA video,
+    decided in the VIDEO decision): every reject button of this message — ❌ Reject all, and ✂ drop when it carries
+    drops (`can_drop`: two or more members) — rejects that post only, never the video, and closing it RELEASES the
+    video: the publisher holds an extra only while its platform's picture/text post is open
+    (`publisher_service._extra_waits`), so once approved the video then goes out alone. One line naming every such
+    platform — "FACEBOOK also has a video: ❌ Reject all here rejects only the picture/text post — the video, once
+    approved, then goes out alone." (with "❌ Reject all or ✂ drop" when the message carries drops) — or [] when no
+    picture/text member is paired: every day without an extra, and every VIDEO decision (its members are videos;
+    rejecting one releases nothing). Round-2 send fix (2026-10-20): the note spoke of ✂ drop only, while Reject all
+    and a one-member decision's only reject button release the video just the same. Pure."""
+    others = [_platform_name(p) for p in members if _is_paired(p, paired) and _fmt(p) != "video"]
+    if not others:
+        return []
+    buttons = REJECT_BUTTONS_MANY if can_drop else REJECT_BUTTONS_ONE
+    return [f"{', '.join(others)} also {'has' if len(others) == 1 else 'have'} a video: {buttons} here rejects only "
+            "the picture/text post — the video, once approved, then goes out alone."]
+
+
+def drop_lines(members: List[Dict[str, Any]], paired: AbstractSet[str] = frozenset()) -> List[str]:
+    """What a ✂ drop does, for a decision message with two or more members: [DROP_LINE] when no member is on a
+    `paired` platform; else DROP_LINE_PAIRED and, per side, which platforms' OTHER post a drop here leaves alone —
+    a video member ("… also has a picture/text post: ✂ drop here rejects only the video.") and a picture/text
+    member, whose line also says that the video is released by ❌ Reject all as much as by a drop
+    (`released_video_lines`: "… also has a video: ❌ Reject all or ✂ drop here rejects only the picture/text post —
+    the video, once approved, then goes out alone."). Pure."""
+    two = [p for p in members if _is_paired(p, paired)]
+    if not two:
+        return [DROP_LINE]
+    lines = [DROP_LINE_PAIRED]
+    videos = [_platform_name(p) for p in two if _fmt(p) == "video"]
+    if videos:
+        lines.append(f"{', '.join(videos)} also {'has' if len(videos) == 1 else 'have'} a picture/text post: "
+                     "✂ drop here rejects only the video.")
+    return lines + released_video_lines(members, paired, can_drop=True)
+
+
+def _dry_subject(posts: List[Dict[str, Any]], *, whole: bool) -> Tuple[str, str]:
+    """The subject and object pronoun of a `dry_run_lines` sentence: ("these posts were" | "this post was",
+    "them" | "it") when `posts` are every member of the decision (`whole`), else they are named
+    ("X, BLUESKY were")."""
+    one = len(posts) == 1
+    if whole:
+        return ("this post was" if one else "these posts were"), ("it" if one else "them")
+    return f"{', '.join(_platform_name(p) for p in posts)} {'was' if one else 'were'}", ("it" if one else "them")
+
+
+def dry_run_lines(run: Any, members: List[Dict[str, Any]]) -> List[str]:
+    """The decision message's ⚠️ lines when "DRY RUN" — read from the posts alone (`dry_run_label`) — could
+    still mislead the owner, or cannot be said of every member. [] in every ordinary case: the run row and
+    the members agree, or the run's flag is unreadable and the members agree among themselves.
+
+    * The run row is marked dry-run (`dry_run` exactly True) but members were recorded LIVE: a re-claim
+      under a dry-run worker rewrote the run's flag after `create_posts` stamped the posts, and the owner
+      who just set dry run expects a rehearsal. "approving publishes it/them" is said only while nothing on
+      the web holds any of those members back (`web_send_block` None for each): otherwise the blocker lines
+      that follow say what approving does now, and this line never contradicts them.
+    * Members were recorded as a DRY RUN while the run row is marked live (exactly False) — the reverse
+      re-claim — or while other members are live (a mixed set: the header then carries no label): approving
+      records the decision but the publisher never sends a rehearsal row.
+
+    Only a real bool on the run row counts (`claim_run` writes `bool(dry_run)`; anything else — a
+    hand-edited row — says nothing about the run). Pure: no I/O; the members' own flags are
+    `is_rehearsal`'s."""
+    if not members:
+        return []
+    live = [p for p in members if not is_rehearsal(p)]
+    rehearsal = [p for p in members if is_rehearsal(p)]
+    flag = run.get("dry_run") if isinstance(run, dict) else None
+    lines: List[str] = []
+    if flag is True and live:
+        subject, them = _dry_subject(live, whole=not rehearsal)
+        line = f"⚠️ The run is now marked dry-run, but {subject} recorded LIVE (not a rehearsal)"
+        if all(web_send_block(p) is None for p in live):
+            line += f": approving publishes {them}"
+        lines.append(line + ".")
+    if rehearsal and (live or flag is False):
+        subject, them = _dry_subject(rehearsal, whole=not live)
+        lead = "The run is now marked live, but " if flag is False else ""
+        lines.append(f"⚠️ {lead}{subject} recorded as a DRY RUN: approving will not send {them}.")
+    return lines
+
+
 def compose_bundle_decision_text(kind: str, members: List[Dict[str, Any]], previews: List[Dict[str, Any]],
-                                 run_date: str, dry: bool, warnings: List[str], *, series_note: str = "") -> str:
-    """The decision message: what Approve all sends, what is not sent, why an approval would not go
-    out (`web_send_blocker`, per blocker), and the media warnings. One message (it carries the keyboard).
-    Drop 2: `series_note` (`digest_service._series_note`: operator labels and fixed words only) names the
-    series the day posted and the fallback it took; "" — a lesson-only day — adds no line."""
+                                 run_date: str, dry: bool, warnings: List[str], *, series_note: str = "",
+                                 dry_notes: Optional[List[str]] = None,
+                                 paired: AbstractSet[str] = frozenset()) -> str:
+    """The decision message: what Approve all sends, what is not sent, which members post text instead
+    of the day's picture and which get a first comment (`bundle_extras_lines`), why an approval would not
+    go out (`web_send_blocker`, per blocker), and the media warnings. One message (it carries the
+    keyboard). Drop 2: `series_note` (`digest_service._series_note`: operator labels and fixed words only)
+    names the series the day posted and the fallback it took; "" — a lesson-only day — adds no line.
+    `dry_notes` (`dry_run_lines`) go right under the header: they qualify its DRY RUN label (or its
+    absence), and the top of the message is never what the 4,096 cap trims. With two or more members it
+    ends with what a ✂ drop does (`drop_lines`): `paired` (`paired_platforms` of the run) names the platforms
+    the run gives two posts, on which a drop rejects one post, not the platform; empty = the line of before.
+    With ONE member — no ✂ drop, so no drop line — it ends with what its ❌ Reject all does to a paired platform's
+    video (`released_video_lines`): rejecting the picture/text post releases it; [] when the member is not paired,
+    so the text of before."""
     lines = [f"DECISION · {'VIDEO' if kind == 'video' else 'POSTS'} · run {run_date}" + (" · DRY RUN" if dry else "")]
+    lines += dry_notes or []
     if series_note:
         lines.append(f"Series: {series_note}")
     lines.append("Approve all sends: " + ", ".join(_platform_label(p) for p in members))
     if previews:
         lines.append("Not sent: " + ", ".join(f"{_platform_name(p)} (preview — not wired yet)" for p in previews))
+    lines += bundle_extras_lines(members)
     blocked: "OrderedDict[str, List[str]]" = OrderedDict()
     for post in members:
         blocker = web_send_blocker(post)
@@ -557,7 +867,11 @@ def compose_bundle_decision_text(kind: str, members: List[Dict[str, Any]], previ
         lines.append(f"⚠️ {blocker}: {_before_approval(blocker, ', '.join(names), can_drop=len(members) > 1)}")
     lines += warnings
     if len(members) > 1:
-        lines.append("✂ drop = reject that one platform and keep the rest (optional).")
+        lines += drop_lines(members, paired)
+    else:
+        # One member: its only reject button is ❌ Reject all, and on a paired picture/text post it releases the
+        # platform's video just as a drop would — say so, naming no ✂ drop the message does not carry.
+        lines += released_video_lines(members, paired, can_drop=False)
     return _truncate_utf16("\n".join(lines), MAX_MESSAGE_CHARS)
 
 
@@ -701,9 +1015,11 @@ def _post_media(svc: Any, post: Dict[str, Any], assets: Dict[str, Dict[str, Any]
 
 async def _send_video_link(chat_id: int, caption: str, url: str, pacer: _Pacer, *, run_id: str,
                            what: str = "video") -> bool:
+    """The video's (or the image card's) link as a plain message — SILENT, like the media it stands in
+    for (Quiet Telegram, 2026-10-15: only a decision makes the owner's phone ring)."""
     try:
         await pacer.wait()
-        await telegram.send_message(chat_id, f"{caption}\n{url}")
+        await telegram.send_message(chat_id, f"{caption}\n{url}", disable_notification=True)
         return True
     except TelegramRateLimitException:
         raise
@@ -715,9 +1031,10 @@ async def _send_video_link(chat_id: int, caption: str, url: str, pacer: _Pacer, 
 
 async def _send_run_video(svc: Any, chat_id: int, run_id: str, run_date: str, video: Dict[str, Any],
                           dry: bool, pacer: _Pacer, *, caption: Optional[str] = None) -> bool:
-    """Send the video (or, when Telegram cannot fetch it or the send is ambiguous, a link to it).
-    False = neither went out; the run's posts are then held back a cycle — the reviewer must see
-    the media first. `caption` replaces the per-post flow's caption (a review bundle names its
+    """Send the video (or, when Telegram cannot fetch it or the send is ambiguous, a link to it) —
+    SILENTLY, in both flows: it only shows what the decision that follows is about (Quiet Telegram,
+    2026-10-15). False = neither went out; the run's posts are then held back a cycle — the reviewer
+    must see the media first. `caption` replaces the per-post flow's caption (a review bundle names its
     platforms)."""
     url = svc.public_url(str(video["storage_path"]))
     if caption is None:
@@ -731,7 +1048,7 @@ async def _send_run_video(svc: Any, chat_id: int, run_id: str, run_date: str, vi
                                       pacer, run_id=run_id)
     try:
         await pacer.wait()
-        await telegram.send_video(chat_id, url, caption=caption)
+        await telegram.send_video(chat_id, url, caption=caption, disable_notification=True)
         return True
     except TelegramRateLimitException:
         raise
@@ -771,7 +1088,7 @@ def _pick_image(run_id: str, run: Dict[str, Any], assets: List[Dict[str, Any]],
 async def _send_bundle_photo(svc: Any, chat_id: int, run_id: str, image: Dict[str, Any], caption: str,
                              pacer: _Pacer) -> bool:
     """Send the image card (or, when Telegram cannot fetch it or the send is ambiguous, a link to it) —
-    `_send_run_video`'s rules. False = neither went out; the bundle is held back a cycle."""
+    `_send_run_video`'s rules, silent like it. False = neither went out; the bundle is held back a cycle."""
     url = svc.public_url(str(image["storage_path"]))
     caption = _truncate_utf16(caption, MAX_CAPTION_CHARS)
     size = image.get("bytes")
@@ -781,7 +1098,7 @@ async def _send_bundle_photo(svc: Any, chat_id: int, run_id: str, image: Dict[st
         return await _send_video_link(chat_id, caption, url, pacer, run_id=run_id, what="image")
     try:
         await pacer.wait()
-        await telegram.send_photo(chat_id, url, caption=caption)
+        await telegram.send_photo(chat_id, url, caption=caption, disable_notification=True)
         return True
     except TelegramRateLimitException:
         raise
@@ -904,7 +1221,9 @@ async def _review_run(svc: Any, chat_id: int, run_id: str, posts: List[Dict[str,
     by_id = {str(a.get("id")): a for a in assets if isinstance(a, dict)}
     video = _pick_video(run_id, run, list(by_id.values()), posts)
     if video is not None:
-        dry = bool(run.get("dry_run")) or any(is_rehearsal(p) for p in posts)
+        # From the posts that follow it, never the run row (`dry_run_label`); each post's own message
+        # carries its own label (`compose_post_text`), as it always did.
+        dry = dry_run_label(posts)
         if not await _send_run_video(svc, chat_id, run_id, run_date, video, dry, pacer):
             counters["failed"] += len(posts)
             return
@@ -929,7 +1248,11 @@ async def _notify_post(svc: Any, chat_id: int, post: Dict[str, Any], run_date: s
         for i, chunk in enumerate(chunks):
             markup = review_keyboard(post_id) if (i == len(chunks) - 1 and not preview) else None
             await pacer.wait()
-            message_ids.append(_message_id(await telegram.send_message(chat_id, chunk, reply_markup=markup)))
+            # Every per-post message rings, as it did before Quiet Telegram: a review message is a DECISION
+            # (it carries Approve / Reject), and a read-only preview keeps today's behaviour — only the
+            # per-post flow's video is silent.
+            message_ids.append(_message_id(await telegram.send_message(chat_id, chunk, reply_markup=markup,
+                                                                       disable_notification=False)))
     except TelegramRateLimitException:
         raise
     except asyncio.CancelledError:
@@ -956,9 +1279,28 @@ async def _notify_post(svc: Any, chat_id: int, post: Dict[str, Any], run_date: s
 
 # ── the sweep, review bundles (MARKETING_REVIEW_BUNDLES) ───────────────────────
 
-#: The run status a bundle waits for. The worker sets it right after `create_posts` answered, so every
-#: post of the run exists: a bundle offered earlier could miss members recorded after it.
+#: What a bundle waits for: proof that EVERY post of the run exists — a bundle offered earlier could miss
+#: members recorded after it. Either one proves it:
+#:   * the run status `media_ready` — the worker's last write, right after the checkpoint below;
+#:   * the stage checkpoint `assets_ready` — the worker's checkpoint PATCH for the stage that calls
+#:     `create_posts`, written only after that call answered (backend/marketing/main.py `run_pipeline`;
+#:     `MEDIA_STAGES` maps "assets_ready" to `stage_posts`, pinned by a test), whatever the status. A tick
+#:     that dies between the two writes (a lost media_ready PATCH, a crash) leaves the run `failed` (or a
+#:     stale `in_progress`) at `assets_ready` with every post recorded — and waiting for `media_ready` let
+#:     that day's finished posts expire unseen (2026-10-15, plan Batch 1 item 10).
+#: A run before that checkpoint stays held, even when it closed `failed`: at `rendered`, `create_posts`
+#: may never have answered, so its posts are not known to be complete.
 _BUNDLE_RUN_STATUS = "media_ready"
+_BUNDLE_RUN_STAGE = "assets_ready"
+
+
+def bundle_offerable(run: Any) -> bool:
+    """May `run`'s bundles be offered now (every post of it exists)? True when its status is `media_ready`
+    OR its stage checkpoint is `assets_ready` (see above). Exact string matches only: a missing row, or a
+    status / stage of any other value or type, holds the run."""
+    if not isinstance(run, dict):
+        return False
+    return run.get("status") == _BUNDLE_RUN_STATUS or run.get("stage") == _BUNDLE_RUN_STAGE
 
 
 def _previewed(post: Dict[str, Any]) -> bool:
@@ -976,16 +1318,25 @@ async def _run_posts(svc: Any, run_id: str) -> List[Dict[str, Any]]:
 
 async def _review_run_bundles(svc: Any, chat_id: int, run_id: str, posts: List[Dict[str, Any]], pacer: _Pacer,
                               counters: Dict[str, int]) -> None:
-    """A run's bundles — nothing until the run reached media_ready; then its video bundle, then its
-    post bundle. Members are the open posts of ENABLED platforms; the rest ride along as previews."""
+    """A run's bundles — nothing until every post of the run exists (`bundle_offerable`: media_ready, or
+    the assets_ready checkpoint); then its video bundle, then its post bundle. Members are the open posts
+    of ENABLED platforms; the rest ride along as previews."""
     try:
         run = await svc.get_run(run_id) or {}
-        if run.get("status") != _BUNDLE_RUN_STATUS:
-            logger.info("marketing review: run_id=%s is %r, not %s — its %d post(s) wait for it before they "
-                        "are offered as a bundle", run_id, run.get("status") if run else "missing",
-                        _BUNDLE_RUN_STATUS, len(posts))
+        if not bundle_offerable(run):
+            logger.info("marketing review: run_id=%s is %r at stage %r — neither %s nor the %s checkpoint, so "
+                        "its %d post(s) wait for it before they are offered as a bundle", run_id,
+                        run.get("status") if isinstance(run, dict) and run else "missing",
+                        run.get("stage") if isinstance(run, dict) else None,
+                        _BUNDLE_RUN_STATUS, _BUNDLE_RUN_STAGE, len(posts))
             counters["held"] += len(posts)
             return
+        if run.get("status") != _BUNDLE_RUN_STATUS:
+            # Degraded but safe: the posts all exist (the checkpoint follows create_posts' answer) while
+            # the run itself never reached media_ready — usually a tick that died after the checkpoint.
+            logger.warning("marketing review: run_id=%s is %r but reached the %s checkpoint (create_posts "
+                           "answered: every post exists) — offering its %d open post(s) as bundles anyway, so "
+                           "they do not expire unseen", run_id, run.get("status"), _BUNDLE_RUN_STAGE, len(posts))
         rows = await _run_posts(svc, run_id)
         assets = await svc.list_assets(run_id)
     except asyncio.CancelledError:
@@ -1008,20 +1359,25 @@ async def _review_run_bundles(svc: Any, chat_id: int, run_id: str, posts: List[D
             counters["failed"] += 1
             continue
         open_rows.append(row)
+    # The platforms this run gives two posts (Batch 3), read from EVERY post of the run: the other post of such a
+    # platform sits in the other decision, so the ✂ drop wording and labels must say a drop rejects ONE post.
+    paired = paired_platforms(rows)
     for kind in REVIEW_BUNDLE_KINDS:
         of_kind = [r for r in open_rows if bundle_kind(r) == kind]
         members = [r for r in of_kind if str(r.get("platform")) in enabled]
         previews = [r for r in of_kind if str(r.get("platform")) not in enabled and not _previewed(r)]
         if members or previews:
             await _notify_bundle(svc, chat_id, run_id, run, run_date, kind, members, previews, by_id, pacer,
-                                 counters)
+                                 counters, paired=paired)
 
 
 async def _notify_bundle(svc: Any, chat_id: int, run_id: str, run: Dict[str, Any], run_date: str, kind: str,
                          members: List[Dict[str, Any]], previews: List[Dict[str, Any]],
-                         assets: Dict[str, Dict[str, Any]], pacer: _Pacer, counters: Dict[str, int]) -> None:
+                         assets: Dict[str, Dict[str, Any]], pacer: _Pacer, counters: Dict[str, int], *,
+                         paired: AbstractSet[str] = frozenset()) -> None:
     """One bundle: stamp the members → the media → one message per distinct caption → the decision
-    message → stamp them notified (at least once; see the module docstring)."""
+    message → stamp them notified (at least once; see the module docstring). `paired`: the run's
+    `paired_platforms` (the ✂ drop wording and labels)."""
     asset_list = list(assets.values())
     warnings: List[str] = []
     # 0. A video bundle shows ONE video, and ✅ Approve all must never cover a video the owner was not
@@ -1084,7 +1440,18 @@ async def _notify_bundle(svc: Any, chat_id: int, run_id: str, run: Dict[str, Any
         stamped.append(updated)
     members = stamped
     everyone = members + previews
-    dry = bool(run.get("dry_run")) or any(is_rehearsal(p) for p in everyone)
+    # The DRY RUN label of every message of this bundle — from the posts Approve all decides (the previews
+    # when there are none), never from the run row: a re-claim rewrites its flag, the posts keep theirs, and
+    # the publisher reads only the post's (`dry_run_label`). Where the two disagree, or the members do, the
+    # decision message says so under its header (`dry_run_lines`).
+    dry = dry_run_label(members or previews)
+    dry_notes = dry_run_lines(run, members)
+    if dry_notes:
+        logger.warning("marketing review: %s bundle bundle_id=%s run_id=%s — dry-run flags differ (run row "
+                       "dry_run=%.*r; live posts=%s; rehearsal posts=%s): labelled from the posts (the publisher's "
+                       "rule) and the decision message says so", kind, bundle_id, run_id, _LOG_VALUE_CAP,
+                       run.get("dry_run"), [p.get("platform") for p in members if not is_rehearsal(p)],
+                       [p.get("platform") for p in members if is_rehearsal(p)])
 
     # 2. The media first — the owner sees what is posted before the decision (the video picked in 0.).
     if kind == "video":
@@ -1122,15 +1489,19 @@ async def _notify_bundle(svc: Any, chat_id: int, run_id: str, run: Dict[str, Any
             last: Optional[int] = None
             for chunk in split_message(compose_bundle_caption_text(group, preview_ids, run_date, dry)):
                 await pacer.wait()
-                last = _message_id(await telegram.send_message(chat_id, chunk))
+                # A caption message only SHOWS the text: silent (Quiet Telegram, 2026-10-15).
+                last = _message_id(await telegram.send_message(chat_id, chunk, disable_notification=True))
             for post in group:
                 shown_at[canonical_post_id(post.get("id"))] = last
         if members:
             text = compose_bundle_decision_text(kind, members, previews, run_date, dry, warnings,
-                                                series_note=_run_series_note(run, run_id))
+                                                series_note=_run_series_note(run, run_id), dry_notes=dry_notes,
+                                                paired=paired)
             await pacer.wait()
-            decision_mid = _message_id(await telegram.send_message(chat_id, text,
-                                                                   reply_markup=bundle_keyboard(bundle_id, members)))
+            # THE decision (it carries the buttons): never silent — it is what the owner's phone rings for.
+            decision_mid = _message_id(await telegram.send_message(
+                chat_id, text, reply_markup=bundle_keyboard(bundle_id, members, paired=paired),
+                disable_notification=False))
     except (TelegramRateLimitException, asyncio.CancelledError):
         raise
     except TelegramException as e:
@@ -1482,6 +1853,32 @@ def _tapped_bundle_id(message: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _shown_paired(message: Dict[str, Any], posts: List[Any]) -> FrozenSet[str]:
+    """The platforms of `posts` whose ✂ drop button on the TAPPED message carried the post's format — the run gave
+    them two posts when the bundle was offered (`paired_platforms`, `drop_label`). Read from that keyboard (Telegram
+    returns the message, keyboard included, with every tap — `_tapped_bundle_id`), so a keyboard rebuilt after a
+    drop, the drop's toast and its verdict line name a post exactly as the owner was shown it, with no read of the
+    run. Only an exact match of our own paired label counts (no button text is ever echoed); a keyboard that cannot
+    be read degrades to the plain "<PLATFORM>" naming — the decision message's own text still says what a drop
+    does there."""
+    markup = message.get("reply_markup") if isinstance(message.get("reply_markup"), dict) else {}
+    rows = markup.get("inline_keyboard") if isinstance(markup.get("inline_keyboard"), list) else []
+    shown: Dict[str, Any] = {}
+    for row in rows:
+        for button in row if isinstance(row, list) else []:
+            parsed = parse_callback_data(button.get("callback_data")) if isinstance(button, dict) else None
+            if parsed and parsed[0] == "bundle_drop":
+                shown[parsed[1]] = button.get("text")
+    out = set()
+    for post in posts:
+        if not isinstance(post, dict):
+            continue
+        platform, pid = post.get("platform"), canonical_post_id(post.get("id"))
+        if isinstance(platform, str) and pid is not None and shown.get(pid) == drop_label(post, {platform}):
+            out.add(platform)
+    return frozenset(out)
+
+
 def _bundle_kind_word(results: List[Dict[str, Any]]) -> str:
     kinds = {(review_bundle_of(r.get("row")) or {}).get("kind") for r in results}
     return "video" if kinds == {"video"} else ("posts" if kinds == {"post"} else "")
@@ -1591,6 +1988,9 @@ async def _handle_bundle_drop(post_id: str, *, cq_id: str, chat_id: int, message
         await _answer(cq_id, "Could not record that — tap again", post_id=post_id)
         return {"ok": True, "outcome": "error", "post_id": post_id}
     name = _platform_name(row) if row else "The post"
+    if row and _shown_paired(message, [row]):
+        # Its button named the post's format (the run gives that platform two posts): so do the toast and the line.
+        name = f"{name} {_fmt(row)}"
     if outcome == "rejected":
         toast, line = f"Dropped {name} ✂", f"✂ Dropped {name} {_et_clock()} — the rest stay open"
     elif outcome == "not_found":
@@ -1621,8 +2021,9 @@ async def _handle_bundle_drop(post_id: str, *, cq_id: str, chat_id: int, message
     await _answer(cq_id, toast, post_id=post_id)
     text = append_verdict(message.get("text"), line)
     if bundle_id and still_open:
-        await _set_keyboard(chat_id, message, bundle_keyboard(bundle_id, still_open), post_id=post_id, text=text,
-                            fallback_text=f"{line}. The rest of this bundle:")
+        await _set_keyboard(chat_id, message, bundle_keyboard(bundle_id, still_open,
+                                                               paired=_shown_paired(message, still_open)),
+                            post_id=post_id, text=text, fallback_text=f"{line}. The rest of this bundle:")
     else:
         await _edit(chat_id, message.get("message_id"), text, post_id=post_id)
     if offer_reason:
@@ -1638,6 +2039,8 @@ async def _offer_drop_reasons(chat_id: int, message: Dict[str, Any], post_id: st
     CancelledError)."""
     platform = (row or {}).get("platform")
     what = f"the {str(platform).upper()} post" if platform else "this post"
+    if row and _shown_paired(message, [row]):
+        what = f"the {str(platform).upper()} {_fmt(row)} post"     # named as its ✂ drop button named it
     message_id = message.get("message_id")
     try:
         await telegram.send_message(chat_id, f"Why was {what} dropped? Tap a reason (optional).",

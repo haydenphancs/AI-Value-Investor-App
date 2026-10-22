@@ -132,7 +132,7 @@ def _independent_worst_case_generation_seconds() -> float:
                 + sum(ss._FINISH_BACKOFF_SECONDS * k for k in range(1, ss._FINISH_ATTEMPTS))
                 + stmt)  # the `_landed` re-read after a retry matched nothing
     per_call = ss.worst_case_model_call_seconds() + refresh
-    holder_read = stmt  # `_holder_renders_images`: one run read after the last model call
+    holder_read = stmt  # `_holder_image_block`: one run read after the last model call
     return 2 * stmt + stmt + MODEL_CALLS_PER_GENERATION * per_call + holder_read + terminal
 
 

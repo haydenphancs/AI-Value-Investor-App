@@ -1,10 +1,13 @@
 """
 Which Learn item, in which template, on which day (SYSTEM_DESIGN_GUIDELINES §12.5).
 
-Pure. Two decisions, both a function of the ET run date and the set of eligible items:
+Pure, given the posting days (a setting read at call time, below). Two decisions, both a function of
+the ET run date and the set of eligible items:
 
 * **Cadence.** The plan's reach research says 3-5 varied posts a week beat seven identical ones,
-  so only `POST_WEEKDAYS` are posting days; the rest are rest days (the run closes `skipped`).
+  so only the posting days post — `POST_WEEKDAYS` (Mon/Tue/Thu/Sat) by default, the web setting
+  MARKETING_POST_WEEKDAYS since Batch 3 (seven varied days once Company Weekly runs); the rest are rest
+  days (the run closes `skipped`).
 * **Rotation.** Posting days are numbered from `EPOCH` (the POSTING-DAY ordinal, so rest days do
   not burn picks), and `daily_rotation.pick_for_day` walks the pool in disjoint cycles — every
   eligible item once before any repeats. Its schedule reshuffles whenever the pool changes
@@ -22,23 +25,52 @@ template → "A", a series id → its class). With only class "A" enabled every 
 top of the classes: `parse_news_series` reads the web setting MARKETING_NEWS_SERIES into the shipped
 series it leaves on, which the caller passes to `enabled_chain` as its `shipped` set. Every series
 has shipped since drop 2b; the switch's default (the 2a four) keeps the 2b series off in production.
+
+Batch 3 (2026-10-20, owner decision 3) makes the cadence a switch: the web setting
+MARKETING_POST_WEEKDAYS, parsed by `parse_post_weekdays` and read at CALL time by `post_weekdays()`
+(its default is `POST_WEEKDAYS`, kept as the DEFAULT_POST_WEEKDAYS). `is_posting_day`,
+`posting_ordinal` and `plan_for` read it (their `weekdays` argument defaults to it; `choose` reads it
+once per call), and so do the digest and the run-health timing. `plan_for` gives Wednesday and Friday
+Thursday's calendar (earnings in season, then the Money Map tail) and Sunday the Money Map tail alone —
+never earnings, which leads Wed/Thu/Fri only; Saturday stays the one lesson-only day. With the default
+every calendar answer is today's, byte for byte. `news_recent_limit()` sizes the ledger read the script
+service makes from it: RECENT_WINDOW posting days of history — 240 rows at four days a week, 420 at seven.
+
+Why a switch mid-week can neither repeat nor skip a lesson: the switch renumbers the posting ordinal,
+which moves the rotation's OWN pick — but `choose` skips the last pool − 1 lessons it is given (a pool
+of up to RECENT_WINDOW + 1), and once the read holds that many, that rule alone decides every pick (the
+one lesson not among them), whatever the ordinal says. `news_recent_limit()` scales the read with the
+cadence so it holds them: RECENT_WINDOW weeks of history even when Saturday is the week's only lesson
+(420 rows = 60 Saturdays at seven days).
+One gap is accepted: right after a switch from seven days back to four the read is 240 rows, about 34
+weeks of seven-day history — every lesson of today's 34-item pool, but not of a pool above ~35 in weeks
+whose only lesson is Saturday's. A week without "sat" posts a lesson only when a news day falls through
+to it (the parse warns). tests/test_marketing_selection.py simulates the switches.
 """
 
 from __future__ import annotations
 
+import functools
 import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any, FrozenSet, Iterable, List, Optional, Sequence, Tuple
 
+# FMP-free (the settings object only, as smart_link reads it): the posting days are read at call time.
+from app.config import settings
 from app.services.daily_rotation import pick_for_day
 # Pure (no FMP, no I/O): the SEC's 13F due dates on the federal business-day calendar.
 from app.services.trillion_club.rules import previous_quarter, sec_13f_due_date
 
 logger = logging.getLogger(__name__)
 
-#: Monday, Tuesday, Thursday, Saturday — four posting days a week.
+#: Monday, Tuesday, Thursday, Saturday — four posting days a week: the DEFAULT. Since Batch 3 the posting
+#: days are the web setting MARKETING_POST_WEEKDAYS, read at call time (`post_weekdays()`); this tuple is its
+#: declared default, parsed (pinned), and what every golden pick in the tests was cut against.
 POST_WEEKDAYS = (0, 1, 3, 5)
+DEFAULT_POST_WEEKDAYS: Tuple[int, ...] = POST_WEEKDAYS
+#: MARKETING_POST_WEEKDAYS' tokens, indexed by `date.weekday()` (0 = Monday). Pinned == config's inline literal.
+WEEKDAY_TOKENS: Tuple[str, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 #: A fixed Monday. The posting-day ordinal counts from here; changing it reshuffles everything.
 EPOCH = date(2026, 9, 21)
@@ -109,16 +141,90 @@ class Selection:
     posting_ordinal: Optional[int] = None
 
 
-def is_posting_day(run_date: date) -> bool:
-    return run_date.weekday() in POST_WEEKDAYS
+# ── Batch 3 (2026-10-20): the posting days are a switch ────────────────────────
 
 
-def posting_ordinal(run_date: date) -> int:
-    """How many posting days lie between `EPOCH` (inclusive) and `run_date` (exclusive).
-    Negative before the epoch; floor division keeps it consistent across the boundary."""
-    days = (run_date - EPOCH).days
-    weeks, offset = divmod(days, 7)  # EPOCH is a Monday, so `offset` is the weekday
-    return weeks * len(POST_WEEKDAYS) + sum(1 for w in POST_WEEKDAYS if w < offset)
+def parse_post_weekdays(raw: Any) -> Tuple[int, ...]:
+    """The posting days a MARKETING_POST_WEEKDAYS value names, as sorted `date.weekday()` numbers
+    (0 = Monday). Pure, never raises, never empty.
+
+    Three-letter tokens only (WEEKDAY_TOKENS), comma-separated; each stripped and lower-cased, empty
+    tokens skipped, duplicates collapsed. An unknown token is DROPPED (ERROR); an empty value, one with
+    no known day left, or a non-string is DEFAULT_POST_WEEKDAYS (ERROR) — a typo can never leave a
+    week without a posting day. A week without "sat" (Saturday is the one lesson-only day, `plan_for`)
+    is WARNED, not forced. Memoised on the raw string, so a bad live value logs once, not on every
+    read; every logged token is bounded."""
+    if not isinstance(raw, str):
+        logger.error("MARKETING_POST_WEEKDAYS: not a string (%s) — using the default %s", type(raw).__name__,
+                     _weekday_text(DEFAULT_POST_WEEKDAYS))
+        return DEFAULT_POST_WEEKDAYS
+    return _parse_post_weekdays_text(raw)
+
+
+@functools.lru_cache(maxsize=16)
+def _parse_post_weekdays_text(raw: str) -> Tuple[int, ...]:
+    """`parse_post_weekdays` for a string: cached, so its logging happens once per distinct value."""
+    tokens = {t.strip().lower() for t in raw.split(",") if t.strip()}
+    unknown = sorted(tokens - set(WEEKDAY_TOKENS))
+    if unknown:
+        logger.error("MARKETING_POST_WEEKDAYS: ignored unknown day(s) %s — the tokens are %s",
+                     ",".join(t[:24] for t in unknown[:10]), ",".join(WEEKDAY_TOKENS))
+    days = tuple(i for i, token in enumerate(WEEKDAY_TOKENS) if token in tokens)
+    if not days:
+        logger.error("MARKETING_POST_WEEKDAYS: no posting day left — using the default %s",
+                     _weekday_text(DEFAULT_POST_WEEKDAYS))
+        return DEFAULT_POST_WEEKDAYS
+    if WEEKDAY_TOKENS.index("sat") not in days:
+        logger.warning("MARKETING_POST_WEEKDAYS: %s has no sat — Saturday is the week's one lesson-only day; "
+                       "without it a news week posts the lesson only when a news day falls through to it",
+                       _weekday_text(days))
+    return days
+
+
+def _weekday_text(days: Iterable[int]) -> str:
+    return ",".join(WEEKDAY_TOKENS[d] for d in days)
+
+
+def post_weekdays() -> Tuple[int, ...]:
+    """The posting days NOW: the web setting MARKETING_POST_WEEKDAYS, read from the settings object at
+    CALL time — nothing derived from it is frozen at import, so the object in force (a redeploy's, a
+    test's patch) always decides — and parsed by `parse_post_weekdays`."""
+    return parse_post_weekdays(settings.MARKETING_POST_WEEKDAYS)
+
+
+def news_recent_limit() -> int:
+    """How many ledger rows a day's selection reads (`script_service`: the lesson rotation and the
+    template build's exclude set): RECENT_WINDOW posting days of history at the CURRENT cadence —
+    240 at the default four days a week, 420 at seven. Read at call time, like `post_weekdays()`."""
+    return RECENT_WINDOW * len(post_weekdays())
+
+
+def _calendar(weekdays: Optional[Iterable[int]]) -> Tuple[int, ...]:
+    """The posting days a calendar call works on: `weekdays` as sorted, distinct `date.weekday()` numbers —
+    or, when None, the setting NOW (`post_weekdays()`). An explicit value that is not weekday numbers (a
+    bool, 7, "mon") is a caller's bug: ValueError, never a silently different calendar."""
+    if weekdays is None:
+        return post_weekdays()
+    days = set(weekdays)
+    if not all(type(d) is int and 0 <= d <= 6 for d in days):
+        raise ValueError(f"posting weekdays must be date.weekday() numbers 0..6, not {sorted(map(repr, days))[:7]}")
+    return tuple(sorted(days))
+
+
+def is_posting_day(run_date: date, weekdays: Optional[Iterable[int]] = None) -> bool:
+    """`run_date`'s weekday is a posting day — of `weekdays`, by default the setting read NOW."""
+    return run_date.weekday() in _calendar(weekdays)
+
+
+def posting_ordinal(run_date: date, weekdays: Optional[Iterable[int]] = None) -> int:
+    """How many posting days lie between `EPOCH` (inclusive) and `run_date` (exclusive), on the calendar of
+    `weekdays` (by default the setting read NOW). Negative before the epoch; floor division keeps it
+    consistent across the boundary. A cadence switch renumbers every day (the ordinal counts the NEW
+    calendar's days since EPOCH): it moves the rotation's own pick, never the recent-window rule (`choose`)."""
+    days = _calendar(weekdays)
+    span = (run_date - EPOCH).days
+    weeks, offset = divmod(span, 7)  # EPOCH is a Monday, so `offset` is the weekday
+    return weeks * len(days) + sum(1 for w in days if w < offset)
 
 
 def _synthetic_day(ordinal: int) -> str:
@@ -172,10 +278,12 @@ def choose(pool: Iterable[str], run_date: date, recent: Iterable[str] = (), *,
            templates: Optional[Sequence[str]] = None) -> Selection:
     """The selection for one ET run date. Pure; `recent` is supplied by the caller (lesson refs
     only once news posts share the ledger — `lesson_refs`). `templates` narrows the template
-    rotation (`choose_template`'s `allowed`); None = every eligible template, exactly as before."""
-    if not is_posting_day(run_date):
+    rotation (`choose_template`'s `allowed`); None = every eligible template, exactly as before.
+    The posting days are the setting read NOW, once, so the day test and the ordinal agree."""
+    days = post_weekdays()
+    if not is_posting_day(run_date, days):
         return Selection(rest_day=True)
-    ordinal = posting_ordinal(run_date)
+    ordinal = posting_ordinal(run_date, days)
     recent_list: List[str] = list(recent)
     pool_list = sorted(set(pool))
     window = max(0, min(len(pool_list) - 1, RECENT_WINDOW))
@@ -341,24 +449,33 @@ class DayPlan:
     rest_day: bool
     #: Series ids in fallback order, always ending in LESSON; () on a rest day.
     chain: Tuple[str, ...] = ()
-    #: rest | monday | tuesday[_congress][_13f] | thursday_earnings | thursday_off | saturday
+    #: rest | monday | tuesday[_congress][_13f] | {wednesday,thursday,friday}_{earnings,off} | saturday | sunday
+    #: (lesson_only: `plan_for`'s guard, unreachable while every weekday has a branch there)
     reason: str = "rest"
 
 
 _MONDAY: Tuple[str, ...] = ("ceo_buys", "insider_buys", "money_map", "theme_explainer", LESSON)
 _TUESDAY_TAIL: Tuple[str, ...] = ("company_stakes", "theme_explainer", "money_map", LESSON)
 _THURSDAY_TAIL: Tuple[str, ...] = ("money_map", "theme_explainer", LESSON)
+#: Batch 3: the tail of every day that has no series of its own — Thursday's, shared by Wednesday, Friday, Sunday.
+_MONEY_MAP_TAIL: Tuple[str, ...] = _THURSDAY_TAIL
+#: The weekdays that lead with earnings while in season (owner decision 3, 2026-10-15), by `date.weekday()`.
+_EARNINGS_DAYS = {2: "wednesday", 3: "thursday", 4: "friday"}
 
 
-def plan_for(d: date) -> DayPlan:
-    """The day's series chain (before the class switch and the shipped set are applied).
+def plan_for(d: date, weekdays: Optional[Iterable[int]] = None) -> DayPlan:
+    """The day's series chain (before the class switch and the shipped set are applied), on the calendar
+    of `weekdays` — by default the setting read NOW (MARKETING_POST_WEEKDAYS: a day it leaves out rests).
 
     Mon: CEO buys → insider buys → Money Map → theme explainer → lesson.
     Tue: [Congress Count on its Tuesday] + [13F Season while in season] + company stakes → theme
          explainer → Money Map → lesson.
-    Thu: [earnings while in season] + Money Map → theme explainer → lesson.
-    Sat: the lesson. Any other day: rest."""
-    if not is_posting_day(d):
+    Wed, Thu, Fri: [earnings while in season] + Money Map → theme explainer → lesson (Wed / Fri post only
+         when the setting lists them; their calendar is Thursday's, as the owner's "earnings leads
+         Wed/Thu/Fri" asks).
+    Sat: the lesson — the week's one lesson-only day.
+    Sun: Money Map → theme explainer → lesson; never earnings (it leads Wed/Thu/Fri only)."""
+    if not is_posting_day(d, weekdays):
         return DayPlan(rest_day=True)
     weekday = d.weekday()
     if weekday == 0:
@@ -369,13 +486,16 @@ def plan_for(d: date) -> DayPlan:
         head = (("congress_count",) if congress else ()) + (("thirteen_f",) if season else ())
         reason = "tuesday" + ("_congress" if congress else "") + ("_13f" if season else "")
         return DayPlan(False, head + _TUESDAY_TAIL, reason)
-    if weekday == 3:
+    if weekday in _EARNINGS_DAYS:
+        name = _EARNINGS_DAYS[weekday]
         if in_earnings_season(d):
-            return DayPlan(False, ("earnings",) + _THURSDAY_TAIL, "thursday_earnings")
-        return DayPlan(False, _THURSDAY_TAIL, "thursday_off")
+            return DayPlan(False, ("earnings",) + _MONEY_MAP_TAIL, f"{name}_earnings")
+        return DayPlan(False, _MONEY_MAP_TAIL, f"{name}_off")
     if weekday == 5:
         return DayPlan(False, (LESSON,), "saturday")
-    # A posting weekday with no series calendar (POST_WEEKDAYS changed without this function).
+    if weekday == 6:
+        return DayPlan(False, _MONEY_MAP_TAIL, "sunday")
+    # The guard: a posting weekday with no series calendar (unreachable while every weekday has a branch above).
     logger.warning("marketing selection: posting weekday %d has no series calendar — lesson only", weekday)
     return DayPlan(False, (LESSON,), "lesson_only")
 

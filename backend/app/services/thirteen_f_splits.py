@@ -19,6 +19,23 @@ What it answers, per quarter pair:
 * ``lookup_failed`` — the subset that failed transiently. A snapshot built on it is
   DEGRADED: the whale path persists it without ``raw_hash`` and the club builder marks it
   ``build_status='degraded'``, so the next run re-derives instead of freezing the hole.
+* ``capped`` (optional, keyword-only, filled in place — Batch 1, 2026-10-15) — the suspects
+  the lookup cap (`_whale_common.MAX_SPLIT_LOOKUPS`) TRIMMED: never looked up, never armed,
+  so they keep their raw share diff (the cap fails open, by design — see below). That is
+  what the in-app whale and club screens have always shown, but a PUBLIC post must not
+  print "reported more / fewer shares" over a split it never checked, so the marketing
+  adapter drops the filing's increased / decreased moves when the set is non-empty. It is
+  never a degraded state: re-running cannot check more suspects than the cap allows.
+
+And one helper no differ calls (the review of 2026-10-16, F1): ``split_windows`` — for ANY
+symbols, the split ratio and the unnameable-adjustment flag of the quarter pair's window,
+through the same seam, fetch window and effective filter as the suspect lookups (so a
+derivation they already made is a cache hit). The suspect filter above is a COST bound for
+the app's screens: a 5:4 split at a flat price, a 3:2 split after a 15% rally or a 2:1 split
+after a 54% rally moves the per-share price by less than ``SPLIT_PRICE_FACTOR`` and is never
+looked up — so the marketing adapter, which must not publish "reported more shares" over a
+split, re-checks every increased / decreased row of a filing itself. The whale request path
+and the club builder never call it.
 
 Splits come from ``corporate_actions_service`` (derived from the entitled adjusted vs
 non-split-adjusted price series), never from FMP ``/splits`` — that endpoint is outside
@@ -30,6 +47,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from app.services._whale_common import MAX_SPLIT_LOOKUPS as _MAX_SPLIT_LOOKUPS
@@ -113,6 +131,18 @@ def suspicious_split_tickers(
     return strong + weak
 
 
+def split_suspects_over_cap(
+    current_raw: Sequence[Dict], previous_raw: Sequence[Dict]
+) -> List[str]:
+    """The split suspects the lookup cap TRIMS for this quarter pair (Batch 1, 2026-10-15) —
+    never looked up and never armed, so their raw share diff stands: exactly the tail
+    `resolve_13f_split_adjustments` adds to its ``capped`` set for the same rows (pinned
+    equal by a test). Pure, zero calls: the marketing adapter re-derives it for a STORED
+    Trillion Club build, which keeps no record of the cap (`BuiltFiling.split_unchecked` is
+    not a column). Rows as `suspicious_split_tickers` reads them (dicts)."""
+    return suspicious_split_tickers(current_raw, previous_raw)[_MAX_SPLIT_LOOKUPS:]
+
+
 def split_ratio_in_window(
     splits: Optional[List[Dict]],
     start_excl: Optional[str],
@@ -152,17 +182,23 @@ async def resolve_13f_split_adjustments(
     *,
     actions: Any,
     log_ctx: str,
+    capped: Optional[Set[str]] = None,
 ) -> Tuple[Dict[str, float], Set[str], Set[str]]:
     """``(split_ratios, unclassified, lookup_failed)`` for one 13F quarter pair.
 
     ``prev_end`` / ``curr_end`` are the two quarter-end ISO dates (``prev_end`` is
     ``None`` on a first filing). ``actions`` is the corporate-actions primitive — the
     whale path passes ``corporate_actions_source(self)`` so tests can inject a fake.
-    ``log_ctx`` carries the caller's identifiers into every log line.
+    ``log_ctx`` carries the caller's identifiers into every log line. ``capped``, when
+    given, is a ``set`` the trimmed (never looked up) suspects are ADDED to — the
+    return shape stays the three-tuple every caller unpacks; a non-set raises
+    ``TypeError`` before any work (a programming error, never a degraded build).
 
     Never raises for a lookup problem: everything below fails CLOSED (arms the backstop
     and reports the ticker as failed) rather than open. See the module docstring.
     """
+    if capped is not None and not isinstance(capped, set):
+        raise TypeError(f"resolve_13f_split_adjustments: capped must be a set, got {type(capped).__name__}")
     # Fetch split ratios ONLY for tickers whose share count jumped like a split (value
     # ~preserved) — bounds the lookup to the rare suspicious holdings instead of every
     # position. Without this, a held-through-split position (e.g. a 10:1) fabricates a
@@ -186,6 +222,9 @@ async def resolve_13f_split_adjustments(
     # Bound BEFORE the try: the fail-closed handler reads it, and the very first statement
     # inside can raise — which would turn a recoverable lookup failure into a NameError.
     suspects: List[str] = []
+    # The trimmed tail (Batch 1): reported through `capped` AFTER the try, so a later batch
+    # failure (which arms only the looked-up suspects) never loses it.
+    overflow: List[str] = []
     try:
         suspects = suspicious_split_tickers(current_raw, prev_raw)
         if len(suspects) > _MAX_SPLIT_LOOKUPS:
@@ -196,12 +235,15 @@ async def resolve_13f_split_adjustments(
             # calls inside one request and burn the rate-limit budget the app shares.
             #
             # Suppression fails OPEN for the overflow: those tickers get the raw diff
-            # (what shipped before any of this existed), never a fabricated ratio.
+            # (what shipped before any of this existed), never a fabricated ratio. A
+            # caller that must not publish an unchecked share change reads them back
+            # through `capped` (the marketing adapter, Batch 1).
             logger.warning(
                 "13F splits (%s): %d split suspects — capping lookups at %d; the "
                 "remainder keep their raw share diff",
                 log_ctx, len(suspects), _MAX_SPLIT_LOOKUPS,
             )
+            overflow = suspects[_MAX_SPLIT_LOOKUPS:]
             suspects = suspects[:_MAX_SPLIT_LOOKUPS]
         if suspects:
             from_date, to_date = window_for_range(prev_end, curr_end)
@@ -285,12 +327,122 @@ async def resolve_13f_split_adjustments(
         split_ratios = {}
         unclassified_tickers = set(suspects or [])
         lookup_failed_tickers = set(suspects or [])
+    if capped is not None:
+        capped.update(overflow)
     return split_ratios, unclassified_tickers, lookup_failed_tickers
+
+
+#: How many symbols `split_windows` derives at once. Each derivation is two price-series
+#: fetches, and the FMP client's pool (20 connections) is shared with user requests.
+SPLIT_WINDOW_CONCURRENCY = 6
+
+
+@dataclass(frozen=True)
+class SplitWindow:
+    """One symbol's corporate actions over a 13F quarter pair ``(prev_end, curr_end]``
+    (`split_windows`, the review of 2026-10-16).
+
+    * ``ratio`` — the product of the stock splits effective in the window (``1.0``: none), or
+      ``None`` when the lookup FAILED: ``get_split_rows`` answered ``None`` (a degraded
+      derivation — "could not look", never "no split") or raised.
+    * ``unclassified`` — an adjustment the classifier could not name (a spin-off, a reverse split
+      past its range) effective in the window. ``has_unclassified_adjustment`` itself answers
+      ``True`` when it could not derive (the 13F callers' fail-closed method). ``None`` when it was
+      not asked (the split lookup failed), raised, or answered something other than a bool.
+
+    Only ``clean`` vouches that the window holds nothing that can fake a share change."""
+
+    ratio: Optional[float]
+    unclassified: Optional[bool]
+
+    @property
+    def clean(self) -> bool:
+        """No split and no unnameable adjustment in the window, both lookups answered."""
+        return (self.ratio is not None and abs(self.ratio - 1.0) <= 1e-9
+                and self.unclassified is False)
+
+
+async def split_windows(
+    symbols: Sequence[str],
+    prev_end: str,
+    curr_end: str,
+    *,
+    actions: Any,
+    log_ctx: str,
+    concurrency: int = SPLIT_WINDOW_CONCURRENCY,
+) -> Dict[str, SplitWindow]:
+    """``{SYMBOL: SplitWindow}`` over ``(prev_end, curr_end]`` for each distinct symbol.
+
+    The same INJECTED seam (``actions``, as `resolve_13f_split_adjustments` takes it — never the
+    singleton here; ``trillion_club.builder.split_windows`` resolves the production default), the
+    same fetch window (`window_for_range`) and the same effective filter, so the derivations the
+    suspect lookups made for this quarter pair are cache hits and the two never disagree about a
+    window. Symbols are keyed upper-cased and stripped, as the corporate-actions cache keys them;
+    a blank or non-string symbol is skipped (the caller decides what an unchecked row means).
+    ``prev_end`` / ``curr_end`` are the two quarter-end ISO dates.
+
+    Never raises for a lookup problem: a failed lookup is ``ratio=None`` (and the probe is not
+    spent on it — a failed derivation is cached in neither tier, so asking again would re-fetch
+    both price series), a failed probe is ``unclassified=None`` — each logged at WARNING with
+    ``log_ctx``. Only cancellation propagates; bad arguments are a ``TypeError`` before any call."""
+    if not isinstance(prev_end, str) or not isinstance(curr_end, str):
+        raise TypeError("split_windows: prev_end and curr_end must be ISO date strings")
+    if actions is None:
+        raise TypeError("split_windows: pass the corporate-actions seam (actions)")
+    from_date, to_date = window_for_range(prev_end, curr_end)
+    wanted = list(dict.fromkeys(
+        s.strip().upper() for s in symbols if isinstance(s, str) and s.strip()))
+    if not wanted:
+        return {}
+    sem = asyncio.Semaphore(max(1, int(concurrency)))
+
+    async def one(sym: str) -> SplitWindow:
+        async with sem:
+            try:
+                rows = await actions.get_split_rows(sym, from_date, to_date)
+            except Exception as e:  # noqa: BLE001 — "could not look", never "nothing there"
+                logger.warning("13F split window (%s): split lookup for %s raised (%s: %s) — "
+                               "not clean (fail closed)", log_ctx, sym, type(e).__name__, e)
+                return SplitWindow(None, None)
+            if rows is None:
+                logger.warning("13F split window (%s): split lookup for %s could not derive — "
+                               "not clean (fail closed)", log_ctx, sym)
+                return SplitWindow(None, None)
+            ratio = split_ratio_in_window(rows, prev_end, curr_end)
+            try:
+                flagged = await actions.has_unclassified_adjustment(
+                    sym, from_date, to_date, effective_from=prev_end, effective_to=curr_end)
+            except Exception as e:  # noqa: BLE001 — same rule as the split lookup
+                logger.warning("13F split window (%s): adjustment probe for %s raised (%s: %s) — "
+                               "not clean (fail closed)", log_ctx, sym, type(e).__name__, e)
+                return SplitWindow(ratio, None)
+            if not isinstance(flagged, bool):
+                logger.warning("13F split window (%s): adjustment probe for %s answered %r, not a "
+                               "bool — not clean (fail closed)", log_ctx, sym, type(flagged).__name__)
+                return SplitWindow(ratio, None)
+            return SplitWindow(ratio, flagged)
+
+    results = await asyncio.gather(*(one(s) for s in wanted), return_exceptions=True)
+    out: Dict[str, SplitWindow] = {}
+    for sym, r in zip(wanted, results):
+        if isinstance(r, asyncio.CancelledError):
+            raise r
+        if isinstance(r, BaseException):      # `one` catches Exception: a belt for the brace
+            logger.warning("13F split window (%s): %s failed (%s: %s) — not clean (fail closed)",
+                           log_ctx, sym, type(r).__name__, r)
+            out[sym] = SplitWindow(None, None)
+            continue
+        out[sym] = r
+    return out
 
 
 __all__ = [
     "SPLIT_PRICE_FACTOR",
+    "SPLIT_WINDOW_CONCURRENCY",
+    "SplitWindow",
     "suspicious_split_tickers",
+    "split_suspects_over_cap",
     "split_ratio_in_window",
     "resolve_13f_split_adjustments",
+    "split_windows",
 ]

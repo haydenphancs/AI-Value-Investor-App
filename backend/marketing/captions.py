@@ -9,6 +9,12 @@ drawn in the brand colour, the others in white, all with a dark outline:
 * Phrases never cross a narrated line and end early at a sentence or clause mark once they have
   a few words; a phrase wider than the safe width is split, and a single word wider than it is
   shrunk horizontally (`\\fscx`) rather than wrapped (WrapStyle 2 = never wrap).
+* A split never strands a figure from the word it is read with (LIVE-CAP-1, 2026-10-20): "Amazon
+  invested $50 | billion" showed "$50" alone through the 500 ms platform cover of a company_stakes
+  video. A figure ("$50", "12.4", "10%") whose next word is a scale word (thousand, million,
+  billion, trillion, percent) or "a share" / "per share" is carried into the next phrase, like a
+  trailing function word ("…offers a | price") — even when that leaves the phrase it ends wider
+  than the safe width, which is then shrunk like a single long word.
 * ONE Dialogue event per word window: each event draws the whole phrase with the active word
   coloured, and ends exactly when the next begins, so the text never flickers. Colour only —
   scaling the active word would shift a centred line on every word.
@@ -16,14 +22,21 @@ drawn in the brand colour, the others in white, all with a dark outline:
 * The text is model-written. Braces and backslashes are ASS override syntax (`{\\p1}` draws
   shapes, `\\N` breaks lines), so they are neutralised here even though the server's markup rule
   already refuses them — defence in depth, since a caption file is where they would execute.
+* A HOOK card's words are not captioned twice (Batch 2, 2026-10-19): while a lesson video opens on
+  its hook card — the accepted hook drawn big on card 0 — the narration's hook line is not burned
+  under it as well (`without_hook_card_words`). Only the words that card really shows, and only
+  while it is on screen.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+
+logger = logging.getLogger("marketing.captions")
 
 PLAY_RES = (1080, 1920)
 FONT_NAME = "Inter"                   # the family name inside Inter-Bold.ttf
@@ -49,6 +62,9 @@ HIGHLIGHT_C = "&HFAA560&"             # #60A5FA (brand primary text) in BGR
 OUTLINE_COLOUR = "&H00261B17"         # #171B26 (page) in BGR
 SHADOW_COLOUR = "&H96000000"          # 0x96 alpha = ~41% opaque black
 
+#: The narration line that is the hook (timings.narrated_lines: the hook first, when there is one).
+HOOK_LINE = 0
+
 _CLAUSE_END = re.compile(r"[.!?;:—–,]$")
 _SENTENCE_END = re.compile(r"[.!?]$")
 _OVERRIDE_CHARS = str.maketrans({"{": "(", "}": ")", "\\": "/"})
@@ -65,6 +81,14 @@ _FUNCTION_WORDS = frozenset({
     "a", "an", "the", "of", "to", "and", "or", "but", "for", "in", "on", "at", "by", "with", "from",
     "as", "his", "her", "your", "its", "their", "our", "my", "this", "that", "is", "are", "was",
 })
+#: A FIGURE as narrated ("$50", "12.4", "1,000,000", "10%", "€3"): it ends in a digit or "%", so a
+#: figure that ends a clause ("$50,") is not one — the clause mark ends that phrase on purpose.
+_FIGURE_RE = re.compile(r"[$€£]?[0-9](?:[0-9.,]*[0-9])?%?\Z")
+#: …and what it is read with (LIVE-CAP-1): ONE scale word ("$50 billion", "12 percent"; a hyphenated
+#: "billion-dollar" reads as its first part), or a pair ("$4.10 a share", "per share").
+_SCALE_WORDS = frozenset({"thousand", "million", "billion", "trillion", "percent"})
+_SCALE_PAIRS = frozenset({("a", "share"), ("per", "share")})
+_TRAILING_MARKS = ".,;:!?…—–" + _CLOSERS
 
 
 def _ends(pattern: "re.Pattern[str]", word: str) -> bool:
@@ -146,6 +170,27 @@ def missing_glyphs(font_path: str, texts: Iterable[str]) -> List[str]:
     return sorted(missing)
 
 
+def _read_as(words: Sequence[Dict]) -> List[str]:
+    """The first two words of `words` as they are READ: lower-cased, quotes and closing punctuation
+    stripped, a hyphenated word split into its parts ("per-share" → "per", "share")."""
+    out: List[str] = []
+    for w in words:
+        core = sanitize(str(w.get("w", ""))).lower().strip(_QUOTES).rstrip(_TRAILING_MARKS)
+        out.extend(part for part in core.split("-") if part)
+        if len(out) >= 2:
+            break
+    return out[:2]
+
+
+def _binds_forward(word: Dict, following: Sequence[Dict]) -> bool:
+    """Is `word` a FIGURE that the words after it (`following`, in order) are read with — "$50 billion",
+    "12 percent", "$4.10 a share"? No phrase may end between them (LIVE-CAP-1)."""
+    if not _FIGURE_RE.match(sanitize(str(word.get("w", ""))).strip(_QUOTES)):
+        return False
+    lead = _read_as(following)
+    return bool(lead) and (lead[0] in _SCALE_WORDS or tuple(lead) in _SCALE_PAIRS)
+
+
 def phrases(words: Sequence[Dict], measure: Callable[[str], float] = _heuristic_width) -> List[List[Dict]]:
     """Group timed words into on-screen phrases (see the module docstring)."""
     out: List[List[Dict]] = []
@@ -157,16 +202,24 @@ def phrases(words: Sequence[Dict], measure: Callable[[str], float] = _heuristic_
             out.append(cur)
         cur = []
 
-    for w in words:
+    for i, w in enumerate(words):
         if cur and cur[-1].get("line") != w.get("line"):
             flush()
         candidate = cur + [w]
         text = " ".join(sanitize(x["w"]) for x in candidate)
         if cur and (len(candidate) > MAX_PHRASE_WORDS or measure(text) > SAFE_WIDTH):
-            # Never end a full phrase on a function word ("…offers a | price"): carry it over.
-            carry = []
-            while len(cur) > 2 and sanitize(cur[-1]["w"]).lower().strip(_QUOTES) in _FUNCTION_WORDS:
-                carry.insert(0, cur.pop())
+            # Never end a full phrase on a figure its scale word follows ("…invested $50 | billion") —
+            # wherever the phrase is cut — nor, while it keeps two words, on a function word ("…offers a |
+            # price"): carry them over. The words after `w` are looked at on its own line only.
+            following = [w, *[x for x in words[i + 1:i + 2] if x.get("line") == w.get("line")]]
+            carry: List[Dict] = []
+            while cur:
+                if _binds_forward(cur[-1], carry + following):
+                    carry.insert(0, cur.pop())
+                elif len(cur) > 2 and sanitize(cur[-1]["w"]).lower().strip(_QUOTES) in _FUNCTION_WORDS:
+                    carry.insert(0, cur.pop())
+                else:
+                    break
             flush()
             candidate = carry + [w]
         cur = candidate
@@ -205,6 +258,32 @@ def events(words: Sequence[Dict], measure: Callable[[str], float] = _heuristic_w
             prefix = f"{{\\an5\\pos({POS[0]},{POS[1]})" + (f"\\fscx{scale}" if scale != 100 else "") + "}"
             evs.append(Event(start, max(end, start + 0.01), prefix + body))
     return evs
+
+
+def without_hook_card_words(words: Sequence[Dict], hook: str, until: float) -> List[Dict]:
+    """The word table to CAPTION when the video opens on a HOOK card (Batch 2): `words` minus the hook
+    line's (HOOK_LINE) words that START before `until` — the moment the hook card leaves the screen
+    (the timeline's first boundary) — because the card already shows those words, verbatim. PURE but
+    for logging; `words` is never mutated.
+
+    It never hides a word the card does not show: only when the hook line's words, in order, ARE
+    `hook`'s whitespace split (timings splits every narrated line that way, and the server checks the
+    table against the accepted script). Otherwise — no hook line, another text, an odd entry — the
+    table comes back whole, logged WARNING: a hook card never costs a caption it does not replace. A
+    hook word that starts at or after `until` keeps its caption (the timeline can end card 0 before
+    the hook does when later cards need their minimum time); every other line is untouched."""
+    table = list(words)
+    hook_words = [w for w in table if isinstance(w, dict) and w.get("line") == HOOK_LINE]
+    spoken = [w.get("w") for w in hook_words]
+    if not isinstance(hook, str) or not hook_words or spoken != hook.split():
+        logger.warning("captions: the hook card's text is not the narration's line %d (%d word(s)) — every "
+                       "caption is kept", HOOK_LINE, len(hook_words))
+        return table
+    if (isinstance(until, bool) or not isinstance(until, (int, float)) or not until == until
+            or any(isinstance(w.get("s"), bool) or not isinstance(w.get("s"), (int, float)) for w in hook_words)):
+        logger.warning("captions: no usable time for the hook card (until=%r) — every caption is kept", until)
+        return table
+    return [w for w in table if not (isinstance(w, dict) and w.get("line") == HOOK_LINE and w["s"] < until)]
 
 
 def quantize(evs: Sequence[Event]) -> List[Event]:

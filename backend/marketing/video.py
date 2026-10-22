@@ -53,6 +53,21 @@ Why each piece is shaped the way it is:
 * **Relative names only.** ffmpeg runs with cwd = the job's workdir and every file argument is a
   plain relative name from a small allow-listed alphabet, so no filtergraph escaping is ever
   needed (`:`, `,`, `;`, `[`, `]`, quotes and backslashes are filtergraph syntax).
+* **The push-in** (Batch 2, 2026-10-19, "first seconds" — the frozen video feature `push_in`): card 0
+  alone zooms from 1.00 to PUSH_IN_ZOOM over its first PUSH_IN_FRAMES frames, then holds
+  (`push_in_filters`). `zoompan` crops on WHOLE pixels, which judders on a slow zoom, so it works on
+  the card upscaled PUSH_IN_UPSCALE× by a bit-exact scale that also does the BT.709 conversion (to
+  yuv444p: zoompan takes only planar YUV, and an auto-inserted converter would be neither BT.709
+  nor bit-exact), then the frames go to yuv420p with the same BT.709 limited-range matrix stated on
+  both sides (no colour shift). The last zoomed frame is held with `tpad=stop_mode=clone` — never
+  `loop` with a non-zero `start`, which counts frames one off (measured on ffmpeg 7.0: `start=44`
+  repeated frame 43). The zoom's fixed point is the centre of the cards' text zone
+  (PUSH_IN_ANCHOR), so a card's text grows about its own middle and every drawn pixel stays above
+  the caption band (tests/test_marketing_video.py pins it against cards.TEXT_ZONE_Y / CAPTION_BAND_Y).
+  It draws no string (the server's allow-list does not change). zoompan's own scaler is not the
+  bit-exact one, so — like the AAC — its bytes are reproducible on ONE host, not across hosts. A
+  count-up of a figure was REJECTED: it would draw intermediate figures nobody declared (and that
+  are false).
 * **The gate** (`check_probe` + `moov_before_mdat`): 1080×1920, yuv420p, h264 High, CFR 30/1
   (r AND avg frame rate), AAC 48 kHz stereo, the expected duration, under the caps, moov before
   mdat (faststart — the platforms fetch by URL and Instagram refuses a trailing moov). A file that
@@ -95,8 +110,25 @@ HEARTBEAT_SECONDS = 60
 #: Card rendering (Pillow, ≤ ~12 cards) + the caption file, budgeted generously for a slow vCPU.
 CARD_RENDER_SECONDS = 30
 #: Bump on ANY argv or encoding change: part of the render's reuse key and written into the file
-#: (`comment`), so a new pipeline is a new object, never a silent mismatch.
-VIDEO_RENDER_VERSION = "x264-high-crf20-bf3-bt709/aac160k-48k/xfade0.3/v1"
+#: (`comment`), so a new pipeline is a new object, never a silent mismatch. v2 (Batch 2): the
+#: push-in on card 0 (`push_in_filters`; its parameters are named in the string).
+VIDEO_RENDER_VERSION = "x264-high-crf20-bf3-bt709/aac160k-48k/xfade0.3/push1.03x45up2/v2"
+#: The push-in (Batch 2, the frozen video feature `push_in`): card 0 zooms from 1.00 to PUSH_IN_ZOOM
+#: over its first PUSH_IN_FRAMES frames (1.5 s at 30 fps), then holds. A gentle 3 %: enough to read as
+#: motion on the first frames a viewer decides on, small enough that card text never reaches the
+#: caption band (see PUSH_IN_ANCHOR).
+PUSH_IN_ZOOM = 1.03
+PUSH_IN_FRAMES = 45
+#: zoompan crops on whole input pixels: at 1× a 3 % zoom over 45 frames stalls and jumps (measured
+#: per-frame scale steps of 0 to 1.8× the mean); on the 2× upscale every step moves (0.5 to 1.8×).
+PUSH_IN_UPSCALE = 2
+#: The zoom's fixed point in output pixels: the centre of the cards' text zone (cards.SAFE_X ×
+#: cards.TEXT_ZONE_Y = 80-1000 × 160-1120 → (540, 640)) — every card centres its content there (a
+#: hook card, an opening card) or lays its panel inside the zone, so the text grows about its own
+#: middle. At PUSH_IN_ZOOM the zone's bottom row lands at 640 + 480 × 1.03 ≈ 1134, above the caption
+#: band's top (cards.CAPTION_BAND_Y[0] = 1170). Mirrored here (this module imports nothing of the
+#: package) and pinned against cards.py by tests/test_marketing_video.py.
+PUSH_IN_ANCHOR = (540, 640)
 #: |probed duration − expected| allowed: the B-frame start (2 frames), frame quantisation
 #: (≤ half a frame) and the AAC tail frame, with room to spare.
 DURATION_TOLERANCE_SECONDS = 0.25
@@ -252,9 +284,11 @@ def timeline(words: Sequence[Mapping[str, Any]], n_cards: int, narration_seconds
       cards; card 0 opens at 0 and stays through the hook AND its own group's lines, so the first
       frame is content. With 6 lines and 3 cards a card still switches on lines 3 and 5 (the
       prompt's "lines 1-2, 3-4 and 5-6"; tests/test_marketing_video.py pins it).
-    * `hook_card=True` — the pre-drop-1 shape, kept for callers that still model it: card 0 is a
-      card shown over the hook alone (it was the brand card), [0, first word of the first script
-      line), and the text cards are 1 … n_cards − 2 (there may be none).
+    * `hook_card=True` — card 0 is a card shown over the hook ALONE, [0, first word of the first
+      script line), and the text cards are 1 … n_cards − 2 (there may be none). Its users: a
+      template's opening card (drop 2a) and a lesson's HOOK card (Batch 2, the frozen video
+      feature `hook_card`) — `render.produce_video` asks for it when `cards.opens_on_hook_card`;
+      before drop 1 it was the brand card.
 
     Either way:
 
@@ -391,20 +425,57 @@ def _check_segments(segments: Sequence[Segment]) -> List[int]:
     return frames
 
 
+#: The per-card conversion every card stream gets: RGB → BT.709 limited-range yuv420p, bit-exact.
+_PREP = ("setsar=1,scale=flags=bicubic+accurate_rnd+full_chroma_int+bitexact"
+         ":out_color_matrix=bt709:out_range=tv,format=yuv420p")
+
+
+def push_in_filters(count: int) -> str:
+    """The filters that turn card 0's single decoded PNG frame into `count` frames of the PUSH-IN
+    (Batch 2): a bit-exact PUSH_IN_UPSCALE× upscale straight to BT.709 limited-range yuv444p, `zoompan`
+    from 1.00 to PUSH_IN_ZOOM over PUSH_IN_FRAMES output frames about PUSH_IN_ANCHOR (frame k at
+    1 + (PUSH_IN_ZOOM − 1)·k / (PUSH_IN_FRAMES − 1); `on` is the output frame number, from 0), a
+    bit-exact 4:4:4 → 4:2:0 step whose matrix and range are stated on BOTH sides (no conversion), and
+    `tpad` cloning the last zoomed frame for the rest. A stream shorter than PUSH_IN_FRAMES (card 0
+    under MIN_SEGMENT_SECONDS, which `timeline` allows only when the whole narration is that short)
+    stops part-way at the same speed. PURE and
+    deterministic; no expression holds a filtergraph metacharacter (`:` `,` `;` `'` `[` `]`), so
+    nothing is quoted. ValueError for a count that is not an int ≥ 1."""
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        raise ValueError(f"count must be an int >= 1, got {count!r}")
+    zoom_frames = min(PUSH_IN_FRAMES, count)
+    (w, h), (ax, ay) = SIZE, PUSH_IN_ANCHOR
+    upscale = (f"setsar=1,scale=w={w * PUSH_IN_UPSCALE}:h={h * PUSH_IN_UPSCALE}"
+               ":flags=bicubic+accurate_rnd+full_chroma_int+bitexact:out_color_matrix=bt709:out_range=tv"
+               ",format=yuv444p")
+    # x/y keep the anchor's FRACTION of the frame fixed: crop origin = fraction × (in − in/zoom).
+    zoom = (f"zoompan=z=1+{PUSH_IN_ZOOM - 1.0:.4f}*on/{PUSH_IN_FRAMES - 1}"
+            f":x=(iw-iw/zoom)*{ax}/{w}:y=(ih-ih/zoom)*{ay}/{h}"
+            f":d={zoom_frames}:s={w}x{h}:fps={FPS}")
+    to_420 = ("setsar=1,scale=flags=bicubic+accurate_rnd+full_chroma_int+bitexact"
+              ":in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=tv,format=yuv420p")
+    hold = f"tpad=stop_mode=clone:stop={count - zoom_frames}"
+    return ",".join((upscale, zoom, to_420, hold))
+
+
 def build_argv(*, ffmpeg: str, card_files: Sequence[str], segments: Sequence[Segment],
                audio_file: str, ass_file: str, fonts_dir: str, out_file: str,
-               threads: int) -> List[str]:
+               threads: int, push_in: bool = False) -> List[str]:
     """The ONE ffmpeg command for the video. PURE and deterministic.
 
     `card_files[i]` is the PNG shown in `segments[i]` (parallel lists; one `-i` per segment, so a
     card used twice is simply decoded twice). All file arguments are names RELATIVE to the
-    directory ffmpeg runs in (`run_ffmpeg(cwd=…)`). ValueError on any contract breach: a name
-    outside the allow-list, a non-contiguous timeline, a segment under one frame, a non-first
-    segment shorter than its fade-in, a bad thread count, or an output that is also an input."""
+    directory ffmpeg runs in (`run_ffmpeg(cwd=…)`). `push_in` (Batch 2) zooms the FIRST segment's
+    card (`push_in_filters`) — every other stream, and the whole filtergraph without it, is the
+    drop-1 one. ValueError on any contract breach: a name outside the allow-list, a
+    non-contiguous timeline, a segment under one frame, a non-first segment shorter than its
+    fade-in, a bad thread count, a `push_in` that is not a bool, or an output that is also an input."""
     if not isinstance(ffmpeg, str) or not ffmpeg:
         raise ValueError("ffmpeg must be the executable's path")
     if isinstance(threads, bool) or not isinstance(threads, int) or threads < 1:
         raise ValueError(f"threads must be an int >= 1, got {threads!r}")
+    if not isinstance(push_in, bool):
+        raise ValueError(f"push_in must be a bool, got {push_in!r}")
     if len(card_files) != len(segments):
         raise ValueError(f"{len(card_files)} card files for {len(segments)} segments "
                          f"(card_files[i] is segment i's card)")
@@ -419,14 +490,15 @@ def build_argv(*, ffmpeg: str, card_files: Sequence[str], segments: Sequence[Seg
     n = len(segments)
     total = segments[-1].end
 
-    prep = ("setsar=1,scale=flags=bicubic+accurate_rnd+full_chroma_int+bitexact"
-            ":out_color_matrix=bt709:out_range=tv,format=yuv420p")
     chains: List[str] = []
     for i in range(n):
         own = frames[i + 1] - frames[i]
         count = own + (XFADE_FRAMES if i + 1 < n else 0)
-        chains.append(f"[{i}:v]{prep},loop=loop={count - 1}:size=1:start=0,"
-                      f"setpts=N/({FPS}*TB),fps={FPS}[v{i}]")
+        if i == 0 and push_in:
+            body = push_in_filters(count)
+        else:
+            body = f"{_PREP},loop=loop={count - 1}:size=1:start=0"
+        chains.append(f"[{i}:v]{body},setpts=N/({FPS}*TB),fps={FPS}[v{i}]")
     acc = "v0"
     for i in range(1, n):
         chains.append(f"[{acc}][v{i}]xfade=transition=fade:duration={_fmt(XFADE_SECONDS)}"
@@ -777,7 +849,8 @@ def render_video(*, workdir: str, card_files: Sequence[str], segments: Sequence[
                  audio_file: str, ass_file: str, fonts_dir: str, out_file: str = "video.mp4",
                  threads: int, ffmpeg: Optional[str] = None, ffprobe: Optional[str] = None,
                  heartbeat: Optional[Callable[[], None]] = None, run_id: str = "?",
-                 max_seconds: float, max_bytes: int = DEFAULT_MAX_BYTES) -> Tuple[bytes, ProbeResult]:
+                 max_seconds: float, max_bytes: int = DEFAULT_MAX_BYTES,
+                 push_in: bool = False, timeout: float = RENDER_TIMEOUT_SECONDS) -> Tuple[bytes, ProbeResult]:
     """Render, probe, gate; return (mp4 bytes, probe). Every file name is relative to `workdir`.
 
     Before ffmpeg runs: the tools exist, every input is there (each card a 1080×1920 PNG, the
@@ -785,13 +858,19 @@ def render_video(*, workdir: str, card_files: Sequence[str], segments: Sequence[
     and the narration's probed length matches the timeline (it must end where the last segment —
     the disclaimer card — begins, ± DURATION_TOLERANCE_SECONDS). After: the ffprobe gate
     (expected duration = segments[-1].end) and moov-before-mdat, else RenderRejected.
-    ValueError (from build_argv) means the caller broke the contract."""
+    `push_in` (Batch 2) zooms the first segment's card (`build_argv`). `timeout` bounds the ffmpeg
+    run (RenderTimeout past it): RENDER_TIMEOUT_SECONDS, or less for a push-in fallback that shares
+    one budget with the failed render before it (render.py). ValueError (from build_argv, or a
+    `timeout` that is not a positive finite number) means the caller broke the contract."""
+    if (isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout)
+            or timeout <= 0):
+        raise ValueError(f"timeout must be a positive number of seconds, got {timeout!r}")
     t0 = _monotonic()
     ffmpeg_exe = _tool("ffmpeg", ffmpeg, run_id)
     ffprobe_exe = _tool("ffprobe", ffprobe, run_id)
     argv = build_argv(ffmpeg=ffmpeg_exe, card_files=card_files, segments=segments,
                       audio_file=audio_file, ass_file=ass_file, fonts_dir=fonts_dir,
-                      out_file=out_file, threads=threads)
+                      out_file=out_file, threads=threads, push_in=push_in)
 
     def at(name: str) -> str:
         return os.path.join(workdir, name)
@@ -830,7 +909,7 @@ def render_video(*, workdir: str, card_files: Sequence[str], segments: Sequence[
         pass
     except OSError as e:
         raise RenderFailed(f"run {run_id}: cannot clear {out_file}: {type(e).__name__}: {e}") from e
-    run_ffmpeg(argv, cwd=workdir, timeout=RENDER_TIMEOUT_SECONDS, heartbeat=heartbeat, run_id=run_id)
+    run_ffmpeg(argv, cwd=workdir, timeout=timeout, heartbeat=heartbeat, run_id=run_id)
     if not os.path.isfile(out_path):
         raise RenderFailed(f"run {run_id}: ffmpeg exited 0 but wrote no {out_file}")
     probe = _probe(ffprobe_exe, out_file, cwd=workdir, run_id=run_id)
@@ -847,6 +926,6 @@ def render_video(*, workdir: str, card_files: Sequence[str], segments: Sequence[
     with open(out_path, "rb") as f:
         data = f.read()
     logger.info("render video OK run_id=%s duration=%.3fs expected=%.3fs bytes=%d segments=%d "
-                "threads=%d wall=%.1fs", run_id, probe.duration or 0.0, expected, len(data),
-                len(segments), threads, _monotonic() - t0)
+                "threads=%d push_in=%s wall=%.1fs", run_id, probe.duration or 0.0, expected, len(data),
+                len(segments), threads, push_in, _monotonic() - t0)
     return data, probe

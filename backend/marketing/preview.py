@@ -11,6 +11,11 @@ call and its ffprobe gate), so what you watch is what the `rendered` stage would
     # script.json = the worker's WorkerScript shape:
     #   {"hook": "...", "video_script": ["...", ...], "cards": [{"title": "...", "body": "..."}, ...],
     #    "disclaimer_card": "..."}
+    # Batch 2: add the read-back's "video_features" (a lesson: ["hook_card", "push_in"]; a template:
+    # ["data_card", "push_in"] and the "data_card_slot" — the index into "cards" of the card the data card
+    # replaces; none, no data card) and "end_card_cta" ("Search Caydex on the App Store" |
+    # "caydexinvest.com") to preview a day the server froze them for — drawn exactly as the rendered
+    # stage draws them.
     ./venv_marketing/bin/python -m marketing.preview path/to/script.json --logos-dir DIR --phonemes [--out DIR]
     # a Company Weekly TEMPLATE script (drop 2a). It is written by the WEB-side generator,
     # `./venv/bin/python scripts/marketing_news_preview.py --series <id> --fixture|--candidates`, whose
@@ -21,7 +26,9 @@ call and its ffprobe gate), so what you watch is what the `rendered` stage would
     # --out DIR writes there instead of marketing/out/<timestamp>.
 
 Needs ffmpeg with libass (Homebrew's and the image's both have it) and the Kokoro weights
-(downloaded to HF_HOME on first use locally; baked into the Railway image).
+(downloaded to HF_HOME on first use locally; baked into the Railway image). A push-in render that fails
+here FAILS — the rendered stage would render once more without the push-in (render.py), but the preview
+is how a host's ffmpeg is checked (`railway ssh` → this command on a push_in script) before the switch.
 
 Text layout: the Linux image's Pillow wheel lays text out with raqm; Homebrew's raqm is found only
 when DYLD_FALLBACK_LIBRARY_PATH names /opt/homebrew/lib AT PROCESS START (dyld reads it once), so
@@ -241,20 +248,29 @@ def main(argv: list) -> int:
     data, duration = voice.encode_m4a(narration.wav_path, out / "narration.m4a")
     words = voice.clamp_to_duration(narration.words, duration)
     (out / "words.json").write_text(json.dumps(words, indent=1), encoding="utf-8")
-    specs = cards.cards_for_script(script, logos=table) if template else cards.cards_for_script(script)
     font = str(_FONTS / "Inter-Bold.ttf")
+    engine = cards.resolve_layout_engine(None)
+    # Batch 2: the script's frozen video features, read the worker's way (`cards.video_features`); the
+    # feature cards (a lesson's hook card, a template's data card) are checked with this font and layout
+    # engine, as the rendered stage checks them — one that cannot be drawn is left out (a WARNING).
+    features = cards.video_features(script)
+    specs = cards.cards_for_script(script, logos=table if template else None, font_path=font,
+                                   layout_engine=engine)
+    push_in = cards.VIDEO_FEATURE_PUSH_IN in features
     missing = []
     try:
         cards.check_glyphs(specs, font, extra=[w["w"] for w in words])
     except cards.MissingGlyphs as e:
         missing = [str(e)]
     t_render = time.monotonic()
+    # The opening follows the cards (`render.produce_video` derives hook_card from them: a template's
+    # opening card, a lesson's hook card); push-in only when frozen — the rendered stage's own call.
     video, video_seconds, shown = render.produce_video(
         workdir=out, specs=specs, words=words, narration_seconds=duration, audio_file="narration.m4a",
         fonts_dir=str(_FONTS), logo_path=render.brand_logo_path(str(_FONTS)),
         threads=render.render_threads(), heartbeat=None, run_id="preview",
-        max_seconds=render.max_video_seconds(), layout_engine=cards.resolve_layout_engine(None),
-        **({"hook_card": True} if template else {}),
+        max_seconds=render.max_video_seconds(), layout_engine=engine,
+        **({"push_in": True} if push_in else {}),
     )
     (out / "preview.mp4").write_bytes(video)
     onscreen = []
@@ -267,7 +283,10 @@ def main(argv: list) -> int:
         "out": str(out), "lines": len(lines), "exact_lines": narration.exact_lines,
         "words": len(words), "narration_s": round(duration, 2), "video_s": round(video_seconds, 2),
         "speed": narration.speed, "m4a_bytes": len(data), "mp4_bytes": len(video),
-        "cards_shown": shown, "onscreen_text": onscreen, "missing_glyphs": missing,
+        "cards_shown": shown, "card_kinds": [specs[i].kind for i in shown],
+        "video_features": list(features), "push_in": push_in, "end_card_cta": specs[-1].end_cta,
+        "data_card_slot": cards.applied_data_card_slot(specs),
+        "onscreen_text": onscreen, "missing_glyphs": missing,
         "raqm": cards.raqm_available(), "render_wall_s": round(time.monotonic() - t_render, 1),
         "wall_s": round(time.monotonic() - t0, 1), "video": _ffprobe(out / "preview.mp4"),
         "post_image": image_report, "template": template,

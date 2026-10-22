@@ -54,11 +54,59 @@ Pinned here:
 * review round 15 (2026-10-10): Money Map's gross and operating profit are the statement's OWN lines
   (never revenue − cost of sales or gross − operatingExpenses), cross-checked to rounding; a theme's
   size counts COMPANIES (GOOG + GOOGL, one CIK, BRK.B / BRK-B are one). Every one mutation-checked.
+* Batch 1 (2026-10-15), earnings: a report without ONE plausible revenue pair is refused whole
+  (``revenue_implausible`` — Progressive's one-month row), a surprise under 5% is refused (exact at the
+  edge), ONE quarterly-statement read places the quarter (Delta → Sep 30; ``period_mismatch`` /
+  ``period_unverified``, a lagging statement never dates the figures), the ranking is by market cap across
+  every profiled report (a Nurix-like one-off never leads; a larger company in the second profile batch
+  call leads), and a kept record is never counted as a rejection. The members-elect window (owner
+  decision 4): every Form 4 row is built with no person inside it. Every new guard mutation-checked.
+  ``RUN`` sits inside that window, so an autouse fixture switches it off for the named Form 4 tests.
+* Batch 1 (2026-10-15), Money Map (plan item 2): a fiscal year that ended 364+ days before the run is
+  refused ``money_map_next_year_due`` (Apple FY2025 on Oct 15, 2026; the 363 / 364-day edge; a content
+  refusal that never uses up an attempt) — so the Money Map tests run on ``MM_RUN`` (Sep 3, 2026), where
+  the fixtures' fiscal 2025 is still the latest year; a label that names nothing (a 1-4 capital code off
+  the allow-list — "NXE", "QCT", "CMBU", "PBNA" — or a generic "Product") folds into the rest while AWS
+  stays, in a theme's segment fact too; live labels ("UNITED STATES", "Latin America (Segment)") are shown
+  as the company writes them; and end to end the record's parts decide the template's wording ("by region"
+  only for an all-regional map, "the United States" in running text only). Every new guard mutation-checked.
+* The review of 2026-10-16, Money Map: a due year never counts toward the content cap (MM-4: nine due seeds
+  ahead of a fresh one), is remembered from its statement read and refused before the fan-out next time, and
+  a known due symbol is tried after the rest of its group, least recently checked first (the January
+  scenario: one empty run of a new process, then the fresh year at once); McDonald's retired "High-Growth
+  Markets" label is its International Operated Markets, for McDonald's only (MM-1); Walmart's stripped labels
+  are shown as Walmart writes them (F5); a region acronym ("US") is named, never folded (MM-2).
+* Batch 1 (2026-10-15), 13F (plan item 3): a filing whose split lookups the cap trimmed shows no more /
+  fewer shares — those moves (``split_unchecked``) and both count keys go, end to end through the template;
+  at the cap nothing is dropped; a club filer's stored build is re-checked from its stored books (no read
+  for a book of at most 25 positions; a missing or garbage book fails closed); an unreadable
+  ``split_unchecked`` fails closed. Pershing's registry CIK is read, built, keyed and named as its successor
+  0002026053 (posted under either key → never read again; read once beside a curated successor row);
+  Berkshire leads ahead of the club and the rest, whatever its registry place, under ONE live-build budget,
+  and a lead filer that is also a club filer is read once. Every new guard mutation-checked.
+* The review of 2026-10-16, 13F: EVERY increased / decreased row is re-checked for a split in its quarter (F1:
+  the review's 3:2-after-a-20%-rally, 5:4-flat, 2:1-after-60%, 4:1-after-210% and 1:2-after-a-40%-fall shapes
+  the shared filter never flags never print "more / fewer shares"; a split the build restated stays, one it kept
+  raw goes; an adjustment, a failed lookup, a symbol-less row or more rows than the cap drop both kinds and
+  counts; only the quarter's own splits count); a club filer's stored build must be complete (F2) and its
+  STORED change rows — filed symbols, CUSIPs, tied to the detail by the counts — are the ones re-checked, which
+  also closes F3; Pershing's hand-over quarter (the real 2026-Q1 / Q2 shapes) is refused before any call while
+  Q3 against Q2 is kept; a curated-inactive successor is skipped with a WARNING (F4). `run` hands every call a
+  hermetic seam (`SplitActions`). Every new guard mutation-checked.
+* The round-3 review of 2026-10-20 (RR3-STAKES-TEMPLATE-WALL), company_stakes: the read refuses every stake ROW its
+  template must refuse (a source title over 80 characters or with a word over 20, an investee-name word over 15, a
+  committed-up-to basis off a commitment, a ``verified_on`` after the run; a local listing the template cannot draw
+  is dropped) and the investor's name word cap after its profile — both directions at every bound, through
+  `NT.compose`; the review's two probes (five such stakes at the head of the newest-first walk) post the stake behind
+  them on the first day; a refusal only the template can make is remembered (`A.remember_template_refusal`) and that
+  stake is offered after every other one (least recently refused first; an edit to its row lifts it, a
+  re-verification does not). Every new guard mutation-checked.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import re
@@ -66,7 +114,7 @@ import time
 import uuid
 from collections import Counter
 from dataclasses import fields as dataclasses_fields
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -89,6 +137,14 @@ RUN = date(2026, 11, 16)          # a Monday; the 2026-Q3 13F due date; window 1
 WEEK = "2026-11-09"
 BERKSHIRE, PERSHING, SCION, BRIDGEWATER, SOROS = (
     "0001067983", "0001336528", "0001649339", "0001350694", "0001029160")
+#: Batch 1 (2026-10-15): Pershing Square's registry CIK is read as its SUCCESSOR filer
+#: (`R.THIRTEEN_F_SUCCESSORS`; the old CIK filed only a 13F-NT for 2026-Q2).
+PERSHING_FILER = "0002026053"
+
+
+def filer(cik: str) -> str:
+    """The EDGAR filer the adapter reads for a registry CIK: its successor, else itself."""
+    return R.THIRTEEN_F_SUCCESSORS.get(cik, cik)
 
 
 @pytest.fixture(autouse=True)
@@ -98,6 +154,19 @@ def _fresh(monkeypatch):
     monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", False)
     yield
     A.clear_memo()
+
+
+#: The REAL members-elect window (owner decision 4), kept before the autouse fixture below replaces it.
+REAL_MEMBERS_ELECT_WINDOW = R.members_elect_window
+
+
+@pytest.fixture(autouse=True)
+def _names_outside_the_members_elect_window(monkeypatch):
+    """`RUN` (Mon Nov 16, 2026) is INSIDE the members-elect window (Election Day Nov 3, 2026 through Jan 3,
+    2027), where every Form 4 row is built with no person. The Form 4 tests here pin the NAMED rules
+    (render, corroborate, the Congress drop) — what any day outside the window builds — so the window is
+    switched off; the members-elect tests restore the real one (`REAL_MEMBERS_ELECT_WINDOW`)."""
+    monkeypatch.setattr(R, "members_elect_window", lambda day: False)
 
 
 async def _settle_leads() -> None:
@@ -323,6 +392,40 @@ class FakeClub:
         return self.details.get(slug)
 
 
+class SplitActions:
+    """The corporate-actions seam (`NewsDeps.actions`), hermetic: `run` hands every call one with no split and no
+    adjustment anywhere unless a test passes its own. The 13F builder's suspect lookups and the adapter's split
+    re-check (the review of 2026-10-16, F1: `_builder.split_windows`) both read it. ``splits``: SYMBOL → FMP-shaped
+    split rows; ``unclassified`` / ``fail`` / ``boom``: symbols whose adjustment probe answers True / whose split
+    lookup answers None (could not derive) / whose split lookup raises. Records every symbol asked, in order."""
+
+    def __init__(self, splits=None, unclassified=(), fail=(), boom=()) -> None:
+        self.splits = {k.upper(): list(v) for k, v in (splits or {}).items()}
+        self.unclassified, self.fail, self.boom = set(unclassified), set(fail), set(boom)
+        self.looked_up: List[str] = []
+        self.probed: List[str] = []
+        self.windows: List[Any] = []
+
+    async def get_split_rows(self, t, from_date=None, to_date=None):
+        self.looked_up.append(t)
+        self.windows.append((from_date, to_date))
+        if t in self.boom:
+            raise FMPUnavailableException("price series down")
+        if t in self.fail:
+            return None
+        return [dict(r) for r in self.splits.get(t, [])]
+
+    async def has_unclassified_adjustment(self, t, from_date=None, to_date=None, *, effective_from=None,
+                                          effective_to=None):
+        self.probed.append((t, effective_from, effective_to))
+        return t in self.unclassified
+
+
+def split_row(day: str, numerator: int, denominator: int) -> Dict[str, Any]:
+    """One stock split in `get_split_rows`' FMP shape."""
+    return {"date": day, "numerator": numerator, "denominator": denominator}
+
+
 def issuer_reads(fmp: FakeFMP) -> List[str]:
     """The per-issuer reads made, each named by the profile symbols of its CIK ("BF-A/BF-B"), or
     by the normalised CIK when no profile has it — sorted."""
@@ -336,6 +439,7 @@ def issuer_reads(fmp: FakeFMP) -> List[str]:
 
 
 async def run(series, fmp=None, *, exclude=(), limit=5, left=60.0, run_date=RUN, **deps):
+    deps.setdefault("actions", SplitActions())      # hermetic: the production seam reads FMP and Supabase
     return await A.candidates(series, run_date=run_date, exclude=frozenset(exclude), limit=limit,
                               deadline=time.monotonic() + left, deps=A.NewsDeps(fmp=fmp, **deps))
 
@@ -648,6 +752,41 @@ async def test_a_profile_gate_reason_is_counted():
     assert got.rejections["not_major_exchange"] == 1 and got.rejections["adr"] == 1
 
 
+@pytest.mark.parametrize("series", ["ceo_buys", "insider_buys"])
+@pytest.mark.asyncio
+async def test_a_depositary_line_without_the_adr_flag_is_refused_for_a_form_4_post(series):
+    """Batch 1 (2026-10-15, plan item 5): FMP named AgomAb's line "AgomAb Therapeutics N.V. American Depositary
+    Shares" with `isAdr` False (the insider_buys preview of 2026-10-12), and the class-tail strip left a clean
+    "AgomAb Therapeutics" — a post saying "disclosed buying … of the company's stock" about depositary shares.
+    The insider profile gate refuses a non-common NAME now (`non_common_listing`, counted); the other issuer
+    stands, and the record still round-trips."""
+    profiles = week_profiles()
+    profiles["FOX"].update(companyName="Fox Corporation American Depositary Shares")
+    rows = week_rows()
+    if series == "insider_buys":         # directors and CFOs only: one at each issuer
+        rows += [irow(sym="FOX", name="BROWN DAVID", cik="0000000556", title="director", shares=20_000, price=30.0),
+                 irow(sym="GME", name="DOE JANE", cik="0000000222", title="director", shares=20_000, price=25.0)]
+    got = await run(series, FakeFMP(insider=rows, profiles=profiles))
+    assert got.rejections.get("non_common_listing") == 1
+    (rec,) = got.records
+    assert [r.company.symbol for r in rec.rows] == ["GME"]
+    assert R.record_from_fact_sheet(json.loads(json.dumps(R.fact_sheet(rec, rejections=got.rejections,
+                                                                      selection={})))) == rec
+
+
+@pytest.mark.asyncio
+async def test_a_vendor_typo_in_the_issuer_name_is_corrected_in_the_record():
+    """FMP's NAUT profile reads "Nautilus Biotechnolgy, Inc."; the record (and so every post) names the company
+    as it spells itself, through `DISPLAY_OVERRIDES` (plan item 5)."""
+    rows = [irow(sym="NAUT", name="MALLICK PARAG", cik="0000000909", shares=100_000, price=3.0)]
+    profiles = {"NAUT": prof("NAUT", "Nautilus Biotechnolgy, Inc.", exchange="NASDAQ", price=3.0, cap=3.0e8,
+                             ceo="Dr. Parag Mallick")}
+    got = await run("ceo_buys", FakeFMP(insider=rows, profiles=profiles))
+    (rec,) = got.records
+    assert rec.rows[0].company == R.CompanyRef("NAUT", "Nautilus Biotechnology")
+    assert "Biotechnolgy" not in json.dumps(R.fact_sheet(rec, rejections=got.rejections, selection={}))
+
+
 @pytest.mark.asyncio
 async def test_two_concurrent_calls_share_one_walk_and_one_profile_batch():
     fmp = FakeFMP(insider=week_rows(), profiles=week_profiles(), insider_delay=0.05)
@@ -809,8 +948,10 @@ def whale(cik, firm, ticker=None, **kw):
 
 
 def registry_world(whales, *, extracts=None, dates=None, **fmp_kw):
-    extracts = extracts if extracts is not None else {k: v for w in whales for k, v in book(w["cik"]).items()}
-    dates = dates if dates is not None else {w["cik"]: DATES_Q3_Q2 for w in whales}
+    # Keyed by the FILER the adapter reads (Batch 1: a registry CIK's successor, else itself).
+    extracts = (extracts if extracts is not None
+                else {k: v for w in whales for k, v in book(filer(w["cik"])).items()})
+    dates = dates if dates is not None else {filer(w["cik"]): DATES_Q3_Q2 for w in whales}
     fmp = FakeFMP(profiles=thirteen_f_profiles(), extracts=extracts, dates=dates, **fmp_kw)
     sb = FakeSB({"whales": whales})
     return fmp, sb
@@ -901,12 +1042,12 @@ async def test_dormant_and_unregistered_filers_are_never_read():
 async def test_a_refused_book_does_not_consume_the_build_cap():
     whales = [whale(BERKSHIRE, "Berkshire Hathaway"), whale(PERSHING, "Pershing Square Capital"),
               whale(SCION, "Scion Asset Management"), whale(BRIDGEWATER, "Bridgewater Associates")]
-    extracts = {k: v for w in whales[1:] for k, v in book(w["cik"]).items()}
+    extracts = {k: v for w in whales[1:] for k, v in book(filer(w["cik"])).items()}
     extracts[(BERKSHIRE, 2026, 3)] = [xrow(BERKSHIRE, 3, "AAPL", "037833100", 1, 1.0)] * 201
     extracts[(BERKSHIRE, 2026, 2)] = book(BERKSHIRE)[(BERKSHIRE, 2026, 2)]
     fmp, sb = registry_world(whales, extracts=extracts)
     got = await run("thirteen_f", fmp, sb=sb)
-    assert [r.filer_cik for r in got.records] == [PERSHING, SCION]
+    assert [r.filer_cik for r in got.records] == [PERSHING_FILER, SCION]
     assert got.rejections["book_too_large"] == 1
     assert BRIDGEWATER not in fmp.dates_ciks          # the cap (2 live builds) was reached
 
@@ -917,28 +1058,29 @@ async def test_a_memoized_build_is_not_a_live_build():
               whale(SCION, "Scion Asset Management")]
     fmp, sb = registry_world(whales)
     first = await run("thirteen_f", fmp, sb=sb)
-    assert [r.filer_cik for r in first.records] == [BERKSHIRE, PERSHING]
+    assert [r.filer_cik for r in first.records] == [BERKSHIRE, PERSHING_FILER]
     extracts_before = fmp.calls["extract"]
     again = await run("thirteen_f", fmp, sb=sb)
-    assert [r.filer_cik for r in again.records] == [BERKSHIRE, PERSHING, SCION]
+    assert [r.filer_cik for r in again.records] == [BERKSHIRE, PERSHING_FILER, SCION]
     assert fmp.calls["extract"] == extracts_before + 2  # only SCION was built live
 
 
 @pytest.mark.asyncio
 async def test_two_unavailable_filers_raise_and_one_is_counted():
     whales = [whale(BERKSHIRE, "Berkshire Hathaway"), whale(PERSHING, "Pershing Square Capital")]
-    down = {(c, 2026, q): FMPUnavailableException("extract down") for c in (BERKSHIRE, PERSHING) for q in (2, 3)}
+    down = {(c, 2026, q): FMPUnavailableException("extract down")
+            for c in (BERKSHIRE, PERSHING_FILER) for q in (2, 3)}
     fmp, sb = registry_world(whales, extracts=down)
     with pytest.raises(A.MarketingNewsUnavailable) as err:
         await run("thirteen_f", fmp, sb=sb)
-    assert err.value.reason == "thirteen_f_unavailable"
+    assert err.value.reason == "thirteen_f_unavailable"     # one strike in the lead step, one in the rest
 
     A.clear_memo()
-    extracts = {**book(PERSHING), (BERKSHIRE, 2026, 3): FMPUnavailableException("down"),
+    extracts = {**book(PERSHING_FILER), (BERKSHIRE, 2026, 3): FMPUnavailableException("down"),
                 (BERKSHIRE, 2026, 2): FMPUnavailableException("down")}
     fmp, sb = registry_world(whales, extracts=extracts)
     got = await run("thirteen_f", fmp, sb=sb)
-    assert [r.filer_cik for r in got.records] == [PERSHING]
+    assert [r.filer_cik for r in got.records] == [PERSHING_FILER]
     assert got.rejections["filer_unavailable"] == 1
 
 
@@ -946,7 +1088,7 @@ async def test_two_unavailable_filers_raise_and_one_is_counted():
 async def test_a_failed_dates_read_counts_as_unavailable():
     whales = [whale(BERKSHIRE, "Berkshire Hathaway"), whale(PERSHING, "Pershing Square Capital")]
     fmp, sb = registry_world(whales, dates={BERKSHIRE: FMPRateLimitException("429"),
-                                            PERSHING: FMPUnavailableException("down")})
+                                            PERSHING_FILER: FMPUnavailableException("down")})
     with pytest.raises(A.MarketingNewsUnavailable) as err:
         await run("thirteen_f", fmp, sb=sb)
     assert err.value.reason == "thirteen_f_unavailable"
@@ -1010,13 +1152,47 @@ def club_world(*, changes=None, card_over=None, company_over=None, rows=None):
     group = SimpleNamespace(companies=[SimpleNamespace(**card)], also_in_club=[])
     detail = SimpleNamespace(company=SimpleNamespace(**company), changes=changes)
     club = FakeClub(group=group, details={"nvidia": detail})
+    ciks = (rows[0].get("ciks") or ["0001045810"]) if rows else ["0001045810"]
     sb = FakeSB({"trillion_club_companies": rows if rows is not None else [
         {"slug": "nvidia", "ciks": ["0001045810"], "card_kind": "thirteen_f", "use_13f": True,
          "detail_symbol": "NVDA", "published": True}], "whales": [],
-        # The stored previous-quarter build an exit is valued on (review round 7: materiality).
+        # The stored previous-quarter build an exit is valued on (review round 7: materiality) — and, since
+        # the review of 2026-10-16, the stored CURRENT build the more / fewer re-check reads (F1, F2).
         "trillion_club_filings": [{"cik": "0001045810", "period": "2026-Q2",
-                                   "holdings": [{"symbol": "RXRX", "value": 35e6}, {"symbol": "GOOG", "value": 1.8e8}]}]})
+                                   "holdings": [{"symbol": "RXRX", "value": 35e6}, {"symbol": "GOOG", "value": 1.8e8}]},
+                                  stored_current(min(ciks), card["period"], changes, company["change_counts"])]})
     return club, sb
+
+
+def club_cusip(key: Any) -> str:
+    """A deterministic 9-digit CUSIP for a fake club holding (the detail's rows carry none)."""
+    return str(int.from_bytes(str(key).encode(), "big") % 10 ** 8).zfill(8) + "7"
+
+
+def stored_current(cik: str, period: str, changes: Any, counts: Any, *, status: str = "complete",
+                   holdings: Optional[List[Dict[str, Any]]] = None, rows: Any = None) -> Dict[str, Any]:
+    """The club filer's STORED current build row (`trillion_club_filings`), consistent with its detail: the
+    change rows as the builder writes them (filed symbol, CUSIP, both share counts), the same per-kind counts,
+    ``build_status``. ``rows`` replaces the change rows (the detail keeps its own)."""
+    def stored_row(ch: Any) -> Dict[str, Any]:
+        sym = getattr(ch, "symbol", None)
+        return {"cusip": club_cusip(sym or getattr(ch, "name", "")), "symbol": sym, "name": getattr(ch, "name", ""),
+                "change": getattr(ch, "change", None), "shares": getattr(ch, "shares", None),
+                "prev_shares": getattr(ch, "prev_shares", None), "value": getattr(ch, "value", None)}
+
+    counts_d = dict(counts) if isinstance(counts, dict) else dict(vars(counts)) if counts is not None else None
+    change_rows = rows if rows is not None else [stored_row(ch) for ch in changes or ()]
+    book = holdings if holdings is not None else [
+        {"cusip": r["cusip"], "symbol": r["symbol"], "shares": r["shares"], "value": r["value"]}
+        for r in change_rows if isinstance(r, dict) and r.get("shares")]
+    return {"cik": cik, "period": period, "holdings": book, "build_status": status,
+            "changes": {"comparison": "quarter", "prev_period": R.period_label(*_tc_previous(period)),
+                        "counts": counts_d, "rows": change_rows}}
+
+
+def _tc_previous(period: str):
+    year, q = int(period[:4]), int(period[-1])
+    return (year - 1, 4) if q == 1 else (year, q - 1)
 
 
 @pytest.mark.asyncio
@@ -1193,10 +1369,23 @@ def seed_aapl(monkeypatch):
     monkeypatch.setattr(R, "MONEY_MAP_SEED", ("AAPL",))
 
 
+#: Batch 1 (2026-10-15): the Money Map tests run on Thu Sep 3, 2026, when Apple's fiscal 2025 (ended Sep 27,
+#: 2025 — `INCOME_AAPL`) is still its LATEST year, 341 days on. On `RUN` (Nov 16, 2026) fiscal 2026 has ended
+#: and been reported, so the freshness gate refuses fiscal 2025 there (`money_map_next_year_due`, pinned by its
+#: own tests below, which name their run dates).
+MM_RUN = date(2026, 9, 3)
+
+
+async def run_mm(fmp=None, **kw):
+    """`run("money_map", …)` on `MM_RUN`, unless the test names its own run date."""
+    kw.setdefault("run_date", MM_RUN)
+    return await run("money_map", fmp, **kw)
+
+
 @pytest.mark.asyncio
 async def test_money_map_happy_path(seed_aapl):
     world = money_world()
-    got = await run("money_map", world.pop("fmp"), **world)
+    got = await run_mm(world.pop("fmp"), **world)
     (rec,) = got.records
     assert isinstance(rec, R.MoneyMap) and R.ledger_key(rec) == "news:money_map:AAPL:2025"
     assert (rec.company.name, rec.fiscal_year, rec.period_end) == ("Apple", "2025", date(2025, 9, 27))
@@ -1232,7 +1421,7 @@ def _with(**over):
 @pytest.mark.asyncio
 async def test_money_map_gates(seed_aapl, over, reason):
     world = money_world(**over)
-    got = await run("money_map", world.pop("fmp"), **world)
+    got = await run_mm(world.pop("fmp"), **world)
     assert got.records == () and got.skip_reason == "money_map_none_qualified"
     assert got.rejections == {reason: 1}
 
@@ -1241,7 +1430,7 @@ async def test_money_map_gates(seed_aapl, over, reason):
 async def test_money_map_facts_outage_is_unavailable(seed_aapl):
     world = money_world(facts=facts_fn(default={"available": False, "upstream": True}))
     with pytest.raises(A.MarketingNewsUnavailable) as err:
-        await run("money_map", world.pop("fmp"), **world)
+        await run_mm(world.pop("fmp"), **world)
     assert err.value.reason == "revenue_unavailable"
 
 
@@ -1250,7 +1439,7 @@ async def test_money_map_breakdown_outage_is_unavailable(seed_aapl):
     world = money_world()
     world["revenue"] = FakeService({}, error=FMPUnavailableException("segmentation down"))
     with pytest.raises(A.MarketingNewsUnavailable) as err:
-        await run("money_map", world.pop("fmp"), **world)
+        await run_mm(world.pop("fmp"), **world)
     assert err.value.reason == "revenue_unavailable"
 
 
@@ -1263,7 +1452,7 @@ async def test_money_map_breakdown_outage_is_unavailable(seed_aapl):
 @pytest.mark.asyncio
 async def test_unverifiable_bars_are_none_never_guessed(seed_aapl, point, gross, operating):
     world = money_world(pp=profit(point=point))
-    rec = (await run("money_map", world.pop("fmp"), **world)).records[0]
+    rec = (await run_mm(world.pop("fmp"), **world)).records[0]
     assert (rec.gross_profit_usd, rec.operating_profit_usd, rec.net_income_usd) == (gross, operating, 95e9)
 
 
@@ -1308,7 +1497,7 @@ def _probe_world(*, bd=None, row=None, point=None):
 @pytest.mark.asyncio
 async def test_money_map_bars_are_as_reported_never_derived(seed_aapl, bd, row, point, gross, operating):
     world = _probe_world(bd=bd, row=row, point=point)
-    got = await run("money_map", world.pop("fmp"), **world)
+    got = await run_mm(world.pop("fmp"), **world)
     (rec,) = got.records
     assert (rec.gross_profit_usd, rec.operating_profit_usd, rec.revenue_usd, rec.net_income_usd) == \
         (gross, operating, 100e9, 2e9)
@@ -1317,7 +1506,7 @@ async def test_money_map_bars_are_as_reported_never_derived(seed_aapl, bd, row, 
 @pytest.mark.asyncio
 async def test_a_small_unnamed_gap_folds_into_other(seed_aapl):
     under = money_world(bd=breakdown(revenue_sources=[src("iPhone", 200e9), src("Services", 100e9), src("Mac", 43e9)]))
-    rec = (await run("money_map", under.pop("fmp"), **under)).records[0]
+    rec = (await run_mm(under.pop("fmp"), **under)).records[0]
     assert rec.other_usd == pytest.approx(7e9) and rec.eliminations_usd is None
 
 
@@ -1332,7 +1521,7 @@ async def test_a_small_unnamed_gap_folds_into_other(seed_aapl):
 @pytest.mark.asyncio
 async def test_derived_eliminations_are_refused_never_drawn(seed_aapl, sources, elim):
     world = money_world(bd=breakdown(revenue_sources=sources, intersegment_eliminations=elim))
-    got = await run("money_map", world.pop("fmp"), **world)
+    got = await run_mm(world.pop("fmp"), **world)
     assert got.records == () and got.rejections == {"money_map_inconsistent": 1}
 
 
@@ -1340,7 +1529,7 @@ async def test_derived_eliminations_are_refused_never_drawn(seed_aapl, sources, 
 @pytest.mark.asyncio
 async def test_no_eliminations_figure_never_draws_a_bar(seed_aapl, elim):
     world = money_world(bd=breakdown(intersegment_eliminations=elim))
-    (rec,) = (await run("money_map", world.pop("fmp"), **world)).records
+    (rec,) = (await run_mm(world.pop("fmp"), **world)).records
     assert rec.eliminations_usd is None and rec.other_usd == 20e9
 
 
@@ -1350,7 +1539,7 @@ async def test_undrawable_duplicate_and_surplus_segments_fold_into_other(seed_aa
                src("Wearables", 30e9), src("Accessories (Retail)", 15e9), src("services", 10e9),
                src("Licensing", 5e9), src("Unallocated", 10e9)]
     world = money_world(bd=breakdown(revenue_sources=sources))
-    rec = (await run("money_map", world.pop("fmp"), **world)).records[0]
+    rec = (await run_mm(world.pop("fmp"), **world)).records[0]
     assert [s.name for s in rec.segments] == ["iPhone", "Services", "Mac", "iPad", "Wearables"]
     assert rec.other_usd == pytest.approx(40e9)        # "(…)", the duplicate, the 6th, "Unallocated"
 
@@ -1359,7 +1548,7 @@ async def test_undrawable_duplicate_and_surplus_segments_fold_into_other(seed_aa
 async def test_a_posted_fiscal_year_is_skipped_before_any_profile_call(seed_aapl):
     world = money_world()
     fmp = world.pop("fmp")
-    got = await run("money_map", fmp, exclude={"news:money_map:AAPL:2025"}, **world)
+    got = await run_mm(fmp, exclude={"news:money_map:AAPL:2025"}, **world)
     assert got.records == () and got.rejections == {"already_posted": 1}
     assert fmp.calls["profiles"] == 0 and fmp.calls["income"] == 0 and world["profit"].calls == []
 
@@ -1379,7 +1568,7 @@ async def test_money_map_pool_order_and_attempt_cap(seed_aapl, monkeypatch):
         "trending_themes": [{"slug": "quantum", "tickers": ["IONQ", "RGTI", "QBTS"], "blocked_tickers": ["RGTI"],
                              "sort_order": 1, "is_active": True}],
     })
-    got = await run("money_map", world.pop("fmp"), exclude={"news:money_map:AAPL:2024"}, **world)
+    got = await run_mm(world.pop("fmp"), exclude={"news:money_map:AAPL:2024"}, **world)
     assert world["revenue"].calls == ["AVGO", "TSM", "IONQ"]      # AAPL (posted before) goes last
     assert got.rejections == {"money_map_degraded": 3}
 
@@ -1391,7 +1580,7 @@ async def test_a_failed_pool_source_degrades_to_the_seed(seed_aapl, monkeypatch,
     world["club"] = FakeClub(error=RuntimeError("club down"))
     world["sb"] = FakeSB(errors={"trending_themes": RuntimeError("themes down")})
     caplog.set_level(logging.WARNING, logger=A.__name__)
-    got = await run("money_map", world.pop("fmp"), **world)
+    got = await run_mm(world.pop("fmp"), **world)
     assert len(got.records) == 1
     assert "club members unavailable" in caplog.text and "theme members unavailable" in caplog.text
 
@@ -2052,7 +2241,7 @@ async def test_gross_stacks_at_the_head_of_the_pool_no_longer_starve_money_map(m
     """rr lens 0 #4 probe: CMCSA, INTC and XOM report gross segment stacks (refused every week);
     they used up the three attempts and AAPL was never reached — every week."""
     fmp, world = _money_pool(monkeypatch, GROSS + ("AAPL",), gross=GROSS)
-    got = await run("money_map", fmp, **world)
+    got = await run_mm(fmp, **world)
     assert [r.company.symbol for r in got.records] == ["AAPL"]
     assert got.rejections == {"money_map_inconsistent": 3}
 
@@ -2061,7 +2250,7 @@ async def test_gross_stacks_at_the_head_of_the_pool_no_longer_starve_money_map(m
 async def test_upstream_gaps_still_stop_at_the_attempt_cap(monkeypatch):
     seed = ("IBM", "ORCL", "CSCO", "AAPL")
     fmp, world = _money_pool(monkeypatch, seed, degraded=seed[:3])
-    got = await run("money_map", fmp, **world)
+    got = await run_mm(fmp, **world)
     assert got.records == () and got.rejections == {"money_map_degraded": 3}
     assert world["revenue"].calls == ["IBM", "ORCL", "CSCO"]          # AAPL is never read
 
@@ -2070,7 +2259,7 @@ async def test_upstream_gaps_still_stop_at_the_attempt_cap(monkeypatch):
 async def test_content_refusals_stop_at_their_own_cap(monkeypatch):
     gross = tuple(f"G{c}" for c in "ABCDEFGHI")                         # nine refused seeds
     fmp, world = _money_pool(monkeypatch, gross + ("AAPL",), gross=gross)
-    got = await run("money_map", fmp, **world)
+    got = await run_mm(fmp, **world)
     assert A.MONEY_MAP_MAX_CONTENT_REJECTIONS == 8
     assert got.records == () and got.rejections == {"money_map_inconsistent": 8}
     assert world["revenue"].calls == list(gross[:8])
@@ -2081,7 +2270,7 @@ async def test_a_normal_money_map_week_still_ends_after_three_records(monkeypatc
     """Records count as attempts, as before: four publishable seeds and a limit of 5 → 3 records."""
     seed = ("AAPL", "MSFT", "NVDA", "AMZN")
     fmp, world = _money_pool(monkeypatch, seed)
-    got = await run("money_map", fmp, **world)
+    got = await run_mm(fmp, **world)
     assert [r.company.symbol for r in got.records] == ["AAPL", "MSFT", "NVDA"]
     assert world["revenue"].calls == ["AAPL", "MSFT", "NVDA"] and got.rejections == {}
 
@@ -2848,10 +3037,22 @@ def _brk_world(stz_previous_value):
     previous = [{"symbol": "DAL", "value": 2.5e9}]
     if stz_previous_value is not None:
         previous.append({"symbol": "STZ", "value": stz_previous_value})
+    # Batch 1 (2026-10-15): a 29-position book is above the split-lookup cap (25), so the adapter re-derives
+    # the cap from the stored CURRENT book too (always there in production: the detail is built from it).
+    # Neither book carries a split-shaped share jump here, so nothing was trimmed. The review of 2026-10-16:
+    # that stored row also carries the change rows the split re-check reads and its build status (F1, F2).
+    current = [{"symbol": s, "shares": sh, "value": v} for s, _n, _c, sh, _p, v in _BRK_Q2_CHANGES if sh]
+    # The stored row holds EVERY change row its counts count (7 increased, 6 decreased); the live records kept
+    # five of them, so the other eight are filler the re-check finds clean.
+    stored = stored_current(BERKSHIRE, "2026-Q2", changes, _BRK_Q2_COUNTS, holdings=current)
+    stored["changes"]["rows"] += [
+        {"cusip": club_cusip(f"BRKFILL{i}"), "symbol": f"QF{chr(65 + i)}", "change": kind, "shares": sh,
+         "prev_shares": p, "value": 1e6}
+        for i, (kind, sh, p) in enumerate([("increased", 2.0, 1.0)] * 5 + [("decreased", 1.0, 2.0)] * 3)]
     sb = FakeSB({"trillion_club_companies": [{"slug": "berkshire-hathaway", "ciks": [BERKSHIRE],
                                               "card_kind": "thirteen_f", "use_13f": True,
                                               "detail_symbol": "BRK-A", "published": True}],
-                 "trillion_club_filings": [{"cik": BERKSHIRE, "period": "2026-Q1", "holdings": previous}],
+                 "trillion_club_filings": [{"cik": BERKSHIRE, "period": "2026-Q1", "holdings": previous}, stored],
                  "whales": []})
     profiles = {s: prof(s, n) for s, n, *_rest in _BRK_Q2_CHANGES}
     profiles["BRK-A"] = prof("BRK-A", "Berkshire Hathaway Inc.", cik=BERKSHIRE)
@@ -2981,7 +3182,8 @@ async def test_a_club_exit_is_valued_on_the_stored_previous_build(monkeypatch, c
     if error is not None:
         sb.errors["trillion_club_filings"] = error
     else:
-        sb.tables["trillion_club_filings"] = previous
+        # beside the stored CURRENT build row, read first for every club filing with a move (2026-10-19)
+        sb.tables["trillion_club_filings"] = previous + [sb.tables["trillion_club_filings"][1]]
     got = await run("thirteen_f", FakeFMP(profiles=thirteen_f_profiles()), club=club, sb=sb)
     unreadable = not previous or previous[0]["period"] != "2026-Q2" or previous[0]["holdings"] == "not json"
     if unreadable:
@@ -3035,7 +3237,7 @@ _MSFT_FY2026 = [src("Server Products And Cloud Services", 129_425e6), src("XBOX"
 async def test_a_money_map_mostly_other_is_refused(monkeypatch, sources, revenue, refused):
     net = 0.4 * revenue
     fmp, world = _mm_world(monkeypatch, sources, revenue=revenue, net=net)
-    got = await run("money_map", fmp, **world)
+    got = await run_mm(fmp, **world)
     if refused:
         assert got.records == () and got.rejections == {"money_map_mostly_other": 1}
     else:
@@ -3048,7 +3250,7 @@ async def test_a_mostly_other_map_is_a_content_refusal_for_the_caps(monkeypatch)
     """It never uses up an upstream attempt: three at the head of the pool still let AAPL through."""
     seed = ("QA", "QB", "QC", "AAPL")
     fmp, world = _money_pool(monkeypatch, seed, mostly_other=seed[:3])
-    got = await run("money_map", fmp, **world)
+    got = await run_mm(fmp, **world)
     assert [r.company.symbol for r in got.records] == ["AAPL"]
     assert got.rejections == {"money_map_mostly_other": 3} and world["revenue"].calls == list(seed)
 
@@ -3058,7 +3260,7 @@ async def test_fmp_segment_labels_are_shown_as_the_company_writes_them(monkeypat
     sources = [src("Intelligent Cloud", 150e9), src("XBOX", 100e9), src("Linked In Corporation", 80e9),
                src("Service", 60e9), src("Services", 5e9), src("Other", 5e9)]
     fmp, world = _mm_world(monkeypatch, sources, revenue=400e9, net=100e9)
-    (rec,) = (await run("money_map", fmp, **world)).records
+    (rec,) = (await run_mm(fmp, **world)).records
     assert [s.name for s in rec.segments] == ["Intelligent Cloud", "Xbox", "LinkedIn", "Services"]
     assert rec.other_usd == pytest.approx(10e9)       # "Services" after "Service" → "Services": a duplicate
 
@@ -3135,7 +3337,7 @@ def _slow_money(monkeypatch, seed, *, gross=(), per_lookup):
 
 
 async def _money_run(deps):
-    return await A.candidates("money_map", run_date=RUN, exclude=frozenset(), limit=5, deadline=45.0, deps=deps)
+    return await A.candidates("money_map", run_date=MM_RUN, exclude=frozenset(), limit=5, deadline=45.0, deps=deps)
 
 
 GH = tuple(f"G{c}" for c in "ABCDEFGH")                                  # eight refused seeds
@@ -3185,14 +3387,915 @@ async def test_out_of_budget_or_an_outage_without_a_kept_record_still_raises(mon
 @pytest.mark.asyncio
 async def test_a_held_record_brings_back_the_total_attempt_cap(monkeypatch, seed, gross, kept, reads):
     fmp, world = _money_pool(monkeypatch, seed, gross=gross)
-    got = await run("money_map", fmp, **world)
+    got = await run_mm(fmp, **world)
     assert [r.company.symbol for r in got.records] == kept and world["revenue"].calls == reads
 
 
 def test_every_segment_override_is_drawn_by_the_adapter():
-    """Each override value passes the adapter's own segment gates (`_segments` draws it)."""
+    """Each override value passes the adapter's own segment gates (`_segments` draws it) — Batch 1: the label
+    fold included (an override that produced a code or a generic label would be folded right back)."""
     for shown in R.SEGMENT_DISPLAY_OVERRIDES.values():
         assert A._SEGMENT_NAME_RE.fullmatch(shown) and shown.strip().lower() not in A._MONEY_MAP_REST_NAMES
+        assert R.segment_fold_reason(shown) is None, shown
+
+
+# ── Batch 1 (2026-10-15, plan item 2): Money Map freshness, labels, wording ───
+
+from app.services.marketing import news_templates as NT  # noqa: E402  (the end-to-end checks compose)
+
+
+@pytest.mark.parametrize("run_date, reason", [
+    (date(2026, 10, 15), "money_map_next_year_due"),     # the plan's case: Apple FY2025, 383 days on
+    (date(2026, 9, 25), None),                           # 363 days: fiscal 2026 has not ended
+    (date(2026, 9, 26), "money_map_next_year_due"),      # 364 days (52 weeks): the next year may have ended
+    (date(2025, 9, 27), None),                           # the year's last day itself
+    (date(2027, 3, 29), "money_map_next_year_due"),      # 548 days: not yet stale, still next-year-due
+    (date(2027, 3, 30), "money_map_stale"),              # 549 days: the older gate answers first
+    (date(2025, 9, 26), "money_map_stale"),              # a year that has not ended on the run date
+], ids=["plan_case_383", "edge_363", "edge_364", "day_0", "548", "549_stale", "future"])
+@pytest.mark.asyncio
+async def test_a_money_map_waits_for_the_next_fiscal_year_once_it_is_due(seed_aapl, run_date, reason, caplog):
+    """A fiscal year that ended `MONEY_MAP_NEXT_YEAR_DUE_DAYS` (364) or more days before the run is refused
+    `money_map_next_year_due`: Apple's fiscal 2025 (ended Sep 27, 2025) on Oct 15, 2026 — fiscal 2026 ended Sep 26
+    and its 10-K is due — is last year's map. Mutation-checked by hand (2026-10-15): `>=` → `>` turns the 364
+    edge red; removing the gate turns every refused row red."""
+    caplog.set_level(logging.INFO, logger=A.__name__)
+    world = money_world()
+    got = await run_mm(world.pop("fmp"), run_date=run_date, **world)
+    if reason is None:
+        (rec,) = got.records
+        assert (rec.fiscal_year, rec.period_end) == ("2025", date(2025, 9, 27)) and got.rejections == {}
+        return
+    assert got.records == () and got.skip_reason == "money_map_none_qualified"
+    assert got.rejections == {reason: 1}
+    if reason == "money_map_next_year_due":
+        age = (run_date - date(2025, 9, 27)).days
+        assert f"AAPL FY2025 ended 2025-09-27, {age} days before the run" in caplog.text
+
+
+def _fy2026(world, fmp, sym):
+    """``sym`` on Apple's FISCAL 2026 (ended Sep 26, 2026): its breakdown, statement row and profit-power year."""
+    world["revenue"].by_symbol[sym] = breakdown(symbol=sym, fiscal_year="2026")
+    world["profit"].by_symbol[sym] = profit(point={"period": "2026"})
+    fmp.income[sym] = [{**INCOME_AAPL[0], "fiscalYear": "2026", "date": "2026-09-26"}]
+
+
+@pytest.mark.asyncio
+async def test_a_next_year_due_map_is_never_an_attempt(monkeypatch):
+    """Three seeds still on fiscal 2025 at the head of the pool (Oct 15, 2026) are refused — never an upstream
+    attempt, so they never use up the three attempts: the fourth, on fiscal 2026, is read and kept. Mutation-
+    checked by hand (2026-10-15): with the code in `_MONEY_MAP_UPSTREAM_GAPS` the fourth is never read."""
+    seed = ("QA", "QB", "QC", "AAPL")
+    fmp, world = _money_pool(monkeypatch, seed)
+    _fy2026(world, fmp, "AAPL")
+    got = await run_mm(fmp, run_date=date(2026, 10, 15), **world)
+    assert [(r.company.symbol, r.fiscal_year) for r in got.records] == [("AAPL", "2026")]
+    assert got.rejections == {"money_map_next_year_due": 3} and world["revenue"].calls == list(seed)
+    assert "money_map_next_year_due" in R.REJECTION_REASONS
+    assert "money_map_next_year_due" not in A._MONEY_MAP_UPSTREAM_GAPS
+
+
+# ── the review of 2026-10-16 (MM-4): a due year is a date fact, remembered, and tried last ──────────────
+
+_DUE_DAY = date(2026, 10, 15)          # `INCOME_AAPL`'s fiscal 2025 (ended Sep 27, 2025) is 383 days old: due
+
+
+def _fan_out_calls(fmp, world):
+    """The reads `_money_map_record` fans out per candidate after its breakdown: statements, profit power, facts,
+    profiles."""
+    return fmp.calls["income"], len(world["profit"].calls), len(world["facts"].calls), fmp.calls["profiles"]
+
+
+@pytest.mark.asyncio
+async def test_due_years_never_use_up_the_content_cap(monkeypatch):
+    """Nine seeds on a due year ahead of a fresh one: before, each counted as a content refusal and the eighth
+    ended the loop (`MONEY_MAP_MAX_CONTENT_REJECTIONS`) — from about Jan 1 to March the December year-ends at the
+    head of the pool closed the series. A date fact now: only the breakdown reads bound it. Mutation-checked by
+    hand (2026-10-19): counting it as a refusal again leaves AAPL unread."""
+    due = tuple(f"D{c}" for c in "ABCDEFGHJ")                            # nine
+    fmp, world = _money_pool(monkeypatch, due + ("AAPL",))
+    _fy2026(world, fmp, "AAPL")
+    got = await run_mm(fmp, run_date=_DUE_DAY, **world)
+    assert [(r.company.symbol, r.fiscal_year) for r in got.records] == [("AAPL", "2026")]
+    assert got.rejections == {"money_map_next_year_due": 9}
+    assert world["revenue"].calls == [*due, "AAPL"]
+
+
+@pytest.mark.asyncio
+async def test_a_due_year_the_memo_knows_is_refused_before_the_fan_out(monkeypatch, caplog):
+    """The year's end is remembered from its statement read: the next run refuses a breakdown still on that year
+    without the statement / profit-power / facts / profile reads. Mutation-checked by hand (2026-10-19): with
+    `_money_map_known_age` answering None, the fan-out counters move on the second run."""
+    caplog.set_level(logging.INFO, logger=A.__name__)
+    fmp, world = _money_pool(monkeypatch, ("QA", "QB", "AAPL"))
+    _fy2026(world, fmp, "AAPL")
+    first = await run_mm(fmp, run_date=_DUE_DAY, **world)
+    assert [r.company.symbol for r in first.records] == ["AAPL"]
+    assert first.rejections == {"money_map_next_year_due": 2}
+    before = _fan_out_calls(fmp, world)
+    world["revenue"].calls.clear()
+    second = await run_mm(fmp, run_date=_DUE_DAY + timedelta(days=1), exclude={"news:money_map:AAPL:2026"},
+                          **world)
+    assert second.records == () and second.skip_reason == "money_map_none_qualified"
+    assert second.rejections == {"money_map_next_year_due": 2, "already_posted": 1}
+    assert world["revenue"].calls == ["QA", "QB", "AAPL"]                 # one breakdown read each
+    assert _fan_out_calls(fmp, world) == before                           # and nothing else
+    assert "QA is still on FY2025 (ended 2025-09-27, 384 days before the run; last checked 2026-10-15)" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_known_due_years_go_last_so_the_series_reaches_a_fresh_year(monkeypatch):
+    """The review's January scenario: twelve due years ahead of a fresh one use up every breakdown read
+    (`MONEY_MAP_MAX_LOOKUPS`) of a NEW process — one run without a map — and the memo then puts them after the
+    rest, so the next run reaches the fresh year at once. With a record held, due years count toward the old
+    total cap (one more is read, then the loop ends). Mutation-checked by hand (2026-10-19): with the order back
+    to plain pool order the second run is empty too; without `due` in the held-record total, every due year is
+    read after the record."""
+    due = tuple(f"D{c}" for c in "ABCDEFGHJKLM")                         # twelve: every read of a call
+    fmp, world = _money_pool(monkeypatch, due + ("DN", "AAPL"))
+    _fy2026(world, fmp, "AAPL")
+    cold = await run_mm(fmp, run_date=_DUE_DAY, **world)
+    assert A.MONEY_MAP_MAX_LOOKUPS == 12
+    assert cold.records == () and cold.rejections == {"money_map_next_year_due": 12}
+    assert world["revenue"].calls == list(due)
+    world["revenue"].calls.clear()
+    warm = await run_mm(fmp, run_date=_DUE_DAY + timedelta(days=1), **world)
+    assert [r.company.symbol for r in warm.records] == ["AAPL"]
+    # DN (unknown: read, due) and AAPL first; then one known-due year (the held-record total reaches 3)
+    assert world["revenue"].calls == ["DN", "AAPL", "DA"]
+    assert warm.rejections == {"money_map_next_year_due": 2}
+
+
+@pytest.mark.asyncio
+async def test_known_due_years_are_retried_least_recently_checked_first(monkeypatch):
+    """A symbol at the back is still re-read when reads are left — the one checked longest ago first, so every
+    waiting symbol gets its turn (a new 10-K is found whichever it is)."""
+    fmp, world = _money_pool(monkeypatch, ("DA", "DB", "DC"))
+    await run_mm(fmp, run_date=_DUE_DAY, **world)                        # learns all three, checked that day
+    monkeypatch.setattr(A, "MONEY_MAP_MAX_LOOKUPS", 1)
+    for days, expected in ((1, "DA"), (2, "DB"), (3, "DC"), (4, "DA")):
+        world["revenue"].calls.clear()
+        got = await run_mm(fmp, run_date=_DUE_DAY + timedelta(days=days), **world)
+        assert world["revenue"].calls == [expected], days
+        assert got.rejections == {"money_map_next_year_due": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_newly_filed_year_is_read_whatever_the_memo_knows(monkeypatch):
+    """The memo knows a YEAR, never the symbol's answer: once the breakdown serves the next year, the normal gates
+    run and the map is kept."""
+    fmp, world = _money_pool(monkeypatch, ("AAPL",))
+    first = await run_mm(fmp, run_date=_DUE_DAY, **world)
+    assert first.rejections == {"money_map_next_year_due": 1}
+    _fy2026(world, fmp, "AAPL")                                           # its fiscal 2026 10-K lands
+    second = await run_mm(fmp, run_date=_DUE_DAY + timedelta(days=1), **world)
+    assert [(r.company.symbol, r.fiscal_year) for r in second.records] == [("AAPL", "2026")]
+
+
+@pytest.mark.asyncio
+async def test_a_stale_year_the_memo_knows_is_still_a_content_refusal(monkeypatch):
+    """The memo applies the statement read's own age rule: past `MONEY_MAP_STALE_DAYS` it is `money_map_stale`
+    (reported as it always was), still without the fan-out. Since B3PD-1 (2026-10-20) a memo answer — this one
+    included — never counts toward the content cap: it costs one breakdown read."""
+    fmp, world = _money_pool(monkeypatch, ("AAPL",))
+    await run_mm(fmp, run_date=_DUE_DAY, **world)
+    before = _fan_out_calls(fmp, world)
+    got = await run_mm(fmp, run_date=date(2027, 3, 30), **world)          # 549 days after Sep 27, 2025
+    assert got.rejections == {"money_map_stale": 1} and _fan_out_calls(fmp, world) == before
+
+
+@pytest.mark.parametrize("junk", ["junk", ("2025",), ("2025", "2025-09-27", date(2026, 10, 15)),
+                                  (2025, date(2025, 9, 27), date(2026, 10, 15)), None])
+@pytest.mark.asyncio
+async def test_a_malformed_memo_entry_is_ignored(monkeypatch, junk):
+    """Fail open to the normal read: a malformed entry can only cost a read, never refuse or reorder a map."""
+    fmp, world = _money_pool(monkeypatch, ("AAPL",))
+    _fy2026(world, fmp, "AAPL")
+    A._memo_put(("money_map_fy_end", "AAPL"), junk, 3600.0)
+    got = await run_mm(fmp, run_date=_DUE_DAY, **world)
+    assert [r.company.symbol for r in got.records] == ["AAPL"]
+    assert A._money_map_known("AAPL") == ("2026", date(2026, 9, 26), _DUE_DAY)   # rewritten by the read
+
+
+def test_the_due_order_puts_every_known_due_year_after_both_groups():
+    """Never posted, then posted for an earlier year — and AFTER both groups every symbol KNOWN to be on a due year
+    (the re-review of 2026-10-19, MM-4-R: a due year is refused whatever its group, so it never outranks a candidate
+    that can publish), least recently checked first, then never posted before posted, then the pool order. An
+    unknown or fresh symbol keeps the pool order inside its group."""
+    run = _DUE_DAY
+    A._memo_put(("money_map_fy_end", "B"), ("2025", date(2025, 9, 27), run), 3600.0)        # due
+    A._memo_put(("money_map_fy_end", "D"), ("2025", date(2025, 9, 27), run), 3600.0)        # due (posted)
+    A._memo_put(("money_map_fy_end", "C"), ("2026", date(2026, 9, 26), run), 3600.0)        # fresh
+    A._memo_put(("money_map_fy_end", "F"), ("2025", date(2025, 9, 27), run - timedelta(days=3)), 3600.0)  # older
+    # G: posted for fiscal 2026, and the memo knows it is still on fiscal 2026 — `already_posted` after its read
+    A._memo_put(("money_map_fy_end", "G"), ("2026", date(2026, 9, 26), run - timedelta(days=1)), 3600.0)
+    posted = {"D": {"2024"}, "E": {"2025"}, "F": {"2024"}, "G": {"2025", "2026"}}
+    order = A._money_map_order(["A", "B", "C", "D", "E", "F", "G"], posted, run)
+    assert order == ["A", "C", "E", "F", "G", "B", "D"]
+
+
+@pytest.mark.asyncio
+async def test_a_posted_symbols_fresh_year_is_reached_before_fourteen_known_due_years(monkeypatch):
+    """The re-review of 2026-10-19 (MM-4-R): fourteen never-posted December year-ends the memo knows to be due, and
+    AAPL — posted for fiscal 2025 — whose breakdown now serves fiscal 2026. Before, the never-posted group came
+    first whole: twelve breakdown reads (`MONEY_MAP_MAX_LOOKUPS`) went to due years that cannot publish, and the
+    run ended `money_map_none_qualified`. AAPL is read first now. Mutation-checked by hand (2026-10-19): with the
+    known-due years back inside their group, AAPL was never read (red)."""
+    due = tuple(f"D{c}" for c in "ABCDEFGHJKLMNP")                         # fourteen
+    fmp, world = _money_pool(monkeypatch, due + ("AAPL",))
+    _fy2026(world, fmp, "AAPL")
+    for sym in due:
+        A._memo_put(("money_map_fy_end", sym), ("2025", date(2025, 9, 27), _DUE_DAY), 3600.0)
+    got = await run_mm(fmp, run_date=_DUE_DAY + timedelta(days=1), exclude={"news:money_map:AAPL:2025"}, **world)
+    assert [(r.company.symbol, r.fiscal_year) for r in got.records] == [("AAPL", "2026")]
+    assert world["revenue"].calls[0] == "AAPL"
+
+
+# ── B3PD-1 (2026-10-20): a refusal is remembered, so refused seeds never wall the pool off ─────────────────────
+#
+# Nothing remembered a content refusal: a never-posted seed refused for its current year kept the head of the pool,
+# every call spent its content cap on the same refused symbols, and once the publishable seeds ahead of them were
+# posted the series never yielded again — the members behind them, and every posted company's NEW fiscal year,
+# were never read (the in-memory walk of the review: 68 posts and no new-year re-post over 2027 at seven days a
+# week, against 236 and 60 without the refusals). Each read that cannot publish is remembered now
+# (`_money_map_remember_refusal`); such a symbol is tried after every candidate that can publish, least recently
+# checked first, and a re-read of the same year is answered before the fan-out without counting toward the cap.
+
+_DEC_FY2025, _DEC_FY2026 = ("2025", "2025-12-31"), ("2026", "2026-12-31")
+
+
+def _dated_pool(monkeypatch, seed, *, refused=(), degraded=(), filed=None):
+    """``seed`` as the Money Map pool, every symbol on a December fiscal year. ``refused`` symbols report a gross
+    segment stack (`money_map_inconsistent`, a content refusal) whatever their year, ``degraded`` ones a degraded
+    breakdown (an upstream gap); ``filed`` maps a symbol to the run day its fiscal 2026 10-K is served (fiscal 2025
+    before it). Returns (fmp, world, set_day): ``set_day(day)`` points every fake at what FMP serves that day."""
+    monkeypatch.setattr(R, "MONEY_MAP_SEED", tuple(seed))
+    world = dict(revenue=FakeService({}), profit=FakeService({}), facts=facts_fn(), sb=FakeSB({"trending_themes": []}))
+    fmp = FakeFMP(profiles={s: prof(s, f"{s.title()} Corporation", exchange="NASDAQ") for s in seed}, income={})
+
+    def set_day(day: date) -> None:
+        for s in seed:
+            fy, end = _DEC_FY2026 if (filed or {}).get(s) is not None and day >= filed[s] else _DEC_FY2025
+            extra: Dict[str, Any] = {"intersegment_eliminations": 10e9} if s in refused else {}
+            if s in degraded:
+                extra["degraded"] = ["segmentation_unavailable"]
+            world["revenue"].by_symbol[s] = breakdown(symbol=s, fiscal_year=fy, **extra)
+            world["profit"].by_symbol[s] = profit(point={"period": fy})
+            fmp.income[s] = [{**INCOME_AAPL[0], "fiscalYear": fy, "date": end}]
+
+    return fmp, world, set_day
+
+
+async def _mm_days(fmp, world, set_day, days, posted, *, limit=1):
+    """Run the walk on each day of ``days`` like the daily build does — one record a day posted to the ledger
+    (``posted``, the ledger keys) — and return each day's (records' symbols with their years, rejections, reads)."""
+    out = []
+    for day in days:
+        set_day(day)
+        world["revenue"].calls.clear()
+        got = await run_mm(fmp, run_date=day, exclude=set(posted), limit=limit, **world)
+        for rec in got.records[:1]:
+            posted.add(R.ledger_key(rec))
+        out.append(([(r.company.symbol, r.fiscal_year) for r in got.records], dict(got.rejections),
+                    list(world["revenue"].calls)))
+    return out
+
+
+@pytest.mark.asyncio
+async def test_ten_refused_seeds_never_wall_off_the_pool_across_a_year_end(monkeypatch):
+    """The review's walk, day by day: ten never-posted seeds refused for their year at the head of the pool, two
+    publishable seeds behind them, and a third first read in the Dec 30 – Feb 16 due window. Each refused seed is
+    read ONCE and then waits behind every candidate that can publish, so the publishable seeds are reached on the
+    next days; through the due window everything is a date fact; and once the fiscal 2026 10-Ks land the walk
+    reaches both the never-posted symbol it read while due (QQ) and the posted company's NEW year (PA). Mutation-
+    checked (2026-10-20): with `_money_map_remember_refusal` a no-op the same eight refused seeds end every day and
+    nothing is ever posted."""
+    refused = tuple(f"R{c}" for c in "ABCDEFGHJK")                             # ten
+    fmp, world, set_day = _dated_pool(monkeypatch, refused + ("PA", "PB", "QQ"), refused=refused,
+                                      filed={"PA": date(2027, 2, 16), "QQ": date(2027, 2, 16)})
+    posted: set = set()
+    nov2, nov3, nov4, jan5, feb17, feb18 = await _mm_days(fmp, world, set_day, [
+        date(2026, 11, 2), date(2026, 11, 3), date(2026, 11, 4), date(2027, 1, 5), date(2027, 2, 17),
+        date(2027, 2, 18)], posted)
+    # day 1: the first eight refused seeds use up the content cap — the one empty day
+    assert nov2 == ([], {"money_map_inconsistent": 8}, list(refused[:8]))
+    # day 2: the two refused seeds never read come first, then PA; the eight remembered ones wait at the back
+    assert nov3 == ([("PA", "2025")], {"money_map_inconsistent": 2}, ["RJ", "RK", "PA"])
+    assert nov4 == ([("PB", "2025")], {}, ["PB"])
+    # the due window (FY2025 ended Dec 31, 2025 is due from Dec 30, 2026): QQ, never read, first — then the waiting
+    # symbols least recently checked first (the year-end memo answers them: no fan-out); twelve reads, no record
+    assert jan5[0] == [] and jan5[1] == {"money_map_next_year_due": 11, "already_posted": 1}
+    assert jan5[2] == ["QQ", *refused, "PA"]
+    # the 10-Ks land: QQ — never posted, read while due — is reached and kept on fiscal 2026 …
+    assert feb17[0] == [("QQ", "2026")] and feb17[2][-1] == "QQ"
+    # … and the next day the posted company's NEW fiscal year, read before every symbol checked since
+    assert feb18[0] == [("PA", "2026")] and feb18[2] == ["PA"]
+    assert posted == {"news:money_map:PA:2025", "news:money_map:PB:2025", "news:money_map:QQ:2026",
+                      "news:money_map:PA:2026"}
+
+
+@pytest.mark.asyncio
+async def test_remembered_refusals_are_answered_before_the_fan_out_and_never_use_up_the_content_cap(monkeypatch,
+                                                                                                    caplog):
+    """Nine symbols whose fiscal 2025 the memo refused yesterday, ahead of AAPL — posted for fiscal 2025, its fiscal
+    2026 10-K now served — whose last check is today: each refused year is answered from the memo (one breakdown
+    read, no statement / profit-power / facts / profile read) and never counts toward the content cap, so AAPL is
+    read and kept. Mutation-checked (2026-10-20): counting the memo's answers as content refusals stops the walk at
+    eight and AAPL is never read."""
+    caplog.set_level(logging.INFO, logger=A.__name__)
+    held = tuple(f"G{c}" for c in "ABCDEFGHJ")                                  # nine
+    filed = date(2027, 2, 16)                                                   # every fiscal 2026 10-K
+    fmp, world, set_day = _dated_pool(monkeypatch, held + ("AAPL",), refused=held,
+                                      filed={s: filed for s in held + ("AAPL",)})
+    day = date(2027, 3, 3)
+    set_day(day)
+    for sym in held:
+        A._memo_put(("money_map_refused", sym), ("2026", "money_map_inconsistent", day - timedelta(days=1),
+                                                 day - timedelta(days=1)), 3600.0)
+    A._memo_put(("money_map_fy_end", "AAPL"), ("2025", date(2025, 12, 31), day), 3600.0)
+    before = _fan_out_calls(fmp, world)
+    got = await run_mm(fmp, run_date=day, exclude={"news:money_map:AAPL:2025"}, **world)
+    assert [(r.company.symbol, r.fiscal_year) for r in got.records] == [("AAPL", "2026")]
+    assert got.rejections == {"money_map_inconsistent": 9}
+    assert world["revenue"].calls == [*held, "AAPL"]
+    # the only fan-out is AAPL's: one statement, one profit power, one facts and one profile read
+    after = _fan_out_calls(fmp, world)
+    assert tuple(a - b for a, b in zip(after, before)) == (1, 1, 1, 1)
+    assert ("GA is still on FY2026, refused money_map_inconsistent when read in full on 2027-03-02 (1 days before "
+            "the run)") in caplog.text
+    # each answer refreshed the check (the order rotates) and kept the day of the full read
+    assert A._money_map_refused("GA") == ("2026", "money_map_inconsistent", day, day - timedelta(days=1))
+    assert A._money_map_refused("AAPL") is None                    # a record drops whatever was remembered
+
+
+@pytest.mark.parametrize("age, read_in_full", [
+    (A.MONEY_MAP_REFUSAL_RECHECK_DAYS - 1, False), (A.MONEY_MAP_REFUSAL_RECHECK_DAYS, True), (-1, True)],
+    ids=["inside_the_window", "at_the_window", "a_later_read_than_the_run"])
+@pytest.mark.asyncio
+async def test_a_remembered_refusal_is_read_in_full_again_after_the_recheck_window(monkeypatch, age, read_in_full):
+    """A refused year is answered from the memo for `MONEY_MAP_REFUSAL_RECHECK_DAYS` after its last FULL read; then
+    it is read in full again (a feed correction, a listing change) — and a read dated after the run (another
+    process's clock) is never trusted."""
+    fmp, world, set_day = _dated_pool(monkeypatch, ("GA",), refused=("GA",))
+    day = date(2026, 11, 3)
+    set_day(day)
+    read_on = day - timedelta(days=age)
+    A._memo_put(("money_map_refused", "GA"), ("2025", "money_map_inconsistent", read_on, read_on), 3600.0)
+    before = _fan_out_calls(fmp, world)
+    got = await run_mm(fmp, run_date=day, **world)
+    assert got.rejections == {"money_map_inconsistent": 1}
+    assert (_fan_out_calls(fmp, world) != before) is read_in_full
+    assert A._money_map_refused("GA")[2:] == ((day, day) if read_in_full else (day, read_on))
+
+
+@pytest.mark.asyncio
+async def test_a_new_fiscal_year_lifts_a_remembered_refusal(monkeypatch):
+    """The memo remembers a YEAR's refusal: once the breakdown serves the next year it is read in full, and kept."""
+    fmp, world, set_day = _dated_pool(monkeypatch, ("GA",), filed={"GA": date(2027, 2, 16)})
+    day = date(2027, 2, 17)
+    set_day(day)
+    A._memo_put(("money_map_refused", "GA"), ("2025", "money_map_mostly_other", day, day), 3600.0)
+    got = await run_mm(fmp, run_date=day, **world)
+    assert [(r.company.symbol, r.fiscal_year) for r in got.records] == [("GA", "2026")]
+
+
+@pytest.mark.asyncio
+async def test_upstream_gaps_wait_at_the_back_but_are_always_read_in_full(monkeypatch):
+    """Three seeds whose breakdown is degraded used up the three attempts every day, ahead of AAPL. A gap is
+    remembered for the ORDER only: the next day AAPL is read first; and a gap is never answered from the memo —
+    each re-read is a full read, so a breakdown that comes back is kept."""
+    gaps = ("DA", "DB", "DC")
+    degraded = set(gaps)                                    # read by `set_day` each day
+    fmp, world, set_day = _dated_pool(monkeypatch, gaps + ("AAPL",), degraded=degraded)
+    posted: set = set()
+    day1, day2 = await _mm_days(fmp, world, set_day, [date(2026, 11, 2), date(2026, 11, 3)], posted)
+    assert day1 == ([], {"money_map_degraded": 3}, list(gaps))
+    assert day2[0] == [("AAPL", "2025")] and day2[2][0] == "AAPL"
+    assert A._money_map_refused("DA")[:2] == ("2025", "money_map_degraded")
+    # DA's breakdown is whole again: the next day it is read in full in its turn (never answered from the memo)
+    # and kept
+    degraded.discard("DA")
+    (day3,) = await _mm_days(fmp, world, set_day, [date(2026, 11, 4)], posted)
+    assert day3[0] == [("DA", "2025")] and day3[2][0] == "DA"
+    assert A._money_map_refused("DA") is None
+
+
+@pytest.mark.asyncio
+async def test_already_posted_reads_refresh_the_rotation(monkeypatch):
+    """Thirteen symbols posted for fiscal 2025, all last checked on the same day, and only the LAST one's fiscal
+    2026 10-K served: twelve reads (`MONEY_MAP_MAX_LOOKUPS`) a day. Each `already_posted` read refreshes its check
+    (B3PD-1), so the next day starts with the one not yet read and keeps it. Mutation-checked (2026-10-20): without
+    the refresh the same twelve are read every day and the new year is never reached."""
+    syms = tuple(f"S{c}" for c in "ABCDEFGHJKLMN")                              # thirteen
+    fmp, world, set_day = _dated_pool(monkeypatch, syms, filed={"SN": date(2027, 2, 16)})
+    old = date(2027, 2, 1)
+    for sym in syms:
+        A._memo_put(("money_map_fy_end", sym), ("2025", date(2025, 12, 31), old), 3600.0)
+    posted = {f"news:money_map:{s}:2025" for s in syms}
+    day1, day2 = await _mm_days(fmp, world, set_day, [date(2027, 3, 2), date(2027, 3, 3)], posted)
+    assert A.MONEY_MAP_MAX_LOOKUPS == 12
+    assert day1 == ([], {"already_posted": 12}, list(syms[:12]))
+    assert day2[0] == [("SN", "2026")] and day2[2] == ["SN"]
+
+
+def test_the_order_holds_back_a_remembered_refusal_only_while_it_is_the_latest_word():
+    """A refusal remembered no earlier than the year-end entry holds a symbol back (least recently checked first,
+    beside the due and posted years); one older than the year-end entry — a newer year read since — does not; a
+    malformed entry is ignored (fail open: it can only cost a read)."""
+    run = date(2026, 11, 3)
+    A._memo_put(("money_map_refused", "B"), ("2025", "money_map_mostly_other", run, run), 3600.0)
+    A._memo_put(("money_map_refused", "C"), ("2025", "money_map_degraded", run - timedelta(days=2),
+                                             run - timedelta(days=2)), 3600.0)
+    # D: refused fiscal 2025 on Oct 1, its fiscal 2026 read (fresh) since — the older refusal no longer holds it
+    A._memo_put(("money_map_refused", "D"), ("2025", "money_map_mostly_other", date(2026, 10, 1),
+                                             date(2026, 10, 1)), 3600.0)
+    A._memo_put(("money_map_fy_end", "D"), ("2026", date(2026, 9, 26), run - timedelta(days=1)), 3600.0)
+    A._memo_put(("money_map_refused", "E"), ("2025", 7, run, run), 3600.0)                  # malformed
+    assert A._money_map_refused("E") is None
+    order = A._money_map_order(["A", "B", "C", "D", "E", "F"], {"F": {"2024"}}, run)
+    assert order == ["A", "D", "E", "F", "C", "B"]
+
+
+# ── RR2-MM-TEMPLATE-WALL (the round-2 review of 2026-10-20): a record the TEMPLATE refuses never walls the pool ────
+#
+# B3PD-1 remembered only the read's own refusals. A record the template then refused — a loss larger than revenue
+# (`implausible_figures`), a segment named like a web address (`slot_rejected`) — was rebuilt and offered first every
+# day: each counted as one of the walk's three attempts and cleared the symbol's remembered refusal, so three
+# never-posted ones at the head of the pool ended the series every day (the review's in-memory walk: ten days, the
+# same three refused, nothing posted — and no posted company's new fiscal year ever reached). A loss larger than
+# revenue is refused at the read now (`money_map_loss_above_revenue`, remembered like any content refusal), and every
+# other template refusal is reported back by the script flow (`A.remember_template_refusal` → `template_refused`).
+
+_LOSS_SOURCES = [src("Vaccines", 1.5e9), src("Collaborations", 0.5e9)]
+
+
+@pytest.mark.parametrize("net, gross, operating, kept_operating, refused", [
+    (-1.2, 0.4, -0.9, -0.9, True),      # the net loss alone is larger than revenue (Moderna's fiscal 2024 shape)
+    (-0.8, 0.3, -1.2, -1.2, True),      # the operating loss alone (a gain below the operating line)
+    (-0.9, -1.2, -1.0, None, True),     # the gross loss alone (the operating line, above the gross loss, is omitted)
+    (-1.0, 0.3, -1.0, -1.0, False),     # losses exactly as large as revenue: the template draws them
+    (-0.5, 0.4, -0.6, -0.6, False),     # an ordinary loss year
+], ids=["net", "operating", "gross", "equal_to_revenue", "ordinary_loss"])
+@pytest.mark.asyncio
+async def test_a_loss_larger_than_revenue_is_refused_at_the_read_exactly_as_the_template_refuses_it(
+        monkeypatch, net, gross, operating, kept_operating, refused):
+    """The read refuses exactly what the template's `implausible_figures` gate refuses (|net|, |gross| or |operating|
+    above revenue — the record it would build is refused by `NT.compose`), here where the walk remembers it (B3PD-1);
+    the rest it builds, and they compose. Mutation-checked (2026-10-20): each of the gate's three conditions removed
+    alone turns its own row red."""
+    rev = 2.0e9
+    fmp, world = _fy2025_world(monkeypatch, "LA", "Lumen Biologics Inc.", _LOSS_SOURCES, revenue=rev, net=net * rev,
+                               gross=gross * rev, operating=operating * rev)
+    got = await run_mm(fmp, **world)
+    company = R.company_from_profile(prof("LA", "Lumen Biologics Inc.", exchange="NASDAQ"), "LA", purpose="listing")
+    would_be = R.MoneyMap(series="money_map", company=company, fiscal_year="2025", period_end=date(2025, 12, 31),
+                          segments=tuple(R.Segment(s.name, s.value) for s in _LOSS_SOURCES), other_usd=None,
+                          eliminations_usd=None, revenue_usd=rev, gross_profit_usd=gross * rev,
+                          operating_profit_usd=None if kept_operating is None else kept_operating * rev,
+                          net_income_usd=net * rev)
+    if refused:
+        assert got.records == () and got.rejections == {"money_map_loss_above_revenue": 1}
+        assert A._money_map_refused("LA")[:2] == ("2025", "money_map_loss_above_revenue")     # remembered (B3PD-1)
+        with pytest.raises(NT.NewsTemplateRefused) as err:
+            NT.compose(would_be, run_date=MM_RUN, store_state="live", allow_x_url=False)
+        assert err.value.code == "implausible_figures"
+    else:
+        (rec,) = got.records
+        assert rec == would_be and A._money_map_refused("LA") is None
+        NT.compose(rec, run_date=MM_RUN, store_state="live", allow_x_url=False)                # composes
+
+
+@pytest.mark.asyncio
+async def test_the_reads_figure_gate_and_the_templates_agree_on_every_profit_and_loss_shape(monkeypatch):
+    """Both directions, over a grid of net / gross / operating shapes (multiples of revenue; None = no statement
+    line): every record the read builds composes (no `implausible_figures` left for the template — the wall's root),
+    and every `money_map_loss_above_revenue` refusal is a record the template would refuse (never an over-block). The
+    record the read would build keeps the gross line it was given and drops an operating line above the gross one
+    (the read's own omission rule). Mutation-checked (2026-10-20): any one of the gate's conditions removed, or its
+    net or operating ``<`` read as ``<=`` (an over-block at a loss exactly as large as revenue), turns it red."""
+    rev = 2.0e9
+    shapes = 0
+    for net in (-1.5, -1.0, -0.6, 0.2):
+        for gross in (None, -1.3, -0.4, 0.5):
+            for operating in (None, -1.4, -1.0, -0.3, 0.1):
+                A.clear_memo()
+                fmp, world = _fy2025_world(monkeypatch, "LA", "Lumen Biologics Inc.", _LOSS_SOURCES, revenue=rev,
+                                           net=net * rev, gross=None if gross is None else gross * rev,
+                                           operating=None if operating is None else operating * rev)
+                got = await run_mm(fmp, **world)
+                shape = (net, gross, operating)
+                if got.records:
+                    (rec,) = got.records
+                    NT.compose(rec, run_date=MM_RUN, store_state="live", allow_x_url=False)
+                    shapes += 1
+                    continue
+                assert got.rejections == {"money_map_loss_above_revenue": 1}, (shape, got.rejections)
+                kept_op = None if operating is None or (gross is not None and operating > gross) else operating
+                would_be = R.MoneyMap(
+                    series="money_map", company=R.CompanyRef(symbol="LA", name="Lumen Biologics"), fiscal_year="2025",
+                    period_end=date(2025, 12, 31), segments=tuple(R.Segment(s.name, s.value) for s in _LOSS_SOURCES),
+                    other_usd=None, eliminations_usd=None, revenue_usd=rev,
+                    gross_profit_usd=None if gross is None else gross * rev,
+                    operating_profit_usd=None if kept_op is None else kept_op * rev, net_income_usd=net * rev)
+                with pytest.raises(NT.NewsTemplateRefused) as err:
+                    NT.compose(would_be, run_date=MM_RUN, store_state="live", allow_x_url=False)
+                assert err.value.code == "implausible_figures", shape
+                shapes += 1
+    assert shapes == 80
+
+
+#: Moderna's fiscal 2024 shape: revenue $3.236B, gross profit $1.77B, an operating loss of $3.94B and a net loss of
+#: $3.561B — a net and an operating loss larger than revenue.
+_MRNA_SHAPE = dict(revenue=3.236e9, gross=1.77e9, operating=-3.94e9, net=-3.561e9)
+_WALL_FILED = date(2027, 2, 16)          # every fiscal 2026 10-K is served from this day (fiscal 2025 before it)
+
+
+def _template_wall_pool(monkeypatch, walled, publishable, posted, *, segment=None):
+    """The pool ``walled`` + ``publishable`` + ``posted``, every symbol on a December fiscal year. ``walled`` symbols
+    (never posted) build a record the TEMPLATE refuses: by default Moderna's shape (`_MRNA_SHAPE`, a loss larger than
+    revenue); with ``segment``, an ordinary year whose largest segment is named ``segment`` (a template-only refusal
+    the read cannot see). ``posted`` symbols are the ones the caller's ledger holds for fiscal 2025. Returns (fmp,
+    world, set_day): ``set_day(day)`` points every fake at what FMP serves that day."""
+    seed = tuple(walled) + tuple(publishable) + tuple(posted)
+    monkeypatch.setattr(R, "MONEY_MAP_SEED", seed)
+    world = dict(revenue=FakeService({}), profit=FakeService({}), facts=facts_fn(), sb=FakeSB({"trending_themes": []}))
+    fmp = FakeFMP(profiles={s: prof(s, f"{s.title()} Corporation", exchange="NASDAQ") for s in seed}, income={})
+    m = _MRNA_SHAPE
+
+    def set_day(day: date) -> None:
+        fy, end = ("2026", "2026-12-31") if day >= _WALL_FILED else ("2025", "2025-12-31")
+        for s in seed:
+            if s in walled and segment is None:
+                world["revenue"].by_symbol[s] = breakdown(
+                    symbol=s, fiscal_year=fy, reported_revenue=m["revenue"], net_income=m["net"],
+                    cost_of_sales=m["revenue"] - m["gross"],
+                    revenue_sources=[src("Vaccines", 3.0e9), src("Collaborations", 0.236e9)])
+                world["profit"].by_symbol[s] = profit(point={
+                    "period": fy, "net_margin": 100.0 * m["net"] / m["revenue"],
+                    "gross_margin": 100.0 * m["gross"] / m["revenue"],
+                    "operating_margin": 100.0 * m["operating"] / m["revenue"]})
+                fmp.income[s] = [{"fiscalYear": fy, "date": end, "reportedCurrency": "USD", "revenue": m["revenue"],
+                                  "grossProfit": m["gross"], "operatingIncome": m["operating"], "netIncome": m["net"]}]
+                continue
+            extra: Dict[str, Any] = {}
+            if s in walled:
+                extra["revenue_sources"] = [src(segment, 200e9), src("Services", 100e9), src("Mac", 30e9),
+                                            src("Other", 20e9)]
+            world["revenue"].by_symbol[s] = breakdown(symbol=s, fiscal_year=fy, **extra)
+            world["profit"].by_symbol[s] = profit(point={"period": fy})
+            fmp.income[s] = [{**INCOME_AAPL[0], "fiscalYear": fy, "date": end}]
+
+    return fmp, world, set_day
+
+
+async def _template_days(fmp, world, set_day, days, posted, *, report):
+    """Each day as the script flow builds it (`_build_template_day`): the walk (`MAX_CANDIDATES_PER_SERIES` records),
+    then the first record the TEMPLATE composes is posted (its ledger key added to ``posted``); with ``report`` each
+    record the template refused is reported back (`A.remember_template_refusal`), as `_report_template_refusal` does.
+    Returns each day's (records' symbols with their years, the template's refusals, the posted key or None, the
+    breakdown reads, the profit-power reads (the fan-out), the rejections)."""
+    from app.services.marketing import script_service as ss
+
+    out = []
+    for day in days:
+        set_day(day)
+        world["revenue"].calls.clear()
+        world["profit"].calls.clear()
+        got = await run_mm(fmp, run_date=day, exclude=set(posted), limit=ss.MAX_CANDIDATES_PER_SERIES, **world)
+        chosen, refusals = None, []
+        for rec in got.records:
+            try:
+                NT.compose(rec, run_date=day, store_state="live", allow_x_url=False)
+            except NT.NewsTemplateRefused as e:
+                refusals.append((rec.company.symbol, e.code))
+                if report:
+                    assert A.remember_template_refusal(rec, (e.code,), run_date=day) is True
+                continue
+            chosen = R.ledger_key(rec)
+            break
+        if chosen is not None:
+            posted.add(chosen)
+        out.append(([(r.company.symbol, r.fiscal_year) for r in got.records], refusals, chosen,
+                    list(world["revenue"].calls), list(world["profit"].calls), dict(got.rejections)))
+    return out
+
+
+@pytest.mark.asyncio
+async def test_three_loss_makers_at_the_head_of_the_pool_no_longer_wall_off_money_map(monkeypatch):
+    """The review's walk: three never-posted companies losing more than their revenue head the pool, two publishable
+    ones and one posted for fiscal 2025 (its fiscal 2026 10-K now served) behind them. NOTHING is reported back here:
+    the read's own refusal must hold them. Each is refused at its first read (a content refusal, so the walk goes on
+    and posts the next one the same day), then waits behind every candidate that can publish and is answered from
+    the memo; the publishable ones and the posted company's NEW year post on the next days. Mutation-checked
+    (2026-10-20): without the read's gate the three are rebuilt every day, the template refuses all three and
+    nothing is ever posted."""
+    walled = ("LA", "LB", "LC")
+    fmp, world, set_day = _template_wall_pool(monkeypatch, walled, ("PA", "PB"), ("QQ",))
+    posted = {"news:money_map:QQ:2025"}
+    days = [date(2027, 3, 1) + timedelta(days=k) for k in range(4)]
+    d1, d2, d3, d4 = await _template_days(fmp, world, set_day, days, posted, report=False)
+    # day 1: each loss-maker refused at the read, and the next candidate is posted the same day
+    assert d1[3] == ["LA", "LB", "LC", "PA"] and d1[5] == {"money_map_loss_above_revenue": 3}
+    assert (d1[0], d1[1], d1[2]) == ([("PA", "2026")], [], "news:money_map:PA:2026")
+    # then the loss-makers wait at the back, answered from the memo with no fan-out
+    assert d2[3] == ["PB", "QQ", "LA"] and d2[4] == ["PB", "QQ"] and d2[2] == "news:money_map:PB:2026"
+    assert d3[3] == ["QQ", "LB", "LC"] and d3[4] == ["QQ"] and d3[2] == "news:money_map:QQ:2026"
+    assert d4[2] is None and not set(d4[4]) & set(walled)        # nothing left to post; no loss-maker re-read
+    assert posted == {"news:money_map:QQ:2025", "news:money_map:PA:2026", "news:money_map:PB:2026",
+                      "news:money_map:QQ:2026"}
+
+
+@pytest.mark.asyncio
+async def test_a_template_refusal_reported_back_never_walls_off_money_map(monkeypatch):
+    """A refusal only the TEMPLATE can make — three never-posted companies whose largest segment is named like a web
+    address ("Booking.com": a bare link, `slot_rejected`) — reported back as the script flow does: the first day is
+    lost (all three records refused, the day falls to the lesson); from the next day they wait behind every candidate
+    that can publish, a re-read of their year is answered from the memo (`template_refused`, no fan-out), and the
+    publishable companies and the posted company's NEW year are reached. Mutation-checked (2026-10-20): with
+    `remember_template_refusal` a no-op the same three records are offered first every day and nothing is posted."""
+    walled = ("WA", "WB", "WC")
+    fmp, world, set_day = _template_wall_pool(monkeypatch, walled, ("PA", "PB"), ("QQ",), segment="Booking.com")
+    posted = {"news:money_map:QQ:2025"}
+    days = [date(2027, 3, 1) + timedelta(days=k) for k in range(4)]
+    (d1,) = await _template_days(fmp, world, set_day, days[:1], posted, report=True)
+    assert d1[0] == [("WA", "2026"), ("WB", "2026"), ("WC", "2026")] and d1[2] is None
+    assert d1[1] == [("WA", "slot_rejected"), ("WB", "slot_rejected"), ("WC", "slot_rejected")]
+    assert A._money_map_refused("WA") == ("2026", "template_refused", days[0], days[0])
+    d2, d3, d4 = await _template_days(fmp, world, set_day, days[1:], posted, report=True)
+    assert d2[3] == ["PA", "PB", "QQ"] and d2[2] == "news:money_map:PA:2026"
+    assert d3[3] == ["PB", "QQ", "WA"] and d3[4] == ["PB", "QQ"] and d3[5] == {"template_refused": 1}
+    assert d3[2] == "news:money_map:PB:2026"
+    assert d4[3] == ["QQ", "WB", "WC"] and d4[2] == "news:money_map:QQ:2026"
+    # each memo answer refreshed the check (the rotation) and kept the day of the full read
+    assert A._money_map_refused("WB") == ("2026", "template_refused", days[3], days[0])
+    assert posted == {"news:money_map:QQ:2025", "news:money_map:PA:2026", "news:money_map:PB:2026",
+                      "news:money_map:QQ:2026"}
+
+
+@pytest.mark.asyncio
+async def test_a_template_refused_year_is_read_in_full_again_after_the_recheck_window(monkeypatch):
+    """Like any remembered refusal, `template_refused` answers a re-read of the SAME year only for
+    `MONEY_MAP_REFUSAL_RECHECK_DAYS` after its full read; then the year is read in full, built, and offered again (a
+    corrected feed composes) — the record clears the memo."""
+    fmp, world, set_day = _template_wall_pool(monkeypatch, ("WA",), (), (), segment="Booking.com")
+    first = date(2026, 11, 2)
+    set_day(first)
+    (rec,) = (await run_mm(fmp, run_date=first, **world)).records
+    assert A.remember_template_refusal(rec, ("slot_rejected",), run_date=first) is True
+    inside = first + timedelta(days=A.MONEY_MAP_REFUSAL_RECHECK_DAYS - 1)
+    got = await run_mm(fmp, run_date=inside, **world)
+    assert got.records == () and got.rejections == {"template_refused": 1}
+    world["revenue"].by_symbol["WA"] = breakdown(symbol="WA", fiscal_year="2025")     # the feed renames the segment
+    after = first + timedelta(days=A.MONEY_MAP_REFUSAL_RECHECK_DAYS)
+    (again,) = (await run_mm(fmp, run_date=after, **world)).records
+    NT.compose(again, run_date=after, store_state="live", allow_x_url=False)
+    assert A._money_map_refused("WA") is None
+
+
+def test_remember_template_refusal_writes_a_money_map_years_refusal_and_nothing_else():
+    """The hook the script flow calls (`MarketingScriptService._report_template_refusal`): a `MoneyMap` record's
+    refusal is remembered for its symbol and fiscal year as `template_refused` — a known rejection reason the memo
+    answers (never one of `_MONEY_MAP_NOT_REMEMBERED`) — read on the run day (a datetime is its day; a bare string
+    is one code); any other record, or a run date that is not a date, writes nothing."""
+    day = date(2026, 11, 19)
+    rec = R.MoneyMap(series="money_map", company=R.CompanyRef(symbol="COST", name="Costco"), fiscal_year="2025",
+                     period_end=date(2025, 8, 31), segments=(R.Segment("United States", 200e9),
+                                                             R.Segment("Canada", 38.5e9)),
+                     other_usd=None, eliminations_usd=None, revenue_usd=238.5e9, gross_profit_usd=None,
+                     operating_profit_usd=None, net_income_usd=8.1e9)
+    assert A.remember_template_refusal(rec, ["slot_rejected", "stale_source"], run_date=day) is True
+    assert A._money_map_refused("COST") == ("2025", "template_refused", day, day)
+    assert A.remember_template_refusal(rec, "implausible_figures", run_date=datetime(2026, 11, 20, 16, 5)) is True
+    assert A._money_map_refused("COST") == ("2025", "template_refused", date(2026, 11, 20), date(2026, 11, 20))
+    A.clear_memo()
+    look_alike = SimpleNamespace(series="money_map", company=SimpleNamespace(symbol="COST"), fiscal_year="2025")
+    assert A.remember_template_refusal(look_alike, ["slot_rejected"], run_date=day) is False
+    assert A.remember_template_refusal(None, ["slot_rejected"], run_date=day) is False
+    assert A.remember_template_refusal(rec, ["slot_rejected"], run_date="2026-11-19") is False
+    assert A._MEMO == {}
+    assert "template_refused" in R.REJECTION_REASONS and "template_refused" not in A._MONEY_MAP_NOT_REMEMBERED
+    assert "money_map_loss_above_revenue" in R.REJECTION_REASONS
+    assert "money_map_loss_above_revenue" not in A._MONEY_MAP_NOT_REMEMBERED | A._MONEY_MAP_UPSTREAM_GAPS
+
+
+#: 2026-10-09 live preview; here it carries the short name Amazon itself uses, "AWS" — the code shape the fold
+#: removes, which `R.SEGMENT_ACRONYMS_OK` must keep wherever a feed writes it so.
+_AMZN_FY2025 = [src("Online Stores", 270e9), src("Third-Party Seller Services", 170e9), src("AWS", 128e9),
+                src("Advertising Services", 69e9), src("Subscription Services", 49e9), src("Physical Stores", 22e9),
+                src("Other", 9e9)]
+
+
+def _fy2025_world(monkeypatch, symbol, name, sources, *, revenue, net, gross=None, operating=None,
+                  date_="2025-12-31"):
+    """One seed on a December fiscal 2025 (fresh on `MM_RUN`, 246 days on), its statement row carrying
+    ``gross`` / ``operating`` as FMP fills them (Amazon reports no gross subtotal: FMP's revenue − cost of
+    revenue), profit power's margins the same lines."""
+    monkeypatch.setattr(R, "MONEY_MAP_SEED", (symbol,))
+    bd = breakdown(symbol=symbol, fiscal_year="2025", revenue_sources=sources, reported_revenue=revenue,
+                   net_income=net, cost_of_sales=None if gross is None else revenue - gross)
+    margins = {"period": "2025", "net_margin": 100.0 * net / revenue,
+               "gross_margin": None if gross is None else 100.0 * gross / revenue,
+               "operating_margin": None if operating is None else 100.0 * operating / revenue}
+    row = {"fiscalYear": "2025", "date": date_, "reportedCurrency": "USD", "revenue": revenue, "netIncome": net,
+           "grossProfit": gross, "operatingIncome": operating}
+    fmp = FakeFMP(profiles={symbol: prof(symbol, name, exchange="NASDAQ")}, income={symbol: [row]})
+    world = dict(revenue=FakeService({symbol: bd}), profit=FakeService({symbol: profit(point=margins)}),
+                 facts=facts_fn(), sb=FakeSB({"trending_themes": []}))
+    return fmp, world
+
+
+@pytest.mark.asyncio
+async def test_amazons_aws_stays_named_and_its_fmp_filled_gross_profit_is_explained(monkeypatch):
+    """AWS is on `R.SEGMENT_ACRONYMS_OK`: Amazon's best-known line is drawn, never folded into "Other or not
+    broken out", wherever a feed writes it "AWS" ("Amazon Web Services", FMP's 2026-10-09 spelling, is no code
+    at all). FMP fills Amazon's gross profit as revenue − cost of revenue (no gross subtotal in its statement);
+    the record carries the statement's line all the same, and the post calls the figures "annual results" and
+    explains gross profit — never "as reported". Mutation-checked by hand (2026-10-15): AWS off the allow-list
+    turns the segment list red."""
+    assert R.segment_fold_reason("Amazon Web Services") is None
+    fmp, world = _fy2025_world(monkeypatch, "AMZN", "Amazon.com, Inc.", _AMZN_FY2025, revenue=717e9, net=77e9,
+                               gross=360e9, operating=80e9)
+    (rec,) = (await run_mm(fmp, **world)).records
+    assert [s.name for s in rec.segments] == ["Online Stores", "Third-Party Seller Services", "AWS",
+                                               "Advertising Services", "Subscription Services"]
+    assert rec.other_usd == pytest.approx(31e9) and rec.gross_profit_usd == 360e9
+    out = NT.compose(rec, run_date=MM_RUN, store_state="live", allow_x_url=False)
+    assert out["image_spec"]["subtitle"] == "Fiscal 2025 · annual results"
+    assert out["captions"]["linkedin"].endswith(
+        "Figures come from the company's annual financial statements for fiscal 2025. Gross profit is revenue "
+        "minus the cost of sales.")
+    assert "as reported" not in json.dumps(out).lower() and NT.validate_package(out, record=rec) == []
+
+
+@pytest.mark.parametrize("label", ["NXE", "QCT", "CMBU", "PBNA", "IT", "Product", "Products", "PRODUCTS", "Revenue",
+                                   "revenues", "Sales", "Net Sales", " net  sales ", "Total", "Segment", "segments"])
+@pytest.mark.asyncio
+async def test_a_label_that_names_nothing_folds_into_the_rest(monkeypatch, label):
+    """A company code (1-4 capitals off the allow-list) or a generic label names no part of the company a reader
+    knows: its revenue joins the rest ("Everything else" since the review of 2026-10-16), never a bar or a line of
+    its own. Mutation-checked by hand (2026-10-15): without `R.segment_fold_reason` in `_segments` every row turns
+    red."""
+    sources = [src("Data Center", 50e9), src("Gaming", 30e9), src(label, 6e9), src("Embedded", 8e9)]
+    fmp, world = _mm_world(monkeypatch, sources, revenue=94e9, net=20e9)
+    (rec,) = (await run_mm(fmp, **world)).records
+    assert [s.name for s in rec.segments] == ["Data Center", "Gaming", "Embedded"]
+    assert rec.other_usd == pytest.approx(6e9)
+
+
+@pytest.mark.parametrize("sources, revenue, reason", [
+    # Qualcomm-shaped: every line a code → nothing named at all
+    ([src("QCT", 33e9), src("QTL", 5.6e9), src("QSI", 0.3e9)], 38.9e9, "segments_thin"),
+    # the largest line a code: the named rest would read as the map — "mostly other", refused
+    ([src("QCT", 30e9), src("QTL", 6e9), src("Automotive", 2e9), src("IoT", 1e9)], 39e9, "money_map_mostly_other"),
+    # PepsiCo-shaped as FMP answered on 2026-10-15: its business lines labelled by codes (the 2026-10-19 live read
+    # carries full names — `_PEP_FY2025` — and composes; this shape stays the codes case)
+    ([src("PBNA", 27e9), src("PFNA", 24e9), src("Europe", 14e9), src("Latin America (Segment)", 12e9),
+      src("Africa, Middle East and South Asia", 6.6e9), src("IBF", 1e9)], 84.6e9, "money_map_mostly_other"),
+], ids=["codes_only", "largest_a_code", "pepsico_codes"])
+@pytest.mark.asyncio
+async def test_a_map_explained_mostly_by_codes_is_refused(monkeypatch, sources, revenue, reason):
+    """Folding never publishes the smaller lines as if they explained the company: the existing gates
+    (`segments_thin`, `money_map_mostly_other`) refuse what is left."""
+    fmp, world = _mm_world(monkeypatch, sources, revenue=revenue, net=0.2 * revenue)
+    got = await run_mm(fmp, **world)
+    assert got.records == () and got.rejections == {reason: 1}
+
+
+def test_live_labels_are_shown_as_the_company_writes_them_and_codes_fold():
+    """FMP's labels read live 2026-10-15: McDonald's "UNITED STATES" is shown "United States"; PepsiCo's "Latin
+    America (Segment)" — XBRL's suffix, undrawable for its parentheses — is "Latin America"; "XBOX" is "Xbox"
+    BEFORE the code check (4 capitals), so it stays; PepsiCo's "PBNA" / "IBF" fold."""
+    named, rest = A._segments(breakdown(revenue_sources=[
+        src("UNITED STATES", 10e9), src("Latin America (Segment)", 9e9), src("XBOX", 8e9), src("PBNA", 7e9),
+        src("IBF", 1e9)]))
+    assert [s.name for s in named] == ["United States", "Latin America", "Xbox"] and rest == pytest.approx(8e9)
+
+
+@pytest.mark.parametrize("sources, revenue, net, regional", [
+    # McDonald's fiscal 2025 as FMP labels it (live 2026-10-15): its 2015-2018 "High-Growth Markets" label for what
+    # it has reported since 2019 as International Operated Markets (the review of 2026-10-16, MM-1: corrected for
+    # McDonald's only) + its home market + a 59-character label (over the cap: folded) — mixed, so neutral
+    ([src("High-Growth Markets", 13.63e9), src("UNITED STATES", 10.82e9),
+      src("International Developmental Licensed Markets and Corporate", 2.43e9)], 26.88e9, 8.5e9, False),
+    # KO-shaped and ALL regional: "by region"
+    ([src("North America", 19.2e9), src("Europe, Middle East & Africa", 8.1e9), src("Latin America", 6.9e9),
+      src("Asia Pacific", 5.2e9)], 39.4e9, 9.9e9, True),
+], ids=["mcdonalds_mixed", "ko_regional"])
+@pytest.mark.asyncio
+async def test_the_adapters_parts_decide_the_wording(monkeypatch, sources, revenue, net, regional):
+    """End to end (adapter record → template): the breakdown reads "by region" only when every named part is a
+    region by its exact name; otherwise the neutral "How fiscal 2025 revenue broke down". "the United States" in
+    running text only — its bar label stays "United States"."""
+    fmp, world = _fy2025_world(monkeypatch, "MCD" if not regional else "KO",
+                               "McDonald's Corporation" if not regional else "The Coca-Cola Company",
+                               sources, revenue=revenue, net=net)
+    (rec,) = (await run_mm(fmp, **world)).records
+    out = NT.compose(rec, run_date=MM_RUN, store_state="live", allow_x_url=False)
+    assert NT.validate_package(out, record=rec) == []
+    paras = out["captions"]["linkedin"].split("\n\n")
+    if regional:
+        assert [s.name for s in rec.segments][:2] == ["North America", "Europe, Middle East & Africa"]
+        assert paras[1].startswith("How fiscal 2025 revenue broke down by region: North America, $19.2 billion; ")
+        assert out["image_post"]["paragraphs"][0].startswith("Bars show revenue by region: ")
+    else:
+        assert [s.name for s in rec.segments] == ["International Operated Markets", "United States"]
+        assert rec.other_usd == pytest.approx(2.43e9)
+        assert paras[1] == ("How fiscal 2025 revenue broke down: International Operated Markets, $13.6 billion; the "
+                            "United States, $10.8 billion; everything else, $2.4 billion.")
+        assert out["video_script"][1] == ("International Operated Markets made up 51% of revenue, and the United "
+                                          "States made up 40% of revenue.")
+        assert [b["label"] for b in out["image_spec"]["segments"]] == [
+            "International Operated Markets", "United States", "Everything else"]
+        assert out["image_post"]["paragraphs"][0].startswith("Bars show how revenue broke down: ")
+        assert "High-Growth" not in json.dumps(out)
+    assert "business line" not in json.dumps(out) and "as reported" not in json.dumps(out).lower()
+    assert "not broken out" not in json.dumps(out)
+
+
+def test_a_company_scoped_label_is_corrected_for_that_company_only():
+    """The review of 2026-10-16 (MM-1, confirmed on EDGAR): FMP's McDonald's breakdown carries "High-Growth
+    Markets", a segment McDonald's retired in 2019, for its International Operated Markets. `_segments` reads the
+    breakdown's own symbol, so the correction is McDonald's alone — another company keeps a real segment of that
+    name — and a theme's segment fact (`_segment_fact`, which reads `_segments`) gets it too. Mutation-checked by
+    hand (2026-10-19): with `_segments` passing no symbol, the McDonald's rows turn red."""
+    sources = [src("High-Growth Markets", 13.63e9), src("UNITED STATES", 10.82e9),
+               src("International Developmental Licensed Markets and Corporate", 2.43e9)]
+    named, rest = A._segments(breakdown(symbol="MCD", revenue_sources=sources))
+    assert [s.name for s in named] == ["International Operated Markets", "United States"]
+    assert rest == pytest.approx(2.43e9)
+    for other in ("YUM", None, "", 7):
+        named, _rest = A._segments(breakdown(symbol=other, revenue_sources=sources))
+        assert [s.name for s in named] == ["High-Growth Markets", "United States"], other
+    fact = A._segment_fact(breakdown(symbol="MCD", revenue_sources=sources, reported_revenue=26.88e9),
+                           date(2026, 11, 19))
+    assert fact == ("International Operated Markets", pytest.approx(13.63e9 / 26.88e9), "2025")
+
+
+#: PepsiCo's fiscal 2025 as FMP labels it (live, 2026-10-19): the realigned EMEA under the pre-2025 AMESA name
+#: (B1R-MM-PEP-STALE-LABEL), "International Beverage Franchise", "(Segment)" on Latin America, and a 59-character
+#: label for Asia Pacific Foods (over the 40-character cap: the rest). The figures are PepsiCo's own Q4 2025 release
+#: ($ millions: PBNA 28,197; PFNA 27,528; EMEA 18,025; LatAm 10,549; IB Franchise 4,997; APAC Foods 4,629).
+_PEP_FY2025 = [src("PepsiCo Beverages North America", 28.197e9), src("PepsiCo Foods North America", 27.528e9),
+               src("Africa, Middle East and South Asia", 18.025e9), src("Latin America (Segment)", 10.549e9),
+               src("International Beverage Franchise", 4.997e9),
+               src("Asia Pacific, Australia and New Zealand, and China Region", 4.629e9)]
+
+
+@pytest.mark.asyncio
+async def test_pepsicos_realigned_emea_is_never_called_africa_middle_east_and_south_asia(monkeypatch):
+    """The re-review of 2026-10-19 (B1R-MM-PEP-STALE-LABEL, checked on EDGAR): FMP's fiscal-2025 breakdown labels
+    PepsiCo's $18.0B Europe, Middle East and Africa segment with the retired "Africa, Middle East and South Asia" (a
+    $6.2B segment in 2024, beside a $13.9B Europe line). The post would have attributed Europe's revenue to Africa,
+    the Middle East and South Asia — a false fact about a named company. Corrected for PepsiCo only
+    (`R.SEGMENT_SYMBOL_OVERRIDES`); its 10-K's "International Beverages Franchise" too. Mutation-checked by hand
+    (2026-10-19): with the PEP row removed the record's third segment was "Africa, Middle East and South Asia" (red)."""
+    fmp, world = _fy2025_world(monkeypatch, "PEP", "PepsiCo, Inc.", _PEP_FY2025, revenue=93.925e9, net=8.24e9)
+    (rec,) = (await run_mm(fmp, **world)).records
+    assert [s.name for s in rec.segments] == ["PepsiCo Beverages North America", "PepsiCo Foods North America",
+                                              "Europe, Middle East and Africa", "Latin America",
+                                              "International Beverages Franchise"]
+    assert rec.other_usd == pytest.approx(4.629e9)
+    out = NT.compose(rec, run_date=MM_RUN, store_state="live", allow_x_url=False)
+    assert NT.validate_package(out, record=rec) == []
+    text = json.dumps(out)
+    assert "South Asia" not in text and "Europe, Middle East and Africa" in text
+    assert "Europe, Middle East and Africa" in [b["label"] for b in out["image_spec"]["segments"]]
+    assert out["captions"]["linkedin"].split("\n\n")[1].startswith("How fiscal 2025 revenue broke down: ")  # mixed
+    # another company keeps a real segment of that name
+    named, _rest = A._segments(breakdown(symbol="KO", revenue_sources=_PEP_FY2025))
+    assert "Africa, Middle East and South Asia" in [s.name for s in named]
+
+
+def test_walmarts_stripped_labels_are_shown_as_walmart_writes_them():
+    """The review of 2026-10-16 (live preview F5): the feed strips Walmart's punctuation ("Walmart U S", "Sams
+    Club" — a misspelled brand); `SEGMENT_DISPLAY_OVERRIDES` shows the company's own names."""
+    named, rest = A._segments(breakdown(symbol="WMT", revenue_sources=[
+        src("Walmart U S", 462e9), src("Walmart International", 123e9), src("Sams Club", 93e9)]))
+    assert [s.name for s in named] == ["Walmart U.S.", "Walmart International", "Sam's Club"] and rest == 0.0
+
+
+def test_a_region_acronym_is_named_never_folded():
+    """The review of 2026-10-16 (MM-2): "US" (and UK, EU, UAE, USA) is a region a reader knows — before, the code
+    fold put its revenue in the rest while the map still read "by region". A company code still folds."""
+    named, rest = A._segments(breakdown(revenue_sources=[src("Europe", 50e9), src("Asia Pacific", 30e9),
+                                                         src("US", 20e9), src("QCT", 5e9)]))
+    assert [s.name for s in named] == ["Europe", "Asia Pacific", "US"] and rest == pytest.approx(5e9)
+    assert all(R.is_region_name(s.name) for s in named)
+
+
+@pytest.mark.parametrize("sources, fact", [
+    ([src("QCT", 33e9), src("QTL", 5.6e9), src("QSI", 0.3e9)], None),                  # codes only: no line at all
+    # a code larger than every named line: the remainder sits above the top — never "Handsets, the largest"
+    ([src("QCT", 20e9), src("Handsets", 15e9), src("IoT", 4e9)], None),
+    ([src("Products", 70e9), src("Services", 30e9)], None),                             # a generic largest line
+    ([src("Handsets", 24.9e9), src("QTL", 5.6e9), src("IoT", 5.4e9), src("Automotive", 2.9e9)],
+     ("Handsets", 24.9e9 / 38.9e9, "2025")),
+    ([src("AWS", 30e9), src("Online Stores", 8.9e9)], ("AWS", 30e9 / 38.9e9, "2025")),  # AWS is a line
+], ids=["codes_only", "code_above_top", "generic_top", "named_top_with_a_code", "aws"])
+def test_a_company_code_is_never_a_themes_line(sources, fact):
+    """A theme tile's line (`_segment_fact`) reads `_segments`' names, so a code or a generic label is never
+    drawn on a tile or narrated, and never hides a larger line behind the named "largest" one."""
+    assert A._segment_fact(breakdown(revenue_sources=sources, reported_revenue=38.9e9), date(2026, 11, 19)) == fact
 
 
 # ── review round 8 (2026-10-10): sitting-officer titles (rr lens 0 #3/#4) ─────
@@ -3551,7 +4654,9 @@ def _club_filer(*, total, changes, counts, previous, profiles):
     club, sb = club_world(changes=[SimpleNamespace(**{"newly_listed": False, "shares": None, "prev_shares": None,
                                                       "value": None, **c}) for c in changes],
                           company_over={"total_value": total, "change_counts": SimpleNamespace(**counts)})
-    sb.tables["trillion_club_filings"] = [{"cik": "0001045810", "period": "2026-Q2", "holdings": previous}]
+    sb.tables["trillion_club_filings"] = [
+        {"cik": "0001045810", "period": "2026-Q2", "holdings": previous},
+        stored_current("0001045810", "2026-Q3", club.details["nvidia"].changes, counts)]   # F1 / F2 read it
     return club, sb, FakeFMP(profiles={**thirteen_f_profiles(), **profiles})
 
 
@@ -3721,7 +4826,7 @@ class FakeFMP2b(FakeFMP):
         self.currency = currency or {}
         self.congress_calls: List[Any] = []
         self.calendar_calls: List[Any] = []
-        self.currency_calls: List[Any] = []
+        self.statement_calls: List[Any] = []
 
     def _congress(self, chamber: str, spec: Any, limit: int) -> Any:
         n = sum(1 for c, _l in self.congress_calls if c == chamber)
@@ -3741,17 +4846,45 @@ class FakeFMP2b(FakeFMP):
         return self._answer(self.calendar.get(from_date, []))
 
     async def get_income_statement(self, sym, period="annual", limit=10):
-        """The earnings currency read (review round 9): a QUARTERLY statement answers from
-        ``currency`` — a currency code (one row in it), a whole answer (a list), or an exception —
-        "USD" for a symbol not listed; an annual one is `FakeFMP`'s."""
+        """The earnings statement read (review round 9's currency read; since Batch 1 also the period
+        check): a QUARTERLY statement answers from ``currency`` — a currency code (the calendar-derived
+        rows of `quarter_rows`, in that currency), a whole answer (a list), or an exception — "USD" for a
+        symbol not listed; an annual one is `FakeFMP`'s."""
         if period != "quarter":
             return await super().get_income_statement(sym, period, limit)
-        self.calls["currency"] += 1
-        self.currency_calls.append((sym, limit))
+        self.calls["statement"] += 1
+        self.statement_calls.append((sym, limit))
         spec = self.currency.get(sym, "USD")
         if isinstance(spec, str):
-            spec = [{"symbol": sym, "date": "2026-12-31", "period": "Q4", "reportedCurrency": spec}]
+            spec = quarter_rows(self.calendar, sym, currency=spec)[:limit]
         return self._answer(spec)
+
+
+def _quarter_end_before(day: date) -> date:
+    """The calendar quarter end strictly before ``day``."""
+    q_month = ((day.month - 1) // 3) * 3
+    return date(day.year - 1, 12, 31) if q_month == 0 else date(day.year, q_month + 1, 1) - timedelta(days=1)
+
+
+def quarter_rows(calendar: Dict[str, Any], sym: str, *, currency: str = "USD") -> List[Dict[str, Any]]:
+    """The quarterly statements a company that reported ``sym``'s newest calendar row would have, newest
+    first, FMP's shape: the reported quarter (the calendar quarter end before the report day) carrying the
+    calendar's own revenueActual — what the period check matches — then three earlier quarters at 90%,
+    82% and 75% of it. A row with no usable revenue (or no row at all) gives a statement with no revenue
+    on the reported quarter."""
+    found = [(day, r) for day, rows in calendar.items() if isinstance(rows, list)
+             for r in rows if isinstance(r, dict) and r.get("symbol") == sym]
+    day, row = max(found, key=lambda t: t[0]) if found else ("2027-01-12", {})
+    ra = row.get("revenueActual")
+    usable = isinstance(ra, (int, float)) and not isinstance(ra, bool) and ra == ra and ra > 0
+    end = _quarter_end_before(date.fromisoformat(day))
+    out = []
+    for i, share in enumerate((1.0, 0.90, 0.82, 0.75)):
+        out.append({"symbol": sym, "date": end.isoformat(), "period": f"Q{(end.month - 1) // 3 + 1}",
+                    "fiscalYear": str(end.year), "reportedCurrency": currency,
+                    "revenue": round(ra * share) if usable else None, "eps": 9.8765})
+        end = _quarter_end_before(end)
+    return out
 
 
 # ── congress_count ────────────────────────────────────────────────────────────
@@ -4445,6 +5578,39 @@ async def test_unpublished_and_secondary_stakes_are_never_read(club_on):
     assert got.records == () and got.rejections == {} and got.skip_reason == "stakes_none_qualified"
 
 
+@pytest.mark.parametrize("title", ["Alexandr Wang memo (Jun 12, 2025)", "Jensen keynote (Mar 18, 2026)",
+                                   "Elon post on X (Mar 2, 2026)", "Mensch interview", "Intrator letter",
+                                   "Volozh interview", "Wang memo"])
+@pytest.mark.asyncio
+async def test_a_stake_source_naming_someone_off_every_list_is_refused(club_on, caplog, title):
+    """The re-review of 2026-10-19 (ST-1-R): the review's probes passed the surname denylist and composed with the
+    name drawn on the image, card 4 and every caption. The source title is now held to a POSITIVE list — the club's
+    and the catalogue's company names (NVIDIA, Amazon, Samsung, TSMC and every investee here), document, date and
+    place words, codes — and the stake is refused (`stake_source_unverified`) before any profile. The words never
+    reach a log line. Mutation-checked by hand (2026-10-20): the adapter check removed, every title here was a
+    record (red)."""
+    caplog.set_level(logging.INFO, logger=A.__name__)
+    club, sb, fmp = stakes_world([stake("nvidia", "Nscale", source_title=title, as_of="2026-03-27")])
+    got = await srun(club, sb, fmp)
+    assert got.records == () and got.rejections == {"stake_source_unverified": 1} and fmp.calls == Counter()
+    assert "stake_source_unverified" in caplog.text
+    assert not any(w in caplog.text for w in ("Alexandr", "Wang", "Jensen", "Elon", "Mensch", "Intrator", "Volozh"))
+
+
+@pytest.mark.asyncio
+async def test_a_stake_source_naming_catalogue_companies_passes_and_an_unknown_local_listing_is_dropped(club_on):
+    """Another catalogue company in the title passes (OpenAI is an investee of the catalogue, NVIDIA a club member);
+    a local listing with a word on no list is DROPPED — card 3 is optional — never drawn, and the stake stays."""
+    rows = [stake("nvidia", "Nscale", source_title="NVIDIA and OpenAI release (Sep 8, 2026)", as_of="2026-03-27",
+                  kind="non_us_listed", local_listing="Masayoshi Exchange"),
+            stake("amazon", "OpenAI", source_title="Amazon 10-Q (quarter ended Jun 30, 2026)", as_of="2026-07-31",
+                  kind="non_us_listed", local_listing="Japan")]
+    club, sb, fmp = stakes_world(rows)
+    got = await srun(club, sb, fmp)
+    assert [(r.investee_name, r.local_listing) for r in got.records] == [("OpenAI", "Japan"), ("Nscale", None)]
+    assert got.rejections == {}
+
+
 @pytest.mark.asyncio
 async def test_stake_boundaries_that_pass(club_on):
     rows = [stake("nvidia", "Edge One", verified_on="2026-08-31"),          # exactly 120 days
@@ -4455,13 +5621,289 @@ async def test_stake_boundaries_that_pass(club_on):
     assert sorted(r.investee_name for r in got.records) == ["Edge One", "Edge Three", "Edge Two"]
 
 
+# ── RR3-STAKES-TEMPLATE-WALL (the round-3 review of 2026-10-20): a stake the TEMPLATE refuses never walls the walk ──
+#
+# The read passed stakes their template always refuses — a source title of 81-120 characters or holding a word over
+# 20, an investee-name word of 16-20 characters, a local listing of 33-40 characters, "committed up to" on a kind other
+# than a commitment, a `verified_on` after the run — and no template refusal of a stake was remembered. Stakes are
+# offered newest `as_of` first, five records a call: five such stakes at the head were offered and refused every day,
+# and every publishable stake behind them waited (the review's probes: six days, nothing posted). The read now refuses
+# each of them (a local listing is dropped), and every refusal only the template can make is reported back by the
+# script flow and remembered (`A.remember_template_refusal`): that stake is then offered after every other one.
+
+_WALL_TITLE = "NVIDIA Quarterly Report on Form 10-Q for the fiscal quarter ended Oct 26, 2026, Notes 8 and 9"
+_LONG_WORD_NAMES = ["Microelectronics Alpha", "Nanotechnologies Beta", "Immunotherapeutics Co",
+                    "Biopharmaceutical Gamma", "Telecommunications Delta"]
+_FIVE_NAMES = ["Nscale", "Ayar Labs", "Lambda", "Crusoe", "Figure"]
+#: Behind the five: an older stake the template composes (Amazon's OpenAI stake).
+_OPENAI_ROW = dict(disclosed_value_usd=50e9, as_of="2026-07-31", source_title="Amazon 10-Q (quarter ended Jun 30, 2026)")
+#: Exact-length texts at the template's bounds — lower-case filler after known words, so the positive list
+#: (ST-1-R) passes them: an 80-character title whose longest word is 20; a 32-character local listing.
+_TITLE_80 = "NVIDIA 10-Q " + "a" * 20 + " " + "b" * 20 + " " + "c" * 20 + " " + "d" * 5
+_LOCAL_32 = "Taiwan abcdefghij abcdefghijklmn"
+
+
+def _would_be_stake(row: Dict[str, Any]) -> R.CompanyStake:
+    """The record the read would build from a stake row of `stakes_world` (NVIDIA's, investee by name only)."""
+    return R.CompanyStake(
+        series="company_stakes", stake_id=row["id"], investor=R.CompanyRef("NVDA", "NVIDIA"),
+        investee_name=row["investee_name"], investee=None, kind=row["kind"], value_usd=row["disclosed_value_usd"],
+        value_basis=row["value_basis"], ownership_pct=None, as_of=date.fromisoformat(row["as_of"]),
+        verified_on=date.fromisoformat(row["verified_on"]), source_title=row["source_title"], background=None,
+        listed_since=None, local_listing=row["local_listing"], is_new=False)
+
+
+def _forget_reads() -> None:
+    """Drop every memo entry but the stakes' template refusals (the next call reads the rows afresh)."""
+    for key in [k for k in A._MEMO if k[0] != "stake_template_refused"]:
+        A._MEMO.pop(key, None)
+
+
+async def _stake_days(rows, days, posted, *, report=True):
+    """Each day as the script flow builds it (`_build_template_day`): the walk (five records), then the first record
+    the TEMPLATE composes is posted (its ledger key added to ``posted``); with ``report`` each record the template
+    refused is reported back (`A.remember_template_refusal`), as `_report_template_refusal` does. Returns each day's
+    (the records' investee names, the template's refusal codes, the posted investee or None, the rejections)."""
+    out = []
+    for day in days:
+        _forget_reads()
+        club, sb, fmp = stakes_world(rows)
+        got = await srun(club, sb, fmp, run_date=day, exclude=frozenset(posted))
+        chosen, refusals = None, []
+        for rec in got.records:
+            try:
+                NT.compose(rec, run_date=day, store_state="live", allow_x_url=False)
+            except NT.NewsTemplateRefused as e:
+                refusals.append(e.code)
+                if report:
+                    assert A.remember_template_refusal(rec, (e.code,), run_date=day) is True
+                continue
+            chosen = rec
+            break
+        if chosen is not None:
+            posted.add(R.ledger_key(chosen))
+        out.append(([r.investee_name for r in got.records], refusals,
+                    chosen.investee_name if chosen is not None else None, dict(got.rejections)))
+    return out
+
+
+#: Five stakes, NEWER than the OpenAI stake, each refused by the template for one gate the read now applies too.
+_READ_WALLS = {
+    # the review's two probes: a title shared by a batch of catalogue rows; investee names with a 16-18 letter word
+    "source_title_too_long": [stake("nvidia", n, as_of=f"2026-11-{10 + i:02d}", source_title=_WALL_TITLE)
+                              for i, n in enumerate(_FIVE_NAMES)],
+    "investee_name_word": [stake("nvidia", n, as_of=f"2026-11-{10 + i:02d}") for i, n in enumerate(_LONG_WORD_NAMES)],
+    "source_title_word": [stake("nvidia", n, as_of=f"2026-11-{10 + i:02d}",
+                                source_title="NVIDIA Form 10-Q/A-Exhibit-99.1-Supplement")
+                          for i, n in enumerate(_FIVE_NAMES)],
+    "committed_up_to_not_a_commitment": [stake("nvidia", n, as_of=f"2026-11-{10 + i:02d}",
+                                               value_basis="committed_up_to") for i, n in enumerate(_FIVE_NAMES)],
+    "verified_after_the_run": [stake("nvidia", n, as_of=f"2026-11-{10 + i:02d}", verified_on="2026-12-30")
+                               for i, n in enumerate(_FIVE_NAMES)],
+}
+
+
+@pytest.mark.parametrize("shape", list(_READ_WALLS))
+@pytest.mark.asyncio
+async def test_five_stakes_the_template_cannot_compose_are_refused_at_the_read_and_never_wall_the_walk(club_on, shape):
+    """The review's walk (STAKES_RUN and the five days after it): five stakes the template refuses head the
+    newest-first walk, a publishable one behind them. Each is refused at the read (`stake_invalid`, before any
+    profile), so the publishable stake is offered — and posted — on the FIRST day; nothing is offered after it. Every
+    refused row, built as the record the read used to build, is refused by `NT.compose`: the read refuses only what
+    the template refuses. Mutation-checked (2026-10-20, in memory): each of the five read gates removed alone turns
+    its own row red (the five records come back and nothing is ever posted)."""
+    walled = _READ_WALLS[shape]
+    rows = walled + [stake("amazon", "OpenAI", **_OPENAI_ROW)]
+    posted: set = set()
+    days = [STAKES_RUN + timedelta(days=k) for k in range(6)]
+    d1, *rest = await _stake_days(rows, days, posted)
+    assert d1 == (["OpenAI"], [], "OpenAI", {"stake_invalid": 5})
+    if shape == "verified_after_the_run":
+        # dated after the run only on the first day: from the next, verified on (or before) the run day, they are
+        # ordinary stakes — offered newest first and posted one a day
+        assert [d[2] for d in rest] == ["Figure", "Crusoe", "Lambda", "Ayar Labs", "Nscale"]
+        assert all(d[1] == [] for d in rest)
+    else:
+        assert all(d == ([], [], None, {"stake_invalid": 5, "already_posted": 1}) for d in rest), rest
+    for row in walled:
+        with pytest.raises(NT.NewsTemplateRefused):
+            NT.compose(_would_be_stake(row), run_date=STAKES_RUN, store_state="live", allow_x_url=False)
+
+
+@pytest.mark.parametrize("over, kept", [
+    ({"source_title": _TITLE_80}, True),                                    # 80 characters, words of 20: drawn
+    ({"source_title": _TITLE_80 + "e"}, False),                             # 81
+    ({"source_title": "NVIDIA 10-Q " + "q" * 20}, True),                    # a word of 20
+    ({"source_title": "NVIDIA 10-Q " + "q" * 21}, False),                   # a word of 21
+    ({"source_title": "NVIDIA 10-Q (equity-method-investments note)"}, False),   # a hyphenated word of 25
+    ({"investee_name": "Microelectronic Labs"}, True),                      # a 15-letter word sits under its plate
+    ({"investee_name": "Microelectronics Labs"}, False),                    # 16
+    ({"investee_name": "Sherwin-Williams Ventures"}, False),                # one word of 16 (a hyphen joins it)
+    ({"kind": "commitment", "value_basis": "committed_up_to"}, True),
+    ({"kind": "private", "value_basis": "committed_up_to"}, False),
+    ({"kind": "on_13f_note", "value_basis": "committed_up_to"}, False),
+    ({"verified_on": "2026-12-29"}, True),                                  # the run day itself
+    ({"verified_on": "2026-12-30"}, False),                                 # the club's one day of ET-vs-UTC grace
+])
+@pytest.mark.asyncio
+async def test_the_reads_stake_gates_and_the_templates_agree_at_every_bound(club_on, over, kept):
+    """Both directions, at each bound the read copies from the template: a stake the read keeps composes; a stake it
+    refuses (`stake_invalid`, before any profile) is one the template refuses as the record the read used to build."""
+    row = stake("nvidia", over.get("investee_name", "Nscale"), as_of="2026-06-30",
+                **{k: v for k, v in over.items() if k != "investee_name"})
+    club, sb, fmp = stakes_world([row])
+    got = await srun(club, sb, fmp)
+    if kept:
+        (rec,) = got.records
+        assert got.rejections == {}
+        NT.compose(rec, run_date=STAKES_RUN, store_state="live", allow_x_url=False)
+    else:
+        assert got.records == () and got.rejections == {"stake_invalid": 1} and fmp.calls == Counter()
+        with pytest.raises(NT.NewsTemplateRefused):
+            NT.compose(_would_be_stake(row), run_date=STAKES_RUN, store_state="live", allow_x_url=False)
+
+
+@pytest.mark.parametrize("local, kept", [
+    (_LOCAL_32, True),                       # 32 characters: card 3 draws it whole
+    (_LOCAL_32 + "o", False),                # 33
+    ("Taiwan " + "a" * 20, True),            # a word of 20
+    ("Taiwan " + "a" * 21, False),           # 21
+])
+@pytest.mark.asyncio
+async def test_a_local_listing_the_template_cannot_draw_is_dropped_never_the_stake(club_on, local, kept):
+    """A local listing is optional (card 3 then uses its generic body), so one the template cannot draw is DROPPED —
+    the stake stays and composes; with the listing kept, card 3 draws it. The listing the read drops is one the
+    template refuses."""
+    row = stake("nvidia", "Nscale", as_of="2026-06-30", kind="non_us_listed", local_listing=local)
+    club, sb, fmp = stakes_world([row])
+    (rec,) = (await srun(club, sb, fmp)).records
+    assert rec.local_listing == (local if kept else None)
+    out = NT.compose(rec, run_date=STAKES_RUN, store_state="live", allow_x_url=False)
+    assert (local in json.dumps(out["cards"])) is kept
+    if not kept:
+        with pytest.raises(NT.NewsTemplateRefused) as err:
+            NT.compose(_would_be_stake(row), run_date=STAKES_RUN, store_state="live", allow_x_url=False)
+        assert err.value.code == "slot_rejected"
+
+
+@pytest.mark.parametrize("profile_name, kept", [
+    ("Microelectronic Corporation", True),       # "Microelectronic": 15 letters under the investor's plate
+    ("Microelectronics Corporation", False),     # 16: the pair layout cannot draw it (the cover could: 20)
+])
+@pytest.mark.asyncio
+async def test_an_investor_whose_name_the_pair_cannot_draw_is_refused_after_its_profile(club_on, profile_name, kept):
+    """The investor's name sits under its plate in half the column too, and only its profile names it: a display
+    name with a word over `R.STAKE_PAIR_NAME_WORD_MAX_CHARS` refuses the stake (`company_name_unusable`) — one the
+    template would refuse."""
+    club, sb, fmp = stakes_world([stake("nvidia", "Nscale", as_of="2026-06-30")])
+    fmp.profiles["NVDA"] = prof("NVDA", profile_name, exchange="NASDAQ")
+    got = await srun(club, sb, fmp)
+    if kept:
+        (rec,) = got.records
+        assert rec.investor.name == "Microelectronic"
+        NT.compose(rec, run_date=STAKES_RUN, store_state="live", allow_x_url=False)
+    else:
+        assert got.records == () and got.rejections == {"company_name_unusable": 1}
+        would_be = dataclasses.replace(_would_be_stake(stake("nvidia", "Nscale", as_of="2026-06-30")),
+                                       investor=R.CompanyRef("NVDA", "Microelectronics"))
+        with pytest.raises(NT.NewsTemplateRefused) as err:
+            NT.compose(would_be, run_date=STAKES_RUN, store_state="live", allow_x_url=False)
+        assert err.value.code == "slot_rejected"
+
+
+#: Refusals only the TEMPLATE makes (its slot rules: "%" and "#" are never drawn) — the read cannot see them.
+_TEMPLATE_ONLY_TITLES = {"percent": "NVIDIA 10-Q (a 9% stake)", "hash": "NVIDIA 10-Q Note #9"}
+
+
+@pytest.mark.parametrize("title", list(_TEMPLATE_ONLY_TITLES))
+@pytest.mark.asyncio
+async def test_a_stake_its_template_refused_is_offered_after_every_other_one(club_on, title):
+    """Five stakes only the template refuses head the walk, a publishable one behind them, reported back as the script
+    flow does. The first day is lost (all five refused, the day falls through); from the next day they wait behind
+    every other stake, so the publishable one is posted; then, alone again, they are offered (never left out) and
+    refused again. Mutation-checked (2026-10-20, in memory): with `remember_template_refusal`'s stake branch a no-op
+    (or the order ignoring the memo) the same five are offered first every day and nothing is ever posted."""
+    walled = [stake("nvidia", n, as_of=f"2026-11-{10 + i:02d}", source_title=_TEMPLATE_ONLY_TITLES[title])
+              for i, n in enumerate(_FIVE_NAMES)]
+    rows = walled + [stake("amazon", "OpenAI", **_OPENAI_ROW)]
+    posted: set = set()
+    days = [STAKES_RUN + timedelta(days=k) for k in range(3)]
+    d1, d2, d3 = await _stake_days(rows, days, posted)
+    newest_first = list(reversed(_FIVE_NAMES))
+    assert d1 == (newest_first, ["slot_rejected"] * 5, None, {})
+    assert d2[0] == ["OpenAI"] + newest_first[:4] and d2[1:3] == ([], "OpenAI")
+    assert d3 == (newest_first, ["slot_rejected"] * 5, None, {"already_posted": 1})
+    assert posted == {f"news:company_stakes:{rows[-1]['id']}"}
+    # each refusal is remembered for its stake id, read on the day it was refused
+    assert A._stake_template_refused_on(_would_be_stake(walled[0])) == days[2]
+
+
+@pytest.mark.asyncio
+async def test_remembered_stakes_are_offered_least_recently_refused_first(club_on):
+    """Among the stakes the template refused, the one refused longest ago comes first (then the usual order): those
+    that wait take turns."""
+    rows = [stake("nvidia", n, as_of=f"2026-11-{10 + i:02d}") for i, n in enumerate(["Alpha Co", "Beta Co", "Gamma Co"])]
+    for row, day in ((rows[2], STAKES_RUN), (rows[0], STAKES_RUN - timedelta(days=7))):
+        assert A.remember_template_refusal(_would_be_stake(row), ("slot_rejected",), run_date=day) is True
+    club, sb, fmp = stakes_world(rows)
+    got = await srun(club, sb, fmp)
+    assert [r.investee_name for r in got.records] == ["Beta Co", "Alpha Co", "Gamma Co"]
+
+
+@pytest.mark.asyncio
+async def test_an_edit_to_a_refused_stakes_row_puts_it_back_in_its_place_a_re_verification_does_not(club_on):
+    """A remembered refusal holds while the row still says what was refused: re-verifying the source (a new
+    `verified_on`) changes nothing the post says and keeps the stake waiting; an edit to what the post says (a
+    corrected title) puts it back in its newest-first place at once."""
+    old = stake("nvidia", "Older Co", as_of="2026-10-01")
+    new = stake("nvidia", "Newer Co", as_of="2026-11-20", source_title=_TEMPLATE_ONLY_TITLES["percent"])
+    assert A.remember_template_refusal(_would_be_stake(new), ("slot_rejected",), run_date=STAKES_RUN) is True
+    for row, order in (
+            (new, ["Older Co", "Newer Co"]),
+            ({**new, "verified_on": "2026-12-28"}, ["Older Co", "Newer Co"]),                 # re-verified: waits
+            ({**new, "source_title": "NVIDIA 10-Q (a nine percent stake)"}, ["Newer Co", "Older Co"])):  # fixed
+        _forget_reads()
+        club, sb, fmp = stakes_world([old, row])
+        got = await srun(club, sb, fmp, run_date=STAKES_RUN + timedelta(days=1))
+        assert [r.investee_name for r in got.records] == order
+
+
+def test_remember_template_refusal_remembers_a_stake_by_its_id_and_its_rows_fingerprint():
+    """The hook the script flow calls: a `CompanyStake` is remembered under its stake id with its row's fingerprint
+    and the run day (a datetime is its day); `_stake_template_refused_on` answers for the same row, not for an edited
+    one, and ignores a malformed entry. A run date that is not a date, or a record that only looks like a stake,
+    writes nothing."""
+    row = stake("nvidia", "Nscale", as_of="2026-06-30")
+    rec = _would_be_stake(row)
+    assert A.remember_template_refusal(rec, ["slot_rejected", "stale_source"], run_date=STAKES_RUN) is True
+    assert A._MEMO[A._stake_refused_key(rec.stake_id)][1] == (A._stake_fingerprint(rec), STAKES_RUN)
+    assert A._stake_template_refused_on(rec) == STAKES_RUN
+    assert A.remember_template_refusal(rec, "slot_rejected", run_date=datetime(2026, 12, 30, 16, 5)) is True
+    assert A._stake_template_refused_on(rec) == date(2026, 12, 30)
+    assert A._stake_template_refused_on(dataclasses.replace(rec, source_title="NVIDIA 10-Q (edited)")) is None
+    # re-verified (verified_on), a new background or ownership share: still the same post — still held
+    assert A._stake_template_refused_on(dataclasses.replace(rec, verified_on=date(2026, 12, 28), background="Note.",
+                                                            ownership_pct=4.0)) == date(2026, 12, 30)
+    A._memo_put(A._stake_refused_key(rec.stake_id), "junk", 60.0)
+    assert A._stake_template_refused_on(rec) is None
+    A.clear_memo()
+    look_alike = SimpleNamespace(series="company_stakes", stake_id=rec.stake_id, investee_name="Nscale")
+    assert A.remember_template_refusal(look_alike, ["slot_rejected"], run_date=STAKES_RUN) is False
+    assert A.remember_template_refusal(rec, ["slot_rejected"], run_date="2026-12-29") is False
+    assert A._MEMO == {}
+
+
 # ── earnings ──────────────────────────────────────────────────────────────────
 
 EARN_RUN = date(2027, 1, 14)             # Thursday, in the Q4 season; days 01-07 .. 01-13
 EARN_DAYS = [f"2027-01-{d:02d}" for d in range(7, 14)]
+#: Batch 1 (2026-10-15): every report carries a revenue pair (none → `revenue_implausible`), so a row that
+#: does not name one gets this plausible quarter: $1.05B against a $1.0B estimate.
+DEFAULT_RA, DEFAULT_RE = 1.05e9, 1.0e9
 
 
-def erow(sym, day, a, e, ra=None, re_=None, **kw):
+def erow(sym, day, a, e, ra=DEFAULT_RA, re_=DEFAULT_RE, **kw):
+    """A calendar row. ``ra`` / ``re_`` default to a plausible pair; pass None to leave one out."""
     row = {"symbol": sym, "date": day, "epsActual": a, "epsEstimated": e, "revenueActual": ra,
            "revenueEstimated": re_, "lastUpdated": day}
     row.update(kw)
@@ -4475,6 +5917,7 @@ def earnings_calendar():
                        erow("LLL", "2027-01-12", 1.3, 1.0),
                        erow("OLD", "2027-01-05", 9.0, 1.0)],            # another day's row: never read here
         "2027-01-11": [erow("BBB", "2027-01-11", 0.9, 1.0)],
+        # A 2.0x revenue pair: the WHOLE report is refused (Batch 1), never kept without its revenue.
         "2027-01-10": [erow("CCC", "2027-01-10", -0.5, -0.25, 3e9, 1.5e9)],
         "2027-01-09": [erow("DDD", "2027-01-09", 0.12, 0.05), erow("EEE", "2027-01-09", 0.169, 1.69)],
         "2027-01-08": [erow("FFF", "2027-01-08", 12.0, 1.0), erow("GGG.L", "2027-01-08", 2.0, 1.0),
@@ -4489,6 +5932,8 @@ def earnings_profiles():
     p = {s: prof(s, f"{s.title()} Industries Inc.", cap=5e9, price=91919.19)
          for s in ("AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "III", "JJJ", "KKK", "LLL", "OLD")}
     p["III"] = prof("III", "Iii Industries Inc.", cap=9e9)
+    # Batch 1: the LARGEST company leads whatever its gap (BBB: 10%, the smallest gap kept here).
+    p["BBB"] = prof("BBB", "Bbb Industries Inc.", cap=50e9)
     p["JJJ"] = prof("JJJ", "Jjj Trust", isEtf=True)
     p["KKK"] = prof("KKK", "Kkk Industries Inc.", cap=1.9e9)
     p["LLL"] = prof("LLL", "Lll Industries Preferred", cap=5e9)
@@ -4500,26 +5945,29 @@ async def erun(fmp, **kw):
 
 
 @pytest.mark.asyncio
-async def test_earnings_one_company_per_record_ranked_by_gap_then_cap():
+async def test_earnings_one_company_per_record_ranked_by_market_cap_then_gap():
+    """Batch 1: ranked by SIZE — market cap, then the gap, then the symbol — never by the widest gap; every
+    record carries its revenue pair and the quarter the statements place it in."""
     fmp = FakeFMP2b(calendar=earnings_calendar(), profiles=earnings_profiles())
     got = await erun(fmp)
     assert [(r.company.symbol, r.report_date.isoformat(), r.eps_actual, r.eps_estimate) for r in got.records] == [
-        ("III", "2027-01-07", 2.0, 1.0),          # gap 100%, cap $9B
-        ("CCC", "2027-01-10", -0.5, -0.25),       # gap 100%, cap $5B
-        ("AAA", "2027-01-12", 1.5, 1.0),          # 50%
-        ("BBB", "2027-01-11", 0.9, 1.0),          # 10%
+        ("BBB", "2027-01-11", 0.9, 1.0),          # $50B, a 10% gap
+        ("III", "2027-01-07", 2.0, 1.0),          # $9B, 100%
+        ("AAA", "2027-01-12", 1.5, 1.0),          # $5B, 50%
     ]
-    iii, ccc, aaa, _bbb = got.records
+    bbb, _iii, aaa = got.records
     assert (aaa.revenue_actual, aaa.revenue_estimate) == (1.1e9, 1.0e9)
-    assert (ccc.revenue_actual, ccc.revenue_estimate) == (None, None)    # 2.0x: outside [0.5, 1.5], dropped
-    assert all(r.period_end is None for r in got.records)
+    assert (bbb.revenue_actual, bbb.revenue_estimate) == (DEFAULT_RA, DEFAULT_RE)
+    assert all(r.period_end == date(2026, 12, 31) for r in got.records)      # placed by the statements
     assert R.ledger_key(aaa) == "news:earnings:AAA:2027-01-12"
     assert got.rejections == {"eps_estimate_too_small": 1, "eps_digit_shift": 1, "eps_gap_implausible": 1,
                               "symbol_grammar": 2, "warrant_unit_right": 1, "etf_or_fund": 1, "below_cap_floor": 1,
-                              "non_common_listing": 1, "revenue_dropped": 1}
+                              "non_common_listing": 1, "revenue_implausible": 1}
     # ONE ET day per calendar call, the seven days before the run.
     assert sorted(fmp.calendar_calls) == [(d, d) for d in EARN_DAYS]
-    assert "OLD" not in fmp.profile_requests[0]
+    assert "OLD" not in fmp.profile_requests[0] and "CCC" not in fmp.profile_requests[0]
+    # ONE quarterly-statement read per kept report, four quarters each.
+    assert sorted(fmp.statement_calls) == [("AAA", 4), ("BBB", 4), ("III", 4)]
 
 
 @pytest.mark.parametrize("rows, expected", [
@@ -4531,7 +5979,7 @@ async def test_a_day_at_the_row_cap_is_truncated_never_ranked(rows, expected):
     cal["2027-01-11"] = cal["2027-01-11"] + [erow(f"Z{i}", "2027-01-11", None, 1.0) for i in range(rows - 1)]
     fmp = FakeFMP2b(calendar=cal, profiles=earnings_profiles())
     if expected == "ok":
-        assert len((await erun(fmp)).records) == 4
+        assert len((await erun(fmp)).records) == 3
     else:
         with pytest.raises(A.MarketingNewsUnavailable) as err:
             await erun(fmp)
@@ -4549,17 +5997,18 @@ async def test_one_failed_day_fails_the_week_and_nothing_is_memoized(answer):
     assert err.value.reason == "earnings_calendar_unavailable"
     fmp.calendar = earnings_calendar()
     calls = fmp.calls["calendar"]
-    assert len((await erun(fmp)).records) == 4
+    assert len((await erun(fmp)).records) == 3
     assert fmp.calls["calendar"] - calls == 7                              # every day read again
 
 
 @pytest.mark.asyncio
-async def test_earnings_days_are_memoized_and_concurrent_calls_share_them():
+async def test_earnings_days_and_statements_are_memoized_and_concurrent_calls_share_them():
     fmp = FakeFMP2b(calendar=earnings_calendar(), profiles=earnings_profiles())
     a, b = await asyncio.gather(erun(fmp), erun(fmp))
-    assert a.records == b.records and fmp.calls["calendar"] == 7
+    assert a.records == b.records and fmp.calls["calendar"] == 7 and fmp.calls["statement"] == 3
     await erun(fmp)
-    assert fmp.calls["calendar"] == 7
+    assert fmp.calls["calendar"] == 7 and fmp.calls["statement"] == 3       # ("quarter_statements", sym)
+    assert ("quarter_statements", "AAA") in A._MEMO
 
 
 @pytest.mark.parametrize("second, expected", [
@@ -4569,8 +6018,10 @@ async def test_earnings_days_are_memoized_and_concurrent_calls_share_them():
     (erow("AAA", "2027-01-08", 1.4, 1.0), "record_invalid"),
     # A refused row beside a clean one: the company's data is not trusted.
     (erow("AAA", "2027-01-08", 12.5, 1.0), "eps_gap_implausible"),
-    # Revenue that disagrees between the rows: dropped, the EPS stays.
-    (erow("AAA", "2027-01-08", 1.5, 1.0, 1.2e9, 1.0e9), ("2027-01-12", (None, None))),
+    # Batch 1: revenue that disagrees between the rows refuses the WHOLE report (never the EPS alone) …
+    (erow("AAA", "2027-01-08", 1.5, 1.0, 1.2e9, 1.0e9), "revenue_implausible"),
+    # … and so does a row without revenue beside one with it: which row is the report is a guess.
+    (erow("AAA", "2027-01-08", 1.5, 1.0, None, None), "revenue_implausible"),
 ])
 @pytest.mark.asyncio
 async def test_two_rows_of_one_company_in_a_week(second, expected):
@@ -4580,7 +6031,7 @@ async def test_two_rows_of_one_company_in_a_week(second, expected):
     got = await erun(fmp)
     aaa = [r for r in got.records if r.company.symbol == "AAA"]
     if isinstance(expected, str):
-        assert aaa == [] and got.rejections.get(expected) == 1
+        assert aaa == [] and got.rejections.get(expected) == (2 if expected == "revenue_implausible" else 1)
     else:
         (rec,) = aaa
         assert rec.report_date.isoformat() == expected[0]
@@ -4589,17 +6040,26 @@ async def test_two_rows_of_one_company_in_a_week(second, expected):
 
 @pytest.mark.parametrize("ra, re_, kept", [
     (1.4e9, 1e9, True), (1.5e9, 1e9, True), (1.51e9, 1e9, False), (0.5e9, 1e9, True), (0.49e9, 1e9, False),
-    (None, 1e9, False), (1e9, None, False), (-1e9, 1e9, False), (0.0, 1e9, False), (1e9, 0.0, False),
-    (float("nan"), 1e9, False), (True, 1e9, False), ("1e9", 1e9, False),
-])
+    (None, 1e9, False), (1e9, None, False), (None, None, False), (-1e9, 1e9, False), (0.0, 1e9, False),
+    (1e9, 0.0, False), (1e9, -1e9, False), (float("nan"), 1e9, False), (1e9, float("inf"), False),
+    (True, 1e9, False), ("1e9", 1e9, False), (10 ** 400, 1e9, False),
+], ids=["1.4x", "1.5x_edge", "1.51x", "0.5x_edge", "0.49x", "no_actual", "no_estimate", "none", "negative",
+        "zero_actual", "zero_estimate", "negative_estimate", "nan", "inf", "bool", "string", "huge_int"])
 @pytest.mark.asyncio
-async def test_revenue_is_shown_only_inside_the_band_and_never_guessed(ra, re_, kept):
+async def test_a_report_without_one_plausible_revenue_pair_is_refused_whole(ra, re_, kept):
+    """Batch 1: the revenue pair is the only check that the row is the quarter the estimate is for. Before,
+    an out-of-band or missing pair was DROPPED and the EPS kept (Progressive's one-month row); now the whole
+    report is refused (`revenue_implausible`) before any profile, and `revenue_dropped` is never counted."""
     cal = {"2027-01-12": [erow("AAA", "2027-01-12", 1.5, 1.0, ra, re_)]}
     fmp = FakeFMP2b(calendar=cal, profiles=earnings_profiles())
     got = await erun(fmp)
-    (rec,) = got.records
-    assert (rec.revenue_actual, rec.revenue_estimate) == ((ra, re_) if kept else (None, None))
-    assert got.rejections.get("revenue_dropped") == (None if kept else 1)
+    if kept:
+        (rec,) = got.records
+        assert (rec.revenue_actual, rec.revenue_estimate) == (ra, re_) and got.rejections == {}
+    else:
+        assert got.records == () and got.rejections == {"revenue_implausible": 1}
+        assert fmp.calls["profiles"] == 0 and fmp.statement_calls == []
+    assert "revenue_dropped" not in got.rejections
 
 
 @pytest.mark.parametrize("a, e, reason", [
@@ -4615,30 +6075,110 @@ async def test_implausible_eps_rows_are_refused(a, e, reason):
     assert got.records == () and got.rejections == {reason: 1} and fmp.calls["profiles"] == 0
 
 
-@pytest.mark.parametrize("a, e", [(0.10, 0.10), (-0.5, -0.1), (-9.0, 1.0), (0.0, 0.5), (4.9, 1.0)])
+@pytest.mark.parametrize("a, e", [(0.105, 0.10), (-0.5, -0.1), (-9.0, 1.0), (0.0, 0.5), (4.9, 1.0)])
 @pytest.mark.asyncio
 async def test_eps_boundaries_that_pass(a, e):
     fmp = FakeFMP2b(calendar={"2027-01-12": [erow("AAA", "2027-01-12", a, e)]}, profiles=earnings_profiles())
     assert len((await erun(fmp)).records) == 1
 
 
+@pytest.mark.parametrize("a, e, kept", [
+    (1.05, 1.00, True), (1.0499, 1.00, False), (0.95, 1.00, True), (0.9501, 1.00, False),
+    (0.21, 0.20, True),                         # 5.0% exactly: the float quotient is 0.04999…, the figures are not
+    (0.2099, 0.20, False), (-0.95, -1.00, True), (-0.951, -1.00, False), (-1.05, -1.00, True),
+    (1.00, 1.00, False), (2.10, 2.00, True), (2.0999, 2.00, False),
+], ids=["5.0", "4.99", "minus_5.0", "minus_4.99", "0.21_vs_0.20", "0.2099", "neg_est_5.0", "neg_est_4.9",
+        "neg_est_more_negative", "equal", "2.10", "2.0999"])
+@pytest.mark.asyncio
+async def test_a_surprise_under_five_percent_is_refused_and_five_point_zero_is_kept(a, e, kept):
+    """Batch 1: |actual − estimate| / |estimate| under `R.EARNINGS_CLEAR_SURPRISE` (5%) is no clear surprise —
+    refused before any profile. The boundary is exact on the figures as written: 0.21 vs 0.20 is 5.0%."""
+    assert R.EARNINGS_CLEAR_SURPRISE == 0.05
+    fmp = FakeFMP2b(calendar={"2027-01-12": [erow("AAA", "2027-01-12", a, e)]}, profiles=earnings_profiles())
+    got = await erun(fmp)
+    if kept:
+        assert [r.company.symbol for r in got.records] == ["AAA"] and got.rejections == {}
+    else:
+        assert got.records == () and got.rejections == {"surprise_unclear": 1} and fmp.calls["profiles"] == 0
+
+
 @pytest.mark.asyncio
 async def test_a_posted_report_is_dropped_before_its_profile():
+    """A posted report is never a candidate: counted ``already_posted`` before the gate and never read. Review
+    of 2026-10-16 (ER-3): its listing IS profiled now — after every candidate, as a posted listing — because its
+    issuer identity (profile CIK, display name) is what ties a sibling listing to the report already posted."""
     fmp = FakeFMP2b(calendar=earnings_calendar(), profiles=earnings_profiles())
     got = await erun(fmp, exclude={"news:earnings:AAA:2027-01-12"})
     assert "AAA" not in [r.company.symbol for r in got.records] and got.rejections["already_posted"] == 1
-    assert "AAA" not in fmp.profile_requests[0]
+    requested = fmp.profile_requests[0]
+    assert requested[-1] == "AAA" and requested.count("AAA") == 1             # the posted listing, last
+    assert "AAA" not in [s for s, _limit in fmp.statement_calls]
+    # a key of another earnings day of THIS window counts too (FMP re-dating a row must not post it twice) — and,
+    # since the re-review of 2026-10-19 (EME-1), of a day up to `EARNINGS_POSTED_LOOKBACK_DAYS` BEFORE it …
+    assert A.EARNINGS_POSTED_LOOKBACK_DAYS == 14
+    assert A._posted_in_window(frozenset({"news:earnings:AAA:2027-01-09"}), []) == set()   # no window, no key
+    for key in ("news:earnings:AAA:2027-01-09", "news:earnings:AAA:2027-01-06", "news:earnings:AAA:2026-12-24"):
+        A.clear_memo()
+        fmp = FakeFMP2b(calendar=earnings_calendar(), profiles=earnings_profiles())
+        got = await erun(fmp, exclude={key})
+        assert "AAA" not in [r.company.symbol for r in got.records] and got.rejections["already_posted"] == 1, key
+    # … a key older than that, of a day after the window, another series' key or a malformed one does not
+    for key in ("news:earnings:AAA:2026-12-23", "news:earnings:AAA:2027-01-14", "news:ceo_buys:AAA:2027-01-12",
+                "news:earnings:AAA", "news:earnings::2027-01-12", "news:earnings:aaa:2027-01-12",
+                "news:earnings:AAA:2027-W02-1", "news:earnings:AAA:2027-02-30", "news:earnings:AAA:20270112"):
+        A.clear_memo()
+        got = await erun(FakeFMP2b(calendar=earnings_calendar(), profiles=earnings_profiles()), exclude={key})
+        assert "AAA" in [r.company.symbol for r in got.records] and "already_posted" not in got.rejections, key
 
 
 @pytest.mark.asyncio
-async def test_earnings_profile_stage_is_bounded_and_needs_one_profile():
-    cal = {"2027-01-12": [erow(f"A{c}{d}", "2027-01-12", 1.0 + i / 100, 1.0)
-                          for i, (c, d) in enumerate((c, d) for c in "BCDEF" for d in "BCDEF")]}
-    fmp = FakeFMP2b(calendar=cal, profiles={})
+async def test_a_report_re_dated_across_two_windows_is_never_posted_twice():
+    """The re-review of 2026-10-19 (EME-1): the Thu 2027-01-07 run (window Dec 31 - Jan 6) posted AAA under
+    news:earnings:AAA:2027-01-06; FMP then dates the same report Jan 7, the first day of the NEXT window. The Jan 14
+    run held AAA again (no posted key inside its window) and would have posted a week-old report a second time —
+    and so would a twin or another class of the same issuer (BRK-A posted under Jan 6, BRK-B dated Jan 7).
+    Mutation-checked by hand (2026-10-19): the lookback narrowed back to the window turned all three red."""
+    cal = {"2027-01-07": [erow("AAA", "2027-01-07", 1.5, 1.0, 1.1e9, 1.0e9)]}
+    got = await erun(FakeFMP2b(calendar=cal, profiles=earnings_profiles()),
+                     exclude={"news:earnings:AAA:2027-01-06"})
+    assert got.records == () and got.rejections == {"already_posted": 1}
+    # a twin family: GOOG posted in the window before, GOOGL (its curated class line) re-dated into this one
+    A.clear_memo()
+    alphabet = {"GOOG": _listing("GOOG", "Alphabet Inc.", cap=3.0e12, cik="0001652044"),
+                "GOOGL": _listing("GOOGL", "Alphabet Inc.", cap=3.0e12, cik="0001652044")}
+    got = await erun(FakeFMP2b(calendar={"2027-01-07": [erow("GOOG", "2027-01-07", 2.87, 2.60, 96.4e9, 95.0e9),
+                                                        erow("GOOGL", "2027-01-07", 2.87, 2.60, 96.4e9, 95.0e9)]},
+                               profiles=alphabet),
+                     exclude={"news:earnings:GOOG:2027-01-05"})
+    assert got.records == () and got.rejections == {"already_posted": 2}
+    # another class of the issuer (its profile CIK): BRK-A posted the window before, BRK-B dated Jan 7
+    A.clear_memo()
+    brk = {"BRK-A": _listing("BRK-A", "Berkshire Hathaway Inc.", exchange="NYSE", cap=1e12, cik="0001067983"),
+           "BRK-B": _listing("BRK-B", "Berkshire Hathaway Inc.", exchange="NYSE", cap=1e12, cik="0001067983")}
+    fmp = FakeFMP2b(calendar={"2027-01-07": [erow("BRK-B", "2027-01-07", 4.67, 4.0, 95e9, 90e9)]}, profiles=brk)
+    got = await erun(fmp, exclude={"news:earnings:BRK-A:2027-01-06"})
+    assert got.records == () and got.rejections == {"already_posted": 1} and fmp.statement_calls == []
+    # the NEXT quarter's report (77+ days on) is never taken for the posted one
+    A.clear_memo()
+    got = await erun(FakeFMP2b(calendar=cal, profiles=earnings_profiles()),
+                     exclude={"news:earnings:AAA:2026-10-21"})
+    assert [r.company.symbol for r in got.records] == ["AAA"] and got.rejections == {}
+
+
+@pytest.mark.asyncio
+async def test_earnings_profiles_the_first_sixty_by_revenue_estimate_in_two_batch_calls():
+    """Batch 1: the reports are pre-ordered by their revenue ESTIMATE (the size proxy before any profile is
+    read) and the first `A.EARNINGS_MAX_PROFILES` are profiled at once — two batch calls of 50; the rest are
+    never profiled and never counted as rejections. All profiles missing → the profile source is down."""
+    rows = [erow(f"Q{c}{d}", "2027-01-12", 1.5, 1.0, 1.1e9 * (100 - i), 1.0e9 * (100 - i))
+            for i, (c, d) in enumerate((c, d) for c in "BCDEFGHJKL" for d in "BCDEFGHJKL")][:70]
+    want = [r["symbol"] for r in rows][:60]                              # the 60 largest revenue estimates
+    fmp = FakeFMP2b(calendar={"2027-01-12": rows}, profiles={})
     with pytest.raises(A.MarketingNewsUnavailable) as err:
         await erun(fmp)
     assert err.value.reason == "profiles_unavailable"
-    assert len(fmp.profile_requests[0]) == A.EARNINGS_PROFILE_CANDIDATES
+    assert [len(b) for b in fmp.profile_requests] == [50, 10] and A.EARNINGS_MAX_PROFILES == 60
+    assert [s for b in fmp.profile_requests for s in b] == want
     empty = FakeFMP2b(calendar={}, profiles={})
     A.clear_memo()
     got = await erun(empty)
@@ -4669,8 +6209,12 @@ def theme_breakdowns():
                                           src("Embedded", 3.6e9)]),
         "AVGO": breakdown(symbol="AVGO", fiscal_year="2025", reported_revenue=51e9,
                           revenue_sources=[src("Semiconductor solutions", 30e9), src("Infrastructure software", 21e9)]),
+        # Batch 1 (2026-10-15): a line labelled by its code ("QTL") folds into the rest
+        # (`R.segment_fold_reason`); the spelled-out lines keep QCOM's fact. A breakdown of codes ONLY
+        # ("QCT" / "QTL" / "QSI") gives no fact at all (`test_a_company_code_is_never_a_themes_line`).
         "QCOM": breakdown(symbol="QCOM", fiscal_year="2025", reported_revenue=38.9e9,
-                          revenue_sources=[src("QCT", 33e9), src("QTL", 5.6e9), src("QSI", 0.3e9)]),
+                          revenue_sources=[src("Handsets", 24.9e9), src("QTL", 5.6e9), src("IoT", 5.4e9),
+                                           src("Automotive", 2.9e9)]),
         "MRVL": breakdown(symbol="MRVL", fiscal_year="2025", reported_revenue=5.8e9, intersegment_eliminations=1e9,
                           revenue_sources=[src("Data center", 4e9), src("Enterprise", 2.8e9)]),
         "INTC": RuntimeError("breakdown build failed"),
@@ -4780,14 +6324,15 @@ async def test_a_posted_theme_is_skipped_before_its_profiles():
 async def test_a_large_theme_keeps_every_member_but_looks_up_only_the_first_twelve():
     syms = [f"S{c}{d}" for c in "AB" for d in "ABCDEFGHIJKL"]                  # 24
     profiles = {s: prof(s, f"Company {s}") for s in syms}
+    # Batch 1: "Hardware", not a generic "Products" (folded into the rest, so it would never be a fact)
     good = breakdown(fiscal_year="2026", reported_revenue=100e9,
-                     revenue_sources=[src("Products", 70e9), src("Services", 30e9)])
+                     revenue_sources=[src("Hardware", 70e9), src("Services", 30e9)])
     world = theme_world([theme(tickers=syms, blocked_tickers=[])], breakdowns={}, profiles=profiles)
     world["revenue"].default = good
     (rec,) = (await trun(world)).records
     assert len(rec.members) == 24
     assert world["revenue"].calls == syms[:A.THEME_SEGMENT_LOOKUPS]
-    assert [m.top_segment for m in rec.members] == ["Products"] * 12 + [None] * 12
+    assert [m.top_segment for m in rec.members] == ["Hardware"] * 12 + [None] * 12
 
 
 @pytest.mark.asyncio
@@ -5063,7 +6608,7 @@ _NON_USD_REPORTERS = [
 
 
 def _non_usd_world(sym, name, country, currency):
-    cal = {"2027-01-12": [erow(sym, "2027-01-12", 2.38, 2.30, 1.8e9, 1.75e9),
+    cal = {"2027-01-12": [erow(sym, "2027-01-12", 2.38, 2.20, 1.8e9, 1.75e9),
                           erow("AAA", "2027-01-12", 1.5, 1.0, 1.1e9, 1.0e9)]}
     profiles = {sym: prof(sym, name, cap=100e9, country=country), "AAA": prof("AAA", "Aaa Industries Inc.", cap=5e9)}
     return FakeFMP2b(calendar=cal, profiles=profiles, currency={sym: currency})
@@ -5080,8 +6625,8 @@ async def test_a_usd_traded_non_usd_reporter_is_refused(sym, name, country, curr
     got = await erun(fmp)
     assert [r.company.symbol for r in got.records] == ["AAA"]
     assert got.rejections == {"non_usd_reporter": 1}
-    assert sorted(s for s, _l in fmp.currency_calls) == sorted([sym, "AAA"])
-    assert all(limit == 1 for _s, limit in fmp.currency_calls)        # the latest quarter only
+    assert sorted(s for s, _l in fmp.statement_calls) == sorted([sym, "AAA"])
+    assert all(limit == A.EARNINGS_STATEMENT_ROWS == 4 for _s, limit in fmp.statement_calls)   # ONE read each
     assert f"{sym} reports in {currency}, not USD" in caplog.text
     # Control: the same company reporting in USD is published.
     A.clear_memo()
@@ -5095,25 +6640,31 @@ async def test_a_usd_traded_non_usd_reporter_is_refused(sym, name, country, curr
     [{"date": "2026-12-31"}],                                               # no reportedCurrency
     [{"date": "2026-12-31", "reportedCurrency": ""}],
     [{"date": "2026-12-31", "reportedCurrency": 840}],
+    [{"reportedCurrency": "USD", "revenue": 1.1e9}],                        # no period end: nothing to date it by
+    [{"date": "2026-12-31", "reportedCurrency": "USD", "revenue": 1.1e9},   # two codes on the newest period
+     {"date": "2026-12-31", "reportedCurrency": "EUR", "revenue": 1.1e9}],
     [{"date": "2026-09-30", "reportedCurrency": "USD"}, {"date": "2026-12-31", "reportedCurrency": "EUR"}],
 ], ids=["unavailable", "rate_limited", "not_entitled", "empty", "not_a_list", "none", "not_a_row", "no_currency",
-        "blank_currency", "numeric_currency", "the_newest_row_decides"])
+        "blank_currency", "numeric_currency", "no_period_end", "two_codes", "the_newest_row_decides"])
 @pytest.mark.asyncio
 async def test_an_unreadable_or_non_usd_currency_read_refuses_the_report(answer, caplog):
     """Fail closed: a report whose reporting currency cannot be confirmed as USD is refused; the
-    week keeps the rest (a per-candidate read, like the Form 4/A check)."""
+    week keeps the rest (a per-candidate read, like the Form 4/A check). Review of 2026-10-16 (ER-2): a read
+    that FAILED (an exception, or an answer no dated row with one currency could be read from) is counted
+    ``statement_unavailable`` — apart from an answered read in another currency (``non_usd_reporter``)."""
     caplog.set_level(logging.INFO, logger=A.__name__)
     cal = {"2027-01-12": [erow("AAA", "2027-01-12", 1.5, 1.0), erow("BBB", "2027-01-12", 0.9, 1.0)]}
     fmp = FakeFMP2b(calendar=cal, profiles=earnings_profiles(), currency={"AAA": answer})
     got = await erun(fmp)
     assert [r.company.symbol for r in got.records] == ["BBB"]
-    assert got.rejections == {"non_usd_reporter": 1}
-    read_failed = not (isinstance(answer, list) and len(answer) == 2)
-    assert ("AAA reporting currency unreadable" if read_failed else "AAA reports in EUR") in caplog.text
+    read_failed = not (isinstance(answer, list) and len(answer) == 2 and answer[0]["date"] != answer[1]["date"])
+    assert got.rejections == ({"statement_unavailable": 1} if read_failed else {"non_usd_reporter": 1})
+    assert ("AAA quarterly statement unreadable — refused as statement_unavailable" if read_failed
+            else "AAA reports in EUR") in caplog.text
     # A failed read is never memoized: the next call reads again and keeps AAA. (A read that
     # answered — the newest row says EUR — is memoized like a calendar day.)
     fmp.currency = {}
-    expected = ["AAA", "BBB"] if read_failed else ["BBB"]
+    expected = ["BBB", "AAA"] if read_failed else ["BBB"]
     assert [r.company.symbol for r in (await erun(fmp)).records] == expected
 
 
@@ -5133,36 +6684,36 @@ def _qualifying(n, *, prefix="Q", ratio_base=1.0):
 
 
 @pytest.mark.asyncio
-async def test_currency_reads_are_bounded_by_the_record_count():
-    """One read per report that reaches the record stage, in waves of the reports still needed —
+async def test_statement_reads_are_bounded_by_the_record_count():
+    """One read per report that reaches the read stage, in waves of the reports still needed —
     never one per profiled candidate."""
     syms, rows, profiles = _qualifying(8)
     fmp = FakeFMP2b(calendar={"2027-01-12": rows}, profiles=profiles)
     got = await erun(fmp)
     assert [r.company.symbol for r in got.records] == syms[:5]
-    assert [s for s, _l in fmp.currency_calls] == syms[:5]               # one wave of five, nothing more
+    assert [s for s, _l in fmp.statement_calls] == syms[:5]               # one wave of five, nothing more
     # Two of the first five refused → one more wave of exactly two.
     A.clear_memo()
     fmp = FakeFMP2b(calendar={"2027-01-12": rows}, profiles=profiles, currency={syms[1]: "CAD", syms[3]: "EUR"})
     got = await erun(fmp)
     assert [r.company.symbol for r in got.records] == [syms[0], syms[2], syms[4], syms[5], syms[6]]
-    assert [s for s, _l in fmp.currency_calls] == syms[:7]
+    assert [s for s, _l in fmp.statement_calls] == syms[:7]
     assert got.rejections == {"non_usd_reporter": 2}
 
 
 @pytest.mark.asyncio
-async def test_currency_reads_stop_at_their_cap():
+async def test_statement_reads_stop_at_their_cap():
     syms, rows, profiles = _qualifying(30)
     fmp = FakeFMP2b(calendar={"2027-01-12": rows}, profiles=profiles, currency={s: "EUR" for s in syms})
     got = await erun(fmp)
     assert got.records == () and got.skip_reason == "earnings_none_qualified"
-    assert len(fmp.currency_calls) == A.EARNINGS_MAX_CURRENCY_READS == 20
+    assert len(fmp.statement_calls) == A.EARNINGS_MAX_STATEMENT_READS == 20
     assert got.rejections == {"non_usd_reporter": 20}
-    assert sum(len(b) for b in fmp.profile_requests) == 20               # no batch profiled past the cap
+    assert [len(b) for b in fmp.profile_requests] == [30]                 # every report profiled at once
 
 
 @pytest.mark.asyncio
-async def test_a_currency_read_out_of_budget_raises():
+async def test_a_statement_read_out_of_budget_raises():
     clock = {"now": 0.0}
 
     class Slow(FakeFMP2b):
@@ -5174,91 +6725,109 @@ async def test_a_currency_read_out_of_budget_raises():
     with pytest.raises(A.MarketingNewsUnavailable) as err:
         await A.candidates("earnings", run_date=EARN_RUN, exclude=frozenset(), deadline=60.0,
                            deps=A.NewsDeps(fmp=fmp, monotonic=lambda: clock["now"]))
-    assert err.value.reason == "budget_exhausted" and "stage=earnings_currency" in err.value.detail
-    assert fmp.currency_calls == []
+    assert err.value.reason == "budget_exhausted" and "stage=earnings_statement" in err.value.detail
+    assert fmp.statement_calls == []
 
 
-# ── rr9 #6: earnings profiles are walked in batches until ``limit`` reports qualify ──
+# ── rr9 #6 → Batch 1: every report the size proxy reaches is profiled at once, ranked by market cap ──
 
-def _sub_floor(n):
+def _sub_floor(n, *, revenue=(1.05e9, 1.0e9)):
     """``n`` reports with a +200% gap from $800M companies (below the $2B earnings floor)."""
     syms = [f"S{a}{b}" for a in "BCDEFGHJKLM" for b in "BCDEFGHJKLM"][:n]
-    return ([erow(sym, "2027-01-12", 3.0, 1.0) for sym in syms],
+    return ([erow(sym, "2027-01-12", 3.0, 1.0, *revenue) for sym in syms],
             {sym: prof(sym, f"{sym} Industries Inc.", cap=8e8) for sym in syms})
 
 
 @pytest.mark.asyncio
 async def test_sub_floor_gaps_never_crowd_out_a_large_cap():
-    """rr9 #6 (CONFIRMED probe): 25 sub-$2B companies with larger gaps rank above MSFT; only the top
-    20 were profiled, every one fell below the floor, and the week skipped."""
+    """rr9 #6 (CONFIRMED probe): 25 sub-$2B companies with larger gaps rank above MSFT. Batch 1: all 26 are
+    profiled in one call, the floor drops the 25, and MSFT is the week."""
     rows, profiles = _sub_floor(25)
     profiles["MSFT"] = prof("MSFT", "Microsoft Corporation", exchange="NASDAQ", cap=3e12)
     fmp = FakeFMP2b(calendar={"2027-01-12": rows + [erow("MSFT", "2027-01-12", 1.16, 1.0)]}, profiles=profiles)
     got = await erun(fmp)
     assert [r.company.symbol for r in got.records] == ["MSFT"]
     assert got.rejections == {"below_cap_floor": 25}
-    assert [len(b) for b in fmp.profile_requests] == [20, 6]              # batches of 20, in rank order
-    assert "MSFT" in fmp.profile_requests[1]
+    assert [len(b) for b in fmp.profile_requests] == [26] and "MSFT" in fmp.profile_requests[0]
 
 
 @pytest.mark.asyncio
-async def test_profiling_stops_at_the_hard_cap():
-    rows, profiles = _sub_floor(70)
+async def test_the_revenue_estimate_reaches_a_large_cap_behind_seventy_small_reports():
+    """Batch 1: 70 sub-floor reports with wider gaps would fill the 60-profile cap if the gap ordered the
+    profiles; the revenue ESTIMATE does (the size proxy before any profile), so MSFT ($70B estimate) is
+    profiled first and leads, and the ten smallest estimates are never profiled."""
+    rows, profiles = _sub_floor(70, revenue=(52e6, 50e6))
     profiles["MSFT"] = prof("MSFT", "Microsoft Corporation", exchange="NASDAQ", cap=3e12)
-    fmp = FakeFMP2b(calendar={"2027-01-12": rows + [erow("MSFT", "2027-01-12", 1.16, 1.0)]}, profiles=profiles)
+    msft = erow("MSFT", "2027-01-12", 1.16, 1.0, 71e9, 70e9)
+    fmp = FakeFMP2b(calendar={"2027-01-12": rows + [msft]}, profiles=profiles)
+    got = await erun(fmp)
+    assert [r.company.symbol for r in got.records] == ["MSFT"]
+    assert [len(b) for b in fmp.profile_requests] == [50, 10] and fmp.profile_requests[0][0] == "MSFT"
+    assert got.rejections == {"below_cap_floor": 59}                       # 59 profiled; 11 never reached
+    # The same week with MSFT's estimate as small as the rest: it ranks 71st by gap and is never profiled.
+    A.clear_memo()
+    fmp = FakeFMP2b(calendar={"2027-01-12": rows + [erow("MSFT", "2027-01-12", 1.16, 1.0, 52e6, 50e6)]},
+                    profiles=profiles)
     got = await erun(fmp)
     assert got.records == () and got.skip_reason == "earnings_none_qualified"
-    assert [len(b) for b in fmp.profile_requests] == [20, 20, 20] and A.EARNINGS_MAX_PROFILES == 60
     assert not any("MSFT" in b for b in fmp.profile_requests)
     assert got.rejections == {"below_cap_floor": 60}
 
 
 @pytest.mark.asyncio
-async def test_batches_stop_once_limit_reports_qualify():
+async def test_the_sub_floor_reports_never_cost_a_statement_read():
     syms, rows, profiles = _qualifying(5)
-    sub, sub_profiles = _sub_floor(30)                                      # rank BELOW the five
-    sub = [dict(r, epsActual=1.001) for r in sub]
+    sub, sub_profiles = _sub_floor(30)
     fmp = FakeFMP2b(calendar={"2027-01-12": rows + sub}, profiles={**profiles, **sub_profiles})
     got = await erun(fmp)
     assert [r.company.symbol for r in got.records] == syms
-    assert len(fmp.profile_requests) == 1                                   # the second batch is never read
+    assert [s for s, _l in fmp.statement_calls] == syms                     # the gate refused the rest first
+    assert got.rejections == {"below_cap_floor": 30}
 
 
 @pytest.mark.asyncio
-async def test_a_gap_tie_across_two_batches_is_still_ordered_by_market_cap():
-    """ZZA ($5B) and ZZB ($9B) tie at +100% on ranks 20 and 21, so they land in two batches; the
-    kept reports are ordered by the full rank key — ZZB ranks first."""
-    rows, profiles = _sub_floor(19)
-    rows = [dict(r, epsActual=3.0) for r in rows]
-    tied = [erow("ZZA", "2027-01-12", 2.0, 1.0), erow("ZZB", "2027-01-12", 2.0, 1.0)]
-    profiles.update({"ZZA": prof("ZZA", "Zza Industries Inc.", cap=5e9), "ZZB": prof("ZZB", "Zzb Industries Inc.", cap=9e9)})
-    fmp = FakeFMP2b(calendar={"2027-01-12": rows + tied}, profiles=profiles)
+async def test_a_larger_company_profiled_in_the_second_batch_call_outranks_the_first():
+    """Batch 1: the market cap decides across EVERY profiled report. ZBIG ($500B) has the smallest revenue
+    estimate, so it is profiled in the SECOND batch call — and still leads the fifty $3B companies of the
+    first, whose gaps are wider."""
+    first = [erow(f"R{a}{b}", "2027-01-12", 1.5, 1.0, 5.5e9, 5.0e9)
+             for a, b in ((a, b) for a in "BCDEFGHJ" for b in "BCDEFGHJ")][:50]
+    second = [erow(f"S{c}", "2027-01-12", 1.2, 1.0, 0.55e9, 0.5e9) for c in "BCDE"]
+    second.append(erow("ZBIG", "2027-01-12", 1.06, 1.0, 0.33e9, 0.3e9))
+    profiles = {r["symbol"]: prof(r["symbol"], f"{r['symbol']} Industries Inc.", cap=3e9) for r in first + second}
+    profiles["ZBIG"] = prof("ZBIG", "Zbig Industries Inc.", cap=500e9)
+    fmp = FakeFMP2b(calendar={"2027-01-12": first + second}, profiles=profiles)
     got = await erun(fmp)
-    assert [r.company.symbol for r in got.records] == ["ZZB", "ZZA"]
-    assert [len(b) for b in fmp.profile_requests] == [20, 1]
+    assert [len(b) for b in fmp.profile_requests] == [50, 5] and "ZBIG" in fmp.profile_requests[1]
+    assert [r.company.symbol for r in got.records] == ["ZBIG"] + [r["symbol"] for r in first[:4]]
+    assert [s for s, _l in fmp.statement_calls][0] == "ZBIG"               # read first: it ranks first
 
 
 @pytest.mark.asyncio
-async def test_out_of_budget_on_a_later_batch_keeps_the_records_held(caplog):
-    """A record already held is fully checked (profile and currency): running out of budget on a
-    LATER batch ends the walk with it; with none held the series still raises."""
+async def test_out_of_budget_on_a_later_wave_keeps_the_records_held(caplog):
+    """A record already held is fully checked (profile, currency, period): running out of budget on a
+    LATER read wave ends the walk with it; with none held the series still raises."""
     clock = {"now": 0.0}
-    sub, sub_profiles = _sub_floor(25)
-    rows = [erow("AAA", "2027-01-12", 5.0, 1.0)] + sub                      # AAA ranks first (+400%)
-    profiles = {**sub_profiles, "AAA": prof("AAA", "Aaa Industries Inc.", cap=5e9)}
+    cal = {"2027-01-12": [erow("AAA", "2027-01-12", 5.0, 1.0), erow("BBB", "2027-01-12", 4.0, 1.0),
+                          erow("CCC", "2027-01-12", 3.0, 1.0)]}
+    profiles = {s: prof(s, f"{s.title()} Industries Inc.", cap=cap) for s, cap in (("AAA", 9e9), ("BBB", 8e9),
+                                                                                       ("CCC", 7e9))}
 
     class Clocked(FakeFMP2b):
         async def get_income_statement(self, sym, period="annual", limit=10):
-            clock["now"] = 59.5                                             # the budget is spent here
+            if sym == "AAA":
+                clock["now"] = 59.5                                         # the budget is spent here
             return await super().get_income_statement(sym, period, limit)
 
     caplog.set_level(logging.WARNING, logger=A.__name__)
-    fmp = Clocked(calendar={"2027-01-12": rows}, profiles=profiles)
-    got = await A.candidates("earnings", run_date=EARN_RUN, exclude=frozenset(), deadline=60.0,
+    fmp = Clocked(calendar=cal, profiles=profiles, currency={"BBB": "EUR"})
+    got = await A.candidates("earnings", run_date=EARN_RUN, exclude=frozenset(), limit=2, deadline=60.0,
                              deps=A.NewsDeps(fmp=fmp, monotonic=lambda: clock["now"]))
+    # wave 1 = AAA (kept) + BBB (EUR, refused); wave 2 (CCC) finds the budget spent
     assert [r.company.symbol for r in got.records] == ["AAA"]
-    assert len(fmp.profile_requests) == 1 and "out of budget after 1 record(s)" in caplog.text
-    # With nothing held, the same exhaustion (spent by the first batch) raises at the second.
+    assert [s for s, _l in fmp.statement_calls] == ["AAA", "BBB"] and got.rejections == {"non_usd_reporter": 1}
+    assert "out of budget after 1 record(s)" in caplog.text
+    # With nothing held, the same exhaustion (spent by the profile call) raises at the first read wave.
     A.clear_memo()
     clock["now"] = 0.0
 
@@ -5268,11 +6837,194 @@ async def test_out_of_budget_on_a_later_batch_keeps_the_records_held(caplog):
             clock["now"] = 59.5
             return got
 
-    fmp = Late(calendar={"2027-01-12": sub}, profiles=sub_profiles)
+    fmp = Late(calendar=cal, profiles=profiles)
     with pytest.raises(A.MarketingNewsUnavailable) as err:
         await A.candidates("earnings", run_date=EARN_RUN, exclude=frozenset(), deadline=60.0,
                            deps=A.NewsDeps(fmp=fmp, monotonic=lambda: clock["now"]))
-    assert err.value.reason == "budget_exhausted" and len(fmp.profile_requests) == 1
+    assert err.value.reason == "budget_exhausted" and fmp.statement_calls == []
+
+
+# ── Batch 1 (2026-10-15): the live findings, the period check, kept never counted ──
+
+_PERIOD_RUN = date(2026, 10, 15)          # Thursday; reports Oct 8 .. 14 (the live preview's week)
+
+
+def _statements(sym, *quarters, currency="USD"):
+    """FMP-shaped quarterly rows, newest first: ``quarters`` = ((period end, revenue), …)."""
+    return [{"symbol": sym, "date": d, "period": "Q", "reportedCurrency": currency, "revenue": rev}
+            for d, rev in quarters]
+
+
+_DAL = ("DAL", "Delta Air Lines, Inc.")
+_DAL_STATEMENTS = _statements("DAL", ("2026-09-30", 20_186_000_000), ("2026-06-30", 16_650_000_000),
+                              ("2026-03-31", 15_854_000_000), ("2025-12-31", 15_560_000_000))
+
+
+@pytest.mark.asyncio
+async def test_progressives_one_month_row_is_refused_never_published_as_the_quarter():
+    """Live finding (2026-10-14): PGR's calendar row held ONE MONTH — revenue $7.16B against a $22.6B
+    QUARTER estimate, EPS $1.08 against $4.35 — and the old code dropped the revenue line and would have
+    published "$1.08 a share … the estimate was $4.35". Batch 1 refuses the whole report, before any
+    profile. Even a monthly row whose estimate were monthly too (in band) is refused: the reported
+    quarter's statement ($23.18B, ended Sep 30) is not the calendar's $7.16B (`period_mismatch`)."""
+    pgr = prof("PGR", "The Progressive Corporation", cap=140e9)
+    fmp = FakeFMP2b(calendar={"2026-10-14": [erow("PGR", "2026-10-14", 1.08, 4.35, 7.16e9, 22.6e9)]},
+                    profiles={"PGR": pgr})
+    got = await erun(fmp, run_date=_PERIOD_RUN)
+    assert got.records == () and got.rejections == {"revenue_implausible": 1}
+    assert fmp.calls["profiles"] == 0 and fmp.statement_calls == []
+    A.clear_memo()
+    quarterly = _statements("PGR", ("2026-09-30", 23_180_000_000), ("2026-06-30", 22_100_000_000))
+    fmp = FakeFMP2b(calendar={"2026-10-14": [erow("PGR", "2026-10-14", 1.08, 4.35, 7.16e9, 7.5e9)]},
+                    profiles={"PGR": pgr}, currency={"PGR": quarterly})
+    got = await erun(fmp, run_date=_PERIOD_RUN)
+    assert got.records == () and got.rejections == {"period_mismatch": 1}
+    assert fmp.statement_calls == [("PGR", 4)]
+
+
+@pytest.mark.asyncio
+async def test_delta_is_kept_with_the_quarter_its_statement_places_it_in():
+    """Live (2026-10-15 preview): DAL reported Oct 9; the calendar says revenue $20.2B, the statement of the
+    quarter ended Sep 30 says $20.186B (0.07% apart) → ``period_end`` Sep 30, and the post says "the quarter
+    that ended September 30th". The EPS pair here is a clear surprise — Delta's REAL pair that day (1.72 vs
+    1.77, 2.8%) is refused `surprise_unclear` (owner default: a ≥ 5% surprise), pinned below."""
+    from app.services.marketing import news_templates as T
+
+    profiles = {"DAL": prof(*_DAL, cap=38e9)}
+    cal = {"2026-10-09": [erow("DAL", "2026-10-09", 1.86, 1.77, 20.2e9, 17_651_850_000.0)]}
+    fmp = FakeFMP2b(calendar=cal, profiles=profiles, currency={"DAL": _DAL_STATEMENTS})
+    got = await erun(fmp, run_date=_PERIOD_RUN)
+    (rec,) = got.records
+    assert (rec.company.symbol, rec.report_date, rec.period_end) == ("DAL", date(2026, 10, 9), date(2026, 9, 30))
+    assert (rec.revenue_actual, rec.revenue_estimate) == (20.2e9, 17_651_850_000.0) and got.rejections == {}
+    assert fmp.statement_calls == [("DAL", 4)]
+    out = T.compose(rec, run_date=_PERIOD_RUN, store_state="live", allow_x_url=False)
+    assert out["video_script"][0].startswith("These figures cover the quarter that ended September 30")
+    assert out["image_spec"]["subtitle"].startswith("Quarter ended Sep 30, 2026")
+    # Delta's REAL EPS pair that day: a 2.8% gap — no clear surprise, refused before any profile.
+    A.clear_memo()
+    cal = {"2026-10-09": [erow("DAL", "2026-10-09", 1.72, 1.77, 20.2e9, 17_651_850_000.0)]}
+    fmp = FakeFMP2b(calendar=cal, profiles=profiles, currency={"DAL": _DAL_STATEMENTS})
+    got = await erun(fmp, run_date=_PERIOD_RUN)
+    assert got.records == () and got.rejections == {"surprise_unclear": 1} and fmp.calls["profiles"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_nurix_like_one_off_never_leads_a_larger_company():
+    """Live finding (2026-10-15 preview): Nurix's $4.73 vs -$0.60 (an 8.9x gap at a $2.55B cap) led the
+    week because the widest gap ranked first. Batch 1 ranks by market cap: Goldman Sachs' smaller (clear)
+    surprise leads and the one-off follows. Nurix's REAL revenue pair ($673M vs a $24M estimate) does not
+    even qualify (`revenue_implausible`)."""
+    profiles = {"NRIX": prof("NRIX", "Nurix Therapeutics, Inc.", exchange="NASDAQ", cap=2.55e9),
+                "GS": prof("GS", "The Goldman Sachs Group, Inc.", cap=150e9)}
+    rows = [erow("NRIX", "2027-01-12", 4.73, -0.60, 30e6, 25e6), erow("GS", "2027-01-12", 17.01, 12.86, 18.7e9, 16.8e9)]
+    fmp = FakeFMP2b(calendar={"2027-01-12": rows}, profiles=profiles)
+    got = await erun(fmp)
+    assert [r.company.symbol for r in got.records] == ["GS", "NRIX"]
+    assert abs(4.73 + 0.60) / 0.60 > abs(17.01 - 12.86) / 12.86          # the gap order would put NRIX first
+    A.clear_memo()
+    rows = [erow("NRIX", "2027-01-12", 4.73, -0.60, 673e6, 24e6), erow("GS", "2027-01-12", 17.01, 12.86, 18.7e9, 16.8e9)]
+    got = await erun(FakeFMP2b(calendar={"2027-01-12": rows}, profiles=profiles))
+    assert [r.company.symbol for r in got.records] == ["GS"] and got.rejections == {"revenue_implausible": 1}
+
+
+@pytest.mark.parametrize("quarters, reason", [
+    # the reported quarter (Dec 31) is not in the statement yet: the newest row is Sep 30, 104 days before
+    # the report — maybe the quarter BEFORE — so even a revenue that matches it proves nothing
+    ((("2026-09-30", 1_050_000_000), ("2026-06-30", 980_000_000)), "period_unverified"),
+    # nothing within 120 days of the report
+    ((("2026-06-30", 1_050_000_000), ("2026-03-31", 990_000_000)), "period_unverified"),
+    # a period ending ON the report day: the answer is not trusted for the reported quarter
+    ((("2027-01-12", 1_050_000_000), ("2026-12-31", 1_050_000_000)), "period_unverified"),
+    # the reported quarter's revenue is missing / not a number
+    ((("2026-12-31", None), ("2026-09-30", 1_000_000_000)), "period_unverified"),
+    ((("2026-12-31", "1.05e9"), ("2026-09-30", 1_000_000_000)), "period_unverified"),
+    # the reported quarter disagrees with the calendar beyond 3% (a month, a half-year, another basis)
+    ((("2026-12-31", 1_100_000_000), ("2026-09-30", 1_050_000_000)), "period_mismatch"),
+    # … even when an OLDER row in the window matches: only the newest one is the reported quarter
+    ((("2026-12-31", 2_100_000_000), ("2026-09-30", 1_050_000_000)), "period_mismatch"),
+    # two rows on the newest period that disagree
+    ((("2026-12-31", 1_050_000_000), ("2026-12-31", 1_200_000_000), ("2026-09-30", 1_000_000_000)),
+     "period_mismatch"),
+    # review of 2026-10-16 (ER-4): the placed row must be a QUARTER — a half-year shape (FMP's "quarters" of a
+    # semiannual reporter), a single row, or one period end twice with nothing older shows none
+    ((("2026-12-31", 1_050_000_000), ("2026-06-30", 990_000_000)), "period_unverified"),
+    ((("2026-12-31", 1_050_000_000),), "period_unverified"),
+    ((("2026-12-31", 1_050_000_000), ("2026-12-31", 1_050_000_000)), "period_unverified"),
+], ids=["stale_newest_row", "nothing_in_window", "period_on_report_day", "no_revenue", "string_revenue",
+        "mismatch", "older_row_matches", "two_rows_disagree", "half_year_shape", "single_row", "one_date_twice"])
+@pytest.mark.asyncio
+async def test_the_period_check_refuses_what_it_cannot_place(quarters, reason, caplog):
+    caplog.set_level(logging.INFO, logger=A.__name__)
+    fmp = FakeFMP2b(calendar={"2027-01-12": [erow("AAA", "2027-01-12", 1.5, 1.0)]}, profiles=earnings_profiles(),
+                    currency={"AAA": _statements("AAA", *quarters)})
+    got = await erun(fmp)
+    assert got.records == () and got.rejections == {reason: 1}
+    assert f"AAA refused as {reason}" in caplog.text
+
+
+@pytest.mark.parametrize("revenue, period_end", [
+    (1_050_000_000, date(2026, 12, 31)), (1_081_500_000, date(2026, 12, 31)),    # equal; 3.0% exactly
+    (1_018_500_000, date(2026, 12, 31)), (1_081_600_000, None), (1_018_400_000, None),
+])
+@pytest.mark.asyncio
+async def test_the_reported_quarter_matches_within_three_percent(revenue, period_end):
+    fmp = FakeFMP2b(calendar={"2027-01-12": [erow("AAA", "2027-01-12", 1.5, 1.0)]}, profiles=earnings_profiles(),
+                    currency={"AAA": _statements("AAA", ("2026-12-31", revenue), ("2026-09-30", 990_000_000))})
+    got = await erun(fmp)
+    if period_end is None:
+        assert got.records == () and got.rejections == {"period_mismatch": 1}
+    else:
+        (rec,) = got.records
+        assert rec.period_end == period_end and got.rejections == {}
+
+
+@pytest.mark.parametrize("stale_revenue, kept", [
+    (1_000_000_000, True), (790_000_000, True), (1_390_000_000, True),     # ×1.05, ×1.33, ×0.755: a quarter's scale
+    (3_500_000_000, False), (700_000_000, False),                          # ×0.3 (a month), ×1.5
+])
+@pytest.mark.asyncio
+async def test_the_scale_check_contingency_keeps_a_lagging_report_without_a_period(monkeypatch, stale_revenue, kept):
+    """`R.EARNINGS_ALLOW_SCALE_CHECK` (off by default): when the statement has not caught up (its newest row
+    is the quarter BEFORE), a report whose revenue is a quarter's scale of it is kept WITHOUT a period
+    ("reported on <date>") — never with that row's period."""
+    assert R.EARNINGS_ALLOW_SCALE_CHECK is False
+    quarters = _statements("AAA", ("2026-09-30", stale_revenue), ("2026-06-30", 900_000_000))
+    world = dict(calendar={"2027-01-12": [erow("AAA", "2027-01-12", 1.5, 1.0)]}, profiles=earnings_profiles(),
+                 currency={"AAA": quarters})
+    got = await erun(FakeFMP2b(**world))
+    assert got.records == () and got.rejections == {"period_unverified": 1}      # the default: refused
+    A.clear_memo()
+    monkeypatch.setattr(R, "EARNINGS_ALLOW_SCALE_CHECK", True)
+    got = await erun(FakeFMP2b(**world))
+    if kept:
+        (rec,) = got.records
+        assert rec.period_end is None and got.rejections == {}
+    else:
+        assert got.records == () and got.rejections == {"period_unverified": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_kept_record_is_never_counted_as_a_rejection():
+    """Batch 1: the old code counted `revenue_dropped` on a record it then KEPT. Every count is now a
+    refusal: three reports kept, one refused per reason, and the counts are exactly those refusals —
+    every candidate counted once, a kept one never. Mutation-checked (2026-10-15): a `ctx.reject(...)` on
+    the kept path turned it red."""
+    rows = [erow("KA", "2027-01-12", 1.5, 1.0), erow("KB", "2027-01-12", 1.4, 1.0), erow("KC", "2027-01-12", 1.3, 1.0),
+            erow("RV", "2027-01-12", 1.5, 1.0, 3e9, 1e9),                 # revenue out of band
+            erow("SU", "2027-01-12", 1.02, 1.0),                          # a 2% gap
+            erow("PM", "2027-01-12", 1.5, 1.0), erow("PU", "2027-01-12", 1.5, 1.0), erow("EU", "2027-01-12", 1.5, 1.0)]
+    profiles = {r["symbol"]: prof(r["symbol"], f"{r['symbol']} Industries Inc.", cap=5e9) for r in rows}
+    # (review of 2026-10-16: PM's mismatching quarter carries the quarter before it, so it is a quarter)
+    currency = {"PM": _statements("PM", ("2026-12-31", 1_300_000_000), ("2026-09-30", 1_000_000_000)),
+                "PU": _statements("PU", ("2026-09-30", 1_050_000_000)), "EU": "EUR"}
+    fmp = FakeFMP2b(calendar={"2027-01-12": rows}, profiles=profiles, currency=currency)
+    got = await erun(fmp, limit=5)
+    assert sorted(r.company.symbol for r in got.records) == ["KA", "KB", "KC"]
+    assert got.rejections == {"revenue_implausible": 1, "surprise_unclear": 1, "period_mismatch": 1,
+                              "period_unverified": 1, "non_usd_reporter": 1}
+    assert sum(got.rejections.values()) + len(got.records) == len(rows)
+    assert all(r.period_end == date(2026, 12, 31) for r in got.records)
 
 
 # ── rr9 #7: the congress worst case, counted in page requests ──
@@ -5641,12 +7393,15 @@ async def test_a_person_filed_13f_is_refused_and_a_listed_companys_chip_never_ri
     assert [r.filer_name for r in got.records] == ["Soros Fund Management"]
 
 
-@pytest.mark.parametrize("curated, shown", [("Pershing Square Capital", "Pershing Square Capital Management"),
-                                            ("Someone Else Entirely", "Pershing Square Capital Management"),
-                                            ("", "Pershing Square Capital Management")])
+@pytest.mark.parametrize("cik, curated, shown", [
+    (SOROS, "Soros Fund", "Soros Fund Management"), (SOROS, "Someone Else Entirely", "Soros Fund Management"),
+    (SOROS, "", "Soros Fund Management"),
+    # Batch 1 (2026-10-15): Pershing's registry CIK is read as its successor — the subject is THAT filer
+    (PERSHING, "Pershing Square Capital", "Pershing Square"), (PERSHING, "", "Pershing Square"),
+])
 @pytest.mark.asyncio
-async def test_the_subject_is_the_edgar_filer_never_the_curated_firm_name(curated, shown):
-    fmp, sb = registry_world([whale(PERSHING, curated)])
+async def test_the_subject_is_the_edgar_filer_never_the_curated_firm_name(cik, curated, shown):
+    fmp, sb = registry_world([whale(cik, curated)])
     got = await run("thirteen_f", fmp, sb=sb)
     assert got.records[0].filer_name == shown
 
@@ -5670,7 +7425,10 @@ def _alphabet_club_world(previous, changes, holdings=None):
         newly_reported=sum(1 for c in changes if c["change"] == "newly_reported"), increased=0, decreased=0,
         no_longer_reported=sum(1 for c in changes if c["change"] == "no_longer_reported"))})
     club.details["nvidia"].holdings = holdings or []
-    sb.tables["trillion_club_filings"] = [{"cik": "0001045810", "period": "2026-Q2", "holdings": previous}]
+    # the stored previous book, and (since 2026-10-19 read for every club filing with a move) the complete
+    # current build row
+    sb.tables["trillion_club_filings"] = [{"cik": "0001045810", "period": "2026-Q2", "holdings": previous},
+                                          sb.tables["trillion_club_filings"][1]]
     return club, sb
 
 
@@ -6092,3 +7850,1530 @@ async def test_a_queued_row_of_a_kept_person_is_never_read_again():
     assert [r.company.symbol for r in got.records[0].rows] == ["QB", "QC", "QD", "PNNT"]
     assert got.rejections == {"amendment_check_failed": 1, "same_person": 1}
     assert issuer_reads(fmp) == ["PNNT", "QA", "QB", "QC", "QD"]          # PFLT never read
+
+
+# ── Batch 1 (2026-10-15): the members-elect window (owner decision 4) ─────────
+
+
+def _insider_world():
+    rows = week_rows() + [
+        irow(sym="FOX", name="TAYLOR EMMA", cik="0000000555", title="officer: Chief Financial Officer",
+             shares=10_000, price=30.0),
+        irow(sym="FOX", name="BROWN DAVID", cik="0000000556", title="director", shares=20_000, price=30.0),
+    ]
+    return FakeFMP(insider=rows, profiles=week_profiles())
+
+
+@pytest.mark.parametrize("series, named", [("ceo_buys", "Ryan Cohen"), ("insider_buys", "David Brown")])
+@pytest.mark.asyncio
+async def test_inside_the_members_elect_window_every_form4_row_is_built_role_only(monkeypatch, caplog, series, named):
+    """Owner decision 4: `RUN` (Nov 16, 2026) is inside the window (Election Day Nov 3, 2026 through Jan 3,
+    2027): the record carries NO person — so neither the post nor its fact sheet can name one — and the
+    series still runs. The record composes into a post that names no one anywhere and passes
+    validate_package. Mutation-checked (2026-10-15): without the window line in `_insider_row` the name was
+    built and this turned red."""
+    from app.services.marketing import news_templates as T
+
+    monkeypatch.setattr(R, "members_elect_window", REAL_MEMBERS_ELECT_WINDOW)
+    assert R.members_elect_window(RUN)
+    caplog.set_level(logging.INFO, logger=A.__name__)
+    got = await run(series, _insider_world())
+    (rec,) = got.records
+    assert rec.rows and all(r.person_name is None for r in rec.rows)
+    sheet = json.dumps(R.fact_sheet(rec, rejections=got.rejections, selection={})).lower()
+    surname = named.split()[-1].lower()
+    assert surname not in sheet
+    assert f"company news {series}: 2026-11-16 is inside the members-elect window" in caplog.text
+    out = T.compose(rec, run_date=RUN, store_state="live", allow_x_url=False)
+    assert out["persons"] == [] and surname not in json.dumps(out).lower()
+    assert T.validate_package(out, record=rec) == []
+    # Control: outside the window the same week names the person.
+    monkeypatch.setattr(R, "members_elect_window", lambda day: False)
+    A.clear_memo()
+    got = await run(series, _insider_world())
+    assert named in [r.person_name for r in got.records[0].rows]
+
+
+@pytest.mark.asyncio
+async def test_inside_the_window_a_member_is_still_dropped_never_built_role_only(monkeypatch):
+    """The window turns names OFF; it never turns the Congress drop off: a sitting member's row is
+    dropped (`congress_name`), not built as an unnamed director."""
+    monkeypatch.setattr(R, "members_elect_window", REAL_MEMBERS_ELECT_WINDOW)
+    rows = week_rows() + [irow(sym="FOX", name="PELOSI NANCY", cik="0000000444", title="director",
+                               shares=20_000, price=30.0)]
+    got = await run("insider_buys", FakeFMP(insider=rows, profiles=week_profiles()))
+    assert got.records == () and got.rejections.get("congress_name") == 1
+
+
+def test_every_exported_name_exists_once():
+    """Batch 1 replaced two earnings constants (`EARNINGS_PROFILE_CANDIDATES`, `EARNINGS_MAX_CURRENCY_READS`)
+    and their names lingered in `__all__` with every suite green — a ``from … import *`` would have raised
+    AttributeError. Every exported name of the adapter, the rules and the templates must exist, once."""
+    from app.services.marketing import news_templates as T
+
+    for mod in (A, R, T):
+        assert [n for n in mod.__all__ if not hasattr(mod, n)] == [], mod.__name__
+        assert len(mod.__all__) == len(set(mod.__all__)), mod.__name__
+    assert {"EARNINGS_MAX_STATEMENT_READS", "EARNINGS_STATEMENT_ROWS"} <= set(A.__all__)
+    assert {"members_elect_window", "general_election_day", "earnings_period", "clear_surprise",
+            "earnings_revenue_pair", "statement_currency", "EARNINGS_CLEAR_SURPRISE"} <= set(R.__all__)
+
+
+# ══ Batch 1 (2026-10-15): 13F — the split-lookup cap, Pershing's successor CIK, Berkshire first ══════
+#
+# Plan item 3. (1) The shared split check looks up at most 25 suspects per filing and the rest keep their
+# RAW share diff (`BuiltFiling.split_unchecked`): a filing whose lookups were capped shows no more / fewer
+# shares — those moves (`split_unchecked`) and both counts go, newly reported and exits stay; a club filer's
+# stored build is re-checked from its stored books. (2) Pershing Square's holdings are filed by CIK
+# 0002026053 since its old CIK filed only a 13F-NT: read, built, keyed and named as the successor, in the
+# old CIK's registry place. (3) Berkshire leads (before the club and the rest of the registry), under ONE
+# live-build budget. Every new guard mutation-checked.
+
+NVIDIA_CIK = "0001045810"
+
+
+class NoSplitActions:
+    """The corporate-actions seam with no split anywhere: every looked-up suspect is confirmed clean, so only
+    the CAP can leave one unchecked. Records the tickers looked up."""
+
+    def __init__(self) -> None:
+        self.looked_up: List[str] = []
+
+    async def get_split_rows(self, t, from_date=None, to_date=None):
+        self.looked_up.append(t)
+        return []
+
+    async def has_unclassified_adjustment(self, t, from_date=None, to_date=None, **kw):
+        return False
+
+
+#: Symbols for the extra positions (no W / U / R ending: never read as a warrant, unit or right).
+_SPLIT_SYMS = [f"Z{a}{b}" for a in "ABCD" for b in "ABCDEFGHIJKLMNOP"]
+_NO_MORE_OR_FEWER = ("more shares", "fewer shares")
+
+
+def _split_registry_world(n_extra: int):
+    """Berkshire's `book` plus ``n_extra`` positions held in both quarters whose share count rose 50% at the
+    same $10M value — a per-share price down a third, the shape of a 3:2 split, so each is a split SUSPECT.
+    The seam finds no split, so a looked-up suspect keeps its raw diff ("increased"); past the cap of 25 the
+    rest are never looked up."""
+    extracts = book(BERKSHIRE)
+    syms = _SPLIT_SYMS[:n_extra]
+    for i, s in enumerate(syms):
+        cusip = f"{900000 + i:06d}AB1"
+        extracts[(BERKSHIRE, 2026, 2)].append(xrow(BERKSHIRE, 2, s, cusip, 100_000, 10e6))
+        extracts[(BERKSHIRE, 2026, 3)].append(xrow(BERKSHIRE, 3, s, cusip, 150_000, 10e6))
+    fmp, sb = registry_world([whale(BERKSHIRE, "Berkshire Hathaway")], extracts=extracts)
+    fmp.profiles.update({s: prof(s, f"{s.title()} Robotics Inc.") for s in syms})
+    return fmp, sb
+
+
+def _compose_text(rec) -> str:
+    from app.services.marketing import news_templates as NT
+
+    return json.dumps(NT.compose(rec, run_date=RUN, store_state="live", allow_x_url=False))
+
+
+@pytest.mark.asyncio
+async def test_a_registry_filing_past_the_split_cap_shows_no_more_or_fewer_shares(caplog):
+    caplog.set_level(logging.WARNING, logger=A.__name__)
+    fmp, sb = _split_registry_world(26)
+    acts = NoSplitActions()
+    got = await run("thirteen_f", fmp, sb=sb, actions=acts)
+    (rec,) = got.records
+    assert len(acts.looked_up) == 25                         # the cap: one suspect was never checked
+    assert [(m.company.symbol, m.move) for m in rec.moves] == [
+        ("CRWV", "newly_reported"), ("OXY", "no_longer_reported")]
+    # Both kinds' counts are LEFT OUT — never written as 0, a false "no holding grew".
+    assert dict(rec.counts) == {"newly_reported": 1, "no_longer_reported": 1}
+    assert got.rejections == {"split_unchecked": 27}         # AAPL + the 26 extras, before any other gate
+    assert f"cik={BERKSHIRE} 2026-Q3" in caplog.text and "(split_unchecked)" in caplog.text
+    text = _compose_text(rec)                                # end to end: the post never says it
+    assert not any(p in text for p in _NO_MORE_OR_FEWER)
+    assert "CoreWeave" in text
+
+
+@pytest.mark.asyncio
+async def test_a_registry_filing_at_the_split_cap_keeps_its_more_and_fewer_moves():
+    fmp, sb = _split_registry_world(25)
+    acts = NoSplitActions()
+    got = await run("thirteen_f", fmp, sb=sb, actions=acts)
+    (rec,) = got.records
+    # The build looked up its 25 suspects; the review of 2026-10-16 (F1) then re-checked every more / fewer row
+    # (the 25 extras and AAPL) — in production the suspects' 25 are cache hits of the build's own derivations.
+    assert len(acts.looked_up) == 25 + 26 and sorted(acts.looked_up[25:]) == sorted(["AAPL", *_SPLIT_SYMS[:25]])
+    assert "split_unchecked" not in got.rejections and "split_in_window" not in got.rejections
+    assert ("AAPL", "increased") in [(m.company.symbol, m.move) for m in rec.moves]
+    assert dict(rec.counts) == {"newly_reported": 1, "increased": 26, "decreased": 0, "no_longer_reported": 1}
+    assert "more shares" in _compose_text(rec)
+
+
+def _club_split_books(n: int):
+    """A club filer's stored CURRENT (2026-Q3) and PREVIOUS (2026-Q2) books: ``n`` positions whose share count
+    rose 50% at the same value (split suspects), and RXRX on the previous book (its exit's value)."""
+    syms = _SPLIT_SYMS[:n]
+    previous = [{"symbol": "RXRX", "shares": 7_000_000.0, "value": 35e6}] + [
+        {"symbol": s, "shares": 100_000.0, "value": 10e6} for s in syms]
+    current = [{"symbol": s, "shares": 150_000.0, "value": 10e6} for s in syms]
+    return current, previous
+
+
+_CLUB_KEPT = ([("CRWV", "newly_reported"), ("RXRX", "no_longer_reported"), ("AAPL", "increased")],
+              {"newly_reported": 3, "increased": 1, "decreased": 1, "no_longer_reported": 1},
+              {"etf_or_fund": 1, "move_not_routable": 1, "move_too_small": 1})
+_CLUB_DROPPED = ([("CRWV", "newly_reported"), ("RXRX", "no_longer_reported")],
+                 {"newly_reported": 3, "no_longer_reported": 1},
+                 {"etf_or_fund": 1, "move_not_routable": 1, "split_unchecked": 2})
+
+
+@pytest.mark.parametrize("position_count, n_suspects, current, expected, why", [
+    # suspects are a subset of the positions: a book of at most 25 never reached the cap — no re-derivation
+    (8, 26, "rows", _CLUB_KEPT, None),
+    (25, 26, "rows", _CLUB_KEPT, None),
+    (30, 25, "rows", _CLUB_KEPT, None),        # at the cap, nothing was trimmed
+    (30, 26, "rows", _CLUB_DROPPED, "1 split suspect(s) past the lookup cap (ZBJ)"),      # one past the cap
+    # (a MISSING current row refuses the whole filer since 2026-10-19:
+    # `test_a_club_filer_whose_current_build_cannot_be_read_is_refused`)
+    (30, 0, "not json", _CLUB_DROPPED, "its stored holdings or change rows are unreadable"),   # unreadable
+], ids=["small_book", "at_the_bound", "at_the_cap", "past_the_cap", "current_garbage"])
+@pytest.mark.asyncio
+async def test_a_club_filing_is_rechecked_against_the_split_cap_from_its_stored_books(
+        monkeypatch, caplog, position_count, n_suspects, current, expected, why):
+    """Since the review of 2026-10-16 the stored CURRENT row is read for every filing with a more / fewer move or
+    count (its build status and change rows: F1, F2) — two reads, whatever the book's size."""
+    monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", True)
+    caplog.set_level(logging.WARNING, logger=A.__name__)
+    club, sb = club_world(company_over={"position_count": position_count})
+    detail = club.details["nvidia"]
+    cur, prev = _club_split_books(n_suspects)
+    rows = [{"cik": NVIDIA_CIK, "period": "2026-Q2", "holdings": prev}]
+    if current is not None:
+        rows.append(stored_current(NVIDIA_CIK, "2026-Q3", detail.changes, detail.company.change_counts,
+                                   holdings=cur if current == "rows" else current))
+    sb.tables["trillion_club_filings"] = rows
+    got = await run("thirteen_f", FakeFMP(profiles=thirteen_f_profiles()), club=club, sb=sb)
+    (rec,) = got.records
+    moves, counts, rejections = expected
+    assert [(m.company.symbol, m.move) for m in rec.moves] == moves
+    assert dict(rec.counts) == counts and got.rejections == rejections
+    assert sb.calls["trillion_club_filings"] == 2
+    if why is not None:
+        assert why in caplog.text and "(split_unchecked)" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_pershing_is_read_built_keyed_and_named_as_its_successor_filer():
+    fmp, sb = registry_world([whale(PERSHING, "Pershing Square Capital", "PSH.L")])
+    got = await run("thirteen_f", fmp, sb=sb)
+    (rec,) = got.records
+    assert (rec.filer_cik, rec.filer_name, rec.filer_symbol) == (PERSHING_FILER, "Pershing Square", None)
+    assert R.ledger_key(rec) == f"news:thirteen_f:{PERSHING_FILER}:2026-Q3"
+    assert fmp.dates_ciks == [PERSHING_FILER]                       # never the old CIK's dates ...
+    assert sorted(fmp.extract_keys) == [(PERSHING_FILER, 2026, 2), (PERSHING_FILER, 2026, 3)]   # ... or book
+    again = await run("thirteen_f", fmp, sb=sb)
+    assert again.records == got.records and fmp.calls["extract"] == 2    # memoized under the successor
+
+
+@pytest.mark.parametrize("posted_under", [PERSHING, PERSHING_FILER], ids=["old_key", "successor_key"])
+@pytest.mark.asyncio
+async def test_a_successor_filing_posted_under_either_key_is_never_read_again(posted_under):
+    fmp, sb = registry_world([whale(PERSHING, "Pershing Square Capital")])
+    got = await run("thirteen_f", fmp, sb=sb, exclude={f"news:thirteen_f:{posted_under}:2026-Q3"})
+    assert got.records == () and got.rejections == {"already_posted": 1} and fmp.calls == Counter()
+
+
+@pytest.mark.asyncio
+async def test_only_the_successors_filing_dates_are_read():
+    """The old CIK still answers dates (its 13F-NT era) — the adapter never asks it."""
+    fmp, sb = registry_world([whale(PERSHING, "Pershing Square Capital")], dates={PERSHING: DATES_Q3_Q2})
+    got = await run("thirteen_f", fmp, sb=sb)
+    assert got.records == () and got.rejections == {"filer_not_filed": 1}
+    assert fmp.dates_ciks == [PERSHING_FILER] and fmp.calls["extract"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_successor_missing_from_the_filer_table_is_refused_before_any_call(monkeypatch):
+    monkeypatch.setattr(R, "THIRTEEN_F_SUCCESSORS", {SCION: "0009999998"})
+    fmp, sb = registry_world([whale(SCION, "Scion Asset Management")])
+    got = await run("thirteen_f", fmp, sb=sb)
+    assert got.records == () and got.rejections == {"filer_entity_unknown": 1} and fmp.calls == Counter()
+
+
+@pytest.mark.asyncio
+async def test_a_successor_curated_beside_its_old_cik_is_read_once(monkeypatch):
+    order = dict(A._registry_order())
+    order[PERSHING_FILER] = order[PERSHING] + 1
+    monkeypatch.setattr(A, "_registry_order", lambda: order)
+    fmp, sb = registry_world([whale(PERSHING, "Pershing Square Capital"), whale(PERSHING_FILER, "Pershing Square")])
+    got = await run("thirteen_f", fmp, sb=sb)
+    assert [r.filer_cik for r in got.records] == [PERSHING_FILER] and fmp.dates_ciks == [PERSHING_FILER]
+
+
+def _club_and_registry_world(whales):
+    """The club world (NVIDIA, a club 13F filer read from its stored build) beside registry filers."""
+    club, sb = club_world()
+    fmp, reg_sb = registry_world(whales)
+    sb.tables["whales"] = reg_sb.tables["whales"]
+    return club, sb, fmp
+
+
+@pytest.mark.asyncio
+async def test_berkshire_leads_ahead_of_the_club_and_the_rest_of_the_registry(monkeypatch):
+    monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", True)
+    club, sb, fmp = _club_and_registry_world([whale(SOROS, "Soros Fund Management"),
+                                              whale(BERKSHIRE, "Berkshire Hathaway")])
+    got = await run("thirteen_f", fmp, club=club, sb=sb)
+    assert [r.filer_cik for r in got.records] == [BERKSHIRE, NVIDIA_CIK, SOROS]   # was NVIDIA, Berkshire, Soros
+
+
+@pytest.mark.asyncio
+async def test_a_lead_filer_leads_whatever_its_registry_place(monkeypatch):
+    order = dict(A._registry_order())
+    order[BERKSHIRE] = max(order.values()) + 1                # curated LAST
+    monkeypatch.setattr(A, "_registry_order", lambda: order)
+    fmp, sb = registry_world([whale(SOROS, "Soros Fund Management"), whale(BERKSHIRE, "Berkshire Hathaway")])
+    got = await run("thirteen_f", fmp, sb=sb)
+    assert [r.filer_cik for r in got.records] == [BERKSHIRE, SOROS] and fmp.dates_ciks == [BERKSHIRE, SOROS]
+
+
+@pytest.mark.asyncio
+async def test_the_lead_and_the_rest_share_one_live_build_budget(monkeypatch):
+    monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", True)
+    club, sb, fmp = _club_and_registry_world([whale(BERKSHIRE, "Berkshire Hathaway"),
+                                              whale(PERSHING, "Pershing Square Capital"),
+                                              whale(SCION, "Scion Asset Management")])
+    got = await run("thirteen_f", fmp, club=club, sb=sb)
+    assert [r.filer_cik for r in got.records] == [BERKSHIRE, NVIDIA_CIK, PERSHING_FILER]
+    assert fmp.calls["extract"] == 2 * A.MAX_LIVE_13F_BUILDS and SCION not in fmp.dates_ciks
+
+
+@pytest.mark.asyncio
+async def test_a_lead_filer_that_is_also_a_club_filer_is_read_once_as_the_lead(monkeypatch):
+    monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", True)
+    club, sb = club_world(card_over={"slug": "berkshire", "name": "Berkshire Hathaway", "detail_symbol": "BRK-A"},
+                          rows=[{"slug": "berkshire", "ciks": [BERKSHIRE], "card_kind": "thirteen_f",
+                                 "use_13f": True, "detail_symbol": "BRK-A", "published": True}])
+    fmp, reg_sb = registry_world([whale(BERKSHIRE, "Berkshire Hathaway", "BRK-A")])
+    sb.tables["whales"] = reg_sb.tables["whales"]
+    got = await run("thirteen_f", fmp, club=club, sb=sb)
+    assert [r.filer_cik for r in got.records] == [BERKSHIRE]
+    assert club.calls["detail"] == 0 and "filer_unavailable" not in got.rejections
+
+
+@pytest.mark.parametrize("value", ["missing", None, ["ZAA"], "ZAA", 1], ids=["missing", "none", "list", "str", "int"])
+@pytest.mark.asyncio
+async def test_a_build_whose_split_unchecked_is_unreadable_fails_closed(monkeypatch, value):
+    """Fail closed: anything but a set reads as "the cap trimmed something", never as "all checked"."""
+    real = A._build_registry
+
+    async def build(ctx, cik, year, quarter):
+        built, cur, prev = await real(ctx, cik, year, quarter)
+        if value == "missing":       # a dataclass default is also a class attribute: copy without the field
+            built = SimpleNamespace(**{f.name: getattr(built, f.name) for f in dataclasses_fields(built)
+                                       if f.name != "split_unchecked"})
+        else:
+            built.split_unchecked = value
+        return built, cur, prev
+
+    monkeypatch.setattr(A, "_build_registry", build)
+    fmp, sb = registry_world([whale(BERKSHIRE, "Berkshire Hathaway", "BRK-A")])
+    got = await run("thirteen_f", fmp, sb=sb)
+    (rec,) = got.records
+    assert [(m.company.symbol, m.move) for m in rec.moves] == [
+        ("CRWV", "newly_reported"), ("OXY", "no_longer_reported")]
+    assert dict(rec.counts) == {"newly_reported": 1, "no_longer_reported": 1}
+    assert got.rejections == {"split_unchecked": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_lead_filer_that_fills_the_room_leaves_the_club_unread(monkeypatch):
+    monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", True)
+    club, sb, fmp = _club_and_registry_world([whale(BERKSHIRE, "Berkshire Hathaway"),
+                                              whale(SOROS, "Soros Fund Management")])
+    got = await run("thirteen_f", fmp, club=club, sb=sb, limit=1)
+    assert [r.filer_cik for r in got.records] == [BERKSHIRE]
+    assert club.calls == Counter() and fmp.dates_ciks == [BERKSHIRE]
+
+
+# ══ review of 2026-10-16: 13F — every more / fewer row re-checked for a split (F1), a club filer's degraded
+# stored build (F2), F3 closed by F1, the successor's hand-over quarter (live preview F2), a curated-inactive
+# successor never silent (F4) ═════════════════════════════════════════════════════════════════════════════
+#
+# F1: the shared suspect filter only looks up a holding whose per-share price moved 30% or more, so a 3:2 split
+# after a 20% rally, a 5:4 split at a flat price, a 2:1 split after a 60% rally or a 1:2 reverse split after a
+# 40% fall was never looked up and its raw share diff was published as "reported more / fewer shares". Every
+# increased / decreased row is now re-checked through the build's own seam; a split the build did not restate,
+# an unnameable adjustment or a failed lookup drops BOTH kinds and their counts (the counts are stated too).
+# Every new guard mutation-checked.
+
+#: KO's previous-quarter row in `book`: 1,000,000 shares worth $70M ($70 a share).
+_KO_PREV = (1_000_000, 70e6)
+
+
+def _ko_world(q3_shares, q3_value, *, q2=_KO_PREV):
+    """Berkshire's `book` with KO's 2026-Q3 row replaced (``q2`` its 2026-Q2 row): the shapes the shared
+    suspect filter passes or flags, depending on KO's per-share price."""
+    extracts = book(BERKSHIRE)
+    extracts[(BERKSHIRE, 2026, 3)] = [r for r in extracts[(BERKSHIRE, 2026, 3)] if r["symbol"] != "KO"] + [
+        xrow(BERKSHIRE, 3, "KO", "191216100", q3_shares, q3_value)]
+    extracts[(BERKSHIRE, 2026, 2)] = [r for r in extracts[(BERKSHIRE, 2026, 2)] if r["symbol"] != "KO"] + [
+        xrow(BERKSHIRE, 2, "KO", "191216100", q2[0], q2[1])]
+    return registry_world([whale(BERKSHIRE, "Berkshire Hathaway", "BRK-A")], extracts=extracts)
+
+
+#: Held-through splits the shared filter never flags (each KO price ratio inside (1/1.3, 1.3)): the review's
+#: own computed cases, each with its split in the quarter (Aug 14, 2026).
+_UNFLAGGED_SPLITS = {
+    "3to2_rally_20pct": (1_500_000, 1_500_000 * 56.0, (3, 2), "increased"),
+    "5to4_flat": (1_250_000, 70e6, (5, 4), "increased"),
+    "2to1_rally_60pct": (2_000_000, 2_000_000 * 56.0, (2, 1), "increased"),
+    "4to1_rally_210pct": (4_000_000, 4_000_000 * 54.25, (4, 1), "increased"),
+    "1to2_reverse_fall_40pct": (500_000, 500_000 * 84.0, (1, 2), "decreased"),
+}
+
+
+def _more_or_fewer(rec) -> List[str]:
+    return [m.company.symbol for m in rec.moves if m.move in ("increased", "decreased")]
+
+
+@pytest.mark.parametrize("shape", list(_UNFLAGGED_SPLITS))
+@pytest.mark.asyncio
+async def test_a_held_through_split_the_filter_never_flags_is_never_published_as_more_or_fewer_shares(
+        shape, caplog):
+    caplog.set_level(logging.WARNING, logger=A.__name__)
+    shares, value, (num, den), raw_kind = _UNFLAGGED_SPLITS[shape]
+    from app.services.thirteen_f_splits import suspicious_split_tickers
+    fmp, sb = _ko_world(shares, value)
+    cur = [{"symbol": "KO", "shares": shares, "value": value}]
+    assert suspicious_split_tickers(cur, [{"symbol": "KO", "shares": _KO_PREV[0], "value": _KO_PREV[1]}]) == []
+    acts = SplitActions(splits={"KO": [split_row("2026-08-14", num, den)]})
+    got = await run("thirteen_f", fmp, sb=sb, actions=acts)
+    (rec,) = got.records
+    assert [(m.company.symbol, m.move) for m in rec.moves] == [("CRWV", "newly_reported"), ("OXY", "no_longer_reported")]
+    assert dict(rec.counts) == {"newly_reported": 1, "no_longer_reported": 1}          # both counts left out
+    assert got.rejections == {"split_in_window": 2}                                     # AAPL + KO
+    assert "KO:split_not_restated" in caplog.text and "(split_in_window)" in caplog.text
+    text = _compose_text(rec)
+    assert not any(p in text for p in _NO_MORE_OR_FEWER)
+    assert "This post does not show share-count changes" in text    # F13-1's line says why
+    # Control: the same filing with no split anywhere in the seam keeps KO's raw move — the re-check is what drops it.
+    A.clear_memo()
+    fmp, sb = _ko_world(shares, value)
+    got = await run("thirteen_f", fmp, sb=sb)
+    assert ("KO", raw_kind) in [(m.company.symbol, m.move) for m in got.records[0].moves]
+    assert "split_in_window" not in got.rejections
+
+
+@pytest.mark.asyncio
+async def test_every_more_or_fewer_row_is_re_checked_over_its_quarter_and_a_week_after():
+    fmp, sb = registry_world([whale(BERKSHIRE, "Berkshire Hathaway", "BRK-A")])
+    acts = SplitActions()
+    got = await run("thirteen_f", fmp, sb=sb, actions=acts)
+    assert ("AAPL", "increased") in [(m.company.symbol, m.move) for m in got.records[0].moves]
+    assert acts.looked_up == ["AAPL"]                  # the only more / fewer row; never a new or exited one
+    # `window_for_range`: the fetch window starts 10 days before the previous quarter's end, as the build's; since the
+    # re-review of 2026-10-19 (F13-QE-SPLIT) the window and the effective filter run 7 days past the quarter's end
+    # (`A.THIRTEEN_F_SPLIT_RECHECK_SLACK_DAYS`) — no longer the build's own cache key.
+    assert A.THIRTEEN_F_SPLIT_RECHECK_SLACK_DAYS == 7
+    assert acts.windows == [("2026-06-20", "2026-10-07")]
+    assert acts.probed == [("AAPL", "2026-06-30", "2026-10-07")]
+
+
+@pytest.mark.parametrize("day, dropped", [
+    ("2026-06-30", False),          # on the previous quarter's end: already in the previous book's count
+    ("2026-07-01", True),
+    ("2026-09-30", True),           # on the quarter's end: in it
+    # the re-review of 2026-10-19 (F13-QE-SPLIT): a split paid on the quarter's last session is ex-dated the next
+    # business day, and a filer booking on the payable date reports the post-split count — a week past the quarter
+    # is checked too (the build never restates it, so the row is `split_in_window`)
+    ("2026-10-01", True),
+    ("2026-10-07", True),           # the last day of the slack
+    ("2026-10-08", False),          # past it
+], ids=["prev_end", "first_day", "quarter_end", "next_day", "slack_end", "past_slack"])
+@pytest.mark.asyncio
+async def test_only_a_split_inside_the_quarter_or_just_after_it_drops_the_moves(day, dropped):
+    fmp, sb = _ko_world(1_200_000, 84e6)                 # a real 20% purchase at a flat price
+    got = await run("thirteen_f", fmp, sb=sb, actions=SplitActions(splits={"KO": [split_row(day, 2, 1)]}))
+    shown = _more_or_fewer(got.records[0])
+    assert (shown == []) is dropped and ("split_in_window" in got.rejections) is dropped
+
+
+@pytest.mark.parametrize("period_end, end", [
+    (date(2026, 9, 30), "2026-10-07"),                   # a week past the quarter
+    (RUN - timedelta(days=3), RUN.isoformat()),          # never past the run date
+    (RUN, RUN.isoformat()),
+    (RUN + timedelta(days=2), (RUN + timedelta(days=2)).isoformat()),   # (never in production) the quarter at least
+], ids=["week", "run_date_cap", "quarter_end_is_run_date", "never_before_the_quarter_end"])
+@pytest.mark.asyncio
+async def test_the_re_check_window_ends_a_week_after_the_quarter_never_after_the_run(period_end, end):
+    acts = SplitActions()
+    got = await A._split_window_problem(_ctx13f(acts), [_r("increased", "AAA")], counts={"increased": 1, "decreased": 0},
+                                        prev_shares=dict, cik=BERKSHIRE, period="2026-Q3",
+                                        prev_end=period_end - timedelta(days=92), period_end=period_end)
+    assert got is None and acts.windows[0][1] == end and acts.probed[0][2] == end
+
+
+@pytest.mark.parametrize("split_under, dropped", [
+    ("OLDKO", True),        # the split only in the OLD symbol's history (FMP keeps a renamed security's old symbol)
+    ("KO", True),           # under the new one: as before
+    (None, False),          # no split anywhere: a real 2x purchase stays
+], ids=["old_symbol_history", "new_symbol_history", "no_split"])
+@pytest.mark.asyncio
+async def test_a_renamed_holding_is_re_checked_under_its_old_symbol_too(split_under, dropped):
+    """The re-review of 2026-10-19 (F13-RENAME): KO's CUSIP sat under OLDKO on the previous extract (a rename in the
+    quarter — FMP kept SQ beside XYZ). The re-check looked up only the row's CURRENT symbol, and the build's suspect
+    filter never pairs two symbols, so a 2:1 split recorded only in OLDKO's history read as "reported more shares".
+    Every symbol the CUSIP carries on either book is looked up now, and the row is clean only when all answer clean.
+    Mutation-checked by hand (2026-10-19): without the CUSIP's other symbols, the old-history row published KO as
+    increased (red)."""
+    extracts = book(BERKSHIRE)
+    extracts[(BERKSHIRE, 2026, 3)] = [r for r in extracts[(BERKSHIRE, 2026, 3)] if r["symbol"] != "KO"] + [
+        xrow(BERKSHIRE, 3, "KO", "191216100", 2_000_000, 140e6)]
+    extracts[(BERKSHIRE, 2026, 2)] = [r for r in extracts[(BERKSHIRE, 2026, 2)] if r["symbol"] != "KO"] + [
+        xrow(BERKSHIRE, 2, "OLDKO", "191216100", 1_000_000, 140e6)]
+    fmp, sb = registry_world([whale(BERKSHIRE, "Berkshire Hathaway", "BRK-A")], extracts=extracts)
+    acts = SplitActions(splits={split_under: [split_row("2026-08-14", 2, 1)]} if split_under else {})
+    got = await run("thirteen_f", fmp, sb=sb, actions=acts)
+    (rec,) = got.records
+    assert {"KO", "OLDKO"} <= set(acts.looked_up)
+    assert ("KO" not in _more_or_fewer(rec)) is dropped and ("split_in_window" in got.rejections) is dropped
+    if dropped:
+        assert _more_or_fewer(rec) == [] and not any(p in _compose_text(rec) for p in _NO_MORE_OR_FEWER)
+
+
+@pytest.mark.asyncio
+async def test_a_club_holding_renamed_in_the_quarter_is_re_checked_under_its_old_symbol(monkeypatch):
+    """F13-RENAME on the club path: the stored PREVIOUS book carries AAPL's CUSIP under OLDAAPL; the split sits only
+    in OLDAAPL's history — both kinds go. Mutation-checked by hand (2026-10-19): the club call without its CUSIP
+    symbols kept AAPL as increased (red)."""
+    monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", True)
+    old_aapl = {"cusip": club_cusip("AAPL"), "symbol": "OLDAAPL", "shares": 1_000.0, "value": 2.5e5}
+    club, sb, acts = _club_with(acts=SplitActions(splits={"OLDAAPL": [split_row("2026-08-14", 2, 1)]}),
+                                previous=[{"symbol": "RXRX", "value": 35e6}, old_aapl])
+    got = await run("thirteen_f", FakeFMP(profiles=thirteen_f_profiles()), club=club, sb=sb, actions=acts)
+    (rec,) = got.records
+    assert "OLDAAPL" in acts.looked_up and _more_or_fewer(rec) == []
+    assert got.rejections["split_in_window"] == 2
+
+
+def test_symbols_by_cusip_reads_every_book_and_skips_what_is_no_share_position():
+    raw_prev = [{"securityCusip": "191216100", "symbol": "oldko "}, {"securityCusip": "191216100", "symbol": "--"},
+                {"securityCusip": "037833100", "symbol": "AAPL", "putCallShare": "Call"},
+                {"securityCusip": None, "symbol": "XYZ"}, "junk"]
+    raw_cur = [{"securityCusip": "191216100", "symbol": "KO"}, {"securityCusip": "037833100", "symbol": "AAPL"}]
+    assert A._symbols_by_cusip(raw_cur, raw_prev, cusip_key="securityCusip") == {
+        "191216100": {"KO", "OLDKO"}, "037833100": {"AAPL"}}
+    assert A._symbols_by_cusip(None, "x", cusip_key="cusip") == {}
+
+
+@pytest.mark.parametrize("q3_shares, num", [(10_000_000, 10), (2_000_000, 2)], ids=["10to1", "2to1"])
+@pytest.mark.asyncio
+async def test_a_post_split_count_booked_before_the_ex_date_is_never_more_shares(q3_shares, num):
+    """F13-QE-SPLIT (the review's reproduction): KO's 13F already holds the post-split count (a filer that booked
+    the shares on the payable date, Sep 30), while the split is ex-dated Oct 1 — outside the quarter the build and
+    its suspect lookup read, so the raw multiple was published "reported more shares of Coca-Cola" (10x, no trade).
+    The re-check's week of slack finds it: both kinds dropped, nothing about more or fewer shares composed.
+    Mutation-checked by hand (2026-10-19): with the slack back to 0 days KO was published as increased (red)."""
+    fmp, sb = _ko_world(q3_shares, 70e6)                  # the same $70M position: the count is the split's
+    got = await run("thirteen_f", fmp, sb=sb, actions=SplitActions(splits={"KO": [split_row("2026-10-01", num, 1)]}))
+    (rec,) = got.records
+    assert _more_or_fewer(rec) == [] and got.rejections["split_in_window"] == 2          # AAPL + KO
+    assert not any(p in _compose_text(rec) for p in _NO_MORE_OR_FEWER)
+    # control: dated in the quarter, the build itself restates it (the suspect lookup) and KO is no move at all
+    A.clear_memo()
+    fmp, sb = _ko_world(q3_shares, 70e6)
+    got = await run("thirteen_f", fmp, sb=sb, actions=SplitActions(splits={"KO": [split_row("2026-09-30", num, 1)]}))
+    assert "KO" not in [m.company.symbol for m in got.records[0].moves]
+
+
+@pytest.mark.asyncio
+async def test_a_split_the_build_restated_stays_and_one_it_did_not_restate_goes():
+    """The re-check also covers the build's own suspects: a 2:1 split with a 10% purchase is restated by the build
+    (1M → 2M previous shares, +10%) and stays; a 3:2 split with a 25% SALE is looked up by the build too, but
+    `restate_prev_shares_for_split` keeps the raw diff for it (the count did not move toward the split), which
+    reads as "more shares" — the re-check refuses it (`split_not_restated`)."""
+    split = SplitActions(splits={"KO": [split_row("2026-08-14", 2, 1)]})
+    fmp, sb = _ko_world(2_200_000, 2_200_000 * 38.5)
+    got = await run("thirteen_f", fmp, sb=sb, actions=split)
+    ko = next(m for m in got.records[0].moves if m.company.symbol == "KO")
+    assert (ko.move, ko.shares, ko.prev_shares) == ("increased", 2_200_000.0, 2_000_000.0)   # restated
+    assert "split_in_window" not in got.rejections and split.looked_up.count("KO") == 2      # build + re-check
+
+    A.clear_memo()
+    fmp, sb = _ko_world(1_125_000, 1_125_000 * 60.0, q2=(1_000_000, 90e6))
+    got = await run("thirteen_f", fmp, sb=sb, actions=SplitActions(splits={"KO": [split_row("2026-08-14", 3, 2)]}))
+    assert _more_or_fewer(got.records[0]) == [] and got.rejections == {"split_in_window": 2}
+
+
+@pytest.mark.parametrize("acts, why", [
+    (SplitActions(unclassified={"KO"}), "KO:adjustment"),
+    (SplitActions(fail={"KO"}), "KO:lookup_failed"),
+    (SplitActions(boom={"KO"}), "KO:lookup_failed"),
+], ids=["unnameable_adjustment", "lookup_could_not_derive", "lookup_raised"])
+@pytest.mark.asyncio
+async def test_an_adjustment_or_a_failed_lookup_fails_closed(acts, why, caplog):
+    caplog.set_level(logging.WARNING)
+    fmp, sb = _ko_world(1_200_000, 84e6)
+    got = await run("thirteen_f", fmp, sb=sb, actions=acts)
+    (rec,) = got.records
+    assert _more_or_fewer(rec) == [] and dict(rec.counts) == {"newly_reported": 1, "no_longer_reported": 1}
+    assert got.rejections == {"split_in_window": 2} and why in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_more_or_fewer_row_with_no_symbol_cannot_be_re_checked():
+    """A CUSIP no lookup resolves (digit-first, the ISIN search answers nothing) is a symbol-less row in both
+    quarters: its share change is counted, never re-checkable — both kinds go, with no lookup spent."""
+    extracts = book(BERKSHIRE)
+    extracts[(BERKSHIRE, 2026, 3)].append(xrow(BERKSHIRE, 3, "", "88160R101", 150_000, 9e6))
+    extracts[(BERKSHIRE, 2026, 2)].append(xrow(BERKSHIRE, 2, "", "88160R101", 100_000, 6e6))
+    fmp, sb = registry_world([whale(BERKSHIRE, "Berkshire Hathaway", "BRK-A")], extracts=extracts)
+    acts = SplitActions()
+    got = await run("thirteen_f", fmp, sb=sb, actions=acts)
+    (rec,) = got.records
+    assert _more_or_fewer(rec) == [] and got.rejections == {"split_unchecked": 2}
+    assert acts.looked_up == []
+
+
+@pytest.mark.asyncio
+async def test_more_rows_than_the_re_check_cap_show_no_more_or_fewer_shares(monkeypatch):
+    fmp, sb = _ko_world(1_200_000, 84e6)                 # AAPL and KO: two more / fewer symbols
+    monkeypatch.setattr(A, "THIRTEEN_F_MAX_SPLIT_CHECKS", 1)
+    acts = SplitActions()
+    got = await run("thirteen_f", fmp, sb=sb, actions=acts)
+    assert _more_or_fewer(got.records[0]) == [] and got.rejections == {"split_unchecked": 2}
+    assert acts.looked_up == []
+    A.clear_memo()
+    monkeypatch.setattr(A, "THIRTEEN_F_MAX_SPLIT_CHECKS", 2)                      # at the cap: checked, kept
+    got = await run("thirteen_f", fmp, sb=sb)
+    assert sorted(_more_or_fewer(got.records[0])) == ["AAPL", "KO"]
+
+
+def _ctx13f(acts=None):
+    return A._Ctx("thirteen_f", RUN, frozenset(), 5, time.monotonic() + 60.0,
+                  A.NewsDeps(actions=acts if acts is not None else SplitActions()))
+
+
+def _r(move, sym, prev=100.0, cusip=None):
+    return {"move": move, "symbol": sym, "cusip": cusip or club_cusip(sym), "prev_shares": prev}
+
+
+@pytest.mark.parametrize("rows, counts, expected, looked_up", [
+    ([_r("increased", "aaa ")], {"increased": 1, "decreased": 0}, None, ["AAA"]),      # as the cache keys it
+    ([], {"increased": 0, "decreased": 0}, None, []),
+    ([_r("increased", "AAA")], {"increased": 2, "decreased": 0}, "split_unchecked", []),   # a counted row unlisted
+    ([_r("increased", "AAA")], {"increased": 0, "decreased": 0}, "split_unchecked", []),   # a listed row uncounted
+    ([_r("decreased", "AAA")], {"increased": 0}, None, []),                    # junk count: record_invalid follows
+    ([_r("decreased", "AAA")], {"increased": 0, "decreased": True}, None, []),
+    ([_r("decreased", "AAA")], {"increased": 0, "decreased": -1}, None, []),
+    ([_r("decreased", "AAA")], None, None, []),
+    ([_r("increased", None)], {"increased": 1, "decreased": 0}, "split_unchecked", []),
+    ([_r("increased", "--")], {"increased": 1, "decreased": 0}, "split_unchecked", []),
+    ([_r("increased", 7)], {"increased": 1, "decreased": 0}, "split_unchecked", []),
+    ([_r("newly_reported", None), _r("increased", "AAA")], {"increased": 1, "decreased": 0}, None, ["AAA"]),
+    ([_r("increased", "AAA"), _r("decreased", "AAA")], {"increased": 1, "decreased": 1}, None, ["AAA"]),
+], ids=["checked", "nothing", "count_unlisted", "row_uncounted", "count_missing", "count_bool", "count_negative",
+        "counts_junk", "no_symbol", "placeholder_symbol", "symbol_not_text", "new_row_needs_no_symbol",
+        "one_lookup_per_symbol"])
+@pytest.mark.asyncio
+async def test_the_re_check_reads_exactly_the_rows_its_counts_count(rows, counts, expected, looked_up):
+    acts = SplitActions()
+    got = await A._split_window_problem(_ctx13f(acts), rows, counts=counts, prev_shares=dict, cik=BERKSHIRE,
+                                        period="2026-Q3", prev_end=date(2026, 6, 30), period_end=date(2026, 9, 30))
+    assert (got[0] if got else None) == expected
+    assert acts.looked_up == looked_up                   # no lookup is spent on a refusal or a junk count
+
+
+@pytest.mark.parametrize("window, prev, book, expected", [
+    (None, 100.0, 100.0, "lookup_failed"),
+    ("none_none", 100.0, 100.0, "lookup_failed"),
+    ("clean_none", 100.0, 100.0, "lookup_failed"),          # the probe failed
+    ("clean_int1", 100.0, 100.0, "lookup_failed"),          # a probe answer that is not a bool
+    ("nan", 100.0, 100.0, "lookup_failed"),
+    ("zero", 100.0, 100.0, "lookup_failed"),
+    ("bool_ratio", 100.0, 100.0, "lookup_failed"),
+    ("adjustment", 100.0, 100.0, "adjustment"),
+    ("clean", 100.0, None, None),                           # no split: nothing to restate
+    ("int_one", 100.0, None, None),
+    ("split2", 200.0, 100.0, None),                         # restated by the build
+    ("split2", 200.4, 100.0, None),                         # within half a share
+    ("split2", 201.0, 100.0, "split_not_restated"),
+    ("split2", 100.0, 100.0, "split_not_restated"),         # the raw count stands
+    ("split2", 200.0, None, "split_not_restated"),          # its CUSIP is not on the previous book once
+    ("split2", None, 100.0, "split_not_restated"),
+    ("split_and_adjustment", 200.0, 100.0, "adjustment"),
+])
+def test_split_window_taint(window, prev, book, expected):
+    from app.services.thirteen_f_splits import SplitWindow
+    w = {None: None, "none_none": SplitWindow(None, None), "clean_none": SplitWindow(1.0, None),
+         "clean_int1": SplitWindow(1.0, 1), "nan": SplitWindow(float("nan"), False), "zero": SplitWindow(0.0, False),
+         "bool_ratio": SplitWindow(True, False), "adjustment": SplitWindow(1.0, True), "clean": SplitWindow(1.0, False),
+         "int_one": SplitWindow(1, False), "split2": SplitWindow(2.0, False),
+         "split_and_adjustment": SplitWindow(2.0, True)}[window]
+    row = {"cusip": "191216100", "prev_shares": prev}
+    books = {} if book is None else {"191216100": book}
+    assert A._split_window_taint(w, row, books) == expected
+
+
+@pytest.mark.parametrize("splits, built", [({}, 0), ({"BBB": [split_row("2026-08-14", 2, 1)]}, 1)],
+                         ids=["no_split", "split"])
+@pytest.mark.asyncio
+async def test_the_previous_book_is_built_only_when_a_split_is_found(splits, built):
+    """The registry path normalises the previous extract for the restatement proof — only when a split IS found
+    in the quarter (never twice, and never on the common no-split path)."""
+    calls = []
+    rows = [_r("increased", "AAA", prev=200.0, cusip="037833100"), _r("decreased", "BBB", prev=200.0,
+                                                                       cusip="191216100")]
+    got = await A._split_window_problem(
+        _ctx13f(SplitActions(splits=splits)), rows, counts={"increased": 1, "decreased": 1},
+        prev_shares=lambda: calls.append(1) or {"191216100": 100.0}, cik=BERKSHIRE, period="2026-Q3",
+        prev_end=date(2026, 6, 30), period_end=date(2026, 9, 30))
+    assert got is None and len(calls) == built          # BBB's 2:1 split restated: 100 x 2 is its 200
+
+
+def test_a_cusip_on_two_rows_of_the_previous_book_proves_no_restatement():
+    rows = [{"cusip": "191216100", "shares": 100.0}, {"cusip": "191216100 ", "shares": 50.0},
+            {"cusip": "037833100", "shares": 7.0}, {"cusip": "bad", "shares": 1.0}, {"cusip": "594918104", "shares": 0},
+            "junk", {"cusip": "023135106", "shares": float("inf")}]
+    assert A._shares_by_cusip(rows) == {"037833100": 7.0}
+    assert A._shares_by_cusip(None) == {} and A._shares_by_cusip("rows") == {}
+
+
+# ── F1 and F2 on the club path: the STORED change rows, the stored build status ──
+
+
+def _club_with(stored_edit=None, *, acts=None, previous=None, company_over=None, changes=None):
+    club, sb = club_world(company_over=company_over, changes=changes)
+    filings = sb.tables["trillion_club_filings"]
+    if previous is not None:
+        filings[0]["holdings"] = previous
+    if stored_edit is not None:
+        stored_edit(filings[1])
+    return club, sb, acts if acts is not None else SplitActions()
+
+
+_CLUB_SPLIT_DROPPED = ([("CRWV", "newly_reported"), ("RXRX", "no_longer_reported")],
+                       {"newly_reported": 3, "no_longer_reported": 1})
+
+
+@pytest.mark.parametrize("status", ["degraded", None, "", "COMPLETE", 7], ids=["degraded", "none", "blank", "case", "int"])
+@pytest.mark.asyncio
+async def test_a_club_filers_degraded_stored_build_is_refused_whole(monkeypatch, caplog, status):
+    """F2 and the owner-delegated decision of 2026-10-19: a club build whose stored status is not exactly "complete"
+    refuses the WHOLE filer (`degraded_build`, once) — parity with the registry path's refusal. The row keeps no
+    reason: a failed symbol lookup can split a CUSIP re-key into an exit plus an entry (a false "newly reported"),
+    a failed split lookup arms only the 50% backstop, and a profiles_missing / unresolved_pending build is refused
+    the same way (fail closed). Before any lookup, profile or previous-book read. Mutation-checked by hand
+    (2026-10-19): with the F2 drop of the more / fewer kinds only, CRWV and RXRX were published (red)."""
+    monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", True)
+    caplog.set_level(logging.WARNING, logger=A.__name__)
+    club, sb, acts = _club_with(lambda row: row.update(build_status=status))
+    fmp = FakeFMP(profiles=thirteen_f_profiles())
+    got = await run("thirteen_f", fmp, club=club, sb=sb, actions=acts)
+    assert got.records == () and got.rejections == {"degraded_build": 1}
+    assert got.skip_reason == "thirteen_f_none_qualified"
+    assert acts.looked_up == [] and fmp.calls["profiles"] == 0 and "not complete" in caplog.text
+    assert "filer refused, no move shown (degraded_build)" in caplog.text
+    assert sb.calls["trillion_club_filings"] == 1                     # the current row only: no previous book read
+
+
+@pytest.mark.asyncio
+async def test_a_club_filers_complete_stored_build_is_re_checked_and_kept(monkeypatch):
+    monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", True)
+    club, sb, acts = _club_with()
+    got = await run("thirteen_f", FakeFMP(profiles=thirteen_f_profiles()), club=club, sb=sb, actions=acts)
+    assert ("AAPL", "increased") in [(m.company.symbol, m.move) for m in got.records[0].moves]
+    assert sorted(acts.looked_up) == ["AAPL", "SOUN"]        # every more / fewer row, shown or not (SOUN is small)
+
+
+@pytest.mark.asyncio
+async def test_a_club_split_the_build_did_not_restate_drops_both_kinds(monkeypatch, caplog):
+    monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", True)
+    caplog.set_level(logging.WARNING, logger=A.__name__)
+    club, sb, acts = _club_with(acts=SplitActions(splits={"AAPL": [split_row("2026-08-14", 2, 1)]}))
+    got = await run("thirteen_f", FakeFMP(profiles=thirteen_f_profiles()), club=club, sb=sb, actions=acts)
+    (rec,) = got.records
+    assert ([(m.company.symbol, m.move) for m in rec.moves], dict(rec.counts)) == _CLUB_SPLIT_DROPPED
+    assert got.rejections == {"etf_or_fund": 1, "move_not_routable": 1, "split_in_window": 2}
+    assert "AAPL:split_not_restated" in caplog.text
+    # Restated by the build — AAPL's stored previous count 500 times the 2:1 split is the row's 1,000 — it stays.
+    A.clear_memo()
+    aapl = {"cusip": club_cusip("AAPL"), "symbol": "AAPL", "shares": 500.0, "value": 1e5}
+    club, sb, acts = _club_with(acts=SplitActions(splits={"AAPL": [split_row("2026-08-14", 2, 1)]}),
+                                previous=[{"symbol": "RXRX", "value": 35e6}, aapl])
+    got = await run("thirteen_f", FakeFMP(profiles=thirteen_f_profiles()), club=club, sb=sb, actions=acts)
+    assert ("AAPL", "increased") in [(m.company.symbol, m.move) for m in got.records[0].moves]
+    assert "split_in_window" not in got.rejections
+
+
+@pytest.mark.asyncio
+async def test_a_club_row_with_no_routable_symbol_is_re_checked_under_its_filed_symbol(monkeypatch):
+    """The detail's change rows carry ROUTABLE symbols only: a more / fewer row of a holding that does not route
+    (shown nowhere, but counted) is read from the stored row, under the symbol its 13F filed."""
+    monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", True)
+
+    def unroutable_soun(row):
+        detail_row = next(r for r in row["changes"]["rows"] if r["symbol"] == "SOUN")
+        detail_row["symbol"] = "SOUNF"                         # the filed symbol; the detail says None
+
+    club, sb, acts = _club_with(unroutable_soun, acts=SplitActions(splits={"SOUNF": [split_row("2026-07-02", 1, 5)]}))
+    next(ch for ch in club.details["nvidia"].changes if ch.symbol == "SOUN").symbol = None
+    got = await run("thirteen_f", FakeFMP(profiles=thirteen_f_profiles()), club=club, sb=sb, actions=acts)
+    assert _more_or_fewer(got.records[0]) == [] and got.rejections["split_in_window"] == 2     # AAPL dropped too
+    assert "SOUNF" in acts.looked_up
+
+
+@pytest.mark.parametrize("edit, why", [
+    (lambda row: row["changes"]["counts"].update(increased=2), "not the detail's"),
+    (lambda row: row["changes"]["counts"].update(increased=True), "not the detail's"),     # True == 1: refused
+    (lambda row: row["changes"]["counts"].update(decreased=1.0), "not the detail's"),
+    (lambda row: row["changes"].update(counts=None), "not the detail's"),
+    (lambda row: row["changes"].update(rows="junk"), "unreadable"),
+    (lambda row: row["changes"].update(comparison="gap"), "unreadable"),
+    (lambda row: row.update(changes="not json"), "unreadable"),
+    (lambda row: row["changes"].update(rows=[r for r in row["changes"]["rows"] if r["symbol"] != "SOUN"]),
+     "are not what its counts count"),                     # a counted decrease the stored rows do not list
+], ids=["counts_differ", "count_bool", "count_float", "counts_missing", "rows_junk", "not_a_comparison",
+        "changes_garbage", "rows_short"])
+@pytest.mark.asyncio
+async def test_a_club_stored_row_that_cannot_vouch_for_the_counts_fails_closed(monkeypatch, caplog, edit, why):
+    monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", True)
+    caplog.set_level(logging.WARNING, logger=A.__name__)
+    club, sb, acts = _club_with(edit)
+    got = await run("thirteen_f", FakeFMP(profiles=thirteen_f_profiles()), club=club, sb=sb, actions=acts)
+    assert ([(m.company.symbol, m.move) for m in got.records[0].moves], dict(got.records[0].counts)) == _CLUB_SPLIT_DROPPED
+    assert got.rejections["split_unchecked"] == 2 and why in caplog.text and acts.looked_up == []
+
+
+@pytest.mark.parametrize("status, kept", [("complete", True), ("degraded", False)])
+@pytest.mark.asyncio
+async def test_a_club_filing_without_a_more_or_fewer_row_still_needs_a_complete_build(monkeypatch, status, kept):
+    """The owner-delegated decision of 2026-10-19: the build status vouches for EVERY move, not only the more / fewer
+    kinds — a degraded build with only newly reported and exited moves is refused whole too (those are exactly the
+    moves a failed symbol lookup can fake). Its current row is read for every club filing with a move."""
+    monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", True)
+    ch = [SimpleNamespace(symbol="CRWV", name="CoreWeave", change="newly_reported", shares=1_000_000.0,
+                          prev_shares=None, value=150e6, newly_listed=True),
+          SimpleNamespace(symbol="RXRX", name="Recursion", change="no_longer_reported", shares=None,
+                          prev_shares=7_000_000.0, value=None, newly_listed=False)]
+    counts = SimpleNamespace(newly_reported=1, increased=0, decreased=0, no_longer_reported=1)
+    club, sb = club_world(changes=ch, company_over={"change_counts": counts})
+    sb.tables["trillion_club_filings"][1]["build_status"] = status
+    got = await run("thirteen_f", FakeFMP(profiles=thirteen_f_profiles()), club=club, sb=sb)
+    if kept:
+        assert [m.company.symbol for m in got.records[0].moves] == ["CRWV", "RXRX"]
+        assert sb.calls["trillion_club_filings"] == 2 and got.rejections == {}     # current row + previous book
+    else:
+        assert got.records == () and got.rejections == {"degraded_build": 1}
+        assert sb.calls["trillion_club_filings"] == 1
+
+
+@pytest.mark.parametrize("error", [None, RuntimeError("supabase down")], ids=["row_missing", "read_fails"])
+@pytest.mark.asyncio
+async def test_a_club_filer_whose_current_build_cannot_be_read_is_refused(monkeypatch, caplog, error):
+    """The owner-delegated decision of 2026-10-19: a stored current row that is missing or unreadable cannot show
+    the build is complete, so the filer is refused (`filer_unavailable`, a WARNING), as for a missing previous book
+    — never published with its status unknown (before, only the more / fewer kinds were dropped)."""
+    monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", True)
+    caplog.set_level(logging.WARNING, logger=A.__name__)
+    club, sb = club_world()
+    sb.tables["trillion_club_filings"] = sb.tables["trillion_club_filings"][:1]      # the previous book only
+    if error is not None:
+        sb.errors["trillion_club_filings"] = error
+    fmp = FakeFMP(profiles=thirteen_f_profiles())
+    got = await run("thirteen_f", fmp, club=club, sb=sb)
+    assert got.records == () and got.rejections == {"filer_unavailable": 1}
+    assert "filer refused, no move shown" in caplog.text and fmp.calls["profiles"] == 0
+
+
+@pytest.mark.asyncio
+async def test_f3_a_capped_suspect_the_stored_books_miss_is_still_looked_up(monkeypatch):
+    """F3 (closed by F1): the stored re-derivation of the split cap reads the STORED previous book, which can lag
+    the live one the build used (a 13F-HR/A re-hashed weekly) — here it says nothing was trimmed, while ZBJ's raw
+    +50% share diff was never checked by the build. ZBJ is a more / fewer row, so the re-check looks it up itself;
+    its split in the quarter was not restated (no previous-book entry proves it) → both kinds go."""
+    monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", True)
+    cur, prev = _club_split_books(25)
+    assert A._builder.stored_split_unchecked(cur, prev) == frozenset()       # the re-derivation sees no cap
+    zbj = SimpleNamespace(symbol="ZBJ", name="Zbj Robotics", change="increased", shares=150_000.0,
+                          prev_shares=100_000.0, value=10e6, newly_listed=False)
+    club, sb = club_world(company_over={"position_count": 30, "change_counts": SimpleNamespace(
+        newly_reported=3, increased=2, decreased=1, no_longer_reported=1, unchanged=3, corporate_action=1)})
+    detail = club.details["nvidia"]
+    detail.changes.append(zbj)
+    sb.tables["trillion_club_filings"] = [
+        {"cik": NVIDIA_CIK, "period": "2026-Q2", "holdings": prev},
+        stored_current(NVIDIA_CIK, "2026-Q3", detail.changes, detail.company.change_counts, holdings=cur)]
+    acts = SplitActions(splits={"ZBJ": [split_row("2026-08-14", 3, 2)]})
+    got = await run("thirteen_f", FakeFMP(profiles=thirteen_f_profiles()), club=club, sb=sb, actions=acts)
+    assert _more_or_fewer(got.records[0]) == [] and got.rejections["split_in_window"] == 3     # AAPL, SOUN, ZBJ
+    assert "ZBJ" in acts.looked_up
+
+
+# ── live preview F2: the successor's hand-over quarter, with the real shapes (FMP extracts read 2026-10-16) ──
+
+#: PERSHING SQUARE INC.'s 2026-Q1 book: Howard Hughes alone (its own holding before the hand-over).
+_PSI_Q1 = [("HHH", "44267T102", 9_000_000, 9_000_000 * 70.0)]
+#: Its 2026-Q2 book, the first full one: 14 positions (Howard Hughes 18,852,064 + 9,000,000 consolidated).
+_PSI_Q2 = [("BN", "11271J107", 57_480_000), ("UBER", "90353T100", 34_330_000), ("HHH", "44267T102", 27_852_064),
+           ("QSR", "76131D103", 25_820_000), ("HTZ", "42806J700", 15_241_127), ("NFLX", "64110L106", 1_200_000),
+           ("AMZN", "023135106", 11_451_981), ("MSFT", "594918104", 5_654_078), ("SEG", "812215200", 5_023_780),
+           ("PSUS", "71531C108", 4_000_000), ("V", "92826C839", 3_000_000), ("META", "30303M102", 2_660_861),
+           ("SPGI", "78409V104", 1_500_000), ("MA", "57636Q104", 1_400_000)]
+#: The OLD CIK's 2026-Q1 book (eleven positions) — never read: the predecessor is not the filer the post names.
+_PSCM_Q1 = [("BN", "11271J107", 59_697_208), ("UBER", "90353T100", 29_958_771), ("QSR", "76131D103", 22_645_483),
+            ("HHH", "44267T102", 18_852_064), ("HTZ", "42806J700", 15_241_127), ("AMZN", "023135106", 11_451_981),
+            ("MSFT", "594918104", 5_654_078), ("SEG", "812215200", 5_023_780), ("META", "30303M102", 2_660_861),
+            ("GOOG", "02079K107", 3_000_000), ("GOOGL", "02079K305", 3_000_000)]
+
+
+def _pershing_handover_world():
+    q2 = [xrow(PERSHING_FILER, 2, s, c, n, n * 70.0) for s, c, n in _PSI_Q2]
+    q1 = [xrow(PERSHING_FILER, 1, s, c, n, v) for s, c, n, v in _PSI_Q1]
+    old = [xrow(PERSHING, 1, s, c, n, n * 70.0) for s, c, n in _PSCM_Q1]
+    dates_q2 = [{"year": 2026, "quarter": 2, "date": "2026-06-30"}, {"year": 2026, "quarter": 1, "date": "2026-03-31"}]
+    fmp, sb = registry_world(
+        [whale(PERSHING, "Pershing Square Capital")],
+        extracts={(PERSHING_FILER, 2026, 2): q2, (PERSHING_FILER, 2026, 1): q1, (PERSHING, 2026, 1): old},
+        dates={PERSHING_FILER: dates_q2, PERSHING: [{"year": 2026, "quarter": 1, "date": "2026-03-31"}]})
+    fmp.profiles.update({s: prof(s, f"{s} Holdings Inc.", exchange="NYSE") for s, _c, _n in _PSI_Q2 + _PSCM_Q1})
+    return fmp, sb
+
+
+@pytest.mark.asyncio
+async def test_the_successors_hand_over_quarter_is_never_compared(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger=A.__name__)
+    fmp, sb = _pershing_handover_world()
+    got = await run("thirteen_f", fmp, sb=sb, run_date=date(2026, 8, 18))          # 13F season: 2026-Q2
+    assert got.records == () and got.rejections == {"successor_transition": 1}
+    assert fmp.calls == Counter()                                                  # refused before any FMP call
+    assert "hand-over quarter (first full book 2026-Q2)" in caplog.text
+    # Anti-vacuity: let the hand-over through and the same world composes the false post the preview found.
+    A.clear_memo()
+    monkeypatch.setitem(R.THIRTEEN_F_SUCCESSOR_SINCE, PERSHING, "2026-Q1")
+    got = await run("thirteen_f", fmp, sb=sb, run_date=date(2026, 8, 18))
+    (rec,) = got.records
+    assert dict(rec.counts)["newly_reported"] == 13 and ("HHH", "increased") in [
+        (m.company.symbol, m.move) for m in rec.moves]
+    assert PERSHING not in fmp.dates_ciks and all(k[0] == PERSHING_FILER for k in fmp.extract_keys)
+
+
+@pytest.mark.asyncio
+async def test_the_quarter_after_the_hand_over_compares_two_full_books():
+    fmp, sb = registry_world([whale(PERSHING, "Pershing Square Capital")])       # 2026-Q3 against 2026-Q2
+    got = await run("thirteen_f", fmp, sb=sb)
+    assert [r.filer_cik for r in got.records] == [PERSHING_FILER] and "successor_transition" not in got.rejections
+
+
+@pytest.mark.asyncio
+async def test_a_successor_with_no_first_full_book_is_refused_every_quarter(monkeypatch):
+    monkeypatch.delitem(R.THIRTEEN_F_SUCCESSOR_SINCE, PERSHING)
+    fmp, sb = registry_world([whale(PERSHING, "Pershing Square Capital")])
+    got = await run("thirteen_f", fmp, sb=sb)
+    assert got.records == () and got.rejections == {"successor_transition": 1} and fmp.calls == Counter()
+
+
+@pytest.mark.parametrize("status, warned", [("inactive", True), ("dormant", True), ("", False)])
+@pytest.mark.asyncio
+async def test_a_curated_inactive_successor_is_skipped_loudly_never_silently(caplog, status, warned):
+    """F4: the old CIK stops filing once a successor files its holdings — exactly when the registry sync suggests
+    a status. The row is still skipped (the owner's curation rules), but with a WARNING naming both CIKs."""
+    caplog.set_level(logging.WARNING, logger=A.__name__)
+    fmp, sb = registry_world([whale(PERSHING, "Pershing Square Capital", lifecycle_status=status),
+                              whale(SCION, "Scion Asset Management", lifecycle_status="inactive")])
+    got = await run("thirteen_f", fmp, sb=sb)
+    msgs = [r.getMessage() for r in caplog.records if "is curated" in r.getMessage()]
+    assert len(msgs) == (1 if warned else 0)                                        # Scion: no successor, no noise
+    if warned:
+        assert PERSHING in msgs[0] and PERSHING_FILER in msgs[0] and got.records == ()
+
+
+# ══ review of 2026-10-16: earnings — one record per issuer, the printed surprise, the statement reads, the EPS
+# basis; Form 4 — the members-elect window over a run's publishing days ══════════════════════════════════════
+#
+# ER-3 / live preview F3: earnings keyed reports by SYMBOL — two listings of one company (GOOG / GOOGL) were two
+# records under two ledger keys, and a NASDAQ preferred line FMP profiles under the issuer's plain name (WAFDP as
+# "WaFd") passed the gate with its own calendar row (0.76 against the common's 0.85). ER-2: a failed statement
+# read was counted `non_usd_reporter`, so an FMP outage read as "nothing qualified". Live preview F1: Prologis'
+# $1.60 Core-FFO-scale actual beside a $0.78 GAAP-scale estimate (GAAP $0.86) composed a false post. ME-1: the
+# members-elect window was read on the run date only, while a run's posts can go out two days later.
+
+
+def _listing(sym, name, *, cap, cik, exchange="NASDAQ", **kw):
+    return prof(sym, name, exchange=exchange, cap=cap, cik=cik, **kw)
+
+
+def _alphabet_world(goog=(2.87, 2.60), googl=(2.87, 2.60), *, extra_rows=(), extra_profiles=None):
+    rows = [erow("GOOG", "2027-01-12", *goog, 96.4e9, 95.0e9), erow("GOOGL", "2027-01-12", *googl, 96.4e9, 95.0e9),
+            *extra_rows]
+    profiles = {"GOOG": _listing("GOOG", "Alphabet Inc.", cap=3.0e12, cik="0001652044"),
+                "GOOGL": _listing("GOOGL", "Alphabet Inc.", cap=3.0e12, cik="0001652044"), **(extra_profiles or {})}
+    return FakeFMP2b(calendar={"2027-01-12": rows}, profiles=profiles)
+
+
+@pytest.mark.asyncio
+async def test_two_listings_of_one_company_are_one_record():
+    """GOOG and GOOGL with one report: ONE record (the root GOOG), the twin dropped before any profile and counted
+    `share_class_overlap` — never two posts of one report under two ledger keys. Two listings that report
+    DIFFERENT figures refuse the company: which one is the report is a guess. Mutation-checked by hand
+    (2026-10-16): without `_drop_twin_lines` both listings were records (the ER-3 probe's shape)."""
+    fmp = _alphabet_world()
+    got = await erun(fmp)
+    assert [r.company.symbol for r in got.records] == ["GOOG"]
+    assert got.rejections == {"share_class_overlap": 1}
+    assert "GOOGL" not in [s for b in fmp.profile_requests for s in b] and fmp.statement_calls == [("GOOG", 4)]
+    A.clear_memo()
+    got = await erun(_alphabet_world(googl=(2.95, 2.60)))
+    assert got.records == () and got.rejections == {"record_invalid": 1, "share_class_overlap": 1}
+    assert got.skip_reason == "earnings_none_qualified"
+
+
+@pytest.mark.parametrize("posted", ["news:earnings:GOOG:2027-01-12", "news:earnings:GOOGL:2027-01-12",
+                                    "news:earnings:GOOG:2027-01-08"])
+@pytest.mark.asyncio
+async def test_a_posted_listing_makes_its_twin_already_posted(posted):
+    """One report, one post: with either listing's key posted in this window (any day of it), the other listing is
+    `already_posted` — the Wed/Thu/Fri earnings days of Batch 3 would otherwise post Alphabet twice."""
+    got = await erun(_alphabet_world(), exclude={posted})
+    assert got.records == () and got.rejections == {"already_posted": 2}
+
+
+def _class_world(rows, profiles):
+    return FakeFMP2b(calendar={"2027-01-12": rows}, profiles=profiles)
+
+
+@pytest.mark.asyncio
+async def test_class_shares_are_one_issuer_after_the_profiles():
+    """Class letters (A / B / C / J / K) and dash classes are never twins of a root: both listings are profiled,
+    and the issuer — the profile CIK, else the display name — keeps ONE: the shortest symbol, then the first
+    (never the larger FMP market cap). Listings whose figures differ refuse the issuer; unrelated companies are
+    untouched. Mutation-checked by hand (2026-10-16): without `_one_listing_per_issuer` LBRDA and LBRDK were
+    two records."""
+    rows = [erow("LBRDA", "2027-01-12", 1.60, 1.40, 1.05e9, 1.0e9), erow("LBRDK", "2027-01-12", 1.60, 1.40, 1.05e9, 1.0e9),
+            erow("GS", "2027-01-12", 17.01, 12.86, 18.7e9, 16.8e9)]
+    profiles = {"LBRDA": _listing("LBRDA", "Liberty Broadband Corporation", cap=9e9, cik="0001611983"),
+                "LBRDK": _listing("LBRDK", "Liberty Broadband Corporation", cap=11e9, cik="0001611983"),
+                "GS": _listing("GS", "The Goldman Sachs Group, Inc.", exchange="NYSE", cap=150e9, cik="0000886982")}
+    fmp = _class_world(rows, profiles)
+    got = await erun(fmp)
+    assert [r.company.symbol for r in got.records] == ["GS", "LBRDA"]           # LBRDK's larger cap: not kept
+    assert got.rejections == {"share_class_overlap": 1}
+    assert {"LBRDA", "LBRDK"} <= {s for b in fmp.profile_requests for s in b}
+    assert sorted(s for s, _l in fmp.statement_calls) == ["GS", "LBRDA"]
+    # BRK-A / BRK-B report per-class EPS: different figures → the issuer is refused, GS stays
+    A.clear_memo()
+    rows = [erow("BRK-A", "2027-01-12", 7_000.0, 6_000.0, 95e9, 90e9), erow("BRK-B", "2027-01-12", 4.67, 4.0, 95e9, 90e9),
+            erow("GS", "2027-01-12", 17.01, 12.86, 18.7e9, 16.8e9)]
+    profiles = {"BRK-A": _listing("BRK-A", "Berkshire Hathaway Inc.", exchange="NYSE", cap=1e12, cik="0001067983"),
+                "BRK-B": _listing("BRK-B", "Berkshire Hathaway Inc.", exchange="NYSE", cap=1e12, cik="0001067983"),
+                "GS": profiles["GS"]}
+    got = await erun(_class_world(rows, profiles))
+    assert [r.company.symbol for r in got.records] == ["GS"]
+    assert got.rejections == {"record_invalid": 1, "share_class_overlap": 1}
+
+
+@pytest.mark.asyncio
+async def test_one_display_name_or_one_cik_is_one_issuer():
+    """The issuer identity is the CIK OR the display name (as `_one_row_per_issuer`): two listings sharing either
+    one are one company, two sharing neither are two."""
+    def world(cik_b, name_b):
+        rows = [erow("ACMA", "2027-01-12", 1.5, 1.0), erow("ACMB", "2027-01-12", 1.5, 1.0)]
+        return _class_world(rows, {"ACMA": _listing("ACMA", "Acme Corp.", cap=9e9, cik="0000000101"),
+                                   "ACMB": _listing("ACMB", name_b, cap=8e9, cik=cik_b)})
+
+    for cik_b, name_b, kept in (("0000000101", "Acme Corp.", ["ACMA"]), ("0000000101", "Acme Holdings", ["ACMA"]),
+                                ("0000000202", "Acme Corp.", ["ACMA"]), ("0000000202", "Acmb Holdings",
+                                                                         ["ACMA", "ACMB"])):
+        A.clear_memo()
+        got = await erun(world(cik_b, name_b))
+        assert [r.company.symbol for r in got.records] == kept, (cik_b, name_b)
+        assert got.rejections == ({} if len(kept) == 2 else {"share_class_overlap": 1})
+
+
+@pytest.mark.asyncio
+async def test_a_posted_class_share_makes_its_sibling_already_posted(caplog):
+    """BRK-A posted this window → BRK-B (same CIK) is `already_posted`: the posted listing is profiled beside the
+    candidates for its issuer identity. A posted listing without a profile cannot be matched — logged at WARNING
+    (the sibling then stays a candidate: a second post of one report is the risk, never a wrong figure)."""
+    caplog.set_level(logging.WARNING, logger=A.__name__)
+    rows = [erow("BRK-A", "2027-01-12", 7_000.0, 6_000.0, 95e9, 90e9), erow("BRK-B", "2027-01-12", 4.67, 4.0, 95e9, 90e9)]
+    profiles = {"BRK-A": _listing("BRK-A", "Berkshire Hathaway Inc.", exchange="NYSE", cap=1e12, cik="0001067983"),
+                "BRK-B": _listing("BRK-B", "Berkshire Hathaway Inc.", exchange="NYSE", cap=1e12, cik="0001067983")}
+    fmp = _class_world(rows, profiles)
+    got = await erun(fmp, exclude={"news:earnings:BRK-A:2027-01-12"})
+    assert got.records == () and got.rejections == {"already_posted": 2}
+    assert fmp.profile_requests[0] == ["BRK-B", "BRK-A"] and fmp.statement_calls == []
+    A.clear_memo()
+    fmp = _class_world(rows, {"BRK-B": profiles["BRK-B"]})
+    got = await erun(fmp, exclude={"news:earnings:BRK-A:2027-01-12"})
+    assert [r.company.symbol for r in got.records] == ["BRK-B"] and got.rejections == {"already_posted": 1}
+    assert "posted listing BRK-A has no usable profile" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_nasdaq_preferred_line_is_never_the_company():
+    """WaFd (live, 2026-10-15): WAFDP's row read 0.76 against a 0.843 estimate (a 9.8% "miss") beside the common
+    WAFD's 0.85 (0.8%: no clear surprise) — and FMP profiles WAFDP as "WaFd, Inc." on NASDAQ. With its root in the
+    window the twin is dropped before any profile (`share_class_overlap`); alone, the profile gate refuses its
+    preferred shape (`non_common_listing`); with the same figures as its root, the root is the one record."""
+    wafd = _listing("WAFD", "WaFd, Inc.", cap=2.4e9, cik="0000936528")
+    wafdp = _listing("WAFDP", "WaFd, Inc.", cap=2.188e9 * 1.2, cik="0000936528")
+    rows = [erow("WAFD", "2027-01-12", 0.85, 0.843, 0.2204e9, 0.2150e9), erow("WAFDP", "2027-01-12", 0.76, 0.843,
+                                                                              0.2204e9, 0.2150e9)]
+    fmp = _class_world(rows, {"WAFD": wafd, "WAFDP": wafdp})
+    got = await erun(fmp)
+    assert got.records == () and got.rejections == {"surprise_unclear": 1, "share_class_overlap": 1}
+    assert fmp.profile_requests == []                                           # nothing reached a profile
+    A.clear_memo()
+    fmp = _class_world(rows[1:], {"WAFDP": wafdp})                              # the preferred line alone
+    got = await erun(fmp)
+    assert got.records == () and got.rejections == {"non_common_listing": 1} and fmp.statement_calls == []
+    A.clear_memo()
+    acme = [erow("ACME", "2027-01-12", 0.95, 0.843, 2.1e9, 2.05e9), erow("ACMEP", "2027-01-12", 0.95, 0.843, 2.1e9,
+                                                                          2.05e9)]
+    got = await erun(_class_world(acme, {"ACME": _listing("ACME", "Acme, Inc.", cap=5e9, cik="0000000303"),
+                                         "ACMEP": _listing("ACMEP", "Acme, Inc.", cap=6e9, cik="0000000303")}))
+    assert [(r.company.symbol, r.eps_actual) for r in got.records] == [("ACME", 0.95)]
+    assert got.rejections == {"share_class_overlap": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_twin_that_outranks_its_root_never_replaces_it():
+    """FMP prices a preferred line on the common's share count, so several outrank their own common (HBANL $34.1B
+    vs HBAN $31.5B, FITBI $50.6B vs FITB $46.5B). The ROOT is kept, never the larger cap; a twin whose row reports
+    other figures refuses the root (FITB 0.83 beside FITBI 0.84); with the root refused for its own row, the twin
+    never passes alone (FITB's 1% gap beside FITBI's 9.8%)."""
+    def world(root_row, twin_row, *more):
+        profiles = {"HBAN": _listing("HBAN", "Huntington Bancshares Incorporated", cap=31.53e9, cik="0000049196"),
+                    "HBANL": _listing("HBANL", "Huntington Bancshares Incorporated", cap=34.12e9, cik="0000049196"),
+                    "FITB": _listing("FITB", "Fifth Third Bancorp", cap=46.52e9, cik="0000035527"),
+                    "FITBI": _listing("FITBI", "Fifth Third Bancorp", cap=50.55e9, cik="0000035527"),
+                    "FITBO": _listing("FITBO", "Fifth Third Bancorp", cap=48e9, cik="0000035527")}
+        return _class_world([root_row, twin_row, *more], profiles)
+
+    got = await erun(world(erow("HBAN", "2027-01-12", 0.40, 0.36, 2.0e9, 1.95e9),
+                           erow("HBANL", "2027-01-12", 0.40, 0.36, 2.0e9, 1.95e9)))
+    assert [r.company.symbol for r in got.records] == ["HBAN"] and got.rejections == {"share_class_overlap": 1}
+    A.clear_memo()
+    got = await erun(world(erow("FITB", "2027-01-12", 0.90, 0.82, 3.26e9, 3.2e9),
+                           erow("FITBI", "2027-01-12", 0.91, 0.82, 3.145e9, 3.2e9),
+                           erow("FITBO", "2027-01-12", 0.90, 0.82, 3.37e9, 3.2e9)))
+    assert got.records == () and got.rejections == {"record_invalid": 1, "share_class_overlap": 2}
+    A.clear_memo()
+    fmp = world(erow("FITB", "2027-01-12", 0.83, 0.82, 3.26e9, 3.2e9), erow("FITBI", "2027-01-12", 0.90, 0.82, 3.26e9,
+                                                                             3.2e9))
+    got = await erun(fmp)
+    assert got.records == () and got.rejections == {"surprise_unclear": 1, "share_class_overlap": 1}
+    assert fmp.profile_requests == []
+
+
+def test_twin_families():
+    listed = {"GOOG", "GOOGL", "WAFD", "WAFDP", "LBRDA", "LBRDK", "LBRD", "FITB", "FITBI", "BRK-A", "BRK-B", "AAPL",
+              "SNAP", "SNAPP", "ABCDE",
+              # the re-review of 2026-10-19: an OTC foreign line (F / Y) is never a twin — often another company
+              "CMPR", "CMPRF", "AXIA", "AXIAY", "TWOD", "TWODF", "TWODY"}
+    assert A._twin_families(listed) == {"GOOG": {"GOOGL"}, "WAFD": {"WAFDP"}, "FITB": {"FITBI"}, "SNAP": {"SNAPP"}}
+    assert A._twin_families(set()) == {} and A.EARNINGS_CLASS_LETTERS == frozenset("ABCJK")
+    # a curated class line makes its root a family's root even when the root has no row in the window (EME-3)
+    assert A._twin_families({"GOOGL", "GOOGM"}) == {"GOOG": {"GOOGL", "GOOGM"}}
+    assert A._twin_families({"GOOGL"}) == {"GOOG": {"GOOGL"}} and A._twin_families({"HBANL"}) == {}
+    assert A.EARNINGS_FOREIGN_LETTERS == frozenset("FY") and A.EARNINGS_CLASS_LINES == frozenset({"GOOGL"})
+
+
+# ── the re-review of 2026-10-19 (B1R-ER3, EME-3): one issuer, per-ticker consensus figures ──
+#
+# FMP keys its analyst consensus per TICKER: GOOG's and GOOGL's estimates differ every quarter (live: Feb 2026 2.63 vs
+# 2.57; Apr 2.68 vs 2.64; Jul $116.5285B vs $116.5325B revenue estimates; Oct 3.02 vs 2.97 ahead of the report),
+# while every Alphabet line carries the SAME actuals. ER-3 refused the issuer on ANY differing figure — Alphabet, the
+# largest reporter of its week, was `record_invalid` every quarter. Now only two ACTUALS refuse it, and every
+# listing's estimate must leave the surprise clear and pointing the same way.
+
+def _alphabet_live(goog, googl, *more, day="2027-01-12"):
+    rows = [erow("GOOG", day, *goog), erow("GOOGL", day, *googl), *more]
+    profiles = {s: _listing(s, "Alphabet Inc.", cap=4.16e12, cik="0001652044") for s in ("GOOG", "GOOGL", "GOOGM",
+                                                                                        "GOOGN")}
+    return FakeFMP2b(calendar={day: rows}, profiles=profiles)
+
+
+@pytest.mark.parametrize("goog, googl, notes", [
+    ((2.82, 2.63, 113.828e9, 111.3184e9), (2.82, 2.57, 113.828e9, 111.3324e9),
+     (2.82, 2.63, 113.828e9, 111.3324e9)),                                        # Feb 4, 2026 (live)
+    ((5.11, 2.68, 109.896e9, 106.961e9), (5.11, 2.64, 109.896e9, 106.9761e9),
+     (5.11, 2.68, 109.896e9, 106.9761e9)),                                        # Apr 29, 2026 (live)
+    ((9.11, 2.87, 119.796e9, 116.5285e9), (9.11, 2.87, 119.796e9, 116.5325e9),
+     (9.11, 2.88, 119.796e9, 116.3761e9)),                                        # Jul 22, 2026 (live)
+], ids=["feb", "apr", "jul"])
+@pytest.mark.asyncio
+async def test_alphabets_live_rows_are_one_record_with_googs_own_figures(goog, googl, notes):
+    """Live-shaped rows (twin_probe, 2026-10-19): GOOG, GOOGL, GOOGM and GOOGN — one actual pair, three consensus
+    figures. ONE record, the root GOOG with its OWN row's estimate; the other lines `share_class_overlap`.
+    Mutation-checked by hand (2026-10-19): with `_family_problem` comparing every figure again, all three red."""
+    fmp = _alphabet_live(goog, googl, erow("GOOGM", "2027-01-12", *notes), erow("GOOGN", "2027-01-12", *notes))
+    got = await erun(fmp)
+    assert [(r.company.symbol, r.eps_actual, r.eps_estimate, r.revenue_estimate) for r in got.records] == [
+        ("GOOG", goog[0], goog[1], goog[3])]
+    assert got.rejections == {"share_class_overlap": 3}
+
+
+@pytest.mark.parametrize("googl, rejections", [
+    ((2.87, 2.80), {"surprise_unclear": 2}),                       # GOOGL's consensus: a 2.5% gap — no clear beat
+    ((2.87, 3.10), {"surprise_unclear": 1, "share_class_overlap": 1}),     # a clear MISS by GOOGL's consensus
+    ((2.95, 2.60), {"record_invalid": 1, "share_class_overlap": 1}),       # two actuals: which is the result
+], ids=["unclear_by_googl", "opposite_by_googl", "two_actuals"])
+@pytest.mark.asyncio
+async def test_a_listing_whose_consensus_does_not_vouch_for_the_surprise_refuses_the_issuer(googl, rejections):
+    """GOOG's 2.87 vs 2.60 (+10%) is printed — but a surprise one listing's consensus calls unclear, or a miss, is no
+    clear surprise (`surprise_unclear`); two different ACTUALS stay `record_invalid` (FITB 0.83 beside FITBI 0.84).
+    Mutation-checked by hand (2026-10-19): the estimate loop of `_family_problem` removed turned the first two red."""
+    got = await erun(_alphabet_live((2.87, 2.60, 96.4e9, 95.0e9), (*googl, 96.4e9, 95.0e9)))
+    assert got.records == () and got.rejections == rejections
+
+
+@pytest.mark.asyncio
+async def test_googl_stands_for_alphabet_when_goog_has_no_reported_row():
+    """EME-3: FMP filled GOOGL's actual before GOOG's — the twin rule dropped GOOGL and GOOG was no candidate, so the
+    week's largest reporter was lost. GOOGL is a curated class line (`A.EARNINGS_CLASS_LINES`): with no REPORTED GOOG
+    row in the window (unreported, or not listed that day) it stands for the issuer; the family's other reported rows
+    (GOOGM) still vouch for it, and a preferred-shaped line is still dropped. Mutation-checked by hand (2026-10-19):
+    without the stand-in the record list was empty (red)."""
+    googm = erow("GOOGM", "2027-01-12", 2.87, 2.60, 96.4e9, 95.0e9)
+    for goog_row in (erow("GOOG", "2027-01-12", None, 2.60, None, 95.0e9),       # listed, not reported yet
+                     erow("GOOG", "2027-01-09", None, 2.61)):                   # a stale projected row only
+        A.clear_memo()
+        fmp = _alphabet_live((2.87, 2.60), (2.87, 2.60, 96.4e9, 95.0e9), googm)
+        fmp.calendar["2027-01-12"] = [r for r in fmp.calendar["2027-01-12"] if r["symbol"] != "GOOG"]
+        fmp.calendar.setdefault(goog_row["date"], []).append(goog_row)
+        got = await erun(fmp)
+        assert [(r.company.symbol, r.company.name) for r in got.records] == [("GOOGL", "Alphabet")]
+        assert got.rejections == {"share_class_overlap": 1}                       # GOOGM
+    # … never when GOOG's own reported row was refused: GOOGL's consensus would decide what GOOG's did not
+    A.clear_memo()
+    got = await erun(_alphabet_live((2.87, 2.80, 96.4e9, 95.0e9), (2.87, 2.60, 96.4e9, 95.0e9)))
+    assert got.records == () and got.rejections == {"surprise_unclear": 1, "share_class_overlap": 1}
+    # … and a stand-in is checked like a root: GOOGM's other actual refuses it
+    A.clear_memo()
+    fmp = _alphabet_live((2.87, 2.60), (2.87, 2.60, 96.4e9, 95.0e9),
+                         erow("GOOGM", "2027-01-12", 2.91, 2.60, 96.4e9, 95.0e9))
+    fmp.calendar["2027-01-12"] = [r for r in fmp.calendar["2027-01-12"] if r["symbol"] != "GOOG"]
+    got = await erun(fmp)
+    assert got.records == () and got.rejections == {"record_invalid": 1, "share_class_overlap": 1}
+
+
+@pytest.mark.asyncio
+async def test_an_otc_foreign_line_is_never_the_twin_that_refuses_its_root():
+    """Live (2026-04 / 2026-07): CMPRF is Gentera, an OTC line, beside Cimpress' CMPR — another company with other
+    figures, and the twin rule refused CMPR `record_invalid`. An F / Y line now stands on its own: the profile gate
+    refuses it (OTC), and CMPR is a record. Mutation-checked by hand (2026-10-19): with F / Y twins again, CMPR was
+    refused (red)."""
+    rows = [erow("CMPR", "2027-01-12", 0.97, 0.80, 0.945e9, 0.92e9), erow("CMPRF", "2027-01-12", 0.55, 0.45,
+                                                                         0.886e9, 0.86e9)]
+    profiles = {"CMPR": _listing("CMPR", "Cimpress plc", cap=2.4e9, cik="0001262976"),
+                "CMPRF": _listing("CMPRF", "Gentera, S.A.B. de C.V.", exchange="OTC", cap=3e9, cik=None)}
+    got = await erun(FakeFMP2b(calendar={"2027-01-12": rows}, profiles=profiles))
+    assert [r.company.symbol for r in got.records] == ["CMPR"]
+    assert got.rejections == {"not_major_exchange": 1}
+
+
+@pytest.mark.parametrize("lbrdk, kept, rejections", [
+    ((1.60, 1.42), ["LBRDA"], {"share_class_overlap": 1}),                   # another consensus, same result: kept
+    ((1.60, 1.70), [], {"surprise_unclear": 1, "share_class_overlap": 1}),   # a clear miss by LBRDK's consensus
+    ((1.62, 1.40), [], {"record_invalid": 1, "share_class_overlap": 1}),     # two actuals
+], ids=["consensus_differs", "opposite", "two_actuals"])
+@pytest.mark.asyncio
+async def test_class_shares_after_the_profiles_compare_actuals_and_every_estimate(lbrdk, kept, rejections):
+    """The issuer dedupe after the profiles (`_one_listing_per_issuer`) runs the same family check over the listings
+    it groups: the root LBRDA's own row is published when every grouped listing's consensus vouches for its surprise.
+    Recorded residual: a class listing refused BEFORE the profiles (its own row no clear surprise) is not in the
+    group, so it cannot refuse its sibling — only a twin family is formed before the profiles."""
+    rows = [erow("LBRDA", "2027-01-12", 1.60, 1.40, 1.05e9, 1.0e9), erow("LBRDK", "2027-01-12", *lbrdk, 1.05e9, 1.0e9)]
+    profiles = {"LBRDA": _listing("LBRDA", "Liberty Broadband Corporation", cap=9e9, cik="0001611983"),
+                "LBRDK": _listing("LBRDK", "Liberty Broadband Corporation", cap=11e9, cik="0001611983")}
+    got = await erun(_class_world(rows, profiles))
+    assert [(r.company.symbol, r.eps_estimate) for r in got.records] == [(s, 1.40) for s in kept]
+    assert got.rejections == rejections
+
+
+def _all_failing(answer):
+    return {s: answer for s in ("AAA", "BBB", "III")}
+
+
+@pytest.mark.parametrize("answer", [FMPRateLimitException("429"), FMPUnavailableException("503"), [], [7]],
+                         ids=["rate_limited", "unavailable", "empty", "no_row"])
+@pytest.mark.asyncio
+async def test_every_statement_read_failing_is_unavailable_never_nothing_qualified(answer, caplog):
+    """ER-2 (the review's own probe): FMP answering 429 to every quarterly-statement read of a Thursday is an
+    OUTAGE — `earnings_statements_unavailable` (the chain falls back as "unavailable", the owner's series note
+    names it first) — never "nothing qualified" with a count of refused reports. Nothing is memoized: the next
+    call reads again and keeps the reports. Mutation-checked by hand (2026-10-16): without the all-failed raise
+    the call answered `earnings_none_qualified` with {"statement_unavailable": 3}."""
+    caplog.set_level(logging.WARNING, logger=A.__name__)
+    fmp = FakeFMP2b(calendar=earnings_calendar(), profiles=earnings_profiles(), currency=_all_failing(answer))
+    with pytest.raises(A.MarketingNewsUnavailable) as err:
+        await erun(fmp)
+    assert err.value.reason == "earnings_statements_unavailable"
+    assert "stage=earnings_statement; all 3 statement read(s) failed" in err.value.detail
+    assert sorted(s for s, _l in fmp.statement_calls) == ["AAA", "BBB", "III"]
+    assert "quarterly statement unreadable — refused as statement_unavailable" in caplog.text
+    fmp.currency = {}
+    assert [r.company.symbol for r in (await erun(fmp)).records] == ["BBB", "III", "AAA"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_beside_an_answered_one_is_one_refused_report():
+    """Only ALL failing is an outage: one failed read beside an answered one is that report's refusal
+    (`statement_unavailable`), whether the answered read is kept or refused (EUR)."""
+    fmp = FakeFMP2b(calendar=earnings_calendar(), profiles=earnings_profiles(),
+                    currency={"BBB": FMPRateLimitException("429"), "III": FMPRateLimitException("429")})
+    got = await erun(fmp)
+    assert [r.company.symbol for r in got.records] == ["AAA"] and got.rejections["statement_unavailable"] == 2
+    A.clear_memo()
+    fmp = FakeFMP2b(calendar=earnings_calendar(), profiles=earnings_profiles(),
+                    currency={"BBB": FMPRateLimitException("429"), "III": FMPRateLimitException("429"), "AAA": "EUR"})
+    got = await erun(fmp)
+    assert got.records == () and got.skip_reason == "earnings_none_qualified"
+    assert got.rejections["statement_unavailable"] == 2 and got.rejections["non_usd_reporter"] == 1
+
+
+@pytest.mark.parametrize("a, e", [(0.095, 0.10), (0.1449, 0.1376), (-0.095, -0.10), (0.3049, 0.2895)])
+@pytest.mark.asyncio
+async def test_a_surprise_the_post_cannot_show_is_refused(a, e):
+    """ER-1: clear as the feed wrote it, not as the post prints it ("$0.10 vs $0.10", "$0.30 vs $0.29") —
+    refused `surprise_unclear` before any profile."""
+    fmp = FakeFMP2b(calendar={"2027-01-12": [erow("AAA", "2027-01-12", a, e)]}, profiles=earnings_profiles())
+    got = await erun(fmp)
+    assert got.records == () and got.rejections == {"surprise_unclear": 1} and fmp.calls["profiles"] == 0
+
+
+@pytest.mark.parametrize("with_profile", [False, True], ids=["no_profile", "profiled"])
+@pytest.mark.asyncio
+async def test_an_absurd_eps_row_never_sinks_the_earnings_series(caplog, with_profile):
+    """Hardening of the ER-1 printed-figure gate (2026-10-16): `R.clear_surprise` quantized in the default 28-digit
+    Decimal context, so ONE calendar row with an EPS of 1e26 or more raised `decimal.InvalidOperation` — and
+    `candidates()` turns any exception into ``internal_error`` for the WHOLE series: the week's real reports were
+    lost with it. The gate now computes exactly (`R.EPS_DECIMAL_PRECISION`); the junk row goes on to the other
+    gates (unprofiled: ``profile_missing``; profiled: the read stage's gates run on it too, and the template is
+    what refuses a figure it cannot print) and the week keeps BBB, III and AAA. Mutation-checked by hand
+    (2026-10-16): with ``ctx.prec = 28`` the call raised ``internal_error`` (red)."""
+    caplog.set_level(logging.ERROR, logger=A.__name__)
+    cal = earnings_calendar()
+    cal["2027-01-12"] = cal["2027-01-12"] + [erow("ZZZ", "2027-01-12", 1e30, 9e29),
+                                             erow("YYY", "2027-01-12", 1.7976931348623157e308, 1e308)]
+    profiles = earnings_profiles()
+    if with_profile:
+        profiles["ZZZ"] = prof("ZZZ", "Zzz Industries Inc.", cap=4e9)
+    got = await erun(FakeFMP2b(calendar=cal, profiles=profiles))
+    assert [r.company.symbol for r in got.records][:3] == ["BBB", "III", "AAA"]
+    # since the owner-delegated EPS ceiling (2026-10-19) both junk rows stop at the row gate, profile or none
+    assert got.rejections["eps_implausible"] == 2 and "profile_missing" not in got.rejections
+    assert "INTERNAL ERROR" not in caplog.text
+
+
+@pytest.mark.parametrize("a, e, kept", [
+    (1_000_000.0, 900_000.0, True),             # exactly the ceiling
+    (7_089.43, 8_259.23, True),                 # Berkshire Hathaway Class A's live row (2026-03-02): far inside it
+    (1_000_000.01, 900_000.0, False),
+    (900_000.0, 1_000_000.5, False),            # the estimate above it
+    (-1_500_000.0, -1_200_000.0, False),
+    (1e20, 1.1e20, False),                      # absurd but self-consistent: no other gate refused it
+], ids=["ceiling", "brk_a", "actual_above", "estimate_above", "negative", "1e20_pair"])
+@pytest.mark.asyncio
+async def test_an_eps_above_a_million_a_share_is_refused_whole(a, e, kept):
+    """The owner-delegated EPS ceiling (2026-10-19): |actual| or |estimate| above `R.EPS_MAX_ABS` ($1,000,000 a
+    share) is a feed error — the WHOLE report is refused at the row gate (`eps_implausible`), before any profile or
+    statement read; Berkshire's Class A EPS stays far inside it. Mutation-checked by hand (2026-10-19): without the
+    row gate a refused row went on to a profile read (red); with ``>=`` the row exactly at the ceiling was refused
+    (red)."""
+    fmp = FakeFMP2b(calendar={"2027-01-12": [erow("AAA", "2027-01-12", a, e)]},
+                    profiles={"AAA": prof("AAA", "Aaa Industries Inc.", cap=5e9)})
+    got = await erun(fmp)
+    if kept:
+        assert [(r.company.symbol, r.eps_actual) for r in got.records] == [("AAA", a)] and got.rejections == {}
+    else:
+        assert got.records == () and got.rejections == {"eps_implausible": 1}
+        assert fmp.calls["profiles"] == 0 and fmp.statement_calls == []
+
+
+_PLD_RUN = date(2026, 10, 22)              # Thursday; reports Oct 15 .. 21 (the live preview's PLD week)
+
+
+def _quarter_rows(sym, revenue, eps, *, older_revenue, older_eps):
+    return [{"symbol": sym, "date": "2026-09-30", "period": "Q3", "reportedCurrency": "USD", "revenue": revenue,
+             "eps": eps, "epsDiluted": eps},
+            {"symbol": sym, "date": "2026-06-30", "period": "Q2", "reportedCurrency": "USD", "revenue": older_revenue,
+             "eps": older_eps, "epsDiluted": older_eps}]
+
+
+def _pld_world(**profile_over):
+    profile = prof("PLD", "Prologis, Inc.", cap=122e9, sector="Real Estate", industry="REIT - Industrial")
+    profile.update(profile_over)
+    row = erow("PLD", "2026-10-15", 1.60, 0.777, 2_387_518_000, 2_175_508_000)
+    statements = _quarter_rows("PLD", 2_387_518_000, 0.86, older_revenue=2_210_000_000, older_eps=1.13)
+    return FakeFMP2b(calendar={"2026-10-15": [row]}, profiles={"PLD": profile}, currency={"PLD": statements})
+
+
+@pytest.mark.asyncio
+async def test_prologis_mixed_basis_eps_is_never_published(caplog):
+    """Live preview F1 (2026-10-16): Prologis' calendar row — 1.60 against an estimate of 0.777, revenue
+    $2,387,518,000 against $2,175,508,000 — passed every gate and composed "Prologis reported EPS of $1.60 vs an
+    analyst estimate of $0.78": the actual is a Core-FFO-scale figure (the quarter's GAAP diluted EPS was 0.86),
+    the estimate a GAAP-scale one. Its real profile (Real Estate, REIT - Industrial) is refused before any
+    statement read (`eps_basis_reit`); the same figures under any other sector are refused after the read
+    (`eps_basis_mixed`: the actual 1.86x GAAP while the estimate is 0.90x). Mutation-checked by hand (2026-10-16):
+    without the sector gate the first world reached the read; without the basis gate the second was a record."""
+    caplog.set_level(logging.INFO, logger=A.__name__)
+    fmp = _pld_world()
+    got = await erun(fmp, run_date=_PLD_RUN)
+    assert got.records == () and got.rejections == {"eps_basis_reit": 1} and fmp.statement_calls == []
+    assert "PLD refused as eps_basis_reit" in caplog.text
+    for over in ({"sector": "Industrials", "industry": "Integrated Freight & Logistics"},
+                 {"sector": "Technology", "industry": None}):
+        A.clear_memo()
+        fmp = _pld_world(**over)
+        got = await erun(fmp, run_date=_PLD_RUN)
+        assert got.records == () and got.rejections == {"eps_basis_mixed": 1}
+        assert fmp.statement_calls == [("PLD", 4)]
+    assert "PLD refused as eps_basis_mixed" in caplog.text
+    # an issuer whose sector cannot be read cannot be shown not to be a REIT (fail closed)
+    for missing in ({"sector": None}, {"sector": ""}, {"sector": 42}):
+        A.clear_memo()
+        got = await erun(_pld_world(**missing, industry="Integrated Freight & Logistics"), run_date=_PLD_RUN)
+        assert got.records == () and got.rejections == {"eps_basis_reit": 1}
+
+
+@pytest.mark.parametrize("sym, name, a, e, gaap", [
+    ("BLK", "BlackRock, Inc.", 15.93, 14.32, 10.57),       # an adjusted actual far from GAAP, estimate adjusted too
+    ("UNH", "UnitedHealth Group Incorporated", 4.69, 4.40, 4.56),
+    ("C", "Citigroup Inc.", 2.85, 2.60, 2.85), ("AA", "Alcoa Corporation", 1.82, 1.55, 1.81),
+    ("TRV", "The Travelers Companies, Inc.", 9.18, 8.10, 9.04), ("CMC", "Commercial Metals Company", 2.09, 1.80, 1.91),
+    ("XLOS", "Xlos Industries Inc.", 1.60, 0.777, -0.40),   # a GAAP loss quarter: the basis gate does not apply
+], ids=["blk", "unh", "c", "aa", "trv", "cmc", "gaap_loss"])
+@pytest.mark.asyncio
+async def test_the_live_previews_held_records_keep_their_eps(sym, name, a, e, gaap):
+    """The held records of the 2026-10-16 live preview track their estimate's basis and stay published (the gate
+    is narrow: never a GAAP check of the actual alone) — BlackRock's $15.93 is 1.507x its GAAP $10.57, but its
+    $14.32 estimate is off the GAAP scale too."""
+    profile = prof(sym, name, exchange="NYSE", cap=80e9, sector="Financial Services", industry="Asset Management")
+    statements = _quarter_rows(sym, 2_000_000_000, gaap, older_revenue=1_900_000_000, older_eps=gaap)
+    fmp = FakeFMP2b(calendar={"2026-10-15": [erow(sym, "2026-10-15", a, e, 2_000_000_000, 1_950_000_000)]},
+                    profiles={sym: profile}, currency={sym: statements})
+    got = await erun(fmp, run_date=_PLD_RUN)
+    (rec,) = got.records
+    assert (rec.company.symbol, rec.eps_actual, rec.eps_estimate, rec.period_end) == (sym, a, e, date(2026, 9, 30))
+    assert got.rejections == {}
+
+
+# ── news-v21 (main-session decision of 2026-10-20): revenue is checked, never printed ───────────────────────
+
+#: GE Aerospace's and Travelers' Q3 2025 (FMP, the read-only probe of 2026-10-20): the calendar's revenue ACTUAL is
+#: the statement's GAAP total — so the period check places the quarter — and its ESTIMATE the consensus for an
+#: ADJUSTED revenue: "revenue of $12.2 billion vs $10.4 billion" held on neither basis. FMP's earlier quarters sat on
+#: the statement basis too, so the revenue-basis gate (2026-10-20, removed) could not see it, and no read of the feed
+#: can. Such a report is HELD for its EPS — the revenue pair stays the data-quality and quarter check — and its post
+#: prints no revenue (`news_templates.EARNINGS_REVENUE_IN_POSTS`). (name, report day, EPS actual / estimate, revenue
+#: actual / estimate, the statement's diluted EPS, sector, industry, the four quarterly statement rows.)
+_TWO_BASIS_2025 = {
+    "GE": ("GE Aerospace", "2025-10-21", 1.66, 1.46, 12.221e9, 10.385e9, 2.16, "Industrials", "Aerospace & Defense",
+           (("2025-09-30", 12.221e9), ("2025-06-30", 11.022e9), ("2025-03-31", 9.934e9), ("2024-12-31", 10.811e9))),
+    "TRV": ("The Travelers Companies, Inc.", "2025-10-16", 8.14, 6.39, 12.470e9, 11.688e9, 8.24, "Financial Services",
+            "Insurance - Property & Casualty",
+            (("2025-09-30", 12.470e9), ("2025-06-30", 12.116e9), ("2025-03-31", 11.810e9), ("2024-12-31", 12.013e9))),
+}
+_TWO_BASIS_RUN = date(2025, 10, 23)          # Thursday; reports Oct 16 .. 22
+
+
+class _HistoryCountingFMP(FakeFMP2b):
+    """Counts any per-symbol earnings-history read (`/stable/earnings?symbol=`, what the removed revenue-basis gate
+    read) and answers it with no history — a gate reading it would refuse every report. The earnings path makes none."""
+
+    async def get_earning_calendar_full(self, ticker, raise_errors=False):
+        self.calls["history"] += 1
+        return []
+
+
+@pytest.mark.asyncio
+async def test_a_two_basis_revenue_pair_is_held_for_its_eps_and_never_printed():
+    """GE Aerospace and Travelers (Q3 2025) are held, the larger first, each placed in its quarter by ONE statement
+    read and nothing more — and each composes an EPS-only post: no revenue word or figure in any string."""
+    profiles, calendar, currency = {}, {}, {}
+    for sym, (name, day, a, e, ra, re_, gaap, sector, industry, quarters) in _TWO_BASIS_2025.items():
+        profiles[sym] = prof(sym, name, cap=200e9 if sym == "GE" else 60e9, sector=sector, industry=industry)
+        calendar.setdefault(day, []).append(erow(sym, day, a, e, ra, re_))
+        currency[sym] = [{"symbol": sym, "date": d, "period": "Q", "reportedCurrency": "USD", "revenue": rev,
+                          "epsDiluted": gaap} for d, rev in quarters]
+    fmp = _HistoryCountingFMP(calendar=calendar, profiles=profiles, currency=currency)
+    got = await erun(fmp, run_date=_TWO_BASIS_RUN)
+    assert [(r.company.symbol, r.period_end, r.revenue_actual, r.revenue_estimate) for r in got.records] == [
+        ("GE", date(2025, 9, 30), 12.221e9, 10.385e9), ("TRV", date(2025, 9, 30), 12.470e9, 11.688e9)]
+    assert got.rejections == {} and fmp.calls["history"] == 0
+    assert sorted(fmp.statement_calls) == [("GE", 4), ("TRV", 4)]
+    for rec, head in zip(got.records, ("GE Aerospace reported EPS of $1.66 vs an analyst estimate of $1.46.",
+                                       "Travelers reported EPS of $8.14 vs an analyst estimate of $6.39.")):
+        out = NT.compose(rec, run_date=_TWO_BASIS_RUN, store_state="live", allow_x_url=False)
+        blob = json.dumps(out).lower()
+        assert "revenue" not in blob and "billion" not in blob and "$12." not in blob, rec.company.symbol
+        assert [r["cells"][0] for r in out["image_spec"]["sections"][0]["rows"]] == ["EPS"]
+        assert out["captions"]["x"].startswith(head)
+
+
+@pytest.mark.asyncio
+async def test_the_clear_surprise_and_the_lead_order_never_read_revenue():
+    """news-v21 (the decision's point 3): the surprise gate reads the EPS pair alone and the lead order is (market
+    cap, EPS gap, symbol) — revenue decides neither: an EQUAL revenue pair beside a clear EPS surprise is held, a
+    40% revenue gap beside a 4% EPS gap is refused (`surprise_unclear`), and swapping the revenue pairs of the
+    reports changes neither the records nor their order. (The revenue ESTIMATE is only the size proxy that picks
+    which `EARNINGS_MAX_PROFILES` reports are profiled at all — never the order of those profiled.)"""
+    day = "2027-01-12"
+    # revenue pairs of every size and gap inside the band (1.0x, 1.4x, 0.6x, 1.45x), estimates from $1B to $3B
+    pairs = {"AAA": (1.0e9, 1.0e9), "BBB": (2.8e9, 2.0e9), "CCC": (0.6e9, 1.0e9), "DDD": (4.35e9, 3.0e9)}
+    eps = {"AAA": (1.5, 1.0), "BBB": (1.04, 1.0), "CCC": (1.2, 1.0), "DDD": (1.2, 1.0)}
+    caps = {"AAA": 5e9, "BBB": 50e9, "CCC": 20e9, "DDD": 20e9}
+    profiles = {s: prof(s, f"{s.title()} Industries Inc.", cap=c) for s, c in caps.items()}
+    seen = []
+    for swap in (False, True):
+        A.clear_memo()
+        # the swap: every report gets another's revenue pair (BBB's 4% EPS gap beside a 1.4x, then a 0.6x pair)
+        shown = dict(zip(pairs, list(pairs.values())[::-1])) if swap else pairs
+        cal = {day: [erow(s, day, *eps[s], *shown[s]) for s in pairs]}
+        got = await erun(FakeFMP2b(calendar=cal, profiles=profiles))
+        seen.append([(r.company.symbol, r.eps_actual, r.eps_estimate) for r in got.records])
+        assert got.rejections == {"surprise_unclear": 1}, swap
+    assert seen[0] == seen[1] == [("CCC", 1.2, 1.0), ("DDD", 1.2, 1.0), ("AAA", 1.5, 1.0)]
+
+
+#: A roster that holds the 120th Congress (sworn in Jan 3, 2027): from that day the shipped 119th roster pauses
+#: both Form 4 series (`R.roster_fresh_for`), so the window's January edge is read with the refreshed one.
+_ROSTER_120TH = ("2027-01-03", "2027-01-03")
+
+
+@pytest.mark.parametrize("run_date, roster, named", [
+    (date(2026, 10, 31), None, True),     # its posts go out Oct 31 .. Nov 2: before Election Day (Tue Nov 3)
+    (date(2026, 11, 1), None, False),     # a post of this run can go out on Election Day: role-only
+    (date(2026, 11, 2), None, False),     # the ME-1 case: Monday before Election Day, approved Tuesday night
+    (date(2027, 1, 3), _ROSTER_120TH, False),   # the window's last day (the new Congress is sworn in)
+    (date(2027, 1, 4), _ROSTER_120TH, True),    # its posts go out Jan 4 .. Jan 6: after the window
+], ids=["oct_31", "nov_1", "nov_2", "jan_3", "jan_4"])
+@pytest.mark.asyncio
+async def test_a_run_whose_posts_can_go_out_in_the_window_is_built_role_only(monkeypatch, tmp_path, run_date, roster,
+                                                                             named):
+    """ME-1: the members-elect window is judged over every day a run's posts can go out (`R.members_elect_for_run`:
+    the run date and the two days after it) — both edges pinned at the adapter, as at the templates and the
+    validator (tests/test_marketing_news_templates.py). Mutation-checked by hand (2026-10-16): `_insider_row`
+    reading `R.members_elect_window(ctx.run_date)` built the person on Nov 1 and Nov 2 (red); the January
+    edge reads the run date's own window (Jan 3 role-only, Jan 4 named)."""
+    monkeypatch.setattr(R, "members_elect_window", REAL_MEMBERS_ELECT_WINDOW)
+    R._congress_state.cache_clear()
+    if roster is not None:
+        monkeypatch.setattr(R, "CONGRESS_ROSTER_PATH", _roster_aged(tmp_path, *roster))
+    try:
+        assert R.roster_fresh_for(run_date)                  # the series runs: the window alone decides the name
+        start, end = R.insider_window(run_date)
+        filed, traded = (end - timedelta(days=2)).isoformat(), (end - timedelta(days=3)).isoformat()
+        rows = [irow(filed=filed, traded=traded)]
+        fmp = FakeFMP(insider=rows, profiles=week_profiles())
+        got = await run("ceo_buys", fmp, run_date=run_date)
+        (rec,) = got.records
+        assert (rec.rows[0].person_name == "Ryan Cohen") is named
+        assert R.members_elect_for_run(run_date) is (not named)
+    finally:
+        monkeypatch.undo()
+        R._congress_state.cache_clear()

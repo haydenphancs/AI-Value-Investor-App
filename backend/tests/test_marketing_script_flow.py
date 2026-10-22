@@ -257,6 +257,25 @@ def world(monkeypatch):
     # turn them on themselves.
     monkeypatch.setattr(mrs.settings, "MARKETING_IMAGE_POSTS", False)
     monkeypatch.setattr(mrs.settings, "MARKETING_X_IMAGES", False)
+    # Batch 1: the picture platforms at their declared default (every image platform), and no first
+    # comment — again whatever this machine's environment says.
+    monkeypatch.setattr(mrs.settings, "MARKETING_IMAGE_PLATFORMS", "bluesky,facebook,linkedin,threads")
+    monkeypatch.setattr(mrs.settings, "MARKETING_FIRST_COMMENT_PLATFORMS", "")
+    # Batch 2: no video feature (the declared default), whatever this machine's environment says.
+    monkeypatch.setattr(mrs.settings, "MARKETING_VIDEO_FEATURES", "")
+    # Batch 3: the three new switches at their declared defaults (no extra video post, the four posting days, no
+    # trial Reels), whatever this machine's environment says.
+    monkeypatch.setattr(mrs.settings, "MARKETING_VIDEO_EXTRA_PLATFORMS", "")
+    monkeypatch.setattr(mrs.settings, "MARKETING_POST_WEEKDAYS", "mon,tue,thu,sat")
+    monkeypatch.setattr(mrs.settings, "MARKETING_INSTAGRAM_TRIAL_MODE", "off")
+    # The content classes and the news series at their declared defaults (lessons only), whatever this machine's
+    # environment says (review of 2026-10-20, HYG-1): with C/F enabled there — the planned production value — a
+    # lesson-day test whose holder declares `news_templates` built a template day through the REAL company-news
+    # adapter (FMP and Supabase, blocked by backend/conftest.py) and reached its lesson only by that fallback. The
+    # tests that need a news day turn them on themselves.
+    from app.config import Settings
+    for name in ("MARKETING_CONTENT_CLASSES", "MARKETING_NEWS_SERIES"):
+        monkeypatch.setattr(mrs.settings, name, Settings.model_fields[name].default)
     # The claim window is computed from the ET date; pin it so the fixed POSTING_DAY is "today".
     monkeypatch.setattr(ss, "_today_et", lambda: POSTING_DAY)
     # No real back-off sleeps in retried ledger writes.
@@ -585,9 +604,16 @@ async def test_accepted_script_returns_only_the_worker_subset(world):
                            "post_formats", "image_post", "image_footer",
                            # drop 2 (contract D11): a lesson's template fields are their lesson defaults
                            "content_class", "authorship", "series", "video_layout", "opening_card",
-                           "image_spec", "logos"}
+                           "image_spec", "logos",
+                           # Batch 2: always present — their presence is the worker's "this web knows" signal
+                           "video_features", "end_card_cta",
+                           # Batch 2 fix (CARDS-B2-1): which card a data card replaces — None without one
+                           "data_card_slot"}
     assert (script["content_class"], script["authorship"], script["series"], script["video_layout"],
             script["opening_card"], script["image_spec"], script["logos"]) == ("A", "ai", None, None, None, None, [])
+    # No feature switched on; the package carries no store state, so the end card keeps the legacy CTA.
+    assert script["video_features"] == [] and script["end_card_cta"] == "caydexinvest.com"
+    assert script["data_card_slot"] is None
     assert script["outlets"] == ["x", "youtube"]
     # Image posts off: the formats are frozen all the same (text / video), with no image to draw.
     assert script["post_formats"] == {"x": "text", "youtube": "video"}
@@ -2573,6 +2599,9 @@ async def test_a_freeze_failure_keeps_the_paid_package_without_formats(world, mo
     row = _script_row(sb, rid)
     assert row["status"] == "accepted" and row["generations"] == 1
     assert "post_formats" not in row["output"] and "image_footer" not in row["output"]
+    # Batch 1: the day that should have carried the picture says why it did not (X is off by default).
+    assert row["output"]["image_fallback"] == {"reason": "freeze_failed",
+                                               "platforms": ["bluesky", "facebook", "linkedin", "threads"]}
     assert any(r.levelno == logging.ERROR and "could not freeze the post formats" in r.getMessage()
                for r in caplog.records)
     script = (await svc.kick(rid, claim=_holder(svc, rid)))["script"]
@@ -2750,6 +2779,9 @@ async def test_an_old_worker_holding_the_run_gets_text_posts_and_a_warning_namin
     assert "image_footer" not in out and out["image_post"] == _IMG
     warned = [r.getMessage() for r in caplog.records if "did not declare" in r.getMessage()]
     assert len(warned) == 1 and "'phase4'" in warned[0] and rid in warned[0] and "TEXT" in warned[0]
+    # Batch 1: recorded for the decision message and the digest (X too: MARKETING_X_IMAGES is on here).
+    assert out["image_fallback"] == {"reason": "worker_capability",
+                                     "platforms": ["bluesky", "facebook", "linkedin", "threads", "x"]}
 
 
 @pytest.mark.parametrize("declared_at_start, declared_at_write, expected", [
@@ -2805,6 +2837,9 @@ async def test_a_run_that_cannot_be_read_at_write_time_freezes_text(world, monke
     assert row["status"] == "accepted" and set(row["output"]["post_formats"].values()) == {"text", "video"}
     assert any("could not read run_id" in r.getMessage() and "frozen as text" in r.getMessage()
                for r in caplog.records)
+    # Batch 1: a ledger blip is "the picture could not be prepared" — never the worker's fault.
+    assert row["output"]["image_fallback"] == {"reason": "freeze_failed",
+                                               "platforms": ["bluesky", "facebook", "linkedin", "threads", "x"]}
 
 
 @pytest.mark.asyncio
@@ -2817,12 +2852,1696 @@ async def test_with_image_posts_off_the_holder_is_never_consulted(world, monkeyp
     _run_row(sb, rid)["metadata"].pop("worker_capabilities")
     asked: List[str] = []
 
-    async def spy(run_id, gen_id):
+    async def spy(run_id, gen_id, **_kw):
         asked.append(run_id)
-        return True
+        return None
 
-    monkeypatch.setattr(svc, "_holder_renders_images", spy)
+    monkeypatch.setattr(svc, "_holder_image_block", spy)
     await svc.kick(rid, claim=_holder(svc, rid))
     await _drain(svc)
     assert asked == []
-    assert set(_script_row(sb, rid)["output"]["post_formats"].values()) == {"text", "video"}
+    out = _script_row(sb, rid)["output"]
+    assert set(out["post_formats"].values()) == {"text", "video"}
+    assert "image_fallback" not in out          # switches off: a text day on purpose, never a fallback
+
+
+# ── Batch 1 (2026-10-15): MARKETING_IMAGE_PLATFORMS and the `image_fallback` reason ─────────────
+#
+# Which platforms post the day's picture is a switch read at write time (X keeps MARKETING_X_IMAGES),
+# and a day that SHOULD have carried the picture but froze some of those platforms as text says why:
+# `output.image_fallback = {"reason": <schemas.IMAGE_FALLBACK_REASONS code>, "platforms": [...]}`,
+# which create_posts stamps on the posts. A platform left off on purpose (or X with its switch off) is
+# text on purpose — never a fallback.
+
+import ast  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from app.schemas import marketing as schemas  # noqa: E402
+from app.services.marketing import template_onscreen  # noqa: E402
+
+_PICTURE_DEFAULT = "bluesky,facebook,linkedin,threads"
+_FOUR = ["bluesky", "facebook", "linkedin", "threads"]
+#: 500 characters, 502 UTF-8 bytes (the value line's em dash): over Threads' picture-post limit.
+_LONG_THREADS = "a" * 499 + "—"
+
+
+def _freeze_before_batch_1(output: Dict[str, Any], run_date: date, *, image_posts: bool,
+                           x_images: bool) -> Dict[str, Any]:
+    """The freeze's DECISIONS exactly as they were before Batch 1 (drop 1 + drop 2, logging left out) —
+    the reference a default-argument freeze must still reproduce, key for key, byte for byte."""
+    out = dict(output)
+    template = output.get("authorship") == "template"
+    template_footer = output.get("image_footer")
+    if template and (not isinstance(template_footer, str) or not template_footer.strip()):
+        raise ValueError("a template output carries no image_footer")
+    image_post = schemas.normalize_image_post(output.get("image_post"))
+    out["image_post"] = image_post
+    image_ok = image_post is not None
+    if template and image_ok and template_onscreen.validate_image_spec(
+            output.get("image_spec"), template_onscreen.logo_keys(output.get("logos")),
+            footer=template_footer) is not None:
+        image_ok = False
+    posts = output.get("posts") if isinstance(output.get("posts"), dict) else {}
+    formats: Dict[str, str] = {}
+    for platform in sorted(posts):
+        allowed = schemas.POST_FORMATS_BY_PLATFORM.get(platform, ())
+        if "video" in allowed:
+            formats[platform] = "video"
+        elif "image" in allowed and image_posts and image_ok and (platform != "x" or x_images):
+            caption = posts[platform].get("caption") if isinstance(posts[platform], dict) else None
+            size = len(caption.encode("utf-8")) if isinstance(caption, str) else 0
+            formats[platform] = "text" if platform == "threads" and size > 500 else "image"
+        elif "text" in allowed:
+            formats[platform] = "text"
+    out["post_formats"] = formats
+    if template:
+        out["image_footer"] = template_footer
+    elif "image" in formats.values():
+        out["image_footer"] = post_copy.image_footer(run_date)
+    else:
+        out.pop("image_footer", None)
+    return out
+
+
+def _template_output(**over: Any) -> Dict[str, Any]:
+    """A minimal TEMPLATE output whose image_spec can never validate (no such layout, no logos)."""
+    out = {"authorship": "template", "image_footer": "Educational only · Source: SEC filings · Caydex",
+           "image_spec": {"layout": "table"}, "logos": [], "image_post": copy.deepcopy(_IMG),
+           "posts": {p: {"platform": p, "caption": f"copy {p}"} for p in _ALL_POSTS}}
+    out.update(over)
+    return out
+
+
+def _freeze_inputs() -> List[Dict[str, Any]]:
+    """Packages across every branch of the freeze: a usable / unusable / absent / garbage image post;
+    every outlet, a few, only X, none; a Threads caption under and over its byte limit; a template whose
+    spec does not validate; a stale `image_fallback` and footer copied into the input."""
+    cases: List[Dict[str, Any]] = []
+    for image_post in ("usable", {"title": "only"}, "absent", "a string", None):
+        for posts in (_ALL_POSTS, ("bluesky", "tiktok"), ("x", "threads"), ("x",), ()):
+            for long_threads in (False, True):
+                pkg = _image_package(posts=posts)
+                if image_post == "absent":
+                    del pkg["image_post"]
+                elif image_post != "usable":
+                    pkg["image_post"] = image_post
+                if long_threads and "threads" in pkg["posts"]:
+                    pkg["posts"]["threads"]["caption"] = _LONG_THREADS
+                cases.append(pkg)
+    cases.append(_image_package(image_footer="a stale footer"))
+    cases.append(_template_output())
+    cases.append(_template_output(image_post=None))
+    return cases
+
+
+def test_a_default_freeze_decides_exactly_as_before_batch_1():
+    """`image_platforms` defaults to every image platform: every caller that does not pass it (the
+    preview script, the tests, a worker read-back) gets the formats, image post and footer it got before
+    Batch 1, byte for byte. The ONE new key, `image_fallback`, appears exactly when image posts are on and
+    a platform that should have posted the picture froze as text."""
+    n = 0
+    for pkg in _freeze_inputs():
+        for image_posts in (False, True):
+            for x_images in (False, True):
+                old = _freeze_before_batch_1(copy.deepcopy(pkg), POSTING_DAY, image_posts=image_posts,
+                                             x_images=x_images)
+                for kw in ({}, {"image_platforms": None}, {"image_platforms": schemas.IMAGE_PLATFORMS}):
+                    new = ss.freeze_post_formats(copy.deepcopy(pkg), POSTING_DAY, image_posts=image_posts,
+                                                 x_images=x_images, run_id="r", **kw)
+                    fallback = new.pop("image_fallback", None)
+                    assert new == old, (pkg.get("posts", {}).keys(), image_posts, x_images, kw)
+                    pictured = sorted(p for p in pkg.get("posts") or {}
+                                      if p in schemas.IMAGE_PLATFORMS or (p == "x" and x_images))
+                    fallen = [p for p in pictured if old["post_formats"].get(p) != "image"] if image_posts else []
+                    assert (fallback or {}).get("platforms", []) == fallen
+                    if fallback is not None:
+                        assert fallback["reason"] in schemas.IMAGE_FALLBACK_REASONS
+                        assert set(fallback) == {"reason", "platforms"}
+                    n += 1
+    assert n >= 600   # anti-vacuity: the matrix is really walked
+
+
+def test_the_image_fallback_key_is_the_shared_contract():
+    assert ss.IMAGE_FALLBACK_KEY == schemas.POST_METADATA_IMAGE_FALLBACK == "image_fallback"
+    assert set(schemas.IMAGE_FALLBACK_REASONS) == {"image_dropped", "worker_capability", "image_spec_invalid",
+                                                   "threads_caption_long", "freeze_failed"}
+    assert all(isinstance(w, str) and w.strip() for w in schemas.IMAGE_FALLBACK_REASONS.values())
+
+
+def test_the_worker_capability_words_name_this_picture_never_every_picture():
+    """Review CTA-3 (2026-10-16): `_holder_image_block` answers "worker_capability" when the holder lacks ANY
+    capability the day's picture needs — post_image, or news_templates on a template day, or layouts_2b for a
+    `pair` / `grid` layout (test_the_holder_check_names_its_reason walks all three) — and a worker lacking
+    only the last two draws a lesson picture every day. So the owner words (the POSTS decision message, the
+    weekly digest) say it cannot draw THIS picture, never that it cannot draw pictures."""
+    words = schemas.IMAGE_FALLBACK_REASONS["worker_capability"]
+    assert words == "the worker that ran the day cannot draw this picture"
+    assert not words.endswith("pictures")
+
+
+@pytest.mark.parametrize("label, pkg, kw, reason, fallen", [
+    ("an unusable image post", _image_package(image_post={"title": "only"}), {}, "image_dropped", _FOUR),
+    ("no image post", {k: v for k, v in _image_package().items() if k != "image_post"}, {}, "image_dropped",
+     _FOUR),
+    ("no image post, X images on", _image_package(image_post=["t", "a", "b"]), {"x_images": True},
+     "image_dropped", _FOUR + ["x"]),
+    ("the holder cannot draw it", _image_package(), {"image_blocked": "worker_capability"},
+     "worker_capability", _FOUR),
+    ("the run could not be read", _image_package(), {"image_blocked": "freeze_failed"}, "freeze_failed", _FOUR),
+    ("a holder block beats a dropped image", _image_package(image_post={"title": "only"}),
+     {"image_blocked": "worker_capability", "x_images": True}, "worker_capability", _FOUR + ["x"]),
+    ("a template spec that does not validate", _template_output(), {}, "image_spec_invalid", _FOUR),
+    ("a template without its alt text", _template_output(image_post=None), {}, "image_dropped", _FOUR),
+    ("a long Threads caption", _image_package(), {"long_threads": True}, "threads_caption_long", ["threads"]),
+    ("only some platforms listed, one dropped", _image_package(image_post={"title": "only"}),
+     {"image_platforms": ("facebook", "threads")}, "image_dropped", ["facebook", "threads"]),
+])
+def test_each_fallback_reason_is_recorded_with_the_platforms_it_cost(label, pkg, kw, reason, fallen, caplog):
+    pkg = copy.deepcopy(pkg)
+    kw = dict(kw)
+    if kw.pop("long_threads", False):
+        pkg["posts"]["threads"]["caption"] = _LONG_THREADS
+    x_images = kw.pop("x_images", False)
+    with caplog.at_level(logging.INFO, logger=ss.logger.name):
+        out = ss.freeze_post_formats(pkg, POSTING_DAY, image_posts=True, x_images=x_images, run_id="run-5", **kw)
+    assert out["image_fallback"] == {"reason": reason, "platforms": fallen}, label
+    assert all(out["post_formats"][p] == "text" for p in fallen)
+    pictured = [p for p in out["post_formats"] if out["post_formats"][p] == "image"]
+    assert not set(pictured) & set(fallen)
+    assert mrs.frozen_post_formats(out) == out["post_formats"]           # what is stored reads back
+    logged = [r.getMessage() for r in caplog.records if "recorded as image_fallback" in r.getMessage()]
+    assert len(logged) == 1 and f"reason={reason}" in logged[0] and "run-5" in logged[0]
+
+
+def test_a_platform_left_off_the_image_platforms_is_text_on_purpose_never_a_fallback():
+    out = ss.freeze_post_formats(_image_package(), POSTING_DAY, image_posts=True, x_images=False,
+                                 image_platforms=("bluesky",))
+    assert out["post_formats"] == {**_VIDEO_FORMATS, "x": "text", "bluesky": "image", "facebook": "text",
+                                   "linkedin": "text", "threads": "text"}
+    assert "image_fallback" not in out and out["image_footer"] == post_copy.image_footer(POSTING_DAY)
+    # none listed: every post text, no footer — and still no fallback (the owner chose it)
+    out = ss.freeze_post_formats(_image_package(), POSTING_DAY, image_posts=True, x_images=False, image_platforms=())
+    assert set(out["post_formats"].values()) == {"text", "video"}
+    assert "image_fallback" not in out and "image_footer" not in out
+    # a listed platform the package carries no copy for costs nothing either
+    out = ss.freeze_post_formats(_image_package(posts=("tiktok", "bluesky")), POSTING_DAY, image_posts=True,
+                                 x_images=False, image_platforms=("facebook",))
+    assert out["post_formats"] == {"tiktok": "video", "bluesky": "text"} and "image_fallback" not in out
+
+
+@pytest.mark.parametrize("x_images", [False, True])
+def test_x_in_the_image_platforms_is_ignored_x_follows_its_own_switch(x_images):
+    out = ss.freeze_post_formats(_image_package(), POSTING_DAY, image_posts=True, x_images=x_images,
+                                 image_platforms=("x", "bluesky", "pinterest", None, 3, "BLUESKY"))
+    assert out["post_formats"]["x"] == ("image" if x_images else "text")
+    assert out["post_formats"]["bluesky"] == "image"
+    assert {out["post_formats"][p] for p in ("facebook", "linkedin", "threads")} == {"text"}
+    assert "image_fallback" not in out
+
+
+def test_x_while_its_switch_is_off_is_never_a_fallback():
+    out = ss.freeze_post_formats(_image_package(image_post=None) | {"image_post": None}, POSTING_DAY,
+                                 image_posts=True, x_images=False)
+    assert "x" not in out["image_fallback"]["platforms"] and out["image_fallback"]["platforms"] == _FOUR
+
+
+@pytest.mark.parametrize("blocked", [None, "worker_capability", "freeze_failed"])
+def test_with_image_posts_off_there_is_never_a_fallback(blocked):
+    """Image posts off is a text day on purpose: no reason recorded, whatever else is true."""
+    for pkg in (_image_package(), _image_package(image_post={"title": "only"}), _template_output()):
+        out = ss.freeze_post_formats(copy.deepcopy(pkg), POSTING_DAY, image_posts=False, x_images=True,
+                                     image_blocked=blocked)
+        assert "image_fallback" not in out and "image" not in out["post_formats"].values()
+
+
+def test_a_stale_image_fallback_in_the_input_is_never_carried_over():
+    stale = {"reason": "worker_capability", "platforms": ["bluesky"]}
+    out = ss.freeze_post_formats(_image_package(image_fallback=stale), POSTING_DAY, image_posts=True, x_images=False)
+    assert "image_fallback" not in out                          # this freeze's own verdict: none
+    out = ss.freeze_post_formats(_image_package(image_post={"title": "only"}, image_fallback=stale), POSTING_DAY,
+                                 image_posts=True, x_images=False)
+    assert out["image_fallback"] == {"reason": "image_dropped", "platforms": _FOUR}
+
+
+@pytest.mark.parametrize("bad", ["bluesky", b"bluesky", "bluesky,facebook"])
+def test_image_platforms_is_a_collection_never_one_string(bad):
+    """A bare string would iterate as characters (no platform at all): refused loudly instead —
+    `_frozen_output` then stores the package without formats and records `freeze_failed`."""
+    with pytest.raises(ValueError, match="not one string"):
+        ss.freeze_post_formats(_image_package(), POSTING_DAY, image_posts=True, x_images=False, image_platforms=bad)
+
+
+@pytest.mark.parametrize("bad", ["worker", "", "WORKER_CAPABILITY", "image_fallback", 1, True])
+@pytest.mark.parametrize("image_posts", [False, True])
+def test_an_unknown_image_blocked_code_is_a_value_error(bad, image_posts):
+    with pytest.raises(ValueError, match="not an image-fallback reason"):
+        ss.freeze_post_formats(_image_package(), POSTING_DAY, image_posts=image_posts, x_images=False,
+                               image_blocked=bad)
+
+
+# ── MARKETING_IMAGE_PLATFORMS: the setting and its reader ─────────────────────────────────────
+
+
+def test_the_image_platforms_setting_is_declared_with_every_image_platform():
+    from app.config import Settings, settings
+
+    assert hasattr(settings, "MARKETING_IMAGE_PLATFORMS")
+    default = Settings.model_fields["MARKETING_IMAGE_PLATFORMS"].default
+    assert default == _PICTURE_DEFAULT == ",".join(schemas.IMAGE_PLATFORMS)
+    assert ss.parse_image_platforms(default) == schemas.IMAGE_PLATFORMS
+    assert "x" not in schemas.IMAGE_PLATFORMS
+
+
+def test_the_config_literal_equals_the_image_platforms():
+    """config.py imports no app module, so its validator carries an inline copy of IMAGE_PLATFORMS. Read by
+    AST (the literal itself) and by behaviour (every platform survives the validator)."""
+    from app.config import Settings
+
+    src = (Path(__file__).resolve().parents[1] / "app" / "config.py").read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "_image_platforms_fail_closed")
+    literals = [ast.literal_eval(a.value) for a in ast.walk(fn)
+                if isinstance(a, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "known" for t in a.targets)]
+    assert literals == [schemas.IMAGE_PLATFORMS]
+    every = ",".join(schemas.IMAGE_PLATFORMS)
+    assert Settings(MARKETING_IMAGE_PLATFORMS=every).MARKETING_IMAGE_PLATFORMS == \
+        ",".join(sorted(schemas.IMAGE_PLATFORMS))
+
+
+@pytest.mark.parametrize("raw, expected, error_words", [
+    (" Threads , BLUESKY ", "bluesky,threads", None),
+    ("bluesky,bluesky", "bluesky", None),
+    ("", "", None),
+    ("  , ", "", None),
+    ("x,bluesky", "bluesky", "MARKETING_X_IMAGES"),             # X keeps its own switch
+    ("X", "", "MARKETING_X_IMAGES"),
+    ("pinterest,facebook", "facebook", "unknown"),
+    ("tiktok", "", "unknown"),                                  # a video platform posts no picture here
+    ("bluesky;facebook", "", "unknown"),                       # one unknown token — never half-parsed
+])
+def test_the_image_platforms_setting_normalises_and_never_fails_the_deploy(monkeypatch, caplog, raw, expected,
+                                                                           error_words):
+    from app.config import Settings
+
+    monkeypatch.setenv("MARKETING_IMAGE_PLATFORMS", raw)
+    with caplog.at_level(logging.ERROR, logger="app.config"):
+        got = Settings().MARKETING_IMAGE_PLATFORMS
+    assert got == expected
+    errors = [r.getMessage() for r in caplog.records if r.name == "app.config" and r.levelno >= logging.ERROR]
+    assert bool(errors) == (error_words is not None), errors
+    for m in errors:
+        assert "MARKETING_IMAGE_PLATFORMS" in m
+    if error_words:
+        assert any(error_words in m for m in errors), errors
+    assert ss.parse_image_platforms(got) == tuple(p for p in schemas.IMAGE_PLATFORMS if p in got.split(","))
+
+
+@pytest.mark.parametrize("value", [None, 1, ["bluesky"]])
+def test_a_non_string_image_platforms_setting_is_no_platform(caplog, value):
+    from app.config import Settings
+
+    with caplog.at_level(logging.ERROR, logger="app.config"):
+        assert Settings(MARKETING_IMAGE_PLATFORMS=value).MARKETING_IMAGE_PLATFORMS == ""
+    assert any("MARKETING_IMAGE_PLATFORMS" in r.getMessage() for r in caplog.records if r.name == "app.config")
+
+
+@pytest.mark.parametrize("raw, expected, logs", [
+    ("threads,bluesky", ("bluesky", "threads"), False),          # always in IMAGE_PLATFORMS order
+    (" LinkedIn ,facebook", ("facebook", "linkedin"), False),
+    ("", (), False),
+    ("x,threads", ("threads",), True),
+    ("x;threads", (), True),
+    (None, (), True),
+    (5, (), True),
+    (["bluesky"], (), True),
+])
+def test_parse_image_platforms_re_validates_a_raw_value(raw, expected, logs, caplog):
+    """A value set on the live settings object skips the Settings validator: the reader re-validates it
+    (fail closed to text posts), logging at ERROR, and never raises."""
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        assert ss.parse_image_platforms(raw) == expected
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert bool(errors) == logs
+    assert all("MARKETING_IMAGE_PLATFORMS" in r.getMessage() for r in errors)
+
+
+# ── _frozen_output: the switch read at write time, every reason recorded ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_image_platforms_switch_is_read_at_write_time(world, monkeypatch):
+    """Read when the accepted output is written (like MARKETING_X_IMAGES), not when the generation
+    starts: a flip during a slow generation lands on THIS write."""
+    sb, runs = world
+    _image_switches(monkeypatch, images=True, x_images=False)
+    monkeypatch.setattr(mrs.settings, "MARKETING_IMAGE_PLATFORMS", _PICTURE_DEFAULT)
+    writer = ImageWriter(["accepted"])
+    writer.gate = asyncio.Event()
+    svc = ss.MarketingScriptService(runs, writer=writer)
+    rid = _run(sb, POSTING_DAY)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    for _ in range(500):
+        if writer.calls:
+            break
+        await asyncio.sleep(0.01)
+    assert writer.calls and not writer.gate.is_set()
+    monkeypatch.setattr(mrs.settings, "MARKETING_IMAGE_PLATFORMS", "threads")
+    writer.gate.set()
+    await _drain(svc)
+    out = _script_row(sb, rid)["output"]
+    assert out["post_formats"] == {**_VIDEO_FORMATS, "x": "text", "threads": "image", "bluesky": "text",
+                                   "facebook": "text", "linkedin": "text"}
+    assert "image_fallback" not in out and out["image_footer"] == post_copy.image_footer(POSTING_DAY)
+
+
+@pytest.mark.asyncio
+async def test_a_raw_image_platforms_value_is_re_validated_at_write_time(world, monkeypatch, caplog):
+    sb, runs = world
+    _image_switches(monkeypatch, images=True, x_images=False)
+    monkeypatch.setattr(mrs.settings, "MARKETING_IMAGE_PLATFORMS", "x, BlueSky ,pinterest")
+    svc = ss.MarketingScriptService(runs, writer=ImageWriter(["accepted"]))
+    rid = _run(sb, POSTING_DAY)
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        await svc.kick(rid, claim=_holder(svc, rid))
+        await _drain(svc)
+    out = _script_row(sb, rid)["output"]
+    assert out["post_formats"]["bluesky"] == "image" and out["post_formats"]["x"] == "text"
+    assert {out["post_formats"][p] for p in ("facebook", "linkedin", "threads")} == {"text"}
+    assert "image_fallback" not in out
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("MARKETING_X_IMAGES" in m for m in errors) and any("pinterest" in m for m in errors)
+
+
+@pytest.mark.asyncio
+async def test_a_freeze_that_raises_under_a_holder_that_cannot_draw_records_the_holders_reason(world, monkeypatch):
+    """Both true: the freeze raised AND the holder could not draw the picture. The owner hears the
+    actionable one (deploy the worker), the one the freeze would have recorded itself."""
+    sb, runs = world
+    _image_switches(monkeypatch, images=True, x_images=False)
+
+    def broken(*_a, **_k):
+        raise RuntimeError("freeze broke")
+
+    monkeypatch.setattr(ss, "freeze_post_formats", broken)
+    svc = ss.MarketingScriptService(runs, writer=ImageWriter(["accepted"]))
+    rid = _run(sb, POSTING_DAY)
+    _run_row(sb, rid)["metadata"].pop("worker_capabilities")
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    out = _script_row(sb, rid)["output"]
+    assert "post_formats" not in out and out["image_fallback"] == {"reason": "worker_capability", "platforms": _FOUR}
+
+
+@pytest.mark.asyncio
+async def test_a_freeze_failure_with_no_picture_platform_records_nothing(world, monkeypatch):
+    sb, runs = world
+    _image_switches(monkeypatch, images=True, x_images=False)
+    monkeypatch.setattr(mrs.settings, "MARKETING_IMAGE_PLATFORMS", "")
+
+    def broken(*_a, **_k):
+        raise RuntimeError("freeze broke")
+
+    monkeypatch.setattr(ss, "freeze_post_formats", broken)
+    svc = ss.MarketingScriptService(runs, writer=ImageWriter(["accepted"]))
+    rid = _run(sb, POSTING_DAY)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    out = _script_row(sb, rid)["output"]
+    assert "post_formats" not in out and "image_fallback" not in out
+
+
+@pytest.mark.asyncio
+async def test_the_holder_check_names_its_reason(world, monkeypatch):
+    sb, runs = world
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
+    rid = _run(sb, POSTING_DAY)
+    assert await svc._holder_image_block(rid, "g") is None
+    _run_row(sb, rid)["metadata"]["worker_capabilities"] = []
+    assert await svc._holder_image_block(rid, "g") == "worker_capability"
+    _run_row(sb, rid)["metadata"]["worker_capabilities"] = ["post_image"]
+    assert await svc._holder_image_block(rid, "g", template=True) == "worker_capability"   # no news_templates
+    # review CTA-3: a drop-2a holder draws lesson pictures and 2a layouts, but not a 2b layout — the same
+    # code, which is why its owner words name THIS picture (test_the_worker_capability_words_name_…)
+    _run_row(sb, rid)["metadata"]["worker_capabilities"] = ["post_image", "news_templates"]
+    assert await svc._holder_image_block(rid, "g") is None
+    for layout in ("rows", "spotlight", "bars"):                     # the drop-2a layouts
+        assert await svc._holder_image_block(rid, "g", template=True, image_layout=layout) is None
+    for layout in schemas.WORKER_LAYOUTS_2B:
+        assert await svc._holder_image_block(rid, "g", template=True, image_layout=layout) == "worker_capability"
+    _run_row(sb, rid)["metadata"]["worker_capabilities"] = ["post_image", "news_templates", "layouts_2b"]
+    for layout in schemas.WORKER_LAYOUTS_2B:
+        assert await svc._holder_image_block(rid, "g", template=True, image_layout=layout) is None
+    assert await svc._holder_image_block(str(uuid.uuid4()), "g") == "freeze_failed"         # no such run
+
+    async def broken(_run_id):
+        raise mrs.MarketingRunError("get_run failed: 520")
+
+    monkeypatch.setattr(runs, "get_run", broken)
+    assert await svc._holder_image_block(rid, "g") == "freeze_failed"
+
+
+@pytest.mark.asyncio
+async def test_an_old_worker_image_day_stamps_its_reason_on_the_text_posts_end_to_end(world, monkeypatch):
+    """kick → accepted under a holder that cannot draw pictures → create_posts: each text post of a
+    picture platform carries `image_fallback: worker_capability`; X (its switch off) and the videos
+    carry none."""
+    sb, runs = world
+    _image_switches(monkeypatch, images=True, x_images=False)
+    svc = ss.MarketingScriptService(runs, writer=ImageWriter(["accepted"]))
+    rid = _run(sb, POSTING_DAY)
+    _run_row(sb, rid)["metadata"].pop("worker_capabilities")
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    assert _script_row(sb, rid)["output"]["image_fallback"] == {"reason": "worker_capability", "platforms": _FOUR}
+    video = _run_video(sb, rid)
+    posts = await runs.create_posts(rid, [
+        {"platform": "bluesky", "format": "text"}, {"platform": "threads", "format": "text"},
+        {"platform": "x", "format": "text"}, {"platform": "youtube", "format": "video", "asset_ids": [video]},
+    ], claim=_holder_of(runs, rid))
+    stamped = {p["platform"]: p["metadata"].get(schemas.POST_METADATA_IMAGE_FALLBACK) for p in posts}
+    assert stamped == {"bluesky": "worker_capability", "threads": "worker_capability", "x": None, "youtube": None}
+
+
+@pytest.mark.parametrize("listed, x_images, expected", [
+    (frozenset({"x"}), False, []),                        # X never follows the listed set…
+    (frozenset({"x"}), True, ["x"]),                      # …only its own switch
+    (frozenset(), True, ["x"]),
+    (frozenset({"bluesky", "tiktok"}), False, ["bluesky"]),   # TikTok posts no picture, listed or not
+    (frozenset(schemas.IMAGE_PLATFORMS), False, ["bluesky"]),
+])
+def test_the_picture_platforms_are_listed_image_platforms_and_x_by_its_switch(listed, x_images, expected):
+    out = _image_package(posts=("x", "bluesky", "tiktok"))
+    assert ss._picture_platforms(out, listed, x_images) == expected
+
+
+@pytest.mark.parametrize("output", [None, "text", {}, {"posts": None}, {"posts": ["bluesky"]},
+                                    {"posts": {1: {}, None: {}, "bluesky": {}}}])
+def test_the_picture_platforms_of_a_malformed_output_never_raise(output):
+    got = ss._picture_platforms(output, frozenset(schemas.IMAGE_PLATFORMS), True)
+    assert got == (["bluesky"] if isinstance(output, dict) and isinstance(output.get("posts"), dict) else [])
+
+
+def test_only_image_platforms_members_count_even_for_a_future_picture_capable_platform(monkeypatch):
+    """`image_platforms` counts only members of schemas.IMAGE_PLATFORMS. Today every picture-capable
+    platform but X is one, so this is proven with a format map that gives a platform outside the set an
+    image format (as a later outlet might): listing it posts no picture and records no fallback."""
+    monkeypatch.setattr(ss, "POST_FORMATS_BY_PLATFORM",
+                        {**schemas.POST_FORMATS_BY_PLATFORM, "pinterest": ("text", "image")})
+    pkg = _image_package(posts=("pinterest", "bluesky"))
+    out = ss.freeze_post_formats(pkg, POSTING_DAY, image_posts=True, x_images=True,
+                                 image_platforms=("pinterest", "bluesky"))
+    assert out["post_formats"] == {"pinterest": "text", "bluesky": "image"} and "image_fallback" not in out
+
+
+# ══ Batch 2 (2026-10-19, "first seconds"): the run's frozen VIDEO features ═══════════════════════════
+#
+# MARKETING_VIDEO_FEATURES is read at WRITE time and frozen into the accepted output as `video_features`:
+# sorted(switch ∩ what applies to the script's kind) — a lesson {hook_card, push_in}, a template
+# {data_card, push_in} — ONLY when the worker holding the run declared `video_v2` (else none: today's
+# video). ONE run read at write time serves both capability decisions (image posts and video). The script
+# read-back always carries `video_features` and `end_card_cta` (their presence is the worker's signal).
+
+import json  # noqa: E402
+
+from app.services.marketing import company_news_rules as news_rules  # noqa: E402
+from app.services.marketing import news_templates  # noqa: E402
+
+_ALL_FEATURES = "hook_card,data_card,push_in"
+#: What the Batch 2 worker declares on its claim (marketing/main.py WORKER_CAPABILITIES).
+_B2_CAPS = ["layouts_2b", "news_templates", "post_image", "video_v2"]
+
+
+def _video_switch(monkeypatch, raw: Any) -> None:
+    monkeypatch.setattr(ss.settings, "MARKETING_VIDEO_FEATURES", raw)
+
+
+def _b2_run(sb, day: date = POSTING_DAY, *, caps: Optional[List[str]] = None, **extra) -> str:
+    rid = _run(sb, day, **extra)
+    _run_row(sb, rid)["metadata"]["worker_capabilities"] = list(_B2_CAPS if caps is None else caps)
+    return rid
+
+
+def _count_holder_reads(monkeypatch, runs, writer) -> List[str]:
+    """Every `get_run` the service makes AFTER the writer was called — i.e. the write-time holder reads."""
+    seen: List[str] = []
+    real = runs.get_run
+
+    async def counting(run_id):
+        if writer.calls:
+            seen.append(run_id)
+        return await real(run_id)
+
+    monkeypatch.setattr(runs, "get_run", counting)
+    return seen
+
+
+# ── the setting ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_the_video_features_setting_is_declared_off_by_default():
+    from app.config import Settings, settings
+
+    assert hasattr(settings, "MARKETING_VIDEO_FEATURES")
+    assert Settings.model_fields["MARKETING_VIDEO_FEATURES"].default == ""
+    assert ss.parse_video_features("") == ()
+
+
+def test_the_config_literal_equals_the_video_features():
+    """config.py imports no app module, so its validator carries an inline copy of VIDEO_FEATURES. Read by AST
+    (the literal itself) and by behaviour (every feature survives the validator)."""
+    from app.config import Settings
+
+    src = (Path(__file__).resolve().parents[1] / "app" / "config.py").read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "_video_features_fail_closed")
+    literals = [ast.literal_eval(a.value) for a in ast.walk(fn)
+                if isinstance(a, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "known" for t in a.targets)]
+    assert literals == [schemas.VIDEO_FEATURES]
+    assert Settings(MARKETING_VIDEO_FEATURES=",".join(schemas.VIDEO_FEATURES)).MARKETING_VIDEO_FEATURES == \
+        ",".join(sorted(schemas.VIDEO_FEATURES))
+
+
+@pytest.mark.parametrize("raw, expected, logs_error", [
+    (" Push_In , hook_card ", "hook_card,push_in", False),
+    ("data_card,data_card", "data_card", False),
+    ("", "", False),
+    (" , ", "", False),
+    ("hook_card,count_up", "hook_card", True),        # the rejected count-up is no feature
+    ("hook-card", "", True),
+    ("hook_card;push_in", "", True),                  # one unknown token — never half-parsed
+])
+def test_the_video_features_setting_normalises_and_never_fails_the_deploy(monkeypatch, caplog, raw, expected,
+                                                                         logs_error):
+    from app.config import Settings
+
+    monkeypatch.setenv("MARKETING_VIDEO_FEATURES", raw)
+    with caplog.at_level(logging.ERROR, logger="app.config"):
+        got = Settings().MARKETING_VIDEO_FEATURES
+    assert got == expected
+    errors = [r.getMessage() for r in caplog.records if r.name == "app.config" and r.levelno >= logging.ERROR]
+    assert bool(errors) == logs_error and all("MARKETING_VIDEO_FEATURES" in m for m in errors)
+    assert ss.parse_video_features(got) == tuple(f for f in schemas.VIDEO_FEATURES if f in got.split(","))
+
+
+@pytest.mark.parametrize("value", [None, 1, ["hook_card"]])
+def test_a_non_string_video_features_setting_is_no_feature(caplog, value):
+    from app.config import Settings
+
+    with caplog.at_level(logging.ERROR, logger="app.config"):
+        assert Settings(MARKETING_VIDEO_FEATURES=value).MARKETING_VIDEO_FEATURES == ""
+    assert any("MARKETING_VIDEO_FEATURES" in r.getMessage() for r in caplog.records if r.name == "app.config")
+
+
+@pytest.mark.parametrize("raw, expected, logs", [
+    ("push_in,HOOK_CARD", ("hook_card", "push_in"), False),          # VIDEO_FEATURES order, whatever the input
+    (_ALL_FEATURES, schemas.VIDEO_FEATURES, False),
+    ("", (), False),
+    ("count_up", (), True),
+    (None, (), True),
+    (3, (), True),
+    (["hook_card"], (), True),
+])
+def test_parse_video_features_re_validates_a_raw_value(raw, expected, logs, caplog):
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        assert ss.parse_video_features(raw) == expected
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert bool(errors) == logs and all("MARKETING_VIDEO_FEATURES" in r.getMessage() for r in errors)
+
+
+# ── the pure freeze ──────────────────────────────────────────────────────────────────────────
+
+
+_LESSON_OUT = {"hook": "A calm idea.", "posts": {"tiktok": {"caption": "c"}}}
+
+
+@pytest.mark.parametrize("switch, holder_v2, expected", [
+    ((), True, []),
+    (schemas.VIDEO_FEATURES, False, []),                      # an older worker holds the run: today's video
+    (schemas.VIDEO_FEATURES, True, ["hook_card", "push_in"]),
+    (("push_in",), True, ["push_in"]),
+    (("hook_card",), True, ["hook_card"]),
+    (("data_card",), True, []),                               # a template feature on a lesson
+    (("data_card", "count_up", 7, None), True, []),           # unknown entries are ignored
+])
+def test_freeze_video_features_on_a_lesson(switch, holder_v2, expected):
+    assert ss.freeze_video_features(dict(_LESSON_OUT), switch=switch, holder_v2=holder_v2, run_id="r") == expected
+
+
+@pytest.mark.parametrize("hook", [None, "", "  ", " padded", "two\nlines", "x" * 601, "see https://x.example"])
+def test_a_hook_that_cannot_be_one_drawable_string_freezes_no_hook_card(hook, caplog):
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        got = ss.freeze_video_features({"hook": hook}, switch=schemas.VIDEO_FEATURES, holder_v2=True, run_id="r-1")
+    assert got == ["push_in"]
+    assert any("hook_card" in r.getMessage() and "r-1" in r.getMessage() for r in caplog.records)
+
+
+def test_a_string_switch_is_a_value_error():
+    for bad in ("hook_card", b"push_in"):
+        with pytest.raises(ValueError, match="collection"):
+            ss.freeze_video_features(dict(_LESSON_OUT), switch=bad, holder_v2=True)
+
+
+# ── a lesson day, through the kick ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("caps, expected", [
+    (_B2_CAPS, ["hook_card", "push_in"]),
+    (["post_image", "news_templates", "layouts_2b"], None),        # a drop-2b worker: no video_v2
+    ([], None),
+])
+@pytest.mark.asyncio
+async def test_a_lesson_freezes_its_video_features_only_for_a_video_v2_holder(world, monkeypatch, caplog, caps,
+                                                                              expected):
+    sb, runs = world
+    _video_switch(monkeypatch, _ALL_FEATURES)
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
+    rid = _b2_run(sb, caps=caps, worker_version="drop2b-image")
+    with caplog.at_level(logging.INFO, logger=ss.logger.name):
+        await svc.kick(rid, claim=_holder(svc, rid))
+        await _drain(svc)
+    out = _script_row(sb, rid)["output"]
+    assert out.get("video_features") == expected
+    script = (await svc.kick(rid, claim=_holder(svc, rid)))["script"]
+    assert script["video_features"] == (expected or [])
+    accepted = [r.getMessage() for r in caplog.records if r.getMessage().startswith("marketing script ACCEPTED")]
+    assert len(accepted) == 1 and f"video_features={expected or []}" in accepted[0]
+    warned = [r.getMessage() for r in caplog.records if "did not declare 'video_v2'" in r.getMessage()]
+    if expected is None:
+        assert len(warned) == 1 and rid in warned[0] and "'drop2b-image'" in warned[0] and "hook_card" in warned[0]
+    else:
+        assert not warned
+
+
+@pytest.mark.parametrize("raw", ["", "data_card"], ids=["switch_off", "template_only_feature"])
+@pytest.mark.asyncio
+async def test_no_applicable_feature_means_no_holder_read_and_no_key(world, monkeypatch, raw):
+    """Byte-identical to before Batch 2: with image posts off and no feature that applies to the day's kind,
+    the accepted write reads no run and stores no `video_features` key."""
+    sb, runs = world
+    _video_switch(monkeypatch, raw)
+    writer = FakeWriter(["accepted"])
+    svc = ss.MarketingScriptService(runs, writer=writer)
+    rid = _b2_run(sb)
+    reads = _count_holder_reads(monkeypatch, runs, writer)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    assert reads == []
+    assert "video_features" not in _script_row(sb, rid)["output"]
+
+
+@pytest.mark.parametrize("images, features", [(True, ""), (False, "push_in"), (True, _ALL_FEATURES)])
+@pytest.mark.asyncio
+async def test_one_holder_read_serves_every_capability_decision(world, monkeypatch, images, features):
+    """The generation's worst case counts ONE write-time run read (_HOLDER_STATEMENTS): image posts and video
+    features share it — and both decisions still come out of it."""
+    sb, runs = world
+    _image_switches(monkeypatch, images=images)
+    _video_switch(monkeypatch, features)
+    writer = ImageWriter(["accepted"])
+    svc = ss.MarketingScriptService(runs, writer=writer)
+    rid = _b2_run(sb)
+    reads = _count_holder_reads(monkeypatch, runs, writer)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    assert reads == [rid] and ss._HOLDER_STATEMENTS == 1
+    out = _script_row(sb, rid)["output"]
+    assert (out["post_formats"]["bluesky"] == "image") is images
+    want = sorted(set(features.split(",")) & {"hook_card", "push_in"}) if features else None
+    assert out.get("video_features") == want
+
+
+@pytest.mark.asyncio
+async def test_a_holder_read_that_fails_freezes_no_feature_and_the_picture_says_why(world, monkeypatch, caplog):
+    sb, runs = world
+    _image_switches(monkeypatch, images=True)
+    _video_switch(monkeypatch, _ALL_FEATURES)
+    writer = ImageWriter(["accepted"])
+    svc = ss.MarketingScriptService(runs, writer=writer)
+    rid = _b2_run(sb)
+    real = runs.get_run
+
+    async def broken_after_the_model_call(run_id):
+        if writer.calls:
+            raise mrs.MarketingRunError("get_run failed: 520")
+        return await real(run_id)
+
+    monkeypatch.setattr(runs, "get_run", broken_after_the_model_call)
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        await svc.kick(rid, claim=_holder(svc, rid))
+        await _drain(svc)
+    row = _script_row(sb, rid)
+    assert row["status"] == "accepted" and "video_features" not in row["output"]
+    assert row["output"]["image_fallback"]["reason"] == "freeze_failed"           # Batch 1's words, unchanged
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("render the video features" in m and "no video feature this run" in m and rid in m for m in msgs)
+    assert any("render the post image" in m and "frozen as text" in m for m in msgs)
+
+
+@pytest.mark.asyncio
+async def test_the_video_switch_is_read_at_write_time_and_then_frozen(world, monkeypatch):
+    """Read when the accepted output is written (like MARKETING_IMAGE_PLATFORMS): a flip during a slow
+    generation lands on THIS write — and once written, a later flip changes nothing the worker reads."""
+    sb, runs = world
+    _video_switch(monkeypatch, "")
+    writer = FakeWriter(["accepted"])
+    writer.gate = asyncio.Event()
+    svc = ss.MarketingScriptService(runs, writer=writer)
+    rid = _b2_run(sb)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    for _ in range(500):
+        if writer.calls:
+            break
+        await asyncio.sleep(0.01)
+    assert writer.calls and not writer.gate.is_set()
+    _video_switch(monkeypatch, "hook_card")
+    writer.gate.set()
+    await _drain(svc)
+    assert _script_row(sb, rid)["output"]["video_features"] == ["hook_card"]
+    _video_switch(monkeypatch, "push_in")
+    assert (await svc.kick(rid, claim=_holder(svc, rid)))["script"]["video_features"] == ["hook_card"]
+    _run_row(sb, rid)["metadata"]["worker_capabilities"] = ["post_image"]      # a re-claim by an older image
+    assert (await svc.kick(rid, claim=_holder(svc, rid)))["script"]["video_features"] == ["hook_card"]
+
+
+@pytest.mark.asyncio
+async def test_a_video_features_key_in_the_package_is_never_carried_over(world, monkeypatch):
+    sb, runs = world
+    _video_switch(monkeypatch, "")
+
+    class Planting(FakeWriter):
+        async def __call__(self, *a, **k):
+            result = await super().__call__(*a, **k)
+            result.package["video_features"] = ["hook_card", "push_in"]
+            return result
+
+    svc = ss.MarketingScriptService(runs, writer=Planting(["accepted"]))
+    rid = _b2_run(sb)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    assert "video_features" not in _script_row(sb, rid)["output"]
+    assert (await svc.kick(rid, claim=_holder(svc, rid)))["script"]["video_features"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_formats_freeze_still_freezes_the_video_features(world, monkeypatch, caplog):
+    sb, runs = world
+    _image_switches(monkeypatch, images=True)
+    _video_switch(monkeypatch, _ALL_FEATURES)
+
+    def broken(*_a, **_k):
+        raise RuntimeError("freeze broke")
+
+    monkeypatch.setattr(ss, "freeze_post_formats", broken)
+    svc = ss.MarketingScriptService(runs, writer=ImageWriter(["accepted"]))
+    rid = _b2_run(sb)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    out = _script_row(sb, rid)["output"]
+    assert "post_formats" not in out and out["video_features"] == ["hook_card", "push_in"]
+
+
+@pytest.mark.asyncio
+async def test_a_video_feature_freeze_that_raises_never_costs_the_paid_package(world, monkeypatch, caplog):
+    sb, runs = world
+    _video_switch(monkeypatch, _ALL_FEATURES)
+
+    def broken(*_a, **_k):
+        raise RuntimeError("feature freeze broke")
+
+    monkeypatch.setattr(ss, "freeze_video_features", broken)
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
+    rid = _b2_run(sb)
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        await svc.kick(rid, claim=_holder(svc, rid))
+        await _drain(svc)
+    row = _script_row(sb, rid)
+    assert row["status"] == "accepted" and row["generations"] == 1 and "video_features" not in row["output"]
+    assert any(r.levelno == logging.ERROR and "could not freeze the video features" in r.getMessage()
+               and rid in r.getMessage() for r in caplog.records)
+
+
+# ── the read-back ────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("state, cta", [("live", "Search Caydex on the App Store"),
+                                        ("preorder", "Search Caydex on the App Store"),
+                                        ("prelaunch", "caydexinvest.com"), (None, "caydexinvest.com"),
+                                        ("LIVE", "caydexinvest.com"), ("<absent>", "caydexinvest.com")])
+@pytest.mark.asyncio
+async def test_an_output_accepted_before_batch_2_reads_back_as_no_feature_and_its_stores_end_card(world, state,
+                                                                                                 cta):
+    """An output without `video_features` = [] (today's video); the end card follows the store state the
+    output's captions were worded with (owner decision 6), exactly like the first comment."""
+    sb, runs = world
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
+    rid = _b2_run(sb)
+    output = _package(KEY)
+    if state != "<absent>":
+        output["store_state"] = state
+    _seed(sb, rid, status="accepted", output=output, generation_id=str(uuid.uuid4()))
+    script = (await svc.kick(rid, claim=_holder(svc, rid)))["script"]
+    assert script["video_features"] == [] and script["end_card_cta"] == cta
+    assert cta in schemas.VIDEO_BRAND_TEXT
+    assert ss.end_card_cta({"store_state": state}) == cta
+
+
+@pytest.mark.parametrize("bad", [["hook_card", "hook_card"], ["data_card"], "push_in", ["count_up"]])
+@pytest.mark.asyncio
+async def test_frozen_video_features_that_do_not_read_back_reach_the_worker_as_none(world, caplog, bad):
+    sb, runs = world
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
+    rid = _b2_run(sb)
+    _seed(sb, rid, status="accepted", output={**_package(KEY), "video_features": bad},
+          generation_id=str(uuid.uuid4()))
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        script = (await svc.kick(rid, claim=_holder(svc, rid)))["script"]
+    assert script["video_features"] == []
+    assert any("do not read back" in r.getMessage() and rid in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_frozen_hook_card_without_a_drawable_hook_is_not_sent(world, caplog):
+    sb, runs = world
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
+    rid = _b2_run(sb)
+    _seed(sb, rid, status="accepted", output={**_package(KEY), "hook": "two\nlines",
+                                              "video_features": ["hook_card", "push_in"]},
+          generation_id=str(uuid.uuid4()))
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        script = (await svc.kick(rid, claim=_holder(svc, rid)))["script"]
+    assert script["video_features"] == ["push_in"]
+    assert any("hook_card is frozen but the accepted hook" in r.getMessage() and rid in r.getMessage()
+               for r in caplog.records)
+
+
+def test_the_kick_route_serializes_the_video_fields(client, monkeypatch):
+    import app.api.v1.endpoints.marketing_internal as mi
+
+    script = {"hook": "h", "video_script": ["l"], "cards": [], "carousel_slides": [], "disclaimer_card": "d",
+              "outlets": ["tiktok"], "video_features": ["hook_card", "push_in"],
+              "end_card_cta": "Search Caydex on the App Store", "data_card_slot": 2}
+
+    class Svc:
+        def __init__(self, s):
+            self.s = s
+
+        async def kick(self, run_id, *, claim):
+            return {"status": "accepted", "source_ref": KEY, "template_id": "checklist", "script": self.s}
+
+    monkeypatch.setattr(mi, "get_marketing_script_service", lambda: Svc(script))
+    body = client.post(f"{_BASE}/runs/r1/script", headers=_H).json()
+    assert body["script"]["video_features"] == ["hook_card", "push_in"]
+    assert body["script"]["end_card_cta"] == "Search Caydex on the App Store"
+    assert body["script"]["data_card_slot"] == 2
+    # the real service's read-back always sets them; even a service shape without them serialises the KEYS
+    legacy = {k: v for k, v in script.items() if k not in ("video_features", "end_card_cta", "data_card_slot")}
+    monkeypatch.setattr(mi, "get_marketing_script_service", lambda: Svc(legacy))
+    body = client.post(f"{_BASE}/runs/r1/script", headers=_H).json()
+    assert body["script"]["video_features"] == [] and body["script"]["end_card_cta"] is None
+    assert "data_card_slot" in body["script"] and body["script"]["data_card_slot"] is None
+
+
+# ── a TEMPLATE day end to end: freeze → read-back → the server's on-screen check ─────────────
+
+
+_B2_DAY = date(2026, 10, 26)      # a Monday outside the members-elect window
+
+
+def _b2_ceo_week() -> news_rules.InsiderBuysWeek:
+    start, end = news_rules.insider_window(_B2_DAY)
+
+    def buy(sym, name, amount, shares, filed, holding="direct"):
+        return news_rules.InsiderPurchase(
+            company=news_rules.CompanyRef(symbol=sym, name=name), role="ceo", person_name=None, amount_usd=amount,
+            shares=shares, purchases=1, earliest_trade_date=filed, latest_trade_date=filed, filing_dates=(filed,),
+            holding=holding, amended=False)
+
+    return news_rules.InsiderBuysWeek(series="ceo_buys", window_start=start, window_end=end, rows=(
+        buy("LOW", "Lowe's", 2_300_000.0, 9_812.0, end - timedelta(days=3), holding="indirect"),
+        buy("SBUX", "Starbucks", 410_000.0, 4_850.0, end - timedelta(days=2))))
+
+
+def _b2_composed() -> Dict[str, Any]:
+    out = news_templates.compose(_b2_ceo_week(), run_date=_B2_DAY, store_state="live", allow_x_url=False)
+    out["logos"] = [{"key": r["key"], "name": r["name"], "url": None, "sha256": None, "bytes": None,
+                     "width": None, "height": None} for r in news_templates.logo_refs(out)]
+    return out
+
+
+def _b2_sheet() -> Dict[str, Any]:
+    rec = _b2_ceo_week()
+    return json.loads(json.dumps(news_rules.fact_sheet(rec, rejections={}, selection={
+        "plan": "monday", "chain": ["ceo_buys", "lesson"], "trail": [{"series": "ceo_buys", "outcome": "chosen"}]})))
+
+
+@pytest.mark.parametrize("caps, images, expected", [
+    (_B2_CAPS, True, ["data_card", "push_in"]),
+    (_B2_CAPS, False, ["data_card", "push_in"]),            # a data card does not need image POSTS on
+    (["post_image", "video_v2"], True, ["push_in"]),         # video_v2, but it cannot draw a template picture
+    (["layouts_2b", "news_templates", "post_image"], True, None),
+], ids=["b2", "b2_image_posts_off", "no_news_templates", "drop2b"])
+@pytest.mark.asyncio
+async def test_a_template_freezes_its_data_card_and_the_whole_chain_agrees(world, monkeypatch, caps, images,
+                                                                           expected):
+    sb, runs = world
+    monkeypatch.setattr(ss, "_today_et", lambda: _B2_DAY)
+    _image_switches(monkeypatch, images=images)
+    _video_switch(monkeypatch, _ALL_FEATURES)
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
+    rid = _b2_run(sb, _B2_DAY, caps=caps)
+    stored = json.loads(json.dumps(await svc._frozen_output(_b2_composed(), _B2_DAY, run_id=rid, gen_id="template:ceo_buys",
+                                                            image_posts=images)))
+    assert stored.get("video_features") == expected
+    # the new key never breaks the template's own re-check (create_posts runs it again)
+    assert news_templates.revalidate(stored, fact_sheet=_b2_sheet(), run_date=_B2_DAY) == []
+    sb.tables[mrs.SCRIPTS].rows.append({"run_id": rid, "run_date": _B2_DAY.isoformat(), "status": "accepted",
+                                        "source_ref": news_rules.ledger_key(_b2_ceo_week()), "template_id": "ceo_buys",
+                                        "output": stored, "fact_sheet": _b2_sheet(), "generation_id": "g",
+                                        "generations": 0, "tokens_used": 0, "violations": []})
+    script = (await svc.kick(rid, claim=_holder(svc, rid)))["script"]
+    assert script["video_features"] == (expected or [])
+    assert script["image_spec"] == stored["image_spec"] and script["image_footer"] == stored["image_footer"]
+    assert script["end_card_cta"] == "Search Caydex on the App Store"
+    # CARDS-B2-1: the data card replaces "The purchase" (card 2 of a Form 4 roundup) — never the last card,
+    # "Same week", whose "At least one more …" is the roundup's own hedge
+    with_data = bool(expected and "data_card" in expected)
+    assert script["data_card_slot"] == (1 if with_data else None)
+    if with_data:
+        assert [c["title"] for c in script["cards"]] == ["Who filed", "The purchase", "Held indirectly",
+                                                         "Same week"]
+    # what a Batch 2 worker draws: the opening card, every text card but the one the slot names, the data card
+    # (the post image), the disclaimer, the new end card
+    voice = str(uuid.uuid4())
+    sb.tables[mrs.ASSETS].rows.append({"id": voice, "run_id": rid, "kind": "audio", "status": "ready",
+                                       "storage_path": f"v-{voice}", "metadata": {"words": [{"w": "x", "s": 0, "e": 1}]}})
+    texts = [c[k] for i, c in enumerate(stored["cards"]) if i != script["data_card_slot"] for k in ("title", "body")]
+    data = template_onscreen.image_strings(stored["image_spec"], stored["logos"])
+    drawn = [*template_onscreen.opening_strings(stored["opening_card"], stored["logos"]), *texts, *data,
+             stored["disclaimer_card"], "Search Caydex on the App Store"]
+    meta = {"onscreen_text": list(dict.fromkeys(drawn)), "voice_asset_id": voice}
+    run = _run_row(sb, rid)
+    if expected and "data_card" in expected:
+        await runs._check_onscreen_text(run, meta)
+    else:
+        with pytest.raises(mrs.MarketingRequestInvalid, match="not the accepted script"):
+            await runs._check_onscreen_text(run, meta)
+    # the alt text is never a data card's (its title may BE the picture's title; a describing paragraph is not)
+    alt_only = next(p for p in stored["image_post"]["paragraphs"] if p not in meta["onscreen_text"])
+    with pytest.raises(mrs.MarketingRequestInvalid, match="not the accepted script"):
+        await runs._check_onscreen_text(run, {**meta, "onscreen_text": [*meta["onscreen_text"], alt_only]})
+
+
+def test_freeze_video_features_keeps_each_kind_to_its_own_features():
+    """The KIND decides, not what happens to be drawable: a template's hook is a drawable string, yet a
+    template never gets a hook card (it opens on its code-owned opening card); a lesson that carries a
+    drawable template-shaped picture never gets a data card."""
+    template = _b2_composed()
+    template["post_formats"] = {"tiktok": "video", "x": "text"}
+    assert mrs.hook_card_text(template) is not None and mrs.data_card_strings(template) is not None
+    assert ss.freeze_video_features(template, switch=schemas.VIDEO_FEATURES, holder_v2=True) == ["data_card", "push_in"]
+    assert ss.freeze_video_features(template, switch=("hook_card",), holder_v2=True) == []
+    lesson = {k: v for k, v in template.items() if k not in ("authorship",)}
+    assert mrs.data_card_strings(lesson) is not None
+    assert ss.freeze_video_features(lesson, switch=schemas.VIDEO_FEATURES, holder_v2=True) == ["hook_card", "push_in"]
+    assert ss.freeze_video_features(lesson, switch=("data_card",), holder_v2=True) == []
+
+
+@pytest.mark.parametrize("tamper", [
+    lambda o: o["image_spec"].__setitem__("layout", "table"),
+    lambda o: o["image_spec"].__setitem__("footer", "Another footer · Caydex"),
+    lambda o: o.__setitem__("logos", o["logos"][1:]),               # the spec names a logo the run lacks
+    lambda o: o.pop("post_formats"),                                 # the read-back would send no footer
+], ids=["bad_layout", "footer_mismatch", "missing_logo", "no_formats"])
+def test_a_template_whose_picture_cannot_be_drawn_freezes_no_data_card(tamper, caplog):
+    out = _b2_composed()
+    out["post_formats"] = {"tiktok": "video", "x": "text"}
+    assert ss.freeze_video_features(copy.deepcopy(out), switch=schemas.VIDEO_FEATURES, holder_v2=True) == [
+        "data_card", "push_in"]
+    tamper(out)
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        got = ss.freeze_video_features(out, switch=schemas.VIDEO_FEATURES, holder_v2=True, run_id="r-9")
+    assert got == ["push_in"]
+    assert any("data_card" in r.getMessage() and "r-9" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("caps, layout, expected", [
+    (["video_v2"], "rows", ("push_in",)),                                   # no news_templates: no picture
+    (["video_v2", "news_templates"], "rows", ("data_card", "push_in")),
+    (["video_v2", "news_templates"], "spotlight", ("data_card", "push_in")),
+    (["video_v2", "news_templates"], "pair", ("push_in",)),                 # a 2b layout needs layouts_2b
+    (["video_v2", "news_templates", "layouts_2b"], "grid", ("data_card", "push_in")),
+    (["news_templates", "layouts_2b", "post_image"], "rows", ()),           # no video_v2: nothing
+])
+def test_the_holder_must_be_able_to_draw_each_feature(world, caplog, caps, layout, expected):
+    sb, runs = world
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
+    run = {"id": "r-7", "worker_version": "w-1", "attempts": 2, "metadata": {"worker_capabilities": caps}}
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        got = svc._holder_video_features("r-7", "g", (run, None), ("data_card", "push_in"), image_layout=layout)
+    assert got == expected
+    warned = [r.getMessage() for r in caplog.records]
+    assert bool(warned) == (got != ("data_card", "push_in"))
+    assert all("r-7" in m and "'w-1'" in m for m in warned)
+
+
+def test_an_unreadable_or_missing_holder_draws_no_feature(world, caplog):
+    sb, runs = world
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        assert svc._holder_video_features("r-8", "g", (None, mrs.MarketingRunError("get_run failed: 520")),
+                                          ("push_in",)) == ()
+        assert svc._holder_video_features("r-8", "g", (None, None), ("push_in",)) == ()
+        assert svc._holder_video_features("r-8", "g", None, ("push_in",)) == ()
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("could not read run_id=r-8" in m and "520" in m for m in msgs)
+    assert any("r-8" in m and "not found" in m for m in msgs)
+
+
+@pytest.mark.asyncio
+async def test_a_data_card_the_read_back_cannot_carry_is_not_sent(world, caplog):
+    """The worker's copy of the logos keeps only entries it can use (an https url…): when that leaves the
+    spec unsent, the frozen data card is not sent either (ERROR) — the worker keeps its last text card."""
+    sb, runs = world
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
+    rid = _b2_run(sb, _B2_DAY)
+    out = _b2_composed()
+    out["post_formats"] = {"tiktok": "video", "x": "text"}
+    out["video_features"] = ["data_card", "push_in"]
+    out["logos"][0]["url"] = "http://not-https.example/logo.png"        # the server's check reads key + name only
+    assert mrs.data_card_strings(out) is not None
+    sb.tables[mrs.SCRIPTS].rows.append({"run_id": rid, "run_date": _B2_DAY.isoformat(), "status": "accepted",
+                                        "template_id": "ceo_buys", "output": out, "generation_id": "g"})
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        script = ss.worker_script(out, run_id=rid)
+    assert script["image_spec"] is None and script["video_features"] == ["push_in"]
+    assert any("data_card is frozen but this read-back cannot carry" in r.getMessage() and rid in r.getMessage()
+               for r in caplog.records)
+
+
+# ══ Batch 2 fix round (2026-10-20) ══════════════════════════════════════════════════════════════════
+#
+# B2-COMPL-1: a hook whose compliance leans on its first narration line (a debunk the writer read as the
+# next sentence) is never frozen as a hook card — the card shows it alone — while the push-in stays.
+# CARDS-B2-1: the read-back names the ONE card the data card replaces (`data_card_slot`), exactly when it
+# sends data_card; a template with no card a data card may replace freezes (and sends) no data card.
+
+#: (hook, the first narration line that debunks it): each passes the writer's chained scan, none alone.
+_LEANING = [("Index funds are risk-free.", "Not always. Every fund can lose value."),
+            ("Diversified portfolios can't lose.", "That's a myth, and every crash has shown why."),
+            ("The market always recovers.", "Not always. Some markets took decades to come back.")]
+
+
+@pytest.mark.parametrize("hook, line0", _LEANING, ids=[h for h, _l in _LEANING])
+def test_a_hook_that_leans_on_its_first_line_freezes_no_hook_card_and_the_push_in_stays(hook, line0, caplog):
+    output = {"hook": hook, "video_script": [line0, "A second line of the script."]}
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        got = ss.freeze_video_features(output, switch=schemas.VIDEO_FEATURES, holder_v2=True, run_id="r-lean")
+    assert got == ["push_in"]
+    (msg,) = [r.getMessage() for r in caplog.records if "hook_card" in r.getMessage()]
+    assert "r-lean" in msg and "passes the compliance checks only beside its first narration line" in msg
+    assert "shows the hook alone" in msg and hook not in msg
+    # a hook that stands alone keeps its card beside the very same first line
+    assert ss.freeze_video_features({"hook": "Why do small habits beat big plans?", "video_script": [line0]},
+                                    switch=schemas.VIDEO_FEATURES, holder_v2=True) == ["hook_card", "push_in"]
+
+
+@pytest.mark.asyncio
+async def test_a_leaning_hook_from_the_writer_is_accepted_without_a_hook_card(world, monkeypatch, caplog):
+    """End to end through the kick: the writer's accepted package keeps its hook (the chained scan passed it),
+    but the frozen features hold no hook card — and the read-back sends none."""
+    sb, runs = world
+    _video_switch(monkeypatch, _ALL_FEATURES)
+    hook, line0 = _LEANING[0]
+
+    class Leaning(FakeWriter):
+        async def __call__(self, *a, **k):
+            result = await super().__call__(*a, **k)
+            result.package["hook"] = hook
+            result.package["video_script"] = [line0, "Line two."]
+            return result
+
+    svc = ss.MarketingScriptService(runs, writer=Leaning(["accepted"]))
+    rid = _b2_run(sb)
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        await svc.kick(rid, claim=_holder(svc, rid))
+        await _drain(svc)
+    out = _script_row(sb, rid)["output"]
+    assert out["hook"] == hook and out["video_features"] == ["push_in"]
+    script = (await svc.kick(rid, claim=_holder(svc, rid)))["script"]
+    assert script["hook"] == hook and script["video_features"] == ["push_in"]
+    assert any("passes the compliance checks only beside its first narration line" in r.getMessage()
+               and rid in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("hook, line0", _LEANING[:2], ids=[h for h, _l in _LEANING[:2]])
+@pytest.mark.asyncio
+async def test_a_frozen_hook_card_whose_hook_leans_on_its_first_line_is_not_sent(world, caplog, hook, line0):
+    """A row frozen before the check (or hand-edited): the read-back drops the hook card (ERROR, naming why) and
+    keeps the push-in."""
+    sb, runs = world
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
+    rid = _b2_run(sb)
+    _seed(sb, rid, status="accepted", output={**_package(KEY), "hook": hook, "video_script": [line0, "Two."],
+                                              "video_features": ["hook_card", "push_in"]},
+          generation_id=str(uuid.uuid4()))
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        script = (await svc.kick(rid, claim=_holder(svc, rid)))["script"]
+    assert script["video_features"] == ["push_in"] and script["data_card_slot"] is None
+    assert any("hook_card is frozen but the accepted hook passes the compliance checks only beside its first "
+               "narration line" in r.getMessage() and rid in r.getMessage() for r in caplog.records)
+
+
+# ── the data card's slot in the read-back ────────────────────────────────────────────────────
+
+
+def _seed_template(sb, rid, out) -> None:
+    sb.tables[mrs.SCRIPTS].rows.append({"run_id": rid, "run_date": _B2_DAY.isoformat(), "status": "accepted",
+                                        "source_ref": news_rules.ledger_key(_b2_ceo_week()), "template_id": "ceo_buys",
+                                        "output": out, "fact_sheet": _b2_sheet(), "generation_id": "g",
+                                        "generations": 0, "tokens_used": 0, "violations": []})
+
+
+@pytest.mark.parametrize("features, sent, slot", [
+    (["data_card", "push_in"], ["data_card", "push_in"], 1),
+    (["data_card"], ["data_card"], 1),
+    (["push_in"], ["push_in"], None),
+    (None, [], None),                       # an output accepted before Batch 2: today's video, no slot
+], ids=["data_and_push_in", "data_only", "push_in_only", "pre_batch_2"])
+@pytest.mark.asyncio
+async def test_the_read_back_names_the_data_cards_slot_exactly_when_it_sends_data_card(world, features, sent, slot):
+    """Computed from the stored cards at every read-back, never stored: an output frozen before this change
+    (data_card in its features, no slot anywhere) reads back the same slot as a new one."""
+    sb, runs = world
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
+    rid = _b2_run(sb, _B2_DAY)
+    out = _b2_composed()
+    out["post_formats"] = {"tiktok": "video", "x": "text"}
+    if features is not None:
+        out["video_features"] = features
+    assert "data_card_slot" not in out
+    _seed_template(sb, rid, json.loads(json.dumps(out)))
+    script = (await svc.kick(rid, claim=_holder(svc, rid)))["script"]
+    assert script["video_features"] == sent and script["data_card_slot"] == slot
+    assert ("data_card" in script["video_features"]) == (script["data_card_slot"] is not None)
+    if slot is not None:
+        assert script["cards"][slot]["title"] == "The purchase"
+        assert type(script["data_card_slot"]) is int
+    wire = json.loads(schemas.WorkerScript(**script).model_dump_json())
+    assert wire["data_card_slot"] == slot
+
+
+@pytest.mark.parametrize("tamper", [
+    lambda o: o["cards"][1].__setitem__("title", "How much"),                  # no card of the series' titles
+    lambda o: o.__setitem__("series", "lesson"),                               # a series the table does not name
+    lambda o: o["cards"][1].pop("body"),                                       # not a text card
+], ids=["no_slot_title", "unknown_series", "malformed_card"])
+@pytest.mark.asyncio
+async def test_a_frozen_data_card_with_no_card_to_replace_is_not_sent(world, caplog, tamper):
+    """A hand-edited row (the freeze never stores one): the worker is not sent data_card (ERROR) — it keeps
+    today's text cards — and the slot stays None; the push-in still goes."""
+    sb, runs = world
+    rid = _b2_run(sb, _B2_DAY)
+    out = _b2_composed()
+    out["post_formats"] = {"tiktok": "video", "x": "text"}
+    out["video_features"] = ["data_card", "push_in"]
+    tamper(out)
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        script = ss.worker_script(out, run_id=rid)
+    assert script["video_features"] == ["push_in"] and script["data_card_slot"] is None
+    assert any("none of the read-back's cards is one a data card may replace" in r.getMessage()
+               and rid in r.getMessage() for r in caplog.records)
+    assert not any("cannot carry the post image" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("tamper", [
+    lambda o: o["cards"][1].__setitem__("title", "How much"),
+    lambda o: o.__setitem__("cards", [dict(c) for c in o["cards"] if c["title"] != "The purchase"]),
+], ids=["no_slot_title", "slot_card_removed"])
+def test_a_template_with_no_card_a_data_card_may_replace_freezes_no_data_card(tamper, caplog):
+    out = _b2_composed()
+    out["post_formats"] = {"tiktok": "video", "x": "text"}
+    assert ss.freeze_video_features(copy.deepcopy(out), switch=schemas.VIDEO_FEATURES, holder_v2=True) == [
+        "data_card", "push_in"]
+    tamper(out)
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        got = ss.freeze_video_features(out, switch=schemas.VIDEO_FEATURES, holder_v2=True, run_id="r-slot")
+    assert got == ["push_in"]
+    assert any("none of the template's cards is one a data card may replace" in r.getMessage()
+               and "r-slot" in r.getMessage() and "ceo_buys" in r.getMessage() for r in caplog.records)
+
+
+def test_a_lesson_read_back_never_names_a_slot():
+    lesson = {**_package(KEY), "video_features": ["hook_card", "push_in"], "series": "ceo_buys",
+              "cards": [{"title": "The purchase", "body": "1 purchase · 1 share · $1"}]}
+    script = ss.worker_script(lesson, run_id="r-lesson")
+    assert script["video_features"] == ["hook_card", "push_in"] and script["data_card_slot"] is None
+
+
+# ══ Batch 3 (2026-10-20): the EXTRA video posts, frozen at write time ═══════════════════════════════════════
+#
+# Owner decision 2 (2026-10-15): Facebook / LinkedIn (and Threads behind its token) also post the day's video. The
+# web switch MARKETING_VIDEO_EXTRA_PLATFORMS is read ONCE, when the accepted output is written (`_frozen_output`),
+# and the extras are frozen into it as `extra_post_formats` + `video_posts` — only on a day whose frozen PRIMARY
+# formats already hold a video, each caption the platform's own accepted caption under the narrated-video
+# disclaimer. With the switch empty (the default) the stored output is byte for byte what it was; the worker's
+# read-back never carries either key.
+
+_B3_BODIES = {
+    "tiktok": "Three habits that quietly compound over a decade.",
+    "youtube_title": "Three habits that compound",
+    "youtube_description": "A short lesson on habits that compound over time.",
+    "instagram": "Three habits that quietly compound.",
+    "facebook": "Three habits that quietly compound over a decade.",
+    "x": "Three habits that quietly compound.",
+    "threads": "Three habits that quietly compound.",
+    "bluesky": "Three habits that quietly compound.",
+    "linkedin": "Three habits that quietly compound over a decade.",
+}
+_EXTRA_ALL = "facebook,linkedin,threads"
+
+
+def _b3_package(run_date: date = POSTING_DAY, *, posts=_ALL_POSTS, bodies: Optional[Dict[str, str]] = None,
+                store_state: str = "live") -> Dict[str, Any]:
+    """A lesson package whose captions are REAL compositions (`post_copy.compose`) — what the writer stores, and
+    the only captions an extra video caption re-derives from — with copy for `posts` and an image post."""
+    pkg = _image_package(posts=posts)
+    texts = dict(_B3_BODIES, **(bodies or {}))
+    pkg["posts"] = {p: post_copy.compose(p, texts, category="blueprints", run_date=run_date,
+                                         store_state=store_state).as_dict() for p in posts}
+    pkg["store_state"] = store_state
+    return pkg
+
+
+def _b3_frozen(pkg: Dict[str, Any], *, images: bool = True) -> Dict[str, Any]:
+    return ss.freeze_post_formats(pkg, POSTING_DAY, image_posts=images, x_images=False, run_id="r")
+
+
+def _extra_switch(monkeypatch, raw: Any) -> None:
+    monkeypatch.setattr(ss.settings, "MARKETING_VIDEO_EXTRA_PLATFORMS", raw)
+
+
+class ExtraWriter(FakeWriter):
+    """FakeWriter whose accepted package is `_b3_package` for the generation's run date (real captions)."""
+
+    async def __call__(self, item, template, run_date, **k):
+        result = await super().__call__(item, template, run_date, **k)
+        if result.package is not None:
+            judge = result.package.get("judge")
+            result.package.clear()
+            result.package.update(_b3_package(run_date))
+            if judge is not None:
+                result.package["judge"] = judge
+        return result
+
+
+# ── the setting, re-validated at call time ───────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("raw, expected, error_words", [
+    (" LinkedIn , facebook ", ("facebook", "linkedin"), None),
+    ("threads,linkedin,facebook", ("facebook", "linkedin", "threads"), None),     # EXTRA_VIDEO_PLATFORMS order
+    ("threads,threads", ("threads",), None),
+    ("", (), None),
+    (" , ", (), None),
+    ("x,facebook", ("facebook",), "two formats"),
+    ("X", (), "two formats"),
+    ("bluesky", (), "deferred to the week-4 review"),
+    ("BlueSky,linkedin", ("linkedin",), "deferred to the week-4 review"),
+    ("tiktok", (), "unknown"),
+    ("instagram,youtube", (), "unknown"),          # their PRIMARY post already is the video
+    ("facebook;linkedin", (), "unknown"),          # one unknown token — never half-parsed
+    (None, (), "not a string"),
+    (7, (), "not a string"),
+    (["facebook"], (), "not a string"),
+])
+def test_batch3_parse_video_extra_platforms_re_validates_a_raw_value(raw, expected, error_words, caplog):
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        assert ss.parse_video_extra_platforms(raw) == expected
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert bool(errors) == (error_words is not None), errors
+    assert all("MARKETING_VIDEO_EXTRA_PLATFORMS" in m for m in errors)
+    if error_words:
+        assert any(error_words in m for m in errors), errors
+
+
+def test_batch3_the_extra_setting_is_read_when_called_and_never_echoes_a_blob(monkeypatch, caplog):
+    _extra_switch(monkeypatch, "linkedin")
+    assert ss.video_extra_platforms_setting() == ("linkedin",)
+    _extra_switch(monkeypatch, "facebook,x")
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        assert ss.video_extra_platforms_setting() == ("facebook",)
+    _extra_switch(monkeypatch, ",".join(f"z{i}{'q' * 500}" for i in range(50)))
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        assert ss.video_extra_platforms_setting() == ()
+    assert caplog.records and all(len(r.getMessage()) < 400 for r in caplog.records)
+    from app.config import Settings
+
+    assert Settings.model_fields["MARKETING_VIDEO_EXTRA_PLATFORMS"].default == ""
+    assert ss.parse_video_extra_platforms(Settings.model_fields["MARKETING_VIDEO_EXTRA_PLATFORMS"].default) == ()
+
+
+# ── the pure freeze ──────────────────────────────────────────────────────────────────────────
+
+
+def _video_caption(stored: Dict[str, Any], platform: str, authorship: str = "ai") -> str:
+    return post_copy.extra_video_caption(platform, stored["posts"][platform]["caption"], POSTING_DAY, authorship)
+
+
+def test_batch3_freeze_extra_formats_matrix(caplog):
+    stored = _b3_frozen(_b3_package())
+    assert stored["post_formats"]["facebook"] == "image" and "video" in stored["post_formats"].values()
+    snapshot = copy.deepcopy(stored)
+    freeze = ss.freeze_extra_formats
+    # the switch empty: nothing, whatever the output could carry
+    assert freeze(stored, POSTING_DAY, platforms=()) == {}
+    assert freeze(stored, POSTING_DAY, platforms=[]) == {}
+    # facebook + linkedin: both, each caption the platform's own under the narrated-video disclaimer
+    both = freeze(stored, POSTING_DAY, platforms=("facebook", "linkedin"), run_id="r")
+    assert both == {"extra_post_formats": {"facebook": "video", "linkedin": "video"},
+                    "video_posts": {p: {"title": None, "caption": _video_caption(stored, p)}
+                                    for p in ("facebook", "linkedin")}}
+    assert list(both["extra_post_formats"]) == ["facebook", "linkedin"]
+    # every listed platform, in EXTRA_VIDEO_PLATFORMS order whatever the input order; x / bluesky / junk ignored
+    every = freeze(stored, POSTING_DAY, platforms=["threads", "x", "bluesky", 7, None, "linkedin", "facebook"])
+    assert list(every["extra_post_formats"]) == ["facebook", "linkedin", "threads"]
+    assert list(every["video_posts"]) == ["facebook", "linkedin", "threads"]
+    assert stored == snapshot                                         # never written into
+    # no primary video today: nothing (the unchanged worker renders no video)
+    no_video = _b3_frozen(_b3_package(posts=("x", "bluesky", "facebook", "linkedin", "threads")))
+    with caplog.at_level(logging.INFO, logger=ss.logger.name):
+        assert freeze(no_video, POSTING_DAY, platforms=("facebook",), run_id="r-nv") == {}
+    assert any("no video" in r.getMessage() and "r-nv" in r.getMessage() for r in caplog.records)
+    # the judge dropped Facebook (no copy, no frozen format): no extra for it, LinkedIn still
+    dropped = _b3_frozen(_b3_package(posts=tuple(p for p in _ALL_POSTS if p != "facebook")))
+    got = freeze(dropped, POSTING_DAY, platforms=("facebook", "linkedin"))
+    assert list(got["extra_post_formats"]) == ["linkedin"]
+    # a hand-edited output whose Facebook copy has no frozen format: no extra for it (create_posts could not read
+    # such an extra back), LinkedIn still
+    unfrozen = copy.deepcopy(stored)
+    del unfrozen["post_formats"]["facebook"]
+    got = freeze(unfrozen, POSTING_DAY, platforms=("facebook", "linkedin"))
+    assert list(got["extra_post_formats"]) == ["linkedin"]
+    # the picture fell back to text (image posts off): its extra is frozen all the same
+    text_day = _b3_frozen(_b3_package(), images=False)
+    assert text_day["post_formats"]["facebook"] == "text"
+    assert list(freeze(text_day, POSTING_DAY, platforms=("facebook",))["extra_post_formats"]) == ["facebook"]
+    # a Threads video caption over 500 UTF-8 BYTES (yet under 500 characters) is skipped; the others stay
+    wide = _b3_frozen(_b3_package(bodies={"threads": "—" * 120 + " compound."}))
+    vc = _video_caption(wide, "threads")
+    assert len(vc) <= 500 < len(vc.encode("utf-8"))
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=ss.logger.name):
+        got = freeze(wide, POSTING_DAY, platforms=("facebook", "threads"), run_id="r-th")
+    assert list(got["extra_post_formats"]) == ["facebook"]
+    assert any("Threads video caption" in r.getMessage() and "UTF-8 bytes" in r.getMessage() for r in caplog.records)
+    # a caption this module did not compose does not re-derive: skipped with a WARNING, never the text
+    junk = copy.deepcopy(stored)
+    junk["posts"]["linkedin"]["caption"] = "copy linkedin, written by hand"
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        got = freeze(junk, POSTING_DAY, platforms=("facebook", "linkedin"), run_id="r-j")
+    assert list(got["extra_post_formats"]) == ["facebook"]
+    assert any("linkedin" in r.getMessage() and "r-j" in r.getMessage() for r in caplog.records)
+    assert not any("written by hand" in r.getMessage() for r in caplog.records)
+    # another run date: the long disclaimer is dated — nothing re-derives for Facebook / LinkedIn
+    assert freeze(stored, POSTING_DAY + timedelta(days=1), platforms=("facebook", "linkedin")) == {}
+    # an unknown authorship: nothing (ERROR)
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        assert freeze({**stored, "authorship": "human"}, POSTING_DAY, platforms=("facebook",)) == {}
+    assert any("authorship" in r.getMessage() for r in caplog.records)
+    # a string is not a collection of platform names
+    for bad in ("facebook", b"facebook", "facebook,linkedin"):
+        with pytest.raises(ValueError, match="collection"):
+            freeze(stored, POSTING_DAY, platforms=bad)
+
+
+def test_batch3_a_template_extra_is_rechecked_and_needs_its_fact_sheet(caplog):
+    out = _b2_composed()
+    stored = ss.freeze_post_formats(out, _B2_DAY, image_posts=True, x_images=False, run_id="r")
+    assert "video" in stored["post_formats"].values()
+    # B3-LIVE-1 (2026-10-20): `_b2_ceo_week` is a ROUNDUP — its Facebook / LinkedIn / Threads caption speaks of the
+    # picture's rows ("The purchases: …", news-v20's format-neutral wording), so without the data card frozen (the
+    # video will not draw the picture) no extra is frozen: WARNING naming `picture_caption`, never the caption's text
+    assert "The purchases: " in stored["posts"]["facebook"]["caption"]
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        assert ss.freeze_extra_formats(stored, _B2_DAY, platforms=("facebook", "linkedin", "threads"), run_id="r-p",
+                                       fact_sheet=_b2_sheet()) == {}
+    pic = [r.getMessage() for r in caplog.records if "r-p" in r.getMessage()]
+    assert len(pic) == 3 and all("picture_caption" in m and "The purchases" not in m and "The largest" not in m
+                                 for m in pic)
+    # a frozen video feature that is not the data card does not draw the picture either
+    assert ss.freeze_extra_formats({**stored, "video_features": ["push_in"]}, _B2_DAY, platforms=("facebook",),
+                                   run_id="r-p", fact_sheet=_b2_sheet()) == {}
+    caplog.clear()
+    stored["video_features"] = ["data_card", "push_in"]          # the video draws the day's picture
+    got = ss.freeze_extra_formats(stored, _B2_DAY, platforms=("facebook", "linkedin", "threads"), run_id="r-t",
+                                  fact_sheet=_b2_sheet())
+    assert list(got["extra_post_formats"]) == ["facebook", "linkedin", "threads"]
+    for p, post in got["video_posts"].items():
+        assert post["caption"] == post_copy.extra_video_caption(p, stored["posts"][p]["caption"], _B2_DAY, "template")
+        assert post_copy.NON_AFFILIATION in post["caption"] and "narration voiced with ai" in post["caption"].lower()
+        assert not any(line.casefold() in post["caption"].casefold() for line in post_copy.AI_DISCLOSURES)
+    # without its fact sheet a template's extra cannot be re-checked: none (WARNING)
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        assert ss.freeze_extra_formats(stored, _B2_DAY, platforms=("facebook",), run_id="r-t") == {}
+    assert any("fact sheet" in r.getMessage() and "r-t" in r.getMessage() for r in caplog.records)
+    # a failed re-check: none for that platform (WARNING naming the codes)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        assert ss.freeze_extra_formats(stored, _B2_DAY, platforms=("facebook",), run_id="r-t",
+                                       fact_sheet={"not": "a sheet"}) == {}
+    assert any("facts_invalid" in r.getMessage() for r in caplog.records)
+
+
+# ── _frozen_output: the default switch is byte-identical ─────────────────────────────────────
+
+
+def _reference(svc_run, pkg, run_date, *, images, features, template):
+    """What `_frozen_output` stored BEFORE Batch 3, for a holder that declared every capability: the formats
+    freeze, then the video features of the package's kind."""
+    ref = ss.freeze_post_formats(pkg, run_date, image_posts=images, x_images=False, run_id=svc_run,
+                                 image_platforms=ss.image_platforms_setting(), image_blocked=None)
+    kind = schemas.TEMPLATE_VIDEO_FEATURES if template else schemas.LESSON_VIDEO_FEATURES
+    switch = tuple(f for f in ss.parse_video_features(features) if f in kind)
+    ref.pop("video_features", None)
+    feats = ss.freeze_video_features(ref, switch=switch, holder_v2=True, run_id=svc_run)
+    if feats:
+        ref["video_features"] = feats
+    return ref
+
+
+@pytest.mark.parametrize("kind", ["lesson", "template"])
+@pytest.mark.parametrize("images", [False, True])
+@pytest.mark.parametrize("features", ["", _ALL_FEATURES])
+@pytest.mark.asyncio
+async def test_batch3_the_default_switch_keeps_every_stored_output_byte_identical(world, monkeypatch, caplog, kind,
+                                                                                images, features):
+    from app.config import Settings
+
+    sb, runs = world
+    _extra_switch(monkeypatch, Settings.model_fields["MARKETING_VIDEO_EXTRA_PLATFORMS"].default)
+    _video_switch(monkeypatch, features)
+    calls: List[Any] = []
+
+    def never(*a, **k):
+        calls.append((a, k))
+        raise RuntimeError("freeze_extra_formats must not run while the switch is empty")
+
+    real = ss.freeze_extra_formats
+    monkeypatch.setattr(ss, "freeze_extra_formats", never)
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
+    day = _B2_DAY if kind == "template" else POSTING_DAY
+    rid = _b2_run(sb, day)
+    pkg, sheet = (_b2_composed(), _b2_sheet()) if kind == "template" else (_b3_package(), None)
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        stored = await svc._frozen_output(copy.deepcopy(pkg), day, run_id=rid, gen_id="g", image_posts=images,
+                                          fact_sheet=sheet)
+    ref = _reference(rid, copy.deepcopy(pkg), day, images=images, features=features, template=kind == "template")
+    assert json.dumps(stored, sort_keys=True, ensure_ascii=False) == json.dumps(ref, sort_keys=True, ensure_ascii=False)
+    assert "extra_post_formats" not in stored and "video_posts" not in stored
+    assert calls == [] and not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    # anti-vacuity: the very same output DOES freeze extras once the switch lists them — for the template (a Form 4
+    # ROUNDUP, B3-LIVE-1) only while its video draws the day's picture (the data card frozen)
+    monkeypatch.setattr(ss, "freeze_extra_formats", real)
+    _extra_switch(monkeypatch, _EXTRA_ALL)
+    on = await svc._frozen_output(copy.deepcopy(pkg), day, run_id=rid, gen_id="g", image_posts=images,
+                                  fact_sheet=sheet)
+    if kind == "template" and "data_card" not in stored.get("video_features", ()):
+        assert "extra_post_formats" not in on and "video_posts" not in on
+    else:
+        assert set(on["extra_post_formats"]) >= {"facebook", "linkedin"}
+    assert {k: v for k, v in on.items() if k not in ("extra_post_formats", "video_posts")} == stored
+
+
+@pytest.mark.asyncio
+async def test_batch3_extras_in_the_package_are_never_carried_over(world, monkeypatch):
+    """A package that arrives carrying the keys (never one the writer or the templates write) is stored without
+    them — the freeze's own decision only — with the switch off, and with it on."""
+    sb, runs = world
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
+    rid = _b2_run(sb)
+    planted = _b3_package()
+    planted["extra_post_formats"] = {"x": "video", "bluesky": "video"}
+    planted["video_posts"] = {"x": {"title": None, "caption": "a planted caption"}}
+    stored = await svc._frozen_output(copy.deepcopy(planted), POSTING_DAY, run_id=rid, gen_id="g", image_posts=True)
+    assert "extra_post_formats" not in stored and "video_posts" not in stored
+    _extra_switch(monkeypatch, "facebook")
+    stored = await svc._frozen_output(copy.deepcopy(planted), POSTING_DAY, run_id=rid, gen_id="g", image_posts=True)
+    assert stored["extra_post_formats"] == {"facebook": "video"} and list(stored["video_posts"]) == ["facebook"]
+
+
+# ── _frozen_output through the kick ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_batch3_the_extra_switch_is_read_at_write_time(world, monkeypatch, caplog):
+    """Read when the accepted output is written (like MARKETING_IMAGE_PLATFORMS): a flip during a slow generation
+    lands on THIS write — and once written, a later flip changes nothing stored or read back."""
+    sb, runs = world
+    _image_switches(monkeypatch, images=True)
+    _extra_switch(monkeypatch, "")
+    writer = ExtraWriter(["accepted"])
+    writer.gate = asyncio.Event()
+    svc = ss.MarketingScriptService(runs, writer=writer)
+    rid = _b2_run(sb)
+    reads = _count_holder_reads(monkeypatch, runs, writer)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    for _ in range(500):
+        if writer.calls:
+            break
+        await asyncio.sleep(0.01)
+    assert writer.calls and not writer.gate.is_set()
+    _extra_switch(monkeypatch, "facebook,linkedin")
+    writer.gate.set()
+    with caplog.at_level(logging.INFO, logger=ss.logger.name):
+        await _drain(svc)
+    out = _script_row(sb, rid)["output"]
+    assert out["extra_post_formats"] == {"facebook": "video", "linkedin": "video"}
+    assert out["video_posts"] == {p: {"title": None, "caption": _video_caption(out, p)} for p in ("facebook", "linkedin")}
+    assert reads == [rid] and ss._HOLDER_STATEMENTS == 1           # no run read for the extras
+    (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("marketing script ACCEPTED")]
+    assert "extras=facebook,linkedin" in line
+    before = copy.deepcopy(out)
+    _extra_switch(monkeypatch, "")
+    script = (await svc.kick(rid, claim=_holder(svc, rid)))["script"]
+    assert _script_row(sb, rid)["output"] == before
+    assert "extra_post_formats" not in script and "video_posts" not in script
+
+
+@pytest.mark.asyncio
+async def test_batch3_the_accepted_line_says_extras_dash_by_default(world, monkeypatch, caplog):
+    sb, runs = world
+    svc = ss.MarketingScriptService(runs, writer=ExtraWriter(["accepted"]))
+    rid = _b2_run(sb)
+    with caplog.at_level(logging.INFO, logger=ss.logger.name):
+        await svc.kick(rid, claim=_holder(svc, rid))
+        await _drain(svc)
+    (line,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith("marketing script ACCEPTED")]
+    assert "extras=-" in line
+    assert "extra_post_formats" not in _script_row(sb, rid)["output"]
+
+
+@pytest.mark.asyncio
+async def test_batch3_a_failing_extra_freeze_never_costs_the_package(world, monkeypatch, caplog):
+    sb, runs = world
+    _extra_switch(monkeypatch, _EXTRA_ALL)
+
+    def broken(*_a, **_k):
+        raise RuntimeError("extra freeze broke")
+
+    monkeypatch.setattr(ss, "freeze_extra_formats", broken)
+    svc = ss.MarketingScriptService(runs, writer=ExtraWriter(["accepted"]))
+    rid = _b2_run(sb)
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        await svc.kick(rid, claim=_holder(svc, rid))
+        await _drain(svc)
+    row = _script_row(sb, rid)
+    assert row["status"] == "accepted" and row["generations"] == 1
+    assert "extra_post_formats" not in row["output"] and "video_posts" not in row["output"]
+    assert row["output"]["post_formats"]["facebook"] in ("image", "text")          # the formats are untouched
+    (err,) = [r for r in caplog.records if r.levelno == logging.ERROR and "extra video posts" in r.getMessage()]
+    assert rid in err.getMessage() and err.exc_info is not None
+
+
+@pytest.mark.asyncio
+async def test_batch3_the_worker_read_back_never_carries_extras(world, monkeypatch):
+    sb, runs = world
+    _extra_switch(monkeypatch, _EXTRA_ALL)
+    svc = ss.MarketingScriptService(runs, writer=ExtraWriter(["accepted"]))
+    rid = _b2_run(sb)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    out = _script_row(sb, rid)["output"]
+    assert set(out["extra_post_formats"]) == {"facebook", "linkedin", "threads"}
+    without = {k: v for k, v in out.items() if k not in ("extra_post_formats", "video_posts")}
+    assert ss.worker_script(out, run_id=rid) == ss.worker_script(without, run_id=rid)
+    script = (await svc.kick(rid, claim=_holder(svc, rid)))["script"]
+    assert script == ss.worker_script(without, run_id=rid)
+    wire = json.loads(schemas.WorkerScript(**script).model_dump_json())
+    assert not {"extra_post_formats", "video_posts"} & set(wire)
+    assert sorted(script["outlets"]) == sorted(out["posts"])      # the outlets are the PRIMARY posts' platforms
+
+
+@pytest.mark.asyncio
+async def test_batch3_a_lesson_day_with_extras_end_to_end(world, monkeypatch):
+    """kick (switch facebook,linkedin) → accepted with the extras frozen → the worker's PRIMARY specs only →
+    create_posts appends the Facebook and LinkedIn video posts on the run's one video, pending review."""
+    sb, runs = world
+    _image_switches(monkeypatch, images=True)
+    _extra_switch(monkeypatch, "facebook,linkedin")
+    svc = ss.MarketingScriptService(runs, writer=ExtraWriter(["accepted"]))
+    rid = _b2_run(sb)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    out = _script_row(sb, rid)["output"]
+    image = _asset(sb, rid, kind="card")
+    next(a for a in sb.tables[mrs.ASSETS].rows if a["id"] == image)["metadata"] = {"image_role": "post_image"}
+    _run_row(sb, rid)["metadata"]["image_asset_id"] = image
+    video = _run_video(sb, rid)
+    specs = [{"platform": p, "format": f, **({"asset_ids": [video if f == "video" else image]} if f != "text" else {})}
+             for p, f in sorted(out["post_formats"].items())]
+    posts = await runs.create_posts(rid, specs, claim=_holder_of(runs, rid))
+    assert [(p["platform"], p["format"]) for p in posts][:len(specs)] == [(s["platform"], s["format"]) for s in specs]
+    extra = posts[len(specs):]
+    assert [(p["platform"], p["format"], p["status"]) for p in extra] == [
+        ("facebook", "video", "pending_review"), ("linkedin", "video", "pending_review")]
+    for p in extra:
+        assert p["caption"] == out["video_posts"][p["platform"]]["caption"] == _video_caption(out, p["platform"])
+        assert p["asset_ids"] == [video] and p["title"] is None
+        assert p["idempotency_key"] == f"{POSTING_DAY.isoformat()}:{p['platform']}:video"
+        assert p["metadata"]["made_with_ai"] is True
+    # the worker can still never name one itself
+    with pytest.raises(mrs.MarketingRequestInvalid):
+        await runs.create_posts(rid, [{"platform": "facebook", "format": "video", "asset_ids": [video]}],
+                                claim=_holder_of(runs, rid))
+
+
+# ── the `world` fixture is a LESSON world, whatever this machine's environment says (HYG-1) ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_world_is_a_lesson_world_whatever_the_environment_says(monkeypatch, request):
+    """Review of 2026-10-20 (HYG-1): with C/F on in the environment (the planned production values), a lesson-day
+    test whose holder declares `news_templates` built a template day through the REAL company-news adapter (FMP and
+    Supabase, blocked by backend/conftest.py, the session exit set to 1) and reached the lesson it describes only by
+    that fallback. `world` pins both switches at their declared defaults, so such a day never reaches the source."""
+    from app.config import Settings
+
+    monkeypatch.setattr(mrs.settings, "MARKETING_CONTENT_CLASSES", "A,C,F")
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES",
+                        "ceo_buys,company_stakes,congress_count,earnings,insider_buys,money_map,thirteen_f")
+    sb, runs = request.getfixturevalue("world")          # after the environment's values, as in a real session
+    for name in ("MARKETING_CONTENT_CLASSES", "MARKETING_NEWS_SERIES"):
+        assert getattr(mrs.settings, name) == Settings.model_fields[name].default
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
+    reached: List[str] = []
+    monkeypatch.setattr(svc, "_news_source_fn", lambda: reached.append("news source") or None)
+    rid = _b2_run(sb)                                    # a holder that declares news_templates, on a Thursday
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    row = _script_row(sb, rid)
+    assert reached == []
+    assert row["status"] == "accepted"
+    assert not str(row["source_ref"]).startswith(news_rules.LEDGER_PREFIX)        # the day is the lesson

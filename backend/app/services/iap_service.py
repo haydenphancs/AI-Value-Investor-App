@@ -566,6 +566,17 @@ _OLDER_PERIOD_MARGIN = timedelta(seconds=60)
 # periods only — a Sandbox month lasts minutes, so the bound means nothing there.
 _UPGRADE_OVERLAP_MAX = timedelta(days=7)
 
+# Apple charges a renewal up to this long before the period ends, which moves the lineage's row
+# to the next period early (`_warn_unreinstated_reversal`: after that, 198 can no longer reinstate
+# the reversed period by itself).
+_EARLY_RENEWAL_MAX = timedelta(hours=24)
+
+# A credit period's `period_start` is its end minus one calendar month (198), so the lineage's own
+# next period can start up to ~3 days before the previous end (month lengths) — or, started early
+# by a clawback, up to `_EARLY_RENEWAL_MAX` before it. One that starts EARLIER than this before a
+# reversed period's end overlaps it: a resubscription, not that period's renewal (D2).
+_RENEWAL_START_SKEW = timedelta(days=3)
+
 # The status overrides (`_status_for_notification`) that `_older_period_reason` honours whatever
 # transaction they carry: EXPIRED's "expired", which states the SUBSCRIPTION's condition. The
 # other notification types that produce these values ("expired" from GRACE_PERIOD_EXPIRED,
@@ -838,6 +849,25 @@ def _register_refunded(rec: Optional[Dict[str, Any]]) -> bool:
     return revoked is not None and (reversed_at is None or reversed_at < revoked)
 
 
+def _superseded_lower_tier(
+    prior: Dict[str, Any], *, tier: str, environment: Optional[str], period_end: datetime,
+) -> bool:
+    """Is `tier` LOWER than the stored row's while its period ends too close to the stored one to
+    be a newer period? Then it is a lower-tier renewal that an upgrade superseded, never news.
+
+    A downgrade takes effect at the renewal, so its period ends a whole period after the stored
+    one. A lower-tier renewal superseded by an upgrade bought inside Apple's early-renewal overlap
+    ends days apart (`_UPGRADE_OVERLAP_MAX`). Production only: a Sandbox month lasts minutes, so
+    there a lower tier is never taken as newer. Shared by Rule D (`_newer_period_reason`) and the
+    grace-recovery bypass (`_grace_recovery_reason`, IAP audit F03, 2026-10-17)."""
+    stored_tier = str(prior.get("tier") or "free").lower()
+    if _TIER_RANK.get(tier, 0) >= _TIER_RANK.get(stored_tier, 0):
+        return False
+    stored_end = _parse_iso(prior.get("current_period_end"))
+    return ((environment or "Production") != "Production" or stored_end is None
+            or period_end - stored_end <= _UPGRADE_OVERLAP_MAX)
+
+
 def _newer_period_reason(
     prior: Optional[Dict[str, Any]],
     *,
@@ -885,12 +915,8 @@ def _newer_period_reason(
     high = max(e for e in (mark, _parse_iso(prior.get("current_period_end"))) if e is not None)
     if period_end - high < _OLDER_PERIOD_MARGIN:
         return None
-    stored_tier = str(prior.get("tier") or "free").lower()
-    if _TIER_RANK.get(tier, 0) < _TIER_RANK.get(stored_tier, 0):
-        stored_end = _parse_iso(prior.get("current_period_end"))
-        if ((environment or "Production") != "Production" or stored_end is None
-                or period_end - stored_end <= _UPGRADE_OVERLAP_MAX):
-            return None
+    if _superseded_lower_tier(prior, tier=tier, environment=environment, period_end=period_end):
+        return None
     return (
         f"expiresDate={period_end.isoformat()} (tier={tier!r}) is later than every period this "
         f"lineage has recorded (max_period_end={high.isoformat()}, stored status="
@@ -903,6 +929,8 @@ def _grace_recovery_reason(
     *,
     status: str,
     payload_revoked: bool,
+    tier: str,
+    environment: Optional[str],
     original_transaction_id: str,
     period_end: Optional[datetime],
 ) -> Optional[str]:
@@ -923,6 +951,14 @@ def _grace_recovery_reason(
       * **The stored row is in grace or billing retry** (`_LONG_WINDOW_STATUSES`).
       * **The payload entitles, carries no revocation, and is of the same original transaction.**
       * **Its period ends at least `_OLDER_PERIOD_MARGIN` after the stored one.**
+      * **Its tier is not below the stored one**, unless (Production) it ends more than
+        `_UPGRADE_OVERLAP_MAX` after the stored period — Rule D's guard (`_superseded_lower_tier`).
+        Without it, the saved JWS of a Pro early renewal that a Max upgrade superseded (it ends
+        hours after the Max) skipped the signedDate check over the Max row in grace: it wrote off
+        the held Max balance and started a fresh Pro allocation for a renewal Apple had refunded
+        at the upgrade (IAP audit F03, 2026-10-17). A downgrade's recovery ends a whole period
+        later and still passes. Not compared with `max_period_end`: a mark a once-longer period
+        left would refuse a genuine recovery.
 
     Lineage mode only, after the register's refusals (Rules A, A′, A″) and the `isUpgraded` one,
     and only for Apple's word from after the register began (the caller applies Rule D's cut): a
@@ -939,10 +975,75 @@ def _grace_recovery_reason(
     stored_end = _parse_iso(prior.get("current_period_end"))
     if stored_end is None or period_end - stored_end < _OLDER_PERIOD_MARGIN:
         return None
+    if _superseded_lower_tier(prior, tier=tier, environment=environment, period_end=period_end):
+        return None
     return (
         f"expiresDate={period_end.isoformat()} is a newer period than the one in "
         f"{prior.get('status')!r} (stored current_period_end={stored_end.isoformat()}): the "
         "renewal of the period that failed"
+    )
+
+
+def _superseded_renewal_reason(
+    prior: Optional[Dict[str, Any]],
+    *,
+    status: str,
+    payload_revoked: bool,
+    tier: str,
+    environment: Optional[str],
+    original_transaction_id: str,
+    period_end: Optional[datetime],
+    transaction_reason: Any,
+) -> Optional[str]:
+    """Why a delivery is a lower-tier RENEWAL that an upgrade superseded, or None to go on.
+
+    IAP audit F04 (2026-10-17), migration 198 (lineage mode). Apple renews a period up to 24 h
+    before it ends; an upgrade bought inside that overlap starts at once and ends a little BEFORE
+    the lower-tier renewal it superseded (which Apple refunds pro rata). Apple's retry of that
+    renewal's DID_RENEW — or the app's relay of its saved JWS — is signed before the upgrade and
+    carries no `isUpgraded`, yet reads "active" with a LATER end: the stale check passes it (a
+    client write stores no ordering key) and `_older_period_reason` passes a later end. Written,
+    it put Pro over the recorded Max; Rule E then refused Apple's REFUND of the Max as an older
+    period, and the keyed clawback started the never-granted Pro period — a refunded user kept
+    Pro and a fresh 1200-credit allocation.
+
+    Refused when ALL of these hold:
+
+      * **Apple's `transactionReason` is RENEWAL** — a renewal the system initiated. Apple: an
+        upgrade is PURCHASE, and so is any purchase the customer makes (a rebuy after a refund);
+        a downgrade is a RENEWAL on the renewal date. A payload without it is not classified.
+      * **It entitles, carries no revocation, and is of the stored row's lineage.**
+      * **The stored row entitles and has a HIGHER tier** (`_ENTITLING_STATUSES`).
+      * **Its period ends within (−`_OLDER_PERIOD_MARGIN`, +`_UPGRADE_OVERLAP_MAX`] of the stored
+        end**, Production only. A downgrade's renewal ends a whole period after the stored end.
+
+    Nothing is written, not even the ordering key: the stored row is newer than this.
+    """
+    if not prior or status not in _ENTITLING_STATUSES or payload_revoked or period_end is None:
+        return None
+    if str(transaction_reason or "").upper() != "RENEWAL":
+        return None
+    if (environment or "Production") != "Production":
+        return None
+    if str(prior.get("status") or "").lower() not in _ENTITLING_STATUSES:
+        return None
+    stored_original = str(prior.get("original_transaction_id") or "")
+    if not original_transaction_id or stored_original != original_transaction_id:
+        return None
+    stored_tier = str(prior.get("tier") or "free").lower()
+    if _TIER_RANK.get(tier, 0) >= _TIER_RANK.get(stored_tier, 0):
+        return None
+    stored_end = _parse_iso(prior.get("current_period_end"))
+    if stored_end is None:
+        return None
+    later_by = period_end - stored_end
+    if later_by <= -_OLDER_PERIOD_MARGIN or later_by > _UPGRADE_OVERLAP_MAX:
+        return None
+    return (
+        f"a {tier!r} RENEWAL ending {period_end.isoformat()}, inside the early-renewal overlap "
+        f"after the stored {prior.get('tier')!r} period (current_period_end="
+        f"{stored_end.isoformat()}, status={prior.get('status')!r}): the renewal the upgrade "
+        "superseded"
     )
 
 
@@ -984,6 +1085,15 @@ _SWEEP_NEVER_ARRIVED = {
     "grace_period": "GRACE_PERIOD_EXPIRED, EXPIRED or BILLING_RECOVERY",
     "billing_retry": "EXPIRED or BILLING_RECOVERY",
 }
+
+
+# How long `sweep_expired_subscriptions` keeps re-checking an account whose subscription row has
+# expired: a reconcile that failed AFTER that write (a PostgREST blip) left users.tier on the paid
+# tier, and no later pass selects an `expired` row again (IAP audit F02, 2026-10-17). Each pass
+# re-reads the account's users.tier and reconciles it when it differs from the effective tier.
+_SWEEP_RECHECK_WINDOW = timedelta(days=7)
+# users rows read per `in_` request by that re-check (keeps the PostgREST URL short).
+_SWEEP_RECHECK_CHUNK = 100
 
 
 def _sweep_windows() -> Dict[str, timedelta]:
@@ -1463,7 +1573,7 @@ class IAPService:
         # and get the tier and the allocation back (`_stale_client_delivery_reason`).
         # What migration 198's keyed credit steps must do once the row decision is made — on
         # every return path below, applied or not (`_lineage_credit_steps`).
-        post = {"claw": False, "reversal": False}
+        post = {"claw": False, "reversal": False, "tier_not_reinstated": False}
         # 198: this transaction's register row once read or recorded (below); `_unapplied` reports it.
         reg: Optional[Dict[str, Any]] = None
 
@@ -1487,6 +1597,7 @@ class IAPService:
                 self._warn_unreinstated_reversal(
                     user_id, transaction_id=transaction_id, original_txn_id=original_txn_id,
                     period_end=period_end, refunded=_register_refunded(reg),
+                    client_path=client_path, tier_not_reinstated=post["tier_not_reinstated"],
                 )
 
         def _unapplied(refused_by: str) -> Dict[str, Any]:
@@ -1631,7 +1742,8 @@ class IAPService:
             if client_path and reg is None and status in _ENTITLING_STATUSES:
                 since = self._register_since()
                 if since is None or client_signed_at is None or client_signed_at < since:
-                    for owned in self._account_rows(user_id):
+                    account_rows = self._account_rows(user_id)
+                    for owned in account_rows:
                         displaced = _stale_client_delivery_reason(
                             owned, status=status, signed_at=client_signed_at)
                         if displaced:
@@ -1643,6 +1755,10 @@ class IAPService:
                                 transaction_id, original_txn_id, user_id, displaced,
                                 owned.get("original_transaction_id"),
                             )
+                            self._flag_unapplied_new_lineage(
+                                user_id, payload, transaction_id=transaction_id,
+                                original_txn_id=original_txn_id, account_rows=account_rows,
+                                since=since, blocking_lineage=owned.get("original_transaction_id"))
                             return _unapplied("stale")
             # RULE B — the reversal of a recorded refund is compared with THAT refund, not with
             # the row's latest key: an unrelated notification signed after the reversal used to
@@ -1678,8 +1794,9 @@ class IAPService:
         # (`_grace_recovery_reason`, lineage only, under the same cut below).
         if lineage and not newer:
             newer = _grace_recovery_reason(
-                prior, status=status, payload_revoked=payload_revoked,
-                original_transaction_id=original_txn_id, period_end=period_end,
+                prior, status=status, payload_revoked=payload_revoked, tier=tier,
+                environment=environment, original_transaction_id=original_txn_id,
+                period_end=period_end,
             )
         if newer:
             # Only Apple's word from AFTER the register began: a JWS signed before it may be a
@@ -1725,22 +1842,35 @@ class IAPService:
         # `revoke_tier_credits` either — the stored period was not refunded. Since 198 a refund
         # of that older period still claws back ITS credits when it is the credit period in force
         # (after an early renewal, or a resubscribe), by its own key: `_lineage_credit_steps`.
+        # Rule E: for a revocation always; for an ENTITLING higher tier only when the transaction
+        # was refunded at some point (#8's case: the reversal or relay of a refunded Max after a
+        # Pro resubscribe). A recorded, never-refunded higher tier is the CURRENT upgrade:
+        # refusing it left a paying Max subscriber on Pro, past Restore, once a stale pre-upgrade
+        # renewal had overwritten the row (fix-pass review).
+        unrecorded: Optional[bool] = None
+        if (lineage and prior is not None
+                and str(prior.get("original_transaction_id") or "") == original_txn_id
+                and _TIER_RANK.get(tier, 0)
+                > _TIER_RANK.get(str(prior.get("tier") or "free").lower(), 0)):
+            if status == "revoked" or (reg or {}).get("revoked_signed_at"):
+                unrecorded = self._unrecorded_upgrade(reg, original_txn_id, period_end)
+            else:
+                # A refund from BEFORE 198 is not in the register, but 196 marked the credit period
+                # it clawed back (Rule A′ reads the same mark). Without it, the reversal or relay
+                # of a Max refunded before 198 overwrote the Pro the user had resubscribed to on
+                # the same lineage, and the account fell to Free when the Max period ended (IAP
+                # audit F08, 2026-10-17). Read only for an OLDER period: an upgrade ending after
+                # the stored period is never refused here, so it pays no extra read.
+                rule_e_stored_end = _parse_iso(prior.get("current_period_end"))
+                if (period_end is not None and rule_e_stored_end is not None
+                        and rule_e_stored_end - period_end >= _OLDER_PERIOD_MARGIN
+                        and (self._credit_period(original_txn_id, period_end)
+                             or {}).get("revoked_at")):
+                    unrecorded = False
         older = _older_period_reason(
             prior, status=status, status_override=status_override, tier=tier,
             environment=row[_ENVIRONMENT_COLUMN], original_transaction_id=original_txn_id,
-            period_end=period_end, notification_type=notification_type,
-            # Rule E: for a revocation always; for an ENTITLING higher tier only when the register
-            # shows the transaction was refunded at some point (#8's case: the reversal or relay of
-            # a refunded Max after a Pro resubscribe). A recorded, never-refunded higher tier is
-            # the CURRENT upgrade: refusing it left a paying Max subscriber on Pro, past Restore,
-            # once a stale pre-upgrade renewal had overwritten the row (fix-pass review).
-            unrecorded=(self._unrecorded_upgrade(reg, original_txn_id, period_end)
-                        if lineage and prior is not None
-                        and str(prior.get("original_transaction_id") or "") == original_txn_id
-                        and _TIER_RANK.get(tier, 0)
-                        > _TIER_RANK.get(str(prior.get("tier") or "free").lower(), 0)
-                        and (status == "revoked" or (reg or {}).get("revoked_signed_at"))
-                        else None),
+            period_end=period_end, notification_type=notification_type, unrecorded=unrecorded,
         )
         if older:
             logger.warning(
@@ -1767,7 +1897,30 @@ class IAPService:
                     period_end.isoformat() if period_end else None, (prior or {}).get("tier"),
                     (prior or {}).get("current_period_end"),
                 )
+                # Owner, 2026-10-17 ("No, one allocation"): the reversed period's CREDITS are not
+                # restored by hand beside that newer paid period (D2) — `_warn_unreinstated_reversal`.
+                post["tier_not_reinstated"] = True
             return _unapplied("older_period")
+
+        # A LOWER-TIER RENEWAL THAT AN UPGRADE SUPERSEDED (IAP audit F04, lineage mode): Apple's
+        # retry of the early renewal the user upgraded over, or the app's relay of its saved JWS.
+        # A later end than the upgrade's, so nothing above refuses it; written, it put Pro over
+        # the recorded Max and turned Apple's refund of that Max into an "older period"
+        # (`_superseded_renewal_reason`). Nothing is written, not even the ordering key.
+        superseded = _superseded_renewal_reason(
+            prior, status=status, payload_revoked=payload_revoked, tier=tier,
+            environment=environment, original_transaction_id=original_txn_id,
+            period_end=period_end, transaction_reason=payload.get("transactionReason"),
+        ) if lineage else None
+        if superseded:
+            logger.warning(
+                "IAP: IGNORING a superseded lower-tier RENEWAL for txn=%s original=%s user=%s "
+                "source=%s (%s) — the upgrade's own transaction carries the entitlement; "
+                "tier/status/current_period_end left unchanged, no ordering key stored",
+                payload.get("transactionId"), original_txn_id, user_id,
+                "client" if client_path else "notification", superseded,
+            )
+            return _unapplied("superseded_renewal")
 
         # A DELIVERY ABOUT THE SAME PERIOD DURING APPLE'S BILLING GRACE PERIOD (a Restore,
         # PRICE_INCREASE, a renewal-preference change, a refund request or its decline) carries
@@ -2200,6 +2353,54 @@ class IAPService:
             self._register_since_at = first
         return first
 
+    def _flag_unapplied_new_lineage(
+        self, user_id: str, payload: Dict[str, Any], *, transaction_id: str,
+        original_txn_id: str, account_rows: list, since: Optional[datetime],
+        blocking_lineage: Any,
+    ) -> None:
+        """ERROR for a person when Rule A″ refused a lineage this account has no record of (IAP
+        audit F01, 2026-10-17). Never raises; the refusal itself is unchanged (owner: "Log + docs
+        only").
+
+        In the K02 window (the register empty, or this JWS signed before its first record) that
+        refusal may be a purchase on ANOTHER Apple ID whose verify was delayed: its SUBSCRIBED
+        was not bound by its appAccountToken while the account held an entitling row (review
+        #11), and Rule A″ then refused its verify once the old lineage had a later-signed
+        notification — the user paid and neither path applied it. It may equally be the replay
+        Rule A″ exists for (a lineage displaced and refunded before 196). The server cannot tell
+        them apart; App Store Connect can. A lineage the account already has a row or a credit
+        period for is ordinary ordering, and stays the WARNING above."""
+        if any(str(r.get("original_transaction_id") or "") == original_txn_id
+               for r in account_rows):
+            return
+        unread = ""
+        try:
+            found = (
+                self.supabase.table("subscription_credit_periods")
+                .select("id")
+                .eq("original_transaction_id", original_txn_id)
+                .limit(1)
+                .execute()
+            )
+            if found.data:
+                return
+        except Exception as e:
+            unread = f" (its credit periods could not be read: {type(e).__name__}: {e})"
+        purchased = _ms_to_dt(payload.get("purchaseDate"))
+        signed = _ms_to_dt(payload.get("signedDate"))
+        logger.error(
+            "IAP PURCHASE NOT APPLIED — check App Store Connect: a client relay of txn=%s "
+            "original=%s user=%s product=%s (purchaseDate=%s, signedDate=%s) is a lineage this "
+            "account has no row, credit period or register record of%s, signed before the "
+            "transaction register began (%s), and was refused as stale against lineage %s. Either "
+            "a purchase on another Apple ID whose verify was delayed (the user paid and has no "
+            "access: OWNER_TASKS §2.4), or the replay of a lineage refunded before 196 (then "
+            "nothing to do)",
+            transaction_id, original_txn_id, user_id, payload.get("productId"),
+            purchased.isoformat() if purchased else None, signed.isoformat() if signed else None,
+            unread, since.isoformat() if since else "nothing recorded yet", blocking_lineage,
+        )
+
     def _account_rows(self, user_id: str) -> list[Dict[str, Any]]:
         """Every `subscriptions` row of the account (one per lineage since 198). Raises
         `IAPError` on a failed read."""
@@ -2325,22 +2526,41 @@ class IAPService:
 
     def _warn_unreinstated_reversal(
         self, user_id: str, *, transaction_id: str, original_txn_id: str,
-        period_end: Optional[datetime], refunded: bool = False,
+        period_end: Optional[datetime], refunded: bool = False, client_path: bool = False,
+        tier_not_reinstated: bool = False,
     ) -> None:
         """D6 (owner, 2026-10-14): a reversed refund whose credit period the keyed path clawed
         back, and which is no longer in force while it still runs, is restored BY HAND (the next
-        period already started). Loud, never raised: the delivery itself was handled.
+        period already started). Loud; the delivery itself was handled.
 
         Only that case (review #25, 2026-10-15): never while the register still holds a refund of
         the transaction (Apple refunded it again after the reversal: nothing to restore), and an
         ERROR only while the balance is in ANOTHER paid period. With no paid period in force the
         period is reinstated by the next credit read or a Restore once its row entitles again — a
-        WARNING; a one-off correction there would grant it twice."""
+        WARNING; a one-off correction there would grant it twice.
+
+        IAP audit, 2026-10-17 — two more cases that a hand correction would grant twice, each a
+        WARNING instead of the ERROR:
+          * F12: ANOTHER lineage's period is in force and ends before this one (minus Apple's
+            early-renewal lead), and this lineage's row still holds this period and outranks every
+            other row and the comp floor: 198 reinstates it by itself once that period ends
+            (`_reinstated_automatically`).
+          * D2 (owner: "No, one allocation"): the reversed tier was NOT reinstated because the same
+            lineage's newer paid period overlaps it (`tier_not_reinstated`, a resubscription that
+            started before this period ended): that period keeps the one allocation; support
+            comps the tier days only.
+        F05: a read this check needs that fails is no longer swallowed. A notification answers 503
+        (`IAPError`), so Apple redelivers it and the check runs again; on a client relay it is a
+        WARNING (Apple's own REFUND_REVERSED runs the check), so a diagnostic read never fails a
+        Restore. The balance read keeps its own ERROR line (review K96)."""
         if refunded:
             return
         try:
             period = self._credit_period(original_txn_id, period_end)
-        except IAPError:
+        except IAPError as e:
+            self._reversal_check_unreadable(
+                "the reversed credit period", e, user_id=user_id, transaction_id=transaction_id,
+                original_txn_id=original_txn_id, period_end=period_end, client_path=client_path)
             return
         if not period or not period.get("revoked_at") or period_end is None:
             return
@@ -2376,13 +2596,126 @@ class IAPService:
             return
         if str(in_force) == str(period.get("id")):
             return
+        try:
+            current = self._credit_period_by_id(in_force)
+            cur_otid = str((current or {}).get("original_transaction_id") or "")
+            cur_start = _parse_iso((current or {}).get("period_start"))
+            cur_end = _parse_iso((current or {}).get("period_end"))
+            if current and cur_otid == original_txn_id:
+                if (tier_not_reinstated and cur_start is not None
+                        and cur_start < period_end - _RENEWAL_START_SKEW):
+                    logger.warning(
+                        "IAP REFUND_REVERSED: one allocation (D2) — user=%s txn=%s original=%s "
+                        "period_end=%s stays clawed back: the same lineage's newer paid period "
+                        "(start %s, end %s) overlaps it and keeps the allocation. Comp the reversed "
+                        "tier's days only (the 'tier NOT reinstated' line); grant no credits by hand",
+                        user_id, transaction_id, original_txn_id, period_end.isoformat(),
+                        cur_start.isoformat(), cur_end.isoformat() if cur_end else None,
+                    )
+                    return
+            elif (current and cur_end is not None
+                    and self._reinstated_automatically(
+                        user_id, period=period, original_txn_id=original_txn_id,
+                        period_end=period_end, in_force_end=cur_end)):
+                logger.warning(
+                    "IAP REFUND_REVERSED: user=%s txn=%s original=%s period_end=%s is still clawed "
+                    "back while lineage %s's period (end %s) is in force — 198 reinstates it by "
+                    "itself at the first credit read after %s (any spend reads first), before "
+                    "%s; do not correct by hand",
+                    user_id, transaction_id, original_txn_id, period_end.isoformat(), cur_otid,
+                    cur_end.isoformat(), cur_end.isoformat(),
+                    (period_end - _EARLY_RENEWAL_MAX).isoformat(),
+                )
+                return
+        except IAPError as e:
+            self._reversal_check_unreadable(
+                "the credit period in force", e, user_id=user_id, transaction_id=transaction_id,
+                original_txn_id=original_txn_id, period_end=period_end, client_path=client_path)
+            return
         logger.error(
             "IAP REFUND_REVERSED credits NOT reinstated — restore by hand: user=%s txn=%s "
-            "original=%s period_end=%s was clawed back and the next paid period has started; Apple "
-            "reversed the refund (OWNER_TASKS runbook: never point paid_period_id back without "
-            "clearing revoke_requested_at)",
+            "original=%s period_end=%s was clawed back and the next paid period has started "
+            "(in force: lineage %s, end %s); Apple reversed the refund (OWNER_TASKS runbook: never "
+            "point paid_period_id back without clearing revoke_requested_at)",
             user_id, transaction_id, original_txn_id, period_end.isoformat(),
+            cur_otid or "unknown", cur_end.isoformat() if cur_end else "unknown",
         )
+
+    def _reversal_check_unreadable(
+        self, what: str, error: Exception, *, user_id: str, transaction_id: str,
+        original_txn_id: str, period_end: Optional[datetime], client_path: bool,
+    ) -> None:
+        """`_warn_unreinstated_reversal` could not read `what` (IAP audit F05, 2026-10-17). Before,
+        it returned in silence and the delivery answered 200: Apple never redelivered, and the D6
+        hand restore never happened. A notification now raises `IAPError` (503); a client relay
+        logs a WARNING and goes on."""
+        when = period_end.isoformat() if period_end else None
+        if client_path:
+            logger.warning(
+                "IAP REFUND_REVERSED check skipped on a client relay: could not read %s for "
+                "user=%s txn=%s original=%s period_end=%s (%s: %s) — Apple's REFUND_REVERSED "
+                "delivery runs this check", what, user_id, transaction_id, original_txn_id, when,
+                type(error).__name__, error,
+            )
+            return
+        logger.error(
+            "IAP REFUND_REVERSED check could not run: could not read %s for user=%s txn=%s "
+            "original=%s period_end=%s (%s: %s) — answering 503 so Apple redelivers it and the "
+            "check runs again", what, user_id, transaction_id, original_txn_id, when,
+            type(error).__name__, error,
+        )
+        raise IAPError("could not check the reversed refund's credit period") from error
+
+    def _credit_period_by_id(self, period_id: Any) -> Optional[Dict[str, Any]]:
+        """The `subscription_credit_periods` row `user_credits.paid_period_id` points at, or None.
+        Raises `IAPError` on a failed read."""
+        try:
+            result = (
+                self.supabase.table("subscription_credit_periods")
+                .select("id, user_id, original_transaction_id, period_start, period_end, tier")
+                .eq("id", period_id)
+                .limit(1)
+                .execute()
+            )
+        except Exception as e:
+            logger.error(
+                "IAP: subscription_credit_periods lookup failed for id=%s: %s: %s",
+                period_id, type(e).__name__, e,
+            )
+            raise IAPError("could not read the credit period in force") from e
+        return (result.data or [None])[0]
+
+    def _reinstated_automatically(
+        self, user_id: str, *, period: Dict[str, Any], original_txn_id: str,
+        period_end: datetime, in_force_end: datetime,
+    ) -> bool:
+        """Will 198's `ensure_credit_period` reinstate this reversed period by itself (IAP audit
+        F12)? Its REINSTATE needs no paid period running and this lineage's row as the winner,
+        holding exactly this period: so ANOTHER lineage's period in force must end while this one
+        still runs — before Apple's early renewal moves this row to its next period — this row must
+        be an `active` Production one at this period's end, and its tier must outrank every other
+        row of the account and the comp floor (the winner's ORDER BY ranks tier before end).
+        Conservative: anything else keeps the D6 ERROR. Raises `IAPError` on a failed read."""
+        if str(period.get("user_id") or "") != str(user_id):
+            return False
+        if in_force_end > period_end - _EARLY_RENEWAL_MAX:
+            return False
+        rows = self._account_rows(user_id)
+        mine = [r for r in rows
+                if str(r.get("original_transaction_id") or "") == original_txn_id]
+        if len(mine) != 1:
+            return False
+        row = mine[0]
+        row_end = _parse_iso(row.get("current_period_end"))
+        if (str(row.get("status") or "").lower() != "active"
+                or (row.get("environment") or "Production") != "Production"
+                or row_end is None or abs(row_end - period_end) >= _OLDER_PERIOD_MARGIN):
+            return False
+        rank = _TIER_RANK.get(str(row.get("tier") or "free").lower(), 0)
+        if any(_TIER_RANK.get(str(r.get("tier") or "free").lower(), 0) >= rank
+               for r in rows if r is not row):
+            return False
+        return rank > _TIER_RANK.get(self.comp_tier(user_id), 0)
 
     # ── Tier reconciliation ───────────────────────────────────────────────────
 
@@ -2645,7 +2978,10 @@ class IAPService:
           retries", so the period-end filter must not apply to them at the short window; that
           is exactly the demotion `winning_tier` documents avoiding.
 
-        Idempotent: a row already `expired` is not selected, so a re-run is a no-op.
+        A row already `expired` is not selected again, so a re-run expires nothing twice. What a
+        later pass does repeat is `_recheck_recent_expiries`: the reconcile after an expiry can fail
+        (a PostgREST blip) once the row is already `expired`, so every pass re-checks the accounts
+        whose rows expired in the last `_SWEEP_RECHECK_WINDOW` and writes only a stale users.tier.
         """
         now = datetime.now(timezone.utc)
         cutoffs = {status: (now - window).isoformat()
@@ -2760,12 +3096,19 @@ class IAPService:
                 errors += 1
                 logger.error(
                     "IAP sweep: expired rows for user=%s but reconcile FAILED (%s: %s) — "
-                    "users.tier still shows the lapsed tier and will keep allocating its "
-                    "credits until the next sweep",
-                    user_id, type(e).__name__, e,
+                    "users.tier may still show the lapsed paid tier; every pass re-checks the "
+                    "accounts whose rows expired in the last %d days and reconciles a stale "
+                    "users.tier, so a later pass heals it. A Production row's credits already "
+                    "lapse (sized from the subscription); a Sandbox-only account's calendar "
+                    "allowance follows users.tier until then",
+                    user_id, type(e).__name__, e, _SWEEP_RECHECK_WINDOW.days,
                 )
 
-        if expired or errors:
+        healed, recheck_errors = self._recheck_recent_expiries(now, skip=affected, limit=limit)
+        reconciled += healed
+        errors += recheck_errors
+
+        if expired or errors or healed:
             logger.info(
                 "IAP sweep: scanned=%d expired=%d users_reconciled=%d errors=%d",
                 len(rows), expired, reconciled, errors,
@@ -2776,6 +3119,108 @@ class IAPService:
             "users_reconciled": reconciled,
             "errors": errors,
         }
+
+    def _recheck_recent_expiries(
+        self, now: datetime, *, skip: set, limit: int
+    ) -> tuple[int, int]:
+        """Reconcile accounts whose subscription row expired recently but whose users.tier still
+        differs from the effective tier. Returns (reconciled, errors); never raises.
+
+        THE GAP (IAP audit F02, 2026-10-17): the sweep's UPDATE commits `expired`, then
+        `reconcile_user_tier` fails on a transient error. No later pass selects an `expired` row,
+        and no notification follows a lost EXPIRED, so users.tier — the gate for paid features —
+        kept the paid tier for good. So each pass re-reads the accounts with a row that went
+        `expired` in the last `_SWEEP_RECHECK_WINDOW` (any writer: the sweep, or an EXPIRED whose
+        own reconcile failed) and reconciles one only when its users.tier is not `free` and is not
+        the effective tier. An account this pass already reconciled (`skip`) is left alone.
+
+        It waits while an `active` row of the account is inside the sweep's own `active` window
+        past its end: `winning_tier` already drops such a row, but Apple's renewal verdict is not
+        in yet, and nothing demotes an account that early today — the sweep decides at +24 h.
+        """
+        since = (now - _SWEEP_RECHECK_WINDOW).isoformat()
+        try:
+            result = (
+                self.supabase.table("subscriptions")
+                .select("user_id, updated_at")
+                .in_("status", ["expired"])
+                .gte("updated_at", since)
+                .order("updated_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            expired_rows = result.data or []
+        except Exception as e:
+            logger.error(
+                "IAP sweep: could not read recently expired subscriptions (%s: %s) — no "
+                "re-check of a stale users.tier this pass",
+                type(e).__name__, e,
+            )
+            return 0, 1
+        if len(expired_rows) >= limit:
+            logger.warning(
+                "IAP sweep: the re-check read %d recently expired rows, its limit — accounts "
+                "behind them are not re-checked this pass", limit,
+            )
+
+        candidates: list[str] = []
+        for r in expired_rows:
+            uid = str(r.get("user_id") or "")
+            if uid and uid not in skip and uid not in candidates:
+                candidates.append(uid)
+        if not candidates:
+            return 0, 0
+
+        errors = 0
+        mirrored: Dict[str, str] = {}
+        for i in range(0, len(candidates), _SWEEP_RECHECK_CHUNK):
+            chunk = candidates[i:i + _SWEEP_RECHECK_CHUNK]
+            try:
+                users = (
+                    self.supabase.table("users").select("id, tier").in_("id", chunk).execute()
+                )
+            except Exception as e:
+                errors += 1
+                logger.error(
+                    "IAP sweep: could not read users.tier for %d recently expired accounts "
+                    "(%s: %s) — re-checked on a later pass", len(chunk), type(e).__name__, e,
+                )
+                continue
+            for u in users.data or []:
+                tier = str(u.get("tier") or "free").lower()
+                if tier != "free":
+                    mirrored[str(u.get("id"))] = tier
+
+        active_window = _sweep_windows()["active"]
+        reconciled = 0
+        for uid, stored in mirrored.items():
+            try:
+                pending = False
+                for row in self._account_rows(uid):
+                    end = _parse_iso(row.get("current_period_end"))
+                    if (str(row.get("status") or "").lower() == "active" and end is not None
+                            and now - active_window < end <= now):
+                        pending = True
+                        break
+                if pending:
+                    continue
+                effective = self.effective_tier(uid)
+                if effective == stored:
+                    continue
+                new_tier = self.reconcile_user_tier(uid)
+                reconciled += 1
+                logger.warning(
+                    "IAP sweep: user=%s users.tier=%s differed from the effective tier %s after "
+                    "an expiry (an earlier reconcile failed) — reconciled to %s",
+                    uid, stored, effective, new_tier,
+                )
+            except Exception as e:
+                errors += 1
+                logger.error(
+                    "IAP sweep: re-check of user=%s (users.tier=%s) FAILED (%s: %s) — retried by "
+                    "the next pass", uid, stored, type(e).__name__, e,
+                )
+        return reconciled, errors
 
     # ── Webhook handling ──────────────────────────────────────────────────────
 
@@ -2900,7 +3345,9 @@ class IAPService:
         # on its own it may only entitle an account that has no subscription to lose: bound onto
         # a paying account, a stranger's Max would start over its period and its refund would
         # claw the lot back (review #11, 2026-10-15). Such an account's own verify binds it — it
-        # runs `_assert_app_account_token_matches` under the buyer's bearer.
+        # runs `_assert_app_account_token_matches` under the buyer's bearer — EXCEPT in the K02
+        # window, where Rule A″ can refuse that verify as stale too: then neither path applies a
+        # paid purchase, logged as "IAP PURCHASE NOT APPLIED" (IAP audit F01, 2026-10-17).
         entitling = [r for r in self._account_rows(owner)
                      if str(r.get("status") or "").lower() in _ENTITLING_STATUSES]
         if entitling:

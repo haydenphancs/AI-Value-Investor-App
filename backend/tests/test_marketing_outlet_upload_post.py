@@ -198,7 +198,11 @@ def creds(monkeypatch):
     for name, value in (("MARKETING_UPLOAD_POST_API_KEY", API_KEY), ("MARKETING_UPLOAD_POST_USER", PROFILE),
                         ("MARKETING_UPLOAD_POST_FACEBOOK_PAGE_ID", FB_PAGE),
                         ("MARKETING_UPLOAD_POST_LINKEDIN_PAGE_ID", LI_PAGE),
-                        ("SUPABASE_URL", SB_URL), ("MARKETING_MEDIA_BUCKET", BUCKET)):
+                        ("SUPABASE_URL", SB_URL), ("MARKETING_MEDIA_BUCKET", BUCKET),
+                        # Batch 3: the three new switches at their declared defaults, whatever this machine's
+                        # environment says — the outlet reads the Instagram trial mode at send time.
+                        ("MARKETING_VIDEO_EXTRA_PLATFORMS", ""), ("MARKETING_POST_WEEKDAYS", "mon,tue,thu,sat"),
+                        ("MARKETING_INSTAGRAM_TRIAL_MODE", "off")):
         monkeypatch.setattr(oup.settings, name, value)
 
 
@@ -375,7 +379,8 @@ def test_caption_limits_match_post_copy():
 
 @pytest.mark.parametrize("platform, fmt", [
     ("tiktok", "text"), ("youtube", "text"), ("instagram", None), ("instagram", "carousel"),
-    ("facebook", "video"), ("linkedin", "video"), ("threads", "carousel"),
+    # Facebook / LinkedIn video is published since Batch 3 (an EXTRA post, tested below); a carousel never is.
+    ("facebook", "carousel"), ("linkedin", "carousel"), ("threads", "carousel"),
     # Image posts go to Facebook, LinkedIn and Threads only: TikTok stays video, YouTube has no
     # photo route, Instagram stays Reels (drop 1).
     ("tiktok", "image"), ("youtube", "image"), ("instagram", "image"),
@@ -1568,3 +1573,655 @@ async def test_e2e_an_image_post_without_its_card_is_refused_before_any_claim(pe
     assert row["status"] == "failed" and row["attempts"] == 0          # never claimed
     assert row["metadata"]["publish"]["category"] == "media" and "no asset" in row["last_error"]
     assert penv.up.uploads == [] and bucket.requests == []
+
+
+# ── Batch 1 (2026-10-15): the App Store first comment and the answer's warnings ───────────────
+#
+# A post `create_posts` stamped with `metadata.first_comment` (the code-owned search line) sends it as
+# `<platform>_first_comment` on whichever route it takes; Upload-Post's answer may carry `warnings`
+# (a refused comment, an ignored field — "the first comment never fails the publish") and
+# `first_comment_posted`, both kept on the post through the publisher's fenced merge.
+
+import logging  # noqa: E402
+
+from app.schemas import marketing as schemas  # noqa: E402
+from test_marketing_publisher import _review_meta  # noqa: E402
+
+SEARCH = post_copy.SEARCH_LINE
+
+
+def _commented(platform: str, text: Any = SEARCH, base: Optional[Dict[str, Any]] = None, **over: Any) -> Dict[str, Any]:
+    post = base if base is not None else _post(platform, **over)
+    post["metadata"] = {**(post.get("metadata") or {}), schemas.POST_METADATA_FIRST_COMMENT: text}
+    return post
+
+
+def test_the_outlet_sends_only_the_code_owned_comment_on_platforms_that_take_one():
+    assert oup.FIRST_COMMENT_TEXTS == frozenset({"Search Caydex on the App Store."})
+    assert set(oup.PLATFORMS) == set(schemas.FIRST_COMMENT_PLATFORMS)    # every Upload-Post outlet takes one
+
+
+@pytest.mark.parametrize("platform", oup.PLATFORMS)
+def test_a_stamped_first_comment_rides_as_the_platforms_own_field(creds, platform):
+    plain = oup.platform_fields(platform, _post(platform))
+    fields = oup.platform_fields(platform, _commented(platform))
+    assert fields == {**plain, f"{platform}_first_comment": SEARCH}
+    assert "first_comment" not in fields                                   # never the generic fallback field
+    prepared = oup.UploadPostAdapter(platform).prepare(_commented(platform))
+    assert prepared.payload["fields"] == fields and "first_comment=1" in prepared.summary
+    # no stamp: exactly the fields pinned above, and no marker in the summary
+    assert "first_comment=1" not in oup.UploadPostAdapter(platform).prepare(_post(platform)).summary
+
+
+@pytest.mark.parametrize("platform", PHOTO)
+def test_a_picture_post_carries_its_first_comment_too(creds, platform):
+    post = _commented(platform, base=_img_post(platform))
+    fields = oup.photo_fields(platform, post, ALT)
+    assert fields[f"{platform}_first_comment"] == SEARCH and fields[f"{platform}_alt_text"] == ALT
+    assert oup.UploadPostAdapter(platform).prepare(post).payload["fields"] == fields
+
+
+@pytest.mark.parametrize("text", ["Download Caydex now — free!", "", "search caydex on the app store.",
+                                  " Search Caydex on the App Store.", "Search Caydex on the App Store. https://x.co",
+                                  42, True, ["Search Caydex on the App Store."], {"t": SEARCH}])
+def test_a_first_comment_that_is_not_the_code_owned_line_is_never_sent(creds, caplog, text):
+    """Nothing scans a comment at runtime: a stamp that is not EXACTLY the pinned line (a hand-edited row)
+    sends no comment at all — logged at ERROR — and never stops the post."""
+    with caplog.at_level(logging.ERROR, logger=oup.logger.name):
+        fields = oup.platform_fields("youtube", _commented("youtube", text))
+        prepared = oup.UploadPostAdapter("youtube").prepare(_commented("youtube", text))
+    assert fields == oup.platform_fields("youtube", _post("youtube"))
+    assert prepared.payload["fields"] == fields
+    assert any("WITHOUT a comment" in r.getMessage() and POST_ID in r.getMessage() for r in caplog.records)
+
+
+def test_no_stamp_or_a_null_stamp_is_no_comment_and_no_error(creds, caplog):
+    with caplog.at_level(logging.ERROR, logger=oup.logger.name):
+        for post in (_post("tiktok"), _commented("tiktok", None), _post("tiktok", metadata=None),
+                     _post("tiktok", metadata="garbage")):
+            assert "tiktok_first_comment" not in oup.platform_fields("tiktok", post)
+    assert not caplog.records
+
+
+def test_a_platform_that_takes_no_comment_never_gets_one(creds, caplog):
+    with caplog.at_level(logging.ERROR, logger=oup.logger.name):
+        assert oup.platform_fields("mastodon", _commented("threads")) == {}
+        assert oup.first_comment_of("bluesky", _commented("threads")) is None
+        assert oup.first_comment_of("x", _commented("threads")) is None
+    assert len([r for r in caplog.records if "WITHOUT a comment" in r.getMessage()]) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", oup.PLATFORMS)
+async def test_the_first_comment_is_on_the_request_actually_sent(up, ledger, platform):
+    path = "/upload" if platform in VIDEO else "/upload_text"
+    up.answer(path, _ack(_rid(platform)))
+    outcome, _prepared = await _send(platform, metadata={"dry_run": False, "first_comment": SEARCH})
+    assert outcome.kind == SUBMITTED
+    parts = _parts(up.uploads[0])
+    assert dict(parts)[f"{platform}_first_comment"] == SEARCH
+    assert [name for name, _ in parts].count(f"{platform}_first_comment") == 1
+
+
+_WARN = "A first comment on TikTok needs a reconnected TikTok account. The post was published without it."
+
+
+@pytest.mark.asyncio
+async def test_an_answers_warnings_and_comment_flag_are_kept_and_logged(up, ledger, caplog):
+    up.answer("/upload", (200, {**_ack(_rid("tiktok"))[1], "warnings": [_WARN, "brand_content_toggle was ignored"],
+                                "first_comment_posted": False}))
+    with caplog.at_level(logging.INFO, logger=oup.logger.name):
+        outcome, _ = await _send("tiktok", metadata={"dry_run": False, "first_comment": SEARCH})
+    assert outcome.kind == SUBMITTED                                     # a note never changes the outcome
+    meta = outcome.publish_meta["upload_post"]
+    assert meta["warnings"] == [_WARN, "brand_content_toggle was ignored"]
+    assert meta["first_comment_posted"] is False
+    warned = [r for r in caplog.records if "warning(s)" in r.getMessage()]
+    assert len(warned) == 1 and warned[0].levelno == logging.WARNING
+    assert POST_ID in warned[0].getMessage() and _rid("tiktok") in warned[0].getMessage()
+    assert any(r.levelno == logging.WARNING and "first comment requested" in r.getMessage()
+               and "posted=False" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_sync_answer_keeps_its_platforms_notes_and_is_still_published(up, ledger):
+    result = {"success": True, "url": TT_URL, "post_id": TT_ID, "first_comment_posted": True,
+              "warnings": ["location_id was ignored"]}
+    up.answer("/upload", (200, {"success": True, "results": {"tiktok": result}, "warnings": [_WARN]}))
+    outcome, _ = await _send("tiktok", metadata={"dry_run": False, "first_comment": SEARCH})
+    assert outcome.kind == PUBLISHED and outcome.external_id == TT_ID
+    meta = outcome.publish_meta["upload_post"]
+    assert meta["warnings"] == [_WARN, "location_id was ignored"] and meta["first_comment_posted"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_refused_sync_answer_keeps_its_notes_too(up, ledger):
+    up.answer("/upload", (200, {"success": False, "warnings": [_WARN],
+                                "results": {"tiktok": {"success": False, "error": "Video too short"}}}))
+    outcome, _ = await _send("tiktok")
+    assert outcome.kind == REFUSED and outcome.publish_meta["upload_post"]["warnings"] == [_WARN]
+
+
+@pytest.mark.asyncio
+async def test_notes_of_an_earlier_attempt_are_never_carried_over(up, ledger):
+    stored = {"publish": {"upload_post": {"warnings": ["an old warning"], "first_comment_posted": True}}}
+    up.answer("/upload", _ack(_rid("tiktok")))
+    outcome, prepared = await _send("tiktok", metadata={"dry_run": False, **stored})
+    assert prepared.publish_meta["upload_post"]["warnings"] == ["an old warning"]   # the write-ahead keeps them
+    meta = outcome.publish_meta["upload_post"]
+    assert "warnings" not in meta and "first_comment_posted" not in meta             # this answer said nothing
+
+
+@pytest.mark.asyncio
+async def test_an_answer_without_notes_adds_no_note_keys(up, ledger, caplog):
+    up.answer("/upload", _ack(_rid("tiktok")))
+    with caplog.at_level(logging.INFO, logger=oup.logger.name):
+        outcome, _ = await _send("tiktok")
+    meta = outcome.publish_meta["upload_post"]
+    assert "warnings" not in meta and "first_comment_posted" not in meta
+    assert not [r for r in caplog.records if "first comment" in r.getMessage() or "warning(s)" in r.getMessage()]
+
+
+def test_keeping_the_notes_can_never_cost_a_sent_upload(caplog):
+    """The upload already went out: a raise here would read as an UNKNOWN outcome. Anything unexpected is
+    logged and the outcome's own metadata stands."""
+
+    class Hostile(dict):
+        def get(self, *_a, **_k):
+            raise RuntimeError("an unexpected answer shape")
+
+    meta = {"request_id": "r", "warnings": ["stale"], "first_comment_posted": True}
+    with caplog.at_level(logging.WARNING, logger=oup.logger.name):
+        oup.UploadPostAdapter("tiktok")._keep_notes(_post("tiktok"), {"request_id": "r", "fields": {}}, Hostile(), meta)
+    assert meta == {"request_id": "r"}
+    assert any("could not keep the answer's notes" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("raw, kept", [
+    (["a", 3, None, "b"], ["a", "b"]),
+    ("a lone string", []),                  # the CLIENT normalises strings; the outlet takes a list only
+    ({"w": "x"}, []),
+    ([f"w{i}" for i in range(9)], [f"w{i}" for i in range(5)]),
+])
+def test_the_outlet_keeps_only_a_list_of_strings_capped(raw, kept):
+    meta: Dict[str, Any] = {}
+    oup.UploadPostAdapter("threads")._keep_notes(_post("threads"), {"request_id": "r", "fields": {}},
+                                                 {"warnings": raw}, meta)
+    assert meta.get("warnings", []) == kept
+
+
+@pytest.mark.asyncio
+async def test_e2e_the_first_comment_goes_out_and_its_warnings_land_on_the_post(penv):
+    """Through the publisher: the stamped comment rides on the request, and the answer's warnings and flag
+    land in the LEDGER under metadata.publish.upload_post (the fenced merge) — the review record kept."""
+    key = _today_key("threads")
+    rid = f"{key}:a1"
+    pid = penv.seed(platform="threads", key=key, caption=CAPTION, meta=_review_meta(first_comment=SEARCH))
+    penv.up.answer("/upload_text", (200, {**_ack(rid)[1], "warnings": ["threads_topic_tag was ignored"],
+                                          "first_comment_posted": True}))
+    counters = await pub.publish_cycle()
+    assert counters["submitted"] == 1
+    (upload,) = penv.up.uploads
+    assert dict(_parts(upload))["threads_first_comment"] == SEARCH
+    row = penv.row(pid)
+    assert row["status"] == "queued"
+    up_meta = row["metadata"]["publish"]["upload_post"]
+    assert up_meta["warnings"] == ["threads_topic_tag was ignored"] and up_meta["first_comment_posted"] is True
+    assert row["metadata"]["first_comment"] == SEARCH
+    _assert_review_kept(row)
+
+
+# ── Batch 3 (2026-10-20, contract): Instagram Trial Reels — the setting and its values ───────────────
+#
+# MARKETING_INSTAGRAM_TRIAL_MODE (off | share_if_liked | dont_share) is read at SEND time by this outlet and maps
+# to Upload-Post's documented `share_mode` values (D14); "off" — the default, and whatever a bad value reads as —
+# sends exactly today's fields.
+
+
+def test_batch3_instagram_trial_setting_is_declared_off_and_its_literal_mirrors_the_modes():
+    """config.py imports no app module, so its validator carries an inline copy of the modes. Read by AST (the
+    literal itself) and by behaviour (every mode survives the validator)."""
+    import ast
+    from pathlib import Path
+
+    from app.config import Settings, settings
+
+    assert hasattr(settings, "MARKETING_INSTAGRAM_TRIAL_MODE")
+    assert Settings.model_fields["MARKETING_INSTAGRAM_TRIAL_MODE"].default == schemas.INSTAGRAM_TRIAL_OFF == "off"
+    src = (Path(__file__).resolve().parents[1] / "app" / "config.py").read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "_instagram_trial_mode_fail_closed")
+    literals = [ast.literal_eval(a.value) for a in ast.walk(fn)
+                if isinstance(a, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "known" for t in a.targets)]
+    assert literals == [(schemas.INSTAGRAM_TRIAL_OFF, *schemas.INSTAGRAM_TRIAL_MODES)]
+    for mode in (schemas.INSTAGRAM_TRIAL_OFF, *schemas.INSTAGRAM_TRIAL_MODES):
+        assert Settings(MARKETING_INSTAGRAM_TRIAL_MODE=mode).MARKETING_INSTAGRAM_TRIAL_MODE == mode
+
+
+@pytest.mark.parametrize("value, expected, logs_error", [
+    ("off", "off", False),
+    ("OFF", "off", False),
+    ("", "off", False),                                    # blank is off, quietly
+    ("   ", "off", False),
+    ("share_if_liked", "share_if_liked", False),
+    ("Share_If_Liked ", "share_if_liked", False),
+    (" DONT_SHARE", "dont_share", False),
+    ("trial", "off", True),
+    ("share-if-liked", "off", True),
+    ("TRIAL_REELS_SHARE_TO_FOLLOWERS_IF_LIKED", "off", True),    # Upload-Post's string is not a setting value
+    ("share_if_liked,dont_share", "off", True),
+    (None, "off", True),
+    (1, "off", True),
+    (True, "off", True),
+    (["share_if_liked"], "off", True),
+])
+def test_batch3_instagram_trial_setting_matrix(monkeypatch, caplog, value, expected, logs_error):
+    from app.config import Settings
+
+    with caplog.at_level(logging.ERROR, logger="app.config"):
+        if isinstance(value, str):
+            monkeypatch.setenv("MARKETING_INSTAGRAM_TRIAL_MODE", value)
+            got = Settings().MARKETING_INSTAGRAM_TRIAL_MODE
+        else:
+            got = Settings(MARKETING_INSTAGRAM_TRIAL_MODE=value).MARKETING_INSTAGRAM_TRIAL_MODE
+    assert got == expected
+    errors = [r.getMessage() for r in caplog.records if r.name == "app.config" and r.levelno >= logging.ERROR
+              and "MARKETING_INSTAGRAM_TRIAL_MODE" in r.getMessage()]
+    assert bool(errors) == logs_error, errors
+    assert all(len(m) < 400 for m in errors)
+    assert got == schemas.INSTAGRAM_TRIAL_OFF or got in schemas.INSTAGRAM_TRIAL_MODES
+
+
+def test_batch3_trial_mode_values_are_upload_posts_documented_strings():
+    """`share_mode` takes Upload-Post's documented values (docs.upload-post.com, upload-video, Instagram section,
+    read 2026-10-20): TRIAL_REELS_SHARE_TO_FOLLOWERS_IF_LIKED and TRIAL_REELS_DONT_SHARE_TO_FOLLOWERS. CUSTOM — a
+    regular Reel, what no field means — is never a trial value, and "off" maps to nothing (today's fields)."""
+    assert schemas.INSTAGRAM_TRIAL_MODES == {
+        "share_if_liked": "TRIAL_REELS_SHARE_TO_FOLLOWERS_IF_LIKED",
+        "dont_share": "TRIAL_REELS_DONT_SHARE_TO_FOLLOWERS",
+    }
+    assert schemas.INSTAGRAM_TRIAL_OFF == "off" and schemas.INSTAGRAM_TRIAL_OFF not in schemas.INSTAGRAM_TRIAL_MODES
+    values = list(schemas.INSTAGRAM_TRIAL_MODES.values())
+    assert len(set(values)) == len(values) and "CUSTOM" not in values
+    assert all(v.startswith("TRIAL_REELS_") and v.isascii() and v == v.upper() for v in values)
+    # the setting's tokens are lower-case words, never Upload-Post's own strings
+    assert all(k == k.lower() and k not in values for k in schemas.INSTAGRAM_TRIAL_MODES)
+
+
+# ── Batch 3 (2026-10-20, send side): the day's VIDEO on Facebook, LinkedIn and Threads ──────────────────────
+#
+# A Facebook / LinkedIn / Threads post may be a VIDEO — that platform's EXTRA post of the run, beside its
+# picture/text post. The route follows the post's FORMAT (POST /upload with the verified MP4), and the caption
+# goes in that platform's description / commentary / text field — never as `title`, which Upload-Post would make
+# a Reel's 255-character title or LinkedIn's media title (D9). The text and photo routes are unchanged.
+
+import uuid  # noqa: E402
+
+#: An extra video's caption (its platform's accepted caption with the narrated-video disclaimer swapped in).
+REEL = ("Time in the market beats timing it. #investing\n\n"
+        "Educational only, not investment advice. Script and narration generated with AI. Caydex")
+_EXTRA = ("facebook", "linkedin", "threads")
+#: What a Facebook / LinkedIn / Threads video must never carry: the caption as a title, the generic description
+#: field, Threads' text-route flag, or a cover/thumbnail (a Reel's cover cannot be pinned).
+_NOT_ON_AN_EXTRA = {"title", "facebook_title", "linkedin_title", "description", "threads_long_text_as_post",
+                    "cover_timestamp", "thumb_offset", "thumbnail", "thumbnail_url", "facebook_thumbnail", "cover_url"}
+
+
+def _vover(platform: str, **over: Any) -> Dict[str, Any]:
+    """The columns of an EXTRA video post as create_posts records it: format video, the run's one video, no title."""
+    return {"format": "video", "asset_ids": [ASSET_ID], "title": None, "caption": REEL,
+            "idempotency_key": f"{DAY}:{platform}:video", **over}
+
+
+def _vpost(platform: str, **over: Any) -> Dict[str, Any]:
+    return _post(platform, **_vover(platform, **over))
+
+
+def _video_fields(platform: str, caption: str = REEL) -> Dict[str, Any]:
+    """D9, pinned EXACTLY (key order included — it is the multipart order)."""
+    return {
+        "facebook": {"facebook_page_id": FB_PAGE, "facebook_media_type": "REELS", "facebook_description": caption,
+                     "facebook_is_ai_generated": True},
+        "linkedin": {"target_linkedin_page_id": LI_PAGE, "linkedin_description": caption, "visibility": "PUBLIC"},
+        "threads": {"threads_title": caption},
+    }[platform]
+
+
+def _rendered(fields: Dict[str, Any]) -> List[Tuple[str, str]]:
+    return [(k, ("true" if v else "false") if isinstance(v, bool) else str(v)) for k, v in fields.items()]
+
+
+@pytest.mark.parametrize("platform", _EXTRA)
+def test_batch3_video_on_facebook_linkedin_threads_prepares(creds, platform):
+    adapter = oup.UploadPostAdapter(platform)
+    assert adapter.video is False                     # still not a PRIMARY video platform: the post's format decides
+    prepared = adapter.prepare(_vpost(platform))
+    p = prepared.payload
+    assert p["kind"] == "video" and p["asset_id"] == ASSET_ID and p["image"] is None and p["text"] == REEL
+    assert p["request_id"] == f"{DAY}:{platform}:video:a1" and p["external_id"] == POST_ID
+    assert p["fields"] == _video_fields(platform) and list(p["fields"]) == list(_video_fields(platform))
+    assert p["fields"] == oup.platform_fields(platform, _vpost(platform))
+    assert not _NOT_ON_AN_EXTRA & set(p["fields"])
+    meta = prepared.publish_meta["upload_post"]
+    assert meta["request_id"] == f"{DAY}:{platform}:video:a1" and "image" not in meta and "share_mode" not in meta
+    assert f"kind=video request_id={DAY}:{platform}:video:a1 " in prepared.summary
+    assert prepared.text_sha256 == hashlib.sha256(REEL.encode("utf-8")).hexdigest()
+    # The same platform's text post keeps its own fields (pinned in test_platform_fields_are_pinned).
+    assert oup.platform_fields(platform, _post(platform)) == {
+        "facebook": {"facebook_page_id": FB_PAGE}, "linkedin": {"target_linkedin_page_id": LI_PAGE},
+        "threads": {"threads_long_text_as_post": True}}[platform]
+
+
+@pytest.mark.parametrize("platform", _EXTRA)
+@pytest.mark.parametrize("assets, n", [([], 0), (None, 0), (["", None], 0), ([ASSET_ID, "second"], 2)])
+def test_batch3_a_video_post_on_a_text_platform_needs_exactly_one_asset(creds, platform, assets, n):
+    with pytest.raises(MarketingPublishRefused, match=f"exactly one video asset, it has {n}"):
+        oup.UploadPostAdapter(platform).prepare(_vpost(platform, asset_ids=assets))
+
+
+@pytest.mark.asyncio
+async def test_batch3_threads_video_over_500_bytes_is_refused_before_the_claim(penv):
+    adapter = oup.UploadPostAdapter("threads")
+    exact = "a" * 500
+    assert adapter.prepare(_vpost("threads", caption=exact)).payload["fields"] == {"threads_title": exact}
+    wide = "é" * 251                                   # 251 characters (under 500), 502 UTF-8 bytes (over)
+    with pytest.raises(MarketingPublishRefused, match="the video caption is 502 UTF-8 bytes > 500"):
+        adapter.prepare(_vpost("threads", caption=wide))
+    # the byte cap is the VIDEO route's: a Threads text post keeps its no-split flag, Facebook counts characters
+    assert adapter.prepare(_post("threads", caption=wide)).payload["fields"] == {"threads_long_text_as_post": True}
+    assert oup.UploadPostAdapter("facebook").prepare(_vpost("facebook", caption="é" * 2000)).payload["kind"] == "video"
+    # the count itself never raises: a lone surrogate (not encodable as UTF-8) counts its 3 bytes
+    with pytest.raises(MarketingPublishRefused, match="501 UTF-8 bytes > 500"):
+        adapter.prepare(_vpost("threads", caption="\ud800" * 167))
+    # Through the publisher: refused by the guard, never claimed, nothing sent.
+    penv.enabled = ["threads"]
+    pid = penv.seed(platform="threads", key=f"{mrs.run_date_et().isoformat()}:threads:video", format="video",
+                    asset_ids=[ASSET_ID], caption=wide, run_id=str(uuid.uuid4()))
+    counters = await pub.publish_cycle()
+    assert counters["failed"] == 1
+    row = penv.row(pid)
+    assert row["status"] == "failed" and row["attempts"] == 0 and "502 UTF-8 bytes" in row["last_error"]
+    assert row["metadata"]["alert_kind"] == "failed" and penv.up.uploads == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", _EXTRA)
+async def test_batch3_the_video_requests_actually_sent(up, ledger, platform):
+    rid = f"{DAY}:{platform}:video:a1"
+    up.answer("/upload", _ack(rid))
+    outcome, _prepared = await _send(platform, **_vover(platform))
+    assert outcome.kind == SUBMITTED and outcome.publish_meta["upload_post"]["request_id"] == rid
+    assert up.sequence == ["GET /uploadposts/me", "POST /upload", "GET /uploadposts/me"]
+    (req,) = up.uploads
+    assert req.headers["idempotency-key"] == rid and req.headers["authorization"] == f"Apikey {API_KEY}"
+    own = [("user", PROFILE), ("platform[]", platform), ("video", VIDEO_URL), ("async_upload", "true"),
+           ("request_id", rid), ("external_id", POST_ID)]
+    assert _parts(req) == own + _rendered(_video_fields(platform))
+    flags = dict(_parts(req))
+    assert not _NOT_ON_AN_EXTRA & set(flags)            # the caption never travels as `title`
+    if platform == "facebook":
+        assert flags["facebook_media_type"] == "REELS" and flags["facebook_description"] == REEL
+        assert flags["facebook_is_ai_generated"] == "true"      # Facebook's own AI label on the request itself
+    elif platform == "linkedin":
+        assert flags["linkedin_description"] == REEL and flags["visibility"] == "PUBLIC"
+    else:
+        assert flags["threads_title"] == REEL
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", _EXTRA)
+async def test_batch3_the_first_comment_rides_on_the_video_route(up, ledger, platform):
+    rid = f"{DAY}:{platform}:video:a1"
+    up.answer("/upload", _ack(rid))
+    outcome, prepared = await _send(platform, **_vover(platform, metadata={"dry_run": False, "first_comment": SEARCH}))
+    assert outcome.kind == SUBMITTED and "first_comment=1" in prepared.summary
+    parts = _parts(up.uploads[0])
+    assert [n for n, _ in parts].count(f"{platform}_first_comment") == 1
+    assert parts[-1] == (f"{platform}_first_comment", SEARCH)
+    assert parts[:-1][6:] == _rendered(_video_fields(platform))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", _EXTRA)
+async def test_batch3_text_and_photo_routes_are_unchanged(up, ledger, bucket, platform):
+    """Byte for byte what they sent before Batch 3: the text post to /upload_text, the picture post to
+    /upload_photos — with the caption as `title`, the page id / no-split flag, the alt text — never /upload."""
+    text_fields = {"facebook": {"facebook_page_id": FB_PAGE}, "linkedin": {"target_linkedin_page_id": LI_PAGE},
+                   "threads": {"threads_long_text_as_post": True}}[platform]
+    up.answer("/upload_text", _ack(_rid(platform)))
+    outcome, prepared = await _send(platform)
+    assert outcome.kind == SUBMITTED and prepared.payload["kind"] == "text"
+    assert _parts(up.calls("/upload_text")[0]) == [
+        ("user", PROFILE), ("platform[]", platform), ("title", CAPTION), ("async_upload", "true"),
+        ("request_id", _rid(platform)), ("external_id", POST_ID), *_rendered(text_fields)]
+    rid = f"{DAY}:{platform}:image:a1"
+    up.answer("/upload_photos", _ack(rid))
+    adapter = oup.UploadPostAdapter(platform)
+    post = _img_post(platform)
+    prepared = adapter.prepare(post)
+    assert prepared.payload["kind"] == "photo"
+    outcome = await adapter.send({k: v for k, v in post.items() if k != POST_IMAGE_KEY}, prepared)
+    assert outcome.kind == SUBMITTED
+    assert _parts(up.calls("/upload_photos")[0]) == [
+        ("user", PROFILE), ("platform[]", platform), ("title", CAPTION), ("photos[]", CARD_URL),
+        ("async_upload", "true"), ("request_id", rid), ("external_id", POST_ID),
+        *_rendered({**text_fields, f"{platform}_alt_text": ALT})]
+    assert up.calls("/upload") == []
+
+
+@pytest.mark.asyncio
+async def test_batch3_two_posts_on_one_platform_each_reconcile_only_their_own_job(up, monkeypatch):
+    """Facebook's picture post and its video of one run are two Upload-Post jobs: Upload-Post's history may hold
+    both, and each post settles on its OWN row (request id), never the other's — through the client, and in the
+    adapter's own re-check behind it."""
+    pic_rid, vid_rid = f"{DAY}:facebook:image:a1", f"{DAY}:facebook:video:a1"
+    pic = _queued("facebook", request_id=pic_rid)
+    pic.update(format="image", idempotency_key=f"{DAY}:facebook:image")
+    vid = _queued("facebook", request_id=vid_rid)
+    vid.update(id=str(uuid.uuid4()), **_vover("facebook"))
+    rows = (_item("facebook", rid=pic_rid, platform_post_id="104857600123456_111",
+                  post_url="https://www.facebook.com/104857600123456/posts/111"),
+            _item("facebook", rid=vid_rid, platform_post_id="998877665544",
+                  post_url="https://www.facebook.com/reel/998877665544"))
+    up.always("/uploadposts/status", _status("completed"))
+    up.always("/uploadposts/history", _hist(*rows))
+    first, second = await _reconcile(pic), await _reconcile(vid)
+    assert (first.kind, first.external_id) == (FOUND, "104857600123456_111")
+    assert (second.kind, second.external_id) == (FOUND, "998877665544")
+    assert [r.url.params["request_id"] for r in up.requests] == [pic_rid, pic_rid, vid_rid, vid_rid]
+
+    async def status(request_id):
+        return {"status": "completed", "results": [], "request_id": request_id}
+
+    async def history(request_id):                     # both rows, unfiltered: the adapter's own check decides
+        return {"history": [dict(r) for r in rows], "in_progress": []}
+
+    monkeypatch.setattr(upload_post, "get_status", status)
+    monkeypatch.setattr(upload_post, "get_history", history)
+    assert (await _reconcile(pic)).external_id == "104857600123456_111"
+    assert (await _reconcile(vid)).external_id == "998877665544"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform, post_id", [("facebook", "998877665544"),
+                                               ("linkedin", "urn:li:ugcPost:7254000000000000000")])
+async def test_batch3_retract_a_facebook_video_by_its_platform_post_id(up, platform, post_id):
+    up.answer("/uploadposts/posts/unpublish", (200, {"success": True, "message": "Post deleted"}),
+              (200, {"success": True}))
+    published = {**_vpost(platform), "status": "published", "external_id": post_id,
+                 "external_url": f"https://{platform}.example/v/1"}
+    assert (await oup.UploadPostAdapter(platform).retract(published)).kind == RETRACTED
+    # …or by the platform post id reconcile stored, when the row has no external id
+    stored = {**published, "external_id": None,
+              "metadata": {"dry_run": False, "publish": {"upload_post": {"platform_post_id": post_id}}}}
+    assert (await oup.UploadPostAdapter(platform).retract(stored)).kind == RETRACTED
+    assert [json.loads(r.content) for r in up.requests] == [{"platform": platform, "user": PROFILE,
+                                                             "post_id": post_id}] * 2
+    # a Threads video, like any Threads post, is removed by hand
+    threads = {**_vpost("threads"), "status": "published", "external_id": "18000000000000000"}
+    assert (await oup.UploadPostAdapter("threads").retract(threads)).kind == MANUAL
+    assert len(up.requests) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform, result, ext_id, ext_url", [
+    ("facebook", {"success": True, "video_reel_id": "998877665544"}, "998877665544", None),
+    ("facebook", {"success": True, "video_reel_id": ["", "998877665544"]}, "998877665544", None),
+    ("linkedin", {"success": True, "video_urn": "urn:li:video:C4E10AQF"}, "urn:li:video:C4E10AQF", None),
+    # the usual keys still come first …
+    ("facebook", {"success": True, "post_id": "104857600123456_1", "video_reel_id": "998877665544"},
+     "104857600123456_1", None),
+    ("linkedin", {"success": True, "platform_post_id": "urn:li:share:1", "video_urn": "urn:li:video:C4E"},
+     "urn:li:share:1", None),
+    # … and an id beats the URL, which a Retract cannot use
+    ("facebook", {"success": True, "url": "https://www.facebook.com/reel/998877665544",
+                  "video_reel_id": "998877665544"}, "998877665544", "https://www.facebook.com/reel/998877665544"),
+])
+async def test_batch3_a_sync_reel_answer_names_its_video_reel_id(up, ledger, platform, result, ext_id, ext_url):
+    rid = f"{DAY}:{platform}:video:a1"
+    up.answer("/upload", (200, {"success": True, "request_id": rid, "results": {platform: result}}))
+    outcome, _ = await _send(platform, **_vover(platform))
+    assert outcome.kind == PUBLISHED and outcome.external_id == ext_id and outcome.external_url == ext_url
+    assert not str(outcome.external_id).startswith("http")          # so Retract has the id it needs
+
+
+# ── Batch 3: Instagram Trial Reels at send time ───────────────────────────────────────────────────────────
+
+#: Today's Reel fields (test_platform_fields_are_pinned), in their multipart order.
+_REEL_FIELDS = {"title": CAPTION, "instagram_title": CAPTION, "media_type": "REELS", "share_to_feed": True,
+                "is_ai_generated": True, "thumb_offset": "500"}
+
+
+@pytest.fixture
+def trial_cache():
+    """A bad live value logs once per distinct value (the parse is memoised): every test starts from none."""
+    oup._parse_instagram_trial_mode_text.cache_clear()
+    yield
+    oup._parse_instagram_trial_mode_text.cache_clear()
+
+
+@pytest.mark.parametrize("mode", ["off", "share_if_liked", "dont_share"])
+def test_batch3_instagram_trial_modes(creds, monkeypatch, caplog, trial_cache, mode):
+    monkeypatch.setattr(oup.settings, "MARKETING_INSTAGRAM_TRIAL_MODE", mode)
+    with caplog.at_level(logging.INFO, logger=oup.logger.name):
+        fields = oup.platform_fields("instagram", _post("instagram"))
+        prepared = oup.UploadPostAdapter("instagram").prepare(_post("instagram"))
+    meta = prepared.publish_meta["upload_post"]
+    assert prepared.payload["fields"] == fields
+    if mode == "off":
+        assert fields == _REEL_FIELDS and list(fields) == list(_REEL_FIELDS)     # today's dict, byte for byte
+        assert "share_mode" not in meta and "share_mode" not in prepared.summary
+    else:
+        value = schemas.INSTAGRAM_TRIAL_MODES[mode]
+        assert list(fields.items()) == [("title", CAPTION), ("instagram_title", CAPTION), ("media_type", "REELS"),
+                                        ("share_mode", value), ("is_ai_generated", True), ("thumb_offset", "500")]
+        assert "share_to_feed" not in fields                                # regular Reels only
+        assert meta["share_mode"] == value and f"share_mode={value} " in prepared.summary
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    # no other platform, and no other format, ever carries it
+    for platform in ("tiktok", "youtube", "facebook", "linkedin", "threads"):
+        assert "share_mode" not in oup.platform_fields(platform, _post(platform))
+    for platform in _EXTRA:
+        assert "share_mode" not in oup.platform_fields(platform, _vpost(platform))
+
+
+@pytest.mark.parametrize("raw", ["trial", "share-if-liked", "TRIAL_REELS_SHARE_TO_FOLLOWERS_IF_LIKED", "custom",
+                                 7, None, True, ["share_if_liked"]])
+def test_batch3_a_bad_live_trial_value_is_a_regular_reel_with_an_error(creds, monkeypatch, caplog, trial_cache, raw):
+    """The validator normalises the setting; a value put on the LIVE settings object past it (a shell, a test)
+    is re-checked at send time: anything but a known mode is a regular Reel — today's fields — and an ERROR,
+    once per distinct string (memoised), every time for a non-string."""
+    monkeypatch.setattr(oup.settings, "MARKETING_INSTAGRAM_TRIAL_MODE", raw)
+    with caplog.at_level(logging.ERROR, logger=oup.logger.name):
+        for _ in range(5):
+            assert oup.platform_fields("instagram", _post("instagram")) == _REEL_FIELDS
+            assert "share_mode" not in oup.UploadPostAdapter("instagram").prepare(_post("instagram")).publish_meta[
+                "upload_post"]
+    errors = [r.getMessage() for r in caplog.records
+              if r.levelno >= logging.ERROR and "MARKETING_INSTAGRAM_TRIAL_MODE" in r.getMessage()]
+    assert len(errors) == (1 if isinstance(raw, str) else 10)
+    assert all(len(m) < 300 for m in errors)
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("off", None), ("OFF", None), ("", None), ("   ", None),
+    ("share_if_liked", "TRIAL_REELS_SHARE_TO_FOLLOWERS_IF_LIKED"), (" Share_If_Liked ", "TRIAL_REELS_SHARE_TO_FOLLOWERS_IF_LIKED"),
+    ("DONT_SHARE", "TRIAL_REELS_DONT_SHARE_TO_FOLLOWERS"),
+])
+def test_batch3_parse_instagram_trial_mode_reads_the_validators_tokens(caplog, trial_cache, raw, expected):
+    with caplog.at_level(logging.ERROR, logger=oup.logger.name):
+        assert oup.parse_instagram_trial_mode(raw) == expected
+    assert not caplog.records
+
+
+def test_batch3_the_trial_mode_is_read_at_send_time_and_recorded_only_when_on(creds, monkeypatch, trial_cache):
+    """Read when each post is prepared (no restart), and `metadata.publish.upload_post.share_mode` says what THIS
+    request asks for: present only when on, never carried over from an earlier attempt sent under another mode."""
+    adapter = oup.UploadPostAdapter("instagram")
+    first = (_now() - timedelta(hours=1)).isoformat()
+    stored = {"request_id": f"{DAY}:instagram:video:a1", "first_sent_at": first,
+              "share_mode": "TRIAL_REELS_DONT_SHARE_TO_FOLLOWERS"}
+    post = _post("instagram", status="approved", attempts=1,
+                 metadata={"dry_run": False, "publish": {"state": "not_sent", "upload_post": stored}})
+    off = adapter.prepare(post)
+    assert off.payload["fields"] == _REEL_FIELDS and off.payload["request_id"] == stored["request_id"]
+    assert "share_mode" not in off.publish_meta["upload_post"]
+    assert off.publish_meta["upload_post"]["first_sent_at"] == first          # the rest of the record is kept
+    monkeypatch.setattr(oup.settings, "MARKETING_INSTAGRAM_TRIAL_MODE", "share_if_liked")
+    on = adapter.prepare(post)
+    assert on.payload["fields"]["share_mode"] == "TRIAL_REELS_SHARE_TO_FOLLOWERS_IF_LIKED"
+    assert on.publish_meta["upload_post"]["share_mode"] == "TRIAL_REELS_SHARE_TO_FOLLOWERS_IF_LIKED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["off", "share_if_liked", "dont_share"])
+async def test_batch3_a_trial_reel_on_the_wire(up, ledger, monkeypatch, trial_cache, mode):
+    monkeypatch.setattr(oup.settings, "MARKETING_INSTAGRAM_TRIAL_MODE", mode)
+    up.answer("/upload", _ack(_rid("instagram")))
+    outcome, _ = await _send("instagram")
+    own = [("user", PROFILE), ("platform[]", "instagram"), ("video", VIDEO_URL), ("async_upload", "true"),
+           ("request_id", _rid("instagram")), ("external_id", POST_ID)]
+    reel = (("share_to_feed", "true"),) if mode == "off" else (("share_mode", schemas.INSTAGRAM_TRIAL_MODES[mode]),)
+    assert _parts(up.uploads[0]) == own + [("title", CAPTION), ("instagram_title", CAPTION), ("media_type", "REELS"),
+                                           *reel, ("is_ai_generated", "true"), ("thumb_offset", "500")]
+    assert outcome.kind == SUBMITTED
+    assert outcome.publish_meta["upload_post"].get("share_mode") == (
+        None if mode == "off" else schemas.INSTAGRAM_TRIAL_MODES[mode])
+
+
+@pytest.mark.asyncio
+async def test_batch3_e2e_the_facebook_reel_goes_out_after_its_picture_text_post(penv):
+    """Through the publisher with the REAL adapter and client: the Facebook text post of a run goes first
+    (/upload_text); its video waits (held, unclaimed) until that post is published, then goes as a Reel."""
+    day = mrs.run_date_et().isoformat()
+    run_id = str(uuid.uuid4())
+    penv.enabled = ["facebook"]
+    text_key, video_key = f"{day}:facebook:text", f"{day}:facebook:video"
+    primary = penv.seed(platform="facebook", key=text_key, caption=CAPTION, run_id=run_id)
+    extra = penv.seed(platform="facebook", key=video_key, run_id=run_id, **_vover("facebook", idempotency_key=video_key))
+    penv.up.answer("/upload_text", _ack(f"{text_key}:a1"))
+    counters = await pub.publish_cycle()
+    assert counters["submitted"] == 1 and counters["retry"] == 1
+    assert [r.url.path for r in penv.up.uploads] == ["/api/upload_text"]
+    assert penv.row(extra)["status"] == "approved" and penv.row(extra)["attempts"] == 0
+
+    _backdate(penv, primary, 660)
+    penv.up.answer("/uploadposts/status", _status("completed", rid=f"{text_key}:a1"))
+    penv.up.answer("/uploadposts/history", _hist(_item("facebook", rid=f"{text_key}:a1",
+                                                       platform_post_id="104857600123456_1",
+                                                       post_url="https://www.facebook.com/104857600123456/posts/1")))
+    assert (await pub.reconcile_cycle())["found"] == 1 and penv.row(primary)["status"] == "published"
+
+    penv.up.answer("/upload", _ack(f"{video_key}:a1"))
+    counters = await pub.publish_cycle()
+    assert counters["submitted"] == 1 and counters["retry"] == 0
+    upload = penv.up.uploads[-1]
+    assert upload.url.path == "/api/upload" and upload.headers["idempotency-key"] == f"{video_key}:a1"
+    parts = dict(_parts(upload))
+    assert parts["video"] == VIDEO_URL and parts["facebook_media_type"] == "REELS"
+    assert parts["facebook_description"] == REEL and parts["facebook_is_ai_generated"] == "true"
+    assert not _NOT_ON_AN_EXTRA & set(parts)
+    row = penv.row(extra)
+    assert row["status"] == "queued" and row["metadata"]["publish"]["state"] == "submitted"
+    assert row["metadata"]["publish"]["upload_post"]["request_id"] == f"{video_key}:a1"
+    _assert_review_kept(row)

@@ -384,6 +384,81 @@ def test_a_confirmed_split_restates_and_stays_complete():
     assert bf.changes["counts"]["unchanged"] == 7, "a held-through 10:1 split is unchanged"
 
 
+# ── Batch 1 (2026-10-15): the split-lookup cap is RECORDED, never a degraded reason ─────────────────
+
+SPLIT_CIK = "0000000042"
+
+
+def _split_book(n):
+    """``n`` positions held in both quarters whose share count rose 50% at the same value — a per-share
+    price down a third, the shape of a 3:2 split, so each is a split SUSPECT — and one plain position."""
+    def rows(period, filed, acc, mult):
+        out = [_row(f"{700000 + i:06d}AB1", 100_000 * mult, 10e6, acc, filed, symbol=f"S{i:02d}X",
+                    name=f"S{i:02d}X CORP", period=period, cik=SPLIT_CIK) for i in range(n)]
+        out.append(_row("037833100", 1_000, 2e6, acc, filed, symbol="AAPL", name="APPLE INC", period=period,
+                        cik=SPLIT_CIK))
+        return out
+    return {"2026-Q1": rows("2026-03-31", "2026-05-15", "0000000042-26-000001", 1.0),
+            "2026-Q2": rows("2026-06-30", "2026-08-14", "0000000042-26-000002", 1.5)}
+
+
+@pytest.mark.parametrize("n, unchecked", [(0, set()), (24, set()), (25, set()), (26, {"S25X"}),
+                                          (27, {"S25X", "S26X"})])
+def test_split_unchecked_is_the_tail_past_the_cap_and_never_degrades_the_build(n, unchecked, caplog):
+    fmp = FakeFMP(extracts={SPLIT_CIK: _split_book(n)}, generic_profiles=True)
+    acts = FakeActions()                                  # no split anywhere: every lookup comes back clean
+    with caplog.at_level(logging.WARNING, logger=B.__name__):
+        bf = _build(fmp, SPLIT_CIK, 2026, 2, actions=acts)
+    assert isinstance(bf.split_unchecked, frozenset) and bf.split_unchecked == frozenset(unchecked)
+    # Never a degraded reason: a rebuild cannot check more than the cap, and `degraded` would make the
+    # daily job rebuild the quarter forever.
+    assert bf.build_status == "complete" and bf.degraded_reasons == []
+    assert len(acts.calls) == min(n, 25)
+    row = bf.as_row()                                     # not a column, and the stored row is unchanged
+    assert "split_unchecked" not in json.dumps(row) and set(row["changes"]) == {
+        "comparison", "prev_period", "counts", "rows"}
+    assert ("past the lookup cap were never checked" in caplog.text) is bool(unchecked)
+    for sym in unchecked:                                 # the app keeps the raw diff, as before
+        assert _change(bf, sym)["change"] == "increased"
+
+
+def test_a_fixture_build_and_a_non_quarter_build_have_no_split_unchecked():
+    assert _build(FakeFMP(), NVIDIA, 2026, 2).split_unchecked == frozenset()
+    assert _build(FakeFMP(), NVIDIA, 2026, 2, prev=False).split_unchecked == frozenset()   # a gap: no split check
+
+
+def test_stored_split_unchecked_rederives_the_live_builds_answer_from_the_stored_rows():
+    """The club path reads STORED builds: re-running the cap over the stored current and previous books
+    (JSON round-tripped, as Supabase returns them) gives exactly the live build's `split_unchecked`."""
+    fmp = FakeFMP(extracts={SPLIT_CIK: _split_book(27)}, generic_profiles=True,
+                  dates={SPLIT_CIK: [{"date": "2026-03-31", "year": 2026, "quarter": 1}]})
+    q1 = _build(fmp, SPLIT_CIK, 2026, 1, prev=False)          # a first filing: the stored previous book
+    q2 = _build(fmp, SPLIT_CIK, 2026, 2, actions=FakeActions())
+    stored_q1 = json.loads(json.dumps(q1.as_row()))["holdings"]
+    stored_q2 = json.loads(json.dumps(q2.as_row()))["holdings"]
+    assert q2.split_unchecked == B.stored_split_unchecked(stored_q2, stored_q1) == frozenset({"S25X", "S26X"})
+    assert B.stored_split_unchecked(stored_q2[:20], stored_q1) == frozenset()     # 20 positions: under the cap
+
+
+@pytest.mark.parametrize("cur, prev", [(None, []), ([], None), ("[]", []), ((), []), ({}, [])])
+def test_stored_split_unchecked_refuses_a_book_that_is_not_a_list(cur, prev):
+    """An unreadable book is the CALLER's decision (the adapter fails closed) — never read here as
+    "no suspects"."""
+    with pytest.raises(TypeError, match="must be a list"):
+        B.stored_split_unchecked(cur, prev)
+
+
+def test_stored_split_unchecked_skips_junk_rows():
+    prev = [{"symbol": f"S{i:02d}X", "shares": 100_000, "value": 10e6} for i in range(26)]
+    cur = [{"symbol": f"S{i:02d}X", "shares": 150_000, "value": 10e6} for i in range(26)]
+    junk = [None, "S99X", 7, {"symbol": None, "shares": 1, "value": 1}, {"symbol": 123, "shares": 1, "value": 1},
+            {"symbol": "", "shares": 1, "value": 1}, {"symbol": "NANX", "shares": float("nan"), "value": 1e6},
+            {"shares": 5, "value": 5}]
+    assert B.stored_split_unchecked(cur + junk, prev + junk) == frozenset({"S25X"})
+    assert B.stored_split_unchecked([], []) == frozenset()
+    assert B.stored_split_unchecked(junk, junk) == frozenset()
+
+
 def _with_symbolless(fmp, cusip, name, cik=NVIDIA):
     extra = _row(cusip, 1000, 5_000_000, "0001045810-26-000065", "2026-08-14", symbol=None, name=name)
     fmp.extracts[cik]["2026-Q2"].append(extra)
@@ -755,3 +830,44 @@ def test_a_huge_integer_is_a_bad_number_not_a_crash():
         assert [r["cusip"] for r in norm.rows] == ["111111118"] and norm.excluded_rows == 1
         assert B.raw_hash_of(raw) != B.raw_hash_of([ok])
         assert B.raw_hash_of(raw) != B.raw_hash_of([ok, dict(raw[1], **{field_: 10 ** 401})])
+
+
+# ── `split_windows`: the marketing adapter's door to the split seam (the review of 2026-10-16, F1) ──
+
+
+class _WindowSeam:
+    """A corporate-actions seam that records what it was asked."""
+
+    def __init__(self, splits=None):
+        self.splits = splits or {}
+        self.asked = []
+
+    async def get_split_rows(self, t, from_date=None, to_date=None):
+        self.asked.append((t, from_date, to_date))
+        return list(self.splits.get(t, []))
+
+    async def has_unclassified_adjustment(self, t, from_date=None, to_date=None, *, effective_from=None,
+                                          effective_to=None):
+        return False
+
+
+def test_split_windows_passes_an_injected_seam_through():
+    from app.services import thirteen_f_splits as tfs
+
+    seam = _WindowSeam({"NVDA": [{"date": "2026-06-10", "numerator": 10, "denominator": 1}]})
+    got = asyncio.run(B.split_windows(["NVDA", "aapl"], "2026-03-31", "2026-06-30", actions=seam, log_ctx="x"))
+    assert got == {"NVDA": tfs.SplitWindow(10.0, False), "AAPL": tfs.SplitWindow(1.0, False)}
+    assert seam.asked == [("NVDA", "2026-03-21", "2026-06-30"), ("AAPL", "2026-03-21", "2026-06-30")]
+    assert B.SplitWindow is tfs.SplitWindow and {"split_windows", "SplitWindow"} <= set(B.__all__)
+
+
+def test_split_windows_resolves_the_production_seam_as_build_filing_does(monkeypatch):
+    """No seam → `corporate_actions_source(None)`, imported inside the call from its source module (as the build
+    resolves it) — never at import, and never inside the shared `thirteen_f_splits`."""
+    from app.services import corporate_actions_service as cas
+
+    seam = _WindowSeam()
+    owners = []
+    monkeypatch.setattr(cas, "corporate_actions_source", lambda owner=None: owners.append(owner) or seam)
+    got = asyncio.run(B.split_windows(["KO"], "2026-06-30", "2026-09-30", actions=None, log_ctx="x"))
+    assert list(got) == ["KO"] and owners == [None] and seam.asked == [("KO", "2026-06-20", "2026-09-30")]

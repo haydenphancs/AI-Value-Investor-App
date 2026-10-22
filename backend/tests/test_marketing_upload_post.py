@@ -946,6 +946,10 @@ async def test_post_analytics_success_false_names_the_reason(monkeypatch, creds)
     (404, {"success": False, "message": "No post found with the given request ID"}, upload_post.UploadPostRefusedError),
     (404, b"<html>Not Found</html>", upload_post.UploadPostRefusedError),
     (400, {"success": False, "message": "Invalid platform"}, upload_post.UploadPostRefusedError),
+    # the platform asked about is not connected to the profile: the measure step's per-account skip (MD-3)
+    (400, {"success": False, "message": "Some platforms are not connected",
+           "invalid_platforms": {"tiktok": "Profile caydex has no Tiktok account configured"}},
+     upload_post.UploadPostNotConnectedError),
     (429, {"success": False, "message": "Too many requests"}, upload_post.UploadPostRateLimitError),
     (408, None, upload_post.UploadPostAmbiguousError),
     (500, {"success": False, "error": "Unexpected error occurred"}, upload_post.UploadPostAmbiguousError),
@@ -1482,3 +1486,123 @@ async def test_upload_photos_sync_answer_is_normalised(monkeypatch, creds):
     result = {"success": True, "url": "https://www.threads.net/@caydex/post/1", "post_id": "1"}
     _install(monkeypatch, _answer(200, {"success": True, "results": {"threads": result}}))
     assert await _photos() == {"mode": "sync", "request_id": None, "results": {"threads": result}, "usage": None}
+
+
+# ── 2026-10-15: what an upload answer says beside its outcome ──────────────────────────────────
+#
+# Upload-Post's upload-video page (VERIFIED 2026-10-15): the first comment "never fails the publish";
+# anything that goes wrong is "a plain-string entry in the response's `warnings` array" (an ignored field
+# too), and a posted one is `first_comment_posted: true`. The client keeps both — present only when sent,
+# `warnings` scrubbed, one line each, at most MAX_WARNINGS × WARNING_MAX_CHARS — and neither ever
+# changes the outcome split.
+
+_TT_WARN = ("A first comment on TikTok needs a reconnected TikTok account. The post was published without it. "
+            "Reconnect your TikTok account from Manage Users (https://app.upload-post.com/manage-users).")
+
+
+def test_the_warning_caps_are_pinned():
+    assert upload_post.MAX_WARNINGS == 5 and upload_post.WARNING_MAX_CHARS == 200
+
+
+@pytest.mark.asyncio
+async def test_an_async_ack_keeps_its_warnings_and_comment_flag(monkeypatch, creds):
+    _install(monkeypatch, _answer(200, {**ASYNC_ACK, "warnings": [_TT_WARN, "location_id was ignored"],
+                                        "first_comment_posted": False}))
+    assert await _video() == {"mode": "async", "request_id": REQUEST_ID,
+                              "warnings": [_TT_WARN[:200], "location_id was ignored"],
+                              "first_comment_posted": False}
+
+
+@pytest.mark.asyncio
+async def test_a_sync_answer_reads_the_platforms_own_entry_too(monkeypatch, creds):
+    """The page does not say where the keys sit: both places are read. The platform's own entry wins for
+    the flag; the warnings are the top level's, then the entry's, without repeats."""
+    entry = {"success": True, "url": "https://www.tiktok.com/@caydex/video/1", "post_id": "1",
+             "first_comment_posted": True, "warnings": ["entry warning", "top warning"]}
+    _install(monkeypatch, _answer(200, {"success": True, "results": {"tiktok": entry},
+                                        "warnings": ["top warning"], "first_comment_posted": False}))
+    res = await _video()
+    assert res["mode"] == "sync" and res["results"]["tiktok"]["post_id"] == "1"
+    assert res["warnings"] == ["top warning", "entry warning"]
+    assert res["first_comment_posted"] is True
+
+
+@pytest.mark.asyncio
+async def test_another_platforms_notes_are_not_ours(monkeypatch, creds):
+    results = {"tiktok": {"success": True, "url": "u"},
+               "instagram": {"success": True, "warnings": ["not ours"], "first_comment_posted": True}}
+    _install(monkeypatch, _answer(200, {"success": True, "results": results}))
+    res = await _video()
+    assert "warnings" not in res and "first_comment_posted" not in res
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_answer_keeps_its_notes(monkeypatch, creds):
+    _install(monkeypatch, _answer(202, {"success": True, "job_id": "job-1", "warnings": ["queued with a note"]}))
+    assert await _video() == {"mode": "scheduled", "job_id": "job-1", "warnings": ["queued with a note"]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw, expected", [
+    ("one plain string", ["one plain string"]),                       # a lone string is one entry
+    (["a", "a", " a ", "", "   ", 3, None, True, {"m": "x"}, ["nested"], "b"], ["a", "b"]),
+    ({"message": "an object"}, None),
+    (42, None),
+    (None, None),
+    ([], None),
+    (["", "  ", 7], None),
+    (True, None),
+])
+async def test_warnings_are_plain_strings_only(monkeypatch, creds, raw, expected):
+    _install(monkeypatch, _answer(200, {**ASYNC_ACK, "warnings": raw}))
+    res = await _text()
+    assert res.get("warnings") == expected
+    assert ("warnings" in res) is (expected is not None)
+    assert res["mode"] == "async" and res["request_id"] == REQUEST_ID
+
+
+@pytest.mark.asyncio
+async def test_warnings_are_capped_folded_onto_one_line_and_scrubbed(monkeypatch, creds):
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJlLXRoYXQtaXMtbG9uZw"
+    raw = [f"bad key {API_KEY} in\nthe\ttext\x00 here\u2028end\x1b[31m",
+           f"Authorization: Apikey {API_KEY}",
+           f"token {jwt}",
+           "x" * 1000,
+           *[f"note {i}" for i in range(9)]]
+    _install(monkeypatch, _answer(200, {**ASYNC_ACK, "warnings": raw}))
+    res = await _text()
+    kept = res["warnings"]
+    assert len(kept) == upload_post.MAX_WARNINGS
+    for w in kept:
+        assert API_KEY not in w and jwt not in w
+        assert len(w) <= upload_post.WARNING_MAX_CHARS
+        assert not any(c in w for c in "\n\r\t\x00\x1b\u2028") and w == w.strip()
+    assert kept[0].startswith("bad key") and "in the text here end" in kept[0]
+    assert kept[3] == "x" * upload_post.WARNING_MAX_CHARS
+    assert kept[4] == "note 0"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", ["true", 1, 0, None, "yes", [True], {"posted": True}])
+async def test_first_comment_posted_must_be_a_real_bool(monkeypatch, creds, flag):
+    _install(monkeypatch, _answer(200, {**ASYNC_ACK, "first_comment_posted": flag}))
+    assert "first_comment_posted" not in await _text()
+
+
+@pytest.mark.asyncio
+async def test_a_bad_entry_flag_falls_back_to_the_top_levels(monkeypatch, creds):
+    _install(monkeypatch, _answer(200, {"success": True, "first_comment_posted": True,
+                                        "results": {"tiktok": {"success": True, "first_comment_posted": "yes"}}}))
+    assert (await _video())["first_comment_posted"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status, body", [
+    (200, {"success": False, "warnings": ["a note"]}),
+    (200, {"success": True, "warnings": ["a note"], "first_comment_posted": True}),   # no request_id / results / job
+    (202, {"success": True, "warnings": ["a note"]}),                                 # scheduled without a job_id
+])
+async def test_notes_never_rescue_an_unclear_answer(monkeypatch, creds, status, body):
+    _install(monkeypatch, _answer(status, body))
+    with pytest.raises(upload_post.UploadPostAmbiguousError):
+        await _text()

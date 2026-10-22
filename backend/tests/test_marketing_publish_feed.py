@@ -16,7 +16,9 @@ What must never regress:
     changed status meanwhile, is sent again next cycle — never lost, never stamped unsent;
   * a Telegram failure NEVER changes a post's status (the publisher owns statuses);
   * ≤ FEED_SEND_LIMIT sends a tick; a 429 stops the feed and holds off the review sweep too;
-  * an unconfigured bot is a no-op that does not even read the ledger.
+  * an unconfigured bot is a no-op that does not even read the ledger;
+  * Quiet Telegram (2026-10-15): "Posted" replies and the "Retracted" fallback are silent on every chunk,
+    every alert rings, and `_send` makes each call site choose (`silent` has no default).
 """
 
 from __future__ import annotations
@@ -791,3 +793,99 @@ async def test_alerts_and_retract_notes_name_the_format_too(ledger, tg, fmt, sho
     texts = [m["text"] for m in tg.of("sendMessage")]
     assert re.fullmatch(_RETRACTED_RE + rf" · X · {re.escape(shown)} · run 2026-09-29", texts[0])
     assert texts[1] == f"boom\n(X · {shown} · run 2026-09-29)"
+
+
+# ── 2026-10-15 (plan Batch 1 item 9): Quiet Telegram — "Posted" is silent, an alert rings ─────────────
+#
+# Mutation-checked by hand on 2026-10-15: sending the alerts with silent=True, and the "Posted" reply with
+# silent=False, each turned a test here red; restored.
+
+
+def _is_silent(payload: Dict[str, Any]) -> bool:
+    if "disable_notification" in payload:
+        assert payload["disable_notification"] is True, payload
+        return True
+    return False
+
+
+@pytest.mark.asyncio
+async def test_a_posted_reply_is_silent_and_otherwise_unchanged(ledger, tg):
+    pid = _seed(ledger)
+    await feed.feed_cycle()
+    (msg,) = tg.of("sendMessage")
+    assert _is_silent(msg)
+    assert msg == {"chat_id": OWNER, "text": f"✅ Posted on X · text · run 2026-09-29\n{X_URL}",
+                   "link_preview_options": {"is_disabled": True},
+                   "reply_markup": {"inline_keyboard": [[{"text": "🗑 Retract", "callback_data": f"d:{pid}"}]]},
+                   "reply_parameters": {"message_id": REVIEW_MID, "allow_sending_without_reply": True},
+                   "disable_notification": True}
+
+
+@pytest.mark.asyncio
+async def test_a_posted_reply_split_in_chunks_is_silent_on_every_chunk(ledger, tg):
+    _seed(ledger, external_url="https://example.invalid/" + "p" * 5000)
+    await feed.feed_cycle()
+    chunks = tg.of("sendMessage")
+    assert len(chunks) >= 2 and all(_is_silent(c) for c in chunks)
+    assert "reply_parameters" in chunks[0] and "reply_markup" in chunks[-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind, status, extra", _ALERT_CASES)
+async def test_every_alert_kind_rings(ledger, tg, kind, status, extra):
+    _seed(ledger, status=status, extra_meta={"alert_kind": kind, "alert_text": f"⚠️ {kind}", **extra})
+    assert (await feed.feed_cycle())["alerts"] == 1
+    (msg,) = tg.of("sendMessage")
+    assert not _is_silent(msg)
+
+
+@pytest.mark.asyncio
+async def test_a_long_alert_rings_on_every_chunk(ledger, tg):
+    _seed(ledger, status="failed", extra_meta={"alert_kind": "failed", "alert_text": "boom " * 2000})
+    assert (await feed.feed_cycle())["alerts"] == 1
+    chunks = tg.of("sendMessage")
+    assert len(chunks) >= 2 and not any(_is_silent(c) for c in chunks)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("posted_mid, edit_answer", [
+    (None, None),                                                                           # nothing to edit
+    (777, (400, {"ok": False, "description": "Bad Request: message to edit not found"})),  # the edit failed
+])
+async def test_a_retracted_fallback_message_is_silent(ledger, tg, posted_mid, edit_answer):
+    extra = {} if posted_mid is None else {"posted_message_id": posted_mid}
+    _seed(ledger, status="retracted", extra_meta=extra)
+    if edit_answer is not None:
+        tg.script["editMessageText"] = [edit_answer]
+    assert (await feed.feed_cycle())["retracted"] == 1
+    (msg,) = tg.of("sendMessage")
+    assert re.fullmatch(_RETRACTED_RE + r" · X · text · run 2026-09-29", msg["text"]) and _is_silent(msg)
+
+
+@pytest.mark.asyncio
+async def test_the_retract_edit_carries_no_notification_flag(ledger, tg):
+    """An edit notifies nobody: editMessageText takes no such parameter, so none is ever sent."""
+    _seed(ledger, status="retracted", extra_meta={"posted_message_id": 777})
+    assert (await feed.feed_cycle())["retracted"] == 1
+    (edit,) = tg.of("editMessageText")
+    assert "disable_notification" not in edit
+
+
+@pytest.mark.asyncio
+async def test_one_tick_of_every_kind_rings_only_for_its_alerts(ledger, tg):
+    _seed(ledger)
+    _seed(ledger, platform="bluesky", external_id=BSKY_URI, external_url=BSKY_URL)
+    _seed(ledger, status="retracted")
+    _seed(ledger, status="failed", external_id=None, extra_meta={"alert_kind": "failed", "alert_text": "❌ refused"})
+    counters = await feed.feed_cycle()
+    assert (counters["posted"], counters["retracted"], counters["alerts"]) == (2, 1, 1)
+    loud = [p["text"] for p in tg.of("sendMessage") if not _is_silent(p)]
+    assert loud == ["❌ refused\n(X · text · run 2026-09-29)"]
+
+
+def test_every_feed_send_decides_its_own_sound():
+    """`_send`'s `silent` is a REQUIRED keyword: a new call site cannot inherit a default by accident."""
+    import inspect
+
+    param = inspect.signature(feed._send).parameters["silent"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY and param.default is inspect.Parameter.empty

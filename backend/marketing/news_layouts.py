@@ -39,6 +39,17 @@ script's `image_post` (on a template that is name-free ALT TEXT; it is never dra
 * **Deterministic bytes**: the same spec, logos, Pillow and engine give the same JPEG
   (`cards.encode_jpeg`, the same quality ladder and byte cap as the lesson image).
 
+**The DATA CARD** (Batch 2, 2026-10-19, the frozen video feature `data_card`): the template video's text
+card the script read-back names (`data_card_slot` — a fact card the picture already shows, never a hedge
+card; `cards.data_card_slot`) may be replaced by this same picture — the same `TemplateImage`, the same
+placers, the same strings (kicker … footer) — laid out in the video card's text zone (`DATA_CARD_FRAME`:
+cards.SAFE_X × cards.TEXT_ZONE_Y, above the caption band) instead of the 4:5 page (`POST_IMAGE_FRAME`). The
+zone holds about 0.71 of the page's height, so the ramp steps the sizes down to fit; a picture that fits
+only with some drawn line under DATA_CARD_MIN_PX is NOT a data card (`layout_data_card` raises CardOverflow and
+`cards.cards_for_script` keeps the text card). It is laid out natively, never a bitmap scale of the
+JPEG: scaled by 0.71, the kicker and the footer (30 px) would land at 21 px and the chips, notes and
+grid lines at 18-20 px — under the floor at every step, so no data card would ever show.
+
 Pure apart from Pillow (imported inside functions). Nothing here imports app.*.
 """
 
@@ -108,6 +119,36 @@ GRID_TEXT_GAP = 18             # a grid tile's plate → its text
 MUTED = _mix(TEXT, CARD, 0.72)
 TRACK = _mix(TEXT, CARD, 0.10)
 DIVIDER = _mix(TEXT, CARD, 0.16)
+
+
+@dataclass(frozen=True)
+class Frame:
+    """Where a template picture is laid out: the `canvas` it is drawn on (w, h), the `box` inside it that
+    holds everything — the panel at the top, the footer at the bottom, nothing outside — and the panel's
+    inner padding. `name` prefixes the layout's kind ("template:rows", "data:rows")."""
+
+    name: str
+    canvas: Tuple[int, int]
+    box: Box
+    pad_x: int
+    pad_y: int
+
+
+#: The 4:5 post image: the page minus cards.IMAGE_MARGIN on every side, the image panel's padding.
+POST_IMAGE_FRAME = Frame(
+    name="template", canvas=(cards.IMAGE_WIDTH, cards.IMAGE_HEIGHT),
+    box=(cards.IMAGE_MARGIN, cards.IMAGE_MARGIN, cards.IMAGE_WIDTH - cards.IMAGE_MARGIN,
+         cards.IMAGE_HEIGHT - cards.IMAGE_MARGIN),
+    pad_x=cards.IMAGE_PANEL_PAD_X, pad_y=cards.IMAGE_PANEL_PAD_Y)
+#: The video's data card (Batch 2): the card's text zone — clear of the platforms' top chrome and of the
+#: caption band — with a text card's panel padding, so its panel lines up with the text cards before it.
+DATA_CARD_FRAME = Frame(
+    name="data", canvas=(cards.WIDTH, cards.HEIGHT),
+    box=(cards.SAFE_X[0], cards.TEXT_ZONE_Y[0], cards.SAFE_X[1], cards.TEXT_ZONE_Y[1]),
+    pad_x=cards.PANEL_PAD_X, pad_y=cards.PANEL_PAD_Y)
+#: The smallest text a data card may draw, px on the 1080×1920 frame (a company name on a WORDMARK plate
+#: is exempt: it stands in for a logo and is sized by its plate, exactly as on the post image).
+DATA_CARD_MIN_PX = 22
 
 
 # ── the spec: walk + validate (the worker's mirror of template_onscreen) ────────────────────
@@ -398,13 +439,20 @@ class _Text:
     width: float
 
 
+class _Illegible(Exception):
+    """Internal: a line would be drawn under the canvas's legibility floor. Every size steps down
+    together along the ramp, so no later step can be legible either — the search stops."""
+
+
 class _Canvas:
     """The panel's content column, (0, 0) at its top-left: `width` px wide and at most `budget`
     tall. Collects text lines, rectangles and logo plates; `y` is the next free row."""
 
-    def __init__(self, width: int, budget: int, font_path: str, engine: str, step: int) -> None:
+    def __init__(self, width: int, budget: int, font_path: str, engine: str, step: int, min_px: int = 0) -> None:
         self.width, self.budget = width, budget
         self.font_path, self.engine, self.step = font_path, engine, step
+        #: The smallest text size this canvas may draw (the data card's legibility floor; 0 = any).
+        self.min_px = min_px
         self.y = 0
         self.lines: List[Tuple[str, str, int, int, int, str, Tuple[int, int, int]]] = []
         self.rects: List[Rect] = []
@@ -413,6 +461,12 @@ class _Canvas:
 
     def px(self, style: _Style) -> int:
         return style.size(self.step)
+
+    def legible(self, size: int, what: str) -> None:
+        """_Illegible when text of `size` px is under this canvas's floor (`min_px`)."""
+        if size < self.min_px:
+            raise _Illegible(f"{what} is drawn at {size}px from ramp step {self.step} — under the "
+                             f"{self.min_px}px legibility floor")
 
     def check(self, what: str) -> None:
         if self.y > self.budget:
@@ -424,6 +478,7 @@ class _Canvas:
 
     def measure(self, text: str, style: _Style, width: float, what: str) -> _Text:
         size = self.px(style)
+        self.legible(size, what)
         font = _font(self.font_path, size, self.engine)
         asc, desc = font.getmetrics()
         pitch = int(round(size * style.leading))
@@ -456,6 +511,7 @@ class _Canvas:
 
     def pill(self, field: str, text: str, style: _Style, x: int, y: int) -> int:
         w, h, size = self.pill_size(text, style)
+        self.legible(size, field)
         if x + w > self.width:
             raise _NoFit(f"{field}: the pill is {w}px wide, room for {self.width - x}px")
         self.rects.append(Rect((x, y, x + w, y + h), h // 2, BADGE_FILL))
@@ -736,30 +792,31 @@ _WALKERS: Dict[str, Walker] = {k: DRAWERS[k][0] for k in cards.SHIPPED_LAYOUTS}
 _LAYOUTS: Dict[str, Placer] = {k: DRAWERS[k][1] for k in cards.SHIPPED_LAYOUTS}
 
 
-def _place(image: TemplateImage, step: int, font_path: str, engine: str) -> TemplateLayout:
-    W, H, M = cards.IMAGE_WIDTH, cards.IMAGE_HEIGHT, cards.IMAGE_MARGIN
-    col_w = W - 2 * M
+def _place(image: TemplateImage, step: int, font_path: str, engine: str,
+           frame: Frame = POST_IMAGE_FRAME, min_px: int = 0) -> TemplateLayout:
+    x0, y0, x1, y1 = frame.box
+    col_w = x1 - x0
     # The footer first: it sits on the page at the bottom, and what it leaves is the panel's.
     foot = cards._Stack(col_w, cards.IMAGE_FOOTER_MAX_H, "center", font_path, engine, step)
     foot.text("footer", image.footer, cards.IMAGE_FOOTER_STYLE, cards.FOOTER_FILL)
-    footer_top = H - M - foot.y
-    area_top, area_h = M, footer_top - cards.IMAGE_FOOTER_GAP - M
-    pad_x, pad_y = cards.IMAGE_PANEL_PAD_X, cards.IMAGE_PANEL_PAD_Y
-    cv = _Canvas(col_w - 2 * pad_x, area_h - 2 * pad_y, font_path, engine, step)
+    footer_top = y1 - foot.y
+    area_top, area_h = y0, footer_top - cards.IMAGE_FOOTER_GAP - y0
+    pad_x, pad_y = frame.pad_x, frame.pad_y
+    cv = _Canvas(col_w - 2 * pad_x, area_h - 2 * pad_y, font_path, engine, step, min_px)
     h = cv.pill("kicker", image.spec["kicker"], KICKER_STYLE, 0, 0)
     cv.y = h
     _LAYOUTS[image.layout](cv, image.spec, image.logos)
     panel_h = cv.y + 2 * pad_y
     top = area_top + (area_h - panel_h) // 2
-    panel: Box = (M, top, W - M, top + panel_h)
-    footer_zone: Box = (M, footer_top, W - M, H - M)
-    dx, dy = M + pad_x, top + pad_y
+    panel: Box = (x0, top, x1, top + panel_h)
+    footer_zone: Box = (x0, footer_top, x1, y1)
+    dx, dy = x0 + pad_x, top + pad_y
 
     def shift(b: Box) -> Box:
         return b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy
 
     lines: List[DrawnLine] = []
-    for stack_lines, ox, oy, bounds in ((cv.lines, dx, dy, panel), (foot.lines, M, footer_top, footer_zone)):
+    for stack_lines, ox, oy, bounds in ((cv.lines, dx, dy, panel), (foot.lines, x0, footer_top, footer_zone)):
         for name, text, size, x, y, anchor, fill in stack_lines:
             l, t, r, b = _font(font_path, size, engine).getbbox(text, anchor=anchor)
             ink = (x + ox + l, y + oy + t, x + ox + r, y + oy + b)
@@ -781,9 +838,9 @@ def _place(image: TemplateImage, step: int, font_path: str, engine: str) -> Temp
             raise _NoFit(f"the plate of {art.key} leaves the panel")
         if art.wordmark:
             lines.extend(cards.wordmark_lines(art, b, font_path, engine))
-    if footer_zone[1] < panel[3] + cards.IMAGE_FOOTER_GAP or panel[1] < M:
+    if footer_zone[1] < panel[3] + cards.IMAGE_FOOTER_GAP or panel[1] < y0:
         raise _NoFit("the panel or the footer leave their areas")   # defence in depth
-    return TemplateLayout(kind=f"template:{image.layout}", step=step, engine=engine, panel=panel,
+    return TemplateLayout(kind=f"{frame.name}:{image.layout}", step=step, engine=engine, panel=panel,
                           rects=rects, tiles=tiles, lines=tuple(lines), shapes=shapes)
 
 
@@ -804,6 +861,39 @@ def layout_template(image: TemplateImage, *, font_path: str, layout_engine: Opti
                            "plate legibly (the name stays declared, never drawn clipped)", image.layout, blank)
         return layout
     raise CardOverflow(f"template image ({image.layout}) does not fit at the floor sizes: {reason}")
+
+
+def illegible_lines(layout: TemplateLayout, min_px: Optional[int] = None) -> List[DrawnLine]:
+    """The drawn lines of `layout` under `min_px` (default DATA_CARD_MIN_PX) — every line but a WORDMARK
+    plate's company name (a logo stand-in, sized by its plate)."""
+    floor = DATA_CARD_MIN_PX if min_px is None else min_px
+    return [ln for ln in layout.lines if ln.size < floor and not ln.field.startswith("wordmark:")]
+
+
+def layout_data_card(image: TemplateImage, *, font_path: str, layout_engine: Optional[str] = None) -> TemplateLayout:
+    """The DATA CARD (Batch 2): `image` laid out in the video card's text zone (DATA_CARD_FRAME) at the
+    largest ramp step where it fits whole — and only if every line drawn there is at least
+    DATA_CARD_MIN_PX (`illegible_lines`; a wordmark plate's name is exempt). Every size steps down
+    together, so the search stops at the first step that would draw a line under the floor (`_Illegible`,
+    raised by the canvas as it measures): no later step can be legible either. CardOverflow otherwise (the
+    caller keeps the text card: a data card never skips the day); never clipped, never a word broken."""
+    engine = cards.resolve_layout_engine(layout_engine)
+    reason = ""
+    for step in range(cards.RAMP_STEPS + 1):
+        try:
+            layout = _place(image, step, font_path, engine, DATA_CARD_FRAME, DATA_CARD_MIN_PX)
+        except _NoFit as e:
+            reason = str(e)
+            continue
+        except _Illegible as e:
+            raise CardOverflow(f"data card ({image.layout}) does not fit legibly: {e}") from None
+        small = illegible_lines(layout, DATA_CARD_MIN_PX)   # defence in depth (the footer is not the canvas's)
+        if small:
+            raise CardOverflow(f"data card ({image.layout}) fits only from ramp step {step}, where "
+                               f"{small[0].field} is drawn at {small[0].size}px — under the "
+                               f"{DATA_CARD_MIN_PX}px legibility floor")
+        return layout
+    raise CardOverflow(f"data card ({image.layout}) does not fit the card's text zone at the floor sizes: {reason}")
 
 
 def _outline_rounded(img, box: Box, radius: int, colour: Tuple[int, int, int], width: int) -> None:
@@ -835,10 +925,24 @@ def _fill_polygon(img, points: Sequence[Tuple[int, int]], colour: Tuple[int, int
 def draw_template(image: TemplateImage, *, font_path: str, layout_engine: Optional[str] = None):
     """(the template image as an RGB PIL image, its layout) — before any JPEG encoding, so tests can
     check its pixels exactly. CardOverflow / CardAssetError as for a card."""
+    layout = layout_template(image, font_path=font_path, layout_engine=layout_engine)
+    return _draw(POST_IMAGE_FRAME, layout, font_path), layout
+
+
+def draw_data_card(image: TemplateImage, *, font_path: str, layout_engine: Optional[str] = None):
+    """(the DATA CARD as a 1080×1920 RGB PIL image, its layout): `image` drawn in the card's text zone on
+    the page colour (`layout_data_card`) — nothing outside the zone, so the caption band and the
+    platforms' chrome stay clear. CardOverflow (it does not fit legibly) / CardAssetError as for a card."""
+    layout = layout_data_card(image, font_path=font_path, layout_engine=layout_engine)
+    return _draw(DATA_CARD_FRAME, layout, font_path), layout
+
+
+def _draw(frame: Frame, layout: TemplateLayout, font_path: str):
+    """`layout` drawn on a new page-coloured canvas of `frame`'s size: the panel, its bars and pills, the
+    shapes, the logo plates, then every line of text."""
     from PIL import Image, ImageDraw
 
-    layout = layout_template(image, font_path=font_path, layout_engine=layout_engine)
-    img = Image.new("RGB", (cards.IMAGE_WIDTH, cards.IMAGE_HEIGHT), _rgb(PAGE))
+    img = Image.new("RGB", frame.canvas, _rgb(PAGE))
     cards._fill_rounded(img, layout.panel, cards.PANEL_RADIUS, _rgb(CARD))
     for r in layout.rects:
         w, h = r.box[2] - r.box[0], r.box[3] - r.box[1]
@@ -858,7 +962,7 @@ def draw_template(image: TemplateImage, *, font_path: str, layout_engine: Option
     for ln in layout.lines:
         draw.text((ln.x, ln.y), ln.text, font=_font(font_path, ln.size, layout.engine), fill=ln.fill,
                   anchor=ln.anchor)
-    return img, layout
+    return img
 
 
 def check_glyphs(image: TemplateImage, font_path: str) -> None:

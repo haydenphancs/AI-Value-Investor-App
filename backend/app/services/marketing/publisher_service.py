@@ -25,8 +25,8 @@ social secrets live, is the ONLY thing that ever calls a platform (rules/marketi
    the engagement counts of our published posts into `marketing_posts.metrics`
    (`metrics_service.measure_cycle`): Bluesky from the public AppView (free); X BILLED, charged
    before each read and held under the X cap with four posts of headroom at the current post price
-   ($0.015 a text post, $0.20 while MARKETING_X_ALLOW_URLS is on, an image post's price plus its alt
-   text while MARKETING_X_IMAGES is on — `outlet_x.metrics_headroom_micros`),
+   ($0.015 a text post, $0.20 while MARKETING_X_ALLOW_URLS is on, an image post's price plus its upload
+   and alt text while MARKETING_X_IMAGES is on — `outlet_x.metrics_headroom_micros`),
    never under DRY_RUN; Upload-Post best-effort.
 7. **Reports** (bot configured) — the run-health alert (`digest_service.health_cycle`, two day jobs
    timed from the web's mirror of the worker's MARKETING_RUN_HOUR_ET): the nightly check at the first
@@ -56,10 +56,30 @@ guess. Every write is a fenced, merging `run_service.transition_post`.
 IMAGE posts (drop 1, contract C9): before `prepare` (pure) the post's picture is resolved from our own
 ledger (`outlet_base.load_post_image`) and attached to a COPY of the row (the claim stays fenced on the
 row as read): a read that failed skips the post this tick, a picture that can never be right (the
-wrong asset, no accepted image_post) refuses it like any guard. A billed call besides the post itself
-(X's alt text) is journaled by its own fenced write AFTER the claim and BEFORE the send
-(`Prepared.pre_send_charge`); the spend cap is checked for both before the claim, and if that write
-fails nothing is sent (the row goes back to `approved`, its reserve refunded).
+wrong asset, no accepted image_post) refuses it like any guard. The calls the send makes besides the
+post itself that X may bill (an X image post: its media upload and its alt text) are journaled together,
+in ONE fenced write AFTER the claim and BEFORE the send (`Prepared.pre_send_charges`, Batch 1 — all or
+none, so a lost write never leaves half of them journaled); the spend cap is checked for the claim's
+reserve plus all of them before the claim, and if that write fails nothing is sent (the row goes back
+to `approved`, its reserve refunded).
+
+PRIMARY FIRST (Batch 3, 2026-10-20; D8): an EXTRA post — the day's video on Facebook, LinkedIn or Threads, a
+platform's second post of the run (`schemas.is_extra_format`: the (platform, format) pair alone says so, no
+stamp) — is not claimed while its platform's primary post of the same run (the picture/text post) is still
+`pending_review`, `approved` or `queued` (_PRIMARY_OPEN; queued covers a submitted job, an unknown outcome and an
+escalation). One read of that run's posts on that platform, at the extra's turn in the pass, so a primary sent
+earlier in the same pass counts as sent; a read that fails holds the extra too (WARNING). A held extra counts as
+`retry` (INFO "HELD"), is written nothing, and is looked at again next tick; it still expires with its day. A
+REHEARSAL (MARKETING_DRY_RUN, or a rehearsal row) is never held and makes no read: it sends nothing, so there is
+no order to keep, and its never-written primary would hold it all day — it is prepared like any post (its guards
+run) and its "would publish" line ends with DRY_RUN_EXTRA_NOTE (round-1 fix B3S-3, 2026-10-20). Why:
+Upload-Post refuses "similar content within 48 h per account/network" (undocumented beyond that line), and the
+two captions differ only in the disclaimer — so the post that risks the refusal must be the second one, never
+the day's working picture. The review sends the VIDEO decision first and Approve wakes this loop, so without
+the hold the video would usually go first. A primary post never triggers the read. When reconcile ESCALATES a
+primary whose run has an approved, live extra on its platform, the "outcome UNKNOWN" alert ends with
+ESCALATION_EXTRA_NOTE — the owner's answer is what lets that video go (one read, in reconcile; a read that fails
+only leaves the line out).
 
 The loop wakes early on an Approve / confirmed Retract (`publisher_wake`).
 """
@@ -72,7 +92,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from app.config import settings
-from app.schemas.marketing import POST_PLATFORMS
+from app.schemas.marketing import EXTRA_VIDEO_PLATFORMS, POST_PLATFORMS, is_extra_format
 from app.services.marketing import (
     outlet_base,
     outlets,
@@ -106,6 +126,8 @@ from app.services.marketing.outlet_base import (
     scrub,
 )
 from app.services.marketing.run_service import (
+    POSTS,
+    _exec,
     _parse_ts,
     get_marketing_run_service,
     is_fresh,
@@ -142,6 +164,18 @@ PENDING_CEILING = timedelta(hours=24)
 #: (with its error), and `is_fresh` still expires the post at the end of its window.
 MAX_RESEND_DEFERRALS = 3
 RESEND_DEFERRAL_RETRY = timedelta(minutes=10)
+
+#: Batch 3 (D8): while a platform's PRIMARY post of a run is in one of these, an EXTRA post of the same run and
+#: platform waits (`_extra_waits`): not decided yet, approved but unsent, or sent with its outcome still open.
+#: Published, failed, rejected, skipped (expired) and retracted let the extra go.
+_PRIMARY_OPEN = ("pending_review", "approved", "queued")
+#: The tail of an EXTRA post's "DRY_RUN: would publish" line. A rehearsal is never held (nothing is sent, so there
+#: is no order to keep), so the line itself says that a live pass would hold it (`_extra_waits`).
+DRY_RUN_EXTRA_NOTE = " (live: held until its {platform} picture/text post is published or closed)"
+#: The line an "outcome UNKNOWN" escalation ends with when its post is a platform's PRIMARY post and the run has an
+#: APPROVED, live EXTRA video on that platform (`_escalation_extra_note`): `_extra_waits` holds that video while
+#: this post is `queued`, so the owner's answer is what lets it go (round-1 integration of B3S-2, 2026-10-20).
+ESCALATION_EXTRA_NOTE = "\nIts {platform} video waits for this answer."
 
 #: In-memory: escalated posts already logged today (one ERROR per post per day, not per tick).
 _escalation_logged: Dict[str, str] = {}
@@ -422,36 +456,71 @@ async def _with_image(post: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[Me
 
 async def _pre_send(svc: Any, adapter: Adapter, row: Dict[str, Any], prepared: Prepared,
                     budget: Optional["_Budget"]) -> Optional[Dict[str, Any]]:
-    """Journal `prepared.pre_send_charge` (a billed call the send makes besides the post — X's alt
-    text) in its own fenced write on the CLAIMED row, before the send: the write-ahead of that call.
+    """Journal `prepared.pre_send_charges` (the calls the send makes besides the post that X may bill —
+    an X image post's media upload and alt text) in ONE fenced write on the CLAIMED row, before the
+    send: the write-ahead of those calls, all or none (two writes could leave half of them journaled,
+    and the refund the outcome computes from all of them would then reverse a charge never made).
     Returns the row to send, or None when nothing may be sent — then a failed write puts the row back
     to `approved` (NOT_SENT, the claim's reserve refunded; nothing left this process), and a row no
     longer queued is left to whoever moved it."""
-    op, micros = prepared.pre_send_charge or ("", 0)
+    charges = prepared.pre_send_charges
+    ops = "+".join(name for name, _micros in charges)    # for the log lines
     error: Optional[str] = None
     charged: Optional[Dict[str, Any]] = None
     try:
         charged = await svc.transition_post(str(row["id"]), expect_status="queued", observed=row, retries=1,
-                                            charge=(str(op), int(micros)))
+                                            charges=charges)
     except asyncio.CancelledError:
         raise
     except Exception as e:
         error = f"{type(e).__name__}: {e}"
         logger.error("marketing publisher: pre-send charge %s NOT journaled post_id=%s platform=%s key=%s (%s) — "
-                     "nothing sent", op, row.get("id"), row.get("platform"), row.get("idempotency_key"), error,
+                     "nothing sent", ops, row.get("id"), row.get("platform"), row.get("idempotency_key"), error,
                      exc_info=True)
     if charged is not None:
         if budget is not None:
-            budget.add(int(micros))
+            budget.add(prepared.pre_send_micros)
         return charged
     if error is None:
         logger.error("marketing publisher: post_id=%s platform=%s left `queued` before its pre-send charge %s — "
-                     "nothing sent", row.get("id"), row.get("platform"), op)
+                     "nothing sent", row.get("id"), row.get("platform"), ops)
         return None
     await record_outcome(svc, adapter, row, Outcome(
-        NOT_SENT, "ledger", error=scrub(f"the {op} charge could not be journaled ({error}); nothing was sent"),
+        NOT_SENT, "ledger", error=scrub(f"the {ops} charge could not be journaled ({error}); nothing was sent"),
         refund_micros=-int(prepared.reserve_micros)), reserve_micros=prepared.reserve_micros)
     return None
+
+
+async def _extra_waits(svc: Any, post: Dict[str, Any]) -> bool:
+    """Must the EXTRA post `post` wait for its platform's primary post (Batch 3, D8 — primary first)? ONE read of
+    the run's posts on that platform; True while any OTHER post there that is not itself an extra is still open
+    (_PRIMARY_OPEN). A read that fails, or a row that names no run to read by, holds it too (WARNING): the second
+    post is the one that may take Upload-Post's similar-content refusal, never the day's working picture.
+    Called only for a LIVE extra — a primary post never makes this read, nor does a rehearsal (nothing is sent)."""
+    post_id, platform, run_id = post.get("id"), post.get("platform"), post.get("run_id")
+    try:
+        if not run_id:
+            raise ValueError("the post names no run")
+        # Bounded by the schema, so no LIMIT that could cut the primary off: one row per format at most
+        # (UNIQUE (run_id, platform, format)), read through the run_id index.
+        res = await _exec(svc.sb.table(POSTS).select("id,format,status").eq("run_id", str(run_id))
+                          .eq("platform", str(platform)), op="publish_extra_siblings", post_id=post_id, run_id=run_id)
+        rows = getattr(res, "data", None)
+        if not isinstance(rows, list):
+            raise ValueError(f"the read answered {type(rows).__name__}, not a list of rows")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning("marketing publisher: post_id=%s platform=%s run_id=%s — its %s picture/text post could not "
+                       "be read (%s: %s); held this tick (primary first)", post_id, platform, run_id, platform,
+                       type(e).__name__, e)
+        return True
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get("id")) == str(post_id):
+            continue
+        if not is_extra_format(platform, row.get("format")) and row.get("status") in _PRIMARY_OPEN:
+            return True
+    return False
 
 
 async def _refuse(svc: Any, post: Dict[str, Any], err: MarketingPublishRefused) -> None:
@@ -511,10 +580,20 @@ async def publish_cycle() -> Dict[str, int]:
         if not_before is not None and now < not_before:
             counters["retry"] += 1
             continue
+        dry = dry_switch or is_rehearsal(post)
+        extra = is_extra_format(platform, post.get("format"))
+        if extra and not dry and await _extra_waits(svc, post):
+            # Batch 3 (D8): the platform's picture/text post of this run goes first; nothing is written. Never in a
+            # rehearsal (round-1 fix B3S-3): a dry pass sends nothing, so there is no order to keep — and its primary,
+            # never written, would stay `approved` and hold the extra all day, so the rehearsal never prepared it.
+            # A rehearsal extra is prepared like any post (its guards run) and its line says that, live, it waits.
+            logger.info("marketing publisher: post_id=%s platform=%s format=%s HELD: waits for its %s picture/text "
+                        "post", post_id, platform, post.get("format"), platform)
+            counters["retry"] += 1
+            continue
         if not adapter.available():
             counters["retry"] += 1
             continue
-        dry = dry_switch or is_rehearsal(post)
         target, media_problem = await _with_image(post)
         if media_problem is not None and not media_problem.definite:
             # A ledger read that failed: nothing claimed, nothing written — the next tick tries again.
@@ -553,13 +632,15 @@ async def publish_cycle() -> Dict[str, int]:
             continue
         if dry:
             # Decided BEFORE the claim: a rehearsal touches no row at all.
-            logger.info("marketing publisher DRY_RUN: would publish post_id=%s platform=%s key=%s %s",
-                        post_id, platform, post.get("idempotency_key"), prepared.summary)
+            logger.info("marketing publisher DRY_RUN: would publish post_id=%s platform=%s key=%s %s%s",
+                        post_id, platform, post.get("idempotency_key"), prepared.summary,
+                        DRY_RUN_EXTRA_NOTE.format(platform=platform) if extra else "")
             counters["skipped"] += 1
             continue
         budget = budgets.get(platform)
-        # The claim's reserve PLUS a pre-send charge (X's alt text): both are spent before the send.
-        need = int(prepared.reserve_micros) + int((prepared.pre_send_charge or ("", 0))[1])
+        # The claim's reserve PLUS every pre-send charge (an X image post: the upload and the alt text):
+        # all of them are journaled before the send.
+        need = int(prepared.reserve_micros) + prepared.pre_send_micros
         if budget is not None and need > 0 and not await budget.allows(need):
             counters["capped"] += 1
             if platform not in alerted and not budget.unreadable:
@@ -589,7 +670,7 @@ async def publish_cycle() -> Dict[str, int]:
             continue
         if budget is not None and prepared.reserve_micros:
             budget.add(prepared.reserve_micros)
-        if prepared.pre_send_charge:
+        if prepared.pre_send_charges:
             charged = await _pre_send(svc, adapter, claimed, prepared, budget)
             if charged is None:
                 counters["retry"] += 1
@@ -613,6 +694,38 @@ async def publish_cycle() -> Dict[str, int]:
 # ── step 2: reconcile ──────────────────────────────────────────────────────────────────────────
 
 
+async def _escalation_extra_note(svc: Any, row: Dict[str, Any]) -> str:
+    """ESCALATION_EXTRA_NOTE for an escalated PRIMARY post (`row`) whose run has an APPROVED, live extra video on the
+    same platform — the video `_extra_waits` holds while this post is queued (Batch 3, D8) — else "". One read of
+    the run's posts on that platform, made only for a primary on a platform that can carry an extra
+    (EXTRA_VIDEO_PLATFORMS); an extra still waiting for its review, already sent or closed, or a rehearsal row (never
+    held, B3S-3) adds nothing. A read that fails, or answers no list, leaves the note out (WARNING): the escalation
+    never waits on it. Never raises but for a cancellation."""
+    platform, run_id, post_id = row.get("platform"), row.get("run_id"), row.get("id")
+    if platform not in EXTRA_VIDEO_PLATFORMS or is_extra_format(platform, row.get("format")) or not run_id:
+        return ""
+    try:
+        # Bounded by the schema (UNIQUE (run_id, platform, format)), as `_extra_waits`'s read is.
+        res = await _exec(svc.sb.table(POSTS).select("id,format,status,metadata").eq("run_id", str(run_id))
+                          .eq("platform", str(platform)), op="escalate_extra_siblings", post_id=post_id, run_id=run_id)
+        rows = getattr(res, "data", None)
+        if not isinstance(rows, list):
+            raise ValueError(f"the read answered {type(rows).__name__}, not a list of rows")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning("marketing reconcile: post_id=%s platform=%s run_id=%s — its extra video post could not be "
+                       "read (%s: %s); the escalation goes out without saying whether a video waits for it",
+                       post_id, platform, run_id, type(e).__name__, e)
+        return ""
+    for sib in rows:
+        if (isinstance(sib, dict) and str(sib.get("id")) != str(post_id)
+                and is_extra_format(platform, sib.get("format")) and sib.get("status") == "approved"
+                and not is_rehearsal(sib)):
+            return ESCALATION_EXTRA_NOTE.format(platform=str(platform).upper())
+    return ""
+
+
 async def _escalate(svc: Any, row: Dict[str, Any], reason: str) -> None:
     platform = str(row.get("platform")).upper()
     url_hint = ""
@@ -623,6 +736,11 @@ async def _escalate(svc: Any, row: Dict[str, Any], reason: str) -> None:
     text = (f"⚠️ {platform} post — outcome UNKNOWN ({reason}). It may or may not be live.{url_hint}\n"
             f"Tap “It's live” if you can see it, or “Not posted” if it is not there. "
             f"It will NOT be resent automatically.")
+    # Batch 3: say when the owner's answer is also what releases the run's approved video on this platform —
+    # left out rather than cut by the alert's length cap (`scrub`), never half a line.
+    note = await _escalation_extra_note(svc, row)
+    if note and len(text) + len(note) <= outlet_base.ERROR_TEXT_MAX:
+        text += note
     when = _now().isoformat()
     # `escalated_at` at the TOP of metadata too: the reconcile scan filters it out in the query, so
     # unanswered escalations can never fill its window and starve a new unknown outcome.
@@ -837,9 +955,9 @@ async def _reconcile_one(svc: Any, row: Dict[str, Any], *, now: datetime, today:
                 if media_problem is not None:
                     raise MarketingPublishRefused(f"{platform}: {media_problem.error}", category="media")
                 prepared = adapter.prepare(target)   # reuses the stored key + record
-                if prepared.pre_send_charge:
-                    # A resend writes ONE fenced row update before its call; a second write-ahead charge
-                    # has no place in it (only X has one, and X is never resent).
+                if prepared.pre_send_charges:
+                    # A resend writes ONE fenced row update before its call; a second write-ahead of other
+                    # billed calls has no place in it (only X has them, and X is never resent).
                     raise MarketingPublishRefused(f"{platform}: a resend cannot carry a pre-send charge")
             except asyncio.CancelledError:
                 raise

@@ -9,9 +9,10 @@ What a video shows, in order:
 * the accepted script's 3-4 TEXT cards (title + body, always together, in order). The FIRST is on
   screen from frame 0, through the hook (drop 1: "videos open on the company, never on our logo"
   — the brand card that used to cover the hook is gone). The hook itself is shown ONLY by the
-  burned captions; no card ever draws it.
+  burned captions — unless the run froze the video feature `hook_card` (below).
 * the closing DISCLAIMER card after the narration: the server-supplied disclaimer text verbatim,
-  a small logo and the CTA "caydexinvest.com".
+  a small logo and the end card's CTA — "caydexinvest.com" (LEGACY_CTA), or "Search Caydex on the
+  App Store" (CTA) when the script read-back names it (`end_card_cta`, Batch 2).
 * (the BRAND card — the logo and the wordmark "Caydex" — is drawn only when a script carries no
   text card at all, so the narration still has a card under it; the writer always emits three.)
 * ("stat" — a big figure, a label and an optional body — exists for the later reportorial class C
@@ -26,6 +27,28 @@ plate carrying the company name, which is then a drawn (declared) string. Its po
 by `news_layouts.py` from the closed `image_spec` (`render_post_image` dispatches; a template never
 falls back to the lesson layout, which would draw its alt text).
 
+The VIDEO FEATURES (Batch 2, 2026-10-19, "first seconds"; owner decision 7 amended rules §5): the server
+freezes them per run and sends them in the script read-back (`video_features`, read by `video_features`
+— only the kind's own: LESSON_VIDEO_FEATURES / TEMPLATE_VIDEO_FEATURES). Each only ADDS to today's video
+and each falls back to it — never a skipped day:
+
+* `hook_card` (a lesson): the video OPENS on a HOOK card — the accepted hook, verbatim, big and centred
+  under an accent rule — shown alone over the narrated hook (`video.timeline(..., hook_card=True)`;
+  `opens_on_hook_card`). A hook that is not one drawable string, lacks a glyph or cannot fit at the floor
+  size is logged (WARNING) and the video opens on its first content card, as before.
+* `data_card` (a template): the ONE text card the read-back names (`data_card_slot`, an index into its
+  `cards`: a fact card the picture already shows — the server's per-series choice, never a hedge card,
+  which a template keeps on screen for its whole line on purpose; CARDS-B2-1) becomes the DATA card — the
+  day's post image (its closed `image_spec`, footer included) laid out in the card's text zone
+  (news_layouts.DATA_CARD_FRAME). No slot (WARNING: a web that names none), or one that does not name a
+  text card of this video (ERROR), draws no data card. Kept as the text card (WARNING) when the picture
+  cannot be drawn there legibly (a line under news_layouts.DATA_CARD_MIN_PX), lacks a glyph, or would take
+  the video past ONSCREEN_TEXT_MAX strings.
+* `push_in` (either): card 0 zooms in slowly — the video's concern (video.py); it draws no string.
+
+The server ALLOWS each feature card's strings only while the feature is frozen (`run_service.
+_check_onscreen_text`); a worker that drew them unfrozen would be refused (422).
+
 What the post image shows (`ImageSpec`, `render_image`): the accepted output's `image_post` title
 and its 2-4 paragraphs on a panel, and the server's code-owned `image_footer` burned under it — no
 logo, no brand card. Same rules as a card: every string declared verbatim (`image_onscreen_strings`
@@ -39,7 +62,8 @@ Why each piece is shaped the way it is:
 
 * **The strings are checked, the pixels are not.** The worker declares every string a card drew
   (`onscreen_strings`) and the server refuses anything that is not the accepted script's card
-  titles/bodies, its disclaimer card or `BRAND_TEXT` (`run_service._check_onscreen_text`). So a
+  titles/bodies, its disclaimer card or `BRAND_TEXT` — or a frozen feature's strings (the hook, the
+  post image's) — (`run_service._check_onscreen_text`). So a
   string is returned VERBATIM — never normalised, re-cased or re-wrapped; wrapping is a drawing
   concern only — and nothing is drawn that `onscreen_strings` does not return (the hook included).
 * **Never truncated, never ellipsised, never a word broken.** Text is greedily word-wrapped (split
@@ -73,7 +97,7 @@ from __future__ import annotations
 import io
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -105,18 +129,40 @@ CARD = "#1E2330"
 ACCENT = "#60A5FA"
 TEXT = "#FFFFFF"
 WORDMARK = "Caydex"
-CTA = "caydexinvest.com"
-#: The only strings a card draws besides the script's own (mirrors
-#: app.schemas.marketing.VIDEO_BRAND_TEXT; tests/test_marketing_cards.py pins them equal).
-BRAND_TEXT: Tuple[str, ...] = (WORDMARK, CTA)
+#: The end card's call to action (owner decision 6, Batch 2: post_copy.SEARCH_LINE without its full
+#: stop). Drawn only when the script read-back names it (`end_card_cta`): the web says so only while the
+#: run's accepted output has the app on the store, and only a web that allows it can name it.
+CTA = "Search Caydex on the App Store"
+#: …and the CTA every card drew before Batch 2: still drawn against a read-back that names no CTA (an
+#: older web, whose allow-list holds only this one) — and allowed by both webs, so it is the fallback.
+LEGACY_CTA = "caydexinvest.com"
+END_CARD_CTAS: Tuple[str, ...] = (LEGACY_CTA, CTA)
+#: The only strings a card draws besides the script's own and a frozen feature's (mirrors
+#: app.schemas.marketing.VIDEO_BRAND_TEXT — a superset since Batch 2, so neither deploy order turns the
+#: end card into a 422; tests/test_marketing_cards.py pins them equal).
+BRAND_TEXT: Tuple[str, ...] = (WORDMARK, LEGACY_CTA, CTA)
+
+#: Batch 2 (2026-10-19) — mirrors of app.schemas.marketing (pinned equal by tests/test_marketing_cards.py):
+#: the video features the server may freeze into a run, and which a script of each kind may carry (a
+#: template already opens on its code-owned opening card; only a template has a picture to draw).
+VIDEO_FEATURE_HOOK_CARD = "hook_card"
+VIDEO_FEATURE_DATA_CARD = "data_card"
+VIDEO_FEATURE_PUSH_IN = "push_in"
+VIDEO_FEATURES: Tuple[str, ...] = (VIDEO_FEATURE_HOOK_CARD, VIDEO_FEATURE_DATA_CARD, VIDEO_FEATURE_PUSH_IN)
+LESSON_VIDEO_FEATURES: Tuple[str, ...] = (VIDEO_FEATURE_HOOK_CARD, VIDEO_FEATURE_PUSH_IN)
+TEMPLATE_VIDEO_FEATURES: Tuple[str, ...] = (VIDEO_FEATURE_DATA_CARD, VIDEO_FEATURE_PUSH_IN)
 
 #: Part of the video's AND the post image's reuse keys: bump with any change to layout, sizes,
 #: colours, assets, the card set or the JPEG encoding. v2 (drop 1): the video lost its opening
 #: brand card; the 4:5 post image was added. v3 (drop 2a): the template opening card, the company
-#: logo plates and wordmark tiles, the template post-image layouts (news_layouts.py).
-CARD_RENDER_VERSION = "cards/v3"
+#: logo plates and wordmark tiles, the template post-image layouts (news_layouts.py). v4 (Batch 2):
+#: the hook card, the data card and the App Store end card (a lesson card or post image that draws
+#: none of them keeps its v3 bytes — tests/test_marketing_cards.py pins the drop-1 goldens).
+CARD_RENDER_VERSION = "cards/v4"
 
-KINDS: Tuple[str, ...] = ("brand", "text", "stat", "disclaimer", "opening")
+KINDS: Tuple[str, ...] = ("brand", "text", "stat", "disclaimer", "opening", "hook", "data")
+#: The kinds shown ALONE over the narrated hook as card 0 — `video.timeline(..., hook_card=True)`.
+HOOK_CARD_KINDS: Tuple[str, ...] = ("opening", "hook")
 
 # ── drop 2a: template (news) scripts — mirrors of app.* (the worker never imports app.*; ──────
 # tests/test_marketing_cards.py and tests/test_marketing_news_layouts.py pin every one equal)
@@ -193,6 +239,9 @@ LABEL_STYLE = _Style(52, 32, 1.2)          # stat label (TEXT)
 STAT_BODY_STYLE = _Style(44, 30, 1.3)      # stat body (TEXT at 82 % over CARD)
 DISCLAIMER_STYLE = _Style(46, 28, 1.3)     # disclaimer body (TEXT at 86 % over PAGE)
 CTA_STYLE = _Style(60, 40, 1.2)            # "caydexinvest.com" (ACCENT)
+#: "Search Caydex on the App Store" (ACCENT): 885 px at 56 px — ONE line in the 920 px column at every
+#: step (CTA_STYLE's 60 px would wrap "Store" alone onto a second line).
+STORE_CTA_STYLE = _Style(56, 40, 1.2)
 WORDMARK_STYLE = _Style(132, 96, 1.2)      # "Caydex" on the brand card (TEXT)
 BADGE_SIZE = 30                            # the pill's text; fixed, never wrapped
 #: The template opening card (drop 2a): the logo tile(s) step down with everything else.
@@ -201,6 +250,11 @@ OPENING_TILE_TWO = _Style(320, 200, 1.0)        # two companies, side by side
 OPENING_TILE_GAP = 64                           # between two tiles
 OPENING_LOGO_GAP = 56                           # tiles → the first line under them
 OPENING_HEADLINE_STYLE = _Style(72, 40, 1.16)   # the headline (TEXT)
+#: The lesson hook card (Batch 2): the accepted hook, centred, under an accent rule. Every real hook of the
+#: test corpora fits at the start size; 14 words of 8-15 letters (writer_prompts.HOOK_MAX_WORDS) need
+#: step 8 (74 px); the floor is still a large, legible line.
+HOOK_STYLE = _Style(92, 56, 1.12)               # the hook (TEXT)
+HOOK_RULE_GAP = 40                              # the accent rule → the hook
 #: A logo plate: corner radius and inner padding as fractions of its shorter side; the padding
 #: keeps the logo clear of the rounded corners (it exceeds radius × (1 − 1/√2)).
 PLATE_RADIUS_RATIO = 0.14
@@ -300,11 +354,20 @@ class CardSpec:
     * brand      — nothing (draws the logo and WORDMARK)
     * text       — title and/or body; optional badge
     * stat       — figure (required), label, body; optional badge
-    * disclaimer — body (required; the server's disclaimer card text; draws it + logo + CTA)
+    * disclaimer — body (required; the server's disclaimer card text; draws it + logo + its CTA:
+      `cta`, one of END_CARD_CTAS — "" draws LEGACY_CTA, what every disclaimer card drew before
+      Batch 2)
     * opening    — a template video's first card (drop 2a, `opening_card`): badge = kicker
       (required), `logos` = 1-2 company logos (a wordmark tile — the company name — for one that
       is not verified), label = chip, figure, title = headline (required). Drawn centred on the
       page, over the hook.
+    * hook       — a LESSON video's first card (Batch 2, the frozen feature `hook_card`): title = the
+      accepted hook, VERBATIM (required). Drawn big and centred on the page under an accent rule,
+      shown alone over the narrated hook.
+    * data       — a TEMPLATE video's data card (Batch 2, `data_card`): `image` = the day's post
+      image, a news_layouts.TemplateImage (required) — drawn in the card's text zone in place of the
+      text card the read-back names (`data_card_slot`), declaring exactly its strings
+      (`TemplateImage.strings`).
     """
 
     kind: str
@@ -314,9 +377,12 @@ class CardSpec:
     label: str = ""
     badge: str = ""
     logos: Tuple[LogoArt, ...] = ()
+    cta: str = ""
+    #: A data card's picture (news_layouts.TemplateImage). Compared, never hashed (it holds dicts).
+    image: Any = field(default=None, hash=False)
 
     def __post_init__(self) -> None:
-        for name in ("kind", "title", "body", "figure", "label", "badge"):
+        for name in ("kind", "title", "body", "figure", "label", "badge", "cta"):
             value = getattr(self, name)
             if not isinstance(value, str):
                 raise TypeError(f"CardSpec.{name} must be a str, not {type(value).__name__}")
@@ -328,6 +394,8 @@ class CardSpec:
             "stat": ("figure", "label", "body", "badge"),
             "disclaimer": ("body",),
             "opening": ("title", "figure", "label", "badge"),
+            "hook": ("title",),
+            "data": (),
         }[self.kind]
         stray = [n for n in ("title", "body", "figure", "label", "badge")
                  if n not in allowed and getattr(self, n)]
@@ -343,6 +411,19 @@ class CardSpec:
             raise ValueError("a stat card needs a figure")
         if self.kind == "disclaimer" and not _present(self.body):
             raise ValueError("a disclaimer card needs its text (body)")
+        if self.cta and (self.kind != "disclaimer" or self.cta not in END_CARD_CTAS):
+            raise ValueError(f"only a disclaimer card draws a CTA, and only one of {END_CARD_CTAS} "
+                             f"(a {self.kind} card with cta {self.cta[:40]!r})")
+        if self.kind == "hook" and not _present(self.title):
+            raise ValueError("a hook card needs its hook (title)")
+        if self.kind == "data":
+            from marketing import news_layouts
+
+            if not isinstance(self.image, news_layouts.TemplateImage):
+                raise TypeError(f"a data card needs its picture (a news_layouts.TemplateImage), "
+                                f"not {type(self.image).__name__}")
+        elif self.image is not None:
+            raise ValueError(f"a {self.kind} card draws no picture")
         if self.kind == "opening":
             if not (_present(self.badge) and _present(self.title)):
                 raise ValueError("an opening card needs its kicker (badge) and its headline (title)")
@@ -354,6 +435,13 @@ class CardSpec:
     @property
     def logo_keys(self) -> Tuple[str, ...]:
         return tuple(a.key for a in self.logos)
+
+    @property
+    def end_cta(self) -> str:
+        """The CTA a disclaimer card draws (`cta`, else LEGACY_CTA); "" for every other kind."""
+        if self.kind != "disclaimer":
+            return ""
+        return self.cta or LEGACY_CTA
 
 
 def _script_str(value: Any, where: str) -> str:
@@ -443,7 +531,176 @@ def opening_spec(card: Any, logos: Dict[str, LogoArt]) -> CardSpec:
                     title=texts["headline"], logos=tuple(arts))
 
 
-def cards_for_script(script: Dict[str, Any], logos: Optional[Dict[str, LogoArt]] = None) -> List[CardSpec]:
+def video_features(script: Any) -> Tuple[str, ...]:
+    """The VIDEO_FEATURES the server froze for this run (Batch 2), as the script read-back carries them
+    (`video_features`), sorted — the kind's own only: LESSON_VIDEO_FEATURES for a lesson,
+    TEMPLATE_VIDEO_FEATURES for a template. () when the read-back carries none (an older web, or a run
+    frozen without features: today's video). A value that does not read back — not a list, a non-string,
+    a duplicate, an unknown feature or one of the other kind — is logged at ERROR and read as () WHOLE,
+    never half-trusted (run_service.frozen_video_features' own rule: a feature only ever adds to the
+    video, so the safe reading of a value nobody can explain is today's video). ValueError only for a
+    script that is not a dict, or whose authorship is unknown (`is_template`). The worker's ONE reader of
+    the field: the render's reuse keys and the push-in read it here too, so what is drawn, what moves and
+    what is keyed never disagree."""
+    if not isinstance(script, dict):
+        raise ValueError(f"script must be a dict, not {type(script).__name__}")
+    raw = script.get("video_features")
+    if raw is None:
+        return ()
+    template = is_template(script)
+    applicable = TEMPLATE_VIDEO_FEATURES if template else LESSON_VIDEO_FEATURES
+    if (not isinstance(raw, list) or not all(isinstance(f, str) for f in raw) or len(set(raw)) != len(raw)
+            or not set(raw) <= set(applicable)):
+        logger.error("cards: the script's video_features %s do not read back for a %s (allowed %s) — read as "
+                     "none: today's video", str(raw)[:80], "template" if template else "lesson", applicable)
+        return ()
+    return tuple(sorted(raw))
+
+
+def end_card_cta(script: Any) -> str:
+    """The CTA the end (disclaimer) card draws: the script read-back's `end_card_cta` (Batch 2: the web's
+    choice — CTA only while the run's accepted output has the app on the store, owner decision 6) when it
+    is one of END_CARD_CTAS; LEGACY_CTA when the read-back names none (an older web: it allows only that
+    one). Any other value is logged at ERROR and drawn as LEGACY_CTA — both webs allow it, so a bad value
+    costs the new CTA, never the day."""
+    raw = script.get("end_card_cta") if isinstance(script, dict) else None
+    if raw is None:
+        return LEGACY_CTA
+    if isinstance(raw, str) and raw in END_CARD_CTAS:
+        return raw
+    logger.error("cards: the script's end_card_cta %r is not one of %s — the end card draws %r",
+                 str(raw)[:40], END_CARD_CTAS, LEGACY_CTA)
+    return LEGACY_CTA
+
+
+def data_card_slot(script: Any) -> Optional[int]:
+    """The index into the script read-back's `cards` (its own content cards — never the opening or the
+    disclaimer card) of the ONE text card the frozen `data_card` replaces: `data_card_slot`, the server's
+    per-series choice of a fact card the picture already shows (CARDS-B2-1: the last card is often the
+    hedge a template keeps on screen on purpose). None — no data card, today's text cards — when:
+
+    * the script did not freeze `data_card` (`video_features`) — a slot it names anyway is ignored
+      (WARNING: the web sends one only with the feature);
+    * the read-back names no slot (WARNING: a web that predates the slot or names none — never a guess at
+      the last card);
+    * the slot is not an index of `cards` — a bool, a non-int, negative, out of range (ERROR).
+
+    ValueError only for a script that is not a dict (or whose authorship is unknown, `video_features`). The
+    worker's ONE reader of the field; `cards_for_script` also checks that the card it names is a text card."""
+    if not isinstance(script, dict):
+        raise ValueError(f"script must be a dict, not {type(script).__name__}")
+    raw = script.get("data_card_slot")
+    if VIDEO_FEATURE_DATA_CARD not in video_features(script):
+        if raw is not None:
+            logger.warning("cards: the script names data_card_slot %s without a frozen data_card — ignored",
+                           str(raw)[:40])
+        return None
+    if raw is None:
+        logger.warning("cards: data_card is frozen but the read-back names no data_card_slot — no data card: "
+                       "today's text cards")
+        return None
+    entries = script.get("cards")
+    count = len(entries) if isinstance(entries, list) else 0
+    if isinstance(raw, bool) or not isinstance(raw, int) or not 0 <= raw < count:
+        logger.error("cards: the script's data_card_slot %s is not an index of its %d card(s) — no data card: "
+                     "today's text cards", str(raw)[:40], count)
+        return None
+    return raw
+
+
+def applied_data_card_slot(specs: Sequence[CardSpec]) -> Optional[int]:
+    """The `data_card_slot` the cards APPLIED — the index into the script's `cards` of the text card a data
+    card replaced (`specs` start with the template's opening card) — or None when they draw no data card.
+    What the render's reuse key and the video's metadata record."""
+    index = next((i for i, spec in enumerate(specs) if spec.kind == "data"), None)
+    return None if index is None else index - 1
+
+
+def opens_on_hook_card(specs: Sequence[CardSpec]) -> bool:
+    """`video.timeline`'s `hook_card`: is card 0 shown ALONE over the narrated hook — a template's opening
+    card, or a lesson's hook card (Batch 2)? (Only a HOOK card shows the hook's own words: that is when
+    the hook's burned captions are suppressed — `specs[0].kind == "hook"`.)"""
+    return bool(specs) and specs[0].kind in HOOK_CARD_KINDS
+
+
+def _too_many_strings(specs: Sequence[CardSpec]) -> Optional[str]:
+    """Why `specs` would declare more than ONSCREEN_TEXT_MAX distinct on-screen strings (the most one
+    video asset may declare — the server refuses more), or None."""
+    n = len(dict.fromkeys(t for spec in specs for t in onscreen_strings(spec)))
+    return None if n <= ONSCREEN_TEXT_MAX else f"the video would declare {n} on-screen strings (max {ONSCREEN_TEXT_MAX})"
+
+
+def _feature_card_problem(card: CardSpec, font_path: str, layout_engine: Optional[str]) -> Optional[str]:
+    """Why a feature card cannot be drawn — a glyph the face lacks, or it does not fit (legibly, for a data
+    card) at the floor — or None. Exactly the checks the render makes, so a card kept here never ends the
+    day there. CardAssetError (an unreadable font) is not content: it propagates."""
+    try:
+        check_glyphs([card], font_path)
+        layout_card(card, font_path=font_path, layout_engine=layout_engine)
+    except (MissingGlyphs, CardOverflow) as e:
+        return f"{type(e).__name__}: {str(e)[:200]}"
+    return None
+
+
+def _with_hook_card(script: Dict[str, Any], specs: List[CardSpec], font_path: str,
+                    layout_engine: Optional[str]) -> List[CardSpec]:
+    """`specs` opened by the HOOK card (the frozen `hook_card`): the accepted hook, verbatim — or `specs`
+    unchanged, with a WARNING, when the hook is not one drawable string, lacks a glyph, cannot fit at the
+    floor size or takes the video past ONSCREEN_TEXT_MAX strings (the video opens on its first card)."""
+    hook = script.get("hook")
+    if not drawable_text(hook):
+        logger.warning("cards: hook_card is frozen but the script's hook is not one drawable string — no hook "
+                       "card: the video opens on its first card")
+        return specs
+    card = CardSpec("hook", title=hook)
+    problem = _feature_card_problem(card, font_path, layout_engine) or _too_many_strings([card, *specs])
+    if problem is not None:
+        logger.warning("cards: no hook card (%s) — the video opens on its first card", problem)
+        return specs
+    logger.info("cards: hook_card frozen — the video opens on the hook card")
+    return [card, *specs]
+
+
+def _with_data_card(script: Dict[str, Any], table: Dict[str, LogoArt], specs: List[CardSpec], font_path: str,
+                    layout_engine: Optional[str]) -> List[CardSpec]:
+    """`specs` ([opening, text…, disclaimer]) with the text card the read-back names (`data_card_slot` —
+    `cards[slot]`, which is specs[slot + 1]) replaced by the DATA card (the frozen `data_card`): the day's
+    post image, drawn in the card's text zone — or `specs` unchanged when there is no usable slot
+    (`data_card_slot` logs why), the slot does not name a text card between the opening and the disclaimer
+    (ERROR: never the opening card, never the disclaimer), the picture cannot be read from the script (ERROR:
+    the server sends data_card only with a drawable picture) or cannot be drawn there (WARNING: a glyph, no
+    legible fit, too many strings)."""
+    from marketing import news_layouts
+
+    slot = data_card_slot(script)
+    if slot is None:
+        return specs
+    index = slot + 1                         # specs[0] is the opening card
+    if not 1 <= index < len(specs) - 1 or specs[index].kind != "text":
+        logger.error("cards: data_card_slot %d does not name a text card of this video (%s) — no data card: "
+                     "today's text cards", slot, [s.kind for s in specs])
+        return specs
+    replaced = specs[index].title or specs[index].body
+    try:
+        image = news_layouts.template_image_for_script(script, table)
+    except ValueError as e:
+        logger.error("cards: data_card is frozen but the script's post image cannot be read (%s) — no data "
+                     "card: the video keeps its text card %d (%r)", str(e)[:200], slot, replaced[:40])
+        return specs
+    card = CardSpec("data", image=image)
+    candidate = [*specs[:index], card, *specs[index + 1:]]
+    problem = _feature_card_problem(card, font_path, layout_engine) or _too_many_strings(candidate)
+    if problem is not None:
+        logger.warning("cards: no data card (%s) — the video keeps its text card %d (%r)", problem, slot,
+                       replaced[:40])
+        return specs
+    logger.info("cards: data_card frozen — the data card (%s picture) replaces text card %d (%r)", image.layout,
+                slot, replaced[:40])
+    return candidate
+
+
+def cards_for_script(script: Dict[str, Any], logos: Optional[Dict[str, LogoArt]] = None, *,
+                     font_path: Optional[str] = None, layout_engine: Optional[str] = None) -> List[CardSpec]:
     """One text card per `script["cards"]` entry (title/body stripped; an entry with neither is
     skipped) + [disclaimer card, its text verbatim]. No brand card opens the video (drop 1): the
     first text card does, from frame 0 (`video.timeline(..., hook_card=False)`). Only when NO
@@ -457,7 +714,17 @@ def cards_for_script(script: Dict[str, Any], logos: Optional[Dict[str, LogoArt]]
     [disclaimer]; the render times it with `hook_card=True` (the opening over the hook, card i+1
     from line i+1). `logos` is its `logo_table` (None: every logo a wordmark). A template script
     without that layout, an unknown layout, a missing opening card or a card that draws nothing is
-    a ValueError: a template video never falls back to the lesson shape."""
+    a ValueError: a template video never falls back to the lesson shape.
+
+    Batch 2: the disclaimer card draws the read-back's end card CTA (`end_card_cta`), and the script's
+    frozen video features (`video_features`) add their cards — a LESSON with `hook_card` OPENS on the
+    hook card (time it with `hook_card=True`: `opens_on_hook_card`); a TEMPLATE with `data_card` draws
+    its post image as the DATA card in place of the text card the read-back names (`data_card_slot`; no
+    slot, no data card — never the last card by default). Each feature card is checked here with
+    the render's own `font_path` / `layout_engine` — its glyphs, that it fits (legibly, for a data card),
+    that the video stays within ONSCREEN_TEXT_MAX strings — and one that fails is left out with a
+    WARNING: today's card, never a skipped day. `font_path` is REQUIRED when the script froze `hook_card`
+    or `data_card` (ValueError: the check is never skipped)."""
     if not isinstance(script, dict):
         raise ValueError(f"script must be a dict, not {type(script).__name__}")
     disclaimer = _script_str(script.get("disclaimer_card"), "script.disclaimer_card")
@@ -474,6 +741,12 @@ def cards_for_script(script: Dict[str, Any], logos: Optional[Dict[str, LogoArt]]
         raise ValueError(f"script.video_layout {str(layout)[:40]!r} is not {VIDEO_LAYOUT_PER_LINE!r}")
     if template and layout != VIDEO_LAYOUT_PER_LINE:
         raise ValueError(f"a template script needs video_layout {VIDEO_LAYOUT_PER_LINE!r}, not {layout!r}")
+    features = video_features(script)
+    drawn = [f for f in features if f in (VIDEO_FEATURE_HOOK_CARD, VIDEO_FEATURE_DATA_CARD)]
+    if drawn and not font_path:
+        raise ValueError(f"the script froze {drawn}: cards_for_script needs the render's font_path to check "
+                         "that each feature card can be drawn")
+    end = CardSpec("disclaimer", body=disclaimer, cta=end_card_cta(script))
     if layout == VIDEO_LAYOUT_PER_LINE:
         table = logo_table(script) if logos is None else logos
         opening = opening_spec(script.get("opening_card"), table)
@@ -490,7 +763,9 @@ def cards_for_script(script: Dict[str, Any], logos: Optional[Dict[str, LogoArt]]
             if not title and not body:
                 raise ValueError(f"script.cards[{i}] draws nothing: a per-line video cannot skip a line's card")
             per_line.append(CardSpec("text", title=title, body=body))
-        per_line.append(CardSpec("disclaimer", body=disclaimer))
+        per_line.append(end)
+        if VIDEO_FEATURE_DATA_CARD in features:
+            per_line = _with_data_card(script, table, per_line, font_path, layout_engine)  # type: ignore[arg-type]
         return per_line
     specs: List[CardSpec] = []
     for i, entry in enumerate(raw_cards):
@@ -507,7 +782,9 @@ def cards_for_script(script: Dict[str, Any], logos: Optional[Dict[str, LogoArt]]
         # still deserves a video (its narration and disclaimer are fine).
         logger.warning("script has no drawable text card — the video opens on the brand card instead")
         specs.append(CardSpec("brand"))
-    specs.append(CardSpec("disclaimer", body=disclaimer))
+    specs.append(end)
+    if VIDEO_FEATURE_HOOK_CARD in features:
+        specs = _with_hook_card(script, specs, font_path, layout_engine)  # type: ignore[arg-type]
     return specs
 
 
@@ -518,7 +795,9 @@ def onscreen_strings(spec: CardSpec) -> List[str]:
     An opening card returns them in template_onscreen.opening_strings' order — kicker, the company
     name of each logo drawn as a WORDMARK (a verified logo draws no string), chip, figure,
     headline — so it is always a subset of the server's allow-list, and equal to it when no logo
-    verified."""
+    verified. A hook card returns the hook; a data card its picture's `TemplateImage.strings` (kicker …
+    footer, each wordmark's company name at its logo's place — a subset of the server's
+    template_onscreen.image_strings); a disclaimer card its text and its CTA (`end_cta`)."""
     if spec.kind == "brand":
         fields = [WORDMARK]
     elif spec.kind == "text":
@@ -527,8 +806,12 @@ def onscreen_strings(spec: CardSpec) -> List[str]:
         fields = [spec.figure, spec.label, spec.body, spec.badge]
     elif spec.kind == "opening":
         fields = [spec.badge, *[a.name for a in spec.logos if a.wordmark], spec.label, spec.figure, spec.title]
+    elif spec.kind == "hook":
+        fields = [spec.title]
+    elif spec.kind == "data":
+        fields = list(spec.image.strings)
     else:  # disclaimer
-        fields = [spec.body, CTA]
+        fields = [spec.body, spec.end_cta]
     return [s for s in fields if _present(s)]
 
 
@@ -779,6 +1062,11 @@ def _stack_for(spec: CardSpec, step: int, font_path: str, engine: str, with_logo
             after_logos = {"gap_em": 0.35}
         st.text("title", spec.title, OPENING_HEADLINE_STYLE, _rgb(TEXT), **after_logos)
         return st, False
+    if spec.kind == "hook":
+        # The accent rule, then the hook — centred on the page, no panel (the video's first frame).
+        st.box("rule", RULE_W, RULE_H, lead_gap=HOOK_RULE_GAP)
+        st.text("title", spec.title, HOOK_STYLE, _rgb(TEXT))
+        return st, False
     if spec.kind == "brand":
         if with_logo:
             st.box("logo", LOGO_BRAND_PX, LOGO_BRAND_PX)
@@ -787,7 +1075,8 @@ def _stack_for(spec: CardSpec, step: int, font_path: str, engine: str, with_logo
         if with_logo:
             st.box("logo", LOGO_SMALL_PX, LOGO_SMALL_PX)
         st.text("body", spec.body, DISCLAIMER_STYLE, DISCLAIMER_FILL, gap_px=LOGO_GAP_SMALL)
-        st.text("cta", CTA, CTA_STYLE, _rgb(ACCENT), gap_em=0.9)
+        cta = spec.end_cta
+        st.text("cta", cta, STORE_CTA_STYLE if cta == CTA else CTA_STYLE, _rgb(ACCENT), gap_em=0.9)
     return st, False
 
 
@@ -946,6 +1235,12 @@ def layout_card(spec: CardSpec, *, font_path: str, with_logo: bool = True,
     CardOverflow (with the floor step's reason) when none does."""
     engine = resolve_layout_engine(layout_engine)
     _check_length(spec)
+    if spec.kind == "data":
+        # The day's post image in the card's text zone — its own placers, with a legibility floor
+        # (news_layouts.layout_data_card; a news_layouts.TemplateLayout, CardOverflow when not legible).
+        from marketing import news_layouts
+
+        return news_layouts.layout_data_card(spec.image, font_path=font_path, layout_engine=engine)  # type: ignore[return-value]
     reason = ""
     for step in range(RAMP_STEPS + 1):
         try:
@@ -1011,12 +1306,18 @@ def render_card(spec: CardSpec, *, font_path: str, logo_path: Optional[str] = No
     uses_logo = spec.kind in ("brand", "disclaimer")
     if uses_logo and not logo_path:
         _warn_once("no_logo", "cards: no logo path — the brand and disclaimer cards render without the logo")
+    if spec.kind == "data":
+        # The day's post image in the card's text zone (news_layouts draws it: its own panel, bars, plates).
+        from marketing import news_layouts
+
+        _check_length(spec)
+        img, data_layout = news_layouts.draw_data_card(spec.image, font_path=font_path,
+                                                       layout_engine=resolve_layout_engine(layout_engine))
+        _warn_blank(spec, data_layout)
+        return _png_bytes(img, spec.kind, data_layout)
     layout = layout_card(spec, font_path=font_path, with_logo=bool(uses_logo and logo_path),
                          layout_engine=layout_engine)
-    blank = blank_wordmarks(layout)
-    if blank:
-        logger.warning("cards: the %s card draws a blank plate for %s (the name does not fit legibly)",
-                       spec.kind, blank)
+    _warn_blank(spec, layout)
     img = Image.new("RGB", (WIDTH, HEIGHT), _rgb(PAGE))
     if layout.panel:
         _fill_rounded(img, layout.panel, PANEL_RADIUS, _rgb(CARD))
@@ -1033,10 +1334,22 @@ def render_card(spec: CardSpec, *, font_path: str, logo_path: Optional[str] = No
     for ln in layout.lines:
         draw.text((ln.x, ln.y), ln.text, font=_font(font_path, ln.size, layout.engine), fill=ln.fill,
                   anchor=ln.anchor)
+    return _png_bytes(img, spec.kind, layout)
+
+
+def _warn_blank(spec: CardSpec, layout: Any) -> None:
+    blank = blank_wordmarks(layout)
+    if blank:
+        logger.warning("cards: the %s card draws a blank plate for %s (the name does not fit legibly)",
+                       spec.kind, blank)
+
+
+def _png_bytes(img, kind: str, layout: Any) -> bytes:
+    """A card's deterministic PNG: RGB, no metadata chunks, a fixed zlib level."""
     buf = io.BytesIO()
     img.save(buf, format="PNG", compress_level=_PNG_COMPRESS_LEVEL, optimize=False)
     logger.debug("card rendered kind=%s step=%d engine=%s lines=%d bytes=%d",
-                 spec.kind, layout.step, layout.engine, len(layout.lines), buf.tell())
+                 kind, layout.step, layout.engine, len(layout.lines), buf.tell())
     return buf.getvalue()
 
 

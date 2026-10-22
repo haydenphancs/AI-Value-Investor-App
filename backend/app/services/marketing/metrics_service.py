@@ -1,12 +1,13 @@
 """
-The marketing MEASURE step — engagement counts for the weekly digest (design doc §12.11,
-rules/marketing.md §2).
+The marketing MEASURE step — engagement counts and video measures for the weekly digest (design doc
+§12.11, rules/marketing.md §2).
 
 One step of the publisher loop (`publisher_service.publisher_tick`, gated on MARKETING_ENABLED and
 MARKETING_METRICS_ENABLED and run LAST, so it never delays a post or a review message) — the loop is
 the only code that calls a platform. `measure_cycle` does the day's work once per ET day, at the first
 tick at or after 06:00 ET (`run_day_job` over the `marketing_metrics_daily` day claim), for the
-`published` posts younger than 30 days: never a retracted or `queued` row (the query reads
+`published` posts younger than 30 days — read in pages, oldest first, so the NEWEST are never the ones a
+limit cuts (`list_published_posts`): never a retracted or `queued` row (the query reads
 `published` only), never one whose retract was requested, and — for the free daily reads — never one
 published less than an hour ago (an AppView that has not indexed it yet would make it `missing`).
 Every result is merged into `marketing_posts.metrics` by `run_service.merge_post_metrics`, the
@@ -45,9 +46,26 @@ column's ONE writer: fenced on the status and `metrics->>rev`, it never touches 
   `account` (`apply_backoff`). A 200 carrying only `errors` (x_api's
   `problem`: a suspended or protected account) records `error` with NO checkpoint — the post stays
   due, the read cost nothing — and stops X for the day.
-* **Upload-Post** — best-effort, only when configured: at most ten posts a day, by the job id the
-  publisher kept (`poll_id`, else `request_id`). A plan refusal (402/403) records `unavailable` for
-  seven days and pauses every Upload-Post read until then (one call a week) — the pause kept, as on
+* **Upload-Post** — best-effort, only when configured: at most forty posts a day, by the job id the
+  publisher kept (`poll_id`, else `request_id`). A VIDEO post (`format` video) is read at fixed ages —
+  1, 3 and 7 days after it went out (`VIDEO_CHECKPOINT_DAYS`, once each, for the largest crossed, like
+  X) and only within a day of that age (VIDEO_CHECKPOINT_TOLERANCE): a due one goes first, then the rest
+  least recently measured first. A video read later than that — the deploy day's backlog, a missed day, a
+  back-off — is an ordinary rotation read with `cp` None, never labelled with an age it was not read at.
+  ANY outcome recorded about a video read uses up every checkpoint it crossed (`cps`), so a post whose
+  read keeps failing never stays at the head of the queue (it would stop the tick there every day and
+  starve the rest). Besides the counts, the video measures Upload-Post sends are kept under the
+  snapshot's `video` (`extract_video_metrics`): TikTok's follows and profile visits from the post, its
+  watch time, completion rate and a retention curve cut to fixed seconds; YouTube's watch fields
+  (documented only when its Analytics report is available — every run logs, per platform, the UNION of
+  the key names Upload-Post sent, never a value, to show whether they reach the live route); Instagram's
+  cross-posted and Facebook views. An average watch time is kept only up to twice
+  MARKETING_MAX_VIDEO_SECONDS, and YouTube's average view percentage only when it agrees with its
+  average view duration over the video's own length, wherever that length is known
+  (`check_view_share`). A refusal about ONE social account — it needs reconnecting, it is not connected to
+  the profile, or Upload-Post parked it — records nothing and skips only that platform for the day; the
+  others are still read. A plan refusal (402/403) records
+  `unavailable` for seven days and pauses every Upload-Post read until then (one call a week) — the pause kept, as on
   X, on the newest Upload-Post post (`upload_post_plan_refused_until`); a 404 is `missing`; an
   unknown outcome for one post (a 5xx, an odd 2xx, a timeout — or a bug of ours) records `error` on
   it, so it moves to the back of tomorrow's queue and one failing post never starves the others; a
@@ -60,7 +78,8 @@ ledger error (after three in one run nothing more is read or written that tick: 
 result cannot be stored is money for nothing), or when the 120-second read budget of one tick is
 spent. A refusal that will not pass by itself stops its platform instead, without holding the day:
 X's 402 (no credits — refunded), a definite Bluesky AppView refusal, or an Upload-Post auth or quota
-refusal stops it for the rest of the ET day; a definite X refusal (400 / 401 / 403 / 404 — any
+refusal stops it for the rest of the ET day (a refusal about one Upload-Post social account stops only
+that platform); a definite X refusal (400 / 401 / 403 / 404 — any
 status-bearing refusal but 402) backs off seven days X-wide, a refused `get_me` has its own
 seven-day back-off, and an Upload-Post plan refusal backs off seven days (all above). A row already
 measured today is never read again, so a second run the same day (another instance, a retried claim)
@@ -73,8 +92,8 @@ refused platform never looks like a clean day.
     {"v": 1, "rev": n, "measured_day": "YYYY-MM-DD",
      "status": "ok" | "missing" | "error" | "unavailable" | "capped" | "no_external_id",
      "note": str | null, "unavailable_until": "YYYY-MM-DD" | null,
-     "cps": [1, 3, …]                               # X only: the checkpoints already measured
-     "last": {"day", "at", "age_h", "cp", <counts>},
+     "cps": [1, 3, …]                               # X, and Upload-Post VIDEO posts: the checkpoints used
+     "last": {"day", "at", "age_h", "cp", <counts>, "video": {<video measures>}},
      "history": [<same as last>, …],                # one per ET day (a rerun replaces that day's);
                                                     # at most 30, at most 4 on X
      "account": {"followers", "following", "posts", "at", "source"},
@@ -85,7 +104,16 @@ refused platform never looks like a clean day.
 
 `<counts>` are likes, reposts, replies, quotes, bookmarks, impressions, views, shares, saves and
 reach — each ONLY when the platform reported it: a count that is missing, None, negative, a bool,
-NaN/inf, a non-integer float, or a string that is not 1-15 ASCII digits is omitted, never 0. A read
+NaN/inf, a non-integer float, or a string that is not 1-15 ASCII digits is omitted, never 0. `video`
+(Upload-Post only; present only when one value is readable) holds counts under the same rule
+(TikTok `new_followers`, `profile_views`; Instagram `crossposted_views`, `facebook_views`), seconds and
+rates under `normalize_measure` — a number, never a bool or a string, finite and inside its own bounds
+(`measure_bounds`: VIDEO_MEASURE_FIELDS, an average watch time at most twice MARKETING_MAX_VIDEO_SECONDS),
+rounded; a value outside them is a unit change upstream and is omitted, never rescaled; YouTube's share
+also when it disagrees with its duration over the video's length (`check_view_share`) — and TikTok's
+`retention` as {"1": fraction, "3": …} at RETENTION_SECONDS only (a curve
+with one unreadable point is omitted whole). `snapshot_has_counts` never looks at it: a read with
+video measures but no count is still `error` / `no_metrics`. A read
 with no count at all records `error` / `no_metrics` and adds no history. A non-`ok` status keeps
 the last good snapshot. `account` (its counts omitted the same way; `source` is `x_api`,
 `bluesky_appview` or `upload_post`) is written only on the NEWEST post of its platform; older posts
@@ -145,8 +173,20 @@ FAILED = "failed"            # the work ran and did not finish: the day stays op
 
 METRICS_VERSION = 1
 MEASURE_MAX_AGE = timedelta(days=30)
-#: ~8 platforms × 4 posting days a week × 30 days ≈ 140 rows; a full read is logged.
+#: The 30-day listing is read in PAGES of this many rows (`list_published_posts`) — at most
+#: MEASURE_SCAN_PAGES of them. `list_measurable_posts` answers OLDEST first under its LIMIT, so a single
+#: capped read lost the NEWEST posts — yesterday's, with their 1-day checkpoints (MD-7, 2026-10-16). A page
+#: stays far under PostgREST's max-rows (~1,000): a page it cut short would pass for the last one. ~8
+#: platforms × 4 posting days a week × 30 days ≈ 140 rows today; at Batch 3's seven days with its three
+#: extra videos (Facebook, LinkedIn, Threads) ~11 a day × 30 days ≈ 330.
 MEASURE_SCAN_LIMIT = 300
+#: The ceiling, never the expected volume: one run a day (`marketing_runs.run_date` UNIQUE) records at most
+#: one post per (platform, format) (`marketing_posts` UNIQUE (run_id, platform, format) over
+#: POST_FORMATS_BY_PLATFORM's 13 pairs plus Batch 3's 3 of EXTRA_POST_FORMATS_BY_PLATFORM — 16), published
+#: on its run day or the next, so 30 days hold at most 32 × 16 = 512 published posts: 4 × 300 = 1,200 is
+#: that bound with more than ×2 to spare (a test derives it from the two maps, so widening them past it
+#: fails the build).
+MEASURE_SCAN_PAGES = 4
 #: No new platform read starts after this many seconds in one tick.
 READ_BUDGET_SECONDS = 120.0
 #: After this many ledger failures in one run, no read starts and no write is attempted until a later
@@ -157,7 +197,23 @@ LEDGER_FAILURES_MAX = 3
 MIN_MEASURE_AGE = timedelta(hours=1)
 HISTORY_MAX = 30
 X_HISTORY_MAX = len(outlet_x.METRICS_CHECKPOINT_DAYS)
-UPLOAD_POST_DAILY_READS = 10
+#: Upload-Post analytics reads per ET day (2026-10-15: 10 → 40, so a video can be read at each of its
+#: VIDEO_CHECKPOINT_DAYS while the rest still rotate). Upload-Post allows 100 live reads per 5 minutes;
+#: the tick's READ_BUDGET_SECONDS still bounds them (a read it cuts waits for tomorrow, never holds the day).
+#: Kept at 40 for Batch 3: at seven days with the three extra videos, ~9 Upload-Post posts a day (6 of them
+#: videos) take ~18 checkpoint reads, leaving ~22 to rotate — a picture or text post is read every ~12 days.
+UPLOAD_POST_DAILY_READS = 40
+#: The ages (days after it went out) an Upload-Post VIDEO post is read at — each once, for the largest
+#: crossed (`due_checkpoint`), a due one before every other read: every video compared at the same age.
+VIDEO_CHECKPOINT_DAYS: Tuple[int, ...] = (1, 3, 7)
+#: …and only within this long of crossing it (MD-2, 2026-10-16): a read is LABELLED with a checkpoint (`cp`)
+#: only at an age in [cp, cp + 1 day). The 06:00 ET measure is daily, so on a normal day exactly one read
+#: lands in each window (a post that went out at 16:20 ET is read at ~1.6, ~3.6 and ~7.6 days). A later
+#: read — the deploy day's backlog (no video had `cps` before Batch 1), a missed or cut day, a back-off, a
+#: platform stopped — is never passed off as a 1-, 3- or 7-day read: it waits its turn in the rotation, is
+#: stored with `cp` None, and uses up the checkpoints it crossed (`video_passed_checkpoints`). X keeps its own
+#: rule (`x_due_checkpoint`: its 28-day checkpoint caps the lag, and its reads are paid).
+VIDEO_CHECKPOINT_TOLERANCE = timedelta(days=1)
 #: A definite refusal pauses its platform's reads (Upload-Post's plan, X's refused read — and, apart,
 #: X's refused account read) for this many days: one call a week, not one a day. A stored back-off date
 #: further ahead than this cannot be ours (we write today + 7) and is ignored, never obeyed.
@@ -221,12 +277,88 @@ UPLOAD_POST_FIELDS: Dict[str, Tuple[str, ...]] = {
 }
 UPLOAD_POST_ACCOUNT_FIELDS: Dict[str, Tuple[str, ...]] = {"followers": ("followers",)}
 
+#: The VIDEO measures Upload-Post sends beyond the counts above (docs.upload-post.com/api/get-analytics,
+#: read 2026-10-15), kept under the snapshot's `video` by `extract_video_metrics` — each by the platform's
+#: own field name, so a stored value always says where it came from. Counts (`normalize_count`):
+VIDEO_COUNT_FIELDS: Dict[str, Tuple[str, ...]] = {
+    # "Followers the account gained from this post" / "Profile visits attributed to this post".
+    "tiktok": ("new_followers", "profile_views"),
+    # Reels plays on Instagram AND Facebook / on Facebook only — null when not shared to Facebook.
+    "instagram": ("crossposted_views", "facebook_views"),
+}
+#: Seconds, minutes, rates and percentages (`normalize_measure`, inclusive bounds). TikTok's completion
+#: rate is a FRACTION (0.184 = 18.4%); YouTube's average view percentage is a percentage that a looping
+#: Short can push past 100. YouTube's three are documented only when its Analytics report is available.
+#: The average watch times' 3,600 is only a ceiling: `measure_bounds` caps them lower at call time.
+VIDEO_MEASURE_FIELDS: Dict[str, Dict[str, Tuple[float, float]]] = {
+    "tiktok": {"average_time_watched": (0, 3600), "total_time_watched": (0, 1e10),
+               "full_video_watched_rate": (0, 1)},
+    "youtube": {"average_view_duration_seconds": (0, 3600), "average_view_percentage": (0, 1000),
+                "watch_time_minutes": (0, 1e9)},
+}
+#: The AVERAGE watch time per view (TikTok's `average_time_watched`, YouTube's
+#: `average_view_duration_seconds`) is kept only up to WATCH_SECONDS_LOOPS × MARKETING_MAX_VIDEO_SECONDS
+#: (`max_watch_seconds`, read at call time — MD-4, 2026-10-16): no video of ours is longer than that setting
+#: (the worker refuses a longer narration), so an average past twice it is a unit change upstream — 7,400
+#: milliseconds for 7.4 s, which the old 3,600 s bound stored as seconds — or a corrupt answer: omitted,
+#: never rescaled.
+AVERAGE_WATCH_KEYS = frozenset({"average_time_watched", "average_view_duration_seconds"})
+WATCH_SECONDS_LOOPS = 2
+#: YouTube's average view percentage is its average view duration ÷ the video's length × 100. When all three
+#: are known (`check_view_share`, MD-4) a percentage further from that than the larger of VIEW_SHARE_POINTS
+#: percentage points (YouTube rounds the duration to whole seconds) and VIEW_SHARE_SLACK of the expected
+#: share is on another scale, and is omitted. The likely slip is a FRACTION (0.45 for 45%): Upload-Post's own
+#: TikTok retention points carry fractions under the name "percentage", and 0.45 is inside 0-1000.
+VIEW_SHARE_KEY = "average_view_percentage"
+VIEW_DURATION_KEY = "average_view_duration_seconds"
+VIEW_SHARE_POINTS = 5.0
+VIEW_SHARE_SLACK = 0.5
+#: A video length (seconds) `check_view_share` trusts — the ready video asset's probed `duration_seconds`.
+VIDEO_SECONDS_BOUNDS: Tuple[float, float] = (1.0, 3600.0)
+#: TikTok's retention curve (one {"second": "1", "percentage": 0.75} point per second) is kept only at
+#: these seconds, as {"1": 0.75, "3": …}: enough to compare openings, never a 60-point curve per entry.
+RETENTION_PLATFORMS = frozenset({"tiktok"})
+RETENTION_KEY = "retention"
+RETENTION_SECONDS: Tuple[int, ...] = (1, 3, 5, 10, 15, 30)
+#: A curve longer than this (an hour of seconds) is not one of our videos: omitted unread.
+RETENTION_MAX_POINTS = 3600
+#: Decimals a measure is stored with.
+MEASURE_DIGITS = 4
+#: Every stored video key → its validator's bounds (None = a count), across platforms: the re-validation
+#: of a stored `video` (`_clean_video`) needs no platform. The names never collide (a test pins it).
+VIDEO_KEY_BOUNDS: Dict[str, Optional[Tuple[float, float]]] = {
+    **{key: None for keys in VIDEO_COUNT_FIELDS.values() for key in keys},
+    **{key: bounds for fields in VIDEO_MEASURE_FIELDS.values() for key, bounds in fields.items()},
+}
+#: The post_metrics keys a key-set log line may name (`_key_set`): anything else is shown as "?".
+_METRIC_KEY_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+#: At most this many keys in that line.
+_KEY_SET_MAX = 60
+#: At most this many distinct names kept per platform for a run's key-set UNION (`_note_keys`): a hostile
+#: answer with thousands of plain keys must not grow it without bound (the line shows _KEY_SET_MAX of them).
+_KEY_UNION_MAX = 200
+#: Every post_metrics field this module reads: always kept in the union and listed first in its line.
+_KNOWN_METRIC_KEYS = frozenset(
+    {alias for aliases in UPLOAD_POST_FIELDS.values() for alias in aliases} | set(VIDEO_KEY_BOUNDS) | {RETENTION_KEY})
+
 _BLUESKY, _X, _UPLOAD_POST = "bluesky", "x", "upload_post"
 
 #: A platform step's verdict: carry on, stop this platform for this tick (the day stays open), or
 #: stop it for the rest of the ET day (a definite refusal).
 _GO, _STOP_TICK, _STOP_TODAY = "go", "stop_tick", "stop_today"
 _RETRY_SINGLY = "retry_singly"
+#: An Upload-Post read refused for ONE social account (MD-3, 2026-10-16): skip that platform for the rest
+#: of the ET day and carry on with the others (`_upload_post_account_refused`).
+_SKIP_PLATFORM = "skip_platform"
+#: Upload-Post's `error_code` for a parked social account (`upload_post._RESTRICTED_CODE`, pinned equal by
+#: a test). The client raises it as an UploadPostRateLimitError, but it is about that ONE account.
+_ACCOUNT_RESTRICTED = "account_restricted"
+#: The Upload-Post refusal CLASSES about ONE social account, whatever their status (MD-3): it needs its owner
+#: — reconnect it or clear Meta's checkpoint prompt (`UploadPostReauthError`), or connect it to the profile at
+#: all (`UploadPostNotConnectedError`, 400 `invalid_platforms`; 2026-10-19 — it used to record `error` on
+#: every post of that platform, one call each a day, using up their checkpoints). Both subclass
+#: UploadPostRefusedError, so `_upload_post_read` catches them before it.
+_ACCOUNT_REFUSALS: Tuple[type, ...] = (upload_post.UploadPostReauthError, upload_post.UploadPostNotConnectedError)
 
 _STATUS_COUNTER = {"ok": "measured", "missing": "missing", "error": "errors", "unavailable": "unavailable",
                    "capped": "capped", "no_external_id": "no_external_id"}
@@ -423,6 +555,177 @@ def normalize_count(value: Any) -> Optional[int]:
     return None
 
 
+def normalize_measure(value: Any, lo: float, hi: float) -> Optional[float]:
+    """A platform MEASURE — seconds, minutes, a rate, a percentage — as a float inside [lo, hi]
+    (inclusive), rounded to MEASURE_DIGITS decimals, or None (OMITTED — never 0).
+
+    Kept: a non-bool int or a finite float inside the bounds. Omitted: None, a bool, ANY string ("7.4"
+    included: the platform sends numbers, and text that looks like one is not trusted as one), NaN /
+    inf, a value below `lo` or above `hi`, any other type. A value outside its bounds is a unit change
+    upstream (a percentage where a fraction is documented) or a corrupt answer: omitted, never rescaled
+    or clamped — a clamped rate would be a wrong number. An int too large for a float is compared
+    exactly, never converted (no OverflowError)."""
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if not lo <= value <= hi:
+        return None
+    return round(float(value), MEASURE_DIGITS) + 0.0   # + 0.0: never a stored -0.0
+
+
+def _whole_second(value: Any) -> Optional[int]:
+    """A retention point's `second`: Upload-Post sends a string of digits ("1"); a plain int is read too.
+    None for anything else (a bool, a float, a signed or spaced string, more than 5 digits)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 0 <= value <= 99_999 else None
+    if isinstance(value, str) and len(value) <= 5 and _COUNT_TEXT_RE.fullmatch(value):
+        return int(value)
+    return None
+
+
+def retention_points(raw: Any) -> Dict[str, float]:
+    """TikTok's retention curve — a list of {"second": "1", "percentage": 0.75}, one point per second —
+    cut to RETENTION_SECONDS as {"1": 0.75, "3": 0.61, …} (a kept second the curve does not reach is
+    simply absent). Pure.
+
+    The whole curve is omitted ({}) when it is malformed: not a list, empty, longer than
+    RETENTION_MAX_POINTS, or ANY point that is not an object with a whole `second` (`_whole_second`) and
+    a `percentage` fraction in 0-1, or a second given twice. A curve with one unreadable point is not
+    trusted at all: a unit change upstream (a percentage for a fraction) makes every point unreadable
+    and leaves nothing, where a per-point filter could keep a wrong-scale survivor."""
+    if not isinstance(raw, list) or not raw or len(raw) > RETENTION_MAX_POINTS:
+        return {}
+    points: Dict[int, float] = {}
+    for item in raw:
+        if not isinstance(item, Mapping):
+            return {}
+        second = _whole_second(item.get("second"))
+        fraction = normalize_measure(item.get("percentage"), 0, 1)
+        if second is None or fraction is None or second in points:
+            return {}
+        points[second] = fraction
+    return {str(s): points[s] for s in RETENTION_SECONDS if s in points}
+
+
+def max_watch_seconds() -> float:
+    """The longest AVERAGE watch time kept (AVERAGE_WATCH_KEYS): WATCH_SECONDS_LOOPS ×
+    MARKETING_MAX_VIDEO_SECONDS, read at call time (150 s with the default 75). Settings declares no bound
+    for that setting, so a value that is not a whole number of seconds in 1-3600 is the declared default —
+    logged once a day, never a crash and never a bound of 0 that would omit every watch time."""
+    seconds = settings.MARKETING_MAX_VIDEO_SECONDS
+    if type(seconds) is not int or not 1 <= seconds <= 3600:
+        default = type(settings).model_fields["MARKETING_MAX_VIDEO_SECONDS"].default
+        _log_once(run_date_et(_now()), "max_video_seconds", logging.WARNING,
+                  "marketing measure: MARKETING_MAX_VIDEO_SECONDS=%r is not 1-3600 seconds — the average watch "
+                  "time bound uses the default %s", seconds, default)
+        seconds = default
+    return float(WATCH_SECONDS_LOOPS * seconds)
+
+
+def measure_bounds(key: Any) -> Optional[Tuple[float, float]]:
+    """A video MEASURE's inclusive bounds NOW (`normalize_measure`): its VIDEO_KEY_BOUNDS entry, with an
+    average watch time (AVERAGE_WATCH_KEYS) capped at `max_watch_seconds()`. None for a count or an
+    unknown key. The one source of the bounds for the measure step AND the digest's re-validation."""
+    bounds = VIDEO_KEY_BOUNDS.get(key) if isinstance(key, str) else None
+    if bounds is None:
+        return None
+    lo, hi = bounds
+    return (lo, min(hi, max_watch_seconds())) if key in AVERAGE_WATCH_KEYS else (lo, hi)
+
+
+def check_view_share(video: Any, video_seconds: Any) -> Dict[str, Any]:
+    """`video` (an `extract_video_metrics` result) with YouTube's average view PERCENTAGE (VIEW_SHARE_KEY)
+    omitted when it disagrees with its average view duration over the video's length (`video_seconds`):
+    expected = duration ÷ length × 100, and a share further from it than the larger of VIEW_SHARE_POINTS
+    points and VIEW_SHARE_SLACK of the expected share is on another scale (MD-4, 2026-10-16). Pure.
+
+    Unchanged — the share kept as its bounds left it — when any of the three is unknown or unreadable
+    (the length must be inside VIDEO_SECONDS_BOUNDS), or when they agree; a looping Short agrees past 100%.
+    The duration is kept either way: its key names its unit and `measure_bounds` confines it to twice the
+    longest video, while "percentage" is demonstrably not a unit at Upload-Post (its TikTok retention points
+    are fractions under that name), so the share is the one a disagreement indicts."""
+    out = dict(video) if isinstance(video, Mapping) else {}
+    share = normalize_measure(out.get(VIEW_SHARE_KEY), *(measure_bounds(VIEW_SHARE_KEY) or (0, 0)))
+    duration = normalize_measure(out.get(VIEW_DURATION_KEY), *(measure_bounds(VIEW_DURATION_KEY) or (0, 0)))
+    seconds = normalize_measure(video_seconds, *VIDEO_SECONDS_BOUNDS)
+    if share is None or duration is None or seconds is None:
+        return out
+    expected = duration / seconds * 100.0
+    if abs(share - expected) > max(VIEW_SHARE_POINTS, VIEW_SHARE_SLACK * expected):
+        out.pop(VIEW_SHARE_KEY, None)
+    return out
+
+
+def extract_video_metrics(post_metrics: Any, platform: Any) -> Dict[str, Any]:
+    """The video measures of one Upload-Post `post_metrics` object for `platform` — only that platform's
+    own fields (VIDEO_COUNT_FIELDS, VIDEO_MEASURE_FIELDS — under `measure_bounds`, so an average watch time
+    past twice the longest video is omitted — and TikTok's retention), each only when readable: a field
+    that is missing, null or unreadable is OMITTED, never 0. {} when none is (or the input is not an
+    object, or the platform reports none of these). Pure — YouTube's share is checked against its video's
+    length afterwards (`check_view_share`), where that length is known."""
+    if not isinstance(post_metrics, Mapping) or not isinstance(platform, str):
+        return {}
+    out: Dict[str, Any] = {}
+    for key in VIDEO_COUNT_FIELDS.get(platform, ()):
+        n = normalize_count(post_metrics.get(key))
+        if n is not None:
+            out[key] = n
+    for key, (lo, hi) in VIDEO_MEASURE_FIELDS.get(platform, {}).items():
+        v = normalize_measure(post_metrics.get(key), *(measure_bounds(key) or (lo, hi)))
+        if v is not None:
+            out[key] = v
+    if platform in RETENTION_PLATFORMS:
+        curve = retention_points(post_metrics.get(RETENTION_KEY))
+        if curve:
+            out[RETENTION_KEY] = curve
+    return out
+
+
+def _clean_video(raw: Any) -> Dict[str, Any]:
+    """A STORED `video` object re-validated key by key (VIDEO_KEY_BOUNDS under `measure_bounds`; the
+    retention seconds in RETENTION_SECONDS, each a fraction 0-1): an unknown key or an unreadable value is
+    dropped. {} when nothing is left. Pure — the trust boundary of `build_snapshot` and `apply_measurement`."""
+    if not isinstance(raw, Mapping):
+        return {}
+    out: Dict[str, Any] = {}
+    for key, bounds in VIDEO_KEY_BOUNDS.items():
+        value = (normalize_count(raw.get(key)) if bounds is None
+                 else normalize_measure(raw.get(key), *(measure_bounds(key) or bounds)))
+        if value is not None:
+            out[key] = value
+    curve = raw.get(RETENTION_KEY)
+    if isinstance(curve, Mapping):
+        kept: Dict[str, float] = {}
+        for second in RETENTION_SECONDS:
+            fraction = normalize_measure(curve.get(str(second)), 0, 1)
+            if fraction is not None:
+                kept[str(second)] = fraction
+        if kept:
+            out[RETENTION_KEY] = kept
+    return out
+
+
+def _key_name(key: Any) -> str:
+    """A post_metrics key as a log line may show it: a plain field name, else "?" (it is upstream text)."""
+    return key if isinstance(key, str) and _METRIC_KEY_RE.fullmatch(key) else "?"
+
+
+def _key_names(keys: Iterable[Any]) -> str:
+    """Sorted key NAMES for a log line — never a value: at most _KEY_SET_MAX, then "+N more"."""
+    names = sorted({_key_name(k) for k in keys})
+    more = len(names) - _KEY_SET_MAX
+    return ",".join(names[:_KEY_SET_MAX]) + (f",+{more} more" if more > 0 else "")
+
+
+def _key_set(metrics: Mapping[str, Any]) -> str:
+    """The sorted KEY SET of a post_metrics object for a log line — never a value. A key that is not a
+    plain field name is shown as "?" (it is upstream text); at most _KEY_SET_MAX keys, then "+N more"."""
+    return _key_names(metrics)
+
+
 def extract_counts(raw: Any, fields: Mapping[str, Sequence[str]]) -> Dict[str, int]:
     """{snapshot key: count} from a platform's metrics object: for each key the first of its field
     names holding a readable count (`normalize_count`); a key with none is absent."""
@@ -448,14 +751,19 @@ def age_hours(published_at: Optional[datetime], now: datetime) -> Optional[float
     return 0.0 if hours == 0 else hours
 
 
+#: Every checkpoint a stored `cps` / `cp` may name: X's and the Upload-Post video ages.
+_CHECKPOINT_DAYS = frozenset(outlet_x.METRICS_CHECKPOINT_DAYS) | frozenset(VIDEO_CHECKPOINT_DAYS)
+
+
 def _valid_cp(value: Any) -> Optional[int]:
-    return value if type(value) is int and value in outlet_x.METRICS_CHECKPOINT_DAYS else None
+    return value if type(value) is int and value in _CHECKPOINT_DAYS else None
 
 
 def build_snapshot(counts: Mapping[str, Any], *, now: datetime, published_at: Optional[datetime],
-                   cp: Optional[int] = None) -> Dict[str, Any]:
-    """One `last` / `history` entry: the ET day and UTC time measured, the post's age in hours, the X
-    checkpoint (None elsewhere) and every readable count — an unreadable one is omitted."""
+                   cp: Optional[int] = None, video: Any = None) -> Dict[str, Any]:
+    """One `last` / `history` entry: the ET day and UTC time measured, the post's age in hours, the
+    checkpoint it was read for (X, or an Upload-Post video; None otherwise), every readable count — an
+    unreadable one is omitted — and, when one value of it is readable, `video` (`_clean_video`)."""
     at = _aware(now)
     snap: Dict[str, Any] = {"day": run_date_et(at).isoformat(), "at": at.astimezone(timezone.utc).isoformat(),
                             "age_h": age_hours(published_at, at), "cp": _valid_cp(cp)}
@@ -464,6 +772,9 @@ def build_snapshot(counts: Mapping[str, Any], *, now: datetime, published_at: Op
         n = normalize_count(source.get(key))
         if n is not None:
             snap[key] = n
+    measures = _clean_video(video)
+    if measures:
+        snap["video"] = measures
     return snap
 
 
@@ -485,6 +796,9 @@ def _clean_snapshot(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
         n = normalize_count(snapshot.get(key))
         if n is not None:
             snap[key] = n
+    measures = _clean_video(snapshot.get("video"))
+    if measures:
+        snap["video"] = measures
     return snap
 
 
@@ -503,22 +817,37 @@ def valid_checkpoints(value: Any) -> List[int]:
     return sorted({c for c in value if _valid_cp(c) is not None})
 
 
-def crossed_checkpoints(published_at: Optional[datetime], now: datetime) -> List[int]:
-    """The checkpoints (days) a post published at `published_at` has reached by `now`."""
+def crossed_checkpoints(published_at: Optional[datetime], now: datetime,
+                        days: Sequence[int] = outlet_x.METRICS_CHECKPOINT_DAYS) -> List[int]:
+    """The checkpoints of `days` (X's by default; VIDEO_CHECKPOINT_DAYS for an Upload-Post video) a post
+    published at `published_at` has reached by `now`."""
     if published_at is None:
         return []
     age = _aware(now) - _aware(published_at)
-    return [cp for cp in outlet_x.METRICS_CHECKPOINT_DAYS if age >= timedelta(days=cp)]
+    return [cp for cp in days if age >= timedelta(days=cp)]
 
 
-def x_due_checkpoint(published_at: Optional[datetime], now: datetime, cps: Any) -> Optional[int]:
-    """The checkpoint an X post is due to be read for — the LARGEST one crossed, when it is not yet
-    in `cps` — or None. A post 8 days old with nothing measured is read ONCE, for 7."""
-    crossed = crossed_checkpoints(published_at, now)
+def x_due_checkpoint(published_at: Optional[datetime], now: datetime, cps: Any,
+                     days: Sequence[int] = outlet_x.METRICS_CHECKPOINT_DAYS, *,
+                     within: Optional[timedelta] = None) -> Optional[int]:
+    """The checkpoint a post is due to be read for — the LARGEST one of `days` crossed, when it is not yet
+    in `cps` — or None. A post 8 days old with nothing measured is read ONCE, for 7. X's checkpoints by
+    default (the name is historical); `due_checkpoint` is the same function for any `days`. With `within`
+    (an Upload-Post video: VIDEO_CHECKPOINT_TOLERANCE) the largest crossed is due only while the post is
+    younger than it plus `within` — a later read is never labelled with it (MD-2)."""
+    crossed = crossed_checkpoints(published_at, now, days)
     if not crossed:
         return None
     largest = max(crossed)
-    return None if largest in valid_checkpoints(cps) else largest
+    if largest in valid_checkpoints(cps):
+        return None
+    if within is not None and _aware(now) - _aware(published_at) >= timedelta(days=largest) + within:
+        return None
+    return largest
+
+
+#: `x_due_checkpoint` for any checkpoint days (an Upload-Post video passes VIDEO_CHECKPOINT_DAYS).
+due_checkpoint = x_due_checkpoint
 
 
 def x_post_time(external_id: Any) -> Optional[datetime]:
@@ -545,14 +874,15 @@ def x_read_center(external_id: Any, published_at: Optional[datetime]) -> Optiona
 
 def apply_measurement(old: Any, *, platform: str, today: date, status: str, note: Any = None,
                       snapshot: Optional[Mapping[str, Any]] = None, cps: Iterable[Any] = (),
-                      unavailable_until: Optional[date] = None) -> Dict[str, Any]:
+                      unavailable_until: Optional[date] = None, track_cps: bool = False) -> Dict[str, Any]:
     """The metrics document after one measurement. Pure (a deep copy of `old`).
 
     Sets `v`, `measured_day`, `status`, `note` and `unavailable_until` (kept only on `unavailable`).
     A snapshot WITH counts becomes `last` and replaces today's `history` entry (bounded: 30, 4 on
     X); a snapshot without any count turns the status into `error` / `no_metrics` and adds nothing.
-    On X, `cps` is merged into the stored checkpoints. A non-`ok` result keeps the last good
-    snapshot. `rev` is the writer's (`merge_post_metrics`)."""
+    On X — and wherever `track_cps` asks for it (an Upload-Post video read for its checkpoint) — `cps`
+    is merged into the stored checkpoints; elsewhere a stored `cps` is left exactly as it was. A non-`ok`
+    result keeps the last good snapshot. `rev` is the writer's (`merge_post_metrics`)."""
     if status not in STATUSES:
         raise ValueError(f"unknown metrics status {status!r}")
     doc = copy.deepcopy(old) if isinstance(old, dict) else {}
@@ -569,7 +899,7 @@ def apply_measurement(old: Any, *, platform: str, today: date, status: str, note
     keep_until = (status == "unavailable" and isinstance(unavailable_until, date)
                   and not isinstance(unavailable_until, datetime))
     doc["unavailable_until"] = unavailable_until.isoformat() if keep_until else None
-    if platform == _X:
+    if platform == _X or track_cps:
         doc["cps"] = sorted(set(valid_checkpoints(doc.get("cps"))) | set(valid_checkpoints(list(cps))))
     if snap is not None:
         history = doc.get("history") if isinstance(doc.get("history"), list) else []
@@ -795,6 +1125,10 @@ class _Run:
         #: Every platform this run stopped or found paused, as one cleaned line each — the job's
         #: `last_error` even when the day succeeds (`_measure_day`).
         self.stops: List[str] = []
+        #: platform → {"reads", "keys", "ages"}: the post_metrics KEY NAMES (never a value) of every Upload-Post
+        #: read this run, and the ages (hours) of the posts read — logged once per platform at the end of the
+        #: step (`_log_key_sets`, MD-5).
+        self.key_sets: Dict[str, Dict[str, Any]] = {}
         self._timed_out = False
         self.ledger_failures = 0
 
@@ -879,7 +1213,8 @@ class _Run:
 
     async def record(self, row: Mapping[str, Any], *, status: str, note: Any = None,
                      snapshot: Optional[Mapping[str, Any]] = None, cps: Iterable[Any] = (),
-                     unavailable_until: Optional[date] = None, hold: bool = True) -> bool:
+                     unavailable_until: Optional[date] = None, hold: bool = True,
+                     track_cps: bool = False) -> bool:
         """Merge one measurement into the post's metrics (`apply_measurement`)."""
         platform = str(row.get("platform") or "")
         effective = "error" if snapshot is not None and not snapshot_has_counts(snapshot) else status
@@ -887,7 +1222,8 @@ class _Run:
 
         def merge(old: Dict[str, Any]) -> Dict[str, Any]:
             return apply_measurement(old, platform=platform, today=self.today, status=status, note=note,
-                                     snapshot=snapshot, cps=cps, unavailable_until=unavailable_until)
+                                     snapshot=snapshot, cps=cps, unavailable_until=unavailable_until,
+                                     track_cps=track_cps)
 
         written = await self._write(row, merge, what=f"metrics ({effective})", hold=hold)
         if written:
@@ -1419,14 +1755,38 @@ def _upload_post_order(row: Dict[str, Any]) -> Tuple[str, float]:
     return (day if isinstance(day, str) else "", -(published.timestamp() if published else 0.0))
 
 
+def video_due_checkpoint(row: Mapping[str, Any], now: datetime) -> Optional[int]:
+    """The VIDEO_CHECKPOINT_DAYS age an Upload-Post VIDEO post (`format` video) is due to be read for —
+    the largest crossed, not yet in its `cps`, and crossed less than VIDEO_CHECKPOINT_TOLERANCE ago
+    (`due_checkpoint`) — or None: not a video, no readable publish time, nothing due, or crossed too long
+    ago (the deploy day's backlog, a missed day, a back-off: that read is a rotation read, MD-2)."""
+    if row.get("format") != "video":
+        return None
+    return due_checkpoint(_published(row), now, _doc(row).get("cps"), VIDEO_CHECKPOINT_DAYS,
+                          within=VIDEO_CHECKPOINT_TOLERANCE)
+
+
+def video_passed_checkpoints(row: Mapping[str, Any], now: datetime) -> List[int]:
+    """Every VIDEO_CHECKPOINT_DAYS age an Upload-Post VIDEO post has crossed, when one of them is not in its
+    `cps` yet — what ANY outcome recorded about a read of it uses up (`cps`), labelled or not: an on-time
+    read uses its checkpoint and any earlier one it skipped, a late read the ones it missed (MD-2), so no
+    checkpoint is ever read late under its label. [] otherwise (not a video, nothing crossed, all used)."""
+    if row.get("format") != "video":
+        return []
+    crossed = crossed_checkpoints(_published(row), now, VIDEO_CHECKPOINT_DAYS)
+    return crossed if set(crossed) - set(valid_checkpoints(_doc(row).get("cps"))) else []
+
+
 async def _upload_post_unavailable(run: _Run, row: Dict[str, Any], e: BaseException,
-                                   newest: Optional[Dict[str, Any]]) -> str:
+                                   newest: Optional[Dict[str, Any]], ck: Mapping[str, Any]) -> str:
     """A plan refusal: every Upload-Post read waits a week. As on X, the pause is a marker on the NEWEST
     Upload-Post post (`newest`, any platform), written first — the refused post may leave the 30-day
-    listing during the week — and the refused post records `unavailable` for the digest."""
+    listing during the week — and the refused post records `unavailable` for the digest (`ck`: its
+    checkpoint is used up, like every outcome of a checkpoint read)."""
     until = run.today + timedelta(days=UNAVAILABLE_DAYS)
     await run.record_backoff(newest if newest is not None else row, UPLOAD_POST_PLAN_REFUSED_KEY, until)
-    await run.record(row, status="unavailable", note=f"plan: {_err(e)}", unavailable_until=until, hold=False)
+    await run.record(row, status="unavailable", note=f"plan: {_err(e)}", unavailable_until=until, hold=False,
+                     **ck)
     _stop_for_today(run, _UPLOAD_POST, f"its plan refuses analytics ({_err(e)}) — next try on "
                     f"{until.isoformat()}", note=f"upload_post paused until {until.isoformat()}: plan: {_err(e)}",
                     level=logging.WARNING)
@@ -1443,37 +1803,154 @@ def _stale_followers(entry: Mapping[str, Any], today: date) -> Optional[date]:
     return snapshot_day
 
 
+def _upload_post_account_key(platform: str) -> str:
+    """`_STOPPED`'s key for ONE Upload-Post platform's social account (MD-3) — beside Upload-Post's own."""
+    return f"{_UPLOAD_POST}:{platform}"
+
+
+def _account_refusal(e: BaseException) -> bool:
+    """Is this Upload-Post refusal about ONE social account rather than Upload-Post (MD-3, 2026-10-16)? The
+    account needs its owner — reconnect it, clear Meta's checkpoint prompt, or connect it to the profile at
+    all (`_ACCOUNT_REFUSALS`) — or Upload-Post parked it (`account_restricted`, which the client raises as an
+    UploadPostRateLimitError). Every other platform's reads still work. A credential, a quota or a plain 429
+    is Upload-Post-wide."""
+    if isinstance(e, _ACCOUNT_REFUSALS):
+        return True
+    code = getattr(e, "error_code", None)
+    return (isinstance(e, upload_post.UploadPostRateLimitError) and isinstance(code, str)
+            and code.strip().lower() == _ACCOUNT_RESTRICTED)
+
+
+def _upload_post_account_refused(run: _Run, platform: str, e: BaseException) -> str:
+    """A refusal about `platform`'s social account (`_account_refusal`): only THAT platform's reads stop, for
+    the rest of the ET day (a later run the same day skips it without a call), and the step carries on with
+    the others — a TikTok that needs reconnecting used to stop every Upload-Post read, day after day, while
+    YouTube, Instagram and the rest passed their 1/3/7-day checkpoints unread (MD-3). Nothing is recorded on
+    the post: the refusal is about the account, so its checkpoint is not used up (once it is late, a later
+    read stores it unlabelled — MD-2). Named in the job's `last_error`: the owner sees which account to fix
+    (a platform not connected to the profile names itself through Upload-Post's `invalid_platforms`)."""
+    _stop_for_today(run, _upload_post_account_key(platform), f"its {platform} account was refused: {_err(e)}",
+                    note=f"upload_post {platform} stopped for {run.today.isoformat()}: {_err(e)}",
+                    level=logging.WARNING)
+    return _SKIP_PLATFORM
+
+
+async def _video_seconds(run: _Run, row: Mapping[str, Any]) -> Optional[float]:
+    """The length (seconds) of the video a post carries: its run's READY `video` asset named in the post's
+    `asset_ids` — the `duration_seconds` the worker probed when it rendered it. ONE `list_assets` read, made
+    only when a YouTube answer carries both watch fields (`check_view_share`, MD-4). None when it cannot be
+    told — no run id or asset ids, a failed read (logged), no or several matching videos, an unreadable
+    length — and the share is then kept as its bounds left it. Never holds the day: it is a read we own."""
+    run_id, ids = row.get("run_id"), row.get("asset_ids")
+    if not isinstance(run_id, str) or not run_id or not isinstance(ids, list) or not ids:
+        return None
+    try:
+        assets = await run.svc.list_assets(run_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning("marketing measure: the video length of post_id=%s could not be read (list_assets run_id=%s: "
+                       "%s) — its YouTube share is kept unchecked", row.get("id"), run_id, _err(e))
+        return None
+    wanted = {str(i) for i in ids}
+    videos = [a for a in (assets if isinstance(assets, list) else [])
+              if isinstance(a, dict) and a.get("kind") == "video" and a.get("status") == "ready"
+              and str(a.get("id")) in wanted]
+    if len(videos) != 1:
+        return None
+    seconds = videos[0].get("duration_seconds")
+    if isinstance(seconds, str):   # our own numeric(8,3) column, should PostgREST ever render it as text
+        try:
+            seconds = float(seconds)
+        except ValueError:
+            return None
+    return normalize_measure(seconds, *VIDEO_SECONDS_BOUNDS)
+
+
+def _note_keys(run: _Run, platform: str, metrics: Mapping[str, Any], age_h: Optional[float]) -> None:
+    """Add one read's post_metrics KEY NAMES (never a value) and its post's age (hours) to this run's union
+    for `platform` (`_log_key_sets`, MD-5). Every field this module reads is always kept; any other name
+    only up to _KEY_UNION_MAX, so a hostile answer can neither grow the set without bound nor crowd out the
+    fields the line is for."""
+    entry = run.key_sets.setdefault(platform, {"reads": 0, "keys": set(), "ages": []})
+    entry["reads"] += 1
+    names: set = entry["keys"]
+    for key in metrics:
+        name = _key_name(key)
+        if name in _KNOWN_METRIC_KEYS or len(names) < _KEY_UNION_MAX:
+            names.add(name)
+    if age_h is not None:
+        entry["ages"].append(age_h)
+
+
+def _union_text(names: Iterable[str]) -> str:
+    """A key-set union for the log: the fields this module reads first, then the rest, each sorted — at
+    most _KEY_SET_MAX names, then "+N more"."""
+    unique = {_key_name(n) for n in names}
+    ordered = sorted(unique & _KNOWN_METRIC_KEYS) + sorted(unique - _KNOWN_METRIC_KEYS)
+    more = len(ordered) - _KEY_SET_MAX
+    return ",".join(ordered[:_KEY_SET_MAX]) + (f",+{more} more" if more > 0 else "")
+
+
+def _log_key_sets(run: _Run) -> None:
+    """One INFO line per Upload-Post platform this run read a `post_metrics` object for: the UNION of the key
+    NAMES every read carried (never a value), how many reads, and the ages of the posts read (MD-5,
+    2026-10-16). One sampled read was not enough: due videos are read first, so a day's first YouTube read
+    was usually its youngest video — at ~1.6 days, often before YouTube's Analytics report exists — and its
+    line could lack the watch fields that older videos carry. The plan decides on the cached-route read
+    from this line."""
+    for platform in sorted(run.key_sets):
+        entry = run.key_sets[platform]
+        ages = entry["ages"]
+        span = f"aged {min(ages):.1f}-{max(ages):.1f} h" if ages else "age unknown"
+        logger.info("marketing measure: Upload-Post post_metrics keys for %s (%d read(s), %s; names only — the "
+                    "union of this run's reads, the fields read here first): %s", platform, entry["reads"], span,
+                    _union_text(entry["keys"]))
+
+
 async def _upload_post_read(run: _Run, row: Dict[str, Any], rid: str, is_newest: bool, *,
-                            newest_any: Optional[Dict[str, Any]]) -> str:
+                            newest_any: Optional[Dict[str, Any]], video_cp: Optional[int] = None) -> str:
     """Read one Upload-Post post. `is_newest`: the newest post of ITS platform (where that platform's
     follower snapshot goes); `newest_any`: the newest Upload-Post post of any platform (where a plan
-    refusal's pause is kept)."""
+    refusal's pause is kept); `video_cp`: the VIDEO_CHECKPOINT_DAYS age a video post is read for
+    (`video_due_checkpoint`: crossed less than a day ago), else None — the snapshot's `cp`.
+
+    A read of a video uses up every checkpoint it has crossed (`video_passed_checkpoints`) on EVERY outcome
+    recorded about this post — ok, missing, an error, a plan refusal — labelled (`video_cp`) or, read late,
+    not (MD-2): a due video goes first in the queue, so one whose read keeps failing (and stops the tick)
+    would otherwise head it every day and starve every other post for 30 days. A failure that is about
+    Upload-Post, not this post (a credential, a quota, a 429), records nothing and uses nothing up; one
+    about this post's social ACCOUNT (a reconnect, a parked account, a platform not connected to the
+    profile) records nothing either and skips its platform for the day (`_SKIP_PLATFORM`, MD-3)."""
     platform = str(row.get("platform"))
+    passed = video_passed_checkpoints(row, run.now)
+    ck: Dict[str, Any] = {"cps": passed, "track_cps": True} if passed else {}
     try:
         run.bump("upload_post_calls")
         res = await upload_post.get_post_analytics(rid, platform=platform)
     except asyncio.CancelledError:
         raise
-    except (upload_post.UploadPostReauthError, upload_post.UploadPostAuthError, upload_post.UploadPostQuotaError,
+    except (upload_post.UploadPostAuthError, upload_post.UploadPostQuotaError,
             upload_post.UploadPostNotConfiguredError) as e:
         _stop_for_today(run, _UPLOAD_POST, _err(e), level=logging.WARNING)
         return _STOP_TODAY
+    except _ACCOUNT_REFUSALS as e:                      # before their UploadPostRefusedError parent
+        return _upload_post_account_refused(run, platform, e)
     except upload_post.UploadPostPlanError as e:
-        return await _upload_post_unavailable(run, row, e, newest_any)
-    except upload_post.UploadPostNotConnectedError as e:
-        await run.record(row, status="error", note=_err(e), hold=False)
-        return _GO
+        return await _upload_post_unavailable(run, row, e, newest_any, ck)
     except upload_post.UploadPostRefusedError as e:
         status = getattr(e, "status", None)
         if status == 402:
-            return await _upload_post_unavailable(run, row, e, newest_any)
+            return await _upload_post_unavailable(run, row, e, newest_any, ck)
         if status == 404:
-            await run.record(row, status="missing", note="Upload-Post has no such post (404)", hold=False)
+            # Follow-up (plan Batch 1 item 8, 2026-10-15): if the live logs show a 404 for PHOTO posts that do
+            # exist (analytics not served for photos), map that case to `unavailable`; not built until seen.
+            await run.record(row, status="missing", note="Upload-Post has no such post (404)", hold=False, **ck)
         elif status is None:
             await run.record(row, status="no_external_id", note=f"the stored job id was refused: {_err(e)}",
-                             hold=False)
+                             hold=False, **ck)
         else:
-            await run.record(row, status="error", note=_err(e), hold=False)
+            await run.record(row, status="error", note=_err(e), hold=False, **ck)
         return _GO
     except upload_post.UploadPostAmbiguousError as e:   # 5xx, 408, an odd 2xx, a timeout — about THIS post
         # Recorded, so this post leaves the head of the queue (`_upload_post_order`: least recently
@@ -1481,9 +1958,15 @@ async def _upload_post_read(run: _Run, row: Dict[str, Any], rid: str, is_newest:
         # 30 days. A non-ok status keeps its last good snapshot.
         logger.warning("marketing measure: Upload-Post read of post_id=%s failed (%s) — recorded as an error; "
                        "Upload-Post waits; it never holds the day open", row.get("id"), _err(e))
-        await run.record(row, status="error", note=_err(e), hold=False)
+        await run.record(row, status="error", note=_err(e), hold=False, **ck)
         return _STOP_TICK
-    except upload_post.UploadPostException as e:     # 429, not sent: about Upload-Post, never this post
+    except upload_post.UploadPostRateLimitError as e:
+        if _account_refusal(e):                         # `account_restricted`: one parked account (MD-3)
+            return _upload_post_account_refused(run, platform, e)
+        logger.warning("marketing measure: Upload-Post read failed (%s) — Upload-Post waits; it never holds "
+                       "the day open", _err(e))
+        return _STOP_TICK
+    except upload_post.UploadPostException as e:     # not sent: about Upload-Post, never this post
         logger.warning("marketing measure: Upload-Post read failed (%s) — Upload-Post waits; it never holds "
                        "the day open", _err(e))
         return _STOP_TICK
@@ -1491,22 +1974,38 @@ async def _upload_post_read(run: _Run, row: Dict[str, Any], rid: str, is_newest:
         logger.error("marketing measure: Upload-Post read BUG post_id=%s (%s)", row.get("id"), _err(e),
                      exc_info=True)
         # Recorded like an unknown outcome: a post that trips a bug must not stay first in line forever.
-        await run.record(row, status="error", note=_err(e), hold=False)
+        await run.record(row, status="error", note=_err(e), hold=False, **ck)
         return _STOP_TICK
     platforms = res.get("platforms") if isinstance(res, dict) else None
     entry = platforms.get(platform) if isinstance(platforms, dict) else None
     if not isinstance(entry, dict):
-        await run.record(row, status="error", note=f"Upload-Post answered without {platform}", hold=False)
+        await run.record(row, status="error", note=f"Upload-Post answered without {platform}", hold=False, **ck)
         return _GO
     metrics = entry.get("post_metrics")
     if isinstance(metrics, dict):
+        # Which fields reach us on the live route (YouTube's watch fields are documented only "when the
+        # report is available"): the KEY NAMES, never a value — their union over the run's reads, logged
+        # once per platform at the end of the step (`_log_key_sets`, MD-5). If they never show there, reading
+        # Upload-Post's cached analytics route is the follow-up (plan Batch 1 item 8).
+        _note_keys(run, platform, metrics, age_hours(_published(row), run.now))
+        video = extract_video_metrics(metrics, platform)
+        if VIEW_SHARE_KEY in video and VIEW_DURATION_KEY in video:
+            # Both watch fields: check the share against the video's own length (MD-4) — one read of ours.
+            checked = check_view_share(video, await _video_seconds(run, row))
+            if VIEW_SHARE_KEY not in checked:
+                logger.warning("marketing measure: post_id=%s platform=%s — average view percentage %s disagrees "
+                               "with its average view duration %s s over the video's length: another scale "
+                               "upstream; the percentage is omitted (compare with YouTube Studio once)",
+                               row.get("id"), platform, video[VIEW_SHARE_KEY], video[VIEW_DURATION_KEY])
+            video = checked
         snapshot = build_snapshot(extract_counts(metrics, UPLOAD_POST_FIELDS), now=run.now,
-                                  published_at=_published(row))
-        await run.record(row, status="ok", snapshot=snapshot, hold=False)
+                                  published_at=_published(row), cp=video_cp, video=video)
+        await run.record(row, status="ok", snapshot=snapshot, hold=False, **ck)
     else:
         why = entry.get("post_metrics_error")
         await run.record(row, status="error", hold=False,
-                         note=f"upload-post: {why}" if isinstance(why, str) and why.strip() else "no_metrics")
+                         note=f"upload-post: {why}" if isinstance(why, str) and why.strip() else "no_metrics",
+                         **ck)
     if is_newest:
         account = build_account({"followers": entry.get("followers")}, UPLOAD_POST_ACCOUNT_FIELDS, now=run.now,
                                 source="upload_post")
@@ -1540,18 +2039,36 @@ async def _measure_upload_post(run: _Run, rows: List[Dict[str, Any]]) -> None:
     left = UPLOAD_POST_DAILY_READS - read_today
     newest = {p: _newest([r for r in rows if r.get("platform") == p]) for p in {r.get("platform") for r in rows}}
     newest_any = _newest(rows)
-    queue = (r for r in rows if not measured_today(r, run.today) and old_enough(r, run.now))
-    for row in sorted(queue, key=_upload_post_order):
-        if left <= 0 or not run.time_left():
-            return
-        rid = _upload_post_id(row)
-        if rid is None:
-            await run.record_no_id(row, "no Upload-Post job id recorded", hold=False)
-            continue
-        left -= 1
-        if await _upload_post_read(run, row, rid, newest.get(row.get("platform")) is row,
-                                   newest_any=newest_any) != _GO:
-            return
+    queue = [(r, video_due_checkpoint(r, run.now)) for r in rows
+             if not measured_today(r, run.today) and old_enough(r, run.now)]
+    # A video due at one of its fixed ages first, then today's order (never measured first, then the least
+    # recently measured); each group in today's order.
+    queue.sort(key=lambda item: (item[1] is None, _upload_post_order(item[0])))
+    #: Platforms whose social account was refused (MD-3) — this run, or earlier today (`_STOPPED`): skipped,
+    #: never called again today, while every other platform is read.
+    skipped: set = set()
+    try:
+        for row, video_cp in queue:
+            if left <= 0 or not run.time_left():
+                return
+            platform = str(row.get("platform"))
+            if platform in skipped or _stopped(run, _upload_post_account_key(platform)):
+                skipped.add(platform)
+                continue
+            rid = _upload_post_id(row)
+            if rid is None:
+                await run.record_no_id(row, "no Upload-Post job id recorded", hold=False)
+                continue
+            left -= 1
+            step = await _upload_post_read(run, row, rid, newest.get(row.get("platform")) is row,
+                                           newest_any=newest_any, video_cp=video_cp)
+            if step == _SKIP_PLATFORM:
+                skipped.add(platform)
+                continue
+            if step != _GO:
+                return
+    finally:
+        _log_key_sets(run)
 
 
 # ── the step ───────────────────────────────────────────────────────────────────────────────────
@@ -1562,6 +2079,57 @@ def metrics_due(now: datetime) -> bool:
     return _aware(now).astimezone(ET).hour >= METRICS_HOUR_ET
 
 
+async def list_published_posts(svc: Any, *, since: datetime, page_limit: int, max_pages: int,
+                               what: str) -> Tuple[List[Dict[str, Any]], bool]:
+    """(rows, capped): every `published` post published at or after `since`, OLDEST first — read in pages,
+    for the measure step (30 days) and the weekly digest (35 days). MD-7, 2026-10-16.
+
+    `list_measurable_posts` answers oldest first under a LIMIT, so ONE capped read lost the NEWEST posts —
+    yesterday's, with their 1-day checkpoints, and the scorecard's latest week — and at Batch 3's cadence
+    (~11 posts a day, every day) 30 days outgrow 300 rows. Each page is read from the newest `published_at`
+    of the page before, INCLUSIVE — a post sharing that instant is never skipped; a row seen twice is kept
+    once, by its `id` (the primary key) — until a page comes back short of `page_limit`, which must stay
+    under PostgREST's max-rows (~1,000): a page it cut short would pass for the last one.
+
+    `capped` is True (logged at ERROR) only after `max_pages` full pages, or when a full page cannot move the
+    read on (every row at one instant, or no readable time) — the rows read so far are returned, and the
+    newest are the ones missing. A failed page raises, as one failed read did: the caller's failure path —
+    and so does an answer that is not a list (TypeError): read as "no more posts" it would end the read
+    early and silently, a wrong "no published posts" in the digest."""
+    if type(page_limit) is not int or page_limit <= 0:
+        raise ValueError(f"page_limit must be a positive int, not {page_limit!r}")   # a 0 would read nothing
+    rows: List[Dict[str, Any]] = []
+    seen: set = set()
+    start = cursor = _aware(since)
+    for _page in range(max(int(max_pages), 1)):
+        raw = await svc.list_measurable_posts(since=cursor, limit=page_limit)
+        if not isinstance(raw, list):
+            raise TypeError(f"list_measurable_posts answered {type(raw).__name__}, not a list (since={cursor})")
+        for row in raw:
+            if not isinstance(row, dict):
+                continue
+            key = row.get("id")
+            if isinstance(key, (str, int)) and not isinstance(key, bool) and key != "":
+                if str(key) in seen:
+                    continue
+                seen.add(str(key))
+            rows.append(row)
+        if len(raw) < page_limit:
+            return rows, False
+        page = [r for r in raw if isinstance(r, dict)]
+        newest = max((t for t in (_published(r) for r in page) if t is not None), default=None)
+        if newest is None or newest <= cursor:
+            logger.error("marketing %s: a full page of %d published posts at or after %s cannot move the read on "
+                         "(every row at one instant, or no readable time) — the posts after it are NOT read; "
+                         "%d read", what, page_limit, cursor.isoformat(), len(rows))
+            return rows, True
+        cursor = newest
+    logger.error("marketing %s: %d full pages of %d published posts since %s — the read stops there, so the NEWEST "
+                 "posts after %s are missing (%d read); raise the page count", what, max_pages, page_limit,
+                 start.isoformat(), cursor.isoformat(), len(rows))
+    return rows, True
+
+
 async def _measure_day(counters: Dict[str, int], *, now: datetime) -> Tuple[bool, int, Optional[str]]:
     """The day's work. (complete, posts whose metrics were written — once each, however many writes —
     why it is incomplete)."""
@@ -1569,7 +2137,9 @@ async def _measure_day(counters: Dict[str, int], *, now: datetime) -> Tuple[bool
     svc = get_marketing_run_service()
     run = _Run(svc, now, counters)
     try:
-        rows = await svc.list_measurable_posts(since=now - MEASURE_MAX_AGE, limit=MEASURE_SCAN_LIMIT)
+        # Paged (MD-7): a capped single read lost the NEWEST posts; `list_published_posts` logs a cap itself.
+        rows, capped = await list_published_posts(svc, since=now - MEASURE_MAX_AGE, page_limit=MEASURE_SCAN_LIMIT,
+                                                  max_pages=MEASURE_SCAN_PAGES, what="measure")
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -1577,9 +2147,9 @@ async def _measure_day(counters: Dict[str, int], *, now: datetime) -> Tuple[bool
         logger.error("marketing measure: the published posts could not be listed (%s: %s) — retried on a later "
                      "tick", type(e).__name__, e, exc_info=True)
         return False, 0, f"list_measurable_posts: {type(e).__name__}: {e}"
-    if len(rows) >= MEASURE_SCAN_LIMIT:
-        logger.warning("marketing measure: %d published posts hit the scan limit — the newest may be missed today",
-                       len(rows))
+    if capped:
+        # Never a silent cut: named in the job's note like every stop (the digest's "note:").
+        run.note_stop(f"the published-posts read stopped at {len(rows)} rows — the newest posts were not read")
     groups: Dict[str, List[Dict[str, Any]]] = {_BLUESKY: [], _X: [], _UPLOAD_POST: []}
     for row in rows:
         if not isinstance(row, dict) or not row.get("id") or retract_requested(row):

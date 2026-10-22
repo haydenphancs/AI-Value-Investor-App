@@ -6,7 +6,9 @@ structures the templates compose (`news_templates.compose`):
 
 * `image_spec` — the 1080×1350 post image: one of five generic LAYOUTS (`rows`, `spotlight`,
   `pair`, `bars`, `grid`) plus the common `{layout, version, kicker, footer}`;
-* `opening_card` — the video's first card: `{kicker, logos[1..2], chip?, figure?, headline}`.
+* `opening_card` — the video's first card: `{kicker, logos[1..2], chip?, figure?, headline}`; the
+  chip (a ticker, a stake's basis and date, or — Batch 1, 2026-10-15 — the period its figure is for)
+  is at most OPENING_CHIP_MAX_CHARS long.
 
 Both are CLOSED schemas: an unknown key, a missing key, a string that is not drawable, a list
 outside its bounds, a ratio that is not a finite number in [0, 1], a style outside BAR_STYLES or
@@ -36,11 +38,17 @@ Drop 2b, a pair's investee may carry NO logo key (`right: {name, logo?}`): a pri
 symbol, so no `output.logos` entry — the worker then draws its name as a wordmark plate, and that
 name is already one of the spec's own strings (PAIR_SIDE_KEYS). The investor (`left`) always has one.
 
-Pure: stdlib + `compliance.clean` + the on-screen caps of `schemas.marketing`. No FMP, no I/O.
+Batch 2 fix (CARDS-B2-1, 2026-10-20): which content card a video's DATA CARD (the post image drawn
+in the video) replaces — `data_card_slot`, from the per-series table DATA_CARD_SLOTS — so the
+picture never covers a hedge, caveat, explainer or source card (DATA_CARD_KEEPS).
+
+Pure: stdlib + `compliance.clean` + the on-screen caps of `schemas.marketing` (and, at call time
+only, `news_templates.LEXICON` for the slot table's card titles). No FMP, no I/O.
 """
 
 from __future__ import annotations
 
+import functools
 import logging
 import math
 import re
@@ -70,6 +78,13 @@ MIN_BARS, MAX_BARS = 2, 7
 MIN_FLOW, MAX_FLOW = 2, 4
 MIN_TILES, MAX_TILES = 3, 12
 MAX_OPENING_LOGOS = 2
+#: The opening card's chip (under the logo, LABEL size) is at most this long (Batch 1, 2026-10-15): a
+#: ticker, a stake's "Committed up to · as of Nov 18, 2025" (36, the longest a template writes) or a
+#: period ("Quarter ended Sep 30, 2026", "Reported Oct 14, 2026", "Fiscal 2025"). The worker lays out
+#: whatever it is given (a longer chip wraps and can push the cover to CardOverflow, a skipped day),
+#: so the bound is the SERVER's: the widest chip of each kind is laid out with the worker's own code
+#: in tests/test_marketing_news_layouts.py. Server-side only — the worker never receives a longer one.
+OPENING_CHIP_MAX_CHARS = 36
 #: A logo key is a canonical symbol ("BRK-B"); never drawn, so only bounded here.
 LOGO_KEY_MAX_CHARS = 16
 BAR_STYLES: Tuple[str, ...] = ("fill", "outline")
@@ -419,6 +434,9 @@ def _walk_opening(card: Any, logo_keys: Collection[str]) -> _Walk:
             _fail("duplicate_logo", f"opening_card.logos[{i}]")
         w.logo(key, f"opening_card.logos[{i}]")
     w.opt_text(card, "chip", "opening_card")                # under the logo
+    chip = card.get("chip")
+    if chip is not None and len(chip) > OPENING_CHIP_MAX_CHARS:     # a str: opt_text refused anything else
+        _fail("chip_too_long", "opening_card.chip", f"{len(chip)} chars (max {OPENING_CHIP_MAX_CHARS})")
     w.opt_text(card, "figure", "opening_card")
     w.text(card["headline"], "opening_card.headline")
     return w
@@ -426,7 +444,8 @@ def _walk_opening(card: Any, logo_keys: Collection[str]) -> _Walk:
 
 def validate_opening_card(card: Any, logo_keys: Collection[str]) -> Optional[str]:
     """The first problem of a template video's `opening_card` (`{kicker, logos[1..2], chip?,
-    figure?, headline}`, closed), or None when it is drawable. Pure."""
+    figure?, headline}`, closed; a chip at most OPENING_CHIP_MAX_CHARS long), or None when it is
+    drawable. Pure."""
     try:
         _walk_opening(card, logo_keys)
     except _Walk.Invalid as e:
@@ -445,3 +464,138 @@ def opening_strings(card: Any, logos: Any) -> List[str]:
         logger.error("template_onscreen: opening_card refused, no string is drawable: %s", e)
         return []
     return _resolve(w.out, names)
+
+
+# ── the data card's slot (Batch 2 fix, CARDS-B2-1) ───────────────────────────
+
+#: A template video is one text card per narration line (`cards`), and a card stays on screen for its whole
+#: line — so since news-v12 each card carries its own line's hedges ("Reporting delay", "About 13F filings",
+#: "How the amount is counted"). The data card (Batch 2: the day's post image drawn in the video) used to
+#: replace the LAST text card: exactly those hedges on several series. It now replaces the card named here —
+#: a FACT card whose facts the post picture already shows — and never a card of DATA_CARD_KEEPS.
+#:
+#: Per series, preference groups of `news_templates.LEXICON` card-title ids: the slot is the first card, in
+#: card order, whose title is one of the first group that names any card. A title with fills (a theme
+#: member's name) matches only when every name it fills in is one the picture DRAWS. Variants are handled by
+#: the titles, never a bare index:
+#: * ceo_buys / insider_buys — "The purchase(s)" (card 2: count · shares · amount): the spotlight draws all
+#:   three, a roundup's rows the lead row's amount;
+#: * thirteen_f — the LEAD kind's moves card (card 2; a later kind's card is never first): the picture's
+#:   section under the same heading lists those holdings, largest first;
+#: * money_map — "Revenue mix" (card 2): the picture's bars name every part;
+#: * congress_count — "Counted once" (card 2): the spotlight draws "Each member counted once" and the
+#:   month · as-of line ("Disclosed in", card 1, would put the spotlight right after the opening card it
+#:   nearly repeats — the same kicker, figure and headline);
+#: * earnings — its date card ("Quarter ended" / "Reported", card 1): the picture's subtitle. Since news-v21
+#:   (`news_templates.EARNINGS_REVENUE_IN_POSTS` off: the revenue estimate's basis is unknown) no earnings post
+#:   has a "Revenue" card, so the first group never names one; it stays for the dormant revenue copy, whose
+#:   "Revenue" vs its estimate (card 2) is the picture's Revenue row;
+#: * company_stakes — "As of" (card 1): the pair draws "As of {date}" beside the figure, and the source line
+#:   ("Source", card 4, and the basis card 2 are kept; card 3's listing claim is not on the picture);
+#: * theme_explainer — the first MEMBER card ("{m1} and {m2}", "{m1}") whose members are all tiles of the
+#:   grid (a name too long for a tile is left off it, counted in "+k more"); a card under a generic title
+#:   ("Largest revenue line(s)", its names in the body) is never the slot. No such card: no data card.
+DATA_CARD_SLOTS: Dict[str, Tuple[Tuple[str, ...], ...]] = {
+    "ceo_buys": (("ins.c2.title.one", "ins.c2.title.many"),),
+    "insider_buys": (("ins.c2.title.one", "ins.c2.title.many"),),
+    "thirteen_f": (("f13.head.new", "f13.head.more", "f13.head.fewer", "f13.head.gone"),),
+    "money_map": (("mm.c2.title",),),
+    "congress_count": (("cg.c2.title",),),
+    "earnings": (("er.c2.revenue.title",), ("er.c1.period.title", "er.c1.report.title")),
+    "company_stakes": (("st.c1.title",),),
+    "theme_explainer": (("th.c.pair.title", "th.c.one.title"),),
+}
+_INSIDER_KEEPS: Tuple[str, ...] = (
+    "ins.c3.indirect.all.title", "ins.c3.indirect.some.title", "ins.c3.amended.title", "ins.c3.explainer.title",
+    "ins.c3.late.date.title", "ins.c3.late.window.title", "ins.c4.amounts.title",
+    # "Same week": its "At least {m} more …" is the roundup's lower bound (review round 9), a hedge it says itself
+    "ins.c4.more.title",
+)
+#: The cards a data card NEVER replaces, whatever DATA_CARD_SLOTS says: every hedge, caveat, explainer and
+#: source card a series can compose (checked before any slot title is matched). Static titles, matched
+#: exactly. Pinned, by their words, in tests/test_marketing_template_onscreen.py.
+DATA_CARD_KEEPS: Dict[str, Tuple[str, ...]] = {
+    "ceo_buys": _INSIDER_KEEPS,
+    "insider_buys": _INSIDER_KEEPS,
+    "thirteen_f": ("f13.c4.explainer.title", "f13.c4.listed.title", "f13.c.explainer2.title"),
+    "money_map": ("mm.c3.none.title",),
+    "congress_count": ("cg.c3.title", "cg.c4.title"),
+    "earnings": ("er.c.estimate.title", "er.c3.title", "er.c4.quarterly.title"),
+    "company_stakes": ("st.c2.invested.title", "st.c2.committed_up_to.title", "st.c2.carrying_value.title",
+                       "st.c2.fair_value.title", "st.c3.commitment.title", "st.c3.source.title", "st.c4.title"),
+    "theme_explainer": ("th.c.explainer.title", "th.c.grouping.title"),
+}
+
+#: A lexicon fill: `{name}` (`news_templates._t` formats every entry with `str.format`).
+_FILL_RE = re.compile(r"\{[A-Za-z0-9_]+\}")
+
+
+@functools.lru_cache(maxsize=None)
+def _slot_rules(series: str) -> Optional[Tuple[Tuple[Tuple[Tuple[str, ...], ...], ...], FrozenSet[str]]]:
+    """The series' slot titles (DATA_CARD_SLOTS in preference order, each entry split at its fills into its
+    literal parts) and its kept titles (DATA_CARD_KEEPS), read from the lexicon — or None for a series the
+    table does not name, or an id the lexicon lacks (ERROR: the data card then has no slot — today's text
+    cards)."""
+    groups, keeps = DATA_CARD_SLOTS.get(series), DATA_CARD_KEEPS.get(series)
+    if groups is None or keeps is None:
+        return None
+    # news_templates imports this module, so the lexicon is read here, at call time — never at import
+    from app.services.marketing.news_templates import LEXICON
+    try:
+        parts = tuple(tuple(tuple(_FILL_RE.split(LEXICON[i])) for i in group) for group in groups)
+        kept = frozenset(LEXICON[i] for i in keeps)
+    except KeyError as e:
+        logger.error("template_onscreen: the data-card slot table names the lexicon id %s that does not exist "
+                     "(series %s) — no data-card slot", str(e)[:80], series)
+        return None
+    return parts, kept
+
+
+def _renders(parts: Tuple[str, ...], title: str, drawn: FrozenSet[str]) -> bool:
+    """Is `title` the lexicon entry split into `parts` (its literal text around each fill), with every fill one
+    of the picture's own strings (`drawn`)? An entry with no fill is exact equality. Bounded: a card title has
+    at most two fills, each tried against at most ONSCREEN_TEXT_MAX strings."""
+    def match(i: int, pos: int) -> bool:
+        if not title.startswith(parts[i], pos):
+            return False
+        pos += len(parts[i])
+        if i == len(parts) - 1:
+            return pos == len(title)
+        return any(d and title.startswith(d, pos) and match(i + 1, pos + len(d)) for d in drawn)
+
+    return match(0, 0)
+
+
+def _text_card_title(card: Any) -> Optional[str]:
+    """A content card's title when the card is one the worker draws as a TEXT card (`{title, body}`, both
+    strings, the title not blank), else None — never a slot."""
+    if not isinstance(card, dict):
+        return None
+    title, body = card.get("title"), card.get("body")
+    if not isinstance(title, str) or not isinstance(body, str) or not title.strip():
+        return None
+    return title
+
+
+def data_card_slot(series: Any, cards: Any, picture: Any) -> Optional[int]:
+    """The 0-based index into a template script's `cards` (its content cards — never the code-owned opening
+    card or the disclaimer card) of the ONE card its data card replaces (DATA_CARD_SLOTS), or None: a series
+    the table does not name (a lesson, an unknown id), cards that are not a list, or no card of the series'
+    slot titles. `picture`: the strings the data card draws (`image_strings` of the run's post image —
+    `run_service.data_card_strings`); a title with fills matches only names drawn there. A card of
+    DATA_CARD_KEEPS, or one that is not a well-formed text card, is never the slot. Deterministic, pure (the
+    lexicon is read at call time); never raises."""
+    rules = _slot_rules(series) if isinstance(series, str) else None
+    if rules is None or not isinstance(cards, (list, tuple)):
+        return None
+    groups, kept = rules
+    drawn = (frozenset(s for s in picture if isinstance(s, str))
+             if isinstance(picture, (list, tuple, set, frozenset)) else frozenset())
+    titles = [_text_card_title(c) for c in cards]
+    for group in groups:
+        for i, title in enumerate(titles):
+            if title is None or title in kept:
+                continue
+            if any(_renders(parts, title, drawn) for parts in group):
+                return i
+    return None

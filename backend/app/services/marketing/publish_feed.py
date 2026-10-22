@@ -20,6 +20,12 @@ with a fenced, merging write (`run_service.transition_post`), exactly like the r
 A Telegram failure here is logged and retried next cycle; it NEVER changes a post's status (the
 publisher owns statuses). Plain text only, no `parse_mode`. Bounded per tick, paced with the review
 sweep's spacing, and it shares the review sweep's flood-control back-off.
+
+Quiet Telegram (2026-10-15, plan Batch 1 item 9): "Posted" replies and the "Retracted" fallback message
+go out SILENTLY (`disable_notification`: a notification with no sound) — they report what the owner
+already decided, and a posting day's "Posted" replies (one per platform) used to ring once each. An ALERT
+always keeps its sound: it asks the owner to look (a refusal, a credential, the X cap, a retract to do by
+hand, an unknown outcome's It's live / Not posted). The retract EDIT notifies nobody either way.
 """
 
 from __future__ import annotations
@@ -106,15 +112,17 @@ async def _rows(svc: Any, query: Any, op: str) -> List[Dict[str, Any]]:
 
 
 async def _send(chat_id: int, text: str, pacer: _Pacer, *, markup: Optional[Dict[str, Any]] = None,
-                reply_to: Optional[int] = None) -> Optional[int]:
-    """Send `text` (split at 4096); the keyboard rides on the last chunk. Returns its message id."""
+                reply_to: Optional[int] = None, silent: bool) -> Optional[int]:
+    """Send `text` (split at 4096); the keyboard rides on the last chunk. Returns its message id.
+    `silent` (required, so every call site decides) sends every chunk with `disable_notification` — a
+    report of what the owner already decided; an alert passes False and rings."""
     last: Optional[int] = None
     chunks = split_message(text) or [text[:100] or "…"]
     for i, chunk in enumerate(chunks):
         await pacer.wait()
         envelope = await telegram.send_message(
             chat_id, chunk, reply_markup=markup if i == len(chunks) - 1 else None,
-            reply_to_message_id=reply_to if i == 0 else None)
+            reply_to_message_id=reply_to if i == 0 else None, disable_notification=silent)
         last = _message_id(envelope)
     return last
 
@@ -147,7 +155,7 @@ async def feed_cycle() -> Dict[str, int]:
                                                    and post.get("external_id")) else None
             try:
                 mid = await _send(chat_id, posted_text(post), pacer, markup=markup,
-                                  reply_to=reply_to if _is_int(reply_to) else None)
+                                  reply_to=reply_to if _is_int(reply_to) else None, silent=True)
             except TelegramRateLimitException:
                 raise
             except TelegramException as e:
@@ -182,7 +190,7 @@ async def feed_cycle() -> Dict[str, int]:
             if not done:
                 try:
                     await _send(chat_id, f"{line} · {str(post.get('platform')).upper()} · {_format(post)} · "
-                                         f"run {_run_date(post)}", pacer)
+                                         f"run {_run_date(post)}", pacer, silent=True)
                 except TelegramRateLimitException:
                     raise
                 except TelegramException as e:
@@ -217,8 +225,9 @@ async def feed_cycle() -> Dict[str, int]:
                 markup = unknown_outcome_keyboard(post_id)
             reply_to = meta.get("review_message_id")
             try:
+                # An alert asks the owner to look: never silent.
                 mid = await _send(chat_id, text, pacer, markup=markup,
-                                  reply_to=reply_to if _is_int(reply_to) else None)
+                                  reply_to=reply_to if _is_int(reply_to) else None, silent=False)
             except TelegramRateLimitException:
                 raise
             except TelegramException as e:

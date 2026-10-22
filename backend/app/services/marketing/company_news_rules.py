@@ -25,7 +25,49 @@ What lives here, and why each piece is in the pure layer:
   renderer (`render_person_name`, the intersection of the two designs' rule sets),
   `corroborates`, the Congress block-list (`congress_names`, `is_congress_name`,
   `congress_name_hits`), `filer_name_problem` and the exact Money Map segment-label overrides
-  (`segment_display_name`, `SEGMENT_DISPLAY_OVERRIDES`).
+  (`segment_display_name`, `SEGMENT_DISPLAY_OVERRIDES`, and — the review of 2026-10-16 — the
+  company-scoped `SEGMENT_SYMBOL_OVERRIDES`: McDonald's retired "High-Growth Markets" label is its
+  International Operated Markets, for McDonald's only).
+* **The cover's word cap** (review of 2026-10-16) — `COMPANY_NAME_WORD_MAX_CHARS` /
+  `company_name_word_too_long`: no word of a company's display name is longer than the video cover can
+  draw whole; refused at the profile gate and by every `CompanyRef`, never by the matching helpers.
+* **Stake-source surnames** (review of 2026-10-16) — `STAKE_SOURCE_PERSON_SURNAMES` /
+  `stake_person_surname_hits`: the people a stake's hand-kept source is likeliest to cite, matched on top of
+  the template's person check.
+* **What a stake post can draw** (the round-3 review of 2026-10-20, RR3-STAKES-TEMPLATE-WALL) —
+  `STAKE_SOURCE_DRAW_MAX_CHARS`, `STAKE_TEXT_WORD_MAX_CHARS`, `STAKE_PAIR_NAME_WORD_MAX_CHARS` and `longest_word`:
+  copies of the template's bounds (pinned equal to them by a test), so the adapter refuses at the read a stake
+  text the template cannot draw instead of offering it every day.
+* **Earnings gates** (Batch 1, 2026-10-15) — `earnings_revenue_pair` (one plausible revenue pair or the
+  whole report is refused; since news-v21 a data-quality and quarter check only — no post prints revenue, the
+  feed never saying which basis its revenue estimate is on), `clear_surprise` (an EPS gap of at least
+  `EARNINGS_CLEAR_SURPRISE`, exact at the boundary, on the feed's figures AND on the two-place figures the post
+  prints), `statement_currency` (the reporting currency of the newest statement period), `earnings_period` (the
+  quarter the figures are for, from the quarterly statements — a row that is not quarter-shaped,
+  `EARNINGS_QUARTER_SPAN_DAYS`, places nothing), `earnings_sector_problem` (a Real Estate / REIT issuer, whose calendar EPS can be FFO-based) and
+  `earnings_basis_mixed` (an actual and an estimate on two different bases, judged against the statement's
+  diluted EPS — the review of 2026-10-16, live preview F1: Prologis' $1.60 Core-FFO-scale actual beside a
+  $0.78 GAAP-scale estimate).
+* **The members-elect window** (owner decision 4, 2026-10-15) — `general_election_day`,
+  `members_elect_window` and `members_elect_for_run`: from an even year's Election Day through January 3,
+  Form 4 posts are role-only — judged for every day a run's posts can go out (the run date and the
+  `MEMBERS_ELECT_PUBLISH_DAYS` after it), never the run date alone.
+* **NASDAQ preferred lines** — `nasdaq_preferred_symbol` (a 5-letter symbol ending P/O/N/M, copied from
+  `stock_search_service`): never a common stock, so the "insider", "earnings" and "common" purposes refuse it.
+* **Money Map labels and regions** (Batch 1, 2026-10-15) — `segment_fold_reason` (a company code of 4
+  capitals or fewer outside `SEGMENT_ACRONYMS_OK` and not a region name, or a generic label from
+  `GENERIC_SEGMENT_LABELS`, is folded into the unnamed rest by the adapter: it names no part of the company a
+  reader knows), and the strict region list (`REGION_NAMES`, `region_key`, `is_region_name`; `REGION_ARTICLE`
+  / `takes_region_article` for "the United States", "the U.S.", "the rest of the world" in running text) that
+  alone may make a breakdown read "by region".
+* **Descriptive stake names** (Batch 1, 2026-10-15) — `DESCRIPTIVE_NAME_HEADS` / `takes_name_article`: a
+  stake named by what it is rather than by a company ("Louisiana data center venture") takes "the" in
+  running text, never on a drawn label.
+* **13F filer tables** (Batch 1, 2026-10-15) — `THIRTEEN_F_SUCCESSORS` (a registry CIK whose holdings are
+  now filed under another EDGAR CIK — Pershing Square → 0002026053, named in `THIRTEEN_F_FILERS`) and
+  `THIRTEEN_F_LEAD_FILERS` (read before the club and the rest of the registry: Berkshire); since the review of
+  2026-10-16 `THIRTEEN_F_SUCCESSOR_SINCE` / `successor_transition`: a successor's hand-over quarter (diffed
+  against its own smaller pre-hand-over book) is never compared.
 * **Reason codes** — `UNAVAILABLE_REASONS` (raise), `SKIP_REASONS` (an honest "nothing
   qualified"), `REJECTION_REASONS` (per-candidate counters, `already_posted` included).
 * **The Money Map seed** (owner decision 2, 2026-10-09) — `MONEY_MAP_SEED`, a reviewable list of
@@ -57,6 +99,7 @@ import unicodedata
 import uuid
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from datetime import date, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, Iterable, List, Literal, Mapping, Optional, Sequence, Tuple, Union
@@ -103,6 +146,9 @@ EARNINGS_MIN_MARKET_CAP = 2_000_000_000.0
 #: "listing" = any major-exchange listing (13F moves, Money Map, a stake's investor, theme
 #: members — an ADR included). "common" (Drop 2b: a Congress Count company, a stake's investee)
 #: = a US common stock: "listing" plus no ADR, USD, and no non-common name — but no cap floor.
+#: "insider" (a Form 4 issuer) refuses a non-common name too since Batch 1 (2026-10-15): FMP names
+#: AgomAb's line "… American Depositary Shares" while its `isAdr` flag is False, and a post saying
+#: "disclosed buying … of the company's stock" must be about the company's common stock.
 PROFILE_PURPOSES: Tuple[str, ...] = ("insider", "earnings", "listing", "common")
 
 #: Form 4 filing window: `[run_date - 7, run_date - 1]`.
@@ -122,8 +168,99 @@ THIRTEEN_F_MAX_MOVES = 8
 CONGRESS_MIN_MEMBERS = 2
 
 EPS_MIN_ABS_ESTIMATE = 0.10
-#: revenue actual / estimate must sit inside this band, else the revenue row is omitted.
+#: Owner-delegated decision (2026-10-19, the Batch 1 re-review): a calendar row whose |EPS actual| or |EPS
+#: estimate| is ABOVE this is no result a post can show — a feed error (a unit slip, a junk row), refused WHOLE
+#: (``eps_implausible``: the adapter's row gate, the `EarningsReport` record and the template alike). Berkshire
+#: Hathaway's Class A, the largest per-share figure listed in the US, reports about $7,000-$20,000 a share, far
+#: inside it. Before it, an absurd but self-consistent pair (both figures ~1e20, within the gap gate) composed with
+#: a huge printed figure, and from 1e26 up failed only at compose.
+EPS_MAX_ABS = 1_000_000.0
+#: revenue actual / estimate must sit inside this band, else the WHOLE report is refused
+#: (`revenue_implausible`, Batch 1 2026-10-15). Before, the revenue row was omitted and the EPS kept —
+#: and a calendar row holding one MONTH (Progressive's 10-14 row: $7.16B against a $22.6B quarter
+#: estimate) published its monthly EPS as the quarter's ("$1.08 vs an estimate of $4.35"). The revenue
+#: pair is the only check that the row is the quarter the estimate is for, so no pair, no post.
 REVENUE_RATIO_BAND: Tuple[float, float] = (0.5, 1.5)
+
+# ── earnings: the newsworthiness and period gates (Batch 1, 2026-10-15) ───────
+
+#: A report whose |actual − estimate| / |estimate| is BELOW this is no clear surprise (`surprise_unclear`):
+#: "EPS of $1.01 vs an estimate of $1.00" is not news. Computed on the figures as written (`clear_surprise`),
+#: so a 5.0% gap is kept and a 4.99% gap refused, whatever the float behind them — AND on the figures as the
+#: post PRINTS them (`EPS_PRINT_PLACES` places, half-up, as `news_templates.eps_image` writes them): review
+#: of 2026-10-16 (ER-1) — 0.095 vs 0.10 is a 5.0% gap in the feed and printed "$0.10 vs $0.10", a "clear
+#: surprise" a reader cannot see. A surprise must be clear on both.
+EARNINGS_CLEAR_SURPRISE = 0.05
+#: The places a post prints a per-share figure with ("$4.86", "-$0.05"): `news_templates.eps_image`'s
+#: rounding (half-up on the magnitude), pinned equal by tests/test_marketing_company_news_rules.py.
+EPS_PRINT_PLACES = 2
+#: The Decimal precision the EPS gates compute in (`clear_surprise`, `printed_eps`): every finite float is exact in
+#: it (at most 309 integer digits, plus the printed places and the threshold's), so a gate never rounds and never
+#: raises. The default context's 28 digits cannot quantize a figure of 1e26 or more (`decimal.InvalidOperation`),
+#: and the adapter turns an exception into ``internal_error`` for the WHOLE series: one absurd calendar row would
+#: have cost the earnings day (review of 2026-10-16, a regression of the ER-1 printed-figure gate, caught in its
+#: hardening pass).
+EPS_DECIMAL_PRECISION = 400
+#: The period check (`earnings_period`): a quarterly statement row whose period END falls in
+#: ``[report − EARNINGS_PERIOD_WINDOW_DAYS, report)`` can be the reported quarter.
+EARNINGS_PERIOD_WINDOW_DAYS = 120
+#: ... but only the NEWEST such row is, and only while it ended at most this many days before the report.
+#: A row older than that may be the quarter BEFORE the reported one — the statement has not caught up yet
+#: (a bank reports mid-month and files its 10-Q weeks later) — and a company whose revenue is flat
+#: quarter to quarter would match it within the tolerance, so the post would date the figures to the
+#: wrong quarter. A 10-K is due 60-90 days after a year end and a 10-Q 40-45 days after a quarter end
+#: (results are released by then), while the next fiscal quarter (12 weeks at the shortest) ends 84+ days
+#: after a quarter end and is reported a week or more later — so 90 days keeps the timely reports and
+#: refuses the stale row (`period_unverified`, fail closed; a late filer past 90 days loses its post).
+EARNINGS_PERIOD_MAX_LAG_DAYS = 90
+#: Review of 2026-10-16 (ER-4): the row the period check keeps must be a QUARTER. Its period end must sit this
+#: many days (inclusive) after the company's next-older statement period end — 11 to 17 weeks: a 12-week retail
+#: quarter is 84 days, a 13-week one 91, a calendar quarter 90-92, a 16-week first or fourth quarter (Kroger,
+#: Costco) 112 and a 17-week one in a 53-week year 119 — and the report must come LESS than that same span after
+#: it (else the NEXT quarter of that length had already ended by the report day: the row may be the quarter
+#: before the reported one — a 12-week quarter ending Jun 13, reported Sep 10, 89 days on, is inside
+#: `EARNINGS_PERIOD_MAX_LAG_DAYS` yet the Sep 5 quarter was the one reported). A half-year row (FMP files a
+#: semiannual reporter's halves as its "quarters": ~181 days apart), a single row or an odd span →
+#: ``period_unverified``: the post would say "the quarter that ended …" about six months of figures.
+EARNINGS_QUARTER_SPAN_DAYS: Tuple[int, int] = (77, 119)
+#: The reported quarter's statement revenue must be within this share of the calendar's revenueActual
+#: (Delta's 2026-09-30 statement: $20.186B against the calendar's $20.2B — 0.07%).
+#:
+#: Accepted coverage loss (live preview of 2026-10-16, F4 — never loosen this for everyone): US banks and
+#: brokers are mostly refused here. Their newest statement row is GROSS revenue (interest income included:
+#: Goldman Sachs $37.70B against the calendar's net $18.68B, 2.02x; JPM 1.52x, BAC 1.59x, MS 1.64x, WFC 1.52x,
+#: SCHW 1.14x, IBKR 1.67x, USB 1.41x, PNC 1.43x, RF 1.24x), and the calendar's revenue is NET, so the row does
+#: not match and the report is refused `period_mismatch` — fail closed, no false post, and "the largest company
+#: with a clear surprise" is almost never a bank (Citi passes only while FMP's newest Citi row happens to be on
+#: the net basis). An insurer can miss the 3% too (Progressive: $23.18B vs $22.30B, 3.9%). A net-revenue basis
+#: for banks or a wider tolerance for insurers is an owner decision, not a default.
+EARNINGS_PERIOD_REVENUE_TOLERANCE = 0.03
+#: Contingency, OFF: when True, a report whose newest statement row is the quarter BEFORE (the statement
+#: has not caught up) is kept WITHOUT a period (``period_end`` None, the post says "reported on <date>")
+#: while the calendar's revenue is within `EARNINGS_SCALE_BAND` of that quarter's — a scale check that
+#: still refuses a month or a half-year. Never a period from that row.
+EARNINGS_ALLOW_SCALE_CHECK = False
+EARNINGS_SCALE_BAND: Tuple[float, float] = (0.75, 1.33)
+#: Review of 2026-10-16 (live preview F1): FMP's earnings calendar mixes BASES. For Prologis (2026-10-15) the
+#: actual was $1.60 — a Core-FFO-scale figure — against a GAAP-scale estimate of $0.777, while the quarter's
+#: GAAP diluted EPS was $0.86; the post would have said "Prologis reported EPS of $1.60 vs an analyst estimate
+#: of $0.78" (a 106% gap that exists on neither basis). Two gates, each refusing the WHOLE report:
+#: * a Real Estate issuer — or one whose industry starts "REIT" — is refused before its statement is read
+#:   (`earnings_sector_problem` → ``eps_basis_reit``): a REIT's calendar EPS can be FFO on either side. Its
+#:   sector must be readable: an unknown sector cannot be shown not to be a REIT (fail closed, as the Money Map
+#:   sector gate);
+#: * any other issuer is refused when its calendar actual sits outside `EARNINGS_BASIS_ACTUAL_BAND` × the
+#:   quarter's statement diluted EPS while the estimate sits within ± `EARNINGS_BASIS_ESTIMATE_TOLERANCE` of it
+#:   (`earnings_basis_mixed` → ``eps_basis_mixed``): the estimate is on the statement's scale and the actual is
+#:   not, so the two figures the post sets side by side are on two bases. Narrow on purpose — it is NOT a GAAP
+#:   check of the actual (the plan's "no GAAP EPS check" stands: an adjusted actual far from GAAP beside an
+#:   adjusted estimate is a true pair — BlackRock's $15.93 vs $14.32 with GAAP $10.57 is kept), it never
+#:   refuses when the statement EPS is missing or not positive, and it does not catch the reverse mix (a
+#:   GAAP-scale actual beside an adjusted estimate).
+EARNINGS_EXCLUDED_SECTORS: FrozenSet[str] = frozenset({"Real Estate"})
+EARNINGS_EXCLUDED_INDUSTRY_PREFIX = "REIT"
+EARNINGS_BASIS_ACTUAL_BAND: Tuple[float, float] = (0.67, 1.5)
+EARNINGS_BASIS_ESTIMATE_TOLERANCE = 0.25
 
 MONEY_MAP_SEGMENTS: Tuple[int, int] = (2, 5)
 #: |Σ segments + other + eliminations − revenue| ≤ this share of revenue.
@@ -152,6 +289,21 @@ STAKE_MAX_AGE_DAYS = 3 * 365
 STAKE_MAX_VALUE_USD = 1e12
 
 COMPANY_NAME_CHARS: Tuple[int, int] = (2, 32)
+#: The longest WORD a company's display name may hold (the review of 2026-10-16): every series draws the name
+#: on its video cover's headline, whose column holds exactly this many "W"s (the widest glyph) at the step
+#: before the floor — the room every cover must keep (measured with the worker's own layout code: 20 there,
+#: 21 at the floor; the image header and title hold 23-24). A longer word was a CardOverflow at render — a
+#: skipped DAY, not one lost post: the Form 4 and Money Map templates checked no word length (13F and the 2b
+#: series refuse past `news_templates.NAME_WORD_MAX_CHARS` / `F13_MAX_WORD_CHARS`, the same 20 — pinned equal
+#: by a test). Refused at the profile gate (`company_from_profile` → ``company_name_unusable``) and by every
+#: record (`CompanyRef`), so a stored fact sheet is held to it too. Deliberately NOT part of
+#: `company_name_problem` / `display_company_name`: those also key the 13F share-class tie and the earnings
+#: issuer dedupe, which must keep matching a name however it is drawn. Real names stay below it (the longest word
+#: seen live is about 18 characters: "Biopharmaceuticals") — but for ONE: the re-review of 2026-10-19 (NAME-CAP-1)
+#: screened the 3,686 NYSE / NASDAQ / AMEX companies of $250M or more and found only "Archer-Daniels-Midland"
+#: (22, one hyphenated word), shown as its own brand "ADM" (`DISPLAY_OVERRIDES`). Characters, not drawn width: a
+#: "W"-count is the bound the cover proves.
+COMPANY_NAME_WORD_MAX_CHARS = 20
 PERSON_NAME_MAX = 40
 FILER_NAME_CHARS: Tuple[int, int] = (2, 60)
 
@@ -164,6 +316,10 @@ UNAVAILABLE_REASONS: FrozenSet[str] = frozenset({
     "thirteen_f_unavailable", "congress_feed_unavailable", "congress_window_uncovered",
     "congress_feed_unordered", "revenue_unavailable", "themes_unavailable", "budget_exhausted",
     "internal_error",
+    # review of 2026-10-16 (ER-2): EVERY quarterly-statement read of an earnings call failed (FMP down, rate
+    # limited, an answer no row could be read from) and no report was held — the source is down, which an
+    # honest "nothing qualified" would hide (as `profiles_unavailable` does for the profiles)
+    "earnings_statements_unavailable",
 })
 #: `Candidates.skip_reason`: an honest "nothing qualified". `already_posted` is NOT one: excluded
 #: refs are dropped silently and counted in `rejections`.
@@ -181,7 +337,8 @@ REJECTION_REASONS: FrozenSet[str] = frozenset({
     # ledger and record
     "already_posted", "record_invalid",
     # profile / company (`non_common_listing`, Drop 2b: a warrant / unit / right / preferred /
-    # notes line by its profile name — purposes "earnings" and "common")
+    # notes line by its profile name — purposes "earnings" and "common"; "insider" too since Batch 1:
+    # a depositary-share line FMP does not flag `isAdr`)
     "profile_missing", "not_major_exchange", "etf_or_fund", "adr", "not_usd", "inactive",
     "below_cap_floor", "company_name_unusable", "company_name_banned_word", "non_common_listing",
     # symbol
@@ -207,7 +364,9 @@ REJECTION_REASONS: FrozenSet[str] = frozenset({
     # insider + 13F: a second share class of one issuer (GOOG/GOOGL, BF-A/BF-B) — the issuer,
     # not the symbol, is the unit
     "share_class_overlap",
-    # earnings
+    # earnings. `revenue_dropped` has no producer since Batch 1 (2026-10-15) — a report without a
+    # plausible revenue pair is refused whole (`revenue_implausible`), never kept without its revenue —
+    # and stays here (append-only) so the set still names what older fact sheets carry
     "eps_estimate_too_small", "eps_digit_shift", "eps_gap_implausible", "revenue_dropped",
     # stakes (`investor_unlisted`, Drop 2b: the club company has no US listing a CompanyRef can
     # be made from — Samsung, Saudi Aramco)
@@ -232,7 +391,8 @@ REJECTION_REASONS: FrozenSet[str] = frozenset({
     "asset_uncertain",
     # Money Map (`money_map_mostly_other`, review round 7: "Other" above the largest named
     # segment or 30% of revenue). `non_usd_reporter` is also the earnings refusal (review round
-    # 9): the latest quarterly statement is not reported in USD, or could not be read
+    # 9): the latest quarterly statement is not reported in USD (a statement that could not be read
+    # at all is `statement_unavailable` since the review of 2026-10-16)
     "money_map_degraded", "money_map_excluded", "segments_thin", "sector_excluded",
     "non_usd_reporter", "revenue_mismatch", "net_income_mismatch", "money_map_stale",
     "money_map_inconsistent", "money_map_mostly_other",
@@ -252,6 +412,61 @@ REJECTION_REASONS: FrozenSet[str] = frozenset({
     # has a larger row at ANOTHER issuer this week ("At least 2 CEOs" about one person running two
     # affiliated funds): the week counts people, so one person is one row
     "same_person",
+    # earnings (Batch 1, 2026-10-15), each refusing the WHOLE report: `revenue_implausible` — the
+    # revenue pair is missing, disagrees between the company's rows, is <= 0 or sits outside
+    # `REVENUE_RATIO_BAND`; `surprise_unclear` — |actual − estimate| under `EARNINGS_CLEAR_SURPRISE` of the
+    # estimate; `period_mismatch` — the reported quarter's statement revenue is not the calendar's;
+    # `period_unverified` — no statement row can be the reported quarter (none in the window, a stale or
+    # unreadable one, a period ending on or after the report) — see `earnings_period`
+    "revenue_implausible", "surprise_unclear", "period_mismatch", "period_unverified",
+    # Money Map (Batch 1, 2026-10-15): `money_map_next_year_due` — the fiscal year ended at least
+    # `company_news_adapter.MONEY_MAP_NEXT_YEAR_DUE_DAYS` (364, 52 weeks) before the run, so the NEXT year
+    # has ended and its annual report is due; a content refusal, never an upstream attempt
+    "money_map_next_year_due",
+    # 13F (Batch 1, 2026-10-15): `split_unchecked` — an increased / decreased move of a filing whose
+    # split lookups the shared cap trimmed (`BuiltFiling.split_unchecked`): a held-through split reads
+    # as "more shares", so the filing's more / fewer moves and counts are not shown; newly reported and
+    # exited moves stay (the split check only ever restates a holding on BOTH books, so the cap changes
+    # nothing about them)
+    "split_unchecked",
+    # earnings (review of 2026-10-16), each refusing the WHOLE report: `statement_unavailable` — its
+    # quarterly-statement read FAILED (an outage, a rate limit, an answer with no readable row or currency):
+    # counted apart from `non_usd_reporter` (an answered read in another currency), so a run whose every read
+    # failed is told apart and raises `earnings_statements_unavailable`; `eps_basis_reit` — a Real Estate / REIT
+    # issuer (or one whose sector is unknown), whose calendar EPS can be FFO-based (`earnings_sector_problem`);
+    # `eps_basis_mixed` — the calendar's actual and estimate on two different bases, judged against the
+    # quarter's statement diluted EPS (`earnings_basis_mixed`: Prologis' $1.60 Core-FFO-scale actual beside a
+    # $0.78 GAAP-scale estimate)
+    "statement_unavailable", "eps_basis_reit", "eps_basis_mixed",
+    # 13F (review of 2026-10-16), each an increased / decreased move dropped with both counts left out (newly
+    # reported and exited moves stay): `split_in_window` — the adapter's own re-check of EVERY more / fewer row
+    # found a stock split the build did not restate, an adjustment the classifier could not name, or a lookup
+    # that failed, in the quarter (the shared suspect filter never looks up a split whose per-share price moved
+    # under 30%: a 5:4 split at a flat price, a 3:2 split after a 15% rally — published as "more shares").
+    # `split_unchecked` (above) now also covers a row that could not be re-checked at all (no symbol, more rows
+    # than the check's cap, a club filer's stored change rows unreadable or not the detail's), and
+    # `degraded_build` a club filer whose STORED build is degraded (its row keeps no reason: a failed split
+    # lookup is possible). `successor_transition` — a successor filer's hand-over quarter
+    # (`THIRTEEN_F_SUCCESSOR_SINCE`): its 13F would be diffed against its own smaller pre-hand-over book, so
+    # continuing positions read as "newly reported"; the whole filing is refused before any FMP call
+    "split_in_window", "successor_transition",
+    # earnings (owner-delegated decision, 2026-10-19): `eps_implausible` — the row's |EPS actual| or |EPS
+    # estimate| is above `EPS_MAX_ABS` ($1,000,000 a share): a feed error, never a result; the WHOLE report is
+    # refused
+    "eps_implausible",
+    # stakes (the re-review of 2026-10-19, ST-1-R): `stake_source_unverified` — the stake's source title carries a
+    # capitalised word that is neither a club or catalogue company's nor on `STAKE_SOURCE_WORDS`
+    # (`stake_text_unknown_words`): it may be a person's name, which is never drawn; the stake is refused
+    "stake_source_unverified",
+    # Money Map (the round-2 review of 2026-10-20, RR2-MM-TEMPLATE-WALL), each REMEMBERED for the symbol's fiscal
+    # year by the adapter's refusal memo (B3PD-1), so the walk tries that company after every candidate that can
+    # publish: `money_map_loss_above_revenue` — a net loss, or a kept gross / operating loss, larger than revenue,
+    # refused at the read exactly as the template refuses such a record (`news_templates._money_map_parts`:
+    # ``implausible_figures``; no bar is drawn longer than revenue's); `template_refused` — the record's template
+    # refused it when it was last offered (the script flow reports it back:
+    # `company_news_adapter.remember_template_refusal`), a template-only gate the read cannot apply (a segment
+    # named like a web address, any future gate)
+    "money_map_loss_above_revenue", "template_refused",
 })
 _REASON_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
@@ -341,6 +556,24 @@ def canonical_symbol(raw: Any) -> Optional[str]:
     return raw.strip().upper().replace(".", "-")
 
 
+#: NASDAQ reserves a fifth letter P / O / N / M for an issuer's first to fourth PREFERRED series (WAFDP, HBANP,
+#: AGNCM, ACGLO, SLMBP …). EXACTLY five letters: SNAP, RAMP and every other four-letter P/O/N/M ticker is a
+#: common stock. COPIED from `stock_search_service._NASDAQ_PREFERRED_RE` (that module loads the FMP client; this
+#: one is pure) and pinned equal to it by tests/test_marketing_company_news_rules.py — that service found 186
+#: active symbols of the shape and no common stock among them. Review of 2026-10-16 (live preview F3): FMP's
+#: profile of such a line carries the ISSUER's plain name ("WaFd, Inc.", NASDAQ, no ADR flag) and a market cap
+#: priced on the common's share count, so the name gate (`non_common_name`) let WAFDP through as "WaFd" — and
+#: its calendar row can carry a different EPS from the common's (WAFDP 0.76 vs WAFD 0.85 against one 0.843
+#: estimate: a 9.8% "miss" that was never the company's).
+NASDAQ_PREFERRED_SYMBOL_RE = re.compile(r"^[A-Z]{4}[PONM]$")
+
+
+def nasdaq_preferred_symbol(symbol: Any) -> bool:
+    """Is ``symbol`` (canonical) a NASDAQ preferred line by its shape (`NASDAQ_PREFERRED_SYMBOL_RE`)? A
+    non-string is False (the symbol gate refuses it with its own reason)."""
+    return isinstance(symbol, str) and NASDAQ_PREFERRED_SYMBOL_RE.match(symbol) is not None
+
+
 def cik10(raw: Any) -> Optional[str]:
     """A CIK as the 10-digit, zero-padded string the ledger key uses, or None. Accepts an int or
     a digit string (leading zeros allowed); never a bool, a float or an all-zero CIK."""
@@ -406,6 +639,62 @@ def insider_window(run_date: date) -> Tuple[date, date]:
     if not isinstance(run_date, date) or isinstance(run_date, datetime):
         raise ValueError("run_date must be a date")
     return run_date - timedelta(days=INSIDER_WINDOW_DAYS), run_date - timedelta(days=1)
+
+
+# ── the members-elect window (owner decision 4, 2026-10-15) ───────────────────
+#
+# From a general election until the new Congress is sworn in (January 3), the people just elected are
+# MEMBERS-ELECT: not on the roster (it holds the SITTING Congress, `roster_fresh_for`), so the Congress
+# block-list cannot know them, and a Form 4 filed by one would be named. Inside the window every Form 4
+# row is ROLE-ONLY — the adapter builds no person (`_insider_row`) and the template names no one
+# (`_insider_parts`, re-checked by `validate_package`) — and the posts keep running. Read from the RUN
+# date, never the wall clock, so a stored output and its re-check at create_posts (`revalidate`, the same
+# run date) always agree — through `members_elect_for_run`, which also covers the days after the run date
+# that its posts can still go out on (review of 2026-10-16).
+
+
+def general_election_day(year: int) -> date:
+    """The US general election day of ``year``: the Tuesday after the first Monday of November
+    (2 U.S.C. §7) — always between November 2 and November 8."""
+    if not isinstance(year, int) or isinstance(year, bool):
+        raise ValueError(f"year must be an int, got {year!r}")
+    nov1 = date(year, 11, 1)
+    first_monday = nov1 + timedelta(days=(7 - nov1.weekday()) % 7)
+    return first_monday + timedelta(days=1)
+
+
+def members_elect_window(day: date) -> bool:
+    """True from Election Day of an EVEN year (the federal general election) through January 3 of the
+    next year, both inclusive; never in an odd year's November or December (no federal general
+    election). January 1-3 belong to the window of the year before, when that year was even."""
+    if not isinstance(day, date) or isinstance(day, datetime):
+        raise ValueError("day must be a date")
+    if day.month == 1 and day.day <= 3:
+        return (day.year - 1) % 2 == 0
+    return day.year % 2 == 0 and day >= general_election_day(day.year)
+
+
+#: Review of 2026-10-16 (ME-1): a run's posts do not all go out on the run date. The publisher sends an approved
+#: post on its run day or the NEXT ET day (later it expires), and an Upload-Post job it never acknowledged may be
+#: resent up to 20 hours after its first send — so a post composed on Monday Nov 2, 2026 (outside the window: a
+#: NAMED Form 4 post) could be approved on Tuesday night, after races are called, or resent on Wednesday Nov 4,
+#: and name a filer who has just become a member-elect. The window is therefore judged over every day a run's
+#: posts can go out: the run date and the this-many days after it.
+MEMBERS_ELECT_PUBLISH_DAYS = 2
+
+
+def members_elect_for_run(run_date: date) -> bool:
+    """THE members-elect check of a run (every caller: the adapter's `_insider_row`, the templates'
+    `_insider_parts`, `validate_package` and — through them — `revalidate`): is ANY day its posts can go out
+    on — ``run_date`` through ``run_date + MEMBERS_ELECT_PUBLISH_DAYS`` — inside `members_elect_window`? The
+    window is one interval (Election Day → January 3), so its value on the two ends decides every day between.
+    A pure function of the run date (and `members_elect_window`, read at call time), so compose, the adapter
+    and every re-check on the same run date agree. 2026: Nov 1 and Nov 2 are role-only runs (their posts can go
+    out on Election Day), Oct 31 is not; Jan 3, 2027 is the last role-only run."""
+    if not isinstance(run_date, date) or isinstance(run_date, datetime):
+        raise ValueError("run_date must be a date")
+    return members_elect_window(run_date) or members_elect_window(
+        run_date + timedelta(days=MEMBERS_ELECT_PUBLISH_DAYS))
 
 
 # ── company names ─────────────────────────────────────────────────────────────
@@ -483,6 +772,15 @@ DISPLAY_OVERRIDES: Dict[str, str] = {
     "c3.ai": "C3 AI",
     "bigbear.ai holdings": "BigBear AI",
     "1-800-flowers.com": "1-800-Flowers",
+    # A vendor misspelling, shown as the company spells itself (Batch 1, 2026-10-15): FMP's profile for NAUT
+    # reads "Nautilus Biotechnolgy, Inc." (read live 2026-10-14 and again 2026-10-15), while the SEC's own
+    # issuer name is "NAUTILUS BIOTECHNOLOGY INC". Nothing catches a typo in a name, so each one is a row.
+    "nautilus biotechnolgy": "Nautilus Biotechnology",
+    # The re-review of 2026-10-19 (NAME-CAP-1): "Archer-Daniels-Midland" is ONE 22-character word, past
+    # `COMPANY_NAME_WORD_MAX_CHARS` — the only one among 3,686 NYSE / NASDAQ / AMEX companies of $250M or more (a
+    # read-only screener scan, 2026-10-19) — so ADM was refused for every series. The company's own brand since
+    # 2019 is "ADM".
+    "archer-daniels-midland company": "ADM",
 }
 
 #: Money Map segment labels as FMP's revenue segmentation spells them → the company's own name
@@ -497,16 +795,199 @@ SEGMENT_DISPLAY_OVERRIDES: Dict[str, str] = {
     "Linked In": "LinkedIn",              # the same spacing defect without the suffix
     "XBOX": "Xbox",
     "Service": "Services",                # Apple reports "Services"
+    # Batch 1 (2026-10-15), FMP's product segmentation read live that day: McDonald's fiscal 2025 labels
+    # its home market in capitals; PepsiCo's "(Segment)" is XBRL's disambiguation suffix, not the
+    # segment's name (its parentheses also made the label undrawable, so its revenue fell into the rest).
+    "UNITED STATES": "United States",
+    "Latin America (Segment)": "Latin America",
+    # The review of 2026-10-16 (live preview F5): Walmart's labels with their punctuation stripped by the feed —
+    # "Walmart U S" for the company's "Walmart U.S." and "Sams Club" for its "Sam's Club" (a misspelled brand).
+    "Walmart U S": "Walmart U.S.",
+    "Sams Club": "Sam's Club",
+}
+
+#: Money Map segment labels that are wrong for ONE company → that company's own segment name, keyed by
+#: (canonical symbol, the label exactly as the feed spells it). The review of 2026-10-16 (MM-1, confirmed on
+#: EDGAR): FMP's fiscal-2025 breakdown for McDonald's labels $13.63B "High-Growth Markets" — a segment of its
+#: 2015-2018 structure — beside the current "International Developmental Licensed Markets and Corporate"; since
+#: 2019 McDonald's reports U.S., International Operated Markets and IDL & Corporate (the FY2025 10-K: 0 hits for
+#: "High-Growth Markets", the three values add up to revenue), so the $13.63B is International Operated Markets
+#: under a retired name. NEVER in the label-only `SEGMENT_DISPLAY_OVERRIDES`: another company may really report a
+#: segment of that name. Consulted first by `segment_display_name(…, symbol=…)` (the adapter's `_segments` passes
+#: the breakdown's symbol, so a theme's segment fact reads it too). Each value must itself be a drawable `Segment`
+#: name that does not fold (a test). Add a row only after checking the company's latest 10-K segment note.
+SEGMENT_SYMBOL_OVERRIDES: Dict[Tuple[str, str], str] = {
+    ("MCD", "High-Growth Markets"): "International Operated Markets",
+    # The re-review of 2026-10-19 (B1R-MM-PEP-STALE-LABEL, checked on EDGAR): PepsiCo realigned its segments for
+    # fiscal 2025 into PFNA, PBNA, International Beverages Franchise, Europe, Middle East and Africa (EMEA), LatAm
+    # Foods and Asia Pacific Foods — India moved from the former AMESA into Asia Pacific Foods. FMP's fiscal-2025
+    # breakdown still labels the $18.02B "Africa, Middle East and South Asia" (the pre-2025 AMESA, $6.22B in
+    # fiscal 2024 beside a $13.87B Europe line that is gone in 2025): the FY2025 10-K (0000077476-26-000007) has 0
+    # hits for that name or "AMESA" and 1 for "Europe, Middle East and Africa", and the Q4 2025 release gives EMEA
+    # net revenue of $18,025M — FMP's figure. Fiscal 2024 and earlier, when the label was right, can never reach a
+    # Money Map (`money_map_next_year_due`). The 10-K also writes "International Beverages Franchise" (FMP:
+    # "International Beverage Franchise").
+    ("PEP", "Africa, Middle East and South Asia"): "Europe, Middle East and Africa",
+    ("PEP", "International Beverage Franchise"): "International Beverages Franchise",
 }
 
 
-def segment_display_name(raw: Any) -> Any:
-    """The display name of a Money Map segment label: its `SEGMENT_DISPLAY_OVERRIDES` entry on an
-    exact match (whitespace stripped), else the label unchanged (a non-string as is — the
-    caller's own gates refuse it)."""
+def segment_display_name(raw: Any, *, symbol: Any = None) -> Any:
+    """The display name of a Money Map segment label: the company's own `SEGMENT_SYMBOL_OVERRIDES` entry when
+    ``symbol`` is given (exact match on the canonical symbol and the stripped label), else its
+    `SEGMENT_DISPLAY_OVERRIDES` entry on an exact match (whitespace stripped), else the label unchanged (a
+    non-string as is — the caller's own gates refuse it)."""
     if not isinstance(raw, str):
         return raw
-    return SEGMENT_DISPLAY_OVERRIDES.get(raw.strip(), raw)
+    label = raw.strip()
+    sym = canonical_symbol(symbol) if symbol is not None else None
+    if sym is not None:
+        fixed = SEGMENT_SYMBOL_OVERRIDES.get((sym, label))
+        if fixed is not None:
+            return fixed
+    return SEGMENT_DISPLAY_OVERRIDES.get(label, raw)
+
+
+# ── Money Map labels that name nothing, and the regions (Batch 1, 2026-10-15) ─
+
+#: Company codes a reader knows as the line's own public name — kept although they match the code shape
+#: below. AWS is how Amazon itself names Amazon Web Services (FMP spelled it out in the 2026-10-09 preview;
+#: a feed or year that writes "AWS" must not fold Amazon's best-known line into the unnamed rest); the others
+#: are region names (`REGION_NAMES`): EMEA and APAC, and (the review of 2026-10-16, MM-2) US, USA, UK, EU and
+#: UAE — a breakdown of "Europe, Asia Pacific, US" folded the US revenue into the rest while it still read "by
+#: region". Every acronym-shaped `REGION_NAMES` key is listed here (a test), and `segment_fold_reason` never
+#: folds a region name anyway. Add a code only when the company uses it as the line's public name, never to
+#: rescue a map.
+SEGMENT_ACRONYMS_OK: FrozenSet[str] = frozenset({"AWS", "EMEA", "APAC", "US", "USA", "UK", "EU", "UAE"})
+#: Labels that name no part of the company (exact after case and spacing, `segment_fold_reason`):
+#: "Products made up 66% of revenue" or "Net sales, $40 billion" tells the reader nothing.
+GENERIC_SEGMENT_LABELS: FrozenSet[str] = frozenset({
+    "product", "products", "segment", "segments", "revenue", "revenues", "sales", "net sales", "total",
+})
+#: A company's internal code: the WHOLE label is 1-4 capital letters ("QCT", "QTL", "NXE", "CMBU";
+#: PepsiCo's "PBNA", "PFNA", "IBF"). Checked on the DISPLAY name, so "XBOX" is "Xbox" first and stays.
+_SEGMENT_CODE_RE = re.compile(r"[A-Z]{1,4}")
+
+
+def segment_fold_reason(name: Any) -> Optional[str]:
+    """Why a Money Map (or theme) segment's DISPLAY name — after `segment_display_name` — is folded into
+    the unnamed rest (the "Everything else" bar), or None when it may be drawn and narrated:
+
+    * ``"code"`` — the whole label is 1-4 capital letters, not on `SEGMENT_ACRONYMS_OK` and not a region
+      name (`is_region_name`: "US", "UK"): an internal code ("QCT: 85% of revenue" tells no one anything);
+    * ``"generic"`` — the label, case- and space-folded, is on `GENERIC_SEGMENT_LABELS`.
+
+    Folding never refuses on its own: the rest is still revenue, and the adapter's own gates
+    (`segments_thin`, `money_map_mostly_other`, a theme fact's "rest above the top") decide whether what
+    is left explains the company. A non-string is None here — the caller's own gates refuse it. Pure."""
+    if not isinstance(name, str):
+        return None
+    label = name.strip()
+    if _SEGMENT_CODE_RE.fullmatch(label) and label not in SEGMENT_ACRONYMS_OK and not is_region_name(label):
+        return "code"
+    if " ".join(label.casefold().split()) in GENERIC_SEGMENT_LABELS:
+        return "generic"
+    return None
+
+
+#: The ONLY names a Money Map calls regions (`region_key` forms). A breakdown reads "How fiscal 2025 revenue
+#: broke down BY REGION" only when EVERY named segment is one of these — exact, never a word inside a label:
+#: McDonald's "International Operated Markets" groups the markets it runs itself, not one place, and
+#: PepsiCo's "Frito-Lay North America" is a business. Anything else reads the neutral "How fiscal 2025
+#: revenue broke down", which is true of any breakdown (FMP's product segmentation is product lines for some
+#: companies, regions for others: before Batch 1 every map said "by product or business line", false for
+#: McDonald's and Costco). The acronyms and the "U.S." forms (the review of 2026-10-16, MM-2 / MM-3) read as
+#: `region_key` writes them: "U.S." is "u s", "U.S.A." is "u s a".
+REGION_NAMES: FrozenSet[str] = frozenset({
+    # countries
+    "united states", "canada", "mexico", "brazil", "united kingdom", "germany", "france", "japan", "china",
+    "greater china", "india", "australia", "south korea", "taiwan",
+    "us", "u s", "usa", "u s a", "uk", "u k", "uae",
+    "united states and canada", "u s and canada", "us and canada",
+    # continents and groups of them
+    "north america", "south america", "latin america", "americas", "europe", "emea", "eu",
+    "europe middle east and africa", "middle east and africa", "africa", "asia", "asia pacific", "apac",
+    "rest of asia pacific",
+    # the remainder outside the home market
+    "international", "other international", "rest of world", "rest of the world",
+})
+#: Region names that take "the" in running text — "the United States made up 73% of revenue", "the Americas,
+#: $40 billion", "The U.S. made up …" (`news_templates`, sentences only: a bar label, a card and the alt text
+#: keep the name as drawn). Every key is also a `REGION_NAMES` key (a test). The review of 2026-10-16 (MM-3):
+#: since Batch 1 the part's name OPENS narration line 2 ("{s} made up {sh} of revenue", no "Its {s} business"
+#: before it), so a name that needs "the" and lacks it here reads "U.S. made up 50% of revenue" — narrated and
+#: burned into the captions. Every country or group named with "the" in English is listed (the U.S. and U.K.
+#: forms, the acronyms, "the United States and Canada", "the rest of the world" / "the rest of Asia Pacific");
+#: the names left out read whole without it ("Canada", "Europe", "Asia Pacific", "International", "Other
+#: International" — a label that names a part, like "Services"), and so does every product or business line.
+REGION_ARTICLE: FrozenSet[str] = frozenset({
+    "united states", "united kingdom", "americas", "middle east and africa",
+    "us", "u s", "usa", "u s a", "uk", "u k", "uae", "eu",
+    "united states and canada", "u s and canada", "us and canada",
+    "rest of world", "rest of the world", "rest of asia pacific",
+})
+#: Punctuation `region_key` reads as a space ("Asia-Pacific", "Europe, Middle East & Africa").
+_REGION_PUNCT_RE = re.compile(r"[.,;:()/'’\-–—]")
+
+
+def region_key(name: Any) -> str:
+    """A segment name as `REGION_NAMES` spells it: NFKC, case-folded, "&" read as "and", punctuation read
+    as a space, spaces collapsed ("Asia-Pacific" → "asia pacific"). "" for a non-string. Pure."""
+    if not isinstance(name, str):
+        return ""
+    s = unicodedata.normalize("NFKC", name).casefold().replace("&", " and ")
+    return " ".join(_REGION_PUNCT_RE.sub(" ", s).split())
+
+
+def is_region_name(name: Any) -> bool:
+    """True only for a name on `REGION_NAMES` (exact, after `region_key`)."""
+    return region_key(name) in REGION_NAMES
+
+
+def takes_region_article(name: Any) -> bool:
+    """True for a region name that takes "the" in running text (`REGION_ARTICLE`)."""
+    return region_key(name) in REGION_ARTICLE
+
+
+# ── descriptive investee names (Batch 1, 2026-10-15) ──────────────────────────
+
+#: The head nouns of a DESCRIPTIVE stake name — one that describes what is held instead of naming a company
+#: (the catalogue's "Louisiana data center venture", Meta's 20% membership interest). In running text such a
+#: name takes "the" ("As of that date, the Louisiana data center venture was not listed …", news_templates'
+#: `st.ee.the`); before Batch 1 the post read "Louisiana data center venture was not listed …", narrated and so
+#: burned into the video's captions. Only the LAST word decides, only in lower case, and only one of these
+#: nouns: a company's own name ends in a capital ("Iroquois Gas Transmission System", "Mitsui & Co.") or is
+#: styled in lower case on purpose ("SK hynix", "bluebird bio") — neither takes an article, and "the SK hynix"
+#: would be a new mistake. A descriptive name with a head noun missing here keeps reading without its article
+#: (the pre-Batch-1 wording, never a wrong word): add the noun when the catalogue gains such a name.
+DESCRIPTIVE_NAME_HEADS: FrozenSet[str] = frozenset({
+    "venture", "ventures", "partnership", "partnerships", "consortium", "alliance", "project", "projects",
+    "campus", "facility", "facilities", "plant", "plants", "factory", "factories", "site", "sites", "center",
+    "centers", "centre", "centres", "complex", "pipeline", "pipelines", "terminal", "terminals", "refinery",
+    "refineries", "mine", "mines", "farm", "farms", "fund", "funds", "portfolio", "investment", "investments",
+    "business", "businesses", "unit", "units", "subsidiary", "subsidiaries", "affiliate", "affiliates",
+    "operation", "operations", "company", "companies", "entity", "entities", "vehicle", "vehicles",
+})
+#: One word of a stake name, for the article rule: lower-case ASCII letters only (a hyphenated, numbered or
+#: capitalised word is never a head noun here).
+_HEAD_NOUN_RE = re.compile(r"[a-z]{2,20}")
+#: `takes_name_article` reads no longer name (a stake's investee name is at most 40 characters where it is
+#: drawn; anything longer is refused before it is said, and the bound keeps the split small).
+STAKE_NAME_ARTICLE_MAX_CHARS = 200
+
+
+def takes_name_article(name: Any) -> bool:
+    """True when a stake's investee name is DESCRIPTIVE (`DESCRIPTIVE_NAME_HEADS`): two words or more, its last
+    word one of those nouns in lower case, and not already opened by "the". Running text then says "the"
+    before it (news_templates `st.ee.the` / `st.ee.the.cap`); a drawn label (a plate, a card) never does. A
+    non-string or blank name is False. Pure, linear."""
+    if not isinstance(name, str) or len(name) > STAKE_NAME_ARTICLE_MAX_CHARS:
+        return False
+    words = name.split()
+    if len(words) < 2 or words[0].casefold() == "the":
+        return False
+    last = words[-1]
+    return bool(_HEAD_NOUN_RE.fullmatch(last)) and last in DESCRIPTIVE_NAME_HEADS
 
 
 def _strip_legal(name: str) -> str:
@@ -584,15 +1065,27 @@ def display_company_name(raw: Any) -> Optional[str]:
     return _display_and_problem(raw)[0]
 
 
+def company_name_word_too_long(name: Any) -> bool:
+    """Does a display name hold a word longer than `COMPANY_NAME_WORD_MAX_CHARS` (one the video cover cannot
+    draw whole)? A word is a run between spaces, so "Sherwin-Williams" is one word of 16. A non-string is
+    False here — the name gates refuse it with their own reason. Linear."""
+    return isinstance(name, str) and any(len(w) > COMPANY_NAME_WORD_MAX_CHARS for w in name.split())
+
+
 def _flag_set(v: Any) -> bool:
     """A profile flag counts as SET unless it is False or absent (fail closed on junk)."""
     return v is not None and v is not False
 
 
 #: A profile name that marks a line other than common stock (Drop 2b: earnings and the "common"
-#: purpose — "no warrants / units / rights / preferred"). The symbol grammar catches most such
-#: lines first (-WT, -U, -PB, a 5-letter W/U/R suffix); this is the name-side backstop. Accepted
-#: over-block: an MLP's "Common Units" (not a common stock either).
+#: purpose — "no warrants / units / rights / preferred"; Batch 1: the "insider" purpose too). The
+#: symbol grammar catches most such lines first (-WT, -U, -PB, a 5-letter W/U/R suffix; a NASDAQ
+#: preferred's 5-letter P/O/N/M shape at the profile gate, `nasdaq_preferred_symbol` — its profile name
+#: is the issuer's own, so this list never sees it); this is the
+#: name-side backstop — and the only gate for a depositary line whose `isAdr` flag is False (AgomAb,
+#: 2026-10-12). Accepted over-blocks: an MLP's "Common Units" (not a common stock either), and a
+#: company whose own name holds one of these words as a word ("Preferred Bank") — one company's posts
+#: lost, never a post about the wrong security.
 _NON_COMMON_NAME_RE = re.compile(
     r"\b(?:warrants?|units?|rights?|preferred|pfd|depositary|notes?|debentures?)\b", re.IGNORECASE)
 
@@ -612,11 +1105,15 @@ def company_from_profile(profile: Any, symbol: Any, *, purpose: str) -> Union["C
     Every purpose: `symbol_grammar` / `warrant_unit_right` (the requested symbol),
     `profile_missing` (no dict, or its canonical symbol differs), `not_major_exchange`,
     `etf_or_fund`, `inactive`, then the name (`company_name_unusable` /
-    `company_name_banned_word`). Purposes "insider", "earnings" and "common" also refuse `adr`
-    and `not_usd`; "insider" and "earnings" also `below_cap_floor` ($250M insider,
-    `EARNINGS_MIN_MARKET_CAP` earnings; a missing or non-finite cap is below it); "earnings" and
-    "common" also `non_common_listing` (`non_common_name`). The profile's cap is read here and
-    never leaves."""
+    `company_name_banned_word`). Purposes "insider", "earnings" and "common" also refuse `adr`,
+    `not_usd` and `non_common_listing` (`non_common_name`; "insider" since Batch 1, 2026-10-15: a
+    depositary-share line FMP does not flag `isAdr`; and, since the review of 2026-10-16, a NASDAQ
+    preferred symbol by its shape, `nasdaq_preferred_symbol` — FMP profiles WAFDP as plain "WaFd, Inc.");
+    "insider" and "earnings" also
+    `below_cap_floor` ($250M insider, `EARNINGS_MIN_MARKET_CAP` earnings; a missing or non-finite
+    cap is below it). Only "listing" keeps a non-common name (a 13F holding, a Money Map, a stake's
+    investor or a theme member is named by its listing, an ADR included). The profile's cap is read
+    here and never leaves."""
     if purpose not in PROFILE_PURPOSES:
         raise ValueError(f"unknown profile purpose {purpose!r}")
     want = canonical_symbol(symbol)
@@ -643,11 +1140,18 @@ def company_from_profile(profile: Any, symbol: Any, *, purpose: str) -> Union["C
         cap = profile.get("marketCap")
         if not _is_num(cap) or cap < floor:
             return "below_cap_floor"
-    if purpose in ("earnings", "common") and non_common_name(profile.get("companyName")):
+    if purpose in ("insider", "earnings", "common") and (
+            non_common_name(profile.get("companyName")) or nasdaq_preferred_symbol(want)):
         return "non_common_listing"
     name, problem = _display_and_problem(profile.get("companyName"))
     if problem:
         return problem
+    if company_name_word_too_long(name):
+        # a word the cover cannot draw whole (`COMPANY_NAME_WORD_MAX_CHARS`): one candidate refused here,
+        # never a CardOverflow that skips the whole day at render
+        logger.info("company news: %s display name has a word longer than %d characters — refused "
+                    "(company_name_unusable)", want, COMPANY_NAME_WORD_MAX_CHARS)
+        return "company_name_unusable"
     return CompanyRef(symbol=want, name=name)
 
 
@@ -727,7 +1231,57 @@ THIRTEEN_F_FILERS: Mapping[str, Optional[str]] = {
     "0000898382": None,                                   # COOPERMAN LEON G (a person)
     "0000850529": "Fisher Asset Management",
     "0001138995": "Glenview Capital Management",
+    # Batch 1 (2026-10-15): a SUCCESSOR filer (`THIRTEEN_F_SUCCESSORS`), not a registry CIK —
+    # EDGAR "PERSHING SQUARE INC." files Pershing Square's holdings since the old CIK filed only a
+    # 13F-NT for 2026-Q2 (a notice that another manager reports them).
+    "0002026053": "Pershing Square",
 }
+
+#: Batch 1 (2026-10-15): a registry 13F CIK whose holdings are now filed under ANOTHER EDGAR CIK →
+#: that successor. The marketing adapter reads the successor's filing dates, builds and diffs its
+#: 13F, keys the ledger on it (a post under the old key also counts as posted) and names it from
+#: `THIRTEEN_F_FILERS[successor]`; the curated ORDER of `data/whale_registry.json` still comes from
+#: the old CIK. One hop, never a chain (tested). The whales table, the registry file and the in-app
+#: whale profile keep the old CIK — the profile goes stale until the whale feature follows (an
+#: owner task, outside the marketing engine).
+THIRTEEN_F_SUCCESSORS: Mapping[str, str] = {
+    "0001336528": "0002026053",                           # Pershing Square Capital → PERSHING SQUARE INC.
+}
+
+#: The review of 2026-10-16 (live preview F2): the FIRST quarter whose full book each successor filed, keyed
+#: like `THIRTEEN_F_SUCCESSORS` (the registry CIK). A successor's 13F is diffed against the successor's OWN
+#: previous filing, and in the hand-over quarter that filing is a different, smaller book: PERSHING SQUARE
+#: INC. filed only Howard Hughes (9,000,000 shares) for 2026-Q1 while the old CIK filed the eleven positions,
+#: so the 2026-Q2 diff read Uber, Brookfield, Microsoft … as "13 newly reported holdings" and the consolidated
+#: 27,852,064 Howard Hughes shares (18,852,064 + 9,000,000) as "more shares". A comparison whose previous
+#: quarter is earlier than this one is refused (`successor_transition`, the whole filing) — never diffed
+#: against the predecessor's book instead: two filers' books in one diff would break the share, option and
+#: class checks, which read the previous book from the filer itself. The hand-over quarter is never
+#: compared; the next one compares two full books. A successor missing here is refused for every quarter
+#: (fail closed). Pershing's first full book: 2026-Q2 (14 positions; FMP extract read 2026-10-16).
+THIRTEEN_F_SUCCESSOR_SINCE: Mapping[str, str] = {
+    "0001336528": "2026-Q2",
+}
+
+
+def successor_transition(registry_cik: Any, period: Any) -> bool:
+    """Would ``period``'s 13F, read from the successor of ``registry_cik`` (`THIRTEEN_F_SUCCESSORS`), be
+    diffed against a quarter before the successor's first full book (`THIRTEEN_F_SUCCESSOR_SINCE`)? False
+    for a registry CIK with no successor (it is its own filer). True — fail closed — for a successor with
+    no since entry or an unreadable one, and for a malformed ``period``."""
+    if registry_cik not in THIRTEEN_F_SUCCESSORS:
+        return False
+    since = THIRTEEN_F_SUCCESSOR_SINCE.get(registry_cik)
+    try:
+        return previous_period_end_of(period) < period_end_of(since)
+    except (TypeError, ValueError):
+        return True
+
+#: Batch 1 (2026-10-15, owner default "Berkshire first in 13F season"): the registry filers read
+#: BEFORE the Trillion Club filers and the rest of the registry, in this order (matched on the
+#: registry CIK or its successor). They share the call's one live-build budget
+#: (`company_news_adapter.MAX_LIVE_13F_BUILDS`) with the rest — never a budget of their own.
+THIRTEEN_F_LEAD_FILERS: Tuple[str, ...] = ("0001067983",)  # Berkshire Hathaway
 
 
 def filer_looks_like_person(name: Any) -> bool:
@@ -753,6 +1307,22 @@ _TEXT_URL_RE = re.compile(r"(?:https?:|www\.|://|@)", re.IGNORECASE)
 STAKE_SOURCE_TITLE_MAX = 120
 STAKE_BACKGROUND_MAX = 90
 STAKE_LOCAL_LISTING_MAX = 40
+#: The round-3 review of 2026-10-20 (RR3-STAKES-TEMPLATE-WALL): what the company_stakes template can DRAW, copied
+#: from `news_templates` (which the adapter may not import: tests/test_marketing_import_boundary.py) and pinned EQUAL
+#: to its twin there by a test, so the adapter refuses at the read every stake text the template must refuse. The
+#: source title is drawn whole on the `pair` image, card 4 and every caption: at most `STAKE_SOURCE_DRAW_MAX_CHARS`
+#: characters (`news_templates.STAKE_SOURCE_MAX_CHARS`) with no word longer than `STAKE_TEXT_WORD_MAX_CHARS`
+#: (`news_templates.NAME_WORD_MAX_CHARS`) — the junk bound above (`STAKE_SOURCE_TITLE_MAX`) is longer, and the
+#: template refused what lay between. The same word cap holds a local listing (card 3) to at most
+#: `COMPANY_NAME_CHARS[1]` characters, the bound the template reads from this module. An investee's (and an
+#: investor's) name sits under its plate in HALF the column: no word longer than `STAKE_PAIR_NAME_WORD_MAX_CHARS`
+#: (`news_templates.PAIR_NAME_WORD_MAX_CHARS`; a word of exactly that length is drawn). A word is a run between
+#: spaces, as the template counts it ("Sherwin-Williams" is one word of 16). Before, the read passed such stakes,
+#: the template refused each one every day, and five of them at the head of the newest-first walk walled the
+#: series (the review's probes: a shared 93-character title; investee names with a 16-18 character word).
+STAKE_SOURCE_DRAW_MAX_CHARS = 80
+STAKE_TEXT_WORD_MAX_CHARS = 20
+STAKE_PAIR_NAME_WORD_MAX_CHARS = 15
 
 
 def free_text_ok(text: Any, *, lo: int = 1, hi: int) -> bool:
@@ -772,6 +1342,136 @@ def free_text_ok(text: Any, *, lo: int = 1, hi: int) -> bool:
         and not _copy_rules.contains_forecast(text)
         and not _NAME_EXTRA_BANNED_RE.search(text)
     )
+
+
+def longest_word(text: Any) -> int:
+    """The length of the longest word of ``text`` — a run between whitespace, the template's own measure
+    (`news_templates._longest_word`: "Sherwin-Williams" and "10-Q/A-Exhibit-99.1" are one word each); 0 for a
+    non-string or blank text. Pure, linear."""
+    return max((len(w) for w in text.split()), default=0) if isinstance(text, str) else 0
+
+
+#: Surnames of the people a stake's hand-kept source is most likely to cite — the leaders, founders and
+#: investors of the Trillion Club's investors and investees, and the best-known fund managers. The review of
+#: 2026-10-16 (ST-1): the stake person check (`news_templates._stake_person_problem`) leaned on lexicons built
+#: for lessons and missed exactly these — "Dario Amodei essay", "Altman blog", "Mira Murati interview",
+#: "Ilya Sutskever interview", "Ellison interview", "Abel letter" all passed, and the source line is drawn on the
+#: image, card 4 and every caption (a name is never drawn: marketing.md §1 decision 2). ON TOP OF that check,
+#: never instead of it, and only for the three stake texts it reads (`stake_person_surname_hits`). Matched as a
+#: whole word in its Title or UPPER form, AFTER the record's own companies are masked — so a listed investee
+#: named for a person ("Charles Schwab") still passes. Left out on purpose: surnames that are everyday words or
+#: other companies' names a source would cite ("Wood", "Page", "Dell"). Accepted over-block: an unlisted
+#: investee such as "S.C. Johnson & Son" ("Son") is refused — one stake post lost, never a name drawn. Add a
+#: surname when the catalogue gains a source that names a new person.
+STAKE_SOURCE_PERSON_SURNAMES: FrozenSet[str] = frozenset({
+    # AI labs and their backers
+    "Amodei", "Altman", "Brockman", "Murati", "Sutskever", "Friar", "Krieger", "Hassabis", "Suleyman",
+    "Musk", "Shotwell",
+    # the largest listed companies
+    "Huang", "Kress", "Nadella", "Hood", "Gates", "Ballmer", "Pichai", "Porat", "Ashkenazi", "Brin",
+    "Zuckerberg", "Bezos", "Jassy", "Olsavsky", "Cook", "Parekh", "Ellison", "Catz", "Son", "Tan", "Wei",
+    "Benioff", "Saylor",
+    # Berkshire Hathaway
+    "Buffett", "Munger", "Abel", "Jain", "Combs", "Weschler",
+    # banks and fund managers
+    "Dimon", "Fink", "Dalio", "Ackman", "Icahn", "Soros", "Druckenmiller", "Tepper", "Burry", "Thiel",
+})
+#: One alternation over the list's Title and UPPER forms, never inside a longer word ("Sons", "Abelson",
+#: "Cookware"); a possessive or a hyphen after it still matches ("Buffett's", "Altman-led").
+_STAKE_SURNAME_RE = re.compile(
+    r"(?<![A-Za-z])(?:"
+    + "|".join(sorted({re.escape(s) for n in STAKE_SOURCE_PERSON_SURNAMES for s in (n, n.upper())},
+                      key=lambda s: (-len(s), s)))
+    + r")(?![A-Za-z])")
+
+
+#: The re-review of 2026-10-19 (ST-1-R): the surname list above is a DENYLIST, and a source naming anyone off it —
+#: "Alexandr Wang memo", "Jensen keynote", "Elon post on X", "Mensch interview", "Intrator letter" — composed with
+#: the name on the image, card 4 and every caption. So the adapter now also holds a stake's hand-kept SOURCE TITLE
+#: and LOCAL LISTING to a POSITIVE list (`stake_text_unknown_words`): every capitalised word must be a word of a
+#: company of the club or the stake catalogue (the adapter passes them, `stake_known_words`), a document, date or
+#: place word below, a code with a digit (10-Q, 13G/A, FY2025, Q2) or a single letter (Series D). Lower-case words
+#: are never names. Built from the live catalogue's 81 source titles and 10 local listings (2026-10-19), which all
+#: pass. A new source shape adds its word here (one stake post is refused until then, logged — never a name drawn).
+STAKE_SOURCE_WORDS: FrozenSet[str] = frozenset(w.casefold() for w in (
+    # documents and their parts
+    "Form", "Forms", "Schedule", "Annual", "Report", "Reports", "Release", "Releases", "Note", "Notes", "Series",
+    "Exhibit", "Ex", "Proxy", "Statement", "Statements", "Letter", "Prospectus", "Interim", "Consolidated",
+    "Financial", "Half-year", "Audit", "Media", "Joint", "Shareholder", "Shareholders", "Shareholding", "Pattern",
+    "Large", "Draft", "Red", "Herring", "Abridged", "Updated", "Amended", "Press", "Announcement", "Filing",
+    "Registration", "Supplement", "Quarterly", "Earnings", "Investor", "Presentation", "Stock", "Data", "Page",
+    "Summary", "Results", "Fiscal", "Year", "Quarter", "Integrated", "Substantial", "Allotment", "Share", "Notice",
+    "Circular", "Disclosure", "Holdings", "Company", "Co", "Inc", "Corp", "Ltd", "Group",
+    # filing systems, regulators and document codes without a digit
+    "SEC", "EDGAR", "DART", "FSA", "IR", "DEF", "AGM", "ADR", "ADS", "IPO", "SAFE", "JV", "CEO", "CFO",
+    # Berkshire Hathaway's insurer (National Indemnity Company) and the LSE's own acronym, as the sources write them
+    "NICO", "LSEG",
+    # months
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Sept", "Oct", "Nov", "Dec", "January", "February",
+    "March", "April", "June", "July", "August", "September", "October", "November", "December",
+    # places and exchanges (a local listing; "Japan's FSA")
+    "Japan", "Korea", "China", "India", "Saudi", "Arabia", "Taiwan", "London", "Switzerland", "Austria", "Germany",
+    "France", "Netherlands", "Canada", "Israel", "Singapore", "Hong", "Kong", "Australia", "Brazil", "Mexico",
+    "Europe", "Asia", "America", "United", "States", "Kingdom", "U.S", "U.K", "US", "UK", "EU", "Texas",
+    "Louisiana", "Shenzhen", "Shanghai", "Tokyo", "Taipei", "Seoul", "Mumbai", "Exchange", "KOSDAQ", "KOSPI",
+    "Nasdaq", "NYSE", "TSX", "Euronext",
+    # companies a live source names beside the stake's own (not in the club or the catalogue)
+    "Sony",
+))
+_STAKE_WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9'’&.\-/]*")
+_STAKE_TEXT_MAX = 400
+
+
+def _stake_word_key(token: str) -> str:
+    """A stake-text token as the positive list compares it: trailing punctuation and a possessive dropped."""
+    key = token.rstrip(".,;:")
+    for tail in ("'s", "’s", "'", "’"):
+        if key.endswith(tail):
+            key = key[: -len(tail)]
+            break
+    return key
+
+
+def stake_known_words(names: Iterable[Any]) -> FrozenSet[str]:
+    """The casefolded words of every name given (the club's companies and the stake catalogue's investees: the
+    companies a stake source may name). Non-strings are skipped. Pure."""
+    out = set()
+    for name in names:
+        if isinstance(name, str):
+            for tok in _STAKE_WORD_RE.findall(name[:_STAKE_TEXT_MAX]):
+                key = _stake_word_key(tok)
+                if key:
+                    out.add(key.casefold())
+    return frozenset(out)
+
+
+def stake_text_unknown_words(text: Any, known: Iterable[str]) -> List[str]:
+    """The capitalised words of a stake's source title or local listing that are on no list (ST-1-R, above) — a
+    word of ``known`` (`stake_known_words`), `STAKE_SOURCE_WORDS`, a code with a digit or a single letter is
+    allowed; [] for a non-string. The caller refuses the source title (and drops the local listing) when any is
+    left: a person's name is never drawn. Pure, linear (texts are capped)."""
+    if not isinstance(text, str):
+        return []
+    known_cf = known if isinstance(known, (set, frozenset)) else frozenset(known)
+    out: List[str] = []
+    for tok in _STAKE_WORD_RE.findall(text[:_STAKE_TEXT_MAX]):
+        key = _stake_word_key(tok)
+        if not key or not key[0].isupper() or len(key) == 1 or any(ch.isdigit() for ch in key):
+            continue
+        cf = key.casefold()
+        if cf in STAKE_SOURCE_WORDS or cf in known_cf:
+            continue
+        out.append(key)
+    return out
+
+
+def stake_person_surname_hits(text: Any) -> List[str]:
+    """The `STAKE_SOURCE_PERSON_SURNAMES` a stake text names (whole words, Title or UPPER form), in order of
+    appearance; [] for a non-string. The caller masks the record's own companies first. Pure, linear (one
+    alternation of literals, lengths capped by the stake text bounds)."""
+    if not isinstance(text, str):
+        return []
+    return [m.group(0) for m in _STAKE_SURNAME_RE.finditer(text)]
 
 
 def theme_title_problem(title: Any) -> Optional[str]:
@@ -1589,7 +2289,12 @@ def congress_name_hits(text: Any) -> List[str]:
 # ── record validation helpers ─────────────────────────────────────────────────
 
 def _is_num(v: Any) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return False
+    try:
+        return math.isfinite(v)
+    except OverflowError:       # an int too large for a float (a JSON integer of 400 digits) is no figure
+        return False
 
 
 def _is_day(v: Any) -> bool:
@@ -1693,6 +2398,8 @@ class CompanyRef:
         problem = company_name_problem(self.name)
         if problem:
             c.fail("name", problem)
+        elif company_name_word_too_long(self.name):
+            c.fail("name", f"a word longer than {COMPANY_NAME_WORD_MAX_CHARS} characters (the cover cannot draw it)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1991,6 +2698,10 @@ class EarningsReport:
         c.number("eps_estimate")
         if abs(self.eps_estimate) < EPS_MIN_ABS_ESTIMATE:
             c.fail("eps_estimate", f"|estimate| below {EPS_MIN_ABS_ESTIMATE}")
+        # the owner-delegated EPS ceiling (2026-10-19): a stored fact sheet is held to it too
+        for name in ("eps_actual", "eps_estimate"):
+            if abs(getattr(self, name)) > EPS_MAX_ABS:
+                c.fail(name, f"|{name}| above {EPS_MAX_ABS:,.0f} a share")
         c.number("revenue_actual", gt=0, optional=True)
         c.number("revenue_estimate", gt=0, optional=True)
         if (self.revenue_actual is None) != (self.revenue_estimate is None):
@@ -1999,6 +2710,239 @@ class EarningsReport:
             lo, hi = REVENUE_RATIO_BAND
             if not (lo <= self.revenue_actual / self.revenue_estimate <= hi):
                 c.fail("revenue_actual", f"revenue ratio outside {REVENUE_RATIO_BAND}")
+
+
+# ── earnings gates (pure; Batch 1, 2026-10-15) ────────────────────────────────
+#
+# The adapter runs these over what FMP answered; each refuses the WHOLE report (one post lost, never a
+# wrong figure about a named company). The record class above is unchanged — it still admits a report
+# without revenue or a period, so a fact sheet stored before these gates reads back the same.
+
+
+def _figure(v: Any) -> Decimal:
+    """A finite number as the Decimal of its shortest repr — the figure as the feed wrote it ("4.35", not
+    4.34999999999999964…), so a gate's boundary is exact."""
+    return Decimal(repr(float(v)))
+
+
+def earnings_revenue_pair(pairs: Sequence[Any]) -> Optional[Tuple[float, float]]:
+    """The ONE ``(revenue actual, revenue estimate)`` pair every calendar row of a report carries, or None —
+    the report is then refused (`revenue_implausible`): no row; rows that disagree (a row without revenue
+    beside one with it included: which is the report is a guess); a missing, non-finite, bool or
+    non-positive figure; a ratio outside `REVENUE_RATIO_BAND` (bounds inclusive). Pure; never raises."""
+    pairs = list(pairs) if isinstance(pairs, (list, tuple)) else []
+    if not pairs or any(not isinstance(p, tuple) or len(p) != 2 for p in pairs):
+        return None
+    first = pairs[0]
+    if any(p != first for p in pairs[1:]):          # NaN != NaN: a NaN pair never agrees, fail closed
+        return None
+    ra, re_ = first
+    if not (_is_num(ra) and _is_num(re_)) or ra <= 0 or re_ <= 0:
+        return None
+    lo, hi = REVENUE_RATIO_BAND
+    if not lo <= ra / re_ <= hi:
+        return None
+    return float(ra), float(re_)
+
+
+def printed_eps(value: Any) -> Decimal:
+    """A per-share figure as the post PRINTS it: `_figure` rounded to `EPS_PRINT_PLACES` places, half-up away
+    from zero (`news_templates.eps_image` rounds the magnitude half-up and puts the sign back: the same
+    figure). Exact for every finite float, never raising (`EPS_DECIMAL_PRECISION`). The caller passes a number
+    (`_is_num`)."""
+    with localcontext() as ctx:
+        ctx.prec = EPS_DECIMAL_PRECISION
+        return _figure(value).quantize(Decimal(1).scaleb(-EPS_PRINT_PLACES), rounding=ROUND_HALF_UP)
+
+
+def clear_surprise(actual: Any, estimate: Any) -> bool:
+    """Is |actual − estimate| at least `EARNINGS_CLEAR_SURPRISE` of |estimate| — on the figures as written
+    (`_figure`) AND on the figures as printed (`printed_eps`)? Exact at the boundary both ways: 0.21 vs 0.20
+    (5.0%) is clear, 1.0499 vs 1.00 is not (4.99% as written, though it prints "$1.05 vs $1.00"); 0.095 vs
+    0.10 is not (5.0% as written, printed "$0.10 vs $0.10": no visible gap — review of 2026-10-16, ER-1), nor
+    0.3049 vs 0.2895 (5.3% as written, printed "$0.30 vs $0.29": 3.4%). False for a missing, non-finite or
+    bool figure, a zero estimate, and an estimate that prints as $0.00 (never a division). Computed in
+    `EPS_DECIMAL_PRECISION` digits: exact, and never raising, for any finite figure (1e300 included — a figure
+    the post cannot print fails at compose, which the script flow logs and counts as a refused candidate; it is
+    never an exception here that sinks the whole series)."""
+    if not (_is_num(actual) and _is_num(estimate)) or estimate == 0:
+        return False
+    with localcontext() as ctx:
+        ctx.prec = EPS_DECIMAL_PRECISION
+        threshold = _figure(EARNINGS_CLEAR_SURPRISE)
+        a, e = _figure(actual), _figure(estimate)
+        if abs(a - e) < threshold * abs(e):
+            return False
+        pa, pe = printed_eps(actual), printed_eps(estimate)
+        return pe != 0 and abs(pa - pe) >= threshold * abs(pe)
+
+
+def _statement_day(v: Any) -> Optional[date]:
+    """A statement row's period end (FMP's ``date``): a date (never a datetime) or the "YYYY-MM-DD" prefix
+    of a str, else None (an unreadable row is never a candidate)."""
+    if isinstance(v, datetime):
+        return None
+    if isinstance(v, date):
+        return v
+    if isinstance(v, str) and len(v) >= 10 and v[:10].isascii():
+        try:
+            return date.fromisoformat(v[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def statement_currency(rows: Any) -> Optional[str]:
+    """The REPORTING currency of a quarterly statement answer: the ``reportedCurrency`` of its NEWEST
+    readable period end (rows sharing that date must all carry the same one), upper-cased — or None when
+    it cannot be read (no dated row, a missing / blank / non-str code, two codes on one date). The newest
+    period is the one `earnings_period` can keep (it refuses an answer with a later one), so the currency
+    checked is the currency of the figures published. Pure; never raises."""
+    dated: List[Tuple[date, Mapping[str, Any]]] = []
+    for row in rows if isinstance(rows, (list, tuple)) else ():
+        if isinstance(row, Mapping):
+            d = _statement_day(row.get("date"))
+            if d is not None:
+                dated.append((d, row))
+    if not dated:
+        return None
+    newest = max(d for d, _row in dated)
+    codes = set()
+    for d, row in dated:
+        if d == newest:
+            code = row.get("reportedCurrency")
+            if not isinstance(code, str) or not code.strip():
+                return None
+            codes.add(code.strip().upper())
+    return codes.pop() if len(codes) == 1 else None
+
+
+def earnings_period(rows: Any, *, report_date: date, revenue_actual: Any
+                    ) -> Tuple[Optional[date], Optional[str]]:
+    """Which fiscal quarter the calendar's figures are for, from the company's latest QUARTERLY income
+    statements (FMP's ``date`` = the period end): ``(period_end, None)`` keeps the report with its period,
+    ``(None, None)`` keeps it without one (only under `EARNINGS_ALLOW_SCALE_CHECK`), ``(None, reason)``
+    refuses it. The EPS is never checked against the statement HERE (the analysts' basis differs from GAAP);
+    `earnings_basis_mixed` is the one narrow EPS gate, run on the placed quarter's row.
+
+    The reported quarter is the NEWEST statement row whose period ends in ``[report −
+    EARNINGS_PERIOD_WINDOW_DAYS, report)``:
+
+    * no such row, or no readable positive revenue on it → ``period_unverified``;
+    * any row ending ON or AFTER the report day → ``period_unverified`` (a quarter that cannot have
+      been reported yet: the answer is not trusted for the one that was);
+    * the row must be QUARTER-SHAPED (review of 2026-10-16, ER-4): the next-older dated row (any age) ended
+      `EARNINGS_QUARTER_SPAN_DAYS` before it — no older row (a single row), a half-year span (~181 days: FMP
+      files a semiannual reporter's halves as "quarters") or an odd one → ``period_unverified``;
+    * that row ended more than `EARNINGS_PERIOD_MAX_LAG_DAYS` before the report → it may be the quarter
+      BEFORE the reported one (the statement has not caught up), and a flat-revenue company would match
+      it → ``period_unverified`` — or, under the contingency, kept WITHOUT a period while the row is
+      quarter-shaped and the calendar's revenue is within `EARNINGS_SCALE_BAND` of it (a quarter's scale,
+      never a month or a half-year);
+    * the report came at least the row's own span after it (its NEXT quarter, as long as this one, had ended
+      by then: a 12-week quarter ending Jun 13 and reported Sep 10) → ``period_unverified``;
+    * its revenue within `EARNINGS_PERIOD_REVENUE_TOLERANCE` of the calendar's revenueActual → its period
+      end; else ``period_mismatch`` (a month, a half-year, another basis — never "the quarter that ended").
+
+    Rows sharing the newest date must all agree. ``report_date`` must be a date (ValueError: a caller bug);
+    everything else is data, and junk in it refuses the report — never raises on it."""
+    if not isinstance(report_date, date) or isinstance(report_date, datetime):
+        raise ValueError("report_date must be a date")
+    if not _is_num(revenue_actual) or revenue_actual <= 0:
+        return None, "period_unverified"
+    dated: List[Tuple[date, Mapping[str, Any]]] = []
+    for row in rows if isinstance(rows, (list, tuple)) else ():
+        if isinstance(row, Mapping):
+            d = _statement_day(row.get("date"))
+            if d is not None:
+                dated.append((d, row))
+    if any(d >= report_date for d, _row in dated):
+        return None, "period_unverified"
+    start = report_date - timedelta(days=EARNINGS_PERIOD_WINDOW_DAYS)
+    window = [(d, row) for d, row in dated if d >= start]
+    if not window:
+        return None, "period_unverified"
+    newest = max(d for d, _row in window)
+    revenues = [row.get("revenue") for d, row in window if d == newest]
+    if not all(_is_num(v) and v > 0 for v in revenues):
+        return None, "period_unverified"
+    ra = _figure(revenue_actual)
+    # Review of 2026-10-16 (ER-4): a QUARTER, by its distance from the company's previous period end (that row
+    # may sit outside the window: a 120-day window can hold one quarter only). No older row → unverified.
+    older = [d for d, _row in dated if d < newest]
+    span = (newest - max(older)).days if older else None
+    quarter_shaped = span is not None and EARNINGS_QUARTER_SPAN_DAYS[0] <= span <= EARNINGS_QUARTER_SPAN_DAYS[1]
+    lag = (report_date - newest).days
+    if lag > EARNINGS_PERIOD_MAX_LAG_DAYS:
+        if EARNINGS_ALLOW_SCALE_CHECK and quarter_shaped:
+            lo, hi = (_figure(x) for x in EARNINGS_SCALE_BAND)
+            if all(lo * _figure(v) <= ra <= hi * _figure(v) for v in revenues):
+                return None, None
+        return None, "period_unverified"
+    if not quarter_shaped or lag >= span:
+        return None, "period_unverified"
+    tolerance = _figure(EARNINGS_PERIOD_REVENUE_TOLERANCE) * ra
+    if all(abs(_figure(v) - ra) <= tolerance for v in revenues):
+        return newest, None
+    return None, "period_mismatch"
+
+
+def earnings_sector_problem(profile: Any) -> Optional[str]:
+    """``eps_basis_reit`` when an earnings issuer's profile says Real Estate (`EARNINGS_EXCLUDED_SECTORS`) or
+    an industry starting "REIT" (`EARNINGS_EXCLUDED_INDUSTRY_PREFIX`, any case: "REIT - Industrial",
+    "REIT - Mortgage") — a REIT's calendar EPS can be FFO on either side (review of 2026-10-16, live preview F1:
+    Prologis) — or when its sector cannot be read (missing, blank, not a string, over-long): an unknown sector
+    cannot be shown not to be a REIT (fail closed, as the Money Map sector gate). None otherwise. A missing
+    industry alone decides nothing (the sector does). Pure; never raises."""
+    if not isinstance(profile, Mapping):
+        return "eps_basis_reit"
+    sector = profile.get("sector")
+    if not isinstance(sector, str) or not sector.strip() or len(sector) > _RAW_NAME_MAX:
+        return "eps_basis_reit"
+    if sector.strip() in EARNINGS_EXCLUDED_SECTORS:
+        return "eps_basis_reit"
+    industry = profile.get("industry")
+    if isinstance(industry, str) and industry.strip()[:len(EARNINGS_EXCLUDED_INDUSTRY_PREFIX)].upper() == \
+            EARNINGS_EXCLUDED_INDUSTRY_PREFIX:
+        return "eps_basis_reit"
+    return None
+
+
+def _statement_eps(row: Mapping[str, Any]) -> Optional[Decimal]:
+    """A statement row's diluted EPS (``epsDiluted``, else ``eps`` — PRESENCE, not truthiness: a reported 0.0
+    is a value) as a Decimal of its figure, or None when neither is a number."""
+    for key in ("epsDiluted", "eps"):
+        v = row.get(key)
+        if _is_num(v):
+            return _figure(v)
+    return None
+
+
+def earnings_basis_mixed(rows: Any, *, period_end: date, actual: Any, estimate: Any) -> bool:
+    """Are the calendar's actual and estimate on two different BASES (``eps_basis_mixed``, review of
+    2026-10-16, live preview F1)? Judged against the diluted EPS (`_statement_eps`) of the statement row(s)
+    dated ``period_end`` — the quarter `earnings_period` placed: True when, for a row whose EPS G is POSITIVE,
+    the actual sits outside `EARNINGS_BASIS_ACTUAL_BAND` × G while the estimate sits within ±
+    `EARNINGS_BASIS_ESTIMATE_TOLERANCE` × G of it (the estimate is on the statement's scale, the actual is not).
+    Prologis: 1.60 against GAAP 0.86 (1.86×) with an estimate of 0.777 (0.90×) → True; BlackRock: 15.93 against
+    GAAP 10.57 (1.507×) with an estimate of 14.32 (1.35×: not on the GAAP scale either) → False. Never True when
+    no dated row carries a positive EPS (the gate does not apply: a loss quarter, a missing figure), and never
+    for a missing or non-numeric actual / estimate (the record gates refuse those). Every band edge inclusive,
+    exact on the figures as written. Pure; never raises."""
+    if not _is_day(period_end) or not (_is_num(actual) and _is_num(estimate)):
+        return False
+    lo, hi = (_figure(x) for x in EARNINGS_BASIS_ACTUAL_BAND)
+    tol = _figure(EARNINGS_BASIS_ESTIMATE_TOLERANCE)
+    a, e = _figure(actual), _figure(estimate)
+    for row in rows if isinstance(rows, (list, tuple)) else ():
+        if not isinstance(row, Mapping) or _statement_day(row.get("date")) != period_end:
+            continue
+        g = _statement_eps(row)
+        if g is None or g <= 0:
+            continue
+        if not (lo * g <= a <= hi * g) and abs(e - g) <= tol * g:
+            return True
+    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -2440,4 +3384,28 @@ __all__ = [
     "ThemeExplainer", "NewsRecord", "RECORD_TYPES", "NESTED_RECORD_TYPES", "ALL_RECORD_TYPES",
     "RECORD_TYPE_BY_SERIES", "ledger_key", "source_label", "record_to_dict", "record_from_dict",
     "fact_sheet", "record_from_fact_sheet",
+    # Batch 1 (2026-10-15): the earnings gates and the members-elect window
+    "EARNINGS_CLEAR_SURPRISE", "EARNINGS_PERIOD_WINDOW_DAYS", "EARNINGS_PERIOD_MAX_LAG_DAYS",
+    "EARNINGS_PERIOD_REVENUE_TOLERANCE", "EARNINGS_ALLOW_SCALE_CHECK", "EARNINGS_SCALE_BAND",
+    "earnings_revenue_pair", "clear_surprise", "statement_currency", "earnings_period",
+    "general_election_day", "members_elect_window",
+    # Batch 1 (2026-10-15): Money Map labels that name nothing, and the regions
+    "SEGMENT_ACRONYMS_OK", "GENERIC_SEGMENT_LABELS", "segment_fold_reason", "REGION_NAMES", "REGION_ARTICLE",
+    "region_key", "is_region_name", "takes_region_article",
+    # Batch 1 (2026-10-15): 13F successor filers and the lead filers read first
+    "THIRTEEN_F_SUCCESSORS", "THIRTEEN_F_LEAD_FILERS", "THIRTEEN_F_SUCCESSOR_SINCE", "successor_transition",
+    # Batch 1 (2026-10-15): a descriptive stake name takes "the" in running text
+    "DESCRIPTIVE_NAME_HEADS", "STAKE_NAME_ARTICLE_MAX_CHARS", "takes_name_article",
+    # review of 2026-10-16: the printed surprise, the quarter's shape, the EPS basis, NASDAQ preferred lines and
+    # the members-elect window over a run's publishing days
+    "EPS_PRINT_PLACES", "EPS_DECIMAL_PRECISION", "printed_eps", "EARNINGS_QUARTER_SPAN_DAYS",
+    "EARNINGS_EXCLUDED_SECTORS",
+    "EARNINGS_EXCLUDED_INDUSTRY_PREFIX", "EARNINGS_BASIS_ACTUAL_BAND", "EARNINGS_BASIS_ESTIMATE_TOLERANCE",
+    "earnings_sector_problem", "earnings_basis_mixed", "NASDAQ_PREFERRED_SYMBOL_RE", "nasdaq_preferred_symbol",
+    "MEMBERS_ELECT_PUBLISH_DAYS", "members_elect_for_run",
+    # review of 2026-10-16: company-scoped segment labels, the cover's word cap, the stake-source surnames
+    "SEGMENT_SYMBOL_OVERRIDES", "COMPANY_NAME_WORD_MAX_CHARS", "company_name_word_too_long",
+    "STAKE_SOURCE_PERSON_SURNAMES", "stake_person_surname_hits",
+    # the round-3 review of 2026-10-20 (RR3-STAKES-TEMPLATE-WALL): what the stake template can draw, at the read
+    "STAKE_SOURCE_DRAW_MAX_CHARS", "STAKE_TEXT_WORD_MAX_CHARS", "STAKE_PAIR_NAME_WORD_MAX_CHARS", "longest_word",
 ]

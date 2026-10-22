@@ -142,14 +142,22 @@ SERVER_OWNED_RUN_METADATA = ("claim_nonce", "closed", "worker_capabilities", "se
 #: does), and `_frozen_output` freezes a 2b-layout template's posts as TEXT under such a holder (a
 #: re-claim by an older image during the build). The deploy order of the web and the worker then never
 #: matters: a missing capability costs the series, never the day.
+#: WORKER_CAPABILITY_VIDEO_V2 (Batch 2, 2026-10-19, "first seconds"): the worker draws the VIDEO_FEATURES
+#: the server froze into the run's accepted output (`output.video_features`, sent in the script read-back)
+#: — a lesson's HOOK card, a template's DATA card, the push-in on card 0 — and the end card the read-back
+#: names (`end_card_cta`). `script_service` freezes a non-empty `video_features` only for a run whose holder
+#: declared it at write time: an older worker gets [] and renders today's video. A feature only ALLOWS
+#: more on-screen strings (`run_service._check_onscreen_text`), it never requires one, so a holder change
+#: after the freeze (either way) costs the feature at most, never the day.
 #: Mirrored by `marketing/main.py` WORKER_CAPABILITIES (pinned equal by tests/test_marketing_worker.py).
 #: Known values only: `RunClaimRequest` DROPS an unknown value with a WARNING (a newer worker against
 #: an older web keeps its claims and is simply not credited with it) — never recorded on the run.
 WORKER_CAPABILITY_POST_IMAGE = "post_image"
 WORKER_CAPABILITY_NEWS_TEMPLATES = "news_templates"
 WORKER_CAPABILITY_LAYOUTS_2B = "layouts_2b"
+WORKER_CAPABILITY_VIDEO_V2 = "video_v2"
 WORKER_CAPABILITIES: Tuple[str, ...] = (WORKER_CAPABILITY_POST_IMAGE, WORKER_CAPABILITY_NEWS_TEMPLATES,
-                                        WORKER_CAPABILITY_LAYOUTS_2B)
+                                        WORKER_CAPABILITY_LAYOUTS_2B, WORKER_CAPABILITY_VIDEO_V2)
 #: The template image layouts only a WORKER_CAPABILITY_LAYOUTS_2B worker draws (template_onscreen.LAYOUTS
 #: members; pinned ⊆ template_onscreen.SHIPPED_LAYOUTS and the worker's cards.SHIPPED_LAYOUTS by the tests).
 WORKER_LAYOUTS_2B: Tuple[str, ...] = ("pair", "grid")
@@ -175,6 +183,14 @@ RUN_WORKER_CAPABILITIES_KEY = "worker_capabilities"
 #: the worker's choice: it is frozen per run into the accepted output's `post_formats` at write time
 #: (`script_service`), and `create_posts` refuses any other — an `image` post without frozen formats
 #: (a script accepted before this change) is refused too. Video platforms are unchanged.
+#:
+#: This is the PRIMARY map (Batch 3, 2026-10-20): ONE post per (run, platform), in the format frozen for
+#: it — what `script_service.freeze_post_formats`, `run_service.frozen_post_formats`, the outlets' expected
+#: formats and the worker's `render.POST_FORMAT` mirror all read, unchanged. Facebook/LinkedIn video IS
+#: re-opened, with the per-FORMAT disclaimer asked for above, but never in this map (widening it would
+#: silently turn Facebook's primary post into a video): EXTRA_POST_FORMATS_BY_PLATFORM below gives a
+#: platform a SECOND post of the run, captioned with its own accepted caption under the narrated-video
+#: disclaimer (`post_copy.extra_video_caption`).
 POST_FORMATS_BY_PLATFORM: Dict[str, Tuple[str, ...]] = {
     "tiktok": ("video",),
     "youtube": ("video",),
@@ -188,6 +204,105 @@ POST_FORMATS_BY_PLATFORM: Dict[str, Tuple[str, ...]] = {
 
 #: The values an accepted output's frozen `post_formats` may hold, one per platform it has copy for.
 FROZEN_POST_FORMATS: Tuple[str, ...] = ("video", "image", "text")
+
+#: The platforms that may post the day's picture (2026-10-15). The web setting MARKETING_IMAGE_PLATFORMS
+#: picks a subset at write time; X is not here — it keeps its own switch, MARKETING_X_IMAGES.
+IMAGE_PLATFORMS: Tuple[str, ...] = ("bluesky", "facebook", "linkedin", "threads")
+#: Why a platform that should have posted the day's picture was frozen as TEXT instead — a closed set.
+#: `script_service.freeze_post_formats` records the code in the accepted output (`image_fallback`),
+#: `create_posts` stamps it on each affected post as `metadata[POST_METADATA_IMAGE_FALLBACK]`, and the POSTS
+#: decision message and the weekly digest name it in these owner words. A platform left off
+#: MARKETING_IMAGE_PLATFORMS on purpose, or X while MARKETING_X_IMAGES is off, is NOT a fallback.
+#: "worker_capability" says THIS picture (review CTA-3, 2026-10-16): `_holder_image_block` stamps it when the
+#: holder lacks ANY capability the day's picture needs — post_image, or news_templates / layouts_2b for a
+#: template's layout — and a worker lacking only those draws a lesson picture every day.
+IMAGE_FALLBACK_REASONS: Dict[str, str] = {
+    "image_dropped": "the picture text did not pass the checks",
+    "worker_capability": "the worker that ran the day cannot draw this picture",
+    "image_spec_invalid": "the picture layout did not validate",
+    "threads_caption_long": "the Threads caption is too long for a picture post",
+    "freeze_failed": "the picture could not be prepared",
+}
+POST_METADATA_IMAGE_FALLBACK = "image_fallback"
+#: The platforms Upload-Post can give an automatic first comment (2026-10-15). The web setting
+#: MARKETING_FIRST_COMMENT_PLATFORMS picks a subset; `create_posts` stamps the exact comment text on each
+#: post that will carry one as `metadata[POST_METADATA_FIRST_COMMENT]` (the outlet sends it, the POSTS/VIDEO
+#: decision message names those platforms). X (a comment is another billed post) and Bluesky (direct, and
+#: its caption already carries a tappable link) never get one.
+FIRST_COMMENT_PLATFORMS: Tuple[str, ...] = ("youtube", "instagram", "facebook", "threads", "linkedin", "tiktok")
+POST_METADATA_FIRST_COMMENT = "first_comment"
+#: Batch 2 (B2-METRICS-ATTRIBUTION, 2026-10-20): `create_posts` stamps the run's frozen VIDEO_FEATURES (the
+#: sorted list `output.video_features`, `run_service.frozen_video_features`) on each VIDEO post as
+#: `metadata[POST_METADATA_VIDEO_FEATURES]` — only when non-empty, so a run without features writes
+#: byte-identical rows — so the measure step and the digest can tell a first-seconds video from an older one.
+#: A note: it gates nothing, and it says what the run ASKED the worker for — the video asset's own metadata
+#: says what it drew (a card that could not fit falls back to today's).
+POST_METADATA_VIDEO_FEATURES = "video_features"
+
+#: Batch 3 (2026-10-20; owner decision 2, 2026-10-15): the EXTRA formats — a platform's SECOND post of a run,
+#: beside its PRIMARY one (POST_FORMATS_BY_PLATFORM above, unchanged). Facebook and LinkedIn may post the day's
+#: narrated video as well as their picture/text post, and Threads too — each only while the web setting
+#: MARKETING_VIDEO_EXTRA_PLATFORMS lists it (empty by default: no extra anywhere). Each extra is captioned with
+#: that platform's OWN accepted caption, only its code-owned disclaimer swapped for the narrated-video one
+#: (`post_copy.extra_video_caption`), so no new model text and no judge call. Never x (X never posts two
+#: formats: MARKETING_VIDEO_EXTRA_PLATFORMS refuses it) and never bluesky (its video is deferred to the
+#: week-4 review). Which extras a run gets is FROZEN per run into the accepted output at write
+#: time (EXTRA_FORMATS_KEY / VIDEO_POSTS_KEY below; `script_service._frozen_output` reads the switch once), and
+#: only on a day whose frozen primary formats already hold a video — the unchanged worker renders it anyway.
+#: `create_posts` appends the extra posts ITSELF (always `pending_review`, on the run's one verified video): the
+#: worker never names one, and a spec naming an extra pair is refused like any pair outside the frozen primary
+#: formats.
+EXTRA_POST_FORMATS_BY_PLATFORM: Dict[str, Tuple[str, ...]] = {
+    "facebook": ("video",),
+    "linkedin": ("video",),
+    "threads": ("video",),
+}
+#: The platforms that may take an extra video, in the order `create_posts` appends their posts. Mirrored by
+#: config's MARKETING_VIDEO_EXTRA_PLATFORMS validator (pinned equal by tests/test_marketing_run_service.py).
+EXTRA_VIDEO_PLATFORMS: Tuple[str, ...] = ("facebook", "linkedin", "threads")
+#: The accepted output's frozen extras: EXTRA_FORMATS_KEY → {platform: "video"}; VIDEO_POSTS_KEY →
+#: {platform: {"title": None, "caption": str}} (each extra's caption, re-derived and verified by `create_posts`
+#: before it records it). The two are written together and ONLY when non-empty: absent means no extras — every
+#: output written before Batch 3, or with the switch empty, records exactly the posts it did. Never sent to the
+#: worker, and never in `news_templates.COMPARED_FIELDS`.
+EXTRA_FORMATS_KEY = "extra_post_formats"
+VIDEO_POSTS_KEY = "video_posts"
+#: A Threads VIDEO caption's limit, in UTF-8 bytes: the /upload route documents no long-text field, so Batch 1's
+#: 500-byte rule holds — checked when the extra is frozen and again by the outlet before it sends. A longer
+#: Threads caption freezes no extra video that day.
+THREADS_VIDEO_CAPTION_MAX_BYTES = 500
+
+
+def recordable_formats(platform: Any) -> Tuple[str, ...]:
+    """Every format the server may record a post of `platform` in: its PRIMARY formats, then its EXTRA ones
+    (`("text", "image", "video")` for Facebook). () for a platform with neither, or a non-string. Pure."""
+    if not isinstance(platform, str):
+        return ()
+    return POST_FORMATS_BY_PLATFORM.get(platform, ()) + EXTRA_POST_FORMATS_BY_PLATFORM.get(platform, ())
+
+
+def is_extra_format(platform: Any, fmt: Any) -> bool:
+    """True iff a (`platform`, `fmt`) post is an EXTRA post: a format only EXTRA_POST_FORMATS_BY_PLATFORM gives
+    that platform, never one of its primary formats. The pair alone says so — no metadata stamp marks an extra,
+    so neither the publisher's primary-first hold nor the review can be talked out of it by a missing stamp.
+    False for anything else (an unknown platform, another case, a non-string). Pure."""
+    if not isinstance(platform, str) or not isinstance(fmt, str):
+        return False
+    return fmt in EXTRA_POST_FORMATS_BY_PLATFORM.get(platform, ()) \
+        and fmt not in POST_FORMATS_BY_PLATFORM.get(platform, ())
+
+
+#: Batch 3 (2026-10-20): Instagram TRIAL REELS. The web setting MARKETING_INSTAGRAM_TRIAL_MODE is read at SEND time
+#: by the Upload-Post outlet (distribution, not content — like the page ids) and maps to Upload-Post's
+#: `share_mode` — its documented values (docs.upload-post.com, upload-video, read 2026-10-20; `CUSTOM`, a regular
+#: Reel, is what no field means). INSTAGRAM_TRIAL_OFF sends exactly today's fields; a trial mode drops
+#: `share_to_feed` (it applies to regular Reels only). Mirrored by config's validator (pinned equal by
+#: tests/test_marketing_outlet_upload_post.py).
+INSTAGRAM_TRIAL_OFF = "off"
+INSTAGRAM_TRIAL_MODES: Dict[str, str] = {
+    "share_if_liked": "TRIAL_REELS_SHARE_TO_FOLLOWERS_IF_LIKED",
+    "dont_share": "TRIAL_REELS_DONT_SHARE_TO_FOLLOWERS",
+}
 
 #: `metadata.image_role` of the one `card` asset a run's image posts carry (the 4:5 JPEG the worker
 #: renders from the accepted output's `image_post`). The only role a card may declare today.
@@ -242,15 +357,52 @@ AUDIO_WORD_MAX_CHARS = 48
 #: Slack between the last word's end and the audio's measured duration (encoder padding).
 AUDIO_TAIL_SLACK_SECONDS = 0.5
 
+#: The end card's call to action. VIDEO_LEGACY_CTA is what every worker before Batch 2 draws (and a
+#: Batch 2 worker against an older web, whose read-back carries no `end_card_cta`); VIDEO_END_CARD_CTA is
+#: owner decision 6's "Search Caydex on the App Store" (post_copy.SEARCH_LINE without its full stop —
+#: pinned equal by tests/test_marketing_run_service.py), drawn only while the run's accepted output says
+#: the app is on the store (store state live or preorder: `script_service.end_card_cta`).
+VIDEO_LEGACY_CTA = "caydexinvest.com"
+VIDEO_END_CARD_CTA = "Search Caydex on the App Store"
 #: Phase 4 (§12.8): the ONLY text a rendered video may draw besides the accepted script's own
 #: card titles/bodies and its disclaimer card — the code-owned end card. The worker declares every
 #: string it drew (`metadata.onscreen_text` of the `video` asset) and the server refuses anything
 #: else; `marketing/cards.py` mirrors this tuple (tests/test_marketing_cards.py pins them equal).
 #: Burned captions are not listed: they are the audio asset's timed words, already checked against
 #: the script (`_check_timed_words`), and the video names that asset (`metadata.voice_asset_id`).
-VIDEO_BRAND_TEXT: Tuple[str, ...] = ("Caydex", "caydexinvest.com")
+#: Batch 2 (2026-10-19) made it a SUPERSET — the wordmark, the legacy CTA (an older worker, a rollback)
+#: and the new one — so neither deploy order can turn the end card into a 422.
+VIDEO_BRAND_TEXT: Tuple[str, ...] = ("Caydex", VIDEO_LEGACY_CTA, VIDEO_END_CARD_CTA)
 ONSCREEN_TEXT_MAX = 64
 ONSCREEN_TEXT_MAX_CHARS = 600
+
+#: Batch 2 ("first seconds", 2026-10-19; owner decision 7 amended rules marketing.md §5: a lesson video
+#: may open on a hook card). What the worker may add to a day's video, chosen by the web switch
+#: MARKETING_VIDEO_FEATURES and FROZEN per run into the accepted output at write time (`video_features`,
+#: `script_service.freeze_video_features`) — only for a holder that declared WORKER_CAPABILITY_VIDEO_V2:
+#:   hook_card — a LESSON video opens on a card drawing the accepted hook verbatim (the hook's burned
+#:               captions are suppressed while it shows: the card says the same words) — frozen only for a
+#:               hook that can stand ALONE (`run_service.hook_card_problem`: one drawable string, and not
+#:               compliant only beside its first narration line);
+#:   data_card — a TEMPLATE video draws the day's post image (its closed `image_spec`, footer included) laid
+#:               out natively in the card's text zone — never a bitmap scale of the JPEG (the worker's
+#:               news_layouts.DATA_CARD_FRAME, legibility floor news_layouts.DATA_CARD_MIN_PX = 22 px) — in
+#:               place of the ONE content card the read-back names (`data_card_slot`: a fact card the picture
+#:               already shows, never a hedge card — `template_onscreen.data_card_slot`); the worker keeps
+#:               that text card when the picture cannot fit legibly;
+#:   push_in   — card 0 zooms in slowly (draws no string).
+#: The server ALLOWS the strings a frozen feature draws (`run_service._check_onscreen_text`), never
+#: requires them: a worker that cannot fit a hook card or a data card falls back to today's card.
+VIDEO_FEATURE_HOOK_CARD = "hook_card"
+VIDEO_FEATURE_DATA_CARD = "data_card"
+VIDEO_FEATURE_PUSH_IN = "push_in"
+VIDEO_FEATURES: Tuple[str, ...] = (VIDEO_FEATURE_HOOK_CARD, VIDEO_FEATURE_DATA_CARD, VIDEO_FEATURE_PUSH_IN)
+#: Which features a script of each kind may carry: a template already opens on its code-owned opening
+#: card (so no hook card), and only a template has an `image_spec` to draw as a data card.
+LESSON_VIDEO_FEATURES: Tuple[str, ...] = (VIDEO_FEATURE_HOOK_CARD, VIDEO_FEATURE_PUSH_IN)
+TEMPLATE_VIDEO_FEATURES: Tuple[str, ...] = (VIDEO_FEATURE_DATA_CARD, VIDEO_FEATURE_PUSH_IN)
+#: `output.video_features` — the frozen list (sorted; absent = [] = today's video).
+VIDEO_FEATURES_KEY = "video_features"
 
 
 def validate_onscreen_text(entries: Any) -> None:
@@ -696,6 +848,23 @@ class WorkerScript(BaseModel):
     image_spec: Optional[Dict[str, Any]] = None
     #: Stored company logos: [{key, name, url|None, sha256|None, bytes|None, width|None, height|None}].
     logos: List[Dict[str, Any]] = Field(default_factory=list)
+    # Batch 2 (add-only, 2026-10-19). Declared, so this web ALWAYS serialises both keys — their presence
+    # is how a Batch 2 worker knows the web knows the new end card (an older web's read-back has neither,
+    # and the worker then keeps VIDEO_LEGACY_CTA).
+    #: The VIDEO_FEATURES frozen for the run (sorted; `script_service.worker_video_fields`), only those the
+    #: read-back can carry: [] for every run frozen without them, and for any script accepted before.
+    video_features: List[str] = Field(default_factory=list)
+    #: The end card's CTA — one of VIDEO_BRAND_TEXT: VIDEO_END_CARD_CTA while the accepted output's store
+    #: state is live or preorder, else VIDEO_LEGACY_CTA (owner decision 6). None only from an older web.
+    end_card_cta: Optional[str] = None
+    #: The DATA CARD's slot (Batch 2 fix CARDS-B2-1, 2026-10-20; add-only): the 0-based index into `cards` —
+    #: the script's own content cards, never the code-owned opening card or the disclaimer card — of the ONE
+    #: card the data card REPLACES (`template_onscreen.data_card_slot`: a fact card the post picture already
+    #: shows, never one of the series' hedge, caveat, explainer or source cards). Set exactly when
+    #: `video_features` carries data_card; None otherwise, and absent from an older web's read-back. The worker
+    #: draws a data card only with data_card AND a valid slot (an int, not a bool, inside `cards`, a text
+    #: card); else no data card — today's text cards.
+    data_card_slot: Optional[int] = None
 
 
 class ScriptKickResponse(BaseModel):

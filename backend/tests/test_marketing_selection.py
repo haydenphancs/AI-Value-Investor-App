@@ -49,6 +49,14 @@ from app.services.marketing.selection import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _declared_post_weekdays(monkeypatch):
+    """Batch 3: the posting days are the web setting MARKETING_POST_WEEKDAYS, read at CALL time — pin it to its
+    declared default (Mon/Tue/Thu/Sat, pinned in the Batch 3 contract section below), so a developer's .env can
+    never move a golden pick. A test that wants another cadence sets its own."""
+    monkeypatch.setattr(sel.settings, "MARKETING_POST_WEEKDAYS", "mon,tue,thu,sat")
+
+
 def _pool(n: int, kind: str = "journey") -> List[str]:
     return [f"{kind}:item{i:03d}" for i in range(n)]
 
@@ -807,3 +815,474 @@ def test_narrowing_the_templates_never_moves_the_item_rotation():
             (plain.rest_day, plain.source_ref, plain.posting_ordinal)
         assert narrow.template_id in sel.LESSON_TEMPLATE_IDS
     assert choose(pool, EPOCH + timedelta(days=2), templates=sel.LESSON_TEMPLATE_IDS) == Selection(rest_day=True)
+
+
+# ── Batch 3 (2026-10-20, contract): the posting days are a switch ─────────────
+#
+# MARKETING_POST_WEEKDAYS (default mon,tue,thu,sat = POST_WEEKDAYS) is parsed by `parse_post_weekdays` — never
+# empty, never raising, memoised so a bad live value logs once — and read at CALL time by `post_weekdays()`;
+# `news_recent_limit()` sizes the script service's ledger read from it (D15, D17).
+
+import logging  # noqa: E402
+
+from app.config import Settings  # noqa: E402
+from app.config import settings as _app_settings  # noqa: E402
+
+_ALL_DAYS = "mon,tue,wed,thu,fri,sat,sun"
+
+
+@pytest.fixture
+def fresh_weekday_cache():
+    """`parse_post_weekdays` memoises per raw string (so it logs once): every case starts from an empty cache."""
+    sel._parse_post_weekdays_text.cache_clear()
+    yield
+    sel._parse_post_weekdays_text.cache_clear()
+
+
+@pytest.mark.parametrize("raw, expected, level", [
+    (None, (0, 1, 3, 5), logging.ERROR),
+    (7, (0, 1, 3, 5), logging.ERROR),
+    ([], (0, 1, 3, 5), logging.ERROR),                     # unhashable: never reaches the cache
+    (["mon"], (0, 1, 3, 5), logging.ERROR),
+    ("", (0, 1, 3, 5), logging.ERROR),
+    (" , ", (0, 1, 3, 5), logging.ERROR),
+    ("MON, tue,THU ,sat", (0, 1, 3, 5), None),
+    ("mon,tue,thu,sat", (0, 1, 3, 5), None),
+    (_ALL_DAYS, (0, 1, 2, 3, 4, 5, 6), None),
+    ("sun,sat,fri,thu,wed,tue,mon", (0, 1, 2, 3, 4, 5, 6), None),    # weekday order, whatever the input
+    ("sat", (5,), None),
+    ("sun,mon", (0, 6), logging.WARNING),                  # no sat: warned, not forced
+    ("mon,mon", (0,), logging.WARNING),
+    ("mon,tue", (0, 1), logging.WARNING),
+    ("mon,funday", (0,), logging.ERROR),                   # the unknown token dropped, the rest kept
+    ("funday", (0, 1, 3, 5), logging.ERROR),               # nothing left: the default
+    ("monday,tuesday,saturday", (0, 1, 3, 5), logging.ERROR),   # three-letter tokens only
+    ("mon;tue;sat", (0, 1, 3, 5), logging.ERROR),          # one unknown token — never half-parsed
+])
+def test_batch3_parse_post_weekdays_matrix(fresh_weekday_cache, caplog, raw, expected, level):
+    with caplog.at_level(logging.WARNING, logger=sel.logger.name):
+        got = sel.parse_post_weekdays(raw)
+    assert got == expected and isinstance(got, tuple)
+    assert got and list(got) == sorted(set(got)) and all(0 <= d <= 6 for d in got)
+    records = [r for r in caplog.records if r.name == sel.logger.name]
+    assert all("MARKETING_POST_WEEKDAYS" in r.getMessage() for r in records)
+    assert max((r.levelno for r in records), default=None) == level, [r.getMessage() for r in records]
+
+
+def test_batch3_a_bad_value_read_100_times_logs_once(fresh_weekday_cache, caplog, monkeypatch):
+    monkeypatch.setattr(sel.settings, "MARKETING_POST_WEEKDAYS", "mon,funday")
+    with caplog.at_level(logging.WARNING, logger=sel.logger.name):
+        for _ in range(100):
+            assert sel.parse_post_weekdays("mon,funday") == (0,)
+            assert sel.post_weekdays() == (0,) and sel.news_recent_limit() == sel.RECENT_WINDOW
+    mine = [r for r in caplog.records if r.name == sel.logger.name]
+    assert [r.levelno for r in mine] == [logging.ERROR, logging.WARNING], [r.getMessage() for r in mine]
+    assert "funday" in mine[0].getMessage()
+    # another raw value is its own entry, and logs its own line
+    with caplog.at_level(logging.WARNING, logger=sel.logger.name):
+        assert sel.parse_post_weekdays("tue,funday,sat") == (1, 5)
+    assert sum(r.levelno == logging.ERROR for r in caplog.records if r.name == sel.logger.name) == 2
+
+
+def test_batch3_parse_post_weekdays_never_echoes_an_unbounded_value(fresh_weekday_cache, caplog):
+    with caplog.at_level(logging.WARNING, logger=sel.logger.name):
+        assert sel.parse_post_weekdays(",".join(f"z{i}{'q' * 500}" for i in range(50))) == sel.DEFAULT_POST_WEEKDAYS
+    msgs = [r.getMessage() for r in caplog.records if r.name == sel.logger.name]
+    assert msgs and all(len(m) < 400 for m in msgs)
+
+
+def test_batch3_config_literal_equals_weekday_tokens(fresh_weekday_cache):
+    """config.py imports no app module, so its validator carries an inline copy of WEEKDAY_TOKENS. Read by AST (the
+    literal itself) and by behaviour: the declared default — and the validator's own fallback — parse to
+    POST_WEEKDAYS, every token survives in weekday order, and the validator's output always parses to what the raw
+    value parses to (the two layers never disagree)."""
+    import ast
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "app" / "config.py").read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "_post_weekdays_fail_closed")
+    literals = [ast.literal_eval(a.value) for a in ast.walk(fn)
+                if isinstance(a, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "known" for t in a.targets)]
+    assert literals == [sel.WEEKDAY_TOKENS] == [("mon", "tue", "wed", "thu", "fri", "sat", "sun")]
+    assert [(EPOCH + timedelta(days=i)).weekday() for i in range(7)] == list(range(7))    # index = weekday()
+    default = Settings.model_fields["MARKETING_POST_WEEKDAYS"].default
+    assert default == "mon,tue,thu,sat"
+    assert sel.parse_post_weekdays(default) == POST_WEEKDAYS == sel.DEFAULT_POST_WEEKDAYS
+    for fallback in ("", "funday", None, 3):
+        assert Settings(MARKETING_POST_WEEKDAYS=fallback).MARKETING_POST_WEEKDAYS == default
+    assert Settings(MARKETING_POST_WEEKDAYS=",".join(reversed(sel.WEEKDAY_TOKENS))).MARKETING_POST_WEEKDAYS == \
+        ",".join(sel.WEEKDAY_TOKENS)
+    for raw in ("MON, tue,THU ,sat", "sun,mon", "mon,funday", "wed", _ALL_DAYS, "mon,tue,wed,thu,fri", " , ",
+                "mon;tue"):
+        assert sel.parse_post_weekdays(Settings(MARKETING_POST_WEEKDAYS=raw).MARKETING_POST_WEEKDAYS) == \
+            sel.parse_post_weekdays(raw), raw
+
+
+def test_batch3_news_recent_limit_follows_the_switch_at_call_time(monkeypatch, fresh_weekday_cache):
+    """D17: RECENT_WINDOW posting days of history at the cadence in force NOW — the shared settings object is
+    patched in place, nothing reloaded: the read happens on every call, and switching back gives today's 240."""
+    assert sel.settings is _app_settings                   # selection reads the one settings object the app reads
+    monkeypatch.setattr(sel.settings, "MARKETING_POST_WEEKDAYS", Settings.model_fields["MARKETING_POST_WEEKDAYS"].default)
+    assert sel.post_weekdays() == POST_WEEKDAYS and sel.news_recent_limit() == 240
+    monkeypatch.setattr(sel.settings, "MARKETING_POST_WEEKDAYS", _ALL_DAYS)
+    assert sel.post_weekdays() == (0, 1, 2, 3, 4, 5, 6) and sel.news_recent_limit() == 420
+    monkeypatch.setattr(sel.settings, "MARKETING_POST_WEEKDAYS", "mon,tue,wed,thu,fri")
+    assert sel.news_recent_limit() == 300
+    monkeypatch.setattr(sel.settings, "MARKETING_POST_WEEKDAYS", "funday")      # a bad value reads as the default
+    assert sel.news_recent_limit() == 240
+    monkeypatch.setattr(sel.settings, "MARKETING_POST_WEEKDAYS", "mon,tue,thu,sat")
+    assert sel.news_recent_limit() == 240 == sel.RECENT_WINDOW * len(POST_WEEKDAYS)
+
+
+# ── Batch 3 (2026-10-20, WP-C): the posting-day calendar follows the switch ───
+#
+# `is_posting_day`, `posting_ordinal` and `plan_for` read MARKETING_POST_WEEKDAYS at call time (an explicit
+# `weekdays` overrides it); `plan_for` gives Wednesday and Friday Thursday's calendar and Sunday the Money Map tail
+# (D16). With the default every answer is today's: proved against LEGACY copies of the live functions (git HEAD
+# 56dcb662), pasted verbatim — only renamed, the module's unchanged helpers read through `sel` — so the new code
+# is never checked against its own arithmetic.
+
+from collections import Counter  # noqa: E402
+
+_LEGACY_POST_WEEKDAYS = (0, 1, 3, 5)
+_LEGACY_MONDAY = ("ceo_buys", "insider_buys", "money_map", "theme_explainer", sel.LESSON)
+_LEGACY_TUESDAY_TAIL = ("company_stakes", "theme_explainer", "money_map", sel.LESSON)
+_LEGACY_THURSDAY_TAIL = ("money_map", "theme_explainer", sel.LESSON)
+
+
+def _legacy_is_posting_day(run_date: date) -> bool:
+    return run_date.weekday() in _LEGACY_POST_WEEKDAYS
+
+
+def _legacy_posting_ordinal(run_date: date) -> int:
+    days = (run_date - EPOCH).days
+    weeks, offset = divmod(days, 7)  # EPOCH is a Monday, so `offset` is the weekday
+    return weeks * len(_LEGACY_POST_WEEKDAYS) + sum(1 for w in _LEGACY_POST_WEEKDAYS if w < offset)
+
+
+def _legacy_choose(pool, run_date: date, recent=(), *, templates=None) -> Selection:
+    if not _legacy_is_posting_day(run_date):
+        return Selection(rest_day=True)
+    ordinal = _legacy_posting_ordinal(run_date)
+    recent_list: List[str] = list(recent)
+    pool_list = sorted(set(pool))
+    window = max(0, min(len(pool_list) - 1, RECENT_WINDOW))
+    key = choose_item(pool_list, ordinal, recent_list[:window])
+    if key is None:
+        return Selection(rest_day=False, posting_ordinal=ordinal)
+    kind = key.split(":", 1)[0]
+    return Selection(
+        rest_day=False, source_ref=key, template_id=choose_template(kind, ordinal, templates),
+        posting_ordinal=ordinal,
+    )
+
+
+def _legacy_plan_for(d: date) -> sel.DayPlan:
+    if not _legacy_is_posting_day(d):
+        return sel.DayPlan(rest_day=True)
+    weekday = d.weekday()
+    if weekday == 0:
+        return sel.DayPlan(False, _LEGACY_MONDAY, "monday")
+    if weekday == 1:
+        congress = sel.is_congress_count_day(d)
+        season = sel.thirteen_f_season(d) is not None
+        head = (("congress_count",) if congress else ()) + (("thirteen_f",) if season else ())
+        reason = "tuesday" + ("_congress" if congress else "") + ("_13f" if season else "")
+        return sel.DayPlan(False, head + _LEGACY_TUESDAY_TAIL, reason)
+    if weekday == 3:
+        if sel.in_earnings_season(d):
+            return sel.DayPlan(False, ("earnings",) + _LEGACY_THURSDAY_TAIL, "thursday_earnings")
+        return sel.DayPlan(False, _LEGACY_THURSDAY_TAIL, "thursday_off")
+    if weekday == 5:
+        return sel.DayPlan(False, (sel.LESSON,), "saturday")
+    return sel.DayPlan(False, (sel.LESSON,), "lesson_only")
+
+
+def _cadence(monkeypatch, raw: str) -> None:
+    monkeypatch.setattr(sel.settings, "MARKETING_POST_WEEKDAYS", raw)
+
+
+@pytest.mark.parametrize("raw", [None, "mon,tue,thu,sat", " Sat,thu , TUE,mon"], ids=["unset", "canonical", "loose"])
+def test_batch3_the_default_cadence_is_byte_identical_for_two_years(monkeypatch, raw):
+    """D15-D17: with MARKETING_POST_WEEKDAYS unset (its declared default) or any spelling of it, every day from a year
+    before EPOCH to two years after it gets exactly the live code's answers — the posting day, the ordinal, the series
+    plan, and `choose` fed back its own picks as production feeds them (the newest `news_recent_limit()` refs, newest
+    first), for the real pool's size (34) and the golden pool."""
+    _cadence(monkeypatch, Settings.model_fields["MARKETING_POST_WEEKDAYS"].default if raw is None else raw)
+    assert sel.post_weekdays() == _LEGACY_POST_WEEKDAYS and sel.news_recent_limit() == 240
+    pools = {"pool_34": _pool(20) + _pool(14, "money_moves"), "golden": _GOLDEN_POOL}
+    history: Dict[str, List[str]] = {name: [] for name in pools}
+    d, end, posting = EPOCH - timedelta(days=365), EPOCH + timedelta(days=730), 0
+    while d <= end:
+        assert sel.is_posting_day(d) is _legacy_is_posting_day(d), d
+        assert sel.posting_ordinal(d) == _legacy_posting_ordinal(d), d
+        assert sel.plan_for(d) == _legacy_plan_for(d), d
+        for name, pool in pools.items():
+            recent = history[name][::-1][:sel.news_recent_limit()]
+            got = sel.choose(pool, d, recent)
+            assert got == _legacy_choose(pool, d, recent), (name, d)
+            if not got.rest_day:
+                history[name].append(got.source_ref)
+        posting += _legacy_is_posting_day(d)
+        d += timedelta(days=1)
+    assert posting == len(history["golden"]) == len(history["pool_34"]) > 600
+
+
+#: Weekday sets the brute-force oracle walks: the default, every day, a working week, and one-day weeks at either end.
+_WEEKDAY_SETS = {"default": (0, 1, 3, 5), "every_day": (0, 1, 2, 3, 4, 5, 6), "mon_fri": (0, 1, 2, 3, 4),
+                 "sat": (5,), "sun": (6,)}
+
+
+def _per_weekday_ordinal(d: date, days: Sequence[int]) -> int:
+    """An oracle independent of the module's `weeks × len + partial`: each posting weekday's dates counted on
+    proleptic ordinals in [EPOCH, d) — minus those in [d, EPOCH) before the epoch. Exact at `date.min` / `date.max`."""
+    lo, hi, sign = ((EPOCH.toordinal(), d.toordinal(), 1) if d >= EPOCH else (d.toordinal(), EPOCH.toordinal(), -1))
+    total = 0
+    for w in days:
+        first = lo + (w - date.fromordinal(lo).weekday()) % 7
+        if first < hi:
+            total += (hi - first - 1) // 7 + 1
+    return sign * total
+
+
+@pytest.mark.parametrize("name", sorted(_WEEKDAY_SETS))
+def test_batch3_posting_ordinal_matches_brute_force_for_any_weekday_set(monkeypatch, name):
+    """For each calendar — through the setting AND through the explicit `weekdays` — the ordinal equals a day-by-day
+    count over ±3 years around EPOCH (a leap day, week and year boundaries) and a per-weekday count at the extremes of
+    `datetime.date`; consecutive posting days get consecutive ordinals, and a week moves the ordinal by its size."""
+    days = _WEEKDAY_SETS[name]
+    _cadence(monkeypatch, ",".join(sel.WEEKDAY_TOKENS[w] for w in days))
+    assert sel.post_weekdays() == days and sel.news_recent_limit() == RECENT_WINDOW * len(days)
+    start, end = EPOCH - timedelta(days=3 * 366), EPOCH + timedelta(days=3 * 366)
+    expected = -sum(1 for i in range((EPOCH - start).days) if (start + timedelta(days=i)).weekday() in days)
+    d = start
+    while d <= end:
+        assert sel.posting_ordinal(d) == sel.posting_ordinal(d, days) == expected == _per_weekday_ordinal(d, days), d
+        assert sel.is_posting_day(d) is sel.is_posting_day(d, days) is (d.weekday() in days), d
+        expected += d.weekday() in days
+        d += timedelta(days=1)
+    for d in (date.min, date.min + timedelta(days=1), date(1, 1, 8), date(1970, 1, 1), date(2000, 2, 29),
+              date(2100, 3, 1), date(9999, 12, 24), date.max - timedelta(days=1), date.max):
+        assert sel.posting_ordinal(d) == sel.posting_ordinal(d, days) == _per_weekday_ordinal(d, days), d
+        if d <= date.max - timedelta(days=7):
+            assert sel.posting_ordinal(d + timedelta(days=7)) - sel.posting_ordinal(d) == len(days), d
+
+
+def test_batch3_the_switch_is_read_at_call_time(monkeypatch):
+    """D15: the shared settings object flipped in place, no reload — the next call answers on the new calendar, and
+    flipping back gives exactly the old answers. An explicit `weekdays` overrides the setting either way."""
+    wed = date(2026, 11, 4)                       # in earnings season: 35 days after the Q3 quarter end
+    pool = _pool(9) + _pool(6, "money_moves")
+
+    def answers():
+        return sel.is_posting_day(wed), sel.posting_ordinal(wed), sel.plan_for(wed), sel.choose(pool, wed)
+
+    assert sel.settings is _app_settings
+    before = answers()
+    assert before[:3] == (False, 26, sel.DayPlan(True)) and before[3] == Selection(rest_day=True)
+    _cadence(monkeypatch, _ALL_DAYS)
+    posting, ordinal, plan, pick = answers()
+    assert (posting, ordinal) == (True, 44)       # 6 weeks of 7 days since EPOCH, plus Mon and Tue
+    assert plan == sel.DayPlan(False, ("earnings", "money_map", "theme_explainer", sel.LESSON), "wednesday_earnings")
+    assert not pick.rest_day and pick.source_ref in pool and pick.posting_ordinal == 44
+    # an explicit calendar beats the setting, both ways
+    assert sel.plan_for(wed, POST_WEEKDAYS) == sel.DayPlan(True) and not sel.is_posting_day(wed, POST_WEEKDAYS)
+    assert sel.posting_ordinal(wed, POST_WEEKDAYS) == 26
+    _cadence(monkeypatch, "mon,tue,thu,sat")
+    assert answers() == before
+    assert sel.is_posting_day(wed, (2,)) and sel.plan_for(wed, [2, 2]).reason == "wednesday_earnings"
+
+
+@pytest.mark.parametrize("junk", [[7], [-1], [True], ["wed"], [2.0], [2, None]])
+def test_batch3_an_explicit_calendar_that_is_not_weekdays_is_refused_and_the_setting_never_raises(monkeypatch, junk):
+    """An explicit `weekdays` is code, not configuration: one that is not `date.weekday()` numbers is a ValueError, never
+    a silently different calendar. The SETTING is configuration: junk there reads as the default and never raises."""
+    wed, thu = date(2026, 11, 4), date(2026, 11, 5)
+    for call in (lambda: sel.is_posting_day(wed, junk), lambda: sel.posting_ordinal(wed, junk),
+                 lambda: sel.plan_for(wed, junk)):
+        with pytest.raises(ValueError, match="date.weekday"):
+            call()
+    for value in (None, 7, ["wed"], "", "funday"):
+        _cadence(monkeypatch, value)
+        assert not sel.is_posting_day(wed) and sel.is_posting_day(thu)
+        assert sel.plan_for(wed) == sel.DayPlan(True) and sel.choose(_pool(5), wed) == Selection(rest_day=True)
+        assert sel.posting_ordinal(thu) == _legacy_posting_ordinal(thu)
+    # an EMPTY explicit calendar is consistent, not junk: no posting day, every ordinal 0 (the setting never is empty)
+    assert not sel.is_posting_day(thu, ()) and sel.posting_ordinal(thu, ()) == 0 and sel.plan_for(thu, ()).rest_day
+
+
+def _plans(start: date, end: date):
+    d = start
+    while d < end:
+        yield d, sel.plan_for(d)
+        d += timedelta(days=1)
+
+
+def test_batch3_the_seven_day_calendar(monkeypatch):
+    """D16 at seven days: Wednesday and Friday lead with earnings in season and run the Money Map tail out of it;
+    Sunday runs the Money Map tail ALWAYS — never earnings (it leads Wed/Thu/Fri); Saturday is the lesson alone;
+    Monday, Tuesday and Thursday plan exactly as on the default calendar. Ten years, every chain ending once in the
+    lesson, no rest day, never the `lesson_only` guard."""
+    tail = ("money_map", "theme_explainer", sel.LESSON)
+    _cadence(monkeypatch, _ALL_DAYS)
+    assert sel.plan_for(date(2026, 11, 4)) == sel.DayPlan(False, ("earnings",) + tail, "wednesday_earnings")
+    assert sel.plan_for(date(2026, 11, 6)) == sel.DayPlan(False, ("earnings",) + tail, "friday_earnings")
+    assert sel.plan_for(date(2026, 12, 2)) == sel.DayPlan(False, tail, "wednesday_off")
+    assert sel.plan_for(date(2026, 12, 4)) == sel.DayPlan(False, tail, "friday_off")
+    sunday = date(2026, 11, 8)
+    assert sel.in_earnings_season(sunday) and sel.plan_for(sunday) == sel.DayPlan(False, tail, "sunday")
+    seen = Counter()
+    for d, plan in _plans(date(2026, 1, 1), date(2036, 1, 1)):
+        weekday = d.weekday()
+        assert not plan.rest_day and plan.chain[-1] == sel.LESSON and plan.chain.count(sel.LESSON) == 1, (d, plan)
+        assert len(set(plan.chain)) == len(plan.chain) and plan.reason != "lesson_only", (d, plan)
+        assert set(plan.chain) - {sel.LESSON} <= set(sel.SERIES_BY_ID), (d, plan)
+        if weekday in (0, 1, 3):
+            assert plan == sel.plan_for(d, POST_WEEKDAYS) == _legacy_plan_for(d), d
+        elif weekday in (2, 4):
+            season = sel.in_earnings_season(d)
+            assert plan.chain == (("earnings",) if season else ()) + tail, d
+            assert plan.reason == ("wednesday" if weekday == 2 else "friday") + ("_earnings" if season else "_off"), d
+            seen["midweek_earnings"] += season
+        elif weekday == 5:
+            assert plan == sel.DayPlan(False, (sel.LESSON,), "saturday"), d
+        else:
+            assert plan == sel.DayPlan(False, tail, "sunday") and "earnings" not in plan.chain, d
+            seen["sunday_in_season"] += sel.in_earnings_season(d)
+    # not vacuous: the ten years hold hundreds of earnings Wednesdays/Fridays and in-season Sundays
+    assert seen["midweek_earnings"] > 300 and seen["sunday_in_season"] > 150, seen
+    # every weekday's plan at the extremes of `datetime.date` (no quarter end before year 1, no 13F calendar)
+    for d in [date.min + timedelta(days=i) for i in range(7)] + [date.max - timedelta(days=i) for i in range(7)]:
+        plan = sel.plan_for(d)
+        assert not plan.rest_day and plan.chain[-1] == sel.LESSON and plan.reason != "lesson_only", (d, plan)
+
+
+#: The owner's production series at switch-on (plan, owner decision 5: every series except theme_explainer).
+_PRODUCTION_SERIES = "ceo_buys,insider_buys,thirteen_f,money_map,earnings,company_stakes,congress_count"
+
+
+@pytest.mark.parametrize("series_raw", [_PRODUCTION_SERIES, "ceo_buys,insider_buys,thirteen_f,money_map"],
+                         ids=["production", "default_switch"])
+def test_batch3_one_lesson_only_day_a_week_at_seven_days(monkeypatch, series_raw):
+    """With classes A,C,F at seven days a week, Saturday stays the week's ONE lesson-only day (every other day has a
+    news series whose chain can post), so the lesson keeps its weekly slot and the news days are six — the runway and
+    `news_recent_limit()` both rest on it."""
+    _cadence(monkeypatch, _ALL_DAYS)
+    shipped = sel.parse_news_series(series_raw)
+    assert "theme_explainer" not in shipped
+    acf = frozenset({"A", "C", "F"})
+    day = date(2026, 10, 19)                       # a Monday
+    for _week in range(3 * 52):
+        lesson_days = [d for d in (day + timedelta(days=i) for i in range(7))
+                       if sel.enabled_chain(sel.plan_for(d).chain, acf, shipped=shipped) == (sel.LESSON,)]
+        assert [d.weekday() for d in lesson_days] == [5], (day, lesson_days)
+        day += timedelta(days=7)
+
+
+# ── the cadence switched mid-week: no lesson repeats, none is skipped ─────────
+
+_SEVEN, _MON_FRI, _DEFAULT = _ALL_DAYS, "mon,tue,wed,thu,fri", "mon,tue,thu,sat"
+#: The flips (D17, the spec's switch matrix): 4 → 7 on a Wednesday, 7 → 4 on a Thursday and back on the Friday,
+#: 7 → Mon-Fri, back to the default. Applied in the morning, before the day's selection.
+_FLIPS = {date(2026, 11, 4): _SEVEN, date(2027, 3, 4): _DEFAULT, date(2027, 3, 5): _SEVEN,
+          date(2027, 9, 8): _MON_FRI, date(2028, 3, 2): _DEFAULT}
+#: When no news day ever falls back, Saturday is the week's only lesson — the read's worst case. A week without
+#: Saturday then has no lesson at all, and a lasting 7 → 4 switch is the accepted gap (pinned in the next test):
+#: this regime runs the first three flips and then holds seven days for two and a half years.
+_FLIPS_SATURDAY_ONLY = {date(2026, 11, 4): _SEVEN, date(2027, 3, 4): _DEFAULT, date(2027, 3, 5): _SEVEN}
+_SIM_START, _SIM_END = date(2026, 10, 19), date(2029, 10, 19)
+
+
+def _simulate_lessons(monkeypatch, n: int, classes: str, fallback_every: Optional[int],
+                      flips: Dict[date, str]) -> List[str]:
+    """Three years of production days, with the real `plan_for` / `enabled_chain` / `choose` / `lesson_refs` /
+    `news_recent_limit` over a NEWEST-FIRST ledger of every posting day's ref (rest days store none, as
+    `recent_source_refs` reads them). Classes "A": every posting day is a lesson. Classes "A,C,F" (the production
+    series): a news day writes a `news:` ref, except every `fallback_every`-th news day, which falls through to the
+    lesson (None: never). The cadence flips at the start of each day in `flips`; returns the lessons in order."""
+    pool = _pool(n)
+    enabled = mschemas.parse_content_classes(classes)
+    shipped = sel.parse_news_series(_PRODUCTION_SERIES)
+    templates = sel.LESSON_TEMPLATE_IDS if enabled != frozenset({"A"}) else None
+    ledger: List[str] = []
+    lessons: List[str] = []
+    news_days = 0
+    calendar = sel.parse_post_weekdays(_DEFAULT)
+    _cadence(monkeypatch, _DEFAULT)
+    d = _SIM_START
+    while d <= _SIM_END:
+        if d in flips:
+            _cadence(monkeypatch, flips[d])
+            calendar = sel.parse_post_weekdays(flips[d])
+        plan = sel.plan_for(d)
+        # not vacuous: every flip really changed the calendar the day runs on
+        assert plan.rest_day is (d.weekday() not in calendar), d
+        if not plan.rest_day:
+            chain = sel.enabled_chain(plan.chain, enabled, shipped=shipped)
+            lesson = chain == (sel.LESSON,)
+            if not lesson:
+                lesson = bool(fallback_every) and news_days % fallback_every == fallback_every - 1
+                news_days += 1
+            if lesson:
+                recent = ledger[::-1][:sel.news_recent_limit()]
+                pick = sel.choose(pool, d, sel.lesson_refs(recent), templates=templates)
+                assert not pick.rest_day and pick.source_ref in pool, (d, pick)
+                lessons.append(pick.source_ref)
+                ledger.append(pick.source_ref)
+            else:
+                ledger.append(f"news:{chain[0]}:{d.isoformat()}")
+        d += timedelta(days=1)
+    return lessons
+
+
+def _repeats(lessons: List[str], n: int) -> List[int]:
+    """The start of every n consecutive lessons that are NOT all different."""
+    return [i for i in range(len(lessons) - n + 1) if len(set(lessons[i:i + n])) < n]
+
+
+@pytest.mark.parametrize("regime", ["A", "ACF_every_5th_falls_back", "ACF_saturday_only"])
+@pytest.mark.parametrize("n", [12, 34, 45])
+def test_batch3_a_cadence_switch_mid_week_never_repeats_or_skips_a_lesson(monkeypatch, n, regime):
+    """The proof behind the module docstring, by simulation: whatever the posting days do mid-week — 4 → 7 on a
+    Wednesday, 7 → 4 on a Thursday and back on the Friday, 7 → Mon-Fri, back to the default — any n consecutive
+    lessons are all different (none repeats) and every n-aligned block is the whole pool (none is skipped): once the
+    read holds pool − 1 lessons, the recent window decides every pick, whatever the renumbered ordinal says.
+
+    The Saturday-only regime is the read's worst case — one lesson a week at seven days — and is what makes
+    `news_recent_limit()` scale with the cadence: its 420 rows hold 60 Saturdays, a constant 240 only 34, and a pool
+    of 45 then repeats (mutation M13)."""
+    classes, fallback, flips = {
+        "A": ("A", None, _FLIPS),
+        "ACF_every_5th_falls_back": ("A,C,F", 5, _FLIPS),
+        "ACF_saturday_only": ("A,C,F", None, _FLIPS_SATURDAY_ONLY),
+    }[regime]
+    lessons = _simulate_lessons(monkeypatch, n, classes, fallback, flips)
+    assert len(lessons) >= 3 * n, len(lessons)                 # several whole cycles, or the claim is vacuous
+    assert _repeats(lessons, n) == []
+    for i in range(0, len(lessons) - n + 1, n):
+        assert sorted(lessons[i:i + n]) == sorted(_pool(n)), i
+
+
+def test_batch3_switching_seven_days_back_to_four_keeps_todays_pool_whole(monkeypatch):
+    """The accepted gap (spec risks; the selection docstring): more than 60 weeks at seven days with Saturday the only
+    lesson, then back to four days for good. The 240-row read right after the switch holds ~34 weeks of seven-day
+    history — 34 lessons — so today's pool of 34 (and up to 36) still never repeats; a pool of 45 does, and even then
+    never a lesson fewer than 35 lessons old. (A 4 → 7 switch has no such gap: the read grows.)"""
+    flips = {date(2026, 11, 4): _SEVEN, date(2028, 3, 2): _DEFAULT}
+
+    def nearest_repeat(lessons: List[str]) -> Optional[int]:
+        last: Dict[str, int] = {}
+        gaps = []
+        for i, ref in enumerate(lessons):
+            if ref in last:
+                gaps.append(i - last[ref])
+            last[ref] = i
+        return min(gaps) if gaps else None
+
+    for n in (34, 36):
+        lessons = _simulate_lessons(monkeypatch, n, "A,C,F", None, flips)
+        assert len(lessons) >= 3 * n and _repeats(lessons, n) == [], n
+    lessons = _simulate_lessons(monkeypatch, 45, "A,C,F", None, flips)
+    assert _repeats(lessons, 45), "the gap no longer bites: update the selection docstring and the docs"
+    assert nearest_repeat(lessons) >= 35

@@ -126,6 +126,9 @@ CANARY_STRINGS = (
 CANARY_NUMBERS = (
     25.123456, 8080808080.0, 7777777.0, 1.2345, 3.21, 99.99, 9191919191919.0, 0.123456789,
     15151515151.0, 4242424242.0, 9.8765, 123456789.0, 31313.13,
+    # Batch 1: the earnings statements' own revenue — within 3% of the calendar's (so the period check
+    # places the quarter) yet never a travelling figure: only the calendar's revenue and the period end do
+    1101234567.0, 1051234567.0,
 )
 
 
@@ -188,8 +191,13 @@ def _sheets(got) -> List[Dict[str, Any]]:
             for rec in got.records]
 
 
-async def _run(series, fmp, **deps):
-    return await A.candidates(series, run_date=T.RUN, exclude=frozenset(), limit=5,
+async def _run(series, fmp, *, run_date=None, **deps):
+    """The adapter on `T.RUN` — Money Map on `T.MM_RUN`, where the fixtures' Apple fiscal 2025 is still the
+    latest year (Batch 1's `money_map_next_year_due` refuses it on `T.RUN`, and `_sheets` needs a record)."""
+    if run_date is None:
+        run_date = T.MM_RUN if series == "money_map" else T.RUN
+    deps.setdefault("actions", T.SplitActions())    # hermetic: the 13F split re-check (review of 2026-10-16, F1)
+    return await A.candidates(series, run_date=run_date, exclude=frozenset(), limit=5,
                               deadline=time.monotonic() + 60.0, deps=A.NewsDeps(fmp=fmp, **deps))
 
 
@@ -200,6 +208,19 @@ def _fresh(monkeypatch):
     monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", False)
     yield
     A.clear_memo()
+
+
+#: The REAL members-elect window (owner decision 4), kept before the autouse fixture below replaces it.
+REAL_MEMBERS_ELECT_WINDOW = R.members_elect_window
+
+
+@pytest.fixture(autouse=True)
+def _names_outside_the_members_elect_window(monkeypatch):
+    """`T.RUN` (Nov 16, 2026) is inside the members-elect window, where no person is built at all. The
+    insider canary run pins the NAMED path (a rendered, corroborated name is the one person value ALLOWED
+    to travel), so the window is off here; `test_inside_the_members_elect_window_no_person_travels`
+    restores it."""
+    monkeypatch.setattr(R, "members_elect_window", lambda day: False)
 
 
 #: Each company's issuer CIK — a canary: it keys the line check and the per-issuer Form 4/A read
@@ -260,6 +281,21 @@ async def test_insider_series_leak_nothing_but_their_fields(series, caplog):
     log = caplog.text.lower()
     assert "pelosi" not in log and "nancy" not in log and "zqxreporter" not in log
     assert "zqxurl" not in log and "https://" not in log
+
+
+@pytest.mark.asyncio
+async def test_inside_the_members_elect_window_no_person_travels(monkeypatch):
+    """Owner decision 4 (Batch 1): inside the window (Election Day through January 3) no person value
+    leaves the adapter — not even the rendered, corroborated CEO the named run above lets travel."""
+    monkeypatch.setattr(R, "members_elect_window", REAL_MEMBERS_ELECT_WINDOW)
+    fmp = T.FakeFMP(insider=_insider_rows(), profiles=_insider_profiles())
+    got = await _run("ceo_buys", fmp)
+    assert [r.company.symbol for r in got.records[0].rows] == ["GME", "FOX"]          # anti-vacuity: the rows
+    assert all(r.person_name is None for r in got.records[0].rows)
+    for sheet in _sheets(got):
+        _assert_clean(sheet)
+        low = json.dumps(sheet).lower()
+        assert "cohen" not in low and "ryan" not in low
 
 
 def _canary_book(cik: str) -> Dict[Any, Any]:
@@ -441,17 +477,27 @@ async def test_earnings_leak_nothing_but_their_fields():
                   revenueEstimatedHigh=15151515151.0, numberOfAnalysts=31313.13, url="https://zqx.example/ZQXURL")
     cal = {"2027-01-12": [T.erow("AAA", "2027-01-12", 1.5, 1.0, 1.1e9, 1.0e9, **canary)],
            "2027-01-11": [T.erow("BBB", "2027-01-11", -0.4, -0.5, **canary)]}
-    profiles = {s: _canary_profile(s, f"{s.title()} Industries Inc.", price=25.123456, cap=8080808080.0)
-                for s in ("AAA", "BBB")}
-    # The reporting-currency read (review round 9): only its "USD" decides; nothing of it travels.
-    statement = {"date": "2026-12-31", "reportedCurrency": "USD", "revenue": 15151515151.0, "eps": 9.8765,
+    # One canary CIK PER company (review of 2026-10-16): the earnings series now reads a profile's CIK as the
+    # issuer's identity (one record per issuer), so a CIK shared by both would rightly make them one company.
+    # The sector is a canary too: the REIT gate reads it (`eps_basis_reit`) and it never travels.
+    profiles = {s: dict(_canary_profile(s, f"{s.title()} Industries Inc.", price=25.123456, cap=8080808080.0),
+                        cik=cik, sector="Technology ZQXSECTOR")
+                for s, cik in (("AAA", "0004242425"), ("BBB", "0004242426"))}
+    # The quarterly-statement read (review round 9's currency read; Batch 1's period check; the review of
+    # 2026-10-16's EPS-basis check): only its "USD" and the period end it places travel — never its revenue (a
+    # canary within 3% of the calendar's), its EPS or diluted EPS, CIK, links, or an older quarter's figure.
+    statement = {"date": "2026-12-31", "reportedCurrency": "USD", "eps": 9.8765, "epsDiluted": 0.123456789,
                  "cik": "0004242424", "link": "https://zqx.example/ZQXINCOMELINK",
                  "finalLink": "https://zqx.example/ZQXINCOMELINK"}
-    fmp = T.FakeFMP2b(calendar=cal, profiles=profiles, currency={s: [dict(statement, symbol=s)] for s in profiles})
+    quarters = {s: [dict(statement, symbol=s, revenue=rev), dict(statement, symbol=s, date="2026-09-30",
+                                                                 revenue=4242424242.0)]
+                for s, rev in (("AAA", 1101234567.0), ("BBB", 1051234567.0))}
+    fmp = T.FakeFMP2b(calendar=cal, profiles=profiles, currency=quarters)
     got = await A.candidates("earnings", run_date=T.EARN_RUN, exclude=frozenset(), limit=5,
                              deadline=time.monotonic() + 60.0, deps=A.NewsDeps(fmp=fmp))
     assert [r.company.symbol for r in got.records] == ["AAA", "BBB"]                     # anti-vacuity
-    assert sorted(sym for sym, _limit in fmp.currency_calls) == ["AAA", "BBB"]
+    assert all(r.period_end.isoformat() == "2026-12-31" for r in got.records)          # the read was used
+    assert sorted(sym for sym, _limit in fmp.statement_calls) == ["AAA", "BBB"]
     for sheet in _sheets(got):
         _assert_clean(sheet)
         low = json.dumps(sheet).lower()

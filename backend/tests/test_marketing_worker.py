@@ -1815,7 +1815,9 @@ def test_the_worker_mirrors_the_servers_image_contract():
     # Every format the server can freeze for a platform is one the worker records.
     for platform, allowed in sch.POST_FORMATS_BY_PLATFORM.items():
         assert set(allowed) <= set(rd.FROZEN_FORMATS), platform
-    assert rd.RENDER_STAGE_VERSION == "render/v3"      # v3: drop 2a (template scripts)
+    # v3: drop 2a (template scripts); v4: Batch 2 (video features); v5: its fix round (caption figures, the
+    # data card's slot, the push-in fallback)
+    assert rd.RENDER_STAGE_VERSION == "render/v5"
     from marketing import logos
 
     assert rd.worst_case_seconds(120.0) == (video.worst_case_seconds(120.0) + rd.IMAGE_RENDER_SECONDS + 120.0
@@ -1847,6 +1849,50 @@ def test_the_render_readiness_check_names_every_missing_piece(m, monkeypatch, tm
     assert not any("logo" in p or "Inter" in p for p in out["problems"])   # the vendored assets exist
 
 
+def _filter_names(argv: List[str]) -> set:
+    """Every filter NAME in a render argv's filtergraph: chains split on ';', labels stripped, filters split
+    on ',' (no expression holds one — video.push_in_filters' own contract), the name before '='."""
+    graph = argv[argv.index("-filter_complex") + 1]
+    names = set()
+    for chain in graph.split(";"):
+        body = re.sub(r"(\[[^\]]*\])+$", "", re.sub(r"^(\[[^\]]*\])+", "", chain))
+        names |= {f.split("=", 1)[0] for f in body.split(",") if f}
+    return names
+
+
+@pytest.mark.parametrize("push_in", [False, True])
+def test_the_preflight_checks_every_filter_the_render_can_use(m, push_in):
+    """VR-1 (2026-10-20): RENDER_FILTERS is what the preflight asks `ffmpeg -filters` for. The push-in added
+    zoompan and tpad to the render argv but not to the list, so an image whose ffmpeg lacked them still
+    reported ready and lost its first push-in day inside ffmpeg. Every name the argv can carry is listed."""
+    from marketing import video as vid
+
+    segs = vid.timeline([{"w": "a", "s": 0.1, "e": 0.5, "line": 0}, {"w": "b", "s": 1.6, "e": 2.0, "line": 1},
+                         {"w": "c", "s": 3.2, "e": 3.6, "line": 2}], 4, 4.0, 2.0, hook_card=True)
+    argv = vid.build_argv(ffmpeg="ffmpeg", card_files=[f"c{s.card}.png" for s in segs], segments=segs,
+                          audio_file="a.m4a", ass_file="c.ass", fonts_dir="fonts", out_file="o.mp4", threads=2,
+                          push_in=push_in)
+    names = _filter_names(argv)
+    assert {"setsar", "scale", "format", "loop", "setpts", "fps", "xfade", "ass", "apad"} <= names   # not vacuous
+    assert ({"zoompan", "tpad"} <= names) == push_in
+    assert names <= set(m.RENDER_FILTERS), sorted(names - set(m.RENDER_FILTERS))
+
+
+def test_an_ffmpeg_without_the_push_in_filters_is_not_ready(m, monkeypatch):
+    """The degraded image the check exists for: `-filters` lists everything but zoompan and tpad → not ready,
+    and the problem names them (the worker's preflight alarm), never a silent pass."""
+    listing = "\n".join(f" ... {name:<16} V->V       filter" for name in m.RENDER_FILTERS
+                        if name not in ("zoompan", "tpad"))
+    monkeypatch.setattr(m.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(m.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=listing))
+    out = m.render_readiness(str(_PKG / "assets" / "fonts"))
+    problems = [p for p in out["problems"] if "lacks filter" in p]
+    assert not out["ready"] and problems and "zoompan" in problems[0] and "tpad" in problems[0], out
+    full = "\n".join(f" ... {name:<16} V->V       filter" for name in m.RENDER_FILTERS)
+    monkeypatch.setattr(m.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=full))
+    assert not any("lacks filter" in p for p in m.render_readiness(str(_PKG / "assets" / "fonts"))["problems"])
+
+
 def test_the_render_threads_follow_the_override_then_the_cgroup(monkeypatch):
     from marketing import render as rd
 
@@ -1869,8 +1915,24 @@ def test_the_render_key_changes_with_every_input_that_changes_the_bytes():
     for change in ({"audio_sha256": "b" * 64}, {"threads": 3}, {"card_version": "c2"},
                    {"video_version": "v2"}, {"card_texts": [["Caydex"], ["T", "B!"]]},
                    {"words": [{"w": "hi", "s": 0.0, "e": 0.5, "line": 0}]}, {"max_seconds": 60.0},
-                   {"layout_engine": "basic"}):
+                   {"layout_engine": "basic"},
+                   # Batch 2: the frozen features (the push-in moves card 0) and the card KINDS (a hook card
+                   # and a text card can draw the same string, and only the hook card hides its captions)
+                   {"video_features": ["push_in"]}, {"video_features": ["hook_card"]},
+                   {"card_kinds": ["brand", "text"]}, {"card_kinds": ["hook", "text"]},
+                   # the fix round: which text card the data card replaced (CARDS-B2-1) — on its own
+                   {"data_card_slot": 0}, {"data_card_slot": 1}):
         assert rd.render_key(**{**base, **change}) != k, change
+    assert rd.render_key(**base, data_card_slot=0) != rd.render_key(**base, data_card_slot=1)
+    assert rd.render_key(**base, data_card_slot=None) == k                # no data card: today's key
+    # the features are a SET (sorted), and a bare string is refused rather than read as letters
+    assert (rd.render_key(**base, video_features=["push_in", "hook_card"])
+            == rd.render_key(**base, video_features=("hook_card", "push_in")))
+    with pytest.raises(ValueError, match="not one string"):
+        rd.render_key(**base, video_features="push_in")
+    for bad in (True, "1", 1.0):
+        with pytest.raises(ValueError, match="data_card_slot"):
+            rd.render_key(**base, data_card_slot=bad)
 
 
 # ── no social secret reaches the worker (Phase 5, rules/marketing.md §2) ──────────────────────
@@ -2036,20 +2098,22 @@ def test_every_claim_declares_the_post_image_capability_the_server_accepts(m, mo
     declares `news_templates` (it draws the per-line template video, its opening card and the
     `image_spec` image) — without it the server gives the run the lesson, never a company-news day. Drop
     2b: `layouts_2b` (it draws the `pair` / `grid` images) — without it the server drops company_stakes
-    and theme_explainer from the day's chain."""
+    and theme_explainer from the day's chain. Batch 2: `video_v2` (it draws the frozen video features and
+    the end card the read-back names) — without it the server freezes no feature: today's video."""
     import logging
 
     from app.schemas.marketing import WORKER_CAPABILITIES, RunClaimRequest
 
     assert m.BackendClient.WORKER_CAPABILITIES == WORKER_CAPABILITIES == ("post_image", "news_templates",
-                                                                          "layouts_2b")
+                                                                          "layouts_2b", "video_v2")
     be = FakeBackend()
     _wire(m, monkeypatch, be)
     assert m.main() == 0
     (body,) = be.claim_bodies
-    assert body["capabilities"] == ["post_image", "news_templates", "layouts_2b"]
+    assert body["capabilities"] == ["post_image", "news_templates", "layouts_2b", "video_v2"]
     with caplog.at_level(logging.WARNING):
-        assert RunClaimRequest.model_validate(body).capabilities == ["layouts_2b", "news_templates", "post_image"]
+        assert RunClaimRequest.model_validate(body).capabilities == ["layouts_2b", "news_templates", "post_image",
+                                                                     "video_v2"]
     assert not [r for r in caplog.records if "does not know" in r.getMessage()]
 
 
@@ -2546,7 +2610,7 @@ def test_a_template_day_draws_logos_once_and_declares_only_what_the_server_allow
     allowed = set(tos.image_strings(script["image_spec"], script["logos"])) | {script["image_footer"]}
     assert set(img_md["onscreen_text"]) <= allowed and script["image_footer"] in img_md["onscreen_text"]
     assert not ({script["image_post"]["title"], *script["image_post"]["paragraphs"]} & set(img_md["onscreen_text"]))
-    assert img_md["image_layout"] == "rows" and img_md["card_version"] == cards.CARD_RENDER_VERSION == "cards/v3"
+    assert img_md["image_layout"] == "rows" and img_md["card_version"] == cards.CARD_RENDER_VERSION == "cards/v4"
     assert img_md["logos"] == [[e["key"], e["sha256"]] for e in script["logos"]]      # both drawn as logos
     # the video: brand text ∪ card titles/bodies ∪ disclaimer ∪ opening strings, disclaimer required
     vid_md = video["metadata"]
@@ -2828,3 +2892,525 @@ def test_the_render_download_reads_an_identity_body_raw_and_caps_the_wire_bytes(
     assert rd.download("https://sb.example/a.png", max_bytes=4, timeout=1.0, max_seconds=5.0) == b"abcd"
     with pytest.raises(rd.RenderInputError, match="exceeded 3 bytes"):
         rd.download("https://sb.example/a.png", max_bytes=3, timeout=1.0, max_seconds=5.0)
+
+
+# ── Batch 2 (2026-10-19, "first seconds"): the frozen video features at the render stage ──────────
+# The web freezes `video_features` per run and sends them, with the end card's CTA, in the script
+# read-back (`WorkerScript.video_features` / `end_card_cta`). The worker draws a feature ONLY when the
+# read-back carries it, declares every string a feature card drew, and keeps today's video — drop 1's
+# keyword-for-keyword render call — for any read-back without one (an older web, a run frozen without).
+
+
+def _feature_spy(seen: List[Dict[str, Any]]):
+    """produce_video's stand-in for a features day: records its keywords, really draws every FEATURE card
+    (Pillow, no ffmpeg — a hook / data card that could not be drawn would fail here), and answers like
+    _fake_produce_video."""
+    def produce(**kw):
+        from marketing import cards
+        from marketing import voice as vc
+
+        seen.append(kw)
+        font = str(Path(kw["fonts_dir"]) / "Inter-Bold.ttf")
+        for spec in kw["specs"]:
+            if spec.kind in ("hook", "data"):
+                cards.render_card(spec, font_path=font, layout_engine=kw["layout_engine"])
+        assert (Path(kw["workdir"]) / kw["audio_file"]).read_bytes() == _FAKE_M4A
+        return _FAKE_MP4, kw["narration_seconds"] + vc.DISCLAIMER_CARD_SECONDS, list(range(len(kw["specs"])))
+    return produce
+
+
+def _lesson_day(m, monkeypatch, script: Dict[str, Any]):
+    from marketing import render as rd
+
+    be = FakeBackend(script_states=[{"status": "accepted", "source_ref": "journey:mr_market",
+                                     "template_id": "case_story", "script": script}])
+    seen: List[Dict[str, Any]] = []
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "produce_video", _feature_spy(seen))
+    assert m.main() == 0, be.patches[-1:]
+    (video,) = [a for a in be.assets.values() if a["kind"] == "video"]
+    return be, seen, video["metadata"]
+
+
+def _lesson_allowed(script: Dict[str, Any]) -> set:
+    """The SERVER's allow-list for a lesson video (run_service._check_onscreen_text), from its own helpers."""
+    from app.schemas.marketing import VIDEO_BRAND_TEXT
+    from app.services.marketing import run_service as mrs
+
+    allowed = set(VIDEO_BRAND_TEXT) | {script["disclaimer_card"]}
+    allowed |= {c[k] for c in script["cards"] for k in ("title", "body") if c.get(k)}
+    if "hook_card" in mrs.frozen_video_features(script, template=False):
+        allowed.add(mrs.hook_card_text(script))
+    return allowed
+
+
+def test_a_lesson_day_draws_its_frozen_hook_card_and_push_in_and_declares_both(m, monkeypatch, env):
+    from app.schemas.marketing import AssetRegisterRequest
+    from marketing import cards
+
+    script = dict(_VIDEO_SCRIPT, video_features=["hook_card", "push_in"], end_card_cta=cards.CTA)
+    be, (kw,), md = _lesson_day(m, monkeypatch, script)
+    # the video OPENS on the hook card — the accepted hook, verbatim — alone over the narrated hook
+    assert [s.kind for s in kw["specs"]] == ["hook", "text", "text", "disclaimer"]
+    assert kw["specs"][0].title == script["hook"] and kw["hook_card"] is True and kw["push_in"] is True
+    # every string drawn is declared, and every declared string is one the server allows for THIS run
+    assert script["hook"] in md["onscreen_text"] and cards.CTA in md["onscreen_text"]
+    assert cards.LEGACY_CTA not in md["onscreen_text"]
+    assert set(md["onscreen_text"]) <= _lesson_allowed(script)
+    assert md["video_features"] == ["hook_card", "push_in"]
+    assert md["card_kinds"] == ["hook", "text", "text", "disclaimer"] and md["render_version"] == "render/v5"
+    assert md["push_in"] is True and "push_in_fallback" not in md and md["data_card_slot"] is None
+    for reg in be.registered:
+        AssetRegisterRequest.model_validate(reg)
+    assert be.run["status"] == "media_ready"
+
+
+@pytest.mark.parametrize("over, cta", [
+    ({}, "caydexinvest.com"),                                                   # an older web: neither key
+    ({"video_features": [], "end_card_cta": "caydexinvest.com"}, "caydexinvest.com"),     # frozen without
+    ({"video_features": [], "end_card_cta": "Search Caydex on the App Store"}, "Search Caydex on the App Store"),
+    ({"video_features": None}, "caydexinvest.com"),
+])
+def test_without_frozen_features_a_lesson_is_todays_video_with_drop_1s_call(m, monkeypatch, env, over, cta):
+    """Nothing frozen → no hook card, no push-in, and produce_video is called with drop 1's keywords
+    exactly (an older worker fake still fits); the end card is the CTA the read-back names, the legacy
+    one when it names none (the only one an older web's allow-list holds)."""
+    from marketing import cards
+
+    script = dict(_VIDEO_SCRIPT, **over)
+    _be, (kw,), md = _lesson_day(m, monkeypatch, script)
+    assert [s.kind for s in kw["specs"]] == ["text", "text", "disclaimer"]
+    assert "hook_card" not in kw and "push_in" not in kw
+    assert script["hook"] not in md["onscreen_text"]                   # the hook is caption-only, as before
+    assert cta in md["onscreen_text"] and set(md["onscreen_text"]) & set(cards.END_CARD_CTAS) == {cta}
+    assert set(md["onscreen_text"]) <= _lesson_allowed(script)
+    assert md["video_features"] == [] and md["card_kinds"] == ["text", "text", "disclaimer"]
+
+
+@pytest.mark.parametrize("features", ["push_in", ["data_card"], ["hook_card", "hook_card"], ["sparkles"],
+                                      [1], {"push_in": True}])
+def test_a_feature_list_that_does_not_read_back_is_todays_video(m, monkeypatch, env, caplog, features):
+    """A value the web would never send (a string, a template feature on a lesson, a duplicate, an unknown
+    name) is read as NO feature — logged ERROR, never half-trusted: today's video, never a failed day."""
+    caplog.set_level(logging.ERROR, logger="marketing.cards")
+    script = dict(_VIDEO_SCRIPT, video_features=features)
+    be, (kw,), md = _lesson_day(m, monkeypatch, script)
+    assert [s.kind for s in kw["specs"]] == ["text", "text", "disclaimer"]
+    assert "hook_card" not in kw and "push_in" not in kw and md["video_features"] == []
+    assert any("do not read back" in r.getMessage() for r in caplog.records)
+    assert be.run["status"] == "media_ready"
+
+
+def test_a_push_in_alone_moves_card_0_and_draws_nothing_new(m, monkeypatch, env):
+    script = dict(_VIDEO_SCRIPT, video_features=["push_in"])
+    _be, (kw,), md = _lesson_day(m, monkeypatch, script)
+    assert [s.kind for s in kw["specs"]] == ["text", "text", "disclaimer"]
+    assert kw["push_in"] is True and "hook_card" not in kw
+    assert script["hook"] not in md["onscreen_text"] and md["video_features"] == ["push_in"]
+
+
+def test_a_hook_card_that_cannot_be_drawn_opens_on_the_first_card_and_never_skips_the_day(
+        m, monkeypatch, env, caplog):
+    """A frozen hook card whose hook does not fit at the floor size (one 41-letter word) is left out with a
+    WARNING: the video opens on its first content card as before, the hook is not declared, the hook's
+    captions stay (no hook card hides them) — and the day goes on (never `unrenderable_text`)."""
+    caplog.set_level(logging.WARNING, logger="marketing.cards")
+    hook = "Supercalifragilisticexpialidociousnesses!"
+    script = dict(_VIDEO_SCRIPT, hook=hook, video_features=["hook_card", "push_in"])
+    be, (kw,), md = _lesson_day(m, monkeypatch, script)
+    assert [s.kind for s in kw["specs"]] == ["text", "text", "disclaimer"]
+    assert "hook_card" not in kw and kw["push_in"] is True
+    assert hook not in md["onscreen_text"] and md["video_features"] == ["hook_card", "push_in"]
+    assert md["card_kinds"] == ["text", "text", "disclaimer"]           # frozen vs drawn, side by side
+    assert any("no hook card" in r.getMessage() for r in caplog.records)
+    assert be.run["status"] == "media_ready"
+
+
+@pytest.mark.parametrize("features", [["push_in"], ["hook_card", "push_in"]])
+def test_a_features_video_is_reused_by_its_key_and_never_reused_for_another_feature_set(m, monkeypatch, env,
+                                                                                        features):
+    """The reuse key carries the frozen features and the card kinds: the same run re-claimed renders
+    nothing again, while a ready video drawn WITHOUT them is never mistaken for the features video — even
+    a push-in alone, which draws the very same cards and strings (only the key's features tell them apart)."""
+    script = dict(_VIDEO_SCRIPT, video_features=features)
+    be, seen, md = _lesson_day(m, monkeypatch, script)
+    assert len(seen) == 1
+    be.run.update({"status": "in_progress", "stage": "voiced"})
+    be.run["metadata"].pop("video_asset_id")
+    be.script_states = [{"status": "accepted", "script": script}]
+    assert m.main() == 0
+    assert len(seen) == 1 and len([a for a in be.assets.values() if a["kind"] == "video"]) == 1
+    # The same run read back WITHOUT the features: its ready video is another render — drawn again.
+    be.run.update({"status": "in_progress", "stage": "voiced"})
+    be.run["metadata"].pop("video_asset_id")
+    be.script_states = [{"status": "accepted", "script": dict(_VIDEO_SCRIPT)}]
+    assert m.main() == 0
+    assert len(seen) == 2 and "push_in" not in seen[1]
+    keys = [r["metadata"]["render_key"] for r in be.registered if r["kind"] == "video"]
+    assert keys[0] == md["render_key"] and len(keys) == 2 and keys[1] != keys[0]
+
+
+def _template_with(tmp_path, **over):
+    be, script, dl = _template_world(tmp_path)
+    script = dict(script, **over)
+    be.script_states[0]["script"] = script
+    return be, script, dl
+
+
+def _template_allowed(script: Dict[str, Any]) -> set:
+    """The SERVER's allow-list for a template video (run_service._check_onscreen_text), from its own helpers."""
+    from app.schemas.marketing import VIDEO_BRAND_TEXT
+    from app.services.marketing import run_service as mrs
+    from app.services.marketing import template_onscreen as tos
+
+    allowed = set(VIDEO_BRAND_TEXT) | {script["disclaimer_card"]}
+    allowed |= {c[k] for c in script["cards"] for k in ("title", "body") if c.get(k)}
+    allowed |= set(tos.opening_strings(script["opening_card"], script["logos"]))
+    if "data_card" in mrs.frozen_video_features(script, template=True):
+        allowed |= set(mrs.data_card_strings(script) or [])
+    return allowed
+
+
+def test_a_template_day_draws_its_frozen_data_card_in_place_of_the_card_the_web_names(m, monkeypatch, env,
+                                                                                      tmp_path):
+    from marketing import cards
+    from marketing import render as rd
+
+    be, script, dl = _template_with(tmp_path, video_features=["data_card", "push_in"], end_card_cta=cards.CTA,
+                                    data_card_slot=1)
+    seen: List[Dict[str, Any]] = []
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "download", dl)
+    monkeypatch.setattr(rd, "produce_video", _feature_spy(seen))
+    assert m.main() == 0, be.patches[-1:]
+    (kw,) = seen
+    assert [s.kind for s in kw["specs"]] == ["opening", "text", "data", "text", "text", "disclaimer"]
+    assert kw["hook_card"] is True and kw["push_in"] is True              # the opening card, alone over the hook
+    (video,) = [a for a in be.assets.values() if a["kind"] == "video"]
+    md = video["metadata"]
+    data_strings = list(kw["specs"][2].image.strings)
+    assert script["image_footer"] in data_strings and script["image_spec"]["title"] in data_strings
+    assert set(data_strings) <= set(md["onscreen_text"])                  # the data card declares what it drew
+    assert set(md["onscreen_text"]) <= _template_allowed(script)
+    assert script["cards"][1]["title"] not in md["onscreen_text"]         # the card it replaced is gone…
+    assert {script["cards"][i]["title"] for i in (0, 2, 3)} <= set(md["onscreen_text"])   # …the hedge stays
+    assert cards.CTA in md["onscreen_text"] and md["video_features"] == ["data_card", "push_in"]
+    assert md["card_kinds"] == ["opening", "text", "data", "text", "text", "disclaimer"]
+    assert md["data_card_slot"] == 1 and md["push_in"] is True
+    # the post image itself is unchanged by the video's features
+    (card,) = [a for a in be.assets.values() if a["kind"] == "card"]
+    assert card["metadata"]["image_layout"] == "rows" and be.run["status"] == "media_ready"
+
+
+def test_a_template_day_without_frozen_features_keeps_its_last_text_card(m, monkeypatch, env, tmp_path):
+    from marketing import render as rd
+
+    be, script, dl = _template_with(tmp_path, video_features=[], end_card_cta=None)
+    seen: List[Dict[str, Any]] = []
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "download", dl)
+    monkeypatch.setattr(rd, "produce_video", _feature_spy(seen))
+    assert m.main() == 0
+    (kw,) = seen
+    assert [s.kind for s in kw["specs"]] == ["opening", "text", "text", "text", "text", "disclaimer"]
+    assert kw["hook_card"] is True and "push_in" not in kw
+    (video,) = [a for a in be.assets.values() if a["kind"] == "video"]
+    md = video["metadata"]
+    assert script["image_spec"]["title"] not in md["onscreen_text"] and "caydexinvest.com" in md["onscreen_text"]
+    assert set(md["onscreen_text"]) <= _template_allowed(script)
+
+
+def test_a_template_day_whose_read_back_names_no_slot_keeps_every_text_card(m, monkeypatch, env, tmp_path, caplog):
+    """CARDS-B2-1: a read-back with data_card frozen but no `data_card_slot` (a web that predates the slot)
+    draws no data card — never the last card by default, which is often the template's hedge — logged,
+    and the day goes on."""
+    from marketing import render as rd
+
+    caplog.set_level(logging.WARNING, logger="marketing.cards")
+    be, script, dl = _template_with(tmp_path, video_features=["data_card", "push_in"], data_card_slot=None)
+    seen: List[Dict[str, Any]] = []
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "download", dl)
+    monkeypatch.setattr(rd, "produce_video", _feature_spy(seen))
+    assert m.main() == 0
+    (kw,) = seen
+    assert [s.kind for s in kw["specs"]] == ["opening", "text", "text", "text", "text", "disclaimer"]
+    (video,) = [a for a in be.assets.values() if a["kind"] == "video"]
+    md = video["metadata"]
+    assert md["data_card_slot"] is None and md["video_features"] == ["data_card", "push_in"]
+    assert script["image_footer"] not in md["onscreen_text"] and set(md["onscreen_text"]) <= _template_allowed(script)
+    assert any("names no data_card_slot" in r.getMessage() for r in caplog.records)
+    assert be.run["status"] == "media_ready"
+
+
+def test_the_reuse_key_tells_one_data_card_slot_from_another(m, monkeypatch, env, tmp_path):
+    """The same run read back with ANOTHER slot is another render (another card replaced): never reused."""
+    from marketing import render as rd
+
+    be, script, dl = _template_with(tmp_path, video_features=["data_card"], data_card_slot=1)
+    seen: List[Dict[str, Any]] = []
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "download", dl)
+    monkeypatch.setattr(rd, "produce_video", _feature_spy(seen))
+    assert m.main() == 0 and len(seen) == 1
+    for slot, renders in ((1, 1), (0, 2)):                     # the same slot is reused; another is drawn
+        be.run.update({"status": "in_progress", "stage": "voiced"})
+        be.run["metadata"].pop("video_asset_id")
+        be.script_states = [{"status": "accepted", "script": dict(script, data_card_slot=slot)}]
+        assert m.main() == 0 and len(seen) == renders, slot
+    keys = [r["metadata"]["render_key"] for r in be.registered if r["kind"] == "video"]
+    assert len(keys) == 2 and keys[0] != keys[1]
+    assert [r["metadata"]["data_card_slot"] for r in be.registered if r["kind"] == "video"] == [1, 0]
+
+
+# B2V-1 — the push-in follows push_in ITSELF, never "any feature frozen": a run frozen with the cards alone
+# (MARKETING_VIDEO_FEATURES="hook_card,data_card") still draws its cards and keeps card 0 still.
+
+def test_a_lesson_with_only_its_hook_card_frozen_never_pushes_in(m, monkeypatch, env):
+    script = dict(_VIDEO_SCRIPT, video_features=["hook_card"], end_card_cta="Search Caydex on the App Store")
+    _be, (kw,), md = _lesson_day(m, monkeypatch, script)
+    assert [s.kind for s in kw["specs"]] == ["hook", "text", "text", "disclaimer"] and kw["hook_card"] is True
+    assert "push_in" not in kw and md["push_in"] is False and md["video_features"] == ["hook_card"]
+
+
+def test_a_template_with_only_its_data_card_frozen_never_pushes_in(m, monkeypatch, env, tmp_path):
+    from marketing import render as rd
+
+    be, _script, dl = _template_with(tmp_path, video_features=["data_card"], data_card_slot=0)
+    seen: List[Dict[str, Any]] = []
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "download", dl)
+    monkeypatch.setattr(rd, "produce_video", _feature_spy(seen))
+    assert m.main() == 0
+    (kw,) = seen
+    assert [s.kind for s in kw["specs"]] == ["opening", "data", "text", "text", "text", "disclaimer"]
+    assert kw["hook_card"] is True and "push_in" not in kw
+    (video,) = [a for a in be.assets.values() if a["kind"] == "video"]
+    assert video["metadata"]["push_in"] is False and video["metadata"]["data_card_slot"] == 0
+
+
+# B2V-5 — the registered card kinds are the cards the video SHOWS: a short narration drops trailing text cards
+# (video.timeline), and the metadata reads "frozen vs drawn" side by side only if it lists what was drawn.
+
+def test_the_registered_card_kinds_and_strings_are_the_shown_cards_only(m, monkeypatch, env):
+    from marketing import render as rd
+    from marketing import voice as vc
+
+    def produce(**kw):
+        n = len(kw["specs"])
+        shown = [0, 1, n - 1]                                   # the timeline dropped the trailing text card
+        return _FAKE_MP4, kw["narration_seconds"] + vc.DISCLAIMER_CARD_SECONDS, shown
+
+    script = dict(_VIDEO_SCRIPT, video_features=["hook_card"])
+    be = FakeBackend(script_states=[{"status": "accepted", "source_ref": "journey:mr_market",
+                                     "template_id": "case_story", "script": script}])
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "produce_video", produce)
+    assert m.main() == 0
+    (video,) = [a for a in be.assets.values() if a["kind"] == "video"]
+    md = video["metadata"]
+    assert md["card_kinds"] == ["hook", "text", "disclaimer"] and md["cards_shown"] == 3
+    dropped = script["cards"][1]
+    assert dropped["title"] not in md["onscreen_text"] and dropped["body"] not in md["onscreen_text"]
+    assert script["hook"] in md["onscreen_text"] and script["cards"][0]["title"] in md["onscreen_text"]
+
+
+# B2-PUSHIN-NO-FALLBACK — the push-in is frozen into the run at write time, so a push-in render that fails
+# (ffmpeg exits non-zero, or its output fails the gate) is rendered ONCE more without it, inside the same
+# ffmpeg budget: card 0 still, the same strings, its own key, the metadata saying so. A timeout or the memory
+# limit is not retried (a still card 0 would hit it too), and a run that froze no push-in never falls back.
+
+
+class _RenderClock:
+    """`render._monotonic`: advanced by the fake renders, so the shared ffmpeg budget is exact."""
+
+    def __init__(self) -> None:
+        self.t = 1000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def _failing_push_in(seen: List[Dict[str, Any]], exc: BaseException, clock: _RenderClock, took: float = 7.0):
+    """produce_video for a push-in day: a call WITH push_in takes `took` seconds and raises `exc`; a call
+    without it renders (records its keywords, like _feature_spy)."""
+    spy = _feature_spy(seen)
+
+    def produce(**kw):
+        if kw.get("push_in"):
+            seen.append(kw)
+            clock.t += took
+            raise exc
+        clock.t += 3.0
+        return spy(**kw)
+    return produce
+
+
+def _push_in_day(m, monkeypatch, exc: BaseException, *, took: float = 7.0, features=("hook_card", "push_in")):
+    from marketing import render as rd
+
+    clock = _RenderClock()
+    script = dict(_VIDEO_SCRIPT, video_features=list(features), end_card_cta="Search Caydex on the App Store")
+    be = FakeBackend(script_states=[{"status": "accepted", "source_ref": "journey:mr_market",
+                                     "template_id": "case_story", "script": script}])
+    seen: List[Dict[str, Any]] = []
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "_monotonic", clock)
+    monkeypatch.setattr(rd, "produce_video", _failing_push_in(seen, exc, clock, took))
+    be.exit_code = m.main()                 # 0: the day rendered; 1: the pipeline failed (the run closed failed)
+    return be, seen, script
+
+
+@pytest.mark.parametrize("exc_name", ["RenderFailed", "RenderRejected"])
+def test_a_failed_push_in_render_falls_back_once_to_a_still_card_0(m, monkeypatch, env, caplog, exc_name):
+    from app.schemas.marketing import AssetRegisterRequest
+    from marketing import video as vid
+
+    caplog.set_level(logging.ERROR, logger="marketing.render")
+    exc = getattr(vid, exc_name)("run run-1: No such filter: 'zoompan'")
+    be, seen, script = _push_in_day(m, monkeypatch, exc, took=7.0)
+    assert be.exit_code == 0
+    first, second = seen
+    assert first["push_in"] is True and "ffmpeg_timeout" not in first
+    assert "push_in" not in second and second["hook_card"] is True and second["specs"] == first["specs"]
+    # the fallback gets what is left of ONE ffmpeg budget: the stage's worst case still holds
+    assert second["ffmpeg_timeout"] == pytest.approx(vid.RENDER_TIMEOUT_SECONDS - 7.0)
+    (video,) = [a for a in be.assets.values() if a["kind"] == "video"]
+    md = video["metadata"]
+    assert md["push_in"] is False and md["video_features"] == ["hook_card", "push_in"]      # frozen vs applied
+    assert md["push_in_fallback"].startswith(f"{exc_name}: ") and "zoompan" in md["push_in_fallback"]
+    assert md["card_kinds"] == ["hook", "text", "text", "disclaimer"] and script["hook"] in md["onscreen_text"]
+    assert set(md["onscreen_text"]) <= _lesson_allowed(script)          # the strings are the push-in's own
+    for reg in be.registered:
+        AssetRegisterRequest.model_validate(reg)
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert any("FALLBACK" in e and "WITHOUT the push-in" in e for e in errors), errors
+    assert be.run["status"] == "media_ready"
+
+
+def test_the_fallback_has_its_own_key_and_a_re_claim_reuses_it(m, monkeypatch, env):
+    """The fallback video is keyed with the features it really rendered (minus push_in) — never the push-in
+    key, so a later push-in that works is not mistaken for it — and a re-claimed run whose checkpoint was lost
+    reuses it instead of failing the push-in again."""
+    from marketing import video as vid
+
+    from marketing import render as rd
+
+    be, seen, script = _push_in_day(m, monkeypatch, vid.RenderFailed("run run-1: ffmpeg exited 1"))
+    assert be.exit_code == 0
+    (fallback,) = [r for r in be.registered if r["kind"] == "video"]
+    ok_be = FakeBackend(script_states=[{"status": "accepted", "source_ref": "journey:mr_market",
+                                        "template_id": "case_story", "script": script}])
+    _wire(m, monkeypatch, ok_be)
+    monkeypatch.setattr(rd, "produce_video", _feature_spy([]))
+    assert m.main() == 0
+    (pushed,) = [r for r in ok_be.registered if r["kind"] == "video"]
+    assert pushed["metadata"]["push_in"] is True
+    assert pushed["metadata"]["render_key"] != fallback["metadata"]["render_key"]
+    # the failed run, re-claimed before its checkpoint: the fallback video IS the render — nothing is drawn
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "produce_video", _failing_push_in(seen, vid.RenderFailed("again"), _RenderClock()))
+    be.run.update({"status": "in_progress", "stage": "voiced"})
+    be.run["metadata"].pop("video_asset_id")
+    be.script_states = [{"status": "accepted", "script": script}]
+    assert m.main() == 0
+    assert len(seen) == 2 and len([a for a in be.assets.values() if a["kind"] == "video"]) == 1
+    assert be.run["status"] == "media_ready"
+
+
+@pytest.mark.parametrize("exc_name", ["RenderTimeout", "RenderOOM"])
+def test_a_push_in_render_that_timed_out_or_ran_out_of_memory_is_not_retried(m, monkeypatch, env, exc_name):
+    from marketing import video as vid
+
+    be, seen, _script = _push_in_day(m, monkeypatch, getattr(vid, exc_name)("run run-1: killed"))
+    assert be.exit_code == 1 and len(seen) == 1 and seen[0]["push_in"] is True    # no second render
+    assert not [a for a in be.assets.values() if a["kind"] == "video"]
+    assert be.run["status"] == "failed" and "killed" in _closing_patch(be)["last_error"]
+
+
+def test_a_card_that_cannot_fit_in_the_push_in_render_skips_the_day_without_a_fallback(m, monkeypatch, env, caplog):
+    """Review VAC-3: only the push-in's own failures (RenderFailed / RenderRejected) fall back. A card that cannot
+    fit (`cards.CardOverflow` → SkipRun `unrenderable_text`) is the day's content — the same on every render — so
+    the day skips after ONE render, with no FALLBACK ERROR (a catch widened to Exception logged a false fallback
+    and rendered twice, with every other test green)."""
+    from marketing import cards
+
+    caplog.set_level(logging.ERROR, logger="marketing.render")
+    be, seen, _script = _push_in_day(m, monkeypatch, cards.CardOverflow("one word wider than the zone"))
+    assert be.exit_code == 0 and len(seen) == 1 and seen[0]["push_in"] is True    # no second render
+    assert be.run["status"] == "skipped" and be.run["metadata"]["skip_reason"] == "unrenderable_text"
+    assert not [a for a in be.assets.values() if a["kind"] == "video"] and be.posts_bodies == []
+    assert not [r.getMessage() for r in caplog.records if "FALLBACK" in r.getMessage()]
+
+
+def test_a_run_that_froze_no_push_in_never_falls_back(m, monkeypatch, env):
+    """Only the push-in is insured: a still render that fails fails as before (the next tick retries)."""
+    from marketing import render as rd
+    from marketing import video as vid
+
+    calls: List[Dict[str, Any]] = []
+
+    def produce(**kw):
+        calls.append(kw)
+        raise vid.RenderFailed("run run-1: ffmpeg exited 1")
+
+    script = dict(_VIDEO_SCRIPT, video_features=["hook_card"])
+    be = FakeBackend(script_states=[{"status": "accepted", "source_ref": "journey:mr_market",
+                                     "template_id": "case_story", "script": script}])
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "produce_video", produce)
+    assert m.main() == 1
+    assert len(calls) == 1 and be.run["status"] == "failed" and "exited 1" in _closing_patch(be)["last_error"]
+
+
+def test_no_fallback_without_enough_of_the_ffmpeg_budget_left(m, monkeypatch, env, caplog):
+    """A push-in render that failed late leaves less than PUSH_IN_FALLBACK_MIN_SECONDS of the shared budget:
+    the first failure stands (ERROR), never a second render past the stage's worst case."""
+    from marketing import render as rd
+    from marketing import video as vid
+
+    caplog.set_level(logging.ERROR, logger="marketing.render")
+    took = vid.RENDER_TIMEOUT_SECONDS - rd.PUSH_IN_FALLBACK_MIN_SECONDS + 1.0
+    be, seen, _script = _push_in_day(m, monkeypatch, vid.RenderRejected("run run-1: duration 0.0s"), took=took)
+    assert be.exit_code == 1 and len(seen) == 1 and be.run["status"] == "failed"
+    assert any("NO fallback" in r.getMessage() for r in caplog.records)
+    # …and exactly at the minimum, it still falls back
+    be, seen, _script = _push_in_day(m, monkeypatch, vid.RenderRejected("run run-1: duration 0.0s"),
+                                     took=vid.RENDER_TIMEOUT_SECONDS - rd.PUSH_IN_FALLBACK_MIN_SECONDS)
+    assert len(seen) == 2 and seen[1]["ffmpeg_timeout"] == pytest.approx(rd.PUSH_IN_FALLBACK_MIN_SECONDS)
+    assert be.exit_code == 0 and be.run["status"] == "media_ready"
+
+
+def test_a_fallback_that_fails_too_fails_the_render(m, monkeypatch, env):
+    from marketing import render as rd
+    from marketing import video as vid
+
+    calls: List[Dict[str, Any]] = []
+
+    def produce(**kw):
+        calls.append(kw)
+        raise vid.RenderFailed(f"run run-1: attempt {len(calls)} exited 1")
+
+    script = dict(_VIDEO_SCRIPT, video_features=["push_in"])
+    be = FakeBackend(script_states=[{"status": "accepted", "source_ref": "journey:mr_market",
+                                     "template_id": "case_story", "script": script}])
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "produce_video", produce)
+    assert m.main() == 1
+    assert len(calls) == 2 and calls[0]["push_in"] is True and "push_in" not in calls[1]
+    assert be.run["status"] == "failed" and "attempt 2" in _closing_patch(be)["last_error"]
+    assert not [a for a in be.assets.values() if a["kind"] == "video"]
+
+
+def test_the_shared_ffmpeg_budget_keeps_the_stage_inside_its_worst_case():
+    """The fallback's ffmpeg gets RENDER_TIMEOUT_SECONDS minus everything the failed attempt took, so the two
+    renders together never outlast ONE render's share of video.worst_case_seconds (cards + 2 probes + ffmpeg)."""
+    from marketing import render as rd
+    from marketing import video as vid
+
+    one_render = vid.RENDER_TIMEOUT_SECONDS + 2 * vid.PROBE_TIMEOUT_SECONDS + vid.CARD_RENDER_SECONDS
+    for took in (0.5, 30.0, 120.0, vid.RENDER_TIMEOUT_SECONDS - rd.PUSH_IN_FALLBACK_MIN_SECONDS):
+        left = vid.RENDER_TIMEOUT_SECONDS - took
+        fallback_worst = vid.CARD_RENDER_SECONDS + 2 * vid.PROBE_TIMEOUT_SECONDS + left
+        assert took + fallback_worst <= one_render
+    assert 0 < rd.PUSH_IN_FALLBACK_MIN_SECONDS < vid.RENDER_TIMEOUT_SECONDS

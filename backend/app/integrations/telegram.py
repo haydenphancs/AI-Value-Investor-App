@@ -53,6 +53,12 @@ Bot API facts this module relies on — VERIFIED against https://core.telegram.o
     message to be replied to is not found"); there is no `reply_to_message_id` parameter any more.
     editMessageReplyMarkup(chat_id, message_id, reply_markup): "edit only the reply markup of
     messages. Returns the edited Message".
+  * (VERIFIED 2026-10-15) sendMessage, sendPhoto and sendVideo each take `disable_notification`
+    (Boolean, Optional): "Sends the message silently. Users will receive a notification with no
+    sound." It is sent ONLY when a caller asks for it (`disable_notification=True`), so every other
+    payload is byte-for-byte what it was. Quiet Telegram (plan Batch 1 item 9): the review bot's media,
+    caption messages and "Posted" replies go out silently; the decisions (a bundle's decision message,
+    a per-post review message), the alerts and the digest / health messages keep the default sound.
   * answerCallbackQuery(callback_query_id, text "0-200 characters"); clients show a progress
     bar until it is called, so every callback is answered, even a refused one.
   * InlineKeyboardButton.callback_data: "1-64 bytes".
@@ -288,6 +294,13 @@ async def _call(method: str, payload: Dict[str, Any], *, timeout: Optional[httpx
 # ── Bot API methods ────────────────────────────────────────────────────
 
 
+def _silence(payload: Dict[str, Any], disable_notification: bool) -> None:
+    """Add `disable_notification: true` (a notification with no sound) only when it is asked for —
+    the default payload stays exactly what it was before the parameter existed."""
+    if disable_notification:
+        payload["disable_notification"] = True
+
+
 async def send_message(
     chat_id: int,
     text: str,
@@ -295,11 +308,13 @@ async def send_message(
     reply_markup: Optional[Dict[str, Any]] = None,
     disable_web_page_preview: bool = True,
     reply_to_message_id: Optional[int] = None,
+    disable_notification: bool = False,
 ) -> Dict[str, Any]:
     """sendMessage, PLAIN text (never `parse_mode`). `disable_web_page_preview` maps to the
     current `link_preview_options.is_disabled` (the old field is no longer documented).
     `reply_to_message_id` threads the message under an earlier one (`reply_parameters`), and is
-    sent anyway if that message is gone (`allow_sending_without_reply`)."""
+    sent anyway if that message is gone (`allow_sending_without_reply`). `disable_notification`
+    sends it silently (no sound); it is in the payload only when True."""
     payload: Dict[str, Any] = {"chat_id": chat_id, "text": text}
     if disable_web_page_preview:
         payload["link_preview_options"] = {"is_disabled": True}
@@ -308,6 +323,7 @@ async def send_message(
     if reply_to_message_id is not None:
         payload["reply_parameters"] = {"message_id": reply_to_message_id,
                                        "allow_sending_without_reply": True}
+    _silence(payload, disable_notification)
     return await _call("sendMessage", payload)
 
 
@@ -317,13 +333,16 @@ async def send_video(
     *,
     caption: Optional[str] = None,
     reply_markup: Optional[Dict[str, Any]] = None,
+    disable_notification: bool = False,
 ) -> Dict[str, Any]:
-    """sendVideo by URL (Telegram fetches it: ≤ 20 MB). Caption is plain text, ≤ 1024."""
+    """sendVideo by URL (Telegram fetches it: ≤ 20 MB). Caption is plain text, ≤ 1024.
+    `disable_notification` sends it silently (no sound); it is in the payload only when True."""
     payload: Dict[str, Any] = {"chat_id": chat_id, "video": video_url, "supports_streaming": True}
     if caption:
         payload["caption"] = caption
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
+    _silence(payload, disable_notification)
     return await _call("sendVideo", payload, timeout=_VIDEO_TIMEOUT)
 
 
@@ -333,14 +352,17 @@ async def send_photo(
     *,
     caption: Optional[str] = None,
     reply_markup: Optional[Dict[str, Any]] = None,
+    disable_notification: bool = False,
 ) -> Dict[str, Any]:
     """sendPhoto by URL (Telegram fetches it: ≤ 5 MB). Caption is plain text (never `parse_mode`),
-    ≤ 1024. The same answer handling as every other method (`_call`)."""
+    ≤ 1024. The same answer handling as every other method (`_call`). `disable_notification` sends it
+    silently (no sound); it is in the payload only when True."""
     payload: Dict[str, Any] = {"chat_id": chat_id, "photo": photo_url}
     if caption:
         payload["caption"] = caption
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
+    _silence(payload, disable_notification)
     return await _call("sendPhoto", payload, timeout=_PHOTO_TIMEOUT)
 
 

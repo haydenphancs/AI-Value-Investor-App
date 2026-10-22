@@ -121,7 +121,7 @@ def _batch(monkeypatch, *, failed: Set[str], universe: List[Dict[str, Any]]):
     svc = _service()
     svc.supabase = _SB()
 
-    async def _no_tam(_industry, _sample):
+    async def _no_tam(_industry, _samples, **_k):   # e.g. drops=
         return None
 
     def _score(**kw):

@@ -1779,7 +1779,14 @@ off the event loop (`asyncio.to_thread`). The sweeps also retry an FMP 429 with 
 wait out FMP's per-minute window together (one shared 60 s window, at most 20 minutes per run;
 `call_with_rate_limit_retry`), with a breaker only after three windows in a row and 20 exhausted
 calls with no success, count fetch failures per
-industry into the run summary, and download the benchmark universe file from the
+industry into the run summary (the moat recompute too since 2026-10-21: every peer request and the
+dossier sample's profile go through the same helper inside one `rate_limit_run("moat")`; the dossier
+sample falls back to the next of the industry's 5 largest companies; a peer whose profile failed, or
+whose statement call failed TRANSIENTLY, is left out rather than scored on half its data, and is
+counted — `fetch_failures_by_kind`, `companies_fetch_lost`, `industries_fetch_lost`,
+`industries_tam_unavailable`, `rate_limit_windows` — with a WARNING naming the industries; the
+transcript read is not wrapped, because it is refused before any HTTP call and its "success" would
+close the shared window), and download the benchmark universe file from the
 `universe-data` bucket at the start of every run (an upload needs no redeploy; the operator
 script can name a local file instead, and an unreadable named file stops the run; any writing
 run from the script — a full sweep or one `--sector` — takes the same claim as the scheduled job
@@ -1823,7 +1830,8 @@ name), and refuses a floor change, a large shrink or a vanished industry without
 The industry universe file (moat, dossier and competitor rosters) is the same builder at floor 0
 (`scripts/discover_industries.py`).
 Moat industries with too few scorable peers never write and are not failures, so a
-same-day re-run that attempts only those settles. Fresh-skips, the industries-only validation
+same-day re-run that attempts only those settles — unless the peers left out by a transient FMP
+failure would have brought them to the floor: that industry FAILED (`peers lost to FMP failures`). Fresh-skips, the industries-only validation
 path and `dry_run` still return. The owner-facing
 view of all of this — what runs itself and what must be done by hand — is
 `documents/OWNER_TASKS.md`.

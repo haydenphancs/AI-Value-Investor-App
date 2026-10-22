@@ -10,9 +10,9 @@ Jan/Apr/Jul/Oct, 02:00 UTC — `_run_industry_dossier_job` in main.py) runs
 and upserts to the `industry_dossier` Supabase table.
 
 Read path: `get_dossier(industry)` is called from
-`ticker_report_data_collector._fetch_dependent` instead of
-`industry_tam_service.get_industry_tam`. In-memory tier (5 min TTL) +
-Supabase row by `industry`. The returned `IndustryDossier` is shaped
+`ticker_report_data_collector._fetch_dependent` (the only reader — there is no
+per-report Census/FRED call). In-memory tier (5 min TTL) + Supabase row by
+`industry`. The returned `IndustryDossier` is shaped
 to be a superset of `IndustryTAM` so the existing `_apply_tam_source`
 logic keeps working when only TAM fields are read.
 
@@ -24,8 +24,9 @@ Coverage chain — never returns null for a discovered industry:
     4. All-industry FRED USNGSP    → source_grain='all_industry'
 
 The report shows TAM/CAGR only for source_grain='industry' (`_apply_tam_source`
-hides the broad stand-ins — owner decision 2026-10-01). iOS renders neither
-`source_grain` nor `tam_source_label`; there is no "broader than industry" chip.
+hides the broad stand-ins — owner decision 2026-10-01). iOS never renders
+`source_grain` (there is no "broader than industry" chip); builds from 2026-10-22
+show `tam_source_label` as the row's source caption.
 
 Self-heal (2026-10-01): a stored row whose TAM is a zero placeholder (written
 when FRED/Census were unreachable — 138 of 158 rows sat that way from 2026-07-05
@@ -61,6 +62,7 @@ from app.services.industry_tam_service import (
     fred_tam_for_series,
 )
 from app.integrations.census import CensusUnavailableException
+from app.utils.implied_revenue import MIN_PLAUSIBLE_PS
 from app.utils.inflight import fail_shared_future
 
 logger = logging.getLogger(__name__)
@@ -143,9 +145,12 @@ class IndustryDossier:
       - industry / sector: identity (used for the source row + iOS chip)
       - lifecycle_phase / hhi / top1_share_pct / top2_share_pct /
         concentration_label: industry-wide aggregates used to replace the
-        focal-ticker peer-derived computation
-      - source_grain: 'industry' | 'sector' | 'all_industry' — drives the
-        iOS warning chip when fallback was used
+        focal-ticker peer-derived computation. Since 2026-10-22 they are
+        REVENUE shares of the universe constituents (`concentration_basis`
+        'revenue_share'); rows written earlier are market-cap shares
+        ('market_cap'). None = not measured.
+      - source_grain: 'industry' | 'sector' | 'all_industry' — the report shows
+        TAM/CAGR only for 'industry' (there is no iOS grain chip)
     """
     # IndustryTAM-compatible fields (must keep these names + order so
     # downstream `_apply_tam_source` reads them transparently)
@@ -170,6 +175,13 @@ class IndustryDossier:
     # Phase B, retired 2026-10-02 with Google Search grounding); such a row is
     # never served (`_withdraw_grounded_tam`) and migration 188 clears it.
     tam_scope: str = "us"
+    # First year of the growth window `cagr_5y_pct` measures (Census: 2017; FRED: the
+    # oldest valid observation); the window ends at `current_year`. None = no CAGR, or a
+    # FRED row stored before migration 203.
+    cagr_start_year: Optional[int] = None
+    # What hhi / top shares / concentration_label are shares of: 'revenue_share' (from
+    # 2026-10-22) or 'market_cap' (earlier rows). None = not measured.
+    concentration_basis: Optional[str] = None
 
     def to_db_row(self) -> Dict[str, Any]:
         return {
@@ -189,7 +201,11 @@ class IndustryDossier:
             "source_grain": self.source_grain,
             "source_label": self.source_label,
             "tam_scope": self.tam_scope,
+            "cagr_start_year": self.cagr_start_year,
+            "concentration_basis": self.concentration_basis,
             "computed_at": datetime.now(timezone.utc).isoformat(),
+            # INFORMATIONAL only: no reader checks it (a stored row is served until the
+            # next quarterly recompute replaces it; the zero / grain guards decide that).
             "expires_at": (datetime.now(timezone.utc) + timedelta(days=8)).isoformat(),
         }
 
@@ -214,10 +230,18 @@ class IndustryDossier:
             hhi=_f("hhi"),
             top1_share_pct=_f("top1_share_pct"),
             top2_share_pct=_f("top2_share_pct"),
-            concentration_label=row.get("concentration_label"),
+            # A label stored with NO hhi was never measured: the old "<3 caps → fragmented"
+            # default. Read it as unmeasured (None), so it cannot override a measured
+            # peer label or show a fabricated "Fragmented" (2026-10-22).
+            concentration_label=row.get("concentration_label") if row.get("hhi") is not None else None,
             constituent_count=row.get("constituent_count"),
             source_grain=str(row.get("source_grain") or "industry"),
             tam_scope=str(row.get("tam_scope") or "us"),
+            cagr_start_year=_year_or_none(row.get("cagr_start_year")),
+            concentration_basis=(
+                row.get("concentration_basis")
+                if row.get("concentration_basis") in CONCENTRATION_BASES else None
+            ),
         )
 
 
@@ -231,10 +255,12 @@ def classify_concentration(top1_pct: float, top2_pct: float, hhi: float) -> str:
     Kept here so the dossier service has no dependency on the collector
     module (which imports a lot). Update both together if thresholds move.
 
-    Inputs are MARKET-CAP shares (see `_compute_hhi(market_caps)`), not
-    market/revenue share — so, like the collector mirror, we never emit
-    'monopoly'/'duopoly' (those are share structures). Cap-derived
-    concentration tops out at 'oligopoly'.
+    Inputs are REVENUE shares of the industry's US-listed constituents (owner
+    decision 2026-10-22, "Revenue-share HHI"; `_revenue_concentration`). The
+    denominator holds only listed companies (no Airbus, no private firms) and
+    revenue is company-wide, not segment-level — so we still never emit
+    'monopoly'/'duopoly'; the label tops out at 'oligopoly'. Thresholds are
+    unchanged from the market-cap era.
     """
     if top1_pct > 50.0 or top2_pct > 70.0 or hhi >= 1500.0:
         return "oligopoly"
@@ -249,22 +275,124 @@ def classify_lifecycle(
     accepted and IGNORED: "fewer than 5 constituents = emerging" read FMP's coverage and the
     universe's US-only filter as industry maturity — the cleaned US-only roster would have
     labelled ~10 more industries "emerging" (moat Network Effects 7.5 instead of 5.0 / 3.0)
-    with no change in their growth."""
-    if cagr_5y_pct is None:
+    with no change in their growth.
+
+    ±1%/yr dead band (owner decision 2026-10-22): |CAGR| < 1 is "mature" — a flat nominal
+    rate is not a decline. Reads the stored 1-dp value (from_db_row re-derives the phase on
+    every read, so the band applies to stored rows without a recompute); -1.0 is declining."""
+    if cagr_5y_pct is None or not math.isfinite(cagr_5y_pct):
         return "mature"
     if cagr_5y_pct > 15.0:
         return "secular_growth"
-    if cagr_5y_pct < 0.0:
+    if cagr_5y_pct <= -1.0:
         return "declining"
     return "mature"
 
 
-def _compute_hhi(market_caps: List[float]) -> float:
-    """HHI on the 0..10000 scale (sum of squared % shares)."""
-    total = sum(market_caps)
+def _compute_hhi(values: List[float]) -> float:
+    """HHI on the 0..10000 scale (sum of squared % shares) — of revenues since
+    2026-10-22."""
+    total = sum(values)
     if total <= 0:
         return 0.0
-    return sum(((c / total) * 100.0) ** 2 for c in market_caps)
+    return sum(((c / total) * 100.0) ** 2 for c in values)
+
+
+# What a stored concentration is a share of (migration 203's CHECK).
+CONCENTRATION_BASES = ("revenue_share", "market_cap")
+# The columns a recompute may leave out of an upsert to KEEP the stored concentration.
+_CONCENTRATION_COLUMNS = (
+    "hhi", "top1_share_pct", "top2_share_pct", "concentration_label",
+    "constituent_count", "concentration_basis",
+)
+# Revenue-share concentration needs the constituents with revenue to hold at least this
+# share of the industry's listed market cap — otherwise the missing ones could be the
+# leaders and the label would be a guess.
+_MIN_REVENUE_CAP_COVERAGE = 0.90
+
+
+def _year_or_none(v: Any) -> Optional[int]:
+    """A stored year as an int in 1990..2100; None for anything else (bool, garbage)."""
+    if isinstance(v, bool):
+        return None
+    try:
+        y = int(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+    return y if 1990 <= y <= 2100 else None
+
+
+def _unmeasured_concentration() -> Dict[str, Any]:
+    return {k: None for k in _CONCENTRATION_COLUMNS}
+
+
+def _revenue_concentration(
+    industry: str,
+    tickers: List[str],
+    caps_by_ticker: Dict[str, float],
+    revenues_by_ticker: Dict[str, float],
+) -> Dict[str, Any]:
+    """Revenue-share concentration of an industry's universe constituents (owner decision
+    2026-10-22). Pure. Returns the six `_CONCENTRATION_COLUMNS`; all None ("unmeasured",
+    never a fabricated 'fragmented') when:
+      * fewer than 3 constituents have a positive revenue;
+      * the constituents with a revenue answer (zeros included) cover < 90% of the listed
+        market cap — the missing ones could be the leaders;
+      * the revenue LEADER's cap/revenue is below `MIN_PLAUSIBLE_PS` (an implied revenue
+        above 20x its cap is corrupt data).
+    """
+    caps: Dict[str, float] = {}
+    for sym in tickers or []:
+        if not isinstance(sym, str) or not sym:
+            continue
+        cap = caps_by_ticker.get(sym.upper())
+        if isinstance(cap, (int, float)) and not isinstance(cap, bool) and math.isfinite(cap) and cap > 0:
+            caps[sym.upper()] = float(cap)
+    revs: Dict[str, float] = {}
+    for sym in caps:
+        rev = revenues_by_ticker.get(sym)
+        if isinstance(rev, (int, float)) and not isinstance(rev, bool) and math.isfinite(rev) and rev >= 0:
+            revs[sym] = float(rev)
+    positive = sorted(((r, s) for s, r in revs.items() if r > 0), reverse=True)
+    if len(positive) < 3:
+        logger.info(
+            "industry_dossier %r: concentration unmeasured — %d listed constituent(s) with "
+            "revenue (need 3)", industry, len(positive),
+        )
+        return _unmeasured_concentration()
+    total_cap = sum(caps.values())
+    covered = sum(caps[s] for s in revs)
+    if total_cap <= 0 or covered / total_cap < _MIN_REVENUE_CAP_COVERAGE:
+        missing = sorted((s for s in caps if s not in revs), key=lambda s: -caps[s])[:5]
+        logger.warning(
+            "industry_dossier %r: concentration unmeasured — constituents with a revenue cover "
+            "%.0f%% of the listed market cap (need %.0f%%); largest without one: %s",
+            industry, 100.0 * covered / total_cap if total_cap > 0 else 0.0,
+            100.0 * _MIN_REVENUE_CAP_COVERAGE, ", ".join(missing),
+        )
+        return _unmeasured_concentration()
+    lead_rev, lead_sym = positive[0]
+    if caps[lead_sym] / lead_rev < MIN_PLAUSIBLE_PS:
+        logger.warning(
+            "industry_dossier %r: concentration unmeasured — revenue leader %s implies "
+            "$%.1fB on a $%.1fB cap (P/S %.3f < %.2f): corrupt data",
+            industry, lead_sym, lead_rev / 1e9, caps[lead_sym] / 1e9,
+            caps[lead_sym] / lead_rev, MIN_PLAUSIBLE_PS,
+        )
+        return _unmeasured_concentration()
+    values = [r for r, _ in positive]
+    total = sum(values)
+    top1 = round(values[0] / total * 100.0, 2)
+    top2 = round((values[0] + values[1]) / total * 100.0, 2)
+    hhi = round(_compute_hhi(values), 2)
+    return {
+        "hhi": hhi,
+        "top1_share_pct": top1,
+        "top2_share_pct": top2,
+        "concentration_label": classify_concentration(top1, top2, hhi),
+        "constituent_count": len(values),
+        "concentration_basis": "revenue_share",
+    }
 
 
 # ── Universe file I/O ───────────────────────────────────────────────────
@@ -342,7 +470,8 @@ def _withdraw_grounded_tam(d: "IndustryDossier") -> "IndustryDossier":
     return dataclasses.replace(
         d,
         current_tam=0.0, future_tam=0.0, current_year="", future_year="",
-        cagr_5y_pct=None, lifecycle_phase="mature", source_grain="all_industry",
+        cagr_5y_pct=None, cagr_start_year=None, lifecycle_phase="mature",
+        source_grain="all_industry",
         source_label="Research figure withdrawn — pending recompute", tam_scope="us",
     )
 
@@ -366,6 +495,7 @@ def _merge_live_tam(stored: "IndustryDossier", live: "IndustryDossier") -> "Indu
         future_year=live.future_year,
         source_label=live.source_label,
         cagr_5y_pct=cagr,
+        cagr_start_year=live.cagr_start_year if cagr is not None else None,
         source_grain=live.source_grain,
         tam_scope="us",  # Phase A sources (Census/FRED) are US-domestic
         lifecycle_phase=classify_lifecycle(cagr),
@@ -674,8 +804,14 @@ class IndustryDossierService:
         go quarterly-stale at most — fine for relative-share HHI.
 
         `force` is accepted for parity with the sector_benchmarks job's
-        signature but currently has no freshness gate (this job only
-        fires weekly from main.py — there's nothing to skip).
+        signature but currently has no freshness gate (this job fires from the
+        quarterly industry chain in main.py, or the admin refresh — there's
+        nothing to skip).
+
+        Concentration is recomputed only for universe entries that carry a
+        `revenues` map (files built from 2026-10-22). An entry without one KEEPS
+        the stored concentration columns — they are left out of its upsert, never
+        recomputed on market cap — with one ERROR per run naming the count.
 
         Raises `IndustryDossierRecomputeSkipped` (after an ERROR log) when the
         run cannot start — an empty universe or no upstream credentials — so the
@@ -725,9 +861,10 @@ class IndustryDossierService:
 
         started = time.time()
 
-        # Compute a dossier per industry — caps come from the universe
-        # file's pre-captured `market_caps` (per-industry) dict.
+        # Compute a dossier per industry — caps and revenues come from the universe
+        # file's pre-captured `market_caps` / `revenues` (per-industry) dicts.
         dossiers: List[IndustryDossier] = []
+        legacy: set = set()     # industries whose stored concentration is KEPT
         for entry in universe:
             industry = entry.get("industry")
             sector = entry.get("sector")
@@ -735,8 +872,30 @@ class IndustryDossierService:
             caps_by_ticker = entry.get("market_caps") or {}
             if not industry or not sector:
                 continue
+            revenues = entry.get("revenues")
+            if not isinstance(revenues, dict):
+                if revenues is not None:
+                    logger.warning(
+                        "industry_dossier %r: universe 'revenues' is %s, not a map — its "
+                        "stored concentration is kept", industry, type(revenues).__name__,
+                    )
+                legacy.add(industry)
+                revenues = None
+            elif tickers and not any(
+                isinstance(t, str) and t.upper() in revenues for t in tickers
+            ):
+                # A map that covers NONE of the industry's tickers is a broken capture
+                # (FMP emptied P/S), not a measurement: keep the stored concentration.
+                logger.warning(
+                    "industry_dossier %r: universe 'revenues' covers none of its %d tickers — "
+                    "its stored concentration is kept", industry, len(tickers),
+                )
+                legacy.add(industry)
+                revenues = None
             try:
-                dossier = await self._compute_one(industry, sector, tickers, caps_by_ticker)
+                dossier = await self._compute_one(
+                    industry, sector, tickers, caps_by_ticker, revenues_by_ticker=revenues,
+                )
                 dossiers.append(dossier)
             except CensusUnavailableException as exc:
                 # Transient: keep the stored row rather than persist a broader
@@ -755,6 +914,8 @@ class IndustryDossierService:
         # 3. Upsert in chunks. Supabase's batch upsert supports several
         # hundred rows per call; 100 is a safe ceiling.
         rows_upserted = 0
+        concentration_kept = 0
+        label_changes = 0
         if dossiers:
             sb = get_supabase()
             rows = [d.to_db_row() for d in dossiers]
@@ -771,10 +932,13 @@ class IndustryDossierService:
             # Skipping leaves the previous value in place, which is stale at worst — and stale
             # is what the `computed_at` column is for.
             try:
+                # Pre-migration-203 columns only: a missing migration must not fail
+                # this fail-safe pre-read (the upsert would then fail loudly instead).
                 existing = (
                     (await sb_exec(
                         sb.table("industry_dossier")
-                        .select("industry, current_tam_b, tam_scope, source_grain")
+                        .select("industry, current_tam_b, tam_scope, source_grain, "
+                                "concentration_label, hhi, cagr_5y_pct")
                     ))
                 )
                 # A GROUNDED global row (`tam_scope='global'`, the retired Phase B) is
@@ -841,8 +1005,26 @@ class IndustryDossierService:
                         "…" if len(skipped) > 8 else "",
                     )
                 rows = kept
+                label_changes = _log_label_changes(existing.data or [], rows, legacy)
 
-            for batch in _chunked(rows, 100):
+            # A legacy entry (no 'revenues' in the universe file) leaves the concentration
+            # columns OUT of its row, so the upsert keeps the stored values. PostgREST needs
+            # uniform keys inside one bulk upsert, so the two kinds go in separate batches.
+            full_rows = [r for r in rows if r["industry"] not in legacy]
+            kept_conc_rows = [
+                {k: v for k, v in r.items() if k not in _CONCENTRATION_COLUMNS}
+                for r in rows if r["industry"] in legacy
+            ]
+            if kept_conc_rows:
+                concentration_kept = len(kept_conc_rows)
+                logger.error(
+                    "industry_dossier: %d of %d universe industries carry no 'revenues' "
+                    "(industry_universe.json built before 2026-10-22) — their stored "
+                    "concentration is KEPT, never recomputed on market cap; rebuild the "
+                    "universe (-m scripts.discover_industries) and re-run",
+                    concentration_kept, len(universe),
+                )
+            for batch in _chunked(full_rows, 100) + _chunked(kept_conc_rows, 100):
                 try:
                     (await sb_exec(
                         sb.table("industry_dossier").upsert(
@@ -862,6 +1044,8 @@ class IndustryDossierService:
             "status": "ok",
             "universe_size": len(universe),
             "rows_upserted": rows_upserted,
+            "concentration_kept": concentration_kept,
+            "label_changes": label_changes,
             "elapsed_seconds": round(elapsed, 1),
         }
         logger.info("industry_dossier recompute: %s", result)
@@ -873,6 +1057,7 @@ class IndustryDossierService:
         sector: str,
         tickers: List[str],
         caps_by_ticker: Dict[str, float],
+        revenues_by_ticker: Optional[Dict[str, float]] = None,
     ) -> IndustryDossier:
         """Resolve TAM/CAGR/lifecycle/concentration for one industry.
 
@@ -884,8 +1069,10 @@ class IndustryDossierService:
           3. sector-level FRED                       source_grain='sector'
           4. all-industry USNGSP                     source_grain='all_industry'
 
-        Concentration / HHI / lifecycle derive from the universe-supplied
-        constituent tickers' market caps (refreshed live by `recompute_all`).
+        Lifecycle derives from the growth rate. Concentration / HHI are REVENUE
+        shares of the universe's constituents (`revenues_by_ticker`, captured with
+        their market caps when industry_universe.json was built — frozen until the
+        next build, not refreshed live); without revenues it is unmeasured (None).
         """
         # ── Tier 1 + 2: industry-level (Census or FRED) ──
         tam_proxy: Optional[IndustryTAM] = None
@@ -935,34 +1122,13 @@ class IndustryDossierService:
             )
             source_grain = "all_industry"
 
-        # ── Concentration from S&P 500 constituents in this industry ──
-        caps = [
-            caps_by_ticker[sym.upper()]
-            for sym in tickers
-            if sym and sym.upper() in caps_by_ticker
-        ]
-        hhi: Optional[float] = None
-        top1_share_pct: Optional[float] = None
-        top2_share_pct: Optional[float] = None
-        concentration_label: Optional[str] = None
-        constituent_count: Optional[int] = len(caps) if caps else None
-
-        if len(caps) >= 3:
-            caps_sorted = sorted(caps, reverse=True)
-            total = sum(caps_sorted)
-            top1_share_pct = round((caps_sorted[0] / total) * 100.0, 2)
-            top2_share_pct = round(((caps_sorted[0] + caps_sorted[1]) / total) * 100.0, 2)
-            hhi = round(_compute_hhi(caps_sorted), 2)
-            concentration_label = classify_concentration(
-                top1_share_pct, top2_share_pct, hhi
-            )
+        # ── Concentration: REVENUE shares of the universe constituents (owner decision
+        #    2026-10-22). No revenues (a live self-heal compute, or a universe file built
+        #    before 2026-10-22) → unmeasured, never a fabricated "fragmented".
+        if revenues_by_ticker is not None:
+            conc = _revenue_concentration(industry, tickers, caps_by_ticker, revenues_by_ticker)
         else:
-            # Too few public players for HHI to be informative. Default
-            # to "fragmented" rather than null so the iOS UI shows
-            # something — fabricating "monopoly" from 1 public ticker
-            # would be misleading (the industry has private competitors
-            # we can't see).
-            concentration_label = "fragmented"
+            conc = _unmeasured_concentration()
 
         lifecycle = classify_lifecycle(tam_proxy.cagr_5y_pct)
 
@@ -976,13 +1142,49 @@ class IndustryDossierService:
             industry=industry,
             sector=sector,
             lifecycle_phase=lifecycle,
-            hhi=hhi,
-            top1_share_pct=top1_share_pct,
-            top2_share_pct=top2_share_pct,
-            concentration_label=concentration_label,
-            constituent_count=constituent_count,
+            hhi=conc["hhi"],
+            top1_share_pct=conc["top1_share_pct"],
+            top2_share_pct=conc["top2_share_pct"],
+            concentration_label=conc["concentration_label"],
+            constituent_count=conc["constituent_count"],
             source_grain=source_grain,
+            cagr_start_year=tam_proxy.cagr_start_year,
+            concentration_basis=conc["concentration_basis"],
         )
+
+
+def _log_label_changes(
+    existing: List[Dict[str, Any]], rows: List[Dict[str, Any]], legacy: set,
+) -> int:
+    """ONE INFO line listing every concentration / lifecycle label this run changes
+    against the stored row (the lifecycle as readers see it: re-derived from the stored
+    CAGR), so a recompute that moves many cards is visible before anyone opens one.
+    Legacy rows keep their concentration and are compared on lifecycle only."""
+    stored = {r.get("industry"): r for r in existing if isinstance(r, dict)}
+    changes: List[str] = []
+    for row in rows:
+        ind = row.get("industry")
+        old = stored.get(ind)
+        if old is None:
+            continue
+        if ind not in legacy:
+            old_label = old.get("concentration_label") if old.get("hhi") is not None else None
+            new_label = row.get("concentration_label")
+            if old_label != new_label or old.get("hhi") != row.get("hhi"):
+                changes.append(
+                    f"{ind} {old_label}→{new_label} hhi {old.get('hhi')}→{row.get('hhi')} "
+                    f"({row.get('concentration_basis')})"
+                )
+        old_cagr = old.get("cagr_5y_pct")
+        old_phase = classify_lifecycle(float(old_cagr) if isinstance(old_cagr, (int, float)) else None)
+        new_phase = classify_lifecycle(row.get("cagr_5y_pct"))
+        if old_phase != new_phase:
+            changes.append(f"{ind} lifecycle {old_phase}→{new_phase}")
+    if changes:
+        logger.info(
+            "industry_dossier label changes vs stored (%d): %s", len(changes), "; ".join(changes),
+        )
+    return len(changes)
 
 
 def _chunked(items: List[Any], size: int) -> List[List[Any]]:

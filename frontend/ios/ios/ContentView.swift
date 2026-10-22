@@ -16,6 +16,10 @@ struct ContentView: View {
     /// together with the ticker, so a handoff of the ticker it already holds still lands on the
     /// Research segment with that ticker shown — observing the ticker alone fired only on a change.
     @State private var researchHandoffSeq = 0
+    /// Bumped (never reset) on every Market widget tap (`caydex://updates/market`). The Updates
+    /// tab observes it and selects its Market chip — a repeat tap while it is already there is
+    /// still a change, so the feed scrolls back to the Market Insight card.
+    @State private var updatesMarketFocusSeq = 0
 
     /// The ONE general-purpose Cay AI conversation, owned here so it survives tab switches and
     /// the chat resumes wherever it is reopened from.
@@ -74,7 +78,7 @@ struct ContentView: View {
             .allowsHitTesting(selectedTab == .home)
             .environment(\.isActiveTab, selectedTab == .home)
 
-            UpdatesView(selectedTab: $selectedTab)
+            UpdatesView(selectedTab: $selectedTab, marketFocusSeq: updatesMarketFocusSeq)
                 .opacity(selectedTab == .updates ? 1 : 0)
                 .allowsHitTesting(selectedTab == .updates)
                 .environment(\.isActiveTab, selectedTab == .updates)
@@ -172,10 +176,11 @@ struct ContentView: View {
             selectedTab = .research
             appState.pendingResearchTicker = nil
         }
-        // A Home Screen widget tap (`caydex://ticker/<SYMBOL>`, parked by `iosApp.onOpenURL`) →
-        // that asset's detail screen, in the SAME destination cover a push uses. That cover
-        // has its own `NavigationStack`, so the ticker screen's search and sheets work, and it
-        // dispatches all five asset classes through `NotificationRouteContent`.
+        // A Home Screen widget tap, parked by `iosApp.onOpenURL`: `caydex://ticker/<SYMBOL>` →
+        // that asset's detail screen, in the SAME destination cover a push uses (its own
+        // `NavigationStack`, so the ticker screen's search and sheets work, and it dispatches all
+        // five asset classes through `NotificationRouteContent`); `caydex://updates/market` →
+        // the Updates tab on its Market chip.
         //
         // ONE OWNER, consume-and-clear, `initial: true`: the same three rules as the push
         // handler above, for the same reasons. A cold launch parks the link before this view
@@ -281,6 +286,17 @@ struct ContentView: View {
         }
     }
 
+    /// Open a widget tap's destination. Exhaustive, with no `default:`: a new destination must
+    /// be decided here.
+    private func presentDeepLink(_ link: PendingDeepLink) {
+        switch link.destination {
+        case .ticker(let symbol, let assetType):
+            presentTickerLink(symbol: symbol, assetType: assetType)
+        case .updatesMarket:
+            openUpdatesMarket()
+        }
+    }
+
     /// Open a widget tap's asset, taking down whatever is on screen first.
     ///
     /// The teardown is `presentTappedPush`'s, for its reason: a cover cannot present while
@@ -288,11 +304,11 @@ struct ContentView: View {
     /// the user is three covers deep would otherwise appear only after they closed everything
     /// by hand. Assigning only after the wait matters too: this view's own
     /// `.onPresentationReset` nils `openedPushDestination` on the bump.
-    private func presentDeepLink(_ link: PendingDeepLink) {
+    private func presentTickerLink(symbol: String, assetType: MarketTickerType) {
         let destination = AlertDestination(
-            label: "Open \(link.symbol)",
+            label: "Open \(symbol)",
             systemImage: "chart.line.uptrend.xyaxis",
-            target: .ticker(symbol: link.symbol, assetType: link.assetType, destination: .default)
+            target: .ticker(symbol: symbol, assetType: assetType, destination: .default)
         )
         guard ModalPresentationProbe.isAnythingPresented else {
             openedPushDestination = destination
@@ -302,6 +318,35 @@ struct ContentView: View {
         Task { @MainActor in
             _ = await ModalPresentationProbe.waitUntilNothingPresented()
             openedPushDestination = destination
+        }
+    }
+
+    /// A Market widget tap: the Updates tab on its Market chip, the Market Insight card first
+    /// (owner, 2026-10-22).
+    ///
+    /// The same teardown as a ticker link: a tab switch UNDER an open cover (a ticker screen, the
+    /// chat, a sheet) would land the user nowhere visible. The tab and the focus change together,
+    /// after the stack is clear; neither is touched by this view's `.onPresentationReset`.
+    ///
+    /// The expanded audio player too. `RootContainerView` draws it as a layer of its own ZStack,
+    /// not a presentation, so the probe never sees it and no reset reaches it — the tab would
+    /// switch underneath it. Collapsing keeps the narration playing in the mini player.
+    private func openUpdatesMarket() {
+        let open = {
+            if AudioManager.shared.showFullScreenPlayer {
+                AudioManager.shared.collapsePlayer()
+            }
+            selectedTab = .updates
+            updatesMarketFocusSeq &+= 1
+        }
+        guard ModalPresentationProbe.isAnythingPresented else {
+            open()
+            return
+        }
+        appState.dismissAllPresentations()
+        Task { @MainActor in
+            _ = await ModalPresentationProbe.waitUntilNothingPresented()
+            open()
         }
     }
 }

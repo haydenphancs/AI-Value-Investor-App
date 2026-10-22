@@ -31,6 +31,13 @@ import pytest
 # Force Sentry inert for tests regardless of what backend/.env contains.
 os.environ["SENTRY_DSN"] = ""
 
+# The SEC buyback check (signal_of_confidence_service `_verify_buybacks`) OFF by default,
+# for the same reason: once the owner sets SEC_EDGAR_USER_AGENT in backend/.env, every
+# Signal of Confidence fixture whose cash-flow rows carry a `cik` would ask SEC — blocked
+# below, so its build would turn degraded `buyback_check` and change what those tests
+# assert. Tests of the check switch it on with monkeypatch.
+os.environ["SEC_EDGAR_USER_AGENT"] = ""
+
 # ---------------------------------------------------------------------------
 # Block outbound network for the whole session.
 #

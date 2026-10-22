@@ -21,7 +21,7 @@ from __future__ import annotations
 from app.config import settings
 import logging
 import math
-from datetime import datetime, timezone
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -278,47 +278,163 @@ def _fmt_amount(v: Any, money: bool = False) -> str:
     return f"{pre}{a:.0f}"
 
 
-def _to_int(v: Any) -> Optional[int]:
-    try:
-        return int(str(v).strip())
-    except (TypeError, ValueError):
+# The market-size strip (owner decision 2026-10-22, "Measured only"): a measured figure is shown
+# at its own year and never projected; a company's earnings-call pair keeps only the years its
+# stored quote states. A report stored before `tam_basis` existed is read from its label and scope.
+_COMPANY_QUOTE_LABEL = "Earnings call quote"
+_UNKNOWN_CONCENTRATION = "unknown"
+_CONCENTRATION_BASIS_NOTE = {
+    "revenue_share": "By revenue",
+    "market_cap": "By market cap",
+    # The report's live fallback: a peer list, never the whole industry (2026-10-22).
+    "peer_revenue_share": "By peer revenue",
+}
+# %/yr. A stored rate beyond this is a corrupt value, not an industry's growth.
+_GROWTH_PCT_MAX_ABS = 1000.0
+
+
+def _year(v: Any) -> Optional[int]:
+    """A calendar year (1900-2100) from an int, an integral float or a 4-digit ASCII string;
+    None for anything else (a bool, NaN, 2024.5, "FY24", a Buddhist-calendar 2569)."""
+    if isinstance(v, bool):
         return None
+    if isinstance(v, float):
+        if not math.isfinite(v) or not v.is_integer():
+            return None
+        v = int(v)
+    elif isinstance(v, str):
+        s = v.strip()
+        if not (len(s) == 4 and s.isascii() and s.isdigit()):
+            return None
+        v = int(s)
+    if not isinstance(v, int):
+        return None
+    return v if 1900 <= v <= 2100 else None
 
 
-def _project_market_dynamics(md: dict) -> dict:
-    """Mirror the iOS today-aligned TAM projection so the PDF matches the Deep
-    Dive. Phase-A (Census/FRED) TAM is often a year or two stale (e.g. Census
-    2023); iOS bumps the current year to today, preserves the (future - current)
-    span, and grows both TAM values by the source CAGR. Replicated here so the
-    report's TAM years/values line up with what the app shows."""
-    md = dict(md or {})
-    src = _to_int(md.get("current_year"))
-    if src is None:
-        return md
-    try:
-        today = datetime.now(timezone.utc).year
-    except Exception:
-        return md
-    fut = _to_int(md.get("future_year"))
-    cagr = _num(md.get("cagr_5yr"))
-    years = max(0, today - src)
-    mult = (1.0 + cagr / 100.0) ** years if (years > 0 and cagr is not None) else 1.0
-    disp_cur = today if years > 0 else src
-    md["current_year"] = str(disp_cur)
-    if fut is not None:
-        md["future_year"] = str(disp_cur + (fut - src))
-    cur_tam = _num(md.get("current_tam"))
-    fut_tam = _num(md.get("future_tam"))
-    # Keep the RAW pre-projection figure + year for source attribution, so the
-    # PDF can cite the actual number we calculate from (e.g. Census/FRED 2023).
-    md["source_tam"] = cur_tam
-    md["source_year"] = str(src)
-    md["projected"] = years > 0
-    if cur_tam is not None:
-        md["current_tam"] = cur_tam * mult
-    if fut_tam is not None:
-        md["future_tam"] = fut_tam * mult
-    return md
+def _tam_basis(md: dict) -> str:
+    """'measured' | 'company_quote' | 'unknown'. The stored `tam_basis` when it is one of the two.
+    A report stored before the key: the earnings-call label is a company quote, a 'global' scope
+    is a retired grounded (Phase B) figure whose basis cannot be stated, anything else was a
+    Census/FRED measurement. An unrecognised stored value is unknown, never measured."""
+    basis = md.get("tam_basis")
+    if basis in ("measured", "company_quote"):
+        return basis
+    if basis is not None:
+        return "unknown"
+    if md.get("tam_source_label") == _COMPANY_QUOTE_LABEL:
+        return "company_quote"
+    if str(md.get("tam_scope") or "").strip().lower() == "global":
+        return "unknown"
+    return "measured"
+
+
+def _stated_in(year: Optional[int], quote: str) -> Optional[int]:
+    """`year` only when the stored quote states it verbatim (never inside a longer number)."""
+    if year is None or not quote:
+        return None
+    return year if re.search(rf"(?<!\d){year}(?!\d)", quote) else None
+
+
+def _growth_pct(v: Any) -> Optional[float]:
+    """The stored rate to 1 dp, never -0.0 (a "-0.0%" reads as a decline); None when missing,
+    non-finite or implausibly large."""
+    n = _num(v)
+    if n is None or abs(n) > _GROWTH_PCT_MAX_ABS:
+        return None
+    r = round(n, 1)
+    return 0.0 if r == 0 else r
+
+
+def _growth_window(start: Any, end: Any) -> str:
+    """'2017–24' ('1998–2003' across a century); '' unless both are valid years, start < end."""
+    s, e = _year(start), _year(end)
+    if s is None or e is None or s >= e:
+        return ""
+    return f"{s}–{e % 100:02d}" if s // 100 == e // 100 else f"{s}–{e}"
+
+
+def _measured_market_dynamics(md: Any) -> dict:
+    """A COPY of the stored market_dynamics plus the strip's display keys. Nothing is projected
+    (owner decision 2026-10-22, "Measured only"): this used to mirror the iOS today-aligned
+    projection, which compounded a backward 2017→2024 Census rate forward, relabelled the 2024
+    figure "2026" and printed "projected at … CAGR". current_tam, future_tam and the years are
+    never changed.
+
+      basis / is_company_quote  `_tam_basis`
+      market_size     current_tam when positive and finite, else None (no strip)
+      measured_year   measured: tam_year, else current_year. A quote: its year only when the
+                      stored quote states it. Unknown basis: None
+      target_size / target_year  a company quote's stated target only, later than measured_year
+                      (a measured row's future_tam is a projection and is never shown)
+      growth_pct / growth_window  `_growth_pct(cagr_5yr)`, `_growth_window` of the stored window
+      structure / structure_basis  the concentration label ('—' when missing or 'unknown') and
+                      what it was measured on
+      scope_label     'US' / 'GLOBAL' beside a measured source only (a quote inherited it falsely)
+      growth_source   growth_source_label when it names another source than the TAM's
+      show_source     False for an unknown basis: its label named retired grounded publishers
+    """
+    out = dict(md) if isinstance(md, dict) else {}
+    basis = _tam_basis(out)
+    is_quote = basis == "company_quote"
+    legacy = out.get("tam_basis") is None
+    quote_raw = out.get("tam_source_quote")
+    quote = quote_raw[:200] if isinstance(quote_raw, str) else ""
+
+    if basis == "measured":
+        measured_year = _year(out.get("tam_year"))
+        if measured_year is None:
+            measured_year = _year(out.get("current_year"))
+    elif is_quote:
+        measured_year = _stated_in(
+            _year(out.get("current_year") if legacy else out.get("tam_year")), quote)
+    else:
+        measured_year = None
+
+    target_year = target_size = None
+    if is_quote:
+        target_year = _stated_in(
+            _year(out.get("future_year") if legacy else out.get("tam_target_year")), quote)
+        if target_year is not None and measured_year is not None and target_year <= measured_year:
+            target_year = None
+        fut = _num(out.get("future_tam"))
+        target_size = fut if target_year is not None and fut is not None and fut > 0 else None
+        if target_size is None:
+            target_year = None
+
+    size = _num(out.get("current_tam"))
+    conc = out.get("concentration")
+    conc = conc.strip() if isinstance(conc, str) else ""
+    known_conc = bool(conc) and conc.lower() != _UNKNOWN_CONCENTRATION
+    label = out.get("tam_source_label")
+    label = label.strip() if isinstance(label, str) else ""
+    growth_label = out.get("growth_source_label")
+    growth_label = growth_label.strip() if isinstance(growth_label, str) else ""
+    scope = out.get("tam_scope")
+    lifecycle = out.get("lifecycle_phase")
+
+    out.update({
+        "basis": basis,
+        "is_company_quote": is_quote,
+        "market_size": size if size is not None and size > 0 else None,
+        "measured_year": measured_year,
+        "target_year": target_year,
+        "target_size": target_size,
+        "growth_pct": _growth_pct(out.get("cagr_5yr")),
+        "growth_window": _growth_window(out.get("cagr_start_year"), out.get("cagr_end_year")),
+        "structure": conc if known_conc else "—",
+        "structure_basis": (
+            _CONCENTRATION_BASIS_NOTE.get(out.get("concentration_basis"), "") if known_conc else ""
+        ),
+        "lifecycle": lifecycle.replace("_", " ") if isinstance(lifecycle, str) else "",
+        "scope_label": (
+            scope.strip().upper() if basis == "measured" and isinstance(scope, str) else ""
+        ),
+        "growth_source": growth_label if growth_label and growth_label != label else "",
+        "show_source": basis != "unknown" and bool(label or (is_quote and quote)),
+        "source_quote": quote if is_quote else "",
+    })
+    return out
 
 
 def _share_count_change_known(ca: Any) -> bool:
@@ -647,7 +763,7 @@ def build_context(
         "company_name": data.get("company_name") or "—",
         "exchange": data.get("exchange") or "",
         "sector": data.get("sector") or moat.get("industry")
-        or (moat.get("market_dynamics") or {}).get("industry") or "",
+        or _measured_market_dynamics(moat.get("market_dynamics")).get("industry") or "",
         "live_date": data.get("live_date") or "",
         "persona_name": persona_name,
         "persona_lens": persona_lens,
@@ -751,7 +867,7 @@ def build_context(
             "insight": (hidden or {}).get("insight") or "",
         },
         "moat": {
-            "market_dynamics": _project_market_dynamics(moat.get("market_dynamics") or {}),
+            "market_dynamics": _measured_market_dynamics(moat.get("market_dynamics")),
             "dimensions": dims,
             "competitors": moat.get("competitors") or [],
             # "direct" | "threat" | None (reports stored before 2026-10-01, which

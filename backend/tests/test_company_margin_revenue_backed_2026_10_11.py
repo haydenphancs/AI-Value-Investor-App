@@ -235,8 +235,10 @@ def test_asset_turnover_peer_median_drops_no_revenue_companies():
 # ── moat peer averages: a new scorer vintage ────────────────────────────────────────────
 
 def test_moat_model_version_is_the_newest_vintage_and_older_rows_are_pending():
-    assert MODEL_VERSION == "moat_v1.2026-10-11"
+    # This vintage stays KNOWN (its rows rank as an older vintage) after a later bump.
+    assert "moat_v1.2026-10-11" in _MODEL_VERSION_ORDER
     assert _MODEL_VERSION_ORDER[-1] == MODEL_VERSION
+    assert _MODEL_VERSION_ORDER.index("moat_v1.2026-10-11") <= _MODEL_VERSION_ORDER.index(MODEL_VERSION)
     assert _MODEL_VERSION_ORDER.index("moat_v1.2026-10") < _MODEL_VERSION_ORDER.index(MODEL_VERSION)
     rows = [
         {"pillar_name": "Brand Power", "model_version": "moat_v1.2026-10", "peer_average_score": 4.6},

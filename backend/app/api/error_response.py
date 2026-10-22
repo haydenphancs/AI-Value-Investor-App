@@ -842,6 +842,15 @@ def auth_error(
 # ── Classifier ────────────────────────────────────────────────────────
 
 
+#: app/integrations/sec_edgar.py's exception classes, lower-cased (classify_exception).
+_SEC_EDGAR_EXCEPTION_NAMES = frozenset({
+    "secexception",
+    "secratelimitexception",
+    "secunavailableexception",
+    "secconfigexception",
+})
+
+
 def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
     """Inspect an exception and return (error_code, default http status).
 
@@ -937,6 +946,16 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
     # answer (no new ErrorCode, so no new iOS `AppError` branch).
     if cls.startswith("bravesearch"):
         return ErrorCode.GEMINI_UNAVAILABLE, _DEFAULT_STATUS[ErrorCode.GEMINI_UNAVAILABLE]
+
+    # ── SEC EDGAR (app/integrations/sec_edgar.py — the buyback check's filing facts) ──
+    # By NAME, ahead of the heuristics: a throttle's message says "HTTP 429" (→ FMP_RATE_LIMITED
+    # below, whose "try again in a minute" is wrong for a 10-minute circuit) and a timeout's
+    # says "timed out". EXACT class names or the "secedgar" prefix only: a bare "sec" prefix
+    # would also claim any Security… / Sector… class. The service degrades to FMP's figure,
+    # so none should reach a door; if one does, it is a filing-data source being unavailable
+    # (no new ErrorCode, so no new iOS `AppError` branch).
+    if cls in _SEC_EDGAR_EXCEPTION_NAMES or cls.startswith("secedgar"):
+        return ErrorCode.FMP_UNAVAILABLE, _DEFAULT_STATUS[ErrorCode.FMP_UNAVAILABLE]
 
     # ── Watchlist datastore unreadable (tracking_service) ─────────────
     # Checked BEFORE the generic heuristics below: a PostgREST read timeout

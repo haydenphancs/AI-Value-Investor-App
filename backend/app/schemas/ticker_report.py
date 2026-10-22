@@ -349,38 +349,53 @@ class RevenueEngineResponse(BaseModel):
 
 
 class MarketDynamicsResponse(BaseModel):
+    """The Moat card's market-dynamics row.
+
+    Owner decision 2026-10-22, "Measured only": the card shows the published market size at
+    its OWN year and the average yearly growth over its real window — never a projection.
+    The legacy fields below keep their types and meaning because shipped iOS builds (1.0 /
+    1.01 / 1.1) decode `industry`, `concentration`, `current_year`, `future_year` and
+    `lifecycle_phase` NON-optionally and still project `current_tam` / `future_tam` to the
+    device year by `cagr_5yr`; the Optional fields after `tam_scope` carry the new meaning
+    and only builds from 2026-10-22 read them.
+    """
     industry: str
-    concentration: str  # "monopoly" | "duopoly" | "oligopoly" | "fragmented"
-    # None when neither the sector_aggregates batch nor the in-hand peer
-    # profiles can produce a CAGR — iOS renders "—" in that case rather
-    # than misleading zeros.
+    # "oligopoly" | "fragmented" — REVENUE shares of the listed constituents (2026-10-22;
+    # monopoly / duopoly are never emitted). "unknown" when not measured: never null, an
+    # old build decodes it non-optionally (and maps the unknown string to Fragmented).
+    concentration: str
+    # The industry's realized average yearly growth over cagr_start_year → cagr_end_year
+    # (7 years as of 2026-10 despite the name). None when no source produced one.
     cagr_5yr: Optional[float] = None
     current_tam: float
+    # Legacy: the trailing rate extended 5 years (or a company quote's own target). Kept
+    # > 0 whenever current_tam > 0 for builds <= 1.1, which render a 0 as "$X → $0B".
     future_tam: float
     current_year: str
     future_year: str
-    lifecycle_phase: str  # "emerging" | "secular_growth" | "mature" | "declining"
+    lifecycle_phase: str  # "secular_growth" | "mature" | "declining" (±1%/yr dead band)
     # Verbatim sentence from the earnings transcript / company description
     # that the AI used to derive `current_tam`/`future_tam`. Empty string
     # when no source quote was found (TAM stays 0 in that case).
     tam_source_quote: Optional[str] = None
-    # Short human caption shown under the TAM row identifying which
-    # source produced the figure: "Earnings call quote" when AI extracted
-    # it from the transcript, "BEA <Sector> value-added (via FRED)" when
-    # the FRED industry-proxy was used, None when TAM stayed at 0.
+    # Short human caption identifying which source produced the TAM: "Earnings
+    # call quote" for a company's own figure, else the Census / BEA source label.
+    # Builds from 2026-10-22 render it under the row. None when TAM stayed at 0.
     tam_source_label: Optional[str] = None
-    # Grain of the underlying data source: 'industry' (Census 4-digit NAICS
-    # or industry-specific FRED), 'sector' (sector-level FRED used as
-    # fallback), 'all_industry' (USNGSP fallback). iOS renders a small
-    # "⚠ Broader than industry" chip when this is not 'industry' so users
-    # know the figure is a proxy. None when TAM came from an AI quote or
-    # wasn't populated.
+    # Grain of the underlying data source: 'industry' | 'sector' | 'all_industry'. The
+    # report shows a TAM only for 'industry' (`_apply_tam_source`); iOS renders no chip.
     source_grain: Optional[str] = None
-    # Scope of the TAM figure: "us" (Census/FRED US-domestic — the default for
-    # most industries) or "global" (Gemini grounded research for globally-
-    # competitive industries). iOS renders an explicit "US"/"Global" pill so the
-    # market size is never ambiguous. None when TAM wasn't populated.
+    # Scope of the TAM figure: "us" (Census/FRED US-domestic). Set only for a MEASURED
+    # industry figure — never for a company's earnings-call quote (usually global).
     tam_scope: Optional[str] = None
+    # ── Measured-only fields (2026-10-22; builds from that date) ──
+    tam_basis: Optional[str] = None          # "measured" | "company_quote"; None = older report / no TAM
+    tam_year: Optional[int] = None           # year current_tam was measured, or stated in the quote
+    tam_target_year: Optional[int] = None    # company_quote only: the quote's stated target year
+    cagr_start_year: Optional[int] = None    # first year of cagr_5yr's window
+    cagr_end_year: Optional[int] = None      # last year of that window (the data year)
+    growth_source_label: Optional[str] = None  # source of cagr_5yr (differs from tam_source_label on a quote)
+    concentration_basis: Optional[str] = None  # "revenue_share" | "market_cap" | "peer_revenue_share" (live peer fallback); None = not measured
 
 
 class MoatDimensionResponse(BaseModel):

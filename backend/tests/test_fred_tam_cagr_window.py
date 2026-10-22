@@ -79,6 +79,7 @@ async def test_no_usable_base_gives_no_cagr_rather_than_a_fake_zero(monkeypatch)
     tam = await its.fred_tam_for_series("USFOODDPNGSP")
     assert tam.current_tam == 708.9
     assert tam.cagr_5y_pct is None
+    assert tam.cagr_start_year is None           # no window without a rate
     assert tam.future_tam == tam.current_tam     # no projection without a rate
 
 
@@ -94,3 +95,38 @@ async def test_a_negative_cagr_survives(monkeypatch):
     _install(monkeypatch, [("2025", 398662), ("2024", 411637), ("2018", 450000)])
     tam = await its.fred_tam_for_series("USMINNGSP")
     assert tam.cagr_5y_pct < 0
+
+
+# ── The growth window travels with the rate (owner decision 2026-10-22) ──────
+
+
+@pytest.mark.asyncio
+async def test_fred_tam_reports_its_base_year(monkeypatch):
+    """The card labels the rate with its real span ("Avg/yr 2018-25"), so the tier
+    must say which observation it measured from."""
+    _install(monkeypatch, RESTAURANTS)
+    tam = await its.fred_tam_for_series("USFOODDPNGSP")
+    assert tam.cagr_start_year == 2018 and tam.current_year == "2025"
+
+
+@pytest.mark.asyncio
+async def test_an_unusable_oldest_point_moves_the_base_year(monkeypatch):
+    _install(monkeypatch, RESTAURANTS[:-1] + [("2018", 0.0)])
+    tam = await its.fred_tam_for_series("USFOODDPNGSP")
+    assert tam.cagr_start_year == 2019
+
+
+@pytest.mark.asyncio
+async def test_a_gapped_series_reports_the_dated_base_year(monkeypatch):
+    _install(monkeypatch, [("2025", 200.0), ("2024", 190.0), ("2022", 170.0), ("2019", 100.0)])
+    tam = await its.fred_tam_for_series("X")
+    assert tam.cagr_start_year == 2019
+
+
+@pytest.mark.asyncio
+async def test_a_near_zero_fred_rate_is_positive_zero(monkeypatch):
+    import math as _math
+    _install(monkeypatch, [("2025", 999.0), ("2024", 999.2)])     # −0.02%/yr → −0.0 rounded
+    tam = await its.fred_tam_for_series("X")
+    assert tam.cagr_5y_pct == 0.0 and _math.copysign(1.0, tam.cagr_5y_pct) == 1.0
+    assert tam.cagr_start_year == 2024

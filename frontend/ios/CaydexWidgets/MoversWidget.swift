@@ -237,18 +237,26 @@ struct MoversWidgetView: View {
         .widgetURL(tileURL)
     }
 
-    /// The tile-wide tap target: the Holdings headline mover's detail screen.
+    /// The tile-wide tap target.
     ///
     /// ONE per widget, set here and nowhere else (a second `.widgetURL` deeper in the tree
     /// is undefined behaviour). It is the only target a Small or Lock Screen tile has, and
     /// the fallback outside the row `Link`s on Medium/Large (see `TapThrough`).
     ///
+    /// - Market mode → the Updates tab on its Market chip, the Market Insight card first
+    ///   (owner, 2026-10-22). The WHOLE Market tile: its asset rows carry no `Link` of their own,
+    ///   because on Medium/Large they cover most of the tile and would take the tap.
+    /// - Holdings → the headline mover's detail screen (unchanged; its rows link one by one).
+    ///
     /// nil, so the app opens at its root, when signed out (the app shows the sign-in wall
-    /// either way), with no snapshot, on a market payload standing in for Holdings, and in
-    /// Market mode. A Market tile shows several assets and no single one is "the" tile, so
-    /// its assets link one by one on Medium/Large instead.
+    /// either way), and in Holdings with no snapshot or with a market payload standing in for
+    /// Holdings.
     private var tileURL: URL? {
-        guard !entry.isSignedOut, entry.mode == .portfolio,
+        guard !entry.isSignedOut else { return nil }
+        if entry.mode == .market {
+            return CaydexDeepLink.updatesMarketURL
+        }
+        guard entry.mode == .portfolio,
               let snap = entry.snapshot, snap.mode == "portfolio",
               let headline = snap.headlineMover
         else { return nil }
@@ -475,7 +483,6 @@ private struct AssetGrid: View {
         VStack(alignment: .leading, spacing: 2) {
             ForEach(positions, id: \.self) { i in
                 AssetCell(asset: assets[i])
-                    .tapThrough(assets[i].deepLink)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -487,8 +494,7 @@ private struct AssetColumn: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            // Small lists here too, where `tapThrough` draws no Link (one tap target per tile).
-            ForEach(assets, id: \.symbol) { AssetCell(asset: $0).tapThrough($0.deepLink) }
+            ForEach(assets, id: \.symbol) { AssetCell(asset: $0) }
         }
     }
 }
@@ -550,7 +556,7 @@ private struct AssetPriceList: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(assets.prefix(limit), id: \.symbol) { AssetPriceRow(asset: $0).tapThrough($0.deepLink) }
+            ForEach(assets.prefix(limit), id: \.symbol) { AssetPriceRow(asset: $0) }
         }
     }
 }
@@ -1443,34 +1449,25 @@ private struct InlineHoldings: View {
 
 // MARK: - Tap-through links
 
-/// Every widget tap used to open the app at its root. These send it to the asset instead,
-/// through `caydex://ticker/<SYMBOL>` (`CaydexDeepLink`, shared with the app, which parses
-/// it, gates it behind sign-in and opens the detail screen).
+/// Every widget tap used to open the app at its root. These send it somewhere specific
+/// instead, through `CaydexDeepLink` (shared with the app, which parses the link, gates it
+/// behind sign-in and opens it): a Holdings tap → `caydex://ticker/<SYMBOL>`, the asset's
+/// detail screen; a Market tap → `caydex://updates/market`, the Updates tab's Market chip.
 ///
 /// TWO MECHANISMS, because WidgetKit gives each family different tap rules:
 /// - `.widgetURL` is the tile-wide target, and the ONLY one a Small or Lock Screen tile
-///   has. It is set once, on `MoversWidgetView`, to the Holdings headline mover. On
-///   Medium/Large it is also the fallback for any tap outside a `Link`.
-/// - `Link` per row on Medium/Large (`tapThrough`). It is inert on Small and Lock Screen
-///   families, so it is not drawn there at all.
+///   has. It is set once, on `MoversWidgetView` (`tileURL`). On Medium/Large it is also the
+///   fallback for any tap outside a `Link`.
+/// - `Link` per Holdings row on Medium/Large (`tapThrough`). It is inert on Small and Lock
+///   Screen families, so it is not drawn there at all. Market rows have none (see `tileURL`).
 ///
-/// The URL carries the ticker and its class, nothing else. That keeps it as safe to hold
+/// A ticker URL carries the ticker and its class, nothing else. That keeps it as safe to hold
 /// behind `.privacySensitive()` Holdings rows as the ticker printed on them.
 private extension WidgetMover {
     /// The class when the quote supplied one. Otherwise the app resolves from the symbol,
     /// which is right for stocks and for crypto pairs.
     var deepLink: URL? {
         CaydexDeepLink.tickerURL(symbol: ticker, assetClass: CaydexDeepLink.AssetClass(wire: assetType))
-    }
-}
-
-private extension WidgetIndex {
-    /// ONLY when the server named the class. The market assets are ETF proxies (SPY, ONEQ,
-    /// DIA, …), and an unclassified SPY resolves to the STOCK screen. A tile with no link is
-    /// better than a tap that opens the wrong screen.
-    var deepLink: URL? {
-        guard let assetClass = CaydexDeepLink.AssetClass(wire: assetType) else { return nil }
-        return CaydexDeepLink.tickerURL(symbol: symbol, assetClass: assetClass)
     }
 }
 

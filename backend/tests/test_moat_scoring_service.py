@@ -322,6 +322,7 @@ def _make_service_with_multi_year(
 class _FakeIndustryTAM:
     hhi: Optional[float] = None
     lifecycle_phase: Optional[str] = None
+    source_grain: Optional[str] = None
 
 
 def test_brand_power_above_median_scores_high():
@@ -435,6 +436,57 @@ def test_network_effects_uses_industry_tam_hhi_and_lifecycle():
     # Average of (7.0, 7.0, 7.5) ≈ 7.17 → round to 7.2
     assert nw.confidence == "high"
     assert nw.score == 7.2
+
+
+def _network_sub_scores(industry_tam: Any) -> Dict[str, Optional[float]]:
+    svc = _make_service_with_fake_medians({})
+    results = svc.score(
+        sector="Industrials", industry="Aerospace & Defense",
+        profile={}, income=[], balance=[], ratios=[],
+        industry_tam=industry_tam,
+    )
+    return {d.metric: d.sub_score for d in results[PILLAR_NETWORK].drivers}
+
+
+@pytest.mark.parametrize(
+    "grain,phase,expected",
+    [
+        # A broad stand-in carries its SECTOR's phase, which the card hides: mature.
+        ("sector", "declining", 5.0),
+        ("all_industry", "declining", 5.0),
+        ("sector", "emerging", 5.0),
+        # The industry's own phase is scored as it stands.
+        ("industry", "declining", 3.0),
+        (None, "declining", 3.0),           # a plain IndustryTAM (Census / industry FRED)
+        ("industry", "secular_growth", 7.0),
+        # No phase stays no reading, whatever the grain — never promoted to mature.
+        ("sector", None, None),
+    ],
+)
+def test_broad_grain_lifecycle_scores_as_mature(grain, phase, expected):
+    subs = _network_sub_scores(
+        _FakeIndustryTAM(hhi=867, lifecycle_phase=phase, source_grain=grain),
+    )
+    assert subs["lifecycle_phase"] == expected
+
+
+def test_broad_grain_gate_reads_an_object_without_a_grain_attribute():
+    """A plain `IndustryTAM` has no `source_grain` at all; it is industry-level."""
+
+    class _NoGrain:
+        hhi = None
+        lifecycle_phase = "declining"
+
+    assert _network_sub_scores(_NoGrain())["lifecycle_phase"] == 3.0
+
+
+def test_revenue_hhi_867_scores_2_5():
+    """Aerospace & Defense's revenue-share HHI (measured 2026-10-22) is 867: fragmented,
+    2.5 — the market-cap HHI would have read SpaceX's $1.9T of $3.5T as concentrated."""
+    assert _hhi_to_score(867) == 2.5
+    subs = _network_sub_scores(_FakeIndustryTAM(hhi=867, lifecycle_phase="mature"))
+    assert subs["industry_hhi"] == 2.5
+    assert subs["lifecycle_phase"] == 5.0
 
 
 def test_intangible_assets_two_metrics_medium_confidence():

@@ -207,7 +207,10 @@ def test_the_payload_keeps_every_key_the_old_file_had(built):
     assert payload["market_cap_floor"] == 0
     assert payload["industry_count"] == 2 and payload["ticker_count"] == 4
     for entry in payload["industries"]:
-        assert set(entry) == {"industry", "sector", "tickers", "market_caps"}
+        # `revenues` (2026-10-22) rides beside market_caps whenever the twin scan ran; these
+        # fakes answer ratios-ttm without a P/S, so every map is empty, never missing.
+        assert set(entry) == {"industry", "sector", "tickers", "market_caps", "revenues"}
+        assert entry["revenues"] == {}
         assert entry["tickers"] == sorted(entry["market_caps"])
         assert all(isinstance(c, float) and c > 0 for c in entry["market_caps"].values())
     assert {e["industry"]: e["tickers"] for e in payload["industries"]} == {

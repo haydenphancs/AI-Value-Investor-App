@@ -7,18 +7,20 @@
 
 import Foundation
 
-/// `caydex://ticker/<SYMBOL>[?type=<class>]`: a Home Screen widget tap → that asset's detail
-/// screen.
+/// The `caydex://` links a Home Screen widget tap opens. Exactly two shapes:
+/// - `caydex://ticker/<SYMBOL>[?type=<class>]` → that asset's detail screen (a Holdings tap);
+/// - `caydex://updates/market` → the Updates tab on its Market chip, where the Market Insight
+///   card leads (a Market tap; owner, 2026-10-22).
 ///
 /// Lives in `Shared/`, so it compiles into BOTH targets. The widget that BUILDS a link and the
 /// app that PARSES it share one grammar, and neither side can drift from the other.
 ///
 /// ⚠️ `caydex` IS ALSO THE OAUTH CALLBACK SCHEME (`APIConfig.oauthCallbackScheme`, redirect
 /// `caydex://auth-callback`). `ASWebAuthenticationSession` consumes that callback itself, so it
-/// never reaches `.onOpenURL`. The parser still recognises ONLY the `ticker` host, and answers
-/// `.notTickerLink` for everything else. A callback that did arrive is therefore left alone,
-/// never misread as a ticker. `test_widget_deep_links.py` pins the scheme equal in all three
-/// places (here, `APIConfig`, Info.plist).
+/// never reaches `.onOpenURL`. The parser still recognises ONLY the `ticker` and `updates`
+/// hosts, and answers `.notOurLink` for everything else. A callback that did arrive is
+/// therefore left alone, never misread as a link of ours. `test_widget_deep_links.py` pins the
+/// scheme equal in all three places (here, `APIConfig`, Info.plist).
 ///
 /// ⚠️ UNTRUSTED INPUT. Any app or web page can open a `caydex://` URL, not just our widget. So
 /// the grammar is exact, and anything outside it is `.malformed`, never coerced into the
@@ -26,15 +28,19 @@ import Foundation
 /// - the symbol is ASCII `[A-Z0-9]` segments joined by `.` or `-`, with an optional leading
 ///   `^`, at most `maxSymbolLength` characters;
 /// - `type` is one of `AssetClass`, given at most once, and is the only query key allowed;
+/// - an `updates` link is exactly the path `/market`, with no query at all;
 /// - there are no credentials, port, fragment or extra path segments.
 ///
 /// What a link may do is decided by the app (`DeepLinkRouter`), not here. That is: open a
-/// detail screen, behind the sign-in wall, and nothing that spends credits.
+/// detail screen or the Updates tab, behind the sign-in wall, and nothing that spends credits.
 nonisolated public enum CaydexDeepLink {
 
     /// Pinned equal to `APIConfig.oauthCallbackScheme` and Info.plist's `CFBundleURLSchemes`.
     public static let scheme = "caydex"
     static let tickerHost = "ticker"
+    static let updatesHost = "updates"
+    /// The one path the `updates` host accepts. Lower-case and exact: no other chip is a link.
+    static let updatesMarketPath = "/market"
     static let typeKey = "type"
     /// Longer than any listed symbol (`SHOP.TO`, `BRK-B`, `^GSPC`, `BTCUSD`) with headroom.
     static let maxSymbolLength = 20
@@ -64,10 +70,13 @@ nonisolated public enum CaydexDeepLink {
     /// What `parse` decided, with a reason worth logging when it declined.
     public enum ParseResult: Equatable, Sendable {
         case ticker(Ticker)
-        /// Not a ticker link at all: another scheme, or another `caydex` host such as the
+        /// `caydex://updates/market`: the Updates tab on its Market chip.
+        case updatesMarket
+        /// Not a link of ours at all: another scheme, or another `caydex` host such as the
         /// OAuth `auth-callback`. The caller must leave it alone.
-        case notTickerLink
-        /// A `caydex://ticker` link that breaks the grammar. Declined, never repaired.
+        case notOurLink
+        /// A `caydex://ticker` or `caydex://updates` link that breaks the grammar. Declined,
+        /// never repaired.
         case malformed(reason: String)
     }
 
@@ -89,21 +98,41 @@ nonisolated public enum CaydexDeepLink {
         return components.url
     }
 
+    /// The Market widget's link: the Updates tab on its Market chip. Built here, like every
+    /// link, so the widget never spells a `caydex://` URL by hand.
+    public static var updatesMarketURL: URL? {
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = updatesHost
+        components.path = updatesMarketPath
+        return components.url
+    }
+
     // MARK: - Parse (app)
 
     public static func parse(_ url: URL) -> ParseResult {
         guard url.absoluteString.count <= maxURLLength else {
             return url.scheme?.lowercased() == scheme
-                ? .malformed(reason: "url_too_long") : .notTickerLink
+                ? .malformed(reason: "url_too_long") : .notOurLink
         }
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               components.scheme?.lowercased() == scheme,
-              components.host?.lowercased() == tickerHost
-        else { return .notTickerLink }
+              let host = components.host?.lowercased(),
+              host == tickerHost || host == updatesHost
+        else { return .notOurLink }
 
         guard components.user == nil, components.password == nil,
               components.port == nil, components.fragment == nil
         else { return .malformed(reason: "unexpected_component") }
+
+        if host == updatesHost {
+            // `query` (not `queryItems`) so a bare trailing `?` is refused too.
+            guard components.query == nil else { return .malformed(reason: "unknown_query_key") }
+            guard components.path == updatesMarketPath else {
+                return .malformed(reason: "unknown_updates_path")
+            }
+            return .updatesMarket
+        }
 
         // `path` is percent-DECODED, so an encoded `%2F` shows up here as `/` and is refused.
         let path = components.path

@@ -188,6 +188,11 @@ _INFLIGHT_MODULES = [
     # and `fetch_chart_data`'s result cache. Builds run as their own tasks, so a viewer
     # who leaves cannot cancel a multi-page history every other viewer is waiting on.
     "price_history_service.py",
+    # Added 2026-10-22 with the Signal of Confidence buyback check. Future-based,
+    # profit_power shape, keyed on (cik, sorted tags): concurrent chart builds for one
+    # company share one round of SEC XBRL fetches; joiners attach through `asyncio.shield`,
+    # and a cancelled leader fails the future with a RuntimeError before re-raising.
+    "sec_concept_service.py",
 ]
 
 

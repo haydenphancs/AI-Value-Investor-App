@@ -729,6 +729,9 @@ _FROZEN_FINANCIALS_IGNORABLE: Dict[str, frozenset] = {
     # interior or leading-edge gap emits no reason at all (P19, 2026-10-01): its point
     # is kept for the share line and ships `cash_flow_reported=False` (0.0 placeholders,
     # forwarded by `model_dump()` in `_build_capital_allocation_block`), never a measured $0.
+    # `buyback_check` stays BLOCKING on purpose: SEC could not answer and no cached filing
+    # data was left, so the buybacks are FMP's unchecked figures — INTC's tax withholding
+    # would freeze into the report as "Buybacks $617M".
     "signal_of_confidence": frozenset({"cash_flow_row"}),
     # Refusing a breakdown whose SEGMENT feed failed sends the Revenue Engine down the
     # failed-fetch path (rebuild from raw segments) instead of freezing the income-only
@@ -2414,6 +2417,11 @@ class TickerReportDataCollector:
                     op = ratios[0].get("operatingProfitMarginTTM")
                     if op is not None:
                         merged["operatingProfitMargin"] = op
+                    # Revenue-share concentration (2026-10-22): revenue = cap ÷ P/S, from
+                    # this same answer — no extra call.
+                    ps = ratios[0].get("priceToSalesRatioTTM")
+                    if ps is not None:
+                        merged["priceToSalesRatio"] = ps
                     # ROIC may live on /ratios-ttm in older FMP shape;
                     # the canonical 2026 location is /key-metrics-ttm
                     # (extracted below) so this is a fallback only.
@@ -3245,7 +3253,7 @@ class TickerReportDataCollector:
                     dim["peer_score"] = ind_avg
         moat_dims = _apply_peer_score_baseline(merged_dims)
         deterministic_market_dynamics = _build_market_dynamics(
-            out.profile, out.sector_aggregates, out.peer_profiles,
+            out.profile, out.peer_profiles, out.peer_ratios, out.ratios_ttm,
         )
         # Two-tier TAM source priority: AI-extracted transcript quote
         # (highest trust — explicit, grounded), then FRED industry
@@ -7661,18 +7669,18 @@ def _empty_price_action(current_price: float) -> Dict[str, Any]:
 
 
 def _default_market_dynamics(profile: Dict[str, Any]) -> Dict[str, Any]:
-    """Honest empty state when neither cached sector aggregates nor
-    in-hand peer profiles are available.
+    """Honest empty state when no peer set can be measured.
 
     `cagr_5yr` and `tam_*` are None so iOS renders "—" placeholders
-    rather than misleading zeros. Concentration defaults to `fragmented`
-    (rather than the more pessimistic `mature` cycle phase) because
-    absence-of-data should not look like presence-of-bad-data.
+    rather than misleading zeros. Concentration is the sentinel "unknown"
+    (2026-10-22) — never a fabricated "fragmented", and never null: shipped
+    iOS builds decode it non-optionally (they map the unknown string to
+    Fragmented, what they showed before; builds from 2026-10-22 show "—").
     """
     now_year = datetime.now(timezone.utc).year
     return {
         "industry": profile.get("industry") or "Unknown",
-        "concentration": "fragmented",
+        "concentration": "unknown",
         "cagr_5yr": None,
         "current_tam": 0.0,
         "future_tam": 0.0,
@@ -7683,52 +7691,130 @@ def _default_market_dynamics(profile: Dict[str, Any]) -> Dict[str, Any]:
         "tam_source_label": None,
         "source_grain": None,
         "tam_scope": None,
+        "concentration_basis": None,
     }
+
+
+# A peer-set concentration needs at least this many measured firms: below it HHI >= 1,500
+# (10,000 / n) for any shares, so the label could only ever read "oligopoly".
+_PEER_CONCENTRATION_MIN_FIRMS = 7
 
 
 def _aggregates_from_peers(
     focal_profile: Dict[str, Any],
     peer_profiles: List[Dict[str, Any]],
+    peer_ratios: Optional[Dict[str, Dict[str, Any]]] = None,
+    focal_ratios_ttm: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Derive concentration metrics from in-hand peer market caps.
+    """Derive REVENUE-share concentration from the focal company and its in-hand peers
+    (owner decision 2026-10-22, "Revenue-share HHI" — the same basis as the industry
+    dossier). The fallback when the dossier has no measured concentration.
 
-    Used as the fallback when the `sector_aggregates` cache table is
-    empty for this sector (batch hasn't run, or the row expired). The
-    focal ticker is included in the cap list so the top-1/top-2 share
-    math reflects competitive dynamics, not just peer-among-peer ranking.
+    Revenue = profile market cap ÷ `priceToSalesRatioTTM` (`app/utils/implied_revenue`),
+    the P/S coming from the ratios-ttm answers the collector already holds (the focal's
+    `ratios_ttm`, the peers' `_fetch_peer_ratios`) — no extra FMP call. Guards the dossier's
+    universe path gets from its build:
+      * a listing whose profile `currency` is not USD is dropped (its cap is in local
+        currency, so cap ÷ P/S would mix currencies into one HHI);
+      * duplicate (cap, P/S) pairs — two share classes of one company carry the same cap
+        and statements — count once;
+      * fewer than `_PEER_CONCENTRATION_MIN_FIRMS` (7) positive revenues — below it
+        the HHI cannot fall under the oligopoly line — or a revenue LEADER with P/S
+        below `MIN_PLAUSIBLE_PS` (corrupt data, WARNING) → None (unmeasured).
+    Its basis is "peer_revenue_share": a peer list, never described as the industry.
 
-    Skips CAGR — we'd need historical revenue per peer (5+ years × N
-    peers worth of FMP calls) which is too expensive to do inline.
-    Caller leaves `cagr_5yr=None` when this is the source.
-
-    Returns None when fewer than 3 valid market caps are available —
-    HHI on 1-2 points isn't informative.
+    Skips CAGR — we'd need historical revenue per peer, too expensive inline.
     """
     from app.services.sector_aggregates_service import compute_hhi
+    from app.utils.implied_revenue import MIN_PLAUSIBLE_PS, implied_ttm_revenue_usd
 
-    caps: List[float] = []
-    focal_cap = float((focal_profile or {}).get("mktCap") or 0.0)
-    if focal_cap > 0:
-        caps.append(focal_cap)
-    for p in peer_profiles or []:
-        c = float(p.get("mktCap") or 0.0)
-        if c > 0:
-            caps.append(c)
+    ratios_by_sym = peer_ratios or {}
 
-    if len(caps) < 3:
+    def _peer_ps(profile: Dict[str, Any]) -> Any:
+        sym = profile.get("symbol")
+        if not isinstance(sym, str) or not sym:
+            return None
+        row = ratios_by_sym.get(sym) or ratios_by_sym.get(sym.upper()) or {}
+        return row.get("priceToSalesRatio") if isinstance(row, dict) else None
+
+    focal_ps = None
+    if isinstance(focal_ratios_ttm, list) and focal_ratios_ttm and isinstance(focal_ratios_ttm[0], dict):
+        focal_ps = focal_ratios_ttm[0].get("priceToSalesRatioTTM")
+    candidates: List[Tuple[Any, Any]] = [(focal_profile, focal_ps)]
+    candidates += [(p, _peer_ps(p)) for p in (peer_profiles or []) if isinstance(p, dict)]
+
+    seen: set = set()
+    measured: List[Tuple[float, float, str]] = []      # (revenue, cap, symbol)
+    for profile, ps in candidates:
+        if not isinstance(profile, dict):
+            continue
+        currency = profile.get("currency")
+        if isinstance(currency, str) and currency.strip() and currency.strip().upper() != "USD":
+            continue
+        cap = profile.get("mktCap")
+        rev = implied_ttm_revenue_usd(cap, ps)
+        if rev is None or rev <= 0:
+            continue
+        key = (round(float(cap), -6), round(float(ps), 4))
+        if key in seen:
+            continue
+        seen.add(key)
+        measured.append((rev, float(cap), str(profile.get("symbol") or "?")))
+
+    # At least 7: with n firms HHI >= 10000/n, so 6 or fewer read "oligopoly" by
+    # arithmetic whatever the shares — a label about the peer list, not the industry.
+    if len(measured) < _PEER_CONCENTRATION_MIN_FIRMS:
         return None
-
-    total = sum(caps)
-    caps_sorted = sorted(caps, reverse=True)
-    top1_share = (caps_sorted[0] / total) * 100.0
-    top2_share = ((caps_sorted[0] + caps_sorted[1]) / total) * 100.0
-
+    measured.sort(reverse=True)
+    lead_rev, lead_cap, lead_sym = measured[0]
+    if lead_cap / lead_rev < MIN_PLAUSIBLE_PS:
+        logger.warning(
+            "peer concentration unmeasured for %s (%s): revenue leader %s implies $%.1fB on a "
+            "$%.1fB cap (P/S %.4f < %.2f) — corrupt data",
+            focal_profile.get("symbol") if isinstance(focal_profile, dict) else "?",
+            focal_profile.get("industry") if isinstance(focal_profile, dict) else "?",
+            lead_sym, lead_rev / 1e9, lead_cap / 1e9, lead_cap / lead_rev, MIN_PLAUSIBLE_PS,
+        )
+        return None
+    values = [r for r, _, _ in measured]
+    total = sum(values)
     return {
-        "hhi": compute_hhi(caps),
-        "top1_share_pct": top1_share,
-        "top2_share_pct": top2_share,
-        "num_constituents": len(caps),
+        "hhi": compute_hhi(values),
+        "top1_share_pct": (values[0] / total) * 100.0,
+        "top2_share_pct": ((values[0] + values[1]) / total) * 100.0,
+        "num_constituents": len(values),
+        # A PEER SET, not the industry's listed companies: surfaces word it as such.
+        "basis": "peer_revenue_share",
     }
+
+
+def _stated_year(value: Any, quote: str, *, lo: int, hi: int) -> Optional[int]:
+    """A 4-digit year from the AI pass, kept only when it lies in [lo, hi] AND appears
+    verbatim in the stored quote — so a Stage-A template default ('2025' / '2030') never
+    reads as a year the company stated, and the year a user sees is in the quote they see."""
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    text = str(value).strip()
+    if len(text) != 4 or not text.isdigit():
+        return None
+    year = int(text)
+    if not lo <= year <= hi:
+        return None
+    if not re.search(rf"(?<!\d){text}(?!\d)", quote or ""):
+        return None
+    return year
+
+
+def _int_year(value: Any) -> Optional[int]:
+    """A data year as an int in 1990..2100 (the collector writes Python ints: research.py
+    serves the raw JSONB); None for anything else."""
+    if isinstance(value, bool):
+        return None
+    try:
+        year = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return year if 1990 <= year <= 2100 else None
 
 
 def _normalize_ai_tam_billions(v: Any) -> Optional[float]:
@@ -7794,8 +7880,8 @@ def _apply_tam_source(
     `tam_scope` (the "US"/"Global" header prefix) is set only when a TAM is
     actually shown — the placeholder used to yield "US - Market Size (TAM) —".
 
-    Concentration override stays tied to the non-AI path, and applies even when
-    the dossier's TAM is hidden: the dossier's industry-wide HHI comes from the
+    The dossier's measured concentration overrides the peer-set figure whichever
+    TAM source won, and even when the dossier's TAM is hidden: it comes from the
     industry's constituents, not from FRED/Census.
     """
     # ── TAM PAIR ──────────────────────────────────────────────────────
@@ -7812,16 +7898,33 @@ def _apply_tam_source(
             # Require BOTH sides — a one-sided quote renders "$0B → $X" (or
             # "$X → $0B") and hides the proxy's complete current+future+CAGR.
             if current is not None and future is not None:
+                stored_quote = quote[:200]
                 market_dynamics["current_tam"] = current
                 market_dynamics["future_tam"] = future
-                market_dynamics["tam_source_quote"] = quote[:200]
+                market_dynamics["tam_source_quote"] = stored_quote
                 market_dynamics["tam_source_label"] = "Earnings call quote"
+                market_dynamics["tam_basis"] = "company_quote"
 
+                # The company's own years — only as STATED in the quote the user sees
+                # (a Stage-A template default never reads as stated), and in range.
+                report_year = datetime.now(timezone.utc).year
+                tam_year = _stated_year(ai_md.get("current_year"), stored_quote,
+                                        lo=report_year - 3, hi=report_year)
+                market_dynamics["tam_year"] = tam_year
+                market_dynamics["tam_target_year"] = _stated_year(
+                    ai_md.get("future_year"), stored_quote,
+                    lo=max(tam_year or report_year, report_year) + 1, hi=report_year + 15,
+                )
+                # Legacy future_year (builds <= 1.1, which show it under the company's
+                # future_tam): the AI's 4-digit year as before, so a far-off "$2.5T by
+                # 2050" keeps 2050 — never the now+5 default under the company's
+                # figure. current_year stays the generation year, so an old build does
+                # not compound a fresh quote. The new card reads tam_target_year only.
                 fy = ai_md.get("future_year")
-                if isinstance(fy, (int, str)):
-                    s = str(fy).strip()
-                    if s.isdigit() and len(s) == 4:
-                        market_dynamics["future_year"] = s
+                if isinstance(fy, (int, str)) and not isinstance(fy, bool):
+                    fy_text = str(fy).strip()
+                    if fy_text.isdigit() and len(fy_text) == 4 and 1990 <= int(fy_text) <= 2100:
+                        market_dynamics["future_year"] = fy_text
                 ai_tam_applied = True
 
     # Is the dossier's figure about THIS industry, with a real TAM? A plain
@@ -7846,32 +7949,41 @@ def _apply_tam_source(
             market_dynamics["current_year"] = industry_tam.current_year
             market_dynamics["future_year"] = industry_tam.future_year
             market_dynamics["tam_source_label"] = industry_tam.source_label
+            # Measured: the card shows current_tam at ITS year, never a projection.
+            market_dynamics["tam_basis"] = "measured"
+            market_dynamics["tam_year"] = _int_year(industry_tam.current_year)
+            market_dynamics["tam_target_year"] = None
 
             # `source_grain` is set when the proxy is an IndustryDossier.
             grain = getattr(industry_tam, "source_grain", None)
             if grain:
                 market_dynamics["source_grain"] = grain
 
-        # Industry-wide concentration (HHI from ALL constituents in this
-        # industry, computed quarterly) is more authoritative than the focal
-        # ticker's peer-set HHI computed live. Override when present — even when
-        # the TAM above is hidden, since it does not come from FRED/Census.
+    # Industry-wide concentration (revenue shares of ALL the industry's listed
+    # constituents, computed quarterly) is more authoritative than the focal
+    # ticker's peer-set figure computed live. Override when measured — WHATEVER
+    # won the TAM pair (2026-10-22: gated on the non-quote path, a report whose
+    # TAM came from an earnings-call quote kept the peer label and so the same
+    # industry read "fragmented" or "oligopoly" by TAM source) and even when the
+    # TAM above is hidden, since it does not come from FRED/Census.
+    if industry_tam is not None:
         dossier_concentration = getattr(industry_tam, "concentration_label", None)
         if dossier_concentration:
             market_dynamics["concentration"] = dossier_concentration
+            market_dynamics["concentration_basis"] = getattr(industry_tam, "concentration_basis", None)
 
     # ── CAGR + lifecycle from the dossier — applied REGARDLESS of which TAM
     #    source won, so a valid AI TAM quote can't blank out the dossier's
     #    CAGR (the "CAGR shows —" bug). ──────────────────────────────────
     if industry_tam is not None:
-        # Scope label (US vs Global) follows the industry's resolved data
-        # source — Census/FRED dossiers are 'us', Phase B overrides 'global' —
-        # and a complete AI earnings quote inherits it (an existing design
-        # choice, ffac6032). Set only when a TAM is actually shown AND the
-        # dossier is about this industry: never over "—" (the tester's
-        # "US - Market Size (TAM) —"), never from a broad stand-in the card hides.
+        # Scope label ("US") follows the industry's resolved data source — set only
+        # when the MEASURED industry figure is shown: never over "—" (the tester's
+        # "US - Market Size (TAM) —"), never from a broad stand-in the card hides, and
+        # never on a company's earnings-call quote (2026-10-22: with Phase B retired
+        # every dossier is 'us', so an inherited scope put "US" over a usually-GLOBAL
+        # company TAM).
         shown_tam = _finite_or_none(market_dynamics.get("current_tam"))
-        if dossier_is_specific and shown_tam is not None and shown_tam > 0:
+        if dossier_is_specific and not ai_tam_applied and shown_tam is not None and shown_tam > 0:
             market_dynamics["tam_scope"] = getattr(industry_tam, "tam_scope", "us")
         # Dossier-derived lifecycle wins outright when present (derived from the
         # industry's CAGR). From a BROAD dossier nothing is trusted: its phase came
@@ -7885,20 +7997,26 @@ def _apply_tam_source(
             # dossier produced a non-default classification (a real signal).
             market_dynamics["lifecycle_phase"] = dossier_lifecycle
 
-        # Surface the industry's realized CAGR only when sector_aggregates
-        # didn't already produce one — preserves the higher-trust source — and
-        # only from an industry-specific dossier.
+        # Surface the industry's realized average yearly growth, with its real
+        # window, only from an industry-specific dossier (and only when nothing set
+        # a rate first).
         if dossier_is_specific and market_dynamics.get("cagr_5yr") is None:
             cagr = _finite_or_none(getattr(industry_tam, "cagr_5y_pct", None))
             if cagr is not None:
-                market_dynamics["cagr_5yr"] = cagr
+                market_dynamics["cagr_5yr"] = cagr + 0.0        # never -0.0 ("+-0.0%")
+                start = _int_year(getattr(industry_tam, "cagr_start_year", None))
+                end = _int_year(getattr(industry_tam, "current_year", None))
+                if start is not None and end is not None and start < end:
+                    market_dynamics["cagr_start_year"] = start
+                    market_dynamics["cagr_end_year"] = end
+                market_dynamics["growth_source_label"] = getattr(industry_tam, "source_label", None)
                 # Legacy promotion — only when the proxy didn't publish a
-                # lifecycle (plain IndustryTAM, not a dossier).
+                # lifecycle (plain IndustryTAM, not a dossier). Through the one
+                # classifier, so it carries the same ±1%/yr dead band.
                 if not dossier_lifecycle and market_dynamics.get("lifecycle_phase") == "mature":
-                    if cagr > 15.0:
-                        market_dynamics["lifecycle_phase"] = "secular_growth"
-                    elif cagr < 0.0:
-                        market_dynamics["lifecycle_phase"] = "declining"
+                    promoted = _classify_lifecycle(cagr)
+                    if promoted != "mature":
+                        market_dynamics["lifecycle_phase"] = promoted
 
 
 def _apply_peer_score_baseline(
@@ -8879,17 +8997,16 @@ def _overlay_ai_guidance(
 def _classify_concentration(
     top1_share_pct: float, top2_share_pct: float, hhi: float,
 ) -> str:
-    """Map MARKET-CAP concentration to the iOS enum value.
+    """Map concentration shares to the iOS enum value.
 
-    IMPORTANT: callers pass market-CAP shares (HHI / top-N of sector market
-    cap), NOT revenue/market share. "monopoly"/"duopoly" are market-SHARE
-    structures, so we never infer them from cap dominance — one mega-cap
-    holding >50% of a sector's market cap (e.g. MSFT in Software-Infrastructure)
-    does NOT make the sector a monopoly, and stamping that on a smaller
-    constituent's report (Oracle) is misleading. Cap-derived concentration
-    therefore tops out at "oligopoly". (Both this and the industry_dossier
-    mirror derive from market cap, so neither emits monopoly/duopoly today;
-    those enum values are reserved for a future real market-share source.)
+    Callers pass REVENUE shares of LISTED companies (owner decision 2026-10-22,
+    "Revenue-share HHI" — the dossier's universe constituents, or the in-hand
+    peer set). Market-cap shares let one richly valued listing decide the label
+    (SpaceX was 54% of US-listed A&D cap). The label still tops out at
+    "oligopoly": the denominator holds only US-listed companies (no Airbus, no
+    private firms) and revenue is company-wide, not segment-level, so
+    "monopoly"/"duopoly" — market-SHARE structures — are never inferred. Keep the
+    thresholds equal to `industry_dossier_service.classify_concentration`.
     """
     if top1_share_pct > 50.0 or top2_share_pct > 70.0 or hhi >= 1500.0:
         return "oligopoly"
@@ -8900,83 +9017,60 @@ def _classify_lifecycle(
     cagr_5yr: Optional[float], num_constituents: Optional[int] = None,
 ) -> str:
     """Map an industry / sector CAGR to the iOS lifecycle enum — from the growth rate ALONE
-    (owner decision 2026-10-09): > 15% → `secular_growth`, < 0% → `declining`, otherwise
-    `mature`; CAGR None → `mature` (no growth signal to differentiate).
+    (owner decision 2026-10-09): > 15% → `secular_growth`, <= -1% → `declining`, otherwise
+    `mature`; CAGR None / non-finite → `mature` (no growth signal to differentiate).
+
+    The ±1%/yr dead band (owner decision 2026-10-22, "±1%/yr dead band"): a nominal rate
+    within 1%/yr of zero is flat, not a decline. A&D's -0.16%/yr (2017 Economic Census →
+    2024 AIES, a 7-year change of -1.1%) used to read "declining" and cost every A&D ticker
+    two points on the moat Network Effects lifecycle input. Callers pass the stored 1-dp
+    value, so -1.0 itself is declining (|-1.0| is not < 1).
 
     `num_constituents` is accepted and IGNORED. "Fewer than 5 public players = emerging"
     measured FMP's coverage (and the US-only universe, or a ticker's peer list), not the
     industry's maturity: the cleaned roster would have labelled ~10 more industries
     "emerging" and lifted their moat Network Effects score with no change in growth.
     """
-    if cagr_5yr is None:
+    if cagr_5yr is None or not math.isfinite(cagr_5yr):
         return "mature"
     if cagr_5yr > 15.0:
         return "secular_growth"
-    if cagr_5yr < 0.0:
+    if cagr_5yr <= -1.0:
         return "declining"
     return "mature"
 
 
 def _build_market_dynamics(
     profile: Dict[str, Any],
-    sector_agg: Optional[SectorAggregates],
     peer_profiles: Optional[List[Dict[str, Any]]] = None,
+    peer_ratios: Optional[Dict[str, Dict[str, Any]]] = None,
+    focal_ratios_ttm: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Real `MarketDynamicsResponse` payload, with cascading data sources.
+    """Real `MarketDynamicsResponse` payload before the industry overlay.
 
-    Priority chain for concentration / lifecycle:
-      1. Cached `SectorAggregates` row (full data including CAGR).
-      2. Inline `_aggregates_from_peers` (concentration only, no CAGR).
-      3. `_default_market_dynamics` (all unknown).
+    Concentration comes from the in-hand peer set's REVENUE shares
+    (`_aggregates_from_peers`) when it can be measured, else the sentinel
+    "unknown" (`_default_market_dynamics`). `_apply_tam_source` then overlays the
+    industry dossier — its measured concentration, TAM, growth window and
+    lifecycle — or an earnings-call TAM quote.
 
-    Lifecycle enum (Swift `LifecyclePhase`):
-      - `secular_growth` — sector 5Y CAGR > 15% (only when CAGR known)
-      - `declining`      — CAGR < 0
-      - `mature`         — default (the constituent-count `emerging` rule is retired,
-                           2026-10-09: lifecycle comes from growth alone)
+    The old priority 1, a cached sector-wide `SectorAggregates` row, is gone
+    (2026-10-22): its writer has no caller, and a revived batch would have put a
+    SECTOR CAGR ahead of the industry figure on an industry card.
 
-    TAM stays 0.0 here — `_apply_tam_source` overlays the AI-extracted
-    quote OR the FRED industry proxy in `assemble_report`.
+    Lifecycle (Swift `LifecyclePhase`) starts "mature": the peer set carries no
+    growth rate; the dossier's CAGR decides it (±1%/yr dead band).
     """
     now_year = datetime.now(timezone.utc).year
     industry = profile.get("industry") or "Unknown"
 
-    # Priority 1: cached sector aggregates (has real CAGR)
-    if sector_agg is not None:
-        concentration = _classify_concentration(
-            sector_agg.top1_share_pct,
-            sector_agg.top2_share_pct,
-            sector_agg.hhi,
-        )
-        cagr = sector_agg.cagr_5yr_pct
-        return {
-            "industry": industry,
-            "concentration": concentration,
-            "cagr_5yr": round(cagr, 1),
-            "current_tam": 0.0,
-            "future_tam": 0.0,
-            "current_year": str(now_year),
-            "future_year": str(now_year + 5),
-            "lifecycle_phase": _classify_lifecycle(
-                cagr, sector_agg.num_constituents,
-            ),
-            "tam_source_quote": None,
-            "tam_source_label": None,
-            "source_grain": None,
-            "tam_scope": None,
-        }
-
-    # Priority 2: derive concentration from in-hand peer market caps
-    peer_agg = _aggregates_from_peers(profile, peer_profiles or [])
+    peer_agg = _aggregates_from_peers(profile, peer_profiles or [], peer_ratios, focal_ratios_ttm)
     if peer_agg is not None:
         concentration = _classify_concentration(
             peer_agg["top1_share_pct"],
             peer_agg["top2_share_pct"],
             peer_agg["hhi"],
         )
-        # CAGR is None at this point (peer profiles alone don't carry
-        # historical revenue). Lifecycle may still get promoted from
-        # "mature" once `_apply_tam_source` overlays a Census/FRED CAGR.
         return {
             "industry": industry,
             "concentration": concentration,
@@ -8985,16 +9079,15 @@ def _build_market_dynamics(
             "future_tam": 0.0,
             "current_year": str(now_year),
             "future_year": str(now_year + 5),
-            "lifecycle_phase": _classify_lifecycle(
-                None, peer_agg["num_constituents"],
-            ),
+            "lifecycle_phase": _classify_lifecycle(None),
             "tam_source_quote": None,
             "tam_source_label": None,
             "source_grain": None,
             "tam_scope": None,
+            "concentration_basis": peer_agg["basis"],
         }
 
-    # Priority 3: honest empty state
+    # Honest empty state
     return _default_market_dynamics(profile)
 
 
@@ -10259,8 +10352,10 @@ def build_financial_context(out: CollectedTickerData) -> str:
         parts.append(
             f"\nOperating CF: {_format_money_compact(cf.get('operatingCashFlow', 0), cur)}")
         parts.append(f"Free CF: {_format_money_compact(cf.get('freeCashFlow', 0), cur)}")
-        parts.append(
-            f"Buybacks: {_format_money_compact(cf.get('commonStockRepurchased', 0), cur)}")
+        # No "Buybacks:" line from the raw annual row (removed 2026-10-22): FMP's
+        # `commonStockRepurchased` is sometimes employee tax withholding or preferred
+        # redemptions (INTC, META, AMD, JPM). The report's capital-allocation block carries
+        # the SEC-checked figures from Signal of Confidence instead.
 
     statement_codes = _non_usd_statement_codes(
         list(income[:3] if income else []) + list(balance[:1] if balance else [])

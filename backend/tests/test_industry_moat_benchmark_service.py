@@ -88,3 +88,147 @@ def test_min_sample_size_matches_sector_benchmark_constant():
         MIN_SAMPLE_SIZE as SECTOR_MIN,
     )
     assert MIN_SAMPLE_SIZE == SECTOR_MIN == 5
+
+
+# ── recompute_all clears the Peer Avg lookup cache (2026-10-22) ─────
+
+
+import uuid  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+from typing import Any, Dict, List  # noqa: E402
+
+from app.services import industry_moat_benchmark_service as imb  # noqa: E402
+from app.services.moat_scoring_service import (  # noqa: E402
+    PILLAR_ORDER,
+    MoatScores,
+    PillarResult,
+)
+
+
+class _MoatTable:
+    """One in-memory `industry_moat_benchmarks`, unique on (industry, pillar_name): the
+    recompute's upserts land in it and the lookup reads from it."""
+
+    def __init__(self, rows: List[Dict[str, Any]]) -> None:
+        self.rows = {(r["industry"], r["pillar_name"]): dict(r) for r in rows}
+        self.reads = 0
+
+    def table(self, _name):
+        store = self
+
+        class _Q:
+            upserted = None
+            industry = None
+
+            def upsert(self, row, **_k):
+                self.upserted = row
+                return self
+
+            def select(self, *_a, **_k):
+                return self
+
+            def eq(self, col, val):
+                if col == "industry":
+                    self.industry = val
+                return self
+
+            def execute(self):
+                if self.upserted is not None:
+                    r = dict(self.upserted)
+                    store.rows[(r["industry"], r["pillar_name"])] = r
+                    return SimpleNamespace(data=[r])
+                store.reads += 1
+                return SimpleNamespace(data=[
+                    dict(r) for (ind, _p), r in store.rows.items() if ind == self.industry
+                ])
+
+        return _Q()
+
+
+class _FakeFMP:
+    async def get_company_profile(self, ticker):
+        return {"symbol": ticker, "sector": "Industrials"}
+
+    async def get_income_statement(self, *_a, **_k):
+        return [{"date": "2025-12-31", "revenue": 100.0}]
+
+    async def get_balance_sheet(self, *_a, **_k):
+        return []
+
+    async def get_financial_ratios(self, *_a, **_k):
+        return []
+
+    async def get_earning_call_transcript(self, *_a, **_k):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_recompute_clears_the_peer_avg_lookup_cache(monkeypatch):
+    industry = f"Test Industry {uuid.uuid4().hex[:8]}"
+    pillar = PILLAR_ORDER[0]
+    table = _MoatTable([{
+        "industry": industry, "pillar_name": pillar, "peer_average_score": 4.0,
+        "model_version": imb.MODEL_VERSION,
+    }])
+    lookup = imb.IndustryMoatBenchmarkLookup.__new__(imb.IndustryMoatBenchmarkLookup)
+    lookup.supabase = table
+    try:
+        # A report built before the recompute caches the old Peer Avg for the hour.
+        assert lookup.get_pillar_benchmarks(industry) == {pillar: 4.0}
+        assert lookup.get_pillar_benchmarks(industry) == {pillar: 4.0}
+        assert table.reads == 1, "the second read is served from the 1 h cache"
+
+        svc = imb.IndustryMoatBenchmarkService.__new__(imb.IndustryMoatBenchmarkService)
+        svc.fmp = _FakeFMP()
+        svc.supabase = table
+
+        async def _no_tam(_industry, _samples, **_k):
+            return None
+
+        monkeypatch.setattr(svc, "_fetch_industry_tam", _no_tam)
+        monkeypatch.setattr(
+            imb, "score_moat_dimensions",
+            lambda **_k: MoatScores({pillar: PillarResult(name=pillar, score=8.0)}),
+        )
+        peers = {f"T{i}": 1.0e10 - i for i in range(MIN_SAMPLE_SIZE + 1)}
+        monkeypatch.setattr(
+            imb, "load_universe",
+            lambda _f: [{"industry": industry, "market_caps": dict(peers)}],
+        )
+        summary = await svc.recompute_all(skip_if_fresh_hours=None)
+        assert summary["pillars_written"] == 1
+        assert table.rows[(industry, pillar)]["peer_average_score"] == 8.0
+
+        # The next report reads the recomputed row, not the cached pre-recompute average.
+        assert lookup.get_pillar_benchmarks(industry) == {pillar: 8.0}
+        assert table.reads == 2
+    finally:
+        imb._lookup_cache.pop(industry, None)
+
+
+@pytest.mark.asyncio
+async def test_a_recompute_that_raises_keeps_the_peer_avg_cache(monkeypatch):
+    """Nothing was written (empty universe → raise before any write): the cached averages
+    are still the stored ones, so the cache is left alone."""
+    industry = f"Test Industry {uuid.uuid4().hex[:8]}"
+    imb._lookup_cache[industry] = (imb.time.time(), {"Brand Power": 4.0})
+    try:
+        svc = imb.IndustryMoatBenchmarkService.__new__(imb.IndustryMoatBenchmarkService)
+        svc.fmp = _FakeFMP()
+        svc.supabase = _MoatTable([])
+        monkeypatch.setattr(imb, "load_universe", lambda _f: [])
+        with pytest.raises(imb.IndustryMoatBenchmarkRecomputeSkipped):
+            await svc.recompute_all(skip_if_fresh_hours=None)
+        assert industry in imb._lookup_cache
+    finally:
+        imb._lookup_cache.pop(industry, None)
+
+
+def test_model_version_is_the_newest_known_vintage():
+    """Every vintage the lookup ranks, oldest first, the current one LAST — a row of any
+    earlier vintage is served as recompute-pending, never as current."""
+    order = imb._MODEL_VERSION_ORDER
+    assert order[-1] == imb.MODEL_VERSION
+    assert len(set(order)) == len(order)
+    assert "moat_v1.2026-10-11" in order
+    assert imb._vintage_rank("moat_v1.2026-10-11") < imb._vintage_rank(imb.MODEL_VERSION)

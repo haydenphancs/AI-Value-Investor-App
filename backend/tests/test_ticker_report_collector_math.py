@@ -35,6 +35,8 @@ from app.services.agents.ticker_report_data_collector import (
     _build_macro_risk_factors_from_fred,
     _build_macro_risk_factors_from_indicators,
     _build_market_dynamics,
+    _classify_concentration,
+    _classify_lifecycle,
     _build_price_action,
     _build_revenue_forecast_partial,
     _build_valuation_vital,
@@ -1155,113 +1157,130 @@ def test_revenue_cagr_negative_for_shrinking_sector():
     assert cagr < 0
 
 
-# ── _build_market_dynamics: HHI / top-share / lifecycle mapping ───────
+# ── _build_market_dynamics: revenue-share peer concentration / lifecycle mapping ───────
 
 
-def _agg(**overrides) -> SectorAggregates:
-    """Builder with sane defaults for the mapping tests."""
-    base = dict(
-        sector="Technology",
-        total_revenue_usd=1_000_000_000_000.0,
-        cagr_5yr_pct=8.0,
-        hhi=1000.0,
-        top1_share_pct=20.0,
-        top2_share_pct=35.0,
-        num_constituents=50,
-        computed_at=datetime.now(timezone.utc),
-    )
-    base.update(overrides)
-    return SectorAggregates(**base)
-
-
-def test_market_dynamics_falls_back_to_defaults_when_no_aggregates():
-    """No batch + no peer profiles → honest placeholders. CAGR is None
-    (not 0) so iOS renders "—" instead of misleading zeros; concentration
-    defaults to `fragmented` because absence-of-data shouldn't look like
-    presence-of-bad-data."""
-    md = _build_market_dynamics({"industry": "Software"}, None)
-    assert md["concentration"] == "fragmented"
+def test_market_dynamics_falls_back_to_unknown_when_no_peer_set_is_measured():
+    """No measurable peer set → honest placeholders. CAGR is None (not 0) so iOS renders
+    "—"; concentration is the sentinel "unknown" (2026-10-22), never a fabricated
+    "fragmented" — and never null (old builds decode it non-optionally)."""
+    md = _build_market_dynamics({"industry": "Software"})
+    assert md["concentration"] == "unknown"
+    assert md["concentration_basis"] is None
     assert md["lifecycle_phase"] == "mature"
     assert md["cagr_5yr"] is None
     assert md["industry"] == "Software"
 
 
-def test_market_dynamics_derives_concentration_from_peers_on_cache_miss():
-    """When sector_aggregates is missing but peer profiles are in-hand,
-    HHI / top-N concentration is computed inline so the UI still shows
-    something better than the empty fallback. CAGR stays None because
-    peer profiles alone don't carry historical revenue."""
-    focal = {"industry": "Software", "mktCap": 800_000_000_000}
-    peers = [
-        {"mktCap": 3_000_000_000_000},   # one dominant peer
-        {"mktCap": 200_000_000_000},
-        {"mktCap": 100_000_000_000},
-    ]
-    md = _build_market_dynamics(focal, None, peers)
-    # Top firm has ~72% of the (focal + peers) total MARKET CAP. That's cap
-    # dominance, not a market-share monopoly, so the label is capped at
-    # oligopoly (monopoly/duopoly are reserved for real share data).
+def _listing(sym, cap, currency="USD"):
+    return {"symbol": sym, "mktCap": cap, "currency": currency}
+
+
+def test_market_dynamics_derives_concentration_from_peer_revenues():
+    """Concentration from the in-hand peers' REVENUE (cap ÷ P/S), from the ratios-ttm
+    answers the collector already holds — labelled a PEER set, never the industry."""
+    focal = {"industry": "Software", "mktCap": 800e9, "currency": "USD"}
+    peers = [_listing("BIG", 3000e9)] + [_listing(f"S{i}", (100 + i) * 1e9) for i in range(6)]
+    peer_ratios = {"BIG": {"priceToSalesRatio": 1.0}}
+    peer_ratios.update({f"S{i}": {"priceToSalesRatio": 2.0} for i in range(6)})
+    md = _build_market_dynamics(focal, peers, peer_ratios, [{"priceToSalesRatioTTM": 8.0}])
+    # Revenues 3000 vs ~50 each → BIG holds ~89% of revenue → oligopoly.
     assert md["concentration"] == "oligopoly"
+    assert md["concentration_basis"] == "peer_revenue_share"
     assert md["cagr_5yr"] is None
-    assert md["industry"] == "Software"
 
 
-def test_market_dynamics_high_cap_concentration_caps_at_oligopoly():
-    """A single firm with >50% of sector MARKET CAP is cap dominance, not a
-    market-share monopoly — capped at oligopoly so a smaller constituent's
-    report isn't mislabeled 'Monopoly'."""
-    md = _build_market_dynamics({}, _agg(top1_share_pct=55.0, hhi=3500.0))
-    assert md["concentration"] == "oligopoly"
+@pytest.mark.parametrize("n", [3, 4, 5, 6])
+def test_a_peer_set_of_six_or_fewer_is_unmeasured(n):
+    """With n firms HHI >= 10000/n, so 6 or fewer could only ever read 'oligopoly' — the
+    label would describe the peer list. Equal shares make the point (2026-10-22)."""
+    focal = {"industry": "X", "mktCap": 100e9, "currency": "USD"}
+    peers = [_listing(f"P{i}", (100 + i) * 1e9) for i in range(n - 1)]
+    ratios = {f"P{i}": {"priceToSalesRatio": 2.0} for i in range(n - 1)}
+    md = _build_market_dynamics(focal, peers, ratios, [{"priceToSalesRatioTTM": 2.0}])
+    assert md["concentration"] == "unknown" and md["concentration_basis"] is None
 
 
-def test_market_dynamics_top2_cap_concentration_caps_at_oligopoly():
-    """Two firms with >70% of sector MARKET CAP → oligopoly (not duopoly),
-    same market-cap-vs-market-share reasoning."""
-    md = _build_market_dynamics({}, _agg(top1_share_pct=40.0, top2_share_pct=75.0, hhi=2900.0))
-    assert md["concentration"] == "oligopoly"
-
-
-def test_market_dynamics_oligopoly_when_hhi_high_but_no_dominant_firm():
-    """No single/double dominator but HHI in the moderately-concentrated
-    DOJ band → oligopoly."""
-    md = _build_market_dynamics({}, _agg(top1_share_pct=25.0, top2_share_pct=45.0, hhi=1800.0))
-    assert md["concentration"] == "oligopoly"
-
-
-def test_market_dynamics_fragmented_when_hhi_low():
-    md = _build_market_dynamics({}, _agg(top1_share_pct=5.0, top2_share_pct=10.0, hhi=400.0))
+def test_a_cap_dominant_high_ps_peer_does_not_make_it_oligopoly():
+    """One richly valued listing (SpaceX: a $1.9T cap at P/S 61) dominates on cap but not
+    on revenue — the 2026-10-22 decision in one case. Ten similar firms plus that outlier:
+    on cap the outlier holds ~65% (oligopoly), on revenue ~6% (fragmented)."""
+    focal = {"industry": "Aerospace & Defense", "mktCap": 100e9, "currency": "USD"}
+    # Distinct caps: identical (cap, P/S) pairs would be read as share-class twins.
+    peers = [_listing(f"P{i}", 100e9 + i * 1e9) for i in range(9)] + [_listing("SPCX", 1906.8e9)]
+    ratios = {f"P{i}": {"priceToSalesRatio": 2.0} for i in range(9)}
+    ratios["SPCX"] = {"priceToSalesRatio": 61.2}
+    md = _build_market_dynamics(focal, peers, ratios, [{"priceToSalesRatioTTM": 2.0}])
     assert md["concentration"] == "fragmented"
+    caps = [100e9] * 10 + [1906.8e9]
+    cap_top1 = max(caps) / sum(caps) * 100
+    assert _classify_concentration(cap_top1, cap_top1, compute_hhi(caps)) == "oligopoly"
 
 
-def test_market_dynamics_secular_growth_when_cagr_above_15():
-    md = _build_market_dynamics({}, _agg(cagr_5yr_pct=18.0))
-    assert md["lifecycle_phase"] == "secular_growth"
+def test_peer_revenue_drops_twins_and_non_usd_listings():
+    """A share-class pair (same cap and P/S) counts once; a listing priced in another
+    currency is dropped (its cap is local, so cap ÷ P/S would mix currencies)."""
+    from app.services.agents.ticker_report_data_collector import _aggregates_from_peers
+
+    focal = {"symbol": "GOOGL", "mktCap": 2100e9, "currency": "USD"}
+    others = [_listing(f"O{i}", (500 + i) * 1e9) for i in range(6)]
+    peers = [_listing("GOOG", 2100e9)] + others + [_listing("7974.T", 9_000_000e9, currency="JPY")]
+    ratios = {"GOOG": {"priceToSalesRatio": 6.0}, "7974.T": {"priceToSalesRatio": 5.0}}
+    ratios.update({f"O{i}": {"priceToSalesRatio": 8.0} for i in range(6)})
+    agg = _aggregates_from_peers(focal, peers, ratios, [{"priceToSalesRatioTTM": 6.0}])
+    assert agg["num_constituents"] == 7          # GOOGL+GOOG once, six others; no JPY listing
+    assert agg["basis"] == "peer_revenue_share"
+    # Drop one "other" and the twin no longer gets the set to 7 → unmeasured.
+    assert _aggregates_from_peers(focal, peers[:-2], ratios, [{"priceToSalesRatioTTM": 6.0}]) is None
 
 
-def test_market_dynamics_declining_when_cagr_negative():
-    md = _build_market_dynamics({}, _agg(cagr_5yr_pct=-3.0))
-    assert md["lifecycle_phase"] == "declining"
+def test_peer_revenue_without_ps_is_unmeasured_and_a_corrupt_leader_too():
+    from app.services.agents.ticker_report_data_collector import _aggregates_from_peers
+
+    focal = {"mktCap": 800e9, "currency": "USD"}
+    peers = [_listing("A", 100e9), _listing("B", 100e9), _listing("C", 100e9)]
+    assert _aggregates_from_peers(focal, peers, {}, []) is None      # no P/S anywhere
+    corrupt = {"A": {"priceToSalesRatio": 0.001}, "B": {"priceToSalesRatio": 2.0},
+               "C": {"priceToSalesRatio": 3.0}}
+    assert _aggregates_from_peers(focal, peers, corrupt, [{"priceToSalesRatioTTM": 4.0}]) is None
 
 
-@pytest.mark.parametrize("n,cagr,phase", [
-    (3, 5.0, "mature"), (1, 20.0, "secular_growth"), (2, -1.0, "declining"),
+def test_a_corrupt_peer_leader_is_unmeasured_with_a_warning(caplog):
+    import logging
+    from app.services.agents.ticker_report_data_collector import _aggregates_from_peers
+
+    focal = {"symbol": "FOC", "industry": "X", "mktCap": 100e9, "currency": "USD"}
+    peers = [_listing("BAD", 100e9)] + [_listing(f"P{i}", (100 + i) * 1e9) for i in range(6)]
+    ratios = {"BAD": {"priceToSalesRatio": 0.001}}
+    ratios.update({f"P{i}": {"priceToSalesRatio": 2.0} for i in range(6)})
+    with caplog.at_level(logging.WARNING):
+        assert _aggregates_from_peers(focal, peers, ratios, [{"priceToSalesRatioTTM": 2.0}]) is None
+    assert "BAD" in caplog.text and "FOC" in caplog.text and "corrupt" in caplog.text
+
+
+@pytest.mark.parametrize("top1,top2,hhi,label", [
+    (55.0, 60.0, 3500.0, "oligopoly"),     # a single dominant firm caps at oligopoly
+    (40.0, 75.0, 2900.0, "oligopoly"),     # two firms over 70% → oligopoly, not duopoly
+    (25.0, 45.0, 1800.0, "oligopoly"),     # HHI in the concentrated band
+    (5.0, 10.0, 400.0, "fragmented"),
 ])
-def test_market_dynamics_ignores_a_small_constituent_count(n, cagr, phase):
-    """Growth-rate only (owner decision 2026-10-09): a handful of public players no longer
-    makes an industry "emerging" — that measured FMP's coverage, not maturity."""
-    md = _build_market_dynamics({}, _agg(num_constituents=n, cagr_5yr_pct=cagr))
-    assert md["lifecycle_phase"] == phase
+def test_concentration_thresholds(top1, top2, hhi, label):
+    assert _classify_concentration(top1, top2, hhi) == label
 
 
-def test_market_dynamics_mature_default():
-    md = _build_market_dynamics({}, _agg(cagr_5yr_pct=5.0, num_constituents=80))
-    assert md["lifecycle_phase"] == "mature"
+@pytest.mark.parametrize("cagr,phase", [
+    (18.0, "secular_growth"), (-3.0, "declining"), (-1.0, "declining"), (-0.2, "mature"),
+    (5.0, "mature"), (20.0, "secular_growth"), (None, "mature"),
+])
+def test_lifecycle_from_growth_alone(cagr, phase):
+    assert _classify_lifecycle(cagr) == phase
+    assert _classify_lifecycle(cagr, 3) == phase     # a constituent count changes nothing
 
 
-def test_market_dynamics_tam_remains_zero_until_pr3():
-    """PR 2 keeps current_tam/future_tam at 0.0; PR 3 will fill them
-    from 10-K MD&A extraction. iOS handles 0.0 as 'unavailable'."""
-    md = _build_market_dynamics({}, _agg())
+def test_market_dynamics_tam_stays_zero_until_the_overlay():
+    """current_tam / future_tam stay 0.0 here; `_apply_tam_source` overlays the
+    industry dossier or an earnings-call quote."""
+    md = _build_market_dynamics({})
     assert md["current_tam"] == 0.0
     assert md["future_tam"] == 0.0
 
@@ -2094,10 +2113,8 @@ def test_apply_tam_dossier_cagr_applies_even_when_ai_tam_wins():
 
 
 def test_apply_tam_scope_from_dossier_us_and_global():
-    """The report must explicitly label TAM as US vs Global. Scope follows the
-    industry's resolved data source — Census/FRED dossiers are 'us', Phase B
-    global-research overrides are 'global' — and is applied regardless of
-    whether the proxy or a complete AI quote won the TAM pair."""
+    """The report labels a MEASURED industry TAM with its scope (Census/FRED dossiers
+    are 'us'). A complete AI earnings-call quote carries no scope (2026-10-22)."""
     from app.services.industry_dossier_service import IndustryDossier
 
     def _dossier(scope: str) -> IndustryDossier:
@@ -2118,15 +2135,17 @@ def test_apply_tam_scope_from_dossier_us_and_global():
     _apply_tam_source(md, {"tam_source_quote": ""}, _dossier("global"))
     assert md["tam_scope"] == "global"
 
-    # A complete AI quote wins the PAIR, but scope still follows the industry.
+    # A complete AI quote wins the PAIR — and gets NO scope (2026-10-22): a company's
+    # quote is usually a global addressable market, and with Phase B retired every
+    # dossier is 'us', so inheriting it put a false "US" over the company's figure.
     md = _md_with_zero_tam()
     _apply_tam_source(md, {
         "current_tam": 150_000_000_000,
         "future_tam": 300_000_000_000,
         "tam_source_quote": "$150B today to $300B.",
-    }, _dossier("global"))
+    }, _dossier("us"))
     assert md["current_tam"] == 150.0          # AI pair won
-    assert md["tam_scope"] == "global"         # ...but scope is the industry's
+    assert md.get("tam_scope") is None         # ...and carries no "US" prefix
 
     # No dossier → scope stays unset (iOS shows no pill).
     md = _md_with_zero_tam()
@@ -2698,6 +2717,43 @@ def test_dossier_classification_helpers_match_collector_thresholds():
     assert ds_lifecycle(None, 3) == "mature" and ds_lifecycle(20.0, 1) == "secular_growth"
     assert "emerging" not in {ds_lifecycle(c, n) for c in (None, -5.0, 3.0, 40.0)
                               for n in (0, 1, 2, 3, 4, 5, 100)}
+
+    # ±1%/yr dead band (owner decision 2026-10-22): |CAGR| < 1 is flat → mature; -1.0
+    # itself is declining. Both mirrors must give the banded label on every boundary.
+    banded = [
+        (-0.2, "mature"), (-0.99, "mature"), (-0.96, "mature"), (-0.0, "mature"),
+        (0.0, "mature"), (0.99, "mature"), (-1.0, "declining"), (-1.04, "declining"),
+        (-4.0, "declining"), (14.99, "mature"), (15.0, "mature"), (15.01, "secular_growth"),
+        (float("nan"), "mature"), (float("inf"), "mature"), (float("-inf"), "mature"),
+        (None, "mature"),
+    ]
+    for cagr, want in banded:
+        assert ds_lifecycle(cagr) == collector_lifecycle(cagr) == want, (cagr, want)
+
+
+def test_apply_tam_legacy_promotion_uses_the_dead_band():
+    """The third lifecycle copy — `_apply_tam_source`'s promotion for a plain IndustryTAM
+    (no published lifecycle) — goes through `_classify_lifecycle`, so a flat -0.2% stays
+    'mature' while -1.0 and -4.0 still promote to 'declining' (owner decision 2026-10-22)."""
+    from app.services.industry_tam_service import IndustryTAM
+
+    def _run(cagr):
+        md = _md_with_zero_tam()
+        md["cagr_5yr"] = None
+        md["lifecycle_phase"] = "mature"
+        tam = IndustryTAM(
+            current_tam=247.0, future_tam=245.0, current_year="2024",
+            future_year="2029", source_label="US Census AIES (NAICS 3364)",
+            cagr_5y_pct=cagr,
+        )
+        _apply_tam_source(md, None, tam)
+        return md["lifecycle_phase"]
+
+    assert _run(-0.2) == "mature"
+    assert _run(-0.99) == "mature"
+    assert _run(-1.0) == "declining"
+    assert _run(-4.0) == "declining"
+    assert _run(16.0) == "secular_growth"
 
 
 # ── PR 3: transcript excerpt builder ───────────────────────────────
@@ -4072,3 +4128,179 @@ def test_the_collected_data_carries_no_grounded_fields():
     assert not names & {"price_catalyst_grounded", "geopolitical_factors", "moat_grounded_pillars",
                         "peer_source", "peer_details"}
 
+
+
+# ── Measured-only market dynamics (owner decision 2026-10-22) ─────────────
+
+
+def _ad_dossier(**over):
+    from app.services.industry_dossier_service import IndustryDossier
+
+    kw = dict(
+        current_tam=342.8, future_tam=359.3, current_year="2024", future_year="2029",
+        source_label="US Census AIES — Aerospace & defense manufacturing (NAICS 3364, 334511, 336992, "
+                     "332992, 332993, 332994)",
+        cagr_5y_pct=0.9, cagr_start_year=2017, industry="Aerospace & Defense", sector="Industrials",
+        lifecycle_phase="mature", hhi=866.8, top1_share_pct=15.17, top2_share_pct=30.01,
+        concentration_label="fragmented", constituent_count=86, source_grain="industry",
+        concentration_basis="revenue_share",
+    )
+    kw.update(over)
+    return IndustryDossier(**kw)
+
+
+def test_apply_tam_measured_basis_sets_year_and_window():
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = None
+    _apply_tam_source(md, {"tam_source_quote": ""}, _ad_dossier())
+    assert md["tam_basis"] == "measured"
+    assert md["tam_year"] == 2024 and isinstance(md["tam_year"], int)
+    assert md["tam_target_year"] is None
+    assert (md["cagr_start_year"], md["cagr_end_year"]) == (2017, 2024)
+    assert md["cagr_5yr"] == 0.9 and md["growth_source_label"].startswith("US Census AIES")
+    assert md["concentration"] == "fragmented" and md["concentration_basis"] == "revenue_share"
+    assert md["tam_scope"] == "us"
+    assert md["future_tam"] > 0                       # legacy pair kept for builds <= 1.1
+
+
+def test_apply_tam_company_quote_takes_only_stated_years():
+    report_year = datetime.now(timezone.utc).year
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = None
+    quote = f"The space economy was $150B in {report_year} and could reach $300B by {report_year + 9}."
+    _apply_tam_source(md, {"current_tam": 150e9, "future_tam": 300e9, "tam_source_quote": quote,
+                           "current_year": str(report_year), "future_year": str(report_year + 9)},
+                      _ad_dossier())
+    assert md["tam_basis"] == "company_quote"
+    assert md["tam_year"] == report_year and md["tam_target_year"] == report_year + 9
+    assert md["future_year"] == str(report_year + 9)
+    assert md.get("tam_scope") is None
+    # The industry's measured growth stays beside the quote, attributed to its own source.
+    assert md["cagr_5yr"] == 0.9 and md["growth_source_label"].startswith("US Census AIES")
+
+
+@pytest.mark.parametrize("future_year_offset,stated", [(16, False), (-1, False), (15, True)])
+def test_a_quote_target_year_must_be_stated_and_in_range(future_year_offset, stated):
+    report_year = datetime.now(timezone.utc).year
+    fy = report_year + future_year_offset
+    md = _md_with_zero_tam()
+    _apply_tam_source(md, {"current_tam": 150e9, "future_tam": 300e9, "current_year": str(report_year),
+                           "future_year": str(fy), "tam_source_quote": f"$150B now, $300B by {fy}."},
+                      _ad_dossier())
+    assert (md["tam_target_year"] == fy) is stated
+    # The LEGACY future_year (builds <= 1.1 show it under the company's future_tam) keeps the
+    # AI's year whatever its range — never the now+5 default under a "$2.5T by 2050".
+    assert md["future_year"] == str(fy)
+
+
+def test_a_template_year_absent_from_the_quote_is_not_stated():
+    report_year = datetime.now(timezone.utc).year
+    md = _md_with_zero_tam()
+    _apply_tam_source(md, {"current_tam": 150e9, "future_tam": 300e9, "current_year": "2025",
+                           "future_year": str(report_year + 4),
+                           "tam_source_quote": "We see a $150B market growing to $300B."}, _ad_dossier())
+    assert md["tam_year"] is None and md["tam_target_year"] is None
+
+
+def test_a_year_beyond_the_stored_200_characters_is_not_stated():
+    report_year = datetime.now(timezone.utc).year
+    fy = report_year + 8
+    quote = "We see a large opportunity. " * 8 + f"It reaches $300B by {fy}."      # year past char 200
+    assert quote.find(str(fy)) > 200
+    md = _md_with_zero_tam()
+    _apply_tam_source(md, {"current_tam": 150e9, "future_tam": 300e9, "future_year": str(fy),
+                           "tam_source_quote": quote}, _ad_dossier())
+    assert md["tam_target_year"] is None
+
+
+def test_a_sector_grain_dossier_gives_no_growth_window():
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = None
+    _apply_tam_source(md, {"tam_source_quote": ""}, _ad_dossier(source_grain="sector"))
+    assert md.get("cagr_start_year") is None and md.get("tam_basis") is None
+    assert md["cagr_5yr"] is None
+
+
+@pytest.mark.parametrize("start,end", [(None, "2024"), (2024, "2024"), (2030, "2024"), (2017, "x")])
+def test_an_unusable_window_sets_neither_year(start, end):
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = None
+    _apply_tam_source(md, {"tam_source_quote": ""}, _ad_dossier(cagr_start_year=start, current_year=end))
+    assert "cagr_start_year" not in md and "cagr_end_year" not in md
+    assert md["cagr_5yr"] == 0.9
+
+
+def test_dossier_concentration_none_never_overrides_a_peer_label():
+    md = _md_with_zero_tam()
+    md["concentration"], md["concentration_basis"] = "oligopoly", "revenue_share"
+    _apply_tam_source(md, {"tam_source_quote": ""},
+                      _ad_dossier(concentration_label=None, hhi=None, concentration_basis=None))
+    assert md["concentration"] == "oligopoly" and md["concentration_basis"] == "revenue_share"
+
+
+def test_cagr_is_never_negative_zero():
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = None
+    _apply_tam_source(md, {"tam_source_quote": ""}, _ad_dossier(cagr_5y_pct=-0.0))
+    assert md["cagr_5yr"] == 0.0 and math.copysign(1.0, md["cagr_5yr"]) == 1.0
+
+
+def test_current_tam_positive_implies_future_tam_positive():
+    """Builds <= 1.1 render a 0 future as '$X → $0B': every producer keeps it > 0."""
+    from app.services.industry_tam_service import IndustryTAM
+
+    for proxy in (_ad_dossier(), _ad_dossier(cagr_5y_pct=None, future_tam=342.8),
+                  IndustryTAM(current_tam=50.6, future_tam=53.7, current_year="2025", future_year="2030",
+                              source_label="BEA Rail Transportation GDP (via FRED)", cagr_5y_pct=1.2)):
+        md = _md_with_zero_tam()
+        _apply_tam_source(md, {"tam_source_quote": ""}, proxy)
+        assert md["current_tam"] > 0 and md["future_tam"] > 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_peer_ratios_adds_ps_without_a_new_call():
+    from app.services.agents.ticker_report_data_collector import TickerReportDataCollector
+
+    calls = []
+
+    class _FMP:
+        async def get_ratios_ttm(self, sym):
+            calls.append(f"ratios:{sym}")
+            return [{"operatingProfitMarginTTM": 0.1, "priceToSalesRatioTTM": 2.5}]
+
+        async def get_key_metrics_ttm(self, sym):
+            calls.append(f"km:{sym}")
+            return [{"returnOnEquityTTM": 0.2}]
+
+        async def _make_request(self, endpoint, params=None):
+            calls.append(f"{endpoint}:{params['symbol']}")
+            return [{"revenueGrowth": 0.05}]
+
+    collector = TickerReportDataCollector.__new__(TickerReportDataCollector)
+    collector.fmp = _FMP()
+    out = await collector._fetch_peer_ratios(["RTX"])
+    assert out["RTX"]["priceToSalesRatio"] == 2.5
+    assert sorted(calls) == ["financial-growth:RTX", "km:RTX", "ratios:RTX"]
+
+
+def test_a_far_off_company_target_keeps_its_year_on_the_legacy_field():
+    report_year = datetime.now(timezone.utc).year
+    md = _md_with_zero_tam()
+    _apply_tam_source(md, {"current_tam": 150e9, "future_tam": 2.5e12, "current_year": "2025",
+                           "future_year": "2050",
+                           "tam_source_quote": "Hydrogen is a $2.5 trillion market by 2050, up from $150 billion in 2025."},
+                      _ad_dossier())
+    assert md["future_year"] == "2050" and md["future_tam"] == 2500.0
+    assert md["tam_target_year"] is None              # beyond now+15: not shown as a target
+    assert md["future_year"] != str(report_year + 5)
+
+
+def test_the_dossier_concentration_applies_whatever_won_the_tam_pair():
+    """A quote winning the TAM pair must not swap the industry's measured label for the peer
+    set's (the same industry read 'fragmented' or 'oligopoly' by TAM source)."""
+    for ai_md in (None, {"current_tam": 630e9, "future_tam": 1.8e12,
+                         "tam_source_quote": "The space economy is $630 billion now, $1.8 trillion by 2035."}):
+        md = _md_with_zero_tam()
+        md["concentration"], md["concentration_basis"] = "oligopoly", "peer_revenue_share"
+        _apply_tam_source(md, ai_md, _ad_dossier())
+        assert md["concentration"] == "fragmented" and md["concentration_basis"] == "revenue_share", ai_md

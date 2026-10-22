@@ -140,6 +140,9 @@ _SERVICE_ROLE_ONLY: dict[str, tuple[str, ...]] = {
     "180": ("news_sentiment_log",),
     # 181: the per-ticker backfill queue behind the news-tone chart's 90-day history.
     "181": ("news_sentiment_backfill",),
+    # 202: SEC EDGAR XBRL concept facts behind the Signal of Confidence buyback check.
+    # Public-domain SEC data, but read only by the backend (sec_concept_service).
+    "202": ("sec_concept_cache",),
 }
 
 # Tables that DO grant anon or authenticated on purpose. Each needs the reason; an entry

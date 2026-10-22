@@ -3477,3 +3477,142 @@ def test_key_management_never_dates_a_holding_to_the_report():
     assert "direct holdings after each one's latest Form 4, not as of the report date" in officers
     holders = next(l for l in text.splitlines() if l.startswith("Top holders, 10%+ owners ("))
     assert "each one's latest 13D/G filing, may predate the report" in holders
+
+
+# ── Market size: measured only (owner decision 2026-10-22) ──
+#
+# A measured row's `future_tam` / `future_year` are a backward industry rate compounded forward
+# (kept on the wire only for old iOS builds); chat used to dump "$244B (2031)" for A&D, a figure
+# the card no longer shows. A company's earnings-call pair keeps its stated target. The rate is
+# dumped under an honest name: `cagr_5yr` held a 7-year Census window.
+
+_MD_MEASURED = {
+    "industry": "Aerospace & Defense", "concentration": "fragmented", "cagr_5yr": 0.9,
+    "current_tam": 342.8, "future_tam": 359.3, "current_year": "2024", "future_year": "2029",
+    "lifecycle_phase": "mature", "tam_scope": "us", "tam_basis": "measured", "tam_year": 2024,
+    "cagr_start_year": 2017, "cagr_end_year": 2024, "concentration_basis": "revenue_share",
+    "tam_source_label": "US Census AIES — Aerospace & defense manufacturing",
+}
+_MD_QUOTE = {
+    "industry": "Aerospace & Defense", "concentration": "fragmented", "cagr_5yr": 0.9,
+    "current_tam": 50.0, "future_tam": 120.0, "current_year": "2026", "future_year": "2030",
+    "lifecycle_phase": "mature", "tam_source_label": "Earnings call quote",
+    "tam_source_quote": "We see a $50 billion market in 2025 growing to $120 billion by 2030.",
+    "tam_basis": "company_quote", "tam_year": 2025, "tam_target_year": 2030,
+}
+
+
+def _small_moat_report(md) -> dict:
+    return {"company_name": "Rocket Lab", "executive_summary_text": "s",
+            "moat_competition": {"durability_note": "DURABLEMARK", "market_dynamics": md,
+                                 "dimensions": [{"name": "Brand Power", "score": 6.0}]}}
+
+
+@pytest.mark.asyncio
+async def test_report_chat_never_sees_a_projected_market_size(resolver, monkeypatch):
+    report = _small_moat_report(dict(_MD_MEASURED))
+    dump = _dump_of(await _resolve_report(resolver, monkeypatch, report, ref="RKLB|warren_buffett"))
+    md_lines = [l for l in dump.splitlines() if l.startswith("moat_competition.market_dynamics.")]
+    assert "moat_competition.market_dynamics.current_tam: 342.8" in md_lines   # anti-vacuity
+    assert "moat_competition.market_dynamics.avg_growth_pct_per_year: 0.9" in md_lines
+    for gone in ("future_tam", "future_year", "359.3", "2029", "cagr_5yr"):
+        assert gone not in dump, gone
+    # Years read as years: the flattener comma-groups ints ("tam_year: 2,024").
+    for year_line in ("tam_year: 2024", "cagr_start_year: 2017", "cagr_end_year: 2024"):
+        assert f"moat_competition.market_dynamics.{year_line}" in md_lines, year_line
+    assert "2,0" not in dump
+    assert report["moat_competition"]["market_dynamics"] == _MD_MEASURED   # never mutated
+
+
+@pytest.mark.asyncio
+async def test_report_chat_keeps_a_company_quotes_stated_target(resolver, monkeypatch):
+    report = _small_moat_report(dict(_MD_QUOTE))
+    dump = _dump_of(await _resolve_report(resolver, monkeypatch, report, ref="RKLB|warren_buffett"))
+    assert "moat_competition.market_dynamics.future_tam: 120" in dump
+    assert "moat_competition.market_dynamics.tam_target_year: 2030" in dump
+    assert "cagr_5yr" not in dump
+
+
+@pytest.mark.parametrize("md,keeps_pair", [
+    (_MD_MEASURED, False),
+    (_MD_QUOTE, True),
+    # Stored before `tam_basis`: the earnings-call label is a quote; anything else is not.
+    ({k: v for k, v in _MD_QUOTE.items() if k not in ("tam_basis",)}, True),
+    ({**_MD_MEASURED, "tam_basis": None, "tam_scope": "global",
+      "tam_source_label": "WSTS / SIA"}, False),
+    ({k: v for k, v in _MD_MEASURED.items() if k != "tam_basis"}, False),
+    # The stored basis wins over a label; an unknown basis is never a quote.
+    ({**_MD_QUOTE, "tam_basis": "measured"}, False),
+    ({**_MD_QUOTE, "tam_basis": "weird"}, False),
+    ({**_MD_QUOTE, "tam_basis": 1}, False),
+])
+def test_without_lead_figures_drops_a_projected_pair_unless_it_is_a_company_quote(md, keeps_pair):
+    report = {"moat_competition": {"market_dynamics": dict(md)}}
+    out = _ccr._without_lead_figures(report)["moat_competition"]["market_dynamics"]
+    assert ("future_tam" in out and "future_year" in out) == keeps_pair
+    assert out["current_tam"] == md["current_tam"]
+    # A quote stored WITH its basis keeps only its stated years (tam_year / tam_target_year):
+    # current_year is the generation year there (2026-10-22). Everything else keeps it.
+    if md.get("tam_basis") == "company_quote":
+        assert "current_year" not in out
+    else:
+        assert out["current_year"] == md["current_year"]
+    assert "cagr_5yr" not in out and out["avg_growth_pct_per_year"] == md["cagr_5yr"]
+    assert report["moat_competition"]["market_dynamics"] == md
+
+
+def test_a_company_quote_without_a_stated_target_dumps_no_future_pair():
+    """The Stage-A template's '2030' is not a year the company said: a quote stored with its
+    basis and no `tam_target_year` dumps no future_tam / future_year (2026-10-22)."""
+    md = {**_MD_QUOTE, "tam_target_year": None, "future_year": "2030"}
+    out = _ccr._without_lead_figures({"moat_competition": {"market_dynamics": md}})
+    dumped = out["moat_competition"]["market_dynamics"]
+    assert "future_tam" not in dumped and "future_year" not in dumped and "current_year" not in dumped
+    assert dumped["current_tam"] == md["current_tam"]
+
+
+def test_the_growth_source_label_is_deep_dropped_like_the_tam_source_label():
+    """The growth rate's source label names the same vendors as tam_source_label, which the
+    chat dump deliberately drops — the new key must not slip past it (2026-10-22)."""
+    assert "growth_source_label" in _ccr._SECTION_DEEP_DROP_KEYS["moat_competition"]
+    assert "tam_source_label" in _ccr._SECTION_DEEP_DROP_KEYS["moat_competition"]
+
+
+def test_the_projected_pair_is_dropped_whatever_its_key_case_and_without_dimensions():
+    md = {"Future_TAM": 1.0, "FUTURE_YEAR": "2031", "current_tam": 2.0, "cagr_5yr": None, 7: "x"}
+    report = {"moat_competition": {"market_dynamics": md, "durability_note": "D"}}
+    out = _ccr._without_lead_figures(report)
+    assert out["moat_competition"] == {
+        "market_dynamics": {"current_tam": 2.0, "avg_growth_pct_per_year": None, 7: "x"},
+        "durability_note": "D"}
+    assert md == {"Future_TAM": 1.0, "FUTURE_YEAR": "2031", "current_tam": 2.0,
+                  "cagr_5yr": None, 7: "x"}
+    assert out["moat_competition"] is not report["moat_competition"]
+
+
+@pytest.mark.parametrize("moat", [
+    {"market_dynamics": None}, {"market_dynamics": ""}, {"market_dynamics": ["future_tam"]},
+    {"market_dynamics": "future_tam"}, "garbage", None, [],
+])
+def test_a_malformed_market_block_passes_through(moat):
+    report = {"moat_competition": moat}
+    out = _ccr._without_lead_figures(report)
+    assert out["moat_competition"] == moat
+
+
+_NAN = float("nan")
+
+
+@pytest.mark.parametrize("key,value,want", [
+    ("tam_year", 2024, "2024"), ("tam_target_year", 2030.0, "2030"), ("CAGR_START_YEAR", 2017, "2017"),
+    ("current_year", "2024", "2024"), ("tam_year", True, True), ("tam_year", 2024.5, 2024.5),
+    ("tam_year", None, None), ("current_tam", 2024, 2024), (7, 2024, 2024),
+])
+def test_dump_year_writes_plain_digits_only_for_year_numbers(key, value, want):
+    got = _ccr._dump_year(key, value)
+    assert got == want and type(got) is type(want)
+
+
+def test_dump_year_leaves_a_non_finite_year_alone():
+    """The flattener already drops a NaN; a "nan" string here would leak it."""
+    assert _ccr._dump_year("tam_year", _NAN) is _NAN

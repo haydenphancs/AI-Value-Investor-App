@@ -376,7 +376,7 @@ async def test_a_grounded_global_row_is_served_as_a_live_census_figure(monkeypat
     fake = _FakeSB([dict(_GROUNDED_GLOBAL)])
     monkeypatch.setattr(ids, "get_supabase", lambda: fake)
 
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         return _live(industry=industry, sector=sector, current_tam=116.2,
                      source_label="US Census AIES (NAICS 3344)")
     _stub_compute(monkeypatch, compute)
@@ -403,7 +403,7 @@ async def test_zero_global_row_heals_as_us_scope(monkeypatch):
     fake = _FakeSB([_row(industry="Semiconductors", sector="Technology", tam_scope="global")])
     monkeypatch.setattr(ids, "get_supabase", lambda: fake)
 
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         return _live(industry=industry, sector=sector)
     _stub_compute(monkeypatch, compute)
     d = await IndustryDossierService().get_or_compute_dossier("Semiconductors", "Technology")
@@ -418,7 +418,7 @@ async def test_zero_global_row_heals_as_us_scope(monkeypatch):
 async def test_live_failure_keeps_placeholder_without_raising_and_memoizes(sb, monkeypatch, caplog):
     calls = {"n": 0}
 
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         calls["n"] += 1
         raise RuntimeError("FRED 503")
     _stub_compute(monkeypatch, compute)
@@ -438,7 +438,7 @@ async def test_live_failure_keeps_placeholder_without_raising_and_memoizes(sb, m
 async def test_live_timeout_keeps_placeholder_and_memoizes(sb, monkeypatch, caplog):
     monkeypatch.setattr(IndustryDossierService, "_LIVE_COMPUTE_TIMEOUT_SECONDS", 0.05)
 
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         await asyncio.sleep(5)
         return _live()
     _stub_compute(monkeypatch, compute)
@@ -468,7 +468,7 @@ _BAD = [0.0, -5.0, float("nan"), float("inf")]
 @pytest.mark.parametrize("field", ["current_tam", "future_tam"])
 @pytest.mark.parametrize("bad", _BAD)
 async def test_unusable_live_tam_is_rejected(sb, monkeypatch, field, bad):
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         return _live(**{field: bad})
     _stub_compute(monkeypatch, compute)
     d = await IndustryDossierService().get_or_compute_dossier(PLUG_INDUSTRY, "Industrials")
@@ -479,7 +479,7 @@ async def test_unusable_live_tam_is_rejected(sb, monkeypatch, field, bad):
 
 @pytest.mark.asyncio
 async def test_nan_live_cagr_becomes_none_but_tam_heals(sb, monkeypatch):
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         return _live(cagr_5y_pct=float("nan"))
     _stub_compute(monkeypatch, compute)
     d = await IndustryDossierService().get_or_compute_dossier(PLUG_INDUSTRY, "Industrials")
@@ -490,12 +490,25 @@ async def test_nan_live_cagr_becomes_none_but_tam_heals(sb, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_negative_live_cagr_is_kept_and_lifecycle_declines(sb, monkeypatch):
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         return _live(cagr_5y_pct=-3.2)
     _stub_compute(monkeypatch, compute)
     d = await IndustryDossierService().get_or_compute_dossier(PLUG_INDUSTRY, "Industrials")
     assert d.cagr_5y_pct == -3.2
     assert d.lifecycle_phase == "declining"
+
+
+@pytest.mark.parametrize("stored_cagr,want", [(-0.2, "mature"), (-0.99, "mature"),
+                                             (-1.0, "declining"), (-3.2, "declining")])
+def test_a_flat_stored_cagr_reads_mature(stored_cagr, want):
+    """A row stored before the ±1%/yr dead band (2026-10-22) — A&D's −0.2 with the label
+    'declining' — is re-derived on read: 'mature', with no recompute. Mutation: restore
+    `< 0.0` in `classify_lifecycle`."""
+    row = _row("Aerospace & Defense", current_tam_b=247.0, future_tam_b=245.0,
+               current_year="2024", future_year="2029", cagr_5y_pct=stored_cagr,
+               lifecycle_phase="declining", source_grain="industry",
+               source_label="US Census AIES — Aerospace product and parts manufacturing (NAICS 3364)")
+    assert IndustryDossier.from_db_row(row).lifecycle_phase == want
 
 
 @pytest.mark.asyncio
@@ -505,7 +518,7 @@ async def test_a_small_constituent_count_no_longer_means_emerging(monkeypatch):
     fake = _FakeSB([_row(constituent_count=3, concentration_label="fragmented")])
     monkeypatch.setattr(ids, "get_supabase", lambda: fake)
 
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         return _live(cagr_5y_pct=20.0)
     _stub_compute(monkeypatch, compute)
     d = await IndustryDossierService().get_or_compute_dossier(PLUG_INDUSTRY, "Industrials")
@@ -519,7 +532,7 @@ async def test_failed_heal_is_retried_after_the_ttl(sb, monkeypatch):
     outcomes = [RuntimeError("down"), _live()]
     calls = {"n": 0}
 
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         calls["n"] += 1
         out = outcomes.pop(0)
         if isinstance(out, Exception):
@@ -544,7 +557,7 @@ async def test_concurrent_callers_share_one_live_compute(sb, monkeypatch):
     gate = asyncio.Event()
     calls = {"n": 0}
 
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         calls["n"] += 1
         await gate.wait()
         return _live()
@@ -563,7 +576,7 @@ async def test_concurrent_callers_share_one_live_compute(sb, monkeypatch):
 async def test_cancelled_leader_does_not_hang_joiners_or_memoize(sb, monkeypatch):
     started = asyncio.Event()
 
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         started.set()
         await asyncio.sleep(30)
         return _live()
@@ -586,7 +599,7 @@ async def test_cancelled_leader_does_not_hang_joiners_or_memoize(sb, monkeypatch
 async def test_reset_during_an_inflight_heal_does_not_recache_stale_data(sb, monkeypatch):
     gate = asyncio.Event()
 
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         await gate.wait()
         return _live()
     _stub_compute(monkeypatch, compute)
@@ -608,7 +621,7 @@ async def test_missing_row_live_result_has_no_concentration(monkeypatch):
     fake = _FakeSB([])
     monkeypatch.setattr(ids, "get_supabase", lambda: fake)
 
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         return _live(industry=industry, sector=sector, concentration_label="fragmented")
     _stub_compute(monkeypatch, compute)
     d = await IndustryDossierService().get_or_compute_dossier("Brand New Industry", "Industrials")
@@ -621,7 +634,7 @@ async def test_missing_row_live_result_has_no_concentration(monkeypatch):
 async def test_missing_row_unusable_live_result_returns_none(monkeypatch):
     monkeypatch.setattr(ids, "get_supabase", lambda: _FakeSB([]))
 
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         return _live(current_tam=0.0, future_tam=0.0)
     _stub_compute(monkeypatch, compute)
     assert await IndustryDossierService().get_or_compute_dossier("Brand New Industry", "Industrials") is None
@@ -705,7 +718,7 @@ async def test_recompute_all_replaces_global_rows_and_never_zeroes_a_real_tam(mo
     monkeypatch.setattr(fred_mod, "get_fred_client", lambda: SimpleNamespace(is_configured=True))
     monkeypatch.setattr(census_mod, "get_census_client", lambda: SimpleNamespace(is_configured=True))
 
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         if industry == "Restaurants":            # a transient miss this run
             return _live(industry=industry, sector=sector, current_tam=0.0, future_tam=0.0,
                          source_label=PLACEHOLDER_LABEL, source_grain="all_industry")
@@ -738,7 +751,7 @@ async def test_cancelled_joiner_does_not_cancel_the_shared_compute(sb, monkeypat
     gate = asyncio.Event()
     calls = {"n": 0}
 
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         calls["n"] += 1
         await gate.wait()
         return _live()
@@ -763,7 +776,7 @@ async def test_missing_row_failure_is_negatively_memoized(monkeypatch):
     monkeypatch.setattr(ids, "get_supabase", lambda: _FakeSB([]))
     calls = {"n": 0}
 
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         calls["n"] += 1
         raise RuntimeError("FRED down")
     _stub_compute(monkeypatch, compute)
@@ -792,7 +805,7 @@ async def test_reset_during_the_supabase_read_caches_neither_placeholder_nor_hea
 
     sb.read_gate, sb.in_read = threading.Event(), threading.Event()
 
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         return _live()
     _stub_compute(monkeypatch, compute)
     task = asyncio.create_task(IndustryDossierService().get_or_compute_dossier(PLUG_INDUSTRY, "Industrials"))
@@ -829,7 +842,7 @@ async def test_status_read_failure_is_transient(sb, monkeypatch):
 async def test_status_failed_live_compute_is_transient_and_memo_keeps_it(sb, monkeypatch, mode):
     monkeypatch.setattr(IndustryDossierService, "_LIVE_COMPUTE_TIMEOUT_SECONDS", 0.05)
 
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         if mode == "raise":
             raise RuntimeError("boom")
         await asyncio.sleep(5)
@@ -860,7 +873,7 @@ async def test_status_every_fred_tier_failing_is_transient_only_when_fred_is_con
 
 @pytest.mark.asyncio
 async def test_status_unusable_but_complete_answer_is_not_transient(sb, monkeypatch):
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         return _live(future_tam=0.0)              # an answer, just not a usable pair
     _stub_compute(monkeypatch, compute)
     d, transient = await _status()
@@ -871,7 +884,7 @@ async def test_status_unusable_but_complete_answer_is_not_transient(sb, monkeypa
 async def test_status_joiner_of_a_cancelled_leader_is_transient(sb, monkeypatch):
     started = asyncio.Event()
 
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         started.set()
         await asyncio.sleep(30)
     _stub_compute(monkeypatch, compute)
@@ -943,7 +956,7 @@ async def _run_recompute(monkeypatch, existing, universe, compute_by_industry):
     monkeypatch.setattr(fred_mod, "get_fred_client", lambda: SimpleNamespace(is_configured=True))
     monkeypatch.setattr(census_mod, "get_census_client", lambda: SimpleNamespace(is_configured=True))
 
-    async def compute(self, industry, sector, tickers, caps_by_ticker):
+    async def compute(self, industry, sector, tickers, caps_by_ticker, revenues_by_ticker=None):
         out = compute_by_industry[industry]
         if isinstance(out, BaseException):
             raise out

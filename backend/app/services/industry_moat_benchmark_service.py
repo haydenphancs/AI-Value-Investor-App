@@ -139,10 +139,18 @@ _LOSS_INDUSTRIES_LOGGED = 10
 # industry's peer average at 0.0 — Biotechnology's Brand Power peer average read 4.6 where its
 # 127 revenue-backed members average 6.9. Rows of the two older vintages stay served, named
 # pending, until the same recompute.
-MODEL_VERSION = "moat_v1.2026-10-11"
+# 2026-10-22 ("moat_v1.2026-10-22"): Network Effects' inputs change in the same release — the
+# industry HHI driver is revenue-share, not market-cap (owner decision "Revenue-share HHI"); the
+# lifecycle phase uses the ±1%/yr dead band (|CAGR| < 1 is mature, "±1%/yr dead band"); a
+# broad-grain dossier's lifecycle scores as mature; and Aerospace & Defense's growth comes from
+# the six-NAICS composite ("Aerospace + defense mfg"). Rows of the three older vintages stay
+# served, named pending, until the rollout's moat refresh replaces them.
+MODEL_VERSION = "moat_v1.2026-10-22"
 # Every vintage the lookup knows, oldest first; a row stamped with anything else (or
 # nothing) ranks below all of them.
-_MODEL_VERSION_ORDER = ("moat_v1.2026-05", "moat_v1.2026-10", MODEL_VERSION)
+_MODEL_VERSION_ORDER = (
+    "moat_v1.2026-05", "moat_v1.2026-10", "moat_v1.2026-10-11", MODEL_VERSION,
+)
 TABLE_NAME = "industry_moat_benchmarks"
 # Re-running the bootstrap with `skip_if_fresh_hours` set lets the
 # operator resume after a Ctrl-C / rate-limit-induced abort — any
@@ -918,6 +926,9 @@ class IndustryMoatBenchmarkService:
                 companies_benchmark_failed, industries_benchmark_failed,
                 "y" if industries_benchmark_failed == 1 else "ies",
             )
+        # This process's Peer Avg reads (1 h TTL) would otherwise pair a report's new focal
+        # score with the pre-recompute average for up to an hour (2026-10-22).
+        _lookup_cache.clear()
         logger.info("industry_moat_benchmark recompute_all summary: %s", summary)
         return summary
 

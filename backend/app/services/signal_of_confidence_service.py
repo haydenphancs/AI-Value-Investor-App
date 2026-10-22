@@ -22,6 +22,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from app.services._buyback_verification import (
+    SEC_BUYBACK_TAGS,
+    SecBuybackFacts,
+    buyback_overrides,
+)
 from app.services._earnings_common import (
     CALENDAR_UNKNOWN,
     EarningsStamp,
@@ -29,6 +34,13 @@ from app.services._earnings_common import (
     stamp_is_persistable,
 )
 from app.database import get_supabase
+from app.integrations.sec_edgar import (
+    SECConfigException,
+    SECException,
+    normalize_cik,
+    user_agent_configured,
+)
+from app.services.sec_concept_service import get_sec_concept_service
 from app.utils.inflight import fail_shared_future
 from app.integrations.fmp import get_fmp_client
 from app.utils.period_labels import annual_fiscal_year, quarterly_period_label
@@ -161,7 +173,12 @@ logger = logging.getLogger(__name__)
 #:     Round 7 likewise: a ratios answer that is not a list is `annual_ratios`, like a raise,
 #:     so such a build is no longer stored; what any build holds is unchanged. Round 8 the
 #:     same for a `[]` ratios answer beside a common dividend in the annual cash flow.
-_PAYLOAD_VERSION = 14
+#: 15 → (2026-10-22) buybacks are checked against the company's SEC filing
+#:     (`_buyback_verification`): FMP's `commonStockRepurchased` carried employee tax
+#:     withholding or preferred redemptions in 11 of 120 surveyed quarters (INTC's $181M /
+#:     $617M "buybacks" are RSU withholdings; Intel repurchased nothing). A v14 row may
+#:     chart them. Values change; the shape does not.
+_PAYLOAD_VERSION = 15
 
 #: The per-share record (`ratios.dividendPerShare`) is scaled by the common share of the
 #: year's dividend cash only when that share is below this — common == net (no preferred
@@ -367,6 +384,69 @@ def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
         return f if math.isfinite(f) else None
     except (ValueError, TypeError):
         return None
+
+
+#: How long a build waits for the SEC buyback check (`_verify_buybacks`). Five concept
+#: reads at the 5-per-second limiter are ~1 s warm; the bound is for SEC hanging, and the
+#: shielded fetch keeps going past it to fill the cache for the next build.
+_BUYBACK_CHECK_TIMEOUT_SECONDS = 10.0
+
+#: The cache-only read a timed-out check falls back to (one Supabase select).
+_BUYBACK_CACHE_READ_TIMEOUT_SECONDS = 3.0
+#: Cached filing data "covers" a quarter ending up to this many days after its newest
+#: period end — the rule's own period-end match tolerance.
+_BUYBACK_COVERAGE_SLACK_DAYS = 7
+#: The newest distinct cash-flow rows the chart can read: the 8 displayed quarters
+#: (`recent = quarters[-8:]` in `_build_quarters`), the `_TRAILING_POINTS - 1` rows the
+#: oldest trailing window reaches back to, and 3 for an income gap or an income feed one
+#: quarter behind the cash flow (both measured: the read set ends at position 11).
+_BUYBACK_CHECK_WINDOW_ROWS = 8 + (_TRAILING_POINTS - 1) + 3
+
+_buyback_check_off_logged = False
+
+
+def _rows_the_chart_reads(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The newest `_BUYBACK_CHECK_WINDOW_ROWS` rows by day, deduped first-wins the way
+    `_build_quarters` keys its cash-flow rows: a buyback outside them cannot reach a bar or
+    a trailing window, so it is no reason to call SEC (or to degrade when SEC fails)."""
+    by_day: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        day = str(row.get("date") or "")[:10]
+        if day and day not in by_day:
+            by_day[day] = row
+    newest = sorted(by_day, reverse=True)[:_BUYBACK_CHECK_WINDOW_ROWS]
+    return [by_day[day] for day in newest]
+
+
+def _is_outflow(value: Any) -> bool:
+    """True when ``value`` is what `_gate_cash_flow_row` charts as a buyback (the same
+    `_safe_float` reading, so the check and the gate agree on which rows have one)."""
+    parsed = _safe_float({"v": value}, "v") if not isinstance(value, bool) else None
+    return parsed is not None and parsed < 0
+
+
+def _log_buyback_check_off() -> None:
+    """Once per process: an unusable SEC User-Agent (blank, or not printable ASCII —
+    `sec_edgar.user_agent_configured`) turns the buyback check off everywhere, so one
+    ERROR says so rather than one per build."""
+    global _buyback_check_off_logged
+    if _buyback_check_off_logged:
+        return
+    _buyback_check_off_logged = True
+    logger.error(
+        "[soc-buyback-check-off] SEC_EDGAR_USER_AGENT is not set or is not printable ASCII "
+        "— Signal of Confidence charts FMP's buyback figures unchecked (employee tax "
+        "withholding included) until it is. Set it to 'Caydex <contact email>' (SEC "
+        "fair-access policy)."
+    )
+
+
+def _retrieve_task_exception(task: "asyncio.Future") -> None:
+    """Done-callback for a background fetch nobody awaits any more: reads its exception so
+    asyncio does not log 'Task exception was never retrieved' for a failure the service
+    already logged."""
+    if not task.cancelled():
+        task.exception()
 
 
 # Quarter display labels come from app.utils.period_labels.quarterly_period_label
@@ -1147,6 +1227,15 @@ class SignalOfConfidenceService:
             annual_ratios, profile, ex_dividend_dates
         )
 
+        # FMP's `commonStockRepurchased` is sometimes employee tax withholding or preferred
+        # redemptions (INTC's $181M / $617M "buybacks"). Checked against the company's SEC
+        # filing; a figure is only ever LOWERED, and only where the filing explains it.
+        buyback_override, buyback_check_failed = await self._verify_buybacks(
+            ticker, quarterly_cashflow, profile
+        )
+        if buyback_check_failed:
+            degraded.append("buyback_check")
+
         data_points, diag = self._build_quarters(
             quarterly_cashflow,
             quarterly_income,
@@ -1155,6 +1244,7 @@ class SignalOfConfidenceService:
             ticker,
             pays_common_dividend=pays_common_dividend,
             dividend_by_year=self._annual_dividend_map(annual_ratios),
+            buyback_override=buyback_override,
             # The FY annual weighted averages the annual statements already fetched imply:
             # what recognises FMP's copy in the newest fiscal-Q4 row (no extra call).
             annual_share_counts=self._annual_share_counts(
@@ -1384,6 +1474,160 @@ class SignalOfConfidenceService:
             return None
         return bool(answer)
 
+    # ── Buybacks against the SEC filing ───────────────────────────
+
+    async def _verify_buybacks(
+        self,
+        ticker: str,
+        quarterly_cashflow: List[Dict[str, Any]],
+        profile: Dict[str, Any],
+    ) -> Tuple[Dict[str, float], bool]:
+        """``({cash-flow row day: corrected buyback dollars}, check_failed)``.
+
+        SEC is asked only when a row the chart can READ carries a buyback
+        (`_BUYBACK_CHECK_WINDOW_ROWS`), so a company with none there (TSLA; AMZN, whose
+        last buybacks are 2022 rows past the window) never calls SEC and never degrades.
+        ``check_failed`` is True when the check could not be made: SEC failed or ran past
+        `_BUYBACK_CHECK_TIMEOUT_SECONDS` with no cached filing data of at most 30 days, or
+        cached data was all there was and it ends before a quarter it left unverified. The
+        build is then served from memory only and the report refuses the section, like any
+        failed leg. A company SEC holds no data for (a foreign filer, no CIK) and a check
+        switched off (no usable User-Agent) keep FMP's figures and are NOT failures — they
+        are steady states, and degrading them would keep those reports out of every shared
+        cache for good.
+        """
+        rows = [r for r in quarterly_cashflow if isinstance(r, dict)]
+        if not any(
+            _is_outflow(r.get("commonStockRepurchased")) for r in _rows_the_chart_reads(rows)
+        ):
+            return {}, False
+        if not user_agent_configured():
+            _log_buyback_check_off()
+            return {}, False
+        cik = next(
+            (c for c in (normalize_cik(r.get("cik")) for r in rows) if c), None
+        ) or normalize_cik(profile.get("cik"))
+        if cik is None:
+            logger.info(
+                "[soc-buyback-check-skipped] ticker=%s step=buyback_check: no CIK on the "
+                "cash-flow rows or the profile — buybacks charted as FMP sends them",
+                ticker,
+            )
+            return {}, False
+        newest = max((str(r.get("date") or "") for r in rows), default="") or None
+
+        # Shielded: a check that runs past the bound keeps going in the background and fills
+        # the SEC cache for the next build, instead of being cancelled half-fetched.
+        task = asyncio.ensure_future(
+            get_sec_concept_service().get_concepts(
+                cik, SEC_BUYBACK_TAGS, newest_period_end=newest
+            )
+        )
+        try:
+            sec = await asyncio.wait_for(
+                asyncio.shield(task), timeout=_BUYBACK_CHECK_TIMEOUT_SECONDS
+            )
+        except SECConfigException:
+            _log_buyback_check_off()
+            return {}, False
+        except asyncio.TimeoutError:
+            # SEC is slow, not failed: the service's own stale fallback runs only once a
+            # fetch has FAILED (its read timeout is 20 s), so ask the cache directly.
+            sec = await self._cached_buyback_concepts(ticker, cik)
+            if sec is None:
+                logger.warning(
+                    "[soc-buyback-check-unavailable] ticker=%s cik=%s step=buyback_check: "
+                    "SEC did not answer within %ss and no cached filing data of at most 30 "
+                    "days is left — buybacks charted as FMP sends them; this build is served "
+                    "from memory only, not persisted",
+                    ticker, cik, _BUYBACK_CHECK_TIMEOUT_SECONDS,
+                )
+                return {}, True
+        except SECException as e:
+            logger.warning(
+                "[soc-buyback-check-unavailable] ticker=%s cik=%s step=buyback_check: %s: %s "
+                "— no cached SEC data either; buybacks charted as FMP sends them; this build "
+                "is served from memory only, not persisted",
+                ticker, cik, type(e).__name__, e,
+            )
+            return {}, True
+        except Exception as e:  # an unexpected failure must not take the chart down
+            logger.error(
+                "[soc-buyback-check-error] ticker=%s cik=%s step=buyback_check: %s: %s — "
+                "buybacks charted as FMP sends them; this build is served from memory only, "
+                "not persisted",
+                ticker, cik, type(e).__name__, e, exc_info=True,
+            )
+            return {}, True
+        finally:
+            if not task.done():
+                task.add_done_callback(_retrieve_task_exception)
+
+        facts = SecBuybackFacts.from_concepts(sec.concepts)
+        overrides, checks = buyback_overrides(rows, facts)
+        unverified: List[str] = []
+        for day, check in checks:
+            if check.outcome == "corrected":
+                logger.info(
+                    "[soc-buyback-corrected] ticker=%s cik=%s date=%s step=buyback_check: "
+                    "charted %.1fM — %s",
+                    ticker, cik, day, check.dollars / 1e6, check.detail,
+                )
+            elif check.outcome in ("mismatch", "sec_higher"):
+                logger.warning(
+                    "[soc-buyback-sec-%s] ticker=%s cik=%s date=%s step=buyback_check: %s",
+                    check.outcome.replace("_", "-"), ticker, cik, day, check.detail,
+                )
+            elif check.outcome == "unverified":
+                unverified.append(day)
+        if unverified:
+            logger.info(
+                "[soc-buyback-unverified] ticker=%s cik=%s step=buyback_check: %d quarter(s) "
+                "(%s) have no SEC repurchase figure to compare — kept as FMP sends them",
+                ticker, cik, len(unverified), ", ".join(unverified),
+            )
+        if sec.stale:
+            # Cached data that ends BEFORE a quarter it left unverified could not check that
+            # quarter at all — fresh data would have had its 10-Q. That is a failed check,
+            # not a steady state: memory only, and the report refuses it.
+            covered = facts.newest_end
+            uncovered = [
+                day for day in unverified
+                if covered is not None
+                and (d := _day(day)) is not None
+                and (d.date() - covered).days > _BUYBACK_COVERAGE_SLACK_DAYS
+            ]
+            if uncovered:
+                logger.warning(
+                    "[soc-buyback-check-stale-gap] ticker=%s cik=%s step=buyback_check: SEC "
+                    "was unavailable and the cached filing data (through %s) has no figure "
+                    "for %s — buybacks charted as FMP sends them; this build is served from "
+                    "memory only, not persisted",
+                    ticker, cik, covered.isoformat(), ", ".join(uncovered),
+                )
+                return overrides, True
+            logger.info(
+                "[soc-buyback-check-stale] ticker=%s cik=%s step=buyback_check: SEC was "
+                "unavailable — checked against cached filing data instead",
+                ticker, cik,
+            )
+        return overrides, False
+
+    async def _cached_buyback_concepts(self, ticker: str, cik: str) -> Any:
+        """The SEC concept cache alone (no SEC call), bounded; None when it holds no usable
+        answer or cannot be read."""
+        try:
+            return await asyncio.wait_for(
+                get_sec_concept_service().get_cached_concepts(cik, SEC_BUYBACK_TAGS),
+                timeout=_BUYBACK_CACHE_READ_TIMEOUT_SECONDS,
+            )
+        except Exception as e:  # incl. the timeout: the caller degrades on None
+            logger.warning(
+                "[soc-buyback-cache-read-failed] ticker=%s cik=%s step=buyback_check: %s: %s",
+                ticker, cik, type(e).__name__, e,
+            )
+            return None
+
     # ── Per-quarter data points ───────────────────────────────────
 
     def _build_data_points(
@@ -1395,6 +1639,7 @@ class SignalOfConfidenceService:
         ticker: str = "",
         pays_common_dividend: Optional[bool] = None,
         dividend_by_year: Optional[Dict[str, float]] = None,
+        buyback_override: Optional[Dict[str, float]] = None,
     ) -> List[SignalOfConfidenceDataPointSchema]:
         """The points of `_build_quarters`, without its diagnostics (callers that only
         chart). The builder uses `_build_quarters` so the gaps reach its degraded gate."""
@@ -1406,6 +1651,7 @@ class SignalOfConfidenceService:
             ticker,
             pays_common_dividend=pays_common_dividend,
             dividend_by_year=dividend_by_year,
+            buyback_override=buyback_override,
         )
         return points
 
@@ -1415,9 +1661,15 @@ class SignalOfConfidenceService:
         quarter_pays: Optional[bool],
         ticker: str,
         date: str,
+        *,
+        buyback_override: Optional[float] = None,
     ) -> Tuple[Optional[float], float, bool]:
         """``(dividend_dollars | None, buyback_dollars, payer_line_missing)`` for one
         cash-flow row, both amounts as positive dollars.
+
+        ``buyback_override`` is the SEC-checked figure for this row (`_verify_buybacks`). It
+        can only LOWER FMP's: the check never raises a figure, and this gate holds that
+        even if a caller passes a higher one.
 
         The dividend gates, in order:
         * `commonDividendsPaid` is the /stable field; legacy `dividendsPaid` only when that
@@ -1461,6 +1713,12 @@ class SignalOfConfidenceService:
         # is issuance or nothing.
         repurchased_raw = _safe_float(cf_rec, "commonStockRepurchased")
         buyback = abs(repurchased_raw) if (repurchased_raw is not None and repurchased_raw < 0) else 0.0
+        if (
+            buyback_override is not None
+            and not isinstance(buyback_override, bool)
+            and math.isfinite(buyback_override)
+        ):
+            buyback = min(buyback, max(0.0, float(buyback_override)))
         return dividend, buyback, missing_line
 
     @staticmethod
@@ -1837,8 +2095,13 @@ class SignalOfConfidenceService:
         pays_common_dividend: Optional[bool] = None,
         dividend_by_year: Optional[Dict[str, float]] = None,
         annual_share_counts: Optional[Dict[str, float]] = None,
+        buyback_override: Optional[Dict[str, float]] = None,
     ) -> Tuple[List[SignalOfConfidenceDataPointSchema], _QuarterDiagnostics]:
         """Build per-quarter data points from FMP data, plus what could not be measured.
+
+        ``buyback_override`` (`_verify_buybacks`, ``{row date: dollars}``) replaces FMP's
+        buyback for the rows the SEC filing corrected, everywhere a row is read — the bar,
+        and every trailing window that touches it.
 
         ``annual_share_counts`` (`_annual_share_counts`, ``{fiscal_year: annual weighted
         average}``) lets `_share_count_glitches` recognise FMP's annual copy in the NEWEST
@@ -2137,7 +2400,8 @@ class SignalOfConfidenceService:
         def gated(date: str) -> Tuple[Optional[float], float, bool]:
             if date not in gated_by_date:
                 gated_by_date[date] = self._gate_cash_flow_row(
-                    cf_by_date[date], quarter_pays_for(date), ticker, date
+                    cf_by_date[date], quarter_pays_for(date), ticker, date,
+                    buyback_override=(buyback_override or {}).get(date),
                 )
             return gated_by_date[date]
 

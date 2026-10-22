@@ -485,6 +485,27 @@ async def test_a_degraded_build_with_no_dividend_card_is_not_confirmed(monkeypat
     assert (await _run("dividends"))["dividends"]["dividend"] == "could not be confirmed in this build"
 
 
+@pytest.mark.asyncio
+async def test_an_unchecked_buyback_figure_is_never_stated(monkeypatch):
+    """`buyback_check`: the SEC check on FMP's buyback figure could not run, so the figure may
+    be employee tax withholding (INTC's "buybacks"). Chat states no yield and never zero —
+    and the reason says nothing about dividends, so a non-payer still reads as one."""
+    soc = _dividends(dividend_info=None, degraded=["buyback_check"])
+    _install(monkeypatch, {"dividends": soc})
+    d = (await _run("dividends"))["dividends"]
+    assert "buyback_yield_ttm" not in d
+    assert d["buybacks"].startswith("could not be checked") and "never treat it as zero" in d["buybacks"]
+    assert d["dividend"] == "Caydex's records show no current dividend"
+
+
+@pytest.mark.asyncio
+async def test_buyback_check_beside_another_reason_still_unconfirms_the_dividend(monkeypatch):
+    soc = _dividends(dividend_info=None, degraded=["buyback_check", "annual_ratios"])
+    _install(monkeypatch, {"dividends": soc})
+    d = (await _run("dividends"))["dividends"]
+    assert d["dividend"] == "could not be confirmed in this build" and "buyback_yield_ttm" not in d
+
+
 # ── outliers: omitted, never zero; negatives keep their sign ─────────────────────
 
 def _pt(period, value, yoy=None, peer=None):

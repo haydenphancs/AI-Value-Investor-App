@@ -876,10 +876,7 @@ def test_on_progress_reaches_the_agent_only_through_run():
 
 
 _RESEARCH_CALL = "        research_text = await self._agentic_research(out, evidence)\n"
-_LOOP_TOP = (
-    "        tools = build_fmp_tool_declarations()\n"
-    "        handlers = build_tool_handlers(self.fmp)\n"
-)
+_LOOP_TOP = "        tools = build_fmp_tool_declarations()\n"
 _STAGE_B_CALL = "            run_narrative_jobs(jobs, self.gemini, self.persona, evidence),\n"
 _JOBS = "        jobs = build_narrative_jobs(self.persona, evidence, report)\n"
 _DEGRADED_TAG = "            report[REPORT_DEGRADED_KEY] = stage_a_degradation\n"

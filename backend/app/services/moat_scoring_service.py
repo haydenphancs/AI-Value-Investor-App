@@ -543,8 +543,15 @@ class MoatScoringService:
             sub_score=_hhi_to_score(hhi),
         ))
 
-        # Lifecycle phase — enum mapping, no median.
+        # Lifecycle phase — enum mapping, no median. A broad stand-in (a sector or
+        # all-industry dossier) carries its SECTOR's growth phase, which the report card
+        # hides (`_apply_tam_source` shows only industry-grain figures), so it scores as
+        # mature rather than lending this industry another one's growth (2026-10-22). A
+        # plain `IndustryTAM` has no grain and is industry-level.
         phase = getattr(industry_tam, "lifecycle_phase", None) if industry_tam else None
+        grain = getattr(industry_tam, "source_grain", None) if industry_tam else None
+        if phase is not None and grain not in (None, "industry"):
+            phase = "mature"
         drivers.append(MetricDriver(
             metric="lifecycle_phase",
             focal=None, sector_median=None,

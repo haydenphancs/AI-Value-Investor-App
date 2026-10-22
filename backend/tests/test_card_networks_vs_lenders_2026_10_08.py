@@ -582,14 +582,14 @@ async def test_an_operating_company_still_compares_its_liquidity_rows(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_the_network_build_round_trips_through_the_v9_cache_shape(monkeypatch):
+async def test_the_network_build_round_trips_through_the_v10_cache_shape(monkeypatch):
     """What the writer stores is what the reader admits (the absolute-only rows included);
     a v8 row (P/E and ROE compared with lenders), a v7 row (the first cut) and a v6 row of
     the same company are rebuilt."""
     resp, _ = await _hc(monkeypatch)
     stored = {**resp.model_dump(), "payload_version": hc._HC_PAYLOAD_VERSION}
     json.dumps(stored, allow_nan=False)
-    assert hc._HC_PAYLOAD_VERSION == 9
+    assert hc._HC_PAYLOAD_VERSION == 10
 
     class _Rows:
         def __init__(self, rows):
@@ -745,19 +745,20 @@ async def test_the_fallback_still_compares_an_operating_company(monkeypatch):
     assert by["debt_to_equity"].score == 4 and by["debt_to_equity"].peer_level == "industry"
 
 
-def test_the_snapshot_payload_version_is_8_and_older_rows_rebuild():
+def test_the_snapshot_payload_version_is_9_and_older_rows_rebuild():
     """A v5 row of V is the unrated D/E-only card; a v6 row may be the first cut's (an
     unlisted lender with the three rows, or V's D/E compared with lenders); a v7 row of WU
-    may carry its made-up rows (2026-10-09). All rebuild. Mutation: leaving the version
-    at 7 serves WU's."""
-    assert hs._SNAPSHOT_PAYLOAD_VERSION == 8
+    may carry its made-up rows (2026-10-09); a v8 row of a small Financial Services
+    industry compared D/E with the sector (2026-10-21). All rebuild. Mutation: leaving the
+    version at 7 serves WU's."""
+    assert hs._SNAPSHOT_PAYLOAD_VERSION == 9
     body = SnapshotItemResponse(category="Financial Health", rating=0, metrics=[],
                                 computed_at="2026-10-08T09:15:00Z").model_dump()
     svc = hs.HealthSnapshotService.__new__(hs.HealthSnapshotService)
-    for old in (5, 6, 7):
+    for old in (5, 6, 7, 8):
         svc.supabase = sph._Supabase([sph._row({**body, hs._VERSION_KEY: old})[0]])
         assert svc._check_supabase_cache("V") is None, f"a v{old} row was served"
-    svc.supabase = sph._Supabase([sph._row({**body, hs._VERSION_KEY: 8})[0]])
+    svc.supabase = sph._Supabase([sph._row({**body, hs._VERSION_KEY: 9})[0]])
     assert svc._check_supabase_cache("V") is not None
 
 

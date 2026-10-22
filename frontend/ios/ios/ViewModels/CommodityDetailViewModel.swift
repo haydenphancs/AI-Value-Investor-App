@@ -9,11 +9,15 @@
 //    POST /api/v1/commodities/{symbol}/news/enrich
 //    GET  /api/v1/stocks/{fmpSymbol}/technical-analysis
 //    GET  /api/v1/stocks/{fmpSymbol}/technical-analysis/detail
+//    GET  /api/v1/commodities/{symbol}/chart/history  (older bars, via ChartHistoryLoader)
+//    GET  /api/v1/commodities/{symbol}/chart?range=&interval=  (one range's bars alone,
+//         only until the full detail lands — see `paintBarsOnlyChart`)
 //
 
 import Foundation
 import SwiftUI
 import Combine
+import os
 
 @MainActor
 class CommodityDetailViewModel: ObservableObject {
@@ -66,7 +70,25 @@ class CommodityDetailViewModel: ObservableObject {
     /// The ONE place this screen names its asset class: the screen passes it to
     /// `TickerChartView`, and init resolves the remembered range/interval against it.
     let chartAssetContext: ChartAssetContext = .commodity
+    /// Bumped ONLY when the bars in hand belong to a different (range, interval) than the
+    /// previous write — a user range or interval change. Never on a timer tick, the
+    /// core→full swap or pull-to-refresh: the chart keeps the user's pan across those and
+    /// resets to the range's default window only on a bump. It used to bump on EVERY write,
+    /// so a panned or pinched chart snapped back every 30 s during market hours.
     @Published var chartDataVersion: Int = 0
+    /// The range / interval the bars in hand were REQUESTED for — captured before the
+    /// await, never the pill at landing time. The pill flips on the tap and the bars arrive
+    /// later; the chart maps the bars by these, and veils itself while they differ.
+    @Published var chartDataRange: ChartTimeRange?
+    @Published var chartDataInterval: ChartInterval?
+    /// True when the user's range / interval change FAILED: its bars are cleared rather than
+    /// leaving the previous selection's under the new pill (where the chart would sit veiled,
+    /// awaiting bars that never come), and the screen says so on a daily range. Reset when
+    /// the user picks again, and by any write that carries bars.
+    @Published private(set) var chartLoadFailed = false
+    /// Older bars for the chart, paged in as the user pans left. Fed every write of the
+    /// chart bars (`didWriteChartBars`) so its store stays contiguous with them.
+    let chartHistory: ChartHistoryLoader
 
     // Analysis tab state
     @Published var isTechnicalLoaded: Bool = false
@@ -106,15 +128,38 @@ class CommodityDetailViewModel: ObservableObject {
     /// awaiting and only applies its result if still current — so a slow
     /// out-of-order response can't clobber a newer one during rapid range switching.
     private var detailRequestGen = 0
+    /// The same kind of token for `paintBarsOnlyChart`, kept apart from `detailRequestGen` on
+    /// purpose: the bars-only fetch runs ALONGSIDE a full fetch, so bumping that one would
+    /// discard the full response it is only meant to get ahead of. Bumped on every bars-only
+    /// request, so a newer pick's answer always wins — even over an older answer for the same
+    /// range (tap 6M → 1Y → 6M while the first 6M answer is still in flight).
+    private var barsOnlyChartGeneration = 0
     /// True while the range sink assigns the range's default interval, so the
     /// interval sink doesn't ALSO reload (one range change would otherwise fire two
     /// identical fetches when the range crosses an interval boundary).
     private var suppressIntervalReload = false
 
+    /// What the last write of the chart bars was fetched for. A commodity has no extended
+    /// session, so (range, interval) is the request; `hasBars` is part of the stamp because
+    /// an EMPTY write (a cold fast core carries no daily bars, a failed range change) commits
+    /// a window against zero bars — the first bars after it must open on the range's default
+    /// window, not on the 10-bar minimum that empty window clamps to. `chartDataVersion`
+    /// moves only when the stamp changes.
+    private struct ChartBarsStamp: Equatable {
+        let range: ChartTimeRange
+        let interval: ChartInterval
+        let hasBars: Bool
+    }
+    private var lastChartStamp: ChartBarsStamp?
+    private let log = Logger(subsystem: "com.caydex.ios", category: "CommodityDetailViewModel")
+
     // MARK: - Initialization
 
     init(commoditySymbol: String) {
         self.commoditySymbol = commoditySymbol
+        // No repository is injected into this view model (it reads `StockRepository.shared`
+        // throughout), so the loader takes the same default.
+        self.chartHistory = ChartHistoryLoader(asset: .commodities)
 
         // Seed the range AND interval as a resolved pair BEFORE the `.dropFirst()`-ed sinks
         // (so it fires nothing): the user's remembered range and that range's interval,
@@ -152,6 +197,12 @@ class CommodityDetailViewModel: ObservableObject {
                 guard !self.suppressIntervalReload else { return }
                 Task { await self.refreshLiveSlice(includeChart: true, userInitiated: true) }
             }
+            .store(in: &cancellables)
+
+        // The screen reads `chartHistory.state` through this view model, so the loader's
+        // changes must re-publish here — an older page landing has to redraw the chart.
+        chartHistory.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
     }
 
@@ -213,52 +264,209 @@ class CommodityDetailViewModel: ObservableObject {
     /// the full response is already in flight and owns the error path. It also
     /// deliberately does NOT touch `errorMessage` or bump any request token, both of
     /// which belong to the full fetch.
+    ///
+    /// When core answers a daily-or-coarser range with NO bars (a cold section — see the
+    /// comment at the call), it follows up with the bars-only route for that same selection
+    /// (`paintBarsOnlyChart`), so a screen opening on a remembered 3M+ range draws its chart
+    /// in well under a second instead of waiting for the full detail.
     private func loadCore() async {
+        // Captured BEFORE the await: the bars are stamped with what was asked for. A range
+        // tap while core is in flight must not label these bars with the new pill.
+        let range = selectedChartRange
+        let interval = chartSettings.selectedInterval
         guard let core = try? await StockRepository.shared.getCommodityCore(
             symbol: commoditySymbol,
-            range: selectedChartRange.rawValue,
-            interval: chartSettings.selectedInterval.rawValue
+            range: range.rawValue,
+            interval: interval.rawValue
         ) else { return }
         // The race guard. A core response landing AFTER the full one must be dropped, or
         // the screen would visibly step backwards from the complete model to the
         // header-only one.
         guard commodityData == nil else { return }
-        coreData = core.toCoreData()
+        var slice = core.toCoreData()
+        // The pill moved while core was in flight AND the newer pick already answered the
+        // chart (its full fetch failed and cleared the bars — `noteChartRequestFailed`):
+        // this older range's bars would sit veiled under the new pill for good. Paint the
+        // header only, keeping the chart as that answer left it.
+        let pillMoved = range != selectedChartRange || interval != chartSettings.selectedInterval
+        if pillMoved, lastChartStamp != nil {
+            slice.chartPricePoints = coreData?.chartPricePoints ?? []
+            coreData = slice
+            return
+        }
+        coreData = slice
+        didWriteChartBars(slice.chartPricePoints, range: range, interval: interval)
+        // A cold core answers a DAILY-or-coarser selection with no bars: `fast_only` serves
+        // those only from Tier-2 and never pulls the daily history to build them. That left a
+        // screen opening on a remembered 3M/6M/1Y/5Y/ALL on the chart placeholder until the
+        // full detail landed (2-5 s cold), while the bars-only route answers in ~0.1-0.7 s.
+        // Not on 1D/1W: core fetched those intraday bars itself, so an empty answer there is
+        // what the bars-only route would say too (FRED has no intraday; a failed fetch is []).
+        // Not when the pill already moved: the pick that moved it fetches its own bars
+        // (`refreshLiveSlice`). The full model cannot have landed here — there is no await
+        // between the race guard above and this line — and the helper re-checks after its own.
+        if slice.chartPricePoints.isEmpty, !interval.isIntraday, !pillMoved {
+            await paintBarsOnlyChart(range: range, interval: interval)
+        }
+    }
+
+    // MARK: - Bars-Only Chart
+
+    /// Fetch ONE selection's bars from the bars-only route (`GET /commodities/{symbol}/chart`)
+    /// and paint them on the fast-core model, while the full detail is still on its way.
+    ///
+    /// Why: the full detail is 2-5 s cold, and until it lands the chart had nothing to draw for
+    /// a daily-or-coarser range — on first paint (core skips those bars when cold) and after a
+    /// range tap (which re-requests the full detail, so it waited just as long). The route runs
+    /// the SAME symbol mapping and bar builder as the detail's `chart_data`, so these are the
+    /// bars the full model would paint.
+    ///
+    /// Writes ONLY while `commodityData` is nil, and only onto `coreData`: once the full model
+    /// is on screen it owns the chart, and a range tap there uses the light `/quote` slice.
+    /// Every guard is re-checked after the await, because the pill, the full model and a newer
+    /// request can all move under it — never another range's bars under the current pill.
+    ///
+    /// An EMPTY answer is written too, exactly as a user pick through the light slice writes
+    /// one: it is the true answer (WTI / Henry Hub have no 1D/1W bars by design), and keeping
+    /// the previous selection's bars under the new pill is the bug `refreshLiveSlice` fixed. On
+    /// first paint it changes nothing — core already wrote that selection's empty answer.
+    ///
+    /// A failure is silent to the user — the full detail is still in flight and owns the error
+    /// path (`fetchCommodityDetail` → `noteChartRequestFailed`) — but it is LOGGED: an
+    /// accelerator that fails every time would otherwise look exactly like a slow backend.
+    private func paintBarsOnlyChart(range: ChartTimeRange, interval: ChartInterval) async {
+        // Taken FIRST, before any early return, so any older answer still in flight is
+        // dropped the moment a newer pick asks.
+        barsOnlyChartGeneration &+= 1
+        let generation = barsOnlyChartGeneration
+        guard commodityData == nil,
+              selectedChartRange == range,
+              chartSettings.selectedInterval == interval else { return }
+        let symbol = commoditySymbol
+        let shape = "\(range.rawValue)/\(interval.rawValue)"
+        let startTime = CFAbsoluteTimeGetCurrent()
+        do {
+            let chart = try await StockRepository.shared.getAssetChart(
+                asset: .commodities,
+                symbol: symbol,
+                range: range.rawValue,
+                interval: interval.rawValue
+            )
+            // Drop the answer when a newer bars-only request superseded it, the full model
+            // landed meanwhile (it owns the chart now), or the pills moved on (these would be
+            // another selection's bars under them). `coreData` is the model on screen while the
+            // full one is nil — the pills live inside the chart, so a pick cannot precede it —
+            // and with no model there is nothing to paint on.
+            guard generation == barsOnlyChartGeneration,
+                  commodityData == nil,
+                  selectedChartRange == range,
+                  chartSettings.selectedInterval == interval,
+                  var slice = coreData else { return }
+            slice.chartPricePoints = chart.prices
+            coreData = slice
+            // Same turn as the write above, through the ONE bar-write funnel.
+            didWriteChartBars(slice.chartPricePoints, range: range, interval: interval)
+            let elapsed = String(format: "%.2f", CFAbsoluteTimeGetCurrent() - startTime)
+            let barCount = chart.prices.count
+            log.debug("bars-only chart painted for \(symbol, privacy: .public) \(shape, privacy: .public) in \(elapsed, privacy: .public)s, \(barCount) bars")
+        } catch {
+            let kind = String(describing: type(of: error))
+            let reason = String(describing: error)
+            log.warning("bars-only chart failed for \(symbol, privacy: .public) \(shape, privacy: .public) (\(kind, privacy: .public)): \(reason, privacy: .public) — the full detail still owns the chart")
+        }
+    }
+
+    // MARK: - Chart Bars Bookkeeping
+
+    /// Every write of the chart bars ends here — core, full (first load and pull-to-refresh),
+    /// a range/interval tap and the 30-second slice — with the range and interval those bars
+    /// were REQUESTED for.
+    ///
+    /// Call it in the same main-actor turn as the bar write, so the chart never sees new bars
+    /// with the previous stamp or history.
+    private func didWriteChartBars(_ bars: [StockPricePoint], range: ChartTimeRange, interval: ChartInterval) {
+        if chartDataRange != range { chartDataRange = range }
+        if chartDataInterval != interval { chartDataInterval = interval }
+        // A commodity has no pre/after-hours session, so its bars are never extended.
+        chartHistory.absorb(bars, symbol: commoditySymbol, range: range, interval: interval, extendedHours: false)
+        if !bars.isEmpty, chartLoadFailed { chartLoadFailed = false }
+        let stamp = ChartBarsStamp(range: range, interval: interval, hasBars: !bars.isEmpty)
+        guard stamp != lastChartStamp else { return }
+        lastChartStamp = stamp
         chartDataVersion += 1
+    }
+
+    /// A chart request for `range` / `interval` failed (call it only for a CURRENT request —
+    /// after the gen guard). When the bars on screen belong to ANOTHER selection they must
+    /// not stay under this pill: clear them and stamp the request, so the chart shows this
+    /// selection's answer instead of veiling the old one forever. When they already ARE this
+    /// selection's bars (a pull-to-refresh failed, the user tapped away and back) they stay.
+    /// Nothing drawn yet → nothing to correct: the full fetch's error card owns that state.
+    private func noteChartRequestFailed(range: ChartTimeRange, interval: ChartInterval) {
+        guard let shown = lastChartStamp else { return }
+        if shown.range == range, shown.interval == interval {
+            if !shown.hasBars { chartLoadFailed = true }
+            return
+        }
+        if commodityData != nil {
+            commodityData?.chartPricePoints = []
+        } else {
+            coreData?.chartPricePoints = []
+        }
+        didWriteChartBars([], range: range, interval: interval)
+        chartLoadFailed = true
+    }
+
+    /// The chart panned toward the oldest bar in hand, or the user tapped Retry
+    /// (`userInitiated`, which skips the loader's post-failure back-off).
+    func loadOlderChartBars(userInitiated: Bool) {
+        chartHistory.requestOlder(force: userInitiated)
     }
 
     // MARK: - Detail Fetch
 
     private func fetchCommodityDetail() async {
+        // Range AND interval captured before the await — they stamp the bars that land.
         let range = selectedChartRange
+        let interval = chartSettings.selectedInterval
+        let symbol = commoditySymbol
         let startTime = CFAbsoluteTimeGetCurrent()
         detailRequestGen += 1
         let gen = detailRequestGen
 
         do {
             let response = try await StockRepository.shared.getCommodityDetail(
-                symbol: commoditySymbol,
+                symbol: symbol,
                 range: range.rawValue,
-                interval: chartSettings.selectedInterval.rawValue
+                interval: interval.rawValue
             )
 
             // Drop a stale response (a newer load/refresh/range-change superseded it).
             guard gen == self.detailRequestGen else { return }
             let elapsed = String(format: "%.1f", CFAbsoluteTimeGetCurrent() - startTime)
-            self.commodityData = response.toDisplayModel()
-            self.chartDataVersion += 1
+            let model = response.toDisplayModel()
+            self.commodityData = model
+            self.didWriteChartBars(model.chartPricePoints, range: range, interval: interval)
             self.isLoading = false
             self.errorMessage = nil
 
-            print("✅ [CommodityDetailVM] Loaded \(response.name) in \(elapsed)s — \(response.chartData.count) chart points")
+            let barCount = model.chartPricePoints.count
+            let shape = "\(range.rawValue)/\(interval.rawValue)"
+            log.debug("loaded \(symbol, privacy: .public) \(shape, privacy: .public) in \(elapsed, privacy: .public)s, \(barCount) chart bars")
 
         } catch {
-            print("❌ [CommodityDetailVM] Failed to load \(commoditySymbol): \(error)")
+            let shape = "\(range.rawValue)/\(interval.rawValue)"
+            let reason = String(describing: error)
+            log.error("detail load failed for \(symbol, privacy: .public) \(shape, privacy: .public): \(reason, privacy: .public)")
             // Drop a STALE failure: if a newer range fetch/refresh already superseded
             // this request (and may have painted correct data), don't stamp a false
             // error banner over it. Mirrors the success-path gen guard above.
             guard gen == self.detailRequestGen else { return }
             self.isLoading = false
+            // A range tap while only the fast core was on screen lands here (see
+            // `refreshLiveSlice`): core's bars are the PREVIOUS range's, so they must not
+            // stay under the new pill.
+            self.noteChartRequestFailed(range: range, interval: interval)
 
             if let apiError = error as? APIError {
                 switch apiError {
@@ -358,14 +566,27 @@ class CommodityDetailViewModel: ObservableObject {
     /// Falling back to the REST values keeps the screen alive for symbols whose upstream
     /// feed never ticks, which is the reason this loop exists at all.
     private func refreshLiveSlice(includeChart: Bool, userInitiated: Bool) async {
+        // A new pick: a failure note belongs to the selection it was about, not this one.
+        if userInitiated, chartLoadFailed { chartLoadFailed = false }
         // A range/interval tap while the FULL detail is still in flight (the fast-core
         // chart is interactive before it lands): re-request the full payload for the new
         // range instead. Bumping the gen here while `commodityData` is nil discarded the
         // in-flight full response, this slice then found no model to merge into, and
         // nothing ever set `commodityData` — the Overview tab shimmered forever and the
         // chart stayed on the old range under the new pill until pull-to-refresh.
+        //
+        // The new selection's bars are ALSO fetched alone, alongside it: the full detail is
+        // 2-5 s cold and the bars-only route ~0.1-0.7 s, so the new pill's chart appears as
+        // soon as that answers instead of when the whole payload does. The full fetch still
+        // owns the error path and, once it lands, the chart; `paintBarsOnlyChart` drops its
+        // answer if the full model got there first or the pill moved on. Captured here, before
+        // either request suspends, so both are for the same pick.
         if userInitiated, commodityData == nil {
+            let pickedRange = selectedChartRange
+            let pickedInterval = chartSettings.selectedInterval
+            async let barsOnlyTask: () = self.paintBarsOnlyChart(range: pickedRange, interval: pickedInterval)
             await fetchCommodityDetail()
+            await barsOnlyTask
             return
         }
         // A user-initiated refresh supersedes anything in flight; the 30-second timer
@@ -376,12 +597,15 @@ class CommodityDetailViewModel: ObservableObject {
             detailRequestGen += 1
         }
         let gen = detailRequestGen
+        // Range AND interval captured with the gen, before the await — they stamp any bars
+        // this slice writes.
         let range = selectedChartRange
+        let interval = chartSettings.selectedInterval
         do {
             let light = try await StockRepository.shared.getCommodityQuote(
                 symbol: commoditySymbol,
                 range: includeChart ? range.rawValue : nil,
-                interval: includeChart ? chartSettings.selectedInterval.rawValue : nil
+                interval: includeChart ? interval.rawValue : nil
             )
             // Drop a stale response so rapid range switching can't clobber a newer range.
             guard gen == self.detailRequestGen, var data = self.commodityData else { return }
@@ -405,6 +629,7 @@ class CommodityDetailViewModel: ObservableObject {
             // belong to the PREVIOUS range, so keeping them drew 3M dailies under a 1D pill
             // and hid the "no intraday chart" note on WTI / Henry Hub, whose 1D/1W answer is
             // empty by design (`commodity_service`). The empty answer is the true one there.
+            var wroteChartBars = false
             if includeChart, userInitiated || !light.chartData.isEmpty {
                 data.chartPricePoints = light.chartData.map {
                     StockPricePoint(
@@ -412,13 +637,24 @@ class CommodityDetailViewModel: ObservableObject {
                         high: $0.high, low: $0.low, volume: $0.volume
                     )
                 }
-                self.chartDataVersion += 1
+                wroteChartBars = true
             }
             // performancePeriods / commodityProfile / benchmarkSummary are untouched:
             // they are range-independent and cannot change between refreshes.
             self.commodityData = data
+            // Same turn as the write above. A timer tick on the same (range, interval)
+            // absorbs without bumping `chartDataVersion`, so a panned chart stays put.
+            if wroteChartBars {
+                self.didWriteChartBars(data.chartPricePoints, range: range, interval: interval)
+            }
         } catch {
-            print("⚠️ [CommodityDetailVM] Live slice refresh failed: \(error)")
+            let symbol = commoditySymbol
+            let reason = String(describing: error)
+            log.error("live slice refresh failed for \(symbol, privacy: .public) (userInitiated: \(userInitiated)): \(reason, privacy: .public)")
+            // A timer tick that fails keeps what is on screen. A USER range/interval change
+            // that fails must not leave the previous selection's bars under the new pill.
+            guard userInitiated, includeChart, gen == self.detailRequestGen else { return }
+            noteChartRequestFailed(range: range, interval: interval)
         }
     }
 

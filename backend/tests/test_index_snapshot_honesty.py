@@ -91,12 +91,12 @@ async def test_pe_known_tracks_whether_the_value_was_computed(pe, expected, monk
     svc = IndexService.__new__(IndexService)
 
     async def _no_ai(*a, **k):
-        return "valuation story", "sector story", "macro story", []
+        return "sector story", "macro story", []
 
     monkeypatch.setattr(svc, "_generate_ai_stories", _no_ai, raising=False)
     out = await svc._build_snapshots(
         symbol="^GSPC", pe=pe, forward_pe=0.0, earnings_yield=0.0,
-        historical_avg_pe=21.0, historical_period="10-yr", sector_raw=[],
+        sector_raw=[],
         index_name="SPDR S&P 500 ETF Trust",
     )
     assert out.valuation.pe_known is expected
@@ -111,12 +111,11 @@ def test_an_unreadable_sector_row_is_dropped_not_zeroed(monkeypatch):
     svc = IndexService.__new__(IndexService)
 
     async def _no_ai(*a, **k):
-        return "valuation story", "sector story", "macro story", []
+        return "sector story", "macro story", []
 
     monkeypatch.setattr(svc, "_generate_ai_stories", _no_ai, raising=False)
     out = asyncio.run(svc._build_snapshots(
         symbol="^GSPC", pe=20.0, forward_pe=0.0, earnings_yield=0.0,
-        historical_avg_pe=21.0, historical_period="10-yr",
         sector_raw=[{"sector": "Energy", "changesPercentage": None},
                     {"sector": "Utilities", "changesPercentage": "n/a"},
                     {"sector": "Tech", "changesPercentage": "1.5%"},
@@ -129,42 +128,39 @@ def test_an_unreadable_sector_row_is_dropped_not_zeroed(monkeypatch):
 
 # ── 3. the story must not characterise an unknown P/E ────────────────────────
 
-def _story(pe, forward_pe=0.0, historical_avg_pe=21.0):
-    from app.services.index_service import IndexService
+def _story(pe, history=None):
+    """The valuation sentence is code-owned since 2026-10-21 (`_valuation_story`)."""
+    from app.services.index_service import _valuation_story
 
-    svc = IndexService.__new__(IndexService)
-    valuation, _sector, _macro, _ind = svc._build_story_templates(
-        pe=pe, forward_pe=forward_pe, historical_avg_pe=historical_avg_pe,
-        sectors=[], macro_cached=None,
-    )
-    return valuation
+    return _valuation_story(pe=pe, pe_sectors=11, pe_history=history)
 
 
-def test_an_unknown_pe_produces_no_valuation_claim():
-    story = _story(0)
+@pytest.mark.parametrize("history", [None, {"avg": 22.1}])
+def test_an_unknown_pe_produces_no_valuation_claim(history):
+    story = _story(0, history)
     assert "{VALUATION_LABEL}" not in story
     assert "{PE_RATIO}" not in story
-    for banned in ("Bargain", "potential value", "premium"):
+    assert "{HISTORICAL_AVG_PE}" not in story
+    for banned in ("Bargain", "potential value", "premium", "above", "below", "in line"):
         assert banned not in story, f"the story still characterises an uncomputed P/E: {story!r}"
     assert "isn't available" in story
 
 
 def test_a_real_pe_still_produces_the_full_story():
     """The refusal must not disarm the feature it protects."""
-    story = _story(28.5, forward_pe=22.1)
-    assert "{PE_RATIO}" in story and "{VALUATION_LABEL}" in story
+    story = _story(28.5, {"avg": 22.1})
+    assert "{PE_RATIO}" in story and "{HISTORICAL_AVG_PE}" in story
 
 
-def test_the_deterministic_story_still_returns_all_four_parts():
-    """`_build_story_templates` feeds a 4-tuple unpack at its call site; an early return
-    with the wrong arity would be a runtime TypeError on every index request."""
+def test_the_deterministic_story_still_returns_all_three_parts():
+    """`_build_story_templates` feeds a 3-tuple unpack at its call site (sector, macro,
+    indicators); an early return with the wrong arity would be a runtime TypeError on every
+    index request."""
     from app.services.index_service import IndexService
 
     svc = IndexService.__new__(IndexService)
-    out = svc._build_story_templates(
-        pe=0, forward_pe=0, historical_avg_pe=21.0, sectors=[], macro_cached=None,
-    )
-    assert len(out) == 4
+    out = svc._build_story_templates(sectors=[], macro_cached=None)
+    assert len(out) == 3
 
 
 # ── 4. the iOS half — a wire flag nothing reads is worthless ─────────────────

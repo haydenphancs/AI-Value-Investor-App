@@ -330,7 +330,9 @@ def test_the_pre_release_alert_offers_a_way_forward():
     for dated in ("once caydex is", "until launch", "not launched", "coming soon"):
         assert dated not in shown, f"the alert copy goes stale at launch: {dated!r}"
     dest = _decl_block(settings, ".navigationDestination(isPresented: $showFeedback)")
-    assert "FeedbackView()" in dest
+    # Without the reward: this path starts at a rating prompt, and Guideline 3.2.2 forbids
+    # rewarding ratings — so "earn free credits" must never be one tap away from it.
+    assert "FeedbackView(showsReward: false)" in dest
 
 
 # ── D. InstallSourceStore ─────────────────────────────────────────────

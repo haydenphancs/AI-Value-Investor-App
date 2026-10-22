@@ -4,10 +4,15 @@
 //
 //  Orchestrator for the main price chart area with overlays
 //
+//  Draws one `ChartFrame` of a precomputed `ChartSeries`. `Equatable`, and `.equatable()`
+//  at the call site: a crosshair scrub (which changes nothing here) no longer re-runs this
+//  body or re-rasterises the drawing group — only a new window, new data or a new setting
+//  does. Every drawing input is in `==`; leaving one out would freeze it on screen.
+//
 
 import SwiftUI
 
-struct MainChartCanvas: View {
+struct MainChartCanvas: View, Equatable {
     /// Only read to bust the `.drawingGroup()` raster cache — see below.
     @Environment(\.colorScheme) private var colorScheme
     /// Read for the dash cue AND to bust the same raster. This canvas rasterises FIVE
@@ -15,14 +20,15 @@ struct MainChartCanvas: View {
     /// chart — and it would only show on a LIVE toggle, never on a cold launch.
     @Environment(\.differentiateWithoutColor) private var differentiate
 
-    let pricePoints: [StockPricePoint]
+    let series: ChartSeries
+    let frame: ChartFrame
+    /// Shared with the crosshair, so its dot sits on this line.
+    let yRange: ChartYRange
     let isPositive: Bool
     let chartType: ChartType
     let overlays: [TechnicalIndicatorType]
     var showExtendedHours: Bool = false
-    /// Close prices preceding the visible range, for MA warm-up.
-    var lookbackCloses: [Double] = []
-    /// Earnings and dividend dates to render as "E" and "D" markers
+    /// Earnings and dividend dates to render as "E" markers
     var chartEventDates: ChartEventDates? = nil
     /// When true, use time-based X positioning (1D intraday)
     var useIntradayTimeMapping: Bool = false
@@ -35,314 +41,161 @@ struct MainChartCanvas: View {
     /// price when nil.
     var baselineClose: Double? = nil
 
+    static func == (lhs: MainChartCanvas, rhs: MainChartCanvas) -> Bool {
+        lhs.series.revision == rhs.series.revision
+            && lhs.series.count == rhs.series.count
+            && lhs.frame == rhs.frame
+            && lhs.yRange == rhs.yRange
+            && lhs.isPositive == rhs.isPositive
+            && lhs.chartType == rhs.chartType
+            && lhs.overlays == rhs.overlays
+            && lhs.showExtendedHours == rhs.showExtendedHours
+            && lhs.chartEventDates == rhs.chartEventDates
+            && lhs.useIntradayTimeMapping == rhs.useIntradayTimeMapping
+            && lhs.sessionWindow == rhs.sessionWindow
+            && lhs.baselineClose == rhs.baselineClose
+    }
+
     private var lineColor: Color {
         isPositive ? AppColors.gainGraphic : AppColors.lossGraphic
     }
 
-    /// Indices of data points that fall outside regular market hours
-    private var extendedHoursIndices: Set<Int> {
-        guard showExtendedHours else { return [] }
-        var indices = Set<Int>()
-        for (i, point) in pricePoints.enumerated() {
-            if point.isExtendedHours {
-                indices.insert(i)
-            }
-        }
-        return indices
-    }
-
-    /// Indices where the chart transitions between regular and extended hours (market open/close boundaries)
-    private var marketBoundaryIndices: [Int] {
-        guard showExtendedHours else { return [] }
-        var boundaries: [Int] = []
-        for i in 1..<pricePoints.count {
-            let prevExtended = pricePoints[i - 1].isExtendedHours
-            let currExtended = pricePoints[i].isExtendedHours
-            if prevExtended != currExtended {
-                boundaries.append(i)
-            }
-        }
-        return boundaries
+    /// Extended-hours shading only exists on the 1D session view, where every bar is drawn.
+    private var shadesExtendedHours: Bool {
+        showExtendedHours && useIntradayTimeMapping
     }
 
     var body: some View {
-        GeometryReader { geometry in
-            let size = geometry.size
-
-            if pricePoints.count > 1 {
-                let useOHLC = chartType == .candle || chartType == .bar
-                let closes = pricePoints.map { $0.close }
-                let baseCoord: ChartCoordinateSystem = {
-                    if useIntradayTimeMapping {
-                        return ChartCoordinateSystem.intradayTimeBased(
-                            closes: closes,
-                            pricePoints: pricePoints,
-                            size: size,
-                            useOHLC: useOHLC,
-                            window: sessionWindow
-                        )
-                    }
-                    return useOHLC
-                        ? ChartCoordinateSystem.from(pricePoints: pricePoints, size: size)
-                        : ChartCoordinateSystem.from(closes: closes, size: size)
-                }()
-
-                // Expand coordinate range to include overlay values AND the
-                // baseline (prior-day close) so neither is clipped.
-                let coord: ChartCoordinateSystem = {
-                    var minVal = baseCoord.minValue
-                    var maxVal = baseCoord.maxValue
-
-                    // Keep the dashed baseline inside the visible y-range.
-                    if let baseline = baselineClose {
-                        minVal = min(minVal, baseline)
-                        maxVal = max(maxVal, baseline)
-                    }
-
-                    let visibleCloses = pricePoints.map { $0.close }
-                    let allCloses = lookbackCloses + visibleCloses
-                    let offset = lookbackCloses.count
-
-                    for overlay in overlays {
-                        switch overlay {
-                        case .ma20:
-                            let values = TechnicalIndicatorCalculator.sma(closes: allCloses, period: 20)
-                            let visible = values.count > offset ? Array(values[offset...]) : values
-                            let nums = visible.compactMap { $0 }
-                            if let lo = nums.min() { minVal = min(minVal, lo) }
-                            if let hi = nums.max() { maxVal = max(maxVal, hi) }
-                        case .ma50:
-                            let values = TechnicalIndicatorCalculator.sma(closes: allCloses, period: 50)
-                            let visible = values.count > offset ? Array(values[offset...]) : values
-                            let nums = visible.compactMap { $0 }
-                            if let lo = nums.min() { minVal = min(minVal, lo) }
-                            if let hi = nums.max() { maxVal = max(maxVal, hi) }
-                        case .ma200:
-                            let values = TechnicalIndicatorCalculator.sma(closes: allCloses, period: 200)
-                            let visible = values.count > offset ? Array(values[offset...]) : values
-                            let nums = visible.compactMap { $0 }
-                            if let lo = nums.min() { minVal = min(minVal, lo) }
-                            if let hi = nums.max() { maxVal = max(maxVal, hi) }
-                        case .bollingerBands:
-                            let bb = TechnicalIndicatorCalculator.bollingerBands(closes: allCloses)
-                            let visUpper = bb.upper.count > offset ? Array(bb.upper[offset...]) : bb.upper
-                            let visLower = bb.lower.count > offset ? Array(bb.lower[offset...]) : bb.lower
-                            if let hi = visUpper.compactMap({ $0 }).max() { maxVal = max(maxVal, hi) }
-                            if let lo = visLower.compactMap({ $0 }).min() { minVal = min(minVal, lo) }
-                        default:
-                            break
-                        }
-                    }
-
-                    // Nothing extended the range → keep the original coord.
-                    if minVal == baseCoord.minValue && maxVal == baseCoord.maxValue {
-                        return baseCoord
-                    }
-                    return ChartCoordinateSystem(
-                        width: size.width,
-                        height: size.height,
-                        minValue: minVal,
-                        maxValue: maxVal,
-                        dataCount: pricePoints.count,
-                        timeFractions: baseCoord.timeFractions
-                    )
-                }()
-
-                ZStack {
-                    // Extended hours background shading
-                    if showExtendedHours && !extendedHoursIndices.isEmpty {
-                        ExtendedHoursBackground(
-                            pricePoints: pricePoints,
-                            coord: coord,
-                            extendedHoursIndices: extendedHoursIndices
-                        )
-                    }
-
-                    // Market hour boundary lines
-                    if showExtendedHours {
-                        ForEach(marketBoundaryIndices, id: \.self) { idx in
-                            let x = coord.xPosition(for: idx)
-                            Path { path in
-                                path.move(to: CGPoint(x: x, y: 0))
-                                path.addLine(to: CGPoint(x: x, y: size.height))
-                            }
-                            .stroke(
-                                AppColors.textMuted.opacity(0.4),
-                                style: StrokeStyle(lineWidth: 1, dash: [4, 3])
-                            )
-                        }
-                    }
-
-                    // Baseline horizontal dash line — prior-day close on 1D
-                    // (else the start-of-range reference). Falls back to the
-                    // current price only when no baseline is supplied.
-                    if let baseline = baselineClose ?? pricePoints.last?.close {
-                        let baselineY = coord.yPosition(for: baseline)
-                        Path { path in
-                            path.move(to: CGPoint(x: 0, y: baselineY))
-                            path.addLine(to: CGPoint(x: size.width, y: baselineY))
-                        }
-                        .stroke(
-                            AppColors.chartGridline,
-                            style: StrokeStyle(lineWidth: 0.5, dash: [4, 3])
-                        )
-                    }
-
-                    // Main chart
-                    switch chartType {
-                    case .line:
-                        LineChartRenderer(
-                            closes: pricePoints.map { $0.close },
-                            coord: coord,
-                            lineColor: lineColor,
-                            extendedHoursIndices: showExtendedHours ? extendedHoursIndices : []
-                        )
-                    case .candle:
-                        CandlestickChartRenderer(
-                            pricePoints: pricePoints,
-                            coord: coord,
-                            extendedHoursIndices: showExtendedHours ? extendedHoursIndices : []
-                        )
-                    case .area:
-                        AreaChartRenderer(
-                            closes: pricePoints.map { $0.close },
-                            coord: coord,
-                            lineColor: lineColor,
-                            extendedHoursIndices: showExtendedHours ? extendedHoursIndices : []
-                        )
-                    case .bar:
-                        OHLCBarChartRenderer(
-                            pricePoints: pricePoints,
-                            coord: coord,
-                            extendedHoursIndices: showExtendedHours ? extendedHoursIndices : []
-                        )
-                    }
-
-                    // Overlays (MA lines, Bollinger Bands)
-                    if !overlays.isEmpty {
-                        OverlayRenderer(overlays: overlays, pricePoints: pricePoints, coord: coord, lookbackCloses: lookbackCloses)
-                    }
-
-                    // Earnings markers
-                    if let events = chartEventDates {
-                        ChartEventMarkers(
-                            pricePoints: pricePoints,
-                            coord: coord,
-                            earningsDates: Set(events.earningsDates)
-                        )
-                    }
+        if frame.drawRange.count > 1 || (useIntradayTimeMapping && frame.drawRange.count == 1) {
+            ZStack {
+                // Extended-hours shading, market boundaries, the baseline and the event
+                // markers: one canvas, no per-bar views.
+                Canvas { context, size in
+                    let coord = ChartCoordinateSystem(width: size.width, height: size.height, yRange: yRange, frame: frame)
+                    drawSessionShading(context: context, coord: coord, size: size)
+                    drawBaseline(context: context, coord: coord, size: size)
                 }
-                .drawingGroup()
-                .accessibilityIgnoresInvertColors()
-                .id("\(colorScheme)-\(differentiate)")
+
+                // Main chart
+                switch chartType {
+                case .line:
+                    LineChartRenderer(series: series, frame: frame, yRange: yRange, lineColor: lineColor, showExtendedHours: shadesExtendedHours)
+                case .candle:
+                    CandlestickChartRenderer(series: series, frame: frame, yRange: yRange, showExtendedHours: shadesExtendedHours)
+                case .area:
+                    AreaChartRenderer(series: series, frame: frame, yRange: yRange, lineColor: lineColor, showExtendedHours: shadesExtendedHours)
+                case .bar:
+                    OHLCBarChartRenderer(series: series, frame: frame, yRange: yRange, showExtendedHours: shadesExtendedHours)
+                }
+
+                // Overlays (MA lines, Bollinger Bands)
+                if !overlays.isEmpty {
+                    OverlayRenderer(overlays: overlays, series: series, frame: frame, yRange: yRange)
+                }
+
+                // Earnings markers
+                if let events = chartEventDates, !events.earningsDates.isEmpty {
+                    ChartEventMarkers(series: series, frame: frame, earningsDates: events.earningsDates)
+                }
+            }
+            .drawingGroup()
+            .accessibilityIgnoresInvertColors()
+            .id("\(colorScheme)-\(differentiate)")
+        } else {
+            Text("No chart data")
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func drawSessionShading(context: GraphicsContext, coord: ChartCoordinateSystem, size: CGSize) {
+        guard shadesExtendedHours else { return }
+        let range = frame.drawRange
+        guard !range.isEmpty, range.upperBound <= series.count else { return }
+        let half = coord.slotWidth / 2
+        var shading = Path()
+        var boundaries = Path()
+        var i = range.lowerBound
+        while i < range.upperBound {
+            if i > range.lowerBound, series.isExtended[i] != series.isExtended[i - 1] {
+                let x = coord.xPosition(for: i)
+                boundaries.move(to: CGPoint(x: x, y: 0))
+                boundaries.addLine(to: CGPoint(x: x, y: size.height))
+            }
+            if series.isExtended[i] {
+                let start = i
+                while i < range.upperBound && series.isExtended[i] { i += 1 }
+                let xStart = coord.xPosition(for: start) - half
+                let xEnd = coord.xPosition(for: i - 1) + half
+                shading.addRect(CGRect(x: xStart, y: 0, width: max(0, xEnd - xStart), height: size.height))
             } else {
-                Text("No chart data")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                i += 1
             }
         }
+        context.fill(shading, with: .color(AppColors.textMuted.opacity(0.06)))
+        context.stroke(boundaries, with: .color(AppColors.textMuted.opacity(0.4)), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
     }
-}
 
-// MARK: - Extended Hours Background Shading
-
-private struct ExtendedHoursBackground: View {
-    let pricePoints: [StockPricePoint]
-    let coord: ChartCoordinateSystem
-    let extendedHoursIndices: Set<Int>
-
-    var body: some View {
-        GeometryReader { geometry in
-            let height = geometry.size.height
-
-            // Find contiguous runs of extended hours indices
-            Canvas { context, size in
-                var i = 0
-                while i < pricePoints.count {
-                    if extendedHoursIndices.contains(i) {
-                        let startIdx = i
-                        while i < pricePoints.count && extendedHoursIndices.contains(i) {
-                            i += 1
-                        }
-                        let endIdx = i - 1
-                        let xStart = coord.xPosition(for: startIdx)
-                        let xEnd = coord.xPosition(for: endIdx)
-                        let halfStep: CGFloat = pricePoints.count > 1
-                            ? (coord.xPosition(for: 1) - coord.xPosition(for: 0)) / 2
-                            : 0
-                        let rect = CGRect(
-                            x: xStart - halfStep,
-                            y: 0,
-                            width: (xEnd - xStart) + halfStep * 2,
-                            height: height
-                        )
-                        context.fill(Path(rect), with: .color(AppColors.textMuted.opacity(0.06)))
-                    } else {
-                        i += 1
-                    }
-                }
-            }
-        }
+    /// Baseline horizontal dash line — prior-day close on 1D (else the start-of-range
+    /// reference). Falls back to the current price only when no baseline is supplied.
+    private func drawBaseline(context: GraphicsContext, coord: ChartCoordinateSystem, size: CGSize) {
+        guard let baseline = baselineClose ?? series.close.last else { return }
+        let y = coord.yPosition(for: baseline)
+        var path = Path()
+        path.move(to: CGPoint(x: 0, y: y))
+        path.addLine(to: CGPoint(x: size.width, y: y))
+        context.stroke(path, with: .color(AppColors.chartGridline), style: StrokeStyle(lineWidth: 0.5, dash: [4, 3]))
     }
 }
 
 // MARK: - Earnings Event Markers
 
 private struct ChartEventMarkers: View {
-    let pricePoints: [StockPricePoint]
-    let coord: ChartCoordinateSystem
-    let earningsDates: Set<String>
+    let series: ChartSeries
+    let frame: ChartFrame
+    let earningsDates: [String]
 
     var body: some View {
         Canvas { context, canvasSize in
-            guard pricePoints.count > 1 else { return }
+            let range = frame.drawRange
+            guard range.count > 1, range.upperBound <= series.count else { return }
+            let firstDate = String(series.dates[range.lowerBound].prefix(10))
+            let lastDate = String(series.dates[range.upperBound - 1].prefix(10))
+            let coord = ChartCoordinateSystem(width: canvasSize.width, height: canvasSize.height, yRange: .unit, frame: frame)
 
-            let earningsIndices = eventIndices(for: earningsDates)
-
-            for index in earningsIndices {
-                let x = coord.xPosition(for: index)
-                let markerY = canvasSize.height - 14
-                drawMarker(context: context, text: "E", x: x, y: markerY,
-                           bgColor: AppColors.cautionFill, textColor: AppColors.textOnAccent)
+            // Each event lands on the first bar dated on or after it (daily: that day;
+            // weekly/monthly: the bar containing it). Binary search, not a scan per event.
+            var xs: [CGFloat] = []
+            for event in earningsDates.sorted() where event >= firstDate && event <= lastDate {
+                let idx = series.lowerBound(event)
+                guard idx < range.upperBound, idx >= range.lowerBound else { continue }
+                xs.append(coord.xPosition(for: idx))
+            }
+            // Zoomed out over decades, quarterly markers merge into one band. When the
+            // typical gap between consecutive earnings is under a marker's width the row says
+            // nothing, so none are drawn; otherwise never two closer than a marker's width.
+            let markerSize: CGFloat = 16
+            if xs.count >= 3 {
+                let gaps = zip(xs, xs.dropFirst()).map { $1 - $0 }.sorted()
+                if gaps[gaps.count / 2] < markerSize * 1.25 { return }
+            }
+            var lastDrawn = -CGFloat.infinity
+            let markerY = canvasSize.height - 14
+            for x in xs where x - lastDrawn >= markerSize {
+                drawMarker(context: context, text: "E", x: x, y: markerY, size: markerSize)
+                lastDrawn = x
             }
         }
     }
 
-    /// For each event date, find the first price point whose date prefix >= the event date.
-    /// Works for all chart intervals: daily (exact), weekly/monthly (maps to the bar containing the event).
-    private func eventIndices(for eventDates: Set<String>) -> Set<Int> {
-        guard let firstDate = pricePoints.first.map({ String($0.date.prefix(10)) }),
-              let lastDate = pricePoints.last.map({ String($0.date.prefix(10)) }) else {
-            return []
-        }
-
-        var indices = Set<Int>()
-        for eventDate in eventDates {
-            // Skip events outside the chart's visible date range
-            guard eventDate >= firstDate, eventDate <= lastDate else { continue }
-
-            for (index, point) in pricePoints.enumerated() {
-                let pointDate = String(point.date.prefix(10))
-                if pointDate >= eventDate {
-                    indices.insert(index)
-                    break
-                }
-            }
-        }
-        return indices
-    }
-
-    private func drawMarker(context: GraphicsContext, text: String, x: CGFloat, y: CGFloat, bgColor: Color, textColor: Color) {
-        let size: CGFloat = 16
+    private func drawMarker(context: GraphicsContext, text: String, x: CGFloat, y: CGFloat, size: CGFloat) {
         let rect = CGRect(x: x - size / 2, y: y - size / 2, width: size, height: size)
-        let roundedRect = RoundedRectangle(cornerRadius: 3).path(in: rect)
-        context.fill(roundedRect, with: .color(bgColor))
-
+        context.fill(RoundedRectangle(cornerRadius: 3).path(in: rect), with: .color(AppColors.cautionFill))
         let resolvedText = context.resolve(
             Text(text)
                 .font(.system(size: 10, weight: .bold))
-                .foregroundColor(textColor)
+                .foregroundColor(AppColors.textOnAccent)
         )
         context.draw(resolvedText, at: CGPoint(x: x, y: y))
     }

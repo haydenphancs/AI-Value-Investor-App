@@ -234,6 +234,45 @@ def test_stochastic_still_returns_percent_k_when_percent_d_is_impossible():
     )
 
 
+def test_slow_stochastic_guards_both_windows_before_they_become_ranges():
+    """The chart's Stoch pane draws the SLOW stochastic (2026-10-20): %K is the fast %K
+    smoothed over `smoothK`, %D is that %K smoothed over `dPeriod`. Its first %K sits at
+    `kPeriod - 1 + smoothK - 1` and its first %D `dPeriod - 1` later — so on a short series
+    (a new listing, a short intraday window) either start can pass `count`, and
+    `dStart..<count` with lowerBound > upperBound TRAPS, exactly as C13 did. Each start must
+    be bounds-checked BEFORE it is used, the fast call must be the pinned one (its %D window
+    IS the smoothing), and a short series must still return %K (the C13 rule above)."""
+    fn = _decl_body(_code(_INDICATORS), "static func slowStochastic(")
+
+    periods = fn.index("guard kPeriod > 0, smoothK > 0, dPeriod > 0 else")
+    k_def = fn.index("let kStart = kPeriod - 1 + smoothK - 1")
+    k_guard = fn.index("guard kStart < count else")
+    fast_call = "stochastic(highs: highs, lows: lows, closes: closes, kPeriod: kPeriod, dPeriod: smoothK)"
+    fast = fn.index(fast_call)
+    assert fn.count("stochastic(highs:") == 1, "one fast pass, and it must be the pinned call"
+    assert periods < k_def < k_guard < fast, (
+        "%K's start must be bounds-checked before the fast stochastic is called "
+        "(a zero period would also make the %D window a trapping range)"
+    )
+
+    # The smoothed %K is the fast pass's %D — adopted only when it covers every bar, or the
+    # %D loop below indexes past its end.
+    count_guard = fn.index("guard raw.dValues.count == count else")
+    adopt = fn.index("kValues = raw.dValues")
+    assert fast < count_guard < adopt
+
+    d_def = fn.index("let dStart = kStart + dPeriod - 1")
+    d_guard = fn.index("guard dStart < count else")
+    loop = fn.index("for i in dStart..<count")
+    assert adopt < d_def < d_guard < loop, "the guard must come before the loop, or it guards nothing"
+
+    for guard in ("guard kStart < count else", "guard dStart < count else"):
+        body = _decl_body(fn, guard)
+        assert "return StochasticData(kValues: kValues, dValues: dValues)" in body, (
+            f"`{guard}` must return (with whatever %K exists), never fall through"
+        )
+
+
 # ── Credit-balance freshness and honesty (2026-08-08 adversarial review) ──────────────
 #
 # All four below are places where a credit number shown to the user was either stale, not

@@ -123,6 +123,18 @@ enum ChartInterval: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Bar length in minutes for an intraday interval; nil for daily and coarser.
+    var minutes: Int? {
+        switch self {
+        case .oneMin:     return 1
+        case .fiveMin:    return 5
+        case .fifteenMin: return 15
+        case .thirtyMin:  return 30
+        case .oneHour:    return 60
+        case .daily, .weekly, .monthly: return nil
+        }
+    }
+
     /// Whether this interval produces intraday datetime strings
     var isIntraday: Bool {
         switch self {
@@ -452,117 +464,39 @@ enum ChartPlaceholder: Equatable {
     case note(String)
 }
 
-// MARK: - Chart Viewport State (pinch-to-zoom + pan)
+// MARK: - Chart Viewport State
 
-class ChartViewportState: ObservableObject {
-    @Published var visibleStart: Int = 0
-    @Published var visibleEnd: Int = 0
-
-    /// The total number of data points
-    private(set) var totalCount: Int = 0
-
-    /// Minimum number of visible points (prevent over-zoom)
-    private let minVisibleCount = 10
-
-    /// Reset visible range (called when new data arrives).
-    /// `displayStart` offsets the left edge so warm-up data used by
-    /// technical indicators is available but not rendered.
-    func reset(totalCount: Int, displayStart: Int = 0) {
-        self.totalCount = totalCount
-        self.visibleStart = min(displayStart, max(totalCount - 1, 0))
-        self.visibleEnd = max(totalCount - 1, 0)
-    }
-
-    /// Whether the chart is currently zoomed in
-    var isZoomed: Bool {
-        visibleEnd - visibleStart + 1 < totalCount
-    }
-
-    /// Extend the visible range to include newly appended data points
-    /// without resetting zoom/pan state.
-    func extendToEnd(newTotalCount: Int) {
-        guard newTotalCount > totalCount else { return }
-        let added = newTotalCount - totalCount
-        totalCount = newTotalCount
-        visibleEnd = min(visibleEnd + added, totalCount - 1)
-    }
-
-    /// The number of currently visible points
-    var visibleCount: Int {
-        visibleEnd - visibleStart + 1
-    }
-
-    /// Apply a zoom scale around the center of the visible range
-    func zoom(scale: CGFloat) {
-        guard totalCount > minVisibleCount else { return }
-        let center = Double(visibleStart + visibleEnd) / 2.0
-        let currentHalf = Double(visibleEnd - visibleStart) / 2.0
-        let newHalf = currentHalf / Double(scale)
-
-        let newStart = Int(max(0, center - newHalf))
-        let newEnd = Int(min(Double(totalCount - 1), center + newHalf))
-
-        // Enforce minimum visible count
-        if newEnd - newStart + 1 >= minVisibleCount {
-            visibleStart = newStart
-            visibleEnd = newEnd
-        }
-    }
-
-    /// Pan by a number of data points (negative = left, positive = right)
-    func pan(byPoints delta: Int) {
-        guard isZoomed else { return }
-        let count = visibleEnd - visibleStart
-        var newStart = visibleStart + delta
-        var newEnd = visibleEnd + delta
-
-        // Clamp to bounds
-        if newStart < 0 {
-            newStart = 0
-            newEnd = count
-        }
-        if newEnd >= totalCount {
-            newEnd = totalCount - 1
-            newStart = max(0, newEnd - count)
-        }
-
-        visibleStart = newStart
-        visibleEnd = newEnd
-    }
-}
+// The viewport (`ChartViewportState`, `ChartWindow`, `ChartViewportBounds`) lives in
+// `ChartViewport.swift`.
 
 // MARK: - Indicator Result Models
 
-struct MAData {
-    let period: Int
-    let values: [Double?]
-    let color: Color
-}
+// `nonisolated` + `Sendable`: `ChartSeries.build` computes these off the main actor.
 
-struct BollingerBandData {
+nonisolated struct BollingerBandData: Sendable {
     let upper: [Double?]
     let middle: [Double?]
     let lower: [Double?]
 }
 
-struct RSIData {
+nonisolated struct RSIData: Sendable {
     let values: [Double?]
 }
 
-struct MACDData {
+nonisolated struct MACDData: Sendable {
     let macdLine: [Double?]
     let signalLine: [Double?]
     let histogram: [Double?]
 }
 
-struct StochasticData {
+nonisolated struct StochasticData: Sendable {
     let kValues: [Double?]
     let dValues: [Double?]
 }
 
 // MARK: - Chart Event Dates (Earnings & Dividends)
 
-struct ChartEventDates: Codable {
+struct ChartEventDates: Codable, Equatable {
     let earningsDates: [String]   // "yyyy-MM-dd"
     let dividendDates: [String]   // "yyyy-MM-dd"
 

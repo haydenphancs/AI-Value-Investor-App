@@ -348,20 +348,21 @@ struct ProfileView: View {
                     .frame(height: 8)
                     .accessibilityHidden(true)
 
-                    // Purchased credits, when there are any.
+                    // The never-expiring balance, when there is any.
                     //
                     // Shown as its own row rather than folded into the bar above, because the
                     // two behave differently and the difference is the whole point: the bar and
-                    // its reset date describe the MONTHLY allowance, while these were bought
-                    // with real money and — per App Store Guideline 3.1.1 — never expire.
-                    // Counting them in "Monthly Credits N/M · Resets on <date>" told the user
-                    // the opposite.
+                    // its reset date describe the MONTHLY allowance, while these — credit packs
+                    // bought with real money (App Store Guideline 3.1.1) and reward credits for
+                    // a confirmed issue report — never expire. Counting them in "Monthly Credits
+                    // N/M · Resets on <date>" told the user the opposite. Labelled by what they
+                    // DO, not "purchased": a reward is in this balance too, and was not bought.
                     if viewModel.purchasedCredits > 0 {
                         HStack(spacing: AppSpacing.xs) {
                             Image(systemName: "infinity")
                                 .font(AppTypography.iconTiny)
                                 .foregroundColor(AppColors.gain)
-                            Text("+\(viewModel.purchasedCredits) purchased · never expire")
+                            Text("+\(viewModel.purchasedCredits) never expire")
                                 .font(AppTypography.caption)
                                 .foregroundColor(AppColors.gain)
                             Spacer()
@@ -604,13 +605,18 @@ struct ProfileView: View {
                 // Was a bare `mailto:` with a fixed subject and no body: it did nothing at all
                 // on a device with no mail client, and where it did work it dropped the user
                 // into an empty compose window, so the reports that arrived were untriageable.
+                //
+                // An account holder sees the reward on the row (gift icon, "earn free credits");
+                // a guest keeps the plain row, since credits can only be added to an account.
+                // The screen itself says a report is reviewed first — nothing is automatic.
                 NavigationLink {
                     FeedbackView()
                 } label: {
                     ProfileSettingsRowContent(
-                        icon: "bubble.left.and.bubble.right.fill",
-                        iconColor: AppColors.textSecondary,
-                        title: "Help Us Improve"
+                        icon: canEarnFeedbackReward ? "gift.fill" : "bubble.left.and.bubble.right.fill",
+                        iconColor: canEarnFeedbackReward ? AppColors.gain : AppColors.textSecondary,
+                        title: "Help Us Improve",
+                        subtitle: canEarnFeedbackReward ? FeedbackRewardCopy.rowSubtitle : nil
                     )
                 }
             }
@@ -764,6 +770,14 @@ struct ProfileView: View {
         if viewModel.creditUsagePercent > 0.9 { return AppColors.bearish }
         if viewModel.creditUsagePercent > 0.7 { return AppColors.neutral }
         return AppColors.primaryBlue
+    }
+
+    /// Whether the Help Us Improve row advertises the feedback reward: only when there is a
+    /// profile to credit, the same gate FeedbackView applies. Not `isAuthenticated ||
+    /// isRestoring` — a cold launch that is still reconnecting has no profile yet, so its report
+    /// would carry no Account ID, and the row would promise what the screen then cannot offer.
+    private var canEarnFeedbackReward: Bool {
+        viewModel.hasAccountProfile
     }
 
     // Both come from `AppInfo`, not a local copy: these were byte-identical in two screens

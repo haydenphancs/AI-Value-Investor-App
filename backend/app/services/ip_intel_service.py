@@ -46,6 +46,7 @@ from app.integrations.openfda import (
 from app.integrations.uspto import (
     USPTOException,
     USPTORateLimitException,
+    USPTORejectedException,
     current_year,
     get_uspto_client,
 )
@@ -56,6 +57,10 @@ logger = logging.getLogger(__name__)
 # ── Config ─────────────────────────────────────────────────────────────
 
 _CACHE_TTL_DAYS = 180        # IP changes slowly — half-year freshness
+# A source that failed is asked again after this long: a definite USPTO
+# refusal is not re-asked inside it, and a payload built while a source
+# failed is cached for it instead of _CACHE_TTL_DAYS.
+_RETRY_AFTER_SECONDS = 24 * 3600
 _MEM_TTL_SECONDS = 300       # 5-min in-memory dedup
 _BATCH_TOP_N = 500
 _BATCH_CONCURRENCY = 5
@@ -88,6 +93,27 @@ def _mem_get(ticker: str) -> Optional[Dict[str, Any]]:
 
 def _mem_set(ticker: str, value: Dict[str, Any]) -> None:
     _mem_cache[ticker] = (time.time(), value)
+
+
+# Tickers whose USPTO search was definitely refused (a 4xx such as the 413 of
+# an oversized page) while nothing else came back to cache: without this, every
+# report collection and the daily pre-warm asked again and wrote another
+# `rejected_no_data` audit row. TTL-only like _mem_cache; a deploy clears it.
+_uspto_refused_until: Dict[str, float] = {}
+
+
+def _uspto_refusal_active(ticker: str) -> bool:
+    until = _uspto_refused_until.get(ticker)
+    if until is None:
+        return False
+    if time.time() >= until:
+        _uspto_refused_until.pop(ticker, None)
+        return False
+    return True
+
+
+def _remember_uspto_refusal(ticker: str) -> None:
+    _uspto_refused_until[ticker] = time.time() + _RETRY_AFTER_SECONDS
 
 
 def _is_pharma(profile: Dict[str, Any]) -> bool:
@@ -231,6 +257,14 @@ class IPIntelService:
                 _mem_set(focal, db_cached)
                 return db_cached
 
+        # A recent definite refusal: nothing to cache, so don't ask again yet.
+        if not force_refresh and _uspto_refusal_active(focal):
+            logger.info(
+                "ip_intel: %s skipped — USPTO refused it within the last %d h",
+                focal, _RETRY_AFTER_SECONDS // 3600,
+            )
+            return None
+
         # Inflight dedup.
         if focal in _inflight:
             try:
@@ -243,9 +277,10 @@ class IPIntelService:
         _inflight[focal] = future
 
         try:
-            payload = await self._fetch_one(focal, profile, run_id=run_id)
+            payload, complete = await self._fetch_one(focal, profile, run_id=run_id)
             if payload:
-                await asyncio.to_thread(self._write_cache, focal, payload)
+                ttl_seconds = None if complete else _RETRY_AFTER_SECONDS
+                await asyncio.to_thread(self._write_cache, focal, payload, ttl_seconds)
                 _mem_set(focal, payload)
                 if not future.done():
                     future.set_result(payload)
@@ -323,7 +358,9 @@ class IPIntelService:
         profile: Dict[str, Any],
         *,
         run_id: Optional[str],
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Tuple[Optional[Dict[str, Any]], bool]:
+        """(payload, complete): `complete` is False when a source that was
+        asked failed, so the payload is cached only until the retry."""
         company_name = profile.get("companyName") or ticker
         assignee = _normalize_assignee(company_name, ticker=ticker)
         sponsor = assignee   # FDA sponsor naming usually mirrors USPTO assignee
@@ -331,27 +368,49 @@ class IPIntelService:
 
         # USPTO — always attempted (most companies have at least a few
         # patents; gracefully no-ops when USPTO_API_KEY missing).
+        # A failed source stays None (unknown), never 0 (a count).
         uspto_total: Optional[int] = None
         uspto_recent: Optional[int] = None
         uspto_error: Optional[str] = None
+        uspto_refused = False
         try:
             recent_year_threshold = current_year() - _RECENT_PATENT_YEARS
-            uspto_data = await self._get_uspto().get_patents_for_assignee(
+            uspto_data = await self._get_uspto().count_patents_for_assignee(
                 assignee, since_year=recent_year_threshold,
             )
-            uspto_recent = int(uspto_data.get("total_hits") or 0)
             uspto_error = uspto_data.get("error")
-            # For "total since the dawn of time", a separate call could
-            # be made — but the recent-5y window is the primary signal
-            # for moat scoring (older patents may have expired). Skip
-            # the second call to stay under rate limit budget.
-            uspto_total = uspto_recent  # placeholder; treats recent as proxy for "active IP"
+            if uspto_error is None:
+                uspto_recent = int(uspto_data.get("total_hits") or 0)
+                # For "total since the dawn of time", a separate call could
+                # be made — but the recent-5y window is the primary signal
+                # for moat scoring (older patents may have expired). Skip
+                # the second call to stay under rate limit budget.
+                uspto_total = uspto_recent  # placeholder; treats recent as proxy for "active IP"
         except USPTORateLimitException:
             uspto_error = "rate_limit"
+            logger.warning(
+                "ip_intel: USPTO rate-limited (HTTP 429) for %s (assignee %r)",
+                ticker, assignee,
+            )
+        except USPTORejectedException as exc:
+            uspto_error = f"http_{exc.status_code}: {exc}"
+            uspto_refused = True
+            logger.warning(
+                "ip_intel: USPTO refused %s (assignee %r) with HTTP %s: %s",
+                ticker, assignee, exc.status_code, exc,
+            )
         except USPTOException as exc:
             uspto_error = f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                "ip_intel: USPTO failed for %s (assignee %r, HTTP %s): %s",
+                ticker, assignee, getattr(exc, "status_code", None), uspto_error,
+            )
         except Exception as exc:
-            uspto_error = f"unexpected: {exc}"
+            uspto_error = f"unexpected: {type(exc).__name__}: {exc}"
+            logger.warning(
+                "ip_intel: unexpected USPTO error for %s (assignee %r): %s",
+                ticker, assignee, uspto_error, exc_info=True,
+            )
 
         # FDA — only for pharma-adjacent tickers.
         fda_active: Optional[int] = None
@@ -369,6 +428,8 @@ class IPIntelService:
                 fda_error = f"{type(exc).__name__}: {exc}"
             except Exception as exc:
                 fda_error = f"unexpected: {exc}"
+            if fda_error:
+                fda_active = fda_total = None
 
         # Per-employee normalization for the patents driver.
         employees = profile.get("fullTimeEmployees")
@@ -413,7 +474,18 @@ class IPIntelService:
             assignee, sponsor, error_detail,
         )
 
-        return payload
+        # Remembered only when every source asked gave a definite answer: a
+        # failed FDA call (transient) must not be held back for a day with it.
+        if payload is None and uspto_refused and fda_error is None:
+            _remember_uspto_refusal(ticker)
+            logger.info(
+                "ip_intel: USPTO refusal for %s remembered — not asked again for %d h",
+                ticker, _RETRY_AFTER_SECONDS // 3600,
+            )
+        else:
+            _uspto_refused_until.pop(ticker, None)
+
+        return payload, uspto_error is None and fda_error is None
 
     async def _safe_fetch_profile(self, ticker: str) -> Optional[Dict[str, Any]]:
         try:
@@ -463,16 +535,25 @@ class IPIntelService:
             return None
         return payload
 
-    def _write_cache(self, ticker: str, payload: Dict[str, Any]) -> None:
+    def _write_cache(
+        self,
+        ticker: str,
+        payload: Dict[str, Any],
+        ttl_seconds: Optional[float] = None,
+    ) -> None:
         if not payload:
             return
         now = datetime.now(timezone.utc)
+        ttl = (
+            timedelta(seconds=ttl_seconds) if ttl_seconds is not None
+            else timedelta(days=_CACHE_TTL_DAYS)
+        )
         row = {
             "ticker": ticker,
             "payload": payload,
             "source_labels": payload.get("source_labels") or [],
             "computed_at": now.isoformat(),
-            "expires_at": (now + timedelta(days=_CACHE_TTL_DAYS)).isoformat(),
+            "expires_at": (now + ttl).isoformat(),
         }
         try:
             sb = get_supabase()

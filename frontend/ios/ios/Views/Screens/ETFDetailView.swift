@@ -27,6 +27,9 @@ struct ETFDetailView: View {
     @StateObject private var chatViewModel = ChatViewModel()
     /// Stable token keying this screen's compact-mode request + audio overlay host registration.
     @State private var compactToken = UUID().uuidString
+    /// The chart's on-screen frame, shared by the chart (which writes it) and `.backSwipe`
+    /// (which skips a drag that starts on it — dragging right there scrolls back in time).
+    @State private var chartTouchRegion = ChartTouchRegion()
 
     let etfSymbol: String
 
@@ -122,7 +125,12 @@ struct ETFDetailView: View {
                             chartSettings: viewModel.chartSettings,
                             assetContext: viewModel.chartAssetContext,
                             chartDataVersion: viewModel.chartDataVersion,
-                            previousClose: etfData.chartPreviousClose
+                            previousClose: etfData.chartPreviousClose,
+                            placeholder: chartPlaceholder(hasBars: !etfData.chartPricePoints.isEmpty),
+                            history: viewModel.chartHistory.state,
+                            onNeedOlderBars: { viewModel.loadOlderChartBars(userInitiated: $0) },
+                            dataRange: viewModel.chartDataRange,
+                            dataInterval: viewModel.chartDataInterval
                         )
                         .padding(.top, AppSpacing.lg)
                     } else if let errorMessage = viewModel.errorMessage {
@@ -192,6 +200,8 @@ struct ETFDetailView: View {
             viewModel.startLivePriceUpdates()
         }
         .backSwipe { handleBackTapped() }
+        // OUTSIDE `.backSwipe`, so the modifier and the chart inside read the same box.
+        .environment(\.chartTouchRegion, chartTouchRegion)
         .sheet(isPresented: $showShareSheet) {
             ShareSheet(items: shareItems)
         }
@@ -232,6 +242,19 @@ struct ETFDetailView: View {
         .fullScreenCover(isPresented: $showSearch) {
             SearchView()
         }
+    }
+
+    // MARK: - Chart placeholder
+
+    /// What the chart frame draws in place of the canvas while it has no bars (the chart
+    /// shows it only then): the failed answer to a range change — the view model clears the
+    /// previous range's bars rather than leave them under the new pill — or the loading
+    /// block while bars are on their way (a cold daily core carries none). Otherwise nil,
+    /// and the canvas says "No chart data".
+    private func chartPlaceholder(hasBars: Bool) -> ChartPlaceholder? {
+        if viewModel.chartLoadFailed { return .note("Couldn't load this range") }
+        if !hasBars && (viewModel.isLoading || viewModel.isChartLoading) { return .loading }
+        return nil
     }
 
     // MARK: - Tab Content

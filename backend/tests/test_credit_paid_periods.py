@@ -834,8 +834,12 @@ def test_the_window_counts_no_system_reason_and_every_spend_or_refund():
     would be given back for free. Every reason the history screen knows is classified here."""
     from app.services import credit_history_service as hist
     system = pool._GRANTED_POOL_SYSTEM_REASONS
+    # Purchased-pool-only grants: their rows carry granted_delta 0, so the window adds 0 for them
+    # whichever side of the NOT IN list they sit on. Exempt only while that stays true (checked
+    # below against the migration's own INSERT and the model).
+    purchased_only = {"feedback_reward"}       # migration 199 (merged with 200 on 2026-10-22)
     for reason, (kind, _title, _ref) in hist._REASONS.items():
-        if reason.startswith("pack_"):
+        if reason.startswith("pack_") or reason in purchased_only:
             continue                            # purchased pool only: granted_delta is 0 either way
         if kind in (hist.KIND_GRANT, hist.KIND_EXPIRE, hist.KIND_REVOKE):
             assert reason in system, f"{reason} ({kind}) moves the granted pool outside any spend"
@@ -848,7 +852,21 @@ def test_the_window_counts_no_system_reason_and_every_spend_or_refund():
         for _at, stmt in statements(strip_sql_comments(text), r"\bINSERT INTO (?:public\.)?credit_transactions\b"):
             written |= set(re.findall(r"'([a-z_]+)'", stmt)) & set(hist._REASONS)
     assert {"grant", "monthly_reset", "monthly_expired", "plan_period", "tier_revoked"} <= written, written
-    assert {r for r in written if not r.startswith("pack_")} <= system, written - system
+    assert {r for r in written if not r.startswith("pack_") and r not in purchased_only} <= system, (
+        written - system)
+    # The exemption's premise, pinned: every ledger INSERT of a purchased-only reason writes
+    # granted_delta 0, in the migrations and in the model's writer.
+    seen = set()
+    for name, text in migration_sources():
+        for _at, stmt in statements(strip_sql_comments(text), r"\bINSERT INTO (?:public\.)?credit_transactions\b"):
+            for reason in purchased_only & set(re.findall(r"'([a-z_]+)'", stmt)):
+                [row] = insert_rows(norm_sql(stmt) + ";", "public.credit_transactions")
+                assert row.get("granted_delta") == "0", f"{name}: {reason} moves the granted pool: {row}"
+                seen.add(reason)
+    assert seen == purchased_only, f"no migration INSERT found for {purchased_only - seen}"
+    c = pool._Credits(total=50, used=0)
+    c.grant_feedback_reward(20, "R-7K2Q9M")
+    assert (c.ledger[-1]["reason"], c.ledger[-1]["granted_delta"]) == ("feedback_reward", 0), c.ledger[-1]
 
 
 def test_refund_credits_rolls_the_period_first():

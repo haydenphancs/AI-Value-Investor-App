@@ -41,7 +41,7 @@ from app.utils.supabase_async import sb_exec
 # A margin counts only beside revenue (FMP answers 0 for a company with none). Defined in
 # app.utils.margins so moat scoring and the report collector share it; imported by name
 # here for the TTM producer (`industry_benchmark_service._extract_ttm`) and the tests.
-from app.utils.margins import revenue_backed_margin
+from app.utils.margins import free_cash_flow_reading, revenue_backed_margin
 
 logger = logging.getLogger(__name__)
 
@@ -1129,13 +1129,15 @@ def _compute_ratio_values(
 
     # FCF margin — cashflow ∩ income join, stored as a DECIMAL (freeCashFlow ÷
     # revenue). Unlike P/FCF / EV/EBITDA (multiples, profitable-only), a margin's
-    # NEGATIVES are real and are kept in the median (mirrors net_margin). No >0 gate.
+    # NEGATIVES are real and are kept in the median (mirrors net_margin). No >0 gate —
+    # but an EXACT 0 is FMP's fill for a cash-flow statement it does not have (a half-year
+    # filer's quarters, an unfiled newest quarter), not a figure (`free_cash_flow_reading`).
     if compute_name == "fcf_margin":
         for company in all_company_data:
             cf_by_year = _index_by_period(company.get(cf_key, []), period_type)
             inc_by_year = _index_by_period(company.get(inc_key, []), period_type)
             for year in set(cf_by_year) & set(inc_by_year):
-                fcf = _safe_float(cf_by_year[year], "freeCashFlow")
+                fcf = free_cash_flow_reading(_safe_float(cf_by_year[year], "freeCashFlow"))
                 rev = _safe_float(inc_by_year[year], "revenue")
                 if fcf is not None and rev and rev > 0:
                     out.setdefault(year, []).append(fcf / rev)

@@ -2632,6 +2632,11 @@ def _index_svc(monkeypatch):
     # `_compute_index_pe_from_sectors` reads the shared `sector_benchmarks` table — real
     # Supabase I/O on the cold path, so the test would measure production's data.
     monkeypatch.setattr(M, "_compute_index_pe_from_sectors", lambda: 21.0)
+    # Same table, same reason: the composite's sector count and its own 10-year average.
+    monkeypatch.setattr(M, "_compute_index_pe_basis",
+                        lambda: {"sectors": 11, "history": {"avg": 22.1, "years": 10,
+                                                            "first_year": 2016,
+                                                            "last_year": 2025}})
     # The constituents endpoints are outside the FMP licence, so `_get_constituent_count`
     # now consults the manifest and never calls them (2026-09-11). This file's
     # call-counting assertions describe the ENTITLED pipeline — caching, sharing, the
@@ -2640,7 +2645,7 @@ def _index_svc(monkeypatch):
     monkeypatch.setattr(M, "is_entitled", lambda path: True)
 
     async def _stories(self, **kw):
-        return ("valuation story", "sector story", "macro story", [])
+        return ("sector story", "macro story", [])
 
     monkeypatch.setattr(M.IndexService, "_generate_ai_stories", _stories)
     return svc, calls
@@ -3227,6 +3232,7 @@ def _index_svc_stubbed(quote, history):
     async def _const(symbol, fallback=0): return fallback
     async def _derived(symbol): return {}
     async def _pe(): return 0
+    async def _pe_basis(): return {}
 
     # Step 7's AI stories are a fan-out leg too, and the only one that survived: it reads
     # the `index_cache` tier-2 row and the macro cache from SUPABASE, then spawns a
@@ -3234,11 +3240,11 @@ def _index_svc_stubbed(quote, history):
     # live Supabase call (blocked by the hermeticity guard, swallowed by `_tier2_get`), and
     # left `^GSPC` stuck in the module-global `_ai_refresh_inflight`. Stubbing the narrowest
     # thing that touches the network keeps `_build_snapshots`' own logic live.
-    async def _stories(**_kw): return ("", "", "", [])
+    async def _stories(**_kw): return ("", "", [])
 
     svc._get_quote, svc._get_history, svc._get_chart = _quote, _hist, _chart
     svc._get_sector_performance, svc._get_constituent_count = _sector, _const
-    svc._get_derived, svc._get_pe = _derived, _pe
+    svc._get_derived, svc._get_pe, svc._get_pe_basis = _derived, _pe, _pe_basis
     svc._generate_ai_stories = _stories
     return svc
 

@@ -178,6 +178,9 @@ struct iosApp: App {
                     // Assert every palette token clears its WCAG floor in BOTH
                     // appearances. Compiled out of release; ~1ms in debug.
                     ThemeContrastAudit.run()
+                    // Same contract for the chart's indicator maths: the O(n) code must
+                    // equal the naive textbook definitions, or the app stops here.
+                    IndicatorSelfCheck.run()
                     #endif
 
                     // Enable 401 → refresh → retry BEFORE auth restore runs, so the

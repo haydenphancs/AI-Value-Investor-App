@@ -608,7 +608,7 @@ def test_a_pre_deploy_v4_valuation_row_is_rebuilt():
 
     # 7 since 2026-10-09 (NET-4: a listed non-lender member's Price card is peer-free);
     # 8 the same day (Earnings Yield = 1 / the card's displayed P/E).
-    assert vss._SNAPSHOT_PAYLOAD_VERSION == 8
+    assert vss._SNAPSHOT_PAYLOAD_VERSION == 9
     svc = vss.ValuationSnapshotService.__new__(vss.ValuationSnapshotService)
     row = {"category": "Price", "rating": 3, "full_report_available": True, "metrics": [],
            vss._DCF_SOURCE_KEY: bool(settings.DCF_ENABLED)}

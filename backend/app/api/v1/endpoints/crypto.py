@@ -11,7 +11,19 @@ Frontend: GET /crypto/fear-greed
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
-from app.dependencies import StandardRateLimit, get_current_user_id, MarketRateLimit
+from app.dependencies import (
+    MarketFanoutRateLimit,
+    MarketRateLimit,
+    StandardRateLimit,
+    get_current_user_id,
+)
+from app.api.chart_history_http import (
+    BEFORE_MAX_LENGTH,
+    CRYPTO_HISTORY_INTERVAL_PATTERN,
+    chart_history_response,
+)
+from app.schemas.chart_history import ChartHistoryResponse, ChartPricesResponse
+from app.services.price_history_service import ASSET_CRYPTO, MAX_PAGE_LIMIT
 from typing import Optional, Dict, Any
 import logging
 import re
@@ -106,6 +118,77 @@ async def get_crypto_fear_greed():
 
 
 # ── Crypto Detail ────────────────────────────────────────────────
+
+
+def _invalid_chart_symbol(raw: str) -> JSONResponse:
+    """Structured 422 INVALID_INPUT for a malformed crypto symbol on a chart route."""
+    return make_error_response(
+        ErrorCode.INVALID_INPUT,
+        status_code=422,
+        message=f"Invalid crypto symbol for chart: {raw[:32]!r}",
+        user_message="That symbol isn't valid.",
+        details={"symbol": raw[:32]},
+    )
+
+
+@router.get("/{symbol}/chart", response_model=ChartPricesResponse)
+async def get_crypto_chart(
+    symbol: str,
+    chart_range: str = Query("3M", alias="range", pattern="^(1D|1W|3M|6M|1Y|2Y|5Y|ALL)$"),
+    interval: Optional[str] = Query(
+        None,
+        alias="interval",
+        pattern="^(1min|5min|15min|30min|1hour|4hour|daily|weekly|monthly|quarterly)$",
+    ),
+):
+    """One range's chart bars alone — what a range tap needs, without the whole detail.
+
+    ``{symbol, prices}``, oldest first, with the indicator warm-up in front of the visible
+    window; the SAME builder and series as `GET /crypto/{symbol}` (`crypto_chart_rows`).
+    Accepts 2Y (CoinGecko Basic's 2-year cap), which `/stocks/{ticker}/chart` refuses.
+    """
+    raw_symbol = symbol
+    symbol = _normalize_crypto_symbol(symbol)
+    if not _CRYPTO_SYMBOL_RE.match(symbol):
+        return _invalid_chart_symbol(raw_symbol)
+    try:
+        return await get_crypto_service().get_crypto_chart(
+            symbol, chart_range=chart_range, interval=interval
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "Crypto chart failed for %s %s %s: %s: %s",
+            symbol, chart_range, interval, type(e).__name__, e, exc_info=True,
+        )
+        if (resp := upstream_error_response(e, ticker=symbol, step="crypto_chart")) is not None:
+            return resp
+        return make_error_response(
+            ErrorCode.COINGECKO_UNAVAILABLE,
+            message=f"{type(e).__name__} building the {chart_range} crypto chart",
+            details={"ticker": symbol, "step": "crypto_chart", "range": chart_range},
+        )
+
+
+@router.get("/{symbol}/chart/history", response_model=ChartHistoryResponse)
+async def get_crypto_chart_history(
+    symbol: str,
+    interval: str = Query(..., pattern=CRYPTO_HISTORY_INTERVAL_PATTERN),
+    before: str = Query(..., max_length=BEFORE_MAX_LENGTH),
+    limit: Optional[int] = Query(None, ge=1, le=MAX_PAGE_LIMIT),
+    _fanout: None = MarketFanoutRateLimit,
+):
+    """Older bars for the crypto chart, from CoinGecko: daily / weekly / monthly back to
+    the plan's history cap, hourly back to CoinGecko's 90-day hourly ceiling. Contract:
+    `GET /stocks/{ticker}/chart/history`."""
+    raw_symbol = symbol
+    symbol = _normalize_crypto_symbol(symbol)
+    if not _CRYPTO_SYMBOL_RE.match(symbol):
+        return _invalid_chart_symbol(raw_symbol)
+    return await chart_history_response(
+        ASSET_CRYPTO, symbol, interval=interval, before=before, limit=limit
+    )
 
 
 @router.get("/{symbol}/core", response_model=CryptoCoreResponse)

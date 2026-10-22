@@ -16,6 +16,7 @@
 //
 
 import Foundation
+import os
 import SwiftUI
 
 // MARK: - Stock Repository Protocol
@@ -55,6 +56,12 @@ protocol StockRepositoryProtocol {
     func getETFCore(symbol: String, range: String, interval: String?) async throws -> ETFCoreResponseDTO
     func getCommodityCore(symbol: String, range: String, interval: String?) async throws -> CommodityCoreResponseDTO
     func getCryptoCore(symbol: String, range: String, interval: String?) async throws -> CryptoCoreResponseDTO
+    // Chart bars: older pages for the pan-left scroll-back (`ChartHistoryLoader`), and the
+    // crypto screen's bars-only range switch.
+    func getChartHistory(asset: ChartHistoryAsset, symbol: String, interval: String, before: String, limit: Int?, extendedHours: Bool) async throws -> ChartHistoryResponse
+    func getCryptoChart(symbol: String, range: String, interval: String?) async throws -> StockChartResponse
+    // The ETF / index / commodity screens' bars-only fetch (a 3M+ first paint, a range tap).
+    func getAssetChart(asset: ChartHistoryAsset, symbol: String, range: String, interval: String?) async throws -> StockChartResponse
 }
 
 // MARK: - Stock Repository
@@ -72,6 +79,15 @@ final class StockRepository: StockRepositoryProtocol {
     private enum CacheTTL {
         static let volatile: TimeInterval = 120        // 2 min — quote, overview
         static let chart: TimeInterval = 25            // 25 sec — under the 30s refresh interval
+        /// 5 min — a daily/weekly/monthly chart. Only its LAST bar moves, and no timer
+        /// refreshes it (the 30s loops run for intraday ranges only), so 25s made every
+        /// range-pill round trip a network call for bars that had not changed.
+        static let chartDaily: TimeInterval = 300
+        /// 1 hour — an older-history page (`chartHistoryPages`). Its bars are settled and
+        /// never change within a close cycle; a new cycle (or a split re-adjusting the series)
+        /// moves `settled_through`, and the first page fetched under it drops the series'
+        /// older-cycle pages (`storeChartHistoryPage`), so this only bounds a page's age.
+        static let chartHistory: TimeInterval = 3600
         static let news: TimeInterval = 60             // 1 min — news updates frequently
         // 24 hours — profile, ETF profile/holdings/dividends, holders. Does NOT "match" the
         // backend's 24h Supabase tier: the two ADD (a row 23h old there, then 24h here).
@@ -96,6 +112,16 @@ final class StockRepository: StockRepositoryProtocol {
     private let apiClient: APIClient
     private var cache: [String: CacheEntry] = [:]
     private let maxCacheEntries = 200
+    /// Older-history pages (`getChartHistory`), kept APART from `cache`. One fling back
+    /// through a year of 5-minute bars is dozens of pages; in the shared 200-entry
+    /// dictionary they would evict the screen's own overview and Financials entries 20 at a
+    /// time. Bounded on its own (`maxChartHistoryPages`), emptied by `clearCache()` with
+    /// everything else, and never touched by `invalidate(symbol:)` — a page holds settled
+    /// bars a pull-to-refresh cannot change.
+    private var chartHistoryPages: [String: ChartHistoryPageEntry] = [:]
+    private static let maxChartHistoryPages = 64
+    private static let chartHistoryKeyPrefix = "chartHistory_"
+    private static let log = Logger(subsystem: "com.caydex.ios", category: "StockRepository")
 
     private init() {
         self.apiClient = .shared
@@ -584,7 +610,7 @@ final class StockRepository: StockRepositoryProtocol {
     func getStockChart(ticker: String, range: String, interval: String? = nil, extendedHours: Bool = false) async throws -> StockChartResponse {
         let cacheKey = "chart_\(ticker)_\(range)_\(interval ?? "default")_\(extendedHours)"
 
-        if let cached: StockChartResponse = getCached(cacheKey, maxAge: CacheTTL.chart) {
+        if let cached: StockChartResponse = getCached(cacheKey, maxAge: chartTTL(range: range, interval: interval)) {
             return cached
         }
 
@@ -595,6 +621,131 @@ final class StockRepository: StockRepositoryProtocol {
 
         setCache(cacheKey, value: chart)
         return chart
+    }
+
+    /// The crypto screen's bars-only fetch (a range or interval switch). `CacheTTL.chart`
+    /// (25s) whatever the interval: crypto trades round the clock, so even a daily chart's
+    /// last bar is live.
+    func getCryptoChart(symbol: String, range: String, interval: String?) async throws -> StockChartResponse {
+        let cacheKey = "crypto_chart_\(symbol)_\(range)_\(interval ?? "default")"
+
+        if let cached: StockChartResponse = getCached(cacheKey, maxAge: CacheTTL.chart) {
+            return cached
+        }
+
+        let chart = try await apiClient.request(
+            endpoint: .getCryptoChart(symbol: symbol, range: range, interval: interval),
+            responseType: StockChartResponse.self
+        )
+
+        setCache(cacheKey, value: chart)
+        return chart
+    }
+
+    /// The ETF / index / commodity screens' bars-only fetch: a screen opening on a
+    /// remembered 3M+ (their `/core` carries no 3M+ bars) and a range tap. Same TTLs as
+    /// `getStockChart` (`chartTTL`): these are equity-session bars, not round-the-clock.
+    func getAssetChart(asset: ChartHistoryAsset, symbol: String, range: String, interval: String?) async throws -> StockChartResponse {
+        // Segments split on "_" so `invalidate(symbol:)` (pull-to-refresh) finds the symbol.
+        let cacheKey = "asset_chart_\(asset.rawValue)_\(symbol.uppercased())_\(range)_\(interval ?? "default")"
+
+        if let cached: StockChartResponse = getCached(cacheKey, maxAge: chartTTL(range: range, interval: interval)) {
+            return cached
+        }
+
+        let chart = try await apiClient.request(
+            endpoint: .getAssetChart(asset: asset, symbol: symbol, range: range, interval: interval),
+            responseType: StockChartResponse.self
+        )
+
+        setCache(cacheKey, value: chart)
+        return chart
+    }
+
+    /// The client TTL for one `getStockChart` payload: `CacheTTL.chart` (25s) for intraday
+    /// bars, which move with the live session, and `CacheTTL.chartDaily` (5 min) for
+    /// daily/weekly/monthly. A nil interval means the range's default one (1D/1W are
+    /// intraday). An interval or range this build does not know gets the SHORT TTL — a
+    /// stale chart is the worse failure.
+    private func chartTTL(range: String, interval: String?) -> TimeInterval {
+        let resolved: ChartInterval?
+        if let interval {
+            resolved = ChartInterval(rawValue: interval)
+        } else {
+            resolved = ChartTimeRange(rawValue: range)?.defaultInterval
+        }
+        guard let resolved, !resolved.isIntraday else { return CacheTTL.chart }
+        return CacheTTL.chartDaily
+    }
+
+    // MARK: - Chart History
+
+    /// One page of bars strictly older than `before` — the chart's pan-left scroll-back
+    /// (`ChartHistoryLoader`). Cached in `chartHistoryPages` for `CacheTTL.chartHistory`
+    /// (1 hour): re-panning across the same edge, or reopening the screen, costs no round trip.
+    ///
+    /// The key carries the symbol UPPER-cased (the loader sends it that way) and every input
+    /// that shapes the page. `limit` joins the key only when set, so the common nil-limit
+    /// key stays `chartHistory_<asset>_<SYMBOL>_<interval>_<before>_<ext>`.
+    func getChartHistory(asset: ChartHistoryAsset, symbol: String, interval: String, before: String, limit: Int?, extendedHours: Bool) async throws -> ChartHistoryResponse {
+        let series = "\(asset.rawValue)_\(symbol.uppercased())_\(interval)_\(extendedHours)"
+        var cacheKey = "\(Self.chartHistoryKeyPrefix)\(asset.rawValue)_\(symbol.uppercased())_\(interval)_\(before)_\(extendedHours)"
+        if let limit { cacheKey += "_limit\(limit)" }
+
+        if let entry = chartHistoryPages[cacheKey],
+           Date().timeIntervalSince(entry.fetchedAt) < CacheTTL.chartHistory {
+            return entry.page
+        }
+
+        let page = try await apiClient.request(
+            endpoint: .getChartHistory(
+                asset: asset, symbol: symbol, interval: interval,
+                before: before, limit: limit, extendedHours: extendedHours
+            ),
+            responseType: ChartHistoryResponse.self
+        )
+
+        storeChartHistoryPage(page, key: cacheKey, series: series, before: before)
+        return page
+    }
+
+    /// Write-through for `getChartHistory`, with the three rules a plain TTL cache gets wrong.
+    private func storeChartHistoryPage(_ page: ChartHistoryResponse, key: String, series: String, before: String) {
+        // An EMPTY page that still claims older history is not an answer — the loader stops
+        // on it, having no cursor to advance with. Pinning it for an hour would end the
+        // scroll-back on every reopen too. (`bars: []` + `has_more: false` IS an answer: the
+        // series starts at the cursor.)
+        guard !page.bars.isEmpty || !page.hasMore else {
+            Self.log.warning("chart history: not caching an empty has_more=true page for \(series, privacy: .public) before \(before, privacy: .public)")
+            return
+        }
+        let now = Date()
+        // A new close cycle re-settles the series (a split re-adjusts every older bar). A page
+        // cached under the previous `settled_through` must not answer the cursor next to this
+        // one's bars: the loader restarts its older bars on every such change, so mixed pages
+        // would restart it on alternate pages until the old ones expired.
+        if let settled = page.settledThrough {
+            let countBefore = chartHistoryPages.count
+            chartHistoryPages = chartHistoryPages.filter { _, entry in
+                entry.series != series || entry.page.settledThrough == settled
+            }
+            let dropped = countBefore - chartHistoryPages.count
+            if dropped > 0 {
+                Self.log.debug("chart history: dropped \(dropped) page(s) of \(series, privacy: .public) not settled through \(settled, privacy: .public)")
+            }
+        }
+        // Bounded: expired pages go first, then the oldest.
+        if chartHistoryPages.count >= Self.maxChartHistoryPages {
+            chartHistoryPages = chartHistoryPages.filter { _, entry in
+                now.timeIntervalSince(entry.fetchedAt) < CacheTTL.chartHistory
+            }
+        }
+        if chartHistoryPages.count >= Self.maxChartHistoryPages {
+            let excess = chartHistoryPages.count - Self.maxChartHistoryPages + 1
+            let oldest = chartHistoryPages.sorted { $0.value.fetchedAt < $1.value.fetchedAt }.prefix(excess)
+            for (oldKey, _) in oldest { chartHistoryPages.removeValue(forKey: oldKey) }
+        }
+        chartHistoryPages[key] = ChartHistoryPageEntry(page: page, fetchedAt: now, series: series)
     }
 
     // MARK: - Analyst Analysis
@@ -869,6 +1020,14 @@ final class StockRepository: StockRepositoryProtocol {
         let timestamp: Date
     }
 
+    private struct ChartHistoryPageEntry {
+        let page: ChartHistoryResponse
+        let fetchedAt: Date
+        /// `<asset>_<SYMBOL>_<interval>_<ext>`: the series the page belongs to, so a new
+        /// `settled_through` can drop that series' older-cycle pages and nothing else.
+        let series: String
+    }
+
     private func getCached<T>(_ key: String, maxAge: TimeInterval) -> T? {
         guard let entry = cache[key],
               Date().timeIntervalSince(entry.timestamp) < maxAge,
@@ -896,6 +1055,7 @@ final class StockRepository: StockRepositoryProtocol {
 
     func clearCache() {
         cache.removeAll()
+        chartHistoryPages.removeAll()
     }
 
     /// Session-end reset, called from `AppState.discardDataForEndedSession()` (auth.md §7).
@@ -924,6 +1084,12 @@ final class StockRepository: StockRepositoryProtocol {
     /// lower-case and the symbol is upper-case. Comparing upper-cased symbols against
     /// raw components therefore cannot collide a ticker with a literal (a stock really
     /// called CORE will not evict every `overview_core_*` entry).
+    ///
+    /// Older-history pages are KEPT: they live in `chartHistoryPages`, which this never
+    /// touches. They hold settled bars a refresh cannot change, so dropping them would only
+    /// make the chart refetch every page the user already panned through. A split is caught
+    /// by the `settled_through` purge in `storeChartHistoryPage` and the loader's seam check,
+    /// not by this gesture.
     ///
     /// - Parameter aliases: other spellings the same asset is cached under — e.g. crypto
     ///   is stored bare ("BTC") by some calls and as the FMP pair ("BTCUSD") by others.
@@ -1238,7 +1404,10 @@ struct StockChartResponse: Codable {
     let prices: [StockPricePoint]
 }
 
-struct StockPricePoint: Codable {
+/// `nonisolated` + `Sendable` so `ChartSeries.build` can read bars off the main actor —
+/// a prepended multi-decade history is merged and its indicators computed in the
+/// background, never inside a frame.
+nonisolated struct StockPricePoint: Codable, Equatable, Sendable {
     let date: String
     let close: Double
     let open: Double?
@@ -3355,6 +3524,19 @@ final class MockStockRepository: StockRepositoryProtocol {
     }
 
     func getCryptoCore(symbol: String, range: String, interval: String?) async throws -> CryptoCoreResponseDTO {
+        throw APIError.networkError(NSError(domain: "Mock", code: 0))
+    }
+
+    func getChartHistory(asset: ChartHistoryAsset, symbol: String, interval: String, before: String, limit: Int?, extendedHours: Bool) async throws -> ChartHistoryResponse {
+        // Previews have no older history: an exhausted page, never invented bars.
+        ChartHistoryResponse(symbol: symbol, interval: interval, bars: [], hasMore: false, settledThrough: nil, reachedStart: false)
+    }
+
+    func getCryptoChart(symbol: String, range: String, interval: String?) async throws -> StockChartResponse {
+        throw APIError.networkError(NSError(domain: "Mock", code: 0))
+    }
+
+    func getAssetChart(asset: ChartHistoryAsset, symbol: String, range: String, interval: String?) async throws -> StockChartResponse {
         throw APIError.networkError(NSError(domain: "Mock", code: 0))
     }
 

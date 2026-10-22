@@ -173,6 +173,15 @@ class MarketOverviewMacroItem(BaseModel):
     signal: str  # "positive", "neutral", "cautious"
 
 
+#: What `MarketOverviewWidget.pe_ratio` IS (2026-10-21). The index pipeline has no licensed
+#: per-index P/E; the figure is one US-market composite, identical for ^GSPC, ^IXIC and ^DJI,
+#: and `historical_avg_pe` is the same composite's own 10-year average — never an index's.
+MARKET_PE_BASIS = (
+    "US market composite: the average of the US sector median TTM P/Es, the same figure for "
+    "every index (not this index's own P/E); historical_avg_pe is that same composite's own "
+    "10-year average"
+)
+
 #: What `MarketOverviewWidget.macro_indicators` ARE: the index pipeline writes those signals
 #: with the model (`index_service`), so they are labels, not readings. The widget is also the
 #: tool result the chat model reads, which is why the basis travels with it.
@@ -203,6 +212,12 @@ class MarketOverviewWidget(BaseModel):
     # reads this card as a tool result. Fail-closed default; additive (iOS ignores unknown keys).
     earnings_yield_known: bool = False
     historical_avg_pe: float
+    # False → `historical_avg_pe` is the 0 placeholder (the composite's own 10-year average is
+    # unknown). Fail-closed default; additive — iOS reads it as Optional, older builds ignore it.
+    historical_avg_pe_known: bool = False
+    # How to read `pe_ratio` / `historical_avg_pe` (`MARKET_PE_BASIS` when the P/E is known,
+    # else None). For the chat model, which took the composite for the named index's own P/E.
+    pe_basis: Optional[str] = None
     sectors: List[MarketOverviewSector] = []
     advancing: int = 0
     declining: int = 0

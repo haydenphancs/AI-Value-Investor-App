@@ -174,7 +174,7 @@ def _moat(monkeypatch, fmp: _FakeFMP, sb: _FakeSB, raw: List[Dict[str, Any]]) ->
     svc.supabase = sb
     svc.fmp = fmp
 
-    async def _no_tam(_industry, _sample):
+    async def _no_tam(_industry, _samples, **_k):   # e.g. drops=
         # The real one reaches the dossier service (Supabase) whenever a profile answers.
         return None
 
@@ -470,7 +470,9 @@ async def test_compute_for_industry_reports_its_stats(monkeypatch):
     stats: Dict[str, int] = {"stale": 1}
     written = await svc.compute_for_industry("Restaurants", stats=stats)
     assert len(written) == len(PILLAR_ORDER)
-    assert stats == {"stale": 1, "peers": 6, "scored": 5, "eligible": len(PILLAR_ORDER)}
+    # R0's 503 is counted since 2026-10-21 (`fetch_<kind>` / `lost_<kind>`, non-zero only).
+    assert stats == {"stale": 1, "peers": 6, "scored": 5, "eligible": len(PILLAR_ORDER),
+                     "fetch_unavailable": 1, "lost_unavailable": 1}
 
     stats = {}
     assert await svc.compute_for_industry("Not In Universe", stats=stats) == {}

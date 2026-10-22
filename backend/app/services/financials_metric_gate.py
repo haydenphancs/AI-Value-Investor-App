@@ -152,6 +152,31 @@ def peer_metric_applicable(metric: str, industry: Optional[str]) -> bool:
     return True
 
 
+# ── Financial Services peers: own industry or none (owner decision 2026-10-20) ─────────
+
+#: A Financial Services company is compared with its OWN industry's median when that
+#: metric's median pools at least this many companies, and with no peer at all below it —
+#: never with the Financial Services SECTOR median, which is a bank-dominated pool (Banks -
+#: Regional alone supplies ~200 of its ~450 companies). Production showed why (read-only,
+#: 2026-10-20): every exchange and data vendor (MCO, SPGI, CME, MSCI …) read "Richly valued
+#: vs peers" against banks' P/E of 12.35, a mortgage lender's D/E read red against 0.46, and
+#: JPM's EV/EBITDA (Banks - Diversified n=19) fell to the sector and decided its Price rating.
+#: Owner: "i lean to option 1, but let's use "10 companies" for the minimum." Every other
+#: sector keeps `sector_benchmark_lookup.MATURE_SAMPLE_FLOOR` (20) and its sector fallback.
+FS_INDUSTRY_PEER_FLOOR = 10
+
+_FS_SECTOR_KEYS = frozenset({"financial services", "financials"})
+
+
+def is_financial_services_sector(sector: Any) -> bool:
+    """True for FMP's "Financial Services" sector (or the "Financials" spelling another feed
+    uses), case- and space-insensitively. Deliberately not `_normalize_sector`: that lives in
+    `sector_benchmark_service`, which imports the lookup that imports this module."""
+    if not isinstance(sector, str):
+        return False
+    return _SPACE_RE.sub(" ", sector.strip().lower()) in _FS_SECTOR_KEYS
+
+
 # ── Mixed industries: payment networks vs lenders (owner decision 2026-10-08) ──────────
 
 #: Industries that hold both lenders and non-lender members (payment networks, fee

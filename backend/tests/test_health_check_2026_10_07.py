@@ -533,7 +533,7 @@ def _cached_row(version: int, metrics: List[Dict[str, Any]]) -> Dict[str, Any]:
             "cached_at": datetime.now(timezone.utc).isoformat(), "next_earnings_date": None}
 
 
-def test_payload_version_is_9_and_older_rows_are_rebuilt():
+def test_payload_version_is_10_and_older_rows_are_rebuilt():
     """A v4 row may hold a bank's three red liquidity rows and "sector" text over an
     industry median; a v5 row (2026-10-07 first pass, possibly written by a local run) a
     broker without interest coverage, or an exchange compared with the bank-pooled
@@ -542,18 +542,20 @@ def test_payload_version_is_9_and_older_rows_are_rebuilt():
     row (the same day's first cut, only ever written by a local run) an unlisted lender
     (ENVA, SEZL) WITH them, or a network's D/E compared with lenders. All are rebuilt on
     their next read. A v8 row (2026-10-09, NET-4 / NET-5) compared a network's P/E and ROE
-    with lenders, or carries WU's made-up liquidity rows: rebuilt too; a v9 row is served.
-    Mutation: leaving the version at 8 serves those."""
-    assert hc._HC_PAYLOAD_VERSION == 9
+    with lenders, or carries WU's made-up liquidity rows: rebuilt too; so is a v9 row
+    (2026-10-21), which compared a small Financial Services industry's P/E and D/E with the
+    bank-dominated sector median; a v10 row is served. Mutation: leaving the version at 9
+    serves those."""
+    assert hc._HC_PAYLOAD_VERSION == 10
     bank_row = {"type": "current_ratio", "value": 0.3, "comparison_value": 1.4,
                 "percent_difference": -78.6, "gauge_position": 0.11, "status": "negative",
                 "insight_text": "sector average. Constrained liquidity position.",
                 "highlighted_value": "79%", "highlighted_label": "well below"}
     svc = hc.HealthCheckService.__new__(hc.HealthCheckService)
-    for old in (4, 5, 6, 7, 8):
+    for old in (4, 5, 6, 7, 8, 9):
         svc.supabase = _Rows([_cached_row(old, [bank_row])])
         assert svc._check_supabase_cache("C") is None, f"a v{old} row was served"
-    svc.supabase = _Rows([_cached_row(9, [dict(bank_row, type="pe_ratio",
+    svc.supabase = _Rows([_cached_row(10, [dict(bank_row, type="pe_ratio",
                                                peer_level="industry")])])
     served = svc._check_supabase_cache("C")
     assert served is not None and served.metrics[0].peer_level == "industry"

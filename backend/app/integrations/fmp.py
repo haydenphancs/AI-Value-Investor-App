@@ -814,6 +814,7 @@ class FMPClient:
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
         extended: bool = False,
+        strict: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Get intraday price data at the specified interval.
@@ -830,6 +831,10 @@ class FMPClient:
                 04:00–19:55 with `extended=true`. Before this parameter existed the
                 Extended Hours toggle on the stock chart merely skipped a filter over
                 data that never contained those bars, so it was inert.
+            strict: Raise `FMPUnavailableException` on a non-list body instead of
+                answering ``[]``. For a caller that reads an empty window as "no older
+                bars exist" (the paged chart history): an FMP error body on a 200 must
+                not end a series.
 
         Returns:
             List of price dicts with datetime stamps (e.g. "2025-03-07 10:30:00")
@@ -845,6 +850,11 @@ class FMPClient:
         data = await self._make_request(
             f"historical-chart/{interval}", params=params
         )
+        if strict and not isinstance(data, list):
+            raise FMPUnavailableException(
+                f"historical-chart/{interval} for {ticker.upper()} returned a "
+                f"{type(data).__name__}, not a list"
+            )
         return data if isinstance(data, list) else []
 
     async def get_analyst_estimates(

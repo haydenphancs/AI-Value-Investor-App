@@ -27,6 +27,10 @@ struct IndexDetailView: View {
     @State private var selectedSearchResult: SearchSelection?
     /// Stable token keying this screen's compact-mode request + audio overlay host registration.
     @State private var compactToken = UUID().uuidString
+    /// Where the chart sits on screen, written by the chart and read by `.backSwipe`, so a
+    /// horizontal pan on the chart scrolls history instead of popping the screen. A plain
+    /// box, not observed: the chart moving never needs to redraw this screen.
+    @State private var chartTouchRegion = ChartTouchRegion()
 
     let indexSymbol: String
 
@@ -62,6 +66,26 @@ struct IndexDetailView: View {
         \(indexData.formattedPrice) \(indexData.formattedChange) \(indexData.formattedChangePercent)
         """
         return ShareContent.items(body)
+    }
+
+    /// What the chart frame shows while it has no bars (the chart draws it only then).
+    ///
+    /// - The user's range / interval change failed or came back empty: THAT answer, under the
+    ///   new pill — never the previous range's bars.
+    /// - Only the fast-core slice is on screen and the full response is still in flight: a
+    ///   shimmer, not "No chart data" (core can land without bars on a cold daily range).
+    ///   Gated on `errorMessage`, which the latest full fetch sets when it fails, so a failed
+    ///   load never leaves a shimmer that cannot resolve. Not on `isLoading`: a superseded
+    ///   fetch (a range tap before the full detail landed) clears that flag while the
+    ///   newer one is still in flight, which flashed "No chart data" for its whole wait.
+    private var chartPlaceholder: ChartPlaceholder? {
+        if viewModel.chartLoadFailed {
+            return .note("Chart unavailable for this range. Pull to refresh to try again.")
+        }
+        if viewModel.indexData == nil, viewModel.errorMessage == nil {
+            return .loading
+        }
+        return nil
     }
 
     var body: some View {
@@ -136,7 +160,12 @@ struct IndexDetailView: View {
                             assetContext: viewModel.chartAssetContext,
                             chartDataVersion: viewModel.chartDataVersion,
                             chartEventDates: viewModel.chartEventDates,
-                            previousClose: indexData.chartPreviousClose
+                            previousClose: indexData.chartPreviousClose,
+                            placeholder: chartPlaceholder,
+                            history: viewModel.chartHistory.state,
+                            onNeedOlderBars: { viewModel.loadOlderChartBars(userInitiated: $0) },
+                            dataRange: viewModel.chartDataRange,
+                            dataInterval: viewModel.chartDataInterval
                         )
                         .padding(.top, AppSpacing.lg)
                     } else if let errorMessage = viewModel.errorMessage {
@@ -205,6 +234,8 @@ struct IndexDetailView: View {
             viewModel.startLivePriceUpdates()
         }
         .backSwipe { handleBackTapped() }
+        // OUTSIDE `.backSwipe`, so the modifier and the chart inside read the same box.
+        .environment(\.chartTouchRegion, chartTouchRegion)
         .navigationDestination(item: $selectedSearchResult) { selection in
             AssetDetailRouter(selection: selection)
         }

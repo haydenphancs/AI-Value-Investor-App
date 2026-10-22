@@ -317,7 +317,7 @@ The two-tier cache-aside pattern (CLAUDE.md invariant #4) — **not Redis**:
   it to its own TTL on read); the other 9 carry an expiry column the read query filters on (`expires_at`
   in 8, `soft_expires_at` / `hard_expires_at` on `ai_insight_cache`). The reference implementation,
   `profit_power_cache`, is `cached_at`-based. Budgets range from 24 h and close-aligned for market data
-  to 180 days for `ip_intel_cache` (USPTO / FDA counts) and permanent for `crypto_coin_id_cache`
+  to 180 days for `ip_intel_cache` (USPTO / FDA counts; 1 day for a row built while one source failed) and permanent for `crypto_coin_id_cache`
   (the Gemini grounded-research caches — `competitor_intel_cache`, `moat_intel_cache`,
   `price_catalyst_cache`, `geopolitical_macro_cache` — were retired 2026-10-02, §2 "No Google Search grounding", and are empty); §7.1's rule is about WHAT may be stored,
   not for how long. §7.1 states the rule for what may go in here; the short version is that **a live price may
@@ -1418,7 +1418,9 @@ values; there is no `CachePolicy` or `CacheKey` type.
 | Class | TTL | Rationale |
 |---|---|---|
 | volatile (quote, header) | 120 s | a price is only ever briefly true |
-| chart | 25 s | redraw cadence, not data cadence |
+| chart (intraday interval) | 25 s | redraw cadence, not data cadence |
+| chart (daily / weekly / monthly) | 300 s | only the last bar moves, and no timer refreshes these ranges |
+| chart history page | 3600 s | settled bars; kept in their own bounded store (`chartHistoryPages`, 64 pages), never in the shared dict, and dropped as soon as a page arrives under a new `settled_through` |
 | news | 60 s | the backend already caches it for hours; this only collapses tab-flipping |
 | analysis | 1800 s | recomputed on the server far less often than that |
 | fundamental | 86400 s | quarterly data |
@@ -1435,6 +1437,62 @@ Eviction drops the 20 oldest **by insertion time** once the entry cap is reached
 LRU — `getCached` does not touch the timestamp — and the code comment saying "LRU" is wrong. It has
 not mattered, because the cap is generous relative to a session's working set; if it ever does, the
 fix is one line in `getCached`.
+
+### 7.2a Asset-detail chart history (scroll back to the first trading day)
+
+The shared detail chart (`TickerChartView`, on the stock, ETF, index, crypto and commodity
+screens) opens on the range the user picked and pages in older bars only once the user pans or
+pinches toward its left edge. First paint is unchanged.
+
+- **Route.** `GET /{stocks|etfs|indices|commodities|crypto}/{symbol}/chart/history` lives on each
+  of the five guarded routers, so it is account-only (auth.md §1a). It takes `interval`,
+  `before` (exclusive), `limit` (≤ 5,000) and `extended_hours` (stocks only), and answers
+  bars oldest first plus `has_more`, `settled_through` and `reached_start`. The shared handler is
+  `app/api/chart_history_http.py` and the schema is `app/schemas/chart_history.py`.
+  `has_more: false` means paging has nothing older to give. `reached_start: true` means more: the
+  page holds the symbol's FIRST bar. That is false at the intraday look-back bound, at
+  CoinGecko's plan cap, and in the 90-day hourly crypto series. An intraday page ending on empty
+  windows counts only when the stock's daily history begins that same day. A failed or empty
+  source is a typed 502 (`FMP_UNAVAILABLE`, or `COINGECKO_UNAVAILABLE` on crypto) and never reads
+  as "start of history".
+- **Service.** `price_history_service.py` keeps one settled daily history per symbol. Weekly and
+  monthly bars are aggregated from that full history BEFORE windowing, so the first bucket is
+  complete. Intraday pages come from calendar-grid windows that every user shares, and crypto
+  hourly bars come from one 90-day series. Every tier is in process memory, bounded by bytes,
+  with `_inflight` dedup (the §10 row explains why there is no Supabase tier).
+  `chart_helper.fetch_chart_data` reads the same history, which gives every range its warm-up:
+  at least 210 bars before the first visible bar, including intraday and crypto 1W. FMP answers
+  only the newest 7 / 42 / 28 / 89 days of one intraday request (5min / 15min / 30min / 1hour,
+  probed 2026-10-21), so a longer intraday read is stitched from newest-first requests
+  (`chart_helper._fetch_intraday_span`); intraday paging reaches 15 years back.
+- **Client.** `ChartHistoryLoader` (one per detail ViewModel) keeps a contiguous, date-ordered
+  store of the bars older than the current payload, with these rules:
+  - a strict "older than the payload's first bar" merge;
+  - a seam check that drops the store on a split or a `settled_through` change;
+  - single flight, with a 10 s back-off after a failure.
+
+  `ChartSeries` merges the store and the payload and computes every indicator ONCE over the
+  merged bars (off the main thread past 4,000 bars). `ChartViewportState` holds a right-anchored,
+  fractional window, so a prepended page never moves the chart.
+- **Correctness floor.** Unless the backend said `reached_start`, the window cannot go further
+  left than `ChartWarmup.bars` (210). Every visible value then matches the full-history value: SMA
+  and Bollinger exactly, and the EMA/Wilder seeds (MACD, RSI) to about 1e-7. Paging that merely
+  stopped (a bound, a cap, a refused page) keeps the floor. At the symbol's first bar, the window
+  reaches it, and each indicator starts at its textbook first index. The floor is read from the
+  series that was BUILT, so a long merge still building in the background never re-floors the
+  bars on screen. Decimation (one min/max envelope per pixel column) is for drawing only; readouts
+  use full-resolution bars.
+- **1D** stays one session laid out by time, with pan and pinch off. **1W** pages back through
+  older intraday bars.
+- **A 3M+ first paint never waits for the full detail.** Every `GET …/core` first-paint route
+  carries bars for 1D/1W only (`fast_only`), and a screen reopens on the range the user
+  last picked. So a screen that opens on 3M or longer requests the bars alone right after
+  core lands; a range tapped before the full detail lands is fetched the same way. The
+  bars-only routes are `GET /stocks/{t}/chart` and `GET /crypto/{s}/chart`, plus
+  `GET /{etfs|indices|commodities}/{symbol}/chart` (added 2026-10-21). Each uses the same
+  `_get_chart` as its detail, so both draw identical bars. They answer in ~0.1-1.4 s cold,
+  against 2-11 s for a cold full detail or overview. Their `GET …/quote` slice is a
+  projection of the full build, which is why it is not used for this.
 
 ### 7.3 Benchmark & report caching
 
@@ -1453,13 +1511,21 @@ out to compute peer medians per request:
   `MATURE_SAMPLE_FLOOR` (20) companies, else the **same period's** sector row when that one
   does, else whichever exists. A period never borrows another period's median (2026-10-07: the
   old "hold back to the last mature period" froze small industries' lines at one old sector value).
+  **Financial Services is the exception** (owner decision 2026-10-20; `fs_industry_only` /
+  `peer_floor`, `financials_metric_gate.FS_INDUSTRY_PEER_FLOOR`): an FS company with an industry
+  is compared with its OWN industry's median from **10** companies, and with **no peer** below
+  that — never with the FS SECTOR median, a bank-dominated pool (exchanges read "richly valued"
+  against banks' P/E of 12.35; JPM's EV/EBITDA at n=19 fell to it and decided its Price rating).
+  Only the industry layer is read; a direct sector read (`industry = ''`: competitor scoring, the
+  moat scorer, an FS company FMP gives no industry) is unchanged.
   That per-period pick serves single values. CHART LINES (Growth, Profit Power, the report
   drill-down — whose metrics carry their line's level, `sector_annual_level` /
   `sector_quarterly_level`; Profit Power's `peer_group_levels` names the net-margin line per tab
   plus one key per margin, e.g. `annual.fcf_margin`) read `get_benchmark_series` instead: every point of a metric's line comes from ONE
   peer group — the industry when it has a mature cell at the newest period, else the sector — so
   the line never steps between populations where n crosses 20, and its legend, tooltip and Cay
-  AI's peer sentence name the group every point belongs to.
+  AI's peer sentence name the group every point belongs to. An FS industry's line keeps only its
+  own periods from 10 companies (none → no line).
 - **Three live `period_type` kinds:**
   - `annual` + `calendar_quarter` — **history** (the chart lines + the growth series). Annual rows
     are keyed by the year of the period end (`period_labels.annual_benchmark_key`: an end on
@@ -1482,11 +1548,19 @@ out to compute peer medians per request:
   value — never an earlier period's. The producer applies the same gate before writing. A `ttm` row
   older than 21 days (`TTM_MAX_AGE_DAYS`: its group fell below 5 companies, or the weekly job
   stopped) is not current and is not served; historical rows have no age limit (the producer
-  fetches 16 annual records, so the oldest years legitimately stop being rewritten).
+  fetches 16 annual records, so the oldest years legitimately stop being rewritten). A **margin
+  median of exactly 0** (`MARGIN_METRICS` in `app/utils/margins.py`) is never served, in any period type
+  (2026-10-21): it is FMP's "0 when there is no revenue" counted as a figure. The producers drop
+  that 0 since 2026-10-11, but the 2026-10-04 fiscal rows held 1,113 of them — Healthcare's sector
+  net margin read 0.0% for every year 2016-2025 on the Profit Power line, the report drill-down,
+  Stage B and Cay AI's grounding (only the Profitability card had a guard) — and rows no later run
+  rewrites keep theirs. Negative medians are real and kept.
 - **Read path** (`sector_benchmark_lookup.py`, 1-hour in-memory cache): `get_current_benchmarks()`
   answers the single-value "vs avg" comparisons: the industry TTM median when it has ≥ 20
   companies → the sector TTM median when it does → the newest complete annual year with a mature
-  median → **none** (no comparison is shown; a thin cell never decides one).
+  median → **none** (no comparison is shown; a thin cell never decides one). Financial Services:
+  the industry TTM median from 10 companies → the industry's NEWEST complete year when it pools
+  10 (never an older year) → none.
 - **Write path** (`industry_benchmark_service.py`): each recompute covers the **top 300** constituents
   per industry by market cap (`TOP_TICKERS_PER_INDUSTRY`) — medians stabilise well below that and it
   bounds the FMP budget; the **median** (not mean) protects against 1–2 outlier reporters. Values are
@@ -1501,7 +1575,7 @@ out to compute peer medians per request:
 
 | Job | Cadence | Writes | Why separate |
 |-----|---------|--------|--------------|
-| Fiscal recompute | Quarterly — first Sunday of Jan/Apr/Jul/Oct, ~04:00 UTC | `annual` + `calendar_quarter` rows + the `''` sector aggregate | Fiscal data only changes on earnings |
+| Fiscal recompute | Quarterly — first Sunday of Jan/Apr/Jul/Oct, ~03:30 UTC (before the moat phase, which scores peers against these medians) | `annual` + `calendar_quarter` rows + the `''` sector aggregate | Fiscal data only changes on earnings |
 | TTM refresh | Weekly — Sunday 06:00 UTC | `ttm` rows + the `''` sector aggregate for the TTM period | price ÷ TTM earnings drifts daily for every company, so the current-snapshot median goes stale as a whole |
 
 Operational invariants:
@@ -1517,7 +1591,8 @@ Operational invariants:
   `calendar_quarter` (migration 184 unapplied), those rows are skipped for the run with an ERROR
   and `calendar_quarter_blocked: true` in the summary, while the annual rows are still written.
 - Both jobs **survive a redeploy inside their window** (2026-09-18). Each phase of the quarterly
-  chain (dossier → IP intel → moat → benchmarks; the competitor-intel phase was retired 2026-10-02)
+  chain (dossier → IP intel → benchmarks → moat; the competitor-intel phase was retired 2026-10-02;
+  medians before moat since 2026-10-21, and the moat phase waits while the medians are unsettled)
   and the weekly TTM run holds
   its own durable, day-keyed claim in `notification_job_state` (migration 147's
   `claim_scheduled_job`, via `main._run_claimed_phase`, with a 3 h stale window that outlasts the
@@ -1673,7 +1748,7 @@ whether any of it runs:
 | social snapshot | one per UTC day, hourly retry | — |
 | Home dashboard warmer: pulse, screener universe, scanners, themes, signals, Trillion, each rebuilt before its TTL (§3.4). FMP cost: in the regular session ~6 small sparkline calls a minute plus the universe sweeps (~1 a minute, 2 calls each); outside it a pulse rebuild costs ~0 FMP chart calls (a finished session's bars are memoized), and in a closed window the universe lives 15 min | a tick every `HOME_WARM_TICK_SECONDS` (10 s), all hours; due at 40 s / 45 s (840 s in a closed window: overnight, weekends, holidays) / 900 s / 480 s / 2400 s / 480 s; starts once the boot warm opens the gate | `SCANNER_PREWARM_ENABLED` (on; off = it idles) |
 | news / report / index pre-warmers | 2 h / 1 h / 30 min | `*_PREWARM_ENABLED` (on) |
-| quarterly chain: dossier → competitor → IP → moat → industry benchmarks | first Sunday of Jan/Apr/Jul/Oct, 02:00 UTC, +30 min each | per-phase claim |
+| quarterly chain: dossier → IP → industry benchmarks → moat (competitor retired 2026-10-02; medians before moat since 2026-10-21) | first Sunday of Jan/Apr/Jul/Oct, 02:00 UTC; IP +60, medians +90, moat +120 min | per-phase claim |
 | TTM benchmarks | Sunday 06:00 UTC | claim |
 | volatility precompute | daily 08:00 UTC | — |
 | whale hydration | politicians every 6 h; full sweep daily ≥ 02:00 UTC (3 h claim) | claim |
@@ -1713,7 +1788,14 @@ off the event loop (`asyncio.to_thread`). The sweeps also retry an FMP 429 with 
 wait out FMP's per-minute window together (one shared 60 s window, at most 20 minutes per run;
 `call_with_rate_limit_retry`), with a breaker only after three windows in a row and 20 exhausted
 calls with no success, count fetch failures per
-industry into the run summary, and download the benchmark universe file from the
+industry into the run summary (the moat recompute too since 2026-10-21: every peer request and the
+dossier sample's profile go through the same helper inside one `rate_limit_run("moat")`; the dossier
+sample falls back to the next of the industry's 5 largest companies; a peer whose profile failed, or
+whose statement call failed TRANSIENTLY, is left out rather than scored on half its data, and is
+counted — `fetch_failures_by_kind`, `companies_fetch_lost`, `industries_fetch_lost`,
+`industries_tam_unavailable`, `rate_limit_windows` — with a WARNING naming the industries; the
+transcript read is not wrapped, because it is refused before any HTTP call and its "success" would
+close the shared window), and download the benchmark universe file from the
 `universe-data` bucket at the start of every run (an upload needs no redeploy; the operator
 script can name a local file instead, and an unreadable named file stops the run; any writing
 run from the script — a full sweep or one `--sector` — takes the same claim as the scheduled job
@@ -1724,7 +1806,10 @@ lenders). Readers go further, permanently: a financial company's current ratio, 
 interest coverage are never compared with the Financial Services SECTOR median at all (what remains
 of it is shell companies, exchanges and developers) — only with a mature industry median, else
 judged on absolute bands (`health_check_service._bank_pooled_sector_cell`, also applied to the
-report drill-down lines). One industry is MIXED: `Financial - Credit Services` holds card networks
+report drill-down lines). Since 2026-10-20 the lookup itself goes further for every metric: an FS
+company with an industry gets its own industry's median from 10 companies or none, never the FS
+sector's (see the dimensions bullet above); `_bank_pooled_sector_cell` stays as the backstop for a
+direct sector read. One industry is MIXED: `Financial - Credit Services` holds card networks
 and fee businesses beside lenders, so every member is gated as a lender except a CURATED non-lender
 (`financials_metric_gate.NON_LENDER_MEMBERS`: the payment networks V, MA, PYPL, WU, GPN and the fee
 businesses TREE, PMTS — owner decisions 2026-10-08/09; the list is the only way in, and a member is
@@ -1754,7 +1839,8 @@ name), and refuses a floor change, a large shrink or a vanished industry without
 The industry universe file (moat, dossier and competitor rosters) is the same builder at floor 0
 (`scripts/discover_industries.py`).
 Moat industries with too few scorable peers never write and are not failures, so a
-same-day re-run that attempts only those settles. Fresh-skips, the industries-only validation
+same-day re-run that attempts only those settles — unless the peers left out by a transient FMP
+failure would have brought them to the floor: that industry FAILED (`peers lost to FMP failures`). Fresh-skips, the industries-only validation
 path and `dry_run` still return. The owner-facing
 view of all of this — what runs itself and what must be done by hand — is
 `documents/OWNER_TASKS.md`.
@@ -2155,6 +2241,28 @@ expression is written out, and must stay that way.)*
 > `ensure_credit_period` now writes a `monthly_expired` row (`-(total - used)`, granted only,
 > `ref_id` NULL so no refund can ever pair with it) before the reset row; the history shows it as
 > "Unused monthly credits expired". Migration 196 builds on 194's body and keeps that row.
+
+> **Migration 199 adds a third function that writes the purchased pool** (2026-10-17). Until then
+> `add_purchased_credits` (a verified consumable purchase) raised `purchased_total` and
+> `revoke_purchased_credits` (an Apple refund) lowered it. `grant_feedback_reward` raises it for a
+> Help Us Improve report the owner has confirmed by hand ("Report an issue · earn free credits").
+> - **Manual only.** Its one caller is `scripts/grant_feedback_reward.py`, and only with `--apply`
+>   (the default is a dry run that makes no call). Nothing in `app/` or the iOS app calls it, and
+>   EXECUTE is granted to `service_role` alone. The app promises credits only for an issue the owner
+>   has confirmed, so a grant that fired on its own would make that copy false.
+> - **Idempotent per `(user_id, ref_id)`**, where `ref_id` is the report code from the email. The
+>   replay lookup runs under the balance row's `FOR UPDATE` lock (taken by `ensure_credit_period`),
+>   so two concurrent grants of one report serialise. A partial unique index on
+>   `credit_transactions (user_id, ref_id) WHERE reason = 'feedback_reward'` is the second line of
+>   defence. A repeat returns `replay` and changes nothing.
+> - **One `feedback_reward` ledger row** (`granted_delta` 0, `purchased_delta` N), which Credit
+>   History shows as "Issue report reward". **No `credit_purchases` row**: a reward is not revenue.
+> - The purchased pool, not the granted one, because `ensure_credit_period` overwrites the granted
+>   pool at every reset. A reward therefore never expires.
+>
+> `scripts/seed_testflight_testers.py` also writes `purchased_total`, by an unlocked
+> read-then-overwrite, so a grant that lands between its read and its write is lost. Never run the
+> two at the same time. Source: `database/migrations/199_feedback_reward_credits.sql`.
 
 ### 9b.2 Spend order and refund order are not inverses
 
@@ -4471,6 +4579,7 @@ What follows is the set with no other home.
 | Gap | Real state | Why it is this way |
 |---|---|---|
 | No backend repository / data-access layer | Services call `supabase.table(...)` directly | Deliberate — Appendix B, Feb 2026. Still holds; the cost is that service math is harder to unit-test without a live client. |
+| The full daily price history behind chart scroll-back is memory-only | `price_history_service` keeps one settled history per symbol in a byte-bounded in-process LRU with `_inflight` dedup; a stock seeds from the overview bundle's already-fetched history when it is in memory, else pages FMP (1-3 calls per symbol per close cycle). ETF / index / commodity reuse their services' own histories. No Supabase tier | The same call the ETF and index services made (§7.1): reading a multi-MB raw history back from Supabase is slower than re-fetching it from FMP, and the overview bundle already persists the newest 5,000 stock rows. The cost is one paged FMP fetch per symbol after a deploy. |
 | No Redis | Tier 1 in-process dict + Tier 2 Supabase `*_cache` (§7.1) | Sufficient today. **The condition that changes it is horizontal scale:** the Tier-1 dict is per-process, so a second Railway instance stops sharing it and the cache-hit rate halves per instance added. |
 | Request correlation is partial | The middleware stack is exactly **five** entries — CORS, GZip, `_security_headers`, `cap_json_body`, `add_process_time`. (`_security_headers` was added 2026-09-12: the privacy, terms and support pages and the AASA file are real browser-reachable responses on this host and carried no `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` or HSTS. The same block documents why `allow_credentials` is now dropped whenever `ALLOWED_ORIGINS` is its `["*"]` default — Starlette answers that spec-illegal pair by echoing the caller's Origin back as trusted, verified live against production.) The last sets `request.state.request_id` and emits `X-Request-ID`, but the id is a millisecond timestamp (collides under concurrency), is read nowhere else, is absent from log records, and is not forwarded upstream | Enough to correlate a client report with one response; not enough to trace a request through the logs. Fixing it is a small, well-bounded change. |
 | Report status is polled while chat streams | SSE ships for chat; report status is a 3s poll with a 300s client deadline | Not an oversight. Per §5.4 the client deadline is deliberately *not* a failure — the server keeps generating and a list poll reconciles — which a stream would complicate rather than simplify. |

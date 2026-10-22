@@ -36,7 +36,11 @@ from app.services.financials_metric_gate import (
     comparable_peer_metrics,
     resolve_payment_network,
 )
-from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup, lookup_failed
+from app.services.sector_benchmark_lookup import (
+    fs_industry_only,
+    get_sector_benchmark_lookup,
+    lookup_failed,
+)
 from app.services.sector_benchmark_service import _normalize_sector
 from app.utils.earnings_yield import earnings_yield_text, parse_multiple
 
@@ -98,7 +102,11 @@ _CACHE_TTL = 300  # 5 minutes
 #     1 / the P/E median at the P/E cell's peer level; "N/A" with no positive P/E. It was FMP's
 #     net income ÷ market cap (C showed 8.09% beside P/E 13.75), which Ask Cay AI — deriving
 #     every yield from the P/E beside it — contradicted.
-_SNAPSHOT_PAYLOAD_VERSION = 8
+# 9 (2026-10-21): the Financial Services peer rule (own industry from 10 companies, else no
+#     peer — never the sector median; owner decision 2026-10-20), and an FS card with fewer
+#     than two judged multiples is unrated (`peers_withheld`). A v8 row of JPM scored its
+#     EV/EBITDA against the Financial Services sector (Banks - Diversified n=19 then).
+_SNAPSHOT_PAYLOAD_VERSION = 9
 _VERSION_KEY = "_schema_v"
 # Which DCF a cached row carries: True = the Caydex Fair Value Estimate (`caydex_estimate`),
 # False/absent = FMP's model (`dcf`). A row that disagrees with settings.DCF_ENABLED is rebuilt,
@@ -776,9 +784,15 @@ class ValuationSnapshotService:
         snapshot = build_price_snapshot(
             fr=fr, km=km, cf=cf, inc=inc, bs=bs, profile=profile,
             bench=cur_bench, bench_levels=cur_levels, ticker=ticker,
-            # The network-scoped two-judged-multiples rule: only when the gate withheld
-            # the medians for a listed non-lender member.
-            peers_withheld=network is True,
+            # The two-judged-multiples rule: when the gate withheld the medians for a
+            # listed non-lender member, and for every Financial Services company with an
+            # industry (2026-10-20): own industry from 10 companies or no peer, so a small
+            # FS industry is left with P/E on its own bands — one multiple is no rating.
+            # Not on a FAILED lookup: an outage says nothing about whether peers exist, and
+            # that build is served degraded (never stored), scored as before.
+            peers_withheld=network is True or (
+                fs_industry_only(industry, sector) and "benchmarks" not in degraded
+            ),
         )
         # While DCF_ENABLED, FMP's DCF is retired and the Caydex estimate is attached at SERVE
         # time (get_valuation_snapshot), never stored in this row.
@@ -852,7 +866,9 @@ def dcf_estimate_from_row(row: Any) -> Optional[DcfEstimateResponse]:
 
 #: The Price card of a company whose peer medians were withheld (`peers_withheld`) is rated
 #: only when at least this many multiples were actually judged (NET-4, 2026-10-09). With
-#: the medians withheld only P/E can be judged, so today such a card is always unrated.
+#: the medians withheld only P/E can be judged, so a listed non-lender member's card is
+#: always unrated; a Financial Services company's (2026-10-20) is rated whenever its own
+#: industry supplies at least one usable median beside a positive P/E.
 _MIN_JUDGED_FOR_RATING = 2
 
 
@@ -903,9 +919,11 @@ def build_price_snapshot(
     it names the symbol in the EV/EBITDA reconstruction log lines, which are the
     only way to see WHY a ticker fell to "—" without re-instrumenting.
 
-    `peers_withheld` (owner decision 2026-10-09, NET-4; network-scoped, NOT a global rule):
-    True only when `financials_metric_gate` withheld every median for a listed non-lender
-    member of a mixed industry. The card is then RATED only when at least
+    `peers_withheld` (owner decision 2026-10-09, NET-4; widened 2026-10-20): True when
+    `financials_metric_gate` withheld every median for a listed non-lender member of a
+    mixed industry, and for every Financial Services company with an industry (its peers
+    are its own industry from 10 companies, or none — never the sector, so a small FS
+    industry can leave P/E alone on its bands). The card is then RATED only when at least
     `_MIN_JUDGED_FOR_RATING` multiples were actually judged — a positive P/E (its absolute
     bands), or a positive P/B, P/S, P/FCF or EV/EBITDA beside a usable median; otherwise
     rating 0 and no `weighted_score` (iOS: unavailable; the report's valuation vital falls
@@ -1225,7 +1243,8 @@ def build_price_snapshot(
             logger.info(
                 "[valuation-unrated] ticker=%s judged=%d: the peer medians were withheld "
                 "(a listed non-lender member — so only P/E, on its own bands, can be "
-                "judged) and fewer than %d multiples were judged — rating 0, no "
+                "judged) or absent (a Financial Services industry too small for its own "
+                "median) and fewer than %d multiples were judged — rating 0, no "
                 "weighted_score; each row keeps its own score",
                 ticker, judged, _MIN_JUDGED_FOR_RATING,
             )

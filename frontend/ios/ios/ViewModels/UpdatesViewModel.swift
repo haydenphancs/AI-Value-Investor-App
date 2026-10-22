@@ -231,6 +231,13 @@ final class UpdatesViewModel: ObservableObject {
     private var initialLoadTask: Task<Void, Never>?
     /// Which `initialLoadTask` is current, so a finished task never clears a newer one.
     private var initialLoadID: UUID?
+    /// The feed load the latest `selectTab` started, with its scope, so the first load can
+    /// wait for it (`joinSelectionLoad`). A Market widget tap selects Market (`focusMarket`)
+    /// BEFORE the tab's first load runs, so that selection's load can claim `inFlightScope`
+    /// first and `loadInitialData`'s own `loadFeed` is skipped as a duplicate. The first load
+    /// then ended on /tabs alone and latched `hasLoadedOnce` with the feed still on the wire,
+    /// so a feed that failed afterwards was never retried on the next activation.
+    private var selectionLoad: (scope: String, task: Task<Void, Never>)?
     /// The pull-to-refresh, owned HERE for the same reason as `initialLoadTask`: SwiftUI cancels
     /// a `.refreshable` action's task while the content changes under the spinner, and that must
     /// cancel only the view's wait, never the request. A second pull (or "Try Again") joins it.
@@ -516,6 +523,7 @@ final class UpdatesViewModel: ObservableObject {
         let task = Task { [weak self] in
             guard let self else { return }
             await self.loadInitialData()
+            await self.joinSelectionLoad()
             // Latch on a genuine LIVE completion — including a legitimately empty scope — but
             // never on an identity cancellation, an error, or a snapshot still on screen (its
             // live load failed, so the next activation must try again).
@@ -655,6 +663,7 @@ final class UpdatesViewModel: ObservableObject {
         initialLoadTask?.cancel()
         initialLoadTask = nil
         initialLoadID = nil
+        selectionLoad = nil
         refreshTask?.cancel()
         refreshTask = nil
         refreshTaskID = nil
@@ -738,7 +747,21 @@ final class UpdatesViewModel: ObservableObject {
 
     func selectTab(_ tab: NewsFilterTab) {
         selectedTab = tab
-        Task { await loadFeed(for: tab, force: false) }
+        selectionLoad = (tab.scope, Task { await loadFeed(for: tab, force: false) })
+    }
+
+    /// Waits for the selection's feed load while a load of the selected scope is still in
+    /// flight, so the first load latches on THAT feed's outcome (see `selectionLoad`). In the
+    /// usual order the first load's own `loadFeed` claimed the scope and the selection's was
+    /// skipped, so by now nothing is in flight and this returns at once. Ownership is judged by
+    /// scope, not by load token: a pull-to-refresh that takes the same scope over during the
+    /// first load is not followed, so the latch can still run with that refresh on the wire
+    /// (as it did before this join existed; the refresh's own Try Again covers its failure).
+    private func joinSelectionLoad() async {
+        guard let running = selectionLoad, running.scope == inFlightScope,
+              running.scope == selectedTab?.scope
+        else { return }
+        await running.task.value
     }
 
     /// The Market chip — a Market widget tap (`caydex://updates/market`, owner 2026-10-22).
@@ -750,6 +773,9 @@ final class UpdatesViewModel: ObservableObject {
     /// the view's `.onChange(of: selectedTab)` → `selectTab` → `loadFeed`, the path a chip tap
     /// takes; already on Market, nothing reloads. Before any /tabs answer this is the same
     /// seeded Market chip `loadTabs` falls back to, which /tabs then keeps (an equal scope).
+    /// Before the tab's FIRST load, that selection's load may claim the scope ahead of the
+    /// first load's own; the first load then joins it (`selectionLoad`) rather than latching
+    /// on /tabs alone.
     func focusMarket() {
         if pendingScope != nil {
             pendingScope = UpdatesScope.market

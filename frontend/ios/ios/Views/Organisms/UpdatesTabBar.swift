@@ -50,19 +50,20 @@ struct UpdatesTabBar: View {
                         }
                     }
                     .padding(.horizontal, AppSpacing.lg)
+                    // The whole strip, inset included, so `reveal` can take it back to rest.
+                    .id(Self.stripID)
                 }
                 // A selection made from code — a Market widget tap, or /tabs re-selecting — can
-                // sit off-screen when the strip was left scrolled. No anchor: SwiftUI scrolls only
-                // as far as it needs to, so a chip already in view does not move.
+                // sit off-screen when the strip was left scrolled.
                 .onChange(of: selectedTab?.scope) { _, scope in
                     guard let scope else { return }
                     withAnimation(.easeInOut(duration: 0.2)) {
-                        proxy.scrollTo(scope)
+                        reveal(scope, with: proxy)
                     }
                 }
                 .onChange(of: marketRevealSeq) { _, _ in
                     withAnimation(.easeInOut(duration: 0.2)) {
-                        proxy.scrollTo(UpdatesScope.market)
+                        reveal(UpdatesScope.market, with: proxy)
                     }
                 }
             }
@@ -74,6 +75,21 @@ struct UpdatesTabBar: View {
             .padding(.trailing, AppSpacing.lg)
         }
         .padding(.vertical, AppSpacing.sm)
+    }
+
+    private static let stripID = "updates.tabbar.strip"
+
+    /// Brings a chip into view. The Market chip, which the server always lists first, takes the
+    /// strip back to its rest position: `scrollTo` a chip makes only the CHIP visible, so it
+    /// stopped flush against the screen edge with the strip's leading inset scrolled away. Any
+    /// other chip gets the least scroll that shows it (no anchor), so one already in view does
+    /// not move.
+    private func reveal(_ scope: String, with proxy: ScrollViewProxy) {
+        if scope == UpdatesScope.market, tabs.first?.scope == scope {
+            proxy.scrollTo(Self.stripID, anchor: .leading)
+        } else {
+            proxy.scrollTo(scope)
+        }
     }
 }
 

@@ -50,6 +50,10 @@ struct MoversEntry: TimelineEntry {
     /// No widget token: signed out (or not yet minted). Renders "Sign in to Caydex…" in BOTH
     /// modes and never stored data — FMP data may be shown only to an authenticated user.
     var isSignedOut: Bool = false
+    /// WidgetKit's `placeholder(in:)` render: sample data, drawn redacted while the tile's first
+    /// timeline loads. It is not this tile's content (its mode and sign-in state are unknown
+    /// there), so it links nothing. Not `isPlaceholder`, which means "no snapshot stored".
+    var isPlaceholderRender: Bool = false
     /// True when no snapshot exists at all — first install, or the app has never run.
     var isPlaceholder: Bool { snapshot == nil }
 }
@@ -58,7 +62,7 @@ struct MoversProvider: AppIntentTimelineProvider {
     private static let log = Logger(subsystem: "com.phan.caydex", category: "widget")
 
     func placeholder(in context: Context) -> MoversEntry {
-        MoversEntry(date: Date(), snapshot: .preview)
+        MoversEntry(date: Date(), snapshot: .preview, isPlaceholderRender: true)
     }
 
     func snapshot(for configuration: MoversConfigurationIntent, in context: Context) async -> MoversEntry {
@@ -249,10 +253,11 @@ struct MoversWidgetView: View {
     /// - Holdings → the headline mover's detail screen (unchanged; its rows link one by one).
     ///
     /// nil, so the app opens at its root, when signed out (the app shows the sign-in wall
-    /// either way), and in Holdings with no snapshot or with a market payload standing in for
-    /// Holdings.
+    /// either way), on WidgetKit's placeholder render (sample data whose mode is only the
+    /// default, so a Holdings tile or a signed-out one would have linked Updates → Market), and
+    /// in Holdings with no snapshot or with a market payload standing in for Holdings.
     private var tileURL: URL? {
-        guard !entry.isSignedOut else { return nil }
+        guard !entry.isSignedOut, !entry.isPlaceholderRender else { return nil }
         if entry.mode == .market {
             return CaydexDeepLink.updatesMarketURL
         }

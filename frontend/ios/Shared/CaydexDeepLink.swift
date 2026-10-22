@@ -19,7 +19,7 @@ import Foundation
 /// `caydex://auth-callback`). `ASWebAuthenticationSession` consumes that callback itself, so it
 /// never reaches `.onOpenURL`. The parser still recognises ONLY the `ticker` and `updates`
 /// hosts, and answers `.notOurLink` for everything else. A callback that did arrive is
-/// therefore left alone, never misread as a link of ours. `test_widget_deep_links.py` pins the
+/// therefore left alone, never misread as a link of ours. `test_ios_widget_deep_links.py` pins the
 /// scheme equal in all three places (here, `APIConfig`, Info.plist).
 ///
 /// ⚠️ UNTRUSTED INPUT. Any app or web page can open a `caydex://` URL, not just our widget. So

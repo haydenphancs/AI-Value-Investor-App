@@ -436,6 +436,8 @@ _CURATED_TABLES = {
     # now that the snapshot holds them they are curated, so a DROP fails here.
     "marketing_scripts", "marketing_link_hits", "theme_rotation_runs", "theme_daily_insights",
     "trillion_club_stakes", "search_pick_daily", "news_sentiment_log", "news_sentiment_backfill",
+    # 2026-10-22: 198 and 202 applied and re-dumped (with 203); the document names both.
+    "subscription_transactions", "sec_concept_cache",
 }
 
 

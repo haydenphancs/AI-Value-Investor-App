@@ -711,8 +711,8 @@ CURATION: dict[str, TableDoc] = {
         purpose="Per-industry measured market size (latest published year), its average "
                 "yearly growth window, lifecycle phase and revenue-share concentration. The "
                 "Moat section reads it.",
-        key=("industry", "sector", "current_tam_b", "future_tam_b", "cagr_5y_pct",
-             "lifecycle_phase", "hhi", "tam_scope"),
+        key=("industry", "sector", "current_tam_b", "cagr_5y_pct", "cagr_start_year",
+             "lifecycle_phase", "hhi", "concentration_basis", "tam_scope"),
         note="TAM is scoped per INDUSTRY, not per company, and the unit is BILLIONS."),
     "public.industry_moat_benchmarks": T("benchmarks",
         purpose="Peer moat-score distribution per (industry, pillar), for the 'vs peers' band.",

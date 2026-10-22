@@ -109,13 +109,18 @@ _CRYPTO_HISTORY_TTL = 3600
 
 #: Calendar days per intraday window. Windows sit on a FIXED grid (`_GRID_EPOCH`), so two
 #: users panning the same symbol share one FMP call per window instead of minting a
-#: window per cursor; sized so a window stays under ~650 extended-hours bars.
+#: window per cursor. Each fits inside ONE FMP request (`chart_helper.FMP_INTRADAY_SPAN_DAYS`:
+#: 7 / 42 / 28 / 89 days); a window FMP answers short is stitched, never left with a hole.
 _INTRADAY_WINDOW_DAYS = {"5min": 7, "15min": 14, "30min": 28, "1hour": 56}
 _GRID_EPOCH = date(2000, 1, 3)  # a Monday
-#: How far back an intraday page may reach. ⚠️ Provisional: FMP's intraday depth per
-#: interval is unprobed (plan Phase 0), so these bound the cost of a long fling; tune them
-#: from the probe. Past the bound a page answers `has_more: false`.
-_INTRADAY_MAX_LOOKBACK_DAYS = {"5min": 365, "15min": 730, "30min": 1095, "1hour": 1825}
+#: How far back an intraday page may reach. Probed live 2026-10-21 (INTC): every interval
+#: still answered full weeks, regular and extended hours, 15 years back (Oct 2011) — the
+#: probe never reached FMP's end, so this is the deepest VERIFIED age, not a provider
+#: limit. Past it a page answers `has_more: false, reached_start: false` (the client keeps
+#: its warm-up floor). Cost of one full pan to the bound, one FMP request per window:
+#: 5min ~782, 15min ~391, 30min ~196, 1hour ~98 — paced by the fan-out limit (60 pages a
+#: minute per user, ≤ 3 windows a page). Lower a value to trade reach for cost.
+_INTRADAY_MAX_LOOKBACK_DAYS = {"5min": 5475, "15min": 5475, "30min": 5475, "1hour": 5475}
 #: Consecutive windows with NO rows (non-error) that end the intraday series — a whole
 #: week without one bar is past the data, not a quiet week.
 _INTRADAY_EMPTY_WINDOWS_TO_END = 2
@@ -938,7 +943,7 @@ class PriceHistoryService:
         today: date,
     ) -> List[Dict[str, Any]]:
         """One grid window of intraday bars, shared by every cursor that falls in it."""
-        from app.services.chart_helper import _filter_regular_hours, _normalize_prices
+        from app.services.chart_helper import _fetch_intraday_span
 
         end = start + timedelta(days=_INTRADAY_WINDOW_DAYS[interval] - 1)
         cutoff = _settled_cutoff_date()
@@ -950,23 +955,14 @@ class PriceHistoryService:
         is_open = end >= today
 
         async def _build() -> List[Dict[str, Any]]:
-            kwargs: Dict[str, Any] = {
-                "interval": interval,
-                "from_date": start.isoformat(),
-                "to_date": min(end, today).isoformat(),
-                # A non-list body RAISES here: the swallowing default would turn an FMP
-                # error into an empty window, and empty windows END the series.
-                "strict": True,
-            }
-            if extended_hours:
-                kwargs["extended"] = True
-            raw = await fmp.get_intraday_prices(upstream, **kwargs)
-            rows = sorted(
-                (r for r in raw if isinstance(r, dict)), key=lambda p: p.get("date") or ""
+            # Stitched: a window FMP answers short (a per-request cap below the window)
+            # is completed from its older side instead of keeping a silent hole. `strict`:
+            # a non-list body RAISES — the swallowing default would turn an FMP error into
+            # an empty window, and empty windows END the series.
+            rows = await _fetch_intraday_span(
+                fmp, upstream, interval, start.isoformat(), min(end, today).isoformat(),
+                extended_hours, strict=True,
             )
-            rows = _normalize_prices(rows)
-            if not extended_hours:
-                rows = _filter_regular_hours(rows)
             rows = [r for r in rows if isinstance(r.get("date"), str) and len(r["date"]) > 10]
             self._windows.put(
                 key,

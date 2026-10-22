@@ -13,7 +13,12 @@ from app.integrations.fmp import FMPClient
 from app.services.asset_class import uses_coingecko_price
 
 logger = logging.getLogger(__name__)
-from app.utils.market_hours import ET, US_MARKET_EARLY_CLOSES, previous_trading_day
+from app.utils.market_hours import (
+    ET,
+    US_MARKET_EARLY_CLOSES,
+    is_trading_day,
+    previous_trading_day,
+)
 
 
 def _finite_or_none(v: Any) -> Optional[float]:
@@ -697,7 +702,16 @@ async def _fetch_equity_chart_rows(
     )
 
     if resolved_interval in INTRADAY_INTERVALS:
-        return await _fetch_intraday_bars(
+        if range_code == "1D" or not from_date:
+            # 1D draws only the latest session, and FMP's newest-first answer (the last
+            # 7 days of 5-minute bars at worst) already holds several sessions of warm-up
+            # in front of it: one request, as it always was.
+            return await _fetch_intraday_bars(
+                fmp, symbol, resolved_interval, from_date, to_date, extended_hours
+            )
+        # 1W asks for more than one FMP request carries (5min: 17 days against 7; 30min:
+        # ~36 against 28), so it is stitched — or the warm-up never arrives.
+        return await _fetch_intraday_span(
             fmp, symbol, resolved_interval, from_date, to_date, extended_hours
         )
 
@@ -813,13 +827,20 @@ async def _fetch_intraday_bars(
     from_date: Optional[str],
     to_date: str,
     extended_hours: bool,
+    *,
+    strict: bool = False,
 ) -> List[Dict[str, Any]]:
     """One FMP intraday read, normalised: oldest first, regular session unless asked.
 
     Shared by the detail chart (`fetch_chart_data`, which widens ``from_date`` by its
     indicator warm-up) and the holdings-card sparkline (`fetch_sparkline_bars`, which
     does not). Extracted unchanged from `fetch_chart_data`'s intraday branch, so both
-    paths forward ``extended`` and filter the same way. A non-list answer is ``[]``.
+    paths forward ``extended`` and filter the same way. A non-list answer is ``[]`` —
+    or, with ``strict``, an `FMPUnavailableException` (the paged history reads an empty
+    window as "no older bars", so an FMP error body must not look like one).
+
+    ⚠️ ONE request: FMP answers at most `FMP_INTRADAY_SPAN_DAYS` of it (the newest
+    part). A longer window goes through `_fetch_intraday_span`.
     """
     # `extended` MUST reach the FMP call: the endpoint serves the regular session
     # only unless asked (see `FMPClient.get_intraday_prices`). Skipping the
@@ -832,6 +853,8 @@ async def _fetch_intraday_bars(
     }
     if extended_hours:
         intraday_kwargs["extended"] = True
+    if strict:
+        intraday_kwargs["strict"] = True
     raw = await fmp.get_intraday_prices(symbol, **intraday_kwargs)
     if isinstance(raw, list):
         raw.sort(key=lambda p: p.get("date") or "")
@@ -842,6 +865,87 @@ async def _fetch_intraday_bars(
             prices = _filter_regular_hours(prices)
         return prices
     return []
+
+
+#: FMP's per-request cap on `historical-chart/{interval}`: a request answers at most this
+#: many calendar days back from its `to` date — the NEWEST part, the older part silently
+#: dropped. Probed live 2026-10-21 (INTC, a 370-day request): 5min returned the last 7
+#: days, 15min 42, 30min 28, 1hour 89 — the same sessions with `extended=true` (2.5x the
+#: rows), so it is a calendar cap, not a row cap. 1min / 4hour were not probed.
+#: Re-probe with `scripts/probe_fmp_intraday_depth.py` if FMP's plan changes.
+FMP_INTRADAY_SPAN_DAYS = {"5min": 7, "15min": 42, "30min": 28, "1hour": 89}
+#: The most requests one stitched intraday read may make (a 1W 5-minute chart with its
+#: warm-up is 3; a paged window that FMP answers whole is 1).
+_MAX_INTRADAY_CHUNKS = 6
+
+
+def _first_trading_day_on_or_after(day: date_type) -> date_type:
+    """The first session on or after ``day`` (bounded walk; see `previous_trading_day`)."""
+    probe = day
+    for _ in range(10):
+        if is_trading_day(probe):
+            return probe
+        probe += timedelta(days=1)
+    return day
+
+
+async def _fetch_intraday_span(
+    fmp: FMPClient,
+    symbol: str,
+    interval: str,
+    from_date: str,
+    to_date: str,
+    extended_hours: bool,
+    *,
+    strict: bool = False,
+) -> List[Dict[str, Any]]:
+    """`_fetch_intraday_bars` over ANY window: stitched from newest-first requests.
+
+    One request is answered with at most `FMP_INTRADAY_SPAN_DAYS` (its newest part), so a
+    window longer than that — a 1W 5-minute chart with its warm-up is ~17 days — lost its
+    oldest days, and with them every warm-up bar the chart's indicators needed. Each next
+    request ends ON the oldest day the previous one returned (inclusive; rows are
+    de-duplicated by stamp, so a day cut mid-way is re-read whole), until the window's
+    first session is reached, a request answers nothing, or nothing older came back (a
+    listing inside the window, or a closure the calendar does not know). A window FMP
+    answers whole costs exactly one request, as before.
+    """
+    try:
+        start = date_type.fromisoformat(from_date)
+        to = date_type.fromisoformat(to_date)
+    except (TypeError, ValueError):
+        return await _fetch_intraday_bars(
+            fmp, symbol, interval, from_date, to_date, extended_hours, strict=strict
+        )
+    span = FMP_INTRADAY_SPAN_DAYS.get(interval)
+    first_session = _first_trading_day_on_or_after(start)
+    merged: Dict[str, Dict[str, Any]] = {}
+    oldest: Optional[date_type] = None
+    for _ in range(_MAX_INTRADAY_CHUNKS):
+        chunk_from = start if span is None else max(start, to - timedelta(days=span))
+        rows = await _fetch_intraday_bars(
+            fmp, symbol, interval, chunk_from.isoformat(), to.isoformat(), extended_hours,
+            strict=strict,
+        )
+        dated = [r for r in rows if isinstance(r.get("date"), str) and len(r["date"]) >= 10]
+        if not dated:
+            break
+        for r in dated:
+            merged.setdefault(r["date"], r)
+        try:
+            earliest = date_type.fromisoformat(dated[0]["date"][:10])
+        except ValueError:
+            break
+        if earliest <= first_session or (oldest is not None and earliest >= oldest):
+            break
+        oldest = earliest
+        to = earliest
+    else:
+        logger.warning(
+            "intraday %s %s %s..%s: still short of the window start after %d requests",
+            symbol, interval, from_date, to_date, _MAX_INTRADAY_CHUNKS,
+        )
+    return [merged[k] for k in sorted(merged)]
 
 
 # ── Holdings-card sparkline (Tracking) ─────────────────────────────────────────

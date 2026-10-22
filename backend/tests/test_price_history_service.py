@@ -608,3 +608,69 @@ async def test_a_superseded_build_never_strands_the_newer_builds_waiters():
     gates[1].set()
     cols = await asyncio.wait_for(newer, 2.0)
     assert cols.complete and len(cols) == 3000
+
+
+# ── FMP's per-request cap and the verified intraday depth (probed 2026-10-21) ──
+
+def test_every_paging_window_fits_in_one_fmp_request():
+    """A window longer than one FMP request would come back with its oldest days missing;
+    the stitch would heal it, but at a request per cap's worth — size them to fit."""
+    for interval, days in PH._INTRADAY_WINDOW_DAYS.items():
+        assert days - 1 <= CH.FMP_INTRADAY_SPAN_DAYS[interval], interval
+
+
+class _ShortAnswerIntraday:
+    """Hourly-stamped bars for every weekday in [from, to], but each request answered with
+    only its newest `cap_days` — a cap SMALLER than the paging window."""
+
+    def __init__(self, cap_days: int):
+        self.cap_days = cap_days
+        self.calls = []
+
+    async def get_intraday_prices(self, symbol, **kw):
+        self.calls.append(kw)
+        to = date.fromisoformat(kw["to_date"])
+        frm = max(date.fromisoformat(kw["from_date"]), to - timedelta(days=self.cap_days))
+        out, d = [], frm
+        while d <= to:
+            if d.weekday() < 5:
+                for m in range(9 * 60 + 30, 16 * 60, 15):
+                    out.append({"date": f"{d.isoformat()} {m // 60:02d}:{m % 60:02d}:00",
+                                "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5,
+                                "volume": 1.0})
+            d += timedelta(days=1)
+        return list(reversed(out))
+
+
+@pytest.mark.asyncio
+async def test_a_window_fmp_answers_short_is_completed_not_left_with_a_hole():
+    from app.utils.market_hours import is_trading_day
+
+    fmp = _ShortAnswerIntraday(cap_days=4)          # 14-day 15-minute windows, 4-day answers
+    page = await _svc().history_page(PH.ASSET_STOCK, "INTC", "15min",
+                                     before="2026-09-30 10:00:00", limit=5000, fmp=fmp)
+    days = sorted({b["date"][:10] for b in page["bars"]})
+    first, last = date.fromisoformat(days[0]), date.fromisoformat(days[-1])
+    d, missing = first, []
+    while d <= last:
+        if is_trading_day(d) and d.isoformat() not in days:
+            missing.append(d.isoformat())
+        d += timedelta(days=1)
+    assert missing == [], f"sessions lost inside a window: {missing}"
+    assert len(fmp.calls) > PH._MAX_WINDOWS_PER_PAGE, "the short answers were never completed"
+    for call in fmp.calls:
+        assert call.get("strict") is True, "a stitched page read must stay strict"
+
+
+@pytest.mark.asyncio
+async def test_paging_stops_at_the_verified_depth_without_asking_fmp():
+    class _Never:
+        async def get_intraday_prices(self, symbol, **kw):
+            raise AssertionError("asked FMP past the verified depth")
+
+    assert set(PH._INTRADAY_MAX_LOOKBACK_DAYS.values()) == {5475}, "probed: ≥ 15 years"
+    too_old = date.today() - timedelta(days=5475 + 120)
+    page = await _svc().history_page(PH.ASSET_STOCK, "INTC", "1hour",
+                                     before=f"{too_old.isoformat()} 10:30:00", fmp=_Never())
+    assert page["bars"] == [] and page["has_more"] is False
+    assert page.get("reached_start") is False, "the look-back bound is not the listing"

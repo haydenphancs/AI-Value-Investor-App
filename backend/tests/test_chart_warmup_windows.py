@@ -78,16 +78,102 @@ class _RecordingIntraday:
         return []
 
 
+_BAR_MINUTES = {"5min": 5, "15min": 15, "30min": 30, "1hour": 60}
+
+
+class _CappedIntraday:
+    """FMP `historical-chart` as probed live (2026-10-21): every session's bars in
+    [from, to], but a request reaching further back than `cap` days from `to` is answered
+    with its NEWEST part only — silently, no error."""
+
+    def __init__(self, cap=None, first_day=None):
+        self.cap = dict(CH.FMP_INTRADAY_SPAN_DAYS if cap is None else cap)
+        self.first_day = first_day
+        self.calls = []
+
+    async def get_intraday_prices(self, symbol, **kw):
+        self.calls.append(kw)
+        interval = kw["interval"]
+        to = date.fromisoformat(kw["to_date"])
+        frm = max(date.fromisoformat(kw["from_date"]), to - timedelta(days=self.cap[interval]))
+        if self.first_day is not None:
+            frm = max(frm, self.first_day)
+        step = _BAR_MINUTES[interval]
+        open_m, close_m = (4 * 60, 20 * 60) if kw.get("extended") else (9 * 60 + 30, 16 * 60)
+        out, d = [], frm
+        while d <= to:
+            if is_trading_day(d):
+                for m in range(open_m, close_m, step):
+                    out.append({"date": f"{d.isoformat()} {m // 60:02d}:{m % 60:02d}:00",
+                                "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5,
+                                "volume": 10.0})
+            d += timedelta(days=1)
+        return list(reversed(out))
+
+
+def _missing_sessions(rows) -> list:
+    """Trading days between the first and last bar that have no bar at all."""
+    days = sorted({r["date"][:10] for r in rows})
+    first, last = date.fromisoformat(days[0]), date.fromisoformat(days[-1])
+    have, missing, d = set(days), [], first
+    while d <= last:
+        if is_trading_day(d) and d.isoformat() not in have:
+            missing.append(d.isoformat())
+        d += timedelta(days=1)
+    return missing
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("range_code,interval", [("1D", "1hour"), ("1D", "15min"),
-                                                 ("1W", "30min"), ("1W", "1hour")])
-async def test_fetch_chart_data_asks_fmp_for_the_bar_count_warmup(range_code, interval):
-    fmp = _RecordingIntraday()
-    await CH.fetch_chart_data(fmp, "NVDA", range_code, interval)
-    asked = date.fromisoformat(fmp.calls[-1]["from_date"])
-    range_start = date.fromisoformat(CH.compute_date_range(range_code)[0])
-    assert asked == CH._intraday_warmup_from(range_start, interval, False)
-    assert _bars_between(asked, range_start, interval, False) >= 210
+@pytest.mark.parametrize("range_code,interval,max_calls", [
+    ("1W", "5min", 4), ("1W", "15min", 1), ("1W", "30min", 2), ("1W", "1hour", 1),
+    ("1D", "15min", 1), ("1D", "1hour", 1),
+])
+async def test_the_chart_receives_its_warmup_through_fmps_request_cap(range_code, interval,
+                                                                     max_calls):
+    """The warm-up must ARRIVE, not merely be asked for: FMP answers one request with at
+    most `FMP_INTRADAY_SPAN_DAYS` of bars, so a 1W 5-minute chart (17 days) used to get 7
+    and a 1W 30-minute chart (~36 days) 28 — the MA(200) never drew and RSI/MACD carried
+    their seed error into the visible week. Longer windows are stitched, with no hole."""
+    fmp = _CappedIntraday()
+    rows = await CH.fetch_chart_data(fmp, "NVDA", range_code, interval)
+    range_start = CH.compute_date_range(range_code)[0]
+    warmup = [r for r in rows if r["date"] < range_start]
+    assert len(warmup) >= 210, f"{range_code} {interval}: only {len(warmup)} warm-up bars arrived"
+    assert _missing_sessions(rows) == [], "a stitched read left a session out"
+    stamps = [r["date"] for r in rows]
+    assert stamps == sorted(stamps) and len(set(stamps)) == len(stamps), "unsorted or repeated bars"
+    assert len(fmp.calls) <= max_calls, f"{len(fmp.calls)} FMP requests"
+    for call in fmp.calls:
+        span = (date.fromisoformat(call["to_date"]) - date.fromisoformat(call["from_date"])).days
+        assert span <= CH.FMP_INTRADAY_SPAN_DAYS[interval], "a request asked past FMP's cap"
+
+
+@pytest.mark.asyncio
+async def test_the_one_day_chart_still_makes_one_request():
+    """1D draws only the latest session; FMP's 7-day answer already carries its warm-up."""
+    fmp = _CappedIntraday()
+    rows = await CH.fetch_chart_data(fmp, "NVDA", "1D", "5min")
+    assert len(fmp.calls) == 1
+    last_day = rows[-1]["date"][:10]
+    assert len([r for r in rows if r["date"][:10] < last_day]) >= 210
+
+
+@pytest.mark.asyncio
+async def test_a_stitched_read_stops_at_a_listing_inside_the_window():
+    """A young listing has no bars before its first day: the read must end there (one
+    extra request to confirm), never loop."""
+    listing = date.today() - timedelta(days=12)
+    fmp = _CappedIntraday(first_day=listing)
+    rows = await CH.fetch_chart_data(fmp, "NEWCO", "1W", "5min")
+    assert rows and rows[0]["date"][:10] >= listing.isoformat()
+    assert len(fmp.calls) <= 3
+    assert _missing_sessions(rows) == []
+
+
+def test_the_recorded_caps_are_the_probed_ones():
+    """Measured live 2026-10-21 (`scripts/probe_fmp_intraday_depth.py`). Changing one
+    without a new probe is a guess about FMP."""
+    assert CH.FMP_INTRADAY_SPAN_DAYS == {"5min": 7, "15min": 42, "30min": 28, "1hour": 89}
 
 
 @pytest.mark.asyncio

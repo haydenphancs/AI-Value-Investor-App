@@ -1419,6 +1419,16 @@ def test_money_map_seed_hygiene():
         assert banned not in seed
 
 
+def test_att_never_gets_a_money_map_whatever_source_proposes_it():
+    """Owner, 2026-10-21: FMP's AT&T segmentation is mislabeled ($24.5B as "Other Capitalized Property
+    Plant and Equipment") and its FY2025 broadband / legacy lines look swapped, so AT&T is out of the seed
+    AND on the never-list — a Trillion Club or theme source proposing it cannot bring it back."""
+    assert "T" not in R.MONEY_MAP_SEED
+    assert "T" in R.MONEY_MAP_EXCLUDED_SYMBOLS
+    assert "T" not in R.merge_money_map_pool(["T", "t", "AVGO"], ["T"])
+    assert "VZ" in R.MONEY_MAP_SEED                     # its neighbour is untouched
+
+
 def test_merge_money_map_pool_order_dedupe_and_exclusions():
     pool = R.merge_money_map_pool(["NVDA", "AVGO", "brk.b", "JPM", "RZLVW", None, 5], ["IONQ", "avgo", "UNH"])
     assert pool[:len(R.MONEY_MAP_SEED)] == R.MONEY_MAP_SEED

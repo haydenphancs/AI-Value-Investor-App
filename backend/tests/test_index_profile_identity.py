@@ -48,7 +48,11 @@ def test_a_profiled_index_still_gets_its_own_identity(symbol):
     meta = _INDEX_PROFILES.get(symbol) or {}
     assert meta.get("name")
     assert meta.get("description")
-    assert isinstance(meta.get("historical_avg_pe"), (int, float))
+    # No per-index P/E anchor (2026-10-21): the profiles' 21 / 25 / 18 sat beside ONE
+    # market-wide composite, so the same figure read "premium" on two screens and "below
+    # average" on the third. The comparison is the composite's own history now.
+    assert "historical_avg_pe" not in meta
+    assert "historical_period" not in meta
 
 
 def test_the_three_profiles_are_actually_distinct():

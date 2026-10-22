@@ -2271,7 +2271,12 @@ class ChatService:
         """
         try:
             from app.services.index_service import get_index_service
-            from app.schemas.chat import MarketOverviewWidget, MarketOverviewSector, MarketOverviewMacroItem
+            from app.schemas.chat import (
+                MARKET_PE_BASIS,
+                MarketOverviewMacroItem,
+                MarketOverviewSector,
+                MarketOverviewWidget,
+            )
 
             # Second gate behind the tool handler's profiled-index check: the index
             # pipeline is the most expensive fetch chat can trigger (paged history + a
@@ -2308,6 +2313,13 @@ class ChatService:
             pe_ratio = _finite_or_none(val.pe_ratio) or 0.0
             pe_known = bool(getattr(val, "pe_known", True)) and pe_ratio > 0
             earnings_yield = _finite_or_none(val.earnings_yield) or 0.0
+            # The composite's OWN 10-year average (2026-10-21), the same for every index.
+            # Known only when the valuation says so: a snapshot built before that day carried a
+            # per-index figure with no flag, and the flag's default reads it as unknown.
+            historical_avg_pe = _finite_or_none(val.historical_avg_pe) or 0.0
+            historical_avg_pe_known = (
+                bool(getattr(val, "historical_avg_pe_known", False)) and historical_avg_pe > 0
+            )
             widget = MarketOverviewWidget(
                 pe_ratio=pe_ratio,
                 pe_known=pe_known,
@@ -2324,7 +2336,9 @@ class ChatService:
                 # 2026-10-09). Same shape as `forward_pe_known`; the 0.0 sentinel stays (iOS
                 # decodes a non-optional Double).
                 earnings_yield_known=pe_known and earnings_yield > 0,
-                historical_avg_pe=_finite_or_none(val.historical_avg_pe) or 0.0,
+                historical_avg_pe=historical_avg_pe,
+                historical_avg_pe_known=historical_avg_pe_known,
+                pe_basis=MARKET_PE_BASIS if pe_known else None,
                 sectors=sectors,
                 advancing=advancing,
                 declining=len(sectors) - advancing,

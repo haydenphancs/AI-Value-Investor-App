@@ -100,7 +100,11 @@ struct ChatMarketOverviewWidget: View {
                     ? String(format: "%.1f%%", data.earningsYield) : "—"
             )
             Spacer()
-            metricPill(label: "10Y Avg", value: String(format: "%.0fx", data.historicalAvgPe))
+            metricPill(
+                label: "10Y Avg",
+                value: data.hasKnownHistoricalAvg
+                    ? String(format: "%.0fx", data.historicalAvgPe) : "—"
+            )
         }
     }
 
@@ -250,7 +254,8 @@ struct ChatMarketOverviewWidget: View {
             forwardPe: 18.2,
             valuationLevel: "Fair Value",
             earningsYield: 4.68,
-            historicalAvgPe: 21.0,
+            historicalAvgPe: 22.1,
+            historicalAvgPeKnown: true,
             sectors: [
                 .init(sector: "Real Estate", changePercent: 1.6),
                 .init(sector: "Technology", changePercent: 0.8),

@@ -495,7 +495,8 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
         "The VIX and the DXY are not in Caydex data."
     ),
     "get_market_overview": (
-        "Fetch overall market valuation (P/E, forward P/E, earnings yield), sector "
+        "Fetch overall market valuation (a US-market composite P/E, the same for every "
+        "index, with its own 10-year average; forward P/E, earnings yield), sector "
         "performance, and macro outlook labels (written outlooks, not measured readings). "
         "For INDEX / broad-market questions, NOT individual stocks."
     ),
@@ -557,7 +558,8 @@ TOOL_CAPABILITIES: Dict[str, str] = {
         "macro readings (rates, Treasury yields, inflation, unemployment and exchange rates)"
     ),
     "get_market_overview": (
-        "get_market_overview for the index's valuation (P/E, forward P/E, earnings yield), "
+        "get_market_overview for the US market's valuation (a composite P/E, the same for "
+        "every index, beside its own 10-year average; earnings yield), "
         "sector performance and macro outlook labels"
     ),
     WEB_SEARCH_TOOL: (

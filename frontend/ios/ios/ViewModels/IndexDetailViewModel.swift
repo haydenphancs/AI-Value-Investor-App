@@ -1015,11 +1015,16 @@ class IndexDetailViewModel: ObservableObject {
             ? String(format: "%.1fx", val.forwardPE) : "unavailable"
         let valYield: String = val.earningsYield > 0
             ? String(format: "%.2f%%", val.earningsYield) : "unavailable"
-        let valAvg: String = String(format: "%.0f", val.historicalAvgPE)
+        // The P/E is ONE US-market composite, the same on every index, and the average is
+        // that same composite's own (2026-10-21) — the model must not read it as this index's.
+        let valAvg: String = val.historicalAvgKnown && val.historicalAvgPE > 0
+            ? String(format: "%.0fx", val.historicalAvgPE) : "unavailable"
+        let valBasis: String = "US market composite (average of the sector median P/Es, "
+            + "the same on every index, not this index's own P/E)"
         parts.append(
-            "VALUATION: P/E(TTM)=\(valPE), Forward P/E=\(valFwd), "
+            "VALUATION — \(valBasis): P/E(TTM)=\(valPE), Forward P/E=\(valFwd), "
             + "Earnings Yield=\(valYield), Level=\(valLevel), "
-            + "Historical Avg P/E (\(val.historicalPeriod))=\(valAvg)x"
+            + "Composite's own \(val.historicalPeriod) avg P/E=\(valAvg)"
         )
 
         // ALL sector performance (not just top 5)

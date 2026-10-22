@@ -317,7 +317,7 @@ The two-tier cache-aside pattern (CLAUDE.md invariant #4) — **not Redis**:
   it to its own TTL on read); the other 9 carry an expiry column the read query filters on (`expires_at`
   in 8, `soft_expires_at` / `hard_expires_at` on `ai_insight_cache`). The reference implementation,
   `profit_power_cache`, is `cached_at`-based. Budgets range from 24 h and close-aligned for market data
-  to 180 days for `ip_intel_cache` (USPTO / FDA counts) and permanent for `crypto_coin_id_cache`
+  to 180 days for `ip_intel_cache` (USPTO / FDA counts; 1 day for a row built while one source failed) and permanent for `crypto_coin_id_cache`
   (the Gemini grounded-research caches — `competitor_intel_cache`, `moat_intel_cache`,
   `price_catalyst_cache`, `geopolitical_macro_cache` — were retired 2026-10-02, §2 "No Google Search grounding", and are empty); §7.1's rule is about WHAT may be stored,
   not for how long. §7.1 states the rule for what may go in here; the short version is that **a live price may

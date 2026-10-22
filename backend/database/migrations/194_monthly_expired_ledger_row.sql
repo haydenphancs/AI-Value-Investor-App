@@ -58,14 +58,16 @@
 -- ⚠️ Never after 196 (196_paid_period_credit_grants.sql). Both replace ensure_credit_period and
 -- the later one wins, so 194 applied last would silently put back the calendar-only body. The
 -- guard below refuses that: once 196's table exists, this file raises and changes nothing
--- (re-apply 196 instead). On a first apply, or a re-run before 196, it is a no-op.
+-- (re-apply the newest migration that defines ensure_credit_period instead: 200 when 200 is
+-- applied, else 198 when 198 is, else 196 — each refuses to run after the next). On a first
+-- apply, or a re-run before 196, it is a no-op.
 
 BEGIN;
 
 DO $$
 BEGIN
     IF to_regclass('public.subscription_credit_periods') IS NOT NULL THEN
-        RAISE EXCEPTION '194 must not be applied after 196: it would replace the newer ensure_credit_period. Re-apply the newest migration that defines it (198 when 198 is applied, else 196) instead.';
+        RAISE EXCEPTION '194 must not be applied after 196: it would replace the newer ensure_credit_period. Re-apply the newest migration that defines it (200 when 200 is applied, else 198 when 198 is applied, else 196) instead.';
     END IF;
 END $$;
 

@@ -14,18 +14,24 @@ used" — at most the old allocation times the share of the old period already e
 Apple refunds the rest of that period.
 
 These run against `_Credits`, the executable model of the SQL in test_credit_pool_isolation
-(one model, never two). The SQL-text guards at the bottom pin the structural half of 196.
+(one model, never two). The SQL-text guards at the bottom pin the structural half of 196 and 198
+on each function's LIVE definition, read through the shared `tests/_migration_sql.py` reader.
 """
 
 from __future__ import annotations
 
+import inspect
+import itertools
 import random
 import re
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 
+import _migration_sql
+from _migration_sql import MIGRATIONS as _MIGRATIONS
+from _migration_sql import (if_block, insert_rows, latest_definition, migration_sources, norm_sql,
+                            set_items, statements, strip_sql_comments)
 import test_credit_pool_isolation as pool
 from test_credit_pool_isolation import _Credits, _next_et_reset, _PLAN_CREDITS
 
@@ -502,26 +508,27 @@ def test_random_lifecycles_keep_every_invariant(seed):
 
 
 # ── The SQL itself: structural guards over the LATEST migration definitions ────────────
+#
+# Every guard here reads a function through `_latest_body`, which is the shared reader
+# (tests/_migration_sql.py): the last `CREATE [OR REPLACE] FUNCTION` in file order, with `--` and
+# `/* */` comments stripped in one pass. Until 2026-10-21 (IAP audit F20) this file had its own
+# regex, which matched only `CREATE OR REPLACE` and stripped only `--`. A later `DROP FUNCTION ...;
+# CREATE FUNCTION` (the shape a return-type change forces; 142 did it to refund_credits) left all
+# fifteen guards reading 198 while the live function changed. It was already wrong: it returned
+# 139's refund_credits, not the live 142. The tests after the guards feed synthetic later
+# migrations IN MEMORY (never a file in migrations/) and require the guards to turn red.
 
-_MIGRATIONS = Path(__file__).resolve().parents[1] / "database" / "migrations"
+_RPCS = ["ensure_credit_period", "grant_tier_upgrade", "revoke_tier_credits", "revoke_paid_period",
+         "reinstate_paid_carry", "record_subscription_transaction"]
 
 
 def _latest_body(name: str) -> tuple[str, str]:
-    pattern = re.compile(
-        rf"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+(?:public\.)?{name}\s*\(.*?AS\s+(\$\w*\$)(.*?)\1",
-        re.IGNORECASE | re.DOTALL,
-    )
-    found = []
-    for path in sorted(_MIGRATIONS.glob("[0-9][0-9][0-9]_*.sql")):
-        text = re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8"))   # comments out
-        found += [(path.name, m.group(2)) for m in pattern.finditer(text)]
-    assert found, f"no definition of {name}() in any migration"
-    return found[-1]
+    """(file name, comment-stripped body) of the live definition of public.<name>."""
+    d = latest_definition(name)
+    return d.file, d.body
 
 
-@pytest.mark.parametrize("name", ["ensure_credit_period", "grant_tier_upgrade", "revoke_tier_credits",
-                                  "revoke_paid_period", "reinstate_paid_carry",
-                                  "record_subscription_transaction"])
+@pytest.mark.parametrize("name", _RPCS)
 def test_the_tier_rpcs_never_name_the_purchased_pool(name):
     """App Store 3.1.1 made structural (117): the granted-pool writers name only granted
     columns, so no branch of theirs can expire a credit someone bought."""
@@ -572,7 +579,8 @@ def test_a_refund_claws_back_only_the_period_it_was_for():
 
 
 def _migration_text(name: str) -> str:
-    return re.sub(r"--[^\n]*", "", (_MIGRATIONS / name).read_text(encoding="utf-8"))
+    """One migration file by name, comments stripped by the shared reader (`--` AND `/* */`)."""
+    return strip_sql_comments((_MIGRATIONS / name).read_text(encoding="utf-8"))
 
 
 def _norm(sql: str) -> str:
@@ -633,9 +641,13 @@ def test_a_refunded_period_is_never_reinstated_while_the_register_holds_its_refu
     assert branch, f"{source}: the REFUND_REVERSED branch is gone"
     clear = re.search(r"UPDATE\s+public\.subscription_credit_periods\s+SET(.*?)WHERE\s+id\s*=\s*v_seen_row\.id\s*;",
                       branch.group(1), re.S)
+    # 200 (IAP audit F15) also clears the clawback's cover and ledger mark: a stale mark would
+    # deduct a LATER window's spend at the next reinstatement.
     assert clear and _norm(clear.group(1)) == (
-        "revoked_at = NULL, revoked_remaining = NULL, revoke_requested_at = NULL, reinstated_at = now()"), (
-        "the reinstate branch must clear revoke_requested_at, or the next call claws it back again")
+        "revoked_at = NULL, revoked_remaining = NULL, revoke_requested_at = NULL, "
+        "revoked_cover = NULL, revoked_ledger_id = NULL, reinstated_at = now()"), (
+        "the reinstate branch must clear revoke_requested_at (or the next call claws it back "
+        "again) and 200's revoked_cover / revoked_ledger_id")
 
 
 _CARRY_UPGRADE_LOOKUP = ("SELECT * INTO v_u FROM public.subscription_credit_periods "
@@ -700,13 +712,15 @@ def test_the_in_force_lineages_own_next_key_is_evaluated_when_the_winner_cannot_
     assert len(re.findall(r"v_retarget\s*:=", body)) == 1, source
     retarget = re.search(r"v_retarget\s*:=(.*?);", loop.group(1), re.S)
     assert retarget, source
-    # EXACT, not "each clause is a substring": `NOT v_reinstate OR v_cur_holds`, `AND NOT
-    # v_cur_holds` and `AND NOT v_cur_sub.status = 'active'` all contain every old substring.
-    # Seven conjuncts under one AND: the winner neither starts nor reinstates, the in-force
-    # lineage holds, its own row can carry a period now, and it is not the winner already.
+    # EXACT, not "each clause is a substring": `NOT v_reinstate OR v_cur_holds` and `AND NOT
+    # v_cur_holds` contain every old substring. Six conjuncts under one AND: the winner neither
+    # starts nor reinstates, the in-force lineage holds, its own row records a LATER period than
+    # the one in force (200, IAP audit F11: whatever its status — grace, retry, or 'active' past
+    # its end; 198 required 'active' with a future end and so never granted such a renewal), and
+    # it is not the winner already.
     expected = (
         "COALESCE(NOT v_start_paid AND NOT v_reinstate AND v_cur_holds "
-        "AND v_cur_sub.status = 'active' AND v_cur_sub.current_period_end > now() "
+        "AND v_cur_sub.current_period_end > v_cur.period_end "
         "AND COALESCE(v_cur_sub.original_transaction_id, '') <> '' "
         "AND v_sub.original_transaction_id IS DISTINCT FROM v_cur_sub.original_transaction_id, FALSE)")
     assert _norm(retarget.group(1)) == expected, (
@@ -724,6 +738,206 @@ def test_the_in_force_lineages_own_next_key_is_evaluated_when_the_winner_cannot_
     for name in ("v_new_key", "v_reinstate", "v_start_paid"):
         assert re.search(rf"{name}\s*:=", loop.group(1)), name
         assert not re.search(rf"{name}\s*:=", body[:loop.start()] + body[loop.end():]), name
+
+
+# ── Migration 200 (IAP audit phase 2: F10, F11, F15) ───────────────────────────────────────────
+
+def test_the_in_force_lineages_later_period_is_a_new_key_whatever_its_status():
+    """F11: a renewal no credit call saw while its row was active must still be a new key once the
+    row is in grace or retry, or 'active' past its end — but only the in-force lineage's OWN row,
+    only a LATER period than the one in force, and never one the register holds a refund of."""
+    source, body = _latest_body("ensure_credit_period")
+    new_key = re.search(r"v_new_key\s*:=(.*?);", body, re.S)
+    assert new_key and len(re.findall(r"v_new_key\s*:=", body)) == 1, source
+    expected = (
+        "COALESCE(v_paid_row AND ((v_sub.status = 'active' AND v_sub.current_period_end > now()) "
+        "OR (v_cur_holds AND v_sub.original_transaction_id = v_cur.original_transaction_id "
+        "AND v_sub.current_period_end > v_cur.period_end "
+        "AND NOT EXISTS (SELECT 1 FROM public.subscription_transactions t "
+        "WHERE t.original_transaction_id = v_sub.original_transaction_id "
+        f"AND t.period_end = v_sub.current_period_end AND {_UNREVERSED_REFUND}))) "
+        "AND COALESCE(v_sub.original_transaction_id, '') <> '' "
+        "AND NOT (v_has_cur AND v_cur.original_transaction_id = v_sub.original_transaction_id "
+        "AND v_cur.period_end = v_sub.current_period_end), FALSE)")
+    assert _norm(new_key.group(1)) == expected, (
+        f"{source}: the candidate key changed:\n  {_norm(new_key.group(1))}\n  expected {expected}")
+
+
+def _branch(body: str, head: str, end: str) -> str:
+    start = re.search(head, body)
+    assert start, f"no {head!r}"
+    return body[start.start():body.index(end, start.start())]
+
+
+def test_the_refund_branch_records_what_the_clawback_covered_and_where_the_ledger_stood():
+    """F15: the REFUND branch stamps revoked_cover (the write-off: what the refunded allocation
+    paid for above the floor) and revoked_ledger_id (the user's last ledger id), read under the
+    balance lock, BEFORE the clawback's own tier_revoked row — or that row would be inside the
+    reinstatement window."""
+    source, body = _latest_body("ensure_credit_period")
+    branch = _branch(body, r"v_floor\s*:=\s*GREATEST\(v_alloc,\s*v_row\.used\)", "RETURN (v_floor - v_row.used);")
+    n = _norm(branch)
+    mark = "SELECT COALESCE(max(t.id), 0) INTO v_mark FROM public.credit_transactions t WHERE t.user_id = p_user_id;"
+    assert n.count(mark) == 1, f"{source}: the ledger mark is gone or doubled"
+    stamp = _PERIOD_UPDATE.search(n)
+    assert stamp and stamp.group(2) == "id = v_cur.id", source
+    assert set_items(stamp.group(1)) == {
+        "revoked_at": "now()", "revoked_remaining": "v_remaining",
+        "revoked_cover": "v_writeoff", "revoked_ledger_id": "v_mark"}, stamp.group(1)
+    assert n.index(mark) < stamp.start() < n.index("'tier_revoked'"), (
+        f"{source}: the mark must be read before the clawback writes its own ledger row")
+    lock = re.search(r"FROM\s+public\.user_credits\s+WHERE\s+user_id\s*=\s*p_user_id\s+FOR\s+UPDATE", body)
+    assert lock and lock.start() < body.index("INTO v_mark"), f"{source}: the mark must be read under the lock"
+
+
+def test_a_reinstatement_deducts_the_granted_pool_spend_after_the_clawback():
+    """F15 (c): REFUND_REVERSED gives back revoked_remaining less the window's spend — every
+    granted-pool movement after the mark, up to the next paid period's start, that is not a system
+    reason (the SQL's NOT IN list = the model's `_GRANTED_POOL_SYSTEM_REASONS`). A period with no
+    mark (clawed back before 200) is reinstated exactly as before."""
+    source, body = _latest_body("ensure_credit_period")
+    branch = _branch(body, r"IF\s+v_reinstate\s+THEN", "RETURN v_restore;")
+    n = _norm(branch)
+    exclude = re.search(r"AND t\.reason NOT IN \((.*?)\);", n)
+    assert exclude, f"{source}: the window's reason exclusion is gone"
+    assert {r.strip().strip("'") for r in exclude.group(1).split(",")} == pool._GRANTED_POOL_SYSTEM_REASONS
+    for piece in (
+        "v_total := v_restore; v_used := 0;",
+        "IF v_seen_row.revoked_ledger_id IS NOT NULL THEN",
+        "SELECT min(t.id) INTO v_stop FROM public.credit_transactions t WHERE t.user_id = p_user_id "
+        "AND t.id > v_seen_row.revoked_ledger_id AND t.reason IN ('plan_period', 'plan_reinstated');",
+        # final review (2026-10-21): refunds of PRE-mark charges go back into the total; the
+        # window's own charges and refunds net into `used`
+        "SELECT COALESCE(SUM(t.granted_delta) FILTER (WHERE t.reverses_id IS NOT NULL "
+        "AND t.reverses_id <= v_seen_row.revoked_ledger_id), 0), "
+        "COALESCE(-SUM(t.granted_delta) FILTER (WHERE t.reverses_id IS NULL "
+        "OR t.reverses_id > v_seen_row.revoked_ledger_id), 0) INTO v_pre_back, v_window "
+        "FROM public.credit_transactions t "
+        "WHERE t.user_id = p_user_id AND t.id > v_seen_row.revoked_ledger_id "
+        "AND (v_stop IS NULL OR t.id < v_stop) AND t.reason NOT IN (",
+        "v_total := v_restore + v_pre_back + GREATEST(-v_window, 0); "
+        "v_used := LEAST(GREATEST(v_window, 0), v_total);",
+        "v_restore := v_total - v_used;",
+    ):
+        assert n.count(piece) == 1, f"{source}: the reinstatement lost (or doubled) {piece!r}"
+    balance = re.search(r"UPDATE public\.user_credits SET (.*?) WHERE user_id = p_user_id;", n)
+    assert balance, source
+    items = set_items(balance.group(1))
+    assert (items["total"], items["used"]) == ("v_total", "v_used"), items
+    assert n.index("v_restore := v_total - v_used;") < n.index("VALUES (p_user_id, v_restore, v_restore, 0, 'plan_reinstated'"), (
+        f"{source}: the plan_reinstated row must carry what was actually restored")
+
+
+def test_the_window_counts_no_system_reason_and_every_spend_or_refund():
+    """The NOT IN list decides what a reinstatement deducts. A granted-pool system reason missing
+    from it would be read as spend (a reset or an expiry deducted twice); a spend or refund in it
+    would be given back for free. Every reason the history screen knows is classified here."""
+    from app.services import credit_history_service as hist
+    system = pool._GRANTED_POOL_SYSTEM_REASONS
+    for reason, (kind, _title, _ref) in hist._REASONS.items():
+        if reason.startswith("pack_"):
+            continue                            # purchased pool only: granted_delta is 0 either way
+        if kind in (hist.KIND_GRANT, hist.KIND_EXPIRE, hist.KIND_REVOKE):
+            assert reason in system, f"{reason} ({kind}) moves the granted pool outside any spend"
+        else:
+            assert reason not in system, f"{reason} ({kind}) is a spend or a refund: window spend"
+    # And every reason literal any migration's ledger INSERT writes (a new reason must be added to
+    # the history table first — its own coverage guard — so the loop above classifies it by kind).
+    written = set()
+    for _name, text in migration_sources():
+        for _at, stmt in statements(strip_sql_comments(text), r"\bINSERT INTO (?:public\.)?credit_transactions\b"):
+            written |= set(re.findall(r"'([a-z_]+)'", stmt)) & set(hist._REASONS)
+    assert {"grant", "monthly_reset", "monthly_expired", "plan_period", "tier_revoked"} <= written, written
+    assert {r for r in written if not r.startswith("pack_")} <= system, written - system
+
+
+def test_refund_credits_rolls_the_period_first():
+    """F10: after its own FOR UPDATE and the no_credits_row return (ensure would INSERT a row for
+    a deleted user and raise 23503), before the debit search, and the pools are re-read."""
+    source, body = _latest_body("refund_credits")
+    n = _norm(body)
+    roll = "PERFORM public.ensure_credit_period(p_user_id); "
+    reread = "SELECT used, purchased_used INTO v_old_used, v_old_pused FROM public.user_credits WHERE user_id = p_user_id;"
+    assert n.count(roll) == 1, f"{source}: refund_credits must roll the period exactly once"
+    assert n.index(roll + reread) >= 0, f"{source}: the pools must be re-read right after the roll"
+    lock = n.index("FROM public.user_credits WHERE user_id = p_user_id FOR UPDATE;")
+    no_row = n.index("'outcome', 'no_credits_row'")
+    search = n.index("IF p_ref_id IS NOT NULL AND p_ref_id <> '' THEN")
+    assert lock < no_row < n.index(roll) < search, f"{source}: the roll is out of place"
+
+
+def test_a_period_start_records_its_ledger_order_mark():
+    """Final review (2026-10-21): the start branch stamps applied_ledger_id with its own plan_period
+    row's id, read under the balance lock right after that row — the bound the cover lookup uses."""
+    source, body = _latest_body("ensure_credit_period")
+    branch = _norm(_branch(body, r"IF\s+v_start_paid\s+THEN", "RETURN (v_plan_alloc + v_carry);"))
+    piece = ("VALUES (p_user_id, v_plan_alloc, v_plan_alloc, 0, 'plan_period', "
+             "v_sub.original_transaction_id, v_plan_alloc + v_carry); "
+             "SELECT max(t.id) INTO v_applied FROM public.credit_transactions t WHERE t.user_id = p_user_id; "
+             "UPDATE public.subscription_credit_periods SET applied_ledger_id = v_applied WHERE id = v_period_id;")
+    assert branch.count(piece) == 1, f"{source}: the start's ledger-order mark changed:\n  {branch}"
+
+
+def test_refund_credits_absorbs_a_covered_charge_before_the_caps():
+    """F15: the cover lookup — a clawed-back period whose clawback came after the debit
+    (revoked_ledger_id >= the debit) and which the debit was charged in (in LEDGER order, after the
+    period's own plan_period row; periods started before 200 fall back to applied_at <= its
+    created_at) — runs before the caps; a wholly or partly covered charge whose caps move nothing
+    is paired by a 0/0/0 row and returns before 142's capped_to_zero relabel."""
+    source, body = _latest_body("refund_credits")
+    n = _norm(body)
+    lookup = ("SELECT p.id, p.revoked_cover INTO v_cover_id, v_cover FROM public.subscription_credit_periods p "
+              "WHERE p.user_id = p_user_id AND p.revoked_at IS NOT NULL AND p.revoked_cover > 0 "
+              "AND p.revoked_ledger_id >= v_debit_id "
+              "AND (CASE WHEN p.applied_ledger_id IS NOT NULL THEN p.applied_ledger_id < v_debit_id "
+              "ELSE p.applied_at <= v_debit_at END) "
+              "ORDER BY p.revoked_ledger_id, p.id LIMIT 1 FOR UPDATE;")
+    assert n.count(lookup) == 1, f"{source}: the cover lookup changed"
+    assert "t.created_at INTO v_debit_id, v_spent_granted, v_spent_purch, v_debit_at" in n, source
+    absorb = ("v_absorb := LEAST(v_spent_granted, v_cover); UPDATE public.subscription_credit_periods "
+              "SET revoked_cover = revoked_cover - v_absorb, revoked_remaining = COALESCE(revoked_remaining, 0) "
+              "+ v_absorb WHERE id = v_cover_id; v_spent_granted := v_spent_granted - v_absorb;")
+    assert n.count(absorb) == 1, f"{source}: the absorb step changed"
+    caps = n.index("IF v_have_split THEN v_back_purch")
+    zero = n.index("IF v_back_granted + v_back_purch = 0 THEN")
+    assert n.index(lookup) < caps < zero, f"{source}: the cover must be taken before the caps"
+    block = if_block(n, zero)
+    covered = block.index("IF v_absorb > 0 THEN")
+    assert covered < block.index("IF v_outcome = 'refunded' AND v_debit_id IS NOT NULL THEN"), (
+        f"{source}: a covered charge must return before 142's capped_to_zero relabel")
+    pairing = [r for r in insert_rows(block, "public.credit_transactions")]
+    assert pairing == [{"user_id": "p_user_id", "delta": "0", "granted_delta": "0", "purchased_delta": "0",
+                        "reason": "p_reason", "ref_id": "p_ref_id", "balance_after": "v_spendable",
+                        "reverses_id": "v_debit_id", "covered": "v_absorb"}], pairing
+    # Which of the two (review of 200, 2026-10-21): wholly covered → covered_by_clawback (settled);
+    # any rest left → capped_to_zero (owed). An inverted or always-true test silences a real owed rest.
+    branch = re.search(r"IF v_absorb > 0 THEN IF (.*?) THEN v_outcome := 'capped_to_zero'; RAISE WARNING "
+                       r"[^;]*; ELSE v_outcome := 'covered_by_clawback'; END IF;", block)
+    assert branch and branch.group(1) == "v_spent_granted + GREATEST(COALESCE(v_spent_purch, 0), 0) > 0", (
+        f"{source}: the covered-vs-owed decision changed")
+    assert ("RETURN jsonb_build_object('outcome', v_outcome, 'refunded', 0, 'covered', v_absorb, "
+            "'spendable', v_spendable);") in block, f"{source}: the covered reply changed"
+    assert n.count("|| CASE WHEN v_absorb > 0 THEN jsonb_build_object('covered', v_absorb) ELSE '{}'::jsonb END;") == 1, (
+        f"{source}: a refunded reply must carry `covered` exactly when a clawback absorbed some of it")
+    moved = [r for r in insert_rows(n, "public.credit_transactions") if r.get("delta") != "0"]
+    assert [r.get("covered") for r in moved] == ["v_absorb"], (
+        f"{source}: the refund row must record what the clawback covered: {moved}")
+
+
+def test_a_replay_of_a_short_refund_reports_what_is_still_owed():
+    """Review of 200 (2026-10-21): a lost reply's retry answers already_refunded. The earlier refund
+    settled its rows' delta + covered; short of the charge, the replay returns `short` so
+    credit_service pages it as partial instead of reading the owed rest as settled."""
+    source, body = _latest_body("refund_credits")
+    n = _norm(body)
+    for piece in (
+        "v_outcome := 'already_refunded'; SELECT COALESCE(SUM(r.delta), 0) + COALESCE(SUM(r.covered), 0) "
+        "INTO v_settled FROM public.credit_transactions r WHERE r.reverses_id = v_reversed_id; "
+        "v_short := GREATEST(p_amount - v_settled, 0);",
+        "RETURN jsonb_build_object('outcome', v_outcome, 'refunded', 0, 'spendable', v_spendable) "
+        "|| CASE WHEN v_short > 0 THEN jsonb_build_object('short', v_short) ELSE '{}'::jsonb END;",
+    ):
+        assert n.count(piece) == 1, f"{source}: the replay's shortfall lost (or doubled) {piece!r}"
 
 
 def test_the_max_period_end_high_water_mark_is_a_trigger_never_a_check():
@@ -799,6 +1013,35 @@ def test_196_and_194_refuse_to_run_after_198():
         assert ddl.index("RAISE EXCEPTION") < ddl.index("CREATE OR REPLACE FUNCTION"), name
 
 
+_AFTER_200 = re.compile(
+    r"IF\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+information_schema\.columns\s+WHERE\s+table_schema\s*=\s*'public'\s+"
+    r"AND\s+table_name\s*=\s*'subscription_credit_periods'\s+AND\s+column_name\s*=\s*'revoked_ledger_id'\s*\)\s+"
+    r"THEN\s+RAISE\s+EXCEPTION\s+'(\d{3}) must not be applied after 200")
+
+
+def test_142_and_198_refuse_to_run_after_200_and_the_older_guards_name_it():
+    """Re-applying 142 (DROP + CREATE refund_credits) or 198 (ensure_credit_period) after 200 would
+    put back the bodies without the period roll, the late renewal and the clawback cover. Keyed on
+    200's column, the one fact that survives a later redefinition. 194/196's refusals point at 200."""
+    for name in ("142_refund_credits_reports_its_outcome.sql", _M198):
+        ddl = _migration_text(name)
+        guard = _AFTER_200.search(ddl)
+        assert guard and guard.group(1) == name[:3], name
+        first_ddl = min(i for i in (ddl.find("DROP FUNCTION"), ddl.find("CREATE OR REPLACE FUNCTION"),
+                                    ddl.find("ALTER TABLE"), ddl.find("CREATE TABLE")) if i >= 0)
+        assert guard.start() < first_ddl and ddl.index("BEGIN;") < guard.start(), name
+    for name in ("194_monthly_expired_ledger_row.sql", "196_paid_period_credit_grants.sql"):
+        refusal = re.search(r"RAISE\s+EXCEPTION\s+'([^']*(?:''[^']*)*)'", _migration_text(name)).group(1)
+        assert "200" in refusal, f"{name}'s refusal must name 200: {refusal}"
+    # 100 defines ensure_credit_period with the same signature and return type: re-run after 196, it
+    # would silently put back the calendar-only body (review of 200, 2026-10-21).
+    ddl = _migration_text("100_credit_tiers_and_monthly_allocation.sql")
+    guard = re.search(r"IF\s+to_regclass\('public\.subscription_credit_periods'\)\s+IS\s+NOT\s+NULL\s+THEN\s+"
+                      r"RAISE\s+EXCEPTION\s+'100 must not be applied after 196[^']*200", ddl)
+    assert guard and guard.start() < ddl.index("CREATE TABLE IF NOT EXISTS public.plan_credits"), (
+        "100 must refuse to run once 196's table exists, before any statement")
+
+
 def test_198_drops_one_row_per_account_and_keys_rows_by_lineage():
     ddl = _migration_text(_M198)
     assert re.search(r"DROP\s+CONSTRAINT\s+IF\s+EXISTS\s+subscriptions_user_id_key", ddl)
@@ -811,8 +1054,7 @@ def test_198_drops_one_row_per_account_and_keys_rows_by_lineage():
 
 
 def test_the_backfill_runs_once_and_only_for_periods_the_old_code_paid():
-    ddl = (_MIGRATIONS / "196_paid_period_credit_grants.sql").read_text(encoding="utf-8")
-    ddl = re.sub(r"--[^\n]*", "", ddl)
+    ddl = _migration_text("196_paid_period_credit_grants.sql")
     # The DO block that INSERTs the backfill rows (196 also opens with its after-198 guard).
     blocks = re.findall(r"DO \$\$(.*?)END \$\$;", ddl, re.S)
     backfill = next(b for b in blocks if "INSERT INTO public.subscription_credit_periods" in b)
@@ -824,3 +1066,206 @@ def test_the_backfill_runs_once_and_only_for_periods_the_old_code_paid():
     assert "comp_tier" in backfill, "a comp tier at or above the plan must stay on the calendar"
     ddl = "\n".join(p.read_text(encoding="utf-8") for p in sorted(_MIGRATIONS.glob("[0-9][0-9][0-9]_*.sql")))
     assert re.search(r"UNIQUE\s*\(\s*original_transaction_id\s*,\s*period_end\s*\)", ddl), "the exactly-once key"
+
+
+# ── The shared reader, and the guards above against a LATER redefinition (IAP audit F20) ──────
+#
+# All in memory: `_with_later` appends one synthetic migration to the real sources through
+# `_migration_sql.migration_sources`, which `latest_definition` looks up at call time. Nothing is
+# written to migrations/. A test that calls `_with_later` is a non-vacuity test, never a guard:
+# `_guards_on_the_reader` relies on that to find the guards.
+
+_SYNTHETIC = "999_synthetic_redefinition.sql"
+_CREATE_SPELLINGS = ["CREATE FUNCTION", "create function", "CREATE OR REPLACE FUNCTION"]
+_SEVEN = _RPCS + ["subscriptions_keep_max_period_end"]
+
+
+def _redefinition(name: str, body: str, create: str) -> str:
+    """A later migration that redefines public.<name> with `body` (header copied from the live
+    one). A plain CREATE comes after a DROP, the shape a return-type change forces."""
+    header = latest_definition(name).header
+    drop = "" if "replace" in create.lower() else f"DROP FUNCTION IF EXISTS public.{name};\n"
+    return f"BEGIN;\n{drop}{create} public.{name}({header}AS $fn${body}$fn$;\nCOMMIT;\n"
+
+
+def _with_later(monkeypatch, later: str) -> None:
+    real = migration_sources()
+    monkeypatch.setattr(_migration_sql, "migration_sources", lambda: real + [(_SYNTHETIC, later)])
+
+
+@pytest.mark.parametrize("create", _CREATE_SPELLINGS)
+@pytest.mark.parametrize("name", _SEVEN + ["refund_credits"])
+def test_the_reader_takes_a_later_redefinition_in_every_create_spelling(name, create, monkeypatch):
+    later = _redefinition(name, "\nBEGIN\n    RETURN NULL;\nEND;\n", create)
+    _with_later(monkeypatch, later)
+    got = latest_definition(name)
+    assert got.file == _SYNTHETIC, f"a later `{create}` of {name}() was not read; got {got.file}"
+    assert norm_sql(got.body) == "BEGIN RETURN NULL; END;", got.body
+
+
+@pytest.mark.parametrize("name,floor", [
+    # `>=`, never a pinned number: migration 200+ redefines some of these. The old reader answered
+    # 139 for refund_credits — a body that stopped running when 142 dropped and re-created it.
+    ("refund_credits", 142), ("grant_tier_upgrade", 196), ("ensure_credit_period", 198),
+    ("revoke_tier_credits", 198), ("revoke_paid_period", 198), ("reinstate_paid_carry", 198),
+    ("record_subscription_transaction", 198), ("subscriptions_keep_max_period_end", 198),
+])
+def test_the_live_definitions_are_at_least_the_ones_these_guards_were_written_for(name, floor):
+    source = latest_definition(name).file
+    assert int(source[:3]) >= floor, f"{name}() is read from {source}, older than {floor}"
+
+
+def test_a_block_commented_copy_after_the_live_definition_is_not_read(monkeypatch):
+    """A rollback copy kept in /* */ AFTER the redefinition must not be taken for the live body."""
+    name = "revoke_paid_period"
+    d = latest_definition(name)
+    live = f"CREATE OR REPLACE FUNCTION public.{name}({d.header}AS $$\nBEGIN RETURN NULL; END;\n$$;\n"
+    rollback = (f"/* rollback copy:\nCREATE OR REPLACE FUNCTION public.{name}({d.header}AS $$\n"
+                f"{d.body}\n$$;\n*/\n")
+    _with_later(monkeypatch, "BEGIN;\n" + live + rollback + "COMMIT;\n")
+    got = latest_definition(name)
+    assert got.file == _SYNTHETIC and norm_sql(got.body) == "BEGIN RETURN NULL; END;", got.body
+
+
+def test_a_slash_star_inside_a_line_comment_or_a_literal_opens_nothing():
+    """K82's old reader removed /* */ BEFORE `--` and literals, so a `/*` in a `--` line (110, 157,
+    163, 173 have one) or in a '...' literal (113) paired with any later `*/` and deleted every
+    definition in between."""
+    sql = ("-- see /api/v1/admin/* for the callers\n"
+           "COMMENT ON TABLE public.t IS 'Grants access to /api/v1/admin/*. Set manually';\n"
+           "CREATE FUNCTION public.f() RETURNS int LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END $$;\n"
+           "/* a real block comment */\n")
+    out = strip_sql_comments(sql)
+    assert "CREATE FUNCTION public.f()" in out and "'Grants access to /api/v1/admin/*. Set manually'" in out
+    assert "see /api" not in out and "real block" not in out
+    assert latest_definition("f", [("200_x.sql", sql)]).file == "200_x.sql"
+
+
+def test_literals_are_text_and_block_comments_nest():
+    s = "RAISE WARNING 'a -- b /* c'; x := 1; -- gone\ny := 2; /* outer /* inner */ still */ z := 3;"
+    out = strip_sql_comments(s)
+    assert norm_sql(out) == "RAISE WARNING 'a -- b /* c'; x := 1; y := 2; z := 3;", out
+    assert strip_sql_comments("a /* x\n y */ b") == "a \n b", "a block comment must keep its lines"
+    for broken in ("a /* never closed", "a /* x /* y */ still open", "x AS $fn$ BEGIN RETURN 1;"):
+        with pytest.raises(AssertionError, match="unterminated"):
+            strip_sql_comments(broken)
+
+
+def test_a_stray_apostrophe_in_dollar_quoted_prose_stays_in_its_region():
+    """A `'` in dollar-quoted prose opens no literal. Read as one, it pairs with the next `'` in the
+    file and keeps every comment in between as code — here a commented-out purchased_total."""
+    sql = ("COMMENT ON FUNCTION public.f() IS $c$it's the old one$c$;\n"
+           "CREATE FUNCTION public.f() RETURNS int LANGUAGE plpgsql AS $$\nBEGIN\n"
+           "    -- RETURN purchased_total;\n    RETURN 1; -- it's fine\nEND $$;\n")
+    body = latest_definition("f", [("200_x.sql", sql)]).body
+    assert norm_sql(body) == "BEGIN RETURN 1; END", body
+
+
+def test_a_drop_after_the_last_definition_fails_loudly(monkeypatch):
+    """A function dropped and not re-created has no live body; handing back the dropped one would
+    keep every guard green over nothing. A DROP + CREATE pair (142) and a DROP of a LONGER name
+    still read as live definitions."""
+    sql = ("CREATE FUNCTION public.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;\n"
+           "DROP FUNCTION IF EXISTS public.f_v2(), public.g();\n")
+    assert latest_definition("f", [("200_x.sql", sql)]).file == "200_x.sql"
+    with pytest.raises(AssertionError, match="DROPPED in 201_y.sql"):
+        latest_definition("f", [("200_x.sql", sql), ("201_y.sql", "DROP FUNCTION public.g(), f();")])
+    _with_later(monkeypatch, "BEGIN;\nDROP FUNCTION IF EXISTS "
+                             "public.revoke_paid_period(UUID, TEXT, TEXT, TEXT, TIMESTAMPTZ);\nCOMMIT;\n")
+    with pytest.raises(AssertionError, match="DROPPED"):
+        latest_definition("revoke_paid_period")
+    assert int(latest_definition("refund_credits").file[:3]) >= 142, "142's DROP + CREATE must read as live"
+
+
+def _inject_purchased_write(body: str) -> str:
+    mutated = re.sub(r"\bBEGIN\b", "BEGIN\n    UPDATE public.user_credits SET purchased_total = 0 "
+                     "WHERE user_id = p_user_id;", body, count=1)
+    assert mutated != body, "no BEGIN to inject after — re-derive this mutation"
+    return mutated
+
+
+@pytest.mark.parametrize("create", _CREATE_SPELLINGS)
+@pytest.mark.parametrize("name", _RPCS)
+def test_a_later_redefinition_naming_the_purchased_pool_turns_the_3_1_1_guard_red(name, create, monkeypatch):
+    """F20's scenario: a later migration re-creates a granted-pool writer (as DROP + plain CREATE
+    when its return type changes) and the new body names purchased_total. The 3.1.1 guard must read
+    THAT body and fail. The old reader kept reading 198 and stayed green."""
+    test_the_tier_rpcs_never_name_the_purchased_pool(name)          # green on the real tree first
+    later = _redefinition(name, _inject_purchased_write(latest_definition(name).body), create)
+    _with_later(monkeypatch, later)
+    assert _latest_body(name)[0] == _SYNTHETIC
+    with pytest.raises(AssertionError, match="names the purchased pool"):
+        test_the_tier_rpcs_never_name_the_purchased_pool(name)
+
+
+def test_a_later_plain_create_without_the_register_recheck_turns_its_guard_red(monkeypatch):
+    test_the_keyed_clawback_rechecks_the_refund_under_the_balance_lock()
+    body = latest_definition("revoke_paid_period").body
+    mutated = re.sub(r"SELECT \* INTO v_t FROM public\.subscription_transactions.*?'reversed'\);\s*END IF;",
+                     "", body, count=1, flags=re.S)
+    assert mutated != body, "the register re-check block moved — re-derive this mutation"
+    _with_later(monkeypatch, _redefinition("revoke_paid_period", mutated, "CREATE FUNCTION"))
+    with pytest.raises(AssertionError):
+        test_the_keyed_clawback_rechecks_the_refund_under_the_balance_lock()
+
+
+def _param_sets(fn) -> list[dict]:
+    """The keyword sets pytest runs `fn` with, from its own parametrize marks."""
+    names, combos = [], [()]
+    for mark in getattr(fn, "pytestmark", []):
+        if mark.name != "parametrize":
+            continue
+        argnames = mark.args[0]
+        argnames = [a.strip() for a in argnames.split(",")] if isinstance(argnames, str) else list(argnames)
+        values = [v.values if type(v).__name__ == "ParameterSet" else v for v in mark.args[1]]
+        values = [tuple(v) if len(argnames) > 1 else (v,) for v in values]
+        names += argnames
+        combos = [c + v for c, v in itertools.product(combos, values)]
+    params = list(inspect.signature(fn).parameters)
+    assert sorted(params) == sorted(names), (
+        f"{fn.__name__} takes {params}, not only parametrized arguments: extend _param_sets")
+    return [dict(zip(names, c)) for c in combos]
+
+
+def _guards_on_the_reader() -> list[tuple]:
+    """Every test in this module that reads a function through `_latest_body`, except the
+    non-vacuity tests (they call `_with_later`), with each argument set it runs with."""
+    out = []
+    for attr, fn in sorted(globals().items()):
+        if not (attr.startswith("test_") and inspect.isfunction(fn)):
+            continue
+        src = inspect.getsource(fn)
+        if "_latest_body(" in src and "_with_later(" not in src:
+            out += [(fn, kw) for kw in _param_sets(fn)]
+    return out
+
+
+def _passes(fn, kw) -> bool:
+    try:
+        fn(**kw)
+    except Exception:                       # a ValueError on a vanished anchor is red too
+        return False
+    return True
+
+
+def _stub_body() -> str:
+    return "\nBEGIN\n    UPDATE public.user_credits SET purchased_total = 0;\n    RETURN NULL;\nEND;\n"
+
+
+@pytest.mark.parametrize("create", ["CREATE FUNCTION", "CREATE OR REPLACE FUNCTION"])
+def test_every_guard_on_the_reader_turns_red_when_a_later_migration_stubs_its_function(create, monkeypatch):
+    """The F20 property for ALL of them at once, including guards added later: one synthetic
+    migration redefines the seven functions with a stub that names the purchased pool and does
+    nothing else. Each guard must then fail — the 3.1.1 guard because the stub names
+    purchased_total, every other one because what it pins is gone. A guard still green on the stub
+    is not reading the live definition, or checks only an absence the stub does not violate:
+    extend `_stub_body` rather than exempting it."""
+    guards = _guards_on_the_reader()
+    assert len(guards) >= 15, f"the sweep found {len(guards)} guard runs: _guards_on_the_reader has rotted"
+    red_at_baseline = [f"{fn.__name__}{kw}" for fn, kw in guards if not _passes(fn, kw)]
+    assert not red_at_baseline, f"guards red on the real tree: {red_at_baseline}"
+    # refund_credits too: 200's F10 / F15 pins read it (IAP audit phase 2).
+    later = "".join(_redefinition(n, _stub_body(), create) for n in _SEVEN + ["refund_credits"])
+    _with_later(monkeypatch, later)
+    green = [f"{fn.__name__}{kw}" for fn, kw in guards if _passes(fn, kw)]
+    assert not green, f"still green over a stubbed later `{create}`: {green}"

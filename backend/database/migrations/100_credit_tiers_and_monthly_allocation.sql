@@ -34,8 +34,20 @@
 --
 -- "Max" reuses the existing user_tier value 'premium' (display_name = 'Max') to avoid an
 -- enum change. Safe to re-run: every statement is idempotent.
+--
+-- ⚠️ Never after 196 (added 2026-10-21, IAP audit phase 2 review): this file's CREATE OR REPLACE
+-- of ensure_credit_period has the same signature and return type as 196/198/200's, so a re-run
+-- would silently put back the calendar-only body. The guard below refuses once 196's table
+-- exists; re-apply the newest migration that defines the function instead (200 when applied).
 
 BEGIN;
+
+DO $$
+BEGIN
+    IF to_regclass('public.subscription_credit_periods') IS NOT NULL THEN
+        RAISE EXCEPTION '100 must not be applied after 196: it would replace the newer ensure_credit_period. Re-apply the newest migration that defines it (200 when 200 is applied, else 198, else 196) instead.';
+    END IF;
+END $$;
 
 -- ── 1. plan_credits: tier -> monthly allocation + storefront price ───────────────────
 CREATE TABLE IF NOT EXISTS public.plan_credits (

@@ -15,7 +15,8 @@ Migration 118 then taught `spend_credits` / `refund_credits` about both pools.
 These tests MODEL THE SQL rather than stub it, in the same spirit as
 `test_iap_entitlement.FakeSupabase`: a fake that returns bland success for every RPC makes a
 credit test pass no matter what the balance does, which is exactly how a money bug survives a
-green suite. **If you change the SQL in 100/112/114/117/118/196, change `_Credits` below.**
+green suite. **If you change the SQL in 100/112/114/117/118/142/196/198/200, change `_Credits`
+below.**
 
 The weight here is on the ways this goes wrong:
   * a purchased balance surviving every granted-pool mutation (the 3.1.1 property),
@@ -43,6 +44,14 @@ _ENTITLING = frozenset({"active", "grace_period", "billing_retry"})
 _ET = ZoneInfo("America/New_York")
 _USER_IDS = itertools.count(1)
 _PERIOD_IDS = itertools.count(1)   # subscription_credit_periods.id
+
+# migration 200 (IAP audit F15): ledger reasons that are NOT a spend or a refund of the granted
+# pool. A reinstatement deducts the granted-pool movement of every OTHER reason after the
+# clawback's mark (the window's calendar spend, net of refunds) — the SQL's NOT IN list.
+_GRANTED_POOL_SYSTEM_REASONS = frozenset({
+    "grant", "monthly_reset", "monthly_expired", "tier_upgrade", "tier_revoked", "plan_period",
+    "plan_reinstated", "tester_grant",
+})
 
 
 def _minus_one_month(ts: datetime) -> datetime:
@@ -136,7 +145,8 @@ class _Credits:
         # `_check` runs at the tail of every modelled RPC, so this arms every case in the file.
         assert self.used <= self.total, "user_credits_used_le_total"
 
-    def _ledger(self, delta, granted_delta, purchased_delta, reason, ref_id, reverses_id=None):
+    def _ledger(self, delta, granted_delta, purchased_delta, reason, ref_id, reverses_id=None,
+                covered=0):
         self.ledger.append({
             "id": len(self.ledger) + 1,
             "delta": delta,
@@ -148,6 +158,11 @@ class _Credits:
             # migration 124: which DEBIT row this refund reverses. A debit with a row pointing
             # at it is retired and can never be paired again.
             "reverses_id": reverses_id,
+            # migration 200 reads it: a debit charged inside a period (applied_at <= created_at)
+            # can be covered by that period's clawback.
+            "created_at": self.now,
+            # migration 200: on a refund row, what a clawback had already paid for of the charge.
+            "covered": covered,
         })
 
     # ── migration 196: the ONE subscriptions row, as iap_service writes it ─────
@@ -250,7 +265,12 @@ class _Credits:
         198 over 196: `sub` is the WINNING row (`_winner`); `cur_sub` is the in-force period's
         own lineage row, which decides the refund backstop and HOLD; while it holds, another
         lineage's same-or-lower tier does not start; a period the register still holds a refund
-        of is never reinstated; `revoke_requested_at` (revoke_paid_period) fires the refund."""
+        of is never reinstated; `revoke_requested_at` (revoke_paid_period) fires the refund.
+
+        200 over 198: (F11) while the in-force lineage holds, its own row's LATER period is a new
+        key whatever the row's status (unless the register holds a refund of it), and the retarget
+        needs only that later period; (F15) the refund stamps `revoked_cover` / `revoked_ledger_id`
+        and a reinstatement deducts the granted-pool spend after that mark."""
         cal_tier = self._calendar_tier()
         cal_alloc = _PLAN_CREDITS.get(cal_tier, 0)
         sub, cur = self._winner(), self.paid_period
@@ -263,8 +283,11 @@ class _Credits:
                      and cur_sub["status"] in _ENTITLING
                      and _TIER_RANK[cur_sub["tier"]] > _TIER_RANK[cal_tier])
         while True:                                     # the SQL's <<pick>> loop: at most twice
-            new_key = (paid_row and sub["status"] == "active" and sub["end"] is not None
-                       and sub["end"] > self.now and bool(sub["otid"])
+            new_key = (paid_row and sub["end"] is not None and bool(sub["otid"])
+                       and ((sub["status"] == "active" and sub["end"] > self.now)
+                            # 200 (IAP audit F11): the in-force lineage's own later period
+                            or (cur_holds and sub["otid"] == cur["otid"] and sub["end"] > cur["end"]
+                                and not self._register_refunded(sub["otid"], sub["end"])))
                        and not (cur is not None
                                 and (cur["otid"], cur["end"]) == (sub["otid"], sub["end"])))
             seen = self.periods.get((sub["otid"], sub["end"])) if new_key else None
@@ -277,8 +300,10 @@ class _Credits:
                 or _TIER_RANK[sub["tier"]] > _TIER_RANK[(cur or {}).get("tier") or "free"])
             # 198: the winner neither starts nor reinstates while the in-force lineage holds →
             # that lineage's own row is evaluated once instead (its renewal is never skipped).
-            if (start_paid or reinstate or not cur_holds or cur_sub["status"] != "active"
-                    or cur_sub["end"] is None or not cur_sub["end"] > self.now
+            # 200 (IAP audit F11): when it records a later period than the one in force, whatever
+            # its status (cur_holds already requires an entitling Production row).
+            if (start_paid or reinstate or not cur_holds
+                    or cur_sub["end"] is None or not cur_sub["end"] > cur["end"]
                     or not cur_sub["otid"] or sub["otid"] == cur_sub["otid"]):
                 break
             sub = cur_sub
@@ -311,6 +336,9 @@ class _Credits:
             writeoff = max(self.used - cal_alloc, 0)
             delta = floor - self.total
             cur["revoked_at"], cur["revoked_remaining"] = self.now, remaining
+            # 200 (IAP audit F15): what the clawback covered, and where the ledger stood.
+            cur["revoked_cover"] = writeoff
+            cur["revoked_ledger_id"] = max((r["id"] for r in self.ledger), default=0)
             self.total, self.used = floor - writeoff, self.used - writeoff
             self.tier_alloc = min(self.tier_alloc, cal_alloc)
             self.paid_period, self.resets_at, self.period_due = None, _next_et_reset(self.now), False
@@ -319,14 +347,32 @@ class _Credits:
             self._check()
             return self.remaining
 
-        # REFUND_REVERSED: the revoked period back, once, with exactly what the refund took.
+        # REFUND_REVERSED: the revoked period back, once, with what the refund took — less (200)
+        # the granted-pool spend after the clawback's mark, up to the next paid period's start.
         if reinstate:
             restore = seen.get("revoked_remaining") or 0
+            total, used = restore, 0
+            mark = seen.get("revoked_ledger_id")
+            if mark is not None:
+                stop = min((r["id"] for r in self.ledger if r["id"] > mark
+                            and r["reason"] in ("plan_period", "plan_reinstated")), default=None)
+                rows = [r for r in self.ledger
+                        if r["id"] > mark and (stop is None or r["id"] < stop)
+                        and r["reason"] not in _GRANTED_POOL_SYSTEM_REASONS]
+                # refunds of charges made before the clawback go back into the total; the rest
+                # nets into `used` (final review, 2026-10-21)
+                pre = [r for r in rows if r["reverses_id"] is not None and r["reverses_id"] <= mark]
+                pre_back = sum(r["granted_delta"] for r in pre)
+                window = -sum(r["granted_delta"] for r in rows if r not in pre)
+                total = restore + pre_back + max(-window, 0)
+                used = min(max(window, 0), total)
             if remaining > 0:
                 self._ledger(-remaining, -remaining, 0, "monthly_expired", None)
             seen["revoked_at"], seen["revoked_remaining"], seen["reinstated_at"] = None, None, self.now
             seen["revoke_requested_at"] = None
-            self.total, self.used, self.tier_alloc = restore, 0, seen["allocation"]
+            seen["revoked_cover"], seen["revoked_ledger_id"] = None, None
+            restore = total - used
+            self.total, self.used, self.tier_alloc = total, used, seen["allocation"]
             self.paid_period, self.resets_at = seen, seen["end"]
             if restore > 0:
                 self._ledger(restore, restore, 0, "plan_reinstated", seen["otid"])
@@ -353,13 +399,17 @@ class _Credits:
                    # migration 198
                    "revoke_requested_at": None,
                    "carried_from": cur.get("id") if running else None,
-                   "carry_revoked": None, "carry_revoked_at": None, "carry_reinstated_at": None}
+                   "carry_revoked": None, "carry_revoked_at": None, "carry_reinstated_at": None,
+                   # migration 196's applied_at (NOT NULL DEFAULT now()); 200's clawback stamps
+                   "applied_at": self.now, "revoked_cover": None, "revoked_ledger_id": None,
+                   "applied_ledger_id": None}
             self.periods[(sub["otid"], sub["end"])] = row
             if remaining - carry > 0:
                 self._ledger(-(remaining - carry), -(remaining - carry), 0, "monthly_expired", None)
             self.total, self.used, self.tier_alloc = alloc + carry, 0, alloc
             self.paid_period, self.resets_at = row, sub["end"]
             self._ledger(alloc, alloc, 0, "plan_period", sub["otid"])
+            row["applied_ledger_id"] = self.ledger[-1]["id"]          # 200: ledger-order start mark
             self._check()
             return self.remaining
 
@@ -552,15 +602,23 @@ class _Credits:
         migration 142: returns {outcome, refunded, spendable} instead of a bare `spendable`.
         Every branch of the SQL used to return the same integer, so a refund that moved ZERO
         was indistinguishable from one that worked — and the caller logged success either way.
+
+        migration 200: it rolls the period first (F10), and a charge an Apple-refunded allocation
+        already paid for is absorbed by that period's `revoked_cover` (F15): `covered` in the
+        reply, `covered_by_clawback` when that is all of it.
         """
         if amount is None or amount <= 0:
             return {"outcome": "invalid", "reason": "non_positive_amount",
                     "refunded": 0, "spendable": self.spendable}
-        debit_id = None
+        # 200 (IAP audit F10): as spend_credits does, so a boundary is seen whether or not
+        # anything rolled the period in between.
+        self.ensure_credit_period()
+        debit_id = debit_at = None
         spent_granted = spent_purch = None
         # Mirrors the SQL's `v_outcome TEXT := 'refunded'`: only the no-match branch overrides
         # it, so a genuine zero-cap refund still reports success-that-moved-nothing.
         outcome = "refunded"
+        short = 0                            # migration 200: a replay's unsettled rest
         if ref_id:
             # migration 124: newest debit of this amount on this ref_id that NOTHING has
             # reversed yet. The un-reversed filter is the whole fix — without it two refunds
@@ -578,10 +636,27 @@ class _Credits:
                     debit_id = row["id"]
                     spent_granted = -row["granted_delta"]
                     spent_purch = -row["purchased_delta"]
+                    debit_at = row.get("created_at")
                     break
         have_split = (spent_granted, spent_purch) != (None, None) and (
             (spent_granted or 0) != 0 or (spent_purch or 0) != 0
         )
+        # 200 (IAP audit F15): the earliest clawback after this debit of a period the debit was
+        # charged in, while its cover lasts.
+        absorb = 0
+        if have_split and (spent_granted or 0) > 0 and debit_at is not None:
+            covers = [p for p in self.periods.values()
+                      if p["user"] == self.user_id and p.get("revoked_at") is not None
+                      and (p.get("revoked_cover") or 0) > 0
+                      and p.get("revoked_ledger_id") is not None and p["revoked_ledger_id"] >= debit_id
+                      and (p["applied_ledger_id"] < debit_id if p.get("applied_ledger_id") is not None
+                           else p.get("applied_at") is not None and p["applied_at"] <= debit_at)]
+            if covers:
+                p = min(covers, key=lambda p: (p["revoked_ledger_id"], p["id"]))
+                absorb = min(spent_granted, p["revoked_cover"])
+                p["revoked_cover"] -= absorb
+                p["revoked_remaining"] = (p.get("revoked_remaining") or 0) + absorb
+                spent_granted -= absorb
         if have_split:
             back_purch = min(max(spent_purch or 0, 0), amount, self.purchased_used)
             back_granted = min(max(spent_granted or 0, 0), amount - back_purch, self.used)
@@ -606,21 +681,35 @@ class _Credits:
                     continue
                 if row["ref_id"] == ref_id and row["delta"] == -amount:
                     outcome = "already_refunded"
+                    # migration 200: what the earlier refund settled (moved + covered); short of
+                    # the charge, the replay says so.
+                    settled = sum(r["delta"] + r.get("covered", 0) for r in self.ledger
+                                  if r["reverses_id"] == row["id"])
+                    short = max(amount - settled, 0)
                     break
         if back_granted + back_purch == 0:
+            # 200: covered by a clawback — a 0/0/0 row pairs the debit, so a replay answers
+            # already_refunded; the rest, if any, is owed (capped_to_zero).
+            if absorb > 0:
+                rest = spent_granted + max(spent_purch or 0, 0)
+                self._ledger(0, 0, 0, reason, ref_id, reverses_id=debit_id, covered=absorb)
+                return {"outcome": "capped_to_zero" if rest > 0 else "covered_by_clawback",
+                        "refunded": 0, "covered": absorb, "spendable": self.spendable}
             # migration 142: a MATCHED debit whose caps collapsed to zero is not a success —
             # the reachable path is a charge and a refund straddling ensure_credit_period's
             # monthly reset of `used`. Not applied without a matched debit: unprovable.
             if outcome == "refunded" and debit_id is not None:
                 outcome = "capped_to_zero"
-            return {"outcome": outcome, "refunded": 0, "spendable": self.spendable}
+            reply = {"outcome": outcome, "refunded": 0, "spendable": self.spendable}
+            return {**reply, "short": short} if outcome == "already_refunded" and short > 0 else reply
         self.used -= back_granted
         self.purchased_used -= back_purch
         self._check()
         self._ledger(back_granted + back_purch, back_granted, back_purch, reason, ref_id,
-                     reverses_id=debit_id)
-        return {"outcome": "refunded", "refunded": back_granted + back_purch,
-                "spendable": self.spendable}
+                     reverses_id=debit_id, covered=absorb)
+        reply = {"outcome": "refunded", "refunded": back_granted + back_purch,
+                 "spendable": self.spendable}
+        return {**reply, "covered": absorb} if absorb > 0 else reply
 
     # ── migration 117 ───────────────────────────────────────────────────────
     def add_purchased_credits(self, txn: str, credits: int, environment="Production",

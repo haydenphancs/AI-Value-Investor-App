@@ -158,10 +158,14 @@ class FakeSupabase:
             "credit_packs": [dict(r) for r in source.values()],
             "subscriptions": [],
             "credit_purchases": [],
+            # The ledger rows the two RPCs write ('pack_purchase', 'pack_revoked'), which the
+            # credit-pack REFUND_REVERSED line reads to say what is owed (IAP audit F22).
+            "credit_transactions": [],
         }
         self._fail = set(fail)
         self.rpcs: list = []
         self.purchased_total = 0
+        self.purchased_used = 0
         self.granted_remaining = 50
 
     def table(self, name):
@@ -175,7 +179,7 @@ class FakeSupabase:
 
     @property
     def spendable(self) -> int:
-        return self.granted_remaining + self.purchased_total
+        return self.granted_remaining + self.purchased_total - self.purchased_used
 
     def rpc(self, name, params):
         if "rpc" in self._fail or name in self._fail:
@@ -206,6 +210,9 @@ class FakeSupabase:
                     "revoked_at": None,
                 })
                 self.purchased_total += credits
+                self.db["credit_transactions"].append({
+                    "user_id": params["p_user_id"], "reason": "pack_purchase",
+                    "ref_id": params["p_transaction_id"], "delta": credits})
                 result = {"outcome": "granted", "credits": credits,
                           "spendable": self.spendable}
 
@@ -216,10 +223,20 @@ class FakeSupabase:
             elif row["revoked_at"] is not None:
                 result = {"outcome": "already_revoked", "spendable": self.spendable}
             else:
+                # 139's floor and write-off: never below what was spent from the pool, and the
+                # spent part of the refunded pack written off.
                 row["revoked_at"] = "now"
-                self.purchased_total -= row["credits"]
+                ptotal, pused = self.purchased_total, self.purchased_used
+                new_total = max(pused, ptotal - row["credits"])
+                delta = new_total - ptotal
+                writeoff = min(max(new_total - (ptotal - row["credits"]), 0), pused)
+                self.purchased_total, self.purchased_used = new_total - writeoff, pused - writeoff
+                if delta:
+                    self.db["credit_transactions"].append({
+                        "user_id": row["user_id"], "reason": "pack_revoked",
+                        "ref_id": params["p_transaction_id"], "delta": delta})
                 result = {"outcome": "revoked", "spendable": self.spendable,
-                          "reclaimed": row["credits"]}
+                          "reclaimed": -delta}
 
         return type("R", (), {"execute": lambda *_a, **_k: type("D", (), {"data": result})()})()
 
@@ -716,6 +733,135 @@ def test_a_refund_before_the_grant_leaves_a_tombstone_the_replay_collides_with(s
     assert out["status"] == "duplicate"
 
 
+_FIRST_REFUND_MS = 1_700_000_000_000          # 2023-11-14 22:13 UTC (Apple's revocationDate)
+_FIRST_APPLIED = "2023-11-15T00:00:00+00:00"   # when we applied it (credit_purchases.revoked_at)
+_SECOND_REFUND_MS = 1_700_100_000_000         # 2023-11-16 02:00 UTC: a NEW refund
+
+
+def _refunded_pack(service, sb, txn="TXN-H"):
+    service.apply_verified_transaction(_USER, _pack_txn(txn_id=txn))
+    notif, t = _notification("REFUND", _pack_txn(txn_id=txn, revocationDate=_FIRST_REFUND_MS))
+    assert service.apply_notification(notif, t)[0] == "credit_pack_revoked"
+    sb.purchase_row(txn, "Production")["revoked_at"] = _FIRST_APPLIED
+
+
+def _hand_restore(sb, txn="TXN-H"):
+    return sb.rpc("add_purchased_credits", {"p_transaction_id": f"refund-reversed:{txn}",
+                                            "p_user_id": _USER, "p_product_id": _PACK_PLUS,
+                                            "p_credits": 250, "p_environment": "Production"}).execute().data
+
+
+def _refund_again(service, caplog, when, txn="TXN-H"):
+    import logging
+
+    notif, t = _notification("REFUND", _pack_txn(txn_id=txn, revocationDate=when))
+    with caplog.at_level(logging.WARNING, logger="app.services.iap_service"):
+        assert service.apply_notification(notif, t)[0] == "credit_pack_already_revoked"
+    return [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+@pytest.mark.parametrize("new_refund", [True, False], ids=["a-new-refund", "a-redelivery"])
+def test_a_refund_after_a_hand_restore_pages_but_a_redelivery_does_not(sb, caplog, new_refund):
+    """Review of phase 2: after a REFUND_REVERSED the owner restores the pack by hand under
+    `refund-reversed:<txn>`. A NEW refund (revocationDate after we applied the first one) must say
+    so at ERROR — nothing revokes the restore row; Apple's redelivery of the first refund must not."""
+    service = _service(sb)
+    _refunded_pack(service, sb)
+    assert _hand_restore(sb)["outcome"] == "granted"
+    errors = _refund_again(service, caplog, _SECOND_REFUND_MS if new_refund else _FIRST_REFUND_MS)
+    if new_refund:
+        assert len(errors) == 1 and "refunded AGAIN after a hand restore" in errors[0], errors
+        assert "revoke_purchased_credits('refund-reversed:TXN-H', 'Production')" in errors[0]
+    else:
+        assert errors == []
+
+
+@pytest.mark.parametrize("new_refund", [True, False], ids=["a-new-refund", "a-redelivery"])
+def test_a_new_refund_before_the_hand_restore_blocks_the_restore(sb, caplog, new_refund):
+    """Review round 2: refund → reversal → a NEW refund BEFORE the owner restored the pack. A revoked
+    placeholder takes the restore key, so the §2.4 restore answers `replay` and grants nothing; the
+    ERROR says not to restore. A redelivery of the first refund writes nothing."""
+    service = _service(sb)
+    _refunded_pack(service, sb)
+    before = sb.purchased_total
+    errors = _refund_again(service, caplog, _SECOND_REFUND_MS if new_refund else _FIRST_REFUND_MS)
+    placeholder = sb.purchase_row("refund-reversed:TXN-H", "Production")
+    if new_refund:
+        assert len(errors) == 1 and "do NOT restore it by hand" in errors[0], errors
+        assert "placeholder now holds the restore key" in errors[0]
+        assert placeholder is not None and placeholder["revoked_at"]
+        assert _hand_restore(sb)["outcome"] == "replay"
+        assert sb.purchased_total == before, "the restore granted a pack Apple refunded again"
+    else:
+        assert errors == [] and placeholder is None
+
+
+@pytest.mark.parametrize("chain", ["after-a-restore", "before-any-restore",
+                                   "reversed-before-the-revoke", "refunded-before-its-grant"])
+def test_a_pack_refunded_or_reversed_more_than_once_asks_for_claude(sb, caplog, chain):
+    """Review rounds 2-3: refund → reversal → refund → reversal, in any order. What is owed depends
+    on the order Apple's events really happened in, which the rows cannot tell (each guessed number
+    had a chain it got wrong), and the §2.4 query would answer `replay`: the line says ASK CLAUDE,
+    owed unknown, never a number the owner would act on."""
+    service = _service(sb)
+    if chain == "refunded-before-its-grant":
+        _refund_before_grant(service, appAccountToken=_USER)
+        sb.purchase_row("TXN-EARLY", "Production")["revoked_at"] = _FIRST_APPLIED
+        txn = "TXN-EARLY"
+        service.apply_notification(*_notification("REFUND_REVERSED", _pack_txn(txn_id=txn)))
+    else:
+        _refunded_pack(service, sb)
+        txn = "TXN-H"
+    if chain != "before-any-restore":
+        _hand_restore(sb, txn)
+        sb.purchased_used = 50                                   # 50 of the restore spent
+    _refund_again(service, caplog, _SECOND_REFUND_MS, txn)
+    if chain in ("after-a-restore", "refunded-before-its-grant"):
+        sb.rpc("revoke_purchased_credits", {"p_transaction_id": f"refund-reversed:{txn}",
+                                            "p_environment": "Production"}).execute()
+    caplog.clear()
+    with caplog.at_level("ERROR", logger="app.services.iap_service"):
+        service.apply_notification(*_notification("REFUND_REVERSED", _pack_txn(txn_id=txn)))
+    [line] = _reversal_lines(caplog)
+    assert "ASK CLAUDE — this pack was refunded or reversed more than once" in line, line
+    assert "owed=unknown " in line, line
+
+
+def test_a_redelivered_reversal_names_the_same_notification_uuid(sb, caplog):
+    """Final review: after the hand restore, Apple's REDELIVERY of the same reversal says ASK CLAUDE
+    (the rows cannot tell it from a second reversal), but both lines carry the same
+    notificationUUID — Apple keeps it on a retry or duplicate — so the owner can see it is the same
+    notification and nothing more is owed."""
+    service = _service(sb)
+    _refunded_pack(service, sb)
+    note = {"notificationType": "REFUND_REVERSED", "subtype": "", "signedDate": 1_700_050_000_000,
+            "notificationUUID": "6f2b1c0e-0000-4000-8000-00000000abcd"}
+    with caplog.at_level("ERROR", logger="app.services.iap_service"):
+        service.apply_notification(dict(note), _pack_txn(txn_id="TXN-H"))
+        _hand_restore(sb)
+        service.apply_notification(dict(note), _pack_txn(txn_id="TXN-H"))
+    first, again = _reversal_lines(caplog)
+    for line in (first, again):
+        assert "notificationUUID=6f2b1c0e-0000-4000-8000-00000000abcd" in line, line
+        assert "signedDate=1700050000000" in line, line
+    assert "owed=250 " in first and "ASK CLAUDE" in again
+
+
+@pytest.mark.parametrize("third", [True, False], ids=["a-third-refund", "a-redelivered-second"])
+def test_a_third_refund_asks_for_claude(sb, caplog, third):
+    """Review round 3: after the placeholder (refund again before any restore) and a reversal that
+    Claude settled by hand, a THIRD refund left that hand grant spendable with no log line."""
+    service = _service(sb)
+    _refunded_pack(service, sb)
+    _refund_again(service, caplog, _SECOND_REFUND_MS)            # writes the placeholder (now)
+    caplog.clear()
+    errors = _refund_again(service, caplog, 2_000_000_000_000 if third else _SECOND_REFUND_MS)
+    if third:
+        assert len(errors) == 1 and "refunded yet again — ASK CLAUDE" in errors[0], errors
+    else:
+        assert errors == []
+
+
 def test_a_redelivered_early_refund_answers_already_revoked(sb):
     """Apple retries; the tombstone is what the revoke RPC finds the second time."""
     service = _service(sb)
@@ -863,3 +1009,71 @@ def test_purchase_revoked_is_not_a_subclass_of_unknown_product():
     assert issubclass(svc.PurchaseRevoked, svc.IAPError)
     assert not issubclass(svc.PurchaseRevoked, svc.UnknownProduct)
     assert not issubclass(svc.UnknownProduct, svc.PurchaseRevoked)
+
+
+# ── IAP audit F22: the lines a person must act on name what they need ─────────────────────
+#
+# A credit pack's REFUND_REVERSED is restored by hand (OWNER_TASKS §2.4). Its ERROR named only
+# the transaction and the user (None when the lookup failed): no environment, no product and no
+# amount, so the restore could not be done from the line.
+
+def _reversal_lines(caplog):
+    return [r.getMessage() for r in caplog.records
+            if "REFUND_REVERSED for credit pack — restore by hand" in r.getMessage()]
+
+
+def _refund_then_reverse(service, sb, caplog, *, spent=0, refund=True, txn_id="TXN-RR"):
+    service.apply_verified_transaction(_USER, _pack_txn(txn_id=txn_id))
+    sb.purchased_used = spent
+    if refund:
+        service.apply_notification(*_notification("REFUND", _pack_txn(txn_id=txn_id)))
+    with caplog.at_level("ERROR", logger="app.services.iap_service"):
+        return service.apply_notification(*_notification("REFUND_REVERSED", _pack_txn(txn_id=txn_id)))
+
+
+@pytest.mark.parametrize("spent, owed", [(0, 250), (100, 150), (250, 0)],
+                         ids=["unspent", "partly-spent", "all-spent"])
+def test_a_pack_reversal_line_names_what_is_owed(sb, caplog, spent, owed):
+    outcome, user = _refund_then_reverse(_service(sb), sb, caplog, spent=spent)
+    assert (outcome, user) == ("credit_pack_refund_reversed_unhandled", _USER)
+    [line] = _reversal_lines(caplog)
+    for part in ("txn=TXN-RR", "original=TXN-RR", "env=Production", f"product={_PACK_PLUS}",
+                 f"user={_USER}", "pack_credits=250", f"owed={owed} "):
+        assert part in line, (part, line)
+
+
+def test_a_reversal_with_no_refund_clawed_back_owes_nothing(sb, caplog):
+    _refund_then_reverse(_service(sb), sb, caplog, refund=False)
+    [line] = _reversal_lines(caplog)
+    assert "owed=0 " in line and "nothing was clawed back" in line
+
+
+def test_a_reversal_of_a_refund_that_beat_its_grant_owes_the_whole_pack(sb, caplog):
+    """The tombstone (a REFUND before the grant) has no 'pack_purchase' row: the whole pack."""
+    service = _service(sb)
+    _refund_before_grant(service, txn_id="TXN-TOMB", appAccountToken=_USER)
+    with caplog.at_level("ERROR", logger="app.services.iap_service"):
+        service.apply_notification(*_notification("REFUND_REVERSED", _pack_txn(txn_id="TXN-TOMB")))
+    [line] = _reversal_lines(caplog)
+    assert "owed=250 " in line and f"user={_USER}" in line and "tombstone" in line
+
+
+def test_an_unreadable_purchase_still_names_the_transaction_and_answers_200(sb, caplog):
+    sb._fail.add("credit_purchases")
+    with caplog.at_level("ERROR", logger="app.services.iap_service"):
+        outcome, _user = _service(sb).apply_notification(
+            *_notification("REFUND_REVERSED", _pack_txn(txn_id="TXN-X")))
+    assert outcome == "credit_pack_refund_reversed_unhandled"
+    [line] = _reversal_lines(caplog)
+    assert "txn=TXN-X" in line and "env=Production" in line and "owed=unknown" in line
+
+
+def test_a_failed_pack_refund_names_the_transaction_before_the_503(sb, caplog):
+    service = _service(sb)
+    service.apply_verified_transaction(_USER, _pack_txn(txn_id="TXN-F"))
+    sb._fail.add("revoke_purchased_credits")
+    with caplog.at_level("ERROR", logger="app.services.iap_service"), pytest.raises(svc.IAPError):
+        service.apply_notification(*_notification("REFUND", _pack_txn(txn_id="TXN-F")))
+    lines = [r.getMessage() for r in caplog.records
+             if "failed to apply for credit pack" in r.getMessage()]
+    assert len(lines) == 1 and "txn=TXN-F" in lines[0] and "env=Production" in lines[0]

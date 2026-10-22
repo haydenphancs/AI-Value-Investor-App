@@ -22,6 +22,7 @@ boundary, which is itself tested separately for fail-closed behaviour.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import time
 from collections.abc import MutableMapping
@@ -253,10 +254,12 @@ class _CreditsView(MutableMapping):
 class FakeSupabase:
     """Fake Supabase client.
 
-    The `rpc` handler runs `ensure_credit_period`, `grant_tier_upgrade` and
-    `revoke_tier_credits` through `_Credits` — the ONE executable model of that SQL
-    (tests/test_credit_pool_isolation.py, kept branch for branch with migration 196) — fed with
-    this fake's own `users` and `subscriptions` rows before every call. That matters: a fake
+    The `rpc` handler runs six RPCs — `ensure_credit_period`, `grant_tier_upgrade`,
+    `revoke_tier_credits`, `record_subscription_transaction`, `revoke_paid_period` and
+    `reinstate_paid_carry` — through `_Credits`, the ONE executable model of that SQL
+    (tests/test_credit_pool_isolation.py, modelled on migrations 196, 198 and 200; the branches it
+    does NOT model are listed in SYSTEM_DESIGN_GUIDELINES §9b.12, "the executable model") — fed
+    with this fake's own `users` and `subscriptions` rows before every call. That matters: a fake
     that returns a bland success for every rpc makes a credit test pass no matter what the
     balance does, which is exactly how a money bug survives a green suite, and a SECOND
     hand-written model drifts (this one still encoded migration 114 after 139 and 196 had
@@ -322,6 +325,7 @@ class FakeSupabase:
                 {"id": i + 1, "environment": env, "transaction_id": txn,
                  "original_transaction_id": rec["otid"], "user_id": rec["user"],
                  "tier": rec["tier"], "period_end": iso(rec["period_end"]),
+                 "revocation_date": iso(rec.get("revocation_date")),
                  "applied_at": iso(rec["applied_at"]), "revoked_signed_at": iso(rec["rev"]),
                  "reversed_signed_at": iso(rec["rr"]), "created_at": iso(rec.get("created"))}
                 # NEWEST first, unlike creation order (a Postgres heap after updates is unordered
@@ -606,31 +610,26 @@ def test_grant_failure_does_not_lose_the_purchase():
     assert ("update", "users", {"tier": "pro"}) in sb.log
 
 
-def test_migration_112_keeps_its_two_load_bearing_invariants():
-    """Source-scan on the SQL, because the Python fake can only model it.
+def test_the_grant_delegates_and_the_mid_month_top_up_keeps_112s_two_invariants():
+    """Source-scan on the LIVE SQL, because the Python fake can only model it.
 
-    Both properties below are what make the grant safe, and both are one careless edit away
-    from a money bug: drop the guard and every app launch mints credits; switch to a bare
-    assignment and a downgrade deletes credits the user paid for."""
-    from pathlib import Path
+    112's two properties are what made the grant safe, and both are one careless edit away from
+    a money bug: drop the replay guard and every app launch mints credits; switch to a bare
+    assignment (or write `used`) and a downgrade deletes credits the user paid for.
 
-    sql = (
-        Path(__file__).resolve().parents[1]
-        / "database" / "migrations" / "112_grant_tier_upgrade.sql"
-    ).read_text()
+    This used to open `112_grant_tier_upgrade.sql` by name, comments included, so it pinned a
+    body that stopped running at 196 (IAP audit F19): it passed whatever the live functions did.
+    Since 196 grant_tier_upgrade is a pure delegate to ensure_credit_period, and the two
+    properties live in that function's mid-month top-up (`IF v_alloc > v_row.tier_alloc THEN`;
+    `total = GREATEST(v_alloc, v_row.total)`, never `used`). Both are now read from the latest
+    definitions by the detectors in test_credit_review_fixes, whose in-memory mutant table
+    (`test_the_live_sql_detectors_catch_each_later_redefinition`) proves each one fails on a
+    broken later migration. 112's old "the UPDATE touches total, never used" is restated there:
+    the grant itself has no UPDATE any more."""
+    from test_credit_review_fixes import _grant_problems, _top_up_problems
 
-    # 1. The idempotence / anti-farming guard: no grant once the ceiling is already met.
-    assert "v_alloc <= v_row.total" in sql, (
-        "the replay guard is gone — grant_tier_upgrade would add credits on every "
-        "Transaction.updates replay"
-    )
-    # 2. No clawback and no zeroing of `used`: the UPDATE must touch `total`, never `used`.
-    grant_update = sql[sql.index("UPDATE public.user_credits"):]
-    grant_update = grant_update[: grant_update.index(";")]
-    assert "used" not in grant_update, (
-        "the grant now writes `used`; zeroing it changes the period's total entitlement and "
-        "makes an upgrade's value depend on when in the month it happens"
-    )
+    problems = _grant_problems() + _top_up_problems()
+    assert not problems, problems
 
 
 # ── Winning tier ──────────────────────────────────────────────────────────────
@@ -1547,25 +1546,19 @@ def test_the_action_is_not_a_retry():
 
 def test_the_ios_client_finishes_the_transaction_on_this_code_only():
     """The backend fix alone does NOT break the loop: `StoreKitService` left the transaction
-    unfinished on ANY thrown error. It must finish on the terminal case, and ONLY that one —
-    finishing on a transient failure would lose a purchase the user paid for."""
-    from pathlib import Path
+    unfinished on ANY thrown error. A failed verify must finish on PURCHASE_ALREADY_LINKED and
+    PURCHASE_REVOKED only — the two codes that can never become grantable — and leave every other
+    failure unfinished: finishing a transient or a recorded-nothing failure (503 SYSTEM_BUSY,
+    409 PURCHASE_ACCOUNT_MISMATCH, a 400) loses a purchase the user paid for.
 
-    repo = Path(__file__).resolve().parents[2]
-    src = (repo / "frontend/ios/ios/Core/Services/StoreKitService.swift").read_text()
+    This used to check only that `case .purchaseAlreadyLinked` came before the FIRST finish, on
+    raw text, so a mutant finishing EVERY failed verify passed it (IAP audit F18). It now runs the
+    one brace-bound, comment-stripped checker in test_ios_purchase_failure_visibility, whose
+    in-memory mutant table proves it catches that and the other ways to finish too much."""
+    from test_ios_purchase_failure_visibility import _SERVICE, _finish_policy_violations, _read
 
-    catch = src[src.index("verifyPurchase(signedTransaction: signed)"):]
-    catch = catch[: catch.index("// Recorded server-side")]
-
-    assert "case .purchaseAlreadyLinked" in catch, (
-        "StoreKitService must finish the transaction on the terminal error, or Apple keeps "
-        "redelivering it every launch"
-    )
-    finish_at = catch.index("await transaction.finish()")
-    terminal_at = catch.index("case .purchaseAlreadyLinked")
-    assert terminal_at < finish_at, "the finish must sit inside the terminal branch"
-    # The unconditional 'leave unfinished' path must still exist for everything else.
-    assert "leaving unfinished" in catch
+    violations = _finish_policy_violations(_read(_SERVICE))
+    assert not violations, violations
 
 
 # ── Migration 196: Production-only paid periods, refunds of the right period, reversals ──
@@ -1738,7 +1731,7 @@ def test_an_older_period_revocation_keeps_the_tier_the_row_and_the_credits(ntype
 
     outcome, _ = s.apply_notification(*_refund_of_the_first_period(now, ntype))
 
-    assert outcome == f"applied:{ntype}"          # a 200: Apple must not redeliver it
+    assert outcome == f"unapplied:older_period:{ntype}"          # a 200: Apple must not redeliver it
     assert sb._tier() == "premium"
     assert _row(sb) == before, "nothing is written — tier, status, period end, ordering key"
     assert sb.remaining == 3700
@@ -3096,7 +3089,7 @@ def test_a_same_period_delivery_with_a_derived_status_keeps_the_grace_period(
         assert out["was_stale"] is True and out["winning_tier"] == "premium"
         assert out["status"] == "grace_period", "the client is told the stored state"
     else:
-        assert out == (f"applied:{source}", _USER)        # a 200: Apple must not redeliver it
+        assert out == (f"unapplied:billing_grace:{source}", _USER)        # a 200: Apple must not redeliver it
 
 
 def test_grace_period_expired_ends_the_grace_period(service_clock):
@@ -3271,9 +3264,13 @@ def test_the_billing_grace_hold_edges():
                              ("active", None), ("grace_period", "grace_period")):
         assert reason(status=status, override=override) is None, (status, override)
     # An explicit "active" about the ENDED period (an OFFER_REDEEMED during grace) says only that
-    # it ended: held like a derived expiry. About a period still running, it applies.
+    # it ended: held like a derived expiry. About a period still running it is held too while the
+    # row is already in grace for it (Apple noticed the failed charge early: IAP audit F07), and
+    # over an `active` row it applies.
     assert reason(status="active", override="active") is not None
-    assert reason(status="active", override="active", now=end - timedelta(hours=1)) is None
+    assert reason(status="active", override="active", now=end - timedelta(hours=1)) is not None
+    assert reason(prior={**row, "status": "active"}, status="active", override="active",
+                  now=end - timedelta(hours=1)) is None
     # The stored row must be in billing grace or retry (an `active` one is held only for 24 h
     # past its end, and `now` here is two days past it: `test_the_active_row_hold_edges`).
     for status in ("active", "expired", "revoked", "", None, "paused"):
@@ -3332,7 +3329,7 @@ def test_a_late_grace_period_expired_cannot_demote_a_recovered_subscriber(servic
         _grace_txn(),
     )
 
-    assert out == ("applied:GRACE_PERIOD_EXPIRED", _USER)      # a 200: nothing to retry
+    assert out == ("unapplied:older_period:GRACE_PERIOD_EXPIRED", _USER)      # a 200: nothing to retry
     assert _row(sb) == before and sb._tier() == "premium"
     assert sb.credits == {"total": 4000, "used": 0}
 
@@ -3484,7 +3481,7 @@ def test_a_derived_expiry_before_the_grace_notification_arrives_is_held(
         out = s.apply_verified_transaction(_USER, _grace_txn(signedDate=_ms(signed)))
         assert out["was_stale"] is True and out["refused_by"] == "billing_grace"
     else:
-        assert _notify(s, source, subtype, signed, _grace_txn()) == (f"applied:{source}", _USER)
+        assert _notify(s, source, subtype, signed, _grace_txn()) == (f"unapplied:billing_grace:{source}", _USER)
 
     assert _row(sb) == before, "nothing is written — status, period end, ordering key"
     assert sb.remaining == 3700, "196/198 HOLD the balance of an active row past its end"
@@ -3588,7 +3585,7 @@ def test_a_late_grace_notice_cannot_rewind_a_recovered_subscriber(service_clock)
 
     out = _grace_notice_retried(s, signed=_GRACE_END + timedelta(seconds=16))
 
-    assert out == ("applied:DID_FAIL_TO_RENEW", _USER)               # a 200: nothing to retry
+    assert out == ("unapplied:older_period:DID_FAIL_TO_RENEW", _USER)               # a 200: nothing to retry
     assert _row(sb) == before and sb._tier() == "premium"
     assert svc._parse_iso(_row(sb)["current_period_end"]) == _ANCHOR + timedelta(days=61)
     assert sb.credits == {"total": 4000, "used": 0}
@@ -3730,7 +3727,7 @@ def test_a_recovery_delivered_after_its_own_late_grace_notice_still_applies(serv
         _txn(product=_MAX, txn_id="txn-3", expires_in_days=61, originalTransactionId="txn-1"),
     )
 
-    assert out == ("applied:DID_RENEW", _USER)
+    assert out == ("applied:DID_RENEW" if sb.lineage else "unapplied:stale:DID_RENEW", _USER)
     if sb.lineage:
         assert _row(sb)["status"] == "active" and sb._tier() == "premium"
         assert svc._parse_iso(_row(sb)["current_period_end"]) == _ANCHOR + timedelta(days=61)
@@ -3765,10 +3762,11 @@ def test_the_grace_recovery_bypass_edges():
            "current_period_end": end.isoformat()}
 
     def reason(prior=row, *, status="active", revoked=False, otid="otid",
-               period_end=end + timedelta(days=30), tier="premium", env="Production"):
+               period_end=end + timedelta(days=30), tier="premium", env="Production",
+               purchase=None):
         return svc._grace_recovery_reason(
             prior, status=status, payload_revoked=revoked, tier=tier, environment=env,
-            original_transaction_id=otid, period_end=period_end)
+            original_transaction_id=otid, period_end=period_end, purchase_date=purchase)
 
     assert reason() is not None and end.isoformat() in reason()
     for status in ("grace_period", "billing_retry", "Grace_Period"):
@@ -3794,6 +3792,17 @@ def test_the_grace_recovery_bypass_edges():
     assert reason(tier="pro", period_end=end + timedelta(days=30), env="Sandbox") is None
     assert reason(prior={**row, "tier": "pro"}, tier="premium",
                   period_end=end + timedelta(hours=12)) is not None
+    # With Apple's purchaseDate (review round 2): a downgrade's recovery is charged after the period
+    # in grace began to fail, whatever its offer length; the superseded renewal well before its end.
+    assert reason(tier="pro", period_end=end + timedelta(days=3), purchase=end + timedelta(days=2)) \
+        is not None, "a 3-day offer downgrade recovered in grace"
+    assert reason(tier="pro", period_end=end + timedelta(hours=12),
+                  purchase=end - timedelta(days=30)) is None
+    assert reason(tier="pro", period_end=end + timedelta(days=30), purchase=end - timedelta(days=6)) \
+        is None, "charged inside the Max period it is in grace for: superseded"
+    # No transactionReason exemption here (review round 4): the bypass does not even take one, so
+    # the saved JWS of the Pro PURCHASE an upgrade superseded stays refused over the Max in grace.
+    assert "transaction_reason" not in inspect.signature(svc._grace_recovery_reason).parameters
 
 
 def test_a_late_higher_tier_grace_notice_cannot_rewind_a_downgrade_recovery(service_clock):
@@ -3849,7 +3858,7 @@ def test_an_offer_redeemed_during_grace_keeps_the_grace_period(service_clock, su
 
     out = _notify(s, "OFFER_REDEEMED", subtype, _GRACE_END + timedelta(days=2), _grace_txn())
 
-    assert out == ("applied:OFFER_REDEEMED", _USER)
+    assert out == ("unapplied:billing_grace:OFFER_REDEEMED", _USER)
     assert _row(sb) == before and sb._tier() == "premium" and sb.remaining == 3700
 
 

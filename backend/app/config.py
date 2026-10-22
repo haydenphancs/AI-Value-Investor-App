@@ -352,9 +352,10 @@ class Settings(BaseSettings):
     # thing standing between a bad row (or a bad hand-edit in Studio) and an unbounded credit
     # mint on a verified purchase. Sized well above the largest real pack (1,200).
     IAP_MAX_PACK_CREDITS: int = 10_000
-    # Shared secret Apple echoes in App Store Server Notifications, if configured. When set,
-    # the webhook additionally requires it — defence in depth on top of JWS verification.
-    IAP_WEBHOOK_SHARED_SECRET: Optional[str] = None
+    # No webhook shared secret: App Store Server Notifications V2 carry only `signedPayload` (a
+    # JWS), so the webhook's control is Apple's verification of it and of the inner transaction
+    # (billing.app_store_notifications). The old IAP_WEBHOOK_SHARED_SECRET field promised a check
+    # nothing performed and was removed (IAP audit F24); a leftover variable is ignored.
     # MUST EQUAL App Store Connect → Subscriptions → Billing Grace Period (3, 16 or 28 days for
     # the monthly plans; with it Off, no row is ever in grace and this is inert). It bounds two
     # things in `iap_service`: the hold that keeps a grace_period row's tier while a same-period

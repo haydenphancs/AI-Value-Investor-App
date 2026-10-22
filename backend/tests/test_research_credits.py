@@ -297,6 +297,90 @@ def test_a_full_refund_is_not_flagged_partial(service, caplog):
     assert result["outcome"] == "refunded"
 
 
+def test_a_charge_a_clawback_covered_is_settled_and_never_pages(service, caplog):
+    """Migration 200 (IAP audit F15): the charge came out of a subscription period Apple refunded
+    and its clawback already wrote the spend off. Nothing is owed — before 200 the floor paid it
+    back a second time, or (after a keyed clawback started P2) it paged a false OWED."""
+    from app.services.credit_service import refund_did_not_happen
+
+    _stub_rpc(service, {"outcome": "covered_by_clawback", "refunded": 0, "covered": 20, "spendable": 0})
+    with caplog.at_level(logging.DEBUG):
+        result = service.refund_ledgered("u", 20, reason="report_refund", ref_id="AAPL:r")
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("covered=20" in r.getMessage() for r in caplog.records)
+    assert result["outcome"] == "covered_by_clawback"
+    assert refund_did_not_happen(result) is False
+
+
+def test_a_partly_covered_charge_whose_rest_was_capped_is_a_partial_leak(service, caplog):
+    """200: 15 covered, the other 5 capped to zero. The RPC wrote the pairing row, so a replay
+    answers already_refunded — the label must be `partial`, which that replay never overwrites."""
+    from app.services.credit_service import refund_did_not_happen
+
+    _stub_rpc(service, {"outcome": "capped_to_zero", "refunded": 0, "covered": 15, "spendable": 50})
+    with caplog.at_level(logging.DEBUG):
+        result = service.refund_ledgered("u", 20, reason="report_refund", ref_id="AAPL:r")
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1 and "REFUND LEAK: PARTIAL REFUND" in errors[0], errors
+    assert "covered 15 of 20" in errors[0] and "OWED 5 credits" in errors[0], errors[0]
+    assert result["outcome"] == "partial" and result["requested"] == 20
+    assert refund_did_not_happen(result) is True
+
+
+@pytest.mark.parametrize("refunded,covered,owed", [(5, 15, None), (3, 15, 2), (20, 0, None)])
+def test_a_refund_plus_what_a_clawback_covered_decides_partial(service, caplog, refunded, covered, owed):
+    """200: `refunded + covered == amount` is whole; short of it, the rest is owed."""
+    from app.services.credit_service import refund_did_not_happen
+
+    payload = {"outcome": "refunded", "refunded": refunded, "spendable": 5}
+    if covered:
+        payload["covered"] = covered
+    _stub_rpc(service, payload)
+    with caplog.at_level(logging.DEBUG):
+        result = service.refund_ledgered("u", 20, reason="report_refund", ref_id="AAPL:r")
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    if owed is None:
+        assert not errors and result["outcome"] == "refunded"
+        assert refund_did_not_happen(result) is False
+    else:
+        assert errors and f"OWED {owed} credits" in errors[0], errors
+        assert result["outcome"] == "partial" and refund_did_not_happen(result) is True
+
+
+def test_a_short_replay_is_a_partial_leak_not_a_benign_replay(service, caplog):
+    """Migration 200: a lost reply's retry answers already_refunded; when the earlier refund settled
+    less than the charge (`short`), the rest is still owed — relabelled `partial`, paged."""
+    from app.services.credit_service import refund_did_not_happen
+
+    _stub_rpc(service, {"outcome": "already_refunded", "refunded": 0, "short": 5, "spendable": 50})
+    with caplog.at_level(logging.DEBUG):
+        result = service.refund_ledgered("u", 20, reason="report_refund", ref_id="AAPL:r")
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1 and "REFUND LEAK: PARTIAL REFUND" in errors[0] and "OWED 5 credits" in errors[0]
+    assert result["outcome"] == "partial" and refund_did_not_happen(result) is True
+
+
+@pytest.mark.parametrize("short", [None, 0, -1, True, "5"])
+def test_a_replay_with_no_usable_short_stays_benign(service, caplog, short):
+    payload = {"outcome": "already_refunded", "refunded": 0, "spendable": 50}
+    if short is not None:
+        payload["short"] = short
+    _stub_rpc(service, payload)
+    with caplog.at_level(logging.DEBUG):
+        result = service.refund_ledgered("u", 20, reason="report_refund", ref_id="AAPL:r")
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert result["outcome"] == "already_refunded"
+
+
+@pytest.mark.parametrize("bad", [True, "15", -3, 15.0, None])
+def test_a_malformed_covered_key_never_makes_a_short_refund_look_whole(service, caplog, bad):
+    _stub_rpc(service, {"outcome": "refunded", "refunded": 5, "covered": bad, "spendable": 5})
+    with caplog.at_level(logging.DEBUG):
+        result = service.refund_ledgered("u", 20, reason="report_refund", ref_id="AAPL:r")
+    assert result["outcome"] == "partial"
+    assert any("OWED 15 credits" in r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR)
+
+
 def test_the_pre_142_integer_contract_still_works(service):
     """Deploy order is code-then-migration, so this method MUST tolerate the old bare-integer
     return. Without it, `int(dict)`'s mirror — a dict-expecting parse of an int — would break

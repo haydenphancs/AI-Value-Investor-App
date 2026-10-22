@@ -14,6 +14,11 @@ as well as `CREATE OR REPLACE FUNCTION`: a change of return type forces `DROP FU
 CREATE FUNCTION` (migration 142 did exactly that to `refund_credits`), and a detector blind to
 that shape keeps reading an older file while the live function stops ledgering expiries.
 
+The reader is shared (tests/_migration_sql.py, since 2026-10-21): this file fixed that blind spot
+first (K82), and the 198 guards in test_credit_paid_periods now read through the same code. Its
+own stripper used to remove `/* */` BEFORE `--`, so a `/*` inside a `--` line (163's `/admin/*`)
+or a literal (113's) would have paired with any later `*/`; the shared one strips in one pass.
+
 Non-vacuity: `test_the_detectors_reject_hand_mutated_bodies` feeds broken copies of the real
 body through the same detectors and requires each one to fail, and
 `test_a_later_plain_create_function_without_the_expiry_is_caught` feeds an in-memory later
@@ -23,40 +28,22 @@ migration (never a file in migrations/) through `_latest`.
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 import pytest
 
-_MIGRATIONS = Path(__file__).resolve().parents[1] / "database" / "migrations"
+from _migration_sql import MIGRATIONS as _MIGRATIONS
+from _migration_sql import latest_definition
+from _migration_sql import migration_sources as _migration_sources
+from _migration_sql import strip_sql_comments as _strip_sql_comments
 
-_FUNC = re.compile(
-    r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:public\.)?ensure_credit_period\s*\("
-    r"(?P<header>.*?)AS\s+(?P<tag>\$\w*\$)(?P<body>.*?)(?P=tag)",
-    re.IGNORECASE | re.DOTALL,
-)
 _RESET_BRANCH_HEAD = "IF v_row.resets_at IS NULL OR now() >= v_row.resets_at THEN"
-
-
-def _strip_sql_comments(sql: str) -> str:
-    sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.S)
-    return "\n".join(re.sub(r"--.*$", "", line) for line in sql.splitlines())
-
-
-def _migration_sources() -> list[tuple[str, str]]:
-    return [(path.name, path.read_text(encoding="utf-8"))
-            for path in sorted(_MIGRATIONS.glob("[0-9][0-9][0-9]_*.sql"))]
 
 
 def _latest(sources: list[tuple[str, str]] | None = None) -> tuple[str, str, str, str]:
     """(file name, header, body, whole stripped file) of the latest definition among
     `sources` ((name, raw SQL) in apply order; default: every migration on disk)."""
-    found = []
-    for name, raw in (_migration_sources() if sources is None else sources):
-        text = _strip_sql_comments(raw)
-        for m in _FUNC.finditer(text):
-            found.append((name, m.group("header"), m.group("body"), text))
-    assert found, "no CREATE [OR REPLACE] FUNCTION ensure_credit_period in any migration"
-    return found[-1]
+    d = latest_definition("ensure_credit_period", sources)
+    return d.file, d.header, d.body, d.text
 
 
 def _latest_problems(sources: list[tuple[str, str]] | None = None) -> list[str]:
@@ -66,7 +53,10 @@ def _latest_problems(sources: list[tuple[str, str]] | None = None) -> list[str]:
     out = []
     if int(name[:3]) < 194:
         out.append(f"the latest ensure_credit_period is {name}, before 194")
-    if "'monthly_expired'" not in body:
+    # A ledger INSERT carrying the reason, not the bare literal: since 200 the REINSTATE branch
+    # also names 'monthly_expired' in a NOT IN list, which would keep a literal check green over
+    # a body that writes no expiry at all.
+    if not [i for i in _ledger_inserts(body) if "'monthly_expired'" in i]:
         out.append(f"the latest ensure_credit_period ({name}) writes no monthly_expired row")
     return out
 
@@ -179,7 +169,10 @@ def test_a_later_plain_create_function_without_the_expiry_is_caught(create):
     stripped = body
     for insert in expiries:
         stripped = stripped.replace(insert, "", 1)
-    assert "'monthly_expired'" not in stripped, "the mutation left an expiry insert behind"
+    # The INSERTs, not the literal: since 200 the REINSTATE branch also names 'monthly_expired' in
+    # its list of reasons that are not window spend.
+    assert not [i for i in _ledger_inserts(stripped) if "'monthly_expired'" in i], (
+        "the mutation left an expiry insert behind")
     later = (
         "BEGIN;\n"
         "DROP FUNCTION IF EXISTS public.ensure_credit_period(UUID);\n"
@@ -188,7 +181,8 @@ def test_a_later_plain_create_function_without_the_expiry_is_caught(create):
     )
     synthetic = sources + [("999_synthetic_redefinition.sql", later)]
     assert _latest(synthetic)[0] == "999_synthetic_redefinition.sql", (
-        f"`_FUNC` does not see a `{create}` redefinition — the guard keeps reading an older file"
+        f"the shared reader (_migration_sql.latest_definition) does not see a `{create}` "
+        "redefinition — the guard keeps reading an older file"
     )
     problems = _latest_problems(synthetic)
     assert any("monthly_expired" in p for p in problems), problems
@@ -232,8 +226,10 @@ def test_security_definer_and_its_settings_survive():
 
 def test_the_latest_file_reasserts_the_acl():
     _name, _header, _body, text = _latest()
+    # PUBLIC is required; 200 also names anon / authenticated (Supabase grants them explicitly).
     assert re.search(
-        r"REVOKE\s+ALL\s+ON\s+FUNCTION\s+public\.ensure_credit_period\(UUID\)\s+FROM\s+PUBLIC;",
+        r"REVOKE\s+ALL\s+ON\s+FUNCTION\s+public\.ensure_credit_period\(UUID\)\s+FROM\s+PUBLIC"
+        r"(?:\s*,\s*\w+)*\s*;",
         text, re.I)
     assert re.search(
         r"GRANT\s+EXECUTE\s+ON\s+FUNCTION\s+public\.ensure_credit_period\(UUID\)\s+TO\s+service_role;",

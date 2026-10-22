@@ -62,12 +62,16 @@ def fetch_all_rows(
     page_size: int = PAGE_SIZE,
     max_pages: int = MAX_PAGES,
     desc: bool = False,
+    then_by: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Page a PostgREST SELECT to completion.
 
     `build_query` returns a FRESH, un-executed query each call (filters applied, no
     `.range()`/`.order()`) — fresh because postgrest-py builders are stateful and reusing
-    one accumulates the previous page's range.
+    one accumulates the previous page's range. `then_by`, a UNIQUE column, breaks ties when
+    `order_by` is not unique (the same direction), so a read can page in a meaningful order
+    — newest first — and still be total; which rows a hit `max_pages` leaves out then follows
+    that order.
     """
     rows: List[Dict[str, Any]] = []
     if page_size > PAGE_SIZE:
@@ -84,13 +88,10 @@ def fetch_all_rows(
         raise ValueError(f"{what}: page_size must be positive, got {page_size}")
     for page in range(max_pages):
         start = page * page_size
-        batch = (
-            build_query()
-            .order(order_by, desc=desc)
-            .range(start, start + page_size - 1)
-            .execute()
-            .data
-        ) or []
+        query = build_query().order(order_by, desc=desc)
+        if then_by:
+            query = query.order(then_by, desc=desc)
+        batch = query.range(start, start + page_size - 1).execute().data or []
         rows.extend(batch)
         if len(batch) < page_size:
             return rows

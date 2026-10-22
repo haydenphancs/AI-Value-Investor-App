@@ -2200,7 +2200,16 @@ Both simple orderings are wrong, and both are tempting:
 > | `already_refunded` | the debit exists but was already reversed — an idempotent replay | INFO — **must not page** |
 > | `no_matching_debit` | no charge matches this `ref_id`/amount — **the user is OWED** | **ERROR → Sentry → Discord** |
 > | `capped_to_zero` | the debit matched but the pools absorbed none of it — **the user is OWED** | **ERROR → Sentry → Discord** |
-> | `partial` (minted by `refund_ledgered`, not the RPC, when `0 < refunded < amount`) | the pools absorbed SOME of it — a charge and a refund straddling a monthly reset with a small new-period `used` — **the user is OWED the rest** | **ERROR → Sentry → Discord** (was a WARNING that every report site read as settled, 2026-09-17) |
+> | `covered_by_clawback` (migration 200) | the charge was made in a subscription period Apple refunded, and that clawback already wrote the spend off — nothing is owed; a 0/0/0 row pairs the debit | INFO — **must not page** |
+> | `partial` (minted by `refund_ledgered`, not the RPC, when `0 < refunded` and `refunded + covered < amount`, or a `capped_to_zero` with `covered > 0`) | the pools absorbed SOME of it — a charge and a refund straddling a period boundary with a small new-period `used` — **the user is OWED the rest** (`amount − refunded − covered`) | **ERROR → Sentry → Discord** (was a WARNING that every report site read as settled, 2026-09-17) |
+>
+> Since 200 a reply carries `covered` — the part of the charge an Apple-refund clawback had
+> already paid for — only when it is above 0, so every other reply keeps 142's shape, and the
+> refund's ledger row records it (`credit_transactions.covered`). A replay (`already_refunded`)
+> adds up what the earlier refund settled (its rows' `delta + covered`) and returns `short` when
+> that is less than the charge; `refund_ledgered` relabels it `partial` and pages. Before 200 a
+> retry of a lost reply after a PARTIAL refund read as settled while the rest was still owed (the
+> caveat 142's header inherited from 124); a partly covered refund would have done the same.
 > | `no_credits_row` / `invalid` / `guest` | degenerate no-ops | ERROR / INFO |
 >
 > `quiet_no_match=True` is passed on purpose where a no-match is the expected answer: the
@@ -2228,7 +2237,13 @@ Both simple orderings are wrong, and both are tempting:
 > `capped_to_zero` is the month-boundary case and is easy to miss: `ensure_credit_period` resets
 > `used` to 0, so a report charged in month M and refunded in M+1 — which the reconciliation
 > sweep does on its own schedule — matches its debit yet can give nothing back. Reporting that
-> as a success would hide exactly the silent-money shape 142 exists to surface.
+> as a success would hide exactly the silent-money shape 142 exists to surface. A paid renewal is
+> such a boundary too (196). Since migration 200 `refund_credits` runs `ensure_credit_period`
+> first, as `spend_credits` does, so a refund after any boundary — the ET 1st, a paid renewal, an
+> upgrade, a lapse — sees the rolled pool whether or not anything touched the balance in between.
+> Before 200 an idle account's refund answered `refunded` into the ENDED period's pool, which the
+> next roll then expired, with no page and a "Refunded" card (IAP audit F10; owner decision
+> 2026-10-21, "Documented 'owed' path").
 >
 > Escalating *benign* zero cases would trade a silent-money bug for alert fatigue, which is how the
 > genuine one ends up ignored — hence the split. `credit_service.refund_did_not_happen()` is the
@@ -2341,7 +2356,8 @@ needs a migration.
 time, so `_stale_delivery_reason` returned "never stale": a refunded subscriber could re-POST the
 saved pre-refund JWS to `/billing/verify` and get the paid tier and its full allocation back. The
 client path now orders on the verified payload's own `signedDate` against the stored
-`last_event_at` (falling back to `updated_at` on old rows), including against the user's row for
+`last_event_at` (falling back to `updated_at` only for a REVOKED row with no `last_event_at`; the
+webhook guard has no fallback at all — IAP audit F23, corrected 2026-10-21), including against the user's row for
 a DIFFERENT original transaction — otherwise "refund Max, buy a cheap Pro, replay the Max JWS"
 still worked. A genuine re-subscribe is signed after the refund and still applies. Transactions
 with `isUpgraded` are skipped on both paths (they could demote or revoke the upgraded tier).
@@ -2426,6 +2442,16 @@ The write is now a compare-and-set:
   that just paid. Since migration 198 there is no owner fallback at all: every lineage has its own
   row, and a notification for a lineage resolved without one (through its credit period or its
   `appAccountToken`) INSERTs that row (§9b.12 "Migration 198").
+- **What the webhook answers (IAP audit F13, 2026-10-21).** `apply_notification` answers 200
+  `applied:{type}` only when the delivery's decision was written. A delivery that a rule refused
+  answers 200 `unapplied:{refused_by}:{type}` — `refused_by` is one of stale, older_period,
+  superseded_transaction, superseded_renewal, billing_grace, refunded_replay or reversed_refund —
+  and logs INFO `IAP webhook NOT applied: … refused_by=…` after the rule's own WARNING. The
+  subscriptions row is left as stored, but since 198 a keyed credit step may still have run: an
+  older-period or superseded REFUND claws back its own period or carry by key, and a refused
+  reversal can give a carry back. Two refusals keep their own outcomes:
+  `ignored_superseded_lineage` and `ignored_stale_refund_reversal`. Before this every refused
+  delivery logged `IAP webhook applied:` like one that landed.
 - **`users.tier` is re-checked.** `reconcile_user_tier` re-reads the rows after mirroring
   `users.tier` and mirrors again when they changed. A reconcile that read before a REFUND and
   wrote after the refund's own reconcile used to leave a refunded account on paid features. A
@@ -2439,7 +2465,14 @@ The write is now a compare-and-set:
   `expired` in the last 7 days (`iap_service.py::_recheck_recent_expiries`, IAP audit F02,
   2026-10-17): it reconciles one only when `users.tier` is paid and differs from the effective
   tier, and it waits while an `active` row of the account is inside the sweep's own 24 h window
-  (the renewal verdict is not in yet).
+  or ends within the next minute (the renewal verdict is not in yet), judged on a clock read per
+  account. It pages through every row expired in the window (review round 2, 2026-10-20: reading
+  only the newest `limit` let a wave of ordinary expiries push a stale account out) with
+  `fetch_all_rows`, newest first by `updated_at` with the unique `id` breaking ties
+  (`then_by`; one pass stamps the same `updated_at` on every row it expires, and OFFSET pages on
+  a tied key skip rows), up to 20 pages, logged when hit. A hit cap leaves out the OLDEST rows of
+  the window: ordering on the random uuid `id` alone left the same accounts out on every pass,
+  a just-failed reconcile among them (review round 3).
 
 Since migration 198 (§9b.12 "Migration 198") the ordering also has a per-TRANSACTION memory,
 `subscription_transactions`: a replay of a refunded transaction is refused against its own refund
@@ -2531,7 +2564,23 @@ extra keys, so the splat would silently serve the granted-only balance with no e
   > kept. Both columns now drop by the write-off, retiring the spent baseline. `purchased_remaining`
   > is unchanged (0) either way; what changes is that a subsequent refund correctly caps
   > `back_purch` at `purchased_used = 0`.
-- **`REFUND_REVERSED` is not automated** — logged loudly, restored by hand.
+- **A credit pack's `REFUND_REVERSED` is not automated** — logged loudly (with the transaction,
+  environment, product, user and the credits owed: IAP audit F22), restored by hand through
+  `add_purchased_credits` under a `refund-reversed:<txn>` id (OWNER_TASKS §2.4). A NEW refund of
+  that pack afterwards (its revocationDate later than when we applied the first) is caught although
+  it answers `already_revoked`: after the hand restore an ERROR says to revoke it; before it, a
+  revoked placeholder takes the restore key so the runbook's restore grants nothing; a third
+  refund, and any reversal of a pack refunded or reversed more than once, says ASK CLAUDE with owed
+  unknown — what is owed then depends on the true order of Apple's events, which the rows cannot
+  tell, so no number is guessed; App Store Connect's refund history decides (review of phase 2,
+  2026-10-21). A subscription's
+  reversal IS automated since 196/198: it is recorded, passes the stale check, and
+  `ensure_credit_period` reinstates the period once (§9b.12); only the D6 case is restored by hand.
+- **The App Store webhook has no shared secret, by design.** `POST /billing/app-store-notifications`
+  is unauthenticated (Apple calls it) and rate-limited per IP before parsing; its only control is
+  Apple's JWS signature on `signedPayload` and on the inner transaction. App Store Server
+  Notifications V2 carry no shared secret, so the dead `IAP_WEBHOOK_SHARED_SECRET` setting, whose
+  comment promised an extra check, was removed (IAP audit F24, 2026-10-21).
 
 ### 9b.7 Pricing
 
@@ -3426,8 +3475,10 @@ undercuts a plan" held only on paper.
 
 - **Paid: one allocation per Apple paid period.** A period is the account's WINNING
   `subscriptions` row (196: its ONE row; since 198 one row per Apple lineage, the winner picked as
-  in "Migration 198") while it is `active` with `current_period_end` in the future, keyed by
-  `(original_transaction_id, current_period_end)`. A renewal or an upgrade is a new key. The table
+  in "Migration 198") while it is `active` with `current_period_end` in the future — or (200,
+  IAP audit F11) a later period that the in-force period's OWN lineage row records while it holds,
+  whatever its status — keyed by `(original_transaction_id, current_period_end)`. A renewal or an
+  upgrade is a new key. The table
   subscription_credit_periods holds every key ever granted, with UNIQUE
   `(original_transaction_id, period_end)`, and `user_credits.paid_period_id` points at the one in
   force.
@@ -3451,6 +3502,13 @@ undercuts a plan" held only on paper.
     - At once, when the new key is a HIGHER tier than the running period (an upgrade).
     - A same-or-lower tier never cuts a running period short. Apple applies a downgrade at the
       renewal anyway.
+    - Late (200, IAP audit F11): on the first touch after the period in force ended, when its
+      own lineage row already records a later paid period that no credit call started while it
+      ran — Apple renewed early, the renewal waited, and nothing read the balance before the row
+      went to billing grace or retry, or stayed `active` past its end. That period starts then,
+      even if its own end has passed (HOLD then holds it), unless the register holds an
+      unreversed refund of it. Before 200, HOLD kept the previous period's leftovers (often 0: a
+      402 during grace) and the paid period was never granted.
   - **How much.** A new period sets the pool to the tier's full allocation (`used = 0`), and the
     leftovers expire (`monthly_expired`).
     - The one exception is an upgrade: the unused credits carry on top, capped at the old
@@ -3533,15 +3591,31 @@ undercuts a plan" held only on paper.
         row in grace can only be the renewal (`iap_service.py::_grace_recovery_reason`). That is
         lineage mode only (198), after the register's refusals, and under Rule D's
         register-start cut. Before 198, the old ordering stands. It also takes Rule D's
-        lower-tier guard (`iap_service.py::_superseded_lower_tier`): a lower tier ending within 7
-        days after the period in grace is the renewal an upgrade superseded, not the recovery.
+        lower-tier guard (`iap_service.py::_superseded_lower_tier`): a lower tier Apple charged
+        more than 48 h before the end of the period in grace (or, with no `purchaseDate`, one
+        ending within 7 days after it) is the renewal an upgrade superseded, not the recovery,
+        whatever its `transactionReason`: a genuine purchase over a row in grace is charged after
+        that period ended, and the saved JWS of the lower-tier purchase an upgrade superseded is a
+        PURCHASE too (review round 4).
         Without it, the saved JWS of a Pro early renewal replaced a Max row in grace, wrote off
         the held balance and started a Pro allocation Apple had refunded (IAP audit F03,
         2026-10-17). In Sandbox a lower-tier recovery delivered after its late grace notice is
         refused as stale, as Rule D refuses it.
       - **A derived expiry that Apple stamped "in grace"** (`data.status` 4) still applies past
         the hold's window, but it stores no ordering key, so Apple's own grace notice or
-        recovery, signed earlier, can still bring the tier back.
+        recovery, signed earlier, can still bring the tier back. Since 2026-10-21 the same holds
+        for an explicit `active` about the ENDED period (an OFFER_REDEEMED during grace), which
+        the hold already counts as derived: past the window it is written as received and stores
+        no key, decided once with the hold (`iap_service.py::_ended_period_explicit_active`,
+        IAP audit F14; dormant while grace is OFF).
+      - **A grace notice signed BEFORE the period ends** (IAP audit F07, 2026-10-21; dormant while
+        grace is OFF; the trigger is unconfirmed with Apple). Apple charges a renewal up to 24 h
+        early; if that fails and Apple signs DID_FAIL_TO_RENEW/GRACE_PERIOD before the end, the
+        row is `grace_period` with its end still ahead, and a later same-period delivery derives
+        or asserts `active`. Written, the subscriber went to Free at the period end. It is now held
+        (no write, no key; `iap_service.py::_grace_noticed_early_reason`) unless it is Apple's own
+        word that ends grace, or an AUTO_RENEW_DISABLED (signed after the notice, it stops the
+        retries) — whatever its `data.status`.
       - Past the bound a derived expiry applies again. The expiry sweep gives `grace_period` the
         same bound + 24 h (`iap_service.py::_sweep_windows`). It used to be 60 days, which kept
         an unpaid user on the tier up to ~32 days past Apple's 28-day maximum. `billing_retry`
@@ -3555,6 +3629,13 @@ undercuts a plan" held only on paper.
     transaction AND the same period end.
     - Then it claws back exactly as `revoke_tier_credits` does (floor = the calendar allowance),
       marks the period `revoked_at` / `revoked_remaining`, and returns to calendar mode.
+    - Since 200 (IAP audit F15) it also records what the refunded allocation paid for above the
+      floor (`revoked_cover`, the write-off) and the user's last ledger id (`revoked_ledger_id`).
+      A later `refund_credits` of a charge made in that period (charged after the period was
+      granted, before the clawback) is absorbed by that cover first and credited to the period's
+      `revoked_remaining` (`covered_by_clawback`, nothing owed): it is neither paid back a second
+      time out of the calendar floor, nor — once a keyed clawback has started the next period —
+      paged as a false OWED. A replay answers `already_refunded` (a 0/0/0 row pairs the debit).
     - A refund of an OLDER renewal carries that renewal's earlier `expiresDate`, and so does a
       refund of the Pro half of an upgrade. A later renewal not yet started carries a later one.
       Neither touches the period in force: it was paid for and not refunded.
@@ -3569,7 +3650,13 @@ undercuts a plan" held only on paper.
         a WARNING with both dates (`iap_service.py::_older_period_reason`). An equal or later
         `expiresDate` applies as before.
       - Three exceptions apply as before. EXPIRED states the subscription's condition
-        (GRACE_PERIOD_EXPIRED and DID_FAIL_TO_RENEW/GRACE_PERIOD do not; see Hold). An entitling HIGHER tier is an upgrade, whose period can be any
+        (GRACE_PERIOD_EXPIRED and DID_FAIL_TO_RENEW/GRACE_PERIOD do not; see Hold) — except,
+        since 2026-10-21 in lineage mode (IAP audit F06, owner: "Refuse it"), when the row holds
+        ANOTHER transaction (`subscriptions.transaction_id`) ending at least a minute later: that
+        is a resubscription the app relayed, which stores no ordering key, so Apple's late
+        EXPIRED retry used to demote the payer to Free. Still applied: an EXPIRED of the stored
+        transaction, of a row whose `transaction_id` is NULL, and, in Production, of a higher tier
+        ending within 7 days (an overlap upgrade's expiry over the renewal it superseded). An entitling HIGHER tier is an upgrade, whose period can be any
         length (an offer, a trial, out of a long intro period, after an early renewal). And in
         Production a REVOKED higher tier ending within 7 days of the stored end is the refund of
         an upgrade bought inside the early-renewal overlap that the row never recorded. Since 198
@@ -3592,12 +3679,16 @@ undercuts a plan" held only on paper.
         landed inside the window between the newer refund's write and that refund's own
         `ensure_credit_period`, it used to rewrite the period end first, so the newer
         period's clawback never matched, and 3,900 of a Max allocation stayed spendable.
-    - `revoke_tier_credits`, which iap_service still calls after a refund, applies the same
-      match. It is a no-op after `ensure_credit_period`, and logs a WARNING when the refund was
+    - `revoke_tier_credits` applies the same match. Since 198 iap_service calls it only for a
+      non-Production revocation that leaves the account on Free (IAP audit F23); a Production
+      refund goes through the keyed `revoke_paid_period`. It is a no-op after `ensure_credit_period`, and logs a WARNING when the refund was
       for another period.
   - **Refund reversed (`REFUND_REVERSED`).** The row entitles again under the revoked key. The
-    period is reinstated ONCE, with exactly what the refund took (`plan_reinstated`), and the
-    calendar leftovers since then expire. A replay finds the key in force and does nothing.
+    period is reinstated ONCE, with what the refund took — plus the charges refunded into it since
+    (above), minus (200, IAP audit F15) the granted-pool spend after the clawback's mark up to the
+    next paid period's start, i.e. what the user spent from the calendar floor while the period
+    stood refunded (`plan_reinstated` carries the net) — and the calendar leftovers since then
+    expire. A period clawed back before 200 has no mark and is reinstated exactly as before. A replay finds the key in force and does nothing.
     Before 196, `grant_tier_upgrade`'s top-up did this by accident; 196 has to do it on purpose.
     Since 198 never while `subscription_transactions` still holds a refund of that period (the
     reversal is recorded before the row is written), and a reversal that arrives after the keyed
@@ -3611,11 +3702,17 @@ undercuts a plan" held only on paper.
   - `users.tier` sizes the calendar allowance UNLESS the account has a Production subscriptions
     row; then only `users.comp_tier` does. Accounts with no row (hand-set testers) and Sandbox
     subscribers keep their pre-196 sizing.
-  - A raised complimentary or Sandbox tier is still topped up mid-month.
+  - A raised complimentary or Sandbox tier is still topped up mid-month. A lowered one keeps the
+    current balance until the 1st; `scripts/set_comp_tier.py` runs `reconcile_user_tier` after
+    every applied change (IAP audit F16, 2026-10-21), so `users.tier` — which gates features and
+    sizes the calendar for an account with no Production row — follows a lowered floor down.
+    Before, only a removed floor was reconciled, and nothing else ever reconciles an account with
+    no subscriptions row.
   - **`users.tier` never sizes a Production paid allocation**; it gates features.
 
-`grant_tier_upgrade(uuid)` keeps its signature for its callers (`reconcile_user_tier`,
-`scripts/set_comp_tier.py`, migration 177's instructions) and now just runs
+`grant_tier_upgrade(uuid)` keeps its signature for its callers (`reconcile_user_tier`, which
+`scripts/set_comp_tier.py` runs after every applied change since IAP audit F16; migration 177's
+instructions) and now just runs
 `ensure_credit_period`. None of the three functions names the purchased pool, which keeps
 App Store 3.1.1 safe. `tests/test_credit_paid_periods.py` pins that structurally, along with the
 exactly-once key and `users.tier` staying out of the paid branch. The same file's outlier math
@@ -3624,8 +3721,15 @@ covers:
 - comp floor, Sandbox, an older-renewal refund and a reversal;
 - a seeded property walk over all of them.
 
-The `_Credits` model in `tests/test_credit_pool_isolation.py` mirrors the SQL branch for branch.
-`tests/test_iap_entitlement.py`'s fake now runs the three RPCs through that model too, where it
+The `_Credits` model in `tests/test_credit_pool_isolation.py` mirrors the SQL's money branches
+(196, 198 and 200). It does NOT model four of them (IAP audit F21, 2026-10-21): the guest
+short-circuit; the first-touch INSERT of a missing `user_credits` row and its `grant` ledger row;
+the ON CONFLICT concurrent-grant branch; and the roll of a NULL `resets_at` (the model reads None as
+a future boundary; such a row exists only when `create_user_credits` failed and
+`handle_new_auth_user`'s safety net inserted one, and the SQL rolls it). Its `spend_credits` does
+not roll the period first, as the SQL does, so a model test calls `ensure_credit_period` before a
+spend. The account-deletion trigger (201) is outside it.
+`tests/test_iap_entitlement.py`'s fake now runs six RPCs through that model too, where it
 used to be a second, stale model of migration 114.
 
 The SQL itself was run against a local Postgres 17, applied after the real 194:
@@ -3678,8 +3782,12 @@ its appAccountToken "Yes", and the rest as recommended; design and two adversari
   of a reversal of that refund. Both only move forward, so arrival order never matters; a
   transaction is REFUNDED while its latest refund is newer than its latest reversal. Every
   subscription REFUND / REVOKE / REFUND_REVERSED is recorded BEFORE any row decision — a refund of
-  a lineage no account can be found for too (owner NULL; answered 200
-  `recorded_refund_unknown_lineage`). Its rows go with the account (`ON DELETE CASCADE`). A
+  a lineage no account can be bound to too (answered 200 `recorded_refund_unknown_lineage`; owner
+  = the account its `appAccountToken` names when that account exists, the lineage left unbound,
+  else NULL — IAP audit F17, 2026-10-21). Its rows go with the account: owned rows by `ON DELETE
+  CASCADE`, ownerless rows of the account's lineages by the BEFORE DELETE trigger on public.users
+  (migration 201). Rows recorded after a deletion (an in-flight delivery, or Apple's later refund
+  of the deleted account's lineage) stay, holding no account id. A
   transaction's application (`applied_at`) is recorded only once its row write has landed: recorded
   before a write that then failed or missed the fence, Apple's retry of the same refund read a
   never-recorded overlap upgrade as recorded and kept the refunded user on Pro (review #6). An
@@ -3704,9 +3812,21 @@ its appAccountToken "Yes", and the rest as recommended; design and two adversari
   - *Rule D* — over a revoked or expired row, an entitling payload about a period later than
     every period the lineage has recorded (`max_period_end` + 60 s) is not older news, whatever
     its `signedDate`: the early renewal whose DID_RENEW is retried after the running period's
-    refund applies. A lower tier must end more than 7 days after the stored period (a downgrade's
-    next period); one ending days apart is a renewal an upgrade superseded and stays refused. The
-    mark must be KNOWN (above), and the payload signed AFTER the register began: a JWS signed
+    refund applies. A lower tier must be a downgrade's renewal, not the one an upgrade superseded
+    (`iap_service.py::_superseded_lower_tier`): with Apple's `purchaseDate`, one charged more than
+    48 h before the stored end is the superseded renewal and stays refused, whatever the periods'
+    lengths (a superseded Pro renewal over a refunded 1-week Max offer was let through on the end
+    distance; review round 2, 2026-10-20); without one, it must end more than 7 days after the
+    stored period. One exception: a `transactionReason` PURCHASE that Apple charged at or after
+    the stored transaction's recorded refund (the register's `revocation_date`, read only for a
+    lower-tier PURCHASE over a revoked row; a failed read answers 503) is a resubscription, never
+    the superseded renewal (review round 3: one bought days into a refunded higher-tier period was
+    refused as stale while StoreKit's re-signed revoked copy held the row's key). Any other
+    PURCHASE keeps both tests: the lower-tier purchase an upgrade superseded is a PURCHASE too,
+    charged before the upgrade, and a month-end clamp can end it after the upgrade (review round 4:
+    exempting every PURCHASE let its saved JWS back in). A refund applied before 198 has no
+    register row, so such a resubscription keeps the 48 h test (a known gap below). The mark
+    must be KNOWN (above), and the payload signed AFTER the register began: a JWS signed
     before it may be a renewal refunded before 198 that nothing recorded, and a mark cannot cover
     pre-198 history (a resubscribe or a re-point before 198 moved it). Apple's retry of a DID_RENEW
     signed before 198 keeps the pre-198 ordering (fix-pass review, 2026-10-15).
@@ -3722,6 +3842,16 @@ its appAccountToken "Yes", and the rest as recommended; design and two adversari
     198 counts too: no register row records it, but 196 marked the credit period it clawed back
     (Rule A′'s evidence). Read only for a higher tier ending before the stored period (IAP audit
     F08, 2026-10-17); a Max refunded before 196 leaves no evidence ("Known, accepted gaps").
+    A recorded higher tier's REFUND still applies over a same-lineage lower-tier row that the
+    superseded renewal wrote over it (IAP audit F04b, 2026-10-21) when all hold: Production; the
+    refunded period still runs; the row ends 60 s to 7 d after it; and the row's own transaction
+    was recorded applied (`applied_at`) at least a minute before Apple's `revocationDate` and more
+    than 48 h before the refunded end. A resubscription is bought only after the revocation, and a
+    downgrade's renewal is charged at most 24 h before the end, so neither can have been applied
+    that early (`iap_service.py::_superseded_overwrite_reason`). Never for a transaction whose
+    refund Apple has reversed before (`reversed_signed_at` set): refund → resubscribe → reversal →
+    a second refund would read the resubscription as the overwrite (review of phase 2). A failed
+    register read answers 503.
   - *The superseded renewal* (`iap_service.py::_superseded_renewal_reason`, IAP audit F04,
     2026-10-17) — Apple's retry of the lower-tier early renewal that an overlap upgrade
     superseded, or the app's relay of its saved JWS, ends hours after the upgrade, so the stale
@@ -3729,9 +3859,14 @@ its appAccountToken "Yes", and the rest as recommended; design and two adversari
     the recorded Max: Rule E then refused Apple's refund of that Max as an older period, and the
     keyed clawback started the Pro period instead. Refused, writing nothing: a payload Apple marks
     `transactionReason` RENEWAL, of a lower tier and the same lineage, over an entitling
-    higher-tier row, ending within (−60 s, +7 d] of its end, in Production. Apple marks an upgrade
-    and any customer purchase PURCHASE, and a downgrade's renewal ends a whole period later, so
-    both still apply. Lineage mode only.
+    higher-tier row, not older than it, in Production, that Apple CHARGED (`purchaseDate`) more
+    than 48 h before that row's end — inside the upgrade's own period. Apple marks an upgrade and
+    any customer purchase PURCHASE, and charges a downgrade's renewal at most 24 h before the
+    period it starts, whatever its offer length, so both still apply (review round 2, 2026-10-20:
+    the first version keyed on the end distance, (−60 s, +7 d], which refused a 3-day offer-code
+    downgrade and missed a superseded renewal over a 1-week Max offer upgrade; it remains the rule
+    for a payload with no `purchaseDate`, and Rule D and the grace bypass share it). Lineage mode
+    only.
 - **The keyed clawback** (`revoke_paid_period(user, environment, transaction, original
   transaction, period end)`): for every recorded refund, applied or not, it takes back exactly
   the credit period that transaction paid for, if it is in force. Under the `user_credits` lock it
@@ -3755,9 +3890,15 @@ its appAccountToken "Yes", and the rest as recommended; design and two adversari
   and takes the carry back once, as Apple's REFUND would; a relay with NO revocation, signed after
   the recorded refund, is reversal evidence and gives it back once (review #27).
 - **Before and after.** The backend detects 198 by probing `subscription_transactions` (a miss is
-  re-probed every 5 minutes) and runs exactly the pre-198 path until then. The 198 SQL reads a
+  re-probed every 5 minutes) and runs its pre-198 path until then. That path is NOT exactly the
+  older backend (IAP audit F09, corrected 2026-10-21): it keeps the 2026-10-13 overlap exemption
+  without Rule E, so K19 — a refunded Max's late or duplicate revocation inside 7 days dropping a
+  same-lineage Pro to Free — is open in it, although the 10-13..10-16 production backend refused
+  every older-period revocation. Production ran it only between the 56dcb662 deploy and 198's
+  apply on 2026-10-16; it comes back only if the database loses 198 (a restore). The 198 SQL reads a
   one-row account exactly as 196, and the trigger keeps legacy writers valid, so either deploy
-  order works; 196 and 194 refuse to run after 198. Until the new backend runs, old code still
+  order is safe for the SQL (not for that tier); 196 and 194 refuse to run after 198, and since 200
+  198 and 142 refuse to run after 200. Until the new backend runs, old code still
   re-points the row when a second Apple ID buys (gap 2 for that account; the trigger restarts that
   row's mark). Once lineage mode has run, a ROLLBACK to a pre-198 backend restores the tier on a
   REFUND_REVERSED but not the refunded period's credits — the register still holds the refund,
@@ -3782,6 +3923,58 @@ its appAccountToken "Yes", and the rest as recommended; design and two adversari
   register's period checks match on (original transaction, period end) with no environment, so a
   refund recorded with no expiry date could not keep a period clawed back (subscription
   transactions always carry one).
+
+**Migration 200: refunds roll first, late renewals start, clawbacks cover** (IAP audit phase 2,
+2026-10-21; `backend/database/migrations/200_credit_refund_roll_late_renewal_clawback_cover.sql`)
+- One file for three findings, because two redefine `ensure_credit_period` and two `refund_credits`
+  (separate files would each re-copy the other's ~430-line body). Generated from the live 198 and
+  142 bodies with exact, asserted edits; everything else is byte-identical.
+- **F10** — `refund_credits` runs `ensure_credit_period` first (after its own lock and the
+  `no_credits_row` answer — earlier, ensure would INSERT a row for a deleted user and raise
+  23503), then re-reads the pools (§9b.2).
+- **F11** — the candidate key and the `<<pick>>` retarget (under "When it starts" above).
+- **F15** — `subscription_credit_periods.revoked_cover` / `revoked_ledger_id`, stamped by the
+  REFUND branch, absorbed by `refund_credits` (new outcome `covered_by_clawback`, a `covered` key in
+  the reply and `credit_transactions.covered` on the refund row, which a replay reads to report a
+  `short` refund — §9b.2), and read at REINSTATE (the window's granted-pool spend: every ledger reason except
+  the system ones — `grant`, `monthly_reset`, `monthly_expired`, `tier_upgrade`, `tier_revoked`,
+  `plan_period`, `plan_reinstated`, `tester_grant` — pinned against the history screen's reason
+  table by `tests/test_credit_paid_periods.py`). Refunds in that window of charges made BEFORE the
+  clawback go back into the restored total (they were paid into the floor, which expires; a
+  never-refunded pool would have received them), so a window charge refunded after the reversal
+  still pairs against `used` (final review). A cover absorbs only debits after the period's start
+  mark `applied_ledger_id` (ledger order). Lock order stays `user_credits` then the period.
+- **Order:** backend first (credit_service knows the new outcome; applied first, a covered refund
+  pages "unrecognised outcome" — fails closed), then 200. No backend probe: Python calls no new
+  RPC, parameter or column. Must be applied before billing grace is ever turned ON (F11).
+- **Guards:** 142 and 198 now refuse to run once 200's column `revoked_ledger_id` exists (each would
+  put back an older body; 142's DROP + CREATE would also re-own the function); 194's and 196's
+  refusals name 200.
+- **Verified** on a local Postgres 17 (2026-10-21): the audit's F10/F11/F15 repros flip to their
+  control twins (F10 `capped_to_zero` with the same balances 49 / 1199; F11 P2 granted in all three
+  shapes; F15 (a), (m), (c), (c2) equal to the twin and (b) `covered_by_clawback` with the twin's
+  1200), 36 asserting edge checks (a covered refund then a reversal = the never-refunded 1000;
+  partial cover 15 + 5; a capped partial cover paired and owed; a post-clawback charge never
+  covered; F11's register-refund and other-lineage guards) that fail on 198's body, the paid-cycle
+  smoke, a second apply, and the re-run guards. In CI: `tests/test_credit_migration_200.py` (the
+  same scenarios on the model; 14 fail on the pre-200 model, 5 are controls) and the SQL-text pins
+  in `tests/test_credit_paid_periods.py`.
+
+**Migration 201: the register's ownerless rows go with the account** (IAP audit F17, owner
+2026-10-21 "Purge them at deletion";
+`backend/database/migrations/201_subscription_transactions_purge_with_account.sql`) — a BEFORE
+DELETE row trigger on `public.users` deletes the ownerless `subscription_transactions` rows of the
+account's lineages (named by its subscriptions rows, credit periods or owned register rows) before
+the cascade removes that evidence, unless another account still references the lineage (its Rule A
+and the reinstatement guard read them). It must RETURN OLD on every path: a NULL return under
+auth.users' cascade does not raise, it silently skips the public.users delete (orphaned data, the
+deletion reported done). Any error is caught and logged as a WARNING, so a deletion never fails over
+this purge (it fails open to the pre-201 behaviour; proven on Postgres with a renamed column). One
+DELETE, pinned exactly by `tests/test_account_deletion_completeness.py`. A trigger rather than
+`users.py`: every deletion path, atomic with the cascade, no deploy. Pure SQL, needs 198. The cost
+(accepted with the decision, extending D3's trade-off for owned rows): a purged ownerless refund row
+was the only thing refusing a replay of that refunded transaction, so after the deletion the same
+Apple ID in a NEW Caydex account can replay it and be granted that period again.
 
 **Why the period is DERIVED from the `subscriptions` row** rather than recorded per transaction
 from Python:
@@ -3880,15 +4073,58 @@ calendar mode may simply not be reconciled yet.
     OWNER_TASKS §2.4) — only while the register no longer holds the refund and the balance is in
     ANOTHER paid period. With no paid period in force it is a WARNING: a Restore or the next credit
     read reinstates it, and a hand correction would grant it twice (review #25/#30). Two more
-    WARNINGs, not the ERROR (IAP audit, 2026-10-17): ANOTHER lineage's period in force that ends
-    before this one (minus Apple's 24 h early-renewal lead), with this lineage's row still at this
-    period and outranking every other row and the comp floor — 198 reinstates it by itself at the
-    first credit read after that end (F12; `iap_service.py::_reinstated_automatically`); and the
-    reversed higher tier whose same-lineage newer paid period overlaps it (a resubscription, the
-    "tier NOT reinstated" case): one allocation, the tier days are comped and no credits are
-    granted (D2; owner, 2026-10-17, "No, one allocation"). The ERROR now names the period in force.
-    A read this check needs that fails answers 503 so Apple redelivers the reversal (a WARNING on
-    a client relay), instead of skipping the check in silence (F05).
+    WARNINGs, not the ERROR (IAP audit, 2026-10-17; review round 2, 2026-10-20):
+    - F12 (`iap_service.py::_reinstated_automatically`): ANOTHER lineage's period in force ends at
+      least 48 h before this one, with this lineage's row still at this period and outranking
+      every other row and the comp floor. 198 reinstates it by itself at the first credit read
+      between that end and this period's end − 24 h (Apple's early renewal of this lineage then
+      moves its row on). Every spend reads first, so if no read happens in that window none of its
+      credits could have been spent, and the lineage's next period starts in full.
+    - D2 (owner: "No, one allocation", 2026-10-17; "Yes, any tier", 2026-10-20): the same
+      lineage's period in force is a purchase made while this period still ran (a resubscription
+      after the refund, of any tier). It is told from the period's SHAPE
+      (`iap_service.py::_resubscribed_while_it_ran`): it ends after this period, but more than an
+      hour before this period's own renewal would (its end + one calendar month, clamped to the
+      month's last day). A renewal (early, a downgrade, a billing recovery) starts at this
+      period's end and ends a month or more after it; a purchase made before that end ends earlier
+      by its lead. Delivery order never enters it. It keeps the one allocation: no credits are
+      granted, and a higher reversed tier's remaining days are comped (the "tier NOT reinstated"
+      ERROR, which now fires whichever rule refused the reversal, the stale check included).
+      Anything else of the same lineage is D6's ERROR, whose runbook now checks App Store Connect
+      for a purchase made after the refund before any correction.
+    The ERROR names the period in force and says what it means (review round 3): the same
+    lineage → check App Store Connect for a purchase made after the refund (D2's case) first;
+    another lineage → 198 MAY still reinstate it by itself until this period's own end (at a
+    credit read once that period lapses, is refunded or renews at a lower plan, while this row
+    still holds this key) and never after, and it cannot see a hand grant: so no correction
+    before that end; then the period's OWN credit-period row AND the register decide — its
+    `revoked_remaining` is owed only while `revoked_at` is still set and `subscription_transactions`
+    holds no unreversed refund of that (original transaction, period end), REINSTATE's own
+    condition (final review of phase 2: a refund stamps `revoked_at` anew and keeps
+    `reinstated_at`, so a period reinstated by 198 and then refunded AGAIN reads like one still
+    owed; every D6 line now hands over the query, `iap_service.py::_d6_still_owed`) and no hand
+    grant of it exists yet. One reversal logs its line once per delivery (Apple's notification,
+    each app relay or Restore), and a hand grant changes neither the row nor the register, so the
+    grant is keyed: ONE `plan_reinstated` row with `ref_id` `d6:<original>:<period_end>`
+    (`_d6_grant_ref`), written into the pool of the period in force under the `user_credits` lock
+    after rolling the period first (`ensure_credit_period`), and the owed test checks that
+    `ref_id` (verification of the final fixes, 2026-10-21). With NO paid period in force, wait
+    while any other `subscription_credit_periods` row of the account has `revoked_at` set and its
+    `period_end` still ahead (until it ends or is reinstated): a `plan_reinstated` row ends that
+    period's reinstatement window (`v_stop`) and is outside it, so a later reversal of THAT period
+    would expire the grant with the calendar leftovers (PG-proven, last verification pass
+    2026-10-22). With a paid period in force no window can hold the row: the period's own
+    `plan_period` row ends every earlier one. And with no period in force at the line's time it
+    is owed at all only if another paid period was in force then (else the no-period WARNING's
+    rule: nothing is owed); never decided by the code's own
+    `plan_reinstated` rows, whose `ref_id` is the lineage, so an earlier reinstatement of another
+    of its periods reads the same — and a hand grant lands in
+    the pool of the period then in force, which that period's refund or renewal can take back
+    (review rounds 4-6: an early grant was doubled by a later refund of the other lineage, marking
+    the period reinstated by hand lost the credits). A failed read of the reversed period or of the period in
+    force answers 503 so Apple redelivers the reversal (a WARNING on a client relay), instead of
+    skipping the check in silence (F05); a failed balance read keeps its own ERROR and answers 200
+    (review K96).
   - A refund applied BEFORE 198 is not in the register, so its REFUND_REVERSED arriving under a
     later key is still refused ("REFUND_REVERSED NOT APPLIED — restore by hand"; Restore Purchases
     heals it; review #9/#24).
@@ -3913,8 +4149,67 @@ calendar mode may simply not be reconciled yet.
     loaded), followed by account deletion, can still be replayed into a new account: the
     register's rows go with the account, as the row and the periods did ("Delete with account",
     matching the privacy policy).
-  - A refund of a lineage never bound and carrying no token is recorded with no owner: it blocks
-    replays of that transaction but claws nothing back (nothing was granted).
+  - A refund of a lineage never bound and carrying no token (or a token naming no account, e.g. a
+    deleted one) is recorded with no owner: it blocks replays of that transaction but claws
+    nothing back (nothing was granted).
+  - Migration 200 leaves (IAP audit F10, F11, F15):
+    - A clawback made by `revoke_tier_credits` (Sandbox, the legacy path) or before 200 records no
+      cover or mark, so a later refund of a charge from that period still pays back from the floor
+      and its reversal deducts nothing (OWNER_TASKS's REFUND LEAK step 3b).
+    - A 196-backfill period's `applied_at` is the backfill time, so charges before it are never
+      covered.
+    - Ordering: a clawback, then its reversal, then the report refund of a pre-clawback charge
+      answers `capped_to_zero` (20 owed: true, and paged) — unchanged by 200. A partly covered
+      charge whose rest is refunded after the next period started pays the rest from that period
+      or is capped (K45's shape).
+    - A hand-written ledger row whose reason is not a granted-pool system reason counts as window
+      spend at a reinstatement; the window assumes every writer holds the `user_credits` lock.
+      So a one-off correction of a refund that never landed (OWNER_TASKS REFUND LEAK step 4;
+      final review of phase 2) starts with `refund_credits` itself, called with the charge's own
+      ref and amount: it rolls the period, absorbs a post-200 clawback's cover
+      (`covered_by_clawback`: nothing owed — a hand correction of step 2's amount would pay it
+      twice while Apple's refund stands; PG-proven, and pinned in `tests/test_credit_migration_200.py`),
+      pairs the debit and reports what is still owed. Only that remainder is written by hand, as ONE
+      `credit_transactions` row, written under that lock with
+      its `user_credits` change, AFTER rolling the period first (`ensure_credit_period` once the
+      lock is held, then re-read the pools — as `refund_credits` does since 200; a correction
+      written into a period that already ended is expired by the next roll): a refund-kind reason
+      (the charge's own, e.g. `report_refund` / `chat_refund`), `reverses_id` = the charge's id,
+      `ref_id` = the charge's, and the owed split (`delta = granted_delta + purchased_delta`,
+      `covered` 0); the pool change lowers `used` as a refund does, and what `used` cannot take
+      raises `total` — which a same-month tier raise's top-up (`total = GREATEST(allocation,
+      total)`) absorbs, so re-add it if a comp tier is raised that month. `reverses_id` also
+      makes a later refund attempt of the charge answer `already_refunded` instead of paying it
+      again (verification of the final fixes). A system reason (`grant`,
+      `tester_grant`, `tier_upgrade`, …) is invisible to the window, so the correction expires
+      with the floor if Apple then reverses a refund of that period (PG-proven: 1170, not 1195);
+      a NULL `reverses_id` hides it from step 2's owed query and from `refund_credits`' replay
+      `short`, so the charge keeps reading as owed. With `reverses_id` set it counts like any
+      refund: before the clawback's mark it is added back (`v_pre_back`), after it it nets
+      against the window (`tests/test_credit_migration_200.py`, edge_200 R7).
+    - A REFUND_REVERSED reinstated after another lineage's period started deducts only the spend
+      before that period's `plan_period` row (conservative, F12).
+    - "Charged inside this period" is read in LEDGER order: after the period's own `plan_period`
+      row (`applied_ledger_id`, set when it starts; ids follow the balance lock, so no race between
+      transaction start times — the final review found that comparing `applied_at` with the debit's
+      `created_at` could invert when a spend began just before a concurrent period start). Periods
+      started before 200 have no mark and keep the timestamp rule, with that millisecond race. A
+      REINSTATED period keeps its start mark, so after two lineages, a reinstatement and a second
+      Apple refund, a debit charged in the other lineage's period in between can be absorbed by this
+      period's cover.
+    - The 0/0/0 row that pairs a covered charge shows in the credit history as a 0-credit refund,
+      and marks the charge reversed (kept: without it a lost-reply retry would absorb twice).
+    - F11: with no paid period in force (`revoke_paid_period`'s second ensure after clawing back an
+      ENDED period) and a lineage row that records the next period but cannot start it now (grace,
+      or `active` past its end), the account stays on the calendar allowance until a renewal
+      starts; a late start sets `resets_at` to a past end (K41 display) and writes the old
+      period's `monthly_expired` at the grace notice.
+  - What outlives an account deletion (F17, 201): register rows recorded AFTER it. They hold no
+    account id and, when token-less, still block a replay of that refunded transaction into a new
+    account. Rows left by deletions before 201 cannot be told from never-bound lineages (no
+    backfill). Nor are unbound refunds recorded ownerless BEFORE the phase-2 backend deploy for a
+    still-live account whose token named it: the token is not stored, so none of the purge's three
+    sources links them to that account.
   - Rule A′ cuts on the clawback time, so a genuine JWS of a refund from before 198 that Apple
     reversed, signed before our clawback, is refused; the REFUND_REVERSED reinstates it unless an
     unrelated later key refuses that too (the pre-198 bullet above).
@@ -3924,16 +4219,54 @@ calendar mode may simply not be reconciled yet.
     two Apple IDs racing on one account can create two rows under the old code (the 198 SQL
     handles them), and a second Apple ID's purchase re-points the account's row (its mark
     restarts).
-  - The superseded-renewal refusal (Rule E's twin above, IAP audit F04) cannot heal a row that a
-    stale lower-tier renewal overwrote BEFORE 2026-10-17, nor see a payload without
-    `transactionReason`: Apple's refund of that Max is still refused as an older period and the
-    Pro period starts. Telling that row from a Pro resubscription needs the stored row's own
-    `signedDate` in the register (a migration): planned with the phase-2 fixes.
+  - The superseded-renewal refusal (Rule E's twin above, IAP audit F04) cannot see a payload
+    without `transactionReason`. A row a stale lower-tier renewal overwrote since 198 is healed
+    when Apple refunds the upgrade (F04b, Rule E above; no migration was needed). Still not
+    healed: (1) rows overwritten 2026-10-13 to 10-16, before 198, which have no register record
+    of the row's transaction; (2) an overwrite that landed after Apple's revocation (the one-off
+    check sends every row whose higher plan was refunded to Claude as "CHECK", who reads the row
+    transaction's kind before any correction — the rows cannot tell a renewal that landed after
+    the refund, or followed a refund before the old period's end, from a purchase made after it;
+    final review of phase 2); (3) a refund
+    after the refunded period ended, which keeps Pro until the row's end (up to about a day, about
+    4 days at a month end); (4) a refund
+    already refused before the fix, which Apple will not resend after a 200 — the one-off check in
+    OWNER_TASKS plus a hand correction covers it, and its later REFUND_REVERSED stays on the "tier
+    NOT reinstated" path.
+  - EXPIRED over a resubscription (F06, under Refund above): legacy mode (no 198) keeps the
+    exemption; a row not rewritten since 198 (`transaction_id` NULL) too; and a lower-tier
+    resubscription ending within 7 days of a higher-tier EXPIRED whose first delivery failed (an
+    offer code) is still demoted until the SUBSCRIBED retry, a Restore or the next renewal.
+    The opposite case (final review of phase 2): a higher-tier upgrade that was never recorded
+    (every delivery of it lost) and whose period ends more than 7 days (`_UPGRADE_OVERLAP_MAX`)
+    before the stored row's end. That is an upgrade bought D days before the Pro period's end and
+    shorter than D − 7 days (the row still holds that Pro period), or one bought in its last
+    24 h and shorter than about three weeks (the row holds the Pro renewal it superseded). Its
+    EXPIRED is refused (`_older_period_reason`), so the account keeps Pro, and that period's
+    credits, until the row's end; before phase 2 every EXPIRED applied. Its REFUND is refused
+    too, by the same function's unrecorded-revocation overlap rule (as before) — not by F04b,
+    whose same 7-day shape (`_superseded_overwrite_shape`) only limits a RECORDED upgrade a
+    payload without `transactionReason` (or a delivery from before the F04 fix) overwrote. Both
+    use `_UPGRADE_OVERLAP_MAX`, so re-deciding
+    offers means that bound, not F04b alone. Unreachable today: both plans are monthly, and App Store Connect has no
+    introductory, promotional, offer-code or win-back offer on either (read through the App
+    Store Connect API 2026-10-21; `Caydex.storekit` has none). OWNER_TASKS asks the owner to
+    tell Claude before creating one, so this is re-decided first.
   - A Max refunded before 196 left no credit period, so Rule E has no evidence of it (IAP audit
     F08 (a)): a late revoked relay of it inside the overlap bound still revokes a Pro
     resubscription on the same lineage, until that Pro renews or a Restore heals it.
   - A purchase on a second Apple ID in the K02 window can be applied by neither path ("IAP
     PURCHASE NOT APPLIED", IAP audit F01, §9b.3 above), until its next renewal is relayed.
+  - D2 from the period's shape (review round 2): a renewal shorter than a month (a 3-day or
+    1-week offer-code downgrade) reads as a resubscription — D2's WARNING, so nothing is granted
+    where a hand restore was owed — and a resubscription made in this period's last hour, an
+    annual one, or one in the last days before a period ending on the 29th-31st (the month-end
+    clamp) reads as a renewal (D6's ERROR, whose runbook checks App Store Connect first). Telling them apart
+    exactly needs the in-force transaction's `transactionReason` in the register (a migration).
+  - A lower-tier resubscription after a refund applied BEFORE 198 (no register row, so no recorded
+    `revocation_date`), whose own deliveries are all stale, keeps the 48 h test: refused as the
+    superseded renewal when charged more than 48 h before the refunded period's end, until a
+    later-signed delivery of it (its next renewal, or a Restore) lands (review round 4).
 - In a HOLD, `resets_at` is the past period end, so Profile's "Resets on" shows a past date until
   the renewal or expiry lands.
 - A paid renewal or upgrade is a new boundary, like the 1st. A report charged just before it that
@@ -5838,6 +6171,9 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | 2026-10-15 | The billing-grace hold covers the LATE grace notification and Apple's own word ends grace (§9b.12 Hold). (1) A derived expiry about the stored period is also held over an `active` row until its end + the sweep's 24 h window (both paths; no write, no key). (2) Never held: DID_FAIL_TO_RENEW without a subtype, DID_CHANGE_RENEWAL_STATUS/AUTO_RENEW_DISABLED (unless Apple signed it while `data.status` was 1), or any notification whose `data.status` is 2, 3 or 5 (`app_store.notification_subscription_status`, read only to END a hold). (3) An explicit "active" about an ended period (OFFER_REDEEMED during grace) is held like a derived expiry. (4) DID_FAIL_TO_RENEW/GRACE_PERIOD joins `_PERIOD_SCOPED_NOTIFICATIONS`: refused about an older period; a period-scoped notice keeps the higher-tier exemption only inside the Production overlap bound. (5) Lineage mode: a newer period over a row in grace skips the signedDate check (`_grace_recovery_reason`, under Rule D's cut). (6) A derived expiry stamped `data.status` 4 stores no ordering key. (7) WARNINGs: a grace notice landing on an already-expired row of the same period, and every row the sweep expires (with env and original transaction) | Owner, 2026-10-14: "use your best judgement" on the two residual gaps. Research (Apple docs, forum answers by Apple engineers): a cancel during grace ends access at once; retries run +1/+12/+24/+48/+72 h after each attempt (Sandbox once); DID_FAIL_TO_RENEW can be signed after the recovery that superseded it; every subscription notification carries `data.status`. Probes: a Restore or derived webhook before the retried grace notice lapsed the held balance for good, and a webhook made the retry stale (Free for the whole grace). Design workflow (4 designs, 3 judges), then an adversarial review (16 findings, 15 confirmed or plausible, all low, all fixed; dispositions in the session record) | A 7-day `active` window (it widens what an unpaid churner whose EXPIRED is lost keeps sevenfold); promoting a row to `grace_period` on `data.status` 4 (undocumented per type; it would grant on a guess); refusing a grace notice with `data.status` 1; the client sending `renewalInfo` (an app release); storing `gracePeriodExpiresDate` (a migration, seen NULL); a lapse-reversal SQL migration now (deferred until the new WARNING fires); an App Store Server API reconcile (needs an In-App Purchase key — owner's call); the grace-recovery bypass before 198 (a refunded renewal's replay would re-entitle it and reinstate its credits) |
 | 2026-10-15 | App-Exclusive Signals rebuild about twice a day on CONTENT age: memory 12 h, the Home warmer at 12 h − 20 min, a `signals_cache` row reused only while its `computed_at` is under 11.5 h; a failing rebuild holds the last good payload (under 24 h) instead of mixing in a partial build; Congressional Buys counts purchases only, card and drill-down share one row filter; a failed drill-down is 503 `SIGNAL_DETAIL_UNAVAILABLE` | Owner: the signals must update on their own, "about 2 times a day" for long-term investors. A forced refresh reloaded any unexpired 24 h row and stamped it now, so the 40-min warm only re-read it and the content changed once a day (up to ~48 h behind a guard timeout). Exchanges are spinoff swaps (holders_service dropped them for HONA); the drill-down kept undated rows and skipped unnamed members the card counted; an empty 200 read as "nobody bought it" beside a card saying four did | Every ~40 min (rejected by the owner: not needed for long-term investors); per-card merging of a partial build with older cards (mixed-age payloads, more state, little gain at 2 builds a day); slots pinned to market hours (follow-up if wanted) |
 | 2026-10-17 | IAP audit, phase 1 (§9b.3, §9b.12): (F02) every expiry-sweep pass re-checks accounts with a row expired in the last 7 days and reconciles a stale paid `users.tier`; (F03) the grace-recovery bypass takes Rule D's lower-tier guard; (F04) a lower-tier RENEWAL ending inside the overlap after an entitling higher-tier row is refused as superseded (`transactionReason`); (F08) Rule E counts 196's clawback mark as refund evidence; (F05) a failed read in the D6 check answers 503 (a WARNING on a client relay); (F12, D2) D6 is a WARNING when 198 reinstates the period by itself or a same-lineage resubscription keeps the one allocation; (F01) a Rule A″ refusal of a lineage the account has no record of logs "IAP PURCHASE NOT APPLIED" | A read-only adversarial audit of how five sessions' changes compose (24 findings, 23 confirmed, 14 reproduced; `.claude/session-state/9edb4eca-…-iap-audit.md`). Owner, 2026-10-17: phase 1 = the six highs + F12, no migration; "No, one allocation"; F01 "Log + docs only"; F04's heal of rows already overwritten "Document, add in phase 2". A Plan agent's stress-test of the first draft replaced a server-clock comparator for F04 and dropped a high-water-mark check for F03 | F04 keyed on the register's `applied_at` (our clock: a late apply or a race refused a paid Pro); F03 comparing with `max_period_end` (a once-longer period's mark refused a real recovery); healing already-overwritten rows by `last_event_at` (reopens K19's "first refund delivery failed until the resubscribe"); letting the appAccountToken bind over a paying account (undoes review #11); an in-process carry-over for F02 (lost on every deploy) |
+| 2026-10-20 | IAP audit, phase 1 review round 2 (§9b.12, §9b.3): D2 is decided from the period's shape — the same lineage's period in force ends after the reversed one but more than an hour before that period's own renewal would (its end + one calendar month), any tier — and the "tier NOT reinstated" ERROR fires on the stale refusal too; F12's WARNING needs the in-force period to end ≥ 48 h before the reversed one (a ≥ 24 h reinstatement window) and says what happens without a credit read; a lower-tier renewal is "superseded" when Apple charged it (`purchaseDate`) more than 48 h before the stored end, the end-distance rule only without one (F04 refusal, Rule D, grace bypass), except (Rule D only) a `transactionReason` PURCHASE charged at or after the stored transaction's recorded refund; the expiry re-check pages newest first through every recent expiry (`fetch_all_rows` with a unique `then_by` tiebreaker, `id`) and reads its clock per account; the D6 ERROR says what to do for the lineage in force (same lineage: check for a purchase after the refund; another lineage: 198 may still reinstate it by itself until this period's end and never after, so no hand correction before then, and the period's own credit-period row then says what is owed); F01's ERROR names the plan and its period end, and its runbook bounds any comp floor by that instant | The adversarial review of the phase-1 diff (workflow wf_c51a0e33-7a7: 15 confirmed, 3 contested, 2 refuted; every one re-checked on `main` 658de4d8), then a second review of these fixes (workflow wf_bfa6b55e-9b5), which found that the first D2 rule measured delivery order, and a third (wf_4b02510c-f29: 10 confirmed, all low — the PURCHASE case, the page-cap order, the D6 and comp-floor runbook timing), and a fourth of those fixes (wf_ea57f916-918: 2 confirmed, 1 contested, all low — every PURCHASE exempted was too broad, the "198 cannot reinstate" branch was false after a refund of the other lineage), and a fifth (wf_8e17e32a-210: 2 confirmed, 1 contested, all low — the round-4 line promised a reinstatement that a same-plan renewal of the other lineage prevents, and its mark-it-reinstated recipe lost the credits), and a sixth (wf_4c69d7f5-23e: 3 confirmed, all low — `plan_reinstated` is lineage-scoped, a hand grant's pool, the column parser unpinned). Owner, 2026-10-20: "Yes, any tier" for D2; work in a worktree off `main`. `purchaseDate` (rejected for storing on 2026-10-14 as undocumented for an ordinary renewal) is only compared here, never stored, against a 48 h lead that holds on either reading — the charge (≤ 24 h before the period starts) or the period start | D2 by `applied_at` > `revoked_at` (delivery order: a resubscription relayed before the refund's retry is granted in the clawback's own transaction and read as D6, and the lineage's renewal delivered after the clawback read as D2); D2 by `period_start < end − 3 d` (198's `end − 1 month` drifts ~3 days at month ends; it missed a resubscription in the last 3 days); `last_event_at` as the discriminator (delivery order too); paging the re-check on `updated_at` alone (one sweep pass stamps the same instant on every row it expires, so OFFSET pages skip or repeat rows) or on the random uuid `id` alone (a hit cap left the same accounts out on every pass, a just-failed reconcile among them); a join on `users.tier` for the re-check (paging is simpler to fake and reason about); exempting every `transactionReason` PURCHASE from the superseded test (the pre-upgrade lower-tier purchase is one; round 4), or exempting it in the grace bypass at all; telling the owner to wait, or that 198 "cannot" reinstate, by the other lineage's end alone (a refund of it reinstates too); promising that 198 "still reinstates" it (a same-plan renewal of the other lineage, this lineage's early renewal or a comp floor prevent it); an early hand grant plus marking the period reinstated by hand (the grant lands in the other lineage's pool, which its refund or roll wipes, while the mark stops 198's own reinstatement); deciding what is owed by a `plan_reinstated` row (its `ref_id` names the lineage, not the period); prescribing the purchased pool for a hand grant (an owner's call: that pool carries App Store 3.1.1 rules); offerPeriod arithmetic for F04 (absent before App Store Server API 1.15) |
+| 2026-10-21 | IAP audit, phase 2 (§9b.2, §9b.3, §9b.6, §9b.12): migration 200 — (F10) `refund_credits` rolls the period first, so a boundary-straddling refund always takes the paged `capped_to_zero` path; (F11) the in-force lineage's own later period is a new key whatever its row's status, unless the register holds a refund of it; (F15) a clawback records its cover and ledger mark, `refund_credits` absorbs a covered charge (`covered_by_clawback`, `covered`), and a reinstatement deducts the window's granted-pool spend; 142/198 refuse after 200. Migration 201 — (F17) ownerless register rows of a deleted account's lineages are purged by a BEFORE DELETE trigger on public.users, and an unbound refund is recorded under the account its token names. Code — (F04b) a recorded upgrade's refund heals a row the superseded renewal overwrote, decided from the row's own `applied_at`; (F06) EXPIRED is refused as an older period when the row holds another, later transaction; (F07) an early grace notice holds later same-period deliveries; (F14) an explicit `active` about an ended period stores no ordering key; (F13) a refused webhook delivery answers `unapplied:{rule}:{type}`; (F16) `scripts/set_comp_tier.py` reconciles every change; (F22) the pack-reversal and 503 ERRORs carry the ids and the amount owed; (F24) the dead `IAP_WEBHOOK_SHARED_SECRET` removed; (F18-F20) one shared SQL reader for the source-scan guards; (F09, F21, F23) docs corrected | The 2026-10-17 composition audit's remaining findings (`.claude/session-state/9edb4eca-…-iap-audit.md`), each repro turned into a test that fails before its fix; the three SQL repros replayed on a local Postgres 17 with 200 loaded, plus 36 asserting edge checks and the re-run guards. Owner, 2026-10-21: "phase 2"; F06 "Refuse it"; F10 "Documented 'owed' path"; F17 "Purge them at deletion"; F15's scope and the old-migration guards as recommended (the full SQL fix; refuse re-runs after 200) | A timer, pg_cron or sweep rolling periods at renewal instants (§7.4 rules out background jobs); an after-loop start block for F11 (breaks "every key decision inside the loop"); granting every skipped period backwards (only the row's current key is visible); three migrations 200/201/202 for F10/F11/F15 (each re-copying a ~430-line body; F10 alone makes F15's false-OWED shape deterministic); F10 option B (relabelling the refund without rolling); F15 (c) only (leaves the double payback); a register column for F04b (NULL on every row it should heal; its only backfill, `last_event_at`, reopens K19); F06 as an end-only rule (breaks legacy fixtures and legacy mode); storing the client JWS's `signedDate` as the ordering key (Apple's earlier-signed notifications would read as stale); writing F07's delivery while keeping `grace_period` (stores an ordering key the hold never stores); F14 written as `expired` (lapses the held balance at once); F16 by lowering `tier` inside `plan_change` (it cannot see subscriptions and would demote a payer); F17 by keeping the rows and changing the privacy policy (reverses D3), or by a purge in `users.py` (misses Studio/scripts and breaks the deletion-scope tests); F09 by making the revoked-in-overlap exemption lineage-only (reopens K67's refund half in legacy mode, unreachable in production since 2026-10-16) |
+| 2026-10-21 | IAP audit phase 2, final review (§9b.12, OWNER_TASKS §2.4): every D6 owner text hands over the register half of "still owed?" (`iap_service.py::_d6_still_owed`: owed only while the period's `revoked_at` is set AND `subscription_transactions` holds no unreversed refund of that original transaction and period end, REINSTATE's own condition); REFUND LEAK 3b(a) lists each pack refunded after the charge with what it reclaimed and leaves the amount to Claude; the F04b one-off check sends every row whose higher plan was refunded to Claude ("CHECK": the rows cannot tell a renewal from a purchase) and calls a row "ok" only for a downgrade renewal or a lower plan ending more than 5 days after the higher one; a D6 hand grant is keyed (`d6:<original>:<period_end>`) and the owed test checks it; a step-4 correction rolls the period first; a step-4 correction is a refund row of its charge (refund-kind reason, `reverses_id` = the charge), never a system reason; migration 200's comments say "once per clawback" and the adjusted amount; the F06 known gap restated; a standing owner rule to tell Claude before creating any subscription offer; then (last verification pass, 2026-10-22) step 4 starts with `refund_credits` itself (it absorbs a post-200 clawback's cover), the D6 grant waits while another refunded period of the account still runs with nothing in force (a `plan_reinstated` row ends that period's reinstatement window), a could-not-tell line whose account has no period in force is owed after the period's end only if another paid period was in force at the line's time, and the `IAP webhook applied` line names its own transaction (`transaction=`) | A read-only review of the last stretch, each finding verified twice and PG-proven against migration 200: a period reinstated then refunded AGAIN re-stamps `revoked_at`, so the row alone would have granted a full allocation for a standing refund; a pack refund writes off nothing when the user's other pack credits cover the spend, so "any pack refund after the charge" withheld credits still owed; a superseded renewal that LANDED after the refund read as a purchase made after it (and, once that was fixed, one following a refund before the old period's end still did, while a genuine month-end purchase read as the leak); one reversal logs its D6 line once per delivery and a hand grant changes neither the row nor the register (two grants for one period); a correction written into an un-rolled month expired at the next roll; a correction under `grant` / `tester_grant` expires at a reinstatement (1170, not 1195) | An exact 3b(a) formula in the runbook (several packs and later spends make the owner's arithmetic error-prone; Claude computes it); registering a new `manual_correction` reason (a grant kind would be forced onto the system list by `test_credit_paid_periods.py`, which would lose it); deciding the F04b verdict from delivery order alone (it cannot tell a late-landing renewal from a purchase), or from the row's computed period start (a refund before the old period's end and month-end clamping defeat it); a new `manual_grant` reason for the D6 grant (a grant kind must join the system list, and the history screen already labels `plan_reinstated` "Plan credits restored") |
 
 ---
 

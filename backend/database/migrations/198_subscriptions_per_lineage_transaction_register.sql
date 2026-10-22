@@ -90,9 +90,25 @@
 -- Depends on 114 (last_event_at) and 196 (subscription_credit_periods, the 196 functions).
 -- Idempotent: IF NOT EXISTS / CREATE OR REPLACE / DROP … IF EXISTS / guarded DO blocks; the
 -- backfill only fills NULLs. Re-running it is safe; re-running 196 or 194 after it is refused.
+--
+-- ⚠️ Never after 200 (200_credit_refund_roll_late_renewal_clawback_cover.sql). 200 redefines
+-- ensure_credit_period (a late renewal starts; a clawback records what it covered); this file
+-- applied again would silently put back 198's body, and refund_credits would then read clawback
+-- stamps nothing writes any more. The guard below refuses that (added 2026-10-21, IAP audit phase
+-- 2): once 200's column subscription_credit_periods.revoked_ledger_id exists, this file raises and
+-- changes nothing.
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'subscription_credit_periods'
+                  AND column_name = 'revoked_ledger_id') THEN
+        RAISE EXCEPTION '198 must not be applied after 200: it would replace 200''s ensure_credit_period. Re-apply 200 instead.';
+    END IF;
+END $$;
 
 -- ── 0. Preflight: no two rows may share a lineage ──────────────────────────────────────────
 

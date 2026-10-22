@@ -5,7 +5,8 @@ WHY. The App Review demo account sits on Max with no subscription behind it, so 
 own sandbox purchase used to re-tier it and the sandbox expiry dropped it to Free — locking the
 Pro/Max narration that answers the 1.0 (9) Guideline 2.5.4 rejection. It also showed Max with
 Free's 50 monthly credits, because its tier was written by hand and the Max allocation was
-never granted. This sets the floor AND runs the same two credit RPCs a real purchase runs.
+never granted. This sets the floor AND runs the same reconciler a real purchase runs
+(`reconcile_user_tier`: users.tier = max(entitling subscription, floor), then the credit RPCs).
 
 The account is found by EMAIL, and no password is involved. Use it for accounts that are not
 in `testflight_testers.local.json` (that file's seed script sets the floor itself).
@@ -36,10 +37,11 @@ def plan_change(current: Dict[str, Any], requested: Optional[str]) -> Dict[str, 
     """The `users` columns to write. Pure, so it is tested without a database.
 
     `tier` is raised to the floor but never lowered HERE: lowering is the reconciler's job,
-    because only it knows about real subscriptions. `main` runs it explicitly when a floor is
-    removed — an account with no subscription rows is never reconciled on its own (no verify,
-    no notification, and the expiry sweep only visits active rows), so without that call a
-    removed Max floor would leave the account on Max, granted 4,000 credits every month.
+    because only it knows about real subscriptions. `main` runs it after EVERY applied change —
+    an account with no subscription rows is never reconciled on its own (no verify, no
+    notification, and the expiry sweep only visits active rows), so without that call a removed
+    or LOWERED Max floor left the account on Max, granted 4,000 credits every month (IAP audit
+    F16: only a removed floor was reconciled).
     """
     rank = {t: i for i, t in enumerate(VALID)}
     change: Dict[str, Any] = {}
@@ -86,23 +88,41 @@ def main() -> int:
           f"purchased={(credits.get('purchased_total') or 0) - (credits.get('purchased_used') or 0)}")
 
     change = plan_change(user, requested)
-    print(f"  change: {change or 'none to users'} · then ensure_credit_period + grant_tier_upgrade")
+    print(f"  change: {change or 'none to users'} · then reconcile_user_tier: users.tier = "
+          "max(entitling subscription, floor), which may LOWER it, then the credit RPCs")
     if not args.apply:
         print("\nDry run only. Re-run with --apply to write.")
         return 0
 
     if change:
         db.table("users").update(change).eq("id", user["id"]).execute()
-    if requested is None:
-        # Floor removed: let the real reconciler recompute the tier from the subscriptions
-        # (which may lower it) and run the credit RPCs. See `plan_change`.
-        from app.services.iap_service import IAPService  # noqa: PLC0415
-        IAPService().reconcile_user_tier(user["id"])
-    else:
-        # Same order as iap_service.reconcile_user_tier: roll the period, then lift the
-        # allocation to the (now floored) tier. grant_tier_upgrade is idempotent, never claws back.
+    # Every applied change goes through the real reconciler: it recomputes the tier from the
+    # subscriptions and the floor (raising, keeping, or LOWERING it) and runs the credit RPCs in
+    # their order (ensure_credit_period, then grant_tier_upgrade). See `plan_change`.
+    from app.services.iap_service import IAPError, IAPService  # noqa: PLC0415
+    try:
+        tier_now = IAPService().reconcile_user_tier(user["id"])
+    except IAPError as e:
+        cause = e.__cause__
+        print(f"✗ comp_tier={requested} written, but reconcile_user_tier FAILED ({e}"
+              + (f": {type(cause).__name__}: {cause}" if cause else "")
+              + ") — users.tier and the credit period may still be the old plan. "
+              "Re-run the same command (it is idempotent).")
+        return 1
+    # reconcile_user_tier logs a credit-RPC failure and carries on (the next credit read retries
+    # it), so a success line here would claim a credit period it never confirmed. Run the
+    # idempotent roll once more, and fail loudly (IAP audit phase 2 review, 2026-10-21).
+    try:
         db.rpc("ensure_credit_period", {"p_user_id": user["id"]}).execute()
-        db.rpc("grant_tier_upgrade", {"p_user_id": user["id"]}).execute()
+    except Exception as e:  # noqa: BLE001 — reported, exit 1
+        print(f"✗ comp_tier={requested} written and tier={tier_now} reconciled, but "
+              f"reconcile_user_tier FAILED to refresh the credit period ({type(e).__name__}: {e}) "
+              "— the balance may still be the old plan's. Re-run the same command (it is "
+              "idempotent).")
+        return 1
+    if requested and tier_now != requested:
+        print(f"  note: tier={tier_now} is above the {requested} floor — an entitling "
+              "subscription holds it")
     after_u = db.table("users").select("tier,comp_tier").eq("id", user["id"]).limit(1).execute().data[0]
     after_c = (db.table("user_credits").select("total,used,tier_alloc")
                .eq("user_id", user["id"]).limit(1).execute().data or [{}])[0]

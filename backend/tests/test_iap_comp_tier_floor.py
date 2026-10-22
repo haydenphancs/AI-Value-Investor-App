@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -196,7 +198,8 @@ _sct_spec.loader.exec_module(_sct)
         ({"tier": "premium", "comp_tier": "premium"}, "premium", {}),
         # a Free account given a Pro floor -> tier raised to the floor
         ({"tier": "free", "comp_tier": None}, "pro", {"comp_tier": "pro", "tier": "pro"}),
-        # a paying Max subscriber given a Pro floor -> never lowered
+        # a Max account given a Pro floor -> never lowered HERE; main()'s reconciler then keeps
+        # Max only while a subscription entitles it
         ({"tier": "premium", "comp_tier": None}, "pro", {"comp_tier": "pro"}),
         # removing a floor writes only the floor; main() then runs reconcile_user_tier
         ({"tier": "premium", "comp_tier": "premium"}, None, {"comp_tier": None}),
@@ -206,10 +209,126 @@ def test_set_comp_tier_plan(current, requested, expected):
     assert _sct.plan_change(current, requested) == expected
 
 
-def test_removing_a_floor_runs_the_reconciler():
-    """Reviewer finding: without this, `--tier none` left the account on Max forever (nothing
-    else ever reconciles an account with no subscription rows)."""
-    src = (Path(__file__).resolve().parents[1] / "scripts" / "set_comp_tier.py").read_text()
-    main = src[src.index("def main()"):]
-    branch = main[main.index("if requested is None:"):]
-    assert "IAPService().reconcile_user_tier(user[\"id\"])" in branch.split("else:", 1)[0]
+# The script's main(), run for real against the credit-modelling fake (IAP audit F16): a LOWERED
+# floor never lowered users.tier — only a removed one was reconciled — so an account with no
+# subscription kept the old tier's features and its calendar allocation every ET 1st. These
+# replace a source scan that only checked the removal branch named the reconciler.
+
+service_clock = _fx.service_clock  # the fixture, found by pytest under this name
+
+_EMAIL = "demo-f16@example.com"
+_T0 = datetime(2026, 10, 10, 16, 0, tzinfo=timezone.utc)
+_T1 = datetime(2026, 10, 15, 16, 0, tzinfo=timezone.utc)
+_NOV = datetime(2026, 11, 1, 5, 0, tzinfo=timezone.utc)
+
+_SHAPES = {
+    "no-row": [],
+    "sandbox-max-expired": [("sbx-1", "premium", "expired", "Sandbox",
+                             _T0 - timedelta(days=20), _T0 - timedelta(days=19))],
+    "production-max-expired": [("p-0", "premium", "expired", "Production",
+                                _T0 - timedelta(days=40), _T0 - timedelta(days=39))],
+    "production-max-active": [("p-1", "premium", "active", "Production",
+                               _T1 + timedelta(days=20), _T0 - timedelta(days=5))],
+}
+
+
+def _sct_account(mode, shape):
+    subs = [{"id": "s1", "user_id": _USER, "tier": tier, "status": status, "store": "app_store",
+             "original_transaction_id": otid, "environment": env,
+             "current_period_end": end.isoformat(), "updated_at": updated.isoformat()}
+            for otid, tier, status, env, end, updated in _SHAPES[shape]]
+    sb = FakeSupabase(schema=mode, subscriptions=subs, credits={"total": 50, "used": 0})
+    sb.model.resets_at = datetime(2026, 11, 1, 4, 0, tzinfo=timezone.utc)
+    sb.db["users"][0].update({"email": _EMAIL, "tier": "free", "comp_tier": None})
+    return sb
+
+
+def _run_sct(monkeypatch, capsys, sb, tier, *, apply=True):
+    import app.database as app_database
+    monkeypatch.setattr(app_database, "get_supabase", lambda: sb)
+    monkeypatch.setattr(svc, "get_supabase", lambda: sb)
+    monkeypatch.setattr(sys, "argv", ["set_comp_tier.py", "--email", _EMAIL, "--tier", tier]
+                        + (["--apply"] if apply else []))
+    rc = _sct.main()
+    return rc, capsys.readouterr().out
+
+
+@pytest.mark.parametrize("shape", ["no-row", "sandbox-max-expired", "production-max-expired"])
+@pytest.mark.parametrize("mode", ["legacy", "lineage"])
+def test_lowering_a_floor_lowers_users_tier_and_next_months_allocation(
+        mode, shape, monkeypatch, capsys, service_clock):
+    sb = _sct_account(mode, shape)
+    service_clock(sb, _T0)
+    assert _run_sct(monkeypatch, capsys, sb, "premium")[0] == 0
+    assert _users_tier(sb) == "premium"
+    sb.model.used = 300
+    service_clock(sb, _T1)
+    assert _run_sct(monkeypatch, capsys, sb, "pro")[0] == 0
+    assert (_users_tier(sb), sb.db["users"][0]["comp_tier"]) == ("pro", "pro")
+    assert sb.model.total == 4000, "a lowered tier keeps this month's balance until the 1st"
+    service_clock(sb, _NOV)
+    sb.rpc("ensure_credit_period", {"p_user_id": _USER}).execute()
+    assert sb.model.total == sb.model.tier_alloc == 1200
+
+
+@pytest.mark.parametrize("mode", ["legacy", "lineage"])
+def test_lowering_a_floor_keeps_a_paying_subscribers_better_tier(
+        mode, monkeypatch, capsys, service_clock):
+    sb = _sct_account(mode, "production-max-active")
+    sb.db["users"][0]["tier"] = "premium"
+    service_clock(sb, _T1)
+    rc, out = _run_sct(monkeypatch, capsys, sb, "pro")
+    assert rc == 0 and _users_tier(sb) == "premium"
+    assert "note: tier=premium" in out
+
+
+@pytest.mark.parametrize("mode", ["legacy", "lineage"])
+def test_a_failed_reconcile_exits_1_and_says_rerun(mode, monkeypatch, capsys, service_clock):
+    sb = _sct_account(mode, "no-row")
+    sb.db["users"][0].update({"tier": "premium", "comp_tier": "premium"})
+    sb._fail.add("subscriptions")
+    service_clock(sb, _T1)
+    rc, out = _run_sct(monkeypatch, capsys, sb, "pro")
+    assert rc == 1 and "reconcile_user_tier FAILED" in out and "Re-run" in out
+
+
+@pytest.mark.parametrize("mode", ["legacy", "lineage"])
+def test_a_failed_credit_refresh_exits_1_and_says_rerun(mode, monkeypatch, capsys, service_clock):
+    """reconcile_user_tier logs a failed ensure_credit_period and returns the tier, so the script
+    must check the credit roll itself (review of phase 2, 2026-10-21): no success line, exit 1."""
+    sb = _sct_account(mode, "no-row")
+    sb.db["users"][0].update({"tier": "premium", "comp_tier": "premium"})
+    sb._fail.add("ensure_credit_period")
+    service_clock(sb, _T1)
+    rc, out = _run_sct(monkeypatch, capsys, sb, "pro")
+    assert rc == 1 and "reconcile_user_tier FAILED" in out and "Re-run" in out
+    assert "✓ now" not in out
+
+
+@pytest.mark.parametrize("mode", ["legacy", "lineage"])
+def test_raising_a_floor_is_unchanged(mode, monkeypatch, capsys, service_clock):
+    sb = _sct_account(mode, "no-row")
+    service_clock(sb, _T0)
+    assert _run_sct(monkeypatch, capsys, sb, "premium")[0] == 0
+    assert _users_tier(sb) == "premium" and sb.model.total == 4000
+    names = [n for n, _ in sb.rpcs]
+    assert names.index("ensure_credit_period") < names.index("grant_tier_upgrade")
+
+
+@pytest.mark.parametrize("mode", ["legacy", "lineage"])
+def test_removing_a_floor_reconciles(mode, monkeypatch, capsys, service_clock):
+    """The reviewer finding the deleted source scan stood for: `--tier none` used to leave the
+    account on Max forever (nothing else reconciles an account with no subscription rows)."""
+    sb = _sct_account(mode, "no-row")
+    service_clock(sb, _T0)
+    _run_sct(monkeypatch, capsys, sb, "premium")
+    assert _run_sct(monkeypatch, capsys, sb, "none")[0] == 0
+    assert (_users_tier(sb), sb.db["users"][0]["comp_tier"]) == ("free", None)
+
+
+def test_a_dry_run_writes_nothing(monkeypatch, capsys, service_clock):
+    sb = _sct_account("lineage", "no-row")
+    service_clock(sb, _T0)
+    rc, out = _run_sct(monkeypatch, capsys, sb, "premium", apply=False)
+    assert rc == 0 and "Dry run only" in out and "may LOWER it" in out
+    assert not [e for e in sb.log if e[:2] == ("update", "users")] and sb.rpcs == []

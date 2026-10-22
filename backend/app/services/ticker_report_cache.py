@@ -293,7 +293,7 @@ TABLE_NAME = "ticker_report_cache"
 #     deterministic Brand Power / Cost Advantage of 0.0/10 on the moat radar, the Stage B moat
 #     prompt, the executive-summary digest and report chat. Markets are closed, so only the
 #     reports cached since Friday's close rebuild. This ONE bump supersedes every instant above.
-# 2026-10-21 (04:40 UTC, after the production fiscal + moat recomputes; RE-STAMP to the push
+# 2026-10-21 (re-stamped 2026-10-22 01:35 UTC, the owner's go; after the production fiscal + moat recomputes; RE-STAMP to the push
 #     moment before deploying — reports cached between this instant and the deploy come from the
 #     old code): the history readers no longer serve a margin median of exactly 0 (the 10-04
 #     fiscal rows drew "industry/sector 0.0%" lines and Stage B "above sector 0.0%" for ~446
@@ -301,7 +301,7 @@ TABLE_NAME = "ticker_report_cache"
 #     Services company is compared with its own industry from 10 companies or with no peer —
 #     never the FS sector median. Cached collections carry the old peer lines and verdicts. This
 #     ONE bump supersedes every instant above.
-CACHE_SCHEMA_FLOOR = datetime(2026, 10, 21, 4, 40, 0, tzinfo=timezone.utc)
+CACHE_SCHEMA_FLOOR = datetime(2026, 10, 22, 1, 35, 0, tzinfo=timezone.utc)
 
 # The internal report key carrying the Financials sections a report lost to a degraded
 # upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.

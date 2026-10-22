@@ -567,6 +567,15 @@ struct MarketDynamicsDTO: Codable {
     // renders an explicit "US"/"Global" pill so the market size is never
     // ambiguous. Nil when TAM wasn't populated (legacy reports / no source).
     let tamScope: String?
+    // Measured-only fields (backend 2026-10-22, "Measured only"). Decoded with
+    // `try?` so a drifted type on the raw-JSONB path is nil, never a failed report.
+    let tamBasis: String?
+    let tamYear: Int?
+    let tamTargetYear: Int?
+    let cagrStartYear: Int?
+    let cagrEndYear: Int?
+    let growthSourceLabel: String?
+    let concentrationBasis: String?
 
     enum CodingKeys: String, CodingKey {
         case industry, concentration
@@ -580,6 +589,13 @@ struct MarketDynamicsDTO: Codable {
         case tamSourceLabel = "tam_source_label"
         case sourceGrain = "source_grain"
         case tamScope = "tam_scope"
+        case tamBasis = "tam_basis"
+        case tamYear = "tam_year"
+        case tamTargetYear = "tam_target_year"
+        case cagrStartYear = "cagr_start_year"
+        case cagrEndYear = "cagr_end_year"
+        case growthSourceLabel = "growth_source_label"
+        case concentrationBasis = "concentration_basis"
     }
 
     init(from decoder: Decoder) throws {
@@ -596,6 +612,13 @@ struct MarketDynamicsDTO: Codable {
         self.tamSourceLabel = try c.decodeIfPresent(String.self, forKey: .tamSourceLabel)
         self.sourceGrain = try c.decodeIfPresent(String.self, forKey: .sourceGrain)
         self.tamScope = try c.decodeIfPresent(String.self, forKey: .tamScope)
+        self.tamBasis = try? c.decodeIfPresent(String.self, forKey: .tamBasis)
+        self.tamYear = try? c.decodeIfPresent(Int.self, forKey: .tamYear)
+        self.tamTargetYear = try? c.decodeIfPresent(Int.self, forKey: .tamTargetYear)
+        self.cagrStartYear = try? c.decodeIfPresent(Int.self, forKey: .cagrStartYear)
+        self.cagrEndYear = try? c.decodeIfPresent(Int.self, forKey: .cagrEndYear)
+        self.growthSourceLabel = try? c.decodeIfPresent(String.self, forKey: .growthSourceLabel)
+        self.concentrationBasis = try? c.decodeIfPresent(String.self, forKey: .concentrationBasis)
     }
 }
 
@@ -1028,7 +1051,14 @@ extension TickerReportAPIResponse {
                 tamSourceQuote: moatCompetition.marketDynamics.tamSourceQuote,
                 tamSourceLabel: moatCompetition.marketDynamics.tamSourceLabel,
                 sourceGrain: moatCompetition.marketDynamics.sourceGrain,
-                tamScope: moatCompetition.marketDynamics.tamScope
+                tamScope: moatCompetition.marketDynamics.tamScope,
+                tamBasis: moatCompetition.marketDynamics.tamBasis,
+                tamYear: moatCompetition.marketDynamics.tamYear,
+                tamTargetYear: moatCompetition.marketDynamics.tamTargetYear,
+                cagrStartYear: moatCompetition.marketDynamics.cagrStartYear,
+                cagrEndYear: moatCompetition.marketDynamics.cagrEndYear,
+                growthSourceLabel: moatCompetition.marketDynamics.growthSourceLabel,
+                concentrationBasis: moatCompetition.marketDynamics.concentrationBasis
             ),
             dimensions: moatCompetition.dimensions.map { d in
                 MoatDimension(name: d.name, score: d.score, peerScore: d.peerScore)
@@ -1232,7 +1262,10 @@ extension TickerReportAPIResponse {
         case "monopoly": return .monopoly
         case "duopoly": return .duopoly
         case "oligopoly": return .oligopoly
-        default: return .fragmented
+        case "fragmented": return .fragmented
+        // "unknown" (not measured, 2026-10-22) and any unrecognised value: "—", never a
+        // guessed "Fragmented".
+        default: return .unknown
         }
     }
 

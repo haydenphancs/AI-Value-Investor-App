@@ -43,8 +43,10 @@ struct DataSourcesView: View {
         DataSourceItem(
             name: "Federal Reserve Bank of St. Louis (FRED)",
             usage: "Macroeconomic series — inflation, interest rates, yield curves, and "
-                + "industry output.",
-            url: "https://fred.stlouisfed.org"
+                + "industry output. This product uses the FRED® API but is not endorsed "
+                + "or certified by the Federal Reserve Bank of St. Louis.",
+            // FRED's API terms require showing a link to them (2026-10-22).
+            url: "https://fred.stlouisfed.org/docs/api/terms_of_use.html"
         ),
         DataSourceItem(
             name: "FINRA",
@@ -79,7 +81,9 @@ struct DataSourcesView: View {
         ),
         DataSourceItem(
             name: "U.S. Census Bureau",
-            usage: "Industry revenue data used for market-size estimates.",
+            usage: "Industry revenue data used for the measured US industry market size. "
+                + "This product uses the Census Bureau Data API but is not endorsed or "
+                + "certified by the Census Bureau.",
             url: "https://www.census.gov"
         ),
         DataSourceItem(

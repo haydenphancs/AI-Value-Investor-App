@@ -698,8 +698,9 @@ CURATION: dict[str, TableDoc] = {
         purpose="Sector-level size and concentration — revenue, CAGR, HHI, top-holder shares.",
         key=("sector", "total_revenue_usd", "cagr_5yr_pct", "hhi", "num_constituents")),
     "public.industry_dossier": T("benchmarks",
-        purpose="Per-industry structure: TAM now and future, growth, lifecycle phase and "
-                "concentration. The Moat section's TAM comes from here.",
+        purpose="Per-industry measured market size (latest published year), its average "
+                "yearly growth window, lifecycle phase and revenue-share concentration. The "
+                "Moat section reads it.",
         key=("industry", "sector", "current_tam_b", "future_tam_b", "cagr_5y_pct",
              "lifecycle_phase", "hhi", "tam_scope"),
         note="TAM is scoped per INDUSTRY, not per company, and the unit is BILLIONS."),

@@ -456,4 +456,5 @@ async def test_the_run_is_one_moat_rate_limit_run_and_a_clean_one_reports_zero(
     }
     # The scoring is unchanged: same vintage stamp on every row.
     assert {r["model_version"] for r in w.svc.supabase.upserts} == {imb.MODEL_VERSION}
-    assert imb.MODEL_VERSION == "moat_v1.2026-10-11"
+    assert "moat_v1.2026-10-11" in imb._MODEL_VERSION_ORDER
+    assert imb._MODEL_VERSION_ORDER[-1] == imb.MODEL_VERSION

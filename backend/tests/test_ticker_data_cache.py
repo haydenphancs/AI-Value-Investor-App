@@ -51,7 +51,8 @@ def _dossier(**over) -> IndustryDossier:
         industry="Software - Infrastructure", sector="Technology",
         lifecycle_phase="secular_growth", hhi=1834.5, top1_share_pct=31.2,
         top2_share_pct=44.9, concentration_label="oligopoly", constituent_count=56,
-        source_grain="industry", tam_scope="global",
+        source_grain="industry", tam_scope="global", cagr_start_year=2018,
+        concentration_basis="revenue_share",
     )
     kw.update(over)
     return IndustryDossier(**kw)
@@ -584,3 +585,16 @@ def test_store_never_writes_a_row_that_would_read_as_a_miss(monkeypatch, caplog,
     assert db.upserts == 0
     assert asyncio.run(tdc.is_cached_collection_fresh("ORCL")) is False
     assert "does not read back" in caplog.text
+
+
+def test_a_dossier_cached_before_the_2026_10_22_fields_still_deserializes():
+    """A collection cached before `cagr_start_year` / `concentration_basis` existed holds a
+    dossier dict without them; the dataclass defaults must read it back (None), never a
+    TypeError that turns every cached collection into a cold miss."""
+    import dataclasses as _dc
+
+    old = _dc.asdict(_dossier())
+    del old["cagr_start_year"], old["concentration_basis"]
+    back = IndustryDossier(**old)
+    assert back.cagr_start_year is None and back.concentration_basis is None
+    assert back.current_tam == 500.0

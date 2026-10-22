@@ -239,7 +239,13 @@ async def test_baseline_blip_raises_instead_of_a_cagr_less_tam(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_get_industry_tam_falls_through_to_fred_on_a_census_blip(monkeypatch):
+async def test_a_census_blip_propagates_out_of_compute_one(monkeypatch):
+    """A transient Census failure on a Census-mapped industry is never swapped for a
+    broader FRED figure: `_compute_one` lets it propagate, so the quarterly recompute
+    keeps the stored row and the read path retries after its negative memo. (The old
+    `get_industry_tam` fell through to FRED here; it was dead code and is gone.)"""
+    from app.services.industry_dossier_service import IndustryDossierService
+
     class _Census:
         is_configured = True
 
@@ -250,10 +256,117 @@ async def test_get_industry_tam_falls_through_to_fred_on_a_census_blip(monkeypat
         is_configured = True
 
         async def get_observations(self, series_id, *, limit=8):
-            vals = [87100, 82300, 78500, 69600, 61200, 57700]
-            return [SimpleNamespace(date=f"{2025 - i}-01-01", value=float(v)) for i, v in enumerate(vals)]
+            raise AssertionError("a Census blip must not reach FRED")
 
     monkeypatch.setattr(its, "get_census_client", lambda: _Census())
     monkeypatch.setattr(its, "get_fred_client", lambda: _FRED())
-    tam = await its.get_industry_tam("Electrical Equipment & Parts")
-    assert tam.current_tam == 87.1
+    with pytest.raises(census.CensusUnavailableException):
+        await IndustryDossierService()._compute_one("Electrical Equipment & Parts", "Industrials", [], {})
+
+
+# ── A schema 400 is "this vintage is unusable", not an outage (2026-10-22) ───
+
+
+@pytest.mark.asyncio
+async def test_unknown_predicate_400_skips_to_the_previous_vintage(monkeypatch, caplog):
+    """A future AIES vintage that switches `NAICS2017=` to `NAICS2022=` answers 400
+    "unknown predicate variable". The probe must step back a year (ERROR, keyless),
+    never abort every Census industry as a transient outage."""
+    client, http = _client(monkeypatch, {
+        f"{BASE}/{YEAR - 1}/aiesbasic": _Resp(400, raw=b"error: unknown predicate variable: 'NAICS2017'"),
+        f"{BASE}/{YEAR - 2}/aiesbasic": _aies("195000604"),
+        f"{BASE}/2017/ecnbasic": _ecn(),
+    })
+    with caplog.at_level(logging.ERROR, logger=LOGGER):
+        snap = await client.get_industry_revenue_snapshot("335")
+    assert snap is not None and snap.year == YEAR - 2
+    assert "unknown predicate/variable" in caplog.text
+    assert "test-key" not in caplog.text
+    # Memoized as a miss like a 404 — the next snapshot does not re-ask the broken vintage.
+    before = len(http.requests)
+    await client.get_industry_revenue_snapshot("335")
+    assert len(http.requests) == before
+
+
+@pytest.mark.asyncio
+async def test_unknown_variable_400_is_a_schema_mismatch_too(monkeypatch):
+    client, _ = _client(monkeypatch, {
+        f"{BASE}/{YEAR - 1}/aiesbasic": _Resp(400, raw=b"error: error: unknown variable 'RCPT_TOT_VAL'"),
+        f"{BASE}/{YEAR - 2}/aiesbasic": _aies("195000604"),
+        f"{BASE}/2017/ecnbasic": _ecn(),
+    })
+    snap = await client.get_industry_revenue_snapshot("335")
+    assert snap.year == YEAR - 2
+
+
+@pytest.mark.asyncio
+async def test_other_400_still_raises_and_is_not_cached(monkeypatch):
+    url = f"{BASE}/{YEAR - 1}/aiesbasic"
+    client, http = _client(monkeypatch, {url: _Resp(400, raw=b"error: bad request")})
+    with pytest.raises(census.CensusUnavailableException):
+        await client.get_industry_revenue_snapshot("335")
+    http.routes[url] = _aies("195000604")
+    http.routes[f"{BASE}/2017/ecnbasic"] = _ecn()
+    assert (await client.get_industry_revenue_snapshot("335")).year == YEAR - 1
+
+
+# ── Thin per-year reads (the composite's building blocks) ─────────────────
+
+
+def test_probe_years_follow_the_frozen_clock():
+    assert census.CensusClient(api_key="test-key").aies_probe_years() == [
+        YEAR - 1, YEAR - 2, YEAR - 3, YEAR - 4,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_per_year_reads_share_the_snapshot_cache(monkeypatch):
+    client, http = _client(monkeypatch, {
+        f"{BASE}/{YEAR - 1}/aiesbasic": _aies("195000604"),
+        f"{BASE}/2017/ecnbasic": _ecn(),
+    })
+    await client.get_industry_revenue_snapshot("335")
+    before = len(http.requests)
+    point = await client.get_aies_revenue("335", YEAR - 1)
+    base = await client.get_ecn_revenue("335")
+    assert point.revenue_usd == 195_000_604_000.0 and point.year == YEAR - 1
+    assert base.revenue_usd == 122_950_000_000.0 and base.year == 2017
+    assert base.naics_label.startswith("Electrical equipment")
+    assert len(http.requests) == before, "the per-year reads must hit the snapshot's cache entries"
+
+
+@pytest.mark.asyncio
+async def test_per_year_read_blip_raises_then_recovers(monkeypatch):
+    url = f"{BASE}/{YEAR - 1}/aiesbasic"
+    client, http = _client(monkeypatch, {url: _Resp(503)})
+    with pytest.raises(census.CensusUnavailableException):
+        await client.get_aies_revenue("335", YEAR - 1)
+    http.routes[url] = _aies("195000604")
+    assert (await client.get_aies_revenue("335", YEAR - 1)).revenue_usd == 195_000_604_000.0
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_per_year_reads_make_no_request(monkeypatch):
+    http = _FakeHTTP({})
+    monkeypatch.setattr(census.httpx, "AsyncClient", http.factory)
+    client = census.CensusClient(api_key="")
+    assert await client.get_aies_revenue("335", YEAR - 1) is None
+    assert await client.get_ecn_revenue("335") is None
+    assert http.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_schema_400_on_the_2017_baseline_raises_and_is_not_cached(monkeypatch):
+    """The fixed Economic Census baseline has no earlier year to step to: a schema 400 there
+    must raise (uncached) so the quarterly recompute keeps the stored rows — never a cached
+    miss that nulls every Census CAGR (hardening, 2026-10-22)."""
+    base = f"{BASE}/2017/ecnbasic"
+    client, http = _client(monkeypatch, {
+        f"{BASE}/{YEAR - 1}/aiesbasic": _aies("195000604"),
+        base: _Resp(400, raw=b"error: unknown variable 'NAICS2017_LABEL'"),
+    })
+    with pytest.raises(census.CensusUnavailableException):
+        await client.get_industry_revenue_snapshot("335")
+    http.routes[base] = _ecn()
+    snap = await client.get_industry_revenue_snapshot("335")
+    assert snap.revenue_usd_baseline == 122_950_000_000.0

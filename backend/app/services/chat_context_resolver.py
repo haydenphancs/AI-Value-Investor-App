@@ -145,6 +145,9 @@ _NO_SECTION_DROP: Tuple[frozenset, Tuple[str, ...]] = (frozenset(), ())
 # `competitive_insight`, it would wall off every later pillar, the insight and the market.
 _SECTION_DEEP_DROP_KEYS: Dict[str, frozenset] = {
     "moat_competition": frozenset({"tam_source_label", "tam_source_quote",
+                                   # the growth rate's source label names the same vendors
+                                   # (2026-10-22) — dropped for the same reason
+                                   "growth_source_label",
                                    "drivers", "confidence"}),
 }
 _NO_DEEP_DROP: frozenset = frozenset()
@@ -659,6 +662,19 @@ _LEAD_OWNED_SECTION_KEYS: Dict[str, frozenset] = {
     "key_management": frozenset({"officers", "top_holders"}),
     "wall_street_consensus": frozenset({"caydex_fair_value"}),
 }
+# A measured market size is shown at its own year and never projected (owner decision 2026-10-22,
+# "Measured only"). `future_tam` / `future_year` on a measured row are a backward industry rate
+# compounded forward (kept only for old iOS builds), so the model never sees them: a "$244B by
+# 2031" in chat was a projection the card no longer shows. A company's earnings-call quote keeps
+# its pair — that target is what the company said.
+_PROJECTED_TAM_KEYS = frozenset({"future_tam", "future_year"})
+# On a company quote stored with `tam_basis`, `current_year` is the report's generation year,
+# not a year the company stated; the dump keeps `tam_year` instead.
+_QUOTE_UNSTATED_YEAR_KEYS = frozenset({"current_year"})
+_COMPANY_TAM_QUOTE_LABEL = "Earnings call quote"
+# `cagr_5yr` is a nominal rate over its stored window (2017-2024 for Census: seven years, not
+# five); dumped under its own name, the model said "5-year CAGR". Renamed in the dump only.
+_GROWTH_RATE_DUMP_KEY = "avg_growth_pct_per_year"
 
 _FigSpec = Tuple[str, List[str], int]   # (head, whole items, cap): one lead line
 
@@ -1225,10 +1241,20 @@ def _report_figures_lead(report: Any) -> List[str]:
     return out
 
 
+def _is_company_tam_quote(md: Dict[str, Any]) -> bool:
+    """Whether a market_dynamics block's TAM pair is a company's own earnings-call quote: the stored
+    `tam_basis`, or (a report stored before that key) the earnings-call source label."""
+    basis = md.get("tam_basis")
+    if basis is not None:
+        return basis == "company_quote"
+    return md.get("tam_source_label") == _COMPANY_TAM_QUOTE_LABEL
+
+
 def _without_lead_figures(report: Any) -> Any:
     """The report minus `_LEAD_OWNED_SECTION_KEYS`, for the dump: a section is found by the exact
     name the lead reads it under; its child keys match case-insensitively, like every key list
-    here. Never mutates its input."""
+    here. Also drops a projected market size (`_PROJECTED_TAM_KEYS`) unless the pair is a
+    company's stated quote. Never mutates its input."""
     if not isinstance(report, dict):
         return report
     out = dict(report)
@@ -1237,7 +1263,32 @@ def _without_lead_figures(report: Any) -> Any:
         if isinstance(node, dict):
             out[section] = {k: v for k, v in node.items()
                             if not (isinstance(k, str) and k.lower() in keys)}
+    moat = out.get("moat_competition")
+    md = moat.get("market_dynamics") if isinstance(moat, dict) else None
+    if isinstance(md, dict):
+        drop = frozenset() if _is_company_tam_quote(md) else _PROJECTED_TAM_KEYS
+        if md.get("tam_basis") == "company_quote":
+            # A quote's years are only those it STATES (tam_year / tam_target_year):
+            # current_year is the generation year, and a future pair without a stated
+            # target year is not something the company said.
+            drop = drop | _QUOTE_UNSTATED_YEAR_KEYS
+            if md.get("tam_target_year") is None:
+                drop = drop | _PROJECTED_TAM_KEYS
+        out["moat_competition"] = {**moat, "market_dynamics": {
+            (_GROWTH_RATE_DUMP_KEY if k == "cagr_5yr" else k): _dump_year(k, v)
+            for k, v in md.items() if not (isinstance(k, str) and k.lower() in drop)
+        }}
     return out
+
+
+def _dump_year(key: Any, value: Any) -> Any:
+    """A market_dynamics `*_year` number as plain digits: the flattener comma-groups every int,
+    and `tam_year: 2,024` is not a year. Anything else is returned unchanged."""
+    if not (isinstance(key, str) and key.lower().endswith("_year")) or isinstance(value, bool):
+        return value
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        value = int(value)
+    return str(value) if isinstance(value, int) else value
 
 
 def _rank_of(rank: Dict[str, int], k: Any) -> int:

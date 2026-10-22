@@ -184,7 +184,7 @@
 {% macro trend(t) %}{% if t == 'up' %}<span style="color:#2563EB">▲</span>{% elif t == 'down' %}<span style="color:#DC2626">▼</span>{% else %}<span style="color:#94A3B8">·</span>{% endif %}{% endmacro %}
 {% macro money(v, d=2) %}{% if v is not none %}${{ ("{:,.%df}"|format(d)).format(v) }}{% else %}—{% endif %}{% endmacro %}
 {% macro pct(v, signed=True) %}{% if v is not none %}{{ ("%+.1f" if signed else "%.1f")|format(v) }}%{% else %}—{% endif %}{% endmacro %}
-{% macro tam_money(v) %}{% if v is not none %}{% if v >= 1000 %}${{ "%.1f"|format(v/1000) }}T{% else %}${{ "%.0f"|format(v) }}B{% endif %}{% else %}—{% endif %}{% endmacro %}
+{% macro tam_money(v) %}{% if v is not none %}{% if v >= 999.5 %}${{ "%.1f"|format(v/1000) }}T{% else %}${{ "%.0f"|format(v) }}B{% endif %}{% else %}—{% endif %}{% endmacro %}
 
   <!-- ═══ Topbar ═══ -->
   <div class="topbar">
@@ -490,17 +490,19 @@
       </tbody></table>{% endif %}
     </td>
   </table>
-  {% if moat.market_dynamics and moat.market_dynamics.current_tam %}{% set md = moat.market_dynamics %}
+  {# Measured only (owner decision 2026-10-22): the published value at its own year, growth over
+     its real span, no projected value. A company target appears only when its quote states it. #}
+  {% if moat.market_dynamics and moat.market_dynamics.market_size %}{% set md = moat.market_dynamics %}
   <table class="strip">
     <tr>
-      <td><div class="k">TAM ({{ md.current_year }})</div><div class="v">{{ tam_money(md.current_tam) }}</div></td>
-      <td><div class="k">TAM ({{ md.future_year }})</div><div class="v">{{ tam_money(md.future_tam) }}</div></td>
-      <td><div class="k">5Y CAGR</div><div class="v">{{ pct(md.cagr_5yr) }}</div></td>
-      <td><div class="k">Structure</div><div class="v" style="font-size:12px;text-transform:capitalize">{{ md.concentration }}</div></td>
-      <td><div class="k">Lifecycle</div><div class="v" style="font-size:12px;text-transform:capitalize">{{ (md.lifecycle_phase or '').replace('_',' ') }}</div></td>
+      <td><div class="k">Market size{% if md.measured_year %} ({{ md.measured_year }}){% endif %}</div><div class="v">{{ tam_money(md.market_size) }}</div></td>
+      {% if md.target_year and md.target_size %}<td><div class="k">Company target ({{ md.target_year }})</div><div class="v">{{ tam_money(md.target_size) }}</div></td>{% endif %}
+      <td><div class="k">Avg/yr{% if md.growth_window %} {{ md.growth_window }}{% endif %}</div><div class="v">{{ pct(md.growth_pct) }}</div></td>
+      <td><div class="k">Structure</div><div class="v" style="font-size:12px;text-transform:capitalize">{{ md.structure }}</div>{% if md.structure_basis %}<div class="caption-note">{{ md.structure_basis }}</div>{% endif %}</td>
+      <td><div class="k">Lifecycle</div><div class="v" style="font-size:12px;text-transform:capitalize">{{ md.lifecycle }}</div></td>
     </tr>
   </table>
-  {% if md.tam_source_quote or md.tam_source_label %}<div class="src">TAM source: {% if md.tam_source_quote %}“{{ md.tam_source_quote }}” — {% endif %}{{ md.tam_source_label or "Industry estimate" }}{% if md.tam_scope %} ({{ md.tam_scope|upper }}){% endif %}{% if md.projected and md.source_tam %} · base figure {{ tam_money(md.source_tam) }} ({{ md.source_year }}); {{ md.current_year }}/{{ md.future_year }} projected at {{ pct(md.cagr_5yr) }} CAGR{% endif %}</div>{% endif %}
+  {% if md.show_source %}<div class="src">Source: {% if md.source_quote %}“{{ md.source_quote }}” — {% endif %}{{ md.tam_source_label or "Industry estimate" }}{% if md.scope_label %} ({{ md.scope_label }}){% endif %}{% if md.growth_source %} · Growth: {{ md.growth_source }}{% endif %}</div>{% endif %}
   {% endif %}
   {% if moat.competitors %}
   <div class="sub-h" style="margin-top:8px">Competitive Landscape</div>

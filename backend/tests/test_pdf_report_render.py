@@ -401,3 +401,205 @@ def test_an_unavailable_insider_section_says_so_in_the_pdf():
     assert "No insider-flow data." not in html
     measured = build_context(_sample(), 196.0)
     assert measured["insider"]["unavailable"] is False
+
+
+# ── Market size: measured only (owner decision 2026-10-22) ───────────────────
+#
+# The strip used to mirror the iOS today-aligned projection: A&D's 2024 Census figure was
+# compounded forward at a backward 2017→2024 rate and printed as "TAM (2026) $246B → TAM (2031)
+# $244B … projected at -0.2% CAGR" under a "5Y CAGR" label on a 7-year window.
+
+import math as _math
+
+from app.services.pdf_report_service import (  # noqa: E402
+    _growth_pct, _growth_window, _measured_market_dynamics, _tam_basis, _year,
+)
+
+_AD_MEASURED = {
+    "industry": "Aerospace & Defense", "concentration": "fragmented", "cagr_5yr": 0.9,
+    "current_tam": 342.8, "future_tam": 359.3, "current_year": "2024", "future_year": "2029",
+    "lifecycle_phase": "mature", "tam_scope": "us", "source_grain": "industry",
+    "tam_source_label": "US Census AIES — Aerospace & defense manufacturing",
+    "tam_basis": "measured", "tam_year": 2024, "cagr_start_year": 2017, "cagr_end_year": 2024,
+    "growth_source_label": "US Census AIES — Aerospace & defense manufacturing",
+    "concentration_basis": "revenue_share",
+}
+_QUOTE = "We see a $50 billion market in 2025 growing to $120 billion by 2030."
+_COMPANY_QUOTE = {
+    "industry": "Aerospace & Defense", "concentration": "fragmented", "cagr_5yr": 0.9,
+    "current_tam": 50.0, "future_tam": 120.0, "current_year": "2026", "future_year": "2030",
+    "lifecycle_phase": "mature", "tam_source_label": "Earnings call quote",
+    "tam_source_quote": _QUOTE, "tam_basis": "company_quote", "tam_year": 2025,
+    "tam_target_year": 2030, "cagr_start_year": 2017, "cagr_end_year": 2024,
+    "growth_source_label": "US Census AIES — Aerospace & defense manufacturing",
+}
+
+
+def _moat_html(md) -> str:
+    """Section 07 of the rendered report, built from a report carrying only `md`."""
+    html = render_html(build_context({"moat_competition": {"market_dynamics": md}}, None))
+    start = html.index("Industry &amp; Competitive Moat")
+    return html[start:html.index("<!-- ═══ 10.", start)]
+
+
+def test_pdf_market_strip_shows_the_measured_year_never_a_projection():
+    md = dict(_AD_MEASURED)
+    section = _moat_html(md)
+    assert "Market size (2024)" in section and "$343B" in section
+    assert "Avg/yr 2017–24" in section and "+0.9%" in section
+    for gone in ("2026", "2031", "2029", "projected", "5Y CAGR", "CAGR", "TAM (", "$359B",
+                 "Company target", "base figure"):
+        assert gone not in section, gone
+    assert "Source: US Census AIES — Aerospace &amp; defense manufacturing (US)" in section
+    assert "Growth:" not in section          # the growth source is the TAM's own
+    assert "By revenue" in section
+    # Pure: the stored values are never rewritten, and the input is not mutated.
+    out = _measured_market_dynamics(md)
+    assert (out["current_tam"], out["future_tam"], out["current_year"], out["future_year"]) == \
+        (342.8, 359.3, "2024", "2029")
+    assert md == _AD_MEASURED and "market_size" not in md
+
+
+def test_a_legacy_measured_row_reads_its_own_year():
+    """A report stored before `tam_basis`: measured, at its stored current_year."""
+    md = {k: v for k, v in _AD_MEASURED.items()
+          if k not in ("tam_basis", "tam_year", "cagr_start_year", "cagr_end_year",
+                       "growth_source_label", "concentration_basis")}
+    out = _measured_market_dynamics(md)
+    assert (out["basis"], out["measured_year"], out["target_year"], out["growth_window"]) == \
+        ("measured", 2024, None, "")
+    section = _moat_html(md)
+    assert "Market size (2024)" in section and "<div class=\"k\">Avg/yr</div>" in section
+    assert "2029" not in section and "$359B" not in section and "By revenue" not in section
+
+
+def test_pdf_company_quote_shows_only_its_stated_target():
+    section = _moat_html(_COMPANY_QUOTE)
+    assert "Market size (2025)" in section and "$50B" in section
+    assert "Company target (2030)" in section and "$120B" in section
+    assert f"“{_QUOTE}” — Earnings call quote" in section
+    assert "(US)" not in section, "an earnings-call pair is not a US measurement"
+    assert " · Growth: US Census AIES" in section
+    assert "2026" not in section            # the unstated default year never shows
+
+
+@pytest.mark.parametrize("change", [
+    {"tam_target_year": 2031},              # not stated in the quote
+    {"tam_target_year": None},
+    {"tam_target_year": 2025},              # not after the measured year
+    {"future_tam": 0.0},
+    {"future_tam": float("nan")},
+    {"tam_source_quote": "x" * 201 + " the market reaches $120 billion by 2030."},  # beyond the stored 200
+])
+def test_a_company_target_needs_a_stated_later_year_and_a_size(change):
+    section = _moat_html({**_COMPANY_QUOTE, **change})
+    assert "Company target" not in section and "$120B" not in section
+
+
+def test_a_legacy_quote_keeps_only_the_years_its_quote_states():
+    md = {k: v for k, v in _COMPANY_QUOTE.items()
+          if k not in ("tam_basis", "tam_year", "tam_target_year")}
+    md["tam_scope"] = "us"                    # inherited falsely from the dossier
+    out = _measured_market_dynamics(md)
+    assert out["is_company_quote"] and out["measured_year"] is None   # "2026" is not stated
+    assert out["target_year"] == 2030
+    section = _moat_html(md)
+    assert "Market size</div>" in section and "Company target (2030)" in section
+    assert "(US)" not in section and "2026" not in section
+
+
+def test_a_legacy_global_row_has_no_source_and_no_year():
+    """Stored retired Phase-B (grounded) rows: their label named grounded publishers and their
+    basis cannot be stated — no Source caption, no measured year."""
+    md = {"concentration": "oligopoly", "cagr_5yr": 6.34, "current_tam": 702.44,
+          "future_tam": 954.76, "current_year": "2025", "future_year": "2030",
+          "lifecycle_phase": "mature", "tam_scope": "global",
+          "tam_source_label": "WSTS / SIA / McKinsey 2025"}
+    assert _tam_basis(md) == "unknown"
+    section = _moat_html(md)
+    assert "Market size</div>" in section and "$702B" in section
+    for gone in ("Source:", "WSTS", "2025", "2030", "GLOBAL", "$955B"):
+        assert gone not in section, gone
+
+
+@pytest.mark.parametrize("conc", ["unknown", "Unknown", "", None, 7])
+def test_pdf_unknown_concentration_is_a_dash(conc):
+    section = _moat_html({**_AD_MEASURED, "concentration": conc})
+    assert ">—</div>" in section.split("Structure", 1)[1][:200]
+    assert "unknown" not in section.lower() and "By revenue" not in section
+
+
+@pytest.mark.parametrize("md", [None, "", "garbage", [], 42, {}])
+def test_a_malformed_market_block_renders_no_strip(md):
+    assert "Market size" not in _moat_html(md)
+
+
+@pytest.mark.parametrize("tam", [0, 0.0, -5.0, float("nan"), float("inf"), None, "big", True])
+def test_no_positive_finite_size_renders_no_strip(tam):
+    section = _moat_html({**_AD_MEASURED, "current_tam": tam})
+    assert "Market size" not in section and "nan" not in section.lower()
+
+
+@pytest.mark.parametrize("v,want", [
+    (2024, 2024), ("2024", 2024), (" 2024 ", 2024), (2024.0, 2024), (1900, 1900), (2100, 2100),
+    (None, None), (True, None), (float("nan"), None), (2024.5, None), ("FY24", None),
+    ("24", None), ("", None), ("  ", None), ("２０２４", None), (2569, None), (1899, None), ("2024-01", None), ([2024], None),
+])
+def test_year_accepts_only_a_plain_calendar_year(v, want):
+    assert _year(v) == want
+
+
+@pytest.mark.parametrize("start,end,want", [
+    (2017, 2024, "2017–24"), ("2017", "2024", "2017–24"), (2001, 2009, "2001–09"),
+    (1998, 2003, "1998–2003"), (2099, 2100, "2099–2100"),
+    (2024, 2017, ""), (2024, 2024, ""), (None, 2024, ""), (2017, None, ""),
+    (float("nan"), 2024, ""), (True, 2024, ""), (2568, 2569, ""),
+])
+def test_growth_window_is_a_valid_increasing_span(start, end, want):
+    assert _growth_window(start, end) == want
+
+
+@pytest.mark.parametrize("v,want", [
+    (0.9, 0.9), (-0.04, 0.0), (-0.0, 0.0), (0, 0.0), (-1.0, -1.0), (0.96, 1.0),
+    (None, None), (float("nan"), None), (float("inf"), None), (True, None), (1e6, None),
+])
+def test_growth_pct_never_a_negative_zero(v, want):
+    got = _growth_pct(v)
+    assert got == want and (got is None or _math.copysign(1.0, got) == _math.copysign(1.0, want))
+
+
+def test_a_flat_rate_renders_plus_zero_never_minus_zero():
+    section = _moat_html({**_AD_MEASURED, "cagr_5yr": -0.04})
+    assert "+0.0%" in section and "-0.0%" not in section
+    assert "—" in _moat_html({**_AD_MEASURED, "cagr_5yr": float("nan")}).split("Avg/yr", 1)[1][:80]
+
+
+@pytest.mark.parametrize("change", [{"tam_year": 2569}, {"tam_year": "garbage"}])
+def test_a_bad_tam_year_falls_back_to_the_stored_year(change):
+    """Never "(2569)": a Buddhist-calendar or junk year is not a year."""
+    section = _moat_html({**_AD_MEASURED, **change})
+    assert "Market size (2024)" in section and "2569" not in section
+
+
+def test_a_size_that_rounds_to_a_thousand_billions_reads_in_trillions():
+    assert "$1.0T" in _moat_html({**_AD_MEASURED, "current_tam": 999.6})
+    assert "$999B" in _moat_html({**_AD_MEASURED, "current_tam": 999.4})
+
+
+def test_a_different_growth_source_is_named():
+    section = _moat_html({**_AD_MEASURED, "growth_source_label": "FRED — industrial production"})
+    assert " · Growth: FRED — industrial production" in section
+
+
+@pytest.mark.parametrize("basis", ["global_grounded", 5, ""])
+def test_an_unrecognised_basis_is_unknown_never_measured(basis):
+    out = _measured_market_dynamics({**_AD_MEASURED, "tam_basis": basis})
+    assert out["basis"] == "unknown" and out["measured_year"] is None and not out["show_source"]
+
+
+def test_pdf_names_a_peer_set_concentration_as_peers():
+    from app.services.pdf_report_service import _measured_market_dynamics
+
+    md = _measured_market_dynamics({"concentration": "oligopoly", "concentration_basis": "peer_revenue_share",
+                                    "current_tam": 0.0})
+    assert md["structure_basis"] == "By peer revenue"

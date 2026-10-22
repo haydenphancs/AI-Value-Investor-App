@@ -2327,3 +2327,67 @@ def test_stage_b_jobs_build_on_a_report_with_competitors():
         assert "KEY COMPETITORS (highest threat score first)" in prompt
         assert "Biggest threat: " in prompt
         assert "Closest rival" not in prompt and "most direct first" not in prompt
+
+
+# ── Market dynamics: the measured-only fields (owner decision 2026-10-22) ────
+
+
+_OLD_BUILD_NON_OPTIONAL = ("industry", "concentration", "current_year", "future_year", "lifecycle_phase")
+
+
+def test_market_dynamics_new_fields_survive_assembly_and_validation():
+    """A measured A&D dossier through the real assembly: the new keys reach the
+    validated response as ints / strings, and every field an old iOS build decodes
+    NON-optionally is a non-null string."""
+    from app.services.industry_dossier_service import IndustryDossier
+
+    coll = TickerReportDataCollector()
+    out = _make_collected_data()
+    out.industry_tam = IndustryDossier(
+        current_tam=342.8, future_tam=359.3, current_year="2024", future_year="2029",
+        source_label="US Census AIES — Aerospace & defense manufacturing (NAICS 3364, 334511)",
+        cagr_5y_pct=0.9, cagr_start_year=2017, industry="Aerospace & Defense", sector="Industrials",
+        hhi=866.8, top1_share_pct=15.17, top2_share_pct=30.01, concentration_label="fragmented",
+        constituent_count=86, source_grain="industry", concentration_basis="revenue_share",
+    )
+    report = coll.assemble_report(out, stage_a_fallback())
+    validated = TickerReportResponse.model_validate(report)
+    md = validated.moat_competition.market_dynamics
+    assert md.tam_basis == "measured" and md.tam_year == 2024
+    assert (md.cagr_start_year, md.cagr_end_year) == (2017, 2024)
+    assert md.concentration == "fragmented" and md.concentration_basis == "revenue_share"
+    assert md.lifecycle_phase == "mature"
+    dumped = validated.model_dump()["moat_competition"]["market_dynamics"]
+    for key in ("tam_basis", "tam_year", "tam_target_year", "cagr_start_year", "cagr_end_year",
+                "growth_source_label", "concentration_basis"):
+        assert key in dumped, key
+    for key in _OLD_BUILD_NON_OPTIONAL:
+        assert isinstance(dumped[key], str) and dumped[key], key
+
+
+def test_a_stored_market_dynamics_without_the_new_keys_still_validates():
+    """A report stored before 2026-10-22 (raw JSONB served by research.py) has none of the
+    new keys; it must validate unchanged."""
+    from app.schemas.ticker_report import MarketDynamicsResponse
+
+    old = {"industry": "Aerospace & Defense", "concentration": "fragmented", "cagr_5yr": -0.2,
+           "current_tam": 247.0, "future_tam": 245.0, "current_year": "2024", "future_year": "2029",
+           "lifecycle_phase": "declining", "tam_source_quote": None,
+           "tam_source_label": "US Census AIES — Aerospace product and parts manufacturing (NAICS 3364)",
+           "source_grain": "industry", "tam_scope": "us"}
+    md = MarketDynamicsResponse.model_validate(old)
+    assert md.tam_basis is None and md.cagr_start_year is None and md.concentration_basis is None
+
+
+def test_worst_case_market_dynamics_never_nulls_an_old_build_field():
+    """No dossier, no peers, no quote: concentration is the 'unknown' sentinel, never None
+    (an old build would fail the whole report decode on a null)."""
+    coll = TickerReportDataCollector()
+    out = _make_collected_data()
+    out.industry_tam = None
+    out.peer_profiles = []
+    report = coll.assemble_report(out, stage_a_fallback())
+    dumped = TickerReportResponse.model_validate(report).model_dump()["moat_competition"]["market_dynamics"]
+    assert dumped["concentration"] == "unknown"
+    for key in _OLD_BUILD_NON_OPTIONAL:
+        assert isinstance(dumped[key], str) and dumped[key], key

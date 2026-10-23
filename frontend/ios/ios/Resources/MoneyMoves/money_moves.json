@@ -345,7 +345,7 @@
         "isVerified": false
       },
       "readTimeMinutes": 6,
-      "sortOrder": 0,
+      "sortOrder": 1,
       "publishedDaysAgo": 5,
       "tagLabel": "CASE STUDY",
       "isFeatured": true,
@@ -989,7 +989,7 @@
         "isVerified": false
       },
       "readTimeMinutes": 6,
-      "sortOrder": 1,
+      "sortOrder": 2,
       "publishedDaysAgo": 8,
       "tagLabel": "ORIGIN STORY",
       "isFeatured": false,
@@ -1538,7 +1538,7 @@
         "isVerified": false
       },
       "readTimeMinutes": 4,
-      "sortOrder": 2,
+      "sortOrder": 3,
       "publishedDaysAgo": 11,
       "tagLabel": "THE PIVOT",
       "isFeatured": false,
@@ -1962,7 +1962,7 @@
         "isVerified": false
       },
       "readTimeMinutes": 5,
-      "sortOrder": 3,
+      "sortOrder": 4,
       "publishedDaysAgo": 12,
       "tagLabel": "BLUEPRINT",
       "isFeatured": false,
@@ -2402,7 +2402,7 @@
         "isVerified": false
       },
       "readTimeMinutes": 4,
-      "sortOrder": 4,
+      "sortOrder": 5,
       "publishedDaysAgo": 12,
       "tagLabel": "ANATOMY OF A FRAUD",
       "isFeatured": false,
@@ -2828,7 +2828,7 @@
         "isVerified": false
       },
       "readTimeMinutes": 4,
-      "sortOrder": 5,
+      "sortOrder": 6,
       "publishedDaysAgo": 10,
       "tagLabel": "HEAD TO HEAD",
       "isFeatured": false,
@@ -3203,7 +3203,7 @@
         "isVerified": false
       },
       "readTimeMinutes": 4,
-      "sortOrder": 6,
+      "sortOrder": 7,
       "publishedDaysAgo": 9,
       "tagLabel": "DISRUPTOR VS INCUMBENTS",
       "isFeatured": false,
@@ -3547,7 +3547,7 @@
         "isVerified": false
       },
       "readTimeMinutes": 4,
-      "sortOrder": 7,
+      "sortOrder": 8,
       "publishedDaysAgo": 11,
       "tagLabel": "THE UNRAVELING",
       "isFeatured": false,
@@ -3948,7 +3948,7 @@
         "isVerified": false
       },
       "readTimeMinutes": 3,
-      "sortOrder": 8,
+      "sortOrder": 9,
       "publishedDaysAgo": 13,
       "tagLabel": "CAUTIONARY TALE",
       "isFeatured": false,
@@ -4279,7 +4279,7 @@
         "isVerified": false
       },
       "readTimeMinutes": 3,
-      "sortOrder": 9,
+      "sortOrder": 10,
       "publishedDaysAgo": 12,
       "tagLabel": "RED FLAGS",
       "isFeatured": false,
@@ -4651,7 +4651,7 @@
         "isVerified": false
       },
       "readTimeMinutes": 3,
-      "sortOrder": 10,
+      "sortOrder": 11,
       "publishedDaysAgo": 10,
       "tagLabel": "THE DUOPOLY",
       "isFeatured": false,
@@ -5004,7 +5004,7 @@
         "isVerified": false
       },
       "readTimeMinutes": 3,
-      "sortOrder": 11,
+      "sortOrder": 12,
       "publishedDaysAgo": 8,
       "tagLabel": "AI ARMS RACE",
       "isFeatured": false,

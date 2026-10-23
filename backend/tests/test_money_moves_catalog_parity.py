@@ -64,6 +64,20 @@ def test_the_two_catalog_copies_do_not_drift():
     )
 
 
+@pytest.mark.parametrize("path", [_FRONTEND_JSON, _BACKEND_JSON], ids=["frontend", "backend"])
+def test_sort_order_is_each_articles_position(path):
+    """`seed_money_moves.py` writes the `sort_order` COLUMN from the article's position
+    (`enumerate`), while the served `content` blob keeps the authored `sortOrder`. When the two
+    disagree the service logs a WARNING for that row on every cache load ("column wins"), and the
+    app's OFFLINE bundle — which sorts by `sortOrder` — orders differently from the server. On
+    2026-10-23 two articles both carried 0 and 12 was skipped: 12 such warnings per load."""
+    orders = [a.get("sortOrder") for a in _articles(path)]
+    assert orders == list(range(len(orders))), (
+        f"{path.name}: sortOrder must equal each article's position (0..{len(orders) - 1}); got {orders}. "
+        "Renumber both copies, then reseed."
+    )
+
+
 def test_every_authored_article_has_generated_artwork():
     """Art is unconditional for a Money Moves article: the catalog tile, the article header and
     the See-All featured card all render it, and a missing `imageUrl` silently degrades to the

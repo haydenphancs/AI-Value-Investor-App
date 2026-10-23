@@ -1126,12 +1126,13 @@ enum LifecyclePhase: String {
     case declining = "Declining"
 }
 
-/// The Moat card's market row. Owner decision 2026-10-22, "Measured only": the published
-/// market size at its OWN year, its average yearly growth over the real window, a source
-/// caption, and no projected value. Builds up to 1.1 re-anchored the source year to the
-/// device year by compounding a backward Census rate (and read the year from
+/// The Moat card's market row (owner decisions 2026-10-22). Builds up to 1.1 re-anchored the
+/// source year to the device year by compounding a backward Census rate (and read the year from
 /// `Calendar.current`, so a Buddhist-calendar phone showed "(2569)"); this type reads no
-/// calendar and never compounds.
+/// calendar and never compounds. A measured row shows the SERVER's projection — the current
+/// year and +5, from public BLS / CMS / GDP paths — when the report carries one, else the
+/// measured value at its own year. The card shows no source line (owner: "no need to add
+/// source lines at all"); the PDF export carries them.
 struct MarketDynamics {
     let industry: String                    // "Aerospace & Defense"
     let concentration: MarketConcentration  // revenue shares of listed constituents
@@ -1162,6 +1163,18 @@ struct MarketDynamics {
     var cagrEndYear: Int? = nil
     var growthSourceLabel: String? = nil    // source of cagr5Yr when it differs from the TAM's
     var concentrationBasis: String? = nil   // "revenue_share" | "market_cap"
+    // Header, scope line and projection (backend 2026-10-22). The projection is computed on
+    // the server; this type only formats it. Nil on a report stored before them.
+    var marketSizeLabel: String? = nil      // "US industry revenue" / "US industry value added"
+    var scopeNote: String? = nil            // the row's one-line scope
+    var projectionYear: Int? = nil          // the current year at report build
+    var projectionTAM: Double? = nil        // billions, current dollars
+    var projectionTargetYear: Int? = nil    // projectionYear + 5
+    var projectionTargetTAM: Double? = nil  // billions, current dollars
+    // The server's year labels, marked as projected ("2026e"; owner 2026-10-22) — drawn as-is so
+    // the mark can change without an app release. Nil → the plain year.
+    var projectionYearLabel: String? = nil
+    var projectionTargetYearLabel: String? = nil
 
     /// "Global" / "US" scope label, or nil when scope is unknown.
     var scopeLabel: String? {
@@ -1172,14 +1185,23 @@ struct MarketDynamics {
         }
     }
 
-    /// Market-size column header, scope-prefixed when known:
-    /// "US - Market Size (TAM)" / "Global - Market Size (TAM)".
-    /// Unprefixed when no TAM is shown: persisted reports from before
-    /// 2026-10-01 carry `tam_scope = "us"` with a zero TAM, which would
-    /// otherwise put a "US" header over "—".
+    /// Market-size column header: the server's "US industry revenue" for a measured row that
+    /// carries it, else scope-prefixed when known ("US - Market Size (TAM)"). Plain
+    /// "Market Size (TAM)" when no TAM is shown — persisted reports from before 2026-10-01
+    /// carry `tam_scope = "us"` with a zero TAM, which would otherwise put a "US" header over
+    /// "—" — and for a company quote (its own figure, usually worldwide).
     var tamHeaderLabel: String {
-        guard tamIsAvailable, let s = scopeLabel else { return "Market Size (TAM)" }
+        guard tamIsAvailable else { return "Market Size (TAM)" }
+        if basis == .measured, let label = Self.trimmed(marketSizeLabel) { return label }
+        guard let s = scopeLabel else { return "Market Size (TAM)" }
         return "\(s) - Market Size (TAM)"
+    }
+
+    private static func trimmed(_ text: String?) -> String? {
+        guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+            return nil
+        }
+        return text
     }
 
     /// True when no TAM source has populated either bound — view hides
@@ -1316,25 +1338,73 @@ struct MarketDynamics {
         return Self.formatTAM(futureTAM)
     }
 
-    /// The caption under the row: where the market size (and, beside a company quote, the
-    /// growth rate) comes from. Nil when no TAM is shown or its basis cannot be stated.
-    var sourceCaption: String? {
-        guard tamIsAvailable else { return nil }
+    /// "$A → $B" over "(YYYY) (YYYY)": the two values the market-size column draws as a pair.
+    struct MarketSizePair: Equatable {
+        let fromValue: String
+        let fromYear: String
+        let toValue: String
+        let toYear: String
+        var isProjection: Bool = false
+    }
+
+    /// The pair the column draws, or nil for a single value. ONLY a company quote's stated
+    /// target or the server's projection — a measured row's legacy `futureTAM` is a backward
+    /// rate compounded forward and is never drawn.
+    var marketSizePair: MarketSizePair? {
         switch basis {
-        case .measured:
-            guard let label = tamSourceLabel?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !label.isEmpty else { return nil }
-            return "Source: \(label)"
         case .companyQuote:
-            var text = "Market size: company estimate (earnings call)"
-            if let growth = growthSourceLabel?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !growth.isEmpty {
-                text += " · Growth: \(growth)"
-            }
-            return text
+            guard let target = formattedTargetTAM, let targetLabel = targetYearLabel else { return nil }
+            return MarketSizePair(fromValue: formattedCurrentTAM, fromYear: measuredYearLabel ?? "",
+                                  toValue: target, toYear: targetLabel)
+        case .measured:
+            return projectionPair
         case .unknown:
             return nil
         }
+    }
+
+    /// The server's projection, formatted — no arithmetic here. Only on a row stored as
+    /// measured, all-or-nothing: valid years with measured < start < target, both values
+    /// positive and finite. Anything else draws the measured value at its own year.
+    private var projectionPair: MarketSizePair? {
+        guard tamBasis == "measured",
+              let start = Self.validYear(projectionYear),
+              let target = Self.validYear(projectionTargetYear),
+              let measured = measuredYear, measured < start, start < target,
+              let fromValue = projectionTAM, fromValue.isFinite, fromValue > 0,
+              let toValue = projectionTargetTAM, toValue.isFinite, toValue > 0 else { return nil }
+        return MarketSizePair(fromValue: Self.formatTAM(fromValue),
+                              fromYear: "(\(Self.yearLabel(projectionYearLabel, start)))",
+                              toValue: Self.formatTAM(toValue),
+                              toYear: "(\(Self.yearLabel(projectionTargetYearLabel, target)))",
+                              isProjection: true)
+    }
+
+    /// The server's projected-year label ("2026e") when it is that year plus a short mark, else
+    /// the plain year — never a label for another year.
+    private static func yearLabel(_ label: String?, _ year: Int) -> String {
+        guard let text = trimmed(label), text.hasPrefix(String(year)), text.count <= 8 else {
+            return String(year)
+        }
+        return text
+    }
+
+    /// The row's one-line scope under the columns ("Revenue of US-located businesses, …" /
+    /// "Company's own figure — scope as stated."). A definition, not a source line: the card
+    /// shows no source (owner, 2026-10-22). Nil when no TAM is shown or its basis is unknown.
+    var scopeCaption: String? {
+        guard tamIsAvailable, basis != .unknown else { return nil }
+        return Self.trimmed(scopeNote)
+    }
+
+    /// VoiceOver text for the market-size column.
+    var marketSizeAccessibilityLabel: String {
+        guard tamIsAvailable else { return "\(tamHeaderLabel): not available" }
+        if let pair = marketSizePair {
+            let kind = pair.isProjection ? ", projected" : ""
+            return "\(tamHeaderLabel)\(kind): \(pair.fromValue) \(pair.fromYear) to \(pair.toValue) \(pair.toYear)"
+        }
+        return "\(tamHeaderLabel): \(formattedCurrentTAM) \(measuredYearLabel ?? "")"
     }
 
     /// "By revenue" under a measured concentration label.
@@ -1367,7 +1437,61 @@ struct MarketDynamics {
         cagrStartYear: 2017,
         cagrEndYear: 2024,
         growthSourceLabel: "US Census AIES — Aerospace & defense manufacturing (NAICS 3364, 334511, 336992, 332992, 332993, 332994)",
-        concentrationBasis: "revenue_share"
+        concentrationBasis: "revenue_share",
+        marketSizeLabel: "US industry revenue",
+        scopeNote: "Revenue of US-located businesses, incl. exports; excludes imports and foreign operations."
+    )
+
+    /// The same A&D row with the server's BLS projection (2026 → 2031), for previews.
+    static let sampleProjected = MarketDynamics(
+        industry: "Aerospace & Defense",
+        concentration: .fragmented,
+        cagr5Yr: 0.9,
+        currentTAM: 342.8,
+        futureTAM: 359.3,
+        currentYear: "2024",
+        futureYear: "2029",
+        lifecyclePhase: .mature,
+        tamSourceQuote: nil,
+        tamSourceLabel: "US Census AIES — Aerospace & defense manufacturing (NAICS 3364, 334511, 336992, 332992, 332993, 332994)",
+        sourceGrain: "industry",
+        tamScope: "us",
+        tamBasis: "measured",
+        tamYear: 2024,
+        cagrStartYear: 2017,
+        cagrEndYear: 2024,
+        concentrationBasis: "revenue_share",
+        marketSizeLabel: "US industry revenue",
+        scopeNote: "Revenue of US-located businesses, incl. exports; excludes imports and foreign operations.",
+        projectionYear: 2026,
+        projectionTAM: 400.0,
+        projectionTargetYear: 2031,
+        projectionTargetTAM: 494.6,
+        projectionYearLabel: "2026e",
+        projectionTargetYearLabel: "2031e"
+    )
+
+    /// A measured-only industry (no public path tracked it), for previews.
+    static let sampleBanksMeasuredOnly = MarketDynamics(
+        industry: "Banks - Diversified",
+        concentration: .fragmented,
+        cagr5Yr: 9.3,
+        currentTAM: 867.0,
+        futureTAM: 1354.0,
+        currentYear: "2024",
+        futureYear: "2029",
+        lifecyclePhase: .mature,
+        tamSourceQuote: nil,
+        tamSourceLabel: "US Census AIES — Commercial banking (NAICS 522110)",
+        sourceGrain: "industry",
+        tamScope: "us",
+        tamBasis: "measured",
+        tamYear: 2024,
+        cagrStartYear: 2017,
+        cagrEndYear: 2024,
+        concentrationBasis: "revenue_share",
+        marketSizeLabel: "US industry revenue",
+        scopeNote: "Revenue of US-located businesses, incl. exports; excludes imports and foreign operations."
     )
 }
 
@@ -1951,7 +2075,8 @@ extension TickerReportData {
                 tamScope: nil,
                 tamBasis: "company_quote",
                 tamTargetYear: 2030,
-                growthSourceLabel: "US Census AIES — Software publishers (NAICS 5112)"
+                growthSourceLabel: "US Census AIES — Software publishers (NAICS 5112)",
+                scopeNote: "Company's own figure — scope as stated."
             ),
             dimensions: [
                 MoatDimension(name: "Switching Costs", score: 9.2, peerScore: 6.5),

@@ -1,0 +1,1981 @@
+{
+ "_about": "Public-domain projections that move the Moat card's MEASURED US Census AIES industry revenue to the current year and +5 (owner decisions 2026-10-22). Census gives the measured value; these series only scale it: value(Y) = measured × S(Y)/S(measured year). Tier rule: the most specific source whose 2017–24 growth tracked Census within 2 pts/yr (BLS sector output → CMS health spending → US nominal GDP → measured only). Refresh yearly with backend/scripts/refresh_industry_tam_projections.py (owner-run). US government works, public domain. Source: U.S. Bureau of Labor Statistics; Centers for Medicare & Medicaid Services (Office of the Actuary); GDP history: U.S. Bureau of Economic Analysis via CMS.",
+ "schema_version": 1,
+ "built_on": "2026-10-22",
+ "horizon_years": 5,
+ "tier_rule": {
+  "window": [
+   2017,
+   2024
+  ],
+  "cms_window": [
+   2018,
+   2024
+  ],
+  "max_gap_pts": 2.0,
+  "order": [
+   "bls_output",
+   "cms_nhe",
+   "gdp_path",
+   "measured_only"
+  ]
+ },
+ "sources": {
+  "bls_output": {
+   "publisher": "U.S. Bureau of Labor Statistics",
+   "program": "Employment Projections 2025–35",
+   "released": "2026-08-27",
+   "url": "https://www.bls.gov/emp/data/industry-out-and-emp.htm",
+   "series": "1 = domestic industry output, millions of current dollars",
+   "history_first_year": 2017,
+   "base_year": 2025,
+   "projection_year": 2035,
+   "path": "history through base_year, then the constant compound rate to projection_year (BLS publishes no intermediate years)",
+   "caption": "BLS Employment Projections 2025–35, industry output"
+  },
+  "cms_nhe": {
+   "publisher": "Centers for Medicare & Medicaid Services (Office of the Actuary)",
+   "program": "National Health Expenditure Projections 2025–34",
+   "released": "2026-06-24",
+   "url": "https://www.cms.gov/data-research/statistics-trends-and-reports/national-health-expenditure-data/projected",
+   "unit": "billions of current dollars",
+   "first_year": 2018,
+   "last_year": 2034,
+   "path": "annual values as published",
+   "caption": "CMS National Health Expenditure Projections 2025–34"
+  },
+  "gdp_path": {
+   "history": "US nominal GDP as printed in CMS NHE Table 1 (BEA data)",
+   "base_and_rate": "BLS Employment Projections 2025–35, Table 4.3",
+   "url": "https://www.bls.gov/emp/tables/nominal-gdp-major-demand-category.htm",
+   "note": "one vintage per path; a newer BEA release waits for the next refresh",
+   "caption": "US nominal GDP (BEA history via CMS), BLS Employment Projections 2025–35"
+  }
+ },
+ "bls_sectors": {
+  "7": {
+   "title": "Oil and gas extraction",
+   "naics_2022": "211",
+   "output": {
+    "2017": 253994.0,
+    "2018": 346639.0,
+    "2019": 316004.0,
+    "2020": 211097.0,
+    "2021": 419977.0,
+    "2022": 653803.0,
+    "2023": 467668.0,
+    "2024": 455994.0,
+    "2025": 459550.2,
+    "2035": 714716.7
+   }
+  },
+  "11": {
+   "title": "Support activities for mining",
+   "naics_2022": "213",
+   "output": {
+    "2017": 106929.0,
+    "2018": 132025.0,
+    "2019": 135631.0,
+    "2020": 76300.0,
+    "2021": 76389.0,
+    "2022": 98710.0,
+    "2023": 115595.0,
+    "2024": 110560.0,
+    "2025": 98390.2,
+    "2035": 155451.5
+   }
+  },
+  "12": {
+   "title": "Electric power generation, transmission and distribution",
+   "naics_2022": "2211",
+   "output": {
+    "2017": 389397.5,
+    "2018": 422085.8,
+    "2019": 423083.3,
+    "2020": 400301.2,
+    "2021": 482347.6,
+    "2022": 556484.5,
+    "2023": 507384.3,
+    "2024": 502828.6,
+    "2025": 534432.5,
+    "2035": 928518.4
+   }
+  },
+  "13": {
+   "title": "Natural gas distribution",
+   "naics_2022": "2212",
+   "output": {
+    "2017": 69553.0,
+    "2018": 77505.7,
+    "2019": 78737.1,
+    "2020": 76975.9,
+    "2021": 94167.7,
+    "2022": 124356.6,
+    "2023": 118193.5,
+    "2024": 118201.4,
+    "2025": 126175.6,
+    "2035": 174257.0
+   }
+  },
+  "14": {
+   "title": "Water, sewage and other systems",
+   "naics_2022": "2213",
+   "output": {
+    "2017": 15136.8,
+    "2018": 15865.8,
+    "2019": 16101.8,
+    "2020": 16706.7,
+    "2021": 17595.6,
+    "2022": 18231.6,
+    "2023": 20079.5,
+    "2024": 22158.4,
+    "2025": 23489.4,
+    "2035": 31641.7
+   }
+  },
+  "18": {
+   "title": "Sugar and confectionery product manufacturing",
+   "naics_2022": "3113",
+   "output": {
+    "2017": 37054.0,
+    "2018": 36549.0,
+    "2019": 38381.9,
+    "2020": 36779.0,
+    "2021": 39416.0,
+    "2022": 41118.0,
+    "2023": 42798.0,
+    "2024": 44612.0,
+    "2025": 45528.7,
+    "2035": 61037.5
+   }
+  },
+  "26": {
+   "title": "Tobacco manufacturing",
+   "naics_2022": "3122",
+   "output": {
+    "2017": 60770.0,
+    "2018": 58934.1,
+    "2019": 58405.9,
+    "2020": 60812.9,
+    "2021": 62072.9,
+    "2022": 60406.0,
+    "2023": 64143.1,
+    "2024": 69178.0,
+    "2025": 70197.4,
+    "2035": 73575.5
+   }
+  },
+  "27": {
+   "title": "Textile mills",
+   "naics_2022": "313",
+   "output": {
+    "2017": 27397.6,
+    "2018": 27745.5,
+    "2019": 26841.5,
+    "2020": 24415.5,
+    "2021": 26625.0,
+    "2022": 27091.5,
+    "2023": 25283.5,
+    "2024": 24929.0,
+    "2025": 25431.3,
+    "2035": 32722.8
+   }
+  },
+  "37": {
+   "title": "Petroleum and coal products manufacturing",
+   "naics_2022": "324",
+   "output": {
+    "2017": 538793.0,
+    "2018": 668876.0,
+    "2019": 597698.0,
+    "2020": 354116.0,
+    "2021": 610478.0,
+    "2022": 881618.0,
+    "2023": 725556.0,
+    "2024": 650631.0,
+    "2025": 592569.4,
+    "2035": 914234.6
+   }
+  },
+  "38": {
+   "title": "Chemical manufacturing (3251,2,3,9)",
+   "naics_2022": "3251, 3252, 3253, 3259",
+   "output": {
+    "2017": 401823.0,
+    "2018": 422216.0,
+    "2019": 385109.5,
+    "2020": 346819.5,
+    "2021": 452526.0,
+    "2022": 513335.0,
+    "2023": 514378.9,
+    "2024": 523366.0,
+    "2025": 537192.3,
+    "2035": 836860.7
+   }
+  },
+  "39": {
+   "title": "Pharmaceutical and medicine manufacturing",
+   "naics_2022": "3254",
+   "output": {
+    "2017": 255027.0,
+    "2018": 271370.0,
+    "2019": 288192.6,
+    "2020": 296918.4,
+    "2021": 313514.0,
+    "2022": 303730.0,
+    "2023": 320169.3,
+    "2024": 333392.0,
+    "2025": 349494.3,
+    "2035": 556598.1
+   }
+  },
+  "43": {
+   "title": "Nonmetallic mineral product manufacturing",
+   "naics_2022": "327",
+   "output": {
+    "2017": 127320.0,
+    "2018": 131415.0,
+    "2019": 135072.0,
+    "2020": 133291.0,
+    "2021": 145641.0,
+    "2022": 166871.0,
+    "2023": 173356.0,
+    "2024": 175289.0,
+    "2025": 174945.4,
+    "2035": 279403.2
+   }
+  },
+  "44": {
+   "title": "Iron and steel mills and ferroalloy manufacturing",
+   "naics_2022": "3311",
+   "output": {
+    "2017": 88122.4,
+    "2018": 105428.4,
+    "2019": 93180.4,
+    "2020": 74597.4,
+    "2021": 121758.4,
+    "2022": 130923.0,
+    "2023": 130849.4,
+    "2024": 128733.4,
+    "2025": 131561.2,
+    "2035": 219523.3
+   }
+  },
+  "46": {
+   "title": "Alumina and aluminum production and processing",
+   "naics_2022": "3313",
+   "output": {
+    "2017": 35656.2,
+    "2018": 41636.2,
+    "2019": 38100.2,
+    "2020": 31498.2,
+    "2021": 41492.1,
+    "2022": 51529.0,
+    "2023": 46902.2,
+    "2024": 45425.2,
+    "2025": 46535.0,
+    "2035": 50445.3
+   }
+  },
+  "49": {
+   "title": "Fabricated metal product manufacturing (3321,2,5,6,9)",
+   "naics_2022": "3321, 3322, 3325, 3326, 3329",
+   "output": {
+    "2017": 129021.6,
+    "2018": 139080.6,
+    "2019": 140418.0,
+    "2020": 129745.4,
+    "2021": 144491.0,
+    "2022": 158389.7,
+    "2023": 162467.4,
+    "2024": 169148.4,
+    "2025": 170524.8,
+    "2035": 247460.2
+   }
+  },
+  "54": {
+   "title": "Machinery manufacturing (3331,2,4,9)",
+   "naics_2022": "3331, 3332, 3334, 3339",
+   "output": {
+    "2017": 272085.0,
+    "2018": 279671.7,
+    "2019": 286361.7,
+    "2020": 260095.5,
+    "2021": 286399.5,
+    "2022": 321136.3,
+    "2023": 324384.8,
+    "2024": 322643.2,
+    "2025": 328401.0,
+    "2035": 438924.8
+   }
+  },
+  "61": {
+   "title": "Semiconductor and other electronic component manufacturing",
+   "naics_2022": "3344",
+   "output": {
+    "2017": 114393.3,
+    "2018": 115619.7,
+    "2019": 116748.7,
+    "2020": 120994.7,
+    "2021": 130679.0,
+    "2022": 137847.3,
+    "2023": 134732.7,
+    "2024": 140251.7,
+    "2025": 139323.3,
+    "2035": 191943.1
+   }
+  },
+  "62": {
+   "title": "Navigational, measuring, electromedical, and control instruments manufacturing",
+   "naics_2022": "3345",
+   "output": {
+    "2017": 158692.4,
+    "2018": 166118.5,
+    "2019": 168347.5,
+    "2020": 166009.5,
+    "2021": 166854.0,
+    "2022": 170015.4,
+    "2023": 168347.8,
+    "2024": 169468.6,
+    "2025": 177757.7,
+    "2035": 276087.9
+   }
+  },
+  "68": {
+   "title": "Motor vehicle manufacturing",
+   "naics_2022": "3361",
+   "output": {
+    "2017": 279067.0,
+    "2018": 310491.5,
+    "2019": 335299.0,
+    "2020": 303793.5,
+    "2021": 350549.1,
+    "2022": 363878.0,
+    "2023": 428716.9,
+    "2024": 415167.0,
+    "2025": 420044.4,
+    "2035": 505315.8
+   }
+  },
+  "70": {
+   "title": "Motor vehicle parts manufacturing",
+   "naics_2022": "3363",
+   "output": {
+    "2017": 268889.0,
+    "2018": 274027.4,
+    "2019": 262794.0,
+    "2020": 223699.4,
+    "2021": 252697.8,
+    "2022": 281460.0,
+    "2023": 287866.3,
+    "2024": 285616.0,
+    "2025": 290213.8,
+    "2035": 250444.9
+   }
+  },
+  "71": {
+   "title": "Aerospace product and parts manufacturing",
+   "naics_2022": "3364",
+   "output": {
+    "2017": 262744.0,
+    "2018": 279956.0,
+    "2019": 257204.0,
+    "2020": 214993.0,
+    "2021": 208098.0,
+    "2022": 231718.7,
+    "2023": 281144.0,
+    "2024": 296017.8,
+    "2025": 339733.2,
+    "2035": 520593.7
+   }
+  },
+  "74": {
+   "title": "Other transportation equipment manufacturing",
+   "naics_2022": "3369",
+   "output": {
+    "2017": 24013.0,
+    "2018": 24568.0,
+    "2019": 21781.0,
+    "2020": 20259.0,
+    "2021": 23091.0,
+    "2022": 21764.1,
+    "2023": 23039.0,
+    "2024": 24986.1,
+    "2025": 27001.7,
+    "2035": 38019.6
+   }
+  },
+  "77": {
+   "title": "Medical equipment and supplies manufacturing",
+   "naics_2022": "3391",
+   "output": {
+    "2017": 95025.0,
+    "2018": 99689.6,
+    "2019": 98586.0,
+    "2020": 93376.0,
+    "2021": 102434.0,
+    "2022": 104249.6,
+    "2023": 102805.0,
+    "2024": 104157.6,
+    "2025": 106652.0,
+    "2035": 165868.6
+   }
+  },
+  "80": {
+   "title": "Wholesale trade",
+   "naics_2022": "42",
+   "output": {
+    "2017": 2053876.0,
+    "2018": 2175142.0,
+    "2019": 2232753.0,
+    "2020": 2125948.0,
+    "2021": 2537886.0,
+    "2022": 2883595.0,
+    "2023": 2864034.0,
+    "2024": 2939504.0,
+    "2025": 3056965.6,
+    "2035": 5075911.9
+   }
+  },
+  "81": {
+   "title": "Motor vehicle and parts dealers",
+   "naics_2022": "441",
+   "output": {
+    "2017": 373174.7,
+    "2018": 390632.2,
+    "2019": 394101.5,
+    "2020": 388206.5,
+    "2021": 481118.0,
+    "2022": 563693.6,
+    "2023": 586010.9,
+    "2024": 600319.0,
+    "2025": 631397.0,
+    "2035": 1125376.2
+   }
+  },
+  "82": {
+   "title": "Food and beverage retailers",
+   "naics_2022": "445",
+   "output": {
+    "2017": 254458.3,
+    "2018": 259145.9,
+    "2019": 276129.4,
+    "2020": 309934.0,
+    "2021": 333219.7,
+    "2022": 361618.1,
+    "2023": 371783.9,
+    "2024": 382824.0,
+    "2025": 399505.3,
+    "2035": 533790.2
+   }
+  },
+  "83": {
+   "title": "General merchandise retailers",
+   "naics_2022": "455",
+   "output": {
+    "2017": 248588.1,
+    "2018": 259467.7,
+    "2019": 263645.3,
+    "2020": 278310.1,
+    "2021": 314192.2,
+    "2022": 329276.4,
+    "2023": 338708.1,
+    "2024": 349544.2,
+    "2025": 362169.0,
+    "2035": 509758.7
+   }
+  },
+  "84": {
+   "title": "All other retail trade (444, 449, 456-9)",
+   "naics_2022": "444, 449, 456, 457, 458, 459",
+   "output": {
+    "2017": 971488.9,
+    "2018": 1025878.7,
+    "2019": 1055006.9,
+    "2020": 1094480.0,
+    "2021": 1350721.4,
+    "2022": 1436192.2,
+    "2023": 1458281.6,
+    "2024": 1503122.1,
+    "2025": 1523710.6,
+    "2035": 2500336.0
+   }
+  },
+  "85": {
+   "title": "Air transportation",
+   "naics_2022": "481",
+   "output": {
+    "2017": 236301.0,
+    "2018": 253774.0,
+    "2019": 272267.0,
+    "2020": 126719.0,
+    "2021": 194945.0,
+    "2022": 296518.0,
+    "2023": 311020.0,
+    "2024": 329276.0,
+    "2025": 340699.2,
+    "2035": 590037.3
+   }
+  },
+  "87": {
+   "title": "Water transportation",
+   "naics_2022": "483",
+   "output": {
+    "2017": 54977.0,
+    "2018": 59805.0,
+    "2019": 60883.0,
+    "2020": 39492.0,
+    "2021": 40540.0,
+    "2022": 66865.0,
+    "2023": 71827.0,
+    "2024": 77558.0,
+    "2025": 78987.2,
+    "2035": 124290.2
+   }
+  },
+  "88": {
+   "title": "Truck transportation",
+   "naics_2022": "484",
+   "output": {
+    "2017": 367154.0,
+    "2018": 401324.0,
+    "2019": 409425.0,
+    "2020": 413595.0,
+    "2021": 490363.0,
+    "2022": 577281.0,
+    "2023": 528292.0,
+    "2024": 526947.0,
+    "2025": 539437.5,
+    "2035": 912626.1
+   }
+  },
+  "92": {
+   "title": "Couriers and messengers",
+   "naics_2022": "492",
+   "output": {
+    "2017": 97060.0,
+    "2018": 104550.0,
+    "2019": 110493.0,
+    "2020": 129269.4,
+    "2021": 152760.0,
+    "2022": 159145.0,
+    "2023": 152665.6,
+    "2024": 153965.0,
+    "2025": 158181.8,
+    "2035": 365589.8
+   }
+  },
+  "94": {
+   "title": "Software publishers",
+   "naics_2022": "5132",
+   "output": {
+    "2017": 281988.6,
+    "2018": 299933.6,
+    "2019": 321275.9,
+    "2020": 352713.8,
+    "2021": 402753.8,
+    "2022": 453118.0,
+    "2023": 495800.6,
+    "2024": 549088.0,
+    "2025": 581846.5,
+    "2035": 876456.6
+   }
+  },
+  "97": {
+   "title": "Telecommunications",
+   "naics_2022": "517",
+   "output": {
+    "2017": 658086.1,
+    "2018": 671768.6,
+    "2019": 682516.7,
+    "2020": 680309.5,
+    "2021": 706420.8,
+    "2022": 719209.5,
+    "2023": 710594.6,
+    "2024": 705994.1,
+    "2025": 727596.7,
+    "2035": 1097708.9
+   }
+  },
+  "99": {
+   "title": "Miscellaneous information services (5131, 516, 519)",
+   "naics_2022": "5131, 516, 519",
+   "output": {
+    "2017": 495826.0,
+    "2018": 536017.6,
+    "2019": 558932.6,
+    "2020": 587128.3,
+    "2021": 676861.8,
+    "2022": 726560.5,
+    "2023": 749020.0,
+    "2024": 798118.1,
+    "2025": 848894.3,
+    "2035": 1237206.1
+   }
+  },
+  "100": {
+   "title": "Monetary authorities - central bank, and credit intermediation and related activities",
+   "naics_2022": "521, 522",
+   "output": {
+    "2017": 1057917.0,
+    "2018": 1111861.0,
+    "2019": 1119901.0,
+    "2020": 1148195.0,
+    "2021": 1195811.0,
+    "2022": 1245809.0,
+    "2023": 1373241.0,
+    "2024": 1423895.0,
+    "2025": 1486694.4,
+    "2035": 2342334.1
+   }
+  },
+  "101": {
+   "title": "Securities, commodity contracts, and other financial investments and related activities",
+   "naics_2022": "523",
+   "output": {
+    "2017": 549317.0,
+    "2018": 579751.0,
+    "2019": 607994.0,
+    "2020": 631959.0,
+    "2021": 721251.0,
+    "2022": 720682.0,
+    "2023": 828055.0,
+    "2024": 932656.0,
+    "2025": 1036084.5,
+    "2035": 1886621.4
+   }
+  },
+  "103": {
+   "title": "Insurance carriers",
+   "naics_2022": "5241",
+   "output": {
+    "2017": 680230.0,
+    "2018": 715594.3,
+    "2019": 732079.6,
+    "2020": 759725.0,
+    "2021": 772654.0,
+    "2022": 838117.6,
+    "2023": 875422.0,
+    "2024": 926988.0,
+    "2025": 954569.3,
+    "2035": 1418823.2
+   }
+  },
+  "104": {
+   "title": "Agencies, brokerages, and other insurance related activities",
+   "naics_2022": "5242",
+   "output": {
+    "2017": 362909.0,
+    "2018": 381828.7,
+    "2019": 400559.4,
+    "2020": 426360.0,
+    "2021": 458293.0,
+    "2022": 493391.4,
+    "2023": 545811.0,
+    "2024": 609011.0,
+    "2025": 627214.3,
+    "2035": 848066.3
+   }
+  },
+  "105": {
+   "title": "Real estate",
+   "naics_2022": "531",
+   "output": {
+    "2017": 1745423.0,
+    "2018": 1841934.0,
+    "2019": 1968152.0,
+    "2020": 1960776.0,
+    "2021": 2261840.8,
+    "2022": 2484170.0,
+    "2023": 2681047.0,
+    "2024": 2808237.0,
+    "2025": 2941848.2,
+    "2035": 4939963.1
+   }
+  },
+  "113": {
+   "title": "Computer systems design and related services",
+   "naics_2022": "5415",
+   "output": {
+    "2017": 475986.3,
+    "2018": 519187.4,
+    "2019": 531753.5,
+    "2020": 551088.9,
+    "2021": 610501.2,
+    "2022": 676667.6,
+    "2023": 709383.5,
+    "2024": 734021.6,
+    "2025": 778169.4,
+    "2035": 1078653.4
+   }
+  },
+  "114": {
+   "title": "Management, scientific, and technical consulting services",
+   "naics_2022": "5416",
+   "output": {
+    "2017": 306054.3,
+    "2018": 324172.7,
+    "2019": 342924.0,
+    "2020": 348275.1,
+    "2021": 393542.0,
+    "2022": 441527.5,
+    "2023": 466730.0,
+    "2024": 501397.2,
+    "2025": 526139.3,
+    "2035": 742806.1
+   }
+  },
+  "116": {
+   "title": "Advertising, public relations, and related services",
+   "naics_2022": "5418",
+   "output": {
+    "2017": 129676.8,
+    "2018": 141166.2,
+    "2019": 150379.6,
+    "2020": 149913.7,
+    "2021": 166260.1,
+    "2022": 185570.6,
+    "2023": 201437.7,
+    "2024": 220445.9,
+    "2025": 230141.7,
+    "2035": 326531.3
+   }
+  },
+  "123": {
+   "title": "Employment services",
+   "naics_2022": "5613",
+   "output": {
+    "2017": 386617.4,
+    "2018": 412291.9,
+    "2019": 439170.2,
+    "2020": 417983.4,
+    "2021": 478917.9,
+    "2022": 536757.0,
+    "2023": 497030.3,
+    "2024": 454785.7,
+    "2025": 470156.3,
+    "2035": 659690.0
+   }
+  },
+  "125": {
+   "title": "Travel arrangement and reservation services",
+   "naics_2022": "5615",
+   "output": {
+    "2017": 59069.0,
+    "2018": 65293.6,
+    "2019": 70197.2,
+    "2020": 37006.0,
+    "2021": 50222.0,
+    "2022": 77778.1,
+    "2023": 90971.2,
+    "2024": 95227.7,
+    "2025": 98436.5,
+    "2035": 135614.4
+   }
+  },
+  "129": {
+   "title": "Waste management and remediation services",
+   "naics_2022": "562",
+   "output": {
+    "2017": 115612.0,
+    "2018": 123442.4,
+    "2019": 128241.2,
+    "2020": 128467.9,
+    "2021": 142152.5,
+    "2022": 154685.1,
+    "2023": 165542.7,
+    "2024": 177527.0,
+    "2025": 187558.4,
+    "2035": 321361.9
+   }
+  },
+  "140": {
+   "title": "Hospitals; private",
+   "naics_2022": "622",
+   "output": {
+    "2017": 846112.3,
+    "2018": 883549.0,
+    "2019": 931077.8,
+    "2020": 920050.7,
+    "2021": 1009915.2,
+    "2022": 1085409.2,
+    "2023": 1160616.7,
+    "2024": 1260541.7,
+    "2025": 1336806.1,
+    "2035": 2212903.8
+   }
+  },
+  "154": {
+   "title": "Accommodation",
+   "naics_2022": "721",
+   "output": {
+    "2017": 282923.0,
+    "2018": 297978.4,
+    "2019": 306488.0,
+    "2020": 182763.1,
+    "2021": 248265.3,
+    "2022": 335935.5,
+    "2023": 376972.1,
+    "2024": 384456.2,
+    "2025": 386524.0,
+    "2035": 688741.7
+   }
+  },
+  "155": {
+   "title": "Full-service restaurants",
+   "naics_2022": "722511",
+   "output": {
+    "2017": 371720.4,
+    "2018": 390979.4,
+    "2019": 409834.8,
+    "2020": 313961.6,
+    "2021": 449801.0,
+    "2022": 527200.4,
+    "2023": 581791.2,
+    "2024": 610173.7,
+    "2025": 641998.5,
+    "2035": 1039991.1
+   }
+  },
+  "156": {
+   "title": "All other food and drinking places",
+   "naics_2022": "7223, 7224, 722513, 722514, 722515",
+   "output": {
+    "2017": 445768.6,
+    "2018": 472273.6,
+    "2019": 499132.5,
+    "2020": 460227.8,
+    "2021": 567520.5,
+    "2022": 646131.8,
+    "2023": 712942.5,
+    "2024": 751715.8,
+    "2025": 790878.1,
+    "2035": 1337029.6
+   }
+  },
+  "182": {
+   "title": "Mining (except oil and gas)",
+   "naics_2022": "212",
+   "output": {
+    "2017": 101852.0,
+    "2018": 106906.0,
+    "2019": 106096.0,
+    "2020": 96699.0,
+    "2021": 117123.0,
+    "2022": 138074.0,
+    "2023": 141258.0,
+    "2024": 139851.0,
+    "2025": 148730.1,
+    "2035": 220483.7
+   }
+  },
+  "183": {
+   "title": "Utilities",
+   "naics_2022": "22",
+   "output": {
+    "2017": 474087.3,
+    "2018": 515457.3,
+    "2019": 517922.2,
+    "2020": 493983.8,
+    "2021": 594110.9,
+    "2022": 699072.7,
+    "2023": 645657.3,
+    "2024": 643188.5,
+    "2025": 684097.5,
+    "2035": 1134417.1
+   }
+  },
+  "185": {
+   "title": "Food manufacturing",
+   "naics_2022": "311",
+   "output": {
+    "2017": 776483.0,
+    "2018": 778904.8,
+    "2019": 797293.4,
+    "2020": 825410.2,
+    "2021": 898349.2,
+    "2022": 1017499.8,
+    "2023": 1030120.8,
+    "2024": 1038798.0,
+    "2025": 1053885.6,
+    "2035": 1615823.0
+   }
+  },
+  "187": {
+   "title": "Wood product manufacturing",
+   "naics_2022": "321",
+   "output": {
+    "2017": 108455.0,
+    "2018": 120358.0,
+    "2019": 112381.0,
+    "2020": 123724.0,
+    "2021": 163378.0,
+    "2022": 179301.0,
+    "2023": 173326.0,
+    "2024": 174156.0,
+    "2025": 170966.7,
+    "2035": 249583.2
+   }
+  },
+  "194": {
+   "title": "Machinery manufacturing",
+   "naics_2022": "333",
+   "output": {
+    "2017": 378267.0,
+    "2018": 389679.0,
+    "2019": 391132.0,
+    "2020": 352285.0,
+    "2021": 391206.0,
+    "2022": 436372.0,
+    "2023": 443368.0,
+    "2024": 436727.0,
+    "2025": 444856.0,
+    "2035": 599889.4
+   }
+  },
+  "196": {
+   "title": "Electrical equipment, appliance, and component manufacturing",
+   "naics_2022": "335",
+   "output": {
+    "2017": 124254.0,
+    "2018": 128063.0,
+    "2019": 131501.0,
+    "2020": 127162.0,
+    "2021": 142008.0,
+    "2022": 169100.0,
+    "2023": 186721.0,
+    "2024": 192695.0,
+    "2025": 200372.5,
+    "2035": 303460.3
+   }
+  },
+  "201": {
+   "title": "Retail trade",
+   "naics_2022": "44, 45",
+   "output": {
+    "2017": 1847710.0,
+    "2018": 1935124.6,
+    "2019": 1988883.1,
+    "2020": 2070930.6,
+    "2021": 2479251.3,
+    "2022": 2690780.4,
+    "2023": 2754784.5,
+    "2024": 2835809.2,
+    "2025": 2916781.8,
+    "2035": 4669261.1
+   }
+  },
+  "209": {
+   "title": "Rental and leasing services",
+   "naics_2022": "532",
+   "output": {
+    "2017": 191725.4,
+    "2018": 207229.8,
+    "2019": 219944.2,
+    "2020": 197777.4,
+    "2021": 227502.7,
+    "2022": 259423.1,
+    "2023": 277379.7,
+    "2024": 281761.1,
+    "2025": 291623.9,
+    "2035": 469275.5
+   }
+  }
+ },
+ "cms_series": {
+  "rx_retail": {
+   "table": "Table 11",
+   "column": "Total",
+   "title": "retail prescription drug spending",
+   "values": {
+    "2018": 321.3,
+    "2019": 333.8,
+    "2020": 345.5,
+    "2021": 365.9,
+    "2022": 390.6,
+    "2023": 432.9,
+    "2024": 467.0,
+    "2025": 518.7,
+    "2026": 561.5,
+    "2027": 587.6,
+    "2028": 620.5,
+    "2029": 653.4,
+    "2030": 678.6,
+    "2031": 715.3,
+    "2032": 746.8,
+    "2033": 781.9,
+    "2034": 814.3
+   }
+  },
+  "health_insurance": {
+   "table": "Table 03",
+   "column": "Health Insurance — Total",
+   "title": "health insurance spending",
+   "values": {
+    "2018": 2627.7,
+    "2019": 2745.0,
+    "2020": 2847.6,
+    "2021": 3062.0,
+    "2022": 3292.0,
+    "2023": 3614.3,
+    "2024": 3892.9,
+    "2025": 4197.1,
+    "2026": 4476.2,
+    "2027": 4701.7,
+    "2028": 4959.6,
+    "2029": 5232.1,
+    "2030": 5509.9,
+    "2031": 5810.7,
+    "2032": 6119.2,
+    "2033": 6472.1,
+    "2034": 6847.4
+   }
+  }
+ },
+ "gdp": {
+  "history": {
+   "2017": 19612.1,
+   "2018": 20656.5,
+   "2019": 21540.0,
+   "2020": 21375.3,
+   "2021": 23725.6,
+   "2022": 26054.6,
+   "2023": 27811.5,
+   "2024": 29298.0
+  },
+  "base_year": 2025,
+  "base_value": 30779.0,
+  "projection_year": 2035,
+  "projection_value": 46950.8,
+  "cms_base_year_value": 30767.1,
+  "vintage_overlap": {
+   "2015": {
+    "bls": 18295.0,
+    "cms": 18295.0
+   }
+  }
+ },
+ "industries": {
+  "Advertising Agencies": {
+   "tier": "gdp_path",
+   "naics_2017": [
+    "5418"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    116
+   ]
+  },
+  "Aerospace & Defense": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "3364",
+    "334511",
+    "336992",
+    "332992",
+    "332993",
+    "332994"
+   ],
+   "kind": "proxy",
+   "composite": {
+    "weights_year": 2024,
+    "codes": {
+     "3364": {
+      "census_thousands": 246965543,
+      "bls_sectors": [
+       71
+      ]
+     },
+     "334511": {
+      "census_thousands": 66586086,
+      "bls_sectors": [
+       62
+      ]
+     },
+     "336992": {
+      "census_thousands": 8720665,
+      "bls_sectors": [
+       74
+      ]
+     },
+     "332992": {
+      "census_thousands": 5429417,
+      "bls_sectors": [
+       49
+      ]
+     },
+     "332993": {
+      "census_thousands": 4559706,
+      "bls_sectors": [
+       49
+      ]
+     },
+     "332994": {
+      "census_thousands": 10562977,
+      "bls_sectors": [
+       49
+      ]
+     }
+    }
+   }
+  },
+  "Agricultural - Machinery": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "3331"
+   ],
+   "kind": "proxy",
+   "bls_sectors": [
+    54
+   ]
+  },
+  "Agricultural Inputs": {
+   "tier": "gdp_path",
+   "naics_2017": [
+    "3253"
+   ],
+   "kind": "proxy",
+   "bls_sectors": [
+    38
+   ]
+  },
+  "Airlines, Airports & Air Services": {
+   "tier": "gdp_path",
+   "naics_2017": [
+    "481"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    85
+   ]
+  },
+  "Aluminum": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "3313"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    46
+   ]
+  },
+  "Apparel - Retail": {
+   "tier": "measured_only",
+   "naics_2017": [
+    "4481"
+   ],
+   "kind": "margin",
+   "bls_sectors": [
+    84
+   ]
+  },
+  "Asset Management": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "523920"
+   ],
+   "kind": "proxy",
+   "bls_sectors": [
+    101
+   ]
+  },
+  "Auto - Dealerships": {
+   "tier": "gdp_path",
+   "naics_2017": [
+    "4411"
+   ],
+   "kind": "margin",
+   "bls_sectors": [
+    81
+   ]
+  },
+  "Auto - Manufacturers": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "3361"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    68
+   ]
+  },
+  "Auto - Parts": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "3363"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    70
+   ]
+  },
+  "Banks": {
+   "tier": "measured_only",
+   "naics_2017": [
+    "522110"
+   ],
+   "kind": "imputed",
+   "bls_sectors": [
+    100
+   ]
+  },
+  "Banks - Diversified": {
+   "tier": "measured_only",
+   "naics_2017": [
+    "522110"
+   ],
+   "kind": "imputed",
+   "bls_sectors": [
+    100
+   ]
+  },
+  "Banks - Regional": {
+   "tier": "measured_only",
+   "naics_2017": [
+    "522110"
+   ],
+   "kind": "imputed",
+   "bls_sectors": [
+    100
+   ]
+  },
+  "Biotechnology": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "3254"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    39
+   ]
+  },
+  "Broadcasting": {
+   "tier": "measured_only",
+   "naics_2017": [
+    "5151"
+   ],
+   "kind": "proxy",
+   "bls_sectors": [
+    99
+   ]
+  },
+  "Chemicals": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "3251"
+   ],
+   "kind": "proxy",
+   "bls_sectors": [
+    38
+   ]
+  },
+  "Construction Materials": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "327"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    43
+   ]
+  },
+  "Consulting Services": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "5416"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    114
+   ]
+  },
+  "Department Stores": {
+   "tier": "measured_only",
+   "naics_2017": [
+    "4522"
+   ],
+   "kind": "margin",
+   "bls_sectors": [
+    83
+   ]
+  },
+  "Discount Stores": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "4523"
+   ],
+   "kind": "margin",
+   "bls_sectors": [
+    83
+   ]
+  },
+  "Diversified Utilities": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "221"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    183
+   ]
+  },
+  "Drug Manufacturers - General": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "3254"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    39
+   ]
+  },
+  "Drug Manufacturers - Specialty & Generic": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "3254"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    39
+   ]
+  },
+  "Electrical Equipment & Parts": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "335"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    196
+   ]
+  },
+  "Electronic Components": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "3344"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    61
+   ]
+  },
+  "Financial - Capital Markets": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "5231"
+   ],
+   "kind": "proxy",
+   "bls_sectors": [
+    101
+   ]
+  },
+  "Financial - Mortgages": {
+   "tier": "measured_only",
+   "naics_2017": [
+    "522292"
+   ],
+   "kind": "imputed",
+   "bls_sectors": [
+    100
+   ]
+  },
+  "Food Confectioners": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "3113"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    18
+   ]
+  },
+  "Food Distribution": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "4244"
+   ],
+   "kind": "margin",
+   "bls_sectors": [
+    80
+   ]
+  },
+  "Grocery Stores": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "4451"
+   ],
+   "kind": "margin",
+   "bls_sectors": [
+    82
+   ]
+  },
+  "Home Improvement": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "444"
+   ],
+   "kind": "margin",
+   "bls_sectors": [
+    84
+   ]
+  },
+  "Independent Power Producers": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "22111"
+   ],
+   "kind": "proxy",
+   "bls_sectors": [
+    12
+   ]
+  },
+  "Industrial - Distribution": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "4238"
+   ],
+   "kind": "margin",
+   "bls_sectors": [
+    80
+   ]
+  },
+  "Industrial - Machinery": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "333"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    194
+   ]
+  },
+  "Industrial Materials": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "212"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    182
+   ]
+  },
+  "Information Technology Services": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "5415"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    113
+   ]
+  },
+  "Insurance - Brokers": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "52421"
+   ],
+   "kind": "proxy",
+   "bls_sectors": [
+    104
+   ]
+  },
+  "Insurance - Diversified": {
+   "tier": "gdp_path",
+   "naics_2017": [
+    "5241"
+   ],
+   "kind": "imputed",
+   "bls_sectors": [
+    103
+   ]
+  },
+  "Insurance - Life": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "524113"
+   ],
+   "kind": "imputed",
+   "bls_sectors": [
+    103
+   ]
+  },
+  "Insurance - Property & Casualty": {
+   "tier": "gdp_path",
+   "naics_2017": [
+    "524126"
+   ],
+   "kind": "imputed",
+   "bls_sectors": [
+    103
+   ]
+  },
+  "Insurance - Reinsurance": {
+   "tier": "measured_only",
+   "naics_2017": [
+    "524130"
+   ],
+   "kind": "imputed",
+   "bls_sectors": [
+    103
+   ]
+  },
+  "Integrated Freight & Logistics": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "492"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    92
+   ]
+  },
+  "Internet Content & Information": {
+   "tier": "measured_only",
+   "naics_2017": [
+    "519130"
+   ],
+   "kind": "proxy",
+   "bls_sectors": [
+    99
+   ]
+  },
+  "Internet Retail": {
+   "tier": "measured_only",
+   "naics_2017": [
+    "4541"
+   ],
+   "kind": "unmappable",
+   "bls_sectors": [
+    201
+   ]
+  },
+  "Investment - Banking & Investment Services": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "5231"
+   ],
+   "kind": "proxy",
+   "bls_sectors": [
+    101
+   ]
+  },
+  "Luxury Goods": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "4483"
+   ],
+   "kind": "margin",
+   "bls_sectors": [
+    84
+   ]
+  },
+  "Manufacturing - Textiles": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "313"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    27
+   ]
+  },
+  "Marine Shipping": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "483"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    87
+   ]
+  },
+  "Medical - Care Facilities": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "622"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    140
+   ]
+  },
+  "Medical - Devices": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "3391"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    77
+   ]
+  },
+  "Medical - Distribution": {
+   "tier": "cms_nhe",
+   "naics_2017": [
+    "4242"
+   ],
+   "kind": "margin",
+   "bls_sectors": [
+    80
+   ],
+   "cms_series": "rx_retail"
+  },
+  "Medical - Healthcare Plans": {
+   "tier": "cms_nhe",
+   "naics_2017": [
+    "524114"
+   ],
+   "kind": "imputed",
+   "bls_sectors": [
+    103
+   ],
+   "cms_series": "health_insurance",
+   "exception": {
+    "rule_tier": "measured_only",
+    "owner_decision": "Measured, Health Plans via CMS",
+    "date": "2026-10-22"
+   }
+  },
+  "Medical - Instruments & Supplies": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "3391"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    77
+   ]
+  },
+  "Medical - Pharmaceuticals": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "3254"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    39
+   ]
+  },
+  "Oil & Gas Equipment & Services": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "213"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    11
+   ]
+  },
+  "Oil & Gas Exploration & Production": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "211"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    7
+   ]
+  },
+  "Oil & Gas Refining & Marketing": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "324110"
+   ],
+   "kind": "proxy",
+   "bls_sectors": [
+    37
+   ]
+  },
+  "Packaged Foods": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "311"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    185
+   ]
+  },
+  "Paper, Lumber & Forest Products": {
+   "tier": "gdp_path",
+   "naics_2017": [
+    "321"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    187
+   ]
+  },
+  "Publishing": {
+   "tier": "measured_only",
+   "naics_2017": [
+    "5111"
+   ],
+   "kind": "proxy",
+   "bls_sectors": [
+    99
+   ]
+  },
+  "REIT - Diversified": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "5311"
+   ],
+   "kind": "proxy",
+   "bls_sectors": [
+    105
+   ]
+  },
+  "REIT - Hotel & Motel": {
+   "tier": "measured_only",
+   "naics_2017": [
+    "72111"
+   ],
+   "kind": "proxy",
+   "bls_sectors": [
+    154
+   ]
+  },
+  "REIT - Industrial": {
+   "tier": "gdp_path",
+   "naics_2017": [
+    "531120"
+   ],
+   "kind": "proxy",
+   "bls_sectors": [
+    105
+   ]
+  },
+  "REIT - Office": {
+   "tier": "gdp_path",
+   "naics_2017": [
+    "531120"
+   ],
+   "kind": "proxy",
+   "bls_sectors": [
+    105
+   ]
+  },
+  "REIT - Residential": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "531110"
+   ],
+   "kind": "proxy",
+   "bls_sectors": [
+    105
+   ]
+  },
+  "REIT - Retail": {
+   "tier": "gdp_path",
+   "naics_2017": [
+    "531120"
+   ],
+   "kind": "proxy",
+   "bls_sectors": [
+    105
+   ]
+  },
+  "Regulated Electric": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "2211"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    12
+   ]
+  },
+  "Regulated Gas": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "2212"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    13
+   ]
+  },
+  "Regulated Water": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "2213"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    14
+   ]
+  },
+  "Renewable Utilities": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "22111"
+   ],
+   "kind": "proxy",
+   "bls_sectors": [
+    12
+   ]
+  },
+  "Rental & Leasing Services": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "532"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    209
+   ]
+  },
+  "Restaurants": {
+   "tier": "gdp_path",
+   "naics_2017": [
+    "7225"
+   ],
+   "kind": "proxy",
+   "bls_sectors": [
+    155,
+    156
+   ]
+  },
+  "Semiconductor Equipment & Materials": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "3344"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    61
+   ]
+  },
+  "Semiconductors": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "3344"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    61
+   ]
+  },
+  "Software - Application": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "5112"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    94
+   ]
+  },
+  "Software - Infrastructure": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "5112"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    94
+   ]
+  },
+  "Software - Services": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "5112"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    94
+   ]
+  },
+  "Staffing & Employment Services": {
+   "tier": "gdp_path",
+   "naics_2017": [
+    "5613"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    123
+   ]
+  },
+  "Steel": {
+   "tier": "measured_only",
+   "naics_2017": [
+    "3311"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    44
+   ]
+  },
+  "Technology Distributors": {
+   "tier": "measured_only",
+   "naics_2017": [
+    "42343"
+   ],
+   "kind": "margin",
+   "bls_sectors": [
+    80
+   ]
+  },
+  "Telecommunications Services": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "517"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    97
+   ]
+  },
+  "Tobacco": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "3122"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    26
+   ]
+  },
+  "Travel Lodging": {
+   "tier": "measured_only",
+   "naics_2017": [
+    "72111"
+   ],
+   "kind": "proxy",
+   "bls_sectors": [
+    154
+   ]
+  },
+  "Travel Services": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "5615"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    125
+   ]
+  },
+  "Trucking": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "484"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    88
+   ]
+  },
+  "Waste Management": {
+   "tier": "bls_output",
+   "naics_2017": [
+    "562"
+   ],
+   "kind": "exact",
+   "bls_sectors": [
+    129
+   ]
+  }
+ }
+}

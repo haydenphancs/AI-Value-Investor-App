@@ -576,6 +576,19 @@ struct MarketDynamicsDTO: Codable {
     let cagrEndYear: Int?
     let growthSourceLabel: String?
     let concentrationBasis: String?
+    // Header, scope line and projection (backend 2026-10-22, owner: "data from today year to
+    // the next 5 year"): the server's projected pair, all or none. Same `try?` rule.
+    let marketSizeLabel: String?
+    let scopeNote: String?
+    let projectionBasis: String?
+    let projectionYear: Int?
+    let projectionYearLabel: String?
+    let projectionTam: Double?
+    let projectionTargetYear: Int?
+    let projectionTargetYearLabel: String?
+    let projectionTargetTam: Double?
+    let projectionRatePct: Double?
+    let projectionSourceLabel: String?
 
     enum CodingKeys: String, CodingKey {
         case industry, concentration
@@ -596,6 +609,17 @@ struct MarketDynamicsDTO: Codable {
         case cagrEndYear = "cagr_end_year"
         case growthSourceLabel = "growth_source_label"
         case concentrationBasis = "concentration_basis"
+        case marketSizeLabel = "market_size_label"
+        case scopeNote = "scope_note"
+        case projectionBasis = "projection_basis"
+        case projectionYear = "projection_year"
+        case projectionYearLabel = "projection_year_label"
+        case projectionTam = "projection_tam"
+        case projectionTargetYear = "projection_target_year"
+        case projectionTargetYearLabel = "projection_target_year_label"
+        case projectionTargetTam = "projection_target_tam"
+        case projectionRatePct = "projection_rate_pct"
+        case projectionSourceLabel = "projection_source_label"
     }
 
     init(from decoder: Decoder) throws {
@@ -619,6 +643,17 @@ struct MarketDynamicsDTO: Codable {
         self.cagrEndYear = try? c.decodeIfPresent(Int.self, forKey: .cagrEndYear)
         self.growthSourceLabel = try? c.decodeIfPresent(String.self, forKey: .growthSourceLabel)
         self.concentrationBasis = try? c.decodeIfPresent(String.self, forKey: .concentrationBasis)
+        self.marketSizeLabel = try? c.decodeIfPresent(String.self, forKey: .marketSizeLabel)
+        self.scopeNote = try? c.decodeIfPresent(String.self, forKey: .scopeNote)
+        self.projectionBasis = try? c.decodeIfPresent(String.self, forKey: .projectionBasis)
+        self.projectionYear = try? c.decodeIfPresent(Int.self, forKey: .projectionYear)
+        self.projectionYearLabel = try? c.decodeIfPresent(String.self, forKey: .projectionYearLabel)
+        self.projectionTam = try? c.decodeIfPresent(Double.self, forKey: .projectionTam)
+        self.projectionTargetYear = try? c.decodeIfPresent(Int.self, forKey: .projectionTargetYear)
+        self.projectionTargetYearLabel = try? c.decodeIfPresent(String.self, forKey: .projectionTargetYearLabel)
+        self.projectionTargetTam = try? c.decodeIfPresent(Double.self, forKey: .projectionTargetTam)
+        self.projectionRatePct = try? c.decodeIfPresent(Double.self, forKey: .projectionRatePct)
+        self.projectionSourceLabel = try? c.decodeIfPresent(String.self, forKey: .projectionSourceLabel)
     }
 }
 
@@ -1058,7 +1093,15 @@ extension TickerReportAPIResponse {
                 cagrStartYear: moatCompetition.marketDynamics.cagrStartYear,
                 cagrEndYear: moatCompetition.marketDynamics.cagrEndYear,
                 growthSourceLabel: moatCompetition.marketDynamics.growthSourceLabel,
-                concentrationBasis: moatCompetition.marketDynamics.concentrationBasis
+                concentrationBasis: moatCompetition.marketDynamics.concentrationBasis,
+                marketSizeLabel: moatCompetition.marketDynamics.marketSizeLabel,
+                scopeNote: moatCompetition.marketDynamics.scopeNote,
+                projectionYear: moatCompetition.marketDynamics.projectionYear,
+                projectionTAM: moatCompetition.marketDynamics.projectionTam,
+                projectionTargetYear: moatCompetition.marketDynamics.projectionTargetYear,
+                projectionTargetTAM: moatCompetition.marketDynamics.projectionTargetTam,
+                projectionYearLabel: moatCompetition.marketDynamics.projectionYearLabel,
+                projectionTargetYearLabel: moatCompetition.marketDynamics.projectionTargetYearLabel
             ),
             dimensions: moatCompetition.dimensions.map { d in
                 MoatDimension(name: d.name, score: d.score, peerScore: d.peerScore)

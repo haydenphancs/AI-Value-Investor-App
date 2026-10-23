@@ -148,6 +148,9 @@ _SECTION_DEEP_DROP_KEYS: Dict[str, frozenset] = {
                                    # the growth rate's source label names the same vendors
                                    # (2026-10-22) — dropped for the same reason
                                    "growth_source_label",
+                                   # the projection's source label and basis name the
+                                   # agencies too (2026-10-22); its figures stay
+                                   "projection_source_label", "projection_basis",
                                    "drivers", "confidence"}),
 }
 _NO_DEEP_DROP: frozenset = frozenset()
@@ -598,9 +601,10 @@ def _competitor_lead(report: Dict[str, Any]) -> List[str]:
 # whole, with room to spare for longer segment names, verdicts and filing titles. The per-group caps add up
 # to more than the lead cap on purpose, so only an oversized report squeezes the tail — officers
 # and holders, which the fundamentals cards now precede.
-_REPORT_FIGURES_LEAD_CAP = 3200
+_REPORT_FIGURES_LEAD_CAP = 3540
 _FIG_FAIR_VALUE_CAP = 300
 _FIG_MOAT_CAP = 320
+_FIG_MARKET_CAP = 340        # the market row: projected pair, measured value, growth, scope
 _FIG_SEGMENTS_CAP = 480
 _FIG_FORECAST_CAP = 340
 _FIG_TRACK_CAP = 240
@@ -675,6 +679,17 @@ _COMPANY_TAM_QUOTE_LABEL = "Earnings call quote"
 # `cagr_5yr` is a nominal rate over its stored window (2017-2024 for Census: seven years, not
 # five); dumped under its own name, the model said "5-year CAGR". Renamed in the dump only.
 _GROWTH_RATE_DUMP_KEY = "avg_growth_pct_per_year"
+# The card's projected pair (2026-10-22, owner: "data from today year to the next 5 year"): a
+# measured Census value scaled along a public-domain path. The figures lead states it as ONE
+# labelled line (`_market_row_figures`): on a full report the moat section's dump budget runs out
+# before `market_dynamics`, so a dumped key never reached the model. Lead-owned, so dropped from
+# the dump (the source label and basis name the agencies, which the model must not name anyway).
+_PROJECTION_KEYS = frozenset({
+    "projection_basis", "projection_year", "projection_tam", "projection_target_year",
+    "projection_target_tam", "projection_rate_pct", "projection_source_label",
+    "projection_year_label", "projection_target_year_label",
+})
+_MARKET_ROW_LEAD_KEYS = frozenset({"market_size_label", "scope_note"})
 
 _FigSpec = Tuple[str, List[str], int]   # (head, whole items, cap): one lead line
 
@@ -811,6 +826,54 @@ def _moat_figures(report: Dict[str, Any]) -> List[_FigSpec]:
             text += f" ({tag})"
         items.append(text)
     return [("Moat pillars (score out of 10): ", items, _FIG_MOAT_CAP)]
+
+
+def _fig_year(value: Any) -> Optional[int]:
+    """A plain 1990..2100 year (int, or a 4-digit string), else None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str) and len(value.strip()) == 4 and value.strip().isdigit():
+        value = int(value.strip())
+    return value if isinstance(value, int) and 1990 <= value <= 2100 else None
+
+
+def _fig_billions(value: Any) -> Optional[str]:
+    f = _fig_float(value)
+    return f"${_fig_amount(f)}B" if f is not None and f > 0 else None
+
+
+def _market_row_figures(report: Dict[str, Any]) -> List[_FigSpec]:
+    """The Moat card's market row as the card shows it (2026-10-22): a MEASURED row only (a
+    company quote stays in the dump with its own words) — the projected pair when the report
+    carries a complete one, else the measured value at its year; the measured growth window; the
+    scope line. Names no agency (the source labels are vendors to the model, like the TAM's)."""
+    mc = report.get("moat_competition")
+    md = mc.get("market_dynamics") if isinstance(mc, dict) else None
+    if not isinstance(md, dict) or md.get("tam_basis") != "measured":
+        return []
+    measured = _fig_billions(md.get("current_tam"))
+    year = _fig_year(md.get("tam_year"))
+    if measured is None or year is None:
+        return []
+    label = _clean_label(md.get("market_size_label"), 40) or "industry market size"
+    items: List[str] = []
+    start, target = _fig_year(md.get("projection_year")), _fig_year(md.get("projection_target_year"))
+    s_val, t_val = _fig_billions(md.get("projection_tam")), _fig_billions(md.get("projection_target_tam"))
+    rate = _fig_float(md.get("projection_rate_pct"))
+    if (None not in (start, target, s_val, t_val, rate) and year < start < target):
+        items.append(f"{s_val} ({start}) → {t_val} ({target}), projected at {rate:+.1f}%/yr "
+                     f"(current dollars, from public US government projections)")
+        items.append(f"measured {measured} ({year})")
+    else:
+        items.append(f"{measured} ({year}), measured — no projection for this industry")
+    growth = _fig_float(md.get("cagr_5yr"))
+    g0, g1 = _fig_year(md.get("cagr_start_year")), _fig_year(md.get("cagr_end_year"))
+    if growth is not None and g0 is not None and g1 is not None and g0 < g1:
+        items.append(f"avg growth {growth + 0.0:+.1f}%/yr {g0}–{g1}")
+    scope = _clean_label(md.get("scope_note"), 140)
+    if scope:
+        items.append(f"scope: {scope}")
+    return [(f"Market row on the card ({label}): ", items, _FIG_MARKET_CAP)]
 
 
 def _segment_figures(report: Dict[str, Any]) -> List[_FigSpec]:
@@ -1185,6 +1248,7 @@ def _fundamentals_figures(report: Dict[str, Any]) -> List[_FigSpec]:
 _FIGURE_GROUPS = (
     (_fair_value_figures, _FIG_FAIR_VALUE_CAP),
     (_moat_figures, _FIG_MOAT_CAP),
+    (_market_row_figures, _FIG_MARKET_CAP),
     (_segment_figures, _FIG_SEGMENTS_CAP),
     (_forecast_figures, _FIG_FORECAST_CAP),
     (_track_record_figures, _FIG_TRACK_CAP),
@@ -1274,11 +1338,19 @@ def _without_lead_figures(report: Any) -> Any:
             drop = drop | _QUOTE_UNSTATED_YEAR_KEYS
             if md.get("tam_target_year") is None:
                 drop = drop | _PROJECTED_TAM_KEYS
+        drop = drop | _PROJECTION_KEYS
+        if md.get("tam_basis") == "measured":
+            drop = drop | _MARKET_ROW_LEAD_KEYS
         out["moat_competition"] = {**moat, "market_dynamics": {
-            (_GROWTH_RATE_DUMP_KEY if k == "cagr_5yr" else k): _dump_year(k, v)
+            _dump_key(k): _dump_year(k, v)
             for k, v in md.items() if not (isinstance(k, str) and k.lower() in drop)
         }}
     return out
+
+
+def _dump_key(key: Any) -> Any:
+    """A market_dynamics key under its dump name (`cagr_5yr` held a 7-year window)."""
+    return _GROWTH_RATE_DUMP_KEY if key == "cagr_5yr" else key
 
 
 def _dump_year(key: Any, value: Any) -> Any:

@@ -2391,3 +2391,72 @@ def test_worst_case_market_dynamics_never_nulls_an_old_build_field():
     assert dumped["concentration"] == "unknown"
     for key in _OLD_BUILD_NON_OPTIONAL:
         assert isinstance(dumped[key], str) and dumped[key], key
+
+
+_AD_FULL_LABEL = ("US Census AIES — Aerospace & defense manufacturing (NAICS 3364, 334511, 336992, "
+                  "332992, 332993, 332994)")
+
+
+def test_the_projection_survives_assembly_and_validation(monkeypatch):
+    """The 2026 → 2031 projection (owner decisions 2026-10-22) through the real assembly: all
+    seven keys reach the validated response, the header/scope keys ride along, and every legacy
+    field keeps its MEASURED meaning for builds that read it."""
+    import app.services.industry_tam_projection as proj
+    from app.services.industry_dossier_service import IndustryDossier
+
+    monkeypatch.setattr(proj, "current_year_et", lambda now=None: 2026)
+    proj.reset_projection_table()
+    coll = TickerReportDataCollector()
+    out = _make_collected_data()
+    out.industry_tam = IndustryDossier(
+        current_tam=342.8, future_tam=359.3, current_year="2024", future_year="2029",
+        source_label=_AD_FULL_LABEL, cagr_5y_pct=0.9, cagr_start_year=2017,
+        industry="Aerospace & Defense", sector="Industrials", hhi=866.8, top1_share_pct=15.17,
+        top2_share_pct=30.01, concentration_label="fragmented", constituent_count=86,
+        source_grain="industry", concentration_basis="revenue_share",
+    )
+    report = coll.assemble_report(out, stage_a_fallback())
+    md = TickerReportResponse.model_validate(report).model_dump()["moat_competition"]["market_dynamics"]
+    assert (md["projection_basis"], md["projection_year"], md["projection_target_year"]) == ("bls_output", 2026, 2031)
+    assert (md["projection_tam"], md["projection_target_tam"], md["projection_rate_pct"]) == (400.0, 494.6, 4.3)
+    assert md["projection_source_label"].startswith("Projection: BLS Employment Projections")
+    assert (md["projection_year_label"], md["projection_target_year_label"]) == ("2026e", "2031e")
+    assert md["market_size_label"] == "US industry revenue"
+    assert md["scope_note"].startswith("Revenue of US-located businesses")
+    assert (md["current_tam"], md["future_tam"], md["current_year"], md["future_year"]) == \
+        (342.8, 359.3, "2024", "2029")
+    assert md["cagr_5yr"] == 0.9 and md["tam_year"] == 2024 and md["tam_target_year"] is None
+    for key in _OLD_BUILD_NON_OPTIONAL:
+        assert isinstance(md[key], str) and md[key], key
+
+
+def test_a_stale_or_partial_composite_label_gets_the_header_but_no_projection():
+    """The 2-code label above (and production's stale 3364-only row) is a Census row the table
+    did not backtest: header and scope line, never a projection."""
+    from app.services.industry_dossier_service import IndustryDossier
+
+    coll = TickerReportDataCollector()
+    out = _make_collected_data()
+    out.industry_tam = IndustryDossier(
+        current_tam=247.0, future_tam=245.0, current_year="2024", future_year="2029",
+        source_label="US Census AIES — Aerospace product and parts manufacturing (NAICS 3364)",
+        cagr_5y_pct=-0.2, cagr_start_year=2017, industry="Aerospace & Defense",
+        sector="Industrials", source_grain="industry",
+    )
+    md = TickerReportResponse.model_validate(coll.assemble_report(out, stage_a_fallback())).model_dump(
+    )["moat_competition"]["market_dynamics"]
+    assert md["market_size_label"] == "US industry revenue"
+    assert all(md[k] is None for k in ("projection_basis", "projection_year", "projection_tam",
+                                       "projection_target_year", "projection_target_tam",
+                                       "projection_rate_pct", "projection_source_label",
+                                       "projection_year_label", "projection_target_year_label"))
+
+
+def test_a_stored_payload_without_the_projection_keys_validates():
+    from app.schemas.ticker_report import MarketDynamicsResponse
+
+    stored = {"industry": "Aerospace & Defense", "concentration": "fragmented", "cagr_5yr": 0.9,
+              "current_tam": 342.8, "future_tam": 359.3, "current_year": "2024", "future_year": "2029",
+              "lifecycle_phase": "mature", "tam_basis": "measured", "tam_year": 2024}
+    md = MarketDynamicsResponse.model_validate(stored)
+    assert md.projection_tam is None and md.market_size_label is None and md.scope_note is None

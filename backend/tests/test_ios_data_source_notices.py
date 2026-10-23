@@ -46,3 +46,20 @@ def test_fred_notice_and_terms_link(src):
 
 def test_census_notice(src):
     assert _CENSUS_NOTICE in _item(src, "U.S. Census Bureau")
+
+
+def test_bls_and_cms_credit_the_projection_sources(src):
+    """The Moat row's 2026→2031 figures scale Census revenue along public BLS / CMS paths
+    (2026-10-22): both agencies are listed, BLS with the citation it asks for."""
+    bls = _item(src, "U.S. Bureau of Labor Statistics")
+    assert "Source: U.S. Bureau of Labor Statistics." in bls
+    assert "https://www.bls.gov/emp/" in bls
+    cms = _item(src, "Centers for Medicare & Medicaid Services")
+    assert "National Health Expenditure projections" in cms
+    assert re.search(r"https://www\.cms\.gov/\S+", cms)
+
+
+def test_cms_also_credits_the_gdp_history(src):
+    """The GDP path's 2017–24 history is BEA data as printed in CMS NHE Table 1 (review 2026-10-22)."""
+    cms = _item(src, "Centers for Medicare & Medicaid Services")
+    assert "historical US nominal GDP" in cms and "Bureau of Economic Analysis" in cms

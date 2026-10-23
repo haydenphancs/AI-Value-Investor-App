@@ -490,19 +490,27 @@
       </tbody></table>{% endif %}
     </td>
   </table>
-  {# Measured only (owner decision 2026-10-22): the published value at its own year, growth over
-     its real span, no projected value. A company target appears only when its quote states it. #}
+  {# Owner decisions 2026-10-22: growth over its real span; a measured Census row shows its stored
+     projection (current year → +5, from public BLS / CMS / GDP paths) when it has one, else the
+     measured value at its own year; the PDF carries the source lines the in-app card omits. A
+     company target appears only when its quote states it. #}
   {% if moat.market_dynamics and moat.market_dynamics.market_size %}{% set md = moat.market_dynamics %}
   <table class="strip">
     <tr>
-      <td><div class="k">Market size{% if md.measured_year %} ({{ md.measured_year }}){% endif %}</div><div class="v">{{ tam_money(md.market_size) }}</div></td>
+      {% if md.proj_size and md.proj_target_size %}
+      <td><div class="k">{{ md.market_label }} ({{ md.proj_year }})</div><div class="v">{{ tam_money(md.proj_size) }}</div></td>
+      <td><div class="k">{{ md.market_label }} ({{ md.proj_target_year }})</div><div class="v">{{ tam_money(md.proj_target_size) }}</div></td>
+      {% else %}
+      <td><div class="k">{{ md.market_label }}{% if md.measured_year %} ({{ md.measured_year }}){% endif %}</div><div class="v">{{ tam_money(md.market_size) }}</div></td>
+      {% endif %}
       {% if md.target_year and md.target_size %}<td><div class="k">Company target ({{ md.target_year }})</div><div class="v">{{ tam_money(md.target_size) }}</div></td>{% endif %}
       <td><div class="k">Avg/yr{% if md.growth_window %} {{ md.growth_window }}{% endif %}</div><div class="v">{{ pct(md.growth_pct) }}</div></td>
       <td><div class="k">Structure</div><div class="v" style="font-size:12px;text-transform:capitalize">{{ md.structure }}</div>{% if md.structure_basis %}<div class="caption-note">{{ md.structure_basis }}</div>{% endif %}</td>
       <td><div class="k">Lifecycle</div><div class="v" style="font-size:12px;text-transform:capitalize">{{ md.lifecycle }}</div></td>
     </tr>
   </table>
-  {% if md.show_source %}<div class="src">Source: {% if md.source_quote %}“{{ md.source_quote }}” — {% endif %}{{ md.tam_source_label or "Industry estimate" }}{% if md.scope_label %} ({{ md.scope_label }}){% endif %}{% if md.growth_source %} · Growth: {{ md.growth_source }}{% endif %}</div>{% endif %}
+  {% if md.show_source %}<div class="src">Source: {% if md.proj_size and md.proj_target_size %}Measured {{ tam_money(md.market_size) }}{% if md.measured_year %} ({{ md.measured_year }}){% endif %} — {% endif %}{% if md.source_quote %}“{{ md.source_quote }}” — {% endif %}{{ md.tam_source_label or "Industry estimate" }}{% if md.scope_label %} ({{ md.scope_label }}){% endif %}{% if md.proj_size and md.proj_target_size and md.proj_caption %} · {{ md.proj_caption }}{% endif %}{% if md.growth_source %} · Growth: {{ md.growth_source }}{% endif %}</div>{% endif %}
+  {% if md.scope_note %}<div class="src">{{ md.scope_note }}</div>{% endif %}
   {% endif %}
   {% if moat.competitors %}
   <div class="sub-h" style="margin-top:8px">Competitive Landscape</div>

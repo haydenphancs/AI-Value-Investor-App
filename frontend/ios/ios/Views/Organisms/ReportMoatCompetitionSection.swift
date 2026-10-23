@@ -54,9 +54,10 @@ struct ReportMoatCompetitionSection: View {
                 .multilineTextAlignment(.center)
 
             // 3-column metrics — `.top` alignment so the value rows of all
-            // three columns share a baseline. Measured only (owner decision
-            // 2026-10-22): the market size at ITS year, the average yearly growth
-            // over its real window, no projected value — so no calendar is read.
+            // three columns share a baseline. Owner decisions 2026-10-22: the
+            // measured growth over its real window; the server's projection (this
+            // year → +5) or the measured value at its own year; no source line on
+            // the card (the PDF carries them) — and no calendar is read here.
             HStack(alignment: .top, spacing: AppSpacing.sm) {
                 growthColumn
                     .frame(maxWidth: 70)
@@ -73,7 +74,7 @@ struct ReportMoatCompetitionSection: View {
             }
             .padding(.top, AppSpacing.sm)
 
-            sourceCaption
+            scopeCaption
         }
     }
 
@@ -100,18 +101,20 @@ struct ReportMoatCompetitionSection: View {
             .overlay(AppColors.divider)
     }
 
-    // Column 2: market size. A measured figure shows one value at its own
-    // year; only a company's earnings-call quote with a STATED target shows
-    // the arrow pair.
+    // Column 2: market size. The arrow pair is ONLY the server's projection
+    // (this year → +5) or a company quote's STATED target; otherwise one value
+    // at its own year.
     private var marketSizeColumn: some View {
         VStack(alignment: .center, spacing: AppSpacing.xxs) {
-            // Scope-prefixed header: "US - Market Size (TAM)" so the market
-            // size is never ambiguous; unprefixed for a company quote.
+            // "US industry revenue" (the server's words), else the scope-prefixed
+            // legacy header; plain "Market Size (TAM)" for a company quote. One
+            // line, scaled to fit: a wrapped header would push this column's value
+            // below the other two columns' values.
             Text(data.marketDynamics.tamHeaderLabel)
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
                 .lineLimit(1)
-                .minimumScaleFactor(0.8)
+                .minimumScaleFactor(0.75)
 
             if data.marketDynamics.tamIsAvailable {
                 marketSizeValues
@@ -121,25 +124,31 @@ struct ReportMoatCompetitionSection: View {
                     .foregroundColor(AppColors.textMuted)
             }
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(data.marketDynamics.marketSizeAccessibilityLabel)
     }
 
     @ViewBuilder
     private var marketSizeValues: some View {
         let md = data.marketDynamics
-        if let target = md.formattedTargetTAM, let targetYear = md.targetYearLabel {
+        if let pair = md.marketSizePair {
             HStack(spacing: AppSpacing.xxs) {
-                metricValueText(md.formattedCurrentTAM)
+                metricValueText(pair.fromValue)
                 Text("→")
                     .font(AppTypography.labelSmall).fontWeight(.bold)
                     .foregroundColor(AppColors.textSecondary)
-                metricValueText(target)
+                metricValueText(pair.toValue)
             }
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
             HStack(spacing: AppSpacing.xxs) {
-                yearText(md.measuredYearLabel ?? "")
+                yearText(pair.fromYear)
                 Spacer()
                     .frame(width: 14)
-                yearText(targetYear)
+                yearText(pair.toYear)
             }
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
         } else {
             metricValueText(md.formattedCurrentTAM)
             if let year = md.measuredYearLabel {
@@ -174,11 +183,12 @@ struct ReportMoatCompetitionSection: View {
         )
     }
 
-    // Where the market size comes from. Wraps (2-3 lines): cutting it would
-    // hide the NAICS codes a composite figure is summed from.
+    // What the figure covers — US-located businesses' revenue, or a company's
+    // own figure. A definition, not a source: the card shows no source line
+    // (owner, 2026-10-22). Wraps rather than truncating.
     @ViewBuilder
-    private var sourceCaption: some View {
-        if let caption = data.marketDynamics.sourceCaption {
+    private var scopeCaption: some View {
+        if let caption = data.marketDynamics.scopeCaption {
             Text(caption)
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
@@ -432,19 +442,48 @@ struct ReportMoatCompetitionSection: View {
     .background(AppColors.cardBackground)
 }
 
-#Preview("Measured industry figure") {
+private func moatPreviewData(_ marketDynamics: MarketDynamics) -> ReportMoatCompetitionData {
     let oracle = TickerReportData.sampleOracle.moatCompetition
+    return ReportMoatCompetitionData(
+        marketDynamics: marketDynamics,
+        dimensions: oracle.dimensions,
+        durabilityNote: oracle.durabilityNote,
+        competitors: oracle.competitors,
+        competitiveInsight: oracle.competitiveInsight
+    )
+}
+
+#Preview("Projected (A&D)") {
     ScrollView {
-        ReportMoatCompetitionSection(
-            data: ReportMoatCompetitionData(
-                marketDynamics: MarketDynamics.sampleMeasured,
-                dimensions: oracle.dimensions,
-                durabilityNote: oracle.durabilityNote,
-                competitors: oracle.competitors,
-                competitiveInsight: oracle.competitiveInsight
-            )
-        )
-        .padding()
+        ReportMoatCompetitionSection(data: moatPreviewData(.sampleProjected))
+            .padding()
+    }
+    .background(AppColors.cardBackground)
+}
+
+#Preview("Measured industry figure") {
+    ScrollView {
+        ReportMoatCompetitionSection(data: moatPreviewData(.sampleMeasured))
+            .padding()
+    }
+    .background(AppColors.cardBackground)
+}
+
+#Preview("Measured only (Banks)") {
+    ScrollView {
+        ReportMoatCompetitionSection(data: moatPreviewData(.sampleBanksMeasuredOnly))
+            .padding()
+    }
+    .background(AppColors.cardBackground)
+}
+
+// The card's real width on a 375pt phone (two 16pt paddings each side). Larger type sizes:
+// check in the Simulator (content size) — AppTypography reads the process category, so a
+// preview's dynamicTypeSize environment does not resize it.
+#Preview("Projected, 375pt phone (311pt card)") {
+    ScrollView {
+        ReportMoatCompetitionSection(data: moatPreviewData(.sampleProjected))
+            .frame(width: 311)
     }
     .background(AppColors.cardBackground)
 }

@@ -10,6 +10,9 @@ on read. Older rows still carry `tam_scope = "us"` with `current_tam = 0`, and
 rendered "US - Market Size (TAM)" over "—", a scope claim about a figure that does not
 exist. The header must also require `tamIsAvailable`, the same predicate that chooses
 between the TAM values and "—" in `ReportMoatCompetitionSection`.
+
+2026-10-22: a measured row's header is the server's `market_size_label` ("US industry
+revenue"); the same guard comes first, and a company quote keeps the plain header.
 """
 
 from __future__ import annotations
@@ -62,13 +65,21 @@ def _market_dynamics() -> str:
 def test_the_scope_prefix_requires_a_shown_tam():
     header = _decl_body(_market_dynamics(), "var tamHeaderLabel: String")
 
-    assert re.search(r"guard\s+tamIsAvailable\s*,\s*let\s+\w+\s*=\s*scopeLabel\s+else", header), (
-        "tamHeaderLabel must guard on tamIsAvailable before prefixing the scope — persisted "
-        "reports carry tam_scope='us' with a zero TAM and would show 'US' over '—'"
+    guard = re.search(r'guard\s+tamIsAvailable\s+else\s*\{\s*return\s+"Market Size \(TAM\)"\s*\}', header)
+    assert guard, (
+        "tamHeaderLabel must open with `guard tamIsAvailable else { return \"Market Size (TAM)\" }` "
+        "— persisted reports carry tam_scope='us' with a zero TAM and would show 'US' over '—'"
     )
-    assert re.search(r'else\s*\{\s*return\s+"Market Size \(TAM\)"\s*\}', header), (
-        "the unavailable / unknown-scope branch must return the unprefixed header"
-    )
+    # Nothing that names a scope or a label may be read before that guard (2026-10-22: the
+    # server's "US industry revenue" label rides in front of the legacy scope prefix).
+    for token in ("marketSizeLabel", "scopeLabel"):
+        assert token in header, f"tamHeaderLabel no longer reads {token}: re-check this guard"
+        assert header.index(token) > guard.end(), f"{token} is read before the tamIsAvailable guard"
+    assert re.search(r'guard\s+let\s+\w+\s*=\s*scopeLabel\s+else\s*\{\s*return\s+"Market Size \(TAM\)"\s*\}',
+                     header), "an unknown scope must still return the unprefixed header"
+    # The server's label is a measured row's header only — never over a company's own figure.
+    assert re.search(r"if\s+basis\s*==\s*\.measured\s*,\s*let\s+\w+\s*=\s*Self\.trimmed\(marketSizeLabel\)",
+                     header)
 
 
 def test_availability_is_the_predicate_the_view_uses():

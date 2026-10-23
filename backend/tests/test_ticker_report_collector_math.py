@@ -4304,3 +4304,126 @@ def test_the_dossier_concentration_applies_whatever_won_the_tam_pair():
         md["concentration"], md["concentration_basis"] = "oligopoly", "peer_revenue_share"
         _apply_tam_source(md, ai_md, _ad_dossier())
         assert md["concentration"] == "fragmented" and md["concentration_basis"] == "revenue_share", ai_md
+
+
+# ── Projection, header and scope line (owner decisions 2026-10-22) ─────────────────
+#
+# "i need data from today year to the next 5 year": a measured Census row also carries the
+# server's projection (`industry_tam_projection`) in NEW keys only. Every legacy field keeps
+# its measured meaning (builds <= 1.1 and the 10-22 build read them).
+
+_PROJ_KEYS = {"projection_basis", "projection_year", "projection_tam", "projection_target_year",
+              "projection_target_tam", "projection_rate_pct", "projection_source_label",
+              "projection_year_label", "projection_target_year_label"}
+_US_SCOPE = "Revenue of US-located businesses, incl. exports; excludes imports and foreign operations."
+
+
+def _measured(dossier, start_year=2026, md=None):
+    md = md if md is not None else _md_with_zero_tam()
+    md["cagr_5yr"] = None
+    _apply_tam_source(md, {"tam_source_quote": ""}, dossier, start_year=start_year)
+    return md
+
+
+def test_apply_tam_adds_the_projection_header_and_scope():
+    md = _measured(_ad_dossier())
+    assert (md["projection_basis"], md["projection_year"], md["projection_target_year"]) == ("bls_output", 2026, 2031)
+    assert (md["projection_tam"], md["projection_target_tam"], md["projection_rate_pct"]) == (400.0, 494.6, 4.3)
+    assert (md["projection_year_label"], md["projection_target_year_label"]) == ("2026e", "2031e")
+    assert md["market_size_label"] == "US industry revenue" and md["scope_note"] == _US_SCOPE
+
+
+def test_the_projection_changes_no_legacy_key(monkeypatch):
+    import app.services.industry_tam_projection as proj
+
+    with_proj = _measured(_ad_dossier())
+    monkeypatch.setattr(proj, "project_industry_tam", lambda **kw: None)
+    without = _measured(_ad_dossier())
+    assert set(with_proj) - set(without) == _PROJ_KEYS
+    assert {k: v for k, v in with_proj.items() if k not in _PROJ_KEYS} == without
+    assert without["lifecycle_phase"] == with_proj["lifecycle_phase"]
+
+
+def test_the_default_start_year_is_the_eastern_year(monkeypatch):
+    import app.services.industry_tam_projection as proj
+
+    monkeypatch.setattr(proj, "current_year_et", lambda now=None: 2027)
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = None
+    _apply_tam_source(md, {"tam_source_quote": ""}, _ad_dossier())
+    assert (md["projection_year"], md["projection_tam"]) == (2027, 417.3)
+
+
+def test_a_company_quote_gets_its_scope_line_and_no_projection():
+    md = _md_with_zero_tam()
+    ai = {"tam_source_quote": "We see a $50 billion market in 2025 growing to $120 billion by 2030.",
+          "current_tam": 50e9, "future_tam": 120e9, "current_year": "2025", "future_year": "2030"}
+    _apply_tam_source(md, ai, _ad_dossier(), start_year=2026)
+    assert md["tam_basis"] == "company_quote"
+    assert md["scope_note"] == "Company's own figure — scope as stated."
+    assert "market_size_label" not in md and not (_PROJ_KEYS & set(md))
+
+
+def test_a_measured_only_industry_gets_header_and_scope_but_no_projection():
+    banks = _ad_dossier(industry="Banks - Diversified", current_tam=867.0, future_tam=1354.0,
+                        source_label="US Census AIES — Commercial banking (NAICS 522110)", cagr_5y_pct=9.3)
+    md = _measured(banks)
+    assert md["market_size_label"] == "US industry revenue" and md["scope_note"] == _US_SCOPE
+    assert not (_PROJ_KEYS & set(md))
+
+
+def test_a_bea_row_is_value_added_with_no_scope_line_and_no_projection():
+    rail = _ad_dossier(industry="Railroads", current_tam=50.6, future_tam=53.7, current_year="2025",
+                       future_year="2030", source_label="BEA Rail Transportation GDP (via FRED)",
+                       cagr_5y_pct=1.2, cagr_start_year=2018)
+    md = _measured(rail)
+    assert md["market_size_label"] == "US industry value added"
+    assert "scope_note" not in md and not (_PROJ_KEYS & set(md))
+    backup = _ad_dossier(industry="Restaurants", current_tam=708.9, current_year="2025",
+                         source_label="BEA Food Services GDP (via FRED)", cagr_5y_pct=6.3)
+    md = _measured(backup)
+    assert md["market_size_label"] == "US industry value added" and not (_PROJ_KEYS & set(md))
+
+
+def test_the_stale_single_code_ad_row_is_never_projected():
+    stale = _ad_dossier(current_tam=247.0, future_tam=245.0, cagr_5y_pct=-0.2,
+                        source_label="US Census AIES — Aerospace product and parts manufacturing (NAICS 3364)")
+    md = _measured(stale)
+    assert md["market_size_label"] == "US industry revenue" and not (_PROJ_KEYS & set(md))
+
+
+def test_a_broad_dossier_gets_nothing_new():
+    md = _measured(_ad_dossier(source_grain="sector"))
+    assert not ({"market_size_label", "scope_note"} | _PROJ_KEYS) & set(md)
+
+
+def test_a_projection_bug_never_costs_the_report(monkeypatch, caplog):
+    import logging
+    import app.services.industry_tam_projection as proj
+
+    def boom(**kw):
+        raise RuntimeError("table exploded")
+    monkeypatch.setattr(proj, "project_industry_tam", boom)
+    caplog.set_level(logging.ERROR)
+    md = _measured(_ad_dossier())
+    assert md["tam_basis"] == "measured" and md["current_tam"] == 342.8
+    assert not (_PROJ_KEYS & set(md))
+    assert any("step=tam_projection" in r.getMessage() for r in caplog.records)
+
+
+def test_any_failure_in_the_projection_step_leaves_the_row_untouched(monkeypatch, caplog):
+    """Review finding 2026-10-22: the imports and the label check sat outside the guard."""
+    import logging
+    import app.services.industry_tam_service as its
+
+    def boom(label):
+        raise ImportError("module renamed")
+    monkeypatch.setattr(its, "census_label_codes", boom)
+    caplog.set_level(logging.ERROR)
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = None
+    _apply_tam_source(md, {"tam_source_quote": ""}, _ad_dossier(), start_year=2026, ticker="RKLB")
+    assert md["tam_basis"] == "measured" and md["current_tam"] == 342.8
+    assert not ({"market_size_label", "scope_note"} | _PROJ_KEYS) & set(md)
+    assert any("ticker=RKLB" in r.getMessage() and "step=tam_projection" in r.getMessage()
+               for r in caplog.records)

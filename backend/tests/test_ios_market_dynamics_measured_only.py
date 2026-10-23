@@ -1,5 +1,11 @@
-"""The iOS Moat card's market row is MEASURED, never projected (owner decision 2026-10-22,
-"Measured only").
+"""The iOS Moat card's market row never compounds on the device (owner decisions 2026-10-22).
+
+"Measured only" removed the on-device projection; the owner then asked for "data from today
+year to the next 5 year": the SERVER now sends a projection from public BLS / CMS / GDP paths
+(`projection_*`), and the card only formats it. These scans pin both halves: no calendar or
+arithmetic in the model, and an arrow pair only from a company quote's stated target or the
+server's projection. The card shows no source line (owner: "no need to add source lines at
+all"); the scope line it does show is a definition.
 
 Builds up to 1.1 re-anchored the source year to the device year by compounding a backward
 Census rate — RKLB's 2024 $247.0B (−0.2%/yr 2017→2024) became "$246B (2026) → $244B (2031)"
@@ -24,7 +30,12 @@ _RESPONSE = _REPO / "frontend/ios/ios/Models/TickerReportResponse.swift"
 _SECTION = _REPO / "frontend/ios/ios/Views/Organisms/ReportMoatCompetitionSection.swift"
 
 _NEW_KEYS = ("tam_basis", "tam_year", "tam_target_year", "cagr_start_year", "cagr_end_year",
-             "growth_source_label", "concentration_basis")
+             "growth_source_label", "concentration_basis",
+             "market_size_label", "scope_note", "projection_basis", "projection_year",
+             "projection_tam", "projection_target_year", "projection_target_tam",
+             "projection_rate_pct", "projection_source_label",
+             "projection_year_label", "projection_target_year_label")
+_STRING_LITERAL = re.compile(r'"(?:[^"\\]|\\.)*"')
 
 
 def _src(path: Path) -> str:
@@ -111,23 +122,46 @@ def test_the_growth_column_is_avg_per_year_with_its_window_in_a_neutral_token():
     assert ".lineLimit(1)" in subtitle and ".minimumScaleFactor(" in subtitle
 
 
-def test_a_measured_row_never_draws_a_future_value():
+def test_a_pair_is_only_a_company_target_or_a_backend_projection():
     values = _decl_body(_section(), "private var marketSizeValues: some View {")
-    branch = values[values.index("if let target = md.formattedTargetTAM, let targetYear = md.targetYearLabel {"):]
-    measured = branch[branch.index("} else {"):]
-    assert "→" not in measured and "formattedTargetTAM" not in measured and "target" not in measured
-    assert values.count("→") == 1
-    # The target value and label exist only for a company quote with a stated year.
+    assert values.count("→") == 1, "one shared arrow view for every pair"
+    branch = values[values.index("if let pair = md.marketSizePair {"):]
+    single = branch[branch.index("} else {"):]
+    for token in ("→", "pair", "target", "projection", "Target", "Projection"):
+        assert token not in single, f"the single-value branch draws {token!r}"
+
+    pair = _decl_body(_market_dynamics(), "var marketSizePair: MarketSizePair? {")
+    quote_arm = pair[pair.index("case .companyQuote:"):pair.index("case .measured:")]
+    assert "formattedTargetTAM" in quote_arm and "targetYearLabel" in quote_arm
+    measured_arm = pair[pair.index("case .measured:"):pair.index("case .unknown:")]
+    assert re.fullmatch(r"case \.measured:\s*return projectionPair\s*", measured_arm), measured_arm
+    assert re.search(r"case \.unknown:\s*return nil", pair)
+
+    projection = _decl_body(_market_dynamics(), "private var projectionPair: MarketSizePair? {")
+    assert 'tamBasis == "measured"' in projection
+    assert re.search(r"measured\s*<\s*start\s*,\s*start\s*<\s*target", projection)
+    assert "isFinite" in projection and "> 0" in projection
+    code = _STRING_LITERAL.sub('""', projection)
+    for banned in ("*", "/", "pow(", "cagr5Yr", "currentTAM", "futureTAM", "+ ", " - "):
+        assert banned not in code, f"projectionPair must only format the server's values ({banned!r})"
+    # A company quote's target is still gated on its basis.
     target = _decl_body(_market_dynamics(), "private var targetYear: Int? {")
     assert "basis == .companyQuote" in target
 
 
-def test_the_source_caption_is_rendered_and_wraps():
-    caption = _decl_body(_section(), "private var sourceCaption: some View {")
-    assert "data.marketDynamics.sourceCaption" in caption
+def test_the_card_draws_no_source_line_and_the_scope_line_wraps():
+    section = _section()
+    for banned in ("tamSourceLabel", "sourceCaption", "growthSourceLabel", "projectionSourceLabel",
+                   '"Source', "Source:"):
+        assert banned not in section, f"the card must show no source line ({banned!r}; owner 2026-10-22)"
+    assert "var sourceCaption" not in _market_dynamics()
+    caption = _decl_body(section, "private var scopeCaption: some View {")
+    assert "data.marketDynamics.scopeCaption" in caption
     assert ".fixedSize(horizontal: false, vertical: true)" in caption
     assert ".lineLimit(1)" not in caption
-    assert "sourceCaption" in _decl_body(_section(), "private var marketDynamicsSection: some View {")
+    assert "scopeCaption" in _decl_body(section, "private var marketDynamicsSection: some View {")
+    scope = _decl_body(_market_dynamics(), "var scopeCaption: String? {")
+    assert re.search(r"guard\s+tamIsAvailable\s*,\s*basis\s*!=\s*\.unknown\s+else", scope)
 
 
 def test_unknown_concentration_renders_a_dash():
@@ -147,8 +181,56 @@ def test_market_dynamics_dividers_use_overlay():
 
 def test_a_legacy_global_row_shows_no_caption_and_no_year():
     """A report stored before `tam_basis` with tam_scope 'global' is a retired grounded
-    (Phase B) figure: its label names the grounded publishers, so no caption and no year."""
+    (Phase B) figure: its label names the grounded publishers, so no scope line, no pair and
+    no year."""
     basis = _decl_body(_market_dynamics(), "private var basis: Basis {")
     assert re.search(r'tamScope\?\.lowercased\(\)\s*==\s*"global"\s*\{\s*return\s+\.unknown', basis)
-    caption = _decl_body(_market_dynamics(), "var sourceCaption: String? {")
-    assert re.search(r"case\s+\.unknown:\s*return\s+nil", caption)
+    measured = _decl_body(_market_dynamics(), "private var measuredYear: Int? {")
+    assert re.search(r"case\s+\.unknown:\s*return\s+nil", measured)
+
+
+def test_the_pair_draws_exactly_the_pairs_values():
+    """Review finding 2026-10-22: wrong-number edits (the 2024 measured value in the 2026 slot, a
+    swapped mapping argument) stayed green. Pin what the pair branch draws and where each value
+    of the pair comes from."""
+    values = _decl_body(_section(), "private var marketSizeValues: some View {")
+    branch = values[values.index("if let pair = md.marketSizePair {"):]
+    pair_branch = branch[:branch.index("} else {")]
+    for draw in ("metricValueText(pair.fromValue)", "metricValueText(pair.toValue)",
+                 "yearText(pair.fromYear)", "yearText(pair.toYear)"):
+        assert draw in pair_branch, draw
+    assert "md." not in pair_branch.split("{", 1)[1], "the pair branch draws only the pair"
+
+    projection = _decl_body(_market_dynamics(), "private var projectionPair: MarketSizePair? {")
+    for bound in ("let start = Self.validYear(projectionYear)",
+                  "let target = Self.validYear(projectionTargetYear)",
+                  "let fromValue = projectionTAM", "let toValue = projectionTargetTAM",
+                  "fromValue: Self.formatTAM(fromValue)", "toValue: Self.formatTAM(toValue)",
+                  'fromYear: "(\\(Self.yearLabel(projectionYearLabel, start)))"',
+                  'toYear: "(\\(Self.yearLabel(projectionTargetYearLabel, target)))"',
+                  "isProjection: true"):
+        assert bound in projection, bound
+    # The server's "2026e" is drawn only for its own year (else the plain year).
+    year_label = _decl_body(_market_dynamics(), "private static func yearLabel(_ label: String?, _ year: Int) -> String {")
+    assert "text.hasPrefix(String(year))" in year_label and "return String(year)" in year_label
+    # VoiceOver says a projected pair is projected.
+    a11y = _decl_body(_market_dynamics(), "var marketSizeAccessibilityLabel: String {")
+    assert 'pair.isProjection ? ", projected"' in a11y
+
+
+def test_the_dto_forwards_every_rendered_projection_field():
+    mapping = _decl_body(_strip_comments(_src(_RESPONSE)), "func toTickerReportData()")
+    for model, dto in (("marketSizeLabel", "marketSizeLabel"), ("scopeNote", "scopeNote"),
+                       ("projectionYear", "projectionYear"), ("projectionTAM", "projectionTam"),
+                       ("projectionTargetYear", "projectionTargetYear"),
+                       ("projectionTargetTAM", "projectionTargetTam"),
+                       ("projectionYearLabel", "projectionYearLabel"),
+                       ("projectionTargetYearLabel", "projectionTargetYearLabel")):
+        assert re.search(rf"\b{model}:\s*moatCompetition\.marketDynamics\.{dto}\b", mapping), model
+
+
+def test_the_market_size_header_stays_on_one_line():
+    """A wrapped header pushed this column's value below the other two (review 2026-10-22)."""
+    column = _decl_body(_section(), "private var marketSizeColumn: some View {")
+    header = column[column.index("Text(data.marketDynamics.tamHeaderLabel)"):column.index("if data.marketDynamics.tamIsAvailable")]
+    assert ".lineLimit(1)" in header and ".minimumScaleFactor(" in header

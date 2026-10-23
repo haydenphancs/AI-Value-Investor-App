@@ -603,3 +603,83 @@ def test_pdf_names_a_peer_set_concentration_as_peers():
     md = _measured_market_dynamics({"concentration": "oligopoly", "concentration_basis": "peer_revenue_share",
                                     "current_tam": 0.0})
     assert md["structure_basis"] == "By peer revenue"
+
+
+# ── Projection (owner decisions 2026-10-22): the PDF carries the source lines ──────
+#
+# The in-app card shows the server's 2026 → 2031 pair with NO source line ("no need to add
+# source lines at all. but we can have source lines at the PDF export"): the PDF strip shows
+# the same pair and says where both the measured value and the projection come from.
+
+_SCOPE = "Revenue of US-located businesses, incl. exports; excludes imports and foreign operations."
+_AD_PROJECTED = dict(
+    _AD_MEASURED, market_size_label="US industry revenue", scope_note=_SCOPE,
+    projection_basis="bls_output", projection_year=2026, projection_tam=400.0,
+    projection_target_year=2031, projection_target_tam=494.6, projection_rate_pct=4.3,
+    projection_source_label="Projection: BLS Employment Projections 2025–35, industry output, +4.3%/yr",
+    projection_year_label="2026e", projection_target_year_label="2031e",
+)
+
+
+def test_pdf_market_strip_shows_the_projection_with_its_sources():
+    section = _moat_html(dict(_AD_PROJECTED))
+    assert "US industry revenue (2026e)" in section and "$400B" in section
+    assert "US industry revenue (2031e)" in section and "$495B" in section
+    assert "Source: Measured $343B (2024) — US Census AIES — Aerospace &amp; defense manufacturing" in section
+    assert "Projection: BLS Employment Projections 2025–35, industry output, +4.3%/yr" in section
+    assert _SCOPE in section
+    assert "Avg/yr 2017–24" in section and "+0.9%" in section       # measured growth stays
+    for gone in ("CAGR", "5Y", "$359B", "2029", "(US)", "Market size ("):
+        assert gone not in section, gone
+
+
+def test_a_measured_only_row_with_the_new_label_reads_its_own_year():
+    md = dict(_AD_MEASURED, market_size_label="US industry revenue", scope_note=_SCOPE)
+    section = _moat_html(md)
+    assert "US industry revenue (2024)" in section and "$343B" in section
+    assert _SCOPE in section and "(US)" not in section
+    for gone in ("2026", "2031", "Projection", "projected"):
+        assert gone not in section, gone
+
+
+@pytest.mark.parametrize("over", [
+    {"projection_tam": float("nan")}, {"projection_target_tam": 0}, {"projection_tam": True},
+    {"projection_tam": "400"}, {"projection_target_year": 2026}, {"projection_year": 2024},
+    {"projection_year": None}, {"projection_target_tam": None}, {"projection_year": "20x6"},
+    {"tam_basis": None}, {"tam_basis": "company_quote"},
+])
+def test_a_malformed_projection_falls_back_to_the_measured_strip(over):
+    md = dict(_AD_PROJECTED, **over)
+    out = _measured_market_dynamics(md)
+    assert out["proj_size"] is None and out["proj_target_size"] is None
+    section = _moat_html(md)
+    assert "$nan" not in section.lower() and ">nan<" not in section.lower()
+    assert "(2031)" not in section and "Projection:" not in section
+
+
+def test_a_company_quote_ignores_stray_projection_keys_and_shows_its_scope_line():
+    md = dict(_COMPANY_QUOTE, scope_note="Company's own figure — scope as stated.",
+              projection_year=2026, projection_tam=999.0, projection_target_year=2031,
+              projection_target_tam=1999.0)
+    section = _moat_html(md)
+    assert "Company target (2030)" in section
+    assert ("Company&#39;s own figure — scope as stated." in section
+            or "Company's own figure — scope as stated." in section)
+    assert "$999" not in section and "(2031)" not in section
+
+
+@pytest.mark.parametrize("labels, want", [
+    ({}, ("(2026)", "(2031)")),                                                  # stored before the labels
+    ({"projection_year_label": "2026e", "projection_target_year_label": "2031e"}, ("(2026e)", "(2031e)")),
+    ({"projection_year_label": "2030e", "projection_target_year_label": "2031e"}, ("(2026)", "(2031e)")),
+    ({"projection_year_label": 2026, "projection_target_year_label": "2031e"}, ("(2026)", "(2031e)")),
+    ({"projection_year_label": "2026e", "projection_target_year_label": "2031 projected value"},
+     ("(2026e)", "(2031)")),                                                      # too long
+])
+def test_a_projected_year_label_is_used_only_for_its_own_year(labels, want):
+    md = {k: v for k, v in _AD_PROJECTED.items()
+          if k not in ("projection_year_label", "projection_target_year_label")}
+    md.update(labels)
+    section = _moat_html(md)
+    for year in want:
+        assert f"US industry revenue {year}" in section, year

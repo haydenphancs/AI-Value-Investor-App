@@ -3263,6 +3263,7 @@ class TickerReportDataCollector:
             deterministic_market_dynamics,
             ai_moat.get("market_dynamics"),
             out.industry_tam,
+            ticker=getattr(out, "ticker", None),
         )
         # Build the sector-medians map keyed by NORMALIZED sector so
         # `_build_competitors` can score each peer (and the focal)
@@ -7845,13 +7846,37 @@ def _normalize_ai_tam_billions(v: Any) -> Optional[float]:
     return round(billions, 1)
 
 
+# The market row's own words (owner decisions 2026-10-22). The figure is US PRODUCTION —
+# revenue of US-located businesses, exports in, imports and foreign operations out — never
+# "the US market"; a company's earnings-call TAM is its own figure at its own (usually worldwide)
+# scope. Backend-authored so the wording changes without an app release; iOS shows them as-is.
+_US_REVENUE_LABEL = "US industry revenue"
+_US_VALUE_ADDED_LABEL = "US industry value added"
+_US_REVENUE_SCOPE_NOTE = (
+    "Revenue of US-located businesses, incl. exports; excludes imports and foreign operations."
+)
+_COMPANY_TAM_SCOPE_NOTE = "Company's own figure — scope as stated."
+
+
 def _apply_tam_source(
     market_dynamics: Dict[str, Any],
     ai_md: Optional[Dict[str, Any]],
     industry_tam: Optional[Any],
+    *,
+    start_year: Optional[int] = None,
+    ticker: Optional[str] = None,
 ) -> None:
     """Apply the TAM pair + industry growth attributes, mutating
     `market_dynamics` in place.
+
+    PROJECTION (2026-10-22, owner: "data from today year to the next 5 year"): a MEASURED Census
+    row also gets `projection_*` — its value scaled to `start_year` (default: the current
+    US/Eastern year) and +5 along the pinned public-domain path of `industry_tam_projection`
+    (BLS / CMS / US GDP, or none for a measured-only industry). The projection lives ONLY in those
+    new keys: every legacy field keeps its measured meaning for builds that read it, and nothing
+    downstream (lifecycle, moat, the LLM digest) reads the projection. `market_size_label` /
+    `scope_note` carry the row's header and scope line ("US industry revenue" for a Census row,
+    "US industry value added" for a BEA row, the company's own figure for a quote).
 
     TWO independent decisions (the split is the bug fix):
 
@@ -7925,6 +7950,7 @@ def _apply_tam_source(
                     fy_text = str(fy).strip()
                     if fy_text.isdigit() and len(fy_text) == 4 and 1990 <= int(fy_text) <= 2100:
                         market_dynamics["future_year"] = fy_text
+                market_dynamics["scope_note"] = _COMPANY_TAM_SCOPE_NOTE
                 ai_tam_applied = True
 
     # Is the dossier's figure about THIS industry, with a real TAM? A plain
@@ -7958,6 +7984,8 @@ def _apply_tam_source(
             grain = getattr(industry_tam, "source_grain", None)
             if grain:
                 market_dynamics["source_grain"] = grain
+
+            _apply_tam_projection(market_dynamics, industry_tam, start_year, ticker)
 
     # Industry-wide concentration (revenue shares of ALL the industry's listed
     # constituents, computed quarterly) is more authoritative than the focal
@@ -8017,6 +8045,46 @@ def _apply_tam_source(
                     promoted = _classify_lifecycle(cagr)
                     if promoted != "mature":
                         market_dynamics["lifecycle_phase"] = promoted
+
+
+def _apply_tam_projection(
+    market_dynamics: Dict[str, Any],
+    industry_tam: Any,
+    start_year: Optional[int],
+    ticker: Optional[str] = None,
+) -> None:
+    """Header, scope line and projected pair for a MEASURED industry row (the measured branch of
+    `_apply_tam_source` calls it after copying the figure). Adds keys only, all inside one guard:
+    any failure — an import, a bad table, a bug — leaves the measured row exactly as it was and
+    logs `[report-industry-tam] step=tam_projection` with the ticker."""
+    industry = getattr(industry_tam, "industry", None) or market_dynamics.get("industry")
+    added: Dict[str, Any] = {}
+    try:
+        from app.services.industry_tam_projection import current_year_et, project_industry_tam
+        from app.services.industry_tam_service import census_label_codes
+
+        label = getattr(industry_tam, "source_label", None)
+        if census_label_codes(label) is not None:
+            added["market_size_label"] = _US_REVENUE_LABEL
+            added["scope_note"] = _US_REVENUE_SCOPE_NOTE
+            projection = project_industry_tam(
+                industry=industry,
+                measured_tam_b=_finite_or_none(getattr(industry_tam, "current_tam", None)),
+                measured_year=market_dynamics.get("tam_year"),
+                source_label=label,
+                start_year=start_year if start_year is not None else current_year_et(),
+            )
+            if projection is not None:
+                added.update(projection.response_fields())
+        elif isinstance(label, str) and label.startswith("BEA "):
+            # BEA GDP-by-industry (Railroads, or a backup while Census is down) is value added,
+            # not revenue: its own header, no revenue scope line, never a projection.
+            added["market_size_label"] = _US_VALUE_ADDED_LABEL
+    except Exception as e:  # noqa: BLE001 — a projection failure must never cost the report
+        logger.exception("[report-industry-tam] ticker=%s industry=%r step=tam_projection: %s: %s — "
+                         "measured value only", ticker, industry, type(e).__name__, e)
+        return
+    market_dynamics.update(added)
 
 
 def _apply_peer_score_baseline(

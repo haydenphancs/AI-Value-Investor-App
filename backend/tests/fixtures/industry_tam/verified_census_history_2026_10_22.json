@@ -1,0 +1,14 @@
+{
+ "verified_on": "2026-10-22",
+ "how": "Read-only GET with the backend/.env Census key (never recorded): api.census.gov/data/timeseries/aies/historical?get=RCPT_TOT_VAL,YEAR,TAXSTAT,TYPOP,NAICS_LABEL&for=us:*&NAICS=<code>, the all-establishments row (TAXSTAT 00, TYPOP 00); values in $1,000s exactly as returned. The same call returned each code's 2024 value equal to verified_sources_2026_10_01.json and its 2017 value equal to the Economic Census figure there to Census's rounding (4242: 931,671,000 vs 931,670,122; 524114: 855,940,000 vs 855,939,898). Used only by the projection tier rule's matched CMS window (2018-24): CMS NHE tables start in 2018.",
+ "census_extra_years": {
+  "4242": {
+   "label": "Drugs and druggists' sundries merchant wholesalers",
+   "aies_2018_thousands": 969469205
+  },
+  "524114": {
+   "label": "Direct health and medical insurance carriers",
+   "aies_2018_thousands": 933166879
+  }
+ }
+}

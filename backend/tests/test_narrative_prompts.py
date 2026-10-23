@@ -615,3 +615,15 @@ def test_the_moat_digest_names_a_peer_set_concentration_as_peers():
 
     bits = _market_structure_bits({"concentration": "oligopoly", "concentration_basis": "peer_revenue_share"})
     assert bits[0] == "oligopoly by revenue share of a peer set"
+
+
+def test_the_moat_digest_ignores_the_projection():
+    """The LLM digest stays on MEASURED growth (2026-10-22): the card's projected pair is a
+    display figure, never a thesis input."""
+    projected = dict(_AD_MEASURED, projection_basis="bls_output", projection_year=2026,
+                     projection_tam=400.0, projection_target_year=2031, projection_target_tam=494.6,
+                     projection_rate_pct=4.3, market_size_label="US industry revenue",
+                     projection_source_label="Projection: BLS Employment Projections 2025–35, +4.3%/yr")
+    assert _structure_line(**projected) == _structure_line(**_AD_MEASURED)
+    for gone in ("2031", "400", "495", "4.3", "Projection", "BLS"):
+        assert gone not in _structure_line(**projected), gone

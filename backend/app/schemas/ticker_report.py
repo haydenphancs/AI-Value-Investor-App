@@ -396,6 +396,23 @@ class MarketDynamicsResponse(BaseModel):
     cagr_end_year: Optional[int] = None      # last year of that window (the data year)
     growth_source_label: Optional[str] = None  # source of cagr_5yr (differs from tam_source_label on a quote)
     concentration_basis: Optional[str] = None  # "revenue_share" | "market_cap" | "peer_revenue_share" (live peer fallback); None = not measured
+    # ── Header, scope line and projection (owner decisions 2026-10-22, "data from today year to
+    #    the next 5 year"; builds from that date). The projection is the measured Census value
+    #    scaled along a pinned public-domain path (`industry_tam_projection`): only on a measured
+    #    Census row whose industry's tier projects, all nine `projection_*` keys or none. The
+    #    legacy fields above never carry it. The in-app card shows no source line (owner); the
+    #    PDF prints `projection_source_label`.
+    market_size_label: Optional[str] = None   # "US industry revenue" | "US industry value added"; None → legacy header
+    scope_note: Optional[str] = None          # the row's one-line scope (Census row, or a company quote)
+    projection_basis: Optional[str] = None    # "bls_output" | "cms_nhe" | "gdp_path"; None = not projected
+    projection_year: Optional[int] = None     # the current year (US/Eastern) at report build
+    projection_year_label: Optional[str] = None   # "2026e": the card prints it, marked as projected
+    projection_tam: Optional[float] = None    # $B, current dollars
+    projection_target_year: Optional[int] = None  # projection_year + 5
+    projection_target_year_label: Optional[str] = None  # "2031e"
+    projection_target_tam: Optional[float] = None  # $B, current dollars
+    projection_rate_pct: Optional[float] = None    # compound %/yr between the two
+    projection_source_label: Optional[str] = None  # "Projection: <source>, +4.3%/yr" (PDF only)
 
 
 class MoatDimensionResponse(BaseModel):

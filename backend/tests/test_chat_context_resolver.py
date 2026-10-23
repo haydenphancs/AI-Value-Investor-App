@@ -3616,3 +3616,60 @@ def test_dump_year_writes_plain_digits_only_for_year_numbers(key, value, want):
 def test_dump_year_leaves_a_non_finite_year_alone():
     """The flattener already drops a NaN; a "nan" string here would leak it."""
     assert _ccr._dump_year("tam_year", _NAN) is _NAN
+
+
+_MD_PROJECTED = dict(
+    _MD_MEASURED, market_size_label="US industry revenue",
+    scope_note="Revenue of US-located businesses, incl. exports; excludes imports and foreign operations.",
+    projection_basis="bls_output", projection_year=2026, projection_tam=400.0,
+    projection_target_year=2031, projection_target_tam=494.6, projection_rate_pct=4.3,
+    projection_source_label="Projection: BLS Employment Projections 2025–35, industry output, +4.3%/yr",
+    projection_year_label="2026e", projection_target_year_label="2031e",
+)
+
+
+@pytest.mark.asyncio
+async def test_report_chat_states_the_cards_market_row_in_the_lead(resolver, monkeypatch):
+    """The card's 2026→2031 pair (2026-10-22) reaches the model as ONE labelled lead line, on a
+    FULL-size report too — the moat section's dump budget runs out before `market_dynamics`, so a
+    dumped key never arrived (review finding). Lead-owned keys leave the dump; no agency named."""
+    for report in (_small_moat_report(dict(_MD_PROJECTED)), _full_figures_report()):
+        report["moat_competition"]["market_dynamics"] = dict(_MD_PROJECTED)
+        block = await _resolve_report(resolver, monkeypatch, _json.loads(_json.dumps(report)),
+                                      ref="RKLB|warren_buffett")
+        head, dump = block.split("(an excerpt; long sections are shortened):\n", 1)[0], _dump_of(block)
+        line = next(l for l in head.splitlines() if l.startswith("Market row on the card (US industry revenue): "))
+        assert "$400B (2026) → $494.6B (2031), projected at +4.3%/yr" in line
+        assert "measured $342.8B (2024)" in line and "avg growth +0.9%/yr 2017–2024" in line
+        assert "scope: Revenue of US-located businesses" in line
+        for gone in ("BLS", "Employment Projections", "Census", "CMS"):
+            assert gone not in line, gone
+        for gone in ("projection_", "market_size_label", "scope_note", "Employment Projections"):
+            assert gone not in dump, gone
+
+
+def test_the_market_row_line_for_each_kind_of_row():
+    def line(md):
+        specs = _ccr._market_row_figures({"moat_competition": {"market_dynamics": md}})
+        return _ccr._fit_items_counted(*specs[0])[0] if specs else None
+
+    assert line(dict(_MD_QUOTE)) is None                         # a quote stays in the dump
+    assert line(dict(_MD_MEASURED, tam_basis=None)) is None      # legacy rows: dump only
+    banks = dict(_MD_MEASURED, current_tam=867.0, market_size_label="US industry revenue")
+    assert "$867B (2024), measured — no projection for this industry" in line(banks)
+    half = dict(_MD_PROJECTED, projection_target_tam=float("nan"))
+    assert "no projection" in line(half) and "nan" not in line(half)
+    stale = dict(_MD_PROJECTED, projection_year=2024)              # start not after measured
+    assert "no projection" in line(stale)
+    assert line(dict(_MD_MEASURED, current_tam=0.0)) is None
+    assert line(dict(_MD_MEASURED, tam_year=True)) is None
+
+
+@pytest.mark.asyncio
+async def test_report_chat_drops_projection_keys_off_a_company_quote(resolver, monkeypatch):
+    stray = dict(_MD_QUOTE, projection_year=2026, projection_tam=999.0, projection_target_year=2031,
+                 projection_target_tam=1999.0, projection_rate_pct=15.0)
+    dump = _dump_of(await _resolve_report(resolver, monkeypatch, _small_moat_report(stray),
+                                          ref="RKLB|warren_buffett"))
+    for gone in ("projection_", "999", "1,999", "Market row on the card"):
+        assert gone not in dump, gone

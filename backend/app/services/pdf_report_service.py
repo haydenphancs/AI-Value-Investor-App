@@ -354,6 +354,47 @@ def _growth_window(start: Any, end: Any) -> str:
     return f"{s}–{e % 100:02d}" if s // 100 == e // 100 else f"{s}–{e}"
 
 
+def _plain_text(v: Any, cap: int = 200) -> str:
+    return v.strip()[:cap] if isinstance(v, str) else ""
+
+
+def _year_label(label: Any, year: int) -> str:
+    """The stored projected-year label ("2026e", owner 2026-10-22: marked as projected) when it is
+    that year plus a short mark, else the plain year — never a label for another year."""
+    if isinstance(label, str):
+        text = label.strip()
+        if text.startswith(str(year)) and len(text) <= 8 and text.isprintable():
+            return text
+    return str(year)
+
+
+def _projection_pair(out: dict, basis: str, measured_year: Optional[int]) -> Optional[dict]:
+    """The stored projection (2026-10-22, owner: "data from today year to the next 5 year") as
+    display keys, or None. Shown only on a row STORED as measured, all-or-nothing: two real
+    positive numbers, years measured < start < target. Anything malformed falls back to the
+    measured strip — never a half pair, never "$nan"."""
+    if basis != "measured" or out.get("tam_basis") != "measured":
+        return None
+
+    def real(v: Any) -> Optional[float]:
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
+            return None
+        return float(v)
+
+    start, target = _year(out.get("projection_year")), _year(out.get("projection_target_year"))
+    s_size, t_size = real(out.get("projection_tam")), real(out.get("projection_target_tam"))
+    if None in (start, target, s_size, t_size) or measured_year is None:
+        return None
+    if not measured_year < start < target:
+        return None
+    return {
+        "proj_year": _year_label(out.get("projection_year_label"), start), "proj_size": s_size,
+        "proj_target_year": _year_label(out.get("projection_target_year_label"), target),
+        "proj_target_size": t_size,
+        "proj_caption": _plain_text(out.get("projection_source_label"), 160),
+    }
+
+
 def _measured_market_dynamics(md: Any) -> dict:
     """A COPY of the stored market_dynamics plus the strip's display keys. Nothing is projected
     (owner decision 2026-10-22, "Measured only"): this used to mirror the iOS today-aligned
@@ -373,6 +414,10 @@ def _measured_market_dynamics(md: Any) -> dict:
       scope_label     'US' / 'GLOBAL' beside a measured source only (a quote inherited it falsely)
       growth_source   growth_source_label when it names another source than the TAM's
       show_source     False for an unknown basis: its label named retired grounded publishers
+      market_label    `market_size_label` ("US industry revenue") or "Market size"
+      scope_note      the row's one-line scope (a measured Census row, or a company quote)
+      proj_*          the stored projection, measured rows only (`_projection_pair`); the PDF
+                      is where its source line lives (the in-app card shows none, owner 10-22)
     """
     out = dict(md) if isinstance(md, dict) else {}
     basis = _tam_basis(out)
@@ -433,7 +478,17 @@ def _measured_market_dynamics(md: Any) -> dict:
         "growth_source": growth_label if growth_label and growth_label != label else "",
         "show_source": basis != "unknown" and bool(label or (is_quote and quote)),
         "source_quote": quote if is_quote else "",
+        "market_label": (_plain_text(out.get("market_size_label"), 40) or "Market size")
+        if basis == "measured" else "Market size",
+        "scope_note": _plain_text(out.get("scope_note"), 160) if basis != "unknown" else "",
+        "proj_year": None, "proj_size": None, "proj_target_year": None,
+        "proj_target_size": None, "proj_caption": "",
     })
+    if out["scope_note"]:
+        out["scope_label"] = ""   # the scope line says it in full
+    pair = _projection_pair(out, basis, measured_year)
+    if pair is not None:
+        out.update(pair)
     return out
 
 

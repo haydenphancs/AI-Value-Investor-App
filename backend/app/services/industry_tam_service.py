@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -606,6 +607,25 @@ def _census_source_label(naics: str, label: str = "") -> str:
     if label:
         return f"US Census AIES — {label} (NAICS {naics})"
     return f"US Census AIES (NAICS {naics})"
+
+
+# The inverse of `_census_source_label`: the label's own trailing "(NAICS a, b, …)" group.
+_CENSUS_LABEL_RE = re.compile(r"US Census AIES(?: — .{1,300})? \(NAICS (\d{2,6}(?:, \d{2,6}){0,11})\)")
+
+
+def census_label_codes(source_label: Any) -> Optional[Tuple[str, ...]]:
+    """The NAICS codes a dossier's `source_label` says Census measured, or None when the label is
+    not a Census AIES label (a BEA / FRED row, a placeholder, a withdrawn grounded row, garbage).
+
+    The projected Moat row (`industry_tam_projection`) keys on this: a projection exists only for
+    the exact codes it was backtested on, so a stale single-code row (A&D before its composite
+    refresh) or a BEA value-added backup never borrows a Census industry's path."""
+    if not isinstance(source_label, str) or len(source_label) > 400:
+        return None
+    m = _CENSUS_LABEL_RE.fullmatch(source_label)
+    if m is None:
+        return None
+    return tuple(m.group(1).split(", "))
 
 
 def _project_5y(latest_value: float, cagr_decimal: float) -> float:

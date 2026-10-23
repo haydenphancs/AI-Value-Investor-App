@@ -81,10 +81,27 @@ struct DataSourcesView: View {
         ),
         DataSourceItem(
             name: "U.S. Census Bureau",
-            usage: "Industry revenue data used for the measured US industry market size. "
+            usage: "Industry revenue data used for the measured US industry revenue. "
                 + "This product uses the Census Bureau Data API but is not endorsed or "
                 + "certified by the Census Bureau.",
             url: "https://www.census.gov"
+        ),
+        // Pinned public-domain projection tables (backend/data/industry_tam_projections.json,
+        // 2026-10-22): no integration file — the backend reads a committed table.
+        DataSourceItem(
+            name: "U.S. Bureau of Labor Statistics",
+            usage: "Employment Projections industry output and nominal GDP, used to project "
+                + "US industry revenue for this year and five years ahead. "
+                + "Source: U.S. Bureau of Labor Statistics.",
+            url: "https://www.bls.gov/emp/"
+        ),
+        DataSourceItem(
+            name: "Centers for Medicare & Medicaid Services",
+            usage: "National Health Expenditure projections, used to project US revenue of "
+                + "health insurers and drug wholesalers, and the historical US nominal GDP "
+                + "(U.S. Bureau of Economic Analysis data, as printed in its Table 1) behind the "
+                + "GDP-based projections.",
+            url: "https://www.cms.gov/data-research/statistics-trends-and-reports/national-health-expenditure-data/projected"
         ),
         DataSourceItem(
             name: "U.S. Food and Drug Administration (openFDA)",

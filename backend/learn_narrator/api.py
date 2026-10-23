@@ -14,6 +14,12 @@ The contract, as this client speaks it:
 
 Status handling (one table, so every route behaves the same):
   * 2xx            → the JSON body (204 → None).
+  * 3xx (any non-2xx below 400) → `NarratorRedirectError`, never followed and never retried: httpx
+                     does not follow redirects, and following one would carry the token header to
+                     wherever it points. Before 2026-10-23 an empty-bodied 301 read as "204, no job",
+                     so a redirecting LEARN_NARRATOR_API_BASE looked healthy forever. On claim the
+                     caller exits 2 (configuration). The same rule holds for the signed upload PUT,
+                     where a redirect would otherwise have read as "stored".
   * 401 / 403      → `NarratorAuthError`: the token is missing or wrong. The caller logs an ERROR and
                      exits non-zero — retrying cannot fix a credential.
   * 404 / 409 / 422 → `NarratorTerminalError`, never retried: the job is gone, no longer ours, or the
@@ -78,6 +84,50 @@ class NarratorUnavailable(NarratorAPIError):
     """502 / 503 / 504 or a transport error on every attempt."""
 
 
+class NarratorRedirectError(NarratorAPIError):
+    """A 3xx (any non-2xx answer below 400): never followed, never retried. On the JSON routes it
+    means LEARN_NARRATOR_API_BASE is not the final URL (http:// instead of https://, a bare domain
+    that redirects to www, …)."""
+
+
+def _redirect_error(resp: httpx.Response, what: str, *, name_target: bool) -> NarratorRedirectError:
+    """Names where the redirect points — scheme, host and port only, never userinfo, path or query
+    — and only when `name_target` (the JSON routes). The signed upload passes False: a Storage
+    redirect's Location may carry the same write token as the signed URL itself. Naming is a hint,
+    so ANY failure to read the Location (a bad URL, a bad IDNA host) just leaves it out."""
+    target = ""
+    if name_target:
+        try:
+            location = resp.headers.get("location", "")
+            url = resp.request.url.join(location) if location else None
+            if url is not None and url.scheme and url.host:
+                target = f" to {url.scheme}://{url.netloc.decode('ascii')}"
+        except Exception:  # noqa: BLE001 — the hint is optional; the typed error below is not
+            target = ""
+    kind = "redirect" if 300 <= resp.status_code < 400 else "non-2xx answer"
+    hint = " — set LEARN_NARRATOR_API_BASE to the final URL" if name_target else ""
+    return NarratorRedirectError(f"{what} -> {resp.status_code} {kind}{target} (not followed){hint}",
+                                 status=resp.status_code)
+
+
+def _refuse_redirects(*, name_target: bool, what: Optional[str] = None) -> Callable[[httpx.Response], None]:
+    """An httpx RESPONSE HOOK that turns any non-2xx answer below 400 into NarratorRedirectError.
+    It must be a hook, not only a check after `request()` returns: for 301/302/303/307/308 httpx
+    parses the Location inside `request()` even with follow_redirects off (to build `next_request`),
+    so a malformed one used to surface as a retried RemoteProtocolError or an untyped InvalidURL.
+    Hooks run before that parse, and an exception raised here is not a TransportError, so the
+    retry loops never retry it."""
+    def hook(resp: httpx.Response) -> None:
+        if 200 <= resp.status_code < 300 or resp.status_code >= 400:
+            return
+        label = what
+        if label is None:
+            path = resp.request.url.path
+            label = f"{resp.request.method} {path[len(API_PREFIX):] if path.startswith(API_PREFIX) else path}"
+        raise _redirect_error(resp, label, name_target=name_target)
+    return hook
+
+
 def _error_from(resp: httpx.Response, what: str) -> NarratorAPIError:
     try:
         body = resp.json()
@@ -116,6 +166,7 @@ class NarratorClient:
             base_url=base_url.rstrip("/") + API_PREFIX,
             headers={TOKEN_HEADER: token, "User-Agent": user_agent},
             timeout=timeout, transport=transport,
+            event_hooks={"response": [_refuse_redirects(name_target=True)]},
         )
 
     # ── claim ────────────────────────────────────────────────────────────────
@@ -155,6 +206,8 @@ class NarratorClient:
                 continue
             if resp.status_code >= 400:
                 raise _error_from(resp, what)
+            if not 200 <= resp.status_code < 300:        # backstop: the response hook raises first
+                raise _redirect_error(resp, what, name_target=True)
             if resp.status_code == 204 or not resp.content:
                 return None
             try:
@@ -213,7 +266,8 @@ class NarratorClient:
             headers["apikey"] = apikey
         what = f"signed upload PUT {path}"
         last: Optional[str] = None
-        with httpx.Client(timeout=timeout, transport=self._transport) as c:
+        with httpx.Client(timeout=timeout, transport=self._transport,
+                          event_hooks={"response": [_refuse_redirects(name_target=False, what=what)]}) as c:
             for attempt in range(RETRIES + 1):
                 if attempt:
                     self._sleep(BACKOFF_SECONDS[min(attempt - 1, len(BACKOFF_SECONDS) - 1)])
@@ -236,5 +290,7 @@ class NarratorClient:
                     snippet = " ".join(resp.text.split())[:200]
                     raise NarratorAPIError(f"{what} -> {resp.status_code}: {snippet}",
                                            status=resp.status_code)
+                if not 200 <= resp.status_code < 300:    # backstop: the response hook raises first
+                    raise _redirect_error(resp, what, name_target=False)
                 return
         raise NarratorUnavailable(f"{what} failed after {RETRIES + 1} attempts ({last})")

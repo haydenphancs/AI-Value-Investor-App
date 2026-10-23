@@ -493,6 +493,9 @@ def main(argv: Optional[List[str]] = None, *, env: Optional[Mapping[str, str]] =
         except api.NarratorAuthError as e:
             logger.error("claim refused — the narrator token is wrong or unset on the web: %s", e)
             return EXIT_CONFIG
+        except api.NarratorRedirectError as e:
+            logger.error("claim redirected — LEARN_NARRATOR_API_BASE is not the web's final URL: %s", e)
+            return EXIT_CONFIG
         except api.NarratorAPIError as e:
             logger.error("claim failed: %s", e)
             return EXIT_JOB_FAILED

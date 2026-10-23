@@ -1189,6 +1189,157 @@ def test_put_signed_transport_errors_never_carry_the_url(caplog):
     assert "SECRET-WRITE-TOKEN" not in caplog.text and "SECRET-WRITE-TOKEN" not in str(e.value)
 
 
+# A redirect is never "no job" and never "stored" (2026-10-23). httpx does not follow redirects, and
+# before this an empty-bodied 3xx on claim returned None — the worker logged "no narration job"
+# forever behind a redirecting LEARN_NARRATOR_API_BASE (http:// for https://, a bare domain → www).
+
+REDIRECTS = [300, 301, 302, 303, 304, 307, 308]
+
+
+def _redirecting(status: int, location: Optional[str], *, json_body: Any = None):
+    seen: List[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        headers = {"location": location} if location is not None else {}
+        if json_body is not None:
+            return httpx.Response(status, headers=headers, json=json_body)
+        return httpx.Response(status, headers=headers)
+    return seen, handler
+
+
+def _redirect_client(handler, sleeps: list) -> api.NarratorClient:
+    return api.NarratorClient("http://caydex.test", "tok-123", transport=httpx.MockTransport(handler),
+                              sleep=sleeps.append)
+
+
+@pytest.mark.parametrize("status", REDIRECTS)
+def test_a_redirected_claim_is_an_error_never_no_job(status):
+    seen, handler = _redirecting(status, "https://www.caydex.test/api/v1/internal/learn/jobs/claim?probe=PATH-SECRET")
+    sleeps: list = []
+    with pytest.raises(api.NarratorRedirectError) as e:
+        _redirect_client(handler, sleeps).claim(["chatterbox"], "v1")
+    assert len(seen) == 1 and sleeps == []                     # never followed, never retried
+    assert e.value.status == status and isinstance(e.value, api.NarratorAPIError)
+    assert "to https://www.caydex.test" in str(e.value) and "LEARN_NARRATOR_API_BASE" in str(e.value)
+    assert "probe=" not in str(e.value) and "PATH-SECRET" not in str(e.value)   # host only
+
+
+@pytest.mark.parametrize("route", ["heartbeat", "upload_target", "complete", "fail"])
+@pytest.mark.parametrize("status", [301, 307])
+def test_every_json_route_refuses_a_redirect_even_with_a_json_body(route, status):
+    seen, handler = _redirecting(status, "/elsewhere", json_body={"ok": True, "path": "p", "status": "ready"})
+    c = _redirect_client(handler, [])
+    call = {"heartbeat": lambda: c.heartbeat("j1"),
+            "upload_target": lambda: c.upload_target("j1", size_bytes=1, sha256="a" * 64),
+            "complete": lambda: c.complete("j1", {}),
+            "fail": lambda: c.fail("j1", "render_failed", "x")}[route]
+    with pytest.raises(api.NarratorRedirectError) as e:
+        call()
+    assert len(seen) == 1 and "to http://caydex.test" in str(e.value)     # a relative Location resolves
+
+
+@pytest.mark.parametrize("location", [None, "", "not a url at all"])
+def test_a_redirect_without_a_usable_location_still_fails_loudly(location):
+    seen, handler = _redirecting(302, location)
+    with pytest.raises(api.NarratorRedirectError) as e:
+        _redirect_client(handler, []).claim(["kokoro"], "v1")
+    assert len(seen) == 1 and "302 redirect" in str(e.value)
+
+
+#: Locations httpx itself chokes on: for 301/302/303/307/308 it parses Location INSIDE request(),
+#: so without the response hook these were a retried RemoteProtocolError ("http://[::1"), an
+#: untyped InvalidURL ("x:y", "https:x/…") or an IDNAError ("http://xn--/") that crashed main().
+MALFORMED_LOCATIONS = ["http://[::1", "x:y", "https:x/y?token=SECRET-WRITE-TOKEN", "http://xn--/"]
+
+
+@pytest.mark.parametrize("status", [300, 301, 302, 304, 307, 308])
+@pytest.mark.parametrize("location", MALFORMED_LOCATIONS)
+def test_a_malformed_location_is_one_typed_unretried_redirect_error(status, location):
+    seen, handler = _redirecting(status, location)
+    sleeps: list = []
+    with pytest.raises(api.NarratorRedirectError) as e:
+        _redirect_client(handler, sleeps).claim(["kokoro"], "v1")
+    assert len(seen) == 1 and sleeps == [] and e.value.status == status
+    assert "SECRET-WRITE-TOKEN" not in str(e.value)
+
+
+@pytest.mark.parametrize("status", [301, 302, 307])
+@pytest.mark.parametrize("location", MALFORMED_LOCATIONS)
+def test_put_signed_refuses_a_malformed_redirect_once_without_leaking(status, location, caplog):
+    seen, handler = _redirecting(status, location)
+    sleeps: list = []
+    with caplog.at_level(logging.DEBUG), pytest.raises(api.NarratorRedirectError) as e:
+        _redirect_client(handler, sleeps).put_signed(SIGNED, b"x" * 1024, path="audio/weekly/x-abc.m4a")
+    assert len(seen) == 1 and sleeps == []                     # the ~9 MB body is never re-sent
+    for text in (str(e.value), caplog.text):
+        assert "SECRET-WRITE-TOKEN" not in text
+
+
+def test_the_redirect_target_keeps_a_non_default_port_but_never_userinfo():
+    seen, handler = _redirecting(301, "https://user:pw@www.caydex.test:8443/api/v1/internal/learn/jobs/claim?q=1")
+    with pytest.raises(api.NarratorRedirectError) as e:
+        _redirect_client(handler, []).claim(["kokoro"], "v1")
+    assert "to https://www.caydex.test:8443 " in str(e.value)
+    assert "user" not in str(e.value) and "pw@" not in str(e.value) and "q=1" not in str(e.value)
+
+
+@pytest.mark.parametrize("location", ["https://www.caydex.test/", *MALFORMED_LOCATIONS])
+def test_main_with_the_real_client_exits_2_on_any_redirected_claim(tmp_path, monkeypatch, caplog, location):
+    env = {**_bake(tmp_path / "models", voices=("am_michael",)), "LEARN_NARRATOR_API_BASE": "http://caydex.test",
+           "LEARN_NARRATOR_API_TOKEN": "tok", "LEARN_NARRATOR_THREADS": "2"}
+    monkeypatch.setattr(m.shutil, "which", lambda name: f"/usr/bin/{name}")
+    seen, handler = _redirecting(301, location)
+
+    def factory(base, token):
+        return api.NarratorClient(base, token, transport=httpx.MockTransport(handler), sleep=lambda s: None)
+
+    def no_render(*a, **k):
+        raise AssertionError("nothing may render after a redirected claim")
+
+    with caplog.at_level(logging.INFO):
+        code = m.main([], env=env, client_factory=factory, runner=no_render)
+    assert code == m.EXIT_CONFIG == 2 and len(seen) == 1
+    assert "claim redirected" in caplog.text and "no narration job" not in caplog.text
+
+
+@pytest.mark.parametrize("status", REDIRECTS)
+def test_put_signed_refuses_a_redirect_and_never_names_its_target(status, caplog):
+    seen, handler = _redirecting(status, SIGNED.replace("proj.supabase.co", "evil.example") + "&again=SECRET-WRITE-TOKEN")
+    c = _redirect_client(handler, [])
+    with caplog.at_level(logging.DEBUG), pytest.raises(api.NarratorRedirectError) as e:
+        c.put_signed(SIGNED, b"x", path="audio/weekly/x-abc.m4a")
+    assert len(seen) == 1 and e.value.status == status
+    for text in (str(e.value), caplog.text):
+        assert "SECRET-WRITE-TOKEN" not in text and "evil.example" not in text and "supabase.co" not in text
+    assert "audio/weekly/x-abc.m4a" in str(e.value)
+
+
+def test_a_redirected_claim_exits_2_as_a_configuration_error(tmp_path, monkeypatch, caplog):
+    redirect = api.NarratorRedirectError("POST /jobs/claim -> 301 redirect to https://www.caydex.test", status=301)
+    with caplog.at_level(logging.INFO):          # INFO: the "no narration job" line logs at INFO
+        code, fake, _ = _tick(tmp_path, monkeypatch, _raw_job(), claim=redirect)
+    assert code == m.EXIT_CONFIG == 2 and fake.names() == ["claim", "close"]
+    assert "LEARN_NARRATOR_API_BASE" in caplog.text and "no narration job" not in caplog.text
+
+
+def test_a_redirected_complete_is_reported_never_completed(tmp_path, monkeypatch, caplog):
+    """Before the fix an empty-bodied 3xx on /complete returned {} — the worker logged
+    'narration COMPLETE' and exited 0 with nothing recorded."""
+    with caplog.at_level(logging.INFO):
+        code, fake, _ = _tick(tmp_path, monkeypatch, _raw_job(),
+                              complete=api.NarratorRedirectError("POST /jobs/j/complete -> 307 redirect", status=307))
+    fail = next(c for c in fake.calls if c[0] == "fail")
+    assert code == 1 and fail[2] == "api_error" and "narration COMPLETE" not in caplog.text
+
+
+def test_a_redirected_upload_is_reported_as_upload_failed(tmp_path, monkeypatch):
+    code, fake, _ = _tick(tmp_path, monkeypatch, _raw_job(),
+                          put=api.NarratorRedirectError("signed upload PUT p -> 302 redirect (not followed)", status=302))
+    fail = next(c for c in fake.calls if c[0] == "fail")
+    assert code == 1 and fail[2] == "upload_failed" and "complete" not in fake.names()
+
+
 # ══ 10. the whole tick ═══════════════════════════════════════════════════════
 
 

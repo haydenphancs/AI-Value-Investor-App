@@ -4,8 +4,9 @@ learn_narrator/child.py — the HEAVY process. `python -m learn_narrator.child <
   render <job.json>   engines.{chatterbox,kokoro}.render → <out_dir>/narration.m4a + render.json
   align  <job.json>   align.align_job (Chatterbox only)  → <out_dir>/align.json
   smoke  <out dir>    the image's build-time proof: one line per engine, the WAV2VEC2 weights, and
-                      `torchaudio.functional.forced_align`, all with the network OFF (the Dockerfile
-                      runs it under `RUN --network=none`) → <out dir>/smoke.json
+                      `torchaudio.functional.forced_align`, all with the network OFF (refused
+                      in-process by `_refuse_network`: Railway rejects `RUN --network=none`)
+                      → <out dir>/smoke.json
 
 Only this module (and the functions it calls) imports torch / chatterbox / kokoro. The parent
 (`main.py`, `runtime.run_child`) sets the thread caps and the offline switches in this process's
@@ -81,9 +82,58 @@ def run(mode: str, job_path: Path) -> Dict[str, Any]:
     raise SystemExit(f"unknown mode {mode!r}")
 
 
+_LOCAL_HOSTS = frozenset({None, "", "localhost", "127.0.0.1", "::1"})
+
+
+def _refuse_network() -> list:
+    """Make every IP connection from this process fail as an unreachable network would: the smoke's
+    offline proof. The Dockerfile used `RUN --network=none`, which Railway's validation rejects
+    ("flag '--network=none' is not supported", 2026-10-23), so the build step has the network and
+    this takes its place: a weight the bake missed is refused, never downloaded. Unix sockets and
+    localhost stay open (local IPC). Returns the list each refused attempt is appended to, so the
+    smoke report and the build log name any library that tried."""
+    import errno
+    import socket
+
+    attempts: list = []
+    connect, connect_ex, getaddrinfo = socket.socket.connect, socket.socket.connect_ex, socket.getaddrinfo
+
+    def _ip(sock: socket.socket) -> bool:
+        return sock.family in (socket.AF_INET, socket.AF_INET6)
+
+    def _refused(what: str) -> OSError:
+        attempts.append(what[:200])
+        print(f"[smoke] network refused: {what[:200]}", flush=True)
+        return OSError(errno.ENETUNREACH, f"network is off for the smoke: {what[:200]}")
+
+    def guarded_connect(self, address):
+        if _ip(self) and address[0] not in _LOCAL_HOSTS:
+            raise _refused(f"connect {address!r}")
+        return connect(self, address)
+
+    def guarded_connect_ex(self, address):
+        if _ip(self) and address[0] not in _LOCAL_HOSTS:
+            _refused(f"connect_ex {address!r}")
+            return errno.ENETUNREACH
+        return connect_ex(self, address)
+
+    def guarded_getaddrinfo(host, *args, **kwargs):
+        name = host.decode() if isinstance(host, bytes) else host
+        if name not in _LOCAL_HOSTS:
+            raise socket.gaierror(socket.EAI_NONAME, str(_refused(f"resolve {name!r}")))
+        return getaddrinfo(host, *args, **kwargs)
+
+    socket.socket.connect = guarded_connect          # type: ignore[method-assign]
+    socket.socket.connect_ex = guarded_connect_ex    # type: ignore[method-assign]
+    socket.getaddrinfo = guarded_getaddrinfo         # type: ignore[assignment]
+    return attempts
+
+
 def smoke(out_dir: Path) -> Dict[str, Any]:
     """Prove the image renders with what it baked: Chatterbox (prepared once, exaggeration passed),
-    the encode, a WAV2VEC2 forced alignment of that line, and Kokoro with every baked voice."""
+    the encode, a WAV2VEC2 forced alignment of that line, and Kokoro with every baked voice — with
+    the network refused (`_refuse_network`) before any library is imported."""
+    refused = _refuse_network()
     threads = runtime.torch_threads()
     for name, value in runtime.child_env(threads, base={}).items():
         os.environ.setdefault(name, value)
@@ -163,6 +213,9 @@ def smoke(out_dir: Path) -> Dict[str, Any]:
     report["kokoro"] = {"voices": voices, "voice": first, "seconds_audio": round(samples / kk.SR, 2),
                         "timed_tokens": stamped, "seconds": round(time.monotonic() - t2, 1)}
     progress(f"kokoro OK {report['kokoro']}")
+    # A refused attempt that a library tolerated is not a failure (as under --network=none), but
+    # it is named here and in the build log above.
+    report["network_refused"] = list(refused)
     raw.unlink(missing_ok=True)
     return report
 

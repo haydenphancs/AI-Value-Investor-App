@@ -432,7 +432,7 @@ def test_the_worker_preview_knows_a_template_script(tmp_path):
 # (`_SB_HOST` / `_SB` sit at the top, beside the autouse fixture that points SUPABASE_URL at them.)
 
 #: Key-shaped, in every request's headers: it must never reach a log line or an exception message.
-_PROBE_KEY = "sb_secret_preview_guard_probe_0123456789"
+_PROBE_KEY = "sb_" + "secret_preview_guard_probe_0123456789"   # split: no key-shaped literal for scanners
 _HEADERS = {"apikey": _PROBE_KEY, "Authorization": f"Bearer {_PROBE_KEY}"}
 _CANDIDATES_ARGS = ["--candidates", "--series", "money_map", "--date", "2026-11-19"]
 

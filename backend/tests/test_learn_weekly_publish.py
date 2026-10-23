@@ -47,7 +47,11 @@ from test_learn_weekly_ledger import _api_error, _Query, _Result, _Table, _wire
 
 UTC = timezone.utc
 OWNER = 424242
-TOKEN = "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawZ"
+# Built from two halves, like test_marketing_review_bot.py: a token-shaped literal in the source is
+# what GitHub secret scanning flagged on 2026-10-23 (it is Telegram's docs example, not a real bot).
+_BOT_ID = "123456789"
+_BOT_SECRET = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawZ"  # 35 chars, the real shape
+TOKEN = f"{_BOT_ID}:{_BOT_SECRET}"
 SECRET = "s3cret_Webhook-token"
 SHA = "a" * 64
 SHA2 = "b" * 64

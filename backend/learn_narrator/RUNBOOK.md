@@ -14,8 +14,10 @@ CPU? if not, then pick option 1 as it is"*).
 ## 1. Build the image (linux/amd64)
 
 The build context is the folder itself (`backend/learn_narrator/`). The build needs network for
-the pip install and the weight bake (~3 GB), then runs a smoke test with the network **off**
-(`RUN --network=none`), so it needs BuildKit (Docker 23+ or `docker buildx`).
+the pip install and the weight bake (~3 GB), then runs a smoke test with the network **off**. The
+smoke refuses the network in-process (`child._refuse_network`), not with `RUN --network=none`:
+Railway's Dockerfile validation rejects that flag ("flag '--network=none' is not supported"). A dead
+proxy on the smoke command alone (never an `ENV` line) also fails any child process that tries to download.
 
 ### Option A — GitHub Actions → GHCR (no x86 machine needed)
 

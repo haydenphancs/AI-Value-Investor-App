@@ -1563,7 +1563,11 @@ def test_the_railway_record():
 def test_the_dockerfile():
     text = (PKG / "Dockerfile").read_text()
     code = _no_comments(text)
-    assert text.splitlines()[0] == "# syntax=docker/dockerfile:1"      # RUN --network needs BuildKit
+    # Railway's Dockerfile validation refuses RUN flags it does not support — the first deploy
+    # failed with "dockerfile invalid: flag '--network=none' is not supported at Line 57"
+    # (2026-10-23). The other two Railway Dockerfiles use no RUN flag and no syntax directive.
+    assert "RUN --" not in code
+    assert not re.match(r"#\s*syntax\s*=", text.splitlines()[0])
     cpu = re.search(r"pip install [^\n]*--index-url https://download\.pytorch\.org/whl/cpu ([^\n\\&]+)", code)
     assert cpu and set(cpu.group(1).split()) == {"torch==2.6.0", "torchaudio==2.6.0"}
     assert "-r learn_narrator/requirements.txt -c learn_narrator/constraints.txt" in code
@@ -1571,11 +1575,73 @@ def test_the_dockerfile():
     assert "torch.version.cuda is None" in code
     assert re.search(r"HF_HOME=/app/models/hf", code) and re.search(r"TORCH_HOME=/app/models/torch", code)
     bake, copy_all = code.index("python -m learn_narrator.bake"), code.index("COPY . learn_narrator/")
-    offline, smoke = code.index("HF_HUB_OFFLINE=1"), code.index("RUN --network=none python -m learn_narrator.child smoke")
+    offline, smoke = code.index("HF_HUB_OFFLINE=1"), code.index("python -m learn_narrator.child smoke")
     assert bake < copy_all < offline < smoke
+    # The dead proxy fails a child process that tries to download; it sits on the smoke RUN only —
+    # an ENV line would reach the running worker, whose httpx follows proxy variables.
+    smoke_run = code[code.rindex("\nRUN ", 0, smoke):smoke]
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        assert f"{var}=http://127.0.0.1:9" in smoke_run, var
+    for env_line in re.findall(r"^ENV (?:[^\n]*\\\n)*[^\n]*", code, re.M):
+        assert "PROXY" not in env_line.upper(), env_line
     assert "python -m learn_narrator.main --preflight" in code[smoke:]
     assert code.rstrip().endswith('CMD ["python", "-m", "learn_narrator.main"]')
     assert "SUPABASE" not in code
+
+
+def _snapshot_socket(monkeypatch):
+    import socket
+    monkeypatch.setattr(socket.socket, "connect", socket.socket.connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", socket.socket.connect_ex)
+    monkeypatch.setattr(socket, "getaddrinfo", socket.getaddrinfo)
+
+
+def test_the_smoke_refuses_the_network_in_process(monkeypatch):
+    """The replacement for `RUN --network=none`: an IP connection or a lookup fails as an unreachable
+    network would, and is recorded; localhost and Unix sockets still work."""
+    import errno
+    import socket
+
+    from learn_narrator import child
+
+    _snapshot_socket(monkeypatch)                  # restored at teardown
+    refused = child._refuse_network()
+
+    with pytest.raises(OSError):
+        socket.create_connection(("huggingface.co", 443), timeout=1)
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        with pytest.raises(OSError) as exc:
+            s.connect(("93.184.216.34", 80))
+        assert exc.value.errno == errno.ENETUNREACH
+        assert s.connect_ex(("93.184.216.34", 80)) == errno.ENETUNREACH
+    finally:
+        s.close()
+    assert len(refused) == 3 and "huggingface.co" in refused[0]
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    try:
+        cli = socket.create_connection(srv.getsockname(), timeout=2)   # loopback stays open
+        cli.close()
+    finally:
+        srv.close()
+    a, b = socket.socketpair()                     # local IPC stays open
+    a.sendall(b"x")
+    assert b.recv(1) == b"x"
+    a.close(), b.close()
+    assert len(refused) == 3
+
+
+def test_the_smoke_refuses_the_network_before_anything_is_imported():
+    tree = ast.parse((PKG / "child.py").read_text())
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "smoke")
+    body = fn.body[1:] if isinstance(fn.body[0], ast.Expr) and isinstance(fn.body[0].value, ast.Constant) else fn.body
+    first = body[0]
+    assert isinstance(first, ast.Assign) and isinstance(first.value, ast.Call)
+    assert getattr(first.value.func, "id", None) == "_refuse_network"
+    assert "network_refused" in ast.unparse(fn)
 
 
 def _pins(path: Path) -> Dict[str, str]:

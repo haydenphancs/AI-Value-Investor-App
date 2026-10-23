@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # learn_narrator/Dockerfile — the Learn NARRATOR worker (plan "Wiser weekly content engine" §1.8).
 #
 # A THIRD Railway service on this repo, Root Directory `/backend/learn_narrator` — the build context
@@ -54,7 +53,15 @@ ENV PYTHONUNBUFFERED=1 \
 # passed), its AAC encode, a WAV2VEC2 forced alignment of it (torchaudio.functional.forced_align),
 # and Kokoro with every baked voice — then the worker's own preflight. A weight the bake missed
 # fails HERE, not on the first cron tick.
-RUN --network=none python -m learn_narrator.child smoke /tmp/smoke \
+# ⚠️ Never put a network flag on RUN: Railway's Dockerfile validation rejects every RUN flag but a
+# cache mount (the first deploy failed with "flag ... is not supported at Line 57", 2026-10-23). The
+# smoke refuses the network IN-PROCESS instead (child._refuse_network), and the dead proxy below —
+# on THIS command only, never an ENV line (the worker's httpx would follow it at run time) — fails
+# any child process that tries to download (pip, curl).
+RUN HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9 \
+    http_proxy=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 all_proxy=http://127.0.0.1:9 \
+    NO_PROXY= no_proxy= \
+    python -m learn_narrator.child smoke /tmp/smoke \
     && python -m learn_narrator.main --preflight \
     && rm -rf /tmp/smoke
 

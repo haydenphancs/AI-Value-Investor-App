@@ -15,19 +15,132 @@ client-side via `?? .max`), but do NOT describe it as the order the user sees. i
 the catalog by DATE — `LearnViewModel.newestFirst` — so `sortOrder`'s only surviving display
 effect is the featured tie-break in `MoneyMovesContentStore`. The Wiser section is labelled
 "Most Recent" for that reason.
+
+Wiser weekly pieces (plan "Wiser weekly content engine" §1.10, migration 204) add three rules,
+all decided HERE so the publisher needs no swap writes and no SQL function:
+
+* **Featured rule** — of the served rows whose `is_featured` column is true, the LOWEST
+  sort_order wins (tie: slug); every other row is served `isFeatured: false`. Every published
+  Deep Dive keeps its flag and gets a more negative sort_order than the last, so the newest one
+  wins on its own and unpublishing it falls back to the previous one, then to the bundle hero.
+  iOS shows the first `isFeatured` row by ascending sortOrder, so serving exactly one keeps the
+  two sides in agreement. A slug in `NEVER_FEATURE` never wins.
+* **Archive rule** — only the newest `LEARN_SERVED_WEEKLY_MAX` rows with `source = 'weekly'`
+  are served; bundle rows always are.
+* **Cache generation** — `invalidate()` (publish / unpublish) and `sync_with_stamp()` (each
+  instance's tick, which covers the Railway deploy overlap) keep a load that started BEFORE the
+  change from re-caching the old rows for an hour.
 """
 
 import asyncio
 import logging
+import re
 import time
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple, Union
 
+from app.config import settings
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
 from app.schemas.money_moves import MoneyMovesResponse
 
 logger = logging.getLogger(__name__)
+
+#: Slugs that are NEVER served as the featured hero, whatever their `is_featured` column says.
+#:
+#: A superset of every `money_moves:*` key in `marketing/content_pool.EXCLUDED`
+#: (`tests/test_learn_bundle_isolation.py` pins it): those articles were judged unfit to front
+#: the brand (unsourced time-relative figures, misconduct stories centred on identifiable people,
+#: a named real investor's biography, a valuation verdict on a named company), and the hero is
+#: the most prominent slot in Learn. Under the featured rule an unpublish falls back to OLDER
+#: flags, so without this list a forgotten flag on one of them would quietly come back as the
+#: hero (plan §1.10: "an unpublish never re-features an article on content_pool.EXCLUDED").
+#:
+#: Copied, not imported: `content_pool` loads the marketing compliance and grounding regex tables
+#: at import time, and the Learn content path must not pull the marketing package in for one set.
+NEVER_FEATURE: FrozenSet[str] = frozenset({
+    "warren-buffetts-early-days",
+    "google-vs-microsoft-ai-wars",
+    "the-future-of-digital-finance",
+    "the-fall-of-enron",
+    "the-ftx-collapse",
+    "theranos-blood-and-lies",
+    "weworks-unraveling",
+    "the-fall-of-sears",
+})
+
+#: `money_move_articles.source` (migration 204, CHECK bundle | weekly). A row read before 204 is
+#: applied has no column at all and is a bundle row: no weekly row can exist without 204.
+SOURCE_BUNDLE = "bundle"
+SOURCE_WEEKLY = "weekly"
+
+#: Fallback for the archive cap when `settings.LEARN_SERVED_WEEKLY_MAX` is unusable (the field is
+#: validated 4..500 at boot, so this only guards a hand-patched or future-renamed setting).
+_DEFAULT_SERVED_WEEKLY_MAX = 40
+
+#: How far apart the publishing instance's clock (the ledger stamp) and this instance's clock (the
+#: cache's "built at") may be before `sync_with_stamp` misses a change. The cost of the margin is
+#: at most one extra reload per publish, so it is generous. Railway hosts are NTP-synced to well
+#: under a second; the margin is for the Postgres `now()` vs app-clock mix.
+_STAMP_SKEW_SECONDS = 120
+
+# PostgREST's answer to a SELECT naming a column the table does not have: Postgres 42703
+# ("column money_move_articles.source does not exist"); PGRST204 is the schema-cache variant.
+_MISSING_COLUMN_MARKERS = ("42703", "pgrst204", "does not exist", "could not find")
+_SOURCE_WORD_RE = re.compile(r"\bsource\b")
+
+
+def _is_missing_source_column(exc: BaseException) -> bool:
+    """True only for "the `source` column does not exist" — the deploy-order gap before migration
+    204 is applied. Any other failure (network, permissions, a different missing column) must
+    keep raising so it reaches the stale-cache fallback and its own log line."""
+    parts = [getattr(exc, attr, None) for attr in ("code", "message", "details", "hint")]
+    text = " ".join(str(p) for p in parts + [exc] if p).lower()
+    if not _SOURCE_WORD_RE.search(text):
+        return False
+    return any(marker in text for marker in _MISSING_COLUMN_MARKERS)
+
+
+def _parse_instant(value: Any) -> Optional[datetime]:
+    """An ISO-8601 string (or datetime) as an aware UTC datetime; None when unusable."""
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    try:
+        return parsed.astimezone(timezone.utc)
+    except OverflowError:
+        # "0001-01-01T00:00:00+05:00" is a valid ISO string whose UTC instant is year 0. It runs
+        # outside any per-row try (the archive sort, the stamp check), so it must not raise.
+        return None
+
+
+def _row_source(row: Dict[str, Any]) -> str:
+    """`weekly` only when the column says so. Absent (pre-204) or NULL is a bundle row — the
+    conservative reading, since a bundle row is always served and never capped."""
+    raw = row.get("source")
+    if isinstance(raw, str) and raw.strip().lower() == SOURCE_WEEKLY:
+        return SOURCE_WEEKLY
+    return SOURCE_BUNDLE
+
+
+def _served_weekly_max() -> int:
+    """`settings.LEARN_SERVED_WEEKLY_MAX`, read at call time; the default on a junk value."""
+    raw = getattr(settings, "LEARN_SERVED_WEEKLY_MAX", _DEFAULT_SERVED_WEEKLY_MAX)
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        logger.error(
+            "money_moves: LEARN_SERVED_WEEKLY_MAX=%r is not a positive integer — using %d",
+            raw, _DEFAULT_SERVED_WEEKLY_MAX,
+        )
+        return _DEFAULT_SERVED_WEEKLY_MAX
+    return raw
 
 
 def _iso_published_at(value: Any) -> Optional[str]:
@@ -59,7 +172,7 @@ def _iso_published_at(value: Any) -> Optional[str]:
             .isoformat()
             .replace("+00:00", "Z")
         )
-    except (ValueError, TypeError) as exc:
+    except (ValueError, TypeError, OverflowError) as exc:
         logger.warning(
             "money_moves: unparseable published_at %r (%s: %s) — leaving the article on its "
             "publishedDaysAgo estimate",
@@ -107,6 +220,129 @@ def _has_waiters(fut: asyncio.Future) -> bool:
         return True
 
 
+# One served article: the raw row (columns) beside the content blob it overlays.
+_Entry = Tuple[Dict[str, Any], Dict[str, Any]]
+
+
+def _apply_archive_cap(entries: List[_Entry], limit: int) -> List[_Entry]:
+    """Serve only the newest `limit` weekly pieces; bundle rows always (plan §1.10, 1c).
+
+    Newest = `published_at` descending, then sort_order ascending (a newer Deep Dive has the
+    more negative sort_order), then slug — a total order, so two instances agree on the cut. A
+    weekly row with no usable `published_at` ranks as the oldest: it is the one to drop, never a
+    reason to drop a dated piece. The input order (the catalog order) is kept for what survives.
+    """
+    weekly = [e for e in entries if _row_source(e[0]) == SOURCE_WEEKLY]
+    if len(weekly) <= limit:
+        return entries
+
+    def newest_first(entry: _Entry) -> Tuple[int, float, int, str]:
+        row = entry[0]
+        when = _parse_instant(row.get("published_at"))
+        return (
+            0 if when else 1,
+            -when.timestamp() if when else 0.0,
+            _sort_key(row),
+            str(row.get("slug") or ""),
+        )
+
+    ranked = sorted(weekly, key=newest_first)
+    kept_ids = {id(e[1]) for e in ranked[:limit]}
+    held_back = [str(e[0].get("slug")) for e in ranked[limit:]]
+    logger.info(
+        "money_moves: archive rule — serving the newest %d of %d weekly pieces; holding back "
+        "%d (newest first: %s)",
+        limit, len(weekly), len(held_back), ", ".join(held_back[:10]),
+    )
+    return [e for e in entries if _row_source(e[0]) != SOURCE_WEEKLY or id(e[1]) in kept_ids]
+
+
+def _is_flagged(row: Dict[str, Any], content: Dict[str, Any]) -> bool:
+    """Whether the row ASKS to be featured. The `is_featured` column is authoritative; the
+    blob's `isFeatured` is the fallback only when the column is absent or NULL. Only a real
+    `True` counts — a non-boolean value (an int, a string from an out-of-band edit) is a
+    malformed flag, and a malformed flag must never put an article in the hero slot."""
+    blob = content.get("isFeatured")
+    column = row.get("is_featured")
+    if isinstance(column, bool):
+        if isinstance(blob, bool) and blob != column:
+            logger.warning(
+                "money_moves: content blob isFeatured=%s disagrees with column is_featured=%s "
+                "— column wins (id=%s slug=%s)",
+                blob, column, row.get("id"), row.get("slug"),
+            )
+        return column
+    if column is not None:
+        logger.warning(
+            "money_moves: non-boolean is_featured %r — treating the row as NOT featured "
+            "(id=%s slug=%s)",
+            column, row.get("id"), row.get("slug"),
+        )
+        return False
+    return blob is True
+
+
+def _ios_decodable(content: Dict[str, Any]) -> bool:
+    """slug and title are hard-required by the iOS DTO: an article without them is dropped on
+    decode, so featuring it would leave NO hero while a decodable flagged row was passed over."""
+    slug, title = content.get("slug"), content.get("title")
+    return (isinstance(slug, str) and bool(slug.strip())
+            and isinstance(title, str) and bool(title.strip()))
+
+
+def _apply_featured_rule(entries: List[_Entry]) -> Optional[str]:
+    """Serve exactly one `isFeatured: true` (or none); return the winner's slug.
+
+    `entries` arrive in catalog order — sort_order ascending, slug tie-break, the same total
+    order `_load` sorts by — so the FIRST eligible flagged entry is the lowest sort_order. Every
+    other entry is served `isFeatured: false`, whatever its blob or column said.
+    """
+    winner: Optional[str] = None
+    flagged_bundle: List[str] = []
+    for row, content in entries:
+        flagged = _is_flagged(row, content)
+        slug = content.get("slug")
+        # Both spellings: a Studio edit can leave the blob's slug and the column apart. Only
+        # strings — a malformed (unhashable) blob slug must cost this row, not the catalog.
+        names = {s for s in (slug, row.get("slug")) if isinstance(s, str)}
+        if flagged and _row_source(row) == SOURCE_BUNDLE:
+            flagged_bundle.append(str(slug))
+        if flagged and (names & NEVER_FEATURE):
+            logger.warning(
+                "money_moves: row slug=%s is flagged featured but is on NEVER_FEATURE — served "
+                "isFeatured=false (clear its is_featured column)",
+                slug,
+            )
+            flagged = False
+        if flagged and not _ios_decodable(content):
+            logger.warning(
+                "money_moves: flagged featured row id=%s slug=%s has no usable slug/title — iOS "
+                "would drop it, so it cannot be the hero",
+                row.get("id"), row.get("slug"),
+            )
+            flagged = False
+        if flagged and winner is None:
+            winner = str(slug)
+            content["isFeatured"] = True
+        else:
+            content["isFeatured"] = False
+    # Many flagged WEEKLY rows is the design (each published Deep Dive keeps its flag, so an
+    # unpublish falls back to the previous one). More than one flagged BUNDLE row is an
+    # authoring mistake in money_moves.json or a Studio edit: only the lowest sort_order shows.
+    if len(flagged_bundle) > 1:
+        logger.warning(
+            "money_moves: %d bundle rows are flagged is_featured (%s) — only the lowest "
+            "sort_order is served as the hero; fix money_moves.json and reseed",
+            len(flagged_bundle), ", ".join(flagged_bundle),
+        )
+    if winner is None and entries:
+        logger.warning(
+            "money_moves: no served article is featured — iOS falls back to the hero bundled in "
+            "the installed app build"
+        )
+    return winner
+
+
 class MoneyMovesContentService:
     # In-memory cache (content is near-static; refresh hourly).
     _cache: Optional[tuple[float, MoneyMovesResponse]] = None
@@ -120,6 +356,17 @@ class MoneyMovesContentService:
     # same gap for the empty-success path.
     _EMPTY_TTL_SECONDS = 30
     _inflight: Optional[asyncio.Future] = None
+    # Cache GENERATION (plan §1.10). Without it, a load that read the table just BEFORE a publish
+    # or unpublish would finish after the publisher's invalidate and re-cache the old rows for
+    # the full hour — an unpublished article served on, or a new Deep Dive missing. `invalidate`
+    # bumps it, and a load stores its result only if the generation it started under is current.
+    _generation: int = 0
+    # When the CURRENT cache's load STARTED (UTC) — what it may have missed is anything stamped
+    # after this — and when the in-flight load started. Compared by `sync_with_stamp`.
+    _built_at: Optional[datetime] = None
+    _inflight_started_at: Optional[datetime] = None
+    # `money_move_articles.source` missing (migration 204 not applied yet): ERROR once per process.
+    _source_column_missing_logged: bool = False
 
     async def get_money_moves(self) -> MoneyMovesResponse:
         cached = MoneyMovesContentService._cache
@@ -137,7 +384,10 @@ class MoneyMovesContentService:
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
+        generation = MoneyMovesContentService._generation
+        started_at = datetime.now(timezone.utc)
         MoneyMovesContentService._inflight = future
+        MoneyMovesContentService._inflight_started_at = started_at
         try:
             response = await self._load()
             # An empty load must never REPLACE a good catalog: prefer the stale-but-real one and
@@ -156,7 +406,9 @@ class MoneyMovesContentService:
                 # Nothing to fall back to. Serve it, but cache it only briefly (_EMPTY_TTL_SECONDS)
                 # so the catalog self-heals as soon as the rows are back.
                 logger.warning("money_moves: load returned 0 articles and no prior cache to keep")
-            MoneyMovesContentService._cache = (time.time(), response)
+            # Still answered to this load's own caller and joiners below — they asked before the
+            # change, so the rows they get are no staler than a cache hit would have been.
+            self._store_if_current(generation, started_at, response)
             if not future.done():
                 future.set_result(response)
             return response
@@ -186,12 +438,98 @@ class MoneyMovesContentService:
                     future.cancel()
             raise
         finally:
-            MoneyMovesContentService._inflight = None
+            # Only if the slot is still OURS: `invalidate` detaches an in-flight load, and the
+            # caller after it may already have registered a fresh one. Clearing that one would
+            # let a third caller start a duplicate load instead of joining it.
+            if MoneyMovesContentService._inflight is future:
+                MoneyMovesContentService._inflight = None
+                MoneyMovesContentService._inflight_started_at = None
 
     @classmethod
     def _ttl_for(cls, response: MoneyMovesResponse) -> int:
         """Full TTL for a real catalog; a short one for an empty result so it self-heals."""
         return cls._TTL_SECONDS if response.articles else cls._EMPTY_TTL_SECONDS
+
+    @classmethod
+    def _store_if_current(
+        cls, generation: int, started_at: datetime, response: MoneyMovesResponse,
+    ) -> bool:
+        """Cache `response` only if no `invalidate` ran since its load began."""
+        if cls._generation != generation:
+            logger.info(
+                "money_moves: the cache was invalidated while this load ran (generation %d -> "
+                "%d) — answering its own callers but NOT caching its %d articles",
+                generation, cls._generation, len(response.articles),
+            )
+            return False
+        cls._cache = (time.time(), response)
+        cls._built_at = started_at
+        return True
+
+    @classmethod
+    def invalidate(cls, reason: str) -> None:
+        """Drop the cached catalog so the next request reads the table (publish / unpublish).
+
+        Bumps the generation, clears the cache, and DETACHES the in-flight load: it keeps running
+        and still answers the callers already waiting on it, but it will not store its result,
+        and the next caller starts a fresh load instead of joining one that read the old rows.
+        Process-local — every other instance converges through `sync_with_stamp` on its tick.
+        """
+        cls._generation += 1
+        detached = cls._inflight is not None
+        cls._cache = None
+        cls._built_at = None
+        cls._inflight = None
+        cls._inflight_started_at = None
+        logger.info(
+            "money_moves: cache invalidated (%s) — generation %d%s",
+            reason, cls._generation, "; detached an in-flight load" if detached else "",
+        )
+
+    @classmethod
+    def sync_with_stamp(cls, stamp: Union[str, datetime, None]) -> bool:
+        """Invalidate when the ledger changed after this instance's cache was built.
+
+        `stamp` is the ledger's max(published_at, unpublished_at): the last moment ANY instance
+        changed what is served. Publish and unpublish invalidate only the instance that ran them,
+        so during a Railway deploy overlap (or with a second instance) the other one would serve
+        the old catalog for up to the hour-long TTL. Each instance's tick calls this instead.
+
+        Compared against the moment the cached load STARTED (and the in-flight load's start, if
+        one is running), less `_STAMP_SKEW_SECONDS` for clock skew between instances. Returns
+        whether it invalidated. A None stamp (nothing ever published) is a no-op; an
+        unparseable one is logged and ignored — the TTL still bounds the staleness.
+        """
+        if stamp is None:
+            return False
+        changed_at = _parse_instant(stamp)
+        if changed_at is None:
+            logger.warning(
+                "money_moves: sync_with_stamp got an unparseable ledger stamp %r — not "
+                "invalidating (the %ds TTL still bounds staleness)",
+                stamp, cls._TTL_SECONDS,
+            )
+            return False
+        skew = timedelta(seconds=_STAMP_SKEW_SECONDS)
+        now = datetime.now(timezone.utc)
+        if changed_at > now + skew:
+            # Still honoured (fail toward freshness), but a stamp from the future means a bad
+            # ledger value or a skewed clock, and it will invalidate on every tick until fixed.
+            logger.warning(
+                "money_moves: ledger stamp %s is in the future (now %s) — check the publisher's "
+                "clock / the ledger row", changed_at.isoformat(), now.isoformat(),
+            )
+        built_at = cls._built_at if cls._cache is not None else None
+        inflight_at = cls._inflight_started_at if cls._inflight is not None else None
+        stale_cache = built_at is not None and changed_at > built_at - skew
+        stale_load = inflight_at is not None and changed_at > inflight_at - skew
+        if not (stale_cache or stale_load):
+            return False
+        cls.invalidate(
+            f"ledger stamp {changed_at.isoformat()} is newer than the "
+            f"{'cache built at ' + built_at.isoformat() if stale_cache else 'in-flight load'}"
+        )
+        return True
 
     async def _load(self) -> MoneyMovesResponse:
         rows = await asyncio.to_thread(self._fetch_rows)
@@ -201,7 +539,7 @@ class MoneyMovesContentService:
         # therefore render in a different order on each side, and in a different order between two
         # launches of the same build. The slug tiebreak is mirrored in MoneyMovesContentStore.swift.
         rows.sort(key=lambda r: (_sort_key(r), str(r.get("slug") or "")))
-        articles: List[Dict[str, Any]] = []
+        entries: List[_Entry] = []
         for row in rows:
             content = row.get("content")
             # Guard the SHAPE, not just truthiness: a truthy but non-dict content (a JSON list
@@ -351,26 +689,63 @@ class MoneyMovesContentService:
                     )
                 content["sortOrder"] = row_sort
 
-                articles.append(content)
+                entries.append((row, content))
             except Exception as exc:  # noqa: BLE001 — one bad row must not collapse the whole catalog
                 logger.warning(
                     "money_moves: skipping malformed row slug=%s: %s: %s",
                     row.get("slug"), type(exc).__name__, exc,
                 )
                 continue
-        return MoneyMovesResponse(articles=articles)
+        # After the per-row overlays, so a malformed row (already skipped) neither takes an
+        # archive slot nor the hero. Cap FIRST: a weekly piece that is not served must not be
+        # the hero either.
+        entries = _apply_archive_cap(entries, _served_weekly_max())
+        _apply_featured_rule(entries)
+        return MoneyMovesResponse(articles=[content for _row, content in entries])
 
     def _fetch_rows(self) -> List[dict]:
         sb = get_supabase()
-        result = (
-            sb.table("money_move_articles")
-            # `title` is fetched for the same reason as `slug`: it is a HARD-REQUIRED field on the
-            # iOS DTO, so a blob that lost it decodes to nothing and the article silently vanishes
-            # client-side. The column is NOT NULL, so it is always a usable fallback.
-            .select("id, slug, title, sort_order, audio_url, audio_duration_seconds, "
-                    "image_url, published_at, content")
-            .execute()
-        )
+        # `title` is fetched for the same reason as `slug`: it is a HARD-REQUIRED field on the
+        # iOS DTO, so a blob that lost it decodes to nothing and the article silently vanishes
+        # client-side. The column is NOT NULL, so it is always a usable fallback.
+        # `is_featured` is the authoritative hero flag and `source` (migration 204) tells a
+        # weekly piece from a bundle article — both read by the featured and archive rules.
+        # Two LITERAL lists, not one string built twice: `test_money_moves_art_parity` reads the
+        # SELECT itself, and `test_money_moves_content_service` pins the fallback to this list
+        # minus `source`, so the two cannot drift apart.
+        try:
+            result = (
+                sb.table("money_move_articles")
+                .select("id, slug, title, sort_order, audio_url, audio_duration_seconds, "
+                        "image_url, published_at, is_featured, source, content")
+                .execute()
+            )
+        except Exception as exc:
+            if not _is_missing_source_column(exc):
+                raise
+            # Deploy order: this code can reach production before the owner applies migration
+            # 204. The catalog must never go dark for that — re-read without the column, which
+            # serves every row as a bundle row (correct: no weekly row exists before 204).
+            cls = MoneyMovesContentService
+            if not cls._source_column_missing_logged:
+                cls._source_column_missing_logged = True
+                logger.error(
+                    "money_moves: money_move_articles.source does not exist (%s: %s) — apply "
+                    "migration 204_learn_weekly_pipeline.sql; serving every row as a bundle row "
+                    "until then",
+                    type(exc).__name__, exc,
+                )
+            else:
+                logger.warning(
+                    "money_moves: money_move_articles.source still missing — re-read without it "
+                    "(apply migration 204)"
+                )
+            result = (
+                sb.table("money_move_articles")
+                .select("id, slug, title, sort_order, audio_url, audio_duration_seconds, "
+                        "image_url, published_at, is_featured, content")
+                .execute()
+            )
         return result.data or []
 
 

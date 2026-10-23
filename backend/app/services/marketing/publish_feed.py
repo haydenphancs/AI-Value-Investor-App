@@ -18,8 +18,10 @@ with a fenced, merging write (`run_service.transition_post`), exactly like the r
   `metadata.alert_notified_at`.
 
 A Telegram failure here is logged and retried next cycle; it NEVER changes a post's status (the
-publisher owns statuses). Plain text only, no `parse_mode`. Bounded per tick, paced with the review
-sweep's spacing, and it shares the review sweep's flood-control back-off.
+publisher owns statuses). Plain text only, no `parse_mode`. Bounded per tick, paced by the ONE pacer every
+sender to the review chat shares (`telegram_pacing.PACER`, 2026-10-22 — so the feed's first message is
+spaced from the review sweep's last one too), and it shares the one flood-control back-off
+(`review_service._rate_limited_until`, which forwards to `telegram_pacing`).
 
 Quiet Telegram (2026-10-15, plan Batch 1 item 9): "Posted" replies and the "Retracted" fallback message
 go out SILENTLY (`disable_notification`: a notification with no sound) — they report what the owner
@@ -38,7 +40,7 @@ from typing import Any, Dict, List, Optional
 from app.integrations import telegram
 from app.integrations.telegram import TelegramException, TelegramRateLimitException
 from app.schemas.marketing import POST_FORMATS
-from app.services.marketing import outlets, review_service
+from app.services.marketing import outlets, review_service, telegram_pacing
 from app.services.marketing.review_service import (
     _Pacer,
     _et_clock,
@@ -137,7 +139,8 @@ async def feed_cycle() -> Dict[str, int]:
         counters["rate_limited"] = 1
         return counters
     svc = get_marketing_run_service()
-    pacer = _Pacer()
+    # The shared pacer (one per process): spaced from — and stopped by a 429 of — the other senders.
+    pacer: _Pacer = telegram_pacing.PACER
     budget = FEED_SEND_LIMIT
     try:
         # 1. posted

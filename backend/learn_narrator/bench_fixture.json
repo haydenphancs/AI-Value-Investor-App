@@ -1,0 +1,282 @@
+{
+ "description": "Phase-0 narrator benchmark fixture (plan 'Wiser weekly content engine'). The A/B part is the committed catalog text of how-amazon-built-its-moat (all of it) and the first 9 narration blocks of costcos-membership-magic, in clone_learn_audio.narration_blocks order, so the render can be compared by ear with the published catalog clips (A5). The worst cases are written for the gate: a 75-word block dense with figures, a 3-word block, acronyms and em-dashes. Never published.",
+ "source_file": "frontend/ios/ios/Resources/MoneyMoves/money_moves.json @ 4544fb96",
+ "source_sha256": "a98172eaf2d096f90de2ded98a7ad20b78a0ddd69734e54a9da4fae5434ace0b",
+ "ab_segments": {
+  "how-amazon-built-its-moat": [
+   0,
+   32
+  ],
+  "costcos-membership-magic": [
+   32,
+   41
+  ]
+ },
+ "words": 1596,
+ "blocks": [
+  {
+   "i": 0,
+   "role": "context",
+   "source": "how-amazon-built-its-moat",
+   "text": "How Amazon Built Its Moat"
+  },
+  {
+   "i": 1,
+   "role": "context",
+   "source": "how-amazon-built-its-moat",
+   "text": "Relentless reinvestment, a self-reinforcing flywheel, and a cloud empire turned an online bookstore into one of the widest moats in business."
+  },
+  {
+   "i": 2,
+   "role": "context",
+   "source": "how-amazon-built-its-moat",
+   "text": "From Bookstore to Everything Store"
+  },
+  {
+   "i": 3,
+   "role": "body",
+   "source": "how-amazon-built-its-moat",
+   "text": "In 1994, Amazon was a website that sold books out of a garage. Three decades later it moves a meaningful share of everything the world buys online, runs the backbone of the modern internet, and produces films watched by hundreds of millions. The interesting question for an investor isn't how Amazon got big — plenty of companies get big. The question is why it has stayed nearly impossible to dislodge. That durability — the thing Warren Buffett calls an economic moat — is what we're going to unpack."
+  },
+  {
+   "i": 4,
+   "role": "body",
+   "source": "how-amazon-built-its-moat",
+   "text": "A moat is a structural advantage that protects a company's profits from competitors, the way a water-filled trench once protected a castle. Some moats come from a brand people trust. Some come from a network that grows more valuable as it gets bigger. Amazon is unusual because it stacked several moats on top of one another, and then spent twenty years deepening all of them at once. Understanding how it did that is a masterclass in long-term competitive strategy."
+  },
+  {
+   "i": 5,
+   "role": "context",
+   "source": "how-amazon-built-its-moat",
+   "text": "The Flywheel"
+  },
+  {
+   "i": 6,
+   "role": "body",
+   "source": "how-amazon-built-its-moat",
+   "text": "At the center of Amazon's strategy is an idea Jeff Bezos famously sketched on a napkin: the flywheel. The logic goes like this. Lower prices attract more customers. More customers attract more third-party sellers who want access to that traffic. More sellers mean more selection and a better experience, which attracts even more customers. That growth lets Amazon spread its fixed costs over a larger base, lowering its cost structure — which lets it lower prices again, and the whole loop spins faster."
+  },
+  {
+   "i": 7,
+   "role": "body",
+   "source": "how-amazon-built-its-moat",
+   "text": "A flywheel is heavy and slow to start, but once it's spinning, each push adds momentum. After enough turns, a competitor isn't fighting a company — it's fighting the momentum of an entire system."
+  },
+  {
+   "i": 8,
+   "role": "body",
+   "source": "how-amazon-built-its-moat",
+   "text": "What makes this powerful is that Amazon deliberately fed the flywheel instead of harvesting it. For years it took profits it could have paid out and reinvested them into lower prices, faster shipping, and new categories. Wall Street often punished the thin margins. Bezos didn't blink, because every turn of the flywheel widened the gap between Amazon and everyone else."
+  },
+  {
+   "i": 9,
+   "role": "item",
+   "source": "how-amazon-built-its-moat",
+   "text": "Lower prices → more customers"
+  },
+  {
+   "i": 10,
+   "role": "item",
+   "source": "how-amazon-built-its-moat",
+   "text": "More customers → more third-party sellers"
+  },
+  {
+   "i": 11,
+   "role": "item",
+   "source": "how-amazon-built-its-moat",
+   "text": "More sellers → more selection and a better experience"
+  },
+  {
+   "i": 12,
+   "role": "item",
+   "source": "how-amazon-built-its-moat",
+   "text": "Greater scale → lower cost structure → lower prices again"
+  },
+  {
+   "i": 13,
+   "role": "context",
+   "source": "how-amazon-built-its-moat",
+   "text": "Scale Economics and the Logistics Moat"
+  },
+  {
+   "i": 14,
+   "role": "body",
+   "source": "how-amazon-built-its-moat",
+   "text": "The most visible moat is physical. Amazon has spent tens of billions of dollars building a fulfillment network — warehouses, sortation centers, delivery stations, and a last-mile fleet — that blankets its major markets. Reproducing that footprint would cost a rival an enormous amount of money and many years, and by the time they finished, Amazon would be further ahead."
+  },
+  {
+   "i": 15,
+   "role": "body",
+   "source": "how-amazon-built-its-moat",
+   "text": "Fulfillment as a Product"
+  },
+  {
+   "i": 16,
+   "role": "body",
+   "source": "how-amazon-built-its-moat",
+   "text": "Amazon then turned that cost center into a moat that pays for itself. Through Fulfillment by Amazon, independent sellers store inventory in Amazon's warehouses and let Amazon handle picking, packing, shipping, and returns. The sellers get Prime's fast delivery; Amazon gets fees, higher warehouse utilization, and even more selection for shoppers. The same infrastructure serves two customers at once, and each new seller makes the network a little more efficient."
+  },
+  {
+   "i": 17,
+   "role": "body",
+   "source": "how-amazon-built-its-moat",
+   "text": "Every fulfillment center Amazon adds shortens the distance to the customer, which lowers shipping cost and delivery time — the two things shoppers care about most. Scale here isn't just bigger; it's structurally cheaper."
+  },
+  {
+   "i": 18,
+   "role": "context",
+   "source": "how-amazon-built-its-moat",
+   "text": "Prime: The Habit That Locks You In"
+  },
+  {
+   "i": 19,
+   "role": "body",
+   "source": "how-amazon-built-its-moat",
+   "text": "If logistics is the moat's outer wall, Prime is the drawbridge that keeps customers inside. For an annual fee, members get fast free shipping, streaming video and music, and a growing list of perks. The genius of Prime isn't any single benefit — it's the psychology of the subscription. Once you've paid for membership, shopping anywhere else feels like leaving money on the table, so you default to Amazon for more and more of your purchases."
+  },
+  {
+   "i": 20,
+   "role": "body",
+   "source": "how-amazon-built-its-moat",
+   "text": "We want Prime to be such a good value you'd be irresponsible not to be a member."
+  },
+  {
+   "i": 21,
+   "role": "body",
+   "source": "how-amazon-built-its-moat",
+   "text": "That habit is a switching cost, and it compounds. Prime members spend far more per year than non-members and renew at remarkably high rates. Bundling in video and music raises the perceived value of the membership while giving you one more reason to stay inside the ecosystem. The result is a recurring, predictable relationship with hundreds of millions of households — exactly the kind of customer captivity that makes a moat durable."
+  },
+  {
+   "i": 22,
+   "role": "context",
+   "source": "how-amazon-built-its-moat",
+   "text": "AWS: The Hidden Profit Engine"
+  },
+  {
+   "i": 23,
+   "role": "body",
+   "source": "how-amazon-built-its-moat",
+   "text": "Here's the twist most people miss: the retail business you see is not where Amazon makes most of its money. In the 2000s, Amazon realized the computing infrastructure it had built to run its own store could be rented out to other companies. That insight became Amazon Web Services — and it quietly grew into one of the most profitable businesses in technology."
+  },
+  {
+   "i": 24,
+   "role": "body",
+   "source": "how-amazon-built-its-moat",
+   "text": "AWS has its own moat. Cloud computing rewards scale: the more customers AWS serves, the more it can invest in data centers, custom chips, and new services, and the lower its unit costs fall. Once a company builds its software on AWS, moving away is expensive and risky — the same switching-cost dynamic as Prime, but for enterprises. And because AWS throws off enormous operating profit, it funds the aggressive, low-margin reinvestment that keeps the retail flywheel spinning."
+  },
+  {
+   "i": 25,
+   "role": "body",
+   "source": "how-amazon-built-its-moat",
+   "text": "AWS is the engine that pays for the flywheel. Cloud profits subsidize low prices and fast shipping in retail — letting Amazon out-invest rivals who have to make each business stand on its own."
+  },
+  {
+   "i": 26,
+   "role": "context",
+   "source": "how-amazon-built-its-moat",
+   "text": "What Investors Can Learn"
+  },
+  {
+   "i": 27,
+   "role": "body",
+   "source": "how-amazon-built-its-moat",
+   "text": "Amazon's story is really a story about durable competitive advantage, and its lessons travel far beyond one company. First, the widest moats are usually stacked, not single. Amazon combined scale economics, network effects from its marketplace, switching costs from Prime and AWS, and a trusted brand — and reinforced each one with the others."
+  },
+  {
+   "i": 28,
+   "role": "body",
+   "source": "how-amazon-built-its-moat",
+   "text": "The Patience Premium"
+  },
+  {
+   "i": 29,
+   "role": "body",
+   "source": "how-amazon-built-its-moat",
+   "text": "Second, moats are built with patience. Amazon traded near-term profit for long-term position for two decades, and tolerated being misunderstood the whole time. As an investor, the takeaway is to look past a single year's margins and ask whether a company is widening or narrowing its competitive advantage. Bezos called this mindset staying 'Day 1' — always acting like an ambitious startup, never a complacent incumbent."
+  },
+  {
+   "i": 30,
+   "role": "body",
+   "source": "how-amazon-built-its-moat",
+   "text": "No moat is permanent. Regulators, new technology, and a company's own size can all erode an advantage. A wide moat is a reason to pay attention — not a reason to stop thinking."
+  },
+  {
+   "i": 31,
+   "role": "body",
+   "source": "how-amazon-built-its-moat",
+   "text": "So when you study a potential investment, borrow Amazon's lens. Ask what protects this business five and ten years from now, whether that protection is getting stronger, and whether management will reinvest today to defend it tomorrow. Find a company quietly turning a flywheel like that, run by people who think in decades, and you may have found a moat worth owning."
+  },
+  {
+   "i": 32,
+   "role": "context",
+   "source": "costcos-membership-magic",
+   "text": "Costco's Membership Magic"
+  },
+  {
+   "i": 33,
+   "role": "context",
+   "source": "costcos-membership-magic",
+   "text": "Why a warehouse that barely profits on what it sells is one of the most loyal businesses in retail."
+  },
+  {
+   "i": 34,
+   "role": "context",
+   "source": "costcos-membership-magic",
+   "text": "A Store That Doesn't Want a Markup"
+  },
+  {
+   "i": 35,
+   "role": "body",
+   "source": "costcos-membership-magic",
+   "text": "Most retailers live and die on markup — buy low, sell higher, keep the difference. Costco runs on a stranger idea: sell as cheaply as it possibly can, capping most markups around fifteen percent when other retailers routinely take twenty-five, fifty, or more. On the goods themselves, Costco barely makes a profit. That sounds like a terrible way to run a store, until you see where the money actually comes from."
+  },
+  {
+   "i": 36,
+   "role": "body",
+   "source": "costcos-membership-magic",
+   "text": "The discipline is almost religious. Costco refuses to mark up any item beyond its internal cap, even when it could obviously charge more and customers would happily pay it. There's a famous story about the company negotiating a supplier price so low that it could have pocketed a fat margin — and passing nearly all of the savings to members instead. To an outsider that looks like leaving money on the table. To Costco it is the entire strategy: relentless proof that the lowest price in town is always inside its own doors."
+  },
+  {
+   "i": 37,
+   "role": "body",
+   "source": "costcos-membership-magic",
+   "text": "In a typical year, membership fees account for the large majority of Costco's operating profit. The merchandise nearly breaks even; the membership is the business."
+  },
+  {
+   "i": 38,
+   "role": "body",
+   "source": "costcos-membership-magic",
+   "text": "This flips retail on its head. Costco isn't really selling groceries and televisions for a profit — it's selling a membership, and using rock-bottom prices as the reason to renew it. Every dollar it chooses not to take in markup is a dollar of trust it banks with the member, and trust is what gets renewed each year."
+  },
+  {
+   "i": 39,
+   "role": "context",
+   "source": "costcos-membership-magic",
+   "text": "The Treasure Hunt"
+  },
+  {
+   "i": 40,
+   "role": "body",
+   "source": "costcos-membership-magic",
+   "text": "Walk into a Costco and you'll find only a few thousand distinct products, versus tens of thousands at a typical supermarket. That scarcity is deliberate. By stocking just one or two options in each category — often in enormous bulk — Costco concentrates its buying into a handful of items and orders them by the truckload."
+  },
+  {
+   "i": 41,
+   "role": "context",
+   "source": "worst_case:three_word",
+   "text": "Why It Matters"
+  },
+  {
+   "i": 42,
+   "role": "body",
+   "source": "worst_case:figures_75",
+   "text": "In fiscal 2023, Amazon reported $574.8 billion in net sales, up 12% from $514.0 billion in 2022. AWS contributed $90.8 billion, about 16% of the total, yet earned $24.6 billion of the company's $36.9 billion operating income, roughly 67%. Purchases of property and equipment reached $52.7 billion, while free cash flow swung from negative $11.6 billion in 2022 to positive $36.8 billion in 2023. Headcount ended the year near 1,525,000 full-time and part-time employees worldwide."
+  },
+  {
+   "i": 43,
+   "role": "body",
+   "source": "worst_case:acronyms_dashes",
+   "text": "AWS, the S&P 500, the SEC's 10-K — and the FTC — all shape how investors read AMZN's P/E, its EBITDA and its U.S. retail margin in Q4."
+  }
+ ]
+}

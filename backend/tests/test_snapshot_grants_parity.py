@@ -72,7 +72,9 @@ _PENDING_SERVICE_ROLE_GRANTS: dict[str, str] = {}
 # Tables whose anon/authenticated grant a not-yet-dumped migration REVOKEs.
 # (169: ticker_news_cache / user_settings / device_tokens — landed, see above.)
 # (174: trending_themes' 081 read grant — applied and re-dumped 2026-09-27, landed.)
-_PENDING_CLIENT_REVOKES: dict[str, str] = {}
+# 204 (written 2026-10-22, owner applies): money_move_articles' 065 read grant. Delete the
+# entry once the re-dumped snapshot no longer shows `GRANT SELECT … TO anon`.
+_PENDING_CLIENT_REVOKES: dict[str, str] = {"money_move_articles": "204"}
 
 _RE_TABLE = re.compile(r"^CREATE TABLE (?:IF NOT EXISTS )?public\.([a-z0-9_]+)\s*\(", re.M)
 _RE_VIEW = re.compile(r"^CREATE (?:OR REPLACE )?VIEW public\.([a-z0-9_]+)\b", re.M)

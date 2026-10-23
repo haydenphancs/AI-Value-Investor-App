@@ -329,6 +329,27 @@ class ErrorCode(str, Enum):
     # is never mislabelled FMP_RATE_LIMITED ("429") or FMP_UNAVAILABLE ("timeout").
     MARKETING_PUBLISHER_UNAVAILABLE = "MARKETING_PUBLISHER_UNAVAILABLE"
 
+    # ── Learn weekly narrator — WORKER-FACING ONLY (plan 2026-10-22, §1.8) ─────
+    # Emitted by /api/v1/internal/learn/*, whose only caller is the standalone narrator worker
+    # (backend/learn_narrator/). iOS never reaches those routes, so the LEARN_NARRATOR_* codes have
+    # NO AppError branch on purpose — /list-error-codes will list them as unmapped; that is correct,
+    # not drift (pinned by tests/test_learn_error_codes_walk.py, like marketing's worker-only list).
+    # They exist so a ledger or contract failure is legible in the worker's log and in Sentry instead
+    # of arriving mislabelled as REPORT_GENERATION_FAILED (the classifier's generic default) or as an
+    # FMP outage ("timeout" / "429" in a message). Raised as app/services/learn_weekly/errors.py's
+    # classes; 404/409/422 are terminal for the worker's current call, 503 is what it retries.
+    LEARN_NARRATOR_NOT_FOUND = "LEARN_NARRATOR_NOT_FOUND"            # job/piece id unknown — a worker bug
+    # A heartbeat / upload / complete / fail on a job the caller's claim no longer holds (re-claimed
+    # after its lease ran out, cancelled because the piece expired or was rejected, or finished).
+    LEARN_NARRATOR_JOB_NOT_HELD = "LEARN_NARRATOR_JOB_NOT_HELD"
+    # The request breaks the internal API contract (an undeclared engine, a timing table that does
+    # not match the server's split or the seconds-per-word band, a forbidden status). Never retried.
+    LEARN_NARRATOR_REQUEST_INVALID = "LEARN_NARRATOR_REQUEST_INVALID"
+    # The uploaded narration is not what the job registered (size, type, bytes-per-second band).
+    LEARN_NARRATOR_ASSET_MISMATCH = "LEARN_NARRATOR_ASSET_MISMATCH"
+    LEARN_NARRATOR_ASSET_MISSING = "LEARN_NARRATOR_ASSET_MISSING"    # worker said uploaded; bucket says no
+    LEARN_NARRATOR_LEDGER_ERROR = "LEARN_NARRATOR_LEDGER_ERROR"      # Supabase/Storage failed — retry
+
 
 # Default user-facing copy per code. Endpoints can override per-call.
 _USER_MESSAGES: Dict[ErrorCode, str] = {
@@ -359,6 +380,21 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.MARKETING_PUBLISHER_UNAVAILABLE: (
         "A social platform could not be reached or refused the post; the publisher records the outcome on the post."
     ),
+    # Learn narrator API — no human reads these either; the strings are for the narrator worker's log.
+    ErrorCode.LEARN_NARRATOR_NOT_FOUND: "Narration job not found.",
+    ErrorCode.LEARN_NARRATOR_JOB_NOT_HELD: (
+        "The narration job is not held by this claim any more; stop work on it and claim again."
+    ),
+    ErrorCode.LEARN_NARRATOR_REQUEST_INVALID: (
+        "The narrator request breaks the internal API contract; it will not succeed on retry."
+    ),
+    ErrorCode.LEARN_NARRATOR_ASSET_MISMATCH: (
+        "The uploaded narration does not match what the job registered; it was refused."
+    ),
+    ErrorCode.LEARN_NARRATOR_ASSET_MISSING: (
+        "The uploaded narration could not be found in the media bucket; re-upload it."
+    ),
+    ErrorCode.LEARN_NARRATOR_LEDGER_ERROR: "The Learn ledger could not be updated; retry.",
     ErrorCode.EMAIL_NOT_CONFIRMED: (
         "Please confirm your email address first. Check your inbox for the "
         "confirmation link \u2014 including your spam folder."
@@ -734,6 +770,14 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.MARKETING_TEMPLATE_REFUSED: 409,
     ErrorCode.MARKETING_REVIEW_BOT_UNAVAILABLE: 503,
     ErrorCode.MARKETING_PUBLISHER_UNAVAILABLE: 503,
+    # Learn narrator API — the marketing worker's contract: 404/409/422 are terminal for the worker's
+    # current call (it records the failure; the next cron run re-claims), 503 is what it retries.
+    ErrorCode.LEARN_NARRATOR_NOT_FOUND: 404,
+    ErrorCode.LEARN_NARRATOR_JOB_NOT_HELD: 409,
+    ErrorCode.LEARN_NARRATOR_REQUEST_INVALID: 422,
+    ErrorCode.LEARN_NARRATOR_ASSET_MISMATCH: 409,
+    ErrorCode.LEARN_NARRATOR_ASSET_MISSING: 409,
+    ErrorCode.LEARN_NARRATOR_LEDGER_ERROR: 503,
 }
 
 
@@ -851,6 +895,38 @@ _SEC_EDGAR_EXCEPTION_NAMES = frozenset({
 })
 
 
+#: app/services/learn_weekly/errors.py — the module its classes must be DEFINED in to be matched.
+_LEARN_ERRORS_MODULE = "app.services.learn_weekly.errors"
+#: Its classes by EXACT name → code (status from `_DEFAULT_STATUS`). The bases map to the retryable 503:
+#: raised as themselves they mean "the server could not complete it" (errors.py's docstring).
+_LEARN_EXCEPTION_CODES: Dict[str, ErrorCode] = {
+    "LearnNarratorNotFound": ErrorCode.LEARN_NARRATOR_NOT_FOUND,
+    "LearnNarratorJobNotHeld": ErrorCode.LEARN_NARRATOR_JOB_NOT_HELD,
+    "LearnNarratorRequestInvalid": ErrorCode.LEARN_NARRATOR_REQUEST_INVALID,
+    "LearnNarratorAssetMismatch": ErrorCode.LEARN_NARRATOR_ASSET_MISMATCH,
+    "LearnNarratorAssetMissing": ErrorCode.LEARN_NARRATOR_ASSET_MISSING,
+    "LearnNarratorLedgerError": ErrorCode.LEARN_NARRATOR_LEDGER_ERROR,
+    "LearnNarratorError": ErrorCode.LEARN_NARRATOR_LEDGER_ERROR,
+    "LearnWeeklyError": ErrorCode.LEARN_NARRATOR_LEDGER_ERROR,
+}
+
+
+def _learn_exception_code(exc: BaseException) -> Optional[ErrorCode]:
+    """The LEARN_NARRATOR_* code of a Learn weekly exception, else None.
+
+    By NAME, like every branch of `classify_exception` (no import of the Learn package here), but along
+    the MRO and only for classes defined in `_LEARN_ERRORS_MODULE`: the nearest Learn class in the
+    hierarchy decides, so a subclass declared in any other module (`class WriterCapsReached(
+    LearnWeeklyError)` in writer.py) gets its parent's code with no branch of its own, and a same-named
+    class defined anywhere else is never mistaken for one of ours."""
+    for klass in type(exc).__mro__:
+        if klass.__module__ == _LEARN_ERRORS_MODULE:
+            code = _LEARN_EXCEPTION_CODES.get(klass.__name__)
+            if code is not None:
+                return code
+    return None
+
+
 def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
     """Inspect an exception and return (error_code, default http status).
 
@@ -863,6 +939,16 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
     cls = type(exc).__name__.lower()
     cls_module = type(exc).__module__.lower()
     msg = str(exc).lower()
+
+    # ── Learn weekly narrator API (app/services/learn_weekly/errors.py) ──────────
+    # FIRST, ahead of every heuristic and even the profile check below: these are our own classes,
+    # matched exactly along the MRO (`_learn_exception_code`), and their messages carry ids, stages and
+    # upstream text — a "timeout" or "429" in one would otherwise be filed as an FMP outage, a
+    # "profile" in a ValueError subclass as TICKER_NOT_FOUND, and anything else as
+    # REPORT_GENERATION_FAILED, which the narrator worker would read as retryable.
+    learn_code = _learn_exception_code(exc)
+    if learn_code is not None:
+        return learn_code, _DEFAULT_STATUS[learn_code]
 
     # ── Profile-not-found from collector / service ────────────────────
     if isinstance(exc, ValueError) and "profile" in msg:
@@ -915,9 +1001,11 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
     # By NAME, up here with the other marketing classes and ahead of every heuristic: a 429's
     # message says "HTTP 429" (→ FMP_RATE_LIMITED below) and a timeout's says "timed out", and
     # neither is the market-data provider. A refused request (4xx) is permanent for that
-    # request, so it is 502 rather than the retryable 503.
+    # request, so it is 502 rather than the retryable 503 — and so is a file too large to send by
+    # URL (`TelegramFileTooLargeError`, refused before any request: its size will not shrink). The
+    # shared pacer's `TelegramFloodControlActive` (a back-off still in force) stays 503: retry later.
     if cls.startswith("telegram"):
-        if "requesterror" in cls or "notconfigured" in cls:
+        if "requesterror" in cls or "notconfigured" in cls or "toolarge" in cls:
             return ErrorCode.MARKETING_REVIEW_BOT_UNAVAILABLE, 502
         return (
             ErrorCode.MARKETING_REVIEW_BOT_UNAVAILABLE,

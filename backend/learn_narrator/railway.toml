@@ -1,0 +1,34 @@
+# learn_narrator/railway.toml — the RECORD of the Learn NARRATOR service's Railway settings.
+#
+# ⚠️ RAILWAY DOES NOT READ THIS FILE for a service like this one (config-as-code is deprecated and a
+# service created after 2026-08-28 cannot opt in — see marketing/railway.toml): the values below are
+# entered BY HAND in the dashboard (learn-narrator → Settings) and written down here. Keep the two in
+# step. tests/test_learn_narrator_worker.py reads the cron, restart and watch values from this file.
+#   Root Directory  /backend/learn_narrator   (the build context; Railway auto-detects its Dockerfile)
+#   Cron Schedule   */20 * * * *              Restart Policy  Never        Healthcheck Path  (none)
+#   Watch Paths     /backend/learn_narrator/**                             Memory            8 GB
+#   vCPU            4 (the benchmark's A1/A2 bars were set on 4 vCPU / 8 GB)
+#
+# ⚠️ OWNER_TASKS rule: do NOT redeploy this service while a job is rendering (a deploy kills the
+# container; the job's lease expires and the server re-claims it, spending one of its re-claims).
+#
+# Environment the service needs — and nothing else; in particular NO Supabase key of any kind:
+#   LEARN_NARRATOR_API_BASE    https://caydexinvest.com (the web service's PUBLIC URL)
+#   LEARN_NARRATOR_API_TOKEN   same value as the web service's LEARN_NARRATOR_TOKEN
+#   LEARN_NARRATOR_THREADS     optional (default: the cgroup cpu.max quota)
+#   LEARN_NARRATOR_UPLOAD_APIKEY  optional Supabase PUBLISHABLE key for the signed PUT, only if
+#                              Storage turns out to require one
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+# Patterns are gitignore-style from the REPO root even with a Root Directory set — hence /backend/.
+watchPatterns = ["/backend/learn_narrator/**"]
+
+[deploy]
+# Every 20 minutes, UTC. A tick with nothing to do exits in seconds; a render holds the container
+# (Railway skips later ticks while it lives) and heartbeats the job's 10-minute lease every 60 s.
+cronSchedule = "*/20 * * * *"
+startCommand = "python -m learn_narrator.main"
+# Deliberately NO healthcheckPath: nothing listens.
+restartPolicyType = "never"

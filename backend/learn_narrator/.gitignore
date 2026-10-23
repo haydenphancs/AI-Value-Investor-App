@@ -1,0 +1,6 @@
+# Local-only artefacts of the narrator worker (the code, the fixture and the reference clip are tracked:
+# Railway builds the image from git).
+out/
+models/
+.cache/
+*.m4a

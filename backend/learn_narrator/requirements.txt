@@ -1,0 +1,27 @@
+# learn_narrator/requirements.txt — the Learn NARRATOR image (learn_narrator/Dockerfile). Not the web
+# image, not the marketing worker: chatterbox-tts pins numpy<2 / transformers 5.2.0, which neither
+# of those can share. Every transitive package is pinned in constraints.txt (applied with -c).
+#
+# torch AND torchaudio are installed by the Dockerfile FIRST, from the PyTorch CPU index
+# (--index-url https://download.pytorch.org/whl/cpu): the CPU wheels, never the CUDA ones
+# (the Dockerfile fails the build on any nvidia-* or triton package). The pins here keep the
+# resolver from replacing them.
+torch==2.6.0
+torchaudio==2.6.0
+# The catalog voice (Chatterbox clone, block mode) — the same version the catalog was voiced with.
+chatterbox-tts==0.1.7
+numpy==1.26.4
+transformers==5.2.0
+safetensors==0.5.3
+librosa==0.11.0
+scipy==1.17.1
+soundfile==0.14.0
+# The fallback engine (plan Phase 0): Kokoro-82M with its own word timestamps.
+kokoro==0.9.4
+misaki[en]==0.9.4
+# misaki loads spaCy's English model; installed from its release wheel (hash-checked) so a cron
+# container never downloads it.
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85
+# The internal API client (the worker's only network dependency).
+httpx==0.28.1
+huggingface_hub==1.33.0

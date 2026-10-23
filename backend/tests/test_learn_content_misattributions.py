@@ -45,10 +45,18 @@ from __future__ import annotations
 
 import json
 import re
-import unicodedata
 from pathlib import Path
 
 import pytest
+
+# The two rule lists (and their normaliser) live in `app/services/learn_content_rules.py` since
+# 2026-10-22: the Wiser weekly validators refuse a model draft with them at run time, and
+# production code must never import a test module. One copy, read by both.
+#   BANNED_PHRASES: wording whose only popular form is a misattribution or unsourced lore.
+#   ATTRIBUTION_REQUIRED: genuine wording, but only as these people's — the block using it must
+#   name all of them.
+from app.services.learn_content_rules import ATTRIBUTION_REQUIRED, BANNED_PHRASES
+from app.services.learn_content_rules import norm as _norm
 
 BACKEND = Path(__file__).resolve().parents[1]
 REPO = BACKEND.parent
@@ -65,37 +73,6 @@ PATH_MODELS = IOS / "Models/InvestorPathModels.swift"
 QUOTE_CARD = IOS / "Views/Molecules/InvestorQuoteCard.swift"
 PATH_VIEW_MODEL = IOS / "ViewModels/InvestorPathViewModel.swift"
 
-# Wording whose only popular form is a misattribution or unsourced lore (normalised substrings).
-BANNED_PHRASES = [
-    "eighth wonder",                                    # not Einstein (shipped: Journey description)
-    "einstein",                                         # in finance copy, only ever that myth
-    "compound interest is the most powerful",           # not Einstein
-    "most powerful force in the universe",              # not Einstein
-    "impatient to the patient",                         # no primary source (shipped: Journey card)
-    "irrational longer than you can remain solvent",    # not Keynes
-    "when the facts change",                            # not Keynes
-    "blood in the streets",                             # apocryphal Rothschild
-    "investment in knowledge pays",                     # not Franklin
-    "roughly right than precisely wrong",               # Carveth Read, pinned on Keynes/Buffett
-    "sells to optimists",                               # Jason Zweig's 2003 commentary, not Graham
-    "four most dangerous words",                        # Templeton via secondary sources only
-    "rolls royce",                                      # unsourced Buffett lore
-    "sitting in the shade",                             # unsourced Buffett lore
-    "make money while you sleep",                       # unsourced Buffett lore
-    "spend what is left after saving",                  # unsourced Buffett lore
-    "protection against ignorance",                     # unsourced Buffett lore
-    "best time to plant a tree",                        # misattributed proverb
-]
-
-# Genuine wording, but only as these people's: the block using it must name all of them.
-ATTRIBUTION_REQUIRED = {
-    # Buffett's rendering of Graham (1987 and 1993 Berkshire letters: "As Ben said: ...").
-    # Shipped credited to Graham alone.
-    "short run the market is a voting machine": ("buffett", "graham"),
-    # Buffett crediting Graham (2008 letter: "Long ago, Ben Graham taught me that ...").
-    "price is what you pay": ("buffett", "graham"),
-}
-
 # Keys whose values mirror a block's `text` sentence-by-sentence / word-by-word.
 READ_ALONG_KEYS = {"readAlong", "itemsReadAlong", "readAlongWords"}
 
@@ -109,14 +86,6 @@ VERIFIED_1991 = (
 # ---------------------------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------------------------
-
-def _norm(text: str) -> str:
-    """Casefold, straighten apostrophes, drop punctuation (same as the cover's test), so
-    "short-run," and "short run" match alike."""
-    text = unicodedata.normalize("NFKC", text).casefold().replace("’", "'").replace("'", "")
-    text = re.sub(r"[^\w\s]", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
 
 def _strip_comments(src: str) -> str:
     """Drop `/* */` blocks, whole-line `//` comments and trailing `//` tails.

@@ -1829,15 +1829,15 @@ grounding, §2 "No Google Search grounding"; a stored `tam_scope='global'` row r
 
 ### 7.4 Scheduled background jobs (the lifespan loops)
 
-Everything scheduled runs INSIDE the one web process: 26 tasks started by
-`app/main.py::_spawn` — 24 loops and two one-shots (the whale profile pre-warm and the Home
-boot warm), plus the Telegram webhook registration when the review bot is configured — and one
-Railway cron service (the marketing worker, §12.2). There is
+Everything scheduled runs INSIDE the one web process: 27 tasks started by
+`app/main.py::_spawn` — 25 loops and two one-shots (the whale profile pre-warm and the Home
+boot warm), plus the Telegram webhook registration when the review bot is configured — and two
+Railway cron services (the marketing worker, §12.2; the Learn narrator, §12.18). There is
 no pg_cron, no edge function, no Celery, and no iOS `BGTaskScheduler`. Two facts decide
 whether any of it runs:
 
 - **`ENVIRONMENT` gates every loop.** Unless it is `"development"` (the Settings default —
-  a laptop), all 26 start; in development only the notification trio can run, and only
+  a laptop), all 27 start; in development only the notification trio can run, and only
   behind `RUN_NOTIFICATION_JOBS_LOCALLY`. Railway must therefore set `ENVIRONMENT`, or
   refunds, subscription expiry and every push silently stop.
 - **Exactly ONE uvicorn worker** (`test_deploy_command_parity.py`). Most loops are unclaimed
@@ -1864,6 +1864,7 @@ whether any of it runs:
 | news-sentiment backfill (90 days per watched ticker, then a nightly 21:00 ET top-up) | every ~3 min, or at once when a ticker is added | `SENTIMENT_BACKFILL_ENABLED` (**off**) |
 | theme rotation / theme insights | 1st trading day 18:30 ET / trading days 18:15 ET | `THEME_ROTATION_ENABLED`, `THEME_INSIGHTS_ENABLED` (**off**) |
 | Trillion Club daily / weekly | 07:00 ET every day / Monday 08:00 ET | `TRILLION_CLUB_JOBS_ENABLED` (**off**) |
+| Wiser weekly engine (§12.18): cache sync, Thursday topic card (`learn_weekly_topic`, day claim), Friday 07:00 ET auto-pick, build (lease per piece, every tick), narration sweep, Telegram review, publish / expiry, Friday 15:00 ET deadman (`learn_weekly_deadman`, day claim) | a tick every 5 min | `LEARN_WEEKLY_ENABLED`, `LEARN_DEEP_DIVE_ENABLED` (**off**); every piece dry-run while `LEARN_WEEKLY_DRY_RUN` (**on**); build kill switch `learn_weekly_build` |
 | marketing publisher (+ the Telegram review sweep and publish feed, §12.9-§12.10, then four day-keyed jobs, §12.11: measure `marketing_metrics_daily` 06:00 ET; run health `marketing_run_health` on a posting day at the run hour + `MARKETING_MAX_RUN_ATTEMPTS`, capped at 23:00 (22:00 ET by default), and `marketing_run_health_final` the day after at the run hour (16:00 ET by default; the run hour is `MARKETING_RUN_HOUR_ET`, the web's mirror of the worker's); the weekly digest `marketing_digest_weekly` Monday 09:00 ET, Tuesday catch-up) / link-hit flush | 10 min, woken at once by an Approve or a confirmed Retract / 60 s | expiry, auto-approved posts back to review, and confirmed retracts: always; reconcile: `MARKETING_ENABLED` (**off**), any queued post with an adapter (billed X reads; it never resends under dry run); publishing: `MARKETING_ENABLED` and a platform listed in `MARKETING_PUBLISH_PLATFORMS` with its credentials (none by default); the review sweep, feed and both run-health checks: the `MARKETING_TELEGRAM_*` settings (unset = off); measure: `MARKETING_ENABLED` and `MARKETING_METRICS_ENABLED` (**off**); digest: the review bot and `MARKETING_DIGEST_ENABLED` (**off**) / — |
 | push dispatch, scheduled senders, price alerts | 60 s / hourly wake (earnings 16:00, smart money 18:00, profile match 19:00 ET) / 60 s | the notification trio (§11.4) |
 
@@ -6251,6 +6252,54 @@ behaviour byte for byte, proven by tests that pin every Telegram message and Upl
   owner's review of a very large "surprise" is the gate. The Form 4 roundup captions became format-neutral
   ("The purchases: …"; news-v20) because they also ride text posts.
 
+### 12.18 Wiser weekly engine: the Friday Feature Deep Dive (2026-10-22)
+
+Owner request 2026-10-22: a Feature Deep Dive every Friday night on the week's most important
+market topic, later a category piece (Blueprints / Value Traps / Battles) on a fixed slot, with
+narration, and a public podcast after that. Built in `app/services/learn_weekly/` (migration 204);
+the plan is `~/.claude/plans/improve-or-add-wiser-snoopy-sun.md`. Everything is off by default.
+
+- **In-app first, licence-shaped facts.** A figure frozen into an article's text or narration comes
+  from SEC EDGAR (XBRL annual facts, verbatim 8-K peg sentences) or the human-verified case library
+  (a JSON file under `backend/data/`, loaded by `app/services/learn_weekly/case_library.py`) — never FMP, whose Order Form forbids data "in any
+  downloadable fashion" and requires deleting viewer caches at termination (narration is cached
+  offline, articles are stored). FMP only RANKS topics (news counts, size filter) inside
+  `app/services/learn_weekly/signals.py`, the one module allowed to import it (`test_learn_weekly_fmp_boundary.py`, with a
+  sentinel test). ApeWisdom/Reddit and Google Trends are not licensed for stored content and are
+  not used.
+- **Topic.** Thursday 18:00 ET a deterministic scorer (robust z-scores of 7-day news vs each
+  ticker's own 8-week baseline, plus 8-K counts and an earnings bonus; >20% missing aborts to a
+  quiet-week fallback) rolls tickers up into the Emerging Frontiers themes and sends the top 3 —
+  each with up to 3 VERBATIM 8-K peg sentences (code checks every span is a substring of the
+  filing) — to the owner's Telegram. The owner taps one; #1 at Friday 07:00 if not.
+- **Writer.** Outline → one call per section (each sees only its fact slice) → per-block validators
+  → one repair → render → whole-article validation → an in-app judge in SHADOW. Validators are an
+  explicit allow-list of compliance codes (the marketing scan alone fails 21 of 23 hand-written
+  articles), first-person-only identity checks (the owner allowed AI companies as subjects), no
+  quotes, people by role only, no misconduct stories (`llm_eligible: false`).
+- **Narration.** A separate Railway cron service, `backend/learn_narrator/` (no `app.*`, no
+  Supabase secret), claims jobs through `/api/v1/internal/learn/*` and uploads through signed URLs
+  to the PRIVATE `money-moves-media` bucket. The engine is frozen per job: the catalog's
+  Chatterbox voice when the CPU benchmark passes, else Kokoro. Read-along: WAV2VEC2 (MIT) per block
+  or Kokoro's native timestamps — never MMS_FA (CC-BY-NC). The server re-checks size, type, byte
+  rate and the timing table (one span per block, seconds-per-word band) before merging.
+- **Review and publish.** Nothing goes live without the owner's Telegram tap (owner, 2026-10-22).
+  The bot shares marketing's flood gate and pacer (`app/services/marketing/telegram_pacing.py`) and the reserved callback
+  letter `y`. Approve → publish at Friday 23:00 ET (dry-run pieces end `rehearsed`); the hold is 48 h,
+  then `expired` with an alert; a Friday 15:00 ET deadman alerts when nothing is in review.
+- **The hero is decided by the content service**, not by swap writes: among flagged rows the lowest
+  `sort_order` wins and every other row is served unflagged. A Deep Dive's sort order is
+  `-(iso_year*100+iso_week)` and it keeps `is_featured`, so the newest wins and unpublishing falls
+  back to the previous one. `NEVER_FEATURE` covers the marketing-excluded articles. 204 also
+  revoked the anon/authenticated SELECT on `money_move_articles` (only the service role reads it).
+
+Rejected: drafts in `money_move_articles` (no status column, client-readable before 204); SQL
+publish/unpublish functions and a partial unique featured index (a multi-row seed would trip the
+per-row check; the service rule needs no writes); reusing `sec_concept_service` (drops accessions,
+forms pinned to the buyback check); `chat_numeric_grounding` as a gate (log-only, exempts years);
+a day claim for the build (Regenerate must rebuild the same day — the piece lease is the guard);
+the marketing compliance scan as a whole-field gate.
+
 ## Appendix A: Where things live
 
 ### iOS
@@ -6292,7 +6341,7 @@ backend/
 │   ├── database.py               # get_supabase(); raw SDK, no ORM
 │   ├── dependencies.py           # NOT app/api/v1/dependencies.py
 │   ├── log_redaction.py
-│   └── main.py                   # lifespan, middleware, 26 supervised background tasks (§7.4)
+│   └── main.py                   # lifespan, middleware, 27 supervised background tasks (§7.4)
 ├── database/
 │   ├── migrations/               # NNN_*.sql, applied by hand
 │   └── schema_snapshot.sql       # pg_dump --schema-only of live Supabase

@@ -143,6 +143,13 @@ _SERVICE_ROLE_ONLY: dict[str, tuple[str, ...]] = {
     # 202: SEC EDGAR XBRL concept facts behind the Signal of Confidence buyback check.
     # Public-domain SEC data, but read only by the backend (sec_concept_service).
     "202": ("sec_concept_cache",),
+    # 204: the Wiser weekly content engine — the period ledger (drafts live ONLY here until the
+    # owner approves them) and the narrator's job queue (the worker holds no Supabase key; it
+    # reaches it through the token-gated internal API). 204 also CLOSED money_move_articles'
+    # 065 read grant: the iOS app has no Supabase client, and the table now holds AI-assisted
+    # weekly pieces the owner can unpublish — an unpublished row must not stay readable through
+    # the anon key that ships in the binary.
+    "204": ("learn_weekly_pieces", "learn_narration_jobs", "money_move_articles"),
 }
 
 # Tables that DO grant anon or authenticated on purpose. Each needs the reason; an entry
@@ -152,7 +159,8 @@ _CLIENT_ACCESS_BY_DESIGN: dict[str, str] = {
     "plan_credits": "storefront catalogue — GET /billing/plans is `.public`; same",
     # trending_themes was here ("editorial, no FMP data") until 174 — see _SERVICE_ROLE_ONLY.
     "lessons": "Learn content (Investor Journey); editorial, no FMP data",
-    "money_move_articles": "Learn content (Money Moves); editorial, no FMP data",
+    # money_move_articles was here ("Learn content (Money Moves); editorial, no FMP data") until
+    # 204 — see _SERVICE_ROLE_ONLY.
     "credit_transactions": "SELECT only, own rows via RLS (credit_transactions_select_own); the ledger the user is entitled to read",
     "subscriptions": "SELECT only, own rows via RLS; FK-bound to public.users",
     # device_tokens / user_settings were here until 169: the iOS app has no Supabase client

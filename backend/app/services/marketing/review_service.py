@@ -105,7 +105,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import time
+import sys
+import types
 import uuid
 from collections import OrderedDict
 from datetime import datetime
@@ -131,7 +132,7 @@ from app.schemas.marketing import (
     POST_METADATA_IMAGE_FALLBACK,
     is_extra_format,
 )
-from app.services.marketing import outlets, publisher_wake
+from app.services.marketing import outlets, publisher_wake, telegram_pacing
 # The first comment's SENDER rule (Batch 1 item 7). `outlets` imports this module already, so this adds
 # no import edge; the decision message then names exactly what the outlet will send.
 from app.services.marketing.outlet_upload_post import first_comment_of
@@ -162,8 +163,9 @@ MAX_WEBHOOK_BODY_BYTES = 64 * 1024
 #: the owner has not decided yet fill the window, and every newer post would never be announced
 #: (the publisher's starvation bug, `list_posts` docstring).
 SCAN_LIMIT = 50
-#: Telegram FAQ: "In a single chat, avoid sending more than one message per second".
-SEND_SPACING_SECONDS = 1.1
+#: `SEND_SPACING_SECONDS` (Telegram FAQ: "In a single chat, avoid sending more than one message per
+#: second") moved to `telegram_pacing` on 2026-10-22; this module still answers to the name and forwards
+#: reads and writes there (`_ReviewServiceModule`, below).
 _WEBHOOK_REGISTER_TIMEOUT_SECONDS = 20.0
 
 _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
@@ -198,8 +200,41 @@ REJECT_REASONS: Dict[str, str] = {
 _STATUS_WORD_RE = re.compile(r"[a-z_]{1,32}", re.ASCII)
 _KEYBOARD_REMOVED: Dict[str, Any] = {"inline_keyboard": []}
 
-#: Monotonic time before which the sweep does not call Telegram (set by a 429's retry_after).
-_rate_limited_until = 0.0
+
+class _ReviewServiceModule(types.ModuleType):
+    """This module's class, so two old module globals keep working by NAME after they moved
+    (2026-10-22, plan §1.9) into `telegram_pacing` — the one pacer and flood back-off every sender to
+    the review chat now shares:
+
+      * `_rate_limited_until` — the monotonic instant before which nobody calls Telegram (a 429's
+        retry_after). `publish_feed` and `digest_service` read and assign `review_service._rate_limited_until`,
+        and so do the tests (`monkeypatch.setattr(rs, "_rate_limited_until", 0.0)`): both land on the
+        SHARED back-off through this property.
+      * `SEND_SPACING_SECONDS` — the gap between two sends to the chat, read at call time by the pacer.
+
+    A property on the module's CLASS (Python's documented way to customise module attribute access) is a
+    data descriptor, so it wins over the module `__dict__` for every `module.name` read and write — the
+    old names never hold a stale copy. Code INSIDE this module must not use the bare names (a bare global
+    read or a `global` assignment bypasses the property): it calls `telegram_pacing` directly."""
+
+    @property
+    def _rate_limited_until(self) -> float:
+        return telegram_pacing.rate_limited_until()
+
+    @_rate_limited_until.setter
+    def _rate_limited_until(self, value: float) -> None:
+        telegram_pacing.set_rate_limited_until(value)
+
+    @property
+    def SEND_SPACING_SECONDS(self) -> float:  # noqa: N802 — the constant's historical name
+        return telegram_pacing.SEND_SPACING_SECONDS
+
+    @SEND_SPACING_SECONDS.setter
+    def SEND_SPACING_SECONDS(self, value: float) -> None:  # noqa: N802
+        telegram_pacing.set_send_spacing(value)
+
+
+sys.modules[__name__].__class__ = _ReviewServiceModule
 
 
 # ── configuration ──────────────────────────────────────────────────────────────
@@ -939,18 +974,12 @@ def _message_id(envelope: Any) -> Optional[int]:
 # ── the sweep ──────────────────────────────────────────────────────────────────
 
 
-class _Pacer:
-    """Spaces consecutive sends to the one chat (Telegram: ≤ 1 message per second)."""
-
-    def __init__(self) -> None:
-        self._last: Optional[float] = None
-
-    async def wait(self) -> None:
-        if self._last is not None:
-            delay = SEND_SPACING_SECONDS - (time.monotonic() - self._last)
-            if delay > 0:
-                await asyncio.sleep(delay)
-        self._last = time.monotonic()
+#: Spaces consecutive sends to the one chat (Telegram: ≤ 1 message per second). Since 2026-10-22 every
+#: instance is a handle on the ONE process pacer (`telegram_pacing.SharedPacer`): the review sweep, the
+#: publish feed, the digest and the Learn sweep wait on the same last-send stamp, so a sweep's first
+#: message no longer follows another sweep's last one at once. The name stays because `publish_feed`,
+#: `digest_service` and the tests import it.
+_Pacer = telegram_pacing.SharedPacer
 
 
 async def _pending_unnotified(svc: Any) -> List[Dict[str, Any]]:
@@ -1151,15 +1180,14 @@ async def _stamp_notified(svc: Any, post_id: str, message_ids: List[Optional[int
 
 async def review_cycle() -> Dict[str, int]:
     """One sweep. Never raises (except CancelledError); returns counters for the loop's log line."""
-    global _rate_limited_until
     counters = {"pending": 0, "sent": 0, "stamped": 0, "videos": 0, "failed": 0, "rate_limited": 0}
     chat_id = review_chat_id()
     if not is_configured() or chat_id is None:
         return counters
-    if time.monotonic() < _rate_limited_until:
+    if telegram_pacing.is_rate_limited():
         counters["rate_limited"] = 1
         logger.info("marketing review: Telegram flood control still in effect for %.0f s; sweep skipped",
-                    _rate_limited_until - time.monotonic())
+                    telegram_pacing.seconds_left())
         return counters
     svc = get_marketing_run_service()
     # Read at call time, like every switch: the owner flips it without a deploy of this code path.
@@ -1179,7 +1207,9 @@ async def review_cycle() -> Dict[str, int]:
     for post in pending:
         groups.setdefault(str(post.get("run_id")), []).append(post)
 
-    pacer = _Pacer()
+    # The ONE pacer every sender to the review chat shares (telegram_pacing): spaced from the feed's,
+    # the digest's and the Learn sweep's sends too, and stopped by their 429s.
+    pacer = telegram_pacing.PACER
     try:
         for run_id, posts in groups.items():
             try:
@@ -1196,11 +1226,13 @@ async def review_cycle() -> Dict[str, int]:
                              "for the next cycle", run_id, type(e).__name__, e, exc_info=True)
                 counters["failed"] += 1
     except TelegramRateLimitException as e:
-        wait = e.retry_after if e.retry_after is not None else 60
-        _rate_limited_until = time.monotonic() + wait
+        # Telegram's 429 — or `TelegramFloodControlActive`, raised by the shared pacer before a send when
+        # ANOTHER sender's 429 closed the chat mid-sweep. Either way the shared back-off holds every sender
+        # off (never shortened; no retry_after → 60 s, as before).
+        telegram_pacing.note_rate_limit(e.retry_after)
         counters["rate_limited"] = 1
-        logger.warning("marketing review: Telegram flood control (retry_after=%s s) — sweep stopped; the rest "
-                       "go out on a later cycle", e.retry_after)
+        logger.warning("marketing review: Telegram flood control (retry_after=%s s, %s) — sweep stopped; the "
+                       "rest go out on a later cycle", e.retry_after, type(e).__name__)
     return counters
 
 
@@ -1630,6 +1662,12 @@ async def handle_update(update: Any) -> Dict[str, Any]:
         await _answer(cq_id, "Not allowed")
         return {"ok": True, "refused": "not_allowed"}
 
+    if isinstance(cq.get("data"), str) and cq["data"].startswith(LEARN_CALLBACK_PREFIX):
+        # The Wiser weekly review (plan 2026-10-22 §1.9) rides this bot: its buttons are `y:<verb>:<uuid>`
+        # — `y` is no marketing verb letter, so nothing above or below ever parsed one. Dispatched only
+        # AFTER the owner allow-list, and fenced off so a Learn failure can never break a marketing tap.
+        return await _dispatch_learn(cq_id, chat_id, from_id, message, cq["data"])
+
     parsed = parse_callback_data(cq.get("data"))
     if parsed is None:
         logger.warning("marketing review webhook: unknown callback data %r from from_id=%s; nothing decided",
@@ -1683,6 +1721,30 @@ async def handle_update(update: Any) -> Dict[str, Any]:
     else:
         await _edit(chat_id, message.get("message_id"), text, post_id=post_id)
     return {"ok": True, "outcome": outcome, "post_id": post_id}
+
+
+#: Callback data the Wiser weekly review owns (`app/services/learn_weekly/review.py`). One letter outside
+#: `_VERBS`; a test pins it free of every marketing verb.
+LEARN_CALLBACK_PREFIX = "y:"
+
+
+async def _dispatch_learn(cq_id: str, chat_id: int, from_id: int, message: Dict[str, Any],
+                          data: str) -> Dict[str, Any]:
+    """Hand an owner's `y:` tap to the Learn review. LAZY import: the marketing bot loads no Learn code
+    until such a tap arrives. Any failure is logged and answered here — never raised into the webhook."""
+    try:
+        from app.services.learn_weekly import review as learn_review
+
+        decided = await learn_review.handle_learn_callback(cq_id=cq_id, chat_id=chat_id, from_id=from_id,
+                                                           message=message, data=data)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error("marketing review webhook: the Learn review tap FAILED (%s: %s) data=%r from_id=%s — "
+                     "nothing decided", type(e).__name__, e, data[:80], from_id, exc_info=True)
+        await _answer(cq_id, "Could not record that — tap again")
+        return {"ok": True, "outcome": "error", "learn": True}
+    return {"ok": True, "learn": True, "decided": bool(decided)}
 
 
 async def _set_keyboard(chat_id: int, message: Dict[str, Any], keyboard: Dict[str, Any], *, post_id: str,

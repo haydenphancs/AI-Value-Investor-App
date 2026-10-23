@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "tickers": ["CRWV", "ORCL", "MSFT", "AMZN", "GOOGL", "META", "NVDA", "AMD", "AVGO", "VST", "CEG"],
+  "note": "owner-maintained extra candidates outside the theme baskets"
+}

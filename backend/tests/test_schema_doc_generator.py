@@ -670,7 +670,10 @@ def test_every_public_table_is_curated():
 # `scripts/dump_schema.sh` is re-run, `test_pending_tables_are_really_still_pending`
 # fails until the name is removed.
 # Empty is the healthy steady state.
-_PENDING_MIGRATION_TABLES: set[str] = set()
+# 2026-10-22: 204's two Wiser weekly tables (written; the owner applies it, then re-dumps).
+_PENDING_MIGRATION_TABLES: set[str] = {
+    "public.learn_weekly_pieces", "public.learn_narration_jobs",
+}
 # 2026-10-22: 198's subscription_transactions and 202's sec_concept_cache were applied and
 # re-dumped (with 203), so they left the list.
 # 2026-10-13: 196's subscription_credit_periods was applied and re-dumped, so it left the list.

@@ -1,0 +1,10 @@
+# The narrator image's build context is backend/learn_narrator/ (Root Directory /backend/learn_narrator).
+# Local-only artefacts never ship: bench output, a local model cache, bytecode.
+out/
+models/
+.cache/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.m4a
+.DS_Store

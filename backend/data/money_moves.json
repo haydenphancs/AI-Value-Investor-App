@@ -16,7 +16,7 @@
       "sortOrder": 0,
       "publishedDaysAgo": 3,
       "tagLabel": "MUST READ",
-      "isFeatured": true,
+      "isFeatured": false,
       "hasAudioVersion": true,
       "audioUrl": null,
       "heroGradientColors": [
@@ -348,7 +348,7 @@
       "sortOrder": 0,
       "publishedDaysAgo": 5,
       "tagLabel": "CASE STUDY",
-      "isFeatured": false,
+      "isFeatured": true,
       "hasAudioVersion": true,
       "audioUrl": null,
       "heroGradientColors": [

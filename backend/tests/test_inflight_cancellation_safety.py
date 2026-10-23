@@ -193,6 +193,10 @@ _INFLIGHT_MODULES = [
     # company share one round of SEC XBRL fetches; joiners attach through `asyncio.shield`,
     # and a cancelled leader fails the future with a RuntimeError before re-raising.
     "sec_concept_service.py",
+    # Added 2026-10-22 with the Wiser weekly engine (migration 204): the Learn-only SEC reads
+    # (submissions, annual XBRL facts, filing text) dedupe one weekly build's concurrent reads per
+    # (cik[, accession]) through the same shielded-join shape.
+    "learn_weekly/sec_facts.py",
 ]
 
 

@@ -554,6 +554,13 @@ async def lifespan(app: FastAPI):
         _spawn(run_trillion_club_daily_loop(), "trillion_club_daily")
         _spawn(run_trillion_club_weekly_loop(), "trillion_club_weekly")
 
+        # Wiser weekly engine: the Friday Feature Deep Dive — Thursday topic card, Friday
+        # build + narration + owner review in Telegram, 23:00 ET publish (migration 204).
+        # Idles, logging once, until LEARN_WEEKLY_ENABLED is set; every piece is dry-run
+        # until LEARN_WEEKLY_DRY_RUN is turned off. See services/learn_weekly/scheduler.py.
+        from app.services.learn_weekly.scheduler import run_learn_weekly_loop
+        _spawn(run_learn_weekly_loop(), "learn_weekly")
+
         # Marketing-engine publisher (design doc §12). The web process is the ONLY holder of
         # the social-posting secrets; the media worker is a separate cron service that never
         # gets them. Interval loop, gated per cycle on MARKETING_ENABLED (default False), so

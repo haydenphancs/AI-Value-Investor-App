@@ -119,6 +119,9 @@ IMPLICIT_REFS: dict[tuple[str, str], tuple[str, str, str]] = {
         "public.agent_personas", "key", "text join on the persona key"),
     ("public.article_chunks", "article_id"): (
         "public.money_move_articles", "id", "RAG chunks of a Money Moves article; no FK"),
+    ("public.learn_weekly_pieces", "narration_job_id"): (
+        "public.learn_narration_jobs", "id",
+        "the job the review bundle carries; no FK (the job's piece_id FK is the enforced edge)"),
     ("public.sector_benchmarks", "industry"): (
         "public.industry_dossier", "industry", "shared industry-name string domain"),
     ("public.industry_moat_benchmarks", "industry"): (
@@ -353,7 +356,36 @@ CURATION: dict[str, TableDoc] = {
     "public.money_move_articles": T("learn-content",
         key=("slug", "title", "category", "content", "sections", "audio_url", "is_featured"),
         note="Sentence-level read-along timings ride inside the served JSONB. A new row is a new "
-             "card in the already-shipped app."),
+             "card in the already-shipped app. Since migration 204: `source` (bundle | weekly) "
+             "marks the rows the Wiser weekly pipeline publishes and unpublishes, titles are "
+             "unique case-folded (iOS keys cards and the audio refresh by title), and the table "
+             "is service_role only (the 065 anon/authenticated read grant is revoked)."),
+    # ------------------------------------------- Wiser weekly content engine (204)
+    # Purpose text comes from each table's COMMENT ON TABLE (precedence 1); `purpose=` is still
+    # given so the card is not blank if the comment is ever lost.
+    "public.learn_weekly_pieces": T("learn-content",
+        purpose="One row per weekly Learn period (a Friday Deep Dive or a category slot): the "
+                "week-level exactly-once claim and the piece's whole life — topic, SEC / "
+                "case-library fact sheet, the draft while it is reviewed, review and publish state.",
+        key=("period_key", "kind", "status", "scheduled_publish_at", "hold_until", "dry_run",
+             "generation_id", "lease_until", "slug", "draft", "narration_job_id", "published_at"),
+        note="Migration 204. Written only by app/services/learn_weekly/ledger.py; every state "
+             "change is a compare-and-swap on the observed status (plus a fence). A builder holds "
+             "the row through lease_until + a fresh generation_id (the marketing_scripts model). "
+             "A draft reaches money_move_articles only after the owner approves it in Telegram; "
+             "dry_run is frozen at creation and a dry-run piece can never be publishing / "
+             "published (CHECK). narration_job_id is a soft pointer (no FK). service_role only."),
+    "public.learn_narration_jobs": T("learn-content",
+        purpose="The Learn narrator worker's queue: one job per (piece, round) with the frozen "
+                "script, engine and voice, the claim fence, and the rendered audio's path, "
+                "timings and checks.",
+        key=("piece_id", "round", "status", "engine", "attempts", "claim_nonce", "lease_until",
+             "worker_failures", "lease_reclaims", "audio_path"),
+        note="Migration 204. The narrator (a Railway cron service) holds NO Supabase key: it "
+             "reaches this table only through the token-gated internal API. A claim bumps "
+             "attempts and mints claim_nonce; every worker write is fenced on both. Worker "
+             "failures (<= 2) and lease re-claims (<= 4) are capped separately. piece_id is a "
+             "real FK (ON DELETE CASCADE). service_role only."),
 
     # ---------------------------------------------------------- learn-progress
     "public.user_learn_progress": T("learn-progress",

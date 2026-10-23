@@ -70,8 +70,9 @@ read-only look at the records `_final_owed` takes, once per process, on a day af
 
 Delivery follows `publish_feed.feed_cycle`: the review bot configured + its review chat, the shared
 Telegram flood back-off (`review_service._rate_limited_until` — while it is open no claim is taken, and
-a 429 here holds the review sweep off too), the review sweep's `_Pacer`, plain text only (no
-`parse_mode`). A job is marked done only after its message went out, so a failure is retried on a later
+a 429 here holds the review sweep off too), the ONE pacer every sender to the review chat shares
+(`telegram_pacing.PACER`, 2026-10-22), plain text only (no `parse_mode`). A job is marked done only
+after its message went out, so a failure is retried on a later
 tick (a 429 inside the send spends that claimed attempt — `run_day_job` counts every claim — but
 while the back-off is open no attempt is claimed at all). Neither cycle raises (except
 CancelledError).
@@ -108,10 +109,17 @@ from app.schemas.marketing import (
     RUN_STAGES,
     parse_content_classes,
 )
-from app.services.marketing import metrics_service, outlets, review_service, selection, smart_link
+from app.services.marketing import (
+    metrics_service,
+    outlets,
+    review_service,
+    selection,
+    smart_link,
+    telegram_pacing,
+)
 from app.services.marketing.outlet_base import scrub
 from app.services.marketing.outlet_upload_post import PLATFORMS as UPLOAD_POST_PLATFORMS
-from app.services.marketing.review_service import REJECT_REASONS, _Pacer, _truncate_utf16, utf16_len
+from app.services.marketing.review_service import REJECT_REASONS, _truncate_utf16, utf16_len
 from app.services.marketing.run_service import (
     _exec,
     _parse_ts,
@@ -2390,9 +2398,11 @@ async def gather_digest(svc: Any, now: datetime) -> Dict[str, Any]:
 
 #: Seconds Telegram asked us to wait when its 429 named none.
 _DEFAULT_RETRY_AFTER = 60
-#: One pacer for both reports, so a health alert and a digest in the same tick are spaced like every
-#: other message to the review chat (Telegram: about one message a second per chat).
-_PACER = _Pacer()
+#: The ONE pacer every sender to the review chat shares (`telegram_pacing`, 2026-10-22): a health alert and
+#: a digest in the same tick are spaced like every other message to the chat — the review sweep's, the
+#: feed's and the Learn sweep's included (Telegram: about one message a second per chat). A module name, so
+#: a test can stand a recording pacer in its place.
+_PACER = telegram_pacing.PACER
 
 
 async def _send_one(chat_id: int, text: str, *, what: str) -> Tuple[bool, Optional[str], bool]:

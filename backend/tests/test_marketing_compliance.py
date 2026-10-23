@@ -16,7 +16,6 @@ Category 1 (pure): no network, no Supabase; reads only the bundled data files.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import re
 import time
@@ -42,14 +41,6 @@ def codes(text, **kw):
 
 def person_hits(text):
     return [v.detail for v in scan(text) if v.code == "person_named"]
-
-
-def _load_misattribution_module():
-    path = BACKEND / "tests" / "test_learn_content_misattributions.py"
-    spec = importlib.util.spec_from_file_location("_marketing_misattr_source", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 # ── real people ──────────────────────────────────────────────────────────────
@@ -530,8 +521,11 @@ def test_guarantee_language_without_a_promise_is_clean(text):
 
 
 def test_misattributions_are_a_superset_of_the_learn_content_list():
-    mod = _load_misattribution_module()
-    learn = {fold(p) for p in mod.BANNED_PHRASES}
+    # The Learn list moved out of tests/test_learn_content_misattributions.py into
+    # app/services/learn_content_rules.py (2026-10-22), which that test now imports too.
+    from app.services.learn_content_rules import BANNED_PHRASES as learn_banned_phrases
+
+    learn = {fold(p) for p in learn_banned_phrases}
     assert learn, "the Learn misattribution list should not be empty"
     assert learn <= {fold(p) for p in c.MISATTRIBUTIONS}
 

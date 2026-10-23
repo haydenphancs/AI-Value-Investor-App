@@ -53,6 +53,8 @@ _PATH_SAMPLE = {
     # marketing worker API (design doc §12) — gated by X-Marketing-Worker-Token, never open
     "run_id": "00000000-0000-0000-0000-000000000000",
     "asset_id": "00000000-0000-0000-0000-000000000000",
+    # Learn narrator worker API (plan 2026-10-22 §1.8) — gated by X-Learn-Narrator-Token
+    "job_id": "00000000-0000-0000-0000-000000000000",
 }
 
 # ── THE ALLOW-LIST ───────────────────────────────────────────────────────────────────

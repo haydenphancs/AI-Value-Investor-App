@@ -394,6 +394,9 @@ _CURATED_TABLES = {
     # (no read or write anywhere in app/ or scripts/) that migration 168 drops. The exemplar
     # is the live per-ticker cache. Curated so the doc line and the table stay coupled.
     "ticker_news_cache",
+    # §12.18 (2026-10-22): the Wiser weekly engine's served table — migration 204 revoked its
+    # client SELECT and added `source`; the prose describes both.
+    "money_move_articles",
     # §7.1 names the three Phase 0–6 tables that follow the "no live price in Tier 2"
     # rule: two settled sessions, derived corporate actions, and the durable half of a
     # coin's fundamentals.

@@ -1,11 +1,15 @@
 """
 Telegram Bot API — a thin client for the marketing REVIEW BOT (design doc §12).
 
-ONE caller: `app/services/marketing/review_service.py`, in the WEB process. The owner approves or
+Callers, all in the WEB process: `app/services/marketing/review_service.py` (the owner approves or
 rejects each day's `pending_review` marketing posts from their phone: the review sweep sends one
 message per post with ✅/❌ buttons, and the button taps come back to the root webhook
-`POST /marketing/telegram/webhook` (app/main.py). The media worker never holds this token — it
-holds no social secret at all (rules/marketing.md §2).
+`POST /marketing/telegram/webhook` (app/main.py)), `publish_feed.py` and `digest_service.py` (what
+happened after a decision; the run-health and weekly reports) and, from the Learn weekly engine
+(plan 2026-10-22 §1.9), the Learn review sweep — which sends a Deep Dive's narration with
+`send_audio`. They all send to ONE chat, so they share one pacer and one flood back-off
+(`app/services/marketing/telegram_pacing.py`). The media worker and the narrator never hold this
+token — they hold no social secret at all (rules/marketing.md §2).
 
 Integration-layer rules (.claude/rules/integrations.md): HTTP in, dict out; typed exceptions; a
 lazy module-level `httpx.AsyncClient` closed in the app lifespan (`close_telegram_client`); no
@@ -59,6 +63,15 @@ Bot API facts this module relies on — VERIFIED against https://core.telegram.o
     payload is byte-for-byte what it was. Quiet Telegram (plan Batch 1 item 9): the review bot's media,
     caption messages and "Posted" replies go out silently; the decisions (a bundle's decision message,
     a per-post review message), the alerts and the digest / health messages keep the default sound.
+  * (VERIFIED 2026-10-22, the page text) sendAudio: "Use this method to send audio files, if you want
+    Telegram clients to display them in the music player. Your audio must be in the .MP3 or .M4A
+    format." `audio` (InputFile or String): pass "an HTTP URL as a String for Telegram to get an
+    audio file from the Internet"; caption "0-1024 characters after entities parsing"; `duration`
+    (Integer) "Duration of the audio in seconds"; `performer` (String) "Performer"; `title`
+    (String) "Track name"; `disable_notification` as above. Uploads go to 50 MB, but a file sent BY
+    URL keeps the Sending-files cap: "5 MB max size for photos and 20 MB max for other types of
+    content" — so `send_audio` refuses a known size over MAX_URL_SEND_BYTES before any request. A
+    12-minute narration at 96 kbps AAC is about 8.6 MB.
   * answerCallbackQuery(callback_query_id, text "0-200 characters"); clients show a progress
     bar until it is called, so every callback is answered, even a refused one.
   * InlineKeyboardButton.callback_data: "1-64 bytes".
@@ -71,6 +84,7 @@ Bot API facts this module relies on — VERIFIED against https://core.telegram.o
 from __future__ import annotations
 
 import logging
+import math
 import re
 from typing import Any, Dict, Optional, Sequence
 
@@ -88,7 +102,7 @@ MAX_MESSAGE_CHARS = 4096
 MAX_CAPTION_CHARS = 1024
 MAX_CALLBACK_DATA_BYTES = 64
 MAX_CALLBACK_ANSWER_CHARS = 200
-#: Telegram fetches a URL-sent video itself, up to this size ("20 MB max for other types").
+#: Telegram fetches a URL-sent video (or audio file) itself, up to this size ("20 MB max for other types").
 MAX_URL_SEND_BYTES = 20 * 1024 * 1024
 #: …and a URL-sent photo up to this size ("5 MB max size for photos").
 MAX_URL_PHOTO_BYTES = 5 * 1024 * 1024
@@ -142,6 +156,22 @@ class TelegramRequestError(TelegramException):
 
 class TelegramNotConfiguredException(TelegramException):
     """MARKETING_TELEGRAM_BOT_TOKEN is not set — no request was made."""
+
+
+class TelegramFileTooLargeError(TelegramRequestError):
+    """A file sent BY URL is known to be over Telegram's by-URL cap (`MAX_URL_SEND_BYTES`) — refused
+    here, NO request was made: Telegram would only fetch it and refuse it. A `TelegramRequestError`
+    on purpose: retrying cannot help, and every caller already answers a refused media send by
+    sending a LINK instead (`review_service._send_run_video`'s rule)."""
+
+
+class TelegramFloodControlActive(TelegramRateLimitException):
+    """NOT sent: a flood-control back-off from an earlier 429 is still in force. Raised by the
+    callers' shared pacer (`app/services/marketing/telegram_pacing.wait_turn`) BEFORE any request —
+    this module never raises it; Telegram's own 429 is the parent class. A subclass of
+    `TelegramRateLimitException` on purpose: every sweep already stops on a 429, and must stop the
+    same way when ANOTHER sweep's 429 closed the one chat they share. `retry_after` = the whole
+    seconds left on the back-off."""
 
 
 # ── client lifecycle ───────────────────────────────────────────────────
@@ -229,6 +259,10 @@ _VIDEO_TIMEOUT = httpx.Timeout(60.0, connect=5.0)
 #: sendPhoto by URL makes Telegram fetch the JPEG (≤ 950 KB here) before it answers — longer than a
 #: plain message for the same reason as the video, shorter than the video's.
 _PHOTO_TIMEOUT = httpx.Timeout(30.0, connect=5.0)
+#: sendAudio by URL makes Telegram fetch the M4A (≤ 20 MB; a Deep Dive's ~8.6 MB) before it answers —
+#: the video's budget, for the video's reason (a short timeout on a file Telegram then delivered anyway
+#: would make the caller send it again).
+_AUDIO_TIMEOUT = httpx.Timeout(60.0, connect=5.0)
 
 
 async def _call(method: str, payload: Dict[str, Any], *, timeout: Optional[httpx.Timeout] = None) -> Dict[str, Any]:
@@ -364,6 +398,85 @@ async def send_photo(
         payload["reply_markup"] = reply_markup
     _silence(payload, disable_notification)
     return await _call("sendPhoto", payload, timeout=_PHOTO_TIMEOUT)
+
+
+def _known_size(size_bytes: Any) -> Optional[float]:
+    """`size_bytes` when it is a usable byte count (a finite number ≥ 0, never a bool), else None —
+    UNKNOWN, logged at WARNING. A malformed size (it comes from a ledger row) must not refuse a send
+    Telegram may well accept: an unknown size is sent, and Telegram's own refusal is the backstop."""
+    if size_bytes is None:
+        return None
+    if (isinstance(size_bytes, (int, float)) and not isinstance(size_bytes, bool)
+            and math.isfinite(size_bytes) and size_bytes >= 0):
+        return float(size_bytes)
+    logger.warning("telegram sendAudio: unusable size_bytes %r (%s) — treated as unknown, size guard skipped",
+                   size_bytes, type(size_bytes).__name__)
+    return None
+
+
+def _duration_seconds(duration: Any) -> Optional[int]:
+    """Telegram's `duration` is an Integer of seconds: a finite number ≥ 0 (never a bool) is rounded to
+    one; anything else is left out of the payload (logged at WARNING) — it is display metadata, and the
+    audio goes either way."""
+    if duration is None:
+        return None
+    if (isinstance(duration, (int, float)) and not isinstance(duration, bool)
+            and math.isfinite(duration) and duration >= 0):
+        return int(round(duration))
+    logger.warning("telegram sendAudio: unusable duration %r (%s) — sent without one",
+                   duration, type(duration).__name__)
+    return None
+
+
+def _label(name: str, value: Any) -> Optional[str]:
+    """`title` / `performer`: a non-empty string is sent as it is (plain text, Telegram renders no
+    markup in either); anything else is left out (a non-string logged at WARNING)."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        return value
+    logger.warning("telegram sendAudio: %s is %s, not a string — sent without it", name, type(value).__name__)
+    return None
+
+
+async def send_audio(
+    chat_id: int,
+    audio_url: str,
+    *,
+    caption: Optional[str] = None,
+    title: Optional[str] = None,
+    performer: Optional[str] = None,
+    duration: Optional[int] = None,
+    size_bytes: Optional[int] = None,
+    disable_notification: bool = False,
+) -> Dict[str, Any]:
+    """sendAudio by URL (Telegram fetches the .MP3/.M4A: ≤ 20 MB by URL). `send_video`'s shape: caption
+    plain text (never `parse_mode`), ≤ 1024 — the caller fits it; `disable_notification` only when True.
+
+    `size_bytes`, when it is a known byte count over MAX_URL_SEND_BYTES, raises
+    `TelegramFileTooLargeError` BEFORE any request (the caller sends a link instead). `duration`
+    (seconds), `title` and `performer` are music-player metadata, sent only when usable (see the
+    helpers). `audio_url` is usually a SIGNED URL — a read credential for a private bucket — so it never
+    appears in a log line or an exception message here: it travels only in the request body."""
+    size = _known_size(size_bytes)
+    if size is not None and size > MAX_URL_SEND_BYTES:
+        raise TelegramFileTooLargeError(
+            f"telegram sendAudio: the file is {size / 1_048_576:.1f} MB, over Telegram's "
+            f"{MAX_URL_SEND_BYTES // 1_048_576} MB limit for a file sent by URL — not sent",
+            method="sendAudio",
+        )
+    payload: Dict[str, Any] = {"chat_id": chat_id, "audio": audio_url}
+    if caption:
+        payload["caption"] = caption
+    seconds = _duration_seconds(duration)
+    if seconds is not None:
+        payload["duration"] = seconds
+    for name, value in (("performer", performer), ("title", title)):
+        label = _label(name, value)
+        if label is not None:
+            payload[name] = label
+    _silence(payload, disable_notification)
+    return await _call("sendAudio", payload, timeout=_AUDIO_TIMEOUT)
 
 
 async def edit_message_text(

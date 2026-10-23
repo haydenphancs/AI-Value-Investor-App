@@ -136,6 +136,25 @@ SOURCE_SENTENCE_DROPS: Dict[str, Dict[str, str]] = {
 #: The `dropped` code recorded for a SOURCE_SENTENCE_DROPS line.
 SOURCE_POLICY_DROP = "source_policy"
 
+#: A Wiser WEEKLY piece (the AI-written Feature Deep Dive / category piece, plan "Wiser weekly
+#: content engine" §1.10) carries a code-owned slug ending in its publish date
+#: (`<kebab-title>-<yyyy-mm-dd>`) and `source: "weekly"`. Such a piece must NEVER enter this
+#: pool, whatever path puts it in a bundle file: it was written by a model from a fact sheet the
+#: marketing validators never saw, it may name AI companies the class-A identity scan refuses,
+#: and only the in-app reader was ever disclosed as its audience. Weekly pieces live only in the
+#: database; `tests/test_learn_bundle_isolation.py` pins that the bundle carries none.
+_WEEKLY_SLUG_RE = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+
+
+def weekly_piece_reason(article: Dict[str, Any]) -> Optional[str]:
+    """Why a Money Moves article is a weekly AI piece (and so refused), or None."""
+    source = article.get("source")
+    if isinstance(source, str) and source.strip().lower() == "weekly":
+        return "source is weekly"
+    if _WEEKLY_SLUG_RE.search(str(article.get("slug") or "").strip()):
+        return "slug ends in a publish date (the weekly-piece slug shape)"
+    return None
+
 _BOLD_RE = re.compile(r"\*\*|__")
 _SENTENCE_END_RE = re.compile(r"[.!?]$")
 
@@ -280,6 +299,14 @@ def _raw_items() -> List[Tuple[str, str, str, str, str, List[str]]]:
     """(key, kind, slug, title, category, sentences) for every corpus item, eligible or not."""
     out = []
     for a in _read(MONEY_MOVES_PATH, "articles"):
+        weekly = weekly_piece_reason(a)
+        if weekly:
+            # Loud, not silent: a weekly piece in the bundle is itself a defect to fix (it must
+            # live only in the database), so the skip names it.
+            logger.warning("marketing content pool: refusing money_moves item %r — a weekly "
+                           "AI-written Learn piece (%s) never enters the public marketing pool",
+                           a.get("slug"), weekly)
+            continue
         out.append((f"{MONEY_MOVES}:{a['slug']}", MONEY_MOVES, str(a["slug"]),
                     str(a.get("title") or ""), str(a.get("category") or ""),
                     _split(_money_moves_blocks(a))))

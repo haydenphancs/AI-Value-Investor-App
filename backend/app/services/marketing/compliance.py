@@ -2923,7 +2923,7 @@ BANNED_PHRASES = (
 )
 
 #: Wording whose only popular form is a misattribution (mirrors
-#: `tests/test_learn_content_misattributions.py::BANNED_PHRASES`; a test pins the superset).
+#: `app/services/learn_content_rules.py::BANNED_PHRASES`; a test pins the superset).
 MISATTRIBUTIONS = (
     "eighth wonder", "einstein", "compound interest is the most powerful",
     "most powerful force in the universe", "impatient to the patient",

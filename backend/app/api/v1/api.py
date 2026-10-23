@@ -28,6 +28,7 @@ from app.api.v1.endpoints import (
     widget,
     analytics,
     marketing_internal,
+    learn_internal,
     search,
 )
 
@@ -81,4 +82,10 @@ api_router.include_router(analytics.router, tags=["Analytics"])
 # calls it, and it takes none of the iOS auth dependencies on purpose.
 api_router.include_router(
     marketing_internal.router, prefix="/internal/marketing", tags=["Marketing (internal)"]
+)
+# Wiser weekly narrator API (plan 2026-10-22 §1.8). Its ONLY caller is the `learn_narrator` cron
+# service, gated at router level by a shared secret (`X-Learn-Narrator-Token`) plus a per-job claim
+# header; like the marketing worker API, iOS never calls it and it takes no iOS auth dependency.
+api_router.include_router(
+    learn_internal.router, prefix="/internal/learn", tags=["Learn narrator (internal)"]
 )

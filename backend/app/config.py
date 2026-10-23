@@ -1152,6 +1152,73 @@ class Settings(BaseSettings):
     TRILLION_CLUB_ENABLED: bool = False
     TRILLION_CLUB_JOBS_ENABLED: bool = False
 
+    # ── Wiser weekly content engine (migration 204, `services/learn_weekly/`) ─────────────────
+    # A Friday "Feature Deep Dive" (and, later, a category piece on LEARN_SLOT_WEEKDAYS) written
+    # from an SEC-grounded fact sheet, narrated by the separate `learn_narrator` service, approved
+    # by the owner in Telegram and only then written to `money_move_articles`. Every switch is
+    # fail-closed: nothing builds until LEARN_WEEKLY_ENABLED, nothing publishes while
+    # LEARN_WEEKLY_DRY_RUN (frozen per piece at build time), and the `notification_job_state`
+    # rows `learn_weekly_topic` / `learn_weekly_build` / `learn_weekly_deadman` are the no-deploy
+    # kill switches. Hours are America/New_York.
+    LEARN_WEEKLY_ENABLED: bool = False
+    LEARN_WEEKLY_DRY_RUN: bool = True
+    LEARN_DEEP_DIVE_ENABLED: bool = False
+    LEARN_SLOT_ENABLED: bool = False
+    # Category-slot publish days: mon..sun tokens, normalised like MARKETING_POST_WEEKDAYS but
+    # parsed at CALL time by `learn_weekly.schedule.parse_slot_weekdays` (unknown tokens dropped
+    # with an ERROR; nothing left -> "mon"). One slot a week until the Deep Dive is stable.
+    LEARN_SLOT_WEEKDAYS: str = "mon"
+    LEARN_TOPIC_HOUR_ET: int = Field(18, ge=0, le=23)            # Thursday topic card
+    LEARN_DEEP_DIVE_BUILD_HOUR_ET: int = Field(8, ge=0, le=23)   # Friday build
+    LEARN_DEEP_DIVE_PUBLISH_HOUR_ET: int = Field(23, ge=0, le=23)
+    LEARN_SLOT_PUBLISH_HOUR_ET: int = Field(5, ge=0, le=23)
+    LEARN_SLOT_BUILD_LEAD_HOURS: int = Field(41, ge=6, le=96)
+    LEARN_REVIEW_HOLD_HOURS: int = Field(48, ge=1, le=72)
+    # Shared secret of the `learn_narrator` worker (`/api/v1/internal/learn/*`). Unset → every
+    # internal route answers 403 (fail-closed), like MARKETING_WORKER_TOKEN.
+    LEARN_NARRATOR_TOKEN: Optional[str] = None
+    # Which engine new narration jobs are FROZEN with ("chatterbox" = the catalog voice clone,
+    # "kokoro" = the licence-clean fallback). The job decides, never the worker's environment;
+    # the worker only declares the engines it can render. Set from the Phase-0 benchmark.
+    LEARN_NARRATOR_ENGINE: str = "chatterbox"
+    LEARN_NARRATOR_KOKORO_VOICE: str = "am_michael"
+
+    @field_validator("LEARN_NARRATOR_ENGINE", mode="before")
+    @classmethod
+    def _learn_engine_known(cls, value: object) -> str:
+        """Strip and lower-case (a Railway value "Kokoro " is the owner's intent, not a typo to punish).
+        The inline literal mirrors `learn_weekly.contracts.ENGINES` (config imports no app module;
+        tests/test_learn_weekly_scheduler.py pins the two equal). Anything else fails the DEPLOY: a
+        job frozen with an unknown engine is one no worker can ever render."""
+        known = ("chatterbox", "kokoro")
+        text = value.strip().lower() if isinstance(value, str) else value
+        if text not in known:
+            raise ValueError(f"LEARN_NARRATOR_ENGINE must be one of {known}, got {value!r}")
+        return text
+
+    @field_validator("LEARN_NARRATOR_KOKORO_VOICE", mode="before")
+    @classmethod
+    def _learn_kokoro_voice_shape(cls, value: object) -> str:
+        """A Kokoro voice id ("am_michael", "af_heart"): lang+gender prefix, underscore, name. A
+        malformed value fails the deploy instead of every narration enqueue on a Friday."""
+        import re
+
+        text = value.strip().lower() if isinstance(value, str) else ""
+        if not re.fullmatch(r"[a-z]{2}_[a-z]{2,24}", text):
+            raise ValueError(f"LEARN_NARRATOR_KOKORO_VOICE must look like 'am_michael', got {value!r}")
+        return text
+    # "shadow" (default) records the in-app judge's verdicts for the review header only;
+    # "enforce" makes them fail a section; "off" skips the call. Anything else = enforce.
+    LEARN_JUDGE_MODE: str = "shadow"
+    LEARN_WRITER_MODEL: str = "gemini-2.5-flash"
+    # Thought tokens bill at the output rate and count toward max_output_tokens; 0 like the
+    # marketing writer (config REPORT_* budgets, measured −66% cost at 0).
+    LEARN_WRITER_THINKING_BUDGET: int = 0
+    LEARN_MAX_CONTENT_REJECTIONS: int = Field(2, ge=1, le=6)
+    LEARN_MAX_WRITER_FAILURES: int = Field(3, ge=1, le=6)
+    LEARN_ART_ENABLED: bool = False
+    LEARN_SERVED_WEEKLY_MAX: int = Field(40, ge=4, le=500)
+
     # Rate limiting
     RATE_LIMIT_PER_MINUTE: int = 60
     # Per-ACCOUNT ceilings on the five market-data routers (stocks / etfs / indices / crypto /

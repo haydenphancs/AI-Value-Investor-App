@@ -1,0 +1,2957 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "mech-hyperscaler-capex-cycle",
+      "kind": "mechanics",
+      "title": "The hyperscaler capex cycle",
+      "themes": [
+        "silicon-rush"
+      ],
+      "category_fit": [
+        "blueprints",
+        "valueTraps"
+      ],
+      "companies": [
+        {
+          "name": "Microsoft Corporation",
+          "cik": "0000789019",
+          "ticker": "MSFT"
+        },
+        {
+          "name": "Alphabet Inc.",
+          "cik": "0001652044",
+          "ticker": "GOOGL"
+        },
+        {
+          "name": "Amazon.com, Inc.",
+          "cik": "0001018724",
+          "ticker": "AMZN"
+        },
+        {
+          "name": "Meta Platforms, Inc.",
+          "cik": "0001326801",
+          "ticker": "META"
+        },
+        {
+          "name": "Oracle Corporation",
+          "cik": "0001341439",
+          "ticker": "ORCL"
+        }
+      ],
+      "sic": null,
+      "era": "2023-2026",
+      "status": null,
+      "llm_eligible": true,
+      "facts": [
+        {
+          "id": "f1",
+          "text": "Microsoft reported additions to property and equipment of $115,948 million for the fiscal year ended June 30, 2026, compared with $64,551 million for the fiscal year ended June 30, 2025 and $44,477 million for the fiscal year ended June 30, 2024.",
+          "source": {
+            "title": "Microsoft Corporation Form 10-K for the fiscal year ended June 30, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/789019/000119312526323660/msft-20260630.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-07-29",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f2",
+          "text": "Alphabet reported purchases of property and equipment of $91,447 million for the year ended December 31, 2025, compared with $52,535 million for 2024 and $32,251 million for 2023.",
+          "source": {
+            "title": "Alphabet Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1652044/000165204426000018/goog-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-05",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f3",
+          "text": "Amazon reported purchases of property and equipment of $131,819 million for the year ended December 31, 2025, compared with $82,999 million for 2024 and $52,729 million for 2023.",
+          "source": {
+            "title": "Amazon.com, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1018724/000101872426000004/amzn-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-06",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f4",
+          "text": "Meta reported purchases of property and equipment of $69,691 million for the year ended December 31, 2025, compared with $37,256 million for 2024 and $27,045 million for 2023.",
+          "source": {
+            "title": "Meta Platforms, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1326801/000162828026003942/meta-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-01-29",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f5",
+          "text": "Oracle reported capital expenditures of $55,663 million for the fiscal year ended May 31, 2026, compared with $21,215 million for the fiscal year ended May 31, 2025 and $6,866 million for the fiscal year ended May 31, 2024.",
+          "source": {
+            "title": "Oracle Corporation Form 10-K for the fiscal year ended May 31, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1341439/000119312526277521/orcl-20260531.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-06-22",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f6",
+          "text": "Microsoft reported that cost of revenue in its Intelligent Cloud segment increased $17.7 billion, or 44%, in the fiscal year ended June 30, 2026, driven by investments in AI infrastructure to support growing customer demand.",
+          "source": {
+            "title": "Microsoft Corporation Form 10-K for the fiscal year ended June 30, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/789019/000119312526323660/msft-20260630.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-07-29",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f7",
+          "text": "As of June 30, 2026, Microsoft had additional leases, primarily for datacenters, that had not yet commenced totaling $329.1 billion, with lease terms of 1 year to 20 years.",
+          "source": {
+            "title": "Microsoft Corporation Form 10-K for the fiscal year ended June 30, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/789019/000119312526323660/msft-20260630.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-07-29",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f8",
+          "text": "As of May 31, 2026, Oracle had $260 billion of additional lease commitments, substantially all related to data center arrangements, with terms of fifteen to nineteen years, that were not reflected on its consolidated balance sheet.",
+          "source": {
+            "title": "Oracle Corporation Form 10-K for the fiscal year ended May 31, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1341439/000119312526277521/orcl-20260531.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-06-22",
+            "type": "sec_filing"
+          }
+        }
+      ],
+      "verified_by": "AI check: 2 independent agents vs primary sources (owner-delegated)",
+      "verified_at": "2026-10-23",
+      "echo_tags": [
+        "capex",
+        "hyperscaler",
+        "data-centre",
+        "ai-infrastructure",
+        "leases"
+      ],
+      "banned_claims": [
+        "Any forecast of future capital spending by any company",
+        "Any claim that a named company is overinvesting or that its spending will not pay off",
+        "Any statement that the AI build-out is a bubble"
+      ],
+      "catalog_subjects": []
+    },
+    {
+      "id": "mech-server-useful-life-depreciation",
+      "kind": "mechanics",
+      "title": "Server useful lives and depreciation accounting",
+      "themes": [
+        "silicon-rush"
+      ],
+      "category_fit": [
+        "blueprints",
+        "valueTraps"
+      ],
+      "companies": [
+        {
+          "name": "Amazon.com, Inc.",
+          "cik": "0001018724",
+          "ticker": "AMZN"
+        },
+        {
+          "name": "Meta Platforms, Inc.",
+          "cik": "0001326801",
+          "ticker": "META"
+        },
+        {
+          "name": "Alphabet Inc.",
+          "cik": "0001652044",
+          "ticker": "GOOGL"
+        },
+        {
+          "name": "Microsoft Corporation",
+          "cik": "0000789019",
+          "ticker": "MSFT"
+        },
+        {
+          "name": "Oracle Corporation",
+          "cik": "0001341439",
+          "ticker": "ORCL"
+        },
+        {
+          "name": "CoreWeave, Inc.",
+          "cik": "0001769628",
+          "ticker": "CRWV"
+        }
+      ],
+      "sic": null,
+      "era": "2023-2026",
+      "status": null,
+      "llm_eligible": true,
+      "facts": [
+        {
+          "id": "f1",
+          "text": "Amazon changed its estimate of the useful lives of a subset of its servers and networking equipment from six years to five years, effective January 1, 2025, citing the increased pace of technology development, particularly in the area of artificial intelligence and machine learning.",
+          "source": {
+            "title": "Amazon.com, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1018724/000101872426000004/amzn-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-06",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f2",
+          "text": "Amazon reported that this change in estimate increased depreciation and amortization expense by $1.4 billion and reduced net income by $1.0 billion for the year ended December 31, 2025.",
+          "source": {
+            "title": "Amazon.com, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1018724/000101872426000004/amzn-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-06",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f3",
+          "text": "Meta increased the estimated useful lives of most of its servers and network assets to 5.5 years, effective January 1, 2025.",
+          "source": {
+            "title": "Meta Platforms, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1326801/000162828026003942/meta-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-01-29",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f4",
+          "text": "Meta reported that this change in estimate reduced depreciation expense by $2.92 billion and increased net income by $2.59 billion for the year ended December 31, 2025.",
+          "source": {
+            "title": "Meta Platforms, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1326801/000162828026003942/meta-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-01-29",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f5",
+          "text": "Alphabet's 10-K for 2025 states that it depreciates servers and network equipment generally over a period of six years and recognizes any change in estimated useful lives on a prospective basis.",
+          "source": {
+            "title": "Alphabet Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1652044/000165204426000018/goog-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-05",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f6",
+          "text": "Microsoft's 10-K for the fiscal year ended June 30, 2026 gives an estimated useful life of two to six years for servers and network equipment.",
+          "source": {
+            "title": "Microsoft Corporation Form 10-K for the fiscal year ended June 30, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/789019/000119312526323660/msft-20260630.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-07-29",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f7",
+          "text": "Oracle's 10-K for the fiscal year ended May 31, 2026 states that its computer, network, machinery and equipment consist primarily of servers and networking equipment with an estimated useful life of six years.",
+          "source": {
+            "title": "Oracle Corporation Form 10-K for the fiscal year ended May 31, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1341439/000119312526277521/orcl-20260531.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-06-22",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f8",
+          "text": "CoreWeave changed its estimate of the useful life of the computing equipment used in its data centers from five to six years, effective January 1, 2023.",
+          "source": {
+            "title": "CoreWeave, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000104/crwv-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-03-02",
+            "type": "sec_filing"
+          }
+        }
+      ],
+      "verified_by": "AI check: 2 independent agents vs primary sources (owner-delegated)",
+      "verified_at": "2026-10-23",
+      "echo_tags": [
+        "depreciation",
+        "useful-life",
+        "gpu",
+        "servers",
+        "accounting-estimate"
+      ],
+      "banned_claims": [
+        "Any claim that a company chose a useful life to inflate or manage earnings",
+        "Any claim that a useful-life estimate is improper, aggressive or misleading",
+        "Any statement of the economic life of a specific GPU model"
+      ],
+      "catalog_subjects": []
+    },
+    {
+      "id": "mech-take-or-pay-compute-contracts",
+      "kind": "mechanics",
+      "title": "Take-or-pay contracts and backlog for compute",
+      "themes": [
+        "silicon-rush"
+      ],
+      "category_fit": [
+        "blueprints",
+        "valueTraps"
+      ],
+      "companies": [
+        {
+          "name": "CoreWeave, Inc.",
+          "cik": "0001769628",
+          "ticker": "CRWV"
+        },
+        {
+          "name": "Oracle Corporation",
+          "cik": "0001341439",
+          "ticker": "ORCL"
+        },
+        {
+          "name": "Microsoft Corporation",
+          "cik": "0000789019",
+          "ticker": "MSFT"
+        }
+      ],
+      "sic": null,
+      "era": "2023-2026",
+      "status": null,
+      "llm_eligible": true,
+      "facts": [
+        {
+          "id": "f1",
+          "text": "CoreWeave's 10-K for 2025 states that the initial period of its committed contracts generally ranges from one to six years and that these contracts are typically structured as take-or-pay agreements requiring payment regardless of the level of utilization.",
+          "source": {
+            "title": "CoreWeave, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000104/crwv-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-03-02",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f2",
+          "text": "CoreWeave's 10-K states that customers under committed contracts often make a prepayment that is recorded as deferred revenue and consumed based on the terms of the contract.",
+          "source": {
+            "title": "CoreWeave, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000104/crwv-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-03-02",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f3",
+          "text": "Committed contracts accounted for over 98% of CoreWeave's revenue for the year ended December 31, 2025, compared with 96% for 2024 and 88% for 2023.",
+          "source": {
+            "title": "CoreWeave, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000104/crwv-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-03-02",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f4",
+          "text": "CoreWeave reported $60.7 billion of remaining performance obligations as of December 31, 2025, compared with $15.1 billion as of December 31, 2024.",
+          "source": {
+            "title": "CoreWeave, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000104/crwv-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-03-02",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f5",
+          "text": "CoreWeave's 10-K states that it primarily finances its infrastructure development through asset-level debt supported by take-or-pay customer contracts, supplemented by corporate-level equity and debt financing.",
+          "source": {
+            "title": "CoreWeave, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000104/crwv-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-03-02",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f6",
+          "text": "Oracle's 10-K defines remaining performance obligations as contracted revenues that had not yet been recognized, including deferred revenues, invoices issued but uncollected, and amounts to be invoiced and recognized as revenues in future periods.",
+          "source": {
+            "title": "Oracle Corporation Form 10-K for the fiscal year ended May 31, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1341439/000119312526277521/orcl-20260531.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-06-22",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f7",
+          "text": "Oracle reported remaining performance obligations of $638 billion as of May 31, 2026, compared with $138 billion as of May 31, 2025, and attributed the increase primarily to certain significant cloud contracts entered into during the period.",
+          "source": {
+            "title": "Oracle Corporation Form 10-K for the fiscal year ended May 31, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1341439/000119312526277521/orcl-20260531.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-06-22",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f8",
+          "text": "Oracle's 10-K states that the economic returns on its large, long-term cloud infrastructure investments depend on customer demand and on the ability of its key customers to meet their contractual obligations.",
+          "source": {
+            "title": "Oracle Corporation Form 10-K for the fiscal year ended May 31, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1341439/000119312526277521/orcl-20260531.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-06-22",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f9",
+          "text": "Microsoft reported revenue allocated to remaining performance obligations of $684 billion as of June 30, 2026, of which $678 billion related to the commercial portion of revenue, with a weighted average duration of approximately 2.3 years.",
+          "source": {
+            "title": "Microsoft Corporation Form 10-K for the fiscal year ended June 30, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/789019/000119312526323660/msft-20260630.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-07-29",
+            "type": "sec_filing"
+          }
+        }
+      ],
+      "verified_by": "AI check: 2 independent agents vs primary sources (owner-delegated)",
+      "verified_at": "2026-10-23",
+      "echo_tags": [
+        "take-or-pay",
+        "backlog",
+        "rpo",
+        "contracts",
+        "deferred-revenue",
+        "neocloud"
+      ],
+      "banned_claims": [
+        "Any claim that remaining performance obligations are guaranteed revenue",
+        "Any claim that a named customer will or will not pay, renew or expand",
+        "Any forecast of when backlog will convert to revenue beyond what the filing states"
+      ],
+      "catalog_subjects": []
+    },
+    {
+      "id": "mech-telecom-fiber-overbuild",
+      "kind": "mechanics",
+      "title": "The 1996-2002 telecom fiber overbuild",
+      "themes": [
+        "silicon-rush"
+      ],
+      "category_fit": [
+        "valueTraps",
+        "blueprints"
+      ],
+      "companies": [],
+      "sic": null,
+      "era": "1995-2003",
+      "status": null,
+      "llm_eligible": true,
+      "facts": [
+        {
+          "id": "f1",
+          "text": "The Federal Reserve Bank of Richmond reported that U.S. investment in communications equipment grew from approximately $62 billion per year in the first quarter of 1996 to over $135 billion per year in the fourth quarter of 2000, in constant 1996 dollars.",
+          "source": {
+            "title": "Boom and Bust in Telecommunications, Economic Quarterly Volume 89/4 (Fall 2003)",
+            "url": "https://fraser.stlouisfed.org/files/docs/publications/frbrichreview/rev_frbrich200304.pdf",
+            "publisher": "Federal Reserve Bank of Richmond",
+            "date": "2003",
+            "type": "academic"
+          }
+        },
+        {
+          "id": "f2",
+          "text": "The same article reported that communications equipment investment fell to under $93 billion in the fourth quarter of 2001, only 69 percent of the level one year earlier.",
+          "source": {
+            "title": "Boom and Bust in Telecommunications, Economic Quarterly Volume 89/4 (Fall 2003)",
+            "url": "https://fraser.stlouisfed.org/files/docs/publications/frbrichreview/rev_frbrich200304.pdf",
+            "publisher": "Federal Reserve Bank of Richmond",
+            "date": "2003",
+            "type": "academic"
+          }
+        },
+        {
+          "id": "f3",
+          "text": "The article stated that by early 2001 it had become apparent that massive overinvestment had taken place in the telecommunications sector, particularly in long-distance fiber-optic cable.",
+          "source": {
+            "title": "Boom and Bust in Telecommunications, Economic Quarterly Volume 89/4 (Fall 2003)",
+            "url": "https://fraser.stlouisfed.org/files/docs/publications/frbrichreview/rev_frbrich200304.pdf",
+            "publisher": "Federal Reserve Bank of Richmond",
+            "date": "2003",
+            "type": "academic"
+          }
+        },
+        {
+          "id": "f4",
+          "text": "The article reported that consumption of telecommunications services grew steadily from approximately $88 billion in 1995 to $151 billion in 2001, in constant 1996 dollars.",
+          "source": {
+            "title": "Boom and Bust in Telecommunications, Economic Quarterly Volume 89/4 (Fall 2003)",
+            "url": "https://fraser.stlouisfed.org/files/docs/publications/frbrichreview/rev_frbrich200304.pdf",
+            "publisher": "Federal Reserve Bank of Richmond",
+            "date": "2003",
+            "type": "academic"
+          }
+        },
+        {
+          "id": "f5",
+          "text": "The article reported that telecommunications industry employment peaked at approximately 1.59 million workers in March 2001 and declined 22 percent to about 1.30 million by July 2003.",
+          "source": {
+            "title": "Boom and Bust in Telecommunications, Economic Quarterly Volume 89/4 (Fall 2003)",
+            "url": "https://fraser.stlouisfed.org/files/docs/publications/frbrichreview/rev_frbrich200304.pdf",
+            "publisher": "Federal Reserve Bank of Richmond",
+            "date": "2003",
+            "type": "academic"
+          }
+        },
+        {
+          "id": "f6",
+          "text": "The Federal Reserve Bank of San Francisco reported that capital investment by publicly traded telecom service companies rose from $47 billion in 1995 to a peak of $121 billion in 2000 and fell to $49 billion by 2002.",
+          "source": {
+            "title": "The Boom and Bust in Information Technology Investment, FRBSF Economic Review 2004",
+            "url": "https://www.frbsf.org/wp-content/uploads/er19-34bk.pdf",
+            "publisher": "Federal Reserve Bank of San Francisco",
+            "date": "2004",
+            "type": "academic"
+          }
+        },
+        {
+          "id": "f7",
+          "text": "A Federal Reserve Board working paper stated that more than 90 percent of the optical fiber cables installed during the 1990s were left unused in the years that followed.",
+          "source": {
+            "title": "Learning By Investing: Embodied Technology and Business Cycles (Finance and Economics Discussion Series 2007-15)",
+            "url": "https://www.federalreserve.gov/pubs/feds/2007/200715/200715pap.pdf",
+            "publisher": "Board of Governors of the Federal Reserve System",
+            "date": "2007",
+            "type": "academic"
+          }
+        },
+        {
+          "id": "f8",
+          "text": "The same paper noted that this level of unused fiber was also partly due to a new signal transmitting technology that dramatically increased the transmitting capacity of each cable.",
+          "source": {
+            "title": "Learning By Investing: Embodied Technology and Business Cycles (Finance and Economics Discussion Series 2007-15)",
+            "url": "https://www.federalreserve.gov/pubs/feds/2007/200715/200715pap.pdf",
+            "publisher": "Board of Governors of the Federal Reserve System",
+            "date": "2007",
+            "type": "academic"
+          }
+        },
+        {
+          "id": "f9",
+          "text": "A 2003 academic paper from the University of Minnesota estimated that U.S. Internet traffic had approximately doubled every year since 1997, and described 1995 and 1996 as an anomalous two-year period when traffic grew at about the rate of a doubling every 100 days.",
+          "source": {
+            "title": "Internet traffic growth: Sources and implications",
+            "url": "https://www-users.cse.umn.edu/~odlyzko/doc/itcom.internet.growth.pdf",
+            "publisher": "University of Minnesota",
+            "date": "2003",
+            "type": "academic"
+          }
+        },
+        {
+          "id": "f10",
+          "text": "A 2026 Federal Reserve Board staff note, using Bureau of Economic Analysis data, reported that the U.S. intellectual property and equipment investment share of GDP reached 11.5 percent in 2000 and that as of the first quarter of 2026 it was about 0.8 percentage points above its 2024 level and slightly below the 2000 peak.",
+          "source": {
+            "title": "Do Major Technology Advancements Lead to Overinvestment? (FEDS Notes)",
+            "url": "https://www.federalreserve.gov/econres/notes/feds-notes/do-major-technology-advancements-lead-to-overinvestment-20260706.html",
+            "publisher": "Board of Governors of the Federal Reserve System",
+            "date": "2026-07-06",
+            "type": "government"
+          }
+        }
+      ],
+      "verified_by": "AI check: 2 independent agents vs primary sources (owner-delegated)",
+      "verified_at": "2026-10-23",
+      "echo_tags": [
+        "overbuild",
+        "fiber",
+        "telecom",
+        "capex",
+        "dark-fiber",
+        "historical-analogue"
+      ],
+      "banned_claims": [
+        "Any claim that the AI build-out is a bubble or will end like the telecom bust",
+        "Any claim that a named company today is overbuilding",
+        "Any account of fraud or misconduct at any telecom company of that era",
+        "Any stock index level or price move from the period"
+      ],
+      "catalog_subjects": []
+    },
+    {
+      "id": "mech-customer-concentration",
+      "kind": "mechanics",
+      "title": "Customer concentration in AI chips and cloud",
+      "themes": [
+        "silicon-rush"
+      ],
+      "category_fit": [
+        "valueTraps",
+        "battles"
+      ],
+      "companies": [
+        {
+          "name": "NVIDIA Corporation",
+          "cik": "0001045810",
+          "ticker": "NVDA"
+        },
+        {
+          "name": "Broadcom Inc.",
+          "cik": "0001730168",
+          "ticker": "AVGO"
+        },
+        {
+          "name": "CoreWeave, Inc.",
+          "cik": "0001769628",
+          "ticker": "CRWV"
+        },
+        {
+          "name": "Advanced Micro Devices, Inc.",
+          "cik": "0000002488",
+          "ticker": "AMD"
+        },
+        {
+          "name": "Oracle Corporation",
+          "cik": "0001341439",
+          "ticker": "ORCL"
+        }
+      ],
+      "sic": null,
+      "era": "2023-2026",
+      "status": null,
+      "llm_eligible": true,
+      "facts": [
+        {
+          "id": "f1",
+          "text": "NVIDIA reported that, for the fiscal year ended January 25, 2026, sales to one direct customer represented 22% of total revenue and sales to another direct customer represented 14% of total revenue, primarily attributable to its Compute & Networking segment.",
+          "source": {
+            "title": "NVIDIA Corporation Form 10-K for the fiscal year ended January 25, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-25",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f2",
+          "text": "NVIDIA's 10-K defines direct customers as those that buy products directly from NVIDIA and indirect customers as those that buy through its direct customers, a group that includes cloud service providers, AI model makers, enterprises and public sector entities.",
+          "source": {
+            "title": "NVIDIA Corporation Form 10-K for the fiscal year ended January 25, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-25",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f3",
+          "text": "NVIDIA reported that three direct customers accounted for 25%, 18% and 13% of its accounts receivable balance as of January 25, 2026.",
+          "source": {
+            "title": "NVIDIA Corporation Form 10-K for the fiscal year ended January 25, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-25",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f4",
+          "text": "Broadcom reported that one customer accounted for 32%, 28% and 21% of its net revenue in fiscal years 2025, 2024 and 2023, and that revenue from this customer was included in its semiconductor solutions segment.",
+          "source": {
+            "title": "Broadcom Inc. Form 10-K for the fiscal year ended November 2, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1730168/000173016825000121/avgo-20251102.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2025-12-18",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f5",
+          "text": "Broadcom's 10-K states that it believes aggregate sales through all channels to its top five end customers accounted for approximately 40% of its net revenue for each of fiscal years 2025 and 2024.",
+          "source": {
+            "title": "Broadcom Inc. Form 10-K for the fiscal year ended November 2, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1730168/000173016825000121/avgo-20251102.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2025-12-18",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f6",
+          "text": "CoreWeave reported that it recognized approximately 67% of its revenue for the year ended December 31, 2025 from its top customer, Microsoft.",
+          "source": {
+            "title": "CoreWeave, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000104/crwv-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-03-02",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f7",
+          "text": "CoreWeave reported that its top two customers accounted for approximately 77% of its revenue for the year ended December 31, 2024 and its top three customers for approximately 73% of its revenue for 2023.",
+          "source": {
+            "title": "CoreWeave, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000104/crwv-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-03-02",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f8",
+          "text": "AMD reported that no customer accounted for at least 10% of its consolidated net revenue in fiscal years 2025 and 2024, and that one Client and Gaming segment customer accounted for 18% in fiscal year 2023.",
+          "source": {
+            "title": "Advanced Micro Devices, Inc. Form 10-K for the fiscal year ended December 27, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000018/amd-20251227.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-04",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f9",
+          "text": "Oracle's 10-K states that no single customer accounted for 10% or more of its total revenues in fiscal 2026, 2025 or 2024.",
+          "source": {
+            "title": "Oracle Corporation Form 10-K for the fiscal year ended May 31, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1341439/000119312526277521/orcl-20260531.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-06-22",
+            "type": "sec_filing"
+          }
+        }
+      ],
+      "verified_by": "AI check: 2 independent agents vs primary sources (owner-delegated)",
+      "verified_at": "2026-10-23",
+      "echo_tags": [
+        "customer-concentration",
+        "hyperscaler",
+        "single-customer-risk",
+        "receivables"
+      ],
+      "banned_claims": [
+        "The identity of any customer a filing does not name",
+        "Any claim that a named customer will reduce, end or shift its purchases",
+        "Any ranking of which company is riskier because of concentration"
+      ],
+      "catalog_subjects": []
+    },
+    {
+      "id": "mech-ai-chip-export-controls",
+      "kind": "mechanics",
+      "title": "Export controls on AI chips",
+      "themes": [
+        "silicon-rush"
+      ],
+      "category_fit": [
+        "battles"
+      ],
+      "companies": [
+        {
+          "name": "NVIDIA Corporation",
+          "cik": "0001045810",
+          "ticker": "NVDA"
+        },
+        {
+          "name": "Advanced Micro Devices, Inc.",
+          "cik": "0000002488",
+          "ticker": "AMD"
+        }
+      ],
+      "sic": null,
+      "era": "2022-2026",
+      "status": null,
+      "llm_eligible": true,
+      "facts": [
+        {
+          "id": "f1",
+          "text": "The Bureau of Industry and Security published an interim final rule in the Federal Register on October 13, 2022, with provisions taking effect on October 7, October 12 and October 21, 2022, that amended the Export Administration Regulations to control advanced computing integrated circuits, computer commodities that contain them, and certain semiconductor manufacturing items.",
+          "source": {
+            "title": "Implementation of Additional Export Controls: Certain Advanced Computing and Semiconductor Manufacturing Items; Supercomputer and Semiconductor End Use; Entity List Modification (87 FR 62186)",
+            "url": "https://www.federalregister.gov/documents/2022/10/13/2022-21658/implementation-of-additional-export-controls-certain-advanced-computing-and-semiconductor",
+            "publisher": "Federal Register (Bureau of Industry and Security)",
+            "date": "2022-10-13",
+            "type": "regulator"
+          }
+        },
+        {
+          "id": "f2",
+          "text": "The Bureau of Industry and Security published a further interim final rule on October 25, 2023, effective November 17, 2023, that revised the advanced computing controls of the October 7, 2022 rule.",
+          "source": {
+            "title": "Implementation of Additional Export Controls: Certain Advanced Computing Items; Supercomputer and Semiconductor End Use; Updates and Corrections (88 FR 73458)",
+            "url": "https://www.federalregister.gov/documents/2023/10/25/2023-23055/implementation-of-additional-export-controls-certain-advanced-computing-items-supercomputer-and",
+            "publisher": "Federal Register (Bureau of Industry and Security)",
+            "date": "2023-10-25",
+            "type": "regulator"
+          }
+        },
+        {
+          "id": "f3",
+          "text": "NVIDIA's 10-K states that in August 2022 the U.S. government announced export restrictions and licensing requirements targeting China's semiconductor and supercomputing industries that affected its A100 and H100 integrated circuits.",
+          "source": {
+            "title": "NVIDIA Corporation Form 10-K for the fiscal year ended January 25, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-25",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f4",
+          "text": "NVIDIA's 10-K states that in October 2023 the U.S. government announced licensing requirements for exports to China and Country Groups D:1, D:4 and D:5 of products exceeding certain performance thresholds, including the A100, H100, GB200 NVL72 and B200.",
+          "source": {
+            "title": "NVIDIA Corporation Form 10-K for the fiscal year ended January 25, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-25",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f5",
+          "text": "NVIDIA's 10-K states that in April 2025 the U.S. government required a license for exports of its H20 integrated circuits to China, including Hong Kong and Macau, and to D:5 countries.",
+          "source": {
+            "title": "NVIDIA Corporation Form 10-K for the fiscal year ended January 25, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-25",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f6",
+          "text": "NVIDIA incurred a $4.5 billion charge in the first quarter of fiscal year 2026 associated with H20 excess inventory and purchase obligations.",
+          "source": {
+            "title": "NVIDIA Corporation Form 10-K for the fiscal year ended January 25, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-25",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f7",
+          "text": "AMD's 10-K states that an April 2025 U.S. license requirement for exports of certain semiconductor products to D5 countries, a group that includes China, affected its AMD Instinct MI308 products and that it incurred approximately $800 million in inventory and related charges in the second quarter of 2025.",
+          "source": {
+            "title": "Advanced Micro Devices, Inc. Form 10-K for the fiscal year ended December 27, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000018/amd-20251227.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-04",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f8",
+          "text": "NVIDIA reported that revenue from customers headquartered outside the United States accounted for 31%, 41% and 48% of its total revenue for fiscal years 2026, 2025 and 2024.",
+          "source": {
+            "title": "NVIDIA Corporation Form 10-K for the fiscal year ended January 25, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-25",
+            "type": "sec_filing"
+          }
+        }
+      ],
+      "verified_by": "AI check: 2 independent agents vs primary sources (owner-delegated)",
+      "verified_at": "2026-10-23",
+      "echo_tags": [
+        "export-controls",
+        "china",
+        "bis",
+        "geopolitics",
+        "inventory-charge"
+      ],
+      "banned_claims": [
+        "Any forecast of future export rules or licence decisions",
+        "Any claim about revenue a company would have earned without the controls",
+        "Any statement about government revenue-sharing arrangements"
+      ],
+      "catalog_subjects": []
+    },
+    {
+      "id": "mech-fabless-foundry-model",
+      "kind": "mechanics",
+      "title": "The fabless chip model",
+      "themes": [
+        "silicon-rush"
+      ],
+      "category_fit": [
+        "blueprints",
+        "battles"
+      ],
+      "companies": [
+        {
+          "name": "NVIDIA Corporation",
+          "cik": "0001045810",
+          "ticker": "NVDA"
+        },
+        {
+          "name": "Advanced Micro Devices, Inc.",
+          "cik": "0000002488",
+          "ticker": "AMD"
+        },
+        {
+          "name": "Broadcom Inc.",
+          "cik": "0001730168",
+          "ticker": "AVGO"
+        }
+      ],
+      "sic": null,
+      "era": "2025-2026",
+      "status": null,
+      "llm_eligible": true,
+      "facts": [
+        {
+          "id": "f1",
+          "text": "NVIDIA's 10-K describes a fabless and contract manufacturing strategy in which it partners with key suppliers for all phases of the manufacturing process, including wafer fabrication, assembly, testing and packaging.",
+          "source": {
+            "title": "NVIDIA Corporation Form 10-K for the fiscal year ended January 25, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-25",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f2",
+          "text": "NVIDIA's 10-K states that this strategy lets it avoid many of the significant costs and risks associated with owning and operating manufacturing operations.",
+          "source": {
+            "title": "NVIDIA Corporation Form 10-K for the fiscal year ended January 25, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-25",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f3",
+          "text": "NVIDIA's 10-K states that it uses foundries such as Taiwan Semiconductor Manufacturing Company and Samsung to produce its semiconductor wafers and purchases memory from SK Hynix, Micron Technology and Samsung.",
+          "source": {
+            "title": "NVIDIA Corporation Form 10-K for the fiscal year ended January 25, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-25",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f4",
+          "text": "NVIDIA's 10-K states that its supply chain is currently mainly concentrated in Asia and that it is expanding into the U.S. and Latin America.",
+          "source": {
+            "title": "NVIDIA Corporation Form 10-K for the fiscal year ended January 25, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-25",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f5",
+          "text": "AMD's 10-K states that it uses Taiwan Semiconductor Manufacturing Company for the production of wafers for its HPC, FPGA and adaptive SoC products.",
+          "source": {
+            "title": "Advanced Micro Devices, Inc. Form 10-K for the fiscal year ended December 27, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000018/amd-20251227.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-04",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f6",
+          "text": "AMD's 10-K states that wafers for its products are either sorted by the foundry or delivered to assembly, test, mark and packaging partners or subcontractors in the Asia-Pacific region.",
+          "source": {
+            "title": "Advanced Micro Devices, Inc. Form 10-K for the fiscal year ended December 27, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000018/amd-20251227.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-04",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f7",
+          "text": "Broadcom's 10-K states that the majority of its front-end wafer manufacturing operations is outsourced to external foundries, including Taiwan Semiconductor Manufacturing Company.",
+          "source": {
+            "title": "Broadcom Inc. Form 10-K for the fiscal year ended November 2, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1730168/000173016825000121/avgo-20251102.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2025-12-18",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f8",
+          "text": "Broadcom's 10-K states that it uses its internal fabrication facilities for products made with its proprietary processes, such as its FBAR filters for wireless communications.",
+          "source": {
+            "title": "Broadcom Inc. Form 10-K for the fiscal year ended November 2, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1730168/000173016825000121/avgo-20251102.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2025-12-18",
+            "type": "sec_filing"
+          }
+        }
+      ],
+      "verified_by": "AI check: 2 independent agents vs primary sources (owner-delegated)",
+      "verified_at": "2026-10-23",
+      "echo_tags": [
+        "fabless",
+        "foundry",
+        "tsmc",
+        "supply-chain",
+        "outsourcing"
+      ],
+      "banned_claims": [
+        "Any claim about a foundry's own capacity, pricing or market share",
+        "Any claim that a company's supply is secure or at risk beyond what its filing states"
+      ],
+      "catalog_subjects": []
+    },
+    {
+      "id": "co-nvidia",
+      "kind": "company",
+      "title": "NVIDIA: business model and segments",
+      "themes": [
+        "silicon-rush"
+      ],
+      "category_fit": [
+        "blueprints",
+        "battles"
+      ],
+      "companies": [
+        {
+          "name": "NVIDIA Corporation",
+          "cik": "0001045810",
+          "ticker": "NVDA"
+        }
+      ],
+      "sic": "3674",
+      "era": "2023-2026",
+      "status": null,
+      "llm_eligible": true,
+      "facts": [
+        {
+          "id": "f1",
+          "text": "NVIDIA reports its business results in two segments, Compute & Networking and Graphics.",
+          "source": {
+            "title": "NVIDIA Corporation Form 10-K for the fiscal year ended January 25, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-25",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f2",
+          "text": "NVIDIA's Compute & Networking segment includes its Data Center accelerated computing and networking platforms, AI solutions and software, and Automotive platforms, while its Graphics segment includes GeForce GPUs for gaming and PCs and Quadro/NVIDIA RTX GPUs for enterprise workstation graphics.",
+          "source": {
+            "title": "NVIDIA Corporation Form 10-K for the fiscal year ended January 25, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-25",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f3",
+          "text": "NVIDIA's total revenue was $215,938 million for the fiscal year ended January 25, 2026, compared with $130,497 million for the fiscal year ended January 26, 2025.",
+          "source": {
+            "title": "NVIDIA Corporation Form 10-K for the fiscal year ended January 25, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-25",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f4",
+          "text": "NVIDIA's Data Center revenue was $193,737 million for the fiscal year ended January 25, 2026, made up of $162,361 million of compute revenue and $31,376 million of networking revenue.",
+          "source": {
+            "title": "NVIDIA Corporation Form 10-K for the fiscal year ended January 25, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-25",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f5",
+          "text": "NVIDIA's networking offerings include NVLink interconnects and switches and end-to-end platforms for InfiniBand and Ethernet.",
+          "source": {
+            "title": "NVIDIA Corporation Form 10-K for the fiscal year ended January 25, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-25",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f6",
+          "text": "NVIDIA introduced its CUDA development platform in 2006, opening the parallel processing capabilities of its GPUs to a broad range of compute-intensive applications.",
+          "source": {
+            "title": "NVIDIA Corporation Form 10-K for the fiscal year ended January 25, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-25",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f7",
+          "text": "NVIDIA's acquisition of Mellanox in 2020 expanded its offerings to include networking.",
+          "source": {
+            "title": "NVIDIA Corporation Form 10-K for the fiscal year ended January 25, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-25",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f8",
+          "text": "For the fiscal year ended January 25, 2026, sales to one direct customer represented 22% of NVIDIA's total revenue and sales to another direct customer represented 14%.",
+          "source": {
+            "title": "NVIDIA Corporation Form 10-K for the fiscal year ended January 25, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-25",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f9",
+          "text": "NVIDIA was incorporated in California in April 1993 and reincorporated in Delaware in April 1998.",
+          "source": {
+            "title": "NVIDIA Corporation Form 10-K for the fiscal year ended January 25, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000021/nvda-20260125.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-25",
+            "type": "sec_filing"
+          }
+        }
+      ],
+      "verified_by": "AI check: 2 independent agents vs primary sources (owner-delegated)",
+      "verified_at": "2026-10-23",
+      "echo_tags": [
+        "gpu",
+        "data-centre",
+        "cuda",
+        "networking",
+        "ai-chips"
+      ],
+      "banned_claims": [
+        "Any market-share figure for NVIDIA",
+        "Any claim that NVIDIA's position is permanent or under threat",
+        "The identity of NVIDIA's unnamed direct customers"
+      ],
+      "catalog_subjects": [
+        "nvidias-ai-dominance"
+      ]
+    },
+    {
+      "id": "co-coreweave",
+      "kind": "company",
+      "title": "CoreWeave: business model and contracts",
+      "themes": [
+        "silicon-rush"
+      ],
+      "category_fit": [
+        "blueprints",
+        "battles"
+      ],
+      "companies": [
+        {
+          "name": "CoreWeave, Inc.",
+          "cik": "0001769628",
+          "ticker": "CRWV"
+        }
+      ],
+      "sic": "7372",
+      "era": "2023-2026",
+      "status": null,
+      "llm_eligible": true,
+      "facts": [
+        {
+          "id": "f1",
+          "text": "CoreWeave was founded in September 2017 and launched its CoreWeave Cloud Platform in 2020.",
+          "source": {
+            "title": "CoreWeave, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000104/crwv-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-03-02",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f2",
+          "text": "CoreWeave's 10-K states that prior to 2022 it had limited revenue, most of which came from past crypto mining offerings that were discontinued.",
+          "source": {
+            "title": "CoreWeave, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000104/crwv-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-03-02",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f3",
+          "text": "CoreWeave reported revenue of $5,131 million for the year ended December 31, 2025, compared with $1,915 million for 2024 and $229 million for 2023.",
+          "source": {
+            "title": "CoreWeave, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000104/crwv-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-03-02",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f4",
+          "text": "CoreWeave reported net losses of $1.2 billion, $863 million and $594 million for the years ended December 31, 2025, 2024 and 2023.",
+          "source": {
+            "title": "CoreWeave, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000104/crwv-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-03-02",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f5",
+          "text": "CoreWeave operates its business in one operating segment.",
+          "source": {
+            "title": "CoreWeave, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000104/crwv-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-03-02",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f6",
+          "text": "CoreWeave sells access to its platform either through committed contracts, which are take-or-pay, or on demand on a pay-as-you-go basis.",
+          "source": {
+            "title": "CoreWeave, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000104/crwv-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-03-02",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f7",
+          "text": "CoreWeave recognized approximately 67% of its revenue for the year ended December 31, 2025 from its top customer, Microsoft.",
+          "source": {
+            "title": "CoreWeave, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000104/crwv-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-03-02",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f8",
+          "text": "As of December 31, 2025, CoreWeave operated 43 data centers with over 850 MW of active power, compared with 32 data centers with approximately 360 MW of active power as of December 31, 2024.",
+          "source": {
+            "title": "CoreWeave, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000104/crwv-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-03-02",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f9",
+          "text": "CoreWeave reported total contracted power capacity of approximately 3.1 GW as of December 31, 2025.",
+          "source": {
+            "title": "CoreWeave, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000104/crwv-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-03-02",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f10",
+          "text": "CoreWeave reported $60.7 billion of remaining performance obligations as of December 31, 2025.",
+          "source": {
+            "title": "CoreWeave, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000104/crwv-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-03-02",
+            "type": "sec_filing"
+          }
+        }
+      ],
+      "verified_by": "AI check: 2 independent agents vs primary sources (owner-delegated)",
+      "verified_at": "2026-10-23",
+      "echo_tags": [
+        "neocloud",
+        "gpu-cloud",
+        "take-or-pay",
+        "customer-concentration",
+        "data-centre"
+      ],
+      "banned_claims": [
+        "Any claim that CoreWeave will or will not become profitable",
+        "Any figure for a private counterparty's own finances",
+        "Any claim about the terms of a contract beyond what the filing states"
+      ],
+      "catalog_subjects": []
+    },
+    {
+      "id": "co-microsoft",
+      "kind": "company",
+      "title": "Microsoft: segments and cloud",
+      "themes": [
+        "silicon-rush"
+      ],
+      "category_fit": [
+        "blueprints",
+        "battles"
+      ],
+      "companies": [
+        {
+          "name": "Microsoft Corporation",
+          "cik": "0000789019",
+          "ticker": "MSFT"
+        }
+      ],
+      "sic": "7372",
+      "era": "2024-2026",
+      "status": null,
+      "llm_eligible": true,
+      "facts": [
+        {
+          "id": "f1",
+          "text": "Microsoft reports its financial performance in three segments: Productivity and Business Processes, Intelligent Cloud, and More Personal Computing.",
+          "source": {
+            "title": "Microsoft Corporation Form 10-K for the fiscal year ended June 30, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/789019/000119312526323660/msft-20260630.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-07-29",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f2",
+          "text": "Microsoft's Intelligent Cloud segment consists of its public, private and hybrid server products and cloud services, including Azure and other cloud services.",
+          "source": {
+            "title": "Microsoft Corporation Form 10-K for the fiscal year ended June 30, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/789019/000119312526323660/msft-20260630.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-07-29",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f3",
+          "text": "Microsoft's total revenue was $331,839 million for the fiscal year ended June 30, 2026, compared with $281,724 million for the fiscal year ended June 30, 2025.",
+          "source": {
+            "title": "Microsoft Corporation Form 10-K for the fiscal year ended June 30, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/789019/000119312526323660/msft-20260630.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-07-29",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f4",
+          "text": "Microsoft's Intelligent Cloud segment revenue was $137,791 million for the fiscal year ended June 30, 2026, compared with $106,265 million for the prior fiscal year.",
+          "source": {
+            "title": "Microsoft Corporation Form 10-K for the fiscal year ended June 30, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/789019/000119312526323660/msft-20260630.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-07-29",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f5",
+          "text": "Microsoft reported that Azure and other cloud services revenue grew 41% in the fiscal year ended June 30, 2026.",
+          "source": {
+            "title": "Microsoft Corporation Form 10-K for the fiscal year ended June 30, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/789019/000119312526323660/msft-20260630.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-07-29",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f6",
+          "text": "Microsoft Cloud revenue, which includes Microsoft 365 Commercial cloud, Azure and other cloud services, the commercial portion of LinkedIn, and Dynamics 365, was $214.4 billion for the fiscal year ended June 30, 2026.",
+          "source": {
+            "title": "Microsoft Corporation Form 10-K for the fiscal year ended June 30, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/789019/000119312526323660/msft-20260630.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-07-29",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f7",
+          "text": "Microsoft reported additions to property and equipment of $115,948 million for the fiscal year ended June 30, 2026, compared with $64,551 million for the prior fiscal year.",
+          "source": {
+            "title": "Microsoft Corporation Form 10-K for the fiscal year ended June 30, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/789019/000119312526323660/msft-20260630.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-07-29",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f8",
+          "text": "Microsoft holds an investment in OpenAI accounted for under the equity method that represents an approximate 25% interest on an as-converted basis.",
+          "source": {
+            "title": "Microsoft Corporation Form 10-K for the fiscal year ended June 30, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/789019/000119312526323660/msft-20260630.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-07-29",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f9",
+          "text": "Microsoft's other income included $6.5 billion of net gains for the fiscal year ended June 30, 2026 and $4.8 billion of net losses for the fiscal year ended June 30, 2025 from investments in OpenAI.",
+          "source": {
+            "title": "Microsoft Corporation Form 10-K for the fiscal year ended June 30, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/789019/000119312526323660/msft-20260630.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-07-29",
+            "type": "sec_filing"
+          }
+        }
+      ],
+      "verified_by": "AI check: 2 independent agents vs primary sources (owner-delegated)",
+      "verified_at": "2026-10-23",
+      "echo_tags": [
+        "cloud",
+        "azure",
+        "hyperscaler",
+        "capex",
+        "openai-stake"
+      ],
+      "banned_claims": [
+        "Any valuation of OpenAI or any figure for OpenAI's own finances",
+        "Any claim about the future of the Microsoft and OpenAI partnership",
+        "Any market-share figure for Azure"
+      ],
+      "catalog_subjects": [
+        "microsofts-cloud-metamorphosis",
+        "google-vs-microsoft-ai-wars"
+      ]
+    },
+    {
+      "id": "co-oracle",
+      "kind": "company",
+      "title": "Oracle: cloud infrastructure and backlog",
+      "themes": [
+        "silicon-rush"
+      ],
+      "category_fit": [
+        "blueprints",
+        "battles"
+      ],
+      "companies": [
+        {
+          "name": "Oracle Corporation",
+          "cik": "0001341439",
+          "ticker": "ORCL"
+        }
+      ],
+      "sic": "7372",
+      "era": "2024-2026",
+      "status": null,
+      "llm_eligible": true,
+      "facts": [
+        {
+          "id": "f1",
+          "text": "Oracle has three businesses, cloud and software, hardware, and services, and each business is comprised of a single operating segment.",
+          "source": {
+            "title": "Oracle Corporation Form 10-K for the fiscal year ended May 31, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1341439/000119312526277521/orcl-20260531.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-06-22",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f2",
+          "text": "Oracle's cloud and software business represented 87% of its total revenues in fiscal 2026 and 86% in fiscal 2025.",
+          "source": {
+            "title": "Oracle Corporation Form 10-K for the fiscal year ended May 31, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1341439/000119312526277521/orcl-20260531.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-06-22",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f3",
+          "text": "Oracle's total revenues were $67,357 million for the fiscal year ended May 31, 2026, compared with $57,399 million for the fiscal year ended May 31, 2025.",
+          "source": {
+            "title": "Oracle Corporation Form 10-K for the fiscal year ended May 31, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1341439/000119312526277521/orcl-20260531.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-06-22",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f4",
+          "text": "Oracle's cloud infrastructure revenues were $18,101 million for fiscal 2026, compared with $10,234 million for fiscal 2025 and $6,840 million for fiscal 2024.",
+          "source": {
+            "title": "Oracle Corporation Form 10-K for the fiscal year ended May 31, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1341439/000119312526277521/orcl-20260531.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-06-22",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f5",
+          "text": "Oracle's cloud applications revenues were $15,888 million for fiscal 2026, compared with $14,272 million for fiscal 2025.",
+          "source": {
+            "title": "Oracle Corporation Form 10-K for the fiscal year ended May 31, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1341439/000119312526277521/orcl-20260531.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-06-22",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f6",
+          "text": "Oracle's 10-K states that its Oracle Cloud Infrastructure offerings are designed to deliver its infrastructure technologies, including compute, storage, networking and cloud-native services, along with solutions such as AI infrastructure, generative AI and agentic AI.",
+          "source": {
+            "title": "Oracle Corporation Form 10-K for the fiscal year ended May 31, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1341439/000119312526277521/orcl-20260531.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-06-22",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f7",
+          "text": "Oracle reported remaining performance obligations of $638 billion as of May 31, 2026, compared with $138 billion as of May 31, 2025.",
+          "source": {
+            "title": "Oracle Corporation Form 10-K for the fiscal year ended May 31, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1341439/000119312526277521/orcl-20260531.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-06-22",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f8",
+          "text": "Oracle reported capital expenditures of $55,663 million for fiscal 2026, compared with $21,215 million for fiscal 2025.",
+          "source": {
+            "title": "Oracle Corporation Form 10-K for the fiscal year ended May 31, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1341439/000119312526277521/orcl-20260531.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-06-22",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f9",
+          "text": "No single customer accounted for 10% or more of Oracle's total revenues in fiscal 2026, 2025 or 2024.",
+          "source": {
+            "title": "Oracle Corporation Form 10-K for the fiscal year ended May 31, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1341439/000119312526277521/orcl-20260531.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-06-22",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f10",
+          "text": "As of May 31, 2026, Oracle had $260 billion of additional lease commitments, substantially all related to data center arrangements, with terms of fifteen to nineteen years, that were not reflected on its consolidated balance sheet.",
+          "source": {
+            "title": "Oracle Corporation Form 10-K for the fiscal year ended May 31, 2026",
+            "url": "https://www.sec.gov/Archives/edgar/data/1341439/000119312526277521/orcl-20260531.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-06-22",
+            "type": "sec_filing"
+          }
+        }
+      ],
+      "verified_by": "AI check: 2 independent agents vs primary sources (owner-delegated)",
+      "verified_at": "2026-10-23",
+      "echo_tags": [
+        "cloud-infrastructure",
+        "oci",
+        "rpo",
+        "capex",
+        "leases"
+      ],
+      "banned_claims": [
+        "Any claim that Oracle can or cannot fund its commitments",
+        "The identity of the counterparties to Oracle's large cloud contracts unless the filing names them",
+        "Any forecast of Oracle's cloud revenue"
+      ],
+      "catalog_subjects": []
+    },
+    {
+      "id": "co-amd",
+      "kind": "company",
+      "title": "AMD: segments and data-centre products",
+      "themes": [
+        "silicon-rush"
+      ],
+      "category_fit": [
+        "blueprints",
+        "battles"
+      ],
+      "companies": [
+        {
+          "name": "Advanced Micro Devices, Inc.",
+          "cik": "0000002488",
+          "ticker": "AMD"
+        }
+      ],
+      "sic": "3674",
+      "era": "2023-2026",
+      "status": null,
+      "llm_eligible": true,
+      "facts": [
+        {
+          "id": "f1",
+          "text": "AMD has three reportable segments, Data Center, Client and Gaming, and Embedded, plus an All Other category that is not a reportable segment.",
+          "source": {
+            "title": "Advanced Micro Devices, Inc. Form 10-K for the fiscal year ended December 27, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000018/amd-20251227.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-04",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f2",
+          "text": "AMD's Data Center segment primarily includes AI accelerators, CPUs for servers, GPUs, APUs, DPUs, AI NICs, FPGAs and SoC products for data centers.",
+          "source": {
+            "title": "Advanced Micro Devices, Inc. Form 10-K for the fiscal year ended December 27, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000018/amd-20251227.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-04",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f3",
+          "text": "AMD's net revenue was $34,639 million for the fiscal year ended December 27, 2025, compared with $25,785 million for the fiscal year ended December 28, 2024.",
+          "source": {
+            "title": "Advanced Micro Devices, Inc. Form 10-K for the fiscal year ended December 27, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000018/amd-20251227.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-04",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f4",
+          "text": "AMD's Data Center segment net revenue was $16,635 million for fiscal 2025, compared with $12,579 million for fiscal 2024, and the segment's operating income was $3,603 million for fiscal 2025.",
+          "source": {
+            "title": "Advanced Micro Devices, Inc. Form 10-K for the fiscal year ended December 27, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000018/amd-20251227.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-04",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f5",
+          "text": "AMD's 10-K states that in the Data Center segment it competes primarily against Intel and NVIDIA with its CPU, GPU, DPU and AI NIC server products.",
+          "source": {
+            "title": "Advanced Micro Devices, Inc. Form 10-K for the fiscal year ended December 27, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000018/amd-20251227.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-04",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f6",
+          "text": "AMD's 10-K states that it advanced its AI GPU roadmap to an annual cadence for AMD Instinct solutions, beginning with the AMD Instinct MI350 Series GPUs in 2025.",
+          "source": {
+            "title": "Advanced Micro Devices, Inc. Form 10-K for the fiscal year ended December 27, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000018/amd-20251227.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-04",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f7",
+          "text": "On March 31, 2025, AMD completed the acquisition of ZT Systems, a provider of AI and general-purpose compute infrastructure for hyperscale computing companies, for total purchase consideration of $4.4 billion.",
+          "source": {
+            "title": "Advanced Micro Devices, Inc. Form 10-K for the fiscal year ended December 27, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000018/amd-20251227.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-04",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f8",
+          "text": "On October 27, 2025, AMD completed the sale of the ZT Manufacturing Business to Sanmina Corporation for $2.4 billion in cash, subject to purchase price adjustments, plus shares of Sanmina common stock.",
+          "source": {
+            "title": "Advanced Micro Devices, Inc. Form 10-K for the fiscal year ended December 27, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000018/amd-20251227.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-04",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f9",
+          "text": "No customer accounted for at least 10% of AMD's consolidated net revenue in fiscal years 2025 and 2024.",
+          "source": {
+            "title": "Advanced Micro Devices, Inc. Form 10-K for the fiscal year ended December 27, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000018/amd-20251227.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-04",
+            "type": "sec_filing"
+          }
+        }
+      ],
+      "verified_by": "AI check: 2 independent agents vs primary sources (owner-delegated)",
+      "verified_at": "2026-10-23",
+      "echo_tags": [
+        "gpu",
+        "cpu",
+        "data-centre",
+        "ai-chips",
+        "acquisition"
+      ],
+      "banned_claims": [
+        "Any market-share figure for AMD",
+        "Any claim that AMD will gain or lose share against a named rival"
+      ],
+      "catalog_subjects": [
+        "amd-vs-intel-the-cpu-wars"
+      ]
+    },
+    {
+      "id": "co-broadcom",
+      "kind": "company",
+      "title": "Broadcom: semiconductors and infrastructure software",
+      "themes": [
+        "silicon-rush"
+      ],
+      "category_fit": [
+        "blueprints",
+        "battles"
+      ],
+      "companies": [
+        {
+          "name": "Broadcom Inc.",
+          "cik": "0001730168",
+          "ticker": "AVGO"
+        }
+      ],
+      "sic": "3674",
+      "era": "2023-2026",
+      "status": null,
+      "llm_eligible": true,
+      "facts": [
+        {
+          "id": "f1",
+          "text": "Broadcom has two reportable segments, semiconductor solutions and infrastructure software.",
+          "source": {
+            "title": "Broadcom Inc. Form 10-K for the fiscal year ended November 2, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1730168/000173016825000121/avgo-20251102.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2025-12-18",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f2",
+          "text": "Broadcom's semiconductor solutions segment includes all of its semiconductor-based product lines and IP licensing, and its infrastructure software segment includes its private cloud, mainframe software, cybersecurity and enterprise software portfolios and its FC SAN business.",
+          "source": {
+            "title": "Broadcom Inc. Form 10-K for the fiscal year ended November 2, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1730168/000173016825000121/avgo-20251102.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2025-12-18",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f3",
+          "text": "Broadcom's total net revenue was $63,887 million for the fiscal year ended November 2, 2025, of which semiconductor solutions contributed $36,858 million and infrastructure software $27,029 million.",
+          "source": {
+            "title": "Broadcom Inc. Form 10-K for the fiscal year ended November 2, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1730168/000173016825000121/avgo-20251102.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2025-12-18",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f4",
+          "text": "Broadcom's AI semiconductor solutions include custom accelerators or XPUs, Ethernet switching and routing silicon, Ethernet NICs, physical layer devices and optical components, as well as racks and systems based on its XPUs.",
+          "source": {
+            "title": "Broadcom Inc. Form 10-K for the fiscal year ended November 2, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1730168/000173016825000121/avgo-20251102.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2025-12-18",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f5",
+          "text": "Broadcom's 10-K states that customers of its solutions for AI data center infrastructure are hyperscalers and companies with AI frontier models, as well as original equipment manufacturers and system integrators that develop servers, switches and racks deployed in large-scale AI data centers.",
+          "source": {
+            "title": "Broadcom Inc. Form 10-K for the fiscal year ended November 2, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1730168/000173016825000121/avgo-20251102.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2025-12-18",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f6",
+          "text": "Broadcom's 10-K attributes the increase in semiconductor solutions revenue for fiscal 2025 to strong demand for its networking solutions, primarily custom AI accelerators and AI networking products.",
+          "source": {
+            "title": "Broadcom Inc. Form 10-K for the fiscal year ended November 2, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1730168/000173016825000121/avgo-20251102.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2025-12-18",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f7",
+          "text": "One customer accounted for 32% of Broadcom's net revenue in fiscal 2025, 28% in fiscal 2024 and 21% in fiscal 2023, and that revenue was included in the semiconductor solutions segment.",
+          "source": {
+            "title": "Broadcom Inc. Form 10-K for the fiscal year ended November 2, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1730168/000173016825000121/avgo-20251102.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2025-12-18",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f8",
+          "text": "Sales to distributors accounted for 48% of Broadcom's net revenue for each of fiscal years 2025 and 2024.",
+          "source": {
+            "title": "Broadcom Inc. Form 10-K for the fiscal year ended November 2, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1730168/000173016825000121/avgo-20251102.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2025-12-18",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f9",
+          "text": "Broadcom acquired VMware, Inc. on November 22, 2023 in a cash-and-stock transaction.",
+          "source": {
+            "title": "Broadcom Inc. Form 10-K for the fiscal year ended November 2, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1730168/000173016825000121/avgo-20251102.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2025-12-18",
+            "type": "sec_filing"
+          }
+        }
+      ],
+      "verified_by": "AI check: 2 independent agents vs primary sources (owner-delegated)",
+      "verified_at": "2026-10-23",
+      "echo_tags": [
+        "custom-silicon",
+        "xpu",
+        "ai-networking",
+        "ethernet",
+        "infrastructure-software"
+      ],
+      "banned_claims": [
+        "The identity of Broadcom's largest customer or of its unnamed XPU customers",
+        "Any market-share figure for Broadcom"
+      ],
+      "catalog_subjects": []
+    },
+    {
+      "id": "mech-data-centre-electricity-demand",
+      "kind": "mechanics",
+      "title": "How much electricity data centres use",
+      "themes": [
+        "powering-machine"
+      ],
+      "category_fit": [
+        "blueprints"
+      ],
+      "companies": [],
+      "sic": null,
+      "era": "2014-2023",
+      "status": null,
+      "llm_eligible": true,
+      "facts": [
+        {
+          "id": "f1",
+          "text": "A December 2024 Lawrence Berkeley National Laboratory report estimated that U.S. data centers consumed 176 TWh of electricity in 2023, representing 4.4% of total U.S. electricity consumption.",
+          "source": {
+            "title": "2024 United States Data Center Energy Usage Report (LBNL-2001637)",
+            "url": "https://escholarship.org/uc/item/32d6m0d1",
+            "publisher": "Lawrence Berkeley National Laboratory",
+            "date": "2024-12",
+            "type": "government"
+          }
+        },
+        {
+          "id": "f2",
+          "text": "The Department of Energy reported that total data center electricity usage climbed from 58 TWh in 2014 to 176 TWh in 2023.",
+          "source": {
+            "title": "DOE Releases New Report Evaluating Increase in Electricity Demand from Data Centers",
+            "url": "https://www.energy.gov/articles/doe-releases-new-report-evaluating-increase-electricity-demand-data-centers",
+            "publisher": "U.S. Department of Energy",
+            "date": "2024-12-20",
+            "type": "government"
+          }
+        },
+        {
+          "id": "f3",
+          "text": "The Lawrence Berkeley National Laboratory report estimated that data center electricity use remained fairly stable at about 60 TWh between 2014 and 2016.",
+          "source": {
+            "title": "2024 United States Data Center Energy Usage Report (LBNL-2001637)",
+            "url": "https://escholarship.org/uc/item/32d6m0d1",
+            "publisher": "Lawrence Berkeley National Laboratory",
+            "date": "2024-12",
+            "type": "government"
+          }
+        },
+        {
+          "id": "f4",
+          "text": "The report states that in 2017 GPU-accelerated servers for artificial intelligence became a significant enough portion of the data center server stock that total data center electricity use began to increase again.",
+          "source": {
+            "title": "2024 United States Data Center Energy Usage Report (LBNL-2001637)",
+            "url": "https://escholarship.org/uc/item/32d6m0d1",
+            "publisher": "Lawrence Berkeley National Laboratory",
+            "date": "2024-12",
+            "type": "government"
+          }
+        },
+        {
+          "id": "f5",
+          "text": "The report estimated that data centers consumed about 76 TWh in 2018, representing 1.9% of total U.S. electricity consumption.",
+          "source": {
+            "title": "2024 United States Data Center Energy Usage Report (LBNL-2001637)",
+            "url": "https://escholarship.org/uc/item/32d6m0d1",
+            "publisher": "Lawrence Berkeley National Laboratory",
+            "date": "2024-12",
+            "type": "government"
+          }
+        },
+        {
+          "id": "f6",
+          "text": "The report estimated that internal data centers accounted for over 60% of server energy consumption in 2014 and nearly 10% in 2023, while hyperscale and colocation data centers accounted for almost 80% in 2023.",
+          "source": {
+            "title": "2024 United States Data Center Energy Usage Report (LBNL-2001637)",
+            "url": "https://escholarship.org/uc/item/32d6m0d1",
+            "publisher": "Lawrence Berkeley National Laboratory",
+            "date": "2024-12",
+            "type": "government"
+          }
+        },
+        {
+          "id": "f7",
+          "text": "The Department of Energy describes data centers as one of the most energy-intensive building types, consuming 10 to 50 times the energy per floor space of a typical commercial office building.",
+          "source": {
+            "title": "Data Centers and Servers (Building Technologies Office)",
+            "url": "https://www.energy.gov/eere/buildings/data-centers-and-servers",
+            "publisher": "U.S. Department of Energy",
+            "date": null,
+            "type": "government"
+          }
+        },
+        {
+          "id": "f8",
+          "text": "The report states that the Energy Act of 2020 called for the Department of Energy to publish an update to the laboratory's 2016 United States Data Center Energy Usage Report.",
+          "source": {
+            "title": "2024 United States Data Center Energy Usage Report (LBNL-2001637)",
+            "url": "https://escholarship.org/uc/item/32d6m0d1",
+            "publisher": "Lawrence Berkeley National Laboratory",
+            "date": "2024-12",
+            "type": "government"
+          }
+        }
+      ],
+      "verified_by": "AI check: 2 independent agents vs primary sources (owner-delegated)",
+      "verified_at": "2026-10-23",
+      "echo_tags": [
+        "electricity-demand",
+        "data-centre",
+        "load-growth",
+        "twh"
+      ],
+      "banned_claims": [
+        "Any projection of future data-centre electricity use, including the report's 2028 scenarios",
+        "Any claim that a named company's demand caused a specific share of this growth"
+      ],
+      "catalog_subjects": []
+    },
+    {
+      "id": "mech-interconnection-queues",
+      "kind": "mechanics",
+      "title": "Grid interconnection queues",
+      "themes": [
+        "powering-machine"
+      ],
+      "category_fit": [
+        "blueprints"
+      ],
+      "companies": [],
+      "sic": null,
+      "era": "2022-2026",
+      "status": null,
+      "llm_eligible": true,
+      "facts": [
+        {
+          "id": "f1",
+          "text": "The Federal Energy Regulatory Commission issued Order No. 2023 on July 28, 2023 to reform the procedures and agreements that transmission providers use to connect new generating facilities to the transmission system.",
+          "source": {
+            "title": "Explainer on the Interconnection Final Rule (Order No. 2023, Docket No. RM22-14-000)",
+            "url": "https://www.ferc.gov/explainer-interconnection-final-rule",
+            "publisher": "Federal Energy Regulatory Commission",
+            "date": null,
+            "type": "regulator"
+          }
+        },
+        {
+          "id": "f2",
+          "text": "FERC stated that as of the end of 2022 there were over 10,000 active interconnection requests in queues throughout the United States, representing over 2,000 gigawatts of potential generation and storage capacity.",
+          "source": {
+            "title": "Explainer on the Interconnection Final Rule (Order No. 2023, Docket No. RM22-14-000)",
+            "url": "https://www.ferc.gov/explainer-interconnection-final-rule",
+            "publisher": "Federal Energy Regulatory Commission",
+            "date": null,
+            "type": "regulator"
+          }
+        },
+        {
+          "id": "f3",
+          "text": "FERC stated that of the 2,179 interconnection studies completed in 2022, 68% were issued late.",
+          "source": {
+            "title": "Explainer on the Interconnection Final Rule (Order No. 2023, Docket No. RM22-14-000)",
+            "url": "https://www.ferc.gov/explainer-interconnection-final-rule",
+            "publisher": "Federal Energy Regulatory Commission",
+            "date": null,
+            "type": "regulator"
+          }
+        },
+        {
+          "id": "f4",
+          "text": "Order No. 2023 requires transmission providers to replace the serial first-come, first-served study process with a first-ready, first-served cluster study process that studies proposed generating facilities in batches.",
+          "source": {
+            "title": "Explainer on the Interconnection Final Rule (Order No. 2023, Docket No. RM22-14-000)",
+            "url": "https://www.ferc.gov/explainer-interconnection-final-rule",
+            "publisher": "Federal Energy Regulatory Commission",
+            "date": null,
+            "type": "regulator"
+          }
+        },
+        {
+          "id": "f5",
+          "text": "Order No. 2023 requires interconnection customers to demonstrate 90% site control when they submit an interconnection request and 100% site control when they execute the facilities study agreement.",
+          "source": {
+            "title": "Explainer on the Interconnection Final Rule (Order No. 2023, Docket No. RM22-14-000)",
+            "url": "https://www.ferc.gov/explainer-interconnection-final-rule",
+            "publisher": "Federal Energy Regulatory Commission",
+            "date": null,
+            "type": "regulator"
+          }
+        },
+        {
+          "id": "f6",
+          "text": "Order No. 2023 introduced penalties for transmission providers that miss study deadlines and withdrawal penalties for interconnection customers whose withdrawal materially affects the cost or timing of other requests with an equal or lower queue position.",
+          "source": {
+            "title": "Explainer on the Interconnection Final Rule (Order No. 2023, Docket No. RM22-14-000)",
+            "url": "https://www.ferc.gov/explainer-interconnection-final-rule",
+            "publisher": "Federal Energy Regulatory Commission",
+            "date": null,
+            "type": "regulator"
+          }
+        },
+        {
+          "id": "f7",
+          "text": "Lawrence Berkeley National Laboratory reported that as of the end of 2025 about 8,200 projects, representing 1,312 GW of generation and approximately 749 GW of storage, were actively seeking grid interconnection in the U.S.",
+          "source": {
+            "title": "Queued Up: 2026 Edition, Characteristics of Power Plants Seeking Transmission Interconnection As of the End of 2025",
+            "url": "https://emp.lbl.gov/publications/queued-2026-edition-characteristics",
+            "publisher": "Lawrence Berkeley National Laboratory",
+            "date": "2026-05",
+            "type": "government"
+          }
+        },
+        {
+          "id": "f8",
+          "text": "The laboratory reported that the median project built in 2025 took 61 months from interconnection request to commercial operation.",
+          "source": {
+            "title": "Queued Up: 2026 Edition, Characteristics of Power Plants Seeking Transmission Interconnection As of the End of 2025 (report slides, PDF)",
+            "url": "https://eta-publications.lbl.gov/sites/default/files/2026-06/queued_up_2026_edition.pdf",
+            "publisher": "Lawrence Berkeley National Laboratory",
+            "date": "2026-06",
+            "type": "government"
+          }
+        },
+        {
+          "id": "f9",
+          "text": "The laboratory reported that only 13% of the capacity that submitted interconnection requests from 2000 to 2020 had reached commercial operation by the end of 2025, while 75% had been withdrawn and 10% was still active.",
+          "source": {
+            "title": "Queued Up: 2026 Edition, Characteristics of Power Plants Seeking Transmission Interconnection As of the End of 2025",
+            "url": "https://emp.lbl.gov/publications/queued-2026-edition-characteristics",
+            "publisher": "Lawrence Berkeley National Laboratory",
+            "date": "2026-05",
+            "type": "government"
+          }
+        },
+        {
+          "id": "f10",
+          "text": "The laboratory reported that active natural gas capacity in interconnection queues increased 86% in 2025 to 253 GW.",
+          "source": {
+            "title": "Queued Up: 2026 Edition, Characteristics of Power Plants Seeking Transmission Interconnection As of the End of 2025",
+            "url": "https://emp.lbl.gov/publications/queued-2026-edition-characteristics",
+            "publisher": "Lawrence Berkeley National Laboratory",
+            "date": "2026-05",
+            "type": "government"
+          }
+        }
+      ],
+      "verified_by": "AI check: 2 independent agents vs primary sources (owner-delegated)",
+      "verified_at": "2026-10-23",
+      "echo_tags": [
+        "interconnection",
+        "queue",
+        "grid",
+        "transmission",
+        "ferc"
+      ],
+      "banned_claims": [
+        "Any forecast of how much queued capacity will be built",
+        "Any claim about when a specific project will connect",
+        "Any judgment that Order No. 2023 has or has not worked"
+      ],
+      "catalog_subjects": []
+    },
+    {
+      "id": "mech-power-purchase-agreements",
+      "kind": "mechanics",
+      "title": "Power purchase agreements with data-centre buyers",
+      "themes": [
+        "powering-machine"
+      ],
+      "category_fit": [
+        "blueprints",
+        "battles"
+      ],
+      "companies": [
+        {
+          "name": "Constellation Energy Corporation",
+          "cik": "0001868275",
+          "ticker": "CEG"
+        },
+        {
+          "name": "Vistra Corp.",
+          "cik": "0001692819",
+          "ticker": "VST"
+        }
+      ],
+      "sic": null,
+      "era": "2024-2026",
+      "status": null,
+      "llm_eligible": true,
+      "facts": [
+        {
+          "id": "f1",
+          "text": "In September 2024, Constellation executed a 20-year power purchase agreement with Microsoft that supports the restart of Three Mile Island Unit 1, renamed the Crane Clean Energy Center.",
+          "source": {
+            "title": "Constellation Energy Corporation Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1868275/000186827526000032/ceg-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-24",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f2",
+          "text": "Constellation's 10-K states that under that agreement Microsoft is to purchase the output generated from the renewed plant, including energy, capacity and emissions-free attributes.",
+          "source": {
+            "title": "Constellation Energy Corporation Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1868275/000186827526000032/ceg-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-24",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f3",
+          "text": "In June 2025, Constellation signed a 20-year power purchase agreement with Meta Platforms for the output of the Clinton Clean Energy Center, with the agreement beginning in June 2027.",
+          "source": {
+            "title": "Constellation Energy Corporation Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1868275/000186827526000032/ceg-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-24",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f4",
+          "text": "In September 2025, Vistra announced a 20-year power purchase agreement, with options to extend for up to an additional 20 years, to supply Amazon Web Services with 1,200 MW of carbon-free power from its Comanche Peak Nuclear Power Plant.",
+          "source": {
+            "title": "Vistra Corp. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000006/vistra-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-27",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f5",
+          "text": "In January 2026, Vistra announced 20-year power purchase agreements with Meta Platforms to supply 2,609 MW of carbon-free power and capacity from its PJM nuclear plants, including 2,176 MW of operating energy and capacity and 433 MW of uprate energy and capacity to be constructed.",
+          "source": {
+            "title": "Vistra Corp. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000006/vistra-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-27",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f6",
+          "text": "Vistra's 10-K states that through its hedging, risk management and power purchase agreement activities it is exposed to the credit risk that counterparties do not perform their obligations.",
+          "source": {
+            "title": "Vistra Corp. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000006/vistra-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-27",
+            "type": "sec_filing"
+          }
+        }
+      ],
+      "verified_by": "AI check: 2 independent agents vs primary sources (owner-delegated)",
+      "verified_at": "2026-10-23",
+      "echo_tags": [
+        "ppa",
+        "offtake",
+        "nuclear",
+        "hyperscaler",
+        "contracts"
+      ],
+      "banned_claims": [
+        "Any price or dollar value of a power purchase agreement, which the filings do not disclose",
+        "Any forecast of delivery dates beyond the contract terms the filings state",
+        "Any claim that a buyer will extend or add agreements"
+      ],
+      "catalog_subjects": []
+    },
+    {
+      "id": "mech-nuclear-licensing-restarts",
+      "kind": "mechanics",
+      "title": "Nuclear licences, renewals and restarts",
+      "themes": [
+        "powering-machine"
+      ],
+      "category_fit": [
+        "blueprints"
+      ],
+      "companies": [
+        {
+          "name": "Constellation Energy Corporation",
+          "cik": "0001868275",
+          "ticker": "CEG"
+        },
+        {
+          "name": "Vistra Corp.",
+          "cik": "0001692819",
+          "ticker": "VST"
+        }
+      ],
+      "sic": null,
+      "era": "2019-2026",
+      "status": null,
+      "llm_eligible": true,
+      "facts": [
+        {
+          "id": "f1",
+          "text": "Under 10 CFR 50.51, each license, except certain non-power production or utilization facility licenses issued after January 29, 2025, is issued for a fixed period of time specified in the license that in no case may exceed 40 years from the date of issuance.",
+          "source": {
+            "title": "10 CFR 50.51 Continuation of license (current text)",
+            "url": "https://www.ecfr.gov/current/title-10/section-50.51",
+            "publisher": "Electronic Code of Federal Regulations",
+            "date": null,
+            "type": "regulator"
+          }
+        },
+        {
+          "id": "f2",
+          "text": "Under 10 CFR 54.31, a renewed license is issued for the remaining years of the current license plus an additional period of not more than 20 years, the term of a renewed license may not exceed 40 years, and a renewed license may be renewed again.",
+          "source": {
+            "title": "10 CFR 54.31 Issuance of a renewed license (current text)",
+            "url": "https://www.ecfr.gov/current/title-10/section-54.31",
+            "publisher": "Electronic Code of Federal Regulations",
+            "date": null,
+            "type": "regulator"
+          }
+        },
+        {
+          "id": "f3",
+          "text": "Constellation's 10-K states that all of its nuclear units were originally licensed by the NRC for 40 years and have since received 20-year operating license renewals.",
+          "source": {
+            "title": "Constellation Energy Corporation Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1868275/000186827526000032/ceg-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-24",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f4",
+          "text": "Constellation's 10-K states that Peach Bottom and Dresden have received subsequent license renewals from the NRC for a second 20-year term, extending their operating period to a total of 80 years.",
+          "source": {
+            "title": "Constellation Energy Corporation Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1868275/000186827526000032/ceg-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-24",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f5",
+          "text": "Vistra's 10-K states that its application for license renewal at the Perry Nuclear Plant was approved by the NRC in July 2025 and that the license now extends through 2046.",
+          "source": {
+            "title": "Vistra Corp. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000006/vistra-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-27",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f6",
+          "text": "Constellation's 10-K states that Three Mile Island Unit 1, renamed the Crane Clean Energy Center, was retired in 2019 for economic reasons and that its restart is subject to regulatory approvals, including the NRC's comprehensive safety and environmental review, and to obtaining a renewed operating license.",
+          "source": {
+            "title": "Constellation Energy Corporation Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1868275/000186827526000032/ceg-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-24",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f7",
+          "text": "Constellation's 10-K states that in November 2025 the DOE Office of Energy Dominance Financing issued a guarantee for up to $1.0 billion for an unsecured loan from the Federal Financing Bank to support the restart of the Crane Clean Energy Center.",
+          "source": {
+            "title": "Constellation Energy Corporation Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1868275/000186827526000032/ceg-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-24",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f8",
+          "text": "The Department of Energy states that in September 2024 it announced the closing of a $1.52 billion loan to Holtec Palisades, LLC to help finance restoring the 800-MW Palisades nuclear generating station in Covert Township, Michigan, which ceased operations in May 2022.",
+          "source": {
+            "title": "Palisades (Office of Energy Dominance Financing project page)",
+            "url": "https://www.energy.gov/edf/palisades",
+            "publisher": "U.S. Department of Energy",
+            "date": null,
+            "type": "government"
+          }
+        },
+        {
+          "id": "f9",
+          "text": "Vistra's 10-K states that nuclear units are generally operated at full capacity and that refueling outages are scheduled during the spring or fall off-peak demand periods.",
+          "source": {
+            "title": "Vistra Corp. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000006/vistra-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-27",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f10",
+          "text": "Constellation reported that its nuclear generating facilities achieved capacity factors of 94.7%, 94.6% and 94.4% in 2025, 2024 and 2023, at ownership percentage.",
+          "source": {
+            "title": "Constellation Energy Corporation Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1868275/000186827526000032/ceg-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-24",
+            "type": "sec_filing"
+          }
+        }
+      ],
+      "verified_by": "AI check: 2 independent agents vs primary sources (owner-delegated)",
+      "verified_at": "2026-10-23",
+      "echo_tags": [
+        "nuclear",
+        "licensing",
+        "nrc",
+        "restart",
+        "license-renewal"
+      ],
+      "banned_claims": [
+        "Any date by which a plant will restart or deliver power",
+        "Any claim that a plant is safe or unsafe",
+        "Any claim about the outcome of a pending NRC review"
+      ],
+      "catalog_subjects": []
+    },
+    {
+      "id": "mech-data-centre-cooling",
+      "kind": "mechanics",
+      "title": "Cooling the AI data centre",
+      "themes": [
+        "powering-machine"
+      ],
+      "category_fit": [
+        "blueprints"
+      ],
+      "companies": [
+        {
+          "name": "CoreWeave, Inc.",
+          "cik": "0001769628",
+          "ticker": "CRWV"
+        }
+      ],
+      "sic": null,
+      "era": "2014-2025",
+      "status": null,
+      "llm_eligible": true,
+      "facts": [
+        {
+          "id": "f1",
+          "text": "The Lawrence Berkeley National Laboratory 2024 data center report defines power usage effectiveness as the total electricity demand of a data center divided by the electricity demand of its IT equipment.",
+          "source": {
+            "title": "2024 United States Data Center Energy Usage Report (LBNL-2001637)",
+            "url": "https://escholarship.org/uc/item/32d6m0d1",
+            "publisher": "Lawrence Berkeley National Laboratory",
+            "date": "2024-12",
+            "type": "government"
+          }
+        },
+        {
+          "id": "f2",
+          "text": "The report defines water usage effectiveness as the total water consumption of a data center divided by the electricity demand of its IT equipment.",
+          "source": {
+            "title": "2024 United States Data Center Energy Usage Report (LBNL-2001637)",
+            "url": "https://escholarship.org/uc/item/32d6m0d1",
+            "publisher": "Lawrence Berkeley National Laboratory",
+            "date": "2024-12",
+            "type": "government"
+          }
+        },
+        {
+          "id": "f3",
+          "text": "The report states that a waterside economizer is well suited for liquid cooling methods such as rear door heat exchangers, direct-to-chip cooling and immersion.",
+          "source": {
+            "title": "2024 United States Data Center Energy Usage Report (LBNL-2001637)",
+            "url": "https://escholarship.org/uc/item/32d6m0d1",
+            "publisher": "Lawrence Berkeley National Laboratory",
+            "date": "2024-12",
+            "type": "government"
+          }
+        },
+        {
+          "id": "f4",
+          "text": "The report states that liquid-cooled IT systems can often be operated at higher water or refrigerant temperatures than air-cooled IT systems.",
+          "source": {
+            "title": "2024 United States Data Center Energy Usage Report (LBNL-2001637)",
+            "url": "https://escholarship.org/uc/item/32d6m0d1",
+            "publisher": "Lawrence Berkeley National Laboratory",
+            "date": "2024-12",
+            "type": "government"
+          }
+        },
+        {
+          "id": "f5",
+          "text": "The report states that water-cooled chiller systems, while highly energy-efficient, consume substantial amounts of water, like all evaporative cooling systems.",
+          "source": {
+            "title": "2024 United States Data Center Energy Usage Report (LBNL-2001637)",
+            "url": "https://escholarship.org/uc/item/32d6m0d1",
+            "publisher": "Lawrence Berkeley National Laboratory",
+            "date": "2024-12",
+            "type": "government"
+          }
+        },
+        {
+          "id": "f6",
+          "text": "The report estimated that U.S. data centers directly consumed 21.2 billion liters of water in 2014 and 66 billion liters in 2023, with hyperscale and colocation data centers accounting for 84% of the 2023 total.",
+          "source": {
+            "title": "2024 United States Data Center Energy Usage Report (LBNL-2001637)",
+            "url": "https://escholarship.org/uc/item/32d6m0d1",
+            "publisher": "Lawrence Berkeley National Laboratory",
+            "date": "2024-12",
+            "type": "government"
+          }
+        },
+        {
+          "id": "f7",
+          "text": "The Department of Energy stated in May 2023 that data center cooling can account for up to 40% of data center energy usage overall.",
+          "source": {
+            "title": "DOE Announces $40 Million for More Efficient Cooling for Data Centers",
+            "url": "https://www.energy.gov/articles/doe-announces-40-million-more-efficient-cooling-data-centers",
+            "publisher": "U.S. Department of Energy",
+            "date": "2023-05-09",
+            "type": "government"
+          }
+        },
+        {
+          "id": "f8",
+          "text": "In May 2023, the Department of Energy announced $40 million in funding for 15 projects under ARPA-E's COOLERCHIPS program to develop high-performance, energy-efficient cooling solutions for data centers.",
+          "source": {
+            "title": "DOE Announces $40 Million for More Efficient Cooling for Data Centers",
+            "url": "https://www.energy.gov/articles/doe-announces-40-million-more-efficient-cooling-data-centers",
+            "publisher": "U.S. Department of Energy",
+            "date": "2023-05-09",
+            "type": "government"
+          }
+        },
+        {
+          "id": "f9",
+          "text": "CoreWeave's 10-K states that its data centers are designed to support high-density AI infrastructure and incorporate advanced networking equipment, enhanced access to power and, where appropriate, liquid cooling technologies.",
+          "source": {
+            "title": "CoreWeave, Inc. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1769628/000176962826000104/crwv-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-03-02",
+            "type": "sec_filing"
+          }
+        }
+      ],
+      "verified_by": "AI check: 2 independent agents vs primary sources (owner-delegated)",
+      "verified_at": "2026-10-23",
+      "echo_tags": [
+        "cooling",
+        "liquid-cooling",
+        "pue",
+        "water",
+        "data-centre"
+      ],
+      "banned_claims": [
+        "Any projection of future data-centre water or cooling demand",
+        "Any claim that a named company's cooling technology is superior"
+      ],
+      "catalog_subjects": []
+    },
+    {
+      "id": "mech-wholesale-power-markets",
+      "kind": "mechanics",
+      "title": "How wholesale power and capacity are priced",
+      "themes": [
+        "powering-machine"
+      ],
+      "category_fit": [
+        "blueprints"
+      ],
+      "companies": [
+        {
+          "name": "Vistra Corp.",
+          "cik": "0001692819",
+          "ticker": "VST"
+        }
+      ],
+      "sic": null,
+      "era": "2025-2026",
+      "status": null,
+      "llm_eligible": true,
+      "facts": [
+        {
+          "id": "f1",
+          "text": "Vistra's 10-K states that in centrally dispatched market structures, such as ERCOT, PJM, ISO-NE, NYISO, MISO and CAISO, all generators receive the same price for energy based on the bid price of the last megawatt-hour needed to balance supply and demand.",
+          "source": {
+            "title": "Vistra Corp. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000006/vistra-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-27",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f2",
+          "text": "Vistra's 10-K states that independent system operators and regional transmission organizations dispatch generation facilities and administer short-term energy and ancillary service markets, and that some also manage long-term planning reserves through capacity markets.",
+          "source": {
+            "title": "Vistra Corp. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000006/vistra-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-27",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f3",
+          "text": "Vistra's 10-K states that PJM administers a forward capacity auction, the Reliability Pricing Model, which establishes a long-term market for capacity.",
+          "source": {
+            "title": "Vistra Corp. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000006/vistra-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-27",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f4",
+          "text": "Vistra's 10-K states that ERCOT relies primarily on energy-market price signals, rather than mandatory capacity requirements or centralized capacity markets, to incentivize investment in and availability of generation resources.",
+          "source": {
+            "title": "Vistra Corp. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000006/vistra-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-27",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f5",
+          "text": "Vistra's 10-K states that ERCOT manages the flow of electricity from approximately 83,707 MW of 2025 peak demand to approximately 27 million Texas customers, representing approximately 90% of the state's electric load.",
+          "source": {
+            "title": "Vistra Corp. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000006/vistra-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-27",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f6",
+          "text": "Vistra's 10-K states that PJM manages the flow of electricity from approximately 160,709 MW of 2025 peak demand to approximately 67 million customers.",
+          "source": {
+            "title": "Vistra Corp. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000006/vistra-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-27",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f7",
+          "text": "Vistra's 10-K states that in 2025 the Texas legislature passed Senate Bill 6, which requires certain co-located large loads and some front-of-the-meter large loads to provide load flexibility during emergencies.",
+          "source": {
+            "title": "Vistra Corp. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000006/vistra-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-27",
+            "type": "sec_filing"
+          }
+        }
+      ],
+      "verified_by": "AI check: 2 independent agents vs primary sources (owner-delegated)",
+      "verified_at": "2026-10-23",
+      "echo_tags": [
+        "power-markets",
+        "capacity-market",
+        "ercot",
+        "pjm",
+        "marginal-pricing"
+      ],
+      "banned_claims": [
+        "Any power or capacity price level or forecast",
+        "Any claim that a market design favours a named company"
+      ],
+      "catalog_subjects": []
+    },
+    {
+      "id": "co-vistra",
+      "kind": "company",
+      "title": "Vistra: generation fleet and retail",
+      "themes": [
+        "powering-machine"
+      ],
+      "category_fit": [
+        "blueprints",
+        "battles"
+      ],
+      "companies": [
+        {
+          "name": "Vistra Corp.",
+          "cik": "0001692819",
+          "ticker": "VST"
+        }
+      ],
+      "sic": "4911",
+      "era": "2025-2026",
+      "status": null,
+      "llm_eligible": true,
+      "facts": [
+        {
+          "id": "f1",
+          "text": "Vistra describes itself as an integrated retail electricity and power generation company.",
+          "source": {
+            "title": "Vistra Corp. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000006/vistra-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-27",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f2",
+          "text": "Vistra's operations are aligned into five reportable segments: Retail, Texas, East, West, and Asset Closure.",
+          "source": {
+            "title": "Vistra Corp. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000006/vistra-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-27",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f3",
+          "text": "At December 31, 2025, Vistra's net generating capacity was 43,641 MW, of which natural gas accounted for 26,989 MW, coal for 8,743 MW, nuclear for 6,448 MW and solar and battery for 1,274 MW.",
+          "source": {
+            "title": "Vistra Corp. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000006/vistra-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-27",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f4",
+          "text": "Vistra owns and operates six nuclear generation units at four facilities: Comanche Peak Units 1 and 2 in ERCOT, and Beaver Valley Units 1 and 2, Perry and Davis-Besse in PJM.",
+          "source": {
+            "title": "Vistra Corp. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000006/vistra-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-27",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f5",
+          "text": "Vistra's retail operations serve approximately 5 million customers, including approximately 2.6 million retail electricity customers in Texas.",
+          "source": {
+            "title": "Vistra Corp. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000006/vistra-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-27",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f6",
+          "text": "In September 2025, Vistra announced a 20-year power purchase agreement to supply Amazon Web Services with 1,200 MW of carbon-free power from its Comanche Peak Nuclear Power Plant.",
+          "source": {
+            "title": "Vistra Corp. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000006/vistra-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-27",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f7",
+          "text": "In January 2026, Vistra announced 20-year power purchase agreements with Meta Platforms to supply 2,609 MW of carbon-free power and capacity from its PJM nuclear plants.",
+          "source": {
+            "title": "Vistra Corp. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000006/vistra-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-27",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f8",
+          "text": "In December 2025, Vistra executed definitive agreements to acquire Cogentrix Energy, consisting of 10 natural gas generation facilities totaling approximately 5,500 MW of capacity.",
+          "source": {
+            "title": "Vistra Corp. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000006/vistra-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-27",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f9",
+          "text": "Vistra's 10-K states that it has nuclear fuel contracted to support all of its refueling needs through 2030.",
+          "source": {
+            "title": "Vistra Corp. Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1692819/000169281926000006/vistra-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-27",
+            "type": "sec_filing"
+          }
+        }
+      ],
+      "verified_by": "AI check: 2 independent agents vs primary sources (owner-delegated)",
+      "verified_at": "2026-10-23",
+      "echo_tags": [
+        "independent-power-producer",
+        "nuclear",
+        "gas",
+        "retail-electricity",
+        "ppa"
+      ],
+      "banned_claims": [
+        "Any claim that the Cogentrix acquisition will close or on what timeline",
+        "Any price or dollar value of Vistra's power purchase agreements"
+      ],
+      "catalog_subjects": []
+    },
+    {
+      "id": "co-constellation",
+      "kind": "company",
+      "title": "Constellation Energy: nuclear fleet and contracts",
+      "themes": [
+        "powering-machine"
+      ],
+      "category_fit": [
+        "blueprints",
+        "battles"
+      ],
+      "companies": [
+        {
+          "name": "Constellation Energy Corporation",
+          "cik": "0001868275",
+          "ticker": "CEG"
+        }
+      ],
+      "sic": "4911",
+      "era": "2024-2026",
+      "status": null,
+      "llm_eligible": true,
+      "facts": [
+        {
+          "id": "f1",
+          "text": "At December 31, 2025, Constellation's owned generating resources had a total capacity of 31,676 MW, and it had contracted generation with a total capacity of 4,798 MW, figures that exclude Calpine.",
+          "source": {
+            "title": "Constellation Energy Corporation Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1868275/000186827526000032/ceg-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-24",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f2",
+          "text": "Constellation has five reportable segments, representing the geographic regions in which its owned generating resources are located and its customer-facing activities are conducted: Mid-Atlantic, Midwest, New York, ERCOT, and Other Power Regions.",
+          "source": {
+            "title": "Constellation Energy Corporation Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1868275/000186827526000032/ceg-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-24",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f3",
+          "text": "Constellation's operating revenues were $25,533 million for 2025, compared with $23,568 million for 2024.",
+          "source": {
+            "title": "Constellation Energy Corporation Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1868275/000186827526000032/ceg-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-24",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f4",
+          "text": "On January 7, 2026, Constellation acquired Calpine for a purchase price of approximately $22 billion, consisting of 50 million newly issued shares of its common stock and approximately $4.5 billion in cash.",
+          "source": {
+            "title": "Constellation Energy Corporation Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1868275/000186827526000032/ceg-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-24",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f5",
+          "text": "Constellation's 10-K states that, after divestitures connected with regulatory approvals, Calpine owns and operates natural gas, geothermal, battery storage and solar assets with approximately 23 GW of generation capacity.",
+          "source": {
+            "title": "Constellation Energy Corporation Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1868275/000186827526000032/ceg-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-24",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f6",
+          "text": "In September 2024, Constellation executed a 20-year power purchase agreement with Microsoft that supports the restart of Three Mile Island Unit 1, renamed the Crane Clean Energy Center, which was retired in 2019 for economic reasons.",
+          "source": {
+            "title": "Constellation Energy Corporation Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1868275/000186827526000032/ceg-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-24",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f7",
+          "text": "Constellation's 10-K describes the Crane site as having approximately 835 MW of emissions-free capacity once operational.",
+          "source": {
+            "title": "Constellation Energy Corporation Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1868275/000186827526000032/ceg-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-24",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f8",
+          "text": "In June 2025, Constellation signed a 20-year power purchase agreement with Meta Platforms for the output of the Clinton Clean Energy Center.",
+          "source": {
+            "title": "Constellation Energy Corporation Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1868275/000186827526000032/ceg-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-24",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f9",
+          "text": "Constellation reported nuclear capacity factors of 94.7% for 2025, 94.6% for 2024 and 94.4% for 2023, at ownership percentage.",
+          "source": {
+            "title": "Constellation Energy Corporation Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1868275/000186827526000032/ceg-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-24",
+            "type": "sec_filing"
+          }
+        },
+        {
+          "id": "f10",
+          "text": "Constellation's 10-K states that it operates all of its nuclear generating stations except the units at Salem and STP.",
+          "source": {
+            "title": "Constellation Energy Corporation Form 10-K for the fiscal year ended December 31, 2025",
+            "url": "https://www.sec.gov/Archives/edgar/data/1868275/000186827526000032/ceg-20251231.htm",
+            "publisher": "U.S. Securities and Exchange Commission (EDGAR)",
+            "date": "2026-02-24",
+            "type": "sec_filing"
+          }
+        }
+      ],
+      "verified_by": "AI check: 2 independent agents vs primary sources (owner-delegated)",
+      "verified_at": "2026-10-23",
+      "echo_tags": [
+        "nuclear",
+        "independent-power-producer",
+        "ppa",
+        "restart",
+        "acquisition"
+      ],
+      "banned_claims": [
+        "Any date by which the Crane Clean Energy Center will restart",
+        "Any price or dollar value of Constellation's power purchase agreements",
+        "Any claim about the performance of the combined company after the Calpine acquisition"
+      ],
+      "catalog_subjects": []
+    }
+  ]
+}

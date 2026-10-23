@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 import logging
 
-from app.integrations.fmp import get_fmp_client, FMPClient
+from app.integrations.fmp import get_fmp_client, FMPClient, FMPUnavailableException
 from app.services.chart_helper import (
     FULL_SPAN,
     fetch_sparkline_bars,
@@ -54,6 +54,7 @@ from app.services._whale_common import (
     sum_amount_bounds,
     format_amount_range,
 )
+from app.services.earnings_window_service import fetch_calendar_days
 from app.services._earnings_common import (
     parse_fmp_timing,
     timing_sentence,
@@ -409,46 +410,73 @@ def _downsample(values: List[float], target: int) -> List[float]:
 # ── Market-wide earnings calendar (process-wide, Tier 1 only) ─────────
 #
 # `_get_earnings_alerts` used to download the WHOLE market's 15-day `earnings-calendar`
-# (~430 KB, thousands of rows) on every feed build — every cold open and every 30 s
-# poll of every user — to keep the handful of rows on that user's watchlist. The window
-# is the same for everyone, so one answer serves every build for 30 minutes.
+# on every feed build — every cold open and every 30 s poll of every user — to keep the
+# handful of rows on that user's watchlist. The window is the same for everyone, so the
+# answer is memoised and shared by every build.
+#
+# ONE CALL PER ET DAY, never one 15-day request (2026-10-22, Sentry PYTHON-FASTAPI-4S):
+# FMP cuts an `earnings-calendar` answer at 4,000 rows and keeps the NEWEST dates. In
+# season the single request for 10-23..11-06 came back holding only Nov 4–6, so every
+# watchlist alert for the next twelve days — today's and tomorrow's first — was missing.
+# `fetch_calendar_days` is the shape every other calendar reader uses (the earnings
+# window, Earnings Shockers, the marketing adapter): all-or-nothing, rows kept only under
+# their own date, and a single day at the cap reported at ERROR. ET, not the server's
+# UTC clock: from 20:00 ET the UTC date is already tomorrow.
+#
+# TWO SPEEDS (owner decision 2026-10-22): today and tomorrow are refetched after
+# `EARNINGS_CALENDAR_TTL` (30 min), the 13 days after them after
+# `EARNINGS_CALENDAR_FAR_TTL` (6 h) — a date that far out rarely moves within hours. That
+# is ~2 calls a round and ~150 a day, not the 720 a 15-call round every 30 min would cost.
+# A day's TTL follows its distance from today at READ time, so at the ET day roll the old
+# day 2 becomes "tomorrow" and is refetched on the near schedule.
 #
 # Tier 1 only, by design: the window moves daily and the rows are a pure function of the
-# upstream, so a Supabase tier would only add a round trip to a 30-minute memo.
+# upstream, so a Supabase tier would only add a round trip to this memo.
 #
-# * ONE slot, so the memory is bounded (one calendar), keyed on the CLIENT object, the
-#   window and the time. Keying on the client keeps a test's fake from being served
-#   another fake's rows, and the slot holds the client strongly, so an `is` check can
-#   never match a recycled object.
-# * Never stores `[]` (a cached empty reads exactly like "nobody reports this fortnight"
-#   — the FMP deep-check lesson), a non-list answer, or a failure.
+# * ONE memo, for ONE client object, holding only the window's days (≤ 15), so the memory
+#   is bounded. Keying on the client keeps a test's fake from being served another fake's
+#   rows, and the memo holds the client strongly, so an `is` check can never match a
+#   recycled object.
+# * An empty DAY is stored (weekends are empty); an empty WINDOW is not (a cached empty
+#   reads exactly like "nobody reports this fortnight" — the FMP deep-check lesson), nor
+#   is a failure or a non-list answer.
+# * A failed or empty round serves the days already held, however old (a calendar row is
+#   a scheduled date, still true hours later), and the next round waits
+#   `_EARNINGS_CALENDAR_FAILURE_RETRY_SECONDS`, so an FMP outage costs one round per wait,
+#   not one per feed build of every user.
 # * `_earnings_calendar_inflight` dedups concurrent misses. A joiner is shielded, and a
 #   joiner whose leader was CANCELLED (a client disconnect) takes over the download
 #   rather than serving its own user a feed with no earnings alerts.
 # * Coherent only within one process — the deploy runs exactly one uvicorn worker
 #   (`tests/test_deploy_command_parity.py`).
 EARNINGS_CALENDAR_TTL = 1800
-# FMP's SILENT row cap on `earnings-calendar`: a larger answer is cut, NEWEST dates kept,
-# so today's and tomorrow's rows — the ones the alert most needs — are the ones dropped.
-# Same number as `earnings_window_service._TRUNCATION_ROWS`.
-_EARNINGS_TRUNCATION_ROWS = 4000
-# (client, from_date, to_date, monotonic stored-at, rows) or None.
-_earnings_calendar_slot: Optional[Tuple[Any, str, str, float, List[Dict[str, Any]]]] = None
-# (id(client), from_date, to_date) -> the leader's future. `id()` is safe here: the
-# leader's frame holds the client until its `finally` has removed the entry.
-_earnings_calendar_inflight: Dict[Tuple[int, str, str], asyncio.Future] = {}
-# The ET day the truncation ERROR was last raised for. A 15-day window exceeds the cap on
-# every fetch during earnings season, so an ERROR every 30 minutes for weeks would bury
-# the Sentry issue; it is raised once per process per ET day and logged at WARNING after.
-_earnings_truncation_error_day: Optional[date] = None
+EARNINGS_CALENDAR_FAR_TTL = 6 * 3600
+# Days 0 and 1 (today, tomorrow) are "near".
+_EARNINGS_NEAR_DAYS = 2
+# The window: today (ET) and the next 14 days.
+_EARNINGS_ALERT_DAYS_AHEAD = 14
+# Overall deadline for one round, INSIDE the leader: a `wait_for` around the leader itself
+# would hand every joiner a cancellation. The client retries each call internally, so a
+# slow upstream could otherwise hold the feed build for minutes.
+_EARNINGS_CALENDAR_DEADLINE_SECONDS = 20.0
+_EARNINGS_CALENDAR_FAILURE_RETRY_SECONDS = 120
+# (client, {ET day: (monotonic stored-at, that day's rows)}) or None.
+_earnings_calendar_memo: Optional[
+    Tuple[Any, Dict[date, Tuple[float, List[Dict[str, Any]]]]]
+] = None
+# (id(client), first ET day) -> the leader's future. `id()` is safe here: the leader's
+# frame holds the client until its `finally` has removed the entry.
+_earnings_calendar_inflight: Dict[Tuple[int, date], asyncio.Future] = {}
+# (client, monotonic time the next round may start) after a failed or empty round.
+_earnings_calendar_retry_after: Optional[Tuple[Any, float]] = None
 
 
 def reset_earnings_calendar_cache() -> None:
-    """Drop the memoised calendar, the in-flight map and the truncation latch (tests)."""
-    global _earnings_calendar_slot, _earnings_truncation_error_day
-    _earnings_calendar_slot = None
+    """Drop the memoised calendar, the in-flight map and the retry wait (tests)."""
+    global _earnings_calendar_memo, _earnings_calendar_retry_after
+    _earnings_calendar_memo = None
     _earnings_calendar_inflight.clear()
-    _earnings_truncation_error_day = None
+    _earnings_calendar_retry_after = None
 
 
 def _et_today() -> date:
@@ -456,53 +484,111 @@ def _et_today() -> date:
     return datetime.now(ET).date()
 
 
-def _log_earnings_truncation(row_count: int, from_date: str, to_date: str) -> None:
-    """ERROR once per process per ET day when the calendar hit FMP's silent row cap."""
-    global _earnings_truncation_error_day
-    if row_count < _EARNINGS_TRUNCATION_ROWS:
-        return
-    day = _et_today()
-    if _earnings_truncation_error_day != day:
-        _earnings_truncation_error_day = day
-        logger.error(
-            "[Tracking] earnings calendar %s..%s returned %d rows — at FMP's silent cap "
-            "(%d), so it is probably TRUNCATED (newest dates kept): today's and "
-            "tomorrow's earnings alerts may be missing. Logged at ERROR once per ET day.",
-            from_date, to_date, row_count, _EARNINGS_TRUNCATION_ROWS,
-        )
-    else:
-        logger.warning(
-            "[Tracking] earnings calendar %s..%s returned %d rows — still at FMP's "
-            "silent cap (%d), probably truncated (already reported at ERROR today)",
-            from_date, to_date, row_count, _EARNINGS_TRUNCATION_ROWS,
-        )
+def _earnings_alert_days(today: date) -> List[date]:
+    """``today`` and the next 14 ET days, oldest first."""
+    return [today + timedelta(days=i) for i in range(_EARNINGS_ALERT_DAYS_AHEAD + 1)]
 
 
-async def _cached_earnings_calendar(
-    fmp: Any, from_date: str, to_date: str
-) -> List[Dict[str, Any]]:
-    """The market-wide calendar for ``from_date..to_date``: memo → join → fetch.
+def _earnings_day_ttl(day: date, today: date) -> int:
+    """30 min for today and tomorrow, 6 h for the days after."""
+    if (day - today).days < _EARNINGS_NEAR_DAYS:
+        return EARNINGS_CALENDAR_TTL
+    return EARNINGS_CALENDAR_FAR_TTL
 
-    Raises what the upstream raises (and `TypeError` for a non-list answer); the caller
-    degrades. The returned list is SHARED with every other caller — read it, never
-    mutate it.
-    """
-    global _earnings_calendar_slot
-    key = (id(fmp), from_date, to_date)
-    while True:
-        slot = _earnings_calendar_slot
-        if (
-            slot is not None
-            and slot[0] is fmp
-            and slot[1] == from_date
-            and slot[2] == to_date
-            and _time.monotonic() - slot[3] < EARNINGS_CALENDAR_TTL
-        ):
-            logger.debug(
-                "[Tracking] earnings calendar %s..%s served from memory (%d rows)",
-                from_date, to_date, len(slot[4]),
+
+def _held_earnings_days(fmp: Any) -> Dict[date, Tuple[float, List[Dict[str, Any]]]]:
+    """The days memoised for this client (any age), or an empty dict."""
+    memo = _earnings_calendar_memo
+    if memo is None or memo[0] is not fmp:
+        return {}
+    return memo[1]
+
+
+def _earnings_days_due(fmp: Any, days: List[date], today: date) -> List[date]:
+    """The window's days that are missing or older than their TTL, oldest first."""
+    held = _held_earnings_days(fmp)
+    now = _time.monotonic()
+    return [
+        d for d in days
+        if d not in held or now - held[d][0] >= _earnings_day_ttl(d, today)
+    ]
+
+
+def _held_earnings_window(
+    fmp: Any, days: List[date]
+) -> Tuple[List[Dict[str, Any]], List[date]]:
+    """``(rows of every held day, oldest first; the days not held at all)``."""
+    held = _held_earnings_days(fmp)
+    rows: List[Dict[str, Any]] = []
+    missing: List[date] = []
+    for d in days:
+        entry = held.get(d)
+        if entry is None:
+            missing.append(d)
+        else:
+            rows.extend(entry[1])
+    return rows, missing
+
+
+def _serve_held_earnings(
+    fmp: Any, days: List[date], span: str, why: str, level: int
+) -> Optional[List[Dict[str, Any]]]:
+    """The held days of this window after a failed round, or None when none is held.
+
+    A day that was never fetched is left out: its alerts are missing, never wrong."""
+    rows, missing = _held_earnings_window(fmp, days)
+    if len(missing) == len(days):
+        return None
+    logger.log(
+        level,
+        "[Tracking] earnings calendar %s: %s — serving the held days (%d rows, %d of %d "
+        "days%s)",
+        span, why, len(rows), len(days) - len(missing), len(days),
+        f"; not held: {', '.join(d.isoformat() for d in missing)}" if missing else "",
+    )
+    return rows
+
+
+async def _fetch_earnings_days(
+    fmp: Any, days: List[date]
+) -> Dict[date, List[Dict[str, Any]]]:
+    """One `earnings-calendar` call per day. Raises if any day fails
+    (`fetch_calendar_days` is all-or-nothing)."""
+
+    async def _one_day(*, from_date: str, to_date: str) -> Any:
+        rows = await fmp.get_earnings_calendar(from_date=from_date, to_date=to_date)
+        if getattr(rows, "fetch_failed", False):
+            # An `EmptyAfterFailure` is an outage, not a day on which nobody reports.
+            raise FMPUnavailableException(
+                f"earnings calendar for {from_date} came back empty after a failed "
+                f"fetch: {getattr(rows, 'reason', '')}"
             )
-            return slot[4]
+        return rows
+
+    return await fetch_calendar_days(_one_day, days)
+
+
+async def _cached_earnings_calendar(fmp: Any, today: date) -> List[Dict[str, Any]]:
+    """The market-wide calendar for ``today`` .. ``today + 14`` (ET), oldest day first:
+    memo → join → fetch the days that are due.
+
+    A failed or empty round serves the days already held; with none held, a failure
+    raises and the caller degrades to no alerts. The rows are SHARED with every other
+    caller — read them, never mutate them.
+    """
+    global _earnings_calendar_memo, _earnings_calendar_retry_after
+    days = _earnings_alert_days(today)
+    span = f"{days[0].isoformat()}..{days[-1].isoformat()}"
+    key = (id(fmp), today)
+    while True:
+        due = _earnings_days_due(fmp, days, today)
+        if not due:
+            rows, _ = _held_earnings_window(fmp, days)
+            logger.debug(
+                "[Tracking] earnings calendar %s served from memory (%d rows)",
+                span, len(rows),
+            )
+            return rows
         inflight = _earnings_calendar_inflight.get(key)
         if inflight is None:
             break
@@ -518,44 +604,78 @@ async def _cached_earnings_calendar(
             if _earnings_calendar_inflight.get(key) is inflight:
                 _earnings_calendar_inflight.pop(key, None)
             logger.info(
-                "[Tracking] earnings calendar %s..%s: leader cancelled — a joiner takes "
-                "over the download", from_date, to_date,
+                "[Tracking] earnings calendar %s: leader cancelled — a joiner takes "
+                "over the download", span,
             )
             continue
+
+    retry = _earnings_calendar_retry_after
+    if retry is not None and retry[0] is fmp:
+        wait = retry[1] - _time.monotonic()
+        if wait > 0:
+            why = f"the last round failed; the next round in {wait:.0f} s"
+            held_rows = _serve_held_earnings(fmp, days, span, why, logging.INFO)
+            if held_rows is None:
+                raise FMPUnavailableException(
+                    f"[Tracking] earnings calendar {span}: {why}, and no day of this "
+                    f"window is held"
+                )
+            return held_rows
 
     loop = asyncio.get_running_loop()
     fut: asyncio.Future = loop.create_future()
     _earnings_calendar_inflight[key] = fut
     started = _time.monotonic()
     try:
-        rows = await fmp.get_earnings_calendar(from_date=from_date, to_date=to_date)
-        if not isinstance(rows, list):
-            raise TypeError(
-                f"earnings calendar {from_date}..{to_date} returned "
-                f"{type(rows).__name__}, not a list"
+        try:
+            fetched = await asyncio.wait_for(
+                _fetch_earnings_days(fmp, due),
+                timeout=_EARNINGS_CALENDAR_DEADLINE_SECONDS,
             )
+        except asyncio.TimeoutError as exc:
+            raise FMPUnavailableException(
+                f"[Tracking] earnings calendar {span}: {len(due)} day calls not done "
+                f"within {_EARNINGS_CALENDAR_DEADLINE_SECONDS:.0f} s"
+            ) from exc
         elapsed_ms = (_time.monotonic() - started) * 1000.0
+        stored_at = _time.monotonic()
+        window = set(days)
+        # Only this window's days survive, so the memo never holds more than 15.
+        held = {
+            d: entry for d, entry in _held_earnings_days(fmp).items() if d in window
+        }
+        for d in due:
+            held[d] = (stored_at, fetched.get(d, []))
+        rows = [row for d in days for row in held.get(d, (0.0, []))[1]]
         if rows:
-            _log_earnings_truncation(len(rows), from_date, to_date)
-            _earnings_calendar_slot = (fmp, from_date, to_date, _time.monotonic(), rows)
+            _earnings_calendar_memo = (fmp, held)
+            _earnings_calendar_retry_after = None
             logger.info(
-                "[Tracking] earnings calendar %s..%s fetched: %d rows in %.0f ms — "
-                "memoised for %d s",
-                from_date, to_date, len(rows), elapsed_ms, EARNINGS_CALENDAR_TTL,
+                "[Tracking] earnings calendar %s: fetched %d of %d days in %.0f ms "
+                "(%d rows in the window) — today and tomorrow memoised for %d s, later "
+                "days for %d s",
+                span, len(due), len(days), elapsed_ms, len(rows),
+                EARNINGS_CALENDAR_TTL, EARNINGS_CALENDAR_FAR_TTL,
             )
         else:
-            logger.warning(
-                "[Tracking] earnings calendar %s..%s returned NO rows in %.0f ms%s — "
-                "served, NOT memoised (an empty answer cannot be told apart from a "
-                "degraded one, so the next build asks again)",
-                from_date, to_date, elapsed_ms,
-                " (marked as a failed fetch)" if getattr(rows, "fetch_failed", False) else "",
+            _earnings_calendar_retry_after = (
+                fmp, _time.monotonic() + _EARNINGS_CALENDAR_FAILURE_RETRY_SECONDS
             )
+            logger.warning(
+                "[Tracking] earnings calendar %s returned NO rows (%d day calls) in "
+                "%.0f ms — NOT memoised (an empty window cannot be told apart from a "
+                "degraded one); the next round in %d s",
+                span, len(due), elapsed_ms, _EARNINGS_CALENDAR_FAILURE_RETRY_SECONDS,
+            )
+            # The days held from an earlier round, as every build inside the wait gets.
+            rows = _serve_held_earnings(
+                fmp, days, span, "this round returned no rows", logging.WARNING
+            ) or []
         if not fut.done():
             fut.set_result(rows)
         return rows
     except asyncio.CancelledError:
-        # BaseException — it skips the arm below. Hand joiners an exception they recover
+        # BaseException — it skips the arms below. Hand joiners an exception they recover
         # from (they take over), or they would hang for the life of the process.
         if not fut.done():
             fut.set_exception(
@@ -563,11 +683,33 @@ async def _cached_earnings_calendar(
             )
             fut.exception()  # mark retrieved: with no joiner nobody ever reads it
         raise
+    except Exception as e:
+        _earnings_calendar_retry_after = (
+            fmp, _time.monotonic() + _EARNINGS_CALENDAR_FAILURE_RETRY_SECONDS
+        )
+        why = (
+            f"this round failed ({type(e).__name__}: {e}); the next round in "
+            f"{_EARNINGS_CALENDAR_FAILURE_RETRY_SECONDS} s"
+        )
+        held_rows = _serve_held_earnings(fmp, days, span, why, logging.WARNING)
+        if held_rows is None:
+            logger.warning(
+                "[Tracking] earnings calendar %s: %s — no day of this window is held, "
+                "so no earnings alerts until then", span, why,
+            )
+            if not fut.done():
+                fut.set_exception(e)
+                # Mark retrieved (see `get_tracking_feed`): the leader re-raises `e`
+                # itself, and with no joiner the stored copy would be logged as never
+                # retrieved.
+                fut.exception()
+            raise
+        if not fut.done():
+            fut.set_result(held_rows)
+        return held_rows
     except BaseException as e:
         if not fut.done():
             fut.set_exception(e)
-            # Mark retrieved (see `get_tracking_feed`): the leader re-raises `e` itself,
-            # and with no joiner the stored copy would be logged as never retrieved.
             fut.exception()
         raise
     finally:
@@ -1253,11 +1395,10 @@ class TrackingService:
     ) -> List[AlertResponse]:
         """Fetch upcoming earnings from FMP, filtered to user's watchlist."""
         try:
-            today = datetime.now().strftime("%Y-%m-%d")
-            future = (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d")
-            # Memoised market-wide for 30 min (`_cached_earnings_calendar`); the rows are
-            # shared with every other build, so this loop only reads them.
-            calendar = await _cached_earnings_calendar(self.fmp, today, future)
+            # One call per ET day, memoised market-wide (`_cached_earnings_calendar`:
+            # today and tomorrow for 30 min, later days for 6 h); the rows are shared
+            # with every other build, so this loop only reads them.
+            calendar = await _cached_earnings_calendar(self.fmp, _et_today())
             if not calendar:
                 return []
 
@@ -1286,7 +1427,9 @@ class TrackingService:
                     month = None
                     if isinstance(date_str, str) and date_str:
                         try:
-                            dt = datetime.strptime(date_str, "%Y-%m-%d")
+                            # [:10]: FMP sometimes sends a full timestamp, which
+                            # the per-day fetch accepts under its own date.
+                            dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
                             day = dt.day
                             month = dt.strftime("%b").upper()
                         except ValueError:

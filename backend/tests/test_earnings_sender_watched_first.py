@@ -1,6 +1,6 @@
 """The earnings pass must cap WATCHED symbols, not the market-wide calendar.
 
-`get_earnings_calendar` returns every company reporting in a four-day window — hundreds on
+`get_earnings_calendar` returns every company reporting in a three-day window — hundreds on
 a heavy day. The pass sliced that to `MAX_SYMBOLS_PER_PASS` BEFORE asking who was watching,
 so whether a user heard about their own holding came down to where FMP happened to place it
 in the response — and `run.success = True` then stamped the day complete, so nothing
@@ -8,6 +8,8 @@ retried it (found 2026-09-12).
 """
 
 from __future__ import annotations
+
+from datetime import timedelta
 
 import pytest
 
@@ -64,10 +66,14 @@ async def test_a_watched_read_failure_does_not_stamp_the_day_complete(monkeypatc
 
     class _FMP:
         async def get_earnings_calendar(self, **kw):
-            # A heavy reporting day — the pass has real work it is about to lose.
+            # A heavy reporting day — the pass has real work it is about to lose. Dated
+            # from the run's own ET day: the calendar is read one day per call and each
+            # row is kept only under its own date.
+            today = es._et_today()
             return [
-                {"symbol": "AAPL", "date": "2026-09-13", "epsActual": None},
-                {"symbol": "NVDA", "date": "2026-09-12", "epsActual": 1.2,
+                {"symbol": "AAPL", "date": (today + timedelta(days=1)).isoformat(),
+                 "epsActual": None},
+                {"symbol": "NVDA", "date": today.isoformat(), "epsActual": 1.2,
                  "epsEstimated": 1.0},
             ]
 

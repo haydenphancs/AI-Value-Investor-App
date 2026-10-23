@@ -1,12 +1,20 @@
 """Earnings notifications — "reports tomorrow" and "beat/missed by X%".
 
-ONE FMP CALL PER DAY. `get_earnings_calendar(from, to)` is market-wide, so a single
-four-day window serves BOTH passes for every ticker anyone watches. The per-symbol
-`get_earning_calendar_full` would be ~200 calls to learn the same thing — that is the
-"one call returns all fields" rule from `project_fmp_api_architecture.md`, and it is the
-single most important design decision in this file.
+THREE FMP CALLS PER RUN, one per ET day. `get_earnings_calendar(from, to)` is
+market-wide, so yesterday, today and tomorrow serve BOTH passes for every ticker anyone
+watches. The per-symbol `get_earning_calendar_full` would be ~200 calls to learn the same
+thing — that is the "one call returns all fields" rule from
+`project_fmp_api_architecture.md`, and it is the single most important design decision in
+this file.
 
-Two passes over that one response:
+One call per DAY, never one three-day request (2026-10-22): FMP cuts an
+`earnings-calendar` answer at 4,000 rows without saying so and keeps the NEWEST dates, and
+in season three days pass that (Oct 28–30 2026 ≈ 4,528 rows, Nov 4–6 ≈ 4,471), so the
+single request silently lost part of YESTERDAY — the late-arriving actuals the result pass
+exists for. `fetch_calendar_days` is all-or-nothing: one failed day raises, which is the
+retry (below).
+
+Two passes over those rows:
 
   A. **Upcoming** — a ticker reports tomorrow (or later today, before the open).
      The value is preparation: a user holding a position wants to know a print is
@@ -33,6 +41,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import get_fmp_client
 from app.services._earnings_common import parse_fmp_timing, timing_sentence
+from app.services.earnings_window_service import fetch_calendar_days
 from app.services.notification_jobs import JOB_EARNINGS, claimed_job
 from app.services.notification_kinds import (
     KIND_EARNINGS_RESULT,
@@ -293,9 +302,9 @@ async def run_earnings_notifications(now: Optional[datetime] = None) -> Dict[str
       * FMP raises → `run.success` stays False, so `run_day` is NOT stamped and the next
         hourly wake retries the SAME ET day. A transient upstream failure must become a
         retry, not a silently skipped day.
-      * FMP returns `[]` → that is a market HOLIDAY (or a genuinely empty calendar),
-        which is a SUCCESSFUL run of zero. Stamping `run_day` here is correct; retrying
-        every hour against an empty calendar would be pure waste.
+      * FMP returns `[]` for all three days → that is a market HOLIDAY (or a genuinely
+        empty calendar), which is a SUCCESSFUL run of zero. Stamping `run_day` here is
+        correct; retrying every hour against an empty calendar would be pure waste.
     """
     stats = {"upcoming": 0, "results": 0, "symbols": 0}
 
@@ -305,14 +314,15 @@ async def run_earnings_notifications(now: Optional[datetime] = None) -> Dict[str
             return stats
 
         today = _et_today(now)
-        # One market-wide call, four-day window: yesterday (late-arriving actuals)
-        # through tomorrow (the upcoming pass). Both passes read this same response.
-        rows = await get_fmp_client().get_earnings_calendar(
-            from_date=(today - timedelta(days=1)).isoformat(),
-            to_date=(today + timedelta(days=1)).isoformat(),
-        )
-        if not isinstance(rows, list):
-            raise TypeError(f"earnings calendar returned {type(rows).__name__}, not a list")
+        # One market-wide call per ET day: yesterday (late-arriving actuals), today and
+        # tomorrow (the upcoming pass). Both passes read the same rows. NEWEST day first,
+        # the order FMP's own multi-day answer used, so `select_results`' first-row-wins
+        # dedup still prefers today's row over yesterday's for a symbol on both.
+        # `fetch_calendar_days` raises on a failed or non-list day (the retry) and keeps
+        # each row only under its own date.
+        days = [today + timedelta(days=1), today, today - timedelta(days=1)]
+        by_day = await fetch_calendar_days(get_fmp_client().get_earnings_calendar, days)
+        rows = [row for d in days for row in by_day.get(d, [])]
 
         if not rows:
             # Holiday / empty calendar. A successful run of zero — see the docstring.

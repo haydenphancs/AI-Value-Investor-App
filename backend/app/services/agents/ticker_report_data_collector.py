@@ -2042,11 +2042,15 @@ class TickerReportDataCollector:
         # floor + the 5-row (`_COMPETITOR_MAX_N`) cap in `_build_competitors()`.
         peers: List[str] = (out.peer_tickers or [])[:8]
         if industry:
-            augment = _industry_universe_peers(
+            # Off the event loop: a cold universe read is a sync Supabase Storage download
+            # (up to ~40 s with its retry) that would otherwise stall every request.
+            augment = await asyncio.to_thread(
+                _industry_universe_peers,
                 industry,
-                exclude={ticker.upper(), *(p.upper() for p in peers)},
+                {ticker.upper(), *(p.upper() for p in peers)},
             )
             peers = list(dict.fromkeys(peers + augment))[:12]
+            _note_universe_hole(out, ticker, industry)
 
         # Persist 1-based rank per peer ticker so downstream scoring
         # (in a different method on the same class) can blend the list
@@ -9447,8 +9451,29 @@ _COMPETITOR_MAX_N = 5
 # Single resolver — see `app/services/universe_data.py`. There were FOUR different
 # path idioms for this one directory, and the file is FMP-derived so it has to be
 # able to move out of the repo (ToS §2.6.1) without a hunt.
-from app.services.universe_data import INDUSTRY_UNIVERSE, load_universe, universe_path
+from app.services.universe_data import INDUSTRY_UNIVERSE, is_unavailable, load_universe, universe_path
 _INDUSTRY_PEERS_CACHE: Dict[str, List[str]] = {}
+
+# Recorded on `out.degraded_sections` when the industry universe could not be read (a
+# Storage blip — `universe_data` retries after 300 s): the report is still delivered, with
+# only FMP's peers, but the collection and report stay out of the shared caches so the next
+# request re-collects instead of serving a short competitor list until the close
+# (2026-10-23: one boot-time Storage timeout did exactly that).
+_INDUSTRY_UNIVERSE_DEGRADED = "industry_universe:transient"
+
+
+def _note_universe_hole(out: Any, ticker: str, industry: str) -> None:
+    """Record `_INDUSTRY_UNIVERSE_DEGRADED` when the universe read just failed (it is
+    unavailable right now). An industry the universe simply does not hold is a real answer,
+    not a hole. Never raises."""
+    if not is_unavailable(INDUSTRY_UNIVERSE):
+        return
+    logger.warning(
+        "[report-peers] ticker=%s industry=%r step=industry_universe: the industry universe "
+        "is unavailable — competitors from FMP's peers only; the collection and report will "
+        "not be shared-cached", ticker, industry,
+    )
+    out.degraded_sections.append(_INDUSTRY_UNIVERSE_DEGRADED)
 
 
 def _load_industry_peers_from_universe(industry: str) -> List[str]:

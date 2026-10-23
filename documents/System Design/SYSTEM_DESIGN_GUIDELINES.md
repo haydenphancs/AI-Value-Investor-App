@@ -1816,7 +1816,12 @@ grounding, §2 "No Google Search grounding"; a stored `tam_scope='global'` row r
   a US stand-in over a global row in the close-aligned report caches. Every such transient
   hole (read failure, live compute raised / timed out, FRED down) is recorded on the
   collection's `degraded_sections` (`industry_tam:transient`), so that report is delivered
-  but never shared-cached for the rest of the close cycle.
+  but never shared-cached for the rest of the close cycle. The same holds for the industry
+  UNIVERSE behind the competitor peers (`industry_universe:transient`, 2026-10-23): a Storage
+  download retries one transient failure (`universe_data._DOWNLOAD_ATTEMPTS` = 2, WARNING), the
+  collector reads it through `asyncio.to_thread`, and a collection built while it was unavailable
+  is delivered with FMP's peers only and never shared-cached (a boot-time 20 s ReadTimeout once
+  left short competitor lists cached until the close).
 - **A run that cannot start does not consume the quarter.** With an empty universe
   (the industry universe file is not in git: a failed download from the `universe-data` bucket
   yields `[]`) or

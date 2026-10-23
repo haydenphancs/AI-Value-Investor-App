@@ -64,6 +64,10 @@ _cache: Dict[str, List[Dict[str, Any]]] = {}
 #: the next attempt after that re-fetches.
 _failed_at: Dict[str, float] = {}
 _FAILURE_RETRY_SECONDS = 300
+#: One retry of a transient Storage failure. Each attempt can take storage3's 20 s timeout,
+#: so two bound a cold read at ~40 s — always off the event loop (the startup check and the
+#: report collector both call through `asyncio.to_thread`).
+_DOWNLOAD_ATTEMPTS = 2
 _lock = threading.Lock()
 
 
@@ -89,11 +93,23 @@ def _download_from_storage(filename: str) -> Optional[bytes]:
 
     The disk copy is written via a `.part` file and renamed, so a concurrent worker can
     never read a half-downloaded payload as a truncated universe.
+
+    A TRANSIENT failure (a read/connect timeout, a dropped connection, a 5xx edge page) is
+    retried once at WARNING before the ERROR below: on 2026-10-23 one Storage GET at boot
+    hung for storage3's 20 s timeout while the file sat intact in the bucket, and the single
+    attempt emptied the peer surfaces for five minutes and opened three Sentry issues. A 404
+    or an auth error is deterministic and is not retried.
     """
     try:
         from app.database import get_supabase
+        from app.utils.supabase_errors import retry_idempotent_sync
 
-        blob = get_supabase().storage.from_(UNIVERSE_BUCKET).download(filename)
+        blob = retry_idempotent_sync(
+            lambda: get_supabase().storage.from_(UNIVERSE_BUCKET).download(filename),
+            what=f"universe download {filename}",
+            attempts=_DOWNLOAD_ATTEMPTS,
+            logger=logger,
+        )
     except Exception as exc:
         logger.error(
             "universe_data: could not fetch %s from Supabase Storage bucket=%s (%s: %s) — "
@@ -186,6 +202,19 @@ def load_universe(filename: str) -> List[Dict[str, Any]]:
         _failed_at.pop(filename, None)
         _cache[filename] = industries
         return industries
+
+
+def is_unavailable(filename: str) -> bool:
+    """Whether the last attempt to read `filename` FAILED and no good copy is memoised — the
+    file is unavailable right now (inside the retry window, or the retry failed again).
+
+    A caller that just got `[]` uses this to tell a transient hole apart from "this industry
+    is not in the universe" (a real answer). False before any attempt, so a caller whose
+    lookup never reached this module (a stubbed test, a cached answer) never reads as a hole.
+
+    Lock-free on purpose: `load_universe` holds `_lock` for a whole download (up to ~40 s),
+    and this is called from the event loop. Dict membership reads are atomic under the GIL."""
+    return filename in _failed_at and filename not in _cache
 
 
 def verify_universe_files_present() -> Dict[str, bool]:

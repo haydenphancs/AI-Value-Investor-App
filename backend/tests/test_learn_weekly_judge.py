@@ -239,3 +239,28 @@ def test_the_judge_imports_nothing_that_loads_fmp():
     imported = {(n.module or "") for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
     imported |= {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
     assert not any("agents" in m or "fmp" in m or "integrations" in m for m in imported), imported
+
+
+def test_the_judge_schema_has_no_item_cap_and_matches_the_marketing_judges_shape():
+    """2026-10-23: `maxItems` on the verdicts array made gemini-3.8-flash refuse the whole request
+    ("400 INVALID_ARGUMENT: Request contains an invalid argument") — every shadow verdict of the
+    first live previews was lost. The marketing judge, live in production, never had one."""
+    from app.services.marketing import judge as mj
+
+    def keys(node):
+        if isinstance(node, dict):
+            yield from node.keys()
+            for v in node.values():
+                yield from keys(v)
+        elif isinstance(node, list):
+            for v in node:
+                yield from keys(v)
+
+    learn = J.response_schema(["title", "sections[0].content[0]"])
+    assert "maxItems" not in set(keys(learn)) and "minItems" not in set(keys(learn))
+    market = mj.response_schema(["title", "sections[0].content[0]"])
+    strip = lambda s: {**s, "properties": {"verdicts": {**s["properties"]["verdicts"], "items": {
+        **s["properties"]["verdicts"]["items"], "properties": {
+            k: {kk: vv for kk, vv in v.items() if kk != "enum"}
+            for k, v in s["properties"]["verdicts"]["items"]["properties"].items()}}}}}
+    assert strip(learn) == strip(market), "the Learn judge schema drifted from the working marketing shape"

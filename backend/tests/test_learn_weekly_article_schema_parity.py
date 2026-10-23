@@ -15,6 +15,7 @@ and never twice, the code-owned fields, and `draft_sha256` equal to the narratio
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import date
 from pathlib import Path
@@ -264,14 +265,63 @@ def test_related_tiles_skip_rows_a_tile_cannot_show():
 # ── icons ─────────────────────────────────────────────────────────────────────────────────────
 
 
-def test_every_schema_icon_enum_is_the_bundle_allow_list():
-    schema = A.outline_response_schema(["S1"])
-    props = schema["properties"]
-    hl = props["keyHighlights"]["items"]["properties"]["icon"]["enum"]
-    sec = props["sections"]["items"]["properties"]["icon"]["enum"]
-    blk = A.SECTION_RESPONSE_SCHEMA["properties"]["blocks"]["items"]["properties"]["icon"]["enum"]
-    assert set(hl) == set(sec) == set(blk) == set(rules.ICON_ALLOWLIST)
+def _enums(node, path=""):
+    """Every (path, enum list) in a response schema."""
+    if isinstance(node, dict):
+        if isinstance(node.get("enum"), list):
+            yield path, node["enum"]
+        for k, v in node.items():
+            yield from _enums(v, f"{path}.{k}")
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            yield from _enums(v, f"{path}[{i}]")
+
+
+def test_no_response_schema_carries_the_icon_list_as_an_enum():
+    """Gemini refused both schemas while the 79-icon list was an enum ("too many states for
+    serving", 2026-10-23): every Deep Dive died at its first call. The list lives in the prompt."""
+    schemas = {"outline": A.outline_response_schema(["S1", "P1"]), "section": A.SECTION_RESPONSE_SCHEMA}
+    for name, schema in schemas.items():
+        for path, enum in _enums(schema):
+            assert not set(enum) & set(rules.ICON_ALLOWLIST), f"{name}{path} is an icon enum again"
+    props = schemas["outline"]["properties"]
+    assert props["keyHighlights"]["items"]["properties"]["icon"] == {"type": "STRING"}
+    assert props["sections"]["items"]["properties"]["icon"] == {"type": "STRING"}
+    assert A.SECTION_RESPONSE_SCHEMA["properties"]["blocks"]["items"]["properties"]["icon"] == {"type": "STRING"}
     assert A.DISCLOSURE_ICON in rules.ICON_ALLOWLIST
+
+
+def test_the_prompt_lists_every_allowed_icon_and_no_other():
+    from app.services.learn_weekly import prompts as Pr
+    assert tuple(A.ICON_CHOICES) == tuple(sorted(rules.ICON_ALLOWLIST))
+    listed = Pr.SYSTEM_BODY.split("copied character for character: ", 1)[1].split(".\n", 1)[0]
+    assert [s.strip() for s in listed.split(",")] == list(A.ICON_CHOICES)
+    assert Pr.PROMPT_VERSION >= "2026-10-23.1"
+
+
+def test_the_prompt_says_us_uk_eu_without_dots_like_marketing():
+    """Grounding refuses a dotted "U.S." ON PURPOSE (marketing: it hides sentence ends and names
+    such as "U.S. Steel"; tests/test_marketing_residuals_compliance.py). Marketing's prompt says so
+    up front; the Learn prompt did not, so every Deep Dive spent a repair round on it (2026-10-23)."""
+    from app.services.learn_weekly import prompts as Pr
+    from app.services.marketing import grounding as g
+    assert "Write US, UK and EU without dots" in Pr.SYSTEM_BODY
+    assert "without dots" in Pr.hint("ungrounded_acronym")
+    assert "U.S" not in g.ACRONYMS and "US" in g.ACRONYMS
+
+
+def test_the_fact_id_enum_is_capped_for_gemini(caplog):
+    """Measured 2026-10-23: 100 ids accepted, 150 refused. Over FACT_ID_ENUM_MAX the enum is
+    dropped (with a WARNING) and the writer's unknown_fact check is the guard."""
+    at_cap = [f"S{i}" for i in range(A.FACT_ID_ENUM_MAX)]
+    over = at_cap + ["P1"]
+    fid = lambda s: s["properties"]["statistics"]["items"]["properties"]["fact_id"]
+    assert fid(A.outline_response_schema(at_cap))["enum"] == at_cap
+    with caplog.at_level(logging.WARNING):
+        assert "enum" not in fid(A.outline_response_schema(over))
+    assert "exceed FACT_ID_ENUM_MAX" in caplog.text
+    for path, enum in _enums(A.outline_response_schema(at_cap)):
+        assert len(enum) <= A.FACT_ID_ENUM_MAX, path
 
 
 def test_schema_enums_match_the_contracts():
@@ -382,8 +432,9 @@ _KEPT = A.OutlineStatistic(fact_id="S1", label="Revenue", trend="up")
 ])
 def test_a_statistic_is_dropped_never_guessed(bad):
     # One bad statistic beside one good one (at most MAX_STATISTICS are read, so each case alone).
+    # The model said "up", but S1 states no change, so the card's arrow is neutral.
     assert A.render_statistics([_KEPT, bad], SHEET) == [
-        {"value": "$130.5 billion", "label": "Revenue", "trend": "up"}]
+        {"value": "$130.5 billion", "label": "Revenue", "trend": "neutral"}]
 
 
 def test_only_the_first_max_statistics_are_read_and_a_bad_sheet_reads_none():
@@ -451,3 +502,108 @@ def test_normalize_outline_is_stable_on_a_second_pass():
     assert [s.target_words for s in again.sections] == pytest.approx(
         [s.target_words for s in o.sections], abs=2)
     assert again.title == o.title and again.tagLabel == o.tagLabel
+
+
+# ── section blocks: empty blocks and callout defaults (2026-10-23 live previews) ───────────────
+
+
+def test_empty_blocks_are_dropped_with_a_warning_and_real_text_is_untouched(caplog):
+    """gemini-2.5-flash looped on bare {"type": "callout"} blocks (only `type` is required) and
+    sank whole sections; an empty block has nothing to judge, so it is dropped — loudly."""
+    draft = A.SectionDraft.model_validate({"blocks": [
+        {"type": "paragraph", "text": "  Real words stay exactly as written.  "},
+        {"type": "callout"}, {"type": "callout", "text": "   "},
+        {"type": "bulletList", "items": ["", "  "]}, {"type": "paragraph", "text": None},
+        {"type": "bulletList", "items": ["One", " two "]},
+    ]})
+    with caplog.at_level(logging.WARNING):
+        blocks = A.section_blocks(draft)
+    assert blocks == [{"type": "paragraph", "text": "Real words stay exactly as written."},
+                      {"type": "bulletList", "items": ["One", "two"]}]
+    assert "dropped 4 empty block(s) of 6" in caplog.text
+
+
+@pytest.mark.parametrize("style, icon, want_style, want_icon", [
+    ("warning", None, "warning", "exclamationmark.triangle.fill"),
+    ("highlight", "not.a.real.symbol", "highlight", "lightbulb.fill"),
+    (None, None, "info", "info.circle.fill"),
+    ("loud", "chart.bar.fill", "info", "chart.bar.fill"),
+])
+def test_a_callout_gets_a_default_style_and_icon_never_new_text(style, icon, want_style, want_icon):
+    if icon == "chart.bar.fill" and icon not in rules.ICON_ALLOWLIST:
+        icon = want_icon = sorted(rules.ICON_ALLOWLIST)[0]          # any allowed icon is kept
+    draft = A.SectionDraft.model_validate({"blocks": [
+        {"type": "callout", "text": "A lesson.", "style": style, "icon": icon}]})
+    assert A.section_blocks(draft) == [
+        {"type": "callout", "icon": want_icon, "style": want_style, "text": "A lesson."}]
+    assert set(A.CALLOUT_STYLE_ICONS) == set(C.CALLOUT_STYLES)
+    assert set(A.CALLOUT_STYLE_ICONS.values()) <= rules.ICON_ALLOWLIST
+
+
+
+# ── one figure per card, and only a stated direction (2026-10-23 reader panel) ─────────────────
+
+
+@pytest.mark.parametrize("text,figures", [
+    ("NVIDIA CORP reported revenue of $130.5 billion for the fiscal year.", ["$130.5 billion"]),
+    ("a net loss of $1.2 billion and revenue of $9 billion", ["$1.2 billion", "$9 billion"]),
+    ("~8,200 projects, representing 1,312 GW of generation", ["8,200", "1,312"]),
+    ("cost of revenue increased $17.7 billion, or 44%", ["$17.7 billion", "44%"]),
+    ("In 2006 it introduced CUDA.", []), (None, []),
+])
+def test_fact_figures_lists_every_distinct_figure_once(text, figures):
+    assert A.fact_figures(text) == figures
+
+
+def test_a_card_on_a_fact_with_several_figures_is_dropped(caplog):
+    """Oracle's fact held total cloud revenue AND IaaS growth; the card printed the first figure
+    under the IaaS label. Two figures → no card (WARNING), never a guess."""
+    sheet = C.FactSheet(C.KIND_DEEP_DIVE, "Cloud", "silicon-rush", (), (
+        C.Fact("P2", "Total cloud revenue (IaaS plus SaaS) was $11.6 billion, up 40%, and "
+                     "Cloud Infrastructure (IaaS) revenue grew 121%.", "sec_peg", "x", ""),
+        C.Fact("S3", "Oracle reported revenue of $57.4 billion for the fiscal year ended May 31, "
+                     "2026.", "sec_xbrl", "x", "")))
+    stats = [A.OutlineStatistic(fact_id="P2", label="Cloud Infrastructure growth", trend="up"),
+             A.OutlineStatistic(fact_id="S3", label="Revenue", trend="neutral")]
+    with caplog.at_level(logging.WARNING):
+        out = A.render_statistics(stats, sheet)
+    assert out == [{"value": "$57.4 billion", "label": "Revenue", "trend": "neutral"}]
+    assert "states 3 figures" in caplog.text
+
+
+@pytest.mark.parametrize("trend,text,shown", [
+    ("up", "Revenue increased to $10 billion.", "up"),
+    ("down", "Revenue declined to $10 billion.", "down"),
+    ("up", "Revenue declined to $10 billion.", "neutral"),        # the fact says the opposite
+    ("up", "Revenue was $10 billion.", "neutral"),                # the fact states no change
+    ("up", "It grew in one unit and fell in another: $10 billion.", "neutral"),   # both
+    ("sideways", "Revenue increased to $10 billion.", "neutral"),
+    ("neutral", "Revenue increased to $10 billion.", "neutral"),
+])
+def test_an_arrow_needs_its_fact_to_state_that_direction(trend, text, shown):
+    assert A.supported_trend(trend, text) == shown
+
+
+def test_a_subheading_repeating_the_section_title_is_dropped(caplog):
+    """iOS draws section.title, then the blocks: five of six preview sections opened with a
+    subheading equal to their title, so readers saw every heading twice (2026-10-23)."""
+    draft = A.SectionDraft.model_validate({"blocks": [
+        {"type": "subheading", "text": "Asset Lives and Depreciation"},
+        {"type": "paragraph", "text": "Servers wear out on a schedule the accounts choose."},
+        {"type": "subheading", "text": "  asset lives and depreciation. "},
+        {"type": "subheading", "text": "Why the schedule matters"},
+    ]})
+    with caplog.at_level(logging.INFO):
+        blocks = A.section_blocks(draft, "Asset Lives and Depreciation")
+    assert blocks == [
+        {"type": "paragraph", "text": "Servers wear out on a schedule the accounts choose."},
+        {"type": "subheading", "text": "Why the schedule matters"}]
+    assert "dropped 2 subheading(s) repeating the section title" in caplog.text
+    # without a title nothing is dropped for repeating it
+    assert len(A.section_blocks(draft)) == 4
+
+
+def test_the_prompt_says_not_to_repeat_the_title():
+    from app.services.learn_weekly import prompts as Pr
+    assert "never open a section with a subheading that repeats that title" in Pr.SYSTEM_BODY
+    assert Pr.PROMPT_VERSION >= "2026-10-23.3"

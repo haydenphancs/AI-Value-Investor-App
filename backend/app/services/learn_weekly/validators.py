@@ -305,6 +305,45 @@ _RUMOUR_RE = re.compile(
     r"complaints? (?:says?|said|alleges?|alleged|claims?|claimed|asserts?|asserted|charges?)|"
     r"unconfirmed reports?|is said to be|are said to be)\b")
 
+#: Any MENTION of a share price or a stock move. `topic`'s peg screen refuses a filing span on a
+#: mention alone (a filing that talks about its stock price is not a peg). An article block is
+#: refused only when the mention STATES one — see `share_price_hits`: the hand-written catalog
+#: says "a single number — market share, units, or stock price — misses the point", which is an
+#: idea, not a price. A deal's "purchase price" and a dividend "per share" are filed facts and
+#: pass. Widened 2026-10-23: a live preview printed CoreWeave's "last reported sale price of
+#: $79.88 per share" — "sale price" and "price of $N per share" were not covered.
+SHARE_PRICE_RE = re.compile(
+    r"\b(?:closing\s+(?:sale\s+)?price|closed\s+at\s+\$|stock\s+price|share\s+price|"
+    r"trading\s+price|offering\s+price|price\s+per\s+share|per[- ]share\s+price|"
+    r"(?:last\s+)?(?:reported\s+)?sale\s+price|"
+    r"market\s+price\s+(?:of|for)\s+(?:its\s+|the\s+|our\s+)?(?:class\s+[a-z]\s+)?"
+    r"(?:common\s+)?(?:stock|shares?)|"
+    r"trad(?:ed|es|ing)\s+(?:at|as\s+high\s+as|as\s+low\s+as)\s+\$|"
+    r"from\s+the\s+(?:prior|previous)\s+(?:trading\s+)?(?:day|close))\b"
+    r"|(?<!purchase\s)\bprice\s+of\s+(?:approximately\s+|about\s+)?\$\s?[0-9][0-9,]*(?:\.[0-9]+)?"
+    r"\s+per\s+share\b",
+    re.IGNORECASE)
+#: A figure in the same sentence: a dollar amount or a percentage.
+_PRICE_FIGURE_RE = re.compile(r"\$\s?[0-9]|[0-9]\s?%|\bpercent\b", re.IGNORECASE)
+#: A move word within a few words AFTER the mention ("stock price rose", "closing price was a
+#: record").
+_PRICE_MOVE_RE = re.compile(
+    r"^\W*(?:\w+\W+){0,6}?(?:rose|rises|rising|fell|falls|falling|jumped|jumps|surged|surges|"
+    r"soared|soars|dropped|drops|plunged|plunges|climbed|climbs|doubled|tripled|halved|crashed|"
+    r"tumbled|slumped|spiked|rallied|record|all-time\s+high|52-week)\b", re.IGNORECASE)
+
+
+def share_price_hits(clean: str) -> List[str]:
+    """Each sentence that STATES a share price or a stock move: a `SHARE_PRICE_RE` mention with a
+    figure in the same sentence, or a move word just after it. Pure, linear."""
+    hits: List[str] = []
+    for sent in compliance.sentences(clean):
+        for m in SHARE_PRICE_RE.finditer(sent):
+            if _PRICE_FIGURE_RE.search(sent) or _PRICE_MOVE_RE.search(sent[m.end():m.end() + 80]):
+                hits.append(m.group(0))
+                break
+    return hits
+
 # ── advice the chat rows miss: trade verbs, the reader's holdings, valuation verdicts ─────────
 
 #: A trade verb; its object (the next 3 words) decides whether it is a trade. "buy back" is a
@@ -838,6 +877,8 @@ def _text_issues(field: str, raw: Any, *, cap: int, time_words_ok: bool,
     m = _RUMOUR_RE.search(folded)
     if m:
         out.append(Issue(field, "rumour", _detail(m.group(0))))
+    for hit in share_price_hits(clean):
+        out.append(Issue(field, "share_price", _detail(hit)))
     if not time_words_ok:
         m = _TIME_WORD_RE.search(folded)
         if m:

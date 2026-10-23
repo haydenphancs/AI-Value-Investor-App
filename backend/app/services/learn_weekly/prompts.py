@@ -29,6 +29,7 @@ from app.services.chat_security import neutralize_fences
 from app.services.learn_weekly import contracts as C
 from app.services.learn_weekly.article_schema import (
     HIGHLIGHT_COUNT,
+    ICON_CHOICES,
     MAX_STATISTICS,
     PEG_TARGET_SHARE,
     SECTION_COUNT,
@@ -38,7 +39,7 @@ from app.services.marketing.writer_prompts import REPAIR_HINTS as _MARKETING_HIN
 
 #: Bump with any meaningful change to a prompt or to SYSTEM_BODY (it is stored with every draft
 #: and is part of the resume key: a half-written piece is never finished under a newer prompt).
-PROMPT_VERSION = "2026-10-22.1"
+PROMPT_VERSION = "2026-10-23.3"   # icons (.1); US/UK/EU without dots (.2); no title-repeat subheading (.3)
 
 #: The owner's scope clause, kept as its own constant so a test can pin it is in SYSTEM_BODY.
 SCOPE_CLAUSE = (
@@ -95,6 +96,12 @@ SYSTEM_BODY = (
     f"{C.MAX_BULLET_WORDS} words each; a callout at most {C.MAX_CALLOUT_WORDS} words, with a "
     "style (highlight, info or warning) and an icon from the allowed list. There are no quote "
     "blocks.\n"
+    "- The allowed list of icons — every icon (key highlights, sections, callouts) is exactly one "
+    "of these names, copied character for character: " + ", ".join(ICON_CHOICES) + ".\n"
+    "- The app already shows each section's title above its blocks: never open a section with "
+    "a subheading that repeats that title.\n"
+    "- Write US, UK and EU without dots (\"US markets\", never \"U.S. markets\"): a dotted "
+    "abbreviation is refused as an ungrounded name, and nothing in the fact sheet changes that.\n"
     "- Plain text only: no markdown, no asterisks or underscores for emphasis, no # headings, "
     "no links or web addresses, no emoji, no hashtags, no @handles and no $ before a ticker. "
     "Never mention the app, its brand, an app store or downloads.\n"
@@ -158,6 +165,8 @@ LEARN_REPAIR_HINTS: Mapping[str, str] = {
     "conduct_claim": "never describe misconduct or what a person or company concealed, inflated "
                      "or misled - state only the filed facts",
     "rumour": "remove the rumour - write only facts that were filed",
+    "share_price": "remove the share price - never state what a stock traded at, a sale or "
+                   "closing price, or a price per share (earnings or dividends per share are fine)",
     "time_word": "remove the time word, or (in the peg section only) put it in the same "
                  "paragraph as the full date it means, e.g. 'On October 21, 2026'",
     "misquote": "remove that saying - weekly articles carry no quotations at all",

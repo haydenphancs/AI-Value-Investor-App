@@ -825,3 +825,23 @@ def test_writer_build_judge_and_prompts_do_not_import_agents_or_fmp_at_load():
     r = subprocess.run([sys.executable, "-c", probe], cwd=str(BACKEND), capture_output=True,
                        text=True, timeout=120)
     assert r.returncode == 0, f"pulled in {r.stdout.strip()} {r.stderr[-400:]}"
+
+
+def test_the_writer_drops_a_subheading_that_repeats_its_section_title():
+    """Wired end to end: the section's own title reaches `section_blocks` (2026-10-23 previews
+    showed every heading twice). A different subheading stays."""
+    client = FakeClient()
+    title = outline()["sections"][1]["title"]
+
+    def with_headings(prompt, kw):
+        ans = json.loads(client.section_answer(prompt, 1)["text"])
+        ans["blocks"].insert(0, {"type": "subheading", "text": title})
+        ans["blocks"].insert(2, {"type": "subheading", "text": "A Different Angle"})
+        return ok(ans)
+
+    client.overrides["section 2"] = with_headings
+    out = run(client)
+    assert out.status == W.STATUS_ACCEPTED, (out.error, out.issues)
+    sec = out.content["sections"][1]
+    heads = [b["text"] for b in sec["content"] if b.get("type") == "subheading"]
+    assert sec["title"] == title and title not in heads and "A Different Angle" in heads

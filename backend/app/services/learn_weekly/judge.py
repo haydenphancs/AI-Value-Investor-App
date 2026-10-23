@@ -218,13 +218,15 @@ def build_prompt(sheet: C.FactSheet, fields: Sequence[Tuple[str, str]], *, gener
 
 def response_schema(labels: Sequence[str]) -> Dict[str, Any]:
     """Per-call schema: `field` is an enum of this article's labels and `rule` of the rubric's
-    codes (a request — `parse_verdicts` still fails closed on anything else)."""
+    codes (a request — `parse_verdicts` still fails closed on anything else). NO `maxItems`:
+    gemini-3.8-flash refuses the whole request with it ("400 INVALID_ARGUMENT: Request contains an
+    invalid argument", measured 2026-10-23 — every shadow verdict was lost); the marketing judge
+    never had one. `parse_verdicts` reads at most `MAX_VERDICTS` (with a WARNING)."""
     return {
         "type": "OBJECT",
         "properties": {
             "verdicts": {
                 "type": "ARRAY",
-                "maxItems": MAX_VERDICTS,
                 "items": {
                     "type": "OBJECT",
                     "properties": {

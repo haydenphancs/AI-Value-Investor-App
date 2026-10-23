@@ -197,12 +197,9 @@ _ENFORCER_RE = re.compile(
 #: Instruction-shaped text: a filing that tells the reader (or a model) what it "must" do.
 _INSTRUCTION_RE = re.compile(r"\b(?:must|shall)\b", re.IGNORECASE)
 _SECOND_PERSON_RE = re.compile(r"\b(?:you|your|yours|yourself|yourselves)\b", re.IGNORECASE)
-#: A share price or a stock move (the writer may never state one). A deal's "purchase price" and a
-#: dividend "per share" are filed facts and pass.
-_SHARE_PRICE_RE = re.compile(
-    r"\b(?:closing\s+(?:sale\s+)?price|closed\s+at\s+\$|stock\s+price|share\s+price|trading\s+price|"
-    r"offering\s+price|price\s+per\s+share|per[- ]share\s+price|"
-    r"from\s+the\s+(?:prior|previous)\s+(?:trading\s+)?(?:day|close))\b", re.IGNORECASE)
+#: A share price or a stock move: ONE rule with the article blocks (`validators.SHARE_PRICE_RE`,
+#: widened 2026-10-23 after a peg span carried "last reported sale price of $79.88 per share").
+_SHARE_PRICE_RE = validators.SHARE_PRICE_RE
 #: Promotional superlatives — refused in a sentence about the issuer (a subject, "the Company",
 #: "we"), since the writer may restate any superlative the sheet states. "first quarter", "best
 #: efforts" and "leading to" are not puffery.

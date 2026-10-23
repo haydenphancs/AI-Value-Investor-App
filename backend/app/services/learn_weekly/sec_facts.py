@@ -52,7 +52,7 @@ import math
 import re
 import time
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from html.parser import HTMLParser
 from typing import (
     Any,
@@ -184,9 +184,16 @@ _METRICS: Tuple[_Metric, ...] = (
             noun="operating income", loss_noun="an operating loss"),
     _Metric("research_and_development", ("ResearchAndDevelopmentExpense",), instant=False,
             noun="research and development expense"),
-    _Metric("capital_expenditures", ("PaymentsToAcquirePropertyPlantAndEquipment",),
+    _Metric("capital_expenditures",
+            ("PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets"),
             instant=False,
-            noun="capital expenditures (purchases of property, plant and equipment)"),
+            noun="capital expenditures (purchases of property, plant and equipment)",
+            # NVIDIA left the first tag after fiscal 2012 and files capex under the second, which
+            # also counts intangible assets — the sentence must say so (2026-10-23 preview).
+            tag_nouns=(
+                ("PaymentsToAcquireProductiveAssets",
+                 "capital expenditures (purchases of property, equipment and intangible assets)"),
+            )),
     _Metric("cash", ("CashAndCashEquivalentsAtCarryingValue",), instant=True,
             noun="cash and cash equivalents"),
     _Metric(
@@ -646,6 +653,7 @@ async def _load_selected(
             continue
         selected.append(best)
 
+    selected = _drop_stale(cik10, selected)
     out = tuple(selected)
     if failures:
         logger.warning(
@@ -656,6 +664,36 @@ async def _load_selected(
     else:
         _cache_put(_facts_cache, cik10, out, _FACTS_CACHE_MAX)
     return out
+
+
+#: How far a metric's newest period may trail the company's newest annual period (any metric)
+#: before it is treated as a chain the company stopped filing under. A year plus slack for a
+#: 53-week year and a late balance-sheet instant.
+_STALE_LAG_DAYS = 400
+
+
+def _drop_stale(cik10: str, selected: Sequence[_Selected]) -> List[_Selected]:
+    """Leave out a metric whose NEWEST row trails the company's newest annual row by more than
+    `_STALE_LAG_DAYS`: every tag of its chain went quiet, so its "latest" is years old. NVIDIA's
+    capex chain ended in fiscal 2012 while its revenue ran to 2026, and a live preview printed the
+    2011 figure beside 2026 revenue as if current (2026-10-23). Relative to the company's own
+    filings, so it needs no clock. WARNING per dropped metric."""
+    newest = [date.fromisoformat(s.rows[0]["end"]) for s in selected if s.rows]
+    if not newest:
+        return list(selected)
+    cutoff = max(newest) - timedelta(days=_STALE_LAG_DAYS)
+    kept: List[_Selected] = []
+    for s in selected:
+        end = date.fromisoformat(s.rows[0]["end"])
+        if end < cutoff:
+            logger.warning(
+                "[learn-sec-metric-stale] CIK%s %s (%s): newest period %s trails the company's "
+                "newest %s by more than %d days — left out (the company stopped filing under it)",
+                cik10, s.metric, s.tag, end.isoformat(), max(newest).isoformat(), _STALE_LAG_DAYS,
+            )
+            continue
+        kept.append(s)
+    return kept
 
 
 def _render_facts(cik10: str, name: str, selected: Sequence[_Selected]) -> List[Fact]:

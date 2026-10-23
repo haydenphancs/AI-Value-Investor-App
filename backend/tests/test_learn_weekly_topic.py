@@ -509,6 +509,10 @@ CRWV_NAMES = ["CoreWeave, Inc.", "CRWV"]
      "on October 17, 2026.", "share_price"),
     ("On October 20, 2026, CoreWeave, Inc. priced its offering at a public offering price of $40.00.",
      "share_price"),
+    # 2026-10-23 live preview: this span reached the article as a stated share price
+    ("The initial conversion price represents a premium of approximately 22.50% over the last "
+     "reported sale price of $79.88 per share of CoreWeave's Class A common stock on September 17, "
+     "2026.", "share_price"),
     ("CoreWeave is the world's most trusted AI infrastructure company.", "puffery"),
     ("CoreWeave is the leading AI cloud platform, delivering software to top AI labs.", "puffery"),
     ("On October 20, 2026, the Company completed the largest acquisition in its history.", "puffery"),

@@ -88,6 +88,17 @@ DISCLOSURE_ICON = "info.circle.fill"
 DISCLOSURE_STYLE = "info"
 
 _ICON_ENUM: List[str] = sorted(rules.ICON_ALLOWLIST)
+#: The allowed icon names, as the PROMPT lists them (`prompts.SYSTEM_BODY`). They are NOT a schema
+#: enum: Gemini compiles a response schema into one constrained-decoding state machine and refuses
+#: one that is too big — "400 INVALID_ARGUMENT: The specified schema produces a constraint that has
+#: too many states for serving". Measured on gemini-2.5-flash, 2026-10-23: the 79-icon enum alone
+#: made BOTH the outline and the section schema fail (every Deep Dive died at its first call);
+#: without it both are accepted. An icon is still checked in code (`validators` "icon").
+ICON_CHOICES: Tuple[str, ...] = tuple(_ICON_ENUM)
+#: The fact-id enum stays (it keeps citations inside the sheet) up to this many ids; the same probe
+#: accepted 100 ids and refused 150. A real Deep Dive sheet held 54-63. Above the cap the enum is
+#: dropped and the writer's own `unknown_fact` check is the only guard (fail closed either way).
+FACT_ID_ENUM_MAX = 80
 
 
 # ── model answers (Pydantic v2) ──────────────────────────────────────────────────────────────
@@ -173,12 +184,17 @@ def parse_section(obj: Any) -> SectionDraft:
 
 
 def outline_response_schema(fact_ids: Sequence[str] = ()) -> Dict[str, Any]:
-    """The outline's schema. `fact_ids` (this sheet's ids) become an enum, so a section or a
-    statistic can only cite a fact that exists — the writer still checks (fail closed)."""
+    """The outline's schema. `fact_ids` (this sheet's ids) become an enum while there are at most
+    `FACT_ID_ENUM_MAX`, so a section or a statistic can only cite a fact that exists — the writer
+    still checks (fail closed). Icons are plain strings: see `ICON_CHOICES`."""
     ids = [i for i in dict.fromkeys(fact_ids) if isinstance(i, str) and i]
     fact_id: Dict[str, Any] = {"type": "STRING"}
-    if ids:
+    if ids and len(ids) <= FACT_ID_ENUM_MAX:
         fact_id["enum"] = ids
+    elif ids:
+        logger.warning("learn outline schema: %d fact ids exceed FACT_ID_ENUM_MAX=%d — no enum "
+                       "(Gemini refuses an over-large schema); the writer's unknown_fact check guards",
+                       len(ids), FACT_ID_ENUM_MAX)
     return {
         "type": "OBJECT",
         "properties": {
@@ -191,7 +207,7 @@ def outline_response_schema(fact_ids: Sequence[str] = ()) -> Dict[str, Any]:
                 "items": {
                     "type": "OBJECT",
                     "properties": {
-                        "icon": {"type": "STRING", "enum": list(_ICON_ENUM)},
+                        "icon": {"type": "STRING"},
                         "title": {"type": "STRING"},
                         "description": {"type": "STRING"},
                     },
@@ -204,7 +220,7 @@ def outline_response_schema(fact_ids: Sequence[str] = ()) -> Dict[str, Any]:
                     "type": "OBJECT",
                     "properties": {
                         "title": {"type": "STRING"},
-                        "icon": {"type": "STRING", "enum": list(_ICON_ENUM)},
+                        "icon": {"type": "STRING"},
                         "kind": {"type": "STRING", "enum": list(C.SECTION_KINDS)},
                         "fact_ids": {"type": "ARRAY", "items": dict(fact_id)},
                         "target_words": {"type": "INTEGER"},
@@ -242,7 +258,7 @@ SECTION_RESPONSE_SCHEMA: Dict[str, Any] = {
                     "text": {"type": "STRING"},
                     "items": {"type": "ARRAY", "maxItems": C.MAX_BULLET_ITEMS,
                               "items": {"type": "STRING"}},
-                    "icon": {"type": "STRING", "enum": list(_ICON_ENUM)},
+                    "icon": {"type": "STRING"},
                     "style": {"type": "STRING", "enum": list(C.CALLOUT_STYLES)},
                 },
                 "required": ["type"],
@@ -319,14 +335,58 @@ def fact_figure(text: Any) -> Optional[str]:
     return None
 
 
+def fact_figures(text: Any) -> List[str]:
+    """EVERY distinct figure a fact states (money, percentage, scaled count, comma count), in
+    reading order, exactly as written; a match inside a longer one ("1.2 billion" in "$1.2
+    billion") is the same figure. Pure; reads the same capped prefix as `fact_figure`."""
+    if not isinstance(text, str) or not text:
+        return []
+    head = text[:_FIGURE_SCAN_CAP]
+    spans = sorted(((m.start(), m.end(), m.group(0)) for rx in _FIGURE_RES for m in rx.finditer(head)),
+                   key=lambda s: (s[0], s[0] - s[1]))
+    out: List[str] = []
+    end = -1
+    for start, stop, figure in spans:
+        if start >= end:
+            out.append(figure)
+            end = stop
+    return list(dict.fromkeys(out))
+
+
+#: The direction words a fact must state for a card to carry that arrow.
+_TREND_WORDS: Dict[str, "re.Pattern[str]"] = {
+    "up": re.compile(r"\b(?:increas(?:e|ed|es|ing)|gr[eo]w(?:n|th)?|rose|risen|higher|expanded|"
+                     r"doubled|tripled|up\s+from)\b", re.IGNORECASE),
+    "down": re.compile(r"\b(?:decreas(?:e|ed|es|ing)|declin(?:e|ed|es|ing)|fell|fallen|lower|"
+                       r"reduced|dropped|shrank|down\s+from)\b", re.IGNORECASE),
+}
+
+
+def supported_trend(trend: Any, fact_text: Any) -> str:
+    """The arrow a card may show: the model's "up"/"down" only when its fact states that direction
+    and not the other; anything else is "neutral". An arrow is a claim — a 2026-10-23 preview put
+    "up" on a count of queued projects whose fact gave no change at all."""
+    if trend not in ("up", "down") or not isinstance(fact_text, str):
+        return "neutral"
+    other = "down" if trend == "up" else "up"
+    head = fact_text[:_FIGURE_SCAN_CAP]
+    if _TREND_WORDS[trend].search(head) and not _TREND_WORDS[other].search(head):
+        return trend
+    return "neutral"
+
+
 def render_statistics(statistics: Sequence[OutlineStatistic], sheet: C.FactSheet
                       ) -> List[Dict[str, str]]:
     """The article's `statistics`, values rendered by CODE. A statistic is DROPPED (WARNING,
-    never guessed) when its fact is not on the sheet, its fact has no figure, its label fails the
-    grounding of its OWN fact (a number or name the fact does not state — "Revenue" on a net-income
-    fact passes, "2024 revenue" on a 2025 fact does not), or its label repeats an earlier one.
-    A trend outside `STAT_TRENDS` is shown as "neutral": an arrow is a claim, and an unreadable one
-    claims nothing."""
+    never guessed) when its fact is not on the sheet, its fact has no figure, its fact states MORE
+    THAN ONE figure, its label fails the grounding of its OWN fact (a number or name the fact does
+    not state — "Revenue" on a net-income fact passes, "2024 revenue" on a 2025 fact does not), or
+    its label repeats an earlier one.
+
+    One figure only (2026-10-23): the card shows a code-chosen figure under a model-written label,
+    and on a fact with several the two came apart — Oracle's $11.6 billion of total cloud revenue
+    was shown as "IaaS growth", 8,200 queued projects as "capacity". A single-figure fact cannot
+    pair the wrong number with its label. The arrow is `supported_trend`."""
     by_id = sheet.by_id() if isinstance(sheet, C.FactSheet) else {}
     out: List[Dict[str, str]] = []
     seen = set()
@@ -336,11 +396,17 @@ def render_statistics(statistics: Sequence[OutlineStatistic], sheet: C.FactSheet
             logger.warning("[learn-stat-dropped] statistic %d cites %r, not on the sheet", k,
                            st.fact_id)
             continue
-        value = fact_figure(fact.text)
-        if value is None:
+        figures = fact_figures(fact.text)
+        if not figures:
             logger.warning("[learn-stat-dropped] statistic %d: fact %s states no figure", k,
                            fact.id)
             continue
+        if len(figures) > 1:
+            logger.warning("[learn-stat-dropped] statistic %d: fact %s states %d figures (%s) — a "
+                           "card could pair the wrong one with its label", k, fact.id, len(figures),
+                           ", ".join(figures[:4]))
+            continue
+        value = figures[0]
         label = (st.label or "").strip()
         key = V.title_key(label)
         if not label or key in seen:
@@ -354,7 +420,7 @@ def render_statistics(statistics: Sequence[OutlineStatistic], sheet: C.FactSheet
             logger.warning("[learn-stat-dropped] statistic %d (fact %s): label not grounded in its "
                            "fact (%s)", k, fact.id, ",".join(sorted({p.code for p in problems})))
             continue
-        trend = st.trend if st.trend in STAT_TRENDS else "neutral"
+        trend = supported_trend(st.trend, fact.text)
         seen.add(key)
         out.append({"value": value, "label": label, "trend": trend})
     return out
@@ -424,21 +490,58 @@ def section_kinds(outline: Outline) -> List[str]:
     return [s.kind for s in outline.sections]
 
 
-def section_blocks(draft: SectionDraft) -> List[Dict[str, Any]]:
+#: The icon a callout gets when the model leaves its icon out or names one off the allow-list:
+#: one per style (a callout with no valid style is an `info` callout). Icons are decoration —
+#: nothing a reader is told depends on one — so this is a default, never a rewrite of content.
+CALLOUT_STYLE_ICONS: Dict[str, str] = {
+    "info": DISCLOSURE_ICON, "warning": "exclamationmark.triangle.fill", "highlight": "lightbulb.fill",
+}
+
+
+def section_blocks(draft: SectionDraft, title: Optional[str] = None) -> List[Dict[str, Any]]:
     """One section answer → its iOS content blocks, each carrying ONLY the keys its type uses
     (`paragraph`/`subheading`: text; `callout`: icon, style, text; `bulletList`: items). Text is
-    trimmed; nothing is rewritten or dropped — a bad block reaches the validators as it is, so the
-    refusal names it. An unknown type keeps its text so `validate_block` can refuse it by type."""
+    trimmed; no reader-visible TEXT is rewritten — a bad block reaches the validators as it is, so
+    the refusal names it. An unknown type keeps its text so `validate_block` can refuse it by type.
+
+    Two exceptions, both measured on gemini-2.5-flash (2026-10-23 previews):
+      * An EMPTY block (no text and no items) is dropped with a WARNING. Constrained decoding with
+        only `type` required can loop on the smallest valid object — ten bare {"type": "callout"}
+        in a row sank whole sections, and a block with nothing in it has nothing to judge.
+      * A callout's missing / off-list icon and missing / unknown style get the defaults in
+        `CALLOUT_STYLE_ICONS` (decoration only; the list is in the prompt, no longer a schema enum).
+      * A `subheading` that repeats the section's own `title` (same `validators.title_key`) is
+        dropped: iOS already draws the title above the blocks, so readers saw every heading twice
+        (five of six sections in one preview).
+    """
     out: List[Dict[str, Any]] = []
+    empty = repeated = 0
+    title_key = V.title_key(title) if isinstance(title, str) and title.strip() else None
     for b in draft.blocks:
         text = b.text.strip() if isinstance(b.text, str) else b.text
+        items = [i.strip() for i in (b.items or []) if isinstance(i, str) and i.strip()]
+        if not text and not items:
+            empty += 1
+            continue
+        if (b.type == "subheading" and title_key is not None and isinstance(text, str)
+                and V.title_key(text) == title_key):
+            repeated += 1
+            continue
         if b.type == "bulletList":
-            items = [i.strip() for i in (b.items or [])]
-            out.append({"type": "bulletList", "items": items})
+            out.append({"type": "bulletList", "items": [i.strip() for i in (b.items or [])]})
         elif b.type == "callout":
-            out.append({"type": "callout", "icon": b.icon, "style": b.style, "text": text})
+            style = b.style if b.style in CALLOUT_STYLE_ICONS else "info"
+            icon = b.icon if isinstance(b.icon, str) and b.icon in rules.ICON_ALLOWLIST \
+                else CALLOUT_STYLE_ICONS[style]
+            out.append({"type": "callout", "icon": icon, "style": style, "text": text})
         else:
             out.append({"type": b.type, "text": text})
+    if empty:
+        logger.warning("learn section: dropped %d empty block(s) of %d (no text, no items)",
+                       empty, len(draft.blocks))
+    if repeated:
+        logger.info("learn section: dropped %d subheading(s) repeating the section title %r",
+                    repeated, title)
     return out
 
 

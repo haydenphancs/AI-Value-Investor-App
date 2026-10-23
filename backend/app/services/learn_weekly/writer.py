@@ -397,9 +397,9 @@ class _Generation:
 
     # ── sections ─────────────────────────────────────────────────────────────────────────────
 
-    def _blocks(self, obj: Any, stage: str) -> List[Dict[str, Any]]:
+    def _blocks(self, obj: Any, stage: str, title: Optional[str] = None) -> List[Dict[str, Any]]:
         try:
-            return A.section_blocks(A.parse_section(obj))
+            return A.section_blocks(A.parse_section(obj), title)
         except (ValidationError, TypeError, ValueError) as e:
             raise _Stop(STATUS_WRITER_FAILED, _one_line(f"{stage}: wrong shape: {e}"))
 
@@ -442,7 +442,7 @@ class _Generation:
             sheet=self.sheet, outline=outline, index=index, target_words=sec.target_words,
             generation_id=self.gen, round_no=1, reject_reason=self.reject_reason),
             A.SECTION_RESPONSE_SCHEMA)
-        blocks = self._blocks(obj, stage)
+        blocks = self._blocks(obj, stage, sec.title)
         issues = self.section_issues(index, sec, blocks)
         if not issues:
             return blocks, True
@@ -452,7 +452,7 @@ class _Generation:
             sheet=self.sheet, outline=outline, index=index, target_words=sec.target_words,
             generation_id=self.gen, previous=obj, issues=issues, round_no=2,
             reject_reason=self.reject_reason), A.SECTION_RESPONSE_SCHEMA)
-        blocks = self._blocks(obj, f"{stage} repair")
+        blocks = self._blocks(obj, f"{stage} repair", sec.title)
         issues = self.section_issues(index, sec, blocks)
         hard = [i for i in issues if i.code != "section_length"]
         if hard:

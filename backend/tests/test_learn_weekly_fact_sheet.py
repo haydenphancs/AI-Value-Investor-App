@@ -434,6 +434,7 @@ async def test_every_read_failing_raises_the_typed_exception():
                                "SalesRevenueNet", "NetIncomeLoss", "OperatingIncomeLoss",
                                "ResearchAndDevelopmentExpense",
                                "PaymentsToAcquirePropertyPlantAndEquipment",
+                               "PaymentsToAcquireProductiveAssets",
                                "CashAndCashEquivalentsAtCarryingValue",
                                "LongTermDebtNoncurrent", "LongTermDebt")})
     with pytest.raises(SECRateLimitException):
@@ -1007,3 +1008,48 @@ def test_fact_sheet_imports_topic_only_lazily():
     r = subprocess.run([sys.executable, "-c", probe], cwd=str(backend), capture_output=True,
                        text=True, timeout=120)
     assert r.returncode == 0, r.stderr[-400:]
+
+
+# ── stale chains (2026-10-23: NVIDIA's 2011 capex printed beside its 2026 revenue) ─────────────
+
+
+@pytest.mark.asyncio
+async def test_a_metric_whose_chain_went_quiet_is_left_out(caplog):
+    sec = FakeSEC({
+        "Revenues": flow(130e9, 61e9),
+        "PaymentsToAcquirePropertyPlantAndEquipment": usd(
+            row(138.7e6, "2012-01-29", "2011-01-31", filed="2012-03-13", accn=ACC24, fy=2012)),
+    })
+    with caplog.at_level("WARNING"):
+        facts = await sf.annual_facts(CIK, NAME, client=sec)
+    assert not any("capital expenditures" in t for t in texts(facts))
+    assert any("revenue of $130 billion" in t for t in texts(facts))
+    assert "[learn-sec-metric-stale]" in caplog.text and "capital_expenditures" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_capex_filed_as_productive_assets_is_read_and_named_as_such():
+    sec = FakeSEC({
+        "Revenues": flow(130e9, 61e9),
+        "PaymentsToAcquirePropertyPlantAndEquipment": usd(
+            row(138.7e6, "2012-01-29", "2011-01-31", filed="2012-03-13", accn=ACC24, fy=2012)),
+        "PaymentsToAcquireProductiveAssets": flow(3.2e9, 1.1e9),
+    })
+    facts = await sf.annual_facts(CIK, NAME, client=sec)
+    capex = [t for t in texts(facts) if "capital expenditures" in t]
+    assert capex and "intangible assets" in capex[0] and "$3.2 billion" in capex[0]
+    assert "2025" in capex[0] and not any("$138.7 million" in t for t in capex)
+
+
+@pytest.mark.asyncio
+async def test_metrics_within_a_year_of_the_newest_all_stay():
+    # Cash is an instant at the same fiscal year end; a one-year-older metric stays (the lag is
+    # under the 400-day bar) — only a chain that went quiet for longer is dropped.
+    sec = FakeSEC({
+        "Revenues": flow(130e9, 61e9),
+        "ResearchAndDevelopmentExpense": usd(row(8.7e9, FY24[1], FY24[0])),
+        "CashAndCashEquivalentsAtCarryingValue": usd(row(8.6e9, FY25[1])),
+    })
+    facts = await sf.annual_facts(CIK, NAME, client=sec)
+    joined = " ".join(texts(facts))
+    assert "research and development" in joined and "cash and cash equivalents" in joined

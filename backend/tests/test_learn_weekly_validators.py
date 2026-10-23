@@ -1280,3 +1280,42 @@ def test_the_new_rows_stay_fast_and_total_on_pathological_text(junk):
     out = para(junk, subjects=CRWV_SUBJECTS)
     assert time.perf_counter() - started < 2.0
     assert "validator_error" not in codes(out), out
+
+
+# ── share prices in ANY article block (2026-10-23: "$79.88 per share" reached a live draft) ────
+
+
+@pytest.mark.parametrize("text", [
+    "The premium was set over the last reported sale price of $79.88 per share of its stock.",
+    "CoreWeave stock traded at $120 in September.",
+    "The shares traded as high as $187 that year.",
+    "The company's stock price rose sharply after the report.",
+    "The offering was set at a price of $40.00 per share.",
+    "The last reported sale price was $79.88.",
+    "The market price of the common stock fell 18% that week.",
+    "Its closing price on the day was a record.",
+])
+def test_a_share_price_is_refused_in_any_block(text):
+    assert "share_price" in para_codes(text), para(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Diluted earnings per share were $2.10 for the fiscal year ended January 25, 2026.",
+    "The board declared a dividend of $0.25 per share.",
+    "The buyer agreed to a purchase price of $95.00 per share in cash.",
+    "Wholesale power trades at market prices that change every hour.",
+    "The average selling price of its chips rose.",
+    # the hand-written catalog's ideas, not prices (the corpus pins these articles)
+    "Judging the battle on a single number — market share, units, or stock price — misses the point.",
+    "Obvious durability gets capitalised into a share price long before it shows up in the earnings.",
+    "Neither the crash nor the comeback arrives on the timetable a share price implies.",
+    "It was the market price of the common stock that set the ratio.",
+    "The conversion premium was measured against the sale price on September 17, 2026.",
+])
+def test_filed_per_share_facts_and_power_prices_are_not_share_prices(text):
+    assert "share_price" not in para_codes(text), para(text)
+
+
+def test_the_peg_screen_and_the_blocks_share_one_price_rule():
+    from app.services.learn_weekly import topic
+    assert topic._SHARE_PRICE_RE is V.SHARE_PRICE_RE

@@ -1664,6 +1664,19 @@ def test_the_constraints_resolve_both_engines_under_chatterbox_pins():
     for k, v in want.items():
         assert pins.get(k) == v, k
     assert not [k for k in pins if k.startswith("nvidia-") or k == "triton"]
+
+
+def test_setuptools_still_ships_pkg_resources_for_the_watermarker():
+    """resemble-perth 1.0.1 (Chatterbox's watermarker) imports pkg_resources and hides the failure
+    behind `PerthImplicitWatermarker = None`; setuptools removed pkg_resources in 82.0.0. The first
+    Railway smoke died on exactly that (setuptools 84.2.1, 2026-10-23)."""
+    pins = _pins(PKG / "constraints.txt")
+    assert pins["resemble-perth"] == "1.0.1"
+    major = int(pins["setuptools"].split(".")[0])
+    assert major < 82, f"setuptools {pins['setuptools']} has no pkg_resources; perth would import as None"
+    code = _no_comments((PKG / "Dockerfile").read_text())
+    check = code.index("assert perth.PerthImplicitWatermarker is not None")
+    assert code.index("-c learn_narrator/constraints.txt") < check < code.index("python -m learn_narrator.bake")
     assert "en-core-web-sm" not in pins                       # a URL requirement, not an index pin
 
 

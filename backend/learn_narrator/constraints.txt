@@ -131,7 +131,13 @@ scikit-learn==1.9.1
 scipy==1.17.1
 segments==2.4.0
 semantic-version==2.10.0
-setuptools==84.2.1
+# setuptools: held at 81.0.0, the LAST release that ships pkg_resources (82.0.0 removed it). The
+# resolver picked 84.2.1 (spacy and thinc require setuptools with no upper bound), and
+# resemble-perth 1.0.1 — Chatterbox's watermarker — opens with `from pkg_resources import
+# resource_filename`; perth swallows the ImportError and sets PerthImplicitWatermarker = None, so
+# ChatterboxTTS() died with "'NoneType' object is not callable" in the first Railway smoke
+# (2026-10-23). The Dockerfile's install step now asserts the watermarker imports.
+setuptools==81.0.0
 shellingham==1.5.4
 six==1.17.0
 smart_open==8.0.4

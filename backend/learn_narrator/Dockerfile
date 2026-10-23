@@ -20,12 +20,15 @@ WORKDIR /app
 COPY requirements.txt constraints.txt learn_narrator/
 # torch AND torchaudio from the CPU index FIRST (the 2.6.0+cpu wheels; the PyPI ones pull ~3 GB of
 # CUDA), then everything else under the ONE resolved constraints file. Then: the resolver agrees
-# with itself (pip check), no CUDA wheel crept in, and the torch build really is the CPU one.
+# with itself (pip check), no CUDA wheel crept in, the torch build really is the CPU one, and
+# Chatterbox's watermarker imports (resemble-perth hides an ImportError behind a None class — the
+# first smoke died on it; see the setuptools note in constraints.txt).
 RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.6.0 torchaudio==2.6.0 \
     && pip install --no-cache-dir -r learn_narrator/requirements.txt -c learn_narrator/constraints.txt \
     && pip check \
     && if pip list 2>/dev/null | grep -qiE '^(nvidia-|triton)'; then echo "CUDA wheels in the image:" >&2; pip list 2>/dev/null | grep -iE '^(nvidia-|triton)' >&2; exit 1; fi \
-    && python -c "import torch, torchaudio; assert torch.version.cuda is None, torch.__version__; assert torch.__version__.startswith('2.6.0'), torch.__version__; assert torchaudio.__version__.startswith('2.6.0'), torchaudio.__version__; print('torch', torch.__version__, 'torchaudio', torchaudio.__version__)"
+    && python -c "import torch, torchaudio; assert torch.version.cuda is None, torch.__version__; assert torch.__version__.startswith('2.6.0'), torch.__version__; assert torchaudio.__version__.startswith('2.6.0'), torchaudio.__version__; print('torch', torch.__version__, 'torchaudio', torchaudio.__version__)" \
+    && python -c "import pkg_resources, perth.perth_net; assert perth.PerthImplicitWatermarker is not None; print('perth watermarker OK')"
 
 # Bake EVERY weight into the image: Chatterbox and Kokoro from Hugging Face (pinned commits, refs/main
 # pointed at them) AND the torch.hub WAV2VEC2_ASR_BASE_960H checkpoint (MIT) — HF_HUB_OFFLINE does

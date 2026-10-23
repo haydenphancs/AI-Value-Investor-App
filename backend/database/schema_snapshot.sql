@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict UcWn5mOcoBONayPitn9bHkY9fnwKBVaQg4NpV45AqpFeZmB4BevwQHx8e0VGD6D
+\restrict dMbGYLMEJllFLTQJ3B7FdjoRLOYiMwE18trEVL8a9h4AvB96dyWIeIeruD4HDWL
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -9361,6 +9361,203 @@ CREATE TABLE public.ip_intel_cache (
 
 
 --
+-- Name: learn_narration_jobs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.learn_narration_jobs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    piece_id uuid NOT NULL,
+    round integer NOT NULL,
+    script jsonb NOT NULL,
+    script_sha256 text NOT NULL,
+    engine text NOT NULL,
+    voice text NOT NULL,
+    pipeline_version text NOT NULL,
+    status text DEFAULT 'queued'::text NOT NULL,
+    attempts integer DEFAULT 0 NOT NULL,
+    worker_failures integer DEFAULT 0 NOT NULL,
+    lease_reclaims integer DEFAULT 0 NOT NULL,
+    claim_nonce text,
+    claimed_at timestamp with time zone,
+    heartbeat_at timestamp with time zone,
+    lease_until timestamp with time zone,
+    audio_path text,
+    audio_bytes bigint,
+    duration_seconds double precision,
+    timings jsonb,
+    checks jsonb,
+    error text,
+    finished_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT learn_narration_jobs_claimed_has_lease CHECK (((status <> 'in_progress'::text) OR ((lease_until IS NOT NULL) AND (claim_nonce IS NOT NULL)))),
+    CONSTRAINT learn_narration_jobs_counts_check CHECK (((attempts >= 0) AND (worker_failures >= 0) AND (lease_reclaims >= 0))),
+    CONSTRAINT learn_narration_jobs_engine_check CHECK ((engine = ANY (ARRAY['chatterbox'::text, 'kokoro'::text]))),
+    CONSTRAINT learn_narration_jobs_ready_has_audio CHECK (((status <> 'ready'::text) OR ((audio_path IS NOT NULL) AND (audio_bytes IS NOT NULL) AND (duration_seconds IS NOT NULL)))),
+    CONSTRAINT learn_narration_jobs_result_ranges CHECK ((((audio_bytes IS NULL) OR (audio_bytes > 0)) AND ((duration_seconds IS NULL) OR (duration_seconds > (0)::double precision)))),
+    CONSTRAINT learn_narration_jobs_round_check CHECK ((round >= 1)),
+    CONSTRAINT learn_narration_jobs_script_check CHECK (((jsonb_typeof(script) = ANY (ARRAY['array'::text, 'object'::text])) AND (script_sha256 ~ '^[0-9a-f]{64}$'::text))),
+    CONSTRAINT learn_narration_jobs_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'in_progress'::text, 'ready'::text, 'failed'::text, 'cancelled'::text]))),
+    CONSTRAINT learn_narration_jobs_text_caps CHECK ((((char_length(voice) >= 1) AND (char_length(voice) <= 80)) AND ((char_length(pipeline_version) >= 1) AND (char_length(pipeline_version) <= 80)) AND ((claim_nonce IS NULL) OR (claim_nonce ~ '^[0-9a-f]{16}$'::text)) AND ((error IS NULL) OR (char_length(error) <= 2000))))
+);
+
+
+--
+-- Name: TABLE learn_narration_jobs; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.learn_narration_jobs IS 'Wiser weekly content engine (migration 204): the narrator worker''s queue, one job per (piece, round) — Retry narration opens a new round. engine / voice / pipeline_version are frozen per job. A claim bumps attempts and mints claim_nonce; every worker write is fenced on both, so a re-claimed zombie writes nothing. Worker failures (<= 2) and lease re-claims (<= 4) are capped separately. The worker holds no Supabase key: it reaches this table only through the token-gated internal API (/api/v1/internal/learn). service_role only.';
+
+
+--
+-- Name: COLUMN learn_narration_jobs.engine; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.learn_narration_jobs.engine IS 'chatterbox | kokoro, frozen when the job is enqueued (LEARN_NARRATOR_ENGINE at that time). A worker is offered only the jobs whose engine it declares it can render.';
+
+
+--
+-- Name: COLUMN learn_narration_jobs.attempts; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.learn_narration_jobs.attempts IS 'Claims ever made. Each claim sets attempts + 1 and a fresh claim_nonce; the worker presents <attempts>.<nonce> on every call and every write is fenced on both.';
+
+
+--
+-- Name: COLUMN learn_narration_jobs.worker_failures; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.learn_narration_jobs.worker_failures IS 'Failures the worker reported. Back to queued while below the cap, failed at it.';
+
+
+--
+-- Name: COLUMN learn_narration_jobs.lease_reclaims; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.learn_narration_jobs.lease_reclaims IS 'Times an in_progress job whose lease ran out (a killed render) was claimed again. At the cap the next expiry closes the job failed instead.';
+
+
+--
+-- Name: learn_weekly_pieces; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.learn_weekly_pieces (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    period_key text NOT NULL,
+    kind text NOT NULL,
+    category text,
+    scheduled_publish_at timestamp with time zone NOT NULL,
+    hold_until timestamp with time zone NOT NULL,
+    dry_run boolean DEFAULT true NOT NULL,
+    status text DEFAULT 'planned'::text NOT NULL,
+    generation_id uuid,
+    lease_until timestamp with time zone,
+    generations integer DEFAULT 0 NOT NULL,
+    content_rejections integer DEFAULT 0 NOT NULL,
+    writer_failures integer DEFAULT 0 NOT NULL,
+    build_attempts integer DEFAULT 0 NOT NULL,
+    progress jsonb DEFAULT '{}'::jsonb NOT NULL,
+    topic jsonb,
+    subjects jsonb DEFAULT '[]'::jsonb NOT NULL,
+    fact_sheet jsonb,
+    fact_sheet_sha256 text,
+    slug text,
+    title text,
+    draft jsonb,
+    draft_sha256 text,
+    validation jsonb,
+    tokens_used integer DEFAULT 0 NOT NULL,
+    narration_job_id uuid,
+    review_round integer DEFAULT 0 NOT NULL,
+    review_message_ids jsonb DEFAULT '[]'::jsonb NOT NULL,
+    reviewed_by text,
+    reviewed_at timestamp with time zone,
+    reject_reason text,
+    publish_lease_until timestamp with time zone,
+    published_at timestamp with time zone,
+    unpublished_at timestamp with time zone,
+    last_error text,
+    last_stage text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT learn_weekly_pieces_category_check CHECK (((category IS NULL) OR (category = ANY (ARRAY['blueprints'::text, 'valueTraps'::text, 'battles'::text])))),
+    CONSTRAINT learn_weekly_pieces_counts_check CHECK (((generations >= 0) AND (content_rejections >= 0) AND (writer_failures >= 0) AND (build_attempts >= 0) AND (tokens_used >= 0) AND (review_round >= 0))),
+    CONSTRAINT learn_weekly_pieces_dry_run_never_publishes CHECK ((NOT (dry_run AND (status = ANY (ARRAY['publishing'::text, 'published'::text]))))),
+    CONSTRAINT learn_weekly_pieces_hold_after_publish CHECK ((hold_until >= scheduled_publish_at)),
+    CONSTRAINT learn_weekly_pieces_json_shapes CHECK (((jsonb_typeof(progress) = 'object'::text) AND (jsonb_typeof(subjects) = 'array'::text) AND (jsonb_typeof(review_message_ids) = 'array'::text) AND ((topic IS NULL) OR (jsonb_typeof(topic) = 'object'::text)) AND ((fact_sheet IS NULL) OR (jsonb_typeof(fact_sheet) = 'object'::text)) AND ((draft IS NULL) OR (jsonb_typeof(draft) = 'object'::text)) AND ((validation IS NULL) OR (jsonb_typeof(validation) = 'object'::text)))),
+    CONSTRAINT learn_weekly_pieces_kind_check CHECK ((kind = ANY (ARRAY['deep_dive'::text, 'slot'::text]))),
+    CONSTRAINT learn_weekly_pieces_period_key_check CHECK ((((kind = 'deep_dive'::text) AND (period_key ~ '^[0-9]{4}-W(0[1-9]|[1-4][0-9]|5[0-3]):deep_dive$'::text)) OR ((kind = 'slot'::text) AND (period_key ~ '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01]):slot$'::text)))),
+    CONSTRAINT learn_weekly_pieces_sha_check CHECK ((((fact_sheet_sha256 IS NULL) OR (fact_sheet_sha256 ~ '^[0-9a-f]{64}$'::text)) AND ((draft_sha256 IS NULL) OR (draft_sha256 ~ '^[0-9a-f]{64}$'::text)))),
+    CONSTRAINT learn_weekly_pieces_slug_check CHECK (((slug IS NULL) OR ((slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'::text) AND (char_length(slug) <= 160)))),
+    CONSTRAINT learn_weekly_pieces_status_check CHECK ((status = ANY (ARRAY['planned'::text, 'topic_pending'::text, 'building'::text, 'drafted'::text, 'media_pending'::text, 'ready_for_review'::text, 'in_review'::text, 'approved'::text, 'publishing'::text, 'published'::text, 'rehearsed'::text, 'skipped'::text, 'failed'::text, 'owner_rejected'::text, 'expired'::text, 'unpublished'::text]))),
+    CONSTRAINT learn_weekly_pieces_text_caps CHECK ((((title IS NULL) OR ((char_length(title) >= 1) AND (char_length(title) <= 300))) AND ((reviewed_by IS NULL) OR (char_length(reviewed_by) <= 200)) AND ((reject_reason IS NULL) OR (char_length(reject_reason) <= 2000)) AND ((last_error IS NULL) OR (char_length(last_error) <= 2000)) AND ((last_stage IS NULL) OR (char_length(last_stage) <= 100))))
+);
+
+
+--
+-- Name: TABLE learn_weekly_pieces; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.learn_weekly_pieces IS 'Wiser weekly content engine (migration 204): one row per period (2026-W43:deep_dive | 2026-10-26:slot) — the week-level exactly-once claim and the piece''s whole life: topic, SEC/case-library fact sheet, the draft (iOS shape) while it is reviewed, review state and publish record. A draft reaches money_move_articles only after the owner approves it in Telegram. A builder holds the row through lease_until + a fresh generation_id (one conditional UPDATE) and every write is fenced on it (the marketing_scripts model). dry_run is frozen at creation and a dry-run piece can never be publishing/published. Written only by app/services/learn_weekly/ledger.py; service_role only.';
+
+
+--
+-- Name: COLUMN learn_weekly_pieces.period_key; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.learn_weekly_pieces.period_key IS 'The period the piece is for: <ISO year>-W<ISO week>:deep_dive (the week it publishes in) or <ET publish date>:slot. UNIQUE: a second create for the same period adopts the first row.';
+
+
+--
+-- Name: COLUMN learn_weekly_pieces.hold_until; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.learn_weekly_pieces.hold_until IS 'End of the review hold. An unapproved piece expires after it, and Approve is refused at or after it. Never earlier than scheduled_publish_at (CHECK).';
+
+
+--
+-- Name: COLUMN learn_weekly_pieces.dry_run; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.learn_weekly_pieces.dry_run IS 'Frozen at creation from LEARN_WEEKLY_DRY_RUN. TRUE = the piece ends rehearsed; it can never be publishing or published (CHECK).';
+
+
+--
+-- Name: COLUMN learn_weekly_pieces.status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.learn_weekly_pieces.status IS 'planned → topic_pending → building → drafted → media_pending → ready_for_review → in_review → approved → publishing → published (→ unpublished); a dry run ends rehearsed. Other ends: skipped, failed, owner_rejected, expired. Every change is a compare-and-swap on the observed status.';
+
+
+--
+-- Name: COLUMN learn_weekly_pieces.generation_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.learn_weekly_pieces.generation_id IS 'Fencing token. Set by the conditional UPDATE that acquires the build lease; every later write of that generation is conditional on it, so a superseded generation cannot land.';
+
+
+--
+-- Name: COLUMN learn_weekly_pieces.topic; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.learn_weekly_pieces.topic IS 'The topic decision: the top 3 with their scores, the owner''s pick and the peg facts with their SEC URLs. FMP-derived numbers in it are nulled by the FMP-termination purge statement.';
+
+
+--
+-- Name: COLUMN learn_weekly_pieces.subjects; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.learn_weekly_pieces.subjects IS 'The piece''s subjects, a JSON array of {name, cik, ticker} (contracts.Subject) — read with fact_sheet.theme_slug by the no-repeat windows (theme 4 weeks, company 12 weeks).';
+
+
+--
+-- Name: COLUMN learn_weekly_pieces.narration_job_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.learn_weekly_pieces.narration_job_id IS 'Soft pointer to the narration job the review bundle carries (no FK: the job''s piece_id FK is the enforced edge, and a circular FK would make re-applying this migration non-idempotent).';
+
+
+--
 -- Name: lessons; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -9789,7 +9986,9 @@ CREATE TABLE public.money_move_articles (
     audio_duration_seconds integer,
     sort_order integer DEFAULT 0 NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    image_url text
+    image_url text,
+    source text DEFAULT 'bundle'::text NOT NULL,
+    CONSTRAINT money_move_articles_source_check CHECK ((source = ANY (ARRAY['bundle'::text, 'weekly'::text])))
 );
 
 
@@ -9797,7 +9996,7 @@ CREATE TABLE public.money_move_articles (
 -- Name: TABLE money_move_articles; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.money_move_articles IS 'Investment case studies: blueprints, value traps, and battles';
+COMMENT ON TABLE public.money_move_articles IS 'Money Moves articles (Learn): investment case studies — blueprints, value traps and battles. source = bundle (seeded from the bundled JSON) or weekly (published by the Wiser weekly pipeline after owner approval). Titles are unique case-folded (iOS keys by title). service_role only since migration 204: the app reads it through the backend.';
 
 
 --
@@ -9826,6 +10025,13 @@ COMMENT ON COLUMN public.money_move_articles.audio_url IS 'Public money-moves-me
 --
 
 COMMENT ON COLUMN public.money_move_articles.image_url IS 'Public URL of the 1206x678 hero plate in the money-moves-images bucket. Authoritative over content->>''imageUrl''. NULL means no artwork yet; iOS falls back to heroGradientColors.';
+
+
+--
+-- Name: COLUMN money_move_articles.source; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.money_move_articles.source IS 'bundle = seeded from the bundled money_moves.json by scripts/seed_money_moves.py; weekly = published by the Wiser weekly pipeline from an approved learn_weekly_pieces row (and deleted by its Unpublish). Migration 204.';
 
 
 --
@@ -13111,6 +13317,46 @@ ALTER TABLE ONLY public.ip_intel_cache
 
 
 --
+-- Name: learn_narration_jobs learn_narration_jobs_piece_round; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.learn_narration_jobs
+    ADD CONSTRAINT learn_narration_jobs_piece_round UNIQUE (piece_id, round);
+
+
+--
+-- Name: learn_narration_jobs learn_narration_jobs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.learn_narration_jobs
+    ADD CONSTRAINT learn_narration_jobs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: learn_weekly_pieces learn_weekly_pieces_period_key_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.learn_weekly_pieces
+    ADD CONSTRAINT learn_weekly_pieces_period_key_key UNIQUE (period_key);
+
+
+--
+-- Name: learn_weekly_pieces learn_weekly_pieces_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.learn_weekly_pieces
+    ADD CONSTRAINT learn_weekly_pieces_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: learn_weekly_pieces learn_weekly_pieces_slug_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.learn_weekly_pieces
+    ADD CONSTRAINT learn_weekly_pieces_slug_key UNIQUE (slug);
+
+
+--
 -- Name: lessons lessons_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -15020,6 +15266,27 @@ CREATE INDEX idx_ip_intel_cache_expires ON public.ip_intel_cache USING btree (ex
 
 
 --
+-- Name: idx_learn_narration_jobs_status_lease; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_learn_narration_jobs_status_lease ON public.learn_narration_jobs USING btree (status, lease_until);
+
+
+--
+-- Name: idx_learn_weekly_pieces_kind_published; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_learn_weekly_pieces_kind_published ON public.learn_weekly_pieces USING btree (kind, published_at DESC);
+
+
+--
+-- Name: idx_learn_weekly_pieces_status_due; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_learn_weekly_pieces_status_due ON public.learn_weekly_pieces USING btree (status, scheduled_publish_at);
+
+
+--
 -- Name: idx_lessons_category; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -15129,6 +15396,13 @@ CREATE UNIQUE INDEX idx_money_move_articles_slug ON public.money_move_articles U
 --
 
 CREATE INDEX idx_money_move_articles_sort ON public.money_move_articles USING btree (sort_order);
+
+
+--
+-- Name: idx_money_move_articles_title_lower; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_money_move_articles_title_lower ON public.money_move_articles USING btree (lower(title));
 
 
 --
@@ -16323,6 +16597,14 @@ ALTER TABLE ONLY public.device_tokens
 
 
 --
+-- Name: learn_narration_jobs learn_narration_jobs_piece_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.learn_narration_jobs
+    ADD CONSTRAINT learn_narration_jobs_piece_id_fkey FOREIGN KEY (piece_id) REFERENCES public.learn_weekly_pieces(id) ON DELETE CASCADE;
+
+
+--
 -- Name: marketing_assets marketing_assets_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -17310,6 +17592,32 @@ CREATE POLICY ip_intel_cache_service_write ON public.ip_intel_cache TO service_r
 
 
 --
+-- Name: learn_narration_jobs; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.learn_narration_jobs ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: learn_narration_jobs learn_narration_jobs_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY learn_narration_jobs_service_all ON public.learn_narration_jobs TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: learn_weekly_pieces; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.learn_weekly_pieces ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: learn_weekly_pieces learn_weekly_pieces_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY learn_weekly_pieces_service_all ON public.learn_weekly_pieces TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: lessons; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -17466,17 +17774,10 @@ CREATE POLICY moat_intel_cache_service_write ON public.moat_intel_cache TO servi
 ALTER TABLE public.money_move_articles ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: money_move_articles money_moves_select_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY money_moves_select_all ON public.money_move_articles FOR SELECT USING (true);
-
-
---
 -- Name: money_move_articles money_moves_service_all; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY money_moves_service_all ON public.money_move_articles USING ((auth.role() = 'service_role'::text));
+CREATE POLICY money_moves_service_all ON public.money_move_articles TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -20286,6 +20587,20 @@ GRANT ALL ON TABLE public.ip_intel_cache TO service_role;
 
 
 --
+-- Name: TABLE learn_narration_jobs; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.learn_narration_jobs TO service_role;
+
+
+--
+-- Name: TABLE learn_weekly_pieces; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.learn_weekly_pieces TO service_role;
+
+
+--
 -- Name: TABLE lessons; Type: ACL; Schema: public; Owner: -
 --
 
@@ -20375,8 +20690,6 @@ GRANT ALL ON TABLE public.moat_intel_cache TO service_role;
 -- Name: TABLE money_move_articles; Type: ACL; Schema: public; Owner: -
 --
 
-GRANT SELECT ON TABLE public.money_move_articles TO anon;
-GRANT SELECT ON TABLE public.money_move_articles TO authenticated;
 GRANT ALL ON TABLE public.money_move_articles TO service_role;
 
 
@@ -21173,5 +21486,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict UcWn5mOcoBONayPitn9bHkY9fnwKBVaQg4NpV45AqpFeZmB4BevwQHx8e0VGD6D
+\unrestrict dMbGYLMEJllFLTQJ3B7FdjoRLOYiMwE18trEVL8a9h4AvB96dyWIeIeruD4HDWL
 

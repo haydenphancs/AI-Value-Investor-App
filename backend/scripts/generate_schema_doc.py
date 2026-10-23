@@ -148,11 +148,19 @@ EXPECTED: dict[str, int] = {
     #                          Supabase, its file is on origin/main)
     #   203 adds only columns (industry_dossier.cagr_start_year, .concentration_basis): no
     #   counted delta.
-    "tables": 153,
-    "public": 114,
-    "fk": 33,
-    "policies": 122,
-    "rls": 114,
+    # Refreshed 2026-10-23 after the owner applied 204 and re-dumping. The snapshot diff held
+    # ONLY 204's objects (no drift). Every delta accounted for:
+    #   +2 tables / +2 public / +2 rls -> learn_weekly_pieces, learn_narration_jobs
+    #   +1 fk                          -> learn_narration_jobs.piece_id → learn_weekly_pieces
+    #   +1 policies (net)              -> +2 new service_role policies, −1 for the dropped
+    #                                     money_moves_select_all (money_moves_service_all was
+    #                                     recreated as TO service_role: no count change)
+    #   functions / enums / views unchanged (204 adds none).
+    "tables": 155,
+    "public": 116,
+    "fk": 34,
+    "policies": 123,
+    "rls": 116,
     "functions": 58,
     "enums": 14,
     "views": 1,

@@ -59,6 +59,16 @@ struct ReportEarningsTimelinePanel: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, AppSpacing.xs)
             }
+
+            // Off-calendar filers only (Planet Labs, NVDA, Apple…): says which months the
+            // "FY" columns cover, so the year in progress isn't read as a future year.
+            if let note = timeline.fiscalYearNote {
+                Text(note)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, AppSpacing.xs)
+            }
         }
     }
 

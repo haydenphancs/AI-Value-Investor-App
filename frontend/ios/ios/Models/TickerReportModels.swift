@@ -725,6 +725,83 @@ struct RevenueProjection: Identifiable {
     }
 }
 
+/// Fiscal-year wording for the Earnings Timeline. Its columns are FISCAL years, so Planet
+/// Labs' "2027" (Feb 2026 – Jan 2027) read as a calendar year still a quarter away while it
+/// was the year in progress. A company whose year does not end in December gets "FY2027"
+/// and its months; a December filer keeps the bare year. Everything derives from the
+/// `periodEnd` the columns already carry, so no wire change and frozen reports work too.
+enum FiscalYearLabel {
+    private static let shortMonths = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    private static let longMonths = ["January", "February", "March", "April", "May", "June",
+                                     "July", "August", "September", "October", "November", "December"]
+
+    /// The (year, month) a fiscal year is NAMED for ending in. A 52/53-week year that closes
+    /// in a month's first week counts as the month before, as the companies describe it:
+    /// Home Depot's 2026-02-01 is a January year end, a December filer's 2022-01-01 is
+    /// December. nil when the "yyyy-MM-dd" prefix is missing or malformed.
+    static func nominalEnd(of periodEnd: String?) -> (year: Int, month: Int)? {
+        guard let s = periodEnd, s.count >= 10 else { return nil }
+        let chars = Array(s.prefix(10))
+        guard chars[4] == "-", chars[7] == "-",
+              let year = Int(String(chars[0..<4])),
+              let month = Int(String(chars[5..<7])),
+              let day = Int(String(chars[8..<10])),
+              (1...12).contains(month), (1...31).contains(day) else { return nil }
+        if day > 7 { return (year, month) }
+        return month == 1 ? (year - 1, 12) : (year, month - 1)
+    }
+
+    /// True when every column has a parseable period end and the LATEST one (a company that
+    /// moved its year end is described by its current one) is not a December year end.
+    /// Older reports without period ends → false: bare years, exactly as before.
+    static func isOffCalendar(_ periodEnds: [String?]) -> Bool {
+        guard !periodEnds.isEmpty else { return false }
+        let ends = periodEnds.map { nominalEnd(of: $0) }
+        guard ends.allSatisfy({ $0 != nil }), let latest = ends.last ?? nil else { return false }
+        return latest.month != 12
+    }
+
+    /// "Feb 2026 – Jan 2027". The year opens the month after the previous column's end when
+    /// that is 1–12 months earlier (so a year-end change's short transition year reads as
+    /// its real months), else 12 months back (the first column, or a gap year).
+    static func range(periodEnd: String?, previousPeriodEnd: String?) -> String? {
+        guard let end = nominalEnd(of: periodEnd) else { return nil }
+        let endIndex = end.year * 12 + (end.month - 1)
+        var startIndex = endIndex - 11
+        if let prev = nominalEnd(of: previousPeriodEnd) {
+            let prevIndex = prev.year * 12 + (prev.month - 1)
+            if (1...12).contains(endIndex - prevIndex) { startIndex = prevIndex + 1 }
+        }
+        let endText = "\(shortMonths[end.month - 1]) \(end.year)"
+        if startIndex == endIndex { return endText }
+        return "\(shortMonths[startIndex % 12]) \(startIndex / 12) – \(endText)"
+    }
+
+    /// "January" for a nominal end month; nil when unparseable.
+    static func endMonthName(of periodEnd: String?) -> String? {
+        nominalEnd(of: periodEnd).map { longMonths[$0.month - 1] }
+    }
+}
+
+extension Array where Element == RevenueProjection {
+    /// The caption under the Earnings Timeline for an off-calendar filer, anchored on the
+    /// year in progress (the first forecast column, else the latest column):
+    /// "Fiscal years end in January: FY2027 runs Feb 2026 – Jan 2027." nil for December
+    /// filers and older reports without period ends.
+    var fiscalYearNote: String? {
+        guard FiscalYearLabel.isOffCalendar(map(\.periodEnd)),
+              let i = firstIndex(where: { $0.isForecast }) ?? indices.last,
+              Int(self[i].period) != nil,
+              let month = FiscalYearLabel.endMonthName(of: last?.periodEnd),
+              let range = FiscalYearLabel.range(
+                periodEnd: self[i].periodEnd,
+                previousPeriodEnd: i > 0 ? self[i - 1].periodEnd : nil
+              ) else { return nil }
+        return "Fiscal years end in \(month): FY\(self[i].period) runs \(range)."
+    }
+}
+
 enum ManagementGuidance: String {
     case raised = "RAISED"
     case maintained = "MAINTAINED"

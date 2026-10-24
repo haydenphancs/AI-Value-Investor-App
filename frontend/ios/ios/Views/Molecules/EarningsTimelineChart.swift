@@ -133,6 +133,12 @@ struct EarningsTimelineChart: View {
 
     private var firstForecastIndex: Int? { points.firstIndex(where: { $0.isForecast }) }
 
+    /// Columns are fiscal years; a company whose year does not end in December is labelled
+    /// "FY2027" so its in-progress year never reads as a calendar year (FiscalYearLabel).
+    private var isOffCalendarFiscalYear: Bool {
+        FiscalYearLabel.isOffCalendar(points.map(\.periodEnd))
+    }
+
     /// Daily prices mapped into COLUMN space: x = columnIndex + fractionThroughPeriod
     /// (so a price flows left→right across each year's column). Only the years
     /// that exist on the chart and have price data — the line naturally stops
@@ -290,6 +296,7 @@ struct EarningsTimelineChart: View {
                         plotBottom - CGFloat((v - domain.min) / (domain.max - domain.min)) * plotHeight
                     }
                     let zeroY = yFor(0)
+                    let offCalendar: Bool = isOffCalendarFiscalYear
                     // EPS shares the revenue mapping, but its plotted position is
                     // CLAMPED into the band — so a lone extreme/outlier year pins
                     // to the top/bottom edge instead of distorting the whole chart.
@@ -353,7 +360,7 @@ struct EarningsTimelineChart: View {
                             .fixedSize()
                             .position(x: centerX(i), y: labelCenterY)
 
-                            Text(String(pt.year))
+                            Text(offCalendar ? "FY\(pt.year)" : String(pt.year))
                                 .font(.system(size: 11))
                                 .foregroundColor(AppColors.textSecondary)
                                 .position(x: centerX(i), y: plotBottom + labelStripHeight / 2)
@@ -450,7 +457,13 @@ struct EarningsTimelineChart: View {
                                     style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
                             .allowsHitTesting(false)
 
-                            inspectPopup(pt)
+                            let months: String? = offCalendar
+                                ? FiscalYearLabel.range(
+                                    periodEnd: pt.periodEnd,
+                                    previousPeriodEnd: sel > 0 ? points[sel - 1].periodEnd : nil)
+                                : nil
+                            inspectPopup(pt, title: offCalendar ? "FY\(pt.year)" : String(pt.year),
+                                         months: months)
                                 .allowsHitTesting(false)
                                 .position(
                                     x: min(max(cx, sidePad + popupHalfWidth),
@@ -493,14 +506,23 @@ struct EarningsTimelineChart: View {
     private let popupHalfWidth: CGFloat = 84   // ~half the (2-column) popup, for edge clamping
     private let popupCenterY: CGFloat = 64     // pushed down so the tighter toggle-chart gap doesn't crowd the button
 
-    /// Detail card for the tapped column: a year header, then TWO columns
-    /// (Revenue | EPS), each stacking its dot+label, YoY %, value, and analyst
-    /// count. Styled like the Capital Allocation popup (card + shadow + border).
-    private func inspectPopup(_ pt: YP) -> some View {
+    /// Detail card for the tapped column: a year header (an off-calendar filer's
+    /// "FY2027" with its months, "Feb 2026 – Jan 2027", on a second line so the
+    /// card keeps its width), then TWO columns (Revenue | EPS), each stacking its
+    /// dot+label, YoY %, value, and analyst count. Styled like the Capital
+    /// Allocation popup (card + shadow + border).
+    private func inspectPopup(_ pt: YP, title: String, months: String?) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(String(pt.year))
-                .font(AppTypography.captionEmphasis)
-                .foregroundColor(AppColors.textPrimary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(AppTypography.captionEmphasis)
+                    .foregroundColor(AppColors.textPrimary)
+                if let months {
+                    Text(months)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
+            }
             HStack(alignment: .top, spacing: AppSpacing.lg) {
                 popupColumn(color: AppColors.primaryBlue, label: "Revenue",
                             yoy: pt.revenueYoYText, yoyColor: pt.revenueYoYColor,

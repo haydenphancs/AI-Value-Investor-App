@@ -1053,3 +1053,153 @@ async def test_metrics_within_a_year_of_the_newest_all_stay():
     facts = await sf.annual_facts(CIK, NAME, client=sec)
     joined = " ".join(texts(facts))
     assert "research and development" in joined and "cash and cash equivalents" in joined
+
+
+# ── date_peg_facts: every peg carries SEC's filing date (the 3M week, 2026-10-23) ─────────────
+
+MMM_SUBJECTS = (Subject("3M CO", "0000066740", "MMM"),)
+MMM_PEG_TEXT = "3M returned $0.6 billion to shareholders via dividends and share repurchases."
+MMM_ACC = "0000066740-26-000308"
+
+
+def mmm_peg(text=MMM_PEG_TEXT, accession=MMM_ACC):
+    return Fact(id="P1", text=text, origin=ORIGIN_SEC_PEG,
+                url="https://www.sec.gov/Archives/edgar/data/66740/000006674026000308/"
+                    "0000066740-26-000308-index.htm", accession=accession)
+
+
+def test_a_peg_is_dated_from_its_own_accession():
+    other = mmm_peg("3M entered into an expanded strategic commercial relationship with Amazon.",
+                    "0000066740-26-000303")
+    dated = fs.date_peg_facts([mmm_peg(), other],
+                              {MMM_ACC: "2026-10-21", "0000066740-26-000303": "2026-10-20"})
+    assert [f.text for f in dated] == [
+        "Form 8-K filed with the SEC on October 21, 2026. " + MMM_PEG_TEXT,
+        "Form 8-K filed with the SEC on October 20, 2026. 3M entered into an expanded "
+        "strategic commercial relationship with Amazon."]
+    assert [(f.id, f.url, f.accession, f.origin) for f in dated] == [
+        (f.id, f.url, f.accession, f.origin) for f in (mmm_peg(), other)]
+
+
+def test_accession_forms_are_matched_after_normalisation():
+    undashed = MMM_ACC.replace("-", "")
+    assert fs.date_peg_facts([mmm_peg(accession=undashed)], {MMM_ACC: "2026-10-21"})[0].text \
+        .startswith("Form 8-K filed with the SEC on October 21, 2026. ")
+    assert fs.date_peg_facts([mmm_peg()], {f" {undashed} ": "2026-10-21T00:00:00"})[0].text \
+        .startswith("Form 8-K filed with the SEC on October 21, 2026. ")
+
+
+@pytest.mark.parametrize("filed", [
+    {}, None, {"0000066740-26-000999": "2026-10-21"}, {MMM_ACC: "2026-13-40"},
+    {MMM_ACC: ""}, {MMM_ACC: None}, {MMM_ACC: 20261021}, {"not an accession": "2026-10-21"},
+])
+def test_a_peg_with_no_filing_date_is_dropped(filed, caplog):
+    with caplog.at_level(logging.WARNING, logger="app.services.learn_weekly.fact_sheet"):
+        assert fs.date_peg_facts([mmm_peg()], filed) == []
+    assert "[learn-sheet-peg-undated] P1" in caplog.text
+
+
+@pytest.mark.parametrize("bad", [mmm_peg(accession=None), mmm_peg(accession="nope")])
+def test_a_peg_with_an_unusable_accession_is_dropped(bad):
+    assert fs.date_peg_facts([bad], {MMM_ACC: "2026-10-21"}) == []
+
+
+@pytest.mark.parametrize("bad", [mmm_peg(text="   "), mmm_peg(text=None), "not a fact", None])
+def test_a_textless_peg_passes_through_for_the_sheet_to_drop(bad):
+    """The prefix must never turn an empty peg into a non-empty one."""
+    assert fs.date_peg_facts([bad], {MMM_ACC: "2026-10-21"}) == [bad]
+    sheet = fs.build_fact_sheet("deep_dive", "t", None, MMM_SUBJECTS,
+                                fs.date_peg_facts([bad], {MMM_ACC: "2026-10-21"}), [], [],
+                                library=LIBRARY)
+    assert sheet.facts == ()
+
+
+def test_no_pegs_date_to_none():
+    assert fs.date_peg_facts([], {MMM_ACC: "2026-10-21"}) == []
+    assert fs.date_peg_facts(None, {MMM_ACC: "2026-10-21"}) == []
+
+
+def test_a_dated_peg_passes_the_peg_screen_on_the_sheet():
+    texts = [MMM_PEG_TEXT,
+             "3M entered into an expanded strategic commercial relationship with Amazon to deploy "
+             "and scale 3M’s optical connectivity and other Data Center related products."]
+    pegs = fs.date_peg_facts([mmm_peg(t) for t in texts], {MMM_ACC: "2026-10-21"})
+    sheet = fs.build_fact_sheet("deep_dive", "3M CO", None, MMM_SUBJECTS, pegs, [], [],
+                                library=LIBRARY)
+    assert [f.text for f in sheet.facts] == [f.text for f in pegs]
+
+
+def test_the_peg_sections_date_grounds_only_on_a_dated_sheet():
+    """The skipped 3M piece: the peg section must state the full date of what it restates, and
+    "On October 21, 2026" was refused as an ungrounded "21" while the sheet held no date."""
+    from app.services.learn_weekly import validators as V
+
+    para = {"type": "paragraph", "text": "On October 21, 2026, 3M returned $0.6 billion to "
+                                         "shareholders via dividends and share repurchases."}
+
+    def codes(pegs):
+        sheet = fs.build_fact_sheet("deep_dive", "3M CO", None, MMM_SUBJECTS, pegs, [], [],
+                                    library=LIBRARY)
+        return {i.code for i in V.validate_block("s0", para, section_kind="peg",
+                                                 grounding_ctx=V.build_grounding_context(sheet),
+                                                 subjects=["3M CO", "MMM"])}
+
+    assert "ungrounded_number" in codes([mmm_peg()])
+    assert codes(fs.date_peg_facts([mmm_peg()], {MMM_ACC: "2026-10-21"})) == set()
+
+
+def _dated_codes(text, section_kind="history"):
+    from app.services.learn_weekly import validators as V
+    sheet = fs.build_fact_sheet("deep_dive", "3M CO", None, MMM_SUBJECTS,
+                                fs.date_peg_facts([mmm_peg()], {MMM_ACC: "2026-10-20"}), [], [],
+                                library=LIBRARY)
+    return {i.code for i in V.validate_block("s", {"type": "paragraph", "text": text},
+                                             section_kind=section_kind,
+                                             grounding_ctx=V.build_grounding_context(sheet),
+                                             subjects=["3M CO", "MMM"])}
+
+
+@pytest.mark.parametrize("text", [
+    "3M has raised its dividend for 20 consecutive years.",
+    "In 2026, 3M doubled its dividend to shareholders.",
+])
+def test_the_filing_day_and_year_never_ground_a_figure_about_the_span(text):
+    """Review round (2026-10-23): with the date inside the span's sentence, its day and year
+    anchored to "dividends" and "shareholders", so an invented history passed as grounded."""
+    assert "number_context" in _dated_codes(text) or "ungrounded_number" in _dated_codes(text)
+
+
+@pytest.mark.parametrize("text", [
+    "On October 20, 2026, 3M returned $0.6 billion to shareholders via dividends and share "
+    "repurchases.",
+    "On October 20, 2026, 3M filed a Form 8-K with the SEC that reported it returned $0.6 billion "
+    "to shareholders.",
+])
+def test_the_peg_section_still_grounds_the_date_and_the_figure(text):
+    assert _dated_codes(text, section_kind="peg") == set()
+
+
+def test_split_peg_date_reads_only_the_code_owned_sentence():
+    from datetime import date
+    from app.services.learn_weekly import contracts as C
+    dated = C.peg_date_text(date(2026, 10, 20)) + MMM_PEG_TEXT
+    assert C.split_peg_date(dated) == ("Form 8-K filed with the SEC on October 20, 2026. ",
+                                       MMM_PEG_TEXT)
+    for text in (MMM_PEG_TEXT, "Form 8-K filed with the SEC on Octember 20, 2026. x",
+                 "In a Form 8-K filed with the SEC on October 20, 2026: x",
+                 "Form 8-K filed with the SEC on October 32, 2026. x", None):
+        assert C.split_peg_date(text) == ("", text)
+
+
+def test_the_peg_screen_reads_the_span_not_the_date_sentence():
+    """The date sentence says "SEC"; the legal-matter rule pairs an enforcer with "settle", so a
+    commercial span ("settled ... in shares") was dropped as a legal matter once dated."""
+    from app.services.learn_weekly import topic
+    span = "3M settled its forward purchase contracts in shares of its common stock."
+    assert topic.peg_problem(span, ["3M CO", "MMM"]) is None
+    assert topic.peg_problem("Form 8-K filed with the SEC on October 20, 2026. " + span,
+                             ["3M CO", "MMM"]) == "legal_matter"
+    pegs = fs.date_peg_facts([mmm_peg(span)], {MMM_ACC: "2026-10-20"})
+    sheet = fs.build_fact_sheet("deep_dive", "3M CO", None, MMM_SUBJECTS, pegs, [], [],
+                                library=LIBRARY)
+    assert [f.text for f in sheet.facts] == [pegs[0].text]

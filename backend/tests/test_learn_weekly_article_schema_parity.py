@@ -468,15 +468,36 @@ def test_section_blocks_carry_only_their_types_keys():
     draft = A.parse_section({"blocks": [
         {"type": "paragraph", "text": "  P.  ", "items": ["leak"], "icon": "cpu.fill"},
         {"type": "callout", "text": "C.", "icon": "bolt.fill", "style": "info"},
-        {"type": "bulletList", "items": [" a ", "b"], "text": "leak"},
+        {"type": "bulletList", "items": [" a ", "b"], "text": " Two things matter: "},
         {"type": "quote", "text": "Q."},
     ]})
     assert A.section_blocks(draft) == [
         {"type": "paragraph", "text": "P."},
         {"type": "callout", "icon": "bolt.fill", "style": "info", "text": "C."},
+        {"type": "paragraph", "text": "Two things matter:"},   # the list's lead-in, before it
         {"type": "bulletList", "items": ["a", "b"]},
         {"type": "quote", "text": "Q."},                       # kept so the validator refuses it
     ]
+
+
+def test_every_block_must_carry_text_in_the_schema():
+    """With only `type` required, gemini-2.5-flash looped on bare {"type": "callout"} objects:
+    2 of 6 live 3M sections came back as 15-16 empty blocks and ~130 words (2026-10-23)."""
+    item = A.SECTION_RESPONSE_SCHEMA["properties"]["blocks"]["items"]
+    assert item["required"] == ["type", "text"]
+
+
+@pytest.mark.parametrize("block,expected", [
+    ({"type": "bulletList", "items": ["a"], "text": ""}, [{"type": "bulletList", "items": ["a"]}]),
+    ({"type": "bulletList", "items": ["a"], "text": "   "}, [{"type": "bulletList", "items": ["a"]}]),
+    ({"type": "bulletList", "items": ["a"]}, [{"type": "bulletList", "items": ["a"]}]),
+    # No items: no lead-in paragraph; the empty list reaches the validator, which refuses it.
+    ({"type": "bulletList", "items": [], "text": "Three reasons:"},
+     [{"type": "bulletList", "items": []}]),
+])
+def test_a_list_lead_in_becomes_a_paragraph_only_when_it_has_text_and_the_list_has_items(
+        block, expected):
+    assert A.section_blocks(A.parse_section({"blocks": [block]})) == expected
 
 
 @pytest.mark.parametrize("targets", [[300] * 5, [10, 10, 10, 10, 10], [5000] * 6, [1] * 7,
@@ -598,7 +619,7 @@ def test_a_subheading_repeating_the_section_title_is_dropped(caplog):
     assert blocks == [
         {"type": "paragraph", "text": "Servers wear out on a schedule the accounts choose."},
         {"type": "subheading", "text": "Why the schedule matters"}]
-    assert "dropped 2 subheading(s) repeating the section title" in caplog.text
+    assert "dropped 2 repeated block(s)" in caplog.text
     # without a title nothing is dropped for repeating it
     assert len(A.section_blocks(draft)) == 4
 
@@ -607,3 +628,47 @@ def test_the_prompt_says_not_to_repeat_the_title():
     from app.services.learn_weekly import prompts as Pr
     assert "never open a section with a subheading that repeats that title" in Pr.SYSTEM_BODY
     assert Pr.PROMPT_VERSION >= "2026-10-23.3"
+
+
+def test_a_lead_in_repeating_a_block_of_its_section_is_dropped():
+    """Review round (2026-10-23): the model wrote an intro paragraph and repeated it as the list's
+    text, which showed the sentence twice and tripped the article's duplicate rule."""
+    draft = A.parse_section({"blocks": [
+        {"type": "paragraph", "text": "Several limits shape how fast the business can grow:"},
+        {"type": "bulletList", "text": "Several limits shape how fast the business can grow:",
+         "items": ["land", "power"]},
+        {"type": "bulletList", "text": "Two more matter as well:", "items": ["cooling", "staff"]},
+    ]})
+    assert A.section_blocks(draft) == [
+        {"type": "paragraph", "text": "Several limits shape how fast the business can grow:"},
+        {"type": "bulletList", "items": ["land", "power"]},
+        {"type": "paragraph", "text": "Two more matter as well:"},
+        {"type": "bulletList", "items": ["cooling", "staff"]},
+    ]
+
+
+def test_a_lead_in_differing_only_by_its_closing_mark_is_the_same_sentence():
+    """Review round 2: "X." as the intro paragraph and "X:" as the list's text showed twice."""
+    draft = A.parse_section({"blocks": [
+        {"type": "paragraph", "text": "Several limits shape how fast the business can grow."},
+        {"type": "bulletList", "text": "Several limits shape how fast the business can grow:",
+         "items": ["land", "power"]},
+    ]})
+    assert A.section_blocks(draft) == [
+        {"type": "paragraph", "text": "Several limits shape how fast the business can grow."},
+        {"type": "bulletList", "items": ["land", "power"]},
+    ]
+
+
+def test_a_lead_in_repeated_by_a_later_block_is_dropped():
+    """Review round 3: a lead-in repeated by a LATER paragraph of its answer passed the section
+    check, then the article's duplicate rule (no repair) rejected the whole generation."""
+    draft = A.parse_section({"blocks": [
+        {"type": "bulletList", "text": "Several limits shape how fast the business can grow:",
+         "items": ["land", "power"]},
+        {"type": "paragraph", "text": "Several limits shape how fast the business can grow."},
+    ]})
+    assert A.section_blocks(draft) == [
+        {"type": "bulletList", "items": ["land", "power"]},
+        {"type": "paragraph", "text": "Several limits shape how fast the business can grow."},
+    ]

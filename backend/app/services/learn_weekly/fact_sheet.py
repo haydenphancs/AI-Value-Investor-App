@@ -25,6 +25,11 @@ What this module guarantees, whatever the callers pass:
   So a library fact that carries a figure (a digit, %, $, or a scale word) is dropped (WARNING)
   when its entry is about no-CIK companies only, or when it names a no-CIK company (of its entry
   or a no-CIK subject) without also naming a CIK filer of the entry and citing sec.gov.
+* **Every peg fact carries its filing date.** `date_peg_facts` (called by the build with SEC's
+  submissions record) opens each span with the code-owned sentence
+  ``contracts.PEG_DATE_PREFIX`` and the 8-K's filing date, and drops a peg whose filing date SEC
+  does not give (WARNING). The peg section must state the full date it restates, and grounding
+  refuses any number the sheet does not hold. The peg screen reads the span without it.
 * **Identical texts appear once** (case- and whitespace-insensitive), the higher-priority copy
   kept.
 * **Stable ids.** Peg facts are numbered ``P1…``, XBRL facts ``S1…`` in input order (so facts
@@ -45,7 +50,9 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Iterable, List, Optional, Sequence, Set, Tuple
+from dataclasses import replace
+from datetime import date
+from typing import Any, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from urllib.parse import urlsplit
 
 from app.integrations.sec_edgar import normalize_accession
@@ -63,15 +70,18 @@ from app.services.learn_weekly.contracts import (
     Fact,
     FactSheet,
     Subject,
+    peg_date_text,
+    split_peg_date,
 )
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["MAX_FACT_CHARS", "sheet_cap", "build_fact_sheet"]
+__all__ = ["MAX_FACT_CHARS", "sheet_cap", "date_peg_facts", "build_fact_sheet"]
 
 #: One fact is one sentence: a longer "fact" is a paste, not a fact (peg spans are ≤ 400).
 MAX_FACT_CHARS = 1000
 _TITLE_MAX_CHARS = 200
+
 
 # A figure in any form a reader would take as a number about the company.
 _FIGURE_RE = re.compile(
@@ -172,6 +182,41 @@ def _subjects(subjects: Optional[Iterable[Any]]) -> Tuple[Subject, ...]:
         seen.add(key)
         out.append(s)
     return tuple(out)
+
+
+def _filing_day(value: Any) -> Optional[date]:
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value.strip()[:10])
+    except ValueError:
+        return None
+
+
+def date_peg_facts(pegs: Iterable[Fact], filed: Mapping[str, str]) -> List[Fact]:
+    """``pegs`` with SEC's filing date in front of each text (`contracts.peg_date_text`).
+    ``filed`` maps an accession number to its ISO filing date (the filers' submissions records).
+    A peg whose accession is not there, or whose date does not parse, is dropped (WARNING):
+    undated, the peg section could not state the date of what it restates. A peg with no text
+    passes through unchanged, so `build_fact_sheet` still drops it as empty."""
+    days = {}
+    for accession, iso in (filed or {}).items():
+        key, day = normalize_accession(accession), _filing_day(iso)
+        if key is not None and day is not None:
+            days[key] = day
+    out: List[Fact] = []
+    for fact in pegs or ():
+        if not isinstance(fact, Fact) or not isinstance(fact.text, str) or not fact.text.strip():
+            out.append(fact)
+            continue
+        key = normalize_accession(fact.accession)
+        day = days.get(key) if key is not None else None
+        if day is None:
+            logger.warning("[learn-sheet-peg-undated] %s: SEC gives no filing date for accession "
+                           "%r — dropped", fact.id, fact.accession)
+            continue
+        out.append(replace(fact, text=peg_date_text(day) + fact.text.strip()))
+    return out
 
 
 def build_fact_sheet(
@@ -321,7 +366,10 @@ def _vet(
             logger.warning("[learn-sheet-uncited] %s %s has no valid accession number — "
                            "dropped", origin, fact.id)
             return None
-        if origin == ORIGIN_SEC_PEG and _peg_screen(fact.id, text, subject_names) is not None:
+        # The screen reads the FILED span: the code-owned date sentence says "SEC", which the
+        # legal-matter rule pairs with a commercial "settle" ("notes that settle in shares").
+        if (origin == ORIGIN_SEC_PEG
+                and _peg_screen(fact.id, split_peg_date(text)[1], subject_names) is not None):
             return None
     else:
         problem = _library_problem(fact, text, library, private_subjects)

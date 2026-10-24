@@ -39,7 +39,7 @@ from app.services.marketing.writer_prompts import REPAIR_HINTS as _MARKETING_HIN
 
 #: Bump with any meaningful change to a prompt or to SYSTEM_BODY (it is stored with every draft
 #: and is part of the resume key: a half-written piece is never finished under a newer prompt).
-PROMPT_VERSION = "2026-10-23.3"   # icons (.1); US/UK/EU without dots (.2); no title-repeat subheading (.3)
+PROMPT_VERSION = "2026-10-23.5"   # icons (.1); US/UK/EU without dots (.2); no title-repeat subheading (.3); list lead-ins (.4); no K/M/B abbreviations (.5)
 
 #: The owner's scope clause, kept as its own constant so a test can pin it is in SYSTEM_BODY.
 SCOPE_CLAUSE = (
@@ -65,6 +65,9 @@ SYSTEM_BODY = (
     "exactly as the fact sheet writes it (\"$130.5 billion\"), with what it measures and its "
     "period. Never compute, round, compare, rank or extrapolate a new figure, and never add a "
     "figure or a name from memory. Plain explanations with no figure and no name are welcome.\n"
+    "- Never shorten an amount or a count with K, M or B (\"5K\", \"$3M\"): write it out as the "
+    "fact sheet does. A company whose name holds a number (3M) is written only as the company, "
+    "never next to an amount word (\"about\", \"grew by\", \"worth\", \"in revenue\").\n"
     "- Never name a person. Mention a person only by role (\"the chief executive\", \"the "
     "board\") and only as the subject of something the fact sheet states. Never describe "
     "anyone's conduct, motives or character, and never say that a person or a company misled, "
@@ -140,6 +143,10 @@ _CATEGORY_DESC = {
 #: back to the marketing writer's hints (`writer_prompts.REPAIR_HINTS`) — same validators, same
 #: wording. Every code the validators or the writer can emit has a hint (pinned by a test).
 LEARN_REPAIR_HINTS: Mapping[str, str] = {
+    "subject_name_number": "this is the company's name, but here it reads as an amount (after "
+                           "a currency or a word like about, grew by, valued at or worth, or "
+                           "before %, worth, per year or 'in revenue'): reword it so it can only "
+                           "be the company, and write any amount in full, from the fact sheet",
     # shape
     "block_invalid": "give every block the keys its type needs: paragraph/subheading need "
                      "text, a callout needs text, style and icon, a bulletList needs items",
@@ -383,10 +390,11 @@ def _section_spec(outline: Outline, index: int, target: int) -> str:
         f"- {{\"type\": \"subheading\", \"text\": ...}} (at most {C.MAX_SUBHEADING_WORDS} words)\n"
         f"- {{\"type\": \"callout\", \"style\": \"highlight\"|\"info\"|\"warning\", \"icon\": ..., "
         f"\"text\": ...}} (at most {C.MAX_CALLOUT_WORDS} words)\n"
-        f"- {{\"type\": \"bulletList\", \"items\": [...]}} (at most {C.MAX_BULLET_ITEMS} items, "
-        f"each at most {C.MAX_BULLET_WORDS} words)\n"
-        "Mostly paragraphs. Do not repeat the section title as the first block. Use only the "
-        "facts below for every number and name."
+        f"- {{\"type\": \"bulletList\", \"text\": ..., \"items\": [...]}} (text: the one "
+        f"sentence that introduces the list, shown just before it; at most {C.MAX_BULLET_ITEMS} "
+        f"items, each at most {C.MAX_BULLET_WORDS} words)\n"
+        "Every block has text. Mostly paragraphs. Do not repeat the section title as the first "
+        "block. Use only the facts below for every number and name."
     )
 
 

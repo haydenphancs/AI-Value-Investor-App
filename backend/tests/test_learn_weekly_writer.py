@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import itertools
 import json
+import random
 import re
 import subprocess
 import sys
@@ -544,14 +546,372 @@ def test_a_repair_hears_every_issue_with_its_hint():
         assert P.hint(code) in prompt
 
 
-def test_a_length_miss_alone_is_repaired_once_then_left_to_the_article_check():
+def _prompt_target(client: FakeClient, stage: str) -> int:
+    prompt = next(c["prompt"] for c in client.calls if c["stage"] == stage)
+    return int(re.search(r"About (\d+) words", prompt).group(1))
+
+
+def _body(out: W.WriterOutcome, index: int) -> List[str]:
+    return [b["text"] for b in out.content["sections"][index]["content"] if b.get("text")]
+
+
+def test_a_short_section_is_absorbed_by_the_later_sections():
+    """The 3M week (2026-10-23): one section short after its repair (a soft length miss), and the
+    article missed its 1,400-word floor. The later sections now take up the shortfall."""
     short = ok({"blocks": [{"type": "paragraph", "text": para(90)}]})
     client = FakeClient({"section 3": short, "section 3 repair": short})
     out = run(client)
     assert "section 3 repair" in client.stages
-    # A 56-word section cannot carry its ~380-word share: the article's word count refuses it.
+    assert out.status == W.STATUS_ACCEPTED, out.issues
+    targets = A.normalize_targets([s["kind"] for s in SECTIONS_5],
+                                  [s["target_words"] for s in SECTIONS_5], C.KIND_DEEP_DIVE)
+    assert _prompt_target(client, "section 3") == pytest.approx(targets[2], abs=60)
+    assert _prompt_target(client, "section 4") > targets[3] + 100
+    assert _prompt_target(client, "section 5") > targets[4] + 100
+    lo, hi = C.DEEP_DIVE_WORDS
+    assert lo <= sum(A.body_words(s["content"]) for s in out.content["sections"]) <= hi + 60
+
+
+def test_a_short_last_section_is_left_to_the_article_check():
+    """Nothing comes after the last section: its length miss is still the article's to refuse."""
+    short = ok({"blocks": [{"type": "paragraph", "text": "A short closing line about chips."}]})
+    client = FakeClient({"section 5": short, "section 5 repair": short})
+    out = run(client)
+    assert "section 5 repair" in client.stages
     assert out.status == W.STATUS_CONTENT_REJECTED
     assert out.issue_codes == ["word_count"]
+
+
+def test_a_length_only_repair_that_comes_back_further_keeps_the_first_draft():
+    """A 3M repair went from 209 to 136 words for a 378-word target and was kept (2026-10-23)."""
+    first = ok({"blocks": [{"type": "paragraph", "text": para(i)} for i in (90, 91, 92, 93)]})
+    worse = ok({"blocks": [{"type": "paragraph", "text": para(94)}]})
+    client = FakeClient({"section 3": first, "section 3 repair": worse})
+    out = run(client)
+    assert "section 3 repair" in client.stages
+    assert out.status == W.STATUS_ACCEPTED, out.issues
+    assert _body(out, 2) == [para(i) for i in (90, 91, 92, 93)]
+
+
+def test_a_length_only_repair_that_comes_closer_is_kept():
+    first = ok({"blocks": [{"type": "paragraph", "text": para(94)}]})
+    better = ok({"blocks": [{"type": "paragraph", "text": para(i)} for i in (90, 91, 92, 93)]})
+    client = FakeClient({"section 3": first, "section 3 repair": better})
+    out = run(client)
+    assert out.status == W.STATUS_ACCEPTED, out.issues
+    assert _body(out, 2) == [para(i) for i in (90, 91, 92, 93)]
+
+
+def test_a_first_draft_that_broke_a_rule_is_never_kept_over_its_repair():
+    """Closer to the target is no reason to keep a draft with a rule break (here an over-long
+    paragraph): the clean repair stands, however short."""
+    broken = ok({"blocks": [{"type": "paragraph", "text": LONG_PARA}]
+                 + [{"type": "paragraph", "text": para(i)} for i in (90, 91, 92)]})
+    short = ok({"blocks": [{"type": "paragraph", "text": para(94)}]})
+    client = FakeClient({"section 3": broken, "section 3 repair": short})
+    out = run(client)
+    assert out.status == W.STATUS_ACCEPTED, out.issues
+    assert _body(out, 2) == [para(94)]
+
+
+def test_a_long_peg_kept_with_its_length_miss_does_not_break_the_peg_share():
+    """Review round 2: with the peg's overshoot taken out of the later sections, a peg kept at
+    ~1.38x its target pushed the peg share over 20% and the article was rejected."""
+    def long_peg(prompt, kw):          # ~1.33-1.36x its target: past its window, kept as is
+        target = int(re.search(r"About (\d+) words", prompt).group(1))
+        blocks, words, n = [{"type": "paragraph", "text": PEG_LINE}], len(PEG_LINE.split()), 80
+        while words + len(para(n).split()) <= target * 1.36:
+            blocks.append({"type": "paragraph", "text": para(n)})
+            words, n = words + len(para(n).split()), n + 1
+        k = 20
+        while words < target * 1.33:
+            blocks.append({"type": "paragraph", "text": POOL[k]})
+            words, k = words + len(POOL[k].split()), k + 1
+        return ok({"blocks": blocks})
+    client = FakeClient({"section 1": long_peg, "section 1 repair": long_peg})
+    out = run(client)
+    assert "section 1 repair" in client.stages
+    assert out.status == W.STATUS_ACCEPTED, out.issues
+
+
+def test_a_resume_reuses_a_section_kept_with_a_length_miss():
+    """Review round 2: a stored section the writer had KEPT with a soft length miss failed the
+    resume check, so it and every section after it were bought again."""
+    saved: List[Dict[str, Any]] = []
+
+    async def on_progress(payload):
+        saved.append(json.loads(json.dumps(payload)))
+    first = ok({"blocks": [{"type": "paragraph", "text": para(i)} for i in (90, 91, 92, 93)]})
+    worse = ok({"blocks": [{"type": "paragraph", "text": para(94)}]})
+    client = FakeClient({"section 3": first, "section 3 repair": worse,
+                         "section 5": RuntimeError("model down")})
+    assert run(client, on_progress=on_progress).status == W.STATUS_WRITER_FAILED
+    client = FakeClient()
+    client.next_para = 60
+    out = run(client, resume=saved[-1])
+    assert out.status == W.STATUS_ACCEPTED, out.issues
+    assert client.stages == ["section 5", "judge"]
+
+
+def test_a_failed_length_repair_keeps_the_clean_first_draft():
+    """Review round 2: an unusable repair (blocked, cut off, a model error) of a draft that only
+    missed its length ended the generation writer_failed."""
+    first = ok({"blocks": [{"type": "paragraph", "text": para(i)} for i in (90, 91, 92, 93)]})
+    client = FakeClient({"section 3": first, "section 3 repair": RuntimeError("model down")})
+    out = run(client)
+    assert out.status == W.STATUS_ACCEPTED, out.issues
+    assert _body(out, 2) == [para(i) for i in (90, 91, 92, 93)]
+
+
+def test_a_repair_nested_past_the_parser_keeps_the_clean_first_draft():
+    """Review round 3: json.loads raises RecursionError (not ValueError) on deep nesting; it
+    escaped parse_answer and the keep-first-draft rule, and the generation crashed."""
+    first = ok({"blocks": [{"type": "paragraph", "text": para(i)} for i in (90, 91, 92, 93)]})
+    deep = {"text": "[" * 5000 + "]" * 5000, "tokens_used": 50, "finish_reason": "STOP"}
+    client = FakeClient({"section 3": first, "section 3 repair": deep})
+    out = run(client)
+    assert out.status == W.STATUS_ACCEPTED, out.issues
+    assert _body(out, 2) == [para(i) for i in (90, 91, 92, 93)]
+    assert W.parse_answer(deep) == (None, "not JSON (RecursionError)")
+
+
+def test_a_lost_lease_at_a_length_repair_still_ends_the_generation():
+    """Review round 3: keeping a first draft is for a FAILED repair, never a lost lease."""
+    first = ok({"blocks": [{"type": "paragraph", "text": para(i)} for i in (90, 91, 92, 93)]})
+    client = FakeClient({"section 3": first})
+    out = run(client, lease=Lease(fail_at=5))        # outline, s1, s2, s3, then the s3 repair
+    assert out.status == W.STATUS_LEASE_LOST and out.content is None
+    assert "section 3 repair" not in client.stages
+    client = FakeClient({"section 3": first})
+    out = run(client, lease=Lease(fail_at=5, exc=RuntimeError("ledger down")))
+    assert out.status == W.STATUS_LEASE_LOST and out.content is None
+
+
+def test_a_failed_repair_of_a_draft_that_broke_a_rule_still_fails():
+    broken = ok({"blocks": [{"type": "paragraph", "text": LONG_PARA}]})
+    client = FakeClient({"section 3": broken, "section 3 repair": RuntimeError("model down")})
+    assert run(client).status == W.STATUS_WRITER_FAILED
+
+
+def test_a_lead_in_without_a_colon_may_recur_in_another_section():
+    lead = "Several limits shape how quickly it can grow."
+    def with_list(index):
+        def answer(prompt, kw):
+            blocks = json.loads(client.section_answer(prompt, index)["text"])["blocks"]
+            blocks.append({"type": "bulletList", "text": lead, "items": ["land", "power"]})
+            return ok({"blocks": blocks})
+        return answer
+    client = FakeClient()
+    client.overrides.update({"section 2": with_list(1), "section 4": with_list(3)})
+    out = run(client)
+    assert out.status == W.STATUS_ACCEPTED, out.issues
+
+
+def test_a_lead_in_repeating_a_paragraph_of_another_section_is_not_a_repetition():
+    """Each section is written blind to the others; the duplicate rule has no repair, so a list's
+    lead-in that happens to repeat another section's short paragraph does not sink the article."""
+    lead = "Several limits shape how quickly it can grow."
+    def intro(prompt, kw):
+        blocks = json.loads(client.section_answer(prompt, 1)["text"])["blocks"]
+        return ok({"blocks": blocks + [{"type": "paragraph", "text": lead}]})
+    def with_list(prompt, kw):
+        blocks = json.loads(client.section_answer(prompt, 3)["text"])["blocks"]
+        return ok({"blocks": blocks + [{"type": "bulletList", "text": lead,
+                                        "items": ["land", "power"]}]})
+    client = FakeClient()
+    client.overrides.update({"section 2": intro, "section 4": with_list})
+    out = run(client)
+    assert out.status == W.STATUS_ACCEPTED, out.issues
+
+
+def test_a_paragraph_of_another_section_repeating_an_earlier_lead_in_is_not_a_repetition():
+    """The reverse order of the test above: a lead-in never enters the cross-section set."""
+    lead = "Several limits shape how quickly it can grow."
+    def with_list(prompt, kw):
+        blocks = json.loads(client.section_answer(prompt, 1)["text"])["blocks"]
+        return ok({"blocks": blocks + [{"type": "bulletList", "text": lead,
+                                        "items": ["land", "power"]}]})
+    def plain(prompt, kw):
+        blocks = json.loads(client.section_answer(prompt, 3)["text"])["blocks"]
+        return ok({"blocks": blocks + [{"type": "paragraph", "text": lead}]})
+    client = FakeClient()
+    client.overrides.update({"section 2": with_list, "section 4": plain})
+    out = run(client)
+    assert out.status == W.STATUS_ACCEPTED, out.issues
+
+
+def test_a_paragraph_and_list_loop_inside_one_section_is_still_a_repetition():
+    """Review round 2: the lead-in exemption must not let a looping section through."""
+    def looping(prompt, kw):
+        blocks = json.loads(client.section_answer(prompt, 1)["text"])["blocks"]
+        loop = [{"type": "paragraph", "text": LEAD_IN},
+                {"type": "bulletList", "text": "", "items": ["land", "power"]}]
+        return ok({"blocks": blocks + loop + loop})
+    client = FakeClient()
+    client.overrides["section 2"] = looping
+    out = run(client)
+    assert out.status == W.STATUS_CONTENT_REJECTED
+    assert "duplicate" in out.issue_codes
+
+
+def test_lists_with_no_lead_in_get_no_extra_blocks():
+    """The block cap allows one extra block per list LEAD-IN, not per list (review round 2)."""
+    def too_many(prompt, kw):
+        lists = [{"type": "bulletList", "text": "", "items": [a, b]}
+                 for a, b in (("land", "power"), ("chips", "cooling"), ("staff", "time"))]
+        return ok({"blocks": lists + [{"type": "paragraph", "text": POOL[k]} for k in range(18)]})
+    client = FakeClient({"section 3": too_many, "section 3 repair": too_many})
+    out = run(client)
+    assert out.status == W.STATUS_CONTENT_REJECTED
+    assert "bad_value" in out.issue_codes
+
+
+LEAD_IN = "Several limits shape how quickly it can grow:"
+
+
+def _many_blocks(prompt: str, kw: Any) -> Dict[str, Any]:
+    """A schema-legal 20-block answer: 17 paragraphs and 3 lists with lead-ins (23 once split)."""
+    target = int(re.search(r"About (\d+) words", prompt).group(1))
+    paras: List[List[str]] = [[] for _ in range(17)]
+    words, k = 3 * (len(LEAD_IN.split()) + 2), 0
+    while words < target * 0.95:
+        paras[k % 17].append(POOL[k % len(POOL)])
+        words += len(POOL[k % len(POOL)].split())
+        k += 1
+    blocks: List[Dict[str, Any]] = [{"type": "paragraph", "text": " ".join(p)} for p in paras if p]
+    for n, (a, b) in enumerate((("land", "power"), ("chips", "cooling"), ("staff", "time"))):
+        blocks.insert(4 + 5 * n, {"type": "bulletList", "text": LEAD_IN if n == 0 else
+                                  f"List number {n + 1} covers these:", "items": [a, b]})
+    return ok({"blocks": blocks})
+
+
+def test_list_lead_ins_never_count_against_the_block_cap():
+    """Review round (2026-10-23): the split-out lead-ins pushed a schema-legal 20-block answer
+    past the 20-block cap, a hard issue the model could not see in its own answer."""
+    client = FakeClient({"section 3": _many_blocks, "section 3 repair": _many_blocks})
+    out = run(client)
+    assert out.status == W.STATUS_ACCEPTED, out.issues
+    assert len(out.content["sections"][2]["content"]) > A.MAX_BLOCKS_PER_SECTION
+
+
+def test_a_list_lead_in_recurring_in_another_section_is_not_a_repetition_loop():
+    def with_list(index):
+        def answer(prompt, kw):
+            blocks = json.loads(client.section_answer(prompt, index)["text"])["blocks"]
+            blocks.append({"type": "bulletList", "text": LEAD_IN, "items": ["land", "power"]})
+            return ok({"blocks": blocks})
+        return answer
+    client = FakeClient()
+    client.overrides.update({"section 2": with_list(1), "section 4": with_list(3)})
+    out = run(client)
+    assert out.status == W.STATUS_ACCEPTED, out.issues
+    assert sum(b.get("text") == LEAD_IN for s in out.content["sections"]
+               for b in s["content"]) == 2
+
+
+def test_the_repair_sees_the_blocks_that_were_checked():
+    """The issue says "content[1]"; the repair must show the model the blocks it numbered (empty
+    blocks dropped, lead-ins split out), not its raw answer, where content[1] was a blank."""
+    first = ok({"blocks": [{"type": "callout"}, {"type": "paragraph", "text": para(90)},
+                           {"type": "paragraph", "text": LONG_PARA}]})
+    client = FakeClient({"section 2": first})
+    client.overrides["section 2 repair"] = lambda p, kw: client.section_answer(p, 1)
+    out = run(client)
+    assert out.status == W.STATUS_ACCEPTED, out.issues
+    prompt = next(c["prompt"] for c in client.calls if c["stage"] == "section 2 repair")
+    assert "sections[1].content[1]" in prompt and "word_limit" in prompt
+    assert '{"type": "callout"}' not in prompt
+    assert json.dumps({"blocks": [{"type": "paragraph", "text": para(90)},
+                                  {"type": "paragraph", "text": LONG_PARA}]},
+                      ensure_ascii=False) in prompt
+
+
+def test_a_length_repair_that_breaks_a_rule_keeps_the_clean_first_draft():
+    """Review round (2026-10-23): a clean but short first draft was thrown away, and the whole
+    generation rejected, when the repair asked for more words added an ungrounded figure."""
+    first = ok({"blocks": [{"type": "paragraph", "text": para(i)} for i in (90, 91, 92, 93)]})
+    broke = ok({"blocks": [{"type": "paragraph", "text": LONG_PARA}]
+                + [{"type": "paragraph", "text": para(i)} for i in (94, 95)]})
+    client = FakeClient({"section 3": first, "section 3 repair": broke})
+    out = run(client)
+    assert "section 3 repair" in client.stages
+    assert out.status == W.STATUS_ACCEPTED, out.issues
+    assert _body(out, 2) == [para(i) for i in (90, 91, 92, 93)]
+
+
+_KINDS_5 = ["peg", "history", "mechanics", "mechanics", "lessons"]
+
+
+def test_the_running_target_starts_at_the_outline_target_and_a_peg_keeps_its_own():
+    t = [247, 326, 375, 326, 375]
+    assert W.running_target(t, _KINDS_5, 0, []) == 247
+    assert W.running_target(t, _KINDS_5, 1, [247]) == 326        # on plan: unchanged
+    late = ["history", "mechanics", "lessons", "peg", "lessons"]
+    t2 = [367, 367, 367, 183, 367]
+    assert W.running_target(t2, late, 3, [10, 10, 10]) == 183     # a peg is never scaled
+
+
+def test_the_running_target_shares_a_shortfall_in_proportion():
+    t = [250, 350, 350, 350, 300]
+    # The peg wrote 150 of 250: the four later sections share the missing 100 by their targets.
+    assert W.running_target(t, _KINDS_5, 1, [150]) == round(350 * (1600 - 150) / 1350)
+    assert W.running_target(t, _KINDS_5, 4, [250, 350, 300, 300]) == 400  # the last takes the rest
+    # A later peg's own target is reserved before the others share what is left.
+    late = ["history", "mechanics", "peg", "lessons"]
+    t2 = [400, 400, 200, 400]
+    assert W.running_target(t2, late, 1, [300]) == round(400 * (1400 - 300 - 200) / 800)
+
+
+def test_a_long_peg_never_shrinks_the_evergreen_sections():
+    """Review round 2 (2026-10-23): a peg 100 words over its target took those words out of the
+    later sections, so the article stayed at its goal and the peg's share went over 20%."""
+    t = [250, 350, 350, 350, 300]
+    assert W.running_target(t, _KINDS_5, 1, [350]) == 350          # the overshoot is ignored
+    assert W.running_target(t, _KINDS_5, 1, [150]) > 350           # a shortfall is taken up
+
+
+@pytest.mark.parametrize("written,expected", [([250, 0, 0], 1.5), ([0, 0, 0], 1.5),
+                                              ([250, 1000, 1000], 0.6), ([250, 700, 700], 0.6)])
+def test_the_running_target_is_clamped(written, expected):
+    t = [250, 350, 350, 350, 300]
+    assert W.running_target(t, _KINDS_5, 3, written) == round(350 * expected)
+
+
+def _outline_shapes(kind: str) -> List[Any]:
+    rnd = random.Random(23)
+    shapes = [(_KINDS_5, [250, 330, 380, 330, 380]),
+              (["peg", "history", "mechanics", "lessons", "lessons"], [100, 400, 400, 300, 300]),
+              (["peg"] + ["history", "mechanics", "lessons"] * 2, [200] * 7),
+              (["history", "mechanics", "lessons", "peg", "lessons"], [300, 300, 300, 150, 300])]
+    while len(shapes) < 40:
+        n = rnd.randint(*A.SECTION_COUNT)
+        kinds = [rnd.choice(["history", "mechanics", "lessons"]) for _ in range(n)]
+        kinds[0 if rnd.random() < 0.7 else rnd.randrange(n)] = "peg"
+        shapes.append((kinds, [rnd.choice([40, 80, 200, 300, 400, 600, 900]) for _ in range(n)]))
+    return [(k, A.normalize_targets(k, raw, kind)) for k, raw in shapes]
+
+
+@pytest.mark.parametrize("kind", [C.KIND_DEEP_DIVE, C.KIND_SLOT])
+def test_sections_inside_their_windows_add_up_to_the_articles_range(kind):
+    """Without running targets, five sections at 0.8x passed one by one and summed to ~1,320
+    words: below the Deep Dive floor of 1,400. With them, any mix of sections inside their own
+    windows (0.8, 1.0 or 1.25 of their running target) reaches the floor; the ceiling holds
+    whenever no section is over 35% of the article, and is never passed by more than 4% (an
+    oversized late section writing long — the article check still refuses that; fixed targets
+    went up to 1.25x the whole goal). Measured over 3,000 random outlines, 2026-10-23."""
+    lo, hi = C.DEEP_DIVE_WORDS if kind == C.KIND_DEEP_DIVE else C.SLOT_WORDS
+    tol_lo, tol_hi = W.SECTION_LENGTH_TOLERANCE
+    for kinds, t in _outline_shapes(kind):
+        combos = (itertools.product((tol_lo, 1.0, tol_hi), repeat=len(t)) if len(t) <= 5 else
+                  (tuple(random.Random(i).choice((tol_lo, 1.0, tol_hi)) for _ in t) for i in range(200)))
+        for ratios in combos:
+            written: List[int] = []
+            for i, r in enumerate(ratios):
+                written.append(int(r * W.running_target(t, kinds, i, written)))
+            assert sum(written) >= lo, (kinds, t, ratios, sum(written))
+            assert sum(written) <= hi * 1.04, (kinds, t, ratios, sum(written))
+            if max(t) <= 0.35 * sum(t):
+                assert sum(written) <= hi, (kinds, t, ratios, sum(written))
 
 
 def test_an_outline_that_fails_twice_is_rejected_before_any_section_is_bought():

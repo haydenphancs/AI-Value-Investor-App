@@ -84,6 +84,9 @@ MODEL_CALLS_PER_GENERATION = 2 + 2 * A.SECTION_COUNT[1] + 1
 
 #: A section's body words must land inside these multiples of its (code-normalised) target.
 SECTION_LENGTH_TOLERANCE = (0.8, 1.25)
+#: How far a later non-peg section's target may move (multiples of its outline target) to absorb
+#: the words the sections before it ran short or long (`running_target`).
+RUNNING_TARGET_RANGE = (0.6, 1.5)
 #: Display caps of the header strings (the catalog card and the hero; the validators cap far
 #: higher only to bound regex work).
 HEADER_CHAR_LIMITS: Mapping[str, int] = {"title": 90, "subtitle": 200, "cardSubtitle": 120}
@@ -189,7 +192,7 @@ def parse_answer(result: Any) -> "tuple[Optional[Dict[str, Any]], Optional[str]]
         return None, f"answer of {len(text)} characters (> {_MAX_ANSWER_CHARS})"
     try:
         obj = json.loads(_FENCE_RE.sub("", text.strip()))
-    except ValueError as e:
+    except (ValueError, RecursionError) as e:          # RecursionError: nested past the C stack
         return None, f"not JSON ({type(e).__name__})"
     if not isinstance(obj, dict):
         return None, f"top level is {type(obj).__name__}, not an object"
@@ -404,62 +407,105 @@ class _Generation:
             raise _Stop(STATUS_WRITER_FAILED, _one_line(f"{stage}: wrong shape: {e}"))
 
     def section_issues(self, index: int, sec: A.OutlineSection,
-                       blocks: Sequence[Mapping[str, Any]]) -> List[V.Issue]:
+                       blocks: Sequence[Mapping[str, Any]],
+                       target: Optional[int] = None) -> List[V.Issue]:
+        """The section's rule and length issues; the length is judged against `target` (the
+        running target, `running_target`), else the outline's own."""
+        target = sec.target_words if target is None else target
         issues: List[V.Issue] = []
         base = f"sections[{index}]"
         if not blocks:
             issues.append(V.Issue(f"{base}.content", "bad_value", "the section has no blocks"))
-        if len(blocks) > A.MAX_BLOCKS_PER_SECTION:
-            issues.append(V.Issue(f"{base}.content", "bad_value",
-                                  f"{len(blocks)} blocks > {A.MAX_BLOCKS_PER_SECTION}"))
-        for j, block in enumerate(list(blocks)[:A.MAX_BLOCKS_PER_SECTION]):
+        # A list's lead-in paragraph is code-made (`article_schema.section_blocks`) from the
+        # list's own text: the model's answer is capped by the schema, so those never count.
+        cap = A.MAX_BLOCKS_PER_SECTION + sum(1 for j in range(len(blocks))
+                                             if V.is_list_lead_in(blocks, j))
+        if len(blocks) > cap:
+            issues.append(V.Issue(f"{base}.content", "bad_value", f"{len(blocks)} blocks > {cap}"))
+        for j, block in enumerate(list(blocks)[:cap]):
             issues += V.validate_block(f"{base}.content[{j}]", block, section_kind=sec.kind,
                                        grounding_ctx=self.ctx, subjects=self.subjects)
         words = A.body_words(blocks)
-        lo = int(sec.target_words * SECTION_LENGTH_TOLERANCE[0])
-        hi = int(math.ceil(sec.target_words * SECTION_LENGTH_TOLERANCE[1]))
+        lo = int(target * SECTION_LENGTH_TOLERANCE[0])
+        hi = int(math.ceil(target * SECTION_LENGTH_TOLERANCE[1]))
         if blocks and not lo <= words <= hi:
             issues.append(V.Issue(base, "section_length",
-                                  f"{words} words; target {sec.target_words} ({lo}-{hi})"))
+                                  f"{words} words; target {target} ({lo}-{hi})"))
         return issues
 
     async def section(self, outline: A.Outline, index: int,
-                      resumed: Optional[Sequence[Mapping[str, Any]]]
+                      resumed: Optional[Sequence[Mapping[str, Any]]],
+                      target: Optional[int] = None
                       ) -> "tuple[List[Dict[str, Any]], bool]":
         """The accepted blocks of one section, and whether they were freshly written (False = the
-        stored copy passed every check again and was reused)."""
+        stored copy passed every check again and was reused). `target` is the section's running
+        target (`running_target`), else the outline's own."""
         sec = outline.sections[index]
+        target = sec.target_words if target is None else target
         if resumed is not None:
             blocks = [dict(b) for b in resumed if isinstance(b, Mapping)]
+            # Length is soft (the writer kept this section with any length miss it had), so a
+            # stored section is re-checked against its hard rules only — else every section kept
+            # with a miss, and every one after it, was bought again on resume (review round 2).
             if (len(blocks) == len(resumed) and blocks
-                    and not self.section_issues(index, sec, blocks)):
+                    and not [i for i in self.section_issues(index, sec, blocks, target)
+                             if i.code != "section_length"]):
                 logger.info("learn writer: generation %s RESUMED section %d", self.gen, index + 1)
                 return blocks, False
             logger.info("learn writer: generation %s rewrites section %d (the stored copy no "
                         "longer passes)", self.gen, index + 1)
         stage = f"section {index + 1}"
         obj = await self._write_call(stage, 1, P.section_prompt(
-            sheet=self.sheet, outline=outline, index=index, target_words=sec.target_words,
+            sheet=self.sheet, outline=outline, index=index, target_words=target,
             generation_id=self.gen, round_no=1, reject_reason=self.reject_reason),
             A.SECTION_RESPONSE_SCHEMA)
         blocks = self._blocks(obj, stage, sec.title)
-        issues = self.section_issues(index, sec, blocks)
+        issues = self.section_issues(index, sec, blocks, target)
         if not issues:
             return blocks, True
         logger.info("learn writer: generation %s %s needs a repair: %s", self.gen, stage,
                     sorted({i.code for i in issues}))
-        obj = await self._write_call(f"{stage} repair", 2, P.section_repair_prompt(
-            sheet=self.sheet, outline=outline, index=index, target_words=sec.target_words,
-            generation_id=self.gen, previous=obj, issues=issues, round_no=2,
-            reject_reason=self.reject_reason), A.SECTION_RESPONSE_SCHEMA)
-        blocks = self._blocks(obj, f"{stage} repair", sec.title)
-        issues = self.section_issues(index, sec, blocks)
+        first, first_hard = blocks, any(i.code != "section_length" for i in issues)
+        # The repair sees the blocks that were CHECKED (empty blocks dropped, list lead-ins split
+        # out), so every "content[j]" an issue names is the block it shows.
+        try:
+            obj = await self._write_call(f"{stage} repair", 2, P.section_repair_prompt(
+                sheet=self.sheet, outline=outline, index=index, target_words=target,
+                generation_id=self.gen, previous={"blocks": blocks}, issues=issues, round_no=2,
+                reject_reason=self.reject_reason), A.SECTION_RESPONSE_SCHEMA)
+            blocks = self._blocks(obj, f"{stage} repair", sec.title)
+        except _Stop as e:
+            if first_hard or e.status != STATUS_WRITER_FAILED:
+                raise
+            # An unusable LENGTH repair (blocked, cut off, wrong shape, a model error) is no
+            # reason to drop a first draft that broke no rule (review round 2).
+            logger.warning("learn writer: generation %s %s: the length repair failed (%s) — "
+                           "keeping the first draft (%d words, target %d)", self.gen, stage,
+                           e.error, A.body_words(first), target)
+            return first, True
+        issues = self.section_issues(index, sec, blocks, target)
         hard = [i for i in issues if i.code != "section_length"]
+        if hard and not first_hard:
+            # Asked only for more (or fewer) words, the repair broke a rule: the first draft broke
+            # none, so it stands with its length miss rather than sinking the generation.
+            logger.warning("learn writer: generation %s %s: the length repair broke %s — keeping "
+                           "the first draft (%d words, target %d)", self.gen, stage,
+                           sorted({i.code for i in hard}), A.body_words(first), target)
+            return first, True
         if hard:
             raise _Stop(STATUS_CONTENT_REJECTED, f"{stage} still broke rules after its repair",
                         issues)
         if issues:
-            # Length alone is soft: the article-level word count is the real bound.
+            # Length alone is soft: the later sections' running targets absorb it, and the
+            # article-level word count is the real bound. A length-only repair that came back
+            # FURTHER from the target is not kept over the first draft (a 3M repair went 209 → 136
+            # words for a 378 target and sank the article, 2026-10-23).
+            if not first_hard and (abs(A.body_words(first) - target)
+                                   < abs(A.body_words(blocks) - target)):
+                logger.info("learn writer: generation %s %s keeps its first draft (%d words) over "
+                            "the repair (%d words) — closer to the target %d", self.gen, stage,
+                            A.body_words(first), A.body_words(blocks), target)
+                return first, True
             logger.info("learn writer: generation %s %s kept with a length miss (%s)", self.gen,
                         stage, issues[0].detail)
         return blocks, True
@@ -531,12 +577,16 @@ class _Generation:
         stored = resume.get("sections") if resumed and isinstance(resume, Mapping) else None
         stored = stored if isinstance(stored, list) else []
         sections: List[List[Dict[str, Any]]] = []
+        targets = [s.target_words for s in outline.sections]
+        written: List[int] = []
         reusing = True
         for i in range(len(outline.sections)):
             # Reuse is a PREFIX: once one stored section is rewritten, the later ones were written
             # beside a different neighbour and are rewritten too (no stitched-together article).
             prior = stored[i] if reusing and i < len(stored) and isinstance(stored[i], list) else None
-            blocks, fresh = await self.section(outline, i, prior)
+            blocks, fresh = await self.section(outline, i, prior,
+                                               running_target(targets, kinds, i, written))
+            written.append(A.body_words(blocks))
             sections.append(blocks)
             if fresh:
                 reusing = False
@@ -564,6 +614,33 @@ class _Generation:
                              issues=_issue_dicts(issues), judge=judge, tokens_used=self.tokens,
                              calls=self.calls, error=error, rounds=list(self.rounds),
                              model=self.model)
+
+
+def running_target(targets: Sequence[int], kinds: Sequence[str], index: int,
+                   written: Sequence[int]) -> int:
+    """Section `index`'s target once the sections before it hold `written` body words (one count
+    per earlier section).
+
+    The model writes about 85% of each target (live 3M sections, 2026-10-23: five sections summed
+    to 1,288-1,404 words against 1,651), so per-section windows alone let every section pass
+    while the article misses its range. A non-peg section therefore takes its share of what is
+    still to write — the outline's total minus the words written and minus the targets of the peg
+    sections still to come — in proportion to its outline target, within `RUNNING_TARGET_RANGE`
+    of it. A peg keeps its own target, and only a peg's SHORTFALL is taken up: its overshoot is
+    never taken out of the evergreen sections, or a long peg would shrink them and fail the
+    article's peg share (review round 2). Pure: a resumed prefix gets the targets it was written
+    under."""
+    base = targets[index]
+    if kinds[index] == "peg":
+        return base
+    counted = sum(min(w, targets[j]) if kinds[j] == "peg" else w
+                  for j, w in enumerate(list(written)[:index]))
+    later = sum(targets[j] for j in range(index, len(targets)) if kinds[j] != "peg")
+    pegs_left = sum(targets[j] for j in range(index, len(targets)) if kinds[j] == "peg")
+    remaining = sum(targets) - counted - pegs_left
+    scaled = base * remaining / max(later, 1)
+    lo, hi = RUNNING_TARGET_RANGE
+    return int(round(min(max(scaled, base * lo), base * hi)))
 
 
 def _thinking_budget() -> Optional[int]:
@@ -637,7 +714,8 @@ async def write_article(*, sheet: C.FactSheet, kind: str, category: str, topic_l
 
 
 __all__ = [
-    "MODEL_CALLS_PER_GENERATION", "SECTION_LENGTH_TOLERANCE", "STATUSES", "STATUS_ACCEPTED",
-    "STATUS_CONTENT_REJECTED", "STATUS_LEASE_LOST", "STATUS_WRITER_FAILED", "WriterOutcome",
-    "parse_answer", "write_article",
+    "MODEL_CALLS_PER_GENERATION", "RUNNING_TARGET_RANGE", "SECTION_LENGTH_TOLERANCE", "STATUSES",
+    "STATUS_ACCEPTED", "STATUS_CONTENT_REJECTED", "STATUS_LEASE_LOST", "STATUS_WRITER_FAILED",
+    "WriterOutcome",
+    "parse_answer", "running_target", "write_article",
 ]

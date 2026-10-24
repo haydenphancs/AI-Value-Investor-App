@@ -1319,3 +1319,209 @@ def test_filed_per_share_facts_and_power_prices_are_not_share_prices(text):
 def test_the_peg_screen_and_the_blocks_share_one_price_rule():
     from app.services.learn_weekly import topic
     assert topic._SHARE_PRICE_RE is V.SHARE_PRICE_RE
+
+
+# ── a company name with a digit is a name, not a quantity (2026-10-23 live dry run: "3M") ──────
+
+_MMM_SHEET = C.FactSheet(C.KIND_DEEP_DIVE, "3M CO", None, (C.Subject("3M CO", "0000066740", "MMM"),), (
+    C.Fact("S1", "3M CO reported revenue of $24.6 billion for the fiscal year ended December 31, "
+                 "2025 (Form 10-K).", C.ORIGIN_SEC_XBRL, "https://www.sec.gov/x", "0000066740-26-000010"),))
+_MMM = ["3M CO", "MMM"]
+
+
+_NUMBER_CODES = {"number_context", "ungrounded_number", "ungrounded_name_number",
+                 "subject_name_number"}
+
+
+@pytest.mark.parametrize("text", [
+    "How 3M Built a Diversified Industrial Business.",
+    "Inside 3M's business model, one division at a time.",
+    "3M reported revenue of $24.6 billion for the fiscal year ended December 31, 2025.",
+    "In 2025, 3M reported revenue of $24.6 billion.",                # a clause after a comma
+    "3M products reach many industries.",                            # the sentence's subject
+    "Products from 3M reach many industries.",
+    "The relationship between 3M and the retailer expanded.",
+    "3M CO operates in many markets.",
+    "3M\u2019s optical connectivity products are sold to data centers.",
+    "Over 3M's long history, the company kept investing.",           # a possessive wins
+    # Review round 2 (2026-10-23): a name-position allow-list refused these, and the live outline
+    # died on "Origins of 3M". The name is the company everywhere but in an amount shape.
+    "Origins of 3M", "The Origins of 3M", "The 3M Story", "The Rise of 3M", "Understanding 3M",
+    "What 3M Teaches About Diversification", "Is 3M Still a Conglomerate?", "Meet 3M",
+    "3M In Focus", "The company sells 3M products.", "Research spending is central to the 3M model.",
+    "Many 3M products started as experiments in its labs.", "Each 3M segment faces its own competitors.",
+    "Critics argue that conglomerates such as 3M can be slow to adapt.", "But 3M kept investing.",
+    "As 3M grew, it diversified.", "Second, the 3M example shows how segments interact.",
+    "3M-branded tape and filters", "The 3M-Amazon relationship", "3M in data centers",
+    "Some 3M products reach households.", "Another 3M product line grew.",
+    "Honeywell is larger than 3M.", "Only 3M offers both.", "The downturn hit 3M hard.",
+    # Review round 3: words that also take a company as their object are not amount words.
+    "3M took a year to integrate the unit.", "Customers buy from 3M each year.",
+    "3M reports every quarter.", "That record makes 3M worth studying.",
+    "A book about 3M explains its labs.", "Several brands sit under 3M.", "The task fell to 3M.",
+    "Post-it Notes earned 3M a reputation for invention.", "The decision was up to 3M.",
+    "Customers choose Amazon over 3M for some services.", "3M'S HISTORY",
+    "Amazon competes with 3M in consumer products.", "Amazon partnered with 3M in data center sales.",
+    "3M in its annual report described four segments.",
+    # Review round 4.
+    "Hospitals used 3M respirators every day during the pandemic.",
+    "Health care workers wore 3M masks every day.",
+    "Every dollar 3M invests in research is a bet on future products.",
+    "Each dollar 3M returns to shareholders is a dollar it does not reinvest.",
+    "The product line was dropped by 3M.", "Prices were increased by 3M.",
+    "Its later brands grew from 3M research.", "That record makes 3M worth a closer look.",
+])
+def test_the_subjects_own_digit_name_is_not_a_number(text):
+    ctx = V.build_grounding_context(_MMM_SHEET)
+    assert not _NUMBER_CODES & set(para_codes(text, grounding_ctx=ctx, subjects=_MMM)), \
+        para(text, grounding_ctx=ctx, subjects=_MMM)
+
+
+@pytest.mark.parametrize("text", [
+    "The deal was worth $3M in cash.",
+    "3M held 3M in cash.",            # passed with NO violation while the sheet's name grounded 3M
+    "3M paid 3M in fines.",
+    "3M sold 3M worth of tape.",
+    "3M sold 3M-dollar contracts.",
+    "3M paid USD 3M to settle.",
+    "3M sold nearly 3M units.",
+    "3M made 3M masks a day.",
+    "A 3m-wide roll of tape.",         # lower case is a length, never the name
+    "Products from 3m reach many industries.",   # ... even where the name could stand
+    "It paid $3M's worth of fees.",    # a currency before it beats the possessive after it
+    # An amount where the name could also stand (a sentence start, a clause, "with"):
+    "3M worth of tape was sold.",
+    "3M paid 3M in back taxes.",
+    "Paid with 3M in cash, the deal closed.",
+    "The plant made, at most 3M rolls.",
+    # Review round 2: change verbs and valuations before it.
+    "Sales grew by 3M last year.", "The unit was valued at 3M.", "The stake was worth 3M.",
+    "Revenue rose to 3M.", "Costs declined from 3M.", "The fund held more than 3M shares.",
+    # Review round 3: "total" (its pattern could never match single spacing), more money nouns,
+    # and words between "in" and the noun.
+    "The fines came to a total of 3M.", "Sales totaling 3M were booked.",
+    "Sales totalling 3M were booked.", "3M paid 3M in fees.", "3M booked 3M in annual revenue.",
+    "3M took on 3M in new debt.", "3M paid 3M in taxes.",
+    # Review round 4: a hedge in between, other tenses, compound money nouns, "'s worth of", and
+    # a non-ASCII hyphen.
+    "The stake was worth about 3M.", "Sales grew by about 3M.", "The unit was valued at around 3M.",
+    "The plant cost an estimated 3M.", "The company spends 3M on research.",
+    "Sales have grown by 3M.", "Revenue rises to 3M.", "Costs increase by 3M.",
+    "Sales fell by 3M last year.", "3M bought back 3M in share repurchases.",
+    "3M paid 3M in dividend payments.", "3M booked 3M in impairment charges.",
+    "3M sold 3M's worth of tape.", "3M sold 3M\u2010dollar contracts.",
+])
+def test_a_digit_name_in_any_other_position_is_refused_with_its_own_code(text):
+    """Review rounds (2026-10-23): a count-noun denylist let "3M in fines", "USD 3M" and "3M
+    masks" through. Every amount shape is refused now, with a code that names the fix. Known
+    residual: a bare count ("3M served 3M customers", "3M of product") reads as the name — the
+    prompt forbids K/M/B abbreviations and the owner reviews every piece."""
+    ctx = V.build_grounding_context(_MMM_SHEET)
+    assert "subject_name_number" in para_codes(text, grounding_ctx=ctx, subjects=_MMM)
+
+
+def test_the_sheets_own_name_grounds_no_number():
+    """"3M CO reported revenue …" made 3,000,000 a sheet number, so an invented "3M" amount next
+    to "reported" or "revenue" was grounded before any exemption ran."""
+    ctx = V.build_grounding_context(_MMM_SHEET)
+    assert 3_000_000 not in {n.value for n in ctx.numbers}
+    assert 24_600_000_000 in {n.value for n in ctx.numbers}
+    plain = C.FactSheet(C.KIND_DEEP_DIVE, "x", None, (C.Subject("NVIDIA CORP", "0001045810", "NVDA"),),
+                        (C.Fact("S1", "NVIDIA CORP shipped 3M units in fiscal 2025 (Form 10-K).",
+                                C.ORIGIN_SEC_XBRL, "https://www.sec.gov/x", "0001045810-25-000023"),))
+    assert 3_000_000 in {n.value for n in V.build_grounding_context(plain).numbers}
+
+
+@pytest.mark.parametrize("name,ticker,text", [
+    ("1 800 FLOWERS COM INC", "FLWS", "The company opened 800 stores."),       # a bare numeral
+    ("10x Genomics, Inc.", "TXG", "Sales rose 10x in five years."),              # a multiple
+    ("10x Genomics, Inc.", "TXG", "10x Genomics reported revenue."),             # fail closed
+])
+def test_a_bare_numeral_or_a_multiple_in_a_name_is_never_exempt(name, ticker, text):
+    sheet = C.FactSheet(C.KIND_DEEP_DIVE, name, None, (C.Subject(name, "0000000001", ticker),), (
+        C.Fact("S1", f"{name} reported revenue of $1.2 billion for the fiscal year ended December 31, "
+                     "2025 (Form 10-K).", C.ORIGIN_SEC_XBRL, "https://www.sec.gov/x",
+               "0000000001-26-000010"),))
+    ctx = V.build_grounding_context(sheet)
+    codes = set(para_codes(text, grounding_ctx=ctx, subjects=[name, ticker]))
+    assert codes & _NUMBER_CODES and "subject_name_number" not in codes
+    # The sheet's own name grounds none of its digits either ("10x" anchored to "revenue").
+    values = {n.value for n in ctx.numbers}
+    assert 1_200_000_000.0 in values and values <= {1_200_000_000.0, 31.0, 2025.0}, values
+
+
+def test_a_figure_that_equals_a_name_digit_stays_a_sheet_figure():
+    """Only the name AS WRITTEN is masked: "800 stores" filed by 1-800-Flowers is still a figure."""
+    name = "1 800 FLOWERS COM INC"
+    sheet = C.FactSheet(C.KIND_DEEP_DIVE, name, None, (C.Subject(name, "0000000001", "FLWS"),), (
+        C.Fact("S1", f"{name} operated 800 stores at the fiscal year ended June 29, 2025 "
+                     "(Form 10-K).", C.ORIGIN_SEC_XBRL, "https://www.sec.gov/x",
+               "0000000001-25-000010"),))
+    assert 800 in {n.value for n in V.build_grounding_context(sheet).numbers}
+
+
+def test_the_exemption_is_only_for_the_pieces_own_subject():
+    """On another company's piece, "3M" is not a subject token: refused as before."""
+    ctx = V.build_grounding_context(_MMM_SHEET)
+    text = "How 3M Built a Diversified Industrial Business."
+    codes = set(para_codes(text, grounding_ctx=ctx, subjects=["General Motors Co", "GM"]))
+    assert codes & {"number_context", "ungrounded_number"} and "subject_name_number" not in codes
+
+
+def test_the_naming_refusal_has_a_repair_hint():
+    from app.services.learn_weekly import prompts as P
+    hint = P.hint("subject_name_number")
+    assert "amount" in hint and "fact sheet" in hint
+    assert "3M" in P.SYSTEM_BODY and "K, M or B" in P.SYSTEM_BODY
+
+
+@pytest.mark.parametrize("name,fact", [
+    ("1 800 FLOWERS COM INC", "1-800-Flowers.com reported revenue of $1.2 billion in fiscal 2025."),
+    ("10X GENOMICS, INC.", "10x Genomics reported revenue of $1.2 billion in fiscal 2025."),
+])
+def test_a_digit_name_spelled_another_way_on_the_sheet_grounds_no_number(name, fact):
+    """Review round 2: only the exact SEC name was masked, so a library or peg fact spelling it
+    another way still grounded "800" or "10x" next to "revenue"."""
+    sheet = C.FactSheet(C.KIND_DEEP_DIVE, name, None, (C.Subject(name, "0000000001", "X"),), (
+        C.Fact("L:x:f1", fact, C.ORIGIN_SEC_XBRL, "https://www.sec.gov/x", "0000000001-26-000010"),))
+    values = {n.value for n in V.build_grounding_context(sheet).numbers}
+    assert 1_200_000_000.0 in values and not values & {1.0, 10.0, 800.0}, values
+
+
+def test_a_token_the_text_does_not_show_reads_as_an_amount():
+    """Fail closed: a violation naming a token the text does not show is never exempted."""
+    assert V._reads_as_an_amount("3m", "No such token here.") is True
+    assert V._reads_as_an_amount("3m", "3M reported revenue.") is False
+
+
+def test_the_sheets_own_name_grounds_no_magnitude():
+    """Review round 3: masking covered the sheet's numbers, not its MAGNITUDES, so "3M CO
+    reported …" still grounded "millions" on a sheet that states only billions."""
+    facts = tuple(C.Fact(f"S{i}", t, C.ORIGIN_SEC_XBRL, "https://www.sec.gov/x", "0000066740-26-000010")
+                  for i, t in enumerate((
+                      "3M CO reported revenue of $24.6 billion for the fiscal year ended December 31, "
+                      "2025 (Form 10-K).",
+                      "3M CO reported research and development expense of $1.1 billion for the fiscal "
+                      "year ended December 31, 2025 (Form 10-K)."), start=1))
+    sheet = C.FactSheet(C.KIND_DEEP_DIVE, "3M CO", None, (C.Subject("3M CO", "0000066740", "MMM"),),
+                        facts)
+    ctx = V.build_grounding_context(sheet)
+    assert {scale for scale, _ in ctx.magnitudes} == {"billion"}
+    for text in ("3M spends millions on research each year.",
+                 "The company pays millions in dividends every fiscal year."):
+        assert "ungrounded_number" in para_codes(text, grounding_ctx=ctx, subjects=_MMM)
+    assert para_codes("3M reported revenue of $24.6 billion.", grounding_ctx=ctx, subjects=_MMM) == []
+
+
+def test_a_real_dollar_figure_on_the_sheet_is_never_masked():
+    """Review round 3: the loose name pattern had no currency guard, so "$3M" on a 3M sheet was
+    masked away and the writer's correct restatement refused."""
+    sheet = C.FactSheet(C.KIND_DEEP_DIVE, "3M CO", None, (C.Subject("3M CO", "0000066740", "MMM"),), (
+        C.Fact("P1", "3M paid a $3M fee under the agreement.", C.ORIGIN_SEC_PEG,
+               "https://www.sec.gov/x", "0000066740-26-000308"),))
+    assert 3_000_000 in {n.value for n in V.build_grounding_context(sheet).numbers}
+
+
+def test_an_upper_case_possessive_is_the_name():
+    """A tagLabel is upper case: "3M'S" must read as a possessive (review round 3)."""
+    assert V._POSSESSIVE_AFTER_RE.match("'S HISTORY") and V._POSSESSIVE_AFTER_RE.match("’S")

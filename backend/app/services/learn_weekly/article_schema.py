@@ -261,7 +261,11 @@ SECTION_RESPONSE_SCHEMA: Dict[str, Any] = {
                     "icon": {"type": "STRING"},
                     "style": {"type": "STRING", "enum": list(C.CALLOUT_STYLES)},
                 },
-                "required": ["type"],
+                # `text` too, on every block (a bulletList's is its lead-in): with only `type`
+                # required, constrained decoding looped on bare {"type": "callout"} objects — 2 of
+                # 6 live section answers were 15-16 empty blocks and ~130 words; with `text`
+                # required, 0 of 12 had an empty block (2026-10-23, gemini-2.5-flash).
+                "required": ["type", "text"],
             },
         },
     },
@@ -504,10 +508,13 @@ def section_blocks(draft: SectionDraft, title: Optional[str] = None) -> List[Dic
     trimmed; no reader-visible TEXT is rewritten — a bad block reaches the validators as it is, so
     the refusal names it. An unknown type keeps its text so `validate_block` can refuse it by type.
 
-    Two exceptions, both measured on gemini-2.5-flash (2026-10-23 previews):
+    The exceptions, all measured on gemini-2.5-flash (2026-10-23 previews):
       * An EMPTY block (no text and no items) is dropped with a WARNING. Constrained decoding with
         only `type` required can loop on the smallest valid object — ten bare {"type": "callout"}
         in a row sank whole sections, and a block with nothing in it has nothing to judge.
+      * A `bulletList`'s text is its lead-in ("Acquisitions can help a company:"): it becomes a
+        `paragraph` just before the list — the items are fragments without it — unless it repeats
+        another block of the answer (the model's own paragraph, written twice).
       * A callout's missing / off-list icon and missing / unknown style get the defaults in
         `CALLOUT_STYLE_ICONS` (decoration only; the list is in the prompt, no longer a schema enum).
       * A `subheading` that repeats the section's own `title` (same `validators.title_key`) is
@@ -517,6 +524,11 @@ def section_blocks(draft: SectionDraft, title: Optional[str] = None) -> List[Dic
     out: List[Dict[str, Any]] = []
     empty = repeated = 0
     title_key = V.title_key(title) if isinstance(title, str) and title.strip() else None
+    # A lead-in that repeats ANY other block of this answer (before or after it) is dropped: the
+    # article's duplicate rule has no repair (review round 3).
+    other_keys = {V.block_key(b.text) for b in draft.blocks
+                  if b.type != "bulletList" and isinstance(b.text, str) and b.text.strip()}
+    lead_keys: set = set()
     for b in draft.blocks:
         text = b.text.strip() if isinstance(b.text, str) else b.text
         items = [i.strip() for i in (b.items or []) if isinstance(i, str) and i.strip()]
@@ -528,6 +540,13 @@ def section_blocks(draft: SectionDraft, title: Optional[str] = None) -> List[Dic
             repeated += 1
             continue
         if b.type == "bulletList":
+            if items and isinstance(text, str) and text:
+                key = V.block_key(text)
+                if key and (key in other_keys or key in lead_keys):
+                    repeated += 1          # the model's own paragraph, repeated as the lead-in
+                else:
+                    lead_keys.add(key)
+                    out.append({"type": "paragraph", "text": text})
             out.append({"type": "bulletList", "items": [i.strip() for i in (b.items or [])]})
         elif b.type == "callout":
             style = b.style if b.style in CALLOUT_STYLE_ICONS else "info"
@@ -540,8 +559,8 @@ def section_blocks(draft: SectionDraft, title: Optional[str] = None) -> List[Dic
         logger.warning("learn section: dropped %d empty block(s) of %d (no text, no items)",
                        empty, len(draft.blocks))
     if repeated:
-        logger.info("learn section: dropped %d subheading(s) repeating the section title %r",
-                    repeated, title)
+        logger.info("learn section: dropped %d repeated block(s) (a subheading repeating the "
+                    "section title %r, or a list lead-in repeating a block)", repeated, title)
     return out
 
 

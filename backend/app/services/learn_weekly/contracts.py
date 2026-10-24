@@ -179,6 +179,30 @@ FACT_ORIGINS = (ORIGIN_SEC_XBRL, ORIGIN_SEC_PEG, ORIGIN_LIBRARY)
 DEEP_DIVE_SHEET_CAP = 9000
 SLOT_SHEET_CAP = 6000
 
+#: The sentence every peg fact opens with on the sheet (`fact_sheet.date_peg_facts`): SEC's own
+#: filing date, never the model's. The peg section must state the full date of what it restates
+#: and grounding refuses any number the sheet does not hold; the stored spans carried no date, so
+#: "On October 21, 2026" was refused as an ungrounded "21" (and was wrong: SEC says October 20)
+#: and the week's piece was skipped (2026-10-23). It is its OWN sentence, and grounding reads it
+#: as its own fact (`validators.build_grounding_context`), so the day and year anchor only to
+#: "Form 8-K filed with the SEC", never to the span's words ("for 20 consecutive years").
+PEG_DATE_PREFIX = "Form 8-K filed with the SEC on {date}. "
+PEG_MONTHS = ("January", "February", "March", "April", "May", "June", "July", "August",
+              "September", "October", "November", "December")
+PEG_DATE_RE = re.compile(r"\AForm 8-K filed with the SEC on (?:" + "|".join(PEG_MONTHS)
+                         + r") (?:[1-9]|[12]\d|3[01]), \d{4}\. ")
+
+
+def peg_date_text(day: date) -> str:
+    return PEG_DATE_PREFIX.format(date=f"{PEG_MONTHS[day.month - 1]} {day.day}, {day.year}")
+
+
+def split_peg_date(text: str) -> Tuple[str, str]:
+    """(the code-owned date sentence, the filed span) of a dated peg text; ("", text) when the
+    text does not open with one."""
+    m = PEG_DATE_RE.match(text) if isinstance(text, str) else None
+    return (m.group(0), text[m.end():]) if m else ("", text)
+
 
 @dataclass(frozen=True)
 class Fact:

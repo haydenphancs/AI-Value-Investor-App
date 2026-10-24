@@ -82,10 +82,10 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 from itertools import islice
-from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from app.services import learn_content_rules as rules
 from app.services.learn_weekly import contracts as C
@@ -831,14 +831,73 @@ def build_grounding_context(sheet: Any) -> grounding.GroundingContext:
             texts = []
         for text in texts:
             if isinstance(text, str) and text.strip():
-                sentences.append(compliance.clean(text[:_FACT_TEXT_CAP]))
+                # A dated peg is two grounding facts: the date sentence's day and year must not
+                # anchor to the span's words ("raised its dividend for 20 consecutive years").
+                for part in C.split_peg_date(text[:_FACT_TEXT_CAP]):
+                    if part.strip():
+                        sentences.append(compliance.clean(part))
         if not sentences:
             logger.error("learn weekly validators: fact sheet %r has no usable sentence; "
                          "grounding will refuse every figure and name", sheet.topic_title)
     else:
         logger.error("learn weekly validators: build_grounding_context got %s, not a FactSheet; "
                      "grounding will refuse every figure and name", type(sheet).__name__)
-    return grounding.build_context(sentences, corpus_vocab())
+    ctx = grounding.build_context(sentences, corpus_vocab())
+    # A subject's own digit-bearing name ("3M CO reported revenue …") must not ground the number it
+    # looks like: the sheet read "3M" as 3 million, so "3M held 3M in cash" passed with no
+    # violation (review, 2026-10-23). Numbers come from the sheet with those names masked; every
+    # other part of the context (the name as a token included) is the sheet as written.
+    masked = [_mask_subject_names(s, sheet) for s in sentences]
+    if masked != sentences:
+        # Both number-derived parts: "3M" also gave the sheet a "million" MAGNITUDE, so "3M spends
+        # millions on research" passed on a sheet stating only billions (review round 3). The
+        # designations stay unmasked: they are what grounds the name "3M CO" itself.
+        m = grounding.build_context(masked, corpus_vocab())
+        ctx = replace(ctx, numbers=m.numbers, magnitudes=m.magnitudes)
+    return ctx
+
+
+def _mask_subject_names(sentence: str, sheet: Any) -> str:
+    """`sentence` with every subject name that holds a digit replaced by a word: the name however
+    the sheet spells it ("1 800 FLOWERS COM INC", "1-800-Flowers.com", "10X GENOMICS, INC." —
+    its "800" or "10x" is not a figure), and every bare letters-and-digits name token ("3M",
+    never "$3M"). A figure that only equals a name digit ("800 stores") stays a figure."""
+    names = _sheet_subject_names(sheet)
+    for rx in _loose_name_patterns(names):
+        sentence = rx.sub("Subjectname", sentence)
+    tokens = _name_number_tokens(names)
+    if tokens:
+        sentence = re.sub(r"(?<![\w$€£¥])(?:" + "|".join(re.escape(t) for t in sorted(tokens))
+                          + r")(?!\w)", "Subjectname", sentence, flags=re.IGNORECASE)
+    return sentence
+
+
+_NAME_SEP = r"[\s\-.,&']*"
+
+
+def _loose_name_patterns(names: Sequence[str]) -> List["re.Pattern[str]"]:
+    """One pattern per subject name holding a digit: its words (corporate suffixes dropped) in
+    order, any punctuation or spacing between them, required up to its first all-letter word and
+    optional after it ("1 800 FLOWERS COM" → "1-800-Flowers", "1-800-Flowers.com")."""
+    out = []
+    for name in names:
+        core = [t for t in _SUBJECT_TOKEN_RE.findall(compliance.fold(name[:TITLE_CAP]))
+                if t not in _CORPORATE_SUFFIXES]
+        if not core or not any(any(c.isdigit() for c in t) for t in core):
+            continue
+        cut = next((i + 1 for i, t in enumerate(core) if t.isalpha()), len(core))
+        body = _NAME_SEP.join(re.escape(t) for t in core[:cut])
+        body += "".join(f"(?:{_NAME_SEP}{re.escape(t)})?" for t in core[cut:])
+        out.append(re.compile(rf"(?<![\w$€£¥]){body}(?!\w)", re.IGNORECASE))
+    return out
+
+
+def _sheet_subject_names(sheet: Any) -> List[str]:
+    out: List[str] = []
+    for s in getattr(sheet, "subjects", None) or () if isinstance(sheet, C.FactSheet) else ():
+        out += [x for x in (getattr(s, "name", None), getattr(s, "ticker", None))
+                if isinstance(x, str) and x]
+    return out
 
 
 # ── the per-text rule chain ──────────────────────────────────────────────────────────────────
@@ -909,9 +968,128 @@ def _text_issues(field: str, raw: Any, *, cap: int, time_words_ok: bool,
         out.append(Issue(field, "valuation_verdict", _detail(hit)))
     if grounding_ctx is not None:
         gtext = clean.title() if caps_label and clean.isupper() else clean
+        names = _name_number_tokens(subjects)
+        named = set()
         for v in grounding.check_grounding(field, gtext, grounding_ctx):
-            out.append(Issue(field, v.code, _detail(v.detail)))
+            token = _name_number_detail(v, names)
+            if token is None:
+                out.append(Issue(field, v.code, _detail(v.detail)))
+            elif token not in named:
+                named.add(token)
+                if _reads_as_an_amount(token, gtext):
+                    out.append(Issue(field, "subject_name_number", _detail(v.detail)))
     return out
+
+
+#: Grounding codes that read a digit as a quantity.
+_NUMBER_CODES = frozenset({"number_context", "ungrounded_number", "ungrounded_name_number"})
+#: A multiple ("10x") reads as a quantity wherever it stands.
+_MULTIPLE_RE = re.compile(r"\d+(?:\.\d+)?x")
+
+
+def _name_number_tokens(subjects: Any) -> FrozenSet[str]:
+    """The subject-name tokens a name exemption can apply to: letters AND digits in one token
+    ("3m", "8x8"). A bare numeral ("800" of 1-800-Flowers, "1847") or a multiple ("10x") is a
+    quantity wherever it stands, so it is never exempt (such a piece is refused, fail closed)."""
+    toks = subjects if isinstance(subjects, frozenset) else subject_tokens(subjects)
+    return frozenset(t for t in toks if any(c.isdigit() for c in t) and any(c.isalpha() for c in t)
+                     and not _MULTIPLE_RE.fullmatch(t))
+
+
+def _name_number_detail(v: Any, names: FrozenSet[str]) -> Optional[str]:
+    """The subject-name token a grounding number violation is about, or None."""
+    if not names or getattr(v, "code", None) not in _NUMBER_CODES:
+        return None
+    detail = compliance.fold(str(getattr(v, "detail", "") or "")).strip(" .,;:!?'\"$€£¥")
+    return detail if detail in names else None
+
+
+# Where an occurrence of a digit-bearing subject name ("3M") stands decides what it is. It is the
+# company everywhere EXCEPT in a shape only an amount takes. A first rule that exempted only
+# name positions refused "Origins of 3M", "the 3M model" and about a third of honest 3M prose,
+# and failed the live outline (review round 2, 2026-10-23); a count-noun-only rule let "3M in
+# fines" and "USD 3M" through (round 1). Known residual: a bare count ("3M served 3M customers")
+# reads as the name — the prompt forbids K/M/B abbreviations and the owner reviews every piece.
+# A currency symbol or code, never the word "dollar": "every dollar 3M invests" is honest, and
+# "3M dollars" is one number grounding refuses on its own (review round 4).
+_CURRENCY_BEFORE_RE = re.compile(r"(?:[$€£¥]\s*|\b(?:usd|us\$|eur|gbp|cad|aud|jpy)\s+)\Z",
+                                 re.IGNORECASE)
+_POSSESSIVE_AFTER_RE = re.compile(r"['’]s\b", re.IGNORECASE)
+_POSSESSIVE_WORTH_RE = re.compile(r"['’]s\s+worth\s+of\b", re.IGNORECASE)
+# A hedge may stand between an amount word and the figure ("worth about 3M").
+_HEDGE = (r"(?:(?:about|around|over|under|up\s+to|some|just\s+(?:over|under)|roughly|nearly|"
+          r"almost|approximately)\s+)?")
+_CHANGE_VERBS = (r"ris(?:e[sn]?|ing)|rose|gr(?:ow[ns]?|ew|owing)|increas(?:e[sd]?|ing)|"
+                 r"decreas(?:e[sd]?|ing)|declin(?:e[sd]?|ing)|jump(?:s|ed|ing)?|climb(?:s|ed|ing)?|"
+                 r"drop(?:s|ped|ping)?|surg(?:e[sd]?|ing)|soar(?:s|ed|ing)?|slip(?:s|ped|ping)?|"
+                 r"shr(?:ank|unk|inks?|inking)")
+# Only words that do not also take a COMPANY as their object: "a book about 3M", "brands under
+# 3M", "the task fell to 3M", "Post-it earned 3M a reputation" are honest (review round 3).
+_AMOUNT_BEFORE_RE = re.compile(
+    r"\b(?:roughly|nearly|almost|approximately|circa|exactly|an\s+estimated|"
+    r"(?:more|less|fewer|greater)\s+than|at\s+(?:least|most)|total(?:s|ed|led|ing|ling)?(?:\s+of)?|"
+    r"(?:valued|priced|estimated)\s+at|worth|spen(?:t|ds?|ding)|borrow(?:ed|s|ing)?|"
+    r"repa(?:id|ys|ying)|averag(?:e[sd]?|ing)|"
+    r"(?:" + _CHANGE_VERBS + r")\s+(?:by|to|from)|(?:fell|falls?|falling)\s+(?:by|from))"
+    r"\s+" + _HEDGE + r"\Z", re.IGNORECASE)
+# The company, not an amount, after those words: a passive agent ("was dropped by 3M") and a
+# source with a noun after it ("grew from 3M research").
+_PASSIVE_BY_RE = re.compile(r"\b(?:was|were|is|are|been|be|being)\s+(?:\w+\s+)?\w+\s+by\s+\Z",
+                            re.IGNORECASE)
+_SOURCE_FROM_RE = re.compile(r"\bfrom\s+\Z", re.IGNORECASE)
+_LOWER_WORD_AFTER_RE = re.compile(r"\s+[a-z]")
+# Money nouns that never name a business line ("goods", "products", "orders" do: "competes with
+# 3M in consumer products"), and the money adjectives that may stand between ("3M in annual
+# revenue", "3M in share repurchases") — never a free word ("partnered with 3M in data center
+# sales").
+_MONEY_NOUNS = (r"revenues?|sales|cash|fines?|fees?|penalt(?:y|ies)|profits?|earnings|income|"
+                r"tax(?:es)?|royalt(?:y|ies)|debt|loans?|savings|costs?|expenses?|spending|funding|"
+                r"investments?|dividends|buybacks|repurchases|proceeds|damages|settlements?|capital|"
+                r"losses|value|payments?|payouts?|charges?|liabilities|wages|bonuses|write-?downs")
+_MONEY_ADJECTIVES = (r"annual|new|total|net|gross|quarterly|yearly|additional|extra|unpaid|back|"
+                     r"operating|free|cash|legal|share|stock|dividend|impairment|interest|research|"
+                     r"capital|tax")
+_UNIT_NOUNS = (r"units?|rolls?|tons?|tonnes?|barrels?|masks?|respirators?|items?|pieces?|"
+               r"sheets?|pounds?|gallons?|liters?|litres?|miles?|meters?|metres?")
+_HYPHEN = "[-\u2010\u2011\u2012\u2013]"
+# "a/per" only: "Hospitals used 3M respirators every day" is honest (review round 4).
+_AMOUNT_AFTER_RE = re.compile(
+    r"(?:\s*%|" + _HYPHEN + r"(?:dollars?|units?|tons?|tonnes?|barrels?|people|strong|plus|square)\b|"
+    r"\s+(?:worth(?!\s+(?:it|a\s+(?:closer\s+|second\s+|quick\s+)?(?:look|read)|the\s+\w+|"
+    r"[a-z]+ing)\b)|percent|per|annually|yearly|times|x)\b|"
+    r"\s+(?:in|of)\s+(?:(?:" + _MONEY_ADJECTIVES + r")\s+){0,2}(?:" + _MONEY_NOUNS + r")\b|"
+    r"\s+(?:" + _UNIT_NOUNS + r")\s+(?:a|per)\s+(?:day|week|month|year|quarter)\b)",
+    re.IGNORECASE)
+
+
+def _reads_as_an_amount(token: str, text: str) -> bool:
+    """Some occurrence of the subject-name `token` in `text` reads as a quantity: lower case
+    ("3m" is a length), a currency before it ("$3M", "USD 3M"), a quantity or change word before
+    it ("nearly 3M", "grew by 3M", "spends 3M", "worth about 3M", "a total of 3M"; never a
+    passive agent "dropped by 3M" or a source "grew from 3M research"), or a measure after it
+    ("3M%", "3M in fines", "3M in share repurchases", "3M worth of tape", "3M-dollar", "3M masks a
+    day"). A possessive ("3M's history") is the name unless a currency precedes it or "worth of"
+    follows it. Fail
+    closed: no occurrence found = an amount (the violation named a token the text does not
+    show)."""
+    hits = list(re.finditer(rf"(?<!\w){re.escape(token)}(?!\w)", text or "", re.IGNORECASE))
+    if not hits:
+        return True
+    for m in hits:
+        if not any(c.isupper() for c in m.group(0)):
+            return True
+        before, after = text[max(0, m.start() - 40):m.start()], text[m.end():m.end() + 60]
+        if _CURRENCY_BEFORE_RE.search(before) or _POSSESSIVE_WORTH_RE.match(after):
+            return True
+        if _POSSESSIVE_AFTER_RE.match(after):
+            continue
+        amount_word = _AMOUNT_BEFORE_RE.search(before) is not None
+        if amount_word and (_PASSIVE_BY_RE.search(before) or (
+                _SOURCE_FROM_RE.search(before) and _LOWER_WORD_AFTER_RE.match(after))):
+            amount_word = False
+        if amount_word or _AMOUNT_AFTER_RE.match(after):
+            return True
+    return False
 
 
 # ── blocks ───────────────────────────────────────────────────────────────────────────────────
@@ -1007,6 +1185,28 @@ def validate_block(field: str, block: Any, *, section_kind: str,
 
 
 # ── articles ─────────────────────────────────────────────────────────────────────────────────
+
+
+#: The longest paragraph read as a list's lead-in (one introducing sentence).
+LEAD_IN_MAX_WORDS = 30
+
+
+def block_key(text: Any) -> str:
+    """The repetition key of a block's text: `title_key` without its closing punctuation, so the
+    same sentence ending in "." and in ":" (an intro paragraph and its list's lead-in) is one."""
+    return title_key(text).rstrip(" .:;!?") if isinstance(text, str) else ""
+
+
+def is_list_lead_in(blocks: Any, index: int) -> bool:
+    """`blocks[index]` is a list's lead-in: a short paragraph right before a bulletList (the shape
+    `article_schema.section_blocks` makes from a list's text)."""
+    try:
+        block, nxt = blocks[index], blocks[index + 1]
+    except (IndexError, TypeError, KeyError):
+        return False
+    return (isinstance(block, Mapping) and isinstance(nxt, Mapping)
+            and block.get("type") == "paragraph" and nxt.get("type") == "bulletList"
+            and 0 < word_count(block.get("text")) <= LEAD_IN_MAX_WORDS)
 
 
 def title_key(title: Any) -> str:
@@ -1220,6 +1420,7 @@ def _validate_article(content: Any, kind: Any, sheet: Any, served_titles: Any,
             if len(blocks) > MAX_BLOCKS_PER_SECTION:
                 out.append(Issue(f"{f}.content", "bad_value",
                                  f"{len(blocks)} blocks > {MAX_BLOCKS_PER_SECTION}"))
+            section_seen = set()
             for j, block in enumerate(blocks[:MAX_BLOCKS_PER_SECTION]):
                 bf = f"{f}.content[{j}]"
                 out += validate_block(bf, block, section_kind=sk if sk in C.SECTION_KINDS
@@ -1227,14 +1428,20 @@ def _validate_article(content: Any, kind: Any, sheet: Any, served_titles: Any,
                 if not isinstance(block, Mapping):
                     continue
                 words = 0
+                lead_in = is_list_lead_in(blocks, j)
                 for _sub, value, _cap in _block_texts(block):
                     words += word_count(value)
-                    key = title_key(value) if isinstance(value, str) else ""
-                    # A repeated paragraph is the shape of a model repetition loop.
+                    key = block_key(value)
+                    # A repeated paragraph is the shape of a model repetition loop, inside a
+                    # section or across them. A list's lead-in ("Key factors include:") recurring
+                    # in ANOTHER section is not (each section is written blind to the others), so
+                    # a lead-in is compared within its own section only.
                     if key and len(key.split()) >= 4:
-                        if key in seen_blocks:
+                        if key in section_seen or (not lead_in and key in seen_blocks):
                             out.append(Issue(bf, "duplicate", _detail(str(value))))
-                        seen_blocks.add(key)
+                        section_seen.add(key)
+                        if not lead_in:
+                            seen_blocks.add(key)
                 total_words += words
                 if sk == "peg":
                     peg_words += words

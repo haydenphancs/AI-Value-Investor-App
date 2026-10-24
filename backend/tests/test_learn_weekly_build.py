@@ -54,6 +54,8 @@ BUNDLE = Path(__file__).resolve().parents[2] / "frontend/ios/ios/Resources/Money
 PEG = C.Fact("P7", "On October 21, 2026, NVIDIA CORP announced a supply agreement for data center "
                    "systems.", C.ORIGIN_SEC_PEG, "https://www.sec.gov/Archives/x",
              "0001045810-26-000101")
+# The 8-K the peg spans come from, as SEC's submissions record lists it: it dates the peg facts.
+PEG_8K = sec_facts.Filing8K("2026-10-21", PEG.accession, "nvda-8k.htm", ("8.01",))
 XBRL = [
     C.Fact("S1", "NVIDIA CORP reported revenue of $130.5 billion for the fiscal year ended January "
                  "26, 2025 (Form 10-K).", C.ORIGIN_SEC_XBRL, "https://www.sec.gov/b", ACCN),
@@ -213,7 +215,7 @@ def rec(monkeypatch, fake):
     async def summary(cik, *, client=None):
         return sec_facts.CompanySummary(name="NVIDIA CORP", cik=CIK, tickers=("NVDA",),
                                         exchanges=("Nasdaq",), sic="3674", sic_description=None,
-                                        foreign_filer=False, recent_8k=())
+                                        foreign_filer=False, recent_8k=(PEG_8K,))
 
     async def annual(cik, name, *, client=None):
         return list(XBRL)
@@ -855,18 +857,46 @@ def test_assemble_fact_sheet_fails_closed_on_any_sec_error(rec, monkeypatch, cap
     assert "SECConfigException" in str(e.value) and "ERROR" in caplog.text
 
 
-def test_assemble_fact_sheet_drops_a_subject_sec_does_not_know(rec, monkeypatch):
+def test_assemble_fact_sheet_drops_a_subject_sec_does_not_know(rec, monkeypatch, caplog):
     async def unknown(cik, *, client=None):
         return None
 
     monkeypatch.setattr(sec_facts, "company_summary", unknown)
-    with pytest.raises(B.FactSheetUnavailable, match="filings 0"):   # peg + 2 primers: too thin
+    with pytest.raises(B.FactSheetUnavailable, match="filings 0"):   # 2 primers: too thin
         asyncio.run(B.assemble_fact_sheet("deep_dive", candidate(), library=LIBRARY))
     monkeypatch.setattr(B, "MIN_SHEET_FACTS", 1)
     sheet = asyncio.run(B.assemble_fact_sheet("deep_dive", candidate(), library=LIBRARY))
-    assert [f.id for f in sheet.facts] == ["P1", "L:dc-primer:f1", "L:nvda-primer:f1"]
+    # No submissions record, so no filing date for the peg: it is dropped, never left undated.
+    assert [f.id for f in sheet.facts] == ["L:dc-primer:f1", "L:nvda-primer:f1"]
+    assert "[learn-sheet-peg-undated] P7" in caplog.text
     assert sheet.subjects == (C.Subject("NVIDIA CORP", CIK, "NVDA"),)
     assert sheet.theme_slug == "ai-chips" and sheet.topic_title == "AI chip supply"
+
+
+def test_assemble_fact_sheet_dates_each_peg_from_its_own_8k(rec, monkeypatch, caplog):
+    """The 3M week (2026-10-23): two pegs from two 8-Ks filed on different days, and one peg whose
+    8-K is not in SEC's record. Each peg gets its OWN filing's date; the unknown one is dropped."""
+    other = C.Fact("P8", "NVIDIA CORP entered into a lease for a data center campus.",
+                   C.ORIGIN_SEC_PEG, "https://www.sec.gov/Archives/y", "0001045810-26-000099")
+    stray = C.Fact("P9", "NVIDIA CORP opened an office.", C.ORIGIN_SEC_PEG,
+                   "https://www.sec.gov/Archives/z", "0001045810-26-000042")
+
+    async def summary(cik, *, client=None):
+        return sec_facts.CompanySummary(
+            name="NVIDIA CORP", cik=CIK, tickers=("NVDA",), exchanges=("Nasdaq",), sic="3674",
+            sic_description=None, foreign_filer=False,
+            recent_8k=(PEG_8K, sec_facts.Filing8K("2026-10-19", "0001045810-26-000099", "a.htm", ())))
+
+    monkeypatch.setattr(sec_facts, "company_summary", summary)
+    cand = candidate(peg_facts=[vars(PEG), vars(other), vars(stray)])
+    sheet = asyncio.run(B.assemble_fact_sheet("deep_dive", cand, library=LIBRARY))
+    pegs = [f for f in sheet.facts if f.origin == C.ORIGIN_SEC_PEG]
+    assert [(f.id, f.accession) for f in pegs] == [("P1", PEG.accession),
+                                                    ("P2", "0001045810-26-000099")]
+    assert pegs[0].text == "Form 8-K filed with the SEC on October 21, 2026. " + PEG.text
+    assert pegs[1].text == ("Form 8-K filed with the SEC on October 19, 2026. NVIDIA CORP "
+                            "entered into a lease for a data center campus.")
+    assert "[learn-sheet-peg-undated] P9" in caplog.text
 
 
 def test_assemble_fact_sheet_never_swallows_a_cancellation(rec, monkeypatch):

@@ -338,13 +338,16 @@ def _cand_key(candidate: Any) -> str:
 # ── the fact sheet (plan §1.6) ───────────────────────────────────────────────────────────────
 
 
-async def _subject_facts(subject: C.Subject, sec: _SECReadRecorder) -> List[C.Fact]:
+async def _subject_facts(subject: C.Subject, sec: _SECReadRecorder
+                         ) -> Tuple[Optional[sec_facts.CompanySummary], List[C.Fact]]:
+    """The subject's submissions record (its 8-Ks date the peg facts) and its XBRL facts."""
     summary = await sec_facts.company_summary(subject.cik, client=sec)
     if summary is None:
         logger.warning("learn build: SEC has no record of CIK%s (%s) — no filing facts for it",
                        subject.cik, subject.name[:60])
-        return []
-    return await sec_facts.annual_facts(subject.cik, subject.name or summary.name, client=sec)
+        return None, []
+    return summary, await sec_facts.annual_facts(subject.cik, subject.name or summary.name,
+                                                 client=sec)
 
 
 def _library_entries(lib: case_library.CaseLibrary, theme: Optional[str],
@@ -375,6 +378,7 @@ async def assemble_fact_sheet(kind: str, candidate: Mapping[str, Any], *,
     sec = _SECReadRecorder()
     results = await asyncio.gather(*(_subject_facts(s, sec) for s in filers), return_exceptions=True)
     xbrl: List[C.Fact] = []
+    filed: Dict[str, str] = {}            # accession -> ISO filing date, from SEC's own record
     for subject, result in zip(filers, results):
         if isinstance(result, BaseException):
             if not isinstance(result, Exception):
@@ -385,7 +389,11 @@ async def assemble_fact_sheet(kind: str, candidate: Mapping[str, Any], *,
             raise FactSheetUnavailable(
                 f"SEC read for CIK{subject.cik} failed: {type(result).__name__}: {result}",
                 stage=STAGE) from result
-        xbrl.extend(result)
+        summary, facts = result
+        if summary is not None:
+            filed.update((f.accession, f.filing_date) for f in summary.recent_8k)
+        xbrl.extend(facts)
+    peg = fs.date_peg_facts(peg, filed)
     lib = library if library is not None else await asyncio.to_thread(case_library.get_case_library)
     entries = _library_entries(lib, theme, [s.cik for s in filers if s.cik])
     library_facts = [f for e in entries for f in lib.facts_for(e)]

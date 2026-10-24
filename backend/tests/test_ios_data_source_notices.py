@@ -63,3 +63,28 @@ def test_cms_also_credits_the_gdp_history(src):
     """The GDP path's 2017–24 history is BEA data as printed in CMS NHE Table 1 (review 2026-10-22)."""
     cms = _item(src, "Centers for Medicare & Medicaid Services")
     assert "historical US nominal GDP" in cms and "Bureau of Economic Analysis" in cms
+
+
+def test_the_global_market_sources_are_credited(src):
+    """The global market rows (2026-10-24) come from an EUR-Lex document, a CC BY 4.0 JRC report
+    and a US ITC report: each is listed, the JRC one with its licence and its copyright line, and
+    each says Caydex changed the figures (CC BY: "any changes are indicated")."""
+    ec = _item(src, "European Commission")
+    assert "COM(2026) 504" in ec and "CELEX:52026PC0504" in ec
+    jrc = _item(src, "European Commission, Joint Research Centre")
+    assert "CC BY 4.0" in jrc and "© European Union, 2025" in jrc and "JRC141323" in jrc
+    itc = _item(src, "U.S. International Trade Commission")
+    assert "Publication 5643" in itc and "pub5643.pdf" in itc
+    for text in (ec, jrc, itc):
+        assert "Caydex fills" in text and "extends" in text
+
+
+def test_every_global_market_source_is_credited(src):
+    """A source added to the global-markets table needs its credit here too."""
+    import json
+
+    table = json.loads((Path(__file__).resolve().parents[1] / "data/industry_global_markets.json")
+                       .read_text(encoding="utf-8"))
+    code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("//"))
+    for name, source in table["sources"].items():
+        assert source["url"] in code, f"{name}: {source['url']} is not on the Data Sources screen"

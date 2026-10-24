@@ -1165,7 +1165,7 @@ struct MarketDynamics {
     var concentrationBasis: String? = nil   // "revenue_share" | "market_cap"
     // Header, scope line and projection (backend 2026-10-22). The projection is computed on
     // the server; this type only formats it. Nil on a report stored before them.
-    var marketSizeLabel: String? = nil      // "US industry revenue" / "US industry value added"
+    var marketSizeLabel: String? = nil      // "US industry revenue" / "US industry value added" / "Global chip market"
     var scopeNote: String? = nil            // the row's one-line scope
     var projectionYear: Int? = nil          // the current year at report build
     var projectionTAM: Double? = nil        // billions, current dollars
@@ -1175,6 +1175,15 @@ struct MarketDynamics {
     // the mark can change without an app release. Nil → the plain year.
     var projectionYearLabel: String? = nil
     var projectionTargetYearLabel: String? = nil
+    // A GLOBAL row (backend 2026-10-24, owner "Replace with global"): `projectionBasis` is
+    // "global_estimate" for the worldwide market (chips, chip equipment, advertising, internet
+    // content), whose header, scope line and pair are the world's and whose growth column shows
+    // `projectionRatePct` ("Global rate") instead of the US history. Nil on older reports.
+    var projectionBasis: String? = nil
+    var projectionRatePct: Double? = nil
+    // The row's credit. Never drawn on the card (owner: no source line) — read only so a global
+    // row missing its credit falls back here exactly as it does in the PDF.
+    var projectionSourceLabel: String? = nil
 
     /// "Global" / "US" scope label, or nil when scope is unknown.
     var scopeLabel: String? {
@@ -1192,7 +1201,7 @@ struct MarketDynamics {
     /// "—" — and for a company quote (its own figure, usually worldwide).
     var tamHeaderLabel: String {
         guard tamIsAvailable else { return "Market Size (TAM)" }
-        if basis == .measured, let label = Self.trimmed(marketSizeLabel) { return label }
+        if basis == .measured, !isBrokenGlobalRow, let label = Self.trimmed(marketSizeLabel) { return label }
         guard let s = scopeLabel else { return "Market Size (TAM)" }
         return "\(s) - Market Size (TAM)"
     }
@@ -1230,6 +1239,29 @@ struct MarketDynamics {
     }
 
     var isCompanyQuote: Bool { basis == .companyQuote }
+
+    // MARK: - Global row
+
+    private var isGlobalBasis: Bool { tamBasis == "measured" && projectionBasis == "global_estimate" }
+
+    /// The global row's rate, when the row is one and the rate is a real number within the
+    /// bound the PDF draws (backend `GLOBAL_RATE_MAX_ABS`).
+    private var globalRate: Double? {
+        guard isGlobalBasis, let rate = projectionRatePct, rate.isFinite, abs(rate) <= 1000 else { return nil }
+        return rate
+    }
+
+    /// A COMPLETE global row — its pair, its rate, its header and its credit: the same test as
+    /// the backend's `is_complete_global_row` (PDF and chat). All-or-nothing: the card never puts
+    /// the world's figures under a US header, nor the world's header over the US value.
+    var showsGlobalRow: Bool {
+        globalRate != nil && projectionPair != nil
+            && Self.trimmed(marketSizeLabel) != nil && Self.trimmed(projectionSourceLabel) != nil
+    }
+
+    /// A row the server marked global that cannot be drawn whole (a damaged report): the card
+    /// falls back to the measured US value under the legacy header, with no scope line.
+    private var isBrokenGlobalRow: Bool { isGlobalBasis && !showsGlobalRow }
 
     private static func validYear(_ year: Int?) -> Int? {
         guard let year, (1990...2100).contains(year) else { return nil }
@@ -1284,8 +1316,26 @@ struct MarketDynamics {
         return "(\(year))"
     }
 
-    /// "(2017–24)" under the growth figure — only with a rate and a valid start < end.
+    /// The rate the growth column shows: a global row's projected rate (owner 2026-10-24,
+    /// "Global rate"), else the industry's measured history.
+    var shownGrowthRate: Double? {
+        showsGlobalRow ? globalRate : cagr5Yr
+    }
+
+    /// "(2026–31e)" under a global row's rate: its pair's own years, with the server's mark.
+    private var globalWindowLabel: String? {
+        guard showsGlobalRow,
+              let start = Self.validYear(projectionYear),
+              let target = Self.validYear(projectionTargetYear) else { return nil }
+        let mark = String(Self.yearLabel(projectionTargetYearLabel, target).dropFirst(String(target).count))
+        let end = start / 100 == target / 100 ? String(format: "%02d", target % 100) : String(target)
+        return "(\(start)–\(end)\(mark))"
+    }
+
+    /// "(2017–24)" under the growth figure — only with a rate and a valid start < end. A global
+    /// row's window is its projection's ("(2026–31e)").
     var growthWindowLabel: String? {
+        if showsGlobalRow { return globalWindowLabel }
         guard cagr5Yr != nil,
               let start = Self.validYear(cagrStartYear),
               let end = Self.validYear(cagrEndYear),
@@ -1301,17 +1351,19 @@ struct MarketDynamics {
     /// "+0.9%" / "0.0%" / "-3.0%". Rounded to 1 dp BEFORE the sign is chosen, so -0.04
     /// never prints "+-0.0%".
     var formattedGrowth: String {
-        guard let cagr = cagr5Yr, cagr.isFinite else { return "—" }
+        guard let cagr = shownGrowthRate, cagr.isFinite else { return "—" }
         let rounded = (cagr * 10).rounded() / 10
         if rounded == 0 { return "0.0%" }
         return String(format: "%+.1f%%", rounded)
     }
 
     var growthAccessibilityLabel: String {
-        guard let cagr = cagr5Yr, cagr.isFinite else { return "Average yearly growth: not available" }
+        guard let cagr = shownGrowthRate, cagr.isFinite else { return "Average yearly growth: not available" }
         let rounded = (cagr * 10).rounded() / 10
         let window: String
-        if let start = Self.validYear(cagrStartYear), let end = Self.validYear(cagrEndYear), start < end {
+        if showsGlobalRow, let start = Self.validYear(projectionYear), let end = Self.validYear(projectionTargetYear) {
+            window = ", projected, \(start) to \(end)"
+        } else if !showsGlobalRow, let start = Self.validYear(cagrStartYear), let end = Self.validYear(cagrEndYear), start < end {
             window = ", \(start) to \(end)"
         } else {
             window = ""
@@ -1357,7 +1409,7 @@ struct MarketDynamics {
             return MarketSizePair(fromValue: formattedCurrentTAM, fromYear: measuredYearLabel ?? "",
                                   toValue: target, toYear: targetLabel)
         case .measured:
-            return projectionPair
+            return isBrokenGlobalRow ? nil : projectionPair
         case .unknown:
             return nil
         }
@@ -1365,14 +1417,18 @@ struct MarketDynamics {
 
     /// The server's projection, formatted — no arithmetic here. Only on a row stored as
     /// measured, all-or-nothing: valid years with measured < start < target, both values
-    /// positive and finite. Anything else draws the measured value at its own year.
+    /// positive and finite. Anything else draws the measured value at its own year. A global
+    /// row is the worldwide market, not the US figure moved forward, so the US measured year
+    /// does not bound it (start < target only).
     private var projectionPair: MarketSizePair? {
         guard tamBasis == "measured",
               let start = Self.validYear(projectionYear),
-              let target = Self.validYear(projectionTargetYear),
-              let measured = measuredYear, measured < start, start < target,
+              let target = Self.validYear(projectionTargetYear), start < target,
               let fromValue = projectionTAM, fromValue.isFinite, fromValue > 0,
               let toValue = projectionTargetTAM, toValue.isFinite, toValue > 0 else { return nil }
+        if !isGlobalBasis {
+            guard let measured = measuredYear, measured < start else { return nil }
+        }
         return MarketSizePair(fromValue: Self.formatTAM(fromValue),
                               fromYear: "(\(Self.yearLabel(projectionYearLabel, start)))",
                               toValue: Self.formatTAM(toValue),
@@ -1393,7 +1449,7 @@ struct MarketDynamics {
     /// "Company's own figure — scope as stated."). A definition, not a source line: the card
     /// shows no source (owner, 2026-10-22). Nil when no TAM is shown or its basis is unknown.
     var scopeCaption: String? {
-        guard tamIsAvailable, basis != .unknown else { return nil }
+        guard tamIsAvailable, basis != .unknown, !isBrokenGlobalRow else { return nil }
         return Self.trimmed(scopeNote)
     }
 
@@ -1469,6 +1525,39 @@ struct MarketDynamics {
         projectionTargetTAM: 494.6,
         projectionYearLabel: "2026e",
         projectionTargetYearLabel: "2031e"
+    )
+
+    /// A semiconductor row with the server's GLOBAL estimate (2026 → 2031), for previews: the
+    /// legacy fields stay the measured US figure.
+    static let sampleGlobalChips = MarketDynamics(
+        industry: "Semiconductors",
+        concentration: .oligopoly,
+        cagr5Yr: 4.1,
+        currentTAM: 116.2,
+        futureTAM: 142.0,
+        currentYear: "2024",
+        futureYear: "2029",
+        lifecyclePhase: .secularGrowth,
+        tamSourceQuote: nil,
+        tamSourceLabel: "US Census AIES — Semiconductor and other electronic component manufacturing (NAICS 3344)",
+        sourceGrain: "industry",
+        tamScope: "us",
+        tamBasis: "measured",
+        tamYear: 2024,
+        cagrStartYear: 2017,
+        cagrEndYear: 2024,
+        concentrationBasis: "revenue_share",
+        marketSizeLabel: "Global chip market",
+        scopeNote: "Worldwide semiconductor sales, all regions.",
+        projectionYear: 2026,
+        projectionTAM: 1000.0,
+        projectionTargetYear: 2031,
+        projectionTargetTAM: 1799.5,
+        projectionYearLabel: "2026e",
+        projectionTargetYearLabel: "2031e",
+        projectionBasis: "global_estimate",
+        projectionRatePct: 12.5,
+        projectionSourceLabel: "Global estimate: European Commission, Chips Act 2.0 proposal COM(2026) 504 (Jun 2026), citing SIA and McKinsey, +12.5%/yr; 2031 extends the 2026–30 rate"
     )
 
     /// A measured-only industry (no public path tracked it), for previews.

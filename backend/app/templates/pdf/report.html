@@ -493,7 +493,9 @@
   {# Owner decisions 2026-10-22: growth over its real span; a measured Census row shows its stored
      projection (current year → +5, from public BLS / CMS / GDP paths) when it has one, else the
      measured value at its own year; the PDF carries the source lines the in-app card omits. A
-     company target appears only when its quote states it. #}
+     company target appears only when its quote states it. A global row (chips, chip equipment,
+     advertising, internet content; owner 2026-10-24) is the worldwide market: its own strip, the
+     global rate, and its credit as the whole source line. #}
   {% if moat.market_dynamics and moat.market_dynamics.market_size %}{% set md = moat.market_dynamics %}
   <table class="strip">
     <tr>
@@ -509,7 +511,8 @@
       <td><div class="k">Lifecycle</div><div class="v" style="font-size:12px;text-transform:capitalize">{{ md.lifecycle }}</div></td>
     </tr>
   </table>
-  {% if md.show_source %}<div class="src">Source: {% if md.proj_size and md.proj_target_size %}Measured {{ tam_money(md.market_size) }}{% if md.measured_year %} ({{ md.measured_year }}){% endif %} — {% endif %}{% if md.source_quote %}“{{ md.source_quote }}” — {% endif %}{{ md.tam_source_label or "Industry estimate" }}{% if md.scope_label %} ({{ md.scope_label }}){% endif %}{% if md.proj_size and md.proj_target_size and md.proj_caption %} · {{ md.proj_caption }}{% endif %}{% if md.growth_source %} · Growth: {{ md.growth_source }}{% endif %}</div>{% endif %}
+  {% if md.is_global %}<div class="src">Source: {{ md.proj_caption }}</div>
+  {% elif md.show_source %}<div class="src">Source: {% if md.proj_size and md.proj_target_size %}Measured {{ tam_money(md.market_size) }}{% if md.measured_year %} ({{ md.measured_year }}){% endif %} — {% endif %}{% if md.source_quote %}“{{ md.source_quote }}” — {% endif %}{{ md.tam_source_label or "Industry estimate" }}{% if md.scope_label %} ({{ md.scope_label }}){% endif %}{% if md.proj_size and md.proj_target_size and md.proj_caption %} · {{ md.proj_caption }}{% endif %}{% if md.growth_source %} · Growth: {{ md.growth_source }}{% endif %}</div>{% endif %}
   {% if md.scope_note %}<div class="src">{{ md.scope_note }}</div>{% endif %}
   {% endif %}
   {% if moat.competitors %}

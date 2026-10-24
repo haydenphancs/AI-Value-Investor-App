@@ -368,13 +368,21 @@ def _year_label(label: Any, year: int) -> str:
     return str(year)
 
 
+_GLOBAL_BASIS = "global_estimate"
+
+
 def _projection_pair(out: dict, basis: str, measured_year: Optional[int]) -> Optional[dict]:
     """The stored projection (2026-10-22, owner: "data from today year to the next 5 year") as
     display keys, or None. Shown only on a row STORED as measured, all-or-nothing: two real
     positive numbers, years measured < start < target. Anything malformed falls back to the
-    measured strip — never a half pair, never "$nan"."""
+    measured strip — never a half pair, never "$nan".
+
+    A GLOBAL row (`projection_basis = "global_estimate"`, owner 2026-10-24) is the worldwide
+    market, not the measured US figure moved forward, so the US measured year does not bound it
+    (start < target only); its growth cell is the global rate over the pair's own years."""
     if basis != "measured" or out.get("tam_basis") != "measured":
         return None
+    is_global = out.get("projection_basis") == _GLOBAL_BASIS
 
     def real(v: Any) -> Optional[float]:
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
@@ -383,16 +391,35 @@ def _projection_pair(out: dict, basis: str, measured_year: Optional[int]) -> Opt
 
     start, target = _year(out.get("projection_year")), _year(out.get("projection_target_year"))
     s_size, t_size = real(out.get("projection_tam")), real(out.get("projection_target_tam"))
-    if None in (start, target, s_size, t_size) or measured_year is None:
+    if None in (start, target, s_size, t_size) or not start < target:
         return None
-    if not measured_year < start < target:
+    if not is_global and (measured_year is None or not measured_year < start):
         return None
-    return {
+    target_label = _year_label(out.get("projection_target_year_label"), target)
+    pair = {
         "proj_year": _year_label(out.get("projection_year_label"), start), "proj_size": s_size,
-        "proj_target_year": _year_label(out.get("projection_target_year_label"), target),
+        "proj_target_year": target_label,
         "proj_target_size": t_size,
-        "proj_caption": _plain_text(out.get("projection_source_label"), 160),
+        "proj_caption": _plain_text(out.get("projection_source_label"), 240),
+        "is_global": False,
     }
+    if is_global:
+        # ONE all-or-nothing test, shared with chat and mirrored by iOS `showsGlobalRow`: a
+        # damaged global row falls back on every surface together.
+        from app.services.industry_global_market import is_complete_global_row
+
+        rate = _growth_pct(out.get("projection_rate_pct"))
+        if not is_complete_global_row(out) or rate is None or not pair["proj_caption"]:
+            return None
+        window = _growth_window(start, target)
+        pair.update({
+            "is_global": True,
+            "growth_pct": rate,
+            # "2026–31e": the target label's projected mark, on the window it closes.
+            "growth_window": window + target_label[len(str(target)):] if window else "",
+            "growth_source": "",
+        })
+    return pair
 
 
 def _measured_market_dynamics(md: Any) -> dict:
@@ -418,6 +445,8 @@ def _measured_market_dynamics(md: Any) -> dict:
       scope_note      the row's one-line scope (a measured Census row, or a company quote)
       proj_*          the stored projection, measured rows only (`_projection_pair`); the PDF
                       is where its source line lives (the in-app card shows none, owner 10-22)
+      is_global       a global row (owner 2026-10-24): the strip and growth cell are the
+                      worldwide market's and the source line is its credit alone
     """
     out = dict(md) if isinstance(md, dict) else {}
     basis = _tam_basis(out)
@@ -482,13 +511,20 @@ def _measured_market_dynamics(md: Any) -> dict:
         if basis == "measured" else "Market size",
         "scope_note": _plain_text(out.get("scope_note"), 160) if basis != "unknown" else "",
         "proj_year": None, "proj_size": None, "proj_target_year": None,
-        "proj_target_size": None, "proj_caption": "",
+        "proj_target_size": None, "proj_caption": "", "is_global": False,
     })
     if out["scope_note"]:
         out["scope_label"] = ""   # the scope line says it in full
     pair = _projection_pair(out, basis, measured_year)
     if pair is not None:
         out.update(pair)
+    elif basis == "measured" and out.get("projection_basis") == _GLOBAL_BASIS:
+        # A damaged global row: the measured US value under the legacy header with its US
+        # scope label and no scope line — never the world's header over a US figure (iOS does
+        # the same: `isBrokenGlobalRow`).
+        out["market_label"] = "Market size"
+        out["scope_note"] = ""
+        out["scope_label"] = scope.strip().upper() if isinstance(scope, str) else ""
     return out
 
 

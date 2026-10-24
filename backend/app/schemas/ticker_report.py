@@ -401,10 +401,13 @@ class MarketDynamicsResponse(BaseModel):
     #    scaled along a pinned public-domain path (`industry_tam_projection`): only on a measured
     #    Census row whose industry's tier projects, all nine `projection_*` keys or none. The
     #    legacy fields above never carry it. The in-app card shows no source line (owner); the
-    #    PDF prints `projection_source_label`.
-    market_size_label: Optional[str] = None   # "US industry revenue" | "US industry value added"; None → legacy header
-    scope_note: Optional[str] = None          # the row's one-line scope (Census row, or a company quote)
-    projection_basis: Optional[str] = None    # "bls_output" | "cms_nhe" | "gdp_path"; None = not projected
+    #    PDF prints `projection_source_label`. A "global_estimate" row (owner 2026-10-24,
+    #    `industry_global_market`: chips, chip equipment, advertising, internet content) is the
+    #    WORLDWIDE market instead — its own header and scope line, the published global path,
+    #    and the card's growth column shows its rate; the legacy fields stay the US figure.
+    market_size_label: Optional[str] = None   # "US industry revenue" | "US industry value added" | a global header ("Global chip market"); None → legacy header
+    scope_note: Optional[str] = None          # the row's one-line scope (Census row, global row, or a company quote)
+    projection_basis: Optional[str] = None    # "bls_output" | "cms_nhe" | "gdp_path" | "global_estimate"; None = not projected
     projection_year: Optional[int] = None     # the current year (US/Eastern) at report build
     projection_year_label: Optional[str] = None   # "2026e": the card prints it, marked as projected
     projection_tam: Optional[float] = None    # $B, current dollars

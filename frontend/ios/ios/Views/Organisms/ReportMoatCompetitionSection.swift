@@ -87,7 +87,7 @@ struct ReportMoatCompetitionSection: View {
         return marketMetricColumn(
             label: "Avg/yr",
             value: md.formattedGrowth,
-            valueColor: md.cagr5Yr == nil ? AppColors.textMuted : AppColors.textPrimary,
+            valueColor: md.shownGrowthRate == nil ? AppColors.textMuted : AppColors.textPrimary,
             subtitle: md.growthWindowLabel
         )
         .accessibilityElement(children: .ignore)
@@ -457,6 +457,14 @@ private func moatPreviewData(_ marketDynamics: MarketDynamics) -> ReportMoatComp
     ScrollView {
         ReportMoatCompetitionSection(data: moatPreviewData(.sampleProjected))
             .padding()
+    }
+    .background(AppColors.cardBackground)
+}
+
+#Preview("Global chip market") {
+    ScrollView {
+        ReportMoatCompetitionSection(data: moatPreviewData(.sampleGlobalChips))
+            .frame(width: 311)
     }
     .background(AppColors.cardBackground)
 }

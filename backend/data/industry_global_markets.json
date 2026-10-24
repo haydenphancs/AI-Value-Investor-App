@@ -1,0 +1,124 @@
+{
+ "_about": "Published GLOBAL market estimates for the Moat card's market row (owner decisions 2026-10-24: 'Replace with global', 'Chips + chip equipment', 'Ads + internet', 'Global rate', chip start '$1T in 2026', end year 'option 2, but no need to mark or note'). Only figures a government document states in its own words, in a document licensed for commercial re-use; a market-research firm the document cites is credited 'as cited', never quoted directly. value(Y): geometric between the stated points; past the last stated year, the last segment's rate for at most max_extension_years. Hand-curated: re-check every source yearly for a newer edition (documents/OWNER_TASKS.md) and set reviewed_on. Read by app/services/industry_global_market.py.",
+ "schema_version": 1,
+ "reviewed_on": "2026-10-24",
+ "horizon_years": 5,
+ "max_extension_years": 3,
+ "sources": {
+  "ec_com_2026_504": {
+   "publisher": "European Commission",
+   "document": "Proposal for a Regulation on a framework of measures for strengthening the Union's semiconductor ecosystem (Chips Act 2.0), COM(2026) 504 final, explanatory memorandum",
+   "date": "2026-06-03",
+   "url": "https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:52026PC0504",
+   "licence": "EUR-Lex legal notice (Commission Decision 2011/833/EU)",
+   "licence_url": "https://eur-lex.europa.eu/content/legal-notice/legal-notice.html",
+   "licence_quote": "Unless otherwise specified, you can re-use the legal documents published in EUR-Lex for commercial or non-commercial purposes.",
+   "cites": "WSTS Semiconductor Market Forecast Spring 2025 (2025 revenue); Semiconductor Industry Association, 'Global Semiconductor Sales Increase Substantially in February' (USD 1 trillion by 2026); McKinsey, 'The next era of semiconductor value creation' (USD 1.6 trillion by 2030)",
+   "credit": "European Commission, Chips Act 2.0 proposal COM(2026) 504 (Jun 2026), citing SIA and McKinsey"
+  },
+  "jrc_141323": {
+   "publisher": "European Commission, Joint Research Centre",
+   "document": "Bonnet, Ciani, Molnar, Nardo: EU's strengths and weaknesses in the global semiconductor sector, JRC141323, section 2.2.1 'Global equipment sales' (printed p. 24), Table 2.2 (p. 25) and the section's 'Main takeaways' (p. 34)",
+   "date": "2025-03-11",
+   "url": "https://publications.jrc.ec.europa.eu/repository/handle/JRC141323",
+   "licence": "CC BY 4.0",
+   "licence_url": "https://creativecommons.org/licenses/by/4.0/",
+   "licence_quote": "Unless otherwise noted, the reuse of this document is authorised under the Creative Commons Attribution 4.0 International (CC BY 4.0) licence (https://creativecommons.org/licenses/by/4.0/). This means that reuse is allowed provided appropriate credit is given and any changes are indicated. For any use or reproduction of photos or other material that is not owned by the European Union permission must be sought directly from the copyright holders.",
+   "cites": "TechInsights equipment database (retrieved April-September 2024)",
+   "credit": "EU Joint Research Centre, JRC141323 (Mar 2025, CC BY 4.0), citing TechInsights"
+  },
+  "usitc_5643": {
+   "publisher": "U.S. International Trade Commission",
+   "document": "Recent Trends in U.S. Services Trade: 2025 Annual Report, Publication 5643, chapter 4 (advertising services), pp. 69-72",
+   "date": "2025-07",
+   "url": "https://www.usitc.gov/publications/332/pub5643.pdf",
+   "licence": "US federal government work, public domain (17 U.S.C. 105)",
+   "licence_url": "https://www.copyright.gov/title17/92chap1.html#105",
+   "licence_quote": "Copyright protection under this title is not available for any work of the United States Government (17 U.S.C. 105).",
+   "cites": "Statista Market Insights, Advertising: Market data & analysis",
+   "credit": "U.S. International Trade Commission, Pub. 5643 (Jul 2025), citing Statista"
+  }
+ },
+ "industries": {
+  "Semiconductors": {
+   "label": "Global chip market",
+   "scope_note": "Worldwide semiconductor sales, all regions.",
+   "source": "ec_com_2026_504",
+   "anchor": {
+    "year": 2026,
+    "value_b": 1000.0,
+    "kind": "stated",
+    "quote": "The market is expected to surpass USD 1 trillion by 2026"
+   },
+   "segments": [
+    {
+     "to_year": 2030,
+     "end_value_b": 1600.0,
+     "kind": "stated",
+     "quote": "and to grow to USD 1.6 trillion by 2030"
+    }
+   ]
+  },
+  "Semiconductor Equipment & Materials": {
+   "label": "Global chip equipment",
+   "scope_note": "Worldwide chip-making equipment sales; excludes materials.",
+   "source": "jrc_141323",
+   "anchor": {
+    "year": 2024,
+    "value_b": 113.0,
+    "kind": "stated",
+    "quote": "Forecasts for 2024 remain stable, reaching $113bn."
+   },
+   "segments": [
+    {
+     "to_year": 2029,
+     "rate_pct": 9.7,
+     "check_end_value_b": 180.0,
+     "kind": "stated",
+     "quote": "Since 2021 global sales stabilized around $110bn per year and they are expected to increase to $180bn by 2029, with a CAGR 2024-29 of 9.7%"
+    }
+   ]
+  },
+  "Advertising Agencies": {
+   "label": "Global advertising market",
+   "scope_note": "Worldwide advertising revenue, all media.",
+   "source": "usitc_5643",
+   "anchor": {
+    "year": 2024,
+    "value_b": 1100.0,
+    "kind": "stated",
+    "quote": "the global advertising services market, which rose 50.8 percent, from $720.8 billion in 2019 to an estimated $1.1 trillion in 2024"
+   },
+   "segments": [
+    {
+     "to_year": 2029,
+     "rate_pct": 7.5,
+     "kind": "stated",
+     "quote": "global advertising revenue is forecast to continue rising at around 7.5 percent in 2025–29"
+    }
+   ]
+  },
+  "Internet Content & Information": {
+   "label": "Global digital ad market",
+   "scope_note": "Worldwide digital advertising revenue.",
+   "source": "usitc_5643",
+   "anchor": {
+    "year": 2024,
+    "value_b": 660.0,
+    "kind": "derived",
+    "quote": "Digital advertising comprised roughly 60 percent of global advertising revenue in 2023 and 2024.",
+    "derivation": "60% of the $1.1 trillion 2024 global advertising market (the same report)"
+   },
+   "segments": [
+    {
+     "to_year": 2029,
+     "rate_pct": 7.5,
+     "kind": "derived",
+     "quote": "global advertising revenue is forecast to continue rising at around 7.5 percent in 2025–29",
+     "derivation": "the report gives no digital-only forecast; its all-advertising rate is applied to the digital share (conservative: the digital share has been rising)"
+    }
+   ],
+   "pdf_note": "digital = 60% of global ad revenue, grown at the all-advertising rate"
+  }
+ }
+}

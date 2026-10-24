@@ -4427,3 +4427,131 @@ def test_any_failure_in_the_projection_step_leaves_the_row_untouched(monkeypatch
     assert not ({"market_size_label", "scope_note"} | _PROJ_KEYS) & set(md)
     assert any("ticker=RKLB" in r.getMessage() and "step=tam_projection" in r.getMessage()
                for r in caplog.records)
+
+
+# ── Global market row (owner decisions 2026-10-24, "Replace with global") ───────────────
+#
+# Chips, chip equipment, advertising and internet content show the WORLDWIDE market from a
+# published government estimate (`industry_global_market`): its own header, scope line and
+# 2026 → 2031 pair with basis "global_estimate". The legacy fields keep the US Census figure.
+
+_CHIPS_LABEL = "US Census AIES — Semiconductor and other electronic component manufacturing (NAICS 3344)"
+
+
+def _chips_dossier(**over):
+    kw = dict(industry="Semiconductors", current_tam=116.2, future_tam=142.0,
+              source_label=_CHIPS_LABEL, cagr_5y_pct=4.1, concentration_label="oligopoly",
+              lifecycle_phase="secular_growth")
+    kw.update(over)
+    return _ad_dossier(**kw)
+
+
+def test_a_chip_row_shows_the_global_market():
+    md = _measured(_chips_dossier())
+    assert md["market_size_label"] == "Global chip market"
+    assert md["scope_note"] == "Worldwide semiconductor sales, all regions."
+    assert md["projection_basis"] == "global_estimate"
+    assert (md["projection_year"], md["projection_tam"]) == (2026, 1000.0)
+    assert (md["projection_target_year"], md["projection_target_tam"]) == (2031, 1799.5)
+    assert md["projection_rate_pct"] == 12.5
+    assert (md["projection_year_label"], md["projection_target_year_label"]) == ("2026e", "2031e")
+    assert md["projection_source_label"].startswith("Global estimate: European Commission")
+    # The legacy fields are the measured US figure, for builds that read them.
+    assert (md["current_tam"], md["tam_year"], md["tam_basis"], md["tam_scope"]) == (116.2, 2024, "measured", "us")
+    assert md["cagr_5yr"] == 4.1 and md["tam_source_label"] == _CHIPS_LABEL
+
+
+def test_the_global_row_changes_no_legacy_key(monkeypatch):
+    import app.services.industry_global_market as glob
+
+    with_global = _measured(_chips_dossier())
+    monkeypatch.setattr(glob, "project_global_market", lambda **kw: None)
+    us_path = _measured(_chips_dossier())
+    assert us_path["market_size_label"] == "US industry revenue"
+    assert us_path["projection_basis"] == "bls_output"          # the US path, as before the change
+    new_keys = _PROJ_KEYS | {"market_size_label", "scope_note"}
+    assert set(with_global) == set(us_path)
+    assert {k: v for k, v in with_global.items() if k not in new_keys} == \
+           {k: v for k, v in us_path.items() if k not in new_keys}
+
+
+@pytest.mark.parametrize("industry, label, tam, start, target", [
+    ("Semiconductor Equipment & Materials", "Global chip equipment", 116.2, 136.0, 216.0),
+    ("Advertising Agencies", "Global advertising market", 92.4, 1271.2, 1825.0),
+    ("Internet Content & Information", "Global digital ad market", 165.0, 762.7, 1095.0),
+])
+def test_the_other_three_global_rows(industry, label, tam, start, target):
+    from app.services.industry_tam_service import INDUSTRY_TO_CENSUS, _census_source_label, census_codes
+
+    codes = census_codes(INDUSTRY_TO_CENSUS[industry])
+    dossier = _ad_dossier(industry=industry, current_tam=tam,
+                          source_label=_census_source_label(", ".join(codes), "label"))
+    md = _measured(dossier)
+    assert md["market_size_label"] == label and md["projection_basis"] == "global_estimate"
+    assert (md["projection_tam"], md["projection_target_tam"]) == (start, target)
+    assert md["current_tam"] == tam
+
+
+def test_internet_content_was_measured_only_in_the_us_and_is_now_global():
+    """No US path tracked Internet Content (measured-only tier); the global row gives it a pair."""
+    import app.services.industry_tam_projection as proj
+
+    assert proj.projection_tier("Internet Content & Information") == "measured_only"
+
+
+def test_past_the_extension_cap_the_row_falls_back_to_the_us_path():
+    """2028 → 2033 is 4 years past the ad report's last stated year (2029): the US row again,
+    with its own header, scope line and GDP-path projection."""
+    from app.services.industry_tam_service import INDUSTRY_TO_CENSUS, _census_source_label, census_codes
+
+    codes = census_codes(INDUSTRY_TO_CENSUS["Advertising Agencies"])
+    dossier = _ad_dossier(industry="Advertising Agencies", current_tam=92.4,
+                          source_label=_census_source_label(", ".join(codes), "label"))
+    md = _measured(dossier, start_year=2028)
+    assert md["market_size_label"] == "US industry revenue" and md["scope_note"] == _US_SCOPE
+    assert md["projection_basis"] == "gdp_path"
+
+
+def test_a_bea_backup_chip_row_gets_no_global_row():
+    md = _measured(_chips_dossier(source_label="BEA Computer and Electronic Products GDP (via FRED)"))
+    assert md["market_size_label"] == "US industry value added"
+    assert not (_PROJ_KEYS & set(md)) and "scope_note" not in md
+
+
+def test_a_chip_company_quote_keeps_its_own_figure():
+    md = _md_with_zero_tam()
+    ai = {"tam_source_quote": "We see a $1 trillion data center market by 2028, from $400 billion in 2025.",
+          "current_tam": 400e9, "future_tam": 1e12, "current_year": "2025", "future_year": "2028"}
+    _apply_tam_source(md, ai, _chips_dossier(), start_year=2026)
+    assert md["tam_basis"] == "company_quote"
+    assert "market_size_label" not in md and not (_PROJ_KEYS & set(md))
+
+
+def test_a_global_row_bug_never_costs_the_report(monkeypatch, caplog):
+    import logging
+    import app.services.industry_global_market as glob
+
+    def boom(**kw):
+        raise RuntimeError("global table exploded")
+    monkeypatch.setattr(glob, "project_global_market", boom)
+    caplog.set_level(logging.ERROR)
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = None
+    _apply_tam_source(md, {"tam_source_quote": ""}, _chips_dossier(), start_year=2026, ticker="NVDA")
+    assert md["tam_basis"] == "measured" and md["current_tam"] == 116.2
+    assert not ({"market_size_label", "scope_note"} | _PROJ_KEYS) & set(md)
+    assert any("ticker=NVDA" in r.getMessage() and "step=tam_projection" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_the_production_call_shape_builds_the_global_row(monkeypatch):
+    """Review 2026-10-24: production calls `_apply_tam_source` WITHOUT `start_year`; every other
+    global test passed one, so dropping the current-year default survived every test."""
+    import app.services.industry_tam_projection as proj
+
+    monkeypatch.setattr(proj, "current_year_et", lambda now=None: 2027)
+    md = _md_with_zero_tam()
+    md["cagr_5yr"] = None
+    _apply_tam_source(md, {"tam_source_quote": ""}, _chips_dossier(), ticker="NVDA")
+    assert md["projection_basis"] == "global_estimate" and md["market_size_label"] == "Global chip market"
+    assert (md["projection_year"], md["projection_tam"]) == (2027, 1124.7)

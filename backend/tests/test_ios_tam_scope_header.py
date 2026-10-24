@@ -77,9 +77,10 @@ def test_the_scope_prefix_requires_a_shown_tam():
         assert header.index(token) > guard.end(), f"{token} is read before the tamIsAvailable guard"
     assert re.search(r'guard\s+let\s+\w+\s*=\s*scopeLabel\s+else\s*\{\s*return\s+"Market Size \(TAM\)"\s*\}',
                      header), "an unknown scope must still return the unprefixed header"
-    # The server's label is a measured row's header only — never over a company's own figure.
-    assert re.search(r"if\s+basis\s*==\s*\.measured\s*,\s*let\s+\w+\s*=\s*Self\.trimmed\(marketSizeLabel\)",
-                     header)
+    # The server's label is a measured row's header only — never over a company's own figure,
+    # and never a damaged global row's world header over the US value (2026-10-24).
+    assert re.search(r"if\s+basis\s*==\s*\.measured\s*,\s*!isBrokenGlobalRow\s*,\s*"
+                     r"let\s+\w+\s*=\s*Self\.trimmed\(marketSizeLabel\)", header)
 
 
 def test_availability_is_the_predicate_the_view_uses():

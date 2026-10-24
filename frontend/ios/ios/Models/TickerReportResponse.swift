@@ -1101,7 +1101,10 @@ extension TickerReportAPIResponse {
                 projectionTargetYear: moatCompetition.marketDynamics.projectionTargetYear,
                 projectionTargetTAM: moatCompetition.marketDynamics.projectionTargetTam,
                 projectionYearLabel: moatCompetition.marketDynamics.projectionYearLabel,
-                projectionTargetYearLabel: moatCompetition.marketDynamics.projectionTargetYearLabel
+                projectionTargetYearLabel: moatCompetition.marketDynamics.projectionTargetYearLabel,
+                projectionBasis: moatCompetition.marketDynamics.projectionBasis,
+                projectionRatePct: moatCompetition.marketDynamics.projectionRatePct,
+                projectionSourceLabel: moatCompetition.marketDynamics.projectionSourceLabel
             ),
             dimensions: moatCompetition.dimensions.map { d in
                 MoatDimension(name: d.name, score: d.score, peerScore: d.peerScore)

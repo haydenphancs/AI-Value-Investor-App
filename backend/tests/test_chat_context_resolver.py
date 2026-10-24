@@ -3673,3 +3673,85 @@ async def test_report_chat_drops_projection_keys_off_a_company_quote(resolver, m
                                           ref="RKLB|warren_buffett"))
     for gone in ("projection_", "999", "1,999", "Market row on the card"):
         assert gone not in dump, gone
+
+
+_MD_GLOBAL = dict(
+    _MD_MEASURED, market_size_label="Global chip market",
+    scope_note="Worldwide semiconductor sales, all regions.",
+    projection_basis="global_estimate", projection_year=2026, projection_tam=1000.0,
+    projection_target_year=2031, projection_target_tam=1799.5, projection_rate_pct=12.5,
+    projection_source_label=("Global estimate: European Commission, Chips Act 2.0 proposal COM(2026) 504 "
+                             "(Jun 2026), citing SIA and McKinsey, +12.5%/yr; 2031 extends the 2026–30 rate"),
+    projection_year_label="2026e", projection_target_year_label="2031e",
+)
+
+
+def test_the_market_row_line_for_a_global_row():
+    """A global row (2026-10-24) states the world market and its rate as the card shows them —
+    not the US measured figure nor the US growth history, and no publisher named."""
+    specs = _ccr._market_row_figures({"moat_competition": {"market_dynamics": dict(_MD_GLOBAL)}})
+    line = _ccr._fit_items_counted(*specs[0])[0]
+    assert line.startswith("Market row on the card (Global chip market): ")
+    assert "(2026) → " in line and "(2031), worldwide, estimated from published government figures, +12.5%/yr" in line
+    assert "scope: Worldwide semiconductor sales" in line
+    for gone in ("measured", "avg growth", "European Commission", "McKinsey", "SIA", "US government"):
+        assert gone not in line, gone
+    damaged = dict(_MD_GLOBAL, projection_rate_pct=None)          # the card's US fallback, not []
+    specs = _ccr._market_row_figures({"moat_competition": {"market_dynamics": damaged}})
+    assert specs[0][0] == "Market row on the card (industry market size): "
+
+
+@pytest.mark.asyncio
+async def test_report_chat_drops_the_global_rows_credit_from_the_dump(resolver, monkeypatch):
+    block = await _resolve_report(resolver, monkeypatch, _small_moat_report(dict(_MD_GLOBAL)),
+                                  ref="NVDA|warren_buffett")
+    dump = _dump_of(block)
+    for gone in ("European Commission", "McKinsey", "global_estimate", "projection_"):
+        assert gone not in dump, gone
+    assert "Market row on the card (Global chip market)" in block
+
+
+def test_a_damaged_global_row_is_stated_as_the_card_draws_it():
+    """The card falls back to the measured US value under its legacy header with no scope line
+    (iOS `isBrokenGlobalRow`, the PDF alike): the lead says that — never the world header."""
+    for over in ({"projection_rate_pct": None}, {"projection_source_label": ""},
+                 {"market_size_label": None}, {"projection_year": "2026"}):
+        specs = _ccr._market_row_figures({"moat_competition": {"market_dynamics": dict(_MD_GLOBAL, **over)}})
+        line = _ccr._fit_items_counted(*specs[0])[0]
+        assert line.startswith("Market row on the card (industry market size): "), over
+        assert "measured — no projection" in line and "Worldwide" not in line and "Global" not in line, over
+
+
+def test_the_digital_ad_row_is_not_called_a_published_estimate():
+    digital = dict(_MD_GLOBAL, market_size_label="Global digital ad market",
+                   scope_note="Worldwide digital advertising revenue.", projection_tam=762.7,
+                   projection_target_tam=1095.0, projection_rate_pct=7.5)
+    line = _ccr._fit_items_counted(*_ccr._market_row_figures(
+        {"moat_competition": {"market_dynamics": digital}})[0])[0]
+    assert "estimated from published government figures" in line and "published global market estimate" not in line
+
+
+def test_the_dump_drops_the_us_figures_a_global_card_does_not_show():
+    """Review 2026-10-24: the dump kept the unlabelled US $116.2B and +4.1%/yr, so "how big is the
+    chip market?" could be answered with a figure the card no longer shows."""
+    md = _ccr._without_lead_figures({"moat_competition": {"market_dynamics": dict(_MD_GLOBAL)}})
+    kept = md["moat_competition"]["market_dynamics"]
+    for gone in ("current_tam", "cagr_5yr", "avg_growth_pct_per_year", "cagr_start_year", "cagr_end_year",
+                 "tam_year", "tam_scope", "tam_source_label", "projection_tam", "market_size_label"):
+        assert gone not in kept, gone
+    assert kept.get("concentration") == _MD_GLOBAL.get("concentration")      # the card still shows it
+    us = _ccr._without_lead_figures({"moat_competition": {"market_dynamics": dict(_MD_PROJECTED)}})
+    assert "current_tam" in us["moat_competition"]["market_dynamics"]       # a US row keeps its figure
+    damaged = _ccr._without_lead_figures({"moat_competition": {"market_dynamics":
+                                          dict(_MD_GLOBAL, projection_rate_pct=None)}})
+    assert "current_tam" in damaged["moat_competition"]["market_dynamics"]  # the card's fallback figure
+
+
+@pytest.mark.asyncio
+async def test_report_chat_states_a_global_row_on_a_full_size_report(resolver, monkeypatch):
+    report = _full_figures_report()
+    report["moat_competition"]["market_dynamics"] = dict(_MD_GLOBAL)
+    block = await _resolve_report(resolver, monkeypatch, _json.loads(_json.dumps(report)), ref="NVDA|warren_buffett")
+    head = block.split("(an excerpt; long sections are shortened):\n", 1)[0]
+    line = next(l for l in head.splitlines() if l.startswith("Market row on the card (Global chip market): "))
+    assert "+12.5%/yr" in line and "European Commission" not in block

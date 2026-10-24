@@ -690,8 +690,28 @@ _PROJECTION_KEYS = frozenset({
     "projection_year_label", "projection_target_year_label",
 })
 _MARKET_ROW_LEAD_KEYS = frozenset({"market_size_label", "scope_note"})
+# On a complete GLOBAL row (2026-10-24) the card shows the world market and its rate, not the US
+# Census figure or its growth history: those leave the dump too, or the model answers "how big
+# is the chip market?" with the unlabelled US $116B the card no longer shows.
+_US_MEASURED_KEYS_ON_GLOBAL_ROW = frozenset({
+    "current_tam", "future_tam", "current_year", "future_year", "tam_year", "tam_target_year",
+    "cagr_5yr", "cagr_start_year", "cagr_end_year", "tam_scope", "tam_source_label",
+    "growth_source_label", "source_grain",
+})
 
 _FigSpec = Tuple[str, List[str], int]   # (head, whole items, cap): one lead line
+
+
+def _is_complete_global_row(md: Any) -> bool:
+    """`industry_global_market.is_complete_global_row` — the PDF's and iOS's test (imported
+    lazily: it reads a pinned table module this resolver otherwise never loads)."""
+    try:
+        from app.services.industry_global_market import is_complete_global_row
+    except Exception as e:  # noqa: BLE001 — a broken import means no global lead, loudly
+        logger.error("chat: global market row check unavailable (%s: %s) — no global lead",
+                     type(e).__name__, e)
+        return False
+    return is_complete_global_row(md)
 
 
 def _fig_float(value: Any) -> Optional[float]:
@@ -851,15 +871,32 @@ def _market_row_figures(report: Dict[str, Any]) -> List[_FigSpec]:
     md = mc.get("market_dynamics") if isinstance(mc, dict) else None
     if not isinstance(md, dict) or md.get("tam_basis") != "measured":
         return []
-    measured = _fig_billions(md.get("current_tam"))
-    year = _fig_year(md.get("tam_year"))
-    if measured is None or year is None:
-        return []
     label = _clean_label(md.get("market_size_label"), 40) or "industry market size"
     items: List[str] = []
     start, target = _fig_year(md.get("projection_year")), _fig_year(md.get("projection_target_year"))
     s_val, t_val = _fig_billions(md.get("projection_tam")), _fig_billions(md.get("projection_target_tam"))
     rate = _fig_float(md.get("projection_rate_pct"))
+    global_basis = md.get("projection_basis") == "global_estimate"
+    if global_basis and _is_complete_global_row(md):
+        # A GLOBAL row (owner 2026-10-24): the card shows the worldwide market and its rate in
+        # place of the US figure and the US growth history, so neither is stated here (and both
+        # leave the dump, `_without_lead_figures`). "Estimated from" holds for all four rows: the
+        # 2031 values extend a stated rate, and the digital row is derived from a stated share.
+        items.append(f"{s_val} ({start}) → {t_val} ({target}), worldwide, estimated from published "
+                     f"government figures, {rate:+.1f}%/yr (current dollars)")
+        scope = _clean_label(md.get("scope_note"), 140)
+        if scope:
+            items.append(f"scope: {scope}")
+        return [(f"Market row on the card ({label}): ", items, _FIG_MARKET_CAP)]
+    measured = _fig_billions(md.get("current_tam"))
+    year = _fig_year(md.get("tam_year"))
+    if measured is None or year is None:
+        return []
+    if global_basis:
+        # A damaged global row: the card draws the measured US value under its legacy header
+        # with no scope line (iOS `isBrokenGlobalRow`, the PDF alike) — state exactly that.
+        return [("Market row on the card (industry market size): ",
+                 [f"{measured} ({year}), measured — no projection for this industry"], _FIG_MARKET_CAP)]
     if (None not in (start, target, s_val, t_val, rate) and year < start < target):
         items.append(f"{s_val} ({start}) → {t_val} ({target}), projected at {rate:+.1f}%/yr "
                      f"(current dollars, from public US government projections)")
@@ -1341,6 +1378,8 @@ def _without_lead_figures(report: Any) -> Any:
         drop = drop | _PROJECTION_KEYS
         if md.get("tam_basis") == "measured":
             drop = drop | _MARKET_ROW_LEAD_KEYS
+            if _is_complete_global_row(md):
+                drop = drop | _US_MEASURED_KEYS_ON_GLOBAL_ROW
         out["moat_competition"] = {**moat, "market_dynamics": {
             _dump_key(k): _dump_year(k, v)
             for k, v in md.items() if not (isinstance(k, str) and k.lower() in drop)

@@ -103,6 +103,31 @@ struct DataSourcesView: View {
                 + "GDP-based projections.",
             url: "https://www.cms.gov/data-research/statistics-trends-and-reports/national-health-expenditure-data/projected"
         ),
+        // Published global market estimates (backend/data/industry_global_markets.json,
+        // 2026-10-24): the credit the EU re-use decision and CC BY 4.0 ask for, with the change
+        // indicated (Caydex fills and extends the stated years).
+        DataSourceItem(
+            name: "European Commission",
+            usage: "Global chip market estimate from the Chips Act 2.0 proposal, COM(2026) 504 "
+                + "(EUR-Lex). Caydex fills the years between its stated figures and extends its "
+                + "last rate to five years ahead.",
+            url: "https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:52026PC0504"
+        ),
+        DataSourceItem(
+            name: "European Commission, Joint Research Centre",
+            usage: "Global chip-equipment sales estimate from \"EU's strengths and weaknesses "
+                + "in the global semiconductor sector\" (JRC141323). © European Union, 2025, "
+                + "licensed under CC BY 4.0. Caydex fills the years between its stated figures "
+                + "and extends its last rate to five years ahead.",
+            url: "https://publications.jrc.ec.europa.eu/repository/handle/JRC141323"
+        ),
+        DataSourceItem(
+            name: "U.S. International Trade Commission",
+            usage: "Global advertising and digital advertising estimates from Recent Trends in "
+                + "U.S. Services Trade, 2025 (Publication 5643). Caydex fills and extends the "
+                + "years from its stated figure and rate.",
+            url: "https://www.usitc.gov/publications/332/pub5643.pdf"
+        ),
         DataSourceItem(
             name: "U.S. Food and Drug Administration (openFDA)",
             usage: "Drug and device approval counts for healthcare companies.",

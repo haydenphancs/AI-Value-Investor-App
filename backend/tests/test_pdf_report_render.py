@@ -683,3 +683,60 @@ def test_a_projected_year_label_is_used_only_for_its_own_year(labels, want):
     section = _moat_html(md)
     for year in want:
         assert f"US industry revenue {year}" in section, year
+
+
+# ── Global market row (owner decisions 2026-10-24) ─────────────────────────────────────
+#
+# Chips / chip equipment / advertising / internet content: the strip is the worldwide market,
+# the growth cell its rate over the pair's own years, and the source line its credit alone —
+# never "Measured $116B (2024) — US Census".
+
+_GLOBAL_CHIPS = dict(
+    _AD_MEASURED, industry="Semiconductors", current_tam=116.2, cagr_5yr=4.1,
+    tam_source_label="US Census AIES — Semiconductor and other electronic component manufacturing (NAICS 3344)",
+    growth_source_label="US Census AIES — Semiconductor and other electronic component manufacturing (NAICS 3344)",
+    market_size_label="Global chip market", scope_note="Worldwide semiconductor sales, all regions.",
+    projection_basis="global_estimate", projection_year=2026, projection_tam=1000.0,
+    projection_target_year=2031, projection_target_tam=1799.5, projection_rate_pct=12.5,
+    projection_source_label=("Global estimate: European Commission, Chips Act 2.0 proposal COM(2026) 504 "
+                             "(Jun 2026), citing SIA and McKinsey, +12.5%/yr; 2031 extends the 2026–30 rate"),
+    projection_year_label="2026e", projection_target_year_label="2031e",
+)
+
+
+def test_pdf_global_row_shows_the_world_market_its_rate_and_its_credit():
+    section = _moat_html(dict(_GLOBAL_CHIPS))
+    assert "Global chip market (2026e)" in section and "$1.0T" in section
+    assert "Global chip market (2031e)" in section and "$1.8T" in section
+    assert "Avg/yr 2026–31e" in section and "+12.5%" in section
+    assert ("Source: Global estimate: European Commission, Chips Act 2.0 proposal COM(2026) 504 "
+            "(Jun 2026), citing SIA and McKinsey, +12.5%/yr; 2031 extends the 2026–30 rate") in section
+    assert "Worldwide semiconductor sales, all regions." in section
+    for gone in ("Measured", "US Census", "$116B", "2017–24", "+4.1%", "Growth:", "(US)"):
+        assert gone not in section, gone
+
+
+def test_pdf_a_global_row_is_not_bounded_by_the_us_measured_year():
+    out = _measured_market_dynamics(dict(_GLOBAL_CHIPS, tam_year=2026))
+    assert out["is_global"] and out["proj_size"] == 1000.0
+
+
+@pytest.mark.parametrize("over", [
+    {"projection_rate_pct": None}, {"projection_rate_pct": float("nan")}, {"projection_rate_pct": "12.5"},
+    {"projection_rate_pct": 1500.0}, {"projection_source_label": ""}, {"projection_source_label": None},
+    {"projection_target_tam": None}, {"projection_target_year": 2026}, {"market_size_label": None},
+    {"projection_year": "2026"},
+])
+def test_pdf_a_damaged_global_row_never_prints_half_a_world_row(over):
+    out = _measured_market_dynamics(dict(_GLOBAL_CHIPS, **over))
+    assert not out["is_global"] and out["proj_size"] is None
+    section = _moat_html(dict(_GLOBAL_CHIPS, **over))
+    assert "(2031e)" not in section and "Global estimate" not in section and "+12.5%" not in section
+    # Review 2026-10-24: never the world's header or scope line over the US Census value.
+    assert "Global chip market" not in section and "Worldwide" not in section
+    assert "Market size (2024)" in section and "$116B" in section and "(US)" in section
+
+
+def test_pdf_a_us_projection_is_not_marked_global():
+    out = _measured_market_dynamics(dict(_AD_PROJECTED))
+    assert out["is_global"] is False and out["growth_window"] == "2017–24"

@@ -8125,26 +8125,38 @@ def _apply_tam_projection(
     """Header, scope line and projected pair for a MEASURED industry row (the measured branch of
     `_apply_tam_source` calls it after copying the figure). Adds keys only, all inside one guard:
     any failure — an import, a bad table, a bug — leaves the measured row exactly as it was and
-    logs `[report-industry-tam] step=tam_projection` with the ticker."""
+    logs `[report-industry-tam] step=tam_projection` with the ticker.
+
+    GLOBAL ROW (owner 2026-10-24, "Replace with global"): on a Census row of an industry with a
+    published global estimate (`industry_global_market`: chips, chip equipment, advertising,
+    internet content), the header, scope line and projection are the WORLDWIDE market's
+    (`projection_basis = "global_estimate"`) instead of the US path. The legacy fields keep the
+    measured US figure either way; with no usable global row the US path applies as before."""
     industry = getattr(industry_tam, "industry", None) or market_dynamics.get("industry")
     added: Dict[str, Any] = {}
     try:
+        from app.services.industry_global_market import project_global_market
         from app.services.industry_tam_projection import current_year_et, project_industry_tam
         from app.services.industry_tam_service import census_label_codes
 
         label = getattr(industry_tam, "source_label", None)
         if census_label_codes(label) is not None:
-            added["market_size_label"] = _US_REVENUE_LABEL
-            added["scope_note"] = _US_REVENUE_SCOPE_NOTE
-            projection = project_industry_tam(
-                industry=industry,
-                measured_tam_b=_finite_or_none(getattr(industry_tam, "current_tam", None)),
-                measured_year=market_dynamics.get("tam_year"),
-                source_label=label,
-                start_year=start_year if start_year is not None else current_year_et(),
-            )
-            if projection is not None:
-                added.update(projection.response_fields())
+            year = start_year if start_year is not None else current_year_et()
+            global_row = project_global_market(industry=industry, start_year=year)
+            if global_row is not None:
+                added.update(global_row.response_fields())
+            else:
+                added["market_size_label"] = _US_REVENUE_LABEL
+                added["scope_note"] = _US_REVENUE_SCOPE_NOTE
+                projection = project_industry_tam(
+                    industry=industry,
+                    measured_tam_b=_finite_or_none(getattr(industry_tam, "current_tam", None)),
+                    measured_year=market_dynamics.get("tam_year"),
+                    source_label=label,
+                    start_year=year,
+                )
+                if projection is not None:
+                    added.update(projection.response_fields())
         elif isinstance(label, str) and label.startswith("BEA "):
             # BEA GDP-by-industry (Railroads, or a backup while Census is down) is value added,
             # not revenue: its own header, no revenue scope line, never a projection.

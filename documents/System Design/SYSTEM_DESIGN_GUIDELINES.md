@@ -1780,8 +1780,9 @@ grounding, §2 "No Google Search grounding"; a stored `tam_scope='global'` row r
   "2026e" / "2031e" the card prints — owner: "mark it as projected on the card (server-side, no
   app release)", drawn as-is, a label for another year falls back to the plain year) — so every
   legacy field keeps its measured meaning for builds that read it. The figure is US PRODUCTION, not a US
-  market: semiconductors 3344 were $116B in 2024 while NVIDIA alone had $216B of revenue. No
-  licensable worldwide forecast exists, so none is shown. The in-app card shows no source line
+  market: semiconductors 3344 were $116B in 2024 while NVIDIA alone had $216B of revenue. A
+  licensable worldwide figure exists for four industries only (the global rows below); every
+  other industry keeps this US row. The in-app card shows no source line
   (owner: "no need to add source lines at all. but we can have source lines at the PDF export");
   the PDF prints "Measured $343B (2024) — … · Projection: BLS …, +4.3%/yr". Chat's figures lead
   states the card's market row as one labelled line (`_market_row_figures`: the projected pair,
@@ -1789,6 +1790,45 @@ grounding, §2 "No Google Search grounding"; a stored `tam_scope='global'` row r
   section's dump budget runs out before `market_dynamics`, so a dumped key never reached the
   model; the `projection_*` keys leave the dump. The LLM report digest, lifecycle and moat
   scoring stay on measured growth. Builds ≤ 1.1 and the 10-22 build show what they did before.
+- **Global rows: chips, chip equipment, advertising, internet content** (owner decisions
+  2026-10-24: "Replace with global", "Global rate", "$1T in 2026", end year "option 2, but no need
+  to mark or note"). For these four the card shows the WORLDWIDE market from a government document
+  licensed for commercial re-use, pinned in `backend/data/industry_global_markets.json` with the
+  quote behind every number, the licence sentence and the firms the document itself cites:
+  Semiconductors ← European Commission, Chips Act 2.0 proposal COM(2026) 504 ("expected to surpass
+  USD 1 trillion by 2026 and to grow to USD 1.6 trillion by 2030", citing SIA and McKinsey;
+  EUR-Lex re-use notice) → "Global chip market" $1.0T (2026e) → $1.8T (2031e), +12.5%/yr;
+  Semiconductor Equipment & Materials ← EU JRC report JRC141323 (CC BY 4.0; $113bn in 2024, 9.7%
+  a year to $180bn in 2029, TechInsights as cited; equipment only) → "Global chip equipment"
+  $136B → $216B; Advertising Agencies ← US ITC Pub. 5643 (public domain; $1.1T in 2024, ~7.5% a
+  year 2025–29, Statista as cited) → "Global advertising market" $1.27T → $1.83T; Internet
+  Content & Information ← the same report's "roughly 60 percent" digital share, grown at its
+  all-advertising rate (derived, and marked so in the table) → "Global digital ad market" $763B →
+  $1.10T. `industry_global_market.py` is geometric between the stated points and extends the last
+  segment's rate at most 3 years past the last stated year (2031 extends the 2026–30 / 2024–29
+  rates); beyond that, or with any table problem (fail-closed load, NaN / duplicate keys refused,
+  every figure's quote and a derived figure's arithmetic required, a credit long enough to cut
+  the change note refused), the row falls back to the US path — WARNING once per industry; a test
+  goes red on the first day a committed row would fall back (1 Jan 2028), and a `reviewed_on` in
+  the future is an ERROR. It runs in `_apply_tam_projection` before the US path, on a measured Census row only,
+  and writes the same additive fields with `projection_basis = "global_estimate"`: its own
+  `market_size_label` and `scope_note`; the legacy fields stay the US Census figure. The growth
+  column shows the global rate over the pair's years ("Avg/yr +12.5% (2026–31e)", iOS from the
+  build after 2026-10-24). One all-or-nothing test decides what a stored row is —
+  `is_complete_global_row` (PDF and chat; iOS `showsGlobalRow` mirrors it field for field: int
+  years, positive finite values, a finite rate within ±1000, a header and a credit): a damaged
+  global row draws the measured US value under the legacy header with no scope line on every
+  surface, never half a world row. On a complete one chat's dump also drops the US figure and its
+  growth history (the card no longer shows them). The PDF's source line is
+  the credit alone ("Global estimate: European Commission, … +12.5%/yr; 2031 extends the 2026–30
+  rate" — the change CC BY asks to indicate); the Data Sources screen credits all three; chat's
+  lead states the pair and rate, no publisher named. A figure WSTS / SIA / McKinsey / Statista /
+  TechInsights publish themselves is never shown directly (their terms do not allow it): only the
+  government document's own sentence. No free source covers software, IT services, telecom,
+  hardware, consumer electronics, communication equipment, components, distributors or media
+  (MIC excludes its Omdia/Statista charts from its licence; GSMA internal use only; ITU
+  non-commercial). Concentration and lifecycle stay on the US measurement. The four sources
+  are re-checked yearly (OWNER_TASKS).
 - **Concentration is a revenue-share HHI** of the universe constituents (owner decision
   2026-10-22, "Revenue-share HHI"): revenue = screener cap ÷ `priceToSalesRatioTTM`, captured
   by the universe build's existing ratios-ttm pass (`app/utils/implied_revenue.py`; no extra FMP
@@ -6452,6 +6492,7 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | 2026-10-21 | IAP audit phase 2, final review (§9b.12, OWNER_TASKS §2.4): every D6 owner text hands over the register half of "still owed?" (`iap_service.py::_d6_still_owed`: owed only while the period's `revoked_at` is set AND `subscription_transactions` holds no unreversed refund of that original transaction and period end, REINSTATE's own condition); REFUND LEAK 3b(a) lists each pack refunded after the charge with what it reclaimed and leaves the amount to Claude; the F04b one-off check sends every row whose higher plan was refunded to Claude ("CHECK": the rows cannot tell a renewal from a purchase) and calls a row "ok" only for a downgrade renewal or a lower plan ending more than 5 days after the higher one; a D6 hand grant is keyed (`d6:<original>:<period_end>`) and the owed test checks it; a step-4 correction rolls the period first; a step-4 correction is a refund row of its charge (refund-kind reason, `reverses_id` = the charge), never a system reason; migration 200's comments say "once per clawback" and the adjusted amount; the F06 known gap restated; a standing owner rule to tell Claude before creating any subscription offer; then (last verification pass, 2026-10-22) step 4 starts with `refund_credits` itself (it absorbs a post-200 clawback's cover), the D6 grant waits while another refunded period of the account still runs with nothing in force (a `plan_reinstated` row ends that period's reinstatement window), a could-not-tell line whose account has no period in force is owed after the period's end only if another paid period was in force at the line's time, and the `IAP webhook applied` line names its own transaction (`transaction=`) | A read-only review of the last stretch, each finding verified twice and PG-proven against migration 200: a period reinstated then refunded AGAIN re-stamps `revoked_at`, so the row alone would have granted a full allocation for a standing refund; a pack refund writes off nothing when the user's other pack credits cover the spend, so "any pack refund after the charge" withheld credits still owed; a superseded renewal that LANDED after the refund read as a purchase made after it (and, once that was fixed, one following a refund before the old period's end still did, while a genuine month-end purchase read as the leak); one reversal logs its D6 line once per delivery and a hand grant changes neither the row nor the register (two grants for one period); a correction written into an un-rolled month expired at the next roll; a correction under `grant` / `tester_grant` expires at a reinstatement (1170, not 1195) | An exact 3b(a) formula in the runbook (several packs and later spends make the owner's arithmetic error-prone; Claude computes it); registering a new `manual_correction` reason (a grant kind would be forced onto the system list by `test_credit_paid_periods.py`, which would lose it); deciding the F04b verdict from delivery order alone (it cannot tell a late-landing renewal from a purchase), or from the row's computed period start (a refund before the old period's end and month-end clamping defeat it); a new `manual_grant` reason for the D6 grant (a grant kind must join the system list, and the history screen already labels `plan_reinstated` "Plan credits restored") |
 | 2026-10-22 | The Moat card's market row is MEASURED, not projected (§7.3): the published value at its own year, growth labelled with its real window, a source caption, no future value ("Measured only"); a rate within ±1%/yr of zero is mature ("±1%/yr dead band"); concentration is a revenue-share HHI ("Revenue-share HHI"); Aerospace & Defense = NAICS 3364 + 334511 + 336992 + 332992/3/4 ("Aerospace + defense mfg") — migration 203 | RKLB read "CAGR (5Yr) −0.2%, $246B (2026) → $244B (2031)" for a market growing again: a 2017-peak → 2024-strike Census rate over 7 years, projected forward by the backend and again by iOS; "declining" cut every A&D ticker's moat Network Effects and was written into the bear case; market-cap HHI was about to flip A&D to "oligopoly" on SpaceX's cap | A longer 2012 baseline (its sign depends on the start year); an M3-extended 2025 estimate (mixed methods, ~15 codes); hiding A&D until a better measure; keeping market-cap HHI; keeping NAICS 3364 alone |
 | 2026-10-22 | The Moat card's market row also shows the current year → +5, in current dollars, from PUBLIC projections (§7.3): the measured Census value scaled along a pinned BLS Employment Projections 2025–35 sector path (58 industries), CMS National Health Expenditure Projections 2025–34 (Medical Distribution; Health Plans by owner exception, "Measured, Health Plans via CMS") or US nominal GDP (12, "i pick option 1"), else measured only (15); tiers by a 2017–24 backtest (within 2 pts/yr of Census); start from BLS's 2025 estimate ("BLS 2025 estimate"); header "US industry revenue" plus a scope line, a company quote labelled as its own figure ("Relabel + scope line", "Company TAM label"); no source line on the card, source lines in the PDF ("no need to add source lines at all. but we can have source lines at the PDF export"); new Optional fields only (TestFlight status of the 10-22 build unknown) | Owner: "i need data from today year to the next 5 year. we need to have a data for this." No free forecast of industry sales exists; the backtest showed BLS tracks Census only where the NAICS code is its own BLS sector (MAE 1.2 pts, r +0.83) and every public path points the wrong way for 15 industries (department stores −5%/yr against +3.5%) | FMP analyst consensus (worldwide company revenue, horizon FY2030, not an industry); a Census M3 nowcast (mixed methods); commercial forecasts (Oxford Economics, IBISWorld: licence); one economy-wide path for every industry; a projection with a caveat for the 15; a worldwide figure (IMF permission, SIPRI royalty, UNIDO/OECD history only); a company US-share chip (deferred: FMP lags filings by a year, RKLB 61.5% vs 79%) |
+| 2026-10-24 | Chips, chip equipment, advertising and internet content show the WORLDWIDE market instead of US industry revenue (§7.3 global rows): a published government estimate licensed for commercial re-use (European Commission COM(2026) 504, EU JRC141323 CC BY 4.0, US ITC Pub. 5643), geometric between its stated points, the last rate extended ≤ 3 years with no mark on the card ("Replace with global", "Global rate", "$1T in 2026", "option 2, but no need to mark or note", "Chips + chip equipment", "Ads + internet") | Owner, on the NVIDIA card's "US industry revenue $119B → $140B": "for seminconductor, it should be … projected to reach over $1.01 trillion to $1.03 trillion by 2031", then "find me a way to show TAM free with similar value" for "mostly technology". Those $1.0T-by-2031 figures were paid market-research releases on 2021–22 data; the industry's own statistics put 2026 alone at ~$1.5–1.7T and are copyrighted | Quote WSTS / SIA / Gartner / Statista directly (copyright, permission needed); the $1.01–1.03T market-research figure (outdated, paid); show only to the source's last year (2030 / 2029); keep the US row and add a global line beside it; global for software / telecom / hardware (no reusable source: MIC excludes its third-party charts, GSMA internal use, ITU non-commercial) |
 
 ---
 

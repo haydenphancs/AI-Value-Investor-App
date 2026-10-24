@@ -134,12 +134,15 @@ def test_a_pair_is_only_a_company_target_or_a_backend_projection():
     quote_arm = pair[pair.index("case .companyQuote:"):pair.index("case .measured:")]
     assert "formattedTargetTAM" in quote_arm and "targetYearLabel" in quote_arm
     measured_arm = pair[pair.index("case .measured:"):pair.index("case .unknown:")]
-    assert re.fullmatch(r"case \.measured:\s*return projectionPair\s*", measured_arm), measured_arm
+    # A damaged global row (2026-10-24) draws the measured value, never half a world row.
+    assert re.fullmatch(r"case \.measured:\s*return isBrokenGlobalRow \? nil : projectionPair\s*",
+                        measured_arm), measured_arm
     assert re.search(r"case \.unknown:\s*return nil", pair)
 
     projection = _decl_body(_market_dynamics(), "private var projectionPair: MarketSizePair? {")
     assert 'tamBasis == "measured"' in projection
-    assert re.search(r"measured\s*<\s*start\s*,\s*start\s*<\s*target", projection)
+    assert re.search(r"start\s*<\s*target", projection)
+    assert re.search(r"measured\s*<\s*start", projection)       # the US path's bound (global rows: none)
     assert "isFinite" in projection and "> 0" in projection
     code = _STRING_LITERAL.sub('""', projection)
     for banned in ("*", "/", "pow(", "cagr5Yr", "currentTAM", "futureTAM", "+ ", " - "):
@@ -161,7 +164,7 @@ def test_the_card_draws_no_source_line_and_the_scope_line_wraps():
     assert ".lineLimit(1)" not in caption
     assert "scopeCaption" in _decl_body(section, "private var marketDynamicsSection: some View {")
     scope = _decl_body(_market_dynamics(), "var scopeCaption: String? {")
-    assert re.search(r"guard\s+tamIsAvailable\s*,\s*basis\s*!=\s*\.unknown\s+else", scope)
+    assert re.search(r"guard\s+tamIsAvailable\s*,\s*basis\s*!=\s*\.unknown\s*,\s*!isBrokenGlobalRow\s+else", scope)
 
 
 def test_unknown_concentration_renders_a_dash():
@@ -234,3 +237,94 @@ def test_the_market_size_header_stays_on_one_line():
     column = _decl_body(_section(), "private var marketSizeColumn: some View {")
     header = column[column.index("Text(data.marketDynamics.tamHeaderLabel)"):column.index("if data.marketDynamics.tamIsAvailable")]
     assert ".lineLimit(1)" in header and ".minimumScaleFactor(" in header
+
+
+# ── Global market row (owner decisions 2026-10-24) ─────────────────────────────────────
+#
+# "Replace with global" + "Global rate": a row whose `projection_basis` is "global_estimate" is
+# the worldwide market — the header, scope line and pair are the server's global row and the
+# growth column shows its rate. All-or-nothing: a damaged global row never puts the world's
+# header or scope line over the measured US value.
+
+def test_the_dto_forwards_the_global_rows_basis_and_rate():
+    mapping = _decl_body(_strip_comments(_src(_RESPONSE)), "func toTickerReportData()")
+    for model, dto in (("projectionBasis", "projectionBasis"), ("projectionRatePct", "projectionRatePct"),
+                       ("projectionSourceLabel", "projectionSourceLabel")):
+        assert re.search(rf"\b{model}:\s*moatCompetition\.marketDynamics\.{dto}\b", mapping), model
+    md = _market_dynamics()
+    assert re.search(r"var projectionBasis:\s*String\?\s*=\s*nil", md)
+    assert re.search(r"var projectionRatePct:\s*Double\?\s*=\s*nil", md)
+
+
+def test_a_global_row_is_only_the_servers_global_basis_with_a_real_rate():
+    md = _market_dynamics()
+    basis = _decl_body(md, "private var isGlobalBasis: Bool {")
+    assert 'tamBasis == "measured"' in basis and 'projectionBasis == "global_estimate"' in basis
+    rate = _decl_body(md, "private var globalRate: Double? {")
+    assert ("guard isGlobalBasis, let rate = projectionRatePct, rate.isFinite, abs(rate) <= 1000 "
+            "else { return nil }") in rate
+    shows = " ".join(_decl_body(md, "var showsGlobalRow: Bool {").split())
+    # The backend's `is_complete_global_row`, field for field: pair, rate, header, credit.
+    assert ("globalRate != nil && projectionPair != nil && Self.trimmed(marketSizeLabel) != nil "
+            "&& Self.trimmed(projectionSourceLabel) != nil") in shows
+    broken = _decl_body(md, "private var isBrokenGlobalRow: Bool {")
+    assert "isGlobalBasis && !showsGlobalRow" in broken
+
+
+def test_a_damaged_global_row_falls_back_to_the_measured_us_value():
+    md = _market_dynamics()
+    header = _decl_body(md, "var tamHeaderLabel: String {")
+    assert re.search(r"basis == \.measured, !isBrokenGlobalRow, let label = Self\.trimmed\(marketSizeLabel\)", header)
+    scope = _decl_body(md, "var scopeCaption: String? {")
+    assert "!isBrokenGlobalRow" in scope
+    pair = _decl_body(md, "var marketSizePair: MarketSizePair? {")
+    assert re.search(r"case \.measured:\s*return isBrokenGlobalRow \? nil : projectionPair", pair)
+
+
+def test_only_a_us_projection_is_bounded_by_the_measured_year():
+    projection = _decl_body(_market_dynamics(), "private var projectionPair: MarketSizePair? {")
+    guard = projection[:projection.index("else { return nil }")]
+    assert "start < target" in guard and "measuredYear" not in guard
+    us_bound = _decl_body(projection, "if !isGlobalBasis {")
+    assert "guard let measured = measuredYear, measured < start else { return nil }" in us_bound
+
+
+def test_the_growth_column_shows_the_global_rate_on_a_global_row():
+    md = _market_dynamics()
+    shown = _decl_body(md, "var shownGrowthRate: Double? {")
+    assert "showsGlobalRow ? globalRate : cagr5Yr" in shown
+    assert "guard let cagr = shownGrowthRate, cagr.isFinite" in _decl_body(md, "var formattedGrowth: String {")
+    a11y = _decl_body(md, "var growthAccessibilityLabel: String {")
+    assert "guard let cagr = shownGrowthRate" in a11y and '", projected, ' in a11y
+    window = _decl_body(md, "var growthWindowLabel: String? {")
+    assert window.split("{", 1)[1].lstrip().startswith("if showsGlobalRow { return globalWindowLabel }")
+    gw = _decl_body(md, "private var globalWindowLabel: String? {")
+    for token in ("guard showsGlobalRow", "Self.validYear(projectionYear)", "Self.validYear(projectionTargetYear)",
+                  "Self.yearLabel(projectionTargetYearLabel, target)", "dropFirst(String(target).count)"):
+        assert token in gw, token
+    growth = _decl_body(_section(), "private var growthColumn: some View {")
+    assert "md.shownGrowthRate == nil ? AppColors.textMuted" in growth and "cagr5Yr" not in growth
+
+
+def test_the_global_chip_preview_exists():
+    md = _src(_MODELS)
+    assert "static let sampleGlobalChips = MarketDynamics(" in md
+    sample = md[md.index("static let sampleGlobalChips"):]
+    sample = sample[:sample.index("\n    )\n")]
+    assert 'projectionBasis: "global_estimate"' in sample and "projectionRatePct: 12.5" in sample
+    assert 'marketSizeLabel: "Global chip market"' in sample
+    assert "moatPreviewData(.sampleGlobalChips)" in _section()
+
+
+
+def test_the_ios_rate_bound_is_the_backends():
+    from app.services.industry_global_market import GLOBAL_RATE_MAX_ABS
+
+    rate = _decl_body(_market_dynamics(), "private var globalRate: Double? {")
+    bound = re.search(r"abs\(rate\)\s*<=\s*(\d+(?:\.\d+)?)", rate)
+    assert bound and float(bound.group(1)) == GLOBAL_RATE_MAX_ABS
+
+
+def test_the_card_never_draws_the_credit():
+    """`projectionSourceLabel` is read for the all-or-nothing test only (owner: no source line)."""
+    assert "projectionSourceLabel" not in _section()

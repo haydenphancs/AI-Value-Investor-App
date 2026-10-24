@@ -3,7 +3,9 @@
 Owner decisions, 2026-10-23 (plan "dcf-v2 + reliability + placement"):
   * Placement: "Overview tab row" + "Report: move up, expand". The estimate used to show only
     on the Analysis tab (not the default) and as the LAST of nine collapsed report modules,
-    so most readers never saw it.
+    so most readers never saw it. The report half was REVERSED the same day after the owner
+    saw it on the Simulator: "move 'Valuation and institution' to at the bottom as the old
+    way" — last module, collapsed, as before. The Overview row stays.
   * R3: on 2026-10-21 FRED failed, the backend sent no estimate anywhere, and the Analysis
     tab drew NO row — the estimate looked like it had never existed. The backend now flags
     that case (`caydex_estimate_unavailable`) and iOS says "temporarily unavailable", and
@@ -16,8 +18,8 @@ Pinned, in the Swift that ships:
     header price threaded from the Overview;
   * the Analysis card's unavailable arm comes AFTER the FMP `dcfRow` arm;
   * `StockRepository` skips `setCache` for a flagged overview;
-  * "Valuation & Institutions" is the FIRST deep-dive module and the ONLY one that starts
-    expanded, and `ReportDeepDiveSection` seeds its `@State` from it;
+  * "Valuation & Institutions" is the LAST deep-dive module and every module starts collapsed
+    (the owner's reversal above);
   * the wire contract: Pydantic `caydex_estimate_unavailable: Optional[bool] = None` ↔ Swift
     `Bool?` with the same CodingKey;
   * the chat context: the Overview turn is told the estimate its Price card draws, through ONE
@@ -268,7 +270,7 @@ def test_the_backend_and_ios_agree_on_the_flag():
     assert '= "caydex_estimate_unavailable"' in dto
 
 
-# ── the report: "Valuation & Institutions" first, expanded ──────────────────────────────────
+# ── the report: "Valuation & Institutions" last, collapsed (owner's reversal) ─────────────
 
 def _module_entries() -> list[str]:
     vm = _code(_REPORT_VM)
@@ -277,32 +279,26 @@ def _module_entries() -> list[str]:
     return re.findall(r"DeepDiveModule\(([^()]*)\)", array)
 
 
-def test_valuation_is_the_first_module_and_the_only_one_expanded():
+def test_valuation_is_the_last_module_as_before():
     entries = _module_entries()
     enum = _decl(_code(_REPORT_MODELS), "enum DeepDiveModuleType")
     cases = set(re.findall(r"case (\w+)", enum))
     assert len(entries) == len(cases) == 9, (len(entries), cases)
     assert {re.search(r"type: \.(\w+)", e).group(1) for e in entries} == cases, "every module once"
-    first = entries[0]
-    assert 'title: "Valuation & Institutions"' in first and "type: .wallStreetConsensus" in first
-    expanded = [e for e in entries if re.search(r"startsExpanded:\s*true", e)]
-    assert expanded == [first], f"only Valuation & Institutions starts expanded: {expanded}"
-    model = _decl(_code(_REPORT_MODELS), "struct DeepDiveModule: Identifiable")
-    assert re.search(r"var startsExpanded\s*=\s*false", model), "every other module defaults collapsed"
+    last = entries[-1]
+    assert 'title: "Valuation & Institutions"' in last and "type: .wallStreetConsensus" in last
     # The screen keeps the view model's order (it only filters out an empty module).
     report = _decl(_code(_REPORT_VIEW), "private func deepDiveModulesSection")
     assert "viewModel.deepDiveModules.filter" in report
     assert ".sorted" not in report and ".reversed" not in report
 
 
-def test_the_section_seeds_its_state_from_the_module():
+def test_every_report_module_starts_collapsed():
     section = _decl(_code(_DEEP_DIVE), "struct ReportDeepDiveSection")
-    init = _decl(section, "init(module: DeepDiveModule,")
-    assert "_isExpanded = State(initialValue: module.startsExpanded)" in init
-    for assigned in ("self.module = module", "self.isLast = isLast", "self.onCollapse = onCollapse",
-                     "self.content = content"):
-        assert assigned in init, assigned
-    assert "@State private var isExpanded" in section
+    assert re.search(r"@State private var isExpanded:\s*Bool\s*=\s*false", section)
+    assert "_isExpanded" not in section, "nothing seeds a module open"
+    model = _decl(_code(_REPORT_MODELS), "struct DeepDiveModule: Identifiable")
+    assert "startsExpanded" not in model and "startsExpanded" not in _code(_REPORT_VM)
     # The other guards on this file still hold their tokens.
     assert "var onCollapse: (() -> Void)? = nil" in section
     assert section.count("onCollapse?()") == 1

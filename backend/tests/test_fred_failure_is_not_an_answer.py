@@ -143,3 +143,77 @@ async def test_the_snapshot_does_not_pin_none_after_a_failed_observations_read(m
     fred._FAILED_AT[("DCOILWTICO", "obs:14")] -= fred._FAILURE_TTL_SECONDS + 1
     snap = await svc.get_snapshot("DCOILWTICO")
     assert snap is not None and snap.latest == 62.5
+
+
+# ── min_observations (opt-in, 2026-10-23): a truncated 200 is a failure for a windowed caller ──
+# The DCF's 5-year Treasury average needs ≥ 1008 DGS10 rows; a short 200 cached for six hours
+# would have blanked every estimate for six hours (R1, after the 2026-10-21 FRED outage).
+
+def _rows(n):
+    return [{"date": f"2026-{1 + i // 28:02d}-{1 + i % 28:02d}", "value": "4.0"} for i in range(n)]
+
+
+@pytest.mark.asyncio
+async def test_a_short_answer_is_a_failure_when_a_minimum_is_asked(monkeypatch, caplog):
+    calls = []
+
+    def _responder():
+        calls.append(1)
+        return ({"observations": _rows(3) if len(calls) == 1 else _rows(10)},)
+
+    _client(monkeypatch, _responder)
+    svc = _svc()
+    assert await svc.get_observations("DGS10", limit=1400, min_observations=5) == []
+    key = ("DGS10", "obs:1400")
+    assert key not in fred._CACHE, "a truncated answer must not be cached for six hours"
+    assert key in fred._FAILED_AT
+    assert any("3 usable row(s), 5 required" in r.getMessage() for r in caplog.records)
+    # herd guard inside the short window, then a retry that succeeds and IS cached
+    assert await svc.get_observations("DGS10", limit=1400, min_observations=5) == []
+    assert len(calls) == 1
+    fred._FAILED_AT[key] -= fred._FAILURE_TTL_SECONDS + 1
+    assert len(await svc.get_observations("DGS10", limit=1400, min_observations=5)) == 10
+    assert len(calls) == 2 and key in fred._CACHE and key not in fred._FAILED_AT
+
+
+@pytest.mark.asyncio
+async def test_without_a_minimum_a_short_answer_is_still_an_answer(monkeypatch):
+    """Control (today's behaviour for every other caller): default 0 caches what came back."""
+    calls = []
+
+    def _responder():
+        calls.append(1)
+        return ({"observations": _rows(3)},)
+
+    _client(monkeypatch, _responder)
+    svc = _svc()
+    assert len(await svc.get_observations("DGS10", limit=1400)) == 3
+    assert len(await svc.get_observations("DGS10", limit=1400)) == 3
+    assert len(calls) == 1 and ("DGS10", "obs:1400") not in fred._FAILED_AT
+
+
+@pytest.mark.asyncio
+async def test_a_short_cached_answer_is_not_served_to_a_caller_that_needs_more(monkeypatch):
+    calls = []
+
+    def _responder():
+        calls.append(1)
+        return ({"observations": _rows(3) if len(calls) == 1 else _rows(8)},)
+
+    _client(monkeypatch, _responder)
+    svc = _svc()
+    assert len(await svc.get_observations("DGS10", limit=1400)) == 3          # cached, default
+    assert len(await svc.get_observations("DGS10", limit=1400, min_observations=5)) == 8
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_minimum_counts_usable_rows_only(monkeypatch):
+    """FRED's '.' holiday rows are dropped before the count."""
+    def _responder():
+        return ({"observations": _rows(4) + [{"date": "2026-06-01", "value": "."}] * 3},)
+
+    _client(monkeypatch, _responder)
+    assert await _svc().get_observations("DGS10", limit=7, min_observations=5) == []
+    fred._FAILED_AT.clear()
+    assert len(await _svc().get_observations("DGS10", limit=7, min_observations=4)) == 4

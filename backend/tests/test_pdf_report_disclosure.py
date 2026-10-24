@@ -331,7 +331,7 @@ def test_a_caydex_insight_renders_while_the_switch_is_on(monkeypatch):
 
 
 def test_section_09_is_verdict_word_free_in_every_state(monkeypatch):
-    """Hard rule 4 (dcf-methodology-v1.md §5): never Undervalued / Overvalued / Cheap / Buy / Sell
+    """Hard rule 4 (dcf-methodology-v2.md §5): never Undervalued / Overvalued / Cheap / Buy / Sell
     / upside / downside — and always the "not a price target" notice beside a value."""
     from app.services import pdf_report_service as pdf
     monkeypatch.setattr(pdf.settings, "DCF_ENABLED", True)

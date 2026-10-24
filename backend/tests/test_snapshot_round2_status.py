@@ -493,9 +493,11 @@ async def test_valuation_status_survives_the_serve_time_estimate_copy(monkeypatc
     monkeypatch.setattr(vss.settings, "DCF_ENABLED", True)
 
     async def _no_estimate(ticker):
-        return None
+        return None, False
 
-    monkeypatch.setattr(vss, "caydex_estimate_or_none", _no_estimate)
+    # The attach reads the estimate WITH its unavailable flag (caydex_estimate_or_none is the
+    # shadow recorder's wrapper around it).
+    monkeypatch.setattr(vss, "caydex_estimate_with_status", _no_estimate)
     _reset(vss)
     svc = _bare(vss.ValuationSnapshotService, fmp=None)
     monkeypatch.setattr(svc, "_check_supabase_cache", lambda ticker: None)

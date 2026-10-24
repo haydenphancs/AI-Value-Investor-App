@@ -28,6 +28,7 @@ struct TickerDetailOverviewContent: View {
             // Snapshots
             TickerDetailSnapshotsSection(
                 snapshots: tickerData.snapshots,
+                currentPrice: tickerData.currentPrice,
                 onDeepResearchTap: onDeepResearchTap
             )
 

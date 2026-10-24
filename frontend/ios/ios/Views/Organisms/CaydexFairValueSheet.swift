@@ -3,7 +3,7 @@
 //  ios
 //
 //  Organism: the assumptions behind a Caydex Fair Value Estimate, what the number is and is
-//  not, and why it can move. The methodology is documents/research/dcf-methodology-v1.md;
+//  not, and why it can move. The methodology is documents/research/dcf-methodology-v2.md;
 //  this sheet must say what the model does and nothing more (spec hard rule 5).
 //
 
@@ -140,7 +140,7 @@ struct CaydexFairValueSheet: View {
         }
     }
 
-    /// Mirrors documents/research/dcf-methodology-v1.md §§1-2. Keep them in step.
+    /// Mirrors documents/research/dcf-methodology-v2.md §§1-2. Keep them in step.
     static let explanation: [String] = [
         "It adds up the free cash flow the company is expected to hand shareholders over the next 10 years, plus a value for the years after, and discounts it all back to today.",
         "The first years come from analysts' consensus forecasts of earnings, turned into cash flow with the company's own recent cash conversion. Later years are extended from that trend, slowing to a long-run growth rate.",

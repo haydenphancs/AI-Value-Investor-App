@@ -199,7 +199,14 @@ final class StockRepository: StockRepositoryProtocol {
             responseType: StockOverviewResponseDTO.self
         )
 
-        setCache(cacheKey, value: response)
+        // A response whose Caydex estimate is TEMPORARILY unavailable is shown but not
+        // cached: caching it would replay the gap for the cache's lifetime after the
+        // backend has recovered.
+        if response.hasUnavailableCaydexEstimate {
+            Self.log.warning("overview: not caching \(ticker, privacy: .public) — its Caydex estimate is temporarily unavailable")
+        } else {
+            setCache(cacheKey, value: response)
+        }
         print("✅ StockRepository: Got overview for \(ticker), range=\(range), interval=\(interval ?? "default"), extendedHours=\(extendedHours)")
         return response
     }

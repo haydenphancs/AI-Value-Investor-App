@@ -59,8 +59,12 @@ class TickerReportViewModel: ObservableObject {
     /// for the explicit "Regenerate · N credits" button.
     private let allowPaidOnOpen: Bool
 
-    // Deep Dive Modules - stored once to avoid regenerating UUIDs on every access
+    // Deep Dive Modules - stored once to avoid regenerating UUIDs on every access.
+    // "Valuation & Institutions" leads, expanded, because it carries the Caydex Fair Value
+    // Estimate (owner, 2026-10-23: "Report: move up, expand"); the PDF keeps its own order.
     let deepDiveModules: [DeepDiveModule] = [
+        DeepDiveModule(title: "Valuation & Institutions", iconName: "building.columns.fill", type: .wallStreetConsensus,
+                       startsExpanded: true),
         DeepDiveModule(title: "Recent Price Movement", iconName: "chart.xyaxis.line", type: .recentPriceMovement),
         DeepDiveModule(title: "The Revenue Engine", iconName: "dollarsign.circle", type: .revenueEngine),
         DeepDiveModule(title: "Fundamentals & Growth", iconName: "chart.bar.fill", type: .fundamentalsGrowth),
@@ -68,8 +72,7 @@ class TickerReportViewModel: ObservableObject {
         DeepDiveModule(title: "Insider & Management", iconName: "person.2.fill", type: .insiderManagement),
         DeepDiveModule(title: "Hidden Market Signals", iconName: "eye.fill", type: .hiddenMarketSignals),
         DeepDiveModule(title: "Industry & Competitive Moat", iconName: "shield.fill", type: .moatCompetition),
-        DeepDiveModule(title: "Macro-Economic & Geopolitical", iconName: "globe", type: .macroGeopolitical),
-        DeepDiveModule(title: "Valuation & Institutions", iconName: "building.columns.fill", type: .wallStreetConsensus)
+        DeepDiveModule(title: "Macro-Economic & Geopolitical", iconName: "globe", type: .macroGeopolitical)
     ]
 
     // MARK: - Initialization

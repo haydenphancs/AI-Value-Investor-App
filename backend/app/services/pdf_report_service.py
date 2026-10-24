@@ -159,7 +159,7 @@ def _num(v: Any) -> Optional[float]:
 def _price_gap(value: Optional[float], price: Optional[float], noun: str) -> tuple[Optional[float], str]:
     """(price-vs-value gap %, neutral words) — "Price 12% below the estimate" / "Price in line
     with the estimate" inside ±0.5 %. Never a verdict (hard rule 4,
-    documents/research/dcf-methodology-v1.md §5). (None, "—") when either side is missing or
+    documents/research/dcf-methodology-v2.md §5). (None, "—") when either side is missing or
     not positive."""
     if not (value and price and value > 0 and price > 0):
         return None, "—"
@@ -170,8 +170,8 @@ def _price_gap(value: Optional[float], price: Optional[float], noun: str) -> tup
 
 
 def _published_estimate(ws: dict, current_price: Optional[float], symbol: str = "") -> dict:
-    """The Caydex Fair Value Estimate as PUBLISHED on the report (model dcf-v1), normalised for
-    the PDF. One reading for the hero card and section 09, so the two can never disagree.
+    """The Caydex Fair Value Estimate as PUBLISHED on the report (under the model version it was
+    built with, dcf-v1 or dcf-v2), normalised for the PDF. One reading for the hero card and section 09, so the two can never disagree.
 
     state "ok"      — value AND range (a value is never shown without its range, §5), with
                       the neutral gap against the report's price;
@@ -547,7 +547,8 @@ def build_context(
     # target under a "Fair Value" heading is the placement rule inverted.
     ws_block = data.get("wall_street_consensus")
     ws_block = ws_block if isinstance(ws_block, dict) else {}
-    # The Caydex Fair Value Estimate as published on the report (model dcf-v1). Only this
+    # The Caydex Fair Value Estimate as published on the report (the model version it was built
+    # with). Only this
     # value may be labelled "Caydex": a bare `fair_value_estimate` without the block is FMP's
     # model (reports generated with DCF_ENABLED off, and every older report).
     estimate = _published_estimate(
@@ -582,7 +583,7 @@ def build_context(
         fair_value = None
         fair_value_basis = ""
         gap_noun = ""
-    # NEUTRAL wording only (hard rule 4, documents/research/dcf-methodology-v1.md §5): the
+    # NEUTRAL wording only (hard rule 4, documents/research/dcf-methodology-v2.md §5): the
     # hero used to print Undervalued / Overvalued at a ±1 % gap, in green and red — a verdict
     # on a model number. It now states the gap, in a neutral colour.
     valuation_color = pdf_charts.MUTED

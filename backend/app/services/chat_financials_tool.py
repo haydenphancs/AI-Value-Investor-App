@@ -213,6 +213,13 @@ _CAYDEX_FV_LABEL = (
     "forecast"
 )
 _THIRD_PARTY_DCF_LABEL = "a third-party discounted-cash-flow model estimate, not a price target"
+# The Caydex estimate could not be computed for this serve (its inputs did not load) — the
+# Analysis tab's "temporarily unavailable" row. A status, never a value and never a refusal.
+_CAYDEX_FV_UNAVAILABLE = "temporarily unavailable"
+_CAYDEX_FV_UNAVAILABLE_REASON = (
+    "its inputs could not be loaded right now - say it is temporarily unavailable, never that "
+    "the company has no estimate or that the model declined to estimate it"
+)
 
 # Which sources each section reads. `key_facts` is in every one: it carries the currencies, the
 # company name for `resolved_as` and the fund flags.
@@ -1352,6 +1359,12 @@ def _fair_value(snap: Any, kf: Optional[Dict[str, Any]] = None) -> Optional[Dict
     if settings.DCF_ENABLED:
         est = _get(snap, "caydex_estimate")
         if est is None:
+            # The estimate's inputs could not be fetched for this serve (an outage, not a
+            # refusal — valuation_snapshot_service sets the flag True or leaves it None): say
+            # so, or the answer reads as "Caydex has no estimate for this company".
+            if _get(snap, "caydex_estimate_unavailable") is True:
+                return {"source": "Caydex fair value model", "status": _CAYDEX_FV_UNAVAILABLE,
+                        "reason": _CAYDEX_FV_UNAVAILABLE_REASON}
             return None
         status = _get(est, "status")
         if status == "refused":
@@ -1402,9 +1415,14 @@ def _valuation_block(value: Any, kf: Optional[Dict[str, Any]] = None) -> Optiona
     snap, degraded = _unwrap_status(value)
     shown, missing = _snapshot_metrics(snap, (kf or {}).get("ticker"))
     fair = _fair_value(snap, kf)
-    if not shown and not fair:
+    # An unavailable estimate is not something to show: with no multiples beside it the card
+    # did not load (the doors' refund gate counts that block as missing, never as an answer).
+    fair_unavailable = isinstance(fair, dict) and fair.get("status") == _CAYDEX_FV_UNAVAILABLE
+    if not shown and (not fair or fair_unavailable):
         if degraded:
             raise _Incomplete("the Price card's build was degraded: " + ", ".join(degraded[:4]))
+        if fair_unavailable:
+            raise _Incomplete("no multiples to show and the fair value's inputs did not load")
         return None
     priced = (_KEY_STATS_PE_DAILY_CLOSE
               if (kf or {}).get("pe_basis") == _PE_BASIS_TWO_CURRENCIES else _KEY_STATS_PE_LIVE)

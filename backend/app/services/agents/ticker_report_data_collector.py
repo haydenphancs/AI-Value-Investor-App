@@ -561,7 +561,9 @@ def _settle_pass1_result(out: Any, attr: str, result: Any, default: Any, ticker:
     * a snapshot card (`_SNAPSHOT_STATUS_ATTRS`) arrives as `(snapshot, degraded)` and is
       landed by `_settle_snapshot_result`, which refuses a degraded build;
     * `insider_trades` (the fail-closed window fetch) → `_settle_insider_rows`;
-    * `holders_response` arrives as `(holders, degraded)` → `_settle_holders_result`.
+    * `holders_response` arrives as `(holders, degraded)` → `_settle_holders_result`;
+    * `caydex_dcf` failed → `_settle_caydex_dcf_failure`: None, and a TRANSIENT input outage
+      (`DcfInputsUnavailableError` not marked ``permanent``) also lands on ``degraded_sections``.
     """
     if attr in _SNAPSHOT_STATUS_ATTRS:
         _settle_snapshot_result(out, attr, result, ticker)
@@ -571,6 +573,9 @@ def _settle_pass1_result(out: Any, attr: str, result: Any, default: Any, ticker:
         return
     if attr == "holders_response":
         _settle_holders_result(out, result, ticker)
+        return
+    if attr == "caydex_dcf" and isinstance(result, BaseException):
+        _settle_caydex_dcf_failure(out, result, ticker)
         return
     if isinstance(result, Exception):
         logger.warning(
@@ -693,9 +698,69 @@ def _settle_holders_result(out: Any, result: Any, ticker: str) -> None:
         )
 
 
+def _settle_caydex_dcf_failure(out: Any, result: BaseException, ticker: str) -> None:
+    """Land a FAILED Caydex Fair Value Estimate fetch (`_caydex_dcf` raised into the gather).
+
+    The estimate is None on every arm (fair value unmeasured, never the price). What differs
+    is whether the collection — and the report built from it — may be SHARED:
+
+    * `DcfInputsUnavailableError` — an input the model cannot do without (the Treasury
+      average, a statement, the consensus) could not be fetched: TRANSIENT. Recorded on
+      ``degraded_sections``, so the collection and the report stay out of every shared
+      cache. It used to land on the plain default: a report built during the 2026-10-21 FRED
+      outage (RKLB) froze "No Caydex Fair Value Estimate is available for this report" into
+      ticker_data_cache and the shared report caches until the close;
+    * the same error marked ``permanent`` (every failed FMP leg was a permanent refusal: a 402
+      not-entitled or a non-429 4xx) — it repeats on every rebuild, so it is logged only, NOT
+      recorded: recording it would keep the ticker out of every cache for good and make each
+      open a new 20-credit generation (the holders lesson, `_settle_holders_result`). Read with
+      ``getattr(..., "permanent", False) is True``: an error without the attribute, or with
+      anything but a real True, stays transient (fail closed — never shared by mistake);
+    * `ValueError` — the DCF's ticker grammar is stricter than the report door's, so it
+      repeats on every rebuild. Recording it would keep the ticker out of every cache for
+      good, and each open would become a new 20-credit generation (the holders lesson,
+      `_settle_holders_result`). Logged only;
+    * anything else — unexpected (a bug, not an outage), so as likely to repeat as the
+      ValueError: logged with its stack, not recorded.
+
+    ``degraded_sections`` becomes the report's `DEGRADED_SECTIONS_KEY`, never
+    `report_degradation.REPORT_DEGRADED_KEY`: the report is still delivered and billed.
+    """
+    from app.services.dcf_fair_value_service import DcfInputsUnavailableError
+
+    out.caydex_dcf = None
+    reason = f"{type(result).__name__}: {result}"
+    if isinstance(result, DcfInputsUnavailableError):
+        if getattr(result, "permanent", False) is True:
+            logger.warning(
+                "[report-dcf-unavailable] %s: Caydex Fair Value Estimate inputs refused "
+                "permanently (%s) — no estimate on this report, which stays cacheable",
+                ticker, reason,
+            )
+            return
+        logger.warning(
+            "[report-dcf-unavailable] %s: Caydex Fair Value Estimate inputs unavailable (%s) "
+            "— no estimate on this report, which is kept out of every shared cache",
+            ticker, reason,
+        )
+        out.degraded_sections.append(f"caydex_dcf:{type(result).__name__}")
+        return
+    if isinstance(result, ValueError):
+        logger.warning(
+            "[report-dcf-ticker-refused] %s: the Caydex Fair Value Estimate refused the "
+            "symbol (%s) — no estimate, the report stays cacheable", ticker, reason,
+        )
+        return
+    logger.error(
+        "[report-dcf-failed] %s: the Caydex Fair Value Estimate raised unexpectedly (%s) — "
+        "no estimate on this report", ticker, reason, exc_info=result,
+    )
+
+
 async def _caydex_dcf(ticker: str):
-    """The Caydex Fair Value Estimate for the collector. Failures propagate to `_assign`, which
-    logs them and leaves `caydex_dcf` None (fair value then unmeasured)."""
+    """The Caydex Fair Value Estimate for the collector. A failure propagates into pass 1's
+    gather and is landed by `_settle_caydex_dcf_failure`: `caydex_dcf` None (fair value then
+    unmeasured), and a transient input outage keeps the collection out of the shared caches."""
     from app.services.dcf_fair_value_service import get_dcf_fair_value_service
     return await get_dcf_fair_value_service().get_fair_value(ticker)
 
@@ -1642,7 +1707,7 @@ class TickerReportDataCollector:
         tasks: List[Tuple[str, Any, Any]] = [
             ("profile", self.fmp.get_company_profile(ticker), {}),
             # FMP's DCF is RETIRED while settings.DCF_ENABLED: the Caydex Fair Value Estimate
-            # (documents/research/dcf-methodology-v1.md) drives fair value instead.
+            # (documents/research/dcf-methodology-v2.md) drives fair value instead.
             (("caydex_dcf", _caydex_dcf(ticker), None) if settings.DCF_ENABLED
              else ("dcf", self.fmp.get_dcf(ticker), {})),
             ("quote", price_source(self).get_quote(ticker), {}),
@@ -10387,7 +10452,7 @@ def build_financial_context(out: CollectedTickerData) -> str:
     if settings.DCF_ENABLED:
         # The PUBLISHED Caydex Fair Value Estimate, worded exactly as the card shows it, with
         # the wording rule — never a bare "fair value" + "upside" (hard rules 3-4,
-        # documents/research/dcf-methodology-v1.md §5). Lazy import: narrative_prompts is
+        # documents/research/dcf-methodology-v2.md §5). Lazy import: narrative_prompts is
         # heavier and imports this module's neighbours.
         from app.services.agents.narrative_prompts import (
             _CAYDEX_ESTIMATE_RULE, _caydex_estimate_line,

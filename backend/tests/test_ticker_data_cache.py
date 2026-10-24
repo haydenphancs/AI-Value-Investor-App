@@ -34,6 +34,7 @@ from app.services.sector_aggregates_service import SectorAggregates
 from app.schemas.profit_power import ProfitPowerResponse, ProfitPowerDataPointSchema
 from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
 from app.schemas.dcf_fair_value import DcfFairValueResponse
+from app.services import dcf_fair_value_service as dcf
 
 
 def _field_names():
@@ -124,10 +125,13 @@ def _sample() -> CollectedTickerData:
         metrics=[SnapshotMetricResponse(name="P/E (1.2x sector avg 22)", value="27.59")],
     )
     # The Caydex Fair Value Estimate — populated because an unregistered one killed every
-    # write on launch day (Sentry, 2026-09-26), and the stamp the read side checks.
+    # write on launch day (Sentry, 2026-09-26), and the stamp the read side checks. The
+    # CURRENT model version, never a literal: under DCF_ENABLED a collection holding another
+    # version's estimate is a miss (`_built_under_current_dcf`), so a literal would turn every
+    # hit test here red on the next MODEL_VERSION bump.
     out.caydex_dcf = DcfFairValueResponse(
         symbol="ORCL", status="ok", fair_value=213.29, range_low=176.2, range_high=266.46,
-        as_of="2026-09-26", model_version="dcf-v1",
+        as_of="2026-09-26", model_version=dcf.MODEL_VERSION,
     )
     out.wall_street_consensus_partial = {"dcf_source": "caydex"}
     # The provenance stamp `_collect_fresh` sets on every production collection; the
@@ -598,3 +602,142 @@ def test_a_dossier_cached_before_the_2026_10_22_fields_still_deserializes():
     back = IndustryDossier(**old)
     assert back.cagr_start_year is None and back.concentration_basis is None
     assert back.current_tam == 500.0
+
+
+# ── A DCF MODEL-version bump (dcf-v2, 2026-10-23) ───────────────────────────────────────────
+#
+# A collection freezes the estimate it was built with (`caydex_dcf`, and the Wall Street card's
+# `model_dump()` copy). Served across a MODEL_VERSION bump it would build today's reports from
+# the old model — v1's "company changed shape" refusal on STX beside the Analysis tab's v2
+# value — until the close. Under DCF_ENABLED, another version is a MISS; no estimate is a hit.
+
+_OTHER_MODEL = dcf.MODEL_VERSION + "-other"      # never equal to the current version
+
+
+def _with_card_copy(out):
+    """The production partial: the source stamp plus the card's copy of the estimate."""
+    out.wall_street_consensus_partial = {"dcf_source": "caydex"}
+    if out.caydex_dcf is not None:
+        out.wall_street_consensus_partial["caydex_fair_value"] = out.caydex_dcf.model_dump()
+    return out
+
+
+def _read_back(monkeypatch, out, *, enabled=True):
+    """Serialize → the stored row → the REAL reader, under the given DCF switch."""
+    from app.config import settings
+
+    blob = _serialize(out)
+    assert blob is not None
+    monkeypatch.setattr(tdc, "get_supabase", lambda: _fake_supabase(
+        {"collected_data": blob, "cached_at": "2026-10-23T14:00:00+00:00"}))
+    monkeypatch.setattr(tdc, "is_cache_fresh", lambda _at: True)
+    monkeypatch.setattr(settings, "DCF_ENABLED", enabled)
+    return asyncio.run(tdc.get_cached_collection("ORCL"))
+
+
+def _restamped(est, version):
+    return est.model_copy(update={"model_version": version})
+
+
+@pytest.mark.parametrize("status", ["ok", "refused"])
+def test_an_estimate_of_the_current_model_is_a_hit(monkeypatch, status):
+    out = _sample()
+    if status == "refused":
+        out.caydex_dcf = DcfFairValueResponse(
+            symbol="ORCL", status="refused", model_version=dcf.MODEL_VERSION,
+            refusal_code="growth_out_of_range", refusal_reason="x.",
+        )
+    hit = _read_back(monkeypatch, _with_card_copy(out))
+    assert hit is not None
+    assert hit.caydex_dcf.model_version == dcf.MODEL_VERSION and hit.caydex_dcf.status == status
+
+
+@pytest.mark.parametrize("stale", ["field", "card_copy", "both"])
+def test_an_estimate_of_another_model_version_is_a_miss(monkeypatch, caplog, stale):
+    """Either copy is enough: the field feeds fair value / valuation and the evidence block,
+    the card copy is what the Valuation & Institutions section shows."""
+    out = _with_card_copy(_sample())
+    if stale in ("field", "both"):
+        out.caydex_dcf = _restamped(out.caydex_dcf, _OTHER_MODEL)
+    if stale in ("card_copy", "both"):
+        out.wall_street_consensus_partial["caydex_fair_value"]["model_version"] = _OTHER_MODEL
+    with caplog.at_level("INFO", logger=tdc.__name__):
+        assert _read_back(monkeypatch, out) is None
+    assert "DCF-MODEL MISMATCH" in caplog.text and _OTHER_MODEL in caplog.text
+
+
+def test_a_refusal_by_the_previous_model_is_a_miss(monkeypatch):
+    """The case that motivated it: STX's v1 'company changed shape' refusal must not outlive
+    the model that made it."""
+    out = _sample()
+    out.caydex_dcf = DcfFairValueResponse(
+        symbol="ORCL", status="refused", model_version=_OTHER_MODEL,
+        refusal_code="company_changed_shape", refusal_reason="x.",
+    )
+    assert _read_back(monkeypatch, _with_card_copy(out)) is None
+
+
+def test_a_collection_with_no_estimate_stays_a_hit(monkeypatch):
+    out = _sample()
+    out.caydex_dcf = None
+    hit = _read_back(monkeypatch, _with_card_copy(out))
+    assert hit is not None and hit.caydex_dcf is None
+
+
+@pytest.mark.parametrize("where", ["field", "card_copy"])
+def test_an_estimate_with_no_readable_version_is_a_miss(monkeypatch, where):
+    """Fail closed: every estimate the service builds carries MODEL_VERSION (`to_response`), so
+    a missing one came from some other producer."""
+    out = _with_card_copy(_sample())
+    if where == "field":
+        out.caydex_dcf = _restamped(out.caydex_dcf, None)
+    else:
+        del out.wall_street_consensus_partial["caydex_fair_value"]["model_version"]
+    assert _read_back(monkeypatch, out) is None
+
+
+def test_written_by_the_old_model_read_by_the_new_one(monkeypatch):
+    """The deploy itself: a row stored by the previous code, read after MODEL_VERSION moved.
+    Also proves the version is read at CALL time (a module-level import would freeze it)."""
+    db = _FakeCacheDB()
+    monkeypatch.setattr(tdc, "get_supabase", lambda: db)
+    from app.config import settings
+    monkeypatch.setattr(settings, "DCF_ENABLED", True)
+    asyncio.run(tdc.store_collection("ORCL", _with_card_copy(_sample())))
+    assert db.upserts == 1
+    assert asyncio.run(tdc.get_cached_collection("ORCL")) is not None      # anti-vacuity
+
+    monkeypatch.setattr(dcf, "MODEL_VERSION", dcf.MODEL_VERSION + "-next")
+    assert asyncio.run(tdc.get_cached_collection("ORCL")) is None
+    # The freshness probe reads `cached_at` only, so it still says fresh (documented window).
+    assert asyncio.run(tdc.is_cached_collection_fresh("ORCL")) is True
+
+
+def test_with_the_estimate_off_the_model_version_is_not_consulted(monkeypatch):
+    """DCF_ENABLED off: only the source stamp decides, exactly as before. An FMP-built
+    collection holding (impossibly) a stale estimate is still a hit — the version gate is
+    the Caydex switch's, not a second rule on FMP-era rows."""
+    out = _sample()
+    out.caydex_dcf = _restamped(out.caydex_dcf, _OTHER_MODEL)
+    out.wall_street_consensus_partial = {"dcf_source": "fmp"}
+    assert _read_back(monkeypatch, out, enabled=False) is not None
+    # …and the source rule is unchanged: a Caydex-built row is still a miss with the switch off.
+    assert _read_back(monkeypatch, _with_card_copy(_sample()), enabled=False) is None
+
+
+@pytest.mark.parametrize("shape", ["model", "dict"])
+def test_the_gate_reads_the_version_off_a_model_or_a_dumped_dict(monkeypatch, shape):
+    """`_deserialize` rebuilds `caydex_dcf` as a DcfFairValueResponse; the card copy is a dict.
+    The gate itself must not care which one it is handed."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "DCF_ENABLED", True)
+    out = _sample()                                        # partial: the source stamp only
+    current = out.caydex_dcf if shape == "model" else out.caydex_dcf.model_dump()
+    stale = (_restamped(out.caydex_dcf, _OTHER_MODEL) if shape == "model"
+             else dict(out.caydex_dcf.model_dump(), model_version=_OTHER_MODEL))
+    out.caydex_dcf = current
+    assert tdc._built_under_current_dcf(out) is True
+    out.caydex_dcf = stale
+    assert tdc._built_under_current_dcf(out) is False
+    out.caydex_dcf = "not an estimate"                    # junk reads as no version → miss
+    assert tdc._built_under_current_dcf(out) is False

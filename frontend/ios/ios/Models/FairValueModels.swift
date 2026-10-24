@@ -2,8 +2,8 @@
 //  FairValueModels.swift
 //  ios
 //
-//  The Caydex Fair Value Estimate (backend model `dcf-v1`,
-//  documents/research/dcf-methodology-v1.md): DTO + display model, co-located.
+//  The Caydex Fair Value Estimate (backend model `dcf-v2`,
+//  documents/research/dcf-methodology-v2.md): DTO + display model, co-located.
 //
 //  ⚠️ Wording rules (spec §5) — the reason this file exists as ONE place:
 //  • it is a MODEL ESTIMATE, always shown with its range, never a price target;
@@ -93,6 +93,9 @@ struct CaydexFairValue: Equatable {
     static let refusedHeadline = "Not modelled"
     /// A report saved before the estimate existed, or one served while it is switched off.
     static let notInReport = "No Caydex Fair Value Estimate is available for this report."
+    /// The backend could not compute the estimate right now (an input was briefly down) —
+    /// NOT a refusal, so it never says "Not modelled".
+    static let temporarilyUnavailable = "Temporarily unavailable — we'll try again shortly."
 
     let state: State
     let alternativeValue: Double?

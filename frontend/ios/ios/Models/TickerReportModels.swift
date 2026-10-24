@@ -1755,6 +1755,10 @@ struct DeepDiveModule: Identifiable {
     let title: String
     let iconName: String
     let type: DeepDiveModuleType
+    /// Opens expanded the first time the report shows. Only "Valuation & Institutions"
+    /// does (owner, 2026-10-23: "Report: move up, expand"), so the Caydex Fair Value
+    /// Estimate is the first thing under the summary instead of the last collapsed module.
+    var startsExpanded = false
 }
 
 enum DeepDiveModuleType {

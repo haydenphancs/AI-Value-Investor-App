@@ -1748,7 +1748,7 @@ class Settings(BaseSettings):
             return "off"
         return mode
 
-    # ── Caydex Fair Value Estimate (DCF, model dcf-v1) ─────────────────────────────────────
+    # ── Caydex Fair Value Estimate (DCF, model dcf-v2) ─────────────────────────────────────
     # Two fail-CLOSED switches (documents/OWNER_TASKS.md §2.1 has the rollout order):
     #
     # DCF_SHADOW — compute and RECORD the estimate (dcf_fair_value_cache + the append-only
@@ -1763,7 +1763,7 @@ class Settings(BaseSettings):
     #   switch: the report read hooks and the PDF drop any stored estimate block at serve time.
     #
     # The model's constants are NOT settings: they live in the service, versioned as
-    # MODEL_VERSION and frozen in documents/research/dcf-methodology-v1.md, so an environment
+    # MODEL_VERSION and frozen in documents/research/dcf-methodology-v2.md, so an environment
     # variable can never change a published value without a model-version change.
     DCF_SHADOW: bool = False
     DCF_ENABLED: bool = False

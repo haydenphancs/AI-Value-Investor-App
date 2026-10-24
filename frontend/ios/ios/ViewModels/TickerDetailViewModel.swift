@@ -2369,6 +2369,12 @@ class TickerDetailViewModel: ObservableObject {
             // too, or Cay AI would call it a sector's beside a card that does not.
             let metricsStr = snap.metrics.map { "\($0.displayName): \($0.value)" }.joined(separator: ", ")
             parts.append("\(snap.category.rawValue): \(snap.rating.displayName) (\(metricsStr))")
+            // The Price card draws the Caydex estimate (`CaydexFairValueCompactRow`), even
+            // collapsed, so an Overview turn is told the same line the Analysis tab's is —
+            // or Cay AI would say it has no estimate beside a card that shows one.
+            if snap.category == .price, let estimateLine = caydexEstimateContextLine(for: snap) {
+                parts.append(estimateLine)
+            }
         }
 
         // Benchmark comparison
@@ -2383,6 +2389,32 @@ class TickerDetailViewModel: ObservableObject {
         }
 
         return parts.isEmpty ? nil : parts.joined(separator: ". ")
+    }
+
+    /// The Caydex Fair Value Estimate as ONE chat-context line, in the states the cards
+    /// draw (`CaydexFairValueCompactRow` on the Overview's Price card, `ValuationMeterSection`
+    /// on the Analysis tab): the estimate with its range and gap, the refusal with its reason,
+    /// "temporarily unavailable" (`caydexEstimateUnavailable`: an input was briefly down, NOT
+    /// a refusal), or nil when the snapshot carries none. Quoted exactly as the card shows it —
+    /// the chat must quote it, never compute its own (spec hard rule 3). Shared by
+    /// `overviewContext` and `analysisContext`, so both tabs tell Cay AI the same thing.
+    private func caydexEstimateContextLine(for snapshot: SnapshotItem) -> String? {
+        if let estimate = snapshot.caydexEstimate {
+            switch estimate.state {
+            case .estimate:
+                var line = "\(CaydexFairValue.title) (a DCF model estimate — not a price target, not a recommendation)"
+                if let v = estimate.formattedValue { line += ": \(v)" }
+                if let range = estimate.formattedRange { line += ", \(range.lowercased())" }
+                if let gap = estimate.formattedGap(versus: tickerData?.currentPrice) { line += ". \(gap)" }
+                return line
+            case .refused(let reason):
+                return "\(CaydexFairValue.title): none — \(reason)"
+            }
+        }
+        if snapshot.caydexEstimateUnavailable {
+            return "\(CaydexFairValue.title): temporarily unavailable — it could not be computed right now (not a refusal), and the app will try again shortly"
+        }
+        return nil
     }
 
     /// Analysis tab context — technicals (with the indicator readings when loaded) and
@@ -2442,19 +2474,11 @@ class TickerDetailViewModel: ObservableObject {
                 }
                 parts.append(line)
             }
-            if let estimate = snapshot.caydexEstimate {
-                // The published Caydex estimate, quoted exactly as the card shows it — the
-                // chat must quote it, never compute its own (spec hard rule 3).
-                switch estimate.state {
-                case .estimate:
-                    var line = "\(CaydexFairValue.title) (a DCF model estimate — not a price target, not a recommendation)"
-                    if let v = estimate.formattedValue { line += ": \(v)" }
-                    if let range = estimate.formattedRange { line += ", \(range.lowercased())" }
-                    if let gap = estimate.formattedGap(versus: tickerData?.currentPrice) { line += ". \(gap)" }
-                    parts.append(line)
-                case .refused(let reason):
-                    parts.append("\(CaydexFairValue.title): none — \(reason)")
-                }
+            // Same precedence as the Valuation card: the Caydex estimate (or its refusal)
+            // REPLACES FMP's DCF row; FMP's DCF only without one; the "temporarily
+            // unavailable" line only when neither is there (it follows the dcf arm).
+            if snapshot.caydexEstimate != nil, let estimateLine = caydexEstimateContextLine(for: snapshot) {
+                parts.append(estimateLine)
             } else if let dcf = snapshot.dcf {
                 switch dcf.status {
                 case .ok:
@@ -2470,6 +2494,8 @@ class TickerDetailViewModel: ObservableObject {
                 case .unavailable:
                     break
                 }
+            } else if let estimateLine = caydexEstimateContextLine(for: snapshot) {
+                parts.append(estimateLine)
             }
         }
 

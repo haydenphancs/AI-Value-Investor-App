@@ -136,6 +136,7 @@ async def test_switch_off_is_exactly_the_old_fmp_behaviour(monkeypatch):
     assert svc.fmp.dcf_calls == 1 and stub.calls == 0
     assert snap.dcf is not None and snap.dcf.value == 135.8
     assert snap.caydex_estimate is None
+    assert snap.caydex_estimate_unavailable is None, "off = no Caydex row of any kind"
 
 
 @pytest.mark.asyncio
@@ -146,6 +147,7 @@ async def test_switch_on_retires_fmp_and_attaches_the_estimate_at_serve_time(mon
     assert svc.fmp.dcf_calls == 0, "FMP's DCF must not even be fetched once ours is on"
     assert snap.dcf is None, "our value must never travel in the slot labelled 'FMP model'"
     assert snap.caydex_estimate == _OK
+    assert snap.caydex_estimate_unavailable is None
     assert svc.supabase.upserts, "the multiples snapshot itself still persists"
     assert "caydex_estimate" not in svc.supabase.upserts[0]["response_json"], \
         "the estimate must never be frozen into the 24 h snapshot row"
@@ -168,14 +170,25 @@ async def test_a_refusal_is_carried_and_a_failure_degrades_this_serve_only(monke
     stub = _StubDcfService(_REFUSED)
     snap = await _serve(_svc(monkeypatch, True, stub))
     assert snap.caydex_estimate.status == "refused"
+    assert snap.caydex_estimate_unavailable is None, "a refusal is an answer, not an outage"
     failing = _StubDcfService(dcf_mod.DcfInputsUnavailableError("down"))
     svc = _svc(monkeypatch, True, failing)
     snap2 = await _serve(svc)
     assert snap2.caydex_estimate is None and snap2.dcf is None
+    assert snap2.caydex_estimate_unavailable is True, "the row says 'temporarily unavailable'"
     assert snap2.metrics, "the rest of the Valuation card must still render"
+    assert "caydex_estimate_unavailable" not in svc.supabase.upserts[0]["response_json"], \
+        "the outage flag must never be frozen into the 24 h snapshot row"
     failing.result = _OK
     snap3 = await _serve(svc)                               # next serve recovers
     assert snap3.caydex_estimate == _OK
+    assert snap3.caydex_estimate_unavailable is None, "the flag lives for one serve only"
+    # Any other failure (the service's stricter ticker regex, an unexpected error) is no row, as
+    # before — never "temporarily unavailable", which would promise it comes back.
+    for err in (ValueError("Invalid ticker symbol: 'AAPL'"), RuntimeError("boom")):
+        failing.result = err
+        snap4 = await _serve(svc)
+        assert snap4.caydex_estimate is None and snap4.caydex_estimate_unavailable is None, err
 
 
 class _Row:

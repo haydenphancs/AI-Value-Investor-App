@@ -498,13 +498,22 @@ class ValuationSnapshotService:
     ) -> SnapshotItemResponse:
         """While settings.DCF_ENABLED, a COPY carrying today's Caydex estimate (FMP's DCF
         retired); otherwise the cached object itself (recording the shadow estimate when
-        DCF_SHADOW is on)."""
+        DCF_SHADOW is on).
+
+        The copy also carries `caydex_estimate_unavailable` — True when the estimate's inputs
+        could not be fetched for this serve, else None (never False) — so the Analysis tab says
+        "temporarily unavailable" instead of drawing no row. It describes the estimate, not the
+        multiples build, so it is never part of the degraded status."""
         if not settings.DCF_ENABLED:
             if settings.DCF_SHADOW:
                 _shadow_record(_validate_ticker(ticker))
             return snapshot
-        estimate = await caydex_estimate_or_none(_validate_ticker(ticker))
-        return snapshot.model_copy(update={"caydex_estimate": estimate, "dcf": None})
+        estimate, unavailable = await caydex_estimate_with_status(_validate_ticker(ticker))
+        return snapshot.model_copy(update={
+            "caydex_estimate": estimate,
+            "dcf": None,
+            "caydex_estimate_unavailable": True if unavailable else None,
+        })
 
     async def _get_snapshot_cached(self, ticker: str) -> SnapshotItemResponse:
         """Two-tier caching and in-flight dedup of the multiples snapshot.
@@ -637,7 +646,11 @@ class ValuationSnapshotService:
                     "ticker": ticker,
                     "category": "Price",
                     "response_json": {
-                        **result.model_dump(exclude={"caydex_estimate"}),
+                        # Both are serve-time only (`_attach_serve_time_estimate`): a stored
+                        # flag would say "temporarily unavailable" for up to 24 h.
+                        **result.model_dump(
+                            exclude={"caydex_estimate", "caydex_estimate_unavailable"},
+                        ),
                         _VERSION_KEY: _SNAPSHOT_PAYLOAD_VERSION,
                         _DCF_SOURCE_KEY: bool(settings.DCF_ENABLED),
                     },
@@ -818,21 +831,54 @@ def _shadow_record(ticker: str) -> None:
     task.add_done_callback(_shadow_tasks.discard)
 
 
-async def caydex_estimate_or_none(ticker: str):
-    """The Caydex Fair Value Estimate, or None when its inputs are unavailable right now.
+async def caydex_estimate_with_status(ticker: str) -> Tuple[Optional[Any], bool]:
+    """``(estimate, unavailable)`` — the Caydex Fair Value Estimate, or None with the reason.
 
-    A refusal IS returned (the card says why there is no number); only a failure to fetch
-    the inputs degrades to None, logged — the Valuation Meter still renders without the row.
+    A refusal IS returned as the estimate (the card says why there is no number). Only
+    `DcfInputsUnavailableError` — an input (the Treasury average, an FMP leg) could not be
+    fetched right now, a transient outage — is ``(None, True)``: the Analysis tab then says
+    "temporarily unavailable" instead of drawing no row. The same error marked ``permanent``
+    (every failed FMP leg was a permanent refusal: a 402 not-entitled or a non-429 4xx) is
+    ``(None, False)``: it is not temporary, so "temporarily unavailable" would be false for good.
+    Only a real ``permanent is True`` counts; a missing attribute stays transient. Anything else
+    (the service's stricter ticker regex raising ValueError, an unexpected error) is
+    ``(None, False)``: no row, as before. All are logged; the Valuation Meter still renders
+    either way.
     """
-    from app.services.dcf_fair_value_service import get_dcf_fair_value_service
+    # Function-scoped: tests patch the SOURCE module's factory (test_dcf_fair_value_wiring).
+    from app.services.dcf_fair_value_service import (
+        DcfInputsUnavailableError,
+        get_dcf_fair_value_service,
+    )
     try:
-        return await get_dcf_fair_value_service().get_fair_value(ticker)
+        return await get_dcf_fair_value_service().get_fair_value(ticker), False
+    except DcfInputsUnavailableError as e:
+        if getattr(e, "permanent", False) is True:
+            logger.warning(
+                "[caydex-dcf-unavailable] %s: %s: %s — inputs refused permanently; rendering "
+                "without the fair value row",
+                ticker, type(e).__name__, e,
+            )
+            return None, False
+        logger.warning(
+            "[caydex-dcf-unavailable] %s: %s: %s — rendering the fair value row as "
+            "temporarily unavailable",
+            ticker, type(e).__name__, e,
+        )
+        return None, True
     except Exception as e:
         logger.warning(
             "[caydex-dcf-unavailable] %s: %s: %s — rendering without the fair value row",
             ticker, type(e).__name__, e,
         )
-        return None
+        return None, False
+
+
+async def caydex_estimate_or_none(ticker: str):
+    """The Caydex Fair Value Estimate, or None when it cannot be served right now
+    (`caydex_estimate_with_status` without the reason; the shadow recorder's entry point)."""
+    estimate, _unavailable = await caydex_estimate_with_status(ticker)
+    return estimate
 
 
 def dcf_estimate_from_row(row: Any) -> Optional[DcfEstimateResponse]:

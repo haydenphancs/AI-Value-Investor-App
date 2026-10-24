@@ -13,6 +13,10 @@
 //  the gap against the LIVE price, a caveat beyond ±50%, "No DCF" for a loss-maker whose
 //  model is negative, and nothing at all when FMP has no model. Never "fair value".
 //
+//  When the backend could not compute the Caydex estimate right now
+//  (`caydexEstimateUnavailable`, a transient upstream failure), the card says so with
+//  `CaydexFairValueUnavailableRow` instead of drawing no row.
+//
 //  When the snapshot carries the Caydex Fair Value Estimate (backend DCF_ENABLED), that
 //  estimate REPLACES the FMP row; the backend then sends no `dcf` at all. It is shown range
 //  first (`CaydexFairValueRow`) with the price-vs-range chart under it
@@ -74,6 +78,14 @@ struct ValuationMeterSection: View {
                 }
             } else if let dcf = snapshot.dcf {
                 dcfRow(dcf)
+            } else if snapshot.caydexEstimateUnavailable {
+                // The estimate could not be computed right now (an input was briefly down):
+                // say so, instead of drawing no row as if it had never existed.
+                VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                    Divider().overlay(AppColors.divider)
+                        .padding(.bottom, AppSpacing.xs)
+                    CaydexFairValueUnavailableRow()
+                }
             }
 
             // `.fairValue` copy: a model number beside a live price. Full width so the
@@ -201,6 +213,15 @@ struct ValuationMeterSection: View {
                         dcf: DcfEstimate(status: .negativeCashFlow, value: nil, asOf: "2026-09-17")
                     ),
                     currentPrice: 2.02
+                )
+                ValuationMeterSection(
+                    snapshot: SnapshotItem(
+                        category: .price,
+                        rating: .average,
+                        metrics: [],
+                        caydexEstimateUnavailable: true
+                    ),
+                    currentPrice: 188.40
                 )
             }
             .padding()

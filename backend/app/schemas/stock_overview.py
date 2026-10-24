@@ -97,11 +97,18 @@ class SnapshotItemResponse(BaseModel):
     # Only the "Price" (valuation) snapshot fills this; Optional on the wire and in Swift
     # (shipped builds and the other four snapshot categories never carry it).
     dcf: Optional[DcfEstimateResponse] = None
-    # The Caydex Fair Value Estimate (model dcf-v1, documents/research/dcf-methodology-v1.md).
+    # The Caydex Fair Value Estimate (model dcf-v2, documents/research/dcf-methodology-v2.md).
     # Filled only when settings.DCF_ENABLED, and then `dcf` (FMP's model) is None: shipped
     # builds label `dcf` "FMP discounted-cash-flow model", so our value must never travel in
     # that slot. Optional end to end: builds predating it ignore the key.
     caydex_estimate: Optional[DcfFairValueResponse] = None
+    # True when, while settings.DCF_ENABLED, the estimate's inputs could not be fetched for
+    # this serve (`DcfInputsUnavailableError`: FRED or an FMP leg down) — `caydex_estimate` is
+    # then None and iOS says "temporarily unavailable" instead of drawing no row at all (the
+    # 2026-10-21 FRED outage blanked it everywhere). None otherwise, never False: a refusal
+    # travels in `caydex_estimate`, and an odd ticker is not an outage. Set at SERVE time only
+    # and never stored in `snapshot_cache` (valuation_snapshot_service). Optional end to end.
+    caydex_estimate_unavailable: Optional[bool] = None
     # When this card was BUILT (`snapshot_build_time`, ISO-8601 UTC "…Z"), 2026-10-07. A
     # cached card keeps its build time on every tier — the Snapshots header used to print
     # today's date over a card up to 24 h old. None only on a card built by a path that

@@ -1,4 +1,5 @@
-"""Phase-2 HISTORICAL REPLAY of the Caydex Fair Value Estimate (model dcf-v1) — READ-ONLY.
+"""Phase-2 HISTORICAL REPLAY of the Caydex Fair Value Estimate (the production model,
+``dcf.MODEL_VERSION``; first run under dcf-v1) — READ-ONLY.
 
 Values every ticker in the universe at every quarter-end since START, as of that date, using only
 what was public then: statements with filingDate ≤ date, the split-adjusted close and market cap
@@ -285,7 +286,7 @@ async def main() -> None:
     dcf.MIN_ANALYSTS = real_floor
 
     # ── evaluate ──
-    out: List[str] = ["# Caydex Fair Value Estimate — historical replay (model dcf-v1)", ""]
+    out: List[str] = [f"# Caydex Fair Value Estimate — historical replay (model {dcf.MODEL_VERSION})", ""]
     out.append(f"Run {date.today().isoformat()} · {len(tickers)} tickers · {len(dates)} dates "
                f"({dates[0]} → {dates[-1]}) · {len(rows)} valuations · machinery pass uses "
                f"analyst floor 1 (FMP's historical counts are sparse).")

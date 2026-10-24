@@ -76,7 +76,7 @@ def test_extract_moat_and_valuation_handle_none_slots(key):
     (None, 200.0, None), (float("nan"), 200.0, None), (0.0, 200.0, None),
 ])
 def test_valuation_analysis_states_a_gap_never_a_verdict(fv, price, expected):
-    """Hard rule 4 (dcf-methodology-v1.md §5): no Undervalued / Overvalued / "N% upside"."""
+    """Hard rule 4 (dcf-methodology-v2.md §5): no Undervalued / Overvalued / "N% upside"."""
     svc = _svc()
     out = svc._extract_valuation({"_scoring_inputs": {"valuation": {
         "status": "deep_undervalued", "fair_value": fv, "current_price": price,

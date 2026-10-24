@@ -1641,7 +1641,7 @@ def _dcf_measured(ws: Dict[str, Any]) -> bool:
 
 
 # Wording rule for the Caydex Fair Value Estimate (hard rule 4 in
-# documents/research/dcf-methodology-v1.md §5): a model estimate, stated as a gap; never a verdict.
+# documents/research/dcf-methodology-v2.md §5): a model estimate, stated as a gap; never a verdict.
 _CAYDEX_ESTIMATE_RULE = (
     "Refer to the Caydex Fair Value Estimate only as a model estimate: say the price is N% "
     "below or above the estimate. Never call the stock undervalued, overvalued, cheap or "

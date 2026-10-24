@@ -4,11 +4,18 @@
 //
 //  Molecule: Expandable snapshot card showing rating category with metrics
 //
+//  The Price (valuation) card also carries the Caydex Fair Value Estimate as a compact row
+//  under its header, visible while the card is collapsed (owner, 2026-10-23: "Overview tab
+//  row") — the estimate used to live only on the Analysis tab. The other four cards never
+//  draw it.
+//
 
 import SwiftUI
 
 struct SnapshotCard: View {
     let snapshot: SnapshotItem
+    /// The live header price the estimate's gap is measured against (Price card only).
+    var currentPrice: Double? = nil
     @State private var isExpanded: Bool = false
 
     var body: some View {
@@ -49,6 +56,15 @@ struct SnapshotCard: View {
             }
             .buttonStyle(PlainButtonStyle())
 
+            // Outside `if isExpanded`, so it shows on the collapsed card too.
+            if snapshot.category == .price {
+                CaydexFairValueCompactRow(
+                    estimate: snapshot.caydexEstimate,
+                    isUnavailable: snapshot.caydexEstimateUnavailable,
+                    currentPrice: currentPrice
+                )
+            }
+
             // Metrics list
             if isExpanded {
                 VStack(alignment: .leading, spacing: AppSpacing.sm) {
@@ -86,6 +102,34 @@ struct SnapshotCard: View {
             ForEach(SnapshotItem.sampleData) { snapshot in
                 SnapshotCard(snapshot: snapshot)
             }
+        }
+        .padding(.horizontal, AppSpacing.lg)
+    }
+    .background(AppColors.background)
+}
+
+#Preview("Price card with the Caydex estimate") {
+    // Illustrative values: the estimate row shows on the collapsed card.
+    ScrollView {
+        VStack(spacing: 0) {
+            SnapshotCard(snapshot: SnapshotItem(
+                category: .price,
+                rating: .average,
+                metrics: [SnapshotMetric(name: "P/E", value: "29.12")],
+                caydexEstimate: .sampleEstimate
+            ), currentPrice: 188.40)
+            SnapshotCard(snapshot: SnapshotItem(
+                category: .price,
+                rating: .average,
+                metrics: [],
+                caydexEstimate: .sampleRefused
+            ), currentPrice: 188.40)
+            SnapshotCard(snapshot: SnapshotItem(
+                category: .price,
+                rating: .average,
+                metrics: [],
+                caydexEstimateUnavailable: true
+            ), currentPrice: 188.40)
         }
         .padding(.horizontal, AppSpacing.lg)
     }

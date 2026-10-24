@@ -29,6 +29,19 @@ struct ReportDeepDiveSection<Content: View>: View {
 
     @State private var isExpanded: Bool = false
 
+    /// Seeds `isExpanded` from `module.startsExpanded` ONCE, at first show. The parent
+    /// keys each module by its stable `module.id`, so the reader's later toggles are kept.
+    init(module: DeepDiveModule,
+         isLast: Bool = false,
+         onCollapse: (() -> Void)? = nil,
+         @ViewBuilder content: @escaping () -> Content) {
+        self.module = module
+        self.isLast = isLast
+        self.onCollapse = onCollapse
+        self.content = content
+        _isExpanded = State(initialValue: module.startsExpanded)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Header row (tappable)
@@ -102,6 +115,17 @@ struct ReportDeepDiveSection<Content: View>: View {
 
 #Preview {
     VStack(spacing: 0) {
+        ReportDeepDiveSection(
+            module: DeepDiveModule(
+                title: "Valuation & Institutions",
+                iconName: "building.columns.fill",
+                type: .wallStreetConsensus,
+                startsExpanded: true
+            )
+        ) {
+            Text("Opens expanded")
+                .foregroundColor(AppColors.textSecondary)
+        }
         ReportDeepDiveSection(
             module: DeepDiveModule(
                 title: "Fundamentals & Growth",

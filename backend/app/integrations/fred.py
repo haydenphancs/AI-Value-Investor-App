@@ -199,20 +199,26 @@ class FREDClient:
         return bool(self.api_key)
 
     async def get_observations(
-        self, series_id: str, *, limit: int = 13,
+        self, series_id: str, *, limit: int = 13, min_observations: int = 0,
     ) -> List[FREDObservation]:
         """Fetch the most-recent `limit` observations for a series.
 
         Sort order is newest-first (so index 0 is the latest). Returns
         empty list when the API key is missing, the request fails, or
         the API returns no observations.
+
+        `min_observations` (opt-in, default 0 = today's behaviour): a 200 carrying fewer usable
+        observations than this is treated as a FAILURE — warned, memoised for the short failure
+        window and NOT cached for six hours — because for a caller that needs a window (the DCF's
+        5-year Treasury average needs 1008 rows) a truncated answer is not an answer. A shorter
+        value already cached under the same key (by a default caller) is not served either.
         """
         if not self.is_configured:
             _warn_unconfigured_once("FRED", "FRED_API_KEY")
             return []
         cache_key = (series_id, f"obs:{limit}")
         cached = _cache_get(cache_key)
-        if cached is not None:
+        if cached is not None and len(cached) >= min_observations:
             return cached  # type: ignore[no-any-return]
         if _failed_recently(cache_key):
             # A recent FAILURE, not an answer — see `_mark_failed` below. Serving [] here
@@ -262,6 +268,13 @@ class FREDClient:
             except (TypeError, ValueError):
                 continue
 
+        if len(out) < min_observations:
+            logger.warning(
+                "FRED observations for %s: %d usable row(s), %d required — treated as a "
+                "failure (not cached)", series_id, len(out), min_observations,
+            )
+            _mark_failed(cache_key)
+            return []
         _cache_set(cache_key, out)
         return out
 

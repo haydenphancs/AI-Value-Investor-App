@@ -1,10 +1,27 @@
 """
-Caydex Fair Value Estimate — a 2-stage free-cash-flow-to-equity DCF, model ``dcf-v1``.
+Caydex Fair Value Estimate — a 2-stage free-cash-flow-to-equity DCF, model ``dcf-v2``.
 
-The methodology is FROZEN in documents/research/dcf-methodology-v1.md, and this module must match
+The methodology is FROZEN in documents/research/dcf-methodology-v2.md, and this module must match
 it line for line (hard rule 5: the methodology text must match the code). Change a rule or a
 constant here and you have made a new model: bump ``MODEL_VERSION`` and update the spec in the
-same change.
+same change. (v1, documents/research/dcf-methodology-v1.md, is superseded and stays frozen.)
+
+v2 (owner decision 2026-10-23, "Conservative" rule set + "re-base" share basis) loosens three
+soft gates that refused companies the model can describe, and adds one input correction:
+  * S1 — a reported revenue drop that has since RECOVERED no longer refuses
+    (STX: −37 % in FY23, FY26 revenue above FY22's); a forecast drop still always refuses.
+  * S2 — the growth band widens to +40 %/yr, but the extrapolated tail never starts above
+    +30 %/yr (NVDA sat at 33.7 % against a 30 % band).
+  * S3 — when five trailing ratios disagree, the three newest take over, if they agree among
+    themselves (CRM's steadily expanding margin; NVDA's spread was 1.84 against 1.8). Review
+    round (owner, 2026-10-23, "Blend over 1.8–2.4×"): the ratio blends from the 5-year median to
+    the 3-year one as the spread runs from 1.8× to 2.4×, so crossing 1.8× is not a jump.
+  * re-base — FMP's consensus net income is on an older share count than its EPS; NI moves
+    toward EPS × today's diluted count, ramping in as the implied count moves from 5 % to 15 %
+    away (owner, "Ramp it in over 5–15%"); a count off by more than 2× is a share-unit conflict
+    and refuses (CRM ~17 % → fully re-based).
+Each one is switched off by a constant (a harness sets them), and with all four off the model
+reproduces v1 exactly (tests/test_dcf_fair_value.py pins it).
 
 Why the rules look the way they do — every refusal, the SBC treatment, the timing convention, the
 rate choices — is in documents/research/dcf-fair-value.md §§1-9 (prototype results, a 54-ticker
@@ -34,13 +51,15 @@ import math
 import re
 import statistics
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
+import httpx
+
 from app.config import settings
 from app.database import get_supabase
-from app.integrations.fmp import FMPUnavailableException, get_fmp_client
+from app.integrations.fmp import FMPNotEntitledException, FMPUnavailableException, get_fmp_client
 from app.integrations.fred import get_fred_client
 from app.schemas.dcf_fair_value import DcfFairValueResponse
 from app.utils.inflight import fail_shared_future
@@ -49,7 +68,7 @@ from app.utils.market_hours import ET
 logger = logging.getLogger(__name__)
 
 # ── Model constants (spec §§1-3). Changing ANY of these = a new MODEL_VERSION. ─────────────
-MODEL_VERSION = "dcf-v1"
+MODEL_VERSION = "dcf-v2"
 METHOD_LABEL = "2-stage free cash flow to equity"
 
 FORECAST_YEARS = 10
@@ -64,7 +83,7 @@ ERP_PCT = 4.23
 ERP_VINTAGE = "Damodaran implied ERP, 1 Jan 2026"
 RF_AT_ERP_PCT = 4.18            # the 10-year T-bond rate Damodaran measured that ERP against
 RF_AVERAGE_YEARS = 5
-# Which risk-free rate enters the DISCOUNT RATE (spec §2). v1 = "erp_vintage": the T-bond rate
+# Which risk-free rate enters the DISCOUNT RATE (spec §2). The model uses "erp_vintage": the T-bond rate
 # Damodaran measured the ERP against (RF_AT_ERP_PCT), so rate and premium are one coherent pair.
 # "avg5" (Simply Wall St's 5-year average) and "recent" (3-month average) are RESEARCH VARIANTS,
 # measured in documents/research/dcf-fair-value.md §9 and never published. Terminal growth
@@ -78,7 +97,12 @@ SENSITIVITY_STEP = 0.01         # range: discount rate ± 1 pt
 
 MARGIN_BOUNDS = (0.01, 0.60)    # method R: (FCF − SBC) / revenue (WMT is a real ~2 %)
 CONVERSION_BOUNDS = (0.35, 1.60)  # method E: (FCF − SBC) / (NI + SBC)
-GROWTH_BOUNDS = (-0.15, 0.30)   # trend growth across the analyst years
+GROWTH_BOUNDS = (-0.15, 0.40)   # trend growth across the analyst years (v1: +30 %)
+# S2 (v2): the extrapolated years start from the analyst-years trend growth, but never above this.
+# The analyst years themselves stay as published. Widening the band to +40 % without this cap
+# would let a +38 %/yr trend compound for five more years into the terminal value; with it, a
+# company inside the band but above +30 % is valued on a tail that starts at +30 % and fades.
+TAIL_START_GROWTH_CAP = 0.30
 MAX_TREND_DEVIATION = 0.25      # an analyst year > 25 % off the analyst-years trend → unstable
 MAX_RATIO_SPREAD = 1.8          # trailing ratios: 2nd-highest ÷ 2nd-lowest (max ÷ min for 3 yrs)
 MAX_DISAGREEMENT = 1.5          # method E / method R must sit in [1/1.5, 1.5]
@@ -86,8 +110,35 @@ MIN_SBC_YEARS = 3               # SBC > 0 in ≥ 3 of the last 5 years = "report
 MAX_DEBT_TO_MARKET_CAP = 0.75
 LENDER_INTEREST_SHARE = 0.08    # Credit Services with interest expense > 8 % of revenue
 SHAPE_MAX_YOY_DROP = 0.25       # revenue falls > 25 % in one year: reported OR forecast
+# S1 (v2): a REPORTED drop a → b is ignored once the latest reported revenue is back to at least
+# this share of a (inclusive). float('inf') = v1 (every reported drop refuses).
+SHAPE_RECOVERY_SHARE = 0.90
+# S3 (v2): when the 5-year ratio spread is too wide, the median of the RECENT_RATIO_YEARS newest
+# years' ratios is blended in (RECENT_RATIO_FULL_SPREAD, _blend_recent) — only with ≥ RECENT_RATIO_MIN_YEARS usable ratios in all, every
+# one of the newest years usable and > 0, and those years within MAX_RATIO_SPREAD of each other.
+# RECENT_RATIO_MIN_YEARS = 10**9 = v1 (no fallback).
+RECENT_RATIO_YEARS = 3
+RECENT_RATIO_MIN_YEARS = 4
+# S3 blend (review round, owner decision 2026-10-23 "Blend over 1.8–2.4× (Recommended)"): the
+# used ratio is (1 − w) × the 5-year median + w × the newest years' median, w rising linearly
+# from 0 at a spread of MAX_RATIO_SPREAD to 1 at this spread. Without it, crossing 1.8× switched
+# between two published values (a CSX-like fixture moved +67 % on a 0.5 % change to an old year).
+RECENT_RATIO_FULL_SPREAD = 2.4
+# Consensus share basis (v2): FMP's consensus NI ÷ consensus EPS implies a share count (median m
+# over the eligible rows). Review round (owner decision 2026-10-23 "Ramp it in over 5–15%
+# (Recommended)"): with gap = |m ÷ diluted shares − 1|, t = (gap − TOLERANCE) ÷ (FULL −
+# TOLERANCE) clamped to [0, 1], and NI' = NI + t × (EPS × shares − NI). A hard 10 % step moved the
+# published value ~9 % overnight when the gap crossed it. float('inf') = v1 (NI as published).
+CONSENSUS_SHARE_TOLERANCE = 0.05
+CONSENSUS_SHARE_FULL = 0.15
+# m ÷ shares above this (or below its inverse) is not an older share count but another share
+# unit (BRK-B's consensus implied 1502× its diluted count, XE's 0.07×): share_count_conflict.
+CONSENSUS_SHARE_MAX_RATIO = 2.0
 SHARE_CONFLICT = 0.15           # diluted shares vs market cap ÷ price (a 5:4 split = 20 %)
 ROLL_BLEND_DAYS = 91            # the forecast window crossfades over a quarter after a FY end
+# When FRED cannot supply the 5-year Treasury average, the newest stored one is used if its
+# SOURCE date (not the day it was copied) is at most this old (spec §2).
+RF_FALLBACK_MAX_AGE_DAYS = 7
 
 # Consecutive fiscal-year ends must be a year apart (52/53-week years land at 364/371 days).
 _FY_GAP_DAYS = (330, 400)
@@ -125,8 +176,8 @@ REFUSAL_REASONS: Dict[str, str] = {
         "Debt is large relative to the company's market value, so an estimate would be unreliable."
     ),
     "company_changed_shape": (
-        "The company changed shape recently (for example a spin-off), so its history doesn't "
-        "describe the business being forecast."
+        "Revenue fell sharply and hasn't recovered, or is forecast to fall (e.g. a spin-off), "
+        "so its history can't guide a forecast."
     ),
     "negative_fcf": "Free cash flow has been negative or unstable.",
     "forecast_losses": "Analysts forecast a loss next year, so there is no cash flow to value.",
@@ -163,6 +214,9 @@ class ConsensusYear:
     net_income: Optional[float]
     analysts_revenue: int
     analysts_eps: int
+    # Consensus EPS (FMP `epsAvg`). Last, with a default, so rows rebuilt from a v1 history log
+    # (which has no eps) still construct; None = unknown, and such a row is never re-based.
+    eps: Optional[float] = None
 
 
 @dataclass
@@ -186,6 +240,11 @@ class DcfInputs:
     total_debt: Optional[float] = None
     rf_avg_pct: Optional[float] = None
     rf_recent_pct: Optional[float] = None
+    # Where rf_avg_pct came from: "fred" (the live series) or "history_fallback" (the newest
+    # stored estimate's, spec §2), and the date of the data behind it — for a fallback, the
+    # ORIGINAL source date, so a fallback copied from a fallback cannot outlive the age limit.
+    rf_source: str = "fred"
+    rf_source_date: Optional[date] = None
     notes: List[str] = field(default_factory=list)
 
     @property
@@ -299,15 +358,19 @@ def build_inputs(
     rf_recent_pct: Optional[float] = None,
     price: Optional[float] = None,
     market_cap: Optional[float] = None,
+    rf_source: str = "fred",
+    rf_source_date: Optional[date] = None,
 ) -> DcfInputs:
     """FMP payloads → DcfInputs, using only rows public on `as_of`.
 
     `price` / `market_cap` override the profile's (the replay passes the historical ones).
+    `rf_source` / `rf_source_date` only label where `rf_avg_pct` came from, for the history log.
     """
     prof = profile[0] if isinstance(profile, list) and profile else profile
     prof = prof if isinstance(prof, dict) else {}
     inp = DcfInputs(ticker=ticker.upper(), as_of=as_of, rf_avg_pct=rf_avg_pct,
-                    rf_recent_pct=rf_recent_pct)
+                    rf_recent_pct=rf_recent_pct, rf_source=rf_source,
+                    rf_source_date=rf_source_date)
     inp.price = price if price is not None else _num(prof.get("price"))
     inp.market_cap = market_cap if market_cap is not None else _num(prof.get("marketCap"))
     inp.listing_currency = (str(prof.get("currency") or "") or None)
@@ -400,6 +463,7 @@ def build_inputs(
             net_income=_num(r.get("netIncomeAvg")),
             analysts_revenue=int(_num(r.get("numAnalystsRevenue")) or 0),
             analysts_eps=int(_num(r.get("numAnalystsEps")) or 0),
+            eps=_num(r.get("epsAvg")),
         )
         if abs((end - last_end).days) <= SAME_FY_DAYS:
             inp.consensus_reported = row
@@ -488,11 +552,13 @@ def project_flows(
     weights: Optional[Sequence[float]] = None,
 ) -> Tuple[List[float], List[date]]:
     """Analyst flows, then extrapolation to FORECAST_YEARS: growth starts at the analyst-years
-    TREND growth (weighted by analyst count) and falls linearly to g; the path starts from the
-    trend value at the last analyst year, never the raw last point (spec §1 step 3)."""
+    TREND growth (weighted by analyst count), capped at TAIL_START_GROWTH_CAP, and falls
+    linearly to g; the path starts from the trend value at the last analyst year, never the raw
+    last point (spec §1 step 3). The cap (v2) is not the silent clip the research rejected: it
+    acts only inside GROWTH_BOUNDS, whose edge still refuses, and value_company notes it."""
     flows, ends = list(analyst_flows), list(analyst_ends)
     trend = consensus_trend(flows, weights)
-    start = g if trend is None else trend.growth
+    start = g if trend is None else min(trend.growth, TAIL_START_GROWTH_CAP)
     remaining = FORECAST_YEARS - len(flows)
     value = flows[-1] if trend is None else trend.last_fitted
     end = ends[-1]
@@ -541,6 +607,119 @@ def ratio_spread(values: Sequence[float]) -> Optional[float]:
     return hi / lo
 
 
+def _trailing_ratio(by_end: Dict[date, float], history: Sequence[FiscalYear]) -> Optional[float]:
+    """S3 (v2): the median ratio of the RECENT_RATIO_YEARS newest fiscal years, or None when the
+    recent years cannot stand in for the five.
+
+    Used only when the 5-year ratios disagree (ratio_spread > MAX_RATIO_SPREAD), and then
+    blended with the 5-year median by _blend_recent. A business
+    whose margin has stepped up and stayed there (CRM's expanding margin, NVDA's 1.84 spread)
+    was refused because its OLD years disagreed with its new ones; the newest three describe the
+    business being forecast. It stays strict where the v1 rule earned its keep — CSX's value
+    doubled at one annual report when an old year left a median that disagreed with itself:
+      * ≥ RECENT_RATIO_MIN_YEARS usable (> 0) ratios in all, so three years never decide alone;
+      * EVERY one of the newest years has a ratio > 0 (a year with no SBC figure, a loss, or
+        negative cash flow has none, and then nothing stands in for it);
+      * those years agree: max ÷ min ≤ MAX_RATIO_SPREAD (alternating good and bad years refuse).
+    `by_end` maps a fiscal-year end to its ratio; `history` is oldest → newest."""
+    if sum(1 for v in by_end.values() if v > 0) < RECENT_RATIO_MIN_YEARS:
+        return None
+    recent_years = history[-RECENT_RATIO_YEARS:]
+    if len(recent_years) < RECENT_RATIO_YEARS:
+        return None
+    recent = [by_end.get(y.end) for y in recent_years]
+    if any(v is None or v <= 0 for v in recent):
+        return None
+    if max(recent) / min(recent) > MAX_RATIO_SPREAD:
+        return None
+    return statistics.median(recent)
+
+
+def rebase_weight(gap: float) -> float:
+    """t ∈ [0, 1] for a share-basis gap |m ÷ shares − 1|: 0 up to CONSENSUS_SHARE_TOLERANCE, 1
+    from CONSENSUS_SHARE_FULL, linear between (review round: a ramp, never a step). A
+    non-finite tolerance (the v1 switch) is 0 with no inf/nan arithmetic; a FULL at or below the
+    tolerance degrades to a step at the tolerance."""
+    if not math.isfinite(CONSENSUS_SHARE_TOLERANCE) or not math.isfinite(gap):
+        return 0.0
+    if gap <= CONSENSUS_SHARE_TOLERANCE:
+        return 0.0
+    if not math.isfinite(CONSENSUS_SHARE_FULL) or CONSENSUS_SHARE_FULL <= CONSENSUS_SHARE_TOLERANCE:
+        return 1.0
+    return min(max((gap - CONSENSUS_SHARE_TOLERANCE)
+                   / (CONSENSUS_SHARE_FULL - CONSENSUS_SHARE_TOLERANCE), 0.0), 1.0)
+
+
+def _blend_recent(
+    median5: Optional[float], spread: Optional[float], by_end: Dict[date, float],
+    history: Sequence[FiscalYear], label: str,
+) -> Tuple[Optional[float], Optional[str]]:
+    """S3 (v2, review round): (ratio to use, note) for one trailing ratio; (None, None) refuses.
+
+    Spread unmeasurable or ≤ MAX_RATIO_SPREAD → the 5-year median, as v1. Above it, the newest
+    years must qualify (_trailing_ratio) or the ratio refuses, as v1; when they do, the ratio is
+    (1 − w) × median5 + w × median3 with w = (spread − MAX_RATIO_SPREAD) ÷
+    (RECENT_RATIO_FULL_SPREAD − MAX_RATIO_SPREAD) clamped to [0, 1] (owner decision 2026-10-23,
+    "Blend over 1.8–2.4×"), so the value is continuous as the spread crosses 1.8×."""
+    if median5 is None or spread is None or spread <= MAX_RATIO_SPREAD:
+        return median5, None
+    recent = _trailing_ratio(by_end, history)
+    if recent is None:
+        return None, None
+    band = RECENT_RATIO_FULL_SPREAD - MAX_RATIO_SPREAD
+    w = 1.0 if not band > 0 else min(max((spread - MAX_RATIO_SPREAD) / band, 0.0), 1.0)
+    ratio = recent if w >= 1 else (1 - w) * median5 + w * recent
+    return ratio, (f"{label} varied {spread:.2f}× over the reported years; blended {w:.0%} toward "
+                   f"the newest {RECENT_RATIO_YEARS} years' median")
+
+
+def consensus_on_share_basis(
+    consensus: Sequence[ConsensusYear], reported: Optional[ConsensusYear], shares: Optional[float],
+) -> Tuple[List[ConsensusYear], Optional[ConsensusYear], Optional[float], float]:
+    """(consensus, consensus_reported, m ÷ shares, t) with net income moved toward TODAY's share
+    basis.
+
+    FMP's consensus net income and consensus EPS do not always sit on the same share count: for
+    CRM, NI ÷ EPS implied ~17 % more shares than the latest diluted count (buybacks since the
+    analysts' NI was set), which put the earnings method — the headline — ~17 % high. The model
+    divides NI by today's diluted count, so NI must be on that basis.
+
+    One decision PER TICKER (owner decision 2026-10-23 re-base; per ticker rather than per year,
+    which would put steps into the analyst-years trend): m = median(NI ÷ EPS) over every row with
+    NI > 0 and EPS > 0, the reported-year row included. With gap = |m ÷ shares − 1| and
+    t = rebase_weight(gap), every such row gets NI' = NI + t × (EPS × shares − NI) — a ramp from
+    t = 0 at CONSENSUS_SHARE_TOLERANCE to t = 1 at CONSENSUS_SHARE_FULL (owner decision
+    2026-10-23, "Ramp it in over 5–15%"), so the value is continuous in m. A row without a
+    positive NI or EPS is left exactly as published (so forecast_losses still sees a forecast
+    loss). The third element is m ÷ shares whenever it was measured (the caller refuses one
+    outside CONSENSUS_SHARE_MAX_RATIO as share_count_conflict), else None — always None with a
+    non-finite tolerance (v1). The fourth is t; rows are replaced only when t > 0. Pure: new rows
+    via dataclasses.replace, the inputs are never modified."""
+    rows = list(consensus)
+    if not math.isfinite(CONSENSUS_SHARE_TOLERANCE):
+        return rows, reported, None, 0.0             # v1: NI as published, nothing measured
+
+    def eligible(c: Optional[ConsensusYear]) -> bool:
+        return (c is not None and c.net_income is not None and c.net_income > 0
+                and c.eps is not None and c.eps > 0)
+
+    implied = [c.net_income / c.eps for c in rows + [reported] if eligible(c)]  # type: ignore[operator, union-attr]
+    if not implied or not shares or shares <= 0:
+        return rows, reported, None, 0.0
+    ratio = statistics.median(implied) / shares
+    t = rebase_weight(abs(ratio - 1))
+    if t <= 0:
+        return rows, reported, ratio, 0.0
+
+    def rebase(c: ConsensusYear) -> ConsensusYear:
+        if not eligible(c):
+            return c
+        target = c.eps * shares  # type: ignore[operator]
+        return replace(c, net_income=target if t >= 1 else c.net_income + t * (target - c.net_income))  # type: ignore[operator]
+
+    return [rebase(c) for c in rows], rebase(reported) if reported is not None else None, ratio, t
+
+
 def _refuse(inp: DcfInputs, code: str, **extra: Any) -> DcfResult:
     # A refusal carries no parameters of an estimate that does not exist (the sheet would
     # otherwise list a discount rate and "estimated on" for nothing) — only its code and date.
@@ -575,6 +754,10 @@ class _Window:
     start: date
     analyst_e: List[ConsensusYear]
     analyst_r: List[ConsensusYear]
+    # The analyst-years trends the window was judged on, kept so value_company can note when
+    # TAIL_START_GROWTH_CAP binds (S2). None with a single analyst year.
+    trend_e: Optional[ConsensusTrend] = None
+    trend_r: Optional[ConsensusTrend] = None
 
 
 def _check_window(start: date, forward: Sequence[ConsensusYear]) -> Tuple[Optional[_Window], Optional[str]]:
@@ -597,7 +780,8 @@ def _check_window(start: date, forward: Sequence[ConsensusYear]) -> Tuple[Option
     for t in trends:
         if t is not None and not (GROWTH_BOUNDS[0] <= t.growth <= GROWTH_BOUNDS[1]):
             return None, "growth_out_of_range"
-    return _Window(start=start, analyst_e=analyst_e, analyst_r=analyst_r), None
+    return _Window(start=start, analyst_e=analyst_e, analyst_r=analyst_r,
+                   trend_e=trends[0], trend_r=trends[1]), None
 
 
 def value_company(inp: DcfInputs, *, rate_basis: str = RATE_RF_BASIS) -> DcfResult:
@@ -612,6 +796,14 @@ def value_company(inp: DcfInputs, *, rate_basis: str = RATE_RF_BASIS) -> DcfResu
         return _refuse(inp, "missing_data")
     if not inp.shares_diluted or inp.shares_diluted <= 0:
         return _refuse(inp, "missing_data")
+    # Consensus NI on today's share basis (v2, consensus_on_share_basis). Local copies: every
+    # rule below reads `consensus` / `reported`, never inp.consensus / inp.consensus_reported.
+    consensus, reported, implied_shares, rebase_t = consensus_on_share_basis(
+        inp.consensus, inp.consensus_reported, inp.shares_diluted)
+    if rebase_t > 0 and implied_shares is not None:
+        notes.append(f"consensus net income implied a share count {implied_shares - 1:+.1%} off "
+                     f"the latest diluted count; re-based {rebase_t:.0%} of the way to consensus "
+                     f"EPS × that count")
     currencies = set(inp.statement_currencies)
     if inp.statement_currency:
         currencies.add(inp.statement_currency)
@@ -626,6 +818,11 @@ def value_company(inp: DcfInputs, *, rate_basis: str = RATE_RF_BASIS) -> DcfResu
             return _refuse(inp, "share_count_conflict")
         if drift > 0.10:
             notes.append(f"share count differs from market cap ÷ price by {drift:.0%}")
+    # The consensus NI ÷ EPS count against the diluted count (§1.4): beyond 2× either way the
+    # consensus is on another share unit (BRK-B 1502×, XE 0.07×), and no re-base can fix that.
+    if implied_shares is not None and not (
+            1 / CONSENSUS_SHARE_MAX_RATIO <= implied_shares <= CONSENSUS_SHARE_MAX_RATIO):
+        return _refuse(inp, "share_count_conflict")
     if inp.industry.startswith(FINANCIAL_INDUSTRY_PREFIXES):
         return _refuse(inp, "financial_company")
     if inp.industry.startswith(REIT_INDUSTRY_PREFIX):
@@ -648,16 +845,30 @@ def value_company(inp: DcfInputs, *, rate_basis: str = RATE_RF_BASIS) -> DcfResu
     # Revenue path: the reported years, then the contiguous consensus years. A fall of more than
     # SHAPE_MAX_YOY_DROP anywhere on it means the history does not describe the company being
     # forecast (a spin-off: HON's 2026 consensus is half its 2025 revenue) or a collapse.
-    path = [y.revenue for y in inp.history]
+    # S1 (v2): a REPORTED drop a → b is ignored once the latest reported revenue is back to at
+    # least SHAPE_RECOVERY_SHARE × a. v1 scanned all five years, so STX — down 37 % in its FY23
+    # disk-drive downturn, FY26 revenue 12.2 B above FY22's 11.66 B — was refused as a company
+    # that "changed shape". A drop INTO the latest year has not recovered by definition, and a
+    # drop anywhere on the FORECAST path (last reported → consensus, consensus → consensus)
+    # always refuses: that is the spin-off case the rule exists for.
+    reported_path = [y.revenue for y in inp.history]
+    path = list(reported_path)
     prev_end = last.end
-    for c in inp.consensus:
+    for c in consensus:
         if not (_FY_GAP_DAYS[0] <= (c.end - prev_end).days <= _FY_GAP_DAYS[1]) or c.revenue is None:
             break
         path.append(c.revenue)
         prev_end = c.end
-    for a, b in zip(path, path[1:]):
+    recovered: List[str] = []
+    for i, (a, b) in enumerate(zip(path, path[1:])):
         if a > 0 and b < (1 - SHAPE_MAX_YOY_DROP) * a:
-            return _refuse(inp, "company_changed_shape")
+            into_latest_or_forecast = i + 1 >= len(reported_path) - 1
+            if into_latest_or_forecast or not last.revenue >= SHAPE_RECOVERY_SHARE * a:
+                return _refuse(inp, "company_changed_shape")
+            recovered.append(f"{inp.history[i + 1].end.year}: {b / a - 1:.0%}")
+    if recovered:
+        notes.append(f"earlier revenue drop ({', '.join(recovered)}) since recovered to "
+                     f"≥ {SHAPE_RECOVERY_SHARE:.0%} of the prior level; not treated as a change of shape")
 
     # ── stock-based compensation (spec §1.2) and negative FCF over EVERY year ──
     sbc_years = sum(1 for y in inp.history if y.sbc is not None)
@@ -681,7 +892,7 @@ def value_company(inp: DcfInputs, *, rate_basis: str = RATE_RF_BASIS) -> DcfResu
     # value therefore crossfades from the old window to the new over ROLL_BLEND_DAYS. The old
     # window is the one that still holds the ended year (as a zero-weight first slot), before and
     # after that year's 10-K — so the filing itself does not move the window either.
-    new_start, forward = last.end, list(inp.consensus)
+    new_start, forward = last.end, list(consensus)
     popped: List[ConsensusYear] = []
     while forward and forward[0].end <= inp.as_of \
             and _FY_GAP_DAYS[0] <= (forward[0].end - new_start).days <= _FY_GAP_DAYS[1]:
@@ -694,12 +905,12 @@ def value_company(inp: DcfInputs, *, rate_basis: str = RATE_RF_BASIS) -> DcfResu
         # (or the last reported one) and still holds the latest ended year as its first slot.
         old_start = popped[-2].end if len(popped) >= 2 else last.end
         old, rolled_at = (old_start, [popped[-1]] + forward), popped[-1].end
-    elif inp.consensus_reported is not None and len(inp.history) >= 2:
+    elif reported is not None and len(inp.history) >= 2:
         # After the 10-K: same old window, rebuilt from that year's consensus row. The clock is
         # anchored on the CONSENSUS row's date in both cases, so a 52/53-week filer (statement
         # 08-30, consensus 08-31) does not shift the crossfade weight on its filing day.
-        old = (inp.history[-2].end, [inp.consensus_reported] + list(inp.consensus))
-        rolled_at = inp.consensus_reported.end
+        old = (inp.history[-2].end, [reported] + list(consensus))
+        rolled_at = reported.end
     weight_new = 1.0
     if rolled_at is not None:
         weight_new = min(max((inp.as_of - rolled_at).days / ROLL_BLEND_DAYS, 0.0), 1.0)
@@ -711,24 +922,44 @@ def value_company(inp: DcfInputs, *, rate_basis: str = RATE_RF_BASIS) -> DcfResu
         old_window, _ = _check_window(*old)          # an old window that fails its rules is ignored
     if old_window is None:
         weight_new = 1.0
+    # S2 (v2): say so when the extrapolated tail starts below the analyst-years trend — on any
+    # window that is valued, the crossfade's old window included (project_flows caps both). One
+    # note per basis, naming the higher of the two trends.
+    capped: Dict[str, float] = {}
+    for w in [window] + ([old_window] if old_window is not None else []):
+        for label, t in (("earnings", w.trend_e), ("revenue", w.trend_r)):
+            if t is not None and t.growth > TAIL_START_GROWTH_CAP:
+                capped[label] = max(capped.get(label, t.growth), t.growth)
+    for label, growth in capped.items():
+        notes.append(f"analyst-years {label} trend of {growth:.1%}/yr; the years after them "
+                     f"start from {TAIL_START_GROWTH_CAP:.0%}/yr")
 
-    margins = [a / y.revenue for y, a in adj if y.revenue > 0]
-    margin = _median(margins)
-    spread = ratio_spread(margins)
-    if margin is None or not (MARGIN_BOUNDS[0] <= margin <= MARGIN_BOUNDS[1]) \
-            or (spread is not None and spread > MAX_RATIO_SPREAD):
+    # S3 (v2): when the five years disagree (spread > MAX_RATIO_SPREAD), the newest three take
+    # over — blended in over the spread band up to RECENT_RATIO_FULL_SPREAD so the threshold is
+    # not a jump (_blend_recent); when they cannot stand in (_trailing_ratio's conditions),
+    # refuse as v1 did. The bounds then apply to the ratio used.
+    margin_by_end = {y.end: a / y.revenue for y, a in adj if y.revenue > 0}
+    margins = list(margin_by_end.values())
+    margin, m_note = _blend_recent(_median(margins), ratio_spread(margins), margin_by_end,
+                                   inp.history, "cash-flow margin")
+    if m_note:
+        notes.append(m_note)
+    if margin is None or not (MARGIN_BOUNDS[0] <= margin <= MARGIN_BOUNDS[1]):
         return _refuse(inp, "unusual_margin")
     # Consensus net income is on the analysts' ADJUSTED basis (SBC added back), statements are
     # GAAP: measure conversion against NI + SBC. With SBC unreported this degrades to FCF / NI.
-    ratios: List[float] = []
+    ratio_by_end: Dict[date, float] = {}
     for y, a in adj:
         earnings = y.net_income + (y.sbc or 0.0) if deduct else y.net_income
         if a > 0 and earnings > 0:
-            ratios.append(a / earnings)
-    conversion = _median(ratios) if len(ratios) >= MIN_HISTORY_YEARS else None
-    c_spread = ratio_spread(ratios)
-    if conversion is None or not (CONVERSION_BOUNDS[0] <= conversion <= CONVERSION_BOUNDS[1]) \
-            or (c_spread is not None and c_spread > MAX_RATIO_SPREAD):
+            ratio_by_end[y.end] = a / earnings
+    ratios = list(ratio_by_end.values())
+    conversion, c_note = _blend_recent(
+        _median(ratios) if len(ratios) >= MIN_HISTORY_YEARS else None, ratio_spread(ratios),
+        ratio_by_end, inp.history, "cash conversion")
+    if c_note:
+        notes.append(c_note)
+    if conversion is None or not (CONVERSION_BOUNDS[0] <= conversion <= CONVERSION_BOUNDS[1]):
         return _refuse(inp, "unusual_conversion")
 
     # ── rates (spec §2) ──
@@ -816,6 +1047,17 @@ def rf_recent_pct(observations: Sequence[Any], as_of: date) -> Optional[float]:
     return statistics.fmean(values) if len(values) >= 40 else None
 
 
+def rf_latest_date(observations: Sequence[Any], as_of: date) -> Optional[date]:
+    """The newest dated, finite observation on or before `as_of`: the source date of a FRED
+    average, recorded in the history so a later fallback can tell how old its rate is."""
+    days = [
+        d for o in observations
+        if (d := _parse_date(getattr(o, "date", None))) is not None and d <= as_of
+        and getattr(o, "value", None) is not None and math.isfinite(o.value)
+    ]
+    return max(days) if days else None
+
+
 def _round(v: Optional[float], nd: int = 2) -> Optional[float]:
     return None if v is None else round(v, nd)
 
@@ -864,13 +1106,74 @@ _inflight: Dict[str, asyncio.Future] = {}
 # unset, an FMP leg failing), callers re-raise for this long instead of re-spending the six FMP
 # calls on every Analysis-tab view (review round: shadow mode would otherwise burn quota).
 _FAILURE_TTL = 180
-_failed_at: Dict[str, float] = {}
+# (failed at, permanent): the memo re-raises with the original failure's `permanent` flag, so a
+# permanent refusal does not read as an outage for the next 180 s (a caller would otherwise
+# record the ticker as degraded, or show "temporarily unavailable", on every rebuild).
+_failed_at: Dict[str, Tuple[float, bool]] = {}
+# The DGS10 read must hold enough rows for rf_average_pct's 80 % coverage rule: a short 200 from
+# FRED is a failure (not cached for 6 h, fred.get_observations' min_observations), never an answer.
+_RF_MIN_OBSERVATIONS = int(0.8 * 252 * RF_AVERAGE_YEARS)
+# The Treasury-average fallback (spec §2), memoised per process and ET date: (read at, result).
+# Longer on a hit than on a miss, so a FRED outage costs one Supabase read per ~10 min, and a
+# history with nothing usable is asked again within two.
+_RF_FALLBACK_HIT_TTL = 600
+_RF_FALLBACK_MISS_TTL = 120
+_rf_fallback_memo: Dict[date, Tuple[float, Optional[Tuple[float, date]]]] = {}
+
+
+def _rf_fallback_from_rows(rows: Sequence[Any], as_of: date) -> Optional[Tuple[float, date]]:
+    """(rf_avg_pct, source date) from dcf_fair_value_history rows, or None. Pure.
+
+    Each row carries `as_of_date`, `rf` (inputs.rf_avg_pct) and `src` (inputs.rf_source_date,
+    absent on rows written before v2). A row's SOURCE date is `src` when present, else its
+    as_of_date (a row computed from FRED that day). Accepted only when that source date is at
+    most RF_FALLBACK_MAX_AGE_DAYS before `as_of` (and not after it), and 0 < rf < 20 is finite.
+    Because a fallback row records the ORIGINAL source date, fallbacks cannot chain a stale rate
+    forward. The newest source date wins."""
+    best: Optional[Tuple[float, date]] = None
+    oldest = as_of - timedelta(days=RF_FALLBACK_MAX_AGE_DAYS)
+    for row in rows if isinstance(rows, (list, tuple)) else []:
+        if not isinstance(row, dict):
+            continue
+        rf = row.get("rf")
+        rf = None if isinstance(rf, bool) else _num(rf)
+        src = _parse_date(row.get("src")) or _parse_date(row.get("as_of_date"))
+        if rf is None or not (0 < rf < 20) or src is None or not (oldest <= src <= as_of):
+            continue
+        if best is None or src > best[1]:
+            best = (rf, src)
+    return best
 
 
 class DcfInputsUnavailableError(FMPUnavailableException):
     """An input the model cannot do without (a statement, the consensus, the Treasury average)
     could not be fetched. Transient: nothing is cached, and it maps to the existing retryable
-    "data provider unavailable" error. It is NOT a refusal, and must never be stored as one."""
+    "data provider unavailable" error. It is NOT a refusal, and must never be stored as one.
+
+    `permanent` (review round, 2026-10-23) is True only when EVERY failed essential FMP leg was a
+    permanent refusal (an unlicensed path — FMPNotEntitledException, FMP's 402 — or an HTTP 4xx
+    that retrying cannot change, `_is_permanent_leg_failure`). The service treats it exactly like
+    any other unavailability (failure memo, nothing stored); a caller may use it to avoid
+    recording a ticker as degraded on every rebuild."""
+
+    def __init__(self, message: str, *, permanent: bool = False) -> None:
+        super().__init__(message)
+        self.permanent = permanent
+
+
+def _is_permanent_leg_failure(exc: BaseException) -> bool:
+    """True for a failed FMP leg that retrying cannot fix: FMPNotEntitledException (raised before
+    the call for a path outside the Order Form, or on FMP's own unpredicted 402), or an
+    httpx.HTTPStatusError with a 4xx status other than 401 (auth), 408 (request timeout) and 429
+    (rate limit). Not FMPAuthException / 401: that is OUR key, an outage for every ticker that an
+    operator fixes, not a refusal of this one. Everything else — FMPUnavailableException, the
+    rate limit, a transport error, a 5xx, an unexpected exception — is transient."""
+    if isinstance(exc, FMPNotEntitledException):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        return isinstance(status, int) and 400 <= status < 500 and status not in (401, 408, 429)
+    return False
 
 
 def _cache_get(key: str) -> Optional[DcfFairValueResponse]:
@@ -930,8 +1233,9 @@ class DcfFairValueService:
                 return stored
 
         failed = _failed_at.get(key)
-        if failed is not None and time.time() - failed < _FAILURE_TTL:
-            raise DcfInputsUnavailableError(f"DCF inputs recently unavailable for {ticker}")
+        if failed is not None and time.time() - failed[0] < _FAILURE_TTL:
+            raise DcfInputsUnavailableError(f"DCF inputs recently unavailable for {ticker}",
+                                            permanent=failed[1])
         if key in _inflight:
             return await asyncio.shield(_inflight[key])
         future: asyncio.Future = asyncio.get_running_loop().create_future()
@@ -947,11 +1251,17 @@ class DcfFairValueService:
                 future.set_result(response)
             return response
         except asyncio.CancelledError:
-            fail_shared_future(future, RuntimeError("in-flight DCF computation was cancelled"))
+            # Followers see the leader's cancellation as a TRANSIENT unavailability (report
+            # degraded, Analysis tab "temporarily unavailable"), never as a model error. No
+            # failure memo: a cancellation says nothing about the inputs.
+            logger.warning("dcf: in-flight computation for %s cancelled; followers get "
+                           "DcfInputsUnavailableError", ticker)
+            fail_shared_future(future, DcfInputsUnavailableError(
+                "in-flight DCF computation was cancelled"))
             raise
         except Exception as e:
             if isinstance(e, DcfInputsUnavailableError):
-                _failed_at[key] = time.time()
+                _failed_at[key] = (time.time(), e.permanent is True)
             fail_shared_future(future, e)
             raise
         finally:
@@ -961,10 +1271,33 @@ class DcfFairValueService:
         as_of = _today_et()
         # The Treasury average first: without it nothing can be valued, so do not spend the six
         # FMP calls (FRED answers [] at once when its key is unset or it failed recently).
-        dgs10 = await self.fred.get_observations("DGS10", limit=1400)
+        dgs10 = await self.fred.get_observations(
+            "DGS10", limit=1400, min_observations=_RF_MIN_OBSERVATIONS)
         rf = rf_average_pct(dgs10, as_of)
+        rf_source, rf_source_date = "fred", rf_latest_date(dgs10, as_of)
+        rf_recent = rf_recent_pct(dgs10, as_of)
+        rf_note: Optional[str] = None
         if rf is None:
-            raise DcfInputsUnavailableError(f"10-year Treasury average unavailable for {ticker}")
+            # R1 (2026-10-23): one FRED failure on 2026-10-21 blanked every estimate in the app.
+            # The 5-year average moves by basis points a week, so the newest stored one (≤ 7
+            # days old at its SOURCE) stands in. Only while persistence is on: with both
+            # switches off nothing is stored and nothing may be read.
+            fallback = None
+            if settings.DCF_ENABLED or settings.DCF_SHADOW:
+                fallback = await self._rf_fallback(ticker, as_of)
+            if fallback is None:
+                raise DcfInputsUnavailableError(
+                    f"10-year Treasury average unavailable for {ticker}: FRED DGS10 gave "
+                    f"{len(dgs10)} usable observation(s) (need {_RF_MIN_OBSERVATIONS} over "
+                    f"{RF_AVERAGE_YEARS} years) and "
+                    + ("no stored average within "
+                       f"{RF_FALLBACK_MAX_AGE_DAYS} days could stand in"
+                       if settings.DCF_ENABLED or settings.DCF_SHADOW
+                       else "the stored-average fallback is off (DCF_ENABLED and DCF_SHADOW unset)"))
+            rf, rf_source_date = fallback
+            rf_source, rf_recent = "history_fallback", None
+            rf_note = (f"10-year Treasury average from stored data dated "
+                       f"{rf_source_date.isoformat()} (live series unavailable)")
         results = await asyncio.gather(
             self.fmp.get_company_profile(ticker),
             self.fmp.get_income_statement(ticker, period="annual", limit=HISTORY_YEARS + 1),
@@ -989,20 +1322,81 @@ class DcfFairValueService:
             for n in failed:
                 logger.warning("dcf: %s fetch failed for %s (%s: %s)", n, ticker,
                                type(payload[n]).__name__, payload[n])
-            raise DcfInputsUnavailableError(f"DCF inputs unavailable for {ticker}: {', '.join(failed)}")
+            permanent = all(_is_permanent_leg_failure(payload[n]) for n in failed)
+            if permanent:
+                logger.warning(
+                    "dcf: every failed leg for %s is a permanent refusal (%s) — raised as "
+                    "permanent unavailability", ticker,
+                    ", ".join(f"{n}={type(payload[n]).__name__}" for n in failed))
+            raise DcfInputsUnavailableError(
+                f"DCF inputs unavailable for {ticker}: {', '.join(failed)}"
+                + (" (permanent refusal)" if permanent else ""), permanent=permanent)
+        # R4 (2026-10-23): an EMPTY profile is a failed fetch, not a company with no data. As a
+        # missing_data refusal it was cached and recorded for the whole day. (Empty statements
+        # or estimates are a real answer and still refuse.)
+        prof = payload["profile"]
+        prof = prof[0] if isinstance(prof, list) and prof else prof
+        if not isinstance(prof, dict) or not prof:
+            logger.warning("dcf: empty company profile for %s (%s) — treated as unavailable",
+                           ticker, type(payload["profile"]).__name__)
+            raise DcfInputsUnavailableError(f"DCF inputs unavailable for {ticker}: empty profile")
         inp = build_inputs(
             ticker, as_of,
             profile=payload["profile"], income_annual=payload["income_annual"],
             income_quarter=payload["income_quarter"], cash_flow_annual=payload["cash_flow_annual"],
             balance_annual=payload["balance_annual"], estimates=payload["estimates"],
-            rf_avg_pct=rf, rf_recent_pct=rf_recent_pct(dgs10, as_of),
+            rf_avg_pct=rf, rf_recent_pct=rf_recent,
+            rf_source=rf_source, rf_source_date=rf_source_date,
         )
+        if rf_note:
+            inp.notes.append(rf_note)
         result = value_company(inp)
         logger.info("dcf: %s %s %s", ticker, result.status,
                     result.refusal_code or f"{result.fair_value:.2f}")
         return to_response(result), _inputs_log(inp)
 
+    async def _rf_fallback(self, ticker: str, as_of: date) -> Optional[Tuple[float, date]]:
+        """The newest usable stored Treasury average (spec §2), memoised per ET date."""
+        memo = _rf_fallback_memo.get(as_of)
+        if memo is not None:
+            read_at, value = memo
+            ttl = _RF_FALLBACK_HIT_TTL if value is not None else _RF_FALLBACK_MISS_TTL
+            if time.time() - read_at < ttl:
+                if value is not None:
+                    logger.warning("[dcf-rf-fallback] %s: FRED unavailable — stored 10-year average "
+                                   "%.4f %% from %s used (memo)", ticker, value[0], value[1].isoformat())
+                return value
+        try:
+            rows = await asyncio.to_thread(self._read_rf_history, as_of)
+            value = _rf_fallback_from_rows(rows, as_of)
+        except Exception as e:
+            logger.warning("[dcf-rf-fallback] %s: history read failed (%s: %s) — no fallback",
+                           ticker, type(e).__name__, e, exc_info=True)
+            value = None
+        _rf_fallback_memo.clear()                 # one entry: today's
+        _rf_fallback_memo[as_of] = (time.time(), value)
+        if value is None:
+            logger.warning("[dcf-rf-fallback] %s: FRED unavailable and no stored 10-year average "
+                           "within %d days", ticker, RF_FALLBACK_MAX_AGE_DAYS)
+        else:
+            logger.warning("[dcf-rf-fallback] %s: FRED unavailable — stored 10-year average %.4f %% "
+                           "from %s used", ticker, value[0], value[1].isoformat())
+        return value
+
     # ── Supabase (sync; always called off the event loop) ──
+
+    def _read_rf_history(self, as_of: date) -> List[Dict[str, Any]]:
+        """The newest history rows' Treasury average and its source date (JSON-path select,
+        verified against the live table 2026-10-23). Raises on failure; the caller logs."""
+        return (
+            self.supabase.table("dcf_fair_value_history")
+            .select("as_of_date, rf:inputs->rf_avg_pct, src:inputs->>rf_source_date")
+            .gte("as_of_date", (as_of - timedelta(days=RF_FALLBACK_MAX_AGE_DAYS)).isoformat())
+            .lte("as_of_date", as_of.isoformat())
+            .order("as_of_date", desc=True)
+            .limit(10)
+            .execute()
+        ).data or []
 
     def _read_stored(self, ticker: str) -> Optional[DcfFairValueResponse]:
         try:
@@ -1068,6 +1462,10 @@ def _inputs_log(inp: DcfInputs) -> Dict[str, Any]:
         "beta_raw": inp.beta_raw,
         "rf_avg_pct": inp.rf_avg_pct,
         "rf_recent_pct": inp.rf_recent_pct,
+        # Where the average came from and the date of its data (spec §2, §4). The rf fallback
+        # reads these back, so a fallback row never resets the age of the rate it copied.
+        "rf_source": inp.rf_source,
+        "rf_source_date": inp.rf_source_date.isoformat() if inp.rf_source_date else None,
         "rate_basis": RATE_RF_BASIS,
         "rf_at_erp_pct": RF_AT_ERP_PCT,
         "erp_pct": ERP_PCT,
@@ -1092,7 +1490,8 @@ def _inputs_log(inp: DcfInputs) -> Dict[str, Any]:
 
 def _consensus_log(c: ConsensusYear) -> Dict[str, Any]:
     return {"end": c.end.isoformat(), "revenue": c.revenue, "net_income": c.net_income,
-            "analysts_revenue": c.analysts_revenue, "analysts_eps": c.analysts_eps}
+            "analysts_revenue": c.analysts_revenue, "analysts_eps": c.analysts_eps,
+            "eps": c.eps}
 
 
 _service: Optional[DcfFairValueService] = None

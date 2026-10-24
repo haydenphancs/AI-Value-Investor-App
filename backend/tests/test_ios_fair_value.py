@@ -3,7 +3,7 @@
 Pins, in the Swift that ships:
   * the wire contract: every DcfFairValueResponse field has a CodingKey with the same snake name,
     everything but symbol/status is Optional, and both carrier DTOs decode the block;
-  * the wording rules (documents/research/dcf-methodology-v1.md §5): the title says "Estimate",
+  * the wording rules (documents/research/dcf-methodology-v2.md §5): the title says "Estimate",
     the subtitle says "not a price target", the gap is "Price N% below/above the estimate", and
     no verdict word (Undervalued / Overvalued / Fairly valued / Cheap / Bargain) appears;
   * a value is never shown without its range, and the RANGE is the headline (owner,
@@ -36,6 +36,8 @@ _BAR = _IOS / "Views" / "Molecules" / "ReportConsensusBar.swift"
 _SNAP_DTO = _IOS / "Models" / "StockOverviewResponseModels.swift"
 _REPORT_DTO = _IOS / "Models" / "TickerReportResponse.swift"
 _VM = _IOS / "ViewModels" / "TickerDetailViewModel.swift"
+_COMPACT = _IOS / "Views" / "Molecules" / "CaydexFairValueCompactRow.swift"
+_UNAVAILABLE = _IOS / "Views" / "Molecules" / "CaydexFairValueUnavailableRow.swift"
 
 _VERDICTS = re.compile(r"undervalued|overvalued|underpriced|overpriced|fairly valued|\bcheap\b|"
                        r"bargain|\bbuy\b|\bsell\b|\bupside\b|\bdownside\b|price target:", re.I)
@@ -128,7 +130,7 @@ def test_title_subtitle_and_gap_wording():
 
 
 def test_no_verdict_word_in_any_fair_value_string():
-    for path in (_MODELS, _ROW, _SHEET, _CHART):
+    for path in (_MODELS, _ROW, _SHEET, _CHART, _COMPACT, _UNAVAILABLE):
         for s in _strings(_code(path)):
             assert _verdict_free(s), f"{path.name}: {s!r}"
     info = _code(_IOS / "Views" / "Molecules" / "ValuationInfoSheet.swift")

@@ -10,7 +10,7 @@ import SwiftUI
 
 struct ValuationInfoSheet: View {
     /// True when the card shows the Caydex Fair Value Estimate instead of FMP's DCF row: the
-    /// sheet must then describe THAT model (dcf-methodology-v1), not the one it replaced.
+    /// sheet must then describe THAT model (dcf-methodology-v2), not the one it replaced.
     var showsCaydexEstimate: Bool = false
     /// True when FMP's DCF row is on the card (the switch is off). With neither row, the sheet
     /// explains neither model.
@@ -101,7 +101,7 @@ struct ValuationInfoSheet: View {
         .background(RoundedRectangle(cornerRadius: AppCornerRadius.large).cardFill())
     }
 
-    /// Mirrors documents/research/dcf-methodology-v1.md; the row's own sheet has the details.
+    /// Mirrors documents/research/dcf-methodology-v2.md; the row's own sheet has the details.
     private var caydexSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             Text("The Caydex Fair Value Estimate")

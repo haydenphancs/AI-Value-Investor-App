@@ -9,7 +9,7 @@
 //  names. Used by the report's "Valuation & Institutions" section and the Analysis tab's
 //  Valuation card, so both draw the estimate the same way.
 //
-//  ⚠️ Rules this view carries (documents/research/dcf-methodology-v1.md §5, pinned by
+//  ⚠️ Rules this view carries (documents/research/dcf-methodology-v2.md §5, pinned by
 //  backend/tests/test_ios_fair_value.py):
 //  • the pole reads only `CaydexFairValue.bounds`, so an estimate is never drawn without its
 //    range;

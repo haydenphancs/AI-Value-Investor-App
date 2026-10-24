@@ -1026,7 +1026,7 @@ class ResearchService:
         ).get("valuation") or {}
         if not val:
             return None
-        # NEUTRAL wording only (documents/research/dcf-methodology-v1.md §5, hard rule 4). This
+        # NEUTRAL wording only (documents/research/dcf-methodology-v2.md §5, hard rule 4). This
         # used to persist and serve "Undervalued" / "Overvalued" and "N% upside" — a verdict on
         # a model value (and, with no DCF, on a synthetic upside mapped from the snapshot rating).
         # Now: no rating label, and the gap stated as price vs the model value when one exists.

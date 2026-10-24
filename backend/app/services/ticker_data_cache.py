@@ -329,8 +329,11 @@ async def get_cached_collection(ticker: str) -> Optional[Any]:
         # valuation derived from it, and the `dcf_source` stamp on the Wall Street partial.
         # Served across a DCF_ENABLED flip, it would build a report under the OTHER setting
         # (an estimate the kill switch just withdrew, or FMP's DCF beside the Caydex tab)
-        # for up to a day. Same rule as the report caches: a mismatch is a miss.
-        logger.info("ticker_data_cache DCF-SOURCE MISMATCH for %s — treating as a miss", ticker)
+        # for up to a day. Same rule as the report caches: a mismatch is a miss. The same
+        # goes for an estimate computed by another DCF model version.
+        logger.info(
+            "ticker_data_cache DCF-SOURCE/MODEL MISMATCH for %s — treating as a miss", ticker,
+        )
         return None
     if out is not None:
         logger.info("ticker_data_cache HIT for %s", ticker)
@@ -338,12 +341,57 @@ async def get_cached_collection(ticker: str) -> Optional[Any]:
 
 
 def _built_under_current_dcf(out: Any) -> bool:
-    """Whether a cached collection was built under the current DCF setting. A row that
-    predates the stamp was built with FMP's DCF."""
+    """Whether a cached collection was built under the current DCF setting — and, while the
+    Caydex estimate is on (settings.DCF_ENABLED), by the current model. A row that predates
+    the source stamp was built with FMP's DCF.
+
+    The model half: the collection freezes the estimate it was built with (`caydex_dcf`, the
+    fair value and valuation derived from it, the Wall Street card's copy). Served across a
+    `MODEL_VERSION` bump it would build today's reports from yesterday's model — v1's
+    "company changed shape" refusal on STX beside the Analysis tab's v2 value — until the
+    close. So an estimate of any other version (or none readable) is a miss. A collection
+    with NO estimate stays a hit: it carries no version, and its source stamp is checked
+    above. The freshness probe (`is_cached_collection_fresh`) cannot see this — it reads
+    `cached_at` only — so after a bump the pre-warmer may skip a ticker whose first real
+    read then re-collects: the same one-close-cycle window as the grounding stamp.
+    Report caches are deliberately NOT invalidated by a bump (a miss there charges the next
+    opener 20 credits); their rows age out at the close.
+    """
     partial = getattr(out, "wall_street_consensus_partial", None)
-    return report_dcf_source_matches(
+    if not report_dcf_source_matches(
         {"wall_street_consensus": partial if isinstance(partial, dict) else {}}
-    )
+    ):
+        return False
+    from app.config import settings
+
+    if not settings.DCF_ENABLED:
+        return True
+    # Lazy: the service pulls in the FMP / FRED clients and Supabase at import.
+    from app.services.dcf_fair_value_service import MODEL_VERSION
+
+    # After `_deserialize` the field is a DcfFairValueResponse; the Wall Street partial holds
+    # its `model_dump()` dict. Both are read, so neither copy can carry an older model.
+    estimates = [getattr(out, "caydex_dcf", None)]
+    if isinstance(partial, dict):
+        estimates.append(partial.get("caydex_fair_value"))
+    versions = [_estimate_model_version(e) for e in estimates if e is not None]
+    stale = [v for v in versions if v != MODEL_VERSION]
+    if stale:
+        logger.info(
+            "ticker_data_cache DCF-MODEL MISMATCH for %s — the collection holds an estimate "
+            "built by %s, the current model is %s",
+            getattr(out, "ticker", "?"), ", ".join(map(repr, stale)), MODEL_VERSION,
+        )
+        return False
+    return True
+
+
+def _estimate_model_version(estimate: Any) -> Any:
+    """`model_version` of a stored estimate — a DcfFairValueResponse or its dumped dict.
+    Anything else reads as None, which never equals a real version (fail closed: a miss)."""
+    if isinstance(estimate, dict):
+        return estimate.get("model_version")
+    return getattr(estimate, "model_version", None)
 
 
 async def is_cached_collection_fresh(ticker: str) -> bool:

@@ -449,17 +449,22 @@ struct SnapshotItem: Identifiable {
     var dcf: DcfEstimate? = nil
     /// The Caydex Fair Value Estimate — when present it replaces FMP's `dcf` row.
     var caydexEstimate: CaydexFairValue? = nil
+    /// True only when there is no `caydexEstimate` because the backend could not compute
+    /// it for a transient reason (`caydex_estimate_unavailable`) — the Analysis tab then
+    /// says "temporarily unavailable" instead of drawing nothing.
+    var caydexEstimateUnavailable: Bool = false
     /// When the backend BUILT this snapshot (`computed_at`). nil = not sent (an older
     /// backend) or unreadable: the Snapshots header then shows no date rather than today's.
     var computedAt: Date? = nil
 
-    init(category: SnapshotCategory, rating: SnapshotRatingLevel, metrics: [SnapshotMetric], fullReportAvailable: Bool = true, dcf: DcfEstimate? = nil, caydexEstimate: CaydexFairValue? = nil, computedAt: Date? = nil) {
+    init(category: SnapshotCategory, rating: SnapshotRatingLevel, metrics: [SnapshotMetric], fullReportAvailable: Bool = true, dcf: DcfEstimate? = nil, caydexEstimate: CaydexFairValue? = nil, caydexEstimateUnavailable: Bool = false, computedAt: Date? = nil) {
         self.category = category
         self.rating = rating
         self.metrics = metrics
         self.fullReportAvailable = fullReportAvailable
         self.dcf = dcf
         self.caydexEstimate = caydexEstimate
+        self.caydexEstimateUnavailable = caydexEstimateUnavailable
         self.computedAt = computedAt
     }
 

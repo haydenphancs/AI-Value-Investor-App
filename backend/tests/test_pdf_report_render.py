@@ -105,7 +105,7 @@ def test_build_context_full_sample():
     # The model value the report was built with — never its analyst target (205, 2026-09-26).
     assert ctx["fair_value"] == 196.0
     assert ctx["margin_of_safety_pct"] > 0  # 196 vs 172.4
-    # Neutral gap wording, never a verdict (hard rule 4 — dcf-methodology-v1.md §5).
+    # Neutral gap wording, never a verdict (hard rule 4 — dcf-methodology-v2.md §5).
     assert ctx["valuation_word"] == "Price 12% below the model value"
     # Eight: the "Wall Street" row (analyst conviction) left with the analyst half.
     assert len(ctx["vitals"]) == 8

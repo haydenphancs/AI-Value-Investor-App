@@ -585,7 +585,7 @@ CURATION: dict[str, TableDoc] = {
         key=("ticker", "model_version", "response_json", "computed_at"),
         note="Migration 178. A row whose model_version differs from the running model is "
              "ignored, so a model change is a miss. GLOBAL and impersonal: no per-user column "
-             "may exist (spec: documents/research/dcf-methodology-v1.md). service_role only."),
+             "may exist (spec: documents/research/dcf-methodology-v2.md). service_role only."),
     "public.dcf_fair_value_history": T("research",
         purpose="Append-only record of every fair-value estimate computed, with its inputs.",
         key=("ticker", "as_of_date", "model_version", "status", "refusal_code", "fair_value",

@@ -56,6 +56,13 @@ struct StockOverviewResponseDTO: Decodable {
         case relatedTickers = "related_tickers"
         case benchmarkSummary = "benchmark_summary"
     }
+
+    /// True when a snapshot says its Caydex Fair Value Estimate is TEMPORARILY unavailable.
+    /// `StockRepository` does not cache such a response, so the next open asks again
+    /// instead of replaying the gap for the cache's lifetime.
+    var hasUnavailableCaydexEstimate: Bool {
+        snapshots.contains { $0.caydexEstimateUnavailable == true && $0.caydexEstimate == nil }
+    }
 }
 
 // MARK: - Price Point DTO (OHLCV)
@@ -229,6 +236,11 @@ struct SnapshotItemDTO: Decodable {
     /// The Caydex Fair Value Estimate (valuation snapshot only, when the backend enables
     /// it — FMP's `dcf` is then absent). Optional: older backends never send it.
     let caydexEstimate: CaydexFairValueDTO?
+    /// True when the estimate could not be computed for a TRANSIENT reason (an upstream
+    /// input was down), so `caydexEstimate` is absent but not because the model refused.
+    /// The Analysis tab then says so instead of drawing no row. Optional: older backends
+    /// never send it, and nil reads as "not flagged".
+    let caydexEstimateUnavailable: Bool?
     /// ISO-8601 UTC instant the backend BUILT this snapshot (a cached item keeps its build
     /// time). Optional: an older backend never sends it, and the header then shows no date.
     let computedAt: String?
@@ -237,6 +249,7 @@ struct SnapshotItemDTO: Decodable {
         case category, rating, metrics, dcf
         case fullReportAvailable = "full_report_available"
         case caydexEstimate = "caydex_estimate"
+        case caydexEstimateUnavailable = "caydex_estimate_unavailable"
         case computedAt = "computed_at"
     }
 }
@@ -347,13 +360,17 @@ extension StockOverviewResponseDTO {
             if computedAt == nil, let raw = dto.computedAt {
                 print("⚠️ StockOverviewDTO: \(symbol) \(dto.category) snapshot computed_at unreadable: \(raw)")
             }
+            let caydexEstimate = dto.caydexEstimate.flatMap { CaydexFairValue(dto: $0) }
             return SnapshotItem(
                 category: category,
                 rating: rating,
                 metrics: metrics,
                 fullReportAvailable: dto.fullReportAvailable,
                 dcf: dto.dcf.flatMap { DcfEstimate(dto: $0) },
-                caydexEstimate: dto.caydexEstimate.flatMap { CaydexFairValue(dto: $0) },
+                caydexEstimate: caydexEstimate,
+                // Only when there is no estimate to show: a flag beside a real estimate
+                // or refusal is ignored rather than hiding it.
+                caydexEstimateUnavailable: dto.caydexEstimateUnavailable == true && caydexEstimate == nil,
                 computedAt: computedAt
             )
         }

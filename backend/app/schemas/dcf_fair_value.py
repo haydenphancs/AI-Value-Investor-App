@@ -1,7 +1,7 @@
 """
-Pydantic response schema for the Caydex Fair Value Estimate (model `dcf-v1`).
+Pydantic response schema for the Caydex Fair Value Estimate (model `dcf-v2`).
 
-Methodology: documents/research/dcf-methodology-v1.md. Built by
+Methodology: documents/research/dcf-methodology-v2.md. Built by
 app/services/dcf_fair_value_service.py.
 
 `status` is the ONLY required field besides `symbol`. Everything else is Optional, so a refusal

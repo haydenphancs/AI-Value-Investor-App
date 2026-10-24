@@ -12,7 +12,7 @@
 //  old ones included — the owner's decision of 2026-09-26. Analyst ratings and price targets
 //  are outside the signed FMP licence, so it only ever said "No analyst price targets are
 //  available", and a model estimate must never sit under a price-target heading or a coloured
-//  BUY/HOLD/SELL line (documents/research/dcf-methodology-v1.md §5). The DTO still decodes
+//  BUY/HOLD/SELL line (documents/research/dcf-methodology-v2.md §5). The DTO still decodes
 //  every analyst field; only `insightWasWrittenForAnalystCard` reads them.
 //
 

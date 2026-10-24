@@ -1,9 +1,12 @@
-"""Caydex Fair Value Estimate — model dcf-v1 (app/services/dcf_fair_value_service.py).
+"""Caydex Fair Value Estimate — model dcf-v2 (app/services/dcf_fair_value_service.py).
 
-Spec: documents/research/dcf-methodology-v1.md. These tests pin:
+Spec: documents/research/dcf-methodology-v2.md (v1 superseded, kept frozen). These tests pin:
   * the arithmetic (Simply Wall St's published Apple case, closed-form checks, monotonicity);
   * the timing convention (no jump at a fiscal-year end or at the annual-report roll);
   * every refusal rule, each with a passing sibling so a rule that fires on everything fails;
+  * the v2 rules (S1 recovered drop, S2 growth band + tail cap, S3 recent ratios, the consensus
+    share re-base), each with a firing test and a passing sibling, and v2 with all four switched
+    off reproducing v1's numbers exactly;
   * SBC handling, point-in-time filtering, share-count and consensus-date edge cases;
   * HARD RULE 1 (nothing per-user can reach the value) and HARD RULE 5 (spec text ↔ constants);
   * the service: flag-gated Supabase access, no caching of a degraded fetch, in-flight dedup.
@@ -14,6 +17,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import copy
+import json
 import math
 import re
 from dataclasses import dataclass
@@ -28,7 +32,8 @@ from app.schemas.dcf_fair_value import DcfFairValueResponse
 
 AS_OF = date(2026, 9, 25)
 _ROOT = Path(__file__).resolve().parents[2]
-_SPEC = _ROOT / "documents" / "research" / "dcf-methodology-v1.md"
+_SPEC = _ROOT / "documents" / "research" / "dcf-methodology-v2.md"
+_SPEC_V1 = _ROOT / "documents" / "research" / "dcf-methodology-v1.md"
 _SERVICE_SRC = Path(dcf.__file__)
 
 
@@ -353,9 +358,19 @@ def test_an_ended_unreported_year_does_not_take_an_analyst_slot():
 
 
 def test_company_changed_shape_on_a_revenue_collapse_in_history():
+    """v2 (S1): a reported collapse refuses only while it has NOT recovered. v1 refused this
+    fixture too — FY2023 at 70 % of FY2022 — but FY2025 (50 B) is back above 90 % of FY2022, so
+    under v2 it is valued with a note; the unrecovered sibling (FY2023-25 all 30 % lower) still
+    refuses."""
     p = copy.deepcopy(_payloads())
     p["income_annual"][2]["revenue"] = p["income_annual"][1]["revenue"] * 0.7
-    assert _value(p).refusal_code == "company_changed_shape"
+    res = _value(p)
+    assert res.status == "ok", res.refusal_code
+    assert any("since recovered" in n for n in res.notes)
+    stuck = copy.deepcopy(_payloads())
+    for r in stuck["income_annual"][2:]:
+        r["revenue"] *= 0.7
+    assert _value(stuck).refusal_code == "company_changed_shape"
 
 
 def test_negative_fcf():
@@ -395,11 +410,21 @@ def test_unusual_margin_and_conversion():
 
 def test_a_self_contradicting_history_is_refused():
     """CSX in the replay: old years converted ~0.3, recent ~0.9, so the 5-year median flipped at
-    one annual report and the value doubled. Two low years out of five → spread > 1.8×."""
+    one annual report and the value doubled. Two low years out of five → spread > 1.8×.
+
+    v2 (S3): when the two low years are the OLDEST and the newest three agree, the newest three
+    decide (no median left to flip: the ratio IS the recent one) — so v1's CSX fixture is now
+    valued on the recent margin. Low years among the newest three still refuse."""
     p = copy.deepcopy(_payloads())
     for r in p["cash_flow_annual"][:2]:
         r["freeCashFlow"] *= 0.4
-    assert _value(p).refusal_code == "unusual_margin"
+    res = _value(p)
+    assert res.status == "ok", res.refusal_code
+    assert res.margin == pytest.approx(0.17) and res.conversion == pytest.approx(0.17 / 0.21)
+    alternating = copy.deepcopy(_payloads())
+    for i in (0, 2, 4):                                          # low, ok, low, ok, low
+        alternating["cash_flow_annual"][i]["freeCashFlow"] *= 0.4
+    assert _value(alternating).refusal_code == "unusual_margin"
     one_odd = copy.deepcopy(_payloads())
     one_odd["cash_flow_annual"][0]["freeCashFlow"] *= 0.4        # one odd year is tolerated
     assert _value(one_odd).status == "ok"
@@ -408,13 +433,20 @@ def test_a_self_contradicting_history_is_refused():
     assert dcf.ratio_spread([0.5, 1.0]) is None
 
 
-def test_growth_out_of_range():
+def _growing(rate: float) -> Dict[str, Any]:
     p = copy.deepcopy(_payloads())
     for i, r in enumerate(sorted((r for r in p["estimates"] if r["date"] >= "2026"),
                                  key=lambda r: r["date"]), start=1):
-        r["revenueAvg"] = 50e9 * 1.4 ** i
+        r["revenueAvg"] = 50e9 * rate ** i
         r["netIncomeAvg"] = 0.2 * r["revenueAvg"]
-    assert _value(p).refusal_code == "growth_out_of_range"
+    return p
+
+
+def test_growth_out_of_range():
+    """v2 (S2): the band's top edge is +40 %/yr (v1: +30 %, which this fixture's +40 % used to
+    exceed). +41 % refuses; +35 % is the passing sibling (test_growth_inside_the_wider_band…)."""
+    assert _value(_growing(1.41)).refusal_code == "growth_out_of_range"
+    assert _value(_growing(1.35)).status == "ok"
 
 
 def test_the_tail_starts_from_the_trend_not_a_noisy_last_year():
@@ -578,6 +610,23 @@ def test_spec_states_every_constant_the_code_uses():
         f"> {dcf.SHARE_CONFLICT * 100:.0f} %",
         f"within {dcf.SAME_FY_DAYS} days",
         f"**{dcf.FORECAST_YEARS}** fiscal years",
+        # v2 (owner decision 2026-10-23)
+        f"**{dcf.TAIL_START_GROWTH_CAP * 100:.0f} %/yr**",
+        f"at least {dcf.SHAPE_RECOVERY_SHARE * 100:.0f} % of",
+        f"the last {dcf.RECENT_RATIO_YEARS} fiscal years",
+        f"at least {dcf.RECENT_RATIO_MIN_YEARS} usable years",
+        f"more than {dcf.CONSENSUS_SHARE_TOLERANCE * 100:.0f} % from the latest diluted share count",
+        f"**{dcf.CONSENSUS_SHARE_FULL * 100:.0f} %** or more",
+        f"more than **{dcf.CONSENSUS_SHARE_MAX_RATIO:.0f}×** the latest diluted count or less than "
+        f"**1/{dcf.CONSENSUS_SHARE_MAX_RATIO:.0f}**",
+        f"from **{dcf.MAX_RATIO_SPREAD}×** to **{dcf.RECENT_RATIO_FULL_SPREAD}×**",
+        f"w = (s − {dcf.MAX_RATIO_SPREAD}) ÷ ({dcf.RECENT_RATIO_FULL_SPREAD} − {dcf.MAX_RATIO_SPREAD})",
+        f"t = (gap − {dcf.CONSENSUS_SHARE_TOLERANCE * 100:.0f} %) ÷ "
+        f"({dcf.CONSENSUS_SHARE_FULL * 100:.0f} % − {dcf.CONSENSUS_SHARE_TOLERANCE * 100:.0f} %)",
+        f"within the last {dcf.RF_FALLBACK_MAX_AGE_DAYS} days",
+        f"fewer than **{dcf._RF_MIN_OBSERVATIONS}**",
+        f"**{dcf.ROLL_BLEND_DAYS} days**",
+        f"`MODEL_VERSION = \"{dcf.MODEL_VERSION}\"`",
     ]
     missing = [e for e in expected if e not in spec]
     assert not missing, missing
@@ -585,6 +634,57 @@ def test_spec_states_every_constant_the_code_uses():
         assert re.search(rf"\b{t}\b", spec), t
     for prefix in dcf.FINANCIAL_INDUSTRY_PREFIXES:
         assert prefix in spec, prefix
+
+
+def test_spec_quotes_the_changed_shape_copy_the_backend_serves():
+    """v2 rewrote the one refusal reason STX was shown; the spec quotes it verbatim."""
+    assert f'now reads "{dcf.REFUSAL_REASONS["company_changed_shape"]}"' in _SPEC.read_text()
+
+
+def test_spec_names_every_history_field_v2_added():
+    """§4: the log fields the code writes for v2 (consensus eps, rf_source, rf_source_date) are
+    named in the spec — derived from the log the code actually writes, not from a list."""
+    p = _payloads()
+    inp = dcf.build_inputs(
+        "TEST", AS_OF, profile=p["profile"], income_annual=p["income_annual"],
+        income_quarter=p["income_quarter"], cash_flow_annual=p["cash_flow_annual"],
+        balance_annual=p["balance_annual"], estimates=p["estimates"], rf_avg_pct=3.9)
+    log = dcf._inputs_log(inp)
+    added = {"rf_source", "rf_source_date"} & set(log)
+    added |= {"eps"} & set(log["consensus"][0])
+    assert added == {"rf_source", "rf_source_date", "eps"}, added
+    section4 = _SPEC.read_text().split("## 4.")[1].split("## 5.")[0]
+    for name in sorted(added):
+        assert f"`{name}`" in section4, name
+    assert "`fred` or `history_fallback`" in section4
+
+
+def test_spec_records_the_owner_decisions_behind_v2():
+    spec = _SPEC.read_text()
+    notes = spec.split("### 2026-10-23 — model v2")[1]
+    for quote in ('"Conservative (Recommended)"', '"Yes, re-base (Recommended)"',
+                  # the review round's two cliffs (owner decisions 2026-10-23)
+                  '"Blend over 1.8–2.4× (Recommended)"', '"Ramp it in over 5–15% (Recommended)"'):
+        assert quote in notes, quote
+    review = notes.split("**Review round (2026-10-23")[1]
+    for fact in ("share_count_conflict", "cancelled", "`permanent = true`", "crossfade"):
+        assert fact in review, fact
+    assert "§9.6" in notes and "silent" in notes      # why the seed cap is not the rejected clip
+
+
+def test_the_v1_spec_is_kept_and_points_to_v2():
+    """v1 stays as the record of what `dcf-v1` history rows mean: still the v1 rules (the +30 %
+    band, no recovery or recent-years rule), with only a header line pointing to v2."""
+    v1 = _SPEC_V1.read_text()
+    lines = v1.splitlines()
+    assert lines[0] == "# Caydex Fair Value Estimate — methodology spec, model `dcf-v1`"
+    assert lines[1] == ""
+    assert lines[2].startswith("> **Superseded by [dcf-methodology-v2.md](dcf-methodology-v2.md) "
+                               "on 2026-10-23.**"), lines[2]
+    assert sum("Superseded" in line for line in lines) == 1
+    assert '`MODEL_VERSION = "dcf-v1"`' in v1 and "+30 %/yr" in v1 and "+40 %/yr" not in v1
+    assert "dcf-methodology-v2" not in "\n".join(lines[3:])   # frozen below the header
+    assert "[dcf-methodology-v1.md](dcf-methodology-v1.md)" in _SPEC.read_text()
 
 
 # ── service: flags, caching, dedup ───────────────────────────────────────────────────────────
@@ -623,7 +723,7 @@ class _Obs:
 
 
 class _FakeFRED:
-    async def get_observations(self, series, limit=13):
+    async def get_observations(self, series, limit=13, **kw):
         today = dcf._today_et()
         days = [today - timedelta(days=i) for i in range(0, 365 * 5 + 30)]
         return [_Obs(d.isoformat(), 3.8) for d in days if d.weekday() < 5]
@@ -634,6 +734,7 @@ def service(monkeypatch):
     dcf._cache.clear()
     dcf._inflight.clear()
     dcf._failed_at.clear()
+    dcf._rf_fallback_memo.clear()
 
     def _no_supabase():
         raise AssertionError("Supabase touched while DCF_ENABLED is False")
@@ -648,6 +749,7 @@ def service(monkeypatch):
     dcf._cache.clear()
     dcf._inflight.clear()
     dcf._failed_at.clear()
+    dcf._rf_fallback_memo.clear()
 
 
 def test_the_switch_is_off_by_default():
@@ -838,9 +940,11 @@ def test_the_range_is_exactly_min_max_of_the_two_readings():
 
 
 @pytest.mark.parametrize("mutate,code", [
-    # conversion spread > 1.8× with a flat margin: NI raised in two old years
+    # conversion spread > 1.8× with a flat margin: NI raised in two years. v2: years 1 and 3
+    # (was 0 and 1) — two OLD odd years are now absorbed by S3's newest-three median, so the
+    # clause needs an odd year among the newest three to fire alone.
     (lambda p: [p["income_annual"][i].update(netIncome=p["income_annual"][i]["netIncome"] * 2.5)
-                for i in (0, 1)], "unusual_conversion"),
+                for i in (1, 3)], "unusual_conversion"),
     # median conversion below 0.35 with the margin in range
     (lambda p: [r.update(netIncome=r["revenue"] * 0.55) for r in p["income_annual"]], "unusual_conversion"),
     # median margin above 60 %
@@ -882,15 +986,20 @@ def test_only_years_with_an_sbc_figure_enter_the_medians():
 
 @pytest.mark.asyncio
 async def test_a_missing_treasury_average_raises_and_is_never_stored(service, monkeypatch):
-    """C16: an input failure must never become a stored refusal."""
+    """C16: an input failure must never become a stored refusal.
+
+    v2 (R1): with persistence on, a missing FRED average first asks the stored history for a
+    recent one (tests/test_dcf_rf_fallback.py); here the history has none, so it still raises."""
     monkeypatch.setattr(dcf.settings, "DCF_ENABLED", True)
     written: List[str] = []
+    read: List[date] = []
     service._read_stored = lambda *a, **k: None
+    service._read_rf_history = lambda as_of: read.append(as_of) or []
     service._write_stored = lambda *a, **k: written.append("cache")
     service._append_history = lambda *a, **k: written.append("history")
 
     class _ThinFRED:
-        async def get_observations(self, series, limit=13):
+        async def get_observations(self, series, limit=13, **kw):
             today = dcf._today_et()
             return [_Obs((today - timedelta(days=i)).isoformat(), 4.0) for i in range(0, 365)]
 
@@ -899,6 +1008,7 @@ async def test_a_missing_treasury_average_raises_and_is_never_stored(service, mo
         await service.get_fair_value("ACME")
     await asyncio.sleep(0.05)
     assert written == [] and not any(k.endswith(":ACME") for k in dcf._cache)
+    assert read == [dcf._today_et()], "the stored-average fallback was not consulted"
 
 
 def test_the_value_is_continuous_across_the_year_end_with_six_consensus_rows():
@@ -1079,11 +1189,24 @@ def test_the_range_takes_the_revenue_method_when_it_lies_outside_the_rate_band()
 
 
 def test_the_history_log_carries_every_crossfade_input():
-    p = _payloads()
+    """v2 adds the consensus EPS (the share re-base is reproducible from the row) and where the
+    Treasury average came from (the rf fallback reads `rf_source_date` back)."""
+    p = _edit(_payloads(), "estimates", lambda r: r.update(epsAvg=r["netIncomeAvg"] / 1e9))
     inp = _inputs(p)
     log = dcf._inputs_log(inp)
     assert log["consensus_reported"] and log["consensus_reported"]["end"] == "2025-12-31"
     assert log["statement_currencies"] == ["USD"] and log["listing_currency"] == "USD"
+    assert log["consensus_reported"]["eps"] == pytest.approx(10.0)
+    assert [c["eps"] for c in log["consensus"]] == [pytest.approx(c.net_income / 1e9) for c in inp.consensus]
+    assert log["rf_source"] == "fred" and log["rf_source_date"] is None
+    labelled = dcf.build_inputs(
+        p["ticker"], AS_OF, profile=p["profile"], income_annual=p["income_annual"],
+        income_quarter=p["income_quarter"], cash_flow_annual=p["cash_flow_annual"],
+        balance_annual=p["balance_annual"], estimates=p["estimates"], rf_avg_pct=3.9,
+        rf_source="history_fallback", rf_source_date=date(2026, 9, 22))
+    log = dcf._inputs_log(labelled)
+    assert log["rf_source"] == "history_fallback" and log["rf_source_date"] == "2026-09-22"
+    json.dumps(log)                       # JSON-safe: it is written to a jsonb column
 
 
 def test_refusal_precedence_matches_the_spec_table():
@@ -1102,3 +1225,686 @@ def test_refusal_precedence_matches_the_spec_table():
     table = [l.split("`")[1] for l in _SPEC.read_text().splitlines() if l.startswith("| `")]
     assert table.index("unstable_consensus") < table.index("unusual_margin")
     assert table.index("model_error") < table.index("models_disagree")
+
+
+# ── model v2 (owner decision 2026-10-23): each rule fires, and a sibling shows where it stops ──
+
+def _v1_switches(monkeypatch) -> None:
+    """Every v2 rule off by its constant: the model must then be v1, number for number."""
+    monkeypatch.setattr(dcf, "SHAPE_RECOVERY_SHARE", float("inf"))
+    monkeypatch.setattr(dcf, "GROWTH_BOUNDS", (-0.15, 0.30))
+    monkeypatch.setattr(dcf, "RECENT_RATIO_MIN_YEARS", 10 ** 9)
+    monkeypatch.setattr(dcf, "CONSENSUS_SHARE_TOLERANCE", float("inf"))
+
+
+def _misbased(p: Dict[str, Any], implied: float = 1.2e9) -> Dict[str, Any]:
+    """Consensus EPS on today's 1 B diluted shares, NI on an older count (`implied` shares) — the
+    CRM shape. Every estimate row, the reported-year one included."""
+    q = copy.deepcopy(p)
+    for r in q["estimates"]:
+        r["epsAvg"] = r["netIncomeAvg"] / implied
+    return q
+
+
+def _csx(p: Dict[str, Any]) -> Dict[str, Any]:
+    """The two OLDEST years convert ~0.3 instead of ~0.8 (spread 2.7×); the newest three agree."""
+    q = copy.deepcopy(p)
+    for r in q["cash_flow_annual"][:2]:
+        r["freeCashFlow"] *= 0.4
+    return q
+
+
+def _collapse(p: Dict[str, Any]) -> Dict[str, Any]:
+    q = copy.deepcopy(p)
+    q["income_annual"][2]["revenue"] = q["income_annual"][1]["revenue"] * 0.7
+    return q
+
+
+# Frozen-v1 results (git show of the dcf-v1 service, 2026-10-23), the reference for the switches.
+_V1_OK = {
+    "base": (lambda: (_payloads(), AS_OF),
+             (213.97893780496338, 175.37480004444055, 251.4275086638642, 224.67788469521162), []),
+    "six": (lambda: (_six_year_consensus(), AS_OF),
+            (228.47293988711135, 187.1327007871551, 268.5780193677297, 239.89658688146693), []),
+    "gap_roll": (lambda: (_gap_fixture(), date(2027, 1, 1)),
+                 (231.39832981214272, 189.56301791287396, 271.76979004367877, 242.9682463027498),
+                 ["forecast window rolling forward after the fiscal year ended 2026-12-31 (1% of the way)"]),
+    "misbased_roll": (lambda: (_misbased(_payloads()), date(2026, 2, 20)),
+                      (207.20969032535226, 169.79924893354683, 243.6161759377453, 217.5701748416196),
+                      ["latest quarterly share count unavailable; fiscal-year count used",
+                       "forecast window rolling forward after the fiscal year ended 2025-12-31 (56% of the way)"]),
+    "beta_none": (lambda: (_prof(_payloads(), beta=None), AS_OF),
+                  (213.97893780496338, 175.37480004444055, 251.4275086638642, 224.67788469521162),
+                  ["beta unavailable; market beta 1.0 used"]),
+}
+_V1_REFUSED = {
+    "csx": (lambda: _csx(_payloads()), "unusual_margin"),
+    "growth_135": (lambda: _growing(1.35), "growth_out_of_range"),
+    "collapse": (lambda: _collapse(_payloads()), "company_changed_shape"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_V1_OK))
+def test_with_every_v2_rule_switched_off_the_model_is_v1(monkeypatch, name):
+    """The harness attributes every changed value to one rule by switching rules off one at a
+    time; that only works if all-off IS v1. Pinned against the frozen v1's own numbers and notes
+    (a 3,000-fixture randomised comparison against the frozen module found 0 differences)."""
+    _v1_switches(monkeypatch)
+    build, (fv, low, high, alt), notes = _V1_OK[name]
+    p, as_of = build()
+    res = _value(p, as_of)
+    assert res.status == "ok", res.refusal_code
+    assert (res.fair_value, res.range_low, res.range_high, res.alternative_value) == (
+        pytest.approx(fv, rel=1e-12), pytest.approx(low, rel=1e-12),
+        pytest.approx(high, rel=1e-12), pytest.approx(alt, rel=1e-12))
+    assert res.notes == notes
+
+
+@pytest.mark.parametrize("name", sorted(_V1_REFUSED))
+def test_with_every_v2_rule_switched_off_v1_refusals_return(monkeypatch, name):
+    build, code = _V1_REFUSED[name]
+    assert _value(build()).status == "ok", "fixture must be one v2 values"
+    _v1_switches(monkeypatch)
+    assert _value(build()).refusal_code == code
+
+
+@pytest.mark.parametrize("name", ["base", "six", "gap_roll", "beta_none"])
+def test_v1_valued_fixtures_keep_their_value_under_v2(name):
+    """No rule may move a value v1 already published when its inputs do not trigger the rule —
+    the WHOLE published result: value, range, alternative (method R, on the wire) and notes
+    (review F2: pinning the value alone let a stray note or a moved method R through). These
+    fixtures carry no EPS, so the re-base cannot act, and their ratio spreads are far below
+    1.8×, so S3's blend cannot either. (misbased_roll is left out on purpose: its consensus is
+    on a 20 %-off share count, which v2 re-bases in full — t = 1, the ramp's top.)"""
+    build, (fv, low, high, alt), notes = _V1_OK[name]
+    p, as_of = build()
+    res = _value(p, as_of)
+    assert res.status == "ok", res.refusal_code
+    assert (res.fair_value, res.range_low, res.range_high, res.alternative_value) == (
+        pytest.approx(fv, rel=1e-12), pytest.approx(low, rel=1e-12),
+        pytest.approx(high, rel=1e-12), pytest.approx(alt, rel=1e-12))
+    assert res.notes == notes
+
+
+# ── S1: a recovered reported drop ──
+
+def _with_revenues(revs: List[float], first_year: int = 2021) -> Dict[str, Any]:
+    """The synthetic company with these reported revenues (oldest first, ending FY2025) and every
+    other line proportional to revenue, so only the shape rule can react."""
+    p = copy.deepcopy(_payloads())
+    years = range(2026 - len(revs), 2026)
+    p["income_annual"] = [
+        {"date": f"{y}-12-31", "filingDate": f"{y + 1}-02-15", "revenue": rev, "netIncome": 0.20 * rev,
+         "weightedAverageShsOutDil": 1e9, "interestExpense": 0.01 * rev, "reportedCurrency": "USD"}
+        for y, rev in zip(years, revs)]
+    p["cash_flow_annual"] = [
+        {"date": f"{y}-12-31", "filingDate": f"{y + 1}-02-15", "freeCashFlow": 0.18 * rev,
+         "stockBasedCompensation": 0.01 * rev}
+        for y, rev in zip(years, revs)]
+    return p
+
+
+def test_a_recovered_drop_is_valued_and_noted():
+    """STX: −37 % in FY23, FY26 revenue above FY22's. v1 refused it as a changed company."""
+    res = _value(_with_revenues([50e9, 31e9, 40e9, 46e9, 50e9]))
+    assert res.status == "ok", res.refusal_code
+    assert any("2022: -38%" in n and "since recovered" in n for n in res.notes), res.notes
+
+
+def test_an_unrecovered_drop_still_refuses():
+    assert _value(_with_revenues([50e9, 31e9, 36e9, 40e9, 44e9])).refusal_code == \
+        "company_changed_shape"
+
+
+def test_the_recovery_threshold_is_inclusive_at_ninety_percent():
+    a = 50e9
+    at = _with_revenues([a, 30e9, 38e9, 42e9, dcf.SHAPE_RECOVERY_SHARE * a])
+    below = _with_revenues([a, 30e9, 38e9, 42e9, 0.899 * a])
+    assert _value(at).status == "ok", _value(at).refusal_code
+    assert _value(below).refusal_code == "company_changed_shape"
+
+
+def test_a_drop_in_the_first_transition_can_recover():
+    res = _value(_with_revenues([50e9, 30e9, 45e9, 48e9, 50e9]))
+    assert res.status == "ok" and any("since recovered" in n for n in res.notes)
+
+
+def test_a_drop_into_the_latest_year_never_passes(monkeypatch):
+    """Even with a recovery share low enough that the latest year would 'recover' to it, a drop
+    INTO the latest year is not a recovery. Sibling: the same drop one year earlier passes."""
+    monkeypatch.setattr(dcf, "SHAPE_RECOVERY_SHARE", 0.5)
+    assert _value(_with_revenues([40e9, 42e9, 45e9, 48e9, 30e9])).refusal_code == \
+        "company_changed_shape"
+    earlier = _with_revenues([40e9, 42e9, 45e9, 30e9, 31e9])
+    assert _value(earlier).status == "ok", _value(earlier).refusal_code
+
+
+def test_a_forecast_drop_after_a_recovered_drop_still_refuses():
+    p = _with_revenues([50e9, 31e9, 45e9, 48e9, 50e9])
+    for r in p["estimates"]:
+        if r["date"] >= "2027":
+            r["revenueAvg"] *= 0.6
+            r["netIncomeAvg"] *= 0.6
+    assert _value(p).refusal_code == "company_changed_shape"
+
+
+def test_a_three_year_history_recovers_only_before_its_latest_year():
+    ok = _with_revenues([50e9, 30e9, 47e9])
+    assert _value(ok).status == "ok", _value(ok).refusal_code
+    assert _value(_with_revenues([50e9, 48e9, 30e9])).refusal_code == "company_changed_shape"
+
+
+# ── S2: the wider growth band, and the tail that starts no higher than +30 %/yr ──
+
+def test_growth_inside_the_wider_band_is_valued_with_a_capped_tail(monkeypatch):
+    """NVDA: a 33.7 %/yr consensus trend against v1's 30 % band. Now valued — but the years after
+    the analysts' start from +30 %/yr, not from the trend (an uncapped tail values it higher)."""
+    p = _growing(1.35)
+    res = _value(p)
+    assert res.status == "ok", res.refusal_code
+    assert any("trend of 35.0%/yr" in n and "start from 30%/yr" in n for n in res.notes), res.notes
+    monkeypatch.setattr(dcf, "TAIL_START_GROWTH_CAP", 1.0)
+    uncapped = _value(p)
+    assert uncapped.fair_value > res.fair_value * 1.05
+    assert not any("start from" in n for n in uncapped.notes)
+
+
+def test_the_tail_cap_does_not_touch_a_trend_below_it():
+    ends = [date(2026 + i, 12, 31) for i in range(5)]
+    vals = [100.0 * 1.25 ** i for i in range(5)]
+    flows, _ = dcf.project_flows(vals, ends, 0.03)
+    assert flows[5] == pytest.approx(vals[-1] * (1 + 0.25 + (0.03 - 0.25) / 5))
+    fast = [100.0 * 1.38 ** i for i in range(5)]
+    flows, _ = dcf.project_flows(fast, ends, 0.03)
+    assert flows[:5] == fast                                 # analyst years as published
+    cap = dcf.TAIL_START_GROWTH_CAP
+    assert flows[5] == pytest.approx(fast[-1] * (1 + cap + (0.03 - cap) / 5))
+    assert not any("start from" in n for n in _value(_payloads()).notes)
+
+
+def test_growth_just_outside_the_wider_band_refuses():
+    assert _value(_growing(1.41)).refusal_code == "growth_out_of_range"
+    assert _value(_growing(1.39)).status == "ok"
+
+
+# ── S3: the newest three years when five disagree ──
+
+def test_the_csx_shape_is_valued_on_the_newest_three_years():
+    res = _value(_csx(_payloads()))
+    assert res.status == "ok", res.refusal_code
+    assert res.margin == pytest.approx(0.17) and res.conversion == pytest.approx(0.17 / 0.21)
+    assert any("cash-flow margin varied" in n for n in res.notes)
+    assert any("cash conversion varied" in n for n in res.notes)
+
+
+def test_alternating_low_years_still_refuse():
+    p = copy.deepcopy(_payloads())
+    for i in (0, 2, 4):
+        p["cash_flow_annual"][i]["freeCashFlow"] *= 0.4
+    assert _value(p).refusal_code == "unusual_margin"
+
+
+def test_the_recent_median_needs_four_usable_ratios_in_all():
+    hist = [dcf.FiscalYear(end=date(2020 + i, 12, 31), revenue=1.0, net_income=1.0, fcf=1.0,
+                           sbc=None, interest_expense=None) for i in range(4)]
+    four = {hist[0].end: 0.3, hist[1].end: 0.8, hist[2].end: 0.9, hist[3].end: 0.85}
+    assert dcf._trailing_ratio(four, hist) == pytest.approx(0.85)
+    three = {k: v for k, v in four.items() if k != hist[0].end}
+    assert dcf._trailing_ratio(three, hist) is None
+    assert dcf._trailing_ratio({**four, hist[1].end: -0.2}, hist) is None   # 3 usable (> 0)
+    assert dcf._trailing_ratio({**four, hist[2].end: 0.4}, hist) is None    # newest disagree
+    # a 3-year history whose ratios disagree still refuses (it has only three ratios)
+    p = copy.deepcopy(_payloads())
+    for k in ("income_annual", "cash_flow_annual"):
+        p[k] = p[k][-3:]
+    p["cash_flow_annual"][0]["freeCashFlow"] *= 0.4
+    assert _value(p).refusal_code == "unusual_margin"
+
+
+def test_the_newest_year_without_an_sbc_figure_blocks_the_recent_median():
+    p = _csx(_payloads())
+    p["cash_flow_annual"][-1]["stockBasedCompensation"] = 0
+    assert _value(p).refusal_code == "unusual_margin"
+    sibling = copy.deepcopy(_payloads())
+    sibling["cash_flow_annual"][-1]["stockBasedCompensation"] = 0
+    assert _value(sibling).status == "ok"
+
+
+def test_a_recent_loss_blocks_the_recent_conversion():
+    p = _csx(_payloads())
+    p["income_annual"][3]["netIncome"] = -1e9
+    assert _value(p).refusal_code == "unusual_conversion"
+    assert _value(_csx(_payloads())).status == "ok"
+
+
+# ── consensus share basis ──
+
+def test_consensus_on_an_older_share_count_is_re_based():
+    """CRM: NI ÷ EPS implied ~17 % more shares than today's diluted count. The re-based value is
+    the value of the same consensus published on today's basis."""
+    rebased = _value(_misbased(_payloads()))
+    consistent = _edit(_payloads(), "estimates",
+                       lambda r: r.update(netIncomeAvg=r["netIncomeAvg"] / 1.2,
+                                          epsAvg=r["netIncomeAvg"] / 1.2 / 1e9))
+    want = _value(consistent)
+    assert rebased.status == want.status == "ok"
+    assert rebased.fair_value == pytest.approx(want.fair_value, rel=1e-9)
+    assert any("+20.0%" in n and "re-based 100% of the way" in n for n in rebased.notes), rebased.notes
+    assert not any("re-based" in n for n in want.notes)
+    assert rebased.fair_value < _value(_payloads()).fair_value * 0.9
+
+
+def test_a_small_share_basis_gap_is_left_alone():
+    """Below the ramp's start (CONSENSUS_SHARE_TOLERANCE, 5 %) NI is used as published."""
+    near = _value(_misbased(_payloads(), implied=1.04e9))
+    assert near.fair_value == pytest.approx(_value(_payloads()).fair_value, rel=1e-12)
+    assert not any("re-based" in n for n in near.notes)
+    under = _value(_misbased(_payloads(), implied=1 / 1.04 * 1e9))       # fewer shares implied
+    assert under.fair_value == pytest.approx(_value(_payloads()).fair_value, rel=1e-12)
+
+
+def test_the_re_base_crossfades_both_windows():
+    """During the crossfade the OLD window is rebuilt from the reported-year row; it must be
+    re-based with the rest, or the two windows sit on different share counts."""
+    as_of = date(2026, 2, 20)
+    consistent = _edit(_payloads(), "estimates",
+                       lambda r: r.update(netIncomeAvg=r["netIncomeAvg"] / 1.2,
+                                          epsAvg=r["netIncomeAvg"] / 1.2 / 1e9))
+    a, b = _value(_misbased(_payloads()), as_of), _value(consistent, as_of)
+    assert any("rolling forward" in n for n in a.notes)
+    assert a.fair_value == pytest.approx(b.fair_value, rel=1e-9)
+    half = _misbased(_payloads())
+    reported = next(r for r in half["estimates"] if r["date"] == "2025-12-31")
+    reported.pop("epsAvg")                                # control: the old window NOT re-based
+    assert abs(_value(half, as_of).fair_value / b.fair_value - 1) > 0.002, "fixture must discriminate"
+
+
+def _cy(ni, eps, year=2026):
+    return dcf.ConsensusYear(end=date(year, 12, 31), revenue=1.0, net_income=ni,
+                             analysts_revenue=20, analysts_eps=20, eps=eps)
+
+
+def test_rows_without_a_positive_ni_and_eps_are_never_re_based():
+    rows = [_cy(120.0, 1.0, 2026), _cy(132.0, 1.1, 2027), _cy(-5.0, 0.5, 2028),
+            _cy(144.0, None, 2029), _cy(150.0, 0.0, 2030), _cy(160.0, -1.0, 2031), _cy(None, 1.0, 2032)]
+    out, rep, ratio, t = dcf.consensus_on_share_basis(rows, None, 100.0)
+    assert ratio == pytest.approx(1.2) and rep is None and t == 1.0
+    assert [c.net_income for c in out] == [pytest.approx(100.0), pytest.approx(110.0), -5.0,
+                                           144.0, 150.0, 160.0, None]
+    assert [c.net_income for c in rows][:2] == [120.0, 132.0], "the inputs were modified"
+    # no EPS at all (a row rebuilt from a v1 history log), or no share count: unchanged
+    bare = [_cy(120.0, None)]
+    assert dcf.consensus_on_share_basis(bare, None, 100.0) == (bare, None, None, 0.0)
+    assert dcf.consensus_on_share_basis(rows, None, None)[2:] == (None, 0.0)
+
+
+def test_a_forecast_loss_with_positive_eps_still_refuses():
+    p = _misbased(_payloads())
+    nxt = next(r for r in p["estimates"] if r["date"] == "2026-12-31")
+    nxt["netIncomeAvg"] = -1e9                                       # eps stays > 0
+    assert _value(p).refusal_code == "forecast_losses"
+
+
+def test_the_share_basis_decision_is_one_per_ticker():
+    """Rows straddling the tolerance move together: the median decides for all of them."""
+    def rows(*implied):
+        return [_cy(100.0 * k, 1.0, 2026 + i) for i, k in enumerate(implied)]
+    implied = (1.05, 1.08, 1.12, 1.13, 1.15)
+    out, _, ratio, t = dcf.consensus_on_share_basis(rows(*implied), None, 100.0)
+    assert ratio == pytest.approx(1.12)
+    assert t == pytest.approx((0.12 - dcf.CONSENSUS_SHARE_TOLERANCE)
+                              / (dcf.CONSENSUS_SHARE_FULL - dcf.CONSENSUS_SHARE_TOLERANCE))   # 0.7
+    # every row moves by the SAME t, the 1.05 and 1.15 rows too
+    assert [c.net_income for c in out] == [pytest.approx(100 * k + t * (100 - 100 * k)) for k in implied]
+    low = (1.01, 1.02, 1.04, 1.13, 1.15)                     # median 1.04: under the ramp's start
+    out, _, ratio, t = dcf.consensus_on_share_basis(rows(*low), None, 100.0)
+    assert ratio == pytest.approx(1.04) and t == 0.0
+    assert [c.net_income for c in out] == [pytest.approx(100 * k) for k in low]
+    # the reported-year row votes and is re-based too
+    rep = _cy(130.0, 1.0, 2025)
+    _, rep_out, ratio, t = dcf.consensus_on_share_basis(rows(1.25, 1.3), rep, 100.0)
+    assert ratio == pytest.approx(1.3) and t == 1.0 and rep_out.net_income == pytest.approx(100.0)
+    assert rep.net_income == 130.0
+
+
+def test_valuing_with_a_re_base_never_mutates_the_inputs():
+    inp = _inputs(_misbased(_payloads()))
+    before = [(c.net_income, c.eps) for c in inp.consensus], inp.consensus_reported, list(inp.notes)
+    for _ in range(2):
+        assert dcf.value_company(inp).status == "ok"
+    assert ([(c.net_income, c.eps) for c in inp.consensus], inp.consensus_reported, inp.notes) == before
+
+
+def test_build_inputs_reads_consensus_eps():
+    inp = _inputs(_misbased(_payloads()))
+    assert all(c.eps == pytest.approx(c.net_income / 1.2e9) for c in inp.consensus)
+    assert inp.consensus_reported.eps == pytest.approx(10e9 / 1.2e9)
+    assert all(c.eps is None for c in _inputs(_payloads()).consensus)
+
+
+def test_the_changed_shape_copy_says_what_the_rule_now_checks():
+    text = dcf.REFUSAL_REASONS["company_changed_shape"]
+    assert "hasn't recovered" in text and "forecast to fall" in text
+    assert text.endswith(".") and len(text) < 130
+
+
+# ── R4: an empty profile is a failed fetch, never a stored refusal ──
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty", [{}, [], [{}], None])
+async def test_an_empty_profile_raises_instead_of_refusing(service, empty):
+    p = _payloads(profile=empty)
+    service.fmp = _FakeFMP(p)
+    with pytest.raises(dcf.DcfInputsUnavailableError):
+        await service.get_fair_value("ACME")
+    assert not any(k.endswith(":ACME") for k in dcf._cache)
+
+
+@pytest.mark.asyncio
+async def test_empty_estimates_are_still_a_refusal(service):
+    service.fmp = _FakeFMP(_payloads(estimates=[]))
+    res = await service.get_fair_value("ACME")
+    assert res.status == "refused" and res.refusal_code == "thin_coverage"
+
+
+# ── v2 review round (2026-10-23): the two cliffs, the share-unit bound, notes, the service ──
+# Owner decisions: S3 "Blend over 1.8–2.4× (Recommended)"; re-base "Ramp it in over 5–15%
+# (Recommended)". Each rule: a firing test, a passing sibling, and a continuity test across the
+# point that used to be a step.
+
+def _with_margins(margins: List[float]) -> Dict[str, Any]:
+    """Flat 50 B revenue and these yearly (FCF − SBC) ÷ revenue margins, oldest first. NI is 20 %
+    and SBC 1 % of revenue, so conversion = margin ÷ 0.21 and both spreads are the same."""
+    p = _with_revenues([50e9] * len(margins))
+    for row, m in zip(p["cash_flow_annual"], margins):
+        row["freeCashFlow"] = (m + 0.01) * 50e9
+    return p
+
+
+def test_s3_is_continuous_as_the_spread_crosses_its_threshold():
+    """dcf-v2-S3-cliff: one 4-year-old margin moves 0.0834 → 0.0830, the spread 1.7986 → 1.807.
+    Before the blend the value jumped 113.28 → 188.80 (+67 %); now it moves by about w = 1 %."""
+    below = _value(_with_margins([0.05, 0.0834, 0.09, 0.15, 0.16]))
+    above = _value(_with_margins([0.05, 0.0830, 0.09, 0.15, 0.16]))
+    assert below.status == above.status == "ok", (below.refusal_code, above.refusal_code)
+    assert dcf.ratio_spread([0.05, 0.0834, 0.09, 0.15, 0.16]) < dcf.MAX_RATIO_SPREAD \
+        < dcf.ratio_spread([0.05, 0.0830, 0.09, 0.15, 0.16])
+    assert abs(above.fair_value / below.fair_value - 1) < 0.02
+    assert below.margin == pytest.approx(0.09) and not any("varied" in n for n in below.notes)
+    s = 0.15 / 0.083
+    w = (s - dcf.MAX_RATIO_SPREAD) / (dcf.RECENT_RATIO_FULL_SPREAD - dcf.MAX_RATIO_SPREAD)
+    assert above.margin == pytest.approx((1 - w) * 0.09 + w * 0.15, rel=1e-12)
+    assert f"cash-flow margin varied {s:.2f}× over the reported years; blended {w:.0%} toward " \
+           f"the newest 3 years' median" in above.notes, above.notes
+
+
+def test_s3_blend_weight_runs_from_the_threshold_to_the_full_spread():
+    """w = 0 at 1.8×, linear, 1 from 2.4×: at and beyond the full spread the newest years' median
+    is used exactly (the CSX fixture, spread 2.7×, is valued on 0.17)."""
+    hist = [dcf.FiscalYear(end=date(2021 + i, 12, 31), revenue=1.0, net_income=1.0, fcf=1.0,
+                           sbc=None, interest_expense=None) for i in range(5)]
+    by_end = {y.end: v for y, v in zip(hist, (0.1, 0.1, 0.2, 0.2, 0.2))}
+    mid = (dcf.MAX_RATIO_SPREAD + dcf.RECENT_RATIO_FULL_SPREAD) / 2
+    ratio, note = dcf._blend_recent(0.1, mid, by_end, hist, "x")
+    assert ratio == pytest.approx(0.15) and "blended 50%" in note
+    assert dcf._blend_recent(0.1, dcf.RECENT_RATIO_FULL_SPREAD, by_end, hist, "x")[0] == 0.2
+    assert dcf._blend_recent(0.1, 9.0, by_end, hist, "x")[0] == 0.2
+    assert dcf._blend_recent(0.1, dcf.MAX_RATIO_SPREAD, by_end, hist, "x") == (0.1, None)
+    assert dcf._blend_recent(0.1, None, by_end, hist, "x") == (0.1, None)
+    assert dcf._blend_recent(None, 2.0, by_end, hist, "x") == (None, None)
+    # the newest years disagree → refuse (None), whatever the weight would have been
+    bad = {**by_end, hist[-1].end: 0.5}
+    assert dcf._blend_recent(0.1, 2.0, bad, hist, "x") == (None, None)
+    res = _value(_csx(_payloads()))
+    assert any("blended 100% toward" in n for n in res.notes), res.notes
+
+
+def test_s3_bounds_apply_to_the_blended_ratio():
+    """A blend whose result is under the 1 % margin floor refuses, though the 5-year median alone
+    would not have been the deciding input."""
+    p = _with_margins([0.002, 0.004, 0.006, 0.0075, 0.008])       # spread 0.0075/0.004 = 1.875
+    res = _value(p)
+    assert res.refusal_code == "unusual_margin"
+
+
+def test_s3_off_switch_still_refuses_inside_the_blend_band(monkeypatch):
+    above = _with_margins([0.05, 0.0830, 0.09, 0.15, 0.16])
+    monkeypatch.setattr(dcf, "RECENT_RATIO_MIN_YEARS", 10 ** 9)
+    assert _value(above).refusal_code == "unusual_margin"
+
+
+def _rescaled(k: float) -> Dict[str, Any]:
+    """Consensus EPS on today's 1 B shares, NI on a count k × that (every row, the reported one
+    included): a re-base at t = 1 must give back exactly the base value."""
+    q = copy.deepcopy(_payloads())
+    for r in q["estimates"]:
+        r["epsAvg"] = r["netIncomeAvg"] / 1e9
+        r["netIncomeAvg"] *= k
+    return q
+
+
+def test_the_re_base_is_continuous_across_its_old_ten_percent_step():
+    """dcf-v2-rebase-cliff: implied 1.0999e9 vs 1.1001e9 moved the value −9.1 % (213.98 → 194.51).
+    Inside the ramp it moves by a hair."""
+    a = _value(_misbased(_payloads(), implied=1.0999e9))
+    b = _value(_misbased(_payloads(), implied=1.1001e9))
+    assert a.status == b.status == "ok"
+    assert abs(b.fair_value / a.fair_value - 1) < 0.005
+    assert abs(b.range_low / a.range_low - 1) < 0.005 and abs(b.range_high / a.range_high - 1) < 0.005
+
+
+def test_the_re_base_ramps_in_between_five_and_fifteen_percent():
+    """At a 10 % gap t = 0.5: NI' = NI × (1 − t + t ÷ 1.1), and method E scales by exactly that."""
+    base = _value(_payloads()).fair_value
+    res = _value(_misbased(_payloads(), implied=1.1e9))
+    t = (0.10 - dcf.CONSENSUS_SHARE_TOLERANCE) / (dcf.CONSENSUS_SHARE_FULL - dcf.CONSENSUS_SHARE_TOLERANCE)
+    assert t == pytest.approx(0.5)
+    assert res.fair_value == pytest.approx(base * (1 - t + t / 1.1), rel=1e-9)
+    assert any("+10.0%" in n and "re-based 50% of the way" in n for n in res.notes), res.notes
+    # the ramp's ends: t = 0 at the start (nothing changes), t = 1 from the full gap
+    assert dcf.rebase_weight(dcf.CONSENSUS_SHARE_TOLERANCE) == 0.0
+    assert dcf.rebase_weight(dcf.CONSENSUS_SHARE_FULL) == pytest.approx(1.0)
+    assert dcf.rebase_weight(0.5) == 1.0 and dcf.rebase_weight(0.0) == 0.0
+    full = _value(_misbased(_payloads(), implied=(1.0 + dcf.CONSENSUS_SHARE_FULL) * 1e9))
+    assert full.fair_value == pytest.approx(base / (1 + dcf.CONSENSUS_SHARE_FULL), rel=1e-9)
+
+
+def test_the_re_base_switch_is_v1_exact_with_no_nan(monkeypatch):
+    monkeypatch.setattr(dcf, "CONSENSUS_SHARE_TOLERANCE", float("inf"))
+    assert dcf.rebase_weight(0.3) == 0.0 and dcf.rebase_weight(float("inf")) == 0.0
+    rows = [_cy(120.0, 1.0)]
+    out, rep, ratio, t = dcf.consensus_on_share_basis(rows, None, 100.0)
+    assert (out, rep, ratio, t) == (rows, None, None, 0.0)
+    # far outside the share-unit bound: v1 neither re-bases nor refuses it as a share conflict —
+    # it reaches the methods on the tripled NI, and the two methods then disagree, as in v1
+    assert _value(_rescaled(3.0)).refusal_code == "models_disagree"
+    res = _value(_rescaled(1.2))
+    assert res.status == "ok" and math.isfinite(res.fair_value)
+    assert res.fair_value == pytest.approx(_value(_payloads()).fair_value * 1.2, rel=1e-9)
+    assert not any("re-based" in n for n in res.notes)
+
+
+def test_a_degenerate_ramp_is_a_step_not_a_division_by_zero(monkeypatch):
+    monkeypatch.setattr(dcf, "CONSENSUS_SHARE_FULL", dcf.CONSENSUS_SHARE_TOLERANCE)
+    assert dcf.rebase_weight(dcf.CONSENSUS_SHARE_TOLERANCE + 1e-9) == 1.0
+    assert dcf.rebase_weight(dcf.CONSENSUS_SHARE_TOLERANCE) == 0.0
+
+
+@pytest.mark.parametrize("k,code", [
+    (2.01, "share_count_conflict"),          # BRK-B-like: consensus on another share unit
+    (1.99, None),                            # inside: re-based in full, the base value back
+    (0.51, None),
+    (0.49, "share_count_conflict"),          # XE-like: 0.07× in the live sweep
+])
+def test_a_share_basis_more_than_twice_off_refuses(k, code):
+    res = _value(_rescaled(k))
+    if code is None:
+        assert res.status == "ok", res.refusal_code
+        assert res.fair_value == pytest.approx(_value(_payloads()).fair_value, rel=1e-9)
+    else:
+        assert res.refusal_code == code
+
+
+def test_the_share_unit_refusal_sits_at_share_count_conflict_in_the_table():
+    """After currency_mismatch, before financial_company — the share_count_conflict row."""
+    foreign = _prof(_rescaled(3.0), currency="EUR")
+    assert _value(foreign).refusal_code == "currency_mismatch"
+    bank = _prof(_rescaled(3.0), industry="Banks - Regional")
+    assert _value(bank).refusal_code == "share_count_conflict"
+    assert _value(_prof(_payloads(), industry="Banks - Regional")).refusal_code == "financial_company"
+
+
+def _rapid_crossfade() -> Dict[str, Any]:
+    """Consensus +28 %/yr from 2026 (new-window trend 28.0 %), the just-ended 2025 row at
+    1/1.12 of the base (old-window trend 31.4 %). Valued on 2026-01-20, 22 % into the crossfade."""
+    p = copy.deepcopy(_payloads())
+    for r in p["estimates"]:
+        y = int(r["date"][:4])
+        if y == 2024:
+            continue
+        r["revenueAvg"] = 50e9 * 1.28 ** (y - 2025) if y >= 2026 else 50e9 / 1.12
+        r["netIncomeAvg"] = 0.2 * r["revenueAvg"]
+    return p
+
+
+def test_the_tail_cap_note_fires_when_only_the_old_window_is_capped(monkeypatch):
+    """dcf-v2-S2-old-window-note: the cap binds on the OLD window (78 % weight) only; the value
+    is lowered (642.13 vs 652.29 uncapped) and the note must say so."""
+    as_of = date(2026, 1, 20)
+    res = _value(_rapid_crossfade(), as_of)
+    assert res.status == "ok", res.refusal_code
+    assert any("rolling forward" in n for n in res.notes)
+    capped = [n for n in res.notes if "start from 30%/yr" in n]
+    assert capped == ["analyst-years earnings trend of 31.4%/yr; the years after them start from 30%/yr",
+                      "analyst-years revenue trend of 31.4%/yr; the years after them start from 30%/yr"]
+    monkeypatch.setattr(dcf, "TAIL_START_GROWTH_CAP", 1.0)
+    uncapped = _value(_rapid_crossfade(), as_of)
+    assert uncapped.fair_value > res.fair_value
+    assert not any("start from" in n for n in uncapped.notes)
+
+
+def test_the_tail_cap_note_is_one_per_basis_with_the_higher_trend():
+    """Both windows capped: one note per basis, naming the steeper trend."""
+    p = copy.deepcopy(_rapid_crossfade())
+    for r in p["estimates"]:
+        y = int(r["date"][:4])
+        if y >= 2026:
+            r["revenueAvg"] = 50e9 * 1.33 ** (y - 2025)
+            r["netIncomeAvg"] = 0.2 * r["revenueAvg"]
+    res = _value(p, date(2026, 1, 20))
+    assert res.status == "ok", res.refusal_code
+    capped = [n for n in res.notes if "start from" in n]
+    assert len(capped) == 2 and capped[0].startswith("analyst-years earnings trend of ")
+    old_trend = float(capped[0].split("trend of ")[1].split("%")[0])
+    assert old_trend > 33.0                                  # the old window's, not the new 33.0
+
+
+class _ErrFMP(_FakeFMP):
+    """Each named leg raises its own exception."""
+
+    def __init__(self, p: Dict[str, Any], errors: Dict[str, BaseException]) -> None:
+        super().__init__(p)
+        self.errors = errors
+
+    async def _ret(self, key: str):
+        self.calls += 1
+        await asyncio.sleep(0)
+        if key in self.errors:
+            raise self.errors[key]
+        return copy.deepcopy(self.p[key])
+
+
+def _http_error(status: int):
+    import httpx
+    req = httpx.Request("GET", "https://financialmodelingprep.com/stable/x")
+    return httpx.HTTPStatusError(f"HTTP {status}", request=req, response=httpx.Response(status, request=req))
+
+
+def _permanent_cases():
+    from app.integrations.fmp import (FMPAuthException, FMPNotEntitledException,
+                                      FMPRateLimitException, FMPUnavailableException)
+    return [
+        ({"estimates": FMPNotEntitledException("402")}, True),
+        ({"income_annual": _http_error(404)}, True),
+        ({"cash_flow_annual": _http_error(403), "estimates": FMPNotEntitledException("x")}, True),
+        ({"estimates": FMPRateLimitException("429")}, False),
+        ({"estimates": _http_error(429)}, False),
+        ({"estimates": _http_error(408)}, False),
+        ({"estimates": _http_error(500)}, False),
+        ({"estimates": FMPUnavailableException("503 after retries")}, False),
+        ({"estimates": asyncio.TimeoutError()}, False),
+        ({"estimates": FMPAuthException("401")}, False),
+        ({"estimates": _http_error(401)}, False),
+        ({"estimates": _http_error(400)}, True),
+        ({"estimates": FMPNotEntitledException("402"), "balance_annual": _http_error(502)}, False),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", range(13))
+async def test_a_permanent_leg_refusal_is_flagged_permanent(service, case):
+    """R2-permanent-leg-failure: only when EVERY failed essential leg is a permanent refusal is
+    the error permanent; one transient leg makes the whole failure transient. Either way it is
+    still DcfInputsUnavailableError, memoised the same way and never stored."""
+    errors, permanent = _permanent_cases()[case]
+    service.fmp = _ErrFMP(_payloads(), errors)
+    with pytest.raises(dcf.DcfInputsUnavailableError) as ei:
+        await service.get_fair_value("ACME")
+    assert ei.value.permanent is permanent
+    assert any(k.endswith(":ACME") for k in dcf._failed_at)          # the memo, unchanged
+    assert not any(k.endswith(":ACME") for k in dcf._cache)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", [0, 3])
+async def test_the_failure_memo_re_raises_with_the_original_permanent_flag(service, case):
+    """Within the 180 s memo the second call never reaches FMP, so its error must carry the
+    first failure's flag: a permanent refusal re-raised as transient would make the report
+    collector record the ticker as degraded (never cached, a fresh 20-credit generation on every
+    open) and the Analysis tab say "temporarily unavailable" for a ticker that will not recover."""
+    errors, permanent = _permanent_cases()[case]
+    service.fmp = _ErrFMP(_payloads(), errors)
+    with pytest.raises(dcf.DcfInputsUnavailableError):
+        await service.get_fair_value("ACME")
+    calls = service.fmp.calls
+    with pytest.raises(dcf.DcfInputsUnavailableError) as again:
+        await service.get_fair_value("ACME")
+    assert service.fmp.calls == calls                                 # answered by the memo
+    assert again.value.permanent is permanent
+
+
+def test_the_unavailable_error_defaults_to_transient():
+    assert dcf.DcfInputsUnavailableError("x").permanent is False
+    assert dcf.DcfInputsUnavailableError("x", permanent=True).permanent is True
+    assert len(_permanent_cases()) == 13
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_leader_fails_followers_as_unavailable(service):
+    """Known item c: a follower of a cancelled leader is told the inputs are temporarily
+    unavailable (DcfInputsUnavailableError), not a RuntimeError the callers read as a model bug;
+    a cancellation records no failure memo."""
+    gate = asyncio.Event()
+
+    class _SlowFMP(_FakeFMP):
+        async def _ret(self, key: str):
+            await gate.wait()
+            return await super()._ret(key)
+
+    service.fmp = _SlowFMP(_payloads())
+    leader = asyncio.create_task(service.get_fair_value("ACME"))
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if dcf._inflight:
+            break
+    assert dcf._inflight, "leader never registered"
+    follower = asyncio.create_task(service.get_fair_value("ACME"))
+    await asyncio.sleep(0)
+    leader.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await leader
+    with pytest.raises(dcf.DcfInputsUnavailableError, match="in-flight DCF computation was cancelled"):
+        await follower
+    assert dcf._failed_at == {} and dcf._inflight == {}
+    gate.set()
+    assert (await service.get_fair_value("ACME")).status == "ok"   # the next caller recomputes

@@ -9,6 +9,8 @@ import SwiftUI
 
 struct TickerDetailSnapshotsSection: View {
     let snapshots: [SnapshotItem]
+    /// The live header price, for the Price card's Caydex estimate gap (nil → no gap line).
+    var currentPrice: Double? = nil
     var onDeepResearchTap: (() -> Void)?
     @State private var showInfoSheet: Bool = false
 
@@ -66,7 +68,7 @@ struct TickerDetailSnapshotsSection: View {
             // Snapshot cards
             VStack(spacing: 0) {
                 ForEach(snapshots) { snapshot in
-                    SnapshotCard(snapshot: snapshot)
+                    SnapshotCard(snapshot: snapshot, currentPrice: currentPrice)
                 }
             }
 

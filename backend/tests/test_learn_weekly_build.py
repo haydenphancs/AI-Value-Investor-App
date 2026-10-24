@@ -39,6 +39,7 @@ from app.services.learn_weekly import article_schema as A
 from app.services.learn_weekly import build as B
 from app.services.learn_weekly import case_library as CL
 from app.services.learn_weekly import contracts as C
+from app.services.learn_weekly import fact_sheet as fs
 from app.services.learn_weekly import ledger, sec_facts
 from app.services.learn_weekly import writer as W
 
@@ -391,7 +392,8 @@ def test_the_real_writer_end_to_end_on_a_fake_model(fake, rec, monkeypatch):
     build(piece)
     row = stored(fake, piece["id"])
     assert row["status"] == C.MEDIA_PENDING, (row["last_error"], row["validation"])
-    assert client.stages == ["outline"] + [f"section {i}" for i in range(1, 6)] + ["judge"]
+    assert client.stages_before_support == ["outline"] + [f"section {i}" for i in range(1, 6)] + ["judge"]
+    assert client.support_calls >= 1 and row["validation"]["judge"]["support"]["flagged"] == 0
     assert row["draft"]["sections"][-1]["content"][-1] == A.disclosure_block()
     assert row["validation"]["section_kinds"][0] == "peg"
     assert row["tokens_used"] == row["validation"]["tokens_used"] > 0
@@ -897,6 +899,66 @@ def test_assemble_fact_sheet_dates_each_peg_from_its_own_8k(rec, monkeypatch, ca
     assert pegs[1].text == ("Form 8-K filed with the SEC on October 19, 2026. NVIDIA CORP "
                             "entered into a lease for a data center campus.")
     assert "[learn-sheet-peg-undated] P9" in caplog.text
+
+
+def _multi(eid: str, themes, cik: Optional[str], kind: str, n: int) -> CL.LibraryEntry:
+    """An entry with `n` distinct facts (f1..fn)."""
+    base = _entry(eid, themes, cik, kind)
+    src = base.facts[0].source
+    facts = tuple(CL.LibraryFact(id=f"f{i}", text=f"{eid} fact number {i} explains one plain thing.",
+                                 source=src) for i in range(1, n + 1))
+    return CL.LibraryEntry(**{**vars(base), "facts": facts})
+
+
+PRIORITY_LIBRARY = CL.CaseLibrary(version=1, entries=(
+    _multi("theme-mech", ["ai-chips"], None, "mechanics", 6),            # the theme's mechanics
+    _multi("other-co", ["ai-chips"], None, "company", 6),                # another company on the theme
+    _multi("subject-mech", ["other-theme"], CIK, "mechanics", 6),        # about the subject, off theme
+    _multi("subject-co", ["other-theme"], CIK, "company", 6),            # the subject's own company primer
+    _multi("unrelated", ["other-theme"], None, "mechanics", 6),
+))
+
+
+def test_the_subjects_company_primer_leads_then_the_theme_then_the_rest():
+    """2026-10-24: the library lists mechanics first and the cap drops from the end, so every
+    company primer of a three-company Deep Dive's own subjects was cut and the writer described
+    those companies from memory (the labelled previews' unsupported claims)."""
+    entries = B._library_entries(PRIORITY_LIBRARY, "ai-chips", [CIK])
+    assert [e.id for e in entries] == ["subject-co", "theme-mech", "subject-mech", "other-co"]
+    facts = B._library_facts(PRIORITY_LIBRARY, entries)
+    lead = [f.id for f in facts[:4 * B.PRIMER_LEAD_FACTS]]
+    assert lead == [f"L:{e}:f{i}" for e in ("subject-co", "theme-mech", "subject-mech", "other-co")
+                    for i in range(1, B.PRIMER_LEAD_FACTS + 1)]
+    assert [f.id for f in facts[4 * B.PRIMER_LEAD_FACTS:]] == [
+        f"L:{e}:f{i}" for e in ("subject-co", "theme-mech", "subject-mech", "other-co") for i in (5, 6)]
+
+
+def test_the_cap_trims_every_primers_tail_before_it_drops_a_primer(rec, monkeypatch):
+    async def summary(cik, *, client=None):
+        return sec_facts.CompanySummary(
+            name="NVIDIA CORP", cik=CIK, tickers=("NVDA",), exchanges=("Nasdaq",), sic="3674",
+            sic_description=None, foreign_filer=False, recent_8k=(PEG_8K,))
+
+    monkeypatch.setattr(sec_facts, "company_summary", summary)
+    full = asyncio.run(B.assemble_fact_sheet("deep_dive", candidate(), library=PRIORITY_LIBRARY))
+    lib_chars = sum(len(f.text) for f in full.facts if f.origin == C.ORIGIN_LIBRARY)
+    # A cap that leaves room for the lead facts only: every primer keeps its first four.
+    lead_chars = sum(len(f.text) for f in full.facts if f.origin == C.ORIGIN_LIBRARY
+                     and int(f.id.rsplit(":f", 1)[1]) <= B.PRIMER_LEAD_FACTS)
+    monkeypatch.setattr(fs, "DEEP_DIVE_SHEET_CAP", full.char_count() - lib_chars + lead_chars)
+    capped = asyncio.run(B.assemble_fact_sheet("deep_dive", candidate(), library=PRIORITY_LIBRARY))
+    kept = [f.id for f in capped.facts if f.origin == C.ORIGIN_LIBRARY]
+    assert {i.split(":")[1] for i in kept} == {"subject-co", "theme-mech", "subject-mech", "other-co"}
+    assert all(int(i.rsplit(":f", 1)[1]) <= B.PRIMER_LEAD_FACTS for i in kept)
+
+
+def test_an_entry_with_fewer_facts_than_the_lead_gives_what_it_has():
+    small = CL.CaseLibrary(version=1, entries=(_entry("one", ["ai-chips"], None),
+                                               _multi("many", ["ai-chips"], None, "mechanics", 7)))
+    facts = B._library_facts(small, B._library_entries(small, "ai-chips", []))
+    assert [f.id for f in facts] == ["L:one:f1"] + [f"L:many:f{i}" for i in range(1, 5)] + \
+        [f"L:many:f{i}" for i in (5, 6, 7)]
+    assert B._library_facts(small, []) == []
 
 
 def test_assemble_fact_sheet_never_swallows_a_cancellation(rec, monkeypatch):

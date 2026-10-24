@@ -9,10 +9,12 @@ What is pinned, and why:
     from the response cache to its own retry);
   * fail CLOSED: a blocked / MAX_TOKENS / empty / non-JSON / wrong-shape answer or a Gemini error is
     `writer_failed`, never parsed and never "repaired" as if it were content — tokens are carried;
-  * the call budget (`MODEL_CALLS_PER_GENERATION` = 17) on the worst path, and `before_call` before
-    EVERY call (False → `lease_lost`, no further spend);
+  * the call budget (`MODEL_CALLS_PER_GENERATION` = 22: 17 + the support check's at most 5) on the
+    worst path, and `before_call` before EVERY call, the support check's included (False →
+    `lease_lost`, no further spend);
   * one repair per failing outline / section; a still-failing one → `content_rejected` with every issue;
-  * the judge modes (shadow records, enforce gates, off skips; unreadable → never a pass in enforce);
+  * the judge modes (shadow records, enforce gates, off skips; unreadable → never a pass in enforce),
+    for the rubric's call and the support check alike;
   * resume from stored progress (prefix reuse, everything re-validated);
   * the scope clause and the identity guard (`neutral_system_instruction`, never a copied rule text).
 """
@@ -160,9 +162,21 @@ def ok(obj: Any, tokens: int = 50) -> Dict[str, Any]:
     return {"text": json.dumps(obj), "tokens_used": tokens, "finish_reason": "STOP"}
 
 
+_ASKED = re.compile(r"Answer for sentences (\d+) to (\d+) only")
+
+
+def support_answer(prompt: str, unsupported=(), tokens: int = 7) -> Dict[str, Any]:
+    """A support-check answer for the sentences the prompt asks about: "general" for each, "none"
+    for the numbers in `unsupported`."""
+    a, b = (int(x) for x in _ASKED.search(prompt).groups())
+    return ok({"sentences": [{"n": n, "support": "none" if n in unsupported else "general",
+                              "claim": ""} for n in range(a, b + 1)]}, tokens)
+
+
 class FakeClient:
     """Answers `generate_json` by stage. `overrides[stage]` is a result dict, an exception to raise,
-    or a callable(prompt, kwargs) returning either; a list of those is consumed in order."""
+    or a callable(prompt, kwargs) returning either; a list of those is consumed in order.
+    `overrides["support"]` answers every support-check call ("support 1-60", …)."""
 
     def __init__(self, overrides: Optional[Dict[str, Any]] = None, *, outline_obj=None,
                  repeat: bool = False) -> None:
@@ -194,8 +208,9 @@ class FakeClient:
         stage = m.group(3)
         self.calls.append({"gen": m.group(1), "round": int(m.group(2)), "stage": stage,
                            "prompt": prompt, "kw": kw})
-        if stage in self.overrides:
-            spec = self.overrides[stage]
+        key = "support" if stage.startswith("support") and "support" in self.overrides else stage
+        if key in self.overrides:
+            spec = self.overrides[key]
             if isinstance(spec, list):
                 spec = spec.pop(0) if len(spec) > 1 else spec[0]
             if callable(spec) and not isinstance(spec, BaseException):
@@ -207,12 +222,28 @@ class FakeClient:
             return ok(self.outline_obj, 100)
         if stage == "judge":
             return ok({"verdicts": []}, 10)
+        if stage.startswith("support"):
+            return support_answer(prompt)
         index = int(re.match(r"section (\d+)", stage).group(1)) - 1
         return self.section_answer(prompt, index)
 
     @property
     def stages(self) -> List[str]:
         return [c["stage"] for c in self.calls]
+
+    @property
+    def stages_before_support(self) -> List[str]:
+        """Every stage but the support check's (its call count depends on the article's length)."""
+        return [st for st in self.stages if not st.startswith("support")]
+
+    @property
+    def support_calls(self) -> int:
+        return sum(st.startswith("support") for st in self.stages)
+
+
+def is_grader(stage: str) -> bool:
+    """The judge's call or a support-check call (neither is a writer call)."""
+    return stage == "judge" or stage.startswith("support")
 
 
 class Lease:
@@ -257,9 +288,12 @@ def test_a_clean_generation_is_accepted_with_the_disclosure_last():
     lease = Lease()
     out = run(client, lease=lease)
     assert out.status == W.STATUS_ACCEPTED, (out.error, out.issues)
-    assert client.stages == ["outline"] + [f"section {i}" for i in range(1, 6)] + ["judge"]
-    assert out.calls == len(client.calls) == lease.n == 7
-    assert out.tokens_used == 100 + 5 * 50 + 10
+    n = len(J.article_sentences(out.content))
+    support = [f"support {a + 1}-{min(a + J.SUPPORT_CHUNK, n)}" for a in range(0, n, J.SUPPORT_CHUNK)]
+    assert client.stages == ["outline"] + [f"section {i}" for i in range(1, 6)] + ["judge"] + support
+    assert out.calls == len(client.calls) == lease.n == 7 + len(support)
+    assert out.tokens_used == 100 + 5 * 50 + 10 + 7 * len(support)
+    assert out.judge["support"] == {"calls": len(support), "sentences": n, "flagged": 0}
     content = out.content
     assert content["sections"][-1]["content"][-1] == A.disclosure_block()
     assert sum(b == A.disclosure_block() for s in content["sections"] for b in s["content"]) == 1
@@ -301,6 +335,10 @@ def test_writer_calls_use_the_settings_and_the_identity_guard_and_the_judge_does
             assert kw["system_instruction"] == J.SYSTEM_BODY
             assert "CRITICAL IDENTITY RULE" not in kw["system_instruction"]
             assert kw["temperature"] == 0.0 and kw["thinking_budget"] == 0
+        elif call["stage"].startswith("support"):
+            assert kw["model_name"] == J.JUDGE_MODEL and kw["system_instruction"] == J.SUPPORT_BODY
+            assert kw["temperature"] == 0.0 and kw["thinking_budget"] == 0
+            assert kw["usage_tag"] == J.SUPPORT_USAGE_TAG and kw["cache"] is False
         else:
             assert kw["model_name"] == "gemini-2.5-flash"
             assert kw["system_instruction"] == neutral_system_instruction(P.SYSTEM_BODY)
@@ -313,7 +351,7 @@ def test_a_bad_thinking_budget_means_the_model_default_never_a_crash(monkeypatch
     monkeypatch.setattr(settings, "LEARN_WRITER_THINKING_BUDGET", -1)
     client = FakeClient()
     assert run(client).status == W.STATUS_ACCEPTED
-    assert {c["kw"]["thinking_budget"] for c in client.calls if c["stage"] != "judge"} == {None}
+    assert {c["kw"]["thinking_budget"] for c in client.calls if not is_grader(c["stage"])} == {None}
 
 
 def test_a_section_prompt_carries_only_its_own_fact_slice():
@@ -337,7 +375,7 @@ def test_the_reject_reason_reaches_every_prompt_fenced_and_neutralised():
     out = run(client, reject_reason=reason)
     assert out.status == W.STATUS_ACCEPTED, out.issues
     for call in client.calls:
-        if call["stage"] == "judge":
+        if is_grader(call["stage"]):
             continue
         assert "EDITOR'S NOTE" in call["prompt"], call["stage"]
         assert "Too dry." in call["prompt"]
@@ -403,7 +441,7 @@ def test_junk_token_counts_never_poison_the_ledger(tokens, counted):
     client = FakeClient({"outline": answer})
     out = run(client)
     assert out.status == W.STATUS_ACCEPTED
-    assert out.tokens_used == counted + 5 * 50 + 10
+    assert out.tokens_used == counted + 5 * 50 + 10 + 7 * client.support_calls
 
 
 @pytest.mark.parametrize("result", [None, "text", ["a"], 3])
@@ -462,12 +500,13 @@ def test_a_caller_bug_raises_before_any_call(kwargs):
 # ═════════════════════════════════════════════════════════════════════════════════════════════
 
 
-def test_the_budget_is_outline_and_repair_two_per_section_and_the_judge():
-    assert W.MODEL_CALLS_PER_GENERATION == 2 + 2 * A.SECTION_COUNT[1] + 1 == 17
+def test_the_budget_is_outline_and_repair_two_per_section_the_judge_and_the_support_check():
+    assert W.MODEL_CALLS_PER_GENERATION == 2 + 2 * A.SECTION_COUNT[1] + 1 + J.SUPPORT_MAX_CALLS == 22
 
 
 def test_the_worst_path_makes_exactly_the_budgeted_calls():
-    """Outline repaired, every one of 7 sections repaired, then the judge: 17 calls, accepted."""
+    """Outline repaired, every one of 7 sections repaired, then the judge and the support check:
+    17 + its calls (≤ SUPPORT_MAX_CALLS), every one gated, accepted."""
     seven = SECTIONS_5 + EXTRA_SECTIONS
     client = FakeClient(outline_obj=outline(seven))
     client.overrides["outline"] = ok(outline(seven, title="The Fall of Sears"))  # collides
@@ -476,7 +515,9 @@ def test_the_worst_path_makes_exactly_the_budgeted_calls():
     lease = Lease()
     out = run(client, lease=lease)
     assert out.status == W.STATUS_ACCEPTED, (out.error, out.issues)
-    assert out.calls == len(client.calls) == lease.n == W.MODEL_CALLS_PER_GENERATION
+    support = [st for st in client.stages if st.startswith("support")]
+    assert 1 <= len(support) <= J.SUPPORT_MAX_CALLS
+    assert out.calls == len(client.calls) == lease.n == 17 + len(support) <= W.MODEL_CALLS_PER_GENERATION
     assert client.stages.count("outline repair") == 1
     assert all(f"section {i} repair" in client.stages for i in range(1, 8))
 
@@ -650,7 +691,7 @@ def test_a_resume_reuses_a_section_kept_with_a_length_miss():
     client.next_para = 60
     out = run(client, resume=saved[-1])
     assert out.status == W.STATUS_ACCEPTED, out.issues
-    assert client.stages == ["section 5", "judge"]
+    assert client.stages_before_support == ["section 5", "judge"]
 
 
 def test_a_failed_length_repair_keeps_the_clean_first_draft():
@@ -1033,6 +1074,104 @@ def test_the_judge_never_shares_the_writer_model():
     assert J.JUDGE_MODEL != settings.model_fields["LEARN_WRITER_MODEL"].default
 
 
+# ── the support check inside the judge stage (2026-10-24) ─────────────────────────────────────
+
+FLAG_THIRD = lambda prompt, kw: support_answer(prompt, unsupported={3})   # noqa: E731
+
+
+def test_shadow_records_the_support_checks_verdicts_beside_the_judges():
+    out = run(FakeClient({"judge": FLAG, "support": FLAG_THIRD}))
+    assert out.status == W.STATUS_ACCEPTED
+    rules = [v["rule"] for v in out.judge["verdicts"]]
+    assert rules == ["learn_forecast", J.SUPPORT_RULE]
+    assert out.judge["support"]["flagged"] == 1 and out.judge["error"] is None
+    assert [r["stage"] for r in out.rounds if r["stage"] in ("judge", "support")] == ["judge", "support"]
+
+
+def test_enforce_rejects_on_a_support_verdict(monkeypatch):
+    monkeypatch.setattr(settings, "LEARN_JUDGE_MODE", "enforce")
+    out = run(FakeClient({"support": FLAG_THIRD}))
+    assert out.status == W.STATUS_CONTENT_REJECTED
+    assert [i["code"] for i in out.issues] == [J.SUPPORT_RULE]
+
+
+@pytest.mark.parametrize("answer", [{"text": "nope", "tokens_used": 9, "finish_reason": "STOP"},
+                                    RuntimeError("support outage")])
+def test_an_unusable_support_check_is_never_a_pass_under_enforce(monkeypatch, answer):
+    monkeypatch.setattr(settings, "LEARN_JUDGE_MODE", "enforce")
+    client = FakeClient({"support": answer})
+    out = run(client)
+    assert out.status == W.STATUS_WRITER_FAILED and out.error.startswith("judge: support:")
+    assert client.support_calls == 1, "nothing is called after an unusable support answer"
+    assert out.content is None
+
+
+def test_under_enforce_a_failed_judge_call_spends_nothing_on_the_support_check(monkeypatch):
+    monkeypatch.setattr(settings, "LEARN_JUDGE_MODE", "enforce")
+    client = FakeClient({"judge": RuntimeError("judge outage")})
+    out = run(client)
+    assert out.status == W.STATUS_WRITER_FAILED and client.support_calls == 0
+
+
+def test_shadow_keeps_the_judges_verdicts_when_the_support_check_fails():
+    out = run(FakeClient({"judge": FLAG, "support": {"text": "nope", "tokens_used": 9,
+                                                     "finish_reason": "STOP"}}))
+    assert out.status == W.STATUS_ACCEPTED
+    assert [v["rule"] for v in out.judge["verdicts"]] == ["learn_forecast"]
+    assert out.judge["error"].startswith("support: LearnJudgeUnavailable")
+    assert out.judge["support"] is None and out.judge["tokens_used"] == 12 + 9
+
+
+def test_shadow_still_runs_the_support_check_when_the_judge_call_fails():
+    client = FakeClient({"judge": RuntimeError("judge outage"), "support": FLAG_THIRD})
+    out = run(client)
+    assert out.status == W.STATUS_ACCEPTED and client.support_calls >= 1
+    assert out.judge["error"].startswith("RuntimeError") and out.judge["support"]["flagged"] == 1
+
+
+def test_under_enforce_a_rubric_verdict_rejects_at_once_and_buys_no_support_check(monkeypatch):
+    """Review 2026-10-24: the support check ran after the rubric had already flagged the draft,
+    and its failure then turned a content rejection into writer_failed with no issues (the
+    flagged draft resumed under the writer-failure cap)."""
+    monkeypatch.setattr(settings, "LEARN_JUDGE_MODE", "enforce")
+    client = FakeClient({"judge": FLAG, "support": {"text": "nope", "tokens_used": 9,
+                                                    "finish_reason": "STOP"}})
+    out = run(client)
+    assert out.status == W.STATUS_CONTENT_REJECTED and client.support_calls == 0
+    assert [i["code"] for i in out.issues] == ["learn_forecast"]
+
+
+def _chunked(monkeypatch):
+    """Two support chunks for the fake article (its ~120 sentences)."""
+    monkeypatch.setattr(J, "SUPPORT_CHUNK", 70)
+
+
+def test_a_failed_second_chunk_still_charges_the_first(monkeypatch):
+    _chunked(monkeypatch)
+    answers = [lambda p, kw: support_answer(p, tokens=1000), RuntimeError("support outage")]
+    client = FakeClient({"support": answers})
+    out = run(client)
+    assert out.status == W.STATUS_ACCEPTED and client.support_calls == 2
+    assert out.tokens_used == 100 + 5 * 50 + 10 + 1000
+    assert out.judge["error"].startswith("support: RuntimeError") and out.judge["support"] is None
+
+
+def test_a_lease_lost_between_support_chunks_still_charges_the_answered_one(monkeypatch):
+    _chunked(monkeypatch)
+    client = FakeClient({"support": lambda p, kw: support_answer(p, tokens=1000)})
+    out = run(client, lease=Lease(fail_at=9))     # 7 writer/judge calls, support 1, then the gate
+    assert out.status == W.STATUS_LEASE_LOST and client.support_calls == 1
+    assert out.tokens_used == 100 + 5 * 50 + 10 + 1000
+
+
+def test_a_lease_lost_before_a_support_call_stops_the_generation():
+    client = FakeClient()
+    lease = Lease(fail_at=8)          # outline + 5 sections + the judge = 7 calls, then support
+    out = run(client, lease=lease)
+    assert out.status == W.STATUS_LEASE_LOST and "support" in out.error
+    assert client.support_calls == 0 and out.content is None
+
+
 # ═════════════════════════════════════════════════════════════════════════════════════════════
 # F. Progress and resume
 # ═════════════════════════════════════════════════════════════════════════════════════════════
@@ -1063,7 +1202,7 @@ def test_a_resume_reuses_the_outline_and_the_finished_sections():
     client.next_para = 60                                    # fresh text for the rest
     out = run(client, resume=saved[3])                      # outline + 3 sections stored
     assert out.status == W.STATUS_ACCEPTED, out.issues
-    assert client.stages == ["section 4", "section 5", "judge"]
+    assert client.stages_before_support == ["section 4", "section 5", "judge"]
 
 
 def test_a_stored_section_that_no_longer_passes_is_rewritten_with_everything_after_it():
@@ -1074,7 +1213,7 @@ def test_a_stored_section_that_no_longer_passes_is_rewritten_with_everything_aft
     client.next_para = 60
     out = run(client, resume=stored)
     assert out.status == W.STATUS_ACCEPTED, out.issues
-    assert client.stages == ["section 2", "section 3", "section 4", "section 5", "judge"]
+    assert client.stages_before_support == ["section 2", "section 3", "section 4", "section 5", "judge"]
 
 
 def test_a_stored_outline_that_now_collides_is_rewritten_and_its_sections_dropped():

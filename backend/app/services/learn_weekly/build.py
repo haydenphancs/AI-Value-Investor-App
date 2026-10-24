@@ -350,19 +350,40 @@ async def _subject_facts(subject: C.Subject, sec: _SECReadRecorder
                                                  client=sec)
 
 
+#: Each primer's first facts (its core: what the company does, what the mechanism is) go onto the
+#: sheet before any primer's later facts, so the cap (`fact_sheet.sheet_cap`, dropping from the end)
+#: trims every primer's tail before it takes a whole primer.
+PRIMER_LEAD_FACTS = 4
+
+
 def _library_entries(lib: case_library.CaseLibrary, theme: Optional[str],
                      ciks: Sequence[str]) -> List[case_library.LibraryEntry]:
-    """The theme's verified PRIMERS plus any primer about one of the subjects, file order, once."""
+    """The theme's verified PRIMERS plus any primer about one of the subjects, once, in priority
+    order: the subjects' own company primers, then the theme's primers, then the rest about a
+    subject, then other companies on the theme (file order within each). The library lists
+    mechanics first, so before 2026-10-24 a three-company Deep Dive's cap dropped every company
+    primer of its own subjects — and the writer described them from memory."""
     wanted = set(ciks)
-    out: List[case_library.LibraryEntry] = []
+    ranked: List[Tuple[int, int, case_library.LibraryEntry]] = []
     seen = set()
-    for entry in lib.usable_entries(kinds=case_library.PRIMER_KINDS):
+    for order, entry in enumerate(lib.usable_entries(kinds=case_library.PRIMER_KINDS)):
         on_theme = theme is not None and theme in entry.themes
         on_subject = any(co.cik in wanted for co in entry.companies if co.cik)
-        if (on_theme or on_subject) and entry.id not in seen:
-            seen.add(entry.id)
-            out.append(entry)
-    return out
+        if not (on_theme or on_subject) or entry.id in seen:
+            continue
+        seen.add(entry.id)
+        company = entry.kind == "company"
+        rank = 0 if company and on_subject else 3 if company else 1 if on_theme else 2
+        ranked.append((rank, order, entry))
+    return [entry for _, _, entry in sorted(ranked, key=lambda t: (t[0], t[1]))]
+
+
+def _library_facts(lib: case_library.CaseLibrary,
+                   entries: Sequence[case_library.LibraryEntry]) -> List[C.Fact]:
+    """Every entry's first `PRIMER_LEAD_FACTS` facts in entry order, then every entry's rest."""
+    per_entry = [lib.facts_for(e) for e in entries]
+    return ([f for facts in per_entry for f in facts[:PRIMER_LEAD_FACTS]]
+            + [f for facts in per_entry for f in facts[PRIMER_LEAD_FACTS:]])
 
 
 async def assemble_fact_sheet(kind: str, candidate: Mapping[str, Any], *,
@@ -396,7 +417,7 @@ async def assemble_fact_sheet(kind: str, candidate: Mapping[str, Any], *,
     peg = fs.date_peg_facts(peg, filed)
     lib = library if library is not None else await asyncio.to_thread(case_library.get_case_library)
     entries = _library_entries(lib, theme, [s.cik for s in filers if s.cik])
-    library_facts = [f for e in entries for f in lib.facts_for(e)]
+    library_facts = _library_facts(lib, entries)
     sheet = fs.build_fact_sheet(kind, candidate_label(candidate), theme, subjects, peg, xbrl,
                                 library_facts, library=lib)
     if len(sheet.facts) < MIN_SHEET_FACTS:

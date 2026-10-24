@@ -139,6 +139,10 @@ _TOO_CLOSE_TOAST = "Too close to the hold end — use scripts/learn_weekly_rebui
 #: the owner's tap is the gate, so the warning sits where the tap is. Pinned ⊆ `judge.RULE_CODES`.
 WARN_JUDGE_RULES: Tuple[str, ...] = ("learn_directive", "learn_valuation_verdict")
 _WARN_JUDGE_WORDS = {"learn_directive": "a buy/sell directive", "learn_valuation_verdict": "a valuation verdict"}
+#: The support check's code (`judge.SUPPORT_RULE`, pinned equal). A thin fact sheet draws dozens of
+#: these, so they get their own count line and are listed AFTER the rubric's flags, which are rarer
+#: and each worth a look.
+SUPPORT_RULE = "learn_unsupported_claim"
 #: How a statistic's trend shows in the review body: the arrow the app draws (iOS `StatisticTrend`:
 #: up / down / neutral; anything else draws NO arrow). An arrow is a claim the model chose, so the
 #: owner must see it before approving.
@@ -488,7 +492,10 @@ def worst_block(checks: Any) -> str:
 
 
 def judge_lines(validation: Any) -> List[str]:
-    """The shadow judge's verdict for the header (`validation.judge`, read defensively)."""
+    """The shadow judge's verdict for the header (`validation.judge`, read defensively), at most 7
+    lines. A judge stage that failed is NAMED, and so is a support check that did not run: in
+    shadow the owner's tap is the only gate, so a check that never ran must never read as a clean
+    article (review 2026-10-24)."""
     judge = validation.get("judge") if isinstance(validation, dict) else None
     if judge is None:
         return ["Shadow judge: not run"]
@@ -502,10 +509,25 @@ def judge_lines(validation: Any) -> List[str]:
     if not isinstance(flags, list):
         return ["Shadow judge: unreadable verdict"]
     head = f"Shadow judge ({alerts.scrub(mode, 16)})" if mode else "Shadow judge"
-    if not flags:
-        return [f"{head}: no flags"]
-    out = [f"{head}: {len(flags)} flag(s)"]
-    for f in flags[:5]:
+    out = [f"{head}: {len(flags)} flag(s)" if flags else f"{head}: no flags"]
+    error = judge.get("error") if isinstance(judge, dict) else None
+    if isinstance(error, str) and error.strip():
+        out.append(f"⚠️ Judge problem: {alerts.scrub(error, 120)}")
+    is_support = [isinstance(f, dict) and f.get("rule") == SUPPORT_RULE for f in flags]
+    support = judge.get("support") if isinstance(judge, dict) else None
+    if isinstance(support, dict):
+        total = support.get("sentences")
+        of = f" of {total}" if isinstance(total, int) and not isinstance(total, bool) and total > 0 else ""
+        out.append(f"Support check: {sum(is_support)}{of} sentence(s) say things the fact sheet does not")
+    elif any(is_support):     # a record with flags but no run summary (older or hand-edited)
+        out.append(f"Support check: {sum(is_support)} sentence(s) say things the fact sheet does not")
+    elif isinstance(judge, dict) and "support" in judge:
+        out.append("⚠️ Support check: did not finish — read the facts yourself")
+    if any(is_support):
+        flags = [f for f, sup in zip(flags, is_support) if not sup] + \
+                [f for f, sup in zip(flags, is_support) if sup]
+    shown = max(2, 6 - len(out))
+    for f in flags[:shown]:
         if isinstance(f, dict):
             rule = f.get("rule") or f.get("code") or "flag"
             where = f.get("field") or f.get("section") or f.get("label")     # `label`: JudgeRecord's Verdict
@@ -514,8 +536,8 @@ def judge_lines(validation: Any) -> List[str]:
                        + (f": {alerts.scrub(quote, 120)}" if quote else ""))
         else:
             out.append(f"• {alerts.scrub(f, 120)}")
-    if len(flags) > 5:
-        out.append(f"• … {len(flags) - 5} more")
+    if len(flags) > shown:
+        out.append(f"• … {len(flags) - shown} more")
     return out
 
 
@@ -539,16 +561,25 @@ def judge_flagged_rules(validation: Any) -> List[str]:
 
 
 def judge_warning(validation: Any) -> Optional[str]:
-    """The ⚠️ line that opens the decision message when the judge flagged a `WARN_JUDGE_RULES` rule
-    (in shadow mode it blocks nothing, so the owner must not miss it); None otherwise."""
-    hits = [r for r in WARN_JUDGE_RULES if r in judge_flagged_rules(validation)]
-    if not hits:
-        return None
+    """The ⚠️ line that opens the decision message when the judge flagged a `WARN_JUDGE_RULES` rule,
+    or when a judge stage did not finish (a recorded error, or a support check that did not run):
+    in shadow mode it blocks nothing, and the decision message is the LOUD one, so the owner must
+    not miss either (re-review 2026-10-24); None otherwise."""
     judge = validation.get("judge") if isinstance(validation, dict) else None
     mode = judge.get("mode") if isinstance(judge, dict) else None
     who = f"The {alerts.scrub(mode, 16)} judge" if isinstance(mode, str) and mode.strip() else "The judge"
-    return (f"⚠️ {who} flagged {' and '.join(_WARN_JUDGE_WORDS[r] for r in hits)} ({', '.join(hits)}) — read "
-            f"the flagged lines in the header before you approve.")
+    hits = [r for r in WARN_JUDGE_RULES if r in judge_flagged_rules(validation)]
+    if hits:
+        return (f"⚠️ {who} flagged {' and '.join(_WARN_JUDGE_WORDS[r] for r in hits)} ({', '.join(hits)}) — "
+                f"read the flagged lines in the header before you approve.")
+    if not isinstance(judge, dict):
+        return None
+    error = judge.get("error")
+    unfinished = isinstance(error, str) and bool(error.strip())
+    if unfinished or ("support" in judge and judge.get("support") is None):
+        return (f"⚠️ {who} did not finish (a check never ran) — read the whole article yourself "
+                f"before you approve.")
+    return None
 
 
 def _duration(seconds: Any) -> str:

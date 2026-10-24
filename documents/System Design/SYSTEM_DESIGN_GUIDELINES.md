@@ -6282,6 +6282,19 @@ the plan is `~/.claude/plans/improve-or-add-wiser-snoopy-sun.md`. Everything is 
   explicit allow-list of compliance codes (the marketing scan alone fails 21 of 23 hand-written
   articles), first-person-only identity checks (the owner allowed AI companies as subjects), no
   quotes, people by role only, no misconduct stories (`llm_eligible: false`).
+  The judge is two stages (2026-10-24): the rubric's one pass (directives, valuation verdicts,
+  forecasts, risk-softening, conduct, superlatives, self-reference) and a SUPPORT CHECK
+  (`learn_unsupported_claim`) for claims made of plain words, which grounding cannot see ("the
+  agreement aims to …"). Code numbers every sentence and the grader must answer each one with the
+  fact ids that state it, "general" or "none"; a skipped sentence or an id not on the sheet fails
+  closed. It takes 1-5 calls, inside the writer's 22-call budget. Measured with
+  `scripts/learn_judge_calibrate.py` against pre-registered labels on 11 real drafts: one holistic
+  pass found ~10% of the unsupported claims; the sentence check found 88% on the holdout at 85%
+  precision (two runs, 6 samples; per-run precision 81% and 90% — the model varies at temperature
+  0), under the pre-registered 90% bar, so it stays in shadow and the owner's tap is the gate.
+  The sheet lists the subjects' own company primers first and every primer's first four facts
+  before any primer's rest: the 9,000-character cap used to cut a three-company Deep Dive's
+  company primers entirely, and the writer then described those companies from memory.
 - **Narration.** A separate Railway cron service, `backend/learn_narrator/` (no `app.*`, no
   Supabase secret), claims jobs through `/api/v1/internal/learn/*` and uploads through signed URLs
   to the PRIVATE `money-moves-media` bucket. The engine is frozen per job: the catalog's

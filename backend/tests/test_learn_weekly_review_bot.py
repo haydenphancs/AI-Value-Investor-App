@@ -1258,8 +1258,11 @@ def _judge_record(*rules: str, mode: str = "shadow") -> Dict[str, Any]:
     from app.services.learn_weekly import judge
     from app.services.marketing import judge as mj
 
+    # A finished judge: the rubric's call and the support check both ran (support=None means the
+    # support check did not finish, which warns on its own).
     return judge.JudgeRecord(mode=mode, verdicts=[mj.Verdict(f"sections[{i}].content[0]", r, "the quote", "why", True)
-                                                  for i, r in enumerate(rules)]).as_dict()
+                                                  for i, r in enumerate(rules)],
+                             support={"calls": 1, "sentences": 10, "flagged": 0}).as_dict()
 
 
 @pytest.mark.parametrize("rules,warned", [
@@ -1326,6 +1329,98 @@ def test_the_body_text_prints_each_statistics_trend_arrow():
 def test_judge_lines_read_any_shape(validation, first):
     lines = review.judge_lines(validation)
     assert lines[0] == first and len(lines) <= 7
+
+
+def test_support_flags_get_a_count_line_and_come_after_the_rubrics():
+    sup = [{"label": f"sections[1].content[{i}]", "rule": review.SUPPORT_RULE, "quote": f"claim {i}"}
+           for i in range(9)]
+    rubric = {"label": "sections[2].content[0]", "rule": "learn_forecast", "quote": "will dominate"}
+    judge = {"mode": "shadow", "verdicts": sup[:3] + [rubric] + sup[3:],
+             "support": {"calls": 3, "sentences": 131, "flagged": 9}}
+    lines = review.judge_lines({"judge": judge})
+    assert lines[0] == "Shadow judge (shadow): 10 flag(s)"
+    assert lines[1] == "Support check: 9 of 131 sentence(s) say things the fact sheet does not"
+    assert lines[2].startswith("• learn_forecast") and lines[-1] == "• … 6 more"
+    assert len(lines) <= 7
+    # A hostile or missing sentence count drops only the "of N".
+    for bad in (None, True, "131", -1, {"sentences": 0}):
+        judge["support"] = bad if not isinstance(bad, dict) else bad
+        assert review.judge_lines({"judge": judge})[1] == \
+            "Support check: 9 sentence(s) say things the fact sheet does not"
+
+
+def test_a_failed_support_check_never_reads_as_a_clean_article():
+    """Review 2026-10-24: a support check that failed in shadow left `verdicts: []`, and the header
+    said "no flags" — the same words as a clean article, while the owner's tap is the only gate."""
+    from app.services.learn_weekly import judge
+
+    rec = judge.JudgeRecord(mode="shadow", error="support: LearnJudgeUnavailable: support answer cut off")
+    lines = review.judge_lines({"judge": rec.as_dict()})
+    assert lines[0] == "Shadow judge (shadow): no flags"
+    assert lines[1].startswith("⚠️ Judge problem: support: LearnJudgeUnavailable")
+    assert lines[2] == "⚠️ Support check: did not finish — read the facts yourself"
+    both = judge.JudgeRecord(mode="shadow", error="RuntimeError: judge 503; support: RuntimeError: 503")
+    assert any(line.startswith("⚠️ Judge problem: RuntimeError") for line in review.judge_lines(
+        {"judge": both.as_dict()}))
+
+
+@pytest.mark.parametrize("record", [
+    {"mode": "shadow", "verdicts": [], "error": "LearnJudgeUnavailable: judge answer cut off", "support": None},
+    {"mode": "shadow", "verdicts": [], "error": None, "support": None},
+    {"mode": "shadow", "verdicts": [], "error": "RuntimeError: judge 503",
+     "support": {"calls": 3, "sentences": 120, "flagged": 0}},
+])
+def test_the_loud_decision_message_warns_when_a_judge_stage_did_not_finish(record):
+    """Re-review 2026-10-24: the "did not finish" lines sat only in the SILENT header; the loud
+    message that carries the Approve button said nothing."""
+    line = review.judge_warning({"judge": record})
+    assert line is not None and "did not finish" in line and line.startswith("⚠️")
+
+
+@pytest.mark.parametrize("record", [
+    {"mode": "shadow", "verdicts": [], "error": None, "support": {"calls": 3, "sentences": 9, "flagged": 0}},
+    {"mode": "shadow", "verdicts": []},                       # a record from before the support check
+    None, "junk",
+])
+def test_a_finished_judge_adds_no_warning(record):
+    assert review.judge_warning({"judge": record}) is None
+
+
+def test_a_flag_warning_wins_over_the_unfinished_one():
+    rec = {"mode": "shadow", "error": "support: boom", "support": None,
+           "verdicts": [{"label": "title", "rule": "learn_directive", "quote": "buy"}]}
+    assert "flagged a buy/sell directive" in review.judge_warning({"judge": rec})
+
+
+def test_a_clean_support_run_says_so_with_its_count():
+    from app.services.learn_weekly import judge
+
+    rec = judge.JudgeRecord(mode="shadow", support={"calls": 3, "sentences": 131, "flagged": 0})
+    assert review.judge_lines({"judge": rec.as_dict()}) == [
+        "Shadow judge (shadow): no flags",
+        "Support check: 0 of 131 sentence(s) say things the fact sheet does not"]
+
+
+@pytest.mark.parametrize("n_rubric,n_support,error,support", [
+    (0, 0, None, None), (9, 0, None, {"sentences": 5}), (0, 30, "x" * 500, {"sentences": 131}),
+    (9, 30, "support: boom", None), (1, 1, "  ", {"sentences": "?"}),
+])
+def test_the_judge_block_never_exceeds_seven_lines(n_rubric, n_support, error, support):
+    verdicts = ([{"label": "title", "rule": "learn_forecast", "quote": "q"}] * n_rubric
+                + [{"label": "title", "rule": review.SUPPORT_RULE, "quote": "q"}] * n_support)
+    lines = review.judge_lines({"judge": {"mode": "shadow", "verdicts": verdicts, "error": error,
+                                          "support": support}})
+    assert 1 <= len(lines) <= 7, lines
+    total = n_rubric + n_support
+    if total > len([ln for ln in lines if ln.startswith("• ") and "more" not in ln]):
+        assert lines[-1].startswith("• … ")
+
+
+def test_the_reviews_support_code_is_the_judges():
+    from app.services.learn_weekly import judge
+
+    assert review.SUPPORT_RULE == judge.SUPPORT_RULE
+    assert review.SUPPORT_RULE not in review.WARN_JUDGE_RULES
 
 
 def test_header_text_survives_hostile_values():

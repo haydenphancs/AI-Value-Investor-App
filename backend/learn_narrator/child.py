@@ -2,6 +2,8 @@
 learn_narrator/child.py — the HEAVY process. `python -m learn_narrator.child <mode> <arg>`:
 
   render <job.json>   engines.{chatterbox,kokoro}.render → <out_dir>/narration.m4a + render.json
+  render_part <job.json>  Chatterbox only: blocks job["part"] = [start, end) → <out_dir>/parts/ +
+                      render_part.json (main.py runs one per RENDER_PART_BLOCKS, then `render`)
   align  <job.json>   align.align_job (Chatterbox only)  → <out_dir>/align.json
   smoke  <out dir>    the image's build-time proof: one line per engine, the WAV2VEC2 weights, and
                       `torchaudio.functional.forced_align`, all with the network OFF (refused
@@ -43,7 +45,7 @@ def _weights_missing(exc: BaseException) -> bool:
     return bool(names & {"LocalEntryNotFoundError", "OfflineModeIsEnabled", "EntryNotFoundError"})
 
 
-def _classify(exc: BaseException) -> Dict[str, str]:
+def _classify(exc: BaseException, mode: str = "render") -> Dict[str, str]:
     from learn_narrator import align
     from learn_narrator.engines import chatterbox, kokoro
 
@@ -56,8 +58,11 @@ def _classify(exc: BaseException) -> Dict[str, str]:
         return {"code": "voice_unsupported", "detail": detail}
     if isinstance(exc, align.AlignFailed):
         return {"code": "align_failed", "detail": detail}
-    if isinstance(exc, MemoryError):
-        return {"code": "render_oom", "detail": detail}
+    # torch's CPU allocator raises its own OutOfMemoryError (matched by name: torch is not imported
+    # here). Named for the MODE, so a part's memory failure is `render_part_oom` — the code
+    # main.render_in_parts retries — exactly as a SIGKILL of that child is (runtime.run_child).
+    if isinstance(exc, MemoryError) or "OutOfMemoryError" in {c.__name__ for c in type(exc).__mro__}:
+        return {"code": f"{mode}_oom", "detail": detail}
     if _weights_missing(exc):
         return {"code": "weights_missing", "detail": detail}
     return {}
@@ -68,6 +73,11 @@ def run(mode: str, job_path: Path) -> Dict[str, Any]:
     out_dir = Path(job["out_dir"])
     threads = int(job.get("threads") or runtime.torch_threads())
     progress = _progress(mode)
+    if mode == "render_part":
+        if job["engine"] != "chatterbox":
+            raise runtime.ChildFailed("engine_unsupported", f"render_part is Chatterbox-only, not {job['engine']!r}")
+        from learn_narrator.engines import chatterbox
+        return chatterbox.render_part(job, out_dir, threads=threads, progress=progress)
     if mode == "render":
         if job["engine"] == "chatterbox":
             from learn_narrator.engines import chatterbox
@@ -221,15 +231,16 @@ def smoke(out_dir: Path) -> Dict[str, Any]:
 
 
 def main(argv: list) -> int:
-    if len(argv) != 3 or argv[1] not in ("render", "align", "smoke"):
-        print("usage: python -m learn_narrator.child {render|align} <job.json> | smoke <out dir>", file=sys.stderr)
+    if len(argv) != 3 or argv[1] not in ("render", "render_part", "align", "smoke"):
+        print("usage: python -m learn_narrator.child {render|render_part|align} <job.json> | smoke <out dir>",
+              file=sys.stderr)
         return 2
     mode, arg = argv[1], Path(argv[2])
     out_dir = arg if mode == "smoke" else Path(json.loads(arg.read_text(encoding="utf-8"))["out_dir"])
     try:
         result = smoke(arg) if mode == "smoke" else run(mode, arg)
     except BaseException as exc:  # noqa: BLE001 — classified, written, and the status says which
-        typed = _classify(exc) if isinstance(exc, Exception) else {}
+        typed = _classify(exc, mode) if isinstance(exc, Exception) else {}
         traceback.print_exc()
         if typed:
             out_dir.mkdir(parents=True, exist_ok=True)

@@ -9,7 +9,9 @@ One tick:
      Only those are declared on the claim: a worker never claims what it would have to download.
   2. `POST /jobs/claim` → 204: exit 0. 200: present the claim on every later call (`hold`).
   3. render in a CHILD process (`runtime.run_child`; torch never enters this process), heartbeating
-     every 60 s. Chatterbox: then align the final m4a in a second child (WAV2VEC2, MIT).
+     every 60 s. Chatterbox renders in parts (`render_in_parts`: one `render_part` child per
+     cb.RENDER_PART_BLOCKS blocks, a part killed by the memory limit run once more, then the
+     assembling `render` child), and then aligns the final m4a in another child (WAV2VEC2, MIT).
   4. build the read-along table (`timings`) and check it the way the server will; measure the file
      (`verify`) against the engine's bands. Any miss → `/fail` with a typed code, never an upload.
   5. `POST /upload` → PUT the bytes to the signed URL → `POST /complete`.
@@ -343,6 +345,53 @@ def render_timeout(engine: str, env: Mapping[str, str]) -> float:
     return float(RENDER_TIMEOUT_SECONDS[engine])
 
 
+def render_in_parts(runner: Callable[..., dict], job: Job, job_path: Path, workdir: Path, *, threads: int,
+                    budget: float, heartbeat: Optional[Callable[[], None]],
+                    clock: Callable[[], float] = time.monotonic) -> Dict[str, Any]:
+    """Chatterbox's render: one `render_part` child per cb.RENDER_PART_BLOCKS blocks (each saves its
+    blocks as they finish), then the `render` child that assembles them — all inside ONE budget
+    (`render_timeout`). The first live render (2026-10-24) grew block by block in one process until
+    the 8 GB limit killed it ~30 blocks in; a fresh process per part bounds that. A part killed by
+    the limit (`render_part_oom`) runs once more in a fresh process, resuming after its last saved
+    block; any other failure, or a second kill, ends the job with that part's code. The budget running
+    out, before or during any child, is always `render_timeout`."""
+    t0 = clock()
+    base = json.loads(job_path.read_text(encoding="utf-8"))
+    n = len(job.blocks)
+
+    def run(mode: str, path: Path, what: str) -> dict:
+        remaining = budget - (clock() - t0)
+        if remaining <= 0:
+            raise runtime.ChildFailed("render_timeout", f"the render budget of {budget / 60:.0f} min ran out "
+                                                        f"before {what}")
+        try:
+            return runner(mode, path, workdir, timeout=remaining, threads=threads, heartbeat=heartbeat)
+        except runtime.ChildFailed as e:
+            if e.code == f"{mode}_timeout":
+                raise runtime.ChildFailed("render_timeout", f"the render budget of {budget / 60:.0f} min ran out "
+                                                            f"during {what}: {e.detail}") from e
+            raise
+
+    for k, start in enumerate(range(0, n, cb.RENDER_PART_BLOCKS)):
+        end = min(n, start + cb.RENDER_PART_BLOCKS)
+        part_path = workdir / f"job.part-{k:02d}.json"
+        part_path.write_text(json.dumps({**base, "part": [start, end]}, ensure_ascii=False), encoding="utf-8")
+        for attempt in (1, 2):
+            try:
+                done = run("render_part", part_path, f"blocks {start}-{end}")
+                logger.info("render part %d (blocks %d-%d) done: %s rendered, %s reused, peak %s MB, %ss", k, start,
+                            end, done.get("rendered"), done.get("reused"), done.get("peak_rss_mb"),
+                            done.get("wall_seconds"))
+                break
+            except runtime.ChildFailed as e:
+                if e.code != "render_part_oom" or attempt == 2:
+                    raise
+                logger.warning("render part %d (blocks %d-%d) was killed (%s) — running it once more in a fresh "
+                               "process; its saved blocks are kept", k, start, end, one_line(e.detail)[:200])
+    render = run("render", job_path, "assembly")
+    return {**render, "wall_seconds": round(clock() - t0, 1)}
+
+
 def report_failure(client: api.NarratorClient, job_id: str, code: str, detail: str) -> None:
     code, detail = fail_code(code), one_line(detail)
     logger.error("narration FAILED job=%s code=%s: %s", job_id, code, detail)
@@ -371,8 +420,12 @@ def process(client: api.NarratorClient, job: Job, workdir: Path, *, threads: int
         job_path.write_text(json.dumps(child_job(job, workdir, threads), ensure_ascii=False), encoding="utf-8")
         logger.info("rendering job=%s round=%s engine=%s blocks=%d words=%d threads=%d", job.id, job.round,
                     job.engine, len(job.blocks), sum(len(b["text"].split()) for b in job.blocks), threads)
-        render = runner("render", job_path, workdir, timeout=render_timeout(job.engine, env), threads=threads,
-                        heartbeat=hb)
+        if job.engine == "chatterbox":
+            render = render_in_parts(runner, job, job_path, workdir, threads=threads,
+                                     budget=render_timeout(job.engine, env), heartbeat=hb)
+        else:
+            render = runner("render", job_path, workdir, timeout=render_timeout(job.engine, env), threads=threads,
+                            heartbeat=hb)
         aligned = None
         if job.engine == "chatterbox":
             hb.maybe()

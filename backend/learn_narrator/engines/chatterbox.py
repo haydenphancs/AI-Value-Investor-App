@@ -32,6 +32,14 @@ catalog's longest block, 93 words, fits — but not a block dense with figures: 
 Words are SPOKEN words (`timings.spoken_word_count`): counting whitespace tokens would fail an honest
 figure-dense block for being slow.
 
+Rendered in PARTS (`render_part`, RENDER_PART_BLOCKS blocks per child process; main.py runs them,
+then the assembling `render` child, which loads no model when every block is saved). The first live
+render (2026-10-24, 3M, 75 blocks on Railway's 4 vCPU / 8 GB) grew block by block in ONE process and
+was SIGKILLed at the memory limit after ~30 blocks. A fresh process per part bounds that growth
+whatever its cause. Each finished block is saved at once (`save_block`, under PARTS_DIR) and reused
+by any later child of the same job, and every block keeps its own seed (SEED + i), so the audio is
+the one a single process would make.
+
 Assembly (`assemble_plan`, as the script): native wpm over the blocks' whitespace words and raw
 speech samples → atempo = TARGET_WPM / native (clamped 0.5–2.0); pauses (BLOCK_PAUSE between blocks,
 SENT_PAUSE inside a split block) inserted BEFORE the tempo pass, so they land at their length after
@@ -41,9 +49,12 @@ it; then ffmpeg atempo + AAC 96k, plus `+faststart` so iOS can start playback be
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import subprocess
+import sys
 import time
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
@@ -94,6 +105,13 @@ SPLIT_ESTIMATE_SECONDS = 38.0
 NATURAL_WPS = 3.0
 ATEMPO_RANGE: Tuple[float, float] = (0.5, 2.0)
 ENCODE_TIMEOUT_SECONDS = 600
+#: Blocks per `render_part` child (see the module docstring). Measured on Railway 2026-10-24: the
+#: loaded model holds ~4.5 GB, then each block adds ~120-170 MB that is never given back (8 GB was
+#: reached ~30 blocks in). 10 blocks → a peak near 6.2 GB under the 8 GB limit; each extra child
+#: reloads the model (~1-2 min). Each part logs its peak ("peak N MB") to check that margin.
+RENDER_PART_BLOCKS = 10
+#: Where `save_block` keeps each finished block, under the job's out_dir.
+PARTS_DIR = "parts"
 
 #: What a job's frozen voice may ask for. The reference is the one clip baked into the image.
 EXAG_RANGE: Tuple[float, float] = (0.25, 2.0)
@@ -294,10 +312,12 @@ def _render_call(i: int, text: str, seed: int, synth: Callable[[str, int], Tuple
 
 def render_blocks(blocks: Sequence[Mapping[str, Any]], synth: Callable[[str, int], Tuple[Any, int]], *,
                   seed: int = SEED, gate: Callable[[int, float], Optional[str]] = block_gate, sr: int = SR,
-                  split: bool = True, progress: Callable[[str], None] = lambda s: None) -> List[BlockRender]:
+                  split: bool = True, progress: Callable[[str], None] = lambda s: None,
+                  on_block: Callable[["BlockRender"], None] = lambda b: None) -> List[BlockRender]:
     """Render every block through `synth(text, seed) -> (audio, samples)`, gating each call (see
     the module docstring). Pure orchestration — the torch calls live in `synth` — so the gate, the
-    split and the seeds are tested without a model. Kokoro passes its own `gate` and `split=False`."""
+    split and the seeds are tested without a model. Kokoro passes its own `gate` and `split=False`.
+    `on_block` gets each block as soon as it is rendered (the parts save it there)."""
     out: List[BlockRender] = []
     t0 = time.monotonic()
     for n, block in enumerate(blocks):
@@ -307,6 +327,7 @@ def render_blocks(blocks: Sequence[Mapping[str, Any]], synth: Callable[[str, int
         for k, part in enumerate(call_groups(text) if split else [text]):
             calls += _render_call(i, part, seed + i + CALL_SEED_STRIDE * k, synth, gate, sr, split, progress)
         b = BlockRender(i=i, words=len(text.split()), calls=calls, sr=sr)
+        on_block(b)
         out.append(b)
         progress(f"block {n + 1}/{len(blocks)} i={i} {b.samples / sr:.1f}s raw in {len(calls)} call(s) "
                  f"({b.spoken_words / max(b.samples / sr, 1e-9):.2f} w/s){' re-rendered' if b.rerendered else ''} "
@@ -401,12 +422,72 @@ def block_record(b: BlockRender, offset: int, length: int, sr: int = SR) -> Dict
 # ── the render (child process only) ──────────────────────────────────────────
 
 
-def render(job: Mapping[str, Any], out_dir: Path, *, threads: int,
-           progress: Callable[[str], None] = print) -> Dict[str, Any]:
-    """Render, gate, assemble and encode the job's blocks; write narration.m4a. Returns the
-    render.json body (per block: raw offset/length, words/s, its calls, leading silence)."""
+def _text_sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def part_path(out_dir: Path, i: int) -> Path:
+    return Path(out_dir) / PARTS_DIR / f"block-{int(i):04d}.npz"
+
+
+def save_block(out_dir: Path, b: BlockRender, text: str, emotion: float) -> Path:
+    """Write one finished block (its calls' audio and what it was rendered from) atomically, so a
+    child killed mid-write leaves no half file a later child would read."""
     import numpy as np
-    import soundfile as sf
+
+    path = part_path(out_dir, b.i)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    meta = {"i": b.i, "words": b.words, "sr": b.sr, "text_sha256": _text_sha(text), "emotion_adv": emotion,
+            "pipeline": PIPELINE_VERSION,
+            "calls": [{"text": c.text, "seed": c.seed, "samples": c.samples, "spoken_words": c.spoken_words,
+                       "rerendered": c.rerendered, "first_reason": c.first_reason} for c in b.calls]}
+    arrays = {f"audio_{k}": np.asarray(c.audio, dtype=np.float32).reshape(-1) for k, c in enumerate(b.calls)}
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("wb") as f:
+        np.savez(f, meta=np.frombuffer(json.dumps(meta).encode("utf-8"), dtype=np.uint8), **arrays)
+    tmp.replace(path)
+    return path
+
+
+def load_block(out_dir: Path, block: Mapping[str, Any]) -> Optional[Tuple[BlockRender, float]]:
+    """The saved render of `block` and the emotion it was rendered at, or None when there is none or
+    it cannot be trusted: unreadable, another text, another pipeline, or audio of the wrong length
+    (WARNING) — the block is then rendered again, never stitched in."""
+    import numpy as np
+
+    i = int(block["i"])
+    path = part_path(out_dir, i)
+    if not path.is_file():
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as z:
+            meta = json.loads(bytes(z["meta"]).decode("utf-8"))
+            calls = [Call(text=str(c["text"]), seed=int(c["seed"]), samples=int(c["samples"]),
+                          spoken_words=int(c["spoken_words"]), rerendered=bool(c["rerendered"]),
+                          first_reason=c.get("first_reason"), audio=np.array(z[f"audio_{k}"], dtype=np.float32))
+                     for k, c in enumerate(meta["calls"])]
+        problem = None
+        if meta.get("pipeline") != PIPELINE_VERSION:
+            problem = f"pipeline {meta.get('pipeline')!r}"
+        elif meta.get("text_sha256") != _text_sha(str(block["text"])) or int(meta.get("i", -1)) != i:
+            problem = "another text"
+        elif not calls or any(c.samples != int(c.audio.shape[0]) for c in calls):
+            problem = "audio of the wrong length"
+        if problem is not None:
+            logger.warning("saved block %d is not usable (%s) — rendering it again", i, problem)
+            return None
+        return BlockRender(i=i, words=int(meta["words"]), calls=calls, sr=int(meta["sr"])), float(meta["emotion_adv"])
+    except (OSError, ValueError, KeyError, TypeError, EOFError, zipfile.BadZipFile) as e:
+        logger.warning("saved block %d is unreadable (%s: %s) — rendering it again", i, type(e).__name__, e)
+        return None
+
+
+def load_voice_model(job: Mapping[str, Any], *, threads: int,
+                     progress: Callable[[str], None] = print) -> Tuple[Callable[[str, int], Tuple[Any, int]], float]:
+    """Load Chatterbox with the job's frozen voice; return `synth(text, seed) -> (audio, samples)`
+    and the prepared emotion. Asserts the prepared `conds.t3.emotion_adv` IS the job's exaggeration
+    before any block is rendered."""
+    import numpy as np
     import torch
     from chatterbox.tts import ChatterboxTTS
 
@@ -429,9 +510,82 @@ def render(job: Mapping[str, Any], out_dir: Path, *, threads: int,
         audio = wav.detach().cpu().numpy().astype(np.float32).reshape(-1)
         return audio, int(audio.shape[0])
 
+    return synth, emotion
+
+
+def part_range(job: Mapping[str, Any]) -> Tuple[int, int]:
+    """The [start, end) slice of the job's blocks a `render_part` child renders."""
+    n = len(job["blocks"])
+    raw = job.get("part")
+    if not (isinstance(raw, (list, tuple)) and len(raw) == 2
+            and all(isinstance(x, int) and not isinstance(x, bool) for x in raw)
+            and 0 <= raw[0] < raw[1] <= n):
+        raise ValueError(f"render_part needs part=[start, end) inside 0..{n}, got {raw!r}")
+    return int(raw[0]), int(raw[1])
+
+
+def render_saved(job: Mapping[str, Any], out_dir: Path, blocks: Sequence[Mapping[str, Any]], *, threads: int,
+                 progress: Callable[[str], None] = print,
+                 load_model: Optional[Callable[..., Tuple[Callable[[str, int], Tuple[Any, int]], float]]] = None
+                 ) -> Tuple[List[BlockRender], List[float], int]:
+    """`blocks` rendered, in order: each one from its saved part when there is one, the rest rendered
+    now (the model is loaded only if any is missing; `load_model` defaults to `load_voice_model`)
+    and saved as each finishes. Returns the renders, every block's emotion, and how many were
+    rendered now."""
+    saved = {int(b["i"]): load_block(out_dir, b) for b in blocks}
+    todo = [b for b in blocks if saved[int(b["i"])] is None]
+    if todo:
+        synth, emotion = (load_model or load_voice_model)(job, threads=threads, progress=progress)
+        texts = {int(b["i"]): str(b["text"]) for b in todo}
+        fresh = render_blocks(todo, synth, seed=int(job.get("seed") or SEED), progress=progress,
+                              on_block=lambda b: save_block(out_dir, b, texts[b.i], emotion))
+        for b in fresh:
+            saved[b.i] = (b, emotion)
+    pairs = [saved[int(b["i"])] for b in blocks]
+    return [p[0] for p in pairs], [p[1] for p in pairs], len(todo)
+
+
+def render_part(job: Mapping[str, Any], out_dir: Path, *, threads: int,
+                progress: Callable[[str], None] = print) -> Dict[str, Any]:
+    """Render (and save) the job's blocks [start, end) — one bounded slice per child process."""
+    start, end = part_range(job)
+    t0 = time.monotonic()
+    rendered, _, fresh = render_saved(job, out_dir, list(job["blocks"])[start:end], threads=threads,
+                                      progress=progress)
+    peak = peak_rss_mb()
+    progress(f"part {start}-{end}: {fresh} rendered, {len(rendered) - fresh} already saved, peak {peak} MB")
+    return {"engine": "chatterbox", "pipeline": PIPELINE_VERSION, "part": [start, end], "rendered": fresh,
+            "reused": len(rendered) - fresh, "peak_rss_mb": peak, "wall_seconds": round(time.monotonic() - t0, 1)}
+
+
+def peak_rss_mb() -> Optional[int]:
+    """This process's peak resident memory in MB (Linux reports KB, macOS bytes), or None: logged per
+    part so the margin under the container's limit is visible, not guessed."""
+    try:
+        import resource
+        raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    except (ImportError, OSError, ValueError):
+        return None
+    return int(raw / (1024 * 1024 if sys.platform == "darwin" else 1024))
+
+
+def render(job: Mapping[str, Any], out_dir: Path, *, threads: int,
+           progress: Callable[[str], None] = print) -> Dict[str, Any]:
+    """Assemble and encode the job's blocks into narration.m4a (rendering any block no part saved).
+    Returns the render.json body (per block: raw offset/length, words/s, its calls, leading silence)."""
+    import numpy as np
+    import soundfile as sf
+
+    voice = voice_params(job.get("voice") or {})
+    t0 = time.monotonic()
     t_render = time.monotonic()
-    rendered = render_blocks(job["blocks"], synth, seed=int(job.get("seed") or SEED), progress=progress)
+    rendered, emotions, _fresh = render_saved(job, out_dir, list(job["blocks"]), threads=threads, progress=progress)
     render_seconds = time.monotonic() - t_render
+    if any(abs(e - voice.exaggeration) > 1e-6 for e in emotions):
+        raise VoiceUnsupported(f"a block was rendered at emotion_adv {sorted(set(emotions))}, the job asks "
+                               f"{voice.exaggeration}")
+    emotion = emotions[0] if emotions else voice.exaggeration
+
     plan = assemble_plan([[c.samples for c in b.calls] for b in rendered], [b.words for b in rendered],
                          target_wpm=voice.target_wpm)
     block_pause = np.zeros(plan.pause_samples, dtype=np.float32)

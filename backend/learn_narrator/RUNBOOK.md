@@ -148,7 +148,24 @@ Failure codes the worker reports (`/fail`): `block_gate` (a block truncated at C
 or outside the words/s band twice), `timings_invalid` (the read-along table would be refused),
 `voice_out_of_band` (the file is not the expected voice), `weights_missing`, `voice_unsupported`,
 `engine_unsupported`, `job_invalid`, `render_timeout` / `render_oom` / `render_failed`,
+`render_part_oom` / `render_part_failed` (Chatterbox, below),
 `align_timeout` / `align_oom` / `align_failed`, `encode_failed`, `upload_failed` (Storage refused
 the PUT), `request_refused` (a 422),
 `api_error`, `worker_error` (a bug — the log has the traceback). The server counts worker
 failures (≤ 2 per job, then the round fails and alerts) — the worker keeps no count.
+
+### Chatterbox renders in parts (2026-10-24)
+
+The first live render (3M, 75 blocks, 1,697 words) ran in ONE child on 4 vCPU / 8 GB: memory sat
+at the limit and the kernel killed the child (`render_oom`, exit -9) after 3,589 s, about 30 blocks
+in. A second attempt showed why: the loaded model holds ~4.5 GB, then memory climbs ~120-170 MB
+with every block and is never given back. So the worker now renders Chatterbox jobs in parts: one
+`render_part` child per `RENDER_PART_BLOCKS` (10) blocks, each saving its blocks under `parts/` as they finish, then the
+`render` child, which assembles the saved blocks without loading the model. A part killed by the
+limit (`render_part_oom`) runs once more in a fresh process and resumes after its last saved block;
+a second kill, or any other failure, ends the job with that part's code. Every block keeps its own
+seed, so the audio is the one a single process would make. All parts share the one render budget
+(`LEARN_NARRATOR_RENDER_TIMEOUT_MINUTES`, default 4 h): the budget running out, in any child, is
+`render_timeout`. Each part reloads the model (~1–2 min) and logs its peak memory ("render part k …
+peak N MB"), so the margin under the limit is in the log. The bench (§3) renders the same way and
+refuses an `--out` that already holds `parts/` from an earlier run (it would reuse them unrendered).

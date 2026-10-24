@@ -338,10 +338,327 @@ def test_a_missing_voice_key_takes_the_catalog_value(caplog):
 
 def test_render_asserts_the_prepared_emotion_and_seeds_each_block():
     src = (PKG / "engines" / "chatterbox.py").read_text()
-    render = ast.unparse(_top(_tree(PKG / "engines" / "chatterbox.py"), "render"))
-    assert "model.conds.t3.emotion_adv" in render and "VoiceUnsupported" in render
-    assert "torch.manual_seed(seed)" in render
+    loader = ast.unparse(_top(_tree(PKG / "engines" / "chatterbox.py"), "load_voice_model"))
+    assert "model.conds.t3.emotion_adv" in loader and "VoiceUnsupported" in loader
+    assert "torch.manual_seed(seed)" in loader
     assert 'from_pretrained(device="cpu")' in src.replace("'", '"')
+    # The assembling child re-checks every saved block's emotion against the job's.
+    render = ast.unparse(_top(_tree(PKG / "engines" / "chatterbox.py"), "render"))
+    assert "emotions" in render and "VoiceUnsupported" in render
+
+
+# ══ 2b. rendering in parts (the 2026-10-24 memory kill) ══════════════════════════
+
+
+def _pt_blocks(n: int) -> List[Dict[str, Any]]:
+    return [{"i": i, "text": f"Block {i} says something plain about tape and filters.", "role": "body"}
+            for i in range(n)]
+
+
+def _pt_synth(calls: List[Any]):
+    """Deterministic in (text, seed) — like a seeded model — and records every call."""
+    import numpy as np
+
+    def synth(text, seed):
+        calls.append((text, seed))
+        n = int(cb.SR * 0.45 * len(text.split()))
+        rng = np.random.default_rng(seed)
+        return rng.standard_normal(n).astype(np.float32) * 0.1, n
+    return synth
+
+
+def _pt_loader(calls: List[Any], loads: List[int], emotion: float = cb.EXAG, fail_at: Optional[int] = None):
+    def load(job, *, threads, progress=print):
+        loads.append(1)
+        inner = _pt_synth(calls)
+
+        def synth(text, seed):
+            if fail_at is not None and len(calls) >= fail_at:
+                raise MemoryError("killed")
+            return inner(text, seed)
+        return synth, emotion
+    return load
+
+
+def _pt_job(n: int) -> Dict[str, Any]:
+    return {"engine": "chatterbox", "voice": {}, "blocks": _pt_blocks(n), "seed": cb.SEED}
+
+
+def test_a_saved_block_round_trips(tmp_path):
+    import numpy as np
+    calls: List[Any] = []
+    b = cb.render_blocks(_pt_blocks(1), _pt_synth(calls))[0]
+    cb.save_block(tmp_path, b, _pt_blocks(1)[0]["text"], cb.EXAG)
+    got, emotion = cb.load_block(tmp_path, _pt_blocks(1)[0])
+    assert emotion == cb.EXAG and (got.i, got.words, got.sr) == (b.i, b.words, b.sr)
+    assert [(c.text, c.seed, c.samples, c.spoken_words, c.rerendered, c.first_reason) for c in got.calls] == \
+        [(c.text, c.seed, c.samples, c.spoken_words, c.rerendered, c.first_reason) for c in b.calls]
+    assert all(np.array_equal(x.audio, y.audio) for x, y in zip(got.calls, b.calls))
+    assert not list(tmp_path.rglob("*.tmp"))                    # written atomically
+
+
+@pytest.mark.parametrize("spoil", ["text", "pipeline", "length", "corrupt", "truncated", "missing"])
+def test_a_saved_block_that_cannot_be_trusted_is_rendered_again(tmp_path, monkeypatch, spoil, caplog):
+    import numpy as np
+    block = _pt_blocks(1)[0]
+    b = cb.render_blocks([block], _pt_synth([]))[0]
+    cb.save_block(tmp_path, b, block["text"], cb.EXAG)
+    path = cb.part_path(tmp_path, 0)
+    if spoil == "text":
+        block = {**block, "text": "Another sentence entirely."}
+    elif spoil == "pipeline":
+        monkeypatch.setattr(cb, "PIPELINE_VERSION", "chatterbox-0.1.7/block/aac96k/v2")
+    elif spoil == "length":
+        b.calls[0].samples += 1
+        cb.save_block(tmp_path, b, block["text"], cb.EXAG)
+    elif spoil == "corrupt":
+        path.write_bytes(b"not an npz")
+    elif spoil == "truncated":                  # a zip cut short: zipfile.BadZipFile, not OSError
+        path.write_bytes(path.read_bytes()[: path.stat().st_size // 2])
+    else:
+        path.unlink()
+    assert cb.load_block(tmp_path, block) is None
+    if spoil != "missing":
+        assert f"saved block 0" in caplog.text
+
+
+def test_parts_make_the_same_audio_as_one_pass(tmp_path):
+    """Every block keeps its own seed, so rendering in slices (one model load each) gives the
+    renders one process would: the same calls, seeds and samples, block for block."""
+    import numpy as np
+    job = _pt_job(7)
+    one_calls: List[Any] = []
+    one = cb.render_blocks(job["blocks"], _pt_synth(one_calls), seed=cb.SEED)
+    calls: List[Any] = []
+    loads: List[int] = []
+    for start, end in ((0, 3), (3, 6), (6, 7)):
+        cb.render_saved(job, tmp_path, job["blocks"][start:end], threads=1, load_model=_pt_loader(calls, loads))
+    assert len(loads) == 3 and calls == one_calls
+    asm_loads: List[int] = []
+    rendered, emotions, fresh = cb.render_saved(job, tmp_path, job["blocks"], threads=1,
+                                                load_model=_pt_loader([], asm_loads))
+    assert fresh == 0 and asm_loads == [] and emotions == [cb.EXAG] * 7  # assembly loads no model
+    for a, b in zip(rendered, one):
+        assert [c.seed for c in a.calls] == [c.seed for c in b.calls]
+        assert all(np.array_equal(x.audio, y.audio) for x, y in zip(a.calls, b.calls))
+
+
+def test_a_killed_part_keeps_its_finished_blocks_and_resumes_after_them(tmp_path):
+    job = _pt_job(5)
+    calls: List[Any] = []
+    with pytest.raises(MemoryError):
+        cb.render_saved(job, tmp_path, job["blocks"], threads=1, load_model=_pt_loader(calls, [], fail_at=3))
+    assert sorted(p.name for p in (tmp_path / cb.PARTS_DIR).glob("*.npz")) == \
+        ["block-0000.npz", "block-0001.npz", "block-0002.npz"]
+    again: List[Any] = []
+    rendered, _, fresh = cb.render_saved(job, tmp_path, job["blocks"], threads=1, load_model=_pt_loader(again, []))
+    assert fresh == 2 and [t for t, _ in again] == [b["text"] for b in job["blocks"][3:]]
+    assert [b.i for b in rendered] == [0, 1, 2, 3, 4]
+
+
+def test_a_saved_block_at_another_emotion_is_refused_at_assembly(tmp_path, monkeypatch):
+    job = _pt_job(2)
+    cb.render_saved(job, tmp_path, job["blocks"][:1], threads=1, load_model=_pt_loader([], [], emotion=0.5))
+    monkeypatch.setattr(cb, "load_voice_model", _pt_loader([], []))
+    monkeypatch.setitem(sys.modules, "soundfile", type(sys)("soundfile"))
+    with pytest.raises(cb.VoiceUnsupported, match="emotion_adv"):
+        cb.render(job, tmp_path, threads=1)
+
+
+@pytest.mark.parametrize("part", [None, [0], [0, 0], [2, 1], [0, 9], [-1, 2], [True, 2], ["0", "2"]])
+def test_a_part_must_be_a_slice_of_the_pt_blocks(part):
+    with pytest.raises(ValueError):
+        cb.part_range({**_pt_job(4), "part": part})
+    assert cb.part_range({**_pt_job(4), "part": [1, 4]}) == (1, 4)
+
+
+def _pt_runner(seen: List[Any], *, oom: Optional[Dict[int, int]] = None, fail: Optional[Dict[int, str]] = None):
+    """A fake `runtime.run_child` for render_in_parts: part k is killed `oom[k]` times, or fails with
+    `fail[k]`; the assembly returns a render body."""
+    oom, fail = dict(oom or {}), dict(fail or {})
+
+    def runner(mode, job_path, out_dir, *, timeout, threads, heartbeat):
+        body = json.loads(job_path.read_text())
+        seen.append((mode, body.get("part"), timeout))
+        if mode == "render_part":
+            k = int(job_path.stem.rsplit("-", 1)[1])
+            if oom.get(k):
+                oom[k] -= 1
+                raise runtime.ChildFailed("render_part_oom", "render_part child killed (exit -9)")
+            if k in fail:
+                raise runtime.ChildFailed(fail[k], "boom")
+            return {"part": body["part"]}
+        return {"audio": "narration.m4a", "wall_seconds": 1.0}
+    return runner
+
+
+def _pt_parts(tmp_path, n_blocks, runner, budget=3600.0, clock=None):
+    job = m.Job(id="j", round=1, engine="chatterbox", voice={}, pipeline_version="learn-narration/v1", attempts=1,
+                claim_nonce="n", blocks=_pt_blocks(n_blocks))
+    job_path = tmp_path / "job.json"
+    job_path.write_text(json.dumps({"engine": "chatterbox", "blocks": _pt_blocks(n_blocks), "out_dir": str(tmp_path)}))
+    return m.render_in_parts(runner, job, job_path, tmp_path, threads=2, budget=budget, heartbeat=lambda: None,
+                             **({"clock": clock} if clock else {}))
+
+
+def test_the_parts_cover_every_block_once_then_assemble(tmp_path):
+    seen: List[Any] = []
+    out = _pt_parts(tmp_path, 75, _pt_runner(seen))
+    parts = [p for mode, p, _ in seen if mode == "render_part"]
+    assert parts[0][0] == 0 and parts[-1][1] == 75 and len(parts) == -(-75 // cb.RENDER_PART_BLOCKS)
+    assert all(b - a <= cb.RENDER_PART_BLOCKS for a, b in parts)
+    assert all(parts[k][1] == parts[k + 1][0] for k in range(len(parts) - 1))
+    assert [mode for mode, _, _ in seen][-1] == "render" and seen[-1][1] is None
+    assert "wall_seconds" in out and out["audio"] == "narration.m4a"
+
+
+def test_a_killed_part_runs_once_more_then_the_job_goes_on(tmp_path, caplog):
+    seen: List[Any] = []
+    _pt_parts(tmp_path, 30, _pt_runner(seen, oom={1: 1}))
+    modes = [(mode, tuple(p) if p else None) for mode, p, _ in seen]
+    n = cb.RENDER_PART_BLOCKS
+    assert modes == [("render_part", (0, n)), ("render_part", (n, 2 * n)), ("render_part", (n, 2 * n)),
+                     ("render_part", (2 * n, 30)), ("render", None)]
+    assert "running it once more" in caplog.text
+
+
+def test_a_part_killed_twice_ends_the_job_with_its_code(tmp_path):
+    seen: List[Any] = []
+    with pytest.raises(runtime.ChildFailed) as e:
+        _pt_parts(tmp_path, 30, _pt_runner(seen, oom={0: 2}))
+    assert e.value.code == "render_part_oom" and len(seen) == 2
+
+
+def test_any_other_part_failure_is_not_retried(tmp_path):
+    seen: List[Any] = []
+    with pytest.raises(runtime.ChildFailed) as e:
+        _pt_parts(tmp_path, 30, _pt_runner(seen, fail={0: "block_gate"}))
+    assert e.value.code == "block_gate" and len(seen) == 1
+
+
+def test_every_part_shares_one_budget(tmp_path):
+    now = [0.0]
+
+    def clock():
+        return now[0]
+    seen: List[Any] = []
+    inner = _pt_runner(seen)
+
+    def slow(mode, job_path, out_dir, *, timeout, threads, heartbeat):
+        out = inner(mode, job_path, out_dir, timeout=timeout, threads=threads, heartbeat=heartbeat)
+        now[0] += 1000.0
+        return out
+    with pytest.raises(runtime.ChildFailed) as e:
+        _pt_parts(tmp_path, 75, slow, budget=3500.0, clock=clock)
+    assert e.value.code == "render_timeout"
+    assert [t for _, _, t in seen] == [3500.0, 2500.0, 1500.0, 500.0]
+
+
+def _pt_part_job(tmp_path, n: int, part) -> Path:
+    job_path = tmp_path / "job.part-01.json"
+    job_path.write_text(json.dumps({**_pt_job(n), "part": part, "out_dir": str(tmp_path), "threads": 1}))
+    return job_path
+
+
+def test_the_render_part_child_renders_exactly_its_slice(tmp_path, monkeypatch):
+    """Review: nothing ran the real render_part, so slicing [start:] or dispatching to `render`
+    (one process again — the 8 GB kill) passed every test."""
+    from learn_narrator import child
+    calls: List[Any] = []
+    loads: List[int] = []
+    monkeypatch.setattr(cb, "load_voice_model", _pt_loader(calls, loads))
+    job_path = _pt_part_job(tmp_path, 30, [12, 24])
+    out = child.run("render_part", job_path)
+    blocks = json.loads(job_path.read_text())["blocks"]
+    assert [t for t, _ in calls] == [b["text"] for b in blocks[12:24]]
+    assert sorted(p.name for p in (tmp_path / cb.PARTS_DIR).glob("*.npz")) == \
+        [f"block-{i:04d}.npz" for i in range(12, 24)]
+    assert out["part"] == [12, 24] and (out["rendered"], out["reused"]) == (12, 0)
+    assert isinstance(out["peak_rss_mb"], int) and out["peak_rss_mb"] > 0
+    assert not (tmp_path / "narration.m4a").exists()
+    again = child.run("render_part", job_path)                  # a retried part resumes: nothing left
+    assert (again["rendered"], again["reused"]) == (0, 12) and len(loads) == 1
+
+
+def test_a_memory_error_in_a_part_is_that_parts_oom(tmp_path, monkeypatch):
+    """Review: `_classify` named every MemoryError `render_oom`, a code render_in_parts never retries."""
+    from learn_narrator import child
+
+    def boom(job, *, threads, progress=print):
+        raise MemoryError("std::bad_alloc")
+    monkeypatch.setattr(cb, "load_voice_model", boom)
+    job_path = _pt_part_job(tmp_path, 2, [0, 2])
+    assert child.main(["child", "render_part", str(job_path)]) == runtime.CHILD_TYPED_FAILURE
+    assert json.loads((tmp_path / "error.json").read_text())["code"] == "render_part_oom"
+
+    class OutOfMemoryError(RuntimeError):          # torch's CPU allocator error, matched by name
+        pass
+    assert child._classify(OutOfMemoryError("DefaultCPUAllocator"), "render_part")["code"] == "render_part_oom"
+    assert child._classify(MemoryError(), "render")["code"] == "render_oom"
+    assert child._classify(MemoryError(), "align")["code"] == "align_oom"
+
+
+@pytest.mark.parametrize("mode_failing", ["render_part", "render"])
+def test_the_budget_running_out_inside_a_child_is_always_render_timeout(tmp_path, mode_failing):
+    seen: List[Any] = []
+    inner = _pt_runner(seen)
+
+    def runner(mode, job_path, out_dir, *, timeout, threads, heartbeat):
+        if mode == mode_failing:
+            raise runtime.ChildFailed(f"{mode}_timeout", f"{mode} ran over 60 min; last: Sampling")
+        return inner(mode, job_path, out_dir, timeout=timeout, threads=threads, heartbeat=heartbeat)
+    with pytest.raises(runtime.ChildFailed) as e:
+        _pt_parts(tmp_path, 20, runner)
+    assert e.value.code == "render_timeout" and "budget" in e.value.detail
+    assert (f"blocks 0-{cb.RENDER_PART_BLOCKS}" if mode_failing == "render_part" else "assembly") in e.value.detail
+
+
+class _BenchRendered(Exception):
+    pass
+
+
+def _bench_args(out: Path, engine: str = "chatterbox"):
+    return bench.parse_args(["--out", str(out), "--no-ab-kit", "--engine", engine, "--threads", "1"])
+
+
+def test_the_bench_renders_chatterbox_the_workers_way(tmp_path, monkeypatch):
+    """Review: the Phase-0 bench still rendered in ONE child — the setup the 8 GB limit killed."""
+    monkeypatch.setattr(bench, "TMP_ROOT", tmp_path)
+    monkeypatch.setattr(m, "check_voice", lambda job, env: None)
+    seen: Dict[str, Any] = {}
+
+    def parts(runner, job, job_path, out_dir, **kw):
+        seen.update(kw, blocks=len(job.blocks))
+        raise _BenchRendered()
+    monkeypatch.setattr(m, "render_in_parts", parts)
+    with pytest.raises(_BenchRendered):
+        bench.run(_bench_args(tmp_path / "run1"), env={})
+    assert seen["budget"] == bench.RENDER_TIMEOUT_SECONDS and seen["blocks"] > cb.RENDER_PART_BLOCKS
+
+    def single(mode, *a, **k):                       # Kokoro keeps its one render child
+        raise _BenchRendered(mode)
+    with pytest.raises(_BenchRendered, match="render"):
+        bench.run(_bench_args(tmp_path / "run2", "kokoro"), env={}, runner=single)
+
+
+def test_the_bench_refuses_a_folder_holding_an_earlier_runs_blocks(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(bench, "TMP_ROOT", tmp_path)
+    monkeypatch.setattr(m, "check_voice", lambda job, env: None)
+    monkeypatch.setattr(m, "render_in_parts", lambda *a, **k: (_ for _ in ()).throw(_BenchRendered()))
+    (tmp_path / "run1" / cb.PARTS_DIR).mkdir(parents=True)
+    (tmp_path / "run1" / cb.PARTS_DIR / "block-0000.npz").write_bytes(b"x")
+    assert bench.run(_bench_args(tmp_path / "run1"), env={}) == 2
+    assert "earlier run" in capsys.readouterr().err
+
+
+def test_the_child_runs_render_part_for_chatterbox_only(tmp_path):
+    from learn_narrator import child
+    job_path = tmp_path / "job.json"
+    job_path.write_text(json.dumps({**_pt_job(2), "engine": "kokoro", "part": [0, 2], "out_dir": str(tmp_path)}))
+    with pytest.raises(runtime.ChildFailed, match="Chatterbox-only"):
+        child.run("render_part", job_path)
+    src = (PKG / "child.py").read_text()
+    assert '"render_part"' in src.split("def main")[1]
 
 
 # ══ 3. the per-block gate ════════════════════════════════════════════════════
@@ -1505,7 +1822,7 @@ def test_a_good_tick_uploads_and_completes(tmp_path, monkeypatch):
     code, fake, seen = _tick(tmp_path, monkeypatch, _raw_job())
     assert code == 0
     assert fake.names()[:2] == ["claim", "hold"] and fake.calls[1][1:] == (2, "0123456789abcdef")
-    assert seen["modes"] == ["render", "align"]
+    assert seen["modes"] == ["render_part", "render", "align"]      # 4 blocks: one part
     assert "fail" not in fake.names() and fake.names()[-1] == "close"
     assert seen["child_job"]["seed"] == cb.SEED and seen["child_job"]["engine"] == "chatterbox"
     put = next(c for c in fake.calls if c[0] == "put")

@@ -201,7 +201,19 @@ def run(args: argparse.Namespace, *, env: Mapping[str, str],
     print(f"bench: engine={job.engine} blocks={len(job.blocks)} words={fixture['words']} threads={threads} out={out_dir}",
           flush=True)
     t0 = clock()
-    render = runner("render", job_path, out_dir, timeout=RENDER_TIMEOUT_SECONDS, threads=threads, heartbeat=None)
+    if job.engine == "chatterbox":
+        # The worker's own path (main.render_in_parts): a single-process render is what the 8 GB limit
+        # killed on 2026-10-24, so the bench must measure the parts. Blocks saved by an earlier run
+        # would be reused without being rendered — a run into such a folder is refused.
+        if any((out_dir / cb.PARTS_DIR).glob("*.npz")):
+            print(f"refused: {out_dir / cb.PARTS_DIR} holds blocks from an earlier run — use a new --out",
+                  file=sys.stderr)
+            return 2
+        render = m.render_in_parts(runner, job, job_path, out_dir, threads=threads, budget=RENDER_TIMEOUT_SECONDS,
+                                   heartbeat=None, clock=clock)
+    else:
+        render = runner("render", job_path, out_dir, timeout=RENDER_TIMEOUT_SECONDS, threads=threads,
+                        heartbeat=None)
     render_s = clock() - t0
     aligned = None
     if job.engine == "chatterbox":

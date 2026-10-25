@@ -6277,6 +6277,11 @@ the plan is `~/.claude/plans/improve-or-add-wiser-snoopy-sun.md`. Everything is 
   quiet-week fallback) rolls tickers up into the Emerging Frontiers themes and sends the top 3 —
   each with up to 3 VERBATIM 8-K peg sentences (code checks every span is a substring of the
   filing) — to the owner's Telegram. The owner taps one; #1 at Friday 07:00 if not.
+  A lone company is a topic only when it has a verified COMPANY entry in the case library,
+  matched by SEC CIK (owner decision 2026-10-24): the 3M week's sheet held 15 filing figures and
+  the writer filled the company's history from memory. The scorer never ranks such a company alone
+  (`primed_tickers`, a required argument), and the build checks again before any SEC read
+  (`build.single_company_problem`): a refused candidate falls through like a thin sheet.
 - **Writer.** Outline → one call per section (each sees only its fact slice) → per-block validators
   → one repair → render → whole-article validation → an in-app judge in SHADOW. Validators are an
   explicit allow-list of compliance codes (the marketing scan alone fails 21 of 23 hand-written

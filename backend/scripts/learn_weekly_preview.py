@@ -103,7 +103,7 @@ async def preview(args: argparse.Namespace, *, gemini: Any = None, sec: Any = No
     """The whole preview. `gemini` / `sec` are injectable for the test."""
     from app.config import settings
     from app.services.learn_weekly import build, contracts as C, signals, sec_facts, topic, writer
-    from app.services.learn_weekly import topic_scorer
+    from app.services.learn_weekly import case_library, topic_scorer
 
     block_database()   # AFTER the imports, so every module-level binding exists to be patched
 
@@ -117,6 +117,10 @@ async def preview(args: argparse.Namespace, *, gemini: Any = None, sec: Any = No
     tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()][:3]
     if not tickers:
         raise SystemExit("--tickers needs at least one ticker")
+    if not args.theme and len(tickers) > 1:
+        # The engine has no multi-company topic: without a theme a topic is ONE company, and the
+        # build checks that company's verified company primer (review 2026-10-24).
+        raise SystemExit("without --theme a topic is one company: pass one ticker, or add --theme")
 
     mapping = await signals.ticker_cik_map(sec=sec)
     subjects = []
@@ -135,6 +139,13 @@ async def preview(args: argparse.Namespace, *, gemini: Any = None, sec: Any = No
         raise SystemExit("no eligible main subject — nothing to write about")
 
     run = topic._Run(period_key=f"preview:{as_of.isoformat()}", llm=gemini, sec=sec)
+    if not args.theme:
+        # A lone company needs its verified company primer (owner rule 2026-10-24). The build would
+        # refuse it, so refuse it here before any 8-K read or model call is spent on it.
+        problem = build.single_company_problem({"kind": "ticker", "key": tickers[0]},
+                                               [s for s, _ in subjects], case_library.get_case_library())
+        if problem is not None:
+            raise SystemExit(f"the build would pass this candidate over: {problem}")
     pegs = await topic._peg_facts(run, subjects, as_of, cand_key="preview")
     if not pegs:
         raise SystemExit(f"no verified peg fact from the week ending {as_of} "
@@ -150,7 +161,12 @@ async def preview(args: argparse.Namespace, *, gemini: Any = None, sec: Any = No
     candidate = {**cand.to_json(), "label": label, "category": category,
                  "subjects": [asdict(s) for s, _ in subjects],
                  "peg_facts": [asdict(f) for f in pegs]}
-    sheet = await build.assemble_fact_sheet(args.kind, candidate)
+    try:
+        sheet = await build.assemble_fact_sheet(args.kind, candidate)
+    except build.FactSheetShortfall as e:
+        # The real build passes such a candidate over (a lone company with no verified company
+        # primer, or a sheet too thin to write from): say so instead of a traceback.
+        raise SystemExit(f"the build would pass this candidate over: {e}") from None
 
     catalog = _bundle_articles()
     outcome = await writer.write_article(

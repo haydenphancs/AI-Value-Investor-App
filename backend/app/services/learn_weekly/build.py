@@ -135,6 +135,14 @@ class FactSheetShortfall(FactSheetUnavailable):
         self.usable = usable
 
 
+class UnprimedCompany(FactSheetShortfall):
+    """A single-company candidate whose company has no verified COMPANY primer (owner decision
+    2026-10-24, `single_company_problem`): passed over exactly like a thin sheet, but named for
+    what it is — no filing was read, so "only 0 usable facts in its filings" would send the owner
+    looking into SEC data that is fine. Its own alert wording and terminal reason
+    (`no_company_primer`)."""
+
+
 class _SECReadRecorder:
     """The SEC client for ONE fact-sheet assembly, recording every read that raised.
 
@@ -320,6 +328,29 @@ def candidate_theme(candidate: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
+def single_company_problem(candidate: Mapping[str, Any], subjects: Sequence[C.Subject],
+                           lib: case_library.CaseLibrary) -> Optional[str]:
+    """Why a single-company candidate may not be written, or None. Owner decision 2026-10-24:
+    "Skip single-company topics that have no verified case-library entry" — a lone company is
+    written only when every main subject has a usable COMPANY primer (`company_primer_ciks`, by
+    CIK). The topic step already ranks only such companies; this repeats the rule where the sheet
+    is built, so a topic stored before the rule, a library entry unverified since, or a rebuild
+    cannot slip past it. Themes are not single-company topics and are never refused here."""
+    if candidate.get("kind") == "theme":
+        return None
+    label = candidate_label(candidate) or _cand_key(candidate)
+    if not subjects:
+        return None                      # no subject at all: the shortfall check below says so
+    primed = lib.company_primer_ciks()
+    # EVERY main subject: a single-company topic has one, and a stored or hand-made one with more
+    # must not slip an unprimed company in behind a primed first subject (review 2026-10-24).
+    missing = [s.name for s in subjects if not (s.cik and s.cik in primed)]
+    if not missing:
+        return None
+    return (f"single-company topic {label!r}: {', '.join(missing)} has no verified company entry "
+            "in the case library (a lone company is written only with its own verified primer)")
+
+
 def candidate_label(candidate: Mapping[str, Any]) -> str:
     for key in ("label", "title", "key"):
         value = candidate.get(key)
@@ -391,10 +422,17 @@ async def assemble_fact_sheet(kind: str, candidate: Mapping[str, Any], *,
     """The capped, cited fact sheet for `candidate` (module docstring). Raises
     `FactSheetUnavailable` when any subject's SEC read fails (a sheet missing the main subject's
     figures is a worse article, not a smaller one), or when fewer than `MIN_SHEET_FACTS` survive
-    while some SEC read failed; `FactSheetShortfall` when fewer survive and every read answered."""
+    while some SEC read failed; `FactSheetShortfall` when fewer survive and every read answered, or
+    — before any read — when a single-company candidate's company has no verified company primer
+    (`single_company_problem`)."""
     subjects = candidate_subjects(candidate)
     peg = candidate_peg_facts(candidate)
     theme = candidate_theme(candidate)
+    lib = library if library is not None else await asyncio.to_thread(case_library.get_case_library)
+    problem = single_company_problem(candidate, subjects, lib)
+    if problem is not None:
+        logger.warning("learn build: %s — passed over like a thin sheet", problem)
+        raise UnprimedCompany(problem, usable=0, stage=STAGE)
     filers = [s for s in subjects if s.cik]
     sec = _SECReadRecorder()
     results = await asyncio.gather(*(_subject_facts(s, sec) for s in filers), return_exceptions=True)
@@ -415,7 +453,6 @@ async def assemble_fact_sheet(kind: str, candidate: Mapping[str, Any], *,
             filed.update((f.accession, f.filing_date) for f in summary.recent_8k)
         xbrl.extend(facts)
     peg = fs.date_peg_facts(peg, filed)
-    lib = library if library is not None else await asyncio.to_thread(case_library.get_case_library)
     entries = _library_entries(lib, theme, [s.cik for s in filers if s.cik])
     library_facts = _library_facts(lib, entries)
     sheet = fs.build_fact_sheet(kind, candidate_label(candidate), theme, subjects, peg, xbrl,
@@ -696,7 +733,9 @@ class _HeldBuild:
                                       f"{problem})")
         idx = topic["chosen_index"]
         candidates = topic["candidates"]
-        why = f"thin_fact_sheet: #{idx + 1} {candidate_label(current)!r}: {shortfall}"
+        unprimed = isinstance(shortfall, UnprimedCompany)
+        reason = "no_company_primer" if unprimed else "thin_fact_sheet"
+        why = f"{reason}: #{idx + 1} {candidate_label(current)!r}: {shortfall}"
         raw_drops = topic.get("build_drops")
         drops = list(raw_drops) if isinstance(raw_drops, list) else []
         drops.append({"index": idx, "key": _cand_key(current), "reason": str(shortfall)[:300]})
@@ -715,7 +754,7 @@ class _HeldBuild:
                        f"moving to #{nxt[0] + 1}" if nxt else "no candidate left")
         if nxt is None:
             return await self.terminal(
-                C.SKIPPED, "thin_fact_sheet", extra={"topic": recorded},
+                C.SKIPPED, reason, extra={"topic": recorded},
                 last_error=f"{why}; no candidate left after #{idx + 1}"[:900])
         cutoff = catch_up_cutoff_for(self.row)
         if cutoff is not None and max(self.now, _utcnow()) >= cutoff:
@@ -733,10 +772,11 @@ class _HeldBuild:
         }
         row = await self.write(self._back_target(why), fields)
         if row is not None:
+            what = ("has no verified company entry in the case library" if unprimed else
+                    f"has only {shortfall.usable} usable facts in its filings (need {MIN_SHEET_FACTS})")
             await _notify(f"🟠 Learn {self.key}: topic #{idx + 1} “{candidate_label(current)[:80]}” "
-                          f"has only {shortfall.usable} usable facts in its filings (need "
-                          f"{MIN_SHEET_FACTS}) — switched to #{j + 1} "
-                          f"“{candidate_label(cand)[:80]}”; it builds on the next tick.")
+                          f"{what} — switched to #{j + 1} “{candidate_label(cand)[:80]}”; it builds "
+                          "on the next tick.")
         return row
 
     async def save_progress(self, sheet_sha: str, review_round: int,
@@ -1145,7 +1185,7 @@ async def build_piece(piece: Mapping[str, Any], *, now: datetime) -> Optional[Di
 
 __all__ = [
     "BUILD_FROM_STATUSES", "FactSheetShortfall", "FactSheetUnavailable", "IN_FLIGHT_STATUSES",
-    "LEASE_SECONDS", "MAX_ENQUEUE_ATTEMPTS", "MIN_SHEET_FACTS", "WAITING_FOR_TOPIC",
+    "LEASE_SECONDS", "MAX_ENQUEUE_ATTEMPTS", "MIN_SHEET_FACTS", "UnprimedCompany", "WAITING_FOR_TOPIC",
     "assemble_fact_sheet", "build_piece", "candidate_label", "candidate_peg_facts",
     "candidate_subjects", "candidate_theme", "catch_up_cutoff_for", "chosen_candidate",
     "enqueue_cutoff_for", "enqueue_narration", "published_date_for", "resume_from", "sheet_sha256",

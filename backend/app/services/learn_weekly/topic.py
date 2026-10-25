@@ -7,7 +7,11 @@ Thu 18:00 ET (`schedule.DeepDiveTimes.topic_at`) the scheduler calls `run_topic_
    next-topic rebuild and is the build step's, never this one's;
 2. ranks the week (`signals` → `topic_scorer.rank_topics(top_n=6)`); a ranking that cannot be
    trusted (> 20% of the universe missing — `ScoringAborted`) falls back to the least-recently-
-   covered ELIGIBLE theme; no eligible theme at all → the piece is `skipped` with a loud alert;
+   covered ELIGIBLE theme; no eligible theme at all → the piece is `skipped` with a loud alert
+   (naming any lone company passed over for lack of a verified entry), or RETRIED when the ranking
+   itself was aborted — an outage never ends the week;
+   A single company is ranked at all only when it has a verified COMPANY primer in the case
+   library (`primed_tickers`; owner decision 2026-10-24) — the build checks it again;
 3. walks the ranked candidates best first until 3 are KEPT. A candidate is kept only with at least
    one verified PEG FACT: up to 3 main subjects (top-scoring members with an SEC CIK, domestic
    filers, outside the 12-week company window), this week's 8-Ks of those subjects, and for each
@@ -52,8 +56,8 @@ Failure split (fail loud and legible):
   stays `planned`, the scheduler's day claim stays open): a read the step depends on failed, or no
   candidate was kept while some SEC / model read had failed — "no peg fact" must not be concluded
   from an outage.
-* TERMINAL (`skipped` + `alerts.notify_terminal`): `SEC_EDGAR_USER_AGENT` unset; no eligible theme;
-  every candidate checked cleanly and none had a verifiable peg fact.
+* TERMINAL (`skipped` + `alerts.notify_terminal`): `SEC_EDGAR_USER_AGENT` unset; no eligible theme
+  after a ranking that ran; every candidate checked cleanly and none had a verifiable peg fact.
 """
 
 from __future__ import annotations
@@ -78,6 +82,7 @@ from app.integrations.sec_edgar import (
     filing_index_url,
     get_sec_edgar_client,
     normalize_accession,
+    normalize_cik,
     user_agent_configured,
 )
 from app.services.chat_security import neutralize_fences
@@ -368,6 +373,17 @@ def _nonce() -> str:
 # ── Subjects ──────────────────────────────────────────────────────────────────────────────────
 
 
+def primed_tickers(signals_by_ticker: Mapping[str, TickerSignal],
+                   lib: case_library.CaseLibrary) -> List[str]:
+    """The week's tickers whose company has a usable COMPANY primer in `lib`, matched by SEC CIK
+    (a ticker can be reused or renamed; the CIK cannot): the only tickers `rank_topics` may offer
+    as a single-company topic (owner decision 2026-10-24). A signal with no CIK never matches.
+    Pure; sorted."""
+    ciks = lib.company_primer_ciks()
+    return sorted(t for t, sig in signals_by_ticker.items()
+                  if normalize_cik(getattr(sig, "cik", None)) in ciks)
+
+
 def pick_subject_tickers(cand: TopicCandidate, signals_by_ticker: Mapping[str, TickerSignal],
                          scores: Mapping[str, Tuple[float, Mapping[str, float]]],
                          themes: Mapping[str, ThemeInput], *, recent_tickers: Iterable[str],
@@ -393,15 +409,51 @@ def pick_subject_tickers(cand: TopicCandidate, signals_by_ticker: Mapping[str, T
     for t in order:
         t = t.strip().upper()
         sig = signals_by_ticker.get(t)
-        if sig is None or t in out:
-            continue
-        if (sig.cik is None or sig.foreign_filer is not False or sig.size_ok is not True
-                or sig.excluded_reason is not None or t in recent_t or sig.cik in recent_c):
+        if sig is None or t in out or not subject_ok(t, sig, recent_t, recent_c):
             continue
         out.append(t)
         if len(out) >= limit:
             break
     return out
+
+
+def subject_ok(ticker: str, sig: TickerSignal, recent_tickers: Set[str], recent_ciks: Set[str]) -> bool:
+    """Whether a ticker may be a main subject: an SEC CIK, a DOMESTIC filer (`foreign_filer is
+    False` — unknown is refused), the size check passed (`size_ok is True`), no upstream exclusion,
+    and outside the 12-week company window by ticker AND by CIK. Pure."""
+    return not (sig.cik is None or sig.foreign_filer is not False or sig.size_ok is not True
+                or sig.excluded_reason is not None or ticker in recent_tickers
+                or sig.cik in recent_ciks)
+
+
+def unlockable_breakouts(passed_over: Sequence[str], ranked: Sequence[TopicCandidate],
+                         signals_by_ticker: Mapping[str, TickerSignal], *,
+                         recent_tickers: Iterable[str], recent_ciks: Iterable[str]) -> List[str]:
+    """The passed-over lone companies a verified company entry COULD turn into a topic: each can be
+    a main subject (`subject_ok`) and is not the top member of a SELECTED theme (the ranking drops a
+    lone ticker its selected theme tops, entry or not). The quiet-week fallback claims nothing: it
+    stands in only when nothing was selected, and a breakout inside it is exactly what an entry
+    would unlock (review round 3). Anything else in a skip alert would send the owner to write an
+    entry that changes nothing. Order kept. Pure."""
+    recent_t = {t.strip().upper() for t in recent_tickers if isinstance(t, str)}
+    recent_c = {c for c in recent_ciks if isinstance(c, str)}
+    claimed = {c.tickers[0] for c in ranked if c.kind == topic_scorer.KIND_THEME and c.tickers
+               and c.reason == topic_scorer.REASON_RANKED}
+    out = []
+    for t in passed_over:
+        sig = signals_by_ticker.get(t)
+        if sig is not None and t not in claimed and subject_ok(t, sig, recent_t, recent_c):
+            out.append(t)
+    return out
+
+
+def passed_over_text(names: Sequence[str], shown: int = 5) -> str:
+    """ "passed over, no verified company entry: A, B (+2 more); " or "" — placed right after a skip
+    reason's code, because `alerts.scrub` cuts the alert line at 160 characters."""
+    if not names:
+        return ""
+    more = f" (+{len(names) - shown} more)" if len(names) > shown else ""
+    return f"passed over, no verified company entry: {', '.join(names[:shown])}{more}; "
 
 
 # ── Category ──────────────────────────────────────────────────────────────────────────────────
@@ -968,6 +1020,7 @@ async def _score_and_store(dd: schedule.DeepDiveTimes, piece: Mapping[str, Any],
     recent_c = await ledger.recent_subjects(C.KIND_DEEP_DIVE, now - timedelta(days=RECENT_COMPANY_DAYS))
     sigs = await _week_signals(signals_mod, pk, now, fmp=fmp, sec=sec)
     by_ticker = {s.ticker: s for s in topic_scorer.dedupe_signals(sigs)}
+    primed = primed_tickers(by_ticker, lib)
 
     aborted: Optional[str] = None
     scores: Dict[str, Tuple[float, Dict[str, float]]] = {}
@@ -977,7 +1030,9 @@ async def _score_and_store(dd: schedule.DeepDiveTimes, piece: Mapping[str, Any],
     else:
         try:
             ranked = topic_scorer.rank_topics(sigs, themes, recent_themes=recent_t.themes,
-                                              recent_companies=recent_c.tickers, top_n=TOPIC_TOP_N)
+                                              recent_companies=recent_c.tickers,
+                                              primed_tickers=primed,
+                                              top_n=TOPIC_TOP_N)
             scores = topic_scorer.score_tickers(sigs)
         except topic_scorer.ScoringAborted as e:
             aborted = str(e)
@@ -985,9 +1040,27 @@ async def _score_and_store(dd: schedule.DeepDiveTimes, piece: Mapping[str, Any],
         logger.warning("[learn-topic] %s: ranking ABORTED (%s) — falling back to the least-recently-"
                        "covered eligible theme", pk, aborted)
         ranked = topic_scorer.quiet_week_fallback(themes, recent_themes=recent_t.themes)
+    # Companies that scored as a lone topic but have no verified company entry: named in a skip so
+    # the owner learns which entry would be worth adding (a quiet week and a lost one differ).
+    # Right after the reason code: the alert line is cut at `alerts.FIELD_CAP` (160) characters.
+    passed = passed_over_text(unlockable_breakouts(
+        topic_scorer.unprimed_breakouts(scores, primed, recent_c.tickers), ranked, by_ticker,
+        recent_tickers=recent_c.tickers, recent_ciks=recent_c.ciks))
     if not ranked:
-        return await _skip(piece, "no_eligible_theme: nothing ranked and no eligible theme outside "
-                                  "the 4-week window (each needs >= 2 verified case-library primers)")
+        could_rank = [t for t in primed if t not in {x.strip().upper() for x in recent_c.tickers
+                                                     if isinstance(x, str)}]
+        if aborted is not None and could_rank:
+            # Nothing was scored, so "no company qualified" would be a guess while a primed company
+            # could still rank once the data is back: an outage never ends such a week — the same
+            # rule as the no-peg-fact path below (review 2026-10-24). With no theme left and no
+            # primed company outside the window, a recovered ranking could only skip too.
+            raise TopicStepError(f"ranking aborted ({aborted}) and no eligible theme to fall back on "
+                                 f"while {len(could_rank)} primed compan(ies) could still rank — retry",
+                                 period_key=pk, step="topic")
+        outage = f" (ranking aborted: {aborted})" if aborted is not None else ""
+        return await _skip(piece, f"no_eligible_theme: {passed}no theme or company qualified and no "
+                                  "eligible theme outside the 4-week window (each needs >= 2 verified "
+                                  f"case-library primers){outage}")
 
     run = _Run(period_key=pk, llm=llm if llm is not None else _gemini(), sec=sec)
     kept: List[Dict[str, Any]] = []
@@ -1022,8 +1095,8 @@ async def _score_and_store(dd: schedule.DeepDiveTimes, piece: Mapping[str, Any],
                 period_key=pk, step="topic")
         spent = (f"; the model-call budget of {TOPIC_MAX_LLM_CALLS} ran out first"
                  if run.budget_exhausted else "")
-        return await _skip(piece, f"no_peg_fact: no candidate had a verifiable peg fact from this "
-                                  f"week's 8-K filings ({detail}){spent}")
+        return await _skip(piece, f"no_peg_fact: {passed}no candidate had a verifiable peg fact from "
+                                  f"this week's 8-K filings ({detail}){spent}")
 
     topic = {
         "version": TOPIC_JSON_VERSION,

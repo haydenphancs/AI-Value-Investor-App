@@ -132,3 +132,52 @@ def test_a_foreign_filer_or_unknown_ticker_is_never_a_main_subject(tmp_path, stu
         asyncio.run(script.preview(_args(script), gemini=object(), sec=object(), out_dir=tmp_path))
     assert "no eligible main subject" in str(e.value)
     assert "foreign filer" in capsys.readouterr().out
+
+
+def test_a_lone_company_the_build_would_refuse_stops_with_a_plain_reason(tmp_path, stubs, monkeypatch,
+                                                                          restore_db_bindings):
+    """Owner rule 2026-10-24: a lone company is written only with its verified company primer. The
+    build passes such a candidate over (FactSheetShortfall); the preview says so, never a traceback,
+    and writes nothing."""
+    script = _load_script()
+
+    async def refused(kind, candidate, *, library=None):
+        raise build.FactSheetShortfall("single-company topic 'CRWV': CoreWeave, Inc. has no verified "
+                                       "company entry in the case library", usable=0)
+
+    monkeypatch.setattr(build, "assemble_fact_sheet", refused)
+    args = script.parse_args(["--tickers", "CRWV", "--label", "CoreWeave", "--as-of", "2026-10-22"])
+    with pytest.raises(SystemExit, match="would pass this candidate over: single-company topic"):
+        asyncio.run(script.preview(args, gemini=object(), sec=object(), out_dir=tmp_path))
+    assert list(tmp_path.iterdir()) == [] and stubs["write"] == []
+
+
+def test_several_tickers_without_a_theme_is_refused_before_any_read(tmp_path, stubs, restore_db_bindings):
+    """The engine has no multi-company topic; previewing one would test a shape production never
+    builds (review 2026-10-24)."""
+    script = _load_script()
+    args = script.parse_args(["--tickers", "MMM,NVDA", "--label", "x", "--as-of", "2026-10-22"])
+    with pytest.raises(SystemExit, match="without --theme a topic is one company"):
+        asyncio.run(script.preview(args, gemini=object(), sec=object(), out_dir=tmp_path))
+    assert list(tmp_path.iterdir()) == [] and stubs["write"] == []
+
+
+def test_one_unprimed_ticker_is_refused_before_any_8k_read_or_model_call(tmp_path, stubs, monkeypatch,
+                                                                         restore_db_bindings):
+    """Review round 2: the refusal is certain once the subject is known, so no 8-K read, peg-screen
+    or label call is spent on it (the build would refuse the same candidate)."""
+    from app.services.learn_weekly import case_library
+
+    spent = []
+
+    async def pegs(run, subjects, today, *, cand_key):
+        spent.append("pegs")
+        return [PEG]
+
+    monkeypatch.setattr(topic, "_peg_facts", pegs)
+    monkeypatch.setattr(case_library, "get_case_library", lambda path=None: case_library.CaseLibrary(1, ()))
+    script = _load_script()
+    args = script.parse_args(["--tickers", "CRWV", "--as-of", "2026-10-22"])     # no --label: no model call
+    with pytest.raises(SystemExit, match="would pass this candidate over: single-company topic"):
+        asyncio.run(script.preview(args, gemini=object(), sec=object(), out_dir=tmp_path))
+    assert spent == [] and stubs["write"] == [] and list(tmp_path.iterdir()) == []

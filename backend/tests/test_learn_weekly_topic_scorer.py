@@ -39,9 +39,19 @@ def news_for(score):
     return score / 0.6 * ts.MAD_SCALE
 
 
-def rank(signals, themes, recent_themes=(), recent_companies=(), top_n=3):
+ALL = object()   # `rank(...)` default: every signal's ticker has a verified company primer
+
+
+def _all_tickers(signals):
+    return [getattr(s, "ticker", None) for s in signals if isinstance(getattr(s, "ticker", None), str)]
+
+
+def rank(signals, themes, recent_themes=(), recent_companies=(), top_n=3, primed=ALL):
+    signals = list(signals)
     return ts.rank_topics(signals, themes, recent_themes=recent_themes,
-                          recent_companies=recent_companies, top_n=top_n)
+                          recent_companies=recent_companies,
+                          primed_tickers=_all_tickers(signals) if primed is ALL else primed,
+                          top_n=top_n)
 
 
 @pytest.fixture
@@ -309,6 +319,70 @@ def test_a_single_ticker_qualifies_at_three_inclusive(fixed_scores):
     assert [(c.kind, c.key, c.tickers, c.title) for c in out] == [("ticker", "CRWV", ("CRWV",), "CRWV")]
 
 
+# ── A lone company needs its verified company primer (owner decision 2026-10-24) ────────────
+
+
+def test_a_lone_ticker_without_a_company_primer_is_never_offered(fixed_scores):
+    """"Skip single-company topics that have no verified case-library entry" — the 3M week: a
+    breakout ticker with no company primer is passed over and the next candidate fills its slot."""
+    s = fixed(fixed_scores, {"MMM": 9.0, "CRWV": 4.0, "NVDA": 3.5})
+    out = rank(s, [], primed=["CRWV", "NVDA"])
+    assert [(c.kind, c.key) for c in out] == [("ticker", "CRWV"), ("ticker", "NVDA")]
+    assert rank(s, [], primed=[]) == []                     # no primer, no theme: nothing offered
+    out = rank(s, [theme("ai", ["CRWV", "NVDA"])], primed=[])
+    assert [(c.kind, c.key) for c in out] == [("theme", "ai")]
+
+
+def test_an_unprimed_ticker_still_lifts_its_theme_and_claims_no_slot(fixed_scores):
+    """MMM is NOT the theme's top member (HON is), so primed it would hold its own slot beside the
+    theme; unprimed it holds none — yet still counts in the theme's mean (review 2026-10-24: the
+    first version made MMM the top member, which the claimed rule drops anyway)."""
+    s = fixed(fixed_scores, {"HON": 9.5, "MMM": 9.0, "GE": 2.0})
+    themes = [theme("industrials", ["MMM", "HON", "GE"])]
+    # Primed: MMM (9.0) keeps its own slot; HON's is taken by the theme it tops.
+    assert [(c.kind, c.key) for c in rank(s, themes)] == [("ticker", "MMM"), ("theme", "industrials")]
+    out = rank(s, themes, primed=["HON", "GE"])
+    assert [(c.kind, c.key) for c in out] == [("theme", "industrials")]
+    assert out[0].tickers == ("HON", "MMM", "GE")
+    assert out[0].score == pytest.approx((9.5 + 9.0 + 2.0) / 3)
+
+
+def test_unprimed_breakouts_names_what_was_passed_over(fixed_scores):
+    s = fixed(fixed_scores, {"MMM": 9.0, "GE": 3.0, "HON": 2.99, "CRWV": 5.0, "AMD": 4.0})
+    scores = ts.score_tickers(s)
+    assert ts.unprimed_breakouts(scores, ["CRWV"], ["AMD"]) == ["MMM", "GE"]   # best first; ≥ 3 only
+    assert ts.unprimed_breakouts(scores, [" mmm ", "ge", "crwv"], []) == ["AMD"]
+    assert ts.unprimed_breakouts({}, [], []) == []
+    with pytest.raises(TypeError):
+        ts.unprimed_breakouts(scores, "MMM", [])
+
+
+def test_primed_tickers_are_normalised_and_junk_is_skipped(fixed_scores, caplog):
+    s = fixed(fixed_scores, {"CRWV": 4.0, "MMM": 5.0})
+    with caplog.at_level(logging.INFO, logger=ts.logger.name):
+        out = rank(s, [], primed=[" crwv ", None, 7, ""])
+    assert [c.key for c in out] == ["CRWV"]
+    assert "no verified company primer" in caplog.text and "MMM" in caplog.text
+
+
+def test_the_primer_rule_is_order_independent(fixed_scores):
+    s = fixed(fixed_scores, {"AA": 5.0, "BB": 4.0, "CC": 3.5, "DD": 3.2})
+    primed = ["DD", "BB", "CC"]
+    expected = rank(s, [], primed=primed)
+    rng = random.Random(1024)
+    for _ in range(20):
+        sh, pr = s[:], primed[:]
+        rng.shuffle(sh)
+        rng.shuffle(pr)
+        assert rank(sh, [], primed=set(pr)) == expected
+    assert [c.key for c in expected] == ["BB", "CC", "DD"]
+
+
+def test_primed_tickers_is_required():
+    with pytest.raises(TypeError):
+        ts.rank_topics([], [], recent_themes=(), recent_companies=())   # type: ignore[call-arg]
+
+
 def test_a_recent_company_is_not_offered_alone_but_still_lifts_its_theme(fixed_scores):
     s = fixed(fixed_scores, {"CRWV": 6.0, "NVDA": 1.5})
     out = rank(s, [theme("ai-infra", ["CRWV", "NVDA"])], recent_companies=[" crwv "])
@@ -367,9 +441,11 @@ def test_a_bad_top_n_is_a_caller_bug(top_n):
 @pytest.mark.parametrize("window", [None, "chips", b"chips"])
 def test_a_missing_or_string_window_is_a_caller_bug(window):
     with pytest.raises(TypeError):
-        ts.rank_topics([], [], recent_themes=window, recent_companies=())
+        ts.rank_topics([], [], recent_themes=window, recent_companies=(), primed_tickers=())
     with pytest.raises(TypeError):
-        ts.rank_topics([], [], recent_themes=(), recent_companies=window)
+        ts.rank_topics([], [], recent_themes=(), recent_companies=window, primed_tickers=())
+    with pytest.raises(TypeError):
+        ts.rank_topics([], [], recent_themes=(), recent_companies=(), primed_tickers=window)
 
 
 # ── rank_topics: end to end with the real scoring ─────────────────────────────────────────────
@@ -563,7 +639,8 @@ def _rich_universe():
 
 def test_shuffling_every_input_fifty_times_never_changes_the_answer():
     signals, themes = _rich_universe()
-    kwargs = dict(recent_themes=["old-news"], recent_companies=["MSFT"])
+    kwargs = dict(recent_themes=["old-news"], recent_companies=["MSFT"],
+                  primed_tickers=_all_tickers(signals))
     expected = ts.rank_topics(signals, themes, **kwargs)
     assert expected and all(c.reason == "ranked" for c in expected)
     rng = random.Random(20261022)
@@ -577,8 +654,10 @@ def test_shuffling_every_input_fifty_times_never_changes_the_answer():
             sh_themes.append(ThemeInput(t.slug, t.title, tuple(members), t.eligible, t.last_covered))
         rng.shuffle(sh_themes)
         recent_t, recent_c = list(kwargs["recent_themes"]), list(kwargs["recent_companies"])
+        primed = list(kwargs["primed_tickers"])
+        rng.shuffle(primed)
         assert ts.rank_topics(sh_signals, sh_themes, recent_themes=set(recent_t),
-                              recent_companies=reversed(recent_c)) == expected
+                              recent_companies=reversed(recent_c), primed_tickers=primed) == expected
 
 
 def test_quiet_week_is_order_independent_too():
@@ -593,7 +672,8 @@ def test_quiet_week_is_order_independent_too():
 
 def test_the_rich_universe_ranks_as_designed():
     signals, themes = _rich_universe()
-    kwargs = dict(recent_themes=["old-news"], recent_companies=["MSFT"])
+    kwargs = dict(recent_themes=["old-news"], recent_companies=["MSFT"],
+                  primed_tickers=_all_tickers(signals))
     # Scores: NVDA 4.2 + 0.4·z_8k(2 vs a 0-median baseline) + 0.5 earnings ≈ 5.24; CRWV = ORCL = 3.6;
     # ai-chips = mean(NVDA, AMD, AVGO) ≈ 3.48; cloud = mean(ORCL, CRWV, MSFT) ≈ 3.43;
     # ai-power = mean(NVDA, VST, CEG) ≈ 2.85; PLTR 2.95 < 3; MSFT recent; old-news recent.

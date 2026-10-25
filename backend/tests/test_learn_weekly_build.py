@@ -604,6 +604,108 @@ def test_an_empty_catalog_waits_rather_than_failing_open(fake, rec, monkeypatch)
     assert fw.calls == [] and row["last_error"].startswith("catalog_unavailable")
 
 
+# ── A lone company needs its verified company primer (owner decision 2026-10-24) ────────────
+
+NVDA_SUBJECTS = [C.Subject("NVIDIA CORP", CIK, "NVDA")]
+NVDA_COMPANY_LIB = CL.CaseLibrary(version=1, entries=(_entry("co-nvidia", ["other-theme"], CIK, "company"),))
+
+
+def lone(**over: Any) -> Dict[str, Any]:
+    """A single-company candidate (kind ticker) about NVIDIA."""
+    return candidate(**{**C.TopicCandidate(kind="ticker", key="NVDA", title="NVDA", score=4.0,
+                                           tickers=("NVDA",)).to_json(), "label": "NVIDIA", **over})
+
+
+@pytest.mark.parametrize("cand,lib,refused", [
+    (lone(), NVDA_COMPANY_LIB, False),
+    (lone(), CL.CaseLibrary(1, ()), True),
+    (lone(), CL.CaseLibrary(1, (_entry("mech", ["ai-chips"], CIK),)), True),       # mechanics only
+    (lone(), CL.CaseLibrary(1, (CL.LibraryEntry(**{**vars(_entry("co-nvidia", ["x"], CIK, "company")),
+                                                   "verified_by": None}),)), True),   # unverified
+    (candidate(), CL.CaseLibrary(1, ()), False),                                    # a theme: never refused here
+    ({**lone(), "kind": None}, CL.CaseLibrary(1, ()), True),                        # unknown kind: fail closed
+])
+def test_a_lone_company_without_its_verified_primer_is_refused(cand, lib, refused):
+    problem = B.single_company_problem(cand, NVDA_SUBJECTS, lib)
+    assert (problem is not None) is refused
+    if refused:
+        assert "NVIDIA CORP has no verified company entry" in problem
+
+
+MMM_SUBJECT = C.Subject("3M CO", "0000066740", "MMM")
+
+
+@pytest.mark.parametrize("subjects,refused", [
+    ([MMM_SUBJECT, NVDA_SUBJECTS[0]], True),     # an unprimed first subject
+    ([NVDA_SUBJECTS[0], MMM_SUBJECT], True),     # an unprimed one behind a primed one (review 2026-10-24)
+    ([NVDA_SUBJECTS[0]], False),
+    ([], False),                                  # no subject: the ordinary shortfall check says so
+])
+def test_every_main_subject_of_a_lone_company_topic_needs_its_primer(subjects, refused):
+    problem = B.single_company_problem(lone(), subjects, NVDA_COMPANY_LIB)
+    assert (problem is not None) is refused
+    if refused:
+        assert problem.count("3M CO") == 1 and "NVIDIA CORP" not in problem
+
+
+def test_the_guard_runs_before_any_sec_read(rec, monkeypatch):
+    calls: List[str] = []
+
+    async def summary(cik, *, client=None):
+        calls.append(cik)
+        return None
+
+    monkeypatch.setattr(sec_facts, "company_summary", summary)
+    with pytest.raises(B.FactSheetShortfall, match="no verified company entry"):
+        asyncio.run(B.assemble_fact_sheet("deep_dive", lone(), library=CL.CaseLibrary(1, ())))
+    assert calls == [], "no SEC read is spent on a refused candidate"
+
+
+def test_a_stored_lone_company_without_a_primer_moves_to_the_next_candidate(fake, rec, monkeypatch):
+    """A topic stored before the rule (or a primer unverified since): the build passes the lone
+    company over exactly like a thin sheet — the topic moves to #2 with one alert."""
+    monkeypatch.setattr(CL, "get_case_library", lambda path=None: CL.CaseLibrary(1, ()))
+    fw = FakeWriter(accepted())
+    monkeypatch.setattr(W, "write_article", fw)
+    piece = make_piece(fake, tp=topic(cands=[lone(), candidate(key="power", title="Power for AI",
+                                                                label="Power for AI")]))
+    build(piece)
+    row = stored(fake, piece["id"])
+    assert fw.calls == [] and row["draft"] is None and row["status"] == C.PLANNED
+    assert row["last_error"].startswith("no_company_primer: #1 'NVIDIA'")
+    assert "no verified company entry" in row["last_error"] and "moved to #2 'Power for AI'" in row["last_error"]
+    t = row["topic"]
+    assert t["chosen_index"] == 1 and [(d["index"], d["key"]) for d in t["build_drops"]] == [(0, "ticker:NVDA")]
+    # Named for what it is: no filing was read, so never "only 0 usable facts in its filings".
+    (note,) = rec.notes
+    assert "has no verified company entry in the case library — switched to #2" in note
+    assert "usable facts" not in note and rec.terminal == []
+
+
+def test_a_lone_company_left_as_the_last_candidate_ends_skipped_as_no_company_primer(fake, rec, monkeypatch):
+    monkeypatch.setattr(CL, "get_case_library", lambda path=None: CL.CaseLibrary(1, ()))
+    monkeypatch.setattr(W, "write_article", FakeWriter(accepted()))
+    piece = make_piece(fake, tp=topic(cands=[lone()]))
+    build(piece)
+    row = stored(fake, piece["id"])
+    assert row["status"] == C.SKIPPED and row["last_error"].startswith("no_company_primer: #1 'NVIDIA'")
+    assert [t["reason"] for t in rec.terminal] == ["no_company_primer"] and rec.notes == []
+
+
+def test_a_primed_lone_company_passes_the_guard_and_is_written(fake, rec, monkeypatch):
+    """The other side of the rule: with its verified company primer a lone company is built — the
+    sheet carries the primer's facts and the writer is called, with the owner's pick unchanged."""
+    sheet = asyncio.run(B.assemble_fact_sheet("deep_dive", lone(), library=NVDA_COMPANY_LIB))
+    assert any(f.id.startswith("L:co-nvidia:") for f in sheet.facts)
+    monkeypatch.setattr(CL, "get_case_library", lambda path=None: NVDA_COMPANY_LIB)
+    fw = FakeWriter(accepted())
+    monkeypatch.setattr(W, "write_article", fw)
+    piece = make_piece(fake, tp=topic(cands=[lone(), candidate(key="power", label="Power for AI")]))
+    build(piece)
+    row = stored(fake, piece["id"])
+    assert len(fw.calls) == 1 and row["topic"]["chosen_index"] == 0 and row["status"] == C.MEDIA_PENDING
+
+
 def test_a_thin_sheet_is_never_written_and_moves_to_the_next_candidate(fake, rec, monkeypatch):
     """Review F3: every SEC read answered and the sheet is still thin — a property of candidate #1,
     not an outage. It must not be retried for two days; the topic moves to #2 with one alert."""

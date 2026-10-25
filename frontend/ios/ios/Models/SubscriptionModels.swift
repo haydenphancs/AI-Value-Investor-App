@@ -353,6 +353,23 @@ extension PlanFeature {
                 accentKey: "signals",
                 included: paid
             ),
+            // Mirrors plan_features._caydex_fair_value_row word for word (owner, 2026-10-25:
+            // the estimate on the Analysis tab is Pro and Max only). "Wherever the model can
+            // value the company", not "every stock": the model refuses about half of large
+            // caps, and the owner chose "Lock only real estimates" — a refused stock shows
+            // "Not modelled" on every plan, so the paid line must not promise a number there.
+            // "There is paid": a shared cached report still shows the estimate to Free (owner:
+            // "Leave reports as is"), so the line scopes the lock to the Analysis tab.
+            PlanFeature(
+                key: "caydex_fair_value",
+                title: "Caydex Fair Value Estimate",
+                detail: paid
+                    ? "A DCF model's fair-value range and estimate on the Analysis tab, wherever the model can value the company."
+                    : "Free keeps the valuation meter, multiples and peer comparisons on the Analysis tab. The Caydex Fair Value Estimate there is paid.",
+                symbol: validatedSymbol("scalemass.fill"),
+                accentKey: "signals",
+                included: paid
+            ),
             // A QUANTITY (Free really gets the first companies of every list), so `included`
             // stays true on every tier — like the Updates row.
             PlanFeature(
@@ -502,6 +519,12 @@ enum PaywallContext: String, Sendable, CaseIterable {
     /// Free as written only when it names no withheld company (backend `_prose_is_safe`);
     /// otherwise Free reads fixed wording that points at the full list.
     case themeCompanies = "theme_companies"
+    /// The Caydex Fair Value Estimate on a stock's Analysis tab (Pro/Max, owner 2026-10-25:
+    /// "lock caydex fair value estimate for free accounts, it should show for Pro and Max
+    /// only"; backend `entitlements.caydex_fair_value_unlocked`). The lock shows only where
+    /// the model produced an estimate ("Lock only real estimates"), so upgrading always
+    /// reveals a number; the valuation meter, multiples and peers stay free.
+    case caydexFairValue = "caydex_fair_value"
 
     var headline: String {
         switch self {
@@ -515,6 +538,7 @@ enum PaywallContext: String, Sendable, CaseIterable {
         case .congressHolders:  return "See what Congress is trading"
         case .trillionClub:     return "See every holding and every quarter"
         case .themeCompanies:   return "See every company in each theme"
+        case .caydexFairValue:  return "Unlock the Caydex Fair Value Estimate"
         }
     }
 
@@ -543,6 +567,8 @@ enum PaywallContext: String, Sendable, CaseIterable {
             return "You already see each company's largest holdings, its latest changes and its disclosed stakes. A plan adds the full holdings list and earlier quarters."
         case .themeCompanies:
             return "You already see every theme, how it is performing and its largest companies. A plan shows the full list and why it's moving."
+        case .caydexFairValue:
+            return "The valuation meter, multiples and peer comparisons stay free on the Analysis tab. Pro and Max add the DCF model's range and estimate there."
         }
     }
 
@@ -561,6 +587,7 @@ enum PaywallContext: String, Sendable, CaseIterable {
         // history — as the whale profile's Current Picks, so the same feature row.
         case .trillionClub:          return "whale_detail"
         case .themeCompanies:        return "theme_companies"
+        case .caydexFairValue:       return "caydex_fair_value"
         }
     }
 
@@ -576,6 +603,8 @@ enum PaywallContext: String, Sendable, CaseIterable {
         case .congressHolders:  return "building.columns.fill"
         case .trillionClub:     return "building.2.fill"
         case .themeCompanies:   return "square.stack.3d.up.fill"
+        // The same glyph as its plan row (`PlanFeature` key "caydex_fair_value").
+        case .caydexFairValue:  return "scalemass.fill"
         }
     }
 
@@ -583,7 +612,8 @@ enum PaywallContext: String, Sendable, CaseIterable {
         switch self {
         case .general, .moreCredits: return AppColors.alertOrange
         case .updatesTickers, .themeCompanies: return AppColors.primaryBlue
-        case .signals, .congressHolders: return AppColors.accentCyan
+        // The plan row's accent is "signals" (accentCyan), so the header matches its row.
+        case .signals, .congressHolders, .caydexFairValue: return AppColors.accentCyan
         case .whaleFollowLimit, .whaleDetail, .trillionClub: return AppColors.alertPurple
         case .learnAudio:            return AppColors.gain
         }

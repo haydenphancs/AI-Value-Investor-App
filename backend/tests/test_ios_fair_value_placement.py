@@ -1,33 +1,48 @@
-"""Where the Caydex Fair Value Estimate shows on iOS, and its "temporarily unavailable" state.
+r"""Where the Caydex Fair Value Estimate shows on iOS, who may see it, and its "temporarily
+unavailable" state.
 
-Owner decisions, 2026-10-23 (plan "dcf-v2 + reliability + placement"):
-  * Placement: "Overview tab row" + "Report: move up, expand". The estimate used to show only
-    on the Analysis tab (not the default) and as the LAST of nine collapsed report modules,
-    so most readers never saw it. The report half was REVERSED the same day after the owner
-    saw it on the Simulator: "move 'Valuation and institution' to at the bottom as the old
-    way" — last module, collapsed, as before. The Overview row stays.
-  * R3: on 2026-10-21 FRED failed, the backend sent no estimate anywhere, and the Analysis
-    tab drew NO row — the estimate looked like it had never existed. The backend now flags
-    that case (`caydex_estimate_unavailable`) and iOS says "temporarily unavailable", and
-    does not cache that overview, so the next open asks again.
+Owner decisions:
+  * 2026-10-23 (plan "dcf-v2 + reliability + placement"): R3 — on 2026-10-21 FRED failed, the
+    backend sent no estimate anywhere, and the Analysis tab drew NO row: the estimate looked
+    like it had never existed. The backend now flags that case (`caydex_estimate_unavailable`)
+    and iOS says "temporarily unavailable", and does not cache that overview, so the next open
+    asks again. The same day's report placement was reversed after the owner saw it on the
+    Simulator: "move 'Valuation and institution' to at the bottom as the old way" — last
+    module, collapsed, as before.
+  * 2026-10-25: "for Analysis tab, lock caydex fair value estimate for free accounts, it should
+    show for Pro and Max only", scoped as "remove 'caydex fair value estimate' at the
+    snapshots, then lock for 'caydex fair value estimate' in the analysis only", enforced
+    "Server-side (Recommended)". So the Overview's compact row (2026-10-23, "Overview tab row")
+    is DELETED for everyone, and the Analysis tab's Valuation card shows `LockedSectionCard`
+    — opening the plans — when the server withheld the estimate (`caydex_estimate_locked`).
+    Reports and Cay AI chat are not gated.
 
 Pinned, in the Swift that ships:
-  * the Overview compact row's states (estimate range-first / refusal / unavailable /
-    nothing) and its tap target;
-  * it renders for the `.price` snapshot only, outside the expanded branch, with the live
-    header price threaded from the Overview;
-  * the Analysis card's unavailable arm comes AFTER the FMP `dcfRow` arm;
-  * `StockRepository` skips `setCache` for a flagged overview;
-  * "Valuation & Institutions" is the LAST deep-dive module and every module starts collapsed
-    (the owner's reversal above);
-  * the wire contract: Pydantic `caydex_estimate_unavailable: Optional[bool] = None` ↔ Swift
-    `Bool?` with the same CodingKey;
-  * the chat context: the Overview turn is told the estimate its Price card draws, through ONE
-    helper (`caydexEstimateContextLine`) that `analysisContext` shares — estimate / refusal /
-    temporarily unavailable / nothing, in the Valuation card's precedence on the Analysis tab.
+  * the compact row is gone: no file, no reference, no estimate on any snapshot card, and no
+    `currentPrice` threaded into the Snapshots section for it;
+  * the Analysis card's arms: estimate → FMP `dcfRow` → unavailable → LOCKED, the lock nested
+    (`cardBackgroundNested`) and presenting `PaywallView` with `\.appState` re-injected;
+  * the wire contract: `caydex_estimate_unavailable` / `caydex_estimate_locked` (Optional[bool])
+    and `caydex_estimate_tier_required` (Optional[str]) ↔ Swift `Bool?` / `String?` with the
+    same CodingKeys, each flag mapped only when no estimate came with it, and never
+    "unavailable" beside the lock;
+  * `StockRepository` skips `setCache` for an unavailable overview (a locked one is cached as
+    usual — session end clears the cache);
+  * "Valuation & Institutions" is the LAST deep-dive module and every module starts collapsed;
+  * the chat context: the Overview turn no longer quotes the estimate; `analysisContext` does,
+    through ONE helper (`caydexEstimateContextLine`) that returns nil for a locked snapshot;
+  * the lock opens its OWN paywall context, `PaywallContext.caydexFairValue` ("caydex_fair_value",
+    the plan row `plan_features` emits), so the sheet highlights the row it is about; the
+    bundled plan row carries the owner's copy (paid line "wherever the model can value the
+    company" — the owner chose "Lock only real estimates", so a refused stock is "Not modelled"
+    on every plan and the paid line promises no number there);
+  * a plan change re-fetches the overview: `TickerDetailView`'s `entitlementGeneration`
+    observer calls `refreshOverviewAfterEntitlementChange()`, which waits out a load in flight,
+    drops the ticker's client cache, re-fetches WITHOUT the loading placeholder, writes through
+    the one apply path `loadTickerData()` uses, and keeps the screen on a failure.
 
 Comment-stripped and brace-bounded (.claude/rules/testing.md §3); each guard mutation-tested
-by hand once (break the source, watch it fail, restore).
+by hand once on a copy (break the source, watch it fail, restore).
 """
 from __future__ import annotations
 
@@ -38,7 +53,7 @@ from pathlib import Path
 from app.schemas.stock_overview import SnapshotItemResponse
 
 _IOS = Path(__file__).resolve().parents[2] / "frontend" / "ios" / "ios"
-_COMPACT = _IOS / "Views" / "Molecules" / "CaydexFairValueCompactRow.swift"
+_COMPACT_NAME = "CaydexFairValueCompactRow"
 _UNAVAILABLE = _IOS / "Views" / "Molecules" / "CaydexFairValueUnavailableRow.swift"
 _SNAPSHOT_CARD = _IOS / "Views" / "Molecules" / "SnapshotCard.swift"
 _SNAPSHOTS_SECTION = _IOS / "Views" / "Organisms" / "TickerDetailSnapshotsSection.swift"
@@ -52,7 +67,7 @@ _REPORT_MODELS = _IOS / "Models" / "TickerReportModels.swift"
 _REPORT_VM = _IOS / "ViewModels" / "TickerReportViewModel.swift"
 _DEEP_DIVE = _IOS / "Views" / "Organisms" / "ReportDeepDiveSection.swift"
 _REPORT_VIEW = _IOS / "Views" / "Screens" / "TickerReportView.swift"
-_VIEWS = _IOS / "Views"
+_IOS_ROOT = _IOS.parent  # frontend/ios: the app, the widget and Shared/
 _VM = _IOS / "ViewModels" / "TickerDetailViewModel.swift"
 
 
@@ -83,84 +98,46 @@ def _decl(src: str, prefix: str) -> str:
     return _match(src, src.index("{", at), "{", "}")
 
 
-def _root_modifiers(label: str) -> list[str]:
-    """Modifier lines on the label closure's OUTERMOST view (depth 0), in order."""
-    out, depth = [], 0
-    for line in label.splitlines():
-        lead = depth
-        for ch in line:
-            if ch in "([{":
-                depth += 1
-            elif ch in ")]}":
-                depth -= 1
-        if lead == 0 and line.strip().startswith("."):
-            out.append(line.strip())
-    return out
-
-
 _VERDICTS = re.compile(r"undervalued|overvalued|underpriced|overpriced|fairly valued|\bcheap\b|"
                        r"bargain|\bbuy\b|\bsell\b|\bupside\b|\bdownside\b|price target:", re.I)
 
 
-# ── the Overview compact row ─────────────────────────────────────────────────────────────────
+# ── the Overview compact row: removed (owner, 2026-10-25) ─────────────────────────────────
 
-def _compact() -> str:
-    return _decl(_code(_COMPACT), "struct CaydexFairValueCompactRow")
-
-
-def test_the_compact_row_has_the_estimate_refusal_unavailable_and_absent_states():
-    row = _compact()
-    body = _decl(row, "var body: some View")
-    split = body.index("} else if isUnavailable {")
-    assert body.lstrip("{ \n").startswith("if let estimate {"), "the estimate arm leads"
-    tail = body[split:]
-    assert re.match(r"\} else if isUnavailable \{\s*CaydexFairValueUnavailableRow\(\)", tail), tail
-    # Absent (no estimate, not flagged) draws NOTHING — no third arm, no placeholder.
-    assert "else {" not in tail and "else{" not in tail, "an absent estimate must draw nothing"
-    est = body[:split]
-    # Estimate arm, range first: title + range → "Estimate $V · gap" → subtitle.
-    arm = est[est.index("case .estimate:"):est.index("case .refused(let reason):")]
-    assert "estimateLine(estimate)" in arm and "CaydexFairValue.subtitle" in arm
-    order = [est.index(t) for t in ("value: headlineValue(estimate)", "estimateLine(estimate)",
-                                    "CaydexFairValue.subtitle")]
-    assert order == sorted(order), "range → estimate line → subtitle"
-    assert re.search(r"ReportMetricRow\(label: CaydexFairValue\.title,\s*value: headlineValue\(estimate\)", est), \
-        "reuse the ReportMetricRow atom for the title + headline line"
-    refused = est[est.index("case .refused(let reason):"):]
-    assert "Text(reason)" in refused
-    head = _decl(row, "private func headlineValue(_ estimate: CaydexFairValue) -> String")
-    assert re.search(r"case \.estimate:\s*return estimate\.formattedRangeBounds", head), "the RANGE is the headline"
-    assert re.search(r"case \.refused:\s*return CaydexFairValue\.refusedHeadline", head)
-    line = _decl(row, "private func estimateLine(_ estimate: CaydexFairValue) -> String?")
-    assert "estimate.formattedEstimate" in line and "estimate.formattedGap(versus: currentPrice)" in line
-    assert '"\\(mid) · \\(gap)"' in line
-    assert "formattedValue" not in row, "a bare value without its range is back"
+def test_the_compact_row_is_gone_from_the_tree():
+    assert not (_IOS / "Views" / "Molecules" / f"{_COMPACT_NAME}.swift").exists(), \
+        "the Overview compact row is back — the owner removed it on 2026-10-25"
+    hosts = [str(path.relative_to(_IOS_ROOT)) for path in sorted(_IOS_ROOT.rglob("*.swift"))
+             if _COMPACT_NAME in _code(path)]
+    assert hosts == [], hosts
+    pbx = (_IOS_ROOT / "ios.xcodeproj" / "project.pbxproj").read_text(encoding="utf-8")
+    assert _COMPACT_NAME not in pbx
 
 
-def test_the_compact_row_opens_the_sheet_and_is_one_tap_target():
-    row = _compact()
-    body = _decl(row, "var body: some View")
-    est = body[:body.index("} else if isUnavailable {")]
-    assert "CaydexFairValueSheet(estimate: estimate, currentPrice: currentPrice)" in est
-    assert ".buttonStyle(.plain)" in est
-    label_at = est.index("} label: {") + len("} label: ")
-    label = _match(est, label_at, "{", "}")[1:-1]
-    mods = _root_modifiers(label)
-    assert mods and mods[-1] == ".contentShape(Rectangle())", f"contentShape must be LAST: {mods}"
-    assert any(m.startswith(".padding(") for m in mods), mods
+def test_no_snapshot_card_draws_the_estimate():
+    card = _decl(_code(_SNAPSHOT_CARD), "struct SnapshotCard: View")
+    for banned in ("caydexEstimate", "CaydexFairValue", "currentPrice"):
+        assert banned not in card, f"{banned} — the Overview's snapshot cards show no estimate"
+    section = _decl(_code(_SNAPSHOTS_SECTION), "struct TickerDetailSnapshotsSection: View")
+    assert "currentPrice" not in section, "the price was threaded only for the removed row"
+    assert "SnapshotCard(snapshot: snapshot)" in section
+    overview = _decl(_code(_OVERVIEW), "struct TickerDetailOverviewContent: View")
+    call = overview[overview.index("TickerDetailSnapshotsSection("):]
+    call = _match(call, call.index("("), "(", ")")
+    assert "currentPrice" not in call, call
+    assert "snapshots: tickerData.snapshots" in call
+
+
+def test_the_unavailable_row_draws_no_surface_and_opens_nothing():
+    row = _decl(_code(_UNAVAILABLE), "struct CaydexFairValueUnavailableRow")
+    for banned in (".cardSurface(", ".cardFill(", ".background(", "Color(hex", "Color.black", ".white"):
+        assert banned not in row, f"{banned} — the row lives inside the Valuation card"
+    colors = set(re.findall(r"AppColors\.(\w+)", row))
+    assert colors and colors <= {"textPrimary", "textSecondary", "textMuted"}, colors
+    for s in re.findall(r'"((?:[^"\\]|\\.)*)"', row):
+        assert not _VERDICTS.search(s), s
     # The unavailable state has nothing to open.
-    unavailable = _decl(_code(_UNAVAILABLE), "struct CaydexFairValueUnavailableRow")
-    assert "Button" not in unavailable and "onTapGesture" not in unavailable and ".sheet(" not in unavailable
-
-
-def test_the_compact_row_draws_no_surface_and_only_text_tokens():
-    for src in (_compact(), _decl(_code(_UNAVAILABLE), "struct CaydexFairValueUnavailableRow")):
-        for banned in (".cardSurface(", ".cardFill(", ".background(", "Color(hex", "Color.black", ".white"):
-            assert banned not in src, f"{banned} — the row lives inside the Snapshots card"
-        colors = set(re.findall(r"AppColors\.(\w+)", src))
-        assert colors and colors <= {"textPrimary", "textSecondary", "textMuted"}, colors
-        for s in re.findall(r'"((?:[^"\\]|\\.)*)"', src):
-            assert not _VERDICTS.search(s), s
+    assert "Button" not in row and "onTapGesture" not in row and ".sheet(" not in row
 
 
 def test_the_unavailable_copy_is_not_a_refusal():
@@ -175,45 +152,7 @@ def test_the_unavailable_copy_is_not_a_refusal():
     assert "refusedHeadline" not in row, "unavailable is not 'Not modelled'"
 
 
-# ── placement: the Overview's Price snapshot card ────────────────────────────────────────────
-
-def test_the_compact_row_renders_for_the_price_snapshot_only_and_while_collapsed():
-    card = _decl(_code(_SNAPSHOT_CARD), "struct SnapshotCard: View")
-    body = _decl(card, "var body: some View")
-    assert body.count("CaydexFairValueCompactRow(") == 1
-    assert re.search(
-        r"if snapshot\.category == \.price \{\s*CaydexFairValueCompactRow\(\s*"
-        r"estimate: snapshot\.caydexEstimate,\s*isUnavailable: snapshot\.caydexEstimateUnavailable,\s*"
-        r"currentPrice: currentPrice\s*\)\s*\}", body), "the row must be gated on the Price card"
-    at = body.index("CaydexFairValueCompactRow(")
-    expanded_at = body.index("if isExpanded {")
-    expanded = _match(body, body.index("{", expanded_at), "{", "}")
-    assert "CaydexFairValueCompactRow" not in expanded, "it must show on the COLLAPSED card"
-    assert body.index(".buttonStyle(PlainButtonStyle())") < at, "never inside the header's toggle button"
-    assert re.search(r"var currentPrice:\s*Double\?\s*=\s*nil", card)
-
-
-def test_the_live_price_is_threaded_from_the_overview():
-    section = _decl(_code(_SNAPSHOTS_SECTION), "struct TickerDetailSnapshotsSection: View")
-    assert re.search(r"var currentPrice:\s*Double\?\s*=\s*nil", section)
-    assert "SnapshotCard(snapshot: snapshot, currentPrice: currentPrice)" in section
-    overview = _decl(_code(_OVERVIEW), "struct TickerDetailOverviewContent: View")
-    call = overview[overview.index("TickerDetailSnapshotsSection("):]
-    call = call[:call.index(")") + 1]
-    assert "currentPrice: tickerData.currentPrice" in call, call
-
-
-def test_only_the_snapshot_card_places_the_compact_row():
-    hosts = []
-    for path in sorted(_VIEWS.rglob("*.swift")):
-        if path == _COMPACT:
-            continue
-        if "CaydexFairValueCompactRow(" in _code(path):
-            hosts.append(path.name)
-    assert hosts == ["SnapshotCard.swift"], hosts
-
-
-# ── the Analysis card's unavailable arm ──────────────────────────────────────────────────────
+# ── the Analysis card's unavailable and locked arms ────────────────────────────────────────
 
 def test_the_analysis_card_says_unavailable_after_the_dcf_row_arm():
     section = _decl(_code(_METER_SECTION), "struct ValuationMeterSection")
@@ -227,7 +166,59 @@ def test_the_analysis_card_says_unavailable_after_the_dcf_row_arm():
     assert "fair value" not in section.lower()
 
 
-# ── the wire flag, the mapping, the cache ────────────────────────────────────────────────────
+def _meter_body() -> tuple[str, str]:
+    section = _decl(_code(_METER_SECTION), "struct ValuationMeterSection")
+    return section, _decl(section, "var body: some View")
+
+
+def test_the_analysis_card_locks_after_the_unavailable_arm():
+    section, body = _meter_body()
+    m = re.search(r"\} else if snapshot\.caydexEstimateUnavailable \{.*?CaydexFairValueUnavailableRow\(\)\s*\}\s*"
+                  r"\} else if snapshot\.caydexEstimateLocked \{\s*"
+                  r"LockedSectionCard\(title: CaydexFairValue\.lockedTitle,\s*"
+                  r"message: CaydexFairValue\.lockedMessage,\s*nested: true\) \{\s*"
+                  r"showPaywall = true\s*\}\s*\}", body, flags=re.S)
+    assert m, "the lock must be the arm after the unavailable one, nested, opening the plans"
+    assert body.index("} else if let dcf = snapshot.dcf {") < m.start()
+    assert body.count("caydexEstimateLocked") == 1, "flag read once, in its own arm"
+    lock_arm = body[body.index("} else if snapshot.caydexEstimateLocked {"):]
+    for banned in ("CaydexFairValueRow", "CaydexFairValueRangeChart", "chartPlaceholder", "dcfRow"):
+        assert banned not in lock_arm, f"{banned} drawn beside the lock"
+    assert "fair value" not in section.lower()
+
+
+def test_the_lock_presents_the_plans_with_the_app_state():
+    section, _ = _meter_body()
+    assert re.search(r"@Environment\(\\\.appState\) private var appState", section)
+    assert re.search(r"@State private var showPaywall:\s*Bool\s*=\s*false", section)
+    sheet_at = section.index(".sheet(isPresented: $showPaywall)")
+    sheet = _match(section, section.index("{", sheet_at), "{", "}")
+    assert re.search(r"PaywallView\(context: \.caydexFairValue\)\s*\.environment\(\\\.appState, appState\)", sheet), \
+        "PaywallView reads \\.appState, and a sheet does not inherit it"
+    assert section.count("showPaywall = true") == 1, "only the lock opens the plans"
+
+
+def test_the_lock_copy_names_pro_and_max():
+    model = _decl(_code(_FV_MODELS), "struct CaydexFairValue:")
+    assert re.search(r"static let lockedTitle = (Self\.)?title\b", model)
+    m = re.search(r'static let lockedMessage = "([^"]+)"', model)
+    assert m, "the lock copy constant is gone"
+    copy = m.group(1)
+    assert "Pro and Max" in copy and "Caydex Fair Value Estimate" in copy
+    assert not _VERDICTS.search(copy), copy
+    card = _decl(_code(_IOS / "Views" / "Molecules" / "LockedSectionCard.swift"), "struct LockedSectionCard")
+    assert "AppColors.cardBackgroundNested" in card, "nested: true must still mean the nested surface"
+
+
+def test_the_info_sheet_explains_no_model_beside_the_lock():
+    # A locked snapshot carries neither `caydexEstimate` nor FMP's `dcf`, so the sheet
+    # keys off their presence and explains neither model (no estimate it cannot show).
+    section, _ = _meter_body()
+    assert re.search(r"ValuationInfoSheet\(showsCaydexEstimate: snapshot\.caydexEstimate != nil,\s*"
+                     r"showsFmpDcf: snapshot\.dcf != nil\)", section)
+
+
+# ── the wire flags, the mapping, the cache ───────────────────────────────────────────────────
 
 def test_the_dto_decodes_the_flag_and_maps_it_only_without_an_estimate():
     src = _code(_SNAP_DTO)
@@ -235,7 +226,8 @@ def test_the_dto_decodes_the_flag_and_maps_it_only_without_an_estimate():
     assert re.search(r"let caydexEstimateUnavailable:\s*Bool\?", dto)
     assert 'case caydexEstimateUnavailable = "caydex_estimate_unavailable"' in dto
     assert "let caydexEstimate = dto.caydexEstimate.flatMap { CaydexFairValue(dto: $0) }" in src
-    assert "caydexEstimateUnavailable: dto.caydexEstimateUnavailable == true && caydexEstimate == nil" in src
+    assert re.search(r"caydexEstimateUnavailable: dto\.caydexEstimateUnavailable == true && caydexEstimate == nil"
+                     r"\s*&& !caydexEstimateLocked,", src), "never unavailable beside the lock"
     item = _decl(_code(_DETAIL_MODELS), "struct SnapshotItem: Identifiable")
     assert re.search(r"var caydexEstimateUnavailable:\s*Bool\s*=\s*false", item)
     init = _decl(item, "init(category: SnapshotCategory")
@@ -244,11 +236,33 @@ def test_the_dto_decodes_the_flag_and_maps_it_only_without_an_estimate():
                      item[item.index("init(category: SnapshotCategory"):item.index(init)])
 
 
+def test_the_dto_decodes_the_lock_and_maps_it_only_without_an_estimate():
+    src = _code(_SNAP_DTO)
+    dto = _decl(src, "struct SnapshotItemDTO")
+    assert re.search(r"let caydexEstimateLocked:\s*Bool\?", dto)
+    assert re.search(r"let caydexEstimateTierRequired:\s*String\?", dto)
+    keys = _decl(dto, "enum CodingKeys")
+    assert 'case caydexEstimateLocked = "caydex_estimate_locked"' in keys
+    assert 'case caydexEstimateTierRequired = "caydex_estimate_tier_required"' in keys
+    assert "let caydexEstimateLocked = dto.caydexEstimateLocked == true && caydexEstimate == nil" in src
+    assert "caydexEstimateLocked: caydexEstimateLocked," in src
+    assert "caydexEstimateTierRequired: dto.caydexEstimateTierRequired," in src
+    item = _decl(_code(_DETAIL_MODELS), "struct SnapshotItem: Identifiable")
+    assert re.search(r"var caydexEstimateLocked:\s*Bool\s*=\s*false", item)
+    assert re.search(r"var caydexEstimateTierRequired:\s*String\?\s*=\s*nil", item)
+    init = _decl(item, "init(category: SnapshotCategory")
+    assert "self.caydexEstimateLocked = caydexEstimateLocked" in init
+    assert "self.caydexEstimateTierRequired = caydexEstimateTierRequired" in init
+    sig = item[item.index("init(category: SnapshotCategory"):item.index(init)]
+    assert re.search(r"caydexEstimateLocked:\s*Bool\s*=\s*false", sig)
+    assert re.search(r"caydexEstimateTierRequired:\s*String\?\s*=\s*nil", sig)
+
+
 def test_the_repository_does_not_cache_a_flagged_overview():
     top = _decl(_code(_SNAP_DTO), "struct StockOverviewResponseDTO: Decodable")
     flag = _decl(top, "var hasUnavailableCaydexEstimate: Bool")
     assert "snapshots.contains" in flag
-    assert "$0.caydexEstimateUnavailable == true && $0.caydexEstimate == nil" in flag
+    assert "$0.caydexEstimateUnavailable == true && $0.caydexEstimate == nil && $0.caydexEstimateLocked != true" in flag
     repo = _decl(_code(_REPOSITORY), "final class StockRepository: StockRepositoryProtocol")
     fn = _decl(repo, 'func getStockOverview(ticker: String, range: String = "3M"')
     assert fn.count("setCache(") == 1
@@ -268,6 +282,25 @@ def test_the_backend_and_ios_agree_on_the_flag():
     dto = _decl(_code(_SNAP_DTO), "struct SnapshotItemDTO")
     assert re.search(r"let caydexEstimateUnavailable:\s*Bool\?", dto), "the Swift field must be Optional"
     assert '= "caydex_estimate_unavailable"' in dto
+
+
+def _optional_field(name: str, inner: type) -> None:
+    field = SnapshotItemResponse.model_fields.get(name)
+    assert field is not None, f"SnapshotItemResponse lacks {name} (the backend half of the lock)"
+    assert field.default is None and not field.is_required(), name
+    assert typing.get_origin(field.annotation) is typing.Union, name
+    assert set(typing.get_args(field.annotation)) == {inner, type(None)}, name
+
+
+def test_the_backend_and_ios_agree_on_the_lock():
+    _optional_field("caydex_estimate_locked", bool)
+    _optional_field("caydex_estimate_tier_required", str)
+    bare = SnapshotItemResponse(category="Price", rating=3, metrics=[])
+    assert bare.caydex_estimate_locked is None and bare.caydex_estimate_tier_required is None
+    dto = _decl(_code(_SNAP_DTO), "struct SnapshotItemDTO")
+    assert re.search(r"let caydexEstimateLocked:\s*Bool\?", dto), "the Swift field must be Optional"
+    assert re.search(r"let caydexEstimateTierRequired:\s*String\?", dto), "the Swift field must be Optional"
+    assert '= "caydex_estimate_locked"' in dto and '= "caydex_estimate_tier_required"' in dto
 
 
 # ── the report: "Valuation & Institutions" last, collapsed (owner's reversal) ─────────────
@@ -304,31 +337,29 @@ def test_every_report_module_starts_collapsed():
     assert section.count("onCollapse?()") == 1
 
 
-# ── the chat context: the Overview turn is told what its Price card draws ────────────────────
+# ── the chat context: told what the Analysis card draws, nothing beside a lock ───────────────
 #
-# Review finding IOS-2 (2026-10-23): the compact row put the estimate on the DEFAULT tab, but
-# `overviewContext` never mentioned it — only `analysisContext` quoted it, and
-# `contextForCurrentTab` sends the selected tab's context alone. Cay AI could then say it had
-# no estimate beside a card showing one, or reason about value itself.
+# Review finding IOS-2 (2026-10-23) made the Overview turn quote the estimate its compact row
+# drew. The row was removed on 2026-10-25, so the Overview turn must not quote it any more —
+# the turn is told only what its cards show. The Analysis turn still quotes it, except for a
+# locked snapshot (the card shows the lock there, not the number).
 
 _HELPER = "private func caydexEstimateContextLine(for snapshot: SnapshotItem) -> String?"
 
 
-def test_the_overview_chat_context_quotes_the_price_cards_estimate():
+def test_the_overview_chat_context_no_longer_quotes_the_estimate():
     overview = _decl(_code(_VM), "private var overviewContext: String?")
-    loop = _decl(overview, "for snap in td.snapshots")
-    assert re.search(r"if snap\.category == \.price, let (\w+) = caydexEstimateContextLine\(for: snap\) \{"
-                     r"\s*parts\.append\(\1\)\s*\}", loop), \
-        "the Overview turn must be told the estimate its Price card draws (CaydexFairValueCompactRow)"
-    # The helper owns the wording; the compact row never shows FMP's model.
-    assert "CaydexFairValue.title" not in overview
-    assert "caydexEstimate" not in overview.replace("caydexEstimateContextLine", "")
-    assert "snap.dcf" not in overview and "DCF model value" not in overview
+    for banned in ("caydexEstimateContextLine", "caydexEstimate", "CaydexFairValue", "snap.dcf",
+                   "DCF model value"):
+        assert banned not in overview, f"{banned} — the Overview no longer shows the estimate"
 
 
-def test_the_estimate_context_helper_covers_the_cards_four_states():
+def test_the_estimate_context_helper_is_silent_for_a_locked_snapshot_and_covers_the_cards_states():
     helper = _decl(_code(_VM), _HELPER)
-    assert helper.lstrip("{ \n").startswith("if let estimate = snapshot.caydexEstimate {"), "the estimate leads"
+    assert re.match(r"\{\s*guard !snapshot\.caydexEstimateLocked else \{ return nil \}\s*"
+                    r"if let estimate = snapshot\.caydexEstimate \{", helper), \
+        "a locked snapshot is told nothing, before any other state"
+    assert helper.count("caydexEstimateLocked") == 1
     est = _decl(helper, "if let estimate = snapshot.caydexEstimate")
     ok = est[est.index("case .estimate:"):est.index("case .refused(let reason):")]
     assert "(a DCF model estimate — not a price target, not a recommendation)" in ok
@@ -369,4 +400,112 @@ def test_the_analysis_chat_context_shares_the_helper_in_the_valuation_cards_orde
     helper = _decl(vm, _HELPER)
     assert vm.count("CaydexFairValue.title") == helper.count("CaydexFairValue.title")
     assert vm.count("func caydexEstimateContextLine(") == 1
-    assert vm.count("caydexEstimateContextLine(for:") == 3, "three call sites: Overview once, Analysis twice"
+    assert vm.count("caydexEstimateContextLine(for:") == 2, "two call sites, both in analysisContext"
+    assert analysis.count("caydexEstimateContextLine(for:") == 2
+
+
+# ── the paywall the lock opens (review fix round, 2026-10-25) ────────────────────────────────
+#
+# `.general` highlighted the credits row and shared its analytics `reason` with the Profile
+# paywall; every other plan lock passes its own context.
+
+_SUBSCRIPTION = _IOS / "Models" / "SubscriptionModels.swift"
+_TICKER_VIEW = _IOS / "Views" / "Screens" / "TickerDetailView.swift"
+_PAID_ROW = ("A DCF model's fair-value range and estimate on the Analysis tab, wherever the "
+             "model can value the company.")
+_FREE_ROW = ("Free keeps the valuation meter, multiples and peer comparisons on the Analysis "
+             "tab. The Caydex Fair Value Estimate there is paid.")
+_PAYWALL_WORDS = re.compile(_VERDICTS.pattern + r"|accura|guarantee|\bevery stock", re.I)
+
+
+def _paywall_arm(enum_body: str, prop: str, case: str) -> str:
+    """The text of `case .<case>:` (alone or in a comma list) in one PaywallContext switch."""
+    body = _decl(enum_body, prop)
+    m = re.search(r"case (?:\.\w+,\s*)*\." + case + r"\b(?:,\s*\.\w+)*:\s*(.*?)(?=\n\s*(?:case |\}))",
+                  body, flags=re.S)
+    assert m, f"PaywallContext.{prop.split()[1]} has no .{case} arm"
+    return m.group(1)
+
+
+def test_the_lock_opens_its_own_paywall_context():
+    section, _ = _meter_body()
+    assert section.count("PaywallView(context:") == 1
+    assert "PaywallView(context: .caydexFairValue)" in section
+    assert ".general" not in section
+
+    enum = _decl(_code(_SUBSCRIPTION), "enum PaywallContext")
+    assert 'case caydexFairValue = "caydex_fair_value"' in enum
+    assert _paywall_arm(enum, "var featureKey: String", "caydexFairValue").strip() == 'return "caydex_fair_value"'
+    from app.services import plan_features
+    assert plan_features.KEY_CAYDEX_FAIR_VALUE == "caydex_fair_value", "the row the paywall highlights"
+    assert '"scalemass.fill"' in _paywall_arm(enum, "var symbol: String", "caydexFairValue"), \
+        "the header's glyph is its plan row's"
+    assert "AppColors.accentCyan" in _paywall_arm(enum, "var accent: Color", "caydexFairValue"), \
+        "the plan row's accent is \"signals\" (accentCyan)"
+    headline = _paywall_arm(enum, "var headline: String", "caydexFairValue")
+    sub = _paywall_arm(enum, "var subheadline: String", "caydexFairValue")
+    assert "Caydex Fair Value Estimate" in headline
+    assert "Pro and Max" in sub and "Analysis tab" in sub
+    for text in (headline, sub):
+        assert not _PAYWALL_WORDS.search(text), text
+
+
+def test_the_bundled_plan_row_carries_the_owners_copy():
+    bundled = _code(_SUBSCRIPTION)
+    at = bundled.index('key: "caydex_fair_value"')
+    row = _match(bundled, bundled.rindex("PlanFeature(", 0, at) + len("PlanFeature"), "(", ")")
+    m = re.search(r'detail:\s*paid\s*\?\s*"((?:[^"\\]|\\.)*)"\s*:\s*"((?:[^"\\]|\\.)*)"', row, flags=re.S)
+    assert m, row
+    assert (m.group(1), m.group(2)) == (_PAID_ROW, _FREE_ROW)
+    assert "included: paid" in row
+
+
+# ── a plan change re-fetches the overview (review fix round, 2026-10-25) ─────────────────────
+#
+# The Price snapshot is tier-shaped and `StockRepository` caches the overview for 120 s under a
+# key with no tier: a user who bought Pro from the lock kept the lock until pull-to-refresh.
+
+_REFRESH = "func refreshOverviewAfterEntitlementChange() async"
+
+
+def test_the_entitlement_observer_refreshes_holders_and_the_overview():
+    view = _code(_TICKER_VIEW)
+    assert view.count(".onChange(of: appState.entitlementGeneration)") == 1
+    body = _decl(view, ".onChange(of: appState.entitlementGeneration)")
+    assert "Task { await viewModel.refreshHoldersAfterEntitlementChange() }" in body
+    assert "Task { await viewModel.refreshOverviewAfterEntitlementChange() }" in body
+
+
+def test_the_overview_refresh_invalidates_refetches_and_keeps_the_screen():
+    vm = _code(_VM)
+    assert vm.count(_REFRESH) == 1
+    fn = _decl(vm, _REFRESH)
+    # Order: wait out a load in flight, THEN drop the cache, THEN fetch.
+    wait = fn.index("if let inFlight = loadTask { await inFlight.value }")
+    drop = fn.index("stockRepository.invalidate(symbol: tickerSymbol)")
+    fetch = fn.index("try await stockRepository.getStockOverview(")
+    apply = fn.index("await applyOverview(response, ticker: ticker, requested: requested, keepBarsOnScreen: true)")
+    assert wait < drop < fetch < apply
+    assert re.search(r"guard tickerData != nil else \{ return \}", fn[drop:fetch])
+    # The newest plan change wins; cancellation writes nothing.
+    assert re.search(r"overviewRefreshGeneration &\+= 1\s*let generation = overviewRefreshGeneration", fn)
+    assert re.search(r"guard generation == overviewRefreshGeneration else \{", fn[fetch:apply])
+    assert re.search(r"guard !Task\.isCancelled else \{ return \}", fn[fetch:apply])
+    # No placeholder flash, no second Phase 2, no blanking on a failure.
+    for banned in ("isLoading", "loadTickerData(", "errorMessage", "tickerData = nil", "toDisplayModel"):
+        assert banned not in fn, f"{banned} in the entitlement refresh"
+    catch = _decl(fn, "} catch")
+    assert re.search(r"guard !Task\.isCancelled else \{ return \}\s*log\.error\(", catch)
+
+
+def test_one_apply_path_writes_a_fetched_overview():
+    vm = _code(_VM)
+    assert vm.count("private func applyOverview(") == 1
+    apply = _decl(vm, "private func applyOverview(")
+    assert apply.count("response.toDisplayModel()") == 1
+    assert vm.count("response.toDisplayModel()") == 1, "the overview is mapped in ONE place"
+    assert re.search(r"\(keepBarsOnScreen && !shownBars\.isEmpty\)", apply)
+    load = _decl(vm, "func loadTickerData()")
+    assert load.count("await self.applyOverview(response, ticker: ticker, requested: requestedStamp)") == 1
+    assert "toDisplayModel" not in load
+    assert vm.count("applyOverview(") == 3, "the declaration and its two callers"

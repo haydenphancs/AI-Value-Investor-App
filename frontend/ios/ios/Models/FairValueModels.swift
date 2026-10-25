@@ -90,12 +90,25 @@ struct CaydexFairValue: Equatable {
     static let refusedGeneric = "Our model doesn't produce an estimate for this company."
     /// The label over the range, which is the headline: the estimate is its middle mark.
     static let rangeLabel = "Estimate range"
+    /// The estimate row's own header and inline range label (owner, 2026-10-25: add "- DCF Model"
+    /// after the title; "Estimate range" becomes "Range:" on the range's line). The row also
+    /// drops `subtitle` ("we already have them": the assumptions sheet one tap away, the cards'
+    /// disclaimers). `title` / `rangeLabel` stay for the sheet, the chart legend and chat.
+    static let rowTitle = "Caydex Fair Value Estimate – DCF Model"
+    static let rowRangeLabel = "Range:"
     static let refusedHeadline = "Not modelled"
     /// A report saved before the estimate existed, or one served while it is switched off.
     static let notInReport = "No Caydex Fair Value Estimate is available for this report."
     /// The backend could not compute the estimate right now (an input was briefly down) —
     /// NOT a refusal, so it never says "Not modelled".
     static let temporarilyUnavailable = "Temporarily unavailable — we'll try again shortly."
+    /// The Analysis tab's lock for a plan without the estimate (owner, 2026-10-25: "lock caydex
+    /// fair value estimate for free accounts, it should show for Pro and Max only"). The server
+    /// withholds the estimate and raises `caydex_estimate_locked`; this copy lives here, not in
+    /// `ValuationMeterSection`, whose source must never spell out the words "fair value".
+    /// `lockedTitle` is the lock's accessibility name ("…, locked").
+    static let lockedTitle = title
+    static let lockedMessage = "The Caydex Fair Value Estimate – DCF Model is part of Pro and Max."
 
     let state: State
     let alternativeValue: Double?
@@ -205,6 +218,18 @@ struct CaydexFairValue: Equatable {
         return "Price \(magnitude)% \(gap < 0 ? "below" : "above") the estimate"
     }
 
+    /// The "79% above" / "12% below" words of `formattedGap`, and which side of the estimate
+    /// the price is on, so the view can colour them (owner, 2026-10-25: red when the price is
+    /// above the estimate, green when below — "Color it as asked", over the neutral-ink rule).
+    /// nil when there is no gap or it rounds to "in line", which stays uncoloured. The words
+    /// themselves stay neutral (hard rule 4): never Undervalued / Overvalued.
+    func gapEmphasis(versus price: Double?) -> (words: String, priceAbove: Bool)? {
+        guard let gap = priceGapPercent(versus: price) else { return nil }
+        let magnitude = Int(abs(gap).rounded())
+        guard magnitude > 0 else { return nil }
+        return ("\(magnitude)% \(gap < 0 ? "below" : "above")", gap > 0)
+    }
+
     // MARK: - Helpers
 
     private static func positive(_ v: Double?) -> Double? {
@@ -249,24 +274,24 @@ struct CaydexFairValue: Equatable {
         return f
     }()
 
-    private static let monthYearFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
-        f.dateFormat = "MMM yyyy"
-        return f
-    }()
-
-    /// "Price · Sep 2024 – Sep 2026" from the first and last "yyyy-MM-dd" dates of the series
-    /// a chart draws, so the label says the window the line actually covers. Shared by the
-    /// report and the Analysis tab. nil when either date does not parse.
+    /// "2-Year" (or "8-Month"): the span the line actually covers, from the first and last
+    /// "yyyy-MM-dd" dates of the series a chart draws. Shared by the report and the Analysis
+    /// tab. It replaced "Price · Oct 2024 – Oct 2026" (owner, 2026-10-25: "change 'price oct
+    /// 2024 - oct 2026' to '2-Year'"). Measured, never assumed: a stock listed eight months ago
+    /// says "8-Month", not "2-Year". A span within a month of whole years reads as years.
+    /// nil when either date does not parse or the dates run backwards.
     static func pricePeriodLabel(from first: String?, to last: String?) -> String? {
         guard let first, let last,
               let start = isoDayFormatter.date(from: String(first.prefix(10))),
-              let end = isoDayFormatter.date(from: String(last.prefix(10))) else { return nil }
-        let a = monthYearFormatter.string(from: start)
-        let b = monthYearFormatter.string(from: end)
-        return a == b ? "Price · \(a)" : "Price · \(a) – \(b)"
+              let end = isoDayFormatter.date(from: String(last.prefix(10))),
+              end >= start else { return nil }
+        let days: Double = end.timeIntervalSince(start) / 86_400
+        let months: Int = max(1, Int((days / 30.44).rounded()))
+        let years: Int = Int((Double(months) / 12).rounded())
+        if years >= 1, abs(months - years * 12) <= 1 {
+            return "\(years)-Year"
+        }
+        return "\(months)-Month"
     }
 
     private static func pct(_ v: Double?, digits: Int = 2) -> String? {

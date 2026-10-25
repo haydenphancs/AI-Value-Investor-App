@@ -172,6 +172,9 @@ class TickerDetailViewModel: ObservableObject {
     /// The in-flight full load, so `refresh()` can await it and a second
     /// concurrent load can be coalesced instead of racing.
     private var loadTask: Task<Void, Never>?
+    /// Monotonic token for `refreshOverviewAfterEntitlementChange()`: only the newest
+    /// plan change's overview may write the screen.
+    private var overviewRefreshGeneration = 0
     /// Monotonic token for chart fetches. Each fetchChartData captures the value
     /// before awaiting and only applies its result if still current — so a slow
     /// response for a no-longer-selected range can't clobber a newer one
@@ -428,54 +431,13 @@ class TickerDetailViewModel: ObservableObject {
                 let requestedRange = self.selectedChartRange
                 let requestedInterval = self.chartSettings.selectedInterval
                 let requestedExtended = useExtendedHours
+                let requestedStamp = ChartBarsStamp(range: requestedRange, interval: requestedInterval, extendedHours: requestedExtended)
                 let response = try await self.stockRepository.getStockOverview(
                     ticker: ticker, range: requestedRange.rawValue,
                     interval: requestedInterval.rawValue,
                     extendedHours: useExtendedHours
                 )
-                // If the user changed the range, the interval, OR the extended-hours
-                // toggle while the (slow) overview was loading — now possible because
-                // the fast-core chart is interactive — the overview's chart is for the
-                // OLD selection. Re-fetch so the chart matches the current selection
-                // instead of silently reverting (the tickerData write below is not
-                // gen-guarded).
-                let currentExtended = self.chartSettings.showExtendedHours && self.chartSettings.selectedInterval.isIntraday
-                let selectionChanged = self.selectedChartRange != requestedRange
-                    || self.chartSettings.selectedInterval != requestedInterval
-                    || currentExtended != requestedExtended
-                let requestedStamp = ChartBarsStamp(range: requestedRange, interval: requestedInterval, extendedHours: requestedExtended)
-                let shownBars = self.tickerData?.chartPricePoints ?? self.coreData?.chartPricePoints ?? []
-                var display = response.toDisplayModel()
-                // Keep the bars already on screen (their stamps already describe them, so this
-                // is not a chart write) when
-                //  - the selection changed during the load: the overview's chart is for the
-                //    OLD selection, and stepping back to it would flash an old range (or a
-                //    third one) under the veil; the catch-up below fetches the current one;
-                //  - the overview came back with NO bars for the stamp already on screen (a
-                //    pull-to-refresh blip): no reason to blank a good chart.
-                //  - the bars-only first paint already drew THIS stamp (see `firstPaintChartStamp`):
-                //    the same route a range tap uses, with today's unfinished bar the
-                //    overview's daily slice leaves out.
-                let drewFirstPaint = self.firstPaintChartStamp == requestedStamp
-                    && self.lastChartStamp == requestedStamp && !shownBars.isEmpty
-                self.firstPaintChartStamp = nil
-                let keepShownBars = self.lastChartStamp != nil
-                    && (selectionChanged
-                        || drewFirstPaint
-                        || (display.chartPricePoints.isEmpty && self.lastChartStamp == requestedStamp && !shownBars.isEmpty))
-                if keepShownBars {
-                    display.chartPricePoints = shownBars
-                    self.tickerData = display
-                } else {
-                    self.tickerData = display
-                    self.recordChartWrite(display.chartPricePoints, stamp: requestedStamp)
-                    // The overview's bars won the race for this stamp: a first-paint
-                    // `/chart` answer still in flight must not land over them afterwards.
-                    if !display.chartPricePoints.isEmpty { self.chartRequestGen += 1 }
-                }
-                if selectionChanged {
-                    await self.fetchChartData(ticker, range: self.selectedChartRange)
-                }
+                await self.applyOverview(response, ticker: ticker, requested: requestedStamp)
                 self.log.debug("overview loaded for \(ticker, privacy: .public)")
             } catch {
                 // The fallback below owns the chart from here; a later refresh must not keep
@@ -540,6 +502,66 @@ class TickerDetailViewModel: ObservableObject {
             // show "Apple announces record Q4 earnings"), and they leak into the Cay AI
             // news context. Matches the no-sample-fallback policy of the other 4 VMs
             // and fetchEarnings/fetchGrowth.
+        }
+    }
+
+    /// Writes a fetched overview to the screen. The ONE apply path: Phase 1 of
+    /// `loadTickerData()` and `refreshOverviewAfterEntitlementChange()` both call it, so the
+    /// two can never map, merge or stamp an overview differently.
+    ///
+    /// - Parameters:
+    ///   - requestedStamp: the (range, interval, extended hours) the overview was fetched
+    ///     FOR, captured before the await.
+    ///   - keepBarsOnScreen: keep the chart bars already drawn whatever the overview carries.
+    ///     The entitlement refresh passes true: only the snapshots are tier-shaped, and the
+    ///     overview's 3M+ chart stops at the last settled close, so swapping the bars on
+    ///     screen for it would drop today's candle the moment a purchase lands.
+    private func applyOverview(_ response: StockOverviewResponseDTO, ticker: String,
+                               requested requestedStamp: ChartBarsStamp,
+                               keepBarsOnScreen: Bool = false) async {
+        // If the user changed the range, the interval, OR the extended-hours
+        // toggle while the (slow) overview was loading — now possible because
+        // the fast-core chart is interactive — the overview's chart is for the
+        // OLD selection. Re-fetch so the chart matches the current selection
+        // instead of silently reverting (the tickerData write below is not
+        // gen-guarded).
+        let currentExtended = self.chartSettings.showExtendedHours && self.chartSettings.selectedInterval.isIntraday
+        let selectionChanged = self.selectedChartRange != requestedStamp.range
+            || self.chartSettings.selectedInterval != requestedStamp.interval
+            || currentExtended != requestedStamp.extendedHours
+        let shownBars = self.tickerData?.chartPricePoints ?? self.coreData?.chartPricePoints ?? []
+        var display = response.toDisplayModel()
+        // Keep the bars already on screen (their stamps already describe them, so this
+        // is not a chart write) when
+        //  - the caller asked to (`keepBarsOnScreen`) and there are bars to keep;
+        //  - the selection changed during the load: the overview's chart is for the
+        //    OLD selection, and stepping back to it would flash an old range (or a
+        //    third one) under the veil; the catch-up below fetches the current one;
+        //  - the overview came back with NO bars for the stamp already on screen (a
+        //    pull-to-refresh blip): no reason to blank a good chart.
+        //  - the bars-only first paint already drew THIS stamp (see `firstPaintChartStamp`):
+        //    the same route a range tap uses, with today's unfinished bar the
+        //    overview's daily slice leaves out.
+        let drewFirstPaint = self.firstPaintChartStamp == requestedStamp
+            && self.lastChartStamp == requestedStamp && !shownBars.isEmpty
+        self.firstPaintChartStamp = nil
+        let keepShownBars = self.lastChartStamp != nil
+            && ((keepBarsOnScreen && !shownBars.isEmpty)
+                || selectionChanged
+                || drewFirstPaint
+                || (display.chartPricePoints.isEmpty && self.lastChartStamp == requestedStamp && !shownBars.isEmpty))
+        if keepShownBars {
+            display.chartPricePoints = shownBars
+            self.tickerData = display
+        } else {
+            self.tickerData = display
+            self.recordChartWrite(display.chartPricePoints, stamp: requestedStamp)
+            // The overview's bars won the race for this stamp: a first-paint
+            // `/chart` answer still in flight must not land over them afterwards.
+            if !display.chartPricePoints.isEmpty { self.chartRequestGen += 1 }
+        }
+        if selectionChanged {
+            await self.fetchChartData(ticker, range: self.selectedChartRange)
         }
     }
 
@@ -1112,6 +1134,53 @@ class TickerDetailViewModel: ObservableObject {
     /// `isHoldersLoaded`, so the tab does not flash its placeholder mid-purchase.
     func refreshHoldersAfterEntitlementChange() async {
         await fetchHolders(tickerSymbol, forceRefresh: true)
+    }
+
+    /// Re-fetch the overview after the plan changed, keeping the current screen on display.
+    ///
+    /// The Price snapshot is tier-shaped (owner, 2026-10-25: "lock caydex fair value
+    /// estimate for free accounts, it should show for Pro and Max only", enforced
+    /// "Server-side"): Free gets `caydex_estimate_locked`, Pro and Max the estimate.
+    /// `StockRepository` caches the overview for `CacheTTL.volatile` (120 s) under a key
+    /// with no tier in it, so a user who just bought Pro from the Valuation lock kept the
+    /// lock — and a downgrade kept the estimate. So: drop this ticker's client cache, then
+    /// re-fetch. Unlike `refresh()` this never calls `loadTickerData()`, which flips
+    /// `isLoading` (the screen's placeholder) and re-runs all of Phase 2. A failure keeps
+    /// what is on screen and logs; it never blanks the screen mid-purchase.
+    func refreshOverviewAfterEntitlementChange() async {
+        // A full load in flight may have sent its overview request BEFORE the plan changed.
+        // Let it land first: answering after this refresh, its older answer would overwrite
+        // the new one on screen and re-cache it for another 120 s.
+        if let inFlight = loadTask { await inFlight.value }
+        guard !Task.isCancelled else { return }
+        stockRepository.invalidate(symbol: tickerSymbol)
+        // Nothing drawn yet (the first load failed and shows its error): the user's retry
+        // fetches fresh now that the cache is dropped.
+        guard tickerData != nil else { return }
+        overviewRefreshGeneration &+= 1
+        let generation = overviewRefreshGeneration
+        let ticker = tickerSymbol
+        let requested = selectedChartStamp
+        do {
+            let response = try await stockRepository.getStockOverview(
+                ticker: ticker, range: requested.range.rawValue,
+                interval: requested.interval.rawValue,
+                extendedHours: requested.extendedHours
+            )
+            guard !Task.isCancelled else { return }
+            // Two plan changes in a row (a purchase, then its restore): only the newest
+            // answer may write — a slow older one would re-lock or re-unlock the card.
+            guard generation == overviewRefreshGeneration else {
+                log.debug("entitlement overview refresh for \(ticker, privacy: .public) dropped — superseded")
+                return
+            }
+            await applyOverview(response, ticker: ticker, requested: requested, keepBarsOnScreen: true)
+            log.info("overview refreshed after an entitlement change for \(ticker, privacy: .public)")
+        } catch {
+            // APIClient wraps cancellation into a network error, so check the task instead.
+            guard !Task.isCancelled else { return }
+            log.error("entitlement overview refresh failed for \(ticker, privacy: .public), keeping the screen: \(String(describing: error), privacy: .public)")
+        }
     }
 
     private func fetchHolders(_ ticker: String, forceRefresh: Bool = false) async {
@@ -2369,12 +2438,9 @@ class TickerDetailViewModel: ObservableObject {
             // too, or Cay AI would call it a sector's beside a card that does not.
             let metricsStr = snap.metrics.map { "\($0.displayName): \($0.value)" }.joined(separator: ", ")
             parts.append("\(snap.category.rawValue): \(snap.rating.displayName) (\(metricsStr))")
-            // The Price card draws the Caydex estimate (`CaydexFairValueCompactRow`), even
-            // collapsed, so an Overview turn is told the same line the Analysis tab's is —
-            // or Cay AI would say it has no estimate beside a card that shows one.
-            if snap.category == .price, let estimateLine = caydexEstimateContextLine(for: snap) {
-                parts.append(estimateLine)
-            }
+            // No Caydex estimate line here: the Overview no longer draws it (owner,
+            // 2026-10-25: "remove 'caydex fair value estimate' at the snapshots"), so the
+            // turn is told only what its cards show. `analysisContext` still quotes it.
         }
 
         // Benchmark comparison
@@ -2391,14 +2457,17 @@ class TickerDetailViewModel: ObservableObject {
         return parts.isEmpty ? nil : parts.joined(separator: ". ")
     }
 
-    /// The Caydex Fair Value Estimate as ONE chat-context line, in the states the cards
-    /// draw (`CaydexFairValueCompactRow` on the Overview's Price card, `ValuationMeterSection`
-    /// on the Analysis tab): the estimate with its range and gap, the refusal with its reason,
-    /// "temporarily unavailable" (`caydexEstimateUnavailable`: an input was briefly down, NOT
-    /// a refusal), or nil when the snapshot carries none. Quoted exactly as the card shows it —
-    /// the chat must quote it, never compute its own (spec hard rule 3). Shared by
-    /// `overviewContext` and `analysisContext`, so both tabs tell Cay AI the same thing.
+    /// The Caydex Fair Value Estimate as ONE chat-context line, in the states the Analysis
+    /// tab's Valuation card (`ValuationMeterSection`) draws: the estimate with its range and
+    /// gap, the refusal with its reason, "temporarily unavailable" (`caydexEstimateUnavailable`:
+    /// an input was briefly down, NOT a refusal), or nil when the snapshot carries none.
+    /// Quoted exactly as the card shows it — the chat must quote it, never compute its own
+    /// (spec hard rule 3). nil too when the snapshot is LOCKED (a plan without the estimate,
+    /// owner 2026-10-25: "it should show for Pro and Max only"): the card shows a lock there,
+    /// so the turn is not told a number the card withholds. Used by `analysisContext` only
+    /// since the Overview's compact row was removed the same day.
     private func caydexEstimateContextLine(for snapshot: SnapshotItem) -> String? {
+        guard !snapshot.caydexEstimateLocked else { return nil }
         if let estimate = snapshot.caydexEstimate {
             switch estimate.state {
             case .estimate:

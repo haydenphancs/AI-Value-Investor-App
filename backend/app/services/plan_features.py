@@ -60,6 +60,7 @@ GROUP_ALWAYS = "always"
 KEY_CREDITS = "credits"
 KEY_UPDATES_TICKERS = "updates_tickers"
 KEY_SIGNALS = "signals"
+KEY_CAYDEX_FAIR_VALUE = "caydex_fair_value"
 KEY_THEME_COMPANIES = "theme_companies"
 KEY_WHALE_TRACKING = "whale_tracking"
 KEY_WHALE_DETAIL = "whale_detail"
@@ -206,6 +207,39 @@ def _signals_row(tier: str) -> Dict[str, Any]:
         "Signal tickers",
         detail,
         "antenna.radiowaves.left.and.right",
+        ACCENT_SIGNALS,
+        included=unlocked,
+    )
+
+
+def _caydex_fair_value_row(tier: str) -> Dict[str, Any]:
+    """The Caydex Fair Value Estimate on the Analysis tab (owner decision 2026-10-25: "lock
+    caydex fair value estimate for free accounts, it should show for Pro and Max only").
+
+    A lock, like the signals row: `included` is the boolean the /overview route enforces
+    (`entitlements.caydex_fair_value_unlocked`). The locked copy names what Free KEEPS on
+    the same card. Wording follows documents/research/dcf-methodology-v2.md §5 — a model's
+    estimate, never a verdict, a target or an accuracy claim. The paid line says "wherever
+    the model can value the company", never "every stock": the model refuses whole sectors
+    (financials, REITs, utilities) and about half of US large caps, and a refusal shows a
+    reason, not a range. The locked line says "there" — the Analysis tab — because reports
+    and Cay AI chat still carry the estimate on every tier (owner, 2026-10-25: "Leave reports
+    as is (Recommended)"). Byte-identical to the Swift fallback in `PlanFeature.bundled`
+    (`tests/test_caydex_fair_value_entitlement.py`).
+    """
+    unlocked = entitlements.caydex_fair_value_unlocked(tier)
+    detail = (
+        "A DCF model's fair-value range and estimate on the Analysis tab, wherever the model "
+        "can value the company."
+        if unlocked else
+        "Free keeps the valuation meter, multiples and peer comparisons on the Analysis "
+        "tab. The Caydex Fair Value Estimate there is paid."
+    )
+    return _row(
+        KEY_CAYDEX_FAIR_VALUE,
+        "Caydex Fair Value Estimate",
+        detail,
+        "scalemass.fill",
         ACCENT_SIGNALS,
         included=unlocked,
     )
@@ -405,6 +439,7 @@ def features_for_tier(
         _credits_row(credits, report_cost, chat_cost, paid=key != entitlements.TIER_FREE),
         _updates_row(key),
         _signals_row(key),
+        _caydex_fair_value_row(key),
         _theme_companies_row(key),
         _whale_tracking_row(key),
         _whale_detail_row(key),

@@ -339,8 +339,13 @@ struct TickerDetailView: View {
         // Holders tab: the Congress segment is server-redacted for Free and the DTO is
         // cached client-side for 24h. Keyed on `entitlementGeneration`, never `user.tier`
         // — `user.tier` hydrates from its `.free` default on every session restore.
+        // The overview too (owner, 2026-10-25: the Caydex Fair Value Estimate on the
+        // Analysis tab is Pro and Max only, server-side): its Price snapshot is redacted
+        // for Free and cached client-side for 120 s, so without this a user who just
+        // bought Pro from the Valuation lock kept seeing the lock.
         .onChange(of: appState.entitlementGeneration) {
             Task { await viewModel.refreshHoldersAfterEntitlementChange() }
+            Task { await viewModel.refreshOverviewAfterEntitlementChange() }
         }
         .onChange(of: viewModel.pendingTickerNavigation) { oldValue, newValue in
             if let ticker = newValue {

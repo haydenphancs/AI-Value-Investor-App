@@ -65,14 +65,15 @@ struct CaydexFairValueSheet: View {
                     .foregroundColor(AppColors.textPrimary)
                     .accessibilityLabel(estimate.rangeAccessibilityLabel ?? CaydexFairValue.rangeLabel)
                 if let mid = estimate.formattedEstimate {
+                    // Same colours as the row (owner, 2026-10-25): the estimate in the range's
+                    // text colour, the gap's "N% above / below" in loss / gain ink.
                     Text(mid)
                         .font(AppTypography.bodySmallEmphasis)
-                        .foregroundColor(AppColors.textPrimary)
+                        .foregroundColor(AppColors.accentCyan)
                 }
-                if let gap = estimate.formattedGap(versus: currentPrice) {
-                    Text(priceContext.map { "\(gap) (\($0))" } ?? gap)
+                if let gap = estimate.gapLine(versus: currentPrice, context: priceContext) {
+                    Text(gap)
                         .font(AppTypography.bodySmall)
-                        .foregroundColor(AppColors.textSecondary)
                 }
             case .refused(let reason):
                 Text(reason)

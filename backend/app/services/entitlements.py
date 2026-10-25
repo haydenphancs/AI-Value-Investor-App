@@ -122,6 +122,32 @@ WHALE_DETAIL_UNLOCKED_TIERS = SIGNALS_UNLOCKED_TIERS
 # on the same card stay free on every tier.
 CONGRESS_HOLDERS_UNLOCKED_TIERS = SIGNALS_UNLOCKED_TIERS
 
+# ── Analysis tab: the Caydex Fair Value Estimate is paid ─────────────────────────────
+#
+# Owner decision (2026-10-25): "for Analysis tab, lock caydex fair value estimate for free
+# accounts, it should show for Pro and Max only." Enforced SERVER-side, like the Congress
+# segment above: `GET /stocks/{ticker}/overview` withholds the estimate from a locked caller
+# and raises `caydex_estimate_locked` (`valuation_snapshot_service.redact_caydex_estimate`),
+# and the app draws its existing lock card over the slot.
+#
+# GATED: the estimate (range + point value) on the Analysis tab's Valuation card — and ONLY
+# where an actual estimate exists (status "ok"). Owner, 2026-10-25: "Lock only real estimates
+# (Recommended)": on a stock the model refuses, a free account sees "Not modelled" + the
+# reason (and "temporarily unavailable" when it is), exactly as Pro does, so upgrading from
+# the lock always reveals a number.
+# FREE keeps: the valuation meter, the multiples and the peer comparisons on that card.
+# NOT gated (owner, 2026-10-25: "Leave reports as is (Recommended)"): AI research reports —
+# free to open from the shared cache, otherwise 20 credits — and Cay AI chat both still carry
+# the estimate on every tier. A free account can therefore read the estimate in a cached
+# report at no cost; known and accepted.
+#
+# DCF HARD RULE 1 still holds: the value is computed ONCE per (ticker, date, model) for
+# everyone; this gate only decides who is SHOWN it, never what is computed.
+#
+# Same floor as the other paid surfaces, and deliberately the same frozenset so they cannot
+# drift into "Pro unlocks one, Max another".
+CAYDEX_FAIR_VALUE_UNLOCKED_TIERS = SIGNALS_UNLOCKED_TIERS
+
 # ── Home: Trillion-Dollar Club Bets — the detail's depth is paid ─────────────────────
 #
 # Owner decision D3 (2026-09-24): cards are free, depth is Pro. FREE keeps every card, a
@@ -289,6 +315,20 @@ def congress_holders_unlocked(tier: Optional[str]) -> bool:
 def required_tier_for_congress_holders(tier: Optional[str]) -> Optional[str]:
     """Pure: the plan that unlocks the Congress segment, or None if already unlocked."""
     return None if congress_holders_unlocked(tier) else TIER_PRO
+
+
+def caydex_fair_value_unlocked(tier: Optional[str]) -> bool:
+    """Pure: may this tier see the Caydex Fair Value Estimate on the Analysis tab?
+
+    False for Free, for guests (identity dict hardcodes ``"free"``), and for anything
+    unrecognised — the unknown case must fall CLOSED onto the paid surface.
+    """
+    return normalize_tier(tier) in CAYDEX_FAIR_VALUE_UNLOCKED_TIERS
+
+
+def required_tier_for_caydex_fair_value(tier: Optional[str]) -> Optional[str]:
+    """Pure: the plan that unlocks the estimate, or None if already unlocked (a floor)."""
+    return None if caydex_fair_value_unlocked(tier) else TIER_PRO
 
 
 def trillion_club_detail_unlocked(tier: Optional[str]) -> bool:

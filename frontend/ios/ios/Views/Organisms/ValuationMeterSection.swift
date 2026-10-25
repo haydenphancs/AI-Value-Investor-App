@@ -17,6 +17,11 @@
 //  (`caydexEstimateUnavailable`, a transient upstream failure), the card says so with
 //  `CaydexFairValueUnavailableRow` instead of drawing no row.
 //
+//  The estimate is Pro and Max only (owner, 2026-10-25: "lock caydex fair value estimate for
+//  free accounts, it should show for Pro and Max only"). For any other plan the server
+//  withholds it and raises `caydex_estimate_locked`; the card then shows `LockedSectionCard`
+//  ("Upgrade to unlock"), which opens the plans — the Holders tab's Congress lock, same shape.
+//
 //  When the snapshot carries the Caydex Fair Value Estimate (backend DCF_ENABLED), that
 //  estimate REPLACES the FMP row; the backend then sends no `dcf` at all. It is shown range
 //  first (`CaydexFairValueRow`) with the price-vs-range chart under it
@@ -37,7 +42,9 @@ struct ValuationMeterSection: View {
     /// True while `priceHistory` may still arrive.
     var isPriceHistoryLoading: Bool = false
 
+    @Environment(\.appState) private var appState
     @State private var showInfoSheet: Bool = false
+    @State private var showPaywall: Bool = false
 
     static let dcfModelLabel = "DCF model value"
     static let dcfSubtitle = "FMP discounted-cash-flow model · not a price target"
@@ -86,6 +93,14 @@ struct ValuationMeterSection: View {
                         .padding(.bottom, AppSpacing.xs)
                     CaydexFairValueUnavailableRow()
                 }
+            } else if snapshot.caydexEstimateLocked {
+                // Not on this plan: the server withheld the estimate. A lock, never an empty
+                // card — an absent row would read as "no estimate exists for this company".
+                LockedSectionCard(title: CaydexFairValue.lockedTitle,
+                                  message: CaydexFairValue.lockedMessage,
+                                  nested: true) {
+                    showPaywall = true
+                }
             }
 
             // `.fairValue` copy: a model number beside a live price. Full width so the
@@ -98,6 +113,15 @@ struct ValuationMeterSection: View {
         .sheet(isPresented: $showInfoSheet) {
             ValuationInfoSheet(showsCaydexEstimate: snapshot.caydexEstimate != nil,
                                showsFmpDcf: snapshot.dcf != nil)
+        }
+        // A PLAN gate, so the plan sheet — not the BuyCredits route a 402 takes.
+        // `.environment(\.appState, appState)` is REQUIRED: PaywallView reads the custom
+        // `\.appState` key and a sheet inherits neither environment automatically.
+        // Its own context (not `.general`): the sheet highlights the plan row this lock is
+        // about and the `paywall_shown` reason tells this lock's conversions apart.
+        .sheet(isPresented: $showPaywall) {
+            PaywallView(context: .caydexFairValue)
+                .environment(\.appState, appState)
         }
     }
 
@@ -223,8 +247,20 @@ struct ValuationMeterSection: View {
                     ),
                     currentPrice: 188.40
                 )
+                // A plan without the estimate: the server withheld it and sent the lock.
+                ValuationMeterSection(
+                    snapshot: SnapshotItem(
+                        category: .price,
+                        rating: .average,
+                        metrics: [],
+                        caydexEstimateLocked: true,
+                        caydexEstimateTierRequired: "pro"
+                    ),
+                    currentPrice: 188.40
+                )
             }
             .padding()
         }
     }
+    .environment(\.appState, AppState())
 }

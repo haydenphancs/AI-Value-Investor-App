@@ -109,6 +109,17 @@ class SnapshotItemResponse(BaseModel):
     # travels in `caydex_estimate`, and an odd ticker is not an outage. Set at SERVE time only
     # and never stored in `snapshot_cache` (valuation_snapshot_service). Optional end to end.
     caydex_estimate_unavailable: Optional[bool] = None
+    # The plan gate (owner decision 2026-10-25: the estimate on the Analysis tab is Pro and
+    # Max only). True when the caller's plan does not include the estimate AND the card held a
+    # real (status "ok") estimate — a refusal, no estimate or "temporarily unavailable" passes
+    # through unlocked ("Lock only real estimates", owner 2026-10-25). `caydex_estimate`
+    # and `caydex_estimate_unavailable` are then None and iOS draws its lock card, which
+    # names `caydex_estimate_tier_required` ("pro"). Set at the /overview ROUTE only
+    # (`valuation_snapshot_service.redact_caydex_estimate`), on a per-request copy; None on
+    # every other path (reports, Cay AI chat and the caches never carry it). Additive and
+    # Optional, so shipped builds ignore both keys and simply show a free account no row.
+    caydex_estimate_locked: Optional[bool] = None
+    caydex_estimate_tier_required: Optional[str] = None
     # When this card was BUILT (`snapshot_build_time`, ISO-8601 UTC "…Z"), 2026-10-07. A
     # cached card keeps its build time on every tier — the Snapshots header used to print
     # today's date over a card up to 24 h old. None only on a card built by a path that

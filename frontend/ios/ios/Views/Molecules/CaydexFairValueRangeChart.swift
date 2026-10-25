@@ -13,8 +13,11 @@
 //  backend/tests/test_ios_fair_value.py):
 //  • the pole reads only `CaydexFairValue.bounds`, so an estimate is never drawn without its
 //    range;
-//  • neutral ink only — no gain/loss/bullish/bearish colour on anything that marks the
-//    estimate, and no signed percent on a label (the gap is stated once, in the header);
+//  • no gain/loss/bullish/bearish colour on anything that marks the estimate, and no signed
+//    percent on a label (the gap is stated once, in the header). The range, its dot and the
+//    "Estimate $X" label share the accent (owner, 2026-10-25). The header's gap words DO take
+//    loss/gain ink since 2026-10-25 (owner: "Color it as asked", over this rule) — in
+//    `CaydexFairValueRow`, never on this chart;
 //  • the range is drawn at the right edge only. A band across the whole plot would read as
 //    "a fair value over the past two years" — the estimate is as of one day.
 //
@@ -26,6 +29,27 @@
 //  The collision resolver is mirrored line for line by
 //  backend/tests/test_ios_report_target_badges.py.
 //
+//  2026-10-25 (owner: "extend the pole, so it can have the current price on the pole. but the
+//  extend is gray color ... the current price may near the estimate, so we can move the
+//  current price to left of the range, so it won't mess up with the estimate or high or low";
+//  length: "Exactly to the price"):
+//  • when the price is outside the range, a GRAY segment (`AppColors.textMuted`, the range
+//    body's width and opacity) runs on the pole from the nearer range end EXACTLY to the
+//    price — never past it — so the range keeps its accent ink and reads apart from the
+//    extension. A gray cap marks the price on the pole, inside the range too. It is drawn
+//    UNDER the High / Low caps and the estimate's dot, so a price on a range end never turns
+//    that accent cap gray (the owner wants the range told apart from the price);
+//    neutral ink: the gap is a distance, not a good or bad sign;
+//  • "Price $X" moves to the LEFT of the pole when it would sit within one label gap of a
+//    High / Estimate / Low mark (or of where their labels land); the right column then names
+//    only the range. There it sits just ABOVE or just BELOW the dashed price line — whichever
+//    side the price line crosses less under the label — never on it: level with the line, its
+//    opaque backing erased the line's most recent stretch, which always ends at the price
+//    (review, 2026-10-25). A text-sized opaque card-colour backing keeps the few crossing
+//    points behind the text.
+//  The decisions are pure statics (`priceExtension`, `priceLabelGoesLeft`, `leftLabelSide`,
+//  `leftLabelCenterY`), mirrored by backend/tests/test_ios_fair_value_pole.py.
+//
 
 import SwiftUI
 
@@ -36,7 +60,7 @@ struct CaydexFairValueRangeChart: View {
     let currentPrice: Double?
     /// The pole is drawn only for an `.estimate`; a refusal or nil draws the price alone.
     let estimate: CaydexFairValue?
-    /// "Price · Sep 2024 – Sep 2026" (see `CaydexFairValue.pricePeriodLabel`).
+    /// "2-Year" / "8-Month" (see `CaydexFairValue.pricePeriodLabel`).
     var periodLabel: String? = nil
     /// "Price at report time" in a report, "Current price" on the Analysis tab (the legend).
     var priceLegend: String = "Current price"
@@ -53,6 +77,18 @@ struct CaydexFairValueRangeChart: View {
         /// From the end of the plot to the labels' leading edge (clears the pole's caps).
         static let labelGap: CGFloat = 10
         static var labelWidth: CGFloat { trailingGutter - labelGap }
+        /// The pole's centre sits this far inside the end of the plot.
+        static let poleInset: CGFloat = 3
+        /// Half of a 14pt cap: the cap's left edge is this far left of the pole's centre.
+        static let capHalfWidth: CGFloat = 7
+        /// From a cap's left edge to the trailing edge of the price label moved left of it.
+        static let leftLabelGap: CGFloat = 6
+        /// The opaque backing's horizontal padding around the left price label.
+        static let leftLabelPadding: CGFloat = 3
+        /// Air between the left price label's text and the dashed price line it sits beside.
+        static let leftLabelLineClearance: CGFloat = 3
+        /// A line point this close to the price's y counts as ON the line, for neither side.
+        static let leftLabelSideTolerance: CGFloat = 1.5
     }
 
     // MARK: - Inputs, sanitised
@@ -143,7 +179,7 @@ struct CaydexFairValueRangeChart: View {
                     currentPriceIndicator(price, chartWidth: chartWidth, in: geometry)
                 }
                 if let b = bounds {
-                    rangePole(b, chartWidth: chartWidth, in: geometry)
+                    rangePole(b, price: validPrice, chartWidth: chartWidth, in: geometry)
                 }
                 if showsColumn {
                     labelColumn(chartWidth: chartWidth, in: geometry)
@@ -158,17 +194,22 @@ struct CaydexFairValueRangeChart: View {
         Path { path in
             let points = series
             guard points.count >= 2 else { return }
-            // End the line short of the pole so its endpoint meets the dashed price line
-            // without crowding the pole; the dashed line continues across to it.
-            let lineWidth = max(chartWidth - Layout.poleGap, 1)
-            let xStep = lineWidth / CGFloat(points.count - 1)
             path.move(to: CGPoint(x: Layout.leadingPadding, y: yPosition(for: points[0], in: geometry)))
             for (index, price) in points.enumerated() {
-                let x = Layout.leadingPadding + CGFloat(index) * xStep
+                let x = Self.lineX(index: index, count: points.count, chartWidth: chartWidth)
                 path.addLine(to: CGPoint(x: x, y: yPosition(for: price, in: geometry)))
             }
         }
         .stroke(AppColors.primaryBlue, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+    }
+
+    /// The x of the line's `index`-th point. The line ends short of the pole so its endpoint
+    /// meets the dashed price line without crowding the pole; the dashed line continues across
+    /// to it. Shared by the line and the left price label's side choice, so the two agree.
+    private static func lineX(index: Int, count: Int, chartWidth: CGFloat) -> CGFloat {
+        let lineWidth = max(chartWidth - Layout.poleGap, 1)
+        let xStep = lineWidth / CGFloat(max(count - 1, 1))
+        return Layout.leadingPadding + CGFloat(index) * xStep
     }
 
     /// The dashed price line runs to the end of the plot, where the column's "Price" label
@@ -184,12 +225,22 @@ struct CaydexFairValueRangeChart: View {
 
     // MARK: - The range pole
 
-    /// The pole runs exactly from low to high, with flat caps at both ends and a dot at the
+    /// The pole's x: the centre of the range, the extension and every cap.
+    private static func poleX(chartWidth: CGFloat) -> CGFloat {
+        Layout.leadingPadding + chartWidth - Layout.poleInset
+    }
+
+    /// The range runs exactly from low to high, with flat caps at both ends and a dot at the
     /// estimate. Neutral accent ink: the estimate is a model value, not a good or bad sign.
+    /// When the price is outside the range, a gray extension runs from the nearer range end
+    /// exactly to the price, and a gray cap marks the price on the pole (owner, 2026-10-25).
+    /// Draw order: range body, extension, price cap, High and Low caps, estimate dot LAST — so
+    /// the gray price cap never covers an accent range cap (a price at High would otherwise turn
+    /// the range's end gray and read as the price), and the dot is never hidden by either.
     @ViewBuilder
-    private func rangePole(_ b: (low: Double, value: Double, high: Double), chartWidth: CGFloat,
-                           in geometry: GeometryProxy) -> some View {
-        let xPos = Layout.leadingPadding + chartWidth - 3
+    private func rangePole(_ b: (low: Double, value: Double, high: Double), price: Double?,
+                           chartWidth: CGFloat, in geometry: GeometryProxy) -> some View {
+        let xPos = Self.poleX(chartWidth: chartWidth)
         let highY = yPosition(for: b.high, in: geometry)
         let valueY = yPosition(for: b.value, in: geometry)
         let lowY = yPosition(for: b.low, in: geometry)
@@ -199,6 +250,27 @@ struct CaydexFairValueRangeChart: View {
                 .fill(AppColors.accentGraphic.opacity(0.35))
                 .frame(width: 6, height: max(lowY - highY, 2))
                 .position(x: xPos, y: (highY + lowY) / 2)
+
+            // The price is part of `priceUniverse`, so its y is inside the label-inset plot:
+            // the extension can never leave the chart, and it stops AT the price, never past.
+            if let price, let ext = Self.priceExtension(price: price, low: b.low, high: b.high) {
+                let fromY = yPosition(for: ext.from, in: geometry)
+                let toY = yPosition(for: ext.to, in: geometry)
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(AppColors.textMuted.opacity(0.35))
+                    .frame(width: 6, height: max(abs(toY - fromY), 2))
+                    .position(x: xPos, y: (fromY + toY) / 2)
+            }
+
+            // "the current price on the pole" — inside the range too. Drawn BEFORE the range's
+            // caps: a price on (or within 3pt of) High or Low must not turn that accent cap gray.
+            if let price {
+                let priceY = yPosition(for: price, in: geometry)
+                Capsule()
+                    .fill(AppColors.textMuted)
+                    .frame(width: 14, height: 3)
+                    .position(x: xPos, y: priceY)
+            }
 
             Capsule()
                 .fill(AppColors.accentGraphic)
@@ -217,6 +289,17 @@ struct CaydexFairValueRangeChart: View {
         }
     }
 
+    /// The gray part of the pole: from the nearer range end to the price, or nil when the
+    /// price is inside the range or on one of its ends. `to` is always the price itself —
+    /// the owner chose "Exactly to the price" (2026-10-25), never a point beyond it. Pure and
+    /// static so it is testable (mirrored by backend/tests/test_ios_fair_value_pole.py).
+    static func priceExtension(price: Double, low: Double, high: Double) -> (from: Double, to: Double)? {
+        guard price.isFinite, low.isFinite, high.isFinite, low <= high else { return nil }
+        if price > high { return (from: high, to: price) }
+        if price < low { return (from: low, to: price) }
+        return nil
+    }
+
     // MARK: - The label column
 
     /// One row of the right-hand column: what it names, its price, and the y of its mark.
@@ -226,6 +309,13 @@ struct CaydexFairValueRangeChart: View {
         let rank: Int
         let name: String
         let price: String
+
+        /// The "Price" row's rank — the one row that may move left of the pole.
+        static let priceRank = 3
+        var isPrice: Bool { rank == Self.priceRank }
+        /// The "Estimate" row's rank — the one row drawn in the range's colour.
+        static let estimateRank = 1
+        var isEstimate: Bool { rank == Self.estimateRank }
     }
 
     /// Every row, sorted top → bottom by the y of its mark.
@@ -234,21 +324,52 @@ struct CaydexFairValueRangeChart: View {
         if let b = bounds {
             rows.append(ColumnLabel(y: yPosition(for: b.high, in: geometry), rank: 0,
                                     name: "High", price: formatBadgePrice(b.high)))
-            rows.append(ColumnLabel(y: yPosition(for: b.value, in: geometry), rank: 1,
+            rows.append(ColumnLabel(y: yPosition(for: b.value, in: geometry), rank: ColumnLabel.estimateRank,
                                     name: "Estimate", price: formatBadgePrice(b.value)))
             rows.append(ColumnLabel(y: yPosition(for: b.low, in: geometry), rank: 2,
                                     name: "Low", price: formatBadgePrice(b.low)))
         }
         if let p = validPrice {
-            rows.append(ColumnLabel(y: yPosition(for: p, in: geometry), rank: 3,
+            rows.append(ColumnLabel(y: yPosition(for: p, in: geometry), rank: ColumnLabel.priceRank,
                                     name: "Price", price: formatBadgePrice(p)))
         }
         return rows.sorted { ($0.y, $0.rank) < ($1.y, $1.rank) }
     }
 
+    /// Whether "Price $X" moves left of the pole (owner, 2026-10-25: "the current price may
+    /// near the estimate, so we can move the current price to left of the range"). Judged
+    /// against the High / Estimate / Low marks AND the y their labels resolve to, so a crowded
+    /// range whose labels spread toward the price also sends it left.
+    private func priceLabelIsLeft(in geometry: GeometryProxy) -> Bool {
+        guard let p = validPrice, let b = bounds else { return false }
+        let marks = [yPosition(for: b.high, in: geometry),
+                     yPosition(for: b.value, in: geometry),
+                     yPosition(for: b.low, in: geometry)]
+        let anchors = Self.resolvedLabelPositions(
+            marks,
+            minGap: labelMinGap,
+            top: labelInset,
+            bottom: geometry.size.height - labelInset
+        )
+        return Self.priceLabelGoesLeft(priceY: yPosition(for: p, in: geometry),
+                                       markYs: marks + anchors, minGap: labelMinGap)
+    }
+
+    /// True when the price's y is CLOSER than `minGap` to any of `markYs` — where its label
+    /// would collide or be pushed off its mark. Exactly `minGap` apart is no collision (the
+    /// resolver's own test: `start + gap <= next`). Pure and static so it is testable
+    /// (mirrored by backend/tests/test_ios_fair_value_pole.py).
+    static func priceLabelGoesLeft(priceY: CGFloat, markYs: [CGFloat], minGap: CGFloat) -> Bool {
+        let gap = max(0, minGap)
+        return markYs.contains { abs($0 - priceY) < gap }
+    }
+
     @ViewBuilder
     private func labelColumn(chartWidth: CGFloat, in geometry: GeometryProxy) -> some View {
-        let rows = columnLabels(in: geometry)
+        let priceGoesLeft = priceLabelIsLeft(in: geometry)
+        let allRows = columnLabels(in: geometry)
+        // With the price moved left, the right column names only the range.
+        let rows = priceGoesLeft ? allRows.filter { !$0.isPrice } : allRows
         let anchors = Self.resolvedLabelPositions(
             rows.map(\.y),
             minGap: labelMinGap,
@@ -263,17 +384,108 @@ struct CaydexFairValueRangeChart: View {
                 .frame(width: Layout.labelWidth, alignment: .leading)
                 .position(x: centerX, y: anchors[index])
         }
+        if priceGoesLeft, let priceRow = allRows.first(where: { $0.isPrice }) {
+            leftPriceLabel(priceRow, chartWidth: chartWidth, in: geometry)
+        }
+    }
+
+    /// "Price $X" left of the pole: right-aligned, its text ending `leftLabelGap` short of the
+    /// price cap's left edge, and just ABOVE or just BELOW the dashed price line — never on it.
+    /// Level with the line, its backing erased the line's most recent stretch: the price line
+    /// always ends at the price, so its endpoint (and every recent point near the price) sat
+    /// under the label (review, 2026-10-25). The side is the one the price line crosses less
+    /// within the label's span (`leftLabelSide`), and the centre is clamped inside the plot,
+    /// flipping sides rather than landing on the dashed line (`leftLabelCenterY`).
+    /// The backing is OPAQUE `AppColors.cardBackground` — both hosts (the report's card and the
+    /// Analysis Valuation card) are `cardBackground` — and TEXT-SIZED (applied before the fixed
+    /// frame), so the few line points that still cross stay behind the text and nothing else is
+    /// masked. Square, not rounded: it is a mask in the host's own colour, so a corner radius
+    /// would draw nothing — and a rounded `cardBackground` fill is the CARD idiom, which needs an
+    /// edge this mask must not have (test_ios_theme_parity rule 9).
+    private func leftPriceLabel(_ row: ColumnLabel, chartWidth: CGFloat, in geometry: GeometryProxy) -> some View {
+        let textTrailingX = Self.poleX(chartWidth: chartWidth) - Layout.capHalfWidth - Layout.leftLabelGap
+        let boxWidth = Layout.labelWidth + 2 * Layout.leftLabelPadding
+        // Never past the plot's leading edge on a very narrow chart.
+        let centerX = max(textTrailingX + Layout.leftLabelPadding - boxWidth / 2, boxWidth / 2)
+        // The span is judged at the WORST-CASE label width, so a longer price never reaches
+        // points the choice did not look at.
+        let side = Self.leftLabelSide(
+            priceY: row.y,
+            pointYsInSpan: linePointYs(from: textTrailingX - Layout.labelWidth, chartWidth: chartWidth, in: geometry),
+            tolerance: Layout.leftLabelSideTolerance
+        )
+        let y = Self.leftLabelCenterY(
+            priceY: row.y,
+            side: side,
+            offset: labelLineHeight / 2 + Layout.leftLabelLineClearance,
+            clearance: labelLineHeight / 2,
+            top: labelInset,
+            bottom: geometry.size.height - labelInset
+        )
+        return columnLabel(row)
+            .padding(.horizontal, Layout.leftLabelPadding)
+            .background(AppColors.cardBackground)
+            .frame(width: boxWidth, alignment: .trailing)
+            .position(x: centerX, y: y)
+    }
+
+    /// The y of every line point whose x is at or right of `startX` — the stretch of the line,
+    /// up to its end, that the left price label's span covers.
+    private func linePointYs(from startX: CGFloat, chartWidth: CGFloat, in geometry: GeometryProxy) -> [CGFloat] {
+        guard showsLine else { return [] }
+        let points = series
+        var ys: [CGFloat] = []
+        for (index, price) in points.enumerated()
+        where Self.lineX(index: index, count: points.count, chartWidth: chartWidth) >= startX {
+            ys.append(yPosition(for: price, in: geometry))
+        }
+        return ys
+    }
+
+    /// Which side of the dashed price line the left label sits on.
+    enum LeftLabelSide: Equatable {
+        case above
+        case below
+    }
+
+    /// The side the price line crosses LESS inside the label's span: points above `priceY`
+    /// (smaller y) count against `.above`, points below against `.below`, and a point within
+    /// `tolerance` of the line counts for neither. A tie — no points included — is `.above`.
+    /// Pure and static so it is testable (mirrored by backend/tests/test_ios_fair_value_pole.py).
+    static func leftLabelSide(priceY: CGFloat, pointYsInSpan: [CGFloat], tolerance: CGFloat) -> LeftLabelSide {
+        let tol = max(0, tolerance)
+        let above = pointYsInSpan.filter { $0 < priceY - tol }.count
+        let below = pointYsInSpan.filter { $0 > priceY + tol }.count
+        return below < above ? .below : .above
+    }
+
+    /// The left label's centre: `offset` above or below `priceY`, clamped to `[top, bottom]`.
+    /// When the clamp pulls it closer than `clearance` to the price line (the text would sit on
+    /// the dashed line, e.g. a price at the very top with `.above`), the other side is used —
+    /// unless that one lands even closer. Pure and static so it is testable (mirrored by
+    /// backend/tests/test_ios_fair_value_pole.py).
+    static func leftLabelCenterY(priceY: CGFloat, side: LeftLabelSide, offset: CGFloat,
+                                 clearance: CGFloat, top: CGFloat, bottom: CGFloat) -> CGFloat {
+        let lowest = max(top, bottom)
+        let wanted = side == .above ? priceY - offset : priceY + offset
+        let first = min(max(wanted, top), lowest)
+        if abs(first - priceY) >= clearance { return first }
+        let flipped = side == .above ? priceY + offset : priceY - offset
+        let other = min(max(flipped, top), lowest)
+        return abs(other - priceY) > abs(first - priceY) ? other : first
     }
 
     /// "High $266.46" on ONE line: the name muted, the price bold.
     private func columnLabel(_ row: ColumnLabel) -> some View {
+        // "Estimate $194.51" takes the range's text colour, matching the dot it names and the
+        // header's Estimate line (owner, 2026-10-25); every other row stays neutral.
         HStack(spacing: 4) {
             Text(row.name)
                 .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
+                .foregroundColor(row.isEstimate ? AppColors.accentCyan : AppColors.textMuted)
             Text(row.price)
                 .font(AppTypography.caption).fontWeight(.bold)
-                .foregroundColor(AppColors.textPrimary)
+                .foregroundColor(row.isEstimate ? AppColors.accentCyan : AppColors.textPrimary)
         }
         .lineLimit(1)
         .minimumScaleFactor(0.7)
@@ -476,7 +688,7 @@ private func previewSeries(count: Int, start: Double, step: Double, wobble: Doub
         prices: previewSeries(count: 120, start: 180, step: 1.4, wobble: 9),
         currentPrice: 341.07,
         estimate: .sampleEstimate,
-        periodLabel: "Price · Sep 2024 – Sep 2026",
+        periodLabel: "2-Year",
         priceLegend: "Price at report time"
     )
     .padding()
@@ -487,7 +699,7 @@ private func previewSeries(count: Int, start: Double, step: Double, wobble: Doub
         prices: previewSeries(count: 120, start: 250, step: 0, wobble: 20),
         currentPrice: 262,
         estimate: .sampleRefused,
-        periodLabel: "Price · Sep 2024 – Sep 2026"
+        periodLabel: "2-Year"
     )
     .padding()
 }
@@ -509,5 +721,52 @@ private func previewSeries(count: Int, start: Double, step: Double, wobble: Doub
             height: 120
         )
     }
+    .padding()
+}
+
+// The 2026-10-25 pole: a gray extension EXACTLY to the price, and the price label moved left of
+// the pole when it would crowd a range label. Each estimate is built in its own statement.
+
+#Preview("Price below the range — gray extension down") {
+    let estimate = CaydexFairValue(state: .estimate(value: 305, low: 268, high: 352))
+    return CaydexFairValueRangeChart(
+        prices: previewSeries(count: 120, start: 140, step: 0.6, wobble: 12),
+        currentPrice: 211,
+        estimate: estimate,
+        periodLabel: "2-Year"
+    )
+    .padding()
+}
+
+#Preview("Price above the range — gray extension up") {
+    let estimate = CaydexFairValue(state: .estimate(value: 195, low: 160, high: 237))
+    return CaydexFairValueRangeChart(
+        prices: previewSeries(count: 120, start: 220, step: 1.05, wobble: 10),
+        currentPrice: 348,
+        estimate: estimate,
+        periodLabel: "2-Year"
+    )
+    .padding()
+}
+
+#Preview("Price ≈ estimate — label moves left") {
+    let estimate = CaydexFairValue(state: .estimate(value: 220, low: 180, high: 260))
+    return CaydexFairValueRangeChart(
+        prices: previewSeries(count: 120, start: 170, step: 0.4, wobble: 8),
+        currentPrice: 222,
+        estimate: estimate,
+        periodLabel: "2-Year"
+    )
+    .padding()
+}
+
+#Preview("Price just above High — short extension, label left") {
+    let estimate = CaydexFairValue(state: .estimate(value: 220, low: 180, high: 260))
+    return CaydexFairValueRangeChart(
+        prices: previewSeries(count: 120, start: 190, step: 0.6, wobble: 8),
+        currentPrice: 263,
+        estimate: estimate,
+        periodLabel: "2-Year"
+    )
     .padding()
 }

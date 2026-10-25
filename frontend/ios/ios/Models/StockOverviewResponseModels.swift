@@ -59,9 +59,12 @@ struct StockOverviewResponseDTO: Decodable {
 
     /// True when a snapshot says its Caydex Fair Value Estimate is TEMPORARILY unavailable.
     /// `StockRepository` does not cache such a response, so the next open asks again
-    /// instead of replaying the gap for the cache's lifetime.
+    /// instead of replaying the gap for the cache's lifetime. A LOCKED snapshot is not one:
+    /// the mapping ignores the flag beside the lock, so the cache does too.
     var hasUnavailableCaydexEstimate: Bool {
-        snapshots.contains { $0.caydexEstimateUnavailable == true && $0.caydexEstimate == nil }
+        snapshots.contains {
+            $0.caydexEstimateUnavailable == true && $0.caydexEstimate == nil && $0.caydexEstimateLocked != true
+        }
     }
 }
 
@@ -241,6 +244,12 @@ struct SnapshotItemDTO: Decodable {
     /// The Analysis tab then says so instead of drawing no row. Optional: older backends
     /// never send it, and nil reads as "not flagged".
     let caydexEstimateUnavailable: Bool?
+    /// True when the server WITHHELD the estimate because this account's plan does not
+    /// include it (Pro and Max only, owner 2026-10-25) — the Analysis tab then shows a lock.
+    /// Optional: older backends never send it, and nil reads as "not locked".
+    let caydexEstimateLocked: Bool?
+    /// The lowest plan that unlocks the estimate ("pro"), sent beside the lock. Optional.
+    let caydexEstimateTierRequired: String?
     /// ISO-8601 UTC instant the backend BUILT this snapshot (a cached item keeps its build
     /// time). Optional: an older backend never sends it, and the header then shows no date.
     let computedAt: String?
@@ -250,6 +259,8 @@ struct SnapshotItemDTO: Decodable {
         case fullReportAvailable = "full_report_available"
         case caydexEstimate = "caydex_estimate"
         case caydexEstimateUnavailable = "caydex_estimate_unavailable"
+        case caydexEstimateLocked = "caydex_estimate_locked"
+        case caydexEstimateTierRequired = "caydex_estimate_tier_required"
         case computedAt = "computed_at"
     }
 }
@@ -361,6 +372,12 @@ extension StockOverviewResponseDTO {
                 print("⚠️ StockOverviewDTO: \(symbol) \(dto.category) snapshot computed_at unreadable: \(raw)")
             }
             let caydexEstimate = dto.caydexEstimate.flatMap { CaydexFairValue(dto: $0) }
+            // Locked only when there is no estimate to show: a flag beside a real estimate
+            // or refusal is ignored rather than hiding what the server did send.
+            let caydexEstimateLocked = dto.caydexEstimateLocked == true && caydexEstimate == nil
+            if dto.caydexEstimateLocked == true && caydexEstimate != nil {
+                print("⚠️ StockOverviewDTO: \(symbol) \(dto.category) caydex_estimate_locked sent beside an estimate — showing the estimate")
+            }
             return SnapshotItem(
                 category: category,
                 rating: rating,
@@ -369,8 +386,12 @@ extension StockOverviewResponseDTO {
                 dcf: dto.dcf.flatMap { DcfEstimate(dto: $0) },
                 caydexEstimate: caydexEstimate,
                 // Only when there is no estimate to show: a flag beside a real estimate
-                // or refusal is ignored rather than hiding it.
-                caydexEstimateUnavailable: dto.caydexEstimateUnavailable == true && caydexEstimate == nil,
+                // or refusal is ignored rather than hiding it. And never beside the lock: an
+                // estimate this plan cannot see is not "temporarily unavailable" to it.
+                caydexEstimateUnavailable: dto.caydexEstimateUnavailable == true && caydexEstimate == nil
+                    && !caydexEstimateLocked,
+                caydexEstimateLocked: caydexEstimateLocked,
+                caydexEstimateTierRequired: dto.caydexEstimateTierRequired,
                 computedAt: computedAt
             )
         }

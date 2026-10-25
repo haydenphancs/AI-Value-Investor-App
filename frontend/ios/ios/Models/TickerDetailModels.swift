@@ -453,11 +453,19 @@ struct SnapshotItem: Identifiable {
     /// it for a transient reason (`caydex_estimate_unavailable`) — the Analysis tab then
     /// says "temporarily unavailable" instead of drawing nothing.
     var caydexEstimateUnavailable: Bool = false
+    /// True only when there is no `caydexEstimate` because this account's plan does not
+    /// include it (`caydex_estimate_locked`): the server withheld it, and the Analysis tab's
+    /// Valuation card shows a lock that opens the plans (owner, 2026-10-25: "lock caydex fair
+    /// value estimate for free accounts, it should show for Pro and Max only").
+    var caydexEstimateLocked: Bool = false
+    /// The lowest plan that unlocks it, as the server names it ("pro"). Informational; the
+    /// lock's copy does not read it.
+    var caydexEstimateTierRequired: String? = nil
     /// When the backend BUILT this snapshot (`computed_at`). nil = not sent (an older
     /// backend) or unreadable: the Snapshots header then shows no date rather than today's.
     var computedAt: Date? = nil
 
-    init(category: SnapshotCategory, rating: SnapshotRatingLevel, metrics: [SnapshotMetric], fullReportAvailable: Bool = true, dcf: DcfEstimate? = nil, caydexEstimate: CaydexFairValue? = nil, caydexEstimateUnavailable: Bool = false, computedAt: Date? = nil) {
+    init(category: SnapshotCategory, rating: SnapshotRatingLevel, metrics: [SnapshotMetric], fullReportAvailable: Bool = true, dcf: DcfEstimate? = nil, caydexEstimate: CaydexFairValue? = nil, caydexEstimateUnavailable: Bool = false, caydexEstimateLocked: Bool = false, caydexEstimateTierRequired: String? = nil, computedAt: Date? = nil) {
         self.category = category
         self.rating = rating
         self.metrics = metrics
@@ -465,6 +473,8 @@ struct SnapshotItem: Identifiable {
         self.dcf = dcf
         self.caydexEstimate = caydexEstimate
         self.caydexEstimateUnavailable = caydexEstimateUnavailable
+        self.caydexEstimateLocked = caydexEstimateLocked
+        self.caydexEstimateTierRequired = caydexEstimateTierRequired
         self.computedAt = computedAt
     }
 

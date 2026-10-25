@@ -29,8 +29,14 @@ from app.schemas.stock_overview import (
     DcfEstimateResponse,
     SnapshotItemResponse,
     SnapshotMetricResponse,
+    StockOverviewResponse,
     snapshot_build_time,
     with_cached_build_time,
+)
+from app.services.entitlements import (
+    TIER_PRO,
+    caydex_fair_value_unlocked,
+    required_tier_for_caydex_fair_value,
 )
 from app.services.financials_metric_gate import (
     comparable_peer_metrics,
@@ -647,9 +653,14 @@ class ValuationSnapshotService:
                     "category": "Price",
                     "response_json": {
                         # Both are serve-time only (`_attach_serve_time_estimate`): a stored
-                        # flag would say "temporarily unavailable" for up to 24 h.
+                        # flag would say "temporarily unavailable" for up to 24 h. The two
+                        # plan-gate keys are per-REQUEST (`redact_caydex_estimate`, never set
+                        # on this instance): a stored lock would lock every paid caller too.
                         **result.model_dump(
-                            exclude={"caydex_estimate", "caydex_estimate_unavailable"},
+                            exclude={
+                                "caydex_estimate", "caydex_estimate_unavailable",
+                                "caydex_estimate_locked", "caydex_estimate_tier_required",
+                            },
                         ),
                         _VERSION_KEY: _SNAPSHOT_PAYLOAD_VERSION,
                         _DCF_SOURCE_KEY: bool(settings.DCF_ENABLED),
@@ -1338,6 +1349,97 @@ def build_price_snapshot(
         weighted_score=weighted_score,
         computed_at=snapshot_build_time(),
     )
+
+# ── Plan gate: the Caydex Fair Value Estimate is Pro/Max (2026-10-25) ─────────────
+#
+# Owner decision (2026-10-25): "for Analysis tab, lock caydex fair value estimate for free
+# accounts, it should show for Pro and Max only" — enforced server-side ("Server-side
+# (Recommended)"), like the Congress segment of the Holders tab
+# (`holders_service.redact_congress`). Applied at the `/stocks/{ticker}/overview` ROUTE
+# only: reports and Cay AI chat read the estimate through other paths and stay ungated
+# (owner, 2026-10-25: "Leave reports as is (Recommended)" — a free account can still open a
+# shared cached report for free and read the estimate there; known and accepted), and the
+# estimate itself is still computed once per (ticker, date, model) for everyone (DCF HARD
+# RULE 1) — the gate decides only who is SHOWN it.
+#
+# What is locked (owner, 2026-10-25: "Lock only real estimates (Recommended)"): ONLY an
+# actual estimate (`caydex_estimate.status == "ok"`), so upgrading always reveals a number. A
+# free account sees a REFUSAL ("Not modelled" + its reason), the "temporarily unavailable"
+# state and a card with no estimate exactly as a paying one does — none of them holds a
+# number, and a lock there would sell an upgrade that shows nothing.
+
+_PRICE_CATEGORY = "Price"
+
+
+def _holds_real_estimate(snap: SnapshotItemResponse) -> bool:
+    """True when ``snap`` carries an actual Caydex estimate — status "ok", the only state
+    with a fair value and a range (a refusal carries a code and a reason, never a number:
+    `dcf_fair_value_service._refuse`). Anything else is the free account's to see."""
+    est = snap.caydex_estimate
+    return est is not None and est.status == "ok"
+
+
+def redact_caydex_estimate(
+    resp: StockOverviewResponse, tier_required: str,
+) -> StockOverviewResponse:
+    """A COPY of ``resp`` with every REAL Caydex estimate withheld and the lock pair raised
+    on the Price card that held it.
+
+    Never mutates: `stock_overview_service.get_overview` serves ONE instance per
+    (ticker, range, interval, session) from its 120 s in-memory tier to every caller, and its
+    Price snapshot is the valuation service's own serve-time copy — an in-place edit would
+    hide the estimate from the next paying caller. Only the snapshot list and the snapshots
+    it changes are copied; everything else is shared by reference, as `model_copy` does.
+
+    Only a card holding an estimate with status "ok" changes (owner, 2026-10-25: "Lock only
+    real estimates (Recommended)"): a refused estimate, a None estimate and the
+    `caydex_estimate_unavailable` outage flag pass through as the very same snapshot object.
+    The Price card gets the lock pair; any OTHER card that carried a real estimate (none does
+    today) loses it too — fail closed — without a lock card of its own.
+    """
+    snapshots = []
+    for snap in resp.snapshots:
+        if not _holds_real_estimate(snap):
+            snapshots.append(snap)
+            continue
+        update: Dict[str, Any] = {
+            "caydex_estimate": None,
+            "caydex_estimate_unavailable": None,
+        }
+        if snap.category == _PRICE_CATEGORY:
+            update["caydex_estimate_locked"] = True
+            update["caydex_estimate_tier_required"] = tier_required
+        snapshots.append(snap.model_copy(update=update))
+    return resp.model_copy(update={"snapshots": snapshots})
+
+
+def gate_caydex_estimate(resp: Any, tier: Optional[str]) -> Any:
+    """The overview as ONE caller on ONE plan may see it — the route's single gate.
+
+    Returns ``resp`` itself (the same object) when the caller's plan includes the estimate,
+    when settings.DCF_ENABLED is off (the kill switch: no Caydex estimate exists then, and
+    FMP's `dcf` row is not part of this gate), when ``resp`` is not an overview model (an
+    error ``JSONResponse`` passes through untouched), and when no card holds a REAL estimate
+    (status "ok"): a refusal, the outage flag and an estimate-less Price card reach a free
+    account unchanged (owner, 2026-10-25: "Lock only real estimates (Recommended)" — the
+    lock appears only where upgrading reveals a number).
+    """
+    if not settings.DCF_ENABLED:
+        return resp
+    if not isinstance(resp, StockOverviewResponse):
+        return resp
+    if caydex_fair_value_unlocked(tier):
+        return resp
+    if not any(_holds_real_estimate(s) for s in resp.snapshots):
+        logger.info(
+            "Caydex estimate gate: no ok estimate on the %s overview — nothing to lock",
+            resp.symbol,
+        )
+        return resp
+    return redact_caydex_estimate(
+        resp, required_tier_for_caydex_fair_value(tier) or TIER_PRO,
+    )
+
 
 # ── Singleton ─────────────────────────────────────────────────────
 

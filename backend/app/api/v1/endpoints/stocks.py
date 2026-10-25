@@ -59,6 +59,7 @@ from app.schemas.technical_analysis import (
     TechnicalAnalysisDetailResponse,
 )
 from app.services.stock_overview_service import get_stock_overview_service
+from app.services.valuation_snapshot_service import gate_caydex_estimate
 from app.services.analyst_service import get_analyst_service
 from app.services.earnings_service import get_earnings_service
 from app.schemas.earnings import EarningsResponse
@@ -694,6 +695,7 @@ async def get_stock_overview(
         pattern="^(1min|5min|15min|30min|1hour|4hour|daily|weekly|monthly|quarterly)$",
     ),
     extended_hours: bool = Query(False, alias="extended_hours"),
+    user: dict = Depends(get_watchlist_identity),
 ):
     """
     Get comprehensive stock overview data for the Overview tab.
@@ -702,11 +704,18 @@ async def get_stock_overview(
     key stats, performance, snapshots, sector info, company profile,
     related tickers, and benchmark summary.
     Set extended_hours=true to include pre-market and after-hours data (intraday only).
+
+    The Caydex Fair Value Estimate on the Price snapshot (the Analysis tab's Valuation
+    card) is Pro/Max (owner decision 2026-10-25): a Free caller receives it withheld with
+    ``caydex_estimate_locked=true``, on a per-request COPY — the overview is cached in
+    memory per ticker and shared by every caller. `get_watchlist_identity` composes with
+    the router-level sign-in guard (as on `/holders`); there is no guest branch.
     """
     ticker = ticker.upper()
     try:
         service = get_stock_overview_service()
-        return await service.get_overview(ticker, chart_range=chart_range, interval=interval, extended_hours=extended_hours)
+        overview = await service.get_overview(ticker, chart_range=chart_range, interval=interval, extended_hours=extended_hours)
+        return gate_caydex_estimate(overview, user.get("tier"))
     except HTTPException:
         raise
     except Exception as e:

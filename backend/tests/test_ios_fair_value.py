@@ -5,7 +5,10 @@ Pins, in the Swift that ships:
     everything but symbol/status is Optional, and both carrier DTOs decode the block;
   * the wording rules (documents/research/dcf-methodology-v2.md §5): the title says "Estimate",
     the subtitle says "not a price target", the gap is "Price N% below/above the estimate", and
-    no verdict word (Undervalued / Overvalued / Fairly valued / Cheap / Bargain) appears;
+    no verdict word (Undervalued / Overvalued / Fairly valued / Cheap / Bargain) appears. The
+    estimate ROW (Analysis card + report) is headed "Caydex Fair Value Estimate – DCF Model",
+    reads "Range: $L – $H" and carries no subtitle (owner, 2026-10-25: "we already have them" —
+    the assumptions sheet and the cards' disclaimers keep it);
   * a value is never shown without its range, and the RANGE is the headline (owner,
     2026-09-26: "not only the exact price") — row, sheet and chart;
   * on the Analysis tab the Caydex row REPLACES FMP's row — never both — with the
@@ -13,7 +16,9 @@ Pins, in the Swift that ships:
   * the report's "Valuation & Institutions" card leads with it, says its price is the
     report-time price, and draws NO analyst half (heading, Buy/Hold/Sell, targets, Momentum);
     an analyst-era insight is hidden;
-  * the chart's pole is the estimate's range in neutral ink;
+  * the chart's pole is the estimate's range in neutral ink; the "Estimate $X" line (row, sheet)
+    and chart label take the range's text colour, and the gap's "N% above / below" words take
+    loss / gain ink in the row and sheet only (owner, 2026-10-25: "Color it as asked");
   * the chat context quotes the published value and no longer names FMP.
 Comment-stripped and brace-bounded (.claude/rules/testing.md §3); mutation-tested by hand.
 """
@@ -36,7 +41,6 @@ _BAR = _IOS / "Views" / "Molecules" / "ReportConsensusBar.swift"
 _SNAP_DTO = _IOS / "Models" / "StockOverviewResponseModels.swift"
 _REPORT_DTO = _IOS / "Models" / "TickerReportResponse.swift"
 _VM = _IOS / "ViewModels" / "TickerDetailViewModel.swift"
-_COMPACT = _IOS / "Views" / "Molecules" / "CaydexFairValueCompactRow.swift"
 _UNAVAILABLE = _IOS / "Views" / "Molecules" / "CaydexFairValueUnavailableRow.swift"
 
 _VERDICTS = re.compile(r"undervalued|overvalued|underpriced|overpriced|fairly valued|\bcheap\b|"
@@ -123,6 +127,8 @@ def test_title_subtitle_and_gap_wording():
     model = _decl(_code(_MODELS), "struct CaydexFairValue:")
     assert 'static let title = "Caydex Fair Value Estimate"' in model
     assert 'static let subtitle = "DCF model estimate · not a price target · not a recommendation"' in model
+    assert 'static let rowTitle = "Caydex Fair Value Estimate – DCF Model"' in model
+    assert 'static let rowRangeLabel = "Range:"' in model
     gap = _decl(model, "func formattedGap(versus price: Double?)")
     assert '"Price in line with the estimate"' in gap
     assert 'return "Price \\(magnitude)% \\(gap < 0 ? "below" : "above") the estimate"' in gap
@@ -130,7 +136,7 @@ def test_title_subtitle_and_gap_wording():
 
 
 def test_no_verdict_word_in_any_fair_value_string():
-    for path in (_MODELS, _ROW, _SHEET, _CHART, _COMPACT, _UNAVAILABLE):
+    for path in (_MODELS, _ROW, _SHEET, _CHART, _UNAVAILABLE):
         for s in _strings(_code(path)):
             assert _verdict_free(s), f"{path.name}: {s!r}"
     info = _code(_IOS / "Views" / "Molecules" / "ValuationInfoSheet.swift")
@@ -145,12 +151,17 @@ def _estimate_arm(block: str) -> str:
 
 def test_the_row_is_range_first_and_never_a_bare_value():
     row = _decl(_code(_ROW), "struct CaydexFairValueRow")
-    arm = _estimate_arm(_decl(row, "private var content: some View"))
-    order = [arm.index(t) for t in ("CaydexFairValue.rangeLabel", "estimate.formattedRangeBounds",
-                                    "estimate.formattedEstimate", "CaydexFairValue.subtitle")]
-    assert order == sorted(order), "range label → range → estimate → subtitle"
-    assert re.search(r"estimate\.formattedRangeBounds[^\n]*\n\s*\.font\(AppTypography\.dataTitle\)", arm), \
-        "the range is the headline type"
+    content = _decl(row, "private var content: some View")
+    arm = _estimate_arm(content)
+    order = [arm.index(t) for t in ("CaydexFairValue.rowRangeLabel", "estimate.formattedRangeBounds",
+                                    "estimate.formattedEstimate")]
+    assert order == sorted(order), "range label → range → estimate"
+    assert re.search(r"estimate\.formattedRangeBounds[^\n]*\n\s*\.font\(AppTypography\.dataMedium\)", arm), \
+        "the range is 14 pt (dataMedium) since the owner's second 2026-10-25 resize"
+    # Owner, 2026-10-25: the row carries no subtitle and names the model in its header.
+    assert "CaydexFairValue.subtitle" not in row
+    assert "Text(CaydexFairValue.rowTitle)" in content
+    assert "Text(CaydexFairValue.title)" not in content
     assert "rangeAccessibilityLabel" in arm, "VoiceOver must hear 'from … to …', not a dash"
     assert "formattedValue" not in row, "a bare value is back in the row"
     assert "CaydexFairValueSheet(" in row, "the assumptions must be one tap away"
@@ -334,3 +345,102 @@ def test_the_chat_context_quotes_the_published_value_and_names_no_vendor():
     vm = _code(_VM)
     assert "if let estimate = snapshot.caydexEstimate {" in vm
     assert "FMP discounted cash flow" not in vm
+
+
+# ── the chart's period label: "2-Year", measured from the data (owner, 2026-10-25) ───────────
+
+def _period_label(first: str, last: str):
+    """Python mirror of `CaydexFairValue.pricePeriodLabel` (pinned below)."""
+    from datetime import date
+    start, end = date.fromisoformat(first[:10]), date.fromisoformat(last[:10])
+    if end < start:
+        return None
+    days = (end - start).days
+    months = max(1, int(_round_half_away(days / 30.44)))
+    years = int(_round_half_away(months / 12))
+    if years >= 1 and abs(months - years * 12) <= 1:
+        return f"{years}-Year"
+    return f"{months}-Month"
+
+
+def _round_half_away(x: float) -> float:
+    # Swift's `.rounded()` rounds half away from zero; Python's round() rounds half to even.
+    import math
+    return math.floor(x + 0.5) if x >= 0 else math.ceil(x - 0.5)
+
+
+def test_the_period_label_source_is_the_mirrored_rule():
+    fn = _decl(_decl(_code(_MODELS), "struct CaydexFairValue:"),
+               "static func pricePeriodLabel(from first: String?, to last: String?) -> String?")
+    for token in ("end >= start else { return nil }",
+                  "let months: Int = max(1, Int((days / 30.44).rounded()))",
+                  "let years: Int = Int((Double(months) / 12).rounded())",
+                  "if years >= 1, abs(months - years * 12) <= 1 {",
+                  'return "\\(years)-Year"', 'return "\\(months)-Month"'):
+        assert token in fn, token
+    assert "Price · " not in fn, "the label no longer spells out the dates"
+
+
+def test_the_period_label_names_the_span_the_data_covers():
+    assert _period_label("2024-10-25", "2026-10-23") == "2-Year"      # the Analysis tab's window
+    assert _period_label("2024-11-20", "2026-10-23") == "2-Year"      # 23 months still reads as 2
+    assert _period_label("2025-04-20", "2026-10-23") == "18-Month"    # not a false "2-Year"
+    assert _period_label("2026-02-20", "2026-10-23") == "8-Month"     # a recent listing
+    assert _period_label("2025-09-20", "2026-10-23") == "1-Year"
+    assert _period_label("2026-10-13", "2026-10-23") == "1-Month"     # never "0-Month"
+    assert _period_label("2026-10-23", "2026-10-23") == "1-Month"
+    assert _period_label("2026-10-23", "2024-10-23") is None          # backwards: no label
+
+
+# ── colour: the estimate in the range's colour, the gap in loss / gain ink (owner, 2026-10-25) ─
+
+def _gap_emphasis(price: float, value: float):
+    """Python mirror of `CaydexFairValue.gapEmphasis(versus:)` (pinned below)."""
+    import math
+    gap = (price / value - 1) * 100
+    magnitude = int(math.floor(abs(gap) + 0.5))          # Swift .rounded(): half away from zero
+    if magnitude == 0:
+        return None
+    return (f"{magnitude}% {'below' if gap < 0 else 'above'}", gap > 0)
+
+
+def test_the_gap_emphasis_source_is_the_mirrored_rule():
+    fn = _decl(_decl(_code(_MODELS), "struct CaydexFairValue:"),
+               "func gapEmphasis(versus price: Double?) -> (words: String, priceAbove: Bool)?")
+    for token in ("guard let gap = priceGapPercent(versus: price) else { return nil }",
+                  "let magnitude = Int(abs(gap).rounded())", "guard magnitude > 0 else { return nil }",
+                  'return ("\\(magnitude)% \\(gap < 0 ? "below" : "above")", gap > 0)'):
+        assert token in fn, token
+
+
+def test_the_gap_emphasis_names_the_side_and_matches_the_gap_words():
+    assert _gap_emphasis(347.73, 194.51) == ("79% above", True)       # AAPL → red
+    assert _gap_emphasis(210.96, 305.26) == ("31% below", False)      # NVDA → green
+    assert _gap_emphasis(100.4, 100.0) is None                        # "in line" → uncoloured
+    assert _gap_emphasis(100.6, 100.0) == ("1% above", True)
+
+
+def test_the_gap_line_colours_only_its_words_and_is_shared_by_row_and_sheet():
+    row_src = _code(_ROW)
+    ext = _decl(row_src, "extension CaydexFairValue")
+    fn = _decl(ext, "func gapLine(versus price: Double?, context: String? = nil) -> AttributedString?")
+    assert "guard let gap = formattedGap(versus: price) else { return nil }" in fn, "same words as before"
+    assert "line.foregroundColor = AppColors.textSecondary" in fn, "the rest of the line stays neutral"
+    assert "gapEmphasis(versus: price)" in fn and "line.range(of: emphasis.words)" in fn
+    assert "emphasis.priceAbove ? AppColors.loss : AppColors.gain" in fn, \
+        "red (loss) when the price is above the estimate, green (gain) when below"
+    for path, anchor in ((_ROW, "private var content: some View"), (_SHEET, "private var summaryCard: some View")):
+        arm = _estimate_arm(_decl(_code(path), anchor))
+        assert "estimate.gapLine(versus: currentPrice, context: priceContext)" in arm, path.name
+        assert "formattedGap(" not in arm, f"{path.name}: the uncoloured gap line is back"
+        mid = arm[arm.index("estimate.formattedEstimate"):arm.index("estimate.gapLine")]
+        assert ".foregroundColor(AppColors.accentCyan)" in mid, f"{path.name}: the estimate is in the range's colour"
+        assert "Graphic" not in mid, "a *Graphic token never inks text"
+
+
+def test_the_chart_estimate_label_is_in_the_range_colour_and_the_rest_stay_neutral():
+    chart = _decl(_code(_CHART), "struct CaydexFairValueRangeChart")
+    label = _decl(chart, "private func columnLabel(_ row: ColumnLabel) -> some View")
+    assert label.count("row.isEstimate ? AppColors.accentCyan :") == 2, "name and price"
+    assert "AppColors.textMuted" in label and "AppColors.textPrimary" in label, "the other rows stay neutral"
+    assert "static let estimateRank = 1" in chart and "rank: ColumnLabel.estimateRank" in chart

@@ -79,7 +79,6 @@ _BLOCKED_FINISHES = frozenset({
     "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "OTHER", "IMAGE_SAFETY",
     "LANGUAGE", "MALFORMED_FUNCTION_CALL",
 })
-_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
 
 SHARED_FIELDS = ("hook", "video_script", "cards", "carousel_slides")
 #: The package key that lists why the image post was dropped (empty when it was kept).
@@ -184,10 +183,13 @@ def parse_response(result: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Li
         return None, [Violation("response", "truncated", "output hit the token ceiling")]
     if not isinstance(text, str) or not text.strip():
         return None, [Violation("response", "empty_response", finish or "no text")]
-    body = _FENCE_RE.sub("", text.strip())
+    if len(text) > jd.MAX_ANSWER_CHARS:
+        return None, [Violation("response", "not_json",
+                                f"answer of {len(text)} characters (> {jd.MAX_ANSWER_CHARS})")]
+    body = jd.strip_code_fences(text)
     try:
         obj = json.loads(body)
-    except ValueError as e:
+    except (ValueError, RecursionError) as e:          # RecursionError: nested past the C stack
         return None, [Violation("response", "not_json", f"{type(e).__name__}: {e}")]
     if not isinstance(obj, dict):
         return None, [Violation("response", "not_json", f"top level is {type(obj).__name__}")]

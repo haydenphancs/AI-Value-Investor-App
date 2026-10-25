@@ -14,7 +14,8 @@ What is pinned:
 * **The call**: system instruction = IDENTITY_RULE … ADVICE_BOUNDARY; model, thinking budget,
   schema and usage tag as declared; every kwarg accepted by the REAL `GeminiClient.generate_json`.
 * **`parse_response`**: fenced / plain JSON, prose around JSON, empty + STOP, SAFETY, RECITATION,
-  MAX_TOKENS partial, top-level list, prefixed finish reasons.
+  MAX_TOKENS partial, top-level list, prefixed finish reasons, nesting past the C stack, an answer
+  over the cap; a long inner whitespace run parses in linear time (review 2026-10-24).
 * **One generation**: a clean draft is 1 call; a violation is exactly 2 calls and the repair
   carries the violation code; EVERY prompt is unique and carries the generation id (the 1-h
   response cache would otherwise replay a rejected draft); shared-field failure twice → rejected;
@@ -381,6 +382,7 @@ _OBJ = {"hook": "x"}
     ({"text": "```json\n" + json.dumps(_OBJ) + "\n```", "finish_reason": "STOP"}, None),
     ({"text": "```JSON\n" + json.dumps(_OBJ) + "\n```\n", "finish_reason": "STOP"}, None),
     ({"text": "```\n" + json.dumps(_OBJ) + "\n```", "finish_reason": "STOP"}, None),
+    ({"text": " ```json\r\n" + json.dumps(_OBJ) + "\r\n```\r\n", "finish_reason": "STOP"}, None),
     ({"text": "  \n" + json.dumps(_OBJ) + "\n  ", "finish_reason": None}, None),
     ({"text": json.dumps(_OBJ), "finish_reason": "FINISH_REASON_STOP"}, None),
     ({"text": json.dumps(_OBJ), "finish_reason": "FinishReason.STOP"}, None),
@@ -391,6 +393,10 @@ _OBJ = {"hook": "x"}
     ({"text": "null", "finish_reason": "STOP"}, "not_json"),
     ({"text": "42", "finish_reason": "STOP"}, "not_json"),
     ({"text": '"just a string"', "finish_reason": "STOP"}, "not_json"),
+    # Review 2026-10-24: nested past the C stack (RecursionError, not a ValueError) and an answer
+    # over the cap are unusable answers too — never an exception out of the generation.
+    ({"text": "[" * 5000, "finish_reason": "STOP"}, "not_json"),
+    ({"text": json.dumps(_OBJ) + " " * ws.jd.MAX_ANSWER_CHARS, "finish_reason": "STOP"}, "not_json"),
     ({"text": "", "finish_reason": "STOP"}, "empty_response"),
     ({"text": "   \n ", "finish_reason": "STOP"}, "empty_response"),
     ({"text": None, "finish_reason": "STOP"}, "empty_response"),
@@ -424,6 +430,22 @@ def test_parse_response_matrix(result, code):
         assert obj is None
         assert [v.code for v in violations] == [code]
         assert violations[0].field == "response"
+
+
+def test_parse_response_reads_an_answer_at_the_cap_with_a_long_inner_whitespace_run_fast():
+    """Review 2026-10-24: the old fence pattern was quadratic in a whitespace run inside the answer
+    (2.5 s on 50,000 newlines, on the web's one event loop). The writer now cuts fences with the
+    judge's linear `strip_code_fences` (its parity with the old pattern is pinned in
+    test_marketing_judge.py), so the longest answer the cap lets through parses in under 0.2 s."""
+    import time
+
+    head, tail = '```json\n{"hook": "x"', "}\n```"
+    pad = ws.jd.MAX_ANSWER_CHARS - len(head) - len(tail)
+    text = head + "\n" * pad + tail
+    t = time.perf_counter()
+    obj, violations = ws.parse_response({"text": text, "finish_reason": "STOP"})
+    assert time.perf_counter() - t < 0.2
+    assert (obj, violations) == (_OBJ, [])
 
 
 # ── one generation ────────────────────────────────────────────────────────────

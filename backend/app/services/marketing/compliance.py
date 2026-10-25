@@ -2992,7 +2992,43 @@ _APP_STORE_CTA_RE = re.compile(
 #: as a sentence end) or an en/em dash, spaced or not ("Lessons on patience—coming soon to the App
 #: Store"; `fold` turns the dash into a hyphen glued to the words). The App Store scan's second reading
 #: makes each one a sentence end. A hyphen is never one ("pre-order", "long-term").
-_CLAUSE_BREAKS_RE = re.compile(r"\n+|\s*[\u2013\u2014]\s*")
+_CLAUSE_DASHES = "\u2013\u2014"
+
+
+def _has_clause_break(text: str) -> bool:
+    r"""`re.search(r"\n+|\s*[\u2013\u2014]\s*", text)`: a line break or a dash anywhere."""
+    return "\n" in text or any(d in text for d in _CLAUSE_DASHES)
+
+
+def _break_clauses(text: str) -> str:
+    r"""`text` with each run of line breaks, and each en/em dash with the whitespace around it,
+    made ". " — exactly `re.sub(r"\n+|\s*[\u2013\u2014]\s*", ". ", text)`, in linear time. That
+    pattern retried `\s*` from every position of a whitespace run that ends in no dash (quadratic:
+    ~150 ms on one 6,000-character field, review 2026-10-24). `\s` and `str.isspace` agree on
+    every code point."""
+    n = len(text)
+    ws_end = list(range(n + 1))          # ws_end[i]: the first index >= i that is not whitespace
+    for i in range(n - 1, -1, -1):
+        if text[i].isspace():
+            ws_end[i] = ws_end[i + 1]
+    out: List[str] = []
+    i = 0
+    while i < n:
+        if text[i] == "\n":                       # `\n+`, the first alternative
+            j = i + 1
+            while j < n and text[j] == "\n":
+                j += 1
+            out.append(". ")
+            i = j
+            continue
+        j = ws_end[i]                             # `\s*[\u2013\u2014]\s*`
+        if j < n and text[j] in _CLAUSE_DASHES:
+            out.append(". ")
+            i = ws_end[j + 1]
+            continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
 #: "signals" as the THING a product sells ("trading signals", "buy signals", "our signals",
 #: "signals to buy") — the App Store "Also avoid" word. The verb ("Growth in revenue and
 #: earnings signals expansion", "This transition signals a maturation of the market" — real
@@ -4385,11 +4421,11 @@ def scan_text(field: str, text: str, *, allow_emoji: bool = False,
     if m:
         v("banned_phrase", m.group(0))
     m = _APP_STORE_CTA_RE.search(folded)
-    if m is None and _CLAUSE_BREAKS_RE.search(text):
+    if m is None and _has_clause_break(text):
         # `fold` made each line break a space and each dash a glued hyphen; a claim alone on its own
         # line ("…\n\nComing soon to the App Store") or after a dash ("Lessons—coming soon to the
         # App Store") opens a clause, as `sentences` reads a line break.
-        m = _APP_STORE_CTA_RE.search(fold(_CLAUSE_BREAKS_RE.sub(". ", text)))
+        m = _APP_STORE_CTA_RE.search(fold(_break_clauses(text)))
     if m:
         v("brand_mention", m.group(0))
     if _ranking_claim(folded):

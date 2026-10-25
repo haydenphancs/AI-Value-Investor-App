@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 def extract_year(record: Dict[str, Any]) -> str:
@@ -293,3 +293,76 @@ def filing_period_display(period: str) -> str:
     if not match:
         return ""
     return f"Q{match.group(2)} {match.group(1)}"
+
+
+# ── Fiscal-year wording for the Future Forecast timeline (PDF) ────────────────
+# Mirrors iOS `FiscalYearLabel` (Models/TickerReportModels.swift). The Earnings Timeline's
+# columns are FISCAL years, so Planet Labs' "2027" (Feb 2026 – Jan 2027) read as a calendar
+# year still a quarter away while it was the year in progress. A company whose year does not
+# end in December gets "FY2027" and its months; a December filer keeps the bare year.
+_MONTHS_SHORT = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+_MONTHS_LONG = ("January", "February", "March", "April", "May", "June",
+                "July", "August", "September", "October", "November", "December")
+
+
+def nominal_fiscal_year_end(period_end: Any) -> Optional[Tuple[int, int]]:
+    """``(year, month)`` a fiscal year is NAMED for ending in. A 52/53-week year closing in a
+    month's first week counts as the month before, as the companies describe it (the
+    `_YEAR_END_SPILL_DAYS` rule): Home Depot's 2026-02-01 is a January year end, a December
+    filer's 2022-01-01 is December. None when the ``yyyy-MM-dd`` prefix is unusable."""
+    end = _parse_iso_date(period_end)
+    if end is None:
+        return None
+    if end.day > _YEAR_END_SPILL_DAYS:
+        return end.year, end.month
+    return (end.year - 1, 12) if end.month == 1 else (end.year, end.month - 1)
+
+
+def is_off_calendar_fiscal_year(period_ends: Iterable[Any]) -> bool:
+    """True when every column has a usable period end and the LATEST one (a company that moved
+    its year end is described by its current one) is not a December year end. A timeline
+    without period ends (older reports, the curated projections) → False: bare years."""
+    ends = [nominal_fiscal_year_end(p) for p in period_ends]
+    if not ends or any(e is None for e in ends):
+        return False
+    return ends[-1][1] != 12
+
+
+def fiscal_year_months(period_end: Any, previous_period_end: Any = None) -> Optional[str]:
+    """``"Feb 2026 – Jan 2027"``. The year opens the month after the previous column's end when
+    that is 1-12 months earlier (a year-end change's short transition year reads as its real
+    months), else 12 months back (the first column, or a gap year). None when unusable."""
+    end = nominal_fiscal_year_end(period_end)
+    if end is None:
+        return None
+    end_index = end[0] * 12 + (end[1] - 1)
+    start_index = end_index - 11
+    prev = nominal_fiscal_year_end(previous_period_end)
+    if prev is not None:
+        prev_index = prev[0] * 12 + (prev[1] - 1)
+        if 1 <= end_index - prev_index <= 12:
+            start_index = prev_index + 1
+    end_text = f"{_MONTHS_SHORT[end[1] - 1]} {end[0]}"
+    if start_index == end_index:
+        return end_text
+    return f"{_MONTHS_SHORT[start_index % 12]} {start_index // 12} – {end_text}"
+
+
+def fiscal_year_note(timeline: List[Dict[str, Any]]) -> Optional[str]:
+    """The caption under the Future Forecast timeline for an off-calendar filer, anchored on
+    the year in progress (the first forecast column, else the latest column): "Fiscal years end
+    in January: FY2027 runs Feb 2026 – Jan 2027." None for December filers and timelines
+    without period ends."""
+    rows = [r for r in (timeline or []) if isinstance(r, dict)]
+    if not is_off_calendar_fiscal_year(r.get("period_end") for r in rows):
+        return None
+    i = next((k for k, r in enumerate(rows) if r.get("is_forecast")), len(rows) - 1)
+    year = str(rows[i].get("period") or "").strip()
+    months = fiscal_year_months(
+        rows[i].get("period_end"), rows[i - 1].get("period_end") if i > 0 else None
+    )
+    latest = nominal_fiscal_year_end(rows[-1].get("period_end"))
+    if not (len(year) == 4 and year.isdigit()) or months is None or latest is None:
+        return None
+    return f"Fiscal years end in {_MONTHS_LONG[latest[1] - 1]}: FY{year} runs {months}."

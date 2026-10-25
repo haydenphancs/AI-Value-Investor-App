@@ -29,6 +29,11 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from app.services import pdf_charts
 from app.utils.currency import currency_code
+from app.utils.period_labels import (
+    fiscal_year_months,
+    fiscal_year_note,
+    is_off_calendar_fiscal_year,
+)
 from app.services.dcf_report_gate import (
     strip_caydex_if_disabled,
     wall_street_insight_is_for_this_card,
@@ -695,8 +700,19 @@ def build_context(
     # Forecast timeline chart (gapless annual; fall back to curated projections).
     forecast = data.get("revenue_forecast") or {}
     timeline = forecast.get("annual_timeline") or forecast.get("projections") or []
+    # Columns are FISCAL years: an off-calendar filer's are "FY2027" (+ months in the table
+    # and a caption), as in the app, so Planet Labs' in-progress FY2027 (Feb 2026 – Jan 2027)
+    # never reads as a calendar year. Needs `period_end` on every row, so the curated
+    # projections and older reports keep bare years.
+    annual_rows = [p for p in (forecast.get("annual_timeline") or []) if isinstance(p, dict)]
+    fy_off = is_off_calendar_fiscal_year(p.get("period_end") for p in annual_rows)
+
+    def _fy_label(period: Any) -> Any:
+        bare = str(period or "").replace("FY", "").strip() or period
+        return f"FY{bare}" if fy_off and isinstance(bare, str) and bare.isdigit() else bare
+
     timeline_items = [{
-        "label": (p.get("period") or "").replace("FY", "").strip() or p.get("period"),
+        "label": _fy_label(p.get("period")),
         "value": _num(p.get("revenue")) or 0.0,
         "value_label": p.get("revenue_label") or "",
         "is_forecast": bool(p.get("is_forecast")),
@@ -729,11 +745,23 @@ def build_context(
     # Forecast table: use the timeline's FORECAST years so it matches the chart
     # (which plots annual_timeline through the last analyst year, e.g. 2031).
     # Fall back to the curated 4-year window when no annual timeline exists.
+    # Off-calendar rows are copied with a `period_label` ("FY2027") and their `months`; the
+    # frozen report dict is never mutated.
     if forecast.get("annual_timeline"):
-        projections_table = [
-            p for p in forecast["annual_timeline"]
-            if isinstance(p, dict) and p.get("is_forecast")
-        ]
+        projections_table = []
+        for i, p in enumerate(annual_rows):
+            if not p.get("is_forecast"):
+                continue
+            if fy_off:
+                p = {
+                    **p,
+                    "period_label": _fy_label(p.get("period")),
+                    "months": fiscal_year_months(
+                        p.get("period_end"),
+                        annual_rows[i - 1].get("period_end") if i > 0 else None,
+                    ),
+                }
+            projections_table.append(p)
     else:
         projections_table = forecast.get("projections") or []
 
@@ -926,6 +954,9 @@ def build_context(
             "guidance_period": forecast.get("guidance_period") or "",
             "forecast_analyst_count": forecast.get("forecast_analyst_count"),
             "insight": forecast.get("insight") or "",
+            # "Fiscal years end in January: FY2027 runs Feb 2026 – Jan 2027." — off-calendar
+            # filers only; "" for December filers and timelines without period ends.
+            "fiscal_year_note": fiscal_year_note(annual_rows) or "",
         },
         "insider": {
             "sentiment": insider.get("sentiment") or "",

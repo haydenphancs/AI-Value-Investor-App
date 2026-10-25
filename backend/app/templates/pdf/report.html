@@ -346,6 +346,7 @@
   <div class="chart-block"><div class="chart-wrap">{{ charts.earnings_timeline | safe }}</div>
     <div class="chart-legend"><span class="sw" style="background:#1E40AF"></span>Reported actual<span class="sw" style="background:#93C5FD"></span>Analyst forecast</div></div>
   {% endif %}
+  {% if forecast.fiscal_year_note %}<div class="caption-note" style="text-align:center">{{ forecast.fiscal_year_note }}</div>{% endif %}
   <table class="strip">
     <tr>
       <td><div class="k">Revenue CAGR</div><div class="v">{{ pct(forecast.cagr) }}</div></td>
@@ -360,7 +361,7 @@
     <tbody>
     {% for p in forecast.projections %}
       <tr>
-        <td class="name">{{ p.period }}{% if p.is_forecast %} <span class="muted">(est)</span>{% endif %}</td>
+        <td class="name">{{ p.period_label or p.period }}{% if p.months %} <span class="muted">· {{ p.months }}</span>{% endif %}{% if p.is_forecast %} <span class="muted">(est)</span>{% endif %}</td>
         <td class="r">{{ p.revenue_label }}</td>
         <td class="r">{{ pct(p.revenue_yoy_pct) }}</td>
         <td class="r">{{ p.eps_label }}</td>

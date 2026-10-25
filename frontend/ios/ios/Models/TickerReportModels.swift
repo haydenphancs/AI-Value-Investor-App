@@ -1522,11 +1522,12 @@ struct MarketDynamics {
         return text
     }
 
-    /// The row's one-line scope under the columns ("Revenue of US-located businesses, …" /
-    /// "Company's own figure — scope as stated."). A definition, not a source line: the card
-    /// shows no source (owner, 2026-10-22). Nil when no TAM is shown or its basis is unknown.
+    /// The line under the columns: a company quote's "Company's own figure — scope as stated."
+    /// only. A measured row (US or global) draws no scope line (owner 2026-10-25: "remove the
+    /// line below 'Revenue of US-located....'"); its header says the scope, and the PDF keeps
+    /// the full line. Nil when no TAM is shown.
     var scopeCaption: String? {
-        guard tamIsAvailable, basis != .unknown, !isBrokenGlobalRow else { return nil }
+        guard tamIsAvailable, basis == .companyQuote else { return nil }
         return Self.trimmed(scopeNote)
     }
 

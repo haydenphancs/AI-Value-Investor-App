@@ -164,7 +164,12 @@ def test_the_card_draws_no_source_line_and_the_scope_line_wraps():
     assert ".lineLimit(1)" not in caption
     assert "scopeCaption" in _decl_body(section, "private var marketDynamicsSection: some View {")
     scope = _decl_body(_market_dynamics(), "var scopeCaption: String? {")
-    assert re.search(r"guard\s+tamIsAvailable\s*,\s*basis\s*!=\s*\.unknown\s*,\s*!isBrokenGlobalRow\s+else", scope)
+    # Owner 2026-10-25: "remove the line below 'Revenue of US-located....'" — only a company
+    # quote's "Company's own figure — scope as stated." is drawn; a measured row (US or global)
+    # draws none (the PDF keeps it).
+    assert re.search(r"guard\s+tamIsAvailable\s*,\s*basis\s*==\s*\.companyQuote\s+else\s*\{\s*return\s+nil\s*\}",
+                     scope)
+    assert "return Self.trimmed(scopeNote)" in scope
 
 
 def test_unknown_concentration_renders_a_dash():
@@ -276,7 +281,7 @@ def test_a_damaged_global_row_falls_back_to_the_measured_us_value():
     header = _decl_body(md, "var tamHeaderLabel: String {")
     assert re.search(r"basis == \.measured, !isBrokenGlobalRow, let label = Self\.trimmed\(marketSizeLabel\)", header)
     scope = _decl_body(md, "var scopeCaption: String? {")
-    assert "!isBrokenGlobalRow" in scope
+    assert "basis == .companyQuote" in scope      # a (damaged) global row is measured: no line at all
     pair = _decl_body(md, "var marketSizePair: MarketSizePair? {")
     assert re.search(r"case \.measured:\s*return isBrokenGlobalRow \? nil : projectionPair", pair)
 
@@ -328,3 +333,14 @@ def test_the_ios_rate_bound_is_the_backends():
 def test_the_card_never_draws_the_credit():
     """`projectionSourceLabel` is read for the all-or-nothing test only (owner: no source line)."""
     assert "projectionSourceLabel" not in _section()
+
+
+def test_a_measured_row_draws_no_scope_line_but_a_company_quote_does():
+    """Owner 2026-10-25: "remove the line below 'Revenue of US-located....'". The US and global
+    rows' scope lines stay in the payload (PDF, chat); the card draws only a quote's line."""
+    scope = _decl_body(_market_dynamics(), "var scopeCaption: String? {")
+    guard = scope[scope.index("guard"):scope.index("else")]
+    assert "measured" not in guard and "!= .unknown" not in guard
+    sample = _src(_MODELS)
+    quote_sample = sample[sample.index('scopeNote: "Company\'s own figure — scope as stated."') - 2000:]
+    assert 'tamSourceLabel: "Earnings call quote"' in quote_sample or "company_quote" in quote_sample

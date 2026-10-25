@@ -309,7 +309,17 @@ TABLE_NAME = "ticker_report_cache"
 #     Cached collections carry the old peer lines, buyback bars and projected market rows. The full
 #     suite ran on the exact merge tree BEFORE this literal was written. This ONE bump supersedes
 #     every instant above.
-CACHE_SCHEMA_FLOOR = datetime(2026, 10, 22, 22, 1, 0, tzinfo=timezone.utc)
+# 2026-10-25 (18:13 UTC = 14:13 ET, a Sunday; the owner's go: "Bump CACHE_SCHEMA_FLOOR now, commit
+#     it with the scope-line change, and push."): the Moat card's worldwide market rows (edebfb8a,
+#     deployed ~04:40 UTC today without a bump) reach a report only when it is rebuilt — the deep
+#     door's shared cache had copied NVDA's analysis completed 2026-10-24 05:21 UTC, whose stored
+#     market row is the US one. Markets are closed, so only the reports cached since Friday's close
+#     rebuild, each on its next view. The A&D composite refresh (OWNER_TASKS §2.1 step 6) still needs
+#     its own bump. The full suite ran on this tree BEFORE this literal was written (17 transient
+#     failures, all test_report_progress_monotonic.py while another session was mid-edit in
+#     research_service.py, a file this push does not carry; 54/54 on re-run). This ONE bump
+#     supersedes every instant above.
+CACHE_SCHEMA_FLOOR = datetime(2026, 10, 25, 18, 13, 0, tzinfo=timezone.utc)
 
 # The internal report key carrying the Financials sections a report lost to a degraded
 # upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.

@@ -1774,7 +1774,9 @@ grounding, §2 "No Google Search grounding"; a stored `tam_scope='global'` row r
   > 0.5%, a target past the source's horizon, a rate outside −10..+15%/yr (ERROR: bad data); a
   missing or invalid table disables every projection with one ERROR. The start year is the
   US/Eastern calendar year. **Additive Optional fields only** — `market_size_label` ("US industry
-  revenue"; "US industry value added" for a BEA row), `scope_note` ("Revenue of US-located
+  revenue"; "US industry value added" for a BEA row), `scope_note` (the card draws it under a
+  company quote only — owner 2026-10-25, "remove the line below 'Revenue of US-located....'";
+  the PDF and chat keep it for every row; "Revenue of US-located
   businesses, incl. exports; excludes imports and foreign operations."; a quote's "Company's own
   figure — scope as stated.") and nine `projection_*` keys (all or none, incl. the year labels
   "2026e" / "2031e" the card prints — owner: "mark it as projected on the card (server-side, no

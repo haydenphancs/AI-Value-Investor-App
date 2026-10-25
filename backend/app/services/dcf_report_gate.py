@@ -1,6 +1,6 @@
 """Report-side gate for the Caydex Fair Value Estimate (settings.DCF_ENABLED).
 
-Two pure helpers, kept in a module that depends only on settings so every report read path can
+Pure helpers, kept in a module that depends only on settings so every report read path can
 import them without a cycle (the collector, the report caches, the endpoints, the chat resolver).
 
 * `report_dcf_source_matches(payload)` — a report records which DCF it was BUILT with in
@@ -9,6 +9,15 @@ import them without a cycle (the collector, the report caches, the endpoints, th
   after enabling, an FMP-DCF report would sit beside the Caydex Analysis tab; after disabling
   (the kill switch), a report whose valuation was DERIVED from the estimate would be re-served and
   copied into new rows. A mismatch is a cache miss.
+
+* `report_dcf_model_is_current(payload)` — whether a report's published estimate came from the
+  current DCF model (`MODEL_VERSION`). Used ONLY by the paid deep door's cross-user reuse
+  (`research_service._lookup_shared_cache`): that buyer pays 20 credits on a reuse hit too, so a
+  report frozen under an older model is a miss and they get a fresh report at the same price
+  (owner, 2026-10-25, after a weekend NVDA report copied Friday's dcf-v1 refusal although v2
+  values it). The FREE paths (`ticker_report_cache.get_cached_report`, the direct door's
+  legacy read) deliberately do not call it: a miss there would charge the next opener 20
+  credits for a regeneration; their rows age out at the next close.
 
 * `strip_caydex_if_disabled(payload)` — while the switch is off, the published estimate block is
   dropped from any STORED report on its way out (report endpoints, chat grounding, the PDF
@@ -40,6 +49,26 @@ def report_dcf_source_matches(payload: Any) -> bool:
     ws = payload.get("wall_street_consensus")
     built = ws.get("dcf_source") if isinstance(ws, dict) else None
     return (built or FMP_SOURCE) == current_dcf_source()
+
+
+def report_dcf_model_is_current(payload: Any) -> bool:
+    """True unless the report carries a published Caydex estimate from another DCF model.
+
+    No estimate block (DCF off, a report built before the estimate existed, or one delivered
+    without it after a permanent input refusal) has no model to compare: True. A block whose
+    `model_version` is missing or unreadable fails closed (False), like the collection cache's
+    rule (`ticker_data_cache._built_under_current_dcf`)."""
+    if not settings.DCF_ENABLED or not isinstance(payload, dict):
+        return True
+    ws = payload.get("wall_street_consensus")
+    block = ws.get("caydex_fair_value") if isinstance(ws, dict) else None
+    if block is None:
+        return True
+    # Lazy: the service pulls in the FMP / FRED clients and Supabase at import.
+    from app.services.dcf_fair_value_service import MODEL_VERSION  # noqa: PLC0415
+
+    version = block.get("model_version") if isinstance(block, dict) else None
+    return version == MODEL_VERSION
 
 
 def wall_street_insight_is_for_this_card(ws: Any) -> bool:

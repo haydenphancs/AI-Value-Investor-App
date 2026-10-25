@@ -22,7 +22,7 @@ import json
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone, timedelta
 
-from app.services.dcf_report_gate import report_dcf_source_matches
+from app.services.dcf_report_gate import report_dcf_model_is_current, report_dcf_source_matches
 from app.config import settings
 from app.database import get_supabase
 from app.integrations.gemini import get_gemini_client
@@ -950,6 +950,17 @@ class ResearchService:
                         logger.info(
                             "Shared cache row for %s/%s was built under the other "
                             "DCF_ENABLED setting — treating as a miss", ticker, persona_key,
+                        )
+                        return None
+                    # This buyer pays 20 credits on a reuse hit too, so never re-sell a report
+                    # whose estimate was frozen by an older DCF model: a miss costs them the
+                    # same and gives them today's model (the free paths keep their rows to the
+                    # close — dcf_report_gate.report_dcf_model_is_current).
+                    if not report_dcf_model_is_current(blob):
+                        logger.info(
+                            "Shared cache row for %s/%s carries a Caydex estimate from an "
+                            "older DCF model — treating as a miss so this buyer gets a fresh "
+                            "report", ticker, persona_key,
                         )
                         return None
                     # Never re-sell a report that lost Financials data to a degraded

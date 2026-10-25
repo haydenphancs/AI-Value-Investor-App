@@ -354,8 +354,9 @@ def _built_under_current_dcf(out: Any) -> bool:
     above. The freshness probe (`is_cached_collection_fresh`) cannot see this — it reads
     `cached_at` only — so after a bump the pre-warmer may skip a ticker whose first real
     read then re-collects: the same one-close-cycle window as the grounding stamp.
-    Report caches are deliberately NOT invalidated by a bump (a miss there charges the next
-    opener 20 credits); their rows age out at the close.
+    The FREE report caches are deliberately NOT invalidated by a bump (a miss there charges
+    the next opener 20 credits); their rows age out at the close. The paid deep door's reuse
+    does skip an older model (dcf_report_gate.report_dcf_model_is_current).
     """
     partial = getattr(out, "wall_street_consensus_partial", None)
     if not report_dcf_source_matches(

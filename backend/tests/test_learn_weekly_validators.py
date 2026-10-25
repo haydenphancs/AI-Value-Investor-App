@@ -1525,3 +1525,187 @@ def test_a_real_dollar_figure_on_the_sheet_is_never_masked():
 def test_an_upper_case_possessive_is_the_name():
     """A tagLabel is upper case: "3M'S" must read as a possessive (review round 3)."""
     assert V._POSSESSIVE_AFTER_RE.match("'S HISTORY") and V._POSSESSIVE_AFTER_RE.match("’S")
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════
+# K. Everyday words grounding's 1934 dictionary cannot know (live previews, 2026-10-23/24)
+# ═════════════════════════════════════════════════════════════════════════════════════════════
+# An AI-chips outline was refused after its repair on `sections[4].title` "Lifespans", and a 3M
+# section on "Hs": an ordinary word written with a capital (every word of a heading, the first
+# word of a sentence) was read as an unknown name. Twins: an invented or real name in the same
+# slot still fails, and a capital mid-sentence in prose is still a name.
+
+
+def heading_issues(text, ctx, heading=True):
+    return V._text_issues("t", text, cap=V.TITLE_CAP, time_words_ok=False, grounding_ctx=ctx,
+                          heading=heading)
+
+
+@pytest.mark.parametrize("title", [
+    "Server Lifespans and Depreciation",          # the refused AI-chips outline title
+    "How Hs Work", "The Three Hs of Hardware",     # the 3M preview's letter plural
+    "Why Hyperscalers Keep Spending", "The Capex Cycle Behind AI Chips", "How Buybacks Fit In",
+    "Tradeoffs in Custom Silicon", "The Roadmap Problem", "Spinoffs and Carveouts",
+    "Payouts to Shareholders", "What a Writedown Means", "Why Hyperscalers' Budgets Grow",
+    "The Lifecycle of an AI Server", "Uptime, Cooling and Power",
+])
+def test_everyday_words_in_a_heading_are_not_names(ctx, title):
+    assert heading_issues(title, ctx) == []
+
+
+@pytest.mark.parametrize("title, detail", [
+    ("Server Zorblax and Depreciation", "Zorblax"),         # an invented company in the same slot
+    ("Why Greenspan Raised Rates", "Greenspan"),            # a person: words + words, no compound rule
+    ("How Brookfield Builds Data Centers", "Brookfield"),   # a real company off the sheet
+    ("How Honeywell Grew", "Honeywell"),
+    ("How Ng Invests", "Ng"),                               # two letters, but not a letter's plural
+    ("Why Su Bet on Chips", "Su"),
+    ("The CapEx Cycle", "CapEx"),                           # an internal capital is a brand's
+    ("Why LifeSpan Matters", "LifeSpan"),
+    ("Lifespanners Explained", "Lifespanners"),             # only the lemma or its plural
+    ("Why Bandwidth Beat Estimates", "Bandwidth"),          # a listed company's exact name: not listed
+    ("How Hyperscale Data Grew", "Hyperscale"),
+])
+def test_a_name_in_a_heading_still_fails(ctx, title, detail):
+    out = heading_issues(title, ctx)
+    assert Issue_at(out, "t", "ungrounded_entity") and detail in {i.detail for i in out}, out
+
+
+def test_a_person_pair_in_a_heading_still_fails(ctx):
+    assert "person_named" in codes(heading_issues("Why Lisa Su Bet on Chips", ctx))
+
+
+HEADING_FIELDS = ("title", "tagLabel", "keyHighlights[0].title", "sections[3].title",
+                  "sections[4].title")
+
+
+def test_the_refused_outline_title_passes_in_a_whole_article():
+    """Every heading slot. The short ones ("The Capex Trap": two content words, the word not
+    first) pass only because the field is a heading — prose would read the capital as a name."""
+    article = make_article()
+    article["sections"][4]["title"] = "Server Lifespans and Depreciation"
+    article["sections"][3]["title"] = "The Roadmap Problem"
+    article["title"] = "The Capex Trap"
+    article["tagLabel"] = "CHIP CAPEX"
+    article["keyHighlights"][0]["title"] = "Long Lifespans"
+    out = article_issues(article, sheet=SHEET)
+    assert not any(i.field in HEADING_FIELDS for i in out), out
+    for short in ("The Roadmap Problem", "The Capex Trap", "Long Lifespans"):
+        assert "ungrounded_entity" in para_codes(short, grounding_ctx=V.build_grounding_context(SHEET))
+    article["sections"][4]["title"] = "Server Zorblax and Depreciation"
+    article["sections"][3]["title"] = "The Zorblax Problem"
+    article["title"] = "The Zorblax Trap"
+    article["tagLabel"] = "CHIP ZORBLAX"
+    article["keyHighlights"][0]["title"] = "Long Zorblax"
+    out = article_issues(article, sheet=SHEET)
+    for f in HEADING_FIELDS:
+        assert Issue_at(out, f, "ungrounded_entity"), (f, out)
+
+
+@pytest.mark.parametrize("text", [
+    "Buybacks return cash to owners.",
+    "Lifespans of servers set the depreciation schedule.",
+    "Servers age. Lifespans set the schedule.",
+    "The three Hs of hardware matter.",                # a letter's plural anywhere
+])
+def test_an_everyday_word_at_a_sentence_start_passes(ctx, text):
+    assert para(text, grounding_ctx=ctx) == []
+
+
+@pytest.mark.parametrize("text, detail", [
+    ("Investors watch Buybacks closely.", "Buybacks"),     # mid-sentence: the writer means a name
+    ("Most server Lifespans run for years.", "Lifespans"),
+    ("Lifespans vary, and Lifespans matter.", "Lifespans"),  # one mid-sentence use is enough
+    ("Analysts expect Zorblax to grow.", "Zorblax"),
+])
+def test_a_capital_mid_sentence_in_prose_is_still_a_name(ctx, text, detail):
+    out = para(text, grounding_ctx=ctx)
+    assert detail in {i.detail for i in out if i.code == "ungrounded_entity"}, out
+
+
+def test_a_title_case_list_item_reads_like_a_heading(ctx):
+    block = {"type": "bulletList", "items": ["Payback Periods and Lifespans",
+                                            "Payback periods and Lifespans."]}
+    out = V.validate_block("b", block, section_kind="history", grounding_ctx=ctx)
+    assert not any(i.field == "b.items[0]" for i in out), out
+    assert Issue_at(out, "b.items[1]", "ungrounded_entity"), out
+
+
+def test_a_lexicon_company_is_never_an_everyday_word(ctx, monkeypatch):
+    """Even a list entry that is wrongly a company stays a name: the lexicon wins."""
+    monkeypatch.setattr(V, "EVERYDAY_WORDS", V.EVERYDAY_WORDS | {"starbucks"})
+    assert Issue_at(heading_issues("Why Starbucks Grew", ctx), "t", "ungrounded_entity")
+
+
+def test_every_everyday_word_earns_its_place_and_names_no_one():
+    given = compliance.given_names()
+    for w in V.EVERYDAY_WORDS:
+        assert w.isascii() and w.isalpha() and w.islower(), w
+        assert not grounding.ordinary(w, frozenset(), frozenset()), f"{w}: the dictionary has it"
+        assert not compliance._is_company_word(w, frozenset()), f"{w}: a lexicon company"
+        assert w not in given and w not in grounding.DENIED_SURNAMES, f"{w}: a name"
+    # Words a piece could mean as a franchise, company or named event stay out (module comment).
+    assert not V.EVERYDAY_WORDS & {"fallout", "meltdown", "liftoff", "logjam", "gigafactory",
+                                   "bandwidth", "hyperscale"}
+
+
+def test_the_marketing_grounding_is_unchanged():
+    """The exemption lives in the Learn validators; the marketing writer's grounding still reads
+    "Lifespans" and "Hs" as unknown names."""
+    mctx = grounding.build_context(["CoreWeave reported revenue of $1.2 billion."], V.corpus_vocab())
+    for text, word in (("Server Lifespans and Depreciation", "Lifespans"), ("How Hs Work", "Hs")):
+        assert word in {v.detail for v in grounding.check_grounding("t", text, mctx)
+                        if v.code == "ungrounded_entity"}
+
+
+def test_everyday_word_positions_stay_fast(ctx):
+    # Lower-case words between them keep the line from reading as Title Case: every one is prose.
+    words = " closely watched ".join(w.capitalize() for w in sorted(V.EVERYDAY_WORDS))
+    text = ("Investors watch " + words + ". ") * 40
+    t0 = time.perf_counter()
+    out = V._text_issues("b", text, cap=V.BLOCK_TEXT_CAP, time_words_ok=False, grounding_ctx=ctx)
+    assert time.perf_counter() - t0 < 2.0
+    assert "ungrounded_entity" in codes(out)
+
+
+# Review of the exemption (2026-10-24): a ticker in an ALL-CAPS label, and what counts as the start
+# of a sentence.
+
+
+@pytest.mark.parametrize("label", ["GS BUYBACKS", "MS", "ZS CAPEX", "TS LINEUP"])
+def test_a_two_letter_ticker_in_a_caps_label_is_never_a_letters_plural(label):
+    """"GS" is read in title case as "Gs", which looks like the plural of a letter."""
+    article = make_article()
+    article["tagLabel"] = label
+    assert Issue_at(article_issues(article, sheet=SHEET), "tagLabel", "ungrounded_entity")
+
+
+def test_a_letters_plural_still_passes_outside_a_caps_label():
+    article = make_article()
+    article["title"] = "The Three Hs of Hardware"
+    article["sections"][2]["content"][0] = {"type": "paragraph",
+                                            "text": "Engineers talk about the three Hs of hardware."}
+    out = article_issues(article, sheet=SHEET)
+    assert not any(i.field in ("title", "sections[2].content[0]") for i in out), out
+
+
+@pytest.mark.parametrize("text", [
+    "Servers age.\nLifespans set the schedule.",       # a line break after end punctuation
+    "- Buybacks return cash to owners.",               # a bullet dash
+    "Servers age. \u201cBuybacks\u201d is the usual word.",  # an opening quote
+    "\u2022 Buybacks return cash to owners.",          # a bullet character
+    "Servers age. (Lifespans set the schedule.)",
+])
+def test_punctuation_before_a_sentences_first_word_keeps_it_first(ctx, text):
+    assert para(text, grounding_ctx=ctx) == []
+
+
+@pytest.mark.parametrize("text", [
+    "Investors watch\nBuybacks closely.",             # a line break INSIDE a sentence
+    "2025: Buybacks grew.",                            # a figure or label before it
+    "In short, Buybacks grew.",
+    "U.S. Buybacks grew last year.",                   # an abbreviation is not a sentence end
+])
+def test_a_word_that_does_not_open_its_sentence_is_still_a_name(ctx, text):
+    assert "Buybacks" in {i.detail for i in para(text, grounding_ctx=ctx)
+                          if i.code == "ungrounded_entity"}, para(text, grounding_ctx=ctx)

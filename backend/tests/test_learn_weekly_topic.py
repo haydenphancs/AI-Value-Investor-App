@@ -249,6 +249,25 @@ class World:
 EMPTY_LIBRARY = case_library.CaseLibrary(version=1, entries=())
 
 
+def company_entry(eid, name, cik, ticker, *, kind="company", verified=True, eligible=True):
+    """A case-library entry about ONE company (verified and LLM-eligible unless told otherwise)."""
+    src = case_library.LibrarySource(title="Form 10-K", url="https://www.sec.gov/primer")
+    return case_library.LibraryEntry(
+        id=eid, kind=kind, title=name, themes=("ai-cloud",), category_fit=("blueprints",),
+        companies=(case_library.LibraryCompany(name=name, cik=cik, ticker=ticker),), sic=None,
+        era=None, status="resolved", llm_eligible=eligible,
+        facts=(case_library.LibraryFact(id="f1", text=f"{name} files reports with the SEC.", source=src),),
+        verified_by="editor" if verified else None, verified_at="2026-10-01" if verified else None)
+
+
+#: Every default-world company with a CIK has its verified COMPANY primer, so a lone company can be
+#: offered (owner rule 2026-10-24: never without one — the EMPTY_LIBRARY tests pin that side).
+PRIMED_LIBRARY = case_library.CaseLibrary(version=1, entries=tuple(
+    company_entry(f"co-{t.lower()}", n, c, t) for t, n, c in (
+        ("CRWV", "CoreWeave, Inc.", CRWV), ("ORCL", "ORACLE CORP", ORCL), ("MSFT", "MICROSOFT CORP", MSFT),
+        ("VST", "Vistra Corp.", VST), ("CEG", "Constellation Energy Corp", CEG))))
+
+
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     monkeypatch.setattr(settings, "SEC_EDGAR_USER_AGENT", UA)
@@ -262,12 +281,44 @@ def _clean(monkeypatch):
     sec_facts.clear_caches()
 
 
-async def run(world=None, *, sec=None, llm=None, library=EMPTY_LIBRARY, now=NOW):
+async def run(world=None, *, sec=None, llm=None, library=PRIMED_LIBRARY, now=NOW):
     return await topic.run_topic_step(DD, now=now, sec=sec or default_sec(), llm=llm or FakeLLM(),
                                       library=library)
 
 
 # ── the happy path and the contract ───────────────────────────────────────────────────────────
+
+
+# ── A lone company needs its verified company primer (owner decision 2026-10-24) ────────────
+
+
+@pytest.mark.asyncio
+async def test_without_its_company_primer_a_lone_company_is_not_offered(monkeypatch):
+    """"Skip single-company topics that have no verified case-library entry": ORCL alone outranks
+    the theme (see the happy path), but with no company primer the card holds the theme only."""
+    world = World(monkeypatch)
+    row = await run(world, library=EMPTY_LIBRARY)
+    assert row is not None and row["status"] == C.TOPIC_PENDING
+    assert [(c["kind"], c["key"]) for c in row["topic"]["candidates"]] == [("theme", "ai-cloud")]
+
+
+@pytest.mark.parametrize("entry,primed", [
+    (company_entry("co-orcl", "ORACLE CORP", ORCL, "ORCL"), True),
+    # The SEC's CIK decides, never the ticker: a primer about another company that once used the ticker.
+    (company_entry("co-old", "OLD ORACLE", "0000000042", "ORCL"), False),
+    (company_entry("mech-db", "ORACLE CORP", ORCL, "ORCL", kind="mechanics"), False),   # not a COMPANY entry
+    (company_entry("co-orcl", "ORACLE CORP", ORCL, "ORCL", verified=False), False),
+    (company_entry("co-orcl", "ORACLE CORP", ORCL, "ORCL", eligible=False), False),     # misconduct-centred
+])
+def test_primed_tickers_match_a_usable_company_entry_by_cik(entry, primed):
+    lib = case_library.CaseLibrary(version=1, entries=(entry,))
+    by_ticker = {"ORCL": sig("ORCL", ORCL), "NOCIK": sig("NOCIK", None)}
+    assert topic.primed_tickers(by_ticker, lib) == (["ORCL"] if primed else [])
+
+
+def test_an_unpadded_signal_cik_still_matches():
+    by_ticker = {"ORCL": sig("ORCL", "1341439")}
+    assert topic.primed_tickers(by_ticker, PRIMED_LIBRARY) == ["ORCL"]
 
 
 @pytest.mark.asyncio
@@ -753,6 +804,101 @@ async def test_no_eligible_theme_skips_with_a_loud_alert(monkeypatch, caplog):
     assert world.alerts == [dict(row=row, status="skipped", reason=row["last_error"], stage="topic")]
     assert any("SKIPPED" in r.getMessage() for r in caplog.records)
     assert world.transitions[-1]["fence"] == {"topic": None}
+
+
+@pytest.mark.asyncio
+async def test_a_week_lost_to_a_missing_company_primer_names_the_company(monkeypatch):
+    """Review 2026-10-24: with no eligible theme left and the one breakout company unprimed, the
+    skip said "nothing ranked" — the owner could not tell a quiet week from a lost one, nor learn
+    which company entry to add. The names come right after the code (alerts cut at 160 chars)."""
+    themes = [ThemeInput("ai-cloud", "AI Cloud Builders", ("CRWV",), eligible=False)]
+    world = World(monkeypatch, themes=themes, sigs=[sig("ORCL", ORCL, news=(25, (5,) * 8)),
+                                                    sig("CRWV", CRWV, news=QUIET)])
+    row = await run(world, library=EMPTY_LIBRARY)
+    assert row["status"] == "skipped"
+    assert row["last_error"].startswith("no_eligible_theme: passed over, no verified company entry: ORCL; ")
+    assert world.alerts[0]["reason"] == row["last_error"]
+
+
+@pytest.mark.asyncio
+async def test_a_no_peg_week_names_the_unprimed_breakout_but_not_the_themes_own_top_member(monkeypatch):
+    """Review round 2: the names reach the no_peg_fact skip too, and only names a company entry
+    could unlock — CRWV tops the ranked theme (it claims CRWV either way), ORCL does not."""
+    # Two strong members, so the theme is SELECTED and tops CRWV (ties sort by ticker).
+    world = World(monkeypatch, themes=[one_theme(("CRWV", "MSFT"))],
+                  sigs=[sig("CRWV", CRWV), sig("MSFT", MSFT), sig("ORCL", ORCL, news=(25, (5,) * 8))])
+    row = await run(world, llm=FakeLLM(spans={}), library=EMPTY_LIBRARY)
+    assert row["status"] == "skipped"
+    prefix = "no_peg_fact: passed over, no verified company entry: "
+    assert row["last_error"].startswith(prefix)
+    names = row["last_error"][len(prefix):].split("; ")[0].split(", ")
+    assert "ORCL" in names and "MSFT" in names and "CRWV" not in names
+    assert world.alerts[0]["reason"] == row["last_error"]
+
+
+@pytest.mark.asyncio
+async def test_an_aborted_ranking_with_no_theme_to_fall_back_on_is_retried(monkeypatch):
+    """Review round 2: an FMP outage left nothing scored; skipping with "no company qualified" would
+    end the week on a guess. It is retried, like the no-peg-fact path."""
+    themes = [ThemeInput("ai-cloud", "AI Cloud Builders", ("CRWV",), eligible=False)]
+    world = World(monkeypatch, themes=themes, sigs=[sig("ORCL", ORCL, news=(None, (5,) * 8)),
+                                                    sig("CRWV", CRWV, news=(None, (5,) * 8)),
+                                                    sig("MSFT", MSFT, news=QUIET)])
+    with pytest.raises(topic.TopicStepError, match="ranking aborted"):
+        await run(world)
+    assert world.piece["status"] == "planned" and world.alerts == []
+
+
+@pytest.mark.asyncio
+async def test_an_aborted_ranking_that_could_never_yield_a_topic_skips_and_names_the_outage(monkeypatch):
+    """Review round 3: with no eligible theme and no primed company outside the window, a
+    recovered ranking could only skip too — so skip now (a retry would refetch the universe hourly
+    until the cut-off), and say the ranking was aborted."""
+    themes = [ThemeInput("ai-cloud", "AI Cloud Builders", ("CRWV",), eligible=False)]
+    world = World(monkeypatch, themes=themes, sigs=[sig("ORCL", ORCL, news=(None, (5,) * 8)),
+                                                    sig("CRWV", CRWV, news=(None, (5,) * 8)),
+                                                    sig("MSFT", MSFT, news=QUIET)])
+    row = await run(world, library=EMPTY_LIBRARY)
+    assert row["status"] == "skipped" and row["last_error"].startswith("no_eligible_theme: no theme")
+    assert "(ranking aborted: " in row["last_error"]
+
+
+@pytest.mark.asyncio
+async def test_the_quiet_week_fallback_claims_no_breakout_from_the_skip_names(monkeypatch):
+    """Review round 3: ORCL breaks out alone inside a theme too thin to qualify; the quiet-week
+    fallback stands in, and ORCL — the company an entry would unlock — must still be named."""
+    world = World(monkeypatch, themes=[ThemeInput("ai-cloud", "AI Cloud Builders", ("ORCL", "MSFT"),
+                                                  eligible=True)],
+                  sigs=[sig("ORCL", ORCL, news=(25, (5,) * 8)), sig("MSFT", MSFT, news=QUIET)])
+    row = await run(world, llm=FakeLLM(spans={}), library=EMPTY_LIBRARY)
+    assert row["status"] == "skipped"
+    assert row["last_error"].startswith("no_peg_fact: passed over, no verified company entry: ORCL; ")
+
+
+def test_only_breakouts_an_entry_could_unlock_are_named():
+    by = {"OK": sig("OK", "0000000001"), "NOCIK": sig("NOCIK", None),
+          "SECFAIL": sig("SECFAIL", "0000000002", foreign=None), "SMALL": sig("SMALL", "0000000003", size_ok=None),
+          "OLDCIK": sig("OLDCIK", "0000000004"), "TOP": sig("TOP", "0000000005"),
+          "EXCL": sig("EXCL", "0000000006", excluded="etf")}
+    ranked = [TopicCandidate("theme", "t", "T", 4.0, ("TOP", "OK"))]
+    out = topic.unlockable_breakouts(["TOP", "OK", "NOCIK", "SECFAIL", "SMALL", "OLDCIK", "EXCL", "GONE"],
+                                     ranked, by, recent_tickers=[], recent_ciks=["0000000004"])
+    assert out == ["OK"]
+
+
+def test_the_passed_over_text_caps_its_names():
+    assert topic.passed_over_text([]) == ""
+    assert topic.passed_over_text(["A", "B"]) == "passed over, no verified company entry: A, B; "
+    assert topic.passed_over_text(list("ABCDEFG")) == \
+        "passed over, no verified company entry: A, B, C, D, E (+2 more); "
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_week_names_no_company(monkeypatch):
+    themes = [ThemeInput("ai-cloud", "AI Cloud Builders", ("CRWV",), eligible=False)]
+    world = World(monkeypatch, themes=themes, sigs=[sig("CRWV", CRWV, news=QUIET)])
+    row = await run(world, library=EMPTY_LIBRARY)
+    assert row["last_error"].startswith("no_eligible_theme: no theme or company qualified")
 
 
 @pytest.mark.asyncio

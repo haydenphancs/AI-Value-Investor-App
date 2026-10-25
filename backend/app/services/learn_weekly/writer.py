@@ -28,7 +28,8 @@ Outcomes (`WriterOutcome.status`), each counted against its OWN cap by the build
 
 Contract with the build step (pinned by `tests/test_learn_weekly_writer.py`):
 * AT MOST `MODEL_CALLS_PER_GENERATION` model calls (outline + its repair + 2 per section for at
-  most 7 sections + the judge = 17), each preceded by `before_call()`;
+  most 7 sections + the judge + at most `judge.SUPPORT_MAX_CALLS` support-check calls = 22), each
+  preceded by `before_call()`;
 * every prompt opens with the nonce `REQUEST {generation_id} round {n} ({stage})` and every call
   passes `cache=False`: a rejected draft is never served back from the response cache;
 * the writer model is `settings.LEARN_WRITER_MODEL`, thinking `LEARN_WRITER_THINKING_BUDGET`, and
@@ -76,11 +77,12 @@ STATUSES = (STATUS_ACCEPTED, STATUS_CONTENT_REJECTED, STATUS_WRITER_FAILED, STAT
 USAGE_TAG = "learn_weekly_writer"
 
 #: ⚠️ The most model calls ONE generation makes: outline + ONE outline repair, then for each of at
-#: most `article_schema.SECTION_COUNT[1]` (7) sections one call + ONE repair, then ONE judge call.
+#: most `article_schema.SECTION_COUNT[1]` (7) sections one call + ONE repair, then ONE judge call and
+#: the support check's calls (at most `judge.SUPPORT_MAX_CALLS`, 2026-10-24).
 #: The build's lease is sized from it (`build.LEASE_SECONDS` is refreshed before each call, so the
 #: bound that matters is per call), and a writer change that adds a call (a second repair, a judge
 #: retry, an article-level repair) must raise it in the same change — a test walks the worst path.
-MODEL_CALLS_PER_GENERATION = 2 + 2 * A.SECTION_COUNT[1] + 1
+MODEL_CALLS_PER_GENERATION = 2 + 2 * A.SECTION_COUNT[1] + 1 + J.SUPPORT_MAX_CALLS
 
 #: A section's body words must land inside these multiples of its (code-normalised) target.
 SECTION_LENGTH_TOLERANCE = (0.8, 1.25)
@@ -98,7 +100,6 @@ _BLOCKED_FINISHES = frozenset({
     "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "OTHER", "IMAGE_SAFETY",
     "LANGUAGE", "MALFORMED_FUNCTION_CALL",
 })
-_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
 _SECTION_CONTENT_FIELD = re.compile(r"^sections\[\d+\]\.content")
 _ERROR_CAP = 300
 #: An answer longer than this is a repetition loop, not an outline or a section — and parsing it
@@ -165,6 +166,12 @@ def _tokens(result: Any) -> int:
     return max(0, int(value))
 
 
+def _exception_tokens(e: BaseException) -> int:
+    """The tokens an exception says its stage already cost (`tokens_used`, set by the judge and
+    the support check), read like `_tokens`: never NaN, negative or a bool."""
+    return _tokens({"tokens_used": getattr(e, "tokens_used", None)})
+
+
 def _finish(result: Mapping[str, Any]) -> str:
     finish = result.get("finish_reason")
     name = str(getattr(finish, "name", finish) or "").upper()
@@ -191,7 +198,7 @@ def parse_answer(result: Any) -> "tuple[Optional[Dict[str, Any]], Optional[str]]
     if len(text) > _MAX_ANSWER_CHARS:
         return None, f"answer of {len(text)} characters (> {_MAX_ANSWER_CHARS})"
     try:
-        obj = json.loads(_FENCE_RE.sub("", text.strip()))
+        obj = json.loads(J.strip_code_fences(text))
     except (ValueError, RecursionError) as e:          # RecursionError: nested past the C stack
         return None, f"not JSON ({type(e).__name__})"
     if not isinstance(obj, dict):
@@ -529,42 +536,86 @@ class _Generation:
     # ── judge ────────────────────────────────────────────────────────────────────────────────
 
     async def judge(self, content: Mapping[str, Any]) -> Optional[J.JudgeRecord]:
+        """The rubric's one call, then the support check (`judge.check_support`, one gated call per
+        `SUPPORT_CHUNK` sentences). Shadow records both — a failed one is recorded, never a gate;
+        enforce fails closed on either failing and rejects on any verdict; off skips both."""
         if self.judge_mode == J.MODE_OFF:
             return None
-        await self._gate("judge")
         record = J.JudgeRecord(mode=self.judge_mode)
+        errors: List[str] = []
+        await self._gate("judge")
         try:
             verdicts, raw = await J.judge_article(self.client, self.sheet, content,
                                                   generation_id=self.gen)
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            spent = int(getattr(e, "tokens_used", 0) or 0) if isinstance(e, J.LearnJudgeUnavailable) else 0
-            self.tokens += spent
-            record.tokens_used = spent
-            record.error = _one_line(f"{type(e).__name__}: {e}")
-            self.rounds.append({"stage": "judge", "round": 1, "tokens_used": spent,
-                                "error": type(e).__name__})
-            if self.judge_mode == J.MODE_ENFORCE:
-                raise _Stop(STATUS_WRITER_FAILED, f"judge: {record.error}")
+            self._judge_failed(record, errors, "judge", e)
+        else:
+            used = _tokens(raw)
+            self.tokens += used
+            record.tokens_used += used
+            record.finish_reason = _finish(raw) or None
+            record.verdicts = list(verdicts)
+            self.rounds.append({"stage": "judge", "round": 1, "tokens_used": used,
+                                "finish_reason": record.finish_reason, "problem": None})
+            if record.verdicts and self.judge_mode == J.MODE_ENFORCE:
+                self._reject(record)          # already rejected: the support check is not bought
+        try:
+            found, meta = await J.check_support(self.client, self.sheet, content,
+                                                generation_id=self.gen,
+                                                before_call=lambda: self._gate("support"))
+        except _Stop as e:
+            # The gate stopped it between chunks (budget, lost lease): the chunks already
+            # answered were still paid for.
+            self.tokens += _exception_tokens(e)
+            raise
+        except Exception as e:
+            self._judge_failed(record, errors, "support", e)
+        else:
+            used = int(meta.get("tokens_used") or 0)
+            self.tokens += used
+            record.tokens_used += used
+            record.verdicts += found
+            record.support = {"calls": meta.get("calls"), "sentences": meta.get("sentences"),
+                              "flagged": len(found)}
+            self.rounds.append({"stage": "support", "round": 1, "tokens_used": used,
+                                "calls": meta.get("calls"), "problem": None})
+        if errors:
+            record.error = _one_line("; ".join(errors))
             logger.warning("learn writer: shadow judge FAILED for generation %s (%s) — recorded, "
                            "not a gate", self.gen, record.error)
-            return record
-        used = _tokens(raw)
-        self.tokens += used
-        record.tokens_used = used
-        record.finish_reason = _finish(raw) or None
-        record.verdicts = list(verdicts)
-        self.rounds.append({"stage": "judge", "round": 1, "tokens_used": used,
-                            "finish_reason": record.finish_reason, "problem": None})
-        if verdicts:
-            codes = sorted({v.rule for v in verdicts})
+        if record.verdicts:
+            codes = sorted({v.rule for v in record.verdicts})
             if self.judge_mode == J.MODE_ENFORCE:
-                raise _Stop(STATUS_CONTENT_REJECTED, f"the judge flagged {codes}",
-                            [V.Issue(v.label, v.rule, f"\"{v.quote}\" - {v.reason}"[:160])
-                             for v in verdicts])
-            logger.info("learn writer: shadow judge would flag generation %s: %s", self.gen, codes)
+                self._reject(record)
+            logger.info("learn writer: shadow judge would flag generation %s: %s (%d verdicts)",
+                        self.gen, codes, len(record.verdicts))
         return record
+
+    def _reject(self, record: J.JudgeRecord) -> None:
+        """Enforce: the judge's verdicts are a content rejection, with every one as an issue."""
+        codes = sorted({v.rule for v in record.verdicts})
+        raise _Stop(STATUS_CONTENT_REJECTED, f"the judge flagged {codes}",
+                    [V.Issue(v.label, v.rule, f"\"{v.quote}\" - {v.reason}"[:160])
+                     for v in record.verdicts])
+
+    def _judge_failed(self, record: J.JudgeRecord, errors: List[str], stage: str,
+                      e: Exception) -> None:
+        """One judge stage failed: carry the tokens it already cost and record why. Under enforce
+        that ends the generation at once (no verdict is never a pass, and no further call is
+        worth its cost) — as a content rejection when the rubric's call had already flagged it."""
+        spent = _exception_tokens(e)
+        self.tokens += spent
+        record.tokens_used += spent
+        errors.append(("" if stage == "judge" else f"{stage}: ") + f"{type(e).__name__}: {e}")
+        self.rounds.append({"stage": stage, "round": 1, "tokens_used": spent,
+                            "error": type(e).__name__})
+        if self.judge_mode == J.MODE_ENFORCE:
+            if record.verdicts:
+                self._reject(record)
+            record.error = _one_line("; ".join(errors))
+            raise _Stop(STATUS_WRITER_FAILED, f"judge: {record.error}")
 
     # ── the whole generation ─────────────────────────────────────────────────────────────────
 

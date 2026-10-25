@@ -34,7 +34,7 @@ import threading
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Tuple
 from urllib.parse import urlsplit
 
 from app.integrations.sec_edgar import normalize_cik
@@ -57,6 +57,8 @@ __all__ = [
     "get_case_library",
     "usable_entries",
     "primer_count",
+    "KIND_COMPANY",
+    "company_primer_ciks",
     "facts_for",
     "library_fact_id",
 ]
@@ -64,6 +66,7 @@ __all__ = [
 LIBRARY_PATH = Path(__file__).resolve().parents[3] / "data" / "learn_case_library.json"
 LIBRARY_VERSION = 1
 ENTRY_KINDS: Tuple[str, ...] = ("mechanics", "company", "case")
+KIND_COMPANY = "company"
 #: The kinds that count toward a theme's eligibility (≥ 2 verified primers, plan §1.5).
 PRIMER_KINDS: Tuple[str, ...] = ("mechanics", "company")
 
@@ -157,6 +160,16 @@ class CaseLibrary:
         """Usable mechanics + company entries for ``theme`` — a theme is eligible for a Deep
         Dive at ≥ 2 (plan §1.5)."""
         return len(self.usable_entries(theme=theme, kinds=PRIMER_KINDS))
+
+    def company_primer_ciks(self) -> FrozenSet[str]:
+        """The CIKs of the companies with a usable COMPANY primer: the only companies a
+        single-company Deep Dive may be about (owner decision 2026-10-24: "Skip single-company
+        topics that have no verified case-library entry"). Without one, a lone company's sheet
+        held only its filing figures and the writer filled its history from memory — the 3M
+        drafts said "four business segments" (it has had three since the 2024 Solventum spin-off).
+        A mechanics or case entry that merely lists the company does not count."""
+        return frozenset(co.cik for e in self.usable_entries(kinds=(KIND_COMPANY,))
+                         for co in e.companies if co.cik)
 
     def facts_for(self, entry: LibraryEntry) -> List[Fact]:
         return facts_for(entry)
@@ -455,3 +468,8 @@ def usable_entries(
 def primer_count(theme: str) -> int:
     """``get_case_library().primer_count(theme)`` — the default file."""
     return get_case_library().primer_count(theme)
+
+
+def company_primer_ciks() -> FrozenSet[str]:
+    """``get_case_library().company_primer_ciks()`` — the default file."""
+    return get_case_library().company_primer_ciks()

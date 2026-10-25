@@ -64,7 +64,10 @@ What is enforced, and why it differs from the public marketing scan
 * **Grounding** — `marketing/grounding.check_grounding` per block against the piece's fact sheet
   (numbers and proper nouns must come from it), with the vocabulary built exactly as the marketing
   writer builds it (`content_pool._vocab` over the Learn corpus). `chat_numeric_grounding` is NOT
-  used: it is log-only, has no cap and exempts years.
+  used: it is log-only, has no cap and exempts years. Its one Learn-side exemption: an
+  `ungrounded_entity` that is a letter's plural ("Hs") or an `EVERYDAY_WORDS` form ("Lifespans",
+  "Capex") written where a capital says no name — a heading, a sentence's first word, a Title-Case
+  line (`_everyday_word`). A capital mid-sentence in prose still reads as a name.
 
 Totality and cost: pure; every field is length-capped BEFORE any normalisation or regex (they run
 on the single uvicorn worker over model output that can be a repetition loop at MAX_TOKENS); every
@@ -900,17 +903,116 @@ def _sheet_subject_names(sheet: Any) -> List[str]:
     return out
 
 
+#: Everyday words grounding's dictionary (Webster's 1934, the Learn corpus, `grounding.MODERN_WORDS`)
+#: cannot know — mostly modern closed compounds. An AI-chips outline was refused after its repair
+#: on "Server Lifespans and Depreciation" (preview, 2026-10-24), and 21 of 31 plausible AI-chips
+#: headings failed the same way ("Hyperscalers", "Capex", "Buybacks", "Tradeoffs"). Lemmas: a form
+#: is the lemma or the lemma + "s". Every entry is a common word in a modern dictionary whose exact
+#: spelling is not a listed company's or a well-known brand's, franchise's or event's name — so NOT
+#: "bandwidth" (Bandwidth Inc.), "hyperscale" (Hyperscale Data), "fallout", "meltdown", "liftoff",
+#: "logjam", "gigafactory" (review, 2026-10-24). Like web2's own words ("Elastic", "Unity"), an entry
+#: can still be a private body's name ("Lifespan", a hospital system): the exemption is positional,
+#: and the judge's support check reads every sentence. Not added to the grounding vocabulary: its
+#: roots and 7-character prefix rule would make "Supercom" ordinary through "supercomputer". No
+#: compound rule either ("Greenspan", "Brookfield", "Honeywell" are word + word). Pinned by
+#: `tests/test_learn_weekly_validators.py`: no entry is already ordinary, a lexicon company or a name.
+EVERYDAY_WORDS: FrozenSet[str] = frozenset("""
+backorder bailout baseload breakeven buildout buyback buyout capex carryover carveout
+cashflow chokepoint colocation datacenter deglobalization downcycle downtick downtime earnout
+endpoint exaflop fab firmware freemium frontrunner gigawatt giveback greenwashing hashrate
+headcount hyperscaler lifecycle lifespan lineup livestream lockdown malware megacap
+megadeal megaproject megatrend microgrid multicloud nearshoring nowcast onboard onboarding opex
+payback paydown payout petaflop photonic photonics pushback ransomware reshoring roadmap rollout
+rollover rundown selloff skillset spinoff spinout stablecoin standalone supercomputer
+supercomputing takeover teraflop terawatt timeframe tokenization tradeoff upcycle upsell uptick
+uptime workaround writedown writeoff
+""".split())
+
+#: The plural of a letter ("the three Hs"): as nameless as the single letter grounding skips.
+_LETTER_PLURAL_RE = re.compile(r"[A-Z]s")
+#: A Capitalised word with no internal capital ("CapEx", "LifeSpan" are a brand's spelling).
+_CAPITALISED_RE = re.compile(r"[A-Z][a-z]+")
+
+
+def _bare_token(tok: str) -> str:
+    """A `grounding._TOKEN_RE` token as `grounding._check_entities` reports it."""
+    bare = tok.strip("'-.&")
+    return bare[:-2] if bare.lower().endswith("'s") else bare
+
+
+#: Closing quotes and brackets after a sentence's end punctuation ('… schedule."').
+_SENTENCE_TAIL = " \t\r\n\"')]”’"
+
+
+def _opens_sentence(sk: str, start: int, sent: str, pos: int) -> bool:
+    """Is the token at `pos` of `sent` (found at `start` in the skeleton `sk`) its sentence's first
+    word: nothing but punctuation before it in the sentence (a bullet dash, a quote — never "2025:"),
+    and the sentence follows the text's start or end punctuation, never a bare line break inside a
+    sentence ("Investors watch\\nBuybacks closely" — `compliance.sentences` splits on every newline)."""
+    if any(ch.isalnum() for ch in sent[:pos]):
+        return False
+    before = sk[:start].rstrip(_SENTENCE_TAIL)
+    return not before or before[-1] in ".!?"
+
+
+def _capital_says_no_name(token: str, text: str, heading: bool) -> bool:
+    """Every occurrence of `token` in `text` sits where its capital belongs to the text, not the
+    word: anywhere in a heading, a sentence's first word (`_opens_sentence`), or a Title-Case line
+    (a list item such as "Payback Periods and Lifespans", `compliance._title_cased`). A capital
+    mid-sentence in prose is the writer naming something ("Investors watch Buybacks closely"), so it
+    stays a name. Read on the skeleton, tokenised and split as `grounding._check_entities` /
+    `_check_name_pairs` read it; a sentence that cannot be placed reads as prose (fail closed)."""
+    if heading:
+        return True
+    sk = compliance.skeleton(text)
+    at = 0
+    for sent in compliance.sentences(sk):
+        start = sk.find(sent, at)
+        if start >= 0:
+            at = start + len(sent)
+        title: Optional[bool] = None
+        for m in grounding._TOKEN_RE.finditer(sent):
+            if _bare_token(m.group(0)) != token:
+                continue
+            if start >= 0 and _opens_sentence(sk, start, sent, m.start()):
+                continue
+            if title is None:
+                title = compliance._title_cased(sent)
+            if not title:
+                return False
+    return True
+
+
+def _everyday_word(token: str, text: str, heading: bool, letter_plurals: bool = True) -> bool:
+    """Is grounding's `ungrounded_entity` `token` an everyday word rather than a name: a letter's
+    plural anywhere ("Hs"), or an `EVERYDAY_WORDS` form ("Lifespans") where its capital says no
+    name. A spelling the company lexicon knows is that company, whatever the list says.
+    `letter_plurals` is False for an ALL-CAPS label read in title case: there "Gs" was "GS", a
+    ticker (Goldman Sachs), never a letter's plural."""
+    low = token.lower()
+    forms = (low, low[:-1]) if low.endswith("s") else (low,)
+    letter_plural = letter_plurals and bool(_LETTER_PLURAL_RE.fullmatch(token))
+    if not letter_plural and not (_CAPITALISED_RE.fullmatch(token)
+                                  and any(w in EVERYDAY_WORDS for w in forms)):
+        return False
+    if any(compliance._is_company_word(w, frozenset()) for w in forms):
+        return False
+    return letter_plural or _capital_says_no_name(token, text, heading)
+
+
 # ── the per-text rule chain ──────────────────────────────────────────────────────────────────
 
 
 def _text_issues(field: str, raw: Any, *, cap: int, time_words_ok: bool,
                  grounding_ctx: Optional[grounding.GroundingContext],
-                 subjects: FrozenSet[str] = frozenset(), caps_label: bool = False) -> List[Issue]:
+                 subjects: FrozenSet[str] = frozenset(), caps_label: bool = False,
+                 heading: bool = False) -> List[Issue]:
     """Every text rule for ONE displayed/narrated string. `time_words_ok` is true only for a
     peg-section block that states a full date; `subjects` are `subject_tokens` of the piece.
     `caps_label`: an ALL-CAPS display label ("DEEP DIVE") is grounded in title case — grounding
     reads every all-caps token as a possible ticker, so the label's ordinary words would fail,
-    while a ticker in it ("NVDA" → "Nvda") still must come from the sheet."""
+    while a ticker in it ("NVDA" → "Nvda") still must come from the sheet. `heading`: a title or
+    label, where any capital may be the heading's (`_everyday_word`)."""
     out: List[Issue] = []
     if not isinstance(raw, str):
         out.append(Issue(field, "block_invalid", f"expected a string, got {type(raw).__name__}"))
@@ -967,10 +1069,14 @@ def _text_issues(field: str, raw: Any, *, cap: int, time_words_ok: bool,
     for hit in _valuation_hits(sents, subjects, valuation):
         out.append(Issue(field, "valuation_verdict", _detail(hit)))
     if grounding_ctx is not None:
-        gtext = clean.title() if caps_label and clean.isupper() else clean
+        titled = caps_label and clean.isupper()
+        gtext = clean.title() if titled else clean
         names = _name_number_tokens(subjects)
         named = set()
         for v in grounding.check_grounding(field, gtext, grounding_ctx):
+            if v.code == "ungrounded_entity" and _everyday_word(v.detail, gtext, heading,
+                                                                letter_plurals=not titled):
+                continue
             token = _name_number_detail(v, names)
             if token is None:
                 out.append(Issue(field, v.code, _detail(v.detail)))
@@ -1300,11 +1406,11 @@ def _validate_article(content: Any, kind: Any, sheet: Any, served_titles: Any,
                      ("cardSubtitle", SHORT_TEXT_CAP)):
         if key in content:
             out += _text_issues(key, content.get(key), cap=cap, time_words_ok=False,
-                                grounding_ctx=ctx, subjects=subj)
+                                grounding_ctx=ctx, subjects=subj, heading=key == "title")
     if content.get("tagLabel") is not None:
         out += _text_issues("tagLabel", content.get("tagLabel"), cap=TITLE_CAP,
                             time_words_ok=False, grounding_ctx=ctx, subjects=subj,
-                            caps_label=True)
+                            caps_label=True, heading=True)
 
     if "category" in content and content.get("category") not in C.CATEGORIES:
         out.append(Issue("category", "bad_value",
@@ -1361,7 +1467,8 @@ def _validate_article(content: Any, kind: Any, sheet: Any, served_titles: Any,
             if not isinstance(icon, str) or icon not in rules.ICON_ALLOWLIST:
                 out.append(Issue(f"{f}.icon", "icon", _detail(f"icon {icon!r} not allowed")))
             out += _text_issues(f"{f}.title", h.get("title"), cap=TITLE_CAP,
-                                time_words_ok=False, grounding_ctx=ctx, subjects=subj)
+                                time_words_ok=False, grounding_ctx=ctx, subjects=subj,
+                                heading=True)
             out += _text_issues(f"{f}.description", h.get("description"), cap=SHORT_TEXT_CAP,
                                 time_words_ok=False, grounding_ctx=ctx, subjects=subj)
             hk = title_key(h.get("title"))
@@ -1405,7 +1512,8 @@ def _validate_article(content: Any, kind: Any, sheet: Any, served_titles: Any,
                 out.append(Issue(f"{f}.kind", "section_kind",
                                  _detail(f"draft section kind {sk!r} not in {C.SECTION_KINDS}")))
             out += _text_issues(f"{f}.title", sec.get("title"), cap=TITLE_CAP,
-                                time_words_ok=False, grounding_ctx=ctx, subjects=subj)
+                                time_words_ok=False, grounding_ctx=ctx, subjects=subj,
+                                heading=True)
             tk = title_key(sec.get("title"))
             if tk and tk in seen_titles:
                 out.append(Issue(f"{f}.title", "duplicate", _detail(str(sec.get("title")))))

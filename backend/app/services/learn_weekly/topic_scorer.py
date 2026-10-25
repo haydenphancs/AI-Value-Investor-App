@@ -23,6 +23,13 @@ Why each rule is shaped the way it is:
 * **Themes beat tickers.** A theme needs breadth (≥ 2 members above 1.0) and scores the mean of its
   top 3; a lone ticker needs a score ≥ 3. A theme covers its top member, so a ticker candidate that
   is the top member of a SELECTED theme is dropped — whichever ranks higher (see `rank_topics`).
+* **A lone company needs its verified company primer.** A ticker becomes a single-company topic
+  only when the caller names it in `primed_tickers` (a usable COMPANY entry of the case library,
+  matched by SEC CIK — `case_library.company_primer_ciks`). Owner decision 2026-10-24: "Skip
+  single-company topics that have no verified case-library entry". Without one, the 3M sheet held
+  15 filing figures and the writer filled the company's history from memory. The argument is
+  REQUIRED: forgetting it is a TypeError, never "every ticker qualifies". It does not touch themes
+  (a theme is eligible on its own ≥ 2 primers), and an unprimed ticker can still lift a theme.
 * **Order-independent.** Members and candidates are sorted by (score desc, key asc) before any
   sum or cut, so shuffling the inputs never changes the answer. The one order-dependent rule is
   deliberate: a duplicated `TickerSignal` / theme slug keeps the FIRST and logs a WARNING.
@@ -381,24 +388,39 @@ def quiet_week_fallback(themes: Iterable[ThemeInput], *, recent_themes: Iterable
                            reason=REASON_QUIET_WEEK)]
 
 
+def unprimed_breakouts(scores: Mapping[str, Tuple[float, Mapping[str, float]]],
+                       primed_tickers: Iterable[str], recent_companies: Iterable[str]) -> List[str]:
+    """The tickers that scored as a lone topic (≥ `TICKER_MIN_SCORE`, outside `recent_companies`)
+    but were passed over for having no verified company primer — best first, then by ticker. The
+    owner reads them in a skip alert to learn which company entry would be worth adding."""
+    primed = _window(primed_tickers, _norm_ticker, "primed_tickers")
+    recent = _window(recent_companies, _norm_ticker, "recent_companies")
+    out = [(score, t) for t, (score, _) in scores.items()
+           if score >= TICKER_MIN_SCORE and t not in recent and t not in primed]
+    return [t for _, t in sorted(out, key=lambda st: (-st[0], st[1]))]
+
+
 # ── Ranking ───────────────────────────────────────────────────────────────────────────────────
 
 
 def rank_topics(signals: Iterable[TickerSignal], themes: Iterable[ThemeInput], *,
                 recent_themes: Iterable[str], recent_companies: Iterable[str],
-                top_n: int = 3) -> List[TopicCandidate]:
+                primed_tickers: Iterable[str], top_n: int = 3) -> List[TopicCandidate]:
     """The week's top `top_n` topics, best first; the quiet-week fallback when none qualifies.
 
     * `recent_themes` — Deep Dive theme slugs of the last 4 weeks (never offered again).
     * `recent_companies` — tickers that were a main subject in the last 12 weeks (never offered as a
       single-ticker topic; they may still lift a theme they belong to).
+    * `primed_tickers` — the tickers whose company has a usable COMPANY primer; only these may be a
+      single-ticker topic (a lone string or None raises, like the windows).
     * Raises `ScoringAborted` when > 20% of the non-excluded universe has no news count (exactly
       20% does not abort), and `TypeError` / `ValueError` on a caller bug (see `_window`, `top_n`).
 
     A theme qualifies when eligible, outside `recent_themes`, and ≥ 2 members score above 1.0; it
     scores the mean of its top 3 members. A ticker in two themes counts in both. A ticker qualifies
-    alone at a score ≥ 3 outside `recent_companies`. Candidates are walked by (score desc, key asc,
-    kind); a ticker that is the TOP member of a selected theme is dropped — whichever ranks higher,
+    alone at a score ≥ 3 outside `recent_companies` and inside `primed_tickers`. Candidates are
+    walked by (score desc, key asc, kind); a ticker that is the TOP member of a selected theme is
+    dropped — whichever ranks higher,
     because a theme's mean can never exceed its top member's score, so "only when the theme ranks
     higher" would fire on exact ties alone and the card would offer the same story twice.
     """
@@ -406,6 +428,7 @@ def rank_topics(signals: Iterable[TickerSignal], themes: Iterable[ThemeInput], *
         raise ValueError(f"top_n must be a positive int, got {top_n!r}")
     recent_theme_set = _window(recent_themes, _norm_slug, "recent_themes")
     recent_company_set = _window(recent_companies, _norm_ticker, "recent_companies")
+    primed_set = _window(primed_tickers, _norm_ticker, "primed_tickers")
     themes = list(themes)
 
     unique = dedupe_signals(signals)
@@ -447,10 +470,16 @@ def rank_topics(signals: Iterable[TickerSignal], themes: Iterable[ThemeInput], *
             candidates.append(cand)
     for ticker in sorted(scores):
         score, components = scores[ticker]
-        if score >= TICKER_MIN_SCORE and ticker not in recent_company_set:
-            candidates.append(TopicCandidate(kind=KIND_TICKER, key=ticker, title=ticker, score=score,
-                                             tickers=(ticker,), components=dict(components),
-                                             reason=REASON_RANKED))
+        if score < TICKER_MIN_SCORE or ticker in recent_company_set or ticker not in primed_set:
+            continue          # an unprimed ticker is never a lone topic (`unprimed_breakouts` names it)
+        candidates.append(TopicCandidate(kind=KIND_TICKER, key=ticker, title=ticker, score=score,
+                                         tickers=(ticker,), components=dict(components),
+                                         reason=REASON_RANKED))
+    unprimed = unprimed_breakouts(scores, primed_set, recent_company_set)
+    if unprimed:
+        logger.info("learn_weekly topic_scorer: %d ticker(s) scored >= %.1f but have no verified "
+                    "company primer — not offered alone: %s", len(unprimed), TICKER_MIN_SCORE,
+                    ", ".join(unprimed[:10]))
     candidates.sort(key=lambda c: (-c.score, c.key, c.kind))
 
     selected: List[TopicCandidate] = []

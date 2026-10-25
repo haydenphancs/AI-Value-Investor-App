@@ -36,7 +36,9 @@ from __future__ import annotations
 import copy
 import inspect
 import json
+import random
 import re
+import time
 import warnings
 from datetime import date
 from typing import Any, Dict, List
@@ -313,6 +315,7 @@ FIELDS = [("hook", "Meet your moody partner."), ("video_script[0]", "Water your 
     _result(["a string, not an object"]),
     _result([{"field": "hook", "rule": "judge_person", "quote": "x"}]),       # no reason
     _result([{"field": "hook", "rule": 3, "quote": "x", "reason": "y"}]),     # wrong type
+    _result([], text="[" * 5000),                     # nested past the C stack: RecursionError
 ], ids=lambda r: f"{r['finish_reason']}:{str(r['text'])[:24]}")
 def test_an_unreadable_answer_raises_and_never_passes(result):
     with pytest.raises(j.MarketingJudgeUnavailable):
@@ -323,6 +326,61 @@ def test_an_empty_verdict_list_is_a_pass_and_a_fenced_answer_is_read():
     assert j.parse_verdicts(_result([]), FIELDS) == []
     fenced = "```json\n" + json.dumps({"verdicts": []}) + "\n```"
     assert j.parse_verdicts(_result([], text=fenced), FIELDS) == []
+
+
+# ── fences: the old pattern's exact cut, in linear time (review 2026-10-24) ─────────
+
+#: The pattern the judge and the writer used until 2026-10-24: the oracle `strip_code_fences`
+#: must equal. Its `\s*```\s*$` branch was quadratic in a whitespace run inside the answer.
+_OLD_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
+_EMPTY = '{"verdicts": []}'
+
+
+@pytest.mark.parametrize("text", [
+    _EMPTY, "```json\n" + _EMPTY + "\n```", "```JSON\n" + _EMPTY + "\n```\n",
+    "```Json " + _EMPTY + " ```", "```\n" + _EMPTY + "\n```",
+    "```json\r\n" + _EMPTY + "\r\n```\r\n",                       # CRLF
+    "  \n\t```json\n" + _EMPTY + "\n```  \n ",                     # whitespace-padded
+    "\u00a0```json\u2003" + _EMPTY + "\u3000```\u00a0",            # Unicode whitespace
+    "\x1c```json\x1d" + _EMPTY + "\x1e```\x1f",                    # separators both call space
+    "```j\u017fon\n" + _EMPTY + "\n```",                           # IGNORECASE's long s
+    "```", "``````", "````", "`````", "```json", "```JSON```", "```jsonx", "```js {}",
+    "``` json```", "```\njson\n{}\n```", "{} ```", "```json {}", "Sure! ```json\n{}\n```",
+    '{"a": "```"}', "```" + "\n" * 50 + "```", "", "   ",
+], ids=repr)
+def test_fences_are_cut_exactly_like_the_old_pattern(text):
+    assert j.strip_code_fences(text) == _OLD_FENCE_RE.sub("", text.strip())
+
+
+def test_fences_are_cut_like_the_old_pattern_on_random_fence_shaped_text():
+    rng = random.Random(20261024)
+    atoms = ["`", "```", "json", "JSON", "j\u017fon", " ", "\n", "\r\n", "\t", "\u00a0", "{", "}",
+             "x", "s"]
+    for _ in range(5000):
+        text = "".join(rng.choice(atoms) for _ in range(rng.randint(0, 12)))
+        assert j.strip_code_fences(text) == _OLD_FENCE_RE.sub("", text.strip()), repr(text)
+
+
+@pytest.mark.parametrize("head, unit, tail", [
+    ('{"verdicts": [', "\n", "]}"),
+    ('```json\n{"verdicts": [', " \t\r\n", "]}\n```"),
+], ids=["bare_newlines", "fenced_mixed"])
+def test_an_answer_at_the_cap_with_a_long_inner_whitespace_run_parses_fast(head, unit, tail):
+    """Review 2026-10-24: the old pattern took 2.5 s on 50,000 newlines inside an answer (~40 s at
+    200,000), synchronously on the web's one event loop. The longest answer the cap lets through
+    (200,000 characters) now parses in well under 0.2 s."""
+    pad = j.MAX_ANSWER_CHARS - len(head) - len(tail)
+    text = head + (unit * pad)[:pad] + tail
+    assert len(text) == j.MAX_ANSWER_CHARS
+    t = time.perf_counter()
+    assert j.parse_verdicts(_result([], text=text), FIELDS) == []
+    assert time.perf_counter() - t < 0.2
+
+
+def test_an_answer_over_the_cap_is_refused_unread():
+    text = _EMPTY[:-1] + " " * j.MAX_ANSWER_CHARS + "}"
+    with pytest.raises(j.MarketingJudgeUnavailable, match=r"characters \(> 200000\)"):
+        j.parse_verdicts(_result([], text=text), FIELDS)
 
 
 def test_a_verdict_becomes_a_violation_on_the_regex_field_name():
@@ -361,7 +419,8 @@ def test_a_mislabelled_quote_stays_on_its_label_and_the_field_holding_it_becomes
 
 
 def test_verdicts_and_their_text_are_bounded():
-    many = [{"field": "hook", "rule": "judge_person", "quote": "q" * 5000, "reason": "r" * 5000}] * 500
+    # Inside MAX_ANSWER_CHARS (a longer answer is refused unread), past every per-verdict cap.
+    many = [{"field": "hook", "rule": "judge_person", "quote": "q" * 1000, "reason": "r" * 1000}] * 60
     vs = j.parse_verdicts(_result(many), FIELDS)
     assert len(vs) == j.MAX_VERDICTS
     assert all(len(v.violation().detail) <= 400 for v in vs)

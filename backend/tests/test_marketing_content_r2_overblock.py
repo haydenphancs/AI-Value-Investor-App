@@ -16,16 +16,20 @@ Category 1 (pure): the Learn bundle and the vendored lists only.
 
 from __future__ import annotations
 
+import ast
 import gc
+import random
 import re
 import time
-from typing import Callable, List, Tuple
+from pathlib import Path
+from typing import Callable, Dict, FrozenSet, List, Set, Tuple
 
 import pytest
 
 from app.services.marketing import compliance as c
 from app.services.marketing import content_pool
 from app.services.marketing import grounding as g
+from app.services.marketing import judge as jd
 from app.services.marketing import numbers as nb
 from app.services.marketing import post_copy as pc
 from app.services.marketing import writer_prompts as wp
@@ -892,18 +896,26 @@ def test_a_degenerate_field_scans_in_linear_time(key, unit):
 
 
 def _compiled_patterns():
-    out = []
-    for mod in (c, g, pc, nb):
+    """Every module-level pattern of the four validator modules, the judge and the writer (review
+    2026-10-24: the code-fence pattern that slipped past this sweep lived in those two). A pattern
+    one module imports from another is listed once, under the first module that holds it."""
+    out, seen = [], set()
+    for mod in (c, g, pc, nb, jd, ws):
+        found = []
         for name, val in vars(mod).items():
             if isinstance(val, re.Pattern):
-                out.append((f"{mod.__name__.split('.')[-1]}.{name}", val))
+                found.append((f"{mod.__name__.split('.')[-1]}.{name}", val))
             elif isinstance(val, tuple):
                 for i, x in enumerate(val):
                     if isinstance(x, re.Pattern):
-                        out.append((f"{mod.__name__.split('.')[-1]}.{name}[{i}]", x))
+                        found.append((f"{mod.__name__.split('.')[-1]}.{name}[{i}]", x))
                     elif isinstance(x, tuple):
-                        out += [(f"{mod.__name__.split('.')[-1]}.{name}[{i}]", y)
-                                for y in x if isinstance(y, re.Pattern)]
+                        found += [(f"{mod.__name__.split('.')[-1]}.{name}[{i}]", y)
+                                  for y in x if isinstance(y, re.Pattern)]
+        for name, rx in found:
+            if id(rx) not in seen:
+                seen.add(id(rx))
+                out.append((name, rx))
     return out
 
 
@@ -919,11 +931,12 @@ _SWEEP_FLOOR = 0.002
 _SWEEP_LIMIT = 8.0
 
 
-def _sweep_suspects(pats, units) -> List[Tuple[str, str]]:
-    """One interleaved sample per (pattern, unit): the cheap screen."""
+def _sweep_suspects(pats, units, skip=_WINDOW_ONLY) -> List[Tuple[str, str]]:
+    """One interleaved sample per (pattern, unit): the cheap screen. A skipped pattern is never
+    timed."""
     out = []
     for name, rx in pats:
-        if name in _WINDOW_ONLY:
+        if name in skip:
             continue
         for unit in units:
             small = (unit * _SWEEP_LADDER[1])[:_SWEEP_LADDER[0]]
@@ -934,17 +947,12 @@ def _sweep_suspects(pats, units) -> List[Tuple[str, str]]:
     return out
 
 
-def test_every_compiled_pattern_is_linear_on_unspaced_runs():
-    """The per-pattern sweep the W2-OB-7 review ran by hand: every module-level pattern in the
-    four validator modules, on 3,000 vs 12,000 characters of each degenerate unit — screened with
-    one interleaved CPU sample, and every suspect confirmed by `assert_linear` (two independent
-    five-round measurements) before it counts."""
-    pats = _compiled_patterns()
-    assert len(pats) >= 150, len(pats)
-    units = ("a.", "U.S.", "A-", "s&p&", "a'", "9.", "zzco ", "a's ")
+def _confirmed_slow(pats, units, skip=_WINDOW_ONLY) -> List[object]:
+    """Every screened suspect confirmed by `assert_linear` (two independent five-round
+    measurements); what is left is super-linear."""
     by_name = dict(pats)
     slow = []
-    for name, unit in _sweep_suspects(pats, units):
+    for name, unit in _sweep_suspects(pats, units, skip):
         rx = by_name[name]
 
         def make(n: int, rx=rx, unit=unit) -> Callable[[], object]:
@@ -956,7 +964,142 @@ def test_every_compiled_pattern_is_linear_on_unspaced_runs():
                           limit=_SWEEP_LIMIT)
         except AssertionError as e:
             slow.append(e.args[0])
+    return slow
+
+
+def test_every_compiled_pattern_is_linear_on_unspaced_runs():
+    """The per-pattern sweep the W2-OB-7 review ran by hand: every module-level pattern in the
+    four validator modules, the judge and the writer, on 3,000 vs 12,000 characters of each
+    degenerate unit — screened with one interleaved CPU sample, and every suspect confirmed by
+    `assert_linear` (two independent five-round measurements) before it counts."""
+    pats = _compiled_patterns()
+    assert len(pats) >= 150, len(pats)
+    assert any(name.startswith("judge.") for name, _ in pats)
+    assert any(name.startswith("writer_service.") for name, _ in pats)
+    units = ("a.", "U.S.", "A-", "s&p&", "a'", "9.", "zzco ", "a's ")
+    slow = _confirmed_slow(pats, units)
     assert slow == [], slow
+
+
+# ── 12b. whitespace runs (review 2026-10-24) ───────────────────────────────────────────────────
+#
+# `\s*X` retried from every position of a whitespace run that ends in no X is quadratic, and the
+# units above hold no run longer than one space. Two such patterns slipped past them: the
+# code-fence pattern of the judge and the writer (now `judge.strip_code_fences`) and the
+# clause-break pattern of the App Store scan (now `compliance._break_clauses`, ~150 ms on one
+# 6,000-character field before).
+
+_WS_UNITS = (" ", "\n", " \t\r\n", "\u00a0")
+
+#: The patterns a bare `finditer` over a whitespace run does not model, each with EVERY call that
+#: reaches it (`test_the_whitespace_exemptions_are_every_call_there_is` reads them from the AST):
+#: `match` is one anchored attempt at a position another match found — O(run) per call, most
+#: windowed too; `_COMPARISON_RE` rewrites only `fold()` text, whose runs `_WS_RE` collapsed to
+#: one space; `_CUSTOMER_AUDIENCE_RE` also searches one bounded match. Never timed: a bare
+#: `finditer` of `_RATIO_AFTER_RE` (windowed to 60 characters where it runs) is cubic — ~24 s on
+#: 1,600 spaces, measured once by hand.
+_WS_EXEMPT: Dict[str, FrozenSet[str]] = {
+    **{f"compliance.{n}": frozenset({"match"}) for n in (
+        "_NEXT_WORD_RE", "_NEXT_WORD_PUNCT_RE", "_NEXT_NAME_RE", "_BET_ON_RE",
+        "_BET_FOR_OWNERS_RE", "_TIER2_LESSON_NOUN_RE", "_RATIO_AFTER_RE", "_RECORD_AFTER_RE",
+        "_FRAME_COMPLEMENT_RE", "_DEBUNK_CLAUSE_RE", "_THAT_RE", "_TURN_START_RE",
+        "_NEW_SUBJECT_RE", "_ADVERBIAL_START_RE", "_YES_NO_QUESTION_RE", "_DEBUNK_NEXT_RE",
+        "_AFFIRM_NEXT_RE", "_DOUBT_NEXT_RE")},
+    "compliance._COMPARISON_RE": frozenset({"sub(' beats ', folded)"}),
+    "compliance._CUSTOMER_AUDIENCE_RE": frozenset({"match", "search(m.group(0))"}),
+}
+
+
+def test_every_compiled_pattern_is_linear_on_whitespace_runs():
+    pats = _compiled_patterns()
+    names = {name for name, _ in pats}
+    assert set(_WS_EXEMPT) <= names, sorted(set(_WS_EXEMPT) - names)
+    slow = _confirmed_slow(pats, _WS_UNITS, skip=_WINDOW_ONLY | set(_WS_EXEMPT))
+    assert slow == [], slow
+
+
+def test_the_whitespace_exemptions_are_every_call_there_is():
+    """Each exempt pattern is reached ONLY through the calls `_WS_EXEMPT` lists — read from the
+    AST, so a comment or docstring naming a pattern does not count. A pattern passed around,
+    looped over, imported by another marketing module or called another way is a whole-text path
+    the sweep must time; a call that is gone makes its exemption stale. Both fail here."""
+    bare = {name.split(".", 1)[1] for name in _WS_EXEMPT}
+    calls: Dict[str, Set[str]] = {}
+    stray: List[str] = []
+    for path in sorted(Path(c.__file__).parent.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        if path.name != "compliance.py":
+            stray += [f"{path.name}: {n}" for node in ast.walk(tree)
+                      for n in ((node.id,) if isinstance(node, ast.Name)
+                                else (node.attr,) if isinstance(node, ast.Attribute)
+                                else (node.name,) if isinstance(node, ast.alias) else ())
+                      if n in bare]
+            continue
+        receivers = set()
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name) and node.func.value.id in bare):
+                rx = node.func.value.id
+                shape = (node.func.attr if node.func.attr == "match"
+                         else ast.unparse(node)[len(rx) + 1:])
+                calls.setdefault(f"compliance.{rx}", set()).add(shape)
+                receivers.add(id(node.func.value))
+        stray += [f"{path.name}: {node.id} (line {node.lineno})" for node in ast.walk(tree)
+                  if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+                  and node.id in bare and id(node) not in receivers]
+    assert stray == [], stray
+    assert calls == {name: set(shapes) for name, shapes in _WS_EXEMPT.items()}
+
+
+#: (item, head, run unit, tail): one field holding one long whitespace run — the real scan path,
+#: capped at 6,000 characters. Before `_break_clauses`, a run without a line break or a dash (and
+#: a " \n" run, through the rewrite) cost the App Store scan ~150 ms at the cap.
+_WS_FIELDS = (
+    (VI, "Margins hit 50%", " ", ""), (RR, "It is", " ", "a myth."),
+    (MR, "Is it safe?", " ", "Yes."), (NV, "Mellanox", "\u00a0", "acquired"),
+    (IT, "Stocks rise", "\n", "."), (IT, "Stocks rise", " \n", "."),
+    (AP, "Lessons", " \t", "—coming soon to the App Store."),
+    (IT, "Prices fall", " \n", "– prices rise"),
+)
+
+
+@pytest.mark.parametrize("key, head, unit, tail", _WS_FIELDS)
+def test_a_field_with_a_long_whitespace_run_scans_in_linear_time(key, head, unit, tail):
+    item = content_pool.get_item(key)
+
+    def run(n: int) -> Callable[[], None]:
+        pad = max(0, n - len(head) - len(tail))
+        text = head + (unit * pad)[:pad] + tail
+        return lambda: ws._scan("f", text, item, allow_emoji=True)
+
+    assert_linear(run, (key, head, unit))
+
+
+#: The pattern the App Store scan used until 2026-10-24: the oracle `_break_clauses` and
+#: `_has_clause_break` must equal.
+_OLD_CLAUSE_BREAKS_RE = re.compile(r"\n+|\s*[–—]\s*")
+
+
+@pytest.mark.parametrize("text", [
+    "", "plain text", "Lessons on patience—coming soon to the App Store.",
+    "Lessons on patience — coming soon", "Lessons–coming", "a — — b",
+    "Read the full lesson\n\nComing soon to the App Store", "a\n \n— b", "a \n—\n b",
+    "a  \n\n  — b", "a\n\n  — b", "—", "\n", " — ", "x——y",
+    "a" + " " * 50 + "b", "a" + " \n" * 20 + "b", "a\u00a0—\u3000b", "pre-order long-term",
+    "a\r\n—\r\nb", "—\n\n—",
+], ids=repr)
+def test_clause_breaks_are_cut_exactly_like_the_old_pattern(text):
+    assert c._break_clauses(text) == _OLD_CLAUSE_BREAKS_RE.sub(". ", text)
+    assert c._has_clause_break(text) == bool(_OLD_CLAUSE_BREAKS_RE.search(text))
+
+
+def test_clause_breaks_match_the_old_pattern_on_random_text():
+    rng = random.Random(20261024)
+    atoms = ["\n", "\n\n", " ", "\t", "\r", "\u00a0", " ", "–", "—", "-", "a", "."]
+    for _ in range(20000):
+        text = "".join(rng.choice(atoms) for _ in range(rng.randint(0, 14)))
+        assert c._break_clauses(text) == _OLD_CLAUSE_BREAKS_RE.sub(". ", text), repr(text)
+        assert c._has_clause_break(text) == bool(_OLD_CLAUSE_BREAKS_RE.search(text)), repr(text)
 
 
 def test_the_linearity_guard_is_not_vacuous():
@@ -979,3 +1122,14 @@ def test_the_linearity_guard_is_not_vacuous():
 
     with pytest.raises(AssertionError):
         assert_linear(make_field, "quadratic field path")
+
+    # The whitespace sweep's own shape (review 2026-10-24): the old code-fence pattern on a run.
+    fence = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
+
+    def make_ws(n: int) -> Callable[[], object]:
+        text = " " * n
+        return lambda: list(fence.finditer(text))
+
+    with pytest.raises(AssertionError):
+        assert_linear(make_ws, "quadratic whitespace pattern", floor=_SWEEP_FLOOR,
+                      ladder=_SWEEP_LADDER, limit=_SWEEP_LIMIT)

@@ -94,8 +94,29 @@ _BLOCKED_FINISHES = frozenset({
     "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "OTHER", "IMAGE_SAFETY",
     "LANGUAGE", "MALFORMED_FUNCTION_CALL",
 })
-_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
 _WS_RE = re.compile(r"\s+")
+#: The longest answer either marketing parser reads (the judge's verdicts here, the writer's
+#: package in `writer_service.parse_response`). Real answers are a small fraction of it; a longer
+#: one is a repetition loop, refused unread so its size never costs the single uvicorn worker.
+MAX_ANSWER_CHARS = 200_000
+
+
+def strip_code_fences(text: str) -> str:
+    r"""`text` without a leading ``` / ```json fence and a trailing ``` — the exact cut of the old
+    `^\s*```(?:json)?\s*|\s*```\s*$` (IGNORECASE), without a pattern: its second branch took time
+    quadratic in a whitespace run INSIDE the answer (2.5 s on 50,000 newlines), on the web's one
+    event loop (review 2026-10-24). Linear in the length of `text`. `casefold`, not `lower`:
+    IGNORECASE lets `s` match the long s (U+017F) and only casefold maps it; `str.strip` and `\s`
+    agree on every code point."""
+    t = text.strip()
+    if t.startswith("```"):
+        t = t[3:]
+        if t[:4].casefold() == "json":
+            t = t[4:]
+        t = t.lstrip()
+    if t.endswith("```"):
+        t = t[:-3].rstrip()
+    return t
 
 
 class MarketingJudgeUnavailable(Exception):
@@ -543,9 +564,12 @@ def parse_verdicts(result: Dict[str, Any], fields: Sequence[Tuple[str, str]]) ->
     text = result.get("text")
     if not isinstance(text, str) or not text.strip():
         raise MarketingJudgeUnavailable(f"judge answer empty (finish={finish_name or None})")
+    if len(text) > MAX_ANSWER_CHARS:
+        raise MarketingJudgeUnavailable(
+            f"judge answer of {len(text)} characters (> {MAX_ANSWER_CHARS})")
     try:
-        obj = json.loads(_FENCE_RE.sub("", text.strip()))
-    except (ValueError, TypeError) as e:
+        obj = json.loads(strip_code_fences(text))
+    except (ValueError, TypeError, RecursionError) as e:   # RecursionError: nested past the C stack
         raise MarketingJudgeUnavailable(f"judge answer is not JSON ({type(e).__name__})") from None
     if not isinstance(obj, dict) or not isinstance(obj.get("verdicts"), list):
         raise MarketingJudgeUnavailable("judge answer has no `verdicts` list")

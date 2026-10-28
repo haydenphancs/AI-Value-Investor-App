@@ -24,7 +24,7 @@ The Resolution Center REPLY is not here on purpose: it is a message sent on the 
 behalf, and the developer sends it.
 
 1.01 (2026-10-05; named 1.01 on 2026-10-08 — Apple reads it as 1.1): 1.0 (10) was approved and
-released. `--version` (default 1.01) points the script
+released. `--version` (default 1.02 since 2026-10-25; 1.01 went live 2026-10-11) points the script
 at the next version, whose notes ASC copies from 1.0 — the four 2026-09-24 paragraphs are already
 there and no-op; the one change left is the AI paragraph's web-search sentence. It has TWO
 versions (2026-10-09): by default the report-chat recipe (WEB_SEARCH_REPORT_CHAT), which the
@@ -36,8 +36,8 @@ only slot with the recording unless `--allow-video-in-empty-slot` is passed.
 
 DEFAULTS TO --dry-run. The original notes are written to a backup directory first.
 
-    ./venv/bin/python scripts/asc_review_resubmit.py                     # 1.01, dry run
-    ./venv/bin/python scripts/asc_review_resubmit.py --apply             # 1.01, write
+    ./venv/bin/python scripts/asc_review_resubmit.py                     # 1.02, dry run
+    ./venv/bin/python scripts/asc_review_resubmit.py --apply             # 1.02, write
     ./venv/bin/python scripts/asc_review_resubmit.py --apply --all-chats-web-search-is-on   # switch ON in prod
     ./venv/bin/python scripts/asc_review_resubmit.py --version 1.0 --video ~/Desktop/caydex-bg-audio.mov
 
@@ -60,7 +60,7 @@ from typing import Dict, List, Optional, Tuple
 
 _HERE = Path(__file__).resolve().parent
 _BUNDLE = "com.phan.caydex"
-_VERSION = "1.01"  # the next App Store version (Apple and the backend read it as 1.1); 1.0 was approved 2026-10-05
+_VERSION = "1.02"  # the next App Store version (read as 1.2); 1.01 was approved 2026-10-11, 1.0 on 2026-10-05
 _BACKUP = Path(os.environ.get("ASC_BACKUP_DIR") or tempfile.gettempdir()) / "asc-review-resubmit-backup"
 
 # App Store Connect's hard cap on App Review Information → Notes.

@@ -42,14 +42,25 @@ struct DailyScannersSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Daily Scanners")
-                    .font(AppTypography.heading)
-                    .foregroundColor(AppColors.textPrimary)
-                Spacer()
+            VStack(alignment: .leading, spacing: 0) {
+                HStack {
+                    Text("Daily Scanners")
+                        .font(AppTypography.heading)
+                        .foregroundColor(AppColors.textPrimary)
+                    Spacer()
+                }
+
+                // One phrase per card (Top Movers, Heavy Traffic, Skeptical Money). "$250M+"
+                // is the backend's `_SCANNER_MIN_MARKET_CAP`, the one floor all three cards
+                // share — never "no penny stocks": Skeptical Money has no $5 price floor.
+                // Pinned to the backend constant by test_ios_daily_scanners_subtitle_parity.py.
+                Text("Big moves, heavy volume, crowded shorts · $250M+ caps")
+                    .font(AppTypography.labelSmall)
+                    .foregroundColor(AppColors.textMuted)
+                    .padding(.top, 4)
+                    .padding(.bottom, 13)
             }
             .padding(.horizontal, AppSpacing.lg)
-            .padding(.bottom, 12)
 
             ScrollViewReader { proxy in
                 VStack(alignment: .leading, spacing: 0) {

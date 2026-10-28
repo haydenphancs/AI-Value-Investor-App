@@ -168,14 +168,45 @@ final class UpdatesViewModel: ObservableObject {
         "+\(lockedTickerCount) more"
     }
 
-    /// Tabs the chip strip renders — everything the plan lets the user open.
+    /// The Tracking tab's "Sort By" choice — the strip's ticker order. Re-read whenever any
+    /// screen saves it (`UpdatesView` listens for `HoldingsSort.didChangeNotification`).
+    @Published private(set) var holdingsSort: HoldingsSort = HoldingsSort.load()
+
+    func reloadHoldingsSort() {
+        let stored = HoldingsSort.load()
+        if stored != holdingsSort { holdingsSort = stored }
+    }
+
+    /// Tabs the chip strip renders — everything the plan lets the user open: the Market chip
+    /// first, then the tickers in the Tracking tab's Holdings order.
     ///
     /// `filterTabs` carries the WHOLE group, locked entries included, because the
     /// Manage-Assets sheet is fed from it and managing your own watchlist is free. Only
     /// the strip filters; conflating the two is what made a Free user's sheet show one
     /// ticker out of twenty with no way to remove the rest.
+    ///
+    /// The order comes from `HoldingsSort.ordered`, the comparator Tracking's list uses, keyed
+    /// on each chip's OWN numbers (so a Change sort reads in order across the % the chips
+    /// show) and on its place in the server's group order ("Date Added"). An unknown price or
+    /// change sorts as 0, exactly as Tracking's placeholder rows do.
     var openableTabs: [NewsFilterTab] {
-        filterTabs.filter { !$0.isLocked }
+        let open: [NewsFilterTab] = filterTabs.filter { !$0.isLocked }
+        let market: [NewsFilterTab] = open.filter { $0.isMarketTab }
+        let tickers: [NewsFilterTab] = open.filter { !$0.isMarketTab }
+        // first-wins: `uniqueKeysWithValues:` would trap on a repeated scope.
+        let positions: [String: Int] = Dictionary(
+            filterTabs.filter { !$0.isMarketTab }.enumerated().map { ($1.scope.uppercased(), $0) },
+            uniquingKeysWith: { first, _ in first })
+        let ordered: [NewsFilterTab] = holdingsSort.ordered(tickers) { (tab: NewsFilterTab) -> HoldingsSort.Key in
+            HoldingsSort.Key(
+                ticker: tab.scope,
+                price: tab.price ?? 0,
+                changePercent: tab.changePercent ?? 0,
+                marketCap: tab.marketCap,
+                position: positions[tab.scope.uppercased()]
+            )
+        }
+        return market + ordered
     }
 
     /// Every ticker in the group, locked or not — the Manage-Assets sheet's source, and

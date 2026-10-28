@@ -290,8 +290,10 @@ async def get_updates_tabs(
     if group is not None and tickers:
         rows = [{"ticker": t, **((meta or {}).get(t) or {})} for t in tickers]
 
-    def _change(sym: str) -> Optional[float]:
-        raw = (quotes.get(sym) or {}).get("changePercentage")
+    def _quote_number(sym: str, field: str) -> Optional[float]:
+        raw = (quotes.get(sym) or {}).get(field)
+        if isinstance(raw, bool):
+            return None
         try:
             f = float(raw)
         except (TypeError, ValueError):
@@ -299,6 +301,15 @@ async def get_updates_tabs(
         # FMP emits NaN/Infinity tokens for thin or just-listed symbols; those
         # serialize to invalid JSON under allow_nan=False and 500 the screen.
         return f if f == f and abs(f) != float("inf") else None
+
+    def _change(sym: str) -> Optional[float]:
+        return _quote_number(sym, "changePercentage")
+
+    def _market_cap(sym: str) -> Optional[float]:
+        # Not positive → None, the Tracking feed's rule (`market_cap=… if market_cap_f else
+        # None`): the strip and the Holdings list must sort a missing cap the same way.
+        cap = _quote_number(sym, "marketCap")
+        return cap if cap is not None and cap > 0 else None
 
     tabs = [
         UpdatesTabResponse(
@@ -335,6 +346,8 @@ async def get_updates_tabs(
                 is_market_tab=False,
                 is_locked=t not in visible_set,
                 asset_type=classes.get(t) or resolve_asset_class(t, row.get("asset_type")),
+                price=_quote_number(t, "price"),
+                market_cap=_market_cap(t),
             )
         )
 

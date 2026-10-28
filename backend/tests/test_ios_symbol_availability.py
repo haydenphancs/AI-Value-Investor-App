@@ -318,13 +318,17 @@ def test_the_scan_actually_reaches_the_tree():
     """Control 2: a broken path or glob would scan zero files and pass."""
     files = _swift_files()
     assert len(files) > 400, f"only {len(files)} Swift files found under {IOS_ROOT}"
+    # The WHOLE tree, not an alphabetical slice: the first 80 files sat just over the bar
+    # (24 vs > 20), so one new file sorting into the slice (Core/Utilities/HoldingsSort.swift,
+    # 2026-10-27) pushed a symbol-bearing file out and failed this control with extraction
+    # working fine. 281 names matched tree-wide that day.
     matched = set()
-    for path in files[:80]:
+    for path in files:
         code = strip_comments(path.read_text(encoding="utf-8", errors="replace"))
         matched |= {m.group(1) for m in re.finditer(r'"([A-Za-z0-9._]+)"', code)} & DB.keys()
-    assert len(matched) > 20, (
-        f"only {len(matched)} known symbol names matched across 80 files — literal extraction "
-        "has regressed and the guard is inspecting nothing"
+    assert len(matched) > 150, (
+        f"only {len(matched)} known symbol names matched across {len(files)} files — literal "
+        "extraction has regressed and the guard is inspecting nothing"
     )
 
 

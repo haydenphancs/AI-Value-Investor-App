@@ -66,6 +66,14 @@ struct UpdatesTabBar: View {
                         reveal(UpdatesScope.market, with: proxy)
                     }
                 }
+                // The chips were re-ordered (Tracking's "Sort By" changed, or the group was
+                // reordered) — the selected one may have moved off-screen.
+                .onChange(of: tabs.map { $0.scope }) { _, _ in
+                    guard let scope = selectedTab?.scope else { return }
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        reveal(scope, with: proxy)
+                    }
+                }
             }
 
             // Manage Assets Button

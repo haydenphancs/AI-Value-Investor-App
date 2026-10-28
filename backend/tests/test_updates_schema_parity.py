@@ -43,6 +43,8 @@ IOS_TAB_KEYS = {
     "is_locked",
     # The ticker's asset class; iOS declares a fund to "Ask Cay AI" with it ("SPY|ETF").
     "asset_type",
+    # Sort keys, never displayed: the strip orders by Tracking's "Sort By" (Price / Market Cap).
+    "price", "market_cap",
 }
 IOS_INSIGHT_KEYS = {
     "scope", "headline", "bullets", "sentiment", "badge", "article_count",

@@ -53,6 +53,13 @@ class UpdatesTabResponse(BaseModel):
     # None on the Market tab. iOS uses it to declare a FUND to "Ask Cay AI" ("SPY|ETF"),
     # which no symbol rule can recognise.
     asset_type: Optional[str] = None
+    # SORT KEYS, never displayed. iOS orders the chip strip with the Tracking tab's "Sort By"
+    # choice (Price / Market Cap among them), so each pill carries the two numbers the strip
+    # cannot otherwise sort on — read from the same quote as `change_percent`, no extra call.
+    # None when the quote is missing or the number is non-finite; market cap also when it is
+    # not positive (the Tracking feed's rule), so both screens order a missing one alike.
+    price: Optional[float] = None
+    market_cap: Optional[float] = None
 
 
 class UpdatesTabsResponse(BaseModel):

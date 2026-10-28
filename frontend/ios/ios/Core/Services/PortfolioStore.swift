@@ -132,6 +132,15 @@ final class PortfolioStore: ObservableObject {
         )
     }
 
+    /// Posted once the SERVER has confirmed a `setTickers` write to the ACTIVE group — the
+    /// Manage Tickers drag-reorder, an Edit Portfolio add / remove, the orphan purge. None of
+    /// those posts `watchlistDidChangeNotification` or `activeGroupDidChangeNotification`, so
+    /// the Updates chips (whose "Date Added" order IS the group's stored order) kept the old
+    /// order and membership for the whole process. Post-confirm for the reason given below.
+    static let activeGroupTickersDidChangeNotification = Notification.Name(
+        "PortfolioStore.activeGroupTickersDidChange"
+    )
+
     /// Posted once the SERVER has confirmed a watchlist add or remove — the star on the
     /// five detail screens, Updates › Manage Assets, and Tracking's own search star / swipe
     /// removal. Every subscriber that already reloads itself after its OWN mutation ignores
@@ -567,6 +576,13 @@ final class PortfolioStore: ObservableObject {
                 portfolios[i].items = originalItems
             }
             throw error
+        }
+        // Read AFTER the await: a sign-out meanwhile nils `activePortfolioId` (`reset()`), and
+        // a group switch meanwhile makes this write another group's.
+        if portfolioId == activePortfolioId {
+            NotificationCenter.default.post(
+                name: Self.activeGroupTickersDidChangeNotification, object: nil
+            )
         }
     }
 

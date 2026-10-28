@@ -326,6 +326,22 @@ struct UpdatesView: View {
                 guard let change = WatchlistChange(notification), change.source != .updates else { return }
                 Task { await viewModel.reloadForWatchlistChange() }
             }
+            // The active group's tickers were reordered or edited on Tracking (Manage Tickers,
+            // Edit Portfolio). Neither posts a watchlist change, and the chips' "Date Added"
+            // order is the group's stored order — so the strip re-reads it.
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: PortfolioStore.activeGroupTickersDidChangeNotification
+                )
+            ) { _ in
+                Task { await viewModel.reloadForWatchlistChange() }
+            }
+            // "Sort By" changed on Tracking: the chips follow at once (no request).
+            .onReceive(
+                NotificationCenter.default.publisher(for: HoldingsSort.didChangeNotification)
+            ) { _ in
+                viewModel.reloadHoldingsSort()
+            }
             .onChange(of: viewModel.selectedTab) { oldValue, newValue in
                 if let newTab = newValue {
                     viewModel.selectTab(newTab)

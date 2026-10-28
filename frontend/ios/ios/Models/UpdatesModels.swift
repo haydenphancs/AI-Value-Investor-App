@@ -50,6 +50,9 @@ struct NewsFilterTab: Identifiable, Equatable {
     var isLocked: Bool = false
     /// Wire asset class ("stock", "etf", …); nil on the Market tab or from an older backend.
     var assetType: String? = nil
+    /// Sort keys only (`HoldingsSort`): the strip orders by Tracking's "Sort By". Never drawn.
+    var price: Double? = nil
+    var marketCap: Double? = nil
 
     /// The reference "Ask Cay AI" sends for this feed. A fund is declared ("SPY|ETF")
     /// because no symbol rule can tell one — without it the chat treated SPY as an
@@ -446,6 +449,10 @@ struct UpdatesTabDTO: Codable, Sendable {
     let isLocked: Bool?
     /// Wire asset class ("stock", "etf", "crypto", …). Optional: older backends omit it.
     let assetType: String?
+    /// Sort keys for the Holdings "Sort By" order (`HoldingsSort`), never displayed. Optional:
+    /// absent on the Market tab, on a missing quote, and from a backend predating them.
+    let price: Double?
+    let marketCap: Double?
 
     enum CodingKeys: String, CodingKey {
         case scope, title
@@ -455,6 +462,8 @@ struct UpdatesTabDTO: Codable, Sendable {
         case isMarketTab = "is_market_tab"
         case isLocked = "is_locked"
         case assetType = "asset_type"
+        case price
+        case marketCap = "market_cap"
     }
 }
 
@@ -745,6 +754,8 @@ extension NewsFilterTab {
         // exactly how that backend behaves.
         self.isLocked = dto.isLocked ?? false
         self.assetType = dto.assetType
+        self.price = (dto.price?.isFinite ?? false) ? dto.price : nil
+        self.marketCap = (dto.marketCap?.isFinite ?? false) ? dto.marketCap : nil
     }
 }
 

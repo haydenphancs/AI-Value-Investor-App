@@ -60,8 +60,6 @@ class TrackingViewModel: ObservableObject {
 
     private static let insightsEnabledKey = "TrackingView.isInsightsEnabled"
     private static let changeDisplayModeKey = "TrackingView.changeDisplayMode"
-    private static let sortOptionKey = "TrackingView.sortOption"
-    private static let sortAscendingKey = "TrackingView.sortAscending"
 
     /// Server-computed diversification score (the source of truth). Nil until
     /// loaded, when the user has < 2 holdings, or when the call fails.
@@ -274,16 +272,11 @@ class TrackingViewModel: ObservableObject {
         self.snapshotStore = TrackingSnapshotStore.shared
         self.isInsightsEnabled = UserDefaults.standard.bool(forKey: Self.insightsEnabledKey)
 
-        // Restore persisted sort preferences. Sort lives on the VM so it
-        // applies to whichever portfolio is active — the menu in the new
-        // PortfolioHeaderBar writes to the same keys.
-        if let raw = UserDefaults.standard.string(forKey: Self.sortOptionKey),
-           let restored = AssetSortOption(rawValue: raw) {
-            self.sortOption = restored
-        }
-        if UserDefaults.standard.object(forKey: Self.sortAscendingKey) != nil {
-            self.sortAscending = UserDefaults.standard.bool(forKey: Self.sortAscendingKey)
-        }
+        // Restore the persisted sort. It applies to whichever portfolio is active, and the
+        // Updates chip strip orders by the same stored value (`HoldingsSort`).
+        let storedSort = HoldingsSort.load()
+        self.sortOption = storedSort.option
+        self.sortAscending = storedSort.ascending
         if let raw = UserDefaults.standard.string(forKey: Self.changeDisplayModeKey),
            let restored = ChangeDisplayMode(rawValue: raw) {
             self.changeDisplayMode = restored
@@ -340,6 +333,13 @@ class TrackingViewModel: ObservableObject {
                 guard let change = WatchlistChange(notification) else { return }
                 self?.handleWatchlistChange(change)
             }
+            .store(in: &cancellables)
+
+        // The sort was changed by ANOTHER instance (there are two Tracking screens, each with
+        // its own ViewModel). Our own `save()` lands here too, and changes nothing.
+        NotificationCenter.default.publisher(for: HoldingsSort.didChangeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.applyStoredSort() }
             .store(in: &cancellables)
 
         // Republish whenever the portfolio store changes so filteredAssets,
@@ -586,46 +586,25 @@ class TrackingViewModel: ObservableObject {
             }
         }
 
-        // Apply sorting
-        switch sortOption {
-        case .name:
-            assets.sort { sortAscending ? $0.ticker < $1.ticker : $0.ticker > $1.ticker }
-        case .price:
-            assets.sort { sortAscending ? $0.price < $1.price : $0.price > $1.price }
-        case .change:
-            assets.sort { sortAscending ? $0.changePercent < $1.changePercent : $0.changePercent > $1.changePercent }
-        case .marketCap:
-            // Assets without a market cap (e.g. crypto, indices) sort to the
-            // bottom in ascending order, top in descending — matches how the
-            // Watchlist screen handles missing fundamentals.
-            assets.sort { lhs, rhs in
-                switch (lhs.marketCap, rhs.marketCap) {
-                case let (l?, r?):
-                    return sortAscending ? l < r : l > r
-                case (nil, _?):
-                    return !sortAscending
-                case (_?, nil):
-                    return sortAscending
-                case (nil, nil):
-                    return sortAscending ? lhs.ticker < rhs.ticker : lhs.ticker > rhs.ticker
-                }
-            }
-        case .dateAdded:
-            // "Date added" now means position in the active portfolio (`order` above).
-            // first-wins rather than `uniqueKeysWithValues:`, which TRAPS on a duplicate
-            // key. A repeated ticker in `order` would crash the sort; the earliest
-            // position is the right one to keep.
-            let positions = Dictionary(
-                order.enumerated().map { ($1, $0) },
-                uniquingKeysWith: { first, _ in first })
-            assets.sort { lhs, rhs in
-                let l = positions[lhs.ticker.uppercased()] ?? Int.max
-                let r = positions[rhs.ticker.uppercased()] ?? Int.max
-                return sortAscending ? l < r : l > r
-            }
+        // Apply sorting — through `HoldingsSort`, the comparator the Updates chip strip uses
+        // too, so the two lists always agree.
+        //
+        // "Date added" means position in the active portfolio (`order` above). first-wins
+        // rather than `uniqueKeysWithValues:`, which TRAPS on a duplicate key. A repeated
+        // ticker in `order` would crash; the earliest position is the right one to keep.
+        let positions: [String: Int] = Dictionary(
+            order.enumerated().map { ($1, $0) },
+            uniquingKeysWith: { first, _ in first })
+        let sort = HoldingsSort(option: sortOption, ascending: sortAscending)
+        return sort.ordered(assets) { (asset: TrackedAsset) -> HoldingsSort.Key in
+            HoldingsSort.Key(
+                ticker: asset.ticker,
+                price: asset.price,
+                changePercent: asset.changePercent,
+                marketCap: asset.marketCap,
+                position: positions[asset.ticker.uppercased()]
+            )
         }
-
-        return assets
     }
 
     /// Alerts scoped strictly to the active portfolio. Multi-ticker rollups
@@ -1765,13 +1744,20 @@ class TrackingViewModel: ObservableObject {
 
     func toggleSort() {
         sortAscending.toggle()
-        UserDefaults.standard.set(sortAscending, forKey: Self.sortAscendingKey)
+        HoldingsSort(option: sortOption, ascending: sortAscending).save()
     }
 
     func selectSortOption(_ option: AssetSortOption) {
         sortOption = option
-        UserDefaults.standard.set(option.rawValue, forKey: Self.sortOptionKey)
+        HoldingsSort(option: option, ascending: sortAscending).save()
         showSortSheet = false
+    }
+
+    /// Re-reads the shared sort after any screen saved it.
+    private func applyStoredSort() {
+        let stored = HoldingsSort.load()
+        if sortOption != stored.option { sortOption = stored.option }
+        if sortAscending != stored.ascending { sortAscending = stored.ascending }
     }
 
     /// Swipe-to-delete: removes the ticker from the active portfolio only.

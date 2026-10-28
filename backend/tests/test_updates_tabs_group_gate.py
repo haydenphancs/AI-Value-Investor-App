@@ -318,6 +318,66 @@ async def test_non_finite_change_percentages_are_nulled(monkeypatch):
     assert all(t.change_percent is None for t in resp.tabs)
 
 
+# ── sort keys: the strip orders by Tracking's "Sort By" (2026-10-27) ──────────
+
+@pytest.mark.asyncio
+async def test_pills_carry_price_and_market_cap_from_the_same_quote(monkeypatch):
+    """iOS sorts the chips by Tracking's Price / Market Cap choice, so each pill carries both —
+    read from the quote `change_percent` already comes from, not from a second call."""
+    _patch(monkeypatch, group=_group(["AAPL", "MSFT"]),
+           quotes=[{"symbol": "AAPL", "changePercentage": 1.5, "price": 190.25,
+                    "marketCap": 2.9e12},
+                   {"symbol": "MSFT", "changePercentage": -0.5, "price": 410.0,
+                    "marketCap": 3.1e12}])
+    resp = await up.get_updates_tabs(user=_user("premium"))
+    by = {t.scope: t for t in resp.tabs}
+    assert (by["AAPL"].price, by["AAPL"].market_cap) == (190.25, 2.9e12)
+    assert (by["MSFT"].price, by["MSFT"].market_cap) == (410.0, 3.1e12)
+
+
+@pytest.mark.asyncio
+async def test_the_market_pill_carries_no_sort_keys(monkeypatch):
+    _patch(monkeypatch, group=_group(["AAPL"]))
+    resp = await up.get_updates_tabs(user=_user("pro"))
+    market = resp.tabs[0]
+    assert market.is_market_tab
+    assert market.price is None and market.market_cap is None
+
+
+@pytest.mark.asyncio
+async def test_unusable_sort_keys_are_nulled_never_zeroed(monkeypatch):
+    """NaN / inf 500 the strip under allow_nan=False; a missing, string, bool, zero or
+    negative market cap must read as MISSING — the Tracking feed's rule — so both screens
+    put that ticker in the same place."""
+    _patch(monkeypatch, group=_group(["NANP", "INFP", "ZERO", "NEGC", "STRP", "BOOL", "NONE"]),
+           quotes=[{"symbol": "NANP", "price": float("nan"), "marketCap": float("nan")},
+                   {"symbol": "INFP", "price": float("inf"), "marketCap": float("-inf")},
+                   {"symbol": "ZERO", "price": 0.0, "marketCap": 0},
+                   {"symbol": "NEGC", "price": 5.0, "marketCap": -10.0},
+                   {"symbol": "STRP", "price": "n/a", "marketCap": "big"},
+                   {"symbol": "BOOL", "price": True, "marketCap": True},
+                   {"symbol": "NONE"}])
+    resp = await up.get_updates_tabs(user=_user("premium"))
+    by = {t.scope: t for t in resp.tabs}
+    for sym in ("NANP", "INFP", "STRP", "BOOL", "NONE"):
+        assert by[sym].price is None, sym
+    for sym in ("NANP", "INFP", "ZERO", "NEGC", "STRP", "BOOL", "NONE"):
+        assert by[sym].market_cap is None, sym
+    # A zero price is a real (if odd) number, not missing — Tracking sorts it as 0 too.
+    assert by["ZERO"].price == 0.0
+    assert by["NEGC"].price == 5.0
+    # And the whole response still serializes strictly.
+    import json
+    json.dumps(resp.model_dump(), allow_nan=False)
+
+
+@pytest.mark.asyncio
+async def test_a_quote_failure_leaves_the_sort_keys_missing(monkeypatch):
+    _patch(monkeypatch, group=_group(["ORCL"]), quotes_raise=True)
+    resp = await up.get_updates_tabs(user=_user("pro"))
+    assert resp.tabs[1].price is None and resp.tabs[1].market_cap is None
+
+
 @pytest.mark.asyncio
 async def test_visible_pills_carry_their_company_name(monkeypatch):
     """The bug this pins: metadata used to be resolved for the first `_MAX_TABS` of the

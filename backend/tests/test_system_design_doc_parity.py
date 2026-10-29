@@ -444,6 +444,8 @@ _CURATED_TABLES = {
     "trillion_club_stakes", "search_pick_daily", "news_sentiment_log", "news_sentiment_backfill",
     # 2026-10-22: 198 and 202 applied and re-dumped (with 203); the document names both.
     "subscription_transactions", "sec_concept_cache",
+    # 2026-10-29: 205 applied and re-dumped; the document names its stake-finder ledger.
+    "trillion_club_stake_findings",
 }
 
 

@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict dMbGYLMEJllFLTQJ3B7FdjoRLOYiMwE18trEVL8a9h4AvB96dyWIeIeruD4HDWL
+\restrict 4CbEbptXyHOz5vrIKa0YdiEdvleQs5jIGH6reuN4hnhSPMgbIGMBhGgmgaoMgZm
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -5559,6 +5559,29 @@ begin
     end if;
     return new;
 end;
+$$;
+
+
+--
+-- Name: enforce_versioning_status_transition(); Type: FUNCTION; Schema: storage; Owner: -
+--
+
+CREATE FUNCTION storage.enforce_versioning_status_transition() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.versioning_status = OLD.versioning_status THEN
+        RETURN NEW;
+    END IF;
+
+    IF NEW.versioning_status = 'DISABLED' OR
+       (OLD.versioning_status = 'DISABLED' AND NEW.versioning_status = 'SUSPENDED') THEN
+        RAISE EXCEPTION 'Cannot transition bucket versioning status from % to %',
+            OLD.versioning_status, NEW.versioning_status;
+    END IF;
+
+    RETURN NEW;
+END;
 $$;
 
 
@@ -11345,6 +11368,135 @@ COMMENT ON TABLE public.trillion_club_filings IS 'Trillion-Dollar Club Bets: one
 
 
 --
+-- Name: trillion_club_stake_findings; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.trillion_club_stake_findings (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    company_slug text NOT NULL,
+    source text NOT NULL,
+    accession text NOT NULL,
+    filer_cik text NOT NULL,
+    investee_cik text,
+    form text NOT NULL,
+    filed_on date NOT NULL,
+    document text NOT NULL,
+    source_url text NOT NULL,
+    tier text NOT NULL,
+    outcome text NOT NULL,
+    reason text NOT NULL,
+    proposed_row jsonb,
+    verified_spans jsonb DEFAULT '[]'::jsonb NOT NULL,
+    fact_sha text,
+    stake_id uuid,
+    status text DEFAULT 'new'::text NOT NULL,
+    telegram_message_id bigint,
+    notified_at timestamp with time zone,
+    published_at timestamp with time zone,
+    owner_decision text,
+    decided_at timestamp with time zone,
+    attempts integer DEFAULT 0 NOT NULL,
+    last_error text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT trillion_club_stake_findings_accession_check CHECK ((accession ~ '^[0-9]{10}-[0-9]{2}-[0-9]{6}$'::text)),
+    CONSTRAINT trillion_club_stake_findings_cik_check CHECK (((filer_cik ~ '^[0-9]{10}$'::text) AND (filer_cik <> '0000000000'::text) AND ((investee_cik IS NULL) OR ((investee_cik ~ '^[0-9]{10}$'::text) AND (investee_cik <> '0000000000'::text))))),
+    CONSTRAINT trillion_club_stake_findings_decision_check CHECK (((owner_decision IS NULL) OR (owner_decision = ANY (ARRAY['kept'::text, 'withdrawn'::text, 'published'::text, 'dismissed'::text, 'deleted_in_studio'::text])))),
+    CONSTRAINT trillion_club_stake_findings_decision_dated CHECK (((owner_decision IS NULL) = (decided_at IS NULL))),
+    CONSTRAINT trillion_club_stake_findings_json_shapes CHECK ((((proposed_row IS NULL) OR ((jsonb_typeof(proposed_row) = 'object'::text) AND (octet_length((proposed_row)::text) <= 16384))) AND
+CASE
+    WHEN (jsonb_typeof(verified_spans) = 'array'::text) THEN ((jsonb_array_length(verified_spans) <= 100) AND (octet_length((verified_spans)::text) <= 65536))
+    ELSE false
+END)),
+    CONSTRAINT trillion_club_stake_findings_outcome_check CHECK ((outcome = ANY (ARRAY['auto'::text, 'proposal'::text, 'heads_up'::text, 'skipped'::text]))),
+    CONSTRAINT trillion_club_stake_findings_ranges CHECK (((attempts >= 0) AND ((telegram_message_id IS NULL) OR (telegram_message_id > 0)))),
+    CONSTRAINT trillion_club_stake_findings_reason_check CHECK ((reason = ANY (ARRAY['plain_13dg'::text, 'about_member'::text, 'legacy_schedule'::text, 'schedule_unparseable'::text, 'member_line_missing'::text, 'member_lines_disagree'::text, 'reporting_type'::text, 'group_member'::text, 'shared_power'::text, 'no_dispositive_power'::text, 'ownership_disclaimed'::text, 'derivative_position'::text, 'class_unmapped'::text, 'percent_above_50'::text, 'exit_filing'::text, 'cusip_invalid'::text, 'no_us_listing'::text, 'ambiguous_listing'::text, 't1_closing'::text, 't2_agreement'::text, 't3_indication'::text, 't4_directed'::text, 'instrument'::text, 'member_filed'::text, 'multi_cik'::text, 'exhibit_skipped'::text, 'commercial_only'::text, 'co_investor_only'::text, 'no_template'::text, 'too_large'::text, 's2_name_mismatch'::text, 'name_unusable'::text, 'copy_rule'::text, 'person_name'::text, 'dates_invalid'::text, 'too_old'::text, 'existing_row'::text, 'possible_match'::text, 'tombstone'::text, 'open_proposal'::text, 'validator'::text, 'volume_cap'::text, 'breaker'::text, 'tier_off'::text, 'before_auto_since'::text, 'trial'::text, 'not_enabled'::text, 'fetch_failed'::text, 'update'::text, 'exit'::text, 'deleted_in_studio'::text, 'recheck_negative'::text]))),
+    CONSTRAINT trillion_club_stake_findings_sha_check CHECK (((fact_sha IS NULL) OR (fact_sha ~ '^[0-9a-f]{64}$'::text))),
+    CONSTRAINT trillion_club_stake_findings_source_check CHECK ((source = ANY (ARRAY['sch13'::text, 'efts'::text]))),
+    CONSTRAINT trillion_club_stake_findings_status_check CHECK ((status = ANY (ARRAY['new'::text, 'staged'::text, 'noted'::text, 'published'::text, 'kept'::text, 'withdrawn'::text, 'proposed'::text, 'publishing'::text, 'dismissed'::text, 'expired'::text, 'superseded'::text, 'closed'::text, 'reported'::text, 'skipped'::text, 'error'::text]))),
+    CONSTRAINT trillion_club_stake_findings_text_caps CHECK ((((char_length(form) >= 1) AND (char_length(form) <= 40)) AND ((char_length(document) >= 1) AND (char_length(document) <= 255)) AND (source_url ~ '^https://'::text) AND (char_length(source_url) <= 500) AND ((last_error IS NULL) OR (char_length(last_error) <= 2000)))),
+    CONSTRAINT trillion_club_stake_findings_tier_check CHECK ((tier = ANY (ARRAY['13dg'::text, 'sec_closing'::text, 'sec_agreement'::text, 'ioi'::text, 'directed_issuance'::text, 'instrument'::text, 'update'::text, 'other'::text])))
+);
+
+
+--
+-- Name: TABLE trillion_club_stake_findings; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.trillion_club_stake_findings IS 'Trillion Club stake finder (migration 205): one row per (member, SEC accession) — the exactly-once claim on a filing (UNIQUE), its classification (tier, outcome auto | proposal | heads_up | skipped, reason), the verified evidence and the proposed stake row, and the Telegram review state (message, owner decision). A terminal finding is never classified again; a withdrawn, dismissed or expired one is a tombstone for its pair. stake_id is ON DELETE SET NULL and no CHECK requires it, so a Studio delete of a stake always succeeds. Written only by the stake finder (app/services/trillion_club/stake_*.py); service_role only.';
+
+
+--
+-- Name: COLUMN trillion_club_stake_findings.reason; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trillion_club_stake_findings.reason IS 'Why it got its outcome — a stake_contracts.REASONS code (closed set, CHECK); the digest text for each code lives there too.';
+
+
+--
+-- Name: COLUMN trillion_club_stake_findings.proposed_row; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trillion_club_stake_findings.proposed_row IS 'The pre-filled trillion_club_stakes row (a JSON object of its columns) for an auto or proposal outcome. A heads-up or skipped finding holds only underscore-prefixed digest keys (_investee, _detail, _t3, _old) so its digest line survives a failed send — and an exit filing (the member reporting 5% or less) its event date (_event), against which an older filing of the pair is refused; those are never read as a stake row. At most 16 KiB.';
+
+
+--
+-- Name: COLUMN trillion_club_stake_findings.verified_spans; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trillion_club_stake_findings.verified_spans IS 'The filing sentences the facts were read from, each verified against the full document text — a JSON array of at most 100 entries and 64 KiB.';
+
+
+--
+-- Name: COLUMN trillion_club_stake_findings.fact_sha; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trillion_club_stake_findings.fact_sha IS 'sha256 hex of the proposed facts. The Publish tap''s compare-and-swap fences on it and on the message id. The facts of an open proposal (proposed / publishing) never change in place (stake_store refuses the write), so a Publish publishes exactly the row its message showed.';
+
+
+--
+-- Name: COLUMN trillion_club_stake_findings.stake_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trillion_club_stake_findings.stake_id IS 'The stake row this finding wrote or updated. ON DELETE SET NULL: a Studio delete always succeeds, and the next reconcile records the pair as withdrawn (deleted_in_studio).';
+
+
+--
+-- Name: COLUMN trillion_club_stake_findings.status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trillion_club_stake_findings.status IS 'auto: new → staged → noted → published (→ kept | withdrawn | closed); proposal: new → proposed → publishing → published (→ withdrawn), or → dismissed | expired; heads-up: new → reported; also skipped, superseded and error (read again once per ET day while attempts < 3, then a fetch_failed heads-up). Terminal statuses are stake_contracts.TERMINAL_STATUSES. Every change is a compare-and-swap on the observed status.';
+
+
+--
+-- Name: COLUMN trillion_club_stake_findings.telegram_message_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trillion_club_stake_findings.telegram_message_id IS 'The owner''s Telegram message carrying this finding''s buttons (a note or a proposal). Taps that change a row are fenced on it.';
+
+
+--
+-- Name: COLUMN trillion_club_stake_findings.published_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trillion_club_stake_findings.published_at IS 'When this finding''s row went live: stamped on every move to published (the auto flip, a reconcile catch-up, the owner''s Publish of a proposal or an update) and never cleared. The auto-publish volume caps (3 a day ET, 10 in 7 days) count auto rows by it — plus every auto finding still new / staged / noted — never by created_at. NULL until then.';
+
+
+--
+-- Name: COLUMN trillion_club_stake_findings.owner_decision; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trillion_club_stake_findings.owner_decision IS 'kept | withdrawn | published | dismissed | deleted_in_studio, with decided_at (both or neither, CHECK). The auto-publish breaker counts withdrawn decisions by decided_at.';
+
+
+--
+-- Name: COLUMN trillion_club_stake_findings.attempts; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trillion_club_stake_findings.attempts IS 'Processing attempts. An error finding is read again at most once per ET day while attempts < 3 (stake_contracts.MAX_ATTEMPTS), then becomes a fetch_failed heads-up (a digest line with its EDGAR link).';
+
+
+--
 -- Name: trillion_club_stakes; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -11373,14 +11525,26 @@ CREATE TABLE public.trillion_club_stakes (
     sort_order integer DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    origin text DEFAULT 'seed'::text NOT NULL,
+    owner_kept_at timestamp with time zone,
+    withdrawn_at timestamp with time zone,
+    investee_cik text,
+    finding_id uuid,
     CONSTRAINT trillion_club_commitment_basis CHECK (((kind <> 'commitment'::text) OR (value_basis IS NULL) OR (value_basis = 'committed_up_to'::text))),
     CONSTRAINT trillion_club_secondary_never_published CHECK ((NOT (published AND (source_confidence = 'secondary'::text)))),
+    CONSTRAINT trillion_club_stake_auto_scope CHECK (((origin <> 'auto'::text) OR (owner_kept_at IS NOT NULL) OR ((NOT material) AND (kind = ANY (ARRAY['on_13f_note'::text, 'us_listed_off_13f'::text])) AND (disclosed_value_usd IS NULL) AND (value_basis IS NULL)))),
+    CONSTRAINT trillion_club_stake_finding_iff_machine CHECK (((finding_id IS NOT NULL) = (origin = ANY (ARRAY['auto'::text, 'proposal'::text])))),
+    CONSTRAINT trillion_club_stake_kept_only_auto CHECK (((owner_kept_at IS NULL) OR (origin = 'auto'::text))),
+    CONSTRAINT trillion_club_stake_machine_shape CHECK (((origin <> ALL (ARRAY['auto'::text, 'proposal'::text])) OR ((background IS NULL) AND (NOT tied_to_deal) AND (source_confidence = 'primary'::text) AND (source_url ~ '^https://www\.sec\.gov/Archives/edgar/data/'::text)))),
     CONSTRAINT trillion_club_stake_value_has_basis CHECK (((disclosed_value_usd IS NULL) OR (value_basis IS NOT NULL))),
+    CONSTRAINT trillion_club_stake_withdrawn_never_published CHECK ((NOT (published AND (withdrawn_at IS NOT NULL)))),
     CONSTRAINT trillion_club_stakes_background_check CHECK (((background IS NULL) OR (char_length(background) <= 90))),
     CONSTRAINT trillion_club_stakes_disclosed_value_usd_check CHECK (((disclosed_value_usd IS NULL) OR (disclosed_value_usd > (0)::double precision))),
+    CONSTRAINT trillion_club_stakes_investee_cik_check CHECK (((investee_cik ~ '^[0-9]{10}$'::text) AND (investee_cik <> '0000000000'::text))),
     CONSTRAINT trillion_club_stakes_investee_cusip_check CHECK (((investee_cusip IS NULL) OR (investee_cusip ~ '^[0-9A-Z]{9}$'::text))),
     CONSTRAINT trillion_club_stakes_investee_name_check CHECK (((char_length(investee_name) >= 1) AND (char_length(investee_name) <= 60))),
     CONSTRAINT trillion_club_stakes_kind_check CHECK ((kind = ANY (ARRAY['private'::text, 'non_us_listed'::text, 'us_listed_off_13f'::text, 'commitment'::text, 'on_13f_note'::text]))),
+    CONSTRAINT trillion_club_stakes_origin_check CHECK ((origin = ANY (ARRAY['seed'::text, 'auto'::text, 'proposal'::text]))),
     CONSTRAINT trillion_club_stakes_ownership_pct_check CHECK (((ownership_pct IS NULL) OR ((ownership_pct > (0)::double precision) AND (ownership_pct <= (100)::double precision)))),
     CONSTRAINT trillion_club_stakes_source_confidence_check CHECK ((source_confidence = ANY (ARRAY['primary'::text, 'secondary'::text]))),
     CONSTRAINT trillion_club_stakes_source_title_check CHECK (((char_length(source_title) >= 1) AND (char_length(source_title) <= 120))),
@@ -11393,7 +11557,42 @@ CREATE TABLE public.trillion_club_stakes (
 -- Name: TABLE trillion_club_stakes; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.trillion_club_stakes IS 'Trillion-Dollar Club Bets: hand-kept stakes outside the 13F (private, non-US, warrants, commitments), each with a primary source, as-of date and verified_on. Secondary rows never published.';
+COMMENT ON TABLE public.trillion_club_stakes IS 'Trillion-Dollar Club Bets: stakes outside the 13F (private, non-US, warrants, commitments), hand-kept, or found automatically from SEC filings (migration 205: origin seed | auto | proposal), each with a primary source, as-of date and verified_on. Secondary rows never published; a withdrawn row (withdrawn_at) never again.';
+
+
+--
+-- Name: COLUMN trillion_club_stakes.origin; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trillion_club_stakes.origin IS 'seed = hand-kept (written by scripts/seed_trillion_club.py; every pre-205 row); auto = published by the stake finder with no owner tap (a member''s own plain-share 13D/13G); proposal = built by the finder and published by the owner''s Publish tap. Migration 205.';
+
+
+--
+-- Name: COLUMN trillion_club_stakes.owner_kept_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trillion_club_stakes.owner_kept_at IS 'When the owner tapped Keep on an auto row''s note (auto rows only, CHECK). A kept row is no longer held to the phase-1 auto scope (it may be made material or carry a value); the machine-row rules still apply.';
+
+
+--
+-- Name: COLUMN trillion_club_stakes.withdrawn_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trillion_club_stakes.withdrawn_at IS 'When the owner tapped Withdraw, or the proposal was dismissed or expired: a tombstone. A withdrawn row is never published (CHECK) and the finder never adds the pair again.';
+
+
+--
+-- Name: COLUMN trillion_club_stakes.investee_cik; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trillion_club_stakes.investee_cik IS 'The investee''s SEC CIK (10 digits, never zero) when known — the first identity key the finder''s dedupe matches on, before the CUSIP-6 and the symbol.';
+
+
+--
+-- Name: COLUMN trillion_club_stakes.finding_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trillion_club_stakes.finding_id IS 'The trillion_club_stake_findings row that wrote this stake: set exactly when origin is auto or proposal (CHECK). A soft pointer — the ledger''s stake_id FK is the enforced edge.';
 
 
 --
@@ -12193,7 +12392,6 @@ CASE
     ELSE false
 END))),
     CONSTRAINT buckets_lifecycle_configuration_standard_only_check CHECK (((type = 'STANDARD'::storage.buckettype) OR ((lifecycle_configuration IS NULL) AND (lifecycle_configuration_generation IS NULL)))),
-    CONSTRAINT buckets_versioning_dark_check CHECK ((versioning_status = 'DISABLED'::text)),
     CONSTRAINT buckets_versioning_standard_only_check CHECK (((type = 'STANDARD'::storage.buckettype) OR (versioning_status = 'DISABLED'::text))),
     CONSTRAINT buckets_versioning_status_check CHECK ((versioning_status = ANY (ARRAY['DISABLED'::text, 'ENABLED'::text, 'SUSPENDED'::text])))
 );
@@ -13946,6 +14144,22 @@ ALTER TABLE ONLY public.trillion_club_companies
 
 ALTER TABLE ONLY public.trillion_club_filings
     ADD CONSTRAINT trillion_club_filings_pkey PRIMARY KEY (cik, period);
+
+
+--
+-- Name: trillion_club_stake_findings trillion_club_stake_findings_company_slug_accession_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.trillion_club_stake_findings
+    ADD CONSTRAINT trillion_club_stake_findings_company_slug_accession_key UNIQUE (company_slug, accession);
+
+
+--
+-- Name: trillion_club_stake_findings trillion_club_stake_findings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.trillion_club_stake_findings
+    ADD CONSTRAINT trillion_club_stake_findings_pkey PRIMARY KEY (id);
 
 
 --
@@ -15833,6 +16047,20 @@ CREATE INDEX idx_trillion_club_filings_recent ON public.trillion_club_filings US
 
 
 --
+-- Name: idx_trillion_club_stake_findings_company_investee; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_trillion_club_stake_findings_company_investee ON public.trillion_club_stake_findings USING btree (company_slug, investee_cik);
+
+
+--
+-- Name: idx_trillion_club_stake_findings_status_notified; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_trillion_club_stake_findings_status_notified ON public.trillion_club_stake_findings USING btree (status, notified_at);
+
+
+--
 -- Name: idx_trillion_club_stakes_company; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -16323,6 +16551,13 @@ CREATE TRIGGER enforce_bucket_name_length_trigger BEFORE INSERT OR UPDATE OF nam
 
 
 --
+-- Name: buckets enforce_versioning_status_transition; Type: TRIGGER; Schema: storage; Owner: -
+--
+
+CREATE TRIGGER enforce_versioning_status_transition BEFORE UPDATE OF versioning_status ON storage.buckets FOR EACH ROW EXECUTE FUNCTION storage.enforce_versioning_status_transition();
+
+
+--
 -- Name: buckets protect_bucket_control_insert; Type: TRIGGER; Schema: storage; Owner: -
 --
 
@@ -16698,6 +16933,22 @@ ALTER TABLE ONLY public.subscriptions
 
 ALTER TABLE ONLY public.theme_rotation_decisions
     ADD CONSTRAINT theme_rotation_decisions_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.theme_rotation_runs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: trillion_club_stake_findings trillion_club_stake_findings_company_slug_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.trillion_club_stake_findings
+    ADD CONSTRAINT trillion_club_stake_findings_company_slug_fkey FOREIGN KEY (company_slug) REFERENCES public.trillion_club_companies(slug) ON UPDATE CASCADE ON DELETE CASCADE;
+
+
+--
+-- Name: trillion_club_stake_findings trillion_club_stake_findings_stake_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.trillion_club_stake_findings
+    ADD CONSTRAINT trillion_club_stake_findings_stake_id_fkey FOREIGN KEY (stake_id) REFERENCES public.trillion_club_stakes(id) ON DELETE SET NULL;
 
 
 --
@@ -18292,6 +18543,19 @@ ALTER TABLE public.trillion_club_filings ENABLE ROW LEVEL SECURITY;
 --
 
 CREATE POLICY trillion_club_filings_service_all ON public.trillion_club_filings TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: trillion_club_stake_findings; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.trillion_club_stake_findings ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: trillion_club_stake_findings trillion_club_stake_findings_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY trillion_club_stake_findings_service_all ON public.trillion_club_stake_findings TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -20998,6 +21262,13 @@ GRANT ALL ON TABLE public.trillion_club_filings TO service_role;
 
 
 --
+-- Name: TABLE trillion_club_stake_findings; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.trillion_club_stake_findings TO service_role;
+
+
+--
 -- Name: TABLE trillion_club_stakes; Type: ACL; Schema: public; Owner: -
 --
 
@@ -21486,5 +21757,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict dMbGYLMEJllFLTQJ3B7FdjoRLOYiMwE18trEVL8a9h4AvB96dyWIeIeruD4HDWL
+\unrestrict 4CbEbptXyHOz5vrIKa0YdiEdvleQs5jIGH6reuN4hnhSPMgbIGMBhGgmgaoMgZm
 

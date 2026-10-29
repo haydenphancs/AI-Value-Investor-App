@@ -156,11 +156,20 @@ EXPECTED: dict[str, int] = {
     #                                     money_moves_select_all (money_moves_service_all was
     #                                     recreated as TO service_role: no count change)
     #   functions / enums / views unchanged (204 adds none).
-    "tables": 155,
-    "public": 116,
-    "fk": 34,
-    "policies": 123,
-    "rls": 116,
+    # Refreshed 2026-10-29 after the owner applied 205 and re-dumping. Every delta accounted for:
+    #   +1 tables / +1 public / +1 rls / +1 policies -> trillion_club_stake_findings, with one
+    #                          service_role policy
+    #   +2 fk                  -> trillion_club_stake_findings.company_slug → trillion_club_companies
+    #                          and .stake_id → trillion_club_stakes
+    #   205's five new trillion_club_stakes columns and their CHECKs are no counted delta. The
+    #   Supabase platform added storage.enforce_versioning_status_transition (with its trigger on
+    #   storage.buckets) and dropped buckets_versioning_dark_check in the same window: storage.*,
+    #   not counted here.
+    "tables": 156,
+    "public": 117,
+    "fk": 36,
+    "policies": 124,
+    "rls": 117,
     "functions": 58,
     "enums": 14,
     "views": 1,

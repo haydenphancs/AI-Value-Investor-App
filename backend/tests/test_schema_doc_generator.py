@@ -670,11 +670,9 @@ def test_every_public_table_is_curated():
 # `scripts/dump_schema.sh` is re-run, `test_pending_tables_are_really_still_pending`
 # fails until the name is removed.
 # Empty is the healthy steady state.
-_PENDING_MIGRATION_TABLES: set[str] = {
-    # 2026-10-28: 205's Trillion Club stake-finder ledger, written and not yet applied. (205's new
-    # columns on the stakes table are no curated key, so that table needs no entry.)
-    "public.trillion_club_stake_findings",
-}
+_PENDING_MIGRATION_TABLES: set[str] = set()
+# 2026-10-29: 205's Trillion Club stake-finder ledger (trillion_club_stake_findings) was applied
+# and re-dumped, so it left the list.
 # 2026-10-23: 204's two Wiser weekly tables (learn_weekly_pieces, learn_narration_jobs) were
 # applied and re-dumped, so they left the list.
 # 2026-10-22: 198's subscription_transactions and 202's sec_concept_cache were applied and

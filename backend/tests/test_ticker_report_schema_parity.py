@@ -496,22 +496,62 @@ def test_narrative_jobs_build_without_error_for_fallback_shell():
         assert callable(j.apply)
 
 
-def test_moat_dimensions_carry_source_tier():
+def test_moat_dimensions_carry_source_tier(monkeypatch):
     """Each pillar must report `source` ∈ {deterministic, grounded,
     ai_legacy} so iOS can show provenance separately from confidence.
     Regression guard for the September 2025 bug where the field was
-    silently dropped by Pydantic before being added to the schema."""
-    coll = TickerReportDataCollector()
-    out = _make_collected_data()
-    report = coll.assemble_report(out, stage_a_fallback())
-    dims = report["moat_competition"]["dimensions"]
-    assert len(dims) == 5, f"expected 5 pillars, got {len(dims)}"
-    valid_sources = {"deterministic", "grounded", "ai_legacy"}
-    for d in dims:
-        assert "source" in d, f"pillar {d.get('name')!r} missing `source`"
-        assert d["source"] in valid_sources, (
-            f"pillar {d.get('name')!r} has invalid source {d.get('source')!r}"
+    silently dropped by Pydantic before being added to the schema.
+
+    2026-10-28: a pillar neither tier scored is DROPPED (never a fabricated 0.0), so this
+    builds a radar with BOTH tiers — two deterministic pillars (one against a real industry
+    0.0 peer) and three Stage A pillars — and checks every field iOS decodes, plus
+    `peer_source` and the block's `model_version`, survives the response schema."""
+    import app.services.industry_moat_benchmark_service as imb_mod
+    import app.services.moat_scoring_service as moat_mod
+
+    scores = moat_mod.MoatScores()
+    for name in moat_mod.PILLAR_ORDER:
+        resolved = name in (moat_mod.PILLAR_COST, moat_mod.PILLAR_BRAND)
+        scores[name] = moat_mod.PillarResult(
+            name=name, score=6.0 if resolved else None,
+            confidence="medium" if resolved else "low",
         )
+    monkeypatch.setattr(moat_mod, "score_moat_dimensions", lambda **_k: scores)
+
+    class _Peers:
+        def get_pillar_benchmarks(self, industry):
+            return {moat_mod.PILLAR_COST: 0.0}
+
+    monkeypatch.setattr(imb_mod, "_lookup_singleton", _Peers())
+    shell = stage_a_fallback()
+    shell["moat_competition"]["dimensions"] = [
+        {"name": n, "score": 3.0, "peer_score": 0.0 if n == moat_mod.PILLAR_SWITCHING else 6.0}
+        for n in moat_mod.PILLAR_ORDER
+        if n not in (moat_mod.PILLAR_COST, moat_mod.PILLAR_BRAND)
+    ]
+    report = TickerReportDataCollector().assemble_report(_make_collected_data(), shell)
+    dims = report["moat_competition"]["dimensions"]
+    assert [d["name"] for d in dims] == list(moat_mod.PILLAR_ORDER)
+    by_name = {d["name"]: d for d in dims}
+    assert by_name[moat_mod.PILLAR_COST]["source"] == "deterministic"
+    assert by_name[moat_mod.PILLAR_COST]["peer_source"] == "industry"
+    assert by_name[moat_mod.PILLAR_COST]["peer_score"] == 0.0
+    assert by_name[moat_mod.PILLAR_BRAND]["peer_source"] == "baseline"
+    assert by_name[moat_mod.PILLAR_NETWORK]["source"] == "ai_legacy"
+    assert by_name[moat_mod.PILLAR_NETWORK]["peer_source"] == "ai_estimate"
+    assert by_name[moat_mod.PILLAR_SWITCHING]["peer_source"] == "baseline"   # AI's 0.0
+    valid_sources = {"deterministic", "grounded", "ai_legacy"}
+    valid_peer_sources = {"industry", "ai_estimate", "baseline"}
+    for d in dims:
+        assert d["source"] in valid_sources, d
+        assert d["peer_source"] in valid_peer_sources, d
+        # iOS MoatDimensionDTO: name String, score Double, peerScore non-optional Double.
+        assert isinstance(d["name"], str) and isinstance(d["score"], float)
+        assert isinstance(d["peer_score"], float)
+    dumped = TickerReportResponse.model_validate(report).model_dump()["moat_competition"]
+    assert dumped["model_version"] == moat_mod.SCORER_VERSION
+    assert [d["peer_source"] for d in dumped["dimensions"]] == [d["peer_source"] for d in dims]
+    assert all(isinstance(d["peer_score"], float) for d in dumped["dimensions"])
 
 
 def test_revenue_forecast_carries_insight_field():

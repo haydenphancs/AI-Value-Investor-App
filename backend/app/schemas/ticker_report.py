@@ -432,10 +432,16 @@ class MoatDimensionResponse(BaseModel):
     confidence: Optional[str] = None
     # Which tier produced this pillar: "deterministic" (Phase 3A — FMP
     # metrics + sector medians), "grounded" (Phase 3D — Gemini grounded
-    # research with web citations), or "ai_legacy" (Stage A AI fallback
-    # when both prior tiers came back empty). Kept separate from
-    # `confidence` so iOS can show provenance independently of strength.
+    # research with web citations; retired 2026-10-02, old reports only), or
+    # "ai_legacy" (Stage A AI estimate when the deterministic tier could not
+    # score it). Kept separate from `confidence` so iOS can show provenance
+    # independently of strength.
     source: Optional[str] = None
+    # Where `peer_score` came from (2026-10-28): "industry" (the industry's own peer
+    # average), "ai_estimate" (Stage A's guess on an ai_legacy pillar) or "baseline" (the
+    # 5.0 midpoint placeholder). None on reports stored before. `peer_score` itself stays a
+    # non-null float — iOS decodes it as a non-optional Double.
+    peer_source: Optional[str] = None
 
 
 class CompetitorResponse(BaseModel):
@@ -473,6 +479,9 @@ class MoatCompetitionResponse(BaseModel):
     competitor_order: Optional[str] = None
     # "research" | "industry_peers"; None on old reports.
     competitor_source: Optional[str] = None
+    # The moat scorer vintage the pillars were built with (`moat_scoring_service.
+    # SCORER_VERSION`); None on reports stored before 2026-10-28.
+    model_version: Optional[str] = None
 
 
 # ── Deep Dive: Macro & Geopolitical ───────────────────────────────────────────

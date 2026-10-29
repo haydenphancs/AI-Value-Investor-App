@@ -45,6 +45,8 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 
+import httpx
+
 # Volatility-relative price-move math now lives in ONE shared leaf module
 # (also imported by the pure materiality gate + the σ precompute). Re-imported
 # here under the original names so `_build_price_action` is unchanged.
@@ -588,9 +590,36 @@ def _settle_pass1_result(out: Any, attr: str, result: Any, default: Any, ticker:
             from app.integrations.fmp import EmptyAfterFailure
             setattr(out, attr, EmptyAfterFailure(f"{type(result).__name__}: {result}"[:200]))
             return
+        if attr in _ANNUAL_STATEMENT_ATTRS and _is_transient_fetch_failure(result):
+            # The annual statements feed every deterministic moat pillar (and the growth /
+            # health cards). Landed as [] with only a warning, a 429 burst sent all five
+            # pillars to the AI tier and the collection was still shared-cached for every
+            # persona until the close. Recorded, the report is delivered and billed as usual
+            # but kept out of every shared cache; a permanent refusal stays cacheable.
+            out.degraded_sections.append(f"{attr}:{type(result).__name__}")
         setattr(out, attr, default)
         return
     setattr(out, attr, result if result is not None else default)
+
+
+# The annual statements the moat scorer reads (`score_moat_dimensions`). A TRANSIENT failure
+# of one marks the collection degraded (`_settle_pass1_result`).
+_ANNUAL_STATEMENT_ATTRS = frozenset({"income", "balance", "ratios"})
+
+
+def _is_transient_fetch_failure(exc: BaseException) -> bool:
+    """A failure the next fetch may not repeat: a 429 or 5xx after the client's retries
+    (`sector_benchmark_service.classify_fetch_failure`), a transport error or a timeout.
+    A 4xx / not-entitled refusal repeats on every rebuild, so it is not."""
+    if isinstance(exc, (httpx.TransportError, asyncio.TimeoutError, TimeoutError)):
+        return True
+    # Local import: sector_benchmark_service pulls in the FMP client at import time.
+    from app.services.sector_benchmark_service import (
+        TRANSIENT_FETCH_FAILURES,
+        classify_fetch_failure,
+    )
+
+    return classify_fetch_failure(exc) in TRANSIENT_FETCH_FAILURES
 
 
 # Holders sources whose failure changes what the REPORT shows from `holders_response`: the
@@ -1116,6 +1145,14 @@ def _settle_snapshot_result(out: Any, attr: str, result: Any, ticker: str) -> No
         return
     setattr(out, attr, snapshot)
 
+
+# Where a moat pillar's `peer_score` (the radar's gray "Peer Avg" point) came from, on the
+# wire as `peer_source` (2026-10-28): the industry's own peer average, the AI's guess on an
+# ai_legacy pillar, or the 5.0 midpoint placeholder. Only "industry" is a measured peer, so
+# only it may be narrated as an edge or a gap (`narrative_prompts._measured_moat_dims`).
+MOAT_PEER_SOURCE_INDUSTRY = "industry"
+MOAT_PEER_SOURCE_AI = "ai_estimate"
+MOAT_PEER_SOURCE_BASELINE = "baseline"
 
 # Recorded on `out.degraded_sections` when a sector-history benchmark read FAILED.
 _SECTOR_HISTORY_DEGRADED = "sector_history:benchmarks"
@@ -3224,6 +3261,7 @@ class TickerReportDataCollector:
         from app.services.moat_scoring_service import (
             score_moat_dimensions,
             PILLAR_ORDER,
+            SCORER_VERSION as MOAT_SCORER_VERSION,
         )
         # Benchmark reads made HERE (after the collection was stored) that FAILED. They
         # ride the report's `DEGRADED_SECTIONS_KEY` below, never `out.degraded_sections`:
@@ -3244,9 +3282,14 @@ class TickerReportDataCollector:
                 ip_intel=out.ip_intel,
             )
         except Exception as exc:
-            logger.warning(
-                "Moat scoring failed for %s: %s — falling through to "
-                "legacy AI dimensions for all pillars", out.ticker, exc,
+            # A bug or a data shape, not an outage (a failed sector-median read is caught
+            # inside the scorer and flagged `lookup_failed` below): it repeats on every
+            # rebuild, so it is logged with its stack and NOT recorded as degraded —
+            # recording it would keep the ticker out of every cache for good and make each
+            # open a new 20-credit generation (the `_settle_caydex_dcf_failure` rule).
+            logger.exception(
+                "[report-moat-scoring-failed] ticker=%s: %s: %s — every pillar falls to "
+                "the AI dimension", out.ticker, type(exc).__name__, exc,
             )
             deterministic_pillars = {}
         if lookup_failed(deterministic_pillars):
@@ -3257,10 +3300,11 @@ class TickerReportDataCollector:
                 "report is delivered but will not be shared-cached", out.ticker,
             )
             assembly_degraded.append(_MOAT_BENCHMARKS_DEGRADED)
+        # Stage A's pillars, matched on a normalized name ("switching costs " is the pillar).
         ai_dims_by_name = {
-            (d.get("name") or ""): d
+            d["name"].strip().casefold(): d
             for d in (ai_moat.get("dimensions") or [])
-            if isinstance(d, dict)
+            if isinstance(d, dict) and isinstance(d.get("name"), str)
         }
         merged_dims: List[Dict[str, Any]] = []
         for pillar_name in PILLAR_ORDER:
@@ -3268,15 +3312,23 @@ class TickerReportDataCollector:
             if det is not None and det.score is not None:
                 dim = det.to_dict()
                 dim["source"] = "deterministic"
+                # The scorer's 5.0 anchor until an industry row replaces it below.
+                dim["peer_source"] = MOAT_PEER_SOURCE_BASELINE
                 merged_dims.append(dim)
                 continue
-            # Final fallback — legacy AI Stage A dimension. The
-            # peer-score floor still applies so the gray polygon doesn't
-            # collapse to center.
-            ai_dim = ai_dims_by_name.get(pillar_name) or {
-                "name": pillar_name, "score": 0.0, "peer_score": 5.0,
-            }
+            # Final fallback — legacy AI Stage A dimension, with the AI's own peer guess.
+            ai_dim = ai_dims_by_name.get(pillar_name.casefold())
+            if ai_dim is None:
+                # Neither tier scored it: dropped, never published as a fabricated 0.0/10
+                # (iOS draws the remaining pillars, or "scores unavailable" below three).
+                logger.warning(
+                    "[report-moat] ticker=%s pillar=%s: no deterministic or AI score — "
+                    "dropped from the radar", out.ticker, pillar_name,
+                )
+                continue
+            ai_dim["name"] = pillar_name
             ai_dim["source"] = "ai_legacy"
+            ai_dim["peer_source"] = MOAT_PEER_SOURCE_AI
             merged_dims.append(ai_dim)
         # Overlay real industry peer averages onto each dimension's
         # peer_score. Without this the gray "Peer Avg" pentagon on the
@@ -3320,6 +3372,7 @@ class TickerReportDataCollector:
                 ind_avg = peer_avgs.get(name) if isinstance(name, str) else None
                 if ind_avg is not None:
                     dim["peer_score"] = ind_avg
+                    dim["peer_source"] = MOAT_PEER_SOURCE_INDUSTRY
         moat_dims = _apply_peer_score_baseline(merged_dims)
         deterministic_market_dynamics = _build_market_dynamics(
             out.profile, out.peer_profiles, out.peer_ratios, out.ratios_ttm,
@@ -3458,6 +3511,9 @@ class TickerReportDataCollector:
             # "threat") on reports stored before 2026-10-01.
             "competitor_order": "threat",
             "competitor_source": "industry_peers",
+            # The scorer vintage the pillars were built with. The paid reuse door
+            # (`moat_scoring_service.report_moat_model_is_current`) never re-sells another one.
+            "model_version": MOAT_SCORER_VERSION,
         }
         moat_vital = _derive_moat_vital(moat_dims, deterministic_competitors)
 
@@ -8191,6 +8247,11 @@ def _apply_peer_score_baseline(
     that report is opened, forever, after the user paid 20 credits for it. A pillar
     with no usable score is DROPPED instead, which the radar now renders as an honest
     "scores unavailable" state rather than a fabricated 0.
+
+    `peer_source` (2026-10-28): the ≤0 → 5.0 lift applies only to a NON-industry peer (the
+    AI's template 0.0); a real industry average of 0.0 (Gold's Intangible Assets) stays 0.0.
+    Every lifted value is tagged `baseline`. `peer_score` itself is never null: iOS decodes
+    it as a non-optional Double, so a null would fail the whole report.
     """
     out: List[Dict[str, Any]] = []
     for d in dims:
@@ -8206,7 +8267,17 @@ def _apply_peer_score_baseline(
         d["score"] = max(0.0, min(10.0, score))
 
         peer = _finite_or_none(d.get("peer_score"))
-        d["peer_score"] = 5.0 if peer is None or peer <= 0 else max(0.0, min(10.0, peer))
+        industry_peer = d.get("peer_source") == MOAT_PEER_SOURCE_INDUSTRY
+        if peer is None or (peer <= 0 and not industry_peer):
+            d["peer_score"] = 5.0
+            d["peer_source"] = MOAT_PEER_SOURCE_BASELINE
+        else:
+            d["peer_score"] = max(0.0, min(10.0, peer))
+            if d.get("peer_source") not in (
+                MOAT_PEER_SOURCE_INDUSTRY, MOAT_PEER_SOURCE_AI, MOAT_PEER_SOURCE_BASELINE,
+            ):
+                # A caller that built the dim without a tag: a peer it cannot vouch for.
+                d["peer_source"] = MOAT_PEER_SOURCE_BASELINE
         out.append(d)
     return out
 
@@ -8288,26 +8359,30 @@ def _build_moat_coverage_note(
       1. `peer_score <= 2.0` AND `score <= 2.5` — uniformly-low signal,
          meaning the industry as a whole doesn't carry that metric
          (e.g. R&D in mining, intangibles in insurance).
-      2. `peer_score == 5.0` AND the pillar's source is grounded or
+      2. `peer_source == "baseline"` AND the pillar's source is grounded or
          ai_legacy — the deterministic path couldn't resolve AND no
          industry benchmark row exists, so we fell back twice. The
-         radar's gray corner sits at the sentinel midpoint.
+         radar's gray corner sits at the sentinel midpoint (it used to be
+         read as `peer_score == 5.0`, which also caught a real 5.0 industry
+         average).
     """
     weak: List[str] = []
     for d in moat_dims:
-        try:
-            peer = float(d.get("peer_score") or 5.0)
-            score = float(d.get("score") or 0.0)
-        except (TypeError, ValueError):
+        if not isinstance(d, dict):
+            continue
+        # A real industry 0.0 is a reading (2026-10-28: no longer lifted to 5.0).
+        peer = _finite_or_none(d.get("peer_score"))
+        score = _finite_or_none(d.get("score"))
+        if peer is None or score is None:
             continue
         source = d.get("source")
         # Uniformly-low — focal AND peer both near zero
         if peer <= 2.0 and score <= 2.5:
             weak.append(d.get("name") or "")
             continue
-        # Baseline-sentinel — peer fell to 5.0 floor AND focal also
+        # Baseline-sentinel — no industry peer row AND focal also
         # couldn't resolve deterministically
-        if peer == 5.0 and source in ("grounded", "ai_legacy"):
+        if d.get("peer_source") == MOAT_PEER_SOURCE_BASELINE and source in ("grounded", "ai_legacy"):
             weak.append(d.get("name") or "")
 
     weak = [w for w in weak if w]
@@ -9911,9 +9986,23 @@ def _derive_moat_vital(
     is docked when a competitor poses a high threat. `overall_rating` still
     reflects the top pillar so the moat card's wide/narrow/none label is
     unchanged.
+
+    MEASURED pillars only (owner decision 2026-10-28, "Show it, but exclude it from backend
+    verdicts"): an `ai_legacy` pillar is an ungrounded Stage A guess — Switching Costs is one
+    on every report, since its transcript input is unlicensed — so it stays on the radar but
+    never sets this score, the persona rating or the rating label. With no measured pillar
+    the score is an explicit None, which `persona_scoring._vital_score` renormalizes out (a
+    vital with no `score` dict used to fall to the legacy label scale and read 3.0).
     """
+    from app.services.moat_scoring_service import MOAT_RATING_NARROW, MOAT_RATING_WIDE
+
+    moat_dims = [
+        d for d in (moat_dims or [])
+        if isinstance(d, dict) and d.get("source") == "deterministic"
+    ]
     if not moat_dims:
         return {
+            "score": {"value": None, "status": "neutral"},
             "overall_rating": "none",
             "primary_source": "Data unavailable",
             "tags": [{"label": "Data unavailable", "strength": "none"}],
@@ -9921,9 +10010,9 @@ def _derive_moat_vital(
             "stability_label": "At Risk",
         }
     max_score = max((float(d.get("score") or 0.0) for d in moat_dims), default=0.0)
-    if max_score >= 8.5:
+    if max_score >= MOAT_RATING_WIDE:
         overall_rating = "wide"
-    elif max_score >= 7.0:
+    elif max_score >= MOAT_RATING_NARROW:
         overall_rating = "narrow"
     else:
         overall_rating = "none"
@@ -9960,7 +10049,7 @@ def _derive_moat_vital(
         if s >= 6.0:
             tags.append({
                 "label": d.get("name") or "Moat Source",
-                "strength": "wide" if s >= 8.5 else "narrow",
+                "strength": "wide" if s >= MOAT_RATING_WIDE else "narrow",
             })
     primary_source = "Unknown"
     for d in moat_dims:
@@ -9977,7 +10066,7 @@ def _derive_moat_vital(
             "Durable" if overall_rating == "wide"
             else "Moderate" if overall_rating == "narrow" else "Weak"
         ),
-        "stability_label": "Stable" if max_score >= 7.0 else "At Risk",
+        "stability_label": "Stable" if max_score >= MOAT_RATING_NARROW else "At Risk",
     }
 
 

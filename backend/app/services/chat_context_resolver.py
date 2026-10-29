@@ -831,7 +831,16 @@ def _moat_figures(report: Dict[str, Any]) -> List[_FigSpec]:
         if not name or score is None or name.lower() in seen:
             continue
         seen.add(name.lower())
-        rows.append((name, score, _threat_score(d.get("peer_score")), d.get("source")))
+        # A report built from 2026-10-28 says where its peer point came from: only the
+        # industry's own average is a peer figure. The AI's guess and the 5.0 placeholder
+        # are never quoted as "vs peers" (the Insight follows the same rule). An older
+        # report carries no tag and keeps its old reading.
+        peer_source = d.get("peer_source")
+        peer = (
+            _threat_score(d.get("peer_score"))
+            if peer_source is None or peer_source == "industry" else None
+        )
+        rows.append((name, score, peer, d.get("source")))
     if not rows:
         return []
     # The PDF's rule (`pdf_charts`): a pillar set whose peer scores are all 0 draws no peer line.

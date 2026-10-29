@@ -40,6 +40,7 @@ from app.services.sector_benchmark_lookup import (
     lookup_failed,
 )
 from app.utils.margins import revenue_backed_margin, revenue_scaled_ratio
+from app.utils.currency import currency_code
 from app.utils.period_labels import annual_benchmark_key
 
 logger = logging.getLogger(__name__)
@@ -61,12 +62,67 @@ PILLAR_ORDER: List[str] = [
     PILLAR_INTANGIBLE,
 ]
 
+# The moat rating's max-pillar thresholds: wide at >= 8.5, narrow at >= 7.0, else none. ONE
+# backend source for the report vital (`_derive_moat_vital`) and the Insight prompt's tone;
+# iOS `MoatOverallRating.from(dimensions:)` holds the same pair
+# (tests/test_ios_moat_rating_threshold_parity.py).
+MOAT_RATING_WIDE = 8.5
+MOAT_RATING_NARROW = 7.0
+
 
 # ── Configuration ──────────────────────────────────────────────────────
 
+# The scorer's vintage. The industry peer averages (`industry_moat_benchmark_service.
+# MODEL_VERSION`) and the report's `moat_competition.model_version` stamp both use it, so a
+# change to any pillar's math gets a new value here.
+# 2026-10-28 (owner decisions after the JOBY audit): revenue growth needs a $10M prior year
+# and is scored on a gentler slope; Network Effects needs a company input; P/S counts only
+# with a positive gross margin; Intangible Assets needs both sector-relative inputs; an
+# exact-zero SG&A and a non-finite input are no reading.
+SCORER_VERSION = "moat_v1.2026-10-28"
+
 # Below this # of resolved metrics, return None for the pillar so the
-# caller falls back to Gemini grounded (or legacy AI) instead.
+# caller falls back to the legacy AI dimension instead.
 _MIN_METRICS_FOR_SCORE = 2
+
+# Revenue growth is a Network Effects reading only off a material base. Off a near-zero year
+# it measures the base, not the business: JOBY's $136K → $53.4M (the Blade acquisition) read
+# 39,183% and pinned the driver at 10/10, making Network Effects its "primary moat" (owner
+# decision 2026-10-28, "Floor + gentler curve"). Growth above the producer's own clamp
+# (`sector_benchmark_service.WINSORIZE_CEIL`, 500%) is no reading either: every peer value in
+# the median was capped there.
+_GROWTH_PRIOR_REVENUE_FLOOR = 10_000_000.0
+# The floor is in US DOLLARS, but statements are in the filer's reporting currency (TSM's rows
+# are TWD): ¥12M is $80K. Units of each reporting currency per US dollar, ROUNDED — used ONLY
+# for this materiality floor, an order-of-magnitude test a ±25% rate drift does not change;
+# never for a displayed or valued figure. A row with no currency reads as USD (the
+# `money_prefix` convention for an unknown currency); a currency missing here is no reading.
+_FLOOR_UNITS_PER_USD: Dict[str, float] = {
+    "USD": 1.0, "EUR": 0.9, "GBP": 0.8, "CHF": 0.9, "CAD": 1.4, "AUD": 1.5, "NZD": 1.7,
+    "JPY": 150.0, "CNY": 7.2, "HKD": 7.8, "TWD": 32.0, "KRW": 1400.0, "INR": 85.0,
+    "SGD": 1.35, "SEK": 10.5, "NOK": 10.5, "DKK": 6.8, "PLN": 4.0, "ILS": 3.7,
+    "BRL": 5.5, "MXN": 18.0, "ZAR": 18.0, "IDR": 16000.0, "THB": 35.0, "MYR": 4.5,
+    "PHP": 57.0, "CLP": 950.0, "COP": 4000.0, "ARS": 1000.0, "TRY": 35.0,
+}
+# Percentage points of growth premium per score point. At 2.0 a +10pp premium already scored
+# 10/10, so the driver read 0 or 10 for 7 of the 10 reports cached 2026-10-15..28 (META +18pp,
+# NVDA +55pp). At 5.0, +25pp over the sector median is 10 and -25pp is 0.
+_GROWTH_DELTA_PER_POINT = 5.0
+
+# A pillar is measured only when its own kind of evidence resolved (owner decisions
+# 2026-10-28). Network Effects: at least one COMPANY input — the HHI and the lifecycle phase
+# are the same for every company in the industry, so on their own they gave every airline
+# without a growth figure the same "measured" 4.5. Intangible Assets: both SECTOR-RELATIVE
+# inputs — the patent / FDA inputs are absolute scales the peer averages never compute, and
+# a single patent (4.0) used to be the second input that made JOBY's pillar "measured".
+_NETWORK_COMPANY_METRICS: Tuple[str, ...] = ("revenue_yoy", "platform_user_count")
+# Inputs only the FOCAL company is scored on: the industry peer averages never fetch patents,
+# FDA approvals or transcripts (`industry_moat_benchmark_service`), so a pillar that used one
+# is not like-for-like with its industry peer and is never narrated as an edge or a gap.
+FOCAL_ONLY_METRICS: Tuple[str, ...] = (
+    "patents_per_employee", "fda_active_approvals", "nrr_pct", "platform_user_count",
+)
+_INTANGIBLE_SECTOR_METRICS: Tuple[str, ...] = ("rd_to_revenue", "intangibles_to_assets")
 
 # Confidence buckets — used by the caller to decide fallback policy.
 _CONFIDENCE_HIGH = "high"      # 3+ metrics resolved
@@ -85,15 +141,19 @@ _CONFIDENCE_LOW = "low"        # <2 — service returns None instead
 
 
 def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
+    """A FINITE float, else None. A NaN survives `float()` and every comparison against it
+    is False, so it used to score a perfect 10.0 on all three mappers and land NaN in
+    `drivers[].focal` (which jsonb cannot store)."""
     if not isinstance(record, dict):
         return None
     val = record.get(key)
-    if val is None:
+    if val is None or isinstance(val, bool):
         return None
     try:
-        return float(val)
+        number = float(val)
     except (TypeError, ValueError):
         return None
+    return number if math.isfinite(number) else None
 
 
 def _latest(records: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -260,25 +320,54 @@ def _canonical_sector(sector: Any) -> str:
     return (_normalize_sector(raw) or "").strip()
 
 
-def _compute_yoy_pct(
-    records: List[Dict[str, Any]], field_name: str,
-) -> Optional[float]:
-    """YoY % growth from a sorted-by-date records list. Returns None
-    when fewer than 2 valid datapoints OR prior is zero.
-    """
-    if not records:
-        return None
-    sorted_recs = sorted(
-        [r for r in records if isinstance(r, dict)],
-        key=lambda r: r.get("date") or "",
+def _focal_revenue_yoy(
+    income: List[Dict[str, Any]], year_key: str,
+) -> Tuple[Optional[float], bool]:
+    """``(revenue growth % of the year keyed `year_key`, whether it may be scored)``.
+
+    Paired exactly as the sector median it is compared with
+    (`sector_benchmark_service._compute_yoy_for_records`: one row per year key, a 300-430-day
+    gap, no transition stub on either side) — the old date-sorted last-two-rows pairing read
+    a repeated year as 0% and a missing year as one year's growth. Scorable only off a prior
+    year of at least `_GROWTH_PRIOR_REVENUE_FLOOR` and inside the producer's clamp; a value
+    outside them is still returned, so the driver shows the figure it refused."""
+    if _year_of(year_key) is None:
+        return None, False
+    # Local import: sector_benchmark_service pulls in the FMP client at import time.
+    from app.services.sector_benchmark_service import (
+        WINSORIZE_CEIL,
+        _by_annual_key_with_spans,
+        _compute_yoy_for_records,
     )
-    if len(sorted_recs) < 2:
-        return None
-    current = _safe_float(sorted_recs[-1], field_name)
-    prior = _safe_float(sorted_recs[-2], field_name)
-    if current is None or prior is None or prior == 0:
-        return None
-    return round((current - prior) / abs(prior) * 100, 2)
+
+    rows = [r for r in (income or []) if isinstance(r, dict)]
+    yoy = _finite_number(
+        _compute_yoy_for_records(rows, "revenue", is_quarterly=False).get(year_key)
+    )
+    if yoy is None:
+        return None, False
+    by_year, _spans = _by_annual_key_with_spans(rows)
+    prior_row = by_year.get(str(int(year_key) - 1)) or {}
+    prior = _safe_float(prior_row, "revenue")
+    raw_currency = prior_row.get("reportedCurrency")
+    units_per_usd = (
+        1.0 if raw_currency is None
+        else _FLOOR_UNITS_PER_USD.get(currency_code(raw_currency) or "")
+    )
+    if prior is not None and units_per_usd is None:
+        logger.warning(
+            "moat_scoring: revenue growth not scored — reporting currency %r has no "
+            "floor rate (_FLOOR_UNITS_PER_USD)", raw_currency,
+        )
+    scorable = (
+        prior is not None
+        and units_per_usd is not None
+        and prior / units_per_usd >= _GROWTH_PRIOR_REVENUE_FLOOR
+        # At -100% or below the current revenue is zero (FMP's zero-fill for an unreported
+        # line, as `revenue_backed_margin` reads it) or negative: no growth reading.
+        and -100.0 < yoy <= WINSORIZE_CEIL
+    )
+    return yoy, scorable
 
 
 # ── Driver + result types ──────────────────────────────────────────────
@@ -380,7 +469,7 @@ class MoatScoringService:
             "operating_margin": ratios_year,
             "ps_ratio": ratios_year,
             "asset_turnover": ratios_year,
-            # `_compute_yoy_pct` reads the newest income record — the same as `_latest`.
+            # `_focal_revenue_yoy` scores the year keyed `inc_year` (the newest record).
             "revenue_yoy": inc_year,
             "rd_to_revenue": inc_year,
             "sga_to_revenue": inc_year,
@@ -417,7 +506,7 @@ class MoatScoringService:
             latest_inc, latest_bs, sector_medians, transcript_sig,
         )
         results[PILLAR_NETWORK] = self._score_network_effects(
-            income, industry_tam, sector_medians, transcript_sig,
+            income, industry_tam, sector_medians, transcript_sig, inc_year,
         )
         results[PILLAR_BRAND] = self._score_brand_power(
             latest_ratios, sector_medians,
@@ -528,9 +617,12 @@ class MoatScoringService:
         industry_tam: Optional[Any],
         medians: Dict[str, Optional[Dict[str, Any]]],
         transcript_sig: Optional[Any] = None,
+        inc_year: str = "",
     ) -> PillarResult:
         """Network Effects: HHI band + lifecycle phase + revenue growth
-        premium vs sector median. Three inputs → high confidence common.
+        premium vs sector median (+ the platform user count when a transcript
+        exists). Measured only when a COMPANY input resolved
+        (`_NETWORK_COMPANY_METRICS`): the HHI and the lifecycle are industry-wide.
         """
         drivers: List[MetricDriver] = []
 
@@ -558,15 +650,20 @@ class MoatScoringService:
             sub_score=_lifecycle_to_score(phase),
         ))
 
-        # Revenue growth premium (absolute delta to sector median)
-        focal_rev_yoy = _compute_yoy_pct(income, "revenue")
+        # Revenue growth premium (absolute delta to sector median). A figure off a near-zero
+        # prior year or past the producer's clamp is shown but not scored.
+        focal_rev_yoy, growth_scorable = _focal_revenue_yoy(income, inc_year)
         payload = medians.get("revenue_yoy")
         median_rev_yoy, period, n = _unpack_median(payload)
         drivers.append(MetricDriver(
             metric="revenue_yoy",
             focal=focal_rev_yoy, sector_median=median_rev_yoy,
-            sub_score=_absolute_delta_score(
-                focal_rev_yoy, median_rev_yoy, delta_per_point=2.0,
+            sub_score=(
+                _absolute_delta_score(
+                    focal_rev_yoy, median_rev_yoy,
+                    delta_per_point=_GROWTH_DELTA_PER_POINT,
+                )
+                if growth_scorable else None
             ),
             period_used=period, sample_size=n,
         ))
@@ -586,7 +683,10 @@ class MoatScoringService:
                 sample_size=None,
             ))
 
-        return _assemble_pillar(PILLAR_NETWORK, drivers)
+        return _assemble_pillar(
+            PILLAR_NETWORK, drivers,
+            required_metrics=_NETWORK_COMPANY_METRICS, min_required=1,
+        )
 
     def _score_brand_power(
         self,
@@ -595,19 +695,26 @@ class MoatScoringService:
     ) -> PillarResult:
         """Brand Power: gross margin percentile + P/S percentile (the
         market pays for brand). Both higher = better.
+
+        P/S is brand evidence only when the company earns a POSITIVE gross margin (owner
+        decision 2026-10-28): selling below cost shows no pricing power, and its multiple is
+        a bet on a tiny revenue base — JOBY's 204× P/S (revenue $53M, gross margin −30%)
+        scored 10/10 and lifted Brand Power to 5.0. The driver still shows the figure.
         """
+        gross_margin = self._gross_margin_ratio(latest_ratios)
+        ps_driver = _build_higher_better_driver(
+            "ps_ratio",
+            # FMP answers 0 with no revenue: no reading, never a 0.0/10 driver.
+            revenue_scaled_ratio(_safe_float(latest_ratios or {}, "priceToSalesRatio")),
+            medians.get("ps_ratio"),
+        )
+        if gross_margin is None or gross_margin <= 0:
+            ps_driver.sub_score = None
         drivers = [
             _build_higher_better_driver(
-                "gross_margin",
-                self._gross_margin_ratio(latest_ratios),
-                medians.get("gross_margin"),
+                "gross_margin", gross_margin, medians.get("gross_margin"),
             ),
-            _build_higher_better_driver(
-                "ps_ratio",
-                # FMP answers 0 with no revenue: no reading, never a 0.0/10 driver.
-                revenue_scaled_ratio(_safe_float(latest_ratios or {}, "priceToSalesRatio")),
-                medians.get("ps_ratio"),
-            ),
+            ps_driver,
         ]
         return _assemble_pillar(PILLAR_BRAND, drivers)
 
@@ -649,6 +756,8 @@ class MoatScoringService:
     ) -> PillarResult:
         """Intangible Assets: R&D intensity + on-balance-sheet intangibles
         share of total assets + (Phase 3C) USPTO patents + FDA approvals.
+        Measured only when BOTH sector-relative inputs resolved
+        (`_INTANGIBLE_SECTOR_METRICS`); the patent / FDA inputs then join the average.
         """
         drivers = [
             _build_higher_better_driver(
@@ -692,7 +801,11 @@ class MoatScoringService:
                     sample_size=None,
                 ))
 
-        return _assemble_pillar(PILLAR_INTANGIBLE, drivers)
+        return _assemble_pillar(
+            PILLAR_INTANGIBLE, drivers,
+            required_metrics=_INTANGIBLE_SECTOR_METRICS,
+            min_required=len(_INTANGIBLE_SECTOR_METRICS),
+        )
 
     # ── Focal-value extractors ───────────────────────────────────────
 
@@ -755,7 +868,9 @@ class MoatScoringService:
             return None
         rev = _safe_float(inc, "revenue")
         sga = _safe_float(inc, "sellingGeneralAndAdministrativeExpenses")
-        if not rev or rev <= 0 or sga is None:
+        # A company with revenue and exactly zero SG&A is FMP's zero-fill for an unreported
+        # line, not a reading — and as a lower-is-better driver it scored a perfect 10.0.
+        if not rev or rev <= 0 or sga is None or sga <= 0:
             return None
         return (sga / rev) * 100.0
 
@@ -851,11 +966,22 @@ def _build_lower_better_driver(
 
 
 def _assemble_pillar(
-    name: str, drivers: List[MetricDriver],
+    name: str,
+    drivers: List[MetricDriver],
+    *,
+    required_metrics: Tuple[str, ...] = (),
+    min_required: int = 0,
 ) -> PillarResult:
-    """Aggregate driver sub-scores into a pillar score + confidence."""
+    """Aggregate driver sub-scores into a pillar score + confidence.
+
+    Unscored (None, so the caller falls back) below `_MIN_METRICS_FOR_SCORE` resolved
+    drivers, or below `min_required` resolved drivers among `required_metrics` — the
+    pillar's own kind of evidence (see `_NETWORK_COMPANY_METRICS`)."""
     valid_subs = [d.sub_score for d in drivers if d.sub_score is not None]
-    if len(valid_subs) < _MIN_METRICS_FOR_SCORE:
+    required_resolved = sum(
+        1 for d in drivers if d.metric in required_metrics and d.sub_score is not None
+    )
+    if len(valid_subs) < _MIN_METRICS_FOR_SCORE or required_resolved < min_required:
         return PillarResult(
             name=name, score=None,
             drivers=drivers, confidence=_CONFIDENCE_LOW,
@@ -866,6 +992,27 @@ def _assemble_pillar(
         name=name, score=round(avg, 1),
         drivers=drivers, confidence=confidence,
     )
+
+
+def report_moat_model_is_current(payload: Any) -> bool:
+    """True unless a report's moat pillars were built by another scorer vintage.
+
+    A report stamps `moat_competition.model_version` (= `SCORER_VERSION`) from 2026-10-28; a
+    block with no stamp was built before it and fails closed (False), like the DCF gate's
+    missing `model_version`. No moat block at all has nothing to compare: True.
+
+    Used ONLY by the paid deep door's cross-user reuse (`research_service._lookup_shared_cache`):
+    that buyer pays 20 credits on a reuse hit, so a report scored by older math is a miss and
+    they get a fresh one at the same price. The FREE cached paths deliberately do not call it
+    (a miss there would charge the next opener 20 credits; their rows age out at the close) —
+    the same split as `dcf_report_gate.report_dcf_model_is_current` (owner, 2026-10-25:
+    "Leave the free cached path as is")."""
+    if not isinstance(payload, dict):
+        return True
+    block = payload.get("moat_competition")
+    if not isinstance(block, dict):
+        return True
+    return block.get("model_version") == SCORER_VERSION
 
 
 # ── Singleton + module-level helper ────────────────────────────────────

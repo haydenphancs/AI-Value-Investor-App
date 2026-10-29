@@ -412,22 +412,23 @@ def test_unmeasured_vital_renormalizes_out():
 def test_moat_vital_rewards_breadth_not_just_max():
     # The old code took the single MAX dimension, so these scored identically.
     one_wall = _derive_moat_vital([
-        {"name": "Switching Costs", "score": 9.0},
-        {"name": "Network", "score": 2.0},
-        {"name": "Cost", "score": 2.0},
-        {"name": "Brand", "score": 2.0},
+        {"name": "Switching Costs", "score": 9.0, "source": "deterministic"},
+        {"name": "Network", "score": 2.0, "source": "deterministic"},
+        {"name": "Cost", "score": 2.0, "source": "deterministic"},
+        {"name": "Brand", "score": 2.0, "source": "deterministic"},
     ])
     many_walls = _derive_moat_vital([
-        {"name": "Switching Costs", "score": 9.0},
-        {"name": "Network", "score": 8.5},
-        {"name": "Cost", "score": 8.0},
-        {"name": "Brand", "score": 8.0},
+        {"name": "Switching Costs", "score": 9.0, "source": "deterministic"},
+        {"name": "Network", "score": 8.5, "source": "deterministic"},
+        {"name": "Cost", "score": 8.0, "source": "deterministic"},
+        {"name": "Brand", "score": 8.0, "source": "deterministic"},
     ])
     assert many_walls["score"]["value"] > one_wall["score"]["value"]
 
 
 def test_moat_vital_docked_by_high_competitor_threat():
-    dims = [{"name": "Brand", "score": 8.0}, {"name": "Scale", "score": 7.5}]
+    dims = [{"name": "Brand", "score": 8.0, "source": "deterministic"},
+            {"name": "Scale", "score": 7.5, "source": "deterministic"}]
     safe = _derive_moat_vital(dims, competitors=[{"threat_level": "low"}])
     threatened = _derive_moat_vital(dims, competitors=[{"threat_level": "high"}])
     assert threatened["score"]["value"] < safe["score"]["value"]

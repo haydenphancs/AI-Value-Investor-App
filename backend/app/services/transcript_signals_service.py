@@ -31,6 +31,7 @@ pass for the 20% of transcripts where regex misses something obvious
 from __future__ import annotations
 
 import logging
+import math
 import re
 from dataclasses import dataclass
 from typing import Optional
@@ -245,7 +246,7 @@ def nrr_to_sub_score(nrr_pct: Optional[float]) -> Optional[float]:
          80%   → 1.5
          70%   → 0.0   (collapse)
     """
-    if nrr_pct is None:
+    if nrr_pct is None or not math.isfinite(nrr_pct):
         return None
     # Linear interpolation between anchor points keeps the formula
     # transparent and auditable. Cap at [0, 10].
@@ -253,12 +254,14 @@ def nrr_to_sub_score(nrr_pct: Optional[float]) -> Optional[float]:
         return 10.0
     if nrr_pct <= 70.0:
         return 0.0
-    # Piece-wise linear between 70 and 130.
+    # Piece-wise linear between 70 and 130. The slope reaches the bounds before the
+    # anchors do (125 → 10.0, 75 → 0.0), so the result is clamped: 129.9 used to read 11.0
+    # and 72 read -0.6.
     if nrr_pct >= 100.0:
         # Above 100: +1.0 per +5 percentage points up to 130.
-        return round(5.0 + (nrr_pct - 100.0) / 5.0, 1)
+        return min(10.0, round(5.0 + (nrr_pct - 100.0) / 5.0, 1))
     # Below 100: -1.0 per -5 percentage points down to 70.
-    return round(5.0 - (100.0 - nrr_pct) / 5.0, 1)
+    return max(0.0, round(5.0 - (100.0 - nrr_pct) / 5.0, 1))
 
 
 def user_count_to_sub_score(user_count: Optional[int]) -> Optional[float]:

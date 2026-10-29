@@ -55,6 +55,7 @@ from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
 from app.services.moat_scoring_service import (
     PILLAR_ORDER,
+    SCORER_VERSION,
     PillarResult,
     score_moat_dimensions,
 )
@@ -145,11 +146,17 @@ _LOSS_INDUSTRIES_LOGGED = 10
 # broad-grain dossier's lifecycle scores as mature; and Aerospace & Defense's growth comes from
 # the six-NAICS composite ("Aerospace + defense mfg"). Rows of the three older vintages stay
 # served, named pending, until the rollout's moat refresh replaces them.
-MODEL_VERSION = "moat_v1.2026-10-22"
+# 2026-10-28 ("moat_v1.2026-10-28" = `moat_scoring_service.SCORER_VERSION`, one value for the
+# scorer, its peer averages and the report stamp): revenue growth needs a $10M prior year and
+# scores 5pp per point; Network Effects needs a company input; P/S counts only with a positive
+# gross margin; Intangible Assets needs both sector-relative inputs. Rows of the four older
+# vintages stay served, named pending, until the admin refresh after the deploy.
+MODEL_VERSION = SCORER_VERSION
 # Every vintage the lookup knows, oldest first; a row stamped with anything else (or
 # nothing) ranks below all of them.
 _MODEL_VERSION_ORDER = (
-    "moat_v1.2026-05", "moat_v1.2026-10", "moat_v1.2026-10-11", MODEL_VERSION,
+    "moat_v1.2026-05", "moat_v1.2026-10", "moat_v1.2026-10-11", "moat_v1.2026-10-22",
+    MODEL_VERSION,
 )
 TABLE_NAME = "industry_moat_benchmarks"
 # Re-running the bootstrap with `skip_if_fresh_hours` set lets the

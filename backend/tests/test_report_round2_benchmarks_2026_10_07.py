@@ -370,7 +370,16 @@ def _assemble_with_pillars(monkeypatch, answer, *, out=None, lookup=None):
     _install(monkeypatch, lookup or _RecordingLookup())
     pillars = _PillarLookup(answer)
     monkeypatch.setattr(imb_mod, "_lookup_singleton", pillars)
-    report = C.TickerReportDataCollector().assemble_report(out, stage_a_fallback())
+    # Stage A answers all five pillars (its template's 5.0 peer default). Since 2026-10-28 a
+    # pillar no tier scored is dropped rather than published as a fabricated 0.0 / peer 5.0,
+    # so the bare fallback shell would leave no pillar for the peer overlay to land on.
+    from app.services.moat_scoring_service import PILLAR_ORDER
+
+    shell = stage_a_fallback()
+    shell["moat_competition"]["dimensions"] = [
+        {"name": name, "score": 4.0, "peer_score": 5.0} for name in PILLAR_ORDER
+    ]
+    report = C.TickerReportDataCollector().assemble_report(out, shell)
     return report, out, pillars
 
 

@@ -711,25 +711,62 @@ def _competitor_prompt_block(moat: Any, limit: int = 4) -> str:
     return "\n".join(lines)
 
 
+def _measured_moat_dims(dims: Any) -> List[Dict[str, Any]]:
+    """The moat pillars SCORED from filings (`source == "deterministic"`). An `ai_legacy`
+    pillar is Stage A's ungrounded guess — Switching Costs on every report, since its
+    transcript input is unlicensed — so it never sets the moat's strength or an edge/gap
+    (owner decision 2026-10-28, "Show it, but exclude it from backend verdicts")."""
+    return [
+        d for d in (dims if isinstance(dims, list) else [])
+        if isinstance(d, dict) and d.get("source") == "deterministic"
+    ]
+
+
+def _has_industry_peer(dim: Dict[str, Any]) -> bool:
+    """Whether a pillar's `peer_score` is the industry's own measured average, scored on
+    the same inputs. The AI's guess and the 5.0 placeholder are not peers to out-defend or
+    trail (a report built before `peer_source` existed has no tag and counts as
+    unmeasured). Nor is an industry average for a pillar the company was scored with a
+    focal-only input on (patents, FDA approvals, transcript figures — the peer recompute
+    never fetches them): the IP inputs alone move Intangible Assets by a point or more."""
+    from app.services.moat_scoring_service import FOCAL_ONLY_METRICS
+
+    if dim.get("peer_source") != "industry" or _f_num(dim.get("peer_score")) is None:
+        return False
+    return not any(
+        isinstance(dr, dict) and dr.get("metric") in FOCAL_ONLY_METRICS
+        and dr.get("sub_score") is not None
+        for dr in (dim.get("drivers") or [])
+    )
+
+
 def _moat_durability_note_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
+    from app.services.moat_scoring_service import MOAT_RATING_NARROW, MOAT_RATING_WIDE
+
     moat = shell.get("moat_competition", {})
-    dims = moat.get("dimensions", [])
-    top = max(dims, key=lambda d: float(d.get("score") or 0.0), default={})
+    dims = [d for d in (moat.get("dimensions") or []) if isinstance(d, dict)]
+    measured = _measured_moat_dims(dims)
+    top = max(measured, key=lambda d: float(d.get("score") or 0.0), default={})
     max_score = float(top.get("score") or 0.0)
 
-    # Mirror the iOS rating thresholds (MoatOverallRating.from(dimensions:)
-    # in TickerReportModels.swift) so the AI's qualitative tone matches
-    # the WIDE/NARROW/NONE badge users see on the moat header. The
-    # iOS app no longer renders a separate tagline — this insight now
-    # carries the whole qualitative signal.
-    if max_score >= 8.5:
+    # The backend rating thresholds (the report's moat vital uses the same pair, over the
+    # same MEASURED pillars). iOS `MoatOverallRating.from(dimensions:)` still counts the
+    # AI-estimated pillars until its own update, so its badge can read higher than this
+    # tone when an estimate is the top pillar.
+    if not measured:
+        strength_hint = (
+            "NOT MEASURED — no moat pillar could be scored from this company's filings. "
+            "Do not call the moat wide, narrow or absent; say its defenses are not yet "
+            "visible in the numbers."
+        )
+    elif max_score >= MOAT_RATING_WIDE:
         strength_hint = (
             "WIDE moat — convey ELITE, durable defense. "
             "Phrases like 'fortress', 'wonderfully sticky', 'hard to dislodge' fit."
         )
-    elif max_score >= 7.0:
+    elif max_score >= MOAT_RATING_NARROW:
         strength_hint = (
             "NARROW moat — convey STRONG-BUT-BEATABLE defense. "
             "Phrases like 'sticky but beatable', 'credible threats remain', "
@@ -752,31 +789,41 @@ def _moat_durability_note_prompt(
         if _biggest_competitor_threat(_competitor_rows(moat)) is not None
         else "the highest threat score"
     )
+    # Edges and gaps: a measured pillar against a measured industry peer, nothing else.
+    compared = [d for d in measured if _has_industry_peer(d)]
     edges = [
-        d for d in dims
-        if d.get("peer_score") is not None
-        and float(d.get("score") or 0.0) - float(d.get("peer_score") or 0.0) >= 1.0
+        d for d in compared
+        if float(d.get("score") or 0.0) - float(d.get("peer_score") or 0.0) >= 1.0
     ]
     gaps = [
-        d for d in dims
-        if d.get("peer_score") is not None
-        and float(d.get("peer_score") or 0.0) - float(d.get("score") or 0.0) >= 1.0
+        d for d in compared
+        if float(d.get("peer_score") or 0.0) - float(d.get("score") or 0.0) >= 1.0
     ]
     edge_str = ", ".join(
         f"{d.get('name')} ({d.get('score')} vs peer {d.get('peer_score')})"
         for d in edges[:3]
-    ) or "no dimension clearly beats peers"
+    ) or "no measured dimension clearly beats its industry peers"
     gap_str = ", ".join(
         f"{d.get('name')} ({d.get('score')} vs peer {d.get('peer_score')})"
         for d in gaps[:3]
-    ) or "no material gaps"
+    ) or "no measured gaps"
+    top_line = (
+        f"{top.get('name', 'unknown')} (score {top.get('score', 0)}/10)" if measured
+        else "none measured"
+    )
+    all_dims = ", ".join(
+        f"{d.get('name')} {d.get('score')}/10"
+        + ("" if d.get("source") == "deterministic" else " (AI estimate, not measured)")
+        for d in dims
+    ) or "none"
 
     return f"""Write the moat & competitive read for this company — how durable its moat is AND how it competes with its rivals.
 
-TOP MOAT SOURCE: {top.get('name', 'unknown')} (score {top.get('score', 0)}/10)
-ALL DIMENSIONS: {", ".join(f"{d.get('name')} {d.get('score')}/10" for d in dims) or "none"}
+TOP MOAT SOURCE: {top_line}
+ALL DIMENSIONS: {all_dims}
+Never present an "AI estimate, not measured" dimension as a strength, an edge or a weakness.
 MOAT STRENGTH: {strength_hint}
-WHERE IT OUT-DEFENDS PEERS (focal vs peer-avg): {edge_str}
+WHERE IT OUT-DEFENDS PEERS (focal vs industry peer avg): {edge_str}
 WHERE IT TRAILS PEERS: {gap_str}
 {competitor_block}
 
@@ -2221,7 +2268,7 @@ RULES:
 - quality_score: integer 0-100 reflecting your conviction on this stock
 - moat dimension scores 0.0-10.0
 - macro impact 0.0-1.0
-- 2-4 bull_case + 2-4 bear_case — count matches the case's strength. Bull and bear can have different counts (e.g. 4 bull + 2 bear when the bull case is rich and the bear thin). Do NOT default to 3 — pick the count that fits the data, not the layout. EACH point MUST cite a concrete number drawn from the CARD VALUES block / evidence (gross margin %, D/E, FCF, P/E, EV/EBITDA, revenue/EPS CAGR, ROE, Altman Z, moat-dimension scores, forecast growth) — i.e. reflect the Deep Dive cards. GROUNDING — STRICT: any number cited MUST appear verbatim in the CARD VALUES block; never invent or recompute; if a metric shows "—"/"N/A", anchor on a different one. A generic point with no number is NOT acceptable.
+- 2-4 bull_case + 2-4 bear_case — count matches the case's strength. Bull and bear can have different counts (e.g. 4 bull + 2 bear when the bull case is rich and the bear thin). Do NOT default to 3 — pick the count that fits the data, not the layout. EACH point MUST cite a concrete number drawn from the CARD VALUES block / evidence (gross margin %, D/E, FCF, P/E, EV/EBITDA, revenue/EPS CAGR, ROE, Altman Z, forecast growth) — i.e. reflect the Deep Dive cards. GROUNDING — STRICT: any number cited MUST appear verbatim in the CARD VALUES block; never invent or recompute; if a metric shows "—"/"N/A", anchor on a different one. A generic point with no number is NOT acceptable.
 - 3-6 macro risk_factors (skip ones that don't materially affect this company)
 - 2-3 critical_factors normally (1 is fine when little is truly worth flagging; 4 only for a genuinely complex situation; NEVER more than 5). Each is a forward-looking thing to MONITOR going forward — a concern paired with what to watch next — NOT a static complaint or a restatement of the bear case. Each factor MUST cover a DIFFERENT area (never two on the same theme): spread across balance-sheet, competitive moat, macro/geopolitical/Fed, growth/forecast, valuation, insider. Make the title a neutral monitor-area name (e.g. "Free Cash Flow", "Competitive Moat", "Fed & Rate Policy", "Geopolitical Exposure", "Growth Durability").
 - 3-5 competitors, ranked by relevance
@@ -2653,20 +2700,28 @@ def _digest_moat(report: Dict[str, Any]) -> List[str]:
     """Industry & Competitive Moat."""
     out: List[str] = []
     moat = report.get("moat_competition") or {}
+    dims = moat.get("dimensions") or []
     dim_strs: List[str] = []
-    for d in (moat.get("dimensions") or []):
-        if not isinstance(d, dict):
-            continue
+    # Measured pillars only, each with its INDUSTRY peer when one exists: an AI-estimated
+    # pillar carries no number here, so the thesis can never cite it as a moat signal
+    # (owner decision 2026-10-28), and a placeholder / AI peer is never a comparison.
+    for d in _measured_moat_dims(dims):
         sc = _f_num(d.get("score"), "{:.1f}")
         if sc is None:
             continue
-        ps = _f_num(d.get("peer_score"), "{:.1f}")
         piece = f"{d.get('name', '?')} {sc}"
-        if ps is not None:
-            piece += f" (peer {ps})"
+        if _has_industry_peer(d):
+            piece += f" (peer {_f_num(d.get('peer_score'), '{:.1f}')})"
         dim_strs.append(piece)
     if dim_strs:
-        out.append("MOAT (0-10, focal vs peer): " + ", ".join(dim_strs))
+        out.append("MOAT (0-10, measured, focal vs industry peer): " + ", ".join(dim_strs))
+    estimated = [
+        str(d.get("name")) for d in dims
+        if isinstance(d, dict) and d.get("source") != "deterministic" and d.get("name")
+    ]
+    if estimated:
+        out.append("  Moat pillars not measured (AI estimates, never cite): "
+                   + ", ".join(estimated))
     md = moat.get("market_dynamics") or {}
     if isinstance(md, dict):
         mbits = _market_structure_bits(md)
@@ -2854,7 +2909,7 @@ SELECTION RULES (strict):
 - DIVERSIFY across modules — take at most ~2 points from any single module. A bull_case made of four valuation/margin ratios is a FAILURE: when the real signal is a wide moat, a price catalyst, raised guidance, a critical macro threat, hostile insider selling, or a strong Wall Street target, that is what belongs here. A quiet/neutral module contributes nothing — skip it.
 - Each point ≤22 words, plain English, no hedging, no clichés. Lead with the number/verdict.
 - SELF-CONTAINED — label the SIGNAL, not just the number: each bullet renders alone with NO section header, so name what each figure measures. Write "55 insider sells vs 1 buy", not a bare "55 sells vs 1 buy"; "analyst target +18%", not just "+18%". The reader must be able to tell which Deep Dive signal each point comes from (insider, analyst, moat, guidance, macro, segment, etc.).
-- GROUNDING — STRICT: every number or named verdict you cite MUST appear verbatim in the EVIDENCE or MODULE DIGEST above (e.g. 'Switching Costs moat 8.5 vs peer 7.0', 'analyst target +18%', 'Extreme -12% move on guidance cut', 'Critical macro threat', '70.51% gross margin', '4.21 D/E'). NEVER invent or recompute a number. A generic point with no concrete number/verdict is NOT acceptable.
+- GROUNDING — STRICT: every number or named verdict you cite MUST appear verbatim in the EVIDENCE or MODULE DIGEST above (e.g. 'Cost Advantage moat 8.5 vs peer 7.0', 'analyst target +18%', 'Extreme -12% move on guidance cut', 'Critical macro threat', '70.51% gross margin', '4.21 D/E'). NEVER invent or recompute a number. A generic point with no concrete number/verdict is NOT acceptable.
 - Never name yourself, the underlying model, or any AI provider.
 
 Return ONLY valid JSON (no markdown fences, no commentary):

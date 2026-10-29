@@ -3115,6 +3115,24 @@ def test_moat_pillars_tolerate_garbage_and_follow_the_pdf_peer_rule():
     assert _fig_lines({"moat_competition": {"dimensions": [None, {}]}}) == []
 
 
+def test_moat_pillars_quote_only_an_industry_peer():
+    """From 2026-10-28 every pillar carries `peer_source`: Cay AI quotes "vs peers" only for
+    the industry's own average — never the AI's guess or the 5.0 placeholder (the Insight's
+    rule too). An untagged pillar (a report stored before) keeps its old reading."""
+    line = _fig_lines({"moat_competition": {"dimensions": [
+        {"name": "Cost Advantage", "score": 6.2, "peer_score": 5.0,
+         "source": "deterministic", "peer_source": "baseline"},
+        {"name": "Switching Costs", "score": 8.0, "peer_score": 7.0,
+         "source": "ai_legacy", "peer_source": "ai_estimate"},
+        {"name": "Brand Power", "score": 4.0, "peer_score": 3.6,
+         "source": "deterministic", "peer_source": "industry"},
+        {"name": "Legacy", "score": 5.0, "peer_score": 6.0},
+    ]}})[0]
+    assert line == ("Moat pillars (score out of 10): Cost Advantage 6.2; "
+                    "Switching Costs 8 (qualitative); Brand Power 4 vs peers 3.6; "
+                    "Legacy 5 vs peers 6")
+
+
 def test_segments_sort_bound_and_label_their_currency():
     eng = {"period": "FY 2025", "revenue_unit": "Millions", "total_revenue": 1000.0,
            "reporting_currency": "TWD", "intersegment_eliminations": 50.0,

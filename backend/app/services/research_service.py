@@ -23,6 +23,7 @@ from typing import Dict, Any, Optional
 from datetime import datetime, timezone, timedelta
 
 from app.services.dcf_report_gate import report_dcf_model_is_current, report_dcf_source_matches
+from app.services.moat_scoring_service import report_moat_model_is_current
 from app.config import settings
 from app.database import get_supabase
 from app.integrations.gemini import get_gemini_client
@@ -961,6 +962,15 @@ class ResearchService:
                             "Shared cache row for %s/%s carries a Caydex estimate from an "
                             "older DCF model — treating as a miss so this buyer gets a fresh "
                             "report", ticker, persona_key,
+                        )
+                        return None
+                    # Same rule for the moat radar: pillars scored by an older scorer
+                    # vintage are not re-sold (moat_scoring_service.report_moat_model_is_current).
+                    if not report_moat_model_is_current(blob):
+                        logger.info(
+                            "Shared cache row for %s/%s carries moat pillars from an older "
+                            "scorer — treating as a miss so this buyer gets a fresh report",
+                            ticker, persona_key,
                         )
                         return None
                     # Never re-sell a report that lost Financials data to a degraded

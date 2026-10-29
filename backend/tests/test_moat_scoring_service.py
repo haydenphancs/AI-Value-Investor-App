@@ -30,7 +30,6 @@ from app.services.moat_scoring_service import (
     PillarResult,
     _absolute_delta_score,
     _assemble_pillar,
-    _compute_yoy_pct,
     _hhi_to_score,
     _latest,
     _lifecycle_to_score,
@@ -145,33 +144,29 @@ def test_lifecycle_to_score_unknown_returns_none():
     assert _lifecycle_to_score("turbocharged") is None
 
 
-# ── _compute_yoy_pct ────────────────────────────────────────────────────
+# ── _focal_revenue_yoy (paired like the producer) ───────────────────────
 
 
-def test_compute_yoy_pct_basic():
-    records = [
-        {"date": "2024-12-31", "revenue": 110},
-        {"date": "2023-12-31", "revenue": 100},
-    ]
-    assert _compute_yoy_pct(records, "revenue") == 10.0
+def test_focal_revenue_yoy_basic_and_decline():
+    from app.services.moat_scoring_service import _focal_revenue_yoy
+    rise = [{"date": "2024-12-31", "revenue": 110_000_000},
+            {"date": "2023-12-31", "revenue": 100_000_000}]
+    fall = [{"date": "2024-12-31", "revenue": 80_000_000},
+            {"date": "2023-12-31", "revenue": 100_000_000}]
+    assert _focal_revenue_yoy(rise, "2024") == (10.0, True)
+    assert _focal_revenue_yoy(fall, "2024") == (-20.0, True)
 
 
-def test_compute_yoy_pct_handles_decline():
-    records = [
-        {"date": "2024-12-31", "revenue": 80},
-        {"date": "2023-12-31", "revenue": 100},
-    ]
-    assert _compute_yoy_pct(records, "revenue") == -20.0
-
-
-def test_compute_yoy_pct_returns_none_when_insufficient_data():
-    assert _compute_yoy_pct([], "revenue") is None
-    assert _compute_yoy_pct([{"date": "2024", "revenue": 100}], "revenue") is None
+def test_focal_revenue_yoy_returns_none_when_insufficient_data():
+    from app.services.moat_scoring_service import _focal_revenue_yoy
+    assert _focal_revenue_yoy([], "2024") == (None, False)
+    assert _focal_revenue_yoy([{"date": "2024-12-31", "revenue": 100}], "2024") == (None, False)
+    assert _focal_revenue_yoy([{"date": "2024-12-31", "revenue": 100}], "") == (None, False)
     # Prior is zero → undefined
-    assert _compute_yoy_pct([
-        {"date": "2024-12-31", "revenue": 100},
+    assert _focal_revenue_yoy([
+        {"date": "2024-12-31", "revenue": 100_000_000},
         {"date": "2023-12-31", "revenue": 0},
-    ], "revenue") is None
+    ], "2024") == (None, False)
 
 
 # ── _assemble_pillar (confidence buckets) ──────────────────────────────
@@ -423,8 +418,8 @@ def test_network_effects_uses_industry_tam_hhi_and_lifecycle():
         sector="Technology", industry="Software - Infrastructure",
         profile={},
         income=[
-            {"date": "2024-12-31", "revenue": 110},
-            {"date": "2023-12-31", "revenue": 100},
+            {"date": "2024-12-31", "revenue": 110_000_000},
+            {"date": "2023-12-31", "revenue": 100_000_000},
         ],
         balance=[],
         ratios=[],
@@ -432,10 +427,10 @@ def test_network_effects_uses_industry_tam_hhi_and_lifecycle():
     )
     nw = results[PILLAR_NETWORK]
     # HHI 3500 → 7.0; lifecycle "secular_growth" → 7.0;
-    # revenue_yoy 10% vs sector 5% → +5 / 2 = +2.5 → 7.5.
-    # Average of (7.0, 7.0, 7.5) ≈ 7.17 → round to 7.2
+    # revenue_yoy 10% vs sector 5% → +5 / 5 (2026-10-28 slope) = +1.0 → 6.0.
+    # Average of (7.0, 7.0, 6.0) ≈ 6.67 → round to 6.7
     assert nw.confidence == "high"
-    assert nw.score == 7.2
+    assert nw.score == 6.7
 
 
 def _network_sub_scores(industry_tam: Any) -> Dict[str, Optional[float]]:
@@ -734,3 +729,303 @@ def test_pillar_drivers_to_dict_includes_period_and_sample_size():
     gm_driver = next(d for d in brand_dict["drivers"] if d["metric"] == "gross_margin")
     assert gm_driver["period_used"] == "2025"
     assert gm_driver["sample_size"] == 85
+
+
+# ── 2026-10-28 owner decisions (JOBY audit): outliers score None, never 10 ──
+#
+# JOBY's report read Network Effects 6.3 ("Primary Driver") off 39,183% growth from a $136K
+# prior year, and Brand Power 5.0 off a 204× P/S with a −30% gross margin. Each case below
+# asserts the DEGRADED output, plus a twin that still scores.
+
+from app.services.moat_scoring_service import (  # noqa: E402
+    SCORER_VERSION,
+    _focal_revenue_yoy,
+    report_moat_model_is_current,
+)
+from app.services.transcript_signals_service import nrr_to_sub_score  # noqa: E402
+
+
+def _drivers(pillar: PillarResult) -> Dict[str, MetricDriver]:
+    return {d.metric: d for d in pillar.drivers}
+
+
+def _score_network(income: List[Dict[str, Any]], *, median: float = 8.94,
+                   hhi: float = 1040.77, phase: str = "mature") -> PillarResult:
+    svc = _make_service_with_fake_medians({"revenue_yoy": median})
+    return svc.score(
+        sector="Industrials", industry="Airlines, Airports & Air Services",
+        profile={}, income=income, balance=[], ratios=[],
+        industry_tam=_FakeIndustryTAM(hhi=hhi, lifecycle_phase=phase),
+    )[PILLAR_NETWORK]
+
+
+def test_joby_growth_off_a_near_zero_base_is_shown_but_not_scored():
+    nw = _score_network([
+        {"date": "2024-12-31", "revenue": 53_425_000},
+        {"date": "2023-12-31", "revenue": 136_000},
+    ])
+    growth = _drivers(nw)["revenue_yoy"]
+    assert growth.focal == 39183.09          # the figure is still on the driver
+    assert growth.sub_score is None          # ...but never pins the pillar at 10
+    # HHI + lifecycle are industry constants: no company input → the AI fallback.
+    assert nw.score is None and nw.confidence == "low"
+
+
+def test_growth_from_a_prior_year_just_under_10m_is_not_scored():
+    nw = _score_network([
+        {"date": "2024-12-31", "revenue": 12_000_000},
+        {"date": "2023-12-31", "revenue": 9_999_999},
+    ])
+    assert _drivers(nw)["revenue_yoy"].sub_score is None
+    assert nw.score is None
+
+
+def test_growth_above_the_producers_clamp_is_not_scored():
+    # A $50M prior year passes the floor, but 600% is past WINSORIZE_CEIL (500%), the
+    # bound every peer value in the median was clamped to.
+    nw = _score_network([
+        {"date": "2024-12-31", "revenue": 350_000_000},
+        {"date": "2023-12-31", "revenue": 50_000_000},
+    ])
+    assert _drivers(nw)["revenue_yoy"].focal == 600.0
+    assert _drivers(nw)["revenue_yoy"].sub_score is None
+
+
+def test_a_40pct_grower_still_scores_on_the_gentler_slope():
+    nw = _score_network([
+        {"date": "2024-12-31", "revenue": 140_000_000},
+        {"date": "2023-12-31", "revenue": 100_000_000},
+    ])
+    growth = _drivers(nw)["revenue_yoy"]
+    # 5 + (40 − 8.94) / 5 = 11.2 → capped 10.0; one notch lower stays on the scale.
+    assert growth.sub_score == 10.0
+    nw2 = _score_network([
+        {"date": "2024-12-31", "revenue": 118_940_000},
+        {"date": "2023-12-31", "revenue": 100_000_000},
+    ])
+    # 18.94% vs 8.94 → +10pp → 5 + 10/5 = 7.0 (it read 10.0 at the old 2pp slope).
+    assert _drivers(nw2)["revenue_yoy"].sub_score == 7.0
+    # HHI 1040.77 → 4.0, mature → 5.0, growth 7.0 → 5.33 → 5.3, high.
+    assert nw2.score == 5.3 and nw2.confidence == "high"
+
+
+def test_growth_is_paired_like_the_sector_median():
+    # A repeated latest year is one year (the old date-sorted pairing read it as 0%).
+    dup = _score_network([
+        {"date": "2024-12-31", "revenue": 120_000_000},
+        {"date": "2024-12-31", "revenue": 120_000_000},
+        {"date": "2023-12-31", "revenue": 100_000_000},
+    ])
+    assert _drivers(dup)["revenue_yoy"].focal == 20.0
+    # A missing year is no one-year growth figure (the old pairing read 2022→2024 as YoY).
+    gap = _score_network([
+        {"date": "2024-12-31", "revenue": 150_000_000},
+        {"date": "2022-12-31", "revenue": 100_000_000},
+    ])
+    assert _drivers(gap)["revenue_yoy"].focal is None
+    assert gap.score is None
+
+
+def test_focal_revenue_yoy_refuses_a_transition_stub():
+    # Dec-2022 FY, a 6-month stub to Jun-2023, then Jun-2024: the stub is never paired.
+    income = [
+        {"date": "2024-06-30", "revenue": 220_000_000},
+        {"date": "2023-06-30", "revenue": 60_000_000},
+        {"date": "2022-12-31", "revenue": 200_000_000},
+    ]
+    yoy, scorable = _focal_revenue_yoy(income, "2024")
+    assert yoy is None and scorable is False
+
+
+def test_focal_revenue_yoy_refuses_negative_current_revenue():
+    yoy, scorable = _focal_revenue_yoy(
+        [{"date": "2024-12-31", "revenue": -5_000_000},
+         {"date": "2023-12-31", "revenue": 100_000_000}], "2024")
+    assert yoy == -105.0 and scorable is False
+
+
+def test_network_effects_with_a_platform_user_count_is_measured():
+    """The transcript's user count is a company input too (latent while transcripts are
+    unlicensed): HHI + lifecycle + users is measured even with no growth figure."""
+    from types import SimpleNamespace
+    svc = _make_service_with_fake_medians({})
+    pillar = svc._score_network_effects(
+        income=[], industry_tam=_FakeIndustryTAM(hhi=1040.77, lifecycle_phase="mature"),
+        medians={}, transcript_sig=SimpleNamespace(user_count=100_000_000, nrr_pct=None),
+    )
+    assert pillar.score is not None and pillar.confidence == "high"
+
+
+def _score_brand(ratios: Dict[str, Any]) -> PillarResult:
+    svc = _make_service_with_fake_medians({"gross_margin": 0.3099, "ps_ratio": 2.4685})
+    return svc.score(
+        sector="Industrials", industry="Airlines, Airports & Air Services",
+        profile={}, income=[], balance=[],
+        ratios=[{"date": "2024-12-31", **ratios}],
+    )[PILLAR_BRAND]
+
+
+def test_joby_ps_with_a_negative_gross_margin_is_not_brand_evidence():
+    brand = _score_brand({"grossProfitMargin": -0.3006, "priceToSalesRatio": 204.14,
+                          "revenuePerShare": 0.0647})
+    ps = _drivers(brand)["ps_ratio"]
+    assert ps.focal == 204.14 and ps.sub_score is None
+    assert _drivers(brand)["gross_margin"].sub_score == 0.0
+    # One driver left → the AI fallback, not mean(0.0, 10.0) = 5.0.
+    assert brand.score is None
+
+
+def test_ps_with_a_zero_gross_margin_is_not_brand_evidence():
+    brand = _score_brand({"grossProfitMargin": 0.0, "priceToSalesRatio": 6.0,
+                          "revenuePerShare": 3.0})
+    assert _drivers(brand)["ps_ratio"].sub_score is None
+    assert brand.score is None
+
+
+def test_ps_with_a_positive_gross_margin_still_scores():
+    brand = _score_brand({"grossProfitMargin": 0.45, "priceToSalesRatio": 6.0,
+                          "revenuePerShare": 3.0})
+    assert _drivers(brand)["ps_ratio"].sub_score is not None
+    assert brand.score is not None and brand.confidence == "medium"
+
+
+def _score_intangible(income, balance, ip_intel, medians) -> PillarResult:
+    svc = _make_service_with_fake_medians(medians)
+    return svc.score(
+        sector="Industrials", industry="Airlines, Airports & Air Services",
+        profile={}, income=income, balance=balance, ratios=[], ip_intel=ip_intel,
+    )[PILLAR_INTANGIBLE]
+
+
+def test_joby_patents_plus_one_sector_input_is_not_measured():
+    # Industrials' R&D median is 0.0 (zero-fills) → the R&D driver is None; the patent
+    # input (4.0) used to be the second driver that made the pillar "measured" at 2.0.
+    pillar = _score_intangible(
+        income=[{"date": "2024-12-31", "revenue": 53_425_000,
+                 "researchAndDevelopmentExpenses": 581_101_000}],
+        balance=[{"date": "2024-12-31", "totalAssets": 1_795_069_000,
+                  "goodwillAndIntangibleAssets": 108_281_000}],
+        ip_intel={"patents_per_employee": 0.0059, "patents_recent_5y": 15},
+        medians={"rd_to_revenue": 0.0, "intangibles_to_assets": 33.12},
+    )
+    assert _drivers(pillar)["patents_per_employee"].sub_score == 4.0
+    assert pillar.score is None and pillar.confidence == "low"
+
+
+def test_rd_plus_intangibles_plus_fda_is_measured():
+    pillar = _score_intangible(
+        income=[{"date": "2024-12-31", "revenue": 1_000_000_000,
+                 "researchAndDevelopmentExpenses": 200_000_000}],
+        balance=[{"date": "2024-12-31", "totalAssets": 2_000_000_000,
+                  "goodwillAndIntangibleAssets": 500_000_000}],
+        ip_intel={"fda_active_approvals": 12},
+        medians={"rd_to_revenue": 15.0, "intangibles_to_assets": 20.0},
+    )
+    assert pillar.score is not None and pillar.confidence == "high"
+
+
+def test_a_nan_input_is_no_reading():
+    assert _safe_float({"x": float("nan")}, "x") is None
+    assert _safe_float({"x": float("inf")}, "x") is None
+    assert _safe_float({"x": True}, "x") is None
+    brand = _score_brand({"grossProfitMargin": float("nan"), "priceToSalesRatio": 6.0,
+                          "revenuePerShare": 3.0})
+    assert _drivers(brand)["gross_margin"].focal is None
+    assert brand.score is None
+
+
+def test_an_exact_zero_sga_with_revenue_is_no_reading():
+    """FMP zero-fills an unreported SG&A line; as a lower-is-better driver it scored 10.0."""
+    svc = _make_service_with_fake_medians({"sga_to_revenue": 18.0})
+    cost = svc.score(
+        sector="Industrials", industry="X", profile={},
+        income=[{"date": "2024-12-31", "revenue": 500_000_000,
+                 "sellingGeneralAndAdministrativeExpenses": 0}],
+        balance=[], ratios=[],
+    )[PILLAR_COST]
+    assert _drivers(cost)["sga_to_revenue"].focal is None
+    assert _drivers(cost)["sga_to_revenue"].sub_score is None
+
+
+@pytest.mark.parametrize("nrr,expected", [
+    (129.9, 10.0), (125.0, 10.0), (72.0, 0.0), (75.0, 0.0), (100.0, 5.0), (110.0, 7.0),
+])
+def test_nrr_sub_score_stays_on_the_0_to_10_scale(nrr, expected):
+    assert nrr_to_sub_score(nrr) == expected
+
+
+def test_nrr_sub_score_refuses_a_non_finite_input():
+    assert nrr_to_sub_score(float("nan")) is None
+
+
+def test_report_moat_model_gate():
+    stamped = {"moat_competition": {"model_version": SCORER_VERSION}}
+    assert report_moat_model_is_current(stamped) is True
+    assert report_moat_model_is_current({"moat_competition": {}}) is False   # pre-stamp
+    assert report_moat_model_is_current(
+        {"moat_competition": {"model_version": "moat_v1.2026-10-22"}}) is False
+    assert report_moat_model_is_current({}) is True                          # no moat block
+    assert report_moat_model_is_current(None) is True
+
+
+def test_peer_averages_carry_the_scorer_vintage():
+    from app.services import industry_moat_benchmark_service as imb
+    assert imb.MODEL_VERSION == SCORER_VERSION
+    assert imb._MODEL_VERSION_ORDER[-1] == SCORER_VERSION
+    assert imb._vintage_rank("moat_v1.2026-10-22") < imb._vintage_rank(SCORER_VERSION)
+
+
+@pytest.mark.parametrize("prior,current,scorable", [
+    (10_000_000, 12_000_000, True),       # the floor is inclusive
+    (50_000_000, 300_000_000, True),      # exactly the producer's 500% clamp
+    (50_000_000, 0, False),               # current revenue 0: a zero-fill, no reading
+])
+def test_growth_scoring_boundaries(prior, current, scorable):
+    yoy, ok = _focal_revenue_yoy(
+        [{"date": "2024-12-31", "revenue": current},
+         {"date": "2023-12-31", "revenue": prior}], "2024")
+    assert ok is scorable
+
+
+def test_revenue_falling_to_zero_never_makes_network_effects_measured():
+    nw = _score_network([
+        {"date": "2024-12-31", "revenue": 0},
+        {"date": "2023-12-31", "revenue": 50_000_000},
+    ])
+    assert _drivers(nw)["revenue_yoy"].sub_score is None
+    assert nw.score is None
+
+
+def test_a_non_finite_expense_line_is_no_reading_at_pillar_level():
+    svc = _make_service_with_fake_medians(
+        {"sga_to_revenue": 18.0, "rd_to_revenue": 15.0, "intangibles_to_assets": 20.0})
+    res = svc.score(
+        sector="Technology", industry="X", profile={},
+        income=[{"date": "2024-12-31", "revenue": 500_000_000,
+                 "sellingGeneralAndAdministrativeExpenses": float("nan"),
+                 "researchAndDevelopmentExpenses": float("inf")}],
+        balance=[], ratios=[],
+    )
+    sga = _drivers(res[PILLAR_COST])["sga_to_revenue"]
+    rd = _drivers(res[PILLAR_INTANGIBLE])["rd_to_revenue"]
+    assert sga.focal is None and sga.sub_score is None
+    assert rd.focal is None and rd.sub_score is None
+
+
+@pytest.mark.parametrize("currency,prior,scorable", [
+    ("JPY", 12_000_000, False),          # ¥12M ≈ $80K: a near-zero base
+    ("JPY", 3_000_000_000, True),        # ¥3B ≈ $20M
+    ("TWD", 200_000_000, False),         # NT$200M ≈ $6.3M
+    ("TWD", 400_000_000, True),          # NT$400M ≈ $12.5M
+    (" usd ", 12_000_000, True),         # normalized like every currency reader
+    (None, 12_000_000, True),            # no field: read as USD (money_prefix convention)
+    ("XYZ", 3_000_000_000, False),       # a currency with no floor rate: no reading
+])
+def test_the_growth_floor_is_in_dollars_whatever_the_reporting_currency(currency, prior, scorable):
+    rows = [{"date": "2024-12-31", "revenue": prior * 2},
+            {"date": "2023-12-31", "revenue": prior}]
+    if currency is not None:
+        for r in rows:
+            r["reportedCurrency"] = currency
+    yoy, ok = _focal_revenue_yoy(rows, "2024")
+    assert yoy == 100.0 and ok is scorable

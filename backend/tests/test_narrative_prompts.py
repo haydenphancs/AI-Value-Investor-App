@@ -558,7 +558,9 @@ def _fully_populated_report() -> dict:
             },
         },
         "moat_competition": {
-            "dimensions": [{"name": p, "score": 6.5, "peer_score": 5.8} for p in pillars],
+            "dimensions": [{"name": p, "score": 6.5, "peer_score": 5.8,
+                            "source": "deterministic", "peer_source": "industry"}
+                           for p in pillars],
             "market_dynamics": {**_AD_MEASURED, "cagr_5yr": -0.2},
             "competitor_order": "direct",
             "competitors": [
@@ -627,3 +629,88 @@ def test_the_moat_digest_ignores_the_projection():
     assert _structure_line(**projected) == _structure_line(**_AD_MEASURED)
     for gone in ("2031", "400", "495", "4.3", "Projection", "BLS"):
         assert gone not in _structure_line(**projected), gone
+
+
+# ── Moat Insight / digest provenance (owner decisions 2026-10-28) ────────
+# JOBY's Insight claimed "some edge in potential network effects and brand power" and
+# "trails significantly in switching costs" — the last against an AI 0.0 and a 5.0
+# placeholder peer. Only a MEASURED pillar against a MEASURED industry peer may be an
+# edge or a gap; an AI estimate is listed as such and never sets the moat's strength.
+
+def _moat_provenance_shell(dims):
+    return {"moat_competition": {"dimensions": dims, "market_dynamics": {}, "competitors": []}}
+
+
+_MEASURED_EDGE = {"name": "Network Effects", "score": 6.3, "peer_score": 4.1,
+                  "source": "deterministic", "peer_source": "industry"}
+_MEASURED_BASELINE_PEER = {"name": "Brand Power", "score": 6.0, "peer_score": 4.0,
+                           "source": "deterministic", "peer_source": "baseline"}
+_AI_PILLAR = {"name": "Switching Costs", "score": 9.0, "peer_score": 5.0,
+              "source": "ai_legacy", "peer_source": "baseline"}
+_AI_GAP = {"name": "Intangible Assets", "score": 0.0, "peer_score": 5.0,
+           "source": "ai_legacy", "peer_source": "ai_estimate"}
+
+
+def test_durability_edges_and_gaps_use_measured_pillars_and_industry_peers_only():
+    prompt = np_._moat_durability_note_prompt(PERSONA, "EVIDENCE", _moat_provenance_shell(
+        [_AI_PILLAR, _MEASURED_EDGE, _MEASURED_BASELINE_PEER, _AI_GAP]))
+    edges = prompt.split("WHERE IT OUT-DEFENDS PEERS", 1)[1].split("\n", 1)[0]
+    gaps = prompt.split("WHERE IT TRAILS PEERS", 1)[1].split("\n", 1)[0]
+    assert "Network Effects (6.3 vs peer 4.1)" in edges
+    assert "Brand Power" not in edges            # a placeholder peer is no comparison
+    assert "Switching Costs" not in edges        # an AI estimate is no edge
+    assert "Intangible Assets" not in gaps and "no measured gaps" in gaps
+    # The AI's 9.0 never sets the top source or the tone (it would read "WIDE moat").
+    assert "TOP MOAT SOURCE: Brand Power (score 6.0/10)" not in prompt
+    assert "TOP MOAT SOURCE: Network Effects (score 6.3/10)" in prompt
+    assert "WIDE moat" not in prompt and "NO moat" in prompt
+    assert "Switching Costs 9.0/10 (AI estimate, not measured)" in prompt
+    assert "Network Effects 6.3/10," in prompt  # measured: no tag
+
+
+def test_durability_with_no_measured_pillar_never_grades_the_moat():
+    prompt = np_._moat_durability_note_prompt(
+        PERSONA, "EVIDENCE", _moat_provenance_shell([_AI_PILLAR, _AI_GAP]))
+    assert "TOP MOAT SOURCE: none measured" in prompt
+    assert "NOT MEASURED" in prompt
+    for tone in ("WIDE moat", "NARROW moat", "NO moat —"):
+        assert tone not in prompt
+
+
+def test_the_thesis_digest_never_carries_an_ai_pillar_number():
+    lines = np_._digest_moat(_moat_provenance_shell(
+        [_AI_PILLAR, _MEASURED_EDGE, _MEASURED_BASELINE_PEER]))
+    text = "\n".join(lines)
+    assert "MOAT (0-10, measured, focal vs industry peer): " in text
+    assert "Network Effects 6.3 (peer 4.1)" in text
+    assert "Brand Power 6.0," not in text and "Brand Power 6.0" in text
+    assert "Brand Power 6.0 (peer" not in text     # placeholder peer dropped
+    assert "Switching Costs 9.0" not in text
+    assert "Moat pillars not measured (AI estimates, never cite): Switching Costs" in text
+
+
+def test_a_pre_provenance_report_has_no_measured_moat_comparison():
+    """A report stored before 2026-10-28 has no `source` / `peer_source`: nothing is
+    narrated as measured (fail closed), every pillar is listed as unmeasured."""
+    legacy = [{"name": "Switching Costs", "score": 8.5, "peer_score": 6.0}]
+    lines = np_._digest_moat(_moat_provenance_shell(legacy))
+    assert not any(ln.startswith("MOAT (0-10") for ln in lines)
+    assert any("not measured" in ln for ln in lines)
+
+
+def test_a_pillar_scored_with_patents_is_never_an_edge_against_patent_free_peers():
+    """The industry peer averages never fetch patents / FDA approvals, so a company pillar
+    that used one is not like-for-like with its peer and is not narrated as an edge."""
+    with_ip = {"name": "Intangible Assets", "score": 7.5, "peer_score": 5.0,
+               "source": "deterministic", "peer_source": "industry",
+               "drivers": [{"metric": "rd_to_revenue", "sub_score": 7.5},
+                           {"metric": "intangibles_to_assets", "sub_score": 6.5},
+                           {"metric": "fda_active_approvals", "sub_score": 8.5}]}
+    without_ip = dict(with_ip, drivers=with_ip["drivers"][:2])
+    edges_of = lambda d: np_._moat_durability_note_prompt(  # noqa: E731
+        PERSONA, "EVIDENCE", _moat_provenance_shell([d])
+    ).split("WHERE IT OUT-DEFENDS PEERS", 1)[1].split("\n", 1)[0]
+    assert "Intangible Assets" not in edges_of(with_ip)
+    assert "Intangible Assets (7.5 vs peer 5.0)" in edges_of(without_ip)
+    digest = "\n".join(np_._digest_moat(_moat_provenance_shell([with_ip])))
+    assert "Intangible Assets 7.5" in digest and "(peer" not in digest

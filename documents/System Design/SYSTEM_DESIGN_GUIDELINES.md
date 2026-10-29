@@ -182,6 +182,13 @@ XBRL `companyconcept` facts, 2026-10-22: the check on Signal of Confidence buyba
 fair-access policy needs a declared `SEC_EDGAR_USER_AGENT` ("Company contact@email"; blank or not
 printable ASCII turns the check off) and at most 10 requests/second per client — the client paces itself at
 `SEC_EDGAR_MAX_RPS` (5) per process and treats a 403 as throttling, with a 10-minute circuit).
+Since 2026-10-28 it also serves the Trillion Club stake finder (`app/services/trillion_club/stake_finder.py`,
+§3 item 5): submissions and a member's own Schedule 13D/13G XML, other companies' filing documents
+(`get_filing_document(max_bytes=12 MiB)`, that caller only) and EDGAR full-text search
+(`full_text_search`, `efts.sec.gov`), which has its OWN 10-minute circuit
+(`SECEdgarFullTextThrottled`, which stops only the full-text stage) while still honouring the
+shared one. Full-text search is undocumented, so it is used for discovery only: every fact a row
+carries is read from the filing document itself.
 **No Google Search grounding** (retired 2026-10-02). Gemini's `google_search` tool is not used
 anywhere: the Gemini API Additional Terms let a grounded answer be shown only to the end user who
 sent the prompt, together with Google's Search Suggestions, unmodified, and never cached, stored or
@@ -385,8 +392,29 @@ The redesigned Home tab (`HomeDashboardView`) is fed by ONE aggregation endpoint
    new-filer probe and discovery screen, by `services/trillion_club/` — the jobs are off until
    `TRILLION_CLUB_JOBS_ENABLED` — stored per
    (CIK, quarter) with every accession, because FMP folds 13F-HR/A amendments into the
-   original quarter), and hand-kept private / non-U.S. / off-13F stakes, each with a primary
-   source and dates (`trillion_club_stakes`; news-only rows can never be published).
+   original quarter), and private / non-U.S. / off-13F stakes, each with a primary
+   source and dates (`trillion_club_stakes`; news-only rows can never be published). Stakes are
+   hand-kept (`origin` 'seed', `scripts/seed_trillion_club.py`) or, since migration 205, found
+   automatically by the stake finder (`app/services/trillion_club/stake_finder.py`, daily 18:30 ET,
+   off until `TRILLION_CLUB_STAKE_FINDER_ENABLED`): a member's own plain-share Schedule 13D/13G
+   may publish itself (`origin` 'auto', tier `13dg`, only after `TRILLION_CLUB_STAKE_AUTO_SINCE`
+   and `TRILLION_CLUB_STAKE_AUTO_TIERS` are set) behind a LOUD Telegram note with Withdraw / Keep;
+   every other SEC-evidenced find (8-K closings as a "trial", signed agreements, warrants,
+   preferred, unlisted issuers, changes to published rows) is a one-tap Publish / Dismiss
+   proposal (`origin` 'proposal'); indications of interest and newer filings about existing rows
+   are digest heads-ups and never a row. Facts come from deterministic templates over the filing
+   text (no LLM, no FMP); every finding is a row of `trillion_club_stake_findings`, the ledger
+   that makes each run resumable, and a Withdraw always wins. Public marketing posts use only rows
+   a person reviewed (seed, proposal, or an auto row the owner tapped Keep on). Rules a later change
+   must keep (review rounds of 2026-10-29): the cap of 3 auto publishes per ET day / 10 per 7 days
+   counts rows by when they went LIVE (`published_at`) plus every auto find still on its way, never
+   by when the finding was written; the member's own exit filing (5% or less) binds its pair in any
+   reading order — the live auto row comes down with a LOUD note, a pending auto find is held back,
+   an open proposal stating a percentage is voided, and any older row of the pair stating a
+   percentage is refused (an amount-only closing is not: it stays a dated fact the owner may
+   publish; the exit's event date rides on its finding); the facts of an open proposal never change in place (a
+   Publish tap carries only the finding id and message id); a filing that cannot be read is retried
+   once per ET day and then becomes a digest line, never a silent skip.
    Membership is a buffered rule on dated FMP market-cap closes (join after 10 straight
    closes at or above $1T, leave after 20 below; owner overrides; hand-entered caps must be
    forced). 13F ingestion is an owner opt-in per company (a bank's 13F is client assets).
@@ -1883,15 +1911,15 @@ grounding, §2 "No Google Search grounding"; a stored `tam_scope='global'` row r
 
 ### 7.4 Scheduled background jobs (the lifespan loops)
 
-Everything scheduled runs INSIDE the one web process: 27 tasks started by
-`app/main.py::_spawn` — 25 loops and two one-shots (the whale profile pre-warm and the Home
+Everything scheduled runs INSIDE the one web process: 28 tasks started by
+`app/main.py::_spawn` — 26 loops and two one-shots (the whale profile pre-warm and the Home
 boot warm), plus the Telegram webhook registration when the review bot is configured — and two
 Railway cron services (the marketing worker, §12.2; the Learn narrator, §12.18). There is
 no pg_cron, no edge function, no Celery, and no iOS `BGTaskScheduler`. Two facts decide
 whether any of it runs:
 
 - **`ENVIRONMENT` gates every loop.** Unless it is `"development"` (the Settings default —
-  a laptop), all 27 start; in development only the notification trio can run, and only
+  a laptop), all 28 start; in development only the notification trio can run, and only
   behind `RUN_NOTIFICATION_JOBS_LOCALLY`. Railway must therefore set `ENVIRONMENT`, or
   refunds, subscription expiry and every push silently stop.
 - **Exactly ONE uvicorn worker** (`test_deploy_command_parity.py`). Most loops are unclaimed
@@ -1917,7 +1945,7 @@ whether any of it runs:
 | chat starter warm | 15 min while the market is active | `CHAT_STARTER_WARM_ENABLED` (on) |
 | news-sentiment backfill (90 days per watched ticker, then a nightly 21:00 ET top-up) | every ~3 min, or at once when a ticker is added | `SENTIMENT_BACKFILL_ENABLED` (**off**) |
 | theme rotation / theme insights | 1st trading day 18:30 ET / trading days 18:15 ET | `THEME_ROTATION_ENABLED`, `THEME_INSIGHTS_ENABLED` (**off**) |
-| Trillion Club daily / weekly | 07:00 ET every day / Monday 08:00 ET | `TRILLION_CLUB_JOBS_ENABLED` (**off**) |
+| Trillion Club daily / weekly / stake finder (§3 item 5: reconcile first, then the members' own 13D/13Gs, then full-text search; the Monday run also re-checks published machine rows) | 07:00 ET every day / Monday 08:00 ET / 18:30 ET every day (boot +480 s; claim stale after 3,600 s; each attempt cancelled after 3,000 s; 3 attempts a day, hourly) | `TRILLION_CLUB_JOBS_ENABLED` (**off**); the finder also needs `TRILLION_CLUB_STAKE_FINDER_ENABLED` (**off**), `SEC_EDGAR_USER_AGENT` and the review bot; kill switch row `trillion_club_stake_finder` |
 | Wiser weekly engine (§12.18): cache sync, Thursday topic card (`learn_weekly_topic`, day claim), Friday 07:00 ET auto-pick, build (lease per piece, every tick), narration sweep, Telegram review, publish / expiry, Friday 15:00 ET deadman (`learn_weekly_deadman`, day claim) | a tick every 5 min | `LEARN_WEEKLY_ENABLED`, `LEARN_DEEP_DIVE_ENABLED` (**off**); every piece dry-run while `LEARN_WEEKLY_DRY_RUN` (**on**); build kill switch `learn_weekly_build` |
 | marketing publisher (+ the Telegram review sweep and publish feed, §12.9-§12.10, then four day-keyed jobs, §12.11: measure `marketing_metrics_daily` 06:00 ET; run health `marketing_run_health` on a posting day at the run hour + `MARKETING_MAX_RUN_ATTEMPTS`, capped at 23:00 (22:00 ET by default), and `marketing_run_health_final` the day after at the run hour (16:00 ET by default; the run hour is `MARKETING_RUN_HOUR_ET`, the web's mirror of the worker's); the weekly digest `marketing_digest_weekly` Monday 09:00 ET, Tuesday catch-up) / link-hit flush | 10 min, woken at once by an Approve or a confirmed Retract / 60 s | expiry, auto-approved posts back to review, and confirmed retracts: always; reconcile: `MARKETING_ENABLED` (**off**), any queued post with an adapter (billed X reads; it never resends under dry run); publishing: `MARKETING_ENABLED` and a platform listed in `MARKETING_PUBLISH_PLATFORMS` with its credentials (none by default); the review sweep, feed and both run-health checks: the `MARKETING_TELEGRAM_*` settings (unset = off); measure: `MARKETING_ENABLED` and `MARKETING_METRICS_ENABLED` (**off**); digest: the review bot and `MARKETING_DIGEST_ENABLED` (**off**) / — |
 | push dispatch, scheduled senders, price alerts | 60 s / hourly wake (earnings 16:00, smart money 18:00, profile match 19:00 ET) / 60 s | the notification trio (§11.4) |
@@ -6357,7 +6385,7 @@ the plan is `~/.claude/plans/improve-or-add-wiser-snoopy-sun.md`. Everything is 
   rate and the timing table (one span per block, seconds-per-word band) before merging.
 - **Review and publish.** Nothing goes live without the owner's Telegram tap (owner, 2026-10-22).
   The bot shares marketing's flood gate and pacer (`app/services/marketing/telegram_pacing.py`) and the reserved callback
-  letter `y`. Approve → publish at Friday 23:00 ET (dry-run pieces end `rehearsed`); the hold is 48 h,
+  letter `y` (`z` is the Trillion Club stake finder's, §3 item 5). Approve → publish at Friday 23:00 ET (dry-run pieces end `rehearsed`); the hold is 48 h,
   then `expired` with an alert; a Friday 15:00 ET deadman alerts when nothing is in review.
 - **The hero is decided by the content service**, not by swap writes: among flagged rows the lowest
   `sort_order` wins and every other row is served unflagged. A Deep Dive's sort order is
@@ -6413,7 +6441,7 @@ backend/
 │   ├── database.py               # get_supabase(); raw SDK, no ORM
 │   ├── dependencies.py           # NOT app/api/v1/dependencies.py
 │   ├── log_redaction.py
-│   └── main.py                   # lifespan, middleware, 27 supervised background tasks (§7.4)
+│   └── main.py                   # lifespan, middleware, 28 supervised background tasks (§7.4)
 ├── database/
 │   ├── migrations/               # NNN_*.sql, applied by hand
 │   └── schema_snapshot.sql       # pg_dump --schema-only of live Supabase

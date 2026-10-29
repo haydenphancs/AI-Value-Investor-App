@@ -122,6 +122,10 @@ IMPLICIT_REFS: dict[tuple[str, str], tuple[str, str, str]] = {
     ("public.learn_weekly_pieces", "narration_job_id"): (
         "public.learn_narration_jobs", "id",
         "the job the review bundle carries; no FK (the job's piece_id FK is the enforced edge)"),
+    ("public.trillion_club_stakes", "finding_id"): (
+        "public.trillion_club_stake_findings", "id",
+        "the finding that wrote a machine row; no FK (the ledger's stake_id FK is the enforced "
+        "edge)"),
     ("public.sector_benchmarks", "industry"): (
         "public.industry_dossier", "industry", "shared industry-name string domain"),
     ("public.industry_moat_benchmarks", "industry"): (
@@ -453,14 +457,18 @@ CURATION: dict[str, TableDoc] = {
              "the daily job. A manual cap (Aramco, Samsung) must be force_in/force_out (CHECK). "
              "use_13f is an owner opt-in, never implied by membership. service_role only."),
     "public.trillion_club_stakes": T("whales",
-        purpose="Hand-kept stakes outside the 13F (private, non-US listed, off-13F US, "
-                "commitments, notes on 13F rows), each with a primary source and dates.",
+        purpose="Stakes outside the 13F (private, non-US listed, off-13F US, commitments, notes "
+                "on 13F rows), hand-kept, or found automatically from SEC filings, each with a "
+                "primary source and dates.",
         key=("company_slug", "kind", "investee_name", "ownership_pct", "disclosed_value_usd",
              "value_basis", "as_of", "source_url", "source_confidence", "material", "published"),
         note="Migration 175. FK to trillion_club_companies.slug (ON DELETE/UPDATE CASCADE). "
              "UNIQUE (company_slug, investee_name, kind) is the seed's upsert key. A secondary "
              "(news-only) row can never be published (CHECK); only material rows reach the "
-             "Home card."),
+             "Home card. Migration 205 adds origin (seed | auto | proposal: who wrote the row), "
+             "finding_id (set exactly on machine rows), investee_cik, owner_kept_at and "
+             "withdrawn_at (a tombstone: never published again). A machine row cites an SEC "
+             "Archives URL and carries no background; the seed script never touches one."),
     "public.trillion_club_filings": T("whales",
         purpose="One built 13F snapshot per (CIK, quarter) for the club's 13F filers: holdings "
                 "and quarter-over-quarter share changes.",
@@ -469,6 +477,22 @@ CURATION: dict[str, TableDoc] = {
         note="Migration 175. period_end is the 'holdings as of' date, never the filing date. "
              "accessions[] because FMP folds a 13F-HR/A into the original quarter. FMP-licensed "
              "data: served to signed-in users only, never written from a laptop."),
+    # Purpose text comes from the table's COMMENT ON TABLE once 205 is dumped (precedence 1);
+    # `purpose=` is still given so the card is not blank if the comment is ever lost.
+    "public.trillion_club_stake_findings": T("whales",
+        purpose="The Trillion Club stake finder's ledger: one row per (member, SEC accession) — "
+                "the exactly-once claim on a filing, its classification (tier, outcome, reason), "
+                "the verified evidence and proposed stake row, and the Telegram review state.",
+        key=("company_slug", "accession", "source", "tier", "outcome", "reason", "status",
+             "stake_id", "fact_sha", "telegram_message_id", "owner_decision", "decided_at"),
+        note="Migration 205. UNIQUE (company_slug, accession): a filing is classified once per "
+             "member, and a terminal finding never again; a withdrawn / dismissed / expired one "
+             "is a tombstone for its (member, investee) pair. stake_id is a real FK, ON DELETE "
+             "SET NULL, and no CHECK requires it, so a Studio delete of a stake always succeeds "
+             "(reconcile then records deleted_in_studio). Every closed list equals "
+             "app/services/trillion_club/stake_contracts.py (tests/"
+             "test_trillion_club_stake_migration.py). Written only by the stake finder; "
+             "service_role only."),
 
     # --------------------------------------------------------------- portfolio
     "public.portfolios": T("portfolio",

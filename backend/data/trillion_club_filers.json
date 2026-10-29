@@ -1,0 +1,130 @@
+{
+ "version": 1,
+ "reviewed_on": "2026-10-28",
+ "note": "Reviewed settings for the Trillion Club stake finder (app/services/trillion_club/stake_finder.py). s1_filers = the CIKs whose OWN-ACCOUNT Schedule 13D/13G filings belong to the member (an affiliate LLC such as Google LLC files Alphabet's); names = every reporting-person name the member's own line may carry, including SEC's conformed spelling; s2_aliases = full legal names searched in other companies' filings (never a bare word). A member left out of this file gets no automatic search at all (one monthly heads-up). Never copy these CIKs into trillion_club_companies.ciks: that column drives 13F ingestion. CIKs and conformed names verified against data.sec.gov submissions on 2026-10-28. Berkshire (whale_link: its holdings show on the whale profile), JPMorgan (client-asset 13Gs), Walmart and SK hynix (unpublished) are deliberately absent. intermediates = reviewed holding companies inside the member's own chain that co-report its block on a joint 13D/13G (verified on Google LLC's SpaceX and TeraWulf 13Gs): never searched, never the member's own line.",
+ "members": [
+  {
+   "slug": "nvidia",
+   "source_name": "NVIDIA",
+   "names": ["NVIDIA Corporation", "NVIDIA CORP"],
+   "s1_filers": [{"cik": "0001045810", "role": "member", "names": ["NVIDIA Corporation", "NVIDIA CORP"], "types": ["CO"]}],
+   "s2_aliases": ["NVIDIA Corporation"],
+   "intermediates": []
+  },
+  {
+   "slug": "alphabet",
+   "source_name": "Alphabet",
+   "names": ["Alphabet Inc."],
+   "s1_filers": [
+    {"cik": "0001652044", "role": "member", "names": ["Alphabet Inc."], "types": ["CO"]},
+    {"cik": "0001824723", "role": "affiliate", "names": ["Google LLC"], "types": ["OO", "CO"]}
+   ],
+   "s2_aliases": ["Alphabet Inc.", "Google LLC"],
+   "intermediates": ["XXVI Holdings Inc."]
+  },
+  {
+   "slug": "amazon",
+   "source_name": "Amazon",
+   "names": ["Amazon.com, Inc.", "AMAZON COM INC"],
+   "s1_filers": [{"cik": "0001018724", "role": "member", "names": ["Amazon.com, Inc.", "AMAZON COM INC"], "types": ["CO"]}],
+   "s2_aliases": ["Amazon.com, Inc."],
+   "intermediates": []
+  },
+  {
+   "slug": "eli-lilly",
+   "source_name": "Lilly",
+   "names": ["Eli Lilly and Company", "ELI LILLY & Co"],
+   "s1_filers": [{"cik": "0000059478", "role": "member", "names": ["Eli Lilly and Company", "ELI LILLY & Co"], "types": ["CO"]}],
+   "s2_aliases": ["Eli Lilly and Company"],
+   "intermediates": []
+  },
+  {
+   "slug": "apple",
+   "source_name": "Apple",
+   "names": ["Apple Inc."],
+   "s1_filers": [{"cik": "0000320193", "role": "member", "names": ["Apple Inc."], "types": ["CO"]}],
+   "s2_aliases": ["Apple Inc."],
+   "intermediates": []
+  },
+  {
+   "slug": "microsoft",
+   "source_name": "Microsoft",
+   "names": ["Microsoft Corporation", "MICROSOFT CORP"],
+   "s1_filers": [{"cik": "0000789019", "role": "member", "names": ["Microsoft Corporation", "MICROSOFT CORP"], "types": ["CO"]}],
+   "s2_aliases": ["Microsoft Corporation"],
+   "intermediates": []
+  },
+  {
+   "slug": "meta",
+   "source_name": "Meta",
+   "names": ["Meta Platforms, Inc."],
+   "s1_filers": [{"cik": "0001326801", "role": "member", "names": ["Meta Platforms, Inc."], "types": ["CO"]}],
+   "s2_aliases": ["Meta Platforms, Inc."],
+   "intermediates": []
+  },
+  {
+   "slug": "broadcom",
+   "source_name": "Broadcom",
+   "names": ["Broadcom Inc."],
+   "s1_filers": [{"cik": "0001730168", "role": "member", "names": ["Broadcom Inc."], "types": ["CO"]}],
+   "s2_aliases": ["Broadcom Inc."],
+   "intermediates": []
+  },
+  {
+   "slug": "tesla",
+   "source_name": "Tesla",
+   "names": ["Tesla, Inc."],
+   "s1_filers": [{"cik": "0001318605", "role": "member", "names": ["Tesla, Inc."], "types": ["CO"]}],
+   "s2_aliases": ["Tesla, Inc."],
+   "intermediates": []
+  },
+  {
+   "slug": "micron",
+   "source_name": "Micron",
+   "names": ["Micron Technology, Inc.", "MICRON TECHNOLOGY INC"],
+   "s1_filers": [{"cik": "0000723125", "role": "member", "names": ["Micron Technology, Inc.", "MICRON TECHNOLOGY INC"], "types": ["CO"]}],
+   "s2_aliases": ["Micron Technology, Inc."],
+   "intermediates": []
+  },
+  {
+   "slug": "amd",
+   "source_name": "AMD",
+   "names": ["Advanced Micro Devices, Inc.", "ADVANCED MICRO DEVICES INC"],
+   "s1_filers": [{"cik": "0000002488", "role": "member", "names": ["Advanced Micro Devices, Inc.", "ADVANCED MICRO DEVICES INC"], "types": ["CO"]}],
+   "s2_aliases": ["Advanced Micro Devices, Inc."],
+   "intermediates": []
+  },
+  {
+   "slug": "spacex",
+   "source_name": "SpaceX",
+   "names": ["Space Exploration Technologies Corp.", "SPACE EXPLORATION TECHNOLOGIES CORP"],
+   "s1_filers": [{"cik": "0001181412", "role": "member", "names": ["Space Exploration Technologies Corp.", "SPACE EXPLORATION TECHNOLOGIES CORP"], "types": ["CO"]}],
+   "s2_aliases": ["Space Exploration Technologies Corp."],
+   "intermediates": []
+  },
+  {
+   "slug": "tsmc",
+   "source_name": "TSMC",
+   "names": ["Taiwan Semiconductor Manufacturing Company Limited", "TAIWAN SEMICONDUCTOR MANUFACTURING CO LTD"],
+   "s1_filers": [{"cik": "0001046179", "role": "member", "names": ["Taiwan Semiconductor Manufacturing Company Limited", "TAIWAN SEMICONDUCTOR MANUFACTURING CO LTD"], "types": ["CO"]}],
+   "s2_aliases": ["Taiwan Semiconductor Manufacturing"],
+   "intermediates": []
+  },
+  {
+   "slug": "samsung",
+   "source_name": "Samsung",
+   "names": ["Samsung Electronics Co., Ltd."],
+   "s1_filers": [],
+   "s2_aliases": ["Samsung Electronics"],
+   "intermediates": []
+  },
+  {
+   "slug": "saudi-aramco",
+   "source_name": "Aramco",
+   "names": ["Saudi Arabian Oil Company"],
+   "s1_filers": [],
+   "s2_aliases": ["Saudi Arabian Oil Company"],
+   "intermediates": []
+  }
+ ]
+}

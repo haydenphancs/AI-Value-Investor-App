@@ -345,16 +345,47 @@ def test_validator_rejects_every_row_the_migration_rejects():
     assert validator_misses(seed_mod) == []
 
 
+_RULES_MODULE = "app.services.trillion_club.stake_rules"
+
+
 def _mutated_seed_module(monkeypatch, old: str, new: str):
-    """The seed script re-executed from an in-memory mutated copy of its source (the file on
-    disk is never touched)."""
-    src = Path(seed_mod.__file__).read_text(encoding="utf-8")
-    assert src.count(old) == 1, f"mutation anchor {old!r} not unique"
+    """The seed script re-executed from an in-memory mutated copy of its sources (the files on
+    disk are never touched).
+
+    Since 2026-10-28 the stake validator and the helpers the script shares with it live in
+    ``app/services/trillion_club/stake_rules.py``, so an anchor may sit in either file: exactly
+    one of the two must hold it, once. A stake_rules anchor is executed as a mutated module that
+    stands in for the real one in ``sys.modules`` only while the script's source re-executes
+    (its ``from app.services.trillion_club.stake_rules import …`` then binds the mutant's
+    objects); the real module is put back straight after, so nothing else ever imports the
+    mutant."""
+    from app.services.trillion_club import stake_rules
+
+    seed_src = Path(seed_mod.__file__).read_text(encoding="utf-8")
+    rules_src = Path(stake_rules.__file__).read_text(encoding="utf-8")
+    hits = {"seed script": seed_src.count(old), "stake_rules": rules_src.count(old)}
+    assert sorted(hits.values()) == [0, 1], f"mutation anchor {old!r} must occur once in exactly one file: {hits}"
+    in_rules = hits["stake_rules"] == 1
     name = "seed_trillion_club_mutant"
     mod = types.ModuleType(name)
     mod.__file__ = seed_mod.__file__
     monkeypatch.setitem(sys.modules, name, mod)
-    exec(compile(src.replace(old, new), seed_mod.__file__, "exec"), mod.__dict__)
+    real_rules = sys.modules[_RULES_MODULE]
+    assert real_rules is stake_rules
+    rules_mod = None
+    try:
+        if in_rules:
+            rules_mod = types.ModuleType(_RULES_MODULE)
+            rules_mod.__file__ = stake_rules.__file__
+            sys.modules[_RULES_MODULE] = rules_mod
+            exec(compile(rules_src.replace(old, new), stake_rules.__file__, "exec"), rules_mod.__dict__)
+        exec(compile(seed_src if in_rules else seed_src.replace(old, new), seed_mod.__file__, "exec"),
+             mod.__dict__)
+    finally:
+        sys.modules[_RULES_MODULE] = real_rules
+    # The mutant really runs the code it was meant to: a stale binding would make every
+    # "the checker fires" test below pass or fail for the wrong reason.
+    assert mod.stake_problems is (rules_mod.stake_problems if in_rules else stake_rules.stake_problems)
     return mod
 
 
@@ -369,6 +400,53 @@ def _mutated_seed_module(monkeypatch, old: str, new: str):
 def test_validator_catalogue_catches_a_disabled_rule(monkeypatch, old, new, expect_missed):
     mutant = _mutated_seed_module(monkeypatch, old, new)
     assert expect_missed in validator_misses(mutant)
+
+
+# One anchor per file the helper can mutate (the script keeps company_problems and the CLI;
+# stake_rules holds stake_problems and the shared helpers).
+_ANCHOR_IN_SCRIPT = '    if card_kind not in CARD_KINDS:'
+_ANCHOR_IN_RULES = '    if not _is_https(g("source_url")):'
+
+
+@pytest.mark.parametrize("anchor", [_ANCHOR_IN_SCRIPT, _ANCHOR_IN_RULES], ids=["script", "stake_rules"])
+def test_mutation_helper_without_a_change_is_green(monkeypatch, anchor, tmp_path):
+    """Anti-vacuity of every "the checker fires" test: re-executing either source UNCHANGED
+    through the helper gives a script the catalogues find nothing wrong with, so each red
+    result above is caused by its one mutation."""
+    clean = _mutated_seed_module(monkeypatch, anchor, anchor)
+    assert clean is not seed_mod
+    assert validator_misses(clean) == []
+    assert policy_misses(clean) == []
+    assert overflow_literal_misses(clean, tmp_path) == []
+    assert write_discipline_violations(clean, ["--apply", "--update"]) == []
+
+
+def test_mutation_helper_puts_the_real_stake_rules_back(monkeypatch):
+    """A stake_rules mutant reaches only the mutant script: the real module is back in
+    sys.modules (and on its package) the moment the helper returns, and the real script still
+    validates with the real rules."""
+    from app.services.trillion_club import stake_rules
+
+    mutant = _mutated_seed_module(monkeypatch, _ANCHOR_IN_RULES, "    if False:")
+    assert sys.modules[_RULES_MODULE] is stake_rules
+    import app.services.trillion_club as pkg
+
+    assert pkg.stake_rules is stake_rules
+    assert seed_mod.stake_problems is stake_rules.stake_problems
+    assert mutant.stake_problems is not stake_rules.stake_problems
+    assert mutant._is_https is not stake_rules._is_https   # every shared helper comes from the mutant
+    assert "url-ftp" in validator_misses(mutant) and validator_misses(seed_mod) == []
+
+
+@pytest.mark.parametrize("anchor", [
+    "no such line anywhere",
+    "def ",                                    # many times in both files
+    "    if update:\n",                        # several times in the script
+    "    return out\n",                        # in both files
+], ids=["missing", "everywhere", "repeated-in-script", "in-both-files"])
+def test_mutation_helper_refuses_an_anchor_that_is_not_unique(monkeypatch, anchor):
+    with pytest.raises(AssertionError, match="must occur once in exactly one file"):
+        _mutated_seed_module(monkeypatch, anchor, anchor + "#")
 
 
 # ══════════════════════════════════════════════════════════════════════════════════════

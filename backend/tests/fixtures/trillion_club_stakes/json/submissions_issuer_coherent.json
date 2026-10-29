@@ -1,0 +1,73 @@
+{
+ "cik": "0000820318",
+ "entityType": "operating",
+ "exchanges": [
+  "NYSE"
+ ],
+ "filings": {
+  "files": [],
+  "recent": {
+   "acceptanceDateTime": [
+    "2023-07-13T12:00:51.000Z",
+    "2023-07-03T13:55:45.000Z",
+    "2023-02-22T21:05:46.000Z",
+    "2020-02-27T11:30:35.000Z"
+   ],
+   "accessionNumber": [
+    "0001193125-23-186292",
+    "0000876661-23-000552",
+    "0001193125-23-044806",
+    "0001193125-20-050953"
+   ],
+   "filingDate": [
+    "2023-07-13",
+    "2023-07-03",
+    "2023-02-22",
+    "2020-02-27"
+   ],
+   "form": [
+    "15-12G",
+    "25-NSE",
+    "25",
+    "15-12G"
+   ],
+   "items": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "primaryDocDescription": [
+    "15-12G",
+    "",
+    "25",
+    "FORM 15-12G"
+   ],
+   "primaryDocument": [
+    "d419202d1512g.htm",
+    "xslF25X02/primary_doc.xml",
+    "d287409d25.htm",
+    "d893253d1512g.htm"
+   ],
+   "reportDate": [
+    "",
+    "",
+    "",
+    ""
+   ]
+  }
+ },
+ "formerNames": [
+  {
+   "from": "1995-10-04T00:00:00.000Z",
+   "name": "II-VI INC",
+   "to": "2022-09-01T00:00:00.000Z"
+  }
+ ],
+ "name": "COHERENT CORP.",
+ "sic": "3827",
+ "sicDescription": "Optical Instruments & Lenses",
+ "tickers": [
+  "COHR"
+ ]
+}

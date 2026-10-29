@@ -9,8 +9,9 @@ Two kinds of data, never mixed up on the wire:
   own SEC Form 13F-HR, as of the quarter end, with quarter-over-quarter SHARE changes. A
   holding that first appears is ``newly_reported`` — never "bought": most Q2 2026 rows were
   IPO conversions (SpaceX listed on 2026-06-12), so ``newly_listed`` says so.
-* **Stakes** (every member): hand-kept private / non-U.S. / off-13F stakes and commitments,
-  each with its primary source, the date it describes and the date it was last checked.
+* **Stakes** (every member): private / non-U.S. / off-13F stakes and commitments, hand-kept
+  or found automatically from SEC filings (the stake finder, migration 205), each with its
+  primary source, the date it describes and the date it was last checked.
 
 RAW numbers on the wire (fractions, dollars); iOS formats. Dates are ISO ``YYYY-MM-DD``
 strings. Every field iOS may not get is Optional or defaulted, so an already-shipped build
@@ -98,7 +99,8 @@ class ClubChangeResponse(BaseModel):
 
 
 class ClubStakeResponse(BaseModel):
-    """A hand-kept stake outside the 13F, with its primary source."""
+    """A stake outside the 13F — hand-kept, or found automatically from SEC filings — with its
+    primary source."""
 
     investee_name: str
     kind: str                                   # one of STAKE_KINDS

@@ -1,0 +1,97 @@
+{
+ "cik": "0001652044",
+ "entityType": "operating",
+ "exchanges": [
+  "Nasdaq",
+  "Nasdaq",
+  "Nasdaq",
+  "Nasdaq"
+ ],
+ "filings": {
+  "files": [],
+  "recent": {
+   "acceptanceDateTime": [
+    "2026-04-29T20:44:16.000Z",
+    "2026-04-29T20:39:48.000Z",
+    "2026-03-26T19:25:59.000Z",
+    "2026-03-26T19:25:56.000Z",
+    "2026-02-18T01:39:02.000Z",
+    "2025-08-15T00:35:22.000Z",
+    "2025-02-19T01:23:00.000Z"
+   ],
+   "accessionNumber": [
+    "0002100119-26-000161",
+    "0002100119-26-000137",
+    "0000102909-26-000584",
+    "0000102909-26-000583",
+    "0001193125-26-055590",
+    "0000950170-25-109161",
+    "0000950170-25-022699"
+   ],
+   "filingDate": [
+    "2026-04-29",
+    "2026-04-29",
+    "2026-03-26",
+    "2026-03-26",
+    "2026-02-17",
+    "2025-08-14",
+    "2025-02-18"
+   ],
+   "form": [
+    "SCHEDULE 13G",
+    "SCHEDULE 13G",
+    "SCHEDULE 13G/A",
+    "SCHEDULE 13G/A",
+    "SCHEDULE 13G/A",
+    "SCHEDULE 13G/A",
+    "SCHEDULE 13G/A"
+   ],
+   "items": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "primaryDocDescription": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "primaryDocument": [
+    "xslSCHEDULE_13G_X02/primary_doc.xml",
+    "xslSCHEDULE_13G_X02/primary_doc.xml",
+    "xslSCHEDULE_13G_X02/primary_doc.xml",
+    "xslSCHEDULE_13G_X02/primary_doc.xml",
+    "xslSCHEDULE_13G_X01/primary_doc.xml",
+    "xslSCHEDULE_13G_X01/primary_doc.xml",
+    "xslSCHEDULE_13G_X01/primary_doc.xml"
+   ],
+   "reportDate": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ]
+  }
+ },
+ "formerNames": [],
+ "name": "Alphabet Inc.",
+ "sic": "7370",
+ "sicDescription": "Services-Computer Programming, Data Processing, Etc.",
+ "tickers": [
+  "GOOGL",
+  "GOOG",
+  "GOOGM",
+  "GOOGN"
+ ]
+}

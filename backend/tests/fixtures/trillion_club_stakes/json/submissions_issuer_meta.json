@@ -1,0 +1,33 @@
+{
+ "cik": "0001326801",
+ "entityType": "operating",
+ "exchanges": [
+  "Nasdaq"
+ ],
+ "filings": {
+  "files": [],
+  "recent": {
+   "acceptanceDateTime": [],
+   "accessionNumber": [],
+   "filingDate": [],
+   "form": [],
+   "items": [],
+   "primaryDocDescription": [],
+   "primaryDocument": [],
+   "reportDate": []
+  }
+ },
+ "formerNames": [
+  {
+   "from": "2005-05-06T00:00:00.000Z",
+   "name": "Facebook Inc",
+   "to": "2021-10-27T00:00:00.000Z"
+  }
+ ],
+ "name": "Meta Platforms, Inc.",
+ "sic": "7370",
+ "sicDescription": "Services-Computer Programming, Data Processing, Etc.",
+ "tickers": [
+  "META"
+ ]
+}

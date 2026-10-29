@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?><edgarSubmission xmlns="http://www.sec.gov/edgar/schedule13g" xmlns:com="http://www.sec.gov/edgar/common">
+  <schemaVersion>X0202</schemaVersion>
+<headerData>
+    <submissionType>SCHEDULE 13G</submissionType>
+    <filerInfo>
+      <filer>
+        <filerCredentials>
+          <cik>0000059478</cik>
+          <ccc>XXXXXXXX</ccc>
+        </filerCredentials>
+      </filer>
+      <liveTestFlag>LIVE</liveTestFlag>
+
+
+
+    </filerInfo>
+  </headerData>
+  <formData>
+    <coverPageHeader>
+      <securitiesClassTitle>Common Stock, par value $0.0001 per share</securitiesClassTitle>
+      <eventDateRequiresFilingThisStatement>04/09/2026</eventDateRequiresFilingThisStatement>
+      <issuerInfo>
+        <issuerCik>0002108121</issuerCik>
+        <issuerName>Ionetix Corp / DE /</issuerName>
+        <issuerCusips>
+          <issuerCusipNumber>000000000</issuerCusipNumber>
+        </issuerCusips>
+        <issuerPrincipalExecutiveOfficeAddress>
+          <com:street1>3130 SOVEREIGN DRIVE</com:street1>
+          <com:city>LANSING</com:city>
+          <com:stateOrCountry>MI</com:stateOrCountry>
+          <com:zipCode>48911</com:zipCode>
+        </issuerPrincipalExecutiveOfficeAddress>
+      </issuerInfo>
+      <designateRulesPursuantThisScheduleFiled>
+        <designateRulePursuantThisScheduleFiled>Rule 13d-1(d)</designateRulePursuantThisScheduleFiled>
+      </designateRulesPursuantThisScheduleFiled>
+    </coverPageHeader>
+    <coverPageHeaderReportingPersonDetails>
+
+      <reportingPersonName>ELI LILLY &amp; Co</reportingPersonName>
+      <citizenshipOrOrganization>IN</citizenshipOrOrganization>
+      <reportingPersonBeneficiallyOwnedNumberOfShares>
+        <soleVotingPower>8411397.00</soleVotingPower>
+        <sharedVotingPower>0.00</sharedVotingPower>
+        <soleDispositivePower>8411397.00</soleDispositivePower>
+        <sharedDispositivePower>0.00</sharedDispositivePower>
+      </reportingPersonBeneficiallyOwnedNumberOfShares>
+      <reportingPersonBeneficiallyOwnedAggregateNumberOfShares>8411397.00</reportingPersonBeneficiallyOwnedAggregateNumberOfShares>
+      <classPercent>7.9</classPercent>
+      <typeOfReportingPerson>CO</typeOfReportingPerson>
+    </coverPageHeaderReportingPersonDetails>
+    <items>
+      <item1>
+        <issuerName>Ionetix Corp / DE /</issuerName>
+        <issuerPrincipalExecutiveOfficeAddress>3130 SOVEREIGN DRIVE, LANSING, MICHIGAN, 48911.</issuerPrincipalExecutiveOfficeAddress>
+      </item1>
+      <item2>
+        <filingPersonName>Eli Lilly and Company</filingPersonName>
+        <principalBusinessOfficeOrResidenceAddress>Lilly Corporate Center
+Indianapolis, Indiana 46285</principalBusinessOfficeOrResidenceAddress>
+        <citizenship>Eli Lilly and Company is an Indiana corporation</citizenship>
+      </item2>
+      <item3>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item3>
+      <item4>
+        <amountBeneficiallyOwned>8,411,397</amountBeneficiallyOwned>
+        <classPercent>7.98%</classPercent>
+        <numberOfSharesPersonHas>
+          <solePowerOrDirectToVote>8,411,397</solePowerOrDirectToVote>
+          <sharedPowerOrDirectToVote>N/A</sharedPowerOrDirectToVote>
+          <solePowerOrDirectToDispose>8,411,397</solePowerOrDirectToDispose>
+          <sharedPowerOrDirectToDispose>N/A</sharedPowerOrDirectToDispose>
+        </numberOfSharesPersonHas>
+      </item4>
+      <item5>
+        <notApplicableFlag>Y</notApplicableFlag>
+        <classOwnership5PercentOrLess>N</classOwnership5PercentOrLess>
+      </item5>
+      <item6>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item6>
+      <item7>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item7>
+      <item8>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item8>
+      <item9>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item9>
+      <item10>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item10>
+    </items>
+    <signatureInformation>
+      <reportingPersonName>ELI LILLY &amp; Co</reportingPersonName>
+      <signatureDetails>
+        <signature>/s/ Christopher Anderson</signature>
+        <title>Vice President - Leader of Corporate Securities and Assistant Corporate Secretary</title>
+        <date>07/24/2026</date>
+      </signatureDetails>
+    </signatureInformation>
+  </formData>
+</edgarSubmission>

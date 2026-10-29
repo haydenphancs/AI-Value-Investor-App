@@ -1,0 +1,29 @@
+{
+ "cik": "0000924613",
+ "entityType": "other",
+ "exchanges": [
+  "NYSE",
+  "OTC"
+ ],
+ "filings": {
+  "files": [],
+  "recent": {
+   "acceptanceDateTime": [],
+   "accessionNumber": [],
+   "filingDate": [],
+   "form": [],
+   "items": [],
+   "primaryDocDescription": [],
+   "primaryDocument": [],
+   "reportDate": []
+  }
+ },
+ "formerNames": [],
+ "name": "NOKIA CORP",
+ "sic": "3663",
+ "sicDescription": "Radio & Tv Broadcasting & Communications Equipment",
+ "tickers": [
+  "NOK",
+  "NOKBF"
+ ]
+}

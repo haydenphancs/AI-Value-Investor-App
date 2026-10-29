@@ -7,8 +7,11 @@ kept apart all the way to the wire (see ``app/schemas/trillion_club.py``):
 * **13F holdings** — built by the daily job (``app/services/trillion_club/``) into
   ``trillion_club_filings``: one snapshot per (CIK, quarter) with the holdings JSON and the
   quarter-over-quarter SHARE changes. Only companies the owner opted in (``use_13f``).
-* **Stakes** — hand-kept rows in ``trillion_club_stakes`` (private, non-U.S., warrants,
-  commitments), each with a primary source, the date it describes and when it was checked.
+* **Stakes** — rows in ``trillion_club_stakes`` (private, non-U.S., warrants, commitments),
+  hand-kept or found automatically from SEC filings (migration 205: ``origin`` 'seed', or
+  'auto' / 'proposal' from ``app/services/trillion_club/stake_finder.py``), each with a primary
+  source, the date it describes and when it was checked. A machine row the owner withdrew is
+  unpublished, so this read path needs no origin rule.
 
 This module NEVER calls FMP and never writes. It reads Supabase only (service role, via
 ``sb_exec`` so no statement runs on the event loop) and assembles the response.
@@ -53,8 +56,8 @@ READ-TIME DECISIONS (deliberately not stored)
 
 COPY
 ----
-Nothing in this section is generated text; every string is hand-kept or comes from an SEC
-filing. The data legitimately names Alphabet, OpenAI and Anthropic, so vendor regexes are
+Nothing in this section is generated text; every string is hand-kept, or found automatically
+from an SEC filing and built by a fixed template (the stake finder; no LLM). The data legitimately names Alphabet, OpenAI and Anthropic, so vendor regexes are
 NOT applied to it, and it is not fed into chat.
 
 GATING
@@ -627,6 +630,10 @@ def stake_problem(row: Mapping[str, Any], today: Optional[date] = None) -> Optio
     a typo'd year would otherwise make ``verified_on`` read as "never stale"."""
     if row.get("published") is not True:
         return "not published"
+    # Migration 205 forbids a published row that carries withdrawn_at; refused here too, so the
+    # owner's Withdraw wins even if that CHECK is ever dropped or a Studio edit flips published.
+    if row.get("withdrawn_at") is not None:
+        return "withdrawn"
     if row.get("source_confidence") != "primary":
         return f"source_confidence {row.get('source_confidence')!r} is not primary"
     kind = row.get("kind")

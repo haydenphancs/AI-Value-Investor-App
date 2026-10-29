@@ -29,6 +29,18 @@ Behaviour, mirroring ``sync_whale_registry.py``:
 - The job-written membership columns (``is_member``, ``member_since``, ``last_market_cap``,
   ``last_cap_date``, the streak counters, ``membership_checked_at``) are never seeded and
   never touched.
+- **Rows the stake finder made** (migration 205's ``origin`` 'auto' / 'proposal', found in
+  SEC filings) are never orphans and never drift: the dry run lists them as "found
+  automatically". A JSON stake with the SAME natural key adopts that row under
+  ``--apply --update``, even when nothing drifted: it becomes a seed row (``origin`` 'seed',
+  its finding, Keep and withdrawal cleared). A JSON stake that names the same investee as a
+  row found automatically under a DIFFERENT key is a WARNING (the card would show it twice).
+  Before 205 is applied the column does not exist: the read falls back to the 175 columns
+  (one WARNING) and every row is a seed row.
+
+The stake validator (``stake_problems`` and the helpers it shares with ``company_problems``)
+lives in ``app/services/trillion_club/stake_rules.py``, shared with the stake finder; this
+script re-exports every one of those names unchanged.
 
 Usage:
     cd backend
@@ -49,14 +61,14 @@ import math
 import os
 import re
 import sys
-import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from types import MappingProxyType
+from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.schemas.trillion_club import CARD_KINDS, STAKE_KINDS, VALUE_BASES  # noqa: E402
+from app.schemas.trillion_club import CARD_KINDS  # noqa: E402
 # ONE copy of the copy rules, shared with the request path (trillion_club_service), so a
 # Studio edit this script would refuse can never be served. Re-exported for the tests.
 from app.services.trillion_club.copy_rules import (  # noqa: E402,F401
@@ -65,6 +77,45 @@ from app.services.trillion_club.copy_rules import (  # noqa: E402,F401
     STAKE_TEXT_FIELDS,
     contains_banned_copy,
     contains_forecast,
+)
+from app.services.trillion_club.stake_contracts import (  # noqa: E402
+    MACHINE_ORIGINS,
+    ORIGIN_SEED,
+    ORIGINS,
+)
+from app.services.trillion_club.stake_names import IdentityIndex  # noqa: E402
+# ONE copy of the stake validator, shared with the stake finder (its gate 5), plus the helpers
+# company_problems shares with it. Every name below used to be defined here; each is
+# re-exported as the SAME object (tests/test_trillion_club_seed_integrity.py pins it). Keep
+# this `from <module> import` form: the mutation tests swap the module in sys.modules.
+from app.services.trillion_club.stake_rules import (  # noqa: E402,F401
+    BACKGROUND_MAX,
+    INT4_MAX,
+    INVESTEE_NAME_MAX,
+    SOURCE_CONFIDENCES,
+    SOURCE_TITLE_MAX,
+    STAKE_COLUMNS,
+    STAKE_KEY,
+    _CUSIP_RE,
+    _DATE_RE,
+    _DISPLAY_TEXT_COLUMNS,
+    _INVISIBLE_CATEGORIES,
+    _SYMBOL_RE,
+    _UNSTORABLE_CHAR,
+    _column_problems,
+    _finite_number,
+    _fold_name,
+    _fold_symbol,
+    _folded_stake_key,
+    _invisible_char_columns,
+    _is_bool,
+    _is_https,
+    _is_int,
+    _iso_date,
+    _text_ok,
+    _unstorable_columns,
+    stake_key,
+    stake_problems,
 )
 
 logger = logging.getLogger("seed_trillion_club")
@@ -76,6 +127,7 @@ STAKES_TABLE = "trillion_club_stakes"
 
 # ── The contract: exactly the hand-kept columns of migration 175 ────────────────────────
 # tests/test_trillion_club_seed_integrity.py parses the migration and pins these against it.
+# The stake columns (STAKE_COLUMNS, STAKE_KEY) are imported above from stake_rules.
 COMPANY_COLUMNS: Tuple[str, ...] = (
     "slug", "display_name", "ciks", "card_kind", "use_13f", "cap_symbol", "symbol_aliases",
     "detail_symbol", "logo_symbol", "home_country", "cap_source", "manual_cap_usd",
@@ -87,48 +139,42 @@ JOB_COLUMNS: Tuple[str, ...] = (
     "is_member", "member_since", "last_market_cap", "last_cap_date", "closes_at_or_above",
     "closes_below", "membership_checked_at",
 )
-STAKE_COLUMNS: Tuple[str, ...] = (
-    "company_slug", "kind", "investee_name", "investee_cusip", "investee_us_symbol",
-    "local_listing", "ownership_pct", "ownership_basis", "disclosed_value_usd", "value_basis",
-    "as_of", "source_title", "source_url", "source_confidence", "material", "tied_to_deal",
-    "listed_since", "background", "verified_on", "published", "sort_order",
-)
-STAKE_KEY: Tuple[str, str, str] = ("company_slug", "investee_name", "kind")
 
 CAP_SOURCES: Tuple[str, ...] = ("fmp_us", "fmp_adr", "manual")
 MEMBERSHIP_MODES: Tuple[str, ...] = ("auto", "force_in", "force_out")
-SOURCE_CONFIDENCES: Tuple[str, ...] = ("primary", "secondary")
 
 DISPLAY_NAME_MAX = 60
-INVESTEE_NAME_MAX = 60
-SOURCE_TITLE_MAX = 120
-BACKGROUND_MAX = 90
-# sort_order is INTEGER (int4): a larger value validates but Postgres refuses it (22003)
-# half-way through --apply, after earlier rows were written.
-INT4_MAX = 2 ** 31 - 1
 
 # `re.fullmatch` everywhere: `^...$` with re.match accepts a trailing "\n".
 _SLUG_RE = re.compile(r"[a-z0-9-]{1,40}")
 _CIK_RE = re.compile(r"[0-9]{10}")
 _COUNTRY_RE = re.compile(r"[A-Z]{2}")
-_CUSIP_RE = re.compile(r"[0-9A-Z]{9}")
-# A US ticker or an exchange-suffixed one (BRK-B, 2222.SR, 005930.KS).
-_SYMBOL_RE = re.compile(r"[A-Z0-9][A-Z0-9.\-]{0,14}")
-_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 # ── Copy rules (plan §Copy) ───────────────────────────────────────────────────────────────
 # BANNED_COPY / FORECAST_COPY / STAKE_TEXT_FIELDS / contains_banned_copy / contains_forecast
 # are imported above from app/services/trillion_club/copy_rules.py — never re-declared here.
 
-# Text Postgres cannot store: NUL is refused in any TEXT (22P05) and a lone UTF-16 surrogate
-# cannot be encoded as UTF-8 (22P02). json.load happily returns both from "\u0000" / "\ud800".
-_UNSTORABLE_CHAR = re.compile(r"[\x00\ud800-\udfff]")
-# One-line display text (names, titles, background): no control or format characters. A
-# zero-width space (U+200B, category Cf) makes "Adv Holdings Ltd" a different key that
-# renders identically; a tab or newline breaks the one-line layout.
-_INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs")
-_DISPLAY_TEXT_COLUMNS: Tuple[str, ...] = (
-    "display_name", "manual_fx_source", *STAKE_TEXT_FIELDS,
+# ── Migration 205: rows the stake finder made ─────────────────────────────────────────────
+# 205 adds `origin` to trillion_club_stakes: 'seed' (this script's rows, the column default),
+# 'auto' / 'proposal' (rows the stake finder found in SEC filings). It is read in the SAME
+# select as the seeded columns; a row without it (a database before 205, the test fakes) or
+# with NULL reads as 'seed'. It is never written except by an adoption (ADOPTION_RESET).
+ORIGIN_COLUMN = "origin"
+_STAKE_READ_COLUMNS: Tuple[str, ...] = (*STAKE_COLUMNS, ORIGIN_COLUMN)
+#: What --apply --update writes, beside the drifted columns, when a JSON stake adopts a row the
+#: stake finder made: a seed row carries no finding, no Keep and no withdrawal (205 pairs
+#: finding_id with a machine origin and owner_kept_at with 'auto').
+ADOPTION_RESET: Mapping[str, Any] = MappingProxyType({
+    "origin": ORIGIN_SEED, "finding_id": None, "owner_kept_at": None, "withdrawn_at": None,
+})
+# PostgREST's answer to a SELECT naming a column the table does not have: Postgres 42703
+# ("column trillion_club_stakes.origin does not exist"); PGRST204 is the schema-cache variant
+# ("Could not find the 'origin' column of 'trillion_club_stakes' in the schema cache").
+_MISSING_COLUMN_CODES = frozenset({"42703", "PGRST204"})
+_ORIGIN_WORD_RE = re.compile(r"\borigin\b", re.IGNORECASE)
+_MISSING_COLUMN_TEXT_RE = re.compile(
+    r"\bcolumn\b[^\n]{0,120}?\bdoes not exist\b|\bcould not find the\b[^\n]{0,80}?\bcolumn\b",
+    re.IGNORECASE,
 )
 
 
@@ -182,92 +228,8 @@ def load_seed(path: str = SEED_PATH) -> Dict[str, List[Dict[str, Any]]]:
 
 
 # ── Validation (pure) ─────────────────────────────────────────────────────────────────────
-
-
-def _is_bool(v: Any) -> bool:
-    return isinstance(v, bool)
-
-
-def _is_int(v: Any) -> bool:
-    return isinstance(v, int) and not isinstance(v, bool)
-
-
-def _finite_number(v: Any) -> Optional[float]:
-    """A real, finite number (bools are not numbers here), else None."""
-    if isinstance(v, bool) or not isinstance(v, (int, float)):
-        return None
-    try:
-        f = float(v)
-    except OverflowError:  # a JSON integer past a double (10**400) is valid JSON, not a number here
-        return None
-    return f if math.isfinite(f) else None
-
-
-def _iso_date(v: Any) -> Optional[date]:
-    if not isinstance(v, str) or not _DATE_RE.fullmatch(v):
-        return None
-    try:
-        return date.fromisoformat(v)
-    except ValueError:
-        return None
-
-
-def _is_https(v: Any) -> bool:
-    return (isinstance(v, str) and v.startswith("https://") and len(v) > len("https://")
-            and not any(ch.isspace() for ch in v))
-
-
-def _text_ok(v: Any, lo: int, hi: int) -> bool:
-    return (isinstance(v, str) and lo <= len(v) <= hi and v == v.strip()
-            and _UNSTORABLE_CHAR.search(v) is None)
-
-
-def _unstorable_columns(row: Mapping[str, Any]) -> List[str]:
-    """Every column holding a string (or a list element) Postgres would refuse at --apply."""
-    out: List[str] = []
-    for col, v in row.items():
-        values = v if isinstance(v, list) else [v]
-        if any(isinstance(x, str) and _UNSTORABLE_CHAR.search(x) for x in values):
-            out.append(f"{col} holds text Postgres cannot store (a NUL or a lone surrogate)")
-    return out
-
-
-def _invisible_char_columns(row: Mapping[str, Any]) -> List[str]:
-    """Display text carrying a control / format character (U+200B, a tab, a newline)."""
-    out: List[str] = []
-    for col in _DISPLAY_TEXT_COLUMNS:
-        v = row.get(col)
-        if isinstance(v, str) and any(unicodedata.category(ch) in _INVISIBLE_CATEGORIES for ch in v):
-            out.append(f"{col} holds an invisible control/format character")
-    return out
-
-
-def _fold_name(name: str) -> str:
-    """The identity a reader sees: NFKC, case-folded, format characters dropped, whitespace
-    collapsed. "Adv Holdings Ltd" / "ADV HOLDINGS LTD" / an NFD "Société" / a name with a
-    zero-width space all fold to one key (the service sorts by casefold() too)."""
-    folded = unicodedata.normalize("NFKC", name)
-    folded = "".join(ch for ch in folded if unicodedata.category(ch) != "Cf")
-    return " ".join(folded.casefold().split())
-
-
-def _fold_symbol(symbol: str) -> str:
-    """BRK.B and BRK-B are one listing."""
-    return symbol.strip().upper().replace(".", "-")
-
-
-def _column_problems(row: Mapping[str, Any], expected: Sequence[str], forbidden: Sequence[str] = ()) -> List[str]:
-    out: List[str] = []
-    keys = set(row)
-    for col in sorted(keys & set(forbidden)):
-        out.append(f"job-written column {col!r} must not be seeded")
-    missing = [c for c in expected if c not in keys]
-    extra = sorted(keys - set(expected) - set(forbidden))
-    if missing:
-        out.append(f"missing columns {missing}")
-    if extra:
-        out.append(f"unknown columns {extra}")
-    return out
+# The stake validator (stake_problems) and the small helpers both validators use (_text_ok,
+# _finite_number, _is_https, _iso_date, …) are imported above from stake_rules.
 
 
 def company_problems(row: Mapping[str, Any]) -> List[str]:
@@ -361,118 +323,6 @@ def company_problems(row: Mapping[str, Any]) -> List[str]:
     return out
 
 
-def stake_problems(row: Mapping[str, Any], companies: Mapping[str, Mapping[str, Any]],
-                   *, today: Optional[date] = None) -> List[str]:
-    """Pure: everything wrong with one stake row (empty list = valid). ``companies`` maps
-    slug → company row, for the foreign key and the per-card-kind policies."""
-    today = today or date.today()
-    out = _column_problems(row, STAKE_COLUMNS)
-    out += _unstorable_columns(row) + _invisible_char_columns(row)
-    g = row.get
-
-    slug = g("company_slug")
-    company = companies.get(slug) if isinstance(slug, str) else None
-    if company is None:
-        out.append(f"company_slug {slug!r} is not a seeded company")
-    kind = g("kind")
-    if kind not in STAKE_KINDS:
-        out.append(f"kind {kind!r} not in {STAKE_KINDS}")
-    if not _text_ok(g("investee_name"), 1, INVESTEE_NAME_MAX):
-        out.append(f"investee_name must be 1-{INVESTEE_NAME_MAX} characters with no outer spaces")
-    cusip = g("investee_cusip")
-    if cusip is not None and (not isinstance(cusip, str) or not _CUSIP_RE.fullmatch(cusip)):
-        out.append(f"investee_cusip {cusip!r} is not 9 upper-case letters/digits")
-    symbol = g("investee_us_symbol")
-    if symbol is not None and (not isinstance(symbol, str) or not _SYMBOL_RE.fullmatch(symbol)):
-        out.append(f"investee_us_symbol {symbol!r} is not a ticker")
-    local = g("local_listing")
-    if local is not None and not _text_ok(local, 1, 60):
-        out.append("local_listing must be 1-60 characters or null")
-
-    pct = g("ownership_pct")
-    pct_f = _finite_number(pct) if pct is not None else None
-    if pct is not None and (pct_f is None or not 0 < pct_f <= 100):
-        out.append(f"ownership_pct must be in (0, 100], got {pct!r}")
-    basis_text = g("ownership_basis")
-    if basis_text is not None and not _text_ok(basis_text, 1, 60):
-        out.append("ownership_basis must be 1-60 characters or null")
-    if (pct is None) != (basis_text is None):
-        out.append("ownership_pct and ownership_basis go together (a % needs its basis)")
-
-    value = g("disclosed_value_usd")
-    value_f = _finite_number(value) if value is not None else None
-    if value is not None and (value_f is None or value_f <= 0):
-        out.append(f"disclosed_value_usd must be a positive finite number, got {value!r}")
-    value_basis = g("value_basis")
-    if value_basis is not None and value_basis not in VALUE_BASES:
-        out.append(f"value_basis {value_basis!r} not in {VALUE_BASES}")
-    if value is not None and value_basis is None:
-        out.append("disclosed_value_usd needs a value_basis")
-    if value is None and value_basis is not None:
-        out.append("value_basis without a disclosed_value_usd")
-    if kind == "commitment" and value_basis not in (None, "committed_up_to"):
-        out.append("a commitment's value_basis must be committed_up_to")
-    if value_basis == "committed_up_to" and kind != "commitment":
-        out.append("committed_up_to is only for kind commitment")
-
-    as_of, verified_on = _iso_date(g("as_of")), _iso_date(g("verified_on"))
-    if as_of is None:
-        out.append(f"as_of {g('as_of')!r} is not an ISO date")
-    if verified_on is None:
-        out.append(f"verified_on {g('verified_on')!r} is not an ISO date")
-    elif verified_on > today:
-        out.append(f"verified_on {verified_on} is in the future")
-    if as_of and verified_on and as_of > verified_on:
-        out.append("as_of is after verified_on (a figure cannot describe a date not yet checked)")
-    listed_since = g("listed_since")
-    if listed_since is not None:
-        ls = _iso_date(listed_since)
-        if ls is None:
-            out.append(f"listed_since {listed_since!r} is not an ISO date")
-        elif verified_on and ls > verified_on:
-            out.append("listed_since is after verified_on")
-
-    if not _text_ok(g("source_title"), 1, SOURCE_TITLE_MAX):
-        out.append(f"source_title must be 1-{SOURCE_TITLE_MAX} characters")
-    if not _is_https(g("source_url")):
-        out.append(f"source_url {g('source_url')!r} is not an https URL")
-    confidence = g("source_confidence")
-    if confidence not in SOURCE_CONFIDENCES:
-        out.append(f"source_confidence {confidence!r} not in {SOURCE_CONFIDENCES}")
-    for col in ("material", "tied_to_deal", "published"):
-        if not _is_bool(g(col)):
-            out.append(f"{col} must be true/false, got {g(col)!r}")
-    if g("published") is True and confidence == "secondary":
-        out.append("a secondary-sourced stake can never be published")
-    sort_order = g("sort_order")
-    if not _is_int(sort_order) or not 0 <= sort_order <= INT4_MAX:
-        out.append(f"sort_order must be an integer in [0, {INT4_MAX}] (INTEGER), got {sort_order!r}")
-
-    background = g("background")
-    if background is not None:
-        if not _text_ok(background, 1, BACKGROUND_MAX):
-            out.append(f"background must be 1-{BACKGROUND_MAX} characters or null")
-        elif contains_forecast(background):
-            out.append("background states a forecast or motive; keep it to what happened")
-    for col in STAKE_TEXT_FIELDS:
-        if contains_banned_copy(g(col)):
-            out.append(f"{col} contains banned wording")
-
-    # Seed policies ------------------------------------------------------------------------
-    if g("material") is True and pct is None and value is None:
-        out.append("material needs a disclosed ownership_pct or disclosed_value_usd")
-    if company is not None:
-        if kind == "on_13f_note" and company.get("card_kind") != "thirteen_f":
-            out.append("on_13f_note belongs only on a thirteen_f card")
-    if kind == "us_listed_off_13f" and symbol is None:
-        out.append("us_listed_off_13f needs the investee_us_symbol")
-    if kind == "non_us_listed" and local is None:
-        out.append("non_us_listed needs a local_listing")
-    if kind == "private" and (symbol is not None or local is not None):
-        out.append("a private stake has no listing (investee_us_symbol / local_listing)")
-    return out
-
-
 def _identity_claims(row: Mapping[str, Any]) -> List[Tuple[str, str]]:
     """What names ONE company: its listings (cap / detail symbol and share-class aliases,
     BRK.B == BRK-B) and its SEC CIKs. Malformed values are skipped (reported elsewhere)."""
@@ -485,15 +335,6 @@ def _identity_claims(row: Mapping[str, Any]) -> List[Tuple[str, str]]:
     if isinstance(ciks, list):
         claims |= {("CIK", c) for c in ciks if isinstance(c, str)}
     return sorted(claims)
-
-
-def _folded_stake_key(row: Mapping[str, Any]) -> Optional[Tuple[str, str, str]]:
-    """The stake's key as a reader sees it (see `_fold_name`); None when a key column is not
-    a string (a hand-edit put a list or an object there — reported by stake_problems)."""
-    slug, name, kind = stake_key(row)
-    if not (isinstance(slug, str) and isinstance(name, str) and isinstance(kind, str)):
-        return None
-    return slug, _fold_name(name), kind
 
 
 def _row_problems(check: Any, row: Mapping[str, Any], *args: Any, **kwargs: Any) -> List[str]:
@@ -551,10 +392,6 @@ def validate_seed(seed: Mapping[str, Sequence[Mapping[str, Any]]], *,
     return problems
 
 
-def stake_key(row: Mapping[str, Any]) -> Tuple[Any, Any, Any]:
-    return tuple(row.get(c) for c in STAKE_KEY)  # type: ignore[return-value]
-
-
 # ── Planning (pure) ───────────────────────────────────────────────────────────────────────
 
 
@@ -588,6 +425,70 @@ def diff_row(seed_row: Mapping[str, Any], db_row: Mapping[str, Any],
     return out
 
 
+def _stake_origin(row: Mapping[str, Any]) -> Any:
+    """A database stake row's migration-205 ``origin``. Absent (a database before 205, the
+    test fakes, the 175-only Postgres harness) or NULL reads as 'seed'; any other value is
+    returned as it is, for the caller to classify (``plan_sync`` never writes one it does not
+    know)."""
+    value = row.get(ORIGIN_COLUMN)
+    return ORIGIN_SEED if value is None else value
+
+
+class StakeAdoption(NamedTuple):
+    """A JSON stake whose database row the stake finder made (origin 'auto' / 'proposal')."""
+
+    key: Tuple[Any, Any, Any]
+    diffs: Dict[str, Tuple[Any, Any]]   # the seeded columns that differ, as in stake_updates
+    origin: str                         # the row's origin before the adoption
+
+
+# What an identity match was made on (stake_names.IdentityMatch.by), as the warning says it.
+_MATCHED_BY = {
+    "cik": "the same SEC CIK",
+    "cusip": "the same CUSIP issuer (its first 6 characters)",
+    "symbol": "the same U.S. symbol (share-class aliases included)",
+    "name": ("the same name only — POSSIBLY the same company (neither row carries an "
+             "identifier the other has)"),
+}
+
+
+def identity_duplicates(seed: Mapping[str, Sequence[Mapping[str, Any]]],
+                        db_stakes: Sequence[Mapping[str, Any]],
+                        ) -> List[Tuple[Tuple[Any, Any, Any], Tuple[Any, Any, Any], str]]:
+    """Pure: ``(JSON stake key, database row key, matched by)`` for every JSON stake that names
+    the same investee as a row the stake finder made (origin 'auto' / 'proposal') for the SAME
+    company under a DIFFERENT natural key. ``--apply`` would insert the JSON row beside it and
+    the card would show one investee twice. Matching is the finder's own
+    (``stake_names.IdentityIndex``): CUSIP-6, then the normalised symbol with the club's
+    share-class aliases (GOOG == GOOGL), then — only when neither row carries an identifier the
+    other has — every significant name token. A pair with the same key is an adoption, never a
+    duplicate."""
+    aliases: Dict[str, List[str]] = {}
+    for c in seed.get("companies", []):
+        cap, extra = c.get("cap_symbol"), c.get("symbol_aliases")
+        if isinstance(cap, str) and isinstance(extra, list):
+            aliases[cap] = [a for a in extra if isinstance(a, str)]
+    machine_by_slug: Dict[str, List[Mapping[str, Any]]] = {}
+    for r in db_stakes:
+        slug = r.get("company_slug")
+        if isinstance(slug, str) and _stake_origin(r) in MACHINE_ORIGINS:
+            machine_by_slug.setdefault(slug, []).append(r)
+    out: List[Tuple[Tuple[Any, Any, Any], Tuple[Any, Any, Any], str]] = []
+    for s in seed.get("stakes", []):
+        key, slug = stake_key(s), s.get("company_slug")
+        if not isinstance(slug, str):   # an unhashable hand-edit; validate_seed reports it
+            continue
+        for r in machine_by_slug.get(slug, ()):
+            if stake_key(r) == key:
+                continue
+            match = IdentityIndex([r], symbol_aliases=aliases).match(
+                cusip=s.get("investee_cusip"), symbol=s.get("investee_us_symbol"),
+                name=s.get("investee_name"))
+            if match is not None:
+                out.append((key, stake_key(r), match.by))
+    return out
+
+
 @dataclass
 class SyncPlan:
     company_inserts: List[Dict[str, Any]] = field(default_factory=list)
@@ -596,18 +497,33 @@ class SyncPlan:
     stake_updates: List[Tuple[Tuple[Any, Any, Any], Dict[str, Tuple[Any, Any]]]] = field(default_factory=list)
     orphan_companies: List[str] = field(default_factory=list)
     orphan_stakes: List[Tuple[Any, Any, Any]] = field(default_factory=list)
+    # Migration 205 — rows the stake finder made (origin 'auto' / 'proposal') ---------------
+    # JSON stakes whose row the finder made: --apply --update makes each a seed row.
+    stake_adoptions: List[StakeAdoption] = field(default_factory=list)
+    # The finder's rows the JSON does not list: never orphans, never drift, never written.
+    machine_stakes: List[Dict[str, Any]] = field(default_factory=list)
+    # (key, origin) of rows whose origin this script does not know: never written.
+    unknown_origin_stakes: List[Tuple[Tuple[Any, Any, Any], Any]] = field(default_factory=list)
+    # (JSON stake key, finder row key, matched by): see identity_duplicates.
+    identity_duplicates: List[Tuple[Tuple[Any, Any, Any], Tuple[Any, Any, Any], str]] = field(
+        default_factory=list)
 
     @property
     def has_changes(self) -> bool:
         return bool(self.company_inserts or self.company_updates
-                    or self.stake_inserts or self.stake_updates)
+                    or self.stake_inserts or self.stake_updates or self.stake_adoptions)
 
 
 def plan_sync(seed: Mapping[str, Sequence[Mapping[str, Any]]],
               db_companies: Sequence[Mapping[str, Any]],
               db_stakes: Sequence[Mapping[str, Any]]) -> SyncPlan:
     """Pure: what an additive sync would insert, which rows drifted, and what is orphaned.
-    Never plans a delete."""
+    Never plans a delete.
+
+    A database stake row the stake finder made (origin 'auto' / 'proposal') is never an
+    orphan and never drift: the JSON listing its exact key ADOPTS it (``stake_adoptions``,
+    planned even with nothing drifted), otherwise it is listed apart (``machine_stakes``). A
+    row with an origin this script does not know is never written at all."""
     plan = SyncPlan()
     existing_c = {r.get("slug"): r for r in db_companies}
     for row in seed["companies"]:
@@ -627,12 +543,31 @@ def plan_sync(seed: Mapping[str, Sequence[Mapping[str, Any]]],
         have = existing_s.get(key)
         if have is None:
             plan.stake_inserts.append({c: row[c] for c in STAKE_COLUMNS})
-        else:
-            diffs = diff_row(row, have, STAKE_COLUMNS)
+            continue
+        origin = _stake_origin(have)
+        diffs = diff_row(row, have, STAKE_COLUMNS)
+        if origin == ORIGIN_SEED:
             if diffs:
                 plan.stake_updates.append((key, diffs))
+        elif origin in MACHINE_ORIGINS:
+            plan.stake_adoptions.append(StakeAdoption(key, diffs, origin))
+        # Any other origin: left exactly as it is (listed in unknown_origin_stakes below).
     seeded_keys = {stake_key(r) for r in seed["stakes"]}
-    plan.orphan_stakes = sorted((k for k in existing_s if k not in seeded_keys), key=repr)
+    orphans: List[Tuple[Any, Any, Any]] = []
+    for key, have in existing_s.items():
+        origin = _stake_origin(have)
+        if origin == ORIGIN_SEED:
+            if key not in seeded_keys:
+                orphans.append(key)
+        elif origin in MACHINE_ORIGINS:
+            if key not in seeded_keys:
+                plan.machine_stakes.append(dict(have))
+        else:
+            plan.unknown_origin_stakes.append((key, origin))
+    plan.orphan_stakes = sorted(orphans, key=repr)
+    plan.machine_stakes.sort(key=lambda r: repr(stake_key(r)))
+    plan.unknown_origin_stakes.sort(key=lambda item: repr(item[0]))
+    plan.identity_duplicates = identity_duplicates(seed, db_stakes)
     return plan
 
 
@@ -647,6 +582,36 @@ def report_plan(plan: SyncPlan) -> None:
     for key, diffs in plan.stake_updates:
         for col, (have, want) in sorted(diffs.items()):
             logger.info("  ~ stake %s / %s (%s).%s: %r -> %r", key[0], key[1], key[2], col, have, want)
+    for key, diffs, origin in plan.stake_adoptions:
+        logger.info("  * adopt stake %s / %s (%s): found automatically (origin %s); --apply "
+                    "--update makes it a seed row (origin seed; its finding, Keep and withdrawal "
+                    "cleared) with %d drifted column(s)", key[0], key[1], key[2], origin, len(diffs))
+        for col, (have, want) in sorted(diffs.items()):
+            logger.info("  ~ stake %s / %s (%s).%s: %r -> %r", key[0], key[1], key[2], col, have, want)
+    logger.info("  found automatically: %d rows (origin auto / proposal, not in the JSON): the "
+                "stake finder's own, never orphans or drift, never written by this script",
+                len(plan.machine_stakes))
+    for row in plan.machine_stakes:
+        logger.info("    = %s / %s (%s): origin %s, %s", row.get("company_slug"),
+                    row.get("investee_name"), row.get("kind"), _stake_origin(row),
+                    "published" if row.get("published") is True else "unpublished")
+    if plan.unknown_origin_stakes:
+        logger.warning(
+            "UNKNOWN ORIGIN: %d stake row(s) carry an origin this script does not know (it knows "
+            "%s), so they are left exactly as they are — never updated, adopted or reported as "
+            "orphans: %s. Update scripts/seed_trillion_club.py before seeding over them.",
+            len(plan.unknown_origin_stakes), list(ORIGINS),
+            [f"{k[0]}/{k[1]}/{k[2]} (origin {o!r})" for k, o in plan.unknown_origin_stakes],
+        )
+    for json_key, db_key, by in plan.identity_duplicates:
+        logger.warning(
+            "IDENTITY: the JSON's stake %s/%s/%s and the row found automatically %s/%s/%s share "
+            "%s. With both published the card shows that investee twice: give the JSON row that "
+            "row's exact (company_slug, investee_name, kind) so --apply --update adopts it, or "
+            "leave the JSON row out.",
+            json_key[0], json_key[1], json_key[2], db_key[0], db_key[1], db_key[2],
+            _MATCHED_BY.get(by, f"the same investee ({by})"),
+        )
     if plan.orphan_companies or plan.orphan_stakes:
         logger.warning(
             "DRIFT: %d company row(s) and %d stake row(s) are in the database but NOT in the "
@@ -661,13 +626,55 @@ def report_plan(plan: SyncPlan) -> None:
 # ── Database I/O ──────────────────────────────────────────────────────────────────────────
 
 
+def _error_text(exc: BaseException) -> str:
+    """The structured parts of a PostgREST error (message / details / hint), else str(exc).
+    Never str(exc) first: postgrest's APIError renders differently across versions."""
+    parts = [getattr(exc, attr, None) for attr in ("message", "details", "hint")]
+    return " ".join(str(p) for p in parts if p) or str(exc)
+
+
+def _is_missing_origin_column(exc: BaseException) -> bool:
+    """True only for "trillion_club_stakes.origin does not exist" — a database before
+    migration 205. A structured code is the answer when there is one (42703 / PGRST204, and the
+    text must name ``origin``: another missing column is a real fault). An int code is an edge
+    or gateway status (supabase_errors' invariant), never schema drift. With no code, the text
+    must say a column named origin does not exist."""
+    code = getattr(exc, "code", None)
+    if isinstance(code, (bool, int)):
+        return False
+    text = _error_text(exc)
+    if not _ORIGIN_WORD_RE.search(text):
+        return False
+    if isinstance(code, str):
+        return code.strip().upper() in _MISSING_COLUMN_CODES
+    if code is not None:
+        return False
+    return _MISSING_COLUMN_TEXT_RE.search(text) is not None
+
+
 def fetch_existing(sb: Any) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Read both tables (every seeded column). Raises on a read failure — an unreadable
-    table must never look like an empty one, or every row would be planned as an insert."""
+    """Read both tables (every seeded column, plus the stakes' migration-205 ``origin`` in the
+    SAME select). Raises on a read failure — an unreadable table must never look like an empty
+    one, or every row would be planned as an insert.
+
+    Before migration 205 is applied ``origin`` does not exist and PostgREST refuses the whole
+    select. That answer, and only that one, is retried ONCE with the 175 columns: no row can
+    have been found automatically yet, so every row reads as seed (one WARNING)."""
     companies = sb.table(COMPANIES_TABLE).select(",".join(COMPANY_COLUMNS)).execute().data
-    stakes = sb.table(STAKES_TABLE).select(",".join(STAKE_COLUMNS)).execute().data
-    if not isinstance(companies, list) or not isinstance(stakes, list):
-        raise RuntimeError("unexpected response shape reading the trillion club tables")
+    try:
+        stakes = sb.table(STAKES_TABLE).select(",".join(_STAKE_READ_COLUMNS)).execute().data
+    except Exception as e:
+        if not _is_missing_origin_column(e):
+            raise
+        logger.warning(
+            "%s has no %s column (%s: %s): migration 205 is not applied, so no stake can have "
+            "been found automatically yet. Reading the migration-175 columns only; every row is "
+            "a seed row.", STAKES_TABLE, ORIGIN_COLUMN, type(e).__name__, _error_text(e)[:300])
+        stakes = sb.table(STAKES_TABLE).select(",".join(STAKE_COLUMNS)).execute().data
+    for table, rows in ((COMPANIES_TABLE, companies), (STAKES_TABLE, stakes)):
+        if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+            raise RuntimeError(f"unexpected response shape reading {table}: "
+                               f"{type(rows).__name__}, not a list of rows")
     return companies, stakes
 
 
@@ -675,7 +682,11 @@ def apply_plan(sb: Any, plan: SyncPlan, seed: Mapping[str, Sequence[Mapping[str,
                update: bool, existing_slugs: Sequence[str]) -> Tuple[int, int]:
     """Write the plan: inserts always, drifted columns only when ``update``. Companies go
     first (stakes reference them). Each row is isolated: one failure is logged with its
-    identifiers and the rest carry on. Returns (rows written, errors)."""
+    identifiers and the rest carry on. Returns (rows written, errors).
+
+    An adoption (a JSON stake whose row the stake finder made) is written only when
+    ``update``, through the SAME full-key UPDATE as drift and even with nothing drifted: its
+    drifted columns plus ``ADOPTION_RESET``."""
     written = errors = 0
     now = datetime.now(timezone.utc).isoformat()
     present = set(existing_slugs)
@@ -717,8 +728,11 @@ def apply_plan(sb: Any, plan: SyncPlan, seed: Mapping[str, Sequence[Mapping[str,
             logger.error("  FAILED to insert stake %s: %s: %s", label, type(e).__name__, e)
     if update:
         seed_s = {stake_key(r): r for r in seed["stakes"]}
-        for key, diffs in plan.stake_updates:
+        adopted = {a.key: a.origin for a in plan.stake_adoptions}
+        for key, diffs in [*plan.stake_updates, *((a.key, a.diffs) for a in plan.stake_adoptions)]:
             payload = {c: seed_s[key][c] for c in diffs}
+            if key in adopted:
+                payload.update(ADOPTION_RESET)
             payload["updated_at"] = now
             label = f"{key[0]} / {key[1]} ({key[2]})"
             try:
@@ -726,10 +740,15 @@ def apply_plan(sb: Any, plan: SyncPlan, seed: Mapping[str, Sequence[Mapping[str,
                    .eq("company_slug", key[0]).eq("investee_name", key[1]).eq("kind", key[2])
                    .execute())
                 written += 1
-                logger.info("  updated stake %s: %s", label, sorted(diffs))
+                if key in adopted:
+                    logger.info("  adopted stake %s (origin %s -> seed): %s", label, adopted[key],
+                                sorted(diffs))
+                else:
+                    logger.info("  updated stake %s: %s", label, sorted(diffs))
             except Exception as e:
                 errors += 1
-                logger.error("  FAILED to update stake %s: %s: %s", label, type(e).__name__, e)
+                logger.error("  FAILED to %s stake %s: %s: %s", "adopt" if key in adopted else "update",
+                             label, type(e).__name__, e)
     return written, errors
 
 
@@ -786,16 +805,20 @@ def main(argv: Optional[Sequence[str]] = None, *, sb: Any = None) -> int:
     try:
         db_companies, db_stakes = fetch_existing(sb)
     except Exception as e:
-        logger.error("Could not read the trillion club tables (%s: %s). Is migration 175 applied?",
+        logger.error("Could not read the trillion club tables (%s: %s). Is migration 175 applied? "
+                     "(Migration 205 adds trillion_club_stakes.origin; before it is applied the 175 "
+                     "columns are read instead, so a failure here is not a missing 205.)",
                      type(e).__name__, e)
         return 1
     plan = plan_sync(seed, db_companies, db_stakes)
     report_plan(plan)
     logger.info(
         "Plan: +%d companies, ~%d drifted companies, +%d stakes, ~%d drifted stakes, "
-        "%d orphan companies, %d orphan stakes",
+        "%d stakes to adopt from the stake finder, %d orphan companies, %d orphan stakes, "
+        "%d stakes found automatically",
         len(plan.company_inserts), len(plan.company_updates), len(plan.stake_inserts),
-        len(plan.stake_updates), len(plan.orphan_companies), len(plan.orphan_stakes))
+        len(plan.stake_updates), len(plan.stake_adoptions), len(plan.orphan_companies),
+        len(plan.orphan_stakes), len(plan.machine_stakes))
 
     if not args.apply:
         logger.info("DRY RUN — nothing written. Re-run with --apply (and --update to overwrite drift).")
@@ -805,6 +828,14 @@ def main(argv: Optional[Sequence[str]] = None, *, sb: Any = None) -> int:
             logger.warning("--update: the JSON's values overwrite the drifted columns listed above.")
         else:
             logger.warning("Drifted rows were left as they are (pass --update to overwrite them).")
+    if plan.stake_adoptions:
+        if args.update:
+            logger.warning("--update: %d stake row(s) found automatically become seed rows (the "
+                           "'adopt' lines above).", len(plan.stake_adoptions))
+        else:
+            logger.warning("%d stake row(s) found automatically that the JSON lists were left as "
+                           "they are (pass --update to adopt them as seed rows).",
+                           len(plan.stake_adoptions))
     written, errors = apply_plan(sb, plan, seed, update=args.update,
                                  existing_slugs=[r.get("slug") for r in db_companies])
     logger.info("Done. written=%d errors=%d", written, errors)

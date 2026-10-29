@@ -1,0 +1,27 @@
+{
+ "cik": "0001835632",
+ "entityType": "operating",
+ "exchanges": [
+  "Nasdaq"
+ ],
+ "filings": {
+  "files": [],
+  "recent": {
+   "acceptanceDateTime": [],
+   "accessionNumber": [],
+   "filingDate": [],
+   "form": [],
+   "items": [],
+   "primaryDocDescription": [],
+   "primaryDocument": [],
+   "reportDate": []
+  }
+ },
+ "formerNames": [],
+ "name": "Marvell Technology, Inc.",
+ "sic": "3674",
+ "sicDescription": "Semiconductors & Related Devices",
+ "tickers": [
+  "MRVL"
+ ]
+}

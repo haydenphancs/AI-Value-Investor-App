@@ -1,0 +1,29 @@
+{
+ "cik": "0002108121",
+ "entityType": "operating",
+ "exchanges": [],
+ "filings": {
+  "files": [],
+  "recent": {
+   "acceptanceDateTime": [],
+   "accessionNumber": [],
+   "filingDate": [],
+   "form": [],
+   "items": [],
+   "primaryDocDescription": [],
+   "primaryDocument": [],
+   "reportDate": []
+  }
+ },
+ "formerNames": [
+  {
+   "from": "2026-02-04T05:00:00.000Z",
+   "name": "JDEV Acquisition Corp",
+   "to": "2026-03-27T04:00:00.000Z"
+  }
+ ],
+ "name": "Ionetix Corp / DE /",
+ "sic": "2835",
+ "sicDescription": "In Vitro & In Vivo Diagnostic Substances",
+ "tickers": []
+}

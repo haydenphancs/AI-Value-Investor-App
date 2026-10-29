@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="UTF-8"?><edgarSubmission xmlns="http://www.sec.gov/edgar/schedule13g" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <schemaVersion>X0202</schemaVersion>
+<headerData>
+    <submissionType>SCHEDULE 13G</submissionType>
+    <filerInfo>
+      <filer>
+        <filerCredentials>
+          <cik>0001824723</cik>
+          <ccc>XXXXXXXX</ccc>
+        </filerCredentials>
+      </filer>
+      <liveTestFlag>LIVE</liveTestFlag>
+
+
+
+    </filerInfo>
+  </headerData>
+  <formData>
+    <coverPageHeader>
+      <securitiesClassTitle>Class A Common Stock, $0.001 par value</securitiesClassTitle>
+      <eventDateRequiresFilingThisStatement>06/30/2026</eventDateRequiresFilingThisStatement>
+      <issuerInfo>
+        <issuerCik>0001181412</issuerCik>
+        <issuerName>Space Exploration Technologies Corp.</issuerName>
+        <issuerCusips>
+          <issuerCusipNumber>84615Q103</issuerCusipNumber>
+        </issuerCusips>
+        <issuerPrincipalExecutiveOfficeAddress>
+          <street1 xmlns="http://www.sec.gov/edgar/common">1 Rocket Road</street1>
+          <city xmlns="http://www.sec.gov/edgar/common">Starbase</city>
+          <stateOrCountry xmlns="http://www.sec.gov/edgar/common">TX</stateOrCountry>
+          <zipCode xmlns="http://www.sec.gov/edgar/common">78521</zipCode>
+        </issuerPrincipalExecutiveOfficeAddress>
+      </issuerInfo>
+      <designateRulesPursuantThisScheduleFiled>
+        <designateRulePursuantThisScheduleFiled>Rule 13d-1(d)</designateRulePursuantThisScheduleFiled>
+      </designateRulesPursuantThisScheduleFiled>
+    </coverPageHeader>
+    <coverPageHeaderReportingPersonDetails>
+
+
+      <reportingPersonName>Google LLC</reportingPersonName>
+      <citizenshipOrOrganization>DE</citizenshipOrOrganization>
+      <reportingPersonBeneficiallyOwnedNumberOfShares>
+        <soleVotingPower>0</soleVotingPower>
+        <sharedVotingPower>551189500</sharedVotingPower>
+        <soleDispositivePower>0</soleDispositivePower>
+        <sharedDispositivePower>551189500</sharedDispositivePower>
+      </reportingPersonBeneficiallyOwnedNumberOfShares>
+      <reportingPersonBeneficiallyOwnedAggregateNumberOfShares>551189500</reportingPersonBeneficiallyOwnedAggregateNumberOfShares>
+      <aggregateAmountExcludesCertainSharesFlag>N</aggregateAmountExcludesCertainSharesFlag>
+      <classPercent>7.2</classPercent>
+      <typeOfReportingPerson>OO</typeOfReportingPerson>
+      <comments>Limited Liability Company</comments>
+    </coverPageHeaderReportingPersonDetails>
+    <coverPageHeaderReportingPersonDetails>
+
+
+      <reportingPersonName>XXVI Holdings Inc.</reportingPersonName>
+      <citizenshipOrOrganization>DE</citizenshipOrOrganization>
+      <reportingPersonBeneficiallyOwnedNumberOfShares>
+        <soleVotingPower>0</soleVotingPower>
+        <sharedVotingPower>551189500</sharedVotingPower>
+        <soleDispositivePower>0</soleDispositivePower>
+        <sharedDispositivePower>551189500</sharedDispositivePower>
+      </reportingPersonBeneficiallyOwnedNumberOfShares>
+      <reportingPersonBeneficiallyOwnedAggregateNumberOfShares>551189500</reportingPersonBeneficiallyOwnedAggregateNumberOfShares>
+      <aggregateAmountExcludesCertainSharesFlag>N</aggregateAmountExcludesCertainSharesFlag>
+      <classPercent>7.2</classPercent>
+      <typeOfReportingPerson>CO</typeOfReportingPerson>
+    </coverPageHeaderReportingPersonDetails>
+    <coverPageHeaderReportingPersonDetails>
+
+
+      <reportingPersonName>Alphabet Inc.</reportingPersonName>
+      <citizenshipOrOrganization>DE</citizenshipOrOrganization>
+      <reportingPersonBeneficiallyOwnedNumberOfShares>
+        <soleVotingPower>0</soleVotingPower>
+        <sharedVotingPower>551189500</sharedVotingPower>
+        <soleDispositivePower>0</soleDispositivePower>
+        <sharedDispositivePower>551189500</sharedDispositivePower>
+      </reportingPersonBeneficiallyOwnedNumberOfShares>
+      <reportingPersonBeneficiallyOwnedAggregateNumberOfShares>551189500</reportingPersonBeneficiallyOwnedAggregateNumberOfShares>
+      <aggregateAmountExcludesCertainSharesFlag>N</aggregateAmountExcludesCertainSharesFlag>
+      <classPercent>7.2</classPercent>
+      <typeOfReportingPerson>CO</typeOfReportingPerson>
+    </coverPageHeaderReportingPersonDetails>
+    <items>
+      <item1>
+        <issuerName>Space Exploration Technologies Corp.</issuerName>
+        <issuerPrincipalExecutiveOfficeAddress>1 Rocket Road, Starbase, TX 78521</issuerPrincipalExecutiveOfficeAddress>
+      </item1>
+      <item2>
+        <filingPersonName>Each of the following is hereinafter individually referred to as a "Reporting Person" and collectively as the "Reporting Persons."  This statement is filed on behalf of:
+
+Google LLC
+XXVI Holdings Inc.
+Alphabet Inc.</filingPersonName>
+        <principalBusinessOfficeOrResidenceAddress>The address of the Reporting Persons is 1600 Amphitheatre Parkway, Mountain View, CA 94043.</principalBusinessOfficeOrResidenceAddress>
+        <citizenship>Each of Google LLC, XXVI Holdings Inc. and Alphabet Inc. is an entity organized under the laws of the State of Delaware.</citizenship>
+      </item2>
+      <item3>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item3>
+      <item4>
+        <amountBeneficiallyOwned>The ownership information presented herein represents beneficial ownership of Class A Common Stock as of June 30, 2026, based upon 7,696,293,669 shares of Class A Common Stock outstanding as of July 28, 2026, as disclosed in the Issuer's Quarterly Report on Form 10-Q filed with the Securities and Exchange Commission on August 4, 2026.
+
+The Reporting Persons are the beneficial owners of 551,189,500 shares of Class A Common Stock held directly by Google LLC. Alphabet Inc. is the controlling stockholder of XXVI Holdings Inc., which is the managing member of Google LLC. As a result, the Reporting Persons may be deemed to share beneficial ownership of the securities owned directly by Google LLC.</amountBeneficiallyOwned>
+        <classPercent>7.2%</classPercent>
+        <numberOfSharesPersonHas>
+          <solePowerOrDirectToVote>0</solePowerOrDirectToVote>
+          <sharedPowerOrDirectToVote>551,189,500</sharedPowerOrDirectToVote>
+          <solePowerOrDirectToDispose>0</solePowerOrDirectToDispose>
+          <sharedPowerOrDirectToDispose>551,189,500</sharedPowerOrDirectToDispose>
+        </numberOfSharesPersonHas>
+      </item4>
+      <item5>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item5>
+      <item6>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item6>
+      <item7>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item7>
+      <item8>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item8>
+      <item9>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item9>
+      <item10>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item10>
+    </items>
+    <exhibitInfo>Exhibit 99.1: Joint Filing Agreement.
+</exhibitInfo>
+    <signatureInformation>
+      <reportingPersonName>Google LLC</reportingPersonName>
+      <signatureDetails>
+        <signature>/s/ Kathryn W. Hall</signature>
+        <title>Kathryn W. Hall, Assistant Secretary</title>
+        <date>08/14/2026</date>
+      </signatureDetails>
+    </signatureInformation>
+    <signatureInformation>
+      <reportingPersonName>XXVI Holdings Inc.</reportingPersonName>
+      <signatureDetails>
+        <signature>/s/ Kathryn W. Hall</signature>
+        <title>Kathryn W. Hall, Assistant Secretary</title>
+        <date>08/14/2026</date>
+      </signatureDetails>
+    </signatureInformation>
+    <signatureInformation>
+      <reportingPersonName>Alphabet Inc.</reportingPersonName>
+      <signatureDetails>
+        <signature>/s/ Kathryn W. Hall</signature>
+        <title>Kathryn W. Hall, Assistant Secretary</title>
+        <date>08/14/2026</date>
+      </signatureDetails>
+    </signatureInformation>
+  </formData>
+
+</edgarSubmission>

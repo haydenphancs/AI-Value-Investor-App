@@ -146,6 +146,12 @@ API (contract D6):
   - ``company_stakes``: Trillion Club stakes (published, `stake_problem`-valid, a named investee,
     a disclosed dollar figure and its basis — never a price); catalogue stakes allowed
     (`company_news_rules.STAKES_INCLUDE_CATALOGUE`), newest ``as_of`` first, one per ledger key.
+    Since the stake finder (migration 205, 2026-10-28) only a row a person reviewed: hand-kept
+    (``origin`` seed), published by the owner's tap (proposal), or found and published automatically
+    and then KEPT by the owner (auto + ``owner_kept_at``) — filtered in the read, re-checked strictly
+    on every row after the row-cap check and before the catalogue's known words are built (a left-out
+    row's investee name never vouches for another row's source title); counted in a log line, never
+    a rejection code.
   - ``earnings``: the previous seven ET days' calendar, one day per call (a day at the 4,000-row
     cap is unavailable, never ranked), EPS digit-shift and implausible gaps refused — and (owner-delegated,
     2026-10-19) an |EPS actual| or |estimate| above `R.EPS_MAX_ABS`, $1,000,000 a share (``eps_implausible``) —,
@@ -550,12 +556,25 @@ STAKES_PROFILE_CANDIDATES = 8
 STAKE_TEMPLATE_REFUSAL_TTL_SECONDS = 400 * 24 * 3600.0
 _STAKES_TABLE = "trillion_club_stakes"
 #: Explicit columns: the club's wire shape lacks ``id`` (the ledger key) and ``created_at`` (new
-#: vs catalogue); ``source_url`` is read for `stake_problem` and never leaves this module.
+#: vs catalogue); ``source_url`` is read for `stake_problem` and never leaves this module, and
+#: neither do ``origin`` / ``owner_kept_at`` (migration 205), read only by `_stake_left_out`.
 _STAKE_COLUMNS = (
     "id,created_at,company_slug,kind,investee_name,investee_us_symbol,local_listing,ownership_pct,"
     "ownership_basis,disclosed_value_usd,value_basis,as_of,source_title,source_url,"
-    "source_confidence,published,listed_since,background,verified_on,sort_order"
+    "source_confidence,published,listed_since,background,verified_on,sort_order,origin,owner_kept_at"
 )
+#: The Trillion Club stake finder (migration 205, 2026-10-28) writes stake rows itself, and ``origin``
+#: says who made each one: ``seed`` (hand-kept, `scripts/seed_trillion_club.py`), ``proposal`` (built
+#: by the finder, published by the owner's Publish tap) or ``auto`` (published by the finder with no
+#: tap — the owner gets a Withdraw / Keep note). The in-app club screen shows every published row; a
+#: PUBLIC post is built only from a row a person reviewed: a seed or proposal row, or an auto row the
+#: owner KEPT (``owner_kept_at``). Mirrors `trillion_club.stake_contracts.ORIGIN_*` (pinned equal by
+#: the adapter tests: the adapter may not import that module, `tests/test_marketing_import_boundary.py`).
+_STAKE_ORIGINS_POSTABLE: Tuple[str, ...] = ("seed", "proposal")
+_STAKE_ORIGIN_AUTO = "auto"
+#: The same rule as the read's PostgREST filter (AND-ed with the others); `_stake_left_out` re-checks
+#: every row it returns, strictly, before anything else reads them.
+_STAKE_POSTABLE_FILTER = "origin.in.(seed,proposal),owner_kept_at.not.is.null"
 
 #: Theme explainer: themes evaluated past the ledger and the cheap gates per call (each costs a
 #: profile batch and segment lookups), the members whose largest segment is looked up (theme
@@ -4123,6 +4142,11 @@ async def _collect_congress_count(ctx: _Ctx) -> Candidates:
 # Catalogue stakes are allowed (`R.STAKES_INCLUDE_CATALOGUE`, main-session decision 1), newest
 # ``as_of`` first, each posted once (its ledger key). FMP-free for the data: the club group, its
 # rows and one stakes read; one profile batch makes the CompanyRefs.
+#
+# The stake finder (migration 205, 2026-10-28) adds machine-made rows: a row reaches a post only
+# when a person reviewed it — hand-kept (``origin`` seed), published by the owner's tap (proposal),
+# or published by the finder and KEPT by the owner (auto + ``owner_kept_at``). The read filters on
+# it in PostgREST and `_postable_stake_rows` re-checks every row before the known words are built.
 
 
 @dataclass(frozen=True)
@@ -4174,6 +4198,54 @@ def _stake_template_refused_on(stake: Any) -> Optional[date]:
     if not isinstance(refused_on, date) or fingerprint != _stake_fingerprint(stake):
         return None
     return refused_on
+
+
+def _stake_left_out(row: Mapping[str, Any]) -> Optional[str]:
+    """Why a stake row may not reach a public post because of WHO made it (migration 205's ``origin``), or None
+    when it may: a hand-kept row (``seed``) and one the owner published with a tap (``proposal``) may; one the stake
+    finder published on its own (``auto``) only once the owner tapped Keep on it — ``owner_kept_at`` holds the tap's
+    timestamp, read as `_day` reads one — so a machine-found fact reaches a public post only after a person read it
+    (``auto_not_kept`` otherwise). Strict, the read's PostgREST filter (`_STAKE_POSTABLE_FILTER`) checked again
+    here: an origin that is not exactly one of those strings — missing, NULL, another case or spacing, a value a
+    later migration adds — is ``origin_unknown``, and a stamp with no date in it (an empty string, ``"false"``,
+    ``0``, ``True``, ``'infinity'``) keeps nothing. Pure."""
+    origin = row.get("origin")
+    if not isinstance(origin, str):
+        return "origin_unknown"
+    if origin in _STAKE_ORIGINS_POSTABLE:
+        return None
+    if origin == _STAKE_ORIGIN_AUTO:
+        return None if _day(row.get("owner_kept_at")) is not None else "auto_not_kept"
+    return "origin_unknown"
+
+
+def _postable_stake_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The stake rows `_stake_left_out` lets through, in their order; the rest are counted in one log line per kind
+    (no rejection code: they are not candidates the template could refuse) — never named (an un-reviewed row's
+    investee name may not be a company's). An unknown origin is a WARNING naming the values: a new origin needs a
+    decision in `_stake_left_out` before its rows can be posted."""
+    postable: List[Dict[str, Any]] = []
+    not_kept = 0
+    unknown: Counter = Counter()
+    for r in rows:
+        why = _stake_left_out(r)
+        if why is None:
+            postable.append(r)
+        elif why == "auto_not_kept":
+            not_kept += 1
+        else:
+            unknown[_scrub(repr(r.get("origin")), 40)] += 1
+    if not_kept:
+        logger.info("company news company_stakes: %d of %d stake row(s) left out — found automatically by the stake "
+                    "finder and not kept by the owner (origin %r, no Keep stamp): a machine-found stake reaches a "
+                    "public post only after the owner's Keep or Publish tap", not_kept, len(rows), _STAKE_ORIGIN_AUTO)
+    if unknown:
+        logger.warning("company news company_stakes: %d of %d stake row(s) left out — an origin the marketing read "
+                       "does not know (%s; it posts %s rows, and %r rows once kept): decide in _stake_left_out "
+                       "before such rows may be posted", sum(unknown.values()), len(rows),
+                       ", ".join(f"{o} ×{n}" for o, n in sorted(unknown.items())[:5]),
+                       "/".join(_STAKE_ORIGINS_POSTABLE), _STAKE_ORIGIN_AUTO)
+    return postable
 
 
 def _stake_candidate(ctx: _Ctx, row: Mapping[str, Any], investors: Mapping[str, Optional[str]],
@@ -4353,12 +4425,17 @@ async def _collect_company_stakes(ctx: _Ctx) -> Candidates:
         ctx, "club_stakes", ("club_stakes", tuple(members)),
         lambda sb: sb.table(_STAKES_TABLE).select(_STAKE_COLUMNS)
         .in_("company_slug", members).eq("published", True).eq("source_confidence", "primary")
+        .or_(_STAKE_POSTABLE_FILTER)
         .limit(STAKES_READ_LIMIT),
         reason="club_unavailable",
     )
     if len(rows) >= STAKES_READ_LIMIT:
         raise MarketingNewsUnavailable(ctx.series, "stakes_truncated",
                                        f"stage=club_stakes; {len(rows)} rows at the {STAKES_READ_LIMIT}-row cap")
+    # The stake finder (migration 205): only rows a person reviewed may be posted — the read's filter, re-checked
+    # strictly on every row it returned. After the cap check (a full page may be cut, whatever this drops) and BEFORE
+    # the known words below: a left-out row's investee name must never vouch for another row's source title.
+    rows = _postable_stake_rows(rows)
     # the companies a stake source may name (ST-1-R): the club's, by its own names, and every catalogue investee
     known = R.stake_known_words(
         [getattr(item, "name", None) for item in [*(getattr(group, "companies", None) or ()),

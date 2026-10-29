@@ -1,0 +1,33 @@
+{
+ "cik": "0001769628",
+ "entityType": "operating",
+ "exchanges": [
+  "Nasdaq"
+ ],
+ "filings": {
+  "files": [],
+  "recent": {
+   "acceptanceDateTime": [],
+   "accessionNumber": [],
+   "filingDate": [],
+   "form": [],
+   "items": [],
+   "primaryDocDescription": [],
+   "primaryDocument": [],
+   "reportDate": []
+  }
+ },
+ "formerNames": [
+  {
+   "from": "2019-03-11T00:00:00.000Z",
+   "name": "Atlantic Crypto Corp",
+   "to": "2019-10-03T00:00:00.000Z"
+  }
+ ],
+ "name": "CoreWeave, Inc.",
+ "sic": "7372",
+ "sicDescription": "Services-Prepackaged Software",
+ "tickers": [
+  "CRWV"
+ ]
+}

@@ -1,0 +1,38 @@
+{
+ "cik": "0001083301",
+ "entityType": "operating",
+ "exchanges": [
+  "Nasdaq"
+ ],
+ "filings": {
+  "files": [],
+  "recent": {
+   "acceptanceDateTime": [],
+   "accessionNumber": [],
+   "filingDate": [],
+   "form": [],
+   "items": [],
+   "primaryDocDescription": [],
+   "primaryDocument": [],
+   "reportDate": []
+  }
+ },
+ "formerNames": [
+  {
+   "from": "2002-12-16T00:00:00.000Z",
+   "name": "IKONICS CORP",
+   "to": "2021-12-13T00:00:00.000Z"
+  },
+  {
+   "from": "1999-08-16T00:00:00.000Z",
+   "name": "CHROMALINE CORP",
+   "to": "2002-11-22T00:00:00.000Z"
+  }
+ ],
+ "name": "TERAWULF INC.",
+ "sic": "6199",
+ "sicDescription": "Finance Services",
+ "tickers": [
+  "WULF"
+ ]
+}

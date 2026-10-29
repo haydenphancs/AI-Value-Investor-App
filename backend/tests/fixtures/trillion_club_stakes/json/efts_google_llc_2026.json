@@ -1,0 +1,245 @@
+{
+ "hits": {
+  "hits": [
+   {
+    "_id": "0001654954-26-006459:inuvo_8k.htm",
+    "_source": {
+     "adsh": "0001654954-26-006459",
+     "ciks": [
+      "0000829323"
+     ],
+     "display_names": [
+      "Inuvo, Inc.  (INUV)  (CIK 0000829323)"
+     ],
+     "file_date": "2026-07-01",
+     "file_description": "FORM 8-K",
+     "file_type": "8-K",
+     "form": "8-K",
+     "items": [
+      "1.01",
+      "1.02",
+      "2.03",
+      "3.02",
+      "8.01",
+      "9.01"
+     ],
+     "period_ending": "2026-06-29",
+     "root_forms": [
+      "8-K"
+     ],
+     "sequence": 1
+    }
+   },
+   {
+    "_id": "0001628280-26-067168:exhibit45-sx1.htm",
+    "_source": {
+     "adsh": "0001628280-26-067168",
+     "ciks": [
+      "0002130357"
+     ],
+     "display_names": [
+      "Anthropic, PBC  (CIK 0002130357)"
+     ],
+     "file_date": "2026-10-26",
+     "file_description": "EX-4.5",
+     "file_type": "EX-4.5",
+     "form": "S-1",
+     "items": [],
+     "period_ending": null,
+     "root_forms": [
+      "S-1"
+     ],
+     "sequence": "12"
+    }
+   },
+   {
+    "_id": "0001193125-26-356217:d412696dex41.htm",
+    "_source": {
+     "adsh": "0001193125-26-356217",
+     "ciks": [
+      "0001835632"
+     ],
+     "display_names": [
+      "Marvell Technology, Inc.  (MRVL)  (CIK 0001835632)"
+     ],
+     "file_date": "2026-08-19",
+     "file_description": "EX-4.1",
+     "file_type": "EX-4.1",
+     "form": "8-K",
+     "items": [
+      "1.01",
+      "3.02",
+      "9.01"
+     ],
+     "period_ending": "2026-08-18",
+     "root_forms": [
+      "8-K"
+     ],
+     "sequence": "2"
+    }
+   },
+   {
+    "_id": "0001213900-26-111109:ea0309097-s1a2_ealixir.htm",
+    "_source": {
+     "adsh": "0001213900-26-111109",
+     "ciks": [
+      "0000832370"
+     ],
+     "display_names": [
+      "Ealixir, Inc.  (EAXR)  (CIK 0000832370)"
+     ],
+     "file_date": "2026-10-21",
+     "file_description": "AMENDMENT NO. 2 TO FORM S-1",
+     "file_type": "S-1/A",
+     "form": "S-1/A",
+     "items": [],
+     "period_ending": null,
+     "root_forms": [
+      "S-1"
+     ],
+     "sequence": 1
+    }
+   },
+   {
+    "_id": "0001193125-26-427866:d864810d424b3.htm",
+    "_source": {
+     "adsh": "0001193125-26-427866",
+     "ciks": [
+      "0001717115"
+     ],
+     "display_names": [
+      "Tempus AI, Inc.  (TEM)  (CIK 0001717115)"
+     ],
+     "file_date": "2026-10-21",
+     "file_description": "424B3",
+     "file_type": "424B3",
+     "form": "424B3",
+     "items": [],
+     "period_ending": null,
+     "root_forms": [
+      "424B3"
+     ],
+     "sequence": 1
+    }
+   }
+  ],
+  "total": {
+   "relation": "eq",
+   "value": 5
+  }
+ },
+ "query": {
+  "_source": {
+   "exclude": [
+    "doc_text"
+   ]
+  },
+  "aggregations": {
+   "biz_states_filter": {
+    "terms": {
+     "field": "biz_states",
+     "size": 30
+    }
+   },
+   "entity_filter": {
+    "terms": {
+     "field": "display_names.raw",
+     "size": 30
+    }
+   },
+   "form_filter": {
+    "terms": {
+     "field": "root_forms",
+     "size": 30
+    }
+   },
+   "sic_filter": {
+    "terms": {
+     "field": "sics",
+     "size": 30
+    }
+   }
+  },
+  "from": 0,
+  "query": {
+   "bool": {
+    "filter": [
+     {
+      "terms": {
+       "root_forms": [
+        "8-K",
+        "6-K",
+        "424B3",
+        "424B4",
+        "424B5",
+        "424B7",
+        "S-1",
+        "F-1"
+       ]
+      }
+     },
+     {
+      "range": {
+       "file_date": {
+        "gte": "2026-07-01",
+        "lte": "2026-10-28"
+       }
+      }
+     }
+    ],
+    "minimum_should_match": 1,
+    "must": [
+     {
+      "match_phrase": {
+       "doc_text": "Google LLC"
+      }
+     }
+    ],
+    "must_not": [],
+    "should": [
+     {
+      "match_phrase": {
+       "doc_text": "securities purchase agreement"
+      }
+     },
+     {
+      "match_phrase": {
+       "doc_text": "share purchase agreement"
+      }
+     },
+     {
+      "match_phrase": {
+       "doc_text": "stock purchase agreement"
+      }
+     },
+     {
+      "match_phrase": {
+       "doc_text": "subscription agreement"
+      }
+     },
+     {
+      "match_phrase": {
+       "doc_text": "investment agreement"
+      }
+     },
+     {
+      "match_phrase": {
+       "doc_text": "concurrent private placement"
+      }
+     },
+     {
+      "match_phrase": {
+       "doc_text": "indicated an interest"
+      }
+     },
+     {
+      "match_phrase": {
+       "doc_text": "directed share issuance"
+      }
+     }
+    ]
+   }
+  },
+  "size": 100
+ }
+}

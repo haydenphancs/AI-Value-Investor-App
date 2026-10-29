@@ -151,7 +151,8 @@ CAYDEX_FAIR_VALUE_UNLOCKED_TIERS = SIGNALS_UNLOCKED_TIERS
 # ── Home: Trillion-Dollar Club Bets — the detail's depth is paid ─────────────────────
 #
 # Owner decision D3 (2026-09-24): cards are free, depth is Pro. FREE keeps every card, a
-# company's top 3 holdings, the latest quarter's CHANGED rows and every hand-kept stake.
+# company's top 3 holdings, the latest quarter's CHANGED rows and every stake (hand-kept, or
+# found automatically from SEC filings).
 # PAID adds the full holdings list and the earlier quarters — the same line the whale
 # profile draws, and deliberately the same frozenset so the two 13F surfaces cannot drift.
 # Applied by `trillion_club_service.redact_trillion_club_detail`, per request.

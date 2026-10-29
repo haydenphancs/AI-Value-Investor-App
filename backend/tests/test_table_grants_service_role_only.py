@@ -150,6 +150,11 @@ _SERVICE_ROLE_ONLY: dict[str, tuple[str, ...]] = {
     # weekly pieces the owner can unpublish — an unpublished row must not stay readable through
     # the anon key that ships in the binary.
     "204": ("learn_weekly_pieces", "learn_narration_jobs", "money_move_articles"),
+    # 205: the Trillion Club stake finder's ledger — one row per (member, SEC accession): the
+    # classification, the verified evidence, the proposed stake row and the Telegram review state.
+    # Only the backend reads or writes it, as service_role. 205 also adds the origin / finding
+    # columns to trillion_club_stakes, whose grants (175) it does not touch.
+    "205": ("trillion_club_stake_findings",),
 }
 
 # Tables that DO grant anon or authenticated on purpose. Each needs the reason; an entry

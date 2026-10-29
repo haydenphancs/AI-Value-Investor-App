@@ -12,6 +12,10 @@ This module is the Learn-side reader of three SEC surfaces, through the thin cli
   writes a figure; it may only restate these sentences.
 * `filing_text(...)` + `verify_peg_span(...)` — the plain text of one filing document and the
   check that a quoted "why now" span is verbatim in it (the model proposes spans, code decides).
+  The text conversion and the check live in `app/utils/filing_text.py` (shared with the
+  Trillion Club stake finder since 2026-10-28) and are re-exported here as the SAME objects
+  under the same names: `html_to_text`, `verify_peg_span`, `normalize_peg_text` and the
+  three length constants.
 
 Why this does NOT reuse `services/sec_concept_service.py`: that service trims each row to
 (start, end, val, filed, form) — no accession number, no fiscal-year fields — and its forms list
@@ -53,7 +57,6 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import date, timedelta
-from html.parser import HTMLParser
 from typing import (
     Any,
     Awaitable,
@@ -81,6 +84,16 @@ from app.integrations.sec_edgar import (
     user_agent_configured,
 )
 from app.services.learn_weekly.contracts import ORIGIN_SEC_XBRL, Fact
+# Re-exported as the SAME objects (tests/test_filing_text_utils.py pins the identity): the
+# Learn pipeline and its tests keep reading them from here.
+from app.utils.filing_text import (
+    FILING_TEXT_MAX_CHARS,
+    PEG_SPAN_MAX_CHARS,
+    PEG_SPAN_MIN_CHARS,
+    html_to_text,
+    normalize_peg_text,
+    verify_peg_span,
+)
 from app.utils.inflight import fail_shared_future
 
 logger = logging.getLogger(__name__)
@@ -97,6 +110,7 @@ __all__ = [
     "filing_text",
     "html_to_text",
     "verify_peg_span",
+    "normalize_peg_text",
     "format_usd",
     "clear_caches",
 ]
@@ -152,10 +166,7 @@ _YEARS_KEPT = 2
 #: Larger than any company's revenue or balance sheet by ~200×: a value past it is corrupt.
 _MAX_ABS_VALUE = 1e15
 _NAME_MAX_CHARS = 120
-
-FILING_TEXT_MAX_CHARS = 200_000
-PEG_SPAN_MIN_CHARS = 40
-PEG_SPAN_MAX_CHARS = 400
+# FILING_TEXT_MAX_CHARS, PEG_SPAN_MIN_CHARS and PEG_SPAN_MAX_CHARS: app/utils/filing_text.py.
 
 
 @dataclass(frozen=True)
@@ -443,7 +454,8 @@ def _parse_submissions(data: Mapping[str, Any], cik10: str) -> CompanySummary:
             skipped += 1
             continue
         document = columns["primaryDocument"][i]
-        if not (isinstance(document, str) and _DOCUMENT_RE.match(document)):
+        # fullmatch: `$` also matches before a trailing newline, which would reach the URL.
+        if not (isinstance(document, str) and _DOCUMENT_RE.fullmatch(document)):
             document = ""
         raw_items = columns["items"][i]
         parts = raw_items.split(",") if isinstance(raw_items, str) else []
@@ -759,7 +771,7 @@ async def filing_text(
     acc = normalize_accession(accession)
     if acc is None:
         raise ValueError(f"invalid accession number: {accession!r}")
-    if not isinstance(document, str) or not _DOCUMENT_RE.match(document):
+    if not isinstance(document, str) or not _DOCUMENT_RE.fullmatch(document):
         raise ValueError(f"invalid filing document name: {document!r}")
     _require_user_agent(f"filing document {acc} {document}")
     key = (cik10, acc, document)
@@ -779,146 +791,5 @@ async def filing_text(
     return await _deduped(("text",) + key, f"SEC document CIK{cik10} {acc} {document}", load)
 
 
-# Hidden or non-content elements. `ix:header` is inline XBRL's hidden block (contexts, units,
-# hidden facts) — thousands of dates and numbers no reader sees; quoting from it would cite text
-# that is not in the visible filing.
-_SKIP_TAGS = frozenset({"script", "style", "head", "title", "noscript", "template", "ix:header"})
-_BLOCK_TAGS = frozenset({
-    "address", "article", "aside", "blockquote", "br", "caption", "center", "dd", "div", "dl",
-    "dt", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header",
-    "hr", "li", "main", "nav", "ol", "p", "pre", "section", "table", "tbody", "td", "tfoot", "th",
-    "thead", "tr", "ul",
-})
-_HTML_SUFFIXES = (".htm", ".html", ".xhtml", ".xml")
-_HTML_SNIFF_RE = re.compile(r"<\s*/?\s*(?:html|body|div|p|table|font|span|br|td)\b", re.I)
-# Zero-width characters EDGAR HTML scatters through words; they would break a verbatim match.
-_ZERO_WIDTH = dict.fromkeys(map(ord, "​‌‍⁠﻿"), None)
-
-
-class _TextExtractor(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)  # entities unescaped by the parser
-        self.parts: List[str] = []
-        self._skip = 0
-
-    def handle_starttag(self, tag: str, attrs: Any) -> None:
-        if tag == "body":
-            self._skip = 0  # an unclosed <head> must not swallow the whole body
-        if tag in _SKIP_TAGS:
-            self._skip += 1
-        elif tag in _BLOCK_TAGS:
-            self.parts.append(" ")
-
-    def handle_startendtag(self, tag: str, attrs: Any) -> None:
-        # <br/>, <hr/>: a separator. A self-closed skip tag opens nothing.
-        if tag in _BLOCK_TAGS:
-            self.parts.append(" ")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in _SKIP_TAGS:
-            if self._skip:
-                self._skip -= 1
-        elif tag in _BLOCK_TAGS:
-            self.parts.append(" ")  # "<td>Revenue</td><td>$1</td>" must not glue the cells
-
-    def handle_data(self, data: str) -> None:
-        if not self._skip:
-            self.parts.append(data)
-
-
-def _collapse(text: str) -> str:
-    return " ".join(text.translate(_ZERO_WIDTH).split())
-
-
-def html_to_text(raw: str, *, document: Optional[str] = None) -> str:
-    """Plain text of one filing document, whitespace collapsed, capped at
-    ``FILING_TEXT_MAX_CHARS``. HTML when the document name says so (or the body looks like
-    it); a plain-text exhibit is only collapsed — a literal "<" in it is text, not a tag."""
-    if not isinstance(raw, str):
-        return ""
-    is_html = (
-        isinstance(document, str) and document.lower().endswith(_HTML_SUFFIXES)
-    ) or bool(_HTML_SNIFF_RE.search(raw[:65536]))
-    if is_html:
-        parser = _TextExtractor()
-        try:
-            parser.feed(raw)
-            parser.close()
-            text = "".join(parser.parts)
-        except Exception as exc:  # HTMLParser is lenient; this is a last resort, never silent
-            logger.warning(
-                "[learn-sec-html-parse] %s: %s: %s — falling back to a tag strip",
-                document, type(exc).__name__, exc,
-            )
-            text = re.sub(r"<[^>]{0,2000}>", " ", raw)
-    else:
-        text = raw
-    text = _collapse(text)
-    if len(text) > FILING_TEXT_MAX_CHARS:
-        logger.info(
-            "[learn-sec-text-capped] %s: %d chars cut to %d — a span past the cap cannot verify",
-            document, len(text), FILING_TEXT_MAX_CHARS,
-        )
-        text = text[:FILING_TEXT_MAX_CHARS]
-    return text
-
-
-# ── verify_peg_span ────────────────────────────────────────────────────
-
-_QUOTES = str.maketrans({
-    "‘": "'", "’": "'", "‚": "'", "‛": "'", "′": "'",
-    "“": '"', "”": '"', "„": '"', "‟": '"', "″": '"',
-    "«": '"', "»": '"',
-})
-_DIGIT_RUN_RE = re.compile(r"[0-9]+")
-# A number as written in a filing: "130,497", "2.02", "1,234.5".
-_NUMBER_TOKEN_RE = re.compile(r"[0-9]+(?:[.,][0-9]+)*")
-_EDGE_WINDOW = 64
-
-
-def _normalise_for_match(text: str) -> str:
-    return _collapse(text.translate(_QUOTES))
-
-
-def verify_peg_span(span: Any, text: Any) -> bool:
-    """True when ``span`` is a verbatim quote of ``text`` (the filing's plain text).
-
-    Only whitespace runs, zero-width characters and curly vs straight quotes are normalised;
-    everything else — case, dashes, digits — must match exactly. The span must be 40-400
-    characters after normalisation, may hold only ASCII digits (a Unicode digit is a homoglyph
-    the downstream number grounding cannot read), and must never cut a number: every digit
-    run of the span is a whole number of the text at the matched position ("$13" quoted from
-    "$130.5 billion" is refused).
-    """
-    if not isinstance(span, str) or not isinstance(text, str):
-        return False
-    if len(span) > PEG_SPAN_MAX_CHARS * 4:  # cheap bound before any normalisation work
-        return False
-    needle = _normalise_for_match(span)
-    if not PEG_SPAN_MIN_CHARS <= len(needle) <= PEG_SPAN_MAX_CHARS:
-        return False
-    if any(ch.isdigit() and not ("0" <= ch <= "9") for ch in needle):
-        return False
-    haystack = _normalise_for_match(text)
-    runs_in_text = set(_DIGIT_RUN_RE.findall(haystack))
-    if any(run not in runs_in_text for run in _DIGIT_RUN_RE.findall(needle)):
-        return False
-    start = haystack.find(needle)
-    while start != -1:
-        if _cuts_no_number(haystack, start, start + len(needle)):
-            return True
-        start = haystack.find(needle, start + 1)
-    return False
-
-
-def _cuts_no_number(haystack: str, start: int, end: int) -> bool:
-    """No number token of ``haystack`` is partly inside [start, end) and partly outside."""
-    lo = max(0, start - _EDGE_WINDOW)
-    window = haystack[lo:min(len(haystack), end + _EDGE_WINDOW)]
-    for m in _NUMBER_TOKEN_RE.finditer(window):
-        a, b = m.start() + lo, m.end() + lo
-        overlaps = a < end and start < b
-        inside = start <= a and b <= end
-        if overlaps and not inside:
-            return False
-    return True
+# html_to_text, verify_peg_span and normalize_peg_text: app/utils/filing_text.py (re-exported
+# above). `filing_text` converts with the default 200k-character cap and `[learn-sec-…]` log tags.

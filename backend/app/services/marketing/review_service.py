@@ -1667,6 +1667,10 @@ async def handle_update(update: Any) -> Dict[str, Any]:
         # — `y` is no marketing verb letter, so nothing above or below ever parsed one. Dispatched only
         # AFTER the owner allow-list, and fenced off so a Learn failure can never break a marketing tap.
         return await _dispatch_learn(cq_id, chat_id, from_id, message, cq["data"])
+    if isinstance(cq.get("data"), str) and cq["data"].startswith(STAKES_CALLBACK_PREFIX):
+        # The Trillion Club stake finder (plan 2026-10-28) rides this bot too: `z:<verb>:<finding uuid>` — `z`
+        # is no marketing verb letter either. Same rule as Learn: only AFTER the owner allow-list, fenced off.
+        return await _dispatch_stakes(cq_id, chat_id, from_id, message, cq["data"])
 
     parsed = parse_callback_data(cq.get("data"))
     if parsed is None:
@@ -1745,6 +1749,31 @@ async def _dispatch_learn(cq_id: str, chat_id: int, from_id: int, message: Dict[
         await _answer(cq_id, "Could not record that — tap again")
         return {"ok": True, "outcome": "error", "learn": True}
     return {"ok": True, "learn": True, "decided": bool(decided)}
+
+
+#: Callback data the Trillion Club stake finder owns (`app/services/trillion_club/stake_review.py`; the grammar
+#: is `stake_contracts.CALLBACK_PREFIX`). One letter outside `_VERBS`; a test pins it free of every marketing verb.
+STAKES_CALLBACK_PREFIX = "z:"
+
+
+async def _dispatch_stakes(cq_id: str, chat_id: int, from_id: int, message: Dict[str, Any],
+                           data: str) -> Dict[str, Any]:
+    """Hand an owner's `z:` tap to the stake review. LAZY import: the marketing bot loads no Trillion Club code
+    until such a tap arrives. The handler answers every tap itself; only a failure to reach it (an import
+    error) is answered here — never raised into the webhook."""
+    try:
+        from app.services.trillion_club.stake_review import handle_stake_callback
+
+        decided = await handle_stake_callback(cq_id=cq_id, chat_id=chat_id, from_id=from_id, message=message,
+                                              data=data)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error("marketing review webhook: the stake review tap FAILED (%s: %s) data=%r from_id=%s — "
+                     "nothing decided", type(e).__name__, e, data[:80], from_id, exc_info=True)
+        await _answer(cq_id, "Could not record that — tap again")
+        return {"ok": True, "outcome": "error", "stakes": True}
+    return {"ok": True, "stakes": True, "decided": bool(decided)}
 
 
 async def _set_keyboard(chat_id: int, message: Dict[str, Any], keyboard: Dict[str, Any], *, post_id: str,

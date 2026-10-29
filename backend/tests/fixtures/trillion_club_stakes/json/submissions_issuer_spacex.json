@@ -1,0 +1,27 @@
+{
+ "cik": "0001181412",
+ "entityType": "operating",
+ "exchanges": [
+  "Nasdaq"
+ ],
+ "filings": {
+  "files": [],
+  "recent": {
+   "acceptanceDateTime": [],
+   "accessionNumber": [],
+   "filingDate": [],
+   "form": [],
+   "items": [],
+   "primaryDocDescription": [],
+   "primaryDocument": [],
+   "reportDate": []
+  }
+ },
+ "formerNames": [],
+ "name": "SPACE EXPLORATION TECHNOLOGIES CORP",
+ "sic": "7370",
+ "sicDescription": "Services-Computer Programming, Data Processing, Etc.",
+ "tickers": [
+  "SPCX"
+ ]
+}

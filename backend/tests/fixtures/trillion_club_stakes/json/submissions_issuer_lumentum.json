@@ -1,0 +1,27 @@
+{
+ "cik": "0001633978",
+ "entityType": "operating",
+ "exchanges": [
+  "Nasdaq"
+ ],
+ "filings": {
+  "files": [],
+  "recent": {
+   "acceptanceDateTime": [],
+   "accessionNumber": [],
+   "filingDate": [],
+   "form": [],
+   "items": [],
+   "primaryDocDescription": [],
+   "primaryDocument": [],
+   "reportDate": []
+  }
+ },
+ "formerNames": [],
+ "name": "Lumentum Holdings Inc.",
+ "sic": "3669",
+ "sicDescription": "Communications Equipment, NEC",
+ "tickers": [
+  "LITE"
+ ]
+}

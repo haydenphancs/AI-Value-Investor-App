@@ -1,0 +1,40 @@
+{
+ "cik": "0000827876",
+ "entityType": "operating",
+ "exchanges": [
+  "Nasdaq",
+  "Nasdaq"
+ ],
+ "filings": {
+  "files": [],
+  "recent": {
+   "acceptanceDateTime": [],
+   "accessionNumber": [],
+   "filingDate": [],
+   "form": [],
+   "items": [],
+   "primaryDocDescription": [],
+   "primaryDocument": [],
+   "reportDate": []
+  }
+ },
+ "formerNames": [
+  {
+   "from": "2014-12-01T00:00:00.000Z",
+   "name": "STRATEAN INC.",
+   "to": "2016-11-08T00:00:00.000Z"
+  },
+  {
+   "from": "2008-11-17T00:00:00.000Z",
+   "name": "SMARTDATA CORP",
+   "to": "2014-11-24T00:00:00.000Z"
+  }
+ ],
+ "name": "CLEANSPARK, INC.",
+ "sic": "6199",
+ "sicDescription": "Finance Services",
+ "tickers": [
+  "CLSK",
+  "CLSKW"
+ ]
+}

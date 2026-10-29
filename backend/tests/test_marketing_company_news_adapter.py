@@ -101,6 +101,15 @@ Pinned here:
   them on the first day; a refusal only the template can make is remembered (`A.remember_template_refusal`) and that
   stake is offered after every other one (least recently refused first; an edit to its row lifts it, a
   re-verification does not). Every new guard mutation-checked.
+* The Trillion Club stake finder (migration 205, 2026-10-28), company_stakes: a stake reaches a post only when a person
+  reviewed it — ``origin`` seed or proposal, or auto with the owner's Keep stamp (``owner_kept_at``) — through the
+  PostgREST filter (the real postgrest-py builder's exact query; the fake reads the ``or`` filter, `postgrest_or_match`)
+  and through the strict re-check alone (``sb.honour_or = False``), over every origin / stamp shape; the two layers
+  agree on every state the schema allows; the re-check runs after the row cap (a full page with auto rows is still
+  ``stakes_truncated``) and before the known words (a left-out row's investee name never vouches for another row's
+  title); left-out rows are counted in a log line, never named, never a rejection code; a database without 205 is
+  ``club_unavailable``; every selected column is in the schema dump or a migration. Every new guard mutation-checked
+  (in memory, 2026-10-28).
 """
 
 from __future__ import annotations
@@ -331,9 +340,56 @@ class FakeFMP:
         return self._answer(self.income.get(sym, []))
 
 
+def _or_terms(expr: str) -> List[str]:
+    """The top-level terms of a PostgREST logic-tree body: ``a.in.(x,y),b.not.is.null`` → two terms."""
+    terms, depth, start = [], 0, 0
+    for i, ch in enumerate(expr):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                raise ValueError(f"unbalanced or-filter {expr!r}")
+        elif ch == "," and depth == 0:
+            terms.append(expr[start:i])
+            start = i + 1
+    if depth:
+        raise ValueError(f"unbalanced or-filter {expr!r}")
+    terms.append(expr[start:])
+    return terms
+
+
+def postgrest_or_match(row: Dict[str, Any], expr: str) -> bool:
+    """Does ``row`` pass PostgREST's ``or=(<expr>)``? Only the subset the adapter writes — ``col.in.(a,b)`` and
+    ``col.is.null|true|false``, each optionally negated (``col.not.is.null``); anything else RAISES, so a filter
+    this fake cannot read never passes (or fails) silently. A key the row lacks reads as NULL, and ``in`` on a NULL
+    is SQL's unknown — false, negated or not."""
+    hits = []
+    for term in _or_terms(expr):
+        col, dot, rest = term.partition(".")
+        negate = rest.startswith("not.")
+        op, dot2, value = (rest[4:] if negate else rest).partition(".")
+        if not (col and dot and dot2):
+            raise ValueError(f"unreadable or-term {term!r}")
+        cell = row.get(col)
+        if op == "in":
+            if not (value.startswith("(") and value.endswith(")")) or '"' in value:
+                raise ValueError(f"unreadable in-list {term!r}")
+            if cell is None:
+                hits.append(False)
+                continue
+            hit = isinstance(cell, str) and cell in value[1:-1].split(",")
+        elif op == "is" and value in ("null", "true", "false"):
+            hit = cell is None if value == "null" else cell is (value == "true")
+        else:
+            raise ValueError(f"or-term {term!r}: operator {op!r} is not one this fake reads")
+        hits.append(hit != negate)
+    return any(hits)
+
+
 class FakeQuery:
     def __init__(self, sb: "FakeSB", table: str) -> None:
-        self.sb, self.table, self.filters, self.in_filters = sb, table, [], []
+        self.sb, self.table, self.filters, self.in_filters, self.or_filters = sb, table, [], [], []
 
     def select(self, cols):
         self.sb.selects.append((self.table, cols))
@@ -345,6 +401,14 @@ class FakeQuery:
 
     def in_(self, key, values):
         self.in_filters.append((key, list(values)))
+        return self
+
+    def or_(self, filters, reference_table=None):
+        if reference_table is not None:
+            raise ValueError("the fake reads an or-filter on the queried table only")
+        _or_terms(filters)                    # unreadable → raises at build time, as a typo should
+        self.sb.ors.append((self.table, filters))
+        self.or_filters.append(filters)
         return self
 
     def order(self, *_a, **_kw):
@@ -359,7 +423,8 @@ class FakeQuery:
             raise self.sb.errors[self.table]
         rows = [dict(r) for r in self.sb.tables.get(self.table, [])
                 if all(r.get(k) == v for k, v in self.filters)
-                and all(r.get(k) in vs for k, vs in self.in_filters)]
+                and all(r.get(k) in vs for k, vs in self.in_filters)
+                and (not self.sb.honour_or or all(postgrest_or_match(r, f) for f in self.or_filters))]
         return SimpleNamespace(data=rows)
 
 
@@ -369,6 +434,11 @@ class FakeSB:
         self.errors = errors or {}
         self.calls: Counter = Counter()
         self.selects: List[Any] = []
+        self.ors: List[Any] = []
+        #: False plays a PostgREST that answered WITHOUT the ``or`` filter (an edit that dropped it, a proxy that
+        #: lost the parameter): the rows it would have refused reach the adapter, whose own strict re-check is then
+        #: what the test sees.
+        self.honour_or = True
 
     def table(self, name):
         return FakeQuery(self, name)
@@ -5350,7 +5420,9 @@ def stake(slug, name, **over):
            "as_of": "2026-06-30", "source_title": "NVIDIA 10-Q (quarter ended Jul 26, 2026)",
            "source_url": "https://www.sec.gov/Archives/edgar/ZQXSOURCEURL.htm", "source_confidence": "primary",
            "published": True, "listed_since": None, "background": None, "verified_on": "2026-12-01",
-           "sort_order": 1, "material": True, "tied_to_deal": False, "updated_at": "2026-12-01T00:00:00+00:00"}
+           "sort_order": 1, "material": True, "tied_to_deal": False, "updated_at": "2026-12-01T00:00:00+00:00",
+           # migration 205 (the stake finder): every row before it reads as hand-kept (NOT NULL DEFAULT 'seed')
+           "origin": "seed", "owner_kept_at": None}
     row.update(over)
     return row
 
@@ -5439,6 +5511,8 @@ async def test_stakes_are_named_figured_and_newest_first(club_on):
     # FMP-free for the data: one profile batch for the CompanyRefs, nothing else.
     assert fmp.calls == Counter({"profiles": 1})
     assert ("trillion_club_stakes", A._STAKE_COLUMNS) in sb.selects
+    # migration 205: the stakes read (and nothing else) asks only for rows a person reviewed
+    assert sb.ors == [("trillion_club_stakes", A._STAKE_POSTABLE_FILTER)]
 
 
 @pytest.mark.asyncio
@@ -5576,6 +5650,309 @@ async def test_unpublished_and_secondary_stakes_are_never_read(club_on):
     club, sb, fmp = stakes_world(rows)
     got = await srun(club, sb, fmp)
     assert got.records == () and got.rejections == {} and got.skip_reason == "stakes_none_qualified"
+
+
+# ── the stake finder's rows (migration 205, plan v3 code change 9, 2026-10-28) ──────────────────────────────────────
+#
+# The Trillion Club stake finder writes stake rows itself: ``origin`` 'auto' (published with no tap — the owner gets a
+# Withdraw / Keep note) or 'proposal' (published by the owner's Publish tap). A PUBLIC post is built only from a row a
+# person reviewed: a seed or proposal row, or an auto row the owner KEPT (``owner_kept_at``). The read filters on it in
+# PostgREST, and `_postable_stake_rows` re-checks every row it returned, strictly — after the row-cap check (a full page
+# may be cut, whatever the check drops) and before the catalogue's known words are built (a left-out row's investee
+# name never vouches for another row's source title). ``sb.honour_or = False`` plays a database answer WITHOUT the
+# filter, so the strict re-check alone is what a test sees.
+
+#: A Keep tap's stamp as PostgREST writes a TIMESTAMPTZ (Postgres trims the fraction's trailing zeros).
+_KEPT_AT = "2026-12-02T15:04:05.12+00:00"
+#: Stands for a key the row does not have at all.
+_ABSENT = object()
+
+
+def auto_stake(slug, name, **over):
+    """A stake the finder published on its own, shaped as migration 205 lets one be while the owner has NOT kept it:
+    a member's own plain-share 13D/13G (`us_listed_off_13f` with its symbol, the cover's percentage and basis, an SEC
+    archive source, no figure, no background, not material, sort order 900). ``over`` may give it what a KEPT row may
+    carry (``owner_kept_at``, a figure the owner added in Studio)."""
+    row = stake(slug, name, kind="us_listed_off_13f", investee_us_symbol="QRVN", ownership_pct=7.2,
+                ownership_basis="of Class A", disclosed_value_usd=None, value_basis=None, material=False,
+                background=None, sort_order=900, as_of=over.pop("as_of", "2026-11-20"), verified_on="2026-12-01",
+                source_title="NVIDIA Schedule 13G (Nov 24, 2026)",
+                source_url="https://www.sec.gov/Archives/edgar/data/1045810/000104581026000123/xslSCHEDULE_13G_X01/"
+                           "primary_doc.xml",
+                origin="auto", owner_kept_at=None, finding_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"finding/{name}")),
+                investee_cik="0001234567", withdrawn_at=None)
+    row.update(over)
+    return row
+
+
+def test_the_stakes_read_selects_the_finders_two_columns_and_mirrors_the_contracts_origins():
+    """Migration 205's two columns are selected, each once, and the origin vocabulary is `stake_contracts`' own: every
+    origin is decided (seed and proposal posted, auto only once kept) — an origin added there fails here until this read
+    decides it (the adapter may not import that module). The PostgREST filter is the plan's literal, built from them."""
+    from app.services.trillion_club import stake_contracts as SC
+
+    cols = A._STAKE_COLUMNS.split(",")
+    assert len(cols) == len(set(cols)) and all(c and c == c.strip() for c in cols)
+    assert {"origin", "owner_kept_at"} <= set(cols)
+    assert set(A._STAKE_ORIGINS_POSTABLE) == {SC.ORIGIN_SEED, SC.ORIGIN_PROPOSAL}
+    assert A._STAKE_ORIGIN_AUTO == SC.ORIGIN_AUTO
+    assert {*A._STAKE_ORIGINS_POSTABLE, A._STAKE_ORIGIN_AUTO} == set(SC.ORIGINS)
+    assert set(SC.MACHINE_ORIGINS) == {SC.ORIGIN_PROPOSAL, A._STAKE_ORIGIN_AUTO}
+    assert A._STAKE_POSTABLE_FILTER == "origin.in.(seed,proposal),owner_kept_at.not.is.null"
+    assert A._STAKE_POSTABLE_FILTER == f"origin.in.({','.join(A._STAKE_ORIGINS_POSTABLE)}),owner_kept_at.not.is.null"
+
+
+_SQL_COMMENT_RE = re.compile(r"--[^\n]*|/\*.*?\*/", re.S)
+_ALTER_STAKES_RE = re.compile(
+    r"\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?:public\.)?trillion_club_stakes\b(.*)", re.I | re.S)
+_ADD_COLUMN_RE = re.compile(r"\bADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?\"?([a-z_][a-z0-9_]*)\"?", re.I)
+
+
+def test_every_column_the_stakes_read_selects_is_in_the_schema():
+    """The read names its columns: one the schema lacks fails the WHOLE read in production (``club_unavailable`` —
+    the series stops), so each must be in the live schema dump's `trillion_club_stakes` or added to it by a migration
+    on disk (205's ``origin`` / ``owner_kept_at``, applied by the owner BEFORE the deploy)."""
+    root = Path(__file__).resolve().parents[1] / "database"
+    snapshot = (root / "schema_snapshot.sql").read_text(encoding="utf-8")
+    block = re.search(r"CREATE TABLE public\.trillion_club_stakes \((.*?)\n\);", snapshot, re.S)
+    assert block, "the schema dump lost trillion_club_stakes"
+    have = {m.group(1) for m in re.finditer(r"^\s{4}([a-z_][a-z0-9_]*) ", block.group(1), re.M)}
+    assert {"id", "investee_name", "source_url"} <= have                                    # anti-vacuity
+    for path in sorted((root / "migrations").glob("[0-9][0-9][0-9]_*.sql")):
+        for statement in _SQL_COMMENT_RE.sub(" ", path.read_text(encoding="utf-8")).split(";"):
+            alter = _ALTER_STAKES_RE.search(statement)
+            if alter:
+                have |= {m.group(1).lower() for m in _ADD_COLUMN_RE.finditer(alter.group(1))}
+    missing = [c for c in A._STAKE_COLUMNS.split(",") if c not in have]
+    assert missing == [], f"selected but in no schema dump or migration (migration 205?): {missing}"
+
+
+@pytest.mark.asyncio
+async def test_a_database_without_migration_205_makes_the_series_unavailable_never_a_post(club_on):
+    """Deployed before 205 is applied (the owner's order is migration first): PostgREST refuses the select naming
+    ``origin`` (42703). The series is unavailable — never a stake posted from rows whose origin could not be read —
+    and the detail names the column, so the log alone says what is wrong."""
+    from postgrest.exceptions import APIError
+
+    missing = APIError({"code": "42703", "message": "column trillion_club_stakes.origin does not exist",
+                        "details": None, "hint": None})
+    club, sb, fmp = stakes_world(trillion_club_stakes=missing)
+    with pytest.raises(A.MarketingNewsUnavailable) as err:
+        await srun(club, sb, fmp)
+    assert err.value.reason == "club_unavailable"
+    assert "stage=club_stakes" in err.value.detail and "trillion_club_stakes.origin does not exist" in err.value.detail
+    assert fmp.calls == Counter()
+
+
+@pytest.mark.asyncio
+async def test_the_stakes_read_is_the_plans_postgrest_query_on_the_real_client(club_on, monkeypatch):
+    """The read as the REAL postgrest-py builder sends it — `sb_exec` answers from the fakes' tables, so nothing leaves
+    the process: the plan's ``or`` parameter beside the other filters, and the explicit column list. The database
+    itself never returns an un-kept auto row."""
+    import postgrest
+
+    club, fake, fmp = stakes_world([stake("nvidia", "Nscale", as_of="2026-06-30")])
+    sent: List[Any] = []
+
+    async def answer(query):
+        sent.append(query)
+        return SimpleNamespace(data=[dict(r) for r in fake.tables[query.path.rsplit("/", 1)[-1]]])
+
+    monkeypatch.setattr(A, "sb_exec", answer)
+    with postgrest.SyncPostgrestClient("http://127.0.0.1:9/rest/v1") as client:
+        got = await srun(club, client, fmp)
+    assert [r.investee_name for r in got.records] == ["Nscale"]                           # anti-vacuity
+    (read,) = [q for q in sent if q.path == "/trillion_club_stakes"]
+    assert read.http_method == "GET"
+    assert sorted(read.params.multi_items()) == sorted([
+        ("select", A._STAKE_COLUMNS), ("company_slug", "in.(amazon,nvidia,samsung,tsmc)"),
+        ("published", "eq.True"), ("source_confidence", "eq.primary"),
+        ("or", "(origin.in.(seed,proposal),owner_kept_at.not.is.null)"), ("limit", str(A.STAKES_READ_LIMIT))])
+
+
+@pytest.mark.parametrize("honour_or", [True, False], ids=["postgrest_filter", "strict_recheck"])
+@pytest.mark.parametrize("over, offered", [
+    pytest.param({"origin": "seed"}, True, id="seed"),
+    pytest.param({"origin": "proposal"}, True, id="proposal"),                        # the owner's Publish tap
+    pytest.param({"origin": "auto", "owner_kept_at": _KEPT_AT}, True, id="auto_kept"),  # the owner's Keep tap
+    pytest.param({"origin": "auto", "owner_kept_at": "2026-12-02T15:04:05+00:00"}, True, id="auto_kept_whole_second"),
+    pytest.param({"origin": "auto"}, False, id="auto_not_kept"),           # published by the finder, never kept
+    pytest.param({"origin": "auto", "owner_kept_at": ""}, False, id="auto_stamp_empty"),
+    pytest.param({"origin": "auto", "owner_kept_at": "false"}, False, id="auto_stamp_false_text"),
+    # a TIMESTAMPTZ can hold 'infinity'; it is no Keep tap
+    pytest.param({"origin": "auto", "owner_kept_at": "infinity"}, False, id="auto_stamp_infinity"),
+    pytest.param({"origin": "auto", "owner_kept_at": 0}, False, id="auto_stamp_zero"),
+    pytest.param({"origin": "auto", "owner_kept_at": True}, False, id="auto_stamp_true"),
+    pytest.param({"origin": "Auto", "owner_kept_at": _KEPT_AT}, False, id="Auto_kept"),
+    pytest.param({"origin": "Seed"}, False, id="Seed"),
+    pytest.param({"origin": " seed"}, False, id="space_seed"),
+    pytest.param({"origin": "proposal "}, False, id="proposal_space"),
+    pytest.param({"origin": None}, False, id="origin_null"),
+    # a stamp never stands in for an origin
+    pytest.param({"origin": None, "owner_kept_at": _KEPT_AT}, False, id="origin_null_kept"),
+    pytest.param({"origin": _ABSENT}, False, id="origin_absent"),
+    # a value a later migration may add
+    pytest.param({"origin": "announced", "owner_kept_at": _KEPT_AT}, False, id="origin_unknown_kept"),
+    pytest.param({"origin": ["seed"]}, False, id="origin_list"),           # unhashable: refused, never a TypeError
+    pytest.param({"origin": {"seed": True}}, False, id="origin_dict"),
+    pytest.param({"origin": 1}, False, id="origin_int"),
+])
+@pytest.mark.asyncio
+async def test_a_stake_reaches_a_post_only_when_a_person_reviewed_it(club_on, over, offered, honour_or):
+    """The same otherwise-publishable stake under every origin / Keep-stamp shape: offered only when hand-kept, published
+    by the owner's tap, or found automatically AND kept — with the database filter applied (as the fake reads it) and
+    without it (the strict re-check alone). A left-out row is no candidate: no rejection code, no profile call."""
+    row = stake("nvidia", "Quorvane Robotics", as_of="2026-11-20",
+                **{k: v for k, v in over.items() if v is not _ABSENT})
+    for k in [k for k, v in over.items() if v is _ABSENT]:
+        row.pop(k)
+    club, sb, fmp = stakes_world([row])
+    sb.honour_or = honour_or
+    got = await srun(club, sb, fmp)
+    if offered:
+        assert [r.investee_name for r in got.records] == ["Quorvane Robotics"] and got.rejections == {}
+    else:
+        assert got.records == () and got.rejections == {} and got.skip_reason == "stakes_none_qualified"
+        assert fmp.calls == Counter()
+
+
+@pytest.mark.parametrize("row, why", [
+    pytest.param({"origin": "seed"}, None, id="seed"),
+    pytest.param({"origin": "seed", "owner_kept_at": _KEPT_AT}, None, id="seed_stamped"),   # the CHECK forbids it
+    pytest.param({"origin": "proposal"}, None, id="proposal"),
+    pytest.param({"origin": "auto", "owner_kept_at": _KEPT_AT}, None, id="auto_kept"),
+    pytest.param({"origin": "auto", "owner_kept_at": datetime(2026, 12, 2, 15, 4, 5)}, None, id="auto_kept_datetime"),
+    pytest.param({"origin": "auto"}, "auto_not_kept", id="auto_no_stamp_key"),
+    pytest.param({"origin": "auto", "owner_kept_at": None}, "auto_not_kept", id="auto_stamp_null"),
+    pytest.param({"origin": "auto", "owner_kept_at": "2026-13-02T15:04:05+00:00"}, "auto_not_kept",
+                 id="auto_stamp_month_13"),
+    pytest.param({"origin": "auto", "owner_kept_at": "  "}, "auto_not_kept", id="auto_stamp_blank"),
+    pytest.param({"origin": "auto", "owner_kept_at": ["2026-12-02"]}, "auto_not_kept", id="auto_stamp_list"),
+    pytest.param({}, "origin_unknown", id="no_origin_key"),
+    pytest.param({"origin": ""}, "origin_unknown", id="origin_empty"),
+    pytest.param({"origin": "AUTO", "owner_kept_at": _KEPT_AT}, "origin_unknown", id="AUTO_kept"),
+    pytest.param({"origin": b"seed"}, "origin_unknown", id="origin_bytes"),
+    pytest.param({"origin": ("seed",)}, "origin_unknown", id="origin_tuple"),
+    pytest.param({"origin": {"seed"}}, "origin_unknown", id="origin_set"),
+])
+def test_why_a_stake_row_is_left_out(row, why):
+    assert A._stake_left_out(row) == why
+
+
+def test_the_database_filter_and_the_strict_recheck_agree_on_every_state_the_schema_allows():
+    """Over every row migration 205 lets exist — each origin, with and without a Keep stamp where its CHECK allows one
+    (``owner_kept_at`` only on an auto row) — the PostgREST filter (as the fake evaluates it) and `_stake_left_out`
+    decide the same: neither layer is looser than the other on real data. The fake refuses a filter it cannot read."""
+    from app.services.trillion_club import stake_contracts as SC
+
+    states = [{"origin": o, "owner_kept_at": None} for o in SC.ORIGINS]
+    states.append({"origin": SC.ORIGIN_AUTO, "owner_kept_at": _KEPT_AT})
+    for row in states:
+        assert postgrest_or_match(row, A._STAKE_POSTABLE_FILTER) == (A._stake_left_out(row) is None), row
+    assert {(r["origin"], r["owner_kept_at"] is not None): postgrest_or_match(r, A._STAKE_POSTABLE_FILTER)
+            for r in states} == {("seed", False): True, ("proposal", False): True, ("auto", False): False,
+                                 ("auto", True): True}                                  # anti-vacuity
+    for bad in ("origin.eq.seed", "origin.in.(seed", "origin.in.(\"seed,x\")", "origin", "origin.not",
+                "origin.is.maybe", "origin.in.seed"):
+        with pytest.raises(ValueError):
+            postgrest_or_match({"origin": "seed"}, bad)
+
+
+@pytest.mark.asyncio
+async def test_a_phase_one_auto_row_is_left_out_before_any_gate_counts_it(club_on, caplog):
+    """The finder's own row as phase 1 writes it (no figure) is not a candidate at all while un-kept — never counted
+    ``stake_no_figure`` — and its name never reaches a log line; one INFO line counts it. Kept, it is a candidate like
+    any other, and its missing figure is what refuses it."""
+    caplog.set_level(logging.INFO, logger=A.__name__)
+    rows = [auto_stake("nvidia", "Quorvane Robotics"), stake("nvidia", "Nscale", as_of="2026-06-30")]
+    club, sb, fmp = stakes_world(rows)
+    sb.honour_or = False
+    got = await srun(club, sb, fmp)
+    assert [r.investee_name for r in got.records] == ["Nscale"] and got.rejections == {}
+    (line,) = [r for r in caplog.records if "left out" in r.getMessage()]
+    assert line.levelno == logging.INFO and "1 of 2 stake row(s) left out" in line.getMessage()
+    assert "found automatically by the stake finder and not kept by the owner" in line.getMessage()
+    assert not any(w in caplog.text for w in ("Quorvane", "QRVN", "Schedule 13G"))
+    A.clear_memo()
+    caplog.clear()
+    club, sb, fmp = stakes_world([{**rows[0], "owner_kept_at": _KEPT_AT}, rows[1]])
+    got = await srun(club, sb, fmp)
+    assert [r.investee_name for r in got.records] == ["Nscale"] and got.rejections == {"stake_no_figure": 1}
+    assert "left out" not in caplog.text
+
+
+@pytest.mark.parametrize("honour_or", [False, True], ids=["strict_recheck", "postgrest_filter"])
+@pytest.mark.asyncio
+async def test_a_left_out_auto_rows_investee_name_never_vouches_for_another_rows_source_title(club_on, honour_or):
+    """The positive word list (ST-1-R) is built from the catalogue's investee names. A left-out row must not lend its
+    name to it: the finder took "Quorvane Robotics" from an SEC filing no person has read, and a seed row whose title
+    names "Quorvane" would otherwise compose. So that title is refused (``stake_source_unverified``); once the owner
+    keeps the auto row, its name is a reviewed company's and the same title passes. Mutation-checked by hand
+    (2026-10-28): `_postable_stake_rows` moved after `R.stake_known_words` turned the ``strict_recheck`` leg red (the
+    seed row became a record); the ``postgrest_filter`` leg stays green — the database never returns the row."""
+    seed = stake("nvidia", "Nscale", as_of="2026-06-30", source_title="NVIDIA and Quorvane release (Sep 8, 2026)")
+    finder = auto_stake("nvidia", "Quorvane Robotics")
+    club, sb, fmp = stakes_world([seed, finder])
+    sb.honour_or = honour_or
+    got = await srun(club, sb, fmp)
+    assert got.records == () and got.rejections == {"stake_source_unverified": 1}
+    A.clear_memo()
+    club, sb, fmp = stakes_world([seed, {**finder, "owner_kept_at": _KEPT_AT}])
+    sb.honour_or = honour_or
+    got = await srun(club, sb, fmp)
+    assert [r.investee_name for r in got.records] == ["Nscale"] and got.rejections == {"stake_no_figure": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_full_stakes_page_is_truncated_whatever_the_origin_check_leaves_out(club_on):
+    """The row cap counts the page the read RETURNED, before `_postable_stake_rows`: 2,000 rows — all but one an
+    un-kept auto row the strict check drops — may still be a cut page, so the series is unavailable, never one stake.
+    Mutation-checked by hand (2026-10-28): the check moved before the cap turned this red (one record came back). One
+    row fewer is a complete page: the auto rows are left out and the seed row is the one stake."""
+    rows = [auto_stake("nvidia", f"Finder Co {i}") for i in range(A.STAKES_READ_LIMIT - 1)]
+    rows.append(stake("nvidia", "Nscale", as_of="2026-06-30"))
+    club, sb, fmp = stakes_world(rows)
+    sb.honour_or = False
+    with pytest.raises(A.MarketingNewsUnavailable) as err:
+        await srun(club, sb, fmp)
+    assert err.value.reason == "stakes_truncated"
+    A.clear_memo()
+    club, sb, fmp = stakes_world(rows[1:])
+    sb.honour_or = False
+    got = await srun(club, sb, fmp)
+    assert [r.investee_name for r in got.records] == ["Nscale"] and got.rejections == {}
+
+
+@pytest.mark.asyncio
+async def test_left_out_rows_are_counted_one_line_per_kind_and_never_named(club_on, caplog):
+    """Un-kept auto rows: one INFO line with the count. Rows of an origin the read does not know (a value a later
+    migration adds, a NULL, a missing key): one WARNING naming the VALUES — a decision is owed in `_stake_left_out` —
+    and the count. No line names an investee, a title or a symbol. With the database filter applied, an un-kept auto
+    row never reaches the adapter (no line at all for it)."""
+    caplog.set_level(logging.INFO, logger=A.__name__)
+    rows = [auto_stake("nvidia", "Quorvane Robotics"), auto_stake("nvidia", "Zelmark Analytics", as_of="2026-11-21"),
+            stake("nvidia", "Pelloran Systems", origin="announced", owner_kept_at=_KEPT_AT),
+            stake("nvidia", "Varnex Labs", origin=None),
+            stake("nvidia", "Nscale", as_of="2026-06-30")]
+    club, sb, fmp = stakes_world(rows)
+    sb.honour_or = False
+    got = await srun(club, sb, fmp)
+    assert [r.investee_name for r in got.records] == ["Nscale"] and got.rejections == {}
+    lines = [(r.levelno, r.getMessage()) for r in caplog.records if "left out" in r.getMessage()]
+    assert [lvl for lvl, _ in lines] == [logging.INFO, logging.WARNING]
+    assert "2 of 5 stake row(s) left out — found automatically" in lines[0][1]
+    assert "2 of 5 stake row(s) left out — an origin the marketing read does not know ('announced' ×1, None ×1;" \
+        in lines[1][1]
+    assert not any(w in caplog.text for w in ("Quorvane", "Zelmark", "Pelloran", "Varnex", "QRVN", "Schedule 13G"))
+    A.clear_memo()
+    caplog.clear()
+    club, sb, fmp = stakes_world(rows)
+    got = await srun(club, sb, fmp)
+    assert [r.investee_name for r in got.records] == ["Nscale"]
+    lines = [(r.levelno, r.getMessage()) for r in caplog.records if "left out" in r.getMessage()]
+    # only the kept row of an unknown origin passes the database filter's second branch; the re-check still drops it
+    assert lines == [(logging.WARNING, lines[0][1])] and "1 of 2 stake row(s)" in lines[0][1]
+    assert "('announced' ×1;" in lines[0][1]
 
 
 @pytest.mark.parametrize("title", ["Alexandr Wang memo (Jun 12, 2025)", "Jensen keynote (Mar 18, 2026)",

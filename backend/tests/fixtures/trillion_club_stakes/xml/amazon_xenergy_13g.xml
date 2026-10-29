@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?><edgarSubmission xmlns="http://www.sec.gov/edgar/schedule13g" xmlns:com="http://www.sec.gov/edgar/common">
+  <schemaVersion>X0202</schemaVersion>
+<headerData>
+    <submissionType>SCHEDULE 13G</submissionType>
+    <filerInfo>
+      <filer>
+        <filerCredentials>
+          <!-- Field: Pseudo-Tag; ID: Name; Data: AMAZON COM INC -->
+          <cik>0001018724</cik>
+          <ccc>XXXXXXXX</ccc>
+        </filerCredentials>
+      </filer>
+      <liveTestFlag>LIVE</liveTestFlag>
+
+
+
+    </filerInfo>
+  </headerData>
+  <formData>
+    <coverPageHeader>
+      <securitiesClassTitle>Class A common stock, par value $0.0001</securitiesClassTitle>
+      <eventDateRequiresFilingThisStatement>06/30/2026</eventDateRequiresFilingThisStatement>
+      <issuerInfo>
+        <issuerCik>0002088896</issuerCik>
+        <issuerName>X-Energy, Inc.</issuerName>
+        <issuerCusips>
+          <issuerCusipNumber>98386P102</issuerCusipNumber>
+        </issuerCusips>
+        <issuerPrincipalExecutiveOfficeAddress>
+          <com:street1>530 Gaither Road, Suite 700</com:street1>
+          <com:city>Rockville</com:city>
+          <com:stateOrCountry>MD</com:stateOrCountry>
+          <com:zipCode>20850</com:zipCode>
+        </issuerPrincipalExecutiveOfficeAddress>
+      </issuerInfo>
+      <designateRulesPursuantThisScheduleFiled>
+        <designateRulePursuantThisScheduleFiled>Rule 13d-1(d)</designateRulePursuantThisScheduleFiled>
+      </designateRulesPursuantThisScheduleFiled>
+    </coverPageHeader>
+    <coverPageHeaderReportingPersonDetails>
+
+
+      <reportingPersonName>Amazon.com, Inc.</reportingPersonName>
+      <citizenshipOrOrganization>DE</citizenshipOrOrganization>
+      <reportingPersonBeneficiallyOwnedNumberOfShares>
+        <soleVotingPower>65836948.00</soleVotingPower>
+        <sharedVotingPower>0.00</sharedVotingPower>
+        <soleDispositivePower>65836948.00</soleDispositivePower>
+        <sharedDispositivePower>0.00</sharedDispositivePower>
+      </reportingPersonBeneficiallyOwnedNumberOfShares>
+      <reportingPersonBeneficiallyOwnedAggregateNumberOfShares>65836948.00</reportingPersonBeneficiallyOwnedAggregateNumberOfShares>
+      <aggregateAmountExcludesCertainSharesFlag>N</aggregateAmountExcludesCertainSharesFlag>
+      <classPercent>22.9</classPercent>
+      <typeOfReportingPerson>CO</typeOfReportingPerson>
+    </coverPageHeaderReportingPersonDetails>
+    <items>
+      <item1>
+        <issuerName>X-Energy, Inc.</issuerName>
+        <issuerPrincipalExecutiveOfficeAddress>530 Gaither Road, Suite 700, Rockville, MD 20850</issuerPrincipalExecutiveOfficeAddress>
+      </item1>
+      <item2>
+        <filingPersonName>Amazon.com, Inc.</filingPersonName>
+        <principalBusinessOfficeOrResidenceAddress>410 TERRY AVENUE NORTH, SEATTLE, WA, 98109</principalBusinessOfficeOrResidenceAddress>
+        <citizenship>DELAWARE</citizenship>
+      </item2>
+      <item3>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item3>
+      <item4>
+        <amountBeneficiallyOwned>65,836,948
+
+Amazon.com NV Investment Holdings LLC ("NV Holdings"), a wholly-owned subsidiary of Amazon.com, Inc. ("Amazon"), is the record holder of the shares of Class A common stock, par value $0.0001 ("Class A common stock"). Amazon has sole voting and investment power with respect to the shares held by NV Holdings.</amountBeneficiallyOwned>
+        <classPercent>22.9%
+
+The percent of class beneficially owned by Amazon was calculated assuming 287,458,734 shares of Class A common stock of X-Energy, Inc. (the "Issuer") outstanding as of June 2, 2026, as reported in the Issuer's Quarterly Report on Form 10-Q for the fiscal quarter ended March 31, 2026, filed with the Securities and Exchange Commission on June 4, 2026.</classPercent>
+        <numberOfSharesPersonHas>
+          <solePowerOrDirectToVote>65,836,948</solePowerOrDirectToVote>
+          <sharedPowerOrDirectToVote>0</sharedPowerOrDirectToVote>
+          <solePowerOrDirectToDispose>65,836,948</solePowerOrDirectToDispose>
+          <sharedPowerOrDirectToDispose>0</sharedPowerOrDirectToDispose>
+        </numberOfSharesPersonHas>
+      </item4>
+      <item5>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item5>
+      <item6>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item6>
+      <item7>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item7>
+      <item8>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item8>
+      <item9>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item9>
+      <item10>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item10>
+    </items>
+    <signatureInformation>
+      <reportingPersonName>Amazon.com, Inc.</reportingPersonName>
+      <signatureDetails>
+        <signature>/s/ Susan K. Jong</signature>
+        <title>Susan K. Jong, Vice President and Secretary</title>
+        <date>08/06/2026</date>
+      </signatureDetails>
+    </signatureInformation>
+  </formData>
+</edgarSubmission>

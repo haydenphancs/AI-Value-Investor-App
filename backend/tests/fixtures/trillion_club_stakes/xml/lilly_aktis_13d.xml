@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8"?><edgarSubmission xmlns="http://www.sec.gov/edgar/schedule13D" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <headerData>
+    <submissionType>SCHEDULE 13D</submissionType>
+    <filerInfo>
+      <filer>
+        <filerCredentials>
+          <cik>0000059478</cik>
+          <ccc>XXXXXXXX</ccc>
+        </filerCredentials>
+      </filer>
+      <liveTestFlag>LIVE</liveTestFlag>
+
+
+
+    </filerInfo>
+  </headerData>
+  <formData>
+    <coverPageHeader>
+      <securitiesClassTitle>Common Stock, $0.0001 par value per share</securitiesClassTitle>
+      <dateOfEvent>01/12/2026</dateOfEvent>
+      <previouslyFiledFlag>false</previouslyFiledFlag>
+      <issuerInfo>
+        <issuerCIK>0002035832</issuerCIK>
+        <issuerCUSIP>00973N102</issuerCUSIP>
+        <issuerName>Aktis Oncology, Inc.</issuerName>
+        <address>
+          <street1 xmlns="http://www.sec.gov/edgar/common">17 DRYDOCK AVENUE, SUITE 17-401</street1>
+          <city xmlns="http://www.sec.gov/edgar/common">BOSTON</city>
+          <stateOrCountry xmlns="http://www.sec.gov/edgar/common">MA</stateOrCountry>
+          <zipCode xmlns="http://www.sec.gov/edgar/common">02210</zipCode>
+        </address>
+      </issuerInfo>
+      <authorizedPersons>
+        <notificationInfo>
+          <personName>Anat Hakim</personName>
+          <personPhoneNum>(317) 276-2000</personPhoneNum>
+          <personAddress>
+            <street1 xmlns="http://www.sec.gov/edgar/common">Lilly Corporate Center</street1>
+            <city xmlns="http://www.sec.gov/edgar/common">Indianapolis</city>
+            <stateOrCountry xmlns="http://www.sec.gov/edgar/common">IN</stateOrCountry>
+            <zipCode xmlns="http://www.sec.gov/edgar/common">46285</zipCode>
+          </personAddress>
+        </notificationInfo>
+      </authorizedPersons>
+    </coverPageHeader>
+    <reportingPersons>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0000059478</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>Eli Lilly and Company</reportingPersonName>
+        <fundType>WC</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>IN</citizenshipOrOrganization>
+        <soleVotingPower>6344114.00</soleVotingPower>
+        <sharedVotingPower>0.00</sharedVotingPower>
+        <soleDispositivePower>6344114.00</soleDispositivePower>
+        <sharedDispositivePower>0.00</sharedDispositivePower>
+        <aggregateAmountOwned>6344114.00</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>11.9</percentOfClass>
+        <typeOfReportingPerson>CO</typeOfReportingPerson>
+        <commentContent>This percentage is calculated based upon 53,296,950 outstanding shares of Common Stock of the Issuer following the consummation of its initial public offering as described in its Prospectus filed with the Securities and Exchange Commission pursuant to Rule 424(b)(4) of the Securities Act of 1933, as amended, on January 9, 2026, after giving effect to the full exercise of the underwriters' option to purchase an additional 2,647,500 shares of Common Stock, as disclosed in the press release issued by the Issuer on January 13, 2026.</commentContent>
+      </reportingPersonInfo>
+    </reportingPersons>
+    <items1To7>
+      <item1>
+        <securityTitle>Common Stock, $0.0001 par value per share</securityTitle>
+        <issuerName>Aktis Oncology, Inc.</issuerName>
+        <issuerPrincipalAddress>
+          <street1 xmlns="http://www.sec.gov/edgar/common">17 DRYDOCK AVENUE, SUITE 17-401</street1>
+          <city xmlns="http://www.sec.gov/edgar/common">BOSTON</city>
+          <stateOrCountry xmlns="http://www.sec.gov/edgar/common">MA</stateOrCountry>
+          <zipCode xmlns="http://www.sec.gov/edgar/common">02210</zipCode>
+        </issuerPrincipalAddress>
+      </item1>
+      <item2>
+        <filingPersonName>Eli Lilly and Company</filingPersonName>
+        <principalBusinessAddress>Lilly Corporate Center
+Indianapolis, Indiana 46285</principalBusinessAddress>
+        <principalJob>The principal business of Eli Lilly and Company is the discovery, development, manufacturing, marketing and sale of pharmaceutical products worldwide. The name, business address, present principal occupation or employment and citizenship of each director and executive officer (including a director and officer who may be a controlling person) of the Reporting Person is set forth on Schedule A.</principalJob>
+        <hasBeenConvicted>During the last five years, neither the Reporting Person nor, to the knowledge of the Reporting Person, any of the persons listed on Schedule A attached hereto, have been convicted in a criminal proceeding (excluding traffic violations or similar misdemeanors).</hasBeenConvicted>
+        <convictionDescription>During the last five years, neither the Reporting Person nor, to the knowledge of the Reporting Person, any of the persons listed on Schedule A attached hereto, have been a party to a civil proceeding of a judicial or administrative body of competent jurisdiction and as a result of such proceeding was or is subject to a judgment, decree or final order enjoining future violations of, or prohibiting or mandating activities subject to, federal or state securities laws or finding any violation with respect to such laws.</convictionDescription>
+        <citizenship>Indiana</citizenship>
+      </item2>
+      <item3>
+        <fundsSource>The Reporting Person beneficially owns an aggregate of 6,344,114 shares of Common Stock of the Issuer, consisting of (a) 788,559 shares of Common Stock that were issued to the Reporting Person at the closing of the Issuer's initial public offering (the "IPO") on January 12, 2026 upon the automatic conversion of (i) 2,500,000 shares of Series A-1 Redeemable Convertible Preferred Stock ("Series A Preferred") acquired prior to the IPO for an aggregate purchase price of $10.0 million and (ii) 500,000 shares of Series B Redeemable Convertible Preferred Stock ("Series B Preferred") acquired prior to the IPO for an aggregate purchase price of $2.0 million; and (b) 5,555,555 shares of Common Stock purchased by the Reporting Person in the IPO at the public offering price of $18.00 per share, for an aggregate purchase price of approximately $100.0 million. The funds used by the Reporting Person to acquire the Series A Preferred, the Series B Preferred and the Common Stock purchased in the IPO consisted of cash on hand.</fundsSource>
+      </item3>
+      <item4>
+        <transactionPurpose>The Reporting Person acquired the securities reported herein for investment purposes and intends to continue to review its investments in the Issuer on an ongoing basis. Except as set forth herein, the Reporting Person does not currently have any specific plan or proposal to acquire or dispose of Common Stock of the Issuer or any securities exercisable for or convertible into Common Stock of the Issuer, but the Reporting Person, consistent with its investment purpose, may at any time and from time to time directly or indirectly acquire additional or all shares of Common Stock, securities exercisable for or convertible into Common Stock of the Issuer, or other securities of the Issuer, or dispose of any or all of its shares of Common Stock, securities exercisable for or convertible into Common Stock of the Issuer, or other securities of the Issuer. The Reporting Person's determination to make any such acquisitions or dispositions, in each such case, will depend upon a variety of factors, including, but not limited to, an ongoing evaluation of its investment in such securities, applicable legal and/or contractual restrictions, prevailing market conditions, other investment opportunities, liquidity requirements of the Reporting Person and/or other investment considerations. In addition, in connection with the foregoing, the Reporting Person may engage in hedging or other transactions with respect to securities of the Issuer, including but not limited to, swaps and other derivative instruments.
+
+As part of its ongoing evaluation of its investment in the Issuer, the Reporting Person expects to engage in discussions with directors, officers, members of management and representatives of the Issuer, and may engage in discussions with stockholders, security holders or other interested parties, from time to time covering a range of topics concerning its investment and the Issuer, including operational, financial and strategic initiatives. Furthermore, without limitation, the Reporting Person may also evaluate and discuss other ideas, that if effected, may relate to, or result in, any other matter listed in Items 4(a)-(j) of Schedule 13D. To facilitate its consideration of such matters, the Reporting Person may retain consultants and advisors and may enter into discussions with potential sources of capital and other third parties. The Reporting Person may exchange information with any such persons pursuant to appropriate confidentiality or similar agreements. The Reporting Person will likely take some or all of the foregoing steps at preliminary stages in its consideration of various possible courses of action before forming any intention to pursue any specific plan or proposal.
+
+Other than as described above, the Reporting Person reports that neither it nor, to its knowledge, any of the other persons listed on Schedule A attached to this Schedule 13D, currently has any specific plan or proposal which relates to, or may result in, any of the matters listed in Items 4(a)-(j) of Schedule 13D, although the Reporting Person may, at any time and from time to time, review or reconsider its position and/or change its purpose and/or formulate plans or proposals with respect thereto.</transactionPurpose>
+      </item4>
+      <item5>
+        <percentageOfClassSecurities>The Reporting Person directly holds an aggregate of 6,344,114 shares of Common Stock, representing approximately 11.9% of the issued and outstanding shares of Common Stock of the Issuer. Ownership percentages set forth in this Schedule 13D are based upon a total of 53,296,950 shares of Common Stock outstanding as of January 14, 2026, following the consummation of the Issuer's IPO as described in its Prospectus filed under Rule 424(b)(4) of the Securities Act of 1933, as amended, on January 9, 2026, after giving effect to the full exercise of the underwriters' option to purchase an additional 2,647,500 shares of Common Stock, as disclosed in the press release issued by the Issuer on January 13, 2026.</percentageOfClassSecurities>
+        <numberOfShares>The information included in part (a) of Item 5 above is incorporated by reference herein.</numberOfShares>
+        <transactionDesc>Other than as described in Item 3, the Reporting Person has not purchased or sold any shares of the Issuer's common stock during the past 60 days.</transactionDesc>
+        <listOfShareholders>No other person is known by the Reporting Person to have the right to receive or the power to direct the receipt of dividends from, or the proceeds from the sale of, the shares of Common Stock beneficially owned by the Reporting Person.</listOfShareholders>
+        <date5PercentOwnership>N/A</date5PercentOwnership>
+      </item5>
+      <item6>
+        <contractDescription>Investors' Rights Agreement
+
+The Reporting Person and certain other stockholders of the Issuer have entered into a Third Amended and Restated Investors' Rights Agreement with the Issuer (the "Investors' Rights Agreement"), which provides such stockholders with customary registration rights under the Securities Act of 1933, including demand registration rights, piggyback registration rights and shelf registration rights. The Issuer is required to pay all expenses, subject to certain conditions and exceptions, relating to the exercise of such registration rights. The Investors' Rights Agreement also contains customary cross-indemnification provisions. The Reporting Person's registration rights will terminate upon the earlier of (i) the closing of certain deemed liquidation events, as defined in the Issuer's certificate of incorporation, (ii) when the Reporting Person beneficially owns (together with its "affiliates," as defined in Rule 144 under the Securities Act of 1933, as amended) less than 1% of the Issuer's outstanding capital stock and is able to sell all of its shares pursuant to Rule 144 or another similar exemption during a three-month period without registration and (iii) the third anniversary of the IPO.
+
+Lock-Up Agreement
+
+The Reporting Person has entered into a lock-up agreement pursuant to which the Reporting Person has agreed not to, among other things and subject to various exceptions, sell or transfer Common Stock or securities convertible into or exercisable or exchangeable for Common Stock for 180 days after January 8, 2026 without first obtaining the prior written consent of J.P. Morgan Securities LLC, BofA Securities, Inc., Leerink Partners LLC and TD Securities (USA) LLC on behalf of the underwriters.
+
+The foregoing descriptions of the Investors' Rights Agreement and the lock-up agreement do not purport to be complete and are qualified in their entirety by reference to the Investors' Rights Agreement and the form of lock-up agreement, listed as Exhibit 2.1 and Exhibit 2.2 hereto, respectively, and incorporated by reference herein.</contractDescription>
+      </item6>
+      <item7>
+        <filedExhibits>Exhibit 2.1: Third Amended and Restated Investors' Rights Agreement, by and among the Issuer and certain of its stockholders, dated September 20, 2024 (Incorporated by reference to Exhibit 4.1 to the Issuer's Registration Statement on Form S-1 (SEC File No. 333-292283), filed with the Securities and Exchange Commission on January 7, 2026).
+
+Exhibit 2.2: Form of Lock-Up Agreement (Incorporated by reference to the Form of the Lock-Up Agreement attached as Exhibit D to the Form of the Underwriting Agreement filed as Exhibit 1.1 to the Issuer's Registration Statement on Form S-1 (SEC File No. 333-292283), filed with the Securities and Exchange Commission on January 7, 2026).</filedExhibits>
+      </item7>
+    </items1To7>
+    <signatureInfo>
+      <signaturePerson>
+        <signatureReportingPerson>Eli Lilly and Company</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Christopher Anderson</signature>
+          <title>Christopher Anderson, Vice President, Leader of Corporate Securities and Assistant Corporate Secretary</title>
+          <date>01/15/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+    </signatureInfo>
+  </formData>
+
+</edgarSubmission>

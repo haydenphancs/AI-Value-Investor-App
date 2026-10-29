@@ -158,6 +158,28 @@ def test_marketing_taps_still_go_to_marketing(fake, tg, configured, monkeypatch)
     assert out == {"ok": True, "refused": "unknown_action"} and called == []
 
 
+def test_a_z_tap_never_reaches_learn_and_a_y_tap_never_reaches_the_stake_finder(fake, tg, configured, monkeypatch):
+    """The two letters the marketing bot hands on (`y` Learn, `z` the Trillion Club stake finder) never cross."""
+    from app.services.trillion_club import stake_review
+
+    learn_calls, stake_calls = [], []
+
+    async def learn_spy(**kw):
+        learn_calls.append(kw["data"])
+        return True
+
+    async def stake_spy(**kw):
+        stake_calls.append(kw["data"])
+        return True
+    monkeypatch.setattr(review, "handle_learn_callback", learn_spy)
+    monkeypatch.setattr(stake_review, "handle_stake_callback", stake_spy)
+    pid = str(uuid.uuid4())
+    assert run(rs.handle_update(update(f"z:w:{pid}"))) == {"ok": True, "stakes": True, "decided": True}
+    assert run(rs.handle_update(update(f"y:a:{pid}"))) == {"ok": True, "learn": True, "decided": True}
+    assert learn_calls == [f"y:a:{pid}"] and stake_calls == [f"z:w:{pid}"]
+    assert review.parse_callback_data(f"z:w:{pid}") is None                # Learn never parses stake data
+
+
 # ── the callback grammar ──────────────────────────────────────────────────────────────────────
 
 

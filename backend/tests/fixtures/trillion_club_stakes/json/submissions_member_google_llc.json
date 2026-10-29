@@ -1,0 +1,47 @@
+{
+ "cik": "0001824723",
+ "entityType": "other",
+ "exchanges": [],
+ "filings": {
+  "files": [],
+  "recent": {
+   "acceptanceDateTime": [
+    "2026-09-25T20:15:03.000Z",
+    "2026-08-14T20:15:02.000Z"
+   ],
+   "accessionNumber": [
+    "0001193125-26-402852",
+    "0001193125-26-352289"
+   ],
+   "filingDate": [
+    "2026-09-25",
+    "2026-08-14"
+   ],
+   "form": [
+    "SCHEDULE 13G",
+    "SCHEDULE 13G"
+   ],
+   "items": [
+    "",
+    ""
+   ],
+   "primaryDocDescription": [
+    "",
+    ""
+   ],
+   "primaryDocument": [
+    "xslSCHEDULE_13G_X02/primary_doc.xml",
+    "xslSCHEDULE_13G_X02/primary_doc.xml"
+   ],
+   "reportDate": [
+    "",
+    ""
+   ]
+  }
+ },
+ "formerNames": [],
+ "name": "Google LLC",
+ "sic": "",
+ "sicDescription": "",
+ "tickers": []
+}

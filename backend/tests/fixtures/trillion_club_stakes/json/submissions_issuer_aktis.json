@@ -1,0 +1,27 @@
+{
+ "cik": "0002035832",
+ "entityType": "operating",
+ "exchanges": [
+  "Nasdaq"
+ ],
+ "filings": {
+  "files": [],
+  "recent": {
+   "acceptanceDateTime": [],
+   "accessionNumber": [],
+   "filingDate": [],
+   "form": [],
+   "items": [],
+   "primaryDocDescription": [],
+   "primaryDocument": [],
+   "reportDate": []
+  }
+ },
+ "formerNames": [],
+ "name": "Aktis Oncology, Inc.",
+ "sic": "2834",
+ "sicDescription": "Pharmaceutical Preparations",
+ "tickers": [
+  "AKTS"
+ ]
+}

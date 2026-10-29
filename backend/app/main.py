@@ -543,16 +543,20 @@ async def lifespan(app: FastAPI):
         _spawn(run_theme_rotation_loop(), "theme_rotation")
         _spawn(run_theme_insights_loop(), "theme_insights")
 
-        # Trillion-Dollar Club Bets: daily membership + 13F builds (07:00 ET) and the weekly
-        # re-hash / new-filer probe / discovery (Monday 08:00 ET). Both idle until
-        # TRILLION_CLUB_JOBS_ENABLED is set, which waits on migration 175 + its seed — see
-        # services/trillion_club/scheduler.py for the claim and the per-day attempt cap.
+        # Trillion-Dollar Club Bets: daily membership + 13F builds (07:00 ET), the weekly
+        # re-hash / new-filer probe / discovery (Monday 08:00 ET) and the stake finder's SEC
+        # run (18:30 ET daily, migration 205). All idle until TRILLION_CLUB_JOBS_ENABLED is
+        # set, which waits on migration 175 + its seed; the stake finder also needs
+        # TRILLION_CLUB_STAKE_FINDER_ENABLED (and 205) — see services/trillion_club/scheduler.py
+        # for the claims and the per-day attempt caps.
         from app.services.trillion_club.scheduler import (
             run_trillion_club_daily_loop,
+            run_trillion_club_stake_finder_loop,
             run_trillion_club_weekly_loop,
         )
         _spawn(run_trillion_club_daily_loop(), "trillion_club_daily")
         _spawn(run_trillion_club_weekly_loop(), "trillion_club_weekly")
+        _spawn(run_trillion_club_stake_finder_loop(), "trillion_club_stake_finder")
 
         # Wiser weekly engine: the Friday Feature Deep Dive — Thursday topic card, Friday
         # build + narration + owner review in Telegram, 23:00 ET publish (migration 204).

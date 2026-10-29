@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="UTF-8"?><edgarSubmission xmlns="http://www.sec.gov/edgar/schedule13g" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <schemaVersion>X0202</schemaVersion>
+<headerData>
+    <submissionType>SCHEDULE 13G</submissionType>
+    <filerInfo>
+      <filer>
+        <filerCredentials>
+          <cik>0001824723</cik>
+          <ccc>XXXXXXXX</ccc>
+        </filerCredentials>
+      </filer>
+      <liveTestFlag>LIVE</liveTestFlag>
+
+
+
+    </filerInfo>
+  </headerData>
+  <formData>
+    <coverPageHeader>
+      <securitiesClassTitle>Common Stock, par value $0.001 per share</securitiesClassTitle>
+      <eventDateRequiresFilingThisStatement>09/11/2026</eventDateRequiresFilingThisStatement>
+      <issuerInfo>
+        <issuerCik>0001083301</issuerCik>
+        <issuerName>TeraWulf Inc.</issuerName>
+        <issuerCusips>
+          <issuerCusipNumber>88080T104</issuerCusipNumber>
+        </issuerCusips>
+        <issuerPrincipalExecutiveOfficeAddress>
+          <street1 xmlns="http://www.sec.gov/edgar/common">9 Federal Street</street1>
+          <city xmlns="http://www.sec.gov/edgar/common">Easton</city>
+          <stateOrCountry xmlns="http://www.sec.gov/edgar/common">MD</stateOrCountry>
+          <zipCode xmlns="http://www.sec.gov/edgar/common">21601</zipCode>
+        </issuerPrincipalExecutiveOfficeAddress>
+      </issuerInfo>
+      <designateRulesPursuantThisScheduleFiled>
+        <designateRulePursuantThisScheduleFiled>Rule 13d-1(c)</designateRulePursuantThisScheduleFiled>
+      </designateRulesPursuantThisScheduleFiled>
+    </coverPageHeader>
+    <coverPageHeaderReportingPersonDetails>
+
+
+      <reportingPersonName>Google LLC</reportingPersonName>
+      <citizenshipOrOrganization>DE</citizenshipOrOrganization>
+      <reportingPersonBeneficiallyOwnedNumberOfShares>
+        <soleVotingPower>0.00</soleVotingPower>
+        <sharedVotingPower>41011803</sharedVotingPower>
+        <soleDispositivePower>0.00</soleDispositivePower>
+        <sharedDispositivePower>41011803</sharedDispositivePower>
+      </reportingPersonBeneficiallyOwnedNumberOfShares>
+      <reportingPersonBeneficiallyOwnedAggregateNumberOfShares>41011803</reportingPersonBeneficiallyOwnedAggregateNumberOfShares>
+      <aggregateAmountExcludesCertainSharesFlag>N</aggregateAmountExcludesCertainSharesFlag>
+      <classPercent>7.6</classPercent>
+      <typeOfReportingPerson>OO</typeOfReportingPerson>
+      <comments>Limited Liability Company</comments>
+    </coverPageHeaderReportingPersonDetails>
+    <coverPageHeaderReportingPersonDetails>
+
+      <reportingPersonName>XXVI Holdings Inc.</reportingPersonName>
+      <citizenshipOrOrganization>DE</citizenshipOrOrganization>
+      <reportingPersonBeneficiallyOwnedNumberOfShares>
+        <soleVotingPower>0.00</soleVotingPower>
+        <sharedVotingPower>41011803</sharedVotingPower>
+        <soleDispositivePower>0.00</soleDispositivePower>
+        <sharedDispositivePower>41011803</sharedDispositivePower>
+      </reportingPersonBeneficiallyOwnedNumberOfShares>
+      <reportingPersonBeneficiallyOwnedAggregateNumberOfShares>41011803</reportingPersonBeneficiallyOwnedAggregateNumberOfShares>
+      <aggregateAmountExcludesCertainSharesFlag>N</aggregateAmountExcludesCertainSharesFlag>
+      <classPercent>7.6</classPercent>
+      <typeOfReportingPerson>CO</typeOfReportingPerson>
+    </coverPageHeaderReportingPersonDetails>
+    <coverPageHeaderReportingPersonDetails>
+
+      <reportingPersonName>Alphabet Inc.</reportingPersonName>
+      <citizenshipOrOrganization>DE</citizenshipOrOrganization>
+      <reportingPersonBeneficiallyOwnedNumberOfShares>
+        <soleVotingPower>0.00</soleVotingPower>
+        <sharedVotingPower>41011803</sharedVotingPower>
+        <soleDispositivePower>0.00</soleDispositivePower>
+        <sharedDispositivePower>41011803</sharedDispositivePower>
+      </reportingPersonBeneficiallyOwnedNumberOfShares>
+      <reportingPersonBeneficiallyOwnedAggregateNumberOfShares>41011803</reportingPersonBeneficiallyOwnedAggregateNumberOfShares>
+      <aggregateAmountExcludesCertainSharesFlag>N</aggregateAmountExcludesCertainSharesFlag>
+      <classPercent>7.6</classPercent>
+      <typeOfReportingPerson>CO</typeOfReportingPerson>
+    </coverPageHeaderReportingPersonDetails>
+    <items>
+      <item1>
+        <issuerName>TeraWulf Inc.</issuerName>
+        <issuerPrincipalExecutiveOfficeAddress>9 Federal Street, Easton, MD 21601</issuerPrincipalExecutiveOfficeAddress>
+      </item1>
+      <item2>
+        <filingPersonName>Each of the following is hereinafter individually referred to as a "Reporting Person" and collectively as the "Reporting Persons."  This statement is filed on behalf of:
+
+Google LLC
+XXVI Holdings Inc.
+Alphabet Inc.
+</filingPersonName>
+        <principalBusinessOfficeOrResidenceAddress>The address of the Reporting Persons is 1600 Amphitheatre Parkway, Mountain View, CA 94043.</principalBusinessOfficeOrResidenceAddress>
+        <citizenship>Each of Google LLC, XXVI Holdings Inc. and Alphabet Inc. is an entity organized under the laws of the State of Delaware.</citizenship>
+      </item2>
+      <item3>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item3>
+      <item4>
+        <amountBeneficiallyOwned>The ownership information presented herein represents beneficial ownership of Common Stock as of September 11, 2026, based upon 539,980,480 shares of Common Stock outstanding, consisting of: (i) 498,968,677 shares of Common Stock outstanding as of July 31, 2026, as disclosed in the Issuer's Quarterly Report on Form 10-Q filed with the Securities and Exchange Commission on August 5, 2026, and (ii) 41,011,803 shares of Common Stock that are issuable upon the exercise of warrants owned by the Reporting Persons that are currently exercisable, or are exercisable within 60 days.
+
+The Reporting Persons are the beneficial owners of 41,011,803 shares of Common Stock that are issuable upon the exercise of warrants that are currently exercisable, or are exercisable within 60 days, held directly by Google LLC. Alphabet Inc. is the controlling stockholder of XXVI Holdings Inc., which is the managing member of Google LLC. As a result, the Reporting Persons may be deemed to share beneficial ownership of the securities owned directly by Google LLC.</amountBeneficiallyOwned>
+        <classPercent>7.6%</classPercent>
+        <numberOfSharesPersonHas>
+          <solePowerOrDirectToVote>0</solePowerOrDirectToVote>
+          <sharedPowerOrDirectToVote>41,011,803</sharedPowerOrDirectToVote>
+          <solePowerOrDirectToDispose>0</solePowerOrDirectToDispose>
+          <sharedPowerOrDirectToDispose>41,011,803</sharedPowerOrDirectToDispose>
+        </numberOfSharesPersonHas>
+      </item4>
+      <item5>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item5>
+      <item6>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item6>
+      <item7>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item7>
+      <item8>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item8>
+      <item9>
+        <notApplicableFlag>Y</notApplicableFlag>
+      </item9>
+      <item10>
+        <notApplicableFlag>N</notApplicableFlag>
+        <certifications>By signing below I certify that, to the best of my knowledge and belief, the securities referred to above were not acquired and are not held for the purpose of or with the effect of changing or influencing the control of the issuer of the securities and were not acquired and are not held in connection with or as a participant in any transaction having that purpose or effect, other than activities solely in connection with a nomination under § 240.14a-11.</certifications>
+      </item10>
+    </items>
+    <exhibitInfo>Exhibit 99.1: Joint Filing Agreement.</exhibitInfo>
+    <signatureInformation>
+      <reportingPersonName>Google LLC</reportingPersonName>
+      <signatureDetails>
+        <signature>/s/ Kathryn W. Hall</signature>
+        <title>Kathryn W. Hall, Assistant Secretary</title>
+        <date>09/25/2026</date>
+      </signatureDetails>
+    </signatureInformation>
+    <signatureInformation>
+      <reportingPersonName>XXVI Holdings Inc.</reportingPersonName>
+      <signatureDetails>
+        <signature>/s/ Kathryn W. Hall</signature>
+        <title>Kathryn W. Hall, Assistant Secretary</title>
+        <date>09/25/2026</date>
+      </signatureDetails>
+    </signatureInformation>
+    <signatureInformation>
+      <reportingPersonName>Alphabet Inc.</reportingPersonName>
+      <signatureDetails>
+        <signature>/s/ Kathryn W. Hall</signature>
+        <title>Kathryn W. Hall, Assistant Secretary</title>
+        <date>09/25/2026</date>
+      </signatureDetails>
+    </signatureInformation>
+  </formData>
+
+</edgarSubmission>

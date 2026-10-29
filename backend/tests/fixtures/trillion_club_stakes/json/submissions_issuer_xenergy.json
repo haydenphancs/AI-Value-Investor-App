@@ -1,0 +1,27 @@
+{
+ "cik": "0002088896",
+ "entityType": "operating",
+ "exchanges": [
+  "Nasdaq"
+ ],
+ "filings": {
+  "files": [],
+  "recent": {
+   "acceptanceDateTime": [],
+   "accessionNumber": [],
+   "filingDate": [],
+   "form": [],
+   "items": [],
+   "primaryDocDescription": [],
+   "primaryDocument": [],
+   "reportDate": []
+  }
+ },
+ "formerNames": [],
+ "name": "X-Energy, Inc.",
+ "sic": "3443",
+ "sicDescription": "Fabricated Plate Work (Boiler Shops)",
+ "tickers": [
+  "XE"
+ ]
+}

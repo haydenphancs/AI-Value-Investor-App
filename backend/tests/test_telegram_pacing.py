@@ -407,7 +407,9 @@ def _module_tree(rel: str) -> ast.Module:
 
 
 _SENDERS = ("app/services/marketing/review_service.py", "app/services/marketing/publish_feed.py",
-            "app/services/marketing/digest_service.py")
+            "app/services/marketing/digest_service.py",
+            # the Trillion Club stake finder's notes, proposals and digest (plan 2026-10-28, `z:` taps)
+            "app/services/trillion_club/stake_review.py")
 
 
 def _pacer_constructions(tree: ast.Module) -> List[int]:
@@ -487,6 +489,55 @@ def test_each_event_loop_gets_its_own_pacer_and_lock():
     assert first_in_loop2 < 1.0
     # in each loop the waiters after the first wait one gap each (≥ 2 gaps of 0.02 s), far under a second
     assert 0.03 <= elapsed1 < 1.0 and 0.03 <= elapsed2 < 1.0
+
+
+# ── the Trillion Club stake finder is one more sender to the same chat (plan 2026-10-28) ────────
+
+
+def _stake_bot_configured(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "MARKETING_TELEGRAM_REVIEW_CHAT_ID", CHAT)
+    monkeypatch.setattr(settings, "MARKETING_TELEGRAM_WEBHOOK_SECRET", "s3cret_Webhook-token")
+    monkeypatch.setattr(settings, "MARKETING_PUBLIC_BASE_URL", "https://caydexinvest.com")
+
+
+_STAKE_FINDING = {"id": "5b0c7a7e-3c1f-4e0a-9d6c-2f1e8b7a6c5d", "company_slug": "nvidia", "member_name": "NVIDIA",
+                  "accession": "0001045810-26-000123", "reason": "plain_13dg",
+                  "source_url": "https://www.sec.gov/Archives/edgar/data/1045810/x.htm"}
+
+
+@pytest.mark.asyncio
+async def test_the_stake_finders_sends_are_spaced_with_every_other_sender(clock, tg, monkeypatch):
+    from datetime import date
+
+    from app.services.trillion_club import stake_review as sr
+
+    _stake_bot_configured(monkeypatch)
+    sent: List[Tuple[str, float]] = []
+    tg.on_call = lambda method, payload: sent.append(("stakes", clock.now))
+    digest = [f"heads-up {i}: " + "x" * 800 for i in range(12)]
+    parts = len(sr.digest_parts(digest, today=date(2026, 10, 28))[0])
+    assert parts >= 3                                              # several sends, not one
+    ok, _ = await asyncio.gather(sr.TelegramStakeNotifier().send_digest(digest),
+                                 _paced_sweep("review", 3, sent, clock, rs._Pacer()))
+    assert ok is True and [n for n, _ in sent].count("stakes") == parts and len(sent) == parts + 3
+    times = sorted(t for _, t in sent)
+    assert all(b - a >= tp.SEND_SPACING_SECONDS - EPS for a, b in zip(times, times[1:])), times
+
+
+@pytest.mark.asyncio
+async def test_a_429_to_the_stake_finder_closes_the_chat_for_everyone_and_back(clock, tg, monkeypatch):
+    from app.services.trillion_club import stake_review as sr
+
+    _stake_bot_configured(monkeypatch)
+    tg.script["sendMessage"] = [_TG_429]
+    notifier = sr.TelegramStakeNotifier()
+    assert await notifier.send_auto_note(_STAKE_FINDING, {"investee_name": "Nebius Group N.V."}) is None
+    assert tp.is_rate_limited() and rs._rate_limited_until == tp.rate_limited_until()   # every sender sees it
+    with pytest.raises(TelegramFloodControlActive):
+        await tp.PACER.wait()                                                          # the Learn / marketing side
+    clock.now = tp.rate_limited_until() + 0.01
+    tp.note_rate_limit(120)                                                            # another sender's 429 now
+    assert await notifier.send_digest(["a line"]) is False and len(tg.calls) == 1      # refused, no request
 
 
 # ── classification of the two new Telegram classes ─────────────────────────────────────────────

@@ -1,0 +1,27 @@
+{
+ "cik": "0000883241",
+ "entityType": "operating",
+ "exchanges": [
+  "Nasdaq"
+ ],
+ "filings": {
+  "files": [],
+  "recent": {
+   "acceptanceDateTime": [],
+   "accessionNumber": [],
+   "filingDate": [],
+   "form": [],
+   "items": [],
+   "primaryDocDescription": [],
+   "primaryDocument": [],
+   "reportDate": []
+  }
+ },
+ "formerNames": [],
+ "name": "SYNOPSYS INC",
+ "sic": "7372",
+ "sicDescription": "Services-Prepackaged Software",
+ "tickers": [
+  "SNPS"
+ ]
+}

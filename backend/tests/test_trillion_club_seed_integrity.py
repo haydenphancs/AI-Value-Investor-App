@@ -14,6 +14,11 @@ pins three things, all hermetically (no network, no Supabase):
 3. The script: every validator rule can fail (a mutation per rule), a dry run writes
    nothing, --apply is additive, --update overwrites only drifted columns, a read failure
    never looks like an empty table, and one bad row never aborts the rest.
+4. The stake validator lives ONCE, in app/services/trillion_club/stake_rules.py (shared with
+   the stake finder), re-exported by the script as the same objects; and the script's
+   migration-205 awareness: `origin` read in the same select (one fallback before 205), rows
+   the stake finder made never orphans or drift, adoption under --apply --update, the
+   identity-duplicate warning.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ import copy
 import json
 import math
 import re
+import types
 from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List
@@ -783,7 +789,10 @@ class _FakeQuery:
         db = self.db
         db.calls.append((self.op, self.table_name, copy.deepcopy(self.payload), list(self.filters)))
         fail = db.fail.get((self.op, self.table_name))
-        if fail is not None and fail(self.payload, self.filters):
+        verdict = fail(self.payload, self.filters) if fail is not None else None
+        if isinstance(verdict, BaseException):   # a hook may name the exact error to raise
+            raise verdict
+        if verdict:
             raise _Boom(f"{self.op} {self.table_name} failed")
         rows = db.tables.setdefault(self.table_name, [])
         if self.op == "select":
@@ -1172,3 +1181,529 @@ def test_a_crash_inside_a_row_check_is_a_problem_not_a_traceback(seed, monkeypat
     problems = seed_mod.validate_seed(seed, today=TODAY)
     assert len(problems) == len(seed["stakes"])
     assert all("could not be validated (TypeError: unforeseen value)" in p for p in problems)
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# 8. stake_rules — the stake validator, moved out of the script on 2026-10-28
+# ══════════════════════════════════════════════════════════════════════════════════════
+# The stake finder must refuse exactly what the seed refuses (its gate 5), so the validator
+# and every helper it shares with company_problems live once, in stake_rules.py.
+
+_RULES = BACKEND / "app" / "services" / "trillion_club" / "stake_rules.py"
+_RULES_MODULE = "app.services.trillion_club.stake_rules"
+
+#: Every name the script defined itself until 2026-10-28 and now imports from stake_rules.
+_MOVED_TO_STAKE_RULES = (
+    "STAKE_COLUMNS", "STAKE_KEY", "SOURCE_CONFIDENCES", "INVESTEE_NAME_MAX", "SOURCE_TITLE_MAX",
+    "BACKGROUND_MAX", "INT4_MAX", "_CUSIP_RE", "_SYMBOL_RE", "_DATE_RE", "_UNSTORABLE_CHAR",
+    "_INVISIBLE_CATEGORIES", "_DISPLAY_TEXT_COLUMNS", "_is_bool", "_is_int", "_finite_number",
+    "_iso_date", "_is_https", "_text_ok", "_unstorable_columns", "_invisible_char_columns",
+    "_fold_name", "_fold_symbol", "_column_problems", "stake_problems", "stake_key",
+    "_folded_stake_key",
+)
+
+
+def _bound_names(node: ast.AST) -> set:
+    """The names one statement binds: def / class / assignment targets."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {node.name}
+    targets: List[ast.AST] = []
+    if isinstance(node, ast.Assign):
+        targets = list(node.targets)
+    elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+        targets = [node.target]
+    out = set()
+    for t in targets:
+        out |= {n.id for n in ast.walk(t) if isinstance(n, ast.Name)}
+    return out
+
+
+def stake_import_problems(script_src: str) -> List[str]:
+    """Why the script does NOT take every moved name from stake_rules unchanged: each must be
+    imported from it under its own name, and none bound again anywhere in the script (an `is`
+    check alone cannot see a re-declared 60 or 90 — small ints are shared objects)."""
+    tree = ast.parse(script_src)
+    from_rules: Dict[str, str] = {}
+    out: List[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                if isinstance(node, ast.ImportFrom) and node.module == _RULES_MODULE and node.level == 0:
+                    from_rules[bound] = alias.name
+                elif bound in _MOVED_TO_STAKE_RULES:
+                    out.append(f"{bound} is imported from {getattr(node, 'module', None)!r}, not stake_rules")
+        out += [f"{name} is re-declared in the script" for name in
+                sorted(_bound_names(node) & set(_MOVED_TO_STAKE_RULES))]
+    for name in _MOVED_TO_STAKE_RULES:
+        if from_rules.get(name) != name:
+            out.append(f"{name} is not imported from stake_rules under its own name")
+    return out
+
+
+def test_the_stake_validator_lives_once_in_stake_rules():
+    from app.services.trillion_club import stake_rules
+
+    for name in _MOVED_TO_STAKE_RULES:
+        assert getattr(seed_mod, name) is getattr(stake_rules, name), name
+    assert stake_import_problems(_SCRIPT.read_text(encoding="utf-8")) == []
+    top = set()
+    for node in ast.parse(_RULES.read_text(encoding="utf-8")).body:
+        top |= _bound_names(node)
+    assert set(_MOVED_TO_STAKE_RULES) <= top, sorted(set(_MOVED_TO_STAKE_RULES) - top)
+
+
+@pytest.mark.parametrize("mutate,expect", [
+    (lambda s: s + "\nINVESTEE_NAME_MAX = 60\n", "INVESTEE_NAME_MAX is re-declared"),
+    (lambda s: s + "\ndef stake_problems(row, companies, *, today=None):\n    return []\n",
+     "stake_problems is re-declared"),
+    (lambda s: s.replace("    _is_https,\n", "", 1), "_is_https is not imported from stake_rules"),
+    (lambda s: s.replace("    stake_key,\n", "    stake_key as _key_of,\n", 1),
+     "stake_key is not imported from stake_rules"),
+    (lambda s: s + "\nfrom app.services.trillion_club_service import stake_problem as _fold_name\n",
+     "_fold_name is imported from 'app.services.trillion_club_service'"),
+], ids=["constant", "function", "dropped", "aliased", "shadowed-by-another-import"])
+def test_stake_import_checker_fires(mutate, expect):
+    src = _SCRIPT.read_text(encoding="utf-8")
+    mutated = mutate(src)
+    assert mutated != src
+    assert any(expect in p for p in stake_import_problems(mutated)), stake_import_problems(mutated)
+
+
+def test_validate_seed_finds_stake_problems_through_the_script(seed, monkeypatch):
+    """validate_seed stays in the script and resolves stake_problems through the script's
+    globals (the crash test above patches it there), never stake_rules' own copy."""
+    seen = []
+
+    def spy(row, companies, *, today=None):
+        seen.append(row.get("investee_name"))
+        return []
+
+    monkeypatch.setattr(seed_mod, "stake_problems", spy)
+    assert seed_mod.validate_seed(seed, today=TODAY) == []
+    assert len(seen) == len(seed["stakes"])
+
+
+def test_the_investee_name_cap_is_one_number():
+    """stake_names (the finder's name cleaner) and stake_rules (the validator) each declare
+    the 60-character cap of migration 175; a name one accepts the other must too."""
+    from app.services.trillion_club import stake_names, stake_rules
+
+    assert (stake_rules.INVESTEE_NAME_MAX == stake_names.INVESTEE_NAME_MAX
+            == _char_bounds("trillion_club_stakes")["investee_name"][1] == 60)
+
+
+#: Imports stake_rules may make. It must validate without credentials and do no I/O: the
+#: seed's --validate-only needs no database, and the finder runs it on the event loop's path.
+_STAKE_RULES_ALLOWED_IMPORTS = frozenset({
+    "__future__", "datetime", "math", "re", "typing", "unicodedata",
+    "app.schemas.trillion_club", "app.services.trillion_club.copy_rules",
+    # Allowed by the stake-finder build contract (pure vocabularies); unused today.
+    "app.services.trillion_club.stake_contracts", "app.services.trillion_club.stake_names",
+})
+_IO_NAMES = frozenset({
+    "open", "__import__", "eval", "exec", "importlib", "import_module", "get_supabase",
+    "os", "sys", "socket", "httpx", "requests", "urllib", "subprocess", "settings",
+})
+
+
+def stake_rules_purity_problems(src: str) -> List[str]:
+    tree = ast.parse(src)
+    out: List[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                out.append(f"relative import of {node.module!r}")
+                continue
+            modules = [node.module]
+        else:
+            continue
+        out += [f"imports {m}" for m in modules if m not in _STAKE_RULES_ALLOWED_IMPORTS]
+    used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    used |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    out += [f"uses {name}" for name in sorted(used & _IO_NAMES)]
+    return out
+
+
+def test_stake_rules_stays_pure():
+    """Parsed from the source (never a sys.modules check, which only sees what one run
+    happened to import): stdlib + the club's pure schemas and copy rules."""
+    assert stake_rules_purity_problems(_RULES.read_text(encoding="utf-8")) == []
+
+
+@pytest.mark.parametrize("line", [
+    "import os",
+    "from app.database import get_supabase",
+    "from app.integrations.sec_edgar import SECEdgarClient",
+    "from app.services.trillion_club import jobs",
+    "from . import rules",
+    "import importlib",
+    "def _late():\n    from app.config import settings\n    return settings",
+    "_raw = open('x').read",
+    "_m = __import__('app.database')",
+], ids=["os", "database", "integration", "jobs", "relative", "importlib", "function-level",
+        "open", "dunder-import"])
+def test_stake_rules_purity_checker_fires(line):
+    src = _RULES.read_text(encoding="utf-8")
+    assert stake_rules_purity_problems(src + "\n" + line + "\n"), line
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# 9. Migration 205 — rows the stake finder made (origin 'auto' / 'proposal')
+# ══════════════════════════════════════════════════════════════════════════════════════
+
+_C, _S = seed_mod.COMPANIES_TABLE, seed_mod.STAKES_TABLE
+_READ_COLS = ",".join((*seed_mod.STAKE_COLUMNS, "origin"))
+_PRE_205_COLS = ",".join(seed_mod.STAKE_COLUMNS)
+_FINDING_A = "7f0c9a8e-1d2b-4c3d-9e8f-0a1b2c3d4e5f"
+_FINDING_B = "0b6e2f1a-3c4d-4e5f-8a9b-1c2d3e4f5a6b"
+_KEY_SPACEX = ("tesla", "SpaceX", "us_listed_off_13f")
+_KEY_NEBIUS = ("nvidia", "Nebius", "on_13f_note")
+_RESET = {"origin": "seed", "finding_id": None, "owner_kept_at": None, "withdrawn_at": None}
+
+
+def _api_error(code: Any, message: Any, details: Any = None) -> BaseException:
+    from postgrest.exceptions import APIError
+
+    return APIError({"code": code, "message": message, "details": details, "hint": None})
+
+
+def _missing_origin(kind: str) -> BaseException:
+    """How a database before migration 205 refuses a select naming `origin`."""
+    if kind == "42703":
+        return _api_error("42703", "column trillion_club_stakes.origin does not exist")
+    if kind == "PGRST204":
+        return _api_error("PGRST204", "Could not find the 'origin' column of "
+                                      "'trillion_club_stakes' in the schema cache")
+    return RuntimeError('column "origin" does not exist')   # no structured code at all
+
+
+def _refuse_origin(error: BaseException):
+    """A fail hook: only the stakes select that names `origin` is refused."""
+    return {("select", _S): lambda cols, _f: error if "origin" in cols.split(",") else None}
+
+
+def _stake_selects(fake: "_FakeSupabase") -> List[str]:
+    return [c[2] for c in fake.calls if c[0] == "select" and c[1] == _S]
+
+
+def _machine(row: Dict[str, Any], origin: str = "auto", **changes: Any) -> Dict[str, Any]:
+    """A stake row as the stake finder writes it (migration 205's columns included)."""
+    out = dict(copy.deepcopy(row), origin=origin, finding_id=_FINDING_A, owner_kept_at=None,
+               withdrawn_at=None, investee_cik=None)
+    out.update(changes)
+    return out
+
+
+def _messages(caplog, prefix: str) -> List[str]:
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith(prefix)]
+
+
+# ── The read ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_origin_is_read_in_the_same_select_as_the_seeded_columns(seed):
+    fake = _FakeSupabase(_db_from_seed(seed))
+    companies, stakes = seed_mod.fetch_existing(fake)
+    assert _stake_selects(fake) == [_READ_COLS]
+    assert len(companies) == len(seed["companies"]) and len(stakes) == len(seed["stakes"])
+
+
+@pytest.mark.parametrize("kind", ["42703", "PGRST204", "no-code"])
+def test_a_database_before_205_is_read_once_more_with_the_175_columns(seed, caplog, kind):
+    """Pre-205 no row can have been found automatically: the read falls back ONCE to the 21
+    columns, warns, and the run behaves exactly as before 205 (drift planned and written; no
+    payload names a 205 column)."""
+    db = _db_from_seed(seed)
+    _find(db[_S], company_slug="tesla", investee_name="SpaceX")["sort_order"] = 77
+    fake = _FakeSupabase(db, fail=_refuse_origin(_missing_origin(kind)))
+    with caplog.at_level("INFO"):
+        assert seed_mod.main(["--apply", "--update"], sb=fake) == 0
+    assert _stake_selects(fake) == [_READ_COLS, _PRE_205_COLS]
+    (warning,) = [m for m in _messages(caplog, _S) if "migration 205 is not applied" in m]
+    assert "origin" in warning
+    assert "found automatically: 0 rows" in caplog.text
+    (write,) = fake.writes()
+    assert write[1] == _S and write[3] == list(zip(seed_mod.STAKE_KEY, _KEY_SPACEX))
+    assert set(write[2]) == {"sort_order", "updated_at"}
+
+
+@pytest.mark.parametrize("error", [
+    _api_error("42703", "column trillion_club_stakes.listed_since does not exist"),
+    _api_error("42703", "column trillion_club_stakes.originator does not exist"),
+    _api_error("42P01", 'relation "public.trillion_club_stakes" does not exist'),
+    _api_error("PGRST301", "origin: JWT expired"),
+    _api_error(520, "JSON could not be generated",
+               "b'<!DOCTYPE html> the origin web server: column origin does not exist'"),
+    RuntimeError("connection reset by peer"),
+    RuntimeError("could not reach the origin server"),
+], ids=["other-column", "origin-prefix", "no-table", "other-code", "edge-520", "network",
+        "origin-not-a-column"])
+def test_only_a_missing_origin_column_is_retried(seed, caplog, error):
+    """Every other read failure is the old one: exit 1, one read, nothing written, and the
+    message names both migrations."""
+    fake = _FakeSupabase(_db_from_seed(seed), fail={("select", _S): lambda cols, _f: error})
+    with caplog.at_level("ERROR"):
+        assert seed_mod.main(["--apply", "--update"], sb=fake) == 1
+    assert _stake_selects(fake) == [_READ_COLS]
+    assert fake.writes() == []
+    (line,) = _messages(caplog, "Could not read the trillion club tables")
+    assert "175" in line and "205" in line
+
+
+def test_the_pre_205_fallback_is_tried_once(seed):
+    error = _missing_origin("42703")
+    fake = _FakeSupabase(_db_from_seed(seed), fail={("select", _S): lambda cols, _f: error})
+    assert seed_mod.main(["--apply"], sb=fake) == 1
+    assert _stake_selects(fake) == [_READ_COLS, _PRE_205_COLS]
+    assert fake.writes() == []
+
+
+class _FixedReads:
+    """Answers every select with a fixed `data` per table and has no write method at all."""
+
+    def __init__(self, data: Dict[str, Any]):
+        self.data, self.calls = data, []
+
+    def table(self, name):
+        outer = self
+
+        class _Q:
+            def select(self, cols):
+                outer.calls.append(("select", name, cols))
+                return self
+
+            def execute(self):
+                return types.SimpleNamespace(data=copy.deepcopy(outer.data[name]))
+
+        return _Q()
+
+
+@pytest.mark.parametrize("stakes", [None, {"rows": []}, [["tesla", "SpaceX"]], [{}, "SpaceX"]],
+                         ids=["null", "object", "row-is-a-list", "one-row-is-a-string"])
+def test_a_malformed_read_is_a_read_failure_never_a_crash(seed, stakes):
+    fake = _FixedReads({_C: copy.deepcopy(seed["companies"]), _S: stakes})
+    assert seed_mod.main(["--apply", "--update"], sb=fake) == 1
+
+
+@pytest.mark.parametrize("exc,expected", [
+    (_api_error("42703", "column trillion_club_stakes.origin does not exist"), True),
+    (_api_error(" 42703 ", "column trillion_club_stakes.origin does not exist"), True),
+    (_api_error("PGRST204", "Could not find the 'origin' column of 'trillion_club_stakes'"), True),
+    (_api_error("42703", None, "column trillion_club_stakes.origin does not exist"), True),
+    (RuntimeError('column "origin" does not exist'), True),
+    (RuntimeError("Could not find the 'origin' column of 'trillion_club_stakes' in the schema cache"), True),
+    (_api_error("42703", "column trillion_club_stakes.listed_since does not exist"), False),
+    (_api_error("42703", "column trillion_club_stakes.origin_note does not exist"), False),
+    (_api_error("23505", "duplicate key value violates unique constraint (origin)"), False),
+    (_api_error(520, "column origin does not exist"), False),
+    (_api_error(True, "column origin does not exist"), False),
+    (_api_error(42703.0, "column origin does not exist"), False),
+    (RuntimeError("origin unreachable"), False),
+    (RuntimeError(""), False),
+], ids=["42703", "42703-padded", "PGRST204", "42703-in-details", "text-only", "schema-cache-text",
+        "other-column", "origin-prefixed-column", "unique-violation", "int-code", "bool-code",
+        "float-code", "origin-word-only", "empty"])
+def test_the_missing_origin_classifier(exc, expected):
+    assert seed_mod._is_missing_origin_column(exc) is expected
+
+
+# ── Planning ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_a_null_or_absent_origin_is_a_seed_row(seed):
+    db = _db_from_seed(seed)
+    _find(db[_S], company_slug="tesla", investee_name="SpaceX").update(origin=None, sort_order=77)
+    _find(db[_S], company_slug="meta", investee_name="Scale AI").update(origin="seed", sort_order=78)
+    studio = dict(copy.deepcopy(_find(seed["stakes"], company_slug="apple")), investee_name="Studio Row")
+    db[_S].append(studio)   # no origin key at all: a pre-205 read, or a fake
+    plan = seed_mod.plan_sync(seed, db[_C], db[_S])
+    assert {k for k, _ in plan.stake_updates} == {_KEY_SPACEX, ("meta", "Scale AI", "private")}
+    assert plan.orphan_stakes == [seed_mod.stake_key(studio)]
+    assert (plan.stake_adoptions, plan.machine_stakes, plan.unknown_origin_stakes) == ([], [], [])
+
+
+def test_rows_found_automatically_are_never_orphans_or_drift(seed, caplog):
+    db = _db_from_seed(seed)
+    spacex = _find(seed["stakes"], company_slug="tesla", investee_name="SpaceX")
+    auto = _machine(spacex, investee_name="Rocket Lab Corp", investee_cusip=None,
+                    investee_us_symbol="RKLB", sort_order=900)
+    proposal = _machine(spacex, origin="proposal", investee_name="AST SpaceMobile",
+                        investee_cusip=None, investee_us_symbol="ASTS", published=False)
+    orphan = dict(copy.deepcopy(spacex), investee_name="Hand-added in Studio", investee_cusip=None,
+                  investee_us_symbol="HAND")
+    db[_S] += [auto, proposal, orphan]
+    plan = seed_mod.plan_sync(seed, db[_C], db[_S])
+    assert [seed_mod.stake_key(r) for r in plan.machine_stakes] == sorted(
+        [seed_mod.stake_key(auto), seed_mod.stake_key(proposal)], key=repr)
+    assert plan.orphan_stakes == [seed_mod.stake_key(orphan)]
+    assert not plan.stake_updates and not plan.stake_adoptions and not plan.has_changes
+    assert plan.identity_duplicates == [] and plan.unknown_origin_stakes == []
+    fake = _FakeSupabase(db)
+    with caplog.at_level("INFO"):
+        assert seed_mod.main(["--apply", "--update"], sb=fake) == 0
+    assert fake.writes() == []   # neither the finder's rows nor the orphan are ever written
+    assert "found automatically: 2 rows" in caplog.text
+    assert "tesla / Rocket Lab Corp (us_listed_off_13f): origin auto, published" in caplog.text
+    assert "tesla / AST SpaceMobile (us_listed_off_13f): origin proposal, unpublished" in caplog.text
+    (drift,) = _messages(caplog, "DRIFT")
+    assert "Hand-added in Studio" in drift and "Rocket Lab" not in drift and "AST SpaceMobile" not in drift
+
+
+def _adoption_db(seed) -> Dict[str, List[Dict[str, Any]]]:
+    """Two JSON stakes whose rows the finder made: SpaceX (auto, kept, nothing drifted) and
+    Nebius (a published proposal the owner withdrew, so unpublished, and re-sorted)."""
+    db = _db_from_seed(seed)
+    _find(db[_S], company_slug="tesla", investee_name="SpaceX").update(
+        origin="auto", finding_id=_FINDING_A, owner_kept_at="2026-10-20T12:00:00+00:00",
+        withdrawn_at=None)
+    _find(db[_S], company_slug="nvidia", investee_name="Nebius").update(
+        origin="proposal", finding_id=_FINDING_B, owner_kept_at=None,
+        withdrawn_at="2026-10-21T09:00:00+00:00", published=False, sort_order=900)
+    return db
+
+
+def test_a_json_stake_adopts_the_row_the_finder_made(seed):
+    db = _adoption_db(seed)
+    plan = seed_mod.plan_sync(seed, db[_C], db[_S])
+    assert {a.key: (a.diffs, a.origin) for a in plan.stake_adoptions} == {
+        _KEY_SPACEX: ({}, "auto"),
+        _KEY_NEBIUS: ({"published": (False, True), "sort_order": (900, 11)}, "proposal"),
+    }
+    assert plan.stake_updates == [] and plan.orphan_stakes == [] and plan.machine_stakes == []
+    assert plan.has_changes, "an adoption with nothing drifted is still a change"
+    assert plan.identity_duplicates == [], "the same key is an adoption, never a duplicate"
+
+
+def test_adoption_is_shown_in_the_dry_run_and_never_written_without_update(seed, caplog):
+    fake = _FakeSupabase(_adoption_db(seed))
+    with caplog.at_level("INFO"):
+        assert seed_mod.main([], sb=fake) == 0
+    assert fake.writes() == []
+    assert ("adopt stake tesla / SpaceX (us_listed_off_13f): found automatically (origin auto)"
+            in caplog.text)
+    assert ("adopt stake nvidia / Nebius (on_13f_note): found automatically (origin proposal)"
+            in caplog.text)
+    assert "~ stake nvidia / Nebius (on_13f_note).sort_order: 900 -> 11" in caplog.text
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        assert seed_mod.main(["--apply"], sb=fake) == 0
+    assert fake.writes() == [], "plain --apply makes no update, adoptions included"
+    assert "2 stake row(s) found automatically" in caplog.text and "pass --update to adopt" in caplog.text
+
+
+def test_apply_update_adopts_through_the_full_key_update(seed):
+    fake = _FakeSupabase(_adoption_db(seed))
+    assert seed_mod.main(["--apply", "--update"], sb=fake) == 0
+    writes = fake.writes()
+    assert [(w[0], w[1]) for w in writes] == [("update", _S), ("update", _S)]
+    for _, _, payload, filters in writes:
+        assert [c for c, _ in filters] == list(seed_mod.STAKE_KEY)   # the full key, nothing else
+        assert not set(payload) & (set(seed_mod.STAKE_KEY) | set(seed_mod.JOB_COLUMNS) | {"id"})
+    by_key = {tuple(v for _, v in filters): payload for _, _, payload, filters in writes}
+    spacex, nebius = by_key[_KEY_SPACEX], by_key[_KEY_NEBIUS]
+    assert set(spacex) == set(_RESET) | {"updated_at"}, "zero diffs: the reset alone"
+    assert {k: spacex[k] for k in _RESET} == _RESET
+    assert set(nebius) == set(_RESET) | {"published", "sort_order", "updated_at"}
+    assert {k: nebius[k] for k in _RESET} == _RESET and (nebius["published"], nebius["sort_order"]) == (True, 11)
+    row = _find(fake.tables[_S], company_slug="nvidia", investee_name="Nebius")
+    assert (row["origin"], row["finding_id"], row["withdrawn_at"], row["published"]) == ("seed", None, None, True)
+    # They are seed rows now: the next run plans nothing and writes nothing.
+    before = len(fake.calls)
+    assert seed_mod.main(["--apply", "--update"], sb=fake) == 0
+    assert [c for c in fake.calls[before:] if c[0] != "select"] == []
+
+
+def test_a_failed_adoption_is_counted_and_the_rest_continue(seed, caplog):
+    fake = _FakeSupabase(_adoption_db(seed), fail={
+        ("update", _S): lambda p, f: ("investee_name", "SpaceX") in f})
+    with caplog.at_level("ERROR"):
+        assert seed_mod.main(["--apply", "--update"], sb=fake) == 1
+    assert "FAILED to adopt stake tesla / SpaceX (us_listed_off_13f): _Boom" in caplog.text
+    assert _find(fake.tables[_S], company_slug="tesla", investee_name="SpaceX")["origin"] == "auto"
+    assert _find(fake.tables[_S], company_slug="nvidia", investee_name="Nebius")["origin"] == "seed"
+
+
+def test_a_row_with_an_unknown_origin_is_never_written(seed, caplog):
+    """Fail closed on a value 205's CHECK should make impossible (or a newer origin this
+    script predates): never updated, adopted, inserted over or called an orphan."""
+    db = _db_from_seed(seed)
+    listed = _find(db[_S], company_slug="tesla", investee_name="SpaceX")
+    listed.update(origin="announced", sort_order=77)     # the JSON lists it, and it drifted
+    stray = dict(copy.deepcopy(listed), investee_name="Unknown Origin Corp", origin=["auto"])
+    db[_S].append(stray)
+    plan = seed_mod.plan_sync(seed, db[_C], db[_S])
+    assert plan.unknown_origin_stakes == sorted(
+        [(_KEY_SPACEX, "announced"), (seed_mod.stake_key(stray), ["auto"])], key=lambda i: repr(i[0]))
+    assert (plan.stake_inserts, plan.stake_updates, plan.stake_adoptions) == ([], [], [])
+    assert (plan.orphan_stakes, plan.machine_stakes) == ([], [])
+    fake = _FakeSupabase(db)
+    with caplog.at_level("WARNING"):
+        assert seed_mod.main(["--apply", "--update"], sb=fake) == 0
+    assert fake.writes() == []
+    (warning,) = _messages(caplog, "UNKNOWN ORIGIN")
+    assert "tesla/SpaceX/us_listed_off_13f (origin 'announced')" in warning and "Unknown Origin Corp" in warning
+
+
+# ── Identity duplicates ───────────────────────────────────────────────────────────────────
+
+
+def test_a_json_stake_naming_a_row_found_automatically_under_another_key_is_warned(seed, caplog):
+    db = _db_from_seed(seed)
+    spacex = _find(seed["stakes"], company_slug="tesla", investee_name="SpaceX")
+    scale = _find(seed["stakes"], company_slug="meta", investee_name="Scale AI")
+    by_cusip = _machine(spacex, investee_name="Space Exploration Technologies", investee_us_symbol=None)
+    by_name = _machine(scale, investee_name="Scale AI, Inc.")          # private: no identifier at all
+    other_member = _machine(spacex, company_slug="nvidia", investee_name="SpaceX Holdings")
+    as_seed = dict(copy.deepcopy(by_cusip), investee_name="Space Exploration (seed row)", origin="seed")
+    db[_S] += [by_cusip, by_name, other_member, as_seed]
+    plan = seed_mod.plan_sync(seed, db[_C], db[_S])
+    assert sorted(plan.identity_duplicates) == sorted([
+        (_KEY_SPACEX, seed_mod.stake_key(by_cusip), "cusip"),
+        (("meta", "Scale AI", "private"), seed_mod.stake_key(by_name), "name"),
+    ])   # never against another member's row, and never seed-vs-seed (validate_seed's job)
+    fake = _FakeSupabase(db)
+    with caplog.at_level("WARNING"):
+        assert seed_mod.main([], sb=fake) == 0
+    assert fake.writes() == []
+    lines = _messages(caplog, "IDENTITY:")
+    assert len(lines) == 2
+    cusip_line = next(m for m in lines if "Space Exploration Technologies" in m)
+    assert "tesla/SpaceX/us_listed_off_13f" in cusip_line and "CUSIP" in cusip_line
+    name_line = next(m for m in lines if "Scale AI, Inc." in m)
+    assert "POSSIBLY the same company" in name_line
+
+
+def test_the_identity_check_uses_the_clubs_share_class_aliases(seed):
+    s = copy.deepcopy(seed)
+    spacex = _find(s["stakes"], company_slug="tesla", investee_name="SpaceX")
+    s["stakes"].append(dict(copy.deepcopy(spacex), investee_name="Alphabet", investee_cusip=None,
+                            investee_us_symbol="GOOG", sort_order=50))
+    machine = _machine(spacex, investee_name="Alphabet Inc. (Class A)", investee_cusip=None,
+                       investee_us_symbol="GOOGL")
+    db_stakes = _db_from_seed(s)[_S] + [machine]
+    pair = (("tesla", "Alphabet", "us_listed_off_13f"), seed_mod.stake_key(machine), "symbol")
+    assert pair in seed_mod.identity_duplicates(s, db_stakes)
+    for c in s["companies"]:          # without the club's aliases GOOG and GOOGL are two listings
+        c["symbol_aliases"] = []
+    assert pair not in seed_mod.identity_duplicates(s, db_stakes)
+
+
+def test_identity_check_tolerates_odd_rows(seed):
+    """Pure and total: odd values in the database rows or the JSON never raise."""
+    s = copy.deepcopy(seed)
+    s["companies"][0]["symbol_aliases"] = None
+    s["companies"][1]["cap_symbol"] = None
+    spacex = _find(seed["stakes"], company_slug="tesla", investee_name="SpaceX")
+    s["stakes"].append(dict(copy.deepcopy(spacex), company_slug=["tesla"], investee_name="Odd JSON"))
+    odd = [_machine(spacex, investee_name="Odd 1", investee_cusip=123, investee_us_symbol=["SPCX"]),
+           _machine(spacex, investee_name=None, investee_cusip="", investee_us_symbol=""),
+           _machine(spacex, company_slug=["tesla"], investee_name="Odd slug"),
+           {"origin": "auto"}]
+    assert seed_mod.identity_duplicates(s, odd) == []
+    # and a real duplicate beside the odd rows is still found
+    found = _machine(spacex, investee_name="SpaceX Corp")
+    assert seed_mod.identity_duplicates(s, [*odd, found]) == [
+        (_KEY_SPACEX, seed_mod.stake_key(found), "cusip")]

@@ -828,6 +828,8 @@ def test_a_valid_stake_passes():
     ({"listed_since": "June"}, "listed_since"),
     ({"source_confidence": "secondary"}, "primary"),
     ({"published": False}, "published"),
+    ({"withdrawn_at": "2026-10-28T22:31:00Z"}, "withdrawn"),
+    ({"withdrawn_at": "2026-10-28T22:31:00+00:00", "origin": "auto"}, "withdrawn"),
     ({"kind": "rumour"}, "kind"),
     ({"investee_name": ""}, "investee_name"),
     ({"investee_name": "x" * 61}, "investee_name"),
@@ -849,6 +851,16 @@ def test_a_valid_stake_passes():
 def test_a_malformed_stake_is_refused(over, reason):
     problem = stake_problem(_valid_stake(**over))
     assert problem is not None and reason in problem, problem
+
+
+@pytest.mark.parametrize("origin", ["seed", "auto", "proposal"])
+def test_a_machine_found_row_is_shown_like_a_hand_kept_one(origin):
+    """Migration 205's columns ride along in ``select("*")``; the read path needs no origin rule.
+    A row the stake finder published (origin auto / proposal) is a sourced fact like any other."""
+    row = _valid_stake(origin=origin, owner_kept_at=None, withdrawn_at=None,
+                       investee_cik="0001234567",
+                       finding_id=None if origin == "seed" else "6f1c0d3e-6a9b-4f43-9e1a-0d7d1f3e2b10")
+    assert stake_problem(row, TODAY) is None
 
 
 @pytest.mark.parametrize("column", ["as_of", "verified_on"])

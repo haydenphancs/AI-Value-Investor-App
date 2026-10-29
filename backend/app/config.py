@@ -1152,6 +1152,25 @@ class Settings(BaseSettings):
     TRILLION_CLUB_ENABLED: bool = False
     TRILLION_CLUB_JOBS_ENABLED: bool = False
 
+    # ── Trillion Club stake finder (migration 205, `services/trillion_club/stake_finder.py`) ──
+    # A daily 18:30 ET job reads SEC filings — a member's own Schedule 13D/13G (structured XML)
+    # and other companies' filings found through EDGAR full-text search — and turns a newly
+    # disclosed stake into an AUTO row (a member's plain-share 13D/13G only), a one-tap Telegram
+    # PROPOSAL, or a digest HEADS-UP. Also needs TRILLION_CLUB_JOBS_ENABLED, SEC_EDGAR_USER_AGENT
+    # and the marketing review bot: no delivered Withdraw note means nothing is published. The
+    # `notification_job_state` row `trillion_club_stake_finder` is the no-deploy stop.
+    TRILLION_CLUB_STAKE_FINDER_ENABLED: bool = False
+    # Evidence tiers that may auto-publish, comma-separated. This build accepts only `13dg`;
+    # `sec_closing` is the owner-approved follow-up after a reviewed trial and is refused (with
+    # an ERROR, like any unknown token) until it ships. Read at call time; blank = none.
+    TRILLION_CLUB_STAKE_AUTO_TIERS: str = ""
+    # Auto-publish only filings filed on or after this date (YYYY-MM-DD, ET); earlier ones come
+    # as proposals. Blank = never; malformed = an ERROR and never. A string parsed at call time,
+    # so a bad value can never stop the deploy. Moving it forward also resets the breaker.
+    TRILLION_CLUB_STAKE_AUTO_SINCE: str = ""
+    # How far back each daily run searches; the findings ledger makes the overlap free.
+    TRILLION_CLUB_STAKE_LOOKBACK_DAYS: int = Field(45, ge=7, le=120)
+
     # ── Wiser weekly content engine (migration 204, `services/learn_weekly/`) ─────────────────
     # A Friday "Feature Deep Dive" (and, later, a category piece on LEARN_SLOT_WEEKDAYS) written
     # from an SEC-grounded fact sheet, narrated by the separate `learn_narrator` service, approved

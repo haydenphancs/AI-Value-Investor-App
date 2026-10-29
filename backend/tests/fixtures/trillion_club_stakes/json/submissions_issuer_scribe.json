@@ -1,0 +1,27 @@
+{
+ "cik": "0001853921",
+ "entityType": "operating",
+ "exchanges": [
+  "Nasdaq"
+ ],
+ "filings": {
+  "files": [],
+  "recent": {
+   "acceptanceDateTime": [],
+   "accessionNumber": [],
+   "filingDate": [],
+   "form": [],
+   "items": [],
+   "primaryDocDescription": [],
+   "primaryDocument": [],
+   "reportDate": []
+  }
+ },
+ "formerNames": [],
+ "name": "Scribe Therapeutics, Inc.",
+ "sic": "2836",
+ "sicDescription": "Biological Products, (No Diagnostic Substances)",
+ "tickers": [
+  "SCTX"
+ ]
+}

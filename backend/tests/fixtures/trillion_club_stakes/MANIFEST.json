@@ -1,0 +1,329 @@
+{
+ "documents": {
+  "amazon_openai_ex101": {
+   "accession": "0001104659-26-021050",
+   "cik": "0001018724",
+   "document": "tm267374d1_ex10-1.htm"
+  },
+  "coherent_closing_8k": {
+   "accession": "0001193125-26-084366",
+   "cik": "0000820318",
+   "document": "d42735d8k.htm"
+  },
+  "coreweave_closing_8k": {
+   "accession": "0001769628-26-000044",
+   "cik": "0001769628",
+   "document": "crwv-20260123.htm"
+  },
+  "intel_closing_8k": {
+   "accession": "0000050863-25-000204",
+   "cik": "0000050863",
+   "document": "intc-20251226.htm"
+  },
+  "intel_signing_8k": {
+   "accession": "0000050863-25-000155",
+   "cik": "0000050863",
+   "document": "intc-20250915.htm"
+  },
+  "inuvo_noise_8k": {
+   "accession": "0001654954-26-006459",
+   "cik": "0000829323",
+   "document": "inuvo_8k.htm"
+  },
+  "lumentum_preferred_8k": {
+   "accession": "0001193125-26-085412",
+   "cik": "0001633978",
+   "document": "d41019d8k.htm"
+  },
+  "marvell_google_warrant_ex41": {
+   "accession": "0001193125-26-356217",
+   "cik": "0001835632",
+   "document": "d412696dex41.htm",
+   "note": "first 40,000 characters of the HTML (preamble)"
+  },
+  "marvell_preferred_8k": {
+   "accession": "0001193125-26-134462",
+   "cik": "0001835632",
+   "document": "d113606d8k.htm"
+  },
+  "nokia_directed_6k": {
+   "accession": "0001104659-25-111065",
+   "cik": "0000924613",
+   "document": "tm2531166d1_6k.htm"
+  },
+  "synopsys_closing_8k": {
+   "accession": "0001193125-25-303209",
+   "cik": "0000883241",
+   "document": "d36680d8k.htm"
+  }
+ },
+ "efts": {
+  "efts_google_llc_2026": {
+   "end": "2026-10-28",
+   "forms": "8-K,6-K,424B3,424B4,424B5,424B7,S-1,F-1",
+   "q": "\"Google LLC\" \"securities purchase agreement\" OR \"share purchase agreement\" OR \"stock purchase agreement\" OR \"subscription agreement\" OR \"investment agreement\" OR \"concurrent private placement\" OR \"indicated an interest\" OR \"directed share issuance\"",
+   "start": "2026-07-01"
+  },
+  "efts_lilly_2026_09_10": {
+   "end": "2026-10-28",
+   "forms": "8-K,6-K,424B3,424B4,424B5,424B7,S-1,F-1",
+   "q": "\"Eli Lilly and Company\" \"securities purchase agreement\" OR \"share purchase agreement\" OR \"stock purchase agreement\" OR \"subscription agreement\" OR \"investment agreement\" OR \"concurrent private placement\" OR \"indicated an interest\" OR \"directed share issuance\"",
+   "start": "2026-09-01"
+  },
+  "efts_nvidia_2025q4_2026q1": {
+   "end": "2026-03-31",
+   "forms": "8-K,6-K,424B3,424B4,424B5,424B7,S-1,F-1",
+   "q": "\"NVIDIA Corporation\" \"securities purchase agreement\" OR \"share purchase agreement\" OR \"stock purchase agreement\" OR \"subscription agreement\" OR \"investment agreement\" OR \"concurrent private placement\" OR \"indicated an interest\" OR \"directed share issuance\"",
+   "start": "2025-11-01"
+  },
+  "efts_nvidia_2026_10": {
+   "end": "2026-10-28",
+   "forms": "8-K,6-K,424B3,424B4,424B5,424B7,S-1,F-1",
+   "q": "\"NVIDIA Corporation\" \"securities purchase agreement\" OR \"share purchase agreement\" OR \"stock purchase agreement\" OR \"subscription agreement\" OR \"investment agreement\" OR \"concurrent private placement\" OR \"indicated an interest\" OR \"directed share issuance\"",
+   "start": "2026-10-01"
+  }
+ },
+ "excerpts": {
+  "iambic_424b4": {
+   "accession": "0001193125-26-422865",
+   "cik": "0001997038",
+   "document": "iambic_inception_424b4.htm",
+   "needles": [
+    "indicated an interest",
+    "NVIDIA"
+   ],
+   "note": "excerpts of the full (uncapped) text"
+  },
+  "meta_424b5_final": {
+   "accession": "0001193125-26-436410",
+   "cik": "0001326801",
+   "document": "d94886d424b5.htm",
+   "needles": [
+    "Cornerstone Investors",
+    "indicated an interest"
+   ],
+   "note": "excerpts of the full (uncapped) text"
+  }
+ },
+ "issuers": {
+  "aktis": {
+   "cik": "0002035832",
+   "name": "Aktis Oncology, Inc."
+  },
+  "cleanspark": {
+   "cik": "0000827876",
+   "name": "CLEANSPARK, INC."
+  },
+  "coherent": {
+   "cik": "0000820318",
+   "name": "COHERENT CORP."
+  },
+  "coreweave": {
+   "cik": "0001769628",
+   "name": "CoreWeave, Inc."
+  },
+  "intel": {
+   "cik": "0000050863",
+   "name": "INTEL CORP"
+  },
+  "ionetix": {
+   "cik": "0002108121",
+   "name": "Ionetix Corp / DE /"
+  },
+  "lumentum": {
+   "cik": "0001633978",
+   "name": "Lumentum Holdings Inc."
+  },
+  "marvell": {
+   "cik": "0001835632",
+   "name": "Marvell Technology, Inc."
+  },
+  "meta": {
+   "cik": "0001326801",
+   "name": "Meta Platforms, Inc."
+  },
+  "nebius": {
+   "cik": "0001513845",
+   "name": "Nebius Group N.V."
+  },
+  "nokia": {
+   "cik": "0000924613",
+   "name": "NOKIA CORP"
+  },
+  "proqr": {
+   "cik": "0001612940",
+   "name": "ProQR Therapeutics N.V."
+  },
+  "scribe": {
+   "cik": "0001853921",
+   "name": "Scribe Therapeutics, Inc."
+  },
+  "spacex": {
+   "cik": "0001181412",
+   "name": "SPACE EXPLORATION TECHNOLOGIES CORP"
+  },
+  "synopsys": {
+   "cik": "0000883241",
+   "name": "SYNOPSYS INC"
+  },
+  "terawulf": {
+   "cik": "0001083301",
+   "name": "TERAWULF INC."
+  },
+  "xenergy": {
+   "cik": "0002088896",
+   "name": "X-Energy, Inc."
+  }
+ },
+ "members": {
+  "alphabet": {
+   "cik": "0001652044",
+   "name": "Alphabet Inc.",
+   "tickers": [
+    "GOOGL",
+    "GOOG",
+    "GOOGM",
+    "GOOGN"
+   ]
+  },
+  "amazon": {
+   "cik": "0001018724",
+   "name": "AMAZON COM INC",
+   "tickers": [
+    "AMZN"
+   ]
+  },
+  "amd": {
+   "cik": "0000002488",
+   "name": "ADVANCED MICRO DEVICES INC",
+   "tickers": [
+    "AMD"
+   ]
+  },
+  "apple": {
+   "cik": "0000320193",
+   "name": "Apple Inc.",
+   "tickers": [
+    "AAPL"
+   ]
+  },
+  "broadcom": {
+   "cik": "0001730168",
+   "name": "Broadcom Inc.",
+   "tickers": [
+    "AVGO"
+   ]
+  },
+  "eli_lilly": {
+   "cik": "0000059478",
+   "name": "ELI LILLY & Co",
+   "tickers": [
+    "LLY"
+   ]
+  },
+  "google_llc": {
+   "cik": "0001824723",
+   "name": "Google LLC",
+   "tickers": []
+  },
+  "meta": {
+   "cik": "0001326801",
+   "name": "Meta Platforms, Inc.",
+   "tickers": [
+    "META"
+   ]
+  },
+  "micron": {
+   "cik": "0000723125",
+   "name": "MICRON TECHNOLOGY INC",
+   "tickers": [
+    "MU"
+   ]
+  },
+  "microsoft": {
+   "cik": "0000789019",
+   "name": "MICROSOFT CORP",
+   "tickers": [
+    "MSFT"
+   ]
+  },
+  "nvidia": {
+   "cik": "0001045810",
+   "name": "NVIDIA CORP",
+   "tickers": [
+    "NVDA"
+   ]
+  },
+  "samsung": {
+   "cik": "0000879316",
+   "name": "SAMSUNG ELECTRONICS CO LTD /FI",
+   "tickers": []
+  },
+  "spacex": {
+   "cik": "0001181412",
+   "name": "SPACE EXPLORATION TECHNOLOGIES CORP",
+   "tickers": [
+    "SPCX"
+   ]
+  },
+  "tesla": {
+   "cik": "0001318605",
+   "name": "Tesla, Inc.",
+   "tickers": [
+    "TSLA"
+   ]
+  },
+  "tsmc": {
+   "cik": "0001046179",
+   "name": "TAIWAN SEMICONDUCTOR MANUFACTURING CO LTD",
+   "tickers": [
+    "TSM",
+    "TSMWF"
+   ]
+  }
+ },
+ "recorded_at": "2026-10-28",
+ "schedules": {
+  "amazon_xenergy_13g": {
+   "accession": "0001104659-26-092071",
+   "filer_cik": "0001018724"
+  },
+  "google_spacex_13g": {
+   "accession": "0001193125-26-352289",
+   "filer_cik": "0001824723"
+  },
+  "google_terawulf_13g": {
+   "accession": "0001193125-26-402852",
+   "filer_cik": "0001824723"
+  },
+  "lilly_aktis_13d": {
+   "accession": "0001193125-26-013469",
+   "filer_cik": "0000059478"
+  },
+  "lilly_ionetix_13g": {
+   "accession": "0000059478-26-000070",
+   "filer_cik": "0000059478"
+  },
+  "lilly_proqr_13ga": {
+   "accession": "0000059478-26-000071",
+   "filer_cik": "0000059478"
+  },
+  "lilly_scribe_13d": {
+   "accession": "0000059478-26-000072",
+   "filer_cik": "0000059478"
+  },
+  "lilly_trex_13d": {
+   "accession": "0000059478-26-000095",
+   "filer_cik": "0000059478"
+  },
+  "nvidia_coreweave_13ga": {
+   "accession": "0001045810-26-000008",
+   "filer_cik": "0001045810"
+  },
+  "nvidia_nebius_13g": {
+   "accession": "0001045810-26-000062",
+   "filer_cik": "0001045810"
+  }
+ },
+ "source": "SEC EDGAR (public)"
+}

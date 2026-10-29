@@ -1,0 +1,33 @@
+{
+ "cik": "0001612940",
+ "entityType": "other",
+ "exchanges": [
+  "Nasdaq"
+ ],
+ "filings": {
+  "files": [],
+  "recent": {
+   "acceptanceDateTime": [],
+   "accessionNumber": [],
+   "filingDate": [],
+   "form": [],
+   "items": [],
+   "primaryDocDescription": [],
+   "primaryDocument": [],
+   "reportDate": []
+  }
+ },
+ "formerNames": [
+  {
+   "from": "2014-07-11T00:00:00.000Z",
+   "name": "ProQR Therapeutics B.V.",
+   "to": "2014-10-03T00:00:00.000Z"
+  }
+ ],
+ "name": "ProQR Therapeutics N.V.",
+ "sic": "2834",
+ "sicDescription": "Pharmaceutical Preparations",
+ "tickers": [
+  "PRQR"
+ ]
+}

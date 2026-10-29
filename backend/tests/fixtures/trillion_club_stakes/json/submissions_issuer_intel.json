@@ -1,0 +1,27 @@
+{
+ "cik": "0000050863",
+ "entityType": "operating",
+ "exchanges": [
+  "Nasdaq"
+ ],
+ "filings": {
+  "files": [],
+  "recent": {
+   "acceptanceDateTime": [],
+   "accessionNumber": [],
+   "filingDate": [],
+   "form": [],
+   "items": [],
+   "primaryDocDescription": [],
+   "primaryDocument": [],
+   "reportDate": []
+  }
+ },
+ "formerNames": [],
+ "name": "INTEL CORP",
+ "sic": "3674",
+ "sicDescription": "Semiconductors & Related Devices",
+ "tickers": [
+  "INTC"
+ ]
+}

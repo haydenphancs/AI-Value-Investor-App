@@ -1,0 +1,615 @@
+{
+ "hits": {
+  "hits": [
+   {
+    "_id": "0001104659-25-111065:tm2531166d1_6k.htm",
+    "_source": {
+     "adsh": "0001104659-25-111065",
+     "ciks": [
+      "0000924613"
+     ],
+     "display_names": [
+      "NOKIA CORP  (NOK, NOKBF)  (CIK 0000924613)"
+     ],
+     "file_date": "2025-11-13",
+     "file_description": "FORM 6-K",
+     "file_type": "6-K",
+     "form": "6-K",
+     "items": [],
+     "period_ending": "2025-11-13",
+     "root_forms": [
+      "6-K"
+     ],
+     "sequence": 1
+    }
+   },
+   {
+    "_id": "0001104659-26-026163:tm268532d1_6k.htm",
+    "_source": {
+     "adsh": "0001104659-26-026163",
+     "ciks": [
+      "0001513845"
+     ],
+     "display_names": [
+      "Nebius Group N.V.  (NBIS)  (CIK 0001513845)"
+     ],
+     "file_date": "2026-03-11",
+     "file_description": "FORM 6-K",
+     "file_type": "6-K",
+     "form": "6-K",
+     "items": [],
+     "period_ending": "2026-03-11",
+     "root_forms": [
+      "6-K"
+     ],
+     "sequence": 1
+    }
+   },
+   {
+    "_id": "0001193125-25-303209:d36680d8k.htm",
+    "_source": {
+     "adsh": "0001193125-25-303209",
+     "ciks": [
+      "0000883241"
+     ],
+     "display_names": [
+      "SYNOPSYS INC  (SNPS)  (CIK 0000883241)"
+     ],
+     "file_date": "2025-12-01",
+     "file_description": "8-K",
+     "file_type": "8-K",
+     "form": "8-K",
+     "items": [
+      "3.02",
+      "7.01",
+      "9.01"
+     ],
+     "period_ending": "2025-12-01",
+     "root_forms": [
+      "8-K"
+     ],
+     "sequence": 1
+    }
+   },
+   {
+    "_id": "0001769628-26-000044:crwv-20260123.htm",
+    "_source": {
+     "adsh": "0001769628-26-000044",
+     "ciks": [
+      "0001769628"
+     ],
+     "display_names": [
+      "CoreWeave, Inc.  (CRWV)  (CIK 0001769628)"
+     ],
+     "file_date": "2026-01-26",
+     "file_description": "8-K",
+     "file_type": "8-K",
+     "form": "8-K",
+     "items": [
+      "3.02",
+      "7.01",
+      "8.01",
+      "9.01"
+     ],
+     "period_ending": "2026-01-23",
+     "root_forms": [
+      "8-K"
+     ],
+     "sequence": 1
+    }
+   },
+   {
+    "_id": "0001193125-26-134462:d113606d8k.htm",
+    "_source": {
+     "adsh": "0001193125-26-134462",
+     "ciks": [
+      "0001835632"
+     ],
+     "display_names": [
+      "Marvell Technology, Inc.  (MRVL)  (CIK 0001835632)"
+     ],
+     "file_date": "2026-03-31",
+     "file_description": "8-K",
+     "file_type": "8-K",
+     "form": "8-K",
+     "items": [
+      "3.02",
+      "5.03",
+      "7.01",
+      "9.01"
+     ],
+     "period_ending": "2026-03-31",
+     "root_forms": [
+      "8-K"
+     ],
+     "sequence": 1
+    }
+   },
+   {
+    "_id": "0001193125-26-085412:d41019d8k.htm",
+    "_source": {
+     "adsh": "0001193125-26-085412",
+     "ciks": [
+      "0001633978"
+     ],
+     "display_names": [
+      "Lumentum Holdings Inc.  (LITE)  (CIK 0001633978)"
+     ],
+     "file_date": "2026-03-02",
+     "file_description": "8-K",
+     "file_type": "8-K",
+     "form": "8-K",
+     "items": [
+      "3.02",
+      "5.03",
+      "7.01",
+      "9.01"
+     ],
+     "period_ending": "2026-03-02",
+     "root_forms": [
+      "8-K"
+     ],
+     "sequence": 1
+    }
+   },
+   {
+    "_id": "0000050863-25-000204:intc-20251226.htm",
+    "_source": {
+     "adsh": "0000050863-25-000204",
+     "ciks": [
+      "0000050863"
+     ],
+     "display_names": [
+      "INTEL CORP  (INTC)  (CIK 0000050863)"
+     ],
+     "file_date": "2025-12-29",
+     "file_description": "8-K",
+     "file_type": "8-K",
+     "form": "8-K",
+     "items": [
+      "3.02"
+     ],
+     "period_ending": "2025-12-26",
+     "root_forms": [
+      "8-K"
+     ],
+     "sequence": 1
+    }
+   },
+   {
+    "_id": "0001193125-26-084366:d42735d8k.htm",
+    "_source": {
+     "adsh": "0001193125-26-084366",
+     "ciks": [
+      "0000820318"
+     ],
+     "display_names": [
+      "COHERENT CORP.  (COHR)  (CIK 0000820318)"
+     ],
+     "file_date": "2026-03-02",
+     "file_description": "8-K",
+     "file_type": "8-K",
+     "form": "8-K",
+     "items": [
+      "3.02",
+      "7.01",
+      "9.01"
+     ],
+     "period_ending": "2026-03-02",
+     "root_forms": [
+      "8-K"
+     ],
+     "sequence": 1
+    }
+   },
+   {
+    "_id": "0001193125-26-085412:d41019dex31.htm",
+    "_source": {
+     "adsh": "0001193125-26-085412",
+     "ciks": [
+      "0001633978"
+     ],
+     "display_names": [
+      "Lumentum Holdings Inc.  (LITE)  (CIK 0001633978)"
+     ],
+     "file_date": "2026-03-02",
+     "file_description": "EX-3.1",
+     "file_type": "EX-3.1",
+     "form": "8-K",
+     "items": [
+      "3.02",
+      "5.03",
+      "7.01",
+      "9.01"
+     ],
+     "period_ending": "2026-03-02",
+     "root_forms": [
+      "8-K"
+     ],
+     "sequence": "2"
+    }
+   },
+   {
+    "_id": "0001193125-26-134462:d113606dex31.htm",
+    "_source": {
+     "adsh": "0001193125-26-134462",
+     "ciks": [
+      "0001835632"
+     ],
+     "display_names": [
+      "Marvell Technology, Inc.  (MRVL)  (CIK 0001835632)"
+     ],
+     "file_date": "2026-03-31",
+     "file_description": "EX-3.1",
+     "file_type": "EX-3.1",
+     "form": "8-K",
+     "items": [
+      "3.02",
+      "5.03",
+      "7.01",
+      "9.01"
+     ],
+     "period_ending": "2026-03-31",
+     "root_forms": [
+      "8-K"
+     ],
+     "sequence": "2"
+    }
+   },
+   {
+    "_id": "0001104659-26-019140:tm2533685-1_424b7.htm",
+    "_source": {
+     "adsh": "0001104659-26-019140",
+     "ciks": [
+      "0001811210"
+     ],
+     "display_names": [
+      "Lucid Group, Inc.  (LCID)  (CIK 0001811210)"
+     ],
+     "file_date": "2026-02-24",
+     "file_description": "424B7",
+     "file_type": "424B7",
+     "form": "424B7",
+     "items": [],
+     "period_ending": null,
+     "root_forms": [
+      "424B7"
+     ],
+     "sequence": 1
+    }
+   },
+   {
+    "_id": "0001104659-26-021050:tm267374d1_ex10-1.htm",
+    "_source": {
+     "adsh": "0001104659-26-021050",
+     "ciks": [
+      "0001018724"
+     ],
+     "display_names": [
+      "AMAZON COM INC  (AMZN)  (CIK 0001018724)"
+     ],
+     "file_date": "2026-02-27",
+     "file_description": "EXHIBIT 10.1",
+     "file_type": "EX-10.1",
+     "form": "8-K",
+     "items": [
+      "1.01",
+      "7.01",
+      "8.01",
+      "9.01"
+     ],
+     "period_ending": "2026-02-27",
+     "root_forms": [
+      "8-K"
+     ],
+     "sequence": "2"
+    }
+   },
+   {
+    "_id": "0001193125-26-021087:d22517d424b3.htm",
+    "_source": {
+     "adsh": "0001193125-26-021087",
+     "ciks": [
+      "0002007825",
+      "0001746727"
+     ],
+     "display_names": [
+      "Churchill Capital Corp X/Cayman  (CCCX, CCCXU, CCCXW)  (CIK 0002007825)",
+      "ColdQuanta, Inc.  (CIK 0001746727)"
+     ],
+     "file_date": "2026-01-23",
+     "file_description": "424B3",
+     "file_type": "424B3",
+     "form": "424B3",
+     "items": [],
+     "period_ending": null,
+     "root_forms": [
+      "424B3"
+     ],
+     "sequence": 1
+    }
+   },
+   {
+    "_id": "0001193125-25-302570:d64210ds1.htm",
+    "_source": {
+     "adsh": "0001193125-25-302570",
+     "ciks": [
+      "0001871638"
+     ],
+     "display_names": [
+      "Blaize Holdings, Inc.  (BZAI, BZAIW)  (CIK 0001871638)"
+     ],
+     "file_date": "2025-11-28",
+     "file_description": "S-1",
+     "file_type": "S-1",
+     "form": "S-1",
+     "items": [],
+     "period_ending": null,
+     "root_forms": [
+      "S-1"
+     ],
+     "sequence": 1
+    }
+   },
+   {
+    "_id": "0001104659-26-007608:tm264427d1_6k.htm",
+    "_source": {
+     "adsh": "0001104659-26-007608",
+     "ciks": [
+      "0000924613"
+     ],
+     "display_names": [
+      "NOKIA CORP  (NOK, NOKBF)  (CIK 0000924613)"
+     ],
+     "file_date": "2026-01-29",
+     "file_description": "FORM 6-K",
+     "file_type": "6-K",
+     "form": "6-K",
+     "items": [],
+     "period_ending": "2026-01-29",
+     "root_forms": [
+      "6-K"
+     ],
+     "sequence": 1
+    }
+   },
+   {
+    "_id": "0001871638-25-000016:a424b3prospectussupplement.htm",
+    "_source": {
+     "adsh": "0001871638-25-000016",
+     "ciks": [
+      "0001871638"
+     ],
+     "display_names": [
+      "Blaize Holdings, Inc.  (BZAI, BZAIW)  (CIK 0001871638)"
+     ],
+     "file_date": "2025-12-18",
+     "file_description": "424B3",
+     "file_type": "424B3",
+     "form": "424B3",
+     "items": [],
+     "period_ending": null,
+     "root_forms": [
+      "424B3"
+     ],
+     "sequence": 1
+    }
+   },
+   {
+    "_id": "0001104659-26-024172:tm268130d1_ex99-1.htm",
+    "_source": {
+     "adsh": "0001104659-26-024172",
+     "ciks": [
+      "0000924613"
+     ],
+     "display_names": [
+      "NOKIA CORP  (NOK, NOKBF)  (CIK 0000924613)"
+     ],
+     "file_date": "2026-03-05",
+     "file_description": "EXHIBIT 99.1",
+     "file_type": "EX-99.1",
+     "form": "6-K",
+     "items": [],
+     "period_ending": "2026-03-05",
+     "root_forms": [
+      "6-K"
+     ],
+     "sequence": "2"
+    }
+   },
+   {
+    "_id": "0001493152-26-009538:ex4-1.htm",
+    "_source": {
+     "adsh": "0001493152-26-009538",
+     "ciks": [
+      "0001144879"
+     ],
+     "display_names": [
+      "Applied Digital Corp.  (APLD)  (CIK 0001144879)"
+     ],
+     "file_date": "2026-03-10",
+     "file_description": "EX-4.1",
+     "file_type": "EX-4.1",
+     "form": "8-K",
+     "items": [
+      "1.01",
+      "2.03",
+      "5.02",
+      "9.01"
+     ],
+     "period_ending": "2026-03-10",
+     "root_forms": [
+      "8-K"
+     ],
+     "sequence": "2"
+    }
+   },
+   {
+    "_id": "0001493152-26-008756:form424b3.htm",
+    "_source": {
+     "adsh": "0001493152-26-008756",
+     "ciks": [
+      "0002076163"
+     ],
+     "display_names": [
+      "ProCap Financial, Inc.  (BRR, BRRWW)  (CIK 0002076163)"
+     ],
+     "file_date": "2026-03-04",
+     "file_description": "424B3",
+     "file_type": "424B3",
+     "form": "424B3",
+     "items": [],
+     "period_ending": null,
+     "root_forms": [
+      "424B3"
+     ],
+     "sequence": 1
+    }
+   },
+   {
+    "_id": "0001493152-25-024479:ex4-1.htm",
+    "_source": {
+     "adsh": "0001493152-25-024479",
+     "ciks": [
+      "0001144879"
+     ],
+     "display_names": [
+      "Applied Digital Corp.  (APLD)  (CIK 0001144879)"
+     ],
+     "file_date": "2025-11-20",
+     "file_description": "EX-4.1",
+     "file_type": "EX-4.1",
+     "form": "8-K",
+     "items": [
+      "1.01",
+      "2.03",
+      "9.01"
+     ],
+     "period_ending": "2025-11-20",
+     "root_forms": [
+      "8-K"
+     ],
+     "sequence": "2"
+    }
+   }
+  ],
+  "total": {
+   "relation": "eq",
+   "value": 20
+  }
+ },
+ "query": {
+  "_source": {
+   "exclude": [
+    "doc_text"
+   ]
+  },
+  "aggregations": {
+   "biz_states_filter": {
+    "terms": {
+     "field": "biz_states",
+     "size": 30
+    }
+   },
+   "entity_filter": {
+    "terms": {
+     "field": "display_names.raw",
+     "size": 30
+    }
+   },
+   "form_filter": {
+    "terms": {
+     "field": "root_forms",
+     "size": 30
+    }
+   },
+   "sic_filter": {
+    "terms": {
+     "field": "sics",
+     "size": 30
+    }
+   }
+  },
+  "from": 0,
+  "query": {
+   "bool": {
+    "filter": [
+     {
+      "terms": {
+       "root_forms": [
+        "8-K",
+        "6-K",
+        "424B3",
+        "424B4",
+        "424B5",
+        "424B7",
+        "S-1",
+        "F-1"
+       ]
+      }
+     },
+     {
+      "range": {
+       "file_date": {
+        "gte": "2025-11-01",
+        "lte": "2026-03-31"
+       }
+      }
+     }
+    ],
+    "minimum_should_match": 1,
+    "must": [
+     {
+      "match_phrase": {
+       "doc_text": "NVIDIA Corporation"
+      }
+     }
+    ],
+    "must_not": [],
+    "should": [
+     {
+      "match_phrase": {
+       "doc_text": "securities purchase agreement"
+      }
+     },
+     {
+      "match_phrase": {
+       "doc_text": "share purchase agreement"
+      }
+     },
+     {
+      "match_phrase": {
+       "doc_text": "stock purchase agreement"
+      }
+     },
+     {
+      "match_phrase": {
+       "doc_text": "subscription agreement"
+      }
+     },
+     {
+      "match_phrase": {
+       "doc_text": "investment agreement"
+      }
+     },
+     {
+      "match_phrase": {
+       "doc_text": "concurrent private placement"
+      }
+     },
+     {
+      "match_phrase": {
+       "doc_text": "indicated an interest"
+      }
+     },
+     {
+      "match_phrase": {
+       "doc_text": "directed share issuance"
+      }
+     }
+    ]
+   }
+  },
+  "size": 100
+ }
+}

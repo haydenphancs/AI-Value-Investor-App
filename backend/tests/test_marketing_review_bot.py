@@ -588,6 +588,59 @@ def test_bad_callback_data_decides_nothing(client, ledger, tg, data):
     assert tg.of("answerCallbackQuery") == [{"callback_query_id": "cbq-1", "text": "Unknown action"}]
 
 
+# ── `z:` taps: the Trillion Club stake finder rides this bot (plan 2026-10-28) ─────────────────
+
+
+@pytest.fixture
+def stake_spy(monkeypatch):
+    from app.services.trillion_club import stake_review
+
+    seen: List[Dict[str, Any]] = []
+
+    async def spy(**kw):
+        seen.append(kw)
+        return True
+    monkeypatch.setattr(stake_review, "handle_stake_callback", spy)
+    return seen
+
+
+def test_an_owners_z_tap_through_the_webhook_reaches_only_the_stake_review(client, ledger, tg, stake_spy):
+    pid = _seed_post(ledger)
+    r = _post_hook(client, _tap(pid, data=f"z:p:{_PID}"))
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    (call,) = stake_spy
+    assert call["data"] == f"z:p:{_PID}" and call["from_id"] == OWNER and call["chat_id"] == OWNER
+    assert call["message"]["message_id"] == 555 and call["cq_id"] == "cbq-1"
+    assert _post(ledger, pid)["status"] == "pending_review"         # no marketing decision was made
+    assert tg.calls == []                                           # the stake review owns the answer
+
+
+@pytest.mark.parametrize("kw", [{"from_id": OWNER + 1}, {"chat_id": OWNER + 1}, {"chat_id": -100123},
+                                {"from_id": str(OWNER)}, {"drop": ("from",)}, {"drop": ("message",)}])
+def test_a_strangers_z_tap_is_refused_before_the_stake_review(client, configured, tg, stake_spy, kw):
+    r = _post_hook(client, _tap(_PID, data=f"z:w:{_PID}", **kw))
+    assert r.status_code == 200 and stake_spy == []
+    assert tg.of("answerCallbackQuery") == [{"callback_query_id": "cbq-1", "text": "Not allowed"}]
+
+
+@pytest.mark.parametrize("data", [f"z:{_PID}", f"z:w:{_PID}", f"z:p:{_PID}", f"z:k:{_PID}", f"z:d:{_PID}",
+                                  f"Z:w:{_PID}", "z:", "z"])
+def test_marketing_never_parses_stake_data(data):
+    assert rs.parse_callback_data(data) is None
+    assert "z" not in rs._VERBS and rs.STAKES_CALLBACK_PREFIX == "z:"
+
+
+def test_a_z_tap_the_stake_review_cannot_take_is_answered_and_the_webhook_still_answers_200(client, configured,
+                                                                                           tg, monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "app.services.trillion_club.stake_review", None)
+    r = _post_hook(client, _tap(_PID, data=f"z:w:{_PID}"))
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert tg.of("answerCallbackQuery") == [{"callback_query_id": "cbq-1",
+                                             "text": "Could not record that — tap again"}]
+
+
 @pytest.mark.parametrize("update", [
     {"update_id": 1, "message": {"text": "hi", "chat": {"id": OWNER}}},
     {"update_id": 2},

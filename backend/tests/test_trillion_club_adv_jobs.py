@@ -1,9 +1,10 @@
 """Trillion-Dollar Club jobs — ADVERSARIAL tests (independent of test_trillion_club_jobs.py).
 
-Scope: ``app/services/trillion_club/{store,jobs,scheduler}.py``, the ``main.lifespan`` spawn /
-shutdown path, and ``scripts/preview_trillion_club.py``. HERMETIC: FMP is an in-memory fake,
-and Supabase is either an in-memory store or an in-memory PostgREST emulator reached through
-the REAL ``postgrest`` SDK over ``httpx.MockTransport`` (no socket is ever opened).
+Scope: ``app/services/trillion_club/{store,jobs,scheduler}.py`` (the daily, weekly and
+stake-finder loops), the ``main.lifespan`` spawn / shutdown path, and
+``scripts/preview_trillion_club.py``. HERMETIC: FMP is an in-memory fake, and Supabase is
+either an in-memory store or an in-memory PostgREST emulator reached through the REAL
+``postgrest`` SDK over ``httpx.MockTransport`` (no socket is ever opened).
 
 The emulator (``Wire``) implements, from migrations 147 and 175:
 
@@ -26,13 +27,14 @@ import copy
 import functools
 import json
 import logging
+import random
 import re
 import subprocess
 import sys
 import threading
 import types
 from collections import defaultdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -689,6 +691,59 @@ def test_weekly_due_uses_the_new_york_weekday(now, due):
     assert S.weekly_due(now) is due
 
 
+@pytest.mark.parametrize("now, expected", [
+    (utc(2026, 10, 28, 22, 29), utc(2026, 10, 28, 22, 30)),   # 18:29 EDT
+    (utc(2026, 10, 28, 22, 30), utc(2026, 10, 29, 22, 30)),   # exactly 18:30 EDT -> strictly after
+    (utc(2026, 10, 29, 3, 30), utc(2026, 10, 29, 22, 30)),    # 23:30 EDT Oct 28 (UTC already Oct 29)
+    (utc(2026, 10, 29, 4, 30), utc(2026, 10, 29, 22, 30)),    # 00:30 EDT Oct 29
+    (utc(2026, 10, 31, 23, 0), utc(2026, 11, 1, 23, 30)),     # Sat 19:00 EDT -> Sun 18:30 EST
+    (utc(2026, 11, 1, 5, 30), utc(2026, 11, 1, 23, 30)),      # 01:30 EDT, the fall-back day
+    (utc(2026, 11, 1, 6, 30), utc(2026, 11, 1, 23, 30)),      # 01:30 EST (the repeated hour)
+    (utc(2026, 11, 1, 22, 30), utc(2026, 11, 1, 23, 30)),     # 17:30 EST: yesterday's 22:30Z is no slot
+    (utc(2026, 11, 1, 23, 30), utc(2026, 11, 2, 23, 30)),     # exactly 18:30 EST
+    (utc(2027, 3, 13, 23, 30), utc(2027, 3, 14, 22, 30)),     # 18:30 EST Sat -> 18:30 EDT Sun
+    (utc(2027, 3, 14, 7, 30), utc(2027, 3, 14, 22, 30)),      # 03:30 EDT, just after the gap
+    (utc(2027, 3, 14, 22, 29), utc(2027, 3, 14, 22, 30)),
+    (utc(2026, 12, 31, 23, 31), utc(2027, 1, 1, 23, 30)),     # across the year end (EST)
+])
+def test_next_stakes_run_is_18_30_et_across_dst_and_midnight(now, expected):
+    assert S.next_stakes_run(now) == expected
+    assert S.next_stakes_run(now) > now
+
+
+@pytest.mark.parametrize("now, due", [
+    (utc(2026, 10, 28, 22, 29), False), (utc(2026, 10, 28, 22, 30), True),     # EDT: 18:30 = 22:30Z
+    (utc(2026, 11, 2, 23, 29), False), (utc(2026, 11, 2, 23, 30), True),       # EST: 18:30 = 23:30Z
+    (utc(2026, 11, 1, 22, 30), False),                                         # 17:30 EST, fall-back day
+    (utc(2027, 3, 14, 22, 29), False), (utc(2027, 3, 14, 22, 30), True),       # spring-forward day
+    (utc(2026, 10, 29, 3, 59), True),                                          # 23:59 EDT Oct 28
+    (utc(2026, 10, 29, 4, 0), False),                                          # 00:00 EDT Oct 29
+])
+def test_stakes_due_follows_the_new_york_wall_clock(now, due):
+    assert S.stakes_due(now) is due
+
+
+def _et_slot(day):
+    return datetime.combine(day, dtime(18, 30), tzinfo=ET).astimezone(timezone.utc)
+
+
+def test_the_stake_slot_is_the_first_18_30_et_after_any_instant():
+    rng = random.Random(205)
+    start = utc(2026, 1, 1)
+    instants = [start + timedelta(seconds=rng.randrange(3 * 366 * 86400)) for _ in range(3000)]
+    for day in (date(2026, 11, 1), date(2027, 3, 14), date(2027, 11, 7), date(2028, 3, 12),
+                date(2026, 12, 31), date(2028, 2, 29)):
+        slot = _et_slot(day)
+        instants += [slot - timedelta(microseconds=1), slot, slot + timedelta(microseconds=1)]
+    for now in instants:
+        nxt = S.next_stakes_run(now)
+        local = nxt.astimezone(ET)
+        assert nxt > now and nxt.utcoffset() == timedelta(0)
+        assert local.time() == dtime(18, 30), (now, nxt)
+        assert _et_slot(local.date() - timedelta(days=1)) <= now, f"{nxt} skipped a slot after {now}"
+        assert S.stakes_due(now) is (now.astimezone(ET).time() >= dtime(18, 30))
+
+
 # ═════════════════════════════════════════════════════════════════════════════════════
 # 2. Exactly-once: the real claim helpers over migration 147's RPCs
 # ═════════════════════════════════════════════════════════════════════════════════════
@@ -871,6 +926,199 @@ async def test_a_raising_run_releases_the_claim_so_another_instance_need_not_wai
     assert len(runs) == 2 and row["run_day"] == "2026-09-24"
 
 
+# ── The stake finder's loop (18:30 ET daily, migration 205) over the same ledger ─────
+
+SLOT = utc(2026, 10, 28, 22, 30)                 # Wed 18:30 EDT
+SLOT_DAY = date(2026, 10, 28)
+FINDER = "app.services.trillion_club.stake_finder"
+STAKES_OK = {"job": "stakes", "ok": True, "items": 2, "failures": []}
+STAKES_FAIL = {"job": "stakes", "ok": False, "items": 0, "failures": ["notes: no delivered note"]}
+
+
+@pytest.fixture
+def stakes(ledger, monkeypatch):
+    """The real claim helpers, the emulated ledger with 205's row, both switches on."""
+    ledger.wire.seed_ledger(S.JOB_TRILLION_CLUB_STAKE_FINDER)
+    monkeypatch.setattr(settings, "TRILLION_CLUB_STAKE_FINDER_ENABLED", True)
+    monkeypatch.setattr(S, "_stakes_attempts", {})
+    monkeypatch.setattr(S, "_logged_once", set())
+    return ledger
+
+
+def stake_run(outcomes, *, during=None):
+    runs = []
+
+    async def run(now):
+        runs.append(now)
+        if during is not None:
+            r = during()
+            if asyncio.iscoroutine(r):
+                await r
+        out = outcomes[min(len(runs), len(outcomes)) - 1]
+        if isinstance(out, BaseException):
+            raise out
+        return copy.deepcopy(out)
+
+    return run, runs
+
+
+async def stakes_tick_as(lg, counter, now, run):
+    """One stake-finder wake of ONE instance: `counter` is that process's attempt counter."""
+    lg.clock.t = now
+    S._stakes_attempts = counter
+    return await S._stakes_tick(now, run=run)
+
+
+@pytest.mark.asyncio
+async def test_two_instances_at_18_30_run_the_stake_finder_exactly_once(stakes):
+    held = []
+
+    async def hold_the_claim():
+        for _ in range(3000):
+            if stakes.wire.claim_calls >= 2:
+                break
+            await asyncio.sleep(0.001)
+        held.append(stakes.wire.claim_calls)
+
+    run, runs = stake_run([STAKES_OK], during=hold_the_claim)
+    a, b = {}, {}
+    results = await asyncio.gather(stakes_tick_as(stakes, a, SLOT, run),
+                                   stakes_tick_as(stakes, b, SLOT, run))
+    assert len(runs) == 1 and held == [2]
+    assert sorted(results, key=lambda x: (x is not None, x)) == [None, S.RETRY_SECONDS]
+    assert sorted([a.get(SLOT_DAY, 0), b.get(SLOT_DAY, 0)]) == [0, 1]
+    row = stakes.wire.ledger(S.JOB_TRILLION_CLUB_STAKE_FINDER)
+    assert row["run_day"] == "2026-10-28" and row["claim_at"] is None and row["items_written"] == 2
+    calls = stakes.wire.claim_calls
+    for h in (1, 3, 5):                       # later that ET day (the last one is 23:30 EDT)
+        assert await stakes_tick_as(stakes, a, SLOT + timedelta(hours=h), run) is None
+        assert await stakes_tick_as(stakes, b, SLOT + timedelta(hours=h), run) is None
+    assert len(runs) == 1 and stakes.wire.claim_calls == calls
+
+
+@pytest.mark.asyncio
+async def test_a_dead_instances_stake_claim_is_taken_over_only_after_the_hour(stakes):
+    run, runs = stake_run([STAKES_OK])
+    row = stakes.wire.ledger(S.JOB_TRILLION_CLUB_STAKE_FINDER)
+    row["claim_at"] = SLOT.isoformat()             # claimed at 18:30, then the process died
+    b = {}
+    assert await stakes_tick_as(stakes, b, SLOT + timedelta(minutes=50), run) == S.RETRY_SECONDS
+    assert await stakes_tick_as(stakes, b, SLOT + timedelta(minutes=59, seconds=59), run) == \
+        S.RETRY_SECONDS
+    assert runs == [] and b.get(SLOT_DAY, 0) == 0
+    assert await stakes_tick_as(stakes, b, SLOT + timedelta(minutes=60), run) is None
+    assert len(runs) == 1 and row["run_day"] == "2026-10-28"
+
+
+@pytest.mark.asyncio
+async def test_a_failing_stake_run_is_capped_on_the_et_day_across_utc_midnight(stakes, caplog):
+    """18:30 EDT is 22:30 UTC, so the evening's retries cross UTC midnight: the cap and the
+    ledger day must both be the ET day."""
+    run, runs = stake_run([STAKES_FAIL])
+    counter = {}
+    for h in (0, 1, 2):                      # 18:30, 19:30, 20:30 EDT (the last is Oct 29 in UTC)
+        await stakes_tick_as(stakes, counter, SLOT + timedelta(hours=h), run)
+    assert len(runs) == 3 and counter == {SLOT_DAY: 3}
+    row = stakes.wire.ledger(S.JOB_TRILLION_CLUB_STAKE_FINDER)
+    assert row["run_day"] is None and row["claim_at"] is None
+    assert row["last_error"] == "notes: no delivered note"
+    reads = len(stakes.wire.requests("GET", "notification_job_state"))
+    assert await stakes_tick_as(stakes, counter, SLOT + timedelta(hours=5), run) is None   # 23:30 EDT
+    assert await stakes_tick_as(stakes, counter, SLOT + timedelta(hours=6), run) is None   # 00:30 EDT
+    assert len(runs) == 3 and len(stakes.wire.requests("GET", "notification_job_state")) == reads
+    assert sum("stake finder: all 3 attempts" in r.getMessage() and r.levelno == logging.ERROR
+               for r in caplog.records) == 1
+    assert await stakes_tick_as(stakes, counter, SLOT + timedelta(days=1), run) == S.RETRY_SECONDS
+    assert len(runs) == 4 and counter == {date(2026, 10, 29): 1}
+
+
+@pytest.mark.asyncio
+async def test_a_late_evening_stake_success_is_recorded_on_the_et_day(stakes):
+    run, runs = stake_run([STAKES_OK])
+    late = utc(2026, 10, 29, 1, 30)          # 21:30 EDT on Oct 28, already Oct 29 in UTC
+    assert await stakes_tick_as(stakes, {}, late, run) is None
+    row = stakes.wire.ledger(S.JOB_TRILLION_CLUB_STAKE_FINDER)
+    assert row["run_day"] == "2026-10-28"
+    assert await stakes_tick_as(stakes, {}, SLOT + timedelta(days=1), run) is None
+    assert len(runs) == 2 and row["run_day"] == "2026-10-29"
+
+
+@pytest.mark.asyncio
+async def test_the_stake_kill_switch_through_the_real_ledger(stakes):
+    run, runs = stake_run([STAKES_OK])
+    row = stakes.wire.ledger(S.JOB_TRILLION_CLUB_STAKE_FINDER)
+    row["enabled"] = False                    # 205's no-deploy stop
+    counter = {}
+    assert await stakes_tick_as(stakes, counter, SLOT, run) is None
+    assert runs == [] and stakes.wire.claim_calls == 0 and counter == {}
+    row["enabled"] = True
+    assert await stakes_tick_as(stakes, counter, SLOT + timedelta(hours=1), run) is None
+    assert len(runs) == 1 and row["run_day"] == "2026-10-28"
+
+
+@pytest.mark.asyncio
+async def test_the_three_jobs_keep_their_own_ledger_rows(stakes, monkeypatch):
+    run, runs = stake_run([STAKES_OK])
+    assert await stakes_tick_as(stakes, {}, SLOT, run) is None
+    daily = stakes.wire.ledger(S.JOB_TRILLION_CLUB_DAILY)
+    weekly = stakes.wire.ledger(S.JOB_TRILLION_CLUB_WEEKLY)
+    assert daily["run_day"] is None and weekly["run_day"] is None and daily["claim_at"] is None
+    # the next morning's daily runs, and its success does not end that day's stake run
+    daily_runs = scripted(monkeypatch, "run_daily", [OK])
+    morning = utc(2026, 10, 29, 11, 0)                                    # 07:00 EDT Oct 29
+    assert await tick_as(stakes, {}, morning) is None
+    assert len(daily_runs) == 1 and daily["run_day"] == "2026-10-29"
+    assert await stakes_tick_as(stakes, {}, SLOT + timedelta(days=1), run) is None
+    assert len(runs) == 2
+    assert stakes.wire.ledger(S.JOB_TRILLION_CLUB_STAKE_FINDER)["run_day"] == "2026-10-29"
+
+
+@pytest.mark.asyncio
+async def test_the_backstop_releases_the_stake_claim_so_the_next_wake_need_not_wait(stakes,
+                                                                                     monkeypatch):
+    monkeypatch.setattr(S, "_STAKES_RUN_BACKSTOP_SECONDS", 0.05)
+
+    async def hung(now):
+        await asyncio.Event().wait()
+
+    counter = {}
+    assert await asyncio.wait_for(stakes_tick_as(stakes, counter, SLOT, hung),
+                                  timeout=10) == S.RETRY_SECONDS      # never a hang
+    row = stakes.wire.ledger(S.JOB_TRILLION_CLUB_STAKE_FINDER)
+    assert row["claim_at"] is None and row["run_day"] is None, \
+        "a cancelled run must release its claim, never park it for the stale window"
+    assert row["last_error"].startswith("stake finder: cancelled by the scheduler after")
+    assert counter == {SLOT_DAY: 1}
+    run, runs = stake_run([STAKES_OK])                  # another instance, a minute later
+    assert await stakes_tick_as(stakes, {}, SLOT + timedelta(minutes=1), run) is None
+    assert len(runs) == 1 and row["run_day"] == "2026-10-28"
+
+
+@pytest.mark.asyncio
+async def test_finder_flag_off_makes_no_ledger_request_all_day(stakes, monkeypatch):
+    monkeypatch.setattr(settings, "TRILLION_CLUB_STAKE_FINDER_ENABLED", False)
+    run, runs = stake_run([STAKES_OK])
+    counter = {}
+    for h in range(24):                                   # 18:30 EDT, then hourly round the clock
+        assert await stakes_tick_as(stakes, counter, SLOT + timedelta(hours=h), run) is None
+    assert stakes.wire.log == [] and runs == [] and counter == {}
+
+
+@pytest.mark.asyncio
+async def test_finder_flag_turned_off_mid_run_settles_the_ledger_then_idles(stakes, monkeypatch):
+    run, runs = stake_run(
+        [STAKES_FAIL],
+        during=lambda: setattr(settings, "TRILLION_CLUB_STAKE_FINDER_ENABLED", False))
+    counter = {}
+    assert await stakes_tick_as(stakes, counter, SLOT, run) == S.RETRY_SECONDS
+    row = stakes.wire.ledger(S.JOB_TRILLION_CLUB_STAKE_FINDER)
+    assert len(runs) == 1 and row["claim_at"] is None and row["last_error"]
+    seen = len(stakes.wire.log)
+    assert await stakes_tick_as(stakes, counter, SLOT + timedelta(hours=1), run) is None
+    assert len(runs) == 1 and len(stakes.wire.log) == seen, \
+        "switched off, the retry wake must not touch the ledger at all"
+
+
 # ── main.lifespan: its shutdown cancels the spawned loop mid-run ─────────────────────
 
 
@@ -899,9 +1147,10 @@ async def _spawn_and_cancel_mid_run(ledger, monkeypatch):
     ledger.clock.t = NOW
     task = asyncio.create_task(S.run_trillion_club_daily_loop(), name="trillion_club_daily")
     await asyncio.wait_for(reached.wait(), timeout=10)
-    # what main.lifespan does on shutdown
+    # what main.lifespan does on shutdown — bounded, so a loop that swallowed the cancel (and
+    # went to sleep for an hour) fails the test instead of hanging the suite
     task.cancel()
-    results = await asyncio.gather(task, return_exceptions=True)
+    results = await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=10)
     return results, wire
 
 
@@ -923,6 +1172,50 @@ async def test_shutdown_mid_run_settles_the_ledger_and_leaves_no_half_written_ro
     # the next instance does not wait out the stale window
     runs = scripted(monkeypatch, "run_daily", [OK])
     assert await tick_as(ledger, {}, NOW + timedelta(minutes=5)) is None and len(runs) == 1
+
+
+@pytest.mark.asyncio
+async def test_shutdown_mid_stake_run_through_the_real_loop_settles_the_ledger(stakes, monkeypatch,
+                                                                                caplog):
+    """The spawned loop as main.lifespan runs it: no injected ``run``, so the tick imports
+    ``stake_finder.run_stakes`` lazily (a stand-in module here), claims, runs, and a shutdown
+    cancel mid-run releases the claim at once."""
+    reached = asyncio.Event()
+    calls = []
+
+    async def run_stakes(now, **kw):
+        calls.append((now, kw))
+        reached.set()
+        await asyncio.Event().wait()
+
+    fake = types.ModuleType(FINDER)
+    fake.run_stakes = run_stakes
+    monkeypatch.setitem(sys.modules, FINDER, fake)
+    monkeypatch.setattr(S, "STAKES_BOOT_DELAY_SECONDS", 0)
+    monkeypatch.setattr(S, "datetime", frozen_datetime(stakes.clock))
+    stakes.clock.t = SLOT
+    task = asyncio.create_task(S.run_trillion_club_stake_finder_loop(),
+                               name="trillion_club_stake_finder")
+    await asyncio.wait_for(reached.wait(), timeout=10)
+    task.cancel()                                          # what main.lifespan does on shutdown
+    # bounded: a loop that swallowed the cancel would sleep for an hour, not end
+    [result] = await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=10)
+    assert isinstance(result, asyncio.CancelledError)
+    assert calls == [(SLOT, {})]
+    assert not [r for r in caplog.records if "tick failed" in r.getMessage()]
+    row = stakes.wire.ledger(S.JOB_TRILLION_CLUB_STAKE_FINDER)
+    assert row["claim_at"] is None and row["run_day"] is None
+    assert row["last_error"] == "cancelled (shutdown)", "a shutdown is not the backstop"
+    assert S._stakes_attempts == {SLOT_DAY: 1}
+
+    async def _must_not_run(now, **kw):
+        raise AssertionError("an injected run was ignored for the module's run_stakes")
+
+    fake.run_stakes = _must_not_run
+    run, runs = stake_run([STAKES_OK])                     # the next instance need not wait
+    assert await asyncio.wait_for(
+        stakes_tick_as(stakes, {}, SLOT + timedelta(minutes=5), run), timeout=10) is None
+    assert len(runs) == 1
 
 
 # ═════════════════════════════════════════════════════════════════════════════════════
@@ -1567,9 +1860,71 @@ def test_running_both_jobs_loads_no_notification_push_or_whale_module():
     assert bad == []
 
 
+_STAKE_RUNTIME_PROBE = r'''
+import asyncio, json, socket, sys
+from datetime import datetime, timezone
+
+def _deny(*a, **k):
+    raise RuntimeError("network from the stake runtime probe")
+socket.getaddrinfo = _deny
+socket.socket.connect = _deny
+
+sys.path.insert(0, "tests")
+import _trillion_club_stake_fakes as F
+import test_trillion_club_stake_backtest as B
+import app.integrations.fmp as fmp
+from app.config import settings
+from app.services.trillion_club import stake_finder as SF, stake_store as SS
+from app.services.trillion_club.stake_store import StakeStore
+from app.services.trillion_club.store import TrillionClubStore
+
+built = []
+_real_init = fmp.FMPClient.__init__
+def _spy(self, *a, **k):
+    built.append(1)
+    _real_init(self, *a, **k)
+fmp.FMPClient.__init__ = _spy
+
+SS.READ_BACKOFF_SECONDS = 0.0
+for name, value in (("TRILLION_CLUB_JOBS_ENABLED", True), ("TRILLION_CLUB_STAKE_FINDER_ENABLED", True),
+                    ("SEC_EDGAR_USER_AGENT", "Caydex probe probe@example.com"),
+                    ("TRILLION_CLUB_STAKE_AUTO_TIERS", "13dg"), ("TRILLION_CLUB_STAKE_AUTO_SINCE", "2026-01-01")):
+    setattr(settings, name, value)
+fake = F.make_fake(include_stakes=True)
+notifier = B.FakeNotifier()
+summary = asyncio.run(SF.run_stakes(B.NOW, sec=B.FakeSEC(), store=StakeStore(fake), notifier=notifier,
+                                    club_store=TrillionClubStore(fake)))
+print("RESULT=" + json.dumps({"ok": summary["ok"], "items": summary["items"], "failures": summary["failures"],
+                              "sent": sorted({k for k, _ in notifier.calls}), "misuse": fake.misuse,
+                              "fmp_clients": len(built), "fmp_global": fmp._fmp_client is not None,
+                              "modules": sorted(m for m in sys.modules if m.startswith("app."))}))
+'''
+
+
+def test_a_whole_stake_run_loads_no_notification_push_or_whale_module_and_never_builds_an_fmp_client():
+    """The stake finder RUNS (reconcile → S1 → S2 → digest, over the real seed and every
+    recorded SEC document) in a fresh interpreter with the network denied: it loads no
+    notification / push / whale module, constructs no FMP client (plan v3: no FMP on this
+    path — the club's job helpers import the module, the finder never calls it), and ends ok."""
+    out = subprocess.run([sys.executable, "-c", _STAKE_RUNTIME_PROBE], cwd=BACKEND,
+                         capture_output=True, text=True, timeout=300)
+    assert out.returncode == 0, out.stderr[-3000:]
+    line = next(l for l in out.stdout.splitlines() if l.startswith("RESULT="))
+    result = json.loads(line[len("RESULT="):])
+    assert result["ok"] is True and result["failures"] == [] and result["items"] > 0, result
+    assert result["misuse"] == [] and "proposal" in result["sent"] and "digest" in result["sent"], result
+    assert result["fmp_clients"] == 0 and result["fmp_global"] is False, result
+    bad = [m for m in result["modules"] if m.startswith(_FORBIDDEN_AT_RUNTIME) or "apns" in m or ".push" in m]
+    assert bad == []
+
+
 # ═════════════════════════════════════════════════════════════════════════════════════
 # 10. main.lifespan: loops cancelled before the FMP client closes
 # ═════════════════════════════════════════════════════════════════════════════════════
+
+
+_TRILLION_LOOPS = ("run_trillion_club_daily_loop", "run_trillion_club_weekly_loop",
+                   "run_trillion_club_stake_finder_loop")
 
 
 def _shutdown_order_problems(src: str) -> list:
@@ -1583,6 +1938,7 @@ def _shutdown_order_problems(src: str) -> list:
                 and n.args and isinstance(n.args[0], ast.Call) and isinstance(n.args[0].func, ast.Name) \
                 and n.args[0].func.id.startswith("run_trillion_club_"):
             lines.setdefault("spawns", []).append(n.lineno)
+            lines.setdefault("loops", []).append(n.args[0].func.id)
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "cancel" \
                 and isinstance(n.func.value, ast.Name) and n.func.value.id == "task":
             lines.setdefault("cancel", n.lineno)
@@ -1590,8 +1946,8 @@ def _shutdown_order_problems(src: str) -> list:
                 and isinstance(n.value.func, ast.Name) and n.value.func.id == "close_fmp_client":
             lines.setdefault("close_fmp", n.lineno)
     problems = []
-    if len(lines.get("spawns", [])) != 2:
-        problems.append(f"expected 2 trillion club spawns, found {lines.get('spawns')}")
+    if sorted(lines.get("loops", [])) != sorted(_TRILLION_LOOPS):
+        problems.append(f"expected one spawn of each of {_TRILLION_LOOPS}, found {lines.get('loops')}")
     if not all(k in lines for k in ("yield", "cancel", "close_fmp")):
         return problems + [f"missing landmarks: {lines}"]
     if any(s > lines["yield"] for s in lines.get("spawns", [])):
@@ -1599,6 +1955,10 @@ def _shutdown_order_problems(src: str) -> list:
     if not lines["yield"] < lines["cancel"] < lines["close_fmp"]:
         problems.append("background loops are not cancelled before close_fmp_client()")
     return problems
+
+
+_STAKE_SPAWN_LINE = ('        _spawn(run_trillion_club_stake_finder_loop(), '
+                     '"trillion_club_stake_finder")\n')
 
 
 def test_main_cancels_the_spawned_loops_before_closing_the_fmp_client():
@@ -1609,6 +1969,12 @@ def test_main_cancels_the_spawned_loops_before_closing_the_fmp_client():
     moved = src.replace("    await close_fmp_client()\n", "", 1).replace(
         marker, "    await close_fmp_client()\n" + marker, 1)
     assert moved != src and _shutdown_order_problems(moved), "the guard is not vacuous"
+    # the stake finder's spawn: dropped, or moved past the yield (never cancelled), goes red
+    assert src.count(_STAKE_SPAWN_LINE) == 1
+    dropped = src.replace(_STAKE_SPAWN_LINE, "", 1)
+    after_yield = dropped.replace("    yield\n", "    yield\n" + _STAKE_SPAWN_LINE[4:], 1)
+    for mutant in (dropped, after_yield):
+        assert mutant != src and _shutdown_order_problems(mutant)
 
 
 # ═════════════════════════════════════════════════════════════════════════════════════

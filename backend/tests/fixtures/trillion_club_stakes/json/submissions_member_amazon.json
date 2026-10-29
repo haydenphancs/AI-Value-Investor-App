@@ -1,0 +1,91 @@
+{
+ "cik": "0001018724",
+ "entityType": "operating",
+ "exchanges": [
+  "Nasdaq"
+ ],
+ "filings": {
+  "files": [],
+  "recent": {
+   "acceptanceDateTime": [
+    "2026-08-06T20:35:35.000Z",
+    "2026-04-29T20:39:03.000Z",
+    "2026-03-26T19:25:54.000Z",
+    "2026-02-10T21:29:29.000Z",
+    "2025-10-14T20:05:43.000Z",
+    "2025-04-14T20:28:10.000Z",
+    "2025-02-07T21:42:28.000Z"
+   ],
+   "accessionNumber": [
+    "0001104659-26-092071",
+    "0002100119-26-000133",
+    "0000102909-26-000582",
+    "0001104659-26-012665",
+    "0001104659-25-099267",
+    "0001104659-25-034700",
+    "0001104659-25-010585"
+   ],
+   "filingDate": [
+    "2026-08-06",
+    "2026-04-29",
+    "2026-03-26",
+    "2026-02-10",
+    "2025-10-14",
+    "2025-04-14",
+    "2025-02-07"
+   ],
+   "form": [
+    "SCHEDULE 13G",
+    "SCHEDULE 13G",
+    "SCHEDULE 13G/A",
+    "SCHEDULE 13G",
+    "SCHEDULE 13G/A",
+    "SCHEDULE 13G/A",
+    "SCHEDULE 13G/A"
+   ],
+   "items": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "primaryDocDescription": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "primaryDocument": [
+    "xslSCHEDULE_13G_X02/primary_doc.xml",
+    "xslSCHEDULE_13G_X02/primary_doc.xml",
+    "xslSCHEDULE_13G_X02/primary_doc.xml",
+    "xslSCHEDULE_13G_X01/primary_doc.xml",
+    "xslSCHEDULE_13G_X01/primary_doc.xml",
+    "xslSCHEDULE_13G_X01/primary_doc.xml",
+    "xslSCHEDULE_13G_X01/primary_doc.xml"
+   ],
+   "reportDate": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ]
+  }
+ },
+ "formerNames": [],
+ "name": "AMAZON COM INC",
+ "sic": "5961",
+ "sicDescription": "Retail-Catalog & Mail-Order Houses",
+ "tickers": [
+  "AMZN"
+ ]
+}

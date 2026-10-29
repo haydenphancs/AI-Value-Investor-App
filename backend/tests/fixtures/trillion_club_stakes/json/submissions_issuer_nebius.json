@@ -1,0 +1,33 @@
+{
+ "cik": "0001513845",
+ "entityType": "other",
+ "exchanges": [
+  "Nasdaq"
+ ],
+ "filings": {
+  "files": [],
+  "recent": {
+   "acceptanceDateTime": [],
+   "accessionNumber": [],
+   "filingDate": [],
+   "form": [],
+   "items": [],
+   "primaryDocDescription": [],
+   "primaryDocument": [],
+   "reportDate": []
+  }
+ },
+ "formerNames": [
+  {
+   "from": "2011-04-28T04:00:00.000Z",
+   "name": "Yandex N.V.",
+   "to": "2024-08-16T04:00:00.000Z"
+  }
+ ],
+ "name": "Nebius Group N.V.",
+ "sic": "7370",
+ "sicDescription": "Services-Computer Programming, Data Processing, Etc.",
+ "tickers": [
+  "NBIS"
+ ]
+}

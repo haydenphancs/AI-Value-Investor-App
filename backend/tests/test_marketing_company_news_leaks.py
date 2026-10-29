@@ -22,6 +22,10 @@ stores them). So:
    input key that is not allow-listed. Congress Count: every member-identity value of the recorded
    row shape (senateID included) is absent from the records, the fact sheets, the scrubbed
    rows, the memo and every log line, and no salted hash leaves the count.
+7. **The stake finder (migration 205, 2026-10-28).** ``origin`` and ``owner_kept_at`` decide the
+   stakes read and never travel: a kept auto row's Keep stamp is a canary, and every text of a row
+   the read leaves out (an un-kept auto row, an unknown origin) is absent from the fact sheets and
+   the logs — through the database filter and through the strict re-check alone.
 
 Hermetic: the fakes come from `test_marketing_company_news_adapter` (sibling import, as
 `test_cards_round4_2026_10_08.py` does).
@@ -469,6 +473,78 @@ async def test_company_stakes_leak_nothing_but_their_fields(monkeypatch):
         low = json.dumps(sheet).lower()
         for canary in ("zqxcusip", "zqxupdated", "zqxownershipbasis", "zqxlogosym", "zqxnotice"):
             assert canary not in low
+
+
+#: Migration 205 (the Trillion Club stake finder, 2026-10-28): a KEPT auto row's Keep stamp is a canary — the record
+#: has no field for it — and so is every text of the rows the read leaves out (an un-kept auto row, and a row of an
+#: origin the read does not know), each otherwise publishable (lower-case canaries pass the source-title word list),
+#: so only the origin rule keeps them out.
+_KEPT_AT_CANARY = "2026-10-27T13:57:29.813579+00:00"
+_FINDER_CANARIES = ("813579", "13:57:29", "2026-10-27", "zqxautoname", "zqxautotitle", "zqxautobackground",
+                    "zqxoriginname", "zqxorigintitle", "zqxorigin", "zqxfindingid", "zqxinvesteecik", "zqxcusip",
+                    "zqxupdated")
+
+
+def _stake_finder_rows() -> List[Dict[str, Any]]:
+    canary = dict(source_url="https://www.sec.gov/Archives/edgar/data/ZQXURL/primary_doc.xml",
+                  investee_cusip="ZQXCUSIP1", updated_at="ZQXUPDATED", finding_id="ZQXFINDINGID",
+                  investee_cik="ZQXINVESTEECIK", withdrawn_at=None, sort_order=31313)
+    return [
+        # kept by the owner (with a figure the owner added in Studio after Keep), and published by the owner's tap
+        T.stake("nvidia", "Ayar Labs", origin="auto", owner_kept_at=_KEPT_AT_CANARY, disclosed_value_usd=155e6,
+                as_of="2026-09-30", **canary),
+        T.stake("nvidia", "Lambda", origin="proposal", disclosed_value_usd=480e6, as_of="2026-08-29", **canary),
+        # left out
+        T.stake("nvidia", "Zqxautoname Robotics", origin="auto", as_of="2026-10-20",
+                source_title="NVIDIA Schedule 13G zqxautotitle", background="Invested in a zqxautobackground round.",
+                **canary),
+        T.stake("nvidia", "Zqxoriginname Labs", origin="ZQXORIGIN", owner_kept_at=_KEPT_AT_CANARY, as_of="2026-10-21",
+                source_title="NVIDIA 10-Q zqxorigintitle", **canary),
+    ]
+
+
+def _all_keys(value: Any) -> Iterable[str]:
+    if isinstance(value, dict):
+        for k, v in value.items():
+            yield str(k)
+            yield from _all_keys(v)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _all_keys(v)
+
+
+@pytest.mark.parametrize("honour_or", [True, False], ids=["postgrest_filter", "strict_recheck"])
+@pytest.mark.asyncio
+async def test_the_stake_finders_columns_and_left_out_rows_leak_nothing(monkeypatch, caplog, honour_or):
+    """``origin`` / ``owner_kept_at`` decide the read and never travel: no fact sheet carries either column (nor the
+    finder's other columns), an origin value, or the Keep stamp; a row left out leaves no text in a sheet or a log line
+    (the unknown origin's VALUE is named in its WARNING, by design). Both through the database filter and through the
+    strict re-check alone (the filter missing). Mutation-checked by hand (2026-10-28, in memory): with
+    `_postable_stake_rows` removed the ``strict_recheck`` leg is red (both left-out rows became records)."""
+    caplog.set_level(logging.INFO, logger=A.__name__)
+    monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", True)
+    club, sb, _fmp = T.stakes_world(_stake_finder_rows())
+    sb.honour_or = honour_or
+    profiles = {"NVDA": _canary_profile("NVDA", "NVIDIA Corporation", exchange="NASDAQ", price=25.123456,
+                                        cap=8080808080.0)}
+    got = await A.candidates("company_stakes", run_date=T.STAKES_RUN, exclude=frozenset(), limit=5,
+                             deadline=time.monotonic() + 60.0,
+                             deps=A.NewsDeps(fmp=T.FakeFMP(profiles=profiles), club=club, sb=sb))
+    assert [r.investee_name for r in got.records] == ["Ayar Labs", "Lambda"]               # anti-vacuity
+    assert got.rejections == {}
+    for sheet in _sheets(got):
+        _assert_clean(sheet)
+        assert not set(_all_keys(sheet)) & {"origin", "owner_kept_at", "finding_id", "investee_cik", "withdrawn_at"}
+        assert not set(_all_strings(sheet)) & {"seed", "auto", "proposal"}
+        low = json.dumps(sheet).lower()
+        for canary in _FINDER_CANARIES:
+            assert canary not in low, canary
+    low_log = caplog.text.lower()
+    for canary in ("zqxautoname", "zqxautotitle", "zqxautobackground", "zqxoriginname", "zqxorigintitle", "813579",
+                   "13:57:29", "zqxurl"):
+        assert canary not in low_log, canary
+    assert "('ZQXORIGIN' ×1;" in caplog.text                         # the unknown origin was seen and left out
+    assert ("found automatically by the stake finder" in caplog.text) is (not honour_or)
 
 
 @pytest.mark.asyncio

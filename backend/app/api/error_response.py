@@ -1026,12 +1026,14 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
             _DEFAULT_STATUS[ErrorCode.MARKETING_PUBLISHER_UNAVAILABLE],
         )
 
-    # ── Brave Search (app/integrations/brave_search.py — report chat's web search) ──
+    # ── Brave Search (app/integrations/brave_search.py — Ask Cay AI's web search and the
+    # Updates Insights jump search) ──
     # By NAME, ahead of the heuristics: a 429's message says "HTTP 429" (→ FMP_RATE_LIMITED
     # below) and a timeout's says "timed out" (→ FMP_UNAVAILABLE), and neither is the
-    # market-data provider. The tool handler turns every Brave failure into a tool result, so
-    # none should reach a door; if one ever does, chat's own retry-later code is the honest
-    # answer (no new ErrorCode, so no new iOS `AppError` branch).
+    # market-data provider. Chat's tool handler turns every Brave failure into a tool result and
+    # the jump search into a skipped search, so none should reach a door; if one ever does,
+    # chat's own retry-later code is the honest answer (no new ErrorCode, so no new iOS
+    # `AppError` branch).
     if cls.startswith("bravesearch"):
         return ErrorCode.GEMINI_UNAVAILABLE, _DEFAULT_STATUS[ErrorCode.GEMINI_UNAVAILABLE]
 

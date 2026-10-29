@@ -1,18 +1,20 @@
 """Who may reach the Brave Search client — and the eval scripts may never reach it.
 
 Brave's Search API terms allow TRANSIENT storage only and forbid using results to evaluate or train
-an AI (§3(b)(xiii)). The code honours that by keeping the client behind ONE service
-(`chat_web_search_service`: per-user transient cache, no Supabase tier) and that service behind the
-chat doors. This file pins the import graph by AST (comments and docstrings can neither satisfy
-nor trip it):
+an AI (§3(b)(xiii)). The code honours that by keeping the client behind TWO services:
+`chat_web_search_service` (per-user transient cache, no Supabase tier) behind the chat doors, and,
+since 2026-10-28, `jump_web_search_service` behind the Updates Insights sweeper (its kept pages
+may live in the SHARED Insights card — the owner's decision, SYSTEM_DESIGN_GUIDELINES §9b.10a).
+This file pins the import graph by AST (comments and docstrings can neither satisfy nor trip it):
 
-* `app.integrations.brave_search` is imported only by `chat_web_search_service.py` and `main.py`
-  (the lifespan closer);
+* `app.integrations.brave_search` is imported only by `chat_web_search_service.py`,
+  `jump_web_search_service.py` and `main.py` (the lifespan closer);
 * `app.services.chat_web_search_service` only by `chat_tools.py`, `chat_service.py` and
-  `endpoints/chat.py`;
-* nothing under `backend/scripts/` or `app/services/marketing/` imports either;
+  `endpoints/chat.py`; `app.services.jump_web_search_service` only by `updates_insight_sweeper.py`;
+* nothing under `backend/scripts/` or `app/services/marketing/` imports any of them;
 * both eval scripts force `CHAT_REPORT_WEB_SEARCH_ENABLED = False` at module level, BEFORE any
-  function runs.
+  function runs, and they and the Insights card preview force `UPDATES_JUMP_WEB_SEARCH_ENABLED =
+  False` the same way.
 
 Anti-vacuity: each allowed importer must really import, and the scanner self-tests every import
 form it claims to see.

@@ -1,9 +1,11 @@
-"""`app.integrations.brave_search` — the thin Brave Search client behind report chat's web search.
+"""`app.integrations.brave_search` — the thin Brave Search client behind Ask Cay AI's web search and
+the Updates Insights jump search.
 
 Pins the request shape, the documented-fields-only parse, the `not_run` flag on every failure path
-(the service refunds a budget unit on exactly that flag), that no exception text ever carries the
+(each caller refunds a budget unit on exactly that flag), that no exception text ever carries the
 key, the URL or the query, the constant-repr key wrapper (Sentry frame variables), the lifespan
-closer, and `classify_exception`'s by-name branch.
+closer, `classify_exception`'s by-name branch, and that the monthly-quota warning fires only
+on a real quota (a monthly limit of 0 is unlimited).
 
 Hermetic: the module-level client is replaced with an `httpx.MockTransport`; nothing reaches the
 network. Settings are set explicitly per test (`Settings` reads `backend/.env`).
@@ -12,6 +14,7 @@ network. Settings are set explicitly per test (`Settings` reads `backend/.env`).
 from __future__ import annotations
 
 import json
+import random
 from typing import Any, Dict, List
 
 import httpx
@@ -361,12 +364,249 @@ async def test_close_is_idempotent_and_reopens(monkeypatch):
     await bs.close_brave_search_client()
 
 
+# ── the monthly-quota warning ─────────────────────────────────────────────────
+# Brave's rate-limiting guide: each X-RateLimit-* header carries one comma-separated value per
+# window, in the order the policy names them, and a monthly limit of 0 means UNLIMITED. The owner's
+# metered plan reads "remaining 0" for that window on every answer, and the old reader (the last
+# remaining value, alone) logged "monthly request quota nearly spent" on every search (2026-10-29).
+
+_DOC = {"x-ratelimit-limit": "1, 15000", "x-ratelimit-policy": "1;w=1, 15000;w=2592000"}
+_METERED = {"x-ratelimit-limit": "50, 0", "x-ratelimit-policy": "50;w=1, 0;w=2592000"}
+_REVERSED = {"x-ratelimit-limit": "15000, 1", "x-ratelimit-policy": "15000;w=2592000, 1;w=1"}
+_UNLIMITED_LINE = ("brave search: the plan has no monthly request quota (0 = unlimited); "
+                   "its spend limit is set in Brave's dashboard")
+
+
+@pytest.fixture(autouse=True)
+def _plan_not_yet_logged(monkeypatch):
+    # Both INFO lines are logged once per PROCESS: every test starts before either.
+    monkeypatch.setattr(bs, "_quota_logged", False)
+    monkeypatch.setattr(bs, "_unreadable_logged", False)
+
+
+def _quota_records(caplog) -> List[Any]:
+    return [r for r in caplog.records if r.name == bs.__name__]
+
+
 @pytest.mark.asyncio
-async def test_low_monthly_quota_is_warned(monkeypatch, configured, caplog):
-    _install(monkeypatch, [(200, _body([]), {"x-ratelimit-remaining": "1, 12"})])
-    with caplog.at_level("WARNING", logger=bs.__name__):
+@pytest.mark.parametrize("headers, warned", [
+    pytest.param({**_DOC, "x-ratelimit-remaining": "0, 12"}, "remaining=12 of 15000", id="doc-low"),
+    pytest.param({**_DOC, "x-ratelimit-remaining": "0, 50"}, "remaining=50 of 15000", id="at-threshold"),
+    pytest.param({**_DOC, "x-ratelimit-remaining": "0, 0"}, "remaining=0 of 15000", id="spent"),
+    pytest.param({**_DOC, "x-ratelimit-remaining": "0, 51"}, None, id="above-threshold"),
+    pytest.param({**_DOC, "x-ratelimit-remaining": "0, 14523"}, None, id="doc-healthy"),
+    # The production shape that warned on every search: no monthly quota at all.
+    pytest.param({**_METERED, "x-ratelimit-remaining": "49, 0"}, None, id="metered-unlimited"),
+    pytest.param({"x-ratelimit-limit": "50, 0", "x-ratelimit-remaining": "49, 0"}, None,
+                 id="metered-without-policy"),
+    pytest.param({"x-ratelimit-limit": "50", "x-ratelimit-policy": "50;w=1",
+                  "x-ratelimit-remaining": "0"}, None, id="burst-window-only"),
+    pytest.param({"x-ratelimit-remaining": "1, 12"}, None, id="remaining-without-a-limit"),
+    pytest.param({}, None, id="no-headers"),
+    # The policy decides which value is the month, not the position.
+    pytest.param({**_REVERSED, "x-ratelimit-remaining": "12, 0"}, "remaining=12 of 15000",
+                 id="policy-reversed-low"),
+    pytest.param({**_REVERSED, "x-ratelimit-remaining": "14000, 0"}, None, id="policy-reversed-healthy"),
+    pytest.param({"x-ratelimit-limit": "1, 500", "x-ratelimit-policy": "1;w=1, 500;w=86400",
+                  "x-ratelimit-remaining": "0, 12"}, None, id="a-daily-window-is-not-monthly"),
+    pytest.param({"x-ratelimit-limit": "1, 15000, 100000",
+                  "x-ratelimit-policy": "1;w=1, 15000;w=2592000, 100000;w=31536000",
+                  "x-ratelimit-remaining": "0, 12, 90000"}, "remaining=12 of 15000",
+                 id="the-month-beside-a-year"),
+    # The window is the parameter NAMED w, wherever it sits: a reader that takes the first or the
+    # last parameter, or refuses the others, finds no month here.
+    pytest.param({"x-ratelimit-limit": "15000, 1",
+                  "x-ratelimit-policy": "15000;q=15000;w=2592000;x=7, 1;q=1;w=1;x=7",
+                  "x-ratelimit-remaining": "12, 0"}, "remaining=12 of 15000",
+                 id="the-window-is-the-w-parameter"),
+    # Without a usable policy: Brave's documented order, two values only.
+    pytest.param({"x-ratelimit-limit": "1, 2000", "x-ratelimit-remaining": "0, 12"},
+                 "remaining=12 of 2000", id="no-policy-documented-order"),
+    pytest.param({"x-ratelimit-limit": "1, 15000", "x-ratelimit-policy": "1;w=1, 15000",
+                  "x-ratelimit-remaining": "0, 12"}, "remaining=12 of 15000",
+                 id="unreadable-policy-documented-order"),
+    pytest.param({"x-ratelimit-limit": "1, 15000", "x-ratelimit-policy": "1;w=1, 15000;w=x",
+                  "x-ratelimit-remaining": "0, 12"}, "remaining=12 of 15000",
+                 id="an-unreadable-w-falls-back-to-the-documented-order"),
+    pytest.param({"x-ratelimit-limit": "1, 15000", "x-ratelimit-remaining": "0, 12",
+                  "x-ratelimit-policy": "1;w=1, 15000;w=86400, 15000;w=2592000"},
+                 "remaining=12 of 15000", id="a-policy-of-another-length-is-not-used"),
+    pytest.param({"x-ratelimit-limit": "1, 15000, 9", "x-ratelimit-remaining": "0, 12, 3"}, None,
+                 id="three-values-without-policy"),
+    # Malformed: never a guess.
+    pytest.param({**_DOC, "x-ratelimit-remaining": "12"}, None, id="counts-disagree"),
+    pytest.param({**_DOC, "x-ratelimit-remaining": "x, 12"}, None, id="an-unreadable-part"),
+    pytest.param({**_DOC, "x-ratelimit-remaining": "x, 0, 12"}, None,
+                 id="an-unreadable-part-never-shifts-the-rest"),
+    pytest.param({**_DOC, "x-ratelimit-remaining": "0, -5"}, None, id="negative-remaining"),
+    pytest.param({"x-ratelimit-limit": "1, inf", "x-ratelimit-remaining": "0, 12"}, None,
+                 id="infinite-limit"),
+])
+async def test_the_monthly_quota_warning_needs_a_real_quota(monkeypatch, configured, caplog,
+                                                           headers, warned):
+    _install(monkeypatch, [(200, _body([]), headers)])
+    with caplog.at_level("INFO", logger=bs.__name__):
         await bs.web_search(QUERY)
-    assert any("quota nearly spent" in r.getMessage() for r in caplog.records)
+    warnings = [r.getMessage() for r in _quota_records(caplog) if r.levelname == "WARNING"]
+    if warned is None:
+        assert warnings == []
+    else:
+        assert len(warnings) == 1
+        assert "monthly request quota nearly spent" in warnings[0] and warned in warnings[0]
+
+
+@pytest.mark.asyncio
+async def test_a_metered_plan_is_logged_once_as_unlimited(monkeypatch, configured, caplog):
+    _install(monkeypatch, [(200, _body([]), {**_METERED, "x-ratelimit-remaining": "49, 0"})] * 2)
+    with caplog.at_level("INFO", logger=bs.__name__):
+        await bs.web_search(QUERY)
+        await bs.web_search(QUERY)
+    assert [(r.levelname, r.getMessage()) for r in _quota_records(caplog)] == [
+        ("INFO", _UNLIMITED_LINE)]
+
+
+@pytest.mark.asyncio
+async def test_a_quota_plan_logs_its_quota_once(monkeypatch, configured, caplog):
+    _install(monkeypatch, [(200, _body([]), {**_DOC, "x-ratelimit-remaining": "0, 14523"}),
+                           (200, _body([]), {**_DOC, "x-ratelimit-remaining": "0, 14522"})])
+    with caplog.at_level("INFO", logger=bs.__name__):
+        await bs.web_search(QUERY)
+        await bs.web_search(QUERY)
+    assert [r.getMessage() for r in _quota_records(caplog)] == [
+        "brave search: monthly request quota 15000, 14523 left"]
+
+
+@pytest.mark.asyncio
+async def test_an_answer_without_rate_limit_headers_leaves_the_plan_unlogged(monkeypatch, configured,
+                                                                             caplog):
+    _install(monkeypatch, [(200, _body([]), {"x-ratelimit-reset": "1, 2592000"}),
+                           (200, _body([]), {**_METERED, "x-ratelimit-remaining": "49, 0"})])
+    with caplog.at_level("INFO", logger=bs.__name__):
+        await bs.web_search(QUERY)
+        assert _quota_records(caplog) == []
+        assert bs._quota_logged is False and bs._unreadable_logged is False
+        await bs.web_search(QUERY)   # the first answer that carries them is the one logged
+    assert [r.getMessage() for r in _quota_records(caplog)] == [_UNLIMITED_LINE]
+
+
+_BURST_ONLY = {"x-ratelimit-limit": "50", "x-ratelimit-policy": "50;w=1", "x-ratelimit-remaining": "49"}
+_NO_QUOTA_READ = ("brave search: no monthly request quota could be read from these rate-limit headers, "
+                  "so answers in this shape get no quota warning (limit=%s policy=%s remaining=%s)")
+_NO_WINDOW_LINE = _NO_QUOTA_READ % ("'50'", "'50;w=1'", "'49'")
+
+
+@pytest.mark.asyncio
+async def test_headers_with_no_monthly_window_are_logged_once_and_never_hide_the_plan(
+        monkeypatch, configured, caplog):
+    # A shape the reader cannot place turns the warning off for those answers: that must show in
+    # the logs once, never silently and never on every answer, and must not hide the plan line.
+    _install(monkeypatch, [(200, _body([]), _BURST_ONLY), (200, _body([]), _BURST_ONLY),
+                           (200, _body([]), {**_DOC, "x-ratelimit-remaining": "0, 12"})])
+    with caplog.at_level("INFO", logger=bs.__name__):
+        for _ in range(3):
+            await bs.web_search(QUERY)
+    assert [(r.levelname, r.getMessage()) for r in _quota_records(caplog)] == [
+        ("INFO", _NO_WINDOW_LINE),
+        ("INFO", "brave search: monthly request quota 15000, 12 left"),
+        ("WARNING", "brave search: monthly request quota nearly spent (remaining=12 of 15000)"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_shape_with_no_monthly_window_after_the_plan_line_still_shows(monkeypatch,
+                                                                              configured, caplog):
+    _install(monkeypatch, [(200, _body([]), {**_DOC, "x-ratelimit-remaining": "0, 14523"}),
+                           (200, _body([]), _BURST_ONLY), (200, _body([]), _BURST_ONLY)])
+    with caplog.at_level("INFO", logger=bs.__name__):
+        for _ in range(3):
+            await bs.web_search(QUERY)
+    assert [r.getMessage() for r in _quota_records(caplog)] == [
+        "brave search: monthly request quota 15000, 14523 left", _NO_WINDOW_LINE]
+
+
+@pytest.mark.asyncio
+async def test_broken_counts_beside_a_monthly_window_are_logged_as_unread(monkeypatch, configured,
+                                                                          caplog):
+    # The policy names a 30-day window here and the counts are what cannot be read, so the line
+    # must not claim the headers have no monthly window.
+    _install(monkeypatch, [(200, _body([]), {**_DOC, "x-ratelimit-remaining": "12"})])
+    with caplog.at_level("INFO", logger=bs.__name__):
+        await bs.web_search(QUERY)
+    assert [r.getMessage() for r in _quota_records(caplog)] == [
+        _NO_QUOTA_READ % ("'1, 15000'", "'1;w=1, 15000;w=2592000'", "'12'")]
+
+
+@pytest.mark.asyncio
+async def test_a_logged_header_value_is_cut_to_80_characters(monkeypatch, configured, caplog):
+    _install(monkeypatch, [(200, _body([]), {"x-ratelimit-limit": "x" * 300})])
+    with caplog.at_level("INFO", logger=bs.__name__):
+        await bs.web_search(QUERY)
+    (line,) = [r.getMessage() for r in _quota_records(caplog)]
+    assert f"limit='{'x' * 80}'" in line and "x" * 81 not in line
+
+
+@pytest.mark.asyncio
+async def test_a_spent_quota_is_warned_on_the_429_too(monkeypatch, configured, caplog):
+    _install(monkeypatch, [(429, {"error": {"code": "RATE_LIMITED"}},
+                            {**_DOC, "x-ratelimit-remaining": "1, 0"})])
+    with caplog.at_level("WARNING", logger=bs.__name__):
+        with pytest.raises(bs.BraveSearchRateLimitException):
+            await bs.web_search(QUERY)
+    assert ["remaining=0 of 15000" in r.getMessage() for r in _quota_records(caplog)] == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_header_reader_bug_never_breaks_a_search(monkeypatch, configured, caplog):
+    # The reader runs on every answer BEFORE `_raise_for`: a bug in it must never stand in for the
+    # typed exception (the callers refund on its `not_run`) or lose a billed answer's results.
+    def boom(_headers):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(bs, "_monthly_quota", boom)
+    _install(monkeypatch, [(200, _body([_ROW]), {**_DOC, "x-ratelimit-remaining": "0, 12"}),
+                           (429, {"error": {"code": "RATE_LIMITED"}}, {})])
+    with caplog.at_level("WARNING", logger=bs.__name__):
+        out = await bs.web_search(QUERY)
+        with pytest.raises(bs.BraveSearchRateLimitException) as ei:
+            await bs.web_search(QUERY)
+    assert len(out["results"]) == 1 and ei.value.not_run is True
+    assert [r.getMessage() for r in _quota_records(caplog)] == [
+        "brave search: rate-limit headers not read (RuntimeError)"] * 2
+
+
+def test_the_quota_reader_never_raises_and_answers_counts_or_none():
+    # Built per window from realistic values, with one field corrupted about a third of the time,
+    # so most cases reach the policy parser and the window choice. (A random token soup returned
+    # None every time and let a policy parser that raises on "w=x" through.)
+    rng = random.Random(20261029)
+    limits = ["0", "1", "50", "2000", "15000", "20000000"]
+    lefts = ["0", "1", "12", "50", "51", "14523"]
+    windows = ["1", "60", "86400", "2592000", "2678400", "31536000"]
+    junk = ["", " ", "x", "-5", "-0", "0.5", "1e3", "1_000", "inf", "nan", "9" * 400, ";", "="]
+    counts = parsed = 0
+    for _ in range(3000):
+        n = rng.randint(1, 3)
+        cols = {"limit": [rng.choice(limits) for _ in range(n)],
+                "remaining": [rng.choice(lefts) for _ in range(n)],
+                "window": [rng.choice(windows) for _ in range(n)]}
+        if rng.random() < 0.3:
+            col = rng.choice(sorted(cols))
+            cols[col][rng.randrange(n)] = rng.choice(junk)
+        if rng.random() < 0.1:
+            cols["remaining"] = cols["remaining"][:-1]   # the counts disagree
+        raw = {"x-ratelimit-limit": ", ".join(cols["limit"]),
+               "x-ratelimit-remaining": ", ".join(cols["remaining"])}
+        if rng.random() < 0.85:
+            raw["x-ratelimit-policy"] = ", ".join(
+                f"{lim};w={w}" for lim, w in zip(cols["limit"], cols["window"]))
+        headers = httpx.Headers(raw)
+        parsed += bs._policy_windows(headers.get("x-ratelimit-policy")) is not None
+        quota = bs._monthly_quota(headers)
+        if quota is not None:
+            counts += 1
+            assert type(quota[0]) is int and type(quota[1]) is int and min(quota) >= 0, (raw, quota)
+    # The cases really reach the paths they test (1,434 answers and 2,356 parsed policies today).
+    assert counts > 700 and parsed > 1200, (counts, parsed)
 
 
 # ── classify_exception ────────────────────────────────────────────────────────

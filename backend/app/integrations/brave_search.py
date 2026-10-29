@@ -1,11 +1,14 @@
 """
-Brave Search API — a thin web-search client for report chat's `web_search` tool.
+Brave Search API — a thin web-search client for Ask Cay AI's `web_search` tool and the Updates
+Insights jump search.
 
-ONE caller: `app/services/chat_web_search_service.py` (the gate, the budget, the per-turn guard,
-the digest and the source pills all live there). Integration-layer rules
-(.claude/rules/integrations.md): HTTP in, dict out; typed exceptions; a lazy module-level
-`httpx.AsyncClient` closed in the app lifespan (`close_brave_search_client`); NO cache of any kind
-and no Supabase — Brave's terms allow transient storage only, so nothing here keeps a result.
+TWO callers, each with its own gate and daily budget: `app/services/chat_web_search_service.py`
+(Ask Cay AI — the gate, the budget, the per-turn guard, the digest and the source pills all live
+there) and `app/services/jump_web_search_service.py` (why a stock jumped, 2026-10-28).
+Integration-layer rules (.claude/rules/integrations.md): HTTP in, dict out; typed exceptions; a
+lazy module-level `httpx.AsyncClient` closed in the app lifespan (`close_brave_search_client`); NO
+cache of any kind and no Supabase — Brave's terms allow transient storage only, so nothing here
+keeps a result.
 
 WHY BRAVE AND NOT GEMINI'S BUILT-IN SEARCH GROUNDING: grounded answers must show a Google-branded
 "Search Suggestions" chip on every answer and may not be modified, mixed or cached — which a
@@ -13,7 +16,7 @@ WHY BRAVE AND NOT GEMINI'S BUILT-IN SEARCH GROUNDING: grounded answers must show
 the built-in search tool with function tools in one call. A function tool backed by a plain
 search API has neither problem.
 
-THE `not_run` FLAG IS THE POINT OF THE EXCEPTION SHAPE. The service claims a daily budget unit
+THE `not_run` FLAG IS THE POINT OF THE EXCEPTION SHAPE. Each caller claims a daily budget unit
 BEFORE the call and refunds it only when the search provably did not run (was never billed):
   * `BraveSearchNotConfiguredException` — no key / unusable key / a non-https base URL; raised
     BEFORE any I/O. not_run=True.
@@ -40,8 +43,10 @@ API facts this module relies on (Brave Search API, Web search endpoint, `GET /re
 `extra_snippets` (plan-dependent). The answer's `web.results[]` rows carry `title`, `url`,
 `description`, `age`, `page_age`, `meta_url.hostname`, `profile.name`, `extra_snippets[]`;
 `query.altered` is the spell-corrected query when Brave changed it. Rate-limit state rides in
-`X-RateLimit-Remaining` / `X-RateLimit-Reset` as comma-separated per-window values (per second,
-then per month).
+`X-RateLimit-Limit` / `-Policy` / `-Remaining` / `-Reset`, one comma-separated value per window in
+the order the policy names them ("1;w=1, 15000;w=2592000": per second, then per 30 days). A monthly
+limit of 0 means UNLIMITED (Brave's rate-limiting guide): a metered plan, capped in dollars in
+Brave's dashboard rather than in requests, whose monthly remaining count reads 0 on every answer.
 """
 
 from __future__ import annotations
@@ -49,7 +54,7 @@ from __future__ import annotations
 import logging
 import math
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -58,13 +63,21 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 _client: Optional[httpx.AsyncClient] = None
+#: Two INFO lines, each logged at most once per process: the plan's monthly quota (so the logs say
+#: what the key is on) and rate-limit headers no monthly quota can be read from (so a warning that
+#: can never fire shows in the logs).
+_quota_logged = False
+_unreadable_logged = False
 
 #: Brave's freshness windows (past day / week / month / year). Anything else is not sent.
 _FRESHNESS = frozenset({"pd", "pw", "pm", "py"})
 #: Brave answers at most 20 web results per request.
 _MAX_COUNT = 20
-#: Warn when the MONTHLY window's remaining requests fall to this.
+#: Warn when a MONTHLY request quota's remaining requests fall to this.
 _MONTHLY_REMAINING_WARN = 50
+#: A rate-limit window at least this long is the monthly quota (Brave's is w=2592000, 30 days); the
+#: other one is the 1-second burst limit.
+_MONTHLY_WINDOW_MIN_SECONDS = 28 * 86400
 #: Brave's `error.code` is a short upper-case identifier ("RATE_LIMITED", "VALIDATION", …). Anything
 #: else is not echoed — the error body may quote the request back.
 _ERROR_CODE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,39}")
@@ -239,11 +252,112 @@ def _retry_after(headers: httpx.Headers) -> Optional[float]:
     return None
 
 
+def _aligned_values(header: Optional[str]) -> Optional[List[float]]:
+    """One number per window, or None when any part is unreadable: the headers are read by
+    POSITION, so skipping a part would pair one window's limit with another window's count."""
+    if not header or not header.strip():
+        return None
+    out: List[float] = []
+    for part in header.split(","):
+        try:
+            v = float(part.strip())
+        except ValueError:
+            return None
+        if not math.isfinite(v):
+            return None
+        out.append(v)
+    return out
+
+
+def _policy_windows(header: Optional[str]) -> Optional[List[float]]:
+    """Each window's length in seconds from `X-RateLimit-Policy` ("1;w=1, 15000;w=2592000" →
+    [1, 2592000]), or None when the header is missing or an entry has no readable `w`."""
+    if not header or not header.strip():
+        return None
+    out: List[float] = []
+    for entry in header.split(","):
+        window: Optional[float] = None
+        for param in entry.split(";")[1:]:
+            name, _, value = param.partition("=")
+            if name.strip().lower() == "w":
+                try:
+                    window = float(value.strip())
+                except ValueError:
+                    return None
+        if window is None or not math.isfinite(window):
+            return None
+        out.append(window)
+    return out
+
+
+def _monthly_quota(headers: httpx.Headers) -> Optional[Tuple[int, int]]:
+    """(limit, remaining) of the plan's monthly request quota, or None when the headers name none.
+
+    The monthly window is the shortest one the policy gives at least 28 days; without a usable
+    policy, the second of exactly two values (Brave's documented order: per second, then per
+    month). A limit of 0 is returned as is: it means unlimited, so nothing can run out.
+    """
+    limits = _aligned_values(headers.get("x-ratelimit-limit"))
+    remaining = _aligned_values(headers.get("x-ratelimit-remaining"))
+    if limits is None or remaining is None or len(limits) != len(remaining):
+        return None
+    windows = _policy_windows(headers.get("x-ratelimit-policy"))
+    if windows is not None and len(windows) == len(limits):
+        long_windows = [i for i, w in enumerate(windows) if w >= _MONTHLY_WINDOW_MIN_SECONDS]
+        if not long_windows:
+            return None
+        i = min(long_windows, key=lambda j: windows[j])
+    elif len(limits) == 2:
+        i = 1
+    else:
+        return None
+    if limits[i] < 0 or remaining[i] < 0:
+        return None
+    return int(limits[i]), int(remaining[i])
+
+
+def _log_plan_once(headers: httpx.Headers, quota: Optional[Tuple[int, int]]) -> None:
+    """The plan's monthly quota, from the first answer it can be read from; and the first
+    rate-limit headers no monthly quota can be read from — no window of 28 days or more, or counts
+    that are missing, unreadable, misaligned or negative (answers in that shape are never warned
+    about). Each is one INFO line per process, so neither hides the other in either order."""
+    global _quota_logged, _unreadable_logged
+    if quota is not None:
+        if not _quota_logged:
+            _quota_logged = True
+            limit, left = quota
+            if limit == 0:
+                logger.info("brave search: the plan has no monthly request quota (0 = unlimited); "
+                            "its spend limit is set in Brave's dashboard")
+            else:
+                logger.info("brave search: monthly request quota %d, %d left", limit, left)
+        return
+    if _unreadable_logged:
+        return
+    seen = [(headers.get(name) or "")[:80]
+            for name in ("x-ratelimit-limit", "x-ratelimit-policy", "x-ratelimit-remaining")]
+    if any(v.strip() for v in seen):
+        _unreadable_logged = True
+        logger.info("brave search: no monthly request quota could be read from these rate-limit "
+                    "headers, so answers in this shape get no quota warning "
+                    "(limit=%r policy=%r remaining=%r)", *seen)
+
+
 def _warn_on_low_quota(headers: httpx.Headers) -> None:
-    remaining = _window_values(headers.get("x-ratelimit-remaining"))
-    if remaining and remaining[-1] <= _MONTHLY_REMAINING_WARN:
-        logger.warning("brave search: monthly request quota nearly spent (remaining=%d)",
-                       int(remaining[-1]))
+    """Warn only when a REAL monthly request quota is nearly spent. A metered plan's monthly limit
+    is 0 (unlimited) and its remaining count reads 0 on every answer: reading that count alone
+    warned on every search (2026-10-29). Runs on every answer BEFORE `_raise_for`, so it never
+    raises: an exception here would stand in for the typed one and lose its `not_run`."""
+    try:
+        quota = _monthly_quota(headers)
+        _log_plan_once(headers, quota)
+    except Exception as e:  # noqa: BLE001 — a diagnostic must never break a search
+        logger.warning("brave search: rate-limit headers not read (%s)", type(e).__name__,
+                       exc_info=True)
+        return
+    if quota is not None and quota[0] > 0 and quota[1] <= _MONTHLY_REMAINING_WARN:
+        logger.warning("brave search: monthly request quota nearly spent (remaining=%d of %d)",
+                       quota[1], quota[0])
 
 
 def _error_code(resp: httpx.Response) -> str:

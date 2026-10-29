@@ -2087,11 +2087,15 @@ Emitted by the app on its own responses:
 | `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin` | every response | `app/main.py` `_security_headers` middleware |
 | `Strict-Transport-Security` | every response **over https only** | same middleware (Railway terminates TLS; uvicorn's `--proxy-headers` makes `request.url.scheme` https) |
 
-**`X-RateLimit-Limit` / `-Remaining` / `-Reset` are NOT emitted by this API.** They appear in the
-codebase only as *reads of FMP's upstream response* in `app/integrations/fmp.py`, where a low
-remaining count raises `FMPRateLimitException`. `X-RateLimit-Reset` is not referenced at all. An
-earlier revision of this section documented all four as part of our own contract; no client should
-depend on them.
+**`X-RateLimit-Limit` / `-Remaining` / `-Reset` / `-Policy` are NOT emitted by this API.** They
+appear in the codebase only as *reads of an upstream response*, by these integrations:
+`app/integrations/fmp.py` (Limit and Remaining: a remaining count ≤ 10 logs a warning; FMP's 429
+raises `FMPRateLimitException`), `app/integrations/brave_search.py` (all four, one value per window:
+it warns only when a positive monthly quota is nearly spent — Brave's monthly limit of 0 means
+unlimited, as on the metered plan — and falls back to Reset for a 429's wait) and
+`app/integrations/upload_post.py` (Reset, for a 429's wait). An earlier revision of this section
+documented `X-RateLimit-Limit` / `-Remaining` / `-Reset` (with `Retry-After`) as part of our own
+contract; no client should depend on any `X-RateLimit-*` header.
 
 ---
 

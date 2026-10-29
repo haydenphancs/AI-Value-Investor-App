@@ -30,6 +30,7 @@ sentinels, and mutation-tested by hand once (see MUTATION_LOG at the bottom).
 from __future__ import annotations
 
 import re
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -137,9 +138,16 @@ _ABSENT_BACKEND = {
     "deep_research_reports": ("§5.3", "the table is `research_reports`"),
     "@router.websocket": ("App B 2026-09-08", "the live-price WebSocket is removed; prices poll over REST"),
 }
-# X-RateLimit-* is READ from FMP upstream; §8.3 says we never EMIT it. Only that one file may
-# mention it, and it must not appear on a response we build.
-_FMP_ONLY = {"X-RateLimit-Limit", "X-RateLimit-Remaining"}
+# X-RateLimit-* are UPSTREAM headers: §8.3 says three integrations READ them and we never EMIT
+# them. Matched case-insensitively (Brave and Upload-Post read lowercase names, which the old
+# case-sensitive scan never saw), per header and in BOTH directions: a new file (an endpoint or a
+# middleware that emits one) and a reader that went away both mean §8.3 needs rewriting.
+_RATE_LIMIT_READERS = {
+    "x-ratelimit-limit": {"integrations/fmp.py", "integrations/brave_search.py"},
+    "x-ratelimit-remaining": {"integrations/fmp.py", "integrations/brave_search.py"},
+    "x-ratelimit-reset": {"integrations/brave_search.py", "integrations/upload_post.py"},
+    "x-ratelimit-policy": {"integrations/brave_search.py"},
+}
 
 
 @pytest.mark.parametrize("token", sorted(_ABSENT_IOS))
@@ -169,14 +177,45 @@ def test_no_core_data_model_files() -> None:
     assert not found, f"§7.1 and §9.2 say there is no Core Data; found model files: {found}"
 
 
-def test_rate_limit_headers_are_read_from_fmp_not_emitted_by_us() -> None:
-    """§8.3: X-RateLimit-* are FMP's, never ours."""
-    for token in sorted(_FMP_ONLY):
-        hits = {p.name for p, src in _backend_py() if token in src}
-        assert hits <= {"fmp.py"}, (
-            f"§8.3 says `{token}` is only ever READ from FMP's response, never emitted on ours. "
-            f"It now appears in {sorted(hits)}. If we started emitting it, §8.3 needs rewriting."
+def test_rate_limit_headers_are_read_upstream_never_emitted_by_us() -> None:
+    """§8.3: X-RateLimit-* are read from upstream responses by the integrations it names, never
+    emitted on ours. Checked both ways: the code against this table, and §8.3's readers (each
+    written `app/integrations/<file>.py` (<the headers it reads>)) against the same table. §8.3
+    must also keep saying they are not emitted, and show none in its table or a code block."""
+    app = _BACKEND / "app"
+    for token, readers in sorted(_RATE_LIMIT_READERS.items()):
+        hits = {p.relative_to(app).as_posix() for p, src in _backend_py() if token in src.lower()}
+        assert hits == readers, (
+            f"§8.3 says `{token}` is only READ, by {sorted(readers)}, and never emitted on our "
+            f"responses. It now appears in {sorted(hits)}. Rewrite §8.3 and this table to match."
         )
+    # §8.3 alone: up to the next heading of any level up to ###, so a later §8.x never counts.
+    section = re.split(r"\n#{1,3} ", _doc_text().split("### 8.3", 1)[1], maxsplit=1)[0]
+    assert re.search(r"\bare (?:not|never) emitted by this API\b", " ".join(section.split()), re.I), (
+        "§8.3 no longer says the X-RateLimit-* headers are not emitted by this API.")
+    fenced = False
+    for line in section.splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        elif (fenced or line.lstrip().startswith("|")) and "x-ratelimit" in line.lower():
+            raise AssertionError(f"§8.3 shows an X-RateLimit-* header as one of ours: {line.strip()!r}")
+    # Any whitespace before the parenthesis (a re-wrapped line) and one level of nesting inside it.
+    pairs = re.findall(r"`app/(integrations/\w+\.py)`\s+\(((?:[^()]|\([^()]*\))*)\)", section)
+    twice = sorted(rel for rel, n in Counter(rel for rel, _ in pairs).items() if n > 1)
+    assert not twice, f"§8.3 names {twice} more than once; name each X-RateLimit-* reader once."
+    named = {rel: " ".join(clause.split()) for rel, clause in pairs}
+    expected = set().union(*_RATE_LIMIT_READERS.values())
+    assert set(named) == expected, (
+        f"§8.3 names {sorted(named)} as the X-RateLimit-* readers; the code's readers are "
+        f"{sorted(expected)}. Write each as `app/integrations/<file>.py` (<the headers it reads>)."
+    )
+    for rel, clause in sorted(named.items()):
+        said = set(re.findall(r"\b(Limit|Remaining|Reset|Policy)\b", clause))
+        if "all four" in clause:
+            said |= {"Limit", "Remaining", "Reset", "Policy"}
+        reads = {token.rsplit("-", 1)[1].capitalize()
+                 for token, readers in _RATE_LIMIT_READERS.items() if rel in readers}
+        assert said == reads, f"§8.3 says app/{rel} reads {sorted(said)}; it reads {sorted(reads)}."
 
 
 # ─────────────────────────────────────────────────────────────────────────────

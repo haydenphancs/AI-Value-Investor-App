@@ -119,8 +119,9 @@ Rules that shape the code (each is a way a wrong stake could reach the screen):
   for the member is a heads-up (each costs a whole-text scan), and so is a document of more
   than ``MAX_DEAL_CANDIDATES`` deal clauses ("too many deal clauses"); choosing among the deals
   stops at a third distinct one (the "different deals" heads-up already); and a per-document
-  ``time.process_time`` budget, checked inside every long loop (the sentences, the links, the
-  near misses and the choice among deals), turns an overrun into a heads-up ("cpu budget").
+  budget of the calling thread's CPU time (``time.thread_time``), checked inside every long loop
+  (the sentences, the links, the near misses and the choice among deals), turns an overrun into
+  a heads-up ("cpu budget").
 """
 
 from __future__ import annotations
@@ -342,9 +343,13 @@ def _result_problems(r: TemplateResult) -> List[str]:
 
 # ── CPU budget ───────────────────────────────────────────────────────────────────────────
 
-#: The clock the budget reads (plan v3: per-document ``time.process_time``). A module
-#: attribute so a test can drive it.
-_cpu_clock = time.process_time
+#: The clock the budget reads: the CALLING thread's CPU time. ``classify_document`` builds its
+#: budget and checks it inside one synchronous call, on the finder's ``asyncio.to_thread``
+#: worker. Plan v3 named ``time.process_time``, which also counts the event loop and every other
+#: thread of the web process, so a busy server could spend a document's budget for it and turn a
+#: proposal into a final "cpu budget" heads-up (pre-push review, 2026-10-29). A module attribute
+#: so a test can drive it.
+_cpu_clock = time.thread_time
 
 
 class _OverBudget(Exception):
@@ -1585,8 +1590,8 @@ def classify_document(
     filer ("INTEL CORP") and ``other_member_aliases`` every OTHER member's aliases (a group's
     members, a second purchaser).
 
-    Deterministic for a given input and bounded: past ``cpu_budget_seconds`` of
-    ``time.process_time`` it returns a heads-up (``no_template``, detail "cpu budget").
+    Deterministic for a given input and bounded: past ``cpu_budget_seconds`` of this thread's
+    CPU time (``time.thread_time``) it returns a heads-up (``no_template``, detail "cpu budget").
 
     Raises:
         ValueError: an argument of the wrong type or shape — a caller's bug, never a

@@ -432,9 +432,9 @@ def test_an_empty_document_is_refused(value):
 
 def test_a_document_over_the_cap_is_refused_before_parsing():
     big = _g13(item4="x" * S.MAX_SCHEDULE_XML_CHARS)
-    t0 = time.process_time()
+    t0 = time.thread_time()
     err = _refused(big)
-    assert "cap" in str(err) and time.process_time() - t0 < 0.5
+    assert "cap" in str(err) and time.thread_time() - t0 < 0.5
     # At the cap itself it still parses.
     filler = S.MAX_SCHEDULE_XML_CHARS - len(_g13(item4=""))
     assert S.parse_schedule_xml(_g13(item4="x" * filler)).item4_text == "x" * filler
@@ -480,9 +480,9 @@ def test_billion_laughs_is_refused_without_expanding_anything():
         + "".join(f'<!ENTITY lol{i} "{"&lol" + str(i - 1) + ";" if i > 1 else "&lol;"}' * 10 + '">' for i in range(1, 10))
         + ']><edgarSubmission>&lol9;</edgarSubmission>'
     )
-    t0 = time.process_time()
+    t0 = time.thread_time()
     _refused(lol)
-    assert time.process_time() - t0 < 0.1
+    assert time.thread_time() - t0 < 0.1
 
 
 def _utf16_doc(extra_decl: str = "") -> str:
@@ -619,13 +619,13 @@ def test_deep_nesting_and_element_floods_stop_the_pull_parse_early():
         "<amountBeneficiallyOwned></amountBeneficiallyOwned>",
         "<amountBeneficiallyOwned>" + "<x/>" * (S.MAX_XML_ELEMENTS + 1) + "</amountBeneficiallyOwned>",
     )
-    t0 = time.process_time()
+    t0 = time.thread_time()
     assert "elements" in str(_refused(flood))
-    assert time.process_time() - t0 < 1.0
+    assert time.thread_time() - t0 < 1.0
     huge_depth = "<edgarSubmission>" + "<a>" * 600_000
-    t0 = time.process_time()
+    t0 = time.thread_time()
     _refused(huge_depth)
-    assert time.process_time() - t0 < 0.5
+    assert time.thread_time() - t0 < 0.5
 
 
 def test_a_bom_and_leading_whitespace_are_tolerated():

@@ -27,6 +27,7 @@ import inspect
 import json
 import logging
 import re
+import threading
 import time
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -1113,6 +1114,39 @@ def test_a_budget_spent_in_the_last_step_still_returns_a_heads_up(monkeypatch):
     monkeypatch.setattr(T, "_cpu_clock", real)
 
 
+def test_the_budget_counts_only_the_calling_threads_cpu():
+    """The finder classifies on an ``asyncio.to_thread`` worker inside the web process. The plan's
+    ``time.process_time`` also counted the event loop and every other thread, so a busy server
+    could spend a document's budget for it and turn a proposal into a final "cpu budget" heads-up
+    (pre-push review, 2026-10-29). Here another thread burns six budgets of CPU while this thread
+    only waits: none of it may count."""
+    budget = T._Budget(0.05)
+    burned: List[float] = []
+
+    def burn() -> None:
+        start = time.thread_time()
+        while time.thread_time() - start < 0.3:
+            pass
+        burned.append(time.thread_time() - start)
+
+    other = threading.Thread(target=burn)
+    other.start()
+    other.join()
+    assert burned and burned[0] >= 0.3, burned   # the other thread really spent six budgets
+    budget.check()      # a whole-process clock raises _OverBudget here
+
+
+def test_the_budget_still_runs_out_on_the_calling_threads_own_cpu():
+    """The other half: this thread's own work does count (a clock that never moves would pass the
+    test above and never stop a runaway document)."""
+    budget = T._Budget(0.05)
+    start = time.thread_time()
+    while time.thread_time() - start < 0.2:
+        pass
+    with pytest.raises(T._OverBudget):
+        budget.check()
+
+
 # ── §13 sentence and span helpers ───────────────────────────────────────────────────────
 
 
@@ -1281,9 +1315,9 @@ _MANY_TERMS_UNIT = "".join(
 ])
 def test_a_huge_degenerate_document_finishes_well_inside_the_budget(unit):
     text = (unit * (2_000_000 // len(unit) + 1))[:2_000_000]
-    t0 = time.process_time()
+    t0 = time.thread_time()
     r = classify(text, budget=30.0)
-    assert time.process_time() - t0 < T.DEFAULT_CPU_BUDGET_SECONDS
+    assert time.thread_time() - t0 < T.DEFAULT_CPU_BUDGET_SECONDS
     assert r.outcome in T.TEMPLATE_OUTCOMES
 
 
@@ -2435,10 +2469,10 @@ def test_a_document_of_many_distinct_sale_links_finishes_inside_the_budget(caplo
     a fraction of the budget, and says so in the log."""
     text = _many_sale_links_doc(1000)
     assert 1_400_000 < len(text) < 1_500_000
-    t0 = time.process_time()
+    t0 = time.thread_time()
     with caplog.at_level(logging.WARNING, logger=T.__name__):
         r = classify(text, budget=T.DEFAULT_CPU_BUDGET_SECONDS)
-    assert time.process_time() - t0 < T.DEFAULT_CPU_BUDGET_SECONDS
+    assert time.thread_time() - t0 < T.DEFAULT_CPU_BUDGET_SECONDS
     assert (r.tier, r.reason, r.outcome, r.spans) == (C.TIER_OTHER, "no_template", C.OUTCOME_HEADS_UP, ()), r
     assert "too many deal clauses" in r.detail
     assert any("[tc-stakes-template-too-many]" in rec.getMessage() for rec in caplog.records)

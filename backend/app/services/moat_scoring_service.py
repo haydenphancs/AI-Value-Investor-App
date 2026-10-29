@@ -103,6 +103,9 @@ _FLOOR_UNITS_PER_USD: Dict[str, float] = {
     "SGD": 1.35, "SEK": 10.5, "NOK": 10.5, "DKK": 6.8, "PLN": 4.0, "ILS": 3.7,
     "BRL": 5.5, "MXN": 18.0, "ZAR": 18.0, "IDR": 16000.0, "THB": 35.0, "MYR": 4.5,
     "PHP": 57.0, "CLP": 950.0, "COP": 4000.0, "ARS": 1000.0, "TRY": 35.0,
+    # Added 2026-10-29: the first peer recompute under this floor logged 7 universe filers
+    # reporting in these (PEN 4, VND, AED, KZT 1 each) with no reading.
+    "AED": 3.67, "PEN": 3.75, "VND": 25500.0, "KZT": 500.0,
 }
 # Percentage points of growth premium per score point. At 2.0 a +10pp premium already scored
 # 10/10, so the driver read 0 or 10 for 7 of the 10 reports cached 2026-10-15..28 (META +18pp,
@@ -356,8 +359,8 @@ def _focal_revenue_yoy(
     )
     if prior is not None and units_per_usd is None:
         logger.warning(
-            "moat_scoring: revenue growth not scored — reporting currency %r has no "
-            "floor rate (_FLOOR_UNITS_PER_USD)", raw_currency,
+            "moat_scoring: %s revenue growth not scored — reporting currency %r has no "
+            "floor rate (_FLOOR_UNITS_PER_USD)", prior_row.get("symbol") or "?", raw_currency,
         )
     scorable = (
         prior is not None

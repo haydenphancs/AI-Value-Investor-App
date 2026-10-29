@@ -13,6 +13,7 @@ Self-contained per the project testing rule.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -1020,6 +1021,15 @@ def test_a_non_finite_expense_line_is_no_reading_at_pillar_level():
     (" usd ", 12_000_000, True),         # normalized like every currency reader
     (None, 12_000_000, True),            # no field: read as USD (money_prefix convention)
     ("XYZ", 3_000_000_000, False),       # a currency with no floor rate: no reading
+    # The four the 2026-10-29 peer recompute found without a rate.
+    ("AED", 30_000_000, False),          # AED30M ≈ $8.2M (pegged 3.67)
+    ("AED", 40_000_000, True),           # AED40M ≈ $10.9M
+    ("PEN", 30_000_000, False),          # S/30M ≈ $8.0M
+    ("PEN", 40_000_000, True),           # S/40M ≈ $10.7M
+    ("VND", 200_000_000_000, False),     # ₫200B ≈ $7.8M
+    ("VND", 300_000_000_000, True),      # ₫300B ≈ $11.8M
+    ("KZT", 4_000_000_000, False),       # ₸4B ≈ $8.0M
+    ("KZT", 6_000_000_000, True),        # ₸6B ≈ $12.0M
 ])
 def test_the_growth_floor_is_in_dollars_whatever_the_reporting_currency(currency, prior, scorable):
     rows = [{"date": "2024-12-31", "revenue": prior * 2},
@@ -1029,3 +1039,14 @@ def test_the_growth_floor_is_in_dollars_whatever_the_reporting_currency(currency
             r["reportedCurrency"] = currency
     yoy, ok = _focal_revenue_yoy(rows, "2024")
     assert yoy == 100.0 and ok is scorable
+
+
+def test_a_currency_without_a_floor_rate_names_the_company_in_its_warning(caplog):
+    """The 2026-10-29 recompute logged seven of these with no ticker, so finding the
+    companies meant matching timestamps against industry lines."""
+    rows = [{"date": "2024-12-31", "revenue": 6e9, "symbol": "ZZTOP", "reportedCurrency": "XYZ"},
+            {"date": "2023-12-31", "revenue": 3e9, "symbol": "ZZTOP", "reportedCurrency": "XYZ"}]
+    with caplog.at_level(logging.WARNING, logger="app.services.moat_scoring_service"):
+        assert _focal_revenue_yoy(rows, "2024") == (100.0, False)
+    msgs = [r.getMessage() for r in caplog.records if "no floor rate" in r.getMessage()]
+    assert msgs and "ZZTOP" in msgs[0] and "'XYZ'" in msgs[0]

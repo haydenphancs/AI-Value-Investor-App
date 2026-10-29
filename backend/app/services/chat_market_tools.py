@@ -846,6 +846,11 @@ async def explain_price_move(
     if a.kind.value == "none":
         out["no_single_catalyst"] = True
         out["bottom_line"] = _bottom_line(exp, news)
+    if getattr(exp, "web_assisted", False) is True:
+        # Built on a web-sourced Insights card (the Updates jump search, 2026-10-28): the
+        # chat doors read this to keep the turn out of the grounding audit and the refund
+        # judge, and the starter-chip warm pass never stores the answer.
+        out["web_assisted"] = True
     return out
 
 

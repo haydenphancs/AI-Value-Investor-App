@@ -44,6 +44,15 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from app.log_redaction import redact_secrets  # noqa: E402
+from app.config import settings  # noqa: E402
+
+# The Updates jump search's web results (2026-10-28) must never feed an evaluation of the card
+# (Brave terms §3(b)(xiii)), and this preview IS one — a human comparing model samples. OFF for
+# the whole process, before anything reads it: no search can run, and a stored card written
+# from web pages is withheld (pinned by tests/test_brave_search_boundary.py). `--jump` replays
+# the jump prompt's MOVE rule from licensed FMP news; `--web-fixture` adds HAND-WRITTEN pages
+# (never saved search results) to test the web block against the card's price guard.
+settings.UPDATES_JUMP_WEB_SEARCH_ENABLED = False
 
 logger = logging.getLogger("preview_insight_card")
 
@@ -227,7 +236,9 @@ async def run_preview(args: argparse.Namespace, *, fmp: Any, gemini: Any,
     print(f"\n=== {scope} as of {as_of.isoformat()} — {len(rows)} fetched, "
           f"{len(corpus)} in the {window}h corpus ===")
     print(f"earnings status: {status.status + ' ' + status.date.isoformat() if status else 'none'}")
-    if stored:
+    if stored and stored.get("withheld"):
+        print("\n--- stored now: written from web search results — not shown ---")
+    elif stored:
         print("\n--- stored now (ai_insight_cache) ---")
         print(f"  {stored.get('headline')}")
         for b in (stored.get("bullets") or [])[:-1]:
@@ -249,11 +260,15 @@ async def run_preview(args: argparse.Namespace, *, fmp: Any, gemini: Any,
     # The sweeper hands the card the sweep's quote; replaying a big-move day needs it (the
     # MARKET prompt's "Price context" line, and the ticker guard's figure rules).
     quote = {"changePercentage": args.quote_pct} if args.quote_pct is not None else None
+    web_pages = load_web_fixture(args.web_fixture) if args.web_fixture else None
+    if web_pages:
+        print(f"web fixture: {len(web_pages)} hand-written page(s)")
     for i in range(args.samples):
         before = len(counting.tags)
         card, reason = await svc._generate_card(
             scope, corpus, f"preview-{scope}-{as_of.isoformat()}-{i}", args.price_band, quote,
-            now=as_of, earnings=status, company_name=args.name,
+            now=as_of, earnings=status, company_name=args.name, jumping=args.jump,
+            web_context=web_pages,
         )
         tags = counting.tags[before:]
         if i == 0 and args.show_prompt and counting.prompts:
@@ -282,20 +297,55 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--earnings-actuals", choices=("calendar", "absent"), default="calendar")
     parser.add_argument("--samples", type=int, default=1)
     parser.add_argument("--show-prompt", action="store_true")
+    parser.add_argument("--jump", action="store_true",
+                        help="replay a JUMPING ticker's prompt (the MOVE rule; never a web search)")
+    parser.add_argument("--web-fixture", default=None,
+                        help="JSON list of HAND-WRITTEN pages {title, snippet, url, publisher, "
+                             "published_at} for the prompt's web block — never saved search "
+                             "results (Brave §3(b)(xiii) forbids evaluating AI on them)")
     parser.add_argument("--compare-stored", action="store_true",
                         help="one SELECT of ai_insight_cache before the tripwire goes in")
     return parser.parse_args(argv)
 
 
+def load_web_fixture(path: str) -> List[Dict[str, Any]]:
+    """The pages of a ``--web-fixture`` file, ``published_at`` parsed to aware UTC. Raises on a
+    file that is not a JSON list of objects with a title and an https url."""
+    import json
+
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        raise ValueError("--web-fixture: expected a JSON list of pages")
+    pages: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict) or not str(item.get("title") or "").strip():
+            raise ValueError("--web-fixture: every page needs a title")
+        if not str(item.get("url") or "").startswith("https://"):
+            raise ValueError("--web-fixture: every page needs an https url")
+        page = dict(item)
+        if isinstance(page.get("published_at"), str):
+            page["published_at"] = parse_as_of(page["published_at"])
+        pages.append(page)
+    return pages
+
+
 def _read_stored(scope: str) -> Optional[Dict[str, Any]]:
     from app.database import get_supabase
 
+    from app.services.news_insight_service import _has_web_origin
+
     res = (
         get_supabase().table("ai_insight_cache")
-        .select("headline,bullets,prompt_version,generated_at")
+        .select("headline,bullets,prompt_version,generated_at,sources")
         .eq("scope", scope).limit(1).execute()
     )
-    return (res.data or [None])[0]
+    row = (res.data or [None])[0]
+    if row is not None and _has_web_origin(row.get("sources")):
+        # Written from the jump search's web pages: comparing it with fresh samples would be an
+        # evaluation built on web results (Brave §3(b)(xiii)). Shown as withheld, never printed.
+        logger.info("stored card for %s was written from web search results — not shown", scope)
+        return {"withheld": True}
+    return row
 
 
 async def main(argv: Optional[Sequence[str]] = None) -> int:

@@ -922,6 +922,27 @@ class Settings(BaseSettings):
     # deploy. `scripts/asc_review_resubmit.py` checks this default before the any-chat review notes.
     CHAT_WEB_SEARCH_MIN_CONSENT_VERSION: int = Field(3, ge=3, le=999)
 
+    # ── Updates Insights jump search (Brave, `jump_web_search_service`, 2026-10-28) ────────────
+    #
+    # When a stock JUMPS (an Unusual/Extreme move in the current session), the Insights sweeper
+    # searches the web for the reason and feeds what it finds into that ticker's card; the pages
+    # are listed in the card's Sources. Owner decision 2026-10-28 ("i pick option 2, i don't
+    # think we break any terms"): ON at deploy, and the card — which is SHARED by every watcher
+    # and served until a newer card replaces it — may hold text written from those pages and
+    # their titles and links.
+    # Still binding: web results are never used to evaluate or tune the AI (Brave §3(b)(xiii)).
+    # The query is only a company name, never anything about a user. Needs the Brave key too.
+    #
+    # The switch is read at call time on BOTH sides: OFF stops new searches AND withholds every
+    # stored card built with web results (`news_insight_service._row_to_card`) — a switch that
+    # only stops writes keeps serving what was stored (the 2026-10-02 grounding lesson).
+    UPDATES_JUMP_WEB_SEARCH_ENABLED: bool = True
+    # Searches a day across all scopes, in its OWN fail-closed bucket in `chat_usage_budget` —
+    # outside chat's 180, which it must never eat. ~$5 per 1,000 requests: 40 bounds it at
+    # ~$0.20 a day (~$4-6 a month). Chat and this share ONE Brave key and dashboard spend limit:
+    # raise that limit by about this much before turning it on. `0` disables the search.
+    UPDATES_JUMP_WEB_SEARCH_DAILY_CAP: int = Field(40, ge=0, le=200)
+
     @field_validator("CHAT_AUTO_WEB_SEARCH_MODE", mode="before")
     @classmethod
     def _auto_web_search_mode_fails_closed(cls, value: object) -> str:

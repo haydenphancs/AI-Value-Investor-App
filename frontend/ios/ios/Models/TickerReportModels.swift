@@ -1666,21 +1666,28 @@ enum MoatOverallRating: String {
     case wide = "Wide Moat"
     case narrow = "Narrow Moat"
     case none = "No Moat"
+    /// No pillar was scored from filings, so there is nothing to grade. Never shown as
+    /// "No Moat", which would be a verdict on estimates.
+    case notMeasured = "Moat Not Measured"
 
     var color: Color {
         switch self {
         case .wide: return AppColors.alertPurple      // Indigo-500 (Purple) - Elite defense
         case .narrow: return AppColors.accentYellow   // Yellow-500 - Strong but beatable
         case .none: return AppColors.textSecondary    // Gray-500 - No structural advantage
+        case .notMeasured: return AppColors.textSecondary
         }
     }
 
     var iconName: String { "shield.lefthalf.filled" }
 
-    // Calculate moat rating from dimensions using the Max-Score Rule
+    // Max-Score Rule over the MEASURED pillars only (owner decision 2026-10-28, "Show it, but
+    // exclude it from backend verdicts"): an AI-estimated pillar stays on the radar but never
+    // sets the chip, matching the backend's `_derive_moat_vital`.
     static func from(dimensions: [MoatDimension]) -> MoatOverallRating {
-        guard let maxScore = dimensions.map({ $0.score }).max() else {
-            return .none
+        let measured = dimensions.filter(\.isMeasured)
+        guard let maxScore = measured.map({ $0.score }).max() else {
+            return .notMeasured
         }
 
         if maxScore >= 8.5 {
@@ -1698,9 +1705,34 @@ struct MoatDimension: Identifiable {
     let name: String        // e.g. "Switching Costs"
     let score: Double       // 0.0 - 10.0
     let peerScore: Double   // competitor avg for comparison
+    /// "deterministic" (scored from filings) or "ai_legacy" (an AI estimate). nil on reports
+    /// stored before the tag existed.
+    var source: String? = nil
+    /// Where `peerScore` came from: "industry", "ai_estimate" or "baseline" (the 5.0
+    /// placeholder). nil on reports stored before 2026-10-28.
+    var peerSource: String? = nil
+
+    /// Counts toward the chip and the Primary Driver. A report from before the tag keeps its
+    /// old reading; any other tag — "ai_legacy", the retired "grounded", an unknown value — is
+    /// an estimate and stays out (the backend grades on "deterministic" alone).
+    var isMeasured: Bool { source == nil || source == "deterministic" }
+
+    /// The 5.0 midpoint placeholder (no peer figure at all): the radar draws this peer point
+    /// hollow and leaves it out of the peer fill. Every other tagged peer point — "industry"
+    /// and "ai_estimate" alike (owner 2026-10-29: "no need to label AI") — draws filled; nil
+    /// (an old report) keeps the old drawing, no point.
+    var peerIsPlaceholder: Bool { peerSource == "baseline" }
 
     var normalizedScore: Double { score / 10.0 }
     var normalizedPeerScore: Double { peerScore / 10.0 }
+
+    /// Preview sample: no pillar scored from filings, every peer on the 5.0 placeholder —
+    /// the "Moat Not Measured" state.
+    static let sampleAllEstimated: [MoatDimension] =
+        TickerReportData.sampleOracle.moatCompetition.dimensions.map {
+            MoatDimension(name: $0.name, score: $0.score, peerScore: 5.0,
+                          source: "ai_legacy", peerSource: "baseline")
+        }
 }
 
 enum CompetitorThreatLevel: String {
@@ -1763,19 +1795,15 @@ struct ReportMoatCompetitionData {
     /// LAST and defaulted to the safe reading (see `CompetitorListOrder`).
     var competitorOrder: CompetitorListOrder = .highestThreat
 
-    // Computed: Overall rating based on Max-Score Rule
+    // Computed: Overall rating based on Max-Score Rule (measured pillars only)
     var overallRating: MoatOverallRating {
         MoatOverallRating.from(dimensions: dimensions)
     }
 
-    // Computed: Primary driver (highest scoring dimension)
+    // Computed: Primary driver — the highest MEASURED pillar, the same set the chip grades.
+    // nil when no pillar was scored from filings (the header then says "not measured").
     var primaryDriver: MoatDimension? {
-        dimensions.max(by: { $0.score < $1.score })
-    }
-
-    // Computed: Primary driver name
-    var primaryDriverName: String {
-        primaryDriver?.name ?? "Unknown"
+        dimensions.filter(\.isMeasured).max(by: { $0.score < $1.score })
     }
 }
 
@@ -2246,13 +2274,21 @@ extension TickerReportData {
                 scopeNote: "Company's own figure — scope as stated."
             ),
             dimensions: [
-                MoatDimension(name: "Switching Costs", score: 9.2, peerScore: 6.5),
-                MoatDimension(name: "Network Effects", score: 5.8, peerScore: 7.0),
-                MoatDimension(name: "Brand Power", score: 7.5, peerScore: 8.2),
-                MoatDimension(name: "Cost Advantage", score: 6.0, peerScore: 5.5),
-                MoatDimension(name: "Intangible Assets", score: 8.4, peerScore: 7.0)
+                // The live shape: Switching Costs is never scored from filings (it draws like
+                // the rest but is not graded), and Intangible Assets often has no industry peer
+                // row (the 5.0 placeholder).
+                MoatDimension(name: "Switching Costs", score: 9.2, peerScore: 6.5,
+                              source: "ai_legacy", peerSource: "ai_estimate"),
+                MoatDimension(name: "Network Effects", score: 5.8, peerScore: 7.0,
+                              source: "deterministic", peerSource: "industry"),
+                MoatDimension(name: "Brand Power", score: 7.5, peerScore: 8.2,
+                              source: "deterministic", peerSource: "industry"),
+                MoatDimension(name: "Cost Advantage", score: 6.0, peerScore: 5.5,
+                              source: "deterministic", peerSource: "industry"),
+                MoatDimension(name: "Intangible Assets", score: 8.4, peerScore: 5.0,
+                              source: "deterministic", peerSource: "baseline")
             ],
-            durabilityNote: "Oracle's moat is anchored by extremely high switching costs in enterprise database and ERP. Customers face multi-year migration timelines and significant retraining costs, creating durable lock-in.",
+            durabilityNote: "Oracle's measured moat rests on its intangible assets, the strongest pillar scored from its filings.",
             competitors: [
                 CompetitorComparison(name: "Amazon Web Services", ticker: "AMZN", competitiveScore: 9.0, marketSharePercent: 31.0, threatLevel: .high, segment: "Cloud infrastructure, databases and AI platforms"),
                 CompetitorComparison(name: "Microsoft Azure", ticker: "MSFT", competitiveScore: 8.5, marketSharePercent: 25.0, threatLevel: .high, segment: "Enterprise cloud applications & ERP"),

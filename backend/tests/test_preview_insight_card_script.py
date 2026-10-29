@@ -92,3 +92,54 @@ def test_safe_scrubs_keys():
 def test_there_is_no_write_flag():
     args = preview.parse_args(["--scope", "ORCL"])
     assert not any("write" in k or "apply" in k for k in vars(args))
+
+
+# ── jump mode (2026-10-28) ────────────────────────────────────────────────────
+
+def test_the_preview_never_reaches_the_jump_search():
+    """The preview compares model samples — an evaluation. Brave §3(b)(xiii): never built on
+    web results, so the switch is OFF for the process (no search, web cards withheld)."""
+    from app.config import settings
+
+    assert settings.UPDATES_JUMP_WEB_SEARCH_ENABLED is False
+    assert preview.parse_args(["--scope", "ORCL", "--jump"]).jump is True
+    assert preview.parse_args(["--scope", "ORCL"]).jump is False
+
+
+def test_a_stored_web_sourced_card_is_never_printed(monkeypatch):
+    rows = [{"headline": "Oracle sets a $225B target", "bullets": ["a", "b"],
+             "prompt_version": 8, "generated_at": "2026-10-28T18:50:00Z",
+             "sources": [{"title": "t", "url": "https://www.cnbc.com/x", "origin": "web"}]}]
+
+    class _Q:
+        def __getattr__(self, name):
+            return lambda *a, **k: self
+
+        def execute(self):
+            return type("R", (), {"data": rows})()
+
+    monkeypatch.setattr("app.database.get_supabase",
+                        lambda: type("C", (), {"table": lambda self, t: _Q()})())
+    assert preview._read_stored("ORCL") == {"withheld": True}
+    rows[0]["sources"] = [{"title": "t", "url": "https://fmp.example/1"}]
+    assert preview._read_stored("ORCL")["headline"] == "Oracle sets a $225B target"
+
+
+def test_a_hand_written_web_fixture_is_loaded_and_checked(tmp_path):
+    """Review 2026-10-29: the web-fed jump prompt had never met the model. `--web-fixture`
+    replays it with HAND-WRITTEN pages — never saved search results (Brave §3(b)(xiii))."""
+    import json
+
+    good = tmp_path / "pages.json"
+    good.write_text(json.dumps([{"title": "Oracle soars on targets", "snippet": "s",
+                                 "url": "https://news.example/a", "publisher": "Example",
+                                 "published_at": "2026-10-28T18:30:00Z"}]))
+    pages = preview.load_web_fixture(str(good))
+    assert pages[0]["published_at"] == datetime(2026, 10, 28, 18, 30, tzinfo=timezone.utc)
+    assert preview.parse_args(["--scope", "ORCL", "--web-fixture", str(good)]).web_fixture
+    for bad in ({"title": "x"}, [{"title": "", "url": "https://a.example"}],
+                [{"title": "x", "url": "http://a.example"}], ["x"]):
+        path = tmp_path / "bad.json"
+        path.write_text(json.dumps(bad))
+        with pytest.raises(ValueError):
+            preview.load_web_fixture(str(path))

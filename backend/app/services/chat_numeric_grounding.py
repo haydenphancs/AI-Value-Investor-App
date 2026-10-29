@@ -296,6 +296,11 @@ class GroundingEvidence:
             isinstance(result, dict) and result.get("web_search") is True
         )
         if not is_web:
+            # A tool result that reprints a web-sourced Insights card (`explain_price_move`;
+            # the Updates jump search, 2026-10-28) carries text written from web pages: never
+            # evidence, and the turn is not audited (Brave §3(b)(xiii)).
+            if isinstance(result, dict) and result.get("web_assisted") is True:
+                return True
             return None
         rows = result.get("results") if isinstance(result, dict) else None
         return isinstance(rows, list) and len(rows) > 0

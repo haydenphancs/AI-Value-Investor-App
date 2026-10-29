@@ -103,6 +103,26 @@ def test_the_claim_cap_is_exactly_what_the_gate_used(rpc, is_market, boost):
     assert rpc.last_params["p_attempt_cap"] == attempt_cap_for(is_market, earnings_window=boost)
 
 
+@pytest.mark.parametrize("is_market", [True, False])
+@pytest.mark.parametrize("jumping", [True, False])
+def test_the_jump_reserve_reaches_the_claim_exactly_as_the_gate_used_it(rpc, is_market, jumping):
+    """2026-10-28 (ORCL +12% behind a spent cap): the jump reserve must widen BOTH
+    ceilings, or the gate admits a jumper at 10/16 and the RPC refuses it silently."""
+    sweeper = _StubSweeper(rpc)
+    sweeper._claim("X", NOW, is_market, False, False, jumping)
+    assert rpc.last_params["p_daily_cap"] == daily_cap_for(is_market, jumping=jumping)
+    assert rpc.last_params["p_attempt_cap"] == attempt_cap_for(is_market, jumping=jumping)
+
+
+def test_a_jumping_ticker_claims_sixteen_and_twenty(rpc):
+    sweeper = _StubSweeper(rpc)
+    assert sweeper._claim("ORCL", NOW, is_market_scope=False, jumping=True) is True
+    assert (rpc.last_params["p_daily_cap"], rpc.last_params["p_attempt_cap"]) == (16, 20)
+    # The market scope never gets the reserve.
+    sweeper._claim(MARKET_SCOPE, NOW, is_market_scope=True, jumping=True)
+    assert rpc.last_params["p_daily_cap"] == PER_SCOPE_DAILY_CAP_MARKET
+
+
 def test_a_boosted_ticker_claims_against_the_market_sized_cap(rpc):
     sweeper = _StubSweeper(rpc)
     assert sweeper._claim("ORCL", NOW, is_market_scope=False, earnings_window=True) is True

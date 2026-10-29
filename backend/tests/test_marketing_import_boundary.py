@@ -71,6 +71,9 @@ FORBIDDEN_MODULES = (
     # third-party content"). `tests/test_brave_search_boundary.py` pins the wider import graph.
     "app.integrations.brave_search",
     "app.services.chat_web_search_service",
+    # The Updates jump search (2026-10-28) — the same third-party results, for the in-app
+    # Insights card only.
+    "app.services.jump_web_search_service",
 )
 FORBIDDEN_NAME = "generate_grounded_research"
 

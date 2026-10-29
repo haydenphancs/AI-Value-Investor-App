@@ -111,6 +111,7 @@ from app.schemas.widget import (
 )
 from app.services.daily_move_attribution import (
     Attribution,
+    CauseKind,
     NewsLean,
     attribute,
     # Shared so the market band and the cause sentence can never disagree about how a
@@ -460,6 +461,10 @@ class MoveExplanation:
     # that said "on Fri", and a paid "today" search was bought for a prior session's move.
     session_word: str = "today"
     session_date: Optional[str] = None
+    # The cause or lean came from an Insights card written with the Updates jump search's
+    # web pages (2026-10-28): Ask Cay AI marks its tool result so the turn is never audited or
+    # judged, and the shared starter-chip answers never store it (Brave §3(b)(xiii)).
+    web_assisted: bool = False
 
 
 _RANK_BASES = ("z", "abs_change")
@@ -1486,6 +1491,7 @@ class WidgetMoversService:
         )
         if a is None:
             return None
+        card = cards.get(sym)
         return MoveExplanation(
             ticker=sym,
             company_name=m.company_name,
@@ -1499,6 +1505,14 @@ class WidgetMoversService:
             attribution=a,
             session_word=session_word,
             session_date=today_iso,
+            # Only when the answer USED the card: its headline as the cause (classified or
+            # leaned — both COMPANY_NEWS) or its lean on the NONE path. A truthy `lean` alone
+            # meant "a card exists", so an earnings or group win was marked too and its turn and
+            # follow-ups were kept from the refund judge (review 2026-10-29).
+            web_assisted=bool(
+                isinstance(card, dict) and card.get("web_assisted")
+                and (a.kind == CauseKind.COMPANY_NEWS or a.lean is not None)
+            ),
         )
 
     # ── cache plumbing ───────────────────────────────────────────────

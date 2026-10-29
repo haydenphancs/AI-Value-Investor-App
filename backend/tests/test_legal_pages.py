@@ -904,7 +904,9 @@ _WEB_SEARCH_CLAUSES = {
             # `CHAT_WEB_SOURCES_PERSIST`'s default, so
             # `test_the_source_list_promise_matches_the_shipped_persistence_switch` pins it in
             # all three copies — and a rollback is then §3 plus the default, nothing else.
-            "we keep no other copy of the search results",
+            # Scoped to CHAT since 2026-10-28: the Updates Insights card keeps its web pages'
+            # titles and links (owner decision; the paragraph below says so).
+            "we keep no other copy of a chat\u2019s search results",
             "a temporary in-memory copy for a few minutes",
             "they may be outdated or wrong, they are not caydex\u2019s view",
             # The consent clause: true for every build the website copy covers.
@@ -912,7 +914,17 @@ _WEB_SEARCH_CLAUSES = {
             "allowed ai chat on a permission screen that describes them",
             "until then, cay ai searches the web only in a chat about a research report, and only "
             "when you ask",
-            "brave software (web search in cay ai chat, as described above)",
+            "brave software (web search in cay ai chat and for updates insights, as described above)",
+            # The Updates jump search (2026-10-28): what is sent (a company name and the move's
+            # direction — `jump_web_search_service.build_query`), and that the shared card keeps
+            # the pages' titles and links (`news_insight_service._web_first_sources`).
+            "web search for updates insights: when a stock on the updates tab makes an unusually "
+            "large move, caydex may search the web for the reason",
+            "only the company\u2019s name and whether the stock is up or down are sent to our web "
+            "search provider",
+            "never anything about you",
+            "is stored with the title and link of each web page it used, and every user who views "
+            "that card sees them",
         ],
     ),
     "terms": (
@@ -929,6 +941,9 @@ _WEB_SEARCH_CLAUSES = {
             "only for your own personal, non-commercial use",
             "you may not scrape, copy, store, cache, resell, or redistribute them",
             "build, train, or improve any artificial intelligence or machine learning model",
+            # 2026-10-28: the flow-down covers the web pages an Updates Insights card lists too.
+            "an updates insights card that explains an unusually large price move may also draw "
+            "on, and list among its sources, web pages found by the same provider",
         ],
     ),
 }

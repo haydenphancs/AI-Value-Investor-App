@@ -38,6 +38,12 @@ os.environ["SENTRY_DSN"] = ""
 # assert. Tests of the check switch it on with monkeypatch.
 os.environ["SEC_EDGAR_USER_AGENT"] = ""
 
+# Brave web search OFF by default, for the same reason: the Updates jump search
+# (`jump_web_search_service`) is ON by default and key-gated, so a developer's Brave key in
+# backend/.env would make `is_configured()` true under pytest. Every Brave test sets its own
+# key with monkeypatch.
+os.environ["BRAVE_SEARCH_API_KEY"] = ""
+
 # ---------------------------------------------------------------------------
 # Block outbound network for the whole session.
 #

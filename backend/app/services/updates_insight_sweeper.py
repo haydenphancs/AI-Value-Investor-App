@@ -63,7 +63,7 @@ import logging
 import random
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -88,21 +88,27 @@ from app.services.news_insight_service import (
     get_news_insight_service,
     select_recent_corpus,
 )
+from app.services.asset_class import resolve_asset_class
+from app.services.jump_web_search_service import (
+    JumpCandidate,
+    get_jump_web_search_service,
+)
 from app.services.ticker_report_cache import current_close_cycle_start
 from app.services.volatility_cache_service import get_volatility_cache_service
 from app.config import settings
 from app.services.updates_materiality import (
     ACTION_GENERATE,
     ACTION_TOUCH,
-    BAND_EXTREME,
-    TIER_EXTREME,
-    TIER_UNUSUAL,
+    JUMP_TIERS,
     Decision,
     attempt_cap_for,
     daily_cap_for,
     decide,
+    jump_band,
+    move_score,
+    mwcb_in_force,
 )
-from app.utils.market_hours import ET, is_market_active, session_phase
+from app.utils.market_hours import ET, SESSION_PREMARKET, is_market_active, session_phase
 from app.services.price_service import (
     current_session_quote,
     price_source,
@@ -145,13 +151,14 @@ _GLOBAL_DAILY_CAP = 1500
 # ``processing_started_at`` in research_reconciliation_service.
 _CLAIM_STALE_SECONDS = 120
 
-# The move tiers that earn a price-move ALERT (and an always-regenerate card). Includes
-# the fixed-band BAND_EXTREME so a thin-history / newly-listed name (σ unavailable →
-# fallback band) — precisely the population most prone to violent moves — is not
-# silently treated as ordinary. (These tiers also gated the grounded "why it moved"
-# web search, retired 2026-10-02 with Google Search grounding; the name is kept
-# because `chat_market_tools._CATALYST_TIERS` mirrors it.)
-_CATALYST_TIERS = (TIER_UNUSUAL, TIER_EXTREME, BAND_EXTREME)
+# The move tiers that earn a price-move ALERT, the jump reserve and the jump's web
+# search: `updates_materiality.JUMP_TIERS` (Unusual, Extreme and the fixed-band
+# BAND_EXTREME, so a thin-history / newly-listed name — σ unavailable → fallback
+# band, precisely the population most prone to violent moves — is not silently
+# treated as ordinary). Which scopes are jumping is decided ONCE per sweep by
+# `jump_band` from the current-session quote, never from `decision.price_band`
+# (a stale `last_price_band` when the quote is unusable, None on `no_corpus`).
+_CATALYST_TIERS = JUMP_TIERS
 
 # Skip reasons after which the card is "as current as policy allows": the sweeper
 # HAS evaluated the scope and no later cycle will regenerate it until a KNOWN
@@ -188,6 +195,37 @@ _ENRICH_WINDOW_CAP = 25          # per scope; == news get_cached_bulk(scopes, 25
 # two Railway instances); a durable RPC is a follow-up.
 _ENRICH_DAILY_CAP = 1200
 
+# ── Jump mode (2026-10-28) ────────────────────────────────────────────
+# A JUMPER (an Unusual/Extreme move in the current session, `jump_band`) gets its
+# FMP news pulled on every 5-minute price tick instead of every third — at most
+# this many extra pulls per scope per ET day (one `news/stock` call each: about
+# the first hour of a jump).
+_JUMP_EXTRA_NEWS_PER_DAY = 12
+# All jumpers together, per ET day, biggest move first: a broad sell-off makes most watched
+# names jumpers at once, and these pulls are only a head start on the regular news pass (the
+# plan's cost bound, +60 FMP calls a day, review 2026-10-29).
+_JUMP_EXTRA_NEWS_TOTAL_PER_DAY = 60
+# One `ticker_move` alert attempt per jumper per this many seconds in a process
+# (`_alert_jumper`); the dispatcher's per-user, per-ET-day dedup is the real
+# once-a-day guarantee.
+_ALERT_MEMO_SECONDS = 1800
+# Gate verdicts after which a web search could not reach a card today, so none is bought.
+# The rest (GENERATE, fingerprint_unchanged, cycle_touch, cooldown, failure_cooldown) can:
+# a NEW set of pages is the gate's one-shot trigger once the cooldown has passed.
+_WEB_NOT_ELIGIBLE = frozenset({
+    "daily_cap", "attempt_cap", "premarket_reserved", "earnings_reserved",
+    "mwcb_market_only", "gate_error", "no_corpus",
+})
+
+
+def _move_direction(quote: Optional[Dict[str, Any]], now: datetime) -> Optional[str]:
+    """"up" / "down" — the sign of the current session's move, as the jump search names it
+    (`JumpWebSearchService.context`) — or None when there is no usable move."""
+    change = session_change_percent(quote, now)
+    if change is None or round(change, 2) == 0.0:
+        return None
+    return "up" if change > 0 else "down"
+
 _STATE_TABLE = "updates_insight_state"
 
 
@@ -198,6 +236,9 @@ class InsightSweeper:
         self.news = get_news_cache_service()
         self.insights = get_news_insight_service()
         self.vol = get_volatility_cache_service()
+        # The jump search (2026-10-28). Read with `getattr(self, "web", None)`: the suite's
+        # sweeper stubs never run this `__init__`, so they can never reach Brave.
+        self.web = get_jump_web_search_service()
         # In-process ET-day cap on proactive enrichment batch calls.
         self._enrich_day = None
         self._enrich_count = 0
@@ -343,6 +384,7 @@ class InsightSweeper:
         is_market_scope: bool,
         earnings_window: bool = False,
         report_day: bool = False,
+        jumping: bool = False,
     ) -> bool:
         """Atomically claim the right to generate ``scope``'s card.
 
@@ -360,8 +402,8 @@ class InsightSweeper:
         forever, burning a per-cycle admission slot each time, and the one
         diagnostic that explained the freeze (`last_skip_reason = 'daily_cap'`)
         disappeared. The two ceilings must be fed from the same function — and
-        with the same ``earnings_window`` and ``report_day``, which is why both
-        are threaded here.
+        with the same ``earnings_window``, ``report_day`` and ``jumping`` (the
+        jump reserve, 2026-10-28), which is why all three are threaded here.
 
         This CANNOT be done client-side. Read-then-write has an ABA bug that
         silently defeats the daily cap: another instance can complete a whole
@@ -384,9 +426,11 @@ class InsightSweeper:
         claim_now = datetime.now(timezone.utc)
         daily_cap = daily_cap_for(
             is_market_scope, earnings_window=earnings_window, report_day=report_day,
+            jumping=jumping,
         )
         attempt_cap = attempt_cap_for(
             is_market_scope, earnings_window=earnings_window, report_day=report_day,
+            jumping=jumping,
         )
         try:
             result = self.supabase.rpc(
@@ -412,9 +456,9 @@ class InsightSweeper:
                 # this path either.
                 logger.info(
                     "Insight claim denied for %s (daily_cap=%d attempt_cap=%d "
-                    "earnings_window=%s report_day=%s) — already at ceiling, or "
-                    "claimed by another instance",
-                    scope, daily_cap, attempt_cap, earnings_window, report_day,
+                    "earnings_window=%s report_day=%s jumping=%s) — already at "
+                    "ceiling, or claimed by another instance",
+                    scope, daily_cap, attempt_cap, earnings_window, report_day, jumping,
                 )
             return granted
         except Exception as e:
@@ -618,6 +662,199 @@ class InsightSweeper:
         move = f"{'Up' if cp > 0 else 'Down'} {abs(cp):.1f}% in today's session"
         return f"{move}. Open {scope} for the latest coverage."
 
+    def _extra_news_due(self, scopes: List[str], now: datetime) -> List[str]:
+        """The jumpers whose news may be pulled on this price-only tick, in the order given
+        (biggest move first), counted per scope per ET day (at most
+        `_JUMP_EXTRA_NEWS_PER_DAY` each, and `_JUMP_EXTRA_NEWS_TOTAL_PER_DAY` across stocks).
+        A coin keeps its own 12 but never draws the stocks' pool: before the bell coins are
+        the only jumpers, and their pulls used to leave nothing for the stock that jumped at
+        14:15 (review 2026-10-29, round 2). The counter is created lazily: the suite's
+        sweeper stubs never run `__init__`."""
+        ledger = self.__dict__.setdefault("_jump_news_ledger", {"day": None, "counts": {}})
+        day = et_date(now)
+        if ledger["day"] != day:
+            ledger["day"] = day
+            ledger["counts"] = {}
+        counts = ledger["counts"]
+        stock_total = sum(n for s, n in counts.items() if not is_crypto_scope(s))
+        due = []
+        for scope in scopes:
+            coin = is_crypto_scope(scope)
+            if not coin and stock_total >= _JUMP_EXTRA_NEWS_TOTAL_PER_DAY:
+                continue
+            if counts.get(scope, 0) < _JUMP_EXTRA_NEWS_PER_DAY:
+                counts[scope] = counts.get(scope, 0) + 1
+                stock_total += 0 if coin else 1
+                due.append(scope)
+        return due
+
+    def _reserve_jumpers(self, jumpers: Dict[str, str], now: datetime) -> frozenset:
+        """Every scope that has jumped today in this process: the ones whose caps carry
+        the jump reserve, in the gate AND the claim.
+
+        The reserve is a per-ET-day allowance, so it outlives the move: read off the live
+        set, a pending reporter that jumped in the session and then faded before the close
+        dropped back to its plain cap, and its in-session jump cards ate the after-close
+        six — the release card was lost (review 2026-10-29; the ORCL 2026-09-10 failure
+        `AFTER_CLOSE_EARNINGS_RESERVE` exists for). The alert, the faster news, the search
+        and the MOVE rule follow the LIVE set. A restart forgets it. Created lazily: the
+        suite's sweeper stubs never run `__init__`."""
+        latch = self.__dict__.setdefault("_jump_reserve_latch", {"day": None, "scopes": set()})
+        day = et_date(now)
+        if latch["day"] != day:
+            latch["day"] = day
+            latch["scopes"] = set()
+        latch["scopes"].update(jumpers)
+        return frozenset(latch["scopes"])
+
+    async def _alert_jumper(
+        self,
+        scope: str,
+        decision: "Decision",
+        band: str,
+        now: datetime,
+        quote: Optional[Dict[str, Any]],
+    ) -> bool:
+        """Send a jumper's `ticker_move` alert whatever happened to its card.
+
+        The alert used to be sent only from inside a regeneration, so a scope that
+        could not regenerate never alerted: ORCL rose ~12% on 2026-10-28 behind a spent
+        daily cap and its watchers heard nothing. The body never reads the card (it is
+        the move itself), so the card is not needed. The decision carries the LIVE jump
+        band, because a skip carries None (`no_corpus`) or a stale band.
+
+        At most one attempt per scope per `_ALERT_MEMO_SECONDS` in this process: the
+        dispatcher's per-user, per-ET-day dedup key is the real once-a-day guarantee,
+        and `notify_watchers` cannot tell "deduped" from "lookup failed", so the memo
+        must expire rather than last the day. Never raises (`_notify_watchers` does not).
+        """
+        if not self._alert_due(scope, now):
+            return False
+        await self._notify_watchers(
+            scope, replace(decision, price_band=band), None, now, quote=quote,
+        )
+        return True
+
+    def _alert_due(self, scope: str, now: datetime) -> bool:
+        """Claim this process's alert attempt for ``scope`` (see `_alert_jumper`)."""
+        memo = self.__dict__.setdefault("_jump_alert_memo", {"day": None, "seen": {}})
+        day = et_date(now)
+        if memo["day"] != day:
+            memo["day"] = day
+            memo["seen"] = {}
+        last = memo["seen"].get(scope)
+        clock = time.monotonic()
+        if last is not None and clock - last < _ALERT_MEMO_SECONDS:
+            return False
+        memo["seen"][scope] = clock
+        return True
+
+    def _jump_candidates(
+        self,
+        jumpers: Dict[str, str],
+        quotes_by_symbol: Dict[str, Dict[str, Any]],
+        corpora: Dict[str, List[Dict[str, Any]]],
+        states: Dict[str, Dict[str, Any]],
+        sigmas: Dict[str, Any],
+        market_change: Any,
+        cycle_start: datetime,
+        now: datetime,
+        market_active: bool,
+        phase: str,
+        earnings_scopes: frozenset,
+        gate_inputs: Dict[str, Tuple[bool, bool, Optional[datetime]]],
+    ) -> List[JumpCandidate]:
+        """The jumpers worth a web search this tick, biggest move first.
+
+        Equities only: a coin's change is a rolling 24 h window, and an ETF, fund,
+        commodity or index moves on macro news the market card already carries. And
+        only a scope that can still REGENERATE today — the gate is asked first, as if a
+        new page set had just arrived (so an unchanged fingerprint cannot hide the caps);
+        a cap, a reserve, an MWCB day or an empty corpus means a search could never reach
+        a card. The company name is the FMP screener's (the quote row), never the
+        client-writable watchlist name: it becomes the search query.
+        """
+        out: List[JumpCandidate] = []
+        for scope, band in jumpers.items():
+            quote = quotes_by_symbol.get(scope) or {}
+            if is_crypto_scope(scope) or quote.get("isEtf") or quote.get("isFund"):
+                continue
+            if resolve_asset_class(scope) != "stock":
+                continue
+            change = session_change_percent(quote, now)
+            if change is None:
+                continue
+            pre = decide(
+                scope=scope, corpus=corpora.get(scope, []), quote=quote,
+                state=states.get(scope), market_change_percent=market_change,
+                close_cycle_start=cycle_start, now=now, model=INSIGHT_MODEL,
+                market_active=market_active, is_market_scope=False,
+                sigma_daily=sigmas.get(scope), session_phase=phase,
+                earnings_window=scope in earnings_scopes,
+                report_day=gate_inputs[scope][0],
+                earnings_pending_today=gate_inputs[scope][1],
+                earnings_reported_at=gate_inputs[scope][2],
+                jumping=True,
+                # "Could NEW pages regenerate the card now?" — without a web input the
+                # fingerprint short-circuit answers `fingerprint_unchanged` before the caps
+                # are read, and a capped jumper bought units that could never reach a card
+                # (review 2026-10-29).
+                web_refreshed_at=now,
+                web_result_count=1,
+            )
+            if pre.reason in _WEB_NOT_ELIGIBLE:
+                continue
+            out.append(JumpCandidate(
+                scope=scope, name=quote.get("name"), change_percent=float(change),
+                score=move_score(band, change),
+            ))
+        return out
+
+    @staticmethod
+    def _jump_set(
+        scopes: List[str],
+        quotes_by_symbol: Dict[str, Dict[str, Any]],
+        sigmas: Dict[str, Any],
+        now: datetime,
+    ) -> Dict[str, str]:
+        """``{scope: move class}`` for every scope JUMPING in the current session.
+
+        One definition (`updates_materiality.jump_band`) read off the session-aware
+        change (`session_change_percent`: a change stamped with a prior session is
+        None), so yesterday's move can never make a jump this morning. A row with NO
+        stamp (the per-symbol profile fallback: a foreign listing, a sub-$50M microcap,
+        a new ticker) cannot say which session it describes, so before the bell its
+        equity change is not a jump either — at best it is yesterday's (review
+        2026-10-29; pre-market moves are not jumps in v1). Never raises: a malformed
+        quote row drops that scope, never the sweep.
+        """
+        out: Dict[str, str] = {}
+        premarket = session_phase(now) == SESSION_PREMARKET
+        for scope in scopes:
+            if scope == MARKET_SCOPE:
+                continue
+            quote = quotes_by_symbol.get(scope)
+            if not isinstance(quote, dict):
+                continue
+            if premarket and not quote.get("changeSession") and not is_crypto_scope(scope):
+                continue
+            try:
+                band = jump_band(
+                    session_change_percent(quote, now),
+                    (sigmas or {}).get(scope),
+                    quote.get("marketCap"),
+                    is_market_scope=False,
+                )
+            except Exception as e:  # noqa: BLE001 — one bad row must not stop the sweep
+                logger.warning(
+                    "Jump check failed for %s (%s: %s) — not treated as jumping",
+                    scope, type(e).__name__, e,
+                )
+                continue
+            if band is not None:
+                out[scope] = band
+        return out
+
     def _release_claim(self, scope: str, now: datetime, reason: str) -> None:
         """Give the claim back without recording a generation.
 
@@ -808,6 +1045,26 @@ class InsightSweeper:
         #     fixed band for that scope. get_sigmas_bulk never raises into the sweep.
         sigmas = await self.vol.get_sigmas_bulk(symbols)
 
+        # 1c'. JUMPERS — decided ONCE per sweep from the current-session move (2026-10-28,
+        #      ORCL +12% behind a spent daily cap). This live set feeds the decoupled alert,
+        #      the faster news pass, the web search and the MOVE rule; the gate's and the
+        #      claim's jump reserve read `reserve_jumpers` (latched for the ET day). None on
+        #      an MWCB day: the whole tape is moving.
+        mwcb = mwcb_in_force(market_change)
+        jumpers = {} if mwcb else self._jump_set(scopes, quotes_by_symbol, sigmas, now)
+        # The caps' view: today's jumpers so far, so a reserve survives a fading move.
+        reserve_jumpers = self._reserve_jumpers(jumpers, now)
+        # Biggest move first wherever jumpers share an allowance: the faster news pass and the
+        # decoupled alerts (a watcher gets a few watchlist alerts a day, and on a broad move
+        # they must go to the biggest movers, not the most-watched names).
+        jump_order = sorted(
+            jumpers,
+            key=lambda s: -move_score(
+                jumpers[s], session_change_percent(quotes_by_symbol.get(s), now),
+            ),
+        )
+        extra_news = 0
+
         # 1c. Earnings window — which tickers get the market-sized daily cap this
         #     ET day. ONE licensed calendar call per day, cached in the service;
         #     best-effort (an empty set boosts nobody). Through THIS sweeper's
@@ -857,6 +1114,15 @@ class InsightSweeper:
         #    The 6h read TTL on ticker_news_cache would otherwise hide it.
         if refresh_news:
             await self._refresh_news(scopes)
+        elif not crypto_only and jumpers:
+            # 2b. A JUMPER's news is pulled on every 5-minute tick, not every third: on
+            #     2026-10-28 ORCL's press release sat in FMP for up to a news interval
+            #     before the card could see it. Bounded per scope and in all per ET day,
+            #     biggest move first.
+            due = self._extra_news_due(jump_order, now)
+            if due:
+                extra_news = len(due)
+                await self._refresh_news(due)
 
         # 3. Corpora — ONE Supabase query for every scope.
         corpora = await asyncio.to_thread(self.news.get_cached_bulk, scopes, 25)
@@ -899,6 +1165,38 @@ class InsightSweeper:
         states = await asyncio.to_thread(self._load_state, scopes)
         cycle_start = current_close_cycle_start(now)
 
+        # 4a. The jump search (2026-10-28): for every EQUITY jumper that can still
+        #     regenerate today, ask the web WHY it is moving. Its kept pages are a gate input
+        #     (a new set is a one-shot trigger, never a fingerprint input) and a generation
+        #     input (a fenced prompt block, and the first entries of the card's sources).
+        #     After `_load_state`, so a capped scope is not searched; before the gate, so
+        #     the gate sees this tick's pages. Brave is bounded at its timeout + 2 s.
+        web = getattr(self, "web", None)
+        web_on = web is not None and not crypto_only and web.enabled()
+        web_counts: Dict[str, int] = {}
+        if web_on and jumpers:
+            candidates = self._jump_candidates(
+                jumpers, quotes_by_symbol, corpora, states, sigmas, market_change,
+                cycle_start, now, market_active, phase, earnings_scopes, gate_inputs,
+            )
+            if candidates:
+                web_counts = await web.refresh(candidates, now)
+        web_context: Dict[str, Tuple[Any, ...]] = {}
+        web_refreshed: Dict[str, Optional[datetime]] = {}
+        if web_on:
+            for scope in scopes:
+                if scope == MARKET_SCOPE:
+                    continue
+                # Pages explain a move in one direction: after a reversal they are not about
+                # this move any more (review 2026-10-29).
+                pages, refreshed_at = web.context(
+                    scope, now,
+                    direction=_move_direction(quotes_by_symbol.get(scope), now),
+                )
+                if pages:
+                    web_context[scope] = pages
+                    web_refreshed[scope] = refreshed_at
+
         pending: List[Tuple[str, Decision]] = []
         touches: List[str] = []
         skips: List[Tuple[str, Decision]] = []
@@ -926,6 +1224,9 @@ class InsightSweeper:
                 report_day=gate_inputs[scope][0],
                 earnings_pending_today=gate_inputs[scope][1],
                 earnings_reported_at=gate_inputs[scope][2],
+                jumping=scope in reserve_jumpers,
+                web_refreshed_at=web_refreshed.get(scope),
+                web_result_count=len(web_context.get(scope, ())),
             )
             reasons[decision.reason] += 1
             if decision.action == ACTION_GENERATE:
@@ -967,7 +1268,10 @@ class InsightSweeper:
         #    this card, so a peak earnings day must not starve a -15% name) — each
         #    group by move size.
         def _urgent(scope: str, decision: Decision) -> bool:
-            return bool(hot.get(scope)) or decision.price_band in _CATALYST_TIERS
+            # The LIVE jump set, never `decision.price_band`: that is the stale
+            # `last_price_band` when the quote is unusable, so a ticker that moved
+            # yesterday used to be ranked urgent all morning.
+            return bool(hot.get(scope)) or scope in jumpers
 
         pending.sort(key=lambda p: (p[0] != MARKET_SCOPE, not _urgent(*p), -p[1].score))
         admitted = pending[:_PER_CYCLE_REGEN_CAP]
@@ -995,6 +1299,7 @@ class InsightSweeper:
                 if not await asyncio.to_thread(
                     self._claim, scope, now, is_market, scope in earnings_scopes,
                     gate_inputs.get(scope, (False, False, None))[0],
+                    scope in reserve_jumpers,
                 ):
                     return False
                 if not await asyncio.to_thread(self._consume_global_budget, now):
@@ -1012,12 +1317,16 @@ class InsightSweeper:
                     # search, retired 2026-10-02 for the Grounding terms. `_store`
                     # writes NULL over any block a card still carries, so the next
                     # regeneration clears it.
+                    pages = web_context.get(scope, ())
+                    reason = decision.reason
+                    if pages and "web (" not in reason:
+                        reason = f"{reason} + web ({len(pages)})"
                     card = await self.insights.generate_and_store(
                         scope=scope,
                         corpus=corpora.get(scope, []),
                         inputset_id=decision.inputset_id or "",
                         price_band=decision.price_band,
-                        trigger_reason=decision.reason,
+                        trigger_reason=reason,
                         quote=(
                             market_quote if scope == MARKET_SCOPE
                             else quotes_by_symbol.get(scope)
@@ -1029,6 +1338,8 @@ class InsightSweeper:
                         earnings=statuses.get(scope),
                         # Lets the price guard read "CoreWeave Gains 4%" as CRWV's price.
                         company_name=names.get(scope),
+                        web_context=pages,
+                        jumping=scope in jumpers,
                     )
                     if card is None:
                         # "conclusion_guard: figure $5,000" is a very different
@@ -1082,6 +1393,9 @@ class InsightSweeper:
                         scope, decision, card, now,
                         quote=quotes_by_symbol.get(scope),
                     )
+                    if scope in jumpers:
+                        # Counts as this sweep's alert attempt for the jumper (6b).
+                        self._alert_due(scope, now)
 
                 return card is not None
 
@@ -1090,6 +1404,28 @@ class InsightSweeper:
                 *[_run(s, d) for s, d in admitted], return_exceptions=True
             )
             generated = sum(1 for r in results if r is True)
+
+        # 6b. A JUMPER's alert, whatever happened to its card — capped, cooling down,
+        #     refused, claimed by another instance, out of budget, or not admitted this
+        #     cycle. 2026-10-28: ORCL rose ~12% behind a spent daily cap and alerted
+        #     nobody, because the alert was only ever sent from inside a regeneration.
+        #     Coins stay coupled to generation: their change is a rolling 24h window, so
+        #     a decoupled alert would fire again after ET midnight for the same move.
+        jump_alerts = 0
+        if jumpers:
+            decided: Dict[str, Decision] = dict(pending)
+            decided.update(dict(skips))
+            for scope in jump_order:
+                band = jumpers[scope]
+                if is_crypto_scope(scope):
+                    continue
+                decision = decided.get(scope) or Decision(
+                    action=ACTION_TOUCH, reason="cycle_touch",
+                )
+                if await self._alert_jumper(
+                    scope, decision, band, now, quotes_by_symbol.get(scope),
+                ):
+                    jump_alerts += 1
 
         # 7. Proactive per-article enrichment (news pass only — new rows arrive
         #    only via _refresh_news). Enrich each scope's whole windowed corpus so
@@ -1104,12 +1440,13 @@ class InsightSweeper:
         logger.info(
             "Insight sweep (%s) scopes=%d generated=%d touched=%d deferred=%d "
             "enriched=%d enrich_deferred=%d prior_session=%d earnings_boosted=%d "
-            "earnings_status=%d earnings_hot=%d "
-            "market=%s active=%s phase=%s reasons=%s",
+            "earnings_status=%d earnings_hot=%d jumpers=%d jump_alerts=%d "
+            "extra_news=%d web=%s mwcb=%s market=%s active=%s phase=%s reasons=%s",
             ("crypto " if crypto_only else "") + ("news+price" if refresh_news else "price"),
             len(scopes), generated, len(touches), dropped,
             enriched_rows, enrich_deferred, prior_session, boosted,
             len(statuses), sum(1 for v in hot.values() if v),
+            len(jumpers), jump_alerts, extra_news, web_counts or "-", mwcb,
             f"{market_change:+.2f}%" if isinstance(market_change, (int, float)) else "n/a",
             market_active, phase, dict(reasons.most_common(8)),
         )

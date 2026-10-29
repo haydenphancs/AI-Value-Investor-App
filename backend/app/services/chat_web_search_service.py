@@ -87,8 +87,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import html
-import ipaddress
 import json
 import logging
 import re
@@ -97,7 +95,6 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlsplit
 
 from contextvars import ContextVar
 
@@ -119,6 +116,19 @@ from app.services.chat_intent import (
     web_fallback_topic,
 )
 from app.services.chat_security import neutralize_fences, normalize_text, sanitize_symbol
+# The URL / host / publisher / text hygiene lives in a pure module shared with the Updates jump
+# search (2026-10-28); re-exported here because `endpoints/chat.py` and the chat tests read these
+# names from this module.
+from app.services.web_result_hygiene import (  # noqa: F401
+    _INJECTION_RE,
+    _WS_RE,
+    _cap,
+    _clean_text,
+    _host_denied,
+    _iso_date,
+    _publisher_for_host,
+    _safe_https_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -176,9 +186,7 @@ _SNIPPET_CAP = 300
 _SNIPPET_FIT_CAP = 160
 _EXTRA_CAP = 200
 _MAX_EXTRAS = 2
-_PUBLISHER_CAP = 60
 _AGE_CAP = 40
-_URL_MAX = 2048
 _QUERY_MAX_WORDS = 16
 _QUERY_MAX_CHARS = 200
 _CACHE_MAX = 512
@@ -278,81 +286,6 @@ _INVALID_QUERY = {
 # ── Host policy ──────────────────────────────────────────────────────────────
 # Social networks, forums, video, self-publishing and search-engine result pages: not
 # publishers, and (for the engines) a way to put an engine's name on a pill.
-_DENIED_HOSTS = frozenset({
-    "reddit.com", "redd.it", "x.com", "twitter.com", "t.co", "stocktwits.com",
-    "youtube.com", "youtu.be", "tiktok.com", "facebook.com", "fb.com", "fb.watch",
-    "instagram.com", "threads.net", "quora.com", "medium.com", "substack.com", "linkedin.com",
-    "pinterest.com", "discord.com", "discord.gg", "t.me", "telegram.org", "tumblr.com",
-    "4chan.org", "investorshub.advfn.com", "hotcopper.com.au",
-    # search engines
-    "brave.com", "google.com", "bing.com", "duckduckgo.com", "search.yahoo.com",
-    # quote / price pages as a whole site (brokers, price trackers)
-    "robinhood.com", "webull.com", "companiesmarketcap.com", "coinmarketcap.com",
-    "coingecko.com", "markets.ft.com",
-})
-# Quote / price pages on otherwise legitimate publishers — the code backstop for "never take a
-# price from the web" (host suffix, path prefix).
-_QUOTE_PATHS: Tuple[Tuple[str, str], ...] = (
-    ("finance.yahoo.com", "/quote/"),
-    ("marketwatch.com", "/investing/"),
-    ("nasdaq.com", "/market-activity/"),
-    ("cnbc.com", "/quotes/"),
-    ("investing.com", "/equities/"), ("investing.com", "/indices/"),
-    ("investing.com", "/commodities/"), ("investing.com", "/currencies/"),
-    ("investing.com", "/crypto/"), ("investing.com", "/etfs/"),
-    ("bloomberg.com", "/quote/"),
-    ("finviz.com", "/quote"),
-    ("stockanalysis.com", "/stocks/"), ("stockanalysis.com", "/etf/"),
-    ("tradingview.com", "/symbols/"),
-    ("marketbeat.com", "/stocks/"),
-    ("zacks.com", "/stock/quote/"),
-    ("morningstar.com", "/stocks/"), ("morningstar.com", "/etfs/"), ("morningstar.com", "/funds/"),
-    ("seekingalpha.com", "/symbol/"),
-    ("fool.com", "/quote/"),
-    ("wsj.com", "/market-data/"),
-    ("barrons.com", "/market-data/"), ("barrons.com", "/quote/"),
-    ("macrotrends.net", "/stocks/"),
-    ("reuters.com", "/markets/companies/"),
-)
-# Display names for well-known outlets, matched on the URL's own host (exact or a subdomain).
-# Anything else shows its bare host — never the page's self-description.
-_PUBLISHER_BY_HOST: Dict[str, str] = {
-    "reuters.com": "Reuters", "apnews.com": "AP News", "bloomberg.com": "Bloomberg",
-    "wsj.com": "The Wall Street Journal", "ft.com": "Financial Times", "cnbc.com": "CNBC",
-    "nytimes.com": "The New York Times", "washingtonpost.com": "The Washington Post",
-    "bbc.com": "BBC", "bbc.co.uk": "BBC", "theguardian.com": "The Guardian",
-    "economist.com": "The Economist", "forbes.com": "Forbes", "fortune.com": "Fortune",
-    "businessinsider.com": "Business Insider", "marketwatch.com": "MarketWatch",
-    "barrons.com": "Barron's", "finance.yahoo.com": "Yahoo Finance", "yahoo.com": "Yahoo",
-    "investopedia.com": "Investopedia", "sec.gov": "SEC", "techcrunch.com": "TechCrunch",
-    "theverge.com": "The Verge", "axios.com": "Axios", "politico.com": "Politico",
-    "fool.com": "The Motley Fool", "morningstar.com": "Morningstar",
-    "seekingalpha.com": "Seeking Alpha", "investors.com": "Investor's Business Daily",
-    "zacks.com": "Zacks", "kiplinger.com": "Kiplinger", "npr.org": "NPR", "cnn.com": "CNN",
-    "foxbusiness.com": "Fox Business", "nasdaq.com": "Nasdaq", "prnewswire.com": "PR Newswire",
-    "businesswire.com": "Business Wire", "globenewswire.com": "GlobeNewswire",
-    "ftc.gov": "FTC", "justice.gov": "U.S. Department of Justice",
-    "federalreserve.gov": "Federal Reserve", "wired.com": "Wired",
-    "arstechnica.com": "Ars Technica", "latimes.com": "Los Angeles Times",
-    "nikkei.com": "Nikkei", "scmp.com": "South China Morning Post",
-    "aljazeera.com": "Al Jazeera", "theinformation.com": "The Information",
-    "semafor.com": "Semafor", "investing.com": "Investing.com",
-}
-_PUBLISHER_KEYS_LONGEST_FIRST = sorted(_PUBLISHER_BY_HOST, key=len, reverse=True)
-
-# ── Text hygiene ─────────────────────────────────────────────────────────────
-_TAG_RE = re.compile(r"<[^<>]{0,500}>")
-_URL_TEXT_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
-_WS_RE = re.compile(r"\s+")
-# A snippet that tries to talk to the model is dropped with its whole result.
-_INJECTION_RE = re.compile(
-    r"\b(?:ignore|disregard|forget)\s+(?:all\s+|any\s+|the\s+)?(?:previous|prior|above|earlier)\s+"
-    r"(?:instructions?|prompts?|rules?|messages?)\b|\bsystem\s+prompt\b|\byou\s+are\s+now\b|"
-    r"\bnew\s+instructions?\s*:",
-    re.IGNORECASE,
-)
-_ISO_DATE_RE = re.compile(r"^\s*(\d{4})-(\d{2})-(\d{2})")
-
 # ── Market-figure scrub (`_scrub_market_figures`) ────────────────────────────
 # Caydex's licensed feed is the only source of prices, % moves, market caps and index levels, so
 # a snippet sentence that CARRIES one never reaches the model: the prompt rule alone ("never take a
@@ -1535,26 +1468,6 @@ def sanitize_web_query(raw: Any) -> Optional[str]:
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-def _cap(text: str, cap: int) -> str:
-    return text if len(text) <= cap else text[: max(cap - 1, 1)].rstrip() + "…"
-
-
-def _clean_text(value: Any, cap: int) -> Optional[str]:
-    """Third-party text made safe for the model: no tags (even double-encoded ones), no URL, no
-    fence delimiter, one line, capped. None when nothing is left."""
-    if not isinstance(value, str):
-        return None
-    t = _TAG_RE.sub(" ", value)
-    t = html.unescape(t)
-    t = _TAG_RE.sub(" ", t)          # `&lt;script&gt;` decodes into a tag
-    t = _URL_TEXT_RE.sub(" ", t)
-    t = neutralize_fences(t)
-    t = _WS_RE.sub(" ", t).strip()
-    if not t:
-        return None
-    return _cap(t, cap)
-
-
 def _sentence_carries_market_figure(sentence: str) -> bool:
     """True when ONE sentence carries a price, a % move, a market cap, an index level or an FX
     rate (see the `_scrub_market_figures` comment block and the STATIC shapes above
@@ -1655,82 +1568,6 @@ def _scrub_market_figures(text: Optional[str], stats: Optional[Dict[str, Any]] =
 # `/`, so `evil.com\.reuters.com` opens evil.com while its suffix says Reuters), a
 # percent-escape, an underscore, an all-numeric "octal IP" (`0177.0.0.1`, which `ipaddress`
 # rejects for its leading zeros) — is refused, never mapped to a publisher (review 2026-10-02).
-_HOST_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
-_HOST_SHAPE_RE = re.compile(rf"(?:{_HOST_LABEL}\.)+(?:[a-z]{{2,63}}|xn--[a-z0-9-]{{1,59}})")
-
-
-def _safe_https_url(url: Any) -> Optional[Tuple[str, str, str]]:
-    """(url, host, path) for an https URL a pill may open, else None. The host comes from the URL
-    itself — lowercased, trailing dot stripped, IDNA-encoded — never from Brave's `meta_url`."""
-    if not isinstance(url, str):
-        return None
-    u = url.strip()
-    if not u or len(u) > _URL_MAX or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in u):
-        return None
-    try:
-        parts = urlsplit(u)
-        if parts.scheme.lower() != "https":
-            return None
-        if "@" in parts.netloc or parts.username is not None or parts.password is not None:
-            return None
-        if parts.port is not None:
-            return None
-        host = (parts.hostname or "").strip().rstrip(".").lower()
-    except ValueError:
-        return None
-    if not host or "." not in host:
-        return None
-    if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
-        return None
-    try:
-        ipaddress.ip_address(host.strip("[]"))
-        return None              # an IP literal is never a publisher
-    except ValueError:
-        pass
-    try:
-        host = host.encode("idna").decode("ascii").lower()
-    except (UnicodeError, ValueError):
-        return None
-    if len(host) > 253 or not _HOST_SHAPE_RE.fullmatch(host):
-        return None
-    return u, host, (parts.path or "/").lower()
-
-
-def _host_matches(host: str, suffix: str) -> bool:
-    return host == suffix or host.endswith("." + suffix)
-
-
-def _host_denied(host: str, path: str) -> bool:
-    if any(_host_matches(host, d) for d in _DENIED_HOSTS):
-        return True
-    return any(_host_matches(host, h) and path.startswith(p) for h, p in _QUOTE_PATHS)
-
-
-def _publisher_for_host(host: str) -> str:
-    for key in _PUBLISHER_KEYS_LONGEST_FIRST:
-        if _host_matches(host, key):
-            return _PUBLISHER_BY_HOST[key]
-    bare = host[4:] if host.startswith("www.") else host
-    return _cap(bare, _PUBLISHER_CAP)
-
-
-def _iso_date(value: Any) -> Optional[str]:
-    """`YYYY-MM-DD` from an ISO timestamp, only when it is a real date between 1990 and next
-    year; else None (a relative "2 days ago" is not a date)."""
-    if not isinstance(value, str):
-        return None
-    m = _ISO_DATE_RE.match(value)
-    if not m:
-        return None
-    try:
-        d = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    except ValueError:
-        return None
-    if not 1990 <= d.year <= datetime.now(timezone.utc).year + 1:
-        return None
-    return d.strftime("%Y-%m-%d")
-
-
 def _json_size(value: Any) -> int:
     """Measured exactly like `gemini.truncate_tool_result` (ASCII-escaped JSON)."""
     try:

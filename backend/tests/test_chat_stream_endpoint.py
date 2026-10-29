@@ -4173,8 +4173,10 @@ def test_an_empty_search_that_spent_a_unit_in_the_fallback_is_never_judged(harne
 
 
 _WEB_HISTORY = [
-    {"role": "assistant", "content": "Reuters reported the case advanced.", "web_searched": True},
-    {"role": "user", "content": "Search the web for the DOJ case", "web_searched": None},
+    {"role": "assistant", "content": "Reuters reported the case advanced.", "web_searched": True,
+     "web_card": None},
+    {"role": "user", "content": "Search the web for the DOJ case", "web_searched": None,
+     "web_card": None},
 ]
 
 
@@ -4215,8 +4217,9 @@ def test_a_history_without_web_answers_is_judged_with_the_last_exchange(harness)
     client, db, quota, _ = harness
     _FakeGemini.coverage_text = _UNANSWERED
     db.prior_rows = [
-        {"role": "assistant", "content": "Apple's CEO is Tim Cook.", "web_searched": None},
-        {"role": "user", "content": "Who runs Apple?", "web_searched": None},
+        {"role": "assistant", "content": "Apple's CEO is Tim Cook.", "web_searched": None,
+         "web_card": None},
+        {"role": "user", "content": "Who runs Apple?", "web_searched": None, "web_card": None},
     ]
     _FakeChatService.events = [("answer", _DECLINE)]
     r = _post(client, message="and his pay?")
@@ -4695,3 +4698,75 @@ def test_a_settled_send_turn_is_not_settled_again_by_the_backstop(harness, monke
     monkeypatch.setattr(_FakeChatService, "generate_response", _boom)
     client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
     assert quota.every_call == [], quota.every_call
+
+
+# ── an answer that read a web-sourced Insights card (the Updates jump search, 2026-10-28) ──
+
+def test_a_stream_turn_on_a_web_sourced_card_is_marked_and_never_judged(harness, caplog):
+    """Owner, 2026-10-28: Ask Cay reads the web-sourced card — and the turn stays out of the
+    refund judge (Brave §3(b)(xiii)), and the stored row is marked so the NEXT turn is not
+    judged either. No web caveat or pills: no web search ran on this turn."""
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    _FakeChatService.prep_overrides = {"web_assisted_card": True}
+    _FakeChatService.events = [("answer", _DECLINE)]
+    with caplog.at_level("INFO", logger="app.services.chat_answer_coverage"):
+        r = _post(client, message="Why did Oracle jump?")
+    assert r.status_code == 200, r.text
+    assert _FakeGemini.coverage_calls == [] and quota.settled == []
+    line = [m.getMessage() for m in caplog.records if "CHAT_UNANSWERED door=" in m.getMessage()][-1]
+    assert "action=skipped:" in line and "judged" not in line
+    thinking = _assistant_row(db)["rich_content"]["thinking"]
+    assert thinking.get("web_assisted_card") is True
+    assert "web_searched" not in thinking
+
+
+def test_a_send_turn_on_a_web_sourced_card_is_marked_and_never_judged(harness):
+    client, db, quota, _ = harness
+    _FakeGemini.coverage_text = _UNANSWERED
+    _FakeChatService.fallback_result = {"content": _DECLINE, "tokens_used": 30,
+                                        "web_assisted_card": True}
+    r = _send(client, message="Why did Oracle jump?")
+    assert r.status_code == 200, r.text
+    assert _FakeGemini.coverage_calls == [] and quota.settled == []
+    thinking = _assistant_row(db)["rich_content"]["thinking"]
+    assert thinking.get("web_assisted_card") is True and "web_searched" not in thinking
+
+
+def test_an_ordinary_turn_is_not_marked(harness):
+    client, db, quota, _ = harness
+    _FakeChatService.fallback_result = {"content": "Oracle reported results.", "tokens_used": 30}
+    r = _send(client, message="What did Oracle report?")
+    assert r.status_code == 200, r.text
+    assert "web_assisted_card" not in _assistant_row(db)["rich_content"]["thinking"]
+
+
+@pytest.mark.parametrize("web_card", [False, True])
+def test_a_stream_deep_dive_on_a_web_sourced_card_never_enters_the_shared_cache(
+    harness, monkeypatch, web_card,
+):
+    """Review 2026-10-29: the stream door (the default) cached an AI Analyst brief whose
+    `explain_price_move` result reprinted a web-sourced Insights card — for every user for 24 h,
+    and its replay carries no flag, so later turns were judged on that text. The send door
+    already refused it. The control (no flag) is cached as before."""
+    client, db, quota, _ = harness
+    _FakeChatService.prep_overrides = {"is_deep_dive": True, "deep_dive_context": "ctx",
+                                       "deep_dive_cached": None}
+    writes = []
+    monkeypatch.setattr(_FakeChatService, "_upsert_deep_dive_cache",
+                        lambda self, *a, **k: writes.append(a))
+    result = {"ticker": "ORCL", "explanation": "Oracle set long-term targets at its Investor Day."}
+    if web_card:
+        result["web_assisted"] = True
+    _FakeChatService.events = [
+        ("tool", {"name": "explain_price_move", "args": {"ticker": "ORCL"}, "result": result}),
+        ("answer", "XLK's software holdings led the fund today. Oracle's Investor Day set "
+                   "long-term targets for the business, and the other large holdings moved "
+                   "with the wider technology group."),
+    ]
+    db.session_row["stock_id"] = "XLK"
+    r = _post(client, message="Give me a deep dive on XLK")
+    assert r.status_code == 200, r.text
+    assert (writes == []) is web_card, writes
+    if web_card:
+        assert _assistant_row(db)["rich_content"]["thinking"].get("web_assisted_card") is True

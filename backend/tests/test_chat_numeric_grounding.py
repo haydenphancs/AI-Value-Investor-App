@@ -745,3 +745,27 @@ def test_the_whole_audit_is_linear_in_the_answer():
         if tb < 1.0 and (tb < 0.01 or tb / max(ts, 1e-6) < 16):
             return
     raise AssertionError(("super-linear audit", ts, tb))
+
+
+# ── a web-sourced Insights card reprinted by a tool (jump mode, 2026-10-28) ────────
+
+def test_a_reprinted_web_sourced_card_is_never_evidence_and_skips_the_audit():
+    from app.services.chat_numeric_grounding import GroundingEvidence, audit_answer
+
+    reprint = {"ticker": "ORCL", "explanation": "Oracle set a $225 billion target.",
+               "web_assisted": True}
+    assert GroundingEvidence._web_result_kind("explain_price_move", reprint) is True
+    ev = GroundingEvidence.from_seed(None)
+    ev.add_tool_result("explain_price_move", reprint)
+    assert ev.web_seen is True
+    assert audit_answer("Oracle targets $225 billion.", ev).skipped == "web_turn"
+    # Without the marker the same result is ordinary evidence.
+    assert GroundingEvidence._web_result_kind("explain_price_move", {"x": 1}) is None
+
+
+def test_the_doors_helper_finds_a_reprinted_card():
+    from app.services.chat_service import web_card_in_tool_results
+
+    assert web_card_in_tool_results([{"a": 1}, {"web_assisted": True}]) is True
+    assert web_card_in_tool_results([{"web_assisted": "yes"}, None, "x"]) is False
+    assert web_card_in_tool_results(None) is False

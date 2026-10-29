@@ -222,12 +222,99 @@ def scrub_sentry_transaction(event: dict, _hint: Any = None) -> dict:
     return event
 
 
+# WEB-SEARCH RESULTS never reach Sentry through a frame's locals (review 2026-10-29). Brave's
+# terms allow its results transient use only, and the Updates Insights card is the one place they
+# may be kept (owner decision 2026-10-28) — sentry-sdk captures every frame's locals by default.
+# A frame in one of these modules holds queries and results, so it keeps its function and line
+# but no locals:
+_WEB_RESULT_MODULES = frozenset({
+    "app.integrations.brave_search",
+    "app.services.chat_web_search_service",
+    "app.services.jump_web_search_service",
+    "app.services.web_result_hygiene",
+})
+# On the Insights path, only a frame that HOLDS the jump search's pages (one of these locals, not
+# empty) loses its locals; the card's other failures keep theirs for triage.
+_WEB_PAGE_MODULES = frozenset({
+    "app.services.news_insight_service",
+    "app.services.updates_insight_sweeper",
+})
+_WEB_PAGE_VARS = frozenset({"web_context", "web", "pages", "web_block", "web_rows"})
+_EMPTY_REPRS = frozenset({"", "None", "()", "[]", "{}", "''", '""', "set()", "frozenset()"})
+_WEB_VARS_DROPPED = {"web_search": "[locals dropped: web search results are transient only]"}
+# ...and, under ANY local name, a frame holding a value only web results have: a stored card
+# source marked `origin: "web"` (`news_insight_service._store`'s `sources`), a chat source pill
+# of kind "web" (`chat._persist_turn`'s message) or a `WebPage` repr (review 2026-10-29, round 2).
+_WEB_VALUE_MODULES = _WEB_PAGE_MODULES | frozenset({
+    "app.api.v1.endpoints.chat",
+    "app.services.chat_service",
+})
+_WEB_VALUE_REPRS = ("WebPage(", "'origin': 'web'", '"origin": "web"', "'kind': 'web'", '"kind": "web"')
+
+
+def _frame_module(frame: dict) -> str:
+    module = frame.get("module")
+    if isinstance(module, str) and module:
+        return module
+    path = frame.get("abs_path") or frame.get("filename") or ""
+    if not isinstance(path, str) or not path.endswith(".py"):
+        return ""
+    parts = path[:-3].replace("\\", "/").split("/")
+    if "app" not in parts:
+        return ""
+    # The LAST "app": a container's working directory is often called app too ("/app/app/…").
+    start = len(parts) - 1 - parts[::-1].index("app")
+    return ".".join(parts[start:])
+
+
+def _has_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, (list, dict)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip() not in _EMPTY_REPRS
+    return True
+
+
+def _holds_web_value(node: Any, depth: int = 0) -> bool:
+    """Whether a serialised local carries a web result (see `_WEB_VALUE_MODULES`). Sentry
+    serialises nested values as dicts/lists of repr strings, so both shapes are read."""
+    if depth > 12:
+        return False
+    if isinstance(node, dict):
+        for key in ("origin", "kind"):
+            value = node.get(key)
+            if isinstance(value, str) and value.strip().strip("'\"") == "web":
+                return True
+        return any(_holds_web_value(v, depth + 1) for v in node.values())
+    if isinstance(node, list):
+        return any(_holds_web_value(v, depth + 1) for v in node)
+    return isinstance(node, str) and any(r in node for r in _WEB_VALUE_REPRS)
+
+
+def _holds_web_results(frame: dict) -> bool:
+    module = _frame_module(frame)
+    if module in _WEB_RESULT_MODULES:
+        return True
+    local_vars = frame.get("vars") or {}
+    if module in _WEB_PAGE_MODULES and any(
+        _has_value(local_vars.get(name)) for name in _WEB_PAGE_VARS
+    ):
+        return True
+    return module in _WEB_VALUE_MODULES and _holds_web_value(local_vars)
+
+
 def _scrub_frames(stacktrace: Any) -> None:
     if not isinstance(stacktrace, dict):
         return
     for frame in stacktrace.get("frames") or []:
-        if isinstance(frame, dict) and isinstance(frame.get("vars"), dict):
-            _redact_strings_in_place(frame["vars"])
+        if not isinstance(frame, dict) or not isinstance(frame.get("vars"), dict):
+            continue
+        if _holds_web_results(frame):
+            frame["vars"] = dict(_WEB_VARS_DROPPED)
+            continue
+        _redact_strings_in_place(frame["vars"])
 
 
 def _is_credential_key(key: Any) -> bool:

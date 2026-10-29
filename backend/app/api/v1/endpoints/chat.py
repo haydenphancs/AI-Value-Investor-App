@@ -1405,8 +1405,9 @@ def _previous_turn_loader(supabase, session_id: str, before_iso: str):
 
     * `web_built` — an assistant row in the model's history window carries
       `rich_content.thinking.web_searched` (both doors store it on a turn whose web results were
-      delivered). This turn's reply may restate that answer, so the turn is not judged (Brave
-      §3(b)(xiii) bars evaluating an AI answer built on their results);
+      delivered) or `rich_content.thinking.web_assisted_card` (a turn that read a web-sourced
+      Insights card, 2026-10-28). This turn's reply may restate that answer, so the turn is not
+      judged (Brave §3(b)(xiii) bars evaluating an AI answer built on their results);
     * `text` — the last exchange, the judge's context for a short follow-up ("and its margins?").
 
     Fails CLOSED: a failed read or a row without the selected flag answers None, which the
@@ -1415,7 +1416,8 @@ def _previous_turn_loader(supabase, session_id: str, before_iso: str):
     def _read() -> PriorContext:
         res = (
             supabase.table("chat_messages")
-            .select("role, content, web_searched:rich_content->thinking->web_searched")
+            .select("role, content, web_searched:rich_content->thinking->web_searched, "
+                    "web_card:rich_content->thinking->web_assisted_card")
             .eq("session_id", session_id)
             .lt("created_at", before_iso)
             .order("created_at", desc=True)
@@ -1426,11 +1428,16 @@ def _previous_turn_loader(supabase, session_id: str, before_iso: str):
         if not isinstance(data, list):
             raise ValueError("history read answered a non-list")
         rows = [r for r in data if isinstance(r, dict)]
-        if len(rows) != len(data) or any("web_searched" not in r for r in rows):
+        if len(rows) != len(data) or any(
+            "web_searched" not in r or "web_card" not in r for r in rows
+        ):
             # A shape drift (e.g. the JSON-path column missing) must never read as "no web turn".
-            raise ValueError("history rows without the web_searched column")
+            raise ValueError("history rows without the web_searched / web_card column")
         web_built = any(
-            r.get("role") == "assistant" and r.get("web_searched") not in (None, False)
+            r.get("role") == "assistant" and (
+                r.get("web_searched") not in (None, False)
+                or r.get("web_card") not in (None, False)
+            )
             for r in rows
         )
         lines = []
@@ -2037,6 +2044,9 @@ async def send_chat_message(
         # …plus report chat's code-authored web-results caveat, appended only when web results
         # reached THIS answer (`web_search_used`), and a model-written copy stripped on every turn.
         web_used = bool(ai_result.get("web_search_used"))
+        # The answer read a web-sourced Insights card (jump mode, 2026-10-28): never judged,
+        # and marked on the stored row so the NEXT turn is not judged either.
+        web_card = ai_result.get("web_assisted_card") is True
         ai_result["content"], _ = finalize_answer_notes(
             clean_answer, trade_intent=trade_intent, web_used=web_used,
             report_as_of=ai_result.get("report_as_of"),
@@ -2097,6 +2107,8 @@ async def send_chat_message(
         }
         if web_used:
             thinking_payload["web_searched"] = True
+        if web_card:
+            thinking_payload["web_assisted_card"] = True
         # A cut answer (the model hit its ceiling after real text) is marked and gets the
         # single "Continue" chip — persisted with the row so history replays the same
         # state, and the identical shape the stream door writes for the same verdict.
@@ -2158,7 +2170,7 @@ async def send_chat_message(
         unanswered_turn = _unanswered_turn(
             door="send", quota=quota, user=user, question=msg, answer=clean_answer,
             cache_hit=ai_result.get("tokens_used") == 0, starter_replay=False,
-            degraded=ai_result.get("degraded"), web_results_delivered=web_used,
+            degraded=ai_result.get("degraded"), web_results_delivered=web_used or web_card,
             web_unit_spent=ai_result.get("web_search_spent") is True,
             send_budget_left=unanswered_left,
         )
@@ -2514,6 +2526,10 @@ async def stream_chat_message(
         # Whether the turn's search kept a unit of the global cap — read from `web_turn`, or, when
         # prep raised (no `web_turn` here), from the fallback's own turn (`web_search_spent`).
         fallback_web_unit_spent = False
+        # Whether the answer read a web-sourced Insights card (the screen's grounding — prep's
+        # resolver meta — or a tool that reprinted one; jump mode, 2026-10-28): never audited,
+        # never judged, and marked on the stored row.
+        web_card_used = False
         # The grounded report's humanized as-of date, which the web-results caveat names (prep's,
         # REPLACED by the fallback's own when it has one), and the list the last `sources` frame
         # carried — a frame is re-sent only when the live list changed (iOS REPLACES its pills).
@@ -2621,6 +2637,7 @@ async def stream_chat_message(
                     or prep.get("system_instruction_no_tools"),
                 }
             report_as_of = prep.get("report_as_of")
+            web_card_used = prep.get("web_assisted_card") is True
             # The grounding audit's starting evidence (never raises; a missing seed → empty).
             grounding_evidence = GroundingEvidence.from_seed(prep.get("grounding_seed"))
             grounding_asset = prep.get("asset_type")
@@ -2869,6 +2886,8 @@ async def stream_chat_message(
                             payload.get("name"), truncate_tool_result(_res),
                         )
                     _web_delivered = payload.get("name") == WEB_SEARCH_TOOL and web_results_delivered(_res)
+                    if isinstance(_res, dict) and _res.get("web_assisted") is True:
+                        web_card_used = True
                     if _web_delivered:
                         # Web results reached the model on this turn (a capped, empty or failed
                         # search never counts) — the caveat and the source pills key off it.
@@ -3035,6 +3054,10 @@ async def stream_chat_message(
                 # Never one built on a user's web results: third-party text must not enter a
                 # cache served to every user (Brave allows transient storage only).
                 and not web_search_used
+                # Nor on a web-sourced Insights card (an `explain_price_move` that reprinted
+                # one): the send door already refused it, and its replay would carry no flag,
+                # so later turns would be judged on that text (review 2026-10-29).
+                and not web_card_used
             ):
                 await asyncio.to_thread(
                     chat_service._upsert_deep_dive_cache,
@@ -3139,6 +3162,8 @@ async def stream_chat_message(
                 web_search_used = bool(ai_result.get("web_search_used"))
                 web_search_automatic = ai_result.get("web_search_automatic") is True
                 fallback_web_unit_spent = ai_result.get("web_search_spent") is True
+                # OR, never replaced: either answer may have read a web-sourced card.
+                web_card_used = web_card_used or ai_result.get("web_assisted_card") is True
                 report_as_of = ai_result.get("report_as_of") or report_as_of
                 fb_base = _strip_web_pills(sources) if sources else _strip_web_pills(ai_result.get("sources"))
                 sources = _merge_web_pills(
@@ -3211,7 +3236,7 @@ async def stream_chat_message(
                     (fallback_grounding_audit or {"skipped": "no_audit"}) if used_fallback
                     else None
                 ),
-                web_turn=web_search_used,
+                web_turn=web_search_used or web_card_used,
                 replay=None if used_fallback else grounding_replay,
                 fallback=used_fallback,
             )
@@ -3281,6 +3306,8 @@ async def stream_chat_message(
         }
         if web_search_used:
             thinking_payload["web_searched"] = True
+        if web_card_used:
+            thinking_payload["web_assisted_card"] = True
         # The answer the user is reading is INCOMPLETE: the model cut it and no
         # continuation finished it (`finish_reason` is cleared by a clean continuation
         # and re-set by the fallback's own verdict). Derived from the reason, not from
@@ -3374,7 +3401,7 @@ async def stream_chat_message(
                 question=user_message, answer=unanswered_answer,
                 cache_hit=tokens_used == 0,
                 starter_replay=replayed_warm and not used_fallback,
-                degraded=degraded_reason, web_results_delivered=web_search_used,
+                degraded=degraded_reason, web_results_delivered=web_search_used or web_card_used,
                 web_unit_spent=(
                     (web_turn is not None and web_turn.spent_a_unit()) or fallback_web_unit_spent
                 ),

@@ -109,6 +109,9 @@ from app.services.chat_service import ChatService, _chat_thinking_budget
 settings.CHAT_REPORT_WEB_SEARCH_ENABLED = False
 settings.CHAT_WEB_SEARCH_ALL_CHATS_ENABLED = False
 settings.CHAT_AUTO_WEB_SEARCH_MODE = "off"
+# The Updates jump search (2026-10-28) too: OFF withholds every stored Insights card written
+# from web pages (`news_insight_service._row_to_card`), so no probe answer is built on one.
+settings.UPDATES_JUMP_WEB_SEARCH_ENABLED = False
 
 # ── The post-deploy probes (`--probes`) ───────────────────────────────────────
 #

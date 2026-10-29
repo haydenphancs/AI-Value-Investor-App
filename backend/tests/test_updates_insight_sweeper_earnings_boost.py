@@ -87,7 +87,8 @@ class _Stub(InsightSweeper):
     async def mark_verified_current(self, scopes, market_active):
         self.verified = (list(scopes), market_active)
 
-    def _claim(self, scope, now, is_market_scope, earnings_window=False, report_day=False):
+    def _claim(self, scope, now, is_market_scope, earnings_window=False, report_day=False,
+               jumping=False):
         self.claims.append((scope, is_market_scope, earnings_window))
         self.report_days = getattr(self, "report_days", {})
         self.report_days[scope] = report_day

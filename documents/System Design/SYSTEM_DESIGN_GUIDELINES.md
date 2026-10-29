@@ -176,7 +176,9 @@ is shown for at most 96 h, and is replaced by the live answer as soon as that la
 chat's `web_search` tool, offered only on a turn where the user explicitly asks to search, look up or
 verify; called only by `app/services/chat_web_search_service.py`, which holds the gate, the per-turn
 single search, the fail-closed daily budget and a per-user transient cache — no Supabase tier and no
-cross-user cache, because Brave's terms allow transient storage only), and `sec_edgar` (SEC EDGAR
+cross-user cache, because Brave's terms allow transient storage only; and, since 2026-10-28, by
+`app/services/jump_web_search_service.py`, the Updates Insights jump search (§9b.10a), whose kept pages
+the SHARED Insights card may hold by owner decision), and `sec_edgar` (SEC EDGAR
 XBRL `companyconcept` facts, 2026-10-22: the check on Signal of Confidence buybacks, called only by
 `app/services/sec_concept_service.py`, which owns the two-tier cache `sec_concept_cache`. SEC's
 fair-access policy needs a declared `SEC_EDGAR_USER_AGENT` ("Company contact@email"; blank or not
@@ -212,10 +214,12 @@ it, including that a new report's stamp survives every writer (a lost stamp woul
 a paid miss).
 Note there is **no NewsAPI or other news vendor** — news comes from FMP (`get_stock_news` /
 `get_general_news` / `get_crypto_news`, and since 2026-10-08 a company's own press releases), with
-Gemini doing enrichment and sentiment on top. The one exception is Ask Cay AI's web search (Brave,
+Gemini doing enrichment and sentiment on top. The exceptions are Ask Cay AI's web search (Brave,
 §9b.10), which can surface third-party news pages — on an explicit ask, or, once its switches are on,
 as an automatic fallback after Caydex's own tools — always attributed to their publishers, never for
-market data, and never as Caydex data. A news ask reads the licensed headlines first.
+market data, and never as Caydex data; and the Updates jump search (Brave, §9b.10a, 2026-10-28), which
+feeds the pages that explain a sudden move into that ticker's Insights card and lists them first among
+its sources. A news ask reads the licensed headlines first.
 `openai_compat` is the switchable second provider for the NEWS features only (per-article sentiment
 and summary bullets, and the sentiment backfill), selected by `NEWS_LLM_PROVIDER` through
 `app/services/news_llm.py`; the default is Gemini, and chat, reports and the Insights card never
@@ -3454,6 +3458,100 @@ flow-down), dated October 9, 2026 in all three copies each. The website copies m
 any web switch is turned on. The consent sheet (`AIDataConsentView`, consent v3) names no vendor. No
 new App Privacy data type: the query derives from a chat message, already declared.
 
+### 9b.10a Updates Insights jump mode: the reserve, the decoupled alert and the jump search (2026-10-28)
+
+TestFlight, ORCL, Wed 2026-10-28: the stock rose ~12% from ~14:15 ET on its Investor Day while its
+Insights card read the previous day's news. Production showed the cause: the card had spent its tenth
+refresh of the day at 13:24 ET (`daily_cap`), the press release reached `ticker_news_cache` at 14:37
+and Reuters/CNBC at 15:01, and the card could not refresh again that day — and the `ticker_move`
+alert never fired, because it was only ever sent from inside a regeneration. 17 of the 39 swept
+scopes were capped by early afternoon that day.
+
+**Jumper.** One definition per sweep (`updates_materiality.jump_band`, computed by the sweeper right
+after quotes and σ): a non-market scope whose CURRENT-session move (`session_change_percent` — a
+prior session's change is None, so yesterday's move is never a jump this morning) is finite, non-zero
+and in `JUMP_TIERS` (Unusual z ≥ 2, Extreme z ≥ 3, or the fixed-band extreme when σ is missing). No
+jumpers on an MWCB day (`mwcb_in_force`). Pre-market changes are blanked and an after-hours move is
+not in `changePercentage`, so v1 covers regular-session moves; a quote with NO session stamp (the
+per-symbol profile fallback: a foreign listing, a sub-$50M microcap, a new ticker) is not a jump before
+the bell either — it cannot say which session its change belongs to.
+
+**What a jumper gets.** `JUMP_RESERVE` (6) extra successes, fed to the gate AND the claim RPC
+(`p_daily_cap` / `p_attempt_cap`, migration 089 params; stacks with the report-day reserve, which
+`earnings_reserved` still holds back while a report is pending). The reserve is a per-ET-day
+allowance: once a scope has jumped it keeps the six for the rest of the day in the process
+(`_reserve_jumpers`), even after the move fades — read off the live move, a pending reporter's
+in-session jump cards ate its after-close six and the release card was lost (a restart between such a
+jump and the release forgets the latch — one reason deploys go after 18:00 ET). Everything else follows
+the LIVE jump set: urgency in the per-cycle admission (never the stale `last_price_band`); its FMP news
+pulled on every 5-minute tick, at most `_JUMP_EXTRA_NEWS_PER_DAY` (12) extra pulls per scope and
+`_JUMP_EXTRA_NEWS_TOTAL_PER_DAY` (60) across stocks per ET day (a coin keeps its own 12 and never draws
+the stocks' pool — before the bell coins are the only jumpers), biggest move first; and its `ticker_move` alert
+whatever happened to the card — capped, cooling down, refused, claimed elsewhere, out of budget, not
+admitted (`_alert_jumper`, one attempt per scope per 30 min in a process; the dispatcher's per-user
+per-ET-day dedup is the real once-a-day guarantee), biggest move first, since a watcher gets only a
+few watchlist alerts a day. Coins stay coupled to generation: their change is a rolling 24 h window, so
+a decoupled alert would re-fire after ET midnight for the same move.
+
+**The jump search** (`jump_web_search_service`, owner decision 2026-10-28: "i pick option 2, i don't
+think we break any terms"). For an EQUITY jumper (no ETF, fund, coin, commodity or index) that can
+still regenerate — a pure pre-decide asked as if new pages had just arrived (`web_refreshed_at=now`, so
+an unchanged fingerprint cannot hide a cap), never on a cap, a reserve, MWCB or `no_corpus` — between
+`_load_state` and the gate: a code-authored query `why is <name> stock up|down today` from the FMP
+screener's company name (never the client-writable watchlist name), cleaned first ("Tesla, Inc." →
+"tesla": no comma, no brand mark like "Yum!", no share-class tail, "A/S" / "S/A" / "SA/NV" as suffixes)
+and then whitelisted (letters of any script, digits, `. & ' -`, at most 80 characters — a comma once
+refused about half of all large caps; a name that cannot be searched logs its scope, never the name),
+`freshness=pd`, one durable fail-closed bucket outside chat's 180 (`UPDATES_JUMP_WEB_SEARCH_DAILY_CAP`,
+40), refunded only on `not_run`; per scope and ET day at most 4 searches, 15 minutes apart, at once
+on a sign flip, biggest move first, two at a time, at most 8 starting in one sweep. Kept: https pages
+outside the shared deny-list (`web_result_hygiene`, moved out of the chat service), one per host,
+dated within 24 h by the page's own time or Brave's minute/hour age ("1 day ago" means 24-47 h, so it is
+not read as an instant), with a link short enough to store (500 characters), about the company — on
+accent-folded text, ALONE: the full name when it has two or more words (any case), a multi-word press
+name ("John Deere"), or the symbol from 3 letters; only BESIDE A COMPANY CUE (a possessive,
+"stock"/"shares", a legal form, a listing in brackets, or "shares of"): a one-word name, a head word, a
+one-word press name ("Disney", "Google" — the widget's `_LEAN_BRAND_ALIASES`) or the first two words of
+a longer name whose head is an ordinary word ("Rocket Lab"). Capitalisation alone cannot tell, since a
+Title Case headline capitalises every word ("Walmart Price Target Raised" is not about Target; "High-Beta
+Stocks" not about BETA Technologies); an ordinary head never counts alone ("American" is not American
+Airlines). At most 3, the number the card lists. The kept set lives in the process for the rest of the ET day (a re-search that keeps nothing
+never erases it; a restart starts over, so the per-day limits are per process lifetime) and is
+returned only while the move keeps the direction it was searched for. It is a gate input as a ONE-SHOT
+TRIGGER (`decide(web_refreshed_at=)`, like `earnings_reported_at`) and never a fingerprint input: two
+instances holding different sets would re-key the shared state row against each other. In generation it
+is a second fenced block (`<<<WEB i>>>`) after the articles, with the MOVE rule (lead with the
+development that explains the move — never the price, the move or its direction — or, when nothing
+explains it, suggest no cause); a prompt with neither a jump nor kept pages is byte-identical
+(`tests/data/insight_ticker_prompt_golden.json`). A scope whose jump faded keeps feeding its same-direction
+pages to its cards for the rest of the ET day, without the MOVE rule (the plan's "any same-ET-day
+context"); after a reversal they stop. The card reads at most 3 pages and lists every one
+first in its sources (`origin: "web"`, stored only) — tappable in the in-app browser, as the owner
+asked. The search log line counts the kept pages from a publisher we do not name (`unknown_host`),
+never the host. A replay with hand-written, price-heavy pages ("Oracle stock soars 12% …") wrote 5 of 5
+ORCL cards, none refused by the price guard, each leading with the Investor Day targets (2026-10-29; one
+cause-bearing fixture — production refusals are countable, below).
+
+**What still binds, and the switch.** Web results are never used to evaluate or tune the AI (Brave
+§3(b)(xiii)): a turn that read a web-sourced card — the Updates-scope grounding (resolver meta) or an
+`explain_price_move` reprint (`web_assisted` on the tool result) — is skipped by `CHAT_GROUNDING` and
+the refund judge, stored with `thinking.web_assisted_card` so the next turn is not judged either, and
+never cached as a deep dive (both doors) or stored as a starter-chip answer (the chip is parked for the
+day); the preview and eval scripts force the switch off at module level. Results are never kept
+anywhere but the card: `WebPage`'s repr carries no title, snippet or link, and the Sentry scrubber
+(`log_redaction._scrub_frames`) drops the locals of every frame in the web-search modules, of any
+Insights frame holding the pages, and of any Insights or chat frame holding a value only web results
+have (a source marked `origin: "web"`, a web pill, a `WebPage`). A web-fed card's refusal logs counts
+only — the model may have copied a page title — and its `last_error` ends `[web pages: N]`, so
+refusals of web-fed cards can be counted after deploy. `UPDATES_JUMP_WEB_SEARCH_ENABLED` (default on, key-gated) is read on
+BOTH sides: off stops new searches AND `_row_to_card` withholds every stored card written from web
+pages (the 2026-10-02 lesson: a switch that only stops writes keeps serving what was stored). It
+withholds, it does not delete: the one `ai_insight_cache` row per scope is overwritten by the next
+card, and nothing deletes the row of a scope that leaves the swept universe (its card stops being
+served 96 h after its last check). Privacy §3 (a paragraph of its own:
+only a company name and the move's direction are sent; the shared card keeps the pages' titles and
+links), §4 (Brave) and Terms §7 (the flow-down covers the card's pages) dated October 28, 2026.
+
 ### 9b.11 Chat data tools — Caydex's figures first
 
 *(Added 2026-10-08/09: the "Caydex data first" audit.)* TestFlight 1.0 (11): in an Updates chat on
@@ -4854,7 +4952,7 @@ Migration 089 exists because two of these were mixed once already.
 | whale 13F + congress | same job, phase 2 | 0 (reads `whale_trades`) | `last_cursor` high-water mark |
 | price alerts | 60s — every rule while the market is active (04:00–20:00 ET), crypto-only rules while it is closed | 1 batch-quote/cycle | none — the dedup key is the lock |
 | profile match | daily, `PROFILE_MATCH_NOTIFY_HOUR_ET` | 0 (reads the shared signals cache) | `claim_notification_job` (a failed profile or tier read leaves the day open) + dedup key `profile_match:{day}:{user_id}` |
-| ticker move (`ticker_move`) | Updates insight sweeper PRICE pass, every 5 min (`updates_insight_sweeper.py`) — and, for coins only, its crypto-only off-hours pass every 30 min while the market is closed — when the σ-scored move lands in a catalyst tier and the quote is usable; body = the move plus a pointer to the ticker (the grounded catalyst body was retired 2026-10-02; the card headline never was a body) | shares that pass's single batch-quote call | dedup key; carries `asset_type` so a coin opens the crypto screen |
+| ticker move (`ticker_move`) | Updates insight sweeper PRICE pass, every 5 min (`updates_insight_sweeper.py`) — and, for coins only, its crypto-only off-hours pass every 30 min while the market is closed — when the σ-scored move lands in a jump tier and the quote is usable — for an equity whatever happened to its card (capped, refused, claimed elsewhere; §9b.10a, 2026-10-28), for a coin only after its card regenerates; body = the move plus a pointer to the ticker (the grounded catalyst body was retired 2026-10-02; the card headline never was a body) | shares that pass's single batch-quote call | dedup key; carries `asset_type` so a coin opens the crypto screen |
 | research failed (`research_failed`) | inline, once the failure claim is won — the pipeline failed, or the sweeper refunds a dead run | 0 | dedup key `reportfail:{report_id}`; fires after the refund is attempted — after a refund LEAK it still fires with the credits line omitted (`refunded=False`) — so a paid-silent failure is impossible either way |
 
 Report-ready is placed AFTER the conditional completion write and AFTER the
@@ -6542,6 +6640,7 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | 2026-10-22 | The Moat card's market row also shows the current year → +5, in current dollars, from PUBLIC projections (§7.3): the measured Census value scaled along a pinned BLS Employment Projections 2025–35 sector path (58 industries), CMS National Health Expenditure Projections 2025–34 (Medical Distribution; Health Plans by owner exception, "Measured, Health Plans via CMS") or US nominal GDP (12, "i pick option 1"), else measured only (15); tiers by a 2017–24 backtest (within 2 pts/yr of Census); start from BLS's 2025 estimate ("BLS 2025 estimate"); header "US industry revenue" plus a scope line, a company quote labelled as its own figure ("Relabel + scope line", "Company TAM label"); no source line on the card, source lines in the PDF ("no need to add source lines at all. but we can have source lines at the PDF export"); new Optional fields only (TestFlight status of the 10-22 build unknown) | Owner: "i need data from today year to the next 5 year. we need to have a data for this." No free forecast of industry sales exists; the backtest showed BLS tracks Census only where the NAICS code is its own BLS sector (MAE 1.2 pts, r +0.83) and every public path points the wrong way for 15 industries (department stores −5%/yr against +3.5%) | FMP analyst consensus (worldwide company revenue, horizon FY2030, not an industry); a Census M3 nowcast (mixed methods); commercial forecasts (Oxford Economics, IBISWorld: licence); one economy-wide path for every industry; a projection with a caveat for the 15; a worldwide figure (IMF permission, SIPRI royalty, UNIDO/OECD history only); a company US-share chip (deferred: FMP lags filings by a year, RKLB 61.5% vs 79%) |
 | 2026-10-24 | Chips, chip equipment, advertising and internet content show the WORLDWIDE market instead of US industry revenue (§7.3 global rows): a published government estimate licensed for commercial re-use (European Commission COM(2026) 504, EU JRC141323 CC BY 4.0, US ITC Pub. 5643), geometric between its stated points, the last rate extended ≤ 3 years with no mark on the card ("Replace with global", "Global rate", "$1T in 2026", "option 2, but no need to mark or note", "Chips + chip equipment", "Ads + internet") | Owner, on the NVIDIA card's "US industry revenue $119B → $140B": "for seminconductor, it should be … projected to reach over $1.01 trillion to $1.03 trillion by 2031", then "find me a way to show TAM free with similar value" for "mostly technology". Those $1.0T-by-2031 figures were paid market-research releases on 2021–22 data; the industry's own statistics put 2026 alone at ~$1.5–1.7T and are copyrighted | Quote WSTS / SIA / Gartner / Statista directly (copyright, permission needed); the $1.01–1.03T market-research figure (outdated, paid); show only to the source's last year (2030 / 2029); keep the US row and add a global line beside it; global for software / telecom / hardware (no reusable source: MIC excludes its third-party charts, GSMA internal use, ITU non-commercial) |
 | 2026-10-28 | Moat radar audit (`moat_scoring_service.SCORER_VERSION` = `moat_v1.2026-10-28`): revenue growth is a Network Effects reading only off a prior year of at least $10M (in dollars, through a rounded per-currency rate for non-USD filers; a currency without one is no reading) and inside the producer's ±500% clamp, paired exactly as the sector median, at 5pp per score point (+25pp = 10); Network Effects is measured only with a COMPANY input (growth or user count), never on the industry HHI + lifecycle alone; P/S counts toward Brand Power only with a positive gross margin; Intangible Assets is measured only when both sector-relative inputs resolve (patents / FDA then join the average); an exact-zero SG&A and a non-finite input are no reading. A pillar no tier scored is DROPPED (never the old fabricated 0.0 / peer 5.0); every pillar carries `peer_source` (industry / ai_estimate / baseline); the moat vital, persona scoring and the Insight's edges/gaps use measured pillars against industry peers only (never a pillar scored with a focal-only input — patents, FDA, transcript figures — the peer averages never fetch), and Cay AI's report grounding quotes "vs peers" only for an industry peer; a scorer exception is logged with its stack, never recorded as degraded (it repeats on every rebuild); the moat block is stamped with the scorer vintage and the paid reuse door never re-sells another one; a transient annual-statement fetch failure keeps the collection out of every shared cache | JOBY read Network Effects 6.3 ('Primary Driver') off 39,183% growth from a $136K year, Brand Power 5.0 off a 204× P/S at a −30% gross margin, and an Insight claiming those 'edges'; revenue growth pinned at 10/10 in 7 of the 10 reports cached 2026-10-15..28; Switching Costs is an AI estimate on every report (its transcript input is unlicensed) and 'Peer Avg' was a 5.0 placeholder in ~110-147 of 149 industries | An absolute revenue floor alone (misses $53M JOBY's P/S); capping P/S at 200 (P/S 10 vs 2.47 already scores 10); dropping AI pillars from the radar (owner chose to show them, labelled, and keep them out of the verdicts); iOS labels this round (owner: backend now, iOS later) |
+| 2026-10-28 | Updates Insights jump mode (§9b.10a): a ticker JUMPING in the current session (Unusual/Extreme, `jump_band`) gets 6 extra card refreshes in the gate AND the claim RPC, its `ticker_move` alert whatever happened to the card (equities; coins stay coupled), its FMP news every 5 minutes (≤12 extra pulls/day) and, for equities, a Brave web search for the reason whose pages feed the card (a fenced block, a one-shot gate trigger, never the fingerprint) and lead its Sources; the card — shared, and served until a newer card replaces it — may hold text and links from those pages (owner: "i pick option 2, i don't think we break any terms"; Sources: "i need to show the source link so users can click to read them"; cap: "Jump reserve only"; Ask Cay: "Yes, Ask Cay reads it", audits skipped); `UPDATES_JUMP_WEB_SEARCH_ENABLED` off also withholds stored web cards; Privacy §3/§4 and Terms §7 dated October 28, 2026 | TestFlight ORCL +12% (2026-10-28): the card had spent its 10/day cap at 13:24 ET, before the jump; FMP had the press release in `ticker_news_cache` 16 minutes after it went out, but the card could not refresh and the move alert never fired (it was sent only from inside a regeneration); 17 of 39 scopes were capped that day | Brave with a written storage licence first (Enterprise; owner declined to wait); Claude's web search tool (a new vendor); per-viewer read-time search (breaks the cache-only read path, needs consent v4 and an iOS release); raising the ordinary cap for everyone; web results in the fingerprint; reviving `price_move` / a "Why it moved" row (iOS release); chat's market-figure scrub on card inputs (drops the reason); SEC 8-K detection |
 
 ---
 

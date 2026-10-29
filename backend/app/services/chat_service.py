@@ -92,6 +92,16 @@ from app.utils.market_hours import ET, session_trading_date
 logger = logging.getLogger(__name__)
 
 
+def web_card_in_tool_results(tool_results: Any) -> bool:
+    """Whether a tool result reprinted a web-sourced Insights card (`explain_price_move`
+    marks it ``web_assisted``; the Updates jump search, 2026-10-28). Such a turn is kept out
+    of the grounding audit, the refund judge and the shared starter-chip answers: Brave's
+    terms bar evaluating an AI answer built on their results (§3(b)(xiii))."""
+    return any(
+        isinstance(r, dict) and r.get("web_assisted") is True for r in (tool_results or [])
+    )
+
+
 # ── Today's date for the model (2026-10-08) ─────────────────────────────────────
 #
 # No chat system instruction carried a date, so the model judged "latest quarter", "this
@@ -793,6 +803,10 @@ class ChatService:
         # Did web results actually reach the answer? Only a SUCCESSFUL tool round counts — the
         # plain-text fallback below never saw them, even when the search itself ran.
         web_used = False
+        # Did the answer read a web-sourced Insights card — on the Updates screen's grounding
+        # (resolver meta) or through a tool that reprinted one? Never audited or judged, and
+        # never cached for every user (jump mode, 2026-10-28).
+        web_card_used = bool(grounding_meta.get("web_assisted_card"))
 
         try:
             response = await self.gemini.generate_with_tools(
@@ -865,6 +879,9 @@ class ChatService:
             web_used = web_turn is not None and any(
                 web_results_delivered(r) for r in (response.get("tool_results") or [])
             )
+            web_card_used = web_card_used or web_card_in_tool_results(
+                response.get("tool_results")
+            )
             # The round succeeded, but if EVERY tool the model called came back as an error
             # (an FMP rate limit, a timeout) the answer has none of its live data either.
             # The stream door's rule exactly: EVERY call failed UPSTREAM. An error the model
@@ -915,7 +932,7 @@ class ChatService:
         # cache served to every user (Brave allows transient storage only).
         if (
             is_deep_dive and context and stock_id and len(ai_text) > 100
-            and not degraded and not truncated and not web_used
+            and not degraded and not truncated and not web_used and not web_card_used
             and self._deep_dive_cacheable(
                 cache_safe=cache_safe, history=history, reader_lens=reader_lens,
                 stock_id=stock_id, asset_type=asset_type, context_type=context_type,
@@ -941,7 +958,7 @@ class ChatService:
             self._grounding_seed(used_instruction, user_message, history, conversation_block,
                                  chunks),
             response.get("tool_results"),
-            web_used=web_used,
+            web_used=web_used or web_card_used,
         )
         grounding_audit["asset"] = asset_type
 
@@ -971,6 +988,10 @@ class ChatService:
             # The grounded report's humanized as-of date (None when the report did not resolve)
             # — the web-results caveat names it.
             "report_as_of": report_as_of,
+            # The answer read a web-sourced Insights card: the endpoint skips the refund judge
+            # and stores `thinking.web_assisted_card`; the starter warm pass never stores it.
+            # Not `web_search_used` — no web caveat, pills or charge rule follow from it.
+            "web_assisted_card": web_card_used,
             # Plain counts (`CHAT_GROUNDING`), logged by the caller; never persisted or sent.
             "grounding_audit": grounding_audit,
         }
@@ -1186,6 +1207,10 @@ class ChatService:
             # The grounded report's humanized as-of date (None unless the server built the
             # report block) — the endpoint's web-results caveat names it.
             "report_as_of": report_as_of,
+            # The screen's grounding holds a web-sourced Insights card (the Updates jump search,
+            # 2026-10-28): the endpoint keeps this turn out of the grounding audit and the
+            # refund judge, and marks the stored answer (`thinking.web_assisted_card`).
+            "web_assisted_card": bool(grounding_meta.get("web_assisted_card")),
             # The log-only grounding audit's starting evidence (plain lists of strings: the
             # instruction above, the user's turns, prior answers). The endpoint adds the turn's
             # non-web tool results as they stream and audits the final answer (`CHAT_GROUNDING`).

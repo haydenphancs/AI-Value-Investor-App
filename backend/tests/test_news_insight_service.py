@@ -589,6 +589,55 @@ def test_the_market_prompts_are_byte_identical_to_the_golden_capture(svc):
     ) == golden["repair_prompt"]
 
 
+def test_the_ticker_prompts_of_a_non_jumper_are_byte_identical_to_the_golden_capture(svc):
+    """Jump mode (2026-10-28) adds a MOVE line and a web block to the prompt of a ticker
+    that is jumping, and to nothing else. These prompts were captured from the code BEFORE
+    that change: any drift here means jump wording leaked into an ordinary ticker or coin
+    card, which would re-word every card without a PROMPT_VERSION bump."""
+    from datetime import date
+    from pathlib import Path
+
+    from app.services.earnings_window_service import EarningsStatus
+    from app.services.insight_conclusion import ConclusionCheck
+
+    golden = json.loads(
+        (Path(__file__).parent / "data" / "insight_ticker_prompt_golden.json").read_text()
+    )
+    now = datetime(2026, 10, 28, 18, 45, tzinfo=timezone.utc)
+    rows = [
+        {"headline": "Oracle Investor Day 2026: Accelerating Value Creation",
+         "summary": "Oracle set a fiscal 2030 revenue target of $225 billion.",
+         "published_at": "2026-10-28T18:21:00Z"},
+        {"headline": "Oracle Creates AI Workspace on ChatGPT",
+         "summary": "Oracle embeds ChatGPT in more of its products.",
+         "published_at": "2026-10-28T13:00:00Z"},
+    ]
+    coin_rows = [
+        {"headline": "Ether climbs as ETF inflows return", "summary": "Inflows resumed.",
+         "published_at": "2026-10-28T15:00:00Z"},
+    ]
+    assert svc._build_prompt(
+        "ORCL", rows, "FP-golden", "Extreme", {"changePercentage": 12.04}, now=now,
+    ) == golden["card_prompt_quote"]
+    assert svc._build_prompt(
+        "ORCL", rows, "FP-golden", None, None, now=now,
+    ) == golden["card_prompt_no_quote"]
+    assert svc._build_prompt(
+        "ORCL", rows, "FP-golden", "notable", {"changePercentage": 2.5}, now=now,
+        earnings=EarningsStatus("upcoming", date(2026, 12, 10)),
+    ) == golden["card_prompt_earnings"]
+    assert svc._build_prompt(
+        "ETHUSD", coin_rows, "FP-golden", "extreme", {"changePercentage": 9.1}, now=now,
+    ) == golden["card_prompt_coin"]
+    assert svc._repair_prompt(
+        "ORCL",
+        {"headline": "Oracle sets a $225 billion fiscal 2030 revenue target",
+         "points": ["Oracle set a fiscal 2030 revenue target of $225 billion.",
+                    "Oracle embeds ChatGPT in more products."], "conclusion": "x"},
+        ConclusionCheck(framing=True), now=now, earnings=None,
+    ) == golden["repair_prompt"]
+
+
 # ── regressions found by the adversarial review ───────────────────────
 
 def test_fallback_card_never_carries_the_ai_summary_badge(svc):

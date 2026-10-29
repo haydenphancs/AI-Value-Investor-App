@@ -726,3 +726,50 @@ async def test_lookup_treats_an_unreadable_age_as_a_stale_widget_but_a_fresh_ans
     assert out["answer"] == "a" * 200 and out["widget_stale"] is True
     _lookup_db(monkeypatch, {"answer": "a" * 200, "widget": None, "suggestions": []})
     assert (await warm.lookup("What tickers are hot today?"))["widget_stale"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_answer_built_on_a_web_sourced_card_is_never_stored(monkeypatch):
+    """Jump mode (2026-10-28): the owner let the Insights CARD be shared; a stored chip answer
+    is another copy of web-derived text served to everyone, so the chip answers live."""
+    class _Svc:
+        async def generate_response(self, **kwargs):
+            return {"content": "z" * 200, "tokens_used": 1, "web_assisted_card": True}
+
+    monkeypatch.setattr("app.services.chat_service.ChatService", _Svc)
+    writes: list = []
+    monkeypatch.setattr(
+        warm, "get_supabase",
+        lambda: SimpleNamespace(table=lambda t: SimpleNamespace(
+            upsert=lambda row, on_conflict=None: SimpleNamespace(
+                execute=lambda: writes.append(row) or SimpleNamespace(data=[])
+            )
+        )),
+    )
+    assert await warm._warm_one("Why is ORCL up 12% today?", "2026-10-28") is False
+    assert writes == []
+
+
+@pytest.mark.asyncio
+async def test_a_rewarm_refused_for_a_web_sourced_card_is_parked_for_the_day(monkeypatch):
+    """Review 2026-10-29: a re-warm is never struck, so a chip whose answer now read a
+    web-sourced card paid a full chat generation on every 15-minute pass — refused again each
+    time — for the rest of the session. The card stays web-built all day: parked at once."""
+    real_warm_one = warm._warm_one
+    hot = "Why is everyone talking about ORCL?"
+    _wire(monkeypatch, _chips((hot, "fixed")),
+          already={warm.question_hash(hot): _ago(7200)}, phase="regular", calls=[])
+    monkeypatch.setattr(warm, "_warm_one", real_warm_one)
+    generations = []
+
+    class _Svc:
+        async def generate_response(self, **kwargs):
+            generations.append(kwargs["user_message"])
+            return {"content": "z" * 200, "tokens_used": 1, "web_assisted_card": True}
+
+    monkeypatch.setattr("app.services.chat_service.ChatService", _Svc)
+    for _ in range(4):
+        await warm.warm_todays_starters()
+    assert generations == [hot], "parked after the first refusal"
+    # A transient re-warm failure still retries next pass (rule 2): nothing else is parked.
+    assert list(warm._refusals) == [warm._refusal_key("2026-09-14", hot)]

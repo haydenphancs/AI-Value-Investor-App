@@ -430,3 +430,53 @@ def test_an_alias_never_names_a_peers_story(ticker, headline):
     lean = _session_news_lean(_card(headline=headline), True, ticker, None,
                               rolling=False, day=WED)
     assert usable_lean_headline(lean.headline, ticker, lean.subject_terms, WED) is None
+
+
+# ── a web-sourced card (the Updates jump search, 2026-10-28) ─────────────────────
+
+@pytest.mark.asyncio
+async def test_a_lean_from_a_web_sourced_card_marks_the_chat_tool_result(monkeypatch):
+    """Ask Cay reads the web-sourced card (owner: "Yes, Ask Cay reads it"); the tool result says
+    so, which keeps the turn out of the grounding audit and the refund judge."""
+    card = {**_card(), "web_assisted": True}
+    svc = _attribution_service(monkeypatch, mover=_crwv(), card=card)
+    exp = await svc.attribute_ticker_move("CRWV")
+    assert exp.web_assisted is True
+    monkeypatch.setattr(wm, "get_widget_movers_service", lambda: svc)
+    monkeypatch.setattr(cmt, "fetch_ticker_news",
+                        AsyncMock(return_value={"news_available": True, "articles": [{"title": "x"}]}))
+    out = await cmt.explain_price_move("CRWV")
+    assert out["explanation"] == HEADLINE + "." and out["web_assisted"] is True
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_card_or_an_unused_web_card_marks_nothing(monkeypatch):
+    svc = _attribution_service(monkeypatch, mover=_crwv(), card=_card())
+    assert (await svc.attribute_ticker_move("CRWV")).web_assisted is False
+    # A web-sourced card the attribution did NOT read: written the session before, so neither
+    # the cause nor the lean comes from it. (A withheld lean below z 2 still READS the card —
+    # "Today's news leaned bearish" — so that case is marked, conservatively.)
+    unused = _attribution_service(monkeypatch, mover=_crwv(),
+                                  card={**_card(generated_at="2026-10-13T17:09:05Z"),
+                                        "web_assisted": True})
+    exp = await unused.attribute_ticker_move("CRWV")
+    assert exp.attribution.kind.value != "company_news" and exp.attribution.lean is None
+    assert exp.web_assisted is False
+    withheld = _attribution_service(monkeypatch, mover=_crwv(pct=-6.9, z=1.64),
+                                    card={**_card(), "web_assisted": True})
+    assert (await withheld.attribute_ticker_move("CRWV")).web_assisted is True
+    # Review 2026-10-29: a same-session web card made `lean` truthy, which marked EVERY
+    # attribution — an earnings win, which prints no card text, kept its turn and follow-ups
+    # out of the refund judge.
+    earnings_win = _attribution_service(
+        monkeypatch, mover=_crwv(), card={**_card(), "web_assisted": True},
+        earnings={"CRWV": {"date": WED_ISO, "time": "bmo",
+                           "epsActual": -0.21, "epsEstimated": 0.05}},
+    )
+    exp = await earnings_win.attribute_ticker_move("CRWV")
+    assert exp.attribution.kind.value == "earnings" and exp.attribution.lean is None
+    assert exp.web_assisted is False
+    monkeypatch.setattr(wm, "get_widget_movers_service", lambda: unused)
+    monkeypatch.setattr(cmt, "fetch_ticker_news",
+                        AsyncMock(return_value={"news_available": True, "articles": [{"title": "x"}]}))
+    assert "web_assisted" not in await cmt.explain_price_move("CRWV")

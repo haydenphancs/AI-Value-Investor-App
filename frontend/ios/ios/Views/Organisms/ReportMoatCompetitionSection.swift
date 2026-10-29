@@ -21,8 +21,11 @@ struct ReportMoatCompetitionSection: View {
                 .overlay(AppColors.cardBackgroundLight)
                 .padding(.vertical, AppSpacing.sm)
 
-            // Moat Rating + Legend
-            moatRatingHeader
+            // Moat Rating + Legend — only over a drawable radar; below a triangle the chart
+            // shows its own "unavailable" state and a chip would grade pillars nobody sees.
+            if data.dimensions.count >= 3 {
+                moatRatingHeader
+            }
 
             // Radar Chart
             radarChartSection
@@ -265,8 +268,29 @@ struct ReportMoatCompetitionSection: View {
 
                 // Legend
                 VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
-                    legendItem(color: AppColors.primaryBlue, label: "Company")
-                    legendItem(color: AppColors.textMuted, label: "Peer Avg")
+                    legendItem(label: "Company") {
+                        RoundedRectangle(cornerRadius: 1)
+                            .fill(AppColors.primaryBlue)
+                            .frame(width: 12, height: 3)
+                    }
+                    // Dashed like the radar's Peer Avg outline, in the same 3:1 colour.
+                    legendItem(label: "Peer Avg") {
+                        Path { path in
+                            path.move(to: CGPoint(x: 0, y: 1.5))
+                            path.addLine(to: CGPoint(x: 12, y: 1.5))
+                        }
+                        .stroke(ReportMoatRadarChart.peerStrokeColor,
+                                style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+                        .frame(width: 12, height: 3)
+                    }
+                    if hasPlaceholderPeer {
+                        legendItem(label: "Not measured") {
+                            Circle()
+                                .strokeBorder(AppColors.textMuted, lineWidth: 1.5)
+                                .frame(width: 8, height: 8)
+                                .frame(width: 12, height: 8)
+                        }
+                    }
                 }
             }
 
@@ -274,30 +298,50 @@ struct ReportMoatCompetitionSection: View {
             // below (durability_note prompt is fed a moat-strength hint
             // so the generated copy naturally conveys "strong defense" /
             // "elite fortress" / etc.).
+            primaryDriverRow
+        }
+    }
+
+    /// The radar's one hollow point: a peer average on the 5.0 placeholder.
+    private var hasPlaceholderPeer: Bool {
+        data.dimensions.contains(where: \.peerIsPlaceholder)
+    }
+
+    /// Reads off the same measured pillars as the chip. With none, says so — never
+    /// "No Moat · Primary Driver: Unknown", which would be a verdict on estimates.
+    @ViewBuilder
+    private var primaryDriverRow: some View {
+        if data.overallRating == .notMeasured {
+            Text("No pillar measured from filings yet")
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        } else if let driver = data.primaryDriver,
+                  data.overallRating != .none || driver.score > 0 {
             HStack(spacing: AppSpacing.xs) {
-                Text("Primary Driver:")
+                // Below the narrow bar the top pillar drives nothing: name it plainly.
+                Text(data.overallRating == .none ? "Strongest pillar:" : "Primary Driver:")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
 
-                Text(data.primaryDriverName)
+                Text(driver.name)
                     .font(AppTypography.caption)
                     .fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
 
-                if let driver = data.primaryDriver {
-                    Text("(\(String(format: "%.1f", driver.score))/10)")
-                        .font(AppTypography.caption)
-                        .foregroundColor(data.overallRating.color)
-                }
+                Text("(\(String(format: "%.1f", driver.score))/10)")
+                    .font(AppTypography.caption)
+                    .foregroundColor(data.overallRating.color)
             }
         }
     }
 
-    private func legendItem(color: Color, label: String) -> some View {
+    private func legendItem<Swatch: View>(
+        label: String,
+        @ViewBuilder swatch: () -> Swatch
+    ) -> some View {
         HStack(spacing: AppSpacing.xs) {
-            RoundedRectangle(cornerRadius: 1)
-                .fill(color)
-                .frame(width: 12, height: 3)
+            swatch()
             Text(label)
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
@@ -442,11 +486,14 @@ struct ReportMoatCompetitionSection: View {
     .background(AppColors.cardBackground)
 }
 
-private func moatPreviewData(_ marketDynamics: MarketDynamics) -> ReportMoatCompetitionData {
+private func moatPreviewData(
+    _ marketDynamics: MarketDynamics,
+    dimensions: [MoatDimension]? = nil
+) -> ReportMoatCompetitionData {
     let oracle = TickerReportData.sampleOracle.moatCompetition
     return ReportMoatCompetitionData(
         marketDynamics: marketDynamics,
-        dimensions: oracle.dimensions,
+        dimensions: dimensions ?? oracle.dimensions,
         durabilityNote: oracle.durabilityNote,
         competitors: oracle.competitors,
         competitiveInsight: oracle.competitiveInsight
@@ -473,6 +520,16 @@ private func moatPreviewData(_ marketDynamics: MarketDynamics) -> ReportMoatComp
     ScrollView {
         ReportMoatCompetitionSection(data: moatPreviewData(.sampleMeasured))
             .padding()
+    }
+    .background(AppColors.cardBackground)
+}
+
+#Preview("Not measured (no pillar scored from filings)") {
+    ScrollView {
+        ReportMoatCompetitionSection(data: moatPreviewData(
+            .sampleMeasured, dimensions: MoatDimension.sampleAllEstimated
+        ))
+        .padding()
     }
     .background(AppColors.cardBackground)
 }

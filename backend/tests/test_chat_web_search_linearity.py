@@ -21,6 +21,7 @@ from app.services import chat_intent as ci
 from app.services import chat_web_search_service as cws
 from app.services import chat_chip_filter as ccf
 from app.services import chat_security as cs
+from app.services import web_result_hygiene as wrh
 
 
 def _cpu_pair(small: Callable[[], object], big: Callable[[], object], rounds: int = 5) -> Tuple[float, float]:
@@ -84,9 +85,10 @@ _NEW_PATTERNS = {
 # to its anchored-only use (a `.search` / `.sub` / `.finditer` call on it fails that test).
 _ANCHORED_ONLY = {
     "chat_intent._DEFINITIONAL_RE": "`.match` at offset 0 of the masked message",
-    "chat_web_search_service._HOST_SHAPE_RE": "`.fullmatch` on a host already capped at 253 chars",
+    "web_result_hygiene._HOST_SHAPE_RE": "`.fullmatch` on a host already capped at 253 chars",
     "chat_web_search_service._CONSENT_DIGITS_RE": "`.fullmatch` on a header capped at 32 chars",
-    "chat_web_search_service._ISO_DATE_RE": "`.match` on a page_age string",
+    "web_result_hygiene._ISO_DATE_RE": "`.match` on a page_age string",
+    "web_result_hygiene._RELATIVE_AGE_RE": "`.match` on an age text capped at 40 chars",
     "chat_web_search_service._Q_YEAR_RE": "`.fullmatch` on one query token",
     "chat_web_search_service._Q_PERIOD_RE": "`.fullmatch` on one query token",
     "chat_web_search_service._Q_PRODUCT_RE": "`.fullmatch` on one query token",
@@ -95,7 +97,7 @@ _ANCHORED_ONLY = {
 
 def _patterns():
     out = []
-    for mod in (ci, cws, ccf, cs):
+    for mod in (ci, cws, ccf, cs, wrh):
         out += [(f"{mod.__name__.rsplit('.', 1)[-1]}.{n}", v) for n, v in vars(mod).items()
                 if isinstance(v, re.Pattern)]
     out += [(f"chat_intent._TOPIC_TABLE.{label}", rx) for label, rx in ci._TOPIC_TABLE]
@@ -110,7 +112,8 @@ def _swept():
 def test_an_exempt_pattern_is_only_ever_used_anchored(name):
     import inspect
     mod_name, attr = name.split(".", 1)
-    mod = {"chat_intent": ci, "chat_web_search_service": cws}[mod_name]
+    mod = {"chat_intent": ci, "chat_web_search_service": cws,
+           "web_result_hygiene": wrh}[mod_name]
     src = inspect.getsource(mod)
     uses = re.findall(rf"\b{re.escape(attr)}\.(\w+)\(", src)
     assert uses, f"{name} is never used — drop it from the exemptions"

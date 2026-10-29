@@ -245,12 +245,29 @@ AFTER_CLOSE_EARNINGS_RESERVE = 6
 # the first analyst notes; 30 minutes spreads them over ~16:05-18:35.
 REPORT_DAY_AFTERHOURS_COOLDOWN_SECONDS = 1800
 
+# Extra successes a ticker gets while it is JUMPING (see `jump_band`): an
+# Unusual/Extreme move in the current session. TestFlight (ORCL, Wed 2026-10-28):
+# the card spent its tenth refresh at 13:24 ET on ordinary news, the stock jumped
+# ~12% from ~14:15 on its Investor Day, the press release reached
+# `ticker_news_cache` at 14:37 and Reuters/CNBC at 15:01 — and the card could not
+# refresh for the rest of the day (`daily_cap`). That same day 17 of the 39 swept
+# scopes were capped by early afternoon. ADDED to the cap like the report-day
+# reserve, never to the market scope. A per-ET-DAY allowance: once a scope has jumped,
+# the sweeper keeps passing `jumping=True` for the rest of the day in its process
+# (`InsightSweeper._reserve_jumpers`) — read off the live move, a pending reporter that
+# faded before the close lost its after-close six to its own jump cards (review
+# 2026-10-29). Never "fix" the latch back to the live set. Six at the 15-minute
+# cooldown covers about the first 90 minutes of a jump: the move, the press release,
+# the first wire stories. Same `daily_cap_for` feeds the gate AND the claim RPC.
+JUMP_RESERVE = 6
+
 
 def daily_cap_for(
     is_market_scope: bool,
     *,
     earnings_window: bool = False,
     report_day: bool = False,
+    jumping: bool = False,
 ) -> int:
     """The per-scope success ceiling for one day.
 
@@ -270,6 +287,11 @@ def daily_cap_for(
     ``report_day`` (the ticker's earnings date is TODAY, pending or reported)
     ADDS `AFTER_CLOSE_EARNINGS_RESERVE` on top — never to the market scope, and
     never below the ticker's ordinary cap, so a missing boost cannot shrink it.
+
+    ``jumping`` (an Unusual/Extreme move in the current session, `jump_band`)
+    ADDS `JUMP_RESERVE` the same way — never to the market scope. It stacks with
+    the report-day reserve, so `earnings_reserved` still holds the after-close six
+    back while a pending reporter jumps in the session.
     """
     if is_market_scope or earnings_window:
         cap = PER_SCOPE_DAILY_CAP_MARKET
@@ -277,6 +299,8 @@ def daily_cap_for(
         cap = PER_SCOPE_DAILY_CAP
     if report_day and not is_market_scope:
         cap += AFTER_CLOSE_EARNINGS_RESERVE
+    if jumping and not is_market_scope:
+        cap += JUMP_RESERVE
     return cap
 
 
@@ -285,6 +309,7 @@ def attempt_cap_for(
     *,
     earnings_window: bool = False,
     report_day: bool = False,
+    jumping: bool = False,
 ) -> int:
     """The per-scope ATTEMPT ceiling for one day: successes + a failure allowance.
 
@@ -294,6 +319,7 @@ def attempt_cap_for(
     """
     return daily_cap_for(
         is_market_scope, earnings_window=earnings_window, report_day=report_day,
+        jumping=jumping,
     ) + PER_SCOPE_FAILURE_ALLOWANCE
 
 
@@ -581,6 +607,48 @@ def move_score(band_or_tier: str, change_percent: Any) -> float:
     return pct  # Typical / flat / unknown
 
 
+# ── Jumps ─────────────────────────────────────────────────────────────
+
+# The move classes that make a ticker JUMPING: the jump reserve, the decoupled
+# `ticker_move` alert, the faster news pass and the web search for the reason.
+# Includes the fixed-band EXTREME so a thin-history name (no σ → fallback band),
+# the population most prone to violent moves, is not treated as ordinary.
+JUMP_TIERS = (TIER_UNUSUAL, TIER_EXTREME, BAND_EXTREME)
+
+
+def mwcb_in_force(market_change_percent: Any) -> bool:
+    """True when the S&P has moved at least MWCB Level 1 (7%) this session: the
+    whole tape is moving, so no per-ticker card regenerates and no ticker counts
+    as jumping (one macro story, not N restatements of it)."""
+    mkt = finite(market_change_percent)
+    return mkt is not None and abs(mkt) / 100.0 >= _MWCB_L1_PCT
+
+
+def jump_band(
+    session_change_percent: Any,
+    sigma_daily: Any,
+    market_cap: Any = None,
+    *,
+    is_market_scope: bool,
+) -> Optional[str]:
+    """The move class when ``scope`` is JUMPING in the current session, else None.
+
+    ``session_change_percent`` must be the CURRENT session's change (the caller
+    reads it through `price_service.session_change_percent`, which blanks a change
+    stamped with a prior session) — never the gate's band, which falls back to the
+    STALE ``last_price_band`` when the quote is unusable and would make yesterday's
+    move a jump this morning. A finite move that rounds to 0.00% is not a jump, the
+    market scope never jumps, and the class must be in `JUMP_TIERS`.
+    """
+    if is_market_scope:
+        return None
+    pct = finite(session_change_percent)
+    if pct is None or round(pct, 2) == 0.0:
+        return None
+    band = classify_move(pct, sigma_daily, market_cap=market_cap)
+    return band if band in JUMP_TIERS else None
+
+
 # ── Fingerprint ───────────────────────────────────────────────────────
 
 def compute_inputset_id(
@@ -664,6 +732,9 @@ def decide(
     report_day: bool = False,
     earnings_pending_today: bool = False,
     earnings_reported_at: Optional[datetime] = None,
+    jumping: bool = False,
+    web_refreshed_at: Optional[datetime] = None,
+    web_result_count: int = 0,
 ) -> Decision:
     """Decide whether ``scope``'s Insights card should be regenerated.
 
@@ -685,6 +756,18 @@ def decide(
       past the daily cap, the attempt cap or the cooldown. Deliberately NOT a
       fingerprint input: a status in the fingerprint re-keyed every card on each
       calendar-fetch failure and whenever two instances disagreed.
+
+    The jump inputs (2026-10-28) are no-ops at their defaults too:
+
+    * ``jumping`` — whether this scope has jumped today (`jump_band`, latched for the ET
+      day by the sweeper's `_reserve_jumpers`): adds `JUMP_RESERVE` successes (the claim
+      RPC must get the same value).
+    * ``web_refreshed_at`` / ``web_result_count`` — when this process's web search
+      for the jump last found a NEW set of pages, and how many it kept. A card
+      generated before that instant is regenerated once, like
+      ``earnings_reported_at`` and for the same reason never via the fingerprint:
+      the web results live in one process, and two instances holding different
+      sets would re-key the shared state row against each other.
     """
     try:
         return _decide_inner(
@@ -697,6 +780,9 @@ def decide(
             report_day=report_day,
             earnings_pending_today=earnings_pending_today,
             earnings_reported_at=earnings_reported_at,
+            jumping=jumping,
+            web_refreshed_at=web_refreshed_at,
+            web_result_count=web_result_count,
         )
     except Exception as e:  # pragma: no cover - defensive
         logger.exception(
@@ -724,12 +810,17 @@ def _decide_inner(
     report_day: bool = False,
     earnings_pending_today: bool = False,
     earnings_reported_at: Optional[datetime] = None,
+    jumping: bool = False,
+    web_refreshed_at: Optional[datetime] = None,
+    web_result_count: int = 0,
 ) -> Decision:
     state = state or {}
-    # A ticker-only concept: the market scope has no earnings date.
+    # A ticker-only concept: the market scope has no earnings date and never jumps.
     if is_market_scope:
         report_day = earnings_pending_today = False
         earnings_reported_at = None
+        jumping = False
+        web_refreshed_at = None
 
     # ── 0. Empty corpus: never hand Gemini nothing ──
     # With no articles the model has no grounding and will confabulate a
@@ -774,13 +865,27 @@ def _decide_inner(
         last_gen is None or last_gen < reported_at
     )
 
+    # A jump's web search found a NEW set of pages after this card was written: the
+    # other change the fingerprint cannot see (the web block is a generation input
+    # held in one process, never part of the digest — see `decide`).
+    web_at = _parse_ts(web_refreshed_at)
+    web_count = int(finite(web_result_count) or 0)
+    web_trigger = web_at is not None and web_count > 0 and (
+        last_gen is None or last_gen < web_at
+    )
+
     # ── 1. Fingerprint short-circuit — the money-saver ──
     # Checked BEFORE every other branch: if the inputs are identical the output
-    # is provably identical, so there is nothing to buy at any price. The one
-    # exception is `earnings_trigger` — the inputs the fingerprint covers are
-    # identical, but the prompt's EARNINGS line is not.
+    # is provably identical, so there is nothing to buy at any price. The
+    # exceptions are `earnings_trigger` — the inputs the fingerprint covers are
+    # identical, but the prompt's EARNINGS line is not — and `web_trigger`, whose
+    # new pages are an input the fingerprint deliberately does not cover.
     stale_refresh = False
-    if inputset_id == state.get("last_inputset_id") and not earnings_trigger:
+    if (
+        inputset_id == state.get("last_inputset_id")
+        and not earnings_trigger
+        and not web_trigger
+    ):
         # Max-staleness floor for the MARKET default tab: if the card is older
         # than MAX_STALENESS_SECONDS, DON'T short-circuit — fall through to the
         # cap/cooldown checks and regenerate so the tab is never stale-looking
@@ -805,12 +910,7 @@ def _decide_inner(
             )
 
     # ── 2. Market-wide dislocation: one macro card, not N restatements ──
-    mkt = finite(market_change_percent)
-    if (
-        not is_market_scope
-        and mkt is not None
-        and abs(mkt) / 100.0 >= _MWCB_L1_PCT
-    ):
+    if not is_market_scope and mwcb_in_force(market_change_percent):
         return Decision(
             action=ACTION_SKIP, reason="mwcb_market_only",
             inputset_id=inputset_id, price_band=band,
@@ -833,6 +933,7 @@ def _decide_inner(
 
     daily_cap = daily_cap_for(
         is_market_scope, earnings_window=earnings_window, report_day=report_day,
+        jumping=jumping,
     )
     if successes >= daily_cap:
         return Decision(
@@ -859,6 +960,7 @@ def _decide_inner(
         )
     if attempts >= attempt_cap_for(
         is_market_scope, earnings_window=earnings_window, report_day=report_day,
+        jumping=jumping,
     ):
         return Decision(
             action=ACTION_SKIP, reason="attempt_cap",
@@ -924,8 +1026,17 @@ def _decide_inner(
         reasons.append("stale_refresh")
     if earnings_trigger and state.get("last_inputset_id") is not None:
         reasons.append("earnings_reported")
-    if not reasons:
+    # With the web trigger alone (an unchanged corpus), the new pages ARE the
+    # reason; "new_articles" would claim a corpus change that did not happen.
+    fingerprint_moved = inputset_id != state.get("last_inputset_id")
+    if not reasons and (fingerprint_moved or not web_trigger):
         reasons.append(f"new_articles ({len(corpus)})")
+    if web_trigger:
+        reasons.append(f"web ({web_count})")
+    if jumping and not is_market_scope and successes >= daily_cap - JUMP_RESERVE:
+        # Past the ordinary allowance: this card is spent from the jump reserve,
+        # so the state row says why a capped-looking scope regenerated.
+        reasons.append("jump_reserve")
 
     return Decision(
         action=ACTION_GENERATE,
@@ -944,6 +1055,10 @@ __all__ = [
     "PER_SCOPE_FAILURE_ALLOWANCE",
     "AFTER_CLOSE_EARNINGS_RESERVE",
     "REPORT_DAY_AFTERHOURS_COOLDOWN_SECONDS",
+    "JUMP_RESERVE",
+    "JUMP_TIERS",
+    "jump_band",
+    "mwcb_in_force",
     "daily_cap_for",
     "attempt_cap_for",
     "premarket_cap_for",

@@ -1721,6 +1721,12 @@ class ChatContextResolver:
             coro = self._resolve_ticker_report(
                 reference_id, client_context, user_id=user_id, meta=handler_meta,
             )
+        elif ctype == "UPDATES_SCOPE":
+            # Its stored Insights card may be web-sourced (the jump search, 2026-10-28): the
+            # handler says so in `meta`, and the turn is then kept out of the grounding audit
+            # and the refund judge (Brave §3(b)(xiii): never evaluate an AI answer built on web
+            # results).
+            coro = self._resolve_updates_scope(reference_id, client_context, meta=handler_meta)
         else:
             coro = handler(self, reference_id, client_context)
 
@@ -1994,7 +2000,10 @@ class ChatContextResolver:
 
     # ── UPDATES_SCOPE (the Updates tab: Insights card, headlines, news-tone trend) ──
     async def _resolve_updates_scope(
-        self, reference_id: Optional[str], client_context: Optional[str]
+        self,
+        reference_id: Optional[str],
+        client_context: Optional[str],
+        meta: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """Ground an "Ask Cay AI" opened from the Updates tab on what that tab shows.
 
@@ -2019,6 +2028,11 @@ class ChatContextResolver:
         no stored card is described as showing the plain "Latest headlines" list. Returns
         None when nothing at all was read, so the "Updates feed" source pill is not claimed
         for an answer grounded on nothing.
+
+        A card written with the jump search's web pages (2026-10-28) is read like any other —
+        the owner chose that Ask Cay sees what the card shows — but labelled as drawing on web
+        search results, and ``meta["web_assisted_card"]`` is set so the turn is never audited
+        or judged (Brave §3(b)(xiii)).
         """
         scope = _updates_scope(reference_id)
         if scope is None:
@@ -2114,11 +2128,16 @@ class ChatContextResolver:
         if card:
             written = _et_stamp(card.get("generated_at"), now)
             on_screen = bool(feed_recent)
+            web_card = bool(card.get("web_assisted"))
+            if web_card and meta is not None:
+                meta["web_assisted_card"] = True
             lines.append(
                 ("Cay AI Insights card on screen" if on_screen
                  else "The most recent Cay AI Insights card (not on screen: the feed has no "
                       "news in its window right now)")
                 + (f", written {written}" if written else "")
+                + (" partly from web search results (third-party pages, not Caydex data)"
+                   if web_card else "")
                 + f" — sentiment {card.get('sentiment') or 'Neutral'}: "
                 + _cap(str(card.get("headline") or ""), _UPDATES_HEADLINE_CAP)
             )

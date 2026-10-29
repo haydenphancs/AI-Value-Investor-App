@@ -531,6 +531,9 @@ async def get_updates_feed(
                         cited = cited_window_floor(card.get("sources"), raw_articles, now)
                         window_hours = max(subject_window, cited or 0)
                         card = {**card, "badge": f"{window_hours}h"}
+                    # `web_assisted` (a card written with the jump search's web pages) is a
+                    # server-only marker for chat's audits: never on the wire.
+                    card = {k: v for k, v in card.items() if k != "web_assisted"}
                     insight = AIInsightCardResponse(**card)
             except Exception as e:
                 # An unavailable insight must never take down the timeline.

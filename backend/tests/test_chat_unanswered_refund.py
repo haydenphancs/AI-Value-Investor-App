@@ -1015,8 +1015,8 @@ class _HistDB:
         return _HistQuery(self)
 
 
-def _row(role, content, web=None):
-    return {"role": role, "content": content, "web_searched": web}
+def _row(role, content, web=None, card=None):
+    return {"role": role, "content": content, "web_searched": web, "web_card": card}
 
 
 async def _load(db):
@@ -1033,8 +1033,26 @@ async def test_the_loader_reads_the_models_history_window_with_the_web_flag():
     assert isinstance(ctx, cov.PriorContext) and ctx.web_built is False
     # Newest first from the DB; the context is the LAST exchange, oldest line first.
     assert ctx.text == "User: and margins?\nCay AI: Margins held at 46%."
-    assert db.selects == ["role, content, web_searched:rich_content->thinking->web_searched"]
+    assert db.selects == ["role, content, web_searched:rich_content->thinking->web_searched, "
+                          "web_card:rich_content->thinking->web_assisted_card"]
     assert db.limits == [chat_mod._UNANSWERED_HISTORY_ROWS]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("card", [True, "true", 1])
+async def test_an_answer_built_on_a_web_sourced_card_marks_the_history(card):
+    """Jump mode (2026-10-28): an answer that read a web-sourced Insights card is stored with
+    `thinking.web_assisted_card`; a follow-up may restate it, so it is never judged either."""
+    rows = [_row("assistant", "a"), _row("user", "q")] * 4
+    rows[3] = _row("assistant", "Oracle set a $225B fiscal 2030 target.", card=card)
+    ctx = await _load(_HistDB(rows))
+    assert ctx.web_built is True
+
+
+@pytest.mark.asyncio
+async def test_a_row_without_the_card_column_is_a_shape_drift():
+    rows = [{"role": "assistant", "content": "a", "web_searched": None}]
+    assert await _load(_HistDB(rows)) is None
 
 
 @pytest.mark.asyncio

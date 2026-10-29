@@ -494,3 +494,82 @@ def test_bluesky_session_fields_are_credential_keys_in_frames():
     session = out["exception"]["values"][0]["stacktrace"]["frames"][0]["vars"]["session"]
     assert session["accessJwt"] == "[redacted]" and session["refreshJwt"] == "[redacted]"
     assert session["did"] == "did:plc:abc"
+
+
+# ── web-search results never reach Sentry through frame locals (review 2026-10-29) ──
+
+_PAGE_TITLE = "Oracle stock soars as Investor Day targets top estimates"
+
+
+def _frame_event(**frame):
+    return {"exception": {"values": [{"value": "boom", "stacktrace": {"frames": [frame]}}]}}
+
+
+def _vars(out):
+    return out["exception"]["values"][0]["stacktrace"]["frames"][0]["vars"]
+
+
+def test_a_frame_in_a_web_search_module_keeps_no_locals():
+    """Brave's terms allow transient use only; the Updates Insights card is the one place a
+    result may be kept. sentry-sdk captures every frame's locals by default."""
+    for module in ("app.services.jump_web_search_service", "app.services.web_result_hygiene",
+                   "app.services.chat_web_search_service", "app.integrations.brave_search"):
+        out = scrub_sentry_event(_frame_event(
+            module=module, function="digest", vars={"title": _PAGE_TITLE, "query": "why is oracle"}))
+        assert _PAGE_TITLE not in str(out) and "why is oracle" not in str(out), module
+        assert list(_vars(out)) == ["web_search"]
+
+
+def test_a_card_frame_holding_the_jump_pages_keeps_no_locals_and_others_keep_theirs():
+    holding = scrub_sentry_event(_frame_event(
+        module="app.services.news_insight_service", function="_build_prompt",
+        vars={"web": [{"title": _PAGE_TITLE}], "scope": "'ORCL'", "prompt": f"'… {_PAGE_TITLE} …'"}))
+    assert _PAGE_TITLE not in str(holding)
+    sweep = scrub_sentry_event(_frame_event(
+        module="app.services.updates_insight_sweeper", function="run_sweep",
+        vars={"web_context": {"ORCL": ["WebPage(publisher='CNBC')"]}, "scope": "'ORCL'"}))
+    assert list(_vars(sweep)) == ["web_search"]
+    # No pages held: the frame keeps its locals for triage (secrets still redacted).
+    plain = scrub_sentry_event(_frame_event(
+        module="app.services.news_insight_service", function="_build_prompt",
+        vars={"web": "[]", "web_context": "None", "scope": "'ORCL'", "apikey": "k-123"}))
+    kept = _vars(plain)
+    assert kept["scope"] == "'ORCL'" and kept["apikey"] == "[redacted]"
+
+
+def test_the_module_is_read_from_the_path_when_sentry_gives_none():
+    out = scrub_sentry_event(_frame_event(
+        abs_path="/app/backend/app/services/jump_web_search_service.py", function="digest",
+        vars={"title": _PAGE_TITLE}))
+    assert _PAGE_TITLE not in str(out)
+    other = scrub_sentry_event(_frame_event(
+        abs_path="/app/backend/app/services/chat_service.py", function="x", vars={"pages": "3"}))
+    assert _vars(other) == {"pages": "3"}
+
+
+def test_a_container_path_named_app_still_finds_the_module():
+    out = scrub_sentry_event(_frame_event(
+        abs_path="/app/app/services/web_result_hygiene.py", function="parse_page_age",
+        vars={"value": _PAGE_TITLE}))
+    assert _PAGE_TITLE not in str(out)
+
+
+def test_a_frame_holding_a_web_source_under_any_name_keeps_no_locals():
+    """Round 2 (2026-10-29): the name-based check missed `_store`'s `sources` (a card's sources
+    lead with the jump pages, `origin: "web"`) and chat's `_persist_turn` message carrying the
+    Brave pills (`kind: "web"`). A value only web results have drops the frame's locals."""
+    store = scrub_sentry_event(_frame_event(
+        module="app.services.news_insight_service", function="_store",
+        vars={"scope": "'ORCL'", "sources": [
+            {"title": f"'{_PAGE_TITLE}'", "url": "'https://www.cnbc.com/x'", "origin": "'web'"}]}))
+    assert _PAGE_TITLE not in str(store) and list(_vars(store)) == ["web_search"]
+    persist = scrub_sentry_event(_frame_event(
+        module="app.api.v1.endpoints.chat", function="_persist_turn",
+        vars={"ai_msg": "{'rich_content': {'sources': [{'kind': 'web', 'title': '"
+                        + _PAGE_TITLE + "'}]}}"}))
+    assert _PAGE_TITLE not in str(persist)
+    # A frame with no web value keeps its locals for triage.
+    plain = scrub_sentry_event(_frame_event(
+        module="app.api.v1.endpoints.chat", function="_persist_turn",
+        vars={"ai_msg": "{'rich_content': {'sources': [{'kind': 'news', 'title': 'x'}]}}"}))
+    assert "news" in str(_vars(plain))

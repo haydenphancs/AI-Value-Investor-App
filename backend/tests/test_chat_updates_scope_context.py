@@ -589,3 +589,49 @@ def test_the_windows_the_chat_cuts_are_the_cards_windows():
     series = [_day(k, 1, 0, 0) for k in range(0, 90, 3)]
     text = trend_mod.summarize_tone_windows(series, today=_et_today())
     assert [int(n) for n in re.findall(r"(\d+)D: ", text)] == sorted(trend_mod.TREND_DAYS)
+
+
+# ── a web-sourced card (the Updates jump search, 2026-10-28) ────────────────────
+
+def _web_card():
+    """A card written with the jump search's pages, served through the REAL `_row_to_card`
+    (switch ON, the owner's default) — so it carries the server-only `web_assisted` marker."""
+    svc = NewsInsightService.__new__(NewsInsightService)
+    card = svc._row_to_card({
+        "scope": "ORCL",
+        "headline": "Oracle sets a $225 billion fiscal 2030 revenue target",
+        "bullets": ["Oracle set a fiscal 2030 revenue target of $225 billion.",
+                    "Oracle capped new funding at $20 billion.",
+                    "The targets frame Oracle's plan through fiscal 2030."],
+        "sentiment": "bullish", "article_count": 4,
+        "generated_at": _iso(timedelta(hours=1)), "prompt_version": 8,
+        "sources": [{"title": "Oracle stock pops", "url": "https://www.cnbc.com/x",
+                     "publisher": "CNBC", "origin": "web"}],
+    }, market_active=False)
+    assert card is not None and card["web_assisted"] is True
+    return card
+
+
+@pytest.mark.asyncio
+async def test_ask_cay_reads_a_web_sourced_card_and_the_turn_is_flagged(monkeypatch):
+    """Owner, 2026-10-28: "Yes, Ask Cay reads it". The card is read like any other — labelled
+    as drawing on web search results — and the resolver's meta flags the turn, so the doors keep
+    it out of the grounding audit and the refund judge (Brave §3(b)(xiii))."""
+    # Explicit: an evaluation script imported elsewhere in the session turns the switch off.
+    from app.config import settings
+    monkeypatch.setattr(settings, "UPDATES_JUMP_WEB_SEARCH_ENABLED", True)
+    _install(monkeypatch, insights=_Insights(_web_card()), news=_News([_row("Oracle news")]))
+    meta = {}
+    block = await ChatContextResolver().resolve("UPDATES_SCOPE", "ORCL", meta=meta)
+    assert "Oracle sets a $225 billion fiscal 2030 revenue target" in block
+    assert "partly from web search results (third-party pages, not Caydex data)" in block
+    assert meta == {"web_assisted_card": True}
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_card_sets_no_flag(monkeypatch):
+    _install(monkeypatch, insights=_Insights(CARD), news=_News([_row("Oracle beats on cloud")]))
+    meta = {}
+    block = await ChatContextResolver().resolve("UPDATES_SCOPE", "ORCL", meta=meta)
+    assert "web search results" not in block
+    assert meta == {}

@@ -392,19 +392,23 @@ async def warm_todays_starters() -> int:
             written += 1
             if question_hash(q) in rewarm:
                 _rewarms[day] = _rewarms.get(day, 0) + 1
-        if not (r is True) and question_hash(q) in rewarm:
+        if r is True:
+            continue
+        key = _refusal_key(day, q)
+        if _refusals.get(key, 0) >= _MAX_WARM_REFUSALS:
+            # Parked by `_warm_one` itself (an answer built on a web-sourced card); it said why.
+            continue
+        if question_hash(q) in rewarm:
             # A failed RE-warm leaves the earlier row standing; parking the chip would
             # freeze that row for the day, which is the staleness rule 2 exists to fix.
             logger.warning("starter warm: re-warm of %r failed — will retry next pass", q[:60])
             continue
-        if not (r is True):
-            key = _refusal_key(day, q)
-            _refusals[key] = _refusals.get(key, 0) + 1
-            if _refusals[key] == _MAX_WARM_REFUSALS:
-                logger.warning(
-                    "starter warm: %r refused %d times today — parked until tomorrow, it "
-                    "will answer live", q[:60], _MAX_WARM_REFUSALS,
-                )
+        _refusals[key] = _refusals.get(key, 0) + 1
+        if _refusals[key] == _MAX_WARM_REFUSALS:
+            logger.warning(
+                "starter warm: %r refused %d times today — parked until tomorrow, it "
+                "will answer live", q[:60], _MAX_WARM_REFUSALS,
+            )
     if written:
         logger.info("starter warm: stored %d/%d answer(s) for %s",
                     written, len(pending), day)
@@ -501,6 +505,19 @@ async def _warm_one(question: str, day: str) -> bool:
         logger.warning(
             "starter warm: refusing to store a degraded (%s) answer for %r — it will answer live",
             result.get("degraded"), question[:60],
+        )
+        return False
+    if result.get("web_assisted_card") is True:
+        # Built on a web-sourced Insights card (the Updates jump search, 2026-10-28). The
+        # owner let the CARD be shared; a stored chip answer is another shared copy of
+        # web-derived text, so it answers live instead. Parked for the day at once: the card
+        # stays web-built for the rest of its ET day, and every pass would otherwise pay a
+        # full chat generation to be refused again — a re-warm included, which is never
+        # struck (review 2026-10-29).
+        _refusals[_refusal_key(day, question)] = _MAX_WARM_REFUSALS
+        logger.info(
+            "starter warm: not storing an answer built on a web-sourced card for %r — parked "
+            "for today, it will answer live", question[:60],
         )
         return False
     answer = (result.get("content") or "").strip()

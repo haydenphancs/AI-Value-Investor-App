@@ -453,7 +453,8 @@ class _Sweep(InsightSweeper):
     async def mark_verified_current(self, scopes, market_active):
         pass
 
-    def _claim(self, scope, now, is_market_scope, earnings_window=False, report_day=False):
+    def _claim(self, scope, now, is_market_scope, earnings_window=False, report_day=False,
+               jumping=False):
         return True
 
     def _consume_global_budget(self, now):

@@ -23,6 +23,7 @@ from app.services.earnings_window_service import (
 from app.services.news_cache_service import MARKET_SCOPE
 from app.services.updates_insight_sweeper import InsightSweeper
 from app.services.updates_materiality import ACTION_GENERATE, Decision
+from app.utils.market_hours import session_trading_date
 from _price_fakes import PriceFromFMPFake
 
 
@@ -48,6 +49,8 @@ class _Stub(InsightSweeper):
         self.claims = {}
         self.generated = {}
         self.finished = {}
+        self.alerts = []
+        self.news_pulls = []
         self.claim_ok = True
 
     async def _universe(self):
@@ -65,6 +68,11 @@ class _Stub(InsightSweeper):
     async def get_sigmas_bulk(self, symbols):
         return {}
 
+    async def refresh_scope_news(self, scope):
+        # A jumper's news is pulled on price-only ticks too (2026-10-28).
+        self.news_pulls.append(scope)
+        return 0
+
     def get_cached_bulk(self, scopes, limit):
         fresh = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
         return {s: [{"external_id": f"{s}-1", "headline": f"{s} news",
@@ -73,7 +81,8 @@ class _Stub(InsightSweeper):
     async def mark_verified_current(self, scopes, market_active):
         pass
 
-    def _claim(self, scope, now, is_market_scope, earnings_window=False, report_day=False):
+    def _claim(self, scope, now, is_market_scope, earnings_window=False, report_day=False,
+               jumping=False):
         self.claims[scope] = (earnings_window, report_day)
         return self.claim_ok
 
@@ -82,6 +91,11 @@ class _Stub(InsightSweeper):
 
     async def _maybe_price_move(self, scope, decision, now, quote):
         return None
+
+    async def _notify_watchers(self, scope, decision, card, now, quote=None):
+        # The real one reaches the push dispatcher (Supabase). A live jumper alerts even
+        # when its card fails (the decoupled `ticker_move` alert, 2026-10-28).
+        self.alerts.append(scope)
 
     async def generate_and_store(self, **kwargs):
         self.generated[kwargs["scope"]] = kwargs
@@ -258,6 +272,24 @@ async def test_a_catalyst_tier_mover_is_not_starved_by_reporting_tickers(monkeyp
 
     monkeypatch.setattr(mod, "decide", _decide)
     stub = _Stub(universe=[*reporters, "CRASH", "CALM"])
+
+    # Since 2026-10-28 urgency reads the LIVE jump set (the current-session quote), not
+    # `decision.price_band` — which is the stale `last_price_band` when a quote is
+    # unusable. So the mover needs a quote that really moved: -15% on a large cap.
+    # Stamped with the current session, as a screener row is: an unstamped row is not a jump
+    # before the bell (review 2026-10-29), which would make this test depend on the hour.
+    session = session_trading_date(datetime.now(timezone.utc)).isoformat()
+
+    class _QuoteFMP:
+        async def get_batch_quotes_bulk(self, symbols):
+            return [{"symbol": "CRASH", "price": 85.0, "changePercentage": -15.0,
+                     "marketCap": 5e11, "changeSession": session}]
+
+    stub.price = PriceFromFMPFake(_QuoteFMP())
     await stub.run_sweep(refresh_news=False)
     assert "CRASH" in stub.claims, "an Extreme mover must share the front of the queue"
     assert "CALM" not in stub.claims, "an ordinary mover still waits behind urgent scopes"
+    # Its card failed (the stub generates nothing), so the alert goes out on its own; its
+    # news is pulled although this is a price-only tick.
+    assert stub.alerts == ["CRASH"]
+    assert stub.news_pulls == ["CRASH"]

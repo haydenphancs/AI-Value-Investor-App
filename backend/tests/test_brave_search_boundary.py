@@ -32,11 +32,17 @@ _SCRIPTS = _BACKEND / "scripts"
 
 BRAVE = "app.integrations.brave_search"
 SERVICE = "app.services.chat_web_search_service"
+JUMP = "app.services.jump_web_search_service"
 
 _ALLOWED: Dict[str, Set[str]] = {
-    BRAVE: {"app/services/chat_web_search_service.py", "app/main.py"},
+    # 2026-10-28 (owner: "i pick option 2, i don't think we break any terms"): the Updates
+    # jump search is the second caller. Its results may live in the SHARED Insights card; they
+    # are still never used to evaluate an AI (the scripts force it off, below).
+    BRAVE: {"app/services/chat_web_search_service.py", "app/main.py",
+            "app/services/jump_web_search_service.py"},
     SERVICE: {"app/services/agents/chat_tools.py", "app/services/chat_service.py",
               "app/api/v1/endpoints/chat.py"},
+    JUMP: {"app/services/updates_insight_sweeper.py"},
 }
 _EVAL_SCRIPTS = ("scripts/eval_chat.py", "scripts/eval_model_routing.py")
 
@@ -98,7 +104,7 @@ def tree() -> Dict[str, Set[str]]:
     return _scan([_APP, _SCRIPTS])
 
 
-@pytest.mark.parametrize("target", [BRAVE, SERVICE])
+@pytest.mark.parametrize("target", [BRAVE, SERVICE, JUMP])
 def test_only_the_allowed_files_import(tree, target):
     importers = {rel for rel, names in tree.items() if _reaches(names, target)}
     importers.discard(str(Path(target.replace(".", "/") + ".py")))   # the module itself
@@ -113,7 +119,7 @@ def test_no_script_and_no_marketing_module_reaches_web_search(tree):
     bad = sorted(
         rel for rel, names in tree.items()
         if (rel.startswith("scripts/") or rel.startswith("app/services/marketing/"))
-        and (_reaches(names, BRAVE) or _reaches(names, SERVICE))
+        and (_reaches(names, BRAVE) or _reaches(names, SERVICE) or _reaches(names, JUMP))
     )
     assert bad == []
 
@@ -140,11 +146,10 @@ def _module_level_assignment_line(src: str, attr: str) -> int:
     return 0
 
 
-@pytest.mark.parametrize("rel", _EVAL_SCRIPTS)
-def test_the_eval_scripts_force_web_search_off_before_anything_runs(rel):
+def _assert_forced_off_before_any_def(rel: str, attr: str) -> None:
     src = (_BACKEND / rel).read_text(encoding="utf-8")
-    line = _module_level_assignment_line(src, "CHAT_REPORT_WEB_SEARCH_ENABLED")
-    assert line, f"{rel} must set settings.CHAT_REPORT_WEB_SEARCH_ENABLED = False at module level"
+    line = _module_level_assignment_line(src, attr)
+    assert line, f"{rel} must set settings.{attr} = False at module level"
     body = ast.parse(src).body
     first_def = min((n.lineno for n in body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))),
                     default=10 ** 9)
@@ -152,6 +157,22 @@ def test_the_eval_scripts_force_web_search_off_before_anything_runs(rel):
                            and n.module == "app.config"
                            and any(a.name == "settings" for a in n.names)), default=0)
     assert settings_import and settings_import < line < first_def
+
+
+@pytest.mark.parametrize("rel", _EVAL_SCRIPTS)
+def test_the_eval_scripts_force_web_search_off_before_anything_runs(rel):
+    _assert_forced_off_before_any_def(rel, "CHAT_REPORT_WEB_SEARCH_ENABLED")
+
+
+#: Every script that evaluates model output — the chat evals and the Insights card preview —
+#: also forces the Updates jump search OFF (2026-10-28): OFF means no search AND every stored
+#: web-sourced card withheld, so no evaluation is ever built on web results (§3(b)(xiii)).
+_JUMP_OFF_SCRIPTS = (*_EVAL_SCRIPTS, "scripts/preview_insight_card.py")
+
+
+@pytest.mark.parametrize("rel", _JUMP_OFF_SCRIPTS)
+def test_the_evaluation_scripts_force_the_jump_search_off_before_anything_runs(rel):
+    _assert_forced_off_before_any_def(rel, "UPDATES_JUMP_WEB_SEARCH_ENABLED")
 
 
 def test_the_assignment_detector_is_not_vacuous():

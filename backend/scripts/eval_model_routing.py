@@ -77,6 +77,8 @@ from app.services.chat_service import ChatService                  # noqa: E402
 # eval run must never reach report chat's web search — forced OFF for the whole process, before
 # anything reads it (pinned by tests/test_brave_search_boundary.py).
 settings.CHAT_REPORT_WEB_SEARCH_ENABLED = False
+# …and the Updates jump search (2026-10-28): OFF also withholds web-sourced Insights cards.
+settings.UPDATES_JUMP_WEB_SEARCH_ENABLED = False
 
 # Candidates for the eligible class: conceptual, no ticker, no on-screen data. Whether a
 # given one IS eligible is decided by the real router below, not by this list — several

@@ -661,11 +661,27 @@ struct MoatDimensionDTO: Codable {
     let name: String
     let score: Double
     let peerScore: Double
+    /// Who scored the pillar: "deterministic" (from filings) or "ai_legacy" (an AI estimate).
+    /// Absent on reports stored before the provenance tag existed.
     let source: String?
+    /// Where `peer_score` came from: "industry", "ai_estimate" or "baseline" (the 5.0
+    /// placeholder). Absent on reports stored before 2026-10-28.
+    let peerSource: String?
 
     enum CodingKeys: String, CodingKey {
         case name, score, source
         case peerScore = "peer_score"
+        case peerSource = "peer_source"
+    }
+
+    // The two provenance tags are labels, never worth a decode failure of the whole report.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.name = try c.decode(String.self, forKey: .name)
+        self.score = try c.decode(Double.self, forKey: .score)
+        self.peerScore = try c.decode(Double.self, forKey: .peerScore)
+        self.source = try? c.decodeIfPresent(String.self, forKey: .source)
+        self.peerSource = try? c.decodeIfPresent(String.self, forKey: .peerSource)
     }
 }
 
@@ -1107,7 +1123,8 @@ extension TickerReportAPIResponse {
                 projectionSourceLabel: moatCompetition.marketDynamics.projectionSourceLabel
             ),
             dimensions: moatCompetition.dimensions.map { d in
-                MoatDimension(name: d.name, score: d.score, peerScore: d.peerScore)
+                MoatDimension(name: d.name, score: d.score, peerScore: d.peerScore,
+                              source: d.source, peerSource: d.peerSource)
             },
             durabilityNote: moatCompetition.durabilityNote,
             competitors: moatCompetition.competitors.map { c in

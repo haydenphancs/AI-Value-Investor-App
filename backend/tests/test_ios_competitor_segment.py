@@ -346,6 +346,29 @@ def test_legend_caption_follows_the_marker_and_the_button_meets_the_target():
     assert "GrowthInfoIcon" not in src
 
 
+def test_the_title_sits_on_its_caption_not_over_the_44pt_row():
+    """Owner 2026-10-30 (RKLB): "move 'Competitors' down. it's the title for the cards below
+    it". On a row of its own the title sat 8pt under the Insight and ~27pt over its caption,
+    the gap being the info button's 44pt box. It now stacks on the caption inside that row,
+    bottom-aligned so the spare height falls above the title and the glyph stays on the
+    caption's line."""
+    src = _code(_MOAT_SECTION)
+    legend = _decl_body(src, r"private var competitorOrderLegend:\s*some View\s*\{")
+    assert re.match(r"\{\s*HStack\(alignment:\s*\.bottom\b", legend), (
+        "a centred row puts half the 44pt box's spare height between title and caption"
+    )
+    stack = _decl_body(legend, r"VStack\(alignment:\s*\.leading,\s*spacing:\s*AppSpacing\.xxs\)\s*\{")
+    assert stack.index("competitorsTitle") < stack.index("Text(data.competitorOrder.caption)")
+    assert "Button" not in stack
+    button = legend[legend.index("Button"):]
+    assert re.search(r"height:\s*HitSlop\.minimumTarget,\s*alignment:\s*\.bottomTrailing\)", button)
+    section = _decl_body(src, r"private var peerComparisonSection:\s*some View\s*\{")
+    assert "competitorsTitle" in _decl_body(section, r"if data\.competitors\.isEmpty\s*\{")
+    assert 'Text("Competitors")' not in section, (
+        "a title row of its own sits over the legend's 44pt box, ~27pt clear of its caption"
+    )
+
+
 # ── the info sheet ──────────────────────────────────────────────────────────────
 
 _VENDOR_OR_MODEL = re.compile(

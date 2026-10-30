@@ -58,8 +58,8 @@ or a dated record, the output cannot hallucinate — the one model-written input
 Insights card, reprinted behind the news-lean gate above and never generated on this path.
 
 `cause.kind == "none"` is a real answer and the common one. For ACHR it renders
-*"Aerospace & Defense fell 1.2%; ACHR moved far more. No clear catalyst in today's
-news."* — which is both true and more useful than any headline available.
+*"Aerospace & Defense fell 1.2%. No clear catalyst in today's news."* beside its own
+−5.0% — which is both true and more useful than any headline available.
 
 RANKING — ONE AXIS PER MODE
 ---------------------------
@@ -1192,6 +1192,16 @@ def _market_payload_is_cacheable(payload: WidgetMoverPayload) -> bool:
     return bool(payload.market_assets) or payload.market_brief is not None
 
 
+def _payload_card_scopes(key: str) -> frozenset:
+    """The Insights card scopes a cached payload's TEXT comes from: the market roll-up for
+    the Market tile (its brief), the holdings for a `portfolio:<user>:<T1,T2,…>` key."""
+    if key == "market":
+        return frozenset({MARKET_SCOPE})
+    if key.startswith("portfolio:"):
+        return frozenset(t for t in key.rsplit(":", 1)[-1].split(",") if t)
+    return frozenset()
+
+
 def _better_earnings_row(candidate: Dict[str, Any], incumbent: Dict[str, Any]) -> bool:
     """Prefer the row that actually REPORTED, then the more recent one.
 
@@ -1347,6 +1357,9 @@ class WidgetMoversService:
         # session ISO date -> (monotonic stamp, context). Keyed by SESSION because the
         # earnings window is a function of it — see `_market_context`.
         self._ctx_cache: Dict[str, Tuple[float, _MarketContext]] = {}
+        # card scope -> monotonic stamp of its newest stored Insights card. See
+        # `forget_payloads_for`.
+        self._card_stamps: Dict[str, float] = {}
 
     # ── public ───────────────────────────────────────────────────────
 
@@ -1517,6 +1530,32 @@ class WidgetMoversService:
 
     # ── cache plumbing ───────────────────────────────────────────────
 
+    def forget_payloads_for(self, scope: str) -> None:
+        """A new Insights card for `scope` was stored: drop the cached payloads it changes.
+
+        The Holdings tile's head line is that card's headline when it agrees with the move
+        (`attribute`'s news lean), and the app asks for a fresh payload the moment it sees a
+        card newer than the tile (`WidgetRefreshService.insightCardArrived`). Inside the 60 s
+        TTL that request was answered from a build that read the OLD card, so the tile kept
+        the old line until the next foreground. A build in flight read the old card too:
+        `_cached` will not keep it (the stamp below).
+        """
+        sym = (scope or "").strip().upper()
+        if not sym:
+            return
+        now = time.monotonic()
+        # Bounded: a stamp only matters to a build that started before it, and none runs
+        # for anything like the TTL.
+        for s in [s for s, t in self._card_stamps.items() if now - t > _MEM_TTL_SECONDS]:
+            del self._card_stamps[s]
+        self._card_stamps[sym] = now
+        for key in [k for k in self._cache if sym in _payload_card_scopes(k)]:
+            self._cache.pop(key, None)
+
+    def _card_written_since(self, key: str, started: float) -> bool:
+        """Whether a card this payload reads was stored after its build started."""
+        return any(self._card_stamps.get(s, -1.0) >= started for s in _payload_card_scopes(key))
+
     async def _cached(
         self,
         key: str,
@@ -1533,18 +1572,24 @@ class WidgetMoversService:
 
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._inflight[key] = fut
+        started = time.monotonic()
         try:
             payload = await build()
             # Joiners of THIS build still share it either way; `cacheable` only decides
             # whether the next caller in the TTL gets it too (default: always).
-            if cacheable is None or cacheable(payload):
-                self._evict_expired()
-                self._cache[key] = (time.monotonic(), payload)
-            else:
+            if cacheable is not None and not cacheable(payload):
                 logger.warning(
                     "widget: %s payload not cached — nothing renderable was built "
                     "(every leg failed); the next refresh rebuilds", key.split(":", 1)[0],
                 )
+            elif self._card_written_since(key, started):
+                logger.info(
+                    "widget: %s payload not cached — an Insights card it reads was stored "
+                    "during the build; the next refresh reads the new one", key.split(":", 1)[0],
+                )
+            else:
+                self._evict_expired()
+                self._cache[key] = (time.monotonic(), payload)
             if not fut.done():
                 fut.set_result(payload)
             return payload

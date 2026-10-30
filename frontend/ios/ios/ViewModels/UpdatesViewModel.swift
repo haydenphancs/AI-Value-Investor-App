@@ -1116,6 +1116,7 @@ final class UpdatesViewModel: ObservableObject {
             // skeleton between, and the rows keep their identity (`stableID` = the server id).
             allNewsArticles = articles
             insightSummary = response.insight.flatMap { NewsInsightSummary(dto: $0) }
+            noteInsightForWidget(insightSummary, stamp: response.insight?.generatedAt, scope: scope)
             let replacedSnapshotSavedAt = snapshotSavedAt
             let replacedSnapshotSeededAt = seededAt
             snapshotSavedAt = nil
@@ -1630,6 +1631,19 @@ final class UpdatesViewModel: ObservableObject {
         }
     }
 
+    /// A card from the NETWORK (never the snapshot or `feedCache`) goes to the widget, which
+    /// refreshes when the card is newer than the tile — see
+    /// `WidgetRefreshService.insightCardArrived`. The stamp is the DTO's own: `updatedAt`
+    /// falls back to now when it does not parse, which would beat any snapshot.
+    private func noteInsightForWidget(_ card: NewsInsightSummary?, stamp: String?, scope: String) {
+        guard let card else { return }
+        WidgetRefreshService.shared.insightCardArrived(
+            scope: scope,
+            generatedAt: UpdatesDateParser.parse(stamp),
+            isAIGenerated: card.isAIGenerated
+        )
+    }
+
     /// Returns true when a real AI card arrived (stop polling).
     private func repollInsight(scope: String, token: UUID) async -> Bool {
         do {
@@ -1642,6 +1656,7 @@ final class UpdatesViewModel: ObservableObject {
                   let card = NewsInsightSummary(dto: dto) else { return false }
             insightSummary = card
             feedCache[scope] = (allNewsArticles, card, loadedOffset, hasMorePages)
+            noteInsightForWidget(card, stamp: dto.generatedAt, scope: scope)
             if card.isAIGenerated {
                 print("✅ UpdatesVM: AI insight arrived for \(scope)")
                 return true

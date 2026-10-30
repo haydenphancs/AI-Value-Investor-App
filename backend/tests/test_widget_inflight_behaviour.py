@@ -199,3 +199,63 @@ async def test_the_inflight_map_is_always_drained():
         await svc._cached("b", boom)
 
     assert svc._inflight == {}
+
+
+# ── A new Insights card reaches the next build (owner, 2026-10-30) ───────────────────────
+#
+# The app refreshes the Holdings tile the moment it sees a card newer than the tile
+# (`WidgetRefreshService.insightCardArrived`). Inside the 60 s TTL that refresh was answered
+# from the build that read the OLD card, so the tile kept the old line.
+
+
+@pytest.mark.asyncio
+async def test_a_new_card_drops_exactly_the_payloads_that_read_it():
+    svc = WidgetMoversService()
+    built = []
+
+    def build_for(key):
+        async def _b():
+            built.append(key)
+            return _payload("market" if key == "market" else "portfolio")
+        return _b
+
+    holdings, other = "portfolio:user-1:INTC,MRVL", "portfolio:user-2:AAPL"
+    for key in (holdings, other, "market"):
+        await svc._cached(key, build_for(key))
+    svc.forget_payloads_for("intc")   # scopes match case-insensitively
+    for key in (holdings, other, "market"):
+        await svc._cached(key, build_for(key))
+    assert built == [holdings, other, "market", holdings]
+
+    svc.forget_payloads_for("__MARKET__")
+    await svc._cached("market", build_for("market"))
+    assert built[-1] == "market" and built.count("market") == 2
+
+
+@pytest.mark.asyncio
+async def test_a_build_that_raced_a_card_write_is_served_but_not_kept():
+    """A build in flight when the card was stored read the old card: its own callers get it,
+    the next caller gets a rebuild."""
+    svc = WidgetMoversService()
+    gate = asyncio.Event()
+    calls = 0
+
+    async def build():
+        nonlocal calls
+        calls += 1
+        await gate.wait()
+        return _payload("portfolio")
+
+    key = "portfolio:user-1:INTC"
+    leader = asyncio.create_task(svc._cached(key, build))
+    await asyncio.sleep(0)
+    svc.forget_payloads_for("INTC")
+    gate.set()
+    assert (await leader).mode == "portfolio"
+    await svc._cached(key, build)
+    assert calls == 2
+    # CONTROL: that rebuild is kept, and a card for a scope the payload does not read
+    # leaves it alone.
+    svc.forget_payloads_for("AAPL")
+    await svc._cached(key, build)
+    assert calls == 2

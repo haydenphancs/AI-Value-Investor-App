@@ -611,7 +611,7 @@ public struct WidgetCause: Codable, Equatable, Sendable {
     /// so the cause cannot contradict the "Tue close" footer beside it.
     public let detailAged: String?
     /// Always-true context beside an ESTABLISHED cause, from the backend ("Software -
-    /// Infrastructure fell 4.0%; CRWV moved far more."). It carries no session word, so it has
+    /// Infrastructure fell 4.0%."). It carries no session word, so it has
     /// no aged twin. Nil on an older backend and for sector / market / none, whose `detail`
     /// already says it. Decoding stays synthesized, so an old App Group snapshot or payload
     /// without the key decodes it as nil.

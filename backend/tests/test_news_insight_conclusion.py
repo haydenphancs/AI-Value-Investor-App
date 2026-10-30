@@ -135,6 +135,36 @@ async def test_a_clean_card_is_one_call_with_the_card_settings():
     assert call["system_instruction"] is nis._SYSTEM_INSTRUCTION
 
 
+
+@pytest.mark.asyncio
+async def test_a_stored_card_clears_the_widget_payloads_built_from_the_old_one(monkeypatch):
+    """Owner 2026-10-30: the widget shows the card's headline right after a new run. The
+    tile's payload cache would otherwise serve the build that read the old card for 60 s."""
+    import app.services.widget_movers_service as wm
+
+    forgotten = []
+
+    class _Widget:
+        def forget_payloads_for(self, scope):
+            forgotten.append(scope)
+
+    monkeypatch.setattr(wm, "get_widget_movers_service", lambda: _Widget())
+    assert await _run(_Svc(_Gemini(_card())), scope="ETHUSD") is not None
+    assert forgotten == ["ETHUSD"]
+    # Nothing stored, nothing cleared: a failed generation leaves the old card current.
+    assert await _run(_Svc(_Gemini(RuntimeError("model down"))), scope="ETHUSD") is None
+    assert forgotten == ["ETHUSD"]
+
+
+def test_clearing_the_widget_payloads_never_fails_a_stored_card(monkeypatch):
+    import app.services.widget_movers_service as wm
+
+    def boom():
+        raise RuntimeError("widget service unavailable")
+
+    monkeypatch.setattr(wm, "get_widget_movers_service", boom)
+    nis._forget_widget_payloads("ETHUSD")   # logs, does not raise
+
 @pytest.mark.asyncio
 async def test_a_new_figure_is_repaired_from_the_points_alone():
     gem = _Gemini(_card(BAD_FIGURE), json.dumps({"conclusion": GOOD}))

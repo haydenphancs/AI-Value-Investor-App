@@ -240,7 +240,6 @@ struct TickerReportView: View {
                 onShare: viewModel.shareTapped,
                 onViewDetailedAnalysis: viewModel.viewDetailedAnalysis,
                 onRunAgain: handleRunAgain,
-                runAgainDetail: runAgainDetail(report),
                 onDelete: { showDeleteConfirm = true },
                 canExportPDF: viewModel.canExportPDF
             )
@@ -589,14 +588,6 @@ struct TickerReportView: View {
             ownerId: AppActions.shared.currentAccountId
         )
         appState.dismissAllPresentations()
-    }
-
-    /// The line under "Run Again" ("Quality Compounder · 20 credits"): which analyst runs and
-    /// what the tap spends — the analyst named the way the Research tab's persona cards name it.
-    private func runAgainDetail(_ report: TickerReportData) -> String {
-        let analyst = AnalysisPersona.forPersonaToken(report.agent.personaKey)?.compactName
-            ?? "\(report.agent.shortName) Agent"
-        return "\(analyst) · \(AnalysisCost.standard.credits) credits"
     }
 
     // MARK: - Report Chat

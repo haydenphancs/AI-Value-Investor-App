@@ -18,11 +18,6 @@ struct ReportHeaderBar: View {
     let onViewDetailedAnalysis: () -> Void
     /// A new paid run of this report's analysis — see `TickerReportView.handleRunAgain`.
     let onRunAgain: () -> Void
-    /// The line under "Run Again": the analyst that runs it and what it costs
-    /// ("Quality Compounder · 20 credits"). The tap spends at once, with no dialog after it,
-    /// so the cost is stated on the item itself — the disclosure `GenerateAnalysisButton`
-    /// makes with "Uses N Credits".
-    let runAgainDetail: String
     let onDelete: () -> Void
     /// PDF export (Share + View Detailed Analysis) is only available for saved
     /// research reports. Hidden otherwise so the menu never offers a dead action.
@@ -93,10 +88,9 @@ struct ReportHeaderBar: View {
                     }
                 }
                 // Outside the PDF gate: a re-run needs only the ticker and the analyst, which
-                // every report on screen has. The second Text is the menu item's subtitle.
+                // every report on screen has. Title only, no second line (owner, 2026-10-30).
                 Button(action: onRunAgain) {
                     Label("Run Again", systemImage: "arrow.clockwise")
-                    Text(runAgainDetail)
                 }
                 Divider()
                 Button(role: .destructive, action: onDelete) {
@@ -125,7 +119,6 @@ struct ReportHeaderBar: View {
         onShare: {},
         onViewDetailedAnalysis: {},
         onRunAgain: {},
-        runAgainDetail: "Quality Compounder · 20 credits",
         onDelete: {}
     )
     .background(AppColors.background)

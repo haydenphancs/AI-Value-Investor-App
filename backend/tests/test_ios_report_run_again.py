@@ -3,10 +3,10 @@
 The report screen's ••• menu (`ReportHeaderBar`) offers "Run Again": the Research tab's Generate
 Analysis for the report's ticker and analyst, after which the report closes onto Research → Reports,
 where the new run's card shows its progress. The tap SPENDS 20 credits with no dialog after it, so
-what is pinned here is the money path, not the layout:
+most of what is pinned here is the money path:
 
-1. The menu item sits below View Detailed Analysis, outside the PDF gate, and its second line
-   states the cost (and the analyst) — the disclosure `GenerateAnalysisButton` makes.
+1. The menu item sits below View Detailed Analysis, outside the PDF gate, and is the title alone —
+   no second line (owner, 2026-10-30) — wired to the report screen's handler.
 2. The report screen PARKS the request on `AppState.pendingResearchRerun` and then asks every tab
    root to take its presentations down, with no `dismiss()` of its own — the "AI Deep Research"
    shape (`test_ios_deep_research_route.py`). The screen is presented from the Reports list AND
@@ -46,7 +46,6 @@ _VM = _IOS / "ViewModels" / "ResearchViewModel.swift"
 _CONTENT = _IOS / "ContentView.swift"
 
 _TAP = "private func handleRunAgain()"
-_DETAIL = "private func runAgainDetail(_ report: TickerReportData) -> String"
 _RERUN = "func rerunAnalysis(_ request: ResearchRerunRequest)"
 _OBSERVER = ".onChange(of: appState.pendingResearchRerun, initial: true)"
 _LIVE = "struct ResearchViewWithBinding: View"
@@ -104,7 +103,7 @@ def _live() -> str:
     return body
 
 
-# ── 1. The menu offers it, below View Detailed Analysis, with the cost on it ──
+# ── 1. The menu offers it, below View Detailed Analysis ──────────────────────
 
 
 def test_the_menu_offers_run_again_below_view_detailed_analysis():
@@ -116,21 +115,14 @@ def test_the_menu_offers_run_again_below_view_detailed_analysis():
     assert "Run Again" not in _block(menu, "if canExportPDF"), (
         "Run Again is inside the PDF gate — a report with no saved row could not be re-run")
     button = _block(menu, "Button(action: onRunAgain)")
-    assert re.search(r"\bText\(runAgainDetail\)", button), (
-        "Run Again lost its second line — the tap spends 20 credits at once, so the item itself "
-        "must state the cost")
+    assert "Text(" not in button, (
+        "Run Again has a second line again — the owner asked for the title alone")
 
 
-def test_the_line_under_it_names_the_cost_and_the_reports_own_analyst():
-    report = _code(_REPORT)
-    detail = _block(report, _DETAIL)
-    assert "AnalysisCost.standard.credits" in detail, "the Run Again line no longer states the cost"
-    assert "report.agent.personaKey" in detail, (
-        "the Run Again line no longer names the analyst of the report on screen")
-    call = _block(report, "ReportHeaderBar(", "(", ")")
-    assert (re.search(r"\bonRunAgain:\s*handleRunAgain\b", call)
-            and re.search(r"\brunAgainDetail:\s*runAgainDetail\(report\)", call)), (
-        "the report screen no longer wires Run Again (its handler and its cost line) into the header")
+def test_the_report_screen_wires_run_again_to_its_handler():
+    call = _block(_code(_REPORT), "ReportHeaderBar(", "(", ")")
+    assert re.search(r"\bonRunAgain:\s*handleRunAgain\b", call), (
+        "the report screen no longer wires Run Again to its handler — a dead menu item")
 
 
 # ── 2 + 3. The tap parks the request, then takes the stack down ──────────────
@@ -265,7 +257,7 @@ def test_the_view_model_runs_it_through_generate_for_the_account_that_tapped():
 # ── The guards above, mutated in memory on every pass ────────────────────────
 
 _T_MENU = test_the_menu_offers_run_again_below_view_detailed_analysis
-_T_DETAIL = test_the_line_under_it_names_the_cost_and_the_reports_own_analyst
+_T_WIRED = test_the_report_screen_wires_run_again_to_its_handler
 _T_TAP = test_the_tap_parks_the_request_then_takes_the_stack_down
 _T_STATE = test_app_state_declares_the_request_and_clears_it_at_session_end
 _T_OWNERS = test_nothing_else_reads_or_writes_the_request
@@ -286,15 +278,14 @@ _MUTATIONS = [
      (('Label("Run Again", systemImage: "arrow.clockwise")',
        'Label("Regenerate", systemImage: "arrow.clockwise")'),),
      _T_MENU, "the report menu no longer offers Run Again"),
-    ("cost-line-dropped", _HEADER,
-     (("                    Text(runAgainDetail)\n", ""),),
-     _T_MENU, "Run Again lost its second line"),
-    ("cost-dropped-from-detail", _REPORT,
-     (('return "\\(analyst) · \\(AnalysisCost.standard.credits) credits"', 'return analyst'),),
-     _T_DETAIL, "the Run Again line no longer states the cost"),
+    ("second-line-back", _HEADER,
+     (('                    Label("Run Again", systemImage: "arrow.clockwise")\n',
+       '                    Label("Run Again", systemImage: "arrow.clockwise")\n'
+       '                    Text("20 credits")\n'),),
+     _T_MENU, "Run Again has a second line again"),
     ("handler-unwired", _REPORT,
      (("onRunAgain: handleRunAgain,", "onRunAgain: {},"),),
-     _T_DETAIL, "the report screen no longer wires Run Again"),
+     _T_WIRED, "the report screen no longer wires Run Again to its handler"),
     ("no-teardown", _REPORT,
      ((_TEARDOWN, "    }\n"),),
      _T_TAP, "never asks the presentation stack to come down"),

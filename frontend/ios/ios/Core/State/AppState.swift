@@ -125,8 +125,8 @@ final class AppState {
     ///
     /// Same reason to be parked here as `pendingResearchTicker`: the report screen is presented
     /// from the Reports list and from notification covers on other tabs, none of which can reach
-    /// the Research tab's `ResearchViewModel`. Unlike that one, this SPENDS — it is a deliberate
-    /// tap on a menu item that states the cost — so it carries the account that tapped.
+    /// the Research tab's `ResearchViewModel`. Unlike that one, this SPENDS — the run it starts
+    /// is charged like any Generate — so it carries the account that tapped.
     ///
     /// Device-global, so it is cleared in `discardDataForEndedSession()`: one left behind must
     /// never run for the next account.

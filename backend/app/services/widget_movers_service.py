@@ -58,8 +58,8 @@ or a dated record, the output cannot hallucinate — the one model-written input
 Insights card, reprinted behind the news-lean gate above and never generated on this path.
 
 `cause.kind == "none"` is a real answer and the common one. For ACHR it renders
-*"Aerospace & Defense fell 1.2%; ACHR moved far more. No clear catalyst in today's
-news."* — which is both true and more useful than any headline available.
+*"Aerospace & Defense fell 1.2%. No clear catalyst in today's news."* beside its own
+−5.0% — which is both true and more useful than any headline available.
 
 RANKING — ONE AXIS PER MODE
 ---------------------------

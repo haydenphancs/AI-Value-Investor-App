@@ -34,7 +34,7 @@ from app.services.widget_movers_service import (
 WED = date(2026, 10, 14)
 WED_ISO = WED.isoformat()
 HEADLINE = "CoreWeave Faces Investor Scrutiny Amid Rising Bond Yields"
-NOTE = "Software - Infrastructure fell 4.0%; CRWV moved far more."
+NOTE = "Software - Infrastructure fell 4.0%."
 
 
 def _card(headline=HEADLINE, sentiment="Bearish", generated_at="2026-10-14T17:09:05Z",

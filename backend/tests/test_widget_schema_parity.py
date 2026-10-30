@@ -102,7 +102,7 @@ def _mover(ticker: str = "ACHR") -> WidgetMoverResponse:
         cause=WidgetCauseResponse(
             kind="none",
             tag=None,
-            detail="Aerospace & Defense fell 1.2%; ACHR moved far more.",
+            detail="Aerospace & Defense fell 1.2%.",
         ),
         context=WidgetMoveContextResponse(
             change_percent=-5.02152,

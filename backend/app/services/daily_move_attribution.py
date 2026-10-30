@@ -432,7 +432,7 @@ class Attribution:
     # Everything we checked and ruled out, for debuggability. Never rendered.
     considered: List[str] = field(default_factory=list)
     # The always-true arithmetic beside an EARNINGS / ANALYST / COMPANY_NEWS cause
-    # ("Software - Infrastructure fell 4.0%; CRWV moved far more."). None for SECTOR,
+    # ("Software - Infrastructure fell 4.0%."). None for SECTOR,
     # MARKET and NONE, whose `detail` already says it. No session word, so no aged twin.
     note: Optional[str] = None
     # "bearish" / "bullish" when the session's Insights card leaned the way the stock moved —
@@ -986,8 +986,8 @@ def describe_context(
 ) -> List[str]:
     """The always-true arithmetic sentences about the move — no session word in any of them.
 
-    How it compares with its industry (flat / far more / the other way) and whether an
-    overnight gap carried it. `include_in_line` adds "…; T moved with it." — for the NOTE
+    How it compares with its industry (flat / the industry's figure when the stock far
+    outran it / the other way) and whether an overnight gap carried it. `include_in_line` adds "…; T moved with it." — for the NOTE
     under an established cause only: `describe_no_cause` never needs it, because an in-line
     move is a SECTOR cause and never reaches NONE.
     """
@@ -1004,10 +1004,9 @@ def describe_context(
                 f"{ticker} was flat while {ctx.industry_name} {_dir_word(ind)} {_pct(ind)}."
             )
         elif same_dir and abs(ctx.change_percent) > abs(ind) * _SECTOR_INLINE_HIGH:
-            parts.append(
-                f"{ctx.industry_name} {_dir_word(ind)} {_pct(ind)}; "
-                f"{ticker} moved far more."
-            )
+            # The industry's figure alone (owner, 2026-10-30): the stock's own percent is
+            # printed beside this line, so "; T moved far more." only restated it.
+            parts.append(f"{ctx.industry_name} {_dir_word(ind)} {_pct(ind)}.")
         elif not same_dir:
             parts.append(
                 f"{ctx.industry_name} {_dir_word(ind)} {_pct(ind)}; "
@@ -1043,7 +1042,7 @@ def describe_no_cause(
 
     Says the most informative TRUE things available instead of apologising: how unusual
     the move was for this particular stock, and how it compares with its industry. For
-    ACHR that reads "Aerospace & Defense fell 1.2%; ACHR fell far more" — which is
+    ACHR that reads "Aerospace & Defense fell 1.2%." beside its own −5.0% — which is
     genuinely useful, and is exactly what a generic PR headline failed to convey.
 
     `news_checked=False` means the news lookup itself FAILED — a Supabase error, or a

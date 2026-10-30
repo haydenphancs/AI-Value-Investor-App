@@ -1594,7 +1594,7 @@ extension WidgetMoverSnapshot {
             cause: WidgetCause(
                 kind: .companyNews, tag: "Bearish News",
                 detail: headline, detailAged: headline,
-                note: "Software - Infrastructure fell 4.0%; ACME moved far more."
+                note: "Software - Infrastructure fell 4.0%."
             ),
             context: ctx
         )
@@ -1613,8 +1613,8 @@ extension WidgetMoverSnapshot {
             ticker: "ACHR", companyName: "Archer Aviation Inc.", changePercent: -5.02,
             cause: WidgetCause(
                 kind: .none,
-                detail: "Aerospace & Defense fell 1.2%; ACHR moved far more. No clear catalyst in today's news.",
-                detailAged: "Aerospace & Defense fell 1.2%; ACHR moved far more. No clear catalyst in that day's news."
+                detail: "Aerospace & Defense fell 1.2%. No clear catalyst in today's news.",
+                detailAged: "Aerospace & Defense fell 1.2%. No clear catalyst in that day's news."
             ),
             context: ctx
         )

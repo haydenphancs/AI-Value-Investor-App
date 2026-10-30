@@ -120,6 +120,18 @@ final class AppState {
     /// Device-global with no user id, so it is cleared in `discardDataForEndedSession()`.
     var pendingResearchTicker: String?
 
+    /// "Run Again" on a report (`TickerReportView`), consumed by `ResearchViewWithBinding`, which
+    /// runs it through the same `generateAnalysis()` the Generate button does and lands on Reports.
+    ///
+    /// Same reason to be parked here as `pendingResearchTicker`: the report screen is presented
+    /// from the Reports list and from notification covers on other tabs, none of which can reach
+    /// the Research tab's `ResearchViewModel`. Unlike that one, this SPENDS — the run it starts
+    /// is charged like any Generate — so it carries the account that tapped.
+    ///
+    /// Device-global, so it is cleared in `discardDataForEndedSession()`: one left behind must
+    /// never run for the next account.
+    var pendingResearchRerun: ResearchRerunRequest?
+
     /// A Home Screen widget tap (`caydex://ticker/<SYMBOL>` or `caydex://updates/market`),
     /// parked by `iosApp`'s `.onOpenURL` and consumed by `ContentView`, which opens that
     /// asset's detail screen or the Updates tab's Market chip.
@@ -1543,6 +1555,7 @@ final class AppState {
         NotificationInboxViewModel.shared.reset()
         pendingPushNotification = nil
         pendingResearchTicker = nil
+        pendingResearchRerun = nil
         // `presentationResetToken` is deliberately NOT reset here — see its declaration.
         PortfolioStore.shared.reset()
         // Same reason: the price alerts in this store are the signed-out user's own

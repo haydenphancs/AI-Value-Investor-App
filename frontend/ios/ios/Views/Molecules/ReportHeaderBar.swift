@@ -3,7 +3,7 @@
 //  ios
 //
 //  Molecule: Top navigation bar for the report with back, company info,
-//  and an overflow (•••) menu containing share, detailed analysis, delete.
+//  and an overflow (•••) menu containing share, detailed analysis, run again, delete.
 //
 
 import SwiftUI
@@ -16,6 +16,8 @@ struct ReportHeaderBar: View {
     let onBack: () -> Void
     let onShare: () -> Void
     let onViewDetailedAnalysis: () -> Void
+    /// A new paid run of this report's analysis — see `TickerReportView.handleRunAgain`.
+    let onRunAgain: () -> Void
     let onDelete: () -> Void
     /// PDF export (Share + View Detailed Analysis) is only available for saved
     /// research reports. Hidden otherwise so the menu never offers a dead action.
@@ -74,8 +76,8 @@ struct ReportHeaderBar: View {
 
             Spacer()
 
-            // Overflow menu (••• → Share / View Ticker / View Detailed Analysis /
-            // Regenerate / Delete). Destructive role auto-renders Delete in red.
+            // Overflow menu (••• → Share / View Detailed Analysis / Run Again / Delete).
+            // Destructive role auto-renders Delete in red.
             Menu {
                 if canExportPDF {
                     Button(action: onShare) {
@@ -84,8 +86,13 @@ struct ReportHeaderBar: View {
                     Button(action: onViewDetailedAnalysis) {
                         Label("View Detailed Analysis", systemImage: "doc.text.magnifyingglass")
                     }
-                    Divider()
                 }
+                // Outside the PDF gate: a re-run needs only the ticker and the analyst, which
+                // every report on screen has. Title only, no second line (owner, 2026-10-30).
+                Button(action: onRunAgain) {
+                    Label("Run Again", systemImage: "arrow.clockwise")
+                }
+                Divider()
                 Button(role: .destructive, action: onDelete) {
                     Label("Delete", systemImage: "trash")
                 }
@@ -111,6 +118,7 @@ struct ReportHeaderBar: View {
         onBack: {},
         onShare: {},
         onViewDetailedAnalysis: {},
+        onRunAgain: {},
         onDelete: {}
     )
     .background(AppColors.background)

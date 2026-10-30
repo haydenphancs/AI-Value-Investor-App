@@ -160,8 +160,8 @@ public enum WidgetSessionLabel {
             .map { fullWording($0) }
     }
 
-    /// The SAME decision as `agedLabel`, worded for a slot with no room: "Tue 10:05",
-    /// "Tue close", "Sep 23", "As of 10:05". nil exactly when `agedLabel` is nil.
+    /// The SAME decision as `agedLabel`, worded for a slot with no room: "Tue 10:05 ET",
+    /// "Tue close", "Sep 23", "As of 10:05 ET". nil exactly when `agedLabel` is nil.
     ///
     /// For the Lock Screen's inline line, which used to fall back from "AAPL +2.10% · Tue
     /// 10:05 AM ET" straight to a bare "AAPL +2.10%" — a Tuesday intraday move presented as
@@ -244,8 +244,10 @@ public enum WidgetSessionLabel {
         }
     }
 
-    /// No " ET", no AM/PM, no "— open Caydex": the claim (which day, close or intraday) is
-    /// kept whole, only its decoration goes.
+    /// No AM/PM, no "— open Caydex": the claim (which day, close or intraday) is kept whole,
+    /// only its decoration goes. " ET" is not decoration and stays (owner, 2026-10-29: a
+    /// market time is New York time, labelled): a bare "Tue 10:05" on the Lock Screen reads
+    /// as the phone's own clock, so a reader in Denver takes a 10:05 ET reading for 10:05 MT.
     private static func compactWording(_ claim: AgedClaim) -> String {
         switch claim {
         case .asOf(let t):                return "As of \(shortClock(t))"
@@ -388,14 +390,15 @@ public enum WidgetSessionLabel {
         return f.string(from: d) + " ET"
     }
 
-    /// "10:05" — the compact label's time. No AM/PM: beside a weekday or "As of" on a market
-    /// tile, the trading hours make it unambiguous.
+    /// "10:05 ET" — the compact label's time, New York time and saying so, as `clock` does.
+    /// No AM/PM: beside a weekday or "As of" on a market tile, the trading hours make it
+    /// unambiguous. " ET", never a literal "EST": that is wrong whenever New York is on EDT.
     private static func shortClock(_ d: Date) -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = TimeZone(identifier: "America/New_York")
         f.dateFormat = "h:mm"
-        return f.string(from: d)
+        return f.string(from: d) + " ET"
     }
 
     /// 09:30 ET on `d`'s ET day.

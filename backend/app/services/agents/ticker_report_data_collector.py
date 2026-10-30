@@ -3580,7 +3580,7 @@ class TickerReportDataCollector:
                     threat_level, risk_factors, measured=macro_measured
                 )
             ),
-            "last_updated": datetime.now(timezone.utc).strftime("Updated %b %d, %Y"),
+            "last_updated": _macro_updated_label(),
         }
         macro_vital = _derive_macro_vital(
             risk_factors, threat_level, composite, measured=macro_measured,
@@ -4069,22 +4069,43 @@ def _monthly_closes(
 
 
 def _format_live_date(now: datetime) -> str:
-    """Platform-safe replacement for strftime('%-d') / '%-I'."""
-    day = now.day
-    hour = now.hour % 12 or 12
-    ampm = "AM" if now.hour < 12 else "PM"
-    return f"Live Data as of {now.strftime('%b')} {day}, {hour}:{now.strftime('%M')} {ampm}"
+    """The generation time on New York's clock, labelled "ET": "Live Data as of Oct 29,
+    8:15 PM ET". It used to print the UTC clock with no label (that instant read
+    "Oct 30, 12:15 AM"). One report is shared by every viewer, so it is never put in a
+    phone's zone. A naive ``now`` is read as UTC (the caller passes
+    ``datetime.now(timezone.utc)``). Platform-safe replacement for strftime('%-d') / '%-I'."""
+    from app.utils.market_hours import ET
+
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    et = now.astimezone(ET)
+    hour = et.hour % 12 or 12
+    ampm = "AM" if et.hour < 12 else "PM"
+    return f"Live Data as of {et.strftime('%b')} {et.day}, {hour}:{et.strftime('%M')} {ampm} ET"
+
+
+def _macro_updated_label(now: Optional[datetime] = None) -> str:
+    """The macro block's "Updated Oct 29, 2026", on New York's calendar like the report's ET
+    stamps: the UTC date was already tomorrow from 8 PM ET (7 PM in EST), beside a "Live Data
+    as of Oct 29, 8:15 PM ET" from the same instant. A naive ``now`` is read as UTC."""
+    from app.utils.market_hours import ET
+
+    moment = now if now is not None else datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(ET).strftime("Updated %b %d, %Y")
 
 
 def _format_close_date(close_date_iso: Optional[str], now: datetime) -> str:
     """Label the report's price as the last market close (the report is anchored
     to the last completed close, not the live tick). Falls back to the
-    generation timestamp only when no close date is available."""
+    generation timestamp only when no close date is available. The close date is
+    a date-only value: printed as written, never moved through a zone."""
     if close_date_iso:
         try:
             d = date.fromisoformat(close_date_iso)
             return f"As of {d.strftime('%b')} {d.day}, {d.year} close"
-        except ValueError:
+        except (TypeError, ValueError):
             pass
     return _format_live_date(now)
 

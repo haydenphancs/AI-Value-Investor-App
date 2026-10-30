@@ -318,3 +318,82 @@ async def test_enrich_window_never_raises_and_no_ops_when_nothing_fresh():
     # All rows already enriched → no ids → NO enrich_articles call at all.
     assert await svc.enrich_window("AAPL", [{"id": "a1", "ai_processed": True}], cap=25) == 0
     assert called["n"] == 0
+
+
+# ── The degraded raw-FMP fallback states the same instant as the cache ──────────────
+#
+# `_fallback_raw_news` — the cold path's last resort when fetch-and-cache raised — passed
+# FMP's ZONE-LESS New York wall clock straight through, unlike every cached writer. iOS
+# parses that shape as UTC, so each story sat 4-5 hours in the past. It now goes through
+# `_sanitize_published_at` like the others: a true UTC instant, or None.
+
+
+class _FallbackService(_StubService):
+    """`_StubService` whose stock feed answers `rows` as given (malformed ones included)."""
+
+    def __init__(self, rows):
+        super().__init__()
+        outer = self
+
+        class _FMP:
+            async def get_stock_news(self, ticker=None, limit=10, from_date=None,
+                                     to_date=None, page=0):
+                outer.fmp_calls.append(("stock", ticker))
+                return rows
+
+        self.fmp = _FMP()
+        self.price = PriceFromFMPFake(self.fmp)
+
+
+def test_the_fallback_feed_normalises_published_at_like_the_cache():
+    rows = [
+        # EDT (until 2026-11-01): 9 PM ET is already the next UTC day.
+        _raw("u1", "EDT evening", when="2026-10-29 21:00:00"),
+        # EST (from 2026-11-01): the same wall clock is five hours behind UTC, not four.
+        _raw("u2", "EST evening", when="2026-11-02 19:30:00"),
+        # One of OUR instants (already carrying an offset) is converted, never re-read.
+        _raw("u3", "Aware", when="2026-10-29T13:09:00+00:00"),
+        _raw("u4", "Empty", when=""),
+        _raw("u5", "Garbage", when="not-a-date"),
+        _raw("u6", "Missing", when=None),
+        _raw("u7", "Impossible", when="2026-13-45 10:00:00"),
+    ]
+    svc = _FallbackService(rows)
+    out = asyncio.run(svc._fallback_raw_news("AAPL", 50))
+    assert out["cached"] is False and out["ticker"] == "AAPL"
+    got = {a["headline"]: a["published_at"] for a in out["articles"]}
+    assert got == {
+        "EDT evening": "2026-10-30T01:00:00+00:00",
+        "EST evening": "2026-11-03T00:30:00+00:00",
+        "Aware": "2026-10-29T13:09:00+00:00",
+        "Empty": None, "Garbage": None, "Missing": None, "Impossible": None,
+    }
+    # Anti-vacuity: the wall clock read as UTC is exactly the bug.
+    assert got["EDT evening"] != "2026-10-29T21:00:00+00:00"
+
+
+def test_a_malformed_fallback_row_is_skipped_not_the_whole_feed():
+    svc = _FallbackService([None, "junk", 7, _raw("u1", "Kept", when="2026-07-20 18:00:00")])
+    out = asyncio.run(svc._fallback_raw_news("AAPL", 50))
+    assert [(a["headline"], a["published_at"]) for a in out["articles"]] == [
+        ("Kept", "2026-07-20T22:00:00+00:00")]
+
+
+def test_a_failed_cold_fetch_degrades_to_the_fallback_with_utc_instants(monkeypatch):
+    """Through the real `get_ticker_news`: a cache miss whose fetch-and-cache step raises
+    serves the raw fallback — dated like the cached path, and still a valid wire payload."""
+    from app.schemas.news import news_feed_from_payload
+
+    svc = _FallbackService([_raw("u1", "EDT evening", when="2026-10-29 21:00:00"),
+                            _raw("u2", "Undated", when="")])
+
+    async def _boom(*a, **k):
+        raise RuntimeError("cache write failed")
+
+    monkeypatch.setattr(svc, "_fetch_and_cache_raw", _boom)
+    out = asyncio.run(svc.get_ticker_news("AAPL", limit=5))
+    assert out["cached"] is False
+    assert [a["id"] for a in out["articles"]] == ["raw_0", "raw_1"]
+    assert [a["published_at"] for a in out["articles"]] == ["2026-10-30T01:00:00+00:00", None]
+    feed = news_feed_from_payload(out, ticker="AAPL")
+    assert [a.published_at for a in feed.articles] == ["2026-10-30T01:00:00+00:00", None]

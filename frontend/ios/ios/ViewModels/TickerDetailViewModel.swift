@@ -1490,14 +1490,18 @@ class TickerDetailViewModel: ObservableObject {
         isoFormatter.formatOptions = [.withInternetDateTime]
         if let date = isoFormatter.date(from: dateString) { return date }
 
-        // Try "yyyy-MM-dd HH:mm:ss" (FMP raw format)
+        // Try "yyyy-MM-dd HH:mm:ss" (FMP raw format): New York wall-clock time, as the backend's
+        // `market_hours.to_utc_instant` reads it. Read as UTC, such a headline was 4-5 hours off.
         let dateFormatter = DateFormatter()
         dateFormatter.locale = Locale(identifier: "en_US_POSIX")
-        dateFormatter.timeZone = TimeZone(identifier: "UTC")
+        dateFormatter.timeZone = TimeZone(identifier: "America/New_York")
         dateFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
         if let date = dateFormatter.date(from: dateString) { return date }
 
-        // Try "yyyy-MM-dd" only
+        // Try "yyyy-MM-dd" only: a bare day has no clock, so it is read at the phone's own
+        // midnight, the zone `TickerNewsArticle.timeAgo` prints it in. At UTC midnight it
+        // printed the day before on every phone west of UTC.
+        dateFormatter.timeZone = TimeZone.current
         dateFormatter.dateFormat = "yyyy-MM-dd"
         return dateFormatter.date(from: dateString)
     }
@@ -2181,37 +2185,21 @@ class TickerDetailViewModel: ObservableObject {
 
     // MARK: - Market Status
 
+    /// The badge for the fallback model (no `/overview`, so no server `market_status`), by the
+    /// server's own rule (`market_status_fields`): the session from `MarketHoursUtil`, holidays
+    /// and 13:00 half-days included, else the LAST REAL CLOSE with its own clock and label.
+    ///
+    /// This was a weekday-and-hour copy that knew neither holidays nor half-days, and stamped
+    /// every close as `now`, "4:00 PM EST": a Saturday close that never happened, 4:00 PM for a
+    /// 13:00 bell, and EST while New York was on EDT.
     private func determineMarketStatus() -> MarketStatus {
         let now = Date()
-        let nyTimeZone = TimeZone(identifier: "America/New_York")!
-
-        var nyCalendar = Calendar.current
-        nyCalendar.timeZone = nyTimeZone
-
-        let weekday = nyCalendar.component(.weekday, from: now)
-        let hour = nyCalendar.component(.hour, from: now)
-        let minute = nyCalendar.component(.minute, from: now)
-        let totalMinutes = hour * 60 + minute
-
-        // Weekend
-        if weekday == 1 || weekday == 7 {
-            return .closed(date: now, time: "4:00 PM", timezone: "EST")
+        if let session = MarketHoursUtil.liveSessionStatus(at: now) {
+            return session
         }
-
-        let marketOpen = 9 * 60 + 30   // 9:30 AM ET
-        let marketClose = 16 * 60       // 4:00 PM ET
-        let preMarketStart = 4 * 60     // 4:00 AM ET
-        let afterHoursEnd = 20 * 60     // 8:00 PM ET
-
-        if totalMinutes >= marketOpen && totalMinutes < marketClose {
-            return .open
-        } else if totalMinutes >= preMarketStart && totalMinutes < marketOpen {
-            return .preMarket
-        } else if totalMinutes >= marketClose && totalMinutes < afterHoursEnd {
-            return .afterHours
-        } else {
-            return .closed(date: now, time: "4:00 PM", timezone: "EST")
-        }
+        // The last real close, its bell and its label: the same line the response mappings
+        // fall back to.
+        return MarketStatus.lastRegularClosed(before: now)
     }
 
     // MARK: - Number Formatting Helpers

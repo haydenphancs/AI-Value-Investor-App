@@ -295,7 +295,9 @@ extension ETFDetailData {
         priceChange: 3.82,
         priceChangePercent: 0.73,
         marketStatus: .closed(
-            date: Calendar.current.date(from: DateComponents(year: 2026, month: 2, day: 14))!,
+            // A real close: Friday Feb 13, 2026 at 4:00 PM in New York (EST), the badge's zone.
+            date: Calendar(identifier: .gregorian).date(from: DateComponents(
+                timeZone: TimeZone(identifier: "America/New_York"), year: 2026, month: 2, day: 13, hour: 16))!,
             time: "4:00 PM",
             timezone: "EST"
         ),

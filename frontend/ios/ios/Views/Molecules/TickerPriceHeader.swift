@@ -92,7 +92,15 @@ struct TickerPriceHeader: View {
             priceChange: "+$2.34",
             priceChangePercent: "(+1.33%)",
             isPositive: true,
-            marketStatus: .closed(date: Date(), time: "4:00 PM", timezone: "EST")
+            // A fixed close inside EDT: `Date()` with "EST" was a false label March to November.
+            marketStatus: .closed(
+                date: Calendar(identifier: .gregorian).date(from: DateComponents(
+                    timeZone: TimeZone(identifier: "America/New_York"),
+                    year: 2026, month: 10, day: 28, hour: 16
+                ))!,
+                time: "4:00 PM",
+                timezone: "EDT"
+            )
         )
 
         TickerPriceHeader(

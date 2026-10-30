@@ -60,9 +60,10 @@ struct MarketStatusBadge: View {
     private var statusAdditionalInfo: String? {
         switch status {
         case .closed(let date, let time, let timezone):
-            let formatter = DateFormatter()
-            formatter.dateFormat = "MMM d"
-            return "\(formatter.string(from: date)), \(time) \(timezone)"
+            // The New York date, like the server's clock and label beside it. This formatted
+            // the date in the PHONE's zone: a 4:00 PM ET close read "Oct 29, 4:00 PM EDT" in
+            // Tokyo, a day the market never closed at that time.
+            return MarketStatus.closeLine(date: date, time: time, timezone: timezone)
         default:
             return nil
         }
@@ -72,10 +73,14 @@ struct MarketStatusBadge: View {
 #Preview {
     VStack(spacing: AppSpacing.md) {
         MarketStatusBadge(status: .open)
+        // A fixed close inside EDT, so the label is true whatever day the canvas renders.
         MarketStatusBadge(status: .closed(
-            date: Date(),
+            date: Calendar(identifier: .gregorian).date(from: DateComponents(
+                timeZone: TimeZone(identifier: "America/New_York"),
+                year: 2026, month: 10, day: 28, hour: 16
+            ))!,
             time: "4:00 PM",
-            timezone: "EST"
+            timezone: "EDT"
         ))
         MarketStatusBadge(status: .preMarket)
         MarketStatusBadge(status: .afterHours)

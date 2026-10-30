@@ -4555,3 +4555,129 @@ def test_the_production_call_shape_builds_the_global_row(monkeypatch):
     _apply_tam_source(md, {"tam_source_quote": ""}, _chips_dossier(), ticker="NVDA")
     assert md["projection_basis"] == "global_estimate" and md["market_size_label"] == "Global chip market"
     assert (md["projection_year"], md["projection_tam"]) == (2027, 1124.7)
+
+
+# ── "Live Data as of …": New York's clock, labelled ET (owner rule, 2026-10-29) ──────
+#
+# The fallback header (a report with no close date) printed the UTC clock with no label:
+# from 8 PM ET it named TOMORROW ("Oct 30, 12:15 AM" for 8:15 PM ET on Oct 29). One report
+# is shared by every viewer, so it is New York time, never a phone's zone. The close date
+# itself is a date-only value and is printed as written.
+
+from app.services.agents.ticker_report_data_collector import (  # noqa: E402
+    _format_close_date,
+    _format_live_date,
+)
+
+_UTC = timezone.utc
+
+
+@pytest.mark.parametrize("now,expected", [
+    # EDT (until 2026-11-01): 20:31 UTC is 4:31 PM in New York.
+    (datetime(2026, 10, 29, 20, 31, tzinfo=_UTC), "Live Data as of Oct 29, 4:31 PM ET"),
+    # The 8 PM ET / midnight UTC boundary: the UTC clock already reads Oct 30, 12:15 AM.
+    (datetime(2026, 10, 30, 0, 15, tzinfo=_UTC), "Live Data as of Oct 29, 8:15 PM ET"),
+    # The EST side (from 2026-11-01): the offset is five hours, not four.
+    (datetime(2026, 11, 2, 21, 5, tzinfo=_UTC), "Live Data as of Nov 2, 4:05 PM ET"),
+    # ... so the UTC day turns at 7 PM ET.
+    (datetime(2026, 11, 3, 0, 30, tzinfo=_UTC), "Live Data as of Nov 2, 7:30 PM ET"),
+    # Midnight and noon on the 12-hour clock.
+    (datetime(2026, 11, 3, 5, 0, tzinfo=_UTC), "Live Data as of Nov 3, 12:00 AM ET"),
+    (datetime(2026, 11, 3, 17, 0, tzinfo=_UTC), "Live Data as of Nov 3, 12:00 PM ET"),
+    # An aware instant in another zone (Tokyo, already Oct 30) is the same New York moment.
+    (datetime(2026, 10, 30, 9, 15, tzinfo=timezone(timedelta(hours=9))),
+     "Live Data as of Oct 29, 8:15 PM ET"),
+])
+def test_the_live_date_is_new_york_time_labelled_et(now, expected):
+    assert _format_live_date(now) == expected
+
+
+def test_a_naive_generation_time_is_read_as_utc():
+    """The caller passes `datetime.now(timezone.utc)`; a naive value is that same UTC clock,
+    never the server's local zone."""
+    assert _format_live_date(datetime(2026, 10, 30, 0, 15)) == "Live Data as of Oct 29, 8:15 PM ET"
+
+
+def test_the_label_never_hard_codes_est_or_edt():
+    for now in (datetime(2026, 7, 1, 16, 0, tzinfo=_UTC), datetime(2026, 12, 1, 16, 0, tzinfo=_UTC)):
+        text = _format_live_date(now)
+        assert text.endswith(" ET") and "EST" not in text and "EDT" not in text, text
+
+
+def test_the_close_date_is_printed_as_written_at_the_utc_day_boundary():
+    """A date-only close never moves through a zone, even when the generation instant is
+    already the next UTC day."""
+    late = datetime(2026, 10, 30, 0, 15, tzinfo=_UTC)
+    assert _format_close_date("2026-10-28", late) == "As of Oct 28, 2026 close"
+    assert _format_close_date("2026-11-02", datetime(2026, 11, 3, 4, 59, tzinfo=_UTC)) == (
+        "As of Nov 2, 2026 close")
+
+
+@pytest.mark.parametrize("bad", [None, "", "2026-13-45", "not-a-date",
+                                 "2026-10-28T20:00:00Z", 20261028])
+def test_a_missing_or_malformed_close_date_falls_back_to_the_et_live_date(bad):
+    """Including a non-string, which used to raise TypeError out of the section builder."""
+    late = datetime(2026, 10, 30, 0, 15, tzinfo=_UTC)
+    assert _format_close_date(bad, late) == "Live Data as of Oct 29, 8:15 PM ET"
+
+
+def test_the_section_builder_labels_a_report_without_a_close_in_et(monkeypatch):
+    """Through the real `_compute_metrics` → `_build_sections` call site: no usable daily bar
+    → no close date → `meta["live_date"]` is the generation time on New York's clock.
+    Mutation: `_build_sections` formatting the UTC clock again."""
+    from app.services.agents import ticker_report_data_collector as C
+
+    class _EmptyLookup:
+        def get_benchmark_series(self, industry, sector, metrics, period_type):
+            return {m: {} for m in metrics}
+
+        def get_benchmarks(self, industry, sector, metrics, period_type):
+            return {m: {} for m in metrics}
+
+        def get_current_benchmarks(self, industry, sector, metrics):
+            return {}
+
+    monkeypatch.setattr("app.services.sector_benchmark_lookup.get_sector_benchmark_lookup",
+                        lambda: _EmptyLookup())
+    coll = C.TickerReportDataCollector.__new__(C.TickerReportDataCollector)
+    out = C.CollectedTickerData(ticker="XYZ", persona_key="warren_buffett")
+    out.profile = {"companyName": "XYZ Corp", "exchangeShortName": "NYSE",
+                   "sector": "Industrials", "industry": "Conglomerates"}
+    out.quote = {"price": 50.0}
+    out.historical = {"historical": [{"date": "", "close": None}]}   # no usable bar
+    before = datetime.now(_UTC)
+    coll._compute_metrics(out)
+    coll._build_sections(out)
+    after = datetime.now(_UTC)
+    assert out.computed["price_close_date"] is None
+    assert out.meta["live_date"] in {_format_live_date(before), _format_live_date(after)}
+    assert out.meta["live_date"].endswith(" ET")
+
+
+# ── The macro block's "Updated <day>": New York's calendar (owner rule, 2026-10-29) ──────
+
+@pytest.mark.parametrize("now,label", [
+    # EDT: 00:15 UTC on Oct 30 is 8:15 PM on Oct 29 in New York; the UTC date was the 30th.
+    (datetime(2026, 10, 30, 0, 15, tzinfo=_UTC), "Updated Oct 29, 2026"),
+    # EST: the UTC day turns at 7 PM ET.
+    (datetime(2027, 1, 15, 0, 30, tzinfo=_UTC), "Updated Jan 14, 2027"),
+    (datetime(2027, 1, 15, 5, 0, tzinfo=_UTC), "Updated Jan 15, 2027"),
+    # Mid-day: both calendars agree. A naive instant is UTC.
+    (datetime(2026, 10, 29, 15, 0), "Updated Oct 29, 2026"),
+])
+def test_the_macro_updated_day_is_new_yorks(now, label):
+    from app.services.agents.ticker_report_data_collector import _macro_updated_label
+
+    assert _macro_updated_label(now) == label
+
+
+def test_the_macro_block_reads_its_day_through_the_new_york_helper():
+    """`macro_data.last_updated` has one writer and it goes through the helper: a UTC
+    `strftime("Updated …")` beside the report's ET stamps named tomorrow from 8 PM ET."""
+    import inspect
+
+    from app.services.agents import ticker_report_data_collector as coll
+
+    src = inspect.getsource(coll)
+    assert src.count('"last_updated": _macro_updated_label(),') == 1
+    assert src.count('strftime("Updated %b %d, %Y")') == 1, "a second Updated-date writer appeared"

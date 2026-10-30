@@ -47,6 +47,7 @@ import json
 import logging
 import math
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.services.chat_budget_service import (
@@ -198,8 +199,9 @@ async def fetch_ticker_news(ticker: str, is_crypto: bool = False) -> Dict[str, A
         if not headline:
             continue
         item: Dict[str, Any] = {"headline": headline}
-        if row.get("published_at"):
-            item["published_at"] = row["published_at"]
+        published = _news_et_clock(row.get("published_at"))
+        if published is not None:
+            item["published_at"] = published
         if row.get("source_name"):
             item["source"] = row["source_name"]
         # Prefer the already-AI-extracted bullets over the raw blurb: they are the same
@@ -711,11 +713,59 @@ def _hot_tickers(scanner_inputs: Any, session_dates: Optional[Counter] = None) -
     return out
 
 
+def _et_clock(value: Any) -> Optional[str]:
+    """An instant from one of OUR writes (the insight card's `generated_at`,
+    "2026-10-07T21:00:00Z"; a naive one is UTC, as `news_insight_service` reads it) on New
+    York's clock: "2026-10-07 17:00 ET" — the zone every market time in the app is shown in.
+    None when it is missing or cannot be read."""
+    from app.utils.market_hours import ET
+
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    try:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(ET).strftime("%Y-%m-%d %H:%M ET")
+    # OverflowError: a stamp at the edge of the datetime range leaves it once converted.
+    except (OverflowError, ValueError):
+        return None
+
+
+def _news_et_clock(value: Any) -> Optional[str]:
+    """A headline's publication time on New York's clock ("2026-10-29 21:05 ET"), as every
+    market time in the app is shown. The row's `published_at` is an aware instant (the cache
+    and its fallback both write one); a zone-less stamp is FMP's own New York wall clock
+    (`market_hours.to_utc_instant`), never UTC, unlike `_et_clock`'s backend stamps. It used to
+    reach the model as a raw UTC ISO instant, already "tomorrow" from 20:00 ET. None when it is
+    missing or cannot be read: left out, never guessed."""
+    from app.utils.market_hours import ET, to_utc_instant
+
+    instant = to_utc_instant(value)
+    if instant is None:
+        return None
+    try:
+        return instant.astimezone(ET).strftime("%Y-%m-%d %H:%M ET")
+    # OverflowError: a stamp at the edge of the datetime range leaves it once converted.
+    except (OverflowError, ValueError):
+        return None
+
+
 def _card_digest(card: Dict[str, Any]) -> Dict[str, Any]:
     """The Updates screen's AI market card, compacted for a tool result.
 
     This is the "integrate with AI Insights" half: the same headline and bullets the
     user already sees on Updates, so chat and that screen tell one story.
+
+    `as_of` is the card's build time on New York's clock ("2026-10-07 17:00 ET"); it used to
+    be the raw UTC ISO instant, which the model could quote as a bare clock. Only the model
+    reads it (nothing parses it back). An unreadable time is left out, never guessed.
     """
     digest: Dict[str, Any] = {}
     if card.get("headline"):
@@ -724,7 +774,9 @@ def _card_digest(card: Dict[str, Any]) -> Dict[str, Any]:
     bullets = [b for b in bullets if b]
     if bullets:
         digest["points"] = bullets
-    digest["as_of"] = card.get("generated_at")
+    as_of = _et_clock(card.get("generated_at"))
+    if as_of is not None:
+        digest["as_of"] = as_of
     return digest
 
 

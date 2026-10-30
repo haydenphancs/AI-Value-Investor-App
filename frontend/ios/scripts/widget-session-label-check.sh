@@ -276,12 +276,14 @@ check("live → nothing, like agedLabel",
       compact("2026-08-14 15:58", "2026-08-14", "regular", "2026-08-14 15:59"), "<nil>")
 check("exactly 45 min → still nothing (the rule is strictly past it)",
       compact("2026-08-11 10:05", "2026-08-11", "regular", "2026-08-11 10:50"), "<nil>")
-check("46 min → the instant, no ET",
-      compact("2026-08-11 10:05", "2026-08-11", "regular", "2026-08-11 10:51"), "As of 10:05")
+// The time keeps its " ET" (owner, 2026-10-29): a bare "10:05" on the Lock Screen reads as
+// the phone's own clock. Only the AM/PM goes.
+check("46 min → the instant, in ET, no AM/PM",
+      compact("2026-08-11 10:05", "2026-08-11", "regular", "2026-08-11 10:51"), "As of 10:05 ET")
 check("next morning, intraday build → the day and the time",
-      compact("2026-08-11 10:05", "2026-08-11", "regular", "2026-08-12 06:50"), "Tue 10:05")
+      compact("2026-08-11 10:05", "2026-08-11", "regular", "2026-08-12 06:50"), "Tue 10:05 ET")
 check("a 15:54 build is still intraday",
-      compact("2026-08-11 15:54", "2026-08-11", "regular", "2026-08-12 06:50"), "Tue 3:54")
+      compact("2026-08-11 15:54", "2026-08-11", "regular", "2026-08-12 06:50"), "Tue 3:54 ET")
 check("a 15:55 build is the close",
       compact("2026-08-11 15:55", "2026-08-11", "regular", "2026-08-12 06:50"), "Tue close")
 check("after-hours build → the close",
@@ -296,13 +298,13 @@ check("…where the full label still asks for a refresh",
       "Aug 14 — open Caydex")
 // 2026-11-01 is the DST change: the ET wall-clock time of the build must survive it.
 check("across the DST change → the build's ET time",
-      compact("2026-10-30 10:05", "2026-10-30", "regular", "2026-11-02 07:00"), "Fri 10:05")
+      compact("2026-10-30 10:05", "2026-10-30", "regular", "2026-11-02 07:00"), "Fri 10:05 ET")
 check("…and the full label agrees",
       WidgetSessionLabel.agedLabel(asOf: d("2026-10-30 10:05"), sessionDate: "2026-10-30",
         marketSession: "regular", sessionLabel: nil, now: d("2026-11-02 07:00")) ?? "<nil>",
       "Fri 10:05 AM ET")
 check("pre-market build after the bell → the instant",
-      compact("2026-08-11 08:30", "2026-08-11", "premarket", "2026-08-11 15:00"), "As of 8:30")
+      compact("2026-08-11 08:30", "2026-08-11", "premarket", "2026-08-11 15:00"), "As of 8:30 ET")
 check("old backend, closed → the legacy wording, unchanged",
       compact("2026-08-14 21:00", nil, "closed", "2026-08-16 11:00"), "At the close")
 
@@ -337,11 +339,17 @@ for (asOfS, sessionDate, phase) in compactFixtures {
             disagreement = "compact is longer than full at \(probe): \(short) vs \(full)"
             break
         }
+        // A label that prints a time names its zone: a bare "Tue 10:05" reads as local time.
+        if let timed = [full, short].compactMap({ $0 })
+            .first(where: { $0.contains(":") && !$0.hasSuffix(" ET") }) {
+            disagreement = "a time with no ET at \(probe): \(timed)"
+            break
+        }
         probe = probe.addingTimeInterval(13 * 60)
     }
     if disagreement != nil { break }
 }
-expect("compact speaks exactly when the full label does, and is never longer",
+expect("compact speaks exactly when the full label does, is never longer, and names ET",
        disagreement == nil, disagreement ?? "")
 
 // A ROUND-THE-CLOCK headline's cause ages by the ET day it was BUILT. The payload's

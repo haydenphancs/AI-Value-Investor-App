@@ -24,6 +24,18 @@ private enum IndexResponseFormatters {
         df.dateFormat = "yyyy-MM-dd"
         return df.date(from: string)
     }
+
+    /// `generated_date` is a date-only NEW YORK day ("2026-10-29", `index_service`), and the
+    /// Market Snapshots line prints it in New York, so it is parsed there too. Read at the
+    /// phone's midnight (the fallback above), every phone east of New York printed the day before.
+    static func parseNewYorkDay(_ string: String) -> Date? {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.calendar = Calendar(identifier: .gregorian)
+        df.timeZone = TimeZone(identifier: "America/New_York")
+        df.dateFormat = "yyyy-MM-dd"
+        return df.date(from: string)
+    }
 }
 
 // MARK: - Light Refresh Slice
@@ -369,12 +381,18 @@ extension IndexDetailResponse {
         case "after_hours":
             mktStatus = .afterHours
         default:
-            let date = IndexResponseFormatters.parseISO8601(marketStatus.date ?? "") ?? Date()
-            mktStatus = .closed(
-                date: date,
-                time: marketStatus.time ?? "4:00 PM",
-                timezone: marketStatus.timezone ?? "EST"
-            )
+            if let serverClose = IndexResponseFormatters.parseISO8601(marketStatus.date ?? "") {
+                mktStatus = .closed(
+                    date: serverClose,
+                    time: marketStatus.time ?? MarketStatus.closeClock(serverClose),
+                    timezone: marketStatus.timezone ?? "ET"
+                )
+            } else {
+                // No readable close from the server: the last real close with its own bell and
+                // label, never "now" (a Saturday would read "Oct 31, 4:00 PM ET", a close that
+                // never happened) and never "4:00 PM" beside a 1:00 PM half-day.
+                mktStatus = MarketStatus.lastRegularClosed(before: Date())
+            }
         }
 
         // Map key statistics groups
@@ -428,7 +446,8 @@ extension IndexDetailResponse {
             storyTemplate: snapshotsData.macroForecast.storyTemplate
         )
 
-        let genDate = IndexResponseFormatters.parseISO8601(snapshotsData.generatedDate) ?? Date()
+        let genDate = IndexResponseFormatters.parseNewYorkDay(snapshotsData.generatedDate)
+            ?? IndexResponseFormatters.parseISO8601(snapshotsData.generatedDate) ?? Date()
         let snapshotsCombined = IndexSnapshotsData(
             valuation: valuation,
             sectorPerformance: sectorSnapshot,
@@ -479,34 +498,6 @@ extension IndexDetailResponse {
             indexProfile: profile,
             benchmarkSummary: benchmark
         )
-    }
-
-    /// Convert news DTOs to display models.
-    func toNewsArticles() -> [TickerNewsArticle] {
-        newsArticles.map { dto in
-            let sentiment: NewsSentiment
-            switch dto.sentiment.lowercased() {
-            case "positive": sentiment = .positive
-            case "negative": sentiment = .negative
-            default: sentiment = .neutral
-            }
-
-            let publishedDate = IndexResponseFormatters.parseISO8601(dto.publishedAt) ?? Date()
-
-            return TickerNewsArticle(
-                apiId: dto.articleUrl ?? UUID().uuidString,
-                headline: dto.headline,
-                source: NewsSource(name: dto.sourceName, iconName: dto.sourceIcon),
-                sentiment: sentiment,
-                publishedAt: publishedDate,
-                thumbnailName: nil,
-                imageURL: dto.thumbnailUrl.flatMap { URL(string: $0) },
-                relatedTickers: dto.relatedTickers,
-                summaryBullets: dto.summaryBullets,
-                articleURL: dto.articleUrl.flatMap { URL(string: $0) },
-                aiProcessed: !dto.summaryBullets.isEmpty
-            )
-        }
     }
 }
 

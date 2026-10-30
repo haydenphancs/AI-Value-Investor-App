@@ -116,7 +116,14 @@ struct CommodityMarketStatusBadge: View {
             priceChange: "-1.23",
             priceChangePercent: "(-1.54%)",
             isPositive: false,
-            marketStatus: .closed(date: Date(), time: "5:00 PM", timezone: "ET")
+            // A fixed close (Wednesday Oct 28, 2026, 5:00 PM in New York), never `Date()`: a
+            // weekend canvas would show a close that never happened.
+            marketStatus: .closed(
+                date: Calendar(identifier: .gregorian).date(from: DateComponents(
+                    timeZone: TimeZone(identifier: "America/New_York"), year: 2026, month: 10, day: 28, hour: 17))!,
+                time: "5:00 PM",
+                timezone: "ET"
+            )
         )
     }
     .padding(.vertical)

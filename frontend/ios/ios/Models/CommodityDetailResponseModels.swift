@@ -234,51 +234,6 @@ struct CommodityNewsArticleDTO: Decodable {
         summaryBullets = try c.decodeIfPresent([String].self, forKey: .summaryBullets) ?? []
         articleUrl = try c.decodeIfPresent(String.self, forKey: .articleUrl)
     }
-
-    func toModel() -> TickerNewsArticle {
-        let date: Date
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let parsed = formatter.date(from: publishedAt) {
-            date = parsed
-        } else {
-            formatter.formatOptions = [.withInternetDateTime]
-            if let parsed = formatter.date(from: publishedAt) {
-                date = parsed
-            } else {
-                let simple = DateFormatter()
-                simple.dateFormat = "yyyy-MM-dd HH:mm:ss"
-                simple.locale = Locale(identifier: "en_US_POSIX")
-                date = simple.date(from: publishedAt) ?? Date()
-            }
-        }
-
-        let newsSource = NewsSource(name: sourceName, iconName: nil)
-
-        let newsSentiment: NewsSentiment
-        switch sentiment.lowercased() {
-        case "positive", "bullish":
-            newsSentiment = .positive
-        case "negative", "bearish":
-            newsSentiment = .negative
-        default:
-            newsSentiment = .neutral
-        }
-
-        return TickerNewsArticle(
-            apiId: articleUrl ?? UUID().uuidString,
-            headline: headline,
-            source: newsSource,
-            sentiment: newsSentiment,
-            publishedAt: date,
-            thumbnailName: nil,
-            imageURL: thumbnailUrl.flatMap { URL(string: $0) },
-            relatedTickers: relatedTickers,
-            summaryBullets: summaryBullets,
-            articleURL: articleUrl.flatMap { URL(string: $0) },
-            aiProcessed: !summaryBullets.isEmpty
-        )
-    }
 }
 
 // MARK: - CommodityDetailResponseDTO → CommodityDetailData Mapping
@@ -318,10 +273,6 @@ extension CommodityDetailResponseDTO {
             relatedCommodities: relatedCommodities?.map { $0.toModel() } ?? [],
             benchmarkSummary: benchmarkSummary?.toModel()
         )
-    }
-
-    func toNewsArticles() -> [TickerNewsArticle] {
-        newsArticles.map { $0.toModel() }
     }
 }
 

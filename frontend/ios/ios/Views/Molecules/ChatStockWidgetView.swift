@@ -125,7 +125,10 @@ struct ChatStockWidgetView: View {
            let date = Self.isoDayFormatter.date(from: last) {
             return Self.asOfFormatter.string(from: date)
         }
-        if let messageDate { return Self.asOfFormatter.string(from: messageDate) }
+        // An INSTANT, not a trading day: when the numbers were read, in New York time and saying
+        // so. Its bare ET date was printed with no zone, a different day from the reader's own
+        // for anyone far enough east or west of New York.
+        if let messageDate { return Self.asOfInstantFormatter.string(from: messageDate) + " ET" }
         return nil
     }
 
@@ -369,6 +372,17 @@ struct ChatStockWidgetView: View {
         f.calendar = Calendar(identifier: .gregorian)
         f.timeZone = marketTimeZone
         f.setLocalizedDateFormatFromTemplate("MMM d, yyyy")
+        return f
+    }()
+
+    /// The message-instant fallback: its New York date AND clock, on the reader's 12/24-hour
+    /// setting (a template, never a fixed `h:mm a`). The caller appends " ET" — never an
+    /// abbreviation that would say EST while New York is on EDT.
+    private static let asOfInstantFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.timeZone = marketTimeZone
+        f.setLocalizedDateFormatFromTemplate("MMMdyyyyjmm")
         return f
     }()
 

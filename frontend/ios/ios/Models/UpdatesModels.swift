@@ -617,10 +617,11 @@ struct EnrichUpdatesNewsResponse: Codable, Sendable {
 
 enum UpdatesDateParser {
     /// The backend returns two shapes: true ISO-8601 (`2026-07-20T17:26:41Z`)
-    /// from our own timestamps, and FMP's space-separated
-    /// `2026-07-20 17:26:41`. Both are UTC. Returning nil for an unparseable
-    /// value lets the caller drop the article rather than stamping it "now" and
-    /// floating stale news to the top of the TODAY section.
+    /// from our own timestamps, and FMP's space-separated `2026-07-20 13:26:41`,
+    /// which is New York wall-clock time (the backend's `market_hours.to_utc_instant`,
+    /// verified live; read here as UTC it was 4-5 hours off). Returning nil for an
+    /// unparseable value lets the caller drop the article rather than stamping it
+    /// "now" and floating stale news to the top of the TODAY section.
     static func parse(_ raw: String?) -> Date? {
         guard let raw, !raw.isEmpty else { return nil }
         if let d = isoWithFraction.date(from: raw) { return d }
@@ -645,8 +646,9 @@ enum UpdatesDateParser {
         f.dateFormat = "yyyy-MM-dd HH:mm:ss"
         // Fixed locale/timezone: without these the parse follows the DEVICE's
         // calendar and zone, so the same payload yields different dates abroad.
+        // New York: FMP's own zone, as every news parser in the app reads it.
         f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
+        f.timeZone = TimeZone(identifier: "America/New_York")
         return f
     }()
 }

@@ -120,15 +120,20 @@ class ProfileViewModel: BaseViewModel {
         return "Renews on \(CreditRenewalDate.short(date))"
     }
 
-    /// `"MMM yyyy"` for "Member since". Same locale reasoning as `CreditRenewalDate`, except the
-    /// anchor is UTC: `users.created_at` is a plain timestamptz with no business timezone
-    /// attached. Without the locale a Japanese-calendar device renders the ERA year — "Member
-    /// since 8月 8" rather than "Member since Aug 2026".
+    /// `"MMM yyyy"` for "Member since". Same locale reasoning as `CreditRenewalDate`: without
+    /// the locale a Japanese-calendar device renders the ERA year — "Member since 8月 8" rather
+    /// than "Member since Aug 2026".
+    ///
+    /// The zone is the PHONE's (owner, 2026-10-29: the user's own events are local time).
+    /// `users.created_at` is an instant, the moment this user signed up, so its month is the
+    /// month on their clock. UTC put an account opened on the evening of March 31 in a US zone
+    /// in April. `.autoupdatingCurrent`, not `.current`: this formatter is built once per
+    /// launch, and it must follow the phone into a new zone.
     private static let memberSinceFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.calendar = Calendar(identifier: .gregorian)
-        f.timeZone = TimeZone(identifier: "UTC")
+        f.timeZone = .autoupdatingCurrent
         f.dateFormat = "MMM yyyy"
         return f
     }()

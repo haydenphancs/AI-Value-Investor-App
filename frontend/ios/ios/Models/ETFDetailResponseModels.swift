@@ -23,13 +23,13 @@ private enum ETFResponseFormatters {
         if let d = fmt.date(from: string) { return d }
         fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         if let d = fmt.date(from: string) { return d }
-        // FMP publishedDate is space-separated with no timezone ("2024-01-15 09:30:00").
-        // The ISO8601 parsers above require a 'T' + offset and fail on it, so EVERY ETF
-        // news article fell back to Date() and rendered as "just now" (and mis-sorted).
-        // Treat the naive timestamp as UTC (matches TickerDetailViewModel.parseDate).
+        // FMP's space-separated, zone-less stamp ("2024-01-15 09:30:00") fails the ISO8601
+        // parsers above (they need a 'T' and an offset). It is New York wall-clock time (the
+        // backend's `market_hours.to_utc_instant`, verified live), as every news parser reads
+        // it (`TickerDetailViewModel.parseDate`).
         let dt = DateFormatter()
         dt.locale = Locale(identifier: "en_US_POSIX")
-        dt.timeZone = TimeZone(identifier: "UTC")
+        dt.timeZone = TimeZone(identifier: "America/New_York")
         dt.dateFormat = "yyyy-MM-dd HH:mm:ss"
         if let d = dt.date(from: string) { return d }
         let df = DateFormatter()
@@ -482,12 +482,17 @@ extension ETFDetailResponseDTO {
         case "after_hours":
             mktStatus = .afterHours
         default:
-            let date = ETFResponseFormatters.parseISO8601(marketStatus.date ?? "") ?? Date()
-            mktStatus = .closed(
-                date: date,
-                time: marketStatus.time ?? "4:00 PM",
-                timezone: marketStatus.timezone ?? "EST"
-            )
+            if let serverClose = ETFResponseFormatters.parseISO8601(marketStatus.date ?? "") {
+                mktStatus = .closed(
+                    date: serverClose,
+                    time: marketStatus.time ?? MarketStatus.closeClock(serverClose),
+                    timezone: marketStatus.timezone ?? "ET"
+                )
+            } else {
+                // No readable close from the server: the last real close with its own bell and
+                // label, never "now" (and never "4:00 PM" beside a 1:00 PM half-day).
+                mktStatus = MarketStatus.lastRegularClosed(before: Date())
+            }
         }
 
         // Map flat key statistics
@@ -645,34 +650,6 @@ extension ETFDetailResponseDTO {
             relatedETFs: related,
             benchmarkSummary: benchmark
         )
-    }
-
-    /// Convert news DTOs to display models.
-    func toNewsArticles() -> [TickerNewsArticle] {
-        newsArticles.map { dto in
-            let sentiment: NewsSentiment
-            switch dto.sentiment.lowercased() {
-            case "positive": sentiment = .positive
-            case "negative": sentiment = .negative
-            default: sentiment = .neutral
-            }
-
-            let publishedDate = ETFResponseFormatters.parseISO8601(dto.publishedAt) ?? Date()
-
-            return TickerNewsArticle(
-                apiId: dto.articleUrl ?? UUID().uuidString,
-                headline: dto.headline,
-                source: NewsSource(name: dto.sourceName, iconName: dto.sourceIcon),
-                sentiment: sentiment,
-                publishedAt: publishedDate,
-                thumbnailName: nil,
-                imageURL: dto.thumbnailUrl.flatMap { URL(string: $0) },
-                relatedTickers: dto.relatedTickers,
-                summaryBullets: dto.summaryBullets,
-                articleURL: dto.articleUrl.flatMap { URL(string: $0) },
-                aiProcessed: !dto.summaryBullets.isEmpty
-            )
-        }
     }
 }
 

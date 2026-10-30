@@ -922,11 +922,15 @@ class ETFDetailViewModel: ObservableObject {
         if let d = iso.date(from: dateString) { return d }
         iso.formatOptions = [.withInternetDateTime]
         if let d = iso.date(from: dateString) { return d }
+        // FMP's zone-less "yyyy-MM-dd HH:mm:ss" is New York wall-clock time (the backend's
+        // `market_hours.to_utc_instant`, verified live). Read as UTC it was 4-5 hours off.
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
+        f.timeZone = TimeZone(identifier: "America/New_York")
         f.dateFormat = "yyyy-MM-dd HH:mm:ss"
         if let d = f.date(from: dateString) { return d }
+        // A bare day: the phone's own midnight, the zone `TickerNewsArticle.timeAgo` prints in.
+        f.timeZone = TimeZone.current
         f.dateFormat = "yyyy-MM-dd"
         return f.date(from: dateString)
     }

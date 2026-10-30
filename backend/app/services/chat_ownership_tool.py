@@ -61,6 +61,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.services._insider_common import insider_window_cutoff, plain_transaction_phrase
 from app.services.asset_class import detect_asset_class
+from app.utils.market_hours import ET
 
 logger = logging.getLogger(__name__)
 
@@ -481,17 +482,20 @@ def _insider_activity_block(resp: Any, *, note: Optional[str] = None) -> Dict[st
         prev = bars.get(key, (0.0, 0.0))
         bars[key] = (prev[0] + max(buy, 0.0), prev[1] + max(sell, 0.0))
     built = _built_day(resp)
-    if built is not None:
-        anchor = (built.year, built.month)
+    # The read's NEW YORK day, as `read_at` / `filings_checked_at` state its clock: the 3- and
+    # 6-month windows end on New York's month. On the UTC month a read from 20:00 ET on a
+    # month's last day already counted the next, empty month and dropped the oldest one.
+    built_et = _in_new_york(built)
+    if built_et is not None:
+        anchor = (built_et.year, built_et.month)
     elif bars:
         anchor = max(bars)
     else:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(ET)
         anchor = (now.year, now.month)
     block: Dict[str, Any] = {"available": True, "basis": _ACTIVITY_BASIS}
     if note:
-        block["read_at"] = (built.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-                            if built is not None else "unknown")
+        block["read_at"] = _et_stamp(built)
         block["note"] = note
     for count in (3, 6):
         months = _months_ending(anchor, count)
@@ -514,10 +518,13 @@ def _insider_activity_block(resp: Any, *, note: Optional[str] = None) -> Dict[st
     sold_sh = (_finite(getattr(summary, "informative_sells_in_millions", None)) or 0.0) * 1e6
     bought_usd = _finite(getattr(card, "total_buy_usd_millions", None))
     sold_usd = _finite(getattr(card, "total_sell_usd_millions", None))
+    # The same New York day (`built_et`, above): the UTC date was already tomorrow from 20:00 ET
+    # ("2026-10-29 21:00 ET … to 2026-10-30").
     span = "last 12 months (trailing 365 days" + (
-        f" to {built.date().isoformat()})" if built is not None else ")")
+        f" to {built_et.date().isoformat()})" if built_et is not None else ")")
     # The card sums priced trades only (`holders_service`: a trade with no price adds 0);
-    # the trades it left out are counted over the card's own window, as the 3/6 lines do.
+    # the trades it left out are counted over the card's own window, as the 3/6 lines do: the
+    # UTC read time, as `holders_service` took the card's cutoff at build (never New York's day).
     cutoff = insider_window_cutoff(built)
     block["last_12_months"] = _window_text(
         span, max(bought_sh, 0.0), max(sold_sh, 0.0),
@@ -899,8 +906,16 @@ def _fit(result: Dict[str, Any], budget: int) -> Dict[str, Any]:
     return result
 
 
+# No real build is older than this: an earlier `built_at` is a corrupt stamp. Read as a time,
+# one near the start of the datetime range ("0001-…") overflowed the 365-day step back of the
+# insider window and raised out of the tool, and showed the model a year-1 "read time".
+_EARLIEST_PLAUSIBLE_READ = datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+
 def _built_at(detail: Any) -> Optional[datetime]:
-    """When `detail` (an `OwnershipDetailSchema`) read the filings; None when unstamped."""
+    """When `detail` (an `OwnershipDetailSchema`) read the filings; None when unstamped,
+    unreadable or implausible (before `_EARLIEST_PLAUSIBLE_READ`), so every reader treats a
+    corrupt stamp as no stamp: no clock, no end date, windows from now."""
     raw = getattr(detail, "built_at", None) if detail is not None else None
     if not isinstance(raw, str):
         return None
@@ -908,7 +923,31 @@ def _built_at(detail: Any) -> Optional[datetime]:
         when = datetime.fromisoformat(raw)
     except ValueError:
         return None
-    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+    when = when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+    return when if when >= _EARLIEST_PLAUSIBLE_READ else None
+
+
+def _in_new_york(when: Optional[datetime]) -> Optional[datetime]:
+    """`when` (a `_built_at` read; naive = UTC) on New York's clock, or None when unstamped or
+    out of range."""
+    if when is None:
+        return None
+    try:
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return when.astimezone(ET)
+    # OverflowError: a stamp at the edge of the datetime range ("0001-01-01T00:00:00+00:00")
+    # leaves it once moved into New York.
+    except (OverflowError, ValueError):
+        return None
+
+
+def _et_stamp(when: Optional[datetime]) -> str:
+    """When the filings were read, as the model may quote it: "2026-10-02 04:00 ET" — New
+    York, the zone every market time in the app is shown in (it used to read
+    "2026-10-02 08:00 UTC"). "unknown" when unstamped or out of range."""
+    local = _in_new_york(when)
+    return local.strftime("%Y-%m-%d %H:%M ET") if local is not None else "unknown"
 
 
 def _age_seconds(when: datetime) -> float:
@@ -1251,8 +1290,7 @@ async def fetch_ownership(ticker: str, user_tier: Optional[str] = None) -> Dict[
     result: Dict[str, Any] = {
         "ticker": sym,
         "resolved_as": _resolved_as(sym),
-        "filings_checked_at": (built.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-                               if built else "unknown"),
+        "filings_checked_at": _et_stamp(built),
         "insiders": insiders,
         "insider_activity": _insider_activity_block(activity_source, note=activity_note),
         "institutions": _institutions_block(resp, degraded),

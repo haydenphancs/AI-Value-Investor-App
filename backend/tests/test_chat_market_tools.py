@@ -17,6 +17,7 @@ than decorative:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -488,6 +489,44 @@ async def test_an_unreadable_move_without_a_crash_carries_no_error(monkeypatch):
     assert out["move_readable"] is False and "error" not in out
 
 
+@pytest.mark.parametrize("published_at,expected", [
+    # The cache's own form (timestamptz read back, or `_sanitize_published_at`): 01:05 UTC is
+    # 9:05 PM EDT the day before. The raw instant read as "Oct 30" — tomorrow in New York.
+    ("2026-10-30T01:05:00+00:00", "2026-10-29 21:05 ET"),
+    ("2026-10-30T01:05:00Z", "2026-10-29 21:05 ET"),
+    # The EST side (from 2026-11-01): the UTC day turns at 7 PM ET.
+    ("2026-11-03T00:30:00+00:00", "2026-11-02 19:30 ET"),
+    # A zone-less stamp is FMP's own New York wall clock (`to_utc_instant`), NEVER UTC: the
+    # degraded fallback sent this shape before it was normalised.
+    ("2026-10-29 21:05:00", "2026-10-29 21:05 ET"),
+])
+@pytest.mark.asyncio
+async def test_a_headline_is_dated_on_new_yorks_clock(monkeypatch, published_at, expected):
+    """Through the real `fetch_ticker_news`: the model reads each headline's time as the app
+    shows market times ("… ET"), never a raw UTC instant or a bare clock."""
+    class _NC:
+        async def get_ticker_news(self, *a, **k):
+            return {"articles": [{"headline": "Apple beats estimates", "published_at": published_at,
+                                  "source_name": "Reuters"}]}
+    monkeypatch.setattr("app.services.news_cache_service.get_news_cache_service", lambda: _NC())
+    out = await cmt.fetch_ticker_news("AAPL")
+    assert out["articles"][0]["published_at"] == expected
+    assert out["articles"][0]["headline"] == "Apple beats estimates"
+
+
+@pytest.mark.parametrize("published_at", [None, "", "yesterday", "2026-13-45T10:00:00Z", 12345,
+                                          "0001-01-01T00:00:00Z", "9999-12-31T23:59:00-12:00"])
+@pytest.mark.asyncio
+async def test_an_unreadable_headline_time_is_left_out_never_guessed(monkeypatch, published_at):
+    class _NC:
+        async def get_ticker_news(self, *a, **k):
+            return {"articles": [{"headline": "Apple beats estimates", "published_at": published_at}]}
+    monkeypatch.setattr("app.services.news_cache_service.get_news_cache_service", lambda: _NC())
+    out = await cmt.fetch_ticker_news("AAPL")
+    assert out["articles"][0]["headline"] == "Apple beats estimates"
+    assert "published_at" not in out["articles"][0]
+
+
 @pytest.mark.asyncio
 async def test_a_news_feed_crash_is_an_error_result(monkeypatch):
     class _NC:
@@ -839,3 +878,60 @@ def test_the_market_tools_hold_no_grounded_tier():
     for name in ("price_catalyst_service", "get_catalyst", "_maybe_web_catalyst",
                  "_claim_web_search", "CHAT_WEB_SEARCH_"):
         assert name not in code_only, name
+
+
+# ── The market card's "as of" is New York's clock (owner rule, 2026-10-29) ─────────────
+#
+# `market_story.as_of` was the card's raw UTC ISO instant ("2026-10-07T21:00:00Z"), which the
+# model could quote as a bare clock. Nothing parses it back (only the model reads it), so it
+# is now New York time labelled ET, like every market time in the app.
+
+@pytest.mark.parametrize("generated_at,expected", [
+    # The card writer's own form; 21:00 UTC is 5:00 PM EDT.
+    ("2026-10-07T21:00:00Z", "2026-10-07 17:00 ET"),
+    # The 8 PM ET / midnight UTC boundary: the UTC calendar is already the next day.
+    ("2026-10-30T00:30:00Z", "2026-10-29 20:30 ET"),
+    ("2026-10-30T00:30:00+00:00", "2026-10-29 20:30 ET"),
+    # The EST side (from 2026-11-01): the UTC day turns at 7 PM ET.
+    ("2026-11-03T00:30:00Z", "2026-11-02 19:30 ET"),
+    # A naive stamp is UTC, as `news_insight_service` reads its own rows.
+    ("2026-11-03T00:30:00", "2026-11-02 19:30 ET"),
+    # An aware datetime (not a string) is converted too.
+    (datetime(2026, 10, 30, 0, 30, tzinfo=timezone.utc), "2026-10-29 20:30 ET"),
+])
+def test_the_card_digest_dates_the_story_in_new_york(generated_at, expected):
+    digest = cmt._card_digest({"headline": "Stocks rose", "bullets": ["one", "two"],
+                               "generated_at": generated_at})
+    assert digest["as_of"] == expected
+    assert digest["headline"] == "Stocks rose" and digest["points"] == ["one", "two"]
+
+
+@pytest.mark.parametrize("generated_at", [None, "", "   ", "yesterday", "2026-13-45T10:00:00Z",
+                                          12345, ["2026-10-07T21:00:00Z"],
+                                          "0001-01-01T00:00:00Z"])
+def test_an_unreadable_card_time_is_left_out_never_guessed(generated_at):
+    card = {"headline": "Stocks rose", "bullets": ["one"]}
+    if generated_at is not None:
+        card["generated_at"] = generated_at
+    digest = cmt._card_digest(card)
+    assert "as_of" not in digest
+    assert digest["headline"] == "Stocks rose"
+
+
+@pytest.mark.asyncio
+async def test_the_snapshot_tool_carries_the_et_card_time(monkeypatch):
+    """Through the real `fetch_market_snapshot`: the card leg's time reaches the model as
+    New York time, not the stored UTC instant."""
+    monkeypatch.setattr(
+        "app.services.market_movers_service.get_market_movers_service",
+        lambda: _snapshot_movers(sector_date="2026-10-29", industry_date="2026-10-29"),
+    )
+    card = {"headline": "Stocks rose", "bullets": ["one", "two"],
+            "generated_at": "2026-10-30T01:00:00Z"}
+    monkeypatch.setattr(
+        "app.services.news_insight_service.get_news_insight_service",
+        lambda: SimpleNamespace(get_cards=AsyncMock(return_value={"__MARKET__": card})),
+    )
+    out = await cmt.fetch_market_snapshot()
+    assert out["market_story"]["as_of"] == "2026-10-29 21:00 ET"
+    assert "2026-10-30T01:00:00Z" not in str(out)

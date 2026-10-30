@@ -59,7 +59,8 @@ async def test_a_full_read_states_supply_valuation_rank_and_the_credited_index(m
     assert out["circulating_supply"] == "19.85M BTC"
     assert out["max_supply"] == "21.00M BTC"
     assert out["fully_diluted_valuation"] == "USD 1.60T"
-    assert out["fully_diluted_valuation_as_of"] == "2026-10-08 14:03 UTC"
+    # New York time, labelled ET (owner rule, 2026-10-29): 14:03 UTC is 10:03 EDT.
+    assert out["fully_diluted_valuation_as_of"] == "2026-10-08 10:03 ET"
     assert out["market_cap_rank"] == 1
     fg = out["crypto_fear_greed"]
     assert fg["value"] == 62 and fg["classification"] == "Greed"
@@ -184,3 +185,59 @@ def test_the_method_reads_only_the_coin_fundamentals():
               if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
               and isinstance(n.func.value, ast.Name) and n.func.value.id == "self"}
     assert called == {"_get_coin_fundamentals"}, called
+
+
+# ── The FDV "as of" is New York's clock (owner rule, 2026-10-29) ─────────────────────
+#
+# CoinGecko's `last_updated` is an instant in UTC. The tool used to slice the UTC clock out
+# of the string and append " UTC" (also mislabelling any other offset as UTC); Ask Cay AI
+# quotes it, and every market time in the app is New York time.
+
+@pytest.mark.parametrize("stamp,expected", [
+    # The 8 PM ET / midnight UTC boundary: the UTC clock already reads Oct 30.
+    ("2026-10-30T00:30:00.000Z", "2026-10-29 20:30 ET"),
+    # The EST side (from 2026-11-01): five hours, so the UTC day turns at 7 PM ET.
+    ("2026-11-03T00:30:00Z", "2026-11-02 19:30 ET"),
+    ("2026-11-03T05:00:00Z", "2026-11-03 00:00 ET"),
+    # Another offset is converted, never labelled "UTC" as written.
+    ("2026-10-08T19:33:11+05:30", "2026-10-08 10:03 ET"),
+    # A naive stamp is CoinGecko's UTC (not FMP's New York wall clock).
+    ("2026-10-08T14:03:11", "2026-10-08 10:03 ET"),
+    ("  2026-10-08T14:03:11Z  ", "2026-10-08 10:03 ET"),
+])
+def test_the_fdv_stamp_is_new_york_time(stamp, expected):
+    from app.services.crypto_service import _coingecko_stamp_et
+
+    assert _coingecko_stamp_et(stamp) == expected
+
+
+@pytest.mark.parametrize("stamp", [
+    None, "", "   ", 1791331200, True,
+    "2026-10-08",                 # a date-only value has no clock to convert
+    "2026-10-08 UTC",
+    "not-a-timestamp-at-all",
+    "2026-13-45T10:00:00Z",
+    "0001-01-01T00:00:00Z",       # overflows once moved into New York
+    "9999-12-31T23:59:59-05:00",  # overflows on the way to UTC
+])
+def test_an_unreadable_fdv_stamp_is_omitted_never_guessed(stamp):
+    from app.services.crypto_service import _coingecko_stamp_et
+
+    assert _coingecko_stamp_et(stamp) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stamp", ["2026-10-08", "garbage", None, 12345])
+async def test_the_valuation_stays_when_its_stamp_cannot_be_read(monkeypatch, stamp):
+    svc, _ = _svc(monkeypatch, _btc(last_updated=stamp))
+    out = await svc.get_coin_facts("BTC")
+    assert out["fully_diluted_valuation"] == "USD 1.60T"
+    assert "fully_diluted_valuation_as_of" not in out
+    assert "UTC" not in json.dumps(out)
+
+
+@pytest.mark.asyncio
+async def test_the_fdv_stamp_at_the_et_day_boundary_through_the_tool(monkeypatch):
+    svc, _ = _svc(monkeypatch, _btc(last_updated="2026-10-30T01:00:00.000Z"))
+    out = await svc.get_coin_facts("BTCUSD")
+    assert out["fully_diluted_valuation_as_of"] == "2026-10-29 21:00 ET"

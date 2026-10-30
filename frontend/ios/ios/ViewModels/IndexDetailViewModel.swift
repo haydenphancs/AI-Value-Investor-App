@@ -1036,10 +1036,10 @@ class IndexDetailViewModel: ObservableObject {
         let fallback = DateFormatter()
         fallback.dateFormat = "yyyy-MM-dd HH:mm:ss"
         fallback.locale = Locale(identifier: "en_US_POSIX")
-        // UTC, not device-local: FMP's space-form timestamp is UTC. Omitting this
-        // parsed it in the device zone, so the same shared row showed a time
-        // shifted by the device's offset here vs Updates / the other detail tabs.
-        fallback.timeZone = TimeZone(identifier: "UTC")
+        // New York, never UTC or the device zone: FMP's space-form timestamp is New York
+        // wall-clock time (the backend's `market_hours.to_utc_instant`, verified live), and
+        // every news parser reads it so, so one shared row shows one time on every screen.
+        fallback.timeZone = TimeZone(identifier: "America/New_York")
         return fallback.date(from: dateString)
     }
 

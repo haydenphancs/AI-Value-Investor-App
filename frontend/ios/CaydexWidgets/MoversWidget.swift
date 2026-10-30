@@ -1411,7 +1411,7 @@ private struct InlineMarket: View {
 /// worth showing without its percentage: `change_percent` is legitimately null at times.
 ///
 /// ⚠️ WHILE AGED, EVERY CANDIDATE CARRIES THE AGE: "AAPL +2.10% · Tue 10:05 AM ET", then
-/// "… · Tue 10:05", then "AAPL · Tue 10:05", then the age alone. The old fallback was the
+/// "… · Tue 10:05 ET", then "AAPL · Tue 10:05 ET", then the age alone. The old fallback was the
 /// bare "AAPL +2.10%" — a week-old number shown as today's whenever the full line was too
 /// wide, which "· Sep 23 — open Caydex" always is.
 private struct InlineHoldings: View {

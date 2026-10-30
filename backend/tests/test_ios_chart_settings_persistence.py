@@ -519,7 +519,10 @@ def test_week_axis_hour_follows_the_users_clock_setting():
     assert "dateFormat =" not in fmt, "a fixed pattern is rewritten under 24-Hour Time"
     assert 'DateFormatter.dateFormat(fromTemplate: "j", options: 0, locale: f.locale)' in fmt
     assert 'f.setLocalizedDateFormatFromTemplate(hourPattern.contains("a") ? "EEEj" : "EEEjmm")' in fmt
-    # Anti-vacuity: the 1W intraday arm actually uses this formatter.
-    arm = _block(models, "func formatDateForXAxis(")
-    week = arm[arm.index("case .oneWeek:"): arm.index("case .threeMonths")]
-    assert "ChartDateFormatters.weekdayTime.string(from: date)" in week
+    # Anti-vacuity: the live axis (`ChartXAxisLabels.format`) picks this formatter for a week of
+    # intraday bars. (`ChartTimeRange.formatDateForXAxis`, this anchor's old home, had no caller
+    # and was deleted on 2026-10-29.)
+    axis = _code(_IOS / "Views" / "Molecules" / "Chart" / "ChartXAxisLabels.swift")
+    pick = _block(axis, "private static func format(first: String, last: String) -> DateFormatter")
+    week = pick[pick.index("case ..<12:"): pick.index("case ..<300:")]
+    assert "return ChartDateFormatters.weekdayTime" in week

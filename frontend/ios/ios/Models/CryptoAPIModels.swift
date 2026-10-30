@@ -260,54 +260,6 @@ struct CryptoNewsArticleDTO: Codable {
         summaryBullets = try c.decodeIfPresent([String].self, forKey: .summaryBullets) ?? []
         articleUrl = try c.decodeIfPresent(String.self, forKey: .articleUrl)
     }
-
-    func toModel() -> TickerNewsArticle {
-        // Parse the ISO date string
-        let date: Date
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let parsed = formatter.date(from: publishedAt) {
-            date = parsed
-        } else {
-            // Try without fractional seconds
-            formatter.formatOptions = [.withInternetDateTime]
-            if let parsed = formatter.date(from: publishedAt) {
-                date = parsed
-            } else {
-                // Try a simpler format "2024-01-15 10:30:00"
-                let simple = DateFormatter()
-                simple.dateFormat = "yyyy-MM-dd HH:mm:ss"
-                simple.locale = Locale(identifier: "en_US_POSIX")
-                date = simple.date(from: publishedAt) ?? Date()
-            }
-        }
-
-        let newsSource = NewsSource(name: sourceName, iconName: nil)
-
-        let newsSentiment: NewsSentiment
-        switch sentiment.lowercased() {
-        case "positive", "bullish":
-            newsSentiment = .positive
-        case "negative", "bearish":
-            newsSentiment = .negative
-        default:
-            newsSentiment = .neutral
-        }
-
-        return TickerNewsArticle(
-            apiId: articleUrl ?? UUID().uuidString,
-            headline: headline,
-            source: newsSource,
-            sentiment: newsSentiment,
-            publishedAt: date,
-            thumbnailName: nil,
-            imageURL: thumbnailUrl.flatMap { URL(string: $0) },
-            relatedTickers: relatedTickers,
-            summaryBullets: summaryBullets,
-            articleURL: articleUrl.flatMap { URL(string: $0) },
-            aiProcessed: !summaryBullets.isEmpty
-        )
-    }
 }
 
 // MARK: - CryptoDetailResponse → CryptoDetailData Mapping

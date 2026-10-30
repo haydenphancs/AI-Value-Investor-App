@@ -680,12 +680,45 @@ def _fresh_probe_clock(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_r3_the_tool_states_when_the_filings_were_read(monkeypatch):
+    # New York time, labelled ET (owner rule, 2026-10-29): 08:00 UTC is 04:00 EDT. It read
+    # "2026-10-02 08:00 UTC" before.
     fake = _Fresh(_stamped(_PRE_SALE, built_at="2026-10-02T08:00:00+00:00"))
     monkeypatch.setattr(hs, "get_holders_service", lambda: fake)
     out = await cot.fetch_ownership("CRWV")
-    assert out["filings_checked_at"] == "2026-10-02 08:00 UTC"
+    assert out["filings_checked_at"] == "2026-10-02 04:00 ET"
     assert "filings_checked_at" in out["how_to_read"]
     assert "filed after it is not included" in out["how_to_read"]
+
+
+@pytest.mark.parametrize("built_at,expected", [
+    # The 8 PM ET / midnight UTC boundary: the UTC clock already says Oct 30.
+    ("2026-10-30T00:30:00+00:00", "2026-10-29 20:30 ET"),
+    # The EST side (from 2026-11-01): five hours, not four — the UTC day turns at 7 PM ET.
+    ("2026-11-03T00:30:00+00:00", "2026-11-02 19:30 ET"),
+    ("2026-11-03T05:00:00+00:00", "2026-11-03 00:00 ET"),
+    # A stamp written with another offset is the same instant.
+    ("2026-10-30T09:30:00+09:00", "2026-10-29 20:30 ET"),
+    # A naive stamp is UTC (`_built_at`).
+    ("2026-10-30T00:30:00", "2026-10-29 20:30 ET"),
+])
+def test_the_filings_stamp_is_new_york_time(built_at, expected):
+    assert cot._et_stamp(cot._built_at(OwnershipDetailSchema(built_at=built_at))) == expected
+
+
+@pytest.mark.parametrize("built_at", [None, "", "not-a-time", "2026-13-45T10:00:00+00:00",
+                                      "0001-01-01T00:00:00+00:00"])
+def test_an_unreadable_filings_stamp_is_unknown_never_a_guess(built_at):
+    """Missing, malformed, or at the edge of the datetime range (it overflows once moved
+    into New York) → "unknown", never a crash and never a UTC clock."""
+    assert cot._et_stamp(cot._built_at(OwnershipDetailSchema(built_at=built_at))) == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_an_unstamped_build_says_unknown(monkeypatch):
+    fake = _Fresh(_stamped(_PRE_SALE, built_at=None))
+    monkeypatch.setattr(hs, "get_holders_service", lambda: fake)
+    out = await cot.fetch_ownership("CRWV")
+    assert out["filings_checked_at"] == "unknown"
 
 
 @pytest.mark.asyncio

@@ -2885,6 +2885,10 @@ class NewsCacheService:
             raw_articles = await self.fmp.get_stock_news(ticker, limit=limit)
             articles = []
             for i, raw in enumerate(raw_articles[:limit]):
+                if not isinstance(raw, dict):
+                    # One malformed row must not cost the whole degraded feed (as on the
+                    # read-only Market page).
+                    continue
                 articles.append({
                     "id": f"raw_{i}",
                     "headline": raw.get("title", ""),
@@ -2894,7 +2898,11 @@ class NewsCacheService:
                     "sentiment_confidence": 0,
                     "source_name": raw.get("publisher") or raw.get("site", ""),
                     "source_logo_url": None,
-                    "published_at": raw.get("publishedDate"),
+                    # FMP's `publishedDate` is a ZONE-LESS New York wall clock. Passed through
+                    # raw, iOS read it as UTC and put every story 4-5 hours in the past; the
+                    # cached paths write the true UTC instant, and so does this one now (an
+                    # unreadable value becomes None).
+                    "published_at": _sanitize_published_at(raw.get("publishedDate")),
                     "thumbnail_url": raw.get("image"),
                     "article_url": raw.get("url"),
                     "related_tickers": self._parse_tickers(raw, ticker),

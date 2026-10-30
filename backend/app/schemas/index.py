@@ -46,9 +46,11 @@ class BenchmarkSummaryResponse(BaseModel):
 
 class MarketStatusResponse(BaseModel):
     status: str  # "open", "closed", "pre_market", "after_hours"
-    date: Optional[str] = None  # "Feb 14, 2026"
-    time: Optional[str] = None  # "4:00 PM"
-    timezone: Optional[str] = None  # "EST"
+    # Closed only (`market_hours.market_status_fields`): the last close as an ISO instant with
+    # New York's offset, its New York clock, and THAT instant's own label (EDT or EST).
+    date: Optional[str] = None  # "2026-10-29T16:00:00-04:00"
+    time: Optional[str] = None  # "4:00 PM" ("1:00 PM" on a half-day)
+    timezone: Optional[str] = None  # "EDT" / "EST"
 
 
 # ── Snapshot models ──────────────────────────────────────────────

@@ -1098,12 +1098,17 @@ class CryptoDetailViewModel: ObservableObject {
         isoFormatter.formatOptions = [.withInternetDateTime]
         if let date = isoFormatter.date(from: dateString) { return date }
 
+        // FMP's zone-less "yyyy-MM-dd HH:mm:ss" is New York wall-clock time (the backend's
+        // `market_hours.to_utc_instant`, verified live), crypto news included: it is FMP's
+        // news feed. Read as UTC it was 4-5 hours off.
         let dateFormatter = DateFormatter()
         dateFormatter.locale = Locale(identifier: "en_US_POSIX")
-        dateFormatter.timeZone = TimeZone(identifier: "UTC")
+        dateFormatter.timeZone = TimeZone(identifier: "America/New_York")
         dateFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
         if let date = dateFormatter.date(from: dateString) { return date }
 
+        // A bare day: the phone's own midnight, the zone `TickerNewsArticle.timeAgo` prints in.
+        dateFormatter.timeZone = TimeZone.current
         dateFormatter.dateFormat = "yyyy-MM-dd"
         return dateFormatter.date(from: dateString)
     }

@@ -5,6 +5,7 @@
 //  Adaptive x-axis date labels for the chart. Each label sits AT its bar's x (the same
 //  `ChartFrame` mapping the canvas uses), and its format follows the span actually in view
 //  — after panning a 3M chart back three years, "Jan 15" would no longer say which January.
+//  Every label is in market time, New York's clock and calendar (`ChartDateFormatters`).
 //
 
 import SwiftUI
@@ -43,7 +44,7 @@ struct ChartXAxisLabels: View {
         }
     }
 
-    // MARK: 1D — evenly spaced session times
+    // MARK: 1D — session times, each at its own place on the axis
 
     private var sessionLabels: some View {
         let refDate = frame.visibleRange.first.flatMap { ChartDateFormatters.parseDate(series.dates[$0]) }
@@ -54,16 +55,31 @@ struct ChartXAxisLabels: View {
             // captions a 24/7 asset's day as 9:30 AM - 4:00 PM.
             window: sessionWindow
         )
-        return HStack {
-            ForEach(Array(labels.enumerated()), id: \.offset) { index, label in
-                Text(label)
-                    .font(.system(size: 10, weight: .regular))
-                    .foregroundColor(AppColors.textMuted)
-                if index < labels.count - 1 {
-                    Spacer()
+        // New York times on every phone, so the axis names its zone once, on the last label
+        // ("4:00 PM ET"): bare, a Denver reader took 9:30 AM for their own clock.
+        var shown = labels
+        if let last = shown.last { shown[shown.count - 1] = last + " ET" }
+        return GeometryReader { geometry in
+            ZStack(alignment: .topLeading) {
+                ForEach(Array(shown.enumerated()), id: \.offset) { index, label in
+                    // The times are evenly spaced across the window, as `timeFractions` places
+                    // the bars, so each label is centred at its own fraction of the axis (the
+                    // first and last clamp inside it). An HStack of Spacers spread them by text
+                    // width instead, and the longer "4:00 PM ET" pulled "1:50 PM" about 20
+                    // minutes early.
+                    let fraction: CGFloat = shown.count > 1 ? CGFloat(index) / CGFloat(shown.count - 1) : 0
+                    Text(label)
+                        .font(.system(size: 10, weight: .regular))
+                        .foregroundColor(AppColors.textMuted)
+                        .fixedSize()
+                        .alignmentGuide(.leading) { d in
+                            -min(max(geometry.size.width * fraction - d.width / 2, 0), max(geometry.size.width - d.width, 0))
+                        }
                 }
             }
+            .frame(width: geometry.size.width, alignment: .topLeading)
         }
+        .frame(height: 14)
     }
 
     // MARK: Bar-positioned labels
@@ -96,15 +112,22 @@ struct ChartXAxisLabels: View {
             lastText = text
             out.append(Label(index: i, x: frame.x(i, width: width), text: text))
         }
+        // A clock axis names its zone once, on the last label ("Mon 3 PM ET"), as the 1D axis
+        // does. A date-only axis has no zone to name.
+        if format === ChartDateFormatters.timeOnly || format === ChartDateFormatters.weekdayTime,
+           let last = out.last {
+            out[out.count - 1] = Label(index: last.index, x: last.x, text: last.text + " ET")
+        }
         return out
     }
 
-    /// The label format for the dates actually in view.
+    /// The label format for the dates actually in view. "This year" and "this week" are judged
+    /// in market time, the zone every label prints in (`ChartDateFormatters`).
     private static func format(first: String, last: String) -> DateFormatter {
         guard let a = ChartDateFormatters.parseDate(first),
               let b = ChartDateFormatters.parseDate(last) else { return ChartDateFormatters.dayMonth }
         let days = b.timeIntervalSince(a) / 86_400
-        let calendar = Calendar.current
+        let calendar = ChartDateFormatters.marketCalendar
         let sameYearAsNow = calendar.component(.year, from: a) == calendar.component(.year, from: Date())
             && calendar.component(.year, from: b) == calendar.component(.year, from: Date())
         switch days {

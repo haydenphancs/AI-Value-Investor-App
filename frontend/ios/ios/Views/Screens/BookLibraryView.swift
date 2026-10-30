@@ -123,6 +123,8 @@ struct BookLibraryView: View {
                         Color.clear.frame(height: AppSpacing.xxxl)
                     }
                 }
+                // Room for the floating mini player, so the last book scrolls clear of it.
+                .miniPlayerSafeArea()
             }
         }
         .navigationBarHidden(true)

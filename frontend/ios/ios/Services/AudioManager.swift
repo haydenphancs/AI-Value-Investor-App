@@ -118,9 +118,12 @@ final class AudioManager: ObservableObject {
         return nil
     }
 
+    /// 0...1, clamped. `duration` starts as the episode's ESTIMATE and is only replaced once the
+    /// player reports the real length, so a playhead can briefly run past it — unclamped, the mini
+    /// player's fill and the full-screen slider then drew past the end of their tracks.
     var progress: Double {
         guard duration > 0 else { return 0 }
-        return currentTime / duration
+        return min(max(currentTime / duration, 0), 1)
     }
 
     var remainingTime: TimeInterval {

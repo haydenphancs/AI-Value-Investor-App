@@ -151,6 +151,8 @@ struct TradeGroupDetailView: View {
             .refreshable {
                 await viewModel.loadTradeGroup()
             }
+            // Pushed in the Tracking tab, under the root's floating mini player.
+            .miniPlayerSafeArea()
         }
         .navigationBarBackButtonHidden(true)
         .toolbar {

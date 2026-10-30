@@ -20,8 +20,18 @@ struct GlobalMiniPlayer: View {
 
     // Layout constants
     private let playerWidthRatio: CGFloat = 0.88 // 88% of screen width
-    private let playerHeight: CGFloat = 60
+    static let playerHeight: CGFloat = 60
     private let capsuleCornerRadius: CGFloat = 36 // Full capsule effect
+
+    /// What the parked capsule occupies above the bar it floats on: its height plus the default
+    /// `bottomSpacing` below it (72pt). Anything pinned to the bottom of a screen the player floats
+    /// over has to sit above this — the Reports "Delete" button sat entirely underneath it.
+    static let footprint: CGFloat = playerHeight + AppSpacing.md
+
+    /// Room a scroll view under the floating player reserves so its last row can scroll clear of
+    /// it: the footprint plus breathing room (88pt). One number for `miniPlayerSafeArea()` and
+    /// `GlobalAudioOverlay`, which used to carry 104 and 88 respectively for the same capsule.
+    static let contentClearance: CGFloat = footprint + AppSpacing.lg
 
     // Animation constants
     private let dismissThreshold: CGFloat = 100
@@ -82,7 +92,7 @@ struct GlobalMiniPlayer: View {
             }
             .padding(.horizontal, AppSpacing.lg)
             .padding(.vertical, AppSpacing.md)
-            .frame(width: playerWidth, height: playerHeight)
+            .frame(width: playerWidth, height: Self.playerHeight)
             .background(capsuleBackground)
             .overlay(
                 // Blue border stroke
@@ -95,11 +105,15 @@ struct GlobalMiniPlayer: View {
             progressBar(width: playerWidth)
         }
         .shadow(color: AppColors.shadowKey, radius: 24, y: 12)
-        .padding(.bottom, bottomSpacing)
-        .contentShape(Rectangle())
+        // The hit shape is the CAPSULE, set before the gap below it. It was a Rectangle applied
+        // after `.padding(.bottom, bottomSpacing)`, which made the transparent strip under the
+        // capsule live: a tap aimed at the top edge of the tab bar or the Ask Cay AI field opened
+        // the full-screen player instead, and the drag-to-dismiss could start there too.
+        .contentShape(RoundedRectangle(cornerRadius: capsuleCornerRadius))
         .onTapGesture {
             audioManager.expandPlayer()
         }
+        .padding(.bottom, bottomSpacing)
     }
 
     // MARK: - Close Button

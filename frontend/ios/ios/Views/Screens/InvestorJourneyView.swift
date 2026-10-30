@@ -128,6 +128,8 @@ struct InvestorJourneyView: View {
                     .refreshable {
                         await viewModel.refresh()
                     }
+                    // Room for the floating mini player, so the quote card scrolls clear of it.
+                    .miniPlayerSafeArea()
                     .onAppear {
                         if scrollToNextLesson, let nextLevelId = viewModel.nextLessonLevelId {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {

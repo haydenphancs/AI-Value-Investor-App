@@ -6508,7 +6508,11 @@ the plan is `~/.claude/plans/improve-or-add-wiser-snoopy-sun.md`. Everything is 
   to the PRIVATE `money-moves-media` bucket. The engine is frozen per job: the catalog's
   Chatterbox voice when the CPU benchmark passes, else Kokoro. Read-along: WAV2VEC2 (MIT) per block
   or Kokoro's native timestamps — never MMS_FA (CC-BY-NC). The server re-checks size, type, byte
-  rate and the timing table (one span per block, seconds-per-word band) before merging.
+  rate and the timing table (one span per block, seconds-per-word band) before merging. A failed
+  render is retried (≤ 2 reports per job, ≤ 3 failed rounds per piece) — except a failure judged on
+  the finished file (`contracts.DETERMINISTIC_FAIL_CODES`): renders are seeded and encoded bitexact,
+  so it ends the job at its first report and opens no round that would render the same file
+  (2026-10-30: the same out-of-band file was rendered three times, ~1.5 h of 4 vCPU each).
 - **Review and publish.** Nothing goes live without the owner's Telegram tap (owner, 2026-10-22).
   The bot shares marketing's flood gate and pacer (`app/services/marketing/telegram_pacing.py`) and the reserved callback
   letter `y` (`z` is the Trillion Club stake finder's, §3 item 5). Approve → publish at Friday 23:00 ET (dry-run pieces end `rehearsed`); the hold is 48 h,

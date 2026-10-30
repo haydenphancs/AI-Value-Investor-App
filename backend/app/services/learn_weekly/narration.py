@@ -1027,16 +1027,18 @@ async def _finish_piece(job: Mapping[str, Any], *, op: str) -> bool:
 async def fail(job_id: Any, claim: WorkerClaim, *, code: Any, detail: Any = "",
                now: Optional[datetime] = None) -> Dict[str, Any]:
     """`POST /jobs/{id}/fail`: the worker gives up on this render. `worker_failures + 1`; the job is
-    re-queued while under MAX_JOB_WORKER_FAILURES and failed at it, and a failed job moves its piece
-    (`after_job_failed`). A cancelled job answers 200 and writes nothing; a replay of a recorded
-    failure re-runs only the fenced piece step."""
+    re-queued while under MAX_JOB_WORKER_FAILURES and failed at it — failed at once for a code in
+    `contracts.DETERMINISTIC_FAIL_CODES` (the same render would fail the same way) — and a failed job
+    moves its piece (`after_job_failed`). A cancelled job answers 200 and writes nothing; a replay of
+    a recorded failure re-runs only the fenced piece step."""
     if not (isinstance(code, str) and _FAIL_CODE_RE.fullmatch(code)):
         raise LearnNarratorRequestInvalid(f"fail: code must match {_FAIL_CODE_RE.pattern}, got {_excerpt(code)!r}",
                                           job_id=job_id, op="fail")
     if not isinstance(detail, str):
         raise LearnNarratorRequestInvalid("fail: detail must be a string", job_id=job_id, op="fail")
     at = now or _now()
-    row = await ledger.fail_job(job_id, claim.attempts, claim.nonce, error=f"{code}: {detail}", now=at)
+    row = await ledger.fail_job(job_id, claim.attempts, claim.nonce, error=f"{code}: {detail}",
+                                final=code in c.DETERMINISTIC_FAIL_CODES, now=at)
     if row is None:
         cur = await _job_or_404(job_id, op="fail")
         if cur.get("status") == c.JOB_CANCELLED:
@@ -1060,15 +1062,33 @@ def _parse_ts(value: Any) -> Optional[datetime]:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def repeats_render(job: Mapping[str, Any], draft: Any, engine: str) -> bool:
+    """Would a new round of `draft` on `engine` ask the worker for exactly what `job` rendered — the
+    same engine, script, voice and pipeline? The render is deterministic, so it would make the same
+    file. False when the draft or the voice cannot be keyed: the enqueue then refuses it, loudly."""
+    if engine != job.get("engine"):
+        return False
+    try:
+        sha = script_sha256(narration_blocks(draft))
+        voice = voice_key(voice_spec(engine))
+    except ValueError:
+        return False
+    return (sha == job.get("script_sha256") and voice == job.get("voice")
+            and job.get("pipeline_version") == PIPELINE_VERSION)
+
+
 async def after_job_failed(job: Mapping[str, Any], *, now: Optional[datetime] = None) -> None:
-    """A narration job ended `failed` (the worker's cap, an asset mismatch at the cap, an unreadable
-    script). If its piece is still `media_pending` on THIS job: while inside the engine's catch-up
-    cut-off (`schedule.catch_up_cutoff`, no build time — the draft exists) and under
-    MAX_AUTO_FAILED_ROUNDS failed rounds, queue the next round (max round + 1, the CURRENT
+    """A narration job ended `failed` (the worker's cap, a deterministic code, an asset mismatch at
+    the cap, an unreadable script). If its piece is still `media_pending` on THIS job: while inside
+    the engine's catch-up cut-off (`schedule.catch_up_cutoff`, no build time — the draft exists) and
+    under MAX_AUTO_FAILED_ROUNDS failed rounds, queue the next round (max round + 1, the CURRENT
     LEARN_NARRATOR_ENGINE) and point the piece at it; otherwise the piece is `failed` and the owner
-    gets the loud alert. Every write is fenced on `narration_job_id` = this job, so a replay — or the
-    scheduler calling this for a job the ledger closed at its re-claim cap — is idempotent. Public for
-    that sweep: `ledger.claim_job` closes an exhausted job without touching its piece."""
+    gets the loud alert. A job that failed with a code in `contracts.DETERMINISTIC_FAIL_CODES` gets no
+    automatic round that would render the same file (`repeats_render`): the piece fails at once —
+    another engine (or a changed draft, voice or pipeline) still gets its round. Every write is fenced
+    on `narration_job_id` = this job, so a replay — or the scheduler calling this for a job the ledger
+    closed at its re-claim cap — is idempotent. Public for that sweep: `ledger.claim_job` closes an
+    exhausted job without touching its piece."""
     at = now or _now()
     piece = await ledger.get_piece_by_id(job.get("piece_id"))
     if piece is None:
@@ -1089,8 +1109,15 @@ async def after_job_failed(job: Mapping[str, Any], *, now: Optional[datetime] = 
     hold = _parse_ts(piece.get("hold_until"))
     jobs = await ledger.list_jobs(piece["id"])
     failed_rounds = sum(1 for j in jobs if j.get("status") == c.JOB_FAILED)
+    code = c.fail_code_of(job.get("error"))
+    alert: Optional[str] = None
     if hold is None:
         reason = "narration_failed_hold_unreadable"
+    elif (job.get("status") == c.JOB_FAILED and code in c.DETERMINISTIC_FAIL_CODES
+          and repeats_render(job, piece.get("draft"), engine)):
+        reason = "narration_deterministic_failure"
+        alert = (f"{reason}: {code} — a new round on {engine} would render the same file; fix the cause, "
+                 f"then rebuild")
     elif failed_rounds >= MAX_AUTO_FAILED_ROUNDS:
         reason = "narration_rounds_exhausted"
     elif at >= schedule.catch_up_cutoff(hold, engine, words, build_seconds=0):
@@ -1127,7 +1154,7 @@ async def after_job_failed(job: Mapping[str, Any], *, now: Optional[datetime] = 
         return
     logger.error("learn narration: piece %s (%s) FAILED at narration — %s (round %s: %s)", piece.get("id"),
                  piece.get("period_key"), reason, job.get("round"), error)
-    await _notify_terminal(row, status=c.FAILED, reason=reason, stage="narration")
+    await _notify_terminal(row, status=c.FAILED, reason=alert or reason, stage="narration")
 
 
 async def _notify_terminal(piece: Mapping[str, Any], *, status: str, reason: str, stage: Optional[str]) -> None:

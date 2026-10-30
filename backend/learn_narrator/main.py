@@ -27,7 +27,11 @@ Stopping rules:
     — the job is no longer ours, so nothing is reported;
   * 401 / 403 on any call → ERROR, exit 2 (a credential problem no retry fixes);
   * a render/alignment/check failure → `/fail` once, exit 1. The SERVER counts worker failures
-    (≤ 2 per job, then the round fails) and lease re-claims; this process keeps no count.
+    (≤ 2 per job, then the round fails) and lease re-claims; this process keeps no count. A code the
+    server lists as deterministic (`DETERMINISTIC_FAIL_CODES` in the web's learn_weekly contracts:
+    `voice_out_of_band`, `timings_invalid`, judged on the finished file) fails the job at its first
+    report and queues no round that would render the same file — so never rename those two codes
+    without the server's list (a worker test pins them).
 
 Environment:
   LEARN_NARRATOR_API_BASE      https://caydexinvest.com (the web service's public URL)

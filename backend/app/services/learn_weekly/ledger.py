@@ -1251,11 +1251,13 @@ def complete_job_sync(job_id: Any, attempts: Any, nonce: Any, *, audio_path: str
     return None
 
 
-def fail_job_sync(job_id: Any, attempts: Any, nonce: Any, *, error: Any,
+def fail_job_sync(job_id: Any, attempts: Any, nonce: Any, *, error: Any, final: bool = False,
                   now: Optional[datetime] = None, sb: Any = None) -> Optional[Dict[str, Any]]:
     """The worker reports a failed render: `worker_failures + 1`, then back to `queued` while under
-    MAX_JOB_WORKER_FAILURES, `failed` at it. Fenced on the claim AND the observed worker_failures. A
-    replay of a failure that already landed for the SAME claim returns the row unchanged."""
+    MAX_JOB_WORKER_FAILURES, `failed` at it — or `failed` at once when `final` (the caller knows a
+    retry of this job fails the same way: `contracts.DETERMINISTIC_FAIL_CODES`). Fenced on the claim
+    AND the observed worker_failures. A replay of a failure that already landed for the SAME claim
+    returns the row unchanged."""
     args = _claim_args("fail_job", job_id, attempts, nonce)
     if args is None:
         return None
@@ -1269,19 +1271,21 @@ def fail_job_sync(job_id: Any, attempts: Any, nonce: Any, *, error: Any,
         return None
     if row.get("status") == c.JOB_IN_PROGRESS and _holds(row, att, non):
         failures = _counter(row, "worker_failures", op="fail_job", rid=jid) + 1
-        final = failures >= c.MAX_JOB_WORKER_FAILURES
+        capped = failures >= c.MAX_JOB_WORKER_FAILURES
+        closes = capped or final is True
         patch = {"worker_failures": failures, "error": err, "lease_until": None, "updated_at": _iso(at),
-                 "status": c.JOB_FAILED if final else c.JOB_QUEUED,
-                 "finished_at": _iso(at) if final else None}
+                 "status": c.JOB_FAILED if closes else c.JOB_QUEUED,
+                 "finished_at": _iso(at) if closes else None}
         done = _one(_exec(client.table(JOBS).update(patch).eq("id", jid).eq("status", c.JOB_IN_PROGRESS)
                           .eq("attempts", str(att)).eq("claim_nonce", non)
                           .eq("worker_failures", str(failures - 1)),
                           op="fail_job", job_id=jid), op="fail_job")
         if done is not None:
-            if final:
+            if closes:
                 logger.error("learn ledger: narration job %s (piece %s round %s) FAILED — worker failure "
-                             "%d of %d: %s", jid, row.get("piece_id"), row.get("round"), failures,
-                             c.MAX_JOB_WORKER_FAILURES, err)
+                             "%d of %d%s: %s", jid, row.get("piece_id"), row.get("round"), failures,
+                             c.MAX_JOB_WORKER_FAILURES,
+                             "" if capped else " (deterministic: a retry would render the same file)", err)
             else:
                 logger.warning("learn ledger: narration job %s (piece %s round %s) re-queued after worker "
                                "failure %d of %d: %s", jid, row.get("piece_id"), row.get("round"), failures,
@@ -1419,9 +1423,10 @@ async def complete_job(job_id: Any, attempts: Any, nonce: Any, *, audio_path: st
                                    timings=timings, checks=checks, now=now, sb=sb)
 
 
-async def fail_job(job_id: Any, attempts: Any, nonce: Any, *, error: Any, now: Optional[datetime] = None,
-                   sb: Any = None) -> Optional[Dict[str, Any]]:
-    return await asyncio.to_thread(fail_job_sync, job_id, attempts, nonce, error=error, now=now, sb=sb)
+async def fail_job(job_id: Any, attempts: Any, nonce: Any, *, error: Any, final: bool = False,
+                   now: Optional[datetime] = None, sb: Any = None) -> Optional[Dict[str, Any]]:
+    return await asyncio.to_thread(fail_job_sync, job_id, attempts, nonce, error=error, final=final, now=now,
+                                   sb=sb)
 
 
 async def cancel_open_jobs(piece_id: Any, *, reason: str = "piece_closed", now: Optional[datetime] = None,

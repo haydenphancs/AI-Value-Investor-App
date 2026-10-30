@@ -1110,8 +1110,9 @@ async def test_an_object_that_is_not_the_registered_one_is_deleted_and_the_round
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bytes_per_second", [5_000, 9_700, 11_000, 14_100, 16_000, 40_000])
 async def test_audio_outside_the_engines_byte_rate_is_refused(fake, bytes_per_second):
-    """9,700 = the Gemini path's default encode, 16,000 = a 128k encode."""
-    _media_pending(fake)
+    """9,700 = the Gemini path's default encode, 16,000 = a 128k encode. An asset mismatch stays on the
+    retry path (not `contracts.DETERMINISTIC_FAIL_CODES`): the job is re-queued under its cap."""
+    _, job = _media_pending(fake)
     wire, claim, kw = await _rendered(fake)
     size = int(kw["duration_seconds"] * bytes_per_second)
     fake.storage.put(kw["path"], size)
@@ -1119,6 +1120,7 @@ async def test_audio_outside_the_engines_byte_rate_is_refused(fake, bytes_per_se
     with pytest.raises(LearnNarratorAssetMismatch) as e:
         await narration.complete(wire["id"], claim, now=NOW, **kw)
     assert "bytes/s" in str(e.value)
+    assert fake.row(ledger.JOBS, job["id"])["status"] == c.JOB_QUEUED
 
 
 @pytest.mark.asyncio
@@ -1348,6 +1350,148 @@ async def test_after_job_failed_is_idempotent_and_ignores_a_piece_on_another_job
     await narration.after_job_failed(failed, now=NOW)          # e.g. the scheduler's sweep, again
     assert fake.row(ledger.PIECES, piece["id"]) == before
     assert len(ledger.list_jobs_sync(piece["id"], sb=fake)) == 2
+
+
+# ── deterministic failures: no retry that renders the same file ─────────────────────────────
+#
+# 2026-10-30: the W44 Deep Dive failed `voice_out_of_band` at 12,888 B/s, then at 12,887 on round 2 —
+# the render is seeded per block and encoded bitexact, so every retry of the same job is the same
+# file, ~1.5 h of 4 vCPU each.
+
+#: Every code the worker reports that is NOT judged on the finished file: kills, timeouts, the
+#: upload, the API, a bug, a block gate, a refused call. Each keeps the retry path.
+_RETRIED_CODES = ("render_oom", "render_part_oom", "render_timeout", "render_failed", "render_part_failed",
+                  "align_oom", "align_timeout", "align_failed", "encode_failed", "upload_failed", "api_error",
+                  "worker_error", "request_refused", "block_gate", "weights_missing", "job_invalid")
+
+
+def test_the_deterministic_codes_are_the_two_judged_on_the_finished_file():
+    assert c.DETERMINISTIC_FAIL_CODES == frozenset({"voice_out_of_band", "timings_invalid"})
+    assert not c.DETERMINISTIC_FAIL_CODES & set(_RETRIED_CODES)
+
+
+@pytest.mark.parametrize("error, code", [
+    ("voice_out_of_band: bytes_per_sec 12888.0 outside (11500, 12800)", "voice_out_of_band"),
+    ("  timings_invalid: 2 problem(s)", "timings_invalid"),
+    ("asset_mismatch: size 7 != 9", "asset_mismatch"),
+    ("lease_reclaims_exhausted: the lease ran out 5 times", "lease_reclaims_exhausted"),
+    ("voice_out_of_band", None),            # no detail separator: not the stored "<code>: <detail>" form
+    ("Voice_Out_Of_Band: x", None),
+    (": x", None),
+    ("", None),
+    (None, None),
+    (42, None),
+])
+def test_fail_code_of_reads_the_stored_prefix_only(error, code):
+    assert c.fail_code_of(error) == code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", sorted(c.DETERMINISTIC_FAIL_CODES))
+async def test_a_deterministic_code_fails_the_job_and_the_piece_at_its_first_report(fake, alerts, code):
+    piece, job = _media_pending(fake)
+    wire, claim = await _claimed(fake)
+    out = await narration.fail(wire["id"], claim, code=code, detail="bytes_per_sec 12888.0 outside", now=NOW)
+    assert out == {"ok": True, "status": c.JOB_FAILED, "worker_failures": 1}
+    jrow = fake.row(ledger.JOBS, job["id"])
+    assert jrow["status"] == c.JOB_FAILED and jrow["finished_at"] and jrow["lease_until"] is None
+    assert jrow["error"].startswith(f"{code}: ")
+    # no automatic round: the same engine, script, voice and pipeline would render the same file
+    assert [j["round"] for j in ledger.list_jobs_sync(piece["id"], sb=fake)] == [1]
+    prow = fake.row(ledger.PIECES, piece["id"])
+    assert prow["status"] == c.FAILED and prow["last_stage"] == "narration"
+    assert prow["last_error"].startswith(f"narration_deterministic_failure: round 1: {code}: ")
+    assert alerts.calls == [{"piece_id": piece["id"], "status": c.FAILED, "stage": "narration",
+                             "reason": f"narration_deterministic_failure: {code} — a new round on chatterbox "
+                                       f"would render the same file; fix the cause, then rebuild"}]
+    # a replay of the recorded failure moves nothing and alerts nothing more; neither does the sweep
+    again = await narration.fail(wire["id"], claim, code=code, detail="again", now=NOW)
+    assert again["status"] == c.JOB_FAILED
+    await narration.after_job_failed(fake.row(ledger.JOBS, job["id"]), now=NOW)
+    assert len(alerts.calls) == 1 and fake.row(ledger.JOBS, job["id"])["worker_failures"] == 1
+    assert await narration.claim_for_worker(["chatterbox"], worker_version="t", now=NOW) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", _RETRIED_CODES)
+async def test_every_other_code_still_requeues_the_job(fake, alerts, code):
+    piece, job = _media_pending(fake)
+    wire, claim = await _claimed(fake)
+    out = await narration.fail(wire["id"], claim, code=code, detail="x", now=NOW)
+    assert out == {"ok": True, "status": c.JOB_QUEUED, "worker_failures": 1}
+    assert fake.row(ledger.PIECES, piece["id"])["status"] == c.MEDIA_PENDING and alerts.calls == []
+    again, _ = await _claimed(fake)                    # the same job, rendered once more
+    assert again["id"] == job["id"] and again["round"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_deterministic_code_on_the_second_attempt_opens_no_round(fake, alerts):
+    """A kill first (re-queued), then a finished file out of band: the job is failed at the cap either
+    way, but the piece gets no round that would render that file again."""
+    piece, job = _media_pending(fake)
+    wire, claim = await _claimed(fake)
+    await narration.fail(wire["id"], claim, code="render_part_oom", detail="exit -9", now=NOW)
+    wire, claim = await _claimed(fake)
+    out = await narration.fail(wire["id"], claim, code="voice_out_of_band", detail="x", now=NOW)
+    assert out["status"] == c.JOB_FAILED and out["worker_failures"] == 2
+    assert len(ledger.list_jobs_sync(piece["id"], sb=fake)) == 1
+    assert fake.row(ledger.PIECES, piece["id"])["status"] == c.FAILED
+    assert [a["reason"].split(":")[0] for a in alerts.calls] == ["narration_deterministic_failure"]
+
+
+@pytest.mark.asyncio
+async def test_a_deterministic_failure_still_gets_a_round_on_another_engine(fake, alerts, monkeypatch):
+    piece, job = _media_pending(fake)
+    wire, claim = await _claimed(fake)
+    monkeypatch.setattr(settings, "LEARN_NARRATOR_ENGINE", "kokoro")
+    monkeypatch.setattr(settings, "LEARN_NARRATOR_KOKORO_VOICE", "am_michael")
+    out = await narration.fail(wire["id"], claim, code="voice_out_of_band", detail="x", now=NOW)
+    assert out["status"] == c.JOB_FAILED
+    jobs = ledger.list_jobs_sync(piece["id"], sb=fake)
+    assert [(j["round"], j["status"], j["engine"]) for j in jobs] == [(1, c.JOB_FAILED, "chatterbox"),
+                                                                       (2, c.JOB_QUEUED, "kokoro")]
+    prow = fake.row(ledger.PIECES, piece["id"])
+    assert prow["status"] == c.MEDIA_PENDING and prow["narration_job_id"] == jobs[1]["id"]
+    assert alerts.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_deterministic_failure_still_gets_a_round_when_the_render_inputs_changed(fake, alerts, monkeypatch):
+    """A new pipeline version asks the worker for something else, so the file would not be the same."""
+    piece, job = _media_pending(fake)
+    wire, claim = await _claimed(fake)
+    monkeypatch.setattr(narration, "PIPELINE_VERSION", "learn-narration/v2")
+    await narration.fail(wire["id"], claim, code="timings_invalid", detail="x", now=NOW)
+    jobs = ledger.list_jobs_sync(piece["id"], sb=fake)
+    assert [(j["round"], j["status"], j["pipeline_version"]) for j in jobs] == [
+        (1, c.JOB_FAILED, "learn-narration/v1"), (2, c.JOB_QUEUED, "learn-narration/v2")]
+    assert alerts.calls == []
+
+
+def test_repeats_render_compares_engine_script_voice_and_pipeline(fake):
+    piece, job = _media_pending(fake)
+    assert narration.repeats_render(job, ARTICLE, "chatterbox") is True
+    assert narration.repeats_render(job, ARTICLE, "kokoro") is False
+    # the engine on its own (the two engines' voice keys never coincide, so this isolates it)
+    assert narration.repeats_render({**job, "engine": "kokoro"}, ARTICLE, "chatterbox") is False
+    assert narration.repeats_render({**job, "voice": "exaggeration=0.5"}, ARTICLE, "chatterbox") is False
+    assert narration.repeats_render({**job, "pipeline_version": "learn-narration/v0"}, ARTICLE, "chatterbox") is False
+    changed = copy.deepcopy(ARTICLE)
+    changed["title"] = changed["title"] + " Revisited"
+    assert narration.repeats_render(job, changed, "chatterbox") is False
+    assert narration.repeats_render(job, None, "chatterbox") is False      # the enqueue refuses it, loudly
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_job_is_never_read_as_a_deterministic_failure(fake, alerts):
+    """The sweep hands `after_job_failed` a CANCELLED job too (a Regenerate racing a Retry narration);
+    only a job that FAILED with a deterministic code stops the rounds."""
+    piece, job = _media_pending(fake)
+    ledger.cancel_open_jobs_sync(piece["id"], sb=fake)
+    cancelled = {**fake.row(ledger.JOBS, job["id"]), "error": "voice_out_of_band: an earlier attempt"}
+    await narration.after_job_failed(cancelled, now=NOW)
+    assert [j["round"] for j in ledger.list_jobs_sync(piece["id"], sb=fake)] == [1, 2]
+    assert fake.row(ledger.PIECES, piece["id"])["status"] == c.MEDIA_PENDING and alerts.calls == []
 
 
 # ── the alert hook ──────────────────────────────────────────────────────────────────────────

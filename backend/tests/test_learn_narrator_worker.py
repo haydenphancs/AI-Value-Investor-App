@@ -1944,6 +1944,80 @@ def test_a_voice_outside_the_bands_fails_before_the_upload(tmp_path, monkeypatch
     assert "upload" not in fake.names()
 
 
+def _server_deterministic_codes() -> set:
+    """`contracts.DETERMINISTIC_FAIL_CODES`, read by AST (this file never imports `app`)."""
+    node = _top(_tree(BACKEND / "app" / "services" / "learn_weekly" / "contracts.py"), "DETERMINISTIC_FAIL_CODES")
+    assert isinstance(node, ast.Call) and ast.unparse(node.func) == "frozenset" and len(node.args) == 1
+    return set(ast.literal_eval(node.args[0]))
+
+
+def _job_failure_sites() -> Dict[str, set]:
+    """{code: names of the main.py functions that raise JobFailure("<code>", …) with a literal code}."""
+    sites: Dict[str, set] = {}
+    for fn in _tree(PKG / "main.py").body:
+        if not isinstance(fn, ast.FunctionDef):
+            continue
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "JobFailure"
+                    and node.args and isinstance(node.args[0], ast.Constant)):
+                sites.setdefault(node.args[0].value, set()).add(fn.name)
+    return sites
+
+
+def _child_codes() -> set:
+    """Every code a child process can end with: the `ChildFailed("<code>")` literals, the
+    `{mode}_timeout/_oom/_failed` family for each mode, and the typed codes a child writes itself."""
+    codes, modes = set(), {"render", "render_part", "align"}
+    for path in _files():
+        for node in ast.walk(_tree(path)):
+            if isinstance(node, ast.Call) and ast.unparse(node.func).endswith("ChildFailed") and node.args:
+                first = node.args[0]
+                if isinstance(first, ast.Constant):
+                    codes.add(first.value)
+                elif isinstance(first, ast.JoinedStr):
+                    suffix = ast.unparse(first).split("}")[-1].rstrip("'\"")
+                    codes |= {f"{m}{suffix}" for m in modes}
+            if isinstance(node, ast.Dict):
+                for k, v in zip(node.keys, node.values):
+                    if isinstance(k, ast.Constant) and k.value == "code" and isinstance(v, ast.Constant):
+                        codes.add(v.value)
+    return codes
+
+
+def test_the_servers_deterministic_codes_are_the_workers_finished_file_checks():
+    """The server fails a job at its first report, and opens no round that would render the same file,
+    for a code in `DETERMINISTIC_FAIL_CODES` (2026-10-30: the same 12,888 B/s file, refused twice).
+    That is only safe for a check of the FINISHED render, which a retry repeats exactly — never a
+    child's kill, timeout or crash. And a renamed worker code would silently fall back to the retries."""
+    codes = _server_deterministic_codes()
+    sites = _job_failure_sites()
+    assert codes == {"voice_out_of_band", "timings_invalid"}
+    for code in codes:
+        assert sites.get(code), f"the worker never reports {code!r}"
+        assert sites[code] <= {"process", "build_timings"}, f"{code!r} is raised before the render: {sites[code]}"
+        assert m.fail_code(code) == code
+    child = _child_codes()
+    assert {"block_gate", "render_oom", "render_part_oom", "render_timeout", "align_failed"} <= child
+    assert not codes & child
+
+
+@pytest.mark.parametrize("case", ["timings_invalid", "voice_out_of_band"])
+def test_the_finished_file_checks_reach_fail_with_the_servers_codes(tmp_path, monkeypatch, case):
+    """Each of the server's deterministic codes is what the worker reports for its finished-file check:
+    once, before any upload, ending the tick with 1. (The 2026-10-30 file: 12,888 B/s over the old
+    12.8k ceiling; 14,100 is over today's.)"""
+    job = _raw_job()
+    _, _, total = _synthetic(job)
+    bad_bytes = {"duration": round(total, 3), "f0_hz": 134.5, "wpm": 157.0, "bytes_per_sec": 14_100, "lufs": -16.1}
+    kwargs = {"collapse": True} if case == "timings_invalid" else {"measure": bad_bytes}
+    code, fake, _ = _tick(tmp_path, monkeypatch, job, **kwargs)
+    fails = [c for c in fake.calls if c[0] == "fail"]
+    assert code == 1 and len(fails) == 1 and "upload" not in fake.names()
+    assert fails[0][2] == case and case in _server_deterministic_codes()
+    if case == "voice_out_of_band":
+        assert "bytes_per_sec 14100" in fails[0][3]
+
+
 def test_an_already_uploaded_object_skips_the_put(tmp_path, monkeypatch):
     body = {"upload_url": None, "already_uploaded": True, "path": "audio/weekly/x-0123456789ab.m4a"}
     code, fake, _ = _tick(tmp_path, monkeypatch, _raw_job(), upload_body=body)

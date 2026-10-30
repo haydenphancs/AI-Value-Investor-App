@@ -154,7 +154,44 @@ raised to 14k: this image's ffmpeg 5.1 encodes 96k higher than the local catalog
 `align_timeout` / `align_oom` / `align_failed`, `encode_failed`, `upload_failed` (Storage refused
 the PUT), `request_refused` (a 422),
 `api_error`, `worker_error` (a bug — the log has the traceback). The server counts worker
-failures (≤ 2 per job, then the round fails and alerts) — the worker keeps no count.
+failures (≤ 2 per job, then the round fails) — the worker keeps no count. A failed round opens the
+next one on its own (at most 3 failed rounds, and only inside the catch-up cut-off); past either
+limit the piece fails and alerts. Except for the two codes below. A tick that reports a failure
+exits 1, which Railway shows as "CRASHED": that is expected.
+
+### Deterministic failures stop at once (2026-10-30)
+
+A render is deterministic: every block is seeded (SEED + its index), the encode is bitexact and the
+aligner runs fixed weights over those bytes. So a failure judged on the FINISHED file comes back
+exactly on a retry of the same job. On 2026-10-30 one Deep Dive was rendered three times for the same
+file (12,888 B/s over the old 12.8k ceiling, then 12,887), ~1.5 h of 4 vCPU each.
+
+`voice_out_of_band` and `timings_invalid` are those codes. The one list is `DETERMINISTIC_FAIL_CODES`
+in `app/services/learn_weekly/contracts.py` (the server's); a worker test pins both to the worker's
+own finished-file checks, so renaming a code on one side fails the build. For either code the server:
+
+* fails the job at its FIRST report — no second attempt;
+* queues no automatic round that would ask for the same render (same engine, script, voice and
+  pipeline version). The piece ends `failed` with `narration_deterministic_failure` in its
+  `last_error`, and Telegram gets the loud alert: *"narration_deterministic_failure: <code> — a new
+  round on <engine> would render the same file; fix the cause, then rebuild"*.
+
+A round that would render something else is still queued as before: the web's `LEARN_NARRATOR_ENGINE`
+now names another engine, or the draft, the voice or `narration.PIPELINE_VERSION` changed.
+
+When the alert fires:
+
+1. Read the job's `error` (the piece's `last_error` repeats it): which band, or which timing problem.
+2. If the CHECK is wrong — a band measured on another encoder, as on 2026-10-30 — fix it on the
+   worker (`verify.py`) AND the server (`narration.BYTES_PER_SECOND_BAND`) and deploy both (never the
+   narrator while a job renders). If the AUDIO is wrong, the text has to change.
+3. Rebuild the piece: `cd backend && ./venv/bin/python scripts/learn_weekly_rebuild.py --period
+   <period key> --yes`. It re-runs the whole build, so a new draft comes back for review. There is no
+   way yet to re-narrate the SAME draft once a piece has failed.
+
+Every other code — `render_oom`, `render_part_oom`, `render_timeout`, `upload_failed`, `api_error`,
+`worker_error`, `block_gate`, an asset mismatch at `/complete`, … — keeps the retry path above.
+`block_gate` is seeded too, but it is not judged on the finished file and stays retried for now.
 
 ### Chatterbox renders in parts (2026-10-24)
 

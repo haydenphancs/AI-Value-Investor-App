@@ -88,6 +88,26 @@ MAX_JOB_WORKER_FAILURES = 2
 MAX_JOB_LEASE_RECLAIMS = 4
 JOB_LEASE_SECONDS = 600
 
+#: Worker `/fail` codes judged on the FINISHED file of a deterministic render (Chatterbox seeds every
+#: block with SEED + its index and encodes bitexact; the aligner runs fixed weights over those same
+#: bytes): the same job renders the same file, so a retry fails the same way. On 2026-10-30 one Deep
+#: Dive failed `voice_out_of_band` at 12,888 B/s, then at 12,887 on the next round — ~1.5 h of 4 vCPU
+#: each. Such a code fails the job at its FIRST report (`narration.fail`), and `narration.after_job_failed`
+#: queues no automatic round with the same render inputs after it (another engine may get one).
+#: Every other code — an OOM kill, a timeout, an upload, the API, a bug, an asset mismatch — keeps the
+#: retry path. The worker holds no copy: `test_learn_narrator_worker.py` pins every code here to a
+#: `JobFailure("<code>", …)` the worker raises after the render, and to no child-process code.
+DETERMINISTIC_FAIL_CODES = frozenset({"voice_out_of_band", "timings_invalid"})
+
+
+def fail_code_of(error: Any) -> Optional[str]:
+    """The code a job's stored `error` opens with (`narration.fail` stores "<code>: <detail>"), or
+    None when it does not open with one."""
+    if not isinstance(error, str):
+        return None
+    m = re.match(r"([a-z0-9][a-z0-9_.\-]{0,63}):", error.strip())
+    return m.group(1) if m else None
+
 # Worst-case render seconds per AUDIO second, by engine — sizes the catch-up cut-off
 # (`schedule.catch_up_cutoff`). Chatterbox = the Phase-0 acceptance bar (A1: 150 min for a 10.5-min
 # fixture ≈ 14.3×); Kokoro ≈ 1.5× realtime measured on Railway 4 vCPU, doubled for margin.

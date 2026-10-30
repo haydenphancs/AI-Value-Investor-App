@@ -1499,6 +1499,26 @@ def test_worker_failures_requeue_then_fail_at_the_cap(fake, caplog):
     assert ledger.claim_job_sync(["chatterbox"], now=T0 + timedelta(days=1), sb=fake) is None
 
 
+def test_a_final_failure_closes_the_job_at_the_first_report(fake, caplog):
+    """`final` (a deterministic code: the same render would fail the same way) fails the job under the
+    cap, still counting the failure, still fenced on the claim, and a replay changes nothing."""
+    pid = _piece(fake)["id"]
+    job = _job(fake, pid)
+    got = ledger.claim_job_sync(["chatterbox"], now=T0, sb=fake)
+    with caplog.at_level("ERROR"):
+        failed = ledger.fail_job_sync(job["id"], got["attempts"], got["claim_nonce"], final=True,
+                                      error="voice_out_of_band: bytes_per_sec 12888.0", now=T0, sb=fake)
+    assert failed["status"] == c.JOB_FAILED and failed["worker_failures"] == 1 < c.MAX_JOB_WORKER_FAILURES
+    assert failed["finished_at"] and failed["lease_until"] is None
+    assert "worker failure 1 of 2 (deterministic" in caplog.text
+    before = copy.deepcopy(fake.row(ledger.JOBS, job["id"]))
+    assert ledger.fail_job_sync(job["id"], got["attempts"], got["claim_nonce"], final=True, error="again",
+                                sb=fake) == before
+    assert ledger.fail_job_sync(job["id"], got["attempts"], "f" * 16, final=True, error="zombie", sb=fake) is None
+    assert fake.row(ledger.JOBS, job["id"]) == before
+    assert ledger.claim_job_sync(["chatterbox"], now=T0 + timedelta(days=1), sb=fake) is None
+
+
 def test_fail_with_a_malformed_claim_is_refused(fake):
     pid = _piece(fake)["id"]
     job = _job(fake, pid)

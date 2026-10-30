@@ -35,23 +35,29 @@ construction. An LLM, if ever added, would only *phrase* what is established her
 ONE MODEL-WRITTEN INPUT — THE NEWS LEAN (owner, 2026-10-14)
 ----------------------------------------------------------
 The session's Updates AI Insights card, when its NET sentiment points the way the stock
-moved, is the last positive answer before "nothing": `detect_news_lean`. It is never
-generated here, only reprinted behind a gate — Bearish/Bullish (never Neutral) agreeing
-with the move, an Unusual move (z ≥ 2, else ≥ 5% without σ), not an after-close card on a
-report day, and a headline that names its subject and carries no price, window, schedule
-or relative-day talk (`usable_lean_headline`). Tagged "Bearish News" / "Bullish News" —
-what the news was, never a catalyst label. When the card agrees but is withheld, the NONE
-sentence says "Today's news leaned bearish." instead of "No clear catalyst", which would
-contradict the card the app shows beside it. CRWV −15.46% on 2026-10-14 (z 2.57, a Bearish
-13:09 ET card) is the case it exists for; ACHR's all-bullish card under −5.02% is the
-case it must keep refusing (`test_daily_move_attribution.py`).
+moved, is the first answer `attribute` tries (owner, 2026-10-30 — see PRECEDENCE):
+`detect_news_lean`. It is never generated here, only reprinted behind a gate —
+Bearish/Bullish (never Neutral) agreeing with the move, an Unusual move (z ≥ 2, else ≥ 5%
+without σ), not an after-close card on a report day, and a headline that names its subject
+and carries no price, window, schedule or relative-day talk (`usable_lean_headline`).
+Tagged "Bearish News" / "Bullish News" — what the news was, never a catalyst label. When
+the card agrees but is withheld, the NONE sentence says "Today's news leaned bearish."
+instead of "No clear catalyst", which would contradict the card the app shows beside it.
+CRWV −15.46% on 2026-10-14 (z 2.57, a Bearish 13:09 ET card) is the case it exists for;
+ACHR's all-bullish card under −5.02% is the case it must keep refusing
+(`test_daily_move_attribution.py`).
 
 PRECEDENCE
 ----------
-Ordered most-specific first, because a stock that reported earnings AND drifted with its
-sector moved on the earnings. `attribute()` returns the single best cause plus the
-always-true context (σ multiple, industry delta, gap split), so a caller can render a
-headline and a supporting line without re-deriving anything.
+The news lean first, whenever its gate passes: the card is the session's own account of the
+news, written after whatever was reported, so it says how the tape took an event and not
+just that the event happened. INTC −30.6% on 2026-10-30 is why: the earnings detector won
+with "INTC beat EPS estimates by 27.8%" while the Bearish card beside it read "Intel's weak
+PC outlook and guidance overshadows strong data center results" (owner: "i need the widget
+to show it"). Then the dated detectors, most-specific first, because a stock that reported
+earnings AND drifted with its sector moved on the earnings. `attribute()` returns the
+single best cause plus the always-true context (σ multiple, industry delta, gap split), so
+a caller can render a headline and a supporting line without re-deriving anything.
 
 WHAT THIS DELIBERATELY WILL NOT DO
 ----------------------------------
@@ -1108,10 +1114,11 @@ def attribute(
     flat day and must not be presented as one. Every other path returns an Attribution,
     including `CauseKind.NONE`.
 
-    Precedence: earnings > analyst > classified company news > group move > the news lean
-    > none. The lean ranks BELOW the group move: when a stock moved in line with its
-    industry or the tape, the group explains the size of the move, and a sentiment lean is
-    the weakest positive signal this module accepts.
+    Precedence: the news lean > earnings > analyst > classified company news > group move >
+    none. The lean leads (owner, 2026-10-30; see the module's PRECEDENCE) but only behind its
+    own unchanged gate, so a card that disagrees with the move, a routine move, or an
+    after-close card on a report day still falls through to the dated detectors. Nothing is
+    lost when it wins: the note keeps the industry arithmetic, "moved with it" included.
     """
     change = _finite(change_percent)
     if change is None:
@@ -1135,6 +1142,30 @@ def attribute(
         industry_change_percent=_finite(industry_change_percent),
         market_change_percent=_finite(market_change_percent),
     )
+
+    # The news lean FIRST — see the docstring. Its `leaned` also words the NONE sentence below.
+    leaned: Optional[str] = None
+    try:
+        lean_hit, leaned = detect_news_lean(
+            ticker, change, z, today, news_lean, earnings_row
+        )
+    except Exception as e:  # a malformed card must never break the widget
+        logger.warning(
+            "daily_move_attribution: news lean raised for %s (%s: %s)",
+            ticker, type(e).__name__, e,
+        )
+        lean_hit, leaned = None, None
+    if lean_hit is not None:
+        return Attribution(
+            kind=lean_hit.kind,
+            tag=lean_hit.tag,
+            detail=lean_hit.detail,
+            context=ctx,
+            # Nothing was checked and ruled out before it.
+            considered=[],
+            note=context_note(ticker, ctx),
+            lean=leaned,
+        )
 
     considered: List[str] = []
     for name, detector in (
@@ -1162,6 +1193,8 @@ def attribute(
             )
             hit = None
         if hit is not None:
+            # No `lean` here even when the card agreed: the answer did not use it, and a set
+            # `lean` marks a turn as built on the card (`web_assisted`, review 2026-10-29).
             return Attribution(
                 kind=hit.kind,
                 tag=hit.tag,
@@ -1171,30 +1204,6 @@ def attribute(
                 note=context_note(ticker, ctx) if hit.kind in _NOTED_KINDS else None,
             )
         considered.append(name)
-
-    # The news lean — deliberately AFTER the loop, so `considered` on the NONE path still
-    # lists exactly the four dated detectors it always has.
-    leaned: Optional[str] = None
-    try:
-        lean_hit, leaned = detect_news_lean(
-            ticker, change, z, today, news_lean, earnings_row
-        )
-    except Exception as e:  # a malformed card must never break the widget
-        logger.warning(
-            "daily_move_attribution: news lean raised for %s (%s: %s)",
-            ticker, type(e).__name__, e,
-        )
-        lean_hit, leaned = None, None
-    if lean_hit is not None:
-        return Attribution(
-            kind=lean_hit.kind,
-            tag=lean_hit.tag,
-            detail=lean_hit.detail,
-            context=ctx,
-            considered=considered,
-            note=context_note(ticker, ctx),
-            lean=leaned,
-        )
 
     return Attribution(
         kind=CauseKind.NONE,

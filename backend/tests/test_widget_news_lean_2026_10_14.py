@@ -467,15 +467,23 @@ async def test_an_ordinary_card_or_an_unused_web_card_marks_nothing(monkeypatch)
     assert (await withheld.attribute_ticker_move("CRWV")).web_assisted is True
     # Review 2026-10-29: a same-session web card made `lean` truthy, which marked EVERY
     # attribution — an earnings win, which prints no card text, kept its turn and follow-ups
-    # out of the refund judge.
+    # out of the refund judge. Since 2026-10-30 an agreeing card on an Unusual move outranks
+    # the earnings, and is marked because the answer IS its headline; the earnings win left
+    # is the one below z 2, whose withheld lean must not ride along on it.
+    miss = {"CRWV": {"date": WED_ISO, "time": "bmo", "epsActual": -0.21, "epsEstimated": 0.05}}
     earnings_win = _attribution_service(
-        monkeypatch, mover=_crwv(), card={**_card(), "web_assisted": True},
-        earnings={"CRWV": {"date": WED_ISO, "time": "bmo",
-                           "epsActual": -0.21, "epsEstimated": 0.05}},
+        monkeypatch, mover=_crwv(pct=-6.9, z=1.64), card={**_card(), "web_assisted": True},
+        earnings=miss,
     )
     exp = await earnings_win.attribute_ticker_move("CRWV")
     assert exp.attribution.kind.value == "earnings" and exp.attribution.lean is None
     assert exp.web_assisted is False
+    lean_win = _attribution_service(
+        monkeypatch, mover=_crwv(), card={**_card(), "web_assisted": True}, earnings=miss,
+    )
+    exp = await lean_win.attribute_ticker_move("CRWV")
+    assert exp.attribution.kind.value == "company_news" and exp.attribution.detail == HEADLINE + "."
+    assert exp.web_assisted is True
     monkeypatch.setattr(wm, "get_widget_movers_service", lambda: unused)
     monkeypatch.setattr(cmt, "fetch_ticker_news",
                         AsyncMock(return_value={"news_available": True, "articles": [{"title": "x"}]}))

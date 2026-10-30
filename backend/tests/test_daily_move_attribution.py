@@ -733,8 +733,8 @@ def test_the_crwv_case_shows_its_insights_headline_with_the_industry_note():
     assert a.note == "Software - Infrastructure fell 4.0%."
     assert a.lean == "bearish"
     assert "No clear catalyst" not in a.detail
-    # The lean runs AFTER the four dated detectors; it is not one of them.
-    assert a.considered == ["earnings", "analyst", "company_news", "group"]
+    # The lean runs FIRST (2026-10-30), so nothing was ruled out before it.
+    assert a.considered == []
 
 
 def test_the_achr_card_under_a_red_move_is_still_refused():
@@ -2050,28 +2050,77 @@ def test_a_round_the_clock_card_has_no_close_to_be_after():
 # ── precedence and the note ─────────────────────────────────────────────────
 
 
-def test_dated_causes_outrank_the_lean():
-    earn = _crwv(earnings_row={"date": "2026-10-14", "time": "bmo",
-                               "epsActual": -0.4, "epsEstimated": 0.1})
-    assert earn.kind is CauseKind.EARNINGS
-    assert earn.note == "Software - Infrastructure fell 4.0%."
-    grade = _crwv(grade_rows=[{"date": "2026-10-14", "gradingCompany": "Acme", "action": "downgrade",
-                               "previousGrade": "Buy", "newGrade": "Sell"}])
+_CRWV_EARNINGS_MISS = {"date": "2026-10-14", "time": "bmo", "epsActual": -0.4, "epsEstimated": 0.1}
+_CRWV_DOWNGRADE = [{"date": "2026-10-14", "gradingCompany": "Acme", "action": "downgrade",
+                    "previousGrade": "Buy", "newGrade": "Sell"}]
+
+
+def test_the_lean_outranks_the_dated_causes():
+    """Owner 2026-10-30 (INTC −30.6% under a Bearish card): "i need the widget to show it".
+    An agreeing card on an Unusual move is the answer even when a dated event matched too."""
+    for a in (
+        _crwv(earnings_row=_CRWV_EARNINGS_MISS),
+        _crwv(grade_rows=_CRWV_DOWNGRADE),
+        _crwv(classified_news=[("Guidance Cut", "CoreWeave lowers guidance")]),
+    ):
+        assert a.kind is CauseKind.COMPANY_NEWS and a.tag == "Bearish News"
+        assert a.detail == CRWV_HEADLINE + "."
+        assert a.note == "Software - Infrastructure fell 4.0%."
+        assert a.lean == "bearish"
+
+
+def test_the_dated_causes_still_answer_when_the_lean_does_not():
+    """CONTROL: the lean's own gate is unchanged. No card, a card that disagrees with the
+    move, or a routine move leaves the dated detectors answering exactly as before — and a
+    withheld lean never rides along on their answer (`web_assisted` reads `lean`)."""
+    for lean, z in ((None, 2.57), (_lean(sentiment="Bullish"), 2.57), (_lean(), 1.5)):
+        earn = _crwv(earnings_row=_CRWV_EARNINGS_MISS, news_lean=lean, z=z)
+        assert earn.kind is CauseKind.EARNINGS and earn.lean is None
+        assert earn.note == "Software - Infrastructure fell 4.0%."
+    grade = _crwv(grade_rows=_CRWV_DOWNGRADE, news_lean=None)
     assert grade.kind is CauseKind.ANALYST
-    classified = _crwv(classified_news=[("Guidance Cut", "CoreWeave lowers guidance")])
+    classified = _crwv(classified_news=[("Guidance Cut", "CoreWeave lowers guidance")],
+                       news_lean=None)
     assert classified.kind is CauseKind.COMPANY_NEWS and classified.tag == "Guidance Cut"
     assert classified.note is not None
 
 
+def test_intc_an_earnings_beat_under_a_crash_shows_the_insights_headline():
+    """The 2026-10-30 Holdings tile: INTC −30.60% the session after a 27.8% EPS beat printed
+    "INTC beat EPS estimates by 27.8%, reported after yesterday's close." while the Updates
+    card beside it read the Bearish headline below."""
+    day = date(2026, 10, 30)
+    headline = "Intel's weak PC outlook and guidance overshadows strong data center results"
+    inputs = dict(
+        ticker="INTC", change_percent=-30.6, today=day, z=9.0,
+        industry_name="Semiconductors", industry_change_percent=-8.7,
+        earnings_row={"date": "2026-10-29", "time": "amc", "epsActual": 0.23, "epsEstimated": 0.18},
+        had_news=True,
+    )
+    card = NewsLean(headline=headline, sentiment="Bearish", subject_terms=("INTC", "intel"),
+                    generated_at="2026-10-30T17:51:00Z", day=day)
+    a = attribute(**inputs, news_lean=card)
+    assert a.kind is CauseKind.COMPANY_NEWS and a.tag == "Bearish News"
+    assert a.detail == headline + "."
+    assert a.note == "Semiconductors fell 8.7%."
+    # Without the card the earnings still answer, as before.
+    assert attribute(**inputs).tag == "Earnings Beat"
+
+
 def test_a_move_in_line_with_its_industry_stays_a_sector_move():
-    a = _crwv(change_percent=-4.2, z=2.5, industry_change_percent=-4.0)
+    a = _crwv(change_percent=-4.2, z=2.5, industry_change_percent=-4.0, news_lean=None)
     assert a.kind is CauseKind.SECTOR
     assert a.note is None
+    # With an agreeing card the card leads, and the note keeps the in-line comparison.
+    leaned = _crwv(change_percent=-4.2, z=2.5, industry_change_percent=-4.0)
+    assert leaned.kind is CauseKind.COMPANY_NEWS and leaned.tag == "Bearish News"
+    assert leaned.note == "Software - Infrastructure fell 4.0%; CRWV moved with it."
 
 
 def test_the_note_is_only_beside_a_cause_that_does_not_already_say_it():
     assert _crwv(news_lean=None).note is None                                  # NONE
-    assert _crwv(change_percent=-4.2, industry_change_percent=-4.0).note is None  # SECTOR
+    assert _crwv(change_percent=-4.2, industry_change_percent=-4.0,
+                 news_lean=None).note is None                                  # SECTOR
     assert _crwv(industry_name=None, industry_change_percent=None).note is None  # nothing true to add
 
 

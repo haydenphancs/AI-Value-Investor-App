@@ -5685,7 +5685,8 @@ the build if any `nvidia-*` package slips in, pins kokoro, misaki and a hash-che
 and bakes the Kokoro weights and the voice at build time with `HF_HUB_OFFLINE=1` at run time, so a
 missing file fails loudly instead of downloading on a cron tick. The preflight reports what the
 voice stage needs (packages, weights, font, the memory limit, the baked model revision) into the
-run's metadata. Give the Railway worker 4 GB. The non-commercial aligner the Learn read-along
+run's metadata. Give the Railway worker 8 GB (4 GB until 2026-10-30, when an earnings day's
+cgroup peak reached 3,345 MB of 3,814 MiB). The non-commercial aligner the Learn read-along
 uses has no place here: Kokoro's own timestamps make an aligner unnecessary, and a test fails
 if the worker tree references it or the `scripts` tree. Every transitive package is pinned in
 `marketing/constraints.txt` (applied with `-c`) to the versions the 2026-09-26 spike measured —
@@ -6047,7 +6048,8 @@ its pure helpers and the shared day-job runner) and `app/services/marketing/dige
   named and never counted into any week (`run_service.charges_between`; the X cap's own reader still
   counts them — fail-closed). Gemini ≈ `marketing_scripts.tokens_used` × one blended $1.50 per 1M
   (writer + judge; the judge model's price doubles on 2027-01-01 — revisit). Worker ≈ each run's
-  billed stage seconds × (its highest memory peak, clamped to 4 GB, at $10/GB-month + 4 vCPUs at
+  billed stage seconds × (its highest memory peak, clamped to the limit its preflight recorded — 4 GB
+  when none was —, at $10/GB-month + 4 vCPUs at
   $20/vCPU-month) — upper-side, Railway meters actual use; the hourly no-op ticks and the web service
   are not counted. Upload-Post = `MARKETING_UPLOAD_POST_MONTHLY_USD` × 7/30.4375 (0 = Free plan), with
   the week's uploads — every post Upload-Post took: a recorded submit, job, poll or platform post id, a
@@ -6082,7 +6084,9 @@ its pure helpers and the shared day-job runner) and `app/services/marketing/dige
   stale it was abandoned, with no retry left at the cap (the day will close failed) and an hourly
   retry below it. An unreadable attempt count promises neither, and a verdict that is not final
   promises a final word the next day. A finished run says nothing, except one line when a stage's
-  cgroup memory peak passed 3,200 MB (2,587 MB of the 3,814 MiB limit on 2026-10-01).
+  cgroup memory peak passed 85% of the container limit the run's preflight recorded
+  (`metadata.preflight.voice.memory_limit`; 3,200 MB when none was readable). 8 GB since 2026-10-30
+  (7,629 MiB → above 6,484 MB); the 4 GB service peaked at 3,345 MB on 2026-10-28.
 - **The final word** (`marketing_run_health_final`, the pure `evaluate_run_final`) re-reads
   yesterday's run at the first tick at or after the run hour on the day after a posting day (16:00
   ET by default): the worker resumes a day's failed or abandoned run only on ticks before its run
@@ -6102,7 +6106,7 @@ its pure helpers and the shared day-job runner) and `app/services/marketing/dige
   that day — every send failed, the bot was not set up that night, the job was disabled, or run
   hour 23 has none — the owner heard nothing, so the word reports every outcome but a good day,
   once: no run, failed, skipped (any reason but `rest_day`), unfinished or an unexpected status,
-  and for a good day only a stage memory peak above 3,200 MB. An unreadable row fails closed: it
+  and for a good day only a stage memory peak above that alert line. An unreadable row fails closed: it
   is read before the run, the attempt fails with its stack logged, the day stays open and a later
   tick retries — never a word on a guess. A tick that runs both jobs runs the final word first, so
   it reads the record before today's check can claim it. It has its own job key because

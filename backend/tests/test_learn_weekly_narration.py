@@ -1017,7 +1017,7 @@ async def test_complete_merges_the_audio_and_hands_the_piece_to_review(fake):
     jrow = fake.row(ledger.JOBS, job["id"])
     assert jrow["status"] == c.JOB_READY and jrow["audio_path"] == kw["path"]
     assert jrow["checks"]["worker"]["coverage"] == 0.99
-    assert jrow["checks"]["server"]["sentences"] > 5 and 11_500 <= jrow["checks"]["server"]["bytes_per_second"] <= 12_800
+    assert jrow["checks"]["server"]["sentences"] > 5 and 11_500 <= jrow["checks"]["server"]["bytes_per_second"] <= 14_000
     prow = fake.row(ledger.PIECES, piece["id"])
     assert prow["status"] == c.READY_FOR_REVIEW
     draft = prow["draft"]
@@ -1108,8 +1108,9 @@ async def test_an_object_that_is_not_the_registered_one_is_deleted_and_the_round
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bytes_per_second", [5_000, 11_000, 13_500, 40_000])
+@pytest.mark.parametrize("bytes_per_second", [5_000, 9_700, 11_000, 14_100, 16_000, 40_000])
 async def test_audio_outside_the_engines_byte_rate_is_refused(fake, bytes_per_second):
+    """9,700 = the Gemini path's default encode, 16,000 = a 128k encode."""
     _media_pending(fake)
     wire, claim, kw = await _rendered(fake)
     size = int(kw["duration_seconds"] * bytes_per_second)
@@ -1120,11 +1121,31 @@ async def test_audio_outside_the_engines_byte_rate_is_refused(fake, bytes_per_se
     assert "bytes/s" in str(e.value)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bytes_per_second", [12_629, 12_888, 13_990])
+async def test_the_narrator_images_encode_rate_is_accepted(fake, bytes_per_second):
+    """Railway's ffmpeg 5.1 encodes `-b:a 96k` above the local catalog's ~12.1k: the 2026-10-24 piece at
+    12,629 B/s, the 2026-10-30 piece at 12,888 — refused twice under the old 12,800 ceiling."""
+    piece, job = _media_pending(fake)
+    wire, claim, kw = await _rendered(fake)
+    size = int(kw["duration_seconds"] * bytes_per_second)
+    fake.storage.put(kw["path"], size)
+    kw["size_bytes"] = size
+    out = await narration.complete(wire["id"], claim, now=NOW, **kw)
+    assert out["status"] == c.JOB_READY
+    assert round(fake.row(ledger.JOBS, job["id"])["checks"]["server"]["bytes_per_second"]) == bytes_per_second
+    assert fake.row(ledger.PIECES, piece["id"])["status"] == c.READY_FOR_REVIEW
+
+
 def test_the_kokoro_band_is_looser_and_still_catches_silence():
-    assert narration.bytes_per_second_problem("kokoro", 13_500 * 100, 100.0) is None
-    assert narration.bytes_per_second_problem("chatterbox", 13_500 * 100, 100.0)
+    assert narration.bytes_per_second_problem("kokoro", 10_500 * 100, 100.0) is None
+    assert narration.bytes_per_second_problem("chatterbox", 10_500 * 100, 100.0)
     assert narration.bytes_per_second_problem("kokoro", 4_000 * 100, 100.0)
     assert narration.bytes_per_second_problem("unknown", 12_000 * 100, 100.0) is None   # strictest band
+    assert narration.bytes_per_second_problem("unknown", 10_500 * 100, 100.0)
+    for engine in ("chatterbox", "kokoro"):                 # the ceiling: a 128k encode is never the voice
+        assert narration.bytes_per_second_problem(engine, 14_000 * 100, 100.0) is None
+        assert narration.bytes_per_second_problem(engine, 14_001 * 100, 100.0)
 
 
 @pytest.mark.asyncio

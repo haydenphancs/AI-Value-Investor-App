@@ -4143,6 +4143,79 @@ def test_an_unreadable_memory_peak_never_alerts(value):
     assert _health(_run("media_ready", timings={"rendered_cgroup_peak_mb": value})) is None
 
 
+def _limited(limit: Any) -> Dict[str, Any]:
+    """Run metadata whose preflight recorded `limit` the way the worker writes it (main.voice_readiness)."""
+    return {"preflight": {"voice": {"ready": True, "memory_limit": limit}}}
+
+
+@pytest.mark.parametrize("raw, mib", [
+    ("7629 MiB", 7629), ("3814 MiB", 3814), ("1024 MiB", 1024),
+    # unrecorded: no limit, the wrong shape, a container the worker could not run in, a non-string
+    ("max", None), ("1023 MiB", None), ("0 MiB", None), ("7629MiB", None), (" 7629 MiB", None),
+    ("7629 MiB\n", None), ("7629 MB", None), ("-7629 MiB", None), ("12345678 MiB", None), ("７６２９ MiB", None),
+    (7629, None), (7629.0, None), (True, None), (None, None), (["7629 MiB"], None),
+])
+def test_the_recorded_memory_limit_is_read_only_in_the_workers_own_shape(raw, mib):
+    assert ds._memory_limit(_run("published", metadata=_limited(raw))) == mib
+
+
+@pytest.mark.parametrize("metadata", [None, [], "x", {"preflight": None}, {"preflight": []},
+                                      {"preflight": {"voice": "7629 MiB"}}, {"preflight": {"render": {"memory_limit": "7629 MiB"}}}])
+def test_a_run_without_a_readable_preflight_has_no_limit(metadata):
+    run = _run("published", timings={"voiced_cgroup_peak_mb": 3345.0})
+    run["metadata"] = metadata
+    assert ds._memory_limit(run) is None and ds._memory_alert_mb(run) == ds.MEMORY_ALERT_MB
+
+
+def test_the_alert_follows_the_recorded_limit():
+    """2026-10-28 (earnings day): 3,344.9 MB in the old 4 GB container alerted; in the 8 GB one it is calm."""
+    oct28 = {"voiced_cgroup_peak_mb": 3344.9, "rendered_cgroup_peak_mb": 3344.9, "voiced_children_maxrss_mb": 2206.1}
+    msg = _health(_run("published", timings=oct28, metadata=_limited("3814 MiB")))
+    assert msg == ("⚠️ Marketing worker memory: stage voiced peaked at 3,345 MB on Sat 2026-10-03 (alert above "
+                   "3,241 MB; the worker's limit is ~3,814 MiB). Give the marketing-worker service more memory "
+                   "before a stage is OOM-killed.")
+    assert _health(_run("published", timings=oct28, metadata=_limited("7629 MiB"))) is None
+    # 85% of 7,629 = 6,484: exactly that is not above it
+    assert _health(_run("published", timings={"voiced_cgroup_peak_mb": 6484.0}, metadata=_limited("7629 MiB"))) is None
+    hot = _health(_run("published", timings={"voiced_cgroup_peak_mb": 6600.0}, metadata=_limited("7629 MiB")))
+    assert "stage voiced peaked at 6,600 MB" in hot and "alert above 6,484 MB; the worker's limit is ~7,629 MiB" in hot
+
+
+@pytest.mark.parametrize("limit", ["max", "junk", 7629, None, "100 MiB"])
+def test_an_unreadable_limit_keeps_the_old_line_and_says_so(limit):
+    msg = _health(_run("published", timings={"voiced_cgroup_peak_mb": 3412.6}, metadata=_limited(limit)))
+    assert "alert above 3,200 MB; the worker's limit was not recorded" in msg
+    assert _health(_run("published", timings={"voiced_cgroup_peak_mb": 3200.0}, metadata=_limited(limit))) is None
+
+
+def test_the_weekly_peak_is_flagged_against_its_own_runs_limit():
+    calm = _digest([], runs=[_run("published", run_date="2026-09-28", timings={"voiced_cgroup_peak_mb": 3344.9},
+                                  metadata=_limited("7629 MiB"))])
+    assert "Worker memory peak: 3,345 MB (voiced, Mon 09-28)\n" in calm and "⚠️ above" not in calm
+    hot = _digest([], runs=[_run("published", run_date="2026-09-28", timings={"voiced_cgroup_peak_mb": 3344.9},
+                                 metadata=_limited("7629 MiB")),
+                            _run("published", run_date="2026-09-29", timings={"voiced_cgroup_peak_mb": 7000.0},
+                                 metadata=_limited("7629 MiB"))])
+    assert "Worker memory peak: 7,000 MB (voiced, Tue 09-29) ⚠️ above 6,484 MB" in hot
+    # the highest peak's OWN run decides: a 4 GB run's 3,300 is flagged even in a week of 8 GB runs
+    mixed = _digest([], runs=[_run("published", run_date="2026-09-28", timings={"voiced_cgroup_peak_mb": 3300.0},
+                                   metadata=_limited("3814 MiB")),
+                              _run("published", run_date="2026-09-29", timings={"voiced_cgroup_peak_mb": 3000.0},
+                                   metadata=_limited("7629 MiB"))])
+    assert "Worker memory peak: 3,300 MB (voiced, Mon 09-28) ⚠️ above 3,241 MB" in mixed
+
+
+@pytest.mark.parametrize("timings, limit, micros", [
+    ({"preflight_s": 303.0, "voiced_cgroup_peak_mb": 9000.0}, "7629 MiB", 18_070),   # capped at the recorded limit
+    ({"preflight_s": 303.0}, "7629 MiB", 18_070),                                    # no peak: the recorded limit
+    ({"preflight_s": 303.0, "voiced_cgroup_peak_mb": 3345.0}, "7629 MiB", 13_177),   # the peak, not the limit
+    ({"preflight_s": 303.0, "voiced_cgroup_peak_mb": 9000.0}, "max", 14_035),        # unrecorded: the 4,096 cap
+    ({"preflight_s": 303.0}, "junk", 14_035),
+])
+def test_the_worker_cost_is_capped_at_the_recorded_limit(timings, limit, micros):
+    assert ds.run_worker_micros(_run("published", timings=timings, metadata=_limited(limit))) == micros
+
+
 @pytest.mark.parametrize("timings", [None, "3500", [], {"cgroup_peak_mb": 3500.0}, {3500: 3500.0}])
 def test_malformed_timings_never_crash_or_alert(timings):
     assert _health(_run("media_ready", timings=timings)) is None

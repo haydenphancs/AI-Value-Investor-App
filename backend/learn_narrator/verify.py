@@ -9,7 +9,7 @@ must measure exactly the way the script does. The script is never imported (the 
 not in the image).
 
 Per engine (`BANDS`):
-  * chatterbox — the catalog bands (F0 130–142 Hz, 144–166 wpm, 11.5–12.8 kB/s, −17.5..−14.5 LUFS),
+  * chatterbox — the catalog bands (F0 130–142 Hz, 144–166 wpm, 11.5–14.0 kB/s, −17.5..−14.5 LUFS),
     ENFORCED: a render outside them is not the catalog voice and fails `voice_out_of_band`.
   * kokoro — UNMEASURED: only the encode band the server also checks (10–14 kB/s), a pace band
     wide enough for any natural voice, and a loudness floor/ceiling that only a silent or clipped
@@ -37,7 +37,11 @@ F0_HZ = (130.0, 142.0)          # clone 132.2-137, Journey 133.3; Gemini 124-128
                                 # cut from a Gemini Achird narration, so the voices are related.
                                 # Encode and pace are what separate them cleanly.
 WPM = (144.0, 166.0)            # TARGET_WPM 165 -> ~158 after block pauses; one clip re-speeded to 150
-BYTES_PER_SEC = (11_500, 12_800)  # -b:a 96k; ffmpeg's default (Gemini path) lands ~9.7k
+BYTES_PER_SEC = (11_500, 14_000)  # -b:a 96k; ffmpeg's default (Gemini path) lands ~9.7k. The ceiling was
+                                  # 12,800 (local ffmpeg 7.0 encodes, ~12.1k); the narrator image's ffmpeg 5.1
+                                  # overshoots 96k (12,629 and 12,888 on Railway, 2026-10-24/30), so it is
+                                  # Kokoro's 14,000: the floor separates the voices, the ceiling only
+                                  # catches a stereo / 128k+ encode (16k+).
 LUFS = (-17.5, -14.5)
 
 Band = Optional[Tuple[float, float]]

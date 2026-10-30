@@ -107,14 +107,17 @@ CHATTERBOX_VOICE: Mapping[str, Any] = {
     "exaggeration": 0.65, "cfg_weight": 0.40, "target_wpm": 165, "ref": "caydex_voice_achird_v2",
 }
 
-#: Bytes per second of the final m4a, by engine. Chatterbox = `verify_learn_voice`'s catalog band
-#: (A4: 11.5–12.8 kB/s for 96 kbps AAC-LC + MP4 overhead). Kokoro is encoded at the same 96 kbps but
-#: its band is UNMEASURED, so it is looser (10–14 kB/s ≈ 80–112 kbps): wide enough for the encoder's
-#: rate control on a different voice's spectrum, still narrow enough that a truncated stream, a
-#: silent track (AAC spends far fewer bytes on silence) or a stereo/160 kbps mistake falls outside.
-#: Tighten it once the narrator's first Kokoro renders are measured.
+#: Bytes per second of the final m4a, by engine. Chatterbox = `verify_learn_voice`'s band (A4:
+#: 11.5–14 kB/s for 96 kbps AAC-LC + MP4 overhead). Its ceiling was 12.8 kB/s, measured on local
+#: ffmpeg 7.0 encodes (~12.1k); the narrator image's ffmpeg 5.1 overshoots the 96k target (12,629 B/s
+#: on 2026-10-24, 12,888 on 2026-10-30, refused twice — a deterministic render, so every retry failed
+#: the same way). The FLOOR is what separates the clone encode from the Gemini path (~9.7k). Kokoro
+#: is encoded at the same 96 kbps but its band is UNMEASURED, so its floor is looser (10–14 kB/s ≈
+#: 80–112 kbps): still narrow enough that a truncated stream, a silent track (AAC spends far fewer
+#: bytes on silence) or a stereo/160 kbps mistake falls outside. Tighten it once the narrator's
+#: first Kokoro renders are measured.
 BYTES_PER_SECOND_BAND: Mapping[str, Tuple[float, float]] = {
-    c.ENGINE_CHATTERBOX: (11_500.0, 12_800.0),
+    c.ENGINE_CHATTERBOX: (11_500.0, 14_000.0),
     c.ENGINE_KOKORO: (10_000.0, 14_000.0),
 }
 

@@ -24,9 +24,11 @@ The worker half of the marketing engine (design doc §12). It is its **own Railw
 Railway setup (service `marketing-worker`, all in the DASHBOARD — Railway lets no new service use a
 config file, and it ignored a custom Dockerfile path): **Root Directory `/backend/marketing`** (the
 build context; Railway auto-detects this folder's `Dockerfile`), **Cron `15 * * * *`**, **Restart
-Policy Never**, no health check, Watch Paths `/backend/marketing/**`, **4 GB of memory** (the
-container peaked at 2.6 GB during the voice stage on 2026-10-01; the render runs after the voice child
-has exited). `railway.toml` records these values.
+Policy Never**, no health check, Watch Paths `/backend/marketing/**`, **8 GB of memory** (4 GB until
+2026-10-30: the container peaked at 2.6 GB during the voice stage on 2026-10-01 and at 3,345 MB on the
+2026-10-28 earnings day — its Kokoro child at 2,206 MB, the rest page cache; the render runs after the
+voice child has exited). Railway bills memory used, not the limit. The run-health alert reads the limit
+the preflight records, so it follows this setting. `railway.toml` records these values.
 Environment: `MARKETING_API_BASE_URL` (the web's public URL, `https://caydexinvest.com`),
 `MARKETING_WORKER_TOKEN`, `MARKETING_RUN_HOUR_ET` (mirrored on the web service under the same name
 for its run-health timing — change both together), `MARKETING_DRY_RUN` (optionally

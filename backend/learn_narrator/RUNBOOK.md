@@ -93,7 +93,7 @@ the 4-vCPU bar (the container's cgroup quota is what the worker reads otherwise)
 | A1 | Wall time (render + align) | ≤ 150 min for the ~1,600-word fixture |
 | A2 | Peak RSS of the largest child | ≤ 6 GB |
 | A3 | Blocks | no Chatterbox call ≥ 39.5 s raw; every call 1.8–3.6 spoken words/s (calls under 8 spoken words: 0.9–5.0) after the one re-render |
-| A4 | Voice bands | F0 130–142 Hz, 144–166 wpm, 11.5–12.8 kB/s, −17.5..−14.5 LUFS |
+| A4 | Voice bands | F0 130–142 Hz, 144–166 wpm, 11.5–14.0 kB/s (12.8 until 2026-10-30: the image's ffmpeg 5.1 encodes 96k at ~12.6–12.9k), −17.5..−14.5 LUFS |
 | A5 | Blind A/B | **you**: see below |
 | A6 | Read-along | ≥ 98 % of sentences aligned, the table passes the server's checks, block-start error ≤ 0.15 s |
 | exaggeration | Conditioning | `emotion_adv` = 0.65 (the setting really reached the model) |
@@ -146,7 +146,9 @@ server) or the API failed, `2` configuration or credentials (wrong token → 401
 
 Failure codes the worker reports (`/fail`): `block_gate` (a block truncated at Chatterbox's 40 s cap
 or outside the words/s band twice), `timings_invalid` (the read-along table would be refused),
-`voice_out_of_band` (the file is not the expected voice), `weights_missing`, `voice_unsupported`,
+`voice_out_of_band` (the file is not the expected voice — the render is deterministic, so a retry of
+the same text fails the same way; on 2026-10-30 a 12,888 B/s file failed only the old 12.8k ceiling,
+raised to 14k: this image's ffmpeg 5.1 encodes 96k higher than the local catalog), `weights_missing`, `voice_unsupported`,
 `engine_unsupported`, `job_invalid`, `render_timeout` / `render_oom` / `render_failed`,
 `render_part_oom` / `render_part_failed` (Chatterbox, below),
 `align_timeout` / `align_oom` / `align_failed`, `encode_failed`, `upload_failed` (Storage refused

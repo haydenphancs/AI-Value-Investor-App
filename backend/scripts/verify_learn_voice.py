@@ -38,7 +38,11 @@ F0_HZ = (130.0, 142.0)          # clone 132.2-137, Journey 133.3; Gemini 124-128
                                 # cut from a Gemini Achird narration, so the voices are related.
                                 # Encode and pace are what separate them cleanly.
 WPM = (144.0, 166.0)            # TARGET_WPM 165 -> ~158 after block pauses; one clip re-speeded to 150
-BYTES_PER_SEC = (11_500, 12_800)  # -b:a 96k; ffmpeg's default (Gemini path) lands ~9.7k
+BYTES_PER_SEC = (11_500, 14_000)  # -b:a 96k; ffmpeg's default (Gemini path) lands ~9.7k. The ceiling was
+                                  # 12,800 (local ffmpeg 7.0 encodes, ~12.1k); the narrator image's ffmpeg 5.1
+                                  # overshoots 96k (12,629 and 12,888 on Railway, 2026-10-24/30), so it is
+                                  # Kokoro's 14,000: the floor separates the voices, the ceiling only
+                                  # catches a stereo / 128k+ encode (16k+).
 LUFS = (-17.5, -14.5)
 
 

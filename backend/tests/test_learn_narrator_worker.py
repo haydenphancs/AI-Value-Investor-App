@@ -1232,13 +1232,26 @@ def test_band_problems():
     assert verify.band_problems("nope", good)
 
 
+def test_the_narrator_images_encode_rate_is_in_band():
+    """The 2026-10-30 Deep Dive's file (pitch, pace and loudness in band) was refused for 12,888 B/s alone:
+    the image's ffmpeg 5.1 encodes 96k above the local catalog's ~12.1k. The floor still refuses the
+    Gemini path's ~9.7k and the ceiling a 128k encode."""
+    real = {"duration": 661.5, "f0_hz": 134.0, "wpm": 158.0, "bytes_per_sec": 12_888.0, "lufs": -16.0}
+    assert verify.band_problems("chatterbox", real) == []
+    assert verify.band_problems("chatterbox", {**real, "bytes_per_sec": 13_999.0}) == []
+    assert verify.band_problems("chatterbox", {**real, "bytes_per_sec": 9_700.0}) == [
+        "bytes_per_sec 9700.0 outside (11500, 14000)"]
+    assert verify.band_problems("chatterbox", {**real, "bytes_per_sec": 16_000.0}) == [
+        "bytes_per_sec 16000.0 outside (11500, 14000)"]
+
+
 def test_the_web_bytes_band_agrees_with_the_workers():
     """The server refuses a file outside BYTES_PER_SECOND_BAND (keyed by `c.ENGINE_*` names, so it is
     not a literal: its two tuples are read from the dict's values)."""
     band = _top(_tree(BACKEND / "app" / "services" / "learn_weekly" / "narration.py"), "BYTES_PER_SECOND_BAND")
     keys = [ast.unparse(k) for k in band.keys]
     values = dict(zip(keys, (ast.literal_eval(v) for v in band.values)))
-    assert values == {"c.ENGINE_CHATTERBOX": (11_500.0, 12_800.0), "c.ENGINE_KOKORO": (10_000.0, 14_000.0)}
+    assert values == {"c.ENGINE_CHATTERBOX": (11_500.0, 14_000.0), "c.ENGINE_KOKORO": (10_000.0, 14_000.0)}
     assert tuple(verify.BANDS["chatterbox"]["bytes_per_sec"]) == values["c.ENGINE_CHATTERBOX"]
     assert tuple(verify.BANDS["kokoro"]["bytes_per_sec"]) == values["c.ENGINE_KOKORO"]
 

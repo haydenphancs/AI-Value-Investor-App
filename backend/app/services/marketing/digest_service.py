@@ -157,9 +157,17 @@ LAST_HOUR_ET = 23
 #: A claim older than this is taken over (a process killed mid-run). Each report takes seconds.
 JOB_STALE_SECONDS = 600
 
-#: A stage's cgroup memory peak (MB) above which the run-health alert warns: the worker's limit is
-#: 3,814 MiB and the 2026-10-01 production peak was 2,587 MB.
+#: A stage's cgroup memory peak warns above this share of the container limit the run's preflight
+#: recorded (`metadata.preflight.voice.memory_limit`, "<n> MiB" from cgroup v2 `memory.max`), so the
+#: alert follows the Railway setting instead of a copy of it. The limit was 4 GB (3,814 MiB) until
+#: 2026-10-30, when the 10-28 earnings day peaked at 3,345 MB (its voice child at 2,206; the rest is
+#: page cache) and the service went to 8 GB (7,629 MiB → alert above 6,484 MB).
+MEMORY_ALERT_SHARE = 0.85
+#: The alert line for a run with no readable limit (no preflight, "max", junk): the old 4 GB service's.
 MEMORY_ALERT_MB = 3200
+#: A recorded limit below this is not a container the worker could run in — read as unrecorded.
+MEMORY_LIMIT_MIN_MB = 1024
+_MEMORY_LIMIT_RE = re.compile(r"([0-9]{1,7}) MiB", re.ASCII)
 #: The followers change is measured against the latest snapshot at least this much older than now's.
 FOLLOWER_BASELINE_AGE = timedelta(days=6)
 #: The published posts of this many days back are read ONCE and feed both the follower snapshots
@@ -215,8 +223,10 @@ X_CHARGE_ROW_LIMIT = 500
 GEMINI_MICROS_PER_MILLION_TOKENS = 1_500_000
 RAILWAY_NANO_PER_GB_SECOND = 3_860
 RAILWAY_NANO_PER_VCPU_SECOND = 7_720
-#: The marketing-worker service: 4 GB (marketing/railway.toml) and at least 4 vCPUs (its render runs
-#: four x264 threads from the cgroup quota) — an ASSUMPTION, labelled ≈.
+#: The marketing-worker service: at least 4 vCPUs (its render runs four x264 threads from the cgroup
+#: quota) — an ASSUMPTION, labelled ≈. Memory is priced at the stage peak, capped at the run's recorded
+#: limit (`_memory_limit`); WORKER_MEMORY_MB (the 4 GB service until 2026-10-30) is the cap and the
+#: no-peak price only when no limit was recorded.
 WORKER_VCPUS = 4
 WORKER_MEMORY_MB = 4096
 #: A stage time beyond this is not a measurement (a worker tick's deadline is 30 minutes).
@@ -629,14 +639,39 @@ def _memory_peaks(run: Dict[str, Any]) -> List[Tuple[float, str]]:
     return out
 
 
+def _memory_limit(run: Dict[str, Any]) -> Optional[int]:
+    """The container memory limit (MiB) the run's preflight recorded — `metadata.preflight.voice.memory_limit`,
+    written by the worker as "<n> MiB" from cgroup v2 `memory.max` — or None: no preflight, no limit ("max"),
+    or anything else (a limit under MEMORY_LIMIT_MIN_MB is junk, not a container the worker ran in)."""
+    preflight = _meta(run).get("preflight")
+    voice = preflight.get("voice") if isinstance(preflight, dict) else None
+    raw = voice.get("memory_limit") if isinstance(voice, dict) else None
+    m = _MEMORY_LIMIT_RE.fullmatch(raw) if isinstance(raw, str) else None
+    if m is None:
+        return None
+    mib = int(m.group(1))
+    return mib if mib >= MEMORY_LIMIT_MIN_MB else None
+
+
+def _memory_alert_mb(run: Dict[str, Any]) -> int:
+    """The peak above which the run's stages warn: MEMORY_ALERT_SHARE of its recorded limit, else
+    MEMORY_ALERT_MB."""
+    limit = _memory_limit(run)
+    return int(limit * MEMORY_ALERT_SHARE) if limit is not None else MEMORY_ALERT_MB
+
+
 def _memory_line(run: Dict[str, Any], day: str) -> Optional[str]:
-    over = [p for p in _memory_peaks(run) if p[0] > MEMORY_ALERT_MB]
+    alert = _memory_alert_mb(run)
+    over = [p for p in _memory_peaks(run) if p[0] > alert]
     if not over:
         return None
     mb, stage = max(over)
+    limit = _memory_limit(run)
+    limit_text = (f"the worker's limit is ~{_n(limit)} MiB" if limit is not None
+                  else "the worker's limit was not recorded")
     return (f"⚠️ Marketing worker memory: stage {stage} peaked at {_n(int(round(mb)))} MB on {day} (alert above "
-            f"{_n(MEMORY_ALERT_MB)} MB; the worker's limit is ~3,814 MiB). Give the marketing-worker service more "
-            f"memory before a stage is OOM-killed.")
+            f"{_n(alert)} MB; {limit_text}). Give the marketing-worker service more memory before a stage is "
+            f"OOM-killed.")
 
 
 def _no_retry() -> str:
@@ -1474,7 +1509,7 @@ def _run_rows(runs: List[Dict[str, Any]], week_start: date, week_end: date) -> T
             continue
         by_day[d] = run
     rows: List[Tuple[date, str]] = []
-    peak: Optional[Tuple[float, date, str]] = None
+    peak: Optional[Tuple[float, date, str, int]] = None   # (MB, day, stage, that run's alert line)
     d = week_start
     while d <= week_end:
         run = by_day.get(d)
@@ -1513,7 +1548,7 @@ def _run_rows(runs: List[Dict[str, Any]], week_start: date, week_end: date) -> T
                 rows.append((d, text))
             for mb, stage in _memory_peaks(run):
                 if peak is None or mb > peak[0]:
-                    peak = (mb, d, stage)
+                    peak = (mb, d, stage, _memory_alert_mb(run))
         d += timedelta(days=1)
     return rows, peak
 
@@ -1559,7 +1594,9 @@ def run_worker_micros(run: Dict[str, Any]) -> Optional[int]:
             return None
         ms += int(round(seconds * 1000))
     peaks = [mb for mb, _stage in _memory_peaks(run)]
-    mb = min(int(round(max(peaks))), WORKER_MEMORY_MB) if peaks else WORKER_MEMORY_MB
+    limit = _memory_limit(run)
+    cap = limit if limit is not None else WORKER_MEMORY_MB
+    mb = min(int(round(max(peaks))), cap) if peaks else cap
     # nano-$ per second = (mb / 1024) × GB rate + vCPUs × vCPU rate; × ms / 1000 → nano-$; / 1000 → micro-$.
     numerator = ms * (mb * RAILWAY_NANO_PER_GB_SECOND + WORKER_VCPUS * RAILWAY_NANO_PER_VCPU_SECOND * 1024)
     return (numerator + 512_000_000) // 1_024_000_000   # half-up
@@ -2049,8 +2086,8 @@ def _render_digest(r: Dict[str, Any], cap: int, score_cap: Optional[int] = None)
         lines += [f"• {_day(d)} {text}" for d, text in r["runs"]]
         peak = r.get("memory_peak")
         if peak:
-            mb, d, stage = peak
-            flag = f" ⚠️ above {_n(MEMORY_ALERT_MB)} MB" if mb > MEMORY_ALERT_MB else ""
+            mb, d, stage, alert = peak
+            flag = f" ⚠️ above {_n(alert)} MB" if mb > alert else ""
             lines.append(f"Worker memory peak: {_n(int(round(mb)))} MB ({stage}, {_day(d)}){flag}")
     lines.append("")
 

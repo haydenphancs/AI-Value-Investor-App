@@ -287,7 +287,8 @@ async def test_a_row_whose_enrichment_throws_still_carries_its_class(monkeypatch
                      ("_get_earnings_alerts", _no_list), ("_get_whale_trade_alerts", _no_list),
                      ("_get_analyst_rating_alerts", _no_list),
                      ("_get_insider_transaction_alerts", _no_list),
-                     ("_backfill_classification", _backfill)]:
+                     ("_backfill_classification", _backfill),
+                     ("_get_extended_prints", _nothing)]:
         monkeypatch.setattr(TrackingService, name, fn)
     ts._feed_cache.clear(); ts._feed_inflight.clear()
 

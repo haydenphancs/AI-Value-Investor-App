@@ -310,12 +310,16 @@ struct AlertsTabContent: View {
         let upcomingTickers = Set(
             trackingViewModel.filteredAlerts.filter(\.isUpcoming).compactMap(upcomingTicker)
         )
+        let upcomingReports = Set(
+            trackingViewModel.filteredAlerts.filter(\.isUpcoming).compactMap(upcomingReport)
+        )
         // Everything this section COULD show, before the chips narrow it. The available
         // chip set and the visible list must both derive from this same array — deriving
         // the chips from the unsuppressed list would offer an Earnings chip whose only row
         // is hidden, i.e. a chip that filters to nothing on its first tap.
         let candidates = notifications.items.filter {
             !duplicatesUpcomingCard($0, upcomingTickers: upcomingTickers)
+                && !duplicatesLiveResultCard($0, upcomingReports: upcomingReports)
         }
         let available = availableFilters(rollups: rollups, items: candidates)
         // Intersect on EVERY read rather than trusting the stored set. A pull-to-refresh can
@@ -356,6 +360,32 @@ struct AlertsTabContent: View {
             return symbol.isEmpty ? nil : symbol
         }
         return nil
+    }
+
+    /// "TICKER|YYYY-MM-DD" for an earnings card that knows its report date, else nil.
+    private func upcomingReport(_ alert: AppAlert) -> String? {
+        guard case .earnings(let data) = alert,
+              let date = data.reportDate, !date.isEmpty,
+              !data.ticker.isEmpty else { return nil }
+        return "\(data.ticker.uppercased())|\(date)"
+    }
+
+    /// Is this RESULT notification (`earnings_result` / `earnings_live`) the same report as a
+    /// card on screen? That card carries the figures themselves, estimate vs actual, live — so
+    /// the row is the weaker copy (live results, 2026-10-29).
+    ///
+    /// Matched on ticker AND report date, never the ticker alone: last quarter's result row must
+    /// stay visible while next quarter's card sits in Upcoming. FAILS OPEN like its sibling: a
+    /// row without `report_date` (sent before the route carried it) is never hidden.
+    private func duplicatesLiveResultCard(
+        _ item: NotificationEventDTO,
+        upcomingReports: Set<String>
+    ) -> Bool {
+        guard AlertDestination.isEarningsResult(item.kind) else { return false }
+        let ticker = (item.route["ticker"] ?? "").uppercased()
+        guard !ticker.isEmpty,
+              let date = item.route["report_date"], !date.isEmpty else { return false }
+        return upcomingReports.contains("\(ticker)|\(date)")
     }
 
     /// Is this notification row a strictly poorer copy of a card already on screen above it?

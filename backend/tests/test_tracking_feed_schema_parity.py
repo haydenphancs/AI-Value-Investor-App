@@ -45,6 +45,10 @@ ALERT_KEYS = {
     "report_time", "eps_estimate", "revenue_estimate", "action",
     "total_amount", "time_window_label", "whale_trade_items",
     "analyst_rating_items", "insider_transaction_items",
+    # Live earnings results (earnings_live_service), all optional.
+    "earnings_status", "report_date", "eps_actual", "revenue_actual",
+    "eps_surprise_pct", "revenue_surprise_pct", "eps_basis", "results_preliminary",
+    "results_checked_at",
 }
 WHALE_ITEM_KEYS = {
     "ticker", "company_name", "whale_count", "amount", "raw_amount",
@@ -113,7 +117,15 @@ def _worst_case_feed() -> TrackingFeedResponse:
             ],
         ),
     ]
-    return TrackingFeedResponse(assets=[asset], alerts=alerts)
+    # A previous-day card at its most-empty legal shape: the live fields all null.
+    recent = [
+        AlertResponse(
+            type="earnings", title="Earnings Alert", description="",
+            ticker="INTC", company_name="Intel", day=29, month="OCT",
+            earnings_status="awaiting", report_date="2026-10-29",
+        ),
+    ]
+    return TrackingFeedResponse(assets=[asset], alerts=alerts, recent_earnings_alerts=recent)
 
 
 def _assert_keys(obj: dict, expected: set, where: str):
@@ -132,7 +144,7 @@ def _assert_required(obj: dict, required: set, where: str):
 def test_tracking_feed_schema_parity():
     payload = _worst_case_feed().model_dump()
 
-    assert set(payload.keys()) == {"assets", "alerts"}
+    assert set(payload.keys()) == {"assets", "alerts", "recent_earnings_alerts"}
 
     # Assets
     assert payload["assets"], "expected at least one asset"
@@ -171,6 +183,14 @@ def test_tracking_feed_schema_parity():
     assert seen_types == {
         "earnings", "market", "whale_trade", "analyst_rating", "insider_transaction",
     }
+
+    # The previous trading day's cards ride in their own list, in the same row shape, and
+    # only ever as earnings rows (the iOS merge reads them as `.earnings`).
+    assert payload["recent_earnings_alerts"], "expected at least one recent earnings card"
+    for alert in payload["recent_earnings_alerts"]:
+        _assert_keys(alert, ALERT_KEYS, "AlertResponse (recent_earnings_alerts)")
+        _assert_required(alert, ALERT_REQUIRED, "AlertResponse (recent_earnings_alerts)")
+        assert alert["type"] == "earnings"
 
     # Round-trip: the dumped dict must re-validate (pins required vs optional).
     TrackingFeedResponse.model_validate(payload)

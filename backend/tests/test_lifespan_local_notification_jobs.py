@@ -25,11 +25,12 @@ import re
 import pytest
 
 import app.main as main_mod
+import app.services.earnings_live_service as els
 import app.services.price_alert_service as pas
 import app.services.universe_data as ud
 from app.config import settings
 
-_LOOPS = ("notification_dispatch", "notification_senders", "price_alerts")
+_LOOPS = ("notification_dispatch", "notification_senders", "price_alerts", "earnings_live")
 
 
 @pytest.fixture
@@ -59,6 +60,9 @@ def lifespan_harness(monkeypatch):
     monkeypatch.setattr(main_mod, "_run_notification_dispatch_loop", _recorder("notification_dispatch"))
     monkeypatch.setattr(main_mod, "_run_scheduled_notification_senders", _recorder("notification_senders"))
     monkeypatch.setattr(pas, "run_price_alert_loop", _recorder("price_alerts"))
+    # The live earnings loop claims `notification_events` rows too (its pushes), so it is
+    # held behind the same production-queue refusal as the three above.
+    monkeypatch.setattr(els, "run_earnings_live_loop", _recorder("earnings_live"))
     monkeypatch.setattr(settings, "ENVIRONMENT", "development")
     monkeypatch.setattr(settings, "PUSH_DRY_RUN", False)
     monkeypatch.setattr(settings, "RUN_NOTIFICATION_JOBS_LOCALLY", False)

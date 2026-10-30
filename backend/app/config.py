@@ -508,6 +508,37 @@ class Settings(BaseSettings):
     # notifies on every cycle. Matches `price_alert_engine.evaluate_alert`'s own default.
     PRICE_ALERT_REARM_PCT: float = 0.005
 
+    # Live earnings results (owner request 2026-10-29) — `earnings_live_service`. The
+    # Tracking card goes LIVE on report day, its sheet shows estimate vs actual the moment
+    # each figure lands, and a push goes out when results land. Four switches, so each part
+    # can be turned off without a deploy of the others:
+    #   * EARNINGS_LIVE_ENABLED — the live state itself: the 60 s loop that refreshes the
+    #     previous trading day and today, the card fields, `recent_earnings_alerts` and
+    #     `GET /tracking/earnings/{ticker}/live`. Off = the card is as it was (estimates).
+    #   * EARNINGS_LIVE_FILINGS_ENABLED — the fast path: the company's own 8-K Item 2.02
+    #     press release read from SEC EDGAR and Gemini-extracted, every figure a verbatim
+    #     quote. Inert while SEC_EDGAR_USER_AGENT is blank (the client refuses before I/O).
+    #   * EARNINGS_LIVE_PUSH_ENABLED — the NEW `earnings_live` push ("Live Results" toggle).
+    #     Ships OFF: 1.02 has no toggle for it, and `device_tokens` carries no app version
+    #     to gate on, so it is switched on once the release with the toggle is installed.
+    #   * EARNINGS_LIVE_RESULT_PUSH_ENABLED — the EXISTING `earnings_result` push ("Results
+    #     & Surprises") sent the moment results land instead of at the next 16:00 ET run.
+    #     That kind has a toggle in every shipped build, so it ships ON.
+    EARNINGS_LIVE_ENABLED: bool = True
+    EARNINGS_LIVE_FILINGS_ENABLED: bool = True
+    EARNINGS_LIVE_PUSH_ENABLED: bool = False
+    EARNINGS_LIVE_RESULT_PUSH_ENABLED: bool = True
+    # Loop cadence. The loop is cheap when nothing reports (one memoised calendar read);
+    # the FMP and SEC cadences below are what cost anything.
+    EARNINGS_LIVE_INTERVAL_SECONDS: int = 60
+    # How many watched tickers' SEC filings are checked per report day, most-watched first.
+    # SEC's limiter (SEC_EDGAR_MAX_RPS) and its 600 s throttle circuit are SHARED with Learn,
+    # the buyback check and the Trillion stake finder, so this stays small.
+    EARNINGS_LIVE_SEC_MAX_SYMBOLS: int = 25
+    # The model that reads a press release. Flash, at temperature 0 and no thinking budget:
+    # this is extraction, and every figure it returns is checked verbatim against the text.
+    EARNINGS_LIVE_EXTRACT_MODEL: str = "gemini-2.5-flash"
+
     # Gemini quota (429) handling. Instead of skipping retries on a rate-limit
     # error, back off and retry a bounded number of times — paired with the
     # agent-run semaphore this recovers transient 429s rather than degrading a

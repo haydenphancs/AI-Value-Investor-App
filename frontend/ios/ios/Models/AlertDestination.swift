@@ -26,6 +26,9 @@ struct AlertDestination: Identifiable, Hashable {
         case ticker(symbol: String, assetType: MarketTickerType, destination: TickerDestination)
         case whale(id: String)
         case report(ticker: String, persona: String?, reportId: String?)
+        /// One report's live results (`EarningsLiveScreen`). `reportDate` is "YYYY-MM-DD", or
+        /// nil to let the server choose (an older notification row carries no date).
+        case earningsLive(ticker: String, reportDate: String?)
     }
 
     var id: String { "\(label)|\(systemImage)|\(String(describing: target))" }
@@ -41,7 +44,7 @@ struct AlertDestination: Identifiable, Hashable {
             return .ticker(symbol: symbol, assetType: assetType, destination: destination)
         case .report(let ticker, let persona, let reportId):
             return .report(id: reportId ?? "", ticker: ticker, persona: persona)
-        case .whale:
+        case .whale, .earningsLive:
             return nil
         }
     }
@@ -121,6 +124,17 @@ extension AlertDestination {
 
         guard !symbol.isEmpty else { return out }
 
+        // An earnings result leads with its own live results — the figures the banner was
+        // about, estimate vs actual — before the ticker screen.
+        if isEarningsResult(item.kind) {
+            let reportDate = route["report_date"].flatMap { $0.isEmpty ? nil : $0 }
+            out.append(AlertDestination(
+                label: "See live results",
+                systemImage: "bolt.horizontal.circle",
+                target: .earningsLive(ticker: symbol, reportDate: reportDate)
+            ))
+        }
+
         out.append(AlertDestination(
             label: "Open \(symbol)",
             systemImage: "chart.line.uptrend.xyaxis",
@@ -153,6 +167,11 @@ extension AlertDestination {
         return out
     }
 
+    /// The two kinds that announce a report's RESULTS (`earnings_result`, `earnings_live`).
+    static func isEarningsResult(_ kind: String) -> Bool {
+        kind == "earnings_result" || kind == "earnings_live"
+    }
+
     /// The extra tab this KIND of alert is about, beyond the ticker's default screen.
     ///
     /// ⚠️ Every kind registered in `backend/app/services/notification_kinds.py` must have an arm
@@ -166,7 +185,7 @@ extension AlertDestination {
         switch kind {
         case "ticker_move":
             return ("Read the news", "newspaper", TickerDestination(tab: .news, section: nil))
-        case "earnings_upcoming", "earnings_result":
+        case "earnings_upcoming", "earnings_result", "earnings_live":
             return ("See the numbers", "chart.bar.doc.horizontal",
                     TickerDestination(tab: .financials, section: nil))
         case "insider_trade":

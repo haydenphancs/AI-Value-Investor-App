@@ -20,6 +20,9 @@ struct AlertCardView: View {
             iconColor: alert.iconColor,
             title: alert.title,
             subtitle: alert.description,
+            // The red LIVE label on the left (owner request 2026-10-29): only while the
+            // server says the report is live — never inferred from the date on the device.
+            leadingBadge: alert.isLiveEarnings ? .live : nil,
             onTap: onTap,
             trailing: { trailingView }
         )
@@ -29,7 +32,13 @@ struct AlertCardView: View {
     private var trailingView: some View {
         switch alert {
         case .earnings(let data):
-            EventDateBadge(day: data.formattedDay, month: data.formattedMonth)
+            // Once any figure is in, the result is what matters, not the date (which the
+            // subtitle still states). Before that, the date badge as always.
+            if data.hasResults {
+                EarningsResultChips(eps: data.epsOutcome, revenue: data.revenueOutcome)
+            } else {
+                EventDateBadge(day: data.formattedDay, month: data.formattedMonth)
+            }
         case .market(let data):
             EventDateBadge(day: data.formattedDay, month: data.formattedMonth)
         case .whaleTrade(let data):

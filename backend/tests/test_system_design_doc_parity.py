@@ -429,6 +429,9 @@ _CURATED_TABLES = {
     "notification_events", "trending_themes", "user_investor_profile", "user_memory_facts",
     "watchlist_items", "whale_trades", "snapshot_cache", "etf_snapshot_cache",
     "signals_cache", "guest_report_budget",
+    # §11.8 (2026-10-29): live earnings explains why the new push ships behind a flag — the
+    # device registrations carry no app version to gate on.
+    "device_tokens",
     # 2026-09-11: `news_articles` was removed from the §7.1 cache tree — it is a DEAD table
     # (no read or write anywhere in app/ or scripts/) that migration 168 drops. The exemplar
     # is the live per-ticker cache. Curated so the doc line and the table stay coupled.

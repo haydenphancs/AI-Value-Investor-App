@@ -81,6 +81,7 @@ struct NotificationsSettingsView: View {
         // Earnings
         "notify_earnings_alerts": true,
         "notify_earnings_upcoming": true,
+        "notify_earnings_live": true,
         "notify_earnings_surprises": true,
 
         // Smart Money

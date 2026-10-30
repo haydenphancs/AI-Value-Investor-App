@@ -1227,7 +1227,14 @@ class TrackingViewModel: ObservableObject {
             )
             guard generation == loadGeneration else { return false }
             self.trackedAssets = feed.assets.map { $0.toTrackedAsset() }
-            self.alerts = feed.alerts.map { $0.toAppAlert() }
+            // The previous trading day's earnings cards first (reported overnight, or still
+            // awaiting until noon ET), then today's and the upcoming ones — the order a user
+            // reads "what just happened" before "what is next". Merged by id so a card can
+            // never appear twice if a row ever sat in both lists across a day roll.
+            let recent = (feed.recentEarningsAlerts ?? []).map { $0.toAppAlert() }
+            let current = feed.alerts.map { $0.toAppAlert() }
+            let currentIds = Set(current.map(\.id))
+            self.alerts = recent.filter { !currentIds.contains($0.id) } + current
             self.lastLiveFeedBody = body
             self.hasLiveFeed = true
             self.assetsErrorMessage = nil
@@ -1690,7 +1697,11 @@ class TrackingViewModel: ObservableObject {
                 guard !Task.isCancelled else { break }
                 guard let self = self else { break }
                 let assets = self.trackedAssets
-                guard MarketHoursUtil.shouldRefreshPrices(
+                // A LIVE earnings card keeps the poll alive past 20:00 ET: an after-close
+                // report's figures can land late in the evening, and the server only says
+                // LIVE while it is genuinely still checking (22:00 ET at the latest).
+                let hasLiveEarnings = self.alerts.contains(where: \.isLiveEarnings)
+                guard hasLiveEarnings || MarketHoursUtil.shouldRefreshPrices(
                     assetTypes: assets.map(\.assetType),
                     symbols: assets.map(\.ticker)
                 ) else { continue }

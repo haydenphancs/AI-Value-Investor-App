@@ -318,6 +318,10 @@ enum APIEndpoint: Sendable {
     case getTrackingAssets
     case bulkUpdateHoldings(items: [HoldingUpdateItem])
     case getPortfolioInsights
+    /// One report's live results for the Alerts sheet (`EarningsLiveResponse`). `reportDate`
+    /// ("YYYY-MM-DD") picks the report; nil lets the server choose today's / the previous
+    /// trading day's / the next one.
+    case getEarningsLive(ticker: String, reportDate: String?)
 
     // MARK: - Portfolios
     case getPortfolios
@@ -660,6 +664,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/tracking/assets/holdings"
         case .getPortfolioInsights:
             return "/api/v1/tracking/portfolio-insights"
+        case .getEarningsLive(let ticker, _):
+            return "/api/v1/tracking/earnings/\(ticker)/live"
 
         // Portfolios
         case .getPortfolios, .createPortfolio:
@@ -878,6 +884,11 @@ enum APIEndpoint: Sendable {
 
         case .lookupNotification(let dedupKey):
             return ["dedup_key": dedupKey]
+
+        case .getEarningsLive(_, let reportDate):
+            // Omitted when nil so the server picks the report.
+            guard let reportDate, !reportDate.isEmpty else { return nil }
+            return ["report_date": reportDate]
 
         case .listCreditHistory(let limit, let before):
             var q = ["limit": String(limit)]
@@ -1330,6 +1341,8 @@ enum APIEndpoint: Sendable {
         case .getUserCredits,
              .getWatchlist, .addToWatchlist, .removeFromWatchlist,
              .getTrackingAssets, .bulkUpdateHoldings, .getPortfolioInsights,
+             // FMP data, displayed only on the authenticated app (the Order Form), like the feed.
+             .getEarningsLive,
              .getPortfolios, .createPortfolio, .renamePortfolio, .deletePortfolio,
              .setPortfolioTickers, .setPortfolioHoldings, .reorderPortfolios,
              .activatePortfolio, .getPortfolioInsightsForPortfolio:

@@ -132,6 +132,26 @@ class AlertResponse(BaseModel):
     # description sentence.
     eps_estimate: Optional[float] = None
     revenue_estimate: Optional[float] = None
+    # Live earnings results (`earnings_live_service`). Every field is OPTIONAL and absent
+    # from a non-earnings row, so a shipped build that has never heard of them decodes the
+    # feed exactly as before.
+    #   earnings_status      "upcoming" | "live" | "reported" | "awaiting"
+    #   report_date          "YYYY-MM-DD" — `day`/`month` carry no year
+    #   eps_actual           adjusted EPS (FMP, or the company's release); GAAP only when
+    #                        `eps_basis == "gaap"`, which is never coloured beat/miss
+    #   *_surprise_pct       percent vs consensus, None when no honest one exists
+    #   results_preliminary  True while a shown figure is from the company's release and
+    #                        FMP has not confirmed it yet
+    #   results_checked_at   ISO-8601 UTC of the last refresh of this report's sources
+    earnings_status: Optional[str] = None
+    report_date: Optional[str] = None
+    eps_actual: Optional[float] = None
+    revenue_actual: Optional[float] = None
+    eps_surprise_pct: Optional[float] = None
+    revenue_surprise_pct: Optional[float] = None
+    eps_basis: Optional[str] = None
+    results_preliminary: Optional[bool] = None
+    results_checked_at: Optional[str] = None
 
     # shared rollup fields (whale_trade, insider_transaction)
     action: Optional[str] = None  # "bought" | "sold"
@@ -153,6 +173,65 @@ class TrackingFeedResponse(BaseModel):
 
     assets: List[TrackedAssetResponse] = Field(default_factory=list)
     alerts: List[AlertResponse] = Field(default_factory=list)
+    # The PREVIOUS trading day's earnings cards (reported, or awaiting until 12:00 ET), so an
+    # after-close report is still on screen with its results the next morning. A separate
+    # field and not more rows in `alerts`: a shipped build ignores an unknown key, whereas a
+    # past-dated row in `alerts` would render as "INTC reports earnings on OCT 29" under
+    # Upcoming the day after. Same `AlertResponse` shape (type "earnings").
+    recent_earnings_alerts: List[AlertResponse] = Field(default_factory=list)
+
+
+# ── Live earnings results (GET /tracking/earnings/{ticker}/live) ────
+
+
+class EarningsLiveMetricResponse(BaseModel):
+    """One metric of one report. `actual` is null while pending — or while `checking`, when
+    a figure exists but a sanity guard holds it until a second source confirms it."""
+
+    estimate: Optional[float] = None
+    actual: Optional[float] = None
+    surprise_pct: Optional[float] = None
+    source: Optional[str] = None        # "fmp" | "filing"
+    basis: Optional[str] = None         # EPS only: "adjusted" | "gaap"
+    checking: bool = False
+
+
+class EarningsLiveQuarterResponse(BaseModel):
+    quarter: str                        # the Financials tab's own label, e.g. "Q3 '25"
+    result: str                         # "beat" | "missed" | "matched" | "no_estimate"
+    surprise_pct: Optional[float] = None
+
+
+class EarningsLiveYearAgoResponse(BaseModel):
+    quarter: Optional[str] = None
+    revenue: Optional[float] = None
+    # Null when the year-ago EPS is on a different basis (GAAP vs adjusted) — comparing
+    # the two would print a swing that never happened.
+    eps: Optional[float] = None
+    revenue_growth_pct: Optional[float] = None
+    eps_growth_pct: Optional[float] = None
+
+
+class EarningsLiveFilingResponse(BaseModel):
+    url: Optional[str] = None           # the SEC filing index page
+    accepted_at: Optional[str] = None   # ISO-8601 UTC
+
+
+class EarningsLiveResponse(BaseModel):
+    ticker: str
+    company_name: Optional[str] = None
+    report_date: str
+    status: str                         # "upcoming" | "live" | "reported" | "awaiting"
+    checked_at: Optional[str] = None
+    preliminary: bool = False
+    eps: EarningsLiveMetricResponse
+    revenue: EarningsLiveMetricResponse
+    filing: Optional[EarningsLiveFilingResponse] = None
+    guidance: Optional[str] = None
+    year_ago: Optional[EarningsLiveYearAgoResponse] = None
+    last_quarters: List[EarningsLiveQuarterResponse] = Field(default_factory=list)
+    # How often the client should ask again while `status == "live"`; null otherwise.
+    poll_seconds: Optional[int] = None
 
 
 # ── Portfolio Holdings CRUD ─────────────────────────────────────────

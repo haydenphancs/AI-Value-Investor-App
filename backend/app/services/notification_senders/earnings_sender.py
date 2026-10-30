@@ -40,7 +40,11 @@ from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import get_fmp_client
-from app.services._earnings_common import parse_fmp_timing, timing_sentence
+from app.services._earnings_common import (
+    eps_digit_shift_suspect,
+    parse_fmp_timing,
+    timing_sentence,
+)
 from app.services.earnings_window_service import fetch_calendar_days
 from app.services.notification_jobs import JOB_EARNINGS, claimed_job
 from app.services.notification_kinds import (
@@ -179,6 +183,16 @@ def select_results(
         surprise = surprise_pct(row)
         if surprise is None or abs(surprise) < MIN_SURPRISE:
             continue
+        # A dropped/added-digit EPS (feed 0.169 for a real 1.69) is a "-90% miss" that never
+        # happened. The Financials tab, the report and Earnings Shockers all refuse it
+        # (`_earnings_common.eps_digit_shift_suspect`); a push is the worst place to print it.
+        act = finite(row.get("epsActual") if "epsActual" in row else row.get("eps"))
+        if eps_digit_shift_suspect(act, row.get("epsEstimated")):
+            logger.warning(
+                "earnings notifications: %s %s EPS %s vs estimate %s has the dropped-digit "
+                "signature — no result alert", sym, when, act, row.get("epsEstimated"),
+            )
+            continue
         seen.add(sym)
         out.append((sym, when, surprise))
     return out
@@ -209,6 +223,43 @@ def result_copy(symbol: str, surprise: float) -> Tuple[str, str]:
         f"{symbol} earnings are out",
         f"EPS {verb} consensus by {pct:.0f}%. Tap for the full picture.",
     )
+
+
+def result_dedup_key(symbol: str, when: str) -> str:
+    """The ONE key a report's result alert is claimed under — whichever sender gets there
+    first. `earnings_live_sender` claims it for both `earnings_live` and the live-timed
+    `earnings_result`, and this module's daily pass finds it taken, so nobody is told twice.
+    Keyed on the EARNINGS date (see `_dispatch`)."""
+    return f"{KIND_EARNINGS_RESULT}:{symbol.upper()}:{str(when)[:10]}"
+
+
+def _watched_tickers_ranked() -> List[str]:
+    """Every ticker at least one user watches, MOST-WATCHED FIRST (the RPC's own order).
+
+    The live loop ranks its SEC budget by it. Same RPC, same 1,000-row clamp and the same
+    RAISE-on-failure contract as `_watched_tickers`, for the same reason: an empty answer is
+    indistinguishable from "nobody watches anything".
+    """
+    from app.database import get_supabase
+
+    rows = get_supabase().rpc(
+        "get_top_watchlist_tickers", {"n": _WATCHED_LOOKUP_LIMIT}
+    ).execute().data or []
+
+    def _count(row: Dict[str, Any]) -> float:
+        try:
+            return float(row.get("watch_count") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    ranked: List[str] = []
+    seen: set = set()
+    for row in sorted(rows, key=_count, reverse=True):
+        sym = str(row.get("ticker") or "").strip().upper()
+        if sym and sym not in seen:
+            seen.add(sym)
+            ranked.append(sym)
+    return ranked
 
 
 def _watched_tickers() -> set:
@@ -276,16 +327,22 @@ async def _dispatch(
     a re-run on the same day cannot re-buzz, and a company that reschedules its print
     gets a genuinely new key rather than being silently suppressed by yesterday's claim.
     """
+    if kind == KIND_EARNINGS_RESULT:
+        dedup_key = result_dedup_key(symbol, when)
+    else:
+        dedup_key = f"{kind}:{symbol}:{when}"
     return await get_push_dispatch_service().notify_watchers(
         ticker=symbol,
         title=title,
         body=body,
-        dedup_key=f"{kind}:{symbol}:{when}",
+        dedup_key=dedup_key,
         kind=kind,
         # FLAT SCALARS ONLY (iOS AnyCodable yields "" for anything nested).
         # The registry supplies the tab, so `earnings_result` lands on Financials
-        # rather than making the user hunt for the numbers the alert is about.
-        data=ticker_route(kind, symbol),
+        # rather than making the user hunt for the numbers the alert is about. The report
+        # date lets a result row open THAT report's live results and stand in for the same
+        # report's card (`AlertDestination.Target.earningsLive`).
+        data=ticker_route(kind, symbol, report_date=when),
     )
 
 

@@ -130,19 +130,27 @@ struct AlertDetailView: View {
 
     private func earningsDetail(_ data: AppAlert.EarningsData) -> some View {
         VStack(spacing: AppSpacing.md) {
-            detailRow(label: "Ticker", value: data.ticker)
-            detailRow(label: "Company", value: data.companyName)
-            if let timing = data.reportTime {
-                detailRow(label: "Report Time", value: timing.displayText.capitalized)
+            // Estimate vs actual, each metric the moment it lands (owner request 2026-10-29).
+            // It polls its own endpoint while the report is LIVE and opens on this card's own
+            // figures, so the sheet is never blank and never a snapshot frozen at the tap.
+            EarningsLiveResultsCard(ticker: data.ticker, reportDate: data.reportDate,
+                                    fallback: data)
+
+            VStack(spacing: AppSpacing.md) {
+                detailRow(label: "Ticker", value: data.ticker)
+                detailRow(label: "Company", value: data.companyName)
+                if let timing = data.reportTime {
+                    detailRow(label: "Report Time", value: timing.displayText.capitalized)
+                }
+                if !data.consensus.isEmpty {
+                    detailRow(label: "Consensus", value: data.consensus)
+                }
+                detailRow(label: "Date", value: "\(data.formattedMonth) \(data.formattedDay)")
+                destinationRows(for: data.ticker)
             }
-            if !data.consensus.isEmpty {
-                detailRow(label: "Consensus", value: data.consensus)
-            }
-            detailRow(label: "Date", value: "\(data.formattedMonth) \(data.formattedDay)")
-            destinationRows(for: data.ticker)
+            .padding(AppSpacing.lg)
+            .cardSurface(cornerRadius: AppCornerRadius.large)
         }
-        .padding(AppSpacing.lg)
-        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 
     // MARK: - Market Detail

@@ -16,13 +16,17 @@ Routes:
                                           across many watchlist rows in one
                                           call (used by the iOS config sheet)
   GET    /tracking/portfolio-insights   → Optional[PortfolioInsightsResponse]
+  GET    /tracking/earnings/{ticker}/live → EarningsLiveResponse (the Alerts sheet's
+                                          live results; polled every 30 s while LIVE)
 """
 
 from fastapi import APIRouter, Depends
 from supabase import Client
 from typing import List, Optional
+from datetime import date
 import asyncio
 import logging
+import re
 
 from app.api.error_response import (
     ErrorCode,
@@ -34,6 +38,7 @@ from app.database import get_supabase
 from app.dependencies import StandardRateLimit, get_watchlist_identity
 from app.integrations.fmp import get_fmp_client
 from app.schemas.tracking import (
+    EarningsLiveResponse,
     TrackingFeedResponse,
     AddHoldingRequest,
     UpdateHoldingRequest,
@@ -496,3 +501,48 @@ async def get_portfolio_insights(
     """
     service = PortfolioInsightsService()
     return await service.compute_insights(user["id"])
+
+
+# ── Live earnings results ───────────────────────────────────────────
+
+# A listed equity symbol as the calendar spells it (BRK.B, BF-B): letters, digits, "." and
+# "-", at most 12. Anything else is refused before any read.
+_LIVE_TICKER_RE = re.compile(r"[A-Z0-9][A-Z0-9.\-]{0,11}")
+
+
+@router.get("/earnings/{ticker}/live", response_model=EarningsLiveResponse)
+async def get_earnings_live(
+    ticker: str,
+    report_date: Optional[str] = None,
+    user: dict = Depends(get_watchlist_identity),
+    # The sheet polls every 30 s while a report is LIVE — 2/min, like the feed.
+    _rate: None = StandardRateLimit,
+):
+    """One report's live results: estimate vs actual for EPS and revenue (each as soon as it
+    lands), the company's own release while FMP has not confirmed it, the year-ago quarter
+    and the last four quarters. Signed-in only: FMP's Order Form licenses display on the
+    authenticated app alone (the same wall `/tracking/assets` is behind).
+
+    Read-only — it never makes the live loop's fetches itself, so a poll costs a memo read.
+    """
+    sym = (ticker or "").strip().upper()
+    if not _LIVE_TICKER_RE.fullmatch(sym):
+        return make_error_response(
+            ErrorCode.INVALID_INPUT, message=f"not a ticker: {ticker[:20]!r}",
+        )
+    requested: Optional[date] = None
+    if report_date:
+        try:
+            requested = date.fromisoformat(report_date[:10])
+        except ValueError:
+            return make_error_response(
+                ErrorCode.INVALID_INPUT, message=f"report_date is not YYYY-MM-DD: {report_date[:20]!r}",
+            )
+    try:
+        return await TrackingService().get_earnings_live(sym, requested)
+    except ValueError as e:
+        return make_error_response(ErrorCode.INVALID_INPUT, message=str(e))
+    except Exception as e:
+        logger.error("Earnings live for %s failed: %s: %s", sym, type(e).__name__, e,
+                     exc_info=True)
+        return error_response_from_exception(e, step="earnings_live")

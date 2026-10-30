@@ -1218,7 +1218,9 @@ failure never is. A failed or empty round serves the days already held and waits
 next one, so an outage costs one round per wait, not one per feed build. A Supabase tier would
 only add a round trip to a memo of a pure upstream function. Each round logs `earnings calendar …
 fetched N of 15 days in M ms` at INFO; a single day at the cap is logged at ERROR by
-`fetch_calendar_days`. The same pass moved the feed's sector backfill into its main gather and fetches
+`fetch_calendar_days`. Live earnings results (§11.8) leave this memo and its two speeds
+untouched: they READ today's rows from it, and hold the previous trading day and a hot copy of
+today in their own two-day memo (`earnings_live_service`). The same pass moved the feed's sector backfill into its main gather and fetches
 each holdings sparkline over two trading days (`chart_helper.fetch_sparkline_bars`), not the
 detail chart's ten calendar days.
 
@@ -1915,16 +1917,16 @@ grounding, §2 "No Google Search grounding"; a stored `tam_scope='global'` row r
 
 ### 7.4 Scheduled background jobs (the lifespan loops)
 
-Everything scheduled runs INSIDE the one web process: 28 tasks started by
-`app/main.py::_spawn` — 26 loops and two one-shots (the whale profile pre-warm and the Home
+Everything scheduled runs INSIDE the one web process: 29 tasks started by
+`app/main.py::_spawn` — 27 loops and two one-shots (the whale profile pre-warm and the Home
 boot warm), plus the Telegram webhook registration when the review bot is configured — and two
 Railway cron services (the marketing worker, §12.2; the Learn narrator, §12.18). There is
 no pg_cron, no edge function, no Celery, and no iOS `BGTaskScheduler`. Two facts decide
 whether any of it runs:
 
 - **`ENVIRONMENT` gates every loop.** Unless it is `"development"` (the Settings default —
-  a laptop), all 28 start; in development only the notification trio can run, and only
-  behind `RUN_NOTIFICATION_JOBS_LOCALLY`. Railway must therefore set `ENVIRONMENT`, or
+  a laptop), all 29 start; in development only the notification loops (the trio and live
+  earnings, §11.8) can run, and only behind `RUN_NOTIFICATION_JOBS_LOCALLY`. Railway must therefore set `ENVIRONMENT`, or
   refunds, subscription expiry and every push silently stop.
 - **Exactly ONE uvicorn worker** (`test_deploy_command_parity.py`). Most loops are unclaimed
   and are safe only because of that; the daily/weekly/quarterly ones hold a day-keyed claim
@@ -1953,6 +1955,7 @@ whether any of it runs:
 | Wiser weekly engine (§12.18): cache sync, Thursday topic card (`learn_weekly_topic`, day claim), Friday 07:00 ET auto-pick, build (lease per piece, every tick), narration sweep, Telegram review, publish / expiry, Friday 15:00 ET deadman (`learn_weekly_deadman`, day claim) | a tick every 5 min | `LEARN_WEEKLY_ENABLED`, `LEARN_DEEP_DIVE_ENABLED` (**off**); every piece dry-run while `LEARN_WEEKLY_DRY_RUN` (**on**); build kill switch `learn_weekly_build` |
 | marketing publisher (+ the Telegram review sweep and publish feed, §12.9-§12.10, then four day-keyed jobs, §12.11: measure `marketing_metrics_daily` 06:00 ET; run health `marketing_run_health` on a posting day at the run hour + `MARKETING_MAX_RUN_ATTEMPTS`, capped at 23:00 (22:00 ET by default), and `marketing_run_health_final` the day after at the run hour (16:00 ET by default; the run hour is `MARKETING_RUN_HOUR_ET`, the web's mirror of the worker's); the weekly digest `marketing_digest_weekly` Monday 09:00 ET, Tuesday catch-up) / link-hit flush | 10 min, woken at once by an Approve or a confirmed Retract / 60 s | expiry, auto-approved posts back to review, and confirmed retracts: always; reconcile: `MARKETING_ENABLED` (**off**), any queued post with an adapter (billed X reads; it never resends under dry run); publishing: `MARKETING_ENABLED` and a platform listed in `MARKETING_PUBLISH_PLATFORMS` with its credentials (none by default); the review sweep, feed and both run-health checks: the `MARKETING_TELEGRAM_*` settings (unset = off); measure: `MARKETING_ENABLED` and `MARKETING_METRICS_ENABLED` (**off**); digest: the review bot and `MARKETING_DIGEST_ENABLED` (**off**) / — |
 | push dispatch, scheduled senders, price alerts | 60 s / hourly wake (earnings 16:00, smart money 18:00, profile match 19:00 ET) / 60 s | the notification trio (§11.4) |
+| live earnings (§11.8): the previous trading day and today for everyone's watched tickers — FMP every 5 min while a watched report is pending (06:00–22:00 ET), the company's 8-K on SEC every minute in the release windows, then the `earnings_live` / live-timed `earnings_result` pushes | 60 s | `EARNINGS_LIVE_ENABLED` (on), `EARNINGS_LIVE_FILINGS_ENABLED` (on; inert without `SEC_EDGAR_USER_AGENT`), `EARNINGS_LIVE_PUSH_ENABLED` (**off**), `EARNINGS_LIVE_RESULT_PUSH_ENABLED` (on) |
 
 A quarterly or weekly phase that does not complete is retried inside the same run's 20-hour
 catch-up window (30 min apart, at most 3 times); phases that already ran are skipped by
@@ -4952,6 +4955,7 @@ Migration 089 exists because two of these were mixed once already.
 |---|---|---|---|
 | report ready | inline, after the conditional completion write | 0 | dedup key only |
 | earnings (upcoming + result) | hourly wake, acts after 16:00 ET | **1 call/day** (one market-wide window serves both passes) | `claim_notification_job` |
+| live earnings (`earnings_live`, then the live-timed `earnings_result`; §11.8) | the live loop, every 60 s, the moment a watched report's first figure lands | 0 of its own (the live loop's two-day memo) | the dedup key `earnings_result:{SYM}:{date}` (`earnings_sender.result_dedup_key`), shared by both kinds and the daily pass — one push per report |
 | insider Form 4 | hourly wake, acts after 18:00 ET | ~200/day (top-200 watchlist) | same job |
 | whale 13F + congress | same job, phase 2 | 0 (reads `whale_trades`) | `last_cursor` high-water mark |
 | price alerts | 60s — every rule while the market is active (04:00–20:00 ET), crypto-only rules while it is closed | 1 batch-quote/cycle | none — the dedup key is the lock |
@@ -5033,6 +5037,80 @@ practice, and the FCA measured an 11% trading-volume increase from push alone. C
 therefore **informational, never directive**, and every template lives in the registry
 or one sender module so the whole surface is auditable in one place. Every category is
 individually opt-out-able in-app, and frequency is capped per category.
+
+### 11.8 Live earnings results (2026-10-29)
+
+Owner request on INTC's report day: the Tracking → Alerts → Upcoming earnings card goes LIVE on
+report day, its sheet shows estimate vs actual for EPS and revenue the moment EACH lands (green
+beat, red miss, the surprise percentage), plus the same quarter last year, the last four
+quarters and the company's outlook, and a push goes out when results land, behind a new
+"Live Results" toggle. Owner decisions: FMP plus the company-filing fast path; the push with its
+own toggle, on by default; all three extras.
+
+**Two sources, one record per (symbol, report date)** (`earnings_live_service`). FMP's
+`earnings-calendar` already carries `epsActual` / `revenueActual` beside the estimates (adjusted
+EPS, the consensus's own basis) but fills them ~1–3 h after a release, and an after-close report
+can wait until the next morning. The company's own release is public within minutes as an 8-K
+Item 2.02 with the press release as EX-99.1, so `earnings_filing_service` reads it from SEC
+EDGAR and Gemini extracts revenue, adjusted and GAAP EPS and the outlook — each with a quote. A
+figure is kept ONLY when its quote is a verbatim span of the release
+(`filing_text.verify_peg_span`, the Learn engine's checker) AND the number read back out of the
+quote equals the value (scale word printed beside it, a loss printed as a loss); anything else
+is dropped and logged (`EARNINGS_LIVE_FILING … revenue=ok|not_verbatim|value_mismatch`). A
+filing figure is PRELIMINARY until FMP has the same metric, which replaces it; a record is
+sticky (a later answer without the actuals never takes a figure back).
+
+**Statuses** (FMP's stable-API calendar rows carry no time of day, so the window is the report
+day, ET):
+`upcoming`; `live` from 06:00 to 22:00 ET while results are incomplete — the red LIVE label is
+drawn only then, and it is true (SEC every minute in the release windows, FMP every 5 min);
+`reported` once complete (EPS, plus revenue when a revenue estimate exists) or when the window
+ends with a figure in; `awaiting` when it ends with nothing — never "late" (FMP lag and
+reschedule duplicates make that misleading; it drops off at 12:00 ET the next day).
+
+**Guards.** A dropped-digit EPS (`eps_digit_shift_suspect`) is held as "checking", never a -90%
+miss; a revenue more than 2x off a material (≥ $100M) consensus is held unless the other source
+agrees within 2%; a GAAP-only EPS is labelled GAAP and never coloured (the owner's 2026-09-27
+caution, `news_insight_service._earnings_line`); no surprise percentage against an estimate under
+$0.01. The daily sender's `select_results` gained the same dropped-digit guard.
+
+**Costs.** The Tracking memo (§7.1) is untouched. The live loop folds today's rows from it and
+fetches, in its own two-day memo: the previous trading day (5 min while a watched row on it is
+pending before 12:00 ET, else 30 min) and today ONLY while a watched row is pending in 06:00–22:00
+ET (5 min) — about 190 extra single-day calls on a busy report day plus ~70 for the previous
+day's morning. SEC: at most `EARNINGS_LIVE_SEC_MAX_SYMBOLS` (25) tickers a day, most-watched
+first, each read once a minute in the release windows (06:00–09:35 and 15:55–18:30 ET) and every 5
+min otherwise, calls spaced 1 s apart, a symbol dropped once its 8-K is found, and every symbol
+parked for SEC's Retry-After on a throttle — the limiter and the 600 s circuit are shared with
+Learn, the buyback check and the Trillion stake finder. One Gemini call per release
+(temperature 0, no thinking budget, not cached); a transient Gemini failure is retried at most
+three times.
+
+**Wire.** `AlertResponse` gained nine optional keys (`earnings_status`, `report_date`,
+`eps_actual`, `revenue_actual`, `eps_surprise_pct`, `revenue_surprise_pct`, `eps_basis`,
+`results_preliminary`, `results_checked_at`); the previous trading day's cards ride in the new
+`TrackingFeedResponse.recent_earnings_alerts` — NOT in `alerts`, where a shipped build would draw
+a past-dated "reports earnings on OCT 29" card under Upcoming. `GET /tracking/earnings/{ticker}/
+live` (`EarningsLiveResponse`, signed-in only — the FMP display licence) serves the sheet, read-
+only, with `poll_seconds: 30` while live; the extras come once per (symbol, report date) from
+`earnings_service.get_earnings` (6 h; 5 min after a failure), so the sheet and the Financials
+tab can never disagree about a quarter. iOS: `frontend/ios/ios/Models/EarningsLiveModels.swift`,
+`EarningsLiveResultsCard` (polls while live; stops on reported, disappear and background), the
+`LiveBadge` atom on `ActivityRow`, `EarningsResultChips`, and "See live results"
+(`AlertDestination.Target.earningsLive` → `EarningsLiveScreen`) leading a tapped result push.
+
+**Push.** `earnings_live` ("Live Results", `notify_earnings_live`, on by default, under the
+Earnings master) goes out the first time any figure lands; `earnings_result` ("Results &
+Surprises") is now also sent live, once FMP's adjusted EPS is in and the surprise clears 5% — FMP
+numbers only, never a filing figure. Both use the daily sender's key and are sent one after the
+other in one coroutine, live first, so the dispatcher's claim (which only users passing their
+toggle and cap ever take) gives each user at most one push per report, and the daily 16:00 ET
+pass finds the key taken. A lock-screen banner prints a dollar figure only from the company's own
+release (public); FMP figures appear as beat/missed by a percentage. `EARNINGS_LIVE_PUSH_ENABLED`
+ships OFF: 1.02 has no toggle for the new kind and `device_tokens` carries no app version, so it
+is switched on once the release with the toggle is installed (OWNER_TASKS). A landing is a
+landing only when the record was seen pending first, so a restart never re-announces a morning's
+results in the afternoon.
 
 ---
 

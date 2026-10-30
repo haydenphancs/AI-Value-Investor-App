@@ -12,7 +12,7 @@ Design (mirrors home_service.py):
 import asyncio
 import math
 import time as _time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any, Tuple
 import logging
 
@@ -33,6 +33,7 @@ from app.utils.supabase_errors import retry_idempotent_async
 from app.schemas.tracking import (
     TrackedAssetResponse,
     AlertResponse,
+    EarningsLiveResponse,
     TrackingFeedResponse,
     WhaleTradeItemResponse,
     AnalystRatingItemResponse,
@@ -55,6 +56,12 @@ from app.services._whale_common import (
     format_amount_range,
 )
 from app.services.earnings_window_service import fetch_calendar_days
+from app.services.earnings_live_service import (
+    LiveSnapshot,
+    card_fields,
+    get_earnings_live_service,
+    live_payload,
+)
 from app.services._earnings_common import (
     parse_fmp_timing,
     timing_sentence,
@@ -63,7 +70,7 @@ from app.services._earnings_common import (
 from app.config import settings
 from app.services.asset_class import uses_coingecko_price
 from app.services.price_service import price_source
-from app.utils.market_hours import ET
+from app.utils.market_hours import ET, previous_trading_day
 
 logger = logging.getLogger(__name__)
 
@@ -717,6 +724,23 @@ async def _cached_earnings_calendar(fmp: Any, today: date) -> List[Dict[str, Any
             _earnings_calendar_inflight.pop(key, None)
 
 
+def _recent_earnings_alert(snap: LiveSnapshot) -> AlertResponse:
+    """One previous-day earnings card, in the same shape `_get_earnings_alerts` builds."""
+    month = snap.day.strftime("%b").upper()
+    return AlertResponse(
+        type="earnings",
+        ticker=snap.symbol,
+        company_name=snap.company_name or snap.symbol,
+        title="Earnings Alert",
+        description=f"{snap.symbol} reported earnings on {month} {snap.day.day}.",
+        day=snap.day.day,
+        month=month,
+        eps_estimate=snap.eps.estimate,
+        revenue_estimate=snap.revenue.estimate,
+        **card_fields(snap, snap.day),
+    )
+
+
 # ── Service ─────────────────────────────────────────────────────────
 
 
@@ -934,6 +958,7 @@ class TrackingService:
         analyst_task = self._get_analyst_rating_alerts(tickers)
         insider_task = self._get_insider_transaction_alerts(fanout, asset_types)
         backfill_task = self._backfill_classification(user_id, watchlist)
+        recent_earnings_task = self._get_recent_earnings_alerts(tickers)
 
         # ⚠️ Positions are load-bearing: results[0..5] are unpacked by index below and
         # `section_names` is indexed by position. A new member goes LAST, with its name
@@ -946,6 +971,7 @@ class TrackingService:
             analyst_task,
             insider_task,
             backfill_task,
+            recent_earnings_task,
             return_exceptions=True,
         )
 
@@ -967,6 +993,9 @@ class TrackingService:
         insider_alerts: List[AlertResponse] = (
             results[5] if not isinstance(results[5], BaseException) else []
         )
+        recent_earnings_alerts: List[AlertResponse] = (
+            results[7] if not isinstance(results[7], BaseException) else []
+        )
 
         section_names = [
             "batch_quotes",
@@ -978,6 +1007,7 @@ class TrackingService:
             # results[6]: its value is ignored (it heals the watchlist dicts in place);
             # the name is what keeps a raise from turning into an IndexError here.
             "sector_backfill",
+            "recent_earnings_alerts",
         ]
         for idx, res in enumerate(results):
             if isinstance(res, BaseException):
@@ -1106,7 +1136,9 @@ class TrackingService:
                     )
                 )
 
-        feed = TrackingFeedResponse(assets=assets, alerts=alerts)
+        feed = TrackingFeedResponse(
+            assets=assets, alerts=alerts, recent_earnings_alerts=recent_earnings_alerts,
+        )
         # Don't PIN a fully-degraded feed. If the quote fan-out resolved nothing at
         # all, every row carries a placeholder price; caching that for the full TTL
         # makes one transient FMP blip look like a 30-second outage on the tab and
@@ -1398,12 +1430,20 @@ class TrackingService:
             # One call per ET day, memoised market-wide (`_cached_earnings_calendar`:
             # today and tomorrow for 30 min, later days for 6 h); the rows are shared
             # with every other build, so this loop only reads them.
-            calendar = await _cached_earnings_calendar(self.fmp, _et_today())
+            today = _et_today()
+            calendar = await _cached_earnings_calendar(self.fmp, today)
             if not calendar:
                 return []
 
             ticker_set = {t.upper() for t in watchlist_tickers}
             alerts: List[AlertResponse] = []
+            # Live results ride on the same rows: today's are folded into the live records
+            # (read-only for this build — only the live loop ever fetches), so a card shows
+            # a figure the moment either the memo or the company's own filing has one.
+            live = get_earnings_live_service() if settings.EARNINGS_LIVE_ENABLED else None
+            now = datetime.now(timezone.utc)
+            if live is not None:
+                live.observe_rows(today, calendar, now, symbols=ticker_set)
 
             for entry in calendar:
                 # One malformed row must not cost every alert: the answer is memoised
@@ -1425,6 +1465,7 @@ class TrackingService:
                     date_str = entry.get("date")
                     day = None
                     month = None
+                    row_day: Optional[date] = None
                     if isinstance(date_str, str) and date_str:
                         try:
                             # [:10]: FMP sometimes sends a full timestamp, which
@@ -1432,6 +1473,7 @@ class TrackingService:
                             dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
                             day = dt.day
                             month = dt.strftime("%b").upper()
+                            row_day = dt.date()
                         except ValueError:
                             pass
 
@@ -1469,6 +1511,11 @@ class TrackingService:
                     raw_name = entry.get("companyName")
                     company_name = raw_name if isinstance(raw_name, str) and raw_name else symbol
 
+                    live_fields: Dict[str, Any] = {}
+                    if live is not None and row_day is not None:
+                        snap = live.snapshot(symbol, row_day, now) if row_day <= today else None
+                        live_fields = card_fields(snap, row_day)
+
                     alerts.append(
                         AlertResponse(
                             type="earnings",
@@ -1481,6 +1528,7 @@ class TrackingService:
                             report_time=report_time,
                             eps_estimate=eps_est,
                             revenue_estimate=rev_est,
+                            **live_fields,
                         )
                     )
                 except Exception as e:
@@ -1495,6 +1543,87 @@ class TrackingService:
         except Exception as exc:
             logger.warning("Earnings alerts failed: %s", exc)
             return []
+
+    async def get_earnings_live(
+        self, symbol: str, requested: Optional[date] = None
+    ) -> EarningsLiveResponse:
+        """`GET /tracking/earnings/{ticker}/live` — one report's live results for the sheet.
+
+        Read-only like the feed: today's rows come from the shared Tracking memo, the
+        previous trading day's from the live loop's records. The report is `requested`
+        when given (it must lie between the previous trading day and today + 14), else
+        today's, else the previous trading day's, else the next one in the window.
+        """
+        sym = symbol.upper()
+        today = _et_today()
+        prev = previous_trading_day(today)
+        if requested is not None and not prev <= requested <= today + timedelta(
+            days=_EARNINGS_ALERT_DAYS_AHEAD
+        ):
+            raise ValueError(
+                f"report_date {requested.isoformat()} is outside {prev.isoformat()}.."
+                f"{(today + timedelta(days=_EARNINGS_ALERT_DAYS_AHEAD)).isoformat()}"
+            )
+        now = datetime.now(timezone.utc)
+        live = get_earnings_live_service()
+        try:
+            calendar = await _cached_earnings_calendar(self.fmp, today)
+        except Exception as e:
+            logger.info("[Tracking] earnings live %s: calendar unavailable (%s: %s)",
+                        sym, type(e).__name__, e)
+            calendar = []
+        live.observe_rows(today, calendar, now, symbols={sym})
+        rows: Dict[date, Dict[str, Any]] = {}
+        for entry in calendar:
+            if not isinstance(entry, dict) or str(entry.get("symbol") or "").upper() != sym:
+                continue
+            raw = entry.get("date")
+            try:
+                d = date.fromisoformat(str(raw or "")[:10])
+            except ValueError:
+                continue
+            rows.setdefault(d, entry)
+
+        if requested is not None:
+            day = requested
+        elif today in rows:
+            day = today
+        elif live.snapshot(sym, prev, now) is not None:
+            day = prev
+        elif rows:
+            day = min(rows)
+        else:
+            day = today
+        snap = live.snapshot(sym, day, now) if day <= today else None
+        row = rows.get(day) or {}
+        raw_name = row.get("companyName")
+        company = raw_name if isinstance(raw_name, str) and raw_name else None
+        found = snap is not None or day in rows
+        extras = await live.history_extras(sym, day) if found else None
+        payload = live_payload(
+            sym, day, snap,
+            company_name=company,
+            eps_estimate=_finite_or_none(row.get("epsEstimated")),
+            revenue_estimate=_finite_or_none(row.get("revenueEstimated")),
+            extras=extras,
+            today=today,
+            found=found,
+        )
+        return EarningsLiveResponse(**payload)
+
+    async def _get_recent_earnings_alerts(
+        self, watchlist_tickers: List[str]
+    ) -> List[AlertResponse]:
+        """The previous trading day's earnings cards — `recent_earnings_alerts`.
+
+        Read-only: the live loop holds that day's rows (`earnings_live_service`), and with
+        the loop off (EARNINGS_LIVE_ENABLED, or local dev) there are simply none.
+        """
+        if not settings.EARNINGS_LIVE_ENABLED or not watchlist_tickers:
+            return []
+        now = datetime.now(timezone.utc)
+        snaps = get_earnings_live_service().recent_snapshots(watchlist_tickers, now)
+        return [_recent_earnings_alert(s) for s in snaps]
 
     # ── Whale Trade Alerts ──────────────────────────────────────────
 

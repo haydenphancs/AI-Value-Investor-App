@@ -270,6 +270,7 @@ KIND_RESEARCH_COMPLETE = "research_complete"
 KIND_RESEARCH_FAILED = "research_failed"
 KIND_EARNINGS_UPCOMING = "earnings_upcoming"
 KIND_EARNINGS_RESULT = "earnings_result"
+KIND_EARNINGS_LIVE = "earnings_live"
 KIND_INSIDER_TRADE = "insider_trade"
 KIND_WHALE_13F = "whale_13f"
 KIND_CONGRESS_TRADE = "congress_trade"
@@ -379,6 +380,29 @@ NOTIFICATION_KINDS: Dict[str, NotificationKind] = {
             label="Earnings results",
             route_tab=TAB_FINANCIALS,
             # The surprise is measured against a consensus and a price that both move.
+            expiration_hours=4,
+        ),
+        # "Live Results" (owner request 2026-10-29): EVERY watched report, the moment any
+        # figure lands — EPS and revenue against consensus, whichever is out — where
+        # `earnings_result` above is the surprises-only alert. They share ONE dedup key per
+        # report (`earnings_sender.result_dedup_key`) and `earnings_live_sender` sends this
+        # one first, so a user with both toggles on is told once. Same group master, same
+        # category cap and thread as its siblings, so the cap and the Earnings master switch
+        # govern all three together.
+        NotificationKind(
+            key=KIND_EARNINGS_LIVE,
+            preference_key="notify_earnings_live",
+            master_preference_key="notify_earnings_alerts",
+            default_on=True,
+            category=CATEGORY_EARNINGS,
+            interruption_level=LEVEL_ACTIVE,
+            thread_id="earnings",
+            respects_quiet_hours=True,
+            route_kind="ticker",
+            label="Live earnings results",
+            route_tab=TAB_FINANCIALS,
+            # A "results are out" banner is news for the evening it lands in, not the next
+            # afternoon; the inbox row keeps it either way.
             expiration_hours=4,
         ),
         # Smart-money kinds are PASSIVE and get apns-priority 5: a Form 4 filed this
@@ -582,6 +606,7 @@ def ticker_route(
     *,
     asset_type: Optional[str] = None,
     whale_id: Optional[str] = None,
+    report_date: Optional[str] = None,
 ) -> Dict[str, str]:
     """Build the `route` payload for a notification that opens an asset screen.
 
@@ -645,6 +670,11 @@ def ticker_route(
     # equity screen.
     if whale_id:
         route["whale_id"] = str(whale_id)
+    # The report an earnings alert is ABOUT ("YYYY-MM-DD"), so the detail screen can open
+    # that report's live results (`AlertDestination.Target.earningsLive`). Additive, for the
+    # same reason as `whale_id` above: the iOS route map ignores names it does not know.
+    if report_date:
+        route["report_date"] = str(report_date)[:10]
     return route
 
 

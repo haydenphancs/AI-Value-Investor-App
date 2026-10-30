@@ -3,7 +3,7 @@
 //  ios
 //
 //  Molecule: Top navigation bar for the report with back, company info,
-//  and an overflow (•••) menu containing share, detailed analysis, delete.
+//  and an overflow (•••) menu containing share, detailed analysis, run again, delete.
 //
 
 import SwiftUI
@@ -16,6 +16,13 @@ struct ReportHeaderBar: View {
     let onBack: () -> Void
     let onShare: () -> Void
     let onViewDetailedAnalysis: () -> Void
+    /// A new paid run of this report's analysis — see `TickerReportView.handleRunAgain`.
+    let onRunAgain: () -> Void
+    /// The line under "Run Again": the analyst that runs it and what it costs
+    /// ("Quality Compounder · 20 credits"). The tap spends at once, with no dialog after it,
+    /// so the cost is stated on the item itself — the disclosure `GenerateAnalysisButton`
+    /// makes with "Uses N Credits".
+    let runAgainDetail: String
     let onDelete: () -> Void
     /// PDF export (Share + View Detailed Analysis) is only available for saved
     /// research reports. Hidden otherwise so the menu never offers a dead action.
@@ -74,8 +81,8 @@ struct ReportHeaderBar: View {
 
             Spacer()
 
-            // Overflow menu (••• → Share / View Ticker / View Detailed Analysis /
-            // Regenerate / Delete). Destructive role auto-renders Delete in red.
+            // Overflow menu (••• → Share / View Detailed Analysis / Run Again / Delete).
+            // Destructive role auto-renders Delete in red.
             Menu {
                 if canExportPDF {
                     Button(action: onShare) {
@@ -84,8 +91,14 @@ struct ReportHeaderBar: View {
                     Button(action: onViewDetailedAnalysis) {
                         Label("View Detailed Analysis", systemImage: "doc.text.magnifyingglass")
                     }
-                    Divider()
                 }
+                // Outside the PDF gate: a re-run needs only the ticker and the analyst, which
+                // every report on screen has. The second Text is the menu item's subtitle.
+                Button(action: onRunAgain) {
+                    Label("Run Again", systemImage: "arrow.clockwise")
+                    Text(runAgainDetail)
+                }
+                Divider()
                 Button(role: .destructive, action: onDelete) {
                     Label("Delete", systemImage: "trash")
                 }
@@ -111,6 +124,8 @@ struct ReportHeaderBar: View {
         onBack: {},
         onShare: {},
         onViewDetailedAnalysis: {},
+        onRunAgain: {},
+        runAgainDetail: "Quality Compounder · 20 credits",
         onDelete: {}
     )
     .background(AppColors.background)

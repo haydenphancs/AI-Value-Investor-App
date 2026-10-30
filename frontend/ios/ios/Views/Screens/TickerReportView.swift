@@ -239,6 +239,8 @@ struct TickerReportView: View {
                 onBack: { dismiss() },
                 onShare: viewModel.shareTapped,
                 onViewDetailedAnalysis: viewModel.viewDetailedAnalysis,
+                onRunAgain: handleRunAgain,
+                runAgainDetail: runAgainDetail(report),
                 onDelete: { showDeleteConfirm = true },
                 canExportPDF: viewModel.canExportPDF
             )
@@ -560,6 +562,41 @@ struct TickerReportView: View {
                     .stroke(AppColors.primaryBlue, lineWidth: 1)
             )
         }
+    }
+
+    // MARK: - Run Again
+
+    /// "Run Again" in the ••• menu: a NEW run of this analysis — the Research tab's Generate
+    /// Analysis for this ticker and this report's analyst — after which the user lands on
+    /// Research → Reports, where the new run's card shows its progress.
+    ///
+    /// Parked on AppState rather than started here. This screen is presented from the Reports
+    /// list AND from notification covers on other tabs, and only the Research tab's
+    /// `ResearchViewModel` can start and monitor a generation; `ResearchViewWithBinding` consumes
+    /// the request. Same shape as "AI Deep Research" (`TickerDetailView.handleDeepResearchTap`):
+    /// park FIRST so the tab has switched before the covers animate away, then ask every tab root
+    /// to take its presentations down — which closes this screen wherever it was opened from.
+    /// No `dismiss()`, for the reason given there: a second dismissal in the same runloop wedges.
+    ///
+    /// The analyst comes from the report ON SCREEN (`report.agent`), never from the route — the
+    /// report chat's rule below: a notification route with no persona defaults to warren_buffett.
+    /// The account is stamped here, at the tap, so the run can never be charged to another one.
+    private func handleRunAgain() {
+        guard let report = viewModel.reportData, !report.symbol.isEmpty else { return }
+        appState.pendingResearchRerun = ResearchRerunRequest(
+            ticker: report.symbol,
+            personaKey: report.agent.personaKey,
+            ownerId: AppActions.shared.currentAccountId
+        )
+        appState.dismissAllPresentations()
+    }
+
+    /// The line under "Run Again" ("Quality Compounder · 20 credits"): which analyst runs and
+    /// what the tap spends — the analyst named the way the Research tab's persona cards name it.
+    private func runAgainDetail(_ report: TickerReportData) -> String {
+        let analyst = AnalysisPersona.forPersonaToken(report.agent.personaKey)?.compactName
+            ?? "\(report.agent.shortName) Agent"
+        return "\(analyst) · \(AnalysisCost.standard.credits) credits"
     }
 
     // MARK: - Report Chat

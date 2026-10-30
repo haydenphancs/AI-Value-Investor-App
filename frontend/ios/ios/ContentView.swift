@@ -459,6 +459,27 @@ struct ResearchViewWithBinding: View {
             // showing a stale target while Generate charged 20 credits for this one.
             viewModel.applyPrefilledTicker(ticker)
         }
+        // "Run Again" on a report (`TickerReportView`), opened from this tab's Reports list or
+        // from a notification cover on another tab. ONE OWNER PER PARKED INTENT, as the shell's
+        // handlers: this view is the value's only observer and its only clearer, so one tap runs
+        // once. Read from AppState rather than handed in by the shell, because only this view
+        // holds the ViewModel that can start and monitor the run.
+        //
+        // The tab switches at once, so Research is what the closing cover reveals. The run waits
+        // for the presentation stack to clear (`ContentView.presentTappedPush`, same idiom): the
+        // reset that closed the report also nils this view's `error`, and an alert cannot present
+        // over a cover that is still animating away — a run that is refused (at the cap, short of
+        // credits) must not lose its explanation to either. `generateAnalysis()` then moves the
+        // segment to Reports, exactly as a Generate tap does.
+        .onChange(of: appState.pendingResearchRerun, initial: true) { _, request in
+            guard let request else { return }
+            appState.pendingResearchRerun = nil
+            selectedTab = .research
+            Task { @MainActor in
+                _ = await ModalPresentationProbe.waitUntilNothingPresented()
+                viewModel.rerunAnalysis(request)
+            }
+        }
         // Live-poll the Reports list while anything is generating.
         //
         // This was wired ONLY in `Views/Screens/ResearchView.swift`, the preview-only

@@ -14,6 +14,10 @@ struct PriceChangeLabel: View {
     var changeAmount: Double? = nil
     var mode: ChangeDisplayMode = .percent
     var showArrow: Bool = true
+    /// An SF Symbol drawn where the arrow goes, in the same colour: the Tracking row's
+    /// pre-market / after-hours chip (`ExtendedSession.symbolName`). Direction then reads
+    /// from the sign and the colour alone. Nil keeps the up/down arrow.
+    var leadingSymbol: String? = nil
     var fontSize: CGFloat = 13
     /// `false` when the caller's backend row said the move is UNKNOWN (`change_known`),
     /// in which case `changePercent` is the wire's non-Optional placeholder `0` and must
@@ -67,7 +71,8 @@ struct PriceChangeLabel: View {
             // Suppressed for non-finite input: an arrow asserts a direction, and there
             // isn't one to assert.
             if showArrow, isFinite {
-                Image(systemName: isPositive ? "arrowtriangle.up.fill" : "arrowtriangle.down.fill")
+                Image(systemName: leadingSymbol
+                      ?? (isPositive ? "arrowtriangle.up.fill" : "arrowtriangle.down.fill"))
                     .font(.system(size: fontSize * 0.7))
             }
 
@@ -103,6 +108,10 @@ struct PriceChangeLabel: View {
         PriceChangeLabel(changePercent: -1.23, changeAmount: -0.05, mode: .amount)
         PriceChangeLabel(changePercent: -0.0, changeAmount: -0.0, mode: .amount)
         PriceChangeLabel(changePercent: 1.5, changeAmount: nil, mode: .amount)
+
+        // The extended-hours chip: a moon / sun in place of the arrow.
+        PriceChangeLabel(changePercent: 0.08, leadingSymbol: "moon.fill", fontSize: 10)
+        PriceChangeLabel(changePercent: -0.35, leadingSymbol: "sun.max.fill", fontSize: 10)
     }
     .padding()
     .background(AppColors.background)

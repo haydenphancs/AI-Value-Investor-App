@@ -39,6 +39,10 @@ ASSET_KEYS = {
     # Companion bools for the two non-Optional floats above (the `pe_known` pattern):
     # iOS decodes them as `Bool?` and renders "—" when False. Added 2026-09-11.
     "price_known", "change_known",
+    # The pre-market / after-hours print (2026-10-30): all three Optional, all three
+    # null in the regular session and on rows with no extended session. iOS decodes
+    # them leniently as `Double?` / `String?` and draws the chip only when all are set.
+    "extended_price", "extended_change_percent", "extended_session",
 }
 ALERT_KEYS = {
     "type", "title", "description", "ticker", "company_name", "day", "month",
@@ -210,9 +214,23 @@ def test_feed_with_extreme_but_finite_values_serializes():
                 price=1e12, change_percent=999.99, previous_close=1e11,
                 sparkline_data=[1e11, 1e12],
             ),
+            TrackedAssetResponse(
+                ticker="AAPL", company_name="Apple",
+                price=348.91, change_percent=1.48, previous_close=343.82,
+                extended_price=349.2, extended_change_percent=0.08,
+                extended_session="after_hours",
+            ),
         ]
     )
     json.dumps(feed.model_dump(), allow_nan=False)
+
+
+def test_the_extended_print_is_absent_by_default():
+    """A row with no print (the regular session, a coin, an index) sends all three
+    keys as null — never a 0.0 placeholder the client could draw as a flat move."""
+    dumped = TrackedAssetResponse(ticker="ORCL", company_name="Oracle").model_dump()
+    for key in ("extended_price", "extended_change_percent", "extended_session"):
+        assert key in dumped and dumped[key] is None, key
 
 
 def test_required_asset_fields_are_never_null_on_the_wire():

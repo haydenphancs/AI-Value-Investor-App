@@ -17,10 +17,13 @@ from typing import Optional, List, Dict, Any, Tuple
 import logging
 
 from app.integrations.fmp import get_fmp_client, FMPClient, FMPUnavailableException
+from app.integrations.fmp_entitlements import is_blocked_symbol
 from app.services.chart_helper import (
     FULL_SPAN,
+    fetch_extended_bars,
     fetch_sparkline_bars,
     intraday_span,
+    latest_extended_print,
     sparkline_precision,
     _finite_or_none,
 )
@@ -63,7 +66,13 @@ from app.services._earnings_common import (
 from app.config import settings
 from app.services.asset_class import uses_coingecko_price
 from app.services.price_service import price_source
-from app.utils.market_hours import ET
+from app.utils.market_hours import (
+    ET,
+    SESSION_CLOSED,
+    SESSION_REGULAR,
+    last_regular_session,
+    session_phase,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +217,62 @@ def _insider_cache_set(ticker: str, value: Any) -> None:
             for key in list(_insider_cache.keys())[:overflow]:
                 _insider_cache.pop(key, None)
     _insider_cache[ticker] = (_time.monotonic(), value)
+
+
+# Per-ticker tier-1 cache for the extended-hours print (`_get_extended_prints`). Keyed by
+# TICKER, with the session the print was read for stored beside it — (monotonic_ts, tag,
+# print) — so the dict stays bounded by the tickers ever asked about. The tag is
+# "<last regular session>:<phase>": a mismatch is a miss, so 04:00, 16:00 and 20:00 ET each
+# force a fresh read instead of serving yesterday's after-hours print into today's
+# pre-market for a TTL. A cached None is a HIT (no trade after the bell, an empty FMP
+# answer) — the same pin the sparkline keeps.
+_extended_cache: Dict[str, Tuple[float, str, Optional[Dict[str, Any]]]] = {}
+# Pre-market / after-hours: bars land every 5 minutes, so 60 s keeps the print within
+# about one bar of FMP.
+EXTENDED_PRINT_TTL = 60
+# 20:00-04:00 ET, weekends and holidays: the print cannot move. A half-day's 13:00-17:00
+# after-hours also reads CLOSED in `session_phase`, so it refreshes at this pace too.
+EXTENDED_PRINT_CLOSED_TTL = 900
+# Same key space as the insider cache (every user's watchlist), same bound.
+_EXTENDED_CACHE_SWEEP_AT = 5000
+
+
+def _extended_cache_get(
+    ticker: str, tag: str, ttl: float
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """(hit, print). A print read for another session, or older than ``ttl``, is a miss."""
+    entry = _extended_cache.get(ticker)
+    if entry is None:
+        return False, None
+    ts, held_tag, value = entry
+    if held_tag != tag or _time.monotonic() - ts > ttl:
+        return False, None
+    return True, value
+
+
+def _extended_cache_set(ticker: str, tag: str, value: Optional[Dict[str, Any]]) -> None:
+    if len(_extended_cache) >= _EXTENDED_CACHE_SWEEP_AT:
+        now = _time.monotonic()
+        for key in [k for k, (ts, _t, _v) in _extended_cache.items()
+                    if now - ts > EXTENDED_PRINT_CLOSED_TTL]:
+            _extended_cache.pop(key, None)
+        if len(_extended_cache) >= _EXTENDED_CACHE_SWEEP_AT:
+            overflow = len(_extended_cache) - _EXTENDED_CACHE_SWEEP_AT + 1
+            for key in list(_extended_cache.keys())[:overflow]:
+                _extended_cache.pop(key, None)
+    _extended_cache[ticker] = (_time.monotonic(), tag, value)
+
+
+def _has_extended_session(ticker: str, stored_type: Optional[str]) -> bool:
+    """Whether a row can carry a pre-market / after-hours print at all.
+
+    A licence-blocked symbol (index, commodity code, FX or crypto pair) has no FMP bars to
+    read, and a coin has no extended session — it trades round the clock and its price is
+    already live. A bare BTC / ETH is the listed ETF since migration 160 and qualifies.
+    """
+    if is_blocked_symbol(ticker):
+        return False
+    return resolve_asset_class(ticker, stored_type) not in ("crypto", "index")
 
 
 def _fanout_tickers(tickers: List[str], user_id: str) -> List[str]:
@@ -934,8 +999,11 @@ class TrackingService:
         analyst_task = self._get_analyst_rating_alerts(tickers)
         insider_task = self._get_insider_transaction_alerts(fanout, asset_types)
         backfill_task = self._backfill_classification(user_id, watchlist)
+        # The pre-market / after-hours print, also one FMP call per ticker (outside the
+        # regular session only), so it takes the capped subset like the sparklines.
+        extended_task = self._get_extended_prints(fanout, asset_types)
 
-        # ⚠️ Positions are load-bearing: results[0..5] are unpacked by index below and
+        # ⚠️ Positions are load-bearing: results[0..5] and [7] are unpacked by index below and
         # `section_names` is indexed by position. A new member goes LAST, with its name
         # appended to `section_names`.
         results = await asyncio.gather(
@@ -946,6 +1014,7 @@ class TrackingService:
             analyst_task,
             insider_task,
             backfill_task,
+            extended_task,
             return_exceptions=True,
         )
 
@@ -967,6 +1036,9 @@ class TrackingService:
         insider_alerts: List[AlertResponse] = (
             results[5] if not isinstance(results[5], BaseException) else []
         )
+        extended_map: Dict[str, Dict[str, Any]] = (
+            results[7] if not isinstance(results[7], BaseException) else {}
+        )
 
         section_names = [
             "batch_quotes",
@@ -978,6 +1050,8 @@ class TrackingService:
             # results[6]: its value is ignored (it heals the watchlist dicts in place);
             # the name is what keeps a raise from turning into an IndexError here.
             "sector_backfill",
+            # results[7]: a raise only costs the rows their extended-hours print.
+            "extended_prints",
         ]
         for idx, res in enumerate(results):
             if isinstance(res, BaseException):
@@ -1049,6 +1123,16 @@ class TrackingService:
                 # movers scanner applies for the same reason.
                 change_pct = (change_pct if change_pct is not None else 0.0) + 0.0
 
+                # The pre-market / after-hours print, measured from THIS row's price: the
+                # regular-session price on screen (the screener holds the close until the
+                # next bell), so the chip and the number beside it agree. All three fields
+                # or none — a print with nothing to measure it from has no move to show.
+                ext = extended_map.get(ticker) or {}
+                ext_price = _finite_or_none(ext.get("price"))
+                ext_change: Optional[float] = None
+                if ext_price is not None and ext_price > 0 and price_f is not None and price_f > 0:
+                    ext_change = _finite_or_none((ext_price - price_f) / price_f * 100.0)
+
                 # Holding info — these columns live on watchlist_items and
                 # are populated by the Portfolio Insights config sheet. iOS
                 # uses them to pre-fill the inputs and decide which rows
@@ -1086,6 +1170,16 @@ class TrackingService:
                         # RESOLVED, not the raw column: the 'Stock' default was published
                         # verbatim for every coin/ETF row (see home_dashboard_service).
                         asset_type=resolve_asset_class(ticker, item.get("asset_type")),
+                        extended_price=(
+                            round(ext_price, 2) if ext_change is not None else None
+                        ),
+                        # `+ 0.0`: the same signed-zero guard as `change_percent`.
+                        extended_change_percent=(
+                            round(ext_change, 2) + 0.0 if ext_change is not None else None
+                        ),
+                        extended_session=(
+                            ext.get("session") if ext_change is not None else None
+                        ),
                     )
                 )
             except Exception as exc:
@@ -1387,6 +1481,66 @@ class TrackingService:
 
         results = await asyncio.gather(*[_fetch_one(t) for t in tickers])
         return {t: (series, lo, hi) for t, series, lo, hi in results}
+
+    # ── Extended-hours prints ───────────────────────────────────────
+
+    async def _get_extended_prints(
+        self,
+        tickers: List[str],
+        asset_types: Optional[Dict[str, str]] = None,
+        *,
+        now: Optional[datetime] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """The newest pre-market / after-hours print per ticker: ``{ticker: {price, session}}``.
+
+        Outside the regular session only. The row's own price comes from the screener /
+        profile, which hold the regular-session price until the next bell (the screener
+        still reports Friday's close at 07:00 Monday), so this is the one place an
+        extended-hours price reaches the Assets tab — read from the licensed
+        `extended=true` 5-minute bars (`chart_helper.fetch_extended_bars`).
+
+        During the regular session this returns ``{}`` WITHOUT an FMP call: the live
+        price already is the latest trade. Overnight and at weekends the last
+        after-hours print stays until pre-market starts at 04:00 ET (owner decision
+        2026-10-30), held for `EXTENDED_PRINT_CLOSED_TTL`.
+
+        ``asset_types`` maps ticker → the STORED ``asset_type`` column, a hint only, as
+        in `_get_all_sparklines`. A row that cannot have a print (`_has_extended_session`)
+        costs no call. A failed read logs and costs that row its print, nothing more,
+        and is not cached, so the next build retries it. ``now`` is injectable for tests;
+        the feed build passes none.
+        """
+        asset_types = asset_types or {}
+        if now is None:
+            now = datetime.now(ET)
+        phase = session_phase(now)
+        if phase == SESSION_REGULAR:
+            return {}
+        tag = f"{last_regular_session(now).isoformat()}:{phase}"
+        ttl = EXTENDED_PRINT_CLOSED_TTL if phase == SESSION_CLOSED else EXTENDED_PRINT_TTL
+        gate = asyncio.Semaphore(_PER_TICKER_FANOUT_CONCURRENCY)
+
+        async def _fetch_one(ticker: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+            if not _has_extended_session(ticker, asset_types.get(ticker)):
+                return ticker, None
+            hit, held = _extended_cache_get(ticker, tag, ttl)
+            if hit:
+                return ticker, held
+            async with gate:
+                try:
+                    bars = await fetch_extended_bars(self.fmp, ticker, now=now)
+                except Exception as exc:
+                    logger.warning(
+                        "Extended-hours print for %s failed: %s: %s",
+                        ticker, type(exc).__name__, exc,
+                    )
+                    return ticker, None
+            found = latest_extended_print(bars)
+            _extended_cache_set(ticker, tag, found)
+            return ticker, found
+
+        results = await asyncio.gather(*[_fetch_one(t) for t in tickers])
+        return {t: found for t, found in results if found}
 
     # ── Earnings Alerts ─────────────────────────────────────────────
 

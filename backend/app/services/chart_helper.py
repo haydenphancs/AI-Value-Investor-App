@@ -16,7 +16,10 @@ logger = logging.getLogger(__name__)
 from app.utils.market_hours import (
     ET,
     US_MARKET_EARLY_CLOSES,
+    WIRE_STATUS_AFTER_HOURS,
+    WIRE_STATUS_PRE_MARKET,
     is_trading_day,
+    last_regular_session,
     previous_trading_day,
 )
 
@@ -1001,6 +1004,90 @@ async def fetch_sparkline_bars(
     return await _fetch_intraday_bars(
         fmp, symbol, SPARKLINE_INTERVAL, from_date, to_date, extended_hours
     )
+
+
+# ── Holdings-card extended-hours print (Tracking) ──────────────────────────────
+
+
+async def fetch_extended_bars(
+    fmp: FMPClient,
+    symbol: str,
+    *,
+    now: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """The 5-minute bars, pre-market and after-hours INCLUDED, behind one row's
+    extended-hours print: from the last regular session through today (ET).
+
+    The licensed source of an after-hours price. FMP's `aftermarket-quote` is in the
+    "Real-time Market Data" package we did not buy, and the quote sources
+    (`company-screener`, `profile`) carry the regular-session price only — but
+    `historical-chart` serves the 04:00-20:00 ET bars when asked (`extended=true`).
+
+    The window starts at `last_regular_session`, so it holds that session's last
+    regular bar (what the print is measured after) and everything since: its
+    after-hours, and before the open today's pre-market. One session (≤ 192 rows)
+    after the close; that session plus today's pre-market before the bell.
+
+    The caller gates crypto (24/7, no extended session) and licence-blocked symbols
+    out before calling; this function does not re-check.
+    """
+    if now is None:
+        now = datetime.now(ET)
+    elif now.tzinfo is None:
+        # `market_hours` reads a naive instant as UTC; so must the "today" below.
+        now = now.replace(tzinfo=timezone.utc)
+    today = now.astimezone(ET).date()
+    return await _fetch_intraday_bars(
+        fmp, symbol, SPARKLINE_INTERVAL,
+        last_regular_session(now).isoformat(), today.isoformat(),
+        extended_hours=True,
+    )
+
+
+def latest_extended_print(bars: Any) -> Optional[Dict[str, Any]]:
+    """The newest pre-market / after-hours print after the last regular-session bar.
+
+    ``bars`` is `fetch_extended_bars` output: oldest first, and already normalised
+    (`_normalize_prices` dropped rows with no date or a non-positive close). Returns
+    ``{"price": close, "session": "pre_market" | "after_hours"}`` — the wire values of
+    `market_hours.WIRE_STATUS_*` — or None when no regular bar exists to measure from,
+    or nothing traded after it.
+
+    The bell comes from `_session_window`, not `_filter_regular_hours`: that filter
+    closes every day at 16:00, so a half-day's 13:00-17:00 after-hours prints would
+    read as regular session and never surface. The session is named by the print's
+    OWN stamp (FMP's ET wall clock), never by the clock now: at 05:00 Monday, before
+    any pre-market trade, the newest print is still Friday's after-hours one, and it
+    says so.
+    """
+    if not isinstance(bars, list):
+        return None
+    last_regular: Optional[int] = None
+    for idx, bar in enumerate(bars):
+        if not isinstance(bar, dict):
+            continue
+        stamp = bar.get("date")
+        minute = _bar_minute_of_day(stamp)
+        window = _session_window(stamp, extended_hours=False)
+        if minute is None or window is None:
+            continue
+        if window[0] <= minute < window[1]:
+            last_regular = idx
+    if last_regular is None:
+        return None
+    for bar in reversed(bars[last_regular + 1:]):
+        if not isinstance(bar, dict):
+            continue
+        minute = _bar_minute_of_day(bar.get("date"))
+        close = _finite_or_none(bar.get("close"))
+        if minute is None or close is None or close <= 0:
+            continue
+        session = (
+            WIRE_STATUS_PRE_MARKET if minute < _REGULAR_OPEN_MINUTE
+            else WIRE_STATUS_AFTER_HOURS
+        )
+        return {"price": close, "session": session}
+    return None
 
 
 def _filter_regular_hours(prices: List[Dict]) -> List[Dict]:

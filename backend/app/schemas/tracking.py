@@ -61,6 +61,16 @@ class TrackedAssetResponse(BaseModel):
     shares: Optional[float] = None
     market_value: Optional[float] = None
     asset_type: Optional[str] = None
+    # The newest pre-market / after-hours print (`TrackingService._get_extended_prints`),
+    # outside the regular session only, for rows that have an extended session (not
+    # crypto, indices or licence-blocked symbols). `price` above stays the
+    # regular-session price; `extended_change_percent` is the print's move FROM it.
+    # `extended_session` is "pre_market" | "after_hours" (`market_hours.WIRE_STATUS_*`),
+    # named by the print's own ET time. All three set together, or all None; older
+    # clients ignore them.
+    extended_price: Optional[float] = None
+    extended_change_percent: Optional[float] = None
+    extended_session: Optional[str] = None
 
 
 class WhaleTradeItemResponse(BaseModel):

@@ -95,6 +95,14 @@ struct TrackedAsset: Identifiable {
     /// Authoritative previous close from the backend FMP quote (nil on older
     /// backends / degraded rows). Preferred over the derived value below.
     let backendPreviousClose: Double?
+    /// The newest pre-market / after-hours print (`extended_*` on the wire), outside the
+    /// regular session only. `extendedChangePercent` is its move FROM `price`, which stays
+    /// the regular-session price. All three nil in the regular session, on a coin, index
+    /// or commodity row, and on an older backend. Declared last with defaults so every
+    /// existing memberwise call (the samples, the height probe's stand-in) still compiles.
+    var extendedPrice: Double? = nil
+    var extendedChangePercent: Double? = nil
+    var extendedSession: ExtendedSession? = nil
 
     /// Signed zero collapsed to +0 — see `PriceChangeLabel.normalizedChange`.
     /// `-0.0` (what a barely-negative move rounds to) satisfies `>= 0` yet still
@@ -161,6 +169,26 @@ struct TrackedAsset: Identifiable {
         return TrackedAsset.formatSignedCurrency(amount)
     }
 
+    /// The extended-hours move in dollars — the chip's value in ``ChangeDisplayMode/amount``.
+    /// Derived like `changeAmount`: both sides are rounded to 2dp server-side, so it is exact
+    /// to the cent. Nil when either side is unknown or non-finite.
+    var extendedChangeAmount: Double? {
+        guard priceKnown, price.isFinite, let ext = extendedPrice, ext.isFinite else { return nil }
+        let delta = ext - price
+        return delta.isFinite ? delta : nil
+    }
+
+    /// The extended-hours price as VoiceOver reads it, formatted like `formattedPrice`.
+    var formattedExtendedPrice: String? {
+        guard let ext = extendedPrice, ext.isFinite else { return nil }
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .currency
+        formatter.currencySymbol = "$"
+        formatter.minimumFractionDigits = 2
+        formatter.maximumFractionDigits = 2
+        return formatter.string(from: NSNumber(value: ext)) ?? String(format: "$%.2f", ext)
+    }
+
     /// `true` when this ticker is opted into Portfolio Insights — i.e. the
     /// user has provided either a share count or a dollar amount for it.
     var isHolding: Bool {
@@ -205,6 +233,33 @@ struct TrackedAsset: Identifiable {
         guard changeKnown else { return "—" }
         let sign = isPositive ? "+" : ""
         return "\(sign)\(String(format: "%.2f", normalizedChange))%"
+    }
+}
+
+// MARK: - Extended Session
+
+/// Which extended session a Tracking row's print belongs to: the backend's
+/// `market_hours.WIRE_STATUS_PRE_MARKET` / `WIRE_STATUS_AFTER_HOURS`. Named by the print's
+/// own New York time, so at 05:00 ET on a Monday, before any pre-market trade, Friday's
+/// after-hours print still says after hours.
+enum ExtendedSession: String {
+    case preMarket = "pre_market"
+    case afterHours = "after_hours"
+
+    /// The chip's glyph, drawn where the day change draws its arrow.
+    var symbolName: String {
+        switch self {
+        case .preMarket: return "sun.max.fill"
+        case .afterHours: return "moon.fill"
+        }
+    }
+
+    /// What VoiceOver says before the extended price.
+    var spokenName: String {
+        switch self {
+        case .preMarket: return "Pre-market"
+        case .afterHours: return "After hours"
+        }
     }
 }
 
@@ -667,6 +722,11 @@ struct TrackedAssetDTO: Codable, Identifiable {
     /// it into "+0.00%" in green). `nil` (older backend) reads as known.
     let priceKnown: Bool?
     let changeKnown: Bool?
+    /// The pre-market / after-hours print. Optional on the wire and here: an older backend
+    /// sends no key, and every row in the regular session sends null.
+    let extendedPrice: Double?
+    let extendedChangePercent: Double?
+    let extendedSession: String?
 
     enum CodingKeys: String, CodingKey {
         case ticker
@@ -684,6 +744,9 @@ struct TrackedAssetDTO: Codable, Identifiable {
         case marketCap = "market_cap"
         case assetType = "asset_type"
         case marketValue = "market_value"
+        case extendedPrice = "extended_price"
+        case extendedChangePercent = "extended_change_percent"
+        case extendedSession = "extended_session"
     }
 
     /// Hand-written so ONE malformed row cannot destroy the entire watchlist.
@@ -731,6 +794,9 @@ struct TrackedAssetDTO: Codable, Identifiable {
         marketValue = lenient(Double.self, .marketValue).finiteOrNil
         priceKnown = lenient(Bool.self, .priceKnown)
         changeKnown = lenient(Bool.self, .changeKnown)
+        extendedPrice = lenient(Double.self, .extendedPrice).finiteOrNil
+        extendedChangePercent = lenient(Double.self, .extendedChangePercent).finiteOrNil
+        extendedSession = lenient(String.self, .extendedSession)
     }
 
     /// Map to the view-layer model used by AssetsListSection
@@ -757,7 +823,12 @@ struct TrackedAssetDTO: Codable, Identifiable {
             marketValue: marketValue,
             sector: sector,
             country: country,
-            backendPreviousClose: previousClose
+            backendPreviousClose: previousClose,
+            extendedPrice: extendedPrice,
+            extendedChangePercent: extendedChangePercent,
+            // An unknown session string (a newer backend) maps to nil, which hides the chip
+            // rather than guessing a glyph.
+            extendedSession: extendedSession.flatMap(ExtendedSession.init(rawValue:))
         )
     }
 }

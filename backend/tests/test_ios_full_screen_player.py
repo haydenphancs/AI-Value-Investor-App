@@ -100,12 +100,12 @@ def test_the_player_still_spans_the_whole_window():
     assert "backgroundGradient\n                    .ignoresSafeArea()" in body
 
 
-def test_one_window_lookup_shared_with_has_dynamic_island():
+def test_one_window_lookup():
+    """`AudioManager.hasDynamicIsland`, the other reader of the window, is gone with the floating
+    status island it gated (test_ios_audio_player_single_render); the one lookup stays here."""
     metrics = _code(WINDOW_METRICS)
     assert "connectedScenes" in metrics and "isKeyWindow" in metrics
     manager = _code(AUDIO_MANAGER)
-    island = _block_after(manager, "static var hasDynamicIsland: Bool")
-    assert "WindowMetrics.safeAreaInsets.top" in island
     assert "connectedScenes" not in manager, "AudioManager grew its own window lookup again"
 
 

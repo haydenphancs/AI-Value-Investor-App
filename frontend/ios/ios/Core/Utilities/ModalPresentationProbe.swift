@@ -55,3 +55,16 @@ enum ModalPresentationProbe {
 
     private static let log = Logger(subsystem: "com.phan.caydex", category: "presentation")
 }
+
+extension UIView {
+    /// The view controller whose view hierarchy holds this view — the nearest one up the
+    /// responder chain. Lets a SwiftUI probe ask UIKit where its host sits in the presentation
+    /// stack (`GlobalAudioOverlay`, the narration paywall).
+    var hostViewController: UIViewController? {
+        var responder = next
+        while let current = responder, !(current is UIViewController) {
+            responder = current.next
+        }
+        return responder as? UIViewController
+    }
+}

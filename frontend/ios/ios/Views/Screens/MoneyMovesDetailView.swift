@@ -128,11 +128,9 @@ struct MoneyMovesDetailView: View {
         }
         // Prevent accidental navigation gestures
         .interactiveDismissDisabled(false)
-        // Narration is Pro/Max: the audio ENGINE refuses a locked episode and asks for
-        // an upgrade, so this presenter is what turns that into the plan sheet. Needed on
-        // each screen because these are fullScreenCovers — a modifier on the presenter
-        // does not reach them.
-        .learnAudioPaywall()
+        // NO `.learnAudioPaywall()`: this is a PUSH in Learn's NavigationStack, and
+        // LearnContentView's presenter (outside that stack) already covers it. A second one here
+        // would answer the same refusal — two plan sheets for one tap.
     }
 
     /// Build the card rows from authored content first (backend → bundled, served by

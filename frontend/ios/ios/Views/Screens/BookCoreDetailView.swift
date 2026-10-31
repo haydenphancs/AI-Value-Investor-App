@@ -14,7 +14,6 @@ struct BookCoreDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var audioManager: AudioManager
     @State private var scrollOffset: CGFloat = 0
-    @State private var previousScrollOffset: CGFloat = 0
     @State private var inputText: String = ""
     @State private var currentContent: CoreChapterContent
 
@@ -27,19 +26,14 @@ struct BookCoreDetailView: View {
     @State private var showBookFinale = false
     @State private var bookFinishedCancellable: AnyCancellable?
 
-    // Track if user initiated playback from this view or if it was already playing
-    @State private var shouldShowPlayer: Bool = false
-
     // True while we're programmatically scrolling — following the narration, or jumping to the top
-    // on a core switch — so the scroll-driven player hide/show logic ignores it (our own scrolling
-    // shouldn't hide the mini player).
+    // on a core switch — so `handleScrollChange` can pin the reported offset (see `isPinnedToTop`).
     @State private var isAutoScrolling: Bool = false
 
     /// Monotonic token for programmatic scrolls. Every `beginProgrammaticScroll` bumps it, and the
     /// clear it schedules only fires if it still owns the newest token. Without this, two scrolls
     /// closer together than the settle window (Next-Next taps; a read-along hop landing on a core
-    /// switch) let the EARLIER one's clear unset the flag mid-flight of the LATER one — re-arming
-    /// `hidePlayerByScroll()` against a scroll the user never made.
+    /// switch) let the EARLIER one's clear unset the flag mid-flight of the LATER one.
     @State private var autoScrollGeneration: Int = 0
 
     /// Set while a core switch settles. The scroll view is already back at the top, but the offset
@@ -51,7 +45,7 @@ struct BookCoreDetailView: View {
     /// Scroll anchor for "the very top of the reader" — see the header spacer in `body`.
     private static let coreTopAnchorID = "coreTop"
 
-    /// Stable token keying this screen's compact-mode requests + audio overlay host registration.
+    /// Stable token keying this screen's audio overlay.
     @State private var compactToken = UUID().uuidString
     /// Owns the chat conversation for this core so it resumes while the screen is open.
     @StateObject private var chatViewModel = ChatViewModel()
@@ -231,8 +225,7 @@ struct BookCoreDetailView: View {
                     // Chapter header
                     CoreDetailHeaderSection(
                         content: content,
-                        book: book,
-                        onPlayStarted: { shouldShowPlayer = true }
+                        book: book
                     )
                     .padding(.horizontal, AppSpacing.lg)
 
@@ -325,8 +318,6 @@ struct BookCoreDetailView: View {
                 // view hasn't physically moved yet) overwrote these immediately and flashed the
                 // sticky mini header in and back out. `isPinnedToTop` is what makes the reset stick.
                 scrollOffset = 0
-                previousScrollOffset = 0
-                audioManager.resetScrollHiding()
             }
             }
 
@@ -356,41 +347,25 @@ struct BookCoreDetailView: View {
                 .zIndex(10)
             }
 
-            // Bottom AI chat bar
+            // Bottom AI chat bar. The audio player is the square at the bar's left
+            // (`ChatBarAudioControl`), never a mini player stacked above the bar.
             VStack(spacing: 0) {
                 Spacer()
 
-                // Global Mini Player (show if audio was playing or user started playback);
-                // hidden when collapsed to the top island (chat-bar focused).
-                if shouldShowPlayer && audioManager.hasActiveEpisode && !audioManager.isPlayerHiddenByScroll && !audioManager.showFullScreenPlayer && !audioManager.isCompactMode {
-                    GlobalMiniPlayer(bottomSpacing: AppSpacing.md / 2)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-
-                // Tapping the chat bar collapses the player to the top status island (Wiser-only).
                 CaydexAIChatBar(
                     inputText: $inputText,
-                    onSend: handleAISend,
-                    onFocusChange: { focused in
-                        audioManager.setCompactMode(focused, reason: compactToken)
-                    }
+                    onSend: handleAISend
                 )
             }
-            .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
-            .animation(.spring(response: 0.25, dampingFraction: 0.85), value: audioManager.isPlayerHiddenByScroll)
-            .animation(.spring(response: 0.3, dampingFraction: 0.85), value: shouldShowPlayer)
-            .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.isCompactMode)
         }
-        // Attached to the outer ZStack, so everything INSIDE it — including the bottom mini player
-        // and the Ask Cay AI bar — sits under the scrim, while the audio chrome added below (the
-        // top status island and the full-screen player) stays above it. That's the right split:
-        // the island only appears while the chat bar is focused, which is impossible behind a
-        // modal scrim, and the full-screen player is only up if the learner opened it deliberately.
+        // Attached to the outer ZStack, so everything INSIDE it — including the Ask Cay AI bar and
+        // its audio square — sits under the scrim, while the full-screen player added below stays
+        // above it: that one is only up if the learner opened it deliberately.
         .overlay { bookFinaleOverlay }
-        // Top status island + full-screen player + overlay-host registration (this screen is a
-        // fullScreenCover above RootContainerView, whose own overlay would be hidden). "Read" jumps
-        // the reading view to the core the narration is currently in — for THIS book; another
-        // book's narration opens that book's reader via the modifier instead.
+        // The full-screen player (this screen is a fullScreenCover above RootContainerView, whose
+        // own layer it hides). "Read" jumps the reading view to the core the narration is
+        // currently in — for THIS book; another book's narration opens that book's reader via the
+        // modifier instead.
         .globalAudioOverlay(token: compactToken, readerHost: BookReaderHost(
             curriculumOrder: book.curriculumOrder,
             openCore: { coreNumber in
@@ -400,11 +375,6 @@ struct BookCoreDetailView: View {
         .navigationBarHidden(true)
         .aiChatCover(isPresented: $showAIChat, viewModel: chatViewModel)
         .onAppear {
-            // If audio is already playing, show the player
-            if audioManager.hasActiveEpisode && audioManager.isPlaying {
-                shouldShowPlayer = true
-            }
-
             // Load the book narration when view appears (paused), unless already active
             ensureBookEpisodeLoaded()
 
@@ -432,8 +402,6 @@ struct BookCoreDetailView: View {
                 }
         }
         .onDisappear {
-            // Reset scroll hiding when leaving the view
-            audioManager.resetScrollHiding()
             // Cancel audio completion subscription
             audioCompletionCancellable?.cancel()
             audioCompletionCancellable = nil
@@ -581,33 +549,18 @@ struct BookCoreDetailView: View {
     }
 
     private func handleScrollChange(newOffset: CGFloat) {
-        // Ignore programmatic scrolling (read-along follow, core-switch jump-to-top) so it doesn't
-        // hide the mini player. During a core switch we also DISBELIEVE the reported offset: the
-        // scroll view is already at the top, but the PreferenceKey still reports the old mid-page
-        // value for a frame or two, which would drive headerOpacity 0 → 1 → 0 and flash the sticky
-        // mini header. The read-along path deliberately does NOT pin — its offset reports are real,
-        // and freezing headerOpacity for 0.6s there would strand the mini header.
-        if isAutoScrolling {
-            let effective = isPinnedToTop ? 0 : newOffset
-            previousScrollOffset = effective
-            scrollOffset = effective
+        // During a core switch we DISBELIEVE the reported offset: the scroll view is already at the
+        // top, but the PreferenceKey still reports the old mid-page value for a frame or two, which
+        // would drive headerOpacity 0 → 1 → 0 and flash the sticky mini header. The read-along path
+        // deliberately does NOT pin — its offset reports are real, and freezing headerOpacity for
+        // 0.6s there would strand the mini header.
+        //
+        // (Scrolling no longer hides any audio player: the player is the square inside the Ask Cay
+        // AI bar's row, which never covers the page.)
+        if isAutoScrolling && isPinnedToTop {
+            scrollOffset = 0
             return
         }
-        let scrollDelta = newOffset - previousScrollOffset
-
-        // Update global audio player visibility based on scroll direction
-        // Require minimum scroll delta to avoid flickering
-        if abs(scrollDelta) > 8 {
-            if scrollDelta > 0 && newOffset > 50 {
-                // Scrolling down - hide global audio player
-                audioManager.hidePlayerByScroll()
-            } else if scrollDelta < -8 {
-                // Scrolling up - show global audio player
-                audioManager.showPlayerAfterScroll()
-            }
-            previousScrollOffset = newOffset
-        }
-
         scrollOffset = newOffset
     }
 
@@ -761,9 +714,6 @@ struct BookCoreDetailView: View {
             contextType: .book,
             referenceId: String(book.curriculumOrder)
         )
-        // Release the focus-driven compact reason deterministically (the covered TextField's
-        // focus-off event is unreliable) so the mini player returns when the chat closes.
-        audioManager.setCompactMode(false, reason: compactToken)
         showAIChat = true
     }
 }
@@ -789,7 +739,6 @@ private struct CoreDetailHeaderSection: View {
     @EnvironmentObject private var audioManager: AudioManager
     let content: CoreChapterContent
     let book: LibraryBook
-    var onPlayStarted: (() -> Void)?
 
     /// True while the signed narration URL is being fetched.
     @State private var isPreparingAudio = false
@@ -875,10 +824,6 @@ private struct CoreDetailHeaderSection: View {
                 let episode = try await book.playableAudioEpisode()
                 // Play the whole-book narration, seeking to this core's start offset
                 audioManager.play(episode, startAt: coreStart)
-                // Force show the global audio player
-                audioManager.resetScrollHiding()
-                // Notify parent that playback started
-                onPlayStarted?()
             } catch LibraryBook.PlayableAudioFailure.notNarrated {
                 // No narration for this book — nothing to report.
             } catch {

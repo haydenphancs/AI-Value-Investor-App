@@ -184,16 +184,7 @@ struct GlobalMiniPlayer: View {
                 audioManager.togglePlayPause()
             }
         }) {
-            ZStack {
-                Circle()
-                    .fill(AppColors.primaryFill)
-                    .frame(width: 44, height: 44)
-
-                Image(systemName: audioManager.isPlaying ? "pause.fill" : "play.fill")
-                    .font(AppTypography.iconDefault).fontWeight(.bold)
-                    .foregroundColor(AppColors.textOnAccent)
-                    .offset(x: audioManager.isPlaying ? 0 : 1)
-            }
+            PlayPauseCircle(isPlaying: audioManager.isPlaying)
         }
         .buttonStyle(PlainButtonStyle())
     }

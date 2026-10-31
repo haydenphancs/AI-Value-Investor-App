@@ -19,21 +19,6 @@ final class AudioManager: ObservableObject {
     // MARK: - Singleton (for environment injection)
     static let shared = AudioManager()
 
-    // MARK: - Device capability
-    @MainActor private static var _hasDynamicIsland: Bool?
-    /// Whether this device has a Dynamic Island, i.e. whether the system Now Playing is shown at the
-    /// top WHILE IN-APP. Detected from the key window's top safe-area inset (~59pt DI, ~47 notch,
-    /// ~20 others). Cached once a real inset is available. On non-DI devices we keep an in-app
-    /// indicator (the system audio surfaces only on the Lock Screen / Control Center there).
-    @MainActor static var hasDynamicIsland: Bool {
-        if let cached = _hasDynamicIsland { return cached }
-        let top = WindowMetrics.safeAreaInsets.top
-        guard top > 0 else { return false } // window not ready yet
-        let result = top >= 51
-        _hasDynamicIsland = result
-        return result
-    }
-
     // MARK: - Published State
     @Published private(set) var currentEpisode: AudioEpisode?
     @Published private(set) var playbackState: PlaybackState = .idle
@@ -62,8 +47,10 @@ final class AudioManager: ObservableObject {
     // UI State
     @Published var isMiniPlayerExpanded: Bool = false
     @Published var showFullScreenPlayer: Bool = false
-    @Published private(set) var isCompactMode: Bool = false  // True when collapsed to the top status island
-    @Published var isPlayerHiddenByScroll: Bool = false  // True when scroll-based hiding is active
+    /// True while the screen on top hosts its own player beside its Ask Cay AI bar
+    /// (`ChatBarAudioControl`) or in the chat's top bar, so the root's floating mini player stands
+    /// down instead of landing on that bar.
+    @Published private(set) var isCompactMode: Bool = false
 
     /// True once the CURRENT episode has actually been started by the user (play / resume), false
     /// while it is merely PREPARED by `load(_:)`.
@@ -75,10 +62,10 @@ final class AudioManager: ObservableObject {
     /// `pause()` / `pauseForExternalAudio()`, where the player must stay on screen to resume from.
     @Published private(set) var hasStartedPlayback: Bool = false
 
-    // Compact-mode is requested by several independent drivers (Wiser chat-bar focus, each stock
-    // screen's lifetime, ChatTabView). Track them as a reason set keyed by a stable per-screen token
-    // so they can't stomp each other and so duplicate appear/disappear or focus on/off are idempotent.
-    // `isCompactMode` is true while ANY reason is active.
+    // Compact-mode is requested by several independent drivers (each asset screen's and the
+    // report's lifetime, the AI chat cover's). Track them as a reason set keyed by a stable
+    // per-screen token so they can't stomp each other and so duplicate appear/disappear are
+    // idempotent. `isCompactMode` is true while ANY reason is active.
     private var compactReasons: Set<String> = []
 
     // MARK: - Computed Properties
@@ -1373,27 +1360,6 @@ final class AudioManager: ObservableObject {
         withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
             isCompactMode = now
         }
-    }
-
-    /// Hide player via scroll (used by detail screens)
-    func hidePlayerByScroll() {
-        guard !isPlayerHiddenByScroll else { return }
-        withAnimation(.easeInOut(duration: 0.25)) {
-            isPlayerHiddenByScroll = true
-        }
-    }
-
-    /// Show player after scroll hiding
-    func showPlayerAfterScroll() {
-        guard isPlayerHiddenByScroll else { return }
-        withAnimation(.easeInOut(duration: 0.25)) {
-            isPlayerHiddenByScroll = false
-        }
-    }
-
-    /// Reset scroll hiding state (call when leaving detail screens)
-    func resetScrollHiding() {
-        isPlayerHiddenByScroll = false
     }
 
     // MARK: - Helpers

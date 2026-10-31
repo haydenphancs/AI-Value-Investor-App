@@ -223,7 +223,7 @@ def test_expandable_content_fades_rather_than_sliding_over_its_siblings(rel):
     The other three are the same mechanism with shorter content.
 
     A plain `.opacity` moves nothing and cannot overlap anything. This is NOT a blanket ban on
-    `.move(edge: .top)`: the audio status island and the top-pinned banners are genuinely
+    `.move(edge: .top)`: top-pinned banners (the report's refresh-failure banner) are genuinely
     edge-anchored, have nothing above them, and keep it — see `test_..._is_not_vacuous`.
     """
     code = _strip_comments(_read(_IOS / rel))
@@ -258,10 +258,12 @@ def test_the_bottom_reveal_scan_is_not_vacuous():
     assert "move(edge:" not in _strip_comments(scanner), "comment stripping regressed"
 
     # 3. The rule is scoped, not global: genuinely top-anchored transitions stay legal.
-    island = _strip_comments(_read(_IOS / "Views/Screens/RootContainerView.swift"))
-    assert ".move(edge: .top)" in island, (
-        "RootContainerView's AudioStatusIsland lost its top-edge move. That one is CORRECT — "
-        "it drops from the top of the screen with nothing above it. If this was swept up by "
+    # (This used to be RootContainerView's floating audio status island, which is gone — the
+    # player never floats at the top any more; see test_ios_audio_player_single_render.)
+    banner = _strip_comments(_read(_IOS / "Views/Screens/TickerReportView.swift"))
+    assert ".move(edge: .top)" in banner, (
+        "TickerReportView's refresh-failure banner lost its top-edge move. That one is CORRECT — "
+        "it drops from the top of the report with nothing above it. If this was swept up by "
         "the rule above, the rule has been over-applied.")
 
 

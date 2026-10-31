@@ -19,6 +19,14 @@ D4  Nothing in the tab tree reserved room for the floating capsule: the last ~40
     Journey, Library, Research, Whale Profile and Trade Group sat under it for good, and on
     Reports → Select it hid the Delete button entirely.
 D5  `progress` was unclamped, so a playhead past the estimated duration drew past the track.
+D6  Owner ruling (2026-10-31): where the player lives next to Ask Cay AI. It never floats ABOVE an
+    Ask Cay AI bar (the asset screens' suggested-question chips sit there) and never as a pill at
+    the top of the screen (the old status island, on iPhones without a Dynamic Island, covered the
+    stock header's Search and bell — and a Dynamic Island shows Now Playing only once the user
+    LEAVES the app, so hiding the player there left nothing at all). Every screen with the bar
+    shows a square to its left holding the mini player's play/pause disc; the AI chat screen shows
+    a pill in its top bar between history and close. Tap = play/pause, press and hold = the
+    full-screen player, in both. Same on every iPhone.
 
 Source scans with comments stripped and declarations brace-bounded; every guard is shown to fail on
 the mutation it exists for. Not run on a device or simulator when written (no Swift toolchain where
@@ -38,6 +46,11 @@ TAB_BAR = IOS / "Views/Organisms/CustomTabBar.swift"
 AUDIO_MANAGER = IOS / "Services/AudioManager.swift"
 MONEY_MOVES = IOS / "Views/Screens/MoneyMovesDetailView.swift"
 LEARN = IOS / "Views/Screens/LearnView.swift"
+CHAT_BAR = IOS / "Views/Molecules/CaydexAIChatBar.swift"
+SQUARE = IOS / "Views/Molecules/ChatBarAudioControl.swift"
+CIRCLE = IOS / "Views/Atoms/PlayPauseCircle.swift"
+PILL = IOS / "Views/Molecules/AudioStatusIsland.swift"
+CHAT = IOS / "Views/Screens/AIChatScreen.swift"
 CONTENT = IOS / "ContentView.swift"
 
 
@@ -88,13 +101,12 @@ def _condition(block: str) -> str:
 def _assert_overlay_draws_only_where_the_root_cannot(overlay: str) -> None:
     modifier = _block_after(overlay, "struct GlobalAudioOverlay: ViewModifier")
     body = _block_after(modifier, "func body(content: Content) -> some View")
-    island = _block_after(body, ".overlay(alignment: .top)")
     mini = _block_after(body, ".overlay(alignment: .bottom)")
     full = _block_after(body, ".overlay {")
     inset = _block_after(body, ".safeAreaInset(edge: .bottom)")
-    assert "AudioStatusIsland()" in island and "GlobalMiniPlayer()" in mini, "scanned the wrong blocks"
+    assert "GlobalMiniPlayer()" in mini, "scanned the wrong block for the mini player"
     assert "FullScreenAudioPlayer(" in full, "scanned the wrong block for the full-screen player"
-    for what, block in (("status island", island), ("mini player", mini), ("full-screen player", full)):
+    for what, block in (("mini player", mini), ("full-screen player", full)):
         assert "drawsPlayerChrome" in _condition(block), (
             f"GlobalAudioOverlay draws its {what} without asking whether the root's own already "
             "shows: on a push inside a tab that is a second copy over the root's — the Money "
@@ -173,6 +185,88 @@ def _assert_only_the_capsule_takes_touches(mini: str) -> None:
         "a Rectangle hit shape takes the capsule's transparent corners too; use its own shape")
 
 
+# ── D6: where the player lives beside Ask Cay AI ─────────────────────────────────────────────
+
+
+def _assert_the_chat_bar_carries_the_square_on_its_left(chat_bar: str) -> None:
+    bar = _block_after(chat_bar, "struct CaydexAIChatBar: View")
+    # Declared after `isBusy`: the memberwise init is positional, so it must come last or every
+    # existing call site (the report's is pinned) stops compiling.
+    busy = bar.find("var isBusy: Bool = false")
+    flag = bar.find("var showsAudioControl: Bool = true")
+    assert 0 <= busy < flag, "`showsAudioControl` must default to true and be declared after `isBusy`"
+    body = _block_after(bar, "var body: some View")
+    square = body.find("ChatBarAudioControl(side: inputHeight)")
+    card = body.find("HStack(spacing: AppSpacing.md)")
+    surface = body.find(".cardSurface(cornerRadius: AppCornerRadius.extraLarge, elevation: .raised)")
+    assert square >= 0, "the Ask Cay AI bar no longer carries the audio square"
+    assert square < card < surface, (
+        "the square must come BEFORE the input card (on its LEFT) and outside it — its own "
+        "container, not a button inside the bar")
+    assert "if showsAudioControl" in body[:square], "the square ignores `showsAudioControl`"
+    assert re.search(r"\.onGeometryChange\(for: CGFloat\.self\)[^}]*size\.height", body[surface:]), (
+        "the square's side must follow the input card's measured height")
+    assert "inputHeight = height" in body[surface:], "the measured height never reaches the square"
+
+
+def _assert_the_square_plays_and_holds_opens(square: str) -> None:
+    view = _block_after(square, "struct ChatBarAudioControl: View")
+    body = _block_after(view, "var body: some View")
+    assert "if audioManager.hasActiveEpisode" in body, "the square must show only while an episode is active"
+    assert "PlayPauseCircle(isPlaying: audioManager.isPlaying)" in body, (
+        "the square must hold the mini player's disc (`PlayPauseCircle`)")
+    tap = _block_after(body, ".onTapGesture")
+    hold = _block_after(body, ".onLongPressGesture(minimumDuration:")
+    assert "togglePlayPause()" in tap and "expandPlayer()" not in tap, "tap = play/pause"
+    assert "expandPlayer()" in hold and "togglePlayPause()" not in hold, "press and hold = full player"
+    assert "Button(" not in body, (
+        "not a Button: a Button fires on the hold's touch-up too, toggling playback AND opening "
+        "the player")
+    assert "max(side, Self.minimumSide)" in body, "the square must never shrink below the disc"
+
+
+def _assert_every_player_shares_the_disc(mini: str, circle: str) -> None:
+    disc = _block_after(circle, "struct PlayPauseCircle: View")
+    assert ".fill(AppColors.primaryFill)" in disc and "pause.fill" in disc and "play.fill" in disc
+    button = _block_after(mini, "private var playPauseButton: some View")
+    assert "PlayPauseCircle(isPlaying: audioManager.isPlaying)" in button, (
+        "the mini player stopped drawing the shared disc — the square and the pill would drift "
+        "from it")
+    assert "Circle()" not in button, "the mini player draws its own disc again"
+
+
+def _assert_the_chat_shows_its_pill_in_the_top_bar(chat: str, pill: str) -> None:
+    top = _block_after(chat, "private var topBar: some View")
+    assert re.search(r"\.overlay\s*\{\s*AudioStatusIsland\(\)\s*\}", top), (
+        "the chat's player must be the pill overlaid in its top bar, between history and close")
+    bars = [m.start() for m in re.finditer(r"\bCaydexAIChatBar\(", chat)]
+    assert len(bars) == 1, bars
+    call = chat[bars[0]: chat.index("\n            )", bars[0])]
+    assert "showsAudioControl: false" in call, (
+        "the chat's own Ask Cay AI bar must opt out of the square — one player per screen")
+    view = _block_after(pill, "struct AudioStatusIsland: View")
+    assert "if audioManager.hasActiveEpisode" in _block_after(view, "var body: some View")
+    shape = _block_after(view, "private var pill: some View")
+    assert "PlayPauseCircle(" in shape, "the pill must use the mini player's disc"
+    tap = _block_after(shape, ".onTapGesture")
+    hold = _block_after(shape, ".onLongPressGesture(minimumDuration:")
+    assert "togglePlayPause()" in tap and "expandPlayer()" in hold, "tap = play/pause, hold = player"
+
+
+def _assert_nothing_floats_at_the_top(root: str, overlay: str, manager: str) -> None:
+    assert "AudioStatusIsland(" not in root and "AudioStatusIsland(" not in overlay, (
+        "a status island floats at the top again — on iPhones without a Dynamic Island it covered "
+        "the stock header's Search and bell")
+    assert ".overlay(alignment: .top)" not in _block_after(overlay, "struct GlobalAudioOverlay: ViewModifier")
+    assert "hasDynamicIsland" not in root + overlay + manager, (
+        "the player must not branch on the Dynamic Island: iOS shows Now Playing there only once "
+        "the user leaves the app")
+    assert re.search(
+        r"if audioManager\.hasActiveEpisode && !audioManager\.showFullScreenPlayer && "
+        r"!audioManager\.isCompactMode \{", root
+    ), "the root must draw nothing while the screen on top hosts its own player"
+
+
 def _sources() -> dict[str, str]:
     return {
         "overlay": _code(OVERLAY),
@@ -181,6 +275,12 @@ def _sources() -> dict[str, str]:
         "tab_bar": _code(TAB_BAR),
         "learn": _code(LEARN),
         "money_moves": _code(MONEY_MOVES),
+        "manager": _code(AUDIO_MANAGER),
+        "chat_bar": _code(CHAT_BAR),
+        "square": _code(SQUARE),
+        "circle": _code(CIRCLE),
+        "pill": _code(PILL),
+        "chat": _code(CHAT),
     }
 
 
@@ -193,6 +293,13 @@ _GUARDS = {
     "root-parks-on-measured-bar":
         lambda s: _assert_the_root_parks_on_the_measured_bar(s["tab_bar"], s["root"]),
     "only-capsule-takes-touches": lambda s: _assert_only_the_capsule_takes_touches(s["mini"]),
+    "chat-bar-square-on-the-left":
+        lambda s: _assert_the_chat_bar_carries_the_square_on_its_left(s["chat_bar"]),
+    "square-tap-plays-hold-opens": lambda s: _assert_the_square_plays_and_holds_opens(s["square"]),
+    "players-share-the-disc": lambda s: _assert_every_player_shares_the_disc(s["mini"], s["circle"]),
+    "chat-pill-in-top-bar": lambda s: _assert_the_chat_shows_its_pill_in_the_top_bar(s["chat"], s["pill"]),
+    "nothing-floats-at-the-top":
+        lambda s: _assert_nothing_floats_at_the_top(s["root"], s["overlay"], s["manager"]),
 }
 
 
@@ -208,9 +315,6 @@ _MUTATIONS = [
      "if drawsPlayerChrome && showBottomMiniPlayer", "if showBottomMiniPlayer"),
     ("full-player-ungated", "overlay-draws-only-where-root-cannot", "overlay",
      "if drawsPlayerChrome && audioManager.showFullScreenPlayer", "if audioManager.showFullScreenPlayer"),
-    ("island-ungated", "overlay-draws-only-where-root-cannot", "overlay",
-     "if drawsPlayerChrome && audioManager.hasActiveEpisode && audioManager.isCompactMode",
-     "if audioManager.hasActiveEpisode && audioManager.isCompactMode"),
     ("inset-gated-on-who-draws", "overlay-draws-only-where-root-cannot", "overlay",
      "if showBottomMiniPlayer && audioManager.hasActiveEpisode\n",
      "if drawsPlayerChrome && showBottomMiniPlayer && audioManager.hasActiveEpisode\n"),
@@ -232,6 +336,32 @@ _MUTATIONS = [
      "static var defaultValue: CGFloat = 0", "static var defaultValue: CGFloat = 73"),
     ("hit-shape-over-the-gap", "only-capsule-takes-touches", "mini",
      ".padding(.bottom, bottomSpacing)", ".padding(.bottom, bottomSpacing)\n        .contentShape(Rectangle())"),
+    ("square-moves-right", "chat-bar-square-on-the-left", "chat_bar",
+     "                if showsAudioControl {\n                    ChatBarAudioControl(side: inputHeight)\n                }\n",
+     ""),
+    ("square-off-by-default", "chat-bar-square-on-the-left", "chat_bar",
+     "    var showsAudioControl: Bool = true\n", "    var showsAudioControl: Bool = false\n"),
+    ("square-tap-opens-player", "square-tap-plays-hold-opens", "square",
+     "                    .onTapGesture {\n                        withAnimation(.spring(response: 0.2)) {\n"
+     "                            audioManager.togglePlayPause()",
+     "                    .onTapGesture {\n                        withAnimation(.spring(response: 0.2)) {\n"
+     "                            audioManager.expandPlayer()"),
+    ("square-hold-does-nothing", "square-tap-plays-hold-opens", "square",
+     "                        audioManager.expandPlayer()\n                    }\n                    .accessibilityElement",
+     "                    }\n                    .accessibilityElement"),
+    ("mini-player-own-disc", "players-share-the-disc", "mini",
+     "            PlayPauseCircle(isPlaying: audioManager.isPlaying)\n",
+     "            Circle().fill(AppColors.primaryFill).frame(width: 44, height: 44)\n"),
+    ("chat-bar-keeps-square", "chat-pill-in-top-bar", "chat",
+     "                showsAudioControl: false\n", ""),
+    ("chat-pill-gone", "chat-pill-in-top-bar", "chat",
+     "            AudioStatusIsland()\n", "            EmptyView()\n"),
+    ("island-floats-again", "nothing-floats-at-the-top", "overlay",
+     "            .overlay(alignment: .bottom) {",
+     "            .overlay(alignment: .top) { AudioStatusIsland() }\n            .overlay(alignment: .bottom) {"),
+    ("root-draws-while-compact", "nothing-floats-at-the-top", "root",
+     "if audioManager.hasActiveEpisode && !audioManager.showFullScreenPlayer && !audioManager.isCompactMode {",
+     "if audioManager.hasActiveEpisode && !audioManager.showFullScreenPlayer {"),
 ]
 
 
@@ -252,9 +382,6 @@ def test_every_guard_kills_its_mutation(label, guard, key, old, new):
 _MINI_PLAYER_HOSTS = {
     "Views/Screens/RootContainerView.swift": "the tab tree's capsule, parked on the tab bar",
     "Views/Modifiers/GlobalAudioOverlay.swift": "covers' capsule, gated on drawsPlayerChrome",
-    "Views/Screens/MoneyMoveArticleDetailView.swift": "a cover; stacked on its Ask Cay AI bar",
-    "Views/Screens/BookDetailView.swift": "a cover; stacked on its Ask Cay AI bar",
-    "Views/Screens/BookCoreDetailView.swift": "a cover; stacked on its Ask Cay AI bar",
     "Views/Molecules/GlobalMiniPlayer.swift": "its own #Preview",
 }
 
@@ -265,12 +392,13 @@ def test_only_the_known_hosts_draw_the_mini_player():
         for path in IOS.rglob("*.swift")
         if "GlobalMiniPlayer(" in _strip_comments(path.read_text(encoding="utf-8"))
     }
-    assert len(drawn) >= 4, f"the scan found almost nothing ({sorted(drawn)}) — it has drifted"
+    assert len(drawn) >= 3, f"the scan found almost nothing ({sorted(drawn)}) — it has drifted"
     unexpected = sorted(drawn - set(_MINI_PLAYER_HOSTS))
     assert not unexpected, (
         f"{unexpected} now draw(s) `GlobalMiniPlayer(`. If the screen is pushed inside a tab, the "
-        "root already draws one there — that is the Money Moves double edge. If it is a cover, add "
-        "it to _MINI_PLAYER_HOSTS with the reason.")
+        "root already draws one there — that is the Money Moves double edge. If it has an Ask Cay "
+        "AI bar, its player is the square beside the bar (D6), never a capsule above it. Otherwise "
+        "add it to _MINI_PLAYER_HOSTS with the reason.")
     gone = sorted(set(_MINI_PLAYER_HOSTS) - drawn)
     assert not gone, f"{gone} no longer draw the player; drop them from _MINI_PLAYER_HOSTS"
 

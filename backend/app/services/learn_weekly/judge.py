@@ -622,6 +622,7 @@ async def check_support(client: Any, sheet: C.FactSheet, content: Mapping[str, A
                                     f"{SUPPORT_CHUNK * SUPPORT_MAX_CALLS}", stage="judge")
     known = frozenset(f.id for f in sheet.facts)
     verdicts: List[mj.Verdict] = []
+    served: List[str] = []
     tokens = calls = 0
     try:
         for start in range(0, len(sentences), SUPPORT_CHUNK):
@@ -641,13 +642,27 @@ async def check_support(client: Any, sheet: C.FactSheet, content: Mapping[str, A
             )
             calls += 1
             tokens += _result_tokens(result)
+            if isinstance(result, dict) and "provider" in result:
+                from app.services.llm_provider import served_by
+
+                label = served_by(result)
+                if label not in served:
+                    served.append(label)
             verdicts += parse_support(result, sentences, start, stop, known)
     except Exception as e:
         # Whatever ends the check early — an unusable answer, a Gemini error on a later chunk,
         # the writer's gate — carries every token the chunks before it already cost.
         e.tokens_used = tokens
+        if served:
+            # …and which provider answered those chunks (only when routed — llm_provider).
+            e.served_labels = list(served)
         raise
-    return verdicts, {"calls": calls, "tokens_used": tokens, "sentences": len(sentences)}
+    meta = {"calls": calls, "tokens_used": tokens, "sentences": len(sentences)}
+    if served:
+        # Which provider answered the chunks (llm_provider) — only when the role was routed, so a
+        # default meta is unchanged.
+        meta["served"] = served
+    return verdicts, meta
 
 
 def _result_tokens(result: Any) -> int:

@@ -168,7 +168,19 @@ def worst_case_model_call_seconds() -> float:
         + step * timeouts * (timeouts + 1) / 2
         + _GENERATE_JSON_DELAY_SECONDS * generic * (generic + 1) / 2
     )
-    return attempts * per_attempt + backoff
+    return attempts * per_attempt + backoff + claude_first_seconds()
+
+
+def claude_first_seconds() -> float:
+    """What asking Claude FIRST adds to one model call (llm_provider, 2026-10-30): one attempt to
+    CAYDEX_CLAUDE_REQUEST_TIMEOUT_SECONDS before the Gemini fallback — 0 while no marketing role is on Claude
+    (switch and key), so the default lease and owner-life numbers are unchanged. Read at import, like
+    the Gemini settings above: a marketing switch takes effect with the deploy that sets it."""
+    from app.services.llm_provider import any_marketing_role_on_claude
+
+    if not any_marketing_role_on_claude():
+        return 0.0
+    return max(float(settings.CAYDEX_CLAUDE_REQUEST_TIMEOUT_SECONDS), 0.0)
 
 
 #: How long a generation owns the run between refreshes. The lease is refreshed before each

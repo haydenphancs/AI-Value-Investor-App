@@ -1953,3 +1953,67 @@ async def test_with_image_posts_off_the_tie_break_ignores_the_image(order):
     res = await _run(FakeClient(_result(rounds[0]), _result(rounds[1])), image_posts=False)
     assert res.status == "accepted" and res.package[wp.IMAGE_FIELD] is None
     assert res.package["captions"]["x"] == clean(BAD_CAPTION)
+
+
+# ── Claude as a second provider (llm_provider, 2026-10-30) ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_default_gemini_package_carries_no_served_by_key():
+    res = await _run(FakeClient(_result(_clean_package())))
+    assert "served_by" not in res.package
+    assert res.model == ws.WRITER_MODEL
+
+
+@pytest.mark.asyncio
+async def test_a_claude_written_package_records_its_model_and_provider():
+    claude = {**_result(_clean_package()), "provider": "claude", "model": "claude-sonnet-5-5"}
+    res = await _run(FakeClient(claude))
+    assert res.status == "accepted"
+    assert res.package["served_by"] == "claude:claude-sonnet-5-5"
+    assert res.package["model"] == res.model == "claude-sonnet-5-5"
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_package_says_gemini_wrote_it_and_why():
+    fell = {**_result(_clean_package()), "provider": "gemini", "fallback_reason": "ClaudeRefusalException"}
+    res = await _run(FakeClient(fell))
+    assert res.package["served_by"] == "gemini (Claude fallback: ClaudeRefusalException)"
+    assert res.model == ws.WRITER_MODEL
+
+
+@pytest.mark.asyncio
+async def test_the_default_client_routes_the_writer_through_llm_provider(monkeypatch):
+    """No client passed → the router: with the writer switch on Claude the draft is Claude's; the
+    same call with the switch at its default is Gemini's. (A writer that went back to a bare
+    get_gemini_client() fails the first half.)"""
+    from app.config import settings
+    from app.integrations import anthropic_client as ac
+    from app.integrations import gemini as gem
+    from app.services import llm_provider as lp
+
+    class FakeClaude:
+        def __init__(self):
+            self.calls = []
+
+        async def generate_json(self, prompt, **kw):
+            self.calls.append(kw)
+            return {"text": json.dumps(_clean_package()), "model": kw["model_name"],
+                    "tokens_used": 10, "finish_reason": "STOP"}
+
+    gemini, claude = FakeClient(_result(_clean_package())), FakeClaude()
+    monkeypatch.setattr(gem, "get_gemini_client", lambda: gemini)
+    monkeypatch.setattr(ac, "get_claude_client", lambda: claude)
+    monkeypatch.setattr(settings, "CAYDEX_ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setattr(settings, "MARKETING_WRITER_PROVIDER", "claude")
+    lp.reset_breaker()
+    res = await ws.generate_package(_item(), TEMPLATE, RUN_DATE, generation_id="gen-r",
+                                    judge_mode=JUDGE_OFF, store_state=post_copy.STORE_PRELAUNCH)
+    assert res.status == "accepted" and len(claude.calls) == 1 and gemini.calls == []
+    assert res.package["served_by"] == f"claude:{settings.CAYDEX_CLAUDE_WRITER_MODEL}"
+
+    monkeypatch.setattr(settings, "MARKETING_WRITER_PROVIDER", "gemini")
+    res = await ws.generate_package(_item(), TEMPLATE, RUN_DATE, generation_id="gen-s",
+                                    judge_mode=JUDGE_OFF, store_state=post_copy.STORE_PRELAUNCH)
+    assert len(gemini.calls) == 1 and len(claude.calls) == 1
+    assert "served_by" not in res.package

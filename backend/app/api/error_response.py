@@ -1037,6 +1037,15 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
     if cls.startswith("bravesearch"):
         return ErrorCode.GEMINI_UNAVAILABLE, _DEFAULT_STATUS[ErrorCode.GEMINI_UNAVAILABLE]
 
+    # ── Claude (app/integrations/anthropic_client.py — the second provider of the marketing and
+    # Learn weekly writer/judge roles) ──
+    # By NAME, ahead of the heuristics: a 429 says "status=429" and a timeout's class says
+    # "Timeout" (→ FMP_UNAVAILABLE below), and neither is the market-data provider. The router
+    # turns every Claude failure into the same call on Gemini, so none should reach a door; if one
+    # does, it is the AI engine being unavailable (no new ErrorCode, so no new iOS branch).
+    if cls.startswith("claude"):
+        return ErrorCode.GEMINI_UNAVAILABLE, _DEFAULT_STATUS[ErrorCode.GEMINI_UNAVAILABLE]
+
     # ── SEC EDGAR (app/integrations/sec_edgar.py — the buyback check's filing facts) ──
     # By NAME, ahead of the heuristics: a throttle's message says "HTTP 429" (→ FMP_RATE_LIMITED
     # below, whose "try again in a minute" is wrong for a 10-minute circuit) and a timeout's

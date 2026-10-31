@@ -28,6 +28,7 @@ from app.integrations.coingecko import close_coingecko_client
 from app.integrations.finra_short_interest import close_finra_client
 from app.integrations.fmp import close_fmp_client
 from app.integrations.openai_compat import close_openai_compat_client
+from app.integrations.anthropic_client import close_claude_client
 from app.integrations.openfda import close_openfda_client
 from app.integrations.sec_edgar import close_sec_edgar_client
 from app.integrations.telegram import close_telegram_client
@@ -158,6 +159,7 @@ def _sentry_group_is_flooding(event: dict) -> bool:
 # is a fintech backend.
 if settings.SENTRY_DSN and settings.ENVIRONMENT == "production":
     import sentry_sdk
+    from sentry_sdk.integrations.anthropic import AnthropicIntegration
     from sentry_sdk.integrations.fastapi import FastApiIntegration
     from sentry_sdk.integrations.logging import LoggingIntegration
     from sentry_sdk.scrubber import EventScrubber
@@ -206,6 +208,13 @@ if settings.SENTRY_DSN and settings.ENVIRONMENT == "production":
         # password-reset code. These events are logger-driven and the stack is what
         # diagnoses them, so the body was never adding diagnostic value.
         max_request_body_size="never",
+        # The Anthropic SDK (the Claude second provider, 2026-10-30) is auto-instrumented once it
+        # is importable: every Claude error the router HANDLES by falling back to Gemini became an
+        # UNHANDLED Sentry event carrying the prompt in frame vars, and reached the triage digest
+        # as a crash. The router's own CLAUDE_FALLBACK WARNING / CLAUDE_BREAKER ERROR lines are the
+        # signal. Only this one integration — `auto_enabling_integrations=False` would also drop
+        # the httpx/starlette ones in use.
+        disabled_integrations=[AnthropicIntegration()],
     )
     logger.info("Sentry error monitoring enabled (environment=%s)", settings.ENVIRONMENT)
 
@@ -705,6 +714,7 @@ async def lifespan(app: FastAPI):
     await close_sec_edgar_client()
     await close_finra_client()
     await close_openai_compat_client()
+    await close_claude_client()
     await close_telegram_client()
     await close_x_client()
     await close_bluesky_client()

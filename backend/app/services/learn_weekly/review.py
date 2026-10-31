@@ -590,6 +590,33 @@ def _duration(seconds: Any) -> str:
     return "?"
 
 
+def served_line(validation: Any) -> Optional[str]:
+    """"Models: writer claude:claude-sonnet-5-5 · judge claude:claude-opus-5-5 · support …" when the
+    piece was written through a role routed to Claude (`validation.served_by`: "role: label"
+    entries, llm_provider), else None — the default Gemini path records nothing and its header is
+    unchanged. Grouped per role in a fixed order (writer, judge, support, then any other) so a
+    writer's several labels never crowd out the judge's; at most 3 labels a role. Read defensively;
+    each label scrubbed and capped."""
+    served = validation.get("served_by") if isinstance(validation, dict) else None
+    if not isinstance(served, list):
+        return None
+    groups: Dict[str, List[str]] = {}
+    for entry in served:
+        if not isinstance(entry, str) or not entry.strip():
+            continue
+        role, sep, label = entry.partition(": ")
+        role, label = (role, label) if sep else ("model", entry)
+        role = alerts.scrub(role, 20)
+        bucket = groups.setdefault(role, [])
+        if len(bucket) < 3:
+            bucket.append(alerts.scrub(label, 80))
+    if not groups:
+        return None
+    order = [r for r in ("writer", "judge", "support") if r in groups] + \
+        [r for r in groups if r not in ("writer", "judge", "support")]
+    return "Models: " + " · ".join(f"{r} {', '.join(groups[r])}" for r in order[:5])
+
+
 def review_header_text(piece: Mapping[str, Any], job: Optional[Mapping[str, Any]],
                        draft: Mapping[str, Any]) -> str:
     """The silent first message of a review bundle (pure)."""
@@ -618,6 +645,9 @@ def review_header_text(piece: Mapping[str, Any], job: Optional[Mapping[str, Any]
                  f"worst block: {worst_block(job.get('checks'))}")
     tokens = _int(piece.get("tokens_used"))
     lines.append(f"Writer tokens: {tokens:,}" if tokens is not None else "Writer tokens: ?")
+    served = served_line(piece.get("validation"))
+    if served:
+        lines.append(served)
     if piece.get("reject_reason"):
         lines.append(f"Last reject reason (fed to this round): {alerts.scrub(piece.get('reject_reason'), 60)}")
     lines.append("Next: the narration, then the article. The decision comes last.")

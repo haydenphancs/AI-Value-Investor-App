@@ -1548,3 +1548,89 @@ def test_calibration_scores_a_verdict_on_every_field_it_acts_on():
     outcome = calib.Outcome(call=call, sample=0, config="t", verdicts=[verdict])
     flagged = calib._flagged_labels(outcome)
     assert set(flagged) == {"captions.x", "cards[0].body"}
+
+
+# ── Claude as a second provider (llm_provider, 2026-10-30) ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_routed_judge_records_who_judged_and_a_default_one_records_nothing():
+    claude_writer = {**_writer_result(_clean_writer_package()), "provider": "claude",
+                     "model": "claude-sonnet-5-5"}
+    claude_judge = {**_result([], tokens=40), "provider": "claude", "model": "claude-opus-5-5"}
+    res = await _gen(Routing([claude_writer], [claude_judge]))
+    assert res.status == "accepted"
+    assert res.package["served_by"] == "claude:claude-sonnet-5-5"
+    assert res.package["judge"]["served_by"] == "claude:claude-opus-5-5"
+    assert res.rounds[0].judge["served_by"] == "claude:claude-opus-5-5"
+    # The record names the model that judged, and no Gemini knob it was never sent.
+    assert res.package["judge"]["model"] == "claude-opus-5-5"
+    assert res.package["judge"]["temperature"] is None and res.package["judge"]["thinking_budget"] is None
+
+    plain = await _gen(Routing([_writer_result(_clean_writer_package())], [_result([], tokens=40)]))
+    assert "served_by" not in plain.package and "served_by" not in plain.package["judge"]
+    assert "served_by" not in plain.rounds[0].judge
+
+
+@pytest.mark.asyncio
+async def test_a_judge_that_fell_back_keeps_the_gemini_record():
+    writer = _writer_result(_clean_writer_package())
+    fell = {**_result([], tokens=40), "provider": "gemini", "fallback_reason": "ClaudeTimeoutException"}
+    res = await _gen(Routing([writer], [fell]))
+    meta = res.package["judge"]
+    assert meta["served_by"] == "gemini (Claude fallback: ClaudeTimeoutException)"
+    assert meta["model"] == j.JUDGE_MODEL and meta["temperature"] == j.JUDGE_TEMPERATURE
+
+
+@pytest.mark.asyncio
+async def test_a_billed_claude_attempt_counts_when_the_gemini_fallback_also_fails():
+    from app.services.llm_provider import CLAUDE_TOKENS_ATTR
+
+    class Boom(RuntimeError):
+        pass
+
+    writer_err, judge_err = Boom("writer: gemini down"), Boom("judge: gemini down")
+    setattr(writer_err, CLAUDE_TOKENS_ATTR, 900)
+    setattr(judge_err, CLAUDE_TOKENS_ATTR, 300)
+    with pytest.raises(Boom) as info:
+        await _gen(Routing([writer_err], []))
+    assert getattr(info.value, ws.TOKENS_ATTR) == 900
+    with pytest.raises(Boom) as info:
+        await _gen(Routing([_writer_result(_clean_writer_package(), 100)], [judge_err]))
+    assert getattr(info.value, ws.TOKENS_ATTR) == 100 + 300
+
+
+@pytest.mark.asyncio
+async def test_the_default_client_routes_the_judge_through_llm_provider_in_enforce(monkeypatch):
+    """No client passed, enforce mode, MARKETING_JUDGE_PROVIDER=claude: the judge's call reaches
+    Claude (on the judge model, never the writer's) while the writer stays on Gemini."""
+    import inspect
+
+    from app.config import settings
+    from app.integrations import anthropic_client as ac
+    from app.integrations import gemini as gem
+    from app.services import llm_provider as lp
+
+    class FakeClaude:
+        def __init__(self):
+            self.calls = []
+
+        async def generate_json(self, prompt, **kw):
+            inspect.signature(ac.ClaudeClient.generate_json).bind(None, prompt, **kw)
+            self.calls.append(kw)
+            return {**_result([], tokens=40), "model": kw["model_name"]}
+
+    gemini, claude = Routing([_writer_result(_clean_writer_package())], []), FakeClaude()
+    monkeypatch.setattr(gem, "get_gemini_client", lambda: gemini)
+    monkeypatch.setattr(ac, "get_claude_client", lambda: claude)
+    monkeypatch.setattr(settings, "CAYDEX_ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setattr(settings, "MARKETING_JUDGE_PROVIDER", "claude")
+    lp.reset_breaker()
+    res = await ws.generate_package(_item(), TEMPLATE, RUN_DATE, generation_id="gen-route",
+                                    judge_mode="enforce")
+    assert res.status == "accepted"
+    assert len(gemini.writer_calls) == 1 and gemini.judge_calls == []
+    assert [c["usage_tag"] for c in claude.calls] == [j.USAGE_TAG]
+    assert claude.calls[0]["model_name"] == settings.CAYDEX_CLAUDE_JUDGE_MODEL
+    assert res.package["judge"]["served_by"] == f"claude:{settings.CAYDEX_CLAUDE_JUDGE_MODEL}"
+    assert "served_by" not in res.package          # the writer stayed on its default path

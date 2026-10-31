@@ -1344,3 +1344,244 @@ def test_the_writer_drops_a_subheading_that_repeats_its_section_title():
     sec = out.content["sections"][1]
     heads = [b["text"] for b in sec["content"] if b.get("type") == "subheading"]
     assert sec["title"] == title and title not in heads and "A Different Angle" in heads
+
+
+# ── Claude as a second provider (llm_provider, 2026-10-30) ───────────────────────────────────
+
+
+class _Routed(FakeClient):
+    """Tags every answer the way llm_provider does: the writer's calls from Claude, the judge's from
+    Gemini after a Claude fallback."""
+
+    async def generate_json(self, prompt: str, **kw: Any) -> Dict[str, Any]:
+        result = await super().generate_json(prompt, **kw)
+        if kw.get("usage_tag") == W.USAGE_TAG:
+            return {**result, "provider": "claude", "model": "claude-sonnet-5-5"}
+        return {**result, "provider": "gemini", "fallback_reason": "ClaudeTimeoutException"}
+
+
+def test_a_default_gemini_record_carries_no_served_by_key():
+    out = run(FakeClient())
+    assert "served_by" not in out.validation_record()
+
+
+def test_a_routed_generation_records_which_provider_answered_each_role():
+    out = run(_Routed())
+    record = out.validation_record()
+    assert record["served_by"] == ["writer: claude:claude-sonnet-5-5",
+                                   "judge: gemini (Claude fallback: ClaudeTimeoutException)",
+                                   "support: gemini (Claude fallback: ClaudeTimeoutException)"]
+    # Every writer call was Claude's: the record names that model, not the configured Gemini one;
+    # the judge fell back, so its configured model stays.
+    assert record["writer_model"] == "claude-sonnet-5-5"
+    assert record["judge"]["model"] == J.JUDGE_MODEL
+
+
+def test_the_review_header_names_the_models_only_when_recorded():
+    from app.services.learn_weekly import review
+
+    assert review.served_line({"served_by": ["writer: claude:claude-sonnet-5-5"]}) == \
+        "Models: writer claude:claude-sonnet-5-5"
+    grouped = review.served_line({"served_by": [
+        "writer: claude:claude-sonnet-5-5", "writer: gemini (Claude fallback: X)",
+        "writer: a", "writer: b", "support: claude:claude-opus-5-5", "judge: claude:claude-opus-5-5"]})
+    # Grouped per role, writer → judge → support, at most 3 labels a role: the judge is never
+    # crowded out by the writer's labels.
+    assert grouped == ("Models: writer claude:claude-sonnet-5-5, gemini (Claude fallback: X), a · "
+                       "judge claude:claude-opus-5-5 · support claude:claude-opus-5-5")
+    for missing in (None, {}, {"served_by": None}, {"served_by": "writer"}, {"served_by": [1, " "]}):
+        assert review.served_line(missing) is None
+
+
+class _AllClaude(FakeClient):
+    async def generate_json(self, prompt: str, **kw: Any) -> Dict[str, Any]:
+        result = await super().generate_json(prompt, **kw)
+        model = "claude-sonnet-5-5" if kw.get("usage_tag") == W.USAGE_TAG else "claude-opus-5-5"
+        return {**result, "provider": "claude", "model": model}
+
+
+def test_an_all_claude_generation_names_both_claude_models_in_the_record():
+    record = run(_AllClaude()).validation_record()
+    assert record["writer_model"] == "claude-sonnet-5-5"
+    assert record["judge"]["model"] == "claude-opus-5-5"
+    assert "support: claude:claude-opus-5-5" in record["served_by"]
+
+
+def test_a_default_record_keeps_the_configured_models():
+    record = run(FakeClient()).validation_record()
+    assert record["writer_model"] == settings.LEARN_WRITER_MODEL.strip()
+    assert record["judge"]["model"] == J.JUDGE_MODEL
+
+
+def test_the_progress_payload_carries_served_by_only_when_routed():
+    saved: List[Dict[str, Any]] = []
+
+    async def keep(payload):
+        saved.append(payload)
+
+    run(FakeClient(), on_progress=keep)
+    assert saved and all("served_by" not in p for p in saved)
+    saved.clear()
+    run(_Routed(), on_progress=keep)
+    assert saved[-1]["served_by"] == ["writer: claude:claude-sonnet-5-5"]
+
+
+def test_a_resumed_generation_keeps_the_labels_of_the_sections_it_reuses():
+    """The stored outline and sections are reused (no new writer call), so only the resume carries
+    the fact that Claude wrote them."""
+    saved: List[Dict[str, Any]] = []
+
+    async def keep(payload):
+        saved.append(payload)
+
+    run(_Routed(), on_progress=keep)
+    resume = dict(saved[-1])
+    out = run(FakeClient(), resume=resume)
+    assert "writer: claude:claude-sonnet-5-5" in out.validation_record()["served_by"]
+
+
+def test_build_resume_from_passes_served_by_through_and_only_strings():
+    from app.services.learn_weekly import build as B
+
+    key = B._progress_key("sha", 1)
+    base = {**key, "outline": {"x": 1}, "sections": []}
+    assert "served_by" not in B.resume_from(base, "sha", 1)
+    got = B.resume_from({**base, "served_by": ["writer: claude:m", 3, None]}, "sha", 1)
+    assert got["served_by"] == ["writer: claude:m"]
+
+
+def test_a_billed_claude_attempt_counts_when_its_gemini_fallback_also_fails():
+    from app.services.llm_provider import CLAUDE_TOKENS_ATTR
+
+    class Boom(RuntimeError):
+        pass
+
+    def fail(prompt, kw):
+        e = Boom("gemini down after a Claude truncation")
+        setattr(e, CLAUDE_TOKENS_ATTR, 777)
+        return e
+
+    base = run(FakeClient()).tokens_used
+    out = run(FakeClient({"judge": fail}))
+    assert out.tokens_used >= 777
+    assert out.validation_record()["judge"]["tokens_used"] >= 777
+    assert out.tokens_used - (base - 10) >= 777          # the failed judge's 10 replaced by 777
+
+
+def test_the_default_client_routes_every_learn_role_through_llm_provider(monkeypatch):
+    """No client passed → llm_provider's router. With both Learn switches on Claude the writer,
+    the judge AND the support check reach Claude and Gemini gets nothing; with the switches at their
+    default the same generation is Gemini's alone. (A write_article that went back to a bare
+    get_gemini_client() fails the first half.)"""
+    import inspect
+
+    from app.integrations import anthropic_client as ac
+    from app.integrations import gemini as gem
+    from app.services import llm_provider as lp
+
+    class FakeClaude:
+        def __init__(self):
+            self.inner, self.tags = FakeClient(), []
+
+        async def generate_json(self, prompt, **kw):
+            inspect.signature(ac.ClaudeClient.generate_json).bind(None, prompt, **kw)  # real signature
+            self.tags.append(kw["usage_tag"])
+            result = await self.inner.generate_json(prompt, **kw)
+            return {**result, "model": kw["model_name"]}
+
+    gemini, claude = FakeClient(), FakeClaude()
+    monkeypatch.setattr(gem, "get_gemini_client", lambda: gemini)
+    monkeypatch.setattr(ac, "get_claude_client", lambda: claude)
+    monkeypatch.setattr(settings, "CAYDEX_ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setattr(settings, "LEARN_WRITER_PROVIDER", "claude")
+    monkeypatch.setattr(settings, "LEARN_JUDGE_PROVIDER", "claude")
+    lp.reset_breaker()
+    out = run(None)
+    assert out.status == W.STATUS_ACCEPTED, (out.error, out.issues)
+    assert gemini.calls == []
+    assert set(claude.tags) == {W.USAGE_TAG, J.USAGE_TAG, J.SUPPORT_USAGE_TAG}
+    record = out.validation_record()
+    assert record["writer_model"] == settings.CAYDEX_CLAUDE_WRITER_MODEL
+    assert record["judge"]["model"] == settings.CAYDEX_CLAUDE_JUDGE_MODEL
+
+    monkeypatch.setattr(settings, "LEARN_WRITER_PROVIDER", "gemini")
+    monkeypatch.setattr(settings, "LEARN_JUDGE_PROVIDER", "gemini")
+    calls_before = len(claude.tags)
+    plain = run(None)
+    assert plain.status == W.STATUS_ACCEPTED and gemini.calls
+    assert len(claude.tags) == calls_before
+    assert "served_by" not in plain.validation_record()
+
+
+def test_llm_provider_roles_are_exactly_the_four_callers_usage_tags():
+    from app.services import llm_provider as lp
+    from app.services.marketing import judge as mj
+    from app.services.marketing import writer_service as ws
+
+    assert set(lp.ROLES) == {ws.USAGE_TAG, mj.USAGE_TAG, W.USAGE_TAG, J.USAGE_TAG, J.SUPPORT_USAGE_TAG}
+    assert lp.ROLES[J.SUPPORT_USAGE_TAG] == lp.ROLES[J.USAGE_TAG]   # the support check is the judge
+
+
+# ── provenance across a provider flip (fix-verification round, 2026-10-30) ──────────────────
+
+
+def _outline_only_progress(client: FakeClient) -> Dict[str, Any]:
+    """The progress saved right after the outline (no section yet): a resume from it reuses the
+    outline and writes every section anew."""
+    saved: List[Dict[str, Any]] = []
+
+    async def keep(payload):
+        saved.append(dict(payload))
+
+    run(client, on_progress=keep)
+    first = saved[0]
+    assert first["sections"] == []
+    return first
+
+
+def test_a_claude_outline_resumed_after_a_flip_to_gemini_is_never_credited_to_claude():
+    resume = _outline_only_progress(_Routed())
+    assert resume["served_by"] == ["writer: claude:claude-sonnet-5-5"]
+    record = run(FakeClient(), resume=resume).validation_record()
+    assert record["served_by"][:2] == ["writer: claude:claude-sonnet-5-5", "writer: gemini"]
+    assert record["writer_model"] == settings.LEARN_WRITER_MODEL.strip()
+
+
+def test_a_gemini_outline_resumed_after_a_flip_to_claude_records_the_mix():
+    resume = _outline_only_progress(FakeClient())
+    assert "served_by" not in resume
+    record = run(_AllClaude(), resume=resume).validation_record()
+    assert record["served_by"][:2] == ["writer: gemini", "writer: claude:claude-sonnet-5-5"]
+    assert record["writer_model"] == settings.LEARN_WRITER_MODEL.strip()
+
+
+class _JudgeClaudeSupportFellBack(FakeClient):
+    async def generate_json(self, prompt: str, **kw: Any) -> Dict[str, Any]:
+        result = await super().generate_json(prompt, **kw)
+        if kw.get("usage_tag") == J.USAGE_TAG:
+            return {**result, "provider": "claude", "model": "claude-opus-5-5"}
+        if kw.get("usage_tag") == J.SUPPORT_USAGE_TAG:
+            return {**result, "provider": "gemini", "fallback_reason": "ClaudeTimeoutException"}
+        return result
+
+
+def test_the_judge_model_is_named_only_when_the_support_check_agrees():
+    record = run(_JudgeClaudeSupportFellBack()).validation_record()
+    assert "judge: claude:claude-opus-5-5" in record["served_by"]
+    assert "support: gemini (Claude fallback: ClaudeTimeoutException)" in record["served_by"]
+    assert record["judge"]["model"] == J.JUDGE_MODEL
+
+
+def test_support_chunks_claude_answered_before_a_failure_are_still_recorded():
+    calls = {"n": 0}
+
+    def support(prompt, kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {**support_answer(prompt), "provider": "claude", "model": "claude-opus-5-5"}
+        return RuntimeError("gemini down on the second chunk")
+
+    out = run(FakeClient({"support": support}))
+    if calls["n"] < 2:
+        pytest.skip("the article fits one support chunk; nothing fails after a labelled chunk")
+    assert "support: claude:claude-opus-5-5" in out.validation_record()["served_by"]

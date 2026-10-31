@@ -528,7 +528,9 @@ def _fully_populated_report() -> dict:
                "Intangible Assets"]
     return {
         "price_action": {"change_pct": -12.4, "window_label": "30 days", "tier": "unusual",
-                         "z_score": 2.7, "event": {"tag": "earnings guidance cut"}},
+                         "z_score": 2.7, "event": {"tag": "earnings guidance cut"},
+                         "_earnings": {"date": "2026-10-29", "position": "on_last_bar"},
+                         "_market": {"change_pct": 0.9}},
         "revenue_engine": {"reporting_currency": "USD", "segments": [
             {"name": "Launch Services and Space Systems Integration", "current_revenue": 245_000.0,
              "previous_revenue": 180_000.0},
@@ -714,3 +716,314 @@ def test_a_pillar_scored_with_patents_is_never_an_edge_against_patent_free_peers
     assert "Intangible Assets (7.5 vs peer 5.0)" in edges_of(without_ip)
     digest = "\n".join(np_._digest_moat(_moat_provenance_shell([with_ip])))
     assert "Intangible Assets 7.5" in digest and "(peer" not in digest
+
+
+# ── Recent Price Movement: SIZE vs CAUSE prompt, the guard, the digest ───────
+# Intel, 2026-10-30: "This is a normal-range move … routine trading inside the stock's
+# normal range, not a fundamental change in the business" — after a 20.6% fall into its
+# Oct 29 report. The old Typical branch ORDERED that last sentence.
+
+_INTEL_TEXT = (
+    "This is a normal-range move, well within the stock's typical monthly band. The drop "
+    "came alongside recent news of a weak quarter for Intel. This move appears to be "
+    "routine trading inside the stock's normal range, not a fundamental change in the "
+    "business."
+)
+
+
+def _intel_pa(**over):
+    pa = {
+        "change_pct": -20.6, "direction": "down", "window_label": "Last 30 Days",
+        "tier": "Notable", "tag": "Notable", "z_score": 0.87, "sigma_daily_pct": 5.03,
+        "expected_band_pct": None, "event": None, "_news_headlines": [],
+        "_floor": {"reason": "window_move", "session_move_pct": None, "session_date": None},
+        "_earnings": {
+            "date": "2026-10-29", "position": "on_last_bar", "reported": True,
+            "eps_actual": 0.52, "eps_estimate": 0.4066, "eps_surprise_pct": 27.9,
+            "eps_result": "beat", "revenue_surprise_pct": -0.3, "revenue_result": "in_line",
+            "reaction_pct": None,
+            "headlines": [{"date": "2026-10-30", "title": "Why Intel Stock Crashed", "site": "fool.com"}],
+        },
+        "_earnings_unavailable": False,
+        "_market": {"change_pct": 0.9, "start": "2026-09-29", "end": "2026-10-29",
+                    "relative_pts": -21.5, "read": "company_specific"},
+        "_last_bar": "2026-10-29",
+    }
+    pa.update(over)
+    return pa
+
+
+def _pa_prompt(pa, evidence="EVIDENCE-BLOCK"):
+    return np_._price_action_narrative_prompt(PERSONA, evidence, {"price_action": pa})
+
+
+def test_the_forced_typical_verdict_is_gone_from_every_branch():
+    for tier in ("Typical", "Notable", "Unusual", "Extreme", "typical"):
+        prompt = _pa_prompt({"change_pct": 3.0, "direction": "up", "tier": tier,
+                             "sigma_daily_pct": 1.2})
+        assert "routine trading inside" not in prompt
+        assert "not a real change in the business" not in prompt
+        assert "CONTEXT only" not in prompt
+        assert "normal-range move" not in prompt
+
+
+def test_the_intel_prompt_carries_size_market_earnings_and_the_timing_caveat():
+    prompt = _pa_prompt(_intel_pa())
+    assert "SIZE: Large: a move of 20% or more over this window." in prompt
+    assert "MARKET: The S&P 500 was up 0.9% over the same days (the stock down 20.6%), so " \
+           "the broad market does not explain this move." in prompt
+    assert "EARNINGS: Quarterly results reported Oct 29, the date of the chart's last close." in prompt
+    assert "EPS 0.52 vs 0.41 estimate (beat by 28%)." in prompt
+    assert "Revenue in line with the estimate." in prompt
+    assert "The market's reaction may not be in this chart yet." in prompt
+    assert "may not be in this chart yet, and do not present the chart's move" in prompt
+    assert "never describe it as normal" in prompt                 # the floor rule
+    assert "HEADLINES SINCE THE REPORT" in prompt and "Why Intel Stock Crashed" in prompt
+    size_line = next(ln for ln in prompt.splitlines() if ln.startswith("SIZE:"))
+    assert "normal" not in size_line.lower()
+
+
+def test_the_prompt_keeps_one_parsable_word_ask_and_embeds_evidence_once():
+    ev = "UNIQUE-EVIDENCE-7731"
+    prompt = _pa_prompt(_intel_pa(), evidence=ev)
+    assert prompt.count(ev) == 1                                   # the cached-context replace
+    m = re.search(r"(?:total )?under (\d+) words", prompt)
+    assert m and int(m.group(1)) == 60
+    assert len(re.findall(r"under \d+ words", prompt)) == 1
+
+
+@pytest.mark.parametrize("tier,phrase", [
+    ("unusual", "Unusually large"), ("EXTREME", "Extremely large"),
+    ("Notable", "Larger than this stock usually moves"),
+    ("Typical", "An ordinary size for this stock"),
+])
+def test_size_lines_match_the_tier_case_insensitively(tier, phrase):
+    prompt = _pa_prompt({"change_pct": 4.0, "direction": "up", "tier": tier,
+                         "sigma_daily_pct": 1.5})
+    assert phrase in prompt
+
+
+def test_size_line_for_a_single_session_floor_and_for_unknown_sigma():
+    pa = _intel_pa(_floor={"reason": "single_session", "session_move_pct": -12.3,
+                           "session_date": "2026-10-22"})
+    assert "a single session down 12.3% on Oct 22" in _pa_prompt(pa)
+    assert "Not enough price history" in _pa_prompt(
+        {"change_pct": 4.0, "direction": "up", "tier": "Typical", "sigma_daily_pct": None})
+
+
+def test_earnings_and_market_lines_degrade_honestly():
+    none = _pa_prompt({"change_pct": 2.0, "direction": "up", "tier": "Typical",
+                       "sigma_daily_pct": 1.0})
+    assert "EARNINGS: No quarterly report in this window." in none
+    assert "MARKET: Not available. Do not guess" in none
+    failed = _pa_prompt({"change_pct": 2.0, "direction": "up", "tier": "Typical",
+                         "sigma_daily_pct": 1.0, "_earnings_unavailable": True})
+    assert "EARNINGS: Could not be checked" in failed
+    pending = _pa_prompt(_intel_pa(_earnings={
+        "date": "2026-10-30", "position": "after_last_bar", "reported": False}))
+    assert "Quarterly results scheduled for Oct 30, after the chart's last close (Oct 29)" in pending
+    assert "not in the data yet" in pending and "reported Oct 30" not in pending
+    inside = _pa_prompt(_intel_pa(_earnings=dict(_intel_pa()["_earnings"],
+                                                 position="inside_window", reaction_pct=-31.16)))
+    assert "inside this window" in inside and "were down 31.2% across the report" in inside
+    assert "may not be in this chart yet" not in inside
+
+
+def test_the_guard_replaces_the_intel_verdict_with_the_facts():
+    out = np_.guard_price_action_narrative(_INTEL_TEXT, _intel_pa(), ticker="INTC")
+    assert out == (
+        "The stock fell 20.6% over the last 30 days while the S&P 500 rose 0.9%, so the move "
+        "was specific to the company. It reported quarterly results on Oct 29: EPS beat "
+        "estimates by 28% and revenue was in line with the estimate. The market's reaction "
+        "to those results may not be in this chart yet."
+    )
+
+
+@pytest.mark.parametrize("bad", [
+    "Shares slipped, but this is noise.",
+    "The decline sits within its normal trading range.",
+    "Nothing statistically unusual here; the business has not changed.",
+    "It is not a fundamental shift in the company.",
+    "This was routine selling.",
+    "Shares stayed inside the usual band.",
+    "An unremarkable stretch for the stock.",
+    "There was no real change at the company.",
+    # review round (2026-10-31): rewordings that used to pass
+    "A typical move for Intel, with no single cause confirmed.",
+    "It is a normal move for a stock this volatile.",
+    "Nothing out of the ordinary drove the decline.",
+    "The slide is not a change in fundamentals but a shift in sentiment.",
+    "Sentiment rather than a fundamental change in the business drove it.",
+    "There was no fundamental shift in the business.",
+    "The decline stayed within the stock’s normal 30-day range.",
+    "The underlying business is intact.",
+])
+def test_the_guard_catches_rewordings_of_the_forbidden_verdict(bad):
+    assert np_.guard_price_action_narrative(bad, _intel_pa()) != bad
+
+
+def test_the_guard_leaves_honest_text_and_ordinary_cards_alone():
+    honest = ("Intel fell after its Oct 29 results: EPS beat estimates, but the shares had "
+              "already slid 20.6% while the S&P 500 rose. The move is company-specific.")
+    assert np_.guard_price_action_narrative(honest, _intel_pa()) == honest
+    ordinary = {"change_pct": 2.1, "direction": "up", "tier": "Typical", "sigma_daily_pct": 1.4}
+    typical_text = "This is a normal-range move for the stock."
+    assert np_.guard_price_action_narrative(typical_text, ordinary) == typical_text
+    assert np_.guard_price_action_narrative("", _intel_pa()) == ""
+    assert np_.guard_price_action_narrative(_INTEL_TEXT, None) == _INTEL_TEXT
+
+
+@pytest.mark.parametrize("pa", [
+    _intel_pa(),
+    _intel_pa(change_pct=0.4, direction="flat", _market=None, _earnings=None),
+    _intel_pa(_earnings={"date": "2026-10-30", "position": "after_last_bar", "reported": False}),
+    _intel_pa(window_label="Since Oct 29", _earnings=dict(_intel_pa()["_earnings"],
+              position="inside_window", reaction_pct=-31.16)),
+    _intel_pa(_earnings=None, _market={"change_pct": -12.0, "read": "market_wide"}),
+    _intel_pa(_earnings=None, _floor=None, _market=None),
+])
+def test_the_fact_text_is_short_dashless_and_model_free(pa):
+    text = np_.price_action_fact_text(pa)
+    assert text and len(text.split()) <= 90
+    assert not re.search(r"[‒–—―]| - ", text)
+    assert not re.search(r"(?i)gemini|google|openai|\bmodel\b|\bAI\b", text)
+    assert "routine" not in text.lower() and "normal" not in text.lower()
+
+
+def test_the_fact_text_variants():
+    flat = np_.price_action_fact_text(_intel_pa(change_pct=0.4, direction="flat",
+                                                _market=None, _earnings=None, _floor=None))
+    assert flat == "The stock was roughly flat over the last 30 days. No single cause is confirmed in the data."
+    pending = np_.price_action_fact_text(_intel_pa(_earnings={
+        "date": "2026-10-30", "position": "after_last_bar", "reported": False}))
+    assert "results are scheduled for Oct 30, and the figures are not in the data yet." in pending
+    assert "may not be in this chart" not in pending
+    since = np_.price_action_fact_text(_intel_pa(window_label="Since Oct 29", _earnings=dict(
+        _intel_pa()["_earnings"], position="inside_window", reaction_pct=-31.16)))
+    assert since.startswith("The stock fell 20.6% since Oct 29") and "fell 31.2% across" in since
+    floored = np_.price_action_fact_text(_intel_pa(_earnings=None))
+    assert floored.endswith("A move this large is significant even for a stock that swings a lot.")
+
+
+def test_the_digest_carries_the_report_and_the_market():
+    line = np_._digest_price_action({"price_action": _intel_pa()})[0]
+    assert line == ("PRICE MOVEMENT: -20.6% over Last 30 Days; Notable (z=0.9); "
+                    "results Oct 29, after this move; S&P up 0.9%")
+    inside = _intel_pa(_earnings=dict(_intel_pa()["_earnings"], position="inside_window"))
+    assert "; results Oct 29; S&P" in np_._digest_price_action({"price_action": inside})[0]
+    pending = _intel_pa(_earnings={"date": "2026-10-30", "position": "after_last_bar",
+                                   "reported": False})
+    assert "; results due Oct 30, not out yet;" in np_._digest_price_action(
+        {"price_action": pending})[0]
+    with_event = _intel_pa(event={"tag": "Earnings Reaction", "date": "Oct 29", "index": 3})
+    assert "; catalyst: Earnings Reaction;" in np_._digest_price_action({"price_action": with_event})[0]
+
+
+def test_the_price_action_job_is_wired_to_the_guard():
+    shell = {"price_action": _intel_pa(), "symbol": "INTC"}
+    job = next(j for j in np_.build_narrative_jobs(PERSONA, "EVIDENCE", shell)
+               if j.label == "price_action_narrative")
+    assert job.postprocess is not None
+    assert job.postprocess(_INTEL_TEXT) == np_.price_action_fact_text(shell["price_action"])
+
+
+@pytest.mark.parametrize("text", [
+    "The 20.6% fall is far outside its normal range, and it is not routine.",
+    "A drop well beyond its usual band; this is not noise.",
+    "The move is larger than a typical month for the stock.",
+    "Intel fell sharply into its report; the noise-cancelling unit was not a factor.",
+])
+def test_the_guard_honours_negation_and_contrast(text):
+    assert np_.guard_price_action_narrative(text, _intel_pa()) == text
+
+
+def test_on_a_typical_card_with_a_report_the_size_words_are_true_and_allowed():
+    pa = {"change_pct": 3.1, "direction": "up", "window_label": "Last 30 Days",
+          "tier": "Typical", "sigma_daily_pct": 2.0, "_floor": None,
+          "_earnings": {"date": "2026-10-22", "position": "inside_window", "reported": True,
+                        "eps_result": "beat", "eps_surprise_pct": 12.0}}
+    honest = ("Shares rose 3.1% after the Oct 22 report, where EPS beat estimates by 12%. "
+              "The gain sits within the stock's normal range in size, but it came from the results.")
+    assert np_.guard_price_action_narrative(honest, pa) == honest
+    verdict = "Shares rose 3.1%, but this is routine trading, not a fundamental change."
+    assert np_.guard_price_action_narrative(verdict, pa) != verdict
+
+
+def test_a_last_bar_report_is_context_not_the_cause_in_the_prompt():
+    late = _pa_prompt(_intel_pa())
+    sentence_1 = next(ln for ln in late.splitlines() if ln.startswith("Sentence 1:"))
+    assert "results reported inside the window" not in sentence_1
+    assert "it is not the" in late and "cause of the move shown" in late
+    assert "never present the chart's move as its cause or its reaction" in late
+    inside = _pa_prompt(_intel_pa(_earnings=dict(_intel_pa()["_earnings"],
+                                                 position="inside_window", reaction_pct=-31.2)))
+    assert "Sentence 1: the main cause, checked in this order: results reported inside the " \
+           "window (EARNINGS)" in inside
+    assert "Lead with them" in inside
+
+
+def test_the_headlines_heading_says_when_results_are_not_out_yet():
+    pending = _intel_pa(_earnings={"date": "2026-10-30", "position": "after_last_bar",
+                                   "reported": False,
+                                   "headlines": [{"date": "2026-10-30",
+                                                  "title": "Intel to report after the bell",
+                                                  "site": "x.com"}]})
+    prompt = _pa_prompt(pending)
+    assert "HEADLINES SINCE THE SCHEDULED REPORT DATE (results not out yet" in prompt
+    assert "HEADLINES SINCE THE REPORT (" not in prompt
+
+
+def test_an_unscanned_window_says_not_checked_rather_than_none():
+    pa = {"change_pct": 2.0, "direction": "up", "tier": "Typical", "sigma_daily_pct": 1.0,
+          "_news_headlines": [], "_news_scanned": False}
+    prompt = _pa_prompt(pa)
+    assert "RECENT MATCHED HEADLINES: not checked" in prompt
+    assert "none in window" not in prompt
+    assert "none in window" in _pa_prompt(dict(pa, _news_scanned=True))
+
+
+def test_the_fact_text_names_a_single_session_floor_and_an_anchored_event():
+    retraced = _intel_pa(change_pct=1.5, direction="up", _earnings=None, _market=None,
+                         _floor={"reason": "single_session", "session_move_pct": 12.4,
+                                 "session_date": "2026-10-23"})
+    text = np_.price_action_fact_text(retraced)
+    assert text == ("The stock rose 1.5% over the last 30 days. The window includes a "
+                    "single session up 12.4% on Oct 23, large even for a stock that "
+                    "swings a lot.")
+    assert "A move this large" not in text
+    anchored = _intel_pa(window_label="Since Oct 15", _earnings=None, _floor=None,
+                         event={"tag": "M&A", "date": "Oct 15", "index": 4})
+    assert "The move is measured from Oct 15 (M&A)." in np_.price_action_fact_text(anchored)
+
+
+def test_the_market_line_and_fact_text_when_the_market_moved_far_more():
+    pa = _intel_pa(change_pct=2.0, direction="up", _earnings=None, _floor=None,
+                   _market={"change_pct": 10.0, "read": "market_larger"})
+    assert "far more than the stock moved" in _pa_prompt(pa)
+    text = np_.price_action_fact_text(pa)
+    assert text.startswith("The stock rose 2.0% over the last 30 days while the S&P 500 rose "
+                           "10.0%, far more than the stock moved.")
+    assert "in step" not in text
+
+
+def test_on_a_floored_card_the_bare_size_words_are_refused_too():
+    """The floor rule forbids "normal / typical / ordinary" outright; a phrasing no SIZE
+    pattern lists ("normal for Intel") is still caught on a floored card, and only there."""
+    text = "The 20.6% decline is normal for Intel given how much it swings."
+    assert np_.guard_price_action_narrative(text, _intel_pa()) != text
+    notable_only = _intel_pa(_floor=None, _earnings=None)
+    assert np_.guard_price_action_narrative(text, notable_only) == text
+
+
+def test_price_lines_never_feed_the_model_a_signed_number():
+    """STYLE asks for negatives in words; a "-20.6%" in the prompt came back as "down
+    twenty point six percent". The SIZE / MARKET / EARNINGS lines use directional words."""
+    pa = _intel_pa(_earnings=dict(_intel_pa()["_earnings"], position="inside_window",
+                                  reaction_pct=-31.16),
+                   _floor={"reason": "single_session", "session_move_pct": -12.3,
+                           "session_date": "2026-10-22"})
+    prompt = _pa_prompt(pa)
+    for head in ("SIZE:", "MARKET:", "EARNINGS:"):
+        line = next(ln for ln in prompt.splitlines() if ln.startswith(head))
+        assert not re.search(r"[+\-]\d", line), line
+    assert not re.search(r"[+\-]\d", np_.price_action_fact_text(pa))

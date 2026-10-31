@@ -2500,3 +2500,43 @@ def test_a_stored_payload_without_the_projection_keys_validates():
               "lifecycle_phase": "mature", "tam_basis": "measured", "tam_year": 2024}
     md = MarketDynamicsResponse.model_validate(stored)
     assert md.projection_tam is None and md.market_size_label is None and md.scope_note is None
+
+
+def test_a_floored_price_action_with_its_internal_keys_validates_and_strips():
+    """The size floor hides the band (`expected_band_pct` None — shipped iOS hides the
+    sub-label then) and adds `_earnings` / `_market` / `_floor` / `_window_start` /
+    `_last_bar`. The RAW dict (underscore keys included) is what the caches store; the
+    validated response must drop every one of them and keep the iOS-required fields."""
+    from datetime import date as _d, timedelta as _td
+    from app.schemas.ticker_report import PriceActionResponse
+
+    end = _d(2026, 10, 29)
+    dates, d = [], end
+    while len(dates) < 200:
+        if d.weekday() < 5:
+            dates.append(d)
+        d -= _td(days=1)
+    dates.reverse()
+    prices = [100.0]
+    for i in range(1, 178):
+        prices.append(prices[-1] * (1.05 if i % 2 else 1 / 1.05))
+    ref = prices[-1]
+    for k in range(1, 23):
+        prices.append(ref * (1 - 0.206 * k / 22))
+    out = _build_price_action(
+        prices, prices[-1], [], [], recent_price_dates=dates,
+        earnings_rows=[{"date": "2026-10-29", "epsActual": 0.52, "epsEstimated": 0.41}],
+        market_series=[(dates[0], 500.0), (_d(2026, 9, 29), 500.0), (end, 504.5)],
+        today=_d(2026, 10, 30),
+    )
+    assert out["_floor"] is not None and out["expected_band_pct"] is None
+    payload = dict(out, narrative="test")
+    model = PriceActionResponse.model_validate(payload)
+    dumped = model.model_dump()
+    assert not any(k.startswith("_") for k in dumped)
+    assert dumped["expected_band_pct"] is None
+    for k in ("prices", "current_price", "narrative", "change_pct", "direction",
+              "window_label", "tag"):
+        assert dumped[k] is not None, k
+    import json as _j
+    _j.dumps(out, allow_nan=False)

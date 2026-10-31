@@ -89,6 +89,12 @@ from app.services.price_volatility import (  # noqa: E402  (import-after-import 
     _std_dev_pop,
     _tier_for_z,
     _z_score_for_window,
+    FLOOR_SESSION_RECENCY_DAYS,
+    FLOOR_SINGLE_SESSION,
+    TIER_NOTABLE,
+    TIER_RANK,
+    effective_tier,
+    max_session_move,
 )
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
@@ -260,6 +266,27 @@ _MACRO_HISTORY_DAYS: int = 400
 _MACRO_SNAPSHOT_TTL_SECONDS: int = 3600  # 1h — fresh enough for a backdrop
 _macro_snapshot_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
 _macro_snapshot_inflight: Dict[str, Any] = {}
+
+# SPY's dated daily closes, kept from the macro fetch (the realized-volatility row reads
+# the same series) so the price-action section can say how the S&P 500 moved over the
+# stock's own window at no extra FMP call. Written ONLY inside
+# `_fetch_macro_indicators_uncached`, which every snapshot-cache write runs first, so a
+# warm snapshot means this was filled by the same run — unless SPY's part of that run
+# failed, in which case the reader answers None and the prompt says "not available".
+_MARKET_SERIES_SYMBOL: str = "SPY"
+_market_series_cache: Dict[str, Tuple[float, List[Tuple[date, float]]]] = {}
+
+
+def _cached_market_series() -> Optional[List[Tuple[date, float]]]:
+    """SPY's cached (date, close) series, oldest first — or None when it is missing or
+    older than two snapshot TTLs (never serve a stale market comparison)."""
+    hit = _market_series_cache.get(_MARKET_SERIES_SYMBOL)
+    if hit is None:
+        return None
+    stamped, series = hit
+    if time.time() - stamped > 2 * _MACRO_SNAPSHOT_TTL_SECONDS or not series:
+        return None
+    return series
 
 
 # ── News catalyst classification ──────────────────────────────────────
@@ -586,9 +613,18 @@ def _settle_pass1_result(out: Any, attr: str, result: Any, default: Any, ticker:
         )
         if attr == "profile":
             raise result
-        if attr == "news":
+        if attr in ("news", "earnings_rows"):
+            # A failed earnings-calendar fetch is "could not be checked", not "no report
+            # in the window" — the price-action prompt says so (`_earnings_unavailable`).
             from app.integrations.fmp import EmptyAfterFailure
             setattr(out, attr, EmptyAfterFailure(f"{type(result).__name__}: {result}"[:200]))
+            if attr == "earnings_rows" and _is_transient_fetch_failure(result):
+                # Never freeze an outage into the shared collection until the next close:
+                # every persona's report would miss the earnings context after FMP
+                # recovered. Delivered and billed as usual, kept out of shared caches —
+                # the rule every other `get_earning_calendar_full(raise_errors=True)`
+                # caller follows.
+                out.degraded_sections.append(f"{attr}:{type(result).__name__}")
             return
         if attr in _ANNUAL_STATEMENT_ATTRS and _is_transient_fetch_failure(result):
             # The annual statements feed every deterministic moat pillar (and the growth /
@@ -1657,12 +1693,19 @@ class TickerReportDataCollector:
         if (not pa or not tier or tier == "Typical"
                 or not change_days or change_days > _INTRADAY_MAX_DAYS):
             return  # not a big move, or the window is long enough for daily
-        today = datetime.now(timezone.utc).date()
-        win_start = (today - timedelta(days=int(change_days) + 5)).isoformat()
+        # Exactly the detection window: from its opening bar to its last SETTLED bar.
+        # `_change_days` counts sessions now, so "today − (days + 5)" could start inside
+        # the window, and "to today" pulled in the unsettled session the card excludes.
+        win_start = pa.get("_window_start")
+        win_end = pa.get("_last_bar")
+        if not (isinstance(win_start, str) and isinstance(win_end, str)):
+            today = datetime.now(timezone.utc).date()
+            win_start = (today - timedelta(days=int(change_days) * 7 // 5 + 5)).isoformat()
+            win_end = today.isoformat()
         try:
             rows = await self.fmp.get_intraday_prices(
                 out.ticker, interval="1hour",
-                from_date=win_start, to_date=today.isoformat(),
+                from_date=win_start, to_date=win_end,
             )
         except Exception as exc:
             logger.warning("intraday chart fetch failed for %s: %s", out.ticker, exc)
@@ -1798,7 +1841,16 @@ class TickerReportDataCollector:
                 self.fmp.get_revenue_product_segmentation(ticker, "annual", "flat"),
                 [],
             ),
-            ("earnings_dates", self.fmp.get_historical_earnings_dates(ticker), []),
+            # The FULL /stable/earnings rows (one call, the same endpoint the dates came
+            # from): the price-action section reads each report's EPS / revenue actual vs
+            # estimate. `earnings_dates` is derived from these rows after the gather; the
+            # rows themselves stay a transient attribute (not a dataclass field), so the
+            # collection cache shape is unchanged.
+            (
+                "earnings_rows",
+                self.fmp.get_earning_calendar_full(ticker, raise_errors=True),
+                [],
+            ),
             ("analyst_analysis", analyst_service.get_analysis(ticker), None),
             # WITH its build status: a degraded holders build must not be frozen into the
             # collection (`_settle_holders_result`).
@@ -1910,6 +1962,11 @@ class TickerReportDataCollector:
 
         for (attr, _coro, default), result in zip(tasks, results):
             _settle_pass1_result(out, attr, result, default, ticker)
+
+        out.earnings_rows = _clean_earnings_rows(getattr(out, "earnings_rows", None), ticker)
+        out.earnings_dates = sorted(
+            {str(r["date"])[:10] for r in out.earnings_rows}, reverse=True,
+        )
 
         # A Financials section served from a PARTIAL build must not be frozen into the
         # report (or the shared collection cache) — see the function's docstring.
@@ -2054,6 +2111,8 @@ class TickerReportDataCollector:
         async def _one(spec: "_MacroSpec") -> Optional[Dict[str, Any]]:
             try:
                 series = await _series(spec)
+                if spec.source != "fred" and spec.ref == _MARKET_SERIES_SYMBOL and series:
+                    _market_series_cache[_MARKET_SERIES_SYMBOL] = (time.time(), list(series))
                 if not series:
                     logger.warning(
                         "macro series %s (%s:%s) returned no usable observations — "
@@ -2809,6 +2868,13 @@ class TickerReportDataCollector:
             # volatility move/z math downstream (see price_volatility guards).
             if not math.isfinite(px):
                 continue
+            # End the series at the SETTLED close `current_price` reports. FMP's EOD feed
+            # carries the in-progress session's partial bar, so a mid-session collection
+            # used to score the move on a bar that was still moving while the card showed
+            # yesterday's close — and "results after the chart's last close" had no fixed
+            # meaning.
+            if close_date is not None and d > close_date:
+                continue
             recent_pairs.append((d, px))
         recent_pairs.reverse()  # FMP returns newest-first; we want chronological.
         c["recent_prices"] = [px for _, px in recent_pairs]
@@ -2986,6 +3052,8 @@ class TickerReportDataCollector:
             out.earnings_dates,
             out.news,
             recent_price_dates=c.get("recent_price_dates") or [],
+            earnings_rows=getattr(out, "earnings_rows", None),
+            market_series=_cached_market_series(),
         )
 
         # ── Revenue engine segments ───────────────────────────────────
@@ -7557,117 +7625,428 @@ def _intraday_closes(rows: List[Dict[str, Any]]) -> List[float]:
     return out
 
 
+# ── Earnings context + market comparison for the price-action section ─────────
+#
+# Owner decisions 2026-10-31 ("Floor 20% / 10%", "AI context only", "Flag it in the
+# insight"). Intel fell 20.6% in a month into a weak quarter; with σ ≈ 5% a day that scored
+# z 0.87, so no earnings date or headline was ever looked at and the insight called the move
+# "routine trading … not a fundamental change". The section now always checks for a report
+# in (or just after) its window, says how the S&P 500 moved over the same days, and floors
+# the tier on absolute size (`price_volatility.effective_tier`).
+
+# A move into/out of a report larger than this (%, two sessions) is a price REACTION.
+_EARNINGS_REACTION_PCT: float = 3.0
+# EPS / revenue within this % of the estimate read "in line".
+_EARNINGS_IN_LINE_PCT: float = 1.0
+# An EPS estimate smaller than this (per share) gives no meaningful surprise %.
+_EPS_MIN_ESTIMATE_FOR_PCT: float = 0.01
+# A revenue surprise beyond this is a unit/vendor glitch, not a result (the earnings
+# card's own plausibility idea).
+_REVENUE_MAX_PLAUSIBLE_SURPRISE_PCT: float = 50.0
+_EARNINGS_SCAN_MIN_DAYS: int = 45
+# A pending row (no actuals) counts as a report only this many days after its date: FMP
+# fills a release's actuals within a day or two, so an older pending row is a postponed
+# report's leftover or a feed estimate — never "results scheduled inside the window".
+_PENDING_REPORT_MAX_AGE_DAYS: int = 5
+_REPORT_HEADLINES_MAX: int = 5
+_REPORT_HEADLINE_MAX_CHARS: int = 140
+# Market share of the stock's move (m / s) at or above this reads market-wide; at or below
+# the second (or opposite sign) company-specific; between, partly market. Below
+# _MARKET_READ_MIN_MOVE_PCT the stock barely moved and no read is given.
+_MARKET_WIDE_SHARE: float = 0.5
+# Above this share the market moved FAR more than the stock (+10% vs +2%): that is not
+# "in step with the market" — it reads `market_larger`.
+_MARKET_LARGER_SHARE: float = 1.5
+_COMPANY_SPECIFIC_SHARE: float = 0.2
+_MARKET_READ_MIN_MOVE_PCT: float = 1.0
+
+EARNINGS_INSIDE_WINDOW = "inside_window"
+EARNINGS_ON_LAST_BAR = "on_last_bar"
+EARNINGS_AFTER_LAST_BAR = "after_last_bar"
+
+
+def _iso_day(raw: Any) -> Optional[date]:
+    if isinstance(raw, datetime):
+        return raw.date()
+    if isinstance(raw, date):
+        return raw
+    if not isinstance(raw, str) or len(raw) < 10:
+        return None
+    try:
+        return date.fromisoformat(raw[:10])
+    except ValueError:
+        return None
+
+
+def _clean_earnings_rows(rows: Any, ticker: str) -> List[Dict[str, Any]]:
+    """The ticker's own dated `/stable/earnings` rows. A failed fetch (an
+    `EmptyAfterFailure`) is returned as is, so its `fetch_failed` marker survives."""
+    if getattr(rows, "fetch_failed", False):
+        return rows
+    symbol = (ticker or "").upper()
+    cleaned: List[Dict[str, Any]] = []
+    for r in rows if isinstance(rows, list) else []:
+        if not isinstance(r, dict) or _iso_day(r.get("date")) is None:
+            continue
+        row_symbol = str(r.get("symbol") or "").upper()
+        if row_symbol and row_symbol != symbol:
+            continue
+        cleaned.append(r)
+    return cleaned
+
+
+def _earnings_events(rows: Any, as_of: date) -> List[Dict[str, Any]]:
+    """Report dates that have HAPPENED by `as_of` (the ET date), oldest first.
+
+    One event per announcement date (`date` is the release day — never the period-end
+    `fiscal_date`), preferring a row that carries actuals. A pending row (no actuals yet)
+    counts only when its date has arrived, it is at most `_PENDING_REPORT_MAX_AGE_DAYS`
+    old (FMP keeps a postponed report's original date as a pending row beside the real
+    one), and no reported row lies within `STALE_RESCHEDULE_DAYS` on either side; an
+    upcoming row never counts. A legacy date-only row (`_date_only`, from a caller that
+    passed bare date strings) is a past announcement and counts as reported.
+    """
+    from app.services._earnings_common import STALE_RESCHEDULE_DAYS, has_reported_actual
+
+    def _reported(r: Dict[str, Any]) -> bool:
+        return bool(r.get("_date_only")) or has_reported_actual(r)
+
+    by_day: Dict[date, Dict[str, Any]] = {}
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        d = _iso_day(r.get("date"))
+        if d is None or d > as_of:
+            continue
+        prev = by_day.get(d)
+        if prev is None or (not _reported(prev) and _reported(r)):
+            by_day[d] = r
+    reported_days = [d for d, r in by_day.items() if has_reported_actual(r)]
+    events: List[Dict[str, Any]] = []
+    for d, r in by_day.items():
+        reported = _reported(r)
+        if not reported and (
+            (as_of - d).days > _PENDING_REPORT_MAX_AGE_DAYS
+            or any(abs((d - rd).days) <= STALE_RESCHEDULE_DAYS for rd in reported_days)
+        ):
+            continue
+        events.append({"date": d, "row": r, "reported": reported})
+    events.sort(key=lambda e: e["date"])
+    return events
+
+
+def _eps_vs_estimate(row: Dict[str, Any]) -> Dict[str, Any]:
+    """EPS actual vs estimate, never vs the share price (foreign filers report per ADS)."""
+    a = _num_or_none(row.get("epsActual", row.get("eps")))
+    e = _num_or_none(row.get("epsEstimated"))
+    if a is None or e is None or eps_digit_shift_suspect(a, e):
+        return {}
+    diff = a - e
+    surprise = diff / abs(e) * 100.0 if abs(e) >= _EPS_MIN_ESTIMATE_FOR_PCT else None
+    if abs(diff) < 0.005 or (surprise is not None and abs(surprise) < _EARNINGS_IN_LINE_PCT):
+        result = "in_line"
+    else:
+        result = "beat" if diff > 0 else "miss"
+    return {
+        "eps_actual": round(a, 4),
+        "eps_estimate": round(e, 4),
+        "eps_surprise_pct": round(surprise, 1) if surprise is not None else None,
+        "eps_result": result,
+    }
+
+
+def _revenue_vs_estimate(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Revenue surprise % only (unit-free); dropped when implausible."""
+    a = _num_or_none(row.get("revenueActual", row.get("revenue")))
+    e = _num_or_none(row.get("revenueEstimated"))
+    if a is None or e is None or e <= 0 or a < 0:
+        return {}
+    surprise = (a - e) / e * 100.0
+    if abs(surprise) > _REVENUE_MAX_PLAUSIBLE_SURPRISE_PCT:
+        return {}
+    if abs(surprise) < _EARNINGS_IN_LINE_PCT:
+        result = "in_line"
+    else:
+        result = "above" if surprise > 0 else "below"
+    return {"revenue_surprise_pct": round(surprise, 1), "revenue_result": result}
+
+
+def _earnings_reaction_pct(recent_prices: List[float], idx: int) -> Optional[float]:
+    """Close the session BEFORE the report's bar → close the session AFTER it: covers a
+    before-open and an after-close release alike. None unless both bars exist (a report on
+    the chart's last bar has no 'after' yet)."""
+    if idx - 1 < 0 or idx + 1 >= len(recent_prices):
+        return None
+    before = _num_or_none(recent_prices[idx - 1])
+    after = _num_or_none(recent_prices[idx + 1])
+    if before is None or after is None or before <= 0:
+        return None
+    pct = (after - before) / before * 100.0
+    return round(pct, 2) if math.isfinite(pct) else None
+
+
+def _earnings_tag(reaction_pct: Optional[float], eps_result: Optional[str]) -> str:
+    """The event pill. With EPS known, "Beat"/"Miss" only when the result and the price
+    agree — a beat followed by a −15% session is a reaction, not a miss. With EPS unknown
+    the price-only rule stands."""
+    if reaction_pct is None:
+        return "Earnings Reaction"
+    up = reaction_pct > _EARNINGS_REACTION_PCT
+    down = reaction_pct < -_EARNINGS_REACTION_PCT
+    if eps_result is None:
+        return "Earnings Beat" if up else "Earnings Miss" if down else "Earnings Reaction"
+    if eps_result == "beat" and up:
+        return "Earnings Beat"
+    if eps_result == "miss" and down:
+        return "Earnings Miss"
+    return "Earnings Reaction"
+
+
+def _report_headlines(
+    news: Optional[List[Dict[str, Any]]], since: date, until: date,
+) -> List[Dict[str, Any]]:
+    """Up to five headlines published from the report day on, newest first — picked by
+    DATE, not by keyword: no keyword list catches "forecasts revenue below estimates"."""
+    picked: List[Tuple[date, Dict[str, Any]]] = []
+    for item in news or []:
+        if not isinstance(item, dict):
+            continue
+        d = _iso_day(item.get("publishedDate") or item.get("date"))
+        title = str(item.get("title") or "").strip()
+        if d is None or not title or not (since <= d <= until):
+            continue
+        picked.append((d, {
+            "date": d.isoformat(),
+            "title": title[:_REPORT_HEADLINE_MAX_CHARS],
+            "site": str(item.get("site") or "")[:60],
+        }))
+    picked.sort(key=lambda t: t[0], reverse=True)
+    return [h for _, h in picked[:_REPORT_HEADLINES_MAX]]
+
+
+def _earnings_context(
+    event: Dict[str, Any],
+    last_bar: date,
+    recent_prices: List[float],
+    recent_price_dates: Optional[List[date]],
+    news: Optional[List[Dict[str, Any]]],
+    as_of: date,
+    today: date,
+) -> Dict[str, Any]:
+    """The `_earnings` block the Stage B prompt reads: where the report sits against the
+    chart's last bar, its results against estimates, and the price reaction when the
+    chart holds both sides of it. ISO strings and finite rounded floats only (the
+    collection cache `json.dumps` it)."""
+    d: date = event["date"]
+    if d < last_bar:
+        position = EARNINGS_INSIDE_WINDOW
+    elif d == last_bar:
+        position = EARNINGS_ON_LAST_BAR
+    else:
+        position = EARNINGS_AFTER_LAST_BAR
+    ctx: Dict[str, Any] = {
+        "date": d.isoformat(),
+        "position": position,
+        "reported": bool(event["reported"]),
+        "eps_actual": None,
+        "eps_estimate": None,
+        "eps_surprise_pct": None,
+        "eps_result": None,
+        "revenue_surprise_pct": None,
+        "revenue_result": None,
+        "reaction_pct": None,
+    }
+    ctx.update(_eps_vs_estimate(event["row"]))
+    ctx.update(_revenue_vs_estimate(event["row"]))
+    if position == EARNINGS_INSIDE_WINDOW:
+        idx = _index_for_date(d, today, recent_prices, recent_price_dates)
+        ctx["reaction_pct"] = _earnings_reaction_pct(recent_prices, idx)
+    ctx["headlines"] = _report_headlines(news, d, max(as_of, today))
+    return ctx
+
+
+def _market_comparison(
+    stock_change_pct: float,
+    start: Optional[date],
+    end: Optional[date],
+    market_series: Optional[List[Tuple[date, float]]],
+) -> Optional[Dict[str, Any]]:
+    """How the S&P 500 (SPY) moved over the stock's own window, and a plain read of how
+    much of the stock's move the market explains. None when the series is missing or does
+    not cover the window (`range_change_pct` refuses a stale anchor)."""
+    from app.services.price_window import range_change_pct
+
+    if not market_series or start is None or end is None:
+        return None
+    m = range_change_pct(market_series, start, end)
+    s = _num_or_none(stock_change_pct)
+    if m is None or s is None:
+        return None
+    read: Optional[str] = None
+    if abs(s) >= _MARKET_READ_MIN_MOVE_PCT:
+        share = m / s
+        if share > _MARKET_LARGER_SHARE:
+            read = "market_larger"
+        elif share >= _MARKET_WIDE_SHARE:
+            read = "market_wide"
+        elif share <= _COMPANY_SPECIFIC_SHARE:
+            read = "company_specific"
+        else:
+            read = "partly_market"
+    return {
+        "change_pct": round(m, 1),
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "relative_pts": round(s - m, 1),
+        "read": read,
+    }
+
+
 def _build_price_action(
     recent_prices: List[float],
     current_price: float,
     earnings_dates: List[str],
     news: Optional[List[Dict[str, Any]]] = None,
     recent_price_dates: Optional[List[date]] = None,
+    *,
+    earnings_rows: Optional[List[Dict[str, Any]]] = None,
+    market_series: Optional[List[Tuple[date, float]]] = None,
+    today: Optional[date] = None,
 ) -> Dict[str, Any]:
     """Volatility-aware price-movement section with dynamic window selection.
 
     Pipeline — significance is decided BEFORE any reason is sought:
       1. Compute σ_daily over the 180-day baseline and the most-unusual
-         evaluation window (7/15/30/45 days; calendar-day in production,
-         trading-day in the legacy test path).
-      2. BIG-MOVE GATE — score the displayed move (current price vs the
-         window's opening close) against σ. Only |z| ≥ _BIG_MOVE_Z is
-         "big" enough to explain; for a move within range we SKIP the
-         catalyst scan entirely and show "Last N Days" + the tier badge.
-      3. Only for a big move: scan earnings + FMP news, and anchor the
-         chart to a catalyst ("Since <date>") when its OWN since-event move
-         also clears _BIG_MOVE_Z — otherwise keep the window. Trim the
-         sparkline to the chosen span.
+         evaluation window (7/15/30/45/60 days; calendar-day in production,
+         trading-day in the legacy test path), with the absolute-size floor
+         (`effective_tier`: 20%+ over the window, or a 10%+ session in it, is at
+         least Notable).
+      2. GATE — the reason hunt runs for a big move (|z| ≥ _BIG_MOVE_Z), a floored
+         one, unknown σ, or when an earnings report falls in (or after) the window:
+         a report is a reason to look whatever the size. An ordinary move with no
+         report skips it and shows "Last N Days" + the tier badge.
+      3. When it runs: scan earnings + FMP news, and anchor the chart to a catalyst
+         ("Since <date>") when its bar is before the chart's last bar and its OWN
+         since-event move is itself at least Notable — otherwise keep the window.
 
-    `_news_headlines` (matched headlines for the Stage B narrative) is
-    populated ONLY when the gate opens — a normal move surfaces no reason.
-    The underscore prefix flags it as Pydantic-ignored.
+    Internal (Pydantic-ignored) keys feed the Stage B prompt: `_news_headlines`
+    (matched catalysts), `_earnings` (the report in or after the window, with results
+    vs estimates), `_market` (the S&P 500 over the same days), `_floor` (why the size
+    floor lifted the tier). `today` pins the clock for tests; production passes None.
     """
     if not recent_prices:
         return _empty_price_action(current_price)
 
-    today = datetime.now(timezone.utc).date()
+    from app.utils.market_hours import ET
+
+    # The legacy (date-less) path keeps the UTC clock its index arithmetic always used;
+    # "has a pending report date arrived" is an ET question.
+    today_utc = today or datetime.now(timezone.utc).date()
+    as_of = today or datetime.now(ET).date()
+    n = len(recent_prices)
+    dated = bool(recent_price_dates) and len(recent_price_dates) == n
+    price_dates: Optional[List[date]] = recent_price_dates if dated else None
+    # Every window, scan and position is anchored on the chart's LAST BAR, never the
+    # wall clock: a collection made after 20:00 ET is already "tomorrow" in UTC, and a
+    # fixed-date test must not drift out of its own window.
+    last_bar: date = price_dates[-1] if price_dates else today_utc
+    recent_from_idx = (
+        bisect.bisect_right(price_dates, last_bar - timedelta(days=FLOOR_SESSION_RECENCY_DAYS))
+        if price_dates else max(1, n - FLOOR_SESSION_RECENCY_DAYS)
+    )
 
     # ── Volatility & dynamic window selection ─────────────────────────
-    vol = _compute_price_volatility(recent_prices, recent_price_dates)
+    vol = _compute_price_volatility(recent_prices, price_dates)
     sigma_daily = vol["sigma_daily"]
     chosen_window = vol["chosen_window"]
     chosen_ref_idx = vol["chosen_ref_idx"]
 
-    # ── STEP 1 · IS IT A BIG MOVE?  (significance is decided FIRST) ────
-    # Score the move the user will actually see — current price vs the close
-    # that opens the most-unusual volatility window — against the stock's own
-    # daily σ. This runs BEFORE any news is scanned: we never hunt for (or pay
-    # to find) a "reason" for ordinary noise. Only a move that clears
-    # _BIG_MOVE_Z earns the reason-finding step below.
+    # ── STEP 1 · HOW BIG IS IT?  (decided FIRST, before any reason) ───
+    # Score the move the user will actually see — current price vs the close that
+    # opens the chosen window — against the stock's own daily σ (in SESSIONS), then
+    # apply the absolute-size floor.
     if chosen_ref_idx is not None:
-        ref_price = recent_prices[chosen_ref_idx]
-        change_days = max(1, len(recent_prices) - 1 - chosen_ref_idx)
+        ref_idx = chosen_ref_idx
     else:
-        ref_idx = max(0, len(recent_prices) - (chosen_window + 1))
-        ref_price = recent_prices[ref_idx]
-        change_days = chosen_window
+        ref_idx = max(0, n - (chosen_window + 1))
+        if price_dates:
+            ref_idx = max(0, bisect.bisect_right(
+                price_dates, last_bar - timedelta(days=chosen_window)) - 1)
+    ref_price = recent_prices[ref_idx]
+    change_days = max(1, n - 1 - ref_idx)
     window_days = chosen_window
     change_pct = round(
         (current_price - ref_price) / ref_price * 100, 1,
     ) if ref_price else 0.0
     z_score = _z_score_for_window(change_pct, sigma_daily, change_days)
-    tier = _tier_for_z(z_score)
+    session_pct, session_idx = max_session_move(recent_prices, ref_idx, recent_from_idx)
+    tier, floor_reason = effective_tier(z_score, change_pct, session_pct)
+    window_start: date = price_dates[ref_idx] if price_dates else (
+        last_bar - timedelta(days=change_days)
+    )
+
+    # ── Earnings in scope: a report that has HAPPENED, dated from the window's start
+    # through today (after the last bar too — results out after the chart's close). ──
+    earnings_failed = bool(getattr(earnings_rows, "fetch_failed", False))
+    if earnings_rows is None:
+        # Legacy callers pass bare date strings: dates with no results attached.
+        earnings_rows = [
+            {"date": d, "_date_only": True} for d in earnings_dates or [] if isinstance(d, str)
+        ]
+    events = _earnings_events(earnings_rows, as_of)
+    in_scope = [e for e in events if e["date"] >= window_start]
 
     big_move = z_score is not None and z_score >= _BIG_MOVE_Z
-    # σ unavailable (<30 closes) → we can't judge "big", so fall back to
-    # scanning (keeps low-history tickers + legacy tests working); the σ
-    # sub-label is hidden in that case anyway.
-    hunt_for_reason = big_move or sigma_daily is None
+    # σ unavailable (<30 closes) → we can't judge "big", so fall back to scanning
+    # (keeps low-history tickers + legacy tests working).
+    # A failed earnings fetch also opens it: "no report found" is then unknown, and the
+    # local news scan costs no extra call.
+    hunt_for_reason = (
+        big_move or floor_reason is not None or sigma_daily is None or bool(in_scope)
+        or earnings_failed
+    )
 
-    # ── STEP 2 · ONLY NOW, AND ONLY FOR A BIG MOVE, FIND THE REASON ───
+    # ── STEP 2 · FIND THE REASON ──────────────────────────────────────
     earnings_candidate: Optional[Dict[str, Any]] = None
     news_candidates: List[Dict[str, Any]] = []
     chosen_event: Optional[Dict[str, Any]] = None
     if hunt_for_reason:
-        # Scan within the larger of (45 days, chosen window) so we don't
-        # miss an old-but-significant event.
-        max_scan = max(45, chosen_window)
-        scan_start = today - timedelta(days=max_scan)
+        # Scan within the larger of (45 days, chosen window) so we don't miss an
+        # old-but-significant event.
+        scan_start = last_bar - timedelta(days=max(_EARNINGS_SCAN_MIN_DAYS, chosen_window))
 
-        if earnings_dates:
-            for ed in earnings_dates:
-                try:
-                    d = datetime.strptime(ed[:10], "%Y-%m-%d").date()
-                except (TypeError, ValueError):
-                    continue
-                if not (scan_start <= d <= today):
-                    continue
-                idx = _index_for_date(d, today, recent_prices, recent_price_dates)
-                change = _price_change_at_index(recent_prices, idx)
-                if change > 3:
-                    tag_e = "Earnings Beat"
-                elif change < -3:
-                    tag_e = "Earnings Miss"
-                else:
-                    tag_e = "Earnings Reaction"
-                earnings_candidate = {
-                    "tag": tag_e,
-                    "date": d,
-                    "index": idx,
-                    "abs_move_pct": abs(change),
-                    "_source": "earnings",
-                }
-                break
+        # The LATEST report that can anchor: dated in [scan_start, last bar) with its bar
+        # before the chart's last bar (a report on the last bar has no reaction yet).
+        for ev in reversed(events):
+            d = ev["date"]
+            if not (scan_start <= d <= last_bar):
+                continue
+            idx = _index_for_date(d, today_utc, recent_prices, price_dates)
+            if idx >= n - 1:
+                continue
+            reaction = _earnings_reaction_pct(recent_prices, idx)
+            eps = _eps_vs_estimate(ev["row"])
+            earnings_candidate = {
+                "tag": _earnings_tag(reaction, eps.get("eps_result")),
+                "date": d,
+                "index": idx,
+                "abs_move_pct": abs(reaction) if reaction is not None else 0.0,
+                "_source": "earnings",
+            }
+            break
 
         news_candidates = _detect_news_catalysts(
-            news or [], recent_prices, today, scan_start, recent_price_dates,
+            news or [], recent_prices, today_utc, scan_start, price_dates,
         )
 
-        # Priority: largest absolute move wins. Ties → earnings (higher
-        # confidence). Catalyst-only ties → most recent date.
+        # Priority: largest absolute move wins. Ties → earnings (higher confidence).
+        # Catalyst-only ties → most recent date. Only a catalyst whose bar is before the
+        # chart's last bar may anchor; a last-bar headline still reaches the prompt.
+        anchorable = [c for c in news_candidates if c["index"] < n - 1]
         best_news: Optional[Dict[str, Any]] = None
-        if news_candidates:
-            news_candidates.sort(
-                key=lambda c: (c["abs_move_pct"], c["date"]),
-                reverse=True,
-            )
-            best_news = news_candidates[0]
+        if anchorable:
+            anchorable.sort(key=lambda c: (c["abs_move_pct"], c["date"]), reverse=True)
+            best_news = anchorable[0]
 
         if earnings_candidate and best_news:
             chosen_event = (
@@ -7680,30 +8059,44 @@ def _build_price_action(
         elif best_news:
             chosen_event = best_news
 
-        # Per-catalyst check: even inside a big-move window, only ANCHOR on a
-        # catalyst whose OWN since-event move itself clears _BIG_MOVE_Z. If it
-        # doesn't, the headline didn't drive the move — demote it to
-        # context-only and let the chart show the volatility window instead.
+        # Per-catalyst check: only ANCHOR on a catalyst whose OWN since-event move is
+        # itself at least Notable (z or the size floor). If it isn't, the headline
+        # didn't drive the move — the chart keeps the volatility window.
         if chosen_event:
-            ev_idx = chosen_event.get("index", -1)
-            ev_ref = recent_prices[ev_idx] if 0 <= ev_idx < len(recent_prices) else None
-            ev_days = max(1, (today - chosen_event["date"]).days)
-            ev_change = ((current_price - ev_ref) / ev_ref * 100) if ev_ref else 0.0
+            ev_idx = chosen_event["index"]
+            ev_ref = recent_prices[ev_idx] if 0 <= ev_idx < n else None
+            ev_days = max(1, n - 1 - ev_idx)
+            # Rounded like the card's own `change_pct`, so this check and the re-anchor
+            # below score identical inputs (a z of 1.004 unrounded could print Typical).
+            ev_change = round(
+                (current_price - ev_ref) / ev_ref * 100, 1,
+            ) if ev_ref else 0.0
             ev_z = _z_score_for_window(ev_change, sigma_daily, ev_days)
-            if ev_z is not None and ev_z < _BIG_MOVE_Z:
+            ev_session, _ = max_session_move(recent_prices, ev_idx, recent_from_idx)
+            ev_tier, _ = effective_tier(ev_z, ev_change, ev_session)
+            if sigma_daily is not None and TIER_RANK[ev_tier] < TIER_RANK[TIER_NOTABLE]:
                 chosen_event = None
+        # A catalyst on (or past) the last bar has no move after it to anchor: never let
+        # its tag and "Since <date>" label sit on top of the window's numbers.
+        if chosen_event and not (0 <= chosen_event["index"] < n - 1):
+            chosen_event = None
 
     # ── A surviving catalyst RE-ANCHORS the move to the event date ────
-    # (otherwise the STEP-1 volatility-window values computed above stand.)
-    if chosen_event and 0 <= chosen_event.get("index", -1) < len(recent_prices):
-        ref_price = recent_prices[chosen_event["index"]]
-        change_days = max(1, (today - chosen_event["date"]).days)
-        window_days = max(change_days, 7)  # tiny lead-in before the marker
+    # (otherwise the STEP-1 window values computed above stand.) The tier is
+    # recomputed for the since-event span the card now shows — with σ known that span
+    # was just required to be at least Notable, so it cannot fall back to Typical.
+    if chosen_event and 0 <= chosen_event["index"] < n - 1:
+        ref_idx = chosen_event["index"]
+        ref_price = recent_prices[ref_idx]
+        change_days = max(1, n - 1 - ref_idx)
+        window_days = max((last_bar - chosen_event["date"]).days, 7)  # lead-in before the marker
         change_pct = round(
             (current_price - ref_price) / ref_price * 100, 1,
         ) if ref_price else 0.0
         z_score = _z_score_for_window(change_pct, sigma_daily, change_days)
-        tier = _tier_for_z(z_score)
+        session_pct, session_idx = max_session_move(recent_prices, ref_idx, recent_from_idx)
+        tier, floor_reason = effective_tier(z_score, change_pct, session_pct)
+        window_start = price_dates[ref_idx] if price_dates else chosen_event["date"]
 
     if abs(change_pct) < 1.0:
         direction = "flat"
@@ -7726,16 +8119,18 @@ def _build_price_action(
     # the DETECTION window (change_pct/window_label/σ/tier above) is unchanged.
     # Using min(detect_idx, min_chart_idx) takes the EARLIER index, so the
     # chart naturally uses the longer span when the move itself is > 1 month.
-    if recent_price_dates and len(recent_price_dates) == len(recent_prices):
-        target = today - timedelta(days=_MIN_CHART_DAYS)
-        min_chart_idx = max(0, bisect.bisect_right(recent_price_dates, target) - 1)
+    if price_dates:
+        target = last_bar - timedelta(days=_MIN_CHART_DAYS)
+        min_chart_idx = max(0, bisect.bisect_right(price_dates, target) - 1)
     else:
-        min_chart_idx = max(0, len(recent_prices) - (_MIN_CHART_DAYS + 1))
+        min_chart_idx = max(0, n - (_MIN_CHART_DAYS + 1))
 
     if not chosen_event and chosen_ref_idx is not None:
         detect_idx = chosen_ref_idx
+    elif chosen_event:
+        detect_idx = max(0, min(ref_idx, n - (window_days + 1)))
     else:
-        detect_idx = max(0, len(recent_prices) - (window_days + 1))
+        detect_idx = max(0, n - (window_days + 1))
 
     chart_start = min(detect_idx, min_chart_idx)
     sparkline = recent_prices[chart_start:]
@@ -7766,12 +8161,32 @@ def _build_price_action(
         for c in headline_evidence
     ]
 
+    # ── The report in (or after) the FINAL window, for the prompt ─────
+    final_scope = [e for e in events if e["date"] >= window_start]
+    earnings_ctx = (
+        _earnings_context(
+            final_scope[-1], last_bar, recent_prices, price_dates, news, as_of, today_utc,
+        )
+        if final_scope else None
+    )
+
     # ── Sigma context exposed to iOS for the sub-label ────────────────
+    # The band is 2σ over the window's SESSIONS. Hidden (None — shipped apps already
+    # drop the label) when only the size floor lifted the tier: "Normal range: ±47%"
+    # under a "Notable" pill read as a contradiction (owner, "Hide it when floored").
     sigma_daily_pct = round(sigma_daily * 100, 2) if sigma_daily else None
     expected_band_pct = None
-    if sigma_daily:
+    if sigma_daily and floor_reason is None:
         expected_band_pct = round(sigma_daily * (change_days ** 0.5) * 100 * 2, 2)
     z_out = round(z_score, 2) if z_score is not None else None
+
+    floor_out: Optional[Dict[str, Any]] = None
+    if floor_reason is not None:
+        floor_out = {"reason": floor_reason, "session_move_pct": None, "session_date": None}
+        if floor_reason == FLOOR_SINGLE_SESSION and session_pct is not None:
+            floor_out["session_move_pct"] = session_pct
+            if price_dates and session_idx is not None:
+                floor_out["session_date"] = price_dates[session_idx].isoformat()
 
     return {
         "prices": sparkline,
@@ -7787,11 +8202,22 @@ def _build_price_action(
         "sigma_daily_pct": sigma_daily_pct,
         "expected_band_pct": expected_band_pct,
         "_news_headlines": evidence_payload,  # Pydantic-ignored
-        "_change_days": change_days,  # detection-window span (Pydantic-ignored)
+        "_change_days": change_days,  # detection-window span in SESSIONS (Pydantic-ignored)
         # The news arm FAILED (an `EmptyAfterFailure`): "no matched headlines" is then an
         # outage, not a finding, and the Stage B prompt must say "could not be checked"
         # rather than let the model narrate a big move as catalyst-free.
         "_news_unavailable": bool(getattr(news, "fetch_failed", False)),
+        # False when the reason hunt never ran (an ordinary-size move with no report): the
+        # prompt then says the headlines were not checked, not "none in window".
+        "_news_scanned": bool(hunt_for_reason),
+        "_earnings": earnings_ctx,
+        "_earnings_unavailable": earnings_failed,
+        "_market": _market_comparison(change_pct, window_start, last_bar, market_series),
+        "_floor": floor_out,
+        # The window's opening bar and last bar (ISO) — the hourly chart fetches exactly
+        # this range instead of reaching into the unsettled session.
+        "_window_start": window_start.isoformat(),
+        "_last_bar": last_bar.isoformat(),
     }
 
 
@@ -7812,6 +8238,11 @@ def _empty_price_action(current_price: float) -> Dict[str, Any]:
         "expected_band_pct": None,
         "_news_headlines": [],
         "_news_unavailable": False,
+        "_news_scanned": False,
+        "_earnings": None,
+        "_earnings_unavailable": False,
+        "_market": None,
+        "_floor": None,
     }
 
 

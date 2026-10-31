@@ -163,3 +163,107 @@ def test_nan_intermediate_close_skips_only_that_window():
     for w in out.get("windows", []):
         assert math.isfinite(w["z"]) and math.isfinite(w["move_pct"])
     assert all(w["days"] != 7 for w in out.get("windows", []))   # poisoned window absent
+
+
+# ── Absolute-size floor (report only, owner decision 2026-10-31) ─────────────
+# A stock that swings ~5% a day scored a −20.6% month as "Typical" (z 0.87). The floor
+# lifts a 20%+ window move, or a 10%+ session inside it, to at least Notable.
+
+from datetime import date, timedelta
+
+import pytest
+
+from app.services.price_volatility import (
+    FLOOR_SINGLE_SESSION,
+    FLOOR_WINDOW_MOVE,
+    effective_tier,
+    max_session_move,
+)
+
+
+@pytest.mark.parametrize("z,move,session,tier,floor", [
+    (0.5, -20.0, None, TIER_NOTABLE, FLOOR_WINDOW_MOVE),
+    (0.5, -19.94, None, TIER_TYPICAL, None),          # prints −19.9% → not floored
+    (0.5, 19.96, None, TIER_NOTABLE, FLOOR_WINDOW_MOVE),  # prints +20.0% → floored
+    (0.5, 5.0, 10.0, TIER_NOTABLE, FLOOR_SINGLE_SESSION),
+    (0.5, 5.0, -9.99, TIER_TYPICAL, None),
+    (None, -25.0, None, TIER_NOTABLE, FLOOR_WINDOW_MOVE),   # σ unknown still floors
+    (2.5, -40.0, -15.0, TIER_UNUSUAL, None),           # never lowers, and z owns it
+    (3.2, 1.0, None, TIER_EXTREME, None),
+    (0.5, float("nan"), float("inf"), TIER_TYPICAL, None),
+    (0.5, None, None, TIER_TYPICAL, None),
+    (0.5, True, None, TIER_TYPICAL, None),             # a bool is not a move
+])
+def test_effective_tier_floor(z, move, session, tier, floor):
+    assert effective_tier(z, move, session) == (tier, floor)
+
+
+def test_max_session_move_respects_the_window_and_recency_bounds():
+    prices = [100.0, 88.0, 90.0, 99.0, 100.0]          # −12%, +2.27%, +10%, +1.01%
+    assert max_session_move(prices, 0) == (-12.0, 1)
+    assert max_session_move(prices, 1) == (10.0, 3)    # session 1 opens the window: excluded
+    assert max_session_move(prices, 0, recent_from_idx=2) == (10.0, 3)
+    assert max_session_move(prices, 4) == (None, None)
+    assert max_session_move([100.0, float("nan"), 0.0, 50.0], 0) == (None, None)
+    assert max_session_move([], 0) == (None, None)
+
+
+def _alternating(n, amp):
+    out = [100.0]
+    for i in range(1, n):
+        out.append(out[-1] * ((1 + amp) if i % 2 else 1 / (1 + amp)))
+    return out
+
+
+def test_a_floored_window_is_chosen_when_every_z_is_below_one_trading_day_mode():
+    prices = _alternating(170, 0.05)
+    ref = prices[-1]
+    for k in range(1, 31):                     # −21% over the last 30 sessions, small steps
+        prices.append(ref * (1 - 0.21 * k / 30) * (1.03 if k % 2 else 1 / 1.03))
+    prices[-1] = ref * 0.79
+    vol = _compute_price_volatility(prices)
+    w30 = next(w for w in vol["windows"] if w["days"] == 30)
+    assert w30["z"] < 1.0 and w30["floor"] == FLOOR_WINDOW_MOVE
+    assert vol["chosen_window"] == 30
+    assert vol["tier"] == TIER_NOTABLE and vol["chosen_floor"] == FLOOR_WINDOW_MOVE
+
+
+def test_calendar_mode_floor_and_recency():
+    n = 200
+    end = date(2026, 10, 29)
+    dates = []
+    d = end
+    while len(dates) < n:
+        if d.weekday() < 5:
+            dates.append(d)
+        d -= timedelta(days=1)
+    dates.reverse()
+    prices = _alternating(n, 0.03)
+    prices[-4] = prices[-5] * 0.87                # −13% session four sessions ago
+    for i in range(-3, 0):
+        prices[i] = prices[i - 1] * 1.04
+    vol = _compute_price_volatility(prices, dates)
+    assert vol["tier"] == TIER_NOTABLE and vol["chosen_floor"] == FLOOR_SINGLE_SESSION
+    assert vol["chosen_session_idx"] == n - 4
+    # the same session 60 calendar days back is too old to floor anything
+    old = _alternating(n, 0.03)
+    old[-44] = old[-45] * 0.87
+    for i in range(-43, 0):
+        old[i] = old[i - 1] * (1.03 if i % 2 else 1 / 1.03)
+    vol_old = _compute_price_volatility(old, dates)
+    assert vol_old["chosen_floor"] is None and vol_old["tier"] == TIER_TYPICAL
+
+
+def test_an_unusual_window_beats_a_floored_notable_one():
+    prices = _alternating(170, 0.01)
+    for _ in range(7):
+        prices.append(prices[-1] * 1.03)          # a sharp 7-session run: high z
+    vol = _compute_price_volatility(prices)
+    assert vol["tier"] in (TIER_UNUSUAL, TIER_EXTREME)
+    assert vol["chosen_floor"] is None
+
+
+def test_a_quiet_stock_is_unchanged_by_the_floor():
+    vol = _compute_price_volatility(_alternating(200, 0.01))
+    assert vol["chosen_window"] == 30 and vol["tier"] == TIER_TYPICAL
+    assert vol["chosen_floor"] is None

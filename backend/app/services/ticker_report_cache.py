@@ -319,7 +319,16 @@ TABLE_NAME = "ticker_report_cache"
 #     failures, all test_report_progress_monotonic.py while another session was mid-edit in
 #     research_service.py, a file this push does not carry; 54/54 on re-run). This ONE bump
 #     supersedes every instant above.
-CACHE_SCHEMA_FLOOR = datetime(2026, 10, 25, 18, 13, 0, tzinfo=timezone.utc)
+# 2026-10-31 (22:07 UTC = 18:07 ET, a Saturday, after the close; the commit time, owner's
+#     "Commit my files"): the Recent Price Movement section. Its partial is frozen at COLLECT
+#     time, so cached collections and reports still carry the old tier (no absolute-size
+#     floor: a 20%+ month on a volatile stock read "Typical"), no earnings / S&P context for
+#     the insight, and the insight the old Typical prompt forced ("routine trading … not a
+#     fundamental change", Intel after its Oct 29 report). Markets are closed, so only the
+#     reports cached since Friday's close rebuild, each on its next view. The full backend suite
+#     (minus the Swift-compiling files) ran on this change BEFORE this literal was written. This
+#     ONE bump supersedes every instant above.
+CACHE_SCHEMA_FLOOR = datetime(2026, 10, 31, 22, 7, 0, tzinfo=timezone.utc)
 
 # The internal report key carrying the Financials sections a report lost to a degraded
 # upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.

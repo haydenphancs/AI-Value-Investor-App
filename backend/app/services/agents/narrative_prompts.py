@@ -257,6 +257,9 @@ class NarrativeJob:
     # legitimately optional. When True, an empty/whitespace response
     # becomes None instead of the fallback string.
     nullable: bool = False
+    # Optional deterministic check on the cleaned text (e.g. the price-action guard).
+    # Runs in its own try/except: a bug in it keeps the model text, never the fallback.
+    postprocess: Optional[Callable[[str], str]] = None
 
 
 # When `evidence` is hoisted into a Gemini CachedContent, each per-field
@@ -372,6 +375,14 @@ async def run_narrative_jobs(
             if not cleaned:
                 job.apply(None if job.nullable else job.fallback_value)
                 return
+            if job.postprocess is not None:
+                try:
+                    cleaned = job.postprocess(cleaned) or cleaned
+                except Exception as pe:
+                    logger.warning(
+                        f"Stage-B postprocess {job.label} failed "
+                        f"({type(pe).__name__}: {pe}) — keeping the model text"
+                    )
             job.apply(cleaned)
         except Exception as e:
             logger.warning(
@@ -881,6 +892,175 @@ Synthesize the set into a verdict, then make it company-specific:
 The goal is the company impact — don't just list the factors back."""
 
 
+# ── Recent Price Movement: prompt, fact lines and output guard ─────────
+#
+# SIZE (how big the move is against the stock's own swings, plus the absolute-size floor)
+# and CAUSE (results, a dated headline, the market, or nothing confirmed) are separate
+# questions. The old Typical branch merged them: it ordered every within-1σ move to end
+# "routine trading inside the stock's normal range, not a real change in the business",
+# and Intel's −20.6% month into a weak quarter was narrated exactly that way (2026-10-30).
+
+
+def _pa_dir_pct(v: Any) -> Optional[str]:
+    """-20.6 → 'down 20.6%', 0.9 → 'up 0.9%', ~0 → 'flat'. Directional words, never a
+    signed number: STYLE asks the model to write negatives in words, and a "-20.6%" in the
+    prompt came back as "down twenty point six percent"."""
+    f = _num_or_none_np(v)
+    if f is None:
+        return None
+    if abs(f) < 0.05:
+        return "flat"
+    return f"{'up' if f > 0 else 'down'} {abs(f):.1f}%"
+
+
+def _pa_day_label(iso: Any) -> Optional[str]:
+    """'2026-10-29' → 'Oct 29' (None when unparseable)."""
+    from datetime import date as _date
+
+    if not isinstance(iso, str) or len(iso) < 10:
+        return None
+    try:
+        d = _date.fromisoformat(iso[:10])
+    except ValueError:
+        return None
+    return d.strftime("%b ") + str(d.day)
+
+
+def _pa_tier(pa: Dict[str, Any]) -> str:
+    return str(pa.get("tier") or "Typical").strip().lower()
+
+
+def _price_action_size_line(pa: Dict[str, Any]) -> str:
+    floor = pa.get("_floor") if isinstance(pa.get("_floor"), dict) else None
+    if floor and floor.get("reason") == "single_session":
+        sess = _num_or_none_np(floor.get("session_move_pct"))
+        day = _pa_day_label(floor.get("session_date"))
+        what = (
+            f"a single session {'up' if sess > 0 else 'down'} {abs(sess):.1f}%"
+            if sess is not None else "a single session of 10% or more"
+        )
+        when = f" on {day}" if day else ""
+        return (
+            f"Large: the window includes {what}{when}. A session that size is significant "
+            f"in absolute terms, even for a stock that swings a lot."
+        )
+    if floor:
+        return (
+            "Large: a move of 20% or more over this window. The stock swings a lot day to "
+            "day, but a move this size is significant in absolute terms."
+        )
+    tier = _pa_tier(pa)
+    if tier == "extreme":
+        return "Extremely large for this stock compared with its own history."
+    if tier == "unusual":
+        return "Unusually large for this stock compared with its own history."
+    if tier == "notable":
+        return "Larger than this stock usually moves over this length of time."
+    if pa.get("sigma_daily_pct") is None:
+        return "Not enough price history to judge the size against the stock's own swings."
+    return (
+        "An ordinary size for this stock over this length of time. Size alone says "
+        "nothing about the cause."
+    )
+
+
+def _price_action_market_line(pa: Dict[str, Any]) -> str:
+    mk = pa.get("_market") if isinstance(pa.get("_market"), dict) else None
+    m = _pa_dir_pct((mk or {}).get("change_pct"))
+    if not mk or m is None:
+        return "Not available. Do not guess how the broad market moved."
+    s = _pa_dir_pct(pa.get("change_pct"))
+    base = f"The S&P 500 was {m} over the same days" + (f" (the stock {s})" if s else "")
+    read = mk.get("read")
+    if read == "company_specific":
+        return base + ", so the broad market does not explain this move."
+    if read == "market_wide":
+        return base + ", so much of this move came with the broad market."
+    if read == "partly_market":
+        return base + ", which explains only part of this move."
+    if read == "market_larger":
+        return base + ", far more than the stock moved: the stock did not keep pace with it."
+    return base + "."
+
+
+def _eps_num(v: Any) -> Optional[str]:
+    f = _f_num(v, "{:.2f}")
+    return f
+
+
+def _price_action_earnings_line(pa: Dict[str, Any]) -> str:
+    ec = pa.get("_earnings") if isinstance(pa.get("_earnings"), dict) else None
+    if not ec:
+        if pa.get("_earnings_unavailable"):
+            return (
+                "Could not be checked (the earnings data was unavailable). Do not say "
+                "there was no report."
+            )
+        return "No quarterly report in this window."
+    day = _pa_day_label(ec.get("date")) or "a recent date"
+    position = ec.get("position")
+    last = _pa_day_label(pa.get("_last_bar"))
+    if position == "on_last_bar":
+        where = ", the date of the chart's last close"
+    elif position == "after_last_bar":
+        where = ", after the chart's last close" + (f" ({last})" if last else "")
+    else:
+        where = ", inside this window"
+    if not ec.get("reported"):
+        # A pending row whose date has arrived: the release may still be hours away (an
+        # after-close report seen at noon), so never say it "reported".
+        parts = [
+            f"Quarterly results scheduled for {day}{where}. The figures are not in the "
+            f"data yet: do not describe results."
+        ]
+    else:
+        parts = [f"Quarterly results reported {day}{where}."]
+    eps_a, eps_e = _eps_num(ec.get("eps_actual")), _eps_num(ec.get("eps_estimate"))
+    if eps_a is not None and eps_e is not None:
+        res = ec.get("eps_result")
+        sp = _f_num(abs(ec["eps_surprise_pct"]), "{:.0f}") if isinstance(
+            ec.get("eps_surprise_pct"), (int, float)) else None
+        if res == "beat":
+            verdict = "beat" + (f" by {sp}%" if sp else "")
+        elif res == "miss":
+            verdict = "missed" + (f" by {sp}%" if sp else "")
+        else:
+            verdict = "in line"
+        parts.append(f"EPS {eps_a} vs {eps_e} estimate ({verdict}).")
+    rev = ec.get("revenue_result")
+    rsp = _f_num(abs(ec["revenue_surprise_pct"]), "{:.1f}") if isinstance(
+        ec.get("revenue_surprise_pct"), (int, float)) else None
+    if rev == "in_line":
+        parts.append("Revenue in line with the estimate.")
+    elif rev in ("above", "below") and rsp:
+        parts.append(f"Revenue {rev} the estimate by {rsp}%.")
+    reaction = _pa_dir_pct(ec.get("reaction_pct"))
+    if reaction:
+        parts.append(
+            f"The shares were {reaction} across the report (the session before to the "
+            f"session after)."
+        )
+    if ec.get("reported") and position in ("on_last_bar", "after_last_bar"):
+        parts.append("The market's reaction may not be in this chart yet.")
+    return " ".join(parts)
+
+
+def _price_action_report_headlines_block(pa: Dict[str, Any]) -> str:
+    ec = pa.get("_earnings") if isinstance(pa.get("_earnings"), dict) else None
+    heads = (ec or {}).get("headlines") or []
+    lines = [
+        f"- [{h.get('date')}] {h.get('title')} ({h.get('site') or 'wire'})"
+        for h in heads[:5] if isinstance(h, dict) and h.get("title")
+    ]
+    if not lines:
+        return ""
+    heading = (
+        "HEADLINES SINCE THE REPORT (by date, unfiltered)" if ec.get("reported")
+        else "HEADLINES SINCE THE SCHEDULED REPORT DATE (results not out yet; by date, unfiltered)"
+    )
+    return f"\n{heading}:\n" + "\n".join(lines) + "\n"
+
+
 def _price_action_narrative_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
@@ -912,6 +1092,13 @@ def _price_action_narrative_prompt(
             "\nRECENT MATCHED HEADLINES: could not be checked (news feed unavailable). "
             "Do NOT describe the move as having no catalyst or no news — say the news "
             "could not be reviewed.\n"
+        )
+    elif pa.get("_news_scanned") is False:
+        # The reason hunt never ran (an ordinary-size move with no report): an empty list
+        # is not a finding, so never let it read as "no news".
+        headlines_block = (
+            "\nRECENT MATCHED HEADLINES: not checked (an ordinary-size move with no report "
+            "in the window). Do not claim there was no news.\n"
         )
     else:
         headlines_block = "\nRECENT MATCHED HEADLINES: none in window\n"
@@ -953,107 +1140,105 @@ def _price_action_narrative_prompt(
     direction = pa.get("direction", "flat")
     change_pct = pa.get("change_pct", 0.0)
     window_label = pa.get("window_label", "Last 30 Days")
+    # The magnitude without a sign: the direction word carries it ("DOWN -20.6%" read as a
+    # double negative, and STYLE has the model write negatives in words).
     if direction == "flat":
         ground_truth = (
-            f"The stock is roughly FLAT ({change_pct:+.1f}%) over "
+            f"The stock is roughly FLAT ({abs(change_pct):.1f}%) over "
             f"{window_label.lower()}."
         )
     else:
         ground_truth = (
-            f"The stock is {direction.upper()} {change_pct:+.1f}% over "
+            f"The stock is {direction.upper()} {abs(change_pct):.1f}% over "
             f"{window_label.lower()}."
         )
 
-    # Volatility posture — biases the conclusion sentence without forcing
-    # the AI to quote σ/z numbers. User wants the prose to focus on WHY,
-    # not on math; the σ math lives in the iOS sub-label.
-    tier = pa.get("tier") or "Typical"
-    z_score = pa.get("z_score")
-    if tier == "Extreme":
-        posture = (
-            "This move is statistically extreme (≈3σ+) for this stock's own "
-            "history. Treat it as a real, meaningful signal — the conclusion "
-            "should lean toward a fundamental change unless the catalyst is "
-            "clearly macro/external (war, fed, oil shock)."
+    ec = pa.get("_earnings") if isinstance(pa.get("_earnings"), dict) else None
+    timing_clause = ""
+    if ec and ec.get("position") in ("on_last_bar", "after_last_bar"):
+        timing_clause = (
+            "\n  Results came out on or after the chart's last close: say the market's "
+            "reaction may not be in this chart yet, and do not present the chart's move "
+            "as the reaction to the report."
+            if ec.get("reported") else
+            "\n  Results are due on or after the chart's last close and are not in the "
+            "data yet: do not describe them, and do not present the chart's move as a "
+            "reaction to them."
         )
-    elif tier == "Unusual":
-        posture = (
-            "This move is unusual (≈2σ) for this stock — outside its normal "
-            "monthly range. Lean toward a meaningful read; let the catalyst "
-            "data decide whether it's fundamental or external."
-        )
-    elif tier == "Notable":
-        posture = (
-            "This move is above average but still within ~2σ of normal. "
-            "Let the catalyst data decide — it could be either a real "
-            "business signal or amplified noise."
-        )
-    else:  # Typical
-        posture = (
-            "This move is within the stock's normal range (within ±1σ). "
-            "The default read is short-term noise unless the catalyst data "
-            "above strongly says otherwise."
+    floor_rule = ""
+    if pa.get("_floor"):
+        floor_rule = (
+            "\n- This move is large in absolute terms: never describe it as normal, "
+            "typical, ordinary, routine or within a range."
         )
 
-    # Branch the sentence template on tier. Python-side branching keeps
-    # the LLM-facing prompt tight and removes the implicit pressure for
-    # the AI to attribute a Typical (within-±1σ) move to a single driver.
-    if tier == "Typical":
-        write_block = """WRITE 2-3 SENTENCES (TYPICAL MOVE — within ±1σ):
-
-Sentence 1 — STATE PLAINLY that this move is within the stock's normal
-  monthly range. Do NOT open by assigning a catalyst. Use phrasing like
-  "This is a normal-range move — well within the stock's typical monthly
-  band" or "Trading inside its usual envelope; nothing statistically
-  unusual here."
-
-Sentence 2 (OPTIONAL) — If a strong headline is in the window, mention it
-  as CONTEXT only ("came alongside X" / "X was in the news"), NOT as the
-  driver of the move. SKIP this sentence entirely if no notable headline.
-
-Final sentence — Classify this as routine trading inside the stock's normal
-  range, not a real change in the business. You may name a macro or sector
-  backdrop if relevant.
-
-NEVER contradict GROUND TRUTH direction. DO NOT quote σ, z-score, or any
-volatility math — that lives in the chart sub-label. DO NOT write phrases
-like "pushing the stock up X%" or "spurred investor confidence" for a
-within-range move — the whole point is that this magnitude is unremarkable
-for this stock."""
+    # A report ON or AFTER the chart's last close came out after the move shown: it is
+    # context (with the timing caveat), never the cause of that move.
+    late_report = bool(ec and ec.get("position") in ("on_last_bar", "after_last_bar"))
+    if late_report:
+        cause_order = (
+            "a catalyst or headline dated inside the window; the broad market or sector,\n"
+            "  only when MARKET shows the S&P 500 moved the same way by a similar amount;\n"
+            "  otherwise say plainly that no single cause is confirmed in the data. The\n"
+            "  report in EARNINGS came at or after the chart's last close: it is not the\n"
+            "  cause of the move shown"
+        )
+        support = (
+            "the report in EARNINGS (its results against estimates when known) and that\n"
+            "  the market's reaction to it may not be in this chart yet"
+        )
+        results_rule = (
+            "- The report in EARNINGS is company-specific news about the business: name it,\n"
+            "  but never present the chart's move as its cause or its reaction, and never call\n"
+            "  the move routine, noise or unrelated to the business."
+        )
     else:
-        # Notable / Unusual / Extreme — catalyst-led, classify at the end.
-        write_block = """WRITE 2-3 SENTENCES:
+        cause_order = (
+            "results reported inside the window (EARNINGS); a catalyst or headline dated\n"
+            "  inside the window; the broad market or sector, only when MARKET shows the\n"
+            "  S&P 500 moved the same way by a similar amount; otherwise say plainly that no\n"
+            "  single cause is confirmed in the data"
+        )
+        support = (
+            "the supporting fact: results against estimates, the dated headline, or the\n"
+            "  market comparison"
+        )
+        results_rule = (
+            "- Results reported inside the window are company-specific news about the\n"
+            "  business. Lead with them, and never call that move routine, noise, normal-range\n"
+            "  or unrelated to the business."
+        )
 
-Sentence 1-2 — Name the primary reason for the move. Use the catalysts above:
-  - if there's an EVENT (earnings/news catalyst), lead with it (cite the headline if available)
-  - otherwise lead with the strongest macro/sector driver (sector rotation, fed, yields, war, oil, etc.)
-  - otherwise say plainly that no single catalyst explains it — broader market drift
-  Cite a specific source from the headlines or macro block when you can.
+    write_block = f"""WRITE 3 SENTENCES:
+Sentence 1: the main cause, checked in this order: {cause_order}.
+Sentence 2: {support}.
+Sentence 3: what kind of move this is: company-specific (results, guidance, a deal, a
+  legal or regulatory event, a product or customer change), market or sector-wide, or not
+  explained by the data. Say WHAT changed, in plain language.{timing_clause}
 
-Final sentence — Judge what KIND of move this is, decided from the evidence
-(do NOT default to one verdict): either a genuine, durable shift in the
-company's own business/economics (e.g. a major contract or customer win, a
-secular tailwind it is capturing, accelerating revenue, raised guidance, a
-strengthening moat — or the negative mirror of any of these), OR a temporary,
-market-driven move (macro fears, sector rotation, broad risk-off, sentiment,
-or no clear cause). Be specific about WHAT changed, in plain language.
+RULES:
+- SIZE and CAUSE are separate questions: a move can be ordinary in size and still come
+  from real company news, and a large move can come from the market.
+{results_rule}
+- Never claim the business did not change, or that a move is "not a fundamental change":
+  the price alone cannot show that.
+- If MARKET shows the S&P 500 flat or moving the other way, do not blame market drift,
+  sector rotation or sentiment unless a headline dated in the window says so.
+- A headline is a cause only if it is dated inside the window (or on or after the report
+  date, for results). Other news in EVIDENCE is background, never "news of" the move.
+- Compare EPS only with its estimate, never with the share price.
+- Never contradict GROUND TRUTH direction; if a headline points the other way, say the
+  price moved against it.
+- Do not quote σ, z-scores or any volatility math, and do not shout ALL-CAPS labels.{floor_rule}"""
 
-NEVER contradict GROUND TRUTH direction. If headlines suggest the opposite of
-the chart, treat the move as market-driven (a repricing through this name).
-If everything is FLAT, write one sentence saying so and skip the catalyst hunt.
-
-DO NOT quote σ, z-score, or any volatility math (it lives in the chart
-sub-label), and DO NOT shout ALL-CAPS labels like "FUNDAMENTAL"/"NOISE" — write
-natural prose. Focus on the WHY and whether it's a real business shift or a
-temporary market move."""
-
-    return f"""Explain WHY the stock moved and what kind of signal this is.
+    return f"""Explain WHY the stock moved over the chart window and what kind of move it is.
 
 GROUND TRUTH: {ground_truth}
+SIZE: {_price_action_size_line(pa)}
+MARKET: {_price_action_market_line(pa)}
+EARNINGS: {_price_action_earnings_line(pa)}
 CATALYST EVENT IN WINDOW: {event_str}
-{headlines_block}{macro_block}
-POSTURE: {posture}
-
+{headlines_block}{_price_action_report_headlines_block(pa)}{macro_block}
 EVIDENCE:
 {evidence}
 
@@ -1061,6 +1246,225 @@ EVIDENCE:
 {_length_brief(3, 60)}
 
 {write_block}"""
+
+
+# The verdict words the old Typical branch planted, plus their common rewordings, in two
+# families. VERDICT phrases (routine, noise, "not a fundamental change", "the business has
+# not changed") are wrong on any card that is floored, Notable+ or carries a report.
+# SIZE phrases ("normal range", "typical band", "nothing unusual") are wrong only when the
+# move is NOT ordinary in size (floored or Notable+): on a Typical card with a report they
+# are true, and the prompt itself says the size is ordinary there. A prompt alone did not
+# hold this line for the Updates insight card either (its `price_claims` guard).
+# "routine" / "noise" are honoured when negated ("not routine", "far from noise"); the
+# rest carry their own negation — it IS the forbidden verdict.
+_PA_NEGATABLE_VERDICT_PATTERNS: Tuple["re.Pattern[str]", ...] = tuple(
+    re.compile(p, re.IGNORECASE) for p in (r"\broutine\b", r"\bnoise\b(?!-)")
+)
+_PA_VERDICT_PATTERNS: Tuple["re.Pattern[str]", ...] = tuple(
+    re.compile(p, re.IGNORECASE) for p in (
+        r"\bnot\s+(?:a|any)\s+(?:real|fundamental|genuine|meaningful|lasting|true)\s+"
+        r"(?:change|shift)\b",
+        r"\bnot\s+(?:a\s+)?(?:change|shift)\s+in\s+(?:the\s+)?(?:company['’]?s?\s+)?"
+        r"(?:business|fundamentals)\b",
+        r"\b(?:rather\s+than|instead\s+of)\s+(?:a\s+)?(?:real|fundamental|genuine)\s+"
+        r"(?:change|shift)\b",
+        r"\bno\s+(?:real\s+|fundamental\s+|genuine\s+)?(?:change|shift)\s+in\s+(?:the\s+)?"
+        r"(?:business|fundamentals)\b",
+        r"\bno\s+(?:real|fundamental|genuine)\s+(?:change|shift)\b",
+        r"\b(?:business|fundamentals?)\s+(?:has|have)\s*(?:not|n['’]t)\s+changed\b",
+        r"\b(?:business|fundamentals?)\s+(?:is|are|remains?)\s+(?:unchanged|intact)\b",
+    )
+)
+_PA_SIZE_PATTERNS: Tuple["re.Pattern[str]", ...] = tuple(
+    re.compile(p, re.IGNORECASE) for p in (
+        r"\bnormal[\s-]+range\b",
+        r"\b(?:normal|usual|typical|ordinary)\s+(?:monthly\s+|weekly\s+|daily\s+|trading\s+)?"
+        r"(?:range|band|envelope|swings?|fluctuations?|volatility|trading|bounds?|move)\b",
+        r"\bwithin\s+(?:its|the\s+stock['’]?s|this\s+stock['’]?s|the)\s+(?:normal|usual|typical)\b",
+        r"\bnothing\s+(?:statistically\s+)?(?:unusual|out\s+of\s+the\s+ordinary)\b",
+        r"\bunremarkable\b",
+    )
+)
+# On a FLOORED card the prompt forbids the bare words too.
+_PA_FLOOR_WORDS = re.compile(r"\b(?:normal|typical|ordinary|usual)\b", re.IGNORECASE)
+# A size phrase negated or contrasted just before it is compliant ("far from its normal
+# range", "outside its usual band", "larger than a typical month") and must not trip.
+_PA_NEGATION_BEFORE = re.compile(
+    r"(?:\bnot\b|n['’]t\b|\bfar\s+from\b|\boutside\b|\bbeyond\b|\banything\s+but\b|"
+    r"\b(?:larger|bigger|greater|more|wider|sharper)\s+than\b|\babove\b|\bexceed\w*\b|"
+    r"\bbreak\w*\s+(?:out\s+of|from)\b|\bwell\s+past\b)[^.;]{0,24}$",
+    re.IGNORECASE,
+)
+
+
+def _pa_size_hit(pattern: "re.Pattern[str]", text: str) -> bool:
+    """True when `pattern` matches somewhere NOT negated or contrasted just before it."""
+    for m in pattern.finditer(text):
+        if not _PA_NEGATION_BEFORE.search(text[max(0, m.start() - 40):m.start()]):
+            return True
+    return False
+
+
+def _price_action_guard_mode(pa: Dict[str, Any]) -> Tuple[bool, bool, bool]:
+    """(verdict, size, floor_words) — which pattern families the guard enforces."""
+    ec = pa.get("_earnings") if isinstance(pa.get("_earnings"), dict) else None
+    floored = bool(pa.get("_floor"))
+    large = floored or _pa_tier(pa) in ("notable", "unusual", "extreme")
+    verdict = large or bool((ec or {}).get("position"))
+    return verdict, large, floored
+
+
+def _price_action_guard_active(pa: Dict[str, Any]) -> bool:
+    return _price_action_guard_mode(pa)[0]
+
+
+def _price_action_guard_hit(text: str, pa: Dict[str, Any]) -> Optional[str]:
+    verdict, size, floor_words = _price_action_guard_mode(pa)
+    if verdict:
+        for p in _PA_VERDICT_PATTERNS:
+            if p.search(text):
+                return p.pattern
+        for p in _PA_NEGATABLE_VERDICT_PATTERNS:
+            if _pa_size_hit(p, text):
+                return p.pattern
+    if size:
+        for p in _PA_SIZE_PATTERNS:
+            if _pa_size_hit(p, text):
+                return p.pattern
+    if floor_words and _pa_size_hit(_PA_FLOOR_WORDS, text):
+        return _PA_FLOOR_WORDS.pattern
+    return None
+
+
+def _pa_window_phrase(window_label: Any) -> str:
+    label = str(window_label or "").strip()
+    if label.lower().startswith("last "):
+        return "over the " + label.lower()
+    if label.lower().startswith("since "):
+        return "since " + label[6:].strip()
+    return "over the chart window"
+
+
+def price_action_fact_text(pa: Dict[str, Any]) -> str:
+    """A deterministic three-part insight built only from the section's own facts — the
+    guard's replacement when the model's text contradicts them. No model, no names."""
+    window = _pa_window_phrase(pa.get("window_label"))
+    chg = _num_or_none_np(pa.get("change_pct"))
+    direction = str(pa.get("direction") or "flat")
+    if chg is None or direction == "flat":
+        first = f"The stock was roughly flat {window}"
+    else:
+        verb = "rose" if chg > 0 else "fell"
+        first = f"The stock {verb} {abs(chg):.1f}% {window}"
+    mk = pa.get("_market") if isinstance(pa.get("_market"), dict) else None
+    m = _num_or_none_np((mk or {}).get("change_pct"))
+    if m is not None:
+        if abs(m) < 0.05:
+            first += " while the S&P 500 was flat"
+        else:
+            first += f" while the S&P 500 {'rose' if m > 0 else 'fell'} {abs(m):.1f}%"
+        read = (mk or {}).get("read")
+        if read == "company_specific":
+            first += ", so the move was specific to the company"
+        elif read == "market_wide":
+            first += ", largely in step with the broad market"
+        elif read == "partly_market":
+            first += ", which explains only part of the move"
+        elif read == "market_larger":
+            first += ", far more than the stock moved"
+    sentences = [first + "."]
+    floor = pa.get("_floor") if isinstance(pa.get("_floor"), dict) else None
+    event = pa.get("event") if isinstance(pa.get("event"), dict) else None
+
+    ec = pa.get("_earnings") if isinstance(pa.get("_earnings"), dict) else None
+    if ec:
+        day = _pa_day_label(ec.get("date")) or "a recent date"
+        s2 = (
+            f"It reported quarterly results on {day}" if ec.get("reported")
+            else f"Its quarterly results are scheduled for {day}"
+        )
+        bits: List[str] = []
+        res = ec.get("eps_result")
+        sp = ec.get("eps_surprise_pct")
+        by = f" by {abs(sp):.0f}%" if isinstance(sp, (int, float)) and math.isfinite(sp) else ""
+        if res == "beat":
+            bits.append(f"EPS beat estimates{by}")
+        elif res == "miss":
+            bits.append(f"EPS missed estimates{by}")
+        elif res == "in_line":
+            bits.append("EPS was in line with estimates")
+        rev = ec.get("revenue_result")
+        if rev == "above":
+            bits.append("revenue came in above the estimate")
+        elif rev == "below":
+            bits.append("revenue came in below the estimate")
+        elif rev == "in_line":
+            bits.append("revenue was in line with the estimate")
+        if not ec.get("reported"):
+            s2 += ", and the figures are not in the data yet"
+        elif bits:
+            s2 += ": " + " and ".join(bits)
+        sentences.append(s2 + ".")
+        reaction = _num_or_none_np(ec.get("reaction_pct"))
+        if not ec.get("reported"):
+            pass
+        elif ec.get("position") in ("on_last_bar", "after_last_bar"):
+            sentences.append("The market's reaction to those results may not be in this chart yet.")
+        elif reaction is not None:
+            sentences.append(
+                f"The shares {'rose' if reaction > 0 else 'fell'} {abs(reaction):.1f}% "
+                f"across the report."
+            )
+    elif event and event.get("tag") and event.get("date"):
+        sentences.append(f"The move is measured from {event['date']} ({event['tag']}).")
+    elif floor and floor.get("reason") == "single_session":
+        pct = _num_or_none_np(floor.get("session_move_pct"))
+        day = _pa_day_label(floor.get("session_date"))
+        what = (
+            f"a single session {'up' if pct > 0 else 'down'} {abs(pct):.1f}%"
+            if pct is not None else "a single session of 10% or more"
+        )
+        sentences.append(
+            f"The window includes {what}{f' on {day}' if day else ''}, large even for a stock "
+            f"that swings a lot."
+        )
+    elif floor:
+        sentences.append("A move this large is significant even for a stock that swings a lot.")
+    elif not (mk and mk.get("read") == "market_wide"):
+        sentences.append("No single cause is confirmed in the data.")
+    return _strip_dashes(" ".join(sentences))
+
+
+def _num_or_none_np(v: Any) -> Optional[float]:
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def guard_price_action_narrative(
+    text: str, pa: Dict[str, Any], ticker: Optional[str] = None,
+) -> str:
+    """Replace a price-action insight that lands on the forbidden verdict ("routine",
+    "normal range", "not a fundamental change", "noise" …) with the deterministic fact
+    text, when the card is floored, Notable+ or carries a report. Otherwise unchanged."""
+    if not text or not isinstance(pa, dict) or not _price_action_guard_active(pa):
+        return text
+    hit = _price_action_guard_hit(text, pa)
+    if hit is None:
+        return text
+    replacement = price_action_fact_text(pa)
+    ec = pa.get("_earnings") if isinstance(pa.get("_earnings"), dict) else None
+    logger.warning(
+        "[price-action-guard] replaced the model insight with the fact text: ticker=%s "
+        "tier=%s floor=%s earnings=%s pattern=%s",
+        ticker, pa.get("tier"), (pa.get("_floor") or {}).get("reason"),
+        (ec or {}).get("position"), hit,
+    )
+    return replacement
 
 
 def _fmt_millions_usd(v: Any, currency: Any = None, *, unknown_prefix: str = "$") -> Optional[str]:
@@ -1971,6 +2375,9 @@ def build_narrative_jobs(
             prompt=_price_action_narrative_prompt(persona, evidence, shell),
             apply=_setter_for_dict_key(pa, "narrative"),
             fallback_value=FALLBACK["price_action_narrative"],
+            postprocess=lambda text, _pa=pa: guard_price_action_narrative(
+                text, _pa, ticker=shell.get("symbol") or shell.get("ticker"),
+            ),
         ))
 
     # ── revenue_engine.analysis_note ──────────────────────────────────
@@ -2422,8 +2829,25 @@ def _digest_price_action(report: Dict[str, Any]) -> List[str]:
             seg += f"; {tier}" + (f" (z={z})" if z is not None else "")
         ev = pa.get("event") if isinstance(pa.get("event"), dict) else None
         tag = (ev or {}).get("tag") or pa.get("tag")
-        if tag and str(tag).strip().lower() not in ("typical", "normal", ""):
+        # A tier is the tag when no catalyst survived — never print it as a catalyst.
+        if tag and str(tag).strip().lower() not in (
+            "typical", "normal", "notable", "unusual", "extreme", "",
+        ):
             seg += f"; catalyst: {tag}"
+        # The report in (or just after) the window and the market over the same days, so
+        # the thesis / critical-factor syntheses read the move as the card does.
+        ec = pa.get("_earnings") if isinstance(pa.get("_earnings"), dict) else None
+        day = _pa_day_label((ec or {}).get("date"))
+        if day and not ec.get("reported"):
+            seg += f"; results due {day}, not out yet"
+        elif day and ec.get("position") in ("on_last_bar", "after_last_bar"):
+            seg += f"; results {day}, after this move"
+        elif day:
+            seg += f"; results {day}"
+        mk = pa.get("_market") if isinstance(pa.get("_market"), dict) else None
+        m = _pa_dir_pct((mk or {}).get("change_pct"))
+        if m:
+            seg += f"; S&P {m}"
         out.append(seg)
     return out
 

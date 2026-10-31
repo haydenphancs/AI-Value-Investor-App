@@ -917,13 +917,17 @@ class FMPClient:
 
         ``raise_errors``: by default a failure (429, 5xx, a non-list body) degrades to
         ``[]``, which is indistinguishable from "this ticker has no announcements".
-        All five callers pass True. ``earnings_service`` and ``revenue_breakdown_service``
+        All six callers pass True. ``earnings_service`` and ``revenue_breakdown_service``
         mark a failed fetch DEGRADED; ``health_check_service``, ``profit_power_service``
         and ``signal_of_confidence_service`` use the calendar only for their cache row's
         next-earnings stamp, so a failure there becomes ``_earnings_common.CALENDAR_UNKNOWN``
         and that build is served from memory but never persisted for 24h with no
         report-day bound. ``tests/test_financials_calendar_failure_not_persisted.py`` pins
-        the flag on every call in those five services.
+        the flag on every call in those five services. The sixth, the report collector
+        (``agents/ticker_report_data_collector.py``, the price-action section's earnings
+        context), settles a failure as an ``EmptyAfterFailure`` and marks a transient one
+        degraded so the collection stays out of the shared caches
+        (``test_ticker_report_collector_math.py``).
         """
         symbol = ticker.upper()
         try:

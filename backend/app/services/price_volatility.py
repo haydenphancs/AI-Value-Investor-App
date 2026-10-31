@@ -16,6 +16,13 @@ baseline; a move over N trading days scores as ``z = |move%| / (σ_daily·√N·
 the tier is Typical / Notable (z≥1) / Unusual (z≥2) / Extreme (z≥3). The baseline
 length is independent of the move horizon (√N scaling handles that) and is a
 tunable constant.
+
+The REPORT adds an absolute-size floor on top (`effective_tier`, owner decision
+2026-10-31): a move of 20%+ over a window, or a single session of 10%+ inside it, is
+never "Typical", however volatile the stock. A stock that swings ~5% a day otherwise
+scored a −20.6% month after a weak quarter as Typical (Intel, z 0.87), and the insight
+called it routine trading. The Updates gate (`updates_materiality`) scores one session
+and deliberately keeps the plain z tiers ("Report only").
 """
 from __future__ import annotations
 
@@ -29,9 +36,10 @@ _BASELINE_DAYS: int = 180
 _DEFAULT_WINDOW: int = 30
 
 # |z| threshold that defines a "BIG move" worth explaining. The price-action
-# section decides significance FIRST and only hunts for a catalyst/reason when
-# the move clears this bar — never the other way round. 1.0σ = Notable+ (the
-# same Typical→Notable line _compute_price_volatility uses). Raise to 2.0
+# section decides significance FIRST and hunts for a catalyst/reason when the move
+# clears this bar — or when the absolute-size floor lifts it, or an earnings report
+# falls in or after its window (`_build_price_action`, 2026-10-31). 1.0σ = Notable+
+# (the same Typical→Notable line _compute_price_volatility uses). Raise to 2.0
 # (Unusual) or 3.0 (Extreme) to only explain larger moves.
 _BIG_MOVE_Z: float = 1.0
 
@@ -40,6 +48,24 @@ TIER_TYPICAL = "Typical"
 TIER_NOTABLE = "Notable"
 TIER_UNUSUAL = "Unusual"
 TIER_EXTREME = "Extreme"
+
+# Rank of each tier, so the absolute-size floor below can raise a tier without ever
+# lowering one, and window selection can compare floored and unfloored windows.
+TIER_RANK: Dict[str, int] = {
+    TIER_TYPICAL: 0, TIER_NOTABLE: 1, TIER_UNUSUAL: 2, TIER_EXTREME: 3,
+}
+
+# Absolute-size floor (report only — see the module docstring). |move| over a window at
+# or above FLOOR_WINDOW_MOVE_PCT, or one session inside it at or above
+# FLOOR_SESSION_MOVE_PCT, lifts a Typical window to Notable.
+FLOOR_WINDOW_MOVE_PCT: float = 20.0
+FLOOR_SESSION_MOVE_PCT: float = 10.0
+# A big session counts toward the floor only when it happened in the last this-many
+# calendar days, so a spike 50 days ago cannot switch the card to "Last 60 Days".
+FLOOR_SESSION_RECENCY_DAYS: int = 30
+
+FLOOR_WINDOW_MOVE = "window_move"
+FLOOR_SINGLE_SESSION = "single_session"
 
 
 def _daily_returns(prices: List[float]) -> List[float]:
@@ -139,6 +165,70 @@ def _tier_for_z(z: Optional[float]) -> str:
     return TIER_TYPICAL
 
 
+def _finite_or_none(value: Any) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def max_session_move(
+    prices: List[float], start_idx: int, recent_from_idx: int = 0,
+) -> Tuple[Optional[float], Optional[int]]:
+    """The largest single-session move (signed %, rounded to 2 dp) among the sessions
+    that END inside a window, and the index of that session's close.
+
+    A session ``i`` (close ``prices[i-1]`` → ``prices[i]``) counts when ``start_idx < i``
+    (it lies inside the window that opens at ``prices[start_idx]``) and
+    ``i >= recent_from_idx`` (it is recent enough to floor — see
+    ``FLOOR_SESSION_RECENCY_DAYS``). Non-finite or non-positive closes are skipped.
+    ``(None, None)`` when no session qualifies.
+    """
+    best_pct: Optional[float] = None
+    best_idx: Optional[int] = None
+    lo = max(1, start_idx + 1, recent_from_idx)
+    for i in range(lo, len(prices)):
+        prev = _finite_or_none(prices[i - 1])
+        curr = _finite_or_none(prices[i])
+        if prev is None or curr is None or prev <= 0:
+            continue
+        pct = (curr - prev) / prev * 100.0
+        if best_pct is None or abs(pct) > abs(best_pct):
+            best_pct, best_idx = pct, i
+    if best_pct is None:
+        return None, None
+    return round(best_pct, 2), best_idx
+
+
+def effective_tier(
+    z: Optional[float],
+    move_pct: Optional[float],
+    session_pct: Optional[float] = None,
+) -> Tuple[str, Optional[str]]:
+    """The z tier, raised to Notable by the absolute-size floor. Returns
+    ``(tier, floor_reason)`` where ``floor_reason`` is ``None`` unless the floor is
+    what lifted the tier (``FLOOR_WINDOW_MOVE`` or ``FLOOR_SINGLE_SESSION``).
+
+    The floor never lowers a tier and applies when σ is unknown (``z`` None). The
+    window move is judged at the one decimal the card prints, so a move shown as
+    "−20.0%" is floored and "−19.9%" is not. Non-finite inputs never trigger it.
+    """
+    z_f = _finite_or_none(z)
+    tier = _tier_for_z(z_f)
+    if TIER_RANK[tier] >= TIER_RANK[TIER_NOTABLE]:
+        return tier, None
+    move = _finite_or_none(move_pct)
+    if move is not None and abs(round(move, 1)) >= FLOOR_WINDOW_MOVE_PCT:
+        return TIER_NOTABLE, FLOOR_WINDOW_MOVE
+    session = _finite_or_none(session_pct)
+    if session is not None and abs(session) >= FLOOR_SESSION_MOVE_PCT:
+        return TIER_NOTABLE, FLOOR_SINGLE_SESSION
+    return tier, None
+
+
 def _compute_price_volatility(
     prices: List[float],
     price_dates: Optional[List[date]] = None,
@@ -172,6 +262,12 @@ def _compute_price_volatility(
         "chosen_z": None,
         "chosen_move_pct": None,
         "chosen_band_pct": None,
+        # Absolute-size floor on the chosen window (`effective_tier`): the reason it
+        # lifted the tier (None when it did not), and the window's largest recent
+        # single session (signed %, and the index of its close).
+        "chosen_floor": None,
+        "chosen_session_pct": None,
+        "chosen_session_idx": None,
     }
     if len(prices) < 30:
         return out
@@ -249,11 +345,29 @@ def _compute_price_volatility(
     if not metrics:
         return out
 
-    # Pick the most unusual window. If every window is within ±1σ
-    # (genuinely quiet stock-week), default to 30 days so the section
-    # still has something to show — `tier` will be "Typical".
-    most_unusual = max(metrics, key=lambda w: w["z"])
-    if most_unusual["z"] < 1.0:
+    # Absolute-size floor per window (`effective_tier`). A big session counts only when
+    # it closed in the last FLOOR_SESSION_RECENCY_DAYS (calendar days in production,
+    # sessions in the trading-day test path).
+    if price_dates:
+        recent_from_idx = bisect.bisect_right(
+            price_dates, price_dates[-1] - timedelta(days=FLOOR_SESSION_RECENCY_DAYS),
+        )
+    else:
+        recent_from_idx = max(1, len(prices) - FLOOR_SESSION_RECENCY_DAYS)
+    for w in metrics:
+        session_pct, session_idx = max_session_move(prices, w["ref_idx"], recent_from_idx)
+        eff, floor = effective_tier(w["z"], w["move_pct"], session_pct)
+        w["max_session_pct"] = session_pct
+        w["max_session_idx"] = session_idx
+        w["eff_tier"] = eff
+        w["floor"] = floor
+
+    # Pick the most unusual window: the highest effective tier, then the highest z (ties
+    # keep the shortest window, `max`'s first match). Without a floor this is the old
+    # argmax-z rule, since rank rises with z. If every window ranks Typical (genuinely
+    # quiet stock-week), default to 30 days so the section still has something to show.
+    most_unusual = max(metrics, key=lambda w: (TIER_RANK[w["eff_tier"]], w["z"]))
+    if TIER_RANK[most_unusual["eff_tier"]] == 0:
         default = next(
             (w for w in metrics if w["days"] == _DEFAULT_WINDOW), most_unusual,
         )
@@ -266,5 +380,8 @@ def _compute_price_volatility(
     out["chosen_z"] = chosen["z"]
     out["chosen_move_pct"] = chosen["move_pct"]
     out["chosen_band_pct"] = chosen["band_2sigma"]
-    out["tier"] = _tier_for_z(chosen["z"])
+    out["chosen_floor"] = chosen["floor"]
+    out["chosen_session_pct"] = chosen["max_session_pct"]
+    out["chosen_session_idx"] = chosen["max_session_idx"]
+    out["tier"] = chosen["eff_tier"]
     return out

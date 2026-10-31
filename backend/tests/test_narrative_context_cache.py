@@ -543,3 +543,58 @@ def test_stage_a_and_stage_b_budgets_are_independent_knobs(monkeypatch):
     monkeypatch.setattr(settings, "REPORT_STAGE_A_THINKING_BUDGET", -1)
     assert stage_a_thinking_budget() is None
     assert narrative_thinking_budget() == 111
+
+
+# ── NarrativeJob.postprocess: the price-action guard runs, and a bug in it is safe ──
+
+def _guarded_job(postprocess):
+    captured: dict = {}
+    job = NarrativeJob(
+        label="price_action_narrative",
+        prompt=f"Explain the move.\n\nEVIDENCE:\n{_EVIDENCE}\n\nLENGTH: under 60 words.",
+        word_cap=90,
+        apply=lambda v: captured.__setitem__("v", v),
+        fallback_value="SENTINEL",
+        postprocess=postprocess,
+    )
+    return job, captured
+
+
+@pytest.mark.asyncio
+async def test_postprocess_rewrites_the_cleaned_text_on_both_paths():
+    persona = get_persona_config("warren_buffett")
+    for handle in (None, "cachedContents/abc"):
+        job, captured = _guarded_job(lambda t: t.upper())
+        await run_narrative_jobs([job], _FakeGemini(cache_handle=handle), persona, _EVIDENCE)
+        assert captured["v"] == "A DURABLE, HIGH-MARGIN COMPOUNDER WITH A WIDE MOAT."
+
+
+@pytest.mark.asyncio
+async def test_a_raising_postprocess_keeps_the_model_text_not_the_fallback():
+    persona = get_persona_config("warren_buffett")
+
+    def boom(_t):
+        raise ValueError("guard bug")
+
+    job, captured = _guarded_job(boom)
+    await run_narrative_jobs([job], _FakeGemini(), persona, _EVIDENCE)
+    assert captured["v"] == "A durable, high-margin compounder with a wide moat."
+
+
+@pytest.mark.asyncio
+async def test_the_price_action_guard_runs_inside_the_job_runner():
+    from app.services.agents import narrative_prompts as npr
+
+    persona = get_persona_config("warren_buffett")
+    pa = {
+        "change_pct": -20.6, "direction": "down", "window_label": "Last 30 Days",
+        "tier": "Notable", "sigma_daily_pct": 5.0, "_floor": {"reason": "window_move"},
+        "_earnings": None, "_market": None,
+    }
+    shell = {"price_action": pa, "symbol": "INTC"}
+    job = next(j for j in npr.build_narrative_jobs(persona, _EVIDENCE, shell)
+               if j.label == "price_action_narrative")
+    gem = _FakeGemini(text="Routine trading inside the stock's normal range.")
+    await run_narrative_jobs([job], gem, persona, _EVIDENCE)
+    assert pa["narrative"] == npr.price_action_fact_text(pa)
+    assert "routine" not in pa["narrative"].lower()

@@ -197,3 +197,20 @@ def test_none_is_distinguishable_from_a_genuinely_flat_market():
                              {"date": "2026-09-04", "close": 100.0}])
     assert window_change_pct(flat, 90) == 0.0
     assert window_change_pct([], 90) is None
+
+
+# ── range_change_pct: the S&P 500 over the stock's own window ────────────────
+from app.services.price_window import range_change_pct
+
+
+def test_range_change_pct_steps_back_over_weekends_and_refuses_stale_anchors():
+    s = [(date(2026, 9, 25), 100.0), (date(2026, 9, 29), 101.0), (date(2026, 10, 29), 102.0)]
+    assert range_change_pct(s, "2026-09-29", "2026-10-29") == pytest.approx(0.9901, abs=1e-4)
+    assert range_change_pct(s, date(2026, 9, 27), date(2026, 10, 30)) == pytest.approx(2.0)
+    assert range_change_pct(s, "2026-09-20", "2026-10-29") is None   # before the series
+    assert range_change_pct(s, "2026-09-29", "2026-11-10") is None   # end anchor 12d stale
+    assert range_change_pct(s, "2026-10-29", "2026-09-29") is None   # reversed
+    assert range_change_pct(s, "2026-10-29", "2026-10-29") is None
+    assert range_change_pct(s, "junk", "2026-10-29") is None
+    assert range_change_pct([], "2026-09-29", "2026-10-29") is None
+    assert range_change_pct(s, "2026-09-29", "2026-09-30") is None  # same anchor bar

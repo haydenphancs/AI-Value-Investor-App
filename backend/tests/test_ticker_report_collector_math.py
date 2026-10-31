@@ -778,7 +778,12 @@ def test_normal_move_skips_reason_hunt_even_with_catalyst():
     60-day flat zig-zag → daily σ ≈ 1% (>=30 closes, so σ is computed).
     Current price is only +0.5% over the 30-day window → z ≈ 0.1 → not a
     big move → reason hunt skipped, even though an SEC-probe headline is
-    present in the window."""
+    present in the window.
+
+    Since 2026-10-31 the hunt ALSO opens for a move the absolute-size floor lifts
+    (20%+ window, 10%+ session) and whenever an earnings report falls in or after the
+    window — a report is a reason to look whatever the size. Neither applies here
+    (+0.5%, no report), so the rule this test pins still holds."""
     prices = [100.0 if i % 2 == 0 else 101.0 for i in range(60)]
     news = [{
         "title": "Company discloses SEC investigation into its accounting",
@@ -999,16 +1004,18 @@ def macro_fakes(monkeypatch):
     tests do not inherit each other's snapshot."""
     import app.integrations.fred as fred_mod
     from app.services.agents.ticker_report_data_collector import (
-        _macro_snapshot_cache, _macro_snapshot_inflight,
+        _macro_snapshot_cache, _macro_snapshot_inflight, _market_series_cache,
     )
 
     _macro_snapshot_cache.clear()
     _macro_snapshot_inflight.clear()
+    _market_series_cache.clear()
     fmp, fred = _FakeMacroFMP(), _FakeFREDClient()
     monkeypatch.setattr(fred_mod, "get_fred_client", lambda: fred)
     yield fmp, fred
     _macro_snapshot_cache.clear()
     _macro_snapshot_inflight.clear()
+    _market_series_cache.clear()
 
 
 @pytest.mark.asyncio
@@ -4681,3 +4688,441 @@ def test_the_macro_block_reads_its_day_through_the_new_york_helper():
     src = inspect.getsource(coll)
     assert src.count('"last_updated": _macro_updated_label(),') == 1
     assert src.count('strftime("Updated %b %d, %Y")') == 1, "a second Updated-date writer appeared"
+
+
+# ── Recent Price Movement: size floor, earnings context, S&P comparison ──────
+# Owner decisions 2026-10-31. Intel fell 20.6% in 30 days into its Oct 29 report; with
+# σ ≈ 5% a day that scored z 0.87, so no earnings date or headline was looked at and the
+# insight called it "routine trading … not a fundamental change". These pin the fix.
+
+import json as _json
+
+from app.integrations.fmp import EmptyAfterFailure as _EAF
+from app.services.agents import ticker_report_data_collector as _col
+
+_INTC_LAST = date(2026, 10, 29)          # a Thursday — the report day
+_INTC_ROWS = [
+    {"symbol": "INTC", "date": "2027-01-28", "epsActual": None, "epsEstimated": 0.2898,
+     "revenueActual": None, "revenueEstimated": 15968180000},
+    {"symbol": "INTC", "date": "2026-10-29", "epsActual": 0.52, "epsEstimated": 0.4066,
+     "revenueActual": 16513000000, "revenueEstimated": 16555180000},
+    {"symbol": "INTC", "date": "2026-07-23", "epsActual": 0.42, "epsEstimated": 0.2173,
+     "revenueActual": 16128000000, "revenueEstimated": 14434850000},
+]
+
+
+def _intel_shaped(n: int = 200, window: int = 22, move: float = -0.206):
+    """A volatile stock (alternating ±5% sessions, σ ≈ 5%) whose last `window` sessions
+    lose `move` overall with no session above 6% — the shape that scored Typical."""
+    dates = _trading_days(_INTC_LAST, n)
+    prices = [100.0]
+    for i in range(1, n - window):
+        prices.append(prices[-1] * (1.05 if i % 2 else 1 / 1.05))
+    ref = prices[-1]
+    per = (1 + move) ** (1 / window)
+    for i in range(window):
+        wiggle = 1.04 if i % 2 else 1 / 1.04
+        prices.append(prices[-1] * per * wiggle)
+    # land exactly on the target move (the wiggle leaves a small residue)
+    prices[-1] = round(ref * (1 + move), 4)
+    return prices, dates
+
+
+def _spy(start: date, end: date, pct: float):
+    days = _trading_days(end, 80)
+    series = [(d, 500.0) for d in days if d <= start]
+    after = [d for d in days if d > start]
+    for i, d in enumerate(after, 1):
+        series.append((d, 500.0 * (1 + pct / 100 * i / len(after))))
+    return series
+
+
+def test_intel_shaped_month_into_its_report_is_floored_and_carries_the_report():
+    prices, dates = _intel_shaped()
+    spy = _spy(date(2026, 9, 29), _INTC_LAST, 0.9)
+    pa = _build_price_action(
+        prices, prices[-1], [], [], recent_price_dates=dates,
+        earnings_rows=list(_INTC_ROWS), market_series=spy, today=date(2026, 10, 30),
+    )
+    assert pa["window_label"] == "Last 30 Days" and pa["change_pct"] == -20.6
+    assert pa["z_score"] is not None and pa["z_score"] < 1.0      # the floor lifts it, not z
+    assert pa["tier"] == "Notable" and pa["tag"] == "Notable"
+    assert pa["_floor"]["reason"] == "window_move"
+    assert pa["event"] is None                                     # a last-bar report never anchors
+    assert pa["_change_days"] == 22                                # SESSIONS, not calendar days
+    assert pa["sigma_daily_pct"] is not None
+    assert pa["expected_band_pct"] is None                         # "Hide it when floored"
+    ec = pa["_earnings"]
+    assert ec["date"] == "2026-10-29" and ec["position"] == "on_last_bar"
+    assert ec["eps_result"] == "beat" and ec["eps_surprise_pct"] == 27.9
+    assert ec["revenue_result"] == "in_line" and ec["reaction_pct"] is None
+    mk = pa["_market"]
+    assert mk["read"] == "company_specific" and abs(mk["change_pct"] - 0.9) < 0.11
+    assert mk["start"] == "2026-09-29" and mk["end"] == "2026-10-29"
+    assert pa["_window_start"] == "2026-09-29" and pa["_last_bar"] == "2026-10-29"
+    _json.dumps(pa, allow_nan=False)                               # the collection cache's rule
+
+
+def test_the_session_after_the_report_anchors_since_the_report_as_a_reaction():
+    """Add the −28.6% session: the card reads "Since Oct 29", and a BEAT followed by a crash
+    is an "Earnings Reaction", never an "Earnings Miss"."""
+    prices, dates = _intel_shaped()
+    prices.append(round(prices[-1] * (1 - 0.286), 4))
+    dates.append(date(2026, 10, 30))
+    pa = _build_price_action(
+        prices, prices[-1], [], [], recent_price_dates=dates,
+        earnings_rows=list(_INTC_ROWS), today=date(2026, 10, 31),
+    )
+    assert pa["window_label"] == "Since Oct 29"
+    assert pa["tag"] == "Earnings Reaction"
+    assert pa["event"]["tag"] == "Earnings Reaction"
+    assert pa["_change_days"] == 1
+    assert pa["tier"] in ("Unusual", "Extreme")
+    assert pa["_earnings"]["position"] == "inside_window"
+    assert pa["_earnings"]["reaction_pct"] < -25
+    assert pa["_market"] is None                                   # no SPY series given
+    assert pa["expected_band_pct"] is not None                     # z lifted it, not the floor
+
+
+@pytest.mark.parametrize("reaction,eps,tag", [
+    (-15.0, "beat", "Earnings Reaction"),
+    (-15.0, "miss", "Earnings Miss"),
+    (-15.0, None, "Earnings Miss"),          # EPS unknown → the old price-only rule
+    (5.0, "beat", "Earnings Beat"),
+    (5.0, "miss", "Earnings Reaction"),
+    (2.0, "beat", "Earnings Reaction"),
+    (None, "beat", "Earnings Reaction"),
+    (5.0, "in_line", "Earnings Reaction"),
+])
+def test_the_earnings_tag_needs_the_result_and_the_price_to_agree(reaction, eps, tag):
+    assert _col._earnings_tag(reaction, eps) == tag
+
+
+def test_earnings_events_keep_only_reports_that_happened():
+    as_of = date(2026, 10, 30)
+    rows = [
+        {"date": "2026-10-29", "epsActual": None},                         # pending, arrived
+        {"date": "2026-10-29", "epsActual": 0.5, "epsEstimated": 0.4},     # same day, reported
+        {"date": "2026-11-05", "epsActual": None},                         # upcoming
+        {"date": "2026-08-10", "epsActual": None},                         # leftover: 9d after a report
+        {"date": "2026-08-01", "epsActual": 0.3},
+        {"date": "2026-06-01", "epsActual": None},                         # lone pending, long past
+        {"date": "garbage"}, {"date": None}, "x", None, {"epsActual": 1.0},
+    ]
+    events = _col._earnings_events(rows, as_of)
+    # the lone pending row from June is months old: a leftover/estimate, not a report
+    assert [e["date"].isoformat() for e in events] == ["2026-08-01", "2026-10-29"]
+    assert events[-1]["reported"] is True                                  # the reported row won
+    # a pending row BEFORE a real report (within 21 days) is a leftover too
+    assert _col._earnings_events(
+        [{"date": "2026-10-20", "epsActual": None}, {"date": "2026-10-29", "epsActual": 0.5}],
+        as_of,
+    )[0]["date"] == date(2026, 10, 29)
+
+
+def test_eps_and_revenue_against_estimates_refuse_bad_figures():
+    assert _col._eps_vs_estimate({"epsActual": 5.2, "epsEstimated": 0.52}) == {}   # digit shift
+    assert _col._eps_vs_estimate({"epsActual": float("nan"), "epsEstimated": 0.4}) == {}
+    assert _col._eps_vs_estimate({"epsActual": "x", "epsEstimated": 0.4}) == {}
+    zero = _col._eps_vs_estimate({"epsActual": 0.05, "epsEstimated": 0.0})
+    assert zero["eps_surprise_pct"] is None and zero["eps_result"] == "beat"
+    assert _col._eps_vs_estimate({"epsActual": 1.005, "epsEstimated": 1.0})["eps_result"] == "in_line"
+    assert _col._eps_vs_estimate({"epsActual": -0.30, "epsEstimated": -0.20})["eps_result"] == "miss"
+    assert _col._revenue_vs_estimate({"revenueActual": 9e9, "revenueEstimated": 1e9}) == {}  # 800%
+    assert _col._revenue_vs_estimate({"revenueActual": 1e9, "revenueEstimated": 0}) == {}
+    assert _col._revenue_vs_estimate({"revenueActual": -1, "revenueEstimated": 1e9}) == {}
+    rev = _col._revenue_vs_estimate({"revenueActual": 1.05e9, "revenueEstimated": 1e9})
+    assert rev == {"revenue_surprise_pct": 5.0, "revenue_result": "above"}
+
+
+def test_a_failed_earnings_fetch_is_could_not_be_checked_not_no_report():
+    from app.services.agents import narrative_prompts as npr
+    from app.services.agents.persona_config import get_persona_config
+
+    prices, dates = _intel_shaped()
+    pa = _build_price_action(
+        prices, prices[-1], [], [], recent_price_dates=dates,
+        earnings_rows=_EAF("429 after retries"), today=date(2026, 10, 30),
+    )
+    assert pa["_earnings"] is None and pa["_earnings_unavailable"] is True
+    prompt = npr._price_action_narrative_prompt(
+        get_persona_config("warren_buffett"), "EVIDENCE", {"price_action": pa})
+    assert "EARNINGS: Could not be checked" in prompt
+    # the cleaner keeps the failure marker
+    assert getattr(_col._clean_earnings_rows(_EAF("x"), "INTC"), "fetch_failed", False)
+
+
+def test_the_settle_step_keeps_the_failed_marker_for_earnings_rows():
+    out = _col.CollectedTickerData(ticker="INTC", persona_key="warren_buffett")
+    _col._settle_pass1_result(out, "earnings_rows", RuntimeError("503"), [], "INTC")
+    assert getattr(out.earnings_rows, "fetch_failed", False) is True
+
+
+def test_clean_earnings_rows_drops_other_symbols_and_undated_rows():
+    rows = [{"symbol": "INTC", "date": "2026-10-29"}, {"symbol": "AMD", "date": "2026-10-28"},
+            {"symbol": "", "date": "2026-07-23"}, {"symbol": "INTC"}, "junk"]
+    assert [r["date"] for r in _col._clean_earnings_rows(rows, "intc")] == ["2026-10-29", "2026-07-23"]
+    assert _col._clean_earnings_rows(None, "INTC") == []
+
+
+def test_an_ordinary_move_with_a_report_inside_the_window_still_hunts_and_stays_typical():
+    """Size and cause are separate: a quiet month with a report in it opens the reason
+    hunt (the report reaches the prompt) but the tier stays Typical."""
+    dates = _trading_days(_INTC_LAST, 120)
+    prices = [100.0 * (1.01 if i % 2 else 1 / 1.01) ** (i % 2) for i in range(120)]
+    rows = [{"date": dates[-8].isoformat(), "epsActual": 1.1, "epsEstimated": 1.0}]
+    pa = _build_price_action(prices, prices[-1], [], [], recent_price_dates=dates,
+                             earnings_rows=rows, today=date(2026, 10, 30))
+    assert pa["tier"] == "Typical" and pa["_floor"] is None
+    assert pa["_earnings"]["position"] == "inside_window"
+    assert pa["_earnings"]["eps_result"] == "beat"
+    assert pa["event"] is None            # its own since-event move is not Notable → no anchor
+    assert pa["expected_band_pct"] is not None
+
+
+def test_a_report_in_the_window_opens_the_hunt_so_its_headlines_reach_the_prompt():
+    """A quiet month (no floor, z < 1) with a report inside it still scans the news: a
+    dated guidance headline reaches `_news_headlines` (without the report it would not)."""
+    dates = _trading_days(_INTC_LAST, 120)
+    prices = [100.0 * (1.01 if i % 2 else 1 / 1.01) ** (i % 2) for i in range(120)]
+    news = [{"title": "Company cuts outlook for the year", "text": "", "site": "wire.com",
+             "publishedDate": dates[-6].isoformat() + " 08:00:00"}]
+    rows = [{"date": dates[-8].isoformat(), "epsActual": 1.1, "epsEstimated": 1.0}]
+    with_report = _build_price_action(prices, prices[-1], [], news, recent_price_dates=dates,
+                                      earnings_rows=rows, today=date(2026, 10, 30))
+    without = _build_price_action(prices, prices[-1], [], news, recent_price_dates=dates,
+                                  earnings_rows=[], today=date(2026, 10, 30))
+    assert [h["tag"] for h in with_report["_news_headlines"]] == ["Guidance Cut"]
+    assert without["_news_headlines"] == [] and without["tier"] == "Typical"
+
+
+def test_a_ten_percent_session_in_the_last_30_days_floors_the_window():
+    dates = _trading_days(_INTC_LAST, 200)
+    prices = [100.0 * (1.03 if i % 2 else 1 / 1.03) ** (i % 2) for i in range(200)]
+    prices[-5] = prices[-6] * 0.88          # a −12% session five sessions ago …
+    for i in range(-4, 0):                  # … mostly retraced
+        prices[i] = prices[i - 1] * 1.03
+    pa = _build_price_action(prices, prices[-1], [], [], recent_price_dates=dates,
+                             earnings_rows=[], today=date(2026, 10, 30))
+    assert pa["tier"] == "Notable"
+    assert pa["_floor"]["reason"] == "single_session"
+    assert pa["_floor"]["session_move_pct"] == -12.0
+    assert pa["_floor"]["session_date"] == dates[-5].isoformat()
+    assert pa["expected_band_pct"] is None
+
+
+def test_a_big_session_older_than_30_days_does_not_floor():
+    dates = _trading_days(_INTC_LAST, 200)
+    prices = [100.0 * (1.03 if i % 2 else 1 / 1.03) ** (i % 2) for i in range(200)]
+    prices[-40] = prices[-41] * 0.88        # ~8 weeks ago
+    for i in range(-39, 0):
+        prices[i] = prices[-40] * (1.03 if i % 2 else 1.0)
+    pa = _build_price_action(prices, prices[-1], [], [], recent_price_dates=dates,
+                             earnings_rows=[], today=date(2026, 10, 30))
+    assert pa["_floor"] is None and pa["tier"] == "Typical"
+
+
+def test_a_last_bar_headline_never_anchors_but_still_reaches_the_prompt():
+    prices, dates = _intel_shaped()
+    news = [{"title": "Intel lowers guidance for Q4", "text": "", "site": "x.com",
+             "publishedDate": "2026-10-29 16:30:00"}]
+    pa = _build_price_action(prices, prices[-1], [], news, recent_price_dates=dates,
+                             earnings_rows=[], today=date(2026, 10, 30))
+    assert pa["event"] is None and pa["window_label"] == "Last 30 Days"
+    assert [h["title"] for h in pa["_news_headlines"]] == ["Intel lowers guidance for Q4"]
+
+
+def test_with_unknown_sigma_a_last_bar_report_still_never_anchors():
+    """Fewer than 30 closes → σ unknown, so the per-catalyst size check is skipped; the
+    last-bar rule alone must keep a report dated on the final bar from relabelling the
+    window "Since <date>" over the window's own numbers."""
+    dates = _trading_days(_INTC_LAST, 20)
+    prices = [100.0] * 19 + [75.0]
+    pa = _build_price_action(prices, 75.0, [], [], recent_price_dates=dates,
+                             earnings_rows=[{"date": "2026-10-29", "epsActual": 0.1,
+                                             "epsEstimated": 0.3}],
+                             today=date(2026, 10, 30))
+    assert pa["sigma_daily_pct"] is None
+    assert pa["event"] is None and pa["window_label"].startswith("Last ")
+    assert pa["tag"] == pa["tier"] == "Notable"            # the floor: −25%
+    assert pa["_earnings"]["position"] == "on_last_bar"
+
+
+def test_event_anchored_change_days_count_sessions_not_calendar_days():
+    """A catalyst 10 sessions back (14 calendar days) → `_change_days` 10, and z/band use
+    √10, not √14."""
+    dates = _trading_days(_INTC_LAST, 200)
+    prices = [100.0 * (1.01 if i % 2 else 1 / 1.01) ** (i % 2) for i in range(200)]
+    for i in range(-10, 0):
+        prices[i] = prices[i - 1] * 1.02    # +22% over the last 10 sessions
+    ev_day = dates[-11]
+    rows = [{"date": ev_day.isoformat(), "epsActual": 2.0, "epsEstimated": 1.5}]
+    pa = _build_price_action(prices, prices[-1], [], [], recent_price_dates=dates,
+                             earnings_rows=rows, today=date(2026, 10, 30))
+    assert pa["window_label"] == f"Since {ev_day.strftime('%b')} {ev_day.day}"
+    assert pa["_change_days"] == 10
+    sigma = pa["sigma_daily_pct"] / 100
+    assert pa["z_score"] == pytest.approx(abs(pa["change_pct"]) / (sigma * 10 ** 0.5 * 100), abs=0.02)
+
+
+def test_the_market_comparison_refuses_a_stale_or_short_series():
+    prices, dates = _intel_shaped()
+    stale = [(d, v) for d, v in _spy(date(2026, 9, 29), _INTC_LAST, 1.0) if d <= date(2026, 10, 15)]
+    pa = _build_price_action(prices, prices[-1], [], [], recent_price_dates=dates,
+                             earnings_rows=[], market_series=stale, today=date(2026, 10, 30))
+    assert pa["_market"] is None
+    short = [(d, v) for d, v in _spy(date(2026, 9, 29), _INTC_LAST, 1.0) if d >= date(2026, 10, 10)]
+    pa2 = _build_price_action(prices, prices[-1], [], [], recent_price_dates=dates,
+                              earnings_rows=[], market_series=short, today=date(2026, 10, 30))
+    assert pa2["_market"] is None
+
+
+@pytest.mark.parametrize("stock,market,read", [
+    (-20.6, 0.9, "company_specific"),
+    (-20.0, -12.0, "market_wide"),
+    (-20.0, -6.0, "partly_market"),
+    (0.5, 3.0, None),                      # the stock barely moved → no read
+    (2.0, 10.0, "market_larger"),          # the market moved far more: not "in step"
+    (-1.5, -8.0, "market_larger"),
+    (-10.0, -15.0, "market_wide"),         # share 1.5 is still in step
+])
+def test_market_read_bands(stock, market, read):
+    series = [(date(2026, 9, 29), 100.0), (date(2026, 10, 29), 100.0 * (1 + market / 100))]
+    mk = _col._market_comparison(stock, date(2026, 9, 29), date(2026, 10, 29), series)
+    assert mk["read"] == read
+
+
+def test_a_late_collection_does_not_drift_out_of_its_own_window():
+    """Every window and scan anchors on the chart's LAST BAR: the same fixture read
+    months later (or after 20:00 ET, already 'tomorrow' in UTC) gives the same card."""
+    prices, dates = _intel_shaped()
+    a = _build_price_action(prices, prices[-1], [], [], recent_price_dates=dates,
+                            earnings_rows=list(_INTC_ROWS), today=date(2026, 10, 30))
+    b = _build_price_action(prices, prices[-1], [], [], recent_price_dates=dates,
+                            earnings_rows=list(_INTC_ROWS), today=date(2026, 12, 20))
+    for k in ("window_label", "change_pct", "tier", "prices", "_change_days", "_earnings"):
+        assert a[k] == b[k]
+    # Once the NEXT report's date has arrived (pending, no figures yet), it is the report
+    # after the chart's last close — and the prompt says its figures are not in yet.
+    c = _build_price_action(prices, prices[-1], [], [], recent_price_dates=dates,
+                            earnings_rows=list(_INTC_ROWS), today=date(2027, 1, 28))
+    assert c["_earnings"]["position"] == "after_last_bar"
+    assert c["_earnings"]["reported"] is False and c["_earnings"]["eps_result"] is None
+
+
+def test_the_empty_state_carries_the_new_keys():
+    pa = _build_price_action([], 10.0, [], [])
+    for k in ("_earnings", "_market", "_floor"):
+        assert pa[k] is None
+    assert pa["_earnings_unavailable"] is False
+
+
+@pytest.mark.asyncio
+async def test_intraday_chart_fetches_exactly_the_detection_window():
+    rows = [{"date": f"2026-10-{d:02d} {h}:00:00", "close": float(100 + d + h)}
+            for d in range(20, 24) for h in (10, 11, 12, 13, 14)]
+    seen = {}
+
+    class _Spy(_FakeIntradayFMP):
+        async def get_intraday_prices(self, ticker, interval="5min", from_date=None,
+                                      to_date=None, extended=False):
+            seen.update(from_date=from_date, to_date=to_date)
+            return await super().get_intraday_prices(ticker, interval, from_date, to_date)
+
+    from app.services.agents.ticker_report_data_collector import TickerReportDataCollector
+    collector = TickerReportDataCollector(fmp=_Spy(rows))
+    out = _pa_out("Notable", 7, [10.0, 11.0, 12.0])
+    out.price_action_partial.update(_window_start="2026-10-20", _last_bar="2026-10-29")
+    await collector._apply_intraday_chart(out)
+    assert seen == {"from_date": "2026-10-20", "to_date": "2026-10-29"}
+
+
+@pytest.mark.asyncio
+async def test_the_macro_fetch_keeps_spys_series_for_the_market_comparison(macro_fakes):
+    from app.services.agents.ticker_report_data_collector import (
+        TickerReportDataCollector, _cached_market_series, _market_series_cache,
+    )
+
+    fmp, _fred = macro_fakes
+    assert _cached_market_series() is None
+    await TickerReportDataCollector(fmp=fmp)._fetch_macro_indicators()
+    assert fmp.history_calls == 2                     # no extra FMP call for the S&P line
+    series = _cached_market_series()
+    assert series and series == sorted(series)        # oldest first, dated
+    stamped, data = _market_series_cache["SPY"]
+    _market_series_cache["SPY"] = (stamped - 3 * 3600, data)
+    assert _cached_market_series() is None            # older than 2 snapshot TTLs → refused
+
+
+# ── review round (2026-10-31): confirmed findings, pinned ─────────────────────
+
+def test_a_postponed_reports_leftover_date_is_not_a_report():
+    """FMP keeps a rescheduled report's ORIGINAL date as a pending row beside the real one.
+    Before the real report lands no reported row is near it, so only the age rule can tell
+    it is a leftover: it must not anchor "Since Oct 15" nor reach the prompt as scheduled."""
+    rows = [{"date": "2026-07-24", "epsActual": 0.5, "epsEstimated": 0.4},
+            {"date": "2026-10-15", "epsActual": None, "epsEstimated": 0.3},
+            {"date": "2026-11-05", "epsActual": None, "epsEstimated": 0.3}]
+    assert [e["date"].isoformat() for e in _col._earnings_events(rows, date(2026, 10, 29))] \
+        == ["2026-07-24"]
+    dates = _trading_days(date(2026, 10, 28), 200)
+    prices = [100.0 * (1.01 if i % 2 else 1 / 1.01) ** (i % 2) for i in range(200)]
+    for i in range(-10, 0):
+        prices[i] = prices[i - 1] * 0.993
+    pa = _build_price_action(prices, prices[-1], [], [], recent_price_dates=dates,
+                             earnings_rows=rows, today=date(2026, 10, 29))
+    assert pa["_earnings"] is None
+    assert not (pa["event"] or {}).get("tag", "").startswith("Earnings")
+    # ...while a pending row dated TODAY (an after-close report seen at noon) still counts
+    today_row = rows + [{"date": "2026-10-29", "epsActual": None}]
+    assert _col._earnings_events(today_row, date(2026, 10, 29))[-1]["reported"] is False
+
+
+def test_an_anchored_card_is_never_typical_when_sigma_is_known():
+    """The per-catalyst check and the re-anchor score IDENTICAL inputs (both rounded): a
+    catalyst kept at z 1.004 must not print Typical with the "Normal range" band."""
+    import random
+
+    # 849, 1467 and 1585 are the seeds that land on the rounding edge (found by running
+    # this loop against the unrounded check); the rest keep the sweep broad.
+    for seed in [849, 1467, 1585, *range(400)]:
+        rng = random.Random(seed)
+        dates = _trading_days(date(2026, 10, 29), 120)
+        prices = [100.0]
+        for _ in range(119):
+            prices.append(prices[-1] * (1 + rng.gauss(0, 0.012)))
+        ev = rng.randint(80, 116)
+        news = [{"title": "Company agrees to acquire rival", "text": "", "site": "w",
+                 "publishedDate": dates[ev].isoformat()}]
+        pa = _build_price_action(prices, prices[-1], [], news, recent_price_dates=dates,
+                                 earnings_rows=[], today=date(2026, 10, 30))
+        if pa["event"] is not None:
+            assert pa["tier"] != "Typical", seed
+            assert pa["window_label"].startswith("Since "), seed
+
+
+def test_a_failed_earnings_fetch_still_scans_the_news_for_an_ordinary_move():
+    dates = _trading_days(_INTC_LAST, 120)
+    prices = [100.0 * (1.01 if i % 2 else 1 / 1.01) ** (i % 2) for i in range(120)]
+    news = [{"title": "Company lowers guidance for the year", "text": "", "site": "wire.com",
+             "publishedDate": dates[-6].isoformat() + " 08:00:00"}]
+    pa = _build_price_action(prices, prices[-1], [], news, recent_price_dates=dates,
+                             earnings_rows=_EAF("503"), today=date(2026, 10, 30))
+    assert pa["_news_scanned"] is True
+    assert [h["tag"] for h in pa["_news_headlines"]] == ["Guidance Cut"]
+    quiet = _build_price_action(prices, prices[-1], [], news, recent_price_dates=dates,
+                                earnings_rows=[], today=date(2026, 10, 30))
+    assert quiet["_news_scanned"] is False and quiet["_news_headlines"] == []
+
+
+def test_a_transient_earnings_failure_keeps_the_collection_out_of_shared_caches():
+    import httpx
+    from app.integrations.fmp import FMPNotEntitledException
+
+    out = _col.CollectedTickerData(ticker="INTC", persona_key="warren_buffett")
+    _col._settle_pass1_result(out, "earnings_rows", httpx.ReadTimeout("slow"), [], "INTC")
+    assert out.degraded_sections == ["earnings_rows:ReadTimeout"]
+    assert getattr(out.earnings_rows, "fetch_failed", False) is True
+    out2 = _col.CollectedTickerData(ticker="INTC", persona_key="warren_buffett")
+    _col._settle_pass1_result(out2, "earnings_rows", FMPNotEntitledException("no"), [], "INTC")
+    assert out2.degraded_sections == []            # a permanent refusal stays cacheable

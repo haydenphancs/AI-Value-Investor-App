@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 4CbEbptXyHOz5vrIKa0YdiEdvleQs5jIGH6reuN4hnhSPMgbIGMBhGgmgaoMgZm
+\restrict u5bdQGW9G6xkpVcSIMbekQn4QyfPJ0OwVoW4iHvOQ7u7aLbQkQApuGoKovvVQb6
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -9851,6 +9851,8 @@ CREATE TABLE public.marketing_scripts (
     run_date date NOT NULL,
     content_rejections integer DEFAULT 0 NOT NULL,
     reject_reason text,
+    claude_usage jsonb,
+    CONSTRAINT marketing_scripts_claude_usage_object CHECK (((claude_usage IS NULL) OR (jsonb_typeof(claude_usage) = 'object'::text))),
     CONSTRAINT marketing_scripts_content_rejections_nonneg CHECK ((content_rejections >= 0)),
     CONSTRAINT marketing_scripts_generations_check CHECK ((generations >= 0)),
     CONSTRAINT marketing_scripts_reject_reason_valid CHECK (((reject_reason IS NULL) OR (reject_reason = ANY (ARRAY['content'::text, 'writer_unavailable'::text, 'empty_pool'::text, 'source_ineligible'::text])))),
@@ -9912,6 +9914,13 @@ COMMENT ON COLUMN public.marketing_scripts.content_rejections IS 'Generations th
 --
 
 COMMENT ON COLUMN public.marketing_scripts.reject_reason IS 'Why a rejected row was closed: content (the validators, 4 times) | writer_unavailable (4 generations ended without a verdict) | empty_pool | source_ineligible.';
+
+
+--
+-- Name: COLUMN marketing_scripts.claude_usage; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.marketing_scripts.claude_usage IS 'The Claude tokens inside tokens_used (never in addition to it), by served model and kind: {"<model>": {"input", "output", "cache_read", "cache_write"}}, summed over every generation of the run, failed Claude attempts included (migration 206). NULL = no Claude token was billed (the MARKETING_*_PROVIDER switches on gemini, or a row older than 206). Written only by app/services/marketing/script_service.py, and only when a generation billed Claude; the weekly digest prices it at Claude list prices and tokens_used minus it at the Gemini rate.';
 
 
 --
@@ -21757,5 +21766,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 4CbEbptXyHOz5vrIKa0YdiEdvleQs5jIGH6reuN4hnhSPMgbIGMBhGgmgaoMgZm
+\unrestrict u5bdQGW9G6xkpVcSIMbekQn4QyfPJ0OwVoW4iHvOQ7u7aLbQkQApuGoKovvVQb6
 

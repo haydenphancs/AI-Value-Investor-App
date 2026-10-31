@@ -43,6 +43,10 @@ ASSET_KEYS = {
     # null in the regular session and on rows with no extended session. iOS decodes
     # them leniently as `Double?` / `String?` and draws the chip only when all are set.
     "extended_price", "extended_change_percent", "extended_session",
+    # The star date (2026-10-31): `watchlist_items.added_at` as UTC
+    # "YYYY-MM-DDTHH:MM:SS.mmmZ", the Holdings "Date Added" sort key. Optional; iOS
+    # decodes it leniently as `String?` (TrackedAssetDTO `addedAt`).
+    "added_at",
 }
 ALERT_KEYS = {
     "type", "title", "description", "ticker", "company_name", "day", "month",

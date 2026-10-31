@@ -32,16 +32,8 @@ enum TrackingTab: String, CaseIterable {
     case alerts = "Alerts"
 }
 
-// MARK: - Asset Sort Option
-enum AssetSortOption: String, CaseIterable {
-    case name = "Name"
-    case price = "Price"
-    case change = "Change"
-    case marketCap = "Market Cap"
-    case dateAdded = "Date Added"
-
-    var displayName: String { rawValue }
-}
+// `AssetSortOption` lives in `Core/Utilities/HoldingsSort.swift`, beside the comparator that
+// reads it (Foundation-only, so a test can run the sort itself).
 
 // MARK: - Change Display Mode
 
@@ -103,6 +95,9 @@ struct TrackedAsset: Identifiable {
     var extendedPrice: Double? = nil
     var extendedChangePercent: Double? = nil
     var extendedSession: ExtendedSession? = nil
+    /// When the ticker joined the watchlist (`added_at` on the wire) — the "Date Added" sort
+    /// key, never drawn. Nil from an older backend or an unreadable date (sorts last).
+    var addedAt: Date? = nil
 
     /// Signed zero collapsed to +0 — see `PriceChangeLabel.normalizedChange`.
     /// `-0.0` (what a barely-negative move rounds to) satisfies `>= 0` yet still
@@ -727,6 +722,9 @@ struct TrackedAssetDTO: Codable, Identifiable {
     let extendedPrice: Double?
     let extendedChangePercent: Double?
     let extendedSession: String?
+    /// When the ticker joined the watchlist, as the backend's UTC-milliseconds ISO string.
+    /// Optional: an older backend sends no key, and saved snapshots predate it.
+    let addedAt: String?
 
     enum CodingKeys: String, CodingKey {
         case ticker
@@ -747,6 +745,7 @@ struct TrackedAssetDTO: Codable, Identifiable {
         case extendedPrice = "extended_price"
         case extendedChangePercent = "extended_change_percent"
         case extendedSession = "extended_session"
+        case addedAt = "added_at"
     }
 
     /// Hand-written so ONE malformed row cannot destroy the entire watchlist.
@@ -797,6 +796,7 @@ struct TrackedAssetDTO: Codable, Identifiable {
         extendedPrice = lenient(Double.self, .extendedPrice).finiteOrNil
         extendedChangePercent = lenient(Double.self, .extendedChangePercent).finiteOrNil
         extendedSession = lenient(String.self, .extendedSession)
+        addedAt = lenient(String.self, .addedAt)
     }
 
     /// Map to the view-layer model used by AssetsListSection
@@ -828,7 +828,8 @@ struct TrackedAssetDTO: Codable, Identifiable {
             extendedChangePercent: extendedChangePercent,
             // An unknown session string (a newer backend) maps to nil, which hides the chip
             // rather than guessing a glyph.
-            extendedSession: extendedSession.flatMap(ExtendedSession.init(rawValue:))
+            extendedSession: extendedSession.flatMap(ExtendedSession.init(rawValue:)),
+            addedAt: HoldingsSort.parseAddedAt(addedAt)
         )
     }
 }

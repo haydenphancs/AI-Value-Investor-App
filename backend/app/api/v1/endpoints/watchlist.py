@@ -408,6 +408,61 @@ async def remove_from_watchlist(
     logger.info("[Watchlist] DELETE ticker=%s (canonical=%s, declared=%s) for user=%s",
                 raw_ticker, canonical, declared or "-", user_id)
 
+    # `only_if_unreferenced`: the "remove from this portfolio" paths send it once the client
+    # believes no other group holds the ticker. Its store can be stale (another device added
+    # the ticker to a group a moment ago), and the delete-through below strips the ticker
+    # from EVERY group, shares included — so the server re-checks, on the exact stored
+    # ticker the delete below would remove (same raw/canonical order), and keeps the row
+    # when any of the caller's groups still holds it. Nothing is deleted on that path.
+    if request.only_if_unreferenced:
+        try:
+            target, referenced = await asyncio.to_thread(
+                retry_idempotent_sync,
+                lambda: _delete_target_and_reference(supabase, user_id, first, second),
+                what=f"watchlist remove reference check {raw_ticker} user={user_id}",
+                logger=logger,
+            )
+        except Exception as exc:
+            # FAIL CLOSED: an unknown answer must not delete. A 503 the client reports,
+            # never a 200 that either kept or removed the row on a guess.
+            level = logging.WARNING if is_transient_supabase_error(exc) else logging.ERROR
+            logger.log(
+                level,
+                "[Watchlist] reference check failed for %s (canonical=%s) user=%s "
+                "(%s: %s) — nothing deleted",
+                raw_ticker, canonical, user_id, type(exc).__name__, exc, exc_info=True,
+            )
+            return make_error_response(
+                ErrorCode.WATCHLIST_UNAVAILABLE,
+                message=(
+                    f"only_if_unreferenced remove of {raw_ticker} for user {user_id}: "
+                    f"group reference check failed ({type(exc).__name__}: {exc}); "
+                    "nothing deleted"
+                ),
+                # Clipped: `stock_id` has no length bound, and this line is shown verbatim.
+                user_message=(
+                    f"We couldn't remove {raw_ticker[:24]} right now. Please try again in a "
+                    "moment."
+                ),
+            )
+        if referenced:
+            logger.info(
+                "[Watchlist] kept %s for user=%s: still held by one of their groups "
+                "(only_if_unreferenced)",
+                target, user_id,
+            )
+            return {
+                # Neutral on purpose: true whether or not a watchlist row exists (an orphan
+                # group row with no watchlist row also lands here). Clients read `removed`.
+                "message": f"{target} not removed: a portfolio still holds it",
+                "removed": False,
+            }
+        # The check cleared ONLY `target`. Delete nothing else: the raw→canonical fall-through
+        # below would otherwise reach the OTHER spelling when `target`'s row vanished (another
+        # device) between the check and the delete — a spelling the check never looked at,
+        # whose delete-through strips it and its shares from every group.
+        first = second = target
+
     # Bound BEFORE the try: the except arm below names it, and binding it inside the try
     # (after the first .execute()) made a Supabase failure raise UnboundLocalError out of
     # the handler itself — the ERROR log was lost and the client got a bare 500.
@@ -448,7 +503,9 @@ async def remove_from_watchlist(
             # force a full per-ticker rebuild on the next GET (an invalidation storm).
             invalidate_feed_cache(user_id)
         (await asyncio.to_thread(_delete_through_from_groups, supabase, user_id, ticker))
-        return {"message": f"{ticker} removed from watchlist"}
+        # `removed`: whether a watchlist row actually went. The message is unchanged for the
+        # shipped builds, which read only the status.
+        return {"message": f"{ticker} removed from watchlist", "removed": bool(result.data)}
     except Exception as exc:
         logger.error(
             "[Watchlist] %s deleting %s (canonical=%s) for user=%s: %s",
@@ -520,6 +577,58 @@ def _heal_active_group(supabase: Client, user_id: str) -> Optional[str]:
             user_id, type(e).__name__, e,
         )
         return None
+
+
+def _delete_target_and_reference(
+    supabase: Client, user_id: str, first: str, second: str
+) -> tuple[str, bool]:
+    """(the stored ticker `DELETE /watchlist` would remove, whether a group holds it).
+
+    The target follows the handler's order exactly: ``first`` when the user has that row,
+    else ``second`` when they have that one, else ``first`` — with no row at all the
+    handler still runs the delete-through on ``first``, so that is the ticker whose group
+    rows are at stake.
+
+    "Held" means any `portfolio_items` row for that exact ticker in ANY of the caller's
+    groups — the set `_delete_through_from_groups` would delete from. The group list is
+    PAGED: a truncated read would miss a group and answer "unreferenced", the direction
+    that deletes. Raises on any read failure; the caller fails closed. Pure reads, so
+    `retry_idempotent_sync` may replay it.
+    """
+    target = first
+    for candidate in dict.fromkeys((first, second)):
+        hit = (
+            supabase.table("watchlist_items")
+            .select("ticker")
+            .eq("user_id", user_id)
+            .eq("ticker", candidate)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if hit:
+            target = candidate
+            break
+    group_rows = fetch_all_rows(
+        lambda: supabase.table("portfolios").select("id").eq("user_id", user_id),
+        order_by="id",
+        what=f"groups for the watchlist reference check user={user_id}",
+    )
+    group_ids = [r["id"] for r in group_rows if r.get("id")]
+    if not group_ids:
+        return target, False
+    held = (
+        supabase.table("portfolio_items")
+        .select("portfolio_id")
+        .in_("portfolio_id", group_ids)
+        .eq("ticker", target)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    return target, bool(held)
 
 
 def _delete_through_from_groups(supabase: Client, user_id: str, ticker: str) -> None:

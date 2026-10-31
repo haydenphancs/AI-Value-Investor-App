@@ -187,7 +187,11 @@ async def fetch_etf_tickers(tickers: Sequence[str]) -> set:
 async def fetch_ticker_metadata(
     user_id: str, tickers: Sequence[str]
 ) -> Dict[str, Dict[str, Any]]:
-    """Company name / logo / asset type for the given tickers, keyed by UPPERCASE ticker.
+    """Company name / logo / asset type / star date for the given tickers, keyed by
+    UPPERCASE ticker.
+
+    `added_at` (when the ticker was starred) is the Updates strip's "Date Added" sort key;
+    Home's strip reads only the name and the class and ignores it.
 
     Group membership lives in `portfolio_items`, which carries only the symbol; every
     human-readable field lives on the user's `watchlist_items` row. `set_portfolio_tickers`
@@ -204,7 +208,7 @@ async def fetch_ticker_metadata(
     def _read() -> List[Dict[str, Any]]:
         return (
             get_supabase().table("watchlist_items")
-            .select("ticker, company_name, logo_url, asset_type")
+            .select("ticker, company_name, logo_url, asset_type, added_at")
             .eq("user_id", user_id)
             .in_("ticker", symbols)
             .execute()

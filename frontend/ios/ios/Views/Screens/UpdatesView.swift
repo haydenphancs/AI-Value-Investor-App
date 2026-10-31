@@ -327,8 +327,9 @@ struct UpdatesView: View {
                 Task { await viewModel.reloadForWatchlistChange() }
             }
             // The active group's tickers were reordered or edited on Tracking (Manage Tickers,
-            // Edit Portfolio). Neither posts a watchlist change, and the chips' "Date Added"
-            // order is the group's stored order — so the strip re-reads it.
+            // Edit Portfolio, the Holdings swipe): posted once per burst of confirmed writes. A
+            // reorder posts no watchlist change, and the chips' Custom order is the group's
+            // stored order — so the strip re-reads it.
             .onReceive(
                 NotificationCenter.default.publisher(
                     for: PortfolioStore.activeGroupTickersDidChangeNotification

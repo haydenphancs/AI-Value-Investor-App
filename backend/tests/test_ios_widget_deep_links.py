@@ -1653,7 +1653,7 @@ _MUTATIONS: list[tuple[str, Path, Callable[[str], str], str, str]] = [
      _REACH, "no longer clears every presentation"),
     ("research-error-alert-kept", _CONTENT, _drop_line("            viewModel.error = nil"),
      _REACH, "no longer clears every presentation"),
-    ("tracking-sort-sheet-kept", _TRACKING, _drop_line("                viewModel.showSortSheet = false"),
+    ("tracking-manage-tickers-kept", _TRACKING, _drop_line("                viewModel.showManageTickersSheet = false"),
      _REACH, "no longer clears every presentation"),
     ("whales-paywall-unreset", _TRACKING,
      _replace("        .onPresentationReset {\n            viewModel.showWhalePaywall = false\n        }\n", ""),

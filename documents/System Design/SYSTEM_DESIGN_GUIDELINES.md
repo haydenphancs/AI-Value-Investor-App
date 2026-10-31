@@ -1278,6 +1278,23 @@ unverifiable joined read falls back to the serial items read (logged at WARNING;
 with a serial read for exactly those groups. A failed groups read still raises rather than answer
 `[]`, which would seed a duplicate default group.
 
+**Group membership writes are serialized per portfolio on the client (2026-10-31).**
+`PUT /portfolios/{id}/tickers` replaces the whole list (delete-all + upsert, no transaction), and
+iOS used to send one per gesture concurrently: a late answer rolled back a newer order on screen,
+a failure reverted newer edits, and two interleaved swaps could resurrect a removed ticker.
+`PortfolioStore` now queues each portfolio's writes (membership and `PUT /holdings` alike) one at
+a time (`MembershipWriteSequencer`): each write sends the list its own edit produced, every answer
+becomes the confirmed membership, only the newest answer replaces what is on screen, and a failure
+reverts to the confirmed list only when no newer write is queued. A `GET /portfolios` that was in
+flight across a write keeps the local items for that group instead of publishing the older list.
+Two devices editing one group at the same instant can still interleave on the server; an atomic
+replace would need an RPC. A ticker removed from its last group also leaves the watchlist through
+`DELETE /watchlist` with `only_if_unreferenced`, which re-checks every group server-side and
+answers `removed: false` instead of deleting (the delete strips the ticker from every group). The
+Holdings "Sort By" Custom option is the group's stored order; "Date Added" reads
+`watchlist_items.added_at`, which no write rewrites (`portfolio_items.added_at` is reset by every
+`PUT /tickers`).
+
 **iOS: the on-disk account snapshots. Home's came first (2026-10-01).**
 `Core/Repositories/HomeDashboardSnapshotStore.swift` keeps the last good `GET /home/dashboard`
 response of the signed-in account, so a cold launch paints it at once. (TestFlight 1.0 (9),

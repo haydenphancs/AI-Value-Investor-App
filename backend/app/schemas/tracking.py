@@ -71,6 +71,14 @@ class TrackedAssetResponse(BaseModel):
     extended_price: Optional[float] = None
     extended_change_percent: Optional[float] = None
     extended_session: Optional[str] = None
+    # When the ticker was STARRED: `watchlist_items.added_at`, written once by the add and
+    # never rewritten (a group reorder rewrites `portfolio_items`, not this). The Holdings
+    # "Date Added" sort reads it — `portfolio_items.position` was the stored order, not a
+    # date. UTC "YYYY-MM-DDTHH:MM:SS.mmmZ" (`utils.iso_dates.iso_utc_millis`: exactly three
+    # fractional digits, the only shape iOS's ISO8601DateFormatter reads). None when the
+    # row has none or it is unreadable; iOS sorts that as unknown, last. Older clients
+    # ignore it.
+    added_at: Optional[str] = None
 
 
 class WhaleTradeItemResponse(BaseModel):

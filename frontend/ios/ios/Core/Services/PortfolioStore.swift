@@ -15,14 +15,17 @@
 //  Mutation strategy:
 //    - Portfolio CRUD (create / rename / delete / reorder) talks to the server
 //      first, then updates @Published state on success.
-//    - Ticker membership mutations (add / remove) update @Published state
-//      optimistically for instant feedback, then sync to the server. The
-//      server payload is the full ordered ticker list (not a diff), so the
-//      sync call is idempotent — a transient failure just means the next
-//      successful call repairs the state. The server preserves per-item
+//    - Ticker membership mutations (add / remove / reorder) update @Published
+//      state optimistically for instant feedback, then sync to the server. The
+//      server payload is the full ordered ticker list (not a diff). A
+//      portfolio's writes go out ONE AT A TIME (`enqueueMembershipWrite`), each
+//      with the list its own edit produced; only the newest answer replaces
+//      what is on screen, and a failure reverts to the last CONFIRMED list
+//      only when no newer write is queued. The server preserves per-item
 //      holdings for tickers that survive the swap.
 //    - Per-portfolio holdings (shares / market_value) are pushed via
-//      `setHoldings(_:in:)`; the server response replaces the local copy.
+//      `setHoldings(_:in:)`, in the same per-portfolio queue; the response's
+//      holdings are merged into the local items by ticker.
 //
 
 import Foundation
@@ -132,11 +135,14 @@ final class PortfolioStore: ObservableObject {
         )
     }
 
-    /// Posted once the SERVER has confirmed a `setTickers` write to the ACTIVE group — the
-    /// Manage Tickers drag-reorder, an Edit Portfolio add / remove, the orphan purge. None of
-    /// those posts `watchlistDidChangeNotification` or `activeGroupDidChangeNotification`, so
-    /// the Updates chips (whose "Date Added" order IS the group's stored order) kept the old
-    /// order and membership for the whole process. Post-confirm for the reason given below.
+    /// Posted once the SERVER has confirmed a membership write to the ACTIVE group — every
+    /// add, remove, reorder and purge (`syncTickers`): the Manage Tickers drag and minus, Edit
+    /// Portfolio's move / remove, the Holdings swipe, the orphan purge. None of those posts
+    /// `watchlistDidChangeNotification` or `activeGroupDidChangeNotification`, so the Updates
+    /// chips (whose Custom order IS the group's stored order) and Home's strip kept the old
+    /// order and membership. `userInfo[membershipChangedKey]` says whether the set of tickers
+    /// changed (a pure reorder leaves the diversification score alone). Post-confirm for the
+    /// reason given below.
     static let activeGroupTickersDidChangeNotification = Notification.Name(
         "PortfolioStore.activeGroupTickersDidChange"
     )
@@ -235,6 +241,9 @@ final class PortfolioStore: ObservableObject {
         // Captured BEFORE the request. `reset()` bumps it, so a load issued under the
         // previous session cannot publish that session's rows after sign-out.
         let epoch = identityEpoch
+        // Also captured BEFORE the request: a membership write queued after this point may not
+        // be in the answer (see `keepingLocalMembership`).
+        let revisionsAtRequest = writeSequencer.revisionSnapshot()
         isLoading = true
         defer {
             isLoading = false
@@ -260,9 +269,10 @@ final class PortfolioStore: ObservableObject {
                 print("[PortfolioStore] ↩︎ discarding a load from an ended session")
                 return false
             }
-            let loaded = response.portfolios
+            let fetched = response.portfolios
                 .map { $0.toPortfolio() }
                 .sorted { $0.sortOrder < $1.sortOrder }
+            let loaded = keepingLocalMembership(over: fetched, revisionsAtRequest: revisionsAtRequest)
             self.portfolios = loaded
             // The SERVER decides which group is active (migration 126). Home and the
             // Updates chips read it straight from the database, so if this device kept
@@ -301,6 +311,38 @@ final class PortfolioStore: ObservableObject {
             portfolioStoreLog.warning("GET /portfolios failed — \(detail, privacy: .public)")
             return false
         }
+    }
+
+    /// `fetched` with the LOCAL membership kept for every group that had a write queued, in
+    /// flight, or finished while the load was out, and the confirmed membership re-seeded for
+    /// every other group.
+    ///
+    /// A `GET /portfolios` issued before a `PUT /tickers` can answer after it. Publishing its
+    /// items as-is put the OLD order back on screen — the very "my reorder did nothing" this
+    /// screen was reported for — and the next whole-list write would then have sent that old
+    /// list to the server. The local items of such a group are the newest confirmed or still
+    /// optimistic state, and its own write settles them.
+    private func keepingLocalMembership(
+        over fetched: [Portfolio], revisionsAtRequest: [String: Int]
+    ) -> [Portfolio] {
+        let local: [String: Portfolio] = Dictionary(
+            portfolios.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var seeded: [String: [PortfolioItem]] = [:]
+        let merged: [Portfolio] = fetched.map { server in
+            let written = writeSequencer.hasPending(server.id)
+                || writeSequencer.revision(server.id) != (revisionsAtRequest[server.id] ?? 0)
+            guard written, let mine = local[server.id] else {
+                seeded[server.id] = server.items
+                return server
+            }
+            var kept = server
+            kept.items = mine.items
+            if let confirmed = confirmedItems[server.id] { seeded[server.id] = confirmed }
+            return kept
+        }
+        // Groups the server no longer has take their confirmed lists with them.
+        confirmedItems = seeded
+        return merged
     }
 
     // MARK: - Active selection
@@ -376,6 +418,12 @@ final class PortfolioStore: ObservableObject {
         identityEpoch &+= 1
         loadTask?.cancel()
         loadTask = nil
+        // The write chain belongs to the ended session. Its links check the epoch above and
+        // resolve silently; the next session's first write must not wait behind them.
+        writeSequencer.reset()
+        writeTails = [:]
+        confirmedItems = [:]
+        unannouncedChanges = [:]
         portfolios = []
         activePortfolioId = nil
         hasLoadedOnce = false
@@ -410,6 +458,7 @@ final class PortfolioStore: ObservableObject {
         let new = dto.toPortfolio()
         portfolios.append(new)
         portfolios.sort { $0.sortOrder < $1.sortOrder }
+        confirmedItems[new.id] = new.items
         confirmedMutationCount &+= 1
         // The server deliberately does NOT auto-activate a new group — doing it there
         // would move Home and Updates as a side effect of an action that only said "make
@@ -427,8 +476,10 @@ final class PortfolioStore: ObservableObject {
             responseType: PortfolioDTO.self
         )
         let updated = dto.toPortfolio()
+        // The NAME only. Replacing the whole row also wrote the response's `items` over a
+        // ticker edit still queued (the rename field sits in the same editor as the drag).
         if let index = portfolios.firstIndex(where: { $0.id == id }) {
-            portfolios[index] = updated
+            portfolios[index].name = updated.name
         }
         confirmedMutationCount &+= 1
         // Renaming the ACTIVE group changes the header Home renders and the title of the
@@ -444,6 +495,10 @@ final class PortfolioStore: ObservableObject {
         let wasActive = activePortfolioId == id
         try await apiClient.request(endpoint: .deletePortfolio(id: id))
         portfolios.removeAll { $0.id == id }
+        confirmedItems.removeValue(forKey: id)
+        unannouncedChanges.removeValue(forKey: id)
+        writeSequencer.forget(id)
+        writeTails.removeValue(forKey: id)
         confirmedMutationCount &+= 1
         if wasActive {
             // The SERVER already promoted a replacement (`ensure_active_portfolio`, called
@@ -459,25 +514,156 @@ final class PortfolioStore: ObservableObject {
 
     func reorderPortfolios(_ newOrder: [Portfolio]) async throws {
         let ids = newOrder.map(\.id)
-        var reordered: [Portfolio] = []
-        for (index, portfolio) in newOrder.enumerated() {
-            var copy = portfolio
-            copy.sortOrder = index
-            reordered.append(copy)
-        }
-        // Snapshot BEFORE the optimistic write. Every other optimistic mutation in this file
-        // (`addTicker`, `removeTicker`, `setTickers`) reverts on throw; this one did not, so a
-        // failed reorder left the local list in the new order and the server in the old one.
-        // The drag looked like it stuck, and the next load silently undid it.
-        let previous = portfolios
-        portfolios = reordered
+        // Only `sortOrder` moves, written onto the CURRENT values. Assigning the caller's copies
+        // (as this used to) also wrote back their `items` and `name` — so a ticker edit still
+        // in flight when the group list was dragged lost its optimistic state, and the revert
+        // put back a whole array captured before it.
+        let previousOrder: [String: Int] = Dictionary(
+            portfolios.map { ($0.id, $0.sortOrder) }, uniquingKeysWith: { first, _ in first })
+        applySortOrder(Dictionary(
+            ids.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first }))
         do {
             try await apiClient.request(endpoint: .reorderPortfolios(ids: ids))
         } catch {
-            portfolios = previous
+            // Snapshot BEFORE the optimistic write and revert on throw, like every other
+            // optimistic mutation in this file: a failed reorder used to leave the local list in
+            // the new order and the server in the old one, and the next load silently undid it.
+            applySortOrder(previousOrder)
             throw error
         }
         confirmedMutationCount &+= 1
+    }
+
+    /// Writes each listed group's `sortOrder` and re-sorts. Groups the map does not name keep
+    /// theirs.
+    private func applySortOrder(_ order: [String: Int]) {
+        for index in portfolios.indices {
+            if let position = order[portfolios[index].id] {
+                portfolios[index].sortOrder = position
+            }
+        }
+        portfolios.sort { $0.sortOrder < $1.sortOrder }
+    }
+
+    // MARK: - Per-portfolio write chain
+
+    /// Which membership write is newest, what is still queued, and whether a load may predate a
+    /// write. See `MembershipWriteSequencer` for why every write to a portfolio waits its turn.
+    private var writeSequencer = MembershipWriteSequencer()
+
+    /// The last write queued per portfolio. The next one awaits it before sending, so a
+    /// portfolio's PUTs reach the server one at a time, in the order the user made them.
+    private var writeTails: [String: Task<Void, Never>] = [:]
+
+    /// The membership the SERVER last confirmed per portfolio — what a failed write reverts to.
+    /// Seeded by a load (for groups with nothing queued), a create, and every confirmed write.
+    private var confirmedItems: [String: [PortfolioItem]] = [:]
+
+    /// `userInfo` key on `activeGroupTickersDidChangeNotification`: true when the confirmed
+    /// writes since the last post changed WHICH tickers the group holds (an add or remove),
+    /// false for pure reorders. The diversification score depends on membership only.
+    static let membershipChangedKey = "membershipChanged"
+
+    /// Confirmed writes not yet announced, per group: whether any of them changed membership.
+    /// Only the NEWEST write's answer is announced (an older one would send Updates to re-read
+    /// a list a newer write is about to replace, and its unordered reloads could land last), so
+    /// the older answers' membership changes ride along here — sticky until that post.
+    private var unannouncedChanges: [String: Bool] = [:]
+
+    /// What one queued membership write came to.
+    private enum MembershipLinkResult {
+        /// The server confirmed this write; its answer is the confirmed ticker list.
+        case confirmed([String])
+        /// This write failed while a NEWER write was queued. That write sends the full list,
+        /// which includes this edit, so ITS answer decides the outcome (`settledOutcome`).
+        case superseded(Error)
+        /// The session ended, or the group was deleted, before it could answer: no one to tell.
+        case abandoned
+    }
+
+    /// Queues a whole-list `PUT /portfolios/{id}/tickers` of `tickers` behind every earlier
+    /// write to the same portfolio.
+    ///
+    /// `tickers` is captured NOW, right after the caller's optimistic edit, so each gesture
+    /// sends exactly the list it produced — never a later one that an unrelated load or holdings
+    /// write may have replaced in the meantime.
+    ///
+    /// - Returns: the write. Its value is the server-confirmed ticker list, or nil when the
+    ///   session ended before it could answer (a link from an ended session never throws: it
+    ///   has no one left to tell).
+    ///
+    /// `satisfied` says whether a confirmed list holds THIS write's edit. It decides the outcome
+    /// of a write that failed while a newer one was queued: the newer write carries this edit,
+    /// so reporting the older failure as final told the user an edit had failed that the server
+    /// then saved — and skipped the remove-fully step for a ticker that did leave the group.
+    private func enqueueMembershipWrite(
+        _ tickers: [String], for portfolioId: String,
+        satisfied: @escaping @Sendable ([String]) -> Bool
+    ) -> Task<[String]?, Error> {
+        let epoch = identityEpoch
+        let ticket = writeSequencer.enqueueMembership(portfolioId)
+        let previous = writeTails[portfolioId]
+        let link = Task { @MainActor [weak self] () async throws -> MembershipLinkResult in
+            await previous?.value
+            guard let self, epoch == self.identityEpoch else { return .abandoned }
+            defer {
+                if epoch == self.identityEpoch { self.writeSequencer.finish(portfolioId) }
+            }
+            // A group deleted while this waited takes no write: it would only 404, and its
+            // caller would report a failure for a group the user just removed.
+            guard self.portfolios.contains(where: { $0.id == portfolioId }) else { return .abandoned }
+            return try await self.syncTickers(for: portfolioId, tickers: tickers, ticket: ticket, epoch: epoch)
+        }
+        writeTails[portfolioId] = Task { _ = try? await link.value }
+        return Task { @MainActor [weak self] () async throws -> [String]? in
+            switch try await link.value {
+            case .confirmed(let confirmed):
+                return confirmed
+            case .abandoned:
+                return nil
+            case .superseded(let error):
+                guard let self else { return nil }
+                return try await self.settledOutcome(
+                    for: portfolioId, epoch: epoch, satisfied: satisfied, error: error
+                )
+            }
+        }
+    }
+
+    /// A superseded write's real outcome: once every write queued for the group has finished,
+    /// the confirmed list either holds this edit (success — the list is returned) or not (the
+    /// write's own error is thrown). nil when the session ended or the group is gone.
+    private func settledOutcome(
+        for portfolioId: String, epoch: Int,
+        satisfied: ([String]) -> Bool, error: Error
+    ) async throws -> [String]? {
+        // Each tail is awaited once: a tail that is already finished while the count still
+        // reads pending must not spin this loop.
+        var lastAwaited: Task<Void, Never>?
+        while epoch == identityEpoch, writeSequencer.hasPending(portfolioId),
+              let tail = writeTails[portfolioId], tail != lastAwaited {
+            lastAwaited = tail
+            await tail.value
+        }
+        guard epoch == identityEpoch, portfolios.contains(where: { $0.id == portfolioId }) else {
+            return nil
+        }
+        guard let confirmed = confirmedItems[portfolioId]?.map(\.ticker), satisfied(confirmed) else {
+            throw error
+        }
+        return confirmed
+    }
+
+    /// Posts `activeGroupTickersDidChangeNotification` for the confirmed writes not announced
+    /// yet, when the group is the active one.
+    private func announceConfirmedChanges(for portfolioId: String) {
+        guard let changed = unannouncedChanges.removeValue(forKey: portfolioId),
+              portfolioId == activePortfolioId else { return }
+        NotificationCenter.default.post(
+            name: Self.activeGroupTickersDidChangeNotification,
+            object: nil,
+            userInfo: [Self.membershipChangedKey: changed]
+        )
     }
 
     // MARK: - Ticker membership (optimistic)
@@ -494,110 +680,105 @@ final class PortfolioStore: ObservableObject {
         }
         if portfolios[index].items.contains(where: { $0.ticker == symbol }) { return }
 
-        let originalItems = portfolios[index].items
         portfolios[index].items.append(
             PortfolioItem(ticker: symbol, shares: nil, marketValue: nil)
         )
-
-        do {
-            try await syncTickers(for: targetId)
-        } catch {
-            // Re-resolve by ID. `index` was captured BEFORE the await, and `portfolios` is
-            // replaced wholesale by `performLoad`, emptied by `reset()` (sign-out) and
-            // shrunk by `deletePortfolio` — any of which can land while this request is in
-            // flight. @MainActor does NOT prevent it: `await` is a suspension point and
-            // other main-actor work interleaves there. Subscripting the stale index then
-            // either traps on out-of-range (a hard crash, not a catchable error) or writes
-            // the revert into a DIFFERENT portfolio. If the target is gone, there is
-            // nothing to revert.
-            if let i = portfolios.firstIndex(where: { $0.id == targetId }) {
-                portfolios[i].items = originalItems
-            }
-            throw error
-        }
+        // A failure is reverted inside the write (to the last CONFIRMED membership, and only
+        // when no newer edit is queued) — never here, from a copy captured before the await.
+        _ = try await enqueueMembershipWrite(
+            portfolios[index].tickers, for: targetId, satisfied: { $0.contains(symbol) }
+        ).value
     }
 
     /// Drop a ticker from the active portfolio (or `portfolioId` if given).
-    func removeTicker(_ ticker: String, from portfolioId: String? = nil) async throws {
-        let symbol = ticker.uppercased()
-        guard let targetId = portfolioId ?? activePortfolioId,
-              let index = portfolios.firstIndex(where: { $0.id == targetId }) else {
-            return
-        }
-        let originalItems = portfolios[index].items
-        portfolios[index].items.removeAll { $0.ticker == symbol }
-        guard portfolios[index].items != originalItems else { return }
-
-        do {
-            try await syncTickers(for: targetId)
-        } catch {
-            // Re-resolve by ID. `index` was captured BEFORE the await, and `portfolios` is
-            // replaced wholesale by `performLoad`, emptied by `reset()` (sign-out) and
-            // shrunk by `deletePortfolio` — any of which can land while this request is in
-            // flight. @MainActor does NOT prevent it: `await` is a suspension point and
-            // other main-actor work interleaves there. Subscripting the stale index then
-            // either traps on out-of-range (a hard crash, not a catchable error) or writes
-            // the revert into a DIFFERENT portfolio. If the target is gone, there is
-            // nothing to revert.
-            if let i = portfolios.firstIndex(where: { $0.id == targetId }) {
-                portfolios[i].items = originalItems
-            }
-            throw error
-        }
+    ///
+    /// - Returns: the server-confirmed tickers after the write, or nil when nothing was sent
+    ///   (the ticker was not there) or the session ended. Remove-fully reads it: a ticker may
+    ///   leave the watchlist only once the server has confirmed it left this group.
+    @discardableResult
+    func removeTicker(_ ticker: String, from portfolioId: String? = nil) async throws -> [String]? {
+        guard let targetId = portfolioId ?? activePortfolioId else { return nil }
+        return try await startRemoveTicker(ticker, from: targetId)?.value
     }
 
-    /// Replace the ticker list for a portfolio (used by drag-to-reorder in the
-    /// Edit Portfolio sheet). Preserves per-portfolio holdings for tickers
-    /// already in the portfolio; new tickers come in with empty holdings.
+    /// `removeTicker` for a caller that must see the row gone NOW (`List.onDelete`): the
+    /// optimistic removal is applied before this returns.
+    ///
+    /// - Returns: the write (its value is the server-confirmed ticker list), or nil when the
+    ///   ticker was not in the group.
+    @discardableResult
+    func startRemoveTicker(_ ticker: String, from portfolioId: String) -> Task<[String]?, Error>? {
+        let symbol = ticker.uppercased()
+        guard let index = portfolios.firstIndex(where: { $0.id == portfolioId }) else { return nil }
+        let before = portfolios[index].items.count
+        portfolios[index].items.removeAll { $0.ticker == symbol }
+        guard portfolios[index].items.count != before else { return nil }
+        return enqueueMembershipWrite(
+            portfolios[index].tickers, for: portfolioId, satisfied: { !$0.contains(symbol) }
+        )
+    }
+
+    /// Replace the ticker list for a portfolio (drag-to-reorder in Manage Tickers and Edit
+    /// Portfolio, and the orphan purge). Preserves per-portfolio holdings for tickers already
+    /// in the portfolio; new tickers come in with empty holdings.
     func setTickers(_ tickers: [String], in portfolioId: String) async throws {
-        guard let index = portfolios.firstIndex(where: { $0.id == portfolioId }) else { return }
+        _ = try await startSetTickers(tickers, in: portfolioId)?.value
+    }
+
+    /// `setTickers` for a caller that must see the new order NOW: the optimistic order is
+    /// applied before this returns, synchronously.
+    ///
+    /// `List.onMove` needs that. Writing the order from inside a `Task` landed one main-actor
+    /// hop after the gesture ended, and the dragged row could snap back for a frame.
+    ///
+    /// - Returns: the write (its value is the server-confirmed ticker list), or nil when there
+    ///   is nothing to send — no such portfolio, or the order is unchanged.
+    @discardableResult
+    func startSetTickers(_ tickers: [String], in portfolioId: String) -> Task<[String]?, Error>? {
+        guard let index = portfolios.firstIndex(where: { $0.id == portfolioId }) else { return nil }
         let normalized = tickers.map { $0.uppercased() }
-        let originalItems = portfolios[index].items
         // first-wins: a portfolio carrying the same ticker twice would otherwise trap
         // here while merely reordering its own tickers.
         let priorByTicker = Dictionary(
-            originalItems.map { ($0.ticker, $0) }, uniquingKeysWith: { first, _ in first })
-        portfolios[index].items = normalized.map { ticker in
+            portfolios[index].items.map { ($0.ticker, $0) }, uniquingKeysWith: { first, _ in first })
+        let newItems = normalized.map { ticker in
             priorByTicker[ticker] ?? PortfolioItem(ticker: ticker, shares: nil, marketValue: nil)
         }
-
-        do {
-            try await syncTickers(for: portfolioId)
-        } catch {
-            // Re-resolve by ID. `index` was captured BEFORE the await, and `portfolios` is
-            // replaced wholesale by `performLoad`, emptied by `reset()` (sign-out) and
-            // shrunk by `deletePortfolio` — any of which can land while this request is in
-            // flight. @MainActor does NOT prevent it: `await` is a suspension point and
-            // other main-actor work interleaves there. Subscripting the stale index then
-            // either traps on out-of-range (a hard crash, not a catchable error) or writes
-            // the revert into a DIFFERENT portfolio. If the target is gone, there is
-            // nothing to revert.
-            if let i = portfolios.firstIndex(where: { $0.id == portfolioId }) {
-                portfolios[i].items = originalItems
-            }
-            throw error
-        }
-        // Read AFTER the await: a sign-out meanwhile nils `activePortfolioId` (`reset()`), and
-        // a group switch meanwhile makes this write another group's.
-        if portfolioId == activePortfolioId {
-            NotificationCenter.default.post(
-                name: Self.activeGroupTickersDidChangeNotification, object: nil
-            )
-        }
+        // A drag dropped where it started: nothing changed, so nothing is sent.
+        guard newItems != portfolios[index].items else { return nil }
+        portfolios[index].items = newItems
+        // Held when the confirmed list keeps these tickers in this relative order (the server
+        // drops a ticker that left the watchlist, and a later write may add or remove others).
+        let desired = newItems.map(\.ticker)
+        return enqueueMembershipWrite(portfolios[index].tickers, for: portfolioId, satisfied: { confirmed in
+            let kept = Set(confirmed)
+            let wanted = Set(desired)
+            return desired.filter { kept.contains($0) } == confirmed.filter { wanted.contains($0) }
+        })
     }
 
     /// Remove a ticker from every portfolio (used by the long-press
     /// "Remove from all portfolios" action). Best-effort: any single sync
     /// failure is logged but the others still run.
-    func removeTickerFromAllPortfolios(_ ticker: String) async {
+    ///
+    /// - Returns: the names of the groups whose write failed, so the caller can say so
+    ///   (auth.md §6) — empty when every write succeeded.
+    @discardableResult
+    func removeTickerFromAllPortfolios(_ ticker: String) async -> [String] {
         let symbol = ticker.uppercased()
+        var failed: [String] = []
         for portfolio in portfolios where portfolio.tickers.contains(symbol) {
             do {
                 try await removeTicker(symbol, from: portfolio.id)
             } catch {
-                print("[PortfolioStore] ❌ Failed to remove \(symbol) from \(portfolio.name): \(error)")
+                let detail = "\(type(of: error)): \(error)"
+                portfolioStoreLog.error(
+                    "remove \(symbol, privacy: .public) from group \(portfolio.id, privacy: .public) failed — \(detail, privacy: .public)"
+                )
+                failed.append(portfolio.name)
             }
         }
+        return failed
     }
 
     /// Drop tickers from every portfolio that no longer exist on the master
@@ -630,13 +811,17 @@ final class PortfolioStore: ObservableObject {
             return false
         }
         var attempted = false
-        for portfolio in portfolios {
-            let upperAllowed = Set(allowed.map { $0.uppercased() })
+        let upperAllowed = Set(allowed.map { $0.uppercased() })
+        // Each group's list is built from the CURRENT `portfolios`, read after the previous
+        // group's await. A copy taken before the loop would overwrite an edit the user made
+        // while an earlier group's write was in flight.
+        for portfolioId in portfolios.map(\.id) {
+            guard let portfolio = portfolios.first(where: { $0.id == portfolioId }) else { continue }
             let filteredTickers = portfolio.tickers.filter { upperAllowed.contains($0) }
             if filteredTickers != portfolio.tickers {
                 attempted = true
                 do {
-                    try await setTickers(filteredTickers, in: portfolio.id)
+                    try await setTickers(filteredTickers, in: portfolioId)
                 } catch {
                     print("[PortfolioStore] ❌ Failed to purge orphans in \(portfolio.name): \(error)")
                 }
@@ -648,37 +833,115 @@ final class PortfolioStore: ObservableObject {
     // MARK: - Per-portfolio holdings (shares / market_value)
 
     /// Push a bulk update of `shares` / `market_value` for tickers in the
-    /// given portfolio. The server response is the full refreshed portfolio,
-    /// which we drop into local state — keeps display + diversification calc
-    /// in sync without a separate refresh.
+    /// given portfolio. The server response is the full refreshed portfolio;
+    /// its holdings are merged into local state by ticker — keeps display +
+    /// diversification calc in sync without a separate refresh.
+    ///
+    /// Queued in the portfolio's write chain: `PUT /tickers` snapshots holdings and then deletes
+    /// and reinserts every row, so a holdings write landing in between was overwritten.
     @discardableResult
     func setHoldings(_ items: [HoldingUpdateItem], in portfolioId: String) async throws -> Portfolio {
-        let dto = try await apiClient.request(
-            endpoint: .setPortfolioHoldings(id: portfolioId, items: items),
-            responseType: PortfolioDTO.self
-        )
+        let epoch = identityEpoch
+        writeSequencer.enqueueOther(portfolioId)
+        let previous = writeTails[portfolioId]
+        let write = Task { @MainActor [weak self] () async throws -> PortfolioDTO? in
+            await previous?.value
+            guard let self, epoch == self.identityEpoch else { return nil }
+            defer {
+                if epoch == self.identityEpoch { self.writeSequencer.finish(portfolioId) }
+            }
+            return try await self.apiClient.request(
+                endpoint: .setPortfolioHoldings(id: portfolioId, items: items),
+                responseType: PortfolioDTO.self
+            )
+        }
+        writeTails[portfolioId] = Task { _ = try? await write.value }
+        guard let dto = try await write.value, epoch == identityEpoch else {
+            // The session ended while the write waited or ran: nothing of it may land in the
+            // next session's store.
+            throw CancellationError()
+        }
         let updated = dto.toPortfolio()
+        // MERGE the holdings by ticker; never replace `items`. The response's membership is the
+        // server's, and a membership edit queued after this write is already on screen.
         if let index = portfolios.firstIndex(where: { $0.id == portfolioId }) {
-            portfolios[index] = updated
+            portfolios[index].items = Self.mergingHoldings(from: updated.items, into: portfolios[index].items)
+        }
+        if let confirmed = confirmedItems[portfolioId] {
+            confirmedItems[portfolioId] = Self.mergingHoldings(from: updated.items, into: confirmed)
         }
         confirmedMutationCount &+= 1
         return updated
     }
 
+    /// `target` with each ticker's `shares` / `marketValue` taken from `source` when `source`
+    /// holds that ticker. Membership and order stay `target`'s.
+    private static func mergingHoldings(
+        from source: [PortfolioItem], into target: [PortfolioItem]
+    ) -> [PortfolioItem] {
+        let byTicker = Dictionary(source.map { ($0.ticker, $0) }, uniquingKeysWith: { first, _ in first })
+        return target.map { item in
+            guard let server = byTicker[item.ticker] else { return item }
+            var merged = item
+            merged.shares = server.shares
+            merged.marketValue = server.marketValue
+            return merged
+        }
+    }
+
     // MARK: - Server sync helper
 
-    private func syncTickers(for portfolioId: String) async throws {
-        guard let portfolio = portfolios.first(where: { $0.id == portfolioId }) else { return }
-        let dto = try await apiClient.request(
-            endpoint: .setPortfolioTickers(id: portfolioId, tickers: portfolio.tickers),
-            responseType: PortfolioDTO.self
-        )
-        let serverTruth = dto.toPortfolio()
-        if let index = portfolios.firstIndex(where: { $0.id == portfolioId }) {
-            // Server is the source of truth — accept its filtered/normalized
-            // items list (it drops tickers not on the master watchlist and
-            // returns the canonical per-portfolio holdings).
-            portfolios[index].items = serverTruth.items
+    /// One queued membership write: the PUT, then what its answer may change.
+    ///
+    /// - Every answer becomes the CONFIRMED membership (the revert target) and is announced.
+    /// - Only the NEWEST write's answer replaces what is on screen; an older one would roll a
+    ///   newer optimistic edit back.
+    /// - A failure reverts to the confirmed membership only when no newer write is queued: that
+    ///   write carries the full list and settles the state itself.
+    private func syncTickers(for portfolioId: String, tickers: [String], ticket: Int, epoch: Int) async throws -> MembershipLinkResult {
+        let dto: PortfolioDTO
+        do {
+            dto = try await apiClient.request(
+                endpoint: .setPortfolioTickers(id: portfolioId, tickers: tickers),
+                responseType: PortfolioDTO.self
+            )
+        } catch {
+            guard epoch == identityEpoch else { return .abandoned }
+            guard let index = portfolios.firstIndex(where: { $0.id == portfolioId }) else {
+                return .abandoned
+            }
+            // A newer write is queued: it sends the full list, this edit included, and its
+            // answer settles both. Neither a revert nor a final failure belongs to this one.
+            guard writeSequencer.isNewest(portfolioId, ticket: ticket) else {
+                return .superseded(error)
+            }
+            if let confirmed = confirmedItems[portfolioId] {
+                portfolios[index].items = confirmed
+            } else {
+                // Nothing confirmed to fall back on (no live load seeded it). Leaving the
+                // optimistic list up would show a state the server refused, so re-read it.
+                portfolioStoreLog.warning(
+                    "membership write failed with no confirmed list for group \(portfolioId, privacy: .public) — reloading"
+                )
+                Task { await self.loadPortfolios() }
+            }
+            // Older writes of this burst may have been confirmed (and not announced, waiting
+            // for this newest one): the server did change, so say so now.
+            announceConfirmedChanges(for: portfolioId)
+            throw error
+        }
+        guard epoch == identityEpoch else { return .abandoned }
+        let serverItems = dto.toPortfolio().items
+        let previousTickers = Set((confirmedItems[portfolioId] ?? []).map(\.ticker))
+        let membershipChanged = Set(serverItems.map(\.ticker)) != previousTickers
+        confirmedItems[portfolioId] = serverItems
+        unannouncedChanges[portfolioId] = (unannouncedChanges[portfolioId] ?? false) || membershipChanged
+        // Server is the source of truth — accept its filtered/normalized items (it drops tickers
+        // not on the master watchlist and returns the canonical per-portfolio holdings). Only
+        // for the newest write: an older answer would undo a newer edit already on screen.
+        let isNewest = writeSequencer.isNewest(portfolioId, ticket: ticket)
+        if isNewest, let index = portfolios.firstIndex(where: { $0.id == portfolioId }) {
+            portfolios[index].items = serverItems
         }
         // Every membership write lands here (add / remove / reorder / purge, and the Edit and
         // Manage Tickers sheets that call the store directly), so one bump covers them all.
@@ -689,9 +952,18 @@ final class PortfolioStore: ObservableObject {
         // until the next app visit. Only after the server confirmed, and only for the active
         // group; the service debounces and is session-gated, so a sign-out mid-request (which
         // nils `activePortfolioId` in `reset()`) publishes nothing.
+        //
+        // The same confirmed change is announced to Updates, Home and Tracking's insights —
+        // every add, remove, reorder and purge, not only `setTickers` (the one poster before,
+        // so a removed ticker stayed on the Updates chips) — once per burst, on the NEWEST
+        // answer, carrying whether any write in it changed membership.
         if portfolioId == activePortfolioId {
             WidgetRefreshService.shared.contentChanged()
+            if isNewest {
+                announceConfirmedChanges(for: portfolioId)
+            }
         }
+        return .confirmed(serverItems.map(\.ticker))
     }
 }
 

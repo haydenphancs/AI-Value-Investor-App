@@ -312,7 +312,9 @@ enum APIEndpoint: Sendable {
     /// mean the listed security. Deliberately NOT optional-with-a-default: every call
     /// site should have to state what it is adding.
     case addToWatchlist(stockId: String, assetType: String?)
-    case removeFromWatchlist(stockId: String, assetType: String? = nil)
+    /// `onlyIfUnreferenced`: delete only when no group still holds the ticker, server-checked
+    /// (the delete strips it from EVERY group). Sent by the "remove from this portfolio" paths.
+    case removeFromWatchlist(stockId: String, assetType: String? = nil, onlyIfUnreferenced: Bool = false)
 
     // MARK: - Tracking
     case getTrackingAssets
@@ -1093,8 +1095,11 @@ enum APIEndpoint: Sendable {
         case .setMoneyMoveBookmark(let slug), .removeMoneyMoveBookmark(let slug):
             return MoneyMoveBookmarkRequest(slug: slug)
 
-        case .removeFromWatchlist(let stockId, let assetType):
-            return RemoveFromWatchlistRequest(stockId: stockId, assetType: assetType)
+        case .removeFromWatchlist(let stockId, let assetType, let onlyIfUnreferenced):
+            return RemoveFromWatchlistRequest(
+                stockId: stockId, assetType: assetType,
+                onlyIfUnreferenced: onlyIfUnreferenced ? true : nil
+            )
 
         case .generateResearch(let stockId, let persona):
             return GenerateResearchRequest(stockId: stockId, investorPersona: persona)
@@ -1652,6 +1657,9 @@ nonisolated struct RemoveFromWatchlistRequest: Encodable, Sendable {
     /// the crypto screen, whose star sends the bare symbol for the COIN: with both rows
     /// present it deleted the user's same-ticker ETF/REIT instead. Omitted when nil.
     let assetType: String?
+    /// True → the backend deletes only when no portfolio of the caller still holds the ticker,
+    /// answering `removed: false` otherwise. Omitted when nil (today's unconditional delete).
+    let onlyIfUnreferenced: Bool?
 }
 
 nonisolated struct GenerateResearchRequest: Encodable, Sendable {

@@ -30,6 +30,7 @@ from app.services.chart_helper import (
 from app.services.asset_class import resolve_asset_class, symbol_trades_extended_hours
 from app.services._classification_common import is_placeholder_text
 from app.utils.postgrest_paging import fetch_all_rows
+from app.utils.iso_dates import iso_utc_millis
 from app.services.crypto_names import display_name_for_row
 from app.database import get_supabase
 from app.utils.supabase_errors import retry_idempotent_async
@@ -1180,6 +1181,10 @@ class TrackingService:
                         extended_session=(
                             ext.get("session") if ext_change is not None else None
                         ),
+                        # The STAR date (`watchlist_items.added_at`, never rewritten), the
+                        # Holdings "Date Added" sort key. Never raises: an unreadable value
+                        # is None + a WARNING, never this row's `except` below.
+                        added_at=iso_utc_millis(item.get("added_at"), ticker=ticker),
                     )
                 )
             except Exception as exc:
@@ -1197,6 +1202,9 @@ class TrackingService:
                         # row whose enrichment threw was pushed to the EQUITY screen on
                         # that refresh — the E3 DOGE routing bug through a side door.
                         asset_type=resolve_asset_class(ticker, item.get("asset_type")),
+                        # Same reasoning: read from the stored row, and `iso_utc_millis`
+                        # cannot raise, so this degraded row cannot fail on it either.
+                        added_at=iso_utc_millis(item.get("added_at"), ticker=ticker),
                     )
                 )
 

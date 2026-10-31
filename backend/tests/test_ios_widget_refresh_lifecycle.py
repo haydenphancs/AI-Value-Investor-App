@@ -142,7 +142,7 @@ _ON_AUTH = "private func onAuthenticated(userId: String? = nil, identity: Int) a
 _SETTLE = "private func settleWidgetSession(userId: String?, identity: Int)"
 _SETTLE_CALL = "settleWidgetSession(userId: userId, identity: identity)"
 _RESTORE = "private func performRestore(trigger: String) async"
-_SYNC = "private func syncTickers(for portfolioId: String) async throws"
+_SYNC = "private func syncTickers(for portfolioId: String, tickers: [String], ticket: Int, epoch: Int) async throws -> MembershipLinkResult"
 
 
 # ── Scanning helpers ─────────────────────────────────────────────────────────────────

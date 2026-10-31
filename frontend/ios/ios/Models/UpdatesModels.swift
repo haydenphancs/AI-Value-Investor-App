@@ -53,6 +53,8 @@ struct NewsFilterTab: Identifiable, Equatable {
     /// Sort keys only (`HoldingsSort`): the strip orders by Tracking's "Sort By". Never drawn.
     var price: Double? = nil
     var marketCap: Double? = nil
+    /// When the ticker joined the watchlist — the "Date Added" sort key. Never drawn.
+    var addedAt: Date? = nil
 
     /// The reference "Ask Cay AI" sends for this feed. A fund is declared ("SPY|ETF")
     /// because no symbol rule can tell one — without it the chat treated SPY as an
@@ -67,17 +69,19 @@ struct NewsFilterTab: Identifiable, Equatable {
         (rounded ?? 0) >= 0
     }
 
-    /// Change rounded to the precision actually displayed.
+    /// Change rounded to the precision actually displayed, signed zero collapsed.
+    ///
+    /// The `+ 0.0` matters: `(-0.04 * 10).rounded() / 10` is `-0.0`, which passes `>= 0` (the
+    /// "+" branch) and still formats as "-0.0", so a tiny negative move rendered "+-0.0%".
     private var rounded: Double? {
         guard let change = changePercent, change.isFinite else { return nil }
-        return (change * 10).rounded() / 10
+        return (change * 10).rounded() / 10 + 0.0
     }
 
     var formattedChange: String? {
         guard let change = rounded else { return nil }
-        // `change` is already rounded, so `-0.0` cannot survive: it normalises to
-        // 0.0 and takes the "+" branch. Formatting the RAW value here is what
-        // produced the "-0.0%" seen for tiny negative moves.
+        // `change` is rounded with signed zero collapsed (above), so a tiny negative move
+        // reads "+0.0%". Formatting the RAW value here is what produced "-0.0%".
         let sign = change >= 0 ? "+" : ""
         return "\(sign)\(String(format: "%.1f", change))%"
     }
@@ -453,6 +457,9 @@ struct UpdatesTabDTO: Codable, Sendable {
     /// absent on the Market tab, on a missing quote, and from a backend predating them.
     let price: Double?
     let marketCap: Double?
+    /// The "Date Added" sort key (UTC-milliseconds ISO string), never displayed. Optional for
+    /// the same reasons.
+    let addedAt: String?
 
     enum CodingKeys: String, CodingKey {
         case scope, title
@@ -464,6 +471,7 @@ struct UpdatesTabDTO: Codable, Sendable {
         case assetType = "asset_type"
         case price
         case marketCap = "market_cap"
+        case addedAt = "added_at"
     }
 }
 
@@ -758,6 +766,7 @@ extension NewsFilterTab {
         self.assetType = dto.assetType
         self.price = (dto.price?.isFinite ?? false) ? dto.price : nil
         self.marketCap = (dto.marketCap?.isFinite ?? false) ? dto.marketCap : nil
+        self.addedAt = HoldingsSort.parseAddedAt(dto.addedAt)
     }
 }
 

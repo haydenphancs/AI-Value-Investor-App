@@ -175,6 +175,10 @@ class TrackingViewModel: ObservableObject {
     /// `handleWatchlistChange(_:)`.
     private var watchlistReloadTask: Task<Void, Never>?
 
+    /// Pending coalesced Portfolio Insights refresh after a confirmed membership change — see
+    /// `refreshInsightsAfterMembershipChange()`.
+    private var membershipInsightsTask: Task<Void, Never>?
+
     /// `recentlyAddedTickers` markers this ViewModel inserted for detail-screen ADDs and
     /// has not yet cleared. Cleared only after a load that could SEE the row: a marker
     /// removed before that load lands would let `performLoad`'s purge treat the new
@@ -238,7 +242,6 @@ class TrackingViewModel: ObservableObject {
 
     // Sheet States
     @Published var showAddAssetSheet: Bool = false
-    @Published var showSortSheet: Bool = false
     @Published var showPortfolioConfigSheet: Bool = false
     @Published var showNewPortfolioSheet: Bool = false
     @Published var showEditPortfolioSheet: Bool = false
@@ -340,6 +343,19 @@ class TrackingViewModel: ObservableObject {
         NotificationCenter.default.publisher(for: HoldingsSort.didChangeNotification)
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.applyStoredSort() }
+            .store(in: &cancellables)
+
+        // A confirmed add / remove on the ACTIVE group (here, in a sheet, or the swipe) changes
+        // the holdings the diversification score is built from, and nothing else re-fetched it:
+        // the card kept a score for tickers the user no longer held until a pull to refresh.
+        // A pure reorder (`membershipChanged` false) leaves the score alone.
+        NotificationCenter.default.publisher(for: PortfolioStore.activeGroupTickersDidChangeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] notification in
+                let changed = (notification.userInfo?[PortfolioStore.membershipChangedKey] as? Bool) ?? true
+                guard changed else { return }
+                self?.refreshInsightsAfterMembershipChange()
+            }
             .store(in: &cancellables)
 
         // Republish whenever the portfolio store changes so filteredAssets,
@@ -495,6 +511,7 @@ class TrackingViewModel: ObservableObject {
         priceRefreshTask?.cancel()
         activityReloadTask?.cancel()
         watchlistReloadTask?.cancel()
+        membershipInsightsTask?.cancel()
     }
 
     // MARK: - Computed Properties
@@ -571,8 +588,8 @@ class TrackingViewModel: ObservableObject {
     var filteredAssets: [TrackedAsset] {
         let seed: TrackingSnapshot? = presentedSnapshot
         let portfolio: Portfolio? = seed != nil ? seed?.activePortfolio : portfolioStore.activePortfolio
-        // The group's tickers in their stored order — `.dateAdded` means "order in the
-        // portfolio", the closest analogue to the old "added at" concept.
+        // The group's tickers in their stored order — the Custom sort, which Manage Tickers
+        // and Edit Portfolio drag.
         let order: [String] = (portfolio?.tickers ?? []).map { $0.uppercased() }
         let active = Set(order)
         let source: [TrackedAsset] = seed?.assets ?? trackedAssets
@@ -589,19 +606,22 @@ class TrackingViewModel: ObservableObject {
         // Apply sorting — through `HoldingsSort`, the comparator the Updates chip strip uses
         // too, so the two lists always agree.
         //
-        // "Date added" means position in the active portfolio (`order` above). first-wins
-        // rather than `uniqueKeysWithValues:`, which TRAPS on a duplicate key. A repeated
-        // ticker in `order` would crash; the earliest position is the right one to keep.
+        // Custom means position in the active portfolio (`order` above). first-wins rather
+        // than `uniqueKeysWithValues:`, which TRAPS on a duplicate key. A repeated ticker in
+        // `order` would crash; the earliest position is the right one to keep.
         let positions: [String: Int] = Dictionary(
             order.enumerated().map { ($1, $0) },
             uniquingKeysWith: { first, _ in first })
         let sort = HoldingsSort(option: sortOption, ascending: sortAscending)
         return sort.ordered(assets) { (asset: TrackedAsset) -> HoldingsSort.Key in
+            // A placeholder price / change (the "—" rows) is UNKNOWN, never its 0.0 wire
+            // value: unknown values sort last in both directions.
             HoldingsSort.Key(
                 ticker: asset.ticker,
-                price: asset.price,
-                changePercent: asset.changePercent,
+                price: asset.priceKnown ? asset.price : nil,
+                changePercent: asset.changeKnown ? asset.changePercent : nil,
                 marketCap: asset.marketCap,
+                addedAt: asset.addedAt,
                 position: positions[asset.ticker.uppercased()]
             )
         }
@@ -1649,6 +1669,9 @@ class TrackingViewModel: ObservableObject {
         // before, so a marker could keep `isOnWatchlist` true across a sign-out) belong
         // to the previous one.
         watchlistReloadTask?.cancel()
+        // A score refresh still debouncing belongs to the previous identity's edit.
+        membershipInsightsTask?.cancel()
+        membershipInsightsTask = nil
         watchlistMarkerQueue.removeAll()
         recentlyAddedTickers.removeAll()
 
@@ -1738,19 +1761,28 @@ class TrackingViewModel: ObservableObject {
         showAddAssetSheet = true
     }
 
-    func openSortOptions() {
-        showSortSheet = true
-    }
-
-    func toggleSort() {
-        sortAscending.toggle()
-        HoldingsSort(option: sortOption, ascending: sortAscending).save()
-    }
-
+    /// Picks a "Sort By" option in its natural direction (A→Z for symbols, largest first for
+    /// the numbers, newest first for dates). Re-tapping the checked option changes nothing.
     func selectSortOption(_ option: AssetSortOption) {
+        guard option != sortOption else { return }
         sortOption = option
+        sortAscending = option.naturalAscending
         HoldingsSort(option: option, ascending: sortAscending).save()
-        showSortSheet = false
+    }
+
+    /// One of the menu's two direction rows (A → Z / Z → A, Low → High / High → Low, …).
+    func setSortDirection(ascending: Bool) {
+        guard ascending != sortAscending else { return }
+        sortAscending = ascending
+        HoldingsSort(option: sortOption, ascending: ascending).save()
+    }
+
+    /// Switches "Sort By" to Custom — the group's own order — on every screen that shares it.
+    private func useCustomOrder() {
+        guard sortOption != .custom else { return }
+        sortOption = .custom
+        sortAscending = AssetSortOption.custom.naturalAscending
+        HoldingsSort(option: .custom, ascending: sortAscending).save()
     }
 
     /// Re-reads the shared sort after any screen saved it.
@@ -1760,10 +1792,9 @@ class TrackingViewModel: ObservableObject {
         if sortAscending != stored.ascending { sortAscending = stored.ascending }
     }
 
-    /// Swipe-to-delete: removes the ticker from the active portfolio only.
-    /// The master watchlist (and any other portfolio that contains it) is
-    /// untouched. Use `removeAssetFromAll` for the long-press path that
-    /// fully removes the ticker.
+    /// Swipe-to-delete: removes the ticker from the active portfolio — and, when no other group
+    /// holds it, from the watchlist too (`removeTickers`). Use `removeAssetFromAll` for the
+    /// long-press path that removes it from every group.
     func removeAsset(_ asset: TrackedAsset) {
         // A snapshot row (or a store with no live list) has no membership this device may
         // write: the store would no-op silently. Say so instead (auth.md §6).
@@ -1771,18 +1802,157 @@ class TrackingViewModel: ObservableObject {
             reportPortfolioStillLoading(action: "remove \(asset.ticker) from this portfolio")
             return
         }
+        guard let portfolioId = portfolioStore.activePortfolioId else {
+            reportPortfolioStillLoading(action: "remove \(asset.ticker) from this portfolio")
+            return
+        }
+        // A failed write reverts inside the store (to the last confirmed list), so the row
+        // comes back on its own; the failure is reported there.
+        removeTickers([asset.ticker], from: portfolioId)
+    }
+
+    /// True when a group other than `portfolioId` holds `ticker` in the LIVE store — what the
+    /// swipe label says.
+    func isHeldByAnotherGroup(_ ticker: String, besides portfolioId: String?) -> Bool {
+        let symbol = ticker.uppercased()
+        return portfolioStore.portfolios.contains { $0.id != portfolioId && $0.tickers.contains(symbol) }
+    }
+
+    /// True when ANY group holds `ticker` in the live store: the client half of the
+    /// remove-fully rule (the server re-checks every group before it deletes).
+    private func isHeldByAnyGroup(_ ticker: String) -> Bool {
+        let symbol = ticker.uppercased()
+        return portfolioStore.portfolios.contains { $0.tickers.contains(symbol) }
+    }
+
+    // MARK: - Group ticker edits (Manage Tickers, Edit Portfolio, the Holdings swipe)
+
+    /// Saves a dragged ticker order for `portfolioId`.
+    ///
+    /// The new order is on screen before this returns (`List.onMove` needs that, or the row
+    /// snaps back for a frame). On the ACTIVE group, "Sort By" switches to Custom at the same
+    /// moment (owner decision 2026-10-31): the Holdings cards were sorted by Symbol, so a drag
+    /// never moved a single card and Manage Tickers read as broken.
+    func moveTickers(in portfolioId: String, to newOrder: [String]) {
+        guard canEditPortfolio else {
+            reportPortfolioStillLoading(action: "reorder this portfolio's tickers")
+            return
+        }
+        // nil: no such group, or the order did not change — nothing to save or switch.
+        guard let write = portfolioStore.startSetTickers(newOrder, in: portfolioId) else { return }
+        // The sort this drag replaces — only when it is the drag that switches to Custom.
+        let isActiveGroup = portfolioId == portfolioStore.activePortfolioId
+        let replacedSort: HoldingsSort? = (isActiveGroup && sortOption != .custom)
+            ? HoldingsSort(option: sortOption, ascending: sortAscending) : nil
+        if isActiveGroup {
+            useCustomOrder()
+        }
         Task {
             do {
-                try await portfolioStore.removeTicker(asset.ticker)
+                _ = try await write.value
             } catch {
-                // The swipe already removed the row optimistically, so silence here left the
-                // ticker gone from the UI and still on the server — it reappeared on the next
-                // refresh with no explanation. Refresh to restore truth, and say what happened.
-                AppActions.shared.reportMutationFailure(
-                    error, action: "remove \(asset.ticker) from this portfolio"
-                )
-                await refresh()
+                // The store has already put the last confirmed order back on screen. The order
+                // the user dragged never saved, so the sort they had is theirs again — unless
+                // they picked another one meanwhile.
+                if let replacedSort, sortOption == .custom {
+                    sortOption = replacedSort.option
+                    sortAscending = replacedSort.ascending
+                    replacedSort.save()
+                }
+                AppActions.shared.reportMutationFailure(error, action: "save the new order")
             }
+        }
+    }
+
+    /// Removes `tickers` from `portfolioId`. The rows leave the screen before this returns
+    /// (`List.onDelete` needs that).
+    ///
+    /// A ticker no other group holds afterwards also leaves the WATCHLIST (owner decision
+    /// 2026-10-31, "Remove fully if in no group"): left there it was invisible on every
+    /// surface yet still sent its earnings / whale pushes and counted toward the cap.
+    func removeTickers(_ tickers: [String], from portfolioId: String) {
+        guard canEditPortfolio else {
+            reportPortfolioStillLoading(action: "remove tickers from this portfolio")
+            return
+        }
+        var writes: [(symbol: String, write: Task<[String]?, Error>)] = []
+        for ticker in tickers {
+            let symbol = ticker.uppercased()
+            if let write = portfolioStore.startRemoveTicker(symbol, from: portfolioId) {
+                writes.append((symbol: symbol, write: write))
+            }
+        }
+        guard !writes.isEmpty else { return }
+        Task { await finishRemovals(writes, from: portfolioId) }
+    }
+
+    private func finishRemovals(
+        _ writes: [(symbol: String, write: Task<[String]?, Error>)], from portfolioId: String
+    ) async {
+        for (symbol, write) in writes {
+            let confirmed: [String]?
+            do {
+                confirmed = try await write.value
+            } catch {
+                // The store has already put the row back (the last confirmed list).
+                AppActions.shared.reportMutationFailure(error, action: "remove \(symbol) from this portfolio")
+                continue
+            }
+            // Off the watchlist only once the SERVER has confirmed the ticker left this group,
+            // while the store is live for this session (nil = the session ended), and when NO
+            // group holds it here — this one included, which a quick re-add (the search star)
+            // refills while the removal is in flight. The server checks every group again
+            // before deleting: this device's list can be stale, and the delete strips the
+            // ticker from ALL groups.
+            guard let confirmed, !confirmed.contains(symbol),
+                  portfolioStore.hasLiveData,
+                  !isHeldByAnyGroup(symbol) else { continue }
+            await removeFromWatchlistIfUnreferenced(symbol)
+        }
+    }
+
+    /// `DELETE /watchlist` with `only_if_unreferenced`: the server deletes only when no group of
+    /// this user still holds the ticker, and answers `removed: false` otherwise.
+    private func removeFromWatchlistIfUnreferenced(_ symbol: String) async {
+        let assetType = watchlistAssetType(for: symbol)
+        do {
+            let response = try await apiClient.request(
+                endpoint: .removeFromWatchlist(stockId: symbol, assetType: assetType, onlyIfUnreferenced: true),
+                responseType: WatchlistRemovalResponseDTO.self
+            )
+            // false: a group (perhaps on another device) still holds it — the row stays, and
+            // nothing changed for anyone. nil is a backend predating the flag, which deleted.
+            guard response.removed != false else { return }
+            // Home's strip and the Updates chips are built from the watchlist / group
+            // server-side and observe nothing here; this tab ignores its own source.
+            PortfolioStore.announceWatchlistChange(
+                ticker: symbol, assetType: assetType, added: false, source: .tracking
+            )
+        } catch {
+            AppActions.shared.reportMutationFailure(error, action: "remove \(symbol) from your watchlist")
+        }
+    }
+
+    /// The class a watchlist delete DECLARES. Undeclared, the backend tries the raw spelling and
+    /// then the coin pair, so a bare ticker whose row is already gone (BTC, ETH, a REIT that
+    /// shares a coin's symbol) could fall through to `BTCUSD` and strip the COIN from every
+    /// group. A declared non-crypto class pins the raw spelling; "crypto" pins the pair.
+    private func watchlistAssetType(for symbol: String) -> String {
+        let row = trackedAssets.first { $0.ticker.uppercased() == symbol }
+        return MarketTickerType.resolve(row?.assetType, symbol: symbol).rawValue
+    }
+
+    /// One coalesced score refresh after a burst of confirmed membership changes (a multi-row
+    /// delete confirms one write per ticker). Never before the first load: init deliberately
+    /// loads nothing, and the preview-only Tracking instance never loads at all.
+    private func refreshInsightsAfterMembershipChange() {
+        guard hasLoadedOnce else { return }
+        membershipInsightsTask?.cancel()
+        membershipInsightsTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            // Re-checked after the wait: an identity change in it resets the latch.
+            guard !Task.isCancelled, let self, self.hasLoadedOnce else { return }
+            await self.loadPortfolioInsights()
         }
     }
 
@@ -1907,15 +2077,22 @@ class TrackingViewModel: ObservableObject {
         // request flies.
         trackedAssets.removeAll { $0.id == asset.id }
 
+        let assetType = watchlistAssetType(for: asset.ticker.uppercased())
         Task {
-            await portfolioStore.removeTickerFromAllPortfolios(asset.ticker)
+            let failedGroups = await portfolioStore.removeTickerFromAllPortfolios(asset.ticker)
             do {
                 try await apiClient.request(
-                    endpoint: .removeFromWatchlist(stockId: asset.ticker)
+                    endpoint: .removeFromWatchlist(stockId: asset.ticker, assetType: assetType)
                 )
                 print("[TrackingVM] ✅ Removed \(asset.ticker) from watchlist + all portfolios")
+                // The delete strips the ticker from every group server-side, including any
+                // whose own write failed above (the store reverted those): re-read so this
+                // screen shows what the server now holds.
+                if !failedGroups.isEmpty {
+                    _ = await portfolioStore.loadPortfolios()
+                }
                 PortfolioStore.announceWatchlistChange(
-                    ticker: asset.ticker, assetType: asset.assetType,
+                    ticker: asset.ticker, assetType: assetType,
                     added: false, source: .tracking
                 )
             } catch {

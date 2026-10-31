@@ -57,6 +57,7 @@ from app.schemas.updates import (
     UpdatesTabsResponse,
 )
 from app.services.asset_class import resolve_asset_class
+from app.utils.iso_dates import iso_utc_millis
 from app.services.crypto_names import crypto_display_name
 from app.services.news_cache_service import (
     MARKET_SCOPE,
@@ -302,8 +303,19 @@ async def get_updates_tabs(
         # serialize to invalid JSON under allow_nan=False and 500 the screen.
         return f if f == f and abs(f) != float("inf") else None
 
+    def _two_dp(value: Optional[float]) -> Optional[float]:
+        # The Tracking feed's rule for the price SORT KEY (never drawn on a pill), so both
+        # screens sort the same number: 2 dp, and `+ 0.0` collapses the signed zero
+        # round(-0.004, 2) leaves. None stays None.
+        return round(value, 2) + 0.0 if value is not None else None
+
     def _change(sym: str) -> Optional[float]:
-        return _quote_number(sym, "changePercentage")
+        # NOT rounded here: the pill DRAWS this at 1 dp, and rounding to 2 dp first would
+        # double-round (0.049 → 0.05 → "+0.1%"). iOS rounds its sort key to 2 dp instead
+        # (`UpdatesViewModel.openableTabs`), matching Tracking's 2-dp feed. `+ 0.0` collapses
+        # a signed zero.
+        value = _quote_number(sym, "changePercentage")
+        return value + 0.0 if value is not None else None
 
     def _market_cap(sym: str) -> Optional[float]:
         # Not positive → None, the Tracking feed's rule (`market_cap=… if market_cap_f else
@@ -346,8 +358,11 @@ async def get_updates_tabs(
                 is_market_tab=False,
                 is_locked=t not in visible_set,
                 asset_type=classes.get(t) or resolve_asset_class(t, row.get("asset_type")),
-                price=_quote_number(t, "price"),
+                price=_two_dp(_quote_number(t, "price")),
                 market_cap=_market_cap(t),
+                # The star date: on the group path the row is the metadata read, on the
+                # fallback path `_read_watchlist` — both select `added_at`. Never raises.
+                added_at=iso_utc_millis(row.get("added_at"), ticker=t),
             )
         )
 

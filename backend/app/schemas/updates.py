@@ -60,6 +60,12 @@ class UpdatesTabResponse(BaseModel):
     # not positive (the Tracking feed's rule), so both screens order a missing one alike.
     price: Optional[float] = None
     market_cap: Optional[float] = None
+    # SORT KEY, never displayed, beside the two above: when the ticker was starred
+    # (`watchlist_items.added_at`), for the "Date Added" sort — the same value and the same
+    # UTC "YYYY-MM-DDTHH:MM:SS.mmmZ" shape as the Tracking feed's `added_at`
+    # (`utils.iso_dates.iso_utc_millis`), so both screens order a ticker alike. None on the
+    # Market tab, and when the row has none or it is unreadable (sorted as unknown, last).
+    added_at: Optional[str] = None
 
 
 class UpdatesTabsResponse(BaseModel):

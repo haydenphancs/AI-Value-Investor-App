@@ -94,17 +94,6 @@ struct TrackingContentView: View {
                     }
                 )
             }
-            .sheet(isPresented: $viewModel.showSortSheet) {
-                SortOptionsSheet(
-                    selectedOption: viewModel.sortOption,
-                    onSelect: { option in
-                        viewModel.selectSortOption(option)
-                    },
-                    onDismiss: {
-                        viewModel.showSortSheet = false
-                    }
-                )
-            }
             .sheet(isPresented: $viewModel.showPortfolioConfigSheet) {
                 PortfolioConfigSheet(viewModel: viewModel)
             }
@@ -113,9 +102,16 @@ struct TrackingContentView: View {
             }
             .sheet(isPresented: $viewModel.showEditPortfolioSheet) {
                 EditPortfolioSheet(viewModel: viewModel)
+                    // A sheet draws ABOVE the root's error toast, so a failed edit reported
+                    // from inside it was never seen (`ErrorPresentationHost`). Re-inject
+                    // explicitly: a broken chain falls silently into a throwaway AppState.
+                    .errorPresentationHost()
+                    .environment(\.appState, appState)
             }
             .sheet(isPresented: $viewModel.showManageTickersSheet) {
                 ManageTickersSheet(viewModel: viewModel)
+                    .errorPresentationHost()
+                    .environment(\.appState, appState)
             }
             .navigationDestination(item: $viewModel.selectedAssetNavigation) { selection in
                 AssetDetailRouter(selection: selection)
@@ -248,17 +244,6 @@ struct TrackingContentViewWithBinding: View {
                     }
                 )
             }
-            .sheet(isPresented: $viewModel.showSortSheet) {
-                SortOptionsSheet(
-                    selectedOption: viewModel.sortOption,
-                    onSelect: { option in
-                        viewModel.selectSortOption(option)
-                    },
-                    onDismiss: {
-                        viewModel.showSortSheet = false
-                    }
-                )
-            }
             .sheet(isPresented: $viewModel.showPortfolioConfigSheet) {
                 PortfolioConfigSheet(viewModel: viewModel)
             }
@@ -267,9 +252,16 @@ struct TrackingContentViewWithBinding: View {
             }
             .sheet(isPresented: $viewModel.showEditPortfolioSheet) {
                 EditPortfolioSheet(viewModel: viewModel)
+                    // A sheet draws ABOVE the root's error toast, so a failed edit reported
+                    // from inside it was never seen (`ErrorPresentationHost`). Re-inject
+                    // explicitly: a broken chain falls silently into a throwaway AppState.
+                    .errorPresentationHost()
+                    .environment(\.appState, appState)
             }
             .sheet(isPresented: $viewModel.showManageTickersSheet) {
                 ManageTickersSheet(viewModel: viewModel)
+                    .errorPresentationHost()
+                    .environment(\.appState, appState)
             }
             .navigationDestination(item: $viewModel.selectedAssetNavigation) { selection in
                 AssetDetailRouter(selection: selection)
@@ -327,7 +319,6 @@ struct TrackingContentViewWithBinding: View {
                 showProfile = false
                 showSearch = false
                 viewModel.showAddAssetSheet = false
-                viewModel.showSortSheet = false
                 viewModel.showPortfolioConfigSheet = false
                 viewModel.showNewPortfolioSheet = false
                 viewModel.showEditPortfolioSheet = false
@@ -572,6 +563,11 @@ struct AssetsTabContent: View {
             assets: viewModel.filteredAssets,
             onAssetTapped: { asset in viewModel.viewAssetDetail(asset) },
             onRemoveAsset: { asset in viewModel.removeAsset(asset) },
+            removeLabel: { asset in
+                viewModel.isHeldByAnotherGroup(asset.ticker, besides: viewModel.portfolioStore.activePortfolioId)
+                    ? "Remove \(asset.ticker) from this portfolio"
+                    : "Remove \(asset.ticker) from your watchlist"
+            },
             onRemoveFromAll: { asset in viewModel.removeAssetFromAll(asset) },
             changeDisplayMode: viewModel.changeDisplayMode,
             onToggleChangeDisplay: { viewModel.toggleChangeDisplayMode() },
@@ -1605,54 +1601,6 @@ struct AddAssetSheet: View {
                 isAdding = false
             }
         }
-    }
-}
-
-// MARK: - Sort Options Sheet
-struct SortOptionsSheet: View {
-    let selectedOption: AssetSortOption
-    var onSelect: ((AssetSortOption) -> Void)?
-    var onDismiss: (() -> Void)?
-
-    var body: some View {
-        NavigationView {
-            List {
-                ForEach(AssetSortOption.allCases, id: \.self) { option in
-                    Button {
-                        onSelect?(option)
-                    } label: {
-                        HStack {
-                            Text(option.displayName)
-                                .font(AppTypography.body)
-                                .foregroundColor(AppColors.textPrimary)
-
-                            Spacer()
-
-                            if selectedOption == option {
-                                Image(systemName: "checkmark")
-                                    .foregroundColor(AppColors.primaryBlue)
-                            }
-                        }
-                    }
-                    .listRowBackground(AppColors.cardBackground)
-                }
-            }
-            .listStyle(InsetGroupedListStyle())
-            .scrollContentBackground(.hidden)
-            .background(AppColors.background)
-            .navigationTitle("Sort By")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
-                        onDismiss?()
-                    }
-                    .fontWeight(.semibold)
-                    .foregroundColor(AppColors.primaryBlue)
-                }
-            }
-        }
-        .presentationDetents([.medium])
     }
 }
 

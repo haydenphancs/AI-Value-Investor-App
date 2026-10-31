@@ -102,6 +102,33 @@ def _valid_scope(scope: str) -> bool:
     return len(scope or "") <= _MAX_SCOPE_LEN and is_trend_scope(scope)
 
 
+def _emitted_tickers(all_tickers: List[str], visible: List[str], cap: int) -> List[str]:
+    """Pure: the group tickers `/tabs` sends — at most ``cap``, every visible one included,
+    in the GROUP's own order.
+
+    The plan gate picks the visible tickers alphabetically over the WHOLE group, so a plain
+    position slice (`all_tickers[:cap]`) cut any visible ticker stored past position ``cap``
+    — and which ones it cut changed whenever the user reordered the group. Here the visible
+    tickers claim their slots first (alphabetically, if a plan ever unlocked more than
+    ``cap``); locked tickers fill what is left in group order.
+
+    The result keeps group order because iOS reads the wire order as the Custom sort's
+    position (`UpdatesViewModel.openableTabs`).
+    """
+    if cap <= 0:
+        return []
+    present = set(all_tickers)
+    keep = set([t for t in dict.fromkeys(visible) if t in present][:cap])
+    room = cap - len(keep)
+    for t in all_tickers:
+        if room <= 0:
+            break
+        if t not in keep:
+            keep.add(t)
+            room -= 1
+    return [t for t in all_tickers if t in keep]
+
+
 # ── Tabs ──────────────────────────────────────────────────────────────
 
 @router.get("/tabs", response_model=UpdatesTabsResponse)
@@ -215,7 +242,10 @@ async def get_updates_tabs(
     #
     # Cost is unchanged: `/tabs` is ONE chunked batch-quote call and ONE metadata query
     # regardless of how many symbols they cover. `_MAX_TABS` still bounds both.
-    tickers = all_tickers[:_MAX_TABS]
+    #
+    # Past `_MAX_TABS` the visible tickers are kept first, then locked ones in group order
+    # (`_emitted_tickers`): a position slice dropped any unlocked ticker stored past the cut.
+    tickers = _emitted_tickers(all_tickers, visible, _MAX_TABS)
 
     # ── Three independent reads, overlapped ──────────────────────────
     # Display metadata, quotes and the ETF lookup each need only `tickers`, so they run in

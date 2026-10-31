@@ -167,6 +167,9 @@ class WriterResult:
     prompt_version: str = wp.PROMPT_VERSION
     raw_outputs: List[Any] = field(default_factory=list)   # for the preview CLI only
     judge_mode: str = jd.MODE_ENFORCE
+    #: The Claude tokens inside `tokens_used`, by model and kind (llm_provider.CLAUDE_USAGE_KEY) —
+    #: writer and judge calls, a failed attempt's included. {} on the default path (no Claude call).
+    claude_usage: Dict[str, Dict[str, int]] = field(default_factory=dict)
 
 
 def _claude_spent(e: BaseException) -> int:
@@ -175,6 +178,18 @@ def _claude_spent(e: BaseException) -> int:
     from app.services.llm_provider import claude_tokens_of
 
     return claude_tokens_of(e)
+
+
+def _with_claude(total: Dict[str, Dict[str, int]], carrier: Any) -> Dict[str, Dict[str, int]]:
+    """`total` plus the Claude usage a router result or exception carries (llm_provider); `total`
+    itself when it carries none — the default path never imports anything here."""
+    raw = (carrier.get("claude_usage") if isinstance(carrier, dict)
+           else getattr(carrier, "claude_usage", None))
+    if not raw:
+        return total
+    from app.services.llm_provider import claude_usage_of, merge_claude_usage
+
+    return merge_claude_usage(total, claude_usage_of(carrier))
 
 
 def _served(result: Any) -> Optional[str]:
@@ -424,13 +439,19 @@ def _image_text(obj: Dict[str, Any]) -> Tuple[str, List[str], List[Violation]]:
     return title, paragraphs, out
 
 
+#: A carousel slide TITLE field: the one place an opening list label ("Check 6:") is structure.
+_SLIDE_TITLE_FIELD_RE = re.compile(r"carousel_slides\[([0-9]{1,2})\]\.title")
+
+
 def _scan(name: str, text: str, item: ContentItem, *, allow_emoji: bool,
           myth_framed: bool = False, next_text: str = "") -> List[Violation]:
+    slide = _SLIDE_TITLE_FIELD_RE.fullmatch(name)
     return (scan_text(name, text, allow_emoji=allow_emoji,
                       strict_instruments=strict_instruments(item.kind),
                       company_terms=item.company_terms, myth_framed=myth_framed,
                       sheet_words=item.grounding.tokens, next_text=next_text)
-            + check_grounding(name, text, item.grounding))
+            + check_grounding(name, text, item.grounding,
+                              ordinal_max=int(slide.group(1)) + 1 if slide else 0))
 
 
 #: A card / slide TITLE that labels its body as the myth ("The myth", "Myth #2", "Common
@@ -635,6 +656,9 @@ def _pick_best(candidates: List[ValidationResult], *,
 #: exception itself is never wrapped or replaced — `is_transient_gemini_error` classifies by
 #: type, and a wrapper would turn every transient timeout into an ERROR page.
 TOKENS_ATTR = "marketing_tokens_used"
+#: Beside it, the Claude part of those tokens by model and kind (`WriterResult.claude_usage`) —
+#: set only when Claude billed; script_service records it in `marketing_scripts.claude_usage`.
+CLAUDE_USAGE_ATTR = "marketing_claude_usage"
 
 
 def _round_codes(rounds: List[RoundRecord]) -> Dict[str, List[str]]:
@@ -644,9 +668,12 @@ def _round_codes(rounds: List[RoundRecord]) -> Dict[str, List[str]]:
 
 
 def _note_failed_generation(e: Exception, tokens: int, rounds: List[RoundRecord], item: ContentItem,
-                            generation_id: str) -> None:
+                            generation_id: str,
+                            claude_usage: Optional[Dict[str, Dict[str, int]]] = None) -> None:
     try:
         setattr(e, TOKENS_ATTR, int(tokens))
+        if claude_usage:
+            setattr(e, CLAUDE_USAGE_ATTR, claude_usage)
     except (AttributeError, TypeError) as attach_err:  # a __slots__ / C-level exception type
         logger.warning(
             "marketing writer: could not attach %s to %s (%s: %s) source_ref=%s generation=%s "
@@ -782,6 +809,7 @@ async def generate_package(
     raw_outputs: List[Any] = []
     candidates: List[ValidationResult] = []
     tokens = 0
+    claude_usage: Dict[str, Dict[str, int]] = {}   # the Claude part of `tokens`, priced apart
     calls = 0
     last_violations: List[Violation] = []
     previous: Any = None
@@ -827,6 +855,7 @@ async def generate_package(
             except Exception as e:
                 # A Claude attempt that billed before its Gemini fallback also failed (llm_provider).
                 tokens += _claude_spent(e)
+                claude_usage = _with_claude(claude_usage, e)
                 best = _pick_best(candidates, image_posts=image_posts)
                 if best is None:
                     raise
@@ -839,6 +868,7 @@ async def generate_package(
                 break
             used = int(result.get("tokens_used") or 0)
             tokens += used
+            claude_usage = _with_claude(claude_usage, result)
             obj, parse_violations = parse_response(result)
             raw_outputs.append(obj if obj is not None else (result.get("text") or "")[:2000])
             vr: Optional[ValidationResult] = None
@@ -864,6 +894,7 @@ async def generate_package(
                         except Exception as e:
                             spent = int(getattr(e, TOKENS_ATTR, 0) or 0) + _claude_spent(e)
                             tokens += spent
+                            claude_usage = _with_claude(claude_usage, e)
                             judge_record = jd.JudgeCall([], spent, None, mode,
                                                         f"{type(e).__name__}: {e}"[:300]).as_dict()
                             if mode == jd.MODE_SHADOW:
@@ -883,6 +914,7 @@ async def generate_package(
                         else:
                             jtokens = int(jraw.get("tokens_used") or 0)
                             tokens += jtokens
+                            claude_usage = _with_claude(claude_usage, jraw)
                             judge_record = jd.JudgeCall(
                                 verdicts, jtokens, jraw.get("finish_reason"), mode).as_dict()
                             if _served(jraw) is not None:
@@ -913,7 +945,7 @@ async def generate_package(
                 break
     except Exception as e:
         # Only Exception: a CancelledError (BaseException) must propagate untouched.
-        _note_failed_generation(e, tokens, rounds, item, generation_id)
+        _note_failed_generation(e, tokens, rounds, item, generation_id, claude_usage)
         raise
     if calls > MODEL_CALLS_PER_GENERATION:  # pragma: no cover — a contract breach, loudly
         logger.error("marketing writer made %d model calls (> %d) source_ref=%s generation=%s — "
@@ -929,7 +961,7 @@ async def generate_package(
             "codes=%s", item.key, template.id, generation_id, _round_codes(rounds),
         )
         return WriterResult("rejected", None, history, rounds, tokens,
-                            raw_outputs=raw_outputs, judge_mode=mode)
+                            raw_outputs=raw_outputs, judge_mode=mode, claude_usage=claude_usage)
     package = dict(best.package or {})
     if package.get(wp.IMAGE_FIELD) is None:
         # Degraded, not failed: the package still publishes, as text where the image would go.
@@ -962,4 +994,5 @@ async def generate_package(
     if best.served_by:
         package["served_by"] = best.served_by
     return WriterResult("accepted", package, [v.as_dict() for v in best.violations], rounds,
-                        tokens, model=writer_model, raw_outputs=raw_outputs, judge_mode=mode)
+                        tokens, model=writer_model, raw_outputs=raw_outputs, judge_mode=mode,
+                        claude_usage=claude_usage)

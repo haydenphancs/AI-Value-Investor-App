@@ -41,6 +41,11 @@ checked, and why each is a hard reject rather than a warning:
   brand, CTA and disclaimer are CODE-owned (`post_copy.py`): model text that mentions Caydex, the
   app, a link or a disclaimer, asks for a tap/follow/save/share, claims an endorsement or social
   proof, or speaks as I/we (outside a reader's self-question) is rejected rather than trusted.
+  A label calling the text educational or informational ("Educational content only.") is the
+  notice's job too (`code_owned`, 2026-10-31).
+* **The writer's materials** (`source_reference`, 2026-10-31) — a public post states its facts;
+  it never narrates where they came from ("The fact sheet shows…", "The source says…", "the
+  flags it names"). Positional: "the source of its profit", "an ETF's fact sheet" pass.
 * **Accents** — every lexicon matches a `skeleton()` of the text (accents and dotless/stroked
   letters folded), so "Buffétt", "Gémini" and "Cáydex" are the names they read as.
 * **Links, handles, markup, cashtags, hashtags** — each is either a cost (X bills $0.20 per
@@ -3182,6 +3187,42 @@ _CODE_OWNED_RES = (
     re.compile(r"\bhuman-(?:written|made|authored)\b|\bwritten (?:entirely |only )?by "
                r"(?:a |real )?(?:human|humans|people|person|hand)\b"),
     re.compile(r"\bnot (?:educational|for education(?:al purposes)?)\b"),
+    # Labelling THIS text's purpose — the notice's own job (2026-10-31: a second writer model
+    # closed captions with "Educational content only."). "for educational use" (Apple's iPads in
+    # schools) and "educational content" without "only" (a streaming library) stay case-study words.
+    # Review round: a label that OPENS and CLOSES its sentence ("Purely educational.", "For education
+    # only.", "General information only.", "This is educational content, not a pitch.") — never a
+    # bare "Education." or a card titled "Learning", and never "Information only goes so far".
+    re.compile(r"\b(?:educational|informational)\s+(?:(?:content|material|post|video|resource)s?\s+)?"
+               r"(?:only|purposes)\b|\bfor\s+(?:general\s+)?(?:education|information|learning|teaching|study)"
+               r"\s+purposes\b"
+               r"|\b(?:(?:this|these)\s+(?:posts?|videos?|content|lessons?|captions?|threads?|carousels?|"
+               r"slides?|explainers?|articles?|pieces?|guides?)|everything (?:here|above|below))\s+(?:is|are)"
+               r"\s+(?:purely\s+|only\s+|just\s+|strictly\s+|meant\s+)?(?:educational|informational|for "
+               r"(?:education|information|learning)|to educate)\b"
+               r"|" + _SENTENCE_START + r"(?:(?:this is|it's|it is)\s+)?(?:for\s+)?(?:general\s+)?"
+               r"(?:educational|informational|education|information|info|learning)(?:\s+(?:content|material|"
+               r"info|information|resource|use)s?)?\s+(?:only|purposes(?:\s+only)?|in nature)"
+               r"\s*(?=[.!?;]|$|,\s+(?:and\s+)?not\b)"
+               r"|" + _SENTENCE_START + r"(?:(?:this is|it's|it is)\s+)?(?:purely|strictly|solely|just|simply)"
+               r"\s+(?:for\s+)?(?:general\s+)?(?:educational|informational|education|information|learning)"
+               r"(?:\s+(?:content|material|purposes))?\s*(?=[.!?;]|$|,\s+(?:and\s+)?not\b)"
+               r"|" + _SENTENCE_START + r"this is\s+(?:general\s+)?(?:educational|informational)(?:\s+(?:content|"
+               r"material))?\s*(?=[.!?;]|$|,\s+(?:and\s+)?not\b)"),
+    # The notice's "not an offer", restated as a verbless label ("Not an offer to buy or sell.",
+    # "Not a solicitation."), or "nothing here is a recommendation". A comma after it ("Not an offer,
+    # a promise.") and an M&A sentence ("The bid was a proposal, not an offer.") stay case-study words.
+    re.compile(_SENTENCE_START + r"(?:(?:this is|it's|it is)\s+)?not\s+(?:an?\s+)?(?:offer|solicitation)s?"
+               r"(?:\s+or\s+(?:an?\s+)?(?:offer|solicitation)s?)?(?=\s*(?:[.!?;]|$)|\s+to\s+(?:buy|sell)\b)"
+               r"|\bnothing\s+(?:here|above|below|in\s+this\s+(?:post|video|lesson|thread|caption|article|"
+               r"piece))\s+is\s+(?:an?\s+)?(?:offer|solicitation|endorsement|recommendation)s?\b"),
+    # The stock model sign-off "Consult a financial professional" (the adviser row catches only
+    # "adviser"). Never a bare "talk to experts in the field" (scuttlebutt), "professional investors",
+    # and no "tax" qualifier — a Learn tax lesson's "a qualified tax professional" stays open.
+    re.compile(r"\b(?:consult|speak\s+(?:to|with)|talk\s+(?:to|with))\s+(?:a\s+|an\s+|your\s+(?:own\s+)?)?"
+               r"(?:(?:qualified|licensed|certified|registered)\s+(?:(?:financial|investment)\s+)?"
+               r"(?:professionals?|advis\w*)|(?:financial|investment)\s+(?:professionals?|experts?))\b"
+               r"|\bconsult\s+(?:a\s+|an\s+|your\s+)?professionals?\b"),
     # Denying machine authorship in other words (round-2 W2CB-1), right above "AI-assisted":
     # "Crafted by people, not machines", "No robots wrote this lesson", "Every word here was
     # written by hand". Scoped to THIS text or to a writing verb: "decisions made by people, not
@@ -3210,6 +3251,66 @@ _CODE_OWNED_RES = (
                r"note|notes|line|lines|stuff|bit|bits|part|words|type)\b|\b(?:ignore|skip|"
                r"disregard)\s+(?:the\s+)?(?:legalese|legal notice|notice below|warning below|"
                r"text below|words below)\b"),
+)
+
+#: The writer's own materials named in public copy (2026-10-31, a second writer model's live
+#: preview: "The fact sheet shows hardware sales are lumpy", "The source says one flag alone rarely
+#: does", "the flags it names"). The facts stand on their own; a post never cites its brief. Every
+#: row is POSITIONAL: a determiner right before "fact sheet" ("the fund's fact sheet" and "an
+#: ETF's fact sheet" are an ETF lesson's words), "the source" only as the SUBJECT of a reporting
+#: verb ("the source of its profit", "the main source of revenue" pass), and "it names" only
+#: after a list noun a source would hand over ("the products it lists" passes).
+#: Review round (same day) widened it to the frames a model reaches for next — a prefix ("Per the
+#: source", "According to the case study": the writer's SOURCE line calls its material a case study),
+#: an adverb before the verb ("The source also notes"), a document-only verb ("stresses", "outlines",
+#: "doesn't say"), "the facts provided" and an inverted attribution ("…, says the source") — and
+#: narrowed it where a REVENUE source reads the same: never "that source" (an anaphor: "fees were the
+#: main source of profit, and that source shows up every year"), never "shows up" / "adds up", never
+#: gives/adds (a revenue source gives cash), never "based on the source OF its profit".
+_SOURCE_DOC = r"(?:sources?|source (?:text|materials?|lesson|article|notes|data|documents?|facts))"
+_SOURCE_REF_RES = (
+    re.compile(r"\b(?:the|this|that|our|your)\s+(?:(?:provided|given|attached|above|supplied|accompanying|"
+               r"original)\s+)?fact[-_ ]?sheets?\b"),
+    re.compile(r"\b(?:(?:per|according to|going by|as (?:noted|stated|described|shown|explained|listed|"
+               r"mentioned|outlined|laid out|set out) in)\s+(?:the|this|our)\s+(?:" + _SOURCE_DOC
+               + r"|case study)|(?:based on|drawn from|taken from)\s+(?:the|this|our)\s+" + _SOURCE_DOC
+               + r")\b(?!\s+(?:of|to|on|for|code)\b)"),
+    re.compile(r"\b(?:the|this|our)\s+" + _SOURCE_DOC + r"\s+(?:(?:also|even|clearly|rightly|simply|plainly|"
+               r"explicitly|specifically|further|again|then|only|just|itself|repeatedly)\s+)?(?:says?|said|"
+               r"shows?(?!\s+up\b)|showed(?!\s+up\b)|notes?|noted|compares?|compared|names?|named|"
+               r"describes?|described|lists?|listed|calls?|called|explains?|explained|argues?|argued|"
+               r"suggests?|suggested|mentions?|mentioned|states?|stated|points? out|pointed out|puts? it|"
+               r"warns?|warned|highlights?|highlighted|frames?|framed|cites?|cited|"
+               r"makes? (?:the|a|this|that|its|one) point|made (?:the|a|this|that|its|one) point|"
+               r"makes? (?:it )?clear|made (?:it )?clear|stress(?:es|ed)?|emphasi[sz](?:es|ed|e)|"
+               r"underscores?|underscored|underlines?|underlined|reminds?|reminded|"
+               r"spells? (?:it |this |that )?out|spelled (?:it |this |that )?out|outlines?|outlined|"
+               r"identif(?:y|ies|ied)|walks? through|walked through|breaks? (?:it )?down|broke (?:it )?down|"
+               r"reports?|reported|confirms?|confirmed|recommends?|recommended|observes?|observed|"
+               r"concludes?|concluded|sums? (?:it )?up|summed (?:it )?up|acknowledges?|acknowledged|"
+               r"admits?|admitted|insists?|insisted|claims?|claimed|writes?|wrote|goes on to|went on to|"
+               r"specif(?:ies|ied)|(?:does not|doesn't|did not|didn't|never) (?:say|state|mention|explain|"
+               r"name|give|list|specify|detail))\b"),
+    re.compile(r"\b(?:flags|signs|checks|steps|lessons|rules|examples|questions|points|ideas|habits|"
+               r"mistakes)\s+it\s+(?:names|lists|cites|gives|describes|mentions|highlights|calls out)\b"),
+    re.compile(r"\b(?:the|these|those)\s+(?:facts?|figures|numbers|data|details|information)\s+(?:provided|"
+               r"supplied)\b(?!\s+(?:by|in|to|for|on|at)\b)|\b(?:the|these)\s+(?:provided|supplied)\s+"
+               r"(?:facts?|figures|numbers|data|details|information)\b"),
+    re.compile(r"\b(?:says?|said|notes?|noted|explains?|explained|writes?|wrote|argues?|argued)\s+the\s+"
+               r"(?:source|fact[-_ ]?sheet)\b(?!\s+(?:of|is|was|were|are|for|behind|that)\b)"),
+    # Residual read of the re-run (same day): told never to cite "the fact sheet", the second model
+    # cited "the case study" — its SOURCE line's name for the material ("The case study tells a
+    # different story", "The Netflix vs. Disney+ case study tells a different one"). Only "THE …
+    # case study" + a reporting verb: "This case study highlights how…" is an honest corpus line (the
+    # post naming itself), and "a classic case study in loyalty" is the lesson. "Case story" is the
+    # template's own name (TEMPLATE: Case story), never English.
+    # The words between "the" and "case study" never cross a sentence or a clause: no full stop
+    # except "vs." / "v." (so "…the next iPhone. This case study shows…" is the honest self-naming).
+    re.compile(r"\bthe\s+(?:(?:vs\.|v\.|[a-z0-9+&'-]+)\s+){0,5}?case study\s+(?:(?:also|even|clearly|simply|"
+               r"plainly)\s+)?"
+               r"(?:tells?|told|shows?(?!\s+up\b)|showed|says?|said|notes?|noted|explains?|explained|argues?|"
+               r"argued|suggests?|suggested|states?|stated|points? out|pointed out|makes? (?:it )?clear|"
+               r"reveals?|revealed|proves?|proved|walks? through|walked through)\b|\bcase stor(?:y|ies)\b"),
 )
 
 #: A certainty word + an investing outcome: the promissory claim the disclaimer's "Investing
@@ -4434,6 +4535,10 @@ def scan_text(field: str, text: str, *, allow_emoji: bool = False,
         m = rx.search(folded)
         if m:
             v("code_owned", m.group(0))
+    for rx in _SOURCE_REF_RES:
+        m = rx.search(folded)
+        if m:
+            v("source_reference", m.group(0))
     for rx in _CTA_RES:
         m = rx.search(folded)
         if m:

@@ -8,7 +8,8 @@ for every one of them; nothing else in the app calls Claude.
 Integration-layer rules (.claude/rules/integrations.md): HTTP in, dict out; typed exceptions; a
 lazy module-level client closed in the app lifespan; no caching, no business decisions. Returns
 the SAME dict shape as `GeminiClient.generate_json` — ``{"text", "model", "tokens_used",
-"finish_reason"}`` — so callers parse one shape.
+"finish_reason"}`` — so callers parse one shape, plus ``usage`` (the call's input / output /
+cache_read / cache_write tokens, which the marketing cost line prices apart, per model).
 
 Deliberate choices:
   * ONE attempt per call (`max_retries=0`) under a TOTAL deadline. The router falls back to
@@ -59,11 +60,16 @@ API_BASE_URL = "https://api.anthropic.com"
 
 
 class ClaudeException(Exception):
-    """Any Claude failure. `tokens_used` is what the failed call billed (0 when unknown)."""
+    """Any Claude failure. `tokens_used` is what the failed call billed (0 when unknown); `usage` is
+    the same tokens by kind (`USAGE_KINDS`) and `model` the model that billed them — None when the
+    call never answered (a timeout, a transport or HTTP error)."""
 
-    def __init__(self, message: str, tokens_used: int = 0):
+    def __init__(self, message: str, tokens_used: int = 0, *,
+                 usage: Optional[Dict[str, int]] = None, model: Optional[str] = None):
         super().__init__(message)
         self.tokens_used = tokens_used
+        self.usage = usage
+        self.model = model
 
 
 class ClaudeConfigException(ClaudeException):
@@ -209,6 +215,10 @@ def _short(text: Any) -> str:
     return s[:_MESSAGE_CAP]
 
 
+#: The token kinds of `usage` (each billed at its own rate) — every key but "total".
+USAGE_KINDS = ("input", "output", "cache_read", "cache_write")
+
+
 def _usage_tokens(response: Any) -> Dict[str, int]:
     usage = getattr(response, "usage", None)
 
@@ -224,6 +234,12 @@ def _usage_tokens(response: Any) -> Dict[str, int]:
     }
     out["total"] = sum(out.values())
     return out
+
+
+def _billed(usage: Dict[str, int], model: str) -> Dict[str, Any]:
+    """The billing keywords of an exception raised AFTER Claude answered: its total, its tokens by
+    kind and the model that billed them."""
+    return {"tokens_used": usage["total"], "usage": {k: usage[k] for k in USAGE_KINDS}, "model": model}
 
 
 def _api_message(e: Exception) -> str:
@@ -337,27 +353,28 @@ class ClaudeClient:
             category = getattr(details, "category", None)
             raise ClaudeRefusalException(
                 f"Claude declined (category={category}, model={served}, tag={usage_tag})",
-                tokens_used=usage["total"])
+                **_billed(usage, served))
         if stop == "max_tokens":
             raise ClaudeTruncatedException(
                 f"Claude answer cut at max_tokens (model={served}, tag={usage_tag})",
-                tokens_used=usage["total"])
+                **_billed(usage, served))
         if stop not in ("end_turn", "stop_sequence"):
             raise ClaudeBadAnswerException(
                 f"unexpected stop_reason={stop} (model={served}, tag={usage_tag})",
-                tokens_used=usage["total"])
+                **_billed(usage, served))
         texts = [b.text for b in (getattr(response, "content", None) or [])
                  if getattr(b, "type", None) == "text" and isinstance(getattr(b, "text", None), str)]
         text = "".join(texts)
         if not text.strip():
             raise ClaudeBadAnswerException(
                 f"no text in the answer (model={served}, tag={usage_tag})",
-                tokens_used=usage["total"])
+                **_billed(usage, served))
         return {
             "text": _unwrap(text) if wrapped else text,
             "model": served,
             "tokens_used": usage["total"],
             "finish_reason": "STOP",
+            "usage": {k: usage[k] for k in USAGE_KINDS},
         }
 
 

@@ -10,8 +10,9 @@ What is enforced, and why it differs from the public marketing scan
 * **Compliance** — `marketing/compliance.scan_text(strict_instruments=False)`, keeping only
   `ENFORCED_COMPLIANCE_CODES` (an EXPLICIT allow-list, pinned by a test): directives /
   recommendations, promises and forecasts, banned phrases, misattributions, famous quotes, links,
-  markup, emoji, handles, hashtags, cashtags, code-owned copy, the brand, and real people's names
-  (weekly pieces name people by role only). NOT enforced: `class_b_valuation` (it flags "value
+  markup, emoji, handles, hashtags, cashtags, code-owned copy, the brand, real people's names
+  (weekly pieces name people by role only), and citing the fact sheet or "the source"
+  (`source_reference`, 2026-10-31). NOT enforced: `class_b_valuation` (it flags "value
   trap", "per share", "market cap" — the vocabulary a business case study is made of), the
   evaluative and `return_figure` rows, the strict role/pronoun rows (off with
   `strict_instruments=False`) and `identity_leak`. In strict mode the scan fails 21 of the 23
@@ -159,6 +160,9 @@ ENFORCED_COMPLIANCE_CODES: FrozenSet[str] = frozenset({
     "code_owned",               # advice / disclaimer / "written without AI" copy is code's
     "brand_mention",            # Caydex, Cay AI, "download", "this app"
     "person_named",             # a real person by name: weekly pieces name people by ROLE only
+    # "The fact sheet gives two consecutive annual reports" shipped in an ACCEPTED Claude draft
+    # (2026-10-31 live check): an article states its facts, it never cites its brief.
+    "source_reference",
 })
 
 #: Emitted by `compliance.scan_text` and NOT enforced in-app, each for a stated reason.

@@ -20,7 +20,9 @@ truncated or empty answer) it logs `CLAUDE_FALLBACK` and makes the original Gemi
 
 Every result the router produced on a Claude-routed role carries `provider` ("claude" | "gemini")
 and, after a fallback, `fallback_reason`; `tokens_used` adds the failed Claude call's tokens so a
-caller's token total still counts every billed token.
+caller's token total still counts every billed token. Whenever Claude billed, the result also
+carries `claude_usage` (CLAUDE_USAGE_KEY): those Claude tokens by model and kind, so the marketing
+cost line can price them at Claude's rates instead of Gemini's.
 
 Settings are read at CALL time, so flipping a role needs no code — but `script_service` sizes the
 marketing lease at import, so a marketing switch takes effect with the deploy that sets it.
@@ -70,6 +72,13 @@ _BETWEEN_TOOLS_EFFORTS = ("low", "medium", "high")
 #: caller's own token attribute (`tokens_used`, `marketing_tokens_used`), which callers overwrite
 #: with their own running totals; the four callers add this to theirs (`claude_tokens_of`).
 CLAUDE_TOKENS_ATTR = "claude_tokens_used"
+#: The key of a router result, and the attribute of an exception, carrying the Claude tokens in it BY
+#: MODEL AND KIND: {served model: {"input", "output", "cache_read", "cache_write"}}. A breakdown only —
+#: the same tokens are already in `tokens_used` / CLAUDE_TOKENS_ATTR, so it is never added to a token
+#: total. The marketing writer sums it into `marketing_scripts.claude_usage`, which the weekly cost
+#: line prices per model (Claude's writer and judge are different models with different prices).
+#: Absent on a plain Gemini result and whenever Claude billed nothing.
+CLAUDE_USAGE_KEY = "claude_usage"
 
 _breaker_until: float = 0.0
 _breaker_reason: str = ""
@@ -98,6 +107,67 @@ def claude_tokens_of(e: BaseException) -> int:
     Never NaN, negative or a bool."""
     v = getattr(e, CLAUDE_TOKENS_ATTR, 0)
     return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else 0
+
+
+def parse_claude_usage(raw: Any) -> Optional[Dict[str, Dict[str, int]]]:
+    """A carried or stored Claude usage, read strictly: {} for None or {}; the usage (every kind
+    listed, every zero-token model dropped) when it is {model: {kind: count}} with non-blank model ids,
+    known kinds (`anthropic_client.USAGE_KINDS`) and plain non-negative int counts; else None."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        return None
+    out: Dict[str, Dict[str, int]] = {}
+    for model, counts in raw.items():
+        if not isinstance(model, str) or not model.strip() or not isinstance(counts, dict):
+            return None
+        if any(k not in ac.USAGE_KINDS or type(n) is not int or n < 0 for k, n in counts.items()):
+            return None
+        if any(counts.values()):
+            out[model] = {k: counts.get(k, 0) for k in ac.USAGE_KINDS}
+    return out
+
+
+def claude_usage_of(obj: Any) -> Dict[str, Dict[str, int]]:
+    """The Claude usage a router result (key CLAUDE_USAGE_KEY) or an exception (the attribute of that
+    name) carries; {} when it carries none, or an unreadable one (logged: its tokens are still in the
+    caller's total, only their Claude price is lost)."""
+    raw = obj.get(CLAUDE_USAGE_KEY) if isinstance(obj, dict) else getattr(obj, CLAUDE_USAGE_KEY, None)
+    parsed = parse_claude_usage(raw)
+    if parsed is None:
+        logger.warning("llm_provider: an unreadable %s on a %s — its Claude tokens stay in the token "
+                       "total but cannot be priced apart", CLAUDE_USAGE_KEY, type(obj).__name__)
+        return {}
+    return parsed
+
+
+def merge_claude_usage(*usages: Any) -> Dict[str, Dict[str, int]]:
+    """The sum of Claude usages, model by model and kind by kind (each read by `parse_claude_usage`;
+    an unreadable one adds nothing)."""
+    out: Dict[str, Dict[str, int]] = {}
+    for usage in usages:
+        for model, counts in (parse_claude_usage(usage) or {}).items():
+            entry = out.setdefault(model, {k: 0 for k in ac.USAGE_KINDS})
+            for k in ac.USAGE_KINDS:
+                entry[k] += counts[k]
+    return out
+
+
+def claude_usage_tokens(usage: Any) -> int:
+    """Every token of a Claude usage (0 for an unreadable one)."""
+    return sum(sum(counts.values()) for counts in (parse_claude_usage(usage) or {}).values())
+
+
+def _usage_entry(model: Any, usage: Any) -> Dict[str, Dict[str, Dict[str, int]]]:
+    """{CLAUDE_USAGE_KEY: {model: usage}} for one Claude call that billed, else {} — merged into a
+    result dict as is."""
+    parsed = parse_claude_usage({model: usage}) if isinstance(model, str) and isinstance(usage, dict) else None
+    return {CLAUDE_USAGE_KEY: parsed} if parsed else {}
+
+
+def _exception_usage(e: BaseException) -> Dict[str, Dict[str, int]]:
+    """The usage a failed Claude call billed (ClaudeException.usage under its .model); {} when none."""
+    return _usage_entry(getattr(e, "model", None), getattr(e, "usage", None)).get(CLAUDE_USAGE_KEY, {})
 
 
 def provider_setting(name: str) -> str:
@@ -235,13 +305,17 @@ class ClaudeOnly:
         claude = self._claude or ac.get_claude_client()
         sleep = self._sleep or asyncio.sleep
         spent = 0
+        spent_usage: Dict[str, Dict[str, int]] = {}
         for attempt in range(self.retries + 1):
             try:
                 result = await _ask_claude(claude, self.model, prompt, kwargs)
             except _MEASURE_RETRYABLE as e:
                 spent += int(getattr(e, "tokens_used", 0) or 0)
+                spent_usage = merge_claude_usage(spent_usage, _exception_usage(e))
                 if attempt >= self.retries:
                     e.tokens_used = spent
+                    if spent_usage:
+                        setattr(e, CLAUDE_USAGE_KEY, spent_usage)
                     raise
                 logger.warning("ClaudeOnly %s: %s (%s) — retry %d of %d", self.model,
                                type(e).__name__, e, attempt + 1, self.retries)
@@ -249,9 +323,15 @@ class ClaudeOnly:
                 continue
             except ac.ClaudeException as e:
                 e.tokens_used = int(getattr(e, "tokens_used", 0) or 0) + spent
+                usage = merge_claude_usage(spent_usage, _exception_usage(e))
+                if usage:
+                    setattr(e, CLAUDE_USAGE_KEY, usage)
                 raise
+            usage = merge_claude_usage(spent_usage, _usage_entry(result.get("model") or self.model,
+                                                                 result.get("usage")).get(CLAUDE_USAGE_KEY))
             return {**result, "provider": PROVIDER_CLAUDE,
-                    "tokens_used": int(result.get("tokens_used") or 0) + spent}
+                    "tokens_used": int(result.get("tokens_used") or 0) + spent,
+                    **({CLAUDE_USAGE_KEY: usage} if usage else {})}
         raise AssertionError("unreachable")  # pragma: no cover
 
 
@@ -302,21 +382,27 @@ class ProviderRouter:
                 logger.error("CLAUDE_FALLBACK tag=%s model=%s reason=%s (%s: %s) — unexpected; the "
                              "same call on Gemini", usage_tag, model, reason, reason, e, exc_info=True)
             spent = int(getattr(e, "tokens_used", 0) or 0) if isinstance(e, ac.ClaudeException) else 0
+            spent_usage = _exception_usage(e) if isinstance(e, ac.ClaudeException) else {}
             try:
                 result = await self._gemini_client().generate_json(prompt, **kwargs)
             except Exception as ge:
                 # Both providers failed: the Gemini error propagates unchanged in type, carrying the
-                # Claude attempt's billed tokens so the caller's total still counts them.
+                # Claude attempt's billed tokens so the caller's total still counts them (and their
+                # breakdown, so the cost line still prices them as Claude's).
                 try:
                     setattr(ge, CLAUDE_TOKENS_ATTR, claude_tokens_of(ge) + spent)
+                    if spent_usage:
+                        setattr(ge, CLAUDE_USAGE_KEY, merge_claude_usage(claude_usage_of(ge), spent_usage))
                 except (AttributeError, TypeError):   # a __slots__ / C-level exception type
                     logger.warning("CLAUDE_FALLBACK tag=%s: could not attach %d Claude tokens to %s — "
                                    "that spend will be missing from the caller's total", usage_tag,
                                    spent, type(ge).__name__)
                 raise
             return {**result, "provider": PROVIDER_GEMINI, "fallback_reason": reason,
-                    "tokens_used": int(result.get("tokens_used") or 0) + spent}
-        return {**result, "provider": PROVIDER_CLAUDE}
+                    "tokens_used": int(result.get("tokens_used") or 0) + spent,
+                    **({CLAUDE_USAGE_KEY: spent_usage} if spent_usage else {})}
+        return {**result, "provider": PROVIDER_CLAUDE, **_usage_entry(result.get("model") or model,
+                                                                       result.get("usage"))}
 
 
 _router: Optional[ProviderRouter] = None

@@ -120,7 +120,7 @@ def test_enforced_compliance_codes_are_pinned_exactly():
     assert V.ENFORCED_COMPLIANCE_CODES == frozenset({
         "class_b_recommendation", "class_b_forward", "promissory", "banned_phrase",
         "misattribution", "famous_quote", "link", "markup", "emoji", "handle", "hashtag",
-        "cashtag", "code_owned", "brand_mention", "person_named",
+        "cashtag", "code_owned", "brand_mention", "person_named", "source_reference",
     })
     # The plan's named exclusions stay excluded.
     for code in ("class_b_valuation", "return_figure", "identity_leak"):
@@ -1734,3 +1734,34 @@ def test_a_first_person_claude_or_anthropic_self_reference_fails(text):
 ])
 def test_third_person_claude_and_anthropic_subject_matter_passes(text):
     assert V.self_reference_hits(text) == []
+
+
+# ── 2026-10-31: an article never cites its own brief ─────────────────────────────────────────
+# An ACCEPTED Claude draft read "The fact sheet gives two consecutive annual reports for each"
+# (live check, 2026-10-31). The filing itself may still be named.
+
+@pytest.mark.parametrize("text", [
+    "The fact sheet gives two consecutive annual reports for each.",
+    "The source says the backlog grew.",
+])
+def test_citing_the_fact_sheet_or_the_source_is_refused(text):
+    assert "source_reference" in para_codes(text)
+
+
+@pytest.mark.parametrize("text", [
+    "The company's annual report describes two segments.",
+    "Fees became the main source of revenue.",
+])
+def test_naming_the_filing_or_a_source_of_revenue_passes(text):
+    assert "source_reference" not in para_codes(text)
+
+
+def test_a_self_written_educational_label_is_refused_in_app():
+    assert "code_owned" in para_codes("This article is for informational purposes only.")
+
+
+def test_the_learn_writer_is_told_not_to_cite_its_brief():
+    from app.services.learn_weekly import prompts as P
+
+    assert "never mention the fact sheet, the source" in P.SYSTEM_BODY
+    assert "fact sheet" in P.hint("source_reference")

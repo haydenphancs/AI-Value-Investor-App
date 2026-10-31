@@ -64,8 +64,10 @@ async def _call(**kw: Any) -> Dict[str, Any]:
 async def test_a_clean_answer_comes_back_in_geminis_dict_shape(monkeypatch):
     seen = _install(monkeypatch, [httpx2.Response(200, json=_message(i=100, o=20, cr=30, cw=5))])
     result = await _call()
+    # Gemini's four keys, plus the tokens by kind (the marketing cost line prices each at its own rate)
     assert result == {"text": '{"a": 1}', "model": "claude-sonnet-5-5", "tokens_used": 155,
-                      "finish_reason": "STOP"}
+                      "finish_reason": "STOP",
+                      "usage": {"input": 100, "output": 20, "cache_read": 30, "cache_write": 5}}
     assert len(seen) == 1
     body = json.loads(seen[0].content)
     assert body["model"] == "claude-sonnet-5-5"
@@ -160,6 +162,19 @@ async def test_an_abnormal_answer_raises_and_carries_its_billed_tokens(monkeypat
     with pytest.raises(exc) as info:
         await _call()
     assert info.value.tokens_used == 120
+    # …by kind, with the model that billed them: the router hands both on, so a failed Claude attempt is
+    # still priced as Claude's in the marketing cost line
+    assert info.value.usage == {"input": 100, "output": 20, "cache_read": 0, "cache_write": 0}
+    assert info.value.model == "claude-sonnet-5-5"
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_never_answered_carries_no_usage(monkeypatch):
+    _install(monkeypatch, [httpx2.Response(529, json={"type": "error", "error": {"type": "overloaded_error",
+                                                                                  "message": "Overloaded"}})])
+    with pytest.raises(ac.ClaudeUnavailableException) as info:
+        await _call()
+    assert (info.value.tokens_used, info.value.usage, info.value.model) == (0, None, None)
 
 
 @pytest.mark.asyncio

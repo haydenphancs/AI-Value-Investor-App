@@ -3707,8 +3707,10 @@ class MarketingRunService:
         return [str(r["source_ref"]) for r in rows][:limit]
 
     async def script_tokens_between(self, start_date: Any, end_date: Any) -> List[Dict[str, Any]]:
-        """`{run_date, tokens_used}` of the scripts dated `start_date`..`end_date` INCLUSIVE (ET days),
-        oldest first — the weekly cost line's Gemini read. Raw values: the caller validates them. One
+        """`{run_date, tokens_used, claude_usage}` of the scripts dated `start_date`..`end_date`
+        INCLUSIVE (ET days), oldest first — the weekly cost line's Gemini and Claude read (Claude's
+        tokens are inside `tokens_used`; `claude_usage` is NULL unless Claude billed — migration 206,
+        which must be applied before this read is deployed). Raw values: the caller validates them. One
         script per run (PK run_id) and one run per day (UNIQUE run_date) bound the read by the day
         count; more rows than days, or two rows on one day (a hand edit — possible in a sparse window
         too), cannot be told apart from a double count, so it RAISES instead of returning a sum that
@@ -3718,12 +3720,13 @@ class MarketingRunService:
             return []
         days = (end - start).days + 1
         res = await _exec(
-            self.sb.table(SCRIPTS).select("run_date,tokens_used")
+            self.sb.table(SCRIPTS).select("run_date,tokens_used,claude_usage")
             .gte("run_date", start.isoformat()).lte("run_date", end.isoformat())
             .order("run_date").limit(days + 1),
             op="script_tokens_between", start=start, end=end,
         )
-        rows = [{"run_date": r.get("run_date"), "tokens_used": r.get("tokens_used")}
+        rows = [{"run_date": r.get("run_date"), "tokens_used": r.get("tokens_used"),
+                 "claude_usage": r.get("claude_usage")}
                 for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]
         days_seen = [str(r["run_date"]) for r in rows]
         if len(rows) > days or len(set(days_seen)) != len(days_seen):

@@ -2017,3 +2017,178 @@ async def test_the_default_client_routes_the_writer_through_llm_provider(monkeyp
                                     judge_mode=JUDGE_OFF, store_state=post_copy.STORE_PRELAUNCH)
     assert len(gemini.calls) == 1 and len(claude.calls) == 1
     assert "served_by" not in res.package
+
+
+# ── the Claude tokens ride apart from the total (the weekly cost line prices them, 2026-10-31) ──────
+
+_JUDGE_CLEAN = '{"verdicts": []}'
+
+
+def _usage(i: int, o: int) -> Dict[str, int]:
+    return {"input": i, "output": o, "cache_read": 0, "cache_write": 0}
+
+
+class _BillingClaude:
+    """The real ClaudeClient's answer shape, per role: the writer gets the clean package, the judge a clean
+    verdict; each bills its `usage` (the router keys it by the model that answered)."""
+
+    def __init__(self, *, fail_writer: Exception = None):
+        self.calls: List[Dict[str, Any]] = []
+        self.fail_writer = fail_writer
+
+    async def generate_json(self, prompt, **kw):
+        self.calls.append(kw)
+        judge = kw["usage_tag"] == "marketing_judge"
+        if not judge and self.fail_writer is not None:
+            raise self.fail_writer
+        usage = _usage(450, 50) if judge else _usage(900, 300)
+        return {"text": _JUDGE_CLEAN if judge else json.dumps(_clean_package()), "model": kw["model_name"],
+                "tokens_used": sum(usage.values()), "finish_reason": "STOP", "usage": usage}
+
+
+def _claude_router(monkeypatch, claude: Any, gemini: FakeClient, *roles: str):
+    from app.config import settings
+    from app.services import llm_provider as lp
+
+    monkeypatch.setattr(settings, "CAYDEX_ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setattr(settings, "CAYDEX_CLAUDE_WRITER_MODEL", "claude-sonnet-5-5")
+    monkeypatch.setattr(settings, "CAYDEX_CLAUDE_JUDGE_MODEL", "claude-opus-5-5")
+    for name in ("MARKETING_WRITER_PROVIDER", "MARKETING_JUDGE_PROVIDER"):
+        monkeypatch.setattr(settings, name, "claude" if name in roles else "gemini")
+    lp.reset_breaker()
+    return lp.ProviderRouter(gemini=gemini, claude=claude)
+
+
+async def _enforced(client: Any, generation_id: str = "gen-c"):
+    return await ws.generate_package(_item(), TEMPLATE, RUN_DATE, generation_id=generation_id, client=client,
+                                     judge_mode="enforce", store_state=post_copy.STORE_PRELAUNCH)
+
+
+@pytest.mark.asyncio
+async def test_claude_writer_and_judge_tokens_ride_apart_by_model_inside_the_total(monkeypatch):
+    claude = _BillingClaude()
+    router = _claude_router(monkeypatch, claude, FakeClient(), "MARKETING_WRITER_PROVIDER",
+                            "MARKETING_JUDGE_PROVIDER")
+    res = await _enforced(router)
+    assert res.status == "accepted" and len(claude.calls) == 2
+    assert res.tokens_used == 1_200 + 500
+    assert res.claude_usage == {"claude-sonnet-5-5": _usage(900, 300), "claude-opus-5-5": _usage(450, 50)}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_claude_draft_and_a_gemini_judge_leave_only_the_billed_attempt_as_claudes(monkeypatch):
+    """Claude's draft is cut at max_tokens (billed 2,000) → Gemini writes (100) and the judge stays on Gemini
+    (40): every token is in the total, only the cut attempt is Claude's."""
+    from app.integrations import anthropic_client as ac
+
+    cut = ac.ClaudeTruncatedException("cut", tokens_used=2_000, model="claude-sonnet-5-5",
+                                      usage=_usage(1_000, 1_000))
+    gemini = FakeClient(_result(_clean_package(), tokens=100), _result({"verdicts": []}, tokens=40))
+    router = _claude_router(monkeypatch, _BillingClaude(fail_writer=cut), gemini, "MARKETING_WRITER_PROVIDER")
+    res = await _enforced(router)
+    assert res.status == "accepted" and res.tokens_used == 2_000 + 100 + 40
+    assert res.claude_usage == {"claude-sonnet-5-5": _usage(1_000, 1_000)}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_generation_carries_its_claude_part_beside_its_tokens(monkeypatch):
+    """Claude's draft is cut, then Gemini's fallback times out: the generation raises (unchanged in type),
+    carrying the 2,000 billed tokens AND their breakdown for script_service to record."""
+    from app.integrations import anthropic_client as ac
+    from app.integrations.gemini import GeminiTimeoutError
+
+    cut = ac.ClaudeTruncatedException("cut", tokens_used=2_000, model="claude-sonnet-5-5",
+                                      usage=_usage(1_000, 1_000))
+    router = _claude_router(monkeypatch, _BillingClaude(fail_writer=cut), FakeClient(GeminiTimeoutError("slow")),
+                            "MARKETING_WRITER_PROVIDER")
+    with pytest.raises(GeminiTimeoutError) as info:
+        await _enforced(router)
+    assert getattr(info.value, ws.TOKENS_ATTR) == 2_000
+    assert getattr(info.value, ws.CLAUDE_USAGE_ATTR) == {"claude-sonnet-5-5": _usage(1_000, 1_000)}
+
+
+@pytest.mark.asyncio
+async def test_a_claude_judge_answer_that_will_not_parse_is_still_counted_as_claudes(monkeypatch):
+    """Gemini drafts (100); the Claude judge answers junk (billed 500) → MarketingJudgeUnavailable, a
+    writer failure in enforce — its tokens and their breakdown ride on it."""
+    from app.services.marketing import judge as jd
+
+    class JunkJudge(_BillingClaude):
+        async def generate_json(self, prompt, **kw):
+            result = await super().generate_json(prompt, **kw)
+            return {**result, "text": "not json"}
+
+    router = _claude_router(monkeypatch, JunkJudge(), FakeClient(_result(_clean_package(), tokens=100)),
+                            "MARKETING_JUDGE_PROVIDER")
+    with pytest.raises(jd.MarketingJudgeUnavailable) as info:
+        await _enforced(router)
+    assert getattr(info.value, ws.TOKENS_ATTR) == 100 + 500
+    assert getattr(info.value, ws.CLAUDE_USAGE_ATTR) == {"claude-opus-5-5": _usage(450, 50)}
+
+
+@pytest.mark.asyncio
+async def test_a_gemini_only_generation_has_no_claude_part_anywhere():
+    res = await _run(FakeClient(_result(_clean_package())))
+    assert res.claude_usage == {}
+    from app.integrations.gemini import GeminiTimeoutError
+
+    with pytest.raises(GeminiTimeoutError) as info:
+        await _run(FakeClient(GeminiTimeoutError("slow")))
+    assert getattr(info.value, ws.TOKENS_ATTR) == 0
+    assert not hasattr(info.value, ws.CLAUDE_USAGE_ATTR)
+
+
+# ── 2026-10-31: the three gaps the live Claude-writer preview found ────────────────────────────
+
+def _checklist(n_slides: int = 8) -> Dict[str, Any]:
+    """A clean package whose carousel is a cover + numbered checks ("Check 1:" … "Check 7:")."""
+    pkg = copy.deepcopy(_clean_package())
+    slides = _pairs_of("carousel_slides", n_slides)
+    for i in range(1, n_slides):
+        slides[i]["title"] = f"Check {i}: " + " ".join(slides[i]["title"].split()[:3])
+    pkg["carousel_slides"] = slides
+    return pkg
+
+
+def _shared(pkg: Dict[str, Any]) -> List[tuple]:
+    return [(v.field, v.code) for v in ws.validate_package(pkg, _item(), RUN_DATE).shared]
+
+
+def test_a_checklist_numbered_past_five_is_accepted():
+    vr = ws.validate_package(_checklist(8), _item(), RUN_DATE)
+    assert vr.ok, [(v.field, v.code, v.detail) for v in vr.shared]
+
+
+def test_a_list_label_past_its_own_slide_position_is_still_refused():
+    pkg = _checklist(8)
+    pkg["carousel_slides"][2]["title"] = "Check 7: " + pkg["carousel_slides"][2]["title"].split(": ", 1)[1]
+    assert ("carousel_slides[2].title", "ungrounded_number") in _shared(pkg)
+
+
+def test_a_list_label_outside_a_carousel_title_is_still_refused():
+    pkg = _checklist(8)
+    pkg["cards"][0]["title"] = "Check 6: " + " ".join(pkg["cards"][0]["title"].split()[:3])
+    assert ("cards[0].title", "ungrounded_number") in _shared(pkg)
+
+
+def test_citing_the_fact_sheet_in_narration_fails_the_round():
+    pkg = copy.deepcopy(_clean_package())
+    pkg["video_script"][1] = "The fact sheet shows how the business worked."
+    assert ("video_script[1]", "source_reference") in _shared(pkg)
+
+
+def test_a_self_written_educational_label_drops_only_its_outlet():
+    pkg = copy.deepcopy(_clean_package())
+    pkg["captions"]["youtube_description"] += " Educational content only."
+    vr = ws.validate_package(pkg, _item(), RUN_DATE)
+    assert [v.code for v in vr.outlets.get("youtube", [])] == ["code_owned"]
+    assert vr.shared == [] and "youtube" not in vr.posts
+
+
+def test_the_writer_is_told_every_new_rule():
+    """§7: a rule the model never hears about wastes the repair round."""
+    for phrase in ("never mention the fact sheet, the source", "may open with a list label",
+                   "never label the text educational or informational"):
+        assert phrase in wp.SYSTEM_BODY, phrase
+    assert "source_reference" in wp.REPAIR_HINTS
+    assert "educational content only" in wp.REPAIR_HINTS["code_owned"]

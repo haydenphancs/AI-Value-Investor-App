@@ -443,3 +443,121 @@ def test_effective_effort_is_what_is_sent_not_the_raw_setting(monkeypatch):
     assert lp.effective_effort() == "low"
     monkeypatch.setattr(settings, "CAYDEX_CLAUDE_EFFORT", " MEDIUM ")
     assert lp.effective_effort() == "medium"
+
+
+# ── the Claude tokens by model and kind (the marketing cost line prices them apart, 2026-10-31) ──────
+
+_U = {"input": 900, "output": 300, "cache_read": 0, "cache_write": 0}
+
+
+class BillingClaude(FakeClaude):
+    """FakeClaude answering like the real client: `usage` by kind, its total in `tokens_used`."""
+
+    async def generate_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        result = await super().generate_json(prompt, **kwargs)
+        return {**result, "tokens_used": 1_200, "usage": dict(_U)}
+
+
+def _truncated(model: str = "claude-sonnet-5-5") -> ac.ClaudeTruncatedException:
+    return ac.ClaudeTruncatedException("cut", tokens_used=12, model=model,
+                                       usage={"input": 10, "output": 2, "cache_read": 0, "cache_write": 0})
+
+
+@pytest.mark.asyncio
+async def test_a_claude_answer_carries_its_tokens_by_model_and_kind(monkeypatch):
+    for name in ("MARKETING_WRITER_PROVIDER", "MARKETING_JUDGE_PROVIDER"):
+        monkeypatch.setattr(settings, name, "claude")
+    router, _gemini, claude = _router(BillingClaude())
+    writer = await router.generate_json("P", **GEMINI_KW)
+    judge = await router.generate_json("P", **{**GEMINI_KW, "usage_tag": "marketing_judge"})
+    assert writer[lp.CLAUDE_USAGE_KEY] == {"claude-sonnet-5-5": _U}
+    assert judge[lp.CLAUDE_USAGE_KEY] == {"claude-opus-5-5": _U}, "keyed by the model that billed"
+    assert writer["tokens_used"] == 1_200, "a breakdown, never added to the total"
+    assert lp.claude_usage_tokens(writer[lp.CLAUDE_USAGE_KEY]) == writer["tokens_used"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_claude_attempts_usage_rides_on_the_gemini_answer(monkeypatch):
+    monkeypatch.setattr(settings, "MARKETING_WRITER_PROVIDER", "claude")
+    router, gemini, _claude = _router(FakeClaude(_truncated()))
+    result = await router.generate_json("P", **GEMINI_KW)
+    assert result["tokens_used"] == 50 + 12
+    assert result[lp.CLAUDE_USAGE_KEY] == {"claude-sonnet-5-5": {"input": 10, "output": 2, "cache_read": 0,
+                                                                  "cache_write": 0}}
+    assert lp.CLAUDE_USAGE_KEY not in gemini.result, "Gemini's own result object is never mutated"
+    # a Claude call that never answered billed nothing: no breakdown at all
+    for error in (ac.ClaudeTimeoutException("slow"), ac.ClaudeUnavailableException("529"), RuntimeError("bug")):
+        lp.reset_breaker()
+        router, _g, _c = _router(FakeClaude(error))
+        assert lp.CLAUDE_USAGE_KEY not in await router.generate_json("P", **GEMINI_KW)
+    # nor does the breaker's straight-to-Gemini path
+    router, _g, _c = _router(FakeClaude(ac.ClaudeRateLimitException("429")))
+    await router.generate_json("P", **GEMINI_KW)
+    assert lp.CLAUDE_USAGE_KEY not in await router.generate_json("P", **GEMINI_KW)
+
+
+@pytest.mark.asyncio
+async def test_a_billed_claude_attempts_usage_rides_on_the_gemini_error_when_both_fail(monkeypatch):
+    monkeypatch.setattr(settings, "MARKETING_WRITER_PROVIDER", "claude")
+    router, gemini, _claude = _router(FakeClaude(_truncated()))
+
+    class Boom(RuntimeError):
+        pass
+
+    async def fail(prompt, **kwargs):
+        e = Boom("gemini down")
+        setattr(e, lp.CLAUDE_USAGE_KEY, {"claude-opus-5-5": {"output": 4}})   # an earlier hop's, kept
+        raise e
+
+    gemini.generate_json = fail
+    with pytest.raises(Boom) as info:
+        await router.generate_json("P", **GEMINI_KW)
+    assert lp.claude_usage_of(info.value) == {
+        "claude-opus-5-5": {"input": 0, "output": 4, "cache_read": 0, "cache_write": 0},
+        "claude-sonnet-5-5": {"input": 10, "output": 2, "cache_read": 0, "cache_write": 0}}
+
+
+@pytest.mark.asyncio
+async def test_claude_only_sums_the_usage_of_its_retries():
+    async def no_sleep(_seconds):
+        return None
+
+    class Flaky(BillingClaude):
+        def __init__(self):
+            super().__init__()
+            self.errors = [ac.ClaudeRateLimitException("429", tokens_used=3, model="claude-opus-5-5",
+                                                       usage={"input": 3})]
+
+        async def generate_json(self, prompt, **kwargs):
+            if self.errors:
+                raise self.errors.pop(0)
+            return await super().generate_json(prompt, **kwargs)
+
+    ok = await lp.ClaudeOnly("claude-opus-5-5", claude=Flaky(), retries=2, sleep=no_sleep).generate_json(
+        "P", **GEMINI_KW)
+    assert ok["tokens_used"] == 1_203
+    assert ok[lp.CLAUDE_USAGE_KEY] == {"claude-opus-5-5": {**_U, "input": 903}}
+
+
+@pytest.mark.parametrize("raw", ["x", [], 7, {"m": "x"}, {"": {"input": 1}}, {7: {"input": 1}},
+                                 {"m": {"input": -1}}, {"m": {"input": True}}, {"m": {"input": 1.0}},
+                                 {"m": {"input": "1"}}, {"m": {"thinking": 1}}])
+def test_an_unreadable_claude_usage_is_refused_whole(raw, caplog):
+    assert lp.parse_claude_usage(raw) is None
+    assert lp.merge_claude_usage({"m": {"input": 1}}, raw) == {"m": {"input": 1, "output": 0, "cache_read": 0,
+                                                                     "cache_write": 0}}
+    assert lp.claude_usage_tokens(raw) == 0
+    e = RuntimeError()
+    setattr(e, lp.CLAUDE_USAGE_KEY, raw)
+    assert lp.claude_usage_of(e) == {} and lp.claude_usage_of({lp.CLAUDE_USAGE_KEY: raw}) == {}
+    assert any("unreadable" in r.getMessage() for r in caplog.records)
+
+
+def test_claude_usage_is_summed_model_by_model_and_kind_by_kind():
+    assert lp.parse_claude_usage(None) == {} and lp.parse_claude_usage({}) == {}
+    assert lp.parse_claude_usage({"m": {"input": 0}}) == {}, "a model that billed nothing is dropped"
+    merged = lp.merge_claude_usage({"a": {"input": 1, "output": 2}}, None, {"a": {"output": 3}, "b": {"cache_read": 4}})
+    assert merged == {"a": {"input": 1, "output": 5, "cache_read": 0, "cache_write": 0},
+                      "b": {"input": 0, "output": 0, "cache_read": 4, "cache_write": 0}}
+    assert lp.claude_usage_tokens(merged) == 10
+    assert lp.claude_usage_of(RuntimeError()) == {} and lp.claude_usage_of({"text": "{}"}) == {}

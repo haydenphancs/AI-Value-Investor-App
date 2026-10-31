@@ -169,7 +169,10 @@ is shown for at most 96 h, and is replaced by the live answer as soon as that la
 └─────────────────┘        └─────────────────┘        └─────────────────┘
 ```
 
-**Integrations** (`backend/app/integrations/`, **18** modules): `fmp`, `gemini`, `coingecko`, `fred`,
+**Integrations** (`backend/app/integrations/`, **19** modules): `fmp`, `gemini`, `anthropic_client` (Claude, the
+SECOND provider for the marketing and Learn weekly writer/judge roles only, behind per-role switches that
+default to Gemini; called only by `app/services/llm_provider.py`, which falls back to the same Gemini call on
+any Claude failure, 2026-10-30), `coingecko`, `fred`,
 `finra_short_interest`, `apewisdom`, `alternative_me`, `census`, `openfda`, `uspto`, `app_store`,
 `openai_compat`, `telegram` (the marketing review bot, §12.9), `x_api`, `bluesky` and `upload_post`
 (the marketing publisher's platforms, §12.10), and `brave_search` (the Brave Search API behind report
@@ -5446,7 +5449,8 @@ entities decoded, disguised dots folded) and rejects:
   return context, and digit-free market caps and price records;
 - **promises and contradictions of the code-owned disclaimer** — "always recovers", "can't
   lose", "guaranteed", calling the text advice, denying AI involvement, dismissing the fine
-  print. Every exemption is POSITIONAL: a negation, a warning or belief frame, a myth label or
+  print, labelling the text educational or informational ("Educational content only."), saying it
+  is not an offer, or "consult a financial professional" (2026-10-31). Every exemption is POSITIONAL: a negation, a warning or belief frame, a myth label or
   a debunk frames only the claim's own clause or the sentence right after it ("Don't panic, the
   market always recovers" and "Ignore the hype, compounding guarantees your money grows" are
   promises); a yes/no question is exempt only when nothing but a debunk answers it, read across
@@ -5455,10 +5459,15 @@ entities decoded, disguised dots folded) and rejects:
 - banned phrases and misattributions, vendor/identity terms, brand, CTA, endorsement and
   social-proof text, first person (quoted testimonials included; only a reader's quoted
   self-question is exempt), links (any label + TLD, disguised dots), handles, markup,
-  hashtags and cashtags.
+  hashtags and cashtags;
+- **the writer's own materials** (`source_reference`, 2026-10-31, after a live preview with a
+  second writer model narrated "The fact sheet shows…") — "the fact sheet", "the source says",
+  "per the source", "the facts provided"; positional, so "the main source of revenue" and "an
+  ETF's fact sheet" pass. Learn weekly enforces it too.
 
 `app/services/marketing/grounding.py` requires every number to match a fact-sheet number by
-value and unit, bound by its LOCAL context: the words either side of the draft number must meet
+value and unit (two structural exemptions: a unit-less count 0-5, and the one-digit ordinal of a
+list label opening a carousel slide title, up to that slide's position — "Check 6:"), bound by its LOCAL context: the words either side of the draft number must meet
 the source's, subjects excluded, and an amount, percentage or multiple stated as a price, worth
 or return claim must be one the sheet states as such (a Money Moves sheet states none); a loss
 cannot come back as a profit. A YEAR binds more loosely — on any shared word including names,
@@ -6073,8 +6082,18 @@ its pure helpers and the shared day-job runner) and `app/services/marketing/dige
   limit + 1 probe must fit inside PostgREST's ~1,000-row answer cap, so a larger limit is refused),
   with undated entries
   named and never counted into any week (`run_service.charges_between`; the X cap's own reader still
-  counts them — fail-closed). Gemini ≈ `marketing_scripts.tokens_used` × one blended $1.50 per 1M
-  (writer + judge; the judge model's price doubles on 2027-01-01 — revisit). Worker ≈ each run's
+  counts them — fail-closed). Gemini ≈ `marketing_scripts.tokens_used` less its Claude tokens × one
+  blended $1.50 per 1M (writer + judge; the judge model's price doubles on 2027-01-01 — revisit).
+  Claude ≈ (2026-10-31, migration 206) `marketing_scripts.claude_usage` — the Claude tokens inside
+  `tokens_used` by served model and kind (input / output / cache read / cache write), written by
+  `script_service` only when a generation billed Claude (the router's `claude_usage` breakdown, a failed
+  attempt's included) — at each model's Anthropic list prices (`CLAUDE_MICROS_PER_MILLION_TOKENS`, cache
+  writes at 1.25× input), summed per week and rounded once. It is a part of the line ("· Claude ≈ $c"
+  after Gemini) only in a week with Claude tokens, and joins the usage label ("X + Gemini + Claude +
+  worker") when either week had any, so a Gemini-only fortnight renders exactly as before. A model or
+  kind with no price, or an unreadable value, reads "Claude unreadable" (an unreadable value, or one
+  claiming more tokens than `tokens_used`, makes Gemini unreadable too: the split is unknown). Money Moves
+  weekly pieces (`learn_weekly_pieces.tokens_used`) are in no digest. Worker ≈ each run's
   billed stage seconds × (its highest memory peak, clamped to the limit its preflight recorded — 4 GB
   when none was —, at $10/GB-month + 4 vCPUs at
   $20/vCPU-month) — upper-side, Railway meters actual use; the hourly no-op ticks and the web service
@@ -6562,7 +6581,7 @@ backend/
 │   │       ├── api.py            # router registration
 │   │       └── endpoints/        # 24 modules; HTTP surface only (marketing_internal.py is worker-facing, §12)
 │   ├── core/security.py          # (config and dependencies are NOT here — see below)
-│   ├── integrations/             # 18 thin HTTP clients + fmp_entitlements (data only)
+│   ├── integrations/             # 19 thin HTTP clients + fmp_entitlements (data only)
 │   ├── models/                   # EMPTY. Vestigial. There is no ORM — CLAUDE.md invariant #5
 │   ├── schemas/                  # Pydantic v2 request/response models
 │   ├── services/

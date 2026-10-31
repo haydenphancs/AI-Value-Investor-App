@@ -41,6 +41,11 @@ _EXEMPT = {
     # INTERNAL router: classifies a query into a route enum. Its output is never shown to a
     # user, so an identity guard would be noise in the prompt and cost tokens on every turn.
     "agents/chat_router.py",
+    # Provider PASS-THROUGH (2026-10-30): forwards the caller's own `system_instruction` to Claude
+    # verbatim. It builds none of its own; its four callers (marketing writer/judge, Learn weekly
+    # writer/judge) each pass `neutral_system_instruction(...)` or the judge's rubric, and are
+    # scanned here themselves. Wrapping again would double the guards.
+    "llm_provider.py",
 }
 
 

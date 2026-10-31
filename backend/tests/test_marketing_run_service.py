@@ -4140,16 +4140,23 @@ async def test_script_tokens_between_is_inclusive_projected_and_ordered(svc, mon
         _script_row(svc, day, tokens)                                                      # stored out of order
     selects = _spy_selects(monkeypatch, svc, mrs.SCRIPTS)
     got = await svc.script_tokens_between(date(2026, 9, 28), date(2026, 10, 4))
-    # inclusive at both ends, oldest first, two keys only, RAW values (the digest validates each count:
-    # a junk one must reach it as junk and read "unreadable", never be coerced to 0 here)
-    assert got == [{"run_date": "2026-09-28", "tokens_used": 21_000},
-                   {"run_date": "2026-09-30", "tokens_used": "12"},
-                   {"run_date": "2026-10-01", "tokens_used": None},
-                   {"run_date": "2026-10-04", "tokens_used": 22_100}]
-    assert selects == [("run_date,tokens_used",)]
+    # inclusive at both ends, oldest first, three keys only, RAW values (the digest validates each count:
+    # a junk one must reach it as junk and read "unreadable", never be coerced to 0 here). claude_usage
+    # (migration 206) is NULL unless Claude billed — a row written without it reads None.
+    assert got == [{"run_date": "2026-09-28", "tokens_used": 21_000, "claude_usage": None},
+                   {"run_date": "2026-09-30", "tokens_used": "12", "claude_usage": None},
+                   {"run_date": "2026-10-01", "tokens_used": None, "claude_usage": None},
+                   {"run_date": "2026-10-04", "tokens_used": 22_100, "claude_usage": None}]
+    assert selects == [("run_date,tokens_used,claude_usage",)]
     assert await svc.script_tokens_between("2026-09-28", "2026-10-04") == got             # ISO strings
     assert await svc.script_tokens_between(date(2026, 10, 5), date(2026, 10, 5)) == [
-        {"run_date": "2026-10-05", "tokens_used": 5}]                                     # a one-day window
+        {"run_date": "2026-10-05", "tokens_used": 5, "claude_usage": None}]               # a one-day window
+    # a stored usage comes back raw too, junk included
+    usage = {"claude-sonnet-5-5": {"input": 900, "output": 300, "cache_read": 0, "cache_write": 0}}
+    for row in svc.fake.tables[mrs.SCRIPTS].rows:
+        row["claude_usage"] = {"2026-09-28": usage, "2026-09-30": "junk"}.get(row["run_date"])
+    got = await svc.script_tokens_between(date(2026, 9, 28), date(2026, 9, 30))
+    assert [r["claude_usage"] for r in got] == [usage, "junk"]
     # an inverted window, and a datetime at either end, read nothing at all
     reads = _counting_reads(monkeypatch)
     assert await svc.script_tokens_between(date(2026, 10, 4), date(2026, 9, 28)) == []
@@ -7299,3 +7306,26 @@ async def test_batch3_a_template_extra_that_fails_its_recheck_is_skipped_not_409
     assert "re-check" in msg and "banned_word" in msg
     for p in posts:
         assert p["metadata"]["authorship"] == "template" and p["metadata"]["made_with_ai"] is (p["format"] == "video")
+
+
+# ── Claude as a second provider (llm_provider, 2026-10-30): the written_by note ──────────────
+
+
+@pytest.mark.asyncio
+async def test_every_post_of_a_claude_written_run_carries_the_written_by_note(svc):
+    rid, specs = await _comment_run(svc, "live")
+    out = _script_output(svc, rid)
+    out["served_by"] = "claude:claude-sonnet-5-5"
+    out["judge"] = {**(out.get("judge") or {}), "served_by": "claude:claude-opus-5-5"}
+    posts = await svc.create_posts(rid, specs, claim=_holder(svc, rid))
+    notes = _notes(posts, schemas.POST_METADATA_WRITTEN_BY)
+    assert set(notes) == set(_EVERY_OUTLET)
+    assert all(n == {"writer": "claude:claude-sonnet-5-5", "judge": "claude:claude-opus-5-5"}
+               for n in notes.values())
+
+
+@pytest.mark.asyncio
+async def test_a_default_gemini_run_writes_no_written_by_note(svc):
+    rid, specs = await _comment_run(svc, "live")
+    posts = await svc.create_posts(rid, specs, claim=_holder(svc, rid))
+    assert all(schemas.POST_METADATA_WRITTEN_BY not in p["metadata"] for p in posts)

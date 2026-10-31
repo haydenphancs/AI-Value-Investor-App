@@ -627,7 +627,8 @@ async def judge_fields(client: Any, item: ContentItem, fields: Sequence[Tuple[st
                        temperature: float = JUDGE_TEMPERATURE) -> Tuple[List[Verdict], Dict[str, Any]]:
     """One judge call. Returns (verdicts, the raw generate_json result). Gemini errors propagate
     unchanged; an unusable answer raises `MarketingJudgeUnavailable` carrying the tokens it cost
-    as `marketing_tokens_used` (the writer's TOKENS_ATTR contract)."""
+    as `marketing_tokens_used` (the writer's TOKENS_ATTR contract) — and, for a Claude answer, their
+    breakdown as `claude_usage`."""
     fields = split_captions(fields)
     if not fields:
         return [], {"text": "{\"verdicts\": []}", "tokens_used": 0, "finish_reason": "STOP"}
@@ -646,5 +647,9 @@ async def judge_fields(client: Any, item: ContentItem, fields: Sequence[Tuple[st
         verdicts = parse_verdicts(result, fields)
     except MarketingJudgeUnavailable as e:
         setattr(e, "marketing_tokens_used", int(result.get("tokens_used") or 0))
+        if result.get("claude_usage"):
+            # A Claude answer that would not parse: its tokens by model (llm_provider.CLAUDE_USAGE_KEY),
+            # so the cost line still prices them as Claude's.
+            setattr(e, "claude_usage", result["claude_usage"])
         raise
     return verdicts, result

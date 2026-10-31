@@ -47,7 +47,12 @@ from app.services.marketing.selection import Template
 #: short paragraphs the worker draws on the day's post image (IMAGE POST; its title follows HOOK AND
 #: TITLES; rule 6's no-emoji list names it). Validated and judged as its own reading chain; a failing
 #: image is dropped (that day's posts are text), never a rejected package.
-PROMPT_VERSION = "2026-10-09.1"
+#: 2026-10-31.1 (Claude-writer preview): rule 1 bans citing the fact sheet or the source
+#: ("the fact sheet shows" — new code `source_reference`); rule 5 lets a carousel slide title open
+#: with a list label ("Check 3:" — grounding exempts that ordinal up to the slide's position); rule
+#: 9 bans labelling the text educational or informational, "not an offer" and "consult a
+#: professional" (`code_owned`).
+PROMPT_VERSION = "2026-10-31.1"
 
 # ── editorial limits ──
 # ENFORCED ceilings (writer_service) sit above what the prompt ASKS for (`_ASK_*`): a model
@@ -162,7 +167,10 @@ SYSTEM_BODY = (
     "about advice or advisers, and no note about AI - the publisher adds its own.\n\n"
     "HARD RULES:\n"
     "1. Use ONLY facts stated in the FACT SHEET. Do not add any number, date, company, "
-    "product, place or person that is not in it, even if you know it to be true.\n"
+    "product, place or person that is not in it, even if you know it to be true. State each "
+    "fact directly, in your own voice: never mention the fact sheet, the source or where a fact "
+    "came from (not \"the fact sheet shows\", \"the source says\", \"the case study shows\" or "
+    "\"the flags it names\"), and never use the template's name.\n"
     "2. Never name or describe a real person - no founders, executives, investors, "
     "politicians, economists, scientists or authors: not by full name, first name, surname or "
     "nickname, not by epithet (\"a legendary investor\", \"the father of value investing\", "
@@ -217,7 +225,9 @@ SYSTEM_BODY = (
     "sheet states, in the same context it states them - keep the fact sheet's own words for "
     "what a number measures (\"paid for\", \"founded\", \"subscribers\"). Put dated figures "
     "in the past tense. Keep numbers and years OUT of the hook, titles and headings - they have no "
-    "room for those words; put the number in a script line or a body beside them.\n"
+    "room for those words; put the number in a script line or a body beside them. The one "
+    "exception: a carousel slide title may open with a list label - Check, Step or Question and "
+    "one digit (\"Check 3:\").\n"
     "6. No links, web addresses, @handles, hashtags, markdown or HTML, no curly braces { } and "
     "no backslashes. Write US, UK and EU without dots (\"US markets\"; a dotted \"U.S.\" is "
     "refused), and always put a space after an abbreviation's final dot (\"e.g. banks\", "
@@ -254,7 +264,10 @@ SYSTEM_BODY = (
     "still a prediction unless the same sentence corrects it (\"..., but nobody knows\"). Never "
     "mention advice, investment recommendations, disclaimers, fine print or the small text "
     "below, or how this text was written (by people, by machines or by AI) - a contrast inside "
-    "the lesson, like \"built for games, not AI\", is fine.\n\n"
+    "the lesson, like \"built for games, not AI\", is fine - and never label the text "
+    "educational or informational (no \"educational content only\", \"purely educational\" or "
+    "\"for informational purposes\"), never say it is not an offer, and never tell readers to "
+    "consult a professional.\n\n"
     "COMPANIES: when the fact sheet is a business case study, name the companies it names - "
     "they are the historical example that makes the lesson concrete. Describe what the "
     "business did and why it worked or failed; never judge the stock. Name no other company, "
@@ -503,8 +516,16 @@ REPAIR_HINTS = {
                   "it as a yes/no question answered 'No' or 'Not always'",
     "code_owned": "never write about advice, investment recommendations, disclaimers, fine "
                   "print, the small text below or how THIS text was written (by people, machines "
-                  "or AI) - the publisher adds its own notice; a contrast inside the lesson "
-                  "('built for games, not AI') is fine",
+                  "or AI), never label the text educational or informational ('educational "
+                  "content only', 'purely educational', 'for informational purposes'), never say "
+                  "it is not an offer, and never tell readers to consult a professional - the "
+                  "publisher adds its own notice; a contrast inside the lesson ('built for games, "
+                  "not AI') is fine",
+    "source_reference": "never mention the fact sheet, the source, the case study or where a fact "
+                        "came from ('the fact sheet shows', 'the source says', 'per the source', "
+                        "'the case study shows', 'the facts provided', 'the flags it names'), and "
+                        "never use the template's name ('case story') - state the fact itself, in "
+                        "your own voice",
     "cta": "no calls to action - never ask readers to tap, click, like, follow, subscribe, "
            "save, share, tag or comment, and never mention a link, the bio, the app, a part "
            "two, a free guide or an offer",

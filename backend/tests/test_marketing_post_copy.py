@@ -1343,8 +1343,11 @@ def test_the_image_footer_refuses_any_authorship_but_ai(authorship):
 
 
 #: What the public-copy scan finds in the footer — exactly what it finds in the short caption
-#: disclaimer: the disclaimer's own "investment advice", the brand, and nothing else.
-_FOOTER_SCAN = [("banned_phrase", "investment advice"), ("brand_mention", "caydex"), ("code_owned", "advice")]
+#: disclaimer: the disclaimer's own "investment advice" and "Educational only" (2026-10-31: the
+#: purpose label is the notice's job, so model text that writes it is `code_owned` — this pin is the
+#: proof the row matches the notice's own wording), the brand, and nothing else.
+_FOOTER_SCAN = [("banned_phrase", "investment advice"), ("brand_mention", "caydex"), ("code_owned", "advice"),
+                ("code_owned", "educational only")]
 
 
 @pytest.mark.parametrize("run_date", sorted(_FOOTER_GOLDEN))
@@ -1589,7 +1592,10 @@ _LONG_SCAN = [("banned_phrase", "investment advice"), ("banned_phrase", "not a r
 @pytest.mark.parametrize("variant", sorted(_TEMPLATE_GOLDEN))
 def test_the_template_disclaimers_pass_the_public_copy_scan(variant):
     text = _template_disclaimers(DATE)[variant]
-    want = _LONG_SCAN if variant.startswith("long") else _FOOTER_SCAN
+    # The video card says "Educational, impersonal information", never the "Educational only" label.
+    want = (_LONG_SCAN if variant.startswith("long")
+            else [hit for hit in _FOOTER_SCAN if hit != ("code_owned", "educational only")]
+            if variant == "card" else _FOOTER_SCAN)
     for kw in ({"allow_emoji": True}, {"allow_emoji": False, "strict_instruments": True},
                {"allow_emoji": False, "strict_instruments": False}):
         assert [(v.code, v.detail) for v in scan_text("f", clean(text), **kw)] == want, kw

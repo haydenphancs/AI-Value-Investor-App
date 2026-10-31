@@ -625,7 +625,13 @@ def resume_from(progress: Any, sheet_sha: str, review_round: int) -> Optional[Di
         logger.info("learn build: stored progress does not match this build (%s) — starting fresh",
                     sorted(k for k, v in key.items() if progress.get(k) != v))
         return None
-    return {"outline": progress.get("outline"), "sections": progress.get("sections") or []}
+    out = {"outline": progress.get("outline"), "sections": progress.get("sections") or []}
+    # Which provider wrote the stored sections (llm_provider, 2026-10-30) — only when a role was
+    # routed to Claude, so a default progress row resumes exactly as before.
+    served = progress.get("served_by")
+    if isinstance(served, list) and served:
+        out["served_by"] = [x for x in served if isinstance(x, str)][:W.MAX_SERVED_LABELS]
+    return out
 
 
 def _int(value: Any) -> int:

@@ -39,7 +39,7 @@ from app.services.marketing.writer_prompts import REPAIR_HINTS as _MARKETING_HIN
 
 #: Bump with any meaningful change to a prompt or to SYSTEM_BODY (it is stored with every draft
 #: and is part of the resume key: a half-written piece is never finished under a newer prompt).
-PROMPT_VERSION = "2026-10-24.1"   # 10-23: icons (.1); US/UK/EU without dots (.2); no title-repeat subheading (.3); list lead-ins (.4); no K/M/B abbreviations (.5) · 10-24: no unsupported aim/cause/result/significance/history claims (.1)
+PROMPT_VERSION = "2026-10-31.1"   # 10-23: icons (.1); US/UK/EU without dots (.2); no title-repeat subheading (.3); list lead-ins (.4); no K/M/B abbreviations (.5) · 10-24: no unsupported aim/cause/result/significance/history claims (.1) · 10-31: never cite the fact sheet/source, never label the article educational (.1)
 
 #: The owner's scope clause, kept as its own constant so a test can pin it is in SYSTEM_BODY.
 SCOPE_CLAUSE = (
@@ -82,7 +82,12 @@ SYSTEM_BODY = (
     "important or successful it was, and no event, product, partnership or historical detail "
     "the fact sheet does not state. Say what was filed or done, in plain words, and stop there. "
     "Where the fact sheet says little, explain how businesses of this kind work in general, "
-    "naming no company, instead of filling in from memory.\n\n"
+    "naming no company, instead of filling in from memory.\n"
+    "- State each fact directly: never mention the fact sheet, the source or where a fact came "
+    "from (not \"the fact sheet gives\" or \"the source says\"; the filing itself, \"the "
+    "company's annual report\", may be named), never label the article educational or "
+    "informational (\"for informational purposes\"), never say it is not an offer, and never "
+    "tell readers to consult a financial professional.\n\n"
     "ADVICE:\n"
     "- Never tell the reader to buy, sell, hold, own, add, trim or avoid anything, and never "
     "say an investment is suitable, right, a fit or a good idea for anyone.\n"

@@ -23,6 +23,7 @@ Category 1 (pure): one JSON fixture, the Learn bundle, the pure validators.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import re
@@ -884,3 +885,63 @@ def test_stats_from_needs_no_model_call(monkeypatch, capsys):
     assert "## Shape (accepted packages)" in out
     assert '- mm_hooks_naming_title_company: "4/15"' in out
     assert "# Marketing writer preview" not in out   # returned before planning any job
+
+
+# ── Claude (llm_provider, 2026-10-30): the measurement scripts ───────────────────────────────
+
+
+def test_a_claude_calibration_config_without_a_key_stops_before_any_call(monkeypatch):
+    from app.config import settings
+
+    cal = _calibrate_module()
+    monkeypatch.setattr(settings, "CAYDEX_ANTHROPIC_API_KEY", None)
+    with pytest.raises(SystemExit) as info:
+        asyncio.run(cal.run_calls([], "claude_opus55", 1, 1))
+    assert "CAYDEX_ANTHROPIC_API_KEY" in str(info.value)
+
+
+def test_a_failed_claude_calibration_call_still_counts_its_billed_tokens(monkeypatch):
+    from app.config import settings
+    from app.integrations import anthropic_client as ac
+    from app.services import llm_provider as lp
+
+    cal = _calibrate_module()
+    monkeypatch.setattr(settings, "CAYDEX_ANTHROPIC_API_KEY", "sk-ant-test")
+
+    async def refuse(self, prompt, **kwargs):
+        raise ac.ClaudeTruncatedException("cut", tokens_used=4321)
+
+    monkeypatch.setattr(lp.ClaudeOnly, "generate_json", refuse)
+    call = cal.Call(item=_MM, cases=[cal.Case(item=_MM, label="hook", text="A plain line.", expect=None,
+                                              source="test")], kind="honest_lines")
+    outcomes = asyncio.run(cal.run_calls([call], "claude_opus55", 1, 1))
+    assert outcomes[0].error and outcomes[0].tokens == 4321
+
+
+def test_the_preview_refuses_a_claude_writer_without_a_key_before_the_paid_baseline(monkeypatch):
+    from app.config import settings
+
+    prev = _preview_module()
+    monkeypatch.setattr(settings, "CAYDEX_ANTHROPIC_API_KEY", None)
+    monkeypatch.setattr(sys, "argv", ["marketing_preview.py", "--all-items", "--writer-model", "claude-sonnet-5-5"])
+    with pytest.raises(SystemExit) as info:
+        asyncio.run(prev.main())
+    assert "CAYDEX_ANTHROPIC_API_KEY" in str(info.value)
+
+
+def test_the_calibrator_checks_the_claude_key_before_any_gemini_config_spends(monkeypatch):
+    from app.config import settings
+
+    cal = _calibrate_module()
+    monkeypatch.setattr(settings, "CAYDEX_ANTHROPIC_API_KEY", None)
+    spent = []
+
+    async def no_call(*a, **k):
+        spent.append(a)
+        return []
+
+    monkeypatch.setattr(cal, "run_calls", no_call)
+    monkeypatch.setattr(sys, "argv", ["marketing_judge_calibrate.py", "--configs", "g38flash0,claude_opus55"])
+    with pytest.raises(SystemExit) as info:
+        asyncio.run(cal.main())
+    assert "claude_opus55" in str(info.value) and spent == []

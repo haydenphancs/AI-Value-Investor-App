@@ -3246,3 +3246,24 @@ async def test_e2e_batch3_switch_empty_keeps_the_batch1_e2e_byte_identical(bundl
     second = await pub.publish_cycle()
     assert (second["submitted"], second["retry"]) == (0, 0) and len(up.uploads) == 6 and sibling_reads == []
     assert up.unexpected == []
+
+
+# ── Claude as a second provider (llm_provider, 2026-10-30) ───────────────────────────────────
+
+
+def test_the_decision_text_names_the_models_only_when_the_posts_carry_them(configured):
+    from app.services.marketing.run_service import written_by_note
+
+    note = written_by_note({"served_by": "claude:claude-sonnet-5-5\nINJECTED",
+                            "judge": {"served_by": "gemini (Claude fallback: ClaudeRefusalException)"}})
+    assert note == {"writer": "claude:claude-sonnet-5-5 INJECTED",
+                    "judge": "gemini (Claude fallback: ClaudeRefusalException)"}
+    for absent in (None, {}, {"served_by": " "}, {"judge": "x"}, {"judge": {"served_by": 3}}):
+        assert written_by_note(absent) is None
+    routed = _row("x", "text")
+    routed["metadata"] = {**(routed.get("metadata") or {}), "written_by": note}
+    text = rs.compose_bundle_decision_text("post", [routed], [], "2026-10-30", False, [])
+    assert text.split("\n")[1] == ("Models: writer claude:claude-sonnet-5-5 INJECTED · "
+                                   "judge gemini (Claude fallback: ClaudeRefusalException)")
+    plain = rs.compose_bundle_decision_text("post", [_row("x", "text")], [], "2026-10-30", False, [])
+    assert "Models:" not in plain

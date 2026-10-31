@@ -575,7 +575,9 @@ CURATION: dict[str, TableDoc] = {
              "migration 190 (Company Weekly): template_id is a lesson template (class A) or a news "
              "series id (class C/F, selection.content_class_of) — the class that gates a post. A "
              "template row is INSERTed accepted by the selecting INSERT: no writer, no lease, "
-             "tokens_used 0, the as-filed record in fact_sheet."),
+             "tokens_used 0, the as-filed record in fact_sheet. Since migration 206: claude_usage "
+             "(JSONB, NULL unless Claude billed) holds the Claude tokens inside tokens_used by "
+             "model and kind, which the weekly digest's cost line prices apart from Gemini's."),
     "public.marketing_link_hits": T("marketing",
         purpose="Per-campaign daily tap counts for the smart link GET /go/{campaign}.",
         key=("campaign", "day", "hits"),

@@ -102,6 +102,10 @@ class ValidationResult:
     judged: bool = False
     judge_required: bool = False
     judge_call: Optional[Dict[str, Any]] = None
+    #: Which provider wrote this candidate ("claude:<model>", or "gemini (Claude fallback: …)")
+    #: — set only when the call went through a role routed to Claude (llm_provider); None on the
+    #: default Gemini path, so a default package is byte-identical to before.
+    served_by: Optional[str] = None
 
     @property
     def regex_ok(self) -> bool:
@@ -163,6 +167,38 @@ class WriterResult:
     prompt_version: str = wp.PROMPT_VERSION
     raw_outputs: List[Any] = field(default_factory=list)   # for the preview CLI only
     judge_mode: str = jd.MODE_ENFORCE
+    #: The Claude tokens inside `tokens_used`, by model and kind (llm_provider.CLAUDE_USAGE_KEY) —
+    #: writer and judge calls, a failed attempt's included. {} on the default path (no Claude call).
+    claude_usage: Dict[str, Dict[str, int]] = field(default_factory=dict)
+
+
+def _claude_spent(e: BaseException) -> int:
+    """Tokens a failed Claude attempt billed before the Gemini fallback raised `e` (llm_provider);
+    0 on the default path."""
+    from app.services.llm_provider import claude_tokens_of
+
+    return claude_tokens_of(e)
+
+
+def _with_claude(total: Dict[str, Dict[str, int]], carrier: Any) -> Dict[str, Dict[str, int]]:
+    """`total` plus the Claude usage a router result or exception carries (llm_provider); `total`
+    itself when it carries none — the default path never imports anything here."""
+    raw = (carrier.get("claude_usage") if isinstance(carrier, dict)
+           else getattr(carrier, "claude_usage", None))
+    if not raw:
+        return total
+    from app.services.llm_provider import claude_usage_of, merge_claude_usage
+
+    return merge_claude_usage(total, claude_usage_of(carrier))
+
+
+def _served(result: Any) -> Optional[str]:
+    """llm_provider's served-by label, or None for a plain Gemini result (no `provider` key)."""
+    if not isinstance(result, dict) or "provider" not in result:
+        return None
+    from app.services.llm_provider import served_by
+
+    return served_by(result)
 
 
 # ── parsing ───────────────────────────────────────────────────────────────────
@@ -403,13 +439,19 @@ def _image_text(obj: Dict[str, Any]) -> Tuple[str, List[str], List[Violation]]:
     return title, paragraphs, out
 
 
+#: A carousel slide TITLE field: the one place an opening list label ("Check 6:") is structure.
+_SLIDE_TITLE_FIELD_RE = re.compile(r"carousel_slides\[([0-9]{1,2})\]\.title")
+
+
 def _scan(name: str, text: str, item: ContentItem, *, allow_emoji: bool,
           myth_framed: bool = False, next_text: str = "") -> List[Violation]:
+    slide = _SLIDE_TITLE_FIELD_RE.fullmatch(name)
     return (scan_text(name, text, allow_emoji=allow_emoji,
                       strict_instruments=strict_instruments(item.kind),
                       company_terms=item.company_terms, myth_framed=myth_framed,
                       sheet_words=item.grounding.tokens, next_text=next_text)
-            + check_grounding(name, text, item.grounding))
+            + check_grounding(name, text, item.grounding,
+                              ordinal_max=int(slide.group(1)) + 1 if slide else 0))
 
 
 #: A card / slide TITLE that labels its body as the myth ("The myth", "Myth #2", "Common
@@ -614,6 +656,9 @@ def _pick_best(candidates: List[ValidationResult], *,
 #: exception itself is never wrapped or replaced — `is_transient_gemini_error` classifies by
 #: type, and a wrapper would turn every transient timeout into an ERROR page.
 TOKENS_ATTR = "marketing_tokens_used"
+#: Beside it, the Claude part of those tokens by model and kind (`WriterResult.claude_usage`) —
+#: set only when Claude billed; script_service records it in `marketing_scripts.claude_usage`.
+CLAUDE_USAGE_ATTR = "marketing_claude_usage"
 
 
 def _round_codes(rounds: List[RoundRecord]) -> Dict[str, List[str]]:
@@ -623,9 +668,12 @@ def _round_codes(rounds: List[RoundRecord]) -> Dict[str, List[str]]:
 
 
 def _note_failed_generation(e: Exception, tokens: int, rounds: List[RoundRecord], item: ContentItem,
-                            generation_id: str) -> None:
+                            generation_id: str,
+                            claude_usage: Optional[Dict[str, Dict[str, int]]] = None) -> None:
     try:
         setattr(e, TOKENS_ATTR, int(tokens))
+        if claude_usage:
+            setattr(e, CLAUDE_USAGE_ATTR, claude_usage)
     except (AttributeError, TypeError) as attach_err:  # a __slots__ / C-level exception type
         logger.warning(
             "marketing writer: could not attach %s to %s (%s: %s) source_ref=%s generation=%s "
@@ -751,13 +799,17 @@ async def generate_package(
     mode = jd.normalize_mode(judge_mode)
     if client is None:
         from app.integrations.gemini import get_gemini_client
+        from app.services.llm_provider import ProviderRouter
 
-        client = get_gemini_client()
+        # Claude first for this role when its switch says so, Gemini otherwise and on any Claude
+        # failure (llm_provider); with every switch at its default this is the plain Gemini call.
+        client = ProviderRouter(gemini=get_gemini_client())
 
     rounds: List[RoundRecord] = []
     raw_outputs: List[Any] = []
     candidates: List[ValidationResult] = []
     tokens = 0
+    claude_usage: Dict[str, Dict[str, int]] = {}   # the Claude part of `tokens`, priced apart
     calls = 0
     last_violations: List[Violation] = []
     previous: Any = None
@@ -801,6 +853,9 @@ async def generate_package(
                     usage_tag=USAGE_TAG,
                 )
             except Exception as e:
+                # A Claude attempt that billed before its Gemini fallback also failed (llm_provider).
+                tokens += _claude_spent(e)
+                claude_usage = _with_claude(claude_usage, e)
                 best = _pick_best(candidates, image_posts=image_posts)
                 if best is None:
                     raise
@@ -813,6 +868,7 @@ async def generate_package(
                 break
             used = int(result.get("tokens_used") or 0)
             tokens += used
+            claude_usage = _with_claude(claude_usage, result)
             obj, parse_violations = parse_response(result)
             raw_outputs.append(obj if obj is not None else (result.get("text") or "")[:2000])
             vr: Optional[ValidationResult] = None
@@ -822,6 +878,7 @@ async def generate_package(
             if obj is not None:
                 vr = validate_package(obj, item, run_date, allow_x_url=allow_x_url, store_state=store_state)
                 vr.judge_required = mode == jd.MODE_ENFORCE
+                vr.served_by = _served(result)
                 previous = obj
                 if mode == jd.MODE_OFF:
                     vr.judged = True
@@ -835,8 +892,9 @@ async def generate_package(
                                 client, item, jd.package_fields(vr.package or {}),
                                 generation_id=generation_id, round_no=round_no)
                         except Exception as e:
-                            spent = int(getattr(e, TOKENS_ATTR, 0) or 0)
+                            spent = int(getattr(e, TOKENS_ATTR, 0) or 0) + _claude_spent(e)
                             tokens += spent
+                            claude_usage = _with_claude(claude_usage, e)
                             judge_record = jd.JudgeCall([], spent, None, mode,
                                                         f"{type(e).__name__}: {e}"[:300]).as_dict()
                             if mode == jd.MODE_SHADOW:
@@ -856,8 +914,11 @@ async def generate_package(
                         else:
                             jtokens = int(jraw.get("tokens_used") or 0)
                             tokens += jtokens
+                            claude_usage = _with_claude(claude_usage, jraw)
                             judge_record = jd.JudgeCall(
                                 verdicts, jtokens, jraw.get("finish_reason"), mode).as_dict()
+                            if _served(jraw) is not None:
+                                judge_record["served_by"] = _served(jraw)
                             if mode == jd.MODE_ENFORCE:
                                 judge_vs = _apply_verdicts(vr, verdicts)
                             elif verdicts:
@@ -884,7 +945,7 @@ async def generate_package(
                 break
     except Exception as e:
         # Only Exception: a CancelledError (BaseException) must propagate untouched.
-        _note_failed_generation(e, tokens, rounds, item, generation_id)
+        _note_failed_generation(e, tokens, rounds, item, generation_id, claude_usage)
         raise
     if calls > MODEL_CALLS_PER_GENERATION:  # pragma: no cover — a contract breach, loudly
         logger.error("marketing writer made %d model calls (> %d) source_ref=%s generation=%s — "
@@ -900,7 +961,7 @@ async def generate_package(
             "codes=%s", item.key, template.id, generation_id, _round_codes(rounds),
         )
         return WriterResult("rejected", None, history, rounds, tokens,
-                            raw_outputs=raw_outputs, judge_mode=mode)
+                            raw_outputs=raw_outputs, judge_mode=mode, claude_usage=claude_usage)
     package = dict(best.package or {})
     if package.get(wp.IMAGE_FIELD) is None:
         # Degraded, not failed: the package still publishes, as text where the image would go.
@@ -911,13 +972,27 @@ async def generate_package(
             "%s", item.key, generation_id, sorted({v.code for v in best.image}),
             "this run's image platforms post text" if image_posts
             else "image posts are off, so nothing changes")
+    writer_model = WRITER_MODEL
+    if best.served_by and best.served_by.startswith("claude:"):
+        writer_model = best.served_by.split(":", 1)[1]
     package.update({"template_id": template.id, "prompt_version": wp.PROMPT_VERSION,
-                    "model": WRITER_MODEL})
+                    "model": writer_model})
     if mode != jd.MODE_OFF:
         package["judge"] = {
             "mode": mode, "model": jd.JUDGE_MODEL, "thinking_budget": jd.JUDGE_THINKING_BUDGET,
             "temperature": jd.JUDGE_TEMPERATURE, "rubric_version": jd.JUDGE_RUBRIC_VERSION,
             "verdicts": (best.judge_call or {}).get("verdicts", []),
         }
+        judge_served = (best.judge_call or {}).get("served_by")
+        if judge_served:
+            package["judge"]["served_by"] = judge_served
+            if judge_served.startswith("claude:"):
+                # Claude judged it: name that model, and record that the Gemini temperature and
+                # thinking budget were never sent (Claude takes neither — llm_provider).
+                package["judge"].update({"model": judge_served.split(":", 1)[1],
+                                         "temperature": None, "thinking_budget": None})
+    if best.served_by:
+        package["served_by"] = best.served_by
     return WriterResult("accepted", package, [v.as_dict() for v in best.violations], rounds,
-                        tokens, raw_outputs=raw_outputs, judge_mode=mode)
+                        tokens, model=writer_model, raw_outputs=raw_outputs, judge_mode=mode,
+                        claude_usage=claude_usage)

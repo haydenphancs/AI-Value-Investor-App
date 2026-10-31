@@ -81,6 +81,7 @@ import httpx
 import pytest
 
 from app.config import settings
+from app.integrations import anthropic_client as ac
 from app.integrations import bluesky, telegram, upload_post, x_api
 from app.schemas.marketing import IMAGE_FALLBACK_REASONS
 from app.services import notification_jobs
@@ -6666,6 +6667,190 @@ def test_a_junk_token_count_or_an_undatable_script_makes_gemini_unreadable(caplo
     assert _worked_lines(script_rows=base + stray)[2:4] == [COST_A, USAGE_A]
     # a date object is a date, as PostgREST's string is
     assert ds._gemini_week([{"run_date": date(2026, 10, 1), "tokens_used": 2}], WEEK_START, WEEK_END) == 3
+
+
+# ── the Claude part of the cost line (migration 206, 2026-10-31) ─────────────
+#
+# `marketing_scripts.claude_usage` holds the Claude tokens INSIDE `tokens_used`, by model and kind. By hand,
+# from the published list prices (digest_service.CLAUDE_MICROS_PER_MILLION_TOKENS), in integer micro-dollars:
+#   last week, Tue 09-29 (tokens_used 19,400): Sonnet 5.5 6,000 in + 2,000 out, Opus 5.5 3,000 in + 400 out =
+#     11,400 Claude tokens; 6,000 × 2 + 2,000 × 10 + 3,000 × 4 + 400 × 20 = 52,000 ($0.052).
+#     Gemini: (82,800 − 11,400) × 1.5 = 107,100 ($0.107). Usage 61,000 + 107,100 + 52,000 + 49,604 = 269,704
+#     ($0.270); total 269,704 + 3,679,671 = 3,949,375 ($3.949).
+#   the week before, Tue 09-22 (15,000): Opus 5.5 5,000 in + 1,000 out = 6,000 tokens; 5,000 × 4 + 1,000 × 20 =
+#     40,000. Gemini (60,000 − 6,000) × 1.5 = 81,000. Usage 55,000 + 81,000 + 40,000 + 40,664 = 216,664 ($0.217).
+
+_SONNET = {"input": 6_000, "output": 2_000, "cache_read": 0, "cache_write": 0}
+_OPUS = {"input": 3_000, "output": 400, "cache_read": 0, "cache_write": 0}
+_OPUS_PREV = {"input": 5_000, "output": 1_000, "cache_read": 0, "cache_write": 0}
+COST_MIXED = ("💵 Cost last week ≈ $3.949: X $0.061 (our ledger) · Gemini ≈ $0.107 · Claude ≈ $0.052 · "
+              "worker ≈ $0.050 · Upload-Post $3.680 (plan fee · 3 uploads)")
+
+
+def _usage_c(last: str = "≈ $0.270", before: str = "≈ $0.186") -> str:
+    """The usage line of a fortnight with Claude in either week: Claude joins the label."""
+    return f"Usage (X + Gemini + Claude + worker): last week {last} · week before {before}"
+
+
+def _with_claude(by_day: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The worked example's script rows, each day's `claude_usage` as given (absent days NULL — what the read
+    returns for a row no Claude call touched)."""
+    return [dict(r, claude_usage=by_day.get(r["run_date"])) for r in _cost_inputs()["script_rows"]]
+
+
+def test_a_gemini_only_fortnight_renders_byte_for_byte_as_before_claude():
+    """The default path: NULL (the read's value for every row no Claude call touched) or {} on every row is
+    the worked example, byte for byte — no Claude part, no Claude in the usage label, and no "claude" key in
+    either week's part."""
+    for empty in (None, {}):
+        rows = [dict(r, claude_usage=empty) for r in _cost_inputs()["script_rows"]]
+        s = _cost_summary(script_rows=rows)
+        assert ds.compose_digest(s).splitlines()[2:5] == [COST_A, USAGE_A, ""]
+        assert "claude" not in s["cost"]["last"] and "claude" not in s["cost"]["before"]
+        assert {k: s["cost"]["last"][k] for k in _LAST_KEYS} == EXPECTED_LAST
+        assert "Claude" not in ds.compose_digest(s)
+
+
+def test_a_mixed_week_prices_claude_apart_at_its_own_list_prices():
+    rows = _with_claude({"2026-09-29": {"claude-sonnet-5-5": _SONNET, "claude-opus-5-5": _OPUS}})
+    s = _cost_summary(script_rows=rows)
+    last, before = s["cost"]["last"], s["cost"]["before"]
+    assert (last["gemini"], last["claude"], last["usage"], last["total"]) == (107_100, 52_000, 269_704, 3_949_375)
+    assert last["unreadable"] == [] and last["usage_partial"] is False
+    assert "claude" not in before, "the week before had no Claude token: its part stays as it was"
+    assert ds.compose_digest(s).splitlines()[2:5] == [COST_MIXED, _usage_c(), ""]
+    # the alert line counts Claude as usage: $0.25 is passed only because of it ($0.235 without)
+    lines = ds.compose_digest(_cost_summary(script_rows=rows, cost_warn_micros=250_000)).splitlines()
+    assert lines[2:5] == [COST_MIXED, _usage_c(), "⚠️ Usage ≈ $0.270 passed your $0.25 alert line"]
+    assert "⚠️" not in "\n".join(ds.compose_digest(_cost_summary(cost_warn_micros=250_000)).splitlines()[2:5])
+
+
+def test_claude_in_the_week_before_only_joins_the_usage_label_never_last_weeks_parts():
+    rows = _with_claude({"2026-09-22": {"claude-opus-5-5": _OPUS_PREV}})
+    s = _cost_summary(script_rows=rows)
+    assert (s["cost"]["before"]["gemini"], s["cost"]["before"]["claude"], s["cost"]["before"]["usage"]) == (
+        81_000, 40_000, 216_664)
+    assert "claude" not in s["cost"]["last"]
+    assert ds.compose_digest(s).splitlines()[2:4] == [COST_A, _usage_c("≈ $0.235", "≈ $0.217")]
+    both = _with_claude({"2026-09-29": {"claude-sonnet-5-5": _SONNET, "claude-opus-5-5": _OPUS},
+                        "2026-09-22": {"claude-opus-5-5": _OPUS_PREV}})
+    assert _worked_lines(script_rows=both)[2:4] == [COST_MIXED, _usage_c(before="≈ $0.217")]
+
+
+def test_a_claude_model_without_a_price_is_unreadable_never_priced_at_a_guess(caplog):
+    """Its tokens can still be taken out of tokens_used (Gemini stays readable: (82,800 − 1,400) × 1.5 =
+    122,100); only their price is unknown, so Claude reads "unreadable" and the sums become floors:
+    61,000 + 122,100 + 49,604 = 232,704, + the fee = 3,912,375."""
+    caplog.set_level(logging.WARNING, logger=ds.__name__)
+    rows = _with_claude({"2026-09-29": {"claude-mystery-9": {"input": 1_000, "output": 400}}})
+    assert _worked_lines(script_rows=rows)[2:4] == [
+        "💵 Cost last week ≥ $3.912 (Claude unreadable): X $0.061 (our ledger) · Gemini ≈ $0.122 · "
+        "Claude unreadable · worker ≈ $0.050 · Upload-Post $3.680 (plan fee · 3 uploads)",
+        _usage_c(last="≥ $0.233 (Claude unreadable)")]
+    assert any("claude-mystery-9" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
+
+
+@pytest.mark.parametrize("junk", ["junk", [], 7, True, {"claude-sonnet-5-5": "x"},
+                                  {"claude-sonnet-5-5": {"input": -1}}, {"claude-sonnet-5-5": {"input": True}},
+                                  {"claude-sonnet-5-5": {"input": 1.5}}, {"claude-sonnet-5-5": {"input": "5"}},
+                                  {"claude-sonnet-5-5": {"tokens": 5}}, {7: {"input": 1}},
+                                  {"claude-sonnet-5-5": {"input": 10 ** 15}}])
+def test_an_unreadable_claude_usage_makes_both_model_parts_unreadable(junk, caplog):
+    """The split of tokens_used is unknown, so neither Gemini nor Claude can be priced: 61,000 + 49,604 =
+    110,604 is the floor, + the fee = 3,790,275. Never a wrong number, never Gemini's whole count."""
+    caplog.set_level(logging.WARNING, logger=ds.__name__)
+    assert _worked_lines(script_rows=_with_claude({"2026-09-29": junk}))[2:4] == [
+        "💵 Cost last week ≥ $3.790 (Gemini and Claude unreadable): X $0.061 (our ledger) · Gemini unreadable · "
+        "Claude unreadable · worker ≈ $0.050 · Upload-Post $3.680 (plan fee · 3 uploads)",
+        _usage_c(last="≥ $0.111 (Gemini and Claude unreadable)")]
+    assert any("claude_usage" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
+    # the same junk on a day outside both weeks is never read
+    stray = _cost_inputs()["script_rows"] + [{"run_date": "2026-10-05", "tokens_used": 5, "claude_usage": junk}]
+    assert _worked_lines(script_rows=stray)[2:4] == [COST_A, USAGE_A]
+
+
+def test_more_claude_tokens_than_tokens_used_makes_gemini_unreadable_but_claude_stands():
+    """Sat 10-02's tokens_used is 0, yet its claude_usage claims 8,000 (6,000 × 2 + 2,000 × 10 = 32,000):
+    Gemini cannot be the difference; Claude's own figure is still read. 61,000 + 32,000 + 49,604 = 142,604;
+    + the fee = 3,822,275."""
+    assert _worked_lines(script_rows=_with_claude({"2026-10-02": {"claude-sonnet-5-5": _SONNET}}))[2:4] == [
+        "💵 Cost last week ≥ $3.822 (Gemini unreadable): X $0.061 (our ledger) · Gemini unreadable · "
+        "Claude ≈ $0.032 · worker ≈ $0.050 · Upload-Post $3.680 (plan fee · 3 uploads)",
+        _usage_c(last="≥ $0.143 (Gemini unreadable)")]
+
+
+def test_an_undatable_script_names_claude_only_when_a_script_holds_claude_tokens():
+    base = _cost_inputs()["script_rows"]
+    undated = {"run_date": "garbage", "tokens_used": 5}
+    assert ds._claude_week(base + [undated], WEEK_START, WEEK_END) == (None, False)
+    assert ds._claude_week(None, WEEK_START, WEEK_END) == (None, False)
+    with_claude = _with_claude({"2026-09-22": {"claude-opus-5-5": _OPUS_PREV}}) + [undated]
+    assert ds._claude_week(with_claude, WEEK_START, WEEK_END) == (None, True)
+    # by hand: X and the worker are still read — 61,000 + 49,604 + the fee = 3,790,275; 55,000 + 40,664 = 95,664
+    assert _worked_lines(script_rows=with_claude)[2:4] == [
+        "💵 Cost last week ≥ $3.790 (Gemini and Claude unreadable): X $0.061 (our ledger) · Gemini unreadable · "
+        "Claude unreadable · worker ≈ $0.050 · Upload-Post $3.680 (plan fee · 3 uploads)",
+        _usage_c("≥ $0.111 (Gemini and Claude unreadable)", "≥ $0.096 (Gemini and Claude unreadable)")]
+
+
+@pytest.mark.parametrize("usage, micros", [
+    ({"claude-haiku-5-5": {"input": 5}}, 1),                       # 0.5 micro, half-up
+    ({"claude-haiku-5-5": {"input": 4}}, 0),                       # 0.4 micro
+    ({"claude-haiku-5-5": {"input": 4, "cache_read": 0}}, 0),      # an unpriced kind with no tokens is fine
+    ({"claude-haiku-5-5": {"cache_read": 1}}, None),               # …with tokens, it is unreadable
+    ({"claude-sonnet-5-5-20261001": {"output": 1}}, 10),           # a dated snapshot is its model
+    ({"claude-opus-5": {"output": 1}}, None),                      # never another model's row by prefix
+    ({"claude-sonnet-5-5": {"cache_write": 2}, "claude-fable-5-1": {"cache_read": 4}}, 6),   # 5 + 1
+    ({"claude-sonnet-5-5": {"input": 500_000_000_000}}, 1_000_000_000_000),          # $1,000,000: still read
+    ({"claude-sonnet-5-5": {"input": 500_000_000_001}}, None),                       # past it: unreadable
+])
+def test_claude_is_each_models_tokens_at_its_own_rates(usage, micros):
+    row = [{"run_date": "2026-10-01", "tokens_used": 10 ** 14, "claude_usage": usage}]
+    assert ds._claude_week(row, WEEK_START, WEEK_END) == (micros, True)
+
+
+def test_claude_is_rounded_once_per_week_never_per_script():
+    """Two days of 3 Sonnet cache-read tokens at $0.20 per 1M: 0.6 + 0.6 = 1.2 micro → 1 (per script it
+    would be 1 + 1 = 2)."""
+    rows = [{"run_date": d, "tokens_used": 3, "claude_usage": {"claude-sonnet-5-5": {"cache_read": 3}}}
+            for d in ("2026-09-29", "2026-10-01")]
+    assert ds._claude_week(rows, WEEK_START, WEEK_END) == (1, True)
+    assert ds._gemini_week(rows, WEEK_START, WEEK_END) == 0
+
+
+def test_the_claude_price_table_is_the_published_list_and_covers_the_default_models():
+    """Anthropic's list prices (checked 2026-10-31), by hand in dollars per 1M: input, output, cache read,
+    cache write (1.25 × input). A changed price must change this test on purpose."""
+    def usd(*dollars):
+        return tuple(None if d is None else round(d * 1_000_000) for d in dollars)
+
+    assert ds.CLAUDE_MICROS_PER_MILLION_TOKENS == {
+        "claude-sonnet-5-5": usd(2, 10, 0.20, 2.50),
+        "claude-opus-5-5": usd(4, 20, 0.20, 5),
+        "claude-fable-5-1": usd(10, 50, 0.25, 12.50),
+        "claude-haiku-5-5": usd(0.10, 0.50, None, 0.125),
+    }
+    assert ds.CLAUDE_TOKEN_KINDS == ac.USAGE_KINDS, "the stored kinds are the client's"
+    # the models the switches send by default are priced in full: a default the table misses would read
+    # "Claude unreadable" on the first Claude week
+    fields = type(settings).model_fields
+    for name in ("CAYDEX_CLAUDE_WRITER_MODEL", "CAYDEX_CLAUDE_JUDGE_MODEL"):
+        rates = ds.claude_rates(fields[name].default)
+        assert rates is not None and None not in rates, name
+
+
+@pytest.mark.asyncio
+async def test_gather_prices_claude_apart_from_the_ledgers_own_rows(digest_ledger, platforms_forbidden, monkeypatch):
+    """End to end through the real read (`script_tokens_between` → `claude_usage`)."""
+    monkeypatch.setattr(settings, "MARKETING_UPLOAD_POST_MONTHLY_USD", 16.0)
+    _seed_costs(digest_ledger)
+    for row in digest_ledger.fake.tables[mrs.SCRIPTS].rows:
+        if row["run_date"] == "2026-09-29":
+            row["claude_usage"] = {"claude-sonnet-5-5": _SONNET, "claude-opus-5-5": _OPUS}
+    report = await ds.gather_digest(digest_ledger, NOW)
+    assert (report["cost"]["last"]["gemini"], report["cost"]["last"]["claude"]) == (107_100, 52_000)
+    assert ds.compose_digest(report).splitlines()[2:4] == [COST_MIXED, _usage_c()]
+    assert platforms_forbidden == []
 
 
 def test_a_300_post_week_keeps_the_cost_block_whole_under_the_date_line():

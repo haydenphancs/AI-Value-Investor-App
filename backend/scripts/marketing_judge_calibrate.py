@@ -64,6 +64,10 @@ CONFIGS: Dict[str, Tuple[str, Optional[int]]] = {
     "g38flash0": ("gemini-3.8-flash", 0),
     "g38flash": ("gemini-3.8-flash", None),
     "g31pro": ("gemini-3.1-pro-preview", None),
+    # Claude (2026-10-30, llm_provider): asked DIRECTLY — no Gemini fallback, so every verdict is
+    # Claude's. Thinking budget 0 = effort CAYDEX_CLAUDE_EFFORT; Opus 5.5 always thinks adaptively.
+    "claude_opus55": ("claude-opus-5-5", 0),
+    "claude_sonnet55": ("claude-sonnet-5-5", 0),
 }
 
 #: Hand-written must-fail lines: (item, field kind, text, the rule we expect). Written for this
@@ -443,11 +447,32 @@ class Outcome:
     tokens: int = 0
 
 
+def _require_claude_key(configs: List[str]) -> None:
+    """Exit before ANY paid call when a Claude config is asked for without a key — main() checks
+    every config up front, so a Gemini config earlier in the list is never paid for and lost."""
+    claude = [c for c in configs if CONFIGS[c][0].startswith("claude-")]
+    if not claude:
+        return
+    from app.integrations import anthropic_client as ac
+
+    if not ac.is_configured():
+        raise SystemExit(f"{', '.join(claude)} need(s) CAYDEX_ANTHROPIC_API_KEY in this shell (or backend/.env)")
+
+
 async def run_calls(calls: List[Call], config: str, samples: int, concurrency: int) -> List[Outcome]:
     from app.integrations.gemini import get_gemini_client
 
-    client = get_gemini_client()
     model, budget = CONFIGS[config]
+    if model.startswith("claude-"):
+        from app.services.llm_provider import ClaudeOnly, effective_effort
+
+        _require_claude_key([config])
+
+        print(f"{config}: {model} at effort {effective_effort()} (CAYDEX_CLAUDE_EFFORT), "
+              f"no Gemini fallback, transport errors retried 3 times", flush=True)
+        client = ClaudeOnly(model, retries=3)
+    else:
+        client = get_gemini_client()
     sem = asyncio.Semaphore(max(1, concurrency))
 
     async def one(n: int, call: Call, s: int) -> Outcome:
@@ -461,8 +486,11 @@ async def run_calls(calls: List[Call], config: str, samples: int, concurrency: i
                 return Outcome(call, s, config, verdicts, None, time.monotonic() - t,
                                int(raw.get("tokens_used") or 0))
             except Exception as e:  # recorded, never a pass
+                # A Claude failure carries its billed tokens as `tokens_used` (a judge parse
+                # failure as `marketing_tokens_used`): count either, so the cost line is honest.
+                spent = getattr(e, "marketing_tokens_used", None) or getattr(e, "tokens_used", 0)
                 return Outcome(call, s, config, [], f"{type(e).__name__}: {e}"[:300],
-                               time.monotonic() - t, int(getattr(e, "marketing_tokens_used", 0) or 0))
+                               time.monotonic() - t, int(spent or 0))
 
     return await asyncio.gather(*(one(n, c, s) for s in range(samples) for n, c in enumerate(calls)))
 
@@ -618,6 +646,7 @@ async def main() -> int:
     unknown = [c for c in configs if c not in CONFIGS]
     if unknown:
         ap.error(f"unknown config(s) {unknown}; choose from {list(CONFIGS)}")
+    _require_claude_key(configs)
 
     if args.fact_sheets:
         calls = fact_sheet_calls()

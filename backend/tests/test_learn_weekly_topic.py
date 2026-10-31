@@ -1175,3 +1175,15 @@ def test_topic_problem_catches_contract_breaks(mutate):
     assert topic.topic_problem(t) is None
     mutate(t)
     assert topic.topic_problem(t) is not None
+
+
+# ── 2026-10-31: a filing span that cites a "fact sheet" or says "for informational purposes" ───
+# The peg screen runs the article validators on the verbatim span ("a span that passes here licenses
+# the writer to say it"), and the writer may not restate "the fact sheet" or a purpose label — so
+# such a span is refused as a peg, on purpose (review round 2026-10-31). Pinned so the coupling is
+# documented, not accidental.
+
+def test_an_exhibit_fact_sheet_span_is_refused_as_a_peg():
+    span = "The company furnished the fact sheet attached as Exhibit 99.2 for informational purposes only."
+    problem = topic.peg_problem(span, ["Acme"])
+    assert problem is not None and "source_reference" in problem and "code_owned" in problem

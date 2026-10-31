@@ -169,7 +169,10 @@ is shown for at most 96 h, and is replaced by the live answer as soon as that la
 └─────────────────┘        └─────────────────┘        └─────────────────┘
 ```
 
-**Integrations** (`backend/app/integrations/`, **18** modules): `fmp`, `gemini`, `coingecko`, `fred`,
+**Integrations** (`backend/app/integrations/`, **19** modules): `fmp`, `gemini`, `anthropic_client` (Claude, the
+SECOND provider for the marketing and Learn weekly writer/judge roles only, behind per-role switches that
+default to Gemini; called only by `app/services/llm_provider.py`, which falls back to the same Gemini call on
+any Claude failure, 2026-10-30), `coingecko`, `fred`,
 `finra_short_interest`, `apewisdom`, `alternative_me`, `census`, `openfda`, `uspto`, `app_store`,
 `openai_compat`, `telegram` (the marketing review bot, §12.9), `x_api`, `bluesky` and `upload_post`
 (the marketing publisher's platforms, §12.10), and `brave_search` (the Brave Search API behind report
@@ -6562,7 +6565,7 @@ backend/
 │   │       ├── api.py            # router registration
 │   │       └── endpoints/        # 24 modules; HTTP surface only (marketing_internal.py is worker-facing, §12)
 │   ├── core/security.py          # (config and dependencies are NOT here — see below)
-│   ├── integrations/             # 18 thin HTTP clients + fmp_entitlements (data only)
+│   ├── integrations/             # 19 thin HTTP clients + fmp_entitlements (data only)
 │   ├── models/                   # EMPTY. Vestigial. There is no ORM — CLAUDE.md invariant #5
 │   ├── schemas/                  # Pydantic v2 request/response models
 │   ├── services/

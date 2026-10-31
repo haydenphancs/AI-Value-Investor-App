@@ -1709,3 +1709,28 @@ def test_punctuation_before_a_sentences_first_word_keeps_it_first(ctx, text):
 def test_a_word_that_does_not_open_its_sentence_is_still_a_name(ctx, text):
     assert "Buybacks" in {i.detail for i in para(text, grounding_ctx=ctx)
                           if i.code == "ungrounded_entity"}, para(text, grounding_ctx=ctx)
+
+
+# ── Claude can write Learn pieces too (llm_provider, 2026-10-30) ─────────────────────────────
+
+
+@pytest.mark.parametrize("text", [
+    "I am Claude.",
+    "I'm Claude, and here is how the filing reads.",
+    "I was built by Anthropic.",
+    "I was trained by the team at Anthropic.",
+    "I'm made by Anthropic to explain filings.",
+])
+def test_a_first_person_claude_or_anthropic_self_reference_fails(text):
+    assert V.self_reference_hits(text), text
+    assert "self_reference" in para_codes(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Anthropic sells its Claude models to every large cloud.",
+    "Claude, built by Anthropic, runs on rented chips.",
+    "Models built by Anthropic run on these clusters.",
+    "Amazon invested in Anthropic, the maker of Claude.",
+])
+def test_third_person_claude_and_anthropic_subject_matter_passes(text):
+    assert V.self_reference_hits(text) == []

@@ -1490,3 +1490,13 @@ def test_a_pick_writes_exactly_what_the_topic_builders_contract_helper_says(fake
     row = piece_row(fake, p["id"])
     assert row["topic"] == expected["topic"]
     assert row["category"] == expected["category"] and row["subjects"] == expected["subjects"]
+
+
+def test_the_header_names_the_models_of_a_claude_routed_piece_and_only_then():
+    base = {"kind": "deep_dive", "period_key": KEY, "review_round": 1, "tokens_used": 10,
+            "title": "T", "topic": {}, "scheduled_publish_at": None, "hold_until": None}
+    routed = {**base, "validation": {"served_by": ["writer: claude:claude-sonnet-5-5\nINJECTED"]}}
+    text = review.review_header_text(routed, None, {"sections": []})
+    assert "Models: writer claude:claude-sonnet-5-5 INJECTED" in text       # scrubbed onto one line
+    plain = review.review_header_text({**base, "validation": {}}, None, {"sections": []})
+    assert "Models:" not in plain

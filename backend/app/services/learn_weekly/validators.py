@@ -206,6 +206,12 @@ _LEARN_SELF_PATTERNS: Tuple[str, ...] = (
     # "I'm just an AI assistant", "I am a chatbot".
     r"\bi(?:'m| am) (?:just |only |merely )?an? (?:ai|artificial intelligence|llm|chatbot|"
     r"virtual assistant|ai assistant|ai model)\b",
+    # Claude can write Learn pieces too (llm_provider, 2026-10-30), so the first-person vendor rows
+    # above (Google / OpenAI / Gemini) get their Anthropic twins — first person only, so
+    # "Anthropic sells its Claude models to clouds" stays third-person subject matter.
+    r"\bi(?:'m| am) claude\b",                                  # "I am Claude"
+    r"\bi(?:'m| am| was)?\s+(?:developed|built|created|made|powered|trained)"
+    r"(?:\s+\w+){0,3}\s+by (?:anthropic|claude)\b",                # "I was made by Anthropic"
 )
 _SELF_RE = re.compile("|".join(_GUARDRAIL_SELF_PATTERNS + _LEARN_SELF_PATTERNS), re.IGNORECASE)
 

@@ -330,17 +330,39 @@ def _rows_of(path: Path) -> List[Dict[str, Any]]:
     return [r for r in rows or [] if isinstance(r, dict)]
 
 
+def _measure_client(writer_model: Optional[str]) -> Any:
+    """None → the production default (llm_provider's router, i.e. the role switches). A Claude model →
+    the WRITER calls go to that model with NO Gemini fallback (a fallback would mix Gemini drafts into a
+    Claude measurement) and the judge calls stay on the router, so a baseline and a Claude run are
+    judged alike."""
+    if not writer_model:
+        return None
+    from app.integrations.gemini import get_gemini_client
+    from app.services.llm_provider import ClaudeOnly, ProviderRouter
+
+    claude, router = ClaudeOnly(writer_model, retries=2), ProviderRouter(gemini=get_gemini_client())
+
+    class _Split:
+        async def generate_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            target = claude if kwargs.get("usage_tag") == "marketing_writer" else router
+            return await target.generate_json(prompt, **kwargs)
+
+    return _Split()
+
+
 async def _run_one(item_key: str, template_id: str, run_date: date, show_facts: bool,
                    allow_x_url: bool, show_raw: bool = False,
                    judge_mode: str = jd.MODE_ENFORCE,
-                   store_state: str = post_copy.STORE_PRELAUNCH) -> Optional[WriterResult]:
+                   store_state: str = post_copy.STORE_PRELAUNCH,
+                   writer_model: Optional[str] = None) -> Optional[WriterResult]:
     item = content_pool.get_item(item_key)
     template = selection.TEMPLATES_BY_ID[template_id]
     try:
         res = await generate_package(item, template, run_date,
                                      generation_id=f"preview-{uuid.uuid4().hex[:8]}",
                                      allow_x_url=allow_x_url, judge_mode=judge_mode,
-                                     store_state=store_state)
+                                     store_state=store_state,
+                                     client=_measure_client(writer_model))
     except Exception as e:  # a preview reports and moves on; it never retries or spends more
         print(f"## {run_date} — {item_key}\n\n**ERROR** {type(e).__name__}: {e}\n", flush=True)
         return None
@@ -365,6 +387,9 @@ async def main() -> int:
     ap.add_argument("--concurrency", type=int, default=3)
     ap.add_argument("--judge", choices=jd.MODES, default=jd.normalize_mode(settings.MARKETING_JUDGE_MODE),
                     help="semantic judge mode for this preview (default: MARKETING_JUDGE_MODE)")
+    ap.add_argument("--writer-model",
+                    help="ask THIS Claude model for every writer call, with no Gemini fallback "
+                         "(e.g. claude-sonnet-5-5; needs CAYDEX_ANTHROPIC_API_KEY) — the judge stays as configured")
     ap.add_argument("--dump-packages", type=Path,
                     help="write every package the run produced (judge-visible fields, every "
                          "round) as a calibration fixture to this path")
@@ -375,6 +400,11 @@ async def main() -> int:
                          "MARKETING_APP_STORE_PREORDER give; production has been 'live' since the app "
                          "launched 2026-10-05, so pass --store-state live to measure its budgets)")
     args = ap.parse_args()
+    if args.writer_model and not args.stats_from:
+        from app.integrations import anthropic_client as ac
+
+        if not ac.is_configured():   # before any paid call
+            raise SystemExit("--writer-model needs CAYDEX_ANTHROPIC_API_KEY in this shell (or backend/.env)")
     if args.stats_from:
         _print_shape(shape_stats(_rows_of(args.stats_from)))
         return 0
@@ -421,7 +451,8 @@ async def main() -> int:
     async def run(job):
         async with sem:
             return await _run_one(*job, show_facts=args.facts, allow_x_url=args.allow_x_url,
-                                  show_raw=args.raw, judge_mode=args.judge, store_state=args.store_state)
+                                  show_raw=args.raw, judge_mode=args.judge, store_state=args.store_state,
+                                  writer_model=args.writer_model)
 
     results = await asyncio.gather(*(run(j) for j in jobs))
     done = [r for r in results if r is not None]

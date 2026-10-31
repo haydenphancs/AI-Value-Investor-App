@@ -7299,3 +7299,26 @@ async def test_batch3_a_template_extra_that_fails_its_recheck_is_skipped_not_409
     assert "re-check" in msg and "banned_word" in msg
     for p in posts:
         assert p["metadata"]["authorship"] == "template" and p["metadata"]["made_with_ai"] is (p["format"] == "video")
+
+
+# ── Claude as a second provider (llm_provider, 2026-10-30): the written_by note ──────────────
+
+
+@pytest.mark.asyncio
+async def test_every_post_of_a_claude_written_run_carries_the_written_by_note(svc):
+    rid, specs = await _comment_run(svc, "live")
+    out = _script_output(svc, rid)
+    out["served_by"] = "claude:claude-sonnet-5-5"
+    out["judge"] = {**(out.get("judge") or {}), "served_by": "claude:claude-opus-5-5"}
+    posts = await svc.create_posts(rid, specs, claim=_holder(svc, rid))
+    notes = _notes(posts, schemas.POST_METADATA_WRITTEN_BY)
+    assert set(notes) == set(_EVERY_OUTLET)
+    assert all(n == {"writer": "claude:claude-sonnet-5-5", "judge": "claude:claude-opus-5-5"}
+               for n in notes.values())
+
+
+@pytest.mark.asyncio
+async def test_a_default_gemini_run_writes_no_written_by_note(svc):
+    rid, specs = await _comment_run(svc, "live")
+    posts = await svc.create_posts(rid, specs, claim=_holder(svc, rid))
+    assert all(schemas.POST_METADATA_WRITTEN_BY not in p["metadata"] for p in posts)

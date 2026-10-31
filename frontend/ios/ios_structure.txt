@@ -187,7 +187,7 @@ SERVICES
 
 AudioManager.swift              -> Global audio player (AVFoundation). Manages
                                    playback, mini-player, full-screen player,
-                                   compact mode (status island)
+                                   compact mode (player beside Ask Cay AI bar)
 AIVoiceManager.swift            -> AI voice interaction management
 
 ================================================================================

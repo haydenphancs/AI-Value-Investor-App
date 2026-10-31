@@ -4,18 +4,36 @@
 //
 //  Reusable overlay that keeps the global audio player visible on `.fullScreenCover` detail
 //  screens. A full-screen cover draws ABOVE RootContainerView, hiding the root audio overlay — so
-//  every covered screen renders the player itself via this modifier instead. It mirrors the three
-//  presentations the root uses (top status island / bottom mini player / full-screen player) and
-//  registers the screen as the overlay "host" so the root suppresses its own (no double render).
+//  every covered screen renders the player itself via this modifier instead. It mirrors the two
+//  presentations the root uses (bottom mini player / full-screen player).
+//
+//  WHERE THE PLAYER LIVES. A screen with an Ask Cay AI bar shows the player as the square beside
+//  that bar (`ChatBarAudioControl`, inside `CaydexAIChatBar`); the AI chat screen shows it as a
+//  pill in its top bar (`AudioStatusIsland`). Nothing ever floats at the top: the old status
+//  island did, on iPhones without a Dynamic Island, over the stock header's Search and bell — and
+//  a Dynamic Island shows Now Playing only once the user leaves the app, so it was never a
+//  substitute either. Same layout on every iPhone.
+//
+//  ONE PLAYER, NEVER TWO. Only a PRESENTATION hides the root's layer. A host PUSHED inside a tab's
+//  NavigationStack is still in the root's tree, where RootContainerView already draws the player,
+//  so drawing it here as well stacked a second capsule a couple of points off the first — the
+//  "double edge" on Money Moves, a push that carried the cover-only `showBottomMiniPlayer`. There is
+//  no host registration and the root never suppresses itself; instead this modifier asks UIKit
+//  whether its host is presented (`ModalPresentationReader`) and draws only when it is, or while that
+//  is still unknown. The asset screens, pushed in Tracking and presented everywhere else, need no
+//  flag of their own.
 //
 //  Apply ONE of these shapes per screen:
 //   • Asset/stock screens     → `.globalAudioOverlay(token:, forceCompact: true)`
-//       Immediately collapses to the top island on open (bottom stays clear for "Ask Cay AI").
+//       The root's floating player stands down while the screen is open, so it never lands on
+//       "Ask Cay AI"; the square beside that bar is the screen's player.
 //   • Other cover screens      → `.globalAudioOverlay(token:, showBottomMiniPlayer: true)`
-//       (News / Trending / lists with no chat bar) — keeps the bottom mini player so audio persists.
+//       (Trending / lists with no chat bar) — keeps the bottom mini player so audio persists.
+//       A screen that is only ever PUSHED in a tab (Money Moves, Journey, Library) takes none of
+//       this: the root draws the player over it and `.miniPlayerSafeArea()` keeps its last row clear.
 //   • Wiser reading screens    → `.globalAudioOverlay(token:, readerHost:)`
-//       The screen renders its own bottom mini player ABOVE the chat bar and drives compact mode
-//       from chat-bar focus; this modifier just supplies the island + full-screen player + host.
+//       Their player is the square beside their Ask Cay AI bar; this modifier supplies the
+//       full-screen player and the in-place "Read".
 //
 //  The full-screen player's "Read" works on EVERY host: a Wiser reader showing the narrated book
 //  jumps in place (`readerHost`); any other host — including another book's screen — opens the
@@ -29,14 +47,15 @@ struct GlobalAudioOverlay: ViewModifier {
 
     /// Whether this screen's bottom tab is the active one. For a screen pushed inside a tab's
     /// NavigationStack, tabs are opacity-mounted (no onDisappear on a tab switch), so forced-compact
-    /// must follow this reactively or it leaks the island onto other tabs. fullScreenCover screens
+    /// must follow this reactively or it hides the player on other tabs. fullScreenCover screens
     /// don't inherit it → default `true` (a presented cover is always foreground).
     @Environment(\.isActiveTab) private var isActiveTab
 
     /// Stable per-screen token (a `@State` UUID string on the host view). Idempotently keys the
     /// compact-mode reason for this screen.
     let token: String
-    /// Asset screens set this — collapse to the top island for the screen's whole lifetime.
+    /// Asset screens set this — the root's floating player stands down for the screen's whole
+    /// lifetime, so it never lands on their Ask Cay AI bar (their square beside it plays instead).
     var forceCompact: Bool = false
     /// Cover screens with no chat bar set this — render the bottom mini player when not compact.
     var showBottomMiniPlayer: Bool = false
@@ -47,44 +66,51 @@ struct GlobalAudioOverlay: ViewModifier {
     /// Read's target when this host can't jump in place (see `openNarratedCore`).
     @State private var readerRoute: NarratedCoreRoute?
 
+    /// Whether the host sits inside a modal presentation (a cover or a sheet). nil until
+    /// `ModalPresentationReader` has seen the host reach a window.
+    @State private var isInsideModalPresentation: Bool?
+
+    /// Draw the mini player and the full-screen player HERE only where the root's own
+    /// layer cannot be seen: inside a presentation — or while that is still unknown, so a failed
+    /// read can only ever leave the old double render, never a cover with no player at all. A host
+    /// known to be in the root's tree (a push inside a tab) leaves both to RootContainerView.
+    private var drawsPlayerChrome: Bool { isInsideModalPresentation != false }
+
     func body(content: Content) -> some View {
         content
             // Reserve bottom space so scroll content / fixed CTAs aren't hidden behind the floating
-            // bottom mini player (mirrors RootContainerView's MiniPlayerSafeAreaModifier, 88pt).
+            // bottom mini player (the same `GlobalMiniPlayer.contentClearance` as
+            // `miniPlayerSafeArea()`). Deliberately NOT gated on `drawsPlayerChrome`: on a pushed
+            // host the capsule is the root's, but it floats over this screen all the same.
             .safeAreaInset(edge: .bottom) {
                 if showBottomMiniPlayer && audioManager.hasActiveEpisode
                     && !audioManager.isCompactMode && !audioManager.showFullScreenPlayer {
-                    Color.clear.frame(height: 88)
+                    Color.clear.frame(height: GlobalMiniPlayer.contentClearance)
                 }
             }
-            // Top status island — NON-DYNAMIC-ISLAND DEVICES ONLY. On a DI device the system Now
-            // Playing is the top indicator; on non-DI devices there is none, so keep an in-app island.
-            .overlay(alignment: .top) {
-                if audioManager.hasActiveEpisode && audioManager.isCompactMode
-                    && !audioManager.showFullScreenPlayer && !AudioManager.hasDynamicIsland {
-                    AudioStatusIsland()
-                        .padding(.top, 8)
-                        .transition(.asymmetric(
-                            insertion: .move(edge: .top).combined(with: .opacity),
-                            removal: .move(edge: .top).combined(with: .opacity)
-                        ))
-                }
-            }
-            // Bottom mini player (only for screens without their own chat-bar-stacked player)
+            // Bottom mini player (only for cover screens without an Ask Cay AI bar — a screen with
+            // one carries the player as the square beside its bar, `ChatBarAudioControl`)
             .overlay(alignment: .bottom) {
-                if showBottomMiniPlayer && audioManager.hasActiveEpisode && !audioManager.isCompactMode && !audioManager.showFullScreenPlayer {
+                if drawsPlayerChrome && showBottomMiniPlayer && audioManager.hasActiveEpisode && !audioManager.isCompactMode && !audioManager.showFullScreenPlayer {
                     GlobalMiniPlayer()
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
             // Full-screen now-playing
             .overlay {
-                if audioManager.showFullScreenPlayer {
+                if drawsPlayerChrome && audioManager.showFullScreenPlayer {
                     FullScreenAudioPlayer(onNavigateToCore: openNarratedCore)
                         .transition(.move(edge: .bottom))
                         .zIndex(100)
                 }
             }
+            // Presented, or pushed in the root's own tree? Decides `drawsPlayerChrome`.
+            .background(
+                ModalPresentationReader { isInsideModalPresentation = $0 }
+                    .frame(width: 0, height: 0)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            )
             // Re-inject so the hosted players resolve `@EnvironmentObject AudioManager` even though the
             // environment object does NOT cross the presenting `.fullScreenCover` boundary.
             .environmentObject(audioManager)
@@ -92,7 +118,7 @@ struct GlobalAudioOverlay: ViewModifier {
             .animation(.spring(response: 0.35, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
             .animation(.spring(response: 0.4, dampingFraction: 0.85), value: audioManager.showFullScreenPlayer)
             .onAppear {
-                // Asset screens collapse to the island while their tab is foreground.
+                // Asset screens stand the root's player down while their tab is foreground.
                 if forceCompact { audioManager.setCompactMode(isActiveTab, reason: token) }
             }
             .onChange(of: isActiveTab) { _, active in
@@ -105,8 +131,8 @@ struct GlobalAudioOverlay: ViewModifier {
                 audioManager.setCompactMode(false, reason: token)
             }
             .narratedCoreReader(item: $readerRoute)
-            // This modifier sits on screens no tab root resets — Money Moves is a push Learn
-            // keeps — so it clears its own reader cover for a widget or push tap.
+            // This modifier sits on screens no tab root resets — an asset screen pushed in Tracking
+            // is a push that tab keeps — so it clears its own reader cover for a widget or push tap.
             .onPresentationReset {
                 readerRoute = nil
             }
@@ -120,6 +146,48 @@ struct GlobalAudioOverlay: ViewModifier {
             host.openCore(route.coreNumber)
         } else {
             readerRoute = route
+        }
+    }
+}
+
+// MARK: - Presentation probe
+
+/// Reports whether the view it sits in lives inside a modal presentation — a `.fullScreenCover` or
+/// a `.sheet` — rather than in the root's own tree (a tab, or a push inside a tab's
+/// NavigationStack). Read from UIKit because SwiftUI has no value that tells a cover from a push;
+/// `ModalPresentationProbe` answers a different question (is ANYTHING presented right now).
+///
+/// `presentingViewController` is non-nil for a presented controller AND for every child of one
+/// (UIKit reports the presenter of the nearest presented ancestor), so a screen pushed inside a
+/// cover's own NavigationStack — an asset screen in `AlertDestinationCover` — reads as presented.
+private struct ModalPresentationReader: UIViewRepresentable {
+    let onResolve: (Bool) -> Void
+
+    func makeUIView(context: Context) -> ProbeView {
+        let view = ProbeView()
+        view.isUserInteractionEnabled = false
+        view.onResolve = onResolve
+        return view
+    }
+
+    func updateUIView(_ uiView: ProbeView, context: Context) {
+        uiView.onResolve = onResolve
+    }
+
+    final class ProbeView: UIView {
+        var onResolve: ((Bool) -> Void)?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window != nil else { return }
+            // No controller in the chain: report nothing, so the overlay keeps drawing.
+            guard let controller = hostViewController else { return }
+            let presented = controller.presentingViewController != nil
+            // A turn later: this runs inside UIKit's view-hierarchy update, and writing SwiftUI
+            // state synchronously from here would be a write during a view update.
+            DispatchQueue.main.async { [weak self] in
+                self?.onResolve?(presented)
+            }
         }
     }
 }

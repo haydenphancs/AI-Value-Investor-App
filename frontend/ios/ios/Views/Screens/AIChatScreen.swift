@@ -14,8 +14,10 @@
 //   • "Resume the last conversation": the CALLER owns the `@StateObject ChatViewModel` and
 //     passes it in here as an `@ObservedObject`, so conversation state survives open/close.
 //     This screen NEVER calls `resetConversation()`.
-//   • Audio collapses to the Dynamic Island / status island via `.globalAudioOverlay` so the
-//     bottom stays clear for the input bar and the player persists above the cover.
+//   • Audio: the player is a small pill centred in the top bar, between history and ✕
+//     (`AudioStatusIsland`) — tap to play/pause, press and hold for the full player. The input
+//     bar opts out of its own audio square, so the screen has one player. `.globalAudioOverlay`
+//     supplies the full-screen player and keeps the root's floating player stood down.
 //
 
 import SwiftUI
@@ -141,8 +143,9 @@ struct AIChatScreen: View {
             .animation(.easeInOut(duration: 0.15), value: showingHistory)
         }
         .offset(y: dismissOffset)
-        // Keep the audio player visible above this cover and collapsed to the island so the
-        // bottom stays clear for the chat bar. Released on dismiss via the modifier's onDisappear.
+        // The full-screen player above this cover (the top-bar pill expands into it). forceCompact
+        // keeps the root's floating player stood down while the chat is up, so it cannot flash over
+        // a pushed asset screen's Ask Cay AI bar as the cover closes. Released via onDisappear.
         .globalAudioOverlay(token: chatToken, forceCompact: true)
         .onAppear {
             // Clear any stale transient error from a prior failed send so a freshly reopened chat
@@ -190,6 +193,12 @@ struct AIChatScreen: View {
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.vertical, AppSpacing.md)
+        // The audio player, centred in the empty space between ☰ and ✕ while an episode is active
+        // (it renders nothing otherwise). An overlay, so it never pushes either button: about
+        // 200pt wide against ~275pt of free bar on a 375pt iPhone.
+        .overlay {
+            AudioStatusIsland()
+        }
         .contentShape(Rectangle())
         // Swipe DOWN on the top bar to dismiss. Simultaneous so the ✕ / history buttons still
         // receive their taps. Only the top bar carries this — never the messages ScrollView.
@@ -322,7 +331,9 @@ struct AIChatScreen: View {
                 onSend: handleSend,
                 // Grey out / block send while a reply is in flight OR a history row is still
                 // loading (matches the ViewModel guard — see `sendMessage`).
-                isBusy: viewModel.isAITyping || viewModel.isLoadingSession
+                isBusy: viewModel.isAITyping || viewModel.isLoadingSession,
+                // The chat's player is the pill in its top bar — no second one down here.
+                showsAudioControl: false
             )
         }
     }

@@ -1072,11 +1072,16 @@ def test_every_view_a_tab_root_reaches_resets_what_it_presents():
 
 # The walk must reach these: each owns a presentation no tab root's reset unwinds. A parser that
 # stopped seeing them would leave the test above green over every one of the old gaps.
+#
+# `GlobalAudioOverlay` left this list when Money Moves, the one KEPT push that carried it, stopped
+# (that overlay drew a second mini player over the root's — test_ios_audio_player_single_render).
+# Every host it has now is a cover, or a push its tab's reset pops, so its reader cover goes down
+# with its host; the tab tree's reader cover is RootContainerView's, which is on this list.
 _MUST_REACH = {
     "RootView", "RootContainerView", "ContentView", "HomeDashboardView", "UpdatesView",
     "ResearchViewWithBinding", "TrackingContentViewWithBinding", "LearnContentView",
     "GlobalHeaderView", "ResearchHeader", "WhalesTabContent", "AllWhalesView",
-    "MoneyMovesDetailView", "BookLibraryView", "InvestorJourneyView", "GlobalAudioOverlay",
+    "MoneyMovesDetailView", "BookLibraryView", "InvestorJourneyView",
     "FullScreenAudioPlayer", "LearnAudioPaywallModifier", "InlineDisclaimerNotice", "ScannerCard",
     "AlertsTabContent",
 }
@@ -1108,7 +1113,7 @@ _ALL_WHALES = _APP / "Views" / "Screens" / "AllWhalesView.swift"
 _LEARN = _APP / "Views" / "Screens" / "LearnView.swift"
 _MONEY_MOVES = _APP / "Views" / "Screens" / "MoneyMovesDetailView.swift"
 _LIBRARY = _APP / "Views" / "Screens" / "BookLibraryView.swift"
-_AUDIO_OVERLAY = _APP / "Views" / "Modifiers" / "GlobalAudioOverlay.swift"
+_ROOT_CONTAINER = _APP / "Views" / "Screens" / "RootContainerView.swift"
 _PLAYER = _APP / "Views" / "Screens" / "FullScreenAudioPlayer.swift"
 _AUDIO_PAYWALL = _APP / "Views" / "Modifiers" / "LearnAudioPaywall.swift"
 _DISCLAIMER_ATOM = _APP / "Views" / "Atoms" / "InlineDisclaimerNotice.swift"
@@ -1661,7 +1666,7 @@ _MUTATIONS: list[tuple[str, Path, Callable[[str], str], str, str]] = [
      _REACH, "no longer clears every presentation"),
     ("journey-story-kept", _JOURNEY_VIEW, _drop_line("            viewModel.showLessonStory = false"),
      _REACH, "no longer clears every presentation"),
-    ("audio-reader-kept", _AUDIO_OVERLAY, _drop_line("                readerRoute = nil"),
+    ("audio-reader-kept", _ROOT_CONTAINER, _drop_line("            readerRoute = nil"),
      _REACH, "no longer clears every presentation"),
     ("player-share-sheet-kept", _PLAYER, _drop_line("            showShareSheet = false"),
      _REACH, "no longer clears every presentation"),
@@ -1694,9 +1699,11 @@ _MUTATIONS: list[tuple[str, Path, Callable[[str], str], str, str]] = [
               "        .aiChatCover(isPresented: $showBookChat, viewModel: bookChatViewModel)\n"
               "        .storyReader(item: $openedStory)\n"),
      _REACH, "add it to _PRESENTATIONS"),
-    ("helper-presents-from-its-parameters", _AUDIO_OVERLAY,
-     _replace("        modifier(GlobalAudioOverlay(\n",
-              "        sheet(isPresented: .constant(forceCompact)) { EmptyView() }.modifier(GlobalAudioOverlay(\n"),
+    # On `miniPlayerSafeArea()`, the audio helper the kept pushes call now that none of them
+    # carries `globalAudioOverlay` (see `_MUST_REACH`).
+    ("helper-presents-from-its-parameters", _ROOT_CONTAINER,
+     _replace("        modifier(MiniPlayerSafeAreaModifier())\n",
+              "        sheet(isPresented: .constant(true)) { EmptyView() }.modifier(MiniPlayerSafeAreaModifier())\n"),
      _REACH, "presents from its parameters"),
     ("walk-loses-a-kept-push", _LEARN,
      _replace("            MoneyMovesDetailView()\n", "            EmptyView()\n"),

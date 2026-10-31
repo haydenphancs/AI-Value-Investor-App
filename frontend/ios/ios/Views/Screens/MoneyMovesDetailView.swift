@@ -21,8 +21,6 @@ struct MoneyMovesDetailView: View {
     // the rows could re-sort as completed moves slid to the end; ordering is purely by date
     // now, so the observation drove nothing but extra body passes. Each MoneyMoveCard observes
     // the store itself, so completion checkmarks still update live.
-    /// Stable token keying this screen's audio overlay host registration.
-    @State private var compactToken = UUID().uuidString
 
     var body: some View {
         ZStack {
@@ -95,11 +93,15 @@ struct MoneyMovesDetailView: View {
                         Color.clear.frame(height: AppSpacing.xxxl)
                     }
                 }
+                // Room for the floating mini player, so the Battles row scrolls clear of it.
+                .miniPlayerSafeArea()
             }
         }
         .navigationBarHidden(true)
-        // Keep the audio player visible above this fullScreenCover (bottom mini player).
-        .globalAudioOverlay(token: compactToken, showBottomMiniPlayer: true)
+        // NO `.globalAudioOverlay` here. This screen is a PUSH inside the Wiser tab's
+        // NavigationStack (LearnView), not a cover, so RootContainerView already draws the player
+        // over it. The overlay's cover-only `showBottomMiniPlayer` drew a SECOND capsule a couple
+        // of points above the root's — the "double edge" reported on this screen.
         .fullScreenCover(item: $selectedArticle) { article in
             MoneyMoveArticleDetailView(article: article)
                 .environmentObject(audioManager)
@@ -126,11 +128,9 @@ struct MoneyMovesDetailView: View {
         }
         // Prevent accidental navigation gestures
         .interactiveDismissDisabled(false)
-        // Narration is Pro/Max: the audio ENGINE refuses a locked episode and asks for
-        // an upgrade, so this presenter is what turns that into the plan sheet. Needed on
-        // each screen because these are fullScreenCovers — a modifier on the presenter
-        // does not reach them.
-        .learnAudioPaywall()
+        // NO `.learnAudioPaywall()`: this is a PUSH in Learn's NavigationStack, and
+        // LearnContentView's presenter (outside that stack) already covers it. A second one here
+        // would answer the same refusal — two plan sheets for one tap.
     }
 
     /// Build the card rows from authored content first (backend → bundled, served by

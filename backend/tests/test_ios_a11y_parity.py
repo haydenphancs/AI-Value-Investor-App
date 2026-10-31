@@ -663,16 +663,23 @@ def test_the_mini_player_clears_the_tab_bar_by_derivation_not_a_magic_number():
         "shape that shipped a 3pt gap")
 
 
-def test_the_detail_screens_keep_their_tighter_player_spacing():
-    """The player-above-chat-bar gap was explicitly signed off as correct, so it must NOT be
-    swept along by the tab-bar fix. Three screens stack the player on the Ask Cay AI bar and
-    pass the tighter value; the tab-bar case is the only one that changed."""
+def test_the_reading_screens_carry_the_player_beside_their_chat_bar_not_above_it():
+    """Owner ruling (2026-10-31): the audio player never stacks ABOVE an Ask Cay AI bar. On the
+    asset screens the suggested-question chips already sit there, and the stack read as messy.
+
+    These three screens used to stack `GlobalMiniPlayer(bottomSpacing: AppSpacing.md / 2)` on
+    their bar (that tighter gap was signed off at the time). They now carry the player the way
+    every screen with the bar does: `CaydexAIChatBar` draws the square beside its input
+    (`ChatBarAudioControl`) unless a screen opts out, and only the AI chat screen does."""
     for rel in ("Views/Screens/MoneyMoveArticleDetailView.swift",
                 "Views/Screens/BookDetailView.swift",
                 "Views/Screens/BookCoreDetailView.swift"):
         code = _strip_swift_comments(_src(rel))
-        assert "GlobalMiniPlayer(bottomSpacing: AppSpacing.md / 2)" in code, (
-            f"{rel}: the chat-bar-stacked player lost its tighter bottomSpacing")
+        assert "CaydexAIChatBar(" in code, f"{rel}: no Ask Cay AI bar — this scan has drifted"
+        assert "GlobalMiniPlayer(" not in code, (
+            f"{rel}: stacks the mini player above its Ask Cay AI bar again")
+        assert "showsAudioControl: false" not in code, (
+            f"{rel}: turned off the player square beside its Ask Cay AI bar")
 
 
 # ── The single "Now Playing" indicator ───────────────────────────────────────────

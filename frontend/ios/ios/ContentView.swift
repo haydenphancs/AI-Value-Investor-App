@@ -377,6 +377,8 @@ struct ResearchViewWithBinding: View {
     /// and simply never read here, which is why Home and Updates recovered from a raced load
     /// and Research did not.
     @Environment(\.isActiveTab) private var isActiveTab
+    /// Whether the root's floating mini player is parked over the bottom of this tab.
+    @Environment(\.miniPlayerVisible) private var miniPlayerVisible
     @StateObject private var viewModel: ResearchViewModel
     @Binding var selectedTab: HomeTab
     let prefilledTicker: String?
@@ -689,6 +691,8 @@ struct ResearchViewWithBinding: View {
                     .frame(height: AppSpacing.xxxl)
             }
         }
+        // Room for the floating mini player, so the credits card scrolls clear of it.
+        .miniPlayerSafeArea()
         .refreshable {
             await viewModel.refresh()
         }
@@ -744,6 +748,8 @@ struct ResearchViewWithBinding: View {
                 }
             }
         }
+        // Room for the floating mini player, on top of the selection spacer above.
+        .miniPlayerSafeArea()
         .refreshable {
             await viewModel.refresh()
         }
@@ -756,6 +762,10 @@ struct ResearchViewWithBinding: View {
                     isDeleting: viewModel.isDeletingReports,
                     onDelete: { viewModel.showDeleteConfirm = true }
                 )
+                // Above the root's mini player while audio plays. That capsule is parked over
+                // exactly this strip and drawn on top of the tab, so it hid Delete entirely and
+                // took its taps.
+                .padding(.bottom, miniPlayerVisible ? GlobalMiniPlayer.footprint : 0)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }

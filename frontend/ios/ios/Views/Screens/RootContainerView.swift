@@ -14,55 +14,54 @@ struct RootContainerView: View {
     /// as a cover over the current tab and closing it returns there. TestFlight 1.0(8): this host
     /// passed no handler, so Read vanished whenever the player was opened outside the book screens.
     @State private var readerRoute: NarratedCoreRoute?
+    /// The tab bar's measured height (`TabBarHeightKey`); 0 until the bars have reported it.
+    @State private var tabBarHeight: CGFloat = 0
 
     var body: some View {
         ZStack {
             // Layer 1: Main Tab Navigation
             ContentView()
                 .environment(\.miniPlayerVisible, audioManager.hasActiveEpisode && !audioManager.isCompactMode)
+                // Each tab draws its own bar, so the player learns the bar's real height from them.
+                .onPreferenceChange(TabBarHeightKey.self) { tabBarHeight = $0 }
 
             // Layer 2: Audio player. A `.fullScreenCover` draws ABOVE this ZStack and renders its own
-            // player, so it simply occludes this one — no suppression needed.
-            // Note: isPlayerHiddenByScroll is only used within detail views (BookCoreDetailView).
-            if audioManager.hasActiveEpisode && !audioManager.showFullScreenPlayer {
-                if audioManager.isCompactMode {
-                    // Compact (stock screens / chat focus): on a Dynamic Island device the system
-                    // shows Now Playing at the top, so render nothing in-app. On non-DI devices there
-                    // is no system top indicator, so keep an in-app status island.
-                    if !AudioManager.hasDynamicIsland {
-                        VStack {
-                            AudioStatusIsland()
-                                .padding(.top, 8)
-                            Spacer()
-                        }
-                        .transition(.asymmetric(
-                            insertion: .move(edge: .top).combined(with: .opacity),
-                            removal: .move(edge: .top).combined(with: .opacity)
-                        ))
-                    }
-                } else {
-                    VStack {
-                        Spacer()
-                        GlobalMiniPlayer()
-                            // Clear the bar exactly, and let the player's OWN `bottomSpacing`
-                            // (AppSpacing.md) be the visual gap — 12pt.
-                            //
-                            // The old bare `58` ignored that the player already pads itself, so
-                            // it resolved to 58 + 12 = 70 against a 73pt bar: a 3pt gap, with
-                            // the capsule reading as welded to the tab bar.
-                            //
-                            // Deliberately NOT `+ AppSpacing.lg - AppSpacing.md` (a 16pt gap).
-                            // That matched the player-to-chat-bar spacing on the detail screens,
-                            // but the tab bar carries far more internal padding of its own
-                            // (12 top + 20 bottom), so the same number reads as a hole above it.
-                            // Equal spacing, unequal surroundings — measured, then reduced.
-                            .padding(.bottom, CustomTabBar.approximateHeight)
-                    }
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .bottom).combined(with: .opacity),
-                        removal: .move(edge: .bottom).combined(with: .opacity)
-                    ))
+            // player, so it simply occludes this one — no suppression needed. A screen PUSHED inside a
+            // tab is not occluded, so this layer IS its player: `GlobalAudioOverlay` stands down there
+            // (`drawsPlayerChrome`) instead of drawing a second copy a couple of points off this one.
+            //
+            // Nothing while compact: the screen on top then hosts its own player — the square beside
+            // its Ask Cay AI bar (`ChatBarAudioControl`) or the chat's top-bar pill — and a floating
+            // one would land on that bar. Compact used to draw a "status island" at the top instead,
+            // on iPhones without a Dynamic Island only: it covered the stock header's Search and
+            // bell buttons, and a Dynamic Island shows Now Playing only once the user LEAVES the app.
+            if audioManager.hasActiveEpisode && !audioManager.showFullScreenPlayer && !audioManager.isCompactMode {
+                VStack {
+                    Spacer()
+                    GlobalMiniPlayer()
+                        // Clear the bar exactly, and let the player's OWN `bottomSpacing`
+                        // (AppSpacing.md) be the visual gap — 12pt.
+                        //
+                        // "Exactly" means the bar's MEASURED height. `approximateHeight` is only
+                        // the fallback for the frame before it is measured: the bar is
+                        // text-sized, so the estimate left ~10pt of gap at the default text
+                        // size and ~1pt at the largest.
+                        //
+                        // The old bare `58` ignored that the player already pads itself, so
+                        // it resolved to 58 + 12 = 70 against a 73pt bar: a 3pt gap, with
+                        // the capsule reading as welded to the tab bar.
+                        //
+                        // Deliberately NOT `+ AppSpacing.lg - AppSpacing.md` (a 16pt gap).
+                        // That matched the player-to-chat-bar spacing on the detail screens,
+                        // but the tab bar carries far more internal padding of its own
+                        // (12 top + 20 bottom), so the same number reads as a hole above it.
+                        // Equal spacing, unequal surroundings — measured, then reduced.
+                        .padding(.bottom, tabBarHeight > 0 ? tabBarHeight : CustomTabBar.approximateHeight)
                 }
+                .transition(.asymmetric(
+                    insertion: .move(edge: .bottom).combined(with: .opacity),
+                    removal: .move(edge: .bottom).combined(with: .opacity)
+                ))
             }
 
             // Layer 3: Full Screen Player (modal overlay) — zIndex 100 so it covers the tab bar.
@@ -98,19 +97,21 @@ extension EnvironmentValues {
 }
 
 // MARK: - Mini Player Safe Area Modifier
-/// Adds extra bottom padding to scrollable content when mini player is visible
+/// Adds extra bottom padding to scrollable content when mini player is visible.
+///
+/// For screens in the TAB tree (tab roots and their pushes), which the root's capsule floats over
+/// without reserving anything: a list ending in 32pt of padding kept its last ~40pt under the
+/// player for good — half the last Wiser book's "Ask the Agent" button. Covers that draw their own
+/// player get the same room from `GlobalAudioOverlay(showBottomMiniPlayer:)`.
 struct MiniPlayerSafeAreaModifier: ViewModifier {
     @Environment(\.miniPlayerVisible) private var miniPlayerVisible
-
-    // Mini player height (60) + bottom padding (66) — keep content clear of the lifted capsule.
-    private let miniPlayerHeight: CGFloat = 104
 
     func body(content: Content) -> some View {
         content
             .safeAreaInset(edge: .bottom) {
                 if miniPlayerVisible {
                     Color.clear
-                        .frame(height: miniPlayerHeight)
+                        .frame(height: GlobalMiniPlayer.contentClearance)
                 }
             }
     }
@@ -129,11 +130,9 @@ extension View {
 struct MiniPlayerContentInsetModifier: ViewModifier {
     @Environment(\.miniPlayerVisible) private var miniPlayerVisible
 
-    private let miniPlayerHeight: CGFloat = 104
-
     func body(content: Content) -> some View {
         content
-            .padding(.bottom, miniPlayerVisible ? miniPlayerHeight : 0)
+            .padding(.bottom, miniPlayerVisible ? GlobalMiniPlayer.contentClearance : 0)
     }
 }
 

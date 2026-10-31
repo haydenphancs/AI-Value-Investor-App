@@ -73,8 +73,9 @@ struct TickerReportView: View {
             }
         }
         .navigationBarHidden(true)
-        // Audio collapses to the top status island while this report screen is open, keeping the
-        // bottom clear for "Ask Cay AI". Also keeps the player visible above this fullScreenCover.
+        // The player is the square beside "Ask Cay AI" (`ChatBarAudioControl`) while this report
+        // screen is open; forceCompact stands the root's floating player down so it never lands on
+        // that bar. Also supplies the full-screen player above this fullScreenCover.
         .globalAudioOverlay(token: compactToken, forceCompact: true)
         .aiChatCover(isPresented: $showAIChat, viewModel: chatViewModel)
         .sheet(item: $viewModel.pdfSheet) { mode in

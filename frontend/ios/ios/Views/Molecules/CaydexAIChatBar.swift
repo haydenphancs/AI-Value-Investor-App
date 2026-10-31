@@ -21,14 +21,17 @@ struct CaydexAIChatBar: View {
     var marquee: Bool = false
     var onSuggestionTap: ((String) -> Void)?
     var onSend: (() -> Void)?
-    /// Reports text-field focus changes. Wiser reading screens pass this to collapse the audio player
-    /// to the top status island while the user types. Default nil ⇒ no behavior change elsewhere.
-    var onFocusChange: ((Bool) -> Void)?
     /// When true (e.g. AIChatScreen while the AI is replying), the send button is disabled so the
     /// user can't fire a second concurrent request. Default false ⇒ no change for other call sites.
     var isBusy: Bool = false
+    /// The audio player's square to the left of the input (`ChatBarAudioControl`), shown while an
+    /// episode is active. On for every screen with this bar; the AI chat screen alone turns it
+    /// off, because its player sits in its top bar. Declared LAST: the memberwise init is
+    /// positional, and every existing call site must keep compiling unchanged.
+    var showsAudioControl: Bool = true
 
-    @FocusState private var isFocused: Bool
+    /// The input card's height, measured, so the audio square matches it.
+    @State private var inputHeight: CGFloat = 0
 
     private var canSend: Bool {
         !isBusy && !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -51,44 +54,58 @@ struct CaydexAIChatBar: View {
                 .padding(.horizontal, AppSpacing.lg)
             }
 
-            // Input bar
-            HStack(spacing: AppSpacing.md) {
-                // Sparkle icon
-                Image(systemName: AppSymbols.ai)
-                    .font(AppTypography.iconMedium).fontWeight(.medium)
-                    .foregroundColor(AppColors.primaryBlue)
+            // Input row: the audio square (while an episode is active) to the LEFT of the input
+            // card, as its own container. Spacing 0 — the square carries its own gap, so with no
+            // episode the card is exactly as wide as it always was.
+            HStack(spacing: 0) {
+                if showsAudioControl {
+                    ChatBarAudioControl(side: inputHeight)
+                }
 
-                // Text field
-                TextField(placeholder, text: $inputText)
-                    .font(AppTypography.body)
-                    .foregroundColor(AppColors.textPrimary)
-                    .focused($isFocused)
-                    // Tapping the bar just focuses the field (keyboard opens inline, the
-                    // full chat cover stays closed) so the user can keep reading while typing.
-                    // Hitting return fires the same send path as the button → opens the chat.
-                    .submitLabel(.send)
-                    .onSubmit {
+                // Input bar
+                HStack(spacing: AppSpacing.md) {
+                    // Sparkle icon
+                    Image(systemName: AppSymbols.ai)
+                        .font(AppTypography.iconMedium).fontWeight(.medium)
+                        .foregroundColor(AppColors.primaryBlue)
+
+                    // Text field
+                    TextField(placeholder, text: $inputText)
+                        .font(AppTypography.body)
+                        .foregroundColor(AppColors.textPrimary)
+                        // Tapping the bar just focuses the field (keyboard opens inline, the
+                        // full chat cover stays closed) so the user can keep reading while typing.
+                        // Hitting return fires the same send path as the button → opens the chat.
+                        .submitLabel(.send)
+                        .onSubmit {
+                            if canSend {
+                                onSend?()
+                            }
+                        }
+
+                    // Send button
+                    Button(action: {
                         if canSend {
                             onSend?()
                         }
+                    }) {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(AppTypography.iconDisplay)
+                            .foregroundColor(canSend ? AppColors.primaryBlue : AppColors.textMuted)
                     }
-
-                // Send button
-                Button(action: {
-                    if canSend {
-                        onSend?()
-                    }
-                }) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(AppTypography.iconDisplay)
-                        .foregroundColor(canSend ? AppColors.primaryBlue : AppColors.textMuted)
+                    .buttonStyle(PlainButtonStyle())
+                    .disabled(!canSend)
                 }
-                .buttonStyle(PlainButtonStyle())
-                .disabled(!canSend)
+                .padding(.horizontal, AppSpacing.lg)
+                .padding(.vertical, AppSpacing.sm)
+                .cardSurface(cornerRadius: AppCornerRadius.extraLarge, elevation: .raised)
+                // The square's side follows the card's real height (it grows with text size).
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.size.height
+                } action: { height in
+                    inputHeight = height
+                }
             }
-            .padding(.horizontal, AppSpacing.lg)
-            .padding(.vertical, AppSpacing.sm)
-            .cardSurface(cornerRadius: AppCornerRadius.extraLarge, elevation: .raised)
             .padding(.horizontal, AppSpacing.lg)
         }
         .padding(.bottom, AppSpacing.md)
@@ -105,9 +122,6 @@ struct CaydexAIChatBar: View {
             )
             .ignoresSafeArea()
         )
-        .onChange(of: isFocused) { _, focused in
-            onFocusChange?(focused)
-        }
     }
 }
 

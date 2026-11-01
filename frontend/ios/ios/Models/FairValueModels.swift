@@ -162,7 +162,7 @@ struct CaydexFairValue: Equatable {
         return nil
     }
 
-    var formattedValue: String? { value.map(Self.money) }
+    var formattedValue: String? { value.map { Self.money($0) } }
 
     var formattedRange: String? {
         guard case let .estimate(_, lo, hi) = state else { return nil }
@@ -328,7 +328,7 @@ struct CaydexFairValue: Equatable {
         case "not_reported": add("Stock-based pay", "Not reported by our data source")
         default: break
         }
-        add("Revenue-based cross-check", positive(d.alternativeValue).map(money))
+        add("Revenue-based cross-check", positive(d.alternativeValue).map { money($0) })
         add("Last reported fiscal year", d.lastReportedFiscalYearEnd)
         add("Estimated on", d.asOf)
         return out

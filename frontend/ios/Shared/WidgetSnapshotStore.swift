@@ -78,7 +78,7 @@ nonisolated public enum WidgetSharedConfig {
 
 /// Why a decode dropped something. One logger for the whole wire model, so a missing row
 /// on a Home Screen is diagnosable from Console alone.
-private let widgetDecodeLog = Logger(subsystem: "com.phan.caydex", category: "widget")
+nonisolated private let widgetDecodeLog = Logger(subsystem: "com.phan.caydex", category: "widget")
 
 // MARK: - Lossy arrays
 
@@ -89,7 +89,7 @@ private let widgetDecodeLog = Logger(subsystem: "com.phan.caydex", category: "wi
 /// malformed row blanked the whole tile to its placeholder, on a Home Screen, with no error
 /// surface and no retry. Decode-only: encoding stays a plain array, so the stored bytes are
 /// exactly the wire shape. Order is preserved — the backend's ranking is the order shown.
-struct LossyArray<Element: Decodable>: Decodable {
+nonisolated struct LossyArray<Element: Decodable>: Decodable {
     let elements: [Element]
 
     init(from decoder: Decoder) throws {
@@ -127,7 +127,7 @@ struct LossyArray<Element: Decodable>: Decodable {
 
 /// One never-throwing element of a `LossyArray`. A bad element decodes to nil and is LOGGED —
 /// silent leniency would make "a row never showed up" undiagnosable.
-private struct LossyElement<Wrapped: Decodable>: Decodable {
+nonisolated private struct LossyElement<Wrapped: Decodable>: Decodable {
     let value: Wrapped?
 
     init(from decoder: Decoder) throws {
@@ -150,7 +150,11 @@ private struct LossyElement<Wrapped: Decodable>: Decodable {
 /// Every field that can be absent is Optional. A widget that fails to decode does not
 /// show an error state; it shows the placeholder, on the Home Screen, with no way for
 /// the user to retry and no crash report anyone would think to send.
-public struct WidgetMoverSnapshot: Codable, Equatable, Sendable {
+///
+/// `nonisolated` (with every type it nests, and the envelope): pure values whose `Codable`
+/// conformances must be usable off the main actor — `WidgetSnapshotStore.migrateLegacyIfNeeded`
+/// decodes and re-encodes them on a detached task at cold launch.
+nonisolated public struct WidgetMoverSnapshot: Codable, Equatable, Sendable {
     public let mode: String
     /// When the payload was BUILT — not what day the numbers describe. Use
     /// `sessionDate` for that; see `WidgetSessionLabel`.
@@ -335,7 +339,7 @@ public struct WidgetMoverSnapshot: Codable, Equatable, Sendable {
 /// Market mode answers "what is the market doing"; Holdings mode answers "what moved
 /// most of mine". The backend session-gates this so an off-session roll-up arrives as
 /// nil rather than as a stale sentence the tile would have to caveat.
-public struct WidgetMarketBrief: Codable, Equatable, Sendable {
+nonisolated public struct WidgetMarketBrief: Codable, Equatable, Sendable {
     public let headline: String
     /// 'Bullish' | 'Bearish' | 'Neutral'. Optional — an older backend omits it.
     public let sentiment: String?
@@ -376,7 +380,7 @@ public struct WidgetMarketBrief: Codable, Equatable, Sendable {
 /// `label` comes from the SERVER on purpose: an already-installed widget cannot learn
 /// that a newly added symbol is called "Russell 2000" without an app update, so the
 /// client must never map symbols to names itself.
-public struct WidgetIndex: Codable, Equatable, Sendable {
+nonisolated public struct WidgetIndex: Codable, Equatable, Sendable {
     public let symbol: String
     /// The honest fund name ("S&P 500 ETF"). The ONLY label shown beside a price.
     public let label: String
@@ -432,7 +436,7 @@ public struct WidgetIndex: Codable, Equatable, Sendable {
 ///
 /// Every field is optional and each leg of the backend fetch degrades on its own, so a
 /// tile can legitimately show indices with no breadth line, or the reverse.
-public struct WidgetMarketContext: Codable, Equatable, Sendable {
+nonisolated public struct WidgetMarketContext: Codable, Equatable, Sendable {
     public let indices: [WidgetIndex]
     public let breadthUp: Int?
     public let breadthTotal: Int?
@@ -492,7 +496,7 @@ public struct WidgetMarketContext: Codable, Equatable, Sendable {
     public var isEmpty: Bool { indices.isEmpty && breadthLabel == nil }
 }
 
-public struct WidgetMover: Codable, Equatable, Sendable {
+nonisolated public struct WidgetMover: Codable, Equatable, Sendable {
     public let ticker: String
     public let companyName: String?
     public let changePercent: Double?
@@ -580,7 +584,7 @@ public struct WidgetMover: Codable, Equatable, Sendable {
 }
 
 /// What kind of cause the backend was able to establish. Mirrors `CauseKind`.
-public enum WidgetCauseKind: String, Codable, Sendable {
+nonisolated public enum WidgetCauseKind: String, Codable, Sendable {
     case earnings
     case analyst
     case companyNews = "company_news"
@@ -600,7 +604,7 @@ public enum WidgetCauseKind: String, Codable, Sendable {
     public var isEstablished: Bool { self != .none }
 }
 
-public struct WidgetCause: Codable, Equatable, Sendable {
+nonisolated public struct WidgetCause: Codable, Equatable, Sendable {
     public let kind: WidgetCauseKind
     public let tag: String?
     /// True at `as_of` — and it may say "today".
@@ -635,7 +639,7 @@ public struct WidgetCause: Codable, Equatable, Sendable {
     }
 }
 
-public struct WidgetMoveContext: Codable, Equatable, Sendable {
+nonisolated public struct WidgetMoveContext: Codable, Equatable, Sendable {
     public let changePercent: Double
     public let z: Double?
     public let gapPercent: Double?
@@ -664,7 +668,7 @@ public struct WidgetMoveContext: Codable, Equatable, Sendable {
     }
 }
 
-public struct WidgetBasket: Codable, Equatable, Sendable {
+nonisolated public struct WidgetBasket: Codable, Equatable, Sendable {
     public let direction: String
     public let movedCount: Int
     public let totalCount: Int
@@ -687,7 +691,7 @@ public struct WidgetBasket: Codable, Equatable, Sendable {
 
 /// Both modes, as the widget reads them. Assembled by `read()` from the per-mode keys; the
 /// legacy v1 key stored exactly this shape, which is why it is still `Codable`.
-public struct WidgetSnapshotEnvelope: Codable, Equatable, Sendable {
+nonisolated public struct WidgetSnapshotEnvelope: Codable, Equatable, Sendable {
     public var market: WidgetMoverSnapshot?
     public var portfolio: WidgetMoverSnapshot?
     public var writtenAt: Date
@@ -717,13 +721,13 @@ struct WidgetPortfolioSlot: Codable {
 
 /// Reads and writes the shared snapshots. Safe to use from both processes.
 public enum WidgetSnapshotStore {
-    private static let log = Logger(subsystem: "com.phan.caydex", category: "widget")
+    nonisolated private static let log = Logger(subsystem: "com.phan.caydex", category: "widget")
 
-    private static var defaults: UserDefaults? {
+    nonisolated private static var defaults: UserDefaults? {
         UserDefaults(suiteName: WidgetSharedConfig.appGroupIdentifier)
     }
 
-    private static var encoder: JSONEncoder {
+    nonisolated private static var encoder: JSONEncoder {
         let e = JSONEncoder()
         e.dateEncodingStrategy = .iso8601
         return e
@@ -732,7 +736,7 @@ public enum WidgetSnapshotStore {
     /// The wire decoder. Public so the extension's fetcher decodes a live response with
     /// the SAME date strategy the stored snapshots use — a second decoder would be one
     /// `.iso8601` away from silently failing on `as_of` and blanking the tile.
-    public static var decoder: JSONDecoder {
+    nonisolated public static var decoder: JSONDecoder {
         let d = JSONDecoder()
         d.dateDecodingStrategy = .iso8601
         return d
@@ -771,7 +775,11 @@ public enum WidgetSnapshotStore {
     /// The backup-restore check: a restore to a new phone carries the App Group (token and
     /// snapshots) but not the `ThisDeviceOnly` Keychain session, so a launch with no stored
     /// session and `hasAnyState` true has someone else's market access and holdings on it.
-    public static var hasAnyState: Bool {
+    ///
+    /// `nonisolated`: `AppState.performRestore` reads it OFF the main thread on a signed-out
+    /// launch — the first App Group read is a cfprefsd round trip, and a stall must not freeze
+    /// the splash.
+    nonisolated public static var hasAnyState: Bool {
         if WidgetAPIConfig.widgetToken != nil { return true }
         guard let defaults else { return false }
         let keys = [
@@ -974,7 +982,10 @@ public enum WidgetSnapshotStore {
     /// - The v1 HOLDINGS half is DROPPED: it carries no owner, so there is no telling whose
     ///   holdings they are, and the next refresh replaces them anyway.
     /// - The v1 key is then deleted, which also ends `read()`'s market fallback to it.
-    public static func migrateLegacyIfNeeded() {
+    ///
+    /// `nonisolated`: `AppState.configure` runs it OFF the main thread (still before the seed),
+    /// so a stalled cfprefsd keeps the splash live instead of freezing it.
+    nonisolated public static func migrateLegacyIfNeeded() {
         guard let defaults else {
             log.error("cannot migrate the widget snapshot — App Group unavailable")
             return
@@ -1001,7 +1012,7 @@ public enum WidgetSnapshotStore {
         #endif
     }
 
-    public enum WidgetMode: String, Sendable {
+    nonisolated public enum WidgetMode: String, Sendable {
         case market
         case portfolio
     }

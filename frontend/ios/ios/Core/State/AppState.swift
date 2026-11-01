@@ -306,7 +306,19 @@ final class AppState {
         // interceptor handles it, which is the designed path. `enterRestoringWindow` still
         // DISARMS deliberately on a transient failure — that divergence is intact.
         Task {
-            await primeStoredCredential()
+            // ONE Keychain read for the whole launch, made OFF the main thread.
+            //
+            // This Task runs on the MAIN actor, and `getStoredToken()` is a synchronous
+            // `SecItemCopyMatching`, a round trip to securityd. The launch used to make it five
+            // times before Home's first frame (the arm, the widget gate, the snapshot owner,
+            // Home's prime and the restore), so a stalled securityd froze the splash for as long
+            // as the stall lasted, the way a stalled `stat()` on this path did (Sentry
+            // CAYDEX-APPLE-IOS-S, 7 s). Awaited here, the splash stays live while it runs, and
+            // every launch consumer below takes THIS value. `performRestore` reads again, off
+            // main as well, on purpose (see there).
+            let launchGeneration = credentialGeneration
+            let launchToken = await authService.loadStoredToken()
+            await primeStoredCredential(launchToken, readUnder: launchGeneration)
 
             // Seed the widget on COLD LAUNCH, from HERE rather than from `iosApp`.
             //
@@ -332,18 +344,23 @@ final class AppState {
             // Group. Written on every launch, not just when it changes, because writing
             // the production URL is what CLEARS a stale localhost override left behind
             // by a debug run — which would otherwise strand the widget on a dead port.
-            WidgetAPIConfig.publishBaseURL(
-                ServerEnvironmentManager.shared.resolvedBaseURL ?? APIConfig.baseURL
-            )
-            // Move a pre-v2 App Group snapshot into the per-mode keys BEFORE the seed writes:
-            // the seed lands in the v2 slots, and an unowned v1 holdings snapshot must not
-            // survive to be shown under whoever signs in next.
-            WidgetSnapshotStore.migrateLegacyIfNeeded()
+            //
+            // Both App Group calls run OFF the main thread: an App Group read or write is a
+            // cfprefsd round trip, and a stalled cfprefsd must not freeze the splash any more
+            // than securityd may. Awaited, so they still finish before the seed below.
+            let widgetBaseURL = ServerEnvironmentManager.shared.resolvedBaseURL ?? APIConfig.baseURL
+            await Task.detached(priority: .userInitiated) {
+                WidgetAPIConfig.publishBaseURL(widgetBaseURL)
+                // Move a pre-v2 App Group snapshot into the per-mode keys BEFORE the seed writes:
+                // the seed lands in the v2 slots, and an unowned v1 holdings snapshot must not
+                // survive to be shown under whoever signs in next.
+                WidgetSnapshotStore.migrateLegacyIfNeeded()
+            }.value
             // The widget's SESSION gate opens here only for a stored credential: a signed-out
             // launch has no session to refresh for. Opened BEFORE the credential gate and the
             // seed, or the seed would be dropped. A dead credential closes it again (the
             // dead-refresh discard); a sign-in opens it in `onAuthenticated`.
-            if authService.hasStoredToken {
+            if launchToken != nil {
                 WidgetRefreshService.shared.openSession()
             }
             WidgetRefreshService.shared.markCredentialReady()
@@ -354,9 +371,9 @@ final class AppState {
             // lazily at mount (`prepare`), after Home has painted. Bound HERE, before the restore,
             // because `applyProfile`'s `bindOwner` (nil → this account) would otherwise delete
             // the file before anything read it. No credential → both files are deleted.
-            // ⚠️ Spelled through `storedCredentialSubject()`, never the inline closure form Home's
-            // prime uses below: Home's guard mutates the FIRST copy of that expression.
-            let accountSnapshotOwner = storedCredentialSubject()
+            // ⚠️ Spelled through `storedCredentialSubject(of:)`, never the inline closure form
+            // Home's prime uses below: Home's guard mutates the FIRST copy of that expression.
+            let accountSnapshotOwner = storedCredentialSubject(of: launchToken)
             UpdatesFeedSnapshotStore.shared.bindLaunchOwner(ownerUserId: accountSnapshotOwner)
             TrackingSnapshotStore.shared.bindLaunchOwner(ownerUserId: accountSnapshotOwner)
 
@@ -369,7 +386,7 @@ final class AppState {
             // token's `sub` claim, read and never trusted for anything else (auth.md §8); no
             // credential means the file is deleted.
             await HomeDashboardSnapshotStore.shared.prime(
-                ownerUserId: authService.getStoredToken().flatMap { WidgetJWT.subject(of: $0) },
+                ownerUserId: launchToken.flatMap { WidgetJWT.subject(of: $0) },
                 apiClient: apiClient
             )
 
@@ -378,19 +395,25 @@ final class AppState {
     }
 
     /// Arm `APIClient` with the stored credential, if there is one, before any request goes out.
+    /// `token` is the launch's one off-main Keychain read.
     ///
     /// Deliberately does NOT touch `auth.status`: this says nothing about whether the session
     /// is valid, only that we hold something worth sending. `restoreSession` immediately
     /// follows and owns the validation — and owns clearing it if the credential is dead.
-    private func primeStoredCredential() async {
-        guard let token = authService.getStoredToken() else { return }
+    ///
+    /// `generation` is `credentialGeneration` from before the read. The read suspended, and a
+    /// sign-in that landed meanwhile installed a NEWER credential: arming this one over it
+    /// would strip that session's token off the client (auth.md §8).
+    private func primeStoredCredential(_ token: String?, readUnder generation: UInt64) async {
+        guard let token, generation == credentialGeneration else { return }
         await apiClient.setAuthToken(token)
     }
 
     /// The stored access token's `sub` claim — WHOSE snapshots this device may show — or nil.
-    /// Read, never trusted for anything else (auth.md §8); it authenticates nothing.
-    private func storedCredentialSubject() -> String? {
-        guard let token = authService.getStoredToken() else { return nil }
+    /// Takes the launch read's token and reads no Keychain itself. Read, never trusted for
+    /// anything else (auth.md §8); it authenticates nothing.
+    private func storedCredentialSubject(of token: String?) -> String? {
+        guard let token else { return nil }
         return WidgetJWT.subject(of: token)
     }
 
@@ -521,7 +544,20 @@ final class AppState {
         // suspended bumps it, and `enterRestoringWindow` then refuses to disarm a token that
         // is no longer the one this restore was validating.
         let generation = credentialGeneration
-        guard let token = authService.getStoredToken() else {
+        // Read OFF the main thread (`loadStoredToken`): at launch this runs while the splash is
+        // up, and a stalled securityd must not freeze it. A fresh read, not the launch Task's
+        // value, on purpose: the restore validates what is stored NOW, and a refresh can rotate
+        // the access token in between (`refreshToken()` saves without bumping
+        // `credentialGeneration`), so arming the launch copy here could put a superseded token
+        // back on the client.
+        let storedToken = await authService.loadStoredToken()
+        // The read suspended. A sign-in or sign-out that landed meanwhile owns the session now,
+        // and both exits below act on it (arm, `.restoring`, `.unauthenticated`).
+        guard generation == credentialGeneration else {
+            print("ℹ️ [AppState] restore superseded during the Keychain read — the newer credential owns the session")
+            return
+        }
+        guard let token = storedToken else {
             // No session here, yet widget state can be: the session token is Keychain
             // `...ThisDeviceOnly` and never migrates, while the App Group (widget token and
             // snapshots) is ordinary backed-up data that a restore to a new phone brings along.
@@ -529,7 +565,18 @@ final class AppState {
             // extension would keep refreshing FMP data onto a signed-out phone for up to 90
             // days (auth.md §8a). Guarded (`hasAnyState` covers the token as well as the
             // snapshots), so an ordinary signed-out launch does not churn.
-            if WidgetSnapshotStore.hasAnyState {
+            //
+            // The check reads the App Group OFF the main thread: it runs on every signed-out
+            // launch, and its first read is a cfprefsd round trip. The clear itself stays here
+            // (once per device): it is the sign-out teardown, gate and epoch included.
+            let orphanedWidgetState = await Task.detached(priority: .userInitiated) {
+                WidgetSnapshotStore.hasAnyState
+            }.value
+            guard generation == credentialGeneration else {
+                print("ℹ️ [AppState] restore superseded during the widget-state read — the newer credential owns the session")
+                return
+            }
+            if orphanedWidgetState {
                 WidgetRefreshService.shared.clearOrphanedState()
             }
             resolveIdentity(nil)

@@ -14,13 +14,17 @@
 import Foundation
 
 /// One timed text span with its start/end offset (seconds) within the currently-playing audio file.
-struct ReadAlongSentence: Decodable, Equatable {
+///
+/// `nonisolated` so its Decodable conformance is usable off the main actor: the bundled Learn
+/// fallbacks (`journey_lessons.json`, `money_moves.json`) carry these timings and are decoded on a
+/// detached task, not on the main thread at tab mount.
+nonisolated struct ReadAlongSentence: Decodable, Equatable, Sendable {
     let text: String
     let start: Double
     let end: Double
 }
 
-extension ReadAlongSentence {
+nonisolated extension ReadAlongSentence {
     private enum CodingKeys: String, CodingKey { case text, start, end }
 
     /// Defensive decode. A single backend-served span with a null / missing / non-numeric

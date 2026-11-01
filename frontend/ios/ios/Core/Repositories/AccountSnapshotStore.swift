@@ -26,7 +26,7 @@
 //        Capture it BEFORE the request (`let snapshotEpoch = snapshotStore.epoch`) and pass it
 //        to `save`. Bumped by every bind to another owner, a session end and a purge.
 //    func bindLaunchOwner(ownerUserId: String?)            // AppState.configure only. No I/O
-//                                                          //   but a delete when nil.
+//                                                          //   on main; a delete when nil, queued.
 //    func bindOwner(_ userId: String)                      // applyProfile / account switch.
 //    func prepare(apiClient: APIClient = .shared) async    // Disk only, single-flight, lazy:
 //                                                          //   reads + decodes the file once
@@ -69,7 +69,10 @@
 //    • `bindOwner` to a different owner bumps `epoch` and deletes; `clearForEndedSession`
 //      unbinds and deletes; `purgeCache` deletes and keeps the binding.
 //  Every disk operation runs in order on ONE detached tail (`diskTail`), so a delete enqueued
-//  after a pending write always lands last.
+//  after a pending write always lands last. The Caches path lookup runs there too
+//  (`AccountSnapshotFileLocation.resolve`): building or binding a store makes NO file-system
+//  call on the main thread. It used to, in the `.shared` initializer, and a stalled lookup froze
+//  a cold launch for 7 s (Sentry CAYDEX-APPLE-IOS-S, 2026-11-01).
 //
 //  ⚠️ SCREENSHOT MODE (DEBUG): every instance, `.shared` included, is memory-only while
 //  `StoreScreenshotMode.isOn` — it never reads the real account's file and never writes the
@@ -168,9 +171,25 @@ nonisolated struct AccountSnapshotConfig: Sendable {
     var maxFileBytes: Int { partCaps.values.reduce(0, +) + AccountSnapshotPolicy.envelopeOverheadBytes }
 
     /// `Library/Caches/<directoryName>`, or nil when the sandbox has no Caches directory.
+    /// ⚠️ A file-system call (Foundation `stat`s the container home). Read it only through
+    /// `AccountSnapshotFileLocation.resolve()`, on the disk tail — never on the main thread.
     var defaultDirectory: URL? {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
             .appendingPathComponent(directoryName, isDirectory: true)
+    }
+}
+
+/// Where a store's file lives, resolved only when a disk operation runs. A store holds this,
+/// not a URL, so creating `.shared` on the main actor asks the file system nothing.
+nonisolated struct AccountSnapshotFileLocation: Sendable {
+    let config: AccountSnapshotConfig
+
+    /// The file's URL, or nil when the sandbox has no Caches directory. Disk tail only.
+    func resolve() -> URL? {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(.main))
+        #endif
+        return config.defaultDirectory?.appendingPathComponent(config.fileName, isDirectory: false)
     }
 }
 
@@ -223,7 +242,12 @@ nonisolated enum AccountSnapshotDecodeError: Error, CustomStringConvertible {
 /// The file I/O, all synchronous and run ONLY on the store's detached disk tail.
 nonisolated enum AccountSnapshotDisk {
 
-    static func read(at url: URL, config: AccountSnapshotConfig) -> AccountSnapshotReadOutcome {
+    static func read(at file: AccountSnapshotFileLocation, config: AccountSnapshotConfig) -> AccountSnapshotReadOutcome {
+        guard let url = file.resolve() else {
+            let name = config.name
+            accountSnapshotLog.warning("\(name, privacy: .public): no Caches directory — nothing to read")
+            return .missing
+        }
         guard FileManager.default.fileExists(atPath: url.path) else { return .missing }
         let bytes: Data
         do {
@@ -242,8 +266,12 @@ nonisolated enum AccountSnapshotDisk {
         }
     }
 
-    static func write(_ envelope: AccountSnapshotEnvelope, to url: URL, config: AccountSnapshotConfig) {
+    static func write(_ envelope: AccountSnapshotEnvelope, to file: AccountSnapshotFileLocation, config: AccountSnapshotConfig) {
         let name = config.name
+        guard let url = file.resolve() else {
+            accountSnapshotLog.warning("\(name, privacy: .public): no Caches directory — not written")
+            return
+        }
         do {
             let encoder = PropertyListEncoder()
             encoder.outputFormat = .binary
@@ -259,8 +287,12 @@ nonisolated enum AccountSnapshotDisk {
         }
     }
 
-    static func delete(at url: URL, config: AccountSnapshotConfig) {
+    static func delete(at file: AccountSnapshotFileLocation, config: AccountSnapshotConfig) {
         let name = config.name
+        guard let url = file.resolve() else {
+            accountSnapshotLog.warning("\(name, privacy: .public): no Caches directory — nothing to delete")
+            return
+        }
         let fm = FileManager.default
         guard fm.fileExists(atPath: url.path) else { return }
         do {
@@ -360,13 +392,14 @@ final class AccountSnapshotStore<Payload: AccountSnapshotPayload> {
     private var readTask: Task<Void, Never>?
     /// The last queued disk operation. Every read, write and delete awaits its predecessor.
     private var diskTail: Task<Void, Never>?
-    /// nil = memory only (previews, and every instance in DEBUG screenshot mode).
-    private let fileURL: URL?
+    /// nil = memory only (previews, and every instance in DEBUG screenshot mode). Resolved to a
+    /// URL only by `AccountSnapshotDisk`, on the disk tail.
+    private let fileURL: AccountSnapshotFileLocation?
 
-    init(config: AccountSnapshotConfig, directory: URL?) {
+    init(config: AccountSnapshotConfig, persistsToDisk: Bool) {
         assert(config.requiredParts.isSubset(of: config.allowedParts), "\(config.name): a required part has no cap")
         self.config = config
-        let url = directory?.appendingPathComponent(config.fileName, isDirectory: false)
+        let url = persistsToDisk ? AccountSnapshotFileLocation(config: config) : nil
         #if DEBUG
         fileURL = StoreScreenshotMode.isOn ? nil : url
         #else
@@ -390,7 +423,7 @@ final class AccountSnapshotStore<Payload: AccountSnapshotPayload> {
         savedAt: Date = Date(),
         owner: String = "preview-user"
     ) -> AccountSnapshotStore<Payload> {
-        let store = AccountSnapshotStore<Payload>(config: config, directory: nil)
+        let store = AccountSnapshotStore<Payload>(config: config, persistsToDisk: false)
         let owner = AccountSnapshotPolicy.normalizedOwner(owner) ?? "preview-user"
         store.boundOwner = owner
         if let seed {
@@ -404,8 +437,9 @@ final class AccountSnapshotStore<Payload: AccountSnapshotPayload> {
     /// Launch: bind the stored credential's owner WITHOUT reading the file.
     ///
     /// Called from `AppState.configure` after the widget seed and BEFORE Home's awaited prime,
-    /// so it costs Home's first frame nothing. Reads the token's `sub` claim only; it
-    /// authenticates nothing. The read happens later, in `prepare`, at tab mount.
+    /// so it costs Home's first frame nothing: no file-system call on main, here or in the
+    /// store's init. Reads the token's `sub` claim only; it authenticates nothing. The read
+    /// happens later, in `prepare`, at tab mount.
     func bindLaunchOwner(ownerUserId: String?) {
         let name = config.name
         let owner = AccountSnapshotPolicy.normalizedOwner(ownerUserId)
@@ -466,7 +500,7 @@ final class AccountSnapshotStore<Payload: AccountSnapshotPayload> {
     }
 
     private func readAndPublish(
-        owner: String, fileURL: URL, readEpoch: Int, readGeneration: Int, apiClient: APIClient
+        owner: String, fileURL: AccountSnapshotFileLocation, readEpoch: Int, readGeneration: Int, apiClient: APIClient
     ) async {
         let name = config.name
         let started = Date()
@@ -647,7 +681,7 @@ final class AccountSnapshotStore<Payload: AccountSnapshotPayload> {
     }
 
     /// The prepare read, ordered behind anything already queued and ahead of anything after it.
-    private func readOnDiskTail(_ url: URL) async -> AccountSnapshotReadOutcome {
+    private func readOnDiskTail(_ url: AccountSnapshotFileLocation) async -> AccountSnapshotReadOutcome {
         let diskConfig = self.config
         let previous = diskTail
         let read = Task.detached(priority: .userInitiated) { () -> AccountSnapshotReadOutcome in

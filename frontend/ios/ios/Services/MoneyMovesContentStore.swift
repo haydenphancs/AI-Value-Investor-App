@@ -42,9 +42,25 @@ final class MoneyMovesContentStore {
     // The featured "deep dive" hero article (isFeatured == true). Remote is authoritative.
     private var remoteFeatured: MoneyMoveArticle?
     private var bundledFeatured: MoneyMoveArticle?
+    /// The bundled offline fallback being read and decoded off the main thread (see `init`).
+    private var bundledLoad: Task<Void, Never>?
 
     private init() {
-        loadBundled()
+        // The file work is DETACHED. This store is first touched by `LearnViewModel` right after
+        // ContentView mounts all five tabs at cold launch, and reading + decoding the 431 KB
+        // bundle inline sat on the main thread in front of Home's first content frame (Sentry
+        // CAYDEX-APPLE-IOS-S follow-up, 2026-11-01). Only the cheap mapping comes back to main.
+        bundledLoad = Task {
+            let file = await Task.detached(priority: .utility) { Self.decodeBundledFile() }.value
+            self.applyBundled(file)
+        }
+    }
+
+    /// Returns once the bundled fallback is in place (at once, after the first time). Until then
+    /// the readers below see remote content only. `prefetch()` awaits this, so a caller that awaits
+    /// a prefetch always reads remote-then-bundled.
+    func bundledContentLoaded() async {
+        await bundledLoad?.value
     }
 
     /// Full article for a card title: prefer fresh backend content, fall back to bundled.
@@ -98,6 +114,7 @@ final class MoneyMovesContentStore {
     /// maps and render bundled/placeholder cards for the rest of the session — deterministic, not a
     /// rare race, since both callers hop the same actor.
     func prefetch() async {
+        await bundledContentLoaded()
         guard !didPrefetch else { return }
         if let inFlight = prefetchTask {
             await inFlight.value
@@ -157,24 +174,34 @@ final class MoneyMovesContentStore {
 
     // MARK: - Bundled loading
 
-    private func loadBundled() {
-        guard let url = Bundle.main.url(forResource: "money_moves", withExtension: "json"),
-              let data = try? Data(contentsOf: url) else {
+    /// Read and decode `money_moves.json`. Detached task only — never the main thread.
+    nonisolated private static func decodeBundledFile() -> MoneyMovesContentFile? {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(.main))
+        #endif
+        guard let url = Bundle.main.url(forResource: "money_moves", withExtension: "json") else {
             print("[MoneyMovesContentStore] money_moves.json not found in bundle")
-            return
+            return nil
         }
         do {
-            let file = try JSONDecoder().decode(MoneyMovesContentFile.self, from: data)
-            let ordered = file.articles.sorted { ($0.sortOrder ?? .max) < ($1.sortOrder ?? .max) }
-            for dto in ordered {
-                let art = dto.toArticle()
-                bundledByTitle[dto.title] = art
-                if !dto.slug.isEmpty { bundledBySlug[dto.slug] = art }
-                bundledCards.append(dto.toCard())
-                if dto.isFeatured == true, bundledFeatured == nil { bundledFeatured = art }
-            }
+            let data = try Data(contentsOf: url)
+            return try JSONDecoder().decode(MoneyMovesContentFile.self, from: data)
         } catch {
-            print("[MoneyMovesContentStore] bundled decode failed: \(error)")
+            print("[MoneyMovesContentStore] bundled read/decode failed: \(error)")
+            return nil
+        }
+    }
+
+    /// Map the decoded bundle into articles and cards, on the main actor.
+    private func applyBundled(_ file: MoneyMovesContentFile?) {
+        guard let file else { return }
+        let ordered = file.articles.sorted { ($0.sortOrder ?? .max) < ($1.sortOrder ?? .max) }
+        for dto in ordered {
+            let art = dto.toArticle()
+            bundledByTitle[dto.title] = art
+            if !dto.slug.isEmpty { bundledBySlug[dto.slug] = art }
+            bundledCards.append(dto.toCard())
+            if dto.isFeatured == true, bundledFeatured == nil { bundledFeatured = art }
         }
     }
 }

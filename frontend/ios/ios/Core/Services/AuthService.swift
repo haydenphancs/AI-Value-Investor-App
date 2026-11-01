@@ -420,6 +420,22 @@ final class AuthService {
         keychain.get(Self.accessTokenKey)
     }
 
+    /// The stored access token, read OFF the main thread.
+    ///
+    /// `getStoredToken()` is a synchronous `SecItemCopyMatching` — a round trip to securityd —
+    /// and this class is `@MainActor`, so it blocks the main thread for as long as securityd
+    /// takes. Cold launch read it five times before Home's first frame, and a stalled securityd
+    /// would freeze the splash the way a stalled `stat()` did (Sentry CAYDEX-APPLE-IOS-S). The
+    /// launch path and the restore read through this instead; `KeychainService` is
+    /// `nonisolated` and `Sendable`, so the detached read touches no main-actor state.
+    func loadStoredToken() async -> String? {
+        let keychain = self.keychain
+        let key = Self.accessTokenKey
+        return await Task.detached(priority: .userInitiated) {
+            keychain.get(key)
+        }.value
+    }
+
     /// Get stored refresh token
     func getStoredRefreshToken() -> String? {
         keychain.get(Self.refreshTokenKey)

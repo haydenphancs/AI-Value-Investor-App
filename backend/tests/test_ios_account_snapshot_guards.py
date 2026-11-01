@@ -23,7 +23,7 @@ What this file pins (store + wiring; the ViewModel rows land with the ViewModels
     do/catch (never `try?`); distinct files from each other and from Home; schemaVersion ↔ the
     `.vN.` in the file name;
   * AppState: the launch bind after the widget seed and BEFORE Home's prime (Home's prime still
-    immediately followed by the restore), spelled through `storedCredentialSubject()` — never
+    immediately followed by the restore), spelled through `storedCredentialSubject(of:)` — never
     the inline `flatMap` form, whose first copy Home's `prime-no-owner` mutation rewrites — the
     re-binds in `applyProfile` and the account switch, the session-end clears; Settings → Clear
     Cache purging and awaiting all three stores before the recount.
@@ -32,6 +32,10 @@ Source scans (there is no XCTest target): comments stripped and every check scop
 brace-bounded declaration (.claude/rules/testing.md §3). `MUTATIONS` breaks each property once
 and asserts its guard fails, several naming the assertion they must fail WITH. The 96 h window
 and the part caps are checked against the real backend settings.
+
+That the store makes no FILE-SYSTEM call on the main thread (the Caches lookup resolves on the
+disk tail — Sentry CAYDEX-APPLE-IOS-S) is pinned apart, for all three snapshot stores, by
+`test_ios_snapshot_stores_no_main_thread_io.py`.
 """
 
 from __future__ import annotations
@@ -59,16 +63,18 @@ _DISK = "nonisolated enum AccountSnapshotDisk"
 _CONFIGURE = "func configure(apiClient: APIClient, authService: AuthService)"
 _ON_AUTH = "private func onAuthenticated(userId: String? = nil, identity: Int) async"
 _FUNNEL = "private func discardDataForEndedSession()"
-_SUBJECT_HELPER = "private func storedCredentialSubject() -> String?"
+_SUBJECT_HELPER = "private func storedCredentialSubject(of token: String?) -> String?"
 _SAVE = "func save(parts: [String: Data], payload: Payload, savedAt: Date, epoch captured: Int)"
 _PREPARE = "func prepare(apiClient: APIClient = .shared) async"
 _READ = "private func readAndPublish("
 _LAUNCH_BIND = "func bindLaunchOwner(ownerUserId: String?)"
-_INIT = "init(config: AccountSnapshotConfig, directory: URL?)"
+_INIT = "init(config: AccountSnapshotConfig, persistsToDisk: Bool)"
 
 _BIND_UPDATES = "UpdatesFeedSnapshotStore.shared.bindLaunchOwner(ownerUserId: accountSnapshotOwner)"
 _BIND_TRACKING = "TrackingSnapshotStore.shared.bindLaunchOwner(ownerUserId: accountSnapshotOwner)"
-_OWNER_LINE = "let accountSnapshotOwner = storedCredentialSubject()"
+_OWNER_LINE = "let accountSnapshotOwner = storedCredentialSubject(of: launchToken)"
+# The launch's one off-main Keychain read arms the client first (test_ios_launch_no_main_thread_keychain.py).
+_PRIME_CREDENTIAL = "await primeStoredCredential(launchToken, readUnder: launchGeneration)"
 _WIDGET_SEED = "WidgetRefreshService.shared.refresh(identity: identityGeneration)"
 _RESTORE = 'await restoreSession(trigger: "launch")'
 _HOME_PRIME = "await HomeDashboardSnapshotStore.shared.prime("
@@ -76,7 +82,7 @@ _HOME_PRIME = "await HomeDashboardSnapshotStore.shared.prime("
 # Home's own regexes (test_ios_home_instant_paint_guards.py), so the adjacency checked here is
 # exactly the one Home's `prime-after-restore` / `prime-no-owner` mutations rely on.
 _PRIME_CALL = r"(await HomeDashboardSnapshotStore\.shared\.prime\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))"
-_FLATMAP_SPELLING = r"authService\.getStoredToken\(\)\.flatMap \{ WidgetJWT\.subject\(of: \$0\) \}"
+_FLATMAP_SPELLING = r"launchToken\.flatMap \{ WidgetJWT\.subject\(of: \$0\) \}"
 
 _PAYLOAD_KEYS = ("updates_payload", "tracking_payload")
 _NETWORK_TOKENS = (".request(", "requestReturningBody(", "downloadData(", "stream(", "URLSession")
@@ -242,7 +248,7 @@ def _config(s: dict[str, str], key: str) -> dict:
 
 def _check_launch_bind(s):
     cfg = _configure(s)
-    _in_order(cfg, "await primeStoredCredential()", _WIDGET_SEED, _OWNER_LINE, _BIND_UPDATES,
+    _in_order(cfg, _PRIME_CREDENTIAL, _WIDGET_SEED, _OWNER_LINE, _BIND_UPDATES,
               _BIND_TRACKING, _HOME_PRIME, _RESTORE)
     for bind in (_BIND_UPDATES, _BIND_TRACKING):
         assert s["app"].count(bind) == 1, f"`{bind}` must run once, at launch only"
@@ -260,8 +266,8 @@ def _check_launch_bind(s):
 
 def _check_subject_helper(s):
     helper = _block(s["app"], _SUBJECT_HELPER)
-    assert "guard let token = authService.getStoredToken() else { return nil }" in _norm(helper), (
-        "storedCredentialSubject no longer reads the stored credential"
+    assert "guard let token else { return nil }" in _norm(helper), (
+        "storedCredentialSubject no longer takes the launch read's stored credential"
     )
     assert "return WidgetJWT.subject(of: token)" in helper, (
         "storedCredentialSubject no longer returns the token's `sub` — the snapshots have no owner"
@@ -725,7 +731,7 @@ def _chain(*mutators: Callable[[str], str]) -> Callable[[str], str]:
     return mutate
 
 
-_BIND_BLOCK = (r"([ \t]*let accountSnapshotOwner = storedCredentialSubject\(\)\n"
+_BIND_BLOCK = (r"([ \t]*let accountSnapshotOwner = storedCredentialSubject\(of: launchToken\)\n"
                r"[ \t]*UpdatesFeedSnapshotStore\.shared\.bindLaunchOwner\(ownerUserId: accountSnapshotOwner\)\n"
                r"[ \t]*TrackingSnapshotStore\.shared\.bindLaunchOwner\(ownerUserId: accountSnapshotOwner\)\n)")
 _RESTORE_RE = r"(await restoreSession\(trigger: \"launch\"\)\n)"
@@ -742,7 +748,7 @@ MUTATIONS: list[tuple] = [
     ("bind-awaited", "launch_bind", "app",
      _sub(r"(\n[ \t]*)(TrackingSnapshotStore\.shared\.bindLaunchOwner)", r"\1await \2"), "is awaited"),
     ("bind-no-owner", "launch_bind", "app",
-     _sub(r"let accountSnapshotOwner = storedCredentialSubject\(\)", "let accountSnapshotOwner: String? = nil"),
+     _sub(r"let accountSnapshotOwner = storedCredentialSubject\(of: launchToken\)", "let accountSnapshotOwner: String? = nil"),
      "not found"),
     ("launch-reads", "launch_bind", "app",
      _sub(r"(TrackingSnapshotStore\.shared\.bindLaunchOwner\(ownerUserId: accountSnapshotOwner\)\n)",
@@ -754,8 +760,8 @@ MUTATIONS: list[tuple] = [
     ("subject-dropped", "subject_helper", "app",
      _sub(r"return WidgetJWT\.subject\(of: token\)", "return nil"), "returns the token's `sub`"),
     ("flatmap-spelling", "subject_helper", "app",
-     _sub(r"let accountSnapshotOwner = storedCredentialSubject\(\)",
-          "let accountSnapshotOwner = authService.getStoredToken().flatMap { WidgetJWT.subject(of: $0) }"),
+     _sub(r"let accountSnapshotOwner = storedCredentialSubject\(of: launchToken\)",
+          "let accountSnapshotOwner = launchToken.flatMap { WidgetJWT.subject(of: $0) }"),
      "appears before Home's prime"),
     ("no-apply-bind-updates", "apply_profile_binds", "app", _rm("UpdatesFeedSnapshotStore.shared.bindOwner(profile.id)")),
     ("no-apply-bind-tracking", "apply_profile_binds", "app", _rm("TrackingSnapshotStore.shared.bindOwner(profile.id)")),
@@ -905,7 +911,7 @@ MUTATIONS: list[tuple] = [
      "re-points"),
     ("screenshot-second-store", "screenshot_memory_only", "tracking_payload",
      _sub(r"(\nextension AccountSnapshotStore)",
-          r"\n@MainActor private let rogue = TrackingSnapshotStore(config: .tracking, directory: nil)\1"),
+          r"\n@MainActor private let rogue = TrackingSnapshotStore(config: .tracking, persistsToDisk: false)\1"),
      "builds more than one store"),
     ("no-file-protection", "file_protection", "store",
      _sub(r", \.completeFileProtectionUntilFirstUserAuthentication", ""), "data protection"),
@@ -993,7 +999,7 @@ def test_the_comment_stripper_actually_strips():
     prose = (
         "// UpdatesFeedSnapshotStore.shared.clearForEndedSession()\n"
         "/// TrackingSnapshotStore.shared.bindLaunchOwner(ownerUserId: accountSnapshotOwner)\n"
-        "/* let accountSnapshotOwner = storedCredentialSubject()\n"
+        "/* let accountSnapshotOwner = storedCredentialSubject(of: launchToken)\n"
         "   fileURL = StoreScreenshotMode.isOn ? nil : url */\n"
         'let url = "https://example.com"  // await trackingSnapshotPurge?.value\n'
     )

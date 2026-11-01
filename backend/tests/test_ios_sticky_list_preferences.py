@@ -367,7 +367,7 @@ def _check_news_filter_store(models: str) -> None:
 
     # What was parsed reaches the result.
     assert re.search(r'let sentiments = \(stored\["sentiments"\] as\? \[String\] \?\? \[\]\)\s*'
-                     r"\.compactMap\(NewsSentiment\.init\(storageID:\)\)", load), "unknown ids are dropped"
+                     r"\.compactMap \{ NewsSentiment\(storageID: \$0\) \}", load), "unknown ids are dropped"
     result = _code_call(load, "return NewsFilterOptions(")
     assert "sources: Array(Set(sources)).sorted()" in result, "the parsed sources must reach the result"
     assert "sentiments: NewsSentiment.allCases.filter { sentiments.contains($0) }" in result, (
@@ -495,7 +495,7 @@ def _check_trend_window(models: str, vm: str) -> None:
     ext = _block(models, "extension SentimentTrendWindow {")
     assert 'static let savedPickKey = "caydex_updates_trend_window"' in ext
     pick = _block(ext, "static func savedPick(from defaults: UserDefaults = .standard) -> SentimentTrendWindow? {")
-    assert "SentimentTrendWindow.init(storageID:)" in pick and "defaults.set" not in pick
+    assert "SentimentTrendWindow(storageID: $0)" in pick and "defaults.set" not in pick
     save = _block(ext, "func saveAsPick(to defaults: UserDefaults = .standard) {")
     assert "defaults.set(storageID, forKey: Self.savedPickKey)" in save
 

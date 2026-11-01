@@ -214,11 +214,24 @@ final class AudioManager: ObservableObject {
 
     /// Declare HOW we'd play, without taking the session. `RootContainerView` holds this singleton,
     /// so init runs the moment the app launches — activating here stopped the user's Spotify /
-    /// Podcasts before they had tapped anything. Category is cheap and non-disruptive; the
-    /// disruptive part (`setActive(true)`) is deferred to `activateAudioSession()`.
+    /// Podcasts before they had tapped anything. Category is non-disruptive; the disruptive part
+    /// (`setActive(true)`) is deferred to `activateAudioSession()`.
+    ///
+    /// Not cheap, though, and so not on the main thread: `setCategory` is a synchronous XPC to the
+    /// audio server, and this init runs from `RootContainerView`'s `@StateObject` while the tabs
+    /// mount at cold launch, in front of Home's first content frame (Sentry CAYDEX-APPLE-IOS-S
+    /// follow-up, 2026-11-01). Nothing waits for it: `activateAudioSession()` re-asserts the same
+    /// category before any real playback, so a tap that beats this write is unaffected.
     private func configureAudioSession() {
+        Task.detached(priority: .utility) {
+            Self.setPlaybackCategory()
+        }
+    }
+
+    /// Declares the shared category + mode. Detached task only (see `configureAudioSession()`).
+    nonisolated private static func setPlaybackCategory() {
         do {
-            try audioSession.setCategory(.playback, mode: .spokenAudio, options: [.allowBluetoothA2DP, .allowAirPlay])
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio, options: [.allowBluetoothA2DP, .allowAirPlay])
         } catch {
             print("[AudioManager] audio session category setup failed: \(error)")
         }

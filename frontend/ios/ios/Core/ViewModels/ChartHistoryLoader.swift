@@ -62,9 +62,11 @@ final class ChartHistoryLoader: ObservableObject {
     /// than this was adjusted differently (a split settled between the two fetches).
     private static let seamTolerance = 0.005
 
-    init(asset: ChartHistoryAsset, repository: StockRepositoryProtocol = StockRepository.shared) {
+    /// `repository` nil = the shared one, resolved in the body: a default argument naming the
+    /// main-actor `StockRepository.shared` is evaluated in a nonisolated context (a Swift 6 error).
+    init(asset: ChartHistoryAsset, repository: StockRepositoryProtocol? = nil) {
         self.asset = asset
-        self.repository = repository
+        self.repository = repository ?? StockRepository.shared
     }
 
     // MARK: - Payloads

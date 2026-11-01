@@ -26,8 +26,8 @@ public enum WidgetAPIConfig {
         string: "https://caydexinvest.com"
     )!
 
-    static let baseURLOverrideKey = "widget.api.baseURL"
-    static let widgetTokenKey = "widget.api.token"
+    nonisolated static let baseURLOverrideKey = "widget.api.baseURL"
+    nonisolated static let widgetTokenKey = "widget.api.token"
 
     /// What the extension should call. The override is only ever set by the app.
     public static var baseURL: URL {
@@ -42,7 +42,10 @@ public enum WidgetAPIConfig {
     ///
     /// Writing the production URL is not a no-op — it CLEARS a stale localhost override
     /// left by a debug run, which would otherwise strand the widget on a dead port.
-    public static func publishBaseURL(_ url: URL) {
+    ///
+    /// `nonisolated`: `AppState.configure` calls this OFF the main thread at cold launch. An App
+    /// Group write goes through cfprefsd, and a stalled cfprefsd must not freeze the splash.
+    nonisolated public static func publishBaseURL(_ url: URL) {
         WidgetSharedDefaults.store?.set(url.absoluteString, forKey: baseURLOverrideKey)
     }
 
@@ -66,7 +69,9 @@ public enum WidgetAPIConfig {
     /// nil is the normal signed-out state and the fetcher treats it as "do not call" rather
     /// than "call and get a 401" — a WidgetKit refresh spent on a guaranteed rejection is one
     /// the tile does not get back.
-    public static var widgetToken: String? {
+    ///
+    /// `nonisolated`: `WidgetSnapshotStore.hasAnyState` reads it off the main thread at launch.
+    nonisolated public static var widgetToken: String? {
         guard let raw = WidgetSharedDefaults.store?.string(forKey: widgetTokenKey),
               !raw.isEmpty else { return nil }
         return raw

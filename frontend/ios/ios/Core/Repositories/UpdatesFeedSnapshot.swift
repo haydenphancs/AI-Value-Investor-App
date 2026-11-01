@@ -33,9 +33,10 @@ extension AccountSnapshotConfig {
     )
 }
 
-/// The one shared instance. Memory-only in DEBUG screenshot mode (the store's init).
+/// The one shared instance. Memory-only in DEBUG screenshot mode (the store's init). Built on
+/// the main actor, so it asks the file system nothing: the path resolves on the disk tail.
 @MainActor private let updatesFeedSnapshotStoreInstance = UpdatesFeedSnapshotStore(
-    config: .updatesFeed, directory: AccountSnapshotConfig.updatesFeed.defaultDirectory
+    config: .updatesFeed, persistsToDisk: true
 )
 
 extension AccountSnapshotStore where Payload == UpdatesFeedSnapshot {

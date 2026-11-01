@@ -115,8 +115,8 @@ struct MoneyMovesDetailView: View {
             loadSampleData()
         }
         .task {
-            // Upgrade to fresh backend content (bundled content is already available
-            // synchronously from the store's init), then rebuild the rows so any
+            // Upgrade to fresh backend content (prefetch first waits for the store's bundled
+            // fallback, decoded off the main thread), then rebuild the rows so any
             // server-side-only topics appear without an app update.
             await MoneyMovesContentStore.shared.prefetch()
             loadSampleData()

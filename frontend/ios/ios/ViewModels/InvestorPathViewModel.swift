@@ -67,14 +67,18 @@ class InvestorJourneyViewModel: ObservableObject {
     func loadData() {
         isLoading = true
 
-        // Bundled lesson content is present synchronously, so build the journey immediately —
-        // correct durations + progress on first paint, no network blocking the screen.
+        // Build the journey immediately — progress on first paint, no network blocking the
+        // screen. Durations are content-derived once the bundled lessons are in; the store
+        // decodes those off the main thread, almost always well before this screen opens.
         rebuildJourney()
         isLoading = false
 
-        // Refresh authored content (cards + media URLs) from the backend in the background so
+        // Rebuild once the bundled lessons are in (a no-op wait after the first time), then
+        // refresh authored content (cards + media URLs) from the backend in the background so
         // it's ready when a lesson is opened; rebuild once it lands in case durations refine.
         Task { [weak self] in
+            await JourneyContentStore.shared.bundledContentLoaded()
+            self?.rebuildJourney()
             await JourneyContentStore.shared.prefetch()
             self?.rebuildJourney()
         }

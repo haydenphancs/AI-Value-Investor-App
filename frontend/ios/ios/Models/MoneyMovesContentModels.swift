@@ -33,7 +33,7 @@ import Foundation
 /// Every drop is LOGGED. Leniency without logging is the worst of both worlds: an article that
 /// vanishes here is invisible (the outer decode still succeeds, the store silently serves the stale
 /// bundled copy), so the only symptom is "the new article never showed up" with nothing to grep.
-private struct FailableDecodable<Wrapped: Decodable>: Decodable {
+nonisolated private struct FailableDecodable<Wrapped: Decodable>: Decodable {
     let value: Wrapped?
     init(from decoder: Decoder) throws {
         do {
@@ -51,7 +51,7 @@ private struct FailableDecodable<Wrapped: Decodable>: Decodable {
 
 /// Best-effort identity peek at a dropped element. Both fields are optional, so this decodes for any
 /// JSON object and simply fails (=> nil) for a scalar element.
-private struct DroppedElementIdentity: Decodable {
+nonisolated private struct DroppedElementIdentity: Decodable {
     let slug: String?
     let title: String?
 
@@ -61,7 +61,7 @@ private struct DroppedElementIdentity: Decodable {
     }
 }
 
-private extension Array where Element == CodingKey {
+nonisolated private extension Array where Element == CodingKey {
     /// `articles[3].sections[1].content[2]` — enough to point at the offending blob.
     var pathDescription: String {
         map { $0.intValue.map { i in "[\(i)]" } ?? ".\($0.stringValue)" }
@@ -81,7 +81,7 @@ private extension Array where Element == CodingKey {
 ///
 /// 2^53 is the cutoff because past it a Double cannot represent consecutive integers, so
 /// the plain `String(d)` form is the more faithful rendering anyway.
-private func _stringifyDouble(_ d: Double) -> String? {
+nonisolated private func _stringifyDouble(_ d: Double) -> String? {
     guard d.isFinite else { return nil }
     if d == d.rounded(), d.magnitude < 9_007_199_254_740_992 {   // 2^53
         return String(Int(d))
@@ -89,7 +89,7 @@ private func _stringifyDouble(_ d: Double) -> String? {
     return String(d)
 }
 
-private extension KeyedDecodingContainer {
+nonisolated private extension KeyedDecodingContainer {
     /// Decode an array, dropping any element that fails to decode. Missing/non-array key => [].
     func lenientArray<T: Decodable>(_ type: T.Type, forKey key: Key) -> [T] {
         let wrapped = ((try? decodeIfPresent([FailableDecodable<T>].self, forKey: key)) ?? nil) ?? []
@@ -135,7 +135,7 @@ private extension KeyedDecodingContainer {
 
 /// Single-value counterpart of `flexibleString` — used per array element, and never throws, so one
 /// bad element can't fail the array decode.
-private struct FlexibleStringElement: Decodable {
+nonisolated private struct FlexibleStringElement: Decodable {
     let value: String?
 
     init(from decoder: Decoder) throws {
@@ -152,9 +152,14 @@ private struct FlexibleStringElement: Decodable {
 }
 
 // MARK: - Top-level containers
+//
+// Isolation: every DTO below and the decoding helpers above are `nonisolated` (and Sendable), so
+// their Decodable conformances work off the main actor. `MoneyMovesContentStore` decodes the
+// bundled fallback on a detached task instead of reading and decoding 431 KB on the main thread
+// at tab mount. The `to…()` mappings build main-actor UI models, so they are `@MainActor`.
 
 /// Bundled file `Resources/MoneyMoves/money_moves.json`.
-struct MoneyMovesContentFile: Decodable {
+nonisolated struct MoneyMovesContentFile: Decodable, Sendable {
     let version: Int?
     let articles: [MoneyMoveArticleDTO]
 
@@ -168,7 +173,7 @@ struct MoneyMovesContentFile: Decodable {
 
 /// Backend response from `GET /api/v1/learn/money-moves` — each article is the row's
 /// `content` blob (same shape as the bundle's articles).
-struct MoneyMovesAPIResponse: Decodable {
+nonisolated struct MoneyMovesAPIResponse: Decodable, Sendable {
     let articles: [MoneyMoveArticleDTO]
     /// Narration is Pro/Max and this caller doesn't have it: the server stripped every
     /// `audioUrl` and read-along span. Optional so an older backend reads absent → unlocked,
@@ -191,7 +196,7 @@ struct MoneyMovesAPIResponse: Decodable {
 
 // MARK: - Article DTO
 
-struct MoneyMoveArticleDTO: Decodable {
+nonisolated struct MoneyMoveArticleDTO: Decodable, Sendable {
     let slug: String
     let title: String
     let subtitle: String          // rich subtitle shown on the article hero
@@ -252,7 +257,7 @@ struct MoneyMoveArticleDTO: Decodable {
     /// (relative order is preserved) and wrong for a rendered date, which is why the backend
     /// now serves `published_at` and why this prefers it. The fallback only survives for the
     /// bundled offline JSON and for rows that predate the seeder.
-    var resolvedPublishedAt: Date {
+    @MainActor var resolvedPublishedAt: Date {
         if let iso = publishedAt, let parsed = MoneyMoveDateFormatting.parseISO8601(iso) {
             return parsed
         }
@@ -261,7 +266,7 @@ struct MoneyMoveArticleDTO: Decodable {
         ) ?? Date()
     }
 
-    func toArticle(trustAudioFlag: Bool = false) -> MoneyMoveArticle {
+    @MainActor func toArticle(trustAudioFlag: Bool = false) -> MoneyMoveArticle {
         let published = resolvedPublishedAt
         return MoneyMoveArticle(
             slug: slug,
@@ -296,7 +301,7 @@ struct MoneyMoveArticleDTO: Decodable {
 
     /// Lightweight card (row tile) derived from the same authored content, so the
     /// catalog can be served from the backend/bundle instead of hardcoded in Swift.
-    func toCard() -> MoneyMove {
+    @MainActor func toCard() -> MoneyMove {
         MoneyMove(
             slug: slug,
             isFeatured: isFeatured ?? false,
@@ -316,7 +321,7 @@ struct MoneyMoveArticleDTO: Decodable {
     }
 
     /// The DB enum / JSON store the case name ("blueprints"), not the display rawValue.
-    static func category(from raw: String) -> MoneyMoveCategory {
+    @MainActor static func category(from raw: String) -> MoneyMoveCategory {
         switch raw {
         case "blueprints": return .blueprints
         case "valueTraps", "value_traps": return .valueTraps
@@ -337,7 +342,7 @@ struct MoneyMoveArticleDTO: Decodable {
 // and coerce the scalar types, so a bad nested value degrades in place. Well-formed content (the whole
 // current bundle) decodes identically. Defined in extensions to preserve the memberwise inits.
 
-extension MoneyMoveArticleDTO {
+nonisolated extension MoneyMoveArticleDTO {
     private enum CodingKeys: String, CodingKey {
         case slug, title, subtitle, cardSubtitle, category, author, readTimeMinutes, viewCount,
              learnerCount, sortOrder, commentCount, publishedDaysAgo, publishedAt, tagLabel,
@@ -389,7 +394,7 @@ extension MoneyMoveArticleDTO {
 
 // MARK: - Nested DTOs
 
-struct ArticleAuthorDTO: Decodable {
+nonisolated struct ArticleAuthorDTO: Decodable, Sendable {
     let name: String
     let title: String
     let isVerified: Bool?
@@ -401,7 +406,7 @@ struct ArticleAuthorDTO: Decodable {
         name: "Caydex", title: "Research", isVerified: nil, followerCount: nil
     )
 
-    func toAuthor() -> ArticleAuthor {
+    @MainActor func toAuthor() -> ArticleAuthor {
         ArticleAuthor(
             name: name,
             avatarName: nil,
@@ -415,7 +420,7 @@ struct ArticleAuthorDTO: Decodable {
     }
 }
 
-struct ArticleHighlightDTO: Decodable {
+nonisolated struct ArticleHighlightDTO: Decodable, Sendable {
     let icon: String
     let title: String
     let description: String
@@ -432,7 +437,7 @@ struct ArticleHighlightDTO: Decodable {
         description = c.flexibleString(forKey: .description) ?? ""
     }
 
-    func toHighlight() -> ArticleHighlight {
+    @MainActor func toHighlight() -> ArticleHighlight {
         // Clamped, not trusted. Money Moves content is served from Supabase and editable without
         // an app release, so `icon` can name a symbol THIS OS has never heard of — which
         // `Image(systemName:)` renders as blank space with no error anywhere. Exactly how four
@@ -449,7 +454,7 @@ struct ArticleHighlightDTO: Decodable {
     static let iconFallback = "info.circle.fill"
 }
 
-struct ArticleSectionDTO: Decodable {
+nonisolated struct ArticleSectionDTO: Decodable, Sendable {
     let title: String
     let icon: String?
     let hasGlowEffect: Bool?
@@ -467,7 +472,7 @@ struct ArticleSectionDTO: Decodable {
         content = c.lenientArray(ArticleSectionContentDTO.self, forKey: .content)
     }
 
-    func toSection() -> ArticleSection {
+    @MainActor func toSection() -> ArticleSection {
         // Build content and its parallel read-along array in lockstep, so dropped (unknown-type)
         // blocks don't misalign the timings index.
         var blocks: [ArticleSectionContent] = []
@@ -491,7 +496,7 @@ struct ArticleSectionDTO: Decodable {
 
 /// A single content block. `type` is the discriminator:
 /// paragraph | subheading | bulletList | quote | callout. Unknown types are dropped.
-struct ArticleSectionContentDTO: Decodable {
+nonisolated struct ArticleSectionContentDTO: Decodable, Sendable {
     let type: String
     let text: String?
     let items: [String]?
@@ -506,7 +511,7 @@ struct ArticleSectionContentDTO: Decodable {
     /// would drive ReadAlongText with zero spans and render the block's prose BLANK (the empty
     /// AttributedString shows nothing). Empty can come from an alignment run that produced no spans
     /// for a block, or a hand-edited Studio row; it must degrade to plain text, not vanish.
-    func readAlongGroup() -> ReadAlongGroup? {
+    @MainActor func readAlongGroup() -> ReadAlongGroup? {
         if type == "bulletList" {
             guard let items = itemsReadAlong, !items.isEmpty else { return nil }
             return .items(items)
@@ -515,7 +520,7 @@ struct ArticleSectionContentDTO: Decodable {
         return .sentences(ra)
     }
 
-    func toContent() -> ArticleSectionContent? {
+    @MainActor func toContent() -> ArticleSectionContent? {
         switch type {
         case "paragraph":
             return text.map { .paragraph($0) }
@@ -537,7 +542,7 @@ struct ArticleSectionContentDTO: Decodable {
         }
     }
 
-    static func calloutStyle(from raw: String?) -> CalloutStyle {
+    @MainActor static func calloutStyle(from raw: String?) -> CalloutStyle {
         switch raw {
         case "warning": return .warning
         case "success": return .success
@@ -547,7 +552,7 @@ struct ArticleSectionContentDTO: Decodable {
     }
 }
 
-extension ArticleSectionContentDTO {
+nonisolated extension ArticleSectionContentDTO {
     private enum CodingKeys: String, CodingKey {
         case type, text, items, attribution, icon, style, readAlong, itemsReadAlong
     }
@@ -571,7 +576,7 @@ extension ArticleSectionContentDTO {
     }
 }
 
-struct ArticleStatisticDTO: Decodable {
+nonisolated struct ArticleStatisticDTO: Decodable, Sendable {
     let value: String
     let label: String
     let trend: String?
@@ -588,7 +593,7 @@ struct ArticleStatisticDTO: Decodable {
         trendValue = c.flexibleString(forKey: .trendValue)
     }
 
-    func toStatistic() -> ArticleStatistic {
+    @MainActor func toStatistic() -> ArticleStatistic {
         ArticleStatistic(
             value: value,
             label: label,
@@ -597,7 +602,7 @@ struct ArticleStatisticDTO: Decodable {
         )
     }
 
-    static func trend(from raw: String?) -> StatisticTrend? {
+    @MainActor static func trend(from raw: String?) -> StatisticTrend? {
         switch raw {
         case "up": return .up
         case "down": return .down
@@ -615,7 +620,7 @@ struct ArticleStatisticDTO: Decodable {
 /// that still carry `comments` keep decoding leniently: never make it, or the article's
 /// `comments` / `commentCount`, required (.claude/rules/learn-content.md). A real comment
 /// feature needs a backend and moderation first, not a revived view.
-struct ArticleCommentDTO: Decodable {
+nonisolated struct ArticleCommentDTO: Decodable, Sendable {
     let authorName: String
     let content: String
     let likeCount: Int?
@@ -640,7 +645,7 @@ struct ArticleCommentDTO: Decodable {
     }
 }
 
-struct RelatedArticleDTO: Decodable {
+nonisolated struct RelatedArticleDTO: Decodable, Sendable {
     let title: String
     let subtitle: String
     let category: String
@@ -670,7 +675,7 @@ struct RelatedArticleDTO: Decodable {
         imageCardUrl = c.flexibleString(forKey: .imageCardUrl).flatMap { $0.isEmpty ? nil : $0 }
     }
 
-    func toRelated() -> RelatedArticle {
+    @MainActor func toRelated() -> RelatedArticle {
         RelatedArticle(
             title: title,
             subtitle: subtitle,

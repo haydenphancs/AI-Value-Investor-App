@@ -194,7 +194,7 @@ def test_indicators_are_stored_by_stable_id_not_label():
     obs = _observer(body, "enabledIndicators")
     assert obs and "storageID" in obs and "rawValue" not in obs, obs
     apply = _block(body, "private func applyStoredSettings()")
-    assert "compactMap(TechnicalIndicatorType.init(storageID:))" in apply
+    assert "compactMap { TechnicalIndicatorType(storageID: $0) }" in apply
 
 
 # ── 3. Live instances follow a change, and the echo cannot loop ───────────────

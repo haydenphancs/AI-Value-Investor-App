@@ -399,7 +399,7 @@ extension NewsFilterOptions {
         let sources = (stored["sources"] as? [String] ?? [])
             .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         let sentiments = (stored["sentiments"] as? [String] ?? [])
-            .compactMap(NewsSentiment.init(storageID:))
+            .compactMap { NewsSentiment(storageID: $0) }
         return NewsFilterOptions(
             sources: Array(Set(sources)).sorted(),
             sectors: [],
@@ -824,7 +824,7 @@ extension SentimentTrendWindow {
 
     /// The saved pick, or nil (auto mode) when none — or only garbage — is stored.
     static func savedPick(from defaults: UserDefaults = .standard) -> SentimentTrendWindow? {
-        defaults.string(forKey: savedPickKey).flatMap(SentimentTrendWindow.init(storageID:))
+        defaults.string(forKey: savedPickKey).flatMap { SentimentTrendWindow(storageID: $0) }
     }
 
     /// Record a TAP. Never call this with a window the code chose (auto mode, a snap-back).

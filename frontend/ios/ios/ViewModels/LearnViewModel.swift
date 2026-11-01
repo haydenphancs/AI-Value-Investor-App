@@ -40,6 +40,12 @@ class LearnViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.rebuildJourney() }
             .store(in: &cancellables)
+        // The Journey store decodes its bundled lessons off the main thread, so the build above
+        // can predate them (no content-derived minutes yet). Rebuild once they are in.
+        Task { [weak self] in
+            await JourneyContentStore.shared.bundledContentLoaded()
+            self?.rebuildJourney()
+        }
 
         // NOTE: there is deliberately no `MoneyMovesProgressStore.$completed` subscription here.
         // It used to re-sort the row on completion, back when completed moves slid to the end.
@@ -56,11 +62,16 @@ class LearnViewModel: ObservableObject {
 
         // Simulate network delay. Journey progress is NOT loaded here — it's derived live from
         // the shared completion store via rebuildJourney() (see init).
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.loadMoneyMoves()
-            self?.loadBooks()
-            self?.loadDiscussions()
-            self?.isLoading = false
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            // The store decodes its bundled catalog off the main thread; wait for it so the row's
+            // first paint is the authored cards, not only the sample placeholders.
+            await MoneyMovesContentStore.shared.bundledContentLoaded()
+            guard let self else { return }
+            self.loadMoneyMoves()
+            self.loadBooks()
+            self.loadDiscussions()
+            self.isLoading = false
         }
     }
 
@@ -71,8 +82,8 @@ class LearnViewModel: ObservableObject {
         rebuildJourney()
     }
 
-    /// Upgrade the Money Moves row to fresh backend content. The store serves bundled content
-    /// synchronously for first paint, then this swaps in /learn/money-moves. Safe to call
+    /// Upgrade the Money Moves row to fresh backend content. First paint is the bundled catalog
+    /// (see `loadMockData`), then this swaps in /learn/money-moves. Safe to call
     /// repeatedly — the store prefetches once per session. Mirrors MoneyMovesDetailView.
     func prefetchMoneyMoves() async {
         await MoneyMovesContentStore.shared.prefetch()

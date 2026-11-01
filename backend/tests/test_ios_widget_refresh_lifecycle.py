@@ -95,6 +95,9 @@ added by the second review round, same day — all killed):
   settle-relaundered  (R3) the tail settle re-reads `identityGeneration`    -> killed
   restore-churn       the no-token clear made unconditional (`if true`)     -> killed
   restore-no-clear    clearOrphanedState() deleted from the no-token branch -> killed
+  (2026-11-01: `ungated-open`, `late-open` and `restore-churn` re-spelled for the launch's ONE
+  off-main Keychain read (`launchToken`) and the off-main `hasAnyState` read — all killed. That
+  those reads stay off main is pinned by test_ios_launch_no_main_thread_keychain.py.)
   dead-refresh-id     `lastAuthenticatedUserId = nil` deleted (dead refresh)-> killed
   sync-any-group      the syncTickers hook made unconditional (`if true`)   -> killed
   sync-no-hook        the syncTickers contentChanged() call deleted         -> killed
@@ -535,7 +538,8 @@ def _check_configure_opens_the_session_before_the_seed(s: dict[str, str]) -> Non
     seed = _idx(cfg, "WidgetRefreshService.shared.refresh(identity:")
     assert "WidgetSnapshotStore.migrateLegacyIfNeeded()" in cfg, "v1 snapshots are never migrated"
     assert cfg.index("WidgetSnapshotStore.migrateLegacyIfNeeded()") < seed
-    opener = re.search(r"if\s+authService\.hasStoredToken\s*\{", cfg)
+    # `launchToken` is the launch's one off-main Keychain read — the stored credential.
+    opener = re.search(r"if\s+launchToken\s*!=\s*nil\s*\{", cfg)
     assert opener, "configure opens the widget session without a stored credential (or not at all)"
     assert "WidgetRefreshService.shared.openSession()" in _block_at(cfg, opener.start())
     assert cfg.count("WidgetRefreshService.shared.openSession()") == 1
@@ -611,8 +615,12 @@ def _check_settle_refuses_a_moved_identity(s: dict[str, str]) -> None:
 
 def _check_a_tokenless_launch_clears_orphaned_state(s: dict[str, str]) -> None:
     restore = _block(s["app"], _RESTORE)
-    no_token = _block_at(restore, _idx(restore, "guard let token = authService.getStoredToken() else"))
-    m = re.search(r"if\s+WidgetSnapshotStore\.hasAnyState\b[^{]*\{", no_token)
+    no_token = _block_at(restore, _idx(restore, "guard let token = storedToken else"))
+    # The check is read off main into a local (test_ios_launch_no_main_thread_keychain.py pins
+    # that half); the clear must be guarded on THAT value.
+    read = re.search(r"let\s+(\w+)\s*=\s*await\s+Task\.detached\b[^{]*\{\s*"
+                     r"WidgetSnapshotStore\.hasAnyState\s*\}\s*\.value", no_token)
+    m = read and re.search(rf"if\s+{read.group(1)}\s*\{{", no_token)
     assert m, (
         "the no-token branch clears the widget unconditionally (or not at all) — guard it on "
         "`WidgetSnapshotStore.hasAnyState` so an ordinary signed-out launch does not churn"
@@ -747,10 +755,11 @@ def _move_owner_recheck_between_writes(body: str) -> str:
 
 def _open_after_seed(s: dict[str, str]) -> dict[str, str]:
     def edit(body: str) -> str:
-        body = re.sub(r"if\s+authService\.hasStoredToken\s*\{\s*WidgetRefreshService\.shared\.openSession\(\)\s*\}",
-                      "", body, count=1)
+        body, n = re.subn(r"if\s+launchToken\s*!=\s*nil\s*\{\s*WidgetRefreshService\.shared\.openSession\(\)\s*\}",
+                          "", body, count=1)
+        assert n == 1, "mutation target (the launch session opener) not found"
         seed = "WidgetRefreshService.shared.refresh(identity: identityGeneration)"
-        return body.replace(seed, seed + "\n            if authService.hasStoredToken { "
+        return body.replace(seed, seed + "\n            if launchToken != nil { "
                             "WidgetRefreshService.shared.openSession() }", 1)
     out = dict(s)
     out["app"] = _edit_block(s["app"], _CONFIGURE, edit)
@@ -830,7 +839,7 @@ MUTATIONS: list[tuple[str, str, Callable[[dict[str, str]], dict[str, str]]]] = [
     ("no-migrate", "configure_opens_before_seed",
      _in("app", _CONFIGURE, _replace_once("WidgetSnapshotStore.migrateLegacyIfNeeded()", ""))),
     ("ungated-open", "configure_opens_before_seed",
-     _in("app", _CONFIGURE, _replace_once("if authService.hasStoredToken {", "if true {"))),
+     _in("app", _CONFIGURE, _replace_once("if launchToken != nil {", "if true {"))),
     ("late-open", "configure_opens_before_seed", _open_after_seed),
     ("heal-gated", "on_authenticated_opens",
      _in("app", _ON_AUTH, _sub_once(r"settleWidgetSession\(userId: userId, identity: identity\)(\s*return)", r"\1"))),
@@ -848,7 +857,7 @@ MUTATIONS: list[tuple[str, str, Callable[[dict[str, str]], dict[str, str]]]] = [
     ("helper-no-owner", "on_authenticated_opens",
      _in("app", _SETTLE, _replace_once("WidgetSnapshotStore.clearPortfolio()", ""))),
     ("restore-churn", "tokenless_launch_clears",
-     _in("app", _RESTORE, _sub_once(r"if\s+WidgetSnapshotStore\.hasAnyState[^{]*\{", "if true {"))),
+     _in("app", _RESTORE, _sub_once(r"if\s+orphanedWidgetState\s*\{", "if true {"))),
     ("restore-no-clear", "tokenless_launch_clears",
      _in("app", _RESTORE, _replace_once("WidgetRefreshService.shared.clearOrphanedState()", ""))),
     ("dead-refresh-id", "dead_refresh_forgets_user",

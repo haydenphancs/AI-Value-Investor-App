@@ -12,9 +12,10 @@ THE SWEEP (`review_cycle`, every Learn tick; unclaimed, fenced by compare-and-sw
      candidates (label, category, tickers, score, peg facts with their SEC URLs) with buttons 1 / 2 / 3.
      The card's message id is stamped into `topic.card_message_ids` (fenced on the row's `updated_at`).
   b. Review bundles — a piece `ready_for_review`: a silent header (kind/category, DRY RUN, publish and
-     hold times in ET, topic + peg URLs, the shadow judge's flags, words, narration length, the worst
-     narration block, tokens), the narration as Telegram audio by a SIGNED URL of the private object (a
-     link when Telegram cannot attach it), the article as plain text in ≤ 4096-character chunks sent
+     hold times in ET, topic + peg URLs, the cover art's URL or why there is none, the shadow judge's
+     flags, words, narration length, the worst narration block, tokens), the cover art as a silent photo
+     (best effort), the narration as Telegram audio by a SIGNED URL of the private object (a link when
+     Telegram cannot attach it), the article as plain text in ≤ 4096-character chunks sent
      silently, then ONE loud decision message: ✅ Approve · ❌ Reject · ♻️ Regenerate · ⏭ Next topic ·
      🔁 Retry narration. Then `ready_for_review → in_review` with `review_message_ids = [decision]`,
      fenced on the draft / round / narration job the owner was shown.
@@ -617,6 +618,36 @@ def served_line(validation: Any) -> Optional[str]:
     return "Models: " + " · ".join(f"{r} {', '.join(groups[r])}" for r in order[:5])
 
 
+_COVER_ART_REASONS = {"off": "switched off (LEARN_ART_ENABLED)"}
+
+
+def cover_art_url(draft: Mapping[str, Any]) -> Optional[str]:
+    """The draft's cover-art hero URL (`cover_art.py`), or None when it has none usable."""
+    url = draft.get("imageUrl") if isinstance(draft, Mapping) else None
+    return url if isinstance(url, str) and url.startswith(("https://", "http://")) and len(url) <= 1000 \
+        else None
+
+
+def cover_art_line(piece: Mapping[str, Any], draft: Mapping[str, Any]) -> str:
+    """"Cover art: <hero URL> (<treatment> · <subject>)" or "No cover art: <reason> — the app shows the
+    category gradient" (pure). The reason is the build's `validation.cover_art` record (read
+    defensively, scrubbed); a draft built before the art step has none ("not recorded")."""
+    validation = piece.get("validation") if isinstance(piece.get("validation"), Mapping) else {}
+    record = validation.get("cover_art") if isinstance(validation.get("cover_art"), Mapping) else {}
+    url = cover_art_url(draft)
+    if url is not None:
+        notes = [alerts.scrub(record[k], 120) for k in ("treatment", "subject")
+                 if isinstance(record.get(k), str) and record[k].strip()]
+        if record.get("reused") is True:
+            notes.append("reused from an earlier round")
+        return f"Cover art: {alerts.scrub(url, 300)}" + (f" ({' · '.join(notes)})" if notes else "")
+    status = record.get("status")
+    reason = (_COVER_ART_REASONS.get(status) if isinstance(status, str) else None) \
+        or (alerts.scrub(record.get("error"), 160) if record.get("error") else None) \
+        or ("the art step ran but the draft has no image URL" if status == "ok" else "not recorded")
+    return f"No cover art: {reason} — the app shows the category gradient"
+
+
 def review_header_text(piece: Mapping[str, Any], job: Optional[Mapping[str, Any]],
                        draft: Mapping[str, Any]) -> str:
     """The silent first message of a review bundle (pure)."""
@@ -639,6 +670,7 @@ def review_header_text(piece: Mapping[str, Any], job: Optional[Mapping[str, Any]
         lines += (["Peg facts:"] + pegs) if pegs else ["Peg facts: none recorded"]
     else:
         lines.append("Topic: not recorded")
+    lines.append(cover_art_line(piece, draft))
     lines += judge_lines(piece.get("validation"))
     job = job or {}
     lines.append(f"{article_words(draft):,} words · narration {_duration(job.get('duration_seconds'))} · "
@@ -779,6 +811,25 @@ async def _send_audio(chat_id: int, piece: Mapping[str, Any], job: Mapping[str, 
         await _send(chat_id, f"🎧 Narration (Telegram could not attach it) — link valid 24 h:\n{url}", silent=True)
 
 
+async def _send_cover(chat_id: int, piece: Mapping[str, Any], draft: Mapping[str, Any], title: str) -> None:
+    """The cover art as a silent photo under the header, so the owner sees it before approving. Best
+    effort: Telegram fetches the PUBLIC URL itself, and anything but a rate limit (which the sweep's
+    back-off owns, as for every other send) is a WARNING — the header already carries the URL."""
+    url = cover_art_url(draft)
+    if url is None:
+        return
+    try:
+        await telegram_pacing.PACER.wait()
+        await telegram.send_photo(chat_id, url, caption=_fit(f"Cover art · {alerts.scrub(title, 200)}",
+                                                              MAX_CAPTION_CHARS),
+                                  disable_notification=True)
+    except (asyncio.CancelledError, TelegramRateLimitException):
+        raise
+    except Exception as e:  # noqa: BLE001 — never blocks the bundle
+        logger.warning("learn review: piece %s cover art not sent as a photo (%s: %s) — its URL is in the "
+                       "header", piece.get("id"), type(e).__name__, e)
+
+
 async def _review_job(piece: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     return await publisher.ready_narration_job(piece)
 
@@ -841,6 +892,7 @@ async def _send_bundle(chat_id: int, piece: Mapping[str, Any], counters: Dict[st
         return
     title = piece.get("title") or draft.get("title") or "untitled"
     await _send(chat_id, review_header_text(piece, job, draft), silent=True)
+    await _send_cover(chat_id, piece, draft, title)
     await _send_audio(chat_id, piece, job, title)
     for chunk in review_service.split_message(article_body_text(draft), MAX_MESSAGE_CHARS):
         await _send(chat_id, chunk, silent=True)

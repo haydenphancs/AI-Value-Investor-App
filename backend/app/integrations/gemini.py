@@ -87,6 +87,27 @@ class GeminiTimeoutError(TimeoutError):
     """
 
 
+class GeminiImageError(Exception):
+    """An image call (`GeminiClient.generate_image`) produced no image. The base class is a
+    PERMANENT failure — a bad request (an unknown model, an invalid config, a 4xx other than 429)
+    that no retry fixes. `transient` tells the caller whether a later call may succeed."""
+
+    transient = False
+
+
+class GeminiImageRefusedError(GeminiImageError):
+    """The model ANSWERED without an image: a refusal (a safety finish reason, safety ratings, a
+    blocked prompt or refusal text). Raised on the first such answer — retrying a refusal only burns
+    quota. The prompt has to change."""
+
+
+class GeminiImageUnavailableError(GeminiImageError):
+    """Every attempt failed transiently — a transport error, a per-call timeout, a 429 / 5xx, or an
+    EMPTY answer (finish reason NO_IMAGE with no ratings and no text). A later call may succeed."""
+
+    transient = True
+
+
 def is_transient_gemini_error(exc: Exception) -> bool:
     """Quota/rate-limit, server-overload, OR per-call timeout — an upstream capacity
     condition the caller should treat as retry-later + sentinel fallback and log at
@@ -1798,6 +1819,96 @@ class GeminiClient:
             if not is_transient_gemini_error(e):
                 logger.error(f"Embedding generation failed: {e}", exc_info=True)
             raise
+
+    async def generate_image(
+        self,
+        prompt: str,
+        *,
+        model_name: str,
+        aspect_ratio: str = "16:9",
+        image_size: str = "2K",
+        max_attempts: int = 3,
+        backoff_seconds: float = 4.0,
+        usage_tag: Optional[str] = None,
+    ) -> bytes:
+        """ONE generated image, as the raw bytes the model returned (PNG or JPEG — the caller
+        decodes). The retry semantics of `scripts/generate_money_moves_art.py::_call_model`:
+
+        * a transport error, a per-call timeout, a 429 or a 5xx → retried, up to `max_attempts`
+          calls with `backoff_seconds × attempt` (capped at 30 s) between them;
+        * an EMPTY answer (finish reason NO_IMAGE, no safety ratings, no text) → retried the same way;
+        * any other answer without an image (a safety finish reason, ratings, a blocked prompt,
+          refusal text) → `GeminiImageRefusedError` at once — retrying a refusal only burns quota;
+        * a bad request (the SDK's ValueError, a 4xx other than 429) → `GeminiImageError` at once.
+        Exhausted transient failures → `GeminiImageUnavailableError`.
+
+        Deliberately OUTSIDE `@async_retry` and the shared quota breaker: an image model has its own
+        quota, and one 429 from a weekly cover must not fail-fast every chat turn and report in the
+        process. Never cached (each call is a new picture). Each attempt is bounded by
+        `_call_with_timeout`; the caller bounds the whole call. `person_generation` is Vertex-only
+        (the Gemini API rejects it), so people are excluded by the prompt, not by a parameter.
+        """
+        attempts = max(1, int(max_attempts))
+        try:
+            config = types.GenerateContentConfig(
+                response_modalities=["IMAGE"],
+                image_config=types.ImageConfig(aspect_ratio=aspect_ratio, image_size=image_size),
+            )
+        except (ValueError, TypeError) as e:
+            raise GeminiImageError(f"generate_image: bad request config: {type(e).__name__}: {e}") from e
+        last: Optional[str] = None
+        for attempt in range(1, attempts + 1):
+            wait = min(float(backoff_seconds) * attempt, 30.0)
+            try:
+                response = await _call_with_timeout(
+                    self._client.aio.models.generate_content(
+                        model=model_name, contents=prompt, config=config),
+                    what="generate_image",
+                )
+            except asyncio.CancelledError:
+                raise
+            except ValueError as e:
+                raise GeminiImageError(f"generate_image: bad request: {type(e).__name__}: {e}") from e
+            except genai_errors.ClientError as e:
+                if getattr(e, "code", None) != 429 and not _is_quota_error(e):
+                    raise GeminiImageError(
+                        f"generate_image: request refused ({getattr(e, 'code', '?')}): "
+                        f"{type(e).__name__}: {str(e)[:300]}") from e
+                last = f"{type(e).__name__}: {str(e)[:200]}"
+                logger.warning("Gemini image: rate-limited on attempt %d/%d (%s)", attempt, attempts, last)
+            except Exception as e:  # transport, timeout, 5xx — transient
+                last = f"{type(e).__name__}: {str(e)[:200]}"
+                logger.warning("Gemini image: attempt %d/%d failed (%s)", attempt, attempts, last)
+            else:
+                _log_gemini_usage(_response_usage(response), call_site="generate_image",
+                                  model=model_name, tag=usage_tag, finish=_response_finish(response))
+                cands = getattr(response, "candidates", None) or []
+                if not cands:
+                    feedback = getattr(response, "prompt_feedback", None)
+                    raise GeminiImageRefusedError(
+                        f"generate_image: no candidates (prompt_feedback={str(feedback)[:200]})")
+                cand = cands[0]
+                content = getattr(cand, "content", None)
+                parts = (getattr(content, "parts", None) if content is not None else None) or []
+                # Walk for inline_data — never index parts[0]: a refusal comes back as a text part.
+                blob = next((p.inline_data.data for p in parts
+                             if getattr(p, "inline_data", None) is not None
+                             and getattr(p.inline_data, "data", None)), None)
+                if blob:
+                    return bytes(blob)
+                text = " ".join((getattr(p, "text", None) or "") for p in parts).strip()
+                reason = str(getattr(cand, "finish_reason", None))
+                ratings = getattr(cand, "safety_ratings", None)
+                if not ("NO_IMAGE" in reason and not ratings and not text):
+                    raise GeminiImageRefusedError(
+                        f"generate_image: no image (finish_reason={reason}, safety={str(ratings)[:200]}, "
+                        f"text={text[:200]!r})")
+                last = f"empty answer ({reason})"
+                logger.warning("Gemini image: empty answer on attempt %d/%d (%s)", attempt, attempts, reason)
+            if attempt < attempts:
+                await asyncio.sleep(wait)
+        raise GeminiImageUnavailableError(
+            f"generate_image: no image after {attempts} attempt(s): {last or 'no detail'}")
 
     @async_retry(max_attempts=2, delay=2.0)
     async def _generate_content_retried(self, *, model: str, contents: Any, config: Any, what: str):

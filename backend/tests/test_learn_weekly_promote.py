@@ -7,8 +7,11 @@ Everything here is offline: the ledger, Storage, ffmpeg and Telegram are stubbed
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import inspect
+import io
+import json
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -17,8 +20,10 @@ from typing import Any, Dict, List
 
 import pytest
 
+from app.config import settings
+from app.services import money_moves_art_style as style
 from app.services.learn_weekly import article_schema as A
-from app.services.learn_weekly import build, ledger, narration, publisher
+from app.services.learn_weekly import build, cover_art, ledger, narration, publisher
 from app.services.learn_weekly import contracts as C
 
 BACKEND = Path(__file__).resolve().parents[1]
@@ -26,6 +31,17 @@ SCRIPT = BACKEND / "scripts" / "learn_weekly_promote.py"
 LEGACY = C.LEGACY_DISCLOSURE_TEXTS[0]
 NOW = datetime(2026, 11, 2, 15, 0, tzinfo=timezone.utc)
 OLD_PATH = "audio/weekly/semiconductor-giants-and-ai-infrastructure-2026-10-30-34a8d0184084.m4a"
+SLUG = "semiconductor-giants-and-ai-infrastructure-2026-10-30"
+SB_URL = "https://x.supabase.co"
+HERO_URL = f"{SB_URL}/storage/v1/object/public/money-moves-images/articles/{SLUG}.hero.jpg"
+CARD_URL = f"{SB_URL}/storage/v1/object/public/money-moves-images/articles/{SLUG}.card.jpg"
+#: W44 was written under the old prompt, whose example tagLabel was this.
+OLD_TAG = "FEATURE DEEP DIVE"
+
+
+@pytest.fixture(autouse=True)
+def _supabase_url(monkeypatch):
+    monkeypatch.setattr(settings, "SUPABASE_URL", SB_URL)
 
 
 def _load():
@@ -39,9 +55,9 @@ def _load():
 P = _load()
 
 
-def _draft() -> Dict[str, Any]:
-    return {
-        "slug": "semiconductor-giants-and-ai-infrastructure-2026-10-30",
+def _draft(tag: Any = None) -> Dict[str, Any]:
+    d = {
+        "slug": SLUG,
         "title": "Semiconductor Giants and AI Infrastructure",
         "subtitle": "How chip makers supply data centers.",
         "category": "battles", "isFeatured": True, "readTimeMinutes": 12, "viewCount": "",
@@ -55,6 +71,30 @@ def _draft() -> Dict[str, Any]:
                 {"type": "callout", "style": "info", "icon": "info.circle.fill", "text": LEGACY}]},
         ],
     }
+    if tag is not None:
+        d["tagLabel"] = tag
+    return d
+
+
+def _plates(color=(20, 40, 70)) -> Dict[str, bytes]:
+    """Real JPEGs at the shipping sizes (what the catalog script writes)."""
+    from PIL import Image
+
+    out = {}
+    for name, (w, h) in style.DERIVATIVES.items():
+        buf = io.BytesIO()
+        Image.new("RGB", (w, h), color).save(buf, "JPEG", quality=84)
+        out[name] = buf.getvalue()
+    return out
+
+
+def _local(plates=None, manifest: Any = "auto") -> Dict[str, Any]:
+    plates = _plates() if plates is None else plates
+    if manifest == "auto":
+        manifest = {"slug": SLUG, "subject": "two identical stacked memory chips", "treatment": "blueprint_cyanotype",
+                    "art_model": "image-model-x", "art_prompt_sha1": "6c34500af0c4",
+                    "masters": {n: {"sha256": hashlib.sha256(b).hexdigest()} for n, b in plates.items()}}
+    return {"plates": plates, "manifest": manifest, "dir": "/art"}
 
 
 def _timings(draft) -> List[Dict[str, Any]]:
@@ -74,8 +114,8 @@ def _timings(draft) -> List[Dict[str, Any]]:
     return out
 
 
-def _piece_job(**piece_over):
-    draft = _draft()
+def _piece_job(tag: Any = None, **piece_over):
+    draft = _draft(tag)
     pid, jid = str(uuid.uuid4()), str(uuid.uuid4())
     piece = {"id": pid, "period_key": "2026-W44:deep_dive", "kind": "deep_dive", "status": C.REHEARSED,
              "dry_run": True, "narration_job_id": jid, "draft": draft, "draft_sha256": narration.draft_sha256(draft),
@@ -224,11 +264,46 @@ _REAL_REPOINT = ledger.repoint_ready_audio_sync
 _REAL_PROMOTE = ledger.promote_rehearsed_sync
 
 
+class _ImageStore:
+    """The PUBLIC image bucket as `cover_art` uses it (list / upload / remove); uploads go to the log."""
+
+    def __init__(self, log: List[Any]) -> None:
+        self.objects: Dict[str, bytes] = {}
+        self.opts: Dict[str, Dict[str, Any]] = {}
+        self.log = log
+        self.storage = self
+
+    def from_(self, bucket):
+        assert bucket == "money-moves-images", bucket
+        return self
+
+    def list(self, prefix, opts):
+        return [{"name": path.rpartition("/")[2], "metadata": {"size": len(data), "mimetype": "image/jpeg"}}
+                for path, data in self.objects.items()
+                if path.rpartition("/")[0] == prefix and opts.get("search", "") in path.rpartition("/")[2]]
+
+    def upload(self, path, data, opts):
+        self.log.append(("art", path))
+        if path in self.objects and opts.get("upsert") == "false":
+            raise type("Dup", (Exception,), {"status": 409})("exists")
+        self.objects[path], self.opts[path] = bytes(data), dict(opts)
+        return {"Key": path}
+
+    def remove(self, paths):
+        self.log.append(("art_remove", list(paths)))
+        for path in paths:
+            self.objects.pop(path, None)
+
+
 class _World:
     """Stubs for every I/O seam; records the order of writes."""
 
     def __init__(self, monkeypatch, piece, job, *, promote_ok=True):
         self.piece, self.job, self.log = piece, job, []
+        self.images = _ImageStore(self.log)
+        self.local = _local()
+        monkeypatch.setattr(cover_art, "_sb", lambda: self.images)
+        monkeypatch.setattr(P, "_read_local_plates", lambda art_dir, slug: self.local)
         self.bucket: Dict[str, int] = {OLD_PATH: job["audio_bytes"]}
         self.duration = job["timings"][-2]["end"] + 0.4
         self.size = int(12_500 * self.duration)
@@ -311,11 +386,12 @@ def test_yes_trims_uploads_repoints_then_promotes_in_that_order(monkeypatch):
     world = _World(monkeypatch, piece, job)
     assert P.main(["--period", "2026-W44:deep_dive", "--publish-at", _when(), "--yes"]) == 0
     kinds = [e if isinstance(e, str) else e[0] for e in world.log]
-    assert kinds == ["download", "trim", "probe", "upload", "repoint", "promote", "notify"]
-    new_path = world.log[3][1]
-    assert world.log[3][2] == "audio/mp4" and new_path != OLD_PATH and narration._WEEKLY_AUDIO_RE.fullmatch(new_path)
-    assert world.log[4] == ("repoint", OLD_PATH, new_path)
-    assert world.log[5][1] == publisher.audio_public_url(new_path)
+    # The cover art first (idempotent; a failure stops before any ledger write), then the audio.
+    assert kinds == ["art", "art", "download", "trim", "probe", "upload", "repoint", "promote", "notify"]
+    new_path = world.log[5][1]
+    assert world.log[5][2] == "audio/mp4" and new_path != OLD_PATH and narration._WEEKLY_AUDIO_RE.fullmatch(new_path)
+    assert world.log[6] == ("repoint", OLD_PATH, new_path)
+    assert world.log[7][1] == publisher.audio_public_url(new_path)
     sent = world.promoted["draft"]
     assert sent["author"] == C.AUTHOR and world.promoted["draft_sha256"] == narration.draft_sha256(sent)
     assert world.promoted["old_draft_sha256"] == piece["draft_sha256"]
@@ -450,3 +526,325 @@ def test_a_naive_publish_time_is_refused(monkeypatch):
     _World(monkeypatch, piece, job)
     with pytest.raises(SystemExit, match="timezone offset"):
         P.main(["--period", "2026-W44:deep_dive", "--publish-at", "2026-11-02T18:00:00"])
+
+
+# ── cover art + tagLabel (owner 2026-11-01: "W44 now + every weekly piece") ──────────────────
+
+
+def test_fixed_tag_label_replaces_only_a_header_repeating_or_missing_tag():
+    assert P.fixed_tag_label(_draft(OLD_TAG)) == P.DEFAULT_TAG_LABEL == "CASE STUDY"
+    assert P.fixed_tag_label(_draft("Feature deep-dive")) == "CASE STUDY"
+    assert P.fixed_tag_label(_draft("FEATURED")) == "CASE STUDY"
+    assert P.fixed_tag_label(_draft(None)) == "CASE STUDY"
+    assert P.fixed_tag_label(_draft("   ")) == "CASE STUDY"
+    assert P.fixed_tag_label(_draft("THE BOTTLENECK")) is None              # a good tag is kept
+    assert P.fixed_tag_label(_draft(OLD_TAG), " head  to head ") == "HEAD TO HEAD"
+    assert P.fixed_tag_label(_draft("HEAD TO HEAD"), "head to head") is None
+
+
+@pytest.mark.parametrize("override, match", [
+    ("DEEP DIVE", "header"), ("Featured story", "header"), ("", "1-4 words"),
+    ("ONE TWO THREE FOUR FIVE", "1-4 words"), ("X" * 33, "32 characters"), ("AI ASSISTED", "AI-assisted"),
+])
+def test_fixed_tag_label_refuses_a_bad_override(override, match):
+    with pytest.raises(SystemExit, match=match):
+        P.fixed_tag_label(_draft(OLD_TAG), override)
+
+
+def test_with_cover_merges_only_the_two_urls_and_the_tag_and_never_mutates():
+    d = _draft(OLD_TAG)
+    new = P.with_cover(d, art={"imageUrl": HERO_URL, "imageCardUrl": CARD_URL}, tag_label="CASE STUDY")
+    assert new["imageUrl"] == HERO_URL and new["imageCardUrl"] == CARD_URL and new["tagLabel"] == "CASE STUDY"
+    assert d.get("imageUrl") is None and d["tagLabel"] == OLD_TAG
+    assert narration.narration_blocks(new) == narration.narration_blocks(d), "neither field is narrated"
+    for bad in ({"imageUrl": HERO_URL}, {"imageUrl": HERO_URL, "imageCardUrl": "javascript:x"},
+                {"imageUrl": HERO_URL, "imageCardUrl": CARD_URL, "extra": "x"}, "junk"):
+        with pytest.raises(SystemExit, match="cover art"):
+            P.with_cover(d, art=bad)
+
+
+def test_promoted_draft_with_art_and_tag_publishes_the_image_and_still_matches_the_audio():
+    piece, job = _piece_job(tag=OLD_TAG)
+    art = {"imageUrl": HERO_URL, "imageCardUrl": CARD_URL}
+    with pytest.raises(SystemExit, match="repeats the app"):
+        P.promoted_draft(piece["draft"], job["script"], audio_url="u", duration_seconds=10)
+    new = P.promoted_draft(piece["draft"], job["script"], audio_url=publisher.audio_public_url(OLD_PATH),
+                           duration_seconds=700.0, art=art, tag_label="CASE STUDY")
+    row, problem = publisher.build_article_row(dict(piece, draft=new, status=C.APPROVED, dry_run=False),
+                                               dict(job, duration_seconds=700.0), now=NOW)
+    assert problem is None
+    assert row["image_url"] == HERO_URL and row["content"]["imageUrl"] == HERO_URL
+    assert row["content"]["imageCardUrl"] == CARD_URL and row["content"]["tagLabel"] == "CASE STUDY"
+
+
+def test_local_plate_problems_checks_sizes_format_and_the_manifest():
+    assert P.local_plate_problems(_local(), SLUG) == []
+    assert P.local_plate_problems(_local(manifest=None), SLUG) == []
+    swapped = _local()
+    swapped["plates"]["hero"] = _plates(color=(200, 10, 10))["hero"]          # not the recorded plate
+    assert any("sha256 differs" in p for p in P.local_plate_problems(swapped, SLUG))
+    other = _local()
+    other["manifest"]["slug"] = "another-piece-2026-10-23"
+    assert any("not " + repr(SLUG) in p for p in P.local_plate_problems(other, SLUG))
+    small = _local(plates={"hero": _plates()["card"], "card": _plates()["card"]}, manifest=None)
+    assert any("want 1206x678" in p for p in P.local_plate_problems(small, SLUG))
+    truncated = _local(plates={"hero": _plates()["hero"][:500], "card": _plates()["card"]}, manifest=None)
+    assert any("not a readable image" in p for p in P.local_plate_problems(truncated, SLUG))
+
+
+def test_read_local_plates_reads_the_pair_and_refuses_half_a_picture(tmp_path):
+    assert P._read_local_plates(tmp_path, SLUG) is None
+    plates = _plates()
+    (tmp_path / f"{SLUG}.hero.jpg").write_bytes(plates["hero"])
+    with pytest.raises(SystemExit, match="only the hero plate"):
+        P._read_local_plates(tmp_path, SLUG)
+    (tmp_path / f"{SLUG}.card.jpg").write_bytes(plates["card"])
+    (tmp_path / f"{SLUG}.manifest.json").write_text(json.dumps({"slug": SLUG}))
+    got = P._read_local_plates(tmp_path, SLUG)
+    assert got["plates"] == plates and got["manifest"] == {"slug": SLUG} and got["dir"] == str(tmp_path)
+    (tmp_path / f"{SLUG}.manifest.json").write_text("{not json")
+    with pytest.raises(SystemExit, match="unreadable"):
+        P._read_local_plates(tmp_path, SLUG)
+    assert P.DEFAULT_ART_DIR == BACKEND / "data" / "learn_weekly_art"
+
+
+def test_plan_art_order():
+    both = {"hero": {"size": 1}, "card": {"size": 1}}
+    assert P.plan_art(local=_local(), bucket=both, draw=True, no_art=False)["source"] == "local"
+    assert P.plan_art(local=None, bucket=both, draw=True, no_art=False)["source"] == "bucket"
+    assert P.plan_art(local=None, bucket={"hero": {"size": 1}, "card": None}, draw=True,
+                      no_art=False)["source"] == "draw"
+    assert P.plan_art(local=None, bucket={}, draw=False, no_art=False)["source"] == "missing"
+    assert P.plan_art(local=_local(), bucket=both, draw=False, no_art=True)["source"] == "none"
+    with pytest.raises(SystemExit, match="contradict"):
+        P.plan_art(local=None, bucket={}, draw=True, no_art=True)
+
+
+def test_yes_publishes_w44_with_its_cover_art_and_a_tag_that_does_not_repeat_the_header(monkeypatch):
+    piece, job = _piece_job(tag=OLD_TAG)
+    world = _World(monkeypatch, piece, job)
+    assert P.main(["--period", "2026-W44:deep_dive", "--publish-at", _when(), "--yes"]) == 0
+    hero, card = f"articles/{SLUG}.hero.jpg", f"articles/{SLUG}.card.jpg"
+    assert world.images.objects == {hero: world.local["plates"]["hero"], card: world.local["plates"]["card"]}
+    for path in (hero, card):
+        assert world.images.opts[path]["content-type"] == "image/jpeg" and world.images.opts[path]["upsert"] == "false"
+    sent = world.promoted["draft"]
+    assert sent["imageUrl"] == HERO_URL and sent["imageCardUrl"] == CARD_URL and sent["tagLabel"] == "CASE STUDY"
+    assert world.promoted["draft_sha256"] == narration.draft_sha256(sent), "the sha covers the art and the tag"
+    v = world.promoted["validation"]
+    assert v["cover_art"]["status"] == "ok" and v["cover_art"]["imageUrl"] == HERO_URL
+    assert v["cover_art"]["subject"] == "two identical stacked memory chips"
+    assert v["promote"]["cover_art"] == "local"
+    assert v["promote"]["tag_label"] == {"from": OLD_TAG, "to": "CASE STUDY"}
+    row, problem = publisher.build_article_row(dict(piece, draft=sent, status=C.APPROVED, dry_run=False),
+                                               world.job, now=NOW)
+    assert problem is None and row["image_url"] == HERO_URL and row["content"]["tagLabel"] == "CASE STUDY"
+
+
+def test_a_tag_label_override_is_published(monkeypatch):
+    piece, job = _piece_job(tag=OLD_TAG)
+    world = _World(monkeypatch, piece, job)
+    assert P.main(["--period", "2026-W44:deep_dive", "--publish-at", _when(), "--yes",
+                   "--tag-label", "head to head"]) == 0
+    assert world.promoted["draft"]["tagLabel"] == "HEAD TO HEAD"
+
+
+def test_without_any_art_source_yes_refuses_before_any_write_and_no_art_publishes_artless(monkeypatch, capsys):
+    piece, job = _piece_job(tag=OLD_TAG)
+    world = _World(monkeypatch, piece, job)
+    world.local = None                                         # no plates on disk, none in the bucket
+    assert P.main(["--period", "2026-W44:deep_dive", "--publish-at", _when()]) == 0
+    assert "--yes refuses" in capsys.readouterr().out and world.log == []
+    with pytest.raises(SystemExit, match="no cover art"):
+        P.main(["--period", "2026-W44:deep_dive", "--publish-at", _when(), "--yes"])
+    assert world.log == []
+    assert P.main(["--period", "2026-W44:deep_dive", "--publish-at", _when(), "--yes", "--no-art"]) == 0
+    assert world.images.objects == {} and "imageUrl" not in world.promoted["draft"]
+    assert world.promoted["draft"]["tagLabel"] == "CASE STUDY", "the tag is fixed even without art"
+    assert world.promoted["validation"]["cover_art"]["status"] == "skipped"
+
+
+def test_a_pair_already_in_the_bucket_is_reused_with_no_upload(monkeypatch):
+    piece, job = _piece_job(tag=OLD_TAG)
+    world = _World(monkeypatch, piece, job)
+    world.local = None
+    plates = _plates()
+    world.images.objects = {f"articles/{SLUG}.{n}.jpg": b for n, b in plates.items()}
+    assert P.main(["--period", "2026-W44:deep_dive", "--publish-at", _when(), "--yes"]) == 0
+    assert not any(isinstance(e, tuple) and e[0] == "art" for e in world.log)
+    assert world.promoted["draft"]["imageUrl"] == HERO_URL
+    assert world.promoted["validation"]["promote"]["cover_art"] == "bucket"
+
+
+def test_draw_art_is_the_paid_fallback(monkeypatch):
+    piece, job = _piece_job(tag=OLD_TAG)
+    world = _World(monkeypatch, piece, job)
+    world.local = None
+    calls = []
+
+    def draw(p, d):
+        calls.append(d["slug"])
+        return {"imageUrl": HERO_URL, "imageCardUrl": CARD_URL,
+                "coverArt": {"status": "ok", "reused": False, "subject": "drawn"}}
+    monkeypatch.setattr(P, "_draw_art", draw)
+    with pytest.raises(SystemExit, match="no cover art"):          # never drawn without the flag
+        P.main(["--period", "2026-W44:deep_dive", "--publish-at", _when(), "--yes"])
+    assert calls == []
+    assert P.main(["--period", "2026-W44:deep_dive", "--publish-at", _when(), "--yes", "--draw-art"]) == 0
+    assert calls == [SLUG] and world.promoted["draft"]["imageUrl"] == HERO_URL
+    assert world.promoted["validation"]["cover_art"]["subject"] == "drawn"
+
+
+def test_refused_plates_or_another_picture_in_the_bucket_stop_before_any_ledger_write(monkeypatch):
+    piece, job = _piece_job(tag=OLD_TAG)
+    world = _World(monkeypatch, piece, job)
+    world.local["plates"]["card"] = _plates(color=(9, 9, 9))["card"]        # not the manifest's plate
+    with pytest.raises(SystemExit, match="refused"):
+        P.main(["--period", "2026-W44:deep_dive", "--publish-at", _when()])
+    assert world.log == []
+    world = _World(monkeypatch, piece, job)
+    world.images.objects = {f"articles/{SLUG}.hero.jpg": b"x" * 10, f"articles/{SLUG}.card.jpg": b"y" * 10}
+    with pytest.raises(SystemExit, match="another picture"):
+        P.main(["--period", "2026-W44:deep_dive", "--publish-at", _when(), "--yes"])
+    assert not any(isinstance(e, tuple) and e[0] in ("download", "upload", "repoint", "promote") for e in world.log)
+
+
+# ── --backfill-art: a piece that is already live ────────────────────────────────────────────
+
+
+_REAL_TRANSITION = ledger.transition_sync
+
+
+class _Live:
+    """A promoted (approved / published) W44 with the art seams, the live row and the ledger write stubbed."""
+
+    def __init__(self, monkeypatch, status, *, tag=OLD_TAG):
+        base = _draft(tag)
+        base["sections"][-1]["content"].pop()                   # the promoted text: no closing
+        base["author"] = dict(C.AUTHOR)
+        self.piece = {"id": str(uuid.uuid4()), "period_key": "2026-W44:deep_dive", "kind": "deep_dive",
+                      "status": status, "dry_run": False, "draft": base,
+                      "draft_sha256": narration.draft_sha256(base), "review_round": 0, "slug": SLUG,
+                      "title": base["title"], "category": "battles",
+                      "validation": {"outcome": "accepted", "promote": {"by": "owner"}}}
+        self.log: List[Any] = []
+        self.images = _ImageStore(self.log)
+        self.local = _local()
+        published = dict(base, isFeatured=True, sortOrder=-202644, publishedAt="2026-11-02T23:00:00+00:00")
+        self.row = {"id": publisher.article_id(SLUG), "slug": SLUG, "source": "weekly", "image_url": None,
+                    "content": published, "updated_at": "2026-11-02T23:00:00.123456+00:00"}
+        self.row_ok = self.transition_ok = True
+        self.transitions: List[Dict[str, Any]] = []
+        monkeypatch.setattr(ledger, "get_piece_sync", lambda key: self.piece)
+        monkeypatch.setattr(ledger, "transition_sync", self.transition)
+        monkeypatch.setattr(cover_art, "_sb", lambda: self.images)
+        monkeypatch.setattr(P, "_read_local_plates", lambda art_dir, slug: self.local)
+        monkeypatch.setattr(P, "_read_live_article_sync", lambda slug: self.row)
+        monkeypatch.setattr(P, "_update_live_article_sync", self.update_row)
+
+        def never(*a, **kw):
+            raise AssertionError("the backfill never trims audio, repoints or promotes")
+        for name in ("_download", "_upload", "_run"):
+            monkeypatch.setattr(P, name, never)
+        monkeypatch.setattr(ledger, "promote_rehearsed_sync", never)
+        monkeypatch.setattr(ledger, "repoint_ready_audio_sync", never)
+
+    def update_row(self, slug, *, image_url, content, observed_updated_at, now):
+        self.log.append(("row", slug, observed_updated_at))
+        if not self.row_ok:
+            return None
+        self.row = dict(self.row, image_url=image_url, content=dict(content), updated_at=now.isoformat())
+        return self.row
+
+    def transition(self, piece_id, **kw):
+        inspect.signature(_REAL_TRANSITION).bind(piece_id, **kw)
+        # The real argument checks, run with no client (they raise before any I/O).
+        assert ledger.transition_problem(kw["from_statuses"], kw["to_status"]) is None
+        ledger._validate_piece_fields(kw["fields"])
+        ledger._validate_fence(kw["fence"], ledger.PIECE_FENCEABLE, ledger.PIECES)
+        self.log.append(("piece", kw["to_status"]))
+        self.transitions.append(kw)
+        if not self.transition_ok:
+            return None
+        self.piece = dict(self.piece, draft=kw["fields"]["draft"], draft_sha256=kw["fields"]["draft_sha256"],
+                          validation=kw["fields"]["validation"])
+        return self.piece
+
+
+def test_backfill_a_published_w44_updates_the_live_row_then_the_piece(monkeypatch, capsys):
+    live = _Live(monkeypatch, C.PUBLISHED)
+    before = copy.deepcopy(live.row)
+    old_draft, old_sha = copy.deepcopy(live.piece["draft"]), live.piece["draft_sha256"]
+    assert P.main(["--period", "2026-W44:deep_dive", "--backfill-art"]) == 0      # dry run
+    assert live.log == [] and "dry run" in capsys.readouterr().out
+    assert P.main(["--period", "2026-W44:deep_dive", "--backfill-art", "--yes"]) == 0
+    assert [e[0] for e in live.log] == ["art", "art", "row", "piece"]
+    assert live.log[2][2] == before["updated_at"], "the row write is fenced on the updated_at read before"
+    row = live.row
+    assert row["image_url"] == HERO_URL and row["content"]["imageUrl"] == HERO_URL
+    assert row["content"]["imageCardUrl"] == CARD_URL and row["content"]["tagLabel"] == "CASE STUDY"
+    untouched = {k: v for k, v in row["content"].items() if k not in ("imageUrl", "imageCardUrl", "tagLabel")}
+    assert untouched == {k: v for k, v in before["content"].items() if k != "tagLabel"}, \
+        "the rest of the published content stays byte for byte"
+    t = live.transitions[0]
+    assert t["from_statuses"] == [C.PUBLISHED] and t["to_status"] == C.PUBLISHED
+    assert t["fence"] == {"draft_sha256": old_sha, "review_round": 0, "dry_run": False}
+    new = t["fields"]["draft"]
+    assert new["imageUrl"] == HERO_URL and new["tagLabel"] == "CASE STUDY"
+    assert t["fields"]["draft_sha256"] == narration.draft_sha256(new)
+    assert narration.narration_blocks(new) == narration.narration_blocks(old_draft), "the audio still matches"
+    assert t["fields"]["validation"]["cover_art"]["imageUrl"] == HERO_URL
+    assert t["fields"]["validation"]["backfill_art"]["tag_label"] == {"from": OLD_TAG, "to": "CASE STUDY"}
+    # A rerun finds nothing to do and writes nothing.
+    live.log.clear()
+    assert P.main(["--period", "2026-W44:deep_dive", "--backfill-art", "--yes"]) == 0
+    assert live.log == []
+
+
+def test_backfill_an_approved_piece_updates_only_its_draft_fenced_on_the_old_sha(monkeypatch):
+    live = _Live(monkeypatch, C.APPROVED)
+    old_sha = live.piece["draft_sha256"]
+    assert P.main(["--period", "2026-W44:deep_dive", "--backfill-art", "--yes"]) == 0
+    assert [e[0] for e in live.log] == ["art", "art", "piece"]
+    t = live.transitions[0]
+    assert t["from_statuses"] == [C.APPROVED] and t["to_status"] == C.APPROVED
+    assert t["fence"] == {"draft_sha256": old_sha, "review_round": 0, "dry_run": False}
+    assert live.piece["draft"]["imageCardUrl"] == CARD_URL
+
+
+def test_backfill_refuses_a_rehearsal_or_a_dry_run_and_waits_out_publishing(monkeypatch):
+    live = _Live(monkeypatch, C.REHEARSED)
+    with pytest.raises(SystemExit, match="through the promote itself"):
+        P.main(["--period", "2026-W44:deep_dive", "--backfill-art", "--yes"])
+    live.piece = dict(live.piece, status=C.APPROVED, dry_run=True)
+    with pytest.raises(SystemExit, match="dry_run=True"):
+        P.main(["--period", "2026-W44:deep_dive", "--backfill-art", "--yes"])
+    live.piece = dict(live.piece, status=C.PUBLISHING, dry_run=False)
+    assert P.main(["--period", "2026-W44:deep_dive", "--backfill-art", "--yes"]) == 1
+    assert live.log == []
+
+
+def test_backfill_a_published_piece_without_its_own_live_row_or_after_a_lost_write(monkeypatch):
+    live = _Live(monkeypatch, C.PUBLISHED)
+    live.row = dict(live.row, source="bundle")
+    with pytest.raises(SystemExit, match="no weekly row of its own"):
+        P.main(["--period", "2026-W44:deep_dive", "--backfill-art", "--yes"])
+    assert live.log == []
+    live = _Live(monkeypatch, C.PUBLISHED)
+    live.row = dict(live.row, content=None)                      # never overwrite unreadable content
+    with pytest.raises(SystemExit, match="unreadable"):
+        P.main(["--period", "2026-W44:deep_dive", "--backfill-art", "--yes"])
+    assert live.log == []
+    live = _Live(monkeypatch, C.PUBLISHED)
+    live.row_ok = False                                          # someone changed the row in between
+    assert P.main(["--period", "2026-W44:deep_dive", "--backfill-art", "--yes"]) == 1
+    assert [e[0] for e in live.log] == ["art", "art", "row"], "the piece is not written after a lost row write"
+
+
+def test_backfill_with_no_art_source_refuses_yes(monkeypatch):
+    live = _Live(monkeypatch, C.PUBLISHED)
+    live.local = None
+    assert P.main(["--period", "2026-W44:deep_dive", "--backfill-art"]) == 0          # dry run: says so
+    with pytest.raises(SystemExit, match="no cover art"):
+        P.main(["--period", "2026-W44:deep_dive", "--backfill-art", "--yes"])
+    assert live.log == []

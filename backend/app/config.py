@@ -1291,7 +1291,16 @@ class Settings(BaseSettings):
     LEARN_WRITER_THINKING_BUDGET: int = 0
     LEARN_MAX_CONTENT_REJECTIONS: int = Field(2, ge=1, le=6)
     LEARN_MAX_WRITER_FAILURES: int = Field(3, ge=1, le=6)
+    # Cover art for every weekly piece (`learn_weekly/cover_art.py`, owner 2026-11-01): ONE image call
+    # + ONE short text call per piece, in the catalog's art system (`money_moves_art_style`), uploaded
+    # to the PUBLIC `money-moves-images` bucket. Fail-closed switch; any art failure or a step past
+    # LEARN_ART_TIMEOUT_SECONDS leaves the piece ARTLESS (iOS draws its gradient) — never a failed or
+    # delayed build. The models mirror scripts/generate_money_moves_art.py's MM_ART_MODEL /
+    # MM_SUBJECT_MODEL defaults.
     LEARN_ART_ENABLED: bool = False
+    LEARN_ART_MODEL: str = "gemini-3-pro-image"
+    LEARN_ART_SUBJECT_MODEL: str = "gemini-2.5-flash"
+    LEARN_ART_TIMEOUT_SECONDS: int = Field(120, ge=15, le=600)
     LEARN_SERVED_WEEKLY_MAX: int = Field(40, ge=4, le=500)
 
     # Rate limiting

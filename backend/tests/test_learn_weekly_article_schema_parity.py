@@ -53,7 +53,7 @@ def _bundle() -> List[Dict[str, Any]]:
 def _outline(n_sections: int = 5, **over: Any) -> A.Outline:
     raw = {
         "title": "How Chips Became the Bottleneck", "subtitle": "A subtitle.",
-        "cardSubtitle": "A card line.", "tagLabel": "Feature Deep Dive",
+        "cardSubtitle": "A card line.", "tagLabel": "Case Study",
         "keyHighlights": [{"icon": "cpu.fill", "title": f"Highlight {i}", "description": "D."}
                           for i in range(3)],
         "sections": [{"title": f"Section {i}", "icon": "chart.bar.fill",
@@ -189,7 +189,7 @@ def test_code_owned_fields():
     assert a["author"] == C.AUTHOR == {"name": "Caydex Research", "title": "Editorial", "isVerified": False}
     assert a["viewCount"] == "" and a["publishedDaysAgo"] == 0
     assert a["isFeatured"] is True and a["hasAudioVersion"] is False and a["audioUrl"] is None
-    assert a["tagLabel"] == "FEATURE DEEP DIVE"
+    assert a["tagLabel"] == "CASE STUDY"
     assert a["heroGradientColors"] == list(A.CATEGORY_GRADIENTS["blueprints"])
     assert a["sortOrder"] == -(2026 * 100 + 43)
     assert a["sections"][0]["hasGlowEffect"] is True

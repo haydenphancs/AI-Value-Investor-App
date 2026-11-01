@@ -17,6 +17,13 @@ that generation, so a run that lost its lease can never overwrite the one that t
                                  ├─ fact sheet / catalog unavailable ─▶ retry, no cap (the catch-up cut-off decides)
                                  └─ lease_lost ────────▶ stop (the new owner carries on)
 
+COVER ART (owner 2026-11-01, `cover_art.py`, behind LEARN_ART_ENABLED): between `accepted` and the
+`drafted` write, after the disclosure is appended, one image is drawn and uploaded and its `imageUrl` /
+`imageCardUrl` join the draft (its `draft_sha256` is computed after, so every fence sees the final
+draft; the narration script does not change). It never fails or delays the piece beyond
+LEARN_ART_TIMEOUT_SECONDS: any failure leaves the draft artless, recorded in `validation.cover_art`
+(which the review header shows). A rebuild of the same slug reuses its stored plates with no model call.
+
 A thin sheet is told apart from an unavailable one: `FactSheetShortfall` means every SEC read
 ANSWERED and the candidate still has fewer than `MIN_SHEET_FACTS` usable facts (no 10-K yet, a
 subject SEC does not know) — retrying it for two days would only lose the week, so the build moves the
@@ -203,6 +210,12 @@ def _alerts() -> ModuleType:
     from app.services.learn_weekly import alerts
 
     return alerts
+
+
+def _cover_art() -> ModuleType:
+    from app.services.learn_weekly import cover_art
+
+    return cover_art
 
 
 async def _notify_terminal(piece: Mapping[str, Any], *, status: str, reason: str,
@@ -813,16 +826,50 @@ class _HeldBuild:
         return await self.requeue(f"{column} {count}/{cap}: {detail}", spent=spent,
                                   clear_progress=clear_progress, validation=validation)
 
+    async def cover_art(self, content: Dict[str, Any], sheet: C.FactSheet
+                        ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """(the draft with its cover art merged in, the record for `validation.cover_art`) — the art
+        step (`cover_art.py`), between the accepted draft and its write. It can never fail or stall the
+        piece: `cover_art_for` never raises and is bounded by LEARN_ART_TIMEOUT_SECONDS (far inside
+        LEASE_SECONDS); the lease is refreshed first so the paid image call is never made for a piece
+        this generation no longer holds. Adds only `imageUrl` / `imageCardUrl` (never narrated, so
+        the narration script is unchanged); the draft hash is computed after, so every
+        `draft_sha256` fence sees the final draft."""
+        art = _cover_art()
+        if not settings.LEARN_ART_ENABLED:
+            return content, {"status": art.STATUS_OFF}
+        try:
+            refreshed = await ledger.refresh_lease(self.pid, generation_id=self.gen,
+                                                   lease_seconds=LEASE_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("learn build: piece %s (%s) lease refresh before the cover art failed (%s: %s) "
+                           "— no cover art this generation", self.pid, self.key, type(e).__name__, e)
+            return content, {"status": art.STATUS_SKIPPED,
+                             "error": f"lease refresh failed: {type(e).__name__}"}
+        if refreshed is None:
+            logger.warning("learn build: piece %s (%s) generation %s lost its lease before the cover "
+                           "art — not drawn (the draft write decides the rest)", self.pid, self.key,
+                           self.gen)
+            return content, {"status": art.STATUS_SKIPPED, "error": "lease lost before the art step"}
+        fields, record = await art.cover_art_for(
+            content, subjects=sheet.subjects, piece_id=self.pid,
+            previous_validation=self.row.get("validation"))
+        return ({**content, **fields} if fields else content), record
+
     async def accepted(self, outcome: W.WriterOutcome, sheet: C.FactSheet, sheet_sha: str,
                        category: str) -> Optional[Dict[str, Any]]:
-        content = outcome.content or {}
+        content, art_record = await self.cover_art(dict(outcome.content or {}), sheet)
+        validation = outcome.validation_record()
+        validation["cover_art"] = art_record
         fields = {
             "draft": content,
             "draft_sha256": A.content_sha256(content),
             "fact_sheet": sheet.to_json(),
             "fact_sheet_sha256": sheet_sha,
             "subjects": ledger.subjects_json(sheet.subjects),
-            "validation": outcome.validation_record(),
+            "validation": validation,
             "tokens_used": self._tokens(outcome.tokens_used),
             "slug": content.get("slug"),
             "title": content.get("title"),

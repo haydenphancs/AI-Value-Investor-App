@@ -24,6 +24,18 @@ WHAT THIS MODULE OWNS
    whole round (review finding F5; "a silent article never ships").
 4. **The worker-facing flows** behind `/api/v1/internal/learn/*` (`learn_internal.py` is the thin
    HTTP surface): claim, heartbeat, upload target, complete, fail — and what each does to the piece.
+5. **Catalog jobs** (migration 207, owner 2026-11-01 "Yes, build it"): a job with NO piece
+   (`piece_id` NULL, `catalog_slug` set) narrates a hand-written Money Moves catalog article on the
+   Railway narrator instead of the owner's laptop. The worker cannot tell the two apart — it renders
+   what it is handed and uploads to the path it is given. For a catalog job the server skips every
+   piece step: the claim does no piece lookup, the audio goes to
+   `audio/catalog/<slug>-<sha256[:12]>.m4a` (`catalog_audio_path`), `complete` verifies exactly as for
+   a piece and then moves NOTHING — it sends the owner one Telegram line naming
+   `scripts/learn_catalog_fetch.py`, which downloads the file and merges the timings into the
+   article; a failed catalog job alerts loudly with how to re-enqueue (round + 1) — ONCE: a replayed
+   /fail sends nothing (`_after_fail_recorded`), and a job the ledger closes at its lease re-claim cap is
+   reported by the claim that closed it (`_report_closed_at_cap`; the scheduler's sweep finds only
+   pieces). Jobs are queued by `scripts/learn_catalog_narrate.py`. Weekly behaviour is unchanged.
 
 THE AUDIO OBJECT
 ----------------
@@ -89,6 +101,10 @@ PIPELINE_VERSION = "learn-narration/v1"
 AUDIO_BUCKET = MONEY_MOVES_BUCKET
 AUDIO_CONTENT_TYPE = "audio/mp4"
 WEEKLY_AUDIO_PREFIX = "audio/weekly"
+#: Where a CATALOG job's audio goes (migration 207): content-addressed like the weekly prefix and in
+#: the same private bucket. It is a staging object — `scripts/learn_catalog_fetch.py` downloads it and
+#: `seed_money_moves.py` publishes the local clip at the catalog's own `audio/<slug>.m4a`.
+CATALOG_AUDIO_PREFIX = "audio/catalog"
 #: The worker's upload cap. A 12-minute Deep Dive at 96 kbps is ≈ 8.6 MB; 60 MB is a runaway.
 MAX_AUDIO_UPLOAD_BYTES = 60 * 1024 * 1024
 #: The ledger's own upper bound on a job's duration (`ledger.MAX_AUDIO_SECONDS`, 4 h).
@@ -99,6 +115,7 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _NONCE_RE = re.compile(r"[0-9a-f]{16}")       # what `ledger.claim_job` mints (secrets.token_hex(8))
 _FAIL_CODE_RE = re.compile(r"[a-z0-9][a-z0-9_.\-]{0,63}")
 _WEEKLY_AUDIO_RE = re.compile(r"audio/weekly/([a-z0-9]+(?:-[a-z0-9]+)*)-([0-9a-f]{12})\.m4a")
+_CATALOG_AUDIO_RE = re.compile(r"audio/catalog/([a-z0-9]+(?:-[a-z0-9]+)*)-([0-9a-f]{12})\.m4a")
 
 #: The engine's voice, frozen into the job. Chatterbox = the catalog clone, at the settings
 #: `scripts/clone_learn_audio.py` voiced it with (approved 2026-06-24) — the worker AST-pins its own
@@ -369,6 +386,36 @@ def weekly_audio_path(slug: str, sha256: str) -> str:
     return f"{WEEKLY_AUDIO_PREFIX}/{slug}-{sha256[:12]}.m4a"
 
 
+def catalog_audio_path(slug: str, sha256: str) -> str:
+    """`audio/catalog/<slug>-<sha256[:12]>.m4a` — a catalog job's content-addressed object (207)."""
+    if not (isinstance(slug, str) and len(slug) <= ledger.CATALOG_SLUG_MAX and _SLUG_RE.fullmatch(slug)):
+        raise ValueError(f"narration: catalog slug {slug!r} is not lowercase kebab-case")
+    if not (isinstance(sha256, str) and _SHA256_RE.fullmatch(sha256)):
+        raise ValueError("narration: sha256 must be 64 lowercase hex characters")
+    return f"{CATALOG_AUDIO_PREFIX}/{slug}-{sha256[:12]}.m4a"
+
+
+def is_catalog_audio_path(path: Any, slug: Optional[str] = None) -> bool:
+    """Is `path` a catalog narration object (of `slug`, when given)?"""
+    m = _CATALOG_AUDIO_RE.fullmatch(path) if isinstance(path, str) else None
+    return m is not None and (slug is None or m.group(1) == slug)
+
+
+def is_catalog_job(job: Mapping[str, Any]) -> bool:
+    """A job with no piece narrates a catalog article (migration 207's CHECK: exactly one of
+    piece_id / catalog_slug is set)."""
+    return job.get("piece_id") is None
+
+
+def catalog_slug_of(job: Mapping[str, Any]) -> str:
+    """The catalog slug of a job with no piece, or ValueError when it is unreadable (a row the 207
+    CHECKs should have refused — never trusted into a Storage path)."""
+    slug = job.get("catalog_slug")
+    if not (isinstance(slug, str) and len(slug) <= ledger.CATALOG_SLUG_MAX and _SLUG_RE.fullmatch(slug)):
+        raise ValueError(f"narration: job {job.get('id')} has no piece and an unreadable catalog_slug {slug!r}")
+    return slug
+
+
 def audio_public_url(path: str) -> str:
     """The PUBLIC-form URL of a weekly narration object — the form `seed_money_moves.py` stores in
     `audioUrl` (`storage.get_public_url`, minus its bare `?`). The bucket is private: this URL is not
@@ -592,6 +639,22 @@ def merge_timings(content: Mapping[str, Any], blocks: Sequence[c.NarrationBlock]
 # ── enqueue (called by the build step) ───────────────────────────────────────────────────────
 
 
+def check_narratable(blocks: Sequence[c.NarrationBlock], *, subject: str) -> None:
+    """ValueError when `blocks` cannot be narrated: none at all, a blank block, or a block over
+    MAX_PARAGRAPH_WORDS (Chatterbox truncates a block at 40 s raw, and the worker would fail the round
+    after rendering it). Shared by a weekly piece's enqueue and a catalog article's
+    (`scripts/learn_catalog_narrate.py`)."""
+    if not blocks:
+        raise ValueError(f"narration: {subject} has nothing to narrate")
+    for b in blocks:
+        if not b.text.strip() or not sentence_split(b.text):
+            raise ValueError(f"narration: block {b.i} ({b.dest}) has no speakable text")
+        words = len(b.text.split())
+        if words > c.MAX_PARAGRAPH_WORDS:
+            raise ValueError(f"narration: block {b.i} ({b.dest}) has {words} words — over the "
+                             f"{c.MAX_PARAGRAPH_WORDS}-word block cap (Chatterbox truncates at 40 s)")
+
+
 async def enqueue_for_piece(piece: Mapping[str, Any], content: Dict[str, Any], *, engine: str,
                             round: int) -> Optional[Dict[str, Any]]:
     """Queue the narration of `content` (the piece's iOS-shaped draft) as round `round` of `piece`,
@@ -607,15 +670,7 @@ async def enqueue_for_piece(piece: Mapping[str, Any], content: Dict[str, Any], *
     if engine not in c.ENGINES:
         raise ValueError(f"narration: unknown engine {engine!r} (known: {c.ENGINES})")
     blocks = narration_blocks(content)
-    if not blocks:
-        raise ValueError(f"narration: piece {piece.get('id')} has nothing to narrate")
-    for b in blocks:
-        if not b.text.strip() or not sentence_split(b.text):
-            raise ValueError(f"narration: block {b.i} ({b.dest}) has no speakable text")
-        words = len(b.text.split())
-        if words > c.MAX_PARAGRAPH_WORDS:
-            raise ValueError(f"narration: block {b.i} ({b.dest}) has {words} words — over the "
-                             f"{c.MAX_PARAGRAPH_WORDS}-word block cap (Chatterbox truncates at 40 s)")
+    check_narratable(blocks, subject=f"piece {piece.get('id')}")
     sha = script_sha256(blocks)
     voice = voice_key(voice_spec(engine))
     job = await ledger.enqueue_job(piece["id"], round=round, script=script_json(blocks), script_sha256=sha,
@@ -684,36 +739,46 @@ async def claim_for_worker(engines: Sequence[str], *, worker_version: str,
     """`POST /jobs/claim`: the oldest job whose FROZEN engine the worker declares (`ledger.claim_job`
     — the engine is the job's, never the worker's environment), as the worker's view of it, or None
     (204). A job whose piece can no longer want narration (terminal or live) is cancelled instead of
-    handed out; a job whose stored script cannot be read is failed (it would fail every render)."""
+    handed out; a job whose stored script cannot be read is failed (it would fail every render).
+    A CATALOG job (no piece, migration 207) has no piece to look up: only its slug and script are
+    checked, and an unreadable one is failed the same way. A catalog job the ledger closed at its lease
+    re-claim cap while scanning (`ledger.claim_job_outcome`) gets its loud owner line here: the
+    scheduler's sweep finds only pieces, so nothing else would ever report it. A weekly job closed that
+    way is left to that sweep, as before."""
     at = now or _now()
     for _ in range(3):  # a cancelled or unreadable job does not cost the worker its cron tick
-        job = await ledger.claim_job(list(engines), now=at)
+        outcome = await ledger.claim_job_outcome(list(engines), now=at)
+        await _report_closed_at_cap(outcome.closed, now=at)
+        job = outcome.claimed
         if job is None:
             logger.info("learn narration: nothing to claim for engines %s (worker %s)", list(engines),
                         _excerpt(worker_version))
             return None
         claim = WorkerClaim(int(job["attempts"]), str(job["claim_nonce"]))
-        piece = await ledger.get_piece_by_id(job.get("piece_id"))
-        if piece is None or piece.get("status") in _NARRATION_DEAD:
-            logger.warning("learn narration: job %s (round %s) belongs to piece %s which is %s — cancelling "
-                           "its open jobs instead of rendering", job.get("id"), job.get("round"),
-                           job.get("piece_id"), None if piece is None else piece.get("status"))
-            await ledger.cancel_open_jobs(job.get("piece_id"), reason="piece_closed_before_render", now=at)
-            continue
+        catalog = is_catalog_job(job)
+        if not catalog:
+            piece = await ledger.get_piece_by_id(job.get("piece_id"))
+            if piece is None or piece.get("status") in _NARRATION_DEAD:
+                logger.warning("learn narration: job %s (round %s) belongs to piece %s which is %s — cancelling "
+                               "its open jobs instead of rendering", job.get("id"), job.get("round"),
+                               job.get("piece_id"), None if piece is None else piece.get("status"))
+                await ledger.cancel_open_jobs(job.get("piece_id"), reason="piece_closed_before_render", now=at)
+                continue
         try:
+            if catalog:
+                catalog_slug_of(job)
             blocks = blocks_from_script(job.get("script"), expected_sha256=job.get("script_sha256"))
             voice = parse_voice_key(job.get("voice"))
         except ValueError as e:
-            logger.error("learn narration: job %s (piece %s round %s) has an unreadable script or voice — "
-                         "failing it rather than rendering: %s", job.get("id"), job.get("piece_id"),
+            logger.error("learn narration: job %s (%s round %s) has an unreadable script or voice — "
+                         "failing it rather than rendering: %s", job.get("id"), ledger.job_subject(job),
                          job.get("round"), e)
-            failed = await ledger.fail_job(job["id"], claim.attempts, claim.nonce,
-                                           error=f"script_unreadable: {e}", now=at)
-            if failed is not None and failed.get("status") == c.JOB_FAILED:
-                await after_job_failed(failed, now=at)
+            failed = await ledger.fail_job_outcome(job["id"], claim.attempts, claim.nonce,
+                                                   error=f"script_unreadable: {e}", now=at)
+            await _after_fail_recorded(failed, now=at, op="claim")
             continue
-        logger.info("learn narration: worker %s claimed job %s (piece %s round %s, %s, %d blocks, attempt %d)",
-                    _excerpt(worker_version), job.get("id"), job.get("piece_id"), job.get("round"),
+        logger.info("learn narration: worker %s claimed job %s (%s round %s, %s, %d blocks, attempt %d)",
+                    _excerpt(worker_version), job.get("id"), ledger.job_subject(job), job.get("round"),
                     job.get("engine"), len(blocks), claim.attempts)
         return {
             "id": str(job["id"]), "round": int(job["round"]), "engine": job["engine"], "voice": voice,
@@ -817,6 +882,14 @@ def _slug_of(piece: Mapping[str, Any], *, op: str) -> str:
     return slug
 
 
+def _catalog_slug(job: Mapping[str, Any], *, op: str) -> str:
+    """A catalog job's slug, or 422 when it is unreadable (never trusted into a Storage path)."""
+    try:
+        return catalog_slug_of(job)
+    except ValueError as e:
+        raise LearnNarratorRequestInvalid(f"{op}: {e}", job_id=job.get("id"), op=op) from None
+
+
 async def _piece_or_404(job: Mapping[str, Any], *, op: str) -> Dict[str, Any]:
     piece = await ledger.get_piece_by_id(job.get("piece_id"))
     if piece is None:
@@ -838,7 +911,10 @@ async def upload_target(job_id: Any, claim: WorkerClaim, *, content_type: Any, s
     with the same size and type (a retried tick after its PUT landed), the path with
     `upload_url: None`. An object of ANOTHER size at the content-addressed path is refused and left
     in place (409): it is not this upload, and deleting by a worker's word could remove audio a
-    published article plays."""
+    published article plays.
+
+    A CATALOG job (no piece) uploads to `audio/catalog/<catalog_slug>-<sha12>.m4a` in the same bucket,
+    under the same exists / size / type rules."""
     if content_type != AUDIO_CONTENT_TYPE:
         raise LearnNarratorRequestInvalid(f"upload: content_type must be {AUDIO_CONTENT_TYPE!r}, got "
                                           f"{_excerpt(content_type)!r}", job_id=job_id, op="upload")
@@ -847,22 +923,26 @@ async def upload_target(job_id: Any, claim: WorkerClaim, *, content_type: Any, s
         raise LearnNarratorRequestInvalid("upload: sha256 must be 64 lowercase hex characters",
                                           job_id=job_id, op="upload")
     job = await _held_job(job_id, claim, op="upload")
-    piece = await _piece_or_404(job, op="upload")
-    path = weekly_audio_path(_slug_of(piece, op="upload"), sha256)
+    if is_catalog_job(job):
+        path = catalog_audio_path(_catalog_slug(job, op="upload"), sha256)
+    else:
+        piece = await _piece_or_404(job, op="upload")
+        path = weekly_audio_path(_slug_of(piece, op="upload"), sha256)
+    subject = ledger.job_subject(job)
     stat = await asyncio.to_thread(_object_stat_sync, AUDIO_BUCKET, path)
     if stat is not None:
         problems = object_problems(stat, want_size=size, want_type=AUDIO_CONTENT_TYPE, path=path)
         if problems:
-            logger.error("learn narration upload: %s already holds ANOTHER object (%s) — job %s (piece %s) "
-                         "refused, object left in place", path, "; ".join(problems), job.get("id"), piece.get("id"))
+            logger.error("learn narration upload: %s already holds ANOTHER object (%s) — job %s (%s) "
+                         "refused, object left in place", path, "; ".join(problems), job.get("id"), subject)
             raise LearnNarratorAssetMismatch(f"upload: {path} already holds another object ({'; '.join(problems)})",
                                              job_id=job.get("id"), op="upload")
         logger.info("learn narration upload: %s already in the bucket with the same size — no re-upload "
                     "(job %s)", path, job.get("id"))
         return {"upload_url": None, "path": path, "content_type": AUDIO_CONTENT_TYPE, "already_uploaded": True}
     url = await asyncio.to_thread(_signed_upload_url_sync, AUDIO_BUCKET, path)
-    logger.info("learn narration upload: signed an upload of %d bytes to %s/%s for job %s (piece %s)",
-                size, AUDIO_BUCKET, path, job.get("id"), piece.get("id"))
+    logger.info("learn narration upload: signed an upload of %d bytes to %s/%s for job %s (%s)",
+                size, AUDIO_BUCKET, path, job.get("id"), subject)
     return {"upload_url": url, "path": path, "content_type": AUDIO_CONTENT_TYPE, "already_uploaded": False}
 
 
@@ -895,23 +975,36 @@ async def complete(job_id: Any, claim: WorkerClaim, *, path: Any, size_bytes: An
          ASSET_MISMATCH); an unknown size/type deletes nothing (503, retried);
       5. `ledger.complete_job`, then the piece `media_pending → ready_for_review` with the merged
          draft and its new draft_sha256 — fenced on status, `narration_job_id` and the draft it read.
+    A CATALOG job (no piece, migration 207) takes the same steps 1-4 against its own
+    `audio/catalog/<catalog_slug>-…` path; step 5 is `ledger.complete_job` and a best-effort owner
+    alert — no piece exists to move (`piece_updated` stays False), and the merge into the article is
+    `scripts/learn_catalog_fetch.py`'s job.
     """
     at = now or _now()
     op = "complete"
     job = await _job_or_404(job_id, op=op)
+    catalog = is_catalog_job(job)
     status = job.get("status")
     if status == c.JOB_CANCELLED:
         logger.info("learn narration complete: job %s was cancelled — the render is discarded, nothing "
-                    "written (piece %s)", job.get("id"), job.get("piece_id"))
+                    "written (%s)", job.get("id"), ledger.job_subject(job))
         return {"ok": True, "status": c.JOB_CANCELLED, "replay": False, "piece_updated": False}
     if status == c.JOB_READY and claim.holds(job):
         logger.info("learn narration complete: job %s is already ready under claim %d — a replay",
                     job.get("id"), claim.attempts)
+        if catalog:
+            return {"ok": True, "status": c.JOB_READY, "replay": True, "piece_updated": False}
         updated = await _finish_piece(job, op="complete_replay")
         return {"ok": True, "status": c.JOB_READY, "replay": True, "piece_updated": updated}
     if status != c.JOB_IN_PROGRESS or not claim.holds(job):
         raise _not_held(job, claim, op=op)
-    ids = {"job_id": job.get("id"), "piece_id": job.get("piece_id"), "op": op}
+    # Every refusal below names its subject: the piece, or (207) the catalog article — `catalog_slug`
+    # is in errors.CONTEXT_KEYS, so it reaches the log line and the worker's error body.
+    ids: Dict[str, Any] = {"job_id": job.get("id"), "op": op}
+    if catalog:
+        ids["catalog_slug"] = job.get("catalog_slug")
+    else:
+        ids["piece_id"] = job.get("piece_id")
     if engine != job.get("engine"):
         raise LearnNarratorRequestInvalid(f"complete: engine {_excerpt(engine)!r} is not the job's frozen "
                                           f"{job.get('engine')!r}", **ids)
@@ -922,20 +1015,32 @@ async def complete(job_id: Any, claim: WorkerClaim, *, path: Any, size_bytes: An
         blocks = blocks_from_script(job.get("script"), expected_sha256=job.get("script_sha256"))
     except ValueError as e:
         raise LearnNarratorRequestInvalid(f"complete: the job's stored script is unusable ({e})", **ids) from None
-    piece = await _piece_or_404(job, op=op)
-    slug = _slug_of(piece, op=op)
-    m = _WEEKLY_AUDIO_RE.fullmatch(path) if isinstance(path, str) else None
-    if m is None or m.group(1) != slug:
-        raise LearnNarratorRequestInvalid(f"complete: path {_excerpt(path)!r} is not a weekly narration path of "
-                                          f"slug {slug!r}", **ids)
-    size = _int_in(size_bytes, 1, MAX_AUDIO_UPLOAD_BYTES, "complete: bytes")
-    if isinstance(duration_seconds, bool) or not isinstance(duration_seconds, (int, float)) \
-            or not math.isfinite(float(duration_seconds)) or not 0 < float(duration_seconds) <= MAX_AUDIO_SECONDS:
-        raise LearnNarratorRequestInvalid(f"complete: duration_seconds must be a finite number in (0, "
-                                          f"{MAX_AUDIO_SECONDS:.0f}], got {duration_seconds!r}", **ids)
-    duration = float(duration_seconds)
-    norm = validate_timings(blocks, timings, duration_seconds=duration)
-    worker_checks = _checks(checks)
+    if catalog:
+        slug = _catalog_slug(job, op=op)
+        if not is_catalog_audio_path(path, slug):
+            raise LearnNarratorRequestInvalid(f"complete: path {_excerpt(path)!r} is not a catalog narration path "
+                                              f"of slug {slug!r}", **ids)
+    else:
+        piece = await _piece_or_404(job, op=op)
+        slug = _slug_of(piece, op=op)
+        m = _WEEKLY_AUDIO_RE.fullmatch(path) if isinstance(path, str) else None
+        if m is None or m.group(1) != slug:
+            raise LearnNarratorRequestInvalid(f"complete: path {_excerpt(path)!r} is not a weekly narration path "
+                                              f"of slug {slug!r}", **ids)
+    try:
+        size = _int_in(size_bytes, 1, MAX_AUDIO_UPLOAD_BYTES, "complete: bytes")
+        if isinstance(duration_seconds, bool) or not isinstance(duration_seconds, (int, float)) \
+                or not math.isfinite(float(duration_seconds)) or not 0 < float(duration_seconds) <= MAX_AUDIO_SECONDS:
+            raise LearnNarratorRequestInvalid(f"complete: duration_seconds must be a finite number in (0, "
+                                              f"{MAX_AUDIO_SECONDS:.0f}], got {duration_seconds!r}", **ids)
+        duration = float(duration_seconds)
+        norm = validate_timings(blocks, timings, duration_seconds=duration)
+        worker_checks = _checks(checks)
+    except LearnNarratorRequestInvalid as e:
+        if e.ids:
+            raise
+        # The shared validators know no job: give their refusal this job's identifiers.
+        raise LearnNarratorRequestInvalid(str(e), **ids) from None
 
     stat = await asyncio.to_thread(_object_stat_sync, AUDIO_BUCKET, path)
     if stat is None:
@@ -948,14 +1053,13 @@ async def complete(job_id: Any, claim: WorkerClaim, *, path: Any, size_bytes: An
             problems.append(rate)
     if problems:
         detail = "; ".join(problems)
-        logger.error("learn narration complete: job %s (piece %s round %s) audio MISMATCH at %s: %s — deleting "
-                     "the object and failing the round", job.get("id"), job.get("piece_id"), job.get("round"),
+        logger.error("learn narration complete: job %s (%s round %s) audio MISMATCH at %s: %s — deleting "
+                     "the object and failing the round", job.get("id"), ledger.job_subject(job), job.get("round"),
                      path, detail)
         await asyncio.to_thread(_remove_object_sync, AUDIO_BUCKET, path)
-        failed = await ledger.fail_job(job["id"], claim.attempts, claim.nonce,
-                                       error=f"asset_mismatch: {detail}", now=at)
-        if failed is not None and failed.get("status") == c.JOB_FAILED:
-            await after_job_failed(failed, now=at)
+        failed = await ledger.fail_job_outcome(job["id"], claim.attempts, claim.nonce,
+                                               error=f"asset_mismatch: {detail}", now=at)
+        await _after_fail_recorded(failed, now=at, op=op)
         raise LearnNarratorAssetMismatch(f"complete: {path} is not what the job registered ({detail}); object "
                                          "deleted, round failed", **ids)
 
@@ -971,6 +1075,9 @@ async def complete(job_id: Any, claim: WorkerClaim, *, path: Any, size_bytes: An
                         cur.get("id"))
             return {"ok": True, "status": c.JOB_CANCELLED, "replay": False, "piece_updated": False}
         raise _not_held(cur, claim, op=op)
+    if catalog:
+        await _notify_catalog_ready(done)
+        return {"ok": True, "status": c.JOB_READY, "replay": False, "piece_updated": False}
     updated = await _finish_piece(done, op=op)
     return {"ok": True, "status": c.JOB_READY, "replay": False, "piece_updated": updated}
 
@@ -1030,24 +1137,52 @@ async def fail(job_id: Any, claim: WorkerClaim, *, code: Any, detail: Any = "",
     re-queued while under MAX_JOB_WORKER_FAILURES and failed at it — failed at once for a code in
     `contracts.DETERMINISTIC_FAIL_CODES` (the same render would fail the same way) — and a failed job
     moves its piece (`after_job_failed`). A cancelled job answers 200 and writes nothing; a replay of
-    a recorded failure re-runs only the fenced piece step."""
+    a recorded failure re-runs only the fenced piece step — and, for a CATALOG job, nothing at all: its
+    step is one unfenced owner alert, sent only by the call that recorded the failure
+    (`_after_fail_recorded`), so a /fail the worker retries after a lost response is not alerted twice."""
     if not (isinstance(code, str) and _FAIL_CODE_RE.fullmatch(code)):
         raise LearnNarratorRequestInvalid(f"fail: code must match {_FAIL_CODE_RE.pattern}, got {_excerpt(code)!r}",
                                           job_id=job_id, op="fail")
     if not isinstance(detail, str):
         raise LearnNarratorRequestInvalid("fail: detail must be a string", job_id=job_id, op="fail")
     at = now or _now()
-    row = await ledger.fail_job(job_id, claim.attempts, claim.nonce, error=f"{code}: {detail}",
-                                final=code in c.DETERMINISTIC_FAIL_CODES, now=at)
+    outcome = await ledger.fail_job_outcome(job_id, claim.attempts, claim.nonce, error=f"{code}: {detail}",
+                                            final=code in c.DETERMINISTIC_FAIL_CODES, now=at)
+    row = outcome.row
     if row is None:
         cur = await _job_or_404(job_id, op="fail")
         if cur.get("status") == c.JOB_CANCELLED:
             logger.info("learn narration fail: job %s was already cancelled — nothing written", cur.get("id"))
             return {"ok": True, "status": c.JOB_CANCELLED, "worker_failures": cur.get("worker_failures")}
         raise _not_held(cur, claim, op="fail")
-    if row.get("status") == c.JOB_FAILED:
-        await after_job_failed(row, now=at)
+    await _after_fail_recorded(outcome, now=at, op="fail")
     return {"ok": True, "status": row.get("status"), "worker_failures": row.get("worker_failures")}
+
+
+async def _after_fail_recorded(outcome: ledger.JobFailOutcome, *, now: datetime, op: str) -> None:
+    """`after_job_failed` for a job a `ledger.fail_job_outcome` call left FAILED (anything else: nothing).
+    A weekly job's piece step is fenced on `narration_job_id`, so it re-runs on a replay as well: that
+    heals a first call whose piece write was lost. A CATALOG job's step is one owner alert with no
+    fence, so it runs only when THIS call recorded the failure (`outcome.written`). Otherwise a /fail
+    the worker retried after a lost response would send the owner the FAILED line twice."""
+    row = outcome.row
+    if row is None or row.get("status") != c.JOB_FAILED:
+        return
+    if is_catalog_job(row) and not outcome.written:
+        logger.info("learn narration %s: job %s (%s round %s) — a replay of a failure already recorded under "
+                    "this claim; its owner alert went out with the first report, none sent now", op,
+                    row.get("id"), ledger.job_subject(row), row.get("round"))
+        return
+    await after_job_failed(row, now=now)
+
+
+async def _report_closed_at_cap(closed: Sequence[Mapping[str, Any]], *, now: datetime) -> None:
+    """Report the catalog jobs a claim closed `failed` at the lease re-claim cap (one loud line each,
+    through `after_job_failed`). The close is fenced, so each job reaches exactly one claim's list and
+    is reported once. Weekly jobs are skipped here: `scheduler._narration_step` sweeps their pieces."""
+    for row in closed:
+        if is_catalog_job(row):
+            await after_job_failed(row, now=now)
 
 
 def _parse_ts(value: Any) -> Optional[datetime]:
@@ -1088,7 +1223,15 @@ async def after_job_failed(job: Mapping[str, Any], *, now: Optional[datetime] = 
     another engine (or a changed draft, voice or pipeline) still gets its round. Every write is fenced
     on `narration_job_id` = this job, so a replay — or the scheduler calling this for a job the ledger
     closed at its re-claim cap — is idempotent. Public for that sweep: `ledger.claim_job` closes an
-    exhausted job without touching its piece."""
+    exhausted job without touching its piece.
+
+    A CATALOG job (no piece, migration 207) has no piece to move and no automatic next round: the
+    owner gets one loud line naming the slug, the error and how to re-enqueue (round + 1). That line
+    has no fence, so its callers send it once per closed job: `_after_fail_recorded` (only the call
+    that recorded the failure) and `_report_closed_at_cap` (only the claim whose fenced close won)."""
+    if is_catalog_job(job):
+        await _notify_catalog_failed(job)
+        return
     at = now or _now()
     piece = await ledger.get_piece_by_id(job.get("piece_id"))
     if piece is None:
@@ -1155,6 +1298,62 @@ async def after_job_failed(job: Mapping[str, Any], *, now: Optional[datetime] = 
     logger.error("learn narration: piece %s (%s) FAILED at narration — %s (round %s: %s)", piece.get("id"),
                  piece.get("period_key"), reason, job.get("round"), error)
     await _notify_terminal(row, status=c.FAILED, reason=alert or reason, stage="narration")
+
+
+# ── catalog alerts (migration 207) ───────────────────────────────────────────────────────────
+
+
+async def _notify_owner(text: str, *, what: str) -> bool:
+    """`alerts.notify` (one plain line in the owner's review chat), imported at call time like
+    `_notify_terminal`. Never raises: an alert that cannot be sent is logged at ERROR with its text."""
+    try:
+        alerts = importlib.import_module("app.services.learn_weekly.alerts")
+        return bool(await alerts.notify(text, loud=True))
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 — an alert never replaces what it reports
+        logger.error("learn narration: the %s alert could not be sent (%s: %s): %s", what, type(e).__name__, e,
+                     text, exc_info=True)
+        return False
+
+
+def _round_text(value: Any) -> str:
+    return str(value) if isinstance(value, int) and not isinstance(value, bool) else "?"
+
+
+def catalog_ready_text(job: Mapping[str, Any]) -> str:
+    """The owner's line for a READY catalog job (plain text, no URL — alerts.notify scrubs it too)."""
+    slug = job.get("catalog_slug")
+    duration = job.get("duration_seconds")
+    ok = isinstance(duration, (int, float)) and not isinstance(duration, bool) and math.isfinite(duration)
+    shown = f"{float(duration):.0f}" if ok else "?"
+    return (f"🎙 Catalog narration READY: {slug} ({shown}s, round {_round_text(job.get('round'))}) — run "
+            f"scripts/learn_catalog_fetch.py --slug {slug}")
+
+
+def catalog_failed_text(job: Mapping[str, Any]) -> str:
+    """The owner's LOUD line for a FAILED catalog job: the slug, the error and how to re-enqueue."""
+    slug = job.get("catalog_slug")
+    error = " ".join(str(job.get("error") or "unspecified").split())[:300]
+    rnd = job.get("round")
+    nxt = str(rnd + 1) if isinstance(rnd, int) and not isinstance(rnd, bool) else "max + 1"
+    return (f"🔴 Catalog narration FAILED: {slug} round {_round_text(rnd)} — {error}. Fix the cause, then "
+            f"re-enqueue (round {nxt}): scripts/learn_catalog_narrate.py --slug {slug} --yes")
+
+
+async def _notify_catalog_ready(job: Mapping[str, Any]) -> None:
+    """Best effort: the job is already READY in the ledger, so a lost line only delays the fetch (the
+    fetch script reads the newest ready job itself)."""
+    logger.info("learn narration: CATALOG job %s (%s round %s) READY — %s, %s s", job.get("id"),
+                job.get("catalog_slug"), job.get("round"), job.get("audio_path"), job.get("duration_seconds"))
+    await _notify_owner(catalog_ready_text(job), what="catalog ready")
+
+
+async def _notify_catalog_failed(job: Mapping[str, Any]) -> None:
+    """A catalog job ended `failed`: no piece logic and no automatic round — loud, with the way back."""
+    logger.error("learn narration: CATALOG job %s (%s round %s) FAILED — %s", job.get("id"),
+                 job.get("catalog_slug"), job.get("round"), job.get("error"))
+    await _notify_owner(catalog_failed_text(job), what="catalog failed")
 
 
 async def _notify_terminal(piece: Mapping[str, Any], *, status: str, reason: str, stage: Optional[str]) -> None:

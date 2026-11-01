@@ -34,7 +34,7 @@ SHEET = C.FactSheet(C.KIND_DEEP_DIVE, "AI chips", "ai-chips", (C.Subject("NVIDIA
 
 CONTENT: Dict[str, Any] = {
     "slug": "x-2026-10-23", "title": "How Chips Became the Bottleneck", "subtitle": "A subtitle.",
-    "cardSubtitle": "A card line.", "tagLabel": "FEATURE DEEP DIVE", "author": dict(C.AUTHOR),
+    "cardSubtitle": "A card line.", "tagLabel": "CASE STUDY", "author": dict(C.AUTHOR),
     "keyHighlights": [{"icon": "cpu.fill", "title": "Highlight one", "description": "Desc one."}],
     "statistics": [{"value": "$130.5 billion", "label": "Fiscal 2025 revenue", "trend": "neutral"}],
     "sections": [

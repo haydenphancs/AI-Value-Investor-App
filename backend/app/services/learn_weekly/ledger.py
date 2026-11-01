@@ -1,5 +1,6 @@
 """The Wiser weekly ledger: every read and write of `learn_weekly_pieces` and `learn_narration_jobs`
-(migration 204). Nothing else in the codebase writes those two tables.
+(migration 204; 207 lets a narration job narrate a hand-written catalog article instead of a piece —
+`enqueue_catalog_job_sync`). Nothing else in the codebase writes those two tables.
 
 WHY IT IS SHAPED THIS WAY
 -------------------------
@@ -63,7 +64,7 @@ import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 from app.database import get_supabase
 from app.services.learn_weekly import contracts as c
@@ -337,13 +338,17 @@ BUMPABLE: Tuple[str, ...] = ("build_attempts", "generations", "content_rejection
 #: What the no-repeat windows count by default: pieces the owner approved or that went live.
 RECENT_STATUSES: Tuple[str, ...] = (c.APPROVED, c.PUBLISHING, c.PUBLISHED)
 
-#: Every column of `learn_narration_jobs` (pinned equal to migration 204 by the ledger test).
+#: Every column of `learn_narration_jobs` (pinned equal to migrations 204 + 207 by the ledger test).
+#: A job narrates exactly one subject: a weekly piece (`piece_id`) or, since 207, a hand-written
+#: Money Moves catalog article (`catalog_slug`, piece_id NULL — `enqueue_catalog_job_sync`).
 JOB_COLUMNS: FrozenSet[str] = frozenset({
-    "id", "piece_id", "round", "script", "script_sha256", "engine", "voice", "pipeline_version",
-    "status", "attempts", "worker_failures", "lease_reclaims", "claim_nonce", "claimed_at",
-    "heartbeat_at", "lease_until", "audio_path", "audio_bytes", "duration_seconds", "timings",
-    "checks", "error", "finished_at", "created_at", "updated_at",
+    "id", "piece_id", "catalog_slug", "round", "script", "script_sha256", "engine", "voice",
+    "pipeline_version", "status", "attempts", "worker_failures", "lease_reclaims", "claim_nonce",
+    "claimed_at", "heartbeat_at", "lease_until", "audio_path", "audio_bytes", "duration_seconds",
+    "timings", "checks", "error", "finished_at", "created_at", "updated_at",
 })
+#: The longest catalog slug the 207 CHECK accepts (the same cap as learn_weekly_pieces.slug).
+CATALOG_SLUG_MAX = 160
 _JOB_TS = frozenset({"claimed_at", "heartbeat_at", "lease_until", "finished_at", "created_at",
                      "updated_at"})
 _TS_COLUMNS = _PIECE_TS | _JOB_TS
@@ -1033,6 +1038,14 @@ def bump_sync(piece_id: Any, column: str, *, fence: Mapping[str, Any],
 _OPEN_JOB_STATUSES = (c.JOB_QUEUED, c.JOB_IN_PROGRESS)
 
 
+def job_subject(row: Mapping[str, Any]) -> str:
+    """What a job narrates, for a log line: `piece <id>` (a weekly piece) or `catalog <slug>` (a
+    hand-written catalog article, migration 207)."""
+    if row.get("piece_id") is None and row.get("catalog_slug"):
+        return f"catalog {row.get('catalog_slug')}"
+    return f"piece {row.get('piece_id')}"
+
+
 def get_job_sync(job_id: Any, *, sb: Any = None) -> Optional[Dict[str, Any]]:
     jid = _uuid_or_none(job_id)
     if jid is None:
@@ -1052,15 +1065,9 @@ def list_jobs_sync(piece_id: Any, *, sb: Any = None) -> List[Dict[str, Any]]:
                        op="list_jobs", piece_id=pid), op="list_jobs")
 
 
-def enqueue_job_sync(piece_id: Any, *, round: int, script: Any, script_sha256: str, engine: str,
-                     voice: str, pipeline_version: str, sb: Any = None) -> Optional[Dict[str, Any]]:
-    """Queue the narration of one piece round — first write wins on (piece_id, round).
-
-    A second enqueue of the same round with the SAME script / engine / voice / pipeline adopts the
-    existing job (a retried tick). With a DIFFERENT one it returns None and logs an ERROR: the round
-    already narrates another script, and handing back the old job would put stale audio in front of
-    the owner. Open a new round instead (`list_jobs` → max round + 1)."""
-    pid = _require_uuid(piece_id, "piece_id")
+def _validate_job_args(round: Any, script: Any, script_sha256: Any, engine: Any, voice: Any,
+                       pipeline_version: Any) -> None:
+    """The arguments every enqueue shares, or ValueError naming the first bad one (before any I/O)."""
     if isinstance(round, bool) or not isinstance(round, int) or round < 1:
         raise ValueError(f"round must be an int >= 1, got {round!r}")
     if not isinstance(script, (list, dict)) or not script:
@@ -1073,6 +1080,18 @@ def enqueue_job_sync(piece_id: Any, *, round: int, script: Any, script_sha256: s
     for name, v in (("voice", voice), ("pipeline_version", pipeline_version)):
         if not (isinstance(v, str) and 0 < len(v) <= 80 and v.strip() == v and not _CONTROL.search(v)):
             raise ValueError(f"{name} must be 1-80 characters with no surrounding space, got {v!r}")
+
+
+def enqueue_job_sync(piece_id: Any, *, round: int, script: Any, script_sha256: str, engine: str,
+                     voice: str, pipeline_version: str, sb: Any = None) -> Optional[Dict[str, Any]]:
+    """Queue the narration of one piece round — first write wins on (piece_id, round).
+
+    A second enqueue of the same round with the SAME script / engine / voice / pipeline adopts the
+    existing job (a retried tick). With a DIFFERENT one it returns None and logs an ERROR: the round
+    already narrates another script, and handing back the old job would put stale audio in front of
+    the owner. Open a new round instead (`list_jobs` → max round + 1)."""
+    pid = _require_uuid(piece_id, "piece_id")
+    _validate_job_args(round, script, script_sha256, engine, voice, pipeline_version)
     client = _client(sb)
     row = {"piece_id": pid, "round": round, "script": script, "script_sha256": script_sha256,
            "engine": engine, "voice": voice, "pipeline_version": pipeline_version,
@@ -1100,6 +1119,69 @@ def enqueue_job_sync(piece_id: Any, *, round: int, script: Any, script_sha256: s
         return None
     logger.info("learn ledger enqueue_job: piece %s round %d already queued as job %s (status %s) — adopted",
                 pid, round, existing.get("id"), existing.get("status"))
+    return existing
+
+
+# ── catalog narration jobs (migration 207) ───────────────────────────────────────────────────
+
+
+def validate_catalog_slug(slug: Any) -> str:
+    """A hand-written catalog article's slug as migration 207's CHECK accepts it (lowercase
+    kebab-case, at most CATALOG_SLUG_MAX characters), or ValueError. `fullmatch`, never `$`: a
+    trailing newline must not pass."""
+    if not (isinstance(slug, str) and 0 < len(slug) <= CATALOG_SLUG_MAX and _SLUG.fullmatch(slug)):
+        raise ValueError(f"catalog_slug must be lowercase kebab-case (<= {CATALOG_SLUG_MAX} chars), got {slug!r}")
+    return slug
+
+
+def list_catalog_jobs_sync(catalog_slug: str, *, sb: Any = None) -> List[Dict[str, Any]]:
+    """Every narration job of one catalog article, by round (the next round is max + 1). ValueError
+    on a malformed slug — it comes from the owner's command line, and is checked before any I/O."""
+    slug = validate_catalog_slug(catalog_slug)
+    return _rows(_exec(_client(sb).table(JOBS).select("*").eq("catalog_slug", slug).order("round").limit(100),
+                       op="list_catalog_jobs", catalog_slug=slug), op="list_catalog_jobs")
+
+
+def enqueue_catalog_job_sync(catalog_slug: str, *, round: int, script: Any, script_sha256: str, engine: str,
+                             voice: str, pipeline_version: str, sb: Any = None) -> Optional[Dict[str, Any]]:
+    """Queue the narration of one hand-written catalog article round — `enqueue_job_sync` for a job
+    with no piece (piece_id NULL, catalog_slug set; owner 2026-11-01). First write wins on
+    (catalog_slug, round), migration 207's UNIQUE.
+
+    The same adoption rule: a second enqueue of the same round with the SAME script / engine / voice /
+    pipeline adopts the existing job; with a DIFFERENT one it returns None and logs an ERROR — the
+    round already narrates another text, and handing it back would merge stale timings into the
+    article. Open a new round instead (`list_catalog_jobs` → max round + 1). Every argument is
+    validated before any I/O."""
+    slug = validate_catalog_slug(catalog_slug)
+    _validate_job_args(round, script, script_sha256, engine, voice, pipeline_version)
+    client = _client(sb)
+    row = {"catalog_slug": slug, "round": round, "script": script, "script_sha256": script_sha256,
+           "engine": engine, "voice": voice, "pipeline_version": pipeline_version, "status": c.JOB_QUEUED}
+    inserted = _rows(_exec(client.table(JOBS).upsert(row, on_conflict="catalog_slug,round",
+                                                    ignore_duplicates=True),
+                           op="enqueue_catalog_job", catalog_slug=slug, round=round), op="enqueue_catalog_job")
+    existing = _one(_exec(client.table(JOBS).select("*").eq("catalog_slug", slug).eq("round", str(round))
+                          .limit(1), op="enqueue_catalog_job_read", catalog_slug=slug, round=round),
+                    op="enqueue_catalog_job_read")
+    if existing is None:
+        logger.error("learn ledger enqueue_catalog_job: catalog %s round %d was inserted-or-ignored but reads "
+                     "back as MISSING", slug, round)
+        return None
+    if inserted:
+        logger.info("learn ledger: queued CATALOG narration job %s for %s round %d (%s/%s, %s, script %s)",
+                    existing.get("id"), slug, round, engine, voice, pipeline_version, script_sha256[:12])
+        return existing
+    drift = [k for k in ("script_sha256", "engine", "voice", "pipeline_version") if existing.get(k) != row[k]]
+    if existing.get("piece_id") is not None:
+        drift.append("piece_id")
+    if drift:
+        logger.error("learn ledger enqueue_catalog_job: catalog %s round %d already holds job %s with a "
+                     "different %s — refusing to hand back a job for another script; open a new round",
+                     slug, round, existing.get("id"), drift)
+        return None
+    logger.info("learn ledger enqueue_catalog_job: catalog %s round %d already queued as job %s (status %s) — "
+                "adopted", slug, round, existing.get("id"), existing.get("status"))
     return existing
 
 
@@ -1141,10 +1223,29 @@ def _holds(row: Mapping[str, Any], attempts: int, nonce: str) -> bool:
             and hmac.compare_digest(stored, nonce))
 
 
-def _close_exhausted(client: Any, row: Mapping[str, Any], at: datetime) -> None:
+class JobClaimOutcome(NamedTuple):
+    """`claim_job_outcome_sync`'s answer. `claimed` is the job this call claimed (None: nothing to
+    claim). `closed` lists every job this call closed `failed` at the lease re-claim cap on the way.
+    The close is fenced, so each closed job is in exactly ONE caller's list. A caller that must report
+    a closed job (a catalog job has no piece for the scheduler's sweep to find) reads it from here."""
+    claimed: Optional[Dict[str, Any]]
+    closed: List[Dict[str, Any]]
+
+
+class JobFailOutcome(NamedTuple):
+    """`fail_job_outcome_sync`'s answer. `row` is what `fail_job_sync` returns. `written` is True only
+    when THIS call recorded the failure; it is False for a replay of a failure that already landed for
+    the same claim, and for a refusal. A caller that alerts once per closed job reads it, so a retried
+    `/fail` (the worker retries on a lost response) does not send the line twice."""
+    row: Optional[Dict[str, Any]]
+    written: bool
+
+
+def _close_exhausted(client: Any, row: Mapping[str, Any], at: datetime) -> Optional[Dict[str, Any]]:
     """An in_progress job whose lease ran out once more than MAX_JOB_LEASE_RECLAIMS allow: close it
     `failed` (fenced on the observed attempts and lease) instead of rendering it a fifth time — a
-    render the platform keeps killing would otherwise loop until the hold expired."""
+    render the platform keeps killing would otherwise loop until the hold expired. Returns the closed
+    row, or None when the job moved first (someone else closed or claimed it)."""
     jid = row.get("id")
     attempts = _counter(row, "attempts", op="claim_job", rid=jid)
     reclaims = _counter(row, "lease_reclaims", op="claim_job", rid=jid)
@@ -1156,11 +1257,12 @@ def _close_exhausted(client: Any, row: Mapping[str, Any], at: datetime) -> None:
     query = _apply_fence(query, {"lease_until": row.get("lease_until")})
     closed = _one(_exec(query, op="claim_job_close", job_id=jid), op="claim_job_close")
     if closed is not None:
-        logger.error("learn ledger: narration job %s (piece %s round %s) FAILED — its lease ran out after "
+        logger.error("learn ledger: narration job %s (%s round %s) FAILED — its lease ran out after "
                      "%d re-claims (cap %d); the render keeps dying (OOM? a redeploy mid-render?)",
-                     jid, row.get("piece_id"), row.get("round"), reclaims, c.MAX_JOB_LEASE_RECLAIMS)
-    else:
-        logger.info("learn ledger claim_job: job %s moved while being closed for its re-claim cap", jid)
+                     jid, job_subject(row), row.get("round"), reclaims, c.MAX_JOB_LEASE_RECLAIMS)
+        return closed
+    logger.info("learn ledger claim_job: job %s moved while being closed for its re-claim cap", jid)
+    return None
 
 
 def claim_job_sync(engines: Iterable[str], *, now: datetime,
@@ -1171,13 +1273,23 @@ def claim_job_sync(engines: Iterable[str], *, now: datetime,
     `attempts` (and, for a re-claim, the observed lease_until — a heartbeat that landed meanwhile
     means the worker is alive): it sets `attempts + 1`, a fresh `claim_nonce`, the lease and the
     heartbeat. Returns the claimed row (its `attempts` and `claim_nonce` are the worker's claim), or
-    None when there is nothing to claim."""
+    None when there is nothing to claim. `claim_job_outcome_sync` also returns the jobs it closed."""
+    return claim_job_outcome_sync(engines, now=now, lease_seconds=lease_seconds, sb=sb).claimed
+
+
+def claim_job_outcome_sync(engines: Iterable[str], *, now: datetime,
+                           lease_seconds: float = c.JOB_LEASE_SECONDS, sb: Any = None) -> JobClaimOutcome:
+    """`claim_job_sync`, plus every job this call closed `failed` at the lease re-claim cap
+    (`JobClaimOutcome.closed`). A weekly job closed this way is picked up by the scheduler's sweep
+    (`scheduler._narration_step` → `narration.after_job_failed`). A catalog job (migration 207) has no
+    piece for that sweep to find, so `narration.claim_for_worker` reports it from this list."""
     eng = _engines(engines)
     at = _aware(now, "now")
     secs = _seconds(lease_seconds, "lease_seconds", upper=MAX_LEASE_SECONDS)
+    closed_rows: List[Dict[str, Any]] = []
     if not eng:
         logger.warning("learn ledger claim_job: the worker declared no known engine — nothing offered")
-        return None
+        return JobClaimOutcome(None, closed_rows)
     client = _client(sb)
     queued = _rows(_exec(client.table(JOBS).select("*").eq("status", c.JOB_QUEUED).in_("engine", list(eng))
                          .order("created_at").order("id").limit(_CLAIM_SCAN),
@@ -1202,7 +1314,9 @@ def claim_job_sync(engines: Iterable[str], *, now: datetime,
         if status == c.JOB_IN_PROGRESS:
             reclaims = _counter(row, "lease_reclaims", op="claim_job", rid=jid)
             if reclaims >= c.MAX_JOB_LEASE_RECLAIMS:
-                _close_exhausted(client, row, at)
+                closed = _close_exhausted(client, row, at)
+                if closed is not None:
+                    closed_rows.append(closed)
                 continue
             patch["lease_reclaims"] = reclaims + 1
             query = _apply_fence(query.update(patch).eq("id", jid).eq("status", status)
@@ -1213,16 +1327,16 @@ def claim_job_sync(engines: Iterable[str], *, now: datetime,
         won = _one(_exec(query, op="claim_job", job_id=jid), op="claim_job")
         if won is not None:
             if status == c.JOB_IN_PROGRESS:
-                logger.warning("learn ledger: RE-CLAIMED narration job %s (piece %s round %s, %s) — its "
-                               "lease ran out at %s; re-claim %d of %d", jid, row.get("piece_id"),
+                logger.warning("learn ledger: RE-CLAIMED narration job %s (%s round %s, %s) — its "
+                               "lease ran out at %s; re-claim %d of %d", jid, job_subject(row),
                                row.get("round"), row.get("engine"), row.get("lease_until"),
                                patch["lease_reclaims"], c.MAX_JOB_LEASE_RECLAIMS)
             else:
-                logger.info("learn ledger: claimed narration job %s (piece %s round %s, %s) — attempt %d",
-                            jid, row.get("piece_id"), row.get("round"), row.get("engine"), attempts + 1)
-            return won
+                logger.info("learn ledger: claimed narration job %s (%s round %s, %s) — attempt %d",
+                            jid, job_subject(row), row.get("round"), row.get("engine"), attempts + 1)
+            return JobClaimOutcome(won, closed_rows)
         logger.info("learn ledger claim_job: job %s was claimed by someone else first", jid)
-    return None
+    return JobClaimOutcome(None, closed_rows)
 
 
 def job_claim_ok_sync(job_id: Any, attempts: Any, nonce: Any, *, sb: Any = None) -> Optional[Dict[str, Any]]:
@@ -1290,8 +1404,8 @@ def complete_job_sync(job_id: Any, attempts: Any, nonce: Any, *, audio_path: str
     }).eq("id", jid).eq("status", c.JOB_IN_PROGRESS).eq("attempts", str(att)).eq("claim_nonce", non),
         op="complete_job", job_id=jid), op="complete_job")
     if row is not None:
-        logger.info("learn ledger: narration job %s (piece %s round %s) READY — %s, %d bytes, %.1fs",
-                    jid, row.get("piece_id"), row.get("round"), audio_path, audio_bytes, duration)
+        logger.info("learn ledger: narration job %s (%s round %s) READY — %s, %d bytes, %.1fs",
+                    jid, job_subject(row), row.get("round"), audio_path, audio_bytes, duration)
         return row
     cur = get_job_sync(jid, sb=client)
     if cur is not None and cur.get("status") == c.JOB_READY and _holds(cur, att, non):
@@ -1309,10 +1423,18 @@ def fail_job_sync(job_id: Any, attempts: Any, nonce: Any, *, error: Any, final: 
     MAX_JOB_WORKER_FAILURES, `failed` at it — or `failed` at once when `final` (the caller knows a
     retry of this job fails the same way: `contracts.DETERMINISTIC_FAIL_CODES`). Fenced on the claim
     AND the observed worker_failures. A replay of a failure that already landed for the SAME claim
-    returns the row unchanged."""
+    returns the row unchanged. `fail_job_outcome_sync` also says whether THIS call wrote it."""
+    return fail_job_outcome_sync(job_id, attempts, nonce, error=error, final=final, now=now, sb=sb).row
+
+
+def fail_job_outcome_sync(job_id: Any, attempts: Any, nonce: Any, *, error: Any, final: bool = False,
+                          now: Optional[datetime] = None, sb: Any = None) -> JobFailOutcome:
+    """`fail_job_sync`, plus whether THIS call recorded the failure (`JobFailOutcome.written`). It is
+    False for a replay under the same claim (the stored row comes back unchanged) and for a refusal
+    (row None)."""
     args = _claim_args("fail_job", job_id, attempts, nonce)
     if args is None:
-        return None
+        return JobFailOutcome(None, False)
     jid, att, non = args
     err = _scrub(error) or "unspecified worker failure"
     at = _aware(now, "now") if now is not None else _now()
@@ -1320,7 +1442,7 @@ def fail_job_sync(job_id: Any, attempts: Any, nonce: Any, *, error: Any, final: 
     row = get_job_sync(jid, sb=client)
     if row is None:
         logger.warning("learn ledger fail_job: job %s does not exist", jid)
-        return None
+        return JobFailOutcome(None, False)
     if row.get("status") == c.JOB_IN_PROGRESS and _holds(row, att, non):
         failures = _counter(row, "worker_failures", op="fail_job", rid=jid) + 1
         capped = failures >= c.MAX_JOB_WORKER_FAILURES
@@ -1334,25 +1456,25 @@ def fail_job_sync(job_id: Any, attempts: Any, nonce: Any, *, error: Any, final: 
                           op="fail_job", job_id=jid), op="fail_job")
         if done is not None:
             if closes:
-                logger.error("learn ledger: narration job %s (piece %s round %s) FAILED — worker failure "
-                             "%d of %d%s: %s", jid, row.get("piece_id"), row.get("round"), failures,
+                logger.error("learn ledger: narration job %s (%s round %s) FAILED — worker failure "
+                             "%d of %d%s: %s", jid, job_subject(row), row.get("round"), failures,
                              c.MAX_JOB_WORKER_FAILURES,
                              "" if capped else " (deterministic: a retry would render the same file)", err)
             else:
-                logger.warning("learn ledger: narration job %s (piece %s round %s) re-queued after worker "
-                               "failure %d of %d: %s", jid, row.get("piece_id"), row.get("round"), failures,
+                logger.warning("learn ledger: narration job %s (%s round %s) re-queued after worker "
+                               "failure %d of %d: %s", jid, job_subject(row), row.get("round"), failures,
                                c.MAX_JOB_WORKER_FAILURES, err)
-            return done
+            return JobFailOutcome(done, True)
         row = get_job_sync(jid, sb=client)
         if row is None:
-            return None
+            return JobFailOutcome(None, False)
     if row.get("status") in (c.JOB_QUEUED, c.JOB_FAILED) and _holds(row, att, non):
         logger.info("learn ledger fail_job: job %s already recorded the failure of claim %d — a replay; "
                     "nothing written", jid, att)
-        return row
+        return JobFailOutcome(row, False)
     logger.info("learn ledger fail_job: job %s claim %d refused — the job is %s (attempts %s)", jid, att,
                 row.get("status"), row.get("attempts"))
-    return None
+    return JobFailOutcome(None, False)
 
 
 def cancel_open_jobs_sync(piece_id: Any, *, reason: str = "piece_closed", now: Optional[datetime] = None,
@@ -1518,9 +1640,25 @@ async def enqueue_job(piece_id: Any, *, round: int, script: Any, script_sha256: 
                                    pipeline_version=pipeline_version, sb=sb)
 
 
+async def list_catalog_jobs(catalog_slug: str, *, sb: Any = None) -> List[Dict[str, Any]]:
+    return await asyncio.to_thread(list_catalog_jobs_sync, catalog_slug, sb=sb)
+
+
+async def enqueue_catalog_job(catalog_slug: str, *, round: int, script: Any, script_sha256: str, engine: str,
+                              voice: str, pipeline_version: str, sb: Any = None) -> Optional[Dict[str, Any]]:
+    return await asyncio.to_thread(enqueue_catalog_job_sync, catalog_slug, round=round, script=script,
+                                   script_sha256=script_sha256, engine=engine, voice=voice,
+                                   pipeline_version=pipeline_version, sb=sb)
+
+
 async def claim_job(engines: Iterable[str], *, now: datetime, lease_seconds: float = c.JOB_LEASE_SECONDS,
                     sb: Any = None) -> Optional[Dict[str, Any]]:
     return await asyncio.to_thread(claim_job_sync, engines, now=now, lease_seconds=lease_seconds, sb=sb)
+
+
+async def claim_job_outcome(engines: Iterable[str], *, now: datetime, lease_seconds: float = c.JOB_LEASE_SECONDS,
+                            sb: Any = None) -> JobClaimOutcome:
+    return await asyncio.to_thread(claim_job_outcome_sync, engines, now=now, lease_seconds=lease_seconds, sb=sb)
 
 
 async def job_claim_ok(job_id: Any, attempts: Any, nonce: Any, *, sb: Any = None) -> Optional[Dict[str, Any]]:
@@ -1545,6 +1683,12 @@ async def fail_job(job_id: Any, attempts: Any, nonce: Any, *, error: Any, final:
                    now: Optional[datetime] = None, sb: Any = None) -> Optional[Dict[str, Any]]:
     return await asyncio.to_thread(fail_job_sync, job_id, attempts, nonce, error=error, final=final, now=now,
                                    sb=sb)
+
+
+async def fail_job_outcome(job_id: Any, attempts: Any, nonce: Any, *, error: Any, final: bool = False,
+                           now: Optional[datetime] = None, sb: Any = None) -> JobFailOutcome:
+    return await asyncio.to_thread(fail_job_outcome_sync, job_id, attempts, nonce, error=error, final=final,
+                                   now=now, sb=sb)
 
 
 async def cancel_open_jobs(piece_id: Any, *, reason: str = "piece_closed", now: Optional[datetime] = None,

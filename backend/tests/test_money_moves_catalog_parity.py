@@ -39,8 +39,15 @@ _NARRATION_PENDING: set[str] = set()
 # ffmpeg, no numpy, no network. Measured 2026-08-22 across the whole catalog:
 #   clone  -> 12073-12245 B/s, 150.4-159.2 WPM   (13 clips)
 #   Gemini ->  9635-9705  B/s, 169.9-170.4 WPM   (3 clips, the drift this catches)
-_CLONE_BYTES_PER_SEC = (11_500, 12_800)   # -b:a 96k -> ~12.1k B/s; the Gemini default is ~9.7k
-_CLONE_WPM = (144.0, 165.0)               # TARGET_WPM 165 lands ~158 after block pauses;
+#
+# 2026-11-01 (owner: "Yes, build it" — the Railway learn-narrator renders catalog articles so nothing
+# heavy runs on the Mac): the ceilings are widened to the narrator's own gate, the SAME bands as
+# backend/learn_narrator/verify.py and scripts/verify_learn_voice.py. The narrator image's ffmpeg 5.1
+# encodes `-b:a 96k` above the local ffmpeg 7.0's ~12.1k (12,629 and 12,888 B/s measured on Railway,
+# 2026-10-24/30), and its pace ceiling is 166 WPM. The 11,500 B/s FLOOR is unchanged on purpose: it is
+# what catches the Gemini voice (~9.7k), and the 144 WPM floor still catches a dragged render.
+_CLONE_BYTES_PER_SEC = (11_500, 14_000)   # -b:a 96k -> ~12.1k (local) / ~12.6-12.9k (narrator); Gemini ~9.7k
+_CLONE_WPM = (144.0, 166.0)               # TARGET_WPM 165 lands ~158 after block pauses;
                                           # the-future-of-digital-finance was re-speeded to 150
 
 

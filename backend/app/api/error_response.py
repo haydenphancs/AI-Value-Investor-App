@@ -1085,7 +1085,11 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
     # and answer FMP_UNAVAILABLE, i.e. tell the user "Our market data provider is
     # temporarily unavailable" when it was the AI engine that stalled. Same shape and
     # same reason as the watchlistunavailable / degradedreporterror guards above.
-    if "geminitimeout" in cls:
+    # The image call's typed failures (`GeminiImageError` and its refused / unavailable
+    # subclasses) are ours too, for the same reason: "geminiimageunavailableerror" would
+    # otherwise reach the generic "unavailable" heuristics. Only the weekly cover art calls
+    # it today and that never reaches a door, but a future caller gets the AI-engine code.
+    if "geminitimeout" in cls or "geminiimage" in cls:
         return (
             ErrorCode.GEMINI_UNAVAILABLE,
             _DEFAULT_STATUS[ErrorCode.GEMINI_UNAVAILABLE],

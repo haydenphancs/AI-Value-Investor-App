@@ -442,6 +442,10 @@ _BRAND_TOKEN_RE = re.compile(r"\bcaydex\b|\bcay[ -]?ai\b")
 #: Matched with `fullmatch` — `$` alone also matches before a trailing "\n", which would let
 #: "slug-2026-10-23\n" through.
 SLUG_RE = re.compile(r"[a-z0-9-]+-(\d{4})-(\d{2})-(\d{2})")
+#: A tagLabel that repeats the app's own header (owner 2026-11-01): iOS draws "FEATURED DEEP DIVE" above
+#: the featured article's tag, so a tag reading "FEATURE DEEP DIVE" printed the label twice. Refused
+#: case-insensitively — DEEP DIVE (any spacing or hyphen) and any word starting FEATUR.
+GENERIC_TAG_RE = re.compile(r"(?i)\bdeep[\s-]*dive|\bfeatur")
 _HEX6_RE = re.compile(r"^[0-9A-Fa-f]{6}$")
 REQUIRED_ARTICLE_KEYS: Tuple[str, ...] = (
     "slug", "title", "subtitle", "cardSubtitle", "category", "author", "readTimeMinutes",
@@ -1418,6 +1422,11 @@ def _validate_article(content: Any, kind: Any, sheet: Any, served_titles: Any,
         out += _text_issues("tagLabel", content.get("tagLabel"), cap=TITLE_CAP,
                             time_words_ok=False, grounding_ctx=ctx, subjects=subj,
                             caps_label=True, heading=True)
+        tag = content.get("tagLabel")
+        hit = GENERIC_TAG_RE.search(tag[:TITLE_CAP]) if isinstance(tag, str) else None
+        if hit:
+            out.append(Issue("tagLabel", "tag_label_generic", _detail(
+                f"{hit.group(0)!r} repeats the app's own \"Featured Deep Dive\" header")))
 
     if "category" in content and content.get("category") not in C.CATEGORIES:
         out.append(Issue("category", "bad_value",
@@ -1610,7 +1619,7 @@ def validate_article(content: Any, *, kind: str, sheet: Optional[C.FactSheet] = 
 
 
 __all__ = [
-    "ENFORCED_COMPLIANCE_CODES", "ENGAGEMENT_KEYS", "GROUNDING_CODES",
+    "ENFORCED_COMPLIANCE_CODES", "ENGAGEMENT_KEYS", "GENERIC_TAG_RE", "GROUNDING_CODES",
     "IGNORED_COMPLIANCE_CODES", "Issue", "REQUIRED_ARTICLE_KEYS", "SLUG_RE", "advice_hits",
     "build_grounding_context", "conduct_hits", "corpus_vocab", "forbidden_token_hits",
     "misquote_hits", "self_reference_hits", "title_key", "validate_article", "validate_block",

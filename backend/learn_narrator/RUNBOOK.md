@@ -141,6 +141,13 @@ Two things the report shows that the plan did not anticipate (both measured, 202
 
 ## 6. Operations
 
+**Catalog articles (migration 207, 2026-11-01).** The same service voices hand-written Money Moves
+articles: `backend/scripts/learn_catalog_narrate.py --slug <slug> --yes` queues a job with no piece
+(Mon–Thu; it refuses the Deep Dive window), the worker renders it like any other job (no worker change,
+no image rebuild), and `backend/scripts/learn_catalog_fetch.py --slug <slug> --yes` pulls the clip and
+read-along once Telegram says READY. Never redeploy this service while a catalog job renders either.
+
+
 Exit codes: `0` done / nothing to do / job no longer ours, `1` the job failed (reported to the
 server) or the API failed, `2` configuration or credentials (wrong token → 401/403).
 

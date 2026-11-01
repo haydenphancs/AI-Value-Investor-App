@@ -6556,6 +6556,21 @@ the plan is `~/.claude/plans/improve-or-add-wiser-snoopy-sun.md`. Everything is 
   the finished file (`contracts.DETERMINISTIC_FAIL_CODES`): renders are seeded and encoded bitexact,
   so it ends the job at its first report and opens no round that would render the same file
   (2026-10-30: the same out-of-band file was rendered three times, ~1.5 h of 4 vCPU each).
+- **Catalog jobs (migration 207, owner 2026-11-01).** A narration job belongs to EITHER a weekly piece
+  (`piece_id`) OR a hand-written catalog article (`catalog_slug`), never both (CHECK). Catalog jobs reuse
+  the same worker, voice and timing checks but skip every piece step: the audio lands at
+  `audio/catalog/<slug>-<sha12>.m4a`, the owner gets a Telegram READY / FAILED line (sent once — the
+  ledger reports whether a fail report actually wrote, and a job closed at the lease re-claim cap alerts
+  from the claim path), and two local scripts enqueue (`backend/scripts/learn_catalog_narrate.py`,
+  refusing the Deep Dive window) and fetch (`backend/scripts/learn_catalog_fetch.py`: byte-exact clip + merged read-along into the article
+  JSON). The worker is unchanged and a source-scan test keeps it job-kind blind.
+- **Cover art (owner 2026-11-01).** Behind `LEARN_ART_ENABLED`, the build draws one image per piece
+  between the accepted draft and its write (`learn_weekly/cover_art.py`, bounded by
+  `LEARN_ART_TIMEOUT_SECONDS`, never failing the piece), in the catalog art system shared byte-for-byte
+  with `scripts/generate_money_moves_art.py` (`app/services/money_moves_art_style.py`). Plates go to the
+  public `money-moves-images` bucket; the publisher copies `imageUrl` into the row's `image_url`. The
+  image model's name lives only in `validation.cover_art` (identity rule). `GeminiClient.generate_image`
+  retries on its own, outside the chat/report quota breaker.
 - **Review and publish.** Nothing goes live without the owner's Telegram tap (owner, 2026-10-22).
   The bot shares marketing's flood gate and pacer (`app/services/marketing/telegram_pacing.py`) and the reserved callback
   letter `y` (`z` is the Trillion Club stake finder's, §3 item 5). Approve → publish at Friday 23:00 ET (dry-run pieces end `rehearsed`); the hold is 48 h,

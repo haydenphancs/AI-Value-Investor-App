@@ -380,16 +380,17 @@ CURATION: dict[str, TableDoc] = {
              "dry_run is frozen at creation and a dry-run piece can never be publishing / "
              "published (CHECK). narration_job_id is a soft pointer (no FK). service_role only."),
     "public.learn_narration_jobs": T("learn-content",
-        purpose="The Learn narrator worker's queue: one job per (piece, round) with the frozen "
-                "script, engine and voice, the claim fence, and the rendered audio's path, "
-                "timings and checks.",
+        purpose="The Learn narrator worker's queue: one job per (piece, round) — or, since 207, per "
+                "(catalog article, round) — with the frozen script, engine and voice, the claim "
+                "fence, and the rendered audio's path, timings and checks.",
         key=("piece_id", "round", "status", "engine", "attempts", "claim_nonce", "lease_until",
              "worker_failures", "lease_reclaims", "audio_path"),
         note="Migration 204. The narrator (a Railway cron service) holds NO Supabase key: it "
              "reaches this table only through the token-gated internal API. A claim bumps "
              "attempts and mints claim_nonce; every worker write is fenced on both. Worker "
              "failures (<= 2) and lease re-claims (<= 4) are capped separately. piece_id is a "
-             "real FK (ON DELETE CASCADE). service_role only."),
+             "real FK (ON DELETE CASCADE). Migration 207: a job has EITHER piece_id OR catalog_slug "
+             "(a hand-written Money Moves article, owner 2026-11-01), never both. service_role only."),
 
     # ---------------------------------------------------------- learn-progress
     "public.user_learn_progress": T("learn-progress",

@@ -39,7 +39,7 @@ from app.services.marketing.writer_prompts import REPAIR_HINTS as _MARKETING_HIN
 
 #: Bump with any meaningful change to a prompt or to SYSTEM_BODY (it is stored with every draft
 #: and is part of the resume key: a half-written piece is never finished under a newer prompt).
-PROMPT_VERSION = "2026-10-31.1"   # 10-23: icons (.1); US/UK/EU without dots (.2); no title-repeat subheading (.3); list lead-ins (.4); no K/M/B abbreviations (.5) · 10-24: no unsupported aim/cause/result/significance/history claims (.1) · 10-31: never cite the fact sheet/source, never label the article educational (.1)
+PROMPT_VERSION = "2026-11-01.1"   # 10-23: icons (.1); US/UK/EU without dots (.2); no title-repeat subheading (.3); list lead-ins (.4); no K/M/B abbreviations (.5) · 10-24: no unsupported aim/cause/result/significance/history claims (.1) · 10-31: never cite the fact sheet/source, never label the article educational (.1) · 11-01: catalog-style tagLabel, never DEEP DIVE / FEATURE(D) (.1)
 
 #: The owner's scope clause, kept as its own constant so a test can pin it is in SYSTEM_BODY.
 SCOPE_CLAUSE = (
@@ -219,6 +219,9 @@ LEARN_REPAIR_HINTS: Mapping[str, str] = {
     "section_count": "write 5 to 7 sections",
     "header_length": "shorten it: title <= 90 characters, subtitle <= 200, cardSubtitle <= 120, "
                      "tagLabel 1-4 words",
+    "tag_label_generic": "the app already shows \"Featured Deep Dive\" above the tag: name the kind "
+                         "of story instead (e.g. HEAD TO HEAD, THE DUOPOLY, ORIGIN STORY, THE "
+                         "BOTTLENECK, RED FLAGS, CASE STUDY), never DEEP DIVE, FEATURE or FEATURED",
     "section_length": "keep the section close to its target length",
 }
 
@@ -299,8 +302,9 @@ def _outline_spec(kind: str, category: str, sheet: C.FactSheet) -> str:
         "differs from every existing title listed below.\n"
         "- subtitle: one sentence of at most 25 words.\n"
         "- cardSubtitle: a short line of at most 12 words for the catalog card.\n"
-        "- tagLabel: 1-3 words naming the kind of story, e.g. FEATURE DEEP DIVE, CASE STUDY, "
-        "THE BOTTLENECK.\n"
+        "- tagLabel: 1-3 words naming the kind of story, in the catalog's style, e.g. HEAD TO HEAD, "
+        "THE DUOPOLY, ORIGIN STORY, THE BOTTLENECK, RED FLAGS, CASE STUDY. The app already shows "
+        "\"Featured Deep Dive\" above it, so never write DEEP DIVE, FEATURE or FEATURED.\n"
         f"- keyHighlights: exactly {HIGHLIGHT_COUNT} objects {{icon, title (at most 6 words), "
         "description (one sentence of at most 30 words)}.\n"
         f"- sections: {SECTION_COUNT[0]}-{SECTION_COUNT[1]} objects {{title (at most 8 words), "

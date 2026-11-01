@@ -185,8 +185,9 @@ def main() -> int:
         is_weekly = a.get("slug") in weekly_slugs
         if not hero or not card:
             if is_weekly and not hero and not card:
-                # Cover art for weekly pieces is plan 1c (LEARN_ART_ENABLED): until then the
-                # card falls back to its gradient by design.
+                # Weekly cover art is drawn at build time (learn_weekly/cover_art.py) only while
+                # LEARN_ART_ENABLED is on, and an art failure leaves the piece artless by design
+                # (the card falls back to its gradient; the piece's validation.cover_art says why).
                 notes.append(a.get("slug"))
                 continue
             # The on-screen symptom of this is IDENTICAL to the row being absent: the client
@@ -202,7 +203,8 @@ def main() -> int:
     for slug, why in broken:
         print(f"     BROKEN {slug}: {why}")
     if notes:
-        print(f"  weekly pieces without artwork (expected until cover art ships): {', '.join(map(str, notes))}")
+        print(f"  weekly pieces without artwork (LEARN_ART_ENABLED off, or the art step failed — see the "
+              f"piece's validation.cover_art): {', '.join(map(str, notes))}")
 
     audio_broken = []
     for r in weekly_rows:

@@ -135,7 +135,7 @@ def outline(sections: Optional[List[Dict[str, Any]]] = None, **over: Any) -> Dic
         "title": "How Chips Became the Bottleneck",
         "subtitle": "A look at the business of building the hardware behind modern computing.",
         "cardSubtitle": "The business behind the hardware.",
-        "tagLabel": "Feature Deep Dive",
+        "tagLabel": "Case Study",
         "keyHighlights": [
             {"icon": "cpu.fill", "title": "Hardware Sets the Pace",
              "description": "Customers buy whole systems, because the parts must work together."},
@@ -973,6 +973,7 @@ def test_an_outline_that_fails_twice_is_rejected_before_any_section_is_bought():
     ({"sections": [dict(s, fact_ids=["S1"]) if i == 0 else s for i, s in enumerate(SECTIONS_5)]},
      "peg_section"),
     ({"tagLabel": "A Very Long Tag Label Here"}, "header_length"),
+    ({"tagLabel": "Feature Deep Dive"}, "tag_label_generic"),     # the doubled label (2026-11-01)
     ({"title": "How " + "Chips " * 20 + "Became"}, "header_length"),
     ({"keyHighlights": outline()["keyHighlights"][:2]}, "bad_value"),
     ({"keyHighlights": [dict(h, icon="star.fill") for h in outline()["keyHighlights"]]}, "icon"),

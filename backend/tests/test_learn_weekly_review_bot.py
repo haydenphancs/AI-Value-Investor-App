@@ -1500,3 +1500,59 @@ def test_the_header_names_the_models_of_a_claude_routed_piece_and_only_then():
     assert "Models: writer claude:claude-sonnet-5-5 INJECTED" in text       # scrubbed onto one line
     plain = review.review_header_text({**base, "validation": {}}, None, {"sections": []})
     assert "Models:" not in plain
+
+
+# ── cover art (owner 2026-11-01, `cover_art.py`) ──────────────────────────────────────────────
+
+HERO = "https://x.supabase.co/storage/v1/object/public/money-moves-images/articles/a-2026-11-06.hero.jpg"
+
+
+def _header(validation: Any, draft_extra: Dict[str, Any]) -> str:
+    base = {"kind": "deep_dive", "period_key": KEY, "review_round": 1, "tokens_used": 10, "title": "T",
+            "topic": {}, "scheduled_publish_at": None, "hold_until": None, "validation": validation}
+    return review.review_header_text(base, None, {"sections": [], **draft_extra})
+
+
+def test_the_header_names_the_cover_art_or_why_there_is_none():
+    ok = {"cover_art": {"status": "ok", "treatment": "duotone_press", "subject": "a wafer\nINJECTED",
+                        "reused": True}}
+    text = _header(ok, {"imageUrl": HERO})
+    assert f"Cover art: {HERO} (duotone_press · a wafer INJECTED · reused from an earlier round)" in text
+    assert "No cover art" not in text
+    off = _header({"cover_art": {"status": "off"}}, {})
+    assert "No cover art: switched off (LEARN_ART_ENABLED) — the app shows the category gradient" in off
+    failed = _header({"cover_art": {"status": "failed", "error": "CoverArtImageError: refused\nx"}}, {})
+    assert "No cover art: CoverArtImageError: refused x —" in failed
+    assert "No cover art: not recorded" in _header({}, {})                    # built before the art step
+    assert "No cover art: not recorded" in _header("junk", {"imageUrl": "javascript:alert(1)"})
+    # every line of the header stays one line, and the header stays inside Telegram's limit
+    assert all("INJECTED" not in line or line.startswith("Cover art:") for line in text.splitlines())
+
+
+def test_a_bundle_with_cover_art_shows_it_as_a_silent_photo_after_the_header(fake, tg, configured):
+    d = {**draft(), "imageUrl": HERO}
+    make_piece(fake, c.READY_FOR_REVIEW, the_draft=d, review_ids=[],
+               validation={"cover_art": {"status": "ok", "treatment": "flat_deco", "subject": "a can"}})
+    out = run(review.review_cycle(NOW))
+    assert out["bundles"] == 1 and out["stamped"] == 1, out
+    assert tg.methods()[:3] == ["sendMessage", "sendPhoto", "sendAudio"]
+    photo = tg.of("sendPhoto")[0]
+    assert photo["photo"] == HERO and photo["disable_notification"] is True and TITLE in photo["caption"]
+    assert f"Cover art: {HERO}" in tg.of("sendMessage")[0]["text"]
+
+
+def test_an_artless_bundle_sends_no_photo(fake, tg, configured):
+    make_piece(fake, c.READY_FOR_REVIEW, review_ids=[])
+    run(review.review_cycle(NOW))
+    assert tg.of("sendPhoto") == [] and "No cover art: not recorded" in tg.of("sendMessage")[0]["text"]
+
+
+def test_a_photo_telegram_refuses_never_blocks_the_bundle(fake, tg, configured, caplog):
+    p = make_piece(fake, c.READY_FOR_REVIEW, the_draft={**draft(), "imageUrl": HERO}, review_ids=[])
+    tg.script["sendPhoto"] = [(400, {"ok": False, "error_code": 400,
+                                     "description": "Bad Request: wrong type of the web page content"})]
+    with caplog.at_level(logging.WARNING):
+        out = run(review.review_cycle(NOW))
+    assert out["bundles"] == 1 and piece_row(fake, p["id"])["status"] == c.IN_REVIEW
+    assert "sendAudio" in tg.methods()
+    assert any("cover art not sent as a photo" in r.getMessage() for r in caplog.records)

@@ -732,7 +732,7 @@ def make_article(kinds=("peg", "history", "history", "mechanics", "mechanics", "
         "title": "The AI Power Crunch",
         "subtitle": "Why electricity became the scarce input of computing",
         "cardSubtitle": "How power shapes the economics of data centers",
-        "tagLabel": "DEEP DIVE",
+        "tagLabel": "CASE STUDY",
         "category": "blueprints",
         "author": dict(C.AUTHOR),
         "readTimeMinutes": 11,
@@ -1774,3 +1774,34 @@ def test_the_learn_writer_is_told_not_to_cite_its_brief():
 
     assert "never mention the fact sheet, the source" in P.SYSTEM_BODY
     assert "fact sheet" in P.hint("source_reference")
+
+
+# ── the doubled label (owner 2026-11-01): iOS already prints "FEATURED DEEP DIVE" over the tag ──
+
+
+@pytest.mark.parametrize("tag", ["FEATURE DEEP DIVE", "Deep Dive", "DEEP-DIVE", "deepdive", "FEATURED",
+                                 "THE FEATURE", "CHIP FEATURES", "deep  dive"])
+def test_a_tag_label_that_repeats_the_apps_header_is_refused(tag):
+    article = make_article()
+    article["tagLabel"] = tag
+    out = article_issues(article, sheet=SHEET)
+    assert Issue_at(out, "tagLabel", "tag_label_generic"), (tag, out)
+
+
+@pytest.mark.parametrize("tag", ["CASE STUDY", "HEAD TO HEAD", "THE DUOPOLY", "ORIGIN STORY",
+                                 "THE BOTTLENECK", "RED FLAGS", "DEEP WATER", "DIVE BAR"])
+def test_a_catalog_style_tag_label_passes_the_generic_rule(tag):
+    article = make_article()
+    article["tagLabel"] = tag
+    assert not Issue_at(article_issues(article, sheet=SHEET), "tagLabel", "tag_label_generic")
+
+
+def test_the_writer_is_told_the_catalog_tag_style_and_never_the_doubled_label():
+    from app.services.learn_weekly import prompts as P
+
+    spec = P._outline_spec(C.KIND_DEEP_DIVE, "battles", SHEET)
+    assert "FEATURE DEEP DIVE" not in spec and "Featured Deep Dive" in spec
+    for example in ("HEAD TO HEAD", "THE DUOPOLY", "ORIGIN STORY", "THE BOTTLENECK", "RED FLAGS", "CASE STUDY"):
+        assert example in spec
+    assert P.PROMPT_VERSION != "2026-10-31.1", "a prompt change bumps PROMPT_VERSION"
+    assert "Featured Deep Dive" in P.hint("tag_label_generic") and P.hint("tag_label_generic") != "fix it"

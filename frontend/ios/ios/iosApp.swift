@@ -199,7 +199,9 @@ struct iosApp: App {
                         // genuine auth failure may end the session; everything else keeps it.
                         do {
                             try await authService.refreshToken()
-                            guard let token = await authService.getStoredToken() else {
+                            // Read off the main thread: `AuthService` is `@MainActor`, and a
+                            // synchronous Keychain read there blocks the UI on securityd.
+                            guard let token = await authService.loadStoredToken() else {
                                 return .credentialRejected
                             }
                             return .refreshed(token)

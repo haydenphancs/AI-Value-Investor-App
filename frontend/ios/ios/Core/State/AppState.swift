@@ -308,8 +308,8 @@ final class AppState {
         Task {
             // ONE Keychain read for the whole launch, made OFF the main thread.
             //
-            // This Task runs on the MAIN actor, and `getStoredToken()` is a synchronous
-            // `SecItemCopyMatching`, a round trip to securityd. The launch used to make it five
+            // This Task runs on the MAIN actor, and a Keychain read is a synchronous
+            // `SecItemCopyMatching`, a round trip to securityd. The launch used to make one five
             // times before Home's first frame (the arm, the widget gate, the snapshot owner,
             // Home's prime and the restore), so a stalled securityd froze the splash for as long
             // as the stall lasted, the way a stalled `stat()` on this path did (Sentry
@@ -433,6 +433,10 @@ final class AppState {
     /// True when a credential is sitting in the Keychain but we are not signed in — i.e. the
     /// app is running tokenless when it shouldn't be. This is the condition the whole
     /// self-healing mechanism exists to resolve.
+    ///
+    /// `hasStoredToken` is `AuthService`'s in-memory mirror, never a Keychain read, so the heal
+    /// triggers (foreground, network back, backoff, a refused request) and the view bodies that
+    /// read this cost the main thread nothing. It used to be a synchronous `SecItemCopyMatching`.
     var hasUnusedStoredCredential: Bool {
         guard let authService else { return false }
         return authService.hasStoredToken && auth.status != .authenticated

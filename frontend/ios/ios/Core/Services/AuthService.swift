@@ -95,6 +95,16 @@ final class AuthService {
     /// re-sign-in isn't wiped by a late logout clear). @MainActor serializes it.
     private var sessionEpoch: Int = 0
 
+    /// Whether the Keychain holds an access token, known WITHOUT asking it. This class is the
+    /// item's only writer (`saveTokens` / `clearToken`), so a mirror set on every write and every
+    /// read stays exact, and `hasStoredToken` never makes a main-thread Keychain call. nil until
+    /// the launch read lands.
+    private var storedTokenPresent: Bool?
+
+    /// Bumped by every Keychain write. An off-main read captures it first and updates the mirror
+    /// only if no write overtook it, so a stale read never undoes a sign-in or sign-out.
+    private var keychainWrites = 0
+
     // MARK: - Initialization
 
     init(apiClient: APIClient, keychain: KeychainService? = nil) {
@@ -391,11 +401,17 @@ final class AuthService {
 
     /// Refresh the access token
     func refreshToken() async throws {
-        guard let refreshToken = getStoredRefreshToken() else {
+        // Captured BEFORE the read: it runs off the main thread and suspends, and a sign-in or
+        // sign-out may land meanwhile.
+        let epoch = sessionEpoch
+        guard let refreshToken = await loadStoredRefreshToken() else {
             throw APIError.unauthorized
         }
+        // A session that changed during the read owns the Keychain now. Sending what the read
+        // returned could spend a NEWER session's refresh token (the server rotates it on use),
+        // leaving that session holding a dead one.
+        guard epoch == sessionEpoch else { return }
 
-        let epoch = sessionEpoch
         let response = try await apiClient.request(
             endpoint: .refreshToken(refreshToken: refreshToken),
             responseType: AuthResponse.self
@@ -415,47 +431,59 @@ final class AuthService {
 
     // MARK: - Token Management
 
-    /// Get stored access token
-    func getStoredToken() -> String? {
-        keychain.get(Self.accessTokenKey)
-    }
-
     /// The stored access token, read OFF the main thread.
     ///
-    /// `getStoredToken()` is a synchronous `SecItemCopyMatching` — a round trip to securityd —
-    /// and this class is `@MainActor`, so it blocks the main thread for as long as securityd
-    /// takes. Cold launch read it five times before Home's first frame, and a stalled securityd
-    /// would freeze the splash the way a stalled `stat()` did (Sentry CAYDEX-APPLE-IOS-S). The
-    /// launch path and the restore read through this instead; `KeychainService` is
-    /// `nonisolated` and `Sendable`, so the detached read touches no main-actor state.
+    /// There is no synchronous getter any more. `SecItemCopyMatching` is a round trip to
+    /// securityd, and this class is `@MainActor`, so a synchronous read blocks the main thread
+    /// for as long as securityd takes. Cold launch made five of them before Home's first frame,
+    /// and a stalled securityd would freeze the splash the way a stalled `stat()` did (Sentry
+    /// CAYDEX-APPLE-IOS-S). Also refreshes `storedTokenPresent`.
     func loadStoredToken() async -> String? {
+        let writes = keychainWrites
+        let token = await keychainValueOffMain(forKey: Self.accessTokenKey)
+        if writes == keychainWrites {
+            storedTokenPresent = token != nil
+        }
+        return token
+    }
+
+    /// The stored refresh token, read OFF the main thread (see `loadStoredToken`).
+    private func loadStoredRefreshToken() async -> String? {
+        await keychainValueOffMain(forKey: Self.refreshTokenKey)
+    }
+
+    /// Every Keychain read in this class: one `get`, on a detached task, so the main actor never
+    /// waits on securityd. `KeychainService` is `nonisolated` and `Sendable`, so the closure
+    /// touches no main-actor state.
+    private func keychainValueOffMain(forKey key: String) async -> String? {
         let keychain = self.keychain
-        let key = Self.accessTokenKey
         return await Task.detached(priority: .userInitiated) {
             keychain.get(key)
         }.value
     }
 
-    /// Get stored refresh token
-    func getStoredRefreshToken() -> String? {
-        keychain.get(Self.refreshTokenKey)
-    }
-
-    /// Check if user has stored token
+    /// Whether the Keychain holds an access token: the `storedTokenPresent` mirror, never a
+    /// Keychain read. Unknown (before the launch read lands) answers false. Nothing is armed
+    /// before that read, and the launch restore runs right after it, so no caller has a
+    /// credential to heal yet.
     var hasStoredToken: Bool {
-        getStoredToken() != nil
+        storedTokenPresent ?? false
     }
 
     /// Save tokens to keychain
     private func saveTokens(accessToken: String, refreshToken: String) {
         keychain.set(accessToken, forKey: Self.accessTokenKey)
         keychain.set(refreshToken, forKey: Self.refreshTokenKey)
+        keychainWrites &+= 1
+        storedTokenPresent = true
     }
 
     /// Clear stored tokens
     func clearToken() {
         keychain.delete(Self.accessTokenKey)
         keychain.delete(Self.refreshTokenKey)
+        keychainWrites &+= 1
+        storedTokenPresent = false
     }
 }
 

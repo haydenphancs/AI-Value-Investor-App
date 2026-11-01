@@ -1,4 +1,4 @@
-"""Cold launch makes NO synchronous Keychain read, and no App Group call, on the main thread.
+"""No synchronous Keychain read on the main thread: at cold launch, and on every heal path.
 
 `AppState.configure`'s launch `Task` runs on the MAIN actor. Until 2026-11-01 it called the
 synchronous `SecItemCopyMatching` (a round trip to securityd) five times for the same
@@ -28,12 +28,29 @@ The fix, pinned here:
     CLEAR (`clearOrphanedState`, once per device, the pinned sign-out teardown) stays on main
     by decision.
 
+The follow-up (same day), also pinned here: every OTHER main-thread Keychain read is gone too.
+`hasStoredToken` was a synchronous read behind `hasUnusedStoredCredential`, which the heal
+triggers (foreground, network restored, backoff, a refused request, `handleError`, a sign-in
+prompt), two view bodies and `handleAuthFailure` all call on the main actor. The token
+refresher (`iosApp`) and `refreshToken()` read synchronously too.
+  * `AuthService` has NO synchronous getter. Its one `keychain.get` sits inside
+    `keychainValueOffMain`'s awaited `Task.detached`, which `loadStoredToken` and
+    `loadStoredRefreshToken` use;
+  * `hasStoredToken` is an in-memory mirror (`storedTokenPresent`). `AuthService` is the item's
+    only writer, so `saveTokens` / `clearToken` set it and bump `keychainWrites`, and an off-main
+    read updates it only if no write overtook it. Before the launch read it answers false, so
+    the launch Task must not ask it;
+  * `refreshToken()` captures its epoch BEFORE its off-main read and re-checks it before sending.
+    A sign-in landing during the read would otherwise have its NEW refresh token spent (the
+    server rotates it on use) by a refresh whose result is then discarded.
+
 Source scans (there is no XCTest target): comments stripped and every check scoped to its
 brace-bounded declaration (.claude/rules/testing.md §3). `MUTATIONS` breaks each property once
 and asserts its guard fails WITH the assertion that names the bug (rule 3, kept in-suite so a
 guard that goes vacuous later fails the build too).
 
-MUTATION_LOG (in-suite, every run; first run 2026-11-01 — all killed).
+MUTATION_LOG (in-suite, every run; first run 2026-11-01 — all killed; the follow-up's rows — the
+reads helper, the mirror, the heal and refresh paths — added the same day, all killed).
 CONTROL: `test_the_comment_stripper_actually_strips`.
 """
 
@@ -51,6 +68,7 @@ _IOS = Path(__file__).resolve().parents[2] / "frontend" / "ios" / "ios"
 _FILES = {
     "app": _IOS / "Core/State/AppState.swift",
     "auth": _IOS / "Core/Services/AuthService.swift",
+    "ios": _IOS / "iosApp.swift",
 }
 
 _CONFIGURE = "func configure(apiClient: APIClient, authService: AuthService)"
@@ -59,18 +77,28 @@ _RESTORE_SESSION = "func restoreSession(trigger: String) async"
 _PRIME_HELPER = "private func primeStoredCredential(_ token: String?, readUnder generation: UInt64) async"
 _SUBJECT_HELPER = "private func storedCredentialSubject(of token: String?) -> String?"
 _LOAD = "func loadStoredToken() async -> String?"
+_LOAD_REFRESH = "private func loadStoredRefreshToken() async -> String?"
+_HELPER = "private func keychainValueOffMain(forKey key: String) async -> String?"
+_AUTH_CLASS = "final class AuthService"
+_HAS_STORED = "var hasStoredToken: Bool"
+_SAVE = "private func saveTokens(accessToken: String, refreshToken: String)"
+_CLEAR = "func clearToken()"
+_REFRESH = "func refreshToken() async throws"
+_UNUSED = "var hasUnusedStoredCredential: Bool"
+_REFRESHER = "await apiClient.setTokenRefresher"
 _KEYCHAIN = "nonisolated final class KeychainService: Sendable"
 
 # A synchronous Keychain read, spelled any way the app spells one.
 _SYNC_KEYCHAIN = (
     "getStoredToken(",
-    "hasStoredToken",
     "getStoredRefreshToken(",
-    "hasUnusedStoredCredential",
     "keychain.",
     "KeychainService",
     "SecItemCopyMatching",
 )
+# The mirror: free to read anywhere EXCEPT the launch Task, where it still says "no credential".
+_MIRROR = ("hasStoredToken", "hasUnusedStoredCredential")
+_HOPS = ("@MainActor", "MainActor.run", "MainActor.assumeIsolated")
 # An App Group call (every one is a cfprefsd round trip).
 _APP_GROUP = ("WidgetSnapshotStore.", "WidgetAPIConfig.", "WidgetSharedDefaults", "UserDefaults(suiteName")
 # A returning guard on the generation captured before the suspension (a log-only `if` is not one).
@@ -187,6 +215,11 @@ def _no_sync_keychain(where: str, body: str) -> None:
 def _check_launch_reads_once_off_main(s: dict[str, str]) -> None:
     launch = _launch_task(s["app"])
     _no_sync_keychain("the launch Task", launch)
+    for tok in _MIRROR:
+        assert tok not in launch, (
+            f"the launch Task asks the mirror (`{tok}`) — before the launch read lands it answers false "
+            "(no credential), so the widget session would never open; use the launch read's value"
+        )
     reads = launch.count("loadStoredToken(")
     m = re.search(r"let\s+(\w+)\s*=\s*await\s+authService\.loadStoredToken\(\)", launch)
     assert m and reads == 1, (
@@ -243,24 +276,96 @@ def _check_launch_helpers_read_no_keychain(s: dict[str, str]) -> None:
     )
 
 
-def _check_load_is_detached(s: dict[str, str]) -> None:
+def _check_auth_service_reads_off_main(s: dict[str, str]) -> None:
     auth = s["auth"]
-    body = _block(auth, _LOAD)
-    spans = _detached_spans(body)
-    assert len(spans) == 1, (
-        "loadStoredToken no longer reads inside ONE awaited `Task.detached { … }.value` — the "
+    cls = _block(auth, _AUTH_CLASS)
+    helper = _block(cls, _HELPER)
+    spans = _detached_spans(helper)
+    assert len(spans) == 1 and "keychain.get(key)" in helper[spans[0][0]:spans[0][1]], (
+        "keychainValueOffMain no longer reads inside ONE awaited `Task.detached { … }.value` — the "
         "Keychain read runs on the caller's actor, the main one"
     )
-    start, end = spans[0]
-    closure = body[start:end]
-    assert closure.count("keychain.get(") == 1 and _outside(body, spans).count("keychain.") == 0, (
-        "loadStoredToken reads the Keychain outside its detached closure"
+    assert cls.count("keychain.get(") == 1, (
+        f"AuthService reads the Keychain outside keychainValueOffMain's detached closure "
+        f"({cls.count('keychain.get(')} `keychain.get(` calls) — a synchronous read on the main actor"
     )
-    for hop in ("@MainActor", "MainActor.run", "MainActor.assumeIsolated"):
-        assert hop not in body, f"loadStoredToken's detached read hops back to the main actor (`{hop}`)"
+    for hop in _HOPS:
+        assert hop not in helper, f"keychainValueOffMain's detached read hops back to the main actor (`{hop}`)"
+    for header, key in ((_LOAD, "accessTokenKey"), (_LOAD_REFRESH, "refreshTokenKey")):
+        assert re.search(rf"await\s+keychainValueOffMain\(forKey:\s*Self\.{key}\)", _block(cls, header)), (
+            f"`{header}` no longer reads through `await keychainValueOffMain(forKey: Self.{key})`"
+        )
     assert _KEYCHAIN in auth and "func get(_ key: String) -> String?" in _block(auth, _KEYCHAIN), (
         "KeychainService is no longer `nonisolated` + `Sendable` with its `get` — the detached read "
         "would have to hop back to the main actor for it"
+    )
+
+
+def _check_mirror_is_exact(s: dict[str, str]) -> None:
+    cls = _block(s["auth"], _AUTH_CLASS)
+    has = _block(cls, _HAS_STORED)
+    assert "storedTokenPresent" in has and not any(t in has for t in ("keychain.", "await", "load")), (
+        "hasStoredToken no longer answers from the `storedTokenPresent` mirror — it reads the Keychain "
+        "on the main actor for every heal trigger and view body"
+    )
+    for header, value, writer in ((_SAVE, "true", "keychain.set("), (_CLEAR, "false", "keychain.delete(")):
+        body = _block(cls, header)
+        last_write = body.rfind(writer)
+        bump = body.find("keychainWrites &+= 1")
+        mirror = re.search(rf"storedTokenPresent\s*=\s*{value}\b", body)
+        assert last_write != -1 and mirror and mirror.start() > last_write, (
+            f"`{header}` does not update the mirror (`storedTokenPresent = {value}`) after its write — "
+            "hasStoredToken goes stale"
+        )
+        assert bump > last_write, (
+            f"`{header}` no longer bumps `keychainWrites` — an off-main read it overtakes would "
+            "overwrite the mirror with what it saw before this write"
+        )
+    load = _block(cls, _LOAD)
+    cap = re.search(r"let\s+(\w+)\s*=\s*keychainWrites\b", load)
+    read = load.find("await ")
+    fence = cap and re.search(rf"if\s+{cap.group(1)}\s*==\s*keychainWrites\s*\{{", load)
+    assert cap and read != -1 and cap.start() < read and fence and fence.start() > read, (
+        "loadStoredToken updates the mirror without checking it was not overtaken by a write — "
+        "capture `keychainWrites` before the read and compare it after"
+    )
+    fenced = _block_at(load, fence.start())
+    assert "storedTokenPresent" in fenced and load.count("storedTokenPresent") == 1, (
+        "loadStoredToken writes the mirror outside its overtaken-by-a-write check"
+    )
+    assert cls.count("storedTokenPresent =") == 3, (
+        f"`storedTokenPresent` is assigned {cls.count('storedTokenPresent =')} times — only saveTokens, "
+        "clearToken and loadStoredToken's fenced update may set it"
+    )
+    writers = [m.start() for m in re.finditer(r"keychain\.(?:set|delete)\(", cls)]
+    inside = [(cls.find(_block(cls, h)), cls.find(_block(cls, h)) + len(_block(cls, h))) for h in (_SAVE, _CLEAR)]
+    assert all(any(a <= w < b for a, b in inside) for w in writers), (
+        "AuthService writes the Keychain outside saveTokens / clearToken — the mirror cannot see that write"
+    )
+
+
+def _check_heal_and_refresh_read_off_main(s: dict[str, str]) -> None:
+    for key, name in (("app", "AppState.swift"), ("ios", "iosApp.swift")):
+        _no_sync_keychain(name, s[key])
+    assert "authService.hasStoredToken" in _block(s["app"], _UNUSED), (
+        "hasUnusedStoredCredential no longer derives from `authService.hasStoredToken` — this scan has drifted"
+    )
+    refresher = _block_at(s["ios"], _idx(s["ios"], _REFRESHER))
+    assert re.search(r"guard\s+let\s+token\s*=\s*await\s+authService\.loadStoredToken\(\)", refresher), (
+        "the token refresher no longer reads the refreshed token through `await authService.loadStoredToken()`"
+    )
+    refresh = _block(s["auth"], _REFRESH)
+    epoch = refresh.find("let epoch = sessionEpoch")
+    read = re.search(r"await\s+loadStoredRefreshToken\(\)", refresh)
+    send = refresh.find("apiClient.request(")
+    assert read and epoch != -1 and epoch < read.start(), (
+        "refreshToken captures `sessionEpoch` after its off-main read — a sign-in or sign-out during "
+        "the read is laundered into the capture"
+    )
+    assert send != -1 and re.search(r"guard\s+epoch\s*==\s*sessionEpoch\s+else\s*\{\s*return\s*\}",
+                                    refresh[read.end():send]), (
+        "refreshToken sends what its read returned without re-checking the epoch — a sign-in during "
+        "the read has its NEW refresh token spent by a refresh whose result is then discarded"
     )
 
 
@@ -325,7 +430,9 @@ GUARDS: dict[str, Callable[[dict[str, str]], None]] = {
     "launch_reads_once": _check_launch_reads_once_off_main,
     "launch_consumers": _check_launch_consumers_take_the_one_read,
     "launch_helpers": _check_launch_helpers_read_no_keychain,
-    "load_detached": _check_load_is_detached,
+    "auth_reads_off_main": _check_auth_service_reads_off_main,
+    "mirror_exact": _check_mirror_is_exact,
+    "heal_refresh_off_main": _check_heal_and_refresh_read_off_main,
     "restore_off_main": _check_restore_reads_off_main_and_rechecks,
     "app_group_off_main": _check_app_group_off_main_before_seed,
 }
@@ -358,7 +465,7 @@ MUTATIONS: list[tuple] = [
      "the launch Task reads the Keychain synchronously"),
     ("sync-opener", "launch_reads_once", "app",
      _sub(r"if launchToken != nil \{", "if authService.hasStoredToken {"),
-     "the launch Task reads the Keychain synchronously"),
+     "the launch Task asks the mirror"),
     ("sync-home-owner", "launch_reads_once", "app",
      _sub(r"ownerUserId: launchToken\.flatMap", "ownerUserId: authService.getStoredToken().flatMap"),
      "the launch Task reads the Keychain synchronously"),
@@ -391,19 +498,65 @@ MUTATIONS: list[tuple] = [
     ("prime-unfenced", "launch_helpers", "app",
      _sub(r"guard let token, generation == credentialGeneration else \{ return \}", "guard let token else { return }"),
      "arms the launch read without checking the credential generation"),
-    ("load-on-caller", "load_detached", "auth",
+    ("helper-on-caller", "auth_reads_off_main", "auth",
      _sub(r"return await Task\.detached\(priority: \.userInitiated\) \{\n\s*keychain\.get\(key\)\n\s*\}\.value",
           "return keychain.get(key)"),
-     "loadStoredToken no longer reads inside ONE awaited"),
-    ("load-fire-and-forget", "load_detached", "auth",
+     "keychainValueOffMain no longer reads inside ONE awaited"),
+    ("helper-fire-and-forget", "auth_reads_off_main", "auth",
      _sub(r"(\{\n\s*keychain\.get\(key\)\n\s*\})\.value", r"\1.result.get()"),
-     "loadStoredToken no longer reads inside ONE awaited"),
-    ("load-main-hop", "load_detached", "auth",
+     "keychainValueOffMain no longer reads inside ONE awaited"),
+    ("helper-main-hop", "auth_reads_off_main", "auth",
      _sub(r"(Task\.detached\(priority: \.userInitiated\) \{)", r"\1 @MainActor in"),
      "hops back to the main actor"),
-    ("keychain-isolated", "load_detached", "auth",
+    ("sync-getter-returns", "auth_reads_off_main", "auth",
+     _sub(r"(\n[ \t]*private func loadStoredRefreshToken\(\) async -> String\? \{)",
+          r"\n    func getStoredToken() -> String? {\n        keychain.get(Self.accessTokenKey)\n    }\n\1"),
+     "AuthService reads the Keychain outside keychainValueOffMain"),
+    ("refresh-read-on-caller", "auth_reads_off_main", "auth",
+     _sub(r"await keychainValueOffMain\(forKey: Self\.refreshTokenKey\)", "keychain.get(Self.refreshTokenKey)"),
+     "AuthService reads the Keychain outside keychainValueOffMain"),
+    ("keychain-isolated", "auth_reads_off_main", "auth",
      _sub(r"nonisolated final class KeychainService: Sendable", "final class KeychainService: Sendable"),
      "KeychainService is no longer `nonisolated`"),
+    ("mirror-reads-keychain", "mirror_exact", "auth",
+     _sub(r"storedTokenPresent \?\? false", "storedTokenPresent ?? (keychain.get(Self.accessTokenKey) != nil)"),
+     "hasStoredToken no longer answers from the `storedTokenPresent` mirror"),
+    ("save-skips-mirror", "mirror_exact", "auth",
+     _sub(r"(keychain\.set\(refreshToken, forKey: Self\.refreshTokenKey\)\n\s*keychainWrites &\+= 1\n)\s*storedTokenPresent = true\n",
+          r"\1"),
+     "does not update the mirror (`storedTokenPresent = true`)"),
+    ("clear-skips-mirror", "mirror_exact", "auth",
+     _sub(r"(keychain\.delete\(Self\.refreshTokenKey\)\n\s*keychainWrites &\+= 1\n)\s*storedTokenPresent = false\n",
+          r"\1"),
+     "does not update the mirror (`storedTokenPresent = false`)"),
+    ("save-skips-write-count", "mirror_exact", "auth",
+     _sub(r"(keychain\.set\(refreshToken, forKey: Self\.refreshTokenKey\)\n)\s*keychainWrites &\+= 1\n", r"\1"),
+     "no longer bumps `keychainWrites`"),
+    ("load-mirror-unfenced", "mirror_exact", "auth",
+     _sub(r"if writes == keychainWrites \{\n\s*(storedTokenPresent = token != nil)\n\s*\}", r"\1"),
+     "updates the mirror without checking it was not overtaken"),
+    ("load-late-capture", "mirror_exact", "auth",
+     _sub(r"let writes = keychainWrites\n(\s*)(let token = await keychainValueOffMain\(forKey: Self\.accessTokenKey\)\n)",
+          r"\2\1let writes = keychainWrites\n"),
+     "updates the mirror without checking it was not overtaken"),
+    ("write-bypasses-mirror", "mirror_exact", "auth",
+     _sub(r"(\n[ \t]*)clearToken\(\)(\s*let endedToken = apiClient\.disarmAuthToken\(\))",
+          r"\1keychain.delete(Self.accessTokenKey)\2"),
+     "writes the Keychain outside saveTokens / clearToken"),
+    ("heal-reads-keychain", "heal_refresh_off_main", "app",
+     _sub(r"return authService\.hasStoredToken && auth\.status != \.authenticated",
+          'return KeychainService.shared.get("access_token") != nil && auth.status != .authenticated'),
+     "AppState.swift reads the Keychain synchronously"),
+    ("refresher-sync-read", "heal_refresh_off_main", "ios",
+     _sub(r"guard let token = await authService\.loadStoredToken\(\)", "guard let token = await authService.getStoredToken()"),
+     "iosApp.swift reads the Keychain synchronously"),
+    ("refresh-late-epoch", "heal_refresh_off_main", "auth",
+     _sub(r"let epoch = sessionEpoch\n(\s*)(guard let refreshToken = await loadStoredRefreshToken\(\) else \{\n\s*throw APIError\.unauthorized\n\s*\}\n)",
+          r"\2\1let epoch = sessionEpoch\n"),
+     "refreshToken captures `sessionEpoch` after its off-main read"),
+    ("refresh-unfenced", "heal_refresh_off_main", "auth",
+     _sub(r"(throw APIError\.unauthorized\n\s*\}\n)\s*guard epoch == sessionEpoch else \{ return \}\n", r"\1"),
+     "refreshToken sends what its read returned without re-checking the epoch"),
     ("restore-sync-read", "restore_off_main", "app",
      _sub(r"let storedToken = await authService\.loadStoredToken\(\)", "let storedToken = authService.getStoredToken()"),
      "performRestore reads the Keychain synchronously"),

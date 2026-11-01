@@ -769,7 +769,7 @@ def test_the_refresher_rejects_only_on_a_genuine_auth_failure():  # T7
         "answers before the isAuthError ternary, and a 429/5xx refresh is an APIError")
     rejected = re.findall(r"\.credentialRejected\b", closure)
     assert len(rejected) == 2 and re.search(
-            r"guard let token = await authService\.getStoredToken\(\) else \{\s*return \.credentialRejected\s*\}",
+            r"guard let token = await authService\.loadStoredToken\(\) else \{\s*return \.credentialRejected\s*\}",
             closure), (
         f"the refresher answers .credentialRejected ({len(rejected)}×) outside the stored-token "
         "guard and the isAuthError ternary — a transient failure would end the session")
@@ -788,7 +788,7 @@ def test_the_refresher_rejects_only_on_a_genuine_auth_failure():  # T7
         ".credentialRejected (or the session be cleared on a refresh that may be transient)")
     throws = [t.strip() for t in re.findall(r"\bthrow\b[^\n}]*", body)]
     assert throws == ["throw APIError.unauthorized"] and re.search(
-            r"guard let refreshToken = getStoredRefreshToken\(\) else \{\s*throw APIError\.unauthorized\s*\}",
+            r"guard let refreshToken = await loadStoredRefreshToken\(\) else \{\s*throw APIError\.unauthorized\s*\}",
             body), (
         f"AuthService.refreshToken throws {throws} beyond the no-refresh-token guard — a client-made "
         "auth error for anything but a missing refresh token is answered .credentialRejected")
@@ -1378,9 +1378,9 @@ _MUTATIONS = [
      "AuthService.refreshToken throws ['throw APIError.unauthorized', 'throw APIError.unauthorized'] "
      "beyond the no-refresh-token guard"),
     ("m76-refreshToken-defer-clears-on-failure", _AUTH_SERVICE, _replace_each(
-        ("        guard let refreshToken = getStoredRefreshToken() else {\n"
+        ("        guard let refreshToken = await loadStoredRefreshToken() else {\n"
          "            throw APIError.unauthorized\n        }\n",
-         "        guard let refreshToken = getStoredRefreshToken() else {\n"
+         "        guard let refreshToken = await loadStoredRefreshToken() else {\n"
          "            throw APIError.unauthorized\n        }\n"
          "        var refreshed = false\n"
          "        defer { if !refreshed { clearToken() } }\n"),

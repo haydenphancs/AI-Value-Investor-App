@@ -828,6 +828,7 @@ def test_unknown_status_names_are_refused_before_any_io(fake, frm, to):
     (c.FAILED, c.BUILDING),               # a terminal piece is left only by a rebuild to planned
     (c.EXPIRED, c.IN_REVIEW),
     (c.REHEARSED, c.PLANNED),             # rehearsed is never left
+    (c.REHEARSED, c.APPROVED),            # … through transition(): only promote_rehearsed_sync
     (c.UNPUBLISHED, c.PLANNED),
     (c.PUBLISHING, c.FAILED),             # its row may be live
     (c.PUBLISHED, c.EXPIRED),
@@ -1586,7 +1587,7 @@ def test_every_sync_operation_has_an_async_twin_with_the_same_parameters():
         "get_piece", "get_piece_by_id", "list_pieces", "recent_subjects", "create_piece", "transition",
         "acquire_lease", "refresh_lease", "release_lease", "bump",
         "get_job", "list_jobs", "enqueue_job", "claim_job", "job_claim_ok", "heartbeat_job", "complete_job",
-        "fail_job", "cancel_open_jobs",
+        "fail_job", "cancel_open_jobs", "promote_rehearsed", "repoint_ready_audio",
     }
     for name, fn in syncs.items():
         twin = getattr(ledger, name, None)
@@ -1640,3 +1641,181 @@ async def test_the_async_path_end_to_end(fake, monkeypatch):
     assert (await ledger.get_piece_by_id(pid))["status"] == c.DRAFTED
     assert [r["id"] for r in await ledger.list_pieces(kind="deep_dive")] == [pid]
     assert (await ledger.recent_subjects("deep_dive", T0 - timedelta(days=30))).themes == frozenset()
+
+
+# ── promoting a rehearsal (owner decision 2026-11-01: publish W44) ───────────────────────────
+
+_OLD_AUDIO = "audio/weekly/ai-power-2026-10-23-0123456789ab.m4a"
+_NEW_AUDIO = "audio/weekly/ai-power-2026-10-23-ba9876543210.m4a"
+_NOW = T0 + timedelta(days=9)
+
+
+def _rehearsed(fake):
+    """A dry-run piece that went the whole way to `rehearsed`, with a ready narration job."""
+    pid = _piece(fake, dry_run=True)["id"]
+    job = _job(fake, pid)
+    got = ledger.claim_job_sync(["chatterbox"], now=T0, sb=fake)
+    job = ledger.complete_job_sync(job["id"], got["attempts"], got["claim_nonce"], audio_path=_OLD_AUDIO,
+                                   audio_bytes=9_000_000, duration_seconds=700.0, timings=[{"i": 0}],
+                                   checks={"server": {"ok": True}}, now=T0, sb=fake)
+    _walk(fake, pid, MAIN_PATH, fields={"draft": {"title": "x"}, "draft_sha256": SHA,
+                                         "narration_job_id": job["id"]})
+    row = ledger.transition_sync(pid, from_statuses=[c.APPROVED], to_status=c.REHEARSED, sb=fake)
+    assert row["status"] == c.REHEARSED and row["dry_run"] is True
+    return row, job
+
+
+def _promote(fake, piece, job, **over):
+    args = dict(review_round=piece["review_round"], old_draft_sha256=SHA, narration_job_id=job["id"],
+                observed_updated_at=piece["updated_at"], draft={"title": "x", "author": {"title": "Editorial"}},
+                draft_sha256="b" * 64, scheduled_publish_at=_NOW + timedelta(minutes=15),
+                hold_until=_NOW + timedelta(hours=48), validation={"promote": {"by": "owner"}}, now=_NOW, sb=fake)
+    args.update(over)
+    return ledger.promote_rehearsed_sync(piece["id"], **args)
+
+
+def test_promote_takes_a_rehearsal_live_and_then_the_ordinary_publish_path_accepts_it(fake):
+    piece, job = _rehearsed(fake)
+    row = _promote(fake, piece, job)
+    assert row["status"] == c.APPROVED and row["dry_run"] is False
+    assert row["draft_sha256"] == "b" * 64 and row["last_stage"] == "promote"
+    assert row["validation"] == {"promote": {"by": "owner"}} and row["publish_lease_until"] is None
+    assert not _piece_violations(fake.row(ledger.PIECES, piece["id"]))
+    # The publisher's own transition now works (it fences on dry_run = false).
+    live = ledger.transition_sync(piece["id"], from_statuses=[c.APPROVED], to_status=c.PUBLISHING,
+                                  within_hold_at=_NOW + timedelta(minutes=16), due_at=_NOW + timedelta(minutes=16),
+                                  fence={"draft_sha256": "b" * 64}, sb=fake)
+    assert live is not None and live["status"] == c.PUBLISHING
+
+
+@pytest.mark.parametrize("over", [
+    {"review_round": 1}, {"old_draft_sha256": "c" * 64}, {"narration_job_id": str(uuid.uuid4())},
+    {"observed_updated_at": T0 - timedelta(days=1)},
+])
+def test_promote_is_fenced_on_everything_the_script_observed(fake, over):
+    piece, job = _rehearsed(fake)
+    before = copy.deepcopy(fake.row(ledger.PIECES, piece["id"]))
+    assert _promote(fake, piece, job, **over) is None
+    assert fake.row(ledger.PIECES, piece["id"]) == before
+
+
+def test_promote_refuses_anything_but_a_dry_run_rehearsal(fake):
+    piece, job = _rehearsed(fake)
+    assert _promote(fake, piece, job) is not None
+    again = fake.row(ledger.PIECES, piece["id"])
+    assert _promote(fake, again, job, old_draft_sha256="b" * 64, draft_sha256="d" * 64) is None, \
+        "an approved (already promoted) piece is not promoted twice"
+    live_pid = _piece(fake, "2026-W45:deep_dive", dry_run=False)["id"]
+    live = _walk(fake, live_pid, MAIN_PATH, fields={"draft_sha256": SHA, "narration_job_id": job["id"]})
+    assert _promote(fake, live, job) is None, "a live piece never takes the promote path"
+
+
+@pytest.mark.parametrize("over,match", [
+    ({"scheduled_publish_at": _NOW}, "after now"),
+    ({"hold_until": _NOW}, "before scheduled_publish_at"),
+    ({"draft_sha256": SHA}, "hashes the same"),
+    ({"old_draft_sha256": "NOT-HEX"}, "old_draft_sha256"),
+    ({"narration_job_id": "nope"}, "narration_job_id"),
+    ({"observed_updated_at": "yesterday"}, "observed_updated_at"),
+    ({"review_round": -1}, "review_round"),
+    ({"draft": "text"}, "draft"),
+])
+def test_promote_validates_its_arguments_before_any_io(fake, over, match):
+    piece, job = _rehearsed(fake)
+    n = len(fake.calls)
+    with pytest.raises(ValueError, match=match):
+        _promote(fake, piece, job, **over)
+    assert len(fake.calls) == n
+
+
+def test_repoint_moves_a_ready_job_to_the_trimmed_file_and_a_replay_writes_nothing(fake):
+    piece, job = _rehearsed(fake)
+    row = ledger.repoint_ready_audio_sync(job["id"], piece_id=piece["id"], old_audio_path=_OLD_AUDIO,
+                                          new_audio_path=_NEW_AUDIO, new_audio_bytes=8_900_000,
+                                          new_duration_seconds=693.5, note={"cut_at": 693.5}, sb=fake)
+    assert row["audio_path"] == _NEW_AUDIO and row["audio_bytes"] == 8_900_000
+    assert row["duration_seconds"] == 693.5 and row["status"] == c.JOB_READY
+    assert row["checks"] == {"server": {"ok": True}, "promote": {"cut_at": 693.5}}
+    assert row["timings"] == [{"i": 0}] and row["script"] == SCRIPT, "the render's record is kept"
+    assert not _job_violations(fake.row(ledger.JOBS, job["id"]))
+    before = copy.deepcopy(fake.row(ledger.JOBS, job["id"]))
+    replay = ledger.repoint_ready_audio_sync(job["id"], piece_id=piece["id"], old_audio_path=_OLD_AUDIO,
+                                             new_audio_path=_NEW_AUDIO, new_audio_bytes=8_900_000,
+                                             new_duration_seconds=693.5, note={"cut_at": 693.5}, sb=fake)
+    assert replay == before == fake.row(ledger.JOBS, job["id"])
+
+
+def test_repoint_refuses_a_job_on_another_path_of_another_piece_or_not_ready(fake):
+    piece, job = _rehearsed(fake)
+    kw = dict(new_audio_path=_NEW_AUDIO, new_audio_bytes=1, new_duration_seconds=1.0, note={}, sb=fake)
+    assert ledger.repoint_ready_audio_sync(job["id"], piece_id=piece["id"],
+                                           old_audio_path="audio/weekly/third-0123456789ab.m4a", **kw) is None
+    assert ledger.repoint_ready_audio_sync(job["id"], piece_id=str(uuid.uuid4()), old_audio_path=_OLD_AUDIO,
+                                           **kw) is None
+    other = _job(fake, piece["id"], round=2)          # queued, never rendered
+    assert ledger.repoint_ready_audio_sync(other["id"], piece_id=piece["id"], old_audio_path=_OLD_AUDIO,
+                                           **kw) is None
+    assert fake.row(ledger.JOBS, job["id"])["audio_path"] == _OLD_AUDIO
+
+
+@pytest.mark.parametrize("over,match", [
+    ({"new_audio_path": "audio/other/x.m4a"}, "new_audio_path"),
+    ({"new_audio_path": "audio/weekly/../secrets.m4a"}, "new_audio_path"),
+    ({"old_audio_path": "/abs/x.m4a"}, "old_audio_path"),
+    ({"new_audio_path": _OLD_AUDIO}, "equals the old one"),
+    ({"new_audio_bytes": 0}, "new_audio_bytes"),
+    ({"new_audio_bytes": True}, "new_audio_bytes"),
+    ({"new_duration_seconds": float("nan")}, "new_duration_seconds"),
+    ({"note": "text"}, "note"),
+])
+def test_repoint_validates_its_arguments_before_any_io(fake, over, match):
+    piece, job = _rehearsed(fake)
+    args = dict(piece_id=piece["id"], old_audio_path=_OLD_AUDIO, new_audio_path=_NEW_AUDIO,
+                new_audio_bytes=10, new_duration_seconds=5.0, note={}, sb=fake)
+    args.update(over)
+    n = len(fake.calls)
+    with pytest.raises(ValueError, match=match):
+        ledger.repoint_ready_audio_sync(job["id"], **args)
+    assert len(fake.calls) == n
+
+
+@pytest.mark.parametrize("change", ["audio_path", "updated_at", "status"])
+def test_repoint_is_fenced_in_the_update_itself_not_only_in_the_read(fake, change):
+    piece, job = _rehearsed(fake)
+
+    def another_writer():                      # lands between the read and the UPDATE
+        row = fake.row(ledger.JOBS, job["id"])
+        if change == "audio_path":
+            row["audio_path"] = "audio/weekly/someone-else-0123456789ab.m4a"
+        elif change == "updated_at":
+            row["updated_at"] = ledger._iso(T0 + timedelta(days=20))
+        else:
+            row["status"] = c.JOB_CANCELLED
+
+    fake.before_update[ledger.JOBS] = [another_writer]
+    assert ledger.repoint_ready_audio_sync(job["id"], piece_id=piece["id"], old_audio_path=_OLD_AUDIO,
+                                           new_audio_path=_NEW_AUDIO, new_audio_bytes=8_900_000,
+                                           new_duration_seconds=693.5, note={}, sb=fake) is None
+    assert fake.row(ledger.JOBS, job["id"]).get("checks", {}).get("promote") is None
+
+
+def test_promote_refuses_a_dry_run_piece_that_has_not_rehearsed_yet(fake):
+    # W44 sat in `approved` (dry run) until its rehearsal tick: the status fence alone must refuse it.
+    pid = _piece(fake, "2026-W45:deep_dive", dry_run=True)["id"]
+    job = _job(fake, pid)
+    approved = _walk(fake, pid, MAIN_PATH, fields={"draft_sha256": SHA, "narration_job_id": job["id"]})
+    assert approved["status"] == c.APPROVED and approved["dry_run"] is True
+    before = copy.deepcopy(fake.row(ledger.PIECES, pid))
+    assert _promote(fake, approved, job) is None
+    assert fake.row(ledger.PIECES, pid) == before
+
+
+def test_promote_is_fenced_in_the_update_on_status(fake):
+    piece, job = _rehearsed(fake)
+
+    def owner_moves_it():
+        fake.row(ledger.PIECES, piece["id"])["status"] = c.UNPUBLISHED   # any other status
+
+    fake.before_update[ledger.PIECES] = [owner_moves_it]
+    assert _promote(fake, piece, job) is None
+    assert fake.row(ledger.PIECES, piece["id"])["dry_run"] is True

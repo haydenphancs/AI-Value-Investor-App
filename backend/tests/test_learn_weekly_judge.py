@@ -75,6 +75,29 @@ def test_fields_are_the_models_words_in_reading_order_with_validator_paths():
     assert C.AUTHOR["name"] not in texts and C.DISCLOSURE_TEXT not in texts
 
 
+_CALIBRATION_FIXTURE = Path(__file__).resolve().parent / "data" / "learn_judge_calibration_2026_10_24.json"
+
+
+def test_every_code_owned_closing_is_skipped_including_the_legacy_one_in_old_drafts():
+    # W43/W44 and the calibration fixture carry the pre-2026-11-01 "AI-assisted: …" closing. If the
+    # judge read it as model text, calibration runs would gain false self-reference flags.
+    assert C.DISCLOSURE_TEXT in C.CODE_OWNED_CLOSINGS
+    assert set(C.LEGACY_DISCLOSURE_TEXTS) <= C.CODE_OWNED_CLOSINGS
+    items = json.loads(_CALIBRATION_FIXTURE.read_text())["items"]
+    assert items
+    seen_legacy = 0
+    for item in items:
+        blocks = [b for s in item["draft"]["sections"] for b in s.get("content") or []]
+        seen_legacy += sum(b.get("text") in C.LEGACY_DISCLOSURE_TEXTS for b in blocks)
+        texts = [t for _, t in J.article_fields(item["draft"])]
+        assert not any(t in C.CODE_OWNED_CLOSINGS for t in texts), item["id"]
+    assert seen_legacy == len(items), "every fixture draft ends on the legacy closing"
+    for closing in C.CODE_OWNED_CLOSINGS:
+        content = A.append_disclosure(dict(CONTENT))
+        content["sections"][-1]["content"][-1] = {**content["sections"][-1]["content"][-1], "text": closing}
+        assert closing not in [t for _, t in J.article_fields(content)]
+
+
 def test_a_runaway_article_is_capped_and_logged(caplog):
     big = dict(CONTENT, sections=[{"title": f"S{i}", "content": [
         {"type": "paragraph", "text": f"Paragraph {i}."}]} for i in range(400)])

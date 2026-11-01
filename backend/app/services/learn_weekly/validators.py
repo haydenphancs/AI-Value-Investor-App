@@ -450,9 +450,6 @@ REQUIRED_ARTICLE_KEYS: Tuple[str, ...] = (
 #: Engagement counters a model or a bug could fabricate. Any non-empty value is refused: a
 #: made-up "12K learners" is a false claim under the brand.
 ENGAGEMENT_KEYS: Tuple[str, ...] = ("viewCount", "learnerCount", "commentCount", "likeCount")
-#: The disclosure the plan pins on every generated piece (§1.11).
-AI_ASSISTED = "ai-assisted"
-
 _BLOCK_KEYS: Mapping[str, FrozenSet[str]] = {
     "paragraph": frozenset({"type", "text", "readAlong"}),
     "subheading": frozenset({"type", "text", "readAlong"}),
@@ -1438,10 +1435,11 @@ def _validate_article(content: Any, kind: Any, sheet: Any, served_titles: Any,
             if author.get("isVerified") is not False:
                 out.append(Issue("author.isVerified", "verified",
                                  _detail(f"must be false, got {author.get('isVerified')!r}")))
-            title = author.get("title")
-            if isinstance(title, str) and AI_ASSISTED not in title[:TITLE_CAP].casefold():
-                out.append(Issue("author.title", "disclosure",
-                                 _detail(f"{title!r} must say AI-assisted")))
+            # Its own check (not an elif): a stale byline is named even when isVerified is wrong too.
+            if {k: v for k, v in author.items() if k != "isVerified"} != \
+                    {k: v for k, v in C.AUTHOR.items() if k != "isVerified"}:
+                out.append(Issue("author", "author_mismatch",
+                                 _detail(f"{dict(author)!r} is not the code-owned author")))
 
     rt = content.get("readTimeMinutes")
     if "readTimeMinutes" in content and not (_is_int(rt) and 1 <= rt <= MAX_READ_TIME_MINUTES):
@@ -1593,7 +1591,7 @@ def validate_article(content: Any, *, kind: str, sheet: Optional[C.FactSheet] = 
                      served_slugs: Optional[Iterable[str]] = ()) -> List[Issue]:
     """Every issue in one DRAFT article (the iOS content shape plus each section's draft `kind`,
     which the renderer drops). Checks the iOS-required keys, the slug pattern, the category enum,
-    the code-owned author (`isVerified` false, "AI-assisted" title), no fabricated engagement
+    the code-owned author (`isVerified` false, equal to `contracts.AUTHOR`), no fabricated engagement
     count, the gradient and the three key highlights, every section and block
     (`validate_block`, grounded against `sheet` when given), the body word count for `kind`
     (`contracts.DEEP_DIVE_WORDS` / `SLOT_WORDS`; body = paragraph, subheading, callout and bullet
@@ -1612,7 +1610,7 @@ def validate_article(content: Any, *, kind: str, sheet: Optional[C.FactSheet] = 
 
 
 __all__ = [
-    "AI_ASSISTED", "ENFORCED_COMPLIANCE_CODES", "ENGAGEMENT_KEYS", "GROUNDING_CODES",
+    "ENFORCED_COMPLIANCE_CODES", "ENGAGEMENT_KEYS", "GROUNDING_CODES",
     "IGNORED_COMPLIANCE_CODES", "Issue", "REQUIRED_ARTICLE_KEYS", "SLUG_RE", "advice_hits",
     "build_grounding_context", "conduct_hits", "corpus_vocab", "forbidden_token_hits",
     "misquote_hits", "self_reference_hits", "title_key", "validate_article", "validate_block",

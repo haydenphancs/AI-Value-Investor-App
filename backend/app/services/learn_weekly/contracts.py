@@ -17,7 +17,7 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import date
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
 
 # ── Piece kinds and Money Moves categories ────────────────────────────────────────────────────
 
@@ -322,9 +322,16 @@ SECTION_KINDS = ("peg", "history", "mechanics", "lessons")
 BLOCK_TYPES = ("paragraph", "subheading", "callout", "bulletList")   # no `quote` in weekly pieces
 CALLOUT_STYLES = ("highlight", "info", "warning")
 
-AUTHOR = {"name": "Caydex Research", "title": "AI-assisted · Editor-reviewed", "isVerified": False}
-# Must contain "AI-assisted": the public disclosures (support.html, terms.html) promise that label.
-DISCLOSURE_TEXT = (
+#: The catalog's own byline (every bundled article carries it). Owner decision 2026-11-01: "no
+#: "AI-assisted" label" — the general AI line lives in the Terms and Support pages instead, which
+#: say AI helps write some Learn articles that Caydex reviews before publishing.
+AUTHOR = {"name": "Caydex Research", "title": "Editorial", "isVerified": False}
+#: The closing callout `article_schema.append_disclosure` adds after validation (it is narrated).
+DISCLOSURE_TEXT = "This article is educational only and is not investment advice."
+#: Closings written by earlier versions (W43/W44 drafts, the judge calibration fixture): still
+#: code-owned, so the judge skips them and the promote script can strip them.
+LEGACY_DISCLOSURE_TEXTS: Tuple[str, ...] = (
     "AI-assisted: this article was researched and written with AI from public filings and "
-    "reviewed by Caydex before publishing. It is educational only and not investment advice."
+    "reviewed by Caydex before publishing. It is educational only and not investment advice.",
 )
+CODE_OWNED_CLOSINGS: FrozenSet[str] = frozenset({DISCLOSURE_TEXT, *LEGACY_DISCLOSURE_TEXTS})

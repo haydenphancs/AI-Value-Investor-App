@@ -816,10 +816,19 @@ def test_author_is_never_verified(verified):
     assert "verified" in article_codes(article)
 
 
-def test_author_shape_and_disclosure():
+def test_author_shape_and_code_owned_author():
     article = make_article()
-    article["author"] = {**C.AUTHOR, "title": "Editorial"}
-    assert "disclosure" in article_codes(article)
+    assert "author_mismatch" not in article_codes(article)
+    # The pre-2026-11-01 byline, a renamed author, an extra key: all refused.
+    for other in ({**C.AUTHOR, "title": "AI-assisted · Editor-reviewed"},
+                  {**C.AUTHOR, "name": "Cay AI"}, {**C.AUTHOR, "role": "writer"}):
+        article["author"] = other
+        assert "author_mismatch" in article_codes(article)
+    # A stale byline is named even when isVerified is wrong too (not hidden behind it).
+    article["author"] = {**C.AUTHOR, "title": "AI-assisted · Editor-reviewed", "isVerified": True}
+    assert {"author_mismatch", "verified"} <= set(article_codes(article))
+    article["author"] = {**C.AUTHOR, "isVerified": True}
+    assert "author_mismatch" not in article_codes(article) and "verified" in article_codes(article)
     for bad in (None, "Caydex", 5, []):
         article["author"] = bad
         assert "bad_value" in article_codes(article)

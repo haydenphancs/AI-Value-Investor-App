@@ -214,13 +214,13 @@ def _all_fields(content: Mapping[str, Any]) -> List[Tuple[str, str]]:
     for k, st in enumerate(content.get("statistics") or []):
         if isinstance(st, Mapping):
             add(f"statistics[{k}].label", st.get("label"))
-    disclosure = C.DISCLOSURE_TEXT
     for i, sec in enumerate(content.get("sections") or []):
         if not isinstance(sec, Mapping):
             continue
         add(f"sections[{i}].title", sec.get("title"))
         for j, block in enumerate(sec.get("content") or []):
-            if not isinstance(block, Mapping) or block.get("text") == disclosure:
+            # Today's closing and the legacy ones (old drafts, the calibration fixture) are code-owned.
+            if not isinstance(block, Mapping) or block.get("text") in C.CODE_OWNED_CLOSINGS:
                 continue
             add(f"sections[{i}].content[{j}]", block.get("text"))
             for k, item in enumerate(block.get("items") or []):

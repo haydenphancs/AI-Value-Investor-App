@@ -185,7 +185,8 @@ def test_the_key_set_is_the_bundles_and_nothing_new():
 
 def test_code_owned_fields():
     a = _worst_case()
-    assert a["author"] == C.AUTHOR and "ai-assisted" in a["author"]["title"].casefold()
+    # The catalog's own byline (owner 2026-11-01: "no "AI-assisted" label").
+    assert a["author"] == C.AUTHOR == {"name": "Caydex Research", "title": "Editorial", "isVerified": False}
     assert a["viewCount"] == "" and a["publishedDaysAgo"] == 0
     assert a["isFeatured"] is True and a["hasAudioVersion"] is False and a["audioUrl"] is None
     assert a["tagLabel"] == "FEATURE DEEP DIVE"
@@ -346,10 +347,31 @@ def test_the_disclosure_is_appended_last_once_and_never_validated():
     assert once == twice
     assert once["sections"][-1]["content"][-1] == A.disclosure_block()
     assert a["sections"][-1]["content"][-1] != A.disclosure_block(), "the input is not mutated"
-    # It names the brand on purpose: the validators would refuse it as model text.
+    # Code-owned on purpose: the validators would refuse it as model text.
     issues = V.validate_block("x", A.disclosure_block(), section_kind="lessons")
-    assert any(i.code in ("forbidden_token", "brand_mention") for i in issues)
-    assert "ai-assisted" in C.DISCLOSURE_TEXT.casefold()   # the label the public disclosures promise
+    assert {"code_owned", "banned_phrase"} <= {i.code for i in issues}
+    assert "not investment advice" in C.DISCLOSURE_TEXT
+
+
+_AI_WORDING = re.compile(r"(?<![a-z])(?:ai|a\.i\.|artificial intelligence|llms?|models?|automated|machine|"
+                         r"generated)(?![a-z])", re.IGNORECASE)
+
+
+def test_no_ai_label_on_the_byline_or_the_closing():
+    # Owner decision 2026-11-01: "no "AI-assisted" label" — the Terms and Support pages carry the
+    # general AI line instead (tests/test_legal_pages.py).
+    assert not _AI_WORDING.search(C.AUTHOR["title"]) and not _AI_WORDING.search(C.AUTHOR["name"])
+    assert not _AI_WORDING.search(C.DISCLOSURE_TEXT)
+    assert C.AUTHOR["isVerified"] is False
+    # The legacy closing still matches (so the regex is not vacuous) and is not today's closing.
+    assert all(_AI_WORDING.search(t) for t in C.LEGACY_DISCLOSURE_TEXTS)
+    for worded in ("Written with A.I. help", "A.I.", "Model-written", "AI-assisted · Editor-reviewed"):
+        assert _AI_WORDING.search(worded), worded
+    assert not _AI_WORDING.search("Editorial") and not _AI_WORDING.search("Caydex Research")
+    assert C.DISCLOSURE_TEXT not in C.LEGACY_DISCLOSURE_TEXTS
+    # Every bundled article carries this byline: a weekly piece reads like the catalog.
+    assert {(a["author"]["name"], a["author"]["title"]) for a in _bundle()} == {
+        (C.AUTHOR["name"], C.AUTHOR["title"])}
 
 
 def test_append_disclosure_refuses_an_article_with_no_section():

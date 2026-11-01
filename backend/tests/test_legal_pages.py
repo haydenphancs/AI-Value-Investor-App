@@ -152,6 +152,41 @@ def test_support_page_explains_the_rating_is_not_ai(client):
     assert "not a forecast" in body
 
 
+#: The general Learn AI line each surface must carry, exactly (owner decision 2026-11-01: weekly
+#: pieces carry "no "AI-assisted" label", so these lines are the disclosure — web AND in-app).
+_LEARN_AI_LINES = {
+    "terms": "uses artificial intelligence to generate analysis, reports, summaries, and chat responses, to "
+             "help write some Learn articles (each reviewed by Caydex before publication), and to narrate "
+             "Learn content in a synthetic voice.",
+    "support": "Some Learn articles are also written with AI assistance from public filings and reviewed by "
+               "Caydex before they are published, and Learn narration uses a synthetic voice.",
+}
+_LEARN_AI_SCREENS = {"terms": "TermsOfUseView.swift", "support": "SupportView.swift"}
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.replace("&ldquo;", "\u201c").replace("&rdquo;", "\u201d").split())
+
+
+@pytest.mark.parametrize("page", ["terms", "support"])
+def test_learn_ai_line_is_general_and_promises_no_label(client, page):
+    """The web page AND its in-app mirror carry the general Learn AI line, word for word, and neither
+    promises an "AI-assisted" label the pieces no longer wear."""
+    served = _flat(client.get(f"/{page}").text)
+    native = _flat(_swift_user_facing_strings(_IOS_SCREENS_DIR / _LEARN_AI_SCREENS[page]))
+    for where, body in (("served", served), ("in-app", native)):
+        assert _LEARN_AI_LINES[page] in body, f"{page} ({where}) lost the Learn AI line"
+        assert "AI-assisted" not in body, f"{page} ({where}) promises an AI-assisted label"
+
+
+def test_store_description_promises_no_learn_label():
+    listing = (_BACKEND.parent / "documents" / "legal" / "app-store-listing.md").read_text(encoding="utf-8")
+    block = re.search(r"^## Description \(4000 max\)\s*\n+```\n(.*?)\n```", listing, re.S | re.M).group(1)
+    flat = " ".join(block.split())
+    assert "AI-assisted" not in flat
+    assert "AI also helps write and narrate some Learn articles, which Caydex reviews before publishing." in flat
+
+
 def test_support_page_frames_fair_value_as_a_model_output(client):
     """A number labelled 'fair value' beside a live price is an implicit mispricing claim."""
     body = client.get("/support").text.lower()

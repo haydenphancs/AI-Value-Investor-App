@@ -6560,6 +6560,15 @@ the plan is `~/.claude/plans/improve-or-add-wiser-snoopy-sun.md`. Everything is 
   The bot shares marketing's flood gate and pacer (`app/services/marketing/telegram_pacing.py`) and the reserved callback
   letter `y` (`z` is the Trillion Club stake finder's, §3 item 5). Approve → publish at Friday 23:00 ET (dry-run pieces end `rehearsed`); the hold is 48 h,
   then `expired` with an alert; a Friday 15:00 ET deadman alerts when nothing is in review.
+  `dry_run` is frozen when the Thursday topic step creates the row, so `LEARN_WEEKLY_DRY_RUN=false`
+  must land before Thursday 18:00 ET to make that Friday live. `rehearsed` is terminal for every
+  writer but one: `ledger.promote_rehearsed_sync` (owner decision 2026-11-01, publish the W44
+  rehearsal), driven only by `scripts/learn_weekly_promote.py`, which also re-cuts the narration
+  (`ledger.repoint_ready_audio_sync`, job before piece) so text and audio still match.
+- **No "AI-assisted" label** (owner, 2026-11-01): the byline is the catalog's ("Caydex Research ·
+  Editorial", enforced exactly) and the narrated closing says only "educational only and not
+  investment advice"; the general AI line lives in the Terms and Support pages (web and in-app)
+  and the App Store text.
 - **The hero is decided by the content service**, not by swap writes: among flagged rows the lowest
   `sort_order` wins and every other row is served unflagged. A Deep Dive's sort order is
   `-(iso_year*100+iso_week)` and it keeps `is_featured`, so the newest wins and unpublishing falls

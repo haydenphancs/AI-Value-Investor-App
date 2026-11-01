@@ -1230,7 +1230,9 @@ class Settings(BaseSettings):
     # from an SEC-grounded fact sheet, narrated by the separate `learn_narrator` service, approved
     # by the owner in Telegram and only then written to `money_move_articles`. Every switch is
     # fail-closed: nothing builds until LEARN_WEEKLY_ENABLED, nothing publishes while
-    # LEARN_WEEKLY_DRY_RUN (frozen per piece at build time), and the `notification_job_state`
+    # LEARN_WEEKLY_DRY_RUN (frozen per piece when the row is created — the Thursday topic step for a
+    # Deep Dive, `topic.py` create_piece — so flip it before Thursday 18:00 ET to make that Friday
+    # live; the one later change is `ledger.promote_rehearsed_sync`), and the `notification_job_state`
     # rows `learn_weekly_topic` / `learn_weekly_build` / `learn_weekly_deadman` are the no-deploy
     # kill switches. Hours are America/New_York.
     LEARN_WEEKLY_ENABLED: bool = False

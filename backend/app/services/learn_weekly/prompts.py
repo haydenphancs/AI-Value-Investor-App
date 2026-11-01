@@ -204,7 +204,7 @@ LEARN_REPAIR_HINTS: Mapping[str, str] = {
     "duplicate": "never repeat a title, a highlight or a paragraph - write something new",
     "word_count": "keep the article inside its word range",
     "peg_share": "shorten the peg section - most of the article must be evergreen",
-    "disclosure": "leave the author as given",
+    "author_mismatch": "leave the author as given",
     "verified": "leave the author as given",
     "engagement_count": "never invent counts of views, learners, likes or comments",
     "slug_pattern": "leave the slug to the system",

@@ -813,6 +813,58 @@ def transition_sync(piece_id: Any, *, from_statuses: Iterable[str], to_status: s
     return row
 
 
+def promote_rehearsed_sync(piece_id: Any, *, review_round: int, old_draft_sha256: str,
+                           narration_job_id: Any, observed_updated_at: Any, draft: Mapping[str, Any],
+                           draft_sha256: str, scheduled_publish_at: datetime, hold_until: datetime,
+                           validation: Mapping[str, Any], now: datetime,
+                           sb: Any = None) -> Optional[Dict[str, Any]]:
+    """The ONE way a `rehearsed` piece goes live: rehearsed → approved with `dry_run` false, a new
+    draft and a new schedule — for the owner's 2026-11-01 decision to publish the W44 rehearsal
+    (`scripts/learn_weekly_promote.py`). Deliberately OUTSIDE `transition()`, so "rehearsed is never
+    left" and "dry_run is frozen" still hold for every other caller. The owner approved this piece
+    in review; the deployed publisher then takes it live on its next due tick, unchanged.
+
+    One conditional UPDATE fenced on status = rehearsed, dry_run = true, the observed review_round,
+    draft_sha256, narration_job_id and updated_at. Arguments are validated before any I/O (a
+    schedule not after `now`, or a hold before the schedule, is refused). Returns the row, or None
+    when the piece moved on (logged)."""
+    pid = _uuid_or_none(piece_id)
+    if pid is None:
+        raise ValueError(f"promote: piece_id {piece_id!r} is not a UUID")
+    rnd = _nonneg_int(review_round, "review_round")
+    if not (isinstance(old_draft_sha256, str) and _HEX64.fullmatch(old_draft_sha256)):
+        raise ValueError("promote: old_draft_sha256 must be 64 lowercase hex characters")
+    jid = _require_uuid(narration_job_id, "narration_job_id")
+    observed = _parse_ts(observed_updated_at)
+    if observed is None:
+        raise ValueError(f"promote: observed_updated_at {observed_updated_at!r} is not a timestamp")
+    for name, value in (("draft", draft), ("validation", validation)):
+        if not isinstance(value, Mapping):
+            raise ValueError(f"promote: {name} must be an object, got {type(value).__name__}")
+    at = _aware(now, "now")
+    if _aware(scheduled_publish_at, "scheduled_publish_at") <= at:
+        raise ValueError("promote: scheduled_publish_at must be after now")
+    patch = _validate_piece_fields({
+        "draft": dict(draft), "draft_sha256": draft_sha256, "scheduled_publish_at": scheduled_publish_at,
+        "hold_until": hold_until, "validation": dict(validation), "publish_lease_until": None,
+        "last_stage": "promote", "last_error": None,
+    })
+    if patch["draft_sha256"] == old_draft_sha256:
+        raise ValueError("promote: the new draft hashes the same as the rehearsed one — nothing to promote")
+    patch.update({"status": c.APPROVED, "dry_run": False, "updated_at": _iso(_now())})
+    client = _client(sb)
+    query = (client.table(PIECES).update(patch).eq("id", pid).eq("status", c.REHEARSED).eq("dry_run", "true")
+             .eq("review_round", str(rnd)).eq("draft_sha256", old_draft_sha256)
+             .eq("narration_job_id", jid).eq("updated_at", _iso(observed)))
+    row = _one(_exec(query, op="promote_rehearsed", piece_id=pid), op="promote_rehearsed")
+    if row is None:
+        _log_lost("promote_rehearsed", client, pid, "wanted rehearsed (dry run) → approved (live)")
+        return None
+    logger.warning("learn ledger: piece %s (%s) PROMOTED from rehearsal → approved, live at %s",
+                   pid, row.get("period_key"), row.get("scheduled_publish_at"))
+    return row
+
+
 _NO_LEASE_STATUSES = frozenset(c.TERMINAL_STATUSES | _LIVE)
 
 
@@ -1323,6 +1375,72 @@ def cancel_open_jobs_sync(piece_id: Any, *, reason: str = "piece_closed", now: O
     return rows
 
 
+def _weekly_audio_path_ok(path: Any) -> bool:
+    return (isinstance(path, str) and len(path) <= 512 and path.startswith("audio/weekly/")
+            and bool(_AUDIO_PATH.fullmatch(path)) and ".." not in path.split("/"))
+
+
+def repoint_ready_audio_sync(job_id: Any, *, piece_id: Any, old_audio_path: str, new_audio_path: str,
+                             new_audio_bytes: int, new_duration_seconds: float, note: Mapping[str, Any],
+                             sb: Any = None) -> Optional[Dict[str, Any]]:
+    """Point a READY narration job at a re-cut file of the same render (the promote script's trimmed
+    W44 audio): `audio_path`, `audio_bytes`, `duration_seconds` and `checks.promote` = `note`.
+    `script`, `timings` and `script_sha256` stay — they are the record of the original render, and
+    nothing re-validates a ready job outside media_pending.
+
+    Reads the job, then ONE UPDATE fenced on id, piece_id, status = ready, audio_path = old and the
+    read's updated_at. A replay (the job already on `new_audio_path` with `checks.promote`) returns
+    the row and writes nothing. None when the job is gone, not ready, another piece's, on a third
+    path, or moved on (logged)."""
+    jid = _require_uuid(job_id, "job_id")
+    pid = _require_uuid(piece_id, "piece_id")
+    for name, path in (("old_audio_path", old_audio_path), ("new_audio_path", new_audio_path)):
+        if not _weekly_audio_path_ok(path):
+            raise ValueError(f"repoint: {name} must be an audio/weekly/ Storage path, got {path!r}")
+    if old_audio_path == new_audio_path:
+        raise ValueError("repoint: the new audio path equals the old one")
+    if isinstance(new_audio_bytes, bool) or not isinstance(new_audio_bytes, int) \
+            or not 0 < new_audio_bytes < MAX_AUDIO_BYTES:
+        raise ValueError(f"repoint: new_audio_bytes must be a positive int, got {new_audio_bytes!r}")
+    duration = _seconds(new_duration_seconds, "new_duration_seconds", upper=MAX_AUDIO_SECONDS)
+    if not isinstance(note, Mapping):
+        raise ValueError(f"repoint: note must be an object, got {type(note).__name__}")
+    note_d = _json_safe(dict(note), "note")
+    client = _client(sb)
+    cur = get_job_sync(jid, sb=client)
+    if cur is None or str(cur.get("piece_id")) != pid or cur.get("status") != c.JOB_READY:
+        logger.warning("learn ledger repoint: job %s is %s for piece %s — not a ready job of piece %s; "
+                       "nothing written", jid, None if cur is None else cur.get("status"),
+                       None if cur is None else cur.get("piece_id"), pid)
+        return None
+    checks = cur.get("checks") if isinstance(cur.get("checks"), dict) else {}
+    if cur.get("audio_path") == new_audio_path and isinstance(checks.get("promote"), dict):
+        logger.info("learn ledger repoint: job %s already points at %s — a replay; nothing written",
+                    jid, new_audio_path)
+        return cur
+    if cur.get("audio_path") != old_audio_path:
+        logger.warning("learn ledger repoint: job %s is on %r, not %r — nothing written", jid,
+                       cur.get("audio_path"), old_audio_path)
+        return None
+    observed = _parse_ts(cur.get("updated_at"))
+    if observed is None:
+        logger.error("learn ledger repoint: job %s has an unreadable updated_at %r — nothing written",
+                     jid, cur.get("updated_at"))
+        return None
+    row = _one(_exec(client.table(JOBS).update({
+        "audio_path": new_audio_path, "audio_bytes": new_audio_bytes, "duration_seconds": duration,
+        "checks": {**checks, "promote": note_d}, "updated_at": _iso(_now()),
+    }).eq("id", jid).eq("piece_id", pid).eq("status", c.JOB_READY).eq("audio_path", old_audio_path)
+        .eq("updated_at", _iso(observed)), op="repoint_ready_audio", job_id=jid), op="repoint_ready_audio")
+    if row is None:
+        logger.warning("learn ledger repoint: job %s moved on between the read and the write — nothing "
+                       "written", jid)
+        return None
+    logger.warning("learn ledger: narration job %s (piece %s) repointed %s → %s (%d bytes, %.1fs)",
+                   jid, pid, old_audio_path, new_audio_path, new_audio_bytes, duration)
+    return row
+
+
 # ── async wrappers (one `asyncio.to_thread` hop per operation; see the module docstring) ─────
 
 
@@ -1432,3 +1550,24 @@ async def fail_job(job_id: Any, attempts: Any, nonce: Any, *, error: Any, final:
 async def cancel_open_jobs(piece_id: Any, *, reason: str = "piece_closed", now: Optional[datetime] = None,
                            sb: Any = None) -> List[Dict[str, Any]]:
     return await asyncio.to_thread(cancel_open_jobs_sync, piece_id, reason=reason, now=now, sb=sb)
+
+
+async def promote_rehearsed(piece_id: Any, *, review_round: int, old_draft_sha256: str,
+                            narration_job_id: Any, observed_updated_at: Any, draft: Mapping[str, Any],
+                            draft_sha256: str, scheduled_publish_at: datetime, hold_until: datetime,
+                            validation: Mapping[str, Any], now: datetime,
+                            sb: Any = None) -> Optional[Dict[str, Any]]:
+    return await asyncio.to_thread(promote_rehearsed_sync, piece_id, review_round=review_round,
+                                   old_draft_sha256=old_draft_sha256, narration_job_id=narration_job_id,
+                                   observed_updated_at=observed_updated_at, draft=draft,
+                                   draft_sha256=draft_sha256, scheduled_publish_at=scheduled_publish_at,
+                                   hold_until=hold_until, validation=validation, now=now, sb=sb)
+
+
+async def repoint_ready_audio(job_id: Any, *, piece_id: Any, old_audio_path: str, new_audio_path: str,
+                              new_audio_bytes: int, new_duration_seconds: float, note: Mapping[str, Any],
+                              sb: Any = None) -> Optional[Dict[str, Any]]:
+    return await asyncio.to_thread(repoint_ready_audio_sync, job_id, piece_id=piece_id,
+                                   old_audio_path=old_audio_path, new_audio_path=new_audio_path,
+                                   new_audio_bytes=new_audio_bytes, new_duration_seconds=new_duration_seconds,
+                                   note=note, sb=sb)

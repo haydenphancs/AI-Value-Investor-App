@@ -436,14 +436,12 @@ async def test_a_fred_backed_neighbour_is_never_quoted_from_fmp(monkeypatch):
 
 def test_no_symbol_list_that_feeds_FMP_contains_a_blocked_symbol():
     import app.services.home_dashboard_service as HD
-    import app.services.home_service as HS
     import app.services.news_cache_service as NC
     import app.services.widget_movers_service as WM
     from app.services.agents.ticker_report_data_collector import _MACRO_SERIES
 
     feeds = {
         "home_dashboard._PULSE_SYMBOLS": [c["symbol"] for c in HD._PULSE_SYMBOLS],
-        "home_service.DEFAULT_MARKET_TICKERS": [c["symbol"] for c in HS.DEFAULT_MARKET_TICKERS],
         "widget_movers._INDEX_SYMBOLS": [s for s, _ in WM._INDEX_SYMBOLS],
         "news_cache.MARKET_INDEX_SYMBOLS": NC.MARKET_INDEX_SYMBOLS.split(","),
         "index_service proxies": [p["proxy_symbol"] for p in _INDEX_PROFILES.values()],

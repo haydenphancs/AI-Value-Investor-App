@@ -1,15 +1,11 @@
 """
-Home Feed Endpoint
-Frontend: GET /home/feed
+Home endpoints: the Home dashboard and the detail screens it opens.
 
-Returns aggregated data for the HomeView screen in a single request:
-- Market tickers with real-time prices + sparkline data (FMP)
-- AI-generated market insight summary
-- Daily briefing alerts (earnings calendar, whale alerts)
-- User's recent research reports (if authenticated)
+- GET /home/dashboard: everything `HomeDashboardView` renders, in one request
+- GET /home/signals/{kind}/{ticker}, /home/themes/{slug}, /home/trillion-club/{slug}
 
-Auth is optional — unauthenticated users receive public market data;
-authenticated users also receive personalised research reports.
+Account-only, enforced on the router below. The legacy `GET /home/feed` was removed on
+2026-11-05: the app stopped calling it on 2026-08-19.
 """
 
 from fastapi import APIRouter, Depends
@@ -18,10 +14,8 @@ import logging
 import re
 
 from app.dependencies import get_current_user_id, get_watchlist_identity
-from app.services.home_service import HomeService
 from app.services.home_dashboard_service import get_home_dashboard_service
 from app.services.signals_service import SignalDetailUnavailable, get_signals_service
-from app.schemas.home import HomeFeedResponse
 from app.schemas.home_dashboard import HomeDashboardResponse
 from app.schemas.signals_detail import SignalTickerDetailResponse
 from app.schemas.themes_detail import ThemeDetailResponse
@@ -72,30 +66,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(dependencies=[Depends(get_current_user_id)])
 
 
-@router.get("/feed", response_model=HomeFeedResponse)
-async def get_home_feed(
-    # Was `get_optional_user_id`, which answered None for a signed-out caller and served the
-    # feed anyway. The feed is FMP market data, so under the End-User Display licence there is
-    # no signed-out case left to be optional about.
-    #
-    # `get_watchlist_identity`, not the token-only `get_current_user_id`, because the feed
-    # serves the CALLER'S OWN research reports: a token-only dependency has no eviction —
-    # a deleted account's still-valid JWT read its reports for the token's lifetime — while
-    # the `users`-row read (threaded, and shared with the router-level dependency) refuses a
-    # gone account, exactly as `/dashboard` below does.
-    user: dict = Depends(get_watchlist_identity),
-):
-    """
-    Aggregated home feed — single request for the entire home screen.
-
-    Fetches market tickers, insight summary, daily briefings, and recent
-    research concurrently.  Each section degrades gracefully on failure.
-    """
-    user_id = user["id"]
-    service = HomeService()
-    return await service.get_home_feed(user_id)
-
-
 @router.get("/dashboard", response_model=HomeDashboardResponse)
 async def get_home_dashboard(
     # The WATCHLIST identity (a real account, else a per-INSTALL guest — migration
@@ -103,14 +73,13 @@ async def get_home_dashboard(
     # partition the watchlist routes write, or a guest would see another install's
     # tickers on the app's most-visited screen.
     #
-    # The legacy `/home/feed` above has always taken a user; the redesigned dashboard
-    # dropped it, which is why a day-1 user and a 40-ticker power user saw a
-    # byte-identical Home.
+    # The first version of this route took no user, which is why a day-1 user and a
+    # 40-ticker power user saw a byte-identical Home.
     user: dict = Depends(get_watchlist_identity),
 ):
     """
     Aggregated Caydex Home dashboard — single request for the redesigned
-    `HomeDashboardView` (distinct from the legacy `/home/feed`).
+    `HomeDashboardView`.
 
     Today this returns the market-status header and the top "Market Pulse"
     strip (major indices + Bitcoin + commodities), each with a live quote and

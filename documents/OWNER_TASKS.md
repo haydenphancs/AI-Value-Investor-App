@@ -105,6 +105,11 @@ admin recomputes, and marketing script generation.
 
 ### 2.1 Do now / verify once
 
+- [ ] **Apply migration 208 after the next deploy (written 2026-11-05, not applied).** It drops `daily_briefings` and `market_insights`, which only the removed `/home/feed` read. Both held 0 rows on 2026-11-05.
+  1. Deploy the `/home/feed` removal first.
+  2. Apply `backend/database/migrations/208_drop_home_feed_tables.sql` in Supabase Studio, then run the VERIFY query at the end of that file (one row: `t | t`). If either table has gained a row, the migration stops and drops nothing.
+  3. Re-dump the schema (`backend/scripts/dump_schema.sh`) and tell Claude. Claude then removes the two curation entries, updates the Atlas counts and regenerates the Atlas; the migration's header lists the steps.
+
 - [ ] **Check a report push on a real iPhone once the next build is on it (blank-screen fix, 2026-11-05).** Force-quit Caydex on the phone, start a report on another signed-in device, then tap "… analysis is ready" from the lock screen. You should see "Reconnecting your account…" for a moment, then the report. The Simulator proved this end to end except the APNs leg. 1.02 (13) still shows the blank screen until a new build ships; until then, open the report from Research > Reports.
 - [ ] **Claude as a second writer/judge for marketing and Money Moves weekly (built 2026-10-30, merged 2026-10-31 as 17891cd7 (PR #71), every switch OFF)** — plan `~/.claude/plans/pasted-content-id-86d6-short-version-clever-island.md`. Your words: "it will not replace anything right? we are building a second option like a fall back option", order "Claude first (Recommended)", scope all four roles. Claude writes/judges first; on ANY Claude failure (refusal, timeout, overload, used-up credits, a spend limit) the same call goes to Gemini, so a day never fails because of Claude. Paid from the Ultra plan's $200/month API credits (expected ≈ $10–30/month for these four roles). One migration (206, for the digest's Claude cost part — step 2). Every Claude variable is `CAYDEX_`-prefixed on purpose (Claude Code exports `CLAUDE_EFFORT` and `ANTHROPIC_BASE_URL`, which would otherwise steer a local run).
   1. ✅ 2026-10-31 (the key works). **Link the credits:** claude.ai → Settings → Billing → API credits → "Link organization" (web browser; a new subscriber waits 7 days). Then in the Claude Console create an API key in that organization.
@@ -1023,7 +1028,7 @@ admin recomputes, and marketing script generation.
 These were found in the 2026-09-25 sweep and deliberately not changed. The last five came from the whole-app sweep's fixes:
 - The whale hydrator's database writes briefly block the web server.
 - An empty earnings calendar from FMP is read as a holiday.
-- The same 4,000-row calendar truncation the Insights sweeper now avoids (one call per day) still affects `home_service` (briefing fallback, 8 days, shows 2 rows) in peak season (found 2026-09-27; `signals_service`, `widget_movers_service` and, on 2026-10-22, `tracking_service` and `earnings_sender` now fetch per day — `earnings_sender`'s yesterday..tomorrow request had passed the cap at ~4,500 rows on Oct 28–30 and Nov 4–6, 2026, losing yesterday's late results).
+- ~~The same 4,000-row calendar truncation the Insights sweeper now avoids (one call per day) still affects `home_service` (briefing fallback, 8 days, shows 2 rows) in peak season~~ — no longer true (found 2026-09-27, closed 2026-11-05): that fallback went with the unused `/home/feed` route, so every calendar read now asks for one day per call. `earnings_sender`'s yesterday..tomorrow request had passed the cap at ~4,500 rows on Oct 28–30 and Nov 4–6, 2026, losing yesterday's late results.
 - A theme rotation that failed twice retries just after midnight ET.
 - During a database outage the Updates sweeper refreshes news 3× as often.
 - Price alerts write every rule every minute: fine now, slow near 5,000 rules.

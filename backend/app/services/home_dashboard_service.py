@@ -30,7 +30,7 @@ Caching (CLAUDE.md invariant 4, lite):
   empty and iOS hides it.
 
 Each symbol degrades gracefully: a failed quote/history drops that one tile
-rather than failing the whole strip (mirrors the legacy `home_service`).
+rather than failing the whole strip.
 """
 
 import asyncio

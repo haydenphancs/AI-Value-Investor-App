@@ -1,6 +1,6 @@
 """
 Caydex Home dashboard schemas — aggregated response for the redesigned
-`HomeDashboardView` (NOT the legacy `HomeView`, which uses `schemas/home.py`).
+`HomeDashboardView`.
 
 Single-response design: one `GET /home/dashboard` call returns everything the
 dashboard renders, built top-to-bottom. Today that is the market-status header

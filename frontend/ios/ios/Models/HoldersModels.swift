@@ -211,6 +211,8 @@ struct SmartMoneyFlowSummary {
     var netFlowUsdMillions: Double? = nil
     var totalBuyUsdMillions: Double? = nil
     var totalSellUsdMillions: Double? = nil
+    /// The dollars above hold a trade valued at its close: printed with "~", never as filed.
+    var usdEstimated: Bool = false
 
     /// The number the badge actually PRINTS, and the unit it prints it in.
     private var verdict: (value: Double, unit: SmartMoneyFlowUnit) {
@@ -237,17 +239,20 @@ struct SmartMoneyFlowSummary {
 
     var formattedNetFlow: String {
         let sign = direction < 0 ? "-" : (direction > 0 ? "+" : "")
-        return sign + Self.formatMagnitude(verdict.value, unit: verdict.unit)
+        let mark = usdEstimated && verdict.unit == .dollars ? "~" : ""
+        return mark + sign + Self.formatMagnitude(verdict.value, unit: verdict.unit)
     }
 
     var formattedBuy: String {
-        Self.formatMagnitude(totalBuyUsdMillions ?? totalBuy,
-                             unit: totalBuyUsdMillions != nil ? .dollars : unit)
+        let mark = usdEstimated && totalBuyUsdMillions != nil ? "~" : ""
+        return mark + Self.formatMagnitude(totalBuyUsdMillions ?? totalBuy,
+                                           unit: totalBuyUsdMillions != nil ? .dollars : unit)
     }
 
     var formattedSell: String {
-        Self.formatMagnitude(totalSellUsdMillions ?? totalSell,
-                             unit: totalSellUsdMillions != nil ? .dollars : unit)
+        let mark = usdEstimated && totalSellUsdMillions != nil ? "~" : ""
+        return mark + Self.formatMagnitude(totalSellUsdMillions ?? totalSell,
+                                           unit: totalSellUsdMillions != nil ? .dollars : unit)
     }
 
     /// The signed value the badge prints — dollars for Insider, the bars' unit
@@ -962,6 +967,8 @@ struct InsiderActivity: Identifiable {
     let changeInMillions: Double  // Positive = bought, Negative = sold
     let transactionType: InsiderTransactionType
     let priceAtTransaction: Double
+    /// The price is the trade-date close, because the filing showed none.
+    var priceEstimated: Bool = false
 
     var isPositive: Bool {
         changeInMillions >= 0
@@ -971,7 +978,10 @@ struct InsiderActivity: Identifiable {
     // raw share count so small trades read exactly (e.g. "+200 shares").
     var formattedChange: String {
         let sign = changeInMillions >= 0 ? "+" : "-"
-        let shares = (abs(changeInMillions) * 1_000_000).rounded()
+        let exact = abs(changeInMillions) * 1_000_000
+        // A converted line can be under one share: 200 Class B on a BRK-A report.
+        if exact > 0 && exact < 1 { return sign + String(format: "%.2f shares", exact) }
+        let shares = exact.rounded()
         let body: String
         if shares >= 1e9 { body = String(format: "%.2fB shares", shares / 1e9) }
         else if shares >= 1e6 { body = String(format: "%.2fM shares", shares / 1e6) }
@@ -986,7 +996,7 @@ struct InsiderActivity: Identifiable {
 
     var formattedPrice: String {
         if priceAtTransaction > 0 {
-            return String(format: "$%.2f", priceAtTransaction)
+            return (priceEstimated ? "~" : "") + String(format: "$%.2f", priceAtTransaction)
         }
         return "$0"
     }

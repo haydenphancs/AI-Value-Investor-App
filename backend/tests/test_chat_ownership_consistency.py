@@ -371,7 +371,7 @@ async def test_all_priced_twelve_months_say_nothing_about_unpriced(monkeypatch):
      "2026-01-02", 0),
 ])
 def test_unpriced_since_outliers(acts, cutoff, expected):
-    assert cot._unpriced_since(acts, cutoff) == expected
+    assert cot._price_gaps_since(acts, cutoff) == (expected, 0)
 
 
 @pytest.mark.asyncio

@@ -667,7 +667,7 @@ async def test_holders_counts_nyax_through_the_real_build_and_persists_it():
     # v3 (2026-10-05): the row also carries the chat-only `ownership_detail`; v4 and v5
     # (2026-10-07) compute it by the final and round-5 reviews' rules; v6 (2026-10-08) ranks
     # the Top 10 Insiders from those holdings (one roster with chat and the report).
-    assert svc.supabase.upserts and svc.supabase.upserts[0]["response_json"]["payload_version"] == 6
+    assert svc.supabase.upserts and svc.supabase.upserts[0]["response_json"]["payload_version"] == 7
     # a 5-minute hit reports the same (clean) status
     assert (await svc.get_holders_with_status("NYAX"))[1] == []
 

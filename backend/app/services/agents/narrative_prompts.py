@@ -37,7 +37,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from app.config import settings
 from app.integrations.gemini import GeminiClient
 from app.log_redaction import redact_secrets
-from app.services._insider_common import ensure_insider_label
+from app.services._insider_common import INSIDER_VALUE_NOTE, ensure_insider_label
 from app.services.agents.persona_config import PersonaConfig
 # Reuse the headline scorer's per-vital reader so the Bull/Bear point count is
 # driven by the EXACT same 0-10 module substrate that drives the quality score.
@@ -1792,8 +1792,13 @@ def _revenue_forecast_insight_prompt(
     else:
         proj_str = "no analyst projections available"
 
-    cagr_str = f"{cagr:+.0f}%" if isinstance(cagr, (int, float)) else "n/a"
-    eps_str = f"{eps_growth:+.0f}%" if isinstance(eps_growth, (int, float)) else "n/a"
+    # The wire's `cagr` and `eps_growth` are required floats, so 0.0 is how "no rate" arrives
+    # (one forward year, or a sign change): it must never read as a measured flat outlook.
+    # `chat_context_resolver._stored_growth` reads them the same way.
+    cagr_str = f"{cagr:+.0f}%" if cagr and isinstance(cagr, (int, float)) else "n/a"
+    eps_str = (
+        f"{eps_growth:+.0f}%" if eps_growth and isinstance(eps_growth, (int, float)) else "n/a"
+    )
 
     # EPS beat/miss history (the EPS Track Record) → lets the read weigh the
     # forecast's CREDIBILITY, not just its shape: steady beats back an
@@ -1922,6 +1927,12 @@ def _share_count_change_known(ca: Dict[str, Any]) -> bool:
     return True
 
 
+def _stake_pct(row: Dict[str, Any], key: str) -> float:
+    """A Key Management row's percent, 0.0 when it has none."""
+    value = row.get(key) if isinstance(row, dict) else None
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
+
 def _key_management_insight_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
@@ -1941,11 +1952,16 @@ def _key_management_insight_prompt(
     # error on a $215B founder stake, but it still happened and should
     # be named, not dismissed.
     top_holders = km.get("top_holders") or []
-    major = top_holders[0] if top_holders else None
-    if major:
+    # The largest stake on the card, wherever it sits: a holder with no 13G stays under
+    # `officers`, and an old 13G must not read as dominant beside Buffett's 13.2%.
+    stakes = [(_stake_pct(h, "percent_ownership"), h) for h in top_holders] + [
+        (_stake_pct(o, "percent_owned"), o) for o in km.get("officers") or []
+    ]
+    major_pct, major = max(stakes, key=lambda pair: pair[0], default=(0.0, None))
+    if major and (major_pct >= 5.0 or top_holders):
         anchor_line = (
             f"DOMINANT HOLDER: {major.get('name')} holds "
-            f"{major.get('percent_ownership')}% "
+            f"{str(round(major_pct, 1)) + '% ' if major_pct else ''}"
             f"({major.get('ownership_value')}). Judge recent activity "
             f"against this base — but name the activity, don't dismiss it."
         )
@@ -2085,10 +2101,15 @@ def _insider_key_insight_prompt(
     insider = shell.get("insider_data", {}) or {}
     sentiment = insider.get("sentiment", "neutral")
     txns = insider.get("transactions", [])
+    # A "~" total holds a closing price, and "N/A" has a trade nobody can value. Told only
+    # when one is present, so every other prompt stays byte-identical.
+    estimate_note = (
+        f"\n{INSIDER_VALUE_NOTE}" if "~" in str(txns) or "N/A" in str(txns) else ""
+    )
     return f"""Write the catchy headline takeaway shown next to the insider score.
 
 SENTIMENT: {sentiment}
-TRANSACTIONS: {txns}
+TRANSACTIONS: {txns}{estimate_note}
 
 {_style_block(persona)}
 LENGTH: One short fragment under 15 words. NO period.
@@ -3194,9 +3215,10 @@ def _digest_forecast(report: Dict[str, Any]) -> List[str]:
     bits: List[str] = []
     cagr = _f_num(rf.get("cagr"), "{:+.1f}")
     eps = _f_num(rf.get("eps_growth"), "{:+.1f}")
-    if cagr is not None:
+    # 0.0 is the required float's "no rate", never a measured flat outlook.
+    if cagr is not None and rf.get("cagr"):
         bits.append(f"revenue CAGR {cagr}%")
-    if eps is not None:
+    if eps is not None and rf.get("eps_growth"):
         bits.append(f"EPS CAGR {eps}%")
     # "unknown" (no transcript on file) is not a stance — the card hides it.
     if rf.get("management_guidance") in ("raised", "maintained", "lowered"):
@@ -3228,6 +3250,8 @@ def _digest_insider(report: Dict[str, Any]) -> List[str]:
         seg = f"INSIDER ({idata.get('timeframe', 'recent')}): {sent or 'n/a'}"
         if tx_strs:
             seg += " — " + ", ".join(tx_strs)
+        if "(~" in seg or "(N/A)" in seg:
+            seg += f". {INSIDER_VALUE_NOTE}"
         out.append(seg)
     ca = idata.get("capital_allocation")
     if isinstance(ca, dict):

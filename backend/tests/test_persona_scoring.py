@@ -426,12 +426,16 @@ def test_moat_vital_rewards_breadth_not_just_max():
     assert many_walls["score"]["value"] > one_wall["score"]["value"]
 
 
-def test_moat_vital_docked_by_high_competitor_threat():
+def test_moat_vital_is_never_docked_by_a_competitor_threat_label():
+    """A peer's `threat_level` is 60% its place in FMP's A-to-Z list, so a dock on it took a
+    full point off Berkshire because CSX and Duke Energy sort early. A dock can only return
+    with a real directness input."""
+    import inspect
+
     dims = [{"name": "Brand", "score": 8.0, "source": "deterministic"},
             {"name": "Scale", "score": 7.5, "source": "deterministic"}]
-    safe = _derive_moat_vital(dims, competitors=[{"threat_level": "low"}])
-    threatened = _derive_moat_vital(dims, competitors=[{"threat_level": "high"}])
-    assert threatened["score"]["value"] < safe["score"]["value"]
+    assert list(inspect.signature(_derive_moat_vital).parameters) == ["moat_dims"]
+    assert _derive_moat_vital(dims)["score"]["value"] == 7.8     # 0.6 x 8.0 + 0.4 x 7.5
 
 
 # ── Signal-driven Bull/Bear count (same substrate as the score) ─────

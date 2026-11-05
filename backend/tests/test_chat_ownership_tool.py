@@ -219,7 +219,7 @@ async def test_the_holdings_ride_into_the_24h_tier_and_back_and_a_v2_row_is_refu
     resp, _ = await svc.get_holders_with_status("CRWV")
     await _drain()
     payload = supabase.upserts[0]["response_json"]
-    assert payload["payload_version"] == hs._HOLDERS_PAYLOAD_VERSION == 6
+    assert payload["payload_version"] == hs._HOLDERS_PAYLOAD_VERSION == 7
     assert payload["ownership_detail"]["insider_holdings"]["insiders"][0]["name"] == "Brian M. Venturo"
     json.dumps(payload, allow_nan=False)  # the row is valid JSON for the jsonb column
 
@@ -230,8 +230,9 @@ async def test_the_holdings_ride_into_the_24h_tier_and_back_and_a_v2_row_is_refu
     assert cached is not None
     assert _holdings(cached).insiders[0].holdings[0].shares == 302526
 
-    # 2: no holdings; 3-4: holdings by earlier review rounds' rules; 5: the raw-row Top 10
-    for version in (2, 3, 4, 5):
+    # 2: no holdings; 3-4: holdings by earlier review rounds' rules; 5: the raw-row Top 10;
+    # 6: price-less rows at $0, share classes added 1:1, joint filers counted twice
+    for version in (2, 3, 4, 5, 6):
         stale_shape = dict(payload, payload_version=version)
         old = _wired(_FMP([]), _Supabase(cached=[{"response_json": stale_shape, "cached_at": now}]))
         assert old._check_supabase_cache("CRWV") is None, f"a v{version} row is rebuilt, not served"

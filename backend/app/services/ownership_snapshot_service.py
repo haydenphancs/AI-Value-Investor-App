@@ -57,7 +57,9 @@ _CACHE_TTL = 300  # 5 minutes
 #:     class or series (`_insider_common` keeps "Series A" / "Series C" apart), so the insider
 #:     flow of a Series-class issuer (FWONA/FWONK, LBRDA/LBRDK) can change; the Holders payload
 #:     moved to v5 for the same rows, and this card must not keep the old flow for 24 h beside it.
-_SNAPSHOT_PAYLOAD_VERSION = 4
+#: 5 → (2026-11-05) the insider flow values a Form 4 row with no price at the trade-date close
+#:     and states Class A and Class B in one unit, so its dollars can change (Holders v7).
+_SNAPSHOT_PAYLOAD_VERSION = 5
 _VERSION_KEY = "_schema_v"
 
 
@@ -112,12 +114,15 @@ def _fmt_pct(val: Optional[float]) -> str:
     return f"{val:.1f}%"
 
 
-def _fmt_usd_flow(net_flow_millions: float, is_positive: bool) -> str:
+def _fmt_usd_flow(
+    net_flow_millions: float, is_positive: bool, estimated: bool = False,
+) -> str:
     """Format a net flow denominated in MILLIONS OF DOLLARS.
 
     Used for the insider row, whose VERDICT is dollar-denominated so it agrees with
     TickerReportView (see `SmartMoneyFlowSummarySchema.net_flow_usd_millions`). The
     Holders chart BARS remain share-denominated; only this figure and the badge move.
+    `estimated` (a trade in it is valued at its close) prints "~", as the report does.
     """
     if not math.isfinite(net_flow_millions):
         return "—"
@@ -133,7 +138,7 @@ def _fmt_usd_flow(net_flow_millions: float, is_positive: bool) -> str:
     else:
         formatted = f"${mag * 1_000_000:.0f}"
     label = "Net Buy" if is_positive else "Net Sell"
-    return f"{label} {formatted}"
+    return f"{label} {'~' if estimated else ''}{formatted}"
 
 
 def _fmt_share_flow(net_flow_millions: float, is_positive: bool) -> str:
@@ -362,7 +367,10 @@ class OwnershipSnapshotService:
                 name="Insider Activity (12M)",
                 value=(
                     "—" if insider_unavailable
-                    else _fmt_usd_flow(insider_usd, insider_positive)
+                    else _fmt_usd_flow(
+                        insider_usd, insider_positive,
+                        getattr(insider_summary, "usd_estimated", None) is True,
+                    )
                     if insider_usd is not None
                     else _fmt_share_flow(insider_flow, insider_positive)
                 ),

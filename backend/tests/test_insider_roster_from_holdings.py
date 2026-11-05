@@ -342,8 +342,8 @@ async def test_holdings_unavailable_gives_an_empty_sheet_never_the_raw_roster():
     assert resp.shareholder_breakdown.top_10_owners.insiders == []
 
 
-def test_the_payload_version_is_6():
-    assert hs._HOLDERS_PAYLOAD_VERSION == 6
+def test_the_payload_version_is_7():
+    assert hs._HOLDERS_PAYLOAD_VERSION == 7
 
 
 # ── source guards: neither builder reads the raw roster for holdings ──────────────────
@@ -638,7 +638,7 @@ def test_an_all_indirect_roster_logs_the_no_direct_figure_reason(caplog, monkeyp
     import logging
     from types import SimpleNamespace
 
-    def fake_roster(holdings, include_unknown=False):
+    def fake_roster(holdings, include_unknown=False, symbol=""):
         return [{"name": "Founder Trust"}] if include_unknown else []
     monkeypatch.setattr(hs, "roster_from_holdings", fake_roster)
     with caplog.at_level(logging.WARNING, logger=hs.logger.name):

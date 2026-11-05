@@ -116,6 +116,9 @@ class SmartMoneyFlowSummarySchema(BaseModel):
     net_flow_usd_millions: Optional[float] = None
     total_buy_usd_millions: Optional[float] = None
     total_sell_usd_millions: Optional[float] = None
+    # True when a dollar total above includes a trade valued at its close because the filing
+    # showed no price: a reader marks it "~", never a filed figure. Optional, as above.
+    usd_estimated: Optional[bool] = None
 
 
 class SmartMoneyDataSchema(BaseModel):
@@ -176,6 +179,8 @@ class InsiderActivitySchema(BaseModel):
     change_in_millions: float = Field(0.0)
     transaction_type: str = "Uninformative Sell"
     price_at_transaction: float = Field(0.0)
+    # True when the price is the trade-date close because the filing showed none. Optional.
+    price_estimated: Optional[bool] = None
 
 
 class InsiderActivitiesDataSchema(BaseModel):

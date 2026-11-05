@@ -63,6 +63,7 @@ from app.services._insider_common import (
     insider_reporter_key,
     is_equity_line,
     normalize_insider_name,
+    share_class_multiple,
 )
 
 logger = logging.getLogger(__name__)
@@ -747,13 +748,14 @@ def _line_entries(
 
 
 def _trades(rows: List[_Row]) -> List[Dict[str, Any]]:
-    """The person's newest day of transactions, one entry per (code, direction)."""
-    groups: Dict[Tuple[str, Optional[bool]], List[_Row]] = {}
+    """The person's newest day of transactions, one entry per (code, direction, share class).
+    Two classes never merge: 2 Class A and 200 Class B are not "202 shares" at one average."""
+    groups: Dict[Tuple[str, Optional[bool], str], List[_Row]] = {}
     for row in rows:
         if row.code or row.shares:
-            groups.setdefault((row.code, row.acquired), []).append(row)
+            groups.setdefault((row.code, row.acquired, row.share_class), []).append(row)
     out: List[Dict[str, Any]] = []
-    for (code, acquired), members in groups.items():
+    for (code, acquired, _share_class), members in groups.items():
         counted = [r.shares for r in members if r.shares is not None]
         priced = [(r.shares, r.price) for r in members if r.shares and r.price]
         weight = sum(s for s, _ in priced)
@@ -891,7 +893,7 @@ def _field(obj: Any, key: str) -> Any:
     return getattr(obj, key, None)
 
 
-def _traded_direct(holdings: Any) -> Optional[Any]:
+def _traded_direct(holdings: Any, symbol: object = "") -> Optional[Any]:
     """The person's traded DIRECT holding: the first entry of each direct line (the holding
     the person trades from — lots and earlier figures follow it, `_direct_entries`), and of
     those the newest; on the same day the larger (two share classes held side by side are
@@ -908,8 +910,14 @@ def _traded_direct(holdings: Any) -> Optional[Any]:
     def rank(entry: Any) -> Tuple[str, float]:
         as_of = _field(entry, "as_of")
         shares = holding_value(_field(entry, "shares"))
+        if shares is not None and classes_differ:
+            # Worth, not recency or raw count: 5,000 Class A outweigh 2,000,000 Class B.
+            return ("", shares * share_class_multiple(symbol, _field(entry, "security")))
         return (as_of if isinstance(as_of, str) else "", shares if shares is not None else -1.0)
 
+    classes_differ = len({
+        share_class_multiple(symbol, _field(entry, "security")) for entry in firsts.values()
+    }) > 1
     return max(firsts.values(), key=rank)
 
 
@@ -925,7 +933,9 @@ def _possibly_stale(entry: Any) -> bool:
     return not isinstance(as_of, str) or not as_of or after.strip()[:10] >= as_of[:10]
 
 
-def roster_from_holdings(holdings: Any, *, include_unknown: bool = False) -> List[Dict[str, Any]]:
+def roster_from_holdings(
+    holdings: Any, *, include_unknown: bool = False, symbol: object = "",
+) -> List[Dict[str, Any]]:
     """One roster row per listed insider, from `insider_holdings_from_rows` output (a dict) or
     an `InsiderHoldingsSchema`: ``{owner, display_name, title, typeOfOwner, role,
     numberOfShares, as_of, security, basis}``, in the holdings' order (most recent filer
@@ -955,7 +965,7 @@ def roster_from_holdings(holdings: Any, *, include_unknown: bool = False) -> Lis
             name = _field(person, "name")
             if not isinstance(name, str) or not name.strip():
                 continue
-            entry = _traded_direct(_field(person, "holdings"))
+            entry = _traded_direct(_field(person, "holdings"), symbol)
             if entry is None and not include_unknown:
                 continue
             shares = None

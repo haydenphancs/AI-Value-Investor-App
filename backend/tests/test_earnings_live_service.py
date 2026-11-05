@@ -22,7 +22,11 @@ What is pinned here, each a way the LIVE card could lie or cost too much:
   * a memo row held 12 h opens no record at any fold, so a report FMP moved over a weekend is
     never a report day: the tick asks FMP first, one round, only when such a row would open one;
   * feed builds and the sheet never fetch — only the loop does;
-  * the tick runs the SEC watch only for watched symbols still pending today;
+  * the SEC watch runs on its own loop, only for watched symbols still pending today: each
+    figure reaches its record the moment it verifies, stamped with that moment, and a stuck
+    round holds up neither FMP nor the push, which goes out on the next FMP tick;
+  * a failed, stuck or cancelled tick in either loop never stops the other, and shutdown
+    reaches both and waits for both;
   * one window, `live_days` (every calendar day from the previous trading day through today),
     holds the records, the push memory and every reader: a landing is sent once however the
     days roll, and a report dated on a closed day lands, keeps its card and answers the sheet
@@ -1281,13 +1285,17 @@ class _Watcher:
     def prune(self, days):
         self.kept = list(days)
 
-    async def run_once(self, now, symbols, day, *, sec=None, gemini=None):
+    async def run_once(self, now, symbols, day, *, sec=None, gemini=None, on_figures=None):
         self.calls.append((list(symbols), day))
-        return {s: f for s, f in self.figures.items() if s in symbols}
+        found = {s: f for s, f in self.figures.items() if s in symbols}
+        for symbol, figures in found.items():
+            if on_figures is not None:
+                on_figures(symbol, figures)
+        return found
 
 
 @pytest.mark.asyncio
-async def test_the_tick_watches_sec_only_for_pending_watched_symbols_and_dispatches(monkeypatch):
+async def test_the_sec_watch_reads_pending_watched_symbols_and_the_next_tick_pushes(monkeypatch):
     monkeypatch.setattr(ts, "_et_today", lambda: REPORT)
     fmp = _FMP({REPORT: [_row("INTC", REPORT),
                          _row("AAPL", REPORT, eps=1.9, rev=1e11, eps_est=1.8, rev_est=9.8e10),
@@ -1303,13 +1311,16 @@ async def test_the_tick_watches_sec_only_for_pending_watched_symbols_and_dispatc
         sent.append([s.symbol for s in snaps])
 
     now = _et(REPORT, 16, 3)
-    stats = await els.earnings_live_tick(now, fmp=fmp, watched=["INTC", "AAPL"],
-                                         dispatch=_dispatch)
+    await els.earnings_live_tick(now, fmp=fmp, watched=["INTC", "AAPL"], dispatch=_dispatch)
+    assert watcher.calls == [] and sent == [[]], "the FMP tick never runs the SEC watch"
+    stats = await els.earnings_filing_tick(now, watched=["INTC", "AAPL"])
     assert watcher.calls == [(["INTC"], REPORT)], "AAPL is complete, TSLA is not watched"
-    assert stats["filings"] == 1
-    # INTC was seen pending in the same tick (the Tracking rows were folded first), so the
-    # filing is a landing.
-    assert sent == [["INTC"]]
+    assert stats == {"watched": 2, "pending": 1, "filings": 1}
+    assert sent == [[]], "the filing tick pushes nothing itself"
+    # INTC was seen pending by the FMP tick that folded the rows, so the filing is a landing.
+    await els.earnings_live_tick(now + timedelta(minutes=1), fmp=fmp, watched=["INTC", "AAPL"],
+                                 dispatch=_dispatch)
+    assert sent == [[], ["INTC"]]
 
 
 @pytest.mark.asyncio
@@ -1345,6 +1356,7 @@ async def test_a_figure_held_at_first_sight_keeps_the_sec_watch_on_it(monkeypatc
         sent.append([s.symbol for s in snaps])
 
     await els.earnings_live_tick(_et(REPORT, 16, 3), fmp=fmp, watched=["AVGO"], dispatch=_dispatch)
+    await els.earnings_filing_tick(_et(REPORT, 16, 3), watched=["AVGO"])
     assert watcher.calls == [(["AVGO"], REPORT)]
     assert sent == [[]]
 
@@ -1358,7 +1370,6 @@ async def test_unchanged_rows_with_a_zero_never_land_across_real_ticks(
     read the first as "seen pending"."""
     monkeypatch.setattr(ts, "_et_today", lambda: REPORT)
     fmp = _FMP({REPORT: _zero_and_twin(zero_newest, twin_est=twin_est), PREV: []})
-    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: _Watcher())
     sent: List[List[str]] = []
 
     async def _dispatch(snaps, now):
@@ -1376,9 +1387,8 @@ _DOORS = ["tick", "card", "sheet"]
 
 
 def _door_service(monkeypatch, rows: List[dict]) -> ts.TrackingService:
-    """The real memo, tick, card and sheet over one fake FMP, with no SEC watch or history."""
+    """The real memo, tick, card and sheet over one fake FMP, with no history."""
     _no_history(monkeypatch)
-    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: _Watcher())
     return _feed_service(monkeypatch, _et(REPORT, 16), rows)
 
 
@@ -1564,8 +1574,8 @@ async def test_a_sheet_poll_keeps_the_own_fetchs_estimate(monkeypatch, memo_eps)
 
 
 @pytest.mark.asyncio
-async def test_a_sheet_poll_during_the_sec_watch_cannot_change_what_the_push_reads(monkeypatch):
-    """The push reads its snapshot after the SEC await, where any reader can fold."""
+async def test_a_sheet_poll_between_two_ticks_cannot_change_what_the_push_reads(monkeypatch):
+    """A filing's push waits for the next tick, and any reader can fold before it."""
     svc_obj = _door_service(monkeypatch, [_row("INTC", REPORT)])
     fmp = svc_obj.fmp
     await _tick(fmp, _et(REPORT, 16), "INTC")                      # seen pending
@@ -1574,13 +1584,6 @@ async def test_a_sheet_poll_during_the_sec_watch_cannot_change_what_the_push_rea
     await ts._cached_earnings_calendar(fmp, REPORT)                # the memo stores 0.60
     fmp.by_day[REPORT] = [_row("INTC", REPORT, eps=0.44)]          # FMP corrects it
     _own_fetch_is_due()
-
-    class _SheetPollDuringTheWatch(_Watcher):
-        async def run_once(self, now, symbols, day, *, sec=None, gemini=None):
-            await svc_obj.get_earnings_live("INTC")
-            return await super().run_once(now, symbols, day, sec=sec, gemini=gemini)
-
-    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: _SheetPollDuringTheWatch())
     sent: List[els.LiveSnapshot] = []
 
     async def _dispatch(snaps, now):
@@ -1589,8 +1592,10 @@ async def test_a_sheet_poll_during_the_sec_watch_cannot_change_what_the_push_rea
     at = _et(REPORT, 16, 36)
     monkeypatch.setattr(ts, "datetime", _FrozenDatetime(at))
     await els.earnings_live_tick(at, fmp=fmp, watched=["INTC"], dispatch=_dispatch)
-    (snap,) = sent
-    assert (snap.eps.actual, snap.eps.surprise_pct) == (0.44, 7.32)
+    await svc_obj.get_earnings_live("INTC")
+    await els.earnings_live_tick(at + timedelta(minutes=1), fmp=fmp, watched=["INTC"],
+                                 dispatch=_dispatch)
+    assert [(s.eps.actual, s.eps.surprise_pct) for s in sent] == [(0.44, 7.32)] * 2
 
 
 def _own_fetch_stamp(symbol: str = "INTC") -> float:
@@ -1689,6 +1694,7 @@ async def test_a_morning_filing_found_by_a_fresh_process_is_not_a_landing(monkey
     for minute in (0, 1):
         await els.earnings_live_tick(_et(REPORT, 15, minute), fmp=fmp, watched=["INTC"],
                                      dispatch=_dispatch)
+        await els.earnings_filing_tick(_et(REPORT, 15, minute), watched=["INTC"])
     assert _svc().snapshot("INTC", REPORT, _et(REPORT, 15, 1)).eps.actual == 0.45
     # The filing completed the report, so the own fetch has stopped: FMP's fill comes by memo.
     fmp.by_day[REPORT] = [_row("INTC", REPORT, eps=0.46, rev=17.2e9)]
@@ -1779,7 +1785,7 @@ def test_a_record_born_from_an_old_filing_is_not_a_landing_either():
 async def test_the_tick_does_nothing_without_watched_tickers():
     stats = await els.earnings_live_tick(_et(REPORT, 9), fmp=_FMP(), watched=[],
                                          dispatch=lambda s, n: None)
-    assert stats == {"watched": 0, "fetched": 0, "filings": 0, "landed": 0}
+    assert stats == {"watched": 0, "fetched": 0, "landed": 0}
 
 
 @pytest.mark.asyncio
@@ -1862,7 +1868,6 @@ def pushes(monkeypatch):
     monkeypatch.setattr(pds, "get_push_dispatch_service", lambda: rec)
     monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", True)
     monkeypatch.setattr(settings, "EARNINGS_LIVE_RESULT_PUSH_ENABLED", True)
-    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: _Watcher())
     sender.reset()
     yield rec
     sender.reset()
@@ -2140,7 +2145,6 @@ async def _memo_filled_on(monkeypatch, fmp: _FMP, day: date) -> None:
     """The last tick of `day`'s live window, then every held day past its TTL: a later tick
     that reads the memo through its own door must pay for a round."""
     monkeypatch.setattr(ts, "_et_today", lambda: day)
-    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: _Watcher())
     await _tick(fmp, _et(day, 21, 59), "INTC")
     _memo_days_expire(*ts._earnings_calendar_memo[1])
     fmp.calls.clear()
@@ -2182,7 +2186,6 @@ async def test_a_fill_after_the_hot_fetch_stops_is_still_read_that_evening(monke
     """The own fetch ends at 22:00, so until midnight the memo is what reads a late fill."""
     fmp = _FMP({**_market(REPORT), REPORT: [_row("INTC", REPORT)]})
     monkeypatch.setattr(ts, "_et_today", lambda: REPORT)
-    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: _Watcher())
     await _tick(fmp, _et(REPORT, 21, 55), "INTC")
     fmp.by_day[REPORT] = [_row("INTC", REPORT, eps=0.60, rev=17.1e9)]
     _memo_days_expire(REPORT)
@@ -2212,7 +2215,6 @@ async def test_a_tick_before_six_still_folds_the_rows_the_memo_holds(monkeypatch
 async def test_a_closed_days_own_report_reaches_the_hot_fetch_from_the_held_rows(monkeypatch):
     fmp = _FMP({**_market(FRIDAY), SATURDAY: [_row("BRK-B", SATURDAY)]})
     monkeypatch.setattr(ts, "_et_today", lambda: FRIDAY)
-    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: _Watcher())
     await _tick(fmp, _et(FRIDAY, 21, 59), "BRK-B")
     _memo_days_expire(*ts._earnings_calendar_memo[1])
     fmp.calls.clear()
@@ -2229,7 +2231,6 @@ async def test_a_restart_with_nothing_held_reads_todays_rows_once(monkeypatch, a
     today = els.et_now(at).date()
     fmp = _FMP({**_market(today), today: [_row("INTC", today)]})
     monkeypatch.setattr(ts, "_et_today", lambda: today)
-    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: _Watcher())
     _nothing_is_due(today)
     await _tick(fmp, at, "INTC")
     assert _svc().snapshot("INTC", today, at) is not None, "nothing held: the memo is read"
@@ -2245,7 +2246,6 @@ async def test_a_failed_first_read_before_six_keeps_the_memos_own_wait(monkeypat
     fmp = _FMP(_market(REPORT))
     _a_day_goes_down(fmp, NEXT)
     monkeypatch.setattr(ts, "_et_today", lambda: REPORT)
-    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: _Watcher())
     _nothing_is_due(REPORT)
     await _tick(fmp, at, "INTC")
     assert ts._earnings_calendar_retry_after is not None, "the round must have failed"
@@ -2282,7 +2282,6 @@ async def _calls_per_day(monkeypatch, fmp: _FMP, start: datetime, end: datetime,
     clock = _Clock()
     monkeypatch.setattr(els, "time", SimpleNamespace(monotonic=clock.monotonic))
     monkeypatch.setattr(ts, "_time", SimpleNamespace(monotonic=clock.monotonic))
-    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: _Watcher())
 
     async def _dispatch(snaps, now):
         return None
@@ -2617,6 +2616,7 @@ async def test_the_sec_watch_stays_on_todays_reports(monkeypatch):
 
     await els.earnings_live_tick(_et(SUNDAY, 9), fmp=fmp, watched=["INTC", "MSFT"],
                                  dispatch=_dispatch)
+    await els.earnings_filing_tick(_et(SUNDAY, 9), watched=["INTC", "MSFT"])
     assert watcher.calls == [(["MSFT"], SUNDAY)]
     assert watcher.kept == els.live_days(SUNDAY)
 
@@ -2889,7 +2889,6 @@ async def _a_market_landing(monkeypatch, watched: List[str], dispatch=None,
 
     monkeypatch.setattr(ts, "_cached_earnings_calendar", _memo)
     monkeypatch.setattr(ts, "_et_today", lambda: REPORT)
-    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: _Watcher())
     await els.earnings_live_tick(_et(REPORT, 9), fmp=fmp, watched=watched, dispatch=dispatch)
     fmp.by_day[REPORT] = [_row(symbol, REPORT, eps=0.60, rev=17.1e9) for symbol in market]
     _svc()._fetched[REPORT] -= els.EARNINGS_LIVE_HOT_TTL_SECONDS + 1
@@ -3065,3 +3064,381 @@ async def test_a_watched_read_that_recovers_replaces_the_list_quietly(monkeypatc
         assert await els._watched_ranked_cached() == ["MSFT"]
     assert els._watched_memo[1] == ["MSFT"]
     assert not _live_logs(caplog)
+
+
+# ── the SEC watch beside the FMP tick ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_stuck_filing_round_cannot_hold_the_fmp_tick_or_the_dispatch(monkeypatch):
+    class _Stuck(_Watcher):
+        async def run_once(self, *a, **k):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(ts, "_et_today", lambda: REPORT)
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: _Stuck())
+    fmp = _FMP({REPORT: [_row("INTC", REPORT)], PREV: []})
+    sent: List[datetime] = []
+
+    async def _dispatch(snaps, now):
+        sent.append(now)
+
+    await asyncio.wait_for(
+        els.earnings_live_tick(_et(REPORT, 16, 3), fmp=fmp, watched=["INTC"], dispatch=_dispatch),
+        1.0)
+    assert sent
+
+
+@pytest.mark.asyncio
+async def test_a_figure_is_pushed_while_the_round_that_read_it_still_runs(monkeypatch):
+    """The record alone would still leave the push waiting for the round to end."""
+    monkeypatch.setattr(ts, "_et_today", lambda: REPORT)
+    at = _et(REPORT, 16, 3)
+    figures = _morning_filing(accepted_at=_et(REPORT, 16, 2))
+    delivered, release = asyncio.Event(), asyncio.Event()
+
+    class _StillReading(_Watcher):
+        async def run_once(self, now, symbols, day, *, sec=None, gemini=None, on_figures=None):
+            on_figures("INTC", figures)
+            delivered.set()
+            await release.wait()
+            return {"INTC": figures}
+
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: _StillReading())
+    fmp = _FMP({REPORT: [_row("INTC", REPORT)], PREV: []})
+    sent: List[List[str]] = []
+
+    async def _dispatch(snaps, now):
+        sent.append([s.symbol for s in snaps])
+
+    await asyncio.wait_for(
+        els.earnings_live_tick(at, fmp=fmp, watched=["INTC"], dispatch=_dispatch), 1.0)
+    watching = asyncio.create_task(els.earnings_filing_tick(at, watched=["INTC"]))
+    await asyncio.wait_for(delivered.wait(), 1.0)
+    await asyncio.wait_for(
+        els.earnings_live_tick(at + timedelta(minutes=1), fmp=fmp, watched=["INTC"],
+                               dispatch=_dispatch),
+        1.0)
+    assert sent == [[], ["INTC"]] and not watching.done()
+    release.set()
+    assert (await watching)["filings"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_filing_landing_inside_the_fmp_fetch_survives_the_fold_and_is_pushed(monkeypatch):
+    """The two loops share the records, so the filing tick can run inside the FMP tick's await
+    and the fold that follows must keep the figure and its landing."""
+    monkeypatch.setattr(ts, "_et_today", lambda: REPORT)
+    at = _et(REPORT, 16, 3)
+    watcher = _Watcher({"INTC": _morning_filing(accepted_at=_et(REPORT, 16, 2))})
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: watcher)
+
+    class _FilingArrivesDuringTheFetch(_FMP):
+        async def get_earnings_calendar(self, from_date=None, to_date=None):
+            rows = await super().get_earnings_calendar(from_date=from_date, to_date=to_date)
+            if from_date == REPORT.isoformat() and not watcher.calls:
+                await els.earnings_filing_tick(at, watched=["INTC"])
+            return rows
+
+    fmp = _FilingArrivesDuringTheFetch({REPORT: [_row("INTC", REPORT)], PREV: []})
+    sent: List[List[str]] = []
+
+    async def _dispatch(snaps, now):
+        sent.append([s.symbol for s in snaps])
+
+    stats = await els.earnings_live_tick(at, fmp=fmp, watched=["INTC"], dispatch=_dispatch)
+    assert watcher.calls == [(["INTC"], REPORT)], "the own fetch is what it ran inside"
+    assert stats["fetched"] >= 1
+    assert sent == [["INTC"]], "the pending row of that fetch must not undo the landing"
+    assert _svc().snapshot("INTC", REPORT, at).eps.actual == 0.45
+
+
+@pytest.mark.asyncio
+async def test_a_filing_landing_is_pushed_once_by_the_next_fmp_tick(monkeypatch, pushes):
+    """Through the real sender: the filing tick stores the figure and tells nobody."""
+    fmp = _FMP({REPORT: [_row("INTC", REPORT)], PREV: []})
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher",
+                        lambda: _Watcher({"INTC": _morning_filing(accepted_at=_et(REPORT, 16, 2))}))
+    await _real_tick(monkeypatch, fmp, _et(REPORT, 16, 3))
+    await els.earnings_filing_tick(_et(REPORT, 16, 3), watched=["INTC"])
+    assert pushes.sent == []
+    await _real_tick(monkeypatch, fmp, _et(REPORT, 16, 4))
+    await _real_tick(monkeypatch, fmp, _et(REPORT, 16, 5))
+    assert pushes.sent == [(KIND_EARNINGS_LIVE, "earnings_result:INTC:2026-10-29")]
+
+
+@pytest.mark.asyncio
+async def test_a_figure_is_stamped_with_the_moment_it_arrived_not_the_rounds_start(monkeypatch):
+    """A figure read 90 s into a round says so, on the sheet's "updated" and on the landing."""
+    clock = _Clock()
+    monkeypatch.setattr(els, "time", SimpleNamespace(monotonic=clock.monotonic))
+
+    class _SlowRound(_Watcher):
+        async def run_once(self, now, symbols, day, *, sec=None, gemini=None, on_figures=None):
+            clock.at += 90
+            return await super().run_once(now, symbols, day, on_figures=on_figures)
+
+    figures = _morning_filing(accepted_at=_et(REPORT, 16, 2))
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher",
+                        lambda: _SlowRound({"INTC": figures}))
+    at = _et(REPORT, 16, 3)
+    _svc().observe_rows(REPORT, [_row("INTC", REPORT)], at)
+    await els.earnings_filing_tick(at, watched=["INTC"])
+    rec = _svc()._records[("INTC", REPORT)]
+    assert (rec.checked_at, rec.landed_at) == (at + timedelta(seconds=90),) * 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hour,reads", [(5, False), (6, True)], ids=["before_six", "at_six"])
+async def test_the_sec_watch_starts_with_the_live_window(monkeypatch, hour, reads):
+    watcher = _Watcher()
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: watcher)
+    _svc().observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 3))
+    await els.earnings_filing_tick(_et(REPORT, hour), watched=["INTC"])
+    assert watcher.calls == ([(["INTC"], REPORT)] if reads else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("watched", [[], ["INTC"]], ids=["nobody_watching", "nothing_pending"])
+async def test_a_filing_tick_with_nothing_pending_never_wakes_the_watcher(monkeypatch, watched):
+    watcher = _Watcher()
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: watcher)
+    stats = await els.earnings_filing_tick(_et(REPORT, 16, 3), watched=watched)
+    assert stats == {"watched": len(watched), "pending": 0, "filings": 0}
+    assert watcher.calls == [] and watcher.kept is None
+
+
+@pytest.mark.asyncio
+async def test_the_filing_tick_reads_the_watched_memo_the_fmp_tick_keeps(monkeypatch):
+    monkeypatch.setattr(_SENDER_READ, _boom)
+    monkeypatch.setattr(els, "_watched_memo", (time.monotonic(), ["INTC"]))
+    stats = await els.earnings_filing_tick(_et(REPORT, 16, 3))
+    assert stats["watched"] == 1
+
+
+# ── the two loops ────────────────────────────────────────────────────────────
+
+_TICKS = ["live", "filing"]
+
+
+async def _pass_time(_seconds: float) -> None:
+    await asyncio.sleep(0)
+
+
+async def _run_loops(monkeypatch, *, live, filing, until: asyncio.Event, sleep=_pass_time,
+                     enabled: bool = True) -> None:
+    """The real loop over these two ticks until `until`, then the shutdown's cancel."""
+    monkeypatch.setattr(els, "earnings_live_tick", live)
+    monkeypatch.setattr(els, "earnings_filing_tick", filing)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", enabled)
+    spawned = asyncio.create_task(els.run_earnings_live_loop(sleep=sleep))
+    try:
+        await asyncio.wait_for(until.wait(), 2.0)
+    finally:
+        spawned.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(spawned, 2.0)
+
+
+def _counting(until: asyncio.Event, rounds: int = 3) -> tuple:
+    """A tick that sets `until` on run number `rounds`, and the list of its runs."""
+    seen: List[datetime] = []
+
+    async def _tick(now):
+        seen.append(now)
+        if len(seen) >= rounds:
+            until.set()
+
+    return _tick, seen
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing", _TICKS)
+async def test_a_tick_that_keeps_failing_stops_neither_loop(monkeypatch, caplog, failing):
+    until = asyncio.Event()
+    healthy, seen = _counting(until)
+    failures: List[datetime] = []
+
+    async def _fails(now):
+        failures.append(now)
+        raise RuntimeError("boom")
+
+    ticks = {"live": healthy, "filing": healthy, failing: _fails}
+    with caplog.at_level(logging.ERROR, logger=els.__name__):
+        await _run_loops(monkeypatch, **ticks, until=until)
+    assert len(seen) >= 3 and len(failures) >= 2, "the failing loop keeps trying too"
+    row = _live_logs(caplog)[0]
+    assert row.levelno == logging.ERROR and row.exc_info is not None
+    assert all(word in row.getMessage() for word in ("_fails", "RuntimeError", "boom"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stuck", _TICKS)
+async def test_a_stuck_tick_holds_up_neither_the_other_loop_nor_the_shutdown(monkeypatch, stuck):
+    until = asyncio.Event()
+    healthy, seen = _counting(until)
+    reached: List[datetime] = []
+
+    async def _stuck(now):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            reached.append(now)
+            raise
+
+    ticks = {"live": healthy, "filing": healthy, stuck: _stuck}
+    await _run_loops(monkeypatch, **ticks, until=until)
+    assert len(seen) >= 3
+    assert len(reached) == 1, "cancelling the spawned task reaches the stuck child"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hit", _TICKS)
+async def test_a_cancellation_nobody_asked_of_a_loop_is_a_failed_tick(monkeypatch, caplog, hit):
+    """A tick can join a future someone else cancels. Taken for a shutdown, that ends its loop
+    for good with nothing logged, while the other runs on alone."""
+    until = asyncio.Event()
+    healthy, seen = _counting(until)
+    strays: List[datetime] = []
+
+    async def _stray(now):
+        strays.append(now)
+        joined = asyncio.get_running_loop().create_future()
+        joined.cancel()
+        await joined
+
+    ticks = {"live": healthy, "filing": healthy, hit: _stray}
+    with caplog.at_level(logging.ERROR, logger=els.__name__):
+        await _run_loops(monkeypatch, **ticks, until=until)
+    assert len(seen) >= 3 and len(strays) >= 2
+    row = _live_logs(caplog)[0]
+    assert "_stray" in row.getMessage() and "cancelled" in row.getMessage()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slow", _TICKS)
+async def test_the_spawned_task_ends_only_once_both_loops_have_unwound(monkeypatch, slow):
+    """`main.py` closes the shared HTTP clients right after awaiting it, and `gather` left to
+    itself ends at the first child cancelled."""
+    until = asyncio.Event()
+    healthy, _ = _counting(until)
+    unwound: List[datetime] = []
+
+    async def _slow_to_unwind(now):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0.05)
+            unwound.append(now)
+
+    ticks = {"live": healthy, "filing": healthy, slow: _slow_to_unwind}
+    await _run_loops(monkeypatch, **ticks, until=until)
+    assert len(unwound) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_filing_loop_starts_behind_the_fmp_loop(monkeypatch):
+    """Its first tick reads the records the FMP tick's first fold opens, so a restart inside a
+    release window does not lose a minute, and one watched-list read serves both."""
+    until = asyncio.Event()
+    order: List[str] = []
+    waits: List[float] = []
+
+    async def _sleep(seconds):
+        waits.append(seconds)
+        await asyncio.sleep(0)
+
+    async def _live(now):
+        order.append("live")
+
+    async def _filing(now):
+        order.append("filing")
+        until.set()
+
+    await _run_loops(monkeypatch, live=_live, filing=_filing, until=until, sleep=_sleep)
+    assert waits[0] == 45, "both still wait for the app to boot"
+    assert order[0] == "live"
+    assert els._FILING_LOOP_DELAY_SECONDS in waits and els._FILING_LOOP_DELAY_SECONDS > 0
+
+
+@pytest.mark.asyncio
+async def test_with_the_feature_off_neither_loop_ticks(monkeypatch):
+    until = asyncio.Event()
+    waits: List[float] = []
+    ticked: List[datetime] = []
+
+    async def _sleep(seconds):
+        waits.append(seconds)
+        if len(waits) > 6:
+            until.set()
+        await asyncio.sleep(0)
+
+    async def _tick(now):
+        ticked.append(now)
+
+    await _run_loops(monkeypatch, live=_tick, filing=_tick, until=until, sleep=_sleep,
+                     enabled=False)
+    assert ticked == []
+
+
+class _StopLoop(BaseException):
+    """Ends `_forever`, which outlives every `Exception`."""
+
+
+@pytest.mark.asyncio
+async def test_the_shutdowns_cancel_ends_a_loop_from_inside_its_tick(monkeypatch):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
+    entered = asyncio.Event()
+
+    async def _blocks(now):
+        entered.set()
+        await asyncio.Event().wait()
+
+    async def _sleep(_seconds):
+        raise _StopLoop
+
+    looping = asyncio.create_task(els._forever(_blocks, 60, sleep=_sleep))
+    await asyncio.wait_for(entered.wait(), 1.0)
+    looping.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await looping
+
+
+async def _forever_over(monkeypatch, tick, durations: List[float]) -> List[float]:
+    """What `_forever` waits after ticks taking `durations` on a stand-in clock."""
+    clock = _Clock()
+    monkeypatch.setattr(els, "time", SimpleNamespace(monotonic=clock.monotonic))
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
+    waits: List[float] = []
+
+    async def _timed(now):
+        clock.at += durations.pop(0)
+        await tick(now)
+
+    async def _sleep(seconds):
+        waits.append(seconds)
+        if not durations:
+            raise _StopLoop
+
+    with pytest.raises(_StopLoop):
+        await els._forever(_timed, 60, sleep=_sleep)
+    return waits
+
+
+@pytest.mark.asyncio
+async def test_the_next_tick_starts_an_interval_after_the_last_one_started(monkeypatch):
+    """A round that read 25 symbols in 30 s must not stretch "every minute" to 90 s, and one
+    that overran still lets everything else run."""
+    async def _ok(now):
+        return None
+
+    assert await _forever_over(monkeypatch, _ok, [30.0, 59.5, 60.0, 400.0, 0.0]) \
+        == [30.0, 1.0, 1.0, 1.0, 60.0]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_tick_keeps_the_same_clock(monkeypatch):
+    async def _fails(now):
+        raise RuntimeError("boom")
+
+    assert await _forever_over(monkeypatch, _fails, [20.0, 90.0]) == [40.0, 1.0]

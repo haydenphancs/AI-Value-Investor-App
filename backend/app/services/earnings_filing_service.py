@@ -46,7 +46,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app.config import settings
 from app.integrations.sec_edgar import (
@@ -82,6 +82,9 @@ _EDGAR_OPEN = (6, 0)
 _EDGAR_CLOSE = (22, 0)
 _FAST_POLL_SECONDS = 60
 _SLOW_POLL_SECONDS = 300
+#: A symbol comes due this much early. Rounds start a minute apart give or take scheduling, and
+#: a round that wakes a moment short of the cadence must not leave the symbol for the next one.
+_DUE_SLACK_SECONDS = 5
 #: Gap between two of OUR SEC calls, so a round of 25 symbols never holds the shared
 #: limiter for long and never bursts against SEC's per-second cap.
 _CALL_SPACING_SECONDS = 1.0
@@ -543,6 +546,8 @@ def build_prompt(symbol: str, report_date: date, text: str) -> str:
 
 @dataclass
 class _Watch:
+    # What the poll cadence counts from: the start of the round that read this symbol, or the
+    # end of a read that failed (`_check_one`).
     checked_mono: float = 0.0
     found: Optional[ResultsFiling] = None
     done: bool = False          # extraction finished (figures or a reasoned miss)
@@ -552,7 +557,8 @@ class _Watch:
 
 @dataclass
 class EarningsFilingWatcher:
-    """Per-process state of the SEC watch. One instance, driven by the live loop only."""
+    """Per-process state of the SEC watch. One instance, driven by the filing loop only
+    (`earnings_live_service.earnings_filing_tick`)."""
 
     _watch: Dict[Tuple[str, date], _Watch] = field(default_factory=dict)
     _extracted: Dict[str, Optional[FilingFigures]] = field(default_factory=dict)
@@ -585,7 +591,7 @@ class EarningsFilingWatcher:
             return True
         if w.done or w.found is not None:
             return False
-        return mono - w.checked_mono >= interval
+        return mono - w.checked_mono >= interval - _DUE_SLACK_SECONDS
 
     async def run_once(
         self,
@@ -597,12 +603,16 @@ class EarningsFilingWatcher:
         gemini: Any = None,
         cik_map: Optional[Mapping[str, str]] = None,
         sleep: Any = asyncio.sleep,
+        on_figures: Optional[Callable[[str, FilingFigures], None]] = None,
     ) -> Dict[str, FilingFigures]:
-        """One round for the symbols reporting on `report_day`. Returns NEW figures by symbol.
+        """One round for the symbols reporting on `report_day`. Returns NEW figures by symbol,
+        and hands each to `on_figures` the moment it verifies: a round is serial, with a model
+        call per filing, so what is read first must not wait for the rest.
 
         `symbols` must already be ordered most-watched first; the round keeps the first
         `EARNINGS_LIVE_SEC_MAX_SYMBOLS`. Never raises: a failure for one symbol costs only
-        that symbol's round, and a throttle parks the whole watcher.
+        that symbol's round, a throttle parks the whole watcher, and a delivery that fails
+        is logged, and that figure is not offered again in this process.
         """
         if not settings.EARNINGS_LIVE_FILINGS_ENABLED or not user_agent_configured():
             return {}
@@ -642,7 +652,10 @@ class EarningsFilingWatcher:
             if not first:
                 await sleep(_CALL_SPACING_SECONDS)
             first = False
-            w.checked_mono = time.monotonic()
+            # The round's start, not this read's: the reads inside a round are spaced out, so
+            # a stamp per read would leave every symbol but the first short of the cadence at
+            # the next round, and each would be read every other minute.
+            w.checked_mono = mono
             try:
                 figures = await self._check_one(client, gemini, symbol, cik, report_day, w,
                                                 sleep)
@@ -668,6 +681,14 @@ class EarningsFilingWatcher:
                 continue
             if figures is not None:
                 new[symbol] = figures
+                if on_figures is not None:
+                    try:
+                        on_figures(symbol, figures)
+                    except Exception as e:
+                        logger.warning(
+                            "[earnings-live-filing] %s %s: figures not delivered (%s: %s)",
+                            symbol, report_day.isoformat(), type(e).__name__, e, exc_info=True,
+                        )
         return new
 
     async def _check_one(
@@ -692,8 +713,11 @@ class EarningsFilingWatcher:
             w.found, w.done, w.figures = filing, True, figures
         else:
             # Transient (Gemini down): try the same filing again on the next due round,
-            # at most `_MAX_EXTRACT_ATTEMPTS` times.
+            # at most `_MAX_EXTRACT_ATTEMPTS` times. The cadence counts from the end of this
+            # read: the next round starts right behind a stalled one, and that must not spend
+            # the attempts any faster, because a filing out of attempts is never read again.
             w.attempts += 1
+            w.checked_mono = time.monotonic()
             if w.attempts >= _MAX_EXTRACT_ATTEMPTS:
                 self._extracted[filing.accession] = None
                 w.found, w.done = filing, True

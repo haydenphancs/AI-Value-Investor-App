@@ -10,17 +10,26 @@ The SEC side is pinned too, because its limiter and 600 s throttle circuit are S
 Learn, the buyback check and the Trillion stake finder: the per-day cap, the release-window
 cadence, the stop once a filing is found, one extraction per accession, and parking every
 symbol on a throttle.
+
+So is the round's timing, because the card reads the record while a round runs: a figure is
+handed over the moment it verifies, every symbol of a round comes due again a minute after that
+round started, and a failed read waits its cadence from its own end.
 Hermetic: fake SEC client and fake Gemini; `asyncio.sleep` is injected.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import pytest
 
 import app.services.earnings_filing_service as efs
+import app.services.earnings_live_service as els
+import app.services.learn_weekly.signals as signals
 from app.config import settings
 from app.integrations.sec_edgar import SECRateLimitException
 from app.utils.market_hours import ET
@@ -378,3 +387,289 @@ async def test_nothing_is_read_outside_edgar_hours(watcher):
     night = datetime(2026, 10, 29, 23, 0, tzinfo=ET).astimezone(timezone.utc)
     await watcher.run_once(night, ["INTC"], REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
     assert sec.calls == []
+
+
+# ── the round's timing ───────────────────────────────────────────────────────
+
+
+class _Clock:
+    """A `time` stand-in for the watcher alone: asyncio keeps its own clock."""
+
+    def __init__(self):
+        self.at = 1_000_000.0
+
+    def monotonic(self) -> float:
+        return self.at
+
+
+@pytest.fixture
+def clock(monkeypatch) -> _Clock:
+    held = _Clock()
+    monkeypatch.setattr(efs, "time", SimpleNamespace(monotonic=held.monotonic))
+    return held
+
+
+def _later_filing(cik: str) -> dict:
+    return dict(_8K, accessionNumber=f"{cik}-26-000001")
+
+
+@pytest.mark.asyncio
+async def test_each_figure_is_delivered_the_moment_it_verifies(watcher):
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K], _CIKS["AAPL"]: [_later_filing(_CIKS["AAPL"])]})
+    delivered: List[str] = []
+    seen: List[List[str]] = []
+
+    class _Gem(_Gemini):
+        async def generate_json(self, prompt, **kwargs):
+            if self.calls == 1:
+                seen.append(list(delivered))
+            return await super().generate_json(prompt, **kwargs)
+
+    found = await watcher.run_once(_AT_16, ["INTC", "AAPL"], REPORT, sec=sec, gemini=_Gem(),
+                                   cik_map=_CIKS, sleep=_no_sleep,
+                                   on_figures=lambda sym, fig: delivered.append(sym))
+    assert seen == [["INTC"]], "the second read starts with the first figure already out"
+    assert delivered == ["INTC", "AAPL"]
+    assert set(found) == {"INTC", "AAPL"}, "the round still reports what it found"
+
+
+@pytest.mark.asyncio
+async def test_a_delivery_that_raises_stays_inside_the_round_and_says_which_report(watcher,
+                                                                                  caplog):
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K], _CIKS["AAPL"]: [_later_filing(_CIKS["AAPL"])]})
+    gem = _Gemini()
+    calls: List[str] = []
+
+    def _raises(symbol, figures):
+        calls.append(symbol)
+        raise ValueError("record refused")
+
+    with caplog.at_level(logging.WARNING, logger=efs.__name__):
+        found = await watcher.run_once(_AT_16, ["INTC", "AAPL"], REPORT, sec=sec, gemini=gem,
+                                       cik_map=_CIKS, sleep=_no_sleep, on_figures=_raises)
+    assert calls == ["INTC", "AAPL"], "one bad delivery must not cost the next symbol its read"
+    assert set(found) == {"INTC", "AAPL"} and gem.calls == 2
+    rows = [r for r in caplog.records if "not delivered" in r.getMessage()]
+    assert len(rows) == 2 and rows[0].exc_info is not None
+    assert "INTC" in rows[0].getMessage() and REPORT.isoformat() in rows[0].getMessage()
+    assert "ValueError" in rows[0].getMessage() and "record refused" in rows[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_delivers_nothing_and_a_later_one_delivers_once(watcher):
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    gem = _Gemini(fail=1)
+    delivered: List[str] = []
+    assert await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
+                                  sleep=_no_sleep,
+                                  on_figures=lambda sym, fig: delivered.append(sym)) == {}
+    assert delivered == []
+    watcher._watch[("INTC", REPORT)].checked_mono = 0.0      # the 60 s cadence has passed
+    for _ in range(2):
+        await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
+                               sleep=_no_sleep,
+                               on_figures=lambda sym, fig: delivered.append(sym))
+    assert delivered == ["INTC"]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_release_delivers_nothing(watcher):
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    delivered: List[str] = []
+    await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec,
+                           gemini=_Gemini(answer={"is_quarterly_results": False}), cik_map=_CIKS,
+                           sleep=_no_sleep, on_figures=lambda sym, fig: delivered.append(sym))
+    assert delivered == []
+
+
+@pytest.mark.asyncio
+async def test_a_second_ticker_of_one_filing_is_delivered_without_a_second_extraction(watcher):
+    """GOOGL and GOOG are one issuer, so one accession: the second ticker's figures come from
+    the watcher's own memory, and must still reach its record."""
+    ciks = {"GOOGL": "0001652044", "GOOG": "0001652044"}
+    sec = _SEC(filings={"0001652044": [_8K]})
+    gem = _Gemini()
+    delivered: List[str] = []
+    await watcher.run_once(_AT_16, ["GOOGL", "GOOG"], REPORT, sec=sec, gemini=gem, cik_map=ciks,
+                           sleep=_no_sleep, on_figures=lambda sym, fig: delivered.append(sym))
+    assert delivered == ["GOOGL", "GOOG"] and gem.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_every_symbol_in_a_round_shares_the_round_start_stamp(watcher, clock):
+    async def _spaced(seconds):
+        clock.at += seconds
+
+    await watcher.run_once(_AT_16, ["AAPL", "MSFT", "INTC"], REPORT, sec=_SEC(), cik_map=_CIKS,
+                           sleep=_spaced)
+    assert {w.checked_mono for w in watcher._watch.values()} == {1_000_000.0}
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_round_reads_every_symbol_again_a_minute_after_it_started(watcher, clock):
+    """Rounds start a minute apart while the reads inside one are spaced out. A stamp per read
+    left all but the first symbol a few seconds short at the next round, so each was read
+    every other minute."""
+    async def _spaced(seconds):
+        clock.at += seconds
+
+    sec = _SEC()
+    for _ in range(3):
+        started = clock.at
+        await watcher.run_once(_AT_16, ["AAPL", "MSFT", "INTC"], REPORT, sec=sec, cik_map=_CIKS,
+                               sleep=_spaced)
+        clock.at = started + 60
+    assert [sec.calls.count(f"sub:{cik}") for cik in _CIKS.values()] == [3, 3, 3]
+
+
+@pytest.mark.parametrize("hm,cadence", [((16, 3), 60), ((12, 0), 300)], ids=["fast", "slow"])
+def test_a_round_a_moment_early_still_reads_the_symbol(watcher, hm, cadence):
+    """A round that wakes a few seconds short must not cost the symbol a whole cadence."""
+    now_et = datetime(2026, 10, 29, *hm, tzinfo=ET)
+    key = ("INTC", REPORT)
+    watcher._watch[key] = efs._Watch(checked_mono=1000.0)
+    on_time = 1000.0 + cadence - efs._DUE_SLACK_SECONDS
+    assert watcher._due(key, now_et, on_time)
+    assert not watcher._due(key, now_et, on_time - 0.001)
+
+
+@pytest.mark.asyncio
+async def test_a_symbol_a_throttle_left_unread_keeps_its_place(watcher, clock):
+    watcher._watch[("MSFT", REPORT)] = efs._Watch(checked_mono=999_000.0)
+    await watcher.run_once(_AT_16, ["AAPL", "MSFT"], REPORT, sec=_SEC(throttle_on=_CIKS["AAPL"]),
+                           cik_map=_CIKS, sleep=_no_sleep)
+    assert watcher._watch[("MSFT", REPORT)].checked_mono == 999_000.0, \
+        "it was never read, so the park must not count as a read"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_waits_its_cadence_from_where_it_ended(watcher, clock):
+    """A stalled model ends a round minutes late and the next one starts a second after. Its
+    attempts must go no faster for that: a filing out of attempts is never read again."""
+    class _Stalls(_Gemini):
+        async def generate_json(self, prompt, **kwargs):
+            clock.at += 90
+            return await super().generate_json(prompt, **kwargs)
+
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    gem = _Stalls(fail=9)
+
+    async def _round() -> None:
+        await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
+                               sleep=_no_sleep)
+
+    await _round()
+    clock.at += 1
+    await _round()
+    assert gem.calls == 1, "a second after the stall ended is no new attempt"
+    clock.at += 60
+    await _round()
+    assert gem.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_read_never_delays_the_symbols_behind_it_past_their_own_cadence(watcher,
+                                                                                       clock):
+    """Only the failed read moves its stamp: its neighbours stay on the round's."""
+    class _Stalls(_Gemini):
+        async def generate_json(self, prompt, **kwargs):
+            clock.at += 90
+            return await super().generate_json(prompt, **kwargs)
+
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    started = clock.at
+    await watcher.run_once(_AT_16, ["INTC", "AAPL"], REPORT, sec=sec, gemini=_Stalls(fail=9),
+                           cik_map=_CIKS, sleep=_no_sleep)
+    assert watcher._watch[("AAPL", REPORT)].checked_mono == started
+    assert watcher._watch[("INTC", REPORT)].checked_mono == clock.at
+
+
+# ── the filing tick, on the real watcher ─────────────────────────────────────
+
+
+def _pending(symbol: str) -> dict:
+    return {"symbol": symbol, "date": REPORT.isoformat(), "epsActual": None, "epsEstimated": 0.41,
+            "revenueActual": None, "revenueEstimated": 16.6e9,
+            "lastUpdated": REPORT.isoformat()}
+
+
+@pytest.fixture
+def live(watcher, monkeypatch):
+    """The real live service over the real watcher, with SEC and Gemini faked."""
+    svc = els.get_earnings_live_service()
+    svc.reset()
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: watcher)
+    monkeypatch.setattr(efs, "_CALL_SPACING_SECONDS", 0)
+
+    async def _map(*, sec=None):
+        return _CIKS
+
+    # `run_once` imports this inside the function, so patch the SOURCE module.
+    monkeypatch.setattr(signals, "ticker_cik_map", _map)
+    yield svc
+    svc.reset()
+
+
+@pytest.mark.asyncio
+async def test_a_figure_is_on_the_record_before_the_next_symbol_is_read(live):
+    """The owner's rule: what comes out first is shown right away, not when the round ends."""
+    live.observe_rows(REPORT, [_pending("INTC"), _pending("AAPL")], _AT_16)
+    shown: List[Optional[float]] = []
+
+    class _Reads(_SEC):
+        async def get_submissions(self, cik):
+            if cik == _CIKS["AAPL"]:
+                shown.append(live.snapshot("INTC", REPORT, _AT_16).revenue.actual)
+            return await super().get_submissions(cik)
+
+    sec = _Reads(filings={_CIKS["INTC"]: [_8K], _CIKS["AAPL"]: [_later_filing(_CIKS["AAPL"])]})
+    stats = await els.earnings_filing_tick(_AT_16, watched=["INTC", "AAPL"], sec=sec,
+                                           gemini=_Gemini())
+    assert shown == [17.1e9]
+    assert stats["filings"] == 2
+    assert live.snapshot("AAPL", REPORT, _AT_16).revenue.actual == 17.1e9
+
+
+@pytest.mark.asyncio
+async def test_a_round_cut_off_at_shutdown_keeps_the_figures_it_already_verified(live):
+    """Cancellation lands mid-round on a redeploy: what was read must not go with it."""
+    live.observe_rows(REPORT, [_pending("INTC"), _pending("AAPL")], _AT_16)
+    reached = asyncio.Event()
+
+    class _Hangs(_SEC):
+        async def get_submissions(self, cik):
+            if cik == _CIKS["AAPL"]:
+                reached.set()
+                await asyncio.Event().wait()
+            return await super().get_submissions(cik)
+
+    sec = _Hangs(filings={_CIKS["INTC"]: [_8K]})
+    tick = asyncio.create_task(
+        els.earnings_filing_tick(_AT_16, watched=["INTC", "AAPL"], sec=sec, gemini=_Gemini()))
+    await asyncio.wait_for(reached.wait(), 2.0)
+    tick.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await tick
+    assert live.snapshot("INTC", REPORT, _AT_16).revenue.actual == 17.1e9
+
+
+@pytest.mark.asyncio
+async def test_a_figure_the_round_could_not_store_is_logged_and_the_round_goes_on(live, caplog,
+                                                                                 monkeypatch):
+    live.observe_rows(REPORT, [_pending("INTC"), _pending("AAPL")], _AT_16)
+    real = live.absorb_filing
+
+    def _absorb(symbol, day, figures, now):
+        if symbol == "INTC":
+            raise RuntimeError("record refused")
+        real(symbol, day, figures, now)
+
+    monkeypatch.setattr(live, "absorb_filing", _absorb)
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K], _CIKS["AAPL"]: [_later_filing(_CIKS["AAPL"])]})
+    with caplog.at_level(logging.WARNING, logger=efs.__name__):
+        await els.earnings_filing_tick(_AT_16, watched=["INTC", "AAPL"], sec=sec,
+                                       gemini=_Gemini())
+    assert any("not delivered" in r.getMessage() and "INTC" in r.getMessage()
+               for r in caplog.records)
+    assert live.snapshot("AAPL", REPORT, _AT_16).revenue.actual == 17.1e9
+    assert live.snapshot("INTC", REPORT, _AT_16).revenue.actual is None

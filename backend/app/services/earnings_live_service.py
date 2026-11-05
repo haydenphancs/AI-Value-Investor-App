@@ -79,6 +79,17 @@ already be gone from the records, or it reads as new on every round.
     sheet endpoint fold the Tracking memo and read; they never fetch, so the live state adds
     no latency to the feed.
 
+TWO LOOPS UNDER ONE TASK (`run_earnings_live_loop`), each on its own 60 s clock, so neither
+source can hold the other up.
+  * The FMP tick (`earnings_live_tick`) folds the memo, fetches what is due and hands the
+    watched landings to the push sender.
+  * The filing tick (`earnings_filing_tick`) reads the filings. A round is serial, with a Gemini
+    call per filing, so a burst or a stalled model can run it for minutes (a call may take
+    `GEMINI_REQUEST_TIMEOUT_SECONDS`). Each figure goes into its record the moment it
+    verifies, stamped with that moment, so the card and the sheet show it mid-round, and its
+    push goes out on the next FMP tick, at most a minute later. The tick reads the records the
+    FMP tick folded, so a stuck FMP tick leaves it working from the ones already held.
+
 STATUSES (no time of day exists on `/stable` rows, so the window is the report day):
   * `upcoming` — a later date, or today before 06:00 ET with nothing in yet.
   * `live`     — today, 06:00–22:00 ET, results not complete. LIVE is drawn ONLY then, and
@@ -1273,22 +1284,101 @@ async def _watched_ranked_cached() -> List[str]:
     return ranked
 
 
-async def run_earnings_live_loop() -> None:
-    """Background loop (main.py lifespan, with the other notification loops): every 60 s,
-    refresh the live days for everyone's watched tickers, run the SEC watch for the ones
-    reporting today, and hand their new landings to the push sender. Never dies on an error."""
-    await asyncio.sleep(45)
-    interval = max(int(settings.EARNINGS_LIVE_INTERVAL_SECONDS), 15)
+#: The least a loop rests between two ticks, however long the last one ran.
+_MIN_TICK_GAP_SECONDS = 1.0
+#: How far the filing loop runs behind the FMP loop. Its first tick then finds the records the
+#: first fold opened (a restart in a release window keeps its minute), and the watched list is
+#: one read, not the same read twice at one moment.
+_FILING_LOOP_DELAY_SECONDS = 10.0
+
+
+async def _forever(
+    tick: Callable[[datetime], Awaitable[Any]],
+    interval: int,
+    *,
+    sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
+) -> None:
+    """Run `tick` every `interval` seconds, counted from each tick's start, so a round that read
+    25 symbols in 30 s does not stretch "every minute" to 90 s. Never returns: a tick that
+    fails is logged and the next one runs. Only the cancel of this task ends it."""
     while True:
+        started = time.monotonic()
         try:
             if settings.EARNINGS_LIVE_ENABLED:
-                await earnings_live_tick(datetime.now(timezone.utc))
+                await tick(datetime.now(timezone.utc))
         except asyncio.CancelledError:
-            raise
+            if asyncio.current_task().cancelling():
+                raise
+            # Not ours: a future the tick joined was cancelled by someone else. Re-raising would
+            # end this loop for good with nothing logged, and the other would run on alone.
+            logger.error("[earnings-live] %s: cancelled from outside the loop, kept as a "
+                         "failed tick", tick.__name__, exc_info=True)
         except Exception as e:
-            logger.error("[earnings-live] tick failed (%s: %s)", type(e).__name__, e,
-                         exc_info=True)
-        await asyncio.sleep(interval)
+            logger.error("[earnings-live] %s failed (%s: %s)", tick.__name__, type(e).__name__,
+                         e, exc_info=True)
+        await sleep(max(_MIN_TICK_GAP_SECONDS, interval - (time.monotonic() - started)))
+
+
+async def run_earnings_live_loop(
+    *, sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
+) -> None:
+    """Background loop (main.py lifespan, with the other notification loops). Two forever-loops
+    under the one spawned task, every 60 s each (TWO LOOPS in the module docstring): the FMP tick
+    refreshes the live days for everyone's watched tickers and hands their new landings to the
+    push sender, and the filing tick watches the ones reporting today. Neither dies on an error or
+    holds up the other. Cancelling the spawned task cancels both, through `gather`, and it ends
+    only once both have unwound."""
+    await sleep(45)
+    interval = max(int(settings.EARNINGS_LIVE_INTERVAL_SECONDS), 15)
+
+    async def _filing_loop() -> None:
+        await sleep(_FILING_LOOP_DELAY_SECONDS)
+        await _forever(earnings_filing_tick, interval, sleep=sleep)
+
+    # Neither loop raises, so `return_exceptions` does one job: without it `gather` ends at the
+    # first child cancelled, and `main.py` closes the shared HTTP clients under the other.
+    await asyncio.gather(
+        _forever(earnings_live_tick, interval, sleep=sleep),
+        _filing_loop(),
+        return_exceptions=True,
+    )
+
+
+async def earnings_filing_tick(
+    now: datetime,
+    *,
+    watched: Optional[Sequence[str]] = None,
+    sec: Any = None,
+    gemini: Any = None,
+) -> Dict[str, int]:
+    """One SEC round over the watched reports still pending today, from the records the FMP tick
+    folded. Each verified figure goes straight into its record and nothing here sends a push:
+    the next FMP tick does. Every dependency is injectable so the suite never reaches a
+    network."""
+    from app.services.earnings_filing_service import get_earnings_filing_watcher
+
+    started = time.monotonic()
+    if watched is None:
+        watched = await _watched_ranked_cached()
+    service = get_earnings_live_service()
+    n = et_now(now)
+    today = n.date()
+    pending_today = service.pending_symbols(today, watched)
+    stats = {"watched": len(watched), "pending": len(pending_today), "filings": 0}
+    if not pending_today or n.hour < EARNINGS_LIVE_START_HOUR_ET:
+        return stats
+
+    def _absorb(symbol: str, figures: FilingFigures) -> None:
+        # The figure's own moment: `checked_at` and the landing must not say a long round's start.
+        service.absorb_filing(symbol, today, figures,
+                              now + timedelta(seconds=time.monotonic() - started))
+
+    watcher = get_earnings_filing_watcher()
+    watcher.prune(live_days(today))
+    found = await watcher.run_once(now, pending_today, today, sec=sec, gemini=gemini,
+                                   on_figures=_absorb)
+    stats["filings"] = len(found)
+    return stats
 
 
 async def earnings_live_tick(
@@ -1296,13 +1386,12 @@ async def earnings_live_tick(
     *,
     fmp: Any = None,
     watched: Optional[Sequence[str]] = None,
-    sec: Any = None,
-    gemini: Any = None,
     dispatch: Optional[Callable[[List[LiveSnapshot], datetime], Awaitable[Any]]] = None,
 ) -> Dict[str, int]:
-    """One round. Every dependency is injectable so the suite never reaches a network."""
+    """One FMP round: fold the memo, fetch what is due, hand the watched landings to the push
+    sender, the filing tick's among them. Every dependency is injectable so the suite never
+    reaches a network."""
     from app.services import tracking_service as ts
-    from app.services.earnings_filing_service import get_earnings_filing_watcher
 
     if fmp is None:
         from app.integrations.fmp import get_fmp_client
@@ -1310,7 +1399,7 @@ async def earnings_live_tick(
         fmp = get_fmp_client()
     if watched is None:
         watched = await _watched_ranked_cached()
-    stats = {"watched": len(watched), "fetched": 0, "filings": 0, "landed": 0}
+    stats = {"watched": len(watched), "fetched": 0, "landed": 0}
     if not watched:
         return stats
     service = get_earnings_live_service()
@@ -1338,15 +1427,6 @@ async def earnings_live_tick(
     before = service.fetches
     await service.refresh(now, fmp=fmp, symbols=watched)
     stats["fetched"] = service.fetches - before
-
-    pending_today = service.pending_symbols(today, watched)
-    if pending_today and n.hour >= EARNINGS_LIVE_START_HOUR_ET:
-        watcher = get_earnings_filing_watcher()
-        watcher.prune(live_days(today))
-        found = await watcher.run_once(now, pending_today, today, sec=sec, gemini=gemini)
-        for symbol, figures in found.items():
-            service.absorb_filing(symbol, today, figures, now)
-        stats["filings"] = len(found)
 
     # Watched reports only, and only here, the one place holding both lists: the sender's cap
     # and its watcher read per send must not go on the rest of the market. Never narrow the

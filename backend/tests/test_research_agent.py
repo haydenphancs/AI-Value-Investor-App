@@ -15,6 +15,7 @@ and the real loop driving them. No network, no Gemini, no FMP.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Dict, List
 
 import pytest
@@ -265,11 +266,32 @@ async def test_a_transport_error_falls_back(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_failing_fallback_yields_the_honest_sentinel(monkeypatch):
+async def test_a_failing_fallback_yields_no_findings(monkeypatch):
+    """Empty, never a sentence: this text reaches Stage A as DEEP RESEARCH FINDINGS."""
     gem = _Gem([RuntimeError("socket closed")], fallback_text=RuntimeError("quota"))
     agent = _agent(gem, monkeypatch)
     out = await agent._agentic_research(_Out(), "EVIDENCE")
-    assert out == "Analysis for AAPL could not be completed."
+    assert out == ""
+
+
+@pytest.mark.asyncio
+async def test_a_blank_fallback_yields_no_findings_and_says_so(monkeypatch, caplog):
+    gem = _Gem([RuntimeError("socket closed")], fallback_text="   ")
+    agent = _agent(gem, monkeypatch)
+    with caplog.at_level(logging.WARNING):
+        out = await agent._agentic_research(_Out(), "EVIDENCE")
+    assert not out.strip()
+    assert "[agentic-no-findings]" in caplog.text
+
+
+def test_no_findings_leave_the_block_out_of_the_stage_a_prompt():
+    from app.services.agents.narrative_prompts import build_stage_a_prompt
+    from app.services.agents.persona_config import get_persona_config
+
+    prompt = build_stage_a_prompt(
+        get_persona_config("warren_buffett"), "Apple Inc.", "AAPL", "EVIDENCE", deep_findings="",
+    )
+    assert "DEEP RESEARCH FINDINGS" not in prompt
 
 
 # ── C11: the reply to the LAST round's tool results is read, not discarded ───────────────

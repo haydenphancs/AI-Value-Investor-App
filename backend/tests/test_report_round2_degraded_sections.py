@@ -340,6 +340,7 @@ async def _run_direct(monkeypatch, report):
     monkeypatch.setattr(trs, "run_narrative_jobs", AsyncMock())
     monkeypatch.setattr(trs, "synthesize_core_thesis", AsyncMock())
     monkeypatch.setattr(trs, "synthesize_critical_factors", AsyncMock())
+    monkeypatch.setattr(trs, "report_schema_problem", lambda report: None)
     upsert = AsyncMock()
     monkeypatch.setattr(trs, "upsert_cached_report", upsert)
     result = await svc._generate_uncontended("AAPL", "warren_buffett")
@@ -434,5 +435,6 @@ async def test_shared_cache_lookup_refuses_a_partial_row(monkeypatch, lost, reus
     svc = object.__new__(ResearchService)
     svc.supabase = q
     monkeypatch.setattr(rs, "report_dcf_source_matches", lambda b: True)
+    monkeypatch.setattr(rs, "report_schema_problem", lambda b: None)
     got = await svc._lookup_shared_cache("AAPL", "warren_buffett")
     assert (got is not None) is reused

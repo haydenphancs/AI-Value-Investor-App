@@ -2502,6 +2502,7 @@ class NewsCacheService:
             articles, ticker, company_name=company_name, is_etf=is_etf,
         )
 
+        response: Optional[Dict[str, Any]] = None
         try:
             # Through the news features' switchable model (app/services/news_llm.py). On the
             # default Gemini provider this is the same generate_json call as always — same
@@ -2550,8 +2551,28 @@ class NewsCacheService:
             # not a code bug. Returning {} makes the caller retry once Gemini recovers;
             # WARNING keeps it OUT of Sentry (at ERROR it pages on every malformed
             # response, which happens routinely under load / long prompts).
+            if response is None:
+                # The transport's own parse failed (a cut HTTP body), so no answer exists.
+                # Splitting would only bill two more calls for a failure unrelated to size.
+                logger.warning(
+                    f"Gemini enrichment transport returned an undecodable body for "
+                    f"{ticker or '<mixed>'}: {e}"
+                )
+                return {}
+            finish = response.get("finish_reason") or "-"
+            if _split and len(articles) > 1:
+                # The same reasoning as the shape-mismatch arm above: a long batch cut short,
+                # or one that breaks at temperature 0, tends to repeat, and every 15-minute
+                # pass re-billed the whole batch for it. Split once; each half usually answers.
+                logger.warning(
+                    f"Gemini batch enrichment returned malformed JSON for "
+                    f"{ticker or '<mixed>'} (finish={finish}, {len(articles)} articles): {e} "
+                    f"— splitting the batch once"
+                )
+                return await self._split_once(articles, ticker)
             logger.warning(
-                f"Gemini batch enrichment returned malformed JSON for {ticker or '<mixed>'}: {e}"
+                f"Gemini batch enrichment returned malformed JSON for {ticker or '<mixed>'} "
+                f"(finish={finish}): {e}"
             )
             return {}
         except Exception as e:

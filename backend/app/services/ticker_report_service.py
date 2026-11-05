@@ -37,12 +37,14 @@ from app.integrations.gemini import get_gemini_client
 from app.services.agents.narrative_prompts import (
     build_narrative_jobs,
     build_stage_a_prompt,
-    parse_stage_a_response,
+    STAGE_B_PARTIAL_SECTION,
+    generate_stage_a_shell,
     run_narrative_jobs,
-    stage_a_fallback,
-    stage_a_thinking_budget,
+    stage_b_is_partial,
+    stage_b_outage_reason,
     synthesize_core_thesis,
     synthesize_critical_factors,
+    thesis_empty_reason,
 )
 from app.services.agents.persona_config import PersonaConfig, get_persona_config
 from app.services.agents.ticker_report_data_collector import (
@@ -50,10 +52,12 @@ from app.services.agents.ticker_report_data_collector import (
     TickerReportDataCollector,
     build_financial_context,
     get_collector,
+    record_degraded_section,
     report_degraded_sections,
 )
 from app.services.ticker_report_cache import (
     get_cached_report,
+    report_schema_problem,
     upsert_cached_report,
 )
 
@@ -66,6 +70,7 @@ logger = logging.getLogger(__name__)
 # See `app/services/report_degradation.py` for the full reasoning.
 from app.services.report_degradation import (  # noqa: E402
     _DEGRADED_KEY,
+    REPORT_DEGRADED_KEY,
     _degraded_reason,
     _mark_degraded,
 )
@@ -143,6 +148,22 @@ class TickerReportService:
         # 3. Stage A: structural / scoring shell
         shell = await self._generate_stage_a(out, persona, evidence)
 
+        #    A degraded Stage A can never be delivered, so stop before the merge and Stage B.
+        #    When Gemini is unavailable (quota circuit open, 429s exhausted, 5xx) or answers
+        #    twice with something unusable, the shell is `stage_a_fallback()`: empty bull and
+        #    bear cases, blank narrative slots. The merged result would still VALIDATE against
+        #    TickerReportResponse, so it used to be charged 20 credits, returned as a success
+        #    AND cached, then served free to every other user for the rest of the close
+        #    cycle. The caller refunds on this marker, and nothing here reaches the upsert.
+        degraded_reason = _degraded_reason(shell)
+        if degraded_reason:
+            logger.warning(
+                "Ticker report for %s/%s NOT generated — Stage A degraded (%s). The caller "
+                "is responsible for refunding credits on a degraded report.",
+                ticker, persona_key, degraded_reason,
+            )
+            return {REPORT_DEGRADED_KEY: degraded_reason}
+
         # 4. Merge deterministic real-data with Stage A shell. On a worker thread:
         #    assemble_report is sync and makes blocking Supabase reads (sector
         #    benchmarks for the competitor set, moat sector medians, peer moats) that
@@ -156,7 +177,7 @@ class TickerReportService:
         #    fundamentals Stage A saw). They mutate disjoint keys of
         #    `report`, so concurrent execution is safe.
         jobs = build_narrative_jobs(persona, evidence, report)
-        await asyncio.gather(
+        narrative_outcome, _ = await asyncio.gather(
             # Pass `evidence` so Stage B can hoist it into a single Gemini
             # context cache shared across all N parallel narrative calls.
             # Omitting it leaves `use_cache` False and every call re-sends the
@@ -165,38 +186,43 @@ class TickerReportService:
             synthesize_core_thesis(report, persona, self.gemini, evidence),
         )
 
+        #    A report that is mostly fallbacks, or has no thesis, is a non-delivery too, and
+        #    the only signal of it is here: every failed job already landed on its sentinel
+        #    and validates. Below the refund line a run can still have lost too much to share.
+        stage_b_degradation = stage_b_outage_reason(
+            narrative_outcome, ticker=ticker, persona=persona_key,
+        ) or thesis_empty_reason(report, ticker=ticker, persona=persona_key)
+        if stage_b_degradation:
+            return {REPORT_DEGRADED_KEY: stage_b_degradation}
+        if stage_b_is_partial(narrative_outcome):
+            record_degraded_section(report, STAGE_B_PARTIAL_SECTION)
+
         # 6. Critical Factors — synthesized AFTER the thesis so it reads the
         #    FINAL bear case; spreads across DISTINCT Deep Dive areas with broad
         #    watch triggers (Fed / war / earnings / analyst / market). Overwrites
         #    on success; the Stage A/B factors stay as the fallback otherwise.
         await synthesize_critical_factors(report, persona, self.gemini, evidence)
 
-        # 6. Persist to cache (best-effort; failure logged but doesn't raise) — but ONLY
-        #    when the report is real.
-        #
-        #    When Gemini is unavailable (quota circuit open, 429s exhausted, 5xx) Stage A
-        #    silently degrades to `stage_a_fallback()` — empty bull/bear cases, blank
-        #    narrative slots — and every Stage B job falls back to its sentinel. The result
-        #    still VALIDATES against TickerReportResponse, so it used to be charged 20
-        #    credits, returned as a success, AND written here, where it was then served free
-        #    to every other user for the rest of the close cycle. One Gemini blip poisoned a
-        #    ticker for everyone until the next close.
+        #    A report the client cannot decode is a non-delivery, typed like any other: the
+        #    endpoint refunds it and answers REPORT_GENERATION_FAILED, not a DATA_INCOMPLETE
+        #    that blames the data.
+        schema_problem = await asyncio.to_thread(report_schema_problem, report)
+        if schema_problem:
+            logger.error(
+                "[report-schema-invalid] ticker=%s persona=%s: %s",
+                ticker, persona_key, schema_problem,
+            )
+            return {REPORT_DEGRADED_KEY: "report_schema_invalid"}
+
+        # 7. Persist to cache (best-effort; failure logged but doesn't raise).
         #
         #    A report that lost Financials data to a DEGRADED upstream build (a 429 on one
-        #    FMP leg — `DEGRADED_SECTIONS_KEY`, set by `assemble_report`) is a different
-        #    case: its AI content is complete, so it is DELIVERED and billed like any other
-        #    report, but never written here — the next caller regenerates instead of
-        #    inheriting the hole for the rest of the close cycle.
-        degraded_reason = _degraded_reason(shell)
+        #    FMP leg — `DEGRADED_SECTIONS_KEY`, set by `assemble_report`) has complete AI
+        #    content, so it is DELIVERED and billed like any other report, but never written
+        #    here — the next caller regenerates instead of inheriting the hole for the rest
+        #    of the close cycle.
         lost_sections = report_degraded_sections(report)
-        if degraded_reason:
-            logger.warning(
-                "Ticker report for %s/%s NOT cached — degraded (%s). The caller is "
-                "responsible for refunding credits on a degraded report.",
-                ticker, persona_key, degraded_reason,
-            )
-            report["_degraded"] = degraded_reason
-        elif lost_sections:
+        if lost_sections:
             logger.warning(
                 "[report-partial-not-cached] Ticker report for %s/%s NOT cached — "
                 "Financials sections lost to a degraded upstream build: %s. Delivered to "
@@ -222,35 +248,4 @@ class TickerReportService:
         company_name = out.profile.get("companyName", ticker)
         prompt = build_stage_a_prompt(persona, company_name, ticker, evidence)
 
-        try:
-            # Stage A runs with a thinking cap (SYSTEM_DESIGN_GUIDELINES 9b.7).
-            # MEASURED on MSFT/warren_buffett via scripts/eval_report_thinking.py
-            # (2026-08-27): default 1,715-2,295 thought tokens and 18.1s, versus
-            # 0 and 6.9s at budget 0 — same 11 top-level keys, parseable at every
-            # budget. Thought tokens bill at the OUTPUT rate.
-            #
-            # Its OWN setting, separate from Stage B's, because this is the call
-            # that decides thesis / pros / cons / moat / valuation on a 20-credit
-            # product and "valid JSON with 11 keys" does not certify that the
-            # judgement survived. Set REPORT_STAGE_A_THINKING_BUDGET negative in
-            # the environment to restore the model default without touching
-            # Stage B, and re-run the eval before trusting either way.
-            result = await self.gemini.generate_json(
-                prompt=prompt,
-                system_instruction=persona.system_prompt,
-                thinking_budget=stage_a_thinking_budget(),
-            )
-            shell = parse_stage_a_response(result.get("text") or "")
-            if shell is None:
-                logger.error(
-                    f"Stage A returned unparseable JSON for {ticker}; "
-                    f"using honest fallback shell."
-                )
-                return _mark_degraded(stage_a_fallback(), "stage_a_unparseable")
-            return shell
-        except Exception as e:
-            logger.error(
-                f"Stage A generation failed for {ticker}: "
-                f"{type(e).__name__}: {e}"
-            )
-            return _mark_degraded(stage_a_fallback(), f"stage_a_{type(e).__name__}")
+        return await generate_stage_a_shell(self.gemini, persona, ticker, prompt)

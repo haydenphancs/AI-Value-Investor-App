@@ -181,7 +181,7 @@ enum APIEndpoint: Sendable {
     case deletePriceAlert(id: String)
 
     // MARK: - Search chips
-    /// "Trending searches" / "Most added" / "Popular" chips for every search screen's empty
+    /// "Trending searches" / "Most added" / "Well-known names" chips for every search screen's empty
     /// state. Impersonal, cached an hour server-side; fetched by `SearchTrendingStore`.
     case getSearchTrending
     /// A tap on a search RESULT row — never a chip or a recent-search row. Fire-and-forget;

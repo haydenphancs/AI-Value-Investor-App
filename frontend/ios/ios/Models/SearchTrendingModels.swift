@@ -3,7 +3,7 @@
 //  ios
 //
 //  The chips every search screen shows before the user types: "Trending searches",
-//  "Most added" and the curated "Popular" fallback (GET /api/v1/search/trending).
+//  "Most added" and the curated "Well-known names" fallback (GET /api/v1/search/trending).
 //
 //  Wire types first, UI types second, co-located per the Models convention. The backend
 //  half is `backend/app/schemas/search_trending.py`; `tests/test_search_trending_schema_parity.py`
@@ -176,11 +176,15 @@ struct SearchTrendingSection: Identifiable, Equatable {
 
     /// Neutral wording on purpose — no counts, no rank marks, no "hot"/"top". The lists are
     /// general and impersonal, never a recommendation (test-pinned word list).
+    ///
+    /// `.popular` keeps its wire name, but the list is hand-picked, so its title must not
+    /// claim popularity nothing measured. "Names", not "companies": the all-assets list also
+    /// holds SPY and BTC. Never "Suggested" or "Picks", which read as advice in a finance app.
     var title: String {
         switch kind {
         case .trendingSearches: return "Trending searches · \(windowDays) days"
         case .mostAdded: return "Most added · \(windowDays) days"
-        case .popular: return "Popular"
+        case .popular: return "Well-known names"
         }
     }
 

@@ -61,7 +61,7 @@ class _StubGemini:
         self._text = text
         self.last_prompt = None
 
-    async def generate_json(self, prompt, system_instruction=None):
+    async def generate_json(self, prompt, system_instruction=None, usage_tag=None):
         self.last_prompt = prompt
         return {"text": self._text}
 
@@ -145,7 +145,7 @@ async def test_synthesize_keeps_fallback_on_error():
     fallback = report["critical_factors"]
 
     class _Boom:
-        async def generate_json(self, prompt, system_instruction=None):
+        async def generate_json(self, prompt, system_instruction=None, usage_tag=None):
             raise RuntimeError("quota")
 
     await synthesize_critical_factors(report, PERSONA, _Boom(), "EV")

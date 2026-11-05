@@ -33,6 +33,13 @@ _ABSENT = object()
 _NOW = datetime.now(timezone.utc).isoformat()
 
 
+@pytest.fixture(autouse=True)
+def _schema_gate_passes(monkeypatch):
+    """These reports are minimal on purpose: the model stamp is the one thing under test, and
+    the schema gate on the shared lookup would otherwise refuse each of them first."""
+    monkeypatch.setattr(rs, "report_schema_problem", lambda report: None)
+
+
 def _report(version=_ABSENT, *, moat: bool = True) -> dict:
     blob = {"symbol": "JOBY", "quality_score": 40.0, GROUNDING_FREE_KEY: True,
             # FMP-source Wall Street block: the DCF gates pass whatever DCF_ENABLED is.

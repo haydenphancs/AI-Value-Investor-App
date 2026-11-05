@@ -36,6 +36,15 @@ _DEGRADED_KEY = "_stage_a_degraded"
 # Set on the *assembled report* by the orchestrators, for endpoint-level refund decisions.
 REPORT_DEGRADED_KEY = "_degraded"
 
+# The model answered, but the answer was unusable. Everything else in this family is the
+# model not answering, which is what GEMINI_UNAVAILABLE says. `degraded_error_code` reads this.
+BAD_ANSWER_REASONS = frozenset({
+    "stage_a_unparseable",
+    "stage_a_malformed",
+    "report_schema_invalid",
+    "thesis_empty",
+})
+
 # POSITIVE provenance stamp: set on EVERY assembled report by `assemble_report` (True only
 # when its collection was built by code with no Google Search grounding — the collection's
 # own `grounding_free` field). Required by every reader that serves a report ACROSS users
@@ -84,7 +93,9 @@ class DegradedReportError(Exception):
     completion write and the `upsert_cached_report` seed that would otherwise poison the
     shared cache for every other user for the rest of the close cycle.
 
-    Maps to `ErrorCode.GEMINI_UNAVAILABLE`, matching the direct path's 503.
+    Maps through `error_response.degraded_error_code`: REPORT_GENERATION_FAILED when the model
+    answered badly (`BAD_ANSWER_REASONS`), GEMINI_UNAVAILABLE when it did not answer. The
+    direct path reads the same mapping.
     """
 
     def __init__(self, reason: str, ticker: str = "", persona: str = ""):

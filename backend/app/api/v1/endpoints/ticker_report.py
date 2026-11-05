@@ -34,6 +34,7 @@ from app.services.dcf_report_gate import report_dcf_source_matches, strip_caydex
 from app.services.report_degradation import GROUNDING_FREE_KEY, report_is_grounding_free
 from app.api.error_response import (
     ErrorCode,
+    degraded_error_code,
     error_response_from_exception,
     make_error_response,
 )
@@ -194,7 +195,16 @@ async def get_ticker_report(
     if cached is not None:
         logger.info(f"ticker_report_cache HIT for {ticker}/{persona} — free serve")
         result, err = _validate_report(cached, ticker, persona)
-        return err if err is not None else result
+        if err is None:
+            return result
+        # A MISS, not an error, exactly as FREE PATH 1 treats the same failure: answering
+        # DATA_INCOMPLETE here told every caller "this report is broken" until the next close.
+        # The request falls through to a real, billable generation of a report that decodes.
+        logger.warning(
+            "ticker_report_cache row for %s/%s failed schema validation — treating as a "
+            "MISS rather than serving a payload iOS cannot decode",
+            ticker, persona,
+        )
 
     # ── PER-USER SINGLE-FLIGHT: one billable generation per (user, ticker, persona).
     #    A same-user request that finds its own generation still running JOINS it — no
@@ -410,15 +420,28 @@ async def _billable_generation(ticker: str, persona: str, user: dict):
                 _refund_sync, what=f"report_refund {charge_ref}",
             )
             returned = not refund_did_not_happen(refund_result)
+            code = degraded_error_code(degraded)
+            lead = (
+                "The report failed to generate"
+                if code is ErrorCode.REPORT_GENERATION_FAILED
+                else "Analysis is temporarily unavailable"
+            )
+            wait = (
+                "please try again"
+                if code is ErrorCode.REPORT_GENERATION_FAILED
+                else "please try again in a few minutes"
+            )
             return make_error_response(
-                ErrorCode.GEMINI_UNAVAILABLE,
-                message=f"report generation degraded for {ticker}/{persona}: {degraded}",
+                code,
+                # The reason stays in the log line above. It can be
+                # `stage_a_<ExceptionClass>`, which names the provider, and this field goes
+                # to the client verbatim (CLAUDE.md invariant 7).
+                message=f"report generation degraded for {ticker}/{persona}",
                 status_code=503,
                 user_message=(
-                    "Analysis is temporarily unavailable. Your credits were returned — "
-                    "please try again in a few minutes."
+                    f"{lead}. Your credits were returned — {wait}."
                     if returned else
-                    "Analysis is temporarily unavailable — please try again in a few minutes."
+                    f"{lead} — {wait}."
                 ),
                 action="retry",
             )

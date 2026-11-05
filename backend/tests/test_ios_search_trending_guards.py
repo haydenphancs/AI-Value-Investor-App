@@ -166,12 +166,26 @@ def test_a_pick_is_sent_at_most_once_per_window_and_remembered_after_success():
 
 # ── 4. The organism: eager, neutral, honest ───────────────────────────────────
 
-def test_the_organism_is_eager_and_says_it_is_not_a_recommendation():
+def test_the_organism_is_eager_and_captions_only_a_list_built_from_activity():
     body = _block(ORGANISM, "var body: some View")
     assert "Lazy" not in body
-    assert "Not a recommendation." in ORGANISM
-    assert "Based on activity in Caydex." in ORGANISM
-    assert "sections.contains(where: \\.isLive)" in ORGANISM
+    # Owner, 2026-11-05: the line is gone from every search screen. `ORGANISM` is
+    # comment-stripped, so a comment naming it cannot satisfy this.
+    assert "recommendation" not in ORGANISM.lower()
+    # Once, under the LAST live list: with [trending, curated] a caption at the end of the
+    # stack would say the hand-picked list came from activity.
+    gate = _block(ORGANISM, "private var captionedSectionID: String?")
+    assert "sections.last(where: \\.isLive)?.id" in gate
+    rows = _block(body, "ForEach(sections) { section in")
+    caption = _block(rows, "if section.id == captioned {")
+    assert 'Text("Based on activity in Caydex.")' in caption
+    assert body.count("Text(") == 2, "the section title and that one caption, nothing else"
+
+
+def test_the_curated_list_never_claims_to_be_popular():
+    title = _block(MODELS, "var title: String")
+    assert 'case .popular: return "Well-known names"' in title
+    assert '"Popular"' not in MODELS, "a hand-picked list: nothing measured its popularity"
 
 
 def _string_literals(src: str) -> list:

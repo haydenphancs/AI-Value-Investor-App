@@ -35,6 +35,13 @@ BACKEND = Path(__file__).resolve().parents[1]
 _ABSENT = object()
 
 
+@pytest.fixture(autouse=True)
+def _schema_gate_passes(monkeypatch):
+    """These reports are minimal on purpose: the model stamp is the one thing under test, and
+    the schema gate on the shared lookup would otherwise refuse each of them first."""
+    monkeypatch.setattr(rs, "report_schema_problem", lambda report: None)
+
+
 def _report(block=_ABSENT, *, source: str = "caydex") -> dict:
     """A minimal stored report as the shared lookup reads it back from JSONB."""
     ws: dict = {"dcf_source": source}

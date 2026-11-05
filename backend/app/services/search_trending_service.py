@@ -1,5 +1,5 @@
 """
-The search-screen chips: "Trending searches", "Most added" and the curated "Popular" fallback.
+The search-screen chips: "Trending searches", "Most added" and the curated fallback.
 
 READ PATH, IMPERSONAL. Every caller gets the same lists; nothing here reads, keys on or
 logs the caller (an AST test in tests/test_search_trending_service.py fails the build if a
@@ -13,8 +13,9 @@ Where the numbers come from (migration 179):
 Both enforce the privacy floor of 3 INSIDE SQL, and this module drops anything below it
 again. The lists never carry a count.
 
-When too little real activity qualifies, a section falls back to ONE curated "Popular"
-section (backend/data/search_trending_popular.json), honestly labelled — never "Trending".
+When too little real activity qualifies, a section falls back to ONE curated section (kind
+`popular`, backend/data/search_trending_popular.json). The list is hand-picked, so the app
+labels it "Well-known names", never "Popular" or "Trending": nothing measured its popularity.
 
 Cache: in memory only, 1 h (a degraded answer for 60 s), with `_inflight` so concurrent
 first callers share one computation. There is no Supabase tier: the upstream IS Supabase —

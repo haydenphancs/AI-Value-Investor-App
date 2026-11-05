@@ -9,7 +9,7 @@ router-level `get_current_user_id` makes a route added here gated by default.
 
 Neither route can break a search screen:
   • GET is impersonal (the same lists for everyone) and never errors — the service falls
-    back to the curated "Popular" lists.
+    back to the curated "Well-known names" lists.
   • POST always answers 204, whether the pick was counted, de-duplicated, invalid or the
     write failed. The app fires it and forgets it, and a uniform answer reveals nothing
     about what the server knows. No new ErrorCode, so no iOS AppError change.

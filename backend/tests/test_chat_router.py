@@ -155,6 +155,19 @@ async def test_router_empty_specialists_falls_back_general():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("text", [None, "", "   \n"])
+async def test_a_blank_answer_is_a_degraded_route_not_a_classification(text, caplog):
+    """A blocked answer read as `{}` and came back degraded=False, which `select_model` takes
+    as proof the turn was classified. Not the same as the model answering with no lens."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger=chat_router.logger.name):
+        r = await chat_router.route_question(_FakeGemini(text), "q")
+    assert r["degraded"] is True and r["specialists"] == ["general"]
+    assert "blank answer" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_router_bad_json_falls_back():
     g = _FakeGemini("not json at all")
     r = await chat_router.route_question(g, "q")

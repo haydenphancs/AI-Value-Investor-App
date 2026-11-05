@@ -901,6 +901,14 @@ def report_degraded_sections(report: Any) -> List[str]:
     return [str(raw)] if raw else []
 
 
+def record_degraded_section(report: Dict[str, Any], section: str) -> None:
+    """Add one lost section to a report, keeping any `assemble_report` already recorded. Every
+    shared cache refuses a report that has one; its buyer still gets it."""
+    lost = report_degraded_sections(report)
+    if section not in lost:
+        report[DEGRADED_SECTIONS_KEY] = [*lost, section]
+
+
 # Growth: the FMP leg → the series it feeds (GrowthService._build_growth). A failed leg
 # leaves those series EMPTY in the build; the others are complete.
 _GROWTH_LEG_SERIES: Dict[str, Tuple[str, ...]] = {
@@ -3198,7 +3206,7 @@ class TickerReportDataCollector:
         insider_data = dict(out.insider_data_partial)
         insider_ai = ai.get("insider_analysis") or {}
         insider_data["ownership_note"] = (
-            insider_ai.get("ownership_note")
+            _stage_a_text(insider_ai.get("ownership_note"))
             or insider_data.get("ownership_note")
         )
         # Capital Allocation block (buybacks + dividends) — reuses the same
@@ -3532,45 +3540,27 @@ class TickerReportDataCollector:
             n_total_peers=len(out.peer_ranks),
             focal_roic_ttm=out.focal_roic_ttm,
         )
-        # Coverage-aware insight + durability note: when one or more
-        # pillars fall flat because the industry's real moats live
-        # outside the financial-statement lens (mining, banks, insurers,
-        # REITs, utilities, energy), append a short explanation so the
-        # user understands a low radar corner is industry-normal rather
-        # than a company weakness. The same note is appended to BOTH
-        # the durability note (rendered as "Insight" under the radar)
-        # AND the competitive insight (iOS no longer renders it — its
-        # `competitiveInsightSection` was removed in 5672700d and stays
-        # removed — but the PDF and the report chat still read it).
-        # Suffix is suppressed on the "Data unavailable"
-        # placeholder for each field, since appending to a placeholder
-        # reads awkwardly.
-        ai_competitive_insight = ai_moat.get("competitive_insight")
-        ai_durability_note = ai_moat.get("durability_note")
-        base_competitive_insight = (
-            ai_competitive_insight or "Data unavailable for this ticker."
-        )
-        base_durability_note = (
-            ai_durability_note or "Data unavailable for this ticker."
-        )
-        coverage_note: Optional[str] = None
-        if ai_competitive_insight or ai_durability_note:
-            # Compute once; reuse across both fields. Returns None when
-            # every pillar resolved cleanly, in which case no suffix is
-            # added anywhere.
-            coverage_note = _build_moat_coverage_note(moat_dims, focal_industry)
+        # Coverage note: when one or more pillars fall flat because the industry's real moats
+        # live outside the financial-statement lens (mining, banks, insurers, REITs,
+        # utilities, energy), the user should learn that a low radar corner is
+        # industry-normal rather than a company weakness. Stage A leaves both narrative
+        # fields empty and Stage B overwrites them, so a suffix added here never survived.
+        # The note travels under `_coverage_note` and `build_narrative_jobs` pops it and
+        # appends it to real model text on BOTH fields: the durability note (rendered as
+        # "Insight" under the radar) and the competitive insight (iOS no longer renders it,
+        # its `competitiveInsightSection` was removed in 5672700d, but the PDF and the report
+        # chat still read it). The "Data unavailable" placeholder never gets a suffix.
         moat_competition = {
             "market_dynamics": deterministic_market_dynamics,
             "dimensions": moat_dims,
             "durability_note": (
-                base_durability_note
-                + (coverage_note if (coverage_note and ai_durability_note) else "")
+                ai_moat.get("durability_note") or "Data unavailable for this ticker."
             ),
             "competitors": deterministic_competitors,
             "competitive_insight": (
-                base_competitive_insight
-                + (coverage_note if (coverage_note and ai_competitive_insight) else "")
+                ai_moat.get("competitive_insight") or "Data unavailable for this ticker."
             ),
+            "_coverage_note": _build_moat_coverage_note(moat_dims, focal_industry),
             # The ORDER MARKER every "most direct first" claim depends on (chat,
             # iOS caption, Stage-B prompts, PDF). Always "threat" / "industry_peers"
             # now: the one directness-ranked list ("direct" / "research") came from
@@ -3638,7 +3628,7 @@ class TickerReportDataCollector:
             # `measured` = did the AUTHORITATIVE tier actually produce anything? With
             # FRED unconfigured `fred_factors` is empty AND no FRED read happened, so an
             # empty risk set means "not measured", not "nothing tripped".
-            "headline": ai_macro.get("headline") or _fallback_macro_headline(
+            "headline": _stage_a_text(ai_macro.get("headline")) or _fallback_macro_headline(
                 threat_level, risk_factors, measured=macro_measured
             ),
             "risk_factors": risk_factors,
@@ -3790,7 +3780,7 @@ class TickerReportDataCollector:
             # Hard cap at 5 ("never more than 5") — the Stage A prompt targets
             # 2-3, this is the deterministic safety net. Applied before Stage B
             # so only the kept factors get narrative jobs.
-            "critical_factors": list(ai.get("critical_factors") or [])[:5],
+            "critical_factors": _sanitize_stage_a_factors(ai.get("critical_factors")),
 
             "disclaimer_text": DISCLAIMER,
         }
@@ -8790,7 +8780,7 @@ def _classify_industry_archetype(industry: Optional[str]) -> Optional[str]:
     coverage-note. Returns None when no archetype matches; the caller
     falls back to a generic explanation.
     """
-    if not industry:
+    if not isinstance(industry, str) or not industry:
         return None
     lo = industry.lower()
     for archetype, keywords in _MOAT_ARCHETYPE_KEYWORDS:
@@ -10778,16 +10768,51 @@ def _derive_macro_vital(
     }
 
 
+def _stage_a_text(value: Any) -> Optional[str]:
+    """A Stage A free-text value, or None. The model can answer any type here, and one wrong
+    type used to fail the whole report at the schema check after Stage B was paid for."""
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _sanitize_stage_a_factors(raw: Any) -> List[Dict[str, Any]]:
+    """Stage A's critical factors in the shape `CriticalFactorResponse` requires, at most 5.
+
+    A factor with no title cannot be written or shown, so it is dropped. Stage B writes
+    `description` and `watch`, and synthesis usually replaces the list, so a missing one is
+    filled, not fatal.
+    """
+    if not isinstance(raw, list):
+        return []
+    factors: List[Dict[str, Any]] = []
+    for factor in raw:
+        if not isinstance(factor, dict) or not _stage_a_text(factor.get("title")):
+            continue
+        factors.append({
+            **factor,
+            "severity": _stage_a_text(factor.get("severity")) or "medium",
+            "description": _stage_a_text(factor.get("description")) or "",
+            "watch": _stage_a_text(factor.get("watch")),
+        })
+    return factors[:5]
+
+
 def _sanitize_thesis(thesis: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Pydantic-safe core_thesis. Bull/bear cap to 5 each (the prompt also
     enforces a signal-driven 2-5 count; this is the post-write defense)."""
     if not isinstance(thesis, dict):
         return {"bull_case": [], "bear_case": []}
+    def _points(raw: Any) -> List[str]:
+        # Only non-empty strings: `{"bull_case": 5}` used to raise TypeError in `list()`,
+        # and a bare string would have become one bullet per character.
+        if not isinstance(raw, list):
+            return []
+        return [p for p in raw if isinstance(p, str) and p.strip()][:5]
+
     # ensure_insider_label: a Stage-A fallback bullet citing insider buy/sell
     # counts ("55 sells vs 1 buy") must say "insider" — these bullets render with
     # no section header, and the Stage-A prompt has no self-labeling rule.
-    bull = [ensure_insider_label(p) for p in list(thesis.get("bull_case") or [])[:5]]
-    bear = [ensure_insider_label(p) for p in list(thesis.get("bear_case") or [])[:5]]
+    bull = [ensure_insider_label(p) for p in _points(thesis.get("bull_case"))]
+    bear = [ensure_insider_label(p) for p in _points(thesis.get("bear_case"))]
     return {"bull_case": bull, "bear_case": bear}
 
 

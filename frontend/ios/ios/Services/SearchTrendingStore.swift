@@ -2,8 +2,8 @@
 //  SearchTrendingStore.swift
 //  ios
 //
-//  The search-screen chips ("Trending searches" / "Most added" / "Popular") and the
-//  device half of recording a search pick.
+//  The search-screen chips ("Trending searches" / "Most added" / "Well-known names") and
+//  the device half of recording a search pick.
 //
 //  ONE shared store, not a per-screen fetch, for two reasons:
 //    • the payload is impersonal and identical for every search surface (Home search from
@@ -72,7 +72,7 @@ final class SearchTrendingStore {
 
     // MARK: - Reading
 
-    /// The sections one surface shows. Never empty: the bundled "Popular" list covers a
+    /// The sections one surface shows. Never empty: the bundled curated list covers a
     /// cold start, an offline launch and a backend that predates the route.
     func sections(for scope: Scope) -> [SearchTrendingSection] {
         if let remote {

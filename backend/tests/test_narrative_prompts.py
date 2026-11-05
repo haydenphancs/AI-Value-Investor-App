@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 import re
 
+import logging
+
 import pytest
 
 from app.services.agents import narrative_prompts as np_
@@ -127,6 +129,125 @@ def test_stage_a_prompt_carries_the_eleven_top_level_keys():
     fallback = np_.stage_a_fallback()
     for key in ("quality_score", "core_thesis", "moat_competition", "macro_data", "critical_factors"):
         assert key in fallback, f"fallback shell lacks {key}"
+
+
+def test_the_prompt_stops_asking_for_what_assemble_report_discards():
+    """Both lists were long, were never read, and every extra line is one more place for the
+    model to break the JSON. The 11 top-level keys stay."""
+    prompt = np_.build_stage_a_prompt(PERSONA, "Apple Inc.", "AAPL", "EVIDENCE", deep_findings="")
+    assert '"risk_factors"' not in prompt and "macro risk_factors" not in prompt
+    assert '"competitors"' not in prompt and "3-5 competitors" not in prompt
+    assert "market_dynamics" in prompt and '"dimensions"' in prompt
+
+
+def test_the_prompt_no_longer_invites_prose_in_the_critical_factor_placeholders():
+    """The GOOGL break sat on a `watch` line: the model wrote prose into a field it was told to
+    leave blank, because another rule called each factor "a concern paired with what to watch
+    next". In 5 of 9 baseline answers it did. Stage B reads only title and severity."""
+    prompt = np_.build_stage_a_prompt(PERSONA, "Apple Inc.", "AAPL", "EVIDENCE", deep_findings="")
+    assert "what to watch next" not in prompt
+    assert 'description and watch stay ""' in prompt
+
+
+def test_guidance_rules_appear_only_with_a_transcript():
+    evidence = "EARNINGS-CALL TRANSCRIPT EXCERPT (verbatim — use only quoted figures):\nWe raised."
+    with_one = np_.build_stage_a_prompt(PERSONA, "Apple Inc.", "AAPL", evidence, deep_findings="")
+    without = np_.build_stage_a_prompt(PERSONA, "Apple Inc.", "AAPL", "EVIDENCE", deep_findings="")
+    assert "paste the verbatim sentence containing the guidance language" in with_one
+    assert "no earnings-call transcript was supplied" not in with_one
+    assert "paste the verbatim sentence containing the guidance language" not in without
+    assert "no earnings-call transcript was supplied" in without
+    assert '"guidance_quote"' in without, "the block keeps its shape either way"
+
+
+def test_guidance_quote_is_no_longer_told_two_opposite_things():
+    prompt = np_.build_stage_a_prompt(
+        PERSONA, "Apple Inc.", "AAPL", "EARNINGS-CALL TRANSCRIPT EXCERPT", deep_findings="",
+    )
+    leave_blank = next(line for line in prompt.splitlines() if line.startswith("- Leave every"))
+    assert "guidance_quote" not in leave_blank
+
+
+def test_the_key_list_is_the_prompt_and_the_fallback():
+    prompt = np_.build_stage_a_prompt(PERSONA, "Apple Inc.", "AAPL", "EVIDENCE", deep_findings="")
+    assert all(f'"{key}"' in prompt for key in np_.STAGE_A_TOP_LEVEL_KEYS)
+    assert len(np_.STAGE_A_TOP_LEVEL_KEYS) == 11
+    assert all(key in np_.stage_a_fallback() for key in np_.STAGE_A_TOP_LEVEL_KEYS)
+    assert np_.stage_a_shell_problem(np_.stage_a_fallback()) is None
+
+
+def test_parse_failure_is_a_warning_that_shows_the_break(caplog):
+    """The parser serves both syntheses too, so severity is the caller's call, and the line
+    must carry what the incident's did not: finish, length and the text around the break."""
+    broken = '{"macro": [{"description": "the "Other Bets" unit", "impact": 0.2}]}'
+    with caplog.at_level(logging.WARNING, logger=np_.logger.name):
+        got = np_.parse_stage_a_response(
+            broken, what="Thesis synthesis", ticker="GOOGL", persona="warren_buffett",
+            finish="STOP",
+        )
+    assert got is None
+    records = [r for r in caplog.records if "[report-json-unparseable]" in r.getMessage()]
+    assert len(records) == 1 and records[0].levelno == logging.WARNING
+    line = records[0].getMessage()
+    for token in ("what=Thesis synthesis", "ticker=GOOGL", "persona=warren_buffett",
+                  "finish=STOP", f"chars={len(broken)}", "Other Bets"):
+        assert token in line, token
+    assert "GOOGL" not in records[0].msg, "a constant template, so Sentry groups one issue"
+
+
+def test_the_excerpt_is_redacted(caplog):
+    key = "a" * 40
+    body = '{"a": "apikey=' + key + '" "oops"}'
+    with caplog.at_level(logging.WARNING, logger=np_.logger.name):
+        assert np_.parse_stage_a_response(body) is None
+    line = next(r.getMessage() for r in caplog.records if "around the break" in r.getMessage())
+    assert key not in line
+    assert "apikey=***" in line, "the secret sits inside the window, so redaction really ran"
+
+
+def test_the_excerpt_is_bounded(caplog):
+    body = '{"a": "' + "x" * 5000 + '" "oops", "b": "' + "y" * 5000 + '"}'
+    with caplog.at_level(logging.WARNING, logger=np_.logger.name):
+        assert np_.parse_stage_a_response(body) is None
+    line = next(r.getMessage() for r in caplog.records if "around the break" in r.getMessage())
+    assert "x" in line and len(line) < 600, "a bounded window, never the whole answer"
+
+
+@pytest.mark.parametrize("text", ["[1, 2]", "null", "5", '"text"'])
+def test_a_parsed_non_object_is_refused_with_a_warning(text, caplog):
+    with caplog.at_level(logging.WARNING, logger=np_.logger.name):
+        assert np_.parse_stage_a_response(text) is None
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert "not an object" in caplog.text
+
+
+def test_absurd_nesting_is_refused_not_raised():
+    assert np_.parse_stage_a_response("[" * 200_000) is None
+
+
+def test_a_blank_answer_is_none_and_the_caller_reports_it():
+    assert np_.parse_stage_a_response("") is None
+    assert np_.parse_stage_a_response(None) is None
+
+
+@pytest.mark.parametrize("shell, problem", [
+    ({}, "no_known_keys"),
+    ({"report": {"quality_score": 71}}, "no_known_keys"),
+    ({"ok": 1}, "no_known_keys"),
+    ({"quality_score": 71, "macro_data": "high risk"}, "macro_data_not_object"),
+    ({"quality_score": 71, "moat_competition": ["wide"]}, "moat_competition_not_object"),
+    ({"quality_score": 71, "core_thesis": 5}, "core_thesis_not_object"),
+    ({"quality_score": 71, "critical_factors": "Rates"}, "critical_factors_not_objects"),
+    ({"quality_score": 71, "critical_factors": ["Rates"]}, "critical_factors_not_objects"),
+    ({"quality_score": 71, "critical_factors": 5}, "critical_factors_not_objects"),
+    # A sparse but real shell is usable: `assemble_report` reads a gap as "never answered".
+    ({"quality_score": 71}, None),
+    ({"core_thesis": {"bull_case": [], "bear_case": []}}, None),
+    ({"quality_score": 0, "macro_data": None, "critical_factors": []}, None),
+    ({"quality_score": 71, "moat_competition": {}, "macro_data": ""}, None),
+])
+def test_stage_a_shell_problem(shell, problem):
+    assert np_.stage_a_shell_problem(shell) == problem
 
 
 def test_parse_stage_a_response_tolerates_fenced_and_broken_json():

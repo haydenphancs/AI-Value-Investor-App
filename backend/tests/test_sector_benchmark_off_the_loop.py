@@ -240,7 +240,7 @@ async def test_direct_report_assembles_off_the_loop(monkeypatch):
     monkeypatch.setattr(trs, "run_narrative_jobs", _async_noop)
     monkeypatch.setattr(trs, "synthesize_core_thesis", _async_noop)
     monkeypatch.setattr(trs, "synthesize_critical_factors", _async_noop)
-    monkeypatch.setattr(trs, "_degraded_reason", lambda shell: "stubbed")   # skip the cache write
+    monkeypatch.setattr(trs, "report_schema_problem", lambda report: None)
     monkeypatch.setattr(trs, "upsert_cached_report", _async_noop)
 
     svc = trs.TickerReportService.__new__(trs.TickerReportService)
@@ -406,7 +406,6 @@ async def test_deep_research_assembles_off_the_loop(monkeypatch):
     from types import SimpleNamespace
 
     from app.services.agents import research_agent as ra
-    from app.services.report_degradation import REPORT_DEGRADED_KEY, _DEGRADED_KEY
 
     seen: Dict[str, Any] = {}
 
@@ -438,7 +437,7 @@ async def test_deep_research_assembles_off_the_loop(monkeypatch):
     async def _research(out, evidence):
         return "findings"
 
-    shell = {"score": 7, _DEGRADED_KEY: "stage_a_fallback"}
+    shell = {"score": 7}
 
     async def _stage_a(out, evidence, research_text):
         return shell
@@ -451,5 +450,3 @@ async def test_deep_research_assembles_off_the_loop(monkeypatch):
     assert seen["thread"] != threading.get_ident(), "assemble_report ran ON the event loop"
     assert seen["args"] == ("AAPL", shell), "the thread got different inputs"
     assert report["ticker"] == "AAPL"
-    # The degradation marker must still cross the (now threaded) merge.
-    assert report[REPORT_DEGRADED_KEY] == "stage_a_fallback"

@@ -147,6 +147,34 @@ class _RowStore:
         return _Q()
 
 
+@pytest.mark.asyncio
+async def test_a_degraded_report_is_refunded_without_paging(monkeypatch, caplog):
+    """Its cause already logged the one ERROR. This site logging another (with a stack that
+    points at a constant `raise`) was one incident opening three Sentry issues."""
+    from app.services.report_degradation import DegradedReportError
+
+    _pdf, failed = _wire(monkeypatch, outcome=DegradedReportError(
+        "stage_a_unparseable", ticker="AAPL", persona="warren_buffett",
+    ))
+    with caplog.at_level(logging.INFO, logger=research_ep.logger.name):
+        await research_ep._run_research_task("r1", "AAPL", "warren_buffett", "u1")
+    assert failed == [("r1", "REPORT_GENERATION_FAILED")], "the refund claim must still run"
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    warned = [r for r in caplog.records if "Research task failed" in r.getMessage()]
+    assert len(warned) == 1 and warned[0].levelno == logging.WARNING
+    assert not warned[0].exc_info
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_failure_still_pages_with_its_stack(monkeypatch, caplog):
+    _pdf, failed = _wire(monkeypatch, outcome=RuntimeError("boom"))
+    with caplog.at_level(logging.INFO, logger=research_ep.logger.name):
+        await research_ep._run_research_task("r1", "AAPL", "warren_buffett", "u1")
+    assert len(failed) == 1
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1 and errors[0].exc_info
+
+
 def _wire_unclaimed(monkeypatch, row):
     store = _RowStore(row)
     pdf, failed = _wire(monkeypatch, outcome=RuntimeError("gemini down"))

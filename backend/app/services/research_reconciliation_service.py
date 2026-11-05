@@ -916,10 +916,10 @@ async def sweep_once(
                 f"Report orphaned in {row.get('status')!r} ({reason}) — "
                 f"worker died or hung"
             ),
-            user_message=(
-                "This analysis didn't finish in time, so your credits were "
-                "refunded. Please try again."
-            ),
+            # No word about credits: this blob is written in the same UPDATE as the claim,
+            # BEFORE `_settle` calls the refund RPC. `_notify_report_failed` and the card's
+            # chip state the real outcome.
+            user_message="This analysis didn't finish in time. Please try again.",
             details={
                 "report_id": row.get("id"),
                 "step": "reconciliation_sweep",

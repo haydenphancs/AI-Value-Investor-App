@@ -21,7 +21,8 @@ dispatcher's job — nothing here decides who is told.
 THE WINDOW. Neither kind goes out for a report older than yesterday: the daily pass's own
 rule (`earnings_sender.in_result_window`), which is narrower than the live days around a
 weekend or a holiday. A Friday report FMP fills on Monday lands, keeps its card and its sheet,
-and is marked handled here without a push.
+and is marked handled here with nothing further sent: a live push from its filing, if one went
+out inside the window, is all it gets.
 
 COPY. Informational, never directive (SYSTEM_DESIGN_GUIDELINES §11.7). A lock-screen banner
 sits OUTSIDE the authenticated app, which is all FMP's Order Form licenses for display, so an
@@ -152,9 +153,10 @@ def _prune(now: datetime) -> None:
 
 
 def _to_decide(snapshots: List[LiveSnapshot], today: date) -> List[LiveSnapshot]:
-    """The reports this round still has a decision on, oldest first. One outside the result
-    window is handled here, both kinds at once: no later round has anything left to decide on
-    it, and it reaches neither the cap nor the log again. Its keys leave with the live days,
+    """The reports this round still has a decision on, oldest first: the oldest leaves the
+    result window soonest, so the cap must hold back a newer one instead. One already outside
+    the window is handled here, both kinds at once: no later round has anything left to decide
+    on it, and it reaches neither the cap nor the log again. Its keys leave with the live days,
     like every other (`_prune`)."""
     open_reports = []
     for snap in snapshots:
@@ -166,8 +168,9 @@ def _to_decide(snapshots: List[LiveSnapshot], today: date) -> List[LiveSnapshot]
             continue
         _live_done.add(key)
         _surprise_done.add(key)
-        logger.info("earnings live push: %s %s is older than yesterday on %s — no push; its "
-                    "card and sheet stay", snap.symbol, snap.day.isoformat(), today.isoformat())
+        logger.info("earnings live push: %s %s is older than yesterday on %s — nothing further "
+                    "will be sent; its card and sheet stay", snap.symbol, snap.day.isoformat(),
+                    today.isoformat())
     return sorted(open_reports, key=lambda s: (s.day, s.symbol))
 
 

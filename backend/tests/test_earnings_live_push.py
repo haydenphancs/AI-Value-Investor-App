@@ -13,12 +13,14 @@ kinds — and the daily 16:00 ET sender — claim the SAME key. What is pinned h
   * each report is dispatched once per process (the 60 s loop re-hands every landing);
   * neither kind goes out for a report older than yesterday, the daily pass's own window, and
     such a report is handled once, for good;
+  * a round sends oldest first, so the cap cannot run a report out of that window;
   * the round cap's warning counts the reports still owed a push, nothing else.
 The dispatcher is a recorder — nothing here reaches APNs or Supabase.
 """
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List
@@ -223,6 +225,13 @@ def _warnings(caplog):
     return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
 
 
+def _owed(line: str) -> int:
+    """The count a cap warning states, read whole: "361 report(s)" also contains "1 report(s)"."""
+    found = re.search(r"reached, (\d+) report", line)
+    assert found, line
+    return int(found.group(1))
+
+
 @pytest.mark.asyncio
 async def test_the_cap_warning_counts_only_the_reports_still_owed(dispatch, monkeypatch, caplog):
     monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
@@ -233,7 +242,7 @@ async def test_the_cap_warning_counts_only_the_reports_still_owed(dispatch, monk
         await sender.dispatch_landings(fresh + done, NOW)
     assert len(dispatch.sent) == 60
     lines = _warnings(caplog)
-    assert len(lines) == 1 and "1 report(s)" in lines[0]
+    assert len(lines) == 1 and _owed(lines[0]) == 1
 
 
 @pytest.mark.asyncio
@@ -271,7 +280,7 @@ async def test_the_cap_warning_skips_reports_waiting_on_fmp(dispatch, monkeypatc
     with caplog.at_level(logging.WARNING, logger=sender.__name__):
         await sender.dispatch_landings(fresh + waiting, NOW)
     lines = _warnings(caplog)
-    assert len(lines) == 1 and "1 report(s)" in lines[0]
+    assert len(lines) == 1 and _owed(lines[0]) == 1
 
 
 @pytest.mark.asyncio
@@ -284,19 +293,20 @@ async def test_the_cap_warning_counts_a_seen_report_whose_fmp_beat_just_arrived(
     with caplog.at_level(logging.WARNING, logger=sender.__name__):
         await sender.dispatch_landings(fresh + seen, NOW)
     lines = _warnings(caplog)
-    assert len(lines) == 1 and "5 report(s)" in lines[0]
+    assert len(lines) == 1 and _owed(lines[0]) == 5
 
 
 @pytest.mark.asyncio
 async def test_the_cap_warning_with_the_result_flag_off(dispatch, monkeypatch, caplog):
+    """Beats, so only the flag stands between a report told live and a second send."""
     monkeypatch.setattr(settings, "EARNINGS_LIVE_RESULT_PUSH_ENABLED", False)
-    fresh = [_snap(f"A{i:03d}", eps=0.42, eps_pct=2.44, rev=17.1e9) for i in range(61)]
-    done = [_snap(f"Z{i:03d}", eps=0.42, eps_pct=2.44, rev=17.1e9) for i in range(300)]
+    fresh = [_snap(f"A{i:03d}", eps=0.60, eps_pct=46.34, rev=17.1e9) for i in range(61)]
+    done = [_snap(f"Z{i:03d}", eps=0.60, eps_pct=46.34, rev=17.1e9) for i in range(300)]
     _seed_done(done, surprise=False)
     with caplog.at_level(logging.WARNING, logger=sender.__name__):
         await sender.dispatch_landings(fresh + done, NOW)
     lines = _warnings(caplog)
-    assert len(lines) == 1 and "1 report(s)" in lines[0]
+    assert len(lines) == 1 and _owed(lines[0]) == 1
 
 
 @pytest.mark.asyncio
@@ -307,7 +317,60 @@ async def test_the_cap_warning_counts_reports_not_sends(dispatch, caplog):
         await sender.dispatch_landings(fresh, NOW)
     assert len(dispatch.sent) == 60
     lines = _warnings(caplog)
-    assert len(lines) == 1 and "1 report(s)" in lines[0]
+    assert len(lines) == 1 and _owed(lines[0]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("eps,estimate", [(0.42, 0.41), (0.42, 0.005)],
+                         ids=["in_line", "near_zero_estimate"])
+async def test_no_cap_warning_for_new_reports_with_nothing_to_send(
+        dispatch, monkeypatch, caplog, eps, estimate):
+    """The shipped flags, on reports this process has not decided yet: the round stops on them
+    and the next one sends nothing for them. The near-zero estimate has no honest surprise."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+    fresh = [_snap(f"A{i:03d}", eps=0.60, eps_pct=46.34) for i in range(60)]
+    quiet = [_snap(f"Z{i:03d}", eps=eps, eps_est=estimate) for i in range(5)]
+    with caplog.at_level(logging.WARNING, logger=sender.__name__):
+        await sender.dispatch_landings(fresh + quiet, NOW)
+    assert len(dispatch.sent) == 60
+    assert _warnings(caplog) == []
+
+
+_BEHIND_THE_CAP = {
+    "beat": {"eps": 0.60, "eps_pct": 46.34},
+    "miss": {"eps": 0.30, "eps_pct": -26.83},
+    "exactly_at_the_bar": {"eps": 21.0, "eps_est": 20.0, "eps_pct": 5.0},
+    "in_line": {"eps": 0.42, "eps_pct": 2.44},
+    "near_zero_estimate": {"eps": 0.42, "eps_est": 0.005},
+    "no_estimate": {"eps": 0.42, "eps_est": None},
+    "filing_figure": {"eps": 0.60, "eps_source": SOURCE_FILING, "eps_pct": 46.34},
+    "no_eps_yet": {"rev": 17.1e9, "rev_pct": 3.01},
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", list(_BEHIND_THE_CAP.values()), ids=list(_BEHIND_THE_CAP))
+@pytest.mark.parametrize("live,result", [(False, True), (True, False), (True, True)],
+                         ids=["shipped", "result_off", "both_on"])
+@pytest.mark.parametrize("told_live", [False, True], ids=["new", "told_live"])
+async def test_the_cap_warning_says_what_the_next_round_sends(
+        dispatch, monkeypatch, caplog, shape, live, result, told_live):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", live)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_RESULT_PUSH_ENABLED", result)
+    sends_per_beat = int(live) + int(result)
+    fresh = [_snap(f"A{i:03d}", eps=0.60, eps_pct=46.34)
+             for i in range(sender.MAX_SENDS_PER_ROUND // sends_per_beat)]
+    behind = [_snap(f"Z{i:03d}", **shape) for i in range(3)]
+    if told_live:
+        _seed_done(behind, surprise=False)
+    with caplog.at_level(logging.WARNING, logger=sender.__name__):
+        await sender.dispatch_landings(fresh + behind, NOW)
+    assert len(dispatch.sent) == sender.MAX_SENDS_PER_ROUND
+    lines = _warnings(caplog)
+    assert len(lines) <= 1
+    await sender.dispatch_landings(fresh + behind, NOW)
+    next_round = {s["ticker"] for s in dispatch.sent[sender.MAX_SENDS_PER_ROUND:]}
+    assert (_owed(lines[0]) if lines else 0) == len(next_round)
 
 
 # ── the result window ────────────────────────────────────────────────────────
@@ -386,6 +449,19 @@ async def test_a_report_that_leaves_the_window_gets_no_second_kind(dispatch):
 
 
 @pytest.mark.asyncio
+async def test_the_window_line_does_not_deny_a_live_push_the_report_already_got(dispatch, caplog):
+    filed = replace(_snap(eps=0.60, eps_source=SOURCE_FILING, eps_pct=46.34, preliminary=True),
+                    day=FRIDAY)
+    await sender.dispatch_landings([filed], _noon(SATURDAY))
+    with caplog.at_level(logging.INFO, logger=sender.__name__):
+        await sender.dispatch_landings([_beat(FRIDAY)], _noon(SUNDAY))
+    assert [s["kind"] for s in dispatch.sent] == [KIND_EARNINGS_LIVE]
+    (line,) = [r.getMessage() for r in caplog.records if "older than yesterday" in r.getMessage()]
+    assert "no push" not in line
+    assert "nothing further will be sent" in line and "its card and sheet stay" in line
+
+
+@pytest.mark.asyncio
 async def test_a_report_held_back_by_the_cap_past_midnight_is_not_told(dispatch):
     """The cap defers to the next round, and that round can be the next day."""
     fresh = [_beat(FRIDAY, f"A{i:03d}") for i in range(31)]
@@ -394,6 +470,24 @@ async def test_a_report_held_back_by_the_cap_past_midnight_is_not_told(dispatch)
     assert len(dispatch.sent) == 60
     await sender.dispatch_landings(fresh, _noon(SUNDAY))
     assert len(dispatch.sent) == 60, "the last report has left the window"
+
+
+@pytest.mark.asyncio
+async def test_the_oldest_report_goes_first_so_the_cap_cannot_run_it_out_of_the_window(
+        dispatch, monkeypatch):
+    """Saturday 23:59 ET is a Friday report's last round. A Saturday report the cap holds back
+    still has all of Sunday, so every report is told. Within a day, symbol order decides, not
+    the order they were handed over."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+    saturday = [_beat(SATURDAY, f"A{i:03d}") for i in reversed(range(sender.MAX_SENDS_PER_ROUND))]
+    reports = saturday + [_beat(FRIDAY, "ZZZ")]
+    await sender.dispatch_landings(reports, _noon(SATURDAY).replace(hour=23, minute=59))
+    assert len(dispatch.sent) == sender.MAX_SENDS_PER_ROUND
+    told = {s["ticker"] for s in dispatch.sent}
+    assert "ZZZ" in told
+    assert saturday[0].symbol not in told, "the last symbol of the newest day is the one to wait"
+    await sender.dispatch_landings(reports, _noon(SUNDAY).replace(hour=0))
+    assert {s["ticker"] for s in dispatch.sent} == {s.symbol for s in reports}
 
 
 @pytest.mark.asyncio

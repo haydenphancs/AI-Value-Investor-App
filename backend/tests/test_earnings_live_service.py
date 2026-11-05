@@ -21,7 +21,9 @@ What is pinned here, each a way the LIVE card could lie or cost too much:
     holds the records, the push memory and every reader: a landing is sent once however the
     days roll, and a report dated on a closed day lands, keeps its card and answers the sheet
     like any other;
-  * an awaiting card stays up until 12:00 ET on the next trading day and drops once.
+  * an awaiting card stays up until 12:00 ET on the next trading day and drops once;
+  * a report still awaiting never hides an older reported one, on the card or in the sheet
+    opened with no date, which always name the same report.
 Hermetic: inline fakes for FMP, SEC and the dispatcher; the clock is passed in.
 """
 from __future__ import annotations
@@ -2061,15 +2063,115 @@ def test_two_reports_in_the_window_draw_one_card_the_newest():
     assert (snap.day, snap.eps.actual) == (SATURDAY, 0.45)
 
 
-def test_an_awaiting_card_that_dropped_gives_way_to_the_older_report():
+def test_a_report_still_awaiting_never_hides_an_older_reported_one():
+    """A company does not report twice in a few days: the pending row is a leftover."""
     svc = _svc()
     svc.observe_rows(FRIDAY, [_row("INTC", FRIDAY, eps=0.44, rev=17.1e9)], _et(FRIDAY, 17))
     svc.observe_rows(SATURDAY, [_row("INTC", SATURDAY)], _et(SATURDAY, 9))
-    assert [s.day for s in svc.recent_snapshots(["INTC"], _et(MONDAY, 9))] == [SATURDAY]
-    assert [s.day for s in svc.recent_snapshots(["INTC"], _et(MONDAY, 12))] == [FRIDAY]
+    for at in ((SATURDAY, 22), (SUNDAY, 9), (MONDAY, 9), (MONDAY, 11, 59), (MONDAY, 12)):
+        (snap,) = svc.recent_snapshots(["INTC"], _et(*at))
+        assert (snap.day, snap.status, snap.eps.actual) == (FRIDAY, els.STATUS_REPORTED, 0.44), at
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reported,leftover,moments", [
+    (FRIDAY, SATURDAY, [(SUNDAY, 9), (MONDAY, 9), (MONDAY, 12)]),
+    (date(2026, 11, 25), date(2026, 11, 26), [(date(2026, 11, 27), 9), (date(2026, 11, 27), 12)]),
+], ids=["weekend", "thanksgiving"])
+async def test_a_pending_leftover_on_a_closed_day_keeps_the_reported_card_through_the_tick(
+        reported, leftover, moments, monkeypatch):
+    fmp = _FMP({reported: [_row("INTC", reported, eps=0.44, rev=17.1e9)],
+                leftover: [_row("INTC", leftover)]})
+
+    async def _dispatch(snaps, now):
+        pass
+
+    for day, hour in moments:
+        monkeypatch.setattr(ts, "_et_today", lambda d=day: d)
+        now = _et(day, hour)
+        await els.earnings_live_tick(now, fmp=fmp, watched=["INTC"], dispatch=_dispatch)
+        (snap,) = _svc().recent_snapshots(["INTC"], now)
+        assert (snap.day, snap.status, snap.eps.actual) == (
+            reported, els.STATUS_REPORTED, 0.44), (day, hour)
+
+
+def test_a_filing_figure_alone_makes_the_older_report_the_card():
+    svc = _svc()
+    svc.observe_rows(FRIDAY, [_row("INTC", FRIDAY)], _et(FRIDAY, 9))
+    svc.absorb_filing("INTC", FRIDAY, efs.FilingFigures(
+        accession="0000050863-26-000123", accepted_at=None, url=None, revenue=17.1e9),
+        _et(FRIDAY, 16, 10))
+    svc.observe_rows(SATURDAY, [_row("INTC", SATURDAY)], _et(SATURDAY, 9))
+    (snap,) = svc.recent_snapshots(["INTC"], _et(SUNDAY, 9))
+    assert (snap.day, snap.status, snap.preliminary) == (FRIDAY, els.STATUS_REPORTED, True)
+
+
+def test_a_held_figure_is_not_a_result_so_it_does_not_outrank_a_newer_awaiting_report():
+    """A dropped-digit EPS shows nothing yet, so its report reads awaiting like the other."""
+    svc = _svc()
+    svc.observe_rows(FRIDAY, [_row("INTC", FRIDAY, eps=0.04, eps_est=0.41, rev_est=None)],
+                     _et(FRIDAY, 17))
+    assert svc.snapshot("INTC", FRIDAY, _et(SUNDAY, 9)).eps.checking
+    svc.observe_rows(SATURDAY, [_row("INTC", SATURDAY)], _et(SATURDAY, 9))
+    (snap,) = svc.recent_snapshots(["INTC"], _et(SUNDAY, 9))
+    assert (snap.day, snap.status) == (SATURDAY, els.STATUS_AWAITING)
+
+
+def test_a_newer_reported_report_beats_an_older_one_still_awaiting():
+    """Some companies do report on a Saturday, and the Friday row is then the leftover."""
+    svc = _svc()
+    svc.observe_rows(FRIDAY, [_row("INTC", FRIDAY)], _et(FRIDAY, 9))
+    svc.observe_rows(SATURDAY, [_row("INTC", SATURDAY, eps=0.45, rev=17.2e9)], _et(SATURDAY, 11))
+    for at in ((SUNDAY, 9), (MONDAY, 9), (MONDAY, 12)):
+        assert [s.day for s in svc.recent_snapshots(["INTC"], _et(*at))] == [SATURDAY], at
+
+
+def test_two_reports_still_awaiting_draw_the_newest_and_drop_together():
+    svc = _svc()
+    svc.observe_rows(FRIDAY, [_row("INTC", FRIDAY)], _et(FRIDAY, 9))
+    svc.observe_rows(SATURDAY, [_row("INTC", SATURDAY)], _et(SATURDAY, 9))
+    assert [s.day for s in svc.recent_snapshots(["INTC"], _et(MONDAY, 11, 59))] == [SATURDAY]
+    assert svc.recent_snapshots(["INTC"], _et(MONDAY, 12)) == []
+
+
+def test_each_symbol_picks_its_own_card():
+    svc = _svc()
+    svc.observe_rows(FRIDAY, [_row("INTC", FRIDAY, eps=0.44, rev=17.1e9)], _et(FRIDAY, 17))
+    svc.observe_rows(SATURDAY, [_row("INTC", SATURDAY), _row("MSFT", SATURDAY)], _et(SATURDAY, 9))
+    assert [(s.symbol, s.day, s.status) for s in svc.recent_snapshots(
+        ["msft", "INTC", "intc"], _et(SUNDAY, 9))] == [
+            ("INTC", FRIDAY, els.STATUS_REPORTED), ("MSFT", SATURDAY, els.STATUS_AWAITING)]
+
+
+def _report_on(day: date, status: str) -> els.LiveSnapshot:
+    pending = els.LiveMetric(None)
+    return els.LiveSnapshot("INTC", day, status, None, pending, pending, False, None, None)
+
+
+@pytest.mark.parametrize("snaps,expected", [
+    ([], None),
+    ([(FRIDAY, els.STATUS_AWAITING)], FRIDAY),
+    ([(FRIDAY, els.STATUS_REPORTED), (SATURDAY, els.STATUS_AWAITING)], FRIDAY),
+    ([(SATURDAY, els.STATUS_AWAITING), (FRIDAY, els.STATUS_REPORTED)], FRIDAY),
+    ([(FRIDAY, els.STATUS_AWAITING), (SATURDAY, els.STATUS_REPORTED)], SATURDAY),
+    ([(FRIDAY, els.STATUS_REPORTED), (SATURDAY, els.STATUS_REPORTED)], SATURDAY),
+    ([(SATURDAY, els.STATUS_REPORTED), (FRIDAY, els.STATUS_REPORTED)], SATURDAY),
+    ([(FRIDAY, els.STATUS_AWAITING), (SATURDAY, els.STATUS_AWAITING)], SATURDAY),
+], ids=["empty", "one", "reported_oldest", "reported_oldest_unsorted", "reported_newest",
+        "two_reported", "two_reported_unsorted", "two_awaiting"])
+def test_newest_report_prefers_a_reported_report_then_the_date_in_any_order(snaps, expected):
+    picked = els.newest_report(_report_on(day, status) for day, status in snaps)
+    assert (picked.day if picked else None) == expected
 
 
 # The sheet.
+
+
+def _calendar_of(*rows: dict):
+    async def _calendar(fmp, today):
+        return list(rows)
+
+    return _calendar
 
 
 def _sheet_on(monkeypatch, today: date) -> ts.TrackingService:
@@ -2099,6 +2201,71 @@ async def test_without_a_date_the_sheet_takes_the_newest_report_before_today(mon
     _svc().observe_rows(SATURDAY, [_row("INTC", SATURDAY, eps=0.45, rev=17.2e9)],
                         _et(SATURDAY, 11))
     assert (await svc_obj.get_earnings_live("INTC")).report_date == SATURDAY.isoformat()
+
+
+REPORT_SHAPES = {
+    "nothing": None,
+    "pending": {},
+    "reported": {"eps": 0.44, "rev": 17.1e9},
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("friday", REPORT_SHAPES)
+@pytest.mark.parametrize("saturday", REPORT_SHAPES)
+@pytest.mark.parametrize("at", [(SUNDAY, 9), (MONDAY, 9), (MONDAY, 11, 59), (MONDAY, 12)],
+                         ids=["sunday", "monday_morning", "before_noon", "noon"])
+async def test_the_card_and_the_undated_sheet_always_name_the_same_report(
+        monkeypatch, friday, saturday, at):
+    """A wrong pick here reads "results aren't in yet" under a card that shows the figures."""
+    svc_obj = _sheet_on(monkeypatch, at[0])
+    monkeypatch.setattr(ts, "datetime", _FrozenDatetime(_et(*at)))
+    for day, shape in ((FRIDAY, friday), (SATURDAY, saturday)):
+        if REPORT_SHAPES[shape] is not None:
+            _svc().observe_rows(day, [_row("INTC", day, **REPORT_SHAPES[shape])], _et(day, 17))
+    cards = _svc().recent_snapshots(["INTC"], _et(*at))
+    sheet = await svc_obj.get_earnings_live("INTC")
+    if cards:
+        assert (sheet.report_date, sheet.status) == (cards[0].day.isoformat(), cards[0].status)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("today", [SUNDAY, MONDAY])
+async def test_a_report_still_awaiting_never_hides_an_older_reported_one_in_the_undated_sheet(
+        monkeypatch, today):
+    svc_obj = _sheet_on(monkeypatch, today)
+    _svc().observe_rows(FRIDAY, [_row("INTC", FRIDAY, eps=0.44, rev=17.1e9)], _et(FRIDAY, 17))
+    _svc().observe_rows(SATURDAY, [_row("INTC", SATURDAY)], _et(SATURDAY, 9))
+    sheet = await svc_obj.get_earnings_live("INTC")
+    assert (sheet.report_date, sheet.status, sheet.eps.actual) == (
+        FRIDAY.isoformat(), els.STATUS_REPORTED, 0.44)
+
+
+@pytest.mark.asyncio
+async def test_a_dated_sheet_still_answers_the_report_it_asked_for(monkeypatch):
+    """The card that was on screen before the older report filled still opens its own date."""
+    svc_obj = _sheet_on(monkeypatch, SUNDAY)
+    _svc().observe_rows(FRIDAY, [_row("INTC", FRIDAY, eps=0.44, rev=17.1e9)], _et(FRIDAY, 17))
+    _svc().observe_rows(SATURDAY, [_row("INTC", SATURDAY)], _et(SATURDAY, 9))
+    sheet = await svc_obj.get_earnings_live("INTC", SATURDAY)
+    assert (sheet.report_date, sheet.status) == (SATURDAY.isoformat(), els.STATUS_AWAITING)
+
+
+@pytest.mark.asyncio
+async def test_the_undated_sheet_keeps_answering_a_report_whose_card_has_dropped(monkeypatch):
+    svc_obj = _sheet_on(monkeypatch, MONDAY)
+    _svc().observe_rows(SATURDAY, [_row("INTC", SATURDAY)], _et(SATURDAY, 9))
+    assert _svc().recent_snapshots(["INTC"], _et(MONDAY, 12)) == []
+    sheet = await svc_obj.get_earnings_live("INTC")
+    assert (sheet.report_date, sheet.status) == (SATURDAY.isoformat(), els.STATUS_AWAITING)
+
+
+@pytest.mark.asyncio
+async def test_today_s_report_still_leads_the_undated_sheet(monkeypatch):
+    svc_obj = _sheet_on(monkeypatch, MONDAY)
+    monkeypatch.setattr(ts, "_cached_earnings_calendar", _calendar_of(_row("INTC", MONDAY)))
+    _svc().observe_rows(FRIDAY, [_row("INTC", FRIDAY, eps=0.44, rev=17.1e9)], _et(FRIDAY, 17))
+    assert (await svc_obj.get_earnings_live("INTC")).report_date == MONDAY.isoformat()
 
 
 @pytest.mark.asyncio

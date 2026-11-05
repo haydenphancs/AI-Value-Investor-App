@@ -67,6 +67,10 @@ STATUSES (no time of day exists on `/stable` rows, so the window is the report d
                  status `earnings_window_service` deliberately does not have (FMP lag and
                  reschedule duplicates make it misleading). An awaiting card stays up until
                  12:00 ET on the first trading day after its report, and drops once.
+  A symbol draws ONE card from the days before today (`newest_report`): the newest reported
+  report, else the newest one still up. A company does not report twice in a few days, so a
+  pending row beside a reported one is a leftover and never hides the figures. The sheet
+  opened with no date takes the same pick, and still answers a report whose card has dropped.
 
 GUARDS, each a defect found elsewhere in this repo:
   * a dropped-digit EPS (`_earnings_common.eps_digit_shift_suspect`) is held as "checking",
@@ -374,6 +378,12 @@ def snapshot_of(rec: _Record, today: date, now_et: datetime) -> LiveSnapshot:
         company_name=rec.company_name, eps=eps, revenue=revenue,
         preliminary=preliminary, checked_at=rec.checked_at, filing=rec.filing,
     )
+
+
+def newest_report(snaps: Iterable[LiveSnapshot]) -> Optional[LiveSnapshot]:
+    """PURE. Which of one symbol's reports from before today it shows, given in any order: the
+    newest reported one, else the newest (see STATUSES in the module docstring)."""
+    return max(snaps, key=lambda s: (s.status == STATUS_REPORTED, s.day), default=None)
 
 
 def iso_utc(when: Optional[datetime]) -> Optional[str]:
@@ -794,22 +804,18 @@ class EarningsLiveService:
         return snapshot_of(rec, n.date(), n)
 
     def recent_snapshots(self, symbols: Collection[str], now: datetime) -> List[LiveSnapshot]:
-        """The cards from before today worth showing (`recent_card_visible`), ONE per symbol:
-        the newest visible report's. iOS ids a card by ticker and date, so a Friday and a
-        Saturday report would otherwise be two cards."""
+        """The cards from before today worth showing (`recent_card_visible`), ONE per symbol
+        (`newest_report`). iOS ids a card by ticker and date, so a Friday and a Saturday report
+        would otherwise be two cards."""
         n = et_now(now)
-        today = n.date()
-        earlier = live_days(today)[:-1]
+        earlier = live_days(n.date())[:-1]
         out = []
         for symbol in sorted({s.upper() for s in symbols}):
-            for day in reversed(earlier):
-                rec = self._records.get((symbol, day))
-                if rec is None:
-                    continue
-                snap = snapshot_of(rec, today, n)
-                if recent_card_visible(snap.status, snap.day, n):
-                    out.append(snap)
-                    break
+            held = (self.snapshot(symbol, day, n) for day in earlier)
+            card = newest_report(s for s in held if s is not None
+                                 and recent_card_visible(s.status, s.day, n))
+            if card is not None:
+                out.append(card)
         return out
 
     def landed_snapshots(self, now: datetime) -> List[LiveSnapshot]:

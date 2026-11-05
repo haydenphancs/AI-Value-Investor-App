@@ -66,6 +66,7 @@ from app.services.earnings_live_service import (
     get_earnings_live_service,
     live_days,
     live_payload,
+    newest_report,
     one_row_per_report,
 )
 from app.services._earnings_common import (
@@ -1731,7 +1732,8 @@ class TrackingService:
         folded into the shared live records, skipping any older than a record's last own
         fetch; the earlier live days' are already in those records. The report is `requested`
         when given (it must lie between the previous trading day and today + 14), else
-        today's, else the newest one before today, else the next one in the window.
+        today's, else the one before today its card would name (`newest_report`), else the
+        next one in the window.
         """
         sym = symbol.upper()
         today = _et_today()
@@ -1760,14 +1762,14 @@ class TrackingService:
             for (_, d), entry in one_row_per_report(calendar, today, symbols={sym}).items()
             if d is not None
         }
-        held = [d for d in earlier if live.snapshot(sym, d, now) is not None]
+        held = newest_report(filter(None, (live.snapshot(sym, d, now) for d in earlier)))
 
         if requested is not None:
             day = requested
         elif today in rows:
             day = today
-        elif held:
-            day = held[-1]
+        elif held is not None:
+            day = held.day
         elif rows:
             day = min(rows)
         else:

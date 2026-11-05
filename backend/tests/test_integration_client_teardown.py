@@ -44,6 +44,12 @@ def _modules() -> list[Path]:
     return sorted(p for p in _INTEGRATIONS.glob("*.py") if p.name != "__init__.py")
 
 
+#: Constructors that create a pooled client which outlives the call that built it.
+_PERSISTENT_CONSTRUCTORS = frozenset({
+    "httpx.AsyncClient", "AsyncClient", "anthropic.AsyncAnthropic", "AsyncAnthropic",
+})
+
+
 def _constructs_persistent_client(tree: ast.AST) -> bool:
     """True if `httpx.AsyncClient(...)` is built anywhere outside an `async with` header.
 
@@ -67,7 +73,9 @@ def _constructs_persistent_client(tree: ast.AST) -> bool:
             if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
             else getattr(func, "id", "")
         )
-        if name in ("httpx.AsyncClient", "AsyncClient") and id(node) not in managed:
+        # An SDK client holding its own pooled HTTP client counts too: `anthropic.AsyncAnthropic`
+        # (the Claude second provider, 2026-10-30) keeps an httpx2 pool alive until closed.
+        if name in _PERSISTENT_CONSTRUCTORS and id(node) not in managed:
             return True
     return False
 

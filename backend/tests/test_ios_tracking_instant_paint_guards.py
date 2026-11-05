@@ -71,7 +71,7 @@ _PURGE = "func purgeTickers(notIn allowed: Set<String>) async -> Bool"
 
 # Every PortfolioStore write the server confirms, and the request it confirms.
 _CONFIRMED_WRITES = {
-    "private func syncTickers(for portfolioId: String) async throws": "apiClient.request(",
+    "private func syncTickers(for portfolioId: String, tickers: [String], ticket: Int, epoch: Int) async throws -> MembershipLinkResult": "apiClient.request(",
     "func setHoldings(_ items: [HoldingUpdateItem], in portfolioId: String) async throws -> Portfolio":
         "apiClient.request(",
     "func createPortfolio(named name: String) async throws -> Portfolio": "apiClient.request(",
@@ -595,6 +595,10 @@ _STILL_LOADING_GATES = {
     "func openNewPortfolioSheet()": "guard canEditPortfolio else",
     "func openEditPortfolioSheet()": "guard canEditPortfolio else",
     "func openManageTickersSheet()": "guard canEditPortfolio else",
+    # The shared ticker edits behind Manage Tickers, Edit Portfolio and the Holdings swipe
+    # (2026-10-31): a whole-list PUT built from a list the server never sent is data loss.
+    "func moveTickers(in portfolioId: String, to newOrder: [String])": "guard canEditPortfolio else",
+    "func removeTickers(_ tickers: [String], from portfolioId: String)": "guard canEditPortfolio else",
     "func removeAsset(_ asset: TrackedAsset)": "guard canEditHoldings else",
     "func removeAssetFromAll(_ asset: TrackedAsset)": "guard canEditHoldings else",
 }
@@ -960,7 +964,7 @@ MUTATIONS: list[tuple] = [
     ("store-task-clobbers", "load_returns_outcome", "pstore",
      _rep("if !Task.isCancelled { self.loadTask = nil }", "self.loadTask = nil"), "unregister a newer"),
     ("sync-no-bump", "confirmed_writes_bump", "pstore",
-     _W("private func syncTickers(for portfolioId: String) async throws", _rm("confirmedMutationCount &+= 1")),
+     _W(list(_CONFIRMED_WRITES)[0], _rm("confirmedMutationCount &+= 1")),
      "syncTickers"),
     ("holdings-no-bump", "confirmed_writes_bump", "pstore",
      _W(list(_CONFIRMED_WRITES)[1], _rm("confirmedMutationCount &+= 1")), "setHoldings"),
@@ -975,7 +979,7 @@ MUTATIONS: list[tuple] = [
     ("switch-no-bump", "confirmed_writes_bump", "pstore",
      _W(list(_CONFIRMED_WRITES)[6], _rm("confirmedMutationCount &+= 1")), "setActivePortfolio"),
     ("reorder-bumps-optimistically", "confirmed_writes_bump", "pstore",
-     _W(list(_CONFIRMED_WRITES)[5], _move_line_before("confirmedMutationCount &+= 1", "let previous = portfolios")),
+     _W(list(_CONFIRMED_WRITES)[5], _move_line_before("confirmedMutationCount &+= 1", "let previousOrder: [String: Int]")),
      "BEFORE the server confirmed"),
     # ── ViewModel: the account-snapshot contract ──
     ("seed-overwrites-live", "seed_precondition_first", "vm",

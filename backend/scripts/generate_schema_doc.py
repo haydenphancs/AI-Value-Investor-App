@@ -165,7 +165,10 @@ EXPECTED: dict[str, int] = {
     #   Supabase platform added storage.enforce_versioning_status_transition (with its trigger on
     #   storage.buckets) and dropped buckets_versioning_dark_check in the same window: storage.*,
     #   not counted here.
-    "tables": 156,
+    # Refreshed 2026-11-05 for migration 207 (catalog narration jobs): no new public table.
+    #   +2 tables -> storage.bucket_lifecycle_states + storage.lifecycle_abandoned_artifacts, both added
+    #                by the Supabase platform (public/fk/policies/rls/functions unchanged).
+    "tables": 158,
     "public": 117,
     "fk": 36,
     "policies": 124,

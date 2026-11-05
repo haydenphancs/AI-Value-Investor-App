@@ -69,11 +69,37 @@ def _sql_body(path: Path) -> str:
 # --------------------------------------------------------------------------
 # The subject table
 # --------------------------------------------------------------------------
+#: `STAGED_ARTICLES` (the style module): hand-written articles whose plates were generated on
+#: 2026-11-01 BEFORE the article joined the bundle (their narration is still being rendered). Their
+#: ARTICLES rows ship now so the paid plates can never re-roll in between. Each slug leaves the set the
+#: day it is in the bundle — `test_staged_plates_have_rows_and_leave_the_staged_set_once_integrated`.
+_STAGED_NOT_YET_IN_CATALOG = art.STAGED_ARTICLES
+
+
 def test_no_orphan_subject_entries():
     """A typo'd key generates art nothing points at. The reverse is legal on purpose —
     an article with no entry is exactly what --auto exists to fill."""
-    orphan = set(art.ARTICLES) - _authored_slugs()
+    orphan = set(art.ARTICLES) - _authored_slugs() - _STAGED_NOT_YET_IN_CATALOG
     assert not orphan, f"ARTICLES keys not present in money_moves.json: {sorted(orphan)}"
+
+
+def test_staged_plates_have_rows_and_leave_the_staged_set_once_integrated():
+    """The staged set is an exemption with an end: every staged slug keeps its ARTICLES row, and a
+    slug already in the bundle no longer needs (or may hold) the exemption — otherwise the set rots
+    into a second, unchecked table."""
+    assert _STAGED_NOT_YET_IN_CATALOG <= set(art.ARTICLES), \
+        sorted(_STAGED_NOT_YET_IN_CATALOG - set(art.ARTICLES))
+    integrated = _STAGED_NOT_YET_IN_CATALOG & _authored_slugs()
+    assert not integrated, (f"{sorted(integrated)} are in money_moves.json now — remove them from "
+                            "money_moves_art_style.STAGED_ARTICLES (the normal orphan and category checks "
+                            "cover them)")
+
+
+def test_the_generator_accepts_the_staged_rows_but_never_draws_them():
+    """`_check_article_table` (run first by every generate) must not refuse the staged rows, and a bare
+    run walks only the bundle's slugs, so no staged plate is redrawn before its article exists."""
+    art._check_article_table()
+    assert not (set(art.STAGED_ARTICLES) & {a["slug"] for a in art._load_articles()})
 
 
 def test_every_entry_has_a_known_treatment_and_matching_category():
@@ -81,11 +107,13 @@ def test_every_entry_has_a_known_treatment_and_matching_category():
     for slug, (category, treatment, subject) in art.ARTICLES.items():
         assert treatment in art.TREATMENTS, f"{slug}: unknown treatment {treatment!r}"
         assert category in art.PALETTES, f"{slug}: unknown category {category!r}"
+        assert len(subject) > 40, f"{slug}: subject too thin to render: {subject!r}"
+        if slug in _STAGED_NOT_YET_IN_CATALOG and slug not in meta:
+            continue    # no bundle row yet to compare the category with (STAGED_ARTICLES)
         assert meta[slug]["category"] == category, (
             f"{slug}: art table says {category!r}, money_moves.json says "
             f"{meta[slug]['category']!r} — the plate would be lit for one section and "
             f"filed under another")
-        assert len(subject) > 40, f"{slug}: subject too thin to render: {subject!r}"
 
 
 def test_battles_subjects_are_two_up():

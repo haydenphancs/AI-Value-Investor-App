@@ -149,7 +149,7 @@ struct SupportView: View {
         LegalSection(
             heading: "AI-generated content",
             paragraphs: [
-                "Research reports, summaries and the Cay AI assistant use large language models. AI output can be inaccurate, incomplete, or outdated, and can state wrong things confidently. Verify anything you intend to rely on against a primary source such as the company's SEC filings.",
+                "Research reports, summaries and the Cay AI assistant use large language models. Some Learn articles are also written with AI assistance from public filings and reviewed by Caydex before they are published, and Learn narration uses a synthetic voice. AI output can be inaccurate, incomplete, or outdated, and can state wrong things confidently. Verify anything you intend to rely on against a primary source such as the company's SEC filings.",
                 "Your chat messages are processed by a third-party AI provider so it can generate a response. Your name, email, account identifier, watchlist, portfolio and holdings are not sent with them. The app asks for your permission before any content is shared this way, and you can withdraw it in Settings. Details are in the Privacy Policy.",
                 "The investing personas are educational simulations of well-known investing styles. They are not affiliated with, endorsed by, or representative of the views of any real person."
             ]

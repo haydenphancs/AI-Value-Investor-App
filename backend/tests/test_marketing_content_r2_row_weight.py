@@ -140,6 +140,19 @@ TABLES: Dict[str, Tuple[Callable[[str], str], Callable[[object], str], Sequence[
         # Round 2 (overblock): the row-6 sample in body position (row 7 now owns the
         # sentence-initial label), and row 7's own.
         "Each word was crafted by people, not machines.", "Made by humans.",
+        # 2026-10-31: a self-written label on THIS text's purpose, the notice's "not an offer"
+        # restated, and the stock "consult a professional" sign-off.
+        "Educational content only.", "Not an offer to buy or sell.",
+        "Consult a financial professional before you invest.",
+    )),
+    "_SOURCE_REF_RES": (_plain, lambda row: "source_reference", (
+        "The fact sheet shows hardware sales are lumpy.",          # determiner + fact sheet
+        "The source compares warning signs to a dashboard light.",  # "the source" + reporting verb
+        "Watch for the flags it names.",                           # list noun + "it names"
+        "Per the source, hardware sales were lumpy.",              # a prefix frame
+        "Based on the facts provided, sales were lumpy.",          # "the facts provided"
+        "Debt matters, says the source.",                          # inverted attribution
+        "The case study tells a different story.",                 # the case study cited
     )),
     "_SAYING_SHAPE_RES+_SAYING_FRAME_RES": (_plain, lambda row: "famous_quote", (
         "Get greedy when everyone is fearful.",
@@ -213,7 +226,8 @@ def test_the_table_list_covers_every_row_table_the_scan_loops_over():
     covered = {a for t in TABLES for a in _parts(t)}
     assert covered == {"_COMPANY_ROWS_RE", "_FORECAST_RES", "_DIRECTIVE_RES", "_PROMISE_RES",
                        "_SAFETY_RES", "_DESCRIPTOR_RES", "_CTA_RES", "_ENDORSEMENT_RES",
-                       "_CODE_OWNED_RES", "_SAYING_SHAPE_RES", "_SAYING_FRAME_RES"}
+                       "_CODE_OWNED_RES", "_SAYING_SHAPE_RES", "_SAYING_FRAME_RES",
+                       "_SOURCE_REF_RES"}
 
 
 # ── W2V-07: the planner / wealth-manager phrases, by behaviour, not by the constant ─────────

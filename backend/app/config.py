@@ -87,6 +87,39 @@ class Settings(BaseSettings):
     # busy provider can hold a request open with keep-alive lines). Not retried when hit.
     NEWS_LLM_REQUEST_TIMEOUT_SECONDS: float = 120.0
 
+    # ── Claude as a SECOND provider (app/services/llm_provider.py, 2026-10-30) ──
+    # Owner: "it will not replace anything ... a second option like a fall back option". Four
+    # roles only — the marketing writer and judge, the Learn weekly writer and judge (its support
+    # checks included). Everything else stays on Gemini whatever these say. Per role "gemini"
+    # (default: byte-identical to before) or "claude" (Claude first; any Claude failure, refusal,
+    # timeout or used-up credits falls back to the same call on Gemini). Unknown → gemini + ERROR.
+    # No key → every role is gemini. WEB service only: the media worker never holds this key.
+    # Every Claude setting is CAYDEX_-prefixed on purpose: Claude Code sessions export CLAUDE_EFFORT,
+    # ANTHROPIC_BASE_URL (and may export ANTHROPIC_API_KEY), so the plain names would silently steer a
+    # local preview or calibration run (review 2026-10-30: CLAUDE_EFFORT=xhigh in this very shell).
+    CAYDEX_ANTHROPIC_API_KEY: Optional[str] = None
+    MARKETING_WRITER_PROVIDER: str = "gemini"
+    MARKETING_JUDGE_PROVIDER: str = "gemini"
+    LEARN_WRITER_PROVIDER: str = "gemini"
+    LEARN_JUDGE_PROVIDER: str = "gemini"
+    # Writer and judge are different models on purpose (a grader must not share the writer's
+    # blind spots) — llm_provider refuses a judge model equal to the writer model, logged.
+    CAYDEX_CLAUDE_WRITER_MODEL: str = "claude-sonnet-5-5"
+    CAYDEX_CLAUDE_JUDGE_MODEL: str = "claude-opus-5-5"
+    # low | medium | high | xhigh | max. Template prose and rubric grading: low is the cost floor.
+    CAYDEX_CLAUDE_EFFORT: str = "low"
+    CAYDEX_CLAUDE_MAX_TOKENS: int = Field(16000, ge=1024, le=32000)
+    # A TOTAL deadline per Claude call. ONE attempt, never retried on Claude: a failure goes
+    # straight to Gemini, so the marketing lease math adds exactly this once per model call. Capped
+    # at 240 s: the lease (Gemini's worst call 572 s + this + the 60 s margin) must stay under the
+    # worker's 15-minute poll session (marketing/main.py SCRIPT_POLL_BUDGET_SECONDS); a bad value
+    # fails the deploy with the field named.
+    CAYDEX_CLAUDE_REQUEST_TIMEOUT_SECONDS: float = Field(120.0, gt=0, le=240, allow_inf_nan=False)
+    # After used-up credits, a 429 or an auth refusal, every role skips Claude for this long
+    # (process-local). Used-up credits stay used up until the next billing cycle; an hour keeps
+    # the retry cost to one failed call an hour.
+    CAYDEX_CLAUDE_BREAKER_SECONDS: float = Field(3600.0, ge=0, le=86400, allow_inf_nan=False)
+
     # ── 90-day news-sentiment backfill (news_sentiment_backfill_service) ──
     # OFF by default: apply migration 181, deploy, run scripts/calibrate_sentiment_backfill.py,
     # then set true in Railway (documents/OWNER_TASKS.md §2).
@@ -1228,7 +1261,9 @@ class Settings(BaseSettings):
     # from an SEC-grounded fact sheet, narrated by the separate `learn_narrator` service, approved
     # by the owner in Telegram and only then written to `money_move_articles`. Every switch is
     # fail-closed: nothing builds until LEARN_WEEKLY_ENABLED, nothing publishes while
-    # LEARN_WEEKLY_DRY_RUN (frozen per piece at build time), and the `notification_job_state`
+    # LEARN_WEEKLY_DRY_RUN (frozen per piece when the row is created — the Thursday topic step for a
+    # Deep Dive, `topic.py` create_piece — so flip it before Thursday 18:00 ET to make that Friday
+    # live; the one later change is `ledger.promote_rehearsed_sync`), and the `notification_job_state`
     # rows `learn_weekly_topic` / `learn_weekly_build` / `learn_weekly_deadman` are the no-deploy
     # kill switches. Hours are America/New_York.
     LEARN_WEEKLY_ENABLED: bool = False
@@ -1287,7 +1322,16 @@ class Settings(BaseSettings):
     LEARN_WRITER_THINKING_BUDGET: int = 0
     LEARN_MAX_CONTENT_REJECTIONS: int = Field(2, ge=1, le=6)
     LEARN_MAX_WRITER_FAILURES: int = Field(3, ge=1, le=6)
+    # Cover art for every weekly piece (`learn_weekly/cover_art.py`, owner 2026-11-01): ONE image call
+    # + ONE short text call per piece, in the catalog's art system (`money_moves_art_style`), uploaded
+    # to the PUBLIC `money-moves-images` bucket. Fail-closed switch; any art failure or a step past
+    # LEARN_ART_TIMEOUT_SECONDS leaves the piece ARTLESS (iOS draws its gradient) — never a failed or
+    # delayed build. The models mirror scripts/generate_money_moves_art.py's MM_ART_MODEL /
+    # MM_SUBJECT_MODEL defaults.
     LEARN_ART_ENABLED: bool = False
+    LEARN_ART_MODEL: str = "gemini-3-pro-image"
+    LEARN_ART_SUBJECT_MODEL: str = "gemini-2.5-flash"
+    LEARN_ART_TIMEOUT_SECONDS: int = Field(120, ge=15, le=600)
     LEARN_SERVED_WEEKLY_MAX: int = Field(40, ge=4, le=500)
 
     # Rate limiting

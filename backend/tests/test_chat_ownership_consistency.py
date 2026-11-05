@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -223,7 +224,9 @@ def test_garbage_congress_counts_are_dropped_never_printed():
 
 def _stale_and_fresh():
     """The cached build predates a 65,616-share sale; the rebuild has it (list, bars, card)."""
-    now = datetime.now(timezone.utc)
+    # New York's day and month, as the 3/6-month windows end on: on the UTC month a run between
+    # 20:00 ET and midnight on a month's last day put the sale in a month the windows don't hold.
+    now = datetime.now(ZoneInfo("America/New_York"))
     sale_day = now.date().isoformat()
     stale = _resp(built_at=_iso(10), shares=368142)
     fresh = _resp(
@@ -275,8 +278,9 @@ async def test_without_the_rebuilds_activity_the_windows_say_they_predate_the_li
     act = (await cot.fetch_ownership("CRWV"))["insider_activity"]
     assert act["available"] is True
     assert "earlier read of the filings" in act["note"] and "never that it did not happen" in act["note"]
+    # New York time, labelled ET (owner rule, 2026-10-29) — it was the UTC clock.
     assert act["read_at"] == datetime.fromisoformat(stale.ownership_detail.built_at).astimezone(
-        timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M ET")
     assert act["last_3_months"].endswith("no open-market purchase or sale was reported")
 
 
@@ -378,3 +382,111 @@ async def test_an_old_build_without_dollars_never_mentions_unpriced_trades(monke
                                        summary=summary)))      # card dollars None
     twelve = (await cot.fetch_ownership("CRWV"))["insider_activity"]["last_12_months"]
     assert "sold 1,000 shares" in twelve and "reported no price" not in twelve and "$" not in twelve
+
+
+# ── The read's stamps are New York's clock and calendar (owner rule, 2026-10-29) ──────
+#
+# `read_at` is the read's New York clock labelled ET, and the 12-month line's "to <date>"
+# is the SAME instant's New York date: on the UTC calendar a read at 8:30 PM ET was already
+# the next day, so the block said "… 20:30 ET" beside "to <tomorrow>".
+
+@pytest.mark.parametrize("built_at,read_at,day", [
+    # EDT: 00:30 UTC on Oct 2 is 8:30 PM on Oct 1 in New York.
+    ("2026-10-02T00:30:00+00:00", "2026-10-01 20:30 ET", "2026-10-01"),
+    # EST: the UTC day turns at 7 PM ET.
+    ("2026-01-15T00:30:00+00:00", "2026-01-14 19:30 ET", "2026-01-14"),
+    ("2026-01-15T05:00:00+00:00", "2026-01-15 00:00 ET", "2026-01-15"),
+    # Mid-day: both calendars agree.
+    ("2026-10-02T15:00:00+00:00", "2026-10-02 11:00 ET", "2026-10-02"),
+])
+def test_read_at_and_the_twelve_month_day_are_the_same_new_york_instant(built_at, read_at, day):
+    summary = InsiderActivitySummarySchema(informative_sells_in_millions=0.001, num_sellers=1)
+    block = cot._insider_activity_block(_resp(built_at=built_at, summary=summary),
+                                        note=cot._ACTIVITY_OLDER_READ)
+    assert block["read_at"] == read_at
+    assert block["last_12_months"].startswith(f"last 12 months (trailing 365 days to {day})")
+    assert "UTC" not in json.dumps(block)
+
+
+@pytest.mark.parametrize("built_at", [None, "", "garbage", "2026-13-45T10:00:00+00:00",
+                                      # Corrupt but parseable: the 365-day step back from any
+                                      # year-1 stamp left the datetime range and raised out of
+                                      # the tool (New York's pre-1883 −4:56 offset kept most of
+                                      # year 1 "in range" for its clock, so a clock check alone
+                                      # missed them), and the model was shown a year-1 clock.
+                                      "0001-01-01T00:00:00+00:00", "0001-01-01T05:00:00+00:00",
+                                      "0001-06-01T00:00:00+00:00", "0001-12-31T23:00:00+00:00",
+                                      "0001-06-01T00:00:00", "1999-12-31T23:59:59+00:00"])
+def test_an_unreadable_read_time_names_no_clock_and_no_day(built_at):
+    """Unstamped, unparseable or implausible → "unknown" and a span with no end date, never a
+    guess and never a raise."""
+    summary = InsiderActivitySummarySchema(informative_sells_in_millions=0.001, num_sellers=1)
+    resp = _resp(built_at="2026-10-02T15:00:00+00:00", summary=summary)
+    resp = resp.model_copy(update={"ownership_detail": resp.ownership_detail.model_copy(
+        update={"built_at": built_at})})
+    block = cot._insider_activity_block(resp, note=cot._ACTIVITY_OLDER_READ)
+    assert block["read_at"] == "unknown"
+    assert block["last_12_months"].startswith("last 12 months (trailing 365 days)")
+
+
+def test_a_read_time_outside_new_yorks_range_is_none_not_a_crash():
+    """The edge of the datetime range overflows once moved into New York: the helpers answer
+    None / "unknown" rather than raising out of the tool."""
+    edge = datetime(1, 1, 1, tzinfo=timezone.utc)
+    assert cot._in_new_york(edge) is None and cot._et_stamp(edge) == "unknown"
+    assert cot._in_new_york(None) is None and cot._et_stamp(None) == "unknown"
+    # A naive read is UTC (as `_built_at` reads one).
+    assert cot._et_stamp(datetime(2026, 10, 2, 0, 30)) == "2026-10-01 20:30 ET"
+
+
+def test_the_twelve_month_window_starts_from_the_reads_own_utc_day():
+    """The unpriced trades are counted over the CARD's window: 365 days back from the read's
+    UTC instant, as `holders_service` cut it at build. Not from now (a days-old read would drop
+    trades the card counted), and not from New York's day (the read below is still Oct 2 in New
+    York, which would pull in a trade from the day the card left out)."""
+    built_at = "2026-10-03T02:00:00+00:00"           # 10 PM ET on Oct 2; the card's cutoff 2025-10-03
+    acts = [_act("2025-10-02", 2000, 0.0),            # the day before the card's window: out
+            _act("2025-10-03", 1500, 0.0)]            # its first day: in
+    summary = InsiderActivitySummarySchema(informative_sells_in_millions=0.0035, num_sellers=1)
+    card = SmartMoneyFlowSummarySchema(total_buy_usd_millions=0.0, total_sell_usd_millions=0.05)
+    assert hs.insider_window_cutoff(datetime.fromisoformat(built_at)) == "2025-10-03"
+    block = cot._insider_activity_block(_resp(built_at=built_at, acts=acts, summary=summary, card=card))
+    assert "1 trade(s) reported no price" in block["last_12_months"], block["last_12_months"]
+
+
+# The 3- and 6-month windows end on the read's NEW YORK month, like the stamps beside them. On
+# the UTC month a read from 20:00 ET (19:00 in EST) on a month's last day already counted the
+# next, empty month and dropped the oldest one — and with it a real sale.
+
+@pytest.mark.parametrize("built_at,three,six", [
+    # EDT: 00:30 UTC on Nov 1 is 8:30 PM on Oct 31 in New York.
+    ("2026-11-01T00:30:00+00:00", "08/2026-10/2026", "05/2026-10/2026"),
+    # EST: 00:30 UTC on Jan 1 is 7:30 PM on Dec 31.
+    ("2027-01-01T00:30:00+00:00", "10/2026-12/2026", "07/2026-12/2026"),
+    # Mid-month: both calendars agree.
+    ("2026-10-15T15:00:00+00:00", "08/2026-10/2026", "05/2026-10/2026"),
+])
+def test_the_windows_end_on_new_yorks_month(built_at, three, six):
+    oldest = three.split("-")[0]          # the 3-month window's oldest New York month
+    flow = [SmartMoneyFlowDataPointSchema(month=oldest, sell_volume=0.5)]
+    block = cot._insider_activity_block(_resp(built_at=built_at, flow=flow))
+    assert block["last_3_months"].startswith(f"last 3 months ({three})"), block["last_3_months"]
+    assert block["last_6_months"].startswith(f"last 6 months ({six})"), block["last_6_months"]
+    assert "sold 500,000" in block["last_3_months"], block["last_3_months"]
+
+
+def test_an_unstamped_read_with_no_bars_ends_on_new_yorks_month(monkeypatch):
+    """No read stamp and no chart bars: the windows end on New York's month NOW, not UTC's."""
+    late = datetime(2026, 11, 1, 0, 30, tzinfo=timezone.utc)      # 20:30 ET on Oct 31
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return late.astimezone(tz) if tz is not None else late.replace(tzinfo=None)
+
+    monkeypatch.setattr(cot, "datetime", _Clock)
+    resp = _resp(built_at="2026-10-02T15:00:00+00:00")
+    resp = resp.model_copy(update={"ownership_detail": resp.ownership_detail.model_copy(
+        update={"built_at": None})})
+    block = cot._insider_activity_block(resp)
+    assert block["last_3_months"].startswith("last 3 months (08/2026-10/2026)"), block["last_3_months"]

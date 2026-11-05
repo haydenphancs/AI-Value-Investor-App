@@ -23,6 +23,11 @@ import pytest
 
 import app.api.v1.endpoints.updates as up
 from app.services.active_group_service import ActiveGroup, ActiveGroupUnavailable
+from app.services.entitlements import (
+    UPDATES_TICKER_LIMITS,
+    select_visible_tickers,
+    updates_ticker_limit,
+)
 from _price_fakes import PriceFromFMPFake
 
 _USER = "user-1"
@@ -442,6 +447,154 @@ async def test_quotes_are_one_bounded_call_for_the_whole_strip(monkeypatch):
 
     assert len(asked) == 1
     assert len(asked[0]) == up._MAX_TABS
+
+
+# ── groups larger than `_MAX_TABS`: every visible ticker ships (2026-10-31) ───────────
+#
+# The plan gate picks the visible tickers alphabetically over the WHOLE group, while the
+# wire used to be `all_tickers[:_MAX_TABS]` — a POSITION slice. In a group past the cap,
+# an unlocked ticker stored past position 30 was cut from the response (the user paid for
+# a chip they never got), and which ones were cut moved every time they reordered the group.
+
+# 35 tickers stored in REVERSE alphabetical order, so the alphabetically-first ones — the
+# ones every plan unlocks first — sit at positions 30-34, past the old cut.
+_BIG_GROUP = [f"T{i:02d}" for i in range(34, -1, -1)]
+_TIERS = [("free", 1), ("pro", 15), ("premium", 30)]
+
+
+def _expected_wire(group, limit):
+    """The rule, restated independently: the visible set, then locked tickers in group
+    order up to `_MAX_TABS`, all emitted in group order."""
+    visible = set(select_visible_tickers(group, limit))
+    locked_fill = [t for t in group if t not in visible][: up._MAX_TABS - len(visible)]
+    keep = visible | set(locked_fill)
+    return [t for t in group if t in keep]
+
+
+def test_no_plan_unlocks_more_tickers_than_the_wire_can_carry():
+    """The guarantee "every visible ticker is emitted" rests on this: a tier whose limit
+    exceeded `_MAX_TABS` would unlock chips the response has no room for."""
+    assert max(UPDATES_TICKER_LIMITS.values()) <= up._MAX_TABS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tier,limit", _TIERS)
+async def test_every_visible_ticker_ships_even_when_stored_past_the_cap(monkeypatch, tier, limit):
+    _patch(monkeypatch, group=_group(_BIG_GROUP))
+    resp = await up.get_updates_tabs(user=_user(tier))
+
+    visible = select_visible_tickers(_BIG_GROUP, limit)
+    assert updates_ticker_limit(tier) == limit
+    assert sorted(_openable(resp)) == visible, "a ticker the plan unlocks was cut from the wire"
+    assert "T00" in _openable(resp), "T00 sorts first and is stored LAST (position 34)"
+    assert len(_tabs(resp)) == up._MAX_TABS
+    assert _tabs(resp) == _expected_wire(_BIG_GROUP, limit)
+    # `is_locked` keeps its meaning: locked exactly when the plan hides the ticker's feed.
+    for tab in resp.tabs[1:]:
+        assert tab.is_locked is (tab.scope not in visible), tab.scope
+    # The upsell counts the WHOLE group, not just what fit on the wire.
+    assert resp.locked_count == len(_BIG_GROUP) - limit
+
+
+@pytest.mark.asyncio
+async def test_the_locked_filler_follows_group_order(monkeypatch):
+    """Free: T00 claims its slot, then the 29 locked tickers stored FIRST fill the rest —
+    T34..T06. T05..T01 (locked, stored last) are the ones left off."""
+    _patch(monkeypatch, group=_group(_BIG_GROUP))
+    resp = await up.get_updates_tabs(user=_user("free"))
+    assert _tabs(resp) == [f"T{i:02d}" for i in range(34, 5, -1)] + ["T00"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tier,limit", _TIERS)
+async def test_reordering_the_group_never_changes_the_visible_set(monkeypatch, tier, limit):
+    """Manage Tickers lets the user drag the Custom order freely. The plan's pick is
+    alphabetical, so no reorder may add, drop or relock a visible chip — and the wire
+    keeps following the NEW order, which iOS reads as the Custom position."""
+    import random
+
+    visible = select_visible_tickers(_BIG_GROUP, limit)
+    rng = random.Random(20261031)
+    orders = [list(_BIG_GROUP), sorted(_BIG_GROUP)]
+    for _ in range(6):
+        order = list(_BIG_GROUP)
+        rng.shuffle(order)
+        orders.append(order)
+
+    for order in orders:
+        _patch(monkeypatch, group=_group(order))
+        resp = await up.get_updates_tabs(user=_user(tier))
+        assert sorted(_openable(resp)) == visible, f"order {order} changed the visible chips"
+        assert _tabs(resp) == _expected_wire(order, limit), f"order {order}"
+        assert resp.locked_count == len(order) - limit
+
+
+@pytest.mark.asyncio
+async def test_metadata_and_quotes_cover_the_visible_tickers_past_the_cap(monkeypatch):
+    """Both reads ask about the EMITTED set — still one call each, still `_MAX_TABS` at
+    most — so a visible ticker stored past position 30 gets its name and its quote."""
+    meta_asked, quote_asked = [], []
+
+    async def _spy_meta(_uid, tickers):
+        meta_asked.append(list(tickers))
+        return {t: {"company_name": f"{t} Inc."} for t in tickers}
+
+    class _FMP:
+        async def get_batch_quotes_bulk(self, symbols):
+            quote_asked.append(list(symbols))
+            return [{"symbol": s, "changePercentage": 1.0} for s in symbols]
+
+    _patch(monkeypatch, group=_group(_BIG_GROUP))
+    monkeypatch.setattr(up, "fetch_ticker_metadata", _spy_meta)
+    monkeypatch.setattr(up, "get_fmp_client", lambda: _FMP())
+    monkeypatch.setattr(up, "price_source",
+                        lambda owner=None: PriceFromFMPFake(_FMP()))
+    resp = await up.get_updates_tabs(user=_user("premium"))
+
+    assert len(meta_asked) == 1 and len(quote_asked) == 1
+    assert meta_asked[0] == quote_asked[0] == _tabs(resp)
+    assert len(meta_asked[0]) == up._MAX_TABS
+    visible = select_visible_tickers(_BIG_GROUP, 30)
+    assert set(visible) <= set(meta_asked[0]), "a visible ticker was never read"
+    assert len(_openable(resp)) == len(visible)
+    for tab in resp.tabs[1:]:
+        if not tab.is_locked:
+            assert tab.company_name == f"{tab.scope} Inc.", tab.scope
+            assert tab.change_percent == 1.0, tab.scope
+
+
+# The helper on its own — the degenerate inputs the endpoint never builds today.
+
+def test_emitted_tickers_is_the_identity_when_the_group_fits():
+    group = ["ORCL", "AAPL", "PLUG"]
+    assert up._emitted_tickers(group, ["AAPL"], up._MAX_TABS) == group
+
+
+@pytest.mark.parametrize("cap", [0, -1])
+def test_emitted_tickers_with_no_room_sends_nothing(cap):
+    assert up._emitted_tickers(["AAPL", "ORCL"], ["AAPL"], cap) == []
+
+
+def test_emitted_tickers_handles_an_empty_group_and_no_visible_tickers():
+    assert up._emitted_tickers([], [], up._MAX_TABS) == []
+    assert up._emitted_tickers(["B", "A", "C"], [], 2) == ["B", "A"]
+
+
+def test_emitted_tickers_ignores_a_visible_ticker_not_in_the_group():
+    """A visible name the group does not hold must not take a slot from a real ticker."""
+    assert up._emitted_tickers(["B", "A", "C"], ["ZZZ", "C"], 2) == ["B", "C"]
+
+
+def test_emitted_tickers_counts_a_duplicated_visible_ticker_once():
+    assert up._emitted_tickers(["B", "A", "C"], ["C", "C"], 2) == ["B", "C"]
+
+
+def test_emitted_tickers_keeps_the_alphabetical_head_if_a_plan_outgrew_the_cap():
+    """Not reachable today (pinned above), but must still stay bounded: the gate's own
+    alphabetical order decides which visible tickers fit, and no locked one does."""
+    group = ["D", "C", "B", "A"]
+    visible = select_visible_tickers(group, 4)
+    assert up._emitted_tickers(group, visible, 2) == ["B", "A"]
 
 
 

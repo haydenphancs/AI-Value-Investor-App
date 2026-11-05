@@ -37,7 +37,7 @@ from app.schemas.crypto import (
     PerformancePeriodResponse,
     RelatedCryptoResponse,
 )
-from app.utils.market_hours import to_utc_instant
+from app.utils.market_hours import ET, to_utc_instant
 from app.services.price_service import price_source
 from app.services.chart_helper import AGGREGATED_INTERVALS, _aggregate_prices, ytd_return
 
@@ -824,6 +824,30 @@ def _fmt_supply(value: Optional[float], symbol: str = "") -> str:
     return f"{value:,.0f}{suffix}"
 
 
+def _coingecko_stamp_et(value: Any) -> Optional[str]:
+    """CoinGecko's `last_updated` ("2026-10-08T14:03:11.000Z", an instant in UTC) on New
+    York's clock — "2026-10-08 10:03 ET", the zone every market time in the app is shown in —
+    for Ask Cay AI to quote. It used to be the UTC clock sliced out of the string, which also
+    mislabelled any stamp carrying another offset as "UTC". A naive stamp is read as UTC
+    (CoinGecko's zone, NOT the FMP New York wall clock `to_utc_instant` assumes); a stamp
+    with no clock (date-only), an unparseable one or a non-string is None — no "as of"."""
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    # "YYYY-MM-DDTHH:MM" at the least: a bare date is a day, not an instant to convert.
+    if len(s) < 16 or s[10] not in "T ":
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local = dt.astimezone(ET)
+    # OverflowError: a stamp at the edge of the datetime range leaves it once converted.
+    except (ValueError, OverflowError):
+        return None
+    return local.strftime("%Y-%m-%d %H:%M ET")
+
+
 def _pct(value: Optional[float]) -> str:
     if value is None:
         return "—"
@@ -1591,9 +1615,9 @@ class CryptoService:
             fdv = _usd(md, "fully_diluted_valuation")
             if fdv is not None:
                 out["fully_diluted_valuation"] = _money(fdv)
-                stamp = md.get("last_updated")
-                if isinstance(stamp, str) and len(stamp) >= 10:
-                    out["fully_diluted_valuation_as_of"] = stamp[:16].replace("T", " ") + " UTC"
+                stamp = _coingecko_stamp_et(md.get("last_updated"))
+                if stamp is not None:
+                    out["fully_diluted_valuation_as_of"] = stamp
             else:
                 unavailable.append("fully diluted valuation")
             rank = coin_res.get("market_cap_rank", md.get("market_cap_rank"))

@@ -655,3 +655,72 @@ def test_grounding_is_fast_and_total_on_degenerate_input(ctx, name):
         best = min(best, time.perf_counter() - t0)
     assert isinstance(out, list)
     assert best < 1.0, f"{name}: {best:.3f}s"
+
+
+# ── 2026-10-31: a carousel title's opening list label is structure ("Check 6:") ──────────────
+# The live Claude-writer preview lost 4 of 34 packages to "Check 6:" / "Check 7:" on checklist
+# slides (5-8 slides are allowed; only bare 0-5 were exempt). The writer passes `ordinal_max` (the
+# slide's 1-based position) for carousel slide TITLES only.
+
+def ground_slide(ctx, text, ordinal_max):
+    return [(v.code, v.detail) for v in
+            g.check_grounding("carousel_slides[6].title", text, ctx, ordinal_max=ordinal_max)]
+
+
+@pytest.mark.parametrize("text, slide", [
+    ("Check 6: How long does a mistake last?", 7),
+    ("Check 7: What could erode it?", 8),
+    ("Check 1: Who makes it?", 1),
+    ("Step 6. Look at the trend", 7),
+    ("Check six: How long does a mistake last?", 7),
+    ("Question #6: Who controls the store?", 7),
+    ("Check No. 6: Who makes it?", 7),
+    ("check 6) who makes it?", 7),
+    ("Step 6.", 6),
+])
+def test_an_opening_list_label_up_to_its_slide_position_is_exempt(ctx, text, slide):
+    assert ground_slide(ctx, text, slide) == []
+
+
+@pytest.mark.parametrize("text, slide, detail", [
+    ("Check 6 billion: a lot", 7, "6 billion"),       # a quantity, not a label
+    ("Check 6 stores: why?", 7, "6"),                 # no delimiter right after the digit
+    ("Check 6:6 stores", 7, "6"),                     # no space after the colon
+    ("Check 6.5: margins", 7, "6.5"),                 # a decimal
+    ("Check 6 - 7: a range", 7, "7"),                 # a dash range
+    ("6 years of delays.", 7, "6"),
+    ("Up 6% on the year.", 7, "6%"),
+    ("Check 7: What could erode it?", 6, "7"),        # past the slide's own position
+    ("Check 10: too far", 9, "10"),                   # one digit only
+    ("Lesson 6: patience", 7, "6"),                   # a series word is not a label
+    ("Part 6: patience", 7, "6"),
+    ("Why Check 6: matters", 7, "6"),                 # only at the very start
+    ("Check 6: Founded in 1999", 7, "1999"),          # the rest of the title is still grounded
+])
+def test_a_number_that_is_not_an_opening_label_is_still_grounded(ctx, text, slide, detail):
+    assert ("ungrounded_number", detail) in ground_slide(ctx, text, slide)
+
+
+def test_the_label_exempts_only_its_own_digit(ctx):
+    text = "Check 6: The chain ran 6 warehouses"
+    assert ground_slide(ctx, text, 7) == [("ungrounded_number", "6")]
+    assert ground(ctx, text) == [("ungrounded_number", "6"), ("ungrounded_number", "6")]
+
+
+@pytest.mark.parametrize("ordinal_max", [0, -3])
+def test_without_a_slide_position_a_list_label_is_grounded_as_before(ctx, ordinal_max):
+    assert ground_slide(ctx, "Check 6: How long does a mistake last?", ordinal_max) == [
+        ("ungrounded_number", "6")]
+
+
+@pytest.mark.parametrize("text", [
+    "Check 7) thousand stores opened", "Check 6: percent of profit", "Step 6. Hundred stores",
+    "Check 6) times revenue", "Check 6: Dozens of stores",
+])
+def test_a_quantity_word_after_the_label_keeps_the_number_a_quantity(ctx, text):
+    assert ("ungrounded_number", text.split()[1].rstrip(":.)")) in ground_slide(ctx, text, 8)
+
+
+def test_a_grounded_number_after_the_label_still_anchors_as_before(ctx):
+    assert ground_slide(ctx, "Check 6: By 2020 the chain ran 800 warehouses", 7) == []
+    assert ("number_context", "2020") in ground_slide(ctx, "Check 6: The stock fell in 2020", 7)

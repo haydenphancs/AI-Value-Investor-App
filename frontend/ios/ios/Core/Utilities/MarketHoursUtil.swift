@@ -233,4 +233,40 @@ enum MarketHoursUtil {
         if minuteOfDay < 16 * 60 { return .open }
         return .afterHours
     }
+
+    // MARK: - The last close
+
+    /// The instant of the most recent regular-session close at or before `instant`: 16:00 ET,
+    /// or 13:00 ET on a half-day (`earlyCloses`), on the last trading day by `holidays`.
+    ///
+    /// The closed half of `liveSessionStatus(at:)`, and the Swift copy of the backend's
+    /// `market_status_fields` (`session_trading_date` + `_close_minute`): a trading day names
+    /// its own close from its bell onwards; anything earlier on it (overnight, pre-market) and
+    /// every weekend or holiday names the trading day before. The stock screen's fallback badge
+    /// stamped `now` at a fixed "4:00 PM EST" instead — a Saturday close that never happened,
+    /// 4:00 PM for a 13:00 half-day, and EST all summer. Holidays are best effort, as in
+    /// `numbersSessionDay`: a closure the backend learns at run time is unknown here.
+    static func lastRegularClose(before instant: Date) -> Date {
+        let calendar: Calendar = etCalendar
+        let today: Date = calendar.startOfDay(for: instant)
+        let parts: DateComponents = calendar.dateComponents([.hour, .minute], from: instant)
+        let minuteOfDay: Int = (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
+        var day: Date = today
+        if !isTradingDay(today, calendar: calendar) || minuteOfDay < closeMinuteOfDay(today, calendar: calendar) {
+            day = previousTradingDay(before: today, calendar: calendar)
+        }
+        let closeMinute: Int = closeMinuteOfDay(day, calendar: calendar)
+        var close: DateComponents = calendar.dateComponents([.year, .month, .day], from: day)
+        close.hour = closeMinute / 60
+        close.minute = closeMinute % 60
+        return calendar.date(from: close) ?? day
+    }
+
+    /// The bell on `day` (an ET midnight) as an ET minute of the day: 13:00 on a half-day
+    /// (`earlyCloses`), else 16:00 — the backend's `_close_minute`.
+    private static func closeMinuteOfDay(_ day: Date, calendar: Calendar) -> Int {
+        let parts: DateComponents = calendar.dateComponents([.year, .month, .day], from: day)
+        let key: String = String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
+        return earlyCloses.contains(key) ? 13 * 60 : 16 * 60
+    }
 }

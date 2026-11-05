@@ -132,12 +132,19 @@ struct AssetRow: View {
                         .lineLimit(1)
                         .minimumScaleFactor(0.85)
 
-                    PriceChangeLabel(
-                        changePercent: asset.changePercent,
-                        changeAmount: asset.changeAmount,
-                        mode: changeDisplayMode,
-                        isKnown: asset.changeKnown
-                    )
+                    // The pre-market / after-hours chip sits LEFT of the day change, so the
+                    // day change stays right-aligned under the price. Same line, so the
+                    // card is no taller: the chip's 10pt text is shorter than the 13pt
+                    // change beside it, and the height probe never has to know.
+                    HStack(spacing: 0) {
+                        extendedMoveChip
+                        PriceChangeLabel(
+                            changePercent: asset.changePercent,
+                            changeAmount: asset.changeAmount,
+                            mode: changeDisplayMode,
+                            isKnown: asset.changeKnown
+                        )
+                    }
                 }
                 // `maxHeight: .infinity` + contentShape makes the tap area span the row's
                 // full height WITHOUT changing the row's intrinsic height — which matters
@@ -146,7 +153,12 @@ struct AssetRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("\(asset.formattedPrice), \(changeAccessibilityValue)")
+            // Offered first, after the navigation side's minimum (80pt ticker column +
+            // 80pt chart + gaps), so the chip's `ViewThatFits` measures the width really
+            // left. At the default (equal) priority this column was offered half the row,
+            // the chip always "fit", and on a 375pt phone the row overflowed its card.
+            .layoutPriority(1)
+            .accessibilityLabel("\(asset.formattedPrice), \(changeAccessibilityValue)\(extendedAccessibilityValue)")
             .accessibilityHint("Switches between percent and dollar change")
         }
         .padding(.vertical, AppSpacing.md)
@@ -170,6 +182,59 @@ struct AssetRow: View {
         }
         return asset.formattedChange
     }
+
+    /// The pre-market / after-hours move this row shows NOW, or nil.
+    ///
+    /// The backend sends a print only outside the regular session, but a saved snapshot can
+    /// still paint this morning's pre-market print after the bell — so the bell decides
+    /// here too, on New York's clock (owner rule 2026-10-29, "ET for markets"), never the
+    /// phone's: `liveSessionStatus` is the same session rule as the backend's
+    /// `session_phase`. The chip carries no clock time; one added later must be New
+    /// York's, labelled " ET".
+    private var extendedMove: (session: ExtendedSession, percent: Double)? {
+        guard let session = asset.extendedSession,
+              let percent = asset.extendedChangePercent, percent.isFinite else { return nil }
+        if case .open? = MarketHoursUtil.liveSessionStatus() { return nil }
+        return (session, percent)
+    }
+
+    /// `☾ +0.08%` (after hours) or `☀ -0.35%` (pre-market), in the row's % / $ mode.
+    ///
+    /// Shown WHOLE or not at all: when it does not fit beside the day change (a 375pt
+    /// phone, or two double-digit moves on a 390-393pt one), `ViewThatFits` falls back to
+    /// the zero-size view instead of squeezing a number into "…". `.layoutPriority(-1)`
+    /// lets the day change take its full width first. VoiceOver reads the move either way.
+    @ViewBuilder
+    private var extendedMoveChip: some View {
+        if let move = extendedMove {
+            ViewThatFits(in: .horizontal) {
+                PriceChangeLabel(
+                    changePercent: move.percent,
+                    changeAmount: asset.extendedChangeAmount,
+                    mode: changeDisplayMode,
+                    leadingSymbol: move.session.symbolName,
+                    fontSize: 10
+                )
+                .padding(.trailing, AppSpacing.xs)
+                Color.clear.frame(width: 0, height: 0)
+            }
+            .layoutPriority(-1)
+        }
+    }
+
+    /// ", After hours $349.20, +0.08%" — appended to the price button's label, whether or
+    /// not the chip found room on screen.
+    private var extendedAccessibilityValue: String {
+        guard let move = extendedMove, let price = asset.formattedExtendedPrice else { return "" }
+        let change: String
+        if changeDisplayMode == .amount, let amount = asset.extendedChangeAmount {
+            change = TrackedAsset.formatSignedCurrency(amount)
+        } else {
+            let normalized = move.percent == 0 ? 0 : move.percent
+            change = "\(normalized >= 0 ? "+" : "")\(String(format: "%.2f", normalized))%"
+        }
+        return ", \(move.session.spokenName) \(price), \(change)"
+    }
 }
 
 #Preview {
@@ -182,5 +247,25 @@ struct AssetRow: View {
             }
         }
     }
+    .background(AppColors.background)
+}
+
+// The chip follows New York's clock: during the regular session (9:30-4:00 ET) this
+// preview correctly shows no chip.
+#Preview("Extended hours") {
+    var afterHours = TrackedAsset.sampleData[0]
+    afterHours.extendedPrice = 178.9
+    afterHours.extendedChangePercent = 0.27
+    afterHours.extendedSession = .afterHours
+    var preMarket = TrackedAsset.sampleData[2]
+    preMarket.extendedPrice = 377.5
+    preMarket.extendedChangePercent = -12.37
+    preMarket.extendedSession = .preMarket
+    return VStack(spacing: AppSpacing.sm) {
+        AssetRow(asset: afterHours)
+        AssetRow(asset: preMarket)
+        AssetRow(asset: afterHours, changeDisplayMode: .amount)
+    }
+    .padding(.horizontal, AppSpacing.lg)
     .background(AppColors.background)
 }

@@ -173,14 +173,15 @@ def _check_primed_before_the_tabs_mount(s):
     cfg = _block(s["app"], "func configure(apiClient: APIClient, authService: AuthService)")
     _in_order(
         cfg,
-        "await primeStoredCredential()",
+        "await primeStoredCredential(launchToken, readUnder: launchGeneration)",
         "HomeDashboardSnapshotStore.shared.prime(",
         'await restoreSession(trigger: "launch")',
     )
     call = cfg[_idx(cfg, "HomeDashboardSnapshotStore.shared.prime("):]
     call = call[: _idx(call, 'await restoreSession(trigger: "launch")')]
     assert "await HomeDashboardSnapshotStore.shared.prime(" in cfg, "prime is not awaited"
-    assert "WidgetJWT.subject(of:" in call and "getStoredToken()" in call, (
+    # `launchToken` is the launch's one off-main Keychain read (test_ios_launch_no_main_thread_keychain.py).
+    assert "WidgetJWT.subject(of:" in call and "launchToken" in call, (
         "prime is not given the stored credential's `sub` — the snapshot has no owner to check"
     )
 
@@ -1180,7 +1181,7 @@ MUTATIONS: list[tuple[str, str, str, Callable[[str], str]]] = [
     ("prime-after-restore", "primed_before_tabs", "app",
      _sub(_PRIME_CALL + r"(\s*)(await restoreSession\(trigger: \"launch\"\))", r"\3\2\1")),
     ("prime-no-owner", "primed_before_tabs", "app",
-     _sub(r"authService\.getStoredToken\(\)\.flatMap \{ WidgetJWT\.subject\(of: \$0\) \}", "nil")),
+     _sub(r"launchToken\.flatMap \{ WidgetJWT\.subject\(of: \$0\) \}", "nil")),
     ("no-apply-bind", "apply_profile_binds", "app", _rm("HomeDashboardSnapshotStore.shared.bindOwner(profile.id)")),
     ("no-switch-rebind", "switch_rebinds", "app", _rm("HomeDashboardSnapshotStore.shared.bindOwner(userId)")),
     ("display-any-owner", "display_fenced", "store", _rm("snapshot.ownerUserId == owner,")),

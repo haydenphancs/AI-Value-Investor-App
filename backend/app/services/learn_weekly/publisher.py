@@ -272,6 +272,18 @@ def build_article_row(piece: Mapping[str, Any], job: Optional[Mapping[str, Any]]
         "readTimeMinutes": read_time,
     })
     author = content.get("author") if isinstance(content.get("author"), Mapping) else {}
+    # The cover art (`cover_art.py`), when the build drew one: the column is what the content service
+    # overlays onto `imageUrl` (and what the catalog rows carry), so the two say the same thing. Only an
+    # http(s) URL is copied; an artless draft leaves the column NULL and the app draws the gradient.
+    image_url = content.get("imageUrl")
+    if not (isinstance(image_url, str) and image_url.startswith(("https://", "http://"))
+            and len(image_url) <= 1000):
+        if image_url is not None:
+            logger.warning("learn publish: piece %s draft has an unusable imageUrl %r — published without "
+                           "cover art", piece.get("id"), str(image_url)[:120])
+            content.pop("imageUrl", None)
+            content.pop("imageCardUrl", None)
+        image_url = None
     row = {
         "id": article_id(slug), "slug": slug, "title": title,
         "subtitle": content.get("subtitle") if isinstance(content.get("subtitle"), str) else None,
@@ -281,7 +293,7 @@ def build_article_row(piece: Mapping[str, Any], job: Optional[Mapping[str, Any]]
         "view_count": content.get("viewCount") if isinstance(content.get("viewCount"), str) else "",
         "is_featured": is_featured, "has_audio_version": True, "audio_url": audio_url,
         "audio_duration_seconds": seconds, "sort_order": sort_order, "source": SOURCE_WEEKLY,
-        "content": content, "updated_at": _iso(now),
+        "image_url": image_url, "content": content, "updated_at": _iso(now),
     }
     try:
         json.dumps(row, allow_nan=False)

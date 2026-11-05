@@ -13,7 +13,7 @@ Two model answers make a piece (plan "Wiser weekly content engine" §1.7):
 `tests/test_learn_weekly_article_schema_parity.py`). Everything a model could fabricate or get
 wrong is CODE-OWNED here, never asked of the model:
 
-* the slug (`<kebab-title>-<yyyy-mm-dd>`), the author (`contracts.AUTHOR`, "AI-assisted"), an
+* the slug (`<kebab-title>-<yyyy-mm-dd>`), the author (`contracts.AUTHOR`, the catalog byline), an
   empty `viewCount` (a made-up count is a false claim under the brand), `publishedDaysAgo` 0,
   `isFeatured` (True for a Deep Dive — the featured rule picks the newest), `hasAudioVersion`
   False until narration lands, the read time, the sort order and the category gradient;
@@ -23,8 +23,8 @@ wrong is CODE-OWNED here, never asked of the model:
   never guessed (`render_statistics`);
 * related articles, drawn only from BUNDLE catalog articles (a weekly piece can be unpublished,
   and iOS opens a related tile by its title — a tile pointing at a removed piece opens nothing);
-* the closing disclosure callout (`append_disclosure`), appended AFTER validation: it names the
-  brand, which the validators refuse in model text, and it must never be the model's words.
+* the closing disclosure callout (`append_disclosure`, "educational only, not investment advice"),
+  appended AFTER validation: it must never be the model's words.
 
 Section KINDS are a drafting device (the validators allow a dated time word only in a `peg`
 section, and cap the peg share): they are kept OUT of the rendered content and returned
@@ -692,7 +692,8 @@ def disclosure_block() -> Dict[str, str]:
 
 def append_disclosure(content: Mapping[str, Any]) -> Dict[str, Any]:
     """A deep copy of `content` with the closing disclosure callout appended to the LAST section —
-    after validation, never validated (it names the brand on purpose). Idempotent: a last block
+    after validation, never validated (the validators refuse a not-investment-advice line in model
+    text as code_owned / banned_phrase — it must stay code's words). Idempotent: a last block
     that already is the disclosure is not appended twice. ValueError when there is no section to
     carry it (a caller bug: such an article never passes validation)."""
     out = copy.deepcopy(dict(content))

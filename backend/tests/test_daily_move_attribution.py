@@ -68,8 +68,8 @@ def test_the_achr_case_finds_no_cause_and_says_so_usefully():
     assert a.kind is CauseKind.NONE
     assert a.tag is None
     # It must still be informative: the industry comparison is the useful true fact.
-    assert "Aerospace & Defense" in a.detail
-    assert "moved far more" in a.detail
+    assert "Aerospace & Defense fell 1.2%." in a.detail
+    assert "far more" not in a.detail
     assert a.considered == ["earnings", "analyst", "company_news", "group"]
 
 
@@ -526,7 +526,7 @@ def test_an_unchecked_lookup_still_reports_the_arithmetic_it_does_know():
         industry_change_percent=-1.2,
     )
     text = describe_no_cause("X", ctx, had_news=False, news_checked=False)
-    assert "Aerospace & Defense" in text and "moved far more" in text
+    assert text == "Aerospace & Defense fell 1.2%."
 
 
 def test_attribute_threads_the_unchecked_state_through():
@@ -694,12 +694,13 @@ def _crwv(**kw) -> Attribution:
 
 # The golden table: `describe_no_cause` was split into `describe_context` + the news clause.
 # Every pre-existing wording must be byte-identical (5,040 cases were diffed once against
-# the old code on 2026-10-14; these rows pin the shapes).
+# the old code on 2026-10-14; these rows pin the shapes). The two far-outran rows lost
+# "; CRWV moved far more" on 2026-10-30 (owner), and only those.
 @pytest.mark.parametrize(
     "chg,ind,name,gap,had,checked,word,want",
     [
         (-15.46, -4.0, "Software - Infrastructure", False, True, True, "today",
-         "Software - Infrastructure fell 4.0%; CRWV moved far more. No clear catalyst in today's news."),
+         "Software - Infrastructure fell 4.0%. No clear catalyst in today's news."),
         (3.0, -2.0, "Tech", False, False, True, "today",
          "Tech fell 2.0%; CRWV went the other way. No company news today."),
         (0.0, -1.2, "Beverages", False, False, True, "today",
@@ -710,7 +711,7 @@ def _crwv(**kw) -> Attribution:
          "Most of it was an overnight gap at the open. No clear catalyst in today's news."),
         (-5.0, None, None, False, True, False, "today", "Today's news could not be checked."),
         (-5.0, -1.2, "Aerospace & Defense", False, True, False, "today",
-         "Aerospace & Defense fell 1.2%; CRWV moved far more."),
+         "Aerospace & Defense fell 1.2%."),
         (-5.0, None, None, False, True, True, "on Fri", "No clear catalyst in Friday's news."),
         (-5.0, None, None, False, False, True, "on Fri", "No company news on Fri."),
         (-5.0, None, None, False, True, False, "on Fri", "Friday's news could not be checked."),
@@ -729,11 +730,11 @@ def test_the_crwv_case_shows_its_insights_headline_with_the_industry_note():
     assert a.kind is CauseKind.COMPANY_NEWS
     assert a.tag == "Bearish News"
     assert a.detail == CRWV_HEADLINE + "."
-    assert a.note == "Software - Infrastructure fell 4.0%; CRWV moved far more."
+    assert a.note == "Software - Infrastructure fell 4.0%."
     assert a.lean == "bearish"
     assert "No clear catalyst" not in a.detail
-    # The lean runs AFTER the four dated detectors; it is not one of them.
-    assert a.considered == ["earnings", "analyst", "company_news", "group"]
+    # The lean runs FIRST (2026-10-30), so nothing was ruled out before it.
+    assert a.considered == []
 
 
 def test_the_achr_card_under_a_red_move_is_still_refused():
@@ -2049,28 +2050,77 @@ def test_a_round_the_clock_card_has_no_close_to_be_after():
 # ── precedence and the note ─────────────────────────────────────────────────
 
 
-def test_dated_causes_outrank_the_lean():
-    earn = _crwv(earnings_row={"date": "2026-10-14", "time": "bmo",
-                               "epsActual": -0.4, "epsEstimated": 0.1})
-    assert earn.kind is CauseKind.EARNINGS
-    assert earn.note == "Software - Infrastructure fell 4.0%; CRWV moved far more."
-    grade = _crwv(grade_rows=[{"date": "2026-10-14", "gradingCompany": "Acme", "action": "downgrade",
-                               "previousGrade": "Buy", "newGrade": "Sell"}])
+_CRWV_EARNINGS_MISS = {"date": "2026-10-14", "time": "bmo", "epsActual": -0.4, "epsEstimated": 0.1}
+_CRWV_DOWNGRADE = [{"date": "2026-10-14", "gradingCompany": "Acme", "action": "downgrade",
+                    "previousGrade": "Buy", "newGrade": "Sell"}]
+
+
+def test_the_lean_outranks_the_dated_causes():
+    """Owner 2026-10-30 (INTC −30.6% under a Bearish card): "i need the widget to show it".
+    An agreeing card on an Unusual move is the answer even when a dated event matched too."""
+    for a in (
+        _crwv(earnings_row=_CRWV_EARNINGS_MISS),
+        _crwv(grade_rows=_CRWV_DOWNGRADE),
+        _crwv(classified_news=[("Guidance Cut", "CoreWeave lowers guidance")]),
+    ):
+        assert a.kind is CauseKind.COMPANY_NEWS and a.tag == "Bearish News"
+        assert a.detail == CRWV_HEADLINE + "."
+        assert a.note == "Software - Infrastructure fell 4.0%."
+        assert a.lean == "bearish"
+
+
+def test_the_dated_causes_still_answer_when_the_lean_does_not():
+    """CONTROL: the lean's own gate is unchanged. No card, a card that disagrees with the
+    move, or a routine move leaves the dated detectors answering exactly as before — and a
+    withheld lean never rides along on their answer (`web_assisted` reads `lean`)."""
+    for lean, z in ((None, 2.57), (_lean(sentiment="Bullish"), 2.57), (_lean(), 1.5)):
+        earn = _crwv(earnings_row=_CRWV_EARNINGS_MISS, news_lean=lean, z=z)
+        assert earn.kind is CauseKind.EARNINGS and earn.lean is None
+        assert earn.note == "Software - Infrastructure fell 4.0%."
+    grade = _crwv(grade_rows=_CRWV_DOWNGRADE, news_lean=None)
     assert grade.kind is CauseKind.ANALYST
-    classified = _crwv(classified_news=[("Guidance Cut", "CoreWeave lowers guidance")])
+    classified = _crwv(classified_news=[("Guidance Cut", "CoreWeave lowers guidance")],
+                       news_lean=None)
     assert classified.kind is CauseKind.COMPANY_NEWS and classified.tag == "Guidance Cut"
     assert classified.note is not None
 
 
+def test_intc_an_earnings_beat_under_a_crash_shows_the_insights_headline():
+    """The 2026-10-30 Holdings tile: INTC −30.60% the session after a 27.8% EPS beat printed
+    "INTC beat EPS estimates by 27.8%, reported after yesterday's close." while the Updates
+    card beside it read the Bearish headline below."""
+    day = date(2026, 10, 30)
+    headline = "Intel's weak PC outlook and guidance overshadows strong data center results"
+    inputs = dict(
+        ticker="INTC", change_percent=-30.6, today=day, z=9.0,
+        industry_name="Semiconductors", industry_change_percent=-8.7,
+        earnings_row={"date": "2026-10-29", "time": "amc", "epsActual": 0.23, "epsEstimated": 0.18},
+        had_news=True,
+    )
+    card = NewsLean(headline=headline, sentiment="Bearish", subject_terms=("INTC", "intel"),
+                    generated_at="2026-10-30T17:51:00Z", day=day)
+    a = attribute(**inputs, news_lean=card)
+    assert a.kind is CauseKind.COMPANY_NEWS and a.tag == "Bearish News"
+    assert a.detail == headline + "."
+    assert a.note == "Semiconductors fell 8.7%."
+    # Without the card the earnings still answer, as before.
+    assert attribute(**inputs).tag == "Earnings Beat"
+
+
 def test_a_move_in_line_with_its_industry_stays_a_sector_move():
-    a = _crwv(change_percent=-4.2, z=2.5, industry_change_percent=-4.0)
+    a = _crwv(change_percent=-4.2, z=2.5, industry_change_percent=-4.0, news_lean=None)
     assert a.kind is CauseKind.SECTOR
     assert a.note is None
+    # With an agreeing card the card leads, and the note keeps the in-line comparison.
+    leaned = _crwv(change_percent=-4.2, z=2.5, industry_change_percent=-4.0)
+    assert leaned.kind is CauseKind.COMPANY_NEWS and leaned.tag == "Bearish News"
+    assert leaned.note == "Software - Infrastructure fell 4.0%; CRWV moved with it."
 
 
 def test_the_note_is_only_beside_a_cause_that_does_not_already_say_it():
     assert _crwv(news_lean=None).note is None                                  # NONE
-    assert _crwv(change_percent=-4.2, industry_change_percent=-4.0).note is None  # SECTOR
+    assert _crwv(change_percent=-4.2, industry_change_percent=-4.0,
+                 news_lean=None).note is None                                  # SECTOR
     assert _crwv(industry_name=None, industry_change_percent=None).note is None  # nothing true to add
 
 
@@ -2082,6 +2132,23 @@ def test_the_note_names_an_in_line_industry_only_under_an_established_cause():
     assert describe_context("X", ctx) == []        # never reaches describe_no_cause
     flat = MoveContext(change_percent=0.0, industry_name="Beverages", industry_change_percent=-1.2)
     assert context_note("KO", flat) == "KO was flat while Beverages fell 1.2%."
+
+
+def test_a_stock_that_far_outran_its_industry_gets_the_industry_figure_alone():
+    """Owner 2026-10-30 (ORCL +11.98% on the Holdings widget): "remove ... 'ORCL moved far
+    more'. so it will have only Software - Infrastructure rose 0.8%." The stock's own
+    percent is printed beside the line, so the clause only restated it."""
+    from app.services.daily_move_attribution import MoveContext
+
+    ctx = MoveContext(change_percent=11.98, industry_name="Software - Infrastructure",
+                      industry_change_percent=0.8)
+    assert context_note("ORCL", ctx) == "Software - Infrastructure rose 0.8%."
+    assert describe_no_cause("ORCL", ctx, had_news=True) == (
+        "Software - Infrastructure rose 0.8%. No clear catalyst in today's news."
+    )
+    # The other comparisons keep their clause: only the far-outran one was restating.
+    other_way = MoveContext(change_percent=-3.0, industry_name="Tech", industry_change_percent=2.0)
+    assert context_note("X", other_way) == "Tech rose 2.0%; X went the other way."
 
 
 @pytest.mark.parametrize("word", ["today", "on Fri", "on Tue"])

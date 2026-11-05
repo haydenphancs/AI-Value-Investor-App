@@ -187,7 +187,7 @@ class WidgetCauseResponse(BaseModel):
     # rolling 24 h move has no equity session to name; the client ages it by as-of day.
     detail_aged: Optional[str] = None
     # The always-true arithmetic beside an ESTABLISHED cause ("Software - Infrastructure
-    # fell 4.0%; CRWV moved far more."). Set for earnings / analyst / company_news only —
+    # fell 4.0%."). Set for earnings / analyst / company_news only —
     # a sector, market or none `detail` already says it. Carries NO session word, so it
     # needs no aged twin. Clients from before 2026-10-14 ignore it; the new client shows
     # it whole under the detail or drops it, never truncated.

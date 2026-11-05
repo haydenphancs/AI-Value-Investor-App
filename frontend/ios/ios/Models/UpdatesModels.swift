@@ -53,6 +53,8 @@ struct NewsFilterTab: Identifiable, Equatable {
     /// Sort keys only (`HoldingsSort`): the strip orders by Tracking's "Sort By". Never drawn.
     var price: Double? = nil
     var marketCap: Double? = nil
+    /// When the ticker joined the watchlist — the "Date Added" sort key. Never drawn.
+    var addedAt: Date? = nil
 
     /// The reference "Ask Cay AI" sends for this feed. A fund is declared ("SPY|ETF")
     /// because no symbol rule can tell one — without it the chat treated SPY as an
@@ -67,17 +69,19 @@ struct NewsFilterTab: Identifiable, Equatable {
         (rounded ?? 0) >= 0
     }
 
-    /// Change rounded to the precision actually displayed.
+    /// Change rounded to the precision actually displayed, signed zero collapsed.
+    ///
+    /// The `+ 0.0` matters: `(-0.04 * 10).rounded() / 10` is `-0.0`, which passes `>= 0` (the
+    /// "+" branch) and still formats as "-0.0", so a tiny negative move rendered "+-0.0%".
     private var rounded: Double? {
         guard let change = changePercent, change.isFinite else { return nil }
-        return (change * 10).rounded() / 10
+        return (change * 10).rounded() / 10 + 0.0
     }
 
     var formattedChange: String? {
         guard let change = rounded else { return nil }
-        // `change` is already rounded, so `-0.0` cannot survive: it normalises to
-        // 0.0 and takes the "+" branch. Formatting the RAW value here is what
-        // produced the "-0.0%" seen for tiny negative moves.
+        // `change` is rounded with signed zero collapsed (above), so a tiny negative move
+        // reads "+0.0%". Formatting the RAW value here is what produced "-0.0%".
         let sign = change >= 0 ? "+" : ""
         return "\(sign)\(String(format: "%.1f", change))%"
     }
@@ -395,7 +399,7 @@ extension NewsFilterOptions {
         let sources = (stored["sources"] as? [String] ?? [])
             .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         let sentiments = (stored["sentiments"] as? [String] ?? [])
-            .compactMap(NewsSentiment.init(storageID:))
+            .compactMap { NewsSentiment(storageID: $0) }
         return NewsFilterOptions(
             sources: Array(Set(sources)).sorted(),
             sectors: [],
@@ -453,6 +457,9 @@ struct UpdatesTabDTO: Codable, Sendable {
     /// absent on the Market tab, on a missing quote, and from a backend predating them.
     let price: Double?
     let marketCap: Double?
+    /// The "Date Added" sort key (UTC-milliseconds ISO string), never displayed. Optional for
+    /// the same reasons.
+    let addedAt: String?
 
     enum CodingKeys: String, CodingKey {
         case scope, title
@@ -464,6 +471,7 @@ struct UpdatesTabDTO: Codable, Sendable {
         case assetType = "asset_type"
         case price
         case marketCap = "market_cap"
+        case addedAt = "added_at"
     }
 }
 
@@ -617,10 +625,11 @@ struct EnrichUpdatesNewsResponse: Codable, Sendable {
 
 enum UpdatesDateParser {
     /// The backend returns two shapes: true ISO-8601 (`2026-07-20T17:26:41Z`)
-    /// from our own timestamps, and FMP's space-separated
-    /// `2026-07-20 17:26:41`. Both are UTC. Returning nil for an unparseable
-    /// value lets the caller drop the article rather than stamping it "now" and
-    /// floating stale news to the top of the TODAY section.
+    /// from our own timestamps, and FMP's space-separated `2026-07-20 13:26:41`,
+    /// which is New York wall-clock time (the backend's `market_hours.to_utc_instant`,
+    /// verified live; read here as UTC it was 4-5 hours off). Returning nil for an
+    /// unparseable value lets the caller drop the article rather than stamping it
+    /// "now" and floating stale news to the top of the TODAY section.
     static func parse(_ raw: String?) -> Date? {
         guard let raw, !raw.isEmpty else { return nil }
         if let d = isoWithFraction.date(from: raw) { return d }
@@ -645,8 +654,9 @@ enum UpdatesDateParser {
         f.dateFormat = "yyyy-MM-dd HH:mm:ss"
         // Fixed locale/timezone: without these the parse follows the DEVICE's
         // calendar and zone, so the same payload yields different dates abroad.
+        // New York: FMP's own zone, as every news parser in the app reads it.
         f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
+        f.timeZone = TimeZone(identifier: "America/New_York")
         return f
     }()
 }
@@ -756,6 +766,7 @@ extension NewsFilterTab {
         self.assetType = dto.assetType
         self.price = (dto.price?.isFinite ?? false) ? dto.price : nil
         self.marketCap = (dto.marketCap?.isFinite ?? false) ? dto.marketCap : nil
+        self.addedAt = HoldingsSort.parseAddedAt(dto.addedAt)
     }
 }
 
@@ -813,7 +824,7 @@ extension SentimentTrendWindow {
 
     /// The saved pick, or nil (auto mode) when none — or only garbage — is stored.
     static func savedPick(from defaults: UserDefaults = .standard) -> SentimentTrendWindow? {
-        defaults.string(forKey: savedPickKey).flatMap(SentimentTrendWindow.init(storageID:))
+        defaults.string(forKey: savedPickKey).flatMap { SentimentTrendWindow(storageID: $0) }
     }
 
     /// Record a TAP. Never call this with a window the code chose (auto mode, a snap-back).

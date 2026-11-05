@@ -1731,9 +1731,12 @@ class HomeDashboardService:
             # Even a blank-named group is still a GROUP: the section must announce itself
             # rather than vanish, or creating a list reads as the strip breaking.
             is_group = True
-            # First N in the user's OWN arrangement (portfolio_items.position), not
-            # alphabetically and not by recency — this strip mirrors what they see on
-            # Tracking, so it has to honour the order they put things in.
+            # First N in stored position order (portfolio_items.position) — the user's
+            # CUSTOM order, the one they set by dragging in Manage Tickers — not
+            # alphabetically and not by recency. This strip does NOT mirror Tracking or
+            # Updates: those order by the device-local "Sort By" choice (Symbol, Price,
+            # Date Added, ...), which the server never sees; they match this strip only
+            # while that choice is Custom.
             symbols = group.tickers[:_WATCHLIST_MAX_TILES]
             if not symbols:
                 logger.info(

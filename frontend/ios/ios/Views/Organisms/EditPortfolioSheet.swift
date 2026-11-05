@@ -17,7 +17,6 @@ struct EditPortfolioSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var pendingDelete: Portfolio?
-    @State private var errorMessage: String?
     /// Drives the push into `PortfolioDetailEditor` (where renaming lives). State-driven
     /// rather than a `NavigationLink` because this list runs in permanent edit mode, which
     /// disables link navigation — see the row builder.
@@ -36,19 +35,6 @@ struct EditPortfolioSheet: View {
                 AppColors.background.ignoresSafeArea()
 
                 portfolioList
-
-                if let errorMessage {
-                    VStack {
-                        Spacer()
-                        Text(errorMessage)
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textOnFill)
-                            .padding(AppSpacing.md)
-                            .background(AppColors.lossFill)
-                            .cornerRadius(AppCornerRadius.medium)
-                            .padding(.bottom, AppSpacing.xl)
-                    }
-                }
             }
             .navigationTitle("Edit Portfolios")
             .navigationBarTitleDisplayMode(.inline)
@@ -183,8 +169,11 @@ struct EditPortfolioSheet: View {
             do {
                 try await viewModel.portfolioStore.reorderPortfolios(reordered)
             } catch {
-                errorMessage = "Couldn't save the new order. Try again."
-                print("[EditPortfolioSheet] ❌ Reorder failed: \(error)")
+                // The store already put the previous order back. Reported through the shared
+                // path (auth.md §6) — the sheet's own banner never cleared and `print` left
+                // nothing in a release build. `errorPresentationHost()` on this sheet makes
+                // the toast visible above it.
+                AppActions.shared.reportMutationFailure(error, action: "save the new portfolio order")
             }
         }
     }
@@ -207,8 +196,7 @@ struct EditPortfolioSheet: View {
             do {
                 try await viewModel.deletePortfolio(id: portfolio.id)
             } catch {
-                errorMessage = "Couldn't delete \(portfolio.name)."
-                print("[EditPortfolioSheet] ❌ Delete failed: \(error)")
+                AppActions.shared.reportMutationFailure(error, action: "delete \(portfolio.name)")
             }
         }
     }
@@ -266,7 +254,7 @@ private struct PortfolioDetailEditor: View {
                 }
                 .listRowBackground(AppColors.cardBackground)
 
-                Section("Tickers") {
+                Section {
                     if liveTickers.isEmpty {
                         Text("This portfolio is empty. Add tickers from the Tracking screen.")
                             .font(AppTypography.caption)
@@ -282,6 +270,13 @@ private struct PortfolioDetailEditor: View {
                         .onMove(perform: handleMoveTicker)
                         .onDelete(perform: handleDeleteTicker)
                     }
+                } header: {
+                    Text("Tickers")
+                } footer: {
+                    // The same side effects as Manage Tickers, said where they happen.
+                    Text("Drag to set this portfolio's Custom order — when it is the active portfolio, Holdings switches to Custom. Removing a ticker no other portfolio holds also takes it off your watchlist.")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textSecondary)
                 }
             }
             .listStyle(.insetGrouped)
@@ -321,29 +316,19 @@ private struct PortfolioDetailEditor: View {
         }
     }
 
+    /// The same paths as Manage Tickers (`TrackingViewModel.moveTickers` / `removeTickers`):
+    /// the order is applied before this returns, Sort By switches to Custom when this is the
+    /// active group, and a failure is reported and reverted there. These catches used to
+    /// `print` only, so a failed edit snapped back with nothing said.
     private func handleMoveTicker(from source: IndexSet, to destination: Int) {
         var updated = liveTickers
         updated.move(fromOffsets: source, toOffset: destination)
-        Task { @MainActor in
-            do {
-                try await viewModel.portfolioStore.setTickers(updated, in: portfolio.id)
-            } catch {
-                print("[PortfolioDetailEditor] ❌ Reorder tickers failed: \(error)")
-            }
-        }
+        viewModel.moveTickers(in: portfolio.id, to: updated)
     }
 
     private func handleDeleteTicker(at offsets: IndexSet) {
         let toRemove = offsets.compactMap { liveTickers[safe: $0] }
-        Task { @MainActor in
-            for ticker in toRemove {
-                do {
-                    try await viewModel.portfolioStore.removeTicker(ticker, from: portfolio.id)
-                } catch {
-                    print("[PortfolioDetailEditor] ❌ Remove \(ticker) failed: \(error)")
-                }
-            }
-        }
+        viewModel.removeTickers(toRemove, from: portfolio.id)
     }
 }
 
@@ -355,4 +340,5 @@ private extension Array {
 
 #Preview {
     EditPortfolioSheet(viewModel: TrackingViewModel())
+        .environment(\.appState, AppState())
 }

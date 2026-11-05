@@ -31,7 +31,7 @@ import Foundation
 /// the store just serves the stale bundled copy — so the only symptom is "the lesson I published
 /// never appeared", with nothing to grep. The coding path plus the element's `title`/`type` is
 /// enough to find the offending `lessons` row in Supabase.
-private struct FailableDecodable<Wrapped: Decodable>: Decodable {
+nonisolated private struct FailableDecodable<Wrapped: Decodable>: Decodable {
     let value: Wrapped?
     init(from decoder: Decoder) throws {
         do {
@@ -49,7 +49,7 @@ private struct FailableDecodable<Wrapped: Decodable>: Decodable {
 
 /// Best-effort identity peek at a dropped element. All fields optional, so it decodes for any JSON
 /// object and simply fails (=> nil) for a scalar.
-private struct DroppedElementIdentity: Decodable {
+nonisolated private struct DroppedElementIdentity: Decodable {
     let title: String?
     let type: String?
 
@@ -59,7 +59,7 @@ private struct DroppedElementIdentity: Decodable {
     }
 }
 
-private struct JourneyAPIResponse: Decodable {
+nonisolated private struct JourneyAPIResponse: Decodable, Sendable {
     let lessons: [JourneyAPILesson]
 
     private enum CodingKeys: String, CodingKey { case lessons }
@@ -70,7 +70,7 @@ private struct JourneyAPIResponse: Decodable {
     }
 }
 
-private struct JourneyAPILesson: Decodable {
+nonisolated private struct JourneyAPILesson: Decodable, Sendable {
     let title: String              // required: it's the stable lesson key; a title-less lesson is dropped
     let storyContent: JourneyAPIStory?
     // Catalog metadata. The backend has always sent these (schemas/journey.py) and the decoder
@@ -116,7 +116,7 @@ struct JourneyCatalogEntry: Sendable {
     let sortOrder: Int
 }
 
-private struct JourneyAPIStory: Decodable {
+nonisolated private struct JourneyAPIStory: Decodable, Sendable {
     let cards: [JourneyAPICard]
 
     private enum CodingKeys: String, CodingKey { case cards }
@@ -127,7 +127,7 @@ private struct JourneyAPIStory: Decodable {
     }
 }
 
-private struct JourneyAPICard: Decodable {
+nonisolated private struct JourneyAPICard: Decodable, Sendable {
     let type: String
     let headline: String?
     let text: String?
@@ -163,8 +163,11 @@ private struct JourneyAPICard: Decodable {
 // `type` (or a lesson missing `title`) would otherwise throw in JSONDecoder().decode and drop the
 // ENTIRE offline fallback (all 27 lessons), taking down offline mode AND the offline fallback for
 // remote-only content. Drop the one bad element, keep the rest — matching JourneyAPICard.
+//
+// `nonisolated` (like every DTO in this file) so the Decodable conformances work off the main
+// actor: the store decodes this 824 KB file on a detached task, never at tab mount on main.
 
-private struct JourneyBundleFile: Decodable {
+nonisolated private struct JourneyBundleFile: Decodable, Sendable {
     let lessons: [JourneyBundleLesson]
 
     private enum CodingKeys: String, CodingKey { case lessons }
@@ -175,7 +178,7 @@ private struct JourneyBundleFile: Decodable {
     }
 }
 
-private struct JourneyBundleLesson: Decodable {
+nonisolated private struct JourneyBundleLesson: Decodable, Sendable {
     let title: String
     let cards: [JourneyBundleCard]
 
@@ -188,7 +191,7 @@ private struct JourneyBundleLesson: Decodable {
     }
 }
 
-private struct JourneyBundleCard: Decodable {
+nonisolated private struct JourneyBundleCard: Decodable, Sendable {
     let type: String
     let headline: String?
     let text: String?
@@ -224,9 +227,25 @@ final class JourneyContentStore {
     private var didPrefetch = false
     /// The single in-flight fetch, so concurrent callers join it instead of racing past it.
     private var prefetchTask: Task<Void, Never>?
+    /// The bundled offline fallback being read and decoded off the main thread (see `init`).
+    private var bundledLoad: Task<Void, Never>?
 
     private init() {
-        loadBundled()
+        // The file work is DETACHED. This store is first touched while ContentView mounts all
+        // five tabs at cold launch (`LearnViewModel.init`), and reading + decoding the 824 KB
+        // bundle inline sat on the main thread in front of Home's first content frame (Sentry
+        // CAYDEX-APPLE-IOS-S follow-up, 2026-11-01). Only the cheap mapping comes back to main.
+        bundledLoad = Task {
+            let file = await Task.detached(priority: .utility) { Self.decodeBundledFile() }.value
+            self.applyBundled(file)
+        }
+    }
+
+    /// Returns once the bundled fallback is in place (at once, after the first time). Until then
+    /// the readers below see remote content only. `prefetch()` awaits this, so a caller that awaits
+    /// a prefetch always reads remote-then-bundled.
+    func bundledContentLoaded() async {
+        await bundledLoad?.value
     }
 
     /// Authored cards for a lesson: prefer fresh backend content, fall back to bundled.
@@ -283,6 +302,7 @@ final class JourneyContentStore {
     /// remote maps and get the text-only bundled lesson — no remote audio, no read-along — for the
     /// rest of the session. Deterministic, not a rare race: both callers hop the same actor.
     func prefetch() async {
+        await bundledContentLoaded()
         guard !didPrefetch else { return }
         if let inFlight = prefetchTask {
             await inFlight.value
@@ -416,38 +436,48 @@ final class JourneyContentStore {
 
     // MARK: - Bundled loading
 
-    private func loadBundled() {
-        guard let url = Bundle.main.url(forResource: "journey_lessons", withExtension: "json"),
-              let data = try? Data(contentsOf: url) else {
+    /// Read and decode `journey_lessons.json`. Detached task only — never the main thread.
+    nonisolated private static func decodeBundledFile() -> JourneyBundleFile? {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(.main))
+        #endif
+        guard let url = Bundle.main.url(forResource: "journey_lessons", withExtension: "json") else {
             print("[JourneyContentStore] journey_lessons.json not found in bundle")
-            return
+            return nil
         }
         do {
-            let file = try JSONDecoder().decode(JourneyBundleFile.self, from: data)
-            for lesson in file.lessons {
-                let slug = Self.slug(lesson.title)
-                bundledByTitle[lesson.title] = lesson.cards.map { card in
-                    // Offline fallback only, and only for the TITLE card — the completion
-                    // card no longer carries artwork. `hasImage` stays load-bearing here, so
-                    // shipping 27 imagesets later lights offline up with no further change.
-                    // Note these names use the TITLE-derived slug; the remote path uses the
-                    // authored one, and they disagree for 14 lessons.
-                    let image = (card.type == "title" && card.hasImage == true)
-                        ? "journey_\(slug)_title" : nil
-                    return makeCard(
-                        title: lesson.title,
-                        type: card.type,
-                        headline: card.headline,
-                        text: card.text ?? "",
-                        audio: card.audioClip,
-                        image: image,
-                        cta: card.cta,
-                        readAlong: card.readAlongWords
-                    )
-                }
-            }
+            let data = try Data(contentsOf: url)
+            return try JSONDecoder().decode(JourneyBundleFile.self, from: data)
         } catch {
-            print("[JourneyContentStore] bundled decode failed: \(error)")
+            print("[JourneyContentStore] bundled read/decode failed: \(error)")
+            return nil
+        }
+    }
+
+    /// Map the decoded bundle into cards, on the main actor.
+    private func applyBundled(_ file: JourneyBundleFile?) {
+        guard let file else { return }
+        for lesson in file.lessons {
+            let slug = Self.slug(lesson.title)
+            bundledByTitle[lesson.title] = lesson.cards.map { card in
+                // Offline fallback only, and only for the TITLE card — the completion
+                // card no longer carries artwork. `hasImage` stays load-bearing here, so
+                // shipping 27 imagesets later lights offline up with no further change.
+                // Note these names use the TITLE-derived slug; the remote path uses the
+                // authored one, and they disagree for 14 lessons.
+                let image = (card.type == "title" && card.hasImage == true)
+                    ? "journey_\(slug)_title" : nil
+                return makeCard(
+                    title: lesson.title,
+                    type: card.type,
+                    headline: card.headline,
+                    text: card.text ?? "",
+                    audio: card.audioClip,
+                    image: image,
+                    cta: card.cta,
+                    readAlong: card.readAlongWords
+                )
+            }
         }
     }
 

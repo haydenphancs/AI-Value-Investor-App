@@ -45,6 +45,8 @@ IOS_TAB_KEYS = {
     "asset_type",
     # Sort keys, never displayed: the strip orders by Tracking's "Sort By" (Price / Market Cap).
     "price", "market_cap",
+    # Sort key too: the star date for "Date Added", same value/shape as the Tracking feed's.
+    "added_at",
 }
 IOS_INSIGHT_KEYS = {
     "scope", "headline", "bullets", "sentiment", "badge", "article_count",

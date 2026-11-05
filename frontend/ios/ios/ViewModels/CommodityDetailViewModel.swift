@@ -1082,22 +1082,27 @@ class CommodityDetailViewModel: ObservableObject {
     }
 
     private func parseDate(_ dateString: String) -> Date? {
+        // Fractional seconds first, as the other news tabs parse them: the formatters below
+        // reject "…13:09:00.123+00:00", which would drop the row here and show it there.
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: dateString) { return date }
         let formatters: [DateFormatter] = {
-            // Fixed POSIX locale + UTC on every formatter. FMP's space-separated
-            // "yyyy-MM-dd HH:mm:ss" is UTC; without an explicit timeZone it parses
-            // in the DEVICE's zone, so the same shared cache row shows a different
-            // time (and "Xh ago") here than on Updates / the other detail tabs —
-            // a cross-screen news-parity break. Matches UpdatesDateParser.fmpSpaced.
+            // Fixed POSIX locale on every formatter, and the zone each shape really is. FMP's
+            // space-separated "yyyy-MM-dd HH:mm:ss" is New York wall-clock time (the backend's
+            // `market_hours.to_utc_instant`, verified live), read so by every news parser
+            // (`UpdatesDateParser.fmpSpaced`, the detail tabs), so one shared cache row shows
+            // one time on every screen. A bare day is read at the phone's own midnight, the
+            // zone `TickerNewsArticle.timeAgo` prints it in.
             let posix = Locale(identifier: "en_US_POSIX")
-            let utc = TimeZone(identifier: "UTC")
             let iso = DateFormatter()
-            iso.locale = posix; iso.timeZone = utc
+            iso.locale = posix; iso.timeZone = TimeZone(identifier: "UTC")
             iso.dateFormat = "yyyy-MM-dd'T'HH:mm:ssZ"
             let simple = DateFormatter()
-            simple.locale = posix; simple.timeZone = utc
+            simple.locale = posix; simple.timeZone = TimeZone(identifier: "America/New_York")
             simple.dateFormat = "yyyy-MM-dd HH:mm:ss"
             let dateOnly = DateFormatter()
-            dateOnly.locale = posix; dateOnly.timeZone = utc
+            dateOnly.locale = posix; dateOnly.timeZone = TimeZone.current
             dateOnly.dateFormat = "yyyy-MM-dd"
             return [iso, simple, dateOnly]
         }()

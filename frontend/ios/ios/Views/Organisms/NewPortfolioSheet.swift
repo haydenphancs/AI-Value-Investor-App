@@ -80,8 +80,8 @@ struct NewPortfolioSheet: View {
     /// (`TrackingViewModel:1057`), so until now closing relied entirely on SwiftUI
     /// writing `false` back through the `isPresented` binding via
     /// `@Environment(\.dismiss)`. That is one indirection too many for a control the
-    /// user is reporting as dead; `AddAssetSheet` and `SortOptionsSheet` in
-    /// `TrackingView.swift` already clear their own flags for the same reason.
+    /// user is reporting as dead; `AddAssetSheet` in `TrackingView.swift` already clears
+    /// its own flag for the same reason.
     /// `dismiss()` stays as the belt-and-braces half — calling both is idempotent.
     private func close() {
         nameFocused = false

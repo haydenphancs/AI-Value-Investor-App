@@ -2043,7 +2043,7 @@ extension TickerReportData {
         companyName: "Oracle",
         exchange: "Nasdaq",
         logoName: nil,
-        liveDate: "Live Data as of Feb 8, 8:04 AM",
+        liveDate: "Live Data as of Feb 8, 8:04 AM ET",
         priceCloseDate: "2026-02-06",
         agent: .buffett,
         qualityRating: ReportQualityRating(

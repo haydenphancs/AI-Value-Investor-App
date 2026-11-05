@@ -178,6 +178,8 @@ struct LearnContentView: View {
             .refreshable {
                 await viewModel.refresh()
             }
+            // Room for the floating mini player: the last book's "Ask the Agent" sat half under it.
+            .miniPlayerSafeArea()
         }
     }
 

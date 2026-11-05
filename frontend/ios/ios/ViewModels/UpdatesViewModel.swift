@@ -187,8 +187,9 @@ final class UpdatesViewModel: ObservableObject {
     ///
     /// The order comes from `HoldingsSort.ordered`, the comparator Tracking's list uses, keyed
     /// on each chip's OWN numbers (so a Change sort reads in order across the % the chips
-    /// show) and on its place in the server's group order ("Date Added"). An unknown price or
-    /// change sorts as 0, exactly as Tracking's placeholder rows do.
+    /// show), its add date, and its place in the server's group order (Custom). A missing
+    /// price, change, cap or date is passed as nil — unknown, sorted last — exactly as
+    /// Tracking passes its placeholder rows.
     var openableTabs: [NewsFilterTab] {
         let open: [NewsFilterTab] = filterTabs.filter { !$0.isLocked }
         let market: [NewsFilterTab] = open.filter { $0.isMarketTab }
@@ -198,11 +199,15 @@ final class UpdatesViewModel: ObservableObject {
             filterTabs.filter { !$0.isMarketTab }.enumerated().map { ($1.scope.uppercased(), $0) },
             uniquingKeysWith: { first, _ in first })
         let ordered: [NewsFilterTab] = holdingsSort.ordered(tickers) { (tab: NewsFilterTab) -> HoldingsSort.Key in
+            // Change rounded to 2 dp for the KEY only: Tracking's feed sends 2-dp values, so
+            // this is what makes a near-tie settle the same way on both screens. The pill
+            // still draws the unrounded value (at 1 dp).
             HoldingsSort.Key(
                 ticker: tab.scope,
-                price: tab.price ?? 0,
-                changePercent: tab.changePercent ?? 0,
+                price: tab.price,
+                changePercent: tab.changePercent.map { ($0 * 100).rounded() / 100 },
                 marketCap: tab.marketCap,
+                addedAt: tab.addedAt,
                 position: positions[tab.scope.uppercased()]
             )
         }
@@ -1116,6 +1121,7 @@ final class UpdatesViewModel: ObservableObject {
             // skeleton between, and the rows keep their identity (`stableID` = the server id).
             allNewsArticles = articles
             insightSummary = response.insight.flatMap { NewsInsightSummary(dto: $0) }
+            noteInsightForWidget(insightSummary, stamp: response.insight?.generatedAt, scope: scope)
             let replacedSnapshotSavedAt = snapshotSavedAt
             let replacedSnapshotSeededAt = seededAt
             snapshotSavedAt = nil
@@ -1630,6 +1636,19 @@ final class UpdatesViewModel: ObservableObject {
         }
     }
 
+    /// A card from the NETWORK (never the snapshot or `feedCache`) goes to the widget, which
+    /// refreshes when the card is newer than the tile — see
+    /// `WidgetRefreshService.insightCardArrived`. The stamp is the DTO's own: `updatedAt`
+    /// falls back to now when it does not parse, which would beat any snapshot.
+    private func noteInsightForWidget(_ card: NewsInsightSummary?, stamp: String?, scope: String) {
+        guard let card else { return }
+        WidgetRefreshService.shared.insightCardArrived(
+            scope: scope,
+            generatedAt: UpdatesDateParser.parse(stamp),
+            isAIGenerated: card.isAIGenerated
+        )
+    }
+
     /// Returns true when a real AI card arrived (stop polling).
     private func repollInsight(scope: String, token: UUID) async -> Bool {
         do {
@@ -1642,6 +1661,7 @@ final class UpdatesViewModel: ObservableObject {
                   let card = NewsInsightSummary(dto: dto) else { return false }
             insightSummary = card
             feedCache[scope] = (allNewsArticles, card, loadedOffset, hasMorePages)
+            noteInsightForWidget(card, stamp: dto.generatedAt, scope: scope)
             if card.isAIGenerated {
                 print("✅ UpdatesVM: AI insight arrived for \(scope)")
                 return true

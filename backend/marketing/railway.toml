@@ -7,7 +7,7 @@
 #   Root Directory  /backend/marketing   (the build context; Railway auto-detects its Dockerfile —
 #                                        a custom Dockerfile path was IGNORED on this service)
 #   Cron Schedule   15 * * * *           Restart Policy  Never        Healthcheck Path  (none)
-#   Watch Paths     /backend/marketing/**                             Memory            4 GB
+#   Watch Paths     /backend/marketing/**                             Memory            8 GB (4 GB until 2026-10-30)
 # The main web service keeps `backend/railway.toml` (config-as-code works there until 2026-12-01).
 #
 # Environment the service needs (and nothing else — in particular NO Supabase SECRET key;

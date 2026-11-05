@@ -2475,13 +2475,28 @@ class ChatService:
                 out["press_releases_note"] = (
                     "No press releases from the company are on file in Caydex's data right now.")
                 return out
-            out["press_releases"] = rows
+            out["press_releases"] = [cls._release_clock_et(r) for r in rows]
             out["press_releases_note"] = cls._PRESS_RELEASES_NOTE
             return cls._fit_press_releases(out)
         except Exception as e:  # noqa: BLE001 — the headlines answer on their own
             logger.warning("chat tool get_ticker_news: press releases not attached (%s: %s)",
                            type(e).__name__, e)
             return news
+
+    @staticmethod
+    def _release_clock_et(row: Dict[str, Any]) -> Dict[str, Any]:
+        """A release's `date` with its zone named: FMP stamps press releases on New York's wall
+        clock with no zone ("2026-10-01 08:30", `press_release_service._stamp`), so the model's
+        copy says "2026-10-01 08:30 ET", as every other market time in its tools does. A bare
+        day, or anything else, is left as it is. Only the model reads this copy."""
+        date = row.get("date")
+        if isinstance(date, str):
+            try:
+                datetime.strptime(date, "%Y-%m-%d %H:%M")
+            except ValueError:
+                return row
+            row["date"] = f"{date} ET"
+        return row
 
     @classmethod
     def _fit_press_releases(cls, out: Dict[str, Any]) -> Dict[str, Any]:

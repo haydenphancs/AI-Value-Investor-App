@@ -1,4 +1,4 @@
-"""The Wiser weekly ledger (`app/services/learn_weekly/ledger.py`) and its migration (204).
+"""The Wiser weekly ledger (`app/services/learn_weekly/ledger.py`) and its migrations (204, 207).
 
 Hermetic: every test runs the REAL ledger against an in-memory PostgREST fake (the approach of
 `test_marketing_run_service.py`) that also enforces migration 204's UNIQUE keys, its foreign key and
@@ -38,6 +38,8 @@ from app.services.learn_weekly.ledger import LearnLedgerConflict, LearnLedgerErr
 
 _BACKEND = Path(__file__).resolve().parents[1]
 _MIGRATION = _BACKEND / "database" / "migrations" / "204_learn_weekly_pipeline.sql"
+#: 207: a narration job narrates a weekly piece OR a hand-written catalog article (owner 2026-11-01).
+_MIGRATION_207 = _BACKEND / "database" / "migrations" / "207_learn_narration_catalog_jobs.sql"
 
 UTC = timezone.utc
 T0 = datetime(2026, 10, 24, 3, 0, tzinfo=UTC)          # Fri 2026-10-23 23:00 ET
@@ -51,6 +53,10 @@ SHA = "a" * 64
 
 def _sql() -> str:
     return strip_sql_comments(_MIGRATION.read_text(encoding="utf-8"))
+
+
+def _sql207() -> str:
+    return strip_sql_comments(_MIGRATION_207.read_text(encoding="utf-8"))
 
 
 def _quoted(group: str) -> tuple:
@@ -74,6 +80,12 @@ _TYPES = r"(?:UUID|TEXT|TIMESTAMPTZ|BOOLEAN|INTEGER|JSONB|BIGINT|DOUBLE PRECISIO
 
 def _columns(sql: str, table: str) -> set:
     return set(re.findall(rf"^\s{{4}}([a-z_0-9]+)\s+{_TYPES}\b", _table_body(sql, table), re.M))
+
+
+def _added_columns(sql: str, table: str) -> set:
+    """Columns a later migration ADDs to `table` (`ALTER TABLE … ADD COLUMN IF NOT EXISTS <col> <type>`)."""
+    return set(re.findall(rf"ALTER TABLE public\.{table}\s+ADD COLUMN IF NOT EXISTS ([a-z_0-9]+)\s+{_TYPES}\b",
+                          sql))
 
 
 def _sql_period_regexes(sql: str) -> Dict[str, "re.Pattern[str]"]:
@@ -194,6 +206,12 @@ def _job_violations(r: Dict[str, Any]) -> List[str]:
     if (r["audio_bytes"] is not None and r["audio_bytes"] <= 0) or (
             r["duration_seconds"] is not None and r["duration_seconds"] <= 0):
         out.append("learn_narration_jobs_result_ranges")
+    # 207: exactly one subject, and a catalog slug in the bundle's kebab shape.
+    if (r["piece_id"] is None) == (r["catalog_slug"] is None):
+        out.append("learn_narration_jobs_one_subject")
+    if r["catalog_slug"] is not None and not (re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", r["catalog_slug"])
+                                              and len(r["catalog_slug"]) <= 160):
+        out.append("learn_narration_jobs_catalog_slug_check")
     return out
 
 
@@ -210,6 +228,8 @@ FAKE_CHECKS = frozenset({
     "learn_narration_jobs_script_check", "learn_narration_jobs_text_caps",
     "learn_narration_jobs_claimed_has_lease", "learn_narration_jobs_ready_has_audio",
     "learn_narration_jobs_result_ranges",
+    # 207
+    "learn_narration_jobs_one_subject", "learn_narration_jobs_catalog_slug_check",
 })
 
 
@@ -333,7 +353,7 @@ class FakeSupabase:
             ledger.PIECES: _Table(self, ledger.PIECES, ledger.PIECE_COLUMNS, piece_defaults,
                                   [("period_key",), ("slug",)], _piece_violations),
             ledger.JOBS: _Table(self, ledger.JOBS, ledger.JOB_COLUMNS, job_defaults,
-                                [("piece_id", "round")], _job_violations),
+                                [("piece_id", "round"), ("catalog_slug", "round")], _job_violations),
         }
 
     def table(self, name):
@@ -359,7 +379,8 @@ class FakeSupabase:
                 continue  # SQL: NULLs are distinct
             if any(tuple(o.get(k) for k in cols) == key for o in others):
                 raise _api_error("23505", f"duplicate key value violates unique constraint {cols}")
-        if t.name == ledger.JOBS and not any(p["id"] == row["piece_id"] for p in self.tables[ledger.PIECES].rows):
+        if (t.name == ledger.JOBS and row["piece_id"] is not None  # SQL: a NULL passes a foreign key
+                and not any(p["id"] == row["piece_id"] for p in self.tables[ledger.PIECES].rows)):
             raise _api_error("23503", "insert or update violates foreign key constraint learn_narration_jobs_piece_id_fkey")
         bad = t.check(row)
         if bad:
@@ -485,8 +506,11 @@ def test_the_migration_columns_equal_the_ledgers():
     """A column the ledger writes that the table lacks is a PostgREST PGRST204 in production; a
     column the table has that the ledger does not know cannot be written or fenced."""
     sql = _sql()
-    assert _columns(sql, "learn_weekly_pieces") == set(ledger.PIECE_COLUMNS)
-    assert _columns(sql, "learn_narration_jobs") == set(ledger.JOB_COLUMNS)
+    assert _columns(sql, "learn_weekly_pieces") | _added_columns(_sql207(), "learn_weekly_pieces") \
+        == set(ledger.PIECE_COLUMNS)
+    assert _columns(sql, "learn_narration_jobs") | _added_columns(_sql207(), "learn_narration_jobs") \
+        == set(ledger.JOB_COLUMNS)
+    assert _added_columns(_sql207(), "learn_narration_jobs") == {"catalog_slug"}
 
 
 def test_the_migration_carries_the_hold_dry_run_and_index_rules():
@@ -536,8 +560,9 @@ def test_the_migration_seeds_the_three_job_rows():
 def test_the_fake_models_every_named_check_in_the_migration():
     """The fake is only a guard if it refuses what production refuses — so its CHECK set must equal
     the migration's named CHECK constraints (the one UNIQUE constraint aside)."""
-    sql = _sql()
-    named = set(re.findall(r"CONSTRAINT\s+(learn_[a-z_]+)\s+CHECK\b", sql))
+    named = set()
+    for sql in (_sql(), _sql207()):
+        named |= set(re.findall(r"CONSTRAINT\s+(learn_[a-z_]+)\s+CHECK\b", sql))
     assert named == FAKE_CHECKS
 
 
@@ -828,6 +853,7 @@ def test_unknown_status_names_are_refused_before_any_io(fake, frm, to):
     (c.FAILED, c.BUILDING),               # a terminal piece is left only by a rebuild to planned
     (c.EXPIRED, c.IN_REVIEW),
     (c.REHEARSED, c.PLANNED),             # rehearsed is never left
+    (c.REHEARSED, c.APPROVED),            # … through transition(): only promote_rehearsed_sync
     (c.UNPUBLISHED, c.PLANNED),
     (c.PUBLISHING, c.FAILED),             # its row may be live
     (c.PUBLISHED, c.EXPIRED),
@@ -1440,6 +1466,70 @@ def test_the_lease_reclaim_cap_closes_the_job_failed(fake, caplog):
     assert "FAILED" in caplog.text
 
 
+def test_the_claim_outcome_names_the_job_it_closed_at_the_cap_exactly_once(fake):
+    """`claim_job_outcome_sync` returns the jobs THIS call closed at the re-claim cap (a catalog job has
+    no piece for the scheduler's sweep to find, so the narrator service reports it from this list). The
+    close is fenced: a second scan sees a failed job and lists nothing."""
+    pid = _piece(fake)["id"]
+    job = _job(fake, pid)
+    now = T0
+    for n in range(c.MAX_JOB_LEASE_RECLAIMS + 1):
+        out = ledger.claim_job_outcome_sync(["chatterbox"], now=now, sb=fake)
+        assert out.claimed is not None and out.claimed["lease_reclaims"] == n and out.closed == []
+        now += timedelta(seconds=c.JOB_LEASE_SECONDS + 1)
+    out = ledger.claim_job_outcome_sync(["chatterbox"], now=now, sb=fake)
+    assert out.claimed is None, "nothing else to claim"
+    (closed,) = out.closed
+    assert closed["id"] == job["id"] and closed["status"] == c.JOB_FAILED
+    assert closed["error"].startswith("lease_reclaims_exhausted")
+    again = ledger.claim_job_outcome_sync(["chatterbox"], now=now + timedelta(seconds=1), sb=fake)
+    assert again == ledger.JobClaimOutcome(None, [])
+    # No usable engine declared: an empty outcome, not an exception.
+    assert ledger.claim_job_outcome_sync(42, now=now, sb=fake) == ledger.JobClaimOutcome(None, [])
+
+
+def test_a_close_that_loses_its_fence_is_not_listed(fake):
+    """A heartbeat that lands between the scan and the close: the fenced close writes nothing, so the
+    job is NOT in `closed` (it is alive) — nobody may alert a job that was never closed."""
+    pid = _piece(fake)["id"]
+    job = _job(fake, pid)
+    now = T0
+    for _ in range(c.MAX_JOB_LEASE_RECLAIMS + 1):
+        ledger.claim_job_outcome_sync(["chatterbox"], now=now, sb=fake)
+        now += timedelta(seconds=c.JOB_LEASE_SECONDS + 1)
+
+    def heartbeat_lands():
+        fake.row(ledger.JOBS, job["id"])["lease_until"] = ledger._iso(now + timedelta(seconds=600))
+
+    fake.before_update[ledger.JOBS] = [heartbeat_lands]
+    out = ledger.claim_job_outcome_sync(["chatterbox"], now=now, sb=fake)
+    assert out == ledger.JobClaimOutcome(None, [])
+    assert fake.row(ledger.JOBS, job["id"])["status"] == c.JOB_IN_PROGRESS
+
+
+def test_the_fail_outcome_says_whether_this_call_wrote(fake):
+    """`fail_job_outcome_sync.written` is True only for the call that recorded the failure — False for a
+    replay under the same claim (the row comes back unchanged) and for a refusal."""
+    pid = _piece(fake)["id"]
+    job = _job(fake, pid)
+    got = ledger.claim_job_sync(["chatterbox"], now=T0, sb=fake)
+    claim = (got["attempts"], got["claim_nonce"])
+    first = ledger.fail_job_outcome_sync(job["id"], *claim, error="voice_out_of_band: x", final=True, now=T0,
+                                         sb=fake)
+    assert first.written is True and first.row["status"] == c.JOB_FAILED
+    replay = ledger.fail_job_outcome_sync(job["id"], *claim, error="voice_out_of_band: x", final=True,
+                                          now=T0 + timedelta(seconds=30), sb=fake)
+    assert replay.written is False and replay.row == fake.row(ledger.JOBS, job["id"])
+    assert replay.row["finished_at"] == first.row["finished_at"], "the replay wrote nothing"
+    assert ledger.fail_job_outcome_sync(job["id"], claim[0] + 1, claim[1], error="x", sb=fake) \
+        == ledger.JobFailOutcome(None, False)
+    assert ledger.fail_job_outcome_sync(str(uuid.uuid4()), *claim, error="x", sb=fake) \
+        == ledger.JobFailOutcome(None, False)
+    assert ledger.fail_job_outcome_sync("not-a-uuid", *claim, error="x", sb=fake) == ledger.JobFailOutcome(None, False)
+    # fail_job_sync keeps its answer: the row, for the write and the replay alike.
+    assert ledger.fail_job_sync(job["id"], *claim, error="x", sb=fake)["id"] == job["id"]
+
+
 def test_complete_and_its_replay(fake):
     pid = _piece(fake)["id"]
     job = _job(fake, pid)
@@ -1496,6 +1586,26 @@ def test_worker_failures_requeue_then_fail_at_the_cap(fake, caplog):
         failed = ledger.fail_job_sync(job["id"], second["attempts"], second["claim_nonce"], error="", now=T0, sb=fake)
     assert failed["status"] == c.JOB_FAILED and failed["worker_failures"] == c.MAX_JOB_WORKER_FAILURES
     assert failed["error"] == "unspecified worker failure" and failed["finished_at"]
+    assert ledger.claim_job_sync(["chatterbox"], now=T0 + timedelta(days=1), sb=fake) is None
+
+
+def test_a_final_failure_closes_the_job_at_the_first_report(fake, caplog):
+    """`final` (a deterministic code: the same render would fail the same way) fails the job under the
+    cap, still counting the failure, still fenced on the claim, and a replay changes nothing."""
+    pid = _piece(fake)["id"]
+    job = _job(fake, pid)
+    got = ledger.claim_job_sync(["chatterbox"], now=T0, sb=fake)
+    with caplog.at_level("ERROR"):
+        failed = ledger.fail_job_sync(job["id"], got["attempts"], got["claim_nonce"], final=True,
+                                      error="voice_out_of_band: bytes_per_sec 12888.0", now=T0, sb=fake)
+    assert failed["status"] == c.JOB_FAILED and failed["worker_failures"] == 1 < c.MAX_JOB_WORKER_FAILURES
+    assert failed["finished_at"] and failed["lease_until"] is None
+    assert "worker failure 1 of 2 (deterministic" in caplog.text
+    before = copy.deepcopy(fake.row(ledger.JOBS, job["id"]))
+    assert ledger.fail_job_sync(job["id"], got["attempts"], got["claim_nonce"], final=True, error="again",
+                                sb=fake) == before
+    assert ledger.fail_job_sync(job["id"], got["attempts"], "f" * 16, final=True, error="zombie", sb=fake) is None
+    assert fake.row(ledger.JOBS, job["id"]) == before
     assert ledger.claim_job_sync(["chatterbox"], now=T0 + timedelta(days=1), sb=fake) is None
 
 
@@ -1566,7 +1676,8 @@ def test_every_sync_operation_has_an_async_twin_with_the_same_parameters():
         "get_piece", "get_piece_by_id", "list_pieces", "recent_subjects", "create_piece", "transition",
         "acquire_lease", "refresh_lease", "release_lease", "bump",
         "get_job", "list_jobs", "enqueue_job", "claim_job", "job_claim_ok", "heartbeat_job", "complete_job",
-        "fail_job", "cancel_open_jobs",
+        "fail_job", "cancel_open_jobs", "promote_rehearsed", "repoint_ready_audio",
+        "list_catalog_jobs", "enqueue_catalog_job", "claim_job_outcome", "fail_job_outcome",
     }
     for name, fn in syncs.items():
         twin = getattr(ledger, name, None)
@@ -1620,3 +1731,362 @@ async def test_the_async_path_end_to_end(fake, monkeypatch):
     assert (await ledger.get_piece_by_id(pid))["status"] == c.DRAFTED
     assert [r["id"] for r in await ledger.list_pieces(kind="deep_dive")] == [pid]
     assert (await ledger.recent_subjects("deep_dive", T0 - timedelta(days=30))).themes == frozenset()
+
+
+# ── promoting a rehearsal (owner decision 2026-11-01: publish W44) ───────────────────────────
+
+_OLD_AUDIO = "audio/weekly/ai-power-2026-10-23-0123456789ab.m4a"
+_NEW_AUDIO = "audio/weekly/ai-power-2026-10-23-ba9876543210.m4a"
+_NOW = T0 + timedelta(days=9)
+
+
+def _rehearsed(fake):
+    """A dry-run piece that went the whole way to `rehearsed`, with a ready narration job."""
+    pid = _piece(fake, dry_run=True)["id"]
+    job = _job(fake, pid)
+    got = ledger.claim_job_sync(["chatterbox"], now=T0, sb=fake)
+    job = ledger.complete_job_sync(job["id"], got["attempts"], got["claim_nonce"], audio_path=_OLD_AUDIO,
+                                   audio_bytes=9_000_000, duration_seconds=700.0, timings=[{"i": 0}],
+                                   checks={"server": {"ok": True}}, now=T0, sb=fake)
+    _walk(fake, pid, MAIN_PATH, fields={"draft": {"title": "x"}, "draft_sha256": SHA,
+                                         "narration_job_id": job["id"]})
+    row = ledger.transition_sync(pid, from_statuses=[c.APPROVED], to_status=c.REHEARSED, sb=fake)
+    assert row["status"] == c.REHEARSED and row["dry_run"] is True
+    return row, job
+
+
+def _promote(fake, piece, job, **over):
+    args = dict(review_round=piece["review_round"], old_draft_sha256=SHA, narration_job_id=job["id"],
+                observed_updated_at=piece["updated_at"], draft={"title": "x", "author": {"title": "Editorial"}},
+                draft_sha256="b" * 64, scheduled_publish_at=_NOW + timedelta(minutes=15),
+                hold_until=_NOW + timedelta(hours=48), validation={"promote": {"by": "owner"}}, now=_NOW, sb=fake)
+    args.update(over)
+    return ledger.promote_rehearsed_sync(piece["id"], **args)
+
+
+def test_promote_takes_a_rehearsal_live_and_then_the_ordinary_publish_path_accepts_it(fake):
+    piece, job = _rehearsed(fake)
+    row = _promote(fake, piece, job)
+    assert row["status"] == c.APPROVED and row["dry_run"] is False
+    assert row["draft_sha256"] == "b" * 64 and row["last_stage"] == "promote"
+    assert row["validation"] == {"promote": {"by": "owner"}} and row["publish_lease_until"] is None
+    assert not _piece_violations(fake.row(ledger.PIECES, piece["id"]))
+    # The publisher's own transition now works (it fences on dry_run = false).
+    live = ledger.transition_sync(piece["id"], from_statuses=[c.APPROVED], to_status=c.PUBLISHING,
+                                  within_hold_at=_NOW + timedelta(minutes=16), due_at=_NOW + timedelta(minutes=16),
+                                  fence={"draft_sha256": "b" * 64}, sb=fake)
+    assert live is not None and live["status"] == c.PUBLISHING
+
+
+@pytest.mark.parametrize("over", [
+    {"review_round": 1}, {"old_draft_sha256": "c" * 64}, {"narration_job_id": str(uuid.uuid4())},
+    {"observed_updated_at": T0 - timedelta(days=1)},
+])
+def test_promote_is_fenced_on_everything_the_script_observed(fake, over):
+    piece, job = _rehearsed(fake)
+    before = copy.deepcopy(fake.row(ledger.PIECES, piece["id"]))
+    assert _promote(fake, piece, job, **over) is None
+    assert fake.row(ledger.PIECES, piece["id"]) == before
+
+
+def test_promote_refuses_anything_but_a_dry_run_rehearsal(fake):
+    piece, job = _rehearsed(fake)
+    assert _promote(fake, piece, job) is not None
+    again = fake.row(ledger.PIECES, piece["id"])
+    assert _promote(fake, again, job, old_draft_sha256="b" * 64, draft_sha256="d" * 64) is None, \
+        "an approved (already promoted) piece is not promoted twice"
+    live_pid = _piece(fake, "2026-W45:deep_dive", dry_run=False)["id"]
+    live = _walk(fake, live_pid, MAIN_PATH, fields={"draft_sha256": SHA, "narration_job_id": job["id"]})
+    assert _promote(fake, live, job) is None, "a live piece never takes the promote path"
+
+
+@pytest.mark.parametrize("over,match", [
+    ({"scheduled_publish_at": _NOW}, "after now"),
+    ({"hold_until": _NOW}, "before scheduled_publish_at"),
+    ({"draft_sha256": SHA}, "hashes the same"),
+    ({"old_draft_sha256": "NOT-HEX"}, "old_draft_sha256"),
+    ({"narration_job_id": "nope"}, "narration_job_id"),
+    ({"observed_updated_at": "yesterday"}, "observed_updated_at"),
+    ({"review_round": -1}, "review_round"),
+    ({"draft": "text"}, "draft"),
+])
+def test_promote_validates_its_arguments_before_any_io(fake, over, match):
+    piece, job = _rehearsed(fake)
+    n = len(fake.calls)
+    with pytest.raises(ValueError, match=match):
+        _promote(fake, piece, job, **over)
+    assert len(fake.calls) == n
+
+
+def test_repoint_moves_a_ready_job_to_the_trimmed_file_and_a_replay_writes_nothing(fake):
+    piece, job = _rehearsed(fake)
+    row = ledger.repoint_ready_audio_sync(job["id"], piece_id=piece["id"], old_audio_path=_OLD_AUDIO,
+                                          new_audio_path=_NEW_AUDIO, new_audio_bytes=8_900_000,
+                                          new_duration_seconds=693.5, note={"cut_at": 693.5}, sb=fake)
+    assert row["audio_path"] == _NEW_AUDIO and row["audio_bytes"] == 8_900_000
+    assert row["duration_seconds"] == 693.5 and row["status"] == c.JOB_READY
+    assert row["checks"] == {"server": {"ok": True}, "promote": {"cut_at": 693.5}}
+    assert row["timings"] == [{"i": 0}] and row["script"] == SCRIPT, "the render's record is kept"
+    assert not _job_violations(fake.row(ledger.JOBS, job["id"]))
+    before = copy.deepcopy(fake.row(ledger.JOBS, job["id"]))
+    replay = ledger.repoint_ready_audio_sync(job["id"], piece_id=piece["id"], old_audio_path=_OLD_AUDIO,
+                                             new_audio_path=_NEW_AUDIO, new_audio_bytes=8_900_000,
+                                             new_duration_seconds=693.5, note={"cut_at": 693.5}, sb=fake)
+    assert replay == before == fake.row(ledger.JOBS, job["id"])
+
+
+def test_repoint_refuses_a_job_on_another_path_of_another_piece_or_not_ready(fake):
+    piece, job = _rehearsed(fake)
+    kw = dict(new_audio_path=_NEW_AUDIO, new_audio_bytes=1, new_duration_seconds=1.0, note={}, sb=fake)
+    assert ledger.repoint_ready_audio_sync(job["id"], piece_id=piece["id"],
+                                           old_audio_path="audio/weekly/third-0123456789ab.m4a", **kw) is None
+    assert ledger.repoint_ready_audio_sync(job["id"], piece_id=str(uuid.uuid4()), old_audio_path=_OLD_AUDIO,
+                                           **kw) is None
+    other = _job(fake, piece["id"], round=2)          # queued, never rendered
+    assert ledger.repoint_ready_audio_sync(other["id"], piece_id=piece["id"], old_audio_path=_OLD_AUDIO,
+                                           **kw) is None
+    assert fake.row(ledger.JOBS, job["id"])["audio_path"] == _OLD_AUDIO
+
+
+@pytest.mark.parametrize("over,match", [
+    ({"new_audio_path": "audio/other/x.m4a"}, "new_audio_path"),
+    ({"new_audio_path": "audio/weekly/../secrets.m4a"}, "new_audio_path"),
+    ({"old_audio_path": "/abs/x.m4a"}, "old_audio_path"),
+    ({"new_audio_path": _OLD_AUDIO}, "equals the old one"),
+    ({"new_audio_bytes": 0}, "new_audio_bytes"),
+    ({"new_audio_bytes": True}, "new_audio_bytes"),
+    ({"new_duration_seconds": float("nan")}, "new_duration_seconds"),
+    ({"note": "text"}, "note"),
+])
+def test_repoint_validates_its_arguments_before_any_io(fake, over, match):
+    piece, job = _rehearsed(fake)
+    args = dict(piece_id=piece["id"], old_audio_path=_OLD_AUDIO, new_audio_path=_NEW_AUDIO,
+                new_audio_bytes=10, new_duration_seconds=5.0, note={}, sb=fake)
+    args.update(over)
+    n = len(fake.calls)
+    with pytest.raises(ValueError, match=match):
+        ledger.repoint_ready_audio_sync(job["id"], **args)
+    assert len(fake.calls) == n
+
+
+@pytest.mark.parametrize("change", ["audio_path", "updated_at", "status"])
+def test_repoint_is_fenced_in_the_update_itself_not_only_in_the_read(fake, change):
+    piece, job = _rehearsed(fake)
+
+    def another_writer():                      # lands between the read and the UPDATE
+        row = fake.row(ledger.JOBS, job["id"])
+        if change == "audio_path":
+            row["audio_path"] = "audio/weekly/someone-else-0123456789ab.m4a"
+        elif change == "updated_at":
+            row["updated_at"] = ledger._iso(T0 + timedelta(days=20))
+        else:
+            row["status"] = c.JOB_CANCELLED
+
+    fake.before_update[ledger.JOBS] = [another_writer]
+    assert ledger.repoint_ready_audio_sync(job["id"], piece_id=piece["id"], old_audio_path=_OLD_AUDIO,
+                                           new_audio_path=_NEW_AUDIO, new_audio_bytes=8_900_000,
+                                           new_duration_seconds=693.5, note={}, sb=fake) is None
+    assert fake.row(ledger.JOBS, job["id"]).get("checks", {}).get("promote") is None
+
+
+def test_promote_refuses_a_dry_run_piece_that_has_not_rehearsed_yet(fake):
+    # W44 sat in `approved` (dry run) until its rehearsal tick: the status fence alone must refuse it.
+    pid = _piece(fake, "2026-W45:deep_dive", dry_run=True)["id"]
+    job = _job(fake, pid)
+    approved = _walk(fake, pid, MAIN_PATH, fields={"draft_sha256": SHA, "narration_job_id": job["id"]})
+    assert approved["status"] == c.APPROVED and approved["dry_run"] is True
+    before = copy.deepcopy(fake.row(ledger.PIECES, pid))
+    assert _promote(fake, approved, job) is None
+    assert fake.row(ledger.PIECES, pid) == before
+
+
+def test_promote_is_fenced_in_the_update_on_status(fake):
+    piece, job = _rehearsed(fake)
+
+    def owner_moves_it():
+        fake.row(ledger.PIECES, piece["id"])["status"] = c.UNPUBLISHED   # any other status
+
+    fake.before_update[ledger.PIECES] = [owner_moves_it]
+    assert _promote(fake, piece, job) is None
+    assert fake.row(ledger.PIECES, piece["id"])["dry_run"] is True
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════
+# Catalog narration jobs (migration 207, owner 2026-11-01 "Yes, build it"): a job with no piece
+# narrates a hand-written Money Moves catalog article on the Railway narrator.
+# ═════════════════════════════════════════════════════════════════════════════════════════════
+
+CATALOG = "coca-cola-vs-pepsico"
+
+
+def _catalog_job(fake, slug=CATALOG, *, round=1, sha=SHA, engine="chatterbox"):
+    row = ledger.enqueue_catalog_job_sync(slug, round=round, script=SCRIPT, script_sha256=sha, engine=engine,
+                                          voice="caydex_voice_achird_v2", pipeline_version="learn-narrator/1",
+                                          sb=fake)
+    assert row is not None
+    return row
+
+
+def test_migration_207_relaxes_piece_id_and_adds_the_catalog_subject():
+    sql = _sql207()
+    assert sql.lstrip().startswith("BEGIN;") and sql.rstrip().endswith("COMMIT;")
+    assert re.search(r"ALTER TABLE public\.learn_narration_jobs ALTER COLUMN piece_id DROP NOT NULL;", sql)
+    assert re.search(r"ALTER TABLE public\.learn_narration_jobs ADD COLUMN IF NOT EXISTS catalog_slug TEXT;", sql)
+    # Exactly one subject; the bundle's kebab slug shape; a FULL unique (PostgREST on_conflict needs it).
+    assert re.search(r"CONSTRAINT learn_narration_jobs_one_subject\s+CHECK \(\(piece_id IS NULL\) <> "
+                     r"\(catalog_slug IS NULL\)\);", sql)
+    m = re.search(r"CONSTRAINT learn_narration_jobs_catalog_slug_check\s+CHECK \(catalog_slug IS NULL\s+OR "
+                  r"\(catalog_slug ~ '([^']+)' AND char_length\(catalog_slug\) <= (\d+)\)\);", sql)
+    assert m and int(m.group(2)) == ledger.CATALOG_SLUG_MAX
+    assert m.group(1) == "^" + ledger._SLUG.pattern.replace("(?:", "(") + "$"
+    assert re.search(r"CONSTRAINT learn_narration_jobs_catalog_round UNIQUE \(catalog_slug, round\);", sql)
+    assert "WHERE catalog_slug" not in sql, "a partial unique index cannot back PostgREST's on_conflict"
+    # Each named constraint is added only when absent (re-runnable), checked on this table.
+    for name in ("learn_narration_jobs_one_subject", "learn_narration_jobs_catalog_slug_check",
+                 "learn_narration_jobs_catalog_round"):
+        assert re.search(rf"IF NOT EXISTS \(SELECT 1 FROM pg_constraint\s+WHERE conname = '{name}'\s+"
+                         r"AND conrelid = 'public\.learn_narration_jobs'::regclass\) THEN", sql), name
+    for col in ("learn_narration_jobs.catalog_slug", "learn_narration_jobs.piece_id", "learn_weekly_pieces.dry_run"):
+        assert re.search(rf"COMMENT ON COLUMN public\.{re.escape(col)} IS", sql), col
+    assert "promote_rehearsed_sync" in sql and "2026-11-01" in sql
+    # No new table, and the grants are 204's, untouched: nothing widened to a client role.
+    assert "CREATE TABLE" not in sql
+    assert not re.search(r"\bGRANT\b|\bREVOKE\b|\bPOLICY\b", sql)
+
+
+def _bare_job(**over):
+    row = {k: None for k in ledger.JOB_COLUMNS}
+    row.update({"round": 1, "status": "queued", "engine": "chatterbox", "attempts": 0, "worker_failures": 0,
+                "lease_reclaims": 0, "script": [], "script_sha256": SHA, "voice": "v", "pipeline_version": "p"})
+    row.update(over)
+    return row
+
+
+def test_the_catalog_slug_validator_is_the_sql_check():
+    for ok in ("kodak-inventing-the-future-it-couldnt-sell", "coca-cola-vs-pepsico", "a", "a1-b2",
+               "x" * ledger.CATALOG_SLUG_MAX):
+        assert ledger.validate_catalog_slug(ok) == ok
+        assert not _job_violations(_bare_job(catalog_slug=ok))
+    for bad in ("", "Kodak", "kodak_", "-kodak", "kodak-", "kodak--x", "kodak\n", "x" * 161, None, 7, "kodák"):
+        with pytest.raises(ValueError):
+            ledger.validate_catalog_slug(bad)
+        if isinstance(bad, str) and bad:
+            assert "learn_narration_jobs_catalog_slug_check" in _job_violations(_bare_job(catalog_slug=bad))
+
+
+def test_catalog_enqueue_is_first_write_wins_on_slug_and_round(fake):
+    first = _catalog_job(fake)
+    assert first["status"] == c.JOB_QUEUED and first["piece_id"] is None and first["catalog_slug"] == CATALOG
+    assert _catalog_job(fake)["id"] == first["id"]
+    assert len(fake.tables[ledger.JOBS].rows) == 1
+    # Another slug, the same round: its own job (NULL piece_ids never collide on (piece_id, round)).
+    other = _catalog_job(fake, "kodak-inventing-the-future-it-couldnt-sell")
+    assert other["id"] != first["id"]
+    # A weekly piece's round 1 lives beside them (NULL catalog_slugs never collide on (catalog_slug, round)).
+    pid = _piece(fake)["id"]
+    assert _job(fake, pid)["catalog_slug"] is None
+    assert len(fake.tables[ledger.JOBS].rows) == 3
+
+
+def test_catalog_enqueue_refuses_to_hand_back_a_job_for_another_script(fake, caplog):
+    _catalog_job(fake)
+    with caplog.at_level("ERROR"):
+        assert ledger.enqueue_catalog_job_sync(CATALOG, round=1, script=SCRIPT, script_sha256="b" * 64,
+                                               engine="chatterbox", voice="caydex_voice_achird_v2",
+                                               pipeline_version="learn-narrator/1", sb=fake) is None
+    assert "open a new round" in caplog.text and CATALOG in caplog.text
+    assert _catalog_job(fake, round=2, sha="b" * 64)["round"] == 2
+    assert [j["round"] for j in ledger.list_catalog_jobs_sync(CATALOG, sb=fake)] == [1, 2]
+
+
+@pytest.mark.parametrize("field, value", [("engine", "kokoro"), ("voice", "am_michael"),
+                                          ("pipeline_version", "learn-narrator/2")])
+def test_catalog_enqueue_refuses_a_round_frozen_to_another_voice(fake, caplog, field, value):
+    _catalog_job(fake)
+    args = dict(round=1, script=SCRIPT, script_sha256=SHA, engine="chatterbox", voice="caydex_voice_achird_v2",
+                pipeline_version="learn-narrator/1")
+    args[field] = value
+    with caplog.at_level("ERROR"):
+        assert ledger.enqueue_catalog_job_sync(CATALOG, sb=fake, **args) is None
+    assert field in caplog.text
+
+
+def test_list_catalog_jobs_reads_only_that_slug_by_round(fake):
+    _catalog_job(fake, round=2)
+    _catalog_job(fake, round=1, sha="c" * 64)
+    _catalog_job(fake, "kodak-inventing-the-future-it-couldnt-sell")
+    pid = _piece(fake)["id"]
+    _job(fake, pid)
+    jobs = ledger.list_catalog_jobs_sync(CATALOG, sb=fake)
+    assert [(j["catalog_slug"], j["round"]) for j in jobs] == [(CATALOG, 1), (CATALOG, 2)]
+    assert ledger.list_catalog_jobs_sync("never-narrated", sb=fake) == []
+    # A weekly piece's list never shows a catalog job.
+    assert [j["catalog_slug"] for j in ledger.list_jobs_sync(pid, sb=fake)] == [None]
+
+
+@pytest.mark.parametrize("kwargs", [
+    dict(catalog_slug="Kodak"), dict(catalog_slug="kodak\n"), dict(catalog_slug=""), dict(catalog_slug=None),
+    dict(catalog_slug="x" * 161), dict(round=0), dict(round=True), dict(script=[]), dict(script="text"),
+    dict(script=[{"t": float("inf")}]), dict(script_sha256="A" * 64), dict(engine="piper"), dict(voice=""),
+    dict(voice=" padded "), dict(pipeline_version="a\nb"),
+])
+def test_catalog_enqueue_refuses_bad_input_before_any_io(fake, kwargs):
+    args = dict(catalog_slug=CATALOG, round=1, script=SCRIPT, script_sha256=SHA, engine="chatterbox",
+                voice="caydex_voice_achird_v2", pipeline_version="learn-narrator/1")
+    args.update(kwargs)
+    n = len(fake.calls)
+    with pytest.raises(ValueError):
+        ledger.enqueue_catalog_job_sync(args.pop("catalog_slug"), sb=fake, **args)
+    if "catalog_slug" in kwargs:
+        with pytest.raises(ValueError):
+            ledger.list_catalog_jobs_sync(kwargs["catalog_slug"], sb=fake)
+    assert len(fake.calls) == n
+
+
+def test_the_fake_refuses_a_job_with_both_or_neither_subject(fake):
+    """The 207 CHECKs and UNIQUE, as the fake models them: a write production would refuse fails here."""
+    pid = _piece(fake)["id"]
+    table = fake.tables[ledger.JOBS]
+    base = {"round": 1, "script": SCRIPT, "script_sha256": SHA, "engine": "chatterbox", "voice": "v",
+            "pipeline_version": "p"}
+    with pytest.raises(APIError, match="learn_narration_jobs_one_subject"):
+        table.insert({**base, "piece_id": pid, "catalog_slug": CATALOG}).execute()
+    with pytest.raises(APIError, match="learn_narration_jobs_one_subject"):
+        table.insert(dict(base)).execute()
+    with pytest.raises(APIError, match="learn_narration_jobs_catalog_slug_check"):
+        table.insert({**base, "catalog_slug": "Not-Kebab"}).execute()
+    table.insert({**base, "catalog_slug": CATALOG}).execute()
+    with pytest.raises(APIError) as dup:
+        table.insert({**base, "catalog_slug": CATALOG}).execute()
+    assert dup.value.code == "23505"
+
+
+def test_a_catalog_job_is_claimed_completed_and_failed_like_a_weekly_one(fake, caplog):
+    job = _catalog_job(fake)
+    with caplog.at_level("INFO"):
+        got = ledger.claim_job_sync(["chatterbox"], now=T0, sb=fake)
+    assert got["id"] == job["id"] and got["status"] == c.JOB_IN_PROGRESS
+    assert f"catalog {CATALOG} round 1" in caplog.text
+    claim = (got["attempts"], got["claim_nonce"])
+    done = ledger.complete_job_sync(job["id"], *claim, audio_path=f"audio/catalog/{CATALOG}-{'a' * 12}.m4a",
+                                    audio_bytes=10, duration_seconds=2.0, timings=[], checks={}, now=T0, sb=fake)
+    assert done["status"] == c.JOB_READY and done["piece_id"] is None
+    # Round 2 fails twice: re-queued, then failed at the cap — no piece involved anywhere.
+    second = _catalog_job(fake, round=2, sha="b" * 64)
+    row = None
+    for expected in (c.JOB_QUEUED, c.JOB_FAILED):
+        got = ledger.claim_job_sync(["chatterbox"], now=T0, sb=fake)
+        assert got["id"] == second["id"]
+        row = ledger.fail_job_sync(second["id"], got["attempts"], got["claim_nonce"], error="render_oom: x",
+                                   now=T0, sb=fake)
+        assert row["status"] == expected
+    assert ledger.job_subject(row) == f"catalog {CATALOG}"
+    assert ledger.job_subject({"piece_id": "p-1", "catalog_slug": None}) == "piece p-1"
+
+
+@pytest.mark.asyncio
+async def test_the_catalog_async_twins_run_end_to_end(fake, monkeypatch):
+    monkeypatch.setattr(ledger, "get_supabase", lambda: fake)
+    job = await ledger.enqueue_catalog_job(CATALOG, round=1, script=SCRIPT, script_sha256=SHA, engine="chatterbox",
+                                           voice="caydex_voice_achird_v2", pipeline_version="learn-narrator/1")
+    assert [j["id"] for j in await ledger.list_catalog_jobs(CATALOG)] == [job["id"]]

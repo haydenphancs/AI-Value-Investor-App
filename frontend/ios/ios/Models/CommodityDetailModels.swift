@@ -63,12 +63,12 @@ enum CommodityMarketStatus {
             return "Market Open"
         case .closed(let date, let time, let timezone):
             guard let date else { return "Market Closed" }
-            let formatter = DateFormatter()
-            formatter.dateFormat = "MMM d"
+            // The close's NEW YORK date beside its New York clock, as on the stock badge.
+            let day = MarketStatus.closeDay(date)
             let when = [time, timezone].filter { !$0.isEmpty }.joined(separator: " ")
             return when.isEmpty
-                ? "Market Closed  \(formatter.string(from: date))"
-                : "Market Closed  \(formatter.string(from: date)), \(when)"
+                ? "Market Closed  \(day)"
+                : "Market Closed  \(day), \(when)"
         case .preMarket:
             return "Pre-Market"
         case .afterHours:

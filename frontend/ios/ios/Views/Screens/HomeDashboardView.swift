@@ -184,6 +184,17 @@ struct HomeDashboardView: View {
         ) { _ in
             Task { await viewModel.reloadForWatchlistChange(isActiveTab: isActiveTab) }
         }
+        // A confirmed reorder / remove / add on the active group (Manage Tickers, Edit
+        // Portfolio, the Holdings swipe). The strip is the group's first tiles in its Custom
+        // order; a reorder (and a remove that keeps the ticker on the watchlist) posts neither
+        // signal above, so it kept the old tiles for up to a minute.
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: PortfolioStore.activeGroupTickersDidChangeNotification
+            )
+        ) { _ in
+            Task { await viewModel.reloadForWatchlistChange(isActiveTab: isActiveTab) }
+        }
         // Home is where this matters most: it has NO root NavigationStack, so every destination
         // here is modal and the ticker screen is routinely two covers deep (theme → ticker,
         // signals → ticker, search → ticker). Clearing these roots unwinds the whole nest —

@@ -18,7 +18,9 @@ source never discussed. The checks, all pure:
   "Apple climbed 70%") must be one the sheet states as a claim; a loss cannot come back as a
   profit; and a bare scale word ("a trillion-dollar company", "worth billions") needs its scale
   in the sheet. Unit-less integers 0-5 not followed by a unit are exempt ("3 lessons"); "up
-  5%" and "5-fold" are not. Round 2 (over-block review) lets an honest restatement with the
+  5%" and "5-fold" are not. The ordinal of a list label opening a CAROUSEL SLIDE title is exempt
+  too, up to that slide's 1-based position ("Check 6: …", `_LIST_LABEL_RE`, 2026-10-31); the
+  writer passes `ordinal_max` for those titles only. Round 2 (over-block review) lets an honest restatement with the
   writer's OWN verb through without reopening those refusals (`_anchored`): a YEAR binds on any
   word the two sentences share, names included, unless its own verb is another event
   ("founded" ≠ "shipped"); unit-scoped verb classes ("acquired" for "Paid for", "established"
@@ -880,7 +882,24 @@ def _small_structural(m: NumberMention, converted: str) -> bool:
     return not (nxt and nxt.group(1) in _UNIT_WORDS)
 
 
-def _check_numbers(field_name: str, text: str, ctx: GroundingContext) -> List[Violation]:
+#: A numbered list LABEL opening a carousel slide title ("Check 6: How long does a mistake
+#: last?", "Step 6. Look at the trend", "Question #6: …"), read on the digit-converted text
+#: (2026-10-31): an ordinal like "Check 1:" … "Check 5:", which pass only because they are ≤ 5, so a
+#: checklist with a sixth or seventh check (5-8 slides are allowed) was refused for "6". Closed label
+#: set (series words like "part" or "lesson" stay out — rule 7 bans a part two), ONE digit, then
+#: ":", "." or ")" and a space before a letter, or the end — so "Check 6 billion", "Check 6:6
+#: stores", "Check 6.5: margins" and a dash range are not labels. `ordinal_max` (the slide's
+#: 1-based position) bounds it; every other number in the title is still grounded.
+#: A quantity word right after the label makes the number a quantity again ("Check 7) thousand
+#: stores", "Check 6: percent of profit", "Check 6: Dozens of stores") — review round, same day.
+_LIST_LABEL_RE = re.compile(r"(check|step|question)\s?(?:#\s?|no\.\s?)?([1-9])\s?[:.)]"
+                            r"(?:\s+(?=[A-Za-z])(?!(?:percent(?:age)?|per\s?cent|times|fold|baggers?|dollars?|"
+                            r"hundreds?|thousands?|millions?|billions?|trillions?|dozens?|bps|basis)\b)|\s*$)",
+                            re.IGNORECASE)
+
+
+def _check_numbers(field_name: str, text: str, ctx: GroundingContext, *,
+                   ordinal_max: int = 0) -> List[Violation]:
     """Every draft number must be a fact-sheet number (value AND unit class) whose context meets
     the source number's context (`_anchored`). Two refusals on top, whatever the anchors say:
     * an amount, percentage or multiple the draft states AS a price, value or return claim
@@ -895,6 +914,12 @@ def _check_numbers(field_name: str, text: str, ctx: GroundingContext) -> List[Vi
     out: List[Violation] = []
     # Spelled-out numbers are converted, then held to exactly the same standard as digits.
     converted = words_to_digits(text)
+    if ordinal_max > 0:
+        # A carousel title's opening list label: its ordinal is structure, not a fact — drop that
+        # one digit (never the label's words) and ground the rest as usual.
+        label = _LIST_LABEL_RE.match(converted)
+        if label is not None and int(label.group(2)) <= ordinal_max:
+            converted = converted[:label.start(2)] + converted[label.end(2):]
     #: (value, unit) → the sheet numbers it equals: a repetition loop of one number scans the
     #: sheet's numbers once, not once per repetition.
     matches_of: dict = {}
@@ -1262,8 +1287,11 @@ def _check_accented_words(field_name: str, text: str, ctx: GroundingContext) -> 
     return out
 
 
-def check_grounding(field_name: str, text: str, ctx: GroundingContext) -> List[Violation]:
-    """All grounding violations for one field. Pure; never raises.
+def check_grounding(field_name: str, text: str, ctx: GroundingContext, *,
+                    ordinal_max: int = 0) -> List[Violation]:
+    """All grounding violations for one field. Pure; never raises. `ordinal_max` > 0 only for a
+    carousel slide title (its 1-based position): an opening list label up to it is structure
+    (`_LIST_LABEL_RE`); every other caller keeps the default, and with it today's checks.
 
     Text past `GROUNDING_CAP` is reported as `too_long` and only the prefix is scanned — the
     same contract as `compliance.scan_text`, so a repetition loop costs a bounded amount of work
@@ -1276,7 +1304,7 @@ def check_grounding(field_name: str, text: str, ctx: GroundingContext) -> List[V
         if len(text) > GROUNDING_CAP:
             out.append(Violation(field_name, "too_long", f"{len(text)} chars > {GROUNDING_CAP}"))
             text = text[:GROUNDING_CAP]
-        out += _check_numbers(field_name, text, ctx)
+        out += _check_numbers(field_name, text, ctx, ordinal_max=min(max(ordinal_max, 0), 9))
         out += _check_name_numbers(field_name, text, ctx)
         sk = skeleton(text)
         entities = _check_entities(field_name, sk, ctx)

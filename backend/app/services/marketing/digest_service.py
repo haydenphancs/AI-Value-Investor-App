@@ -52,9 +52,10 @@ read-only look at the records `_final_owed` takes, once per process, on a day af
   date line sits the weekly COST line (`weekly_cost`, `_cost_lines`), also from our database only and in
   integer micro-dollars: X exact to our charges journal (each entry by its own time, so a metrics read
   on an old post lands in the week it was billed), Gemini / the worker / the Upload-Post plan fee as
-  labelled estimates (≈), the week before beside it, and a ⚠️ line when last week's usage (X + Gemini +
-  worker) passed MARKETING_WEEKLY_COST_WARN_USD. Each part degrades alone to "unreadable" and the total
-  then reads "≥" — never a wrong number, never a silent 0. In place of the old this-week engagement
+  labelled estimates (≈) — and Claude (≈, at its own list prices) only in a week a writer or judge call
+  went to Claude —, the week before beside it, and a ⚠️ line when last week's usage (X + Gemini +
+  [Claude +] worker) passed MARKETING_WEEKLY_COST_WARN_USD. Each part degrades alone to "unreadable" and
+  the total then reads "≥" — never a wrong number, never a silent 0. In place of the old this-week engagement
   block sits the follows-first 4-WEEK SCORECARD (`scorecard`, 2026-10-15): one row per (platform,
   format) over the published posts of the 4 ET weeks ending that Sunday — posts; followers and their
   change against the snapshot closest to 4 weeks earlier (dated); TikTok's follows and profile visits
@@ -157,9 +158,17 @@ LAST_HOUR_ET = 23
 #: A claim older than this is taken over (a process killed mid-run). Each report takes seconds.
 JOB_STALE_SECONDS = 600
 
-#: A stage's cgroup memory peak (MB) above which the run-health alert warns: the worker's limit is
-#: 3,814 MiB and the 2026-10-01 production peak was 2,587 MB.
+#: A stage's cgroup memory peak warns above this share of the container limit the run's preflight
+#: recorded (`metadata.preflight.voice.memory_limit`, "<n> MiB" from cgroup v2 `memory.max`), so the
+#: alert follows the Railway setting instead of a copy of it. The limit was 4 GB (3,814 MiB) until
+#: 2026-10-30, when the 10-28 earnings day peaked at 3,345 MB (its voice child at 2,206; the rest is
+#: page cache) and the service went to 8 GB (7,629 MiB → alert above 6,484 MB).
+MEMORY_ALERT_SHARE = 0.85
+#: The alert line for a run with no readable limit (no preflight, "max", junk): the old 4 GB service's.
 MEMORY_ALERT_MB = 3200
+#: A recorded limit below this is not a container the worker could run in — read as unrecorded.
+MEMORY_LIMIT_MIN_MB = 1024
+_MEMORY_LIMIT_RE = re.compile(r"([0-9]{1,7}) MiB", re.ASCII)
 #: The followers change is measured against the latest snapshot at least this much older than now's.
 FOLLOWER_BASELINE_AGE = timedelta(days=6)
 #: The published posts of this many days back are read ONCE and feed both the follower snapshots
@@ -203,20 +212,41 @@ X_CHARGE_ROW_LIMIT = 500
 
 #: The weekly COST line (`weekly_cost`) — integer micro-dollars throughout, so it can never be NaN or
 #: inf. X is exact to OUR ledger; the rest are labelled estimates (≈):
-#: * Gemini: every token the writer and the judge spent (`marketing_scripts.tokens_used`) at ONE
-#:   blended, upper-side rate of $1.50 per 1M (writer gemini-2.5-flash $0.30 in / $2.50 out; judge
-#:   gemini-3.8-flash $0.75 / $3.75 through 2026-12-31, DOUBLED from 2027-01-01 — revisit then,
-#:   documents/OWNER_TASKS.md §2.5).
+#: * Gemini: every token the writer and the judge spent (`marketing_scripts.tokens_used`) that is not
+#:   Claude's, at ONE blended, upper-side rate of $1.50 per 1M (writer gemini-2.5-flash $0.30 in /
+#:   $2.50 out; judge gemini-3.8-flash $0.75 / $3.75 through 2026-12-31, DOUBLED from 2027-01-01 —
+#:   revisit then, documents/OWNER_TASKS.md §2.5).
+#: * Claude (2026-10-31): the Claude tokens inside `tokens_used` (`marketing_scripts.claude_usage`,
+#:   migration 206 — NULL unless a MARKETING_*_PROVIDER switch sent a call to Claude), each model's at its
+#:   own rates (`CLAUDE_MICROS_PER_MILLION_TOKENS`). Shown only in a week that has any.
 #: * worker: Railway list prices ($10 per GB-month, $20 per vCPU-month, over 30 days, in nano-dollars
 #:   per second) for every second a run's stages took, at its highest memory peak and 4 busy vCPUs —
 #:   upper-side (Railway meters actual use). The hourly no-op ticks and the web service (shared with
 #:   the whole app) are not counted.
 #: * Upload-Post: the plan's fixed monthly fee (MARKETING_UPLOAD_POST_MONTHLY_USD) × 7 / 30.4375.
 GEMINI_MICROS_PER_MILLION_TOKENS = 1_500_000
+#: Anthropic's list prices per 1M tokens, in micro-dollars: (input, output, cache read, cache write) —
+#: as published 2026-10-06, checked 2026-10-31 (Sonnet 5.5 $2 / $10, Opus 5.5 $4 / $20, Fable 5.1 $10 / $50;
+#: cache reads $0.20 / $0.20 / $0.25). Cache writes at 1.25× input, the 5-minute TTL's rate (these roles
+#: send no cache_control, so both cache kinds stay 0 in practice). Haiku 5.5 at its rate for prompts up to
+#: 100K tokens (every prompt of these roles is far below; $0.50 / $2.50 above), with no published cache-read
+#: rate (None). A served model is matched by its id or its id plus a dated snapshot suffix (-YYYYMMDD). A
+#: model or token kind with no rate here makes the Claude part "unreadable", logged with the model — add
+#: its row, never a guess. Revisit with any Anthropic price change.
+CLAUDE_MICROS_PER_MILLION_TOKENS: Dict[str, Tuple[Optional[int], Optional[int], Optional[int], Optional[int]]] = {
+    "claude-sonnet-5-5": (2_000_000, 10_000_000, 200_000, 2_500_000),
+    "claude-opus-5-5": (4_000_000, 20_000_000, 200_000, 5_000_000),
+    "claude-fable-5-1": (10_000_000, 50_000_000, 250_000, 12_500_000),
+    "claude-haiku-5-5": (100_000, 500_000, None, 125_000),
+}
+#: The token kinds of `claude_usage`, in the order of each price row.
+CLAUDE_TOKEN_KINDS = ("input", "output", "cache_read", "cache_write")
 RAILWAY_NANO_PER_GB_SECOND = 3_860
 RAILWAY_NANO_PER_VCPU_SECOND = 7_720
-#: The marketing-worker service: 4 GB (marketing/railway.toml) and at least 4 vCPUs (its render runs
-#: four x264 threads from the cgroup quota) — an ASSUMPTION, labelled ≈.
+#: The marketing-worker service: at least 4 vCPUs (its render runs four x264 threads from the cgroup
+#: quota) — an ASSUMPTION, labelled ≈. Memory is priced at the stage peak, capped at the run's recorded
+#: limit (`_memory_limit`); WORKER_MEMORY_MB (the 4 GB service until 2026-10-30) is the cap and the
+#: no-peak price only when no limit was recorded.
 WORKER_VCPUS = 4
 WORKER_MEMORY_MB = 4096
 #: A stage time beyond this is not a measurement (a worker tick's deadline is 30 minutes).
@@ -629,14 +659,39 @@ def _memory_peaks(run: Dict[str, Any]) -> List[Tuple[float, str]]:
     return out
 
 
+def _memory_limit(run: Dict[str, Any]) -> Optional[int]:
+    """The container memory limit (MiB) the run's preflight recorded — `metadata.preflight.voice.memory_limit`,
+    written by the worker as "<n> MiB" from cgroup v2 `memory.max` — or None: no preflight, no limit ("max"),
+    or anything else (a limit under MEMORY_LIMIT_MIN_MB is junk, not a container the worker ran in)."""
+    preflight = _meta(run).get("preflight")
+    voice = preflight.get("voice") if isinstance(preflight, dict) else None
+    raw = voice.get("memory_limit") if isinstance(voice, dict) else None
+    m = _MEMORY_LIMIT_RE.fullmatch(raw) if isinstance(raw, str) else None
+    if m is None:
+        return None
+    mib = int(m.group(1))
+    return mib if mib >= MEMORY_LIMIT_MIN_MB else None
+
+
+def _memory_alert_mb(run: Dict[str, Any]) -> int:
+    """The peak above which the run's stages warn: MEMORY_ALERT_SHARE of its recorded limit, else
+    MEMORY_ALERT_MB."""
+    limit = _memory_limit(run)
+    return int(limit * MEMORY_ALERT_SHARE) if limit is not None else MEMORY_ALERT_MB
+
+
 def _memory_line(run: Dict[str, Any], day: str) -> Optional[str]:
-    over = [p for p in _memory_peaks(run) if p[0] > MEMORY_ALERT_MB]
+    alert = _memory_alert_mb(run)
+    over = [p for p in _memory_peaks(run) if p[0] > alert]
     if not over:
         return None
     mb, stage = max(over)
+    limit = _memory_limit(run)
+    limit_text = (f"the worker's limit is ~{_n(limit)} MiB" if limit is not None
+                  else "the worker's limit was not recorded")
     return (f"⚠️ Marketing worker memory: stage {stage} peaked at {_n(int(round(mb)))} MB on {day} (alert above "
-            f"{_n(MEMORY_ALERT_MB)} MB; the worker's limit is ~3,814 MiB). Give the marketing-worker service more "
-            f"memory before a stage is OOM-killed.")
+            f"{_n(alert)} MB; {limit_text}). Give the marketing-worker service more memory before a stage is "
+            f"OOM-killed.")
 
 
 def _no_retry() -> str:
@@ -1474,7 +1529,7 @@ def _run_rows(runs: List[Dict[str, Any]], week_start: date, week_end: date) -> T
             continue
         by_day[d] = run
     rows: List[Tuple[date, str]] = []
-    peak: Optional[Tuple[float, date, str]] = None
+    peak: Optional[Tuple[float, date, str, int]] = None   # (MB, day, stage, that run's alert line)
     d = week_start
     while d <= week_end:
         run = by_day.get(d)
@@ -1513,7 +1568,7 @@ def _run_rows(runs: List[Dict[str, Any]], week_start: date, week_end: date) -> T
                 rows.append((d, text))
             for mb, stage in _memory_peaks(run):
                 if peak is None or mb > peak[0]:
-                    peak = (mb, d, stage)
+                    peak = (mb, d, stage, _memory_alert_mb(run))
         d += timedelta(days=1)
     return rows, peak
 
@@ -1559,7 +1614,9 @@ def run_worker_micros(run: Dict[str, Any]) -> Optional[int]:
             return None
         ms += int(round(seconds * 1000))
     peaks = [mb for mb, _stage in _memory_peaks(run)]
-    mb = min(int(round(max(peaks))), WORKER_MEMORY_MB) if peaks else WORKER_MEMORY_MB
+    limit = _memory_limit(run)
+    cap = limit if limit is not None else WORKER_MEMORY_MB
+    mb = min(int(round(max(peaks))), cap) if peaks else cap
     # nano-$ per second = (mb / 1024) × GB rate + vCPUs × vCPU rate; × ms / 1000 → nano-$; / 1000 → micro-$.
     numerator = ms * (mb * RAILWAY_NANO_PER_GB_SECOND + WORKER_VCPUS * RAILWAY_NANO_PER_VCPU_SECOND * 1024)
     return (numerator + 512_000_000) // 1_024_000_000   # half-up
@@ -1586,10 +1643,83 @@ def _worker_week(runs: Optional[List[Any]], first: date, last: date) -> Optional
     return total if total <= _MICROS_BOUND else None
 
 
+def claude_rates(model: str) -> Optional[Tuple[Optional[int], ...]]:
+    """A served Claude model's price row: by its id, or by its id with a dated snapshot suffix
+    ("claude-sonnet-5-5-20261001"); None for a model without one."""
+    rates = CLAUDE_MICROS_PER_MILLION_TOKENS.get(model)
+    if rates is None:
+        base, _, suffix = model.rpartition("-")
+        if len(suffix) == 8 and suffix.isascii() and suffix.isdigit():
+            rates = CLAUDE_MICROS_PER_MILLION_TOKENS.get(base)
+    return rates
+
+
+def _claude_row(row: Dict[str, Any]) -> Tuple[bool, Optional[int], Optional[int], str]:
+    """One script row's `claude_usage`: (seen — the row says Claude billed, i.e. any value but NULL or {};
+    its Claude tokens, None when the value cannot be read; their price in micro-dollars × 1M — summed per
+    week and rounded once — None when a model or kind with tokens has no rate; why not, for the log)."""
+    raw = row.get("claude_usage")
+    if raw is None or raw == {}:
+        return False, 0, 0, ""
+    if not isinstance(raw, dict):
+        return True, None, None, "not an object"
+    tokens = numerator = 0
+    unpriced = ""
+    for model, counts in raw.items():
+        if not isinstance(model, str) or not isinstance(counts, dict) or set(counts) - set(CLAUDE_TOKEN_KINDS):
+            return True, None, None, "not {model: {kind: count}}"
+        rates = claude_rates(model)
+        for kind, rate in zip(CLAUDE_TOKEN_KINDS, rates or (None,) * len(CLAUDE_TOKEN_KINDS)):
+            if kind not in counts:
+                continue
+            n = _count(counts[kind])
+            if n is None:
+                return True, None, None, f"an unreadable {kind} count"
+            tokens += n
+            if n and rate is None:
+                unpriced = unpriced or f"no {kind} price for model {_clean(model, 60)!r}"
+            elif n:
+                numerator += n * rate
+    return True, tokens, None if unpriced else numerator, unpriced
+
+
+def _claude_week(rows: Optional[List[Any]], first: date, last: date) -> Tuple[Optional[int], bool]:
+    """(The Claude ≈ cost of the scripts dated `first`..`last` (ET), and whether that week has any Claude
+    tokens at all.) (0, False) for a week without any — the default, Gemini-only week, whose cost line
+    then never names Claude. (None, True) when an in-window value cannot be read or priced (logged with
+    the day). The rows unread → (None, False): the Gemini part names that read. A row that cannot be
+    dated → (None, whether ANY script holds Claude tokens), as it cannot be placed in either week."""
+    if rows is None:
+        return None, False
+    numerator, seen, readable = 0, False, True
+    for row in rows:
+        day = _ledger_date(row.get("run_date")) if isinstance(row, dict) else None
+        if day is None:
+            return None, any(isinstance(r, dict) and _claude_row(r)[0] for r in rows)
+        if not first <= day <= last:
+            continue
+        row_seen, _tokens, micros, why = _claude_row(row)
+        if not row_seen:
+            continue
+        seen = True
+        if micros is None:
+            logger.warning("marketing digest: the script of %s has a claude_usage the cost line cannot price (%s) — "
+                           "the Claude part of the week %s..%s is unreadable", day, why, first, last)
+            readable = False
+            continue
+        numerator += micros
+    if not seen:
+        return 0, False
+    micros = (numerator + 500_000) // 1_000_000
+    return (micros if readable and micros <= _MICROS_BOUND else None), True
+
+
 def _gemini_week(rows: Optional[List[Any]], first: date, last: date) -> Optional[int]:
-    """The Gemini ≈ cost of the scripts dated `first`..`last` (ET): their summed `tokens_used` at the one
-    blended rate, rounded half-up. None when the rows could not be read, a row's day cannot be read (it
-    cannot be placed in either week), or an in-window count is not a plain non-negative int."""
+    """The Gemini ≈ cost of the scripts dated `first`..`last` (ET): their summed `tokens_used`, less the
+    Claude tokens inside it (`claude_usage`, priced apart by `_claude_week`), at the one blended rate,
+    rounded half-up. None when the rows could not be read, a row's day cannot be read (it cannot be placed
+    in either week), an in-window count is not a plain non-negative int, or its Claude tokens cannot be
+    read or exceed its `tokens_used` (the split is unknown)."""
     if rows is None:
         return None
     tokens = 0
@@ -1606,7 +1736,14 @@ def _gemini_week(rows: Optional[List[Any]], first: date, last: date) -> Optional
             logger.warning("marketing digest: the script of %s has an unreadable tokens_used — the Gemini part "
                            "of the week %s..%s is unreadable", day, first, last)
             return None
-        tokens += count
+        _seen, claude, _micros, why = _claude_row(row)
+        if claude is None or claude > count:
+            logger.warning("marketing digest: the script of %s has %s — the Gemini part of the week %s..%s is "
+                           "unreadable (its Claude tokens cannot be taken out of tokens_used)", day,
+                           f"an unreadable claude_usage ({why})" if claude is None
+                           else f"{claude} Claude tokens, more than its tokens_used {count}", first, last)
+            return None
+        tokens += count - claude
     micros = (tokens * GEMINI_MICROS_PER_MILLION_TOKENS + 500_000) // 1_000_000
     return micros if micros <= _MICROS_BOUND else None
 
@@ -1687,19 +1824,25 @@ def _fee_week(monthly_micros: int) -> int:
     return (monthly_micros * 70_000 + _MONTH_DAYS_X10000 // 2) // _MONTH_DAYS_X10000
 
 
-def _usage_part(x: Optional[int], gemini: Optional[int], worker: Optional[int]) -> Dict[str, Any]:
-    """One week's USAGE — the parts that move with what the engine did (X, Gemini, the worker) — and the
-    usage parts that could not be read (the sum then leaves them out: a floor)."""
-    values = (("X", x), ("Gemini", gemini), ("worker", worker))
+def _usage_part(x: Optional[int], gemini: Optional[int], worker: Optional[int],
+                claude: Optional[int] = None, claude_seen: bool = False) -> Dict[str, Any]:
+    """One week's USAGE — the parts that move with what the engine did (X, Gemini, the worker, and Claude
+    in a week that has Claude tokens: then and only then the part carries a "claude" key) — and the usage
+    parts that could not be read (the sum then leaves them out: a floor)."""
+    values = [("X", x), ("Gemini", gemini)] + ([("Claude", claude)] if claude_seen else []) + [("worker", worker)]
     unreadable = [name for name, v in values if v is None]
-    return {"x": x, "gemini": gemini, "worker": worker, "usage": sum(v for _name, v in values if v is not None),
+    part = {"x": x, "gemini": gemini, "worker": worker, "usage": sum(v for _name, v in values if v is not None),
             "usage_unreadable": unreadable, "usage_partial": bool(unreadable)}
+    if claude_seen:
+        part["claude"] = claude
+    return part
 
 
 def _cost_part(x: Optional[int], gemini: Optional[int], worker: Optional[int],
-               upload_post: Optional[int]) -> Dict[str, Any]:
+               upload_post: Optional[int], claude: Optional[int] = None,
+               claude_seen: bool = False) -> Dict[str, Any]:
     """Last week's whole cost: its usage (`_usage_part`) plus the plan fee's share."""
-    part = _usage_part(x, gemini, worker)
+    part = _usage_part(x, gemini, worker, claude, claude_seen)
     part.update(upload_post=upload_post, total=part["usage"] + (upload_post if upload_post is not None else 0),
                 unreadable=part["usage_unreadable"] + ([] if upload_post is not None else ["Upload-Post"]))
     return part
@@ -1717,7 +1860,8 @@ def weekly_cost(
     (the November week is 169 hours, still 7 days of the plan). The week before carries NO fee: the plan
     in force then is not recorded, and today's fee (MARKETING_UPLOAD_POST_MONTHLY_USD, read at call time)
     would misprice it by the whole fee the first Monday after a plan change — so the two weeks are
-    compared by usage, like with like."""
+    compared by usage, like with like. Claude's tokens are priced apart from Gemini's (`_claude_week`),
+    each week on its own; a week without any carries no Claude part at all."""
     start, end = week_bounds(week_start, week_end)
     prev_first, prev_last = week_start - timedelta(days=7), week_start - timedelta(days=1)
     prev_start, _prev_end = week_bounds(prev_first, prev_last)   # _prev_end == start
@@ -1729,12 +1873,14 @@ def weekly_cost(
     x_last, undated = _x_week(charge_rows, start, end)
     x_prev, _undated_prev = _x_week(charge_rows, prev_start, start)
     last = _cost_part(x_last, _gemini_week(script_rows, week_start, week_end),
-                      _worker_week(runs, week_start, week_end), fee_week)
+                      _worker_week(runs, week_start, week_end), fee_week,
+                      *_claude_week(script_rows, week_start, week_end))
     uploads, uploads_unsure = _uploads(live)
     last.update(undated=undated, uploads=uploads, uploads_floor=bool(posts_capped) or uploads_unsure,
                 free=fee == 0)
     before = _usage_part(x_prev, _gemini_week(script_rows, prev_first, prev_last),
-                         _worker_week(prev_runs, prev_first, prev_last))
+                         _worker_week(prev_runs, prev_first, prev_last),
+                         *_claude_week(script_rows, prev_first, prev_last))
     return {"last": last, "before": before, "warn": warn}
 
 
@@ -1889,7 +2035,9 @@ def _usage_text(part: Dict[str, Any]) -> str:
 def _cost_lines(cost: Any) -> List[str]:
     """The weekly cost block: last week's total and parts; then USAGE (X + Gemini + worker, never the plan
     fee) for last week beside the week before — like with like, as the fee in force a week earlier is not
-    recorded; and the usage alert when last week's usage passed MARKETING_WEEKLY_COST_WARN_USD. It sits
+    recorded; and the usage alert when last week's usage passed MARKETING_WEEKLY_COST_WARN_USD. Claude
+    appears only when a week had Claude tokens: as a part of last week's line when last week did, and in
+    the usage label when either week did — a Gemini-only fortnight renders exactly as before Claude. It sits
     right under the date line, so the row caps never touch it and the last-resort cut (which keeps the
     top) never drops it. An unreadable part is named and its sum becomes a floor ("≥")."""
     if not isinstance(cost, dict) or not isinstance(cost.get("last"), dict) or not isinstance(cost.get("before"), dict):
@@ -1911,6 +2059,10 @@ def _cost_lines(cost: Any) -> List[str]:
     else:
         x_txt = f"X {_usd(x)} (our ledger)"
     gemini_txt = f"Gemini ≈ {_usd(gemini)}" if type(gemini) is int else "Gemini unreadable"
+    if "claude" in last:
+        claude = last.get("claude")
+        gemini_txt += f" · Claude ≈ {_usd(claude)}" if type(claude) is int else " · Claude unreadable"
+    usage_label = "X + Gemini + Claude + worker" if "claude" in last or "claude" in before else "X + Gemini + worker"
     worker_txt = f"worker ≈ {_usd(worker)}" if type(worker) is int else "worker unreadable"
     if type(upload) is not int:
         upload_txt = "Upload-Post unreadable"
@@ -1922,7 +2074,7 @@ def _cost_lines(cost: Any) -> List[str]:
     approx, note = head(last)
     lines = [f"💵 Cost last week {approx} {_usd(last.get('total'))}{note}: "
              f"{x_txt} · {gemini_txt} · {worker_txt} · {upload_txt}",
-             f"Usage (X + Gemini + worker): last week {_usage_text(last)} · week before {_usage_text(before)}"]
+             f"Usage ({usage_label}): last week {_usage_text(last)} · week before {_usage_text(before)}"]
     warn = cost.get("warn") if type(cost.get("warn")) is int else 0
     usage = last.get("usage")
     if warn > 0 and type(usage) is int and usage > warn:
@@ -2049,8 +2201,8 @@ def _render_digest(r: Dict[str, Any], cap: int, score_cap: Optional[int] = None)
         lines += [f"• {_day(d)} {text}" for d, text in r["runs"]]
         peak = r.get("memory_peak")
         if peak:
-            mb, d, stage = peak
-            flag = f" ⚠️ above {_n(MEMORY_ALERT_MB)} MB" if mb > MEMORY_ALERT_MB else ""
+            mb, d, stage, alert = peak
+            flag = f" ⚠️ above {_n(alert)} MB" if mb > alert else ""
             lines.append(f"Worker memory peak: {_n(int(round(mb)))} MB ({stage}, {_day(d)}){flag}")
     lines.append("")
 

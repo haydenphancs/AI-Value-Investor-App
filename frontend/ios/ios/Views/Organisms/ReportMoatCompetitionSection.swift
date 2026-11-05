@@ -399,17 +399,16 @@ struct ReportMoatCompetitionSection: View {
 
     private var peerComparisonSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
-            Text("Competitors")
-                // Match the "Software - Infrastructure" industry subtitle: same
-                // font/size (bodySmallEmphasis) AND the same secondary (gray)
-                // color, so the two section labels read identically.
-                .font(AppTypography.bodySmallEmphasis)
-                .foregroundColor(AppColors.textSecondary)
-
+            // The title sits on what it heads — the caption, or the empty message —
+            // never on a row of its own (owner 2026-10-30, RKLB: it read as the
+            // Insight paragraph's last line, ~27pt clear of its own caption).
             if data.competitors.isEmpty {
-                Text("No competitor data available")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
+                VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                    competitorsTitle
+                    Text("No competitor data available")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
             } else {
                 competitorOrderLegend
                 ForEach(data.competitors) { competitor in
@@ -417,21 +416,42 @@ struct ReportMoatCompetitionSection: View {
                 }
             }
         }
+        // A floor for the break from the Insight above: at larger type sizes the title
+        // and caption fill the legend's 44pt row and leave no spare height over it.
+        .padding(.top, AppSpacing.xs)
         .sheet(isPresented: $showCompetitorsInfo) {
             CompetitorsInfoSheet(order: data.competitorOrder)
         }
     }
 
-    /// What the row order and the score mean (TestFlight #57: "Is NVIDIA the main
-    /// competitor? How did we get the competitors?"). The caption follows the report's
-    /// own order marker, so a threat-ordered report never claims "most direct first".
+    private var competitorsTitle: some View {
+        Text("Competitors")
+            // Match the "Software - Infrastructure" industry subtitle: same
+            // font/size (bodySmallEmphasis) AND the same secondary (gray)
+            // color, so the two section labels read identically.
+            .font(AppTypography.bodySmallEmphasis)
+            .foregroundColor(AppColors.textSecondary)
+    }
+
+    /// The list's header: the title over what the row order and the score mean
+    /// (TestFlight #57: "Is NVIDIA the main competitor? How did we get the competitors?").
+    /// The caption follows the report's own order marker, so a threat-ordered report
+    /// never claims "most direct first".
+    ///
+    /// The title shares the info button's 44pt row. On a row of its own above, that
+    /// button's spare height opened ~15pt between the title and its caption; bottom
+    /// alignment moves the spare height above the title, where it widens the break
+    /// from the Insight instead.
     private var competitorOrderLegend: some View {
-        HStack(alignment: .center, spacing: AppSpacing.xs) {
-            Text(data.competitorOrder.caption)
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        HStack(alignment: .bottom, spacing: AppSpacing.xs) {
+            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                competitorsTitle
+                Text(data.competitorOrder.caption)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             Button {
                 showCompetitorsInfo = true
@@ -440,10 +460,10 @@ struct ReportMoatCompetitionSection: View {
                     .font(AppTypography.iconSmall).fontWeight(.medium)
                     .foregroundColor(AppColors.textMuted)
                     // Size the box to the minimum target first (slop alone is clipped by
-                    // a parent that fits it tightly); `.trailing` keeps the glyph flush
-                    // with the rows' right edge.
+                    // a parent that fits it tightly); `.bottomTrailing` keeps the glyph on
+                    // the caption's line, flush with the rows' right edge.
                     .frame(width: HitSlop.minimumTarget, height: HitSlop.minimumTarget,
-                           alignment: .trailing)
+                           alignment: .bottomTrailing)
                     .hitSlop(reaching: HitSlop.minimumTarget)
             }
             .buttonStyle(.plain)

@@ -138,15 +138,17 @@ extension MarketStatusDTO {
         case "after_hours":
             return .afterHours
         default:
-            let resolvedDate: Date = {
-                if let dateStr = date {
-                    let fmt = ISO8601DateFormatter()
-                    fmt.formatOptions = [.withInternetDateTime]
-                    return fmt.date(from: dateStr) ?? Date()
-                }
-                return Date()
-            }()
-            return .closed(date: resolvedDate, time: time ?? "4:00 PM", timezone: timezone ?? "EST")
+            let fmt = ISO8601DateFormatter()
+            fmt.formatOptions = [.withInternetDateTime]
+            guard let dateStr = date, let serverClose = fmt.date(from: dateStr) else {
+                // No readable close from the server: the last real close with its own bell and
+                // label, never "now" (and never "4:00 PM" beside a 1:00 PM half-day).
+                return MarketStatus.lastRegularClosed(before: Date())
+            }
+            // "ET" when the server names no label: a fixed "EST" is false whenever New York is
+            // on EDT. With no clock, the server close's own New York clock (a half-day closes at
+            // 1:00 PM). The same fallbacks here and in the stock, ETF and index `toDisplayModel`.
+            return .closed(date: serverClose, time: time ?? MarketStatus.closeClock(serverClose), timezone: timezone ?? "ET")
         }
     }
 }
@@ -322,18 +324,17 @@ extension StockOverviewResponseDTO {
             case "after_hours":
                 return .afterHours
             default:
-                let date: Date = {
-                    if let dateStr = marketStatus.date {
-                        let fmt = ISO8601DateFormatter()
-                        fmt.formatOptions = [.withInternetDateTime]
-                        return fmt.date(from: dateStr) ?? Date()
-                    }
-                    return Date()
-                }()
+                let fmt = ISO8601DateFormatter()
+                fmt.formatOptions = [.withInternetDateTime]
+                guard let dateStr = marketStatus.date, let serverClose = fmt.date(from: dateStr) else {
+                    // No readable close from the server: the last real close with its own bell
+                    // and label, never "now" (and never "4:00 PM" beside a 1:00 PM half-day).
+                    return MarketStatus.lastRegularClosed(before: Date())
+                }
                 return .closed(
-                    date: date,
-                    time: marketStatus.time ?? "4:00 PM",
-                    timezone: marketStatus.timezone ?? "EST"
+                    date: serverClose,
+                    time: marketStatus.time ?? MarketStatus.closeClock(serverClose),
+                    timezone: marketStatus.timezone ?? "ET"
                 )
             }
         }()

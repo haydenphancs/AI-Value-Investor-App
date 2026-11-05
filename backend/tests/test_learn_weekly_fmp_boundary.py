@@ -60,7 +60,7 @@ FORBIDDEN_MODULES = (
 #: files are skipped (later waves); the anti-vacuity check below needs the wave-A ones present.
 FRESH_MODULES = (
     "fact_sheet", "prompts", "writer", "validators", "judge", "narration", "case_library", "review",
-    "publisher", "alerts", "build",
+    "publisher", "alerts", "build", "cover_art",
     "contracts", "schedule", "topic_scorer", "errors", "ledger", "sec_facts", "topic",
 )
 _WAVE_A = ("fact_sheet", "validators", "case_library", "contracts", "schedule", "topic_scorer",

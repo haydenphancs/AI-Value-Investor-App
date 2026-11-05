@@ -741,3 +741,29 @@ def test_the_gate_reads_the_version_off_a_model_or_a_dumped_dict(monkeypatch, sh
     assert tdc._built_under_current_dcf(out) is False
     out.caydex_dcf = "not an estimate"                    # junk reads as no version → miss
     assert tdc._built_under_current_dcf(out) is False
+
+
+def test_serialize_keeps_the_price_action_internal_keys_json_clean():
+    """The price-action partial now carries `_earnings` / `_market` / `_floor` and ISO
+    window bounds; one `date` object or NaN there would fail the whole collection write."""
+    out = _sample()
+    out.price_action_partial = {
+        "prices": [1.0, 2.0], "current_price": 2.0, "event": None, "narrative": None,
+        "change_pct": -20.6, "direction": "down", "window_label": "Last 30 Days",
+        "tag": "Notable", "tier": "Notable", "z_score": 0.87, "sigma_daily_pct": 5.03,
+        "expected_band_pct": None, "_news_headlines": [], "_change_days": 22,
+        "_news_unavailable": False,
+        "_earnings": {"date": "2026-10-29", "position": "on_last_bar", "reported": True,
+                      "eps_actual": 0.52, "eps_estimate": 0.4066, "eps_surprise_pct": 27.9,
+                      "eps_result": "beat", "revenue_surprise_pct": -0.3,
+                      "revenue_result": "in_line", "reaction_pct": None, "headlines": []},
+        "_earnings_unavailable": False,
+        "_market": {"change_pct": 0.9, "start": "2026-09-29", "end": "2026-10-29",
+                    "relative_pts": -21.5, "read": "company_specific"},
+        "_floor": {"reason": "window_move", "session_move_pct": None, "session_date": None},
+        "_window_start": "2026-09-29", "_last_bar": "2026-10-29",
+    }
+    blob = _serialize(out)
+    assert blob is not None
+    back = _deserialize(blob, _field_names())
+    assert back.price_action_partial["_earnings"]["position"] == "on_last_bar"

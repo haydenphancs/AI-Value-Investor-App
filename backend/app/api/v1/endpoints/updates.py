@@ -57,6 +57,7 @@ from app.schemas.updates import (
     UpdatesTabsResponse,
 )
 from app.services.asset_class import resolve_asset_class
+from app.utils.iso_dates import iso_utc_millis
 from app.services.crypto_names import crypto_display_name
 from app.services.news_cache_service import (
     MARKET_SCOPE,
@@ -99,6 +100,33 @@ def _valid_scope(scope: str) -> bool:
     from app.services.news_sentiment_trend_service import is_trend_scope
 
     return len(scope or "") <= _MAX_SCOPE_LEN and is_trend_scope(scope)
+
+
+def _emitted_tickers(all_tickers: List[str], visible: List[str], cap: int) -> List[str]:
+    """Pure: the group tickers `/tabs` sends — at most ``cap``, every visible one included,
+    in the GROUP's own order.
+
+    The plan gate picks the visible tickers alphabetically over the WHOLE group, so a plain
+    position slice (`all_tickers[:cap]`) cut any visible ticker stored past position ``cap``
+    — and which ones it cut changed whenever the user reordered the group. Here the visible
+    tickers claim their slots first (alphabetically, if a plan ever unlocked more than
+    ``cap``); locked tickers fill what is left in group order.
+
+    The result keeps group order because iOS reads the wire order as the Custom sort's
+    position (`UpdatesViewModel.openableTabs`).
+    """
+    if cap <= 0:
+        return []
+    present = set(all_tickers)
+    keep = set([t for t in dict.fromkeys(visible) if t in present][:cap])
+    room = cap - len(keep)
+    for t in all_tickers:
+        if room <= 0:
+            break
+        if t not in keep:
+            keep.add(t)
+            room -= 1
+    return [t for t in all_tickers if t in keep]
 
 
 # ── Tabs ──────────────────────────────────────────────────────────────
@@ -214,7 +242,10 @@ async def get_updates_tabs(
     #
     # Cost is unchanged: `/tabs` is ONE chunked batch-quote call and ONE metadata query
     # regardless of how many symbols they cover. `_MAX_TABS` still bounds both.
-    tickers = all_tickers[:_MAX_TABS]
+    #
+    # Past `_MAX_TABS` the visible tickers are kept first, then locked ones in group order
+    # (`_emitted_tickers`): a position slice dropped any unlocked ticker stored past the cut.
+    tickers = _emitted_tickers(all_tickers, visible, _MAX_TABS)
 
     # ── Three independent reads, overlapped ──────────────────────────
     # Display metadata, quotes and the ETF lookup each need only `tickers`, so they run in
@@ -302,8 +333,19 @@ async def get_updates_tabs(
         # serialize to invalid JSON under allow_nan=False and 500 the screen.
         return f if f == f and abs(f) != float("inf") else None
 
+    def _two_dp(value: Optional[float]) -> Optional[float]:
+        # The Tracking feed's rule for the price SORT KEY (never drawn on a pill), so both
+        # screens sort the same number: 2 dp, and `+ 0.0` collapses the signed zero
+        # round(-0.004, 2) leaves. None stays None.
+        return round(value, 2) + 0.0 if value is not None else None
+
     def _change(sym: str) -> Optional[float]:
-        return _quote_number(sym, "changePercentage")
+        # NOT rounded here: the pill DRAWS this at 1 dp, and rounding to 2 dp first would
+        # double-round (0.049 → 0.05 → "+0.1%"). iOS rounds its sort key to 2 dp instead
+        # (`UpdatesViewModel.openableTabs`), matching Tracking's 2-dp feed. `+ 0.0` collapses
+        # a signed zero.
+        value = _quote_number(sym, "changePercentage")
+        return value + 0.0 if value is not None else None
 
     def _market_cap(sym: str) -> Optional[float]:
         # Not positive → None, the Tracking feed's rule (`market_cap=… if market_cap_f else
@@ -346,8 +388,11 @@ async def get_updates_tabs(
                 is_market_tab=False,
                 is_locked=t not in visible_set,
                 asset_type=classes.get(t) or resolve_asset_class(t, row.get("asset_type")),
-                price=_quote_number(t, "price"),
+                price=_two_dp(_quote_number(t, "price")),
                 market_cap=_market_cap(t),
+                # The star date: on the group path the row is the metadata read, on the
+                # fallback path `_read_watchlist` — both select `added_at`. Never raises.
+                added_at=iso_utc_millis(row.get("added_at"), ticker=t),
             )
         )
 

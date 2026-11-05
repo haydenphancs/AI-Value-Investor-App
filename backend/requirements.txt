@@ -28,6 +28,13 @@ python-multipart==0.0.18
 # grounding tool is NOT used — retired 2026-10-02 for its terms.)
 google-genai==1.75.0
 
+# Anthropic Claude — the SECOND provider for the marketing and Learn weekly writer/judge roles
+# (app/integrations/anthropic_client.py; off unless CAYDEX_ANTHROPIC_API_KEY and a role switch are set —
+# the plain ANTHROPIC_API_KEY is deliberately ignored: Claude Code sessions may export it).
+# 2.x sends API version 2026-10-21 (no temperature/top_p/top_k) and is built on its own `httpx2`
+# package, so it leaves the httpx 0.28.1 pin below untouched.
+anthropic==2.3.0
+
 # HTTP client (for FMP API). 0.28.1 required by google-genai; supabase 2.16 allows it (<0.29).
 httpx[socks]==0.28.1
 
@@ -64,6 +71,12 @@ ta>=0.11.0
 weasyprint==62.3
 pydyf==0.10.0
 jinja2>=3.1.4
+
+# Weekly cover art (app/services/learn_weekly/cover_art.py → money_moves_art_style): the master →
+# hero/card JPEG derivatives. Already installed as WeasyPrint 62.3's own dependency (Pillow>=9.1.0);
+# named here so the web image cannot lose it with a WeasyPrint change. Same floor, so resolution is
+# unchanged.
+Pillow>=9.1.0
 
 # Utilities
 python-dotenv==1.0.1

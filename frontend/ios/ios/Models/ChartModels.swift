@@ -374,7 +374,7 @@ final class ChartSettings: ObservableObject {
         // An id this build does not know is dropped, never guessed; it is rewritten away
         // the next time the user toggles a pane (never on a read).
         let storedIDs = UserDefaults.standard.stringArray(forKey: Self.enabledIndicatorsKey) ?? []
-        let storedIndicators = Set(storedIDs.compactMap(TechnicalIndicatorType.init(storageID:)))
+        let storedIndicators = Set(storedIDs.compactMap { TechnicalIndicatorType(storageID: $0) })
         if enabledIndicators != storedIndicators { enabledIndicators = storedIndicators }
     }
 

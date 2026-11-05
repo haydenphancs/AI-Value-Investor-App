@@ -362,8 +362,13 @@ below are the visually distinctive, screen-recordable / screenshot-able surfaces
   `Views/Modifiers/GlobalAudioOverlay.swift` (hosted in `Views/Screens/RootContainerView.swift`).
 - **Full-screen player** — `Views/Screens/FullScreenAudioPlayer.swift`: artwork-tinted gradient
   background + `AudioArtworkLarge` (280pt, breathing halo, scales on play), custom slider, ±15s.
-- **Status island** — `Views/Molecules/AudioStatusIsland.swift`: Dynamic-Island pill with the
-  3-bar animated waveform during chat playback.
+- **Chat-bar square** — `Views/Molecules/ChatBarAudioControl.swift`: on every screen with an Ask
+  Cay AI bar, the player is a square to the bar's left holding the mini player's play/pause disc
+  (`Views/Atoms/PlayPauseCircle.swift`). Tap = play/pause, press and hold = full-screen player.
+- **Chat top-bar pill** — `Views/Molecules/AudioStatusIsland.swift`: the AI chat screen's player,
+  centred between history and close (3-bar waveform, title, play/pause disc); same gestures.
+  Nothing floats at the top of any screen: a Dynamic Island shows Now Playing only once the user
+  leaves the app.
 - Orchestrated by `Services/AudioManager.swift`. (System Now-Playing / Lock Screen integration
   via `MPNowPlayingInfoCenter` + `MPRemoteCommandCenter`.)
 

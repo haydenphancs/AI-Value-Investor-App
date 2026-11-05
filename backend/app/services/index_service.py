@@ -718,6 +718,21 @@ def _finite_positive(value: Any) -> Optional[float]:
     return number if math.isfinite(number) and number > 0 else None
 
 
+def _snapshot_generated_date(now: Optional[datetime] = None) -> str:
+    """The Market Snapshots' `generated_date`: the NEW YORK calendar date of `now`, ISO.
+
+    iOS prints it as "Updated on <date> ET" (`IndexDetailSnapshotsSection`). It used to be
+    the UTC calendar day, which is already tomorrow from 20:00 ET (19:00 while New York is
+    on EST) until midnight ET — a snapshot built at 21:00 ET on Oct 29 said Oct 30. A naive
+    `now` is read as UTC. `now` is injectable for tests.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return now.astimezone(ET).date().isoformat()
+
+
 def _get_market_status() -> MarketStatusResponse:
     """Current session, delegated to the one holiday/half-day-aware implementation.
 
@@ -1950,13 +1965,15 @@ class IndexService:
     async def _build_snapshots(
         self, *, symbol, pe, forward_pe, earnings_yield, sector_raw, index_name,
         pe_basis: Optional[Dict[str, Any]] = None,
+        now: Optional[datetime] = None,
     ) -> IndexSnapshotsDataResponse:
         """Build the three snapshot cards. The valuation sentence is code-owned
         (`_valuation_story`); the model writes only the sector and macro stories.
 
         `pe_basis` is `_get_pe_basis()`: the sector count behind `pe` and the composite's
         own 10-year average. Absent or partial → the sentence names no count / makes no
-        comparison, and `historical_avg_pe_known` is False.
+        comparison, and `historical_avg_pe_known` is False. `now` (tests) dates the
+        snapshot — `_snapshot_generated_date`.
         """
         pe_basis = pe_basis or {}
 
@@ -2004,7 +2021,8 @@ class IndexService:
         )
         historical_avg_pe = _finite_positive((pe_history or {}).get("avg"))
 
-        today_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+        # The New York date: iOS labels it "ET" (see `_snapshot_generated_date`).
+        today_str = _snapshot_generated_date(now)
 
         return IndexSnapshotsDataResponse(
             valuation=ValuationSnapshotResponse(

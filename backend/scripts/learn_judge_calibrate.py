@@ -458,10 +458,22 @@ async def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="override JUDGE_THINKING_BUDGET for this run (-1 = the model's default)")
     ap.add_argument("--verdicts-in", type=Path, help="score saved verdicts; no model call")
     ap.add_argument("--verdicts-out", type=Path, help="save the raw verdicts (JSON)")
+    ap.add_argument("--claude-model",
+                    help="ask THIS Claude model (e.g. claude-opus-5-5) for every judge and support call, "
+                         "with no Gemini fallback, before LEARN_JUDGE_PROVIDER=claude (needs "
+                         "CAYDEX_ANTHROPIC_API_KEY). Transport errors are retried 3 times.")
     args = ap.parse_args(argv)
 
     if args.verdicts_in and args.thinking is not None:   # before anything is changed
         raise SystemExit("--thinking changes a judge call; --verdicts-in makes none")
+    client = None
+    if args.claude_model and not args.verdicts_in:
+        from app.integrations import anthropic_client as ac
+        from app.services.llm_provider import ClaudeOnly
+
+        if not ac.is_configured():
+            raise SystemExit("--claude-model needs CAYDEX_ANTHROPIC_API_KEY in this shell (or backend/.env)")
+        client = ClaudeOnly(args.claude_model, retries=3)
     fixture = load_fixture(args.fixture)
     if args.thinking is not None:   # an experiment knob: the shipped value stays in judge.py
         J.JUDGE_THINKING_BUDGET = None if args.thinking < 0 else args.thinking
@@ -474,12 +486,17 @@ async def main(argv: Optional[Sequence[str]] = None) -> int:
         # holdout's verdicts).
         subset = fixture if args.split == "all" else {
             **fixture, "items": [it for it in fixture["items"] if it["split"] == args.split]}
-        runs = await run_judge(subset, args.samples, args.concurrency, check=args.check)
+        runs = await run_judge(subset, args.samples, args.concurrency, client=client, check=args.check)
         rubric = f"{J.RUBRIC_VERSION} ({args.check})"
-        model, thinking = J.JUDGE_MODEL, J.JUDGE_THINKING_BUDGET
+        if client is not None:
+            from app.services.llm_provider import effective_effort
+
+            model, thinking = args.claude_model, f"effort {effective_effort()}"
+        else:
+            model, thinking = J.JUDGE_MODEL, J.JUDGE_THINKING_BUDGET
         if args.verdicts_out:
             args.verdicts_out.write_text(json.dumps(
-                {"rubric_version": rubric, "model": J.JUDGE_MODEL, "thinking": J.JUDGE_THINKING_BUDGET,
+                {"rubric_version": rubric, "model": model, "thinking": thinking,
                  "samples": args.samples, "runs": runs},
                 indent=1, ensure_ascii=False), encoding="utf-8")
     print(f"rubric {rubric} · model {model} · thinking {thinking}")

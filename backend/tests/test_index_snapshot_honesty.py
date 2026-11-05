@@ -249,3 +249,106 @@ def test_no_swift_file_force_reads_the_level_off_the_sentinel():
         src = _swift(path)
         assert "valuation.level!" not in src, path
         assert ".level!.rawValue" not in src, path
+
+
+# ── "Updated on <date> ET": the snapshot is dated on New York's calendar ─────────────
+#
+# iOS prints `generated_date` as "Updated on <date> ET" (IndexDetailSnapshotsSection). It
+# was the UTC calendar day, which turns at 8 PM ET (7 PM while New York is on EST) — a
+# snapshot built at 9 PM ET on Oct 29 said Oct 30.
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+_UTC = timezone.utc
+
+
+@pytest.mark.parametrize("now,expected", [
+    # The pinned boundary: 21:00 ET on Oct 29 (EDT) is 01:00 UTC on Oct 30.
+    (datetime(2026, 10, 30, 1, 0, tzinfo=_UTC), "2026-10-29"),
+    # 8 PM ET exactly is midnight UTC; one minute before it is still the same day in both.
+    (datetime(2026, 10, 30, 0, 0, tzinfo=_UTC), "2026-10-29"),
+    (datetime(2026, 10, 29, 23, 59, tzinfo=_UTC), "2026-10-29"),
+    # Midnight ET (04:00 UTC in EDT) is the next New York day.
+    (datetime(2026, 10, 30, 4, 0, tzinfo=_UTC), "2026-10-30"),
+    (datetime(2026, 10, 30, 3, 59, tzinfo=_UTC), "2026-10-29"),
+    # The EST side (from 2026-11-01): the UTC day turns at 7 PM ET, New York's at 05:00 UTC.
+    (datetime(2026, 11, 3, 0, 30, tzinfo=_UTC), "2026-11-02"),
+    (datetime(2026, 11, 3, 4, 59, tzinfo=_UTC), "2026-11-02"),
+    (datetime(2026, 11, 3, 5, 0, tzinfo=_UTC), "2026-11-03"),
+    # The year end: still Dec 31 in New York while UTC is already in the new year.
+    (datetime(2027, 1, 1, 2, 0, tzinfo=_UTC), "2026-12-31"),
+    # Another zone's aware instant (Tokyo) is converted, never read off its own calendar.
+    (datetime(2026, 10, 30, 10, 0, tzinfo=timezone(timedelta(hours=9))), "2026-10-29"),
+    # A naive value is UTC.
+    (datetime(2026, 10, 30, 1, 0), "2026-10-29"),
+])
+def test_the_snapshot_date_is_the_new_york_calendar_day(now, expected):
+    from app.services.index_service import _snapshot_generated_date
+
+    assert _snapshot_generated_date(now) == expected
+
+
+def _freeze_index_clock(monkeypatch, instant):
+    """`index_service`'s `datetime.now` frozen at the aware `instant`. Production passes no
+    clock, and the UTC and New York days differ only from 20:00 ET (19:00 in EST) to midnight,
+    so a live clock checked the None branch only when the suite happened to run then."""
+    from app.services import index_service
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant.astimezone(tz) if tz is not None else instant.astimezone(_UTC).replace(tzinfo=None)
+
+    monkeypatch.setattr(index_service, "datetime", _Clock)
+
+
+@pytest.mark.parametrize("instant,expected", [
+    # 9 PM EDT on Oct 29: UTC already says Oct 30.
+    (datetime(2026, 10, 30, 1, 0, tzinfo=_UTC), "2026-10-29"),
+    # 9 PM EST on New Year's Eve: UTC is already in 2027.
+    (datetime(2027, 1, 1, 2, 0, tzinfo=_UTC), "2026-12-31"),
+    # 04:30 UTC: a fixed −5 h would still say Oct 29 in EDT, a fixed −4 h already Jan 1 in EST.
+    (datetime(2026, 10, 30, 4, 30, tzinfo=_UTC), "2026-10-30"),
+    (datetime(2027, 1, 1, 4, 30, tzinfo=_UTC), "2026-12-31"),
+])
+def test_the_snapshot_date_defaults_to_now_in_new_york(monkeypatch, instant, expected):
+    from app.services.index_service import _snapshot_generated_date
+
+    _freeze_index_clock(monkeypatch, instant)
+    assert _snapshot_generated_date() == expected
+
+
+@pytest.mark.asyncio
+async def test_the_builder_dates_the_snapshot_at_the_et_boundary(monkeypatch):
+    """Through the real `_build_snapshots`: 21:00 ET on Oct 29 is Oct 30 in UTC and must
+    stamp Oct 29. Mutation: the builder back on `datetime.now(tz=timezone.utc)`."""
+    from app.services.index_service import IndexService
+
+    svc = IndexService.__new__(IndexService)
+
+    async def _no_ai(*a, **k):
+        return "sector story", "macro story", []
+
+    monkeypatch.setattr(svc, "_generate_ai_stories", _no_ai)
+    # The second instant (New Year's Eve in New York, already 2027 in UTC) is far from any
+    # run date, so a builder that ignored `now` and read the wall clock could not pass by
+    # coincidence on the day this was written.
+    for now, expected in ((datetime(2026, 10, 30, 1, 0, tzinfo=_UTC), "2026-10-29"),
+                          (datetime(2027, 1, 1, 2, 0, tzinfo=_UTC), "2026-12-31")):
+        out = await svc._build_snapshots(
+            symbol="^GSPC", pe=20.0, forward_pe=0.0, earnings_yield=0.0, sector_raw=[],
+            index_name="SPDR S&P 500 ETF Trust", now=now,
+        )
+        assert out.generated_date == expected, now
+    # The production call passes no clock: New York's day, on a frozen clock rather than
+    # whenever the suite runs. 9 PM EDT tells it from the UTC day; 04:30 UTC tells it from a
+    # FIXED offset (−5 h in EDT is still Oct 29; −4 h in EST is already Jan 1).
+    for instant, expected in ((datetime(2026, 10, 30, 1, 0, tzinfo=_UTC), "2026-10-29"),
+                              (datetime(2026, 10, 30, 4, 30, tzinfo=_UTC), "2026-10-30"),
+                              (datetime(2027, 1, 1, 4, 30, tzinfo=_UTC), "2026-12-31")):
+        _freeze_index_clock(monkeypatch, instant)
+        live = await svc._build_snapshots(
+            symbol="^GSPC", pe=20.0, forward_pe=0.0, earnings_yield=0.0, sector_raw=[],
+            index_name="SPDR S&P 500 ETF Trust",
+        )
+        assert live.generated_date == expected, instant

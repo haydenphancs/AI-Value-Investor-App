@@ -1,0 +1,39 @@
+{
+  "slug": "semiconductor-giants-and-ai-infrastructure-2026-10-30",
+  "category": "battles",
+  "treatment": "blueprint_cyanotype",
+  "subject": "two identical stacked high-bandwidth memory chips standing upright side by side, the thin layers of their stacked silicon dies and the fine rows of tiny solder bumps along their bases clearly readable, both completely blank and unmarked",
+  "subject_source": "authored (one-off, weekly W44)",
+  "art_model": "gemini-3-pro-image",
+  "art_prompt_sha1": "6c34500af0c4",
+  "art_native_width": 2752,
+  "art_native_height": 1536,
+  "masters": {
+    "hero": {
+      "file": "semiconductor-giants-and-ai-infrastructure-2026-10-30.hero.jpg",
+      "width": 1206,
+      "height": 678,
+      "sha256": "463fa7bf0d3079eb617ddb59376828920daa54e307d64258fbf28d473c922e9e",
+      "bytes": 135197,
+      "cropped": true
+    },
+    "card": {
+      "file": "semiconductor-giants-and-ai-infrastructure-2026-10-30.card.jpg",
+      "width": 640,
+      "height": 360,
+      "sha256": "821cd8cf965c8d8444a9fdf5274b0563a2d43dcb2a8e1b5f4cf13e09c223f198",
+      "bytes": 40792,
+      "cropped": true
+    }
+  },
+  "plate": {
+    "margin_px_fraction": 0.04,
+    "ring_median_luma": 0.0398,
+    "ring_spread": 0.0154,
+    "inner_spread": 0.1462,
+    "edge_activity": 0.106,
+    "mean_luma": 0.1036,
+    "inner_mean_luma": 0.1123,
+    "needs_hairline": false
+  }
+}

@@ -1403,6 +1403,37 @@ class ResearchViewModel: ObservableObject {
         owner == AppActions.shared.currentAccountId && !Task.isCancelled
     }
 
+    /// "Run Again" from a report (`TickerReportView`): the same `generateAnalysis()` a Generate
+    /// tap runs, for that report's ticker and analyst. Handed over by `ResearchViewWithBinding`
+    /// once the report has closed.
+    ///
+    /// Through the two single writers, as `retryReport` does: `applyPrefilledTicker` (the chip
+    /// must show the ticker being charged for) and `selectPersona` (asking for THAT analyst again
+    /// is a manual pick, so a re-applied default cannot overwrite it). `generateAnalysis()` then
+    /// runs every guard a Generate tap does — the cap, sign-in, the balance — and is what moves
+    /// the segment to Reports.
+    ///
+    /// Synchronous on purpose: nothing can run between the owner check and the charge. The
+    /// request crossed a presentation teardown to get here, so one tapped by an account that no
+    /// longer holds the session is dropped — never charged to whoever holds it now, and no alert.
+    func rerunAnalysis(_ request: ResearchRerunRequest) {
+        guard request.ownerId == AppActions.shared.currentAccountId else {
+            print("🛑 ResearchVM: Run Again for \(request.ticker) dropped — the account that tapped is no longer signed in")
+            return
+        }
+        // The served list first, so the Research tab shows the served name and description; the
+        // built-in table second. No default: a paid run must never borrow an analyst nobody asked for.
+        guard let persona = personas.first(where: { $0.key == request.personaKey })
+                ?? AnalysisPersona.forPersonaToken(request.personaKey) else {
+            print("⚠️ ResearchVM: Run Again for \(request.ticker) refused — unknown persona '\(request.personaKey)'")
+            error = "That analyst isn't available right now."
+            return
+        }
+        applyPrefilledTicker(request.ticker)
+        selectPersona(persona)
+        generateAnalysis()
+    }
+
     func addMoreCredits() {
         showCreditsSheet = true
     }

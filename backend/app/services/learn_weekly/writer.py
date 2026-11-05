@@ -75,6 +75,9 @@ STATUS_LEASE_LOST = "lease_lost"
 STATUSES = (STATUS_ACCEPTED, STATUS_CONTENT_REJECTED, STATUS_WRITER_FAILED, STATUS_LEASE_LOST)
 
 USAGE_TAG = "learn_weekly_writer"
+#: Most distinct "role: provider" labels a generation records (llm_provider, 2026-10-30): one per
+#: role and outcome in practice (writer / judge / support × claude / a fallback reason).
+MAX_SERVED_LABELS = 12
 
 #: ⚠️ The most model calls ONE generation makes: outline + ONE outline repair, then for each of at
 #: most `article_schema.SECTION_COUNT[1]` (7) sections one call + ONE repair, then ONE judge call and
@@ -120,6 +123,9 @@ class WriterOutcome:
     rounds: List[Dict[str, Any]] = field(default_factory=list)
     model: str = ""
     prompt_version: str = P.PROMPT_VERSION
+    #: Which provider answered each routed call ("writer: claude:<model>", …) — empty on the
+    #: default Gemini path (llm_provider), so a default record is byte-identical to before.
+    served_by: List[str] = field(default_factory=list)
 
     @property
     def issue_codes(self) -> List[str]:
@@ -128,7 +134,7 @@ class WriterOutcome:
     def validation_record(self) -> Dict[str, Any]:
         """What the build stores in the piece's `validation` column (JSON-safe): the issues, the
         section kinds, the judge record and how the article was produced."""
-        return {
+        record = {
             "outcome": self.status,
             "issues": list(self.issues),
             "section_kinds": list(self.section_kinds),
@@ -139,7 +145,39 @@ class WriterOutcome:
             "tokens_used": self.tokens_used,
             "rounds": list(self.rounds),
             "error": self.error,
+            **({"served_by": list(self.served_by)} if self.served_by else {}),
         }
+        return _routed_models(record, self.served_by)
+
+
+def _routed_models(record: Dict[str, Any], served: Sequence[str]) -> Dict[str, Any]:
+    """When EVERY call of a role was answered by one Claude model (llm_provider), the record names
+    that model — `writer_model` for the writer, `judge.model` for the judge — instead of the Gemini
+    model configured for it. A role with no label, a fallback, or a mix keeps its configured model
+    (the `served_by` labels say what happened). No labels → the record is returned untouched."""
+    if not served:
+        return record
+
+    def only_claude(role: str) -> Optional[str]:
+        labels = {x.split(": ", 1)[1] for x in served if isinstance(x, str) and x.startswith(f"{role}: ")}
+        if len(labels) == 1:
+            (label,) = labels
+            if label.startswith("claude:"):
+                return label.split(":", 1)[1]
+        return None
+
+    writer = only_claude("writer")
+    if writer:
+        record["writer_model"] = writer
+    judge = only_claude("judge")
+    # The judge record holds the rubric's AND the support check's verdicts under one model: name
+    # Claude only when the support labels (if any) agree.
+    has_support = any(isinstance(x, str) and x.startswith("support: ") for x in served)
+    if judge and has_support and only_claude("support") != judge:
+        judge = None
+    if judge and isinstance(record.get("judge"), dict):
+        record["judge"] = {**record["judge"], "model": judge}
+    return record
 
 
 class _Stop(Exception):
@@ -170,6 +208,14 @@ def _exception_tokens(e: BaseException) -> int:
     """The tokens an exception says its stage already cost (`tokens_used`, set by the judge and
     the support check), read like `_tokens`: never NaN, negative or a bool."""
     return _tokens({"tokens_used": getattr(e, "tokens_used", None)})
+
+
+def _claude_spent(e: BaseException) -> int:
+    """Tokens a failed Claude attempt billed before the Gemini fallback raised `e` (llm_provider);
+    0 on the default path."""
+    from app.services.llm_provider import claude_tokens_of
+
+    return claude_tokens_of(e)
 
 
 def _finish(result: Mapping[str, Any]) -> str:
@@ -237,6 +283,10 @@ class _Generation:
         self.calls = 0
         self.tokens = 0
         self.rounds: List[Dict[str, Any]] = []
+        self.served: List[str] = []
+        #: Roles that already had a PLAIN (unrouted, Gemini) answer in this generation — so a later
+        #: routed answer of the same role records the mix instead of crediting Claude with it all.
+        self._plain_roles: set = set()
         self.ctx = V.build_grounding_context(sheet)
         self.subjects = [x for s in sheet.subjects for x in (s.name, s.ticker) if isinstance(x, str)]
         self.fact_ids = [f.id for f in sheet.facts]
@@ -245,6 +295,30 @@ class _Generation:
         from app.services.agents.persona_config import neutral_system_instruction
 
         self.system = neutral_system_instruction(P.SYSTEM_BODY)
+
+    def _note_served(self, role: str, result: Any) -> None:
+        """Record which provider answered a call routed by llm_provider. A plain Gemini result (no
+        `provider` key) records nothing on its own — the default path stays byte-identical — but a
+        role that holds BOTH plain and routed answers in one generation (a provider switch flipped
+        across a resume, review 2026-10-30) records "<role>: gemini" too, so the record shows the
+        mix and `_routed_models` never credits Claude with sections Gemini wrote."""
+        if not isinstance(result, Mapping):
+            return
+        plain_label = f"{role}: gemini"
+        if "provider" not in result:
+            self._plain_roles.add(role)
+            if any(x.startswith(f"{role}: ") for x in self.served):
+                self._note_label(plain_label)
+            return
+        from app.services.llm_provider import served_by
+
+        if role in self._plain_roles:
+            self._note_label(plain_label)
+        self._note_label(f"{role}: {served_by(result)}")
+
+    def _note_label(self, label: str) -> None:
+        if label not in self.served and len(self.served) < MAX_SERVED_LABELS:
+            self.served.append(label)
 
     # ── the model-call gate ──────────────────────────────────────────────────────────────────
 
@@ -289,10 +363,13 @@ class _Generation:
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            # A Claude attempt that billed before its Gemini fallback also failed (llm_provider).
+            self.tokens += _claude_spent(e)
             self.rounds.append({"stage": stage, "round": round_no, "error": type(e).__name__})
             raise _Stop(STATUS_WRITER_FAILED, _one_line(f"{stage}: {type(e).__name__}: {e}"))
         used = _tokens(result)
         self.tokens += used
+        self._note_served("writer", result)
         obj, problem = parse_answer(result)
         self.rounds.append({"stage": stage, "round": round_no, "tokens_used": used,
                             "finish_reason": _finish(result) if isinstance(result, Mapping) else None,
@@ -523,6 +600,9 @@ class _Generation:
             return
         payload = {"outline": outline.model_dump(mode="json"),
                    "sections": [[dict(b) for b in blocks] for blocks in sections]}
+        if self.served:
+            # So a resume after a deploy still names who wrote the stored sections.
+            payload["served_by"] = list(self.served)
         try:
             await self.on_progress(payload)
         except asyncio.CancelledError:
@@ -554,6 +634,7 @@ class _Generation:
         else:
             used = _tokens(raw)
             self.tokens += used
+            self._note_served("judge", raw)
             record.tokens_used += used
             record.finish_reason = _finish(raw) or None
             record.verdicts = list(verdicts)
@@ -575,6 +656,8 @@ class _Generation:
         else:
             used = int(meta.get("tokens_used") or 0)
             self.tokens += used
+            for label in meta.get("served") or ():
+                self._note_label(f"support: {label}")
             record.tokens_used += used
             record.verdicts += found
             record.support = {"calls": meta.get("calls"), "sentences": meta.get("sentences"),
@@ -605,9 +688,12 @@ class _Generation:
         """One judge stage failed: carry the tokens it already cost and record why. Under enforce
         that ends the generation at once (no verdict is never a pass, and no further call is
         worth its cost) — as a content rejection when the rubric's call had already flagged it."""
-        spent = _exception_tokens(e)
+        spent = _exception_tokens(e) + _claude_spent(e)
         self.tokens += spent
         record.tokens_used += spent
+        for label in getattr(e, "served_labels", None) or ():   # chunks answered before it failed
+            if isinstance(label, str):
+                self._note_label(f"{stage}: {label}")
         errors.append(("" if stage == "judge" else f"{stage}: ") + f"{type(e).__name__}: {e}")
         self.rounds.append({"stage": stage, "round": 1, "tokens_used": spent,
                             "error": type(e).__name__})
@@ -621,6 +707,15 @@ class _Generation:
 
     async def run(self, resume: Optional[Mapping[str, Any]]) -> WriterOutcome:
         outline, resumed = await self.outline(resume)
+        if resumed and isinstance(resume, Mapping):
+            labels = resume.get("served_by")
+            if isinstance(labels, list) and labels:
+                for label in labels:
+                    if isinstance(label, str):
+                        self._note_label(label)
+            else:
+                # The reused outline/sections were written on the default (plain Gemini) path.
+                self._plain_roles.add("writer")
         if not resumed:
             await self.progress(outline, [])
         kinds = A.section_kinds(outline)
@@ -664,7 +759,7 @@ class _Generation:
         return WriterOutcome(status=status, content=content, section_kinds=list(kinds),
                              issues=_issue_dicts(issues), judge=judge, tokens_used=self.tokens,
                              calls=self.calls, error=error, rounds=list(self.rounds),
-                             model=self.model)
+                             model=self.model, served_by=list(self.served))
 
 
 def running_target(targets: Sequence[int], kinds: Sequence[str], index: int,
@@ -733,8 +828,11 @@ async def write_article(*, sheet: C.FactSheet, kind: str, category: str, topic_l
     mode = J.normalize_mode(settings.LEARN_JUDGE_MODE)
     if client is None:
         from app.integrations.gemini import get_gemini_client
+        from app.services.llm_provider import ProviderRouter
 
-        client = get_gemini_client()
+        # Claude first for this role when its switch says so, Gemini otherwise and on any Claude
+        # failure (llm_provider); with every switch at its default this is the plain Gemini call.
+        client = ProviderRouter(gemini=get_gemini_client())
     if str(settings.LEARN_WRITER_MODEL).strip() == J.JUDGE_MODEL and mode != J.MODE_OFF:
         logger.warning("learn writer: LEARN_WRITER_MODEL equals the judge model %s — the second "
                        "gate shares the writer's blind spots", J.JUDGE_MODEL)

@@ -10,12 +10,6 @@ import SwiftUI
 
 // MARK: - Cached Formatters
 private enum IndexDetailFormatters {
-    static let mediumDateFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "MMM d, yyyy"
-        return f
-    }()
-
     static let decimalFormatter: NumberFormatter = {
         let f = NumberFormatter()
         f.numberStyle = .decimal
@@ -298,12 +292,9 @@ struct IndexSnapshotsData {
     let valuation: IndexValuationSnapshot
     let sectorPerformance: IndexSectorPerformanceSnapshot
     let macroForecast: IndexMacroForecastSnapshot
+    /// A New York DAY (`parseNewYorkDay`), printed in New York by `IndexDetailSnapshotsSection`.
     let generatedDate: Date
     let generatedBy: String  // e.g. "Cay AI" — always provider-neutral
-
-    var formattedGeneratedDate: String {
-        IndexDetailFormatters.mediumDateFormatter.string(from: generatedDate)
-    }
 }
 
 // MARK: - Index Profile
@@ -469,7 +460,9 @@ extension IndexSnapshotsData {
         valuation: IndexValuationSnapshot.sampleData,
         sectorPerformance: IndexSectorPerformanceSnapshot.sampleData,
         macroForecast: IndexMacroForecastSnapshot.sampleData,
-        generatedDate: Calendar.current.date(from: DateComponents(year: 2026, month: 2, day: 10))!,
+        // The New York day, at New York midnight, as `parseNewYorkDay` reads the real one.
+        generatedDate: Calendar(identifier: .gregorian).date(from: DateComponents(
+            timeZone: TimeZone(identifier: "America/New_York"), year: 2026, month: 2, day: 10))!,
         generatedBy: "Cay AI"
     )
 }
@@ -482,7 +475,9 @@ extension IndexDetailData {
         priceChange: 58.44,
         priceChangePercent: 0.98,
         marketStatus: .closed(
-            date: Calendar.current.date(from: DateComponents(year: 2026, month: 2, day: 14))!,
+            // A real close: Friday Feb 13, 2026 at 4:00 PM in New York (EST), the badge's zone.
+            date: Calendar(identifier: .gregorian).date(from: DateComponents(
+                timeZone: TimeZone(identifier: "America/New_York"), year: 2026, month: 2, day: 13, hour: 16))!,
             time: "4:00 PM",
             timezone: "EST"
         ),

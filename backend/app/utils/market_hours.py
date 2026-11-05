@@ -291,6 +291,24 @@ def session_trading_date(now: datetime | None = None) -> date:
     return previous_trading_day(today)
 
 
+def last_regular_session(now: datetime | None = None) -> date:
+    """The ET date of the most recent REGULAR session that has opened.
+
+    `session_trading_date` flips to today at 04:00 ET, but until the 09:30 bell
+    the last regular session is still the previous trading day's — the one the
+    pre-market prints are measured against. Every other phase agrees with
+    `session_trading_date`. Same rule `stock_overview_service.session_ohl_for`
+    applies inline to pick the session its open/high/low describe.
+    """
+    if now is None:
+        # One clock reading for both questions, so they cannot straddle 09:30.
+        now = datetime.now(ET)
+    session = session_trading_date(now)
+    if session_phase(now) == SESSION_PREMARKET:
+        return previous_trading_day(session)
+    return session
+
+
 # ── FMP timestamp normalisation ───────────────────────────────────────
 
 

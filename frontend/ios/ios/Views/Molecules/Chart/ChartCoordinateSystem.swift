@@ -330,8 +330,10 @@ enum TradingDayHelper {
         }
     }
 
-    /// Generate evenly-spaced time labels across the trading session in the user's local timezone.
-    /// Returns `count` labels like ["7:30 AM", "9:05 AM", "10:40 AM", "12:15 PM"].
+    /// Generate evenly-spaced time labels across the trading session in NEW YORK time, the
+    /// clock the bars are stamped in. Returns `count` labels like
+    /// ["9:30 AM", "11:40 AM", "1:50 PM", "4:00 PM"] on the regular bell, on every phone: in
+    /// the phone's zone a Denver axis read 7:30 AM - 2:00 PM under a 9:30 - 4:00 session.
     ///
     /// `window` must be the SAME one `timeFractions` used, or the axis labels
     /// describe a different day than the line above them — a 24/7 asset would be
@@ -347,26 +349,24 @@ enum TradingDayHelper {
         var etCalendar = Calendar(identifier: .gregorian)
         etCalendar.timeZone = etTimeZone
 
-        // Use today (or the reference date's day) as the base
-        let baseDate = referenceDate ?? Date()
-        var openComps = etCalendar.dateComponents([.year, .month, .day], from: baseDate)
-        openComps.hour = window.openMinute / 60
-        openComps.minute = window.openMinute % 60
-        openComps.second = 0
+        // The New York day of the reference bar (or of now).
+        let day = etCalendar.startOfDay(for: referenceDate ?? Date())
 
-        guard let openDate = etCalendar.date(from: openComps) else { return [] }
-
-        // Local timezone formatter for display (static: this ran a new DateFormatter on
-        // every chart pass).
+        // Market-time formatter (static: this ran a new DateFormatter on every chart pass).
         let formatter = ChartDateFormatters.timeOnly
 
         var labels: [String] = []
         for i in 0..<count {
             let minuteOffset = Double(i) * Double(window.length) / Double(count - 1)
-            guard let labelDate = Calendar.current.date(
-                byAdding: .minute,
-                value: Int(minuteOffset),
-                to: openDate
+            // A WALL-CLOCK minute of the New York day, as `timeFractions` places each bar —
+            // never elapsed minutes, which slip an hour on a DST Sunday's 23- or 25-hour
+            // round-the-clock day. `% 24`: the 24:00 end of that day reads "12:00 AM".
+            let minuteOfDay = window.openMinute + Int(minuteOffset)
+            guard let labelDate = etCalendar.date(
+                bySettingHour: (minuteOfDay / 60) % 24,
+                minute: minuteOfDay % 60,
+                second: 0,
+                of: day
             ) else { continue }
             labels.append(formatter.string(from: labelDate))
         }

@@ -61,6 +61,24 @@ class TrackedAssetResponse(BaseModel):
     shares: Optional[float] = None
     market_value: Optional[float] = None
     asset_type: Optional[str] = None
+    # The newest pre-market / after-hours print (`TrackingService._get_extended_prints`),
+    # outside the regular session only, for rows that have an extended session (not
+    # crypto, indices or licence-blocked symbols). `price` above stays the
+    # regular-session price; `extended_change_percent` is the print's move FROM it.
+    # `extended_session` is "pre_market" | "after_hours" (`market_hours.WIRE_STATUS_*`),
+    # named by the print's own ET time. All three set together, or all None; older
+    # clients ignore them.
+    extended_price: Optional[float] = None
+    extended_change_percent: Optional[float] = None
+    extended_session: Optional[str] = None
+    # When the ticker was STARRED: `watchlist_items.added_at`, written once by the add and
+    # never rewritten (a group reorder rewrites `portfolio_items`, not this). The Holdings
+    # "Date Added" sort reads it — `portfolio_items.position` was the stored order, not a
+    # date. UTC "YYYY-MM-DDTHH:MM:SS.mmmZ" (`utils.iso_dates.iso_utc_millis`: exactly three
+    # fractional digits, the only shape iOS's ISO8601DateFormatter reads). None when the
+    # row has none or it is unreadable; iOS sorts that as unknown, last. Older clients
+    # ignore it.
+    added_at: Optional[str] = None
 
 
 class WhaleTradeItemResponse(BaseModel):

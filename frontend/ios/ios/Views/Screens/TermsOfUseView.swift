@@ -14,7 +14,7 @@ struct TermsOfUseView: View {
     var body: some View {
         LegalDocumentView(
             title: "Terms of Use",
-            lastUpdated: "October 28, 2026",
+            lastUpdated: "November 1, 2026",
             intro: "These Terms of Use (\u{201C}Terms\u{201D}) govern your access to and use of the Caydex mobile application and related services (the \u{201C}App\u{201D}), operated by Caydex (\u{201C}we,\u{201D} \u{201C}us,\u{201D} or \u{201C}our\u{201D}). By downloading, accessing, or using the App, you agree to be bound by these Terms. If you do not agree, do not use the App.",
             sections: Self.sections
         )
@@ -42,7 +42,7 @@ struct TermsOfUseView: View {
         LegalSection(
             heading: "AI-Generated Content",
             paragraphs: [
-                "The App uses artificial intelligence to generate analysis, reports, summaries, and chat responses. AI output may be inaccurate, incomplete, outdated, or misleading, and may not reflect real-world events. Treat all AI output as informational only and independently verify anything you rely on.",
+                "The App uses artificial intelligence to generate analysis, reports, summaries, and chat responses, to help write some Learn articles (each reviewed by Caydex before publication), and to narrate Learn content in a synthetic voice. AI output may be inaccurate, incomplete, outdated, or misleading, and may not reflect real-world events. Treat all AI output as informational only and independently verify anything you rely on.",
                 "Investor \u{201C}personas\u{201D} and similar features are educational simulations. They do not represent the actual views, statements, or endorsement of any real person."
             ]
         ),

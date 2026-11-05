@@ -222,7 +222,7 @@ def run(args: argparse.Namespace, *, env: Mapping[str, str],
     peak = peak_child_rss_bytes()
     table, block_checks = m.build_timings(job, render, aligned)
     audio = out_dir / render["audio"]
-    file_m = measure(audio, sum(len(b["text"].split()) for b in job.blocks))
+    file_m = measure(audio, verify.spoken_words(job.blocks))      # spoken words, as the worker counts
     problems = tm.check_table(job.blocks, table, file_m.get("duration"))
     report = {"engine": job.engine, "threads": threads, "render_seconds": round(render_s, 1),
               "wall_seconds": round(wall, 1), "cgroup_memory_peak": cgroup_peak_bytes(),

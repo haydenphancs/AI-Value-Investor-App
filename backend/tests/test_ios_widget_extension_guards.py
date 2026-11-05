@@ -1119,7 +1119,7 @@ _MUTATIONS: list[tuple[str, str, str, str]] = [
      'ticker: "ACME", companyName: "Acme Robotics"', 'ticker: "CRWV", companyName: "CoreWeave"'),
     ("cause_note", "widget",
      '                detail: headline, detailAged: headline,\n'
-     '                note: "Software - Infrastructure fell 4.0%; ACME moved far more."\n',
+     '                note: "Software - Infrastructure fell 4.0%."\n',
      "                detail: headline, detailAged: headline\n"),
     ("cause_note", "widget",
      "No clear catalyst in that day's news.\"\n",

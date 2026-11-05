@@ -38,6 +38,9 @@
 //      overwrites a good snapshot, and the refusal lapses with the display window.
 //  Every disk operation runs in order on ONE detached tail (`diskTail`), so a delete enqueued
 //  after a pending write always lands last: a session end cannot be resurrected by a late write.
+//  The Caches path lookup runs there too (`HomeDashboardSnapshotFile.resolve`): `shared` is
+//  built on the main actor at launch and asks the file system nothing (Sentry
+//  CAYDEX-APPLE-IOS-S, 2026-11-01: a stalled lookup in a `.shared` initializer froze a launch 7 s).
 //
 //  ⚠️ NOT A GATE. The server's own redaction (signals tickers, the watchlist) is the real gate;
 //  the snapshot keeps exactly what the server sent this account (owner decision 2026-10-01).
@@ -72,10 +75,27 @@ nonisolated enum HomeSnapshotReadOutcome: Sendable {
     case envelope(HomeDashboardSnapshotEnvelope)
 }
 
+/// Where the snapshot file lives, resolved only when a disk operation runs. The store holds
+/// this, not a URL, so creating `shared` on the main actor asks the file system nothing.
+nonisolated struct HomeDashboardSnapshotFile: Sendable {
+    /// The file's URL, or nil when the sandbox has no Caches directory. Disk tail only.
+    func resolve() -> URL? {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(.main))
+        #endif
+        return HomeDashboardSnapshotStore.defaultDirectory?
+            .appendingPathComponent(HomeDashboardSnapshotStore.fileName, isDirectory: false)
+    }
+}
+
 /// The file I/O, all synchronous and run ONLY on the store's detached disk tail.
 nonisolated enum HomeDashboardSnapshotDisk {
 
-    static func read(at url: URL) -> HomeSnapshotReadOutcome {
+    static func read(at file: HomeDashboardSnapshotFile) -> HomeSnapshotReadOutcome {
+        guard let url = file.resolve() else {
+            homeSnapshotLog.warning("home-snapshot: no Caches directory — nothing to read")
+            return .missing
+        }
         guard FileManager.default.fileExists(atPath: url.path) else { return .missing }
         let bytes: Data
         do {
@@ -94,7 +114,11 @@ nonisolated enum HomeDashboardSnapshotDisk {
         }
     }
 
-    static func write(_ envelope: HomeDashboardSnapshotEnvelope, to url: URL) {
+    static func write(_ envelope: HomeDashboardSnapshotEnvelope, to file: HomeDashboardSnapshotFile) {
+        guard let url = file.resolve() else {
+            homeSnapshotLog.warning("home-snapshot: no Caches directory — not written")
+            return
+        }
         do {
             let encoder = PropertyListEncoder()
             encoder.outputFormat = .binary
@@ -110,7 +134,11 @@ nonisolated enum HomeDashboardSnapshotDisk {
         }
     }
 
-    static func delete(at url: URL) {
+    static func delete(at file: HomeDashboardSnapshotFile) {
+        guard let url = file.resolve() else {
+            homeSnapshotLog.warning("home-snapshot: no Caches directory — nothing to delete")
+            return
+        }
         let fm = FileManager.default
         guard fm.fileExists(atPath: url.path) else { return }
         do {
@@ -172,12 +200,14 @@ final class HomeDashboardSnapshotStore {
     nonisolated static let fileName = "home-dashboard-snapshot.v1.plist"
 
     /// `Library/Caches/HomeDashboard`, or nil when the sandbox has no Caches directory.
+    /// ⚠️ A file-system call (Foundation `stat`s the container home). Read it only through
+    /// `HomeDashboardSnapshotFile.resolve()`, on the disk tail — never on the main thread.
     nonisolated static var defaultDirectory: URL? {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
             .appendingPathComponent("HomeDashboard", isDirectory: true)
     }
 
-    static let shared = HomeDashboardSnapshotStore(directory: HomeDashboardSnapshotStore.defaultDirectory)
+    static let shared = HomeDashboardSnapshotStore(persistsToDisk: true)
 
     // MARK: - State
 
@@ -189,11 +219,12 @@ final class HomeDashboardSnapshotStore {
     private var current: Snapshot?
     /// The last queued disk operation. Every read, write and delete awaits its predecessor.
     private var diskTail: Task<Void, Never>?
-    /// nil = memory only (previews).
-    private let fileURL: URL?
+    /// nil = memory only (previews). Resolved to a URL only by `HomeDashboardSnapshotDisk`, on
+    /// the disk tail.
+    private let fileURL: HomeDashboardSnapshotFile?
 
-    init(directory: URL?) {
-        fileURL = directory?.appendingPathComponent(Self.fileName, isDirectory: false)
+    init(persistsToDisk: Bool) {
+        fileURL = persistsToDisk ? HomeDashboardSnapshotFile() : nil
     }
 
     /// A memory-only store, optionally pre-seeded — for previews. Never touches the disk.
@@ -202,7 +233,7 @@ final class HomeDashboardSnapshotStore {
         savedAt: Date = Date(),
         owner: String = "preview-user"
     ) -> HomeDashboardSnapshotStore {
-        let store = HomeDashboardSnapshotStore(directory: nil)
+        let store = HomeDashboardSnapshotStore(persistsToDisk: false)
         let owner = normalizedOwner(owner) ?? "preview-user"
         store.boundOwner = owner
         if let seed {
@@ -417,7 +448,7 @@ final class HomeDashboardSnapshotStore {
     }
 
     /// The launch read, ordered behind anything already queued and ahead of anything after it.
-    private func readOnDiskTail(_ url: URL) async -> HomeSnapshotReadOutcome {
+    private func readOnDiskTail(_ url: HomeDashboardSnapshotFile) async -> HomeSnapshotReadOutcome {
         let previous = diskTail
         let read = Task.detached(priority: .userInitiated) { () -> HomeSnapshotReadOutcome in
             await previous?.value

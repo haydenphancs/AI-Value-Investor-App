@@ -38,12 +38,14 @@ def _clean_caches():
     ts._feed_inflight.clear()
     ts._sparkline_cache.clear()
     ts._insider_cache.clear()
+    ts._extended_cache.clear()
     ts.reset_earnings_calendar_cache()
     yield
     ts._feed_cache.clear()
     ts._feed_inflight.clear()
     ts._sparkline_cache.clear()
     ts._insider_cache.clear()
+    ts._extended_cache.clear()
     ts.reset_earnings_calendar_cache()
 
 
@@ -232,17 +234,21 @@ async def test_the_build_caps_the_per_ticker_passes_but_keeps_every_row(monkeypa
     async def _insider(self, tickers, asset_types=None):
         seen["insider"] = list(tickers); return []
     async def _backfill(self, user_id, watchlist): return None
+    async def _extended(self, tickers, asset_types=None):
+        seen["extended"] = list(tickers); return {}
     for name, fn in [("_get_batch_quotes", _quotes), ("_get_all_sparklines", _spark),
                      ("_get_earnings_alerts", _earn), ("_get_whale_trade_alerts", _whale),
                      ("_get_analyst_rating_alerts", _analyst),
                      ("_get_insider_transaction_alerts", _insider),
-                     ("_backfill_classification", _backfill)]:
+                     ("_backfill_classification", _backfill),
+                     ("_get_extended_prints", _extended)]:
         monkeypatch.setattr(TrackingService, name, fn)
 
     feed = await TrackingService().get_tracking_feed("u")
 
     assert seen["spark"] == ["AAPL", "MSFT"]
     assert seen["insider"] == ["AAPL", "MSFT"]
+    assert seen["extended"] == ["AAPL", "MSFT"], "the extended print is per ticker: capped too"
     assert [a.ticker for a in feed.assets] == ["AAPL", "MSFT", "NVDA", "AMZN"], (
         "every watchlist row must stay in the feed — the client purges what is missing"
     )
@@ -701,9 +707,10 @@ _HEAL_WATCHLIST = [
 ]
 
 
-def _stub_sections(monkeypatch, *, backfill, quotes=None):
-    """Stub the six data sections and the backfill; the watchlist read stays REAL
-    (against `_FakeSupabase`), so the order watchlist → gather is exercised."""
+def _stub_sections(monkeypatch, *, backfill, quotes=None, extended=None):
+    """Stub the six data sections, the backfill and the extended-hours prints; the
+    watchlist read stays REAL (against `_FakeSupabase`), so the order watchlist → gather
+    is exercised."""
     async def _quotes(self, tickers):
         if quotes is not None:
             return await quotes(tickers)
@@ -713,11 +720,13 @@ def _stub_sections(monkeypatch, *, backfill, quotes=None):
     async def _whale(self, tickers): return []
     async def _analyst(self, tickers): return []
     async def _insider(self, tickers, asset_types=None): return []
+    async def _no_extended(self, tickers, asset_types=None): return {}
     for name, fn in [("_get_batch_quotes", _quotes), ("_get_all_sparklines", _spark),
                      ("_get_earnings_alerts", _earn), ("_get_whale_trade_alerts", _whale),
                      ("_get_analyst_rating_alerts", _analyst),
                      ("_get_insider_transaction_alerts", _insider),
-                     ("_backfill_classification", backfill)]:
+                     ("_backfill_classification", backfill),
+                     ("_get_extended_prints", extended or _no_extended)]:
         monkeypatch.setattr(TrackingService, name, fn)
 
 
@@ -801,6 +810,32 @@ async def test_a_raising_backfill_does_not_cost_the_feed(monkeypatch, caplog):
     assert exc_info and isinstance(exc_info[1], RuntimeError), exc_info
     assert exc_info[2] is not None, "the traceback must reach the log record"
     assert ts._feed_cache_get("u-backfill-boom") is feed, "a cosmetic failure must not stop caching"
+
+
+@pytest.mark.asyncio
+async def test_a_raising_extended_print_does_not_cost_the_feed(monkeypatch, caplog):
+    """The extended-hours print is results[7], the gather's LAST member. A raise costs
+    the rows their print and nothing else: every row is served with its regular price,
+    the feed is cached, and the ERROR names `extended_prints` (a missing name in
+    `section_names` would raise IndexError in the logging loop instead)."""
+    monkeypatch.setattr(ts, "get_supabase", lambda: _FakeSupabase(_watchlist_copy()))
+
+    async def _backfill(self, user_id, watchlist): return None
+    async def _extended(self, tickers, asset_types=None):
+        raise RuntimeError("extended bars exploded")
+
+    _stub_sections(monkeypatch, backfill=_backfill, extended=_extended)
+    with caplog.at_level(logging.ERROR, logger=ts.logger.name):
+        feed = await TrackingService().get_tracking_feed("u-extended-boom")
+
+    assert [a.ticker for a in feed.assets] == ["AAPL", "SPY"]
+    assert all(a.price_known and a.price == 10.0 for a in feed.assets)
+    assert all(a.extended_price is None and a.extended_change_percent is None
+               and a.extended_session is None for a in feed.assets)
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert any("extended_prints" in m and "u-extended-boom" in m and "RuntimeError" in m
+               for m in errors), errors
+    assert ts._feed_cache_get("u-extended-boom") is feed
 
 
 @pytest.mark.asyncio

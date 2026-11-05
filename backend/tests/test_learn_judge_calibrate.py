@@ -456,3 +456,36 @@ def test_the_rubric_examples_are_never_calibration_text():
         if len(folded.split()) < 3:
             continue
         assert folded not in corpus, f"rubric example is calibration text: {ex!r}"
+
+
+# ── Claude (llm_provider, 2026-10-30): --claude-model ────────────────────────────────────────
+
+
+def test_claude_model_without_a_key_stops_before_any_call(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "CAYDEX_ANTHROPIC_API_KEY", None)
+    with pytest.raises(SystemExit) as info:
+        asyncio.run(cal.main(["--fixture", str(FIXTURE), "--claude-model", "claude-opus-5-5"]))
+    assert "CAYDEX_ANTHROPIC_API_KEY" in str(info.value)
+
+
+def test_claude_model_runs_the_judge_and_support_on_claude_only_and_labels_the_report(monkeypatch, capsys, tmp_path):
+    from app.config import settings
+    from app.services import llm_provider as lp
+
+    monkeypatch.setattr(settings, "CAYDEX_ANTHROPIC_API_KEY", "sk-ant-test")
+    seen = {}
+
+    async def fake_run_judge(fixture, samples, concurrency, client=None, check="judge"):
+        seen["client"], seen["check"] = client, check
+        return {}
+
+    monkeypatch.setattr(cal, "run_judge", fake_run_judge)
+    out = tmp_path / "v.json"
+    asyncio.run(cal.main(["--fixture", str(FIXTURE), "--claude-model", "claude-opus-5-5",
+                          "--check", "both", "--verdicts-out", str(out)]))
+    assert isinstance(seen["client"], lp.ClaudeOnly) and seen["client"].model == "claude-opus-5-5"
+    assert seen["client"].retries == 3 and seen["check"] == "both"
+    assert "model claude-opus-5-5" in capsys.readouterr().out
+    assert json.loads(out.read_text())["model"] == "claude-opus-5-5"

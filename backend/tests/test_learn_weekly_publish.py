@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -262,7 +263,7 @@ def draft(*, title: str = TITLE, paragraphs: int = 3, words: int = 40) -> Dict[s
     para = " ".join(["capacity"] * words)
     return {
         "slug": SLUG, "title": title, "subtitle": "Why compute got scarce.", "cardSubtitle": "Power, chips, land.",
-        "category": "blueprints", "author": dict(c.AUTHOR), "readTimeMinutes": 9, "tagLabel": "DEEP DIVE",
+        "category": "blueprints", "author": dict(c.AUTHOR), "readTimeMinutes": 9, "tagLabel": "CASE STUDY",
         "isFeatured": False, "hasAudioVersion": False, "heroGradientColors": ["EA580C", "C2410C", "9A3412"],
         "keyHighlights": [{"icon": "bolt.fill", "title": "Power", "description": "Grid access is the bottleneck."}],
         "statistics": [{"value": "$1.2 billion", "label": "Supply agreement"}],
@@ -808,3 +809,42 @@ def test_a_path_the_narration_module_refuses_fails_the_piece_instead_of_retrying
     fake.row(ledger.JOBS, p["narration_job_id"])["audio_path"] = "audio/weekly/Not_Kebab-XYZ.m4a"
     assert run(publisher.publish_due(AFTER)).get("failed") == 1
     assert piece_row(fake, p["id"])["last_error"] == "narration_path_invalid" and fake.articles() == []
+
+
+# ── cover art (owner 2026-11-01, `cover_art.py`) ──────────────────────────────────────────────
+
+HERO_URL = f"https://x.supabase.co/storage/v1/object/public/money-moves-images/articles/{SLUG}.hero.jpg"
+CARD_URL = f"https://x.supabase.co/storage/v1/object/public/money-moves-images/articles/{SLUG}.card.jpg"
+
+
+def test_cover_art_reaches_the_image_url_column_and_the_served_catalog(fake, tg, configured,
+                                                                     no_narration_module):
+    d = {**draft(), "imageUrl": HERO_URL, "imageCardUrl": CARD_URL}
+    make_piece(fake, c.APPROVED, the_draft=d)
+    assert run(publisher.publish_due(AFTER)).get("published") == 1
+    row = fake.articles()[0]
+    assert row["image_url"] == HERO_URL
+    assert row["content"]["imageUrl"] == HERO_URL and row["content"]["imageCardUrl"] == CARD_URL
+    served = [a for a in run(MoneyMovesContentService()._load()).articles if a.get("slug") == SLUG]
+    assert served and served[0]["imageUrl"] == HERO_URL and served[0]["imageCardUrl"] == CARD_URL
+
+
+def test_an_artless_draft_publishes_with_a_null_image_url(fake, tg, configured, no_narration_module):
+    make_piece(fake, c.APPROVED)
+    assert run(publisher.publish_due(AFTER)).get("published") == 1
+    row = fake.articles()[0]
+    assert row["image_url"] is None and "imageUrl" not in row["content"]
+
+
+@pytest.mark.parametrize("junk", ["", "javascript:alert(1)", "ftp://x/y.jpg", 7, ["x"], "https://" + "x" * 1001],
+                         ids=["empty", "javascript", "ftp", "int", "list", "too-long"])
+def test_a_junk_image_url_is_never_published(fake, junk, caplog):
+    p = make_piece(fake, c.APPROVED, the_draft={**draft(), "imageUrl": junk, "imageCardUrl": CARD_URL})
+    with caplog.at_level(logging.WARNING):
+        row, problem = publisher.build_article_row(piece_row(fake, p["id"]),
+                                                   fake.row(ledger.JOBS, p["narration_job_id"]), now=AFTER)
+    assert problem is None and row["image_url"] is None
+    assert "imageUrl" not in row["content"] and "imageCardUrl" not in row["content"]
+    assert any("unusable imageUrl" in r.getMessage() for r in caplog.records)
+    # pure: the stored draft is untouched
+    assert piece_row(fake, p["id"])["draft"]["imageUrl"] == junk

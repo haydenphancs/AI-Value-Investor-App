@@ -74,9 +74,9 @@ def test_there_are_formatters_to_check():
 _KNOWN_UNLOCALISED = {
     "Models/ChatConversationModels.swift",
     "Models/ChatModels.swift",
-    "Models/CommodityDetailModels.swift",
     "Models/HomeModels.swift",
-    "Models/IndexDetailModels.swift",
+    # Models/IndexDetailModels.swift — CLEARED 2026-10-29: its one formatter fed a dead
+    # `formattedGeneratedDate` that printed the New York snapshot day in the phone's zone.
     "Models/IndexDetailResponseModels.swift",
     "Models/InvestorPathModels.swift",
     "Models/MoneyMoveArticleModels.swift",

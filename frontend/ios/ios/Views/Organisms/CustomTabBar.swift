@@ -14,8 +14,12 @@ struct CustomTabBar: View {
     ///
     /// Published because `RootContainerView` parks the floating mini player above this bar and
     /// had been doing it with a bare `58`, which left a MEASURED 3pt gap — the capsule sat
-    /// visually welded to the tab bar and was reported from TestFlight. Deriving it here means
-    /// the two move together instead of drifting.
+    /// visually welded to the tab bar and was reported from TestFlight.
+    ///
+    /// Now only the FALLBACK for the frame before the bar has been measured: the root parks the
+    /// player on `TabBarHeightKey`, the bar's real height. The item is text-sized (caption up to
+    /// 1.4×, icon up to 1.25×), so this estimate left ~10pt of gap at the default size and ~1pt
+    /// at the largest — the same welded look, back again for anyone with bigger text.
     static let approximateHeight: CGFloat = 73
 
     @Binding var selectedTab: HomeTab
@@ -50,6 +54,14 @@ struct CustomTabBar: View {
         }
         .padding(.top, AppSpacing.md)
         .padding(.bottom, AppSpacing.xl)
+        // The bar's real height, for `RootContainerView` to park the mini player on. Measured
+        // here, after the paddings and before the background (which runs into the safe area).
+        .background(
+            GeometryReader { proxy in
+                Color.clear
+                    .preference(key: TabBarHeightKey.self, value: proxy.size.height)
+            }
+        )
         .background(AppColors.tabBarBackground)
         // Top hairline. `tabBarBackground`'s DARK arm (#171B26) is byte-identical to the
         // page background's, so the bar had NO boundary at all in dark — measured on a
@@ -71,6 +83,18 @@ struct CustomTabBar: View {
                 .fill(AppColors.border)
                 .frame(height: 1)
         }
+    }
+}
+
+/// The tab bar's measured height (excluding the bottom safe area), read by `RootContainerView`.
+///
+/// `max`, because every tab draws its own bar (all five are mounted at once) and they are all the
+/// same height. 0 means "not measured yet" — the root falls back to `approximateHeight`, so the
+/// default must not be a plausible height that `max` could keep over a real, shorter one.
+struct TabBarHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 

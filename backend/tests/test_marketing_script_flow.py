@@ -1560,6 +1560,134 @@ async def test_tokens_used_accumulates_across_generations(world, second, total, 
     assert row["tokens_used"] == total
 
 
+# ── the Claude part of tokens_used (migration 206, 2026-10-31) ───────────────
+
+_U1 = {"claude-sonnet-5-5": {"input": 900, "output": 300, "cache_read": 0, "cache_write": 0}}
+_U2 = {"claude-sonnet-5-5": {"input": 100, "output": 50, "cache_read": 0, "cache_write": 0},
+       "claude-opus-5-5": {"input": 450, "output": 50, "cache_read": 0, "cache_write": 0}}
+_U1_U2 = {"claude-sonnet-5-5": {"input": 1_000, "output": 350, "cache_read": 0, "cache_write": 0},
+          "claude-opus-5-5": {"input": 450, "output": 50, "cache_read": 0, "cache_write": 0}}
+
+
+class _BillingWriter(FakeWriter):
+    """FakeWriter whose n-th generation also billed `usages[n]` of Claude tokens — on its WriterResult, or
+    on the raised exception as the writer's CLAUDE_USAGE_ATTR (None: a Gemini-only generation)."""
+
+    def __init__(self, outcomes: List[Any], usages: List[Any]):
+        super().__init__(outcomes)
+        self.usages = list(usages)
+
+    async def __call__(self, *args, **kwargs):
+        from app.services.marketing import writer_service
+
+        usage = self.usages.pop(0)
+        try:
+            result = await super().__call__(*args, **kwargs)
+        except Exception as e:
+            if usage:
+                setattr(e, writer_service.CLAUDE_USAGE_ATTR, usage)
+            raise
+        if usage:
+            result.claude_usage = usage
+        return result
+
+
+class _PatchSpy(mrs.MarketingRunService):
+    def __init__(self, sb):
+        super().__init__(supabase=sb)
+        self.patches: List[Dict[str, Any]] = []
+
+    async def update_script_where(self, run_id, patch, *, expect):
+        self.patches.append(dict(patch))
+        return await super().update_script_where(run_id, patch, expect=expect)
+
+
+def test_the_claude_usage_attribute_is_the_writers():
+    from app.services.marketing import writer_service
+
+    assert ss._CLAUDE_USAGE_ATTR == writer_service.CLAUDE_USAGE_ATTR
+
+
+@pytest.mark.asyncio
+async def test_a_gemini_only_day_never_writes_the_claude_column(world):
+    """The default path writes exactly what it wrote before migration 206 — so it works against a table
+    that does not have the column yet."""
+    sb, _runs = world
+    spy = _PatchSpy(sb)
+    # the content-rejection and accepted writes (the failure write: the next test)
+    svc = ss.MarketingScriptService(spy, writer=FakeWriter(["rejected", "accepted"]))
+    rid = _run(sb, POSTING_DAY)
+    for _ in range(2):
+        await svc.kick(rid, claim=_holder(svc, rid))
+        await _drain(svc)
+    assert _script_row(sb, rid)["status"] == "accepted"
+    assert len([p for p in spy.patches if "tokens_used" in p]) == 2
+    assert not any("claude_usage" in p for p in spy.patches) and "claude_usage" not in _script_row(sb, rid)
+
+
+@pytest.mark.asyncio
+async def test_a_gemini_only_failure_never_writes_the_claude_column(world):
+    sb, _runs = world
+    spy = _PatchSpy(sb)
+    svc = ss.MarketingScriptService(spy, writer=FakeWriter([_timeout_spending(5)]))
+    rid = _run(sb, POSTING_DAY)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    assert _script_row(sb, rid)["tokens_used"] == 5
+    assert len([p for p in spy.patches if "tokens_used" in p]) == 1
+    assert not any("claude_usage" in p for p in spy.patches) and "claude_usage" not in _script_row(sb, rid)
+
+
+@pytest.mark.parametrize("second, status", [("accepted", "accepted"), ("rejected", "selected"),
+                                            ("timeout", "selected")])
+@pytest.mark.asyncio
+async def test_claude_usage_accumulates_across_generations_like_tokens_used(world, second, status):
+    sb, runs = world
+    outcome = _timeout_spending(777) if second == "timeout" else second
+    svc = ss.MarketingScriptService(runs, writer=_BillingWriter(["rejected", outcome], [_U1, _U2]))
+    rid = _run(sb, POSTING_DAY)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    assert _script_row(sb, rid)["claude_usage"] == _U1
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    row = _script_row(sb, rid)
+    assert row["status"] == status and row["claude_usage"] == _U1_U2
+    assert row["tokens_used"] == 99 + {"accepted": 1234, "rejected": 99, "timeout": 777}[second]
+
+
+@pytest.mark.asyncio
+async def test_a_later_gemini_only_generation_keeps_the_stored_claude_usage(world):
+    sb, runs = world
+    spy = _PatchSpy(sb)
+    svc = ss.MarketingScriptService(spy, writer=_BillingWriter(["rejected", "accepted"], [_U1, None]))
+    rid = _run(sb, POSTING_DAY)
+    for _ in range(2):
+        await svc.kick(rid, claim=_holder(svc, rid))
+        await _drain(svc)
+    row = _script_row(sb, rid)
+    assert row["status"] == "accepted" and row["claude_usage"] == _U1
+    assert "claude_usage" not in spy.patches[-1], "the accepted write leaves the column alone"
+
+
+@pytest.mark.parametrize("junk", ["junk", [], {"claude-sonnet-5-5": {"input": -1}}, {"m": {"thinking": 3}}])
+@pytest.mark.asyncio
+async def test_an_unreadable_stored_claude_usage_is_never_overwritten(world, caplog, junk):
+    """Rewriting it would drop whatever tokens it held; left alone, the digest reads that day's model parts
+    as unreadable — a floor, never a wrong number. tokens_used still adds up."""
+    sb, runs = world
+    rid = _run(sb, POSTING_DAY)
+    _seed(sb, rid, claude_usage=junk, tokens_used=50)
+    svc = ss.MarketingScriptService(runs, writer=_BillingWriter(["accepted"], [_U1]))
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        await svc.kick(rid, claim=_holder(svc, rid))
+        await _drain(svc)
+    row = _script_row(sb, rid)
+    assert row["status"] == "accepted" and row["tokens_used"] == 50 + 1234
+    assert row["claude_usage"] == junk
+    assert any("unreadable claude_usage" in m for _lvl, m in _msgs(caplog))
+
+
 # ── `_landed` calls a write landed only if the row is exactly OUR write ──────
 
 

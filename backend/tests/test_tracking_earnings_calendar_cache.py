@@ -704,7 +704,8 @@ async def test_a_cancelled_feed_build_never_strips_another_users_earnings_alert(
                      ("_get_whale_trade_alerts", _whale),
                      ("_get_analyst_rating_alerts", _analyst),
                      ("_get_insider_transaction_alerts", _insider),
-                     ("_backfill_classification", _backfill)]:
+                     ("_backfill_classification", _backfill),
+                     ("_get_extended_prints", _spark)]:
         monkeypatch.setattr(TrackingService, name, fn)
 
     fmp = _CalendarFMP(rows=[_row("AAPL")], gated=True)

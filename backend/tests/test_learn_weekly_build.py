@@ -258,7 +258,7 @@ def stored(fake, pid) -> Dict[str, Any]:
 
 def content_for(title: str = "How Chips Became the Bottleneck") -> Dict[str, Any]:
     o = A.normalize_outline(A.parse_outline({
-        "title": title, "subtitle": "A subtitle.", "cardSubtitle": "Card.", "tagLabel": "Deep Dive",
+        "title": title, "subtitle": "A subtitle.", "cardSubtitle": "Card.", "tagLabel": "Case Study",
         "keyHighlights": [{"icon": "cpu.fill", "title": f"H{i}", "description": "D."}
                           for i in range(3)],
         "sections": [{"title": f"S{i}", "icon": "cpu.fill", "kind": "history", "fact_ids": [],
@@ -1490,3 +1490,135 @@ def test_the_sec_recorder_records_failures_but_never_a_cancellation(monkeypatch)
     clone = _copy.copy(B._SECReadRecorder.__new__(B._SECReadRecorder))
     with pytest.raises(AttributeError):
         clone._client                                    # no infinite recursion
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════
+# I. Cover art (owner 2026-11-01, `cover_art.py`): between the accepted draft and its write —
+#    never a failed or delayed piece
+# ═════════════════════════════════════════════════════════════════════════════════════════════
+
+ART = {"imageUrl": "https://x.supabase.co/storage/v1/object/public/money-moves-images/articles/a.hero.jpg",
+       "imageCardUrl": "https://x.supabase.co/storage/v1/object/public/money-moves-images/articles/a.card.jpg"}
+
+
+class ArtStub:
+    """Stands in for `cover_art.cover_art_for`; records what it saw (the lease too)."""
+
+    def __init__(self, fake, answer=None, exc: Optional[BaseException] = None) -> None:
+        self.fake, self.answer, self.exc = fake, answer, exc
+        self.calls: List[Dict[str, Any]] = []
+
+    async def __call__(self, draft, *, subjects=(), piece_id=None, previous_validation=None, **_):
+        row = self.fake.row(ledger.PIECES, piece_id)
+        self.calls.append({"draft": dict(draft), "subjects": list(subjects), "piece_id": piece_id,
+                           "lease_until": row.get("lease_until"), "status": row.get("status")})
+        if self.exc is not None:
+            raise self.exc
+        return self.answer
+
+
+def _art_module(monkeypatch):
+    from app.services.learn_weekly import cover_art
+
+    monkeypatch.setattr(B, "_cover_art", lambda: cover_art)
+    return cover_art
+
+
+def test_art_off_never_calls_the_art_step_and_records_it(fake, rec, monkeypatch):
+    cover_art = _art_module(monkeypatch)
+    stub = ArtStub(fake, exc=AssertionError("must not be called while LEARN_ART_ENABLED is off"))
+    monkeypatch.setattr(cover_art, "cover_art_for", stub)
+    monkeypatch.setattr(settings, "LEARN_ART_ENABLED", False)
+    fw = FakeWriter(accepted())
+    monkeypatch.setattr(W, "write_article", fw)
+    piece = make_piece(fake)
+    build(piece)
+    row = stored(fake, piece["id"])
+    assert stub.calls == [] and row["status"] == C.MEDIA_PENDING
+    assert "imageUrl" not in row["draft"] and row["draft"] == fw.outcomes[0].content
+    assert row["validation"]["cover_art"] == {"status": "off"}
+
+
+def test_cover_art_joins_the_draft_before_its_hash_and_its_narration(fake, rec, monkeypatch):
+    cover_art = _art_module(monkeypatch)
+    record = {"status": "ok", "reused": False, "subject": "a wafer", "treatment": "duotone_press",
+              "model": "image-model", "prompt_sha1": "abcdef012345", "imageUrl": ART["imageUrl"]}
+    stub = ArtStub(fake, answer=(dict(ART), record))
+    monkeypatch.setattr(cover_art, "cover_art_for", stub)
+    monkeypatch.setattr(settings, "LEARN_ART_ENABLED", True)
+    content = content_for()
+    monkeypatch.setattr(W, "write_article", FakeWriter(accepted(content)))
+    piece = make_piece(fake)
+    build(piece)
+    row = stored(fake, piece["id"])
+    assert row["status"] == C.MEDIA_PENDING
+    (call,) = stub.calls
+    # the art step saw the FINAL accepted draft (disclosure appended) while this generation held a live lease
+    assert call["draft"] == content and call["draft"]["sections"][-1]["content"][-1] == A.disclosure_block()
+    assert call["lease_until"] is not None and call["status"] == C.BUILDING
+    assert call["subjects"] and call["subjects"][0].name == "NVIDIA CORP"
+    assert row["draft"] == {**content, **ART}
+    assert row["draft_sha256"] == A.content_sha256({**content, **ART}), "the fence sees the final draft"
+    (q,) = rec.enqueued
+    assert q["content"] == {**content, **ART}
+    assert row["validation"]["cover_art"] == record and row["validation"]["outcome"] == "accepted"
+    assert "coverArt" not in row["draft"] and "model" not in row["draft"], "the record never reaches the app"
+
+
+def test_a_failed_art_step_leaves_the_piece_artless_and_on_time(fake, rec, monkeypatch):
+    cover_art = _art_module(monkeypatch)
+    stub = ArtStub(fake, answer=(None, {"status": "failed", "error": "CoverArtImageError: refused"}))
+    monkeypatch.setattr(cover_art, "cover_art_for", stub)
+    monkeypatch.setattr(settings, "LEARN_ART_ENABLED", True)
+    fw = FakeWriter(accepted())
+    monkeypatch.setattr(W, "write_article", fw)
+    piece = make_piece(fake)
+    build(piece)
+    row = stored(fake, piece["id"])
+    assert row["status"] == C.MEDIA_PENDING and row["draft"] == fw.outcomes[0].content
+    assert row["validation"]["cover_art"]["status"] == "failed" and rec.terminal == []
+
+
+@pytest.mark.parametrize("failure", ["hang", "bug"])
+def test_the_real_art_door_never_fails_or_stalls_the_build(fake, rec, monkeypatch, caplog, failure):
+    """The REAL `cover_art_for` around a step that hangs past LEARN_ART_TIMEOUT_SECONDS, or raises a
+    bug: the piece is drafted artless and narrated, with a WARNING naming the piece."""
+    cover_art = _art_module(monkeypatch)
+
+    async def step(*a, **k):
+        if failure == "hang":
+            await asyncio.sleep(30)
+        raise RuntimeError("art bug")
+
+    monkeypatch.setattr(cover_art, "make_cover_art", step)
+    monkeypatch.setattr(settings, "LEARN_ART_ENABLED", True)
+    monkeypatch.setattr(settings, "LEARN_ART_TIMEOUT_SECONDS", 0.05)
+    fw = FakeWriter(accepted())
+    monkeypatch.setattr(W, "write_article", fw)
+    piece = make_piece(fake)
+    with caplog.at_level(logging.WARNING):
+        build(piece)
+    row = stored(fake, piece["id"])
+    assert row["status"] == C.MEDIA_PENDING and "imageUrl" not in row["draft"]
+    assert row["validation"]["cover_art"]["status"] == "failed"
+    assert any(str(piece["id"]) in r.getMessage() and "without cover art" in r.getMessage()
+               for r in caplog.records)
+    assert len(rec.enqueued) == 1
+
+
+def test_no_paid_art_for_a_piece_whose_lease_is_gone(fake, rec, monkeypatch):
+    cover_art = _art_module(monkeypatch)
+    stub = ArtStub(fake, exc=AssertionError("must not draw for a lost lease"))
+    monkeypatch.setattr(cover_art, "cover_art_for", stub)
+    monkeypatch.setattr(settings, "LEARN_ART_ENABLED", True)
+    monkeypatch.setattr(W, "write_article", FakeWriter(accepted(), before_calls=0))
+
+    async def lost(*a, **k):
+        return None
+
+    monkeypatch.setattr(ledger, "refresh_lease", lost)
+    piece = make_piece(fake)
+    build(piece)
+    row = stored(fake, piece["id"])
+    assert stub.calls == []
+    assert row["validation"]["cover_art"] == {"status": "skipped", "error": "lease lost before the art step"}

@@ -45,6 +45,7 @@ __all__ = [
     "series_from_rows",
     "series_from_observations",
     "window_change_pct",
+    "range_change_pct",
     "latest_value",
 ]
 
@@ -165,4 +166,39 @@ def window_change_pct(
     if anchor <= 0:
         return None
     pct = (newest / anchor - 1.0) * 100.0
+    return round(pct, 4) if math.isfinite(pct) else None
+
+
+def range_change_pct(
+    series: Sequence[Tuple[date, float]],
+    start: Any,
+    end: Any,
+    *,
+    tolerance_days: int = 5,
+) -> Optional[float]:
+    """Percent change between two DATES of a dated series, or None.
+
+    Each end is the last observation at or before its date (stepping back over weekends
+    and holidays, never forward), so the change spans the same calendar range as the
+    caller's own window — the report's "S&P 500 over the same days" comparison.
+
+    ``None`` — never 0.0 — when either date is unparseable, ``end`` is not after
+    ``start``, the series does not reach back to ``start``, or either anchor is more than
+    ``tolerance_days`` older than its date: a stale or gappy series must refuse rather than
+    measure a different range than the one named.
+    """
+    start_d, end_d = _as_date(start), _as_date(end)
+    if start_d is None or end_d is None or end_d <= start_d or len(series) < 2:
+        return None
+    dates = [d for d, _ in series]
+    i_start = bisect.bisect_right(dates, start_d) - 1
+    i_end = bisect.bisect_right(dates, end_d) - 1
+    if i_start < 0 or i_end <= i_start:
+        return None
+    (a_date, a_val), (b_date, b_val) = series[i_start], series[i_end]
+    if (start_d - a_date).days > tolerance_days or (end_d - b_date).days > tolerance_days:
+        return None
+    if a_val <= 0:
+        return None
+    pct = (b_val / a_val - 1.0) * 100.0
     return round(pct, 4) if math.isfinite(pct) else None

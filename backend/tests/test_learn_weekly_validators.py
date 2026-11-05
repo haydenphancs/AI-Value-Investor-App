@@ -120,7 +120,7 @@ def test_enforced_compliance_codes_are_pinned_exactly():
     assert V.ENFORCED_COMPLIANCE_CODES == frozenset({
         "class_b_recommendation", "class_b_forward", "promissory", "banned_phrase",
         "misattribution", "famous_quote", "link", "markup", "emoji", "handle", "hashtag",
-        "cashtag", "code_owned", "brand_mention", "person_named",
+        "cashtag", "code_owned", "brand_mention", "person_named", "source_reference",
     })
     # The plan's named exclusions stay excluded.
     for code in ("class_b_valuation", "return_figure", "identity_leak"):
@@ -732,7 +732,7 @@ def make_article(kinds=("peg", "history", "history", "mechanics", "mechanics", "
         "title": "The AI Power Crunch",
         "subtitle": "Why electricity became the scarce input of computing",
         "cardSubtitle": "How power shapes the economics of data centers",
-        "tagLabel": "DEEP DIVE",
+        "tagLabel": "CASE STUDY",
         "category": "blueprints",
         "author": dict(C.AUTHOR),
         "readTimeMinutes": 11,
@@ -816,10 +816,19 @@ def test_author_is_never_verified(verified):
     assert "verified" in article_codes(article)
 
 
-def test_author_shape_and_disclosure():
+def test_author_shape_and_code_owned_author():
     article = make_article()
-    article["author"] = {**C.AUTHOR, "title": "Editorial"}
-    assert "disclosure" in article_codes(article)
+    assert "author_mismatch" not in article_codes(article)
+    # The pre-2026-11-01 byline, a renamed author, an extra key: all refused.
+    for other in ({**C.AUTHOR, "title": "AI-assisted · Editor-reviewed"},
+                  {**C.AUTHOR, "name": "Cay AI"}, {**C.AUTHOR, "role": "writer"}):
+        article["author"] = other
+        assert "author_mismatch" in article_codes(article)
+    # A stale byline is named even when isVerified is wrong too (not hidden behind it).
+    article["author"] = {**C.AUTHOR, "title": "AI-assisted · Editor-reviewed", "isVerified": True}
+    assert {"author_mismatch", "verified"} <= set(article_codes(article))
+    article["author"] = {**C.AUTHOR, "isVerified": True}
+    assert "author_mismatch" not in article_codes(article) and "verified" in article_codes(article)
     for bad in (None, "Caydex", 5, []):
         article["author"] = bad
         assert "bad_value" in article_codes(article)
@@ -1709,3 +1718,90 @@ def test_punctuation_before_a_sentences_first_word_keeps_it_first(ctx, text):
 def test_a_word_that_does_not_open_its_sentence_is_still_a_name(ctx, text):
     assert "Buybacks" in {i.detail for i in para(text, grounding_ctx=ctx)
                           if i.code == "ungrounded_entity"}, para(text, grounding_ctx=ctx)
+
+
+# ── Claude can write Learn pieces too (llm_provider, 2026-10-30) ─────────────────────────────
+
+
+@pytest.mark.parametrize("text", [
+    "I am Claude.",
+    "I'm Claude, and here is how the filing reads.",
+    "I was built by Anthropic.",
+    "I was trained by the team at Anthropic.",
+    "I'm made by Anthropic to explain filings.",
+])
+def test_a_first_person_claude_or_anthropic_self_reference_fails(text):
+    assert V.self_reference_hits(text), text
+    assert "self_reference" in para_codes(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Anthropic sells its Claude models to every large cloud.",
+    "Claude, built by Anthropic, runs on rented chips.",
+    "Models built by Anthropic run on these clusters.",
+    "Amazon invested in Anthropic, the maker of Claude.",
+])
+def test_third_person_claude_and_anthropic_subject_matter_passes(text):
+    assert V.self_reference_hits(text) == []
+
+
+# ── 2026-10-31: an article never cites its own brief ─────────────────────────────────────────
+# An ACCEPTED Claude draft read "The fact sheet gives two consecutive annual reports for each"
+# (live check, 2026-10-31). The filing itself may still be named.
+
+@pytest.mark.parametrize("text", [
+    "The fact sheet gives two consecutive annual reports for each.",
+    "The source says the backlog grew.",
+])
+def test_citing_the_fact_sheet_or_the_source_is_refused(text):
+    assert "source_reference" in para_codes(text)
+
+
+@pytest.mark.parametrize("text", [
+    "The company's annual report describes two segments.",
+    "Fees became the main source of revenue.",
+])
+def test_naming_the_filing_or_a_source_of_revenue_passes(text):
+    assert "source_reference" not in para_codes(text)
+
+
+def test_a_self_written_educational_label_is_refused_in_app():
+    assert "code_owned" in para_codes("This article is for informational purposes only.")
+
+
+def test_the_learn_writer_is_told_not_to_cite_its_brief():
+    from app.services.learn_weekly import prompts as P
+
+    assert "never mention the fact sheet, the source" in P.SYSTEM_BODY
+    assert "fact sheet" in P.hint("source_reference")
+
+
+# ── the doubled label (owner 2026-11-01): iOS already prints "FEATURED DEEP DIVE" over the tag ──
+
+
+@pytest.mark.parametrize("tag", ["FEATURE DEEP DIVE", "Deep Dive", "DEEP-DIVE", "deepdive", "FEATURED",
+                                 "THE FEATURE", "CHIP FEATURES", "deep  dive"])
+def test_a_tag_label_that_repeats_the_apps_header_is_refused(tag):
+    article = make_article()
+    article["tagLabel"] = tag
+    out = article_issues(article, sheet=SHEET)
+    assert Issue_at(out, "tagLabel", "tag_label_generic"), (tag, out)
+
+
+@pytest.mark.parametrize("tag", ["CASE STUDY", "HEAD TO HEAD", "THE DUOPOLY", "ORIGIN STORY",
+                                 "THE BOTTLENECK", "RED FLAGS", "DEEP WATER", "DIVE BAR"])
+def test_a_catalog_style_tag_label_passes_the_generic_rule(tag):
+    article = make_article()
+    article["tagLabel"] = tag
+    assert not Issue_at(article_issues(article, sheet=SHEET), "tagLabel", "tag_label_generic")
+
+
+def test_the_writer_is_told_the_catalog_tag_style_and_never_the_doubled_label():
+    from app.services.learn_weekly import prompts as P
+
+    spec = P._outline_spec(C.KIND_DEEP_DIVE, "battles", SHEET)
+    assert "FEATURE DEEP DIVE" not in spec and "Featured Deep Dive" in spec
+    for example in ("HEAD TO HEAD", "THE DUOPOLY", "ORIGIN STORY", "THE BOTTLENECK", "RED FLAGS", "CASE STUDY"):
+        assert example in spec
+    assert P.PROMPT_VERSION != "2026-10-31.1", "a prompt change bumps PROMPT_VERSION"
+    assert "Featured Deep Dive" in P.hint("tag_label_generic") and P.hint("tag_label_generic") != "fix it"

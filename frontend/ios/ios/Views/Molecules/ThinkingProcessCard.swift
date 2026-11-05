@@ -86,7 +86,7 @@ struct ThinkingProcessCard: View {
                     // leaderboard swept across the card's own header, hero and CTA, and was reported from
                     // TestFlight as "words coming from the background ... looks like a bug".
                     // A fade moves nothing and cannot overlap anything.
-                    // (Genuinely top-anchored things — the audio status island, a banner pinned to the top
+                    // (Genuinely top-anchored things — the report's refresh-failure banner, pinned to the top
                     // of a screen — are the opposite case and keep their `.move(edge: .top)`.)
                     .transition(.opacity)
             }

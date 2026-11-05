@@ -91,13 +91,18 @@ _OAUTH_PARAM_RE = re.compile(
 _APIKEY_HEADER_RE = re.compile(r"(?i)\b(apikey\s+)[A-Za-z0-9._\-]{8,}")
 _APP_PASSWORD_RE = re.compile(r"(?<![A-Za-z0-9-])[a-z0-9]{4}(?:-[a-z0-9]{4}){3}(?![A-Za-z0-9-])")
 
+# Anthropic API keys (`sk-ant-api03-…`, admin `sk-ant-admin01-…`; 2026-10-30, the Claude second
+# provider). The SDK sends the key in a header, never a URL, but a key pasted into the wrong
+# variable can be echoed by a settings check, and a bare key matches no pattern above.
+_ANTHROPIC_KEY_RE = re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{8,}")
+
 
 def redact_secrets(text: Any) -> str:
     """Return ``str(text)`` with secrets and no-diagnostic-value PII replaced by ``***``.
 
     Covers: secret query params (``apikey=``…), email addresses, bearer tokens, bare JWTs,
     inline Postgres DSN passwords, Telegram bot tokens (in a URL path or bare), OAuth 1.0a
-    parameters, ``Apikey <key>`` headers and Bluesky app passwords. Does NOT touch `user_id` UUIDs — see the module
+    parameters, ``Apikey <key>`` headers, Bluesky app passwords and Anthropic ``sk-ant-`` keys. Does NOT touch `user_id` UUIDs — see the module
     docstring for why.
     """
     try:
@@ -106,6 +111,7 @@ def redact_secrets(text: Any) -> str:
         s = _OAUTH_PARAM_RE.sub(r"\1***", s)
         s = _APIKEY_HEADER_RE.sub(r"\1***", s)
         s = _APP_PASSWORD_RE.sub("***", s)
+        s = _ANTHROPIC_KEY_RE.sub("sk-ant-***", s)
         s = _SECRET_QS_RE.sub(_qs_sub, s)
         s = _SECRET_KV_RE.sub(r"\1***\4", s)
         s = _DSN_RE.sub(r"\1***\2", s)

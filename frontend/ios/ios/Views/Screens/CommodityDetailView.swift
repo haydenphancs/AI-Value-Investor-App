@@ -191,8 +191,9 @@ struct CommodityDetailView: View {
         .sheet(isPresented: $showPriceAlerts) {
             PriceAlertsSheet(ticker: commoditySymbol, assetType: "commodity")
         }
-        // Audio collapses to the top status island while this asset screen is open, keeping the
-        // bottom clear for "Ask Cay AI". Also keeps the player visible above this fullScreenCover.
+        // The player is the square beside "Ask Cay AI" (`ChatBarAudioControl`) while this asset
+        // screen is open; forceCompact stands the root's floating player down so it never lands on
+        // that bar. Also supplies the full-screen player above this fullScreenCover.
         .globalAudioOverlay(token: compactToken, forceCompact: true)
         .task {
             // Today's starter questions. One shared request per ET day across all six

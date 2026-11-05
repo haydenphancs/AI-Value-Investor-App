@@ -52,8 +52,11 @@ from typing import Any, Dict
 logger = logging.getLogger(__name__)
 
 #: The identifiers an exception may carry into its message. Identifiers only — see the module docstring.
+#: `catalog_slug` (migration 207) names the hand-written Money Moves article a catalog narration job
+#: narrates (a job with no piece): an owner-authored kebab-case slug, never a secret.
 CONTEXT_KEYS = frozenset({
-    "job_id", "piece_id", "period_key", "round", "slug", "stage", "step", "engine", "status", "op",
+    "job_id", "piece_id", "catalog_slug", "period_key", "round", "slug", "stage", "step", "engine", "status",
+    "op",
 })
 #: Each identifier's rendered length cap (one log line; an id is far shorter).
 _ID_VALUE_CAP = 80

@@ -10,8 +10,9 @@ What is enforced, and why it differs from the public marketing scan
 * **Compliance** — `marketing/compliance.scan_text(strict_instruments=False)`, keeping only
   `ENFORCED_COMPLIANCE_CODES` (an EXPLICIT allow-list, pinned by a test): directives /
   recommendations, promises and forecasts, banned phrases, misattributions, famous quotes, links,
-  markup, emoji, handles, hashtags, cashtags, code-owned copy, the brand, and real people's names
-  (weekly pieces name people by role only). NOT enforced: `class_b_valuation` (it flags "value
+  markup, emoji, handles, hashtags, cashtags, code-owned copy, the brand, real people's names
+  (weekly pieces name people by role only), and citing the fact sheet or "the source"
+  (`source_reference`, 2026-10-31). NOT enforced: `class_b_valuation` (it flags "value
   trap", "per share", "market cap" — the vocabulary a business case study is made of), the
   evaluative and `return_figure` rows, the strict role/pronoun rows (off with
   `strict_instruments=False`) and `identity_leak`. In strict mode the scan fails 21 of the 23
@@ -159,6 +160,9 @@ ENFORCED_COMPLIANCE_CODES: FrozenSet[str] = frozenset({
     "code_owned",               # advice / disclaimer / "written without AI" copy is code's
     "brand_mention",            # Caydex, Cay AI, "download", "this app"
     "person_named",             # a real person by name: weekly pieces name people by ROLE only
+    # "The fact sheet gives two consecutive annual reports" shipped in an ACCEPTED Claude draft
+    # (2026-10-31 live check): an article states its facts, it never cites its brief.
+    "source_reference",
 })
 
 #: Emitted by `compliance.scan_text` and NOT enforced in-app, each for a stated reason.
@@ -206,6 +210,12 @@ _LEARN_SELF_PATTERNS: Tuple[str, ...] = (
     # "I'm just an AI assistant", "I am a chatbot".
     r"\bi(?:'m| am) (?:just |only |merely )?an? (?:ai|artificial intelligence|llm|chatbot|"
     r"virtual assistant|ai assistant|ai model)\b",
+    # Claude can write Learn pieces too (llm_provider, 2026-10-30), so the first-person vendor rows
+    # above (Google / OpenAI / Gemini) get their Anthropic twins — first person only, so
+    # "Anthropic sells its Claude models to clouds" stays third-person subject matter.
+    r"\bi(?:'m| am) claude\b",                                  # "I am Claude"
+    r"\bi(?:'m| am| was)?\s+(?:developed|built|created|made|powered|trained)"
+    r"(?:\s+\w+){0,3}\s+by (?:anthropic|claude)\b",                # "I was made by Anthropic"
 )
 _SELF_RE = re.compile("|".join(_GUARDRAIL_SELF_PATTERNS + _LEARN_SELF_PATTERNS), re.IGNORECASE)
 
@@ -432,6 +442,10 @@ _BRAND_TOKEN_RE = re.compile(r"\bcaydex\b|\bcay[ -]?ai\b")
 #: Matched with `fullmatch` — `$` alone also matches before a trailing "\n", which would let
 #: "slug-2026-10-23\n" through.
 SLUG_RE = re.compile(r"[a-z0-9-]+-(\d{4})-(\d{2})-(\d{2})")
+#: A tagLabel that repeats the app's own header (owner 2026-11-01): iOS draws "FEATURED DEEP DIVE" above
+#: the featured article's tag, so a tag reading "FEATURE DEEP DIVE" printed the label twice. Refused
+#: case-insensitively — DEEP DIVE (any spacing or hyphen) and any word starting FEATUR.
+GENERIC_TAG_RE = re.compile(r"(?i)\bdeep[\s-]*dive|\bfeatur")
 _HEX6_RE = re.compile(r"^[0-9A-Fa-f]{6}$")
 REQUIRED_ARTICLE_KEYS: Tuple[str, ...] = (
     "slug", "title", "subtitle", "cardSubtitle", "category", "author", "readTimeMinutes",
@@ -440,9 +454,6 @@ REQUIRED_ARTICLE_KEYS: Tuple[str, ...] = (
 #: Engagement counters a model or a bug could fabricate. Any non-empty value is refused: a
 #: made-up "12K learners" is a false claim under the brand.
 ENGAGEMENT_KEYS: Tuple[str, ...] = ("viewCount", "learnerCount", "commentCount", "likeCount")
-#: The disclosure the plan pins on every generated piece (§1.11).
-AI_ASSISTED = "ai-assisted"
-
 _BLOCK_KEYS: Mapping[str, FrozenSet[str]] = {
     "paragraph": frozenset({"type", "text", "readAlong"}),
     "subheading": frozenset({"type", "text", "readAlong"}),
@@ -1411,6 +1422,11 @@ def _validate_article(content: Any, kind: Any, sheet: Any, served_titles: Any,
         out += _text_issues("tagLabel", content.get("tagLabel"), cap=TITLE_CAP,
                             time_words_ok=False, grounding_ctx=ctx, subjects=subj,
                             caps_label=True, heading=True)
+        tag = content.get("tagLabel")
+        hit = GENERIC_TAG_RE.search(tag[:TITLE_CAP]) if isinstance(tag, str) else None
+        if hit:
+            out.append(Issue("tagLabel", "tag_label_generic", _detail(
+                f"{hit.group(0)!r} repeats the app's own \"Featured Deep Dive\" header")))
 
     if "category" in content and content.get("category") not in C.CATEGORIES:
         out.append(Issue("category", "bad_value",
@@ -1428,10 +1444,11 @@ def _validate_article(content: Any, kind: Any, sheet: Any, served_titles: Any,
             if author.get("isVerified") is not False:
                 out.append(Issue("author.isVerified", "verified",
                                  _detail(f"must be false, got {author.get('isVerified')!r}")))
-            title = author.get("title")
-            if isinstance(title, str) and AI_ASSISTED not in title[:TITLE_CAP].casefold():
-                out.append(Issue("author.title", "disclosure",
-                                 _detail(f"{title!r} must say AI-assisted")))
+            # Its own check (not an elif): a stale byline is named even when isVerified is wrong too.
+            if {k: v for k, v in author.items() if k != "isVerified"} != \
+                    {k: v for k, v in C.AUTHOR.items() if k != "isVerified"}:
+                out.append(Issue("author", "author_mismatch",
+                                 _detail(f"{dict(author)!r} is not the code-owned author")))
 
     rt = content.get("readTimeMinutes")
     if "readTimeMinutes" in content and not (_is_int(rt) and 1 <= rt <= MAX_READ_TIME_MINUTES):
@@ -1583,7 +1600,7 @@ def validate_article(content: Any, *, kind: str, sheet: Optional[C.FactSheet] = 
                      served_slugs: Optional[Iterable[str]] = ()) -> List[Issue]:
     """Every issue in one DRAFT article (the iOS content shape plus each section's draft `kind`,
     which the renderer drops). Checks the iOS-required keys, the slug pattern, the category enum,
-    the code-owned author (`isVerified` false, "AI-assisted" title), no fabricated engagement
+    the code-owned author (`isVerified` false, equal to `contracts.AUTHOR`), no fabricated engagement
     count, the gradient and the three key highlights, every section and block
     (`validate_block`, grounded against `sheet` when given), the body word count for `kind`
     (`contracts.DEEP_DIVE_WORDS` / `SLOT_WORDS`; body = paragraph, subheading, callout and bullet
@@ -1602,7 +1619,7 @@ def validate_article(content: Any, *, kind: str, sheet: Optional[C.FactSheet] = 
 
 
 __all__ = [
-    "AI_ASSISTED", "ENFORCED_COMPLIANCE_CODES", "ENGAGEMENT_KEYS", "GROUNDING_CODES",
+    "ENFORCED_COMPLIANCE_CODES", "ENGAGEMENT_KEYS", "GENERIC_TAG_RE", "GROUNDING_CODES",
     "IGNORED_COMPLIANCE_CODES", "Issue", "REQUIRED_ARTICLE_KEYS", "SLUG_RE", "advice_hits",
     "build_grounding_context", "conduct_hits", "corpus_vocab", "forbidden_token_hits",
     "misquote_hits", "self_reference_hits", "title_key", "validate_article", "validate_block",

@@ -30,7 +30,7 @@ struct BookDetailView: View {
     /// player's "Read" route into the reader. A SEPARATE flag on purpose: the two covers live on
     /// different views and must not share one.
     @State private var closeBookAfterPlayerReader = false
-    /// Stable token keying this screen's compact-mode requests + audio overlay host registration.
+    /// Stable token keying this screen's audio overlay.
     @State private var compactToken = UUID().uuidString
     /// Owns the chat conversation for this book so it resumes while the screen is open.
     @StateObject private var chatViewModel = ChatViewModel()
@@ -120,20 +120,11 @@ struct BookDetailView: View {
             .opacity(headerOpacity)
             .allowsHitTesting(headerOpacity > 0.5)
 
-            // Bottom Ask AI bar
-            // spacing: 0 — the implicit VStack default stacked ON TOP of the player's own bottom
-            // padding here, so this screen sat noticeably further from the chat bar than the reader
-            // and the article screen, which both pin it to 0. The gap is the player's alone now.
+            // Bottom Ask AI bar. The audio player is the square at the bar's left
+            // (`ChatBarAudioControl`), never a mini player stacked above the bar.
             VStack(spacing: 0) {
                 Spacer()
 
-                // Bottom mini player — hidden when collapsed to the top island (chat-bar focused).
-                if audioManager.hasActiveEpisode && !audioManager.showFullScreenPlayer && !audioManager.isCompactMode {
-                    GlobalMiniPlayer(bottomSpacing: AppSpacing.md / 2)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-
-                // Tapping the chat bar collapses the player to the top status island (Wiser-only).
                 CaydexAIChatBar(
                     inputText: $aiInputText,
                     onSend: {
@@ -151,24 +142,15 @@ struct BookDetailView: View {
                             contextType: .book,
                             referenceId: String(book.curriculumOrder)
                         )
-                        // Release the focus-driven compact reason deterministically (the covered
-                        // TextField's focus-off event is unreliable) so the mini player returns when
-                        // the chat closes; AIChatScreen's forceCompact keeps audio in the DI meanwhile.
-                        audioManager.setCompactMode(false, reason: compactToken)
                         showAIChat = true
-                    },
-                    onFocusChange: { focused in
-                        audioManager.setCompactMode(focused, reason: compactToken)
                     }
                 )
             }
-            .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
-            .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.isCompactMode)
         }
-        // Top status island + full-screen player + overlay-host registration (this screen is a
-        // fullScreenCover above RootContainerView, whose own overlay would be hidden). "Read" opens
-        // the reading view at the core the narration is currently in — for THIS book; another
-        // book's narration opens that book's reader via the modifier instead.
+        // The full-screen player (this screen is a fullScreenCover above RootContainerView, whose
+        // own layer it hides). "Read" opens the reading view at the core the narration is
+        // currently in — for THIS book; another book's narration opens that book's reader via the
+        // modifier instead.
         .globalAudioOverlay(token: compactToken, readerHost: BookReaderHost(
             curriculumOrder: book.curriculumOrder,
             openCore: { coreNumber in
@@ -196,10 +178,6 @@ struct BookDetailView: View {
                 })
                 .environmentObject(AudioManager.shared)
             }
-        }
-        .onDisappear {
-            // Reset scroll hiding when leaving to ensure main screen player shows
-            audioManager.resetScrollHiding()
         }
         .onChange(of: audioManager.currentTime) { oldTime, newTime in
             // Auto-complete cores (the numbered badges) as the narration plays through them, so the

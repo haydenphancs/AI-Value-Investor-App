@@ -16,7 +16,10 @@ struct IndexDetailSnapshotsSection: View {
 
     private var formattedDate: String {
         let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
         formatter.dateFormat = "MM/dd/yyyy"
+        // The New York day `parseNewYorkDay` read: parsed and printed in the same zone.
         formatter.timeZone = TimeZone(identifier: "America/New_York")
         return formatter.string(from: snapshotsData.generatedDate)
     }

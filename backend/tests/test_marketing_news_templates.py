@@ -1965,12 +1965,19 @@ CLASS_B_VALUATION_IDS = frozenset({"st.h.fair_value.poss", "st.h.fair_value.of",
                                    "st.c2.fair_value.title"})
 #: `brand_mention` only on the theme's grouping lines: the grouping IS Caydex's, and says so.
 BRAND_MENTION_IDS = frozenset({"th.grouping", "th.c.grouping.title"})
+#: `source_reference` only on the stake lines that point at the filing the post NAMES (its "Source: …"
+#: line): "from the source named in this post", "the source says up to that amount". The rule (2026-10-31)
+#: is for MODEL text citing its own brief ("The fact sheet shows…"); these code-owned lines cite a real,
+#: named document on purpose and are accurate.
+SOURCE_REFERENCE_IDS = frozenset({"st.l1", "st.l2.committed_up_to", "st.l2.carrying_value",
+                                  "st.l2.fair_value", "st.l2.invested"})
 
 
 def test_every_exempted_id_is_a_live_entry():
     """news-v19: `ins.open.head.min` left the lexicon with the cover's second company name; an exemption for
     an id that no longer exists would silently stand ready for a new entry of that name."""
-    assert PERSON_NAMED_IDS | CLASS_B_VALUATION_IDS | BRAND_MENTION_IDS <= set(T.LEXICON)
+    assert (PERSON_NAMED_IDS | CLASS_B_VALUATION_IDS | BRAND_MENTION_IDS
+            | SOURCE_REFERENCE_IDS) <= set(T.LEXICON)
 
 
 @pytest.mark.parametrize("entry_id", sorted(T.LEXICON))
@@ -1978,7 +1985,8 @@ def test_the_public_copy_scan_finds_only_the_exempted_codes(entry_id):
     codes = {v.code for v in scan_text(entry_id, neutral(entry_id))}
     allowed = ({"person_named"} if entry_id in PERSON_NAMED_IDS else set()) | (
         {"class_b_valuation"} if entry_id in CLASS_B_VALUATION_IDS else set()) | (
-        {"brand_mention"} if entry_id in BRAND_MENTION_IDS else set())
+        {"brand_mention"} if entry_id in BRAND_MENTION_IDS else set()) | (
+        {"source_reference"} if entry_id in SOURCE_REFERENCE_IDS else set())
     assert codes <= allowed, (entry_id, codes)
 
 
@@ -1986,7 +1994,8 @@ def test_the_2b_exemption_tables_are_exact():
     """Every exempted 2b id really draws its code (no stale exemption that would hide a new hit).
     Mutation-checked by hand (2026-10-10, in memory): "worth" in `er.l2.revenue` turned the public-copy
     scan red; "a bargain" in `st.l4` turned the banned-word test red (scan_text has no row for it)."""
-    for ids, code in ((CLASS_B_VALUATION_IDS, "class_b_valuation"), (BRAND_MENTION_IDS, "brand_mention")):
+    for ids, code in ((CLASS_B_VALUATION_IDS, "class_b_valuation"), (BRAND_MENTION_IDS, "brand_mention"),
+                      (SOURCE_REFERENCE_IDS, "source_reference")):
         for entry_id in ids:
             assert code in {v.code for v in scan_text(entry_id, neutral(entry_id))}, entry_id
 

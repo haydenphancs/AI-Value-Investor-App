@@ -134,6 +134,8 @@ struct WhaleProfileView: View {
                 .refreshable {
                     await viewModel.refresh()
                 }
+                // Pushed in the Tracking tab, under the root's floating mini player.
+                .miniPlayerSafeArea()
             } else {
                 // Load failed (offline / 500 / whale not found): loadProfile
                 // leaves profile == nil and only sets errorMessage. Without this

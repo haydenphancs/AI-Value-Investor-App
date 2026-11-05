@@ -9,11 +9,18 @@ must measure exactly the way the script does. The script is never imported (the 
 not in the image).
 
 Per engine (`BANDS`):
-  * chatterbox — the catalog bands (F0 130–142 Hz, 144–166 wpm, 11.5–12.8 kB/s, −17.5..−14.5 LUFS),
+  * chatterbox — the catalog bands (F0 130–142 Hz, 144–166 wpm, 11.5–14.0 kB/s, −17.5..−14.5 LUFS),
     ENFORCED: a render outside them is not the catalog voice and fails `voice_out_of_band`.
   * kokoro — UNMEASURED: only the encode band the server also checks (10–14 kB/s), a pace band
     wide enough for any natural voice, and a loudness floor/ceiling that only a silent or clipped
     file misses. Pitch is recorded, never enforced. Tighten after the first real Kokoro renders.
+
+The pace is SPOKEN words per minute of the file (`spoken_words`: `timings.spoken_word_count` of every
+narrated block — "$574.8 billion" is eight words, not two), the basis the tempo pass now uses too
+(chatterbox pipeline v2, 2026-11-01). Counted on whitespace tokens, the published W44 Deep Dive (161
+figure tokens, sped up 1.188×) passed this band while it narrated ~25% too fast. The band is unchanged:
+the 23 catalog clips measure 155.8–161.7 spoken wpm (150.4–159.2 on tokens), see
+tests/test_money_moves_catalog_parity.py.
 
 numpy is imported inside `median_f0` only — the parent process calls `measure`, and stays free of
 the heavy stack at import.
@@ -24,7 +31,9 @@ import math
 import re
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+
+from learn_narrator import timings as tm
 
 SR = 16000
 
@@ -37,7 +46,11 @@ F0_HZ = (130.0, 142.0)          # clone 132.2-137, Journey 133.3; Gemini 124-128
                                 # cut from a Gemini Achird narration, so the voices are related.
                                 # Encode and pace are what separate them cleanly.
 WPM = (144.0, 166.0)            # TARGET_WPM 165 -> ~158 after block pauses; one clip re-speeded to 150
-BYTES_PER_SEC = (11_500, 12_800)  # -b:a 96k; ffmpeg's default (Gemini path) lands ~9.7k
+BYTES_PER_SEC = (11_500, 14_000)  # -b:a 96k; ffmpeg's default (Gemini path) lands ~9.7k. The ceiling was
+                                  # 12,800 (local ffmpeg 7.0 encodes, ~12.1k); the narrator image's ffmpeg 5.1
+                                  # overshoots 96k (12,629 and 12,888 on Railway, 2026-10-24/30), so it is
+                                  # Kokoro's 14,000: the floor separates the voices, the ceiling only
+                                  # catches a stereo / 128k+ encode (16k+).
 LUFS = (-17.5, -14.5)
 
 Band = Optional[Tuple[float, float]]
@@ -101,9 +114,14 @@ def _clean(x: float, places: int) -> Optional[float]:
     return round(float(x), places) if isinstance(x, (int, float)) and math.isfinite(float(x)) else None
 
 
+def spoken_words(blocks: Sequence[Mapping[str, Any]]) -> int:
+    """The words the voice says across the job's `{i, text}` blocks — `measure`'s `words`."""
+    return sum(tm.spoken_word_count(str(b.get("text") or "")) for b in blocks)
+
+
 def measure(path: Path, words: int, *, size_bytes: Optional[int] = None) -> Dict[str, Any]:
-    """The four measurements of a file (`words` = whitespace words of every narrated block, the
-    script's basis). NaN becomes None (JSON has no NaN)."""
+    """The four measurements of a file (`words` = SPOKEN words of every narrated block,
+    `spoken_words`). NaN becomes None (JSON has no NaN)."""
     d = duration(path)
     size = path.stat().st_size if size_bytes is None else size_bytes
     return {

@@ -68,6 +68,7 @@ from app.schemas.marketing import (
     POST_METADATA_FIRST_COMMENT,
     POST_METADATA_IMAGE_FALLBACK,
     POST_METADATA_VIDEO_FEATURES,
+    POST_METADATA_WRITTEN_BY,
     POST_PLATFORMS,
     POST_STATUSES,
     RUN_STAGES,
@@ -616,6 +617,23 @@ def image_fallback_of(output: Any, *, run_id: Any = None) -> Optional[Tuple[str,
         logger.error("marketing create_posts run_id=%s: the accepted output's image_fallback names %d entr(ies) "
                      "that could never post a picture — dropped", run_id, len(bad))
     return reason, frozenset(p for p in platforms if isinstance(p, str) and p in _PICTURE_CAPABLE)
+
+
+_WRITTEN_BY_CAP = 80
+
+
+def written_by_note(output: Any) -> Optional[Dict[str, str]]:
+    """`metadata[POST_METADATA_WRITTEN_BY]` for every post of the run: the accepted output's
+    `served_by` (the writer) and `judge.served_by`, each a capped one-line string — None when neither
+    is there (every role on its default Gemini path: the rows stay byte-identical). Pure."""
+    if not isinstance(output, dict):
+        return None
+    judge = output.get("judge") if isinstance(output.get("judge"), dict) else {}
+    note: Dict[str, str] = {}
+    for key, value in (("writer", output.get("served_by")), ("judge", judge.get("served_by"))):
+        if isinstance(value, str) and value.strip():
+            note[key] = " ".join(value.split())[:_WRITTEN_BY_CAP]
+    return note or None
 
 
 def video_features_note(output: Any, *, template: bool, run_id: Any = None) -> Optional[List[str]]:
@@ -2600,6 +2618,7 @@ class MarketingRunService:
         # Batch 2 (B2-METRICS-ATTRIBUTION): a third note, on each VIDEO post — the run's frozen video features,
         # so the measure step and the digest can tell a first-seconds video from an older one (never a gate).
         video_note = video_features_note(output, template=klass in NEWS_CLASSES, run_id=run_id)
+        written_by = written_by_note(output)
         out: List[Dict[str, Any]] = []
         for platform, fmt, copy, asset_ids in [*planned, *extra_planned]:
             # Only a media-less TEXT post of a class-A (judged) script is born approved: the server
@@ -2629,6 +2648,8 @@ class MarketingRunService:
                 metadata[POST_METADATA_IMAGE_FALLBACK] = fallback[0]
             if video_note is not None and fmt == "video":
                 metadata[POST_METADATA_VIDEO_FEATURES] = list(video_note)
+            if written_by is not None:
+                metadata[POST_METADATA_WRITTEN_BY] = dict(written_by)
             row = {
                 "run_id": run_id,
                 "platform": platform,
@@ -3686,8 +3707,10 @@ class MarketingRunService:
         return [str(r["source_ref"]) for r in rows][:limit]
 
     async def script_tokens_between(self, start_date: Any, end_date: Any) -> List[Dict[str, Any]]:
-        """`{run_date, tokens_used}` of the scripts dated `start_date`..`end_date` INCLUSIVE (ET days),
-        oldest first — the weekly cost line's Gemini read. Raw values: the caller validates them. One
+        """`{run_date, tokens_used, claude_usage}` of the scripts dated `start_date`..`end_date`
+        INCLUSIVE (ET days), oldest first — the weekly cost line's Gemini and Claude read (Claude's
+        tokens are inside `tokens_used`; `claude_usage` is NULL unless Claude billed — migration 206,
+        which must be applied before this read is deployed). Raw values: the caller validates them. One
         script per run (PK run_id) and one run per day (UNIQUE run_date) bound the read by the day
         count; more rows than days, or two rows on one day (a hand edit — possible in a sparse window
         too), cannot be told apart from a double count, so it RAISES instead of returning a sum that
@@ -3697,12 +3720,13 @@ class MarketingRunService:
             return []
         days = (end - start).days + 1
         res = await _exec(
-            self.sb.table(SCRIPTS).select("run_date,tokens_used")
+            self.sb.table(SCRIPTS).select("run_date,tokens_used,claude_usage")
             .gte("run_date", start.isoformat()).lte("run_date", end.isoformat())
             .order("run_date").limit(days + 1),
             op="script_tokens_between", start=start, end=end,
         )
-        rows = [{"run_date": r.get("run_date"), "tokens_used": r.get("tokens_used")}
+        rows = [{"run_date": r.get("run_date"), "tokens_used": r.get("tokens_used"),
+                 "claude_usage": r.get("claude_usage")}
                 for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]
         days_seen = [str(r["run_date"]) for r in rows]
         if len(rows) > days or len(set(days_seen)) != len(days_seen):

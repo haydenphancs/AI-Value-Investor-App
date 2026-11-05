@@ -4,9 +4,10 @@
 //
 //  Organism: dedicated reorder + delete surface for the tickers in the
 //  active portfolio. Reached from the "..." menu in PortfolioHeaderBar
-//  (Manage Tickers). Persists order via PortfolioStore.setTickers and
-//  removals via PortfolioStore.removeTicker — same backend hooks the
-//  EditPortfolioSheet's per-portfolio editor uses.
+//  (Manage Tickers). Every edit goes through `TrackingViewModel.moveTickers`
+//  / `removeTickers` — the same paths Edit Portfolio and the Holdings swipe
+//  use — so the Custom-sort switch, the remove-fully rule and the failure
+//  reporting cannot drift between the three.
 //
 
 import SwiftUI
@@ -14,8 +15,6 @@ import SwiftUI
 struct ManageTickersSheet: View {
     @ObservedObject var viewModel: TrackingViewModel
     @Environment(\.dismiss) private var dismiss
-
-    @State private var errorMessage: String?
 
     private var activePortfolio: Portfolio? {
         viewModel.portfolioStore.activePortfolio
@@ -27,13 +26,15 @@ struct ManageTickersSheet: View {
         activePortfolio?.tickers ?? []
     }
 
-    /// Symbol → company name lookup for the row subtitle. Falls back to
-    /// the symbol when the asset feed hasn't populated this ticker yet.
+    /// Symbol → company name lookup for the row subtitle. The live feed first; the saved
+    /// snapshot's rows while the feed has not answered (the sheet can open over a snapshot);
+    /// the bare symbol when neither knows the ticker.
     private var companyNames: [String: String] {
-        Dictionary(
-            viewModel.trackedAssets.map {
-                ($0.ticker.uppercased(), $0.companyName)
-            },
+        let rows = viewModel.trackedAssets.isEmpty
+            ? (viewModel.presentedSnapshot?.assets ?? [])
+            : viewModel.trackedAssets
+        return Dictionary(
+            rows.map { ($0.ticker.uppercased(), $0.companyName) },
             // first-wins: `.uppercased()` can collapse case-differing rows onto one key,
             // and `uniqueKeysWithValues:` traps on the duplicate.
             uniquingKeysWith: { first, _ in first }
@@ -46,19 +47,6 @@ struct ManageTickersSheet: View {
                 AppColors.background.ignoresSafeArea()
 
                 tickerList
-
-                if let errorMessage {
-                    VStack {
-                        Spacer()
-                        Text(errorMessage)
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textOnFill)
-                            .padding(AppSpacing.md)
-                            .background(AppColors.lossFill)
-                            .cornerRadius(AppCornerRadius.medium)
-                            .padding(.bottom, AppSpacing.xl)
-                    }
-                }
             }
             .navigationTitle(activePortfolio?.name ?? "Manage Tickers")
             .navigationBarTitleDisplayMode(.inline)
@@ -87,7 +75,7 @@ struct ManageTickersSheet: View {
                     .onMove(perform: handleMove)
                     .onDelete(perform: handleDelete)
                 } footer: {
-                    Text("Drag the handles on the right to reorder. Swipe or tap the minus to remove a ticker from this portfolio.")
+                    Text("Drag to set your Custom order — Holdings switches to Custom when you reorder. Removing a ticker no other portfolio holds also takes it off your watchlist.")
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textSecondary)
                 }
@@ -123,7 +111,7 @@ struct ManageTickersSheet: View {
             Text("No tickers in this portfolio")
                 .font(AppTypography.bodyEmphasis)
                 .foregroundColor(AppColors.textPrimary)
-            Text("Add tickers from the Tracking screen, then come back here to reorder them.")
+            Text("Add tickers with the search bar on Holdings, then come back here to reorder them.")
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textSecondary)
                 .multilineTextAlignment(.center)
@@ -134,37 +122,24 @@ struct ManageTickersSheet: View {
 
     // MARK: - Actions
 
+    /// Synchronous on purpose: the view model applies the new order before returning, so the
+    /// dragged row never snaps back. A failure is reported (and the order restored) by it.
     private func handleMove(from source: IndexSet, to destination: Int) {
         guard let portfolioId = activePortfolio?.id else { return }
         var reordered = liveTickers
         reordered.move(fromOffsets: source, toOffset: destination)
-        Task { @MainActor in
-            do {
-                try await viewModel.portfolioStore.setTickers(reordered, in: portfolioId)
-            } catch {
-                errorMessage = "Couldn't save the new order. Try again."
-                print("[ManageTickersSheet] ❌ Reorder failed: \(error)")
-            }
-        }
+        viewModel.moveTickers(in: portfolioId, to: reordered)
     }
 
     private func handleDelete(at offsets: IndexSet) {
         guard let portfolioId = activePortfolio?.id else { return }
         let tickers = liveTickers
         let toRemove = offsets.compactMap { tickers.indices.contains($0) ? tickers[$0] : nil }
-        Task { @MainActor in
-            for ticker in toRemove {
-                do {
-                    try await viewModel.portfolioStore.removeTicker(ticker, from: portfolioId)
-                } catch {
-                    errorMessage = "Couldn't remove \(ticker)."
-                    print("[ManageTickersSheet] ❌ Remove \(ticker) failed: \(error)")
-                }
-            }
-        }
+        viewModel.removeTickers(toRemove, from: portfolioId)
     }
 }
 
 #Preview {
     ManageTickersSheet(viewModel: TrackingViewModel())
+        .environment(\.appState, AppState())
 }

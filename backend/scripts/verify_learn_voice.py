@@ -15,6 +15,11 @@ has been written back to the JSON, and before a bad render can be moved into the
 
 Exit 0 = every clip is in-band. Exit 1 = at least one is not; the reason is named per clip.
 Needs ffmpeg/ffprobe and numpy (a script, not a test — the suite stays hermetic).
+
+The pace is SPOKEN words per minute (`learn_narrator.timings.spoken_word_count`: "$574.8 billion" is
+eight words), the basis the narrator's tempo pass and its own copy of this gate use since 2026-11-01.
+On whitespace tokens a figure-dense render sped up to "165 WPM" passed while narrating ~25% too fast
+(the W44 Deep Dive). The band is unchanged: the 23 catalog clips measure 155.8-161.7 spoken WPM.
 """
 from __future__ import annotations
 
@@ -27,6 +32,10 @@ from pathlib import Path
 import numpy as np
 
 BACKEND = Path(__file__).resolve().parents[1]
+if str(BACKEND) not in sys.path:
+    sys.path.insert(0, str(BACKEND))
+from learn_narrator import timings as tm  # noqa: E402 — pure stdlib: the narrator's spoken form
+
 SR = 16000
 
 # Measured 2026-08-22 over all 13 clone clips + a 362 s Investor Journey sample. The Gemini
@@ -38,7 +47,11 @@ F0_HZ = (130.0, 142.0)          # clone 132.2-137, Journey 133.3; Gemini 124-128
                                 # cut from a Gemini Achird narration, so the voices are related.
                                 # Encode and pace are what separate them cleanly.
 WPM = (144.0, 166.0)            # TARGET_WPM 165 -> ~158 after block pauses; one clip re-speeded to 150
-BYTES_PER_SEC = (11_500, 12_800)  # -b:a 96k; ffmpeg's default (Gemini path) lands ~9.7k
+BYTES_PER_SEC = (11_500, 14_000)  # -b:a 96k; ffmpeg's default (Gemini path) lands ~9.7k. The ceiling was
+                                  # 12,800 (local ffmpeg 7.0 encodes, ~12.1k); the narrator image's ffmpeg 5.1
+                                  # overshoots 96k (12,629 and 12,888 on Railway, 2026-10-24/30), so it is
+                                  # Kokoro's 14,000: the floor separates the voices, the ceiling only
+                                  # catches a stereo / 128k+ encode (16k+).
 LUFS = (-17.5, -14.5)
 
 
@@ -94,8 +107,9 @@ def _catalog() -> dict[str, dict]:
 
 
 def spoken_words(article: dict) -> int:
-    """Mirrors generate_money_moves_audio.narration_blocks — title, subtitle, section titles and
-    every spoken body block, markup stripped."""
+    """The words the voice SAYS across generate_money_moves_audio.narration_blocks' blocks — title,
+    subtitle, section titles and every spoken body block, markup stripped — in the narrator's spoken
+    form (`tm.spoken_word_count`), never whitespace tokens."""
     b = [article.get("title"), article.get("subtitle")]
     for s in article.get("sections", []):
         b.append(s.get("title"))
@@ -105,7 +119,7 @@ def spoken_words(article: dict) -> int:
                 b.append(blk["text"])
             elif k == "bulletList":
                 b += (blk.get("items") or [])
-    return sum(len(re.sub(r"\*\*", "", x).split()) for x in b if x)
+    return sum(tm.spoken_word_count(re.sub(r"\*\*", "", x)) for x in b if x)
 
 
 def main() -> int:
@@ -135,7 +149,7 @@ def main() -> int:
         if not F0_HZ[0] <= f0 <= F0_HZ[1]:
             why.append(f"pitch {f0:.1f}Hz outside {F0_HZ} — likely NOT the clone voice")
         if art and not WPM[0] <= w <= WPM[1]:
-            why.append(f"pace {w:.1f} WPM outside {WPM}")
+            why.append(f"pace {w:.1f} spoken WPM outside {WPM}")
         if not BYTES_PER_SEC[0] <= bps <= BYTES_PER_SEC[1]:
             why.append(f"encode {bps:.0f} B/s outside {BYTES_PER_SEC} — wrong bitrate flag?")
         if not LUFS[0] <= lu <= LUFS[1]:

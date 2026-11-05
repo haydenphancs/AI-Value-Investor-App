@@ -21,7 +21,7 @@ struct MoneyMoveArticleDetailView: View {
     @State private var contentHeight: CGFloat = 0
     @State private var viewportHeight: CGFloat = 0
     @State private var aiInputText: String = ""
-    /// Stable token keying this screen's compact-mode requests + audio overlay host registration.
+    /// Stable token keying this screen's audio overlay.
     @State private var compactToken = UUID().uuidString
     /// Owns the chat conversation for this article so it resumes while the screen is open.
     @StateObject private var chatViewModel = ChatViewModel()
@@ -177,11 +177,13 @@ struct MoneyMoveArticleDetailView: View {
                         )
                         .padding(.top, AppSpacing.lg)
 
-                        // Bottom padding (extra space for mini player). Completion is now an
-                        // explicit toggle at the end of the article (and on narration finish),
-                        // so reaching the end no longer auto-marks it read.
+                        // Bottom padding for the Ask Cay AI bar. One height whether or not audio
+                        // plays: the player is the square INSIDE the bar's row now, so it no longer
+                        // adds a mini player's height above the bar. (Was `hasActiveEpisode ? 120 : 40`.)
+                        // Completion is now an explicit toggle at the end of the article (and on
+                        // narration finish), so reaching the end no longer auto-marks it read.
                         Color.clear
-                            .frame(height: audioManager.hasActiveEpisode ? 120 : 40)
+                            .frame(height: 100)
                     }
                 }
                 // Drive the sticky header + reading-progress bar straight from the scroll
@@ -233,17 +235,11 @@ struct MoneyMoveArticleDetailView: View {
             // look almost right, which is the worst way for this to be wrong.
             .coordinateSpace(.named(MoneyMoveArticleSpace.screen))
 
-            // Bottom bar: Mini Player + AI Chat
+            // Bottom bar: AI Chat. The audio player is the square at the bar's left
+            // (`ChatBarAudioControl`), never a mini player stacked above the bar.
             VStack(spacing: 0) {
                 Spacer()
 
-                // Bottom mini player — hidden when collapsed to the top island (chat-bar focused).
-                if audioManager.hasActiveEpisode && !audioManager.showFullScreenPlayer && !audioManager.isCompactMode {
-                    GlobalMiniPlayer(bottomSpacing: AppSpacing.md / 2)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-
-                // Tapping the chat bar collapses the player to the top status island (Wiser-only).
                 CaydexAIChatBar(
                     inputText: $aiInputText,
                     onSend: {
@@ -256,26 +252,16 @@ struct MoneyMoveArticleDetailView: View {
                             contextType: .moneyMovesArticle,
                             referenceId: shown.slug
                         )
-                        // Release the focus-driven compact reason deterministically (the covered
-                        // TextField's focus-off event is unreliable). AIChatScreen's own forceCompact
-                        // keeps audio in the DI while the chat is open; on close this screen's mini
-                        // player returns instead of staying stuck hidden.
-                        audioManager.setCompactMode(false, reason: compactToken)
                         showAIChat = true
-                    },
-                    onFocusChange: { focused in
-                        audioManager.setCompactMode(focused, reason: compactToken)
                     }
                 )
             }
         }
-        // Top status island + full-screen player + overlay-host registration (this screen is a
-        // fullScreenCover above RootContainerView, whose own overlay would be hidden).
+        // The full-screen player (this screen is a fullScreenCover above RootContainerView, whose
+        // own layer it hides).
         .globalAudioOverlay(token: compactToken)
         .navigationBarHidden(true)
         .aiChatCover(isPresented: $showAIChat, viewModel: chatViewModel)
-        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
-        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.isCompactMode)
         .onAppear {
             // Finishing the narration also completes the article.
             audioCompletionCancellable = audioManager.playbackDidComplete

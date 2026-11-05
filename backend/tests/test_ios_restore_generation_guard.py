@@ -165,7 +165,10 @@ def _check_every_effect_after_a_network_await_is_guarded(src: str) -> None:
         for sink in re.finditer(re.escape(token), restore):
             preceding = [a for a in awaits if a < sink.start()]
             if not preceding:
-                continue  # the no-token branch: nothing has suspended yet
+                # The no-token branch: no NETWORK await precedes it. Its Keychain and App Group
+                # reads do suspend, and their generation guards are pinned by
+                # test_ios_launch_no_main_thread_keychain.py.
+                continue
             segment = restore[preceding[-1] : sink.start()]
             assert _GEN_GUARD.search(segment), (
                 f"`{token}` at offset {sink.start()} follows a network await with no generation "

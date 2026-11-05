@@ -293,12 +293,25 @@ struct PortfolioHeaderMenuOverlay: View {
                 }
             }
 
-            PortfolioMenuRow(
-                title: viewModel.sortAscending ? "Descending" : "Ascending",
-                systemImage: viewModel.sortAscending ? "arrow.down" : "arrow.up"
-            ) {
-                viewModel.toggleSort()
-                activeMenu = nil
+            // The direction as STATE: two checkable rows named for the option. A single row
+            // used to name the action ("Descending ↓" while the list was ascending), which read
+            // as the current direction. Custom is the user's own order, so it has none.
+            if let labels = viewModel.sortOption.directionLabels {
+                PortfolioMenuDivider()
+                PortfolioMenuRow(
+                    title: labels.ascending,
+                    isChecked: viewModel.sortAscending
+                ) {
+                    viewModel.setSortDirection(ascending: true)
+                    activeMenu = nil
+                }
+                PortfolioMenuRow(
+                    title: labels.descending,
+                    isChecked: !viewModel.sortAscending
+                ) {
+                    viewModel.setSortDirection(ascending: false)
+                    activeMenu = nil
+                }
             }
 
             PortfolioMenuDivider()
@@ -354,6 +367,10 @@ private struct PortfolioMenuRow: View {
         }
         .buttonStyle(.plain)
         .disabled(isDisabled)
+        // The checkmark is a glyph, so VoiceOver needs the state said: the Sort By and
+        // direction rows are a choice, not a list of actions. Arrows read as words.
+        .accessibilityAddTraits(isChecked ? [.isSelected] : [])
+        .accessibilityLabel(title.replacingOccurrences(of: " → ", with: " to "))
     }
 }
 

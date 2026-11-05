@@ -10,9 +10,28 @@ import SwiftUI
 
 // MARK: - Cached Formatters (avoid re-creating expensive formatters on every access)
 private enum TickerDetailFormatters {
-    static let shortDateFormatter: DateFormatter = {
+    /// "Oct 28": the NEW YORK date of a market close, for the closed badge
+    /// (`MarketStatus.closeLine`) beside the server's New York clock and EDT/EST. In the
+    /// phone's zone a 4:00 PM ET close read as the next day in Tokyo: a date and a clock that
+    /// never met. Gregorian, so the day is the market's own on a Buddhist- or Japanese-calendar
+    /// phone; the device locale, like its neighbours', keeps the month in the reader's language.
+    static let marketCloseDateFormatter: DateFormatter = {
         let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.timeZone = TimeZone(identifier: "America/New_York")
         f.dateFormat = "MMM d"
+        return f
+    }()
+
+    /// "4:00 PM": a market close's New York clock in the backend's own wording
+    /// (`market_status_fields` writes "%-I:%M %p"). POSIX, so neither the phone's language nor
+    /// its 24-Hour Time setting rewrites it ("16:00" beside the server's "4:00 PM" elsewhere).
+    static let marketCloseClockFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
+        f.timeZone = TimeZone(identifier: "America/New_York")
+        f.dateFormat = "h:mm a"
         return f
     }()
 
@@ -114,40 +133,14 @@ enum ChartTimeRange: String, CaseIterable {
         }
     }
 
-    /// Format a date string into the appropriate x-axis label
-    func formatDateForXAxis(_ dateString: String) -> String {
-        guard let date = ChartDateFormatters.parseDate(dateString) else { return "" }
-        let isIntraday = ChartDateFormatters.isIntraday(dateString)
-        switch self {
-        case .oneDay:
-            if isIntraday {
-                return ChartDateFormatters.timeOnly.string(from: date)       // "10:30 AM"
-            }
-            return ChartDateFormatters.dayMonth.string(from: date)           // "Mar 7"
-        case .oneWeek:
-            if isIntraday {
-                return ChartDateFormatters.weekdayTime.string(from: date)    // "Mon 10 AM"
-            }
-            return ChartDateFormatters.weekday.string(from: date)            // "Mon"
-        case .threeMonths, .sixMonths:
-            return ChartDateFormatters.dayMonth.string(from: date)           // "Jan 15"
-        case .oneYear, .twoYears:
-            // monthYear, not year: 2Y is DAILY bars spanning two calendar years, so a
-            // year-only label would repeat itself across the whole axis.
-            return ChartDateFormatters.monthYear.string(from: date)          // "Mar '25"
-        case .fiveYears:
-            return ChartDateFormatters.year.string(from: date)               // "2023"
-        case .all:
-            return ChartDateFormatters.year.string(from: date)               // "2020"
-        }
-    }
-
-    /// Format a date string for the crosshair tooltip
+    /// Format a date string for the crosshair tooltip. An intraday bar's clock is New York's and
+    /// the chip says so: a reader in Denver took "10:30 AM" for their own clock. A daily bar is
+    /// a trading day, with no clock to label.
     func formatDateForCrosshair(_ dateString: String) -> String {
         guard let date = ChartDateFormatters.parseDate(dateString) else { return dateString }
         let isIntraday = ChartDateFormatters.isIntraday(dateString)
         if isIntraday {
-            return ChartDateFormatters.fullDateTime.string(from: date)       // "Mar 7, 2025 10:30 AM"
+            return ChartDateFormatters.fullDateTime.string(from: date) + " ET"   // "Mar 7, 2025 10:30 AM ET"
         }
         switch self {
         case .oneDay:
@@ -163,11 +156,31 @@ enum ChartTimeRange: String, CaseIterable {
 }
 
 // MARK: - Chart Date Formatters (cached, thread-safe)
+
+/// Every chart date is MARKET time: parsed and formatted in New York's zone, on the Gregorian
+/// calendar (owner, 2026-10-29: market times in ET). An intraday bar is a New York wall clock,
+/// so its axis tick and its crosshair read the exchange's clock; in the phone's zone a Denver
+/// 1D axis ran 7:30 AM - 2:00 PM. A daily bar is a New York trading DAY, parsed at New York
+/// midnight and formatted in the same zone, so it keeps its date on every phone: parsed in one
+/// zone and formatted in another, a date-only bar prints the day before.
 enum ChartDateFormatters {
+    /// America/New_York, the zone the backend stamps intraday bars in.
+    static let marketTimeZone: TimeZone = TimeZone(identifier: "America/New_York") ?? .current
+
+    /// The calendar the label RULES judge in ("this year", "this week"): the formatters' own
+    /// zone, so the rule that picks a format and the date it prints agree.
+    static let marketCalendar: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = marketTimeZone
+        return calendar
+    }()
+
     static let inputFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd"
         f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
+        f.timeZone = marketTimeZone
         return f
     }()
 
@@ -175,51 +188,26 @@ enum ChartDateFormatters {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd HH:mm:ss"
         f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "America/New_York")
+        f.timeZone = marketTimeZone
         return f
     }()
 
-    static let weekday: DateFormatter = {
+    /// A DISPLAY formatter in market time: the device's locale, so month and weekday names stay
+    /// in the reader's language, on the Gregorian calendar in New York's zone.
+    private static func marketFormatter(_ pattern: String) -> DateFormatter {
         let f = DateFormatter()
-        f.dateFormat = "EEE"   // "Mon"
+        f.calendar = Calendar(identifier: .gregorian)
+        f.timeZone = marketTimeZone
+        f.dateFormat = pattern
         return f
-    }()
+    }
 
-    static let weekdayFull: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "EEEE, MMM d"   // "Monday, Mar 7"
-        return f
-    }()
-
-    static let dayMonth: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "MMM d"   // "Jan 15"
-        return f
-    }()
-
-    static let monthYear: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "MMM ''yy"   // "Mar '25"
-        return f
-    }()
-
-    static let year: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy"   // "2025"
-        return f
-    }()
-
-    static let fullDate: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "MMM d, yyyy"   // "Mar 7, 2025"
-        return f
-    }()
-
-    static let timeOnly: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "h:mm a"   // "10:30 AM"
-        return f
-    }()
+    static let weekdayFull: DateFormatter = marketFormatter("EEEE, MMM d")   // "Monday, Mar 7"
+    static let dayMonth: DateFormatter = marketFormatter("MMM d")            // "Jan 15"
+    static let monthYear: DateFormatter = marketFormatter("MMM ''yy")        // "Mar '25"
+    static let year: DateFormatter = marketFormatter("yyyy")                 // "2025"
+    static let fullDate: DateFormatter = marketFormatter("MMM d, yyyy")      // "Mar 7, 2025"
+    static let timeOnly: DateFormatter = marketFormatter("h:mm a")           // "10:30 AM"
 
     /// "Mon 10 AM" on a 12-hour phone, "Mon 13:00" on a 24-hour one — never a fixed format.
     ///
@@ -227,19 +215,17 @@ enum ChartDateFormatters {
     /// ON, iOS rewrites a fixed `h … a` pattern to `HH` and drops the AM/PM, so the 1W axis
     /// printed "Mon 07 · Tue 13 · Thu 12" — read as DATES, out of order (TestFlight 1.0 (9),
     /// AVGO screenshot). A localized template follows the user's 12/24-hour choice, and the
-    /// 24-hour form keeps its minutes so "13:00" can only be a time.
+    /// 24-hour form keeps its minutes so "13:00" can only be a time. Market time like the rest.
     static let weekdayTime: DateFormatter = {
         let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.timeZone = marketTimeZone
         let hourPattern = DateFormatter.dateFormat(fromTemplate: "j", options: 0, locale: f.locale) ?? "h a"
         f.setLocalizedDateFormatFromTemplate(hourPattern.contains("a") ? "EEEj" : "EEEjmm")
         return f
     }()
 
-    static let fullDateTime: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "MMM d, yyyy h:mm a"   // "Mar 7, 2025 10:30 AM"
-        return f
-    }()
+    static let fullDateTime: DateFormatter = marketFormatter("MMM d, yyyy h:mm a")   // "Mar 7, 2025 10:30 AM"
 
     /// Parse both "yyyy-MM-dd" and "yyyy-MM-dd HH:mm:ss" date strings.
     ///
@@ -261,6 +247,8 @@ enum ChartDateFormatters {
 // MARK: - Market Status
 enum MarketStatus {
     case open
+    /// `date` is the close INSTANT; `time` and `timezone` are its New York clock and label, as the
+    /// backend's `market_status_fields` sends them ("4:00 PM", "EDT").
     case closed(date: Date, time: String, timezone: String)
     case preMarket
     case afterHours
@@ -270,12 +258,48 @@ enum MarketStatus {
         case .open:
             return "Market Open"
         case .closed(let date, let time, let timezone):
-            return "Market Closed  \(TickerDetailFormatters.shortDateFormatter.string(from: date)), \(time) \(timezone)"
+            return "Market Closed  \(Self.closeLine(date: date, time: time, timezone: timezone))"
         case .preMarket:
             return "Pre-Market"
         case .afterHours:
             return "After Hours"
         }
+    }
+
+    /// "Oct 28, 4:00 PM EDT": the close's New York DATE beside its New York clock and label. The
+    /// one line both readers print (`displayText`, `MarketStatusBadge`), so neither can put the
+    /// phone's date next to the market's clock.
+    static func closeLine(date: Date, time: String, timezone: String) -> String {
+        "\(closeDay(date)), \(time) \(timezone)"
+    }
+
+    /// "Oct 28": a close's New York date on its own, for a closed line printed from outside this
+    /// file (`CommodityMarketStatus.displayText`).
+    static func closeDay(_ date: Date) -> String {
+        TickerDetailFormatters.marketCloseDateFormatter.string(from: date)
+    }
+
+    /// "4:00 PM", or "1:00 PM" on a half-day: a close's own New York clock, worded as the backend
+    /// words it. The clock of every closed line built on the phone, and of a server close that
+    /// arrived without one (never a fixed "4:00 PM" beside a 1:00 PM close).
+    static func closeClock(_ date: Date) -> String {
+        TickerDetailFormatters.marketCloseClockFormatter.string(from: date)
+    }
+
+    /// The closed line for the last real close before `instant`: that close, its New York clock
+    /// ("4:00 PM", or "1:00 PM" on a half-day) and the true label of THAT instant. The one
+    /// fallback for every screen whose server named no readable close (`determineMarketStatus`,
+    /// the stock, ETF and index mappings), so none stamps "now" or puts a half-day at 4:00 PM.
+    static func lastRegularClosed(before instant: Date) -> MarketStatus {
+        let close: Date = MarketHoursUtil.lastRegularClose(before: instant)
+        let newYork: TimeZone = TimeZone(identifier: "America/New_York")!
+        return .closed(
+            date: close,
+            time: closeClock(close),
+            // The label of THAT instant. Never `abbreviation(for:)`: it can follow the device's
+            // locale ("GMT-4"), not the market's own EDT/EST.
+            timezone: newYork.isDaylightSavingTime(for: close) ? "EDT" : "EST"
+        )
     }
 }
 
@@ -728,7 +752,9 @@ extension TickerDetailData {
         priceChange: 2.34,
         priceChangePercent: 1.33,
         marketStatus: .closed(
-            date: Calendar.current.date(from: DateComponents(year: 2024, month: 12, day: 18))!,
+            // A real close: Wednesday Dec 18, 2024 at 4:00 PM in New York (EST), the badge's zone.
+            date: Calendar(identifier: .gregorian).date(from: DateComponents(
+                timeZone: TimeZone(identifier: "America/New_York"), year: 2024, month: 12, day: 18, hour: 16))!,
             time: "4:00 PM",
             timezone: "EST"
         ),

@@ -129,6 +129,7 @@ from app.schemas.marketing import (
     IMAGE_ROLE_POST,
     POST_FORMATS,
     POST_METADATA_FIRST_COMMENT,
+    POST_METADATA_WRITTEN_BY,
     POST_METADATA_IMAGE_FALLBACK,
     is_extra_format,
 )
@@ -869,6 +870,23 @@ def dry_run_lines(run: Any, members: List[Dict[str, Any]]) -> List[str]:
     return lines
 
 
+def written_by_line(members: List[Dict[str, Any]]) -> str:
+    """"Models: writer claude:claude-sonnet-5-5 · judge claude:claude-opus-5-5" from the members'
+    `metadata.written_by` (stamped by `create_posts` only when a role went through Claude, llm_provider),
+    or "" — so a default Gemini day's message is unchanged. The first member that carries it decides
+    (every post of a run carries the same note); each value is capped and folded onto one line."""
+    for post in members:
+        meta = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+        note = meta.get(POST_METADATA_WRITTEN_BY)
+        if not isinstance(note, dict):
+            continue
+        parts = [f"{role} {' '.join(str(note[role]).split())[:80]}" for role in ("writer", "judge")
+                 if isinstance(note.get(role), str) and note[role].strip()]
+        if parts:
+            return "Models: " + " · ".join(parts)
+    return ""
+
+
 def compose_bundle_decision_text(kind: str, members: List[Dict[str, Any]], previews: List[Dict[str, Any]],
                                  run_date: str, dry: bool, warnings: List[str], *, series_note: str = "",
                                  dry_notes: Optional[List[str]] = None,
@@ -889,6 +907,9 @@ def compose_bundle_decision_text(kind: str, members: List[Dict[str, Any]], previ
     lines += dry_notes or []
     if series_note:
         lines.append(f"Series: {series_note}")
+    written = written_by_line(members)
+    if written:
+        lines.append(written)
     lines.append("Approve all sends: " + ", ".join(_platform_label(p) for p in members))
     if previews:
         lines.append("Not sent: " + ", ".join(f"{_platform_name(p)} (preview — not wired yet)" for p in previews))

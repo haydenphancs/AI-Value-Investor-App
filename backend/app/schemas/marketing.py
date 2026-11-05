@@ -238,6 +238,11 @@ POST_METADATA_FIRST_COMMENT = "first_comment"
 #: A note: it gates nothing, and it says what the run ASKED the worker for — the video asset's own metadata
 #: says what it drew (a card that could not fit falls back to today's).
 POST_METADATA_VIDEO_FEATURES = "video_features"
+#: 2026-10-30 (Claude as a second provider, `app/services/llm_provider.py`): which models wrote and judged the
+#: accepted script — `{"writer": "claude:claude-sonnet-5-5", "judge": "gemini (Claude fallback: …)"}` — copied
+#: by `create_posts` from the accepted output's `served_by` / `judge.served_by`, ONLY when a role was routed to
+#: Claude (a default Gemini day writes byte-identical rows). A note for the review message: it gates nothing.
+POST_METADATA_WRITTEN_BY = "written_by"
 
 #: Batch 3 (2026-10-20; owner decision 2, 2026-10-15): the EXTRA formats — a platform's SECOND post of a run,
 #: beside its PRIMARY one (POST_FORMATS_BY_PLATFORM above, unchanged). Facebook and LinkedIn may post the day's

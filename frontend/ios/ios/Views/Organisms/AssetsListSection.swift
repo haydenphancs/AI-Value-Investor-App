@@ -20,8 +20,12 @@ struct AssetsListSection: View {
     let assets: [TrackedAsset]
     var onAssetTapped: ((TrackedAsset) -> Void)?
     var onRemoveAsset: ((TrackedAsset) -> Void)?
+    /// What the swipe's remove does, for VoiceOver. The swipe takes the ticker out of this
+    /// portfolio and, when no other portfolio holds it, off the watchlist too — so the caller,
+    /// which knows the groups, words it.
+    var removeLabel: ((TrackedAsset) -> String)?
     /// Long-press path that fully removes the ticker from the master watchlist
-    /// and every portfolio (vs the swipe path which is portfolio-only).
+    /// and every portfolio.
     var onRemoveFromAll: ((TrackedAsset) -> Void)?
     /// Percent vs dollars for every row's change. One value for the whole list — tapping any
     /// row's price block switches all of them, which is what makes the column comparable.
@@ -65,7 +69,7 @@ struct AssetsListSection: View {
                             } label: {
                                 Image(systemName: "trash.fill")
                             }
-                            .accessibilityLabel("Remove \(asset.ticker) from this portfolio")
+                            .accessibilityLabel(removeLabel?(asset) ?? "Remove \(asset.ticker) from this portfolio")
                         }
                     }
                     .contextMenu {

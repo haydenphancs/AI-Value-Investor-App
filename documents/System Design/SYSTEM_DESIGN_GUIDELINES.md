@@ -169,7 +169,10 @@ is shown for at most 96 h, and is replaced by the live answer as soon as that la
 └─────────────────┘        └─────────────────┘        └─────────────────┘
 ```
 
-**Integrations** (`backend/app/integrations/`, **18** modules): `fmp`, `gemini`, `coingecko`, `fred`,
+**Integrations** (`backend/app/integrations/`, **19** modules): `fmp`, `gemini`, `anthropic_client` (Claude, the
+SECOND provider for the marketing and Learn weekly writer/judge roles only, behind per-role switches that
+default to Gemini; called only by `app/services/llm_provider.py`, which falls back to the same Gemini call on
+any Claude failure, 2026-10-30), `coingecko`, `fred`,
 `finra_short_interest`, `apewisdom`, `alternative_me`, `census`, `openfda`, `uspto`, `app_store`,
 `openai_compat`, `telegram` (the marketing review bot, §12.9), `x_api`, `bluesky` and `upload_post`
 (the marketing publisher's platforms, §12.10), and `brave_search` (the Brave Search API behind report
@@ -553,10 +556,17 @@ The `CaydexWidgets` extension answers two different questions, and each has its 
   only the weaker sentence below.
 
   An agreeing card that fails the rest of that gate gives "Today's news leaned bearish." instead
-  of "No clear catalyst". The industry arithmetic rides beside an established cause as
+  of "No clear catalyst". Since 2026-10-30 the card is tried FIRST, ahead of earnings, analyst
+  actions, classified news and the group move (INTC −30.6%: an EPS beat had hidden the Bearish
+  card that explained the fall). The industry arithmetic rides beside an established cause as
   `cause.note`. Installed builds render the headline; only the new build shows the note. Only the APP can fetch
   `GET /widget/portfolio-mover` (`.signInRequired`; the widget token cannot reach it). It
-  writes the result into the App Group, where it is stamped with the owning user id.
+  writes the result into the App Group, where it is stamped with the owning user id. A new
+  card run reaches the tile while the app is open: the Updates screen hands every AI card it
+  fetches to `WidgetRefreshService.insightCardArrived`, which refreshes (a content change, past
+  the 60 s throttle) when the card is the head mover's or the market's and newer than the
+  stored tile's `as_of`; and storing a card drops the backend payloads cached from the old one
+  (`WidgetMoversService.forget_payloads_for`).
   Ranking is by |%| here; market mode keeps the volatility-z ranking for its legacy movers,
   which installed builds still render.
 
@@ -1224,6 +1234,26 @@ today in their own two-day memo (`earnings_live_service`). The same pass moved t
 each holdings sparkline over two trading days (`chart_helper.fetch_sparkline_bars`), not the
 detail chart's ten calendar days.
 
+**Tier 1 only: the Assets tab's extended-hours print (2026-10-30).** A holdings row's price is the
+screener's regular-session price (at 07:00 ET on a Monday it still reports Friday's close) and FMP's
+`aftermarket-quote` is outside the licence, so the pre-market / after-hours move comes from the
+licensed `extended=true` 5-minute bars: `app/services/tracking_service.py::_get_extended_prints`, the
+feed gather's last member, reads the newest bar after the last regular one
+(`app/services/chart_helper.py::fetch_extended_bars`, from `market_hours.last_regular_session`
+through today, both on New York's calendar; `app/services/chart_helper.py::latest_extended_print`,
+half-day aware) and the merge measures it from the row's own price. It is held per ticker in
+`_extended_cache` under a tag of the last regular session and the phase, so 04:00, 16:00 and 20:00
+ET each force a fresh read: 60 s (`EXTENDED_PRINT_TTL`) in pre-market and after hours, 15 min
+(`EXTENDED_PRINT_CLOSED_TTL`) when closed, when the last after-hours print stays on the row until
+pre-market. An empty answer is kept (nothing traded after the bell); a failure is not. FMP cost:
+none from 09:30 to 16:00 ET, none for a coin, an index or a licence-blocked symbol; otherwise at most
+one call per ticker per minute while a feed is being built (at most 192 rows after the close, the
+prior session plus today's pre-market before the bell), one per 15 min overnight and at weekends. It
+takes the capped fan-out (`TRACKING_FEED_MAX_TICKERS`) like the sparklines. On iOS the move is a
+chip beside the day change (`AssetRow.extendedMoveChip`), shown whole or not at all, so the card is
+no taller, and hidden by New York's bell (`MarketHoursUtil.liveSessionStatus`) whatever a saved
+snapshot holds.
+
 **Tier 1 with no Tier 2: page 0 of the shared Market news feed (2026-10-08).** Page 0 of
 `__MARKET__` is identical for every user and was re-read from `ticker_news_cache` on every
 Updates open. `news_cache_service.py` now remembers it per `limit` (1–50, so bounded) for 60 s,
@@ -1249,6 +1279,23 @@ unverifiable joined read falls back to the serial items read (logged at WARNING;
 `!inner` filter was not applied), and a group the joined read returned no items for is topped up
 with a serial read for exactly those groups. A failed groups read still raises rather than answer
 `[]`, which would seed a duplicate default group.
+
+**Group membership writes are serialized per portfolio on the client (2026-10-31).**
+`PUT /portfolios/{id}/tickers` replaces the whole list (delete-all + upsert, no transaction), and
+iOS used to send one per gesture concurrently: a late answer rolled back a newer order on screen,
+a failure reverted newer edits, and two interleaved swaps could resurrect a removed ticker.
+`PortfolioStore` now queues each portfolio's writes (membership and `PUT /holdings` alike) one at
+a time (`MembershipWriteSequencer`): each write sends the list its own edit produced, every answer
+becomes the confirmed membership, only the newest answer replaces what is on screen, and a failure
+reverts to the confirmed list only when no newer write is queued. A `GET /portfolios` that was in
+flight across a write keeps the local items for that group instead of publishing the older list.
+Two devices editing one group at the same instant can still interleave on the server; an atomic
+replace would need an RPC. A ticker removed from its last group also leaves the watchlist through
+`DELETE /watchlist` with `only_if_unreferenced`, which re-checks every group server-side and
+answers `removed: false` instead of deleting (the delete strips the ticker from every group). The
+Holdings "Sort By" Custom option is the group's stored order; "Date Added" reads
+`watchlist_items.added_at`, which no write rewrites (`portfolio_items.added_at` is reset by every
+`PUT /tickers`).
 
 **iOS: the on-disk account snapshots. Home's came first (2026-10-01).**
 `Core/Repositories/HomeDashboardSnapshotStore.swift` keeps the last good `GET /home/dashboard`
@@ -5497,7 +5544,8 @@ entities decoded, disguised dots folded) and rejects:
   return context, and digit-free market caps and price records;
 - **promises and contradictions of the code-owned disclaimer** — "always recovers", "can't
   lose", "guaranteed", calling the text advice, denying AI involvement, dismissing the fine
-  print. Every exemption is POSITIONAL: a negation, a warning or belief frame, a myth label or
+  print, labelling the text educational or informational ("Educational content only."), saying it
+  is not an offer, or "consult a financial professional" (2026-10-31). Every exemption is POSITIONAL: a negation, a warning or belief frame, a myth label or
   a debunk frames only the claim's own clause or the sentence right after it ("Don't panic, the
   market always recovers" and "Ignore the hype, compounding guarantees your money grows" are
   promises); a yes/no question is exempt only when nothing but a debunk answers it, read across
@@ -5506,10 +5554,15 @@ entities decoded, disguised dots folded) and rejects:
 - banned phrases and misattributions, vendor/identity terms, brand, CTA, endorsement and
   social-proof text, first person (quoted testimonials included; only a reader's quoted
   self-question is exempt), links (any label + TLD, disguised dots), handles, markup,
-  hashtags and cashtags.
+  hashtags and cashtags;
+- **the writer's own materials** (`source_reference`, 2026-10-31, after a live preview with a
+  second writer model narrated "The fact sheet shows…") — "the fact sheet", "the source says",
+  "per the source", "the facts provided"; positional, so "the main source of revenue" and "an
+  ETF's fact sheet" pass. Learn weekly enforces it too.
 
 `app/services/marketing/grounding.py` requires every number to match a fact-sheet number by
-value and unit, bound by its LOCAL context: the words either side of the draft number must meet
+value and unit (two structural exemptions: a unit-less count 0-5, and the one-digit ordinal of a
+list label opening a carousel slide title, up to that slide's position — "Check 6:"), bound by its LOCAL context: the words either side of the draft number must meet
 the source's, subjects excluded, and an amount, percentage or multiple stated as a price, worth
 or return claim must be one the sheet states as such (a Money Moves sheet states none); a loss
 cannot come back as a profit. A YEAR binds more loosely — on any shared word including names,
@@ -5763,7 +5816,8 @@ the build if any `nvidia-*` package slips in, pins kokoro, misaki and a hash-che
 and bakes the Kokoro weights and the voice at build time with `HF_HUB_OFFLINE=1` at run time, so a
 missing file fails loudly instead of downloading on a cron tick. The preflight reports what the
 voice stage needs (packages, weights, font, the memory limit, the baked model revision) into the
-run's metadata. Give the Railway worker 4 GB. The non-commercial aligner the Learn read-along
+run's metadata. Give the Railway worker 8 GB (4 GB until 2026-10-30, when an earnings day's
+cgroup peak reached 3,345 MB of 3,814 MiB). The non-commercial aligner the Learn read-along
 uses has no place here: Kokoro's own timestamps make an aligner unnecessary, and a test fails
 if the worker tree references it or the `scripts` tree. Every transitive package is pinned in
 `marketing/constraints.txt` (applied with `-c`) to the versions the 2026-09-26 spike measured —
@@ -6123,9 +6177,20 @@ its pure helpers and the shared day-job runner) and `app/services/marketing/dige
   limit + 1 probe must fit inside PostgREST's ~1,000-row answer cap, so a larger limit is refused),
   with undated entries
   named and never counted into any week (`run_service.charges_between`; the X cap's own reader still
-  counts them — fail-closed). Gemini ≈ `marketing_scripts.tokens_used` × one blended $1.50 per 1M
-  (writer + judge; the judge model's price doubles on 2027-01-01 — revisit). Worker ≈ each run's
-  billed stage seconds × (its highest memory peak, clamped to 4 GB, at $10/GB-month + 4 vCPUs at
+  counts them — fail-closed). Gemini ≈ `marketing_scripts.tokens_used` less its Claude tokens × one
+  blended $1.50 per 1M (writer + judge; the judge model's price doubles on 2027-01-01 — revisit).
+  Claude ≈ (2026-10-31, migration 206) `marketing_scripts.claude_usage` — the Claude tokens inside
+  `tokens_used` by served model and kind (input / output / cache read / cache write), written by
+  `script_service` only when a generation billed Claude (the router's `claude_usage` breakdown, a failed
+  attempt's included) — at each model's Anthropic list prices (`CLAUDE_MICROS_PER_MILLION_TOKENS`, cache
+  writes at 1.25× input), summed per week and rounded once. It is a part of the line ("· Claude ≈ $c"
+  after Gemini) only in a week with Claude tokens, and joins the usage label ("X + Gemini + Claude +
+  worker") when either week had any, so a Gemini-only fortnight renders exactly as before. A model or
+  kind with no price, or an unreadable value, reads "Claude unreadable" (an unreadable value, or one
+  claiming more tokens than `tokens_used`, makes Gemini unreadable too: the split is unknown). Money Moves
+  weekly pieces (`learn_weekly_pieces.tokens_used`) are in no digest. Worker ≈ each run's
+  billed stage seconds × (its highest memory peak, clamped to the limit its preflight recorded — 4 GB
+  when none was —, at $10/GB-month + 4 vCPUs at
   $20/vCPU-month) — upper-side, Railway meters actual use; the hourly no-op ticks and the web service
   are not counted. Upload-Post = `MARKETING_UPLOAD_POST_MONTHLY_USD` × 7/30.4375 (0 = Free plan), with
   the week's uploads — every post Upload-Post took: a recorded submit, job, poll or platform post id, a
@@ -6160,7 +6225,9 @@ its pure helpers and the shared day-job runner) and `app/services/marketing/dige
   stale it was abandoned, with no retry left at the cap (the day will close failed) and an hourly
   retry below it. An unreadable attempt count promises neither, and a verdict that is not final
   promises a final word the next day. A finished run says nothing, except one line when a stage's
-  cgroup memory peak passed 3,200 MB (2,587 MB of the 3,814 MiB limit on 2026-10-01).
+  cgroup memory peak passed 85% of the container limit the run's preflight recorded
+  (`metadata.preflight.voice.memory_limit`; 3,200 MB when none was readable). 8 GB since 2026-10-30
+  (7,629 MiB → above 6,484 MB); the 4 GB service peaked at 3,345 MB on 2026-10-28.
 - **The final word** (`marketing_run_health_final`, the pure `evaluate_run_final`) re-reads
   yesterday's run at the first tick at or after the run hour on the day after a posting day (16:00
   ET by default): the worker resumes a day's failed or abandoned run only on ticks before its run
@@ -6180,7 +6247,7 @@ its pure helpers and the shared day-job runner) and `app/services/marketing/dige
   that day — every send failed, the bot was not set up that night, the job was disabled, or run
   hour 23 has none — the owner heard nothing, so the word reports every outcome but a good day,
   once: no run, failed, skipped (any reason but `rest_day`), unfinished or an unexpected status,
-  and for a good day only a stage memory peak above 3,200 MB. An unreadable row fails closed: it
+  and for a good day only a stage memory peak above that alert line. An unreadable row fails closed: it
   is read before the run, the attempt fails with its stack logged, the day stays open and a later
   tick retries — never a word on a guess. A tick that runs both jobs runs the final word first, so
   it reads the record before today's check can claim it. It has its own job key because
@@ -6561,12 +6628,49 @@ the plan is `~/.claude/plans/improve-or-add-wiser-snoopy-sun.md`. Everything is 
   Supabase secret), claims jobs through `/api/v1/internal/learn/*` and uploads through signed URLs
   to the PRIVATE `money-moves-media` bucket. The engine is frozen per job: the catalog's
   Chatterbox voice when the CPU benchmark passes, else Kokoro. Read-along: WAV2VEC2 (MIT) per block
-  or Kokoro's native timestamps — never MMS_FA (CC-BY-NC). The server re-checks size, type, byte
-  rate and the timing table (one span per block, seconds-per-word band) before merging.
+  or Kokoro's native timestamps — never MMS_FA (CC-BY-NC). Chatterbox's tempo pass normalises the raw
+  speech to 165 SPOKEN words per minute (figures counted the way the voice says them) and is capped at
+  0.80–1.10, and the file's pace band counts spoken words too (pipeline v2, 2026-11-01: counting written
+  tokens sped the figure-dense W44 Deep Dive up 1.188×). The server re-checks size, type, byte
+  rate, the spoken-word pace (the worker's band judged again, so a stale worker cannot get a too-fast
+  file to review) and the timing table (one span per block, seconds-per-word band) before merging. A failed
+  render is retried (≤ 2 reports per job, ≤ 3 failed rounds per piece) — except a failure judged on
+  the finished file (`contracts.DETERMINISTIC_FAIL_CODES`): renders are seeded and encoded bitexact,
+  so it ends the job at its first report and opens no round that would render the same file
+  (2026-10-30: the same out-of-band file was rendered three times, ~1.5 h of 4 vCPU each).
+- **Catalog jobs (migration 207, owner 2026-11-01).** A narration job belongs to EITHER a weekly piece
+  (`piece_id`) OR a hand-written catalog article (`catalog_slug`), never both (CHECK). Catalog jobs reuse
+  the same worker, voice and timing checks but skip every piece step: the audio lands at
+  `audio/catalog/<slug>-<sha12>.m4a`, the owner gets a Telegram READY / FAILED line (sent once — the
+  ledger reports whether a fail report actually wrote, and a job closed at the lease re-claim cap alerts
+  from the claim path), and two local scripts enqueue (`backend/scripts/learn_catalog_narrate.py`,
+  refusing the Deep Dive window) and fetch (`backend/scripts/learn_catalog_fetch.py`: byte-exact clip + merged read-along into the article
+  JSON). The worker is unchanged and a source-scan test keeps it job-kind blind. A PUBLISHED weekly
+  piece is re-narrated through the same path keyed by its slug (its own job would be cancelled at claim):
+  `backend/scripts/learn_weekly_renarrate.py` enqueues the live text, then swaps the READY render onto the
+  live row in one fenced update (audio URL, duration, read-along only) and mirrors it onto the piece; the
+  READY / FAILED line recognises the weekly slug. The swap refuses a render shorter than the live clip
+  without an explicit flag: the text is the same, so shorter is faster speech.
+- **Cover art (owner 2026-11-01).** Behind `LEARN_ART_ENABLED`, the build draws one image per piece
+  between the accepted draft and its write (`learn_weekly/cover_art.py`, bounded by
+  `LEARN_ART_TIMEOUT_SECONDS`, never failing the piece), in the catalog art system shared byte-for-byte
+  with `scripts/generate_money_moves_art.py` (`app/services/money_moves_art_style.py`). Plates go to the
+  public `money-moves-images` bucket; the publisher copies `imageUrl` into the row's `image_url`. The
+  image model's name lives only in `validation.cover_art` (identity rule). `GeminiClient.generate_image`
+  retries on its own, outside the chat/report quota breaker.
 - **Review and publish.** Nothing goes live without the owner's Telegram tap (owner, 2026-10-22).
   The bot shares marketing's flood gate and pacer (`app/services/marketing/telegram_pacing.py`) and the reserved callback
   letter `y` (`z` is the Trillion Club stake finder's, §3 item 5). Approve → publish at Friday 23:00 ET (dry-run pieces end `rehearsed`); the hold is 48 h,
   then `expired` with an alert; a Friday 15:00 ET deadman alerts when nothing is in review.
+  `dry_run` is frozen when the Thursday topic step creates the row, so `LEARN_WEEKLY_DRY_RUN=false`
+  must land before Thursday 18:00 ET to make that Friday live. `rehearsed` is terminal for every
+  writer but one: `ledger.promote_rehearsed_sync` (owner decision 2026-11-01, publish the W44
+  rehearsal), driven only by `scripts/learn_weekly_promote.py`, which also re-cuts the narration
+  (`ledger.repoint_ready_audio_sync`, job before piece) so text and audio still match.
+- **No "AI-assisted" label** (owner, 2026-11-01): the byline is the catalog's ("Caydex Research ·
+  Editorial", enforced exactly) and the narrated closing says only "educational only and not
+  investment advice"; the general AI line lives in the Terms and Support pages (web and in-app)
+  and the App Store text.
 - **The hero is decided by the content service**, not by swap writes: among flagged rows the lowest
   `sort_order` wins and every other row is served unflagged. A Deep Dive's sort order is
   `-(iso_year*100+iso_week)` and it keeps `is_featured`, so the newest wins and unpublishing falls
@@ -6605,7 +6709,7 @@ backend/
 │   │       ├── api.py            # router registration
 │   │       └── endpoints/        # 24 modules; HTTP surface only (marketing_internal.py is worker-facing, §12)
 │   ├── core/security.py          # (config and dependencies are NOT here — see below)
-│   ├── integrations/             # 18 thin HTTP clients + fmp_entitlements (data only)
+│   ├── integrations/             # 19 thin HTTP clients + fmp_entitlements (data only)
 │   ├── models/                   # EMPTY. Vestigial. There is no ORM — CLAUDE.md invariant #5
 │   ├── schemas/                  # Pydantic v2 request/response models
 │   ├── services/
@@ -6723,6 +6827,9 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | 2026-10-24 | Chips, chip equipment, advertising and internet content show the WORLDWIDE market instead of US industry revenue (§7.3 global rows): a published government estimate licensed for commercial re-use (European Commission COM(2026) 504, EU JRC141323 CC BY 4.0, US ITC Pub. 5643), geometric between its stated points, the last rate extended ≤ 3 years with no mark on the card ("Replace with global", "Global rate", "$1T in 2026", "option 2, but no need to mark or note", "Chips + chip equipment", "Ads + internet") | Owner, on the NVIDIA card's "US industry revenue $119B → $140B": "for seminconductor, it should be … projected to reach over $1.01 trillion to $1.03 trillion by 2031", then "find me a way to show TAM free with similar value" for "mostly technology". Those $1.0T-by-2031 figures were paid market-research releases on 2021–22 data; the industry's own statistics put 2026 alone at ~$1.5–1.7T and are copyrighted | Quote WSTS / SIA / Gartner / Statista directly (copyright, permission needed); the $1.01–1.03T market-research figure (outdated, paid); show only to the source's last year (2030 / 2029); keep the US row and add a global line beside it; global for software / telecom / hardware (no reusable source: MIC excludes its third-party charts, GSMA internal use, ITU non-commercial) |
 | 2026-10-28 | Moat radar audit (`moat_scoring_service.SCORER_VERSION` = `moat_v1.2026-10-28`): revenue growth is a Network Effects reading only off a prior year of at least $10M (in dollars, through a rounded per-currency rate for non-USD filers; a currency without one is no reading) and inside the producer's ±500% clamp, paired exactly as the sector median, at 5pp per score point (+25pp = 10); Network Effects is measured only with a COMPANY input (growth or user count), never on the industry HHI + lifecycle alone; P/S counts toward Brand Power only with a positive gross margin; Intangible Assets is measured only when both sector-relative inputs resolve (patents / FDA then join the average); an exact-zero SG&A and a non-finite input are no reading. A pillar no tier scored is DROPPED (never the old fabricated 0.0 / peer 5.0); every pillar carries `peer_source` (industry / ai_estimate / baseline); the moat vital, persona scoring and the Insight's edges/gaps use measured pillars against industry peers only (never a pillar scored with a focal-only input — patents, FDA, transcript figures — the peer averages never fetch), and Cay AI's report grounding quotes "vs peers" only for an industry peer; a scorer exception is logged with its stack, never recorded as degraded (it repeats on every rebuild); the moat block is stamped with the scorer vintage and the paid reuse door never re-sells another one; a transient annual-statement fetch failure keeps the collection out of every shared cache | JOBY read Network Effects 6.3 ('Primary Driver') off 39,183% growth from a $136K year, Brand Power 5.0 off a 204× P/S at a −30% gross margin, and an Insight claiming those 'edges'; revenue growth pinned at 10/10 in 7 of the 10 reports cached 2026-10-15..28; Switching Costs is an AI estimate on every report (its transcript input is unlicensed) and 'Peer Avg' was a 5.0 placeholder in ~110-147 of 149 industries | An absolute revenue floor alone (misses $53M JOBY's P/S); capping P/S at 200 (P/S 10 vs 2.47 already scores 10); dropping AI pillars from the radar (owner chose to show them, labelled, and keep them out of the verdicts); iOS labels this round (owner: backend now, iOS later) |
 | 2026-10-28 | Updates Insights jump mode (§9b.10a): a ticker JUMPING in the current session (Unusual/Extreme, `jump_band`) gets 6 extra card refreshes in the gate AND the claim RPC, its `ticker_move` alert whatever happened to the card (equities; coins stay coupled), its FMP news every 5 minutes (≤12 extra pulls/day) and, for equities, a Brave web search for the reason whose pages feed the card (a fenced block, a one-shot gate trigger, never the fingerprint) and lead its Sources; the card — shared, and served until a newer card replaces it — may hold text and links from those pages (owner: "i pick option 2, i don't think we break any terms"; Sources: "i need to show the source link so users can click to read them"; cap: "Jump reserve only"; Ask Cay: "Yes, Ask Cay reads it", audits skipped); `UPDATES_JUMP_WEB_SEARCH_ENABLED` off also withholds stored web cards; Privacy §3/§4 and Terms §7 dated October 28, 2026 | TestFlight ORCL +12% (2026-10-28): the card had spent its 10/day cap at 13:24 ET, before the jump; FMP had the press release in `ticker_news_cache` 16 minutes after it went out, but the card could not refresh and the move alert never fired (it was sent only from inside a regeneration); 17 of 39 scopes were capped that day | Brave with a written storage licence first (Enterprise; owner declined to wait); Claude's web search tool (a new vendor); per-viewer read-time search (breaks the cache-only read path, needs consent v4 and an iOS release); raising the ordinary cap for everyone; web results in the fingerprint; reviving `price_move` / a "Why it moved" row (iOS release); chat's market-figure scrub on card inputs (drops the reason); SEC 8-K detection |
+| 2026-10-30 | Tracking → Assets shows the pre-market / after-hours move as a chip on the change line, left of the day change (`☾ +0.08%  ▲ +1.48%`; ☀ before the open), measured from the row's own regular-session price and read from the licensed `historical-chart/5min?extended=true` bars (`tracking_service._get_extended_prints`, the feed gather's last member: never in the regular session, never for a coin, an index or a licence-blocked symbol; a session-tagged per-ticker cache, 60 s live and 15 min closed). The last after-hours print stays overnight and at weekends until 04:00 ET pre-market (owner: "Keep last AH price"); 5-minute bars (owner: "5-minute bars"); the chip shows whole or not at all (`ViewThatFits`), so the card is no taller (owner: "i don't want to increase the height of the card") — on a 375pt phone it usually does not fit and only VoiceOver reads it | Owner, on the Assets tab at 4:56 PM ET: "do we have price after hours to show?" Nothing in the app showed one: the screener and the profile carry the regular-session price only, and FMP's `aftermarket-quote` is the unpurchased "Real-time Market Data" package (402) — but the Extended Hours toggle's bars already held every pre-market and after-hours trade | A third line under the price (taller cards); the after-hours price as the row's main number (Robinhood-style); the after-hours price in place of the company name (names hidden 4 PM-9:30 AM and all weekend); the after-hours PRICE in the chip (does not fit beside the day change on 375-393pt phones); 1-minute bars (about 5x the FMP data per call); buying "Real-time Market Data" for batch real-time after-hours quotes in one call (the switch if a real-time print is ever needed) |
+| 2026-10-30 | The Updates Insights card's headline is the FIRST answer for a move on the widget and in Ask Cay AI: `attribute` runs `detect_news_lean` before the dated detectors (earnings, analyst, classified news, group). Its gate is unchanged (agreeing sentiment, an Unusual move, no after-close card on a report day, a usable headline), so a card that fails it still falls through to them, and a dated win never carries the withheld lean (`web_assisted`). When the card wins, `cause.note` keeps the industry arithmetic, "moved with it" included. A new run reaches the tile while the app is open: storing a card drops the cached widget payloads that read its scope (`WidgetMoversService.forget_payloads_for`; a build that raced the write is served but not kept), and the app refreshes when the Updates screen fetches an AI card newer than the stored tile's `as_of` for the Holdings head mover or the market (`WidgetRefreshService.insightCardArrived`, a content change past the 60 s throttle) | Holdings tile, INTC −30.60% on 2026-10-30: it printed "INTC beat EPS estimates by 27.8%, reported after yesterday's close." while the Updates card read "Intel's weak PC outlook and guidance overshadows strong data center results" (Bearish, 15 min old). The earnings detector ran first, so the card that passed every gate was never consulted. Owner: "i need the widget to show it out. right after the Insight has new content or a new run" | Putting the card ahead of a CONTRADICTING dated cause only (a beat under a fall): a miss under a fall would still hide the card the owner asked to see. Relaxing the agreement or Unusual gate (the ACHR bug). A holdings-capable widget token or silent pushes so a CLOSED app updates the tile: the Holdings tile still changes only when the app runs |
+| 2026-10-31 | The report's Recent Price Movement section separates SIZE from CAUSE (`price_volatility.effective_tier`, `_build_price_action`, `_price_action_narrative_prompt`): a move of 20%+ over its window, or a 10%+ session in it, is at least Notable however volatile the stock (the "Normal range" sub-label is then hidden); the reason hunt also runs whenever an earnings report falls in or after the window; the prompt gets the report's EPS and revenue against estimates (the same FMP earnings-calendar call, `get_earning_calendar_full`), where it sits against the chart's last close, and the S&P 500 (SPY, the macro fetch's series) over the same days; a guard swaps an insight that says "routine / normal range / not a fundamental change" on such a card for a fact sentence. The σ estimator and the Updates tiers are unchanged | Intel −20.6% in 30 days into its Oct 29 report, σ ≈ 5%/day → z 0.87 "Typical"; no earnings or news scan ran below z 1 and the Typical prompt forced "routine trading … not a fundamental change in the business". Owner decisions: "Floor 20% / 10%", "AI context only", "Flag it in the insight", "Hide it when floored", "Report only" | A different σ (excluding the window: z 0.83; MAD: z 0.99 — neither fixes it, and both shift every stock); the floor in the Updates gate (re-bills cards, changes widget tiers); showing the S&P line on the card (needs an app release) |
 
 ---
 

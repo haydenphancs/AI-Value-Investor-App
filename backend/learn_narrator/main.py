@@ -27,7 +27,11 @@ Stopping rules:
     — the job is no longer ours, so nothing is reported;
   * 401 / 403 on any call → ERROR, exit 2 (a credential problem no retry fixes);
   * a render/alignment/check failure → `/fail` once, exit 1. The SERVER counts worker failures
-    (≤ 2 per job, then the round fails) and lease re-claims; this process keeps no count.
+    (≤ 2 per job, then the round fails) and lease re-claims; this process keeps no count. A code the
+    server lists as deterministic (`DETERMINISTIC_FAIL_CODES` in the web's learn_weekly contracts:
+    `voice_out_of_band`, `timings_invalid`, judged on the finished file) fails the job at its first
+    report and queues no round that would render the same file — so never rename those two codes
+    without the server's list (a worker test pins them).
 
 Environment:
   LEARN_NARRATOR_API_BASE      https://caydexinvest.com (the web service's public URL)
@@ -418,8 +422,10 @@ def process(client: api.NarratorClient, job: Job, workdir: Path, *, threads: int
         check_voice(job, env)
         job_path = workdir / "job.json"
         job_path.write_text(json.dumps(child_job(job, workdir, threads), ensure_ascii=False), encoding="utf-8")
-        logger.info("rendering job=%s round=%s engine=%s blocks=%d words=%d threads=%d", job.id, job.round,
-                    job.engine, len(job.blocks), sum(len(b["text"].split()) for b in job.blocks), threads)
+        spoken = verify.spoken_words(job.blocks)
+        logger.info("rendering job=%s round=%s engine=%s blocks=%d words=%d spoken=%d threads=%d", job.id,
+                    job.round, job.engine, len(job.blocks), sum(len(b["text"].split()) for b in job.blocks),
+                    spoken, threads)
         if job.engine == "chatterbox":
             render = render_in_parts(runner, job, job_path, workdir, threads=threads,
                                      budget=render_timeout(job.engine, env), heartbeat=hb)
@@ -434,8 +440,8 @@ def process(client: api.NarratorClient, job: Job, workdir: Path, *, threads: int
         if not audio.is_file() or audio.stat().st_size == 0:
             raise JobFailure("render_failed", "the render produced no audio file")
         table, block_checks = build_timings(job, render, aligned)
-        words = sum(len(b["text"].split()) for b in job.blocks)
-        file_m = measure(audio, words)
+        # The pace band counts SPOKEN words, the tempo pass's own basis (chatterbox pipeline v2).
+        file_m = measure(audio, spoken)
         duration = file_m.get("duration")
         if not duration:
             raise JobFailure("encode_failed", "ffprobe could not read the encoded file's duration")
@@ -464,6 +470,8 @@ def process(client: api.NarratorClient, job: Job, workdir: Path, *, threads: int
             "blocks": block_checks, "file": file_checks, "summary": summary(block_checks),
             "worker": {"worker_version": (env.get("LEARN_NARRATOR_WORKER_VERSION") or WORKER_VERSION)[:80],
                        "engine_pipeline": render.get("pipeline"), "atempo": render.get("atempo"),
+                       "atempo_wanted": render.get("atempo_wanted"), "atempo_clamped": render.get("atempo_clamped"),
+                       "tempo_words": render.get("tempo_words"),
                        "threads": threads, "render_seconds": render.get("wall_seconds"),
                        "align_seconds": (aligned or {}).get("wall_seconds"),
                        "emotion_adv": render.get("emotion_adv"), "voice": render.get("voice"),

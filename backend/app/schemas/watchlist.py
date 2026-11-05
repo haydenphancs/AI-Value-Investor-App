@@ -29,3 +29,11 @@ class RemoveFromWatchlistRequest(BaseModel):
     # Same disambiguation as the add: "crypto" means the PAIR row (BTCUSD), anything else
     # or absent means raw-then-canonical. Optional so the shipped build keeps working.
     asset_type: Optional[str] = None
+    # True: remove the row ONLY when none of the caller's groups (`portfolio_items`) still
+    # holds the stored ticker this request resolves to. Sent by the "remove from this
+    # portfolio" paths once the client believes no other group holds it — the server
+    # re-checks because the client's store can be stale, and the endpoint's delete-through
+    # would otherwise strip that ticker (and its shares) from another device's group.
+    # A kept row answers 200 {"removed": false}. False (the default, and every shipped
+    # build) is the unconditional remove.
+    only_if_unreferenced: bool = False

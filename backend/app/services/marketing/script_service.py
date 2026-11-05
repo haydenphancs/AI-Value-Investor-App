@@ -168,7 +168,19 @@ def worst_case_model_call_seconds() -> float:
         + step * timeouts * (timeouts + 1) / 2
         + _GENERATE_JSON_DELAY_SECONDS * generic * (generic + 1) / 2
     )
-    return attempts * per_attempt + backoff
+    return attempts * per_attempt + backoff + claude_first_seconds()
+
+
+def claude_first_seconds() -> float:
+    """What asking Claude FIRST adds to one model call (llm_provider, 2026-10-30): one attempt to
+    CAYDEX_CLAUDE_REQUEST_TIMEOUT_SECONDS before the Gemini fallback — 0 while no marketing role is on Claude
+    (switch and key), so the default lease and owner-life numbers are unchanged. Read at import, like
+    the Gemini settings above: a marketing switch takes effect with the deploy that sets it."""
+    from app.services.llm_provider import any_marketing_role_on_claude
+
+    if not any_marketing_role_on_claude():
+        return 0.0
+    return max(float(settings.CAYDEX_CLAUDE_REQUEST_TIMEOUT_SECONDS), 0.0)
 
 
 #: How long a generation owns the run between refreshes. The lease is refreshed before each
@@ -340,6 +352,27 @@ _OWNER_WEDGED = "wedged"
 #: the tokens its generation already spent). Not imported: writer_service loads the agents
 #: package, and through it the FMP client, at import time.
 _TOKENS_ATTR = "marketing_tokens_used"
+#: `writer_service.CLAUDE_USAGE_ATTR` (same contract): the Claude part of those tokens, by model.
+_CLAUDE_USAGE_ATTR = "marketing_claude_usage"
+
+
+def _claude_patch(row: Dict[str, Any], usage: Any, run_id: str, gen_id: str) -> Dict[str, Any]:
+    """`{"claude_usage": <the row's value + this generation's>}` when this generation billed Claude
+    tokens, else {} — so a generation with no Claude call writes exactly what it wrote before the
+    column existed (migration 206). The weekly cost line prices these tokens at Claude's rates and the
+    rest of `tokens_used` at Gemini's. A stored value that cannot be read is left as it is (WARNING):
+    rewriting it would drop its tokens, and the digest reads that row's Claude part as unreadable."""
+    if not usage:
+        return {}
+    from app.services.llm_provider import merge_claude_usage, parse_claude_usage
+
+    new, prior = parse_claude_usage(usage), parse_claude_usage(row.get("claude_usage"))
+    if new is None or prior is None:
+        logger.warning("marketing script: run_id=%s generation=%s has an unreadable claude_usage (%s) — "
+                       "this generation's Claude tokens are not added to it (they stay in tokens_used)",
+                       run_id, gen_id, "the generation's" if new is None else "the stored one")
+        return {}
+    return {"claude_usage": merge_claude_usage(prior, new)} if new else {}
 
 
 class LeaseLost(Exception):
@@ -2306,6 +2339,7 @@ class MarketingScriptService:
                 "model": result.model, "prompt_version": result.prompt_version,
                 "tokens_used": prior_tokens + _int(result.tokens_used),
                 "fact_sheet": sheet, "last_error": None,
+                **_claude_patch(row, getattr(result, "claude_usage", None), run_id, gen_id),
             })
             if outcome == WRITTEN:
                 logger.info("marketing script ACCEPTED run_id=%s generation=%s source=%s outlets=%s "
@@ -2327,6 +2361,7 @@ class MarketingScriptService:
             "content_rejections": content_after,
             "tokens_used": prior_tokens + _int(result.tokens_used),
             "last_error": "content rejected: " + ", ".join(_codes(result.violations))[:1900],
+            **_claude_patch(row, getattr(result, "claude_usage", None), run_id, gen_id),
         }
         if final:
             patch["reject_reason"] = REASON_CONTENT
@@ -2557,6 +2592,7 @@ class MarketingScriptService:
             "status": REJECTED if final else SELECTED,
             "tokens_used": _int(row.get("tokens_used")) + spent,
             "last_error": f"{type(e).__name__}: {e}"[:2000],
+            **_claude_patch(row, getattr(e, _CLAUDE_USAGE_ATTR, None), run_id, gen_id),
         }
         if final:
             patch["reject_reason"] = REASON_WRITER_UNAVAILABLE

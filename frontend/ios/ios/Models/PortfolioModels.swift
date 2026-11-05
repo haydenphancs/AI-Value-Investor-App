@@ -56,6 +56,14 @@ struct PortfolioListResponseDTO: Codable {
     let portfolios: [PortfolioDTO]
 }
 
+/// `DELETE /watchlist`'s body. `removed` is false when `only_if_unreferenced` kept the row
+/// because a group still holds the ticker, and nil from a backend that predates the flag
+/// (which deleted unconditionally).
+struct WatchlistRemovalResponseDTO: Codable {
+    let message: String?
+    let removed: Bool?
+}
+
 struct PortfolioItemDTO: Codable {
     let ticker: String
     let shares: Double?

@@ -18,7 +18,8 @@
 //
 //  Triggers: the cold-launch seed and the sign-in force (`AppState`), every foreground and
 //  background (`iosApp`), and a content change — the active group, its holdings or the
-//  watchlist (`contentChanged()`). Every one of them is gated on `sessionOpen`.
+//  watchlist (`contentChanged()`), or an Insights card newer than the tile
+//  (`insightCardArrived`). Every one of them is gated on `sessionOpen`.
 //
 
 import Foundation
@@ -473,6 +474,36 @@ final class WidgetRefreshService {
         }
         log.info("widget content changed — refreshing")
         startRefresh()
+    }
+
+    // MARK: - Insights cards
+
+    /// The Updates screen just received an Insights card from the network.
+    ///
+    /// The Holdings tile's head line IS that card's headline when the card agrees with the
+    /// move (the backend's news lean, owner 2026-10-30), and the Market tile leads with the
+    /// market card's. But the extension never fetches Holdings, so a new run of the card
+    /// reached the tile only at the next foreground or swipe home — and not even then inside
+    /// the 60 s throttle. A card written after the stored snapshot was BUILT (`asOf`) is one
+    /// the tile cannot be showing yet: refresh, as a content change. Self-limiting: once the
+    /// refresh stores, the snapshot is newer than the card.
+    func insightCardArrived(scope: String, generatedAt: Date?, isAIGenerated: Bool) {
+        // Only an AI card can become the tile's line (`_session_news_lean`), and an
+        // unparseable stamp says nothing about which is newer.
+        guard isAIGenerated, let generatedAt, let stored = WidgetSnapshotStore.read() else { return }
+        let snapshot: WidgetMoverSnapshot?
+        if scope == UpdatesScope.market {
+            snapshot = stored.market
+        } else if let head = stored.portfolio?.headlineMover?.ticker,
+                  head.caseInsensitiveCompare(scope) == .orderedSame {
+            // Only the head mover's line is a card headline; the other rows are numbers.
+            snapshot = stored.portfolio
+        } else {
+            snapshot = nil
+        }
+        guard let snapshot, generatedAt > snapshot.asOf else { return }
+        log.info("widget: an Insights card newer than the tile arrived — refreshing")
+        contentChanged()
     }
 
     // MARK: - Background

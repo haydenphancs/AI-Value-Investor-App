@@ -1458,3 +1458,145 @@ def test_a_framed_promise_about_a_named_company_is_still_rejected(text, strict):
 ])
 def test_the_same_frames_still_exempt_a_misconception_about_markets(text):
     assert scan_text("x", text, strict_instruments=False) == []
+
+
+# ── 2026-10-31: the writer's own materials, and a self-written "educational" label ───────────
+# From the live Claude-writer preview (30 accepted packages): narration citing "the fact sheet" /
+# "the source says" (2 packages) and captions closing "Educational content only." (2) — all
+# accepted, none caught. Each refusal has a positional twin that must keep passing.
+
+_SOURCE_REFERENCES = (
+    "The fact sheet shows hardware sales are lumpy.",
+    "The source compares warning signs to a dashboard light.",
+    "The source says one flag alone rarely does.",
+    "Watch for the flags it names.",
+    "According to the source, fees grew.",
+    "This factsheet lists the risks.",
+    "The sources show two paths.",
+    # review round: an adverb, a prefix frame, a document-only verb, "the facts provided", an
+    # inverted attribution, an adjective before "fact sheet", a compound noun
+    "The source also notes that one flag rarely decides it.",
+    "Per the source, hardware sales were lumpy.",
+    "According to the case study, fees drove profit.",
+    "As noted in the source, debt matters.",
+    "Based on the facts provided, sales were lumpy.",
+    "The source stresses that debt matters.",
+    "The source outlines three warning signs.",
+    "The source doesn't say why sales were lumpy.",
+    "Debt matters, says the source.",
+    "The provided fact sheet lists two segments.",
+    "The source data shows two paths.",
+    # residual read of the re-run: the case study cited as the authority, and the template's name
+    "The case study tells a different story.",
+    "The case study shows why that is incomplete.",
+    "The Netflix vs. Disney+ case study tells a different one.",
+    "A case story on Tesla and the traditional automakers.",
+)
+
+_SOURCE_TWINS = (
+    "Fees became the source of most profit.",
+    "The main source of revenue shifted to services.",
+    "The source of the problem showed up later.",
+    "Read the fund's fact sheet before you buy.",
+    "An ETF's fact sheet lists its holdings.",
+    "Open source software spread fast.",
+    "The products it lists on its site changed.",
+    "The risks it names in its annual report grew.",
+    # review round: a REVENUE source reads like a document in these shapes
+    "Membership fees were the main source of profit, and that source shows up every year.",
+    "That source names no single customer.",
+    "Ads were the source, and the source shows up in every quarter.",
+    "The source provides steady cash.",
+    "Based on the source of its profit, Costco differs.",
+    "Per the notes to the accounts, debt is due later.",
+    "The information provided to shareholders must be accurate.",
+    "The services provided by the warehouse matter.",
+    "The numbers given are rounded.",
+    "Costco is a classic case study in loyalty.",
+    "The report says the source of growth is the cloud.",
+    "This case study highlights how serving different customers shapes the business.",
+    "The case study of Costco is about loyalty.",
+    "LVMH is a case study in patient ownership.",
+    "Many believe Apple lives by the next iPhone. This case study shows why that is incomplete.",
+)
+
+
+@pytest.mark.parametrize("text", _SOURCE_REFERENCES)
+def test_citing_the_writers_materials_is_refused(text):
+    assert "source_reference" in codes(text), codes(text)
+
+
+@pytest.mark.parametrize("text", _SOURCE_TWINS)
+def test_source_and_fact_sheet_as_ordinary_words_pass(text):
+    assert "source_reference" not in codes(text), codes(text)
+
+
+_EDUCATIONAL_LABELS = (
+    "Educational content only.",
+    "For informational purposes only.",
+    "For educational purposes, here is how it works.",
+    "This post is purely educational.",
+    "This video is for education.",
+    "Informational only.",
+    # review round: a label that opens and closes its sentence
+    "Purely educational.",
+    "For education only.",
+    "General information only.",
+    "This is educational content, not a pitch.",
+    "Everything here is educational.",
+    "This article is purely educational.",
+    "For information purposes, here is the idea.",
+    "For learning purposes only.",
+)
+
+_EDUCATIONAL_TWINS = (
+    "Apple sold iPads for educational use.",
+    "Netflix added educational content for kids.",
+    "Education only goes so far without patience.",
+    "The lesson is about patience.",
+    "Information only goes so far.",
+    "Learning",
+    "Education matters more than luck.",
+    "The company built an educational app for schools.",
+)
+
+
+@pytest.mark.parametrize("text", _EDUCATIONAL_LABELS)
+def test_a_self_written_educational_label_is_code_owned(text):
+    assert "code_owned" in codes(text), codes(text)
+
+
+@pytest.mark.parametrize("text", _EDUCATIONAL_TWINS)
+def test_educational_as_a_case_study_word_passes(text):
+    assert "code_owned" not in codes(text), codes(text)
+
+
+_NOTICE_RESTATEMENTS = (
+    "Not an offer to buy or sell.",
+    "Not a solicitation.",
+    "This is not an offer or solicitation to buy or sell securities.",
+    "Nothing here is a recommendation.",
+    "Consult a financial professional before you invest.",
+    "Always consult a qualified financial professional.",
+    "Talk to a licensed professional before investing.",
+)
+
+_NOTICE_TWINS = (
+    "The bid was a merger proposal, not an offer.",
+    "Not an offer letter, but a handshake deal.",
+    "The board said its offer to buy the company was final.",
+    "Talk to experts in the field, then read the filings.",
+    "Professional investors read the footnotes.",
+    "Many professionals consult the annual report first.",
+    "Consult a qualified tax professional about filing.",
+)
+
+
+@pytest.mark.parametrize("text", _NOTICE_RESTATEMENTS)
+def test_restating_the_notice_or_its_sign_off_is_code_owned(text):
+    assert "code_owned" in codes(text), codes(text)
+
+
+@pytest.mark.parametrize("text", _NOTICE_TWINS)
+def test_offers_and_professionals_in_a_lesson_pass(text):
+    assert "code_owned" not in codes(text), codes(text)

@@ -662,8 +662,10 @@ class NewsInsightService:
             scope, trigger_reason, len(articles), len(web), jumping, card["sentiment"],
             gen_seconds,
         )
-        # Invalidate Tier 1 so the next read picks up the new row.
+        # Invalidate Tier 1 so the next read picks up the new row…
         self._cache.pop(scope, None)
+        # …and the widget payloads built from the card this one replaces.
+        _forget_widget_payloads(scope)
         return card
 
     async def scopes_failed_after_their_card(
@@ -1752,6 +1754,21 @@ def _price_net(
             "card for %s (generated %s)", len(bullets) - 1 - len(kept), scope, generated_at,
         )
     return kept + [bullets[-1]]
+
+
+def _forget_widget_payloads(scope: str) -> None:
+    """`WidgetMoversService.forget_payloads_for`, after a new card is stored. Imported
+    lazily (the widget service imports this module) and never raises: the card is already
+    written, and a stale tile for up to 60 s is the worst a failure here costs."""
+    try:
+        from app.services.widget_movers_service import get_widget_movers_service
+
+        get_widget_movers_service().forget_payloads_for(scope)
+    except Exception as e:
+        logger.warning(
+            "Insight stored for %s but the widget payload cache was not cleared (%s: %s)",
+            scope, type(e).__name__, e,
+        )
 
 
 def _clip(text: str, limit: int) -> str:

@@ -87,7 +87,7 @@ def stub(monkeypatch):
 async def test_a_listed_company_gets_its_press_releases_beside_the_headlines(stub):
     out = await _svc()._fetch_ticker_news_data("AAPL")
     assert out["articles"] == _news()["articles"], "the headlines are untouched"
-    assert out["press_releases"] == [_release("2026-10-01 08:30")]
+    assert out["press_releases"] == [_release("2026-10-01 08:30 ET")]
     assert "company's own statements" in out["press_releases_note"]
     assert "never present one as independent reporting" in out["press_releases_note"]
     assert ("releases", "AAPL", ChatService._PRESS_RELEASE_WAIT_SECONDS) in stub["calls"]
@@ -216,7 +216,7 @@ async def test_a_headline_outage_keeps_its_error_and_the_releases(stub):
                     "note": "The news feed could not be reached; do not say there is no news."}
     out = await _svc()._fetch_ticker_news_data("AAPL")
     assert out["upstream"] is True and out["error"].startswith("news feed unavailable")
-    assert out["press_releases"] == [_release("2026-10-01 08:30")]
+    assert out["press_releases"] == [_release("2026-10-01 08:30 ET")]
 
 
 @pytest.mark.asyncio
@@ -226,7 +226,7 @@ async def test_a_raising_headline_read_keeps_the_releases(stub, caplog):
         out = await _svc()._fetch_ticker_news_data("AAPL")
     assert out["upstream"] is True and out["error"] == "news feed unavailable"
     assert "SECRET" not in json.dumps(out)
-    assert out["press_releases"] == [_release("2026-10-01 08:30")]
+    assert out["press_releases"] == [_release("2026-10-01 08:30 ET")]
     assert "headline fetch raised for AAPL" in caplog.text
 
 
@@ -279,6 +279,20 @@ def test_small_results_are_left_whole():
     assert all(r["text"] == "X" * 40 for r in out["press_releases"])
 
 
+def test_a_release_clock_names_its_zone_and_a_bare_day_does_not():
+    """FMP stamps releases on New York's wall clock with no zone: the model's copy says "ET"
+    (the clock alone read as UTC or the reader's own zone). A bare day has no clock to label,
+    and anything that is not a stamp is passed through untouched."""
+    releases = [_release("2026-10-01 08:30"), _release("2026-09-30"), _release("soon"),
+                {"date": None, "title": "No date"}]
+    out = ChatService._with_press_releases(_news(), releases)
+    assert [r["date"] for r in out["press_releases"]] == ["2026-10-01 08:30 ET", "2026-09-30", "soon", None]
+    assert releases[0]["date"] == "2026-10-01 08:30", "the caller's rows are copied, never edited"
+    # Already labelled (or any other trailing text): not a bare clock, so never "ET ET".
+    again = ChatService._with_press_releases(_news(), [_release("2026-10-01 08:30 ET")])
+    assert again["press_releases"][0]["date"] == "2026-10-01 08:30 ET"
+
+
 def test_texts_shorten_first_then_drop_then_the_oldest_go():
     budget = _budget()
     # Leaves room for all five releases with short texts — but not full ones.
@@ -297,7 +311,7 @@ def test_texts_shorten_first_then_drop_then_the_oldest_go():
     rows = out["press_releases"]
     assert 1 <= len(rows) < 5 and all("text" not in r for r in rows)
     assert [r["date"] for r in rows] == sorted((r["date"] for r in rows), reverse=True)
-    assert rows[0]["date"] == "2026-10-05 08:30", "the newest release is the one kept"
+    assert rows[0]["date"] == "2026-10-05 08:30 ET", "the newest release is the one kept"
     assert "older release" in out["press_releases_shortened"]
     assert "never treat what is missing as nothing announced" in out["press_releases_shortened"]
     assert out["articles"] == news["articles"]

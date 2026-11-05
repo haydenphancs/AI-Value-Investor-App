@@ -640,6 +640,22 @@ struct AnalysisCost {
     static let standard = AnalysisCost(credits: 20)
 }
 
+// MARK: - Run Again Request
+
+/// "Run Again" on a report, parked on `AppState.pendingResearchRerun` by `TickerReportView` and
+/// run by the Research tab through the same `generateAnalysis()` the Generate button uses.
+///
+/// Equatable for `.onChange`. Consumed and cleared, so a second tap with equal values is still
+/// a change from nil and runs again.
+struct ResearchRerunRequest: Equatable {
+    let ticker: String
+    /// Backend persona key ("warren_buffett") of the report ON SCREEN — `report.agent.personaKey`.
+    let personaKey: String
+    /// `AppActions.shared.currentAccountId` at the tap. A request whose account no longer holds
+    /// the session is dropped, never charged to whoever holds it now.
+    let ownerId: String?
+}
+
 // MARK: - Report Status
 enum ReportStatus: String {
     case processing = "Processing"

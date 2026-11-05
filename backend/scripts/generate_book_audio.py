@@ -446,6 +446,9 @@ def render_book(order: int, force: bool) -> None:
 
 
 if __name__ == "__main__":
+    from _cli_flags import check_flags
+
+    check_flags(sys.argv, known={"--force"}, doc=__doc__)
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     force = "--force" in sys.argv
     if not args:

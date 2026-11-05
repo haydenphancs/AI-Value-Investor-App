@@ -109,6 +109,14 @@ EXCLUDED: Dict[str, str] = {
 #: sentence or more than one (a stale or ambiguous drop is a silent policy hole).
 #: Pre-registered 2026-09-26 from the user's decisions, BEFORE any judge output was read.
 SOURCE_SENTENCE_DROPS: Dict[str, Dict[str, str]] = {
+    "money_moves:kodak-inventing-the-future-it-couldnt-sell": {
+        # Dotted place acronyms, which grounding refuses on purpose (compliance reads "U.S." as a
+        # sentence end, see test_marketing_residuals_compliance.py). The article's text is frozen
+        # to its narration, so the sheet drops the lines rather than the article changing: a sheet
+        # that says "U.K." invites exactly the form the writer is refused for. 2026-11-05.
+        "in the U.S., Japan and Western Europe": "a dotted place acronym the writer may not use",
+        "of its U.K. subsidiary": "a dotted place acronym the writer may not use",
+    },
     "journey:etfs_101": {
         # Own-voice risk-softening about a product category (decision 2). The sibling "many
         # people use a broad ETF as the calm, steady core of their plan" is ATTRIBUTED usage,

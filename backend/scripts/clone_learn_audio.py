@@ -278,4 +278,7 @@ def main():
 
 
 if __name__ == "__main__":
+    from _cli_flags import check_flags
+
+    check_flags(sys.argv, known={"--all", "--canonical", "--shard"}, doc=__doc__)
     main()

@@ -318,11 +318,11 @@ def _path(sha="ab" * 32):
 # ═════════════════════════════════════════════════════════════════════════════════════════════
 
 
-def test_the_bundles_are_present_and_hold_23_articles_each():
+def test_the_bundles_are_present_and_hold_26_articles_each():
     """Anti-vacuity for the parity tests below: they iterate these."""
     for path in _BUNDLES[:1]:
-        assert len(json.loads(path.read_text(encoding="utf-8"))["articles"]) == 23
-    assert len(_articles()) >= 23
+        assert len(json.loads(path.read_text(encoding="utf-8"))["articles"]) == 26
+    assert len(_articles()) >= 26
 
 
 def test_narration_order_equals_the_clone_script_over_every_bundled_article():

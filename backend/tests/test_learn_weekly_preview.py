@@ -103,7 +103,7 @@ def test_the_preview_blocks_the_database_and_writes_only_its_out_dir(tmp_path, s
     with pytest.raises(script.PreviewDatabaseBlocked):
         ledger.get_supabase()
     kw = stubs["write"][0]
-    assert kw["in_flight_titles"] == [] and len(kw["served_titles"]) == 23
+    assert kw["in_flight_titles"] == [] and len(kw["served_titles"]) == 26
 
 
 def test_no_peg_fact_stops_the_preview_honestly(tmp_path, stubs, monkeypatch, restore_db_bindings):

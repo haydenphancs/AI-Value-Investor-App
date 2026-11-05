@@ -2385,6 +2385,17 @@
             "D97706",
             "B45309"
           ]
+        },
+        {
+          "title": "McDonald's: The Real Estate Empire",
+          "subtitle": "Why a burger brand is also a landlord.",
+          "category": "blueprints",
+          "readTimeMinutes": 4,
+          "viewCount": "",
+          "gradientColors": [
+            "2563EB",
+            "1D4ED8"
+          ]
         }
       ],
       "audioDurationSeconds": 343,
@@ -6219,6 +6230,17 @@
             "BE123C",
             "881337"
           ]
+        },
+        {
+          "title": "Kodak: Inventing the Future It Couldn't Sell",
+          "subtitle": "It built a digital camera in 1975; digital never carried film's margins.",
+          "category": "valueTraps",
+          "readTimeMinutes": 4,
+          "viewCount": "",
+          "gradientColors": [
+            "C2410C",
+            "B45309"
+          ]
         }
       ],
       "audioDurationSeconds": 246,
@@ -7469,6 +7491,17 @@
             "A16207",
             "854D0E"
           ]
+        },
+        {
+          "title": "Kodak: Inventing the Future It Couldn't Sell",
+          "subtitle": "It built a digital camera in 1975; digital never carried film's margins.",
+          "category": "valueTraps",
+          "readTimeMinutes": 4,
+          "viewCount": "",
+          "gradientColors": [
+            "C2410C",
+            "B45309"
+          ]
         }
       ]
     },
@@ -8218,6 +8251,17 @@
           "gradientColors": [
             "8B5CF6",
             "6D28D9"
+          ]
+        },
+        {
+          "title": "Coca-Cola vs. PepsiCo",
+          "subtitle": "Two colas made the same way, very different businesses behind them.",
+          "category": "battles",
+          "readTimeMinutes": 4,
+          "viewCount": "",
+          "gradientColors": [
+            "A21CAF",
+            "86198F"
           ]
         }
       ]
@@ -9457,6 +9501,1303 @@
           "gradientColors": [
             "9A3412",
             "7C2D12"
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "mcdonalds-the-real-estate-empire",
+      "title": "McDonald's: The Real Estate Empire",
+      "subtitle": "A burger company whose conventional franchise contract generally includes a lease, so that a large part of its revenue arrives as rent from the operators who run restaurants on property it controls.",
+      "cardSubtitle": "Why a burger brand is also a landlord.",
+      "category": "blueprints",
+      "author": {
+        "name": "Caydex Research",
+        "title": "Editorial",
+        "isVerified": false
+      },
+      "tagLabel": "THE LANDLORD MODEL",
+      "heroGradientColors": [
+        "2563EB",
+        "1D4ED8",
+        "1E3A8A"
+      ],
+      "keyHighlights": [
+        {
+          "icon": "map.fill",
+          "title": "The Ground Is the Asset",
+          "description": "On a conventional franchise, the company generally holds the land and building. The operator pays for the equipment and fit-out."
+        },
+        {
+          "icon": "banknote.fill",
+          "title": "Rent Outearns Royalty",
+          "description": "In fiscal 2025, franchise rent came to about $10.4 billion, royalties to about $6.0 billion."
+        },
+        {
+          "icon": "arrow.clockwise",
+          "title": "The Site Comes Back",
+          "description": "When a 20-year conventional franchise ends, the company keeps control of the land and building and decides what happens next."
+        }
+      ],
+      "sections": [
+        {
+          "title": "A Building on a Plot",
+          "icon": "map.fill",
+          "hasGlowEffect": true,
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "The object above is a blueprint, white lines on blue, of a small roadside restaurant drawn as an exploded assembly. The roof floats above the walls, the walls above the foundation slab, and a service window with a small awning is set into one wall. Underneath run the surveyed boundary lines of the rectangle of land it stands on. There is no sign anywhere, and that absence is the point.",
+              "readAlong": [
+                {
+                  "text": "The object above is a blueprint, white lines on blue, of a small roadside restaurant drawn as an exploded assembly.",
+                  "start": 18.11,
+                  "end": 25.07
+                },
+                {
+                  "text": "The roof floats above the walls, the walls above the foundation slab, and a service window with a small awning is set into one wall.",
+                  "start": 25.82,
+                  "end": 33.32
+                },
+                {
+                  "text": "Underneath run the surveyed boundary lines of the rectangle of land it stands on.",
+                  "start": 34.02,
+                  "end": 38.0
+                },
+                {
+                  "text": "There is no sign anywhere, and that absence is the point.",
+                  "start": 38.66,
+                  "end": 41.62
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "A customer sees the building and the menu. In McDonald's own filings, a large part of the business sits underneath both. Under a conventional franchise, the company generally owns or holds a long-term lease on the land and the building. The franchisee pays for the equipment, the signs, the seating and the décor.",
+              "readAlong": [
+                {
+                  "text": "A customer sees the building and the menu.",
+                  "start": 43.24,
+                  "end": 45.39
+                },
+                {
+                  "text": "In McDonald's own filings, a large part of the business sits underneath both.",
+                  "start": 45.99,
+                  "end": 50.01
+                },
+                {
+                  "text": "Under a conventional franchise, the company generally owns or holds a long-term lease on the land and the building.",
+                  "start": 50.79,
+                  "end": 56.76
+                },
+                {
+                  "text": "The franchisee pays for the equipment, the signs, the seating and the décor.",
+                  "start": 57.34,
+                  "end": 61.54
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "Two Kinds of Franchise",
+          "icon": "square.split.2x2.fill",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "The first McDonald's opened in San Bernardino, California, in 1940. By the end of 2025 there were 45,356 McDonald's restaurants, and about 95% were franchised. But in the annual report franchised covers two quite different deals, and only one of them makes the company a landlord.",
+              "readAlong": [
+                {
+                  "text": "The first McDonald's opened in San Bernardino, California, in 1940.",
+                  "start": 65.42,
+                  "end": 69.26
+                },
+                {
+                  "text": "By the end of 2025 there were 45,356 McDonald's restaurants, and about 95% were franchised.",
+                  "start": 69.78,
+                  "end": 77.11
+                },
+                {
+                  "text": "But in the annual report franchised covers two quite different deals, and only one of them makes the company a landlord.",
+                  "start": 77.69,
+                  "end": 83.25
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "Roughly 20,700 restaurants were run by developmental licensees and affiliates, who supply their own capital, including the real estate, and pay a royalty on sales. About 22,600 ran under conventional franchises, and the company operated about 2,000 itself. On those sites it generally controls the property.",
+              "readAlong": [
+                {
+                  "text": "Roughly 20,700 restaurants were run by developmental licensees and affiliates, who supply their own capital, including the real estate, and pay a royalty on sales.",
+                  "start": 84.75,
+                  "end": 95.44
+                },
+                {
+                  "text": "About 22,600 ran under conventional franchises, and the company operated about 2,000 itself.",
+                  "start": 96.08,
+                  "end": 102.74
+                },
+                {
+                  "text": "On those sites it generally controls the property.",
+                  "start": 103.42,
+                  "end": 105.7
+                }
+              ]
+            },
+            {
+              "type": "subheading",
+              "text": "How a conventional franchisee pays",
+              "readAlong": [
+                {
+                  "text": "How a conventional franchisee pays",
+                  "start": 106.92,
+                  "end": 109.23
+                }
+              ]
+            },
+            {
+              "type": "bulletList",
+              "items": [
+                "A royalty, set as a percent of sales",
+                "Rent, also tied to a percent of sales, with a specified minimum",
+                "An initial fee when a restaurant opens or a new franchise is granted",
+                "Generally, the site's property taxes, insurance and maintenance as well, paid by the franchisee"
+              ],
+              "itemsReadAlong": [
+                [
+                  {
+                    "text": "A royalty, set as a percent of sales",
+                    "start": 110.57,
+                    "end": 113.39
+                  }
+                ],
+                [
+                  {
+                    "text": "Rent, also tied to a percent of sales, with a specified minimum",
+                    "start": 114.69,
+                    "end": 119.14
+                  }
+                ],
+                [
+                  {
+                    "text": "An initial fee when a restaurant opens or a new franchise is granted",
+                    "start": 120.32,
+                    "end": 124.39
+                  }
+                ],
+                [
+                  {
+                    "text": "Generally, the site's property taxes, insurance and maintenance as well, paid by the franchisee",
+                    "start": 125.62,
+                    "end": 131.51
+                  }
+                ]
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "The minimum rent is anchored to the property. The filing says it is based on the company's investment in sites it owns, and parallels its own lease payments and escalations on sites it leases. A franchise generally runs 20 years. At the end, the company keeps control of the land and building, and can renew with the same operator, choose a different one, or close the restaurant.",
+              "readAlong": [
+                {
+                  "text": "The minimum rent is anchored to the property.",
+                  "start": 132.57,
+                  "end": 134.53
+                },
+                {
+                  "text": "The filing says it is based on the company's investment in sites it owns, and parallels its own lease payments and escalations on sites it leases.",
+                  "start": 135.25,
+                  "end": 142.56
+                },
+                {
+                  "text": "A franchise generally runs 20 years.",
+                  "start": 143.26,
+                  "end": 145.54
+                },
+                {
+                  "text": "At the end, the company keeps control of the land and building, and can renew with the same operator, choose a different one, or close the restaurant.",
+                  "start": 146.14,
+                  "end": 153.44
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "Rent Is the Bigger Line",
+          "icon": "banknote.fill",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "The revenue lines show which role is larger. In fiscal 2025 McDonald's took in about $26.9 billion. About $16.5 billion came from franchised restaurants, against about $9.7 billion of sales at restaurants it ran itself. Inside the franchised figure, rent was about $10.4 billion and royalties about $6.0 billion. The landlord line beat the brand line by more than $4 billion.",
+              "readAlong": [
+                {
+                  "text": "The revenue lines show which role is larger.",
+                  "start": 157.98,
+                  "end": 160.14
+                },
+                {
+                  "text": "In fiscal 2025 McDonald's took in about $26.9 billion.",
+                  "start": 160.7,
+                  "end": 165.49
+                },
+                {
+                  "text": "About $16.5 billion came from franchised restaurants, against about $9.7 billion of sales at restaurants it ran itself.",
+                  "start": 165.5,
+                  "end": 173.25
+                },
+                {
+                  "text": "Inside the franchised figure, rent was about $10.4 billion and royalties about $6.0 billion.",
+                  "start": 173.85,
+                  "end": 180.43
+                },
+                {
+                  "text": "The landlord line beat the brand line by more than $4 billion.",
+                  "start": 180.55,
+                  "end": 186.55
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "The franchise side is also where most of the restaurant margin sits. After occupancy costs, which include lease expense and depreciation, franchised margins came to about $13.9 billion, roughly 90% of the total. Behind them sits the property: the company owned about 56% of the land and about 80% of the buildings for restaurants in its consolidated markets, and existing conventional franchises carried about $31.5 billion of future minimum rent, before any discounting.",
+              "readAlong": [
+                {
+                  "text": "The franchise side is also where most of the restaurant margin sits.",
+                  "start": 187.65,
+                  "end": 191.35
+                },
+                {
+                  "text": "After occupancy costs, which include lease expense and depreciation, franchised margins came to about $13.9 billion, roughly 90% of the total.",
+                  "start": 192.06,
+                  "end": 201.61
+                },
+                {
+                  "text": "Behind them sits the property: the company owned about 56% of the land and about 80% of the buildings for restaurants in its consolidated markets, and existing conventional franchises carried about $31.5 billion of future minimum rent, before any discounting.",
+                  "start": 202.07,
+                  "end": 218.51
+                }
+              ]
+            },
+            {
+              "type": "callout",
+              "icon": "lightbulb.fill",
+              "style": "highlight",
+              "text": "To understand a franchise business, ask who holds the ground. A brand alone collects a share of sales. A brand that is also the landlord collects rent with a floor under it, and keeps the site when the contract ends.",
+              "readAlong": [
+                {
+                  "text": "To understand a franchise business, ask who holds the ground.",
+                  "start": 219.65,
+                  "end": 223.41
+                },
+                {
+                  "text": "A brand alone collects a share of sales.",
+                  "start": 223.99,
+                  "end": 226.22
+                },
+                {
+                  "text": "A brand that is also the landlord collects rent with a floor under it, and keeps the site when the contract ends.",
+                  "start": 226.94,
+                  "end": 232.56
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "What the Landlord Carries",
+          "icon": "scalemass.fill",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "Holding the ground is not free. Much of it is leased rather than owned: the company is a tenant across a large portfolio, leasing the land alone at some sites and the land and building at others. At the end of 2025 its lease liabilities stood at about $14.8 billion, the present value of the minimum lease payments it expects to make.",
+              "readAlong": [
+                {
+                  "text": "Holding the ground is not free.",
+                  "start": 236.85,
+                  "end": 238.47
+                },
+                {
+                  "text": "Much of it is leased rather than owned: the company is a tenant across a large portfolio, leasing the land alone at some sites and the land and building at others.",
+                  "start": 239.19,
+                  "end": 248.51
+                },
+                {
+                  "text": "At the end of 2025 its lease liabilities stood at about $14.8 billion, the present value of the minimum lease payments it expects to make.",
+                  "start": 249.44,
+                  "end": 258.06
+                }
+              ]
+            },
+            {
+              "type": "callout",
+              "icon": "exclamationmark.triangle.fill",
+              "style": "warning",
+              "text": "The percent-of-sales design cuts both ways. Royalties and the variable part of rent shrink when franchisee sales shrink, and the filing itself warns that its franchised revenue depends largely on franchisees growing their sales.",
+              "readAlong": [
+                {
+                  "text": "The percent-of-sales design cuts both ways.",
+                  "start": 259.4,
+                  "end": 261.8
+                },
+                {
+                  "text": "Royalties and the variable part of rent shrink when franchisee sales shrink, and the filing itself warns that its franchised revenue depends largely on franchisees growing their sales.",
+                  "start": 262.43,
+                  "end": 272.35
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "Two more honest limits. The model leans on franchisee economics: the company relies on operators willing and able to fund reinvestment, and may co-invest to modernise restaurants. And property is slow to move. Long real estate commitments leave it limited flexibility to quickly reshape the portfolio as trade areas and customer habits change, while the buildings it holds keep depreciating on its own books.",
+              "readAlong": [
+                {
+                  "text": "Two more honest limits.",
+                  "start": 273.55,
+                  "end": 274.77
+                },
+                {
+                  "text": "The model leans on franchisee economics: the company relies on operators willing and able to fund reinvestment, and may co-invest to modernise restaurants.",
+                  "start": 275.35,
+                  "end": 283.72
+                },
+                {
+                  "text": "And property is slow to move.",
+                  "start": 284.28,
+                  "end": 285.84
+                },
+                {
+                  "text": "Long real estate commitments leave it limited flexibility to quickly reshape the portfolio as trade areas and customer habits change, while the buildings it holds keep depreciating on its own books.",
+                  "start": 286.4,
+                  "end": 296.44
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "statistics": [
+        {
+          "value": "~95%",
+          "label": "Restaurants Franchised, 2025",
+          "trend": "neutral"
+        },
+        {
+          "value": "~$10.4B",
+          "label": "Franchise Rent, Fiscal 2025",
+          "trend": "up"
+        },
+        {
+          "value": "~56%",
+          "label": "Land Owned, Consolidated Markets",
+          "trend": "neutral"
+        }
+      ],
+      "readTimeMinutes": 4,
+      "sortOrder": 23,
+      "publishedDaysAgo": 0,
+      "isFeatured": false,
+      "hasAudioVersion": true,
+      "audioUrl": null,
+      "audioDurationSeconds": 297,
+      "viewCount": "",
+      "relatedArticles": [
+        {
+          "title": "Costco's Membership Magic",
+          "subtitle": "The power of customer loyalty economics.",
+          "category": "blueprints",
+          "readTimeMinutes": 5,
+          "viewCount": "",
+          "gradientColors": [
+            "0D9488",
+            "0F766E"
+          ]
+        },
+        {
+          "title": "Coca-Cola vs. PepsiCo",
+          "subtitle": "Two colas made the same way, very different businesses behind them.",
+          "category": "battles",
+          "readTimeMinutes": 4,
+          "viewCount": "",
+          "gradientColors": [
+            "A21CAF",
+            "86198F"
+          ]
+        },
+        {
+          "title": "How Amazon Built Its Moat",
+          "subtitle": "The strategy behind unstoppable dominance.",
+          "category": "blueprints",
+          "readTimeMinutes": 6,
+          "viewCount": "",
+          "gradientColors": [
+            "059669",
+            "047857"
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "coca-cola-vs-pepsico",
+      "title": "Coca-Cola vs. PepsiCo",
+      "subtitle": "The same cola rivalry, fought by two companies that made very different choices about what to own: one mostly sells concentrate to independent bottlers and tends its brands, the other makes, bottles and delivers much of what it sells and takes most of its revenue from foods.",
+      "cardSubtitle": "Two colas made the same way, very different businesses behind them.",
+      "category": "battles",
+      "author": {
+        "name": "Caydex Research",
+        "title": "Editorial",
+        "isVerified": false
+      },
+      "tagLabel": "ONE RIVALRY, TWO MODELS",
+      "heroGradientColors": [
+        "A21CAF",
+        "86198F",
+        "4A044E"
+      ],
+      "keyHighlights": [
+        {
+          "icon": "drop.fill",
+          "title": "Selling the Syrup",
+          "description": "Concentrate operations made up 59% of Coca-Cola's revenue in fiscal 2025."
+        },
+        {
+          "icon": "cart.fill",
+          "title": "A Food Company Too",
+          "description": "Convenient foods made up 58% of PepsiCo's fiscal 2025 net revenue, beverages 42%."
+        },
+        {
+          "icon": "scalemass.fill",
+          "title": "Revenue Versus Margin",
+          "description": "Both filings say finished drinks generally bring more revenue but thinner margins than selling concentrate."
+        }
+      ],
+      "sections": [
+        {
+          "title": "Two Blank Cans",
+          "icon": "square.on.square",
+          "hasGlowEffect": true,
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "The object above is a pair of bare aluminium cans, beaded with condensation, with nothing printed on either. The only difference is the light: one is lit cold blue, the other warm amber. In the can, the two famous colas are made the same basic way, from a flavour concentrate, sweetener and carbonated water.",
+              "readAlong": [
+                {
+                  "text": "The object above is a pair of bare aluminium cans, beaded with condensation, with nothing printed on either.",
+                  "start": 23.76,
+                  "end": 30.26
+                },
+                {
+                  "text": "The only difference is the light: one is lit cold blue, the other warm amber.",
+                  "start": 30.8,
+                  "end": 35.45
+                },
+                {
+                  "text": "In the can, the two famous colas are made the same basic way, from a flavour concentrate, sweetener and carbonated water.",
+                  "start": 36.37,
+                  "end": 42.82
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "The companies behind the cans are not twins at all. One mostly sells the flavour and the name, and leaves the heavy lifting to partners. The other makes, bottles and delivers a large share of what it sells, and takes most of its revenue from chips, cereals and other foods.",
+              "readAlong": [
+                {
+                  "text": "The companies behind the cans are not twins at all.",
+                  "start": 43.98,
+                  "end": 46.32
+                },
+                {
+                  "text": "One mostly sells the flavour and the name, and leaves the heavy lifting to partners.",
+                  "start": 47.04,
+                  "end": 51.18
+                },
+                {
+                  "text": "The other makes, bottles and delivers a large share of what it sells, and takes most of its revenue from chips, cereals and other foods.",
+                  "start": 51.76,
+                  "end": 58.76
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "The Syrup Company",
+          "icon": "drop.fill",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "Coca-Cola began in Atlanta in 1886 as a syrup, mixed with carbonated water at a pharmacy soda fountain. In a sense it never stopped being a syrup company. Its annual report describes two lines of business: concentrate operations, selling concentrate and syrup to bottlers, and finished product operations, selling finished drinks.",
+              "readAlong": [
+                {
+                  "text": "Coca-Cola began in Atlanta in 1886 as a syrup, mixed with carbonated water at a pharmacy soda fountain.",
+                  "start": 61.85,
+                  "end": 69.24
+                },
+                {
+                  "text": "In a sense it never stopped being a syrup company.",
+                  "start": 69.74,
+                  "end": 72.24
+                },
+                {
+                  "text": "Its annual report describes two lines of business: concentrate operations, selling concentrate and syrup to bottlers, and finished product operations, selling finished drinks.",
+                  "start": 72.8,
+                  "end": 82.49
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "Most of its drinks are made and sold by independent bottlers. Under its bottler's agreements, a bottler generally buys concentrate from Coca-Cola or a supplier it authorizes, then adds water and sweetener, packages the drink and sells it in an assigned territory. In fiscal 2025 the five largest accounted for 44% of worldwide volume.",
+              "readAlong": [
+                {
+                  "text": "Most of its drinks are made and sold by independent bottlers.",
+                  "start": 83.85,
+                  "end": 87.09
+                },
+                {
+                  "text": "Under its bottler's agreements, a bottler generally buys concentrate from Coca-Cola or a supplier it authorizes, then adds water and sweetener, packages the drink and sells it in an assigned territory.",
+                  "start": 87.81,
+                  "end": 98.86
+                },
+                {
+                  "text": "In fiscal 2025 the five largest accounted for 44% of worldwide volume.",
+                  "start": 100.12,
+                  "end": 105.26
+                }
+              ]
+            },
+            {
+              "type": "subheading",
+              "text": "Owning less, on purpose",
+              "readAlong": [
+                {
+                  "text": "Owning less, on purpose",
+                  "start": 106.31,
+                  "end": 107.92
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "Concentrate operations made up 59% of Coca-Cola's revenue of about $47.9 billion in fiscal 2025, and 85% of its unit case volume. Finished drinks were the other 15% of volume but 41% of revenue. The filing states the trade-off plainly: finished drinks generally bring in more revenue for the volume sold, but at lower gross margins.",
+              "readAlong": [
+                {
+                  "text": "Concentrate operations made up 59% of Coca-Cola's revenue of about $47.9 billion in fiscal 2025, and 85% of its unit case volume.",
+                  "start": 109.37,
+                  "end": 118.85
+                },
+                {
+                  "text": "Finished drinks were the other 15% of volume but 41% of revenue.",
+                  "start": 119.39,
+                  "end": 123.77
+                },
+                {
+                  "text": "The filing states the trade-off plainly: finished drinks generally bring in more revenue for the volume sold, but at lower gross margins.",
+                  "start": 124.65,
+                  "end": 131.78
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "So it has repeatedly sold company-owned bottling to independent partners, which it calls refranchising. In 2025 it refranchised bottling in parts of India, and agreed to sell part of its stake in its African bottling business to one of its largest bottlers, keeping 25%.",
+              "readAlong": [
+                {
+                  "text": "So it has repeatedly sold company-owned bottling to independent partners, which it calls refranchising.",
+                  "start": 133.25,
+                  "end": 139.22
+                },
+                {
+                  "text": "In 2025 it refranchised bottling in parts of India, and agreed to sell part of its stake in its African bottling business to one of its largest bottlers, keeping 25%.",
+                  "start": 139.9,
+                  "end": 149.06
+                }
+              ]
+            },
+            {
+              "type": "callout",
+              "icon": "info.circle.fill",
+              "style": "info",
+              "text": "Coca-Cola's own history shows how strongly drinkers are attached to the brand. In April 1985 it changed its formula for the first time in 99 years, after taste tests with nearly 200,000 consumers. Following a wave of consumer protest, the original formula came back 79 days later as Coca-Cola classic.",
+              "readAlong": [
+                {
+                  "text": "Coca-Cola's own history shows how strongly drinkers are attached to the brand.",
+                  "start": 150.82,
+                  "end": 155.37
+                },
+                {
+                  "text": "In April 1985 it changed its formula for the first time in 99 years, after taste tests with nearly 200,000 consumers.",
+                  "start": 156.07,
+                  "end": 164.07
+                },
+                {
+                  "text": "Following a wave of consumer protest, the original formula came back 79 days later as Coca-Cola classic.",
+                  "start": 164.87,
+                  "end": 171.05
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "The Company That Makes Things",
+          "icon": "shippingbox.fill",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "PepsiCo was formed in 1965, when Frito-Lay merged with Pepsi-Cola, so snacks were there from its first day. In fiscal 2025 foods were the larger half: convenient foods made up 58% of net revenue of about $93.9 billion, beverages 42%. Its six reporting segments follow that mix:",
+              "readAlong": [
+                {
+                  "text": "PepsiCo was formed in 1965, when Frito-Lay merged with Pepsi-Cola, so snacks were there from its first day.",
+                  "start": 175.42,
+                  "end": 181.81
+                },
+                {
+                  "text": "In fiscal 2025 foods were the larger half: convenient foods made up 58% of net revenue of about $93.9 billion, beverages 42%.",
+                  "start": 182.47,
+                  "end": 192.16
+                },
+                {
+                  "text": "Its six reporting segments follow that mix:",
+                  "start": 192.68,
+                  "end": 194.62
+                }
+              ]
+            },
+            {
+              "type": "bulletList",
+              "items": [
+                "Two North American units, one for convenient foods and one for beverages",
+                "A franchise unit that sells drink concentrate to bottlers internationally",
+                "A Europe, Middle East and Africa unit running both foods and company-owned bottlers",
+                "Food-only units for Latin America and Asia Pacific"
+              ],
+              "itemsReadAlong": [
+                [
+                  {
+                    "text": "Two North American units, one for convenient foods and one for beverages",
+                    "start": 195.74,
+                    "end": 200.0
+                  }
+                ],
+                [
+                  {
+                    "text": "A franchise unit that sells drink concentrate to bottlers internationally",
+                    "start": 201.18,
+                    "end": 205.26
+                  }
+                ],
+                [
+                  {
+                    "text": "A Europe, Middle East and Africa unit running both foods and company-owned bottlers",
+                    "start": 206.41,
+                    "end": 212.34
+                  }
+                ],
+                [
+                  {
+                    "text": "Food-only units for Latin America and Asia Pacific",
+                    "start": 213.5,
+                    "end": 216.71
+                  }
+                ]
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "Where Coca-Cola mostly leaves bottling to partners, PepsiCo does much of it itself. Its North American drinks business runs its own bottling plants, and direct store delivery, run with its bottlers and distributors, carries drinks and foods straight to stores, where its staff or bottlers stock the shelves. In fiscal 2025, company-owned bottlers produced 36% of its revenue.",
+              "readAlong": [
+                {
+                  "text": "Where Coca-Cola mostly leaves bottling to partners, PepsiCo does much of it itself.",
+                  "start": 218.23,
+                  "end": 223.01
+                },
+                {
+                  "text": "Its North American drinks business runs its own bottling plants, and direct store delivery, run with its bottlers and distributors, carries drinks and foods straight to stores, where its staff or bottlers stock the shelves.",
+                  "start": 223.75,
+                  "end": 236.12
+                },
+                {
+                  "text": "In fiscal 2025, company-owned bottlers produced 36% of its revenue.",
+                  "start": 236.9,
+                  "end": 241.95
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "What Each Structure Buys",
+          "icon": "scalemass.fill",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "The cost shows in the filings. In fiscal 2025 PepsiCo took in roughly twice Coca-Cola's revenue, but it employed about 306,000 people against Coca-Cola's 65,900, more than four times as many.",
+              "readAlong": [
+                {
+                  "text": "The cost shows in the filings.",
+                  "start": 246.21,
+                  "end": 247.72
+                },
+                {
+                  "text": "In fiscal 2025 PepsiCo took in roughly twice Coca-Cola's revenue, but it employed about 306,000 people against Coca-Cola's 65,900, more than four times as many.",
+                  "start": 248.2,
+                  "end": 259.43
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "Each structure buys something. Running its own bottling and store delivery gives PepsiCo a direct hand in how its drinks and foods are stocked and displayed on store shelves. Selling concentrate gives Coca-Cola a leaner business built on its brands, but leaves it reliant on bottlers that are independent contractors, not its agents.",
+              "readAlong": [
+                {
+                  "text": "Each structure buys something.",
+                  "start": 260.77,
+                  "end": 262.17
+                },
+                {
+                  "text": "Running its own bottling and store delivery gives PepsiCo a direct hand in how its drinks and foods are stocked and displayed on store shelves.",
+                  "start": 262.65,
+                  "end": 269.86
+                },
+                {
+                  "text": "Selling concentrate gives Coca-Cola a leaner business built on its brands, but leaves it reliant on bottlers that are independent contractors, not its agents.",
+                  "start": 270.54,
+                  "end": 278.81
+                }
+              ]
+            },
+            {
+              "type": "callout",
+              "icon": "lightbulb.fill",
+              "style": "highlight",
+              "text": "Two companies can sell products made the same way and still be very different businesses. The model lives in two lines of the annual report: where the revenue comes from, and who owns the plants and the trucks.",
+              "readAlong": [
+                {
+                  "text": "Two companies can sell products made the same way and still be very different businesses.",
+                  "start": 280.05,
+                  "end": 284.76
+                },
+                {
+                  "text": "The model lives in two lines of the annual report: where the revenue comes from, and who owns the plants and the trucks.",
+                  "start": 285.44,
+                  "end": 291.52
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "Some caveats. Coca-Cola's lean figures leave out its independent bottlers, whose plants and people sit on their own books; companies in which it holds sizeable stakes, including several large bottlers, had combined revenue of about $102.8 billion in 2025. Coca-Cola also owns some bottling, and PepsiCo also sells concentrate to franchise bottlers. Neither model is simply better; each pays for a different kind of control.",
+              "readAlong": [
+                {
+                  "text": "Some caveats.",
+                  "start": 292.84,
+                  "end": 293.62
+                },
+                {
+                  "text": "Coca-Cola's lean figures leave out its independent bottlers, whose plants and people sit on their own books; companies in which it holds sizeable stakes, including several large bottlers, had combined revenue of about $102.8 billion in 2025.",
+                  "start": 294.28,
+                  "end": 309.47
+                },
+                {
+                  "text": "Coca-Cola also owns some bottling, and PepsiCo also sells concentrate to franchise bottlers.",
+                  "start": 310.27,
+                  "end": 315.6
+                },
+                {
+                  "text": "Neither model is simply better; each pays for a different kind of control.",
+                  "start": 316.28,
+                  "end": 319.92
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "statistics": [
+        {
+          "value": "~$47.9B",
+          "label": "Coca-Cola Revenue, FY2025",
+          "trend": "neutral"
+        },
+        {
+          "value": "~$93.9B",
+          "label": "PepsiCo Net Revenue, FY2025",
+          "trend": "neutral"
+        },
+        {
+          "value": "58%",
+          "label": "PepsiCo Revenue From Foods",
+          "trend": "neutral"
+        }
+      ],
+      "readTimeMinutes": 4,
+      "sortOrder": 24,
+      "publishedDaysAgo": 0,
+      "isFeatured": false,
+      "hasAudioVersion": true,
+      "audioUrl": null,
+      "audioDurationSeconds": 320,
+      "viewCount": "",
+      "relatedArticles": [
+        {
+          "title": "The Home Depot vs. Lowe's",
+          "subtitle": "A fight for the loyalty of contractors and DIY enthusiasts.",
+          "category": "battles",
+          "readTimeMinutes": 3,
+          "viewCount": "",
+          "gradientColors": [
+            "9333EA",
+            "7E22CE"
+          ]
+        },
+        {
+          "title": "Visa vs. Mastercard",
+          "subtitle": "The payment network duopoly.",
+          "category": "battles",
+          "readTimeMinutes": 3,
+          "viewCount": "",
+          "gradientColors": [
+            "8B5CF6",
+            "6D28D9"
+          ]
+        },
+        {
+          "title": "McDonald's: The Real Estate Empire",
+          "subtitle": "Why a burger brand is also a landlord.",
+          "category": "blueprints",
+          "readTimeMinutes": 4,
+          "viewCount": "",
+          "gradientColors": [
+            "2563EB",
+            "1D4ED8"
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "kodak-inventing-the-future-it-couldnt-sell",
+      "title": "Kodak: Inventing the Future It Couldn't Sell",
+      "subtitle": "A company whose own researcher built a digital camera in 1975, but whose richest margins came from film, paper, chemicals and processing, the sales digital substitution hit hardest.",
+      "cardSubtitle": "It built a digital camera in 1975; digital never carried film's margins.",
+      "category": "valueTraps",
+      "author": {
+        "name": "Caydex Research",
+        "title": "Editorial",
+        "isVerified": false
+      },
+      "tagLabel": "TOO GOOD TO LEAVE",
+      "heroGradientColors": [
+        "C2410C",
+        "B45309",
+        "78350F"
+      ],
+      "keyHighlights": [
+        {
+          "icon": "lightbulb.fill",
+          "title": "Invented at Home",
+          "description": "A Kodak researcher built a digital camera prototype in 1975, about the size of a toaster."
+        },
+        {
+          "icon": "arrow.triangle.2.circlepath",
+          "title": "Paid on Every Picture",
+          "description": "Film, paper, chemicals and processing could earn again each time someone took a photo."
+        },
+        {
+          "icon": "chart.line.downtrend.xyaxis",
+          "title": "Digital Up, Margin Down",
+          "description": "Digital revenue overtook traditional revenue in 2005, while gross margin fell to 25.6%."
+        }
+      ],
+      "sections": [
+        {
+          "title": "A Photograph of Film",
+          "icon": "sparkles",
+          "hasGlowEffect": true,
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "The object above is a photograph of film, propped on a worn wooden counter: one 35mm roll standing in its small metal canister, its leader curling out, with more canisters and coils of film around it. The film in the picture and the paper it is printed on are, between them, a fair portrait of how Eastman Kodak made its money.",
+              "readAlong": [
+                {
+                  "text": "The object above is a photograph of film, propped on a worn wooden counter: one 35mm roll standing in its small metal canister, its leader curling out, with more canisters and coils of film around it.",
+                  "start": 18.74,
+                  "end": 30.51
+                },
+                {
+                  "text": "The film in the picture and the paper it is printed on are, between them, a fair portrait of how Eastman Kodak made its money.",
+                  "start": 31.27,
+                  "end": 37.4
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "The awkward twist is that the threat was first built inside the company. In 1975 a Kodak researcher built what the company calls the world's first digital camera, a toaster-sized prototype that captured black-and-white images of 10,000 pixels. Kodak did not miss the future; it had a working prototype of it in 1975. The hard part was living with it.",
+              "readAlong": [
+                {
+                  "text": "The awkward twist is that the threat was first built inside the company.",
+                  "start": 38.96,
+                  "end": 42.74
+                },
+                {
+                  "text": "In 1975 a Kodak researcher built what the company calls the world's first digital camera, a toaster-sized prototype that captured black-and-white images of 10,000 pixels.",
+                  "start": 43.55,
+                  "end": 54.19
+                },
+                {
+                  "text": "Kodak did not miss the future; it had a working prototype of it in 1975.",
+                  "start": 54.93,
+                  "end": 59.6
+                },
+                {
+                  "text": "The hard part was living with it.",
+                  "start": 60.18,
+                  "end": 61.76
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "A Meter on Every Picture",
+          "icon": "arrow.triangle.2.circlepath",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "Kodak's annual report for fiscal 1996 spelled out the model. Amateur photography needed, at minimum, a camera, film and photofinishing, and photofinishing needed chemicals and paper for prints. Kodak supplied all of it.",
+              "readAlong": [
+                {
+                  "text": "Kodak's annual report for fiscal 1996 spelled out the model.",
+                  "start": 66.5,
+                  "end": 70.83
+                },
+                {
+                  "text": "Amateur photography needed, at minimum, a camera, film and photofinishing, and photofinishing needed chemicals and paper for prints.",
+                  "start": 71.57,
+                  "end": 79.38
+                },
+                {
+                  "text": "Kodak supplied all of it.",
+                  "start": 80.04,
+                  "end": 81.48
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "The camera opened the door; the pictures paid the rent. Each roll bought, developed and printed was another chance to sell film, paper, chemicals or processing. In fiscal 1996 Kodak reported about $16.0 billion of sales and roughly $7.6 billion of gross profit, close to 48 cents of every sales dollar.",
+              "readAlong": [
+                {
+                  "text": "The camera opened the door; the pictures paid the rent.",
+                  "start": 83.0,
+                  "end": 85.56
+                },
+                {
+                  "text": "Each roll bought, developed and printed was another chance to sell film, paper, chemicals or processing.",
+                  "start": 86.28,
+                  "end": 91.95
+                },
+                {
+                  "text": "In fiscal 1996 Kodak reported about $16.0 billion of sales and roughly $7.6 billion of gross profit, close to 48 cents of every sales dollar.",
+                  "start": 92.73,
+                  "end": 102.47
+                }
+              ]
+            },
+            {
+              "type": "subheading",
+              "text": "What the digital camera deleted",
+              "readAlong": [
+                {
+                  "text": "What the digital camera deleted",
+                  "start": 103.82,
+                  "end": 105.39
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "A digital camera has no roll to replace: the next picture needs no film, no chemicals and no lab. Kodak's fiscal 2003 annual report named the damage. Digital substitution had hit mainly its film and paper sales and processing services in the U.S., Japan and Western Europe, and it expected U.S. consumer film industry volumes to fall 10% to 12% in 2004.",
+              "readAlong": [
+                {
+                  "text": "A digital camera has no roll to replace: the next picture needs no film, no chemicals and no lab.",
+                  "start": 106.59,
+                  "end": 113.06
+                },
+                {
+                  "text": "Kodak's fiscal 2003 annual report named the damage.",
+                  "start": 113.84,
+                  "end": 117.24
+                },
+                {
+                  "text": "Digital substitution had hit mainly its film and paper sales and processing services in the U.S., Japan and Western Europe, and it expected U.S. consumer film industry volumes to fall 10% to 12% in 2004.",
+                  "start": 118.02,
+                  "end": 131.37
+                }
+              ]
+            },
+            {
+              "type": "callout",
+              "icon": "lightbulb.fill",
+              "style": "highlight",
+              "text": "Before asking whether an incumbent can build the new product, ask what the new product deletes. When it deletes the repeat purchase that pays for everything else, the company must replace its income, not just its product line.",
+              "readAlong": [
+                {
+                  "text": "Before asking whether an incumbent can build the new product, ask what the new product deletes.",
+                  "start": 132.88,
+                  "end": 137.66
+                },
+                {
+                  "text": "When it deletes the repeat purchase that pays for everything else, the company must replace its income, not just its product line.",
+                  "start": 138.2,
+                  "end": 144.62
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "Winning the Sales, Losing the Margin",
+          "icon": "chart.line.downtrend.xyaxis",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "Kodak did go digital, and seriously. It introduced a professional digital camera system in 1991, launched EasyShare consumer cameras in 2001 and, by its own count, shipped its 100 millionth digital still camera in 2011. Its 2003 strategy combined managing the traditional business for cash with faster digital growth, among other goals.",
+              "readAlong": [
+                {
+                  "text": "Kodak did go digital, and seriously.",
+                  "start": 149.42,
+                  "end": 151.56
+                },
+                {
+                  "text": "It introduced a professional digital camera system in 1991, launched EasyShare consumer cameras in 2001 and, by its own count, shipped its 100 millionth digital still camera in 2011.",
+                  "start": 152.06,
+                  "end": 164.41
+                },
+                {
+                  "text": "Its 2003 strategy combined managing the traditional business for cash with faster digital growth, among other goals.",
+                  "start": 164.97,
+                  "end": 171.64
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "By fiscal 2005 digital revenues, swelled by acquired printing businesses, had overtaken traditional ones. The trouble was the kind of revenue it was. On about $14.3 billion of sales, gross margin slipped to 25.6% from 29.1% a year earlier, and the annual report named consumer digital cameras first in explaining the price and mix declines. Its fiscal 2003 report had already warned that rapid price declines soon after a model's launch were common.",
+              "readAlong": [
+                {
+                  "text": "By fiscal 2005 digital revenues, swelled by acquired printing businesses, had overtaken traditional ones.",
+                  "start": 172.82,
+                  "end": 179.04
+                },
+                {
+                  "text": "The trouble was the kind of revenue it was.",
+                  "start": 179.71,
+                  "end": 181.67
+                },
+                {
+                  "text": "On about $14.3 billion of sales, gross margin slipped to 25.6% from 29.1% a year earlier, and the annual report named consumer digital cameras first in explaining the price and mix declines.",
+                  "start": 182.29,
+                  "end": 195.44
+                },
+                {
+                  "text": "Its fiscal 2003 report had already warned that rapid price declines soon after a model's launch were common.",
+                  "start": 196.04,
+                  "end": 201.82
+                }
+              ]
+            },
+            {
+              "type": "callout",
+              "icon": "exclamationmark.triangle.fill",
+              "style": "warning",
+              "text": "This is a value trap of strategy: a business too profitable to abandon. The further Kodak's sales shifted from film toward lower-margin digital products, led by cameras under steady price pressure, the thinner its margin became.",
+              "readAlong": [
+                {
+                  "text": "This is a value trap of strategy: a business too profitable to abandon.",
+                  "start": 203.04,
+                  "end": 207.6
+                },
+                {
+                  "text": "The further Kodak's sales shifted from film toward lower-margin digital products, led by cameras under steady price pressure, the thinner its margin became.",
+                  "start": 208.28,
+                  "end": 217.31
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "Looking for Another Meter",
+          "icon": "building.2.fill",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "The reckoning came in 2012. Kodak filed for Chapter 11 in January, said in February it would exit its business of digital cameras, pocket video cameras and digital picture frames, and in December agreed to sell and license its digital imaging patents in deals worth about $525 million. It emerged in September 2013, completing that day the spin-off of its personalized imaging and document imaging businesses to the pension plan of its U.K. subsidiary.",
+              "readAlong": [
+                {
+                  "text": "The reckoning came in 2012.",
+                  "start": 221.39,
+                  "end": 223.17
+                },
+                {
+                  "text": "Kodak filed for Chapter 11 in January, said in February it would exit its business of digital cameras, pocket video cameras and digital picture frames, and in December agreed to sell and license its digital imaging patents in deals worth about $525 million.",
+                  "start": 223.9,
+                  "end": 239.0
+                },
+                {
+                  "text": "It emerged in September 2013, completing that day the spin-off of its personalized imaging and document imaging businesses to the pension plan of its U.K. subsidiary.",
+                  "start": 239.26,
+                  "end": 247.87
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "Its fiscal 2025 annual report describes a far smaller manufacturer, with about $1.1 billion of revenue and three business segments:",
+              "readAlong": [
+                {
+                  "text": "Its fiscal 2025 annual report describes a far smaller manufacturer, with about $1.1 billion of revenue and three business segments:",
+                  "start": 249.27,
+                  "end": 258.24
+                }
+              ]
+            },
+            {
+              "type": "bulletList",
+              "items": [
+                "Print: digital offset printing plates, presses, inks and workflow software",
+                "Advanced Materials and Chemicals: photographic, industrial and motion picture film, specialty chemicals and patent licensing",
+                "Brand: licensing the Kodak name to other companies"
+              ],
+              "itemsReadAlong": [
+                [
+                  {
+                    "text": "Print: digital offset printing plates, presses, inks and workflow software",
+                    "start": 259.36,
+                    "end": 264.73
+                  }
+                ],
+                [
+                  {
+                    "text": "Advanced Materials and Chemicals: photographic, industrial and motion picture film, specialty chemicals and patent licensing",
+                    "start": 265.99,
+                    "end": 273.61
+                  }
+                ],
+                [
+                  {
+                    "text": "Brand: licensing the Kodak name to other companies",
+                    "start": 274.57,
+                    "end": 277.93
+                  }
+                ]
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "The telling detail is in printing. A new plate is needed for every print run, which the filing calls a recurring revenue stream, and the plate-making business supplied about half of fiscal 2025 revenue. Kodak rebuilt itself around a consumable again, sold to printers instead of households.",
+              "readAlong": [
+                {
+                  "text": "The telling detail is in printing.",
+                  "start": 279.11,
+                  "end": 280.81
+                },
+                {
+                  "text": "A new plate is needed for every print run, which the filing calls a recurring revenue stream, and the plate-making business supplied about half of fiscal 2025 revenue.",
+                  "start": 281.31,
+                  "end": 289.88
+                },
+                {
+                  "text": "Kodak rebuilt itself around a consumable again, sold to printers instead of households.",
+                  "start": 290.44,
+                  "end": 294.68
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "Two honest limits. The 1996 and 2005 margins describe different companies, since Kodak sold and bought whole businesses in between, and its 2005 cost of goods sold carried about $430 million of restructuring charges, so the comparison shows direction, not precision. And hindsight flatters the critic: the filings show how hard it was to give up a meter that ran on every picture, not what a film company should have become.",
+              "readAlong": [
+                {
+                  "text": "Two honest limits.",
+                  "start": 295.8,
+                  "end": 296.8
+                },
+                {
+                  "text": "The 1996 and 2005 margins describe different companies, since Kodak sold and bought whole businesses in between, and its 2005 cost of goods sold carried about $430 million of restructuring charges, so the comparison shows direction, not precision.",
+                  "start": 297.2,
+                  "end": 313.34
+                },
+                {
+                  "text": "And hindsight flatters the critic: the filings show how hard it was to give up a meter that ran on every picture, not what a film company should have become.",
+                  "start": 313.94,
+                  "end": 322.0
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "statistics": [
+        {
+          "value": "1975",
+          "label": "Digital Camera Prototype",
+          "trend": "neutral"
+        },
+        {
+          "value": "~48%",
+          "label": "Gross Margin, Fiscal 1996",
+          "trend": "neutral"
+        },
+        {
+          "value": "25.6%",
+          "label": "Gross Margin, Fiscal 2005",
+          "trend": "down"
+        }
+      ],
+      "readTimeMinutes": 4,
+      "sortOrder": 25,
+      "publishedDaysAgo": 0,
+      "isFeatured": false,
+      "hasAudioVersion": true,
+      "audioUrl": null,
+      "audioDurationSeconds": 322,
+      "viewCount": "",
+      "relatedArticles": [
+        {
+          "title": "The Fall of Sears",
+          "subtitle": "The retailer that invented everything Amazon did.",
+          "category": "valueTraps",
+          "readTimeMinutes": 4,
+          "viewCount": "",
+          "gradientColors": [
+            "9A3412",
+            "7C2D12"
+          ]
+        },
+        {
+          "title": "Microsoft's Cloud Metamorphosis",
+          "subtitle": "How Satya Nadella saved a giant from irrelevance.",
+          "category": "blueprints",
+          "readTimeMinutes": 3,
+          "viewCount": "",
+          "gradientColors": [
+            "0369A1",
+            "075985"
+          ]
+        },
+        {
+          "title": "Meta's Metaverse Pivot",
+          "subtitle": "Betting the kingdom on a virtual dream.",
+          "category": "valueTraps",
+          "readTimeMinutes": 4,
+          "viewCount": "",
+          "gradientColors": [
+            "BE185D",
+            "9D174D"
           ]
         }
       ]

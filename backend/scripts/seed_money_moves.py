@@ -58,6 +58,10 @@ _EXISTING_IMAGES: set[str] = set()  # objects already in money-moves-images/arti
 # slug -> the published_at ALREADY stored for that row. Loaded once in main() so a re-seed
 # preserves the original publication date instead of re-deriving it. See _resolve_published_at.
 _EXISTING_PUBLISHED_AT: dict[str, str] = {}
+# slug -> the artwork URLs ALREADY stored for that row (same field names as `_ART_FIELDS`' values).
+# Loaded once in main() so that no failure path can upsert an empty `image_url` over a live cover.
+# See build_row.
+_EXISTING_ART: dict[str, dict[str, str]] = {}
 # False until the bucket is confirmed to exist. Without this a --dry-run reports [art] for
 # every article while the real run that follows would publish none of it — the upload throws
 # and is swallowed per-file. A dry run that disagrees with the real run is worse than no dry
@@ -223,6 +227,37 @@ def _resolve_published_at(article: dict, slug: str) -> str:
     return (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
 
 
+def _stored_art(row: dict) -> dict[str, str]:
+    """The artwork URLs a stored row already serves, keeping only usable (non-empty string) ones."""
+    content = row.get("content") if isinstance(row.get("content"), dict) else {}
+    found = {"imageUrl": row.get("image_url") or content.get("imageUrl"),
+             "imageCardUrl": content.get("imageCardUrl")}
+    return {field: url for field, url in found.items() if isinstance(url, str) and url}
+
+
+def _image_bucket_exists(sb) -> bool:
+    """True when money-moves-images is there. Raises when the server says it is not.
+
+    `get_bucket` alone cannot answer that any more. storage3 0.12.1 builds its `SyncBucket`
+    dataclass straight from the server's JSON, so the day Supabase added `versioning_status` to
+    that body every 200 became a TypeError, which read as "bucket not found" (2026-11-05). That
+    took the "audio and text only" path, whose empty artwork would have been upserted over every
+    live cover.
+
+    So a listing with anything in it settles the question without parsing a bucket. An EMPTY
+    listing proves nothing (`.list()` on a missing bucket also returns []), so only then is the
+    bucket asked for directly, and a TypeError there means the server answered 200 — a missing
+    bucket raises the SDK's API error, which goes to the caller.
+    """
+    if sb.storage.from_(IMAGE_BUCKET).list(IMAGE_PREFIX, {"limit": 1}):
+        return True
+    try:
+        sb.storage.get_bucket(IMAGE_BUCKET)
+    except TypeError as exc:
+        print(f"(storage SDK could not parse the bucket reply, which still means it exists: {exc})")
+    return True
+
+
 def build_row(sb, article: dict, sort_order: int) -> dict:
     slug = article["slug"]
     published_at = _resolve_published_at(article, slug)
@@ -234,7 +269,11 @@ def build_row(sb, article: dict, sort_order: int) -> dict:
 
     # Baked into the same passthrough blob, which is why new artwork reaches installed apps
     # with no App Store release: the endpoint serves `content` verbatim.
-    art = upload_art(sb, slug)
+    #
+    # A stored URL survives unless a new one replaces it, field by field. `upload_art` returns {}
+    # on every failure path (bucket unconfirmed, no manifest, unreadable manifest, failed upload),
+    # and `upsert` writes what it is given: an empty result here would blank a live cover.
+    art = {**_EXISTING_ART.get(slug, {}), **upload_art(sb, slug)}
     article.update(art)
 
     return {
@@ -271,11 +310,12 @@ def main():
     # exactly the bug this exists to prevent, with no signal that it happened. A transient
     # Supabase 520 must not be able to rewrite every publication date.
     try:
-        stored = sb.table("money_move_articles").select("slug, published_at").execute()
+        stored = sb.table("money_move_articles").select("slug, published_at, image_url, content").execute()
         for row in getattr(stored, "data", None) or []:
             slug = row.get("slug")
             if slug:
                 _EXISTING_PUBLISHED_AT[slug] = row.get("published_at")
+                _EXISTING_ART[slug] = _stored_art(row)
         dated = sum(1 for v in _EXISTING_PUBLISHED_AT.values() if v)
         print(f"{len(_EXISTING_PUBLISHED_AT)} existing row(s), {dated} with a publication date "
               f"— those dates will be preserved.\n")
@@ -304,12 +344,11 @@ def main():
     # the same.
     global _IMAGE_BUCKET_OK
     try:
-        sb.storage.get_bucket(IMAGE_BUCKET)
-        _IMAGE_BUCKET_OK = True
+        _IMAGE_BUCKET_OK = _image_bucket_exists(sb)
     except Exception as exc:  # noqa: BLE001
-        print(f"⚠ bucket '{IMAGE_BUCKET}' not found — apply migration "
-              f"137_money_moves_images.sql, then re-run. Seeding audio and text only. "
-              f"({type(exc).__name__}: {exc})\n")
+        print(f"⚠ bucket '{IMAGE_BUCKET}' could not be confirmed — apply migration "
+              f"137_money_moves_images.sql if it is missing, then re-run. Seeding audio and text "
+              f"only; stored artwork URLs are kept. ({type(exc).__name__}: {exc})\n")
     else:
         try:
             listed = sb.storage.from_(IMAGE_BUCKET).list(IMAGE_PREFIX, {"limit": 500})
@@ -371,4 +410,7 @@ def main():
 
 
 if __name__ == "__main__":
+    from _cli_flags import check_flags
+
+    check_flags(sys.argv, known={"--dry-run", "--force"}, doc=__doc__)
     main()

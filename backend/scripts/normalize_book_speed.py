@@ -190,4 +190,7 @@ def main():
 
 
 if __name__ == "__main__":
+    from _cli_flags import check_flags
+
+    check_flags(sys.argv, known={"--slow", "--target"}, doc=__doc__)
     main()

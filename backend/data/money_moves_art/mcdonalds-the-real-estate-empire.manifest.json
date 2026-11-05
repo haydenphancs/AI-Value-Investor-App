@@ -1,0 +1,48 @@
+{
+  "slug": "mcdonalds-the-real-estate-empire",
+  "category": "blueprints",
+  "treatment": "blueprint_cyanotype",
+  "subject": "a small single-storey roadside restaurant with a drive-through lane, drawn as an exploded assembly with its flat roof, walls and foundation slab lifted apart along one vertical axis above the surveyed boundary lines and corner stakes of its own rectangular plot of land, with no sign, emblem or mark of any kind on the building",
+  "subject_source": "authored",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "16:9",
+  "art_size": "2K",
+  "art_prompt": "A CYANOTYPE technical drawing: the object rendered entirely as fine white engineering linework on a deep Prussian-blue ground, drawn as a precise orthographic exploded assembly diagram with thin leader lines, section hatching, centre lines and arcs. The blue ground carries the mottled uneven wash and slight paper grain of a real sun-exposed blueprint, with soft edges where the coating thinned. Leader lines end in plain dots \u2014 no numbers, no dimensions, no annotations of any kind.\n\nSUBJECT: a small single-storey roadside restaurant with a drive-through lane, drawn as an exploded assembly with its flat roof, walls and foundation slab lifted apart along one vertical axis above the surveyed boundary lines and corner stakes of its own rectangular plot of land, with no sign, emblem or mark of any kind on the building\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 never cropped so tightly that it becomes an abstract texture or an unidentifiable piece of material. It must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nPALETTE: cold steel-blue and pale cyan against deep slate and near-black, with clean bone white. One warm accent at most, and only if the object needs it. Precise and engineered. Use three or four colours at most plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal landscape 16:9 frame. ONE single clear idea, calm and uncluttered, never a busy scene. The subject is complete and entirely inside the frame with a clear unbroken margin on all four sides \u2014 nothing touches or is cut by any edge, because this image is shown as a rounded card and anything against an edge reads as a mistake. The background treatment, however, runs fully edge to edge into all four corners with no border, no frame, no vignette and no second card drawn inside the picture.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, handwriting, engraving, embossed lettering, serial numbers, dial numerals, dimension labels, captions, brand names, logos, trademarks, signage or watermarks ANYWHERE in the image \u2014 every card, label, plaque, sheet, screen and printed surface in the picture is completely blank. No human faces, no hands, no people. No real company's product, packaging or identifying mark.",
+  "art_prompt_sha1": "404f24d336ed",
+  "art_file": "mcdonalds-the-real-estate-empire.art.jpg",
+  "art_native_width": 2752,
+  "art_native_height": 1536,
+  "masters": {
+    "hero": {
+      "file": "mcdonalds-the-real-estate-empire.hero.jpg",
+      "width": 1206,
+      "height": 678,
+      "sha256": "54061f1084d1dff4a31650e24f3393121e2cb67dfcc70fde5aee7fc9e5ab08b8",
+      "bytes": 125121,
+      "cropped": true
+    },
+    "card": {
+      "file": "mcdonalds-the-real-estate-empire.card.jpg",
+      "width": 640,
+      "height": 360,
+      "sha256": "8b03ca0fc2c654a6e25946a0d264caf9a7e03eeecfd89b325342570c7f105276",
+      "bytes": 39556,
+      "cropped": true
+    }
+  },
+  "plate": {
+    "margin_px_fraction": 0.04,
+    "ring_median_luma": 0.321,
+    "ring_spread": 0.586,
+    "inner_spread": 0.095,
+    "edge_activity": 6.169,
+    "mean_luma": 0.1337,
+    "inner_mean_luma": 0.0928,
+    "needs_hairline": false
+  },
+  "uploaded": {
+    "hero": "54061f1084d1dff4a31650e24f3393121e2cb67dfcc70fde5aee7fc9e5ab08b8",
+    "card": "8b03ca0fc2c654a6e25946a0d264caf9a7e03eeecfd89b325342570c7f105276"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/money-moves-images/articles/mcdonalds-the-real-estate-empire.hero.jpg"
+}

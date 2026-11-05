@@ -8,14 +8,14 @@ they are pinned directly, with hand-built records — no clock, no network.
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
 import app.services.earnings_live_service as els
 from app.services.earnings_filing_service import FilingFigures
-from app.utils.market_hours import ET
+from app.utils.market_hours import ET, is_trading_day, previous_trading_day
 
 REPORT = date(2026, 10, 29)           # a Thursday, INTC's report day
 NEXT = date(2026, 10, 30)
@@ -106,11 +106,75 @@ def test_an_early_filing_before_six_makes_the_card_live_not_upcoming():
 
 @pytest.mark.parametrize("hour,visible", [(8, True), (11, True), (12, False), (18, False)])
 def test_an_awaiting_card_drops_off_at_noon_et_the_next_day(hour, visible):
-    assert els.recent_card_visible(els.STATUS_AWAITING, _et(NEXT, hour)) is visible
+    assert els.recent_card_visible(els.STATUS_AWAITING, REPORT, _et(NEXT, hour)) is visible
 
 
 def test_a_reported_card_stays_all_next_day():
-    assert els.recent_card_visible(els.STATUS_REPORTED, _et(NEXT, 21))
+    assert els.recent_card_visible(els.STATUS_REPORTED, REPORT, _et(NEXT, 21))
+
+
+@pytest.mark.parametrize("status", [els.STATUS_UPCOMING, els.STATUS_LIVE])
+def test_a_card_that_never_ended_its_window_is_not_a_recent_card(status):
+    assert not els.recent_card_visible(status, REPORT, _et(NEXT, 8))
+
+
+def test_an_awaiting_card_past_its_next_trading_day_stays_down_on_a_closed_morning():
+    """Monday's card on Saturday morning: Friday was its next trading day, and that is over."""
+    monday, saturday = date(2026, 10, 26), date(2026, 10, 31)
+    assert not els.recent_card_visible(els.STATUS_AWAITING, monday, _et(saturday, 9))
+
+
+def _first_trading_day_after(day: date) -> date:
+    day += timedelta(days=1)
+    while not is_trading_day(day):
+        day += timedelta(days=1)
+    return day
+
+
+def _every_day_2026_to_2028():
+    day = date(2026, 1, 1)
+    while day.year < 2029:
+        yield day
+        day += timedelta(days=1)
+
+
+def test_an_awaiting_card_drops_once_at_noon_on_its_first_trading_day_on_every_calendar_day():
+    """Walks every live day the card can be read on, closed days and holiday runs included."""
+    for today in _every_day_2026_to_2028():
+        for day in els.live_days(today)[:-1]:
+            ends = _first_trading_day_after(day)
+            for hour in (0, 11, 12, 23):
+                assert els.recent_card_visible(els.STATUS_AWAITING, day, _et(today, hour)) is (
+                    (today, hour) < (ends, 12)), (day, today, hour)
+
+
+# ── the live days ────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("today,first,count", [
+    (date(2026, 10, 29), date(2026, 10, 28), 2),    # an ordinary Thursday
+    (date(2026, 11, 7), date(2026, 11, 6), 2),      # a Saturday
+    (date(2026, 11, 8), date(2026, 11, 6), 3),      # a Sunday
+    (date(2026, 11, 9), date(2026, 11, 6), 4),      # a Monday: Friday, the weekend, today
+    (date(2026, 11, 10), date(2026, 11, 9), 2),     # a Tuesday
+    (date(2026, 11, 26), date(2026, 11, 25), 2),    # Thanksgiving
+    (date(2026, 11, 27), date(2026, 11, 25), 3),    # the Friday after it
+    (date(2026, 9, 8), date(2026, 9, 4), 5),        # the Tuesday after Labor Day
+])
+def test_the_live_days_are_every_calendar_day_from_the_previous_trading_day(today, first, count):
+    assert els.live_days(today) == [first + timedelta(days=i) for i in range(count)]
+
+
+def test_the_window_stays_whole_and_never_moves_back_on_the_holiday_table():
+    """A key leaves the sender's memory with its report only if the floor never comes back."""
+    previous_floor = None
+    for today in _every_day_2026_to_2028():
+        days = els.live_days(today)
+        assert days[0] == previous_trading_day(today) and days[-1] == today
+        assert all(b - a == timedelta(days=1) for a, b in zip(days, days[1:]))
+        assert not any(is_trading_day(d) for d in days[1:-1]), "only closed days in between"
+        assert previous_floor is None or days[0] >= previous_floor
+        previous_floor = days[0]
 
 
 # ── per-metric figures and their guards ──────────────────────────────────────

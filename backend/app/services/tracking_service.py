@@ -64,6 +64,7 @@ from app.services.earnings_live_service import (
     LiveSnapshot,
     card_fields,
     get_earnings_live_service,
+    live_days,
     live_payload,
     one_row_per_report,
 )
@@ -80,7 +81,6 @@ from app.utils.market_hours import (
     SESSION_CLOSED,
     SESSION_REGULAR,
     last_regular_session,
-    previous_trading_day,
     session_phase,
 )
 
@@ -805,7 +805,7 @@ async def _cached_earnings_calendar(fmp: Any, today: date) -> List[Dict[str, Any
 
 
 def _recent_earnings_alert(snap: LiveSnapshot) -> AlertResponse:
-    """One previous-day earnings card, in the same shape `_get_earnings_alerts` builds."""
+    """One earnings card from before today, in the same shape `_get_earnings_alerts` builds."""
     month = snap.day.strftime("%b").upper()
     return AlertResponse(
         type="earnings",
@@ -1729,13 +1729,14 @@ class TrackingService:
 
         No live fetch, like the feed: today's rows come from the shared Tracking memo and are
         folded into the shared live records, skipping any older than a record's last own
-        fetch; the previous trading day's are already in those records. The report is
-        `requested` when given (it must lie between the previous trading day and today + 14),
-        else today's, else the previous trading day's, else the next one in the window.
+        fetch; the earlier live days' are already in those records. The report is `requested`
+        when given (it must lie between the previous trading day and today + 14), else
+        today's, else the newest one before today, else the next one in the window.
         """
         sym = symbol.upper()
         today = _et_today()
-        prev = previous_trading_day(today)
+        earlier = live_days(today)[:-1]
+        prev = earlier[0]
         if requested is not None and not prev <= requested <= today + timedelta(
             days=_EARNINGS_ALERT_DAYS_AHEAD
         ):
@@ -1759,13 +1760,14 @@ class TrackingService:
             for (_, d), entry in one_row_per_report(calendar, today, symbols={sym}).items()
             if d is not None
         }
+        held = [d for d in earlier if live.snapshot(sym, d, now) is not None]
 
         if requested is not None:
             day = requested
         elif today in rows:
             day = today
-        elif live.snapshot(sym, prev, now) is not None:
-            day = prev
+        elif held:
+            day = held[-1]
         elif rows:
             day = min(rows)
         else:
@@ -1790,9 +1792,9 @@ class TrackingService:
     async def _get_recent_earnings_alerts(
         self, watchlist_tickers: List[str]
     ) -> List[AlertResponse]:
-        """The previous trading day's earnings cards — `recent_earnings_alerts`.
+        """The earnings cards from before today — `recent_earnings_alerts`.
 
-        Read-only: the live loop holds that day's rows (`earnings_live_service`), and with
+        Read-only: the live loop holds those days' rows (`earnings_live_service`), and with
         the loop off (EARNINGS_LIVE_ENABLED, or local dev) there are simply none.
         """
         if not settings.EARNINGS_LIVE_ENABLED or not watchlist_tickers:

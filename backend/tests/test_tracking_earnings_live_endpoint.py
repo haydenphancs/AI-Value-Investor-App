@@ -105,6 +105,19 @@ def test_without_a_date_the_previous_trading_days_report_is_chosen_when_today_ha
     assert body["report_date"] == "2026-10-28" and body["status"] == "reported"
 
 
+@pytest.mark.parametrize("query", ["", "?report_date=2026-10-24"], ids=["no_date", "by_date"])
+def test_a_report_dated_on_a_closed_day_is_answered_on_the_next_trading_day(
+        client, monkeypatch, query):
+    saturday, monday = date(2026, 10, 24), date(2026, 10, 26)
+    monkeypatch.setattr(ts, "_et_today", lambda: monday)
+    els.get_earnings_live_service().observe_rows(
+        saturday, [_row("MSFT", saturday, epsActual=3.1, revenueActual=7e10, epsEstimated=3.0,
+                        revenueEstimated=6.9e10)],
+        datetime(2026, 10, 24, 15, tzinfo=timezone.utc))
+    body = client.get(f"/api/v1/tracking/earnings/MSFT/live{query}").json()
+    assert (body["report_date"], body["status"]) == ("2026-10-24", "reported")
+
+
 @pytest.mark.parametrize("reported_first", [False, True],
                          ids=["pending_first", "reported_first"])
 def test_a_duplicate_pair_answers_with_the_reported_rows_figures(client, reported_first):

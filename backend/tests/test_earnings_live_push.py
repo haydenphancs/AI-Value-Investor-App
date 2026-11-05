@@ -15,6 +15,7 @@ The dispatcher is a recorder — nothing here reaches APNs or Supabase.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List
 
@@ -157,6 +158,21 @@ async def test_the_once_per_report_memory_is_bounded_to_the_live_days(dispatch):
     three_days_later = datetime(2026, 11, 3, 15, 0, tzinfo=timezone.utc)
     await sender.dispatch_landings([], three_days_later)
     assert ("INTC", REPORT) not in sender._live_done
+
+
+@pytest.mark.asyncio
+async def test_the_memory_keeps_a_closed_day_report_as_long_as_it_is_live(dispatch):
+    """A Saturday report is handed over through Monday. A key forgotten any sooner would be
+    sent again on the next round."""
+    saturday = date(2026, 11, 7)
+    snap = replace(_snap(eps=0.42, eps_pct=2.44, rev=17.1e9), day=saturday)
+    for now in (datetime(2026, 11, 7, 18, tzinfo=timezone.utc),
+                datetime(2026, 11, 8, 18, tzinfo=timezone.utc),
+                datetime(2026, 11, 9, 18, tzinfo=timezone.utc)):
+        await sender.dispatch_landings([snap], now)
+    assert len(dispatch.sent) == 1
+    await sender.dispatch_landings([], datetime(2026, 11, 10, 18, tzinfo=timezone.utc))
+    assert ("INTC", saturday) not in sender._live_done
 
 
 @pytest.mark.asyncio

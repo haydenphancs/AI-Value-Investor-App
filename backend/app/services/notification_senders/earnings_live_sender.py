@@ -38,6 +38,8 @@ from app.services.earnings_live_service import (
     SOURCE_FMP,
     LiveMetric,
     LiveSnapshot,
+    et_now,
+    live_days,
 )
 from app.services.notification_kinds import (
     KIND_EARNINGS_LIVE,
@@ -54,7 +56,7 @@ from app.services.notification_senders.earnings_sender import (
 logger = logging.getLogger(__name__)
 
 #: Bound one round's fan-out, as `earnings_sender.MAX_SYMBOLS_PER_PASS` does. Anything over
-#: it is picked up on the next 60 s round, never dropped.
+#: it is picked up on the next 60 s round, while its report is still in the live days.
 MAX_SENDS_PER_ROUND = 60
 
 # Once per (symbol, report date) per process. The dedup key is what stops a restart from
@@ -133,13 +135,12 @@ async def _notify(kind: str, snap: LiveSnapshot, title: str, body: str) -> int:
 
 
 def _prune(now: datetime) -> None:
-    """Forget keys older than the live loop's two days, so the sets stay bounded."""
-    from app.services.earnings_live_service import et_now
-    from app.utils.market_hours import previous_trading_day
-
-    floor = previous_trading_day(et_now(now).date())
+    """Forget keys outside the live days, so the sets stay bounded. The same window on the same
+    `now` as `landed_snapshots`: a key must never leave here while its report is still handed
+    over, or that report reads as new on every round."""
+    days = set(live_days(et_now(now).date()))
     for done in (_live_done, _surprise_done):
-        for key in [k for k in done if k[1] < floor]:
+        for key in [k for k in done if k[1] not in days]:
             done.discard(key)
 
 

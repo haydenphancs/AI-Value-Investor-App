@@ -191,11 +191,12 @@ class TrackingFeedResponse(BaseModel):
 
     assets: List[TrackedAssetResponse] = Field(default_factory=list)
     alerts: List[AlertResponse] = Field(default_factory=list)
-    # The PREVIOUS trading day's earnings cards (reported, or awaiting until 12:00 ET), so an
-    # after-close report is still on screen with its results the next morning. A separate
-    # field and not more rows in `alerts`: a shipped build ignores an unknown key, whereas a
-    # past-dated row in `alerts` would render as "INTC reports earnings on OCT 29" under
-    # Upcoming the day after. Same `AlertResponse` shape (type "earnings").
+    # The earnings cards from before today (`earnings_live_service.recent_snapshots`: reported,
+    # or awaiting until 12:00 ET on the next trading day), so an after-close report is still
+    # on screen with its results the next morning. A separate field and not more rows in
+    # `alerts`: a shipped build ignores an unknown key, whereas a past-dated row in `alerts`
+    # would render as "INTC reports earnings on OCT 29" under Upcoming the day after. Same
+    # `AlertResponse` shape (type "earnings").
     recent_earnings_alerts: List[AlertResponse] = Field(default_factory=list)
 
 

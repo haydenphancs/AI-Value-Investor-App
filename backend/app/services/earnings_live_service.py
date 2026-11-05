@@ -32,19 +32,26 @@ The card and the sheet read the same pick (`one_row_per_report`).
 anything folds (`_note_consensus`) and kept GUARD-ONLY. The sanity guards, the zero rules and
 "is a revenue still due" read it; a surprise, the card and the sheet never do.
 
-THE MEMO. The previous trading day and today, one single-day calendar call each — a
-multi-day request is cut at 4,000 rows with the NEWEST dates kept (`fetch_calendar_days`).
+THE MEMO. The live days (`live_days`): every calendar day from the previous trading day
+through today, one single-day calendar call each — a multi-day request is cut at 4,000 rows
+with the NEWEST dates kept (`fetch_calendar_days`). Calendar days, because a report can carry
+a weekend or holiday date. This one window holds the records, the push sender's memory and
+every reader, and each refresh prunes to it first: a report the sender has forgotten must
+already be gone from the records, or it reads as new on every round.
   * Today's rows arrive for free: the Tracking memo (`tracking_service._cached_earnings_
     calendar`, 30 min, the owner's 2026-10-22 cadence) already holds them, and every reader
     folds them in. This module fetches today ITSELF only while it is HOT.
-  * The previous trading day is held only here (after-close actuals land overnight, and the
+  * The days before today are held only here (after-close actuals land overnight, and the
     card must still be there the next morning).
   * HOT = 06:00–22:00 ET, and a WATCHED row on that day still lacks results — the same gate
     as `earnings_window_service._hot_due`. The previous trading day stops being hot at 12:00
-    ET. Hot days refresh every `EARNINGS_LIVE_HOT_TTL_SECONDS` (5 min); the previous day
-    otherwise every 30 min. 5 min and not faster: the filing path supplies the speed, FMP is
-    the confirmation. Cost, worst case: ~190 extra single-day calls on a report day plus ~70
-    for the previous day's morning, against the Tracking memo's ~150 a day.
+    ET, and a closed day between it and today is never hot. Hot days refresh every
+    `EARNINGS_LIVE_HOT_TTL_SECONDS` (5 min). Any other day before today is asked once, then
+    every 30 min while a watched report on it is pending. 5 min and not faster: the filing
+    path supplies the speed, FMP is the confirmation. Cost, worst case: ~190 extra single-day
+    calls on a report day plus ~70 for the previous day's morning, against the Tracking memo's
+    ~150 a day; a closed day adds one call, and at most 48 a day while a watched report on it
+    is pending.
   * Refreshed by the live loop ONLY (`run_earnings_live_loop`, 60 s). Feed builds and the
     sheet endpoint fold the Tracking memo and read; they never fetch, so the live state adds
     no latency to the feed.
@@ -58,8 +65,8 @@ STATUSES (no time of day exists on `/stable` rows, so the window is the report d
                  guard-only), or the live window ended with at least one figure in.
   * `awaiting` — the window ended with nothing in. "Results not in yet" — never "late", a
                  status `earnings_window_service` deliberately does not have (FMP lag and
-                 reschedule duplicates make it misleading). An awaiting card drops off at
-                 12:00 ET the next trading day.
+                 reschedule duplicates make it misleading). An awaiting card stays up until
+                 12:00 ET on the first trading day after its report, and drops once.
 
 GUARDS, each a defect found elsewhere in this repo:
   * a dropped-digit EPS (`_earnings_common.eps_digit_shift_suspect`) is held as "checking",
@@ -102,7 +109,7 @@ from app.services._earnings_common import eps_digit_shift_suspect
 from app.services.earnings_filing_service import FilingFigures
 from app.services.earnings_window_service import _row_date, _row_symbol, fetch_calendar_days
 from app.services.updates_materiality import finite
-from app.utils.market_hours import ET, previous_trading_day
+from app.utils.market_hours import ET, is_trading_day, previous_trading_day
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +120,8 @@ EARNINGS_LIVE_COLD_TTL_SECONDS = 1800
 #: The live window on the report day, in ET hours: [start, end).
 EARNINGS_LIVE_START_HOUR_ET = 6
 EARNINGS_LIVE_END_HOUR_ET = 22
-#: The previous trading day stays hot, and an `awaiting` card stays up, until this ET hour.
+#: The previous trading day stays hot until this ET hour, and an `awaiting` card stays up until
+#: this ET hour on the first trading day after its report.
 EARNINGS_LIVE_PREV_DAY_UNTIL_HOUR_ET = 12
 
 #: Below this |estimate| no surprise percentage is honest (`earnings_sender.MIN_ABS_ESTIMATE`:
@@ -241,6 +249,15 @@ def et_now(now: datetime) -> datetime:
     return now.astimezone(ET)
 
 
+def live_days(today: date) -> List[date]:
+    """The one window of the live state: every calendar day from the previous trading day
+    through ``today``, oldest first (THE MEMO in the module docstring). Never just those two
+    days: `previous_trading_day` steps over a weekend or holiday, and a report dated on one
+    would drop out the day after, while the sheet still accepts its date."""
+    first = previous_trading_day(today)
+    return [first + timedelta(days=i) for i in range((today - first).days + 1)]
+
+
 def eps_surprise_pct(actual: Optional[float], estimate: Optional[float]) -> Optional[float]:
     """(a - e) / |e| as a percent (2 dp), or None when there is no honest one."""
     if actual is None or estimate is None or abs(estimate) < MIN_ABS_EPS_ESTIMATE:
@@ -333,11 +350,18 @@ def live_status(day: date, today: date, now_et: datetime, eps: LiveMetric,
     return STATUS_REPORTED if any_in else STATUS_AWAITING
 
 
-def recent_card_visible(status: str, now_et: datetime) -> bool:
-    """A previous-day card: reported stays all day, awaiting drops at 12:00 ET."""
+def recent_card_visible(status: str, day: date, now_et: datetime) -> bool:
+    """A card from before today, for a report dated `day`. Reported stays. Awaiting stays until
+    12:00 ET on the first trading day after `day`, so it drops once: a Friday card is up all
+    weekend, and a card from the day before a holiday all through it."""
     if status == STATUS_REPORTED:
         return True
-    return status == STATUS_AWAITING and now_et.hour < EARNINGS_LIVE_PREV_DAY_UNTIL_HOUR_ET
+    if status != STATUS_AWAITING:
+        return False
+    today = now_et.date()
+    if previous_trading_day(today) > day:
+        return False
+    return not is_trading_day(today) or now_et.hour < EARNINGS_LIVE_PREV_DAY_UNTIL_HOUR_ET
 
 
 def snapshot_of(rec: _Record, today: date, now_et: datetime) -> LiveSnapshot:
@@ -770,23 +794,27 @@ class EarningsLiveService:
         return snapshot_of(rec, n.date(), n)
 
     def recent_snapshots(self, symbols: Collection[str], now: datetime) -> List[LiveSnapshot]:
-        """The previous trading day's cards worth showing (reported / awaiting-before-noon)."""
+        """The cards from before today worth showing (`recent_card_visible`), ONE per symbol:
+        the newest visible report's. iOS ids a card by ticker and date, so a Friday and a
+        Saturday report would otherwise be two cards."""
         n = et_now(now)
         today = n.date()
-        prev = previous_trading_day(today)
+        earlier = live_days(today)[:-1]
         out = []
         for symbol in sorted({s.upper() for s in symbols}):
-            rec = self._records.get((symbol, prev))
-            if rec is None:
-                continue
-            snap = snapshot_of(rec, today, n)
-            if recent_card_visible(snap.status, n):
-                out.append(snap)
+            for day in reversed(earlier):
+                rec = self._records.get((symbol, day))
+                if rec is None:
+                    continue
+                snap = snapshot_of(rec, today, n)
+                if recent_card_visible(snap.status, snap.day, n):
+                    out.append(snap)
+                    break
         return out
 
     def landed_snapshots(self, now: datetime) -> List[LiveSnapshot]:
-        """Every record whose results were SEEN landing in this process (previous trading day
-        and today), as of now. The push sender keeps its own once-per-key bookkeeping.
+        """Every record of the live days whose results were SEEN landing in this process, as of
+        now. The push sender keeps its own once-per-key bookkeeping, over the same days.
 
         A record already reported when first seen (a restart, a first fetch after the fact)
         is not a landing — the same rule as `earnings_window_service._absorb` — so a deploy
@@ -795,10 +823,12 @@ class EarningsLiveService:
         though FMP's row still reads pending (`absorb_filing`).
         """
         n = et_now(now)
+        today = n.date()
+        days = set(live_days(today))
         return [
-            snapshot_of(rec, n.date(), n)
+            snapshot_of(rec, today, n)
             for rec in self._records.values()
-            if rec.landed_at is not None and rec.landed_from_pending
+            if rec.day in days and rec.landed_at is not None and rec.landed_from_pending
         ]
 
     def pending_symbols(self, day: date, symbols: Iterable[str]) -> List[str]:
@@ -822,40 +852,47 @@ class EarningsLiveService:
     def due_days(self, now: datetime, symbols: Collection[str]) -> List[date]:
         """The days this round must fetch, oldest first (see THE MEMO in the docstring)."""
         n = et_now(now)
-        today = n.date()
-        prev = previous_trading_day(today)
+        *earlier, today = live_days(n.date())
         mono = time.monotonic()
         due = []
-        last = self._fetched.get(prev)
-        if last is None:
-            due.append(prev)
-        elif self._is_hot(prev, n, symbols):
-            if mono - last >= EARNINGS_LIVE_HOT_TTL_SECONDS:
-                due.append(prev)
-        elif self.pending_symbols(prev, symbols) and mono - last >= EARNINGS_LIVE_COLD_TTL_SECONDS:
-            # Outside the hot window a late FMP fill is still worth picking up, slowly — and
-            # once every watched report on that day is complete there is nothing left to ask.
-            due.append(prev)
+        # `earlier[0]` is the previous trading day, the only one of these that can go hot.
+        for day in earlier:
+            last = self._fetched.get(day)
+            if last is None:
+                due.append(day)
+            elif day == earlier[0] and self._is_hot(day, n, symbols):
+                if mono - last >= EARNINGS_LIVE_HOT_TTL_SECONDS:
+                    due.append(day)
+            elif (self.pending_symbols(day, symbols)
+                  and mono - last >= EARNINGS_LIVE_COLD_TTL_SECONDS):
+                # Outside the hot window a late FMP fill is still worth picking up, slowly — and
+                # once every watched report on that day is complete there is nothing left to ask.
+                due.append(day)
         if self._is_hot(today, n, symbols):
             last = self._fetched.get(today)
             if last is None or mono - last >= EARNINGS_LIVE_HOT_TTL_SECONDS:
                 due.append(today)
         return due
 
+    def _prune(self, now: datetime) -> None:
+        """Forget every day outside the live days."""
+        days = set(live_days(et_now(now).date()))
+        for key in [k for k in self._records if k[1] not in days]:
+            self._records.pop(key, None)
+        for day in [d for d in self._fetched if d not in days]:
+            self._fetched.pop(day, None)
+
     async def refresh(self, now: datetime, *, fmp: Any, symbols: Collection[str]) -> None:
-        """Fetch the due days and fold them in. Never raises (a failure keeps the records)."""
+        """Prune, then fetch the due days and fold them in. The prune comes before every early
+        return: the days roll with nothing due and during a failure wait too. Never raises (a
+        failure keeps the records of the live days)."""
+        self._prune(now)
         if time.monotonic() < self._failed_until:
             return
         days = self.due_days(now, symbols)
         if not days:
             return
         await self._run_once(("refresh", days[-1]), lambda: self._fetch(now, fmp, days))
-        n = et_now(now)
-        keep = {previous_trading_day(n.date()), n.date()}
-        for key in [k for k in self._records if k[1] not in keep]:
-            self._records.pop(key, None)
-        for day in [d for d in self._fetched if d not in keep]:
-            self._fetched.pop(day, None)
 
     async def _fetch(self, now: datetime, fmp: Any, days: List[date]) -> None:
         getter = getattr(fmp, "get_earnings_calendar", None)
@@ -1149,7 +1186,7 @@ async def earnings_live_tick(
     pending_today = service.pending_symbols(today, watched)
     if pending_today and n.hour >= EARNINGS_LIVE_START_HOUR_ET:
         watcher = get_earnings_filing_watcher()
-        watcher.prune([previous_trading_day(today), today])
+        watcher.prune(live_days(today))
         found = await watcher.run_once(now, pending_today, today, sec=sec, gemini=gemini)
         for symbol, figures in found.items():
             service.absorb_filing(symbol, today, figures, now)

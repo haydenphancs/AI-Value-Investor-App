@@ -546,7 +546,7 @@ class Settings(BaseSettings):
     # each figure lands, and a push goes out when results land. Four switches, so each part
     # can be turned off without a deploy of the others:
     #   * EARNINGS_LIVE_ENABLED — the live state itself: the 60 s loop that refreshes the
-    #     previous trading day and today, the card fields, `recent_earnings_alerts` and
+    #     previous trading day through today, the card fields, `recent_earnings_alerts` and
     #     `GET /tracking/earnings/{ticker}/live`. Off = the card is as it was (estimates).
     #   * EARNINGS_LIVE_FILINGS_ENABLED — the fast path: the company's own 8-K Item 2.02
     #     press release read from SEC EDGAR and Gemini-extracted, every figure a verbatim

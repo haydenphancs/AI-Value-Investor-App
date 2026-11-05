@@ -105,6 +105,30 @@ def test_without_a_date_the_previous_trading_days_report_is_chosen_when_today_ha
     assert body["report_date"] == "2026-10-28" and body["status"] == "reported"
 
 
+@pytest.mark.parametrize("reported_first", [False, True],
+                         ids=["pending_first", "reported_first"])
+def test_a_duplicate_pair_answers_with_the_reported_rows_figures(client, reported_first):
+    pair = [_row("MSFT", REPORT, epsEstimated=0.35, revenueEstimated=15.9e9),
+            _row("MSFT", REPORT, epsActual=0.44, revenueActual=17.1e9)]
+    ts.get_fmp_client().rows[:] = pair[::-1] if reported_first else pair
+    body = client.get("/api/v1/tracking/earnings/MSFT/live").json()
+    assert (body["eps"]["estimate"], body["eps"]["surprise_pct"]) == (0.41, 7.32)
+    assert (body["revenue"]["estimate"], body["revenue"]["surprise_pct"]) == (16.6e9, 3.01)
+
+
+@pytest.mark.parametrize("newest_first", [False, True])
+def test_a_future_pair_shows_the_estimates_the_card_picks(client, newest_first):
+    """No record exists yet, so the row is the sheet's only consensus: it must be the row the
+    card picks, not whichever FMP listed first."""
+    day = REPORT + timedelta(days=4)
+    stale = _row("MSFT", day, epsEstimated=0.35, lastUpdated="2026-10-01")
+    fresh = _row("MSFT", day, epsEstimated=0.41, lastUpdated="2026-10-20")
+    ts.get_fmp_client().rows[:] = [fresh, stale] if newest_first else [stale, fresh]
+    body = client.get("/api/v1/tracking/earnings/MSFT/live").json()
+    assert body["status"] == "upcoming" and body["report_date"] == day.isoformat()
+    assert body["eps"]["estimate"] == 0.41
+
+
 def test_a_ticker_with_no_report_in_the_window_answers_none(client):
     body = client.get("/api/v1/tracking/earnings/ZZZZ/live").json()
     assert body["status"] == "none"

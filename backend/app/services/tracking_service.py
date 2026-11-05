@@ -65,6 +65,7 @@ from app.services.earnings_live_service import (
     card_fields,
     get_earnings_live_service,
     live_payload,
+    one_row_per_report,
 )
 from app.services._earnings_common import (
     parse_fmp_timing,
@@ -1609,21 +1610,16 @@ class TrackingService:
             if live is not None:
                 live.observe_rows(today, calendar, now, symbols=ticker_set)
 
-            for entry in calendar:
-                # One malformed row must not cost every alert: the answer is memoised
-                # for 30 min, so an `AttributeError` here would blank every user's
-                # earnings alerts for that long.
-                if not isinstance(entry, dict):
-                    continue
+            # One card per report: FMP can list a report twice, and both cards would carry
+            # one id on iOS. A non-dict row is skipped there too: the answer is memoised for
+            # 30 min, so an `AttributeError` here would blank every user's earnings alerts
+            # for that long.
+            reports = one_row_per_report(calendar, today, symbols=ticker_set)
+            for (symbol, _), entry in reports.items():
                 # A malformed DICT row (a non-str field, anything that raises below)
                 # costs only that row — never the whole section. The memo would keep an
                 # all-or-nothing failure for 30 min.
-                symbol = "?"
                 try:
-                    symbol = str(entry.get("symbol") or "").upper()
-                    if symbol not in ticker_set:
-                        continue
-
                     # Parse date for day/month. A non-str date is treated as absent
                     # (strptime would raise TypeError, which `except ValueError` misses).
                     date_str = entry.get("date")
@@ -1679,6 +1675,10 @@ class TrackingService:
                     if live is not None and row_day is not None:
                         snap = live.snapshot(symbol, row_day, now) if row_day <= today else None
                         live_fields = card_fields(snap, row_day)
+                        if snap is not None:
+                            # The surprise came from the record's estimates: show those, as
+                            # the sheet does. In this block only: `snap` is not reset per row.
+                            eps_est, rev_est = snap.eps.estimate, snap.revenue.estimate
 
                     alerts.append(
                         AlertResponse(
@@ -1737,16 +1737,12 @@ class TrackingService:
                         sym, type(e).__name__, e)
             calendar = []
         live.observe_rows(today, calendar, now, symbols={sym})
-        rows: Dict[date, Dict[str, Any]] = {}
-        for entry in calendar:
-            if not isinstance(entry, dict) or str(entry.get("symbol") or "").upper() != sym:
-                continue
-            raw = entry.get("date")
-            try:
-                d = date.fromisoformat(str(raw or "")[:10])
-            except ValueError:
-                continue
-            rows.setdefault(d, entry)
+        # The card's pick, so a future pair cannot show one consensus there and another here.
+        rows: Dict[date, Dict[str, Any]] = {
+            d: entry
+            for (_, d), entry in one_row_per_report(calendar, today, symbols={sym}).items()
+            if d is not None
+        }
 
         if requested is not None:
             day = requested

@@ -16,6 +16,13 @@ TWO SOURCES, ONE RECORD PER (symbol, report date).
   A record is STICKY: a figure, once verified, never goes back to "not out yet", and FMP's
   figure replaces the filing's the moment FMP has one.
 
+DUPLICATE ROWS. FMP can list one report twice, a stale pending row beside the reported one,
+in either order. One response therefore decides per report, never per row: the rows carrying
+results supply each metric's estimate and actual, a pending twin is ignored, and the record
+takes one landing decision. An estimate moves only with its own actual, or while that metric
+has no FMP actual, so a surprise is never worked out against a pending row's consensus. The
+card and the sheet read the same pick (`one_row_per_report`).
+
 THE MEMO. The previous trading day and today, one single-day calendar call each — a
 multi-day request is cut at 4,000 rows with the NEWEST dates kept (`fetch_calendar_days`).
   * Today's rows arrive for free: the Tracking memo (`tracking_service._cached_earnings_
@@ -51,7 +58,10 @@ GUARDS, each a defect found elsewhere in this repo:
     within 2% (FMP's dropped-digit revenue, `earnings_service._reconcile_revenue`);
   * a GAAP-only EPS is shown labelled GAAP with no beat/miss — the consensus is adjusted (the
     owner's 2026-09-27 caution, `news_insight_service._earnings_line`);
-  * no surprise percentage against an estimate under $0.01 (`earnings_sender.MIN_ABS_ESTIMATE`).
+  * no surprise percentage against an estimate under $0.01 (`earnings_sender.MIN_ABS_ESTIMATE`);
+  * a zero revenue from FMP is stored only against a consensus under $100M, with no figure
+    held (a pre-revenue name can report nothing): beside a material consensus, or none, it
+    is an unfilled field, never a -100% miss and never a landing.
 """
 
 from __future__ import annotations
@@ -102,6 +112,10 @@ MIN_ABS_EPS_ESTIMATE = 0.01
 _REVENUE_GUARD_MIN_ESTIMATE = 100e6
 _REVENUE_PLAUSIBLE = (0.5, 2.0)
 _SOURCES_AGREE = 0.02
+#: A filing accepted longer than this before its record was first seen was already out at
+#: first sight, like an FMP row first seen reported. Long enough to cover a deploy gap, so a
+#: deploy inside the release window keeps the landing it can still announce.
+_FILING_LANDING_GRACE = timedelta(minutes=15)
 
 _FETCH_DEADLINE_SECONDS = 20.0
 _FAILURE_RETRY_SECONDS = 120.0
@@ -156,10 +170,14 @@ class _Record:
     fmp_revenue: Optional[float] = None
     filing: Optional[FilingFigures] = None
     checked_at: Optional[datetime] = None
+    # When this process first held the record: read against a filing's acceptance time.
+    first_seen_at: Optional[datetime] = None
     # Observed WITHOUT results in this process — what makes a later landing a landing.
     seen_pending: bool = False
     landed_at: Optional[datetime] = None
     landed_from_pending: bool = False
+    # The fold runs on every tick and feed build: a refused revenue is logged once per record.
+    revenue_refusal_logged: bool = False
 
 
 @dataclass(frozen=True)
@@ -424,6 +442,70 @@ def yoy_growth_pct(actual: Optional[float], year_ago: Optional[float]) -> Option
     return round((actual - year_ago) / year_ago * 100.0, 2)
 
 
+def _usable_actuals(row: Dict[str, Any]) -> int:
+    """How many results a calendar row carries: a finite EPS (0.0 is a real breakeven) and a
+    positive revenue. Not `row_reported`: a zero or negative revenue must not rank a row as
+    the reported one; whether a zero is a result is `_storable_revenue`'s call."""
+    eps = finite(row.get("epsActual"))
+    revenue = finite(row.get("revenueActual"))
+    return int(eps is not None) + int(revenue is not None and revenue > 0)
+
+
+def _row_rank(row: Dict[str, Any], today: date) -> Tuple[int, str]:
+    """How strongly a row speaks for its report: results first, then FMP's own `lastUpdated`.
+    Actuals on a row dated after today are garbage (`earnings_window_service._absorb`), so
+    they rank as nothing, and a re-touched pending twin never beats a reported row."""
+    day = _row_date(row)
+    usable = _usable_actuals(row) if day is not None and day <= today else 0
+    return usable, str(row.get("lastUpdated") or "")
+
+
+def _rows_to_fold(group: List[Dict[str, Any]], today: date) -> List[Dict[str, Any]]:
+    """One report's rows, in fold order. When any row carries results the others are dropped;
+    all of those are kept, because two reported rows can split EPS and revenue. The best row
+    folds last, and a tie goes to the first listed, the same pick as `one_row_per_report`."""
+    ranked = sorted(reversed(group), key=lambda row: _row_rank(row, today))
+    reported = [row for row in ranked if _row_rank(row, today)[0] > 0]
+    return reported or ranked
+
+
+def one_row_per_report(
+    rows: Iterable[Any], today: date, *, symbols: Optional[Collection[str]] = None,
+) -> Dict[Tuple[str, Optional[date]], Dict[str, Any]]:
+    """PURE. The one row that speaks for each (symbol, date), first-seen order kept, so a
+    timestamp date merges with its plain twin and a reschedule's two dates stay two reports.
+
+    For the readers that show ONE row: the card and the sheet. Non-dict and symbol-less rows
+    are skipped, and ``symbols`` narrows the answer to those tickers. A tie keeps the first
+    listed row.
+    """
+    wanted = {s.upper() for s in symbols} if symbols is not None else None
+    best: Dict[Tuple[str, Optional[date]], Dict[str, Any]] = {}
+    for row in rows:
+        symbol = _row_symbol(row)
+        if not symbol or (wanted is not None and symbol not in wanted):
+            continue
+        key = (symbol, _row_date(row))
+        held = best.get(key)
+        if held is None or _row_rank(row, today) > _row_rank(held, today):
+            best[key] = row
+    return best
+
+
+def _storable_revenue(actual: Optional[float], held: Optional[float],
+                      consensus: Optional[float]) -> Optional[float]:
+    """The FMP revenue a row may store, or None. A negative one is junk. A zero is a result
+    only with no positive figure held (records are sticky) and a consensus under the
+    plausibility guard's floor; beside a material consensus, or with none to judge it by, it
+    is an unfilled field, and storing it would read as a -100% miss and a landing."""
+    if actual is None or actual > 0:
+        return actual
+    if actual == 0 and not held and consensus is not None \
+            and consensus < _REVENUE_GUARD_MIN_ESTIMATE:
+        return 0.0
+    return None
+
+
 # ── The service ─────────────────────────────────────────────────────
 
 
@@ -452,6 +534,11 @@ class EarningsLiveService:
                      fetched: bool = False) -> None:
         """Fold FMP calendar rows dated `day` into their records. Sticky (module docstring).
 
+        Each symbol's rows decide TOGETHER (`_rows_to_fold`, DUPLICATE ROWS in the module
+        docstring), with one `_note_landing` per symbol: a pending row beside a reported one
+        in the same response is "reported", not a landing, as in
+        `earnings_window_service._absorb`, whichever FMP listed first.
+
         ``symbols`` narrows the fold to those tickers (a feed build passes its user's), so a
         reader never pays for the whole market's rows.
 
@@ -460,40 +547,55 @@ class EarningsLiveService:
         `checked_at`, or the sheet would say "updated just now" over a half-hour-old answer.
         """
         wanted = {s.upper() for s in symbols} if symbols is not None else None
+        groups: Dict[str, List[Dict[str, Any]]] = {}
         for row in rows:
-            if not isinstance(row, dict):
-                continue
             symbol = _row_symbol(row)
             if not symbol or (wanted is not None and symbol not in wanted):
                 continue
-            if _row_date(row) != day:
-                continue
+            if _row_date(row) == day:
+                groups.setdefault(symbol, []).append(row)
+        today = et_now(now).date()
+        for symbol, group in groups.items():
             rec = self._records.get((symbol, day))
             if rec is None:
-                rec = _Record(symbol=symbol, day=day)
+                rec = _Record(symbol=symbol, day=day, first_seen_at=now)
                 self._records[(symbol, day)] = rec
-            self._fold(rec, row, now, fetched=fetched)
+            for row in _rows_to_fold(group, today):
+                self._fold(rec, row, now, fetched=fetched)
+            self._note_landing(rec, now)
 
     def _fold(self, rec: _Record, row: Dict[str, Any], now: datetime,
               *, fetched: bool) -> None:
+        """One row into its record. An estimate moves only with its own actual, or while that
+        metric has no FMP actual: the surprise behind a figure keeps the figure's consensus
+        through a later pending row, and the landing is the caller's, once per report."""
         eps_est = finite(row.get("epsEstimated"))
-        if eps_est is not None:
-            rec.eps_estimate = eps_est
-        rev_est = finite(row.get("revenueEstimated"))
-        if rev_est is not None and rev_est > 0:
-            rec.revenue_estimate = rev_est
         eps_act = finite(row.get("epsActual"))
+        if eps_est is not None and (eps_act is not None or rec.fmp_eps is None):
+            rec.eps_estimate = eps_est
         if eps_act is not None:
             rec.fmp_eps = eps_act
-        rev_act = finite(row.get("revenueActual"))
-        if rev_act is not None and rev_act >= 0:
+        rev_est = finite(row.get("revenueEstimated"))
+        if rev_est is not None and rev_est <= 0:
+            rev_est = None
+        reported_revenue = finite(row.get("revenueActual"))
+        consensus = rev_est if rev_est is not None else rec.revenue_estimate
+        rev_act = _storable_revenue(reported_revenue, rec.fmp_revenue, consensus)
+        if reported_revenue is not None and rev_act is None and not rec.revenue_refusal_logged:
+            rec.revenue_refusal_logged = True
+            logger.warning(
+                "[earnings-live] %s %s: FMP revenue %s refused (consensus %s, holding %s)",
+                rec.symbol, rec.day.isoformat(), reported_revenue, consensus, rec.fmp_revenue,
+            )
+        if rev_est is not None and (rev_act is not None or rec.fmp_revenue is None):
+            rec.revenue_estimate = rev_est
+        if rev_act is not None:
             rec.fmp_revenue = rev_act
         name = row.get("companyName")
         if isinstance(name, str) and name.strip():
             rec.company_name = name.strip()
         if fetched and (rec.checked_at is None or now > rec.checked_at):
             rec.checked_at = now
-        self._note_landing(rec, now)
 
     def _note_landing(self, rec: _Record, now: datetime) -> None:
         if has_results(eps_metric(rec), revenue_metric(rec)):
@@ -505,10 +607,16 @@ class EarningsLiveService:
 
     def absorb_filing(self, symbol: str, day: date, figures: FilingFigures,
                       now: datetime) -> None:
-        """The company's own release for (symbol, day). The first verified one is kept."""
+        """The company's own release for (symbol, day). The first verified one is kept.
+
+        A release accepted more than `_FILING_LANDING_GRACE` before the record was first seen
+        was already out at first sight, whatever FMP's row still says. `seen_pending` is
+        cleared rather than the landing skipped, so `_note_landing` closes it for good: no
+        later fold or FMP fill can reopen it, the end state of a row first seen reported.
+        """
         rec = self._records.get((symbol.upper(), day))
         if rec is None:
-            rec = _Record(symbol=symbol.upper(), day=day)
+            rec = _Record(symbol=symbol.upper(), day=day, first_seen_at=now)
             self._records[(rec.symbol, day)] = rec
             # A record born from a filing was certainly pending a moment ago: the filing
             # watcher only runs for symbols the loop saw without results.
@@ -517,6 +625,14 @@ class EarningsLiveService:
             rec.filing = figures
         if rec.checked_at is None or now > rec.checked_at:
             rec.checked_at = now
+        accepted, seen = figures.accepted_at, rec.first_seen_at
+        if (accepted is not None and seen is not None
+                and et_now(seen) - et_now(accepted) > _FILING_LANDING_GRACE):
+            rec.seen_pending = False
+            logger.info(
+                "[earnings-live] %s %s: filing accepted %s was already out at first sight (%s)",
+                rec.symbol, day.isoformat(), iso_utc(accepted), iso_utc(seen),
+            )
         self._note_landing(rec, now)
 
     # ── reading ────────────────────────────────────────────────────
@@ -549,7 +665,9 @@ class EarningsLiveService:
 
         A record already reported when first seen (a restart, a first fetch after the fact)
         is not a landing — the same rule as `earnings_window_service._absorb` — so a deploy
-        never re-announces a morning's results in the afternoon.
+        never re-announces a morning's results in the afternoon. The same goes for a filing
+        accepted more than `_FILING_LANDING_GRACE` before the record was first seen, even
+        though FMP's row still reads pending (`absorb_filing`).
         """
         n = et_now(now)
         return [

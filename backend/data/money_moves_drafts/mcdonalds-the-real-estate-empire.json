@@ -1,0 +1,387 @@
+{
+ "slug": "mcdonalds-the-real-estate-empire",
+ "title": "McDonald's: The Real Estate Empire",
+ "subtitle": "A burger company whose conventional franchise contract generally includes a lease, so that a large part of its revenue arrives as rent from the operators who run restaurants on property it controls.",
+ "cardSubtitle": "Why a burger brand is also a landlord.",
+ "category": "blueprints",
+ "tagLabel": "THE LANDLORD MODEL",
+ "heroGradientColors": [
+  "2563EB",
+  "1D4ED8",
+  "1E3A8A"
+ ],
+ "keyHighlights": [
+  {
+   "icon": "map.fill",
+   "title": "The Ground Is the Asset",
+   "description": "On a conventional franchise, the company generally holds the land and building. The operator pays for the equipment and fit-out."
+  },
+  {
+   "icon": "banknote.fill",
+   "title": "Rent Outearns Royalty",
+   "description": "In fiscal 2025, franchise rent came to about $10.4 billion, royalties to about $6.0 billion."
+  },
+  {
+   "icon": "arrow.clockwise",
+   "title": "The Site Comes Back",
+   "description": "When a 20-year conventional franchise ends, the company keeps control of the land and building and decides what happens next."
+  }
+ ],
+ "sections": [
+  {
+   "title": "A Building on a Plot",
+   "icon": "map.fill",
+   "hasGlowEffect": true,
+   "content": [
+    {
+     "type": "paragraph",
+     "text": "The object above is a blueprint, white lines on blue, of a small roadside restaurant drawn as an exploded assembly. The roof floats above the walls, the walls above the foundation slab, and a service window with a small awning is set into one wall. Underneath run the surveyed boundary lines of the rectangle of land it stands on. There is no sign anywhere, and that absence is the point.",
+     "readAlong": [
+      {
+       "text": "The object above is a blueprint, white lines on blue, of a small roadside restaurant drawn as an exploded assembly.",
+       "start": 18.11,
+       "end": 25.07
+      },
+      {
+       "text": "The roof floats above the walls, the walls above the foundation slab, and a service window with a small awning is set into one wall.",
+       "start": 25.82,
+       "end": 33.32
+      },
+      {
+       "text": "Underneath run the surveyed boundary lines of the rectangle of land it stands on.",
+       "start": 34.02,
+       "end": 38.0
+      },
+      {
+       "text": "There is no sign anywhere, and that absence is the point.",
+       "start": 38.66,
+       "end": 41.62
+      }
+     ]
+    },
+    {
+     "type": "paragraph",
+     "text": "A customer sees the building and the menu. In McDonald's own filings, a large part of the business sits underneath both. Under a conventional franchise, the company generally owns or holds a long-term lease on the land and the building. The franchisee pays for the equipment, the signs, the seating and the décor.",
+     "readAlong": [
+      {
+       "text": "A customer sees the building and the menu.",
+       "start": 43.24,
+       "end": 45.39
+      },
+      {
+       "text": "In McDonald's own filings, a large part of the business sits underneath both.",
+       "start": 45.99,
+       "end": 50.01
+      },
+      {
+       "text": "Under a conventional franchise, the company generally owns or holds a long-term lease on the land and the building.",
+       "start": 50.79,
+       "end": 56.76
+      },
+      {
+       "text": "The franchisee pays for the equipment, the signs, the seating and the décor.",
+       "start": 57.34,
+       "end": 61.54
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "title": "Two Kinds of Franchise",
+   "icon": "square.split.2x2.fill",
+   "content": [
+    {
+     "type": "paragraph",
+     "text": "The first McDonald's opened in San Bernardino, California, in 1940. By the end of 2025 there were 45,356 McDonald's restaurants, and about 95% were franchised. But in the annual report franchised covers two quite different deals, and only one of them makes the company a landlord.",
+     "readAlong": [
+      {
+       "text": "The first McDonald's opened in San Bernardino, California, in 1940.",
+       "start": 65.42,
+       "end": 69.26
+      },
+      {
+       "text": "By the end of 2025 there were 45,356 McDonald's restaurants, and about 95% were franchised.",
+       "start": 69.78,
+       "end": 77.11
+      },
+      {
+       "text": "But in the annual report franchised covers two quite different deals, and only one of them makes the company a landlord.",
+       "start": 77.69,
+       "end": 83.25
+      }
+     ]
+    },
+    {
+     "type": "paragraph",
+     "text": "Roughly 20,700 restaurants were run by developmental licensees and affiliates, who supply their own capital, including the real estate, and pay a royalty on sales. About 22,600 ran under conventional franchises, and the company operated about 2,000 itself. On those sites it generally controls the property.",
+     "readAlong": [
+      {
+       "text": "Roughly 20,700 restaurants were run by developmental licensees and affiliates, who supply their own capital, including the real estate, and pay a royalty on sales.",
+       "start": 84.75,
+       "end": 95.44
+      },
+      {
+       "text": "About 22,600 ran under conventional franchises, and the company operated about 2,000 itself.",
+       "start": 96.08,
+       "end": 102.74
+      },
+      {
+       "text": "On those sites it generally controls the property.",
+       "start": 103.42,
+       "end": 105.7
+      }
+     ]
+    },
+    {
+     "type": "subheading",
+     "text": "How a conventional franchisee pays",
+     "readAlong": [
+      {
+       "text": "How a conventional franchisee pays",
+       "start": 106.92,
+       "end": 109.23
+      }
+     ]
+    },
+    {
+     "type": "bulletList",
+     "items": [
+      "A royalty, set as a percent of sales",
+      "Rent, also tied to a percent of sales, with a specified minimum",
+      "An initial fee when a restaurant opens or a new franchise is granted",
+      "Generally, the site's property taxes, insurance and maintenance as well, paid by the franchisee"
+     ],
+     "itemsReadAlong": [
+      [
+       {
+        "text": "A royalty, set as a percent of sales",
+        "start": 110.57,
+        "end": 113.39
+       }
+      ],
+      [
+       {
+        "text": "Rent, also tied to a percent of sales, with a specified minimum",
+        "start": 114.69,
+        "end": 119.14
+       }
+      ],
+      [
+       {
+        "text": "An initial fee when a restaurant opens or a new franchise is granted",
+        "start": 120.32,
+        "end": 124.39
+       }
+      ],
+      [
+       {
+        "text": "Generally, the site's property taxes, insurance and maintenance as well, paid by the franchisee",
+        "start": 125.62,
+        "end": 131.51
+       }
+      ]
+     ]
+    },
+    {
+     "type": "paragraph",
+     "text": "The minimum rent is anchored to the property. The filing says it is based on the company's investment in sites it owns, and parallels its own lease payments and escalations on sites it leases. A franchise generally runs 20 years. At the end, the company keeps control of the land and building, and can renew with the same operator, choose a different one, or close the restaurant.",
+     "readAlong": [
+      {
+       "text": "The minimum rent is anchored to the property.",
+       "start": 132.57,
+       "end": 134.53
+      },
+      {
+       "text": "The filing says it is based on the company's investment in sites it owns, and parallels its own lease payments and escalations on sites it leases.",
+       "start": 135.25,
+       "end": 142.56
+      },
+      {
+       "text": "A franchise generally runs 20 years.",
+       "start": 143.26,
+       "end": 145.54
+      },
+      {
+       "text": "At the end, the company keeps control of the land and building, and can renew with the same operator, choose a different one, or close the restaurant.",
+       "start": 146.14,
+       "end": 153.44
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "title": "Rent Is the Bigger Line",
+   "icon": "banknote.fill",
+   "content": [
+    {
+     "type": "paragraph",
+     "text": "The revenue lines show which role is larger. In fiscal 2025 McDonald's took in about $26.9 billion. About $16.5 billion came from franchised restaurants, against about $9.7 billion of sales at restaurants it ran itself. Inside the franchised figure, rent was about $10.4 billion and royalties about $6.0 billion. The landlord line beat the brand line by more than $4 billion.",
+     "readAlong": [
+      {
+       "text": "The revenue lines show which role is larger.",
+       "start": 157.98,
+       "end": 160.14
+      },
+      {
+       "text": "In fiscal 2025 McDonald's took in about $26.9 billion.",
+       "start": 160.7,
+       "end": 165.49
+      },
+      {
+       "text": "About $16.5 billion came from franchised restaurants, against about $9.7 billion of sales at restaurants it ran itself.",
+       "start": 165.5,
+       "end": 173.25
+      },
+      {
+       "text": "Inside the franchised figure, rent was about $10.4 billion and royalties about $6.0 billion.",
+       "start": 173.85,
+       "end": 180.43
+      },
+      {
+       "text": "The landlord line beat the brand line by more than $4 billion.",
+       "start": 180.55,
+       "end": 186.55
+      }
+     ]
+    },
+    {
+     "type": "paragraph",
+     "text": "The franchise side is also where most of the restaurant margin sits. After occupancy costs, which include lease expense and depreciation, franchised margins came to about $13.9 billion, roughly 90% of the total. Behind them sits the property: the company owned about 56% of the land and about 80% of the buildings for restaurants in its consolidated markets, and existing conventional franchises carried about $31.5 billion of future minimum rent, before any discounting.",
+     "readAlong": [
+      {
+       "text": "The franchise side is also where most of the restaurant margin sits.",
+       "start": 187.65,
+       "end": 191.35
+      },
+      {
+       "text": "After occupancy costs, which include lease expense and depreciation, franchised margins came to about $13.9 billion, roughly 90% of the total.",
+       "start": 192.06,
+       "end": 201.61
+      },
+      {
+       "text": "Behind them sits the property: the company owned about 56% of the land and about 80% of the buildings for restaurants in its consolidated markets, and existing conventional franchises carried about $31.5 billion of future minimum rent, before any discounting.",
+       "start": 202.07,
+       "end": 218.51
+      }
+     ]
+    },
+    {
+     "type": "callout",
+     "icon": "lightbulb.fill",
+     "style": "highlight",
+     "text": "To understand a franchise business, ask who holds the ground. A brand alone collects a share of sales. A brand that is also the landlord collects rent with a floor under it, and keeps the site when the contract ends.",
+     "readAlong": [
+      {
+       "text": "To understand a franchise business, ask who holds the ground.",
+       "start": 219.65,
+       "end": 223.41
+      },
+      {
+       "text": "A brand alone collects a share of sales.",
+       "start": 223.99,
+       "end": 226.22
+      },
+      {
+       "text": "A brand that is also the landlord collects rent with a floor under it, and keeps the site when the contract ends.",
+       "start": 226.94,
+       "end": 232.56
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "title": "What the Landlord Carries",
+   "icon": "scalemass.fill",
+   "content": [
+    {
+     "type": "paragraph",
+     "text": "Holding the ground is not free. Much of it is leased rather than owned: the company is a tenant across a large portfolio, leasing the land alone at some sites and the land and building at others. At the end of 2025 its lease liabilities stood at about $14.8 billion, the present value of the minimum lease payments it expects to make.",
+     "readAlong": [
+      {
+       "text": "Holding the ground is not free.",
+       "start": 236.85,
+       "end": 238.47
+      },
+      {
+       "text": "Much of it is leased rather than owned: the company is a tenant across a large portfolio, leasing the land alone at some sites and the land and building at others.",
+       "start": 239.19,
+       "end": 248.51
+      },
+      {
+       "text": "At the end of 2025 its lease liabilities stood at about $14.8 billion, the present value of the minimum lease payments it expects to make.",
+       "start": 249.44,
+       "end": 258.06
+      }
+     ]
+    },
+    {
+     "type": "callout",
+     "icon": "exclamationmark.triangle.fill",
+     "style": "warning",
+     "text": "The percent-of-sales design cuts both ways. Royalties and the variable part of rent shrink when franchisee sales shrink, and the filing itself warns that its franchised revenue depends largely on franchisees growing their sales.",
+     "readAlong": [
+      {
+       "text": "The percent-of-sales design cuts both ways.",
+       "start": 259.4,
+       "end": 261.8
+      },
+      {
+       "text": "Royalties and the variable part of rent shrink when franchisee sales shrink, and the filing itself warns that its franchised revenue depends largely on franchisees growing their sales.",
+       "start": 262.43,
+       "end": 272.35
+      }
+     ]
+    },
+    {
+     "type": "paragraph",
+     "text": "Two more honest limits. The model leans on franchisee economics: the company relies on operators willing and able to fund reinvestment, and may co-invest to modernise restaurants. And property is slow to move. Long real estate commitments leave it limited flexibility to quickly reshape the portfolio as trade areas and customer habits change, while the buildings it holds keep depreciating on its own books.",
+     "readAlong": [
+      {
+       "text": "Two more honest limits.",
+       "start": 273.55,
+       "end": 274.77
+      },
+      {
+       "text": "The model leans on franchisee economics: the company relies on operators willing and able to fund reinvestment, and may co-invest to modernise restaurants.",
+       "start": 275.35,
+       "end": 283.72
+      },
+      {
+       "text": "And property is slow to move.",
+       "start": 284.28,
+       "end": 285.84
+      },
+      {
+       "text": "Long real estate commitments leave it limited flexibility to quickly reshape the portfolio as trade areas and customer habits change, while the buildings it holds keep depreciating on its own books.",
+       "start": 286.4,
+       "end": 296.44
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "statistics": [
+  {
+   "value": "~95%",
+   "label": "Restaurants Franchised, 2025",
+   "trend": "neutral"
+  },
+  {
+   "value": "~$10.4B",
+   "label": "Franchise Rent, Fiscal 2025",
+   "trend": "up"
+  },
+  {
+   "value": "~56%",
+   "label": "Land Owned, Consolidated Markets",
+   "trend": "neutral"
+  }
+ ],
+ "readTimeMinutes": 4,
+ "audioDurationSeconds": 297,
+ "hasAudioVersion": true
+}

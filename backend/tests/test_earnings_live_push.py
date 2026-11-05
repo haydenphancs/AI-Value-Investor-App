@@ -30,6 +30,7 @@ from app.services.earnings_live_service import (
     SOURCE_FMP,
     STATUS_LIVE,
     STATUS_REPORTED,
+    EarningsLiveService,
     LiveMetric,
     LiveSnapshot,
 )
@@ -170,6 +171,20 @@ async def test_a_dropped_digit_eps_never_reaches_a_result_push(dispatch):
     await sender.dispatch_landings([held], NOW)
     assert [s["kind"] for s in dispatch.sent] == [KIND_EARNINGS_LIVE]
     assert "EPS being confirmed" in dispatch.sent[0]["body"]
+
+
+@pytest.mark.asyncio
+async def test_a_row_with_both_actuals_at_zero_pushes_nothing(dispatch):
+    """FMP's unfilled shape must not reach a banner as "EPS missed consensus by 100%"."""
+    def _row(**kw):
+        return {"symbol": "INTC", "date": REPORT.isoformat(), "epsEstimated": 0.41,
+                "revenueEstimated": 16.6e9, **kw}
+
+    live = EarningsLiveService()
+    live.observe_rows(REPORT, [_row()], datetime(2026, 10, 29, 13, 0, tzinfo=timezone.utc))
+    live.observe_rows(REPORT, [_row(epsActual=0, revenueActual=0)], NOW)
+    await sender.dispatch_landings(live.landed_snapshots(NOW), NOW)
+    assert dispatch.sent == []
 
 
 # ── copy ─────────────────────────────────────────────────────────────────────

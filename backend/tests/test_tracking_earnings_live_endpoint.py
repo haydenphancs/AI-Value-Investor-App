@@ -116,6 +116,22 @@ def test_a_duplicate_pair_answers_with_the_reported_rows_figures(client, reporte
     assert (body["revenue"]["estimate"], body["revenue"]["surprise_pct"]) == (16.6e9, 3.01)
 
 
+@pytest.mark.parametrize("reported_first", [False, True],
+                         ids=["pending_first", "reported_first"])
+def test_a_figure_held_by_a_twins_consensus_reaches_the_sheet_as_checking(client, reported_first):
+    """No figure, no estimate, `checking` true: iOS draws "—" and "Confirming…". The twin's
+    consensus held the figure and must not show."""
+    pair = [_row("AVGO", REPORT, epsEstimated=1.65),
+            _row("AVGO", REPORT, epsActual=0.169, epsEstimated=None, revenueEstimated=None)]
+    ts.get_fmp_client().rows[:] = pair[::-1] if reported_first else pair
+    body = client.get("/api/v1/tracking/earnings/AVGO/live").json()
+    assert set(body["eps"]) == METRIC_KEYS and set(body["revenue"]) == METRIC_KEYS
+    assert body["eps"]["checking"] is True
+    assert (body["eps"]["estimate"], body["eps"]["actual"]) == (None, None)
+    assert body["eps"]["surprise_pct"] is None
+    assert body["revenue"]["estimate"] is None
+
+
 @pytest.mark.parametrize("newest_first", [False, True])
 def test_a_future_pair_shows_the_estimates_the_card_picks(client, newest_first):
     """No record exists yet, so the row is the sheet's only consensus: it must be the row the

@@ -73,6 +73,21 @@ def test_eps_alone_completes_a_report_that_has_no_revenue_estimate():
     assert _status(rec, _et(REPORT, 16, 30)) == els.STATUS_REPORTED
 
 
+def test_a_guard_only_revenue_consensus_keeps_eps_alone_from_completing_a_report():
+    rec = _rec(revenue_estimate=None, revenue_guard_estimate=16.6e9, fmp_eps=0.44)
+    assert els.revenue_metric(rec).estimate is None, "guard-only: never shown"
+    assert _status(rec, _et(REPORT, 16, 30)) == els.STATUS_LIVE
+    assert _status(replace(rec, fmp_revenue=17.1e9), _et(REPORT, 16, 30)) == els.STATUS_REPORTED
+
+
+def test_a_held_revenue_is_not_in_even_with_no_estimate_to_show():
+    rec = _rec(revenue_estimate=None, revenue_guard_estimate=16.6e9, fmp_eps=0.44,
+               fmp_revenue=1.71e9)
+    held = els.revenue_metric(rec)
+    assert held.checking and (held.actual, held.estimate) == (None, None)
+    assert _status(rec, _et(REPORT, 16, 30)) == els.STATUS_LIVE
+
+
 def test_after_twenty_two_et_a_report_with_nothing_is_awaiting_never_late():
     assert _status(_rec(), _et(REPORT, 22)) == els.STATUS_AWAITING
     assert _status(_rec(fmp_revenue=17.1e9), _et(REPORT, 22)) == els.STATUS_REPORTED

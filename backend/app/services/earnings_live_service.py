@@ -17,11 +17,15 @@ TWO SOURCES, ONE RECORD PER (symbol, report date).
   figure replaces the filing's the moment FMP has one.
 
 DUPLICATE ROWS. FMP can list one report twice, a stale pending row beside the reported one,
-in either order. One response therefore decides per report, never per row: the rows carrying
-results supply each metric's estimate and actual, a pending twin is ignored, and the record
-takes one landing decision. An estimate moves only with its own actual, or while that metric
-has no FMP actual, so a surprise is never worked out against a pending row's consensus. The
-card and the sheet read the same pick (`one_row_per_report`).
+in either order. One response therefore decides per report, never per row, and a repeat of it
+decides the same again (every tick and feed build folds the same rows). Each metric's actual
+comes from one row with that row's own estimate, a pending twin supplies neither, and the
+record takes one landing decision. An estimate moves only with its own actual, or while that
+metric has no FMP actual, so a surprise is never worked out against another row's consensus.
+The card and the sheet read the same pick (`one_row_per_report`).
+  A row left out still counts as evidence: the consensus every row states is read before
+anything folds (`_note_consensus`) and kept GUARD-ONLY. The sanity guards, the zero rules and
+"is a revenue still due" read it; a surprise, the card and the sheet never do.
 
 THE MEMO. The previous trading day and today, one single-day calendar call each — a
 multi-day request is cut at 4,000 rows with the NEWEST dates kept (`fetch_calendar_days`).
@@ -44,8 +48,8 @@ STATUSES (no time of day exists on `/stable` rows, so the window is the report d
   * `live`     — today, 06:00–22:00 ET, results not complete. LIVE is drawn ONLY then, and
                  it is true: SEC is checked every minute in the release windows and FMP
                  every 5 min.
-  * `reported` — complete (EPS, plus revenue when a revenue estimate exists), or the live
-                 window ended with at least one figure in.
+  * `reported` — complete (EPS, plus revenue when a revenue estimate exists, shown or
+                 guard-only), or the live window ended with at least one figure in.
   * `awaiting` — the window ended with nothing in. "Results not in yet" — never "late", a
                  status `earnings_window_service` deliberately does not have (FMP lag and
                  reschedule duplicates make it misleading). An awaiting card drops off at
@@ -61,7 +65,10 @@ GUARDS, each a defect found elsewhere in this repo:
   * no surprise percentage against an estimate under $0.01 (`earnings_sender.MIN_ABS_ESTIMATE`);
   * a zero revenue from FMP is stored only against a consensus under $100M, with no figure
     held (a pre-revenue name can report nothing): beside a material consensus, or none, it
-    is an unfilled field, never a -100% miss and never a landing.
+    is an unfilled field, never a -100% miss and never a landing;
+  * a row with an EPS of exactly 0 beside a zero or negative revenue is unfilled as a whole,
+    unless that revenue stands and no EPS is held. Beside a real revenue, or with no revenue
+    on the row, 0 is a real breakeven.
 """
 
 from __future__ import annotations
@@ -157,6 +164,8 @@ class LiveMetric:
     basis: Optional[str] = None
     # Held by a sanity guard: a figure exists but is not shown until it is confirmed.
     checking: bool = False
+    # No figure yet, and a consensus, shown or guard-only, says one is coming.
+    due: bool = False
 
 
 @dataclass
@@ -166,6 +175,9 @@ class _Record:
     company_name: Optional[str] = None
     eps_estimate: Optional[float] = None
     revenue_estimate: Optional[float] = None
+    # GUARD-ONLY (`_note_consensus`): what the latest response stated, from ANY of its rows.
+    eps_guard_estimate: Optional[float] = None
+    revenue_guard_estimate: Optional[float] = None
     fmp_eps: Optional[float] = None
     fmp_revenue: Optional[float] = None
     filing: Optional[FilingFigures] = None
@@ -176,8 +188,9 @@ class _Record:
     seen_pending: bool = False
     landed_at: Optional[datetime] = None
     landed_from_pending: bool = False
-    # The fold runs on every tick and feed build: a refused revenue is logged once per record.
+    # The fold runs on every tick and feed build: a refusal is logged once per record.
     revenue_refusal_logged: bool = False
+    eps_refusal_logged: bool = False
 
 
 @dataclass(frozen=True)
@@ -234,8 +247,10 @@ def revenue_surprise_pct(actual: Optional[float], estimate: Optional[float]) -> 
 
 def eps_metric(rec: _Record) -> LiveMetric:
     """FMP first (adjusted, the consensus's basis), then the filing's adjusted EPS, then the
-    filing's GAAP EPS labelled GAAP and never coloured."""
+    filing's GAAP EPS labelled GAAP and never coloured. With no shown estimate the guard reads
+    the guard-only one; the surprise and the metric's `estimate` never do."""
     est = rec.eps_estimate
+    guard_est = est if est is not None else rec.eps_guard_estimate
     filing = rec.filing
     gaap = filing.eps_gaap if filing is not None else None
     candidates: List[Tuple[float, str, str]] = []
@@ -245,7 +260,7 @@ def eps_metric(rec: _Record) -> LiveMetric:
         candidates.append((filing.eps_adjusted, SOURCE_FILING, BASIS_ADJUSTED))
     held = False
     for value, source, basis in candidates:
-        if eps_digit_shift_suspect(value, est, gaap):
+        if eps_digit_shift_suspect(value, guard_est, gaap):
             held = True
             continue
         return LiveMetric(est, value, eps_surprise_pct(value, est), source, basis)
@@ -257,7 +272,10 @@ def eps_metric(rec: _Record) -> LiveMetric:
 
 
 def revenue_metric(rec: _Record) -> LiveMetric:
+    """FMP first, then the filing. Like `eps_metric`, the plausibility guard falls back to the
+    guard-only estimate; the surprise and the metric's `estimate` never do."""
     est = rec.revenue_estimate
+    guard_est = est if est is not None else rec.revenue_guard_estimate
     fmp = rec.fmp_revenue
     filed = rec.filing.revenue if rec.filing is not None else None
     if fmp is not None:
@@ -265,10 +283,10 @@ def revenue_metric(rec: _Record) -> LiveMetric:
     elif filed is not None:
         value, source, other = filed, SOURCE_FILING, None
     else:
-        return LiveMetric(est)
-    if est is not None and est >= _REVENUE_GUARD_MIN_ESTIMATE and value > 0:
+        return LiveMetric(est, due=guard_est is not None)
+    if guard_est is not None and guard_est >= _REVENUE_GUARD_MIN_ESTIMATE and value > 0:
         lo, hi = _REVENUE_PLAUSIBLE
-        if not lo <= value / est <= hi:
+        if not lo <= value / guard_est <= hi:
             agrees = other is not None and abs(other - value) <= _SOURCES_AGREE * value
             if not agrees:
                 return LiveMetric(est, checking=True)
@@ -280,7 +298,13 @@ def has_results(eps: LiveMetric, revenue: LiveMetric) -> bool:
 
 
 def is_complete(eps: LiveMetric, revenue: LiveMetric) -> bool:
-    return eps.actual is not None and (revenue.actual is not None or revenue.estimate is None)
+    """EPS is in, and so is revenue unless none is coming: any consensus says one is, shown or
+    guard-only, and a held figure is not in yet."""
+    if eps.actual is None:
+        return False
+    if revenue.actual is not None:
+        return True
+    return revenue.estimate is None and not revenue.due and not revenue.checking
 
 
 def live_status(day: date, today: date, now_et: datetime, eps: LiveMetric,
@@ -445,10 +469,14 @@ def yoy_growth_pct(actual: Optional[float], year_ago: Optional[float]) -> Option
 def _usable_actuals(row: Dict[str, Any]) -> int:
     """How many results a calendar row carries: a finite EPS (0.0 is a real breakeven) and a
     positive revenue. Not `row_reported`: a zero or negative revenue must not rank a row as
-    the reported one; whether a zero is a result is `_storable_revenue`'s call."""
+    the reported one, nor an EPS of 0.0 beside it, the unfilled shape. Whether those are
+    results is `_storable_figures`'s call; a row with a real figure outranks them either
+    way, so the pick needs no consensus."""
     eps = finite(row.get("epsActual"))
     revenue = finite(row.get("revenueActual"))
-    return int(eps is not None) + int(revenue is not None and revenue > 0)
+    if revenue is not None and revenue <= 0:
+        return int(eps is not None and eps != 0)
+    return int(eps is not None) + int(revenue is not None)
 
 
 def _row_rank(row: Dict[str, Any], today: date) -> Tuple[int, str]:
@@ -460,11 +488,15 @@ def _row_rank(row: Dict[str, Any], today: date) -> Tuple[int, str]:
     return usable, str(row.get("lastUpdated") or "")
 
 
-def _rows_to_fold(group: List[Dict[str, Any]], today: date) -> List[Dict[str, Any]]:
-    """One report's rows, in fold order. When any row carries results the others are dropped;
-    all of those are kept, because two reported rows can split EPS and revenue. The best row
-    folds last, and a tie goes to the first listed, the same pick as `one_row_per_report`."""
-    ranked = sorted(reversed(group), key=lambda row: _row_rank(row, today))
+def _ranked_rows(group: List[Dict[str, Any]], today: date) -> List[Dict[str, Any]]:
+    """One report's rows, weakest first. The best row is last, and a tie goes to the first
+    listed, the same pick as `one_row_per_report`."""
+    return sorted(reversed(group), key=lambda row: _row_rank(row, today))
+
+
+def _rows_to_fold(ranked: List[Dict[str, Any]], today: date) -> List[Dict[str, Any]]:
+    """The ranked rows that speak for the report. When any row carries results the others are
+    dropped; all of those are kept, because two reported rows can split EPS and revenue."""
     reported = [row for row in ranked if _row_rank(row, today)[0] > 0]
     return reported or ranked
 
@@ -492,6 +524,30 @@ def one_row_per_report(
     return best
 
 
+def _eps_estimate(row: Dict[str, Any]) -> Optional[float]:
+    return finite(row.get("epsEstimated"))
+
+
+def _revenue_estimate(row: Dict[str, Any]) -> Optional[float]:
+    """A row's revenue consensus. Zero or negative is no consensus at all."""
+    value = finite(row.get("revenueEstimated"))
+    return value if value is not None and value > 0 else None
+
+
+def _note_consensus(rec: _Record, ranked: List[Dict[str, Any]]) -> None:
+    """Keep what one response says the consensus is, from ALL its rows and before anything
+    folds, so a row left out of the fold still counts and every fold of the response judges
+    alike. EPS takes the best row's. Revenue takes the largest: any material consensus in the
+    response means a real business, whichever row FMP touched last, and a zero beside it is
+    unfilled. A response stating none keeps the last one."""
+    eps = [value for value in map(_eps_estimate, ranked) if value is not None]
+    revenue = [value for value in map(_revenue_estimate, ranked) if value is not None]
+    if eps:
+        rec.eps_guard_estimate = eps[-1]
+    if revenue:
+        rec.revenue_guard_estimate = max(revenue)
+
+
 def _storable_revenue(actual: Optional[float], held: Optional[float],
                       consensus: Optional[float]) -> Optional[float]:
     """The FMP revenue a row may store, or None. A negative one is junk. A zero is a result
@@ -504,6 +560,38 @@ def _storable_revenue(actual: Optional[float], held: Optional[float],
             and consensus < _REVENUE_GUARD_MIN_ESTIMATE:
         return 0.0
     return None
+
+
+def _storable_figures(eps: Optional[float], revenue: Optional[float],
+                      held_eps: Optional[float], held_revenue: Optional[float],
+                      consensus: Optional[float]) -> Tuple[Optional[float], Optional[float]]:
+    """What one FMP row may store, as (EPS, revenue), each None when refused. An EPS of 0.0 is
+    a real breakeven, except beside a zero or negative revenue: that row is FMP's unfilled
+    shape, unless the revenue stands by itself and no EPS is held, so it stores nothing.
+    Storing it would read as a -100% miss and a landing, or take a real EPS back."""
+    stored = _storable_revenue(revenue, held_revenue, consensus)
+    if eps == 0 and revenue is not None and revenue <= 0 and (stored is None or held_eps):
+        return None, None
+    return eps, stored
+
+
+def _settled(actual: Optional[float], estimate: Optional[float],
+             pick: Optional[Tuple[Dict[str, Any], float]], rows: List[Dict[str, Any]],
+             estimate_of: Callable[[Dict[str, Any]], Optional[float]],
+             ) -> Tuple[Optional[float], Optional[float]]:
+    """One metric's (actual, estimate) after one response. A picked figure brings its own
+    row's estimate and no other row's, so a row's place in the fold cannot cross a consensus.
+    With no figure in the response and none held, the best row's estimate moves."""
+    if pick is not None:
+        row, value = pick
+        own = estimate_of(row)
+        return value, own if own is not None else estimate
+    if actual is None:
+        for row in reversed(rows):
+            own = estimate_of(row)
+            if own is not None:
+                return None, own
+    return actual, estimate
 
 
 # ── The service ─────────────────────────────────────────────────────
@@ -537,7 +625,8 @@ class EarningsLiveService:
         Each symbol's rows decide TOGETHER (`_rows_to_fold`, DUPLICATE ROWS in the module
         docstring), with one `_note_landing` per symbol: a pending row beside a reported one
         in the same response is "reported", not a landing, as in
-        `earnings_window_service._absorb`, whichever FMP listed first.
+        `earnings_window_service._absorb`, whichever FMP listed first. Their consensus is read
+        first, so a repeat of the response decides what this fold decides.
 
         ``symbols`` narrows the fold to those tickers (a feed build passes its user's), so a
         reader never pays for the whole market's rows.
@@ -560,40 +649,49 @@ class EarningsLiveService:
             if rec is None:
                 rec = _Record(symbol=symbol, day=day, first_seen_at=now)
                 self._records[(symbol, day)] = rec
-            for row in _rows_to_fold(group, today):
-                self._fold(rec, row, now, fetched=fetched)
+            ranked = _ranked_rows(group, today)
+            _note_consensus(rec, ranked)
+            self._fold_report(rec, _rows_to_fold(ranked, today), now, fetched=fetched)
             self._note_landing(rec, now)
 
-    def _fold(self, rec: _Record, row: Dict[str, Any], now: datetime,
-              *, fetched: bool) -> None:
-        """One row into its record. An estimate moves only with its own actual, or while that
-        metric has no FMP actual: the surprise behind a figure keeps the figure's consensus
-        through a later pending row, and the landing is the caller's, once per report."""
-        eps_est = finite(row.get("epsEstimated"))
-        eps_act = finite(row.get("epsActual"))
-        if eps_est is not None and (eps_act is not None or rec.fmp_eps is None):
-            rec.eps_estimate = eps_est
-        if eps_act is not None:
-            rec.fmp_eps = eps_act
-        rev_est = finite(row.get("revenueEstimated"))
-        if rev_est is not None and rev_est <= 0:
-            rev_est = None
-        reported_revenue = finite(row.get("revenueActual"))
-        consensus = rev_est if rev_est is not None else rec.revenue_estimate
-        rev_act = _storable_revenue(reported_revenue, rec.fmp_revenue, consensus)
-        if reported_revenue is not None and rev_act is None and not rec.revenue_refusal_logged:
-            rec.revenue_refusal_logged = True
-            logger.warning(
-                "[earnings-live] %s %s: FMP revenue %s refused (consensus %s, holding %s)",
-                rec.symbol, rec.day.isoformat(), reported_revenue, consensus, rec.fmp_revenue,
-            )
-        if rev_est is not None and (rev_act is not None or rec.fmp_revenue is None):
-            rec.revenue_estimate = rev_est
-        if rev_act is not None:
-            rec.fmp_revenue = rev_act
-        name = row.get("companyName")
-        if isinstance(name, str) and name.strip():
-            rec.company_name = name.strip()
+    def _fold_report(self, rec: _Record, rows: List[Dict[str, Any]], now: datetime,
+                     *, fetched: bool) -> None:
+        """One response's rows for one report, weakest first, into its record: each metric's
+        figure is the strongest row's that may be stored (`_settled` settles its estimate).
+        The surprise behind a figure keeps the figure's consensus through a later pending row,
+        and the landing is the caller's, once per report."""
+        eps_pick: Optional[Tuple[Dict[str, Any], float]] = None
+        revenue_pick: Optional[Tuple[Dict[str, Any], float]] = None
+        held_revenue = rec.fmp_revenue
+        for row in rows:
+            reported_eps = finite(row.get("epsActual"))
+            reported_revenue = finite(row.get("revenueActual"))
+            eps, revenue = _storable_figures(reported_eps, reported_revenue, rec.fmp_eps,
+                                             held_revenue, rec.revenue_guard_estimate)
+            if revenue is not None:
+                revenue_pick, held_revenue = (row, revenue), revenue
+            elif reported_revenue is not None and not rec.revenue_refusal_logged:
+                rec.revenue_refusal_logged = True
+                logger.warning(
+                    "[earnings-live] %s %s: FMP revenue %s refused (consensus %s, holding %s)",
+                    rec.symbol, rec.day.isoformat(), reported_revenue,
+                    rec.revenue_guard_estimate, held_revenue,
+                )
+            if eps is not None:
+                eps_pick = (row, eps)
+            elif reported_eps is not None and not rec.eps_refusal_logged:
+                rec.eps_refusal_logged = True
+                logger.warning(
+                    "[earnings-live] %s %s: FMP EPS %s refused beside revenue %s (holding %s)",
+                    rec.symbol, rec.day.isoformat(), reported_eps, reported_revenue, rec.fmp_eps,
+                )
+            name = row.get("companyName")
+            if isinstance(name, str) and name.strip():
+                rec.company_name = name.strip()
+        rec.fmp_eps, rec.eps_estimate = _settled(
+            rec.fmp_eps, rec.eps_estimate, eps_pick, rows, _eps_estimate)
+        rec.fmp_revenue, rec.revenue_estimate = _settled(
+            rec.fmp_revenue, rec.revenue_estimate, revenue_pick, rows, _revenue_estimate)
         if fetched and (rec.checked_at is None or now > rec.checked_at):
             rec.checked_at = now
 

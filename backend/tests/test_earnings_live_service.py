@@ -6,8 +6,11 @@ What is pinned here, each a way the LIVE card could lie or cost too much:
     re-announce a morning's results in the afternoon), and a filing accepted well before the
     record's first sight is not one either;
   * FMP's duplicate rows act as ONE report: one landing decision, one card, and never a
-    pending twin's estimate beside a reported row's actual;
-  * a zero revenue is a result only against a tiny consensus with no figure held;
+    pending twin's estimate beside a reported row's actual, while the guards still read that
+    twin's consensus;
+  * a repeat of one response decides what its first fold decided, in any row order;
+  * a zero revenue is a result only against a tiny consensus with no figure held, and an EPS
+    of 0.0 beside a refused revenue is the same unfilled field;
   * the live memo fetches TODAY only while a watched row is pending in 06:00–22:00 ET, and
     the previous trading day at 5 min while hot (until 12:00 ET), else every 30 min;
   * feed builds and the sheet never fetch — only the loop does;
@@ -17,6 +20,7 @@ Hermetic: inline fakes for FMP, SEC and the dispatcher; the clock is passed in.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -237,6 +241,168 @@ def test_a_reported_row_with_no_estimate_takes_none_from_its_pending_twin(report
     assert (snap.eps.estimate, snap.eps.surprise_pct) == (None, None)
     assert (snap.revenue.estimate, snap.revenue.surprise_pct) == (None, None)
     assert (snap.eps.actual, snap.revenue.actual) == (0.44, 17.1e9)
+
+
+@pytest.mark.parametrize("reported_first", **_ORDERS)
+def test_a_dropped_digit_eps_is_held_by_its_pending_twins_consensus_at_first_sight(reported_first):
+    """The twin's estimate stays out of the surprise, never out of the guard: without it the
+    dropped digit prints and the hot refresh and the SEC watch stop."""
+    pair = [_row("AVGO", REPORT, eps_est=1.65), _row("AVGO", REPORT, eps=0.169, eps_est=None,
+                                                     rev_est=None)]
+    svc = _svc()
+    now = _et(REPORT, 17)
+    svc.observe_rows(REPORT, pair[::-1] if reported_first else pair, now)
+    snap = svc.snapshot("AVGO", REPORT, now)
+    assert snap.eps.checking and snap.eps.actual is None
+    assert (snap.eps.estimate, snap.eps.surprise_pct) == (None, None)
+    assert snap.status == els.STATUS_LIVE
+    assert svc.pending_symbols(REPORT, ["AVGO"]) == ["AVGO"]
+    assert svc.landed_snapshots(now) == []
+
+
+@pytest.mark.parametrize("reported_first", **_ORDERS)
+def test_a_dropped_digit_revenue_is_held_by_its_pending_twins_consensus_at_first_sight(
+        reported_first):
+    pair = [_row("AVGO", REPORT, eps_est=1.65), _row("AVGO", REPORT, rev=1.71e9, eps_est=None,
+                                                     rev_est=None)]
+    svc = _svc()
+    now = _et(REPORT, 17)
+    svc.observe_rows(REPORT, pair[::-1] if reported_first else pair, now)
+    snap = svc.snapshot("AVGO", REPORT, now)
+    assert snap.revenue.checking and snap.revenue.actual is None
+    assert (snap.revenue.estimate, snap.revenue.surprise_pct) == (None, None)
+    assert svc.pending_symbols(REPORT, ["AVGO"]) == ["AVGO"]
+
+
+@pytest.mark.parametrize("newest", ["eps_row", "revenue_row"])
+@pytest.mark.parametrize("reported_first", **_ORDERS)
+def test_a_dropped_digit_revenue_is_held_whichever_reported_row_fmp_touched_last(
+        newest, reported_first):
+    eps_row = _row("AVGO", REPORT, eps=1.70, eps_est=1.65, rev_est=16.6e9)
+    revenue_row = _row("AVGO", REPORT, rev=1.71e9, eps_est=None, rev_est=None)
+    {"eps_row": eps_row, "revenue_row": revenue_row}[newest]["lastUpdated"] = "2026-10-30"
+    rows = [eps_row, revenue_row]
+    svc = _svc()
+    now = _et(REPORT, 17)
+    svc.observe_rows(REPORT, rows[::-1] if reported_first else rows, now)
+    snap = svc.snapshot("AVGO", REPORT, now)
+    assert snap.revenue.checking and snap.revenue.actual is None and snap.eps.actual == 1.70
+    assert snap.status == els.STATUS_LIVE, "a held revenue is not in"
+    assert svc.pending_symbols(REPORT, ["AVGO"]) == ["AVGO"]
+
+
+@pytest.mark.parametrize("newest", ["eps_row", "revenue_row"])
+def test_a_reported_row_never_lends_its_consensus_to_another_rows_figure(newest):
+    """FMP's touch date must not decide the surprise: the revenue's own row has no consensus."""
+    eps_row = _row("INTC", REPORT, eps=0.44, eps_est=0.41, rev_est=15.9e9)
+    revenue_row = _row("INTC", REPORT, rev=17.1e9, eps_est=None, rev_est=None)
+    {"eps_row": eps_row, "revenue_row": revenue_row}[newest]["lastUpdated"] = "2026-10-30"
+    svc = _svc()
+    now = _et(REPORT, 17)
+    svc.observe_rows(REPORT, [eps_row, revenue_row], now)
+    snap = svc.snapshot("INTC", REPORT, now)
+    assert (snap.revenue.actual, snap.revenue.estimate, snap.revenue.surprise_pct) == (
+        17.1e9, None, None)
+    assert (snap.eps.actual, snap.eps.estimate) == (0.44, 0.41)
+
+
+@pytest.mark.parametrize("newest_first", [False, True])
+def test_the_newest_figure_keeps_its_own_missing_consensus(newest_first):
+    old = {**_row("INTC", REPORT, eps=0.40, eps_est=0.35), "lastUpdated": "2026-10-01"}
+    new = {**_row("INTC", REPORT, eps=0.44, eps_est=None), "lastUpdated": "2026-10-20"}
+    rows = [new, old] if newest_first else [old, new]
+    svc = _svc()
+    now = _et(REPORT, 17)
+    svc.observe_rows(REPORT, rows, now)
+    snap = svc.snapshot("INTC", REPORT, now)
+    assert (snap.eps.actual, snap.eps.estimate, snap.eps.surprise_pct) == (0.44, None, None)
+
+
+@pytest.mark.parametrize("reported_first", **_ORDERS)
+def test_a_twins_revenue_consensus_keeps_a_missing_revenue_due(reported_first):
+    """EPS alone is not complete while any row says a revenue is coming, shown or not."""
+    pair = [_row("INTC", REPORT, eps_est=None), _row("INTC", REPORT, eps=0.44, eps_est=None,
+                                                     rev_est=None)]
+    svc = _svc()
+    now = _et(REPORT, 17)
+    svc.observe_rows(REPORT, pair[::-1] if reported_first else pair, now)
+    snap = svc.snapshot("INTC", REPORT, now)
+    assert snap.revenue.estimate is None and snap.status == els.STATUS_LIVE
+    assert svc.pending_symbols(REPORT, ["INTC"]) == ["INTC"]
+
+
+@pytest.mark.parametrize("listed_first", [False, True])
+def test_the_newest_consensus_is_the_one_that_guards(listed_first):
+    """Two pending twins disagree: FMP's latest touch decides, as it does for any tie on results."""
+    figure = _row("AVGO", REPORT, eps=0.169, eps_est=None, rev_est=None)
+    stale = {**_row("AVGO", REPORT, eps_est=0.17, rev_est=None), "lastUpdated": "2026-10-01"}
+    fresh = {**_row("AVGO", REPORT, eps_est=1.65, rev_est=None), "lastUpdated": "2026-10-20"}
+    twins = [fresh, stale] if listed_first else [stale, fresh]
+    svc = _svc()
+    now = _et(REPORT, 17)
+    svc.observe_rows(REPORT, [figure, *twins], now)
+    assert svc.snapshot("AVGO", REPORT, now).eps.checking
+
+
+def test_a_pending_row_after_the_figure_still_feeds_the_guard():
+    """The same pair in two responses: the 30-min memo can hand the twin back later."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("AVGO", REPORT, eps=0.169, eps_est=None, rev_est=None)],
+                     _et(REPORT, 17))
+    svc.observe_rows(REPORT, [_row("AVGO", REPORT, eps_est=1.65, rev_est=None)], _et(REPORT, 17, 5))
+    snap = svc.snapshot("AVGO", REPORT, _et(REPORT, 17, 5))
+    assert snap.eps.checking and (snap.eps.actual, snap.eps.estimate) == (None, None)
+
+
+def test_a_response_stating_no_consensus_keeps_the_guard_it_had():
+    figure = _row("AVGO", REPORT, eps=0.169, eps_est=None, rev_est=None)
+    svc = _svc()
+    now = _et(REPORT, 17)
+    svc.observe_rows(REPORT, [_row("AVGO", REPORT, eps_est=1.65, rev_est=None), figure], now)
+    svc.observe_rows(REPORT, [figure], now + timedelta(minutes=5))
+    assert svc.snapshot("AVGO", REPORT, now + timedelta(minutes=5)).eps.checking
+
+
+def test_the_real_figure_after_a_held_one_lands_with_no_surprise_from_the_twin():
+    twin = _row("AVGO", REPORT, eps_est=1.65, rev_est=None)
+    svc = _svc()
+    svc.observe_rows(REPORT, [twin, _row("AVGO", REPORT, eps=0.169, eps_est=None, rev_est=None)],
+                     _et(REPORT, 16))
+    svc.observe_rows(REPORT, [twin, _row("AVGO", REPORT, eps=1.69, eps_est=None, rev_est=None)],
+                     _et(REPORT, 17))
+    (snap,) = svc.landed_snapshots(_et(REPORT, 17))
+    assert (snap.eps.actual, snap.eps.estimate, snap.eps.surprise_pct) == (1.69, None, None)
+    assert snap.status == els.STATUS_REPORTED
+
+
+def test_the_guard_only_consensus_also_judges_a_filing_figure():
+    pair = [_row("AVGO", REPORT, eps_est=1.65, rev_est=None),
+            _row("AVGO", REPORT, eps=0.169, eps_est=None, rev_est=None)]
+    svc = _svc()
+    now = _et(REPORT, 17)
+    svc.observe_rows(REPORT, pair, now)
+    svc.absorb_filing("AVGO", REPORT, efs.FilingFigures(
+        accession="0001730168-26-000123", accepted_at=None, url=None, eps_adjusted=1.70), now)
+    snap = svc.snapshot("AVGO", REPORT, now)
+    assert (snap.eps.actual, snap.eps.source, snap.eps.estimate) == (1.70, els.SOURCE_FILING, None)
+    other = els.EarningsLiveService()
+    other.observe_rows(REPORT, pair, now)
+    other.absorb_filing("AVGO", REPORT, efs.FilingFigures(
+        accession="0001730168-26-000123", accepted_at=None, url=None, eps_adjusted=0.17), now)
+    assert other.snapshot("AVGO", REPORT, now).eps.checking
+
+
+def test_the_shown_consensus_beats_a_guard_only_one():
+    """The figure's own row knows its consensus; a stale twin must not hold a real figure."""
+    pair = [_row("TINY", REPORT, eps_est=1.65, rev_est=16.6e9),
+            _row("TINY", REPORT, eps=0.17, eps_est=0.16, rev=1.71e9, rev_est=1.7e9)]
+    svc = _svc()
+    now = _et(REPORT, 17)
+    svc.observe_rows(REPORT, pair, now)
+    snap = svc.snapshot("TINY", REPORT, now)
+    assert (snap.eps.actual, snap.eps.estimate) == (0.17, 0.16) and not snap.eps.checking
+    assert (snap.revenue.actual, snap.revenue.estimate) == (1.71e9, 1.7e9)
+    assert not snap.revenue.checking
 
 
 @pytest.mark.parametrize("listed_first", [False, True])
@@ -470,6 +636,160 @@ def test_a_zero_beside_a_pending_twin_is_still_pending(reported_first):
     assert (snap.eps.actual, snap.revenue.actual) == (0.44, 17.1e9)
 
 
+def _zero_and_twin(zero_newest: bool, twin_est: float = 30e6, zero_est=None) -> List[dict]:
+    """A zero-revenue row with no consensus beside the pending row that has one."""
+    newer, older = "2026-10-20", "2026-10-01"
+    return [
+        {**_row("JOBY", REPORT, rev=0, eps_est=None, rev_est=zero_est),
+         "lastUpdated": newer if zero_newest else older},
+        {**_row("JOBY", REPORT, eps_est=None, rev_est=twin_est),
+         "lastUpdated": older if zero_newest else newer},
+    ]
+
+
+@pytest.mark.parametrize("zero_newest", [False, True])
+@pytest.mark.parametrize("reported_first", **_ORDERS)
+def test_a_zero_is_judged_against_the_whole_response_on_its_first_fold(zero_newest, reported_first):
+    """A repeat must not decide differently: a refusal first and a store on the repeat reads
+    as a landing, and FMP's touch date must not choose between the two."""
+    rows = _zero_and_twin(zero_newest)
+    rows = rows[::-1] if reported_first else rows
+    svc = _svc()
+    now = _et(REPORT, 15)
+    for _ in range(3):
+        svc.observe_rows(REPORT, rows, now)
+        snap = svc.snapshot("JOBY", REPORT, now)
+        assert (snap.revenue.actual, snap.revenue.surprise_pct) == (0.0, None)
+        assert svc.landed_snapshots(now) == []
+
+
+@pytest.mark.parametrize("zero_newest", [False, True])
+def test_a_zero_beside_a_material_consensus_is_refused_on_every_fold(zero_newest):
+    rows = _zero_and_twin(zero_newest, twin_est=16.6e9)
+    svc = _svc()
+    now = _et(REPORT, 15)
+    for _ in range(3):
+        svc.observe_rows(REPORT, rows, now)
+        snap = svc.snapshot("JOBY", REPORT, now)
+        assert (snap.revenue.actual, snap.revenue.estimate) == (None, 16.6e9)
+    assert svc.landed_snapshots(now) == []
+
+
+@pytest.mark.parametrize("zero_newest", [False, True])
+def test_any_material_consensus_in_the_response_refuses_a_zero(zero_newest):
+    """The zero's own tiny estimate does not outvote its twin, whichever FMP touched last."""
+    svc = _svc()
+    now = _et(REPORT, 15)
+    svc.observe_rows(REPORT, [_row("JOBY", REPORT)], _et(REPORT, 9))
+    svc.observe_rows(REPORT, _zero_and_twin(zero_newest, twin_est=16.6e9, zero_est=30e6), now)
+    assert svc.snapshot("JOBY", REPORT, now).revenue.actual is None
+    assert svc.landed_snapshots(now) == []
+
+
+@pytest.mark.parametrize("zero_newest", [False, True])
+def test_a_real_revenue_beats_a_zero_whichever_fmp_touched_last(zero_newest):
+    newer, older = "2026-10-20", "2026-10-01"
+    rows = [{**_row("JOBY", REPORT, eps=-0.2, rev=0, rev_est=30e6),
+             "lastUpdated": newer if zero_newest else older},
+            {**_row("JOBY", REPORT, rev=5e6, rev_est=None),
+             "lastUpdated": older if zero_newest else newer}]
+    svc = _svc()
+    now = _et(REPORT, 17)
+    svc.observe_rows(REPORT, rows, now)
+    snap = svc.snapshot("JOBY", REPORT, now)
+    assert (snap.revenue.actual, snap.revenue.estimate, snap.eps.actual) == (5e6, None, -0.2)
+
+
+# A both-actuals-zero row: FMP's unfilled shape, or a true breakeven against a tiny consensus.
+
+
+@pytest.mark.parametrize("rev", [0, -5e6], ids=["zero", "negative"])
+def test_an_eps_of_zero_beside_a_refused_revenue_is_not_a_landing(rev):
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 9))
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0, rev=rev)], _et(REPORT, 16, 30))
+    snap = svc.snapshot("INTC", REPORT, _et(REPORT, 16, 30))
+    assert (snap.eps.actual, snap.revenue.actual) == (None, None)
+    assert (snap.eps.estimate, snap.revenue.estimate) == (0.41, 16.6e9)
+    assert snap.status == els.STATUS_LIVE
+    assert svc.landed_snapshots(_et(REPORT, 16, 31)) == []
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], _et(REPORT, 17))
+    (snap,) = svc.landed_snapshots(_et(REPORT, 17))
+    assert (snap.eps.actual, snap.revenue.actual) == (0.44, 17.1e9)
+
+
+@pytest.mark.parametrize("rev_est", [16.6e9, 30e6, None])
+@pytest.mark.parametrize("held_revenue", [17.1e9, None])
+def test_a_later_double_zero_never_takes_a_figure_back(rev_est, held_revenue):
+    """Whatever the consensus says about a zero, it never replaces a real figure."""
+    svc = _svc()
+    now = _et(REPORT, 17)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=1.69, eps_est=1.6, rev=held_revenue)], now)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0, eps_est=1.6, rev=0, rev_est=rev_est)],
+                     now + timedelta(minutes=5))
+    snap = svc.snapshot("INTC", REPORT, now + timedelta(minutes=5))
+    assert (snap.eps.actual, snap.eps.estimate) == (1.69, 1.6)
+    assert snap.revenue.actual == held_revenue
+
+
+@pytest.mark.parametrize("newest_listed_first", [False, True])
+@pytest.mark.parametrize("rev_est", [16.6e9, 30e6], ids=["material", "tiny"])
+def test_a_double_zero_row_never_ranks_as_the_reported_row(newest_listed_first, rev_est):
+    """Tied on results it would fold last and take a real EPS back, and the card would pick it."""
+    real = {**_row("INTC", REPORT, eps=1.69, eps_est=1.6, rev_est=rev_est),
+            "lastUpdated": "2026-10-01"}
+    zero = {**_row("INTC", REPORT, eps=0, eps_est=1.6, rev=0, rev_est=rev_est),
+            "lastUpdated": "2026-10-20"}
+    rows = [zero, real] if newest_listed_first else [real, zero]
+    svc = _svc()
+    now = _et(REPORT, 17)
+    svc.observe_rows(REPORT, rows, now)
+    assert svc.snapshot("INTC", REPORT, now).eps.actual == 1.69
+    assert els.one_row_per_report(rows, REPORT)[("INTC", REPORT)] is real
+
+
+@pytest.mark.parametrize("reported_first", **_ORDERS)
+def test_a_double_zero_beside_a_pending_twin_is_still_pending(reported_first):
+    rows = [_row("INTC", REPORT), _row("INTC", REPORT, eps=0, rev=0)]
+    svc = _svc()
+    now = _et(REPORT, 9)
+    for _ in range(2):
+        svc.observe_rows(REPORT, rows[::-1] if reported_first else rows, now)
+    assert svc.snapshot("INTC", REPORT, now).eps.actual is None
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], _et(REPORT, 17))
+    assert [s.symbol for s in svc.landed_snapshots(_et(REPORT, 17))] == ["INTC"]
+
+
+def test_a_breakeven_beside_a_real_revenue_stays_a_result():
+    svc = _svc()
+    now = _et(REPORT, 17)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.0, eps_est=-0.02, rev=17.1e9)], now)
+    snap = svc.snapshot("INTC", REPORT, now)
+    assert (snap.eps.actual, snap.revenue.actual) == (0.0, 17.1e9)
+    assert snap.status == els.STATUS_REPORTED
+
+
+def test_a_breakeven_on_no_revenue_stands_against_a_tiny_consensus():
+    """A pre-revenue name can report exactly nothing, on both lines."""
+    svc = _svc()
+    now = _et(REPORT, 17)
+    svc.observe_rows(REPORT, [_row("JOBY", REPORT, eps=0.0, eps_est=-0.02, rev=0, rev_est=30e6)],
+                     now)
+    snap = svc.snapshot("JOBY", REPORT, now)
+    assert (snap.eps.actual, snap.revenue.actual) == (0.0, 0.0)
+    assert snap.status == els.STATUS_REPORTED
+
+
+def test_a_refused_eps_is_logged_once_with_its_symbol_and_day(caplog):
+    svc = _svc()
+    now = _et(REPORT, 17)
+    with caplog.at_level(logging.WARNING, logger=els.logger.name):
+        for _ in range(3):
+            svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0, rev=0)], now)
+    (line,) = [r.getMessage() for r in caplog.records if "EPS" in r.getMessage()]
+    assert "INTC" in line and REPORT.isoformat() in line
+
+
 def test_a_refused_revenue_is_logged_once_with_its_symbol_and_day(caplog):
     """The fold runs every minute, and whether FMP ever sends this is exactly what a log
     has to answer."""
@@ -500,6 +820,50 @@ def test_a_negative_revenue_is_refused_and_does_not_rank():
     assert els.one_row_per_report(rows, REPORT)[("INTC", REPORT)] is rows[1]
     svc.observe_rows(REPORT, [_row("AAPL", REPORT, rev=-5e6)], now)
     assert svc.snapshot("AAPL", REPORT, now).revenue.actual is None
+
+
+# ── one response decides once ────────────────────────────────────────────────
+
+_ROW_SHAPES = list(itertools.product(
+    (None, 0, 0.44),                    # epsActual
+    (None, 0, 17.1e9, 1.71e9),          # revenueActual: none, unfilled, real, dropped digit
+    (None, 0.41),                       # epsEstimated
+    (None, 30e6, 16.6e9),               # revenueEstimated: none, tiny, material
+))
+
+
+def _shape_row(shape: tuple, touched: str) -> dict:
+    eps, rev, eps_est, rev_est = shape
+    return {**_row("JOBY", REPORT, eps=eps, rev=rev, eps_est=eps_est, rev_est=rev_est),
+            "lastUpdated": touched}
+
+
+def _outcome(svc: els.EarningsLiveService, now: datetime) -> tuple:
+    snap = svc.snapshot("JOBY", REPORT, now)
+    return (snap.eps, snap.revenue, snap.status, svc.pending_symbols(REPORT, ["JOBY"]),
+            [s.symbol for s in svc.landed_snapshots(now)])
+
+
+@pytest.mark.parametrize("seen_pending", [False, True], ids=["first_sight", "after_pending"])
+def test_every_pair_decides_on_its_first_fold_in_any_row_order(seen_pending):
+    """Every feed build and every tick re-folds the same rows, so a second answer from one
+    response is a landing nobody saw, or a card and a sheet that disagree on one memo."""
+    now = _et(REPORT, 15)
+    for first, second in itertools.product(_ROW_SHAPES, _ROW_SHAPES):
+        rows = [_shape_row(first, "2026-10-01"), _shape_row(second, "2026-10-20")]
+        outcomes = []
+        for listed in (rows, rows[::-1]):
+            svc = els.EarningsLiveService()
+            if seen_pending:
+                svc.observe_rows(REPORT, [_row("JOBY", REPORT)], _et(REPORT, 9))
+            svc.observe_rows(REPORT, listed, now)
+            once = _outcome(svc, now)
+            svc.observe_rows(REPORT, listed, now)
+            assert _outcome(svc, now) == once, (first, second)
+            outcomes.append(once)
+            if not seen_pending:
+                assert once[-1] == [], (first, second)
+        assert outcomes[0] == outcomes[1], (first, second)
 
 
 # ── the hot gate ─────────────────────────────────────────────────────────────
@@ -727,6 +1091,42 @@ async def test_with_live_off_a_pair_is_still_one_card_on_the_reported_row(
     assert card.earnings_status is None, "no live fields without the live records"
 
 
+def _no_history(monkeypatch) -> None:
+    async def _no_extras(self, symbol, report_day, *, loader=None):
+        return None
+
+    monkeypatch.setattr(els.EarningsLiveService, "history_extras", _no_extras)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reported_first", **_ORDERS)
+async def test_a_guard_only_consensus_reaches_neither_the_card_nor_the_sheet(
+        monkeypatch, reported_first):
+    _no_history(monkeypatch)
+    pair = [_row("INTC", REPORT, eps_est=0.35, rev_est=15.9e9),
+            _row("INTC", REPORT, eps=0.44, rev=17.1e9, eps_est=None, rev_est=None)]
+    svc_obj = _feed_service(monkeypatch, _et(REPORT, 17), pair[::-1] if reported_first else pair)
+    (card,) = await svc_obj._get_earnings_alerts(["INTC"])
+    assert (card.eps_estimate, card.revenue_estimate) == (None, None)
+    assert (card.eps_surprise_pct, card.revenue_surprise_pct) == (None, None)
+    sheet = await svc_obj.get_earnings_live("INTC")
+    assert (sheet.eps.estimate, sheet.revenue.estimate) == (None, None)
+    assert (sheet.eps.surprise_pct, sheet.revenue.surprise_pct) == (None, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("zero_newest", [False, True])
+async def test_the_card_and_the_sheet_agree_on_one_memo_holding_a_zero(monkeypatch, zero_newest):
+    """Each folds the same memo again: a fold that changed its mind split them."""
+    _no_history(monkeypatch)
+    svc_obj = _feed_service(monkeypatch, _et(REPORT, 15), _zero_and_twin(zero_newest))
+    (card,) = await svc_obj._get_earnings_alerts(["JOBY"])
+    sheet = await svc_obj.get_earnings_live("JOBY")
+    assert card.revenue_actual == sheet.revenue.actual == 0.0
+    assert card.revenue_surprise_pct is None and sheet.revenue.surprise_pct is None
+    assert card.earnings_status == sheet.status == els.STATUS_LIVE
+
+
 async def _card_after_own_fetch(monkeypatch, memo: dict, own: Optional[dict]):
     """A card whose memo row is older than the live memo's own fetch."""
     svc_obj = _feed_service(monkeypatch, _et(REPORT, 16, 36), [memo])
@@ -831,6 +1231,46 @@ async def test_a_restart_over_a_previous_day_pair_dispatches_nothing(monkeypatch
     assert _svc().snapshot("INTC", friday, _et(monday, 10)).status == els.STATUS_REPORTED
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reported_first", **_ORDERS)
+async def test_a_figure_held_at_first_sight_keeps_the_sec_watch_on_it(monkeypatch, reported_first):
+    monkeypatch.setattr(ts, "_et_today", lambda: REPORT)
+    pair = [_row("AVGO", REPORT, eps_est=1.65, rev_est=None),
+            _row("AVGO", REPORT, eps=0.169, eps_est=None, rev_est=None)]
+    fmp = _FMP({REPORT: pair[::-1] if reported_first else pair, PREV: []})
+    watcher = _Watcher()
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: watcher)
+    sent: List[List[str]] = []
+
+    async def _dispatch(snaps, now):
+        sent.append([s.symbol for s in snaps])
+
+    await els.earnings_live_tick(_et(REPORT, 16, 3), fmp=fmp, watched=["AVGO"], dispatch=_dispatch)
+    assert watcher.calls == [(["AVGO"], REPORT)]
+    assert sent == [[]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("zero_newest", [False, True])
+@pytest.mark.parametrize("twin_est", [30e6, 16.6e9], ids=["tiny", "material"])
+async def test_unchanged_rows_with_a_zero_never_land_across_real_ticks(
+        monkeypatch, zero_newest, twin_est):
+    """The memo fold and the own fetch of one tick see one response: the second must not
+    read the first as "seen pending"."""
+    monkeypatch.setattr(ts, "_et_today", lambda: REPORT)
+    fmp = _FMP({REPORT: _zero_and_twin(zero_newest, twin_est=twin_est), PREV: []})
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: _Watcher())
+    sent: List[List[str]] = []
+
+    async def _dispatch(snaps, now):
+        sent.append([s.symbol for s in snaps])
+
+    for minute in (0, 1, 6):
+        await els.earnings_live_tick(_et(REPORT, 15, minute), fmp=fmp, watched=["JOBY"],
+                                     dispatch=_dispatch)
+    assert sent == [[], [], []]
+
+
 # ── a filing already out at first sight ──────────────────────────────────────
 
 
@@ -911,13 +1351,16 @@ def test_a_filing_with_no_acceptance_time_is_read_as_fresh():
     assert [s.symbol for s in svc.landed_snapshots(_et(REPORT, 15, 2))] == ["INTC"]
 
 
-def test_a_later_figure_keeps_a_landing_that_was_seen():
-    """A landing already taken is never undone by an old filing found after it."""
+def test_a_later_figure_keeps_a_landing_that_was_seen(caplog):
+    """A landing already taken is never undone by an old filing found after it. First sight
+    has to follow the filing past the grace, or the already-out rule never runs."""
     svc = _svc()
-    svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 6, 30))
-    svc.observe_rows(REPORT, [_row("INTC", REPORT, rev=17.1e9)], _et(REPORT, 8))
-    svc.absorb_filing("INTC", REPORT, _morning_filing(), _et(REPORT, 8, 1))
-    assert [s.symbol for s in svc.landed_snapshots(_et(REPORT, 8, 2))] == ["INTC"]
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 15))
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, rev=17.1e9)], _et(REPORT, 15, 5))
+    with caplog.at_level(logging.INFO, logger=els.logger.name):
+        svc.absorb_filing("INTC", REPORT, _morning_filing(), _et(REPORT, 15, 6))
+    assert [r for r in caplog.records if "first sight" in r.getMessage()], "the rule must run"
+    assert [s.symbol for s in svc.landed_snapshots(_et(REPORT, 15, 7))] == ["INTC"]
 
 
 def test_an_old_filing_with_no_usable_figure_leaves_the_next_figure_a_landing():

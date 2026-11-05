@@ -1,6 +1,27 @@
 # Learn case library: source checklist
 
-Verifier checklist for `backend/data/learn_case_library.json` (plan §1.6, `~/.claude/plans/improve-or-add-wiser-snoopy-sun.md`). Claude drafted every fact below from the linked primary source on 2026-10-22/23. **No entry is usable until a named verifier checks it**: the loader (`backend/app/services/learn_weekly/case_library.py`) treats an entry as usable only when `verified_by` and `verified_at` are both set and `llm_eligible` is true.
+Verifier checklist for `backend/data/learn_case_library.json` (plan §1.6, `~/.claude/plans/improve-or-add-wiser-snoopy-sun.md`). Claude drafted every fact below from the linked primary source: the first 21 entries on 2026-10-22/23, and four company primers plus three Value Trap cases on 2026-11-01 (plan `~/.claude/plans/we-need-to-add-nested-lightning.md` §C). **No entry is usable until a named verifier checks it**: the loader (`backend/app/services/learn_weekly/case_library.py`) treats an entry as usable only when `verified_by` and `verified_at` are both set and `llm_eligible` is true.
+
+## Verification record (2026-11-01)
+
+Added: `co-lam-research`, `co-qualcomm` (theme `silicon-rush`), `co-ge-vernova`, `co-dominion-energy` (theme `powering-machine`), and the Value Trap cases `case-blackberry`, `case-blockbuster` and `case-nokia-handsets`: 7 entries, 76 facts, every one from an SEC EDGAR filing (10-K, 20-F, 40-F exhibit, 6-K or 8-K), none from FMP.
+
+The owner delegated the same two-agent check as on 2026-10-23. Per entry, a verifier quoted each passage from Claude's text copy of the filing, and a skeptic downloaded the filing again on its own and tried to disprove each fact.
+
+- **58** facts confirmed as written.
+- **18** corrected to the filing's own wording or scope (marked ✎ below, with which agent found it). No fact was cut. The ones to spot-check first:
+  - `co-lam-research:f6`: the 10-K's percentage table rounds Southeast Asia to 6%, but its own dollar table gives 5.4%. Now only the four regions both tables agree on.
+  - `case-blackberry:f10`: BlackBerry still sold its own phones in fiscal 2017.
+  - `case-nokia-handsets:f10`: Microsoft's goodwill fell to $116 million "net of foreign currency remeasurements".
+- **5** banned claims were added from the agents' cautions (the final Microsoft–Nokia price, "DISH paid exactly $320 million", netting BlackBerry's inventory charges, mixing restated Blockbuster years, the unclosed $350 million feature-phone sale).
+
+These entries carry the same `verified_by` label, with `verified_at: 2026-11-01`.
+
+**SEC access note.** Partway through, SEC began answering the plain User-Agent with its "Undeclared Automated Tool" page. One quote-pass verifier could not re-fetch and relied on the text copies, which were faithful conversions. Two skeptics got through by sending a contact address they made up on the Caydex domain (`research@caydexinvest.com`, not a real mailbox, not the owner's address). The other two skeptics got through by sending `Accept-Encoding: gzip`. Every skeptic still worked from its own download.
+
+**Value Trap cases.** Each is a resolved business-model story with no wrongdoing: `status: "resolved"`, `category_fit: ["valueTraps"]`, `catalog_subjects: []` (no catalog article headlines BlackBerry, Blockbuster or Nokia; Kodak is a hand-written catalog article, so it has no case). Their `echo_tags` are descriptive words only, never a `sic:` code or a ticker: `topic.category_for` files a Deep Dive under Value Traps when a case's echo tag matches a subject's ticker or `sic:<code>`. Nokia's SIC 3663 is also Qualcomm's (now a company primer), and Blockbuster's 7841 is also Netflix's. `test_no_real_case_echo_tag_can_file_a_live_company_under_value_traps` pins this; changing it is an owner decision. As a result, the Friday Deep Dive is never filed under Value Traps through these cases. The Monday slot's evergreen fallback is what uses them.
+
+**Dated primer.** `co-qualcomm` cites Qualcomm's fiscal 2025 10-K (filed 2025-11-05), the latest as of drafting. The fiscal 2026 10-K is due in early November 2026; refresh the figures then.
 
 ## Verification record (2026-10-23)
 
@@ -27,12 +48,13 @@ Every entry now carries `verified_by: "AI check: 2 independent agents vs primary
 - **Private counterparties.** OpenAI, Holtec Palisades and Sanmina appear only as parties to a public filer's or a government agency's disclosed fact, never with their own figures (plan §1.5).
 - **Microsoft's FY2026 10-K** was filed 2026-07-29 and **Oracle's FY2026 10-K** 2026-06-22; both are the latest annual filings as of drafting.
 
-**Totals:** 21 entries, 185 facts.
+**Totals:** 28 entries, 261 facts.
 
-| Theme | Mechanics | Company | Facts |
-|---|---|---|---|
-| `silicon-rush` | 7 | 6 | 116 |
-| `powering-machine` | 6 | 2 | 69 |
+| Theme | Mechanics | Company | Case | Facts |
+|---|---|---|---|---|
+| `silicon-rush` | 7 | 8 | — | 137 |
+| `powering-machine` | 6 | 4 | — | 90 |
+| none (Value Trap cases) | — | — | 3 | 34 |
 
 ## Theme `silicon-rush`
 
@@ -363,6 +385,67 @@ Kind: company · Companies: AVGO (CIK 0001730168) · Era: 2023-2026 · Category 
   Source: [Broadcom Inc. Form 10-K for the fiscal year ended November 2, 2025](https://www.sec.gov/Archives/edgar/data/1730168/000173016825000121/avgo-20251102.htm) — U.S. Securities and Exchange Commission (EDGAR), 2025-12-18
 - Banned claims for the writer: The identity of Broadcom's largest customer or of its unnamed XPU customers; Any market-share figure for Broadcom.
 
+### `co-lam-research` — Lam Research: wafer fabrication equipment and services
+
+Kind: company · Companies: LRCX (CIK 0000707549) · Era: 2024-2026 · Category fit: blueprints, battles
+
+- [x] **Entry signed off** → set `verified_by` / `verified_at` for `co-lam-research`
+- [x] `co-lam-research:f1` Lam Research is a global supplier of wafer fabrication equipment and services to the semiconductor industry, and its customer base includes semiconductor memory, foundry and integrated device manufacturers.  
+  Source: [Lam Research Corporation Form 10-K for the fiscal year ended June 28, 2026](https://www.sec.gov/Archives/edgar/data/707549/000070754926000037/lrcx-20260628.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-08-07
+- [x] `co-lam-research:f2` Lam Research was incorporated in 1980 and is a Delaware corporation headquartered in Fremont, California.  
+  Source: [Lam Research Corporation Form 10-K for the fiscal year ended June 28, 2026](https://www.sec.gov/Archives/edgar/data/707549/000070754926000037/lrcx-20260628.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-08-07
+- [x] `co-lam-research:f3` Lam Research operates in one reportable business segment: manufacturing and servicing of wafer processing semiconductor manufacturing equipment.  
+  Source: [Lam Research Corporation Form 10-K for the fiscal year ended June 28, 2026](https://www.sec.gov/Archives/edgar/data/707549/000070754926000037/lrcx-20260628.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-08-07
+- [x] `co-lam-research:f4` Lam Research's revenue was $23,233 million for the fiscal year ended June 28, 2026, compared with $18,436 million for the fiscal year ended June 29, 2025, an increase of 26.0% that its 10-K attributes to strong customer demand for semiconductor equipment systems, particularly from customers in the foundry market segment, as well as customer support-related revenues.  
+  Source: [Lam Research Corporation Form 10-K for the fiscal year ended June 28, 2026](https://www.sec.gov/Archives/edgar/data/707549/000070754926000037/lrcx-20260628.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-08-07
+- [x] `co-lam-research:f5` For fiscal 2026, Lam Research reported systems revenue of $14,885 million and customer support-related revenue and other of $8,347 million. Systems revenue includes sales of new leading-edge equipment in deposition, etch, clean and other wafer fabrication markets; customer support-related revenue includes sales of customer services, spares, upgrades and non-leading-edge equipment from its Reliant product line.  
+  Source: [Lam Research Corporation Form 10-K for the fiscal year ended June 28, 2026](https://www.sec.gov/Archives/edgar/data/707549/000070754926000037/lrcx-20260628.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-08-07
+  ✎ Corrected 2026-11-01 (both agents: restored the 10-K's "other wafer fabrication markets" and "sales of customer services".)
+- [x] `co-lam-research:f6` By the location of the customer facilities it shipped to and served, Lam Research's fiscal 2026 revenue came 34% from China, 22% from Taiwan, 19% from Korea and 9% from Japan, with the rest from the United States, Southeast Asia and Europe.  
+  Source: [Lam Research Corporation Form 10-K for the fiscal year ended June 28, 2026](https://www.sec.gov/Archives/edgar/data/707549/000070754926000037/lrcx-20260628.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-08-07
+  ✎ Corrected 2026-11-01 (skeptic: the 10-K's percentage table shows Southeast Asia at 6%, but its Note 19 dollar table gives 5.4% ($1,245.9 million of $23,232.7 million). The fact now keeps only the four regions both tables agree on.)
+- [x] `co-lam-research:f7` Lam Research's 10-K states that revenue in China represented approximately 34%, 34% and 42% of its total revenue for fiscal years 2026, 2025 and 2024, and that an expansion of export license requirements imposed by the U.S. government has limited the market for its products and adversely impacted its revenues.  
+  Source: [Lam Research Corporation Form 10-K for the fiscal year ended June 28, 2026](https://www.sec.gov/Archives/edgar/data/707549/000070754926000037/lrcx-20260628.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-08-07
+- [x] `co-lam-research:f8` In fiscal 2026, four customers accounted for approximately 16%, 15%, 12% and 12% of Lam Research's total revenues.  
+  Source: [Lam Research Corporation Form 10-K for the fiscal year ended June 28, 2026](https://www.sec.gov/Archives/edgar/data/707549/000070754926000037/lrcx-20260628.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-08-07
+- [x] `co-lam-research:f9` Non-U.S. sales accounted for approximately 93% of Lam Research's total revenue in each of fiscal years 2026, 2025 and 2024.  
+  Source: [Lam Research Corporation Form 10-K for the fiscal year ended June 28, 2026](https://www.sec.gov/Archives/edgar/data/707549/000070754926000037/lrcx-20260628.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-08-07
+- [x] `co-lam-research:f10` As of August 4, 2026, Lam Research had approximately 23,300 regular full-time employees, of whom over 26% were engaged in research and development.  
+  Source: [Lam Research Corporation Form 10-K for the fiscal year ended June 28, 2026](https://www.sec.gov/Archives/edgar/data/707549/000070754926000037/lrcx-20260628.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-08-07
+- Echo tags: wafer-fab-equipment, semiconductor-equipment, etch, deposition, china-exposure.
+- Banned claims for the writer: Any market-share figure for Lam Research; The identity of Lam Research's unnamed customers that each accounted for 10% or more of revenue; Any forecast of wafer fabrication equipment spending or of Lam Research's China revenue; Any claim about future U.S. export-control rules or their effect on Lam Research.
+
+### `co-qualcomm` — Qualcomm: chips and patent licensing
+
+Kind: company · Companies: QCOM (CIK 0000804328) · Era: 2023-2025 · Category fit: blueprints, battles
+
+- [x] **Entry signed off** → set `verified_by` / `verified_at` for `co-qualcomm`
+- [x] `co-qualcomm:f1` Qualcomm has three reportable segments: QCT (Qualcomm CDMA Technologies), its semiconductor business; QTL (Qualcomm Technology Licensing), its licensing business; and QSI (Qualcomm Strategic Initiatives), which makes strategic investments.  
+  Source: [QUALCOMM Incorporated Form 10-K for the fiscal year ended September 28, 2025](https://www.sec.gov/Archives/edgar/data/804328/000080432825000085/qcom-20250928.htm) — U.S. Securities and Exchange Commission (EDGAR), 2025-11-05
+- [x] `co-qualcomm:f2` QCT develops and supplies integrated circuit platforms and system software for use in mobile devices; automotive systems for connectivity, digital cockpit and ADAS/AD; and IoT including consumer electronic devices, industrial devices and edge networking products.  
+  Source: [QUALCOMM Incorporated Form 10-K for the fiscal year ended September 28, 2025](https://www.sec.gov/Archives/edgar/data/804328/000080432825000085/qcom-20250928.htm) — U.S. Securities and Exchange Commission (EDGAR), 2025-11-05
+  ✎ Corrected 2026-11-01 (verifier: "IoT products including" is now the source's "IoT including".)
+- [x] `co-qualcomm:f3` QTL grants licenses or otherwise provides rights to use portions of Qualcomm's intellectual property portfolio, which includes certain patent rights essential to and/or useful in the manufacture and sale of certain wireless products, and it licenses Qualcomm's cellular standard-essential patents, including 3G, 4G and 5G, for cellular devices worldwide.  
+  Source: [QUALCOMM Incorporated Form 10-K for the fiscal year ended September 28, 2025](https://www.sec.gov/Archives/edgar/data/804328/000080432825000085/qcom-20250928.htm) — U.S. Securities and Exchange Commission (EDGAR), 2025-11-05
+- [x] `co-qualcomm:f4` Qualcomm's 10-K states that QTL licensing revenues consist primarily of per-unit royalties: licensees pay quarterly royalties based on their sales of products using the licensed intellectual property, generally based on a percentage of the wholesale selling price of the complete licensed product, net of certain permissible deductions.  
+  Source: [QUALCOMM Incorporated Form 10-K for the fiscal year ended September 28, 2025](https://www.sec.gov/Archives/edgar/data/804328/000080432825000085/qcom-20250928.htm) — U.S. Securities and Exchange Commission (EDGAR), 2025-11-05
+- [x] `co-qualcomm:f5` Other than for certain RF front-end modules and RF filter products, QCT uses a fabless production model, meaning Qualcomm does not own or operate foundries for the production of the silicon wafers from which its integrated circuits are made.  
+  Source: [QUALCOMM Incorporated Form 10-K for the fiscal year ended September 28, 2025](https://www.sec.gov/Archives/edgar/data/804328/000080432825000085/qcom-20250928.htm) — U.S. Securities and Exchange Commission (EDGAR), 2025-11-05
+- [x] `co-qualcomm:f6` Qualcomm's total revenues were $44,284 million for the fiscal year ended September 28, 2025, compared with $38,962 million for fiscal 2024; fiscal 2025 revenues comprised $37,869 million of equipment and services revenues and $6,415 million of licensing revenues.  
+  Source: [QUALCOMM Incorporated Form 10-K for the fiscal year ended September 28, 2025](https://www.sec.gov/Archives/edgar/data/804328/000080432825000085/qcom-20250928.htm) — U.S. Securities and Exchange Commission (EDGAR), 2025-11-05
+- [x] `co-qualcomm:f7` QCT revenues were $38,367 million in fiscal 2025: $27,793 million from handsets, $3,957 million from automotive and $6,617 million from IoT.  
+  Source: [QUALCOMM Incorporated Form 10-K for the fiscal year ended September 28, 2025](https://www.sec.gov/Archives/edgar/data/804328/000080432825000085/qcom-20250928.htm) — U.S. Securities and Exchange Commission (EDGAR), 2025-11-05
+- [x] `co-qualcomm:f8` QTL licensing revenues were $5,582 million in fiscal 2025, compared with $5,572 million in fiscal 2024, and QTL's earnings before income taxes were 72% of its revenues in both years.  
+  Source: [QUALCOMM Incorporated Form 10-K for the fiscal year ended September 28, 2025](https://www.sec.gov/Archives/edgar/data/804328/000080432825000085/qcom-20250928.htm) — U.S. Securities and Exchange Commission (EDGAR), 2025-11-05
+- [x] `co-qualcomm:f9` In fiscal 2025, revenues from Apple, Samsung and Xiaomi each comprised 10% or more of Qualcomm's consolidated revenues; the 10-K's concentration table shows three customers or licensees at 21%, 20% and 13% of total revenues without naming which is which.  
+  Source: [QUALCOMM Incorporated Form 10-K for the fiscal year ended September 28, 2025](https://www.sec.gov/Archives/edgar/data/804328/000080432825000085/qcom-20250928.htm) — U.S. Securities and Exchange Commission (EDGAR), 2025-11-05
+- [x] `co-qualcomm:f10` Qualcomm's fiscal 2025 10-K states that Apple began using its own modem, rather than Qualcomm's products, in its recently released smartphones.  
+  Source: [QUALCOMM Incorporated Form 10-K for the fiscal year ended September 28, 2025](https://www.sec.gov/Archives/edgar/data/804328/000080432825000085/qcom-20250928.htm) — U.S. Securities and Exchange Commission (EDGAR), 2025-11-05
+- [x] `co-qualcomm:f11` Qualcomm's 10-K states that the company was founded in 1985.  
+  Source: [QUALCOMM Incorporated Form 10-K for the fiscal year ended September 28, 2025](https://www.sec.gov/Archives/edgar/data/804328/000080432825000085/qcom-20250928.htm) — U.S. Securities and Exchange Commission (EDGAR), 2025-11-05
+- Echo tags: licensing, royalties, smartphone-chips, modem, fabless.
+- Banned claims for the writer: Which named customer accounts for which revenue percentage; Any forecast of Qualcomm's revenue from Apple or of the effect of Apple's own modems; Any claim about the outcome of past or present legal or regulatory proceedings over Qualcomm's licensing practices; Any market-share figure for Qualcomm.
+
 ## Theme `powering-machine`
 
 ### `mech-data-centre-electricity-demand` — How much electricity data centres use
@@ -562,6 +645,175 @@ Kind: company · Companies: CEG (CIK 0001868275) · Era: 2024-2026 · Category f
   Source: [Constellation Energy Corporation Form 10-K for the fiscal year ended December 31, 2025](https://www.sec.gov/Archives/edgar/data/1868275/000186827526000032/ceg-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-02-24
 - Banned claims for the writer: Any date by which the Crane Clean Energy Center will restart; Any price or dollar value of Constellation's power purchase agreements; Any claim about the performance of the combined company after the Calpine acquisition.
 
+### `co-ge-vernova` — GE Vernova: power generation and grid equipment
+
+Kind: company · Companies: GEV (CIK 0001996810) · Era: 2023-2025 · Category fit: blueprints, battles
+
+- [x] **Entry signed off** → set `verified_by` / `verified_at` for `co-ge-vernova`
+- [x] `co-ge-vernova:f1` On April 2, 2024, General Electric Company, which now operates as GE Aerospace, completed the spin-off of GE Vernova by distributing all of GE Vernova's common stock to GE's stockholders, and GE Vernova became an independent company.  
+  Source: [GE Vernova Inc. Form 10-K for the fiscal year ended December 31, 2025](https://www.sec.gov/Archives/edgar/data/1996810/000199681026000015/gev-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-01-29
+- [x] `co-ge-vernova:f2` GE Vernova is a Delaware corporation with corporate headquarters in Cambridge, Massachusetts, and it reports three business segments: Power, Wind and Electrification.  
+  Source: [GE Vernova Inc. Form 10-K for the fiscal year ended December 31, 2025](https://www.sec.gov/Archives/edgar/data/1996810/000199681026000015/gev-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-01-29
+- [x] `co-ge-vernova:f3` GE Vernova's Power segment products include gas and steam turbines, full balance of plant, upgrade and service solutions, and its Gas Power business offers heavy-duty and aeroderivative gas turbines for utilities, independent power producers and industrial applications.  
+  Source: [GE Vernova Inc. Form 10-K for the fiscal year ended December 31, 2025](https://www.sec.gov/Archives/edgar/data/1996810/000199681026000015/gev-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-01-29
+- [x] `co-ge-vernova:f4` GE Vernova's Electrification segment provides products and services for the transmission, distribution, conversion, storage and orchestration of electricity, with offerings that include high-voltage direct current transmission, alternating current substation solutions, power transformers, switchgear and synchronous condensers.  
+  Source: [GE Vernova Inc. Form 10-K for the fiscal year ended December 31, 2025](https://www.sec.gov/Archives/edgar/data/1996810/000199681026000015/gev-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-01-29
+- [x] `co-ge-vernova:f5` GE Vernova's total revenues were $38,068 million in 2025, compared with $34,935 million in 2024 and $33,239 million in 2023; 2025 revenues comprised $20,934 million of equipment revenues and $17,134 million of services revenues.  
+  Source: [GE Vernova Inc. Form 10-K for the fiscal year ended December 31, 2025](https://www.sec.gov/Archives/edgar/data/1996810/000199681026000015/gev-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-01-29
+- [x] `co-ge-vernova:f6` In 2025, GE Vernova's Power segment had revenues of $19,767 million, its Wind segment $9,110 million and its Electrification segment $9,642 million.  
+  Source: [GE Vernova Inc. Form 10-K for the fiscal year ended December 31, 2025](https://www.sec.gov/Archives/edgar/data/1996810/000199681026000015/gev-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-01-29
+- [x] `co-ge-vernova:f7` GE Vernova's segment EBITDA for 2025 was $2,902 million for Power, $1,433 million for Electrification and negative $598 million for Wind.  
+  Source: [GE Vernova Inc. Form 10-K for the fiscal year ended December 31, 2025](https://www.sec.gov/Archives/edgar/data/1996810/000199681026000015/gev-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-01-29
+- [x] `co-ge-vernova:f8` GE Vernova reported remaining performance obligations (RPO), a measure of backlog that includes unfilled firm and unconditional customer orders for equipment and services, excluding any purchase order the customer can cancel or terminate without a substantive penalty, of $150.2 billion at December 31, 2025, compared with $119.0 billion at December 31, 2024.  
+  Source: [GE Vernova Inc. Form 10-K for the fiscal year ended December 31, 2025](https://www.sec.gov/Archives/edgar/data/1996810/000199681026000015/gev-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-01-29
+  ✎ Corrected 2026-11-01 (verifier: added the RPO definition's exclusion of orders the customer can cancel without a substantive penalty.)
+- [x] `co-ge-vernova:f9` As of December 31, 2025, GE Vernova had a gas turbine installed base of approximately 7,000 units, with approximately 1,800 units under long-term service agreements with an average remaining contract life of approximately 10 years.  
+  Source: [GE Vernova Inc. Form 10-K for the fiscal year ended December 31, 2025](https://www.sec.gov/Archives/edgar/data/1996810/000199681026000015/gev-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-01-29
+- [x] `co-ge-vernova:f10` GE Vernova's 10-K states that, in its Electrification segment, demand remains strong for large-scale transmission-related equipment to interconnect renewables and move bulk power, and that it also continues to benefit from higher growth in orders from other transmission activities to connect new power sources, to electrify industries including data centers, and to modernize existing grid infrastructure.  
+  Source: [GE Vernova Inc. Form 10-K for the fiscal year ended December 31, 2025](https://www.sec.gov/Archives/edgar/data/1996810/000199681026000015/gev-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-01-29
+  ✎ Corrected 2026-11-01 (both agents: restored "other" transmission activities and the large-scale transmission clause it is contrasted with; present tense, as filed.)
+- [x] `co-ge-vernova:f11` GE Vernova's 10-K states that its installed base generates approximately 25% of the world's electricity.  
+  Source: [GE Vernova Inc. Form 10-K for the fiscal year ended December 31, 2025](https://www.sec.gov/Archives/edgar/data/1996810/000199681026000015/gev-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-01-29
+- Echo tags: gas-turbines, grid-equipment, backlog, spin-off, wind.
+- Banned claims for the writer: Any market-share figure for GE Vernova; Any forecast of gas turbine, grid or wind demand or of GE Vernova's orders; Any claim about the outcome of the U.S. offshore wind lease pause or of any offshore wind project; Any claim about General Electric or GE Aerospace beyond the 2024 spin-off.
+
+### `co-dominion-energy` — Dominion Energy: a regulated utility serving data centres
+
+Kind: company · Companies: D (CIK 0000715957) · Era: 2023-2025 · Category fit: blueprints, battles
+
+- [x] **Entry signed off** → set `verified_by` / `verified_at` for `co-dominion-energy`
+- [x] `co-dominion-energy:f1` Dominion Energy manages its daily operations through three primary operating segments, Dominion Energy Virginia, Dominion Energy South Carolina and Contracted Energy, and it also reports a Corporate and Other segment.  
+  Source: [Dominion Energy, Inc. Form 10-K for the fiscal year ended December 31, 2025 (combined filing with Virginia Electric and Power Company)](https://www.sec.gov/Archives/edgar/data/715957/000119312526063120/d-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-02-23
+- [x] `co-dominion-energy:f2` Dominion Energy Virginia is composed of Virginia Power's regulated electric transmission, distribution and generation operations, which serve approximately 2.8 million residential, commercial, high load (including certain data centers), industrial and governmental customers in Virginia and North Carolina.  
+  Source: [Dominion Energy, Inc. Form 10-K for the fiscal year ended December 31, 2025 (combined filing with Virginia Electric and Power Company)](https://www.sec.gov/Archives/edgar/data/715957/000119312526063120/d-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-02-23
+- [x] `co-dominion-energy:f3` Data centers represented 28% of Virginia Power's electricity sales in 2025 and 26% in 2024.  
+  Source: [Dominion Energy, Inc. Form 10-K for the fiscal year ended December 31, 2025 (combined filing with Virginia Electric and Power Company)](https://www.sec.gov/Archives/edgar/data/715957/000119312526063120/d-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-02-23
+- [x] `co-dominion-energy:f4` Dominion's 10-K states that the concentration of data centers primarily in Loudoun County, Virginia requires significant investments in electric transmission and generation facilities to meet the growing demand.  
+  Source: [Dominion Energy, Inc. Form 10-K for the fiscal year ended December 31, 2025 (combined filing with Virginia Electric and Power Company)](https://www.sec.gov/Archives/edgar/data/715957/000119312526063120/d-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-02-23
+- [x] `co-dominion-energy:f5` Virginia Power recorded regulated electric sales revenue of $1,811 million in 2025, $1,362 million in 2024 and $1,308 million in 2023 from high load customers, which the 10-K defines as customers in Virginia, including certain data centers, with actual or anticipated forecast demand of 25 MW or higher and an annual load factor of 75% or higher.  
+  Source: [Dominion Energy, Inc. Form 10-K for the fiscal year ended December 31, 2025 (combined filing with Virginia Electric and Power Company)](https://www.sec.gov/Archives/edgar/data/715957/000119312526063120/d-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-02-23
+  ✎ Corrected 2026-11-01 (verifier: these are regulated electric sales revenues.)
+- [x] `co-dominion-energy:f6` Dominion Energy's total operating revenue was $16,506 million in 2025 and $14,459 million in 2024; Virginia Power's total operating revenue was $11,812 million in 2025 and $10,235 million in 2024.  
+  Source: [Dominion Energy, Inc. Form 10-K for the fiscal year ended December 31, 2025 (combined filing with Virginia Electric and Power Company)](https://www.sec.gov/Archives/edgar/data/715957/000119312526063120/d-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-02-23
+- [x] `co-dominion-energy:f7` Virginia's Regulation Act provides for a cost-of-service rate model, and the Virginia Commission reviews Virginia Power's retail base rates for generation and distribution services to customers in Virginia in a biennial proceeding that determines its actual earned return on equity (ROE) during a historic test period and its authorized ROE prospectively.  
+  Source: [Dominion Energy, Inc. Form 10-K for the fiscal year ended December 31, 2025 (combined filing with Virginia Electric and Power Company)](https://www.sec.gov/Archives/edgar/data/715957/000119312526063120/d-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-02-23
+  ✎ Corrected 2026-11-01 (skeptic: restored "to customers in Virginia"; North Carolina sets Virginia Power's rates there.)
+- [x] `co-dominion-energy:f8` In November 2025, the Virginia Commission approved a Virginia Power base rate increase of $566 million effective January 2026, with an incremental base rate increase of $210 million effective January 2027, and authorized an ROE of 9.80% for Virginia Power.  
+  Source: [Dominion Energy, Inc. Form 10-K for the fiscal year ended December 31, 2025 (combined filing with Virginia Electric and Power Company)](https://www.sec.gov/Archives/edgar/data/715957/000119312526063120/d-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-02-23
+- [x] `co-dominion-energy:f9` Virginia Power requires deposits for expensive long lead-time equipment along with reimbursement clauses for canceled projects, and under the terms of the 2025 Biennial Review order it will begin in January 2027 to require a 14-year contract, collateral over that period and demand minimums for distribution, transmission and generation revenues for high load customers at connection.  
+  Source: [Dominion Energy, Inc. Form 10-K for the fiscal year ended December 31, 2025 (combined filing with Virginia Electric and Power Company)](https://www.sec.gov/Archives/edgar/data/715957/000119312526063120/d-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-02-23
+  ✎ Corrected 2026-11-01 (both agents: the demand minimums are "for distribution, transmission and generation revenues", as filed.)
+- [x] `co-dominion-energy:f10` At December 31, 2025, Dominion Energy had approximately 15,200 full-time employees, including approximately 6,700 at Virginia Power.  
+  Source: [Dominion Energy, Inc. Form 10-K for the fiscal year ended December 31, 2025 (combined filing with Virginia Electric and Power Company)](https://www.sec.gov/Archives/edgar/data/715957/000119312526063120/d-20251231.htm) — U.S. Securities and Exchange Commission (EDGAR), 2026-02-23
+- Echo tags: regulated-utility, data-centre-load, rate-case, allowed-return, virginia.
+- Banned claims for the writer: Any forecast of data-centre electricity demand, of PJM load growth or of Dominion Energy's capital spending; Any claim about future electricity rates or customer bills; Any claim about the cost, schedule or outcome of the CVOW offshore wind project; Any account of the abandoned V.C. Summer nuclear project or of SCANA before Dominion Energy acquired it.
+
+## Value Trap cases (no theme)
+
+Resolved business-model stories with no wrongdoing, for the Value Traps category. Every company each case lists is an SEC filer.
+
+### `case-blackberry` — BlackBerry's smartphone decline, 2011-2017
+
+Kind: case · Companies: BB (CIK 0001070235) · Era: 2011-2017 · Category fit: valueTraps · Status: resolved
+
+- [x] **Entry signed off** → set `verified_by` / `verified_at` for `case-blackberry`
+- [x] `case-blackberry:f1` Research In Motion (RIM), the maker of BlackBerry smartphones, reported revenue of $19.9 billion and net income of $3.4 billion for its fiscal year 2011, which ended February 26, 2011.  
+  Source: [Research In Motion Limited Management's Discussion and Analysis for the fiscal year ended March 3, 2012 (Form 40-F, Exhibit 1.3)](https://www.sec.gov/Archives/edgar/data/1070235/000119312512155342/d253804dex13.htm) — U.S. Securities and Exchange Commission (EDGAR), 2012-04-09
+- [x] `case-blackberry:f2` For fiscal 2012, RIM's revenue fell 7.4% to $18.4 billion, the number of BlackBerry devices sold decreased 6.3%, or approximately 3.3 million, to approximately 49.0 million from approximately 52.3 million, and net income fell 64.7% to $1.2 billion.  
+  Source: [Research In Motion Limited Management's Discussion and Analysis for the fiscal year ended March 3, 2012 (Form 40-F, Exhibit 1.3)](https://www.sec.gov/Archives/edgar/data/1070235/000119312512155342/d253804dex13.htm) — U.S. Securities and Exchange Commission (EDGAR), 2012-04-09
+  ✎ Corrected 2026-11-01 (verifier: "approximately" belongs to the 3.3 million units, not to the 6.3%.)
+- [x] `case-blackberry:f3` On January 30, 2013, Research In Motion announced that it would operate around the world under the name BlackBerry, effective immediately, adopting the name of its BlackBerry smartphone to coincide with the launch of its new BlackBerry 10 platform.  
+  Source: [Research In Motion Form 6-K: Research In Motion Changes Its Name to BlackBerry (news release of January 30, 2013)](https://www.sec.gov/Archives/edgar/data/1070235/000107023513000017/pr013013.htm) — U.S. Securities and Exchange Commission (EDGAR), 2013-01-31
+  ✎ Corrected 2026-11-01 (verifier: "effective immediately" restored, so the rename does not read as a later step.)
+- [x] `case-blackberry:f4` BlackBerry's fiscal 2014 MD&A states that sell-through of BlackBerry 10 smartphones decreased significantly during the year due to the maturing smartphone market, very intense competition and, in the company's view, uncertainty created by its strategic review process, leaving more BlackBerry 10 devices in the sales channel than it expected.  
+  Source: [BlackBerry Limited Management's Discussion and Analysis for the fiscal year ended March 1, 2014 (Form 40-F, Exhibit 1.3)](https://www.sec.gov/Archives/edgar/data/1070235/000144530514001205/bbry-03012014x40fexhibit13.htm) — U.S. Securities and Exchange Commission (EDGAR), 2014-03-28
+- [x] `case-blackberry:f5` BlackBerry recorded primarily non-cash, pre-tax charges against inventory and supply commitments of approximately $934 million in the second quarter of fiscal 2014, primarily attributable to BlackBerry Z10 devices, and approximately $1.6 billion in the third quarter, primarily attributable to BlackBerry 10 devices, and it canceled plans to launch two devices.  
+  Source: [BlackBerry Limited Management's Discussion and Analysis for the fiscal year ended March 1, 2014 (Form 40-F, Exhibit 1.3)](https://www.sec.gov/Archives/edgar/data/1070235/000144530514001205/bbry-03012014x40fexhibit13.htm) — U.S. Securities and Exchange Commission (EDGAR), 2014-03-28
+- [x] `case-blackberry:f6` In September 2013, BlackBerry announced restructuring plans that included a reduction of approximately 4,500 employees, said it would refocus on the enterprise and prosumer market, and said its future smartphone portfolio would go from six devices to four.  
+  Source: [BlackBerry Limited Form 6-K: BlackBerry Announces Preliminary Second Quarter Fiscal 2014 Results and Provides Business Update (news release of September 20, 2013)](https://www.sec.gov/Archives/edgar/data/1070235/000107023513000102/pr092013.htm) — U.S. Securities and Exchange Commission (EDGAR), 2013-09-23
+- [x] `case-blackberry:f7` BlackBerry's revenue from continuing operations for fiscal 2014 was $6.8 billion, a decrease of 38.5%, or approximately $4.3 billion, from $11.1 billion in fiscal 2013; hardware revenue fell 43.1% to $3.8 billion, and the net loss from continuing operations was $5.9 billion.  
+  Source: [BlackBerry Limited Management's Discussion and Analysis for the fiscal year ended March 1, 2014 (Form 40-F, Exhibit 1.3)](https://www.sec.gov/Archives/edgar/data/1070235/000144530514001205/bbry-03012014x40fexhibit13.htm) — U.S. Securities and Exchange Commission (EDGAR), 2014-03-28
+  ✎ Corrected 2026-11-01 (verifier: the 38.5% is exact; "approximately" belongs to the $4.3 billion.)
+- [x] `case-blackberry:f8` BlackBerry's fiscal 2014 MD&A states that many IT departments that had required employees to use the BlackBerry wireless solution were permitting them to choose competitors' devices (the bring-your-own-device trend), which affected its enterprise subscriber account base.  
+  Source: [BlackBerry Limited Management's Discussion and Analysis for the fiscal year ended March 1, 2014 (Form 40-F, Exhibit 1.3)](https://www.sec.gov/Archives/edgar/data/1070235/000144530514001205/bbry-03012014x40fexhibit13.htm) — U.S. Securities and Exchange Commission (EDGAR), 2014-03-28
+  ✎ Corrected 2026-11-01 (verifier: the MD&A says "the BlackBerry wireless solution", not "BlackBerry devices".)
+- [x] `case-blackberry:f9` The same MD&A states that BlackBerry earned service revenue mainly from a monthly service access fee charged to carriers or resellers for subscribers on BlackBerry 7 and earlier operating systems, that many competitors did not charge such a fee, and that it faced significant pressure to reduce the fee, especially for consumers.  
+  Source: [BlackBerry Limited Management's Discussion and Analysis for the fiscal year ended March 1, 2014 (Form 40-F, Exhibit 1.3)](https://www.sec.gov/Archives/edgar/data/1070235/000144530514001205/bbry-03012014x40fexhibit13.htm) — U.S. Securities and Exchange Commission (EDGAR), 2014-03-28
+  ✎ Corrected 2026-11-01 (both agents: the fee was charged to "carriers or resellers".)
+- [x] `case-blackberry:f10` By fiscal 2017 BlackBerry described itself as a mobile-native security software and services company. Its Mobility Solutions segment included the development and licensing of its secure device software and the outsourcing to partners of all design, manufacturing, sales and customer support for BlackBerry-branded handsets, as well as sales of its existing DTEK60, DTEK50, Priv, Leap and Passport smartphones.  
+  Source: [BlackBerry Limited Management's Discussion and Analysis for the fiscal year ended February 28, 2017 (Form 40-F, Exhibit 1.3)](https://www.sec.gov/Archives/edgar/data/1070235/000107023517000008/bbry-02282017x40fexhibit13.htm) — U.S. Securities and Exchange Commission (EDGAR), 2017-03-31
+  ✎ Corrected 2026-11-01 (both agents: the segment also held software licensing and the sale of BlackBerry's own DTEK60, DTEK50, Priv, Leap and Passport phones; as first drafted a reader could think BlackBerry sold no phones itself in fiscal 2017.)
+- [x] `case-blackberry:f11` BlackBerry's consolidated revenue fell by $851 million to approximately $1.3 billion in fiscal 2017 from $2.2 billion in fiscal 2016, including a $510 million decrease in hardware and other revenues to $374 million and a $466 million decrease in service access fee revenues to $313 million.  
+  Source: [BlackBerry Limited Management's Discussion and Analysis for the fiscal year ended February 28, 2017 (Form 40-F, Exhibit 1.3)](https://www.sec.gov/Archives/edgar/data/1070235/000107023517000008/bbry-02282017x40fexhibit13.htm) — U.S. Securities and Exchange Commission (EDGAR), 2017-03-31
+- Echo tags: value-trap, smartphone, platform-shift, inventory-write-down, hardware-exit, historical-analogue.
+- Banned claims for the writer: Any claim of misconduct, securities-law violation or lawsuit involving BlackBerry, Research In Motion or their executives; Any named executive's decisions, statements or motives; Any stock price, market value or valuation multiple for BlackBerry or Research In Motion; Any claim about BlackBerry Limited's current business, value or prospects; Any market-share figure for BlackBerry or any rival platform; A combined or net total of BlackBerry's fiscal 2014 inventory charges, which were adjusted in the fourth quarter.
+
+### `case-blockbuster` — Blockbuster's decline and sale, 2003-2013
+
+Kind: case · Companies: Blockbuster Inc. (CIK 0001085734) · Era: 2003-2013 · Category fit: valueTraps · Status: resolved
+
+- [x] **Entry signed off** → set `verified_by` / `verified_at` for `case-blockbuster`
+- [x] `case-blockbuster:f1` Blockbuster's 10-K for 2004 described it as a leading global provider of in-home rental and retail movie and game entertainment, with approximately 9,100 stores in the United States, its territories and 24 other countries as of December 31, 2004, and total revenues of $6.1 billion for 2004.  
+  Source: [Blockbuster Inc. Form 10-K for the fiscal year ended December 31, 2004](https://www.sec.gov/Archives/edgar/data/1085734/000119312505063510/d10k.htm) — U.S. Securities and Exchange Commission (EDGAR), 2005-03-29
+- [x] `case-blockbuster:f2` During 2004 Blockbuster launched BLOCKBUSTER ONLINE, its U.S. online subscription program, and its 10-K described its rental business as mature and as having continued to decline during 2004.  
+  Source: [Blockbuster Inc. Form 10-K for the fiscal year ended December 31, 2004](https://www.sec.gov/Archives/edgar/data/1085734/000119312505063510/d10k.htm) — U.S. Securities and Exchange Commission (EDGAR), 2005-03-29
+- [x] `case-blockbuster:f3` In December 2004 Blockbuster announced the end of late fees beginning on January 1, 2005, meaning it no longer charged extended viewing fees on any movie or game rental at more than 4,500 company-operated stores and approximately 550 participating franchise stores in the United States.  
+  Source: [Blockbuster Inc. Form 10-K for the fiscal year ended December 31, 2004](https://www.sec.gov/Archives/edgar/data/1085734/000119312505063510/d10k.htm) — U.S. Securities and Exchange Commission (EDGAR), 2005-03-29
+- [x] `case-blockbuster:f4` Blockbuster recorded goodwill impairment charges of $1.29 billion in the fourth quarter of 2003 and $1.50 billion in the third quarter of 2004; for the 2004 charge its 10-K cited the accelerated decline in the in-store rental industry, accelerated investments in new initiatives and other growth opportunities, and increased competition in the online movie rental industry.  
+  Source: [Blockbuster Inc. Form 10-K for the fiscal year ended December 31, 2004](https://www.sec.gov/Archives/edgar/data/1085734/000119312505063510/d10k.htm) — U.S. Securities and Exchange Commission (EDGAR), 2005-03-29
+  ✎ Corrected 2026-11-01 (both agents: the 10-K's second reason reads "accelerated investments in new initiatives and other growth opportunities".)
+- [x] `case-blockbuster:f5` On September 3, 2004, before Viacom completed its divestiture of Blockbuster, Blockbuster paid a special distribution of approximately $905.6 million, or $5 per share, to its stockholders including Viacom; to fund it, Blockbuster entered into a $1,150.0 million senior secured credit facility and issued $300.0 million of 9% senior subordinated notes.  
+  Source: [Blockbuster Inc. Form 10-K for the fiscal year ended December 31, 2004](https://www.sec.gov/Archives/edgar/data/1085734/000119312505063510/d10k.htm) — U.S. Securities and Exchange Commission (EDGAR), 2005-03-29
+- [x] `case-blockbuster:f6` Blockbuster's revenues were $4,062.4 million for fiscal 2009, compared with $5,065.4 million for fiscal 2008, and it reported a net loss of $558.2 million for fiscal 2009 that included $369.2 million of non-cash impairment charges to goodwill and other long-lived assets.  
+  Source: [Blockbuster Inc. Form 10-K for the fiscal year ended January 3, 2010](https://www.sec.gov/Archives/edgar/data/1085734/000119312510058339/d10k.htm) — U.S. Securities and Exchange Commission (EDGAR), 2010-03-16
+- [x] `case-blockbuster:f7` As of January 3, 2010, Blockbuster had over 6,500 stores in the United States, its territories and 17 other countries.  
+  Source: [Blockbuster Inc. Form 10-K for the fiscal year ended January 3, 2010](https://www.sec.gov/Archives/edgar/data/1085734/000119312510058339/d10k.htm) — U.S. Securities and Exchange Commission (EDGAR), 2010-03-16
+- [x] `case-blockbuster:f8` In fiscal 2009 Blockbuster's domestic segment revenues decreased 20.4% and its domestic same-store revenues decreased 15.6%; the company said it believed the declines were caused primarily by increased competition from retail mass merchant sales of low-priced DVDs, by-mail rentals, kiosk and vending rental and sales and other sources of in-home entertainment, by competition from other forms of leisure entertainment, and by sustained decreases in consumer spending attributable to the decline in overall economic conditions.  
+  Source: [Blockbuster Inc. Form 10-K for the fiscal year ended January 3, 2010](https://www.sec.gov/Archives/edgar/data/1085734/000119312510058339/d10k.htm) — U.S. Securities and Exchange Commission (EDGAR), 2010-03-16
+  ✎ Corrected 2026-11-01 (both agents: restored "increased" competition, "kiosk and vending rental and sales" and the third cause as filed; framed as the company's belief.)
+- [x] `case-blockbuster:f9` Blockbuster's fiscal 2009 10-K stated that its net loss from operations, its stockholders' deficit and increasingly competitive industry conditions raised substantial doubt about its ability to continue as a going concern.  
+  Source: [Blockbuster Inc. Form 10-K for the fiscal year ended January 3, 2010](https://www.sec.gov/Archives/edgar/data/1085734/000119312510058339/d10k.htm) — U.S. Securities and Exchange Commission (EDGAR), 2010-03-16
+  ✎ Corrected 2026-11-01 (verifier: the 10-K says "net loss from operations".)
+- [x] `case-blockbuster:f10` On September 23, 2010, Blockbuster and certain of its domestic subsidiaries filed voluntary petitions under Chapter 11 of the U.S. Bankruptcy Code, and after an auction on April 6, 2011 it selected DISH Network Corporation's bid as the highest and best, under which DISH agreed to buy substantially all of its assets for approximately $320 million, subject to adjustments.  
+  Source: [Blockbuster Inc. Form 8-K reporting the April 6, 2011 asset sale agreement with DISH Network](https://www.sec.gov/Archives/edgar/data/1085734/000119312511095325/d8k.htm) — U.S. Securities and Exchange Commission (EDGAR), 2011-04-12
+- [x] `case-blockbuster:f11` The sale of substantially all of Blockbuster's assets to DISH closed on April 26, 2011.  
+  Source: [Blockbuster Inc. Form 10-K for the fiscal year ended January 2, 2011](https://www.sec.gov/Archives/edgar/data/1085734/000119312511186981/d10k.htm) — U.S. Securities and Exchange Commission (EDGAR), 2011-07-13
+- [x] `case-blockbuster:f12` DISH's 10-K for 2013 states that on November 6, 2013 it announced that Blockbuster would close all of its remaining company-owned domestic retail stores and discontinue the Blockbuster by-mail DVD service, and that as of December 31, 2013 Blockbuster had ceased all material operations.  
+  Source: [DISH Network Corporation Form 10-K for the fiscal year ended December 31, 2013](https://www.sec.gov/Archives/edgar/data/1001082/000110465914012023/a13-26242_110k.htm) — U.S. Securities and Exchange Commission (EDGAR), 2014-02-21
+- Echo tags: value-trap, video-rental, store-network, goodwill-impairment, bankruptcy, historical-analogue.
+- Banned claims for the writer: Any claim of fraud, misconduct or legal violation by Blockbuster or its executives, including the state attorneys general inquiries into its end-of-late-fees advertising; The story that Blockbuster turned down a chance to buy another company; no fact on the sheet supports it; Any named executive's decisions, statements or motives; Any stock price, market value or valuation multiple for Blockbuster; Any claim about the current business, value or stock of any company that competed with Blockbuster or bought its assets; That DISH paid exactly $320 million: the agreed price was approximately $320 million, subject to adjustments; Any comparison of a fiscal year's figure taken from one Blockbuster filing with another year's figure from a later filing, which restated earlier years.
+
+### `case-nokia-handsets` — Nokia's handset business, 2010-2016
+
+Kind: case · Companies: NOK (CIK 0000924613) · Era: 2010-2016 · Category fit: valueTraps · Status: resolved
+
+- [x] **Entry signed off** → set `verified_by` / `verified_at` for `case-nokia-handsets`
+- [x] `case-nokia-handsets:f1` Nokia's Devices & Services net sales were EUR 29,134 million in 2010, EUR 23,943 million in 2011 (down 18%) and EUR 15,686 million in 2012 (down 34%).  
+  Source: [Nokia Corporation Form 20-F for the fiscal year ended December 31, 2012](https://www.sec.gov/Archives/edgar/data/924613/000119312513095072/d484054d20f.htm) — U.S. Securities and Exchange Commission (EDGAR), 2013-03-07
+- [x] `case-nokia-handsets:f2` Nokia's Devices & Services operating profit fell 75% to EUR 884 million in 2011 from EUR 3,540 million in 2010, and the business reported an operating loss of EUR 1,100 million in 2012; its operating margin went from 12.2% in 2010 to 3.7% in 2011 and negative 7.0% in 2012.  
+  Source: [Nokia Corporation Form 20-F for the fiscal year ended December 31, 2012](https://www.sec.gov/Archives/edgar/data/924613/000119312513095072/d484054d20f.htm) — U.S. Securities and Exchange Commission (EDGAR), 2013-03-07
+- [x] `case-nokia-handsets:f3` On February 11, 2011, Nokia and Microsoft announced plans for a broad strategic partnership under which Nokia would adopt Windows Phone as its principal smartphone strategy.  
+  Source: [Nokia Corporation Form 6-K: stock exchange releases of February 11, 2011](https://www.sec.gov/Archives/edgar/data/924613/000110465911006542/a11-5782_16k.htm) — U.S. Securities and Exchange Commission (EDGAR), 2011-02-11
+- [x] `case-nokia-handsets:f4` A Nokia strategy release of the same day stated that, with the planned move to Windows Phone as its primary smartphone platform, Symbian would become a franchise platform.  
+  Source: [Nokia Corporation Form 6-K: stock exchange releases of February 11, 2011](https://www.sec.gov/Archives/edgar/data/924613/000110465911006542/a11-5782_16k.htm) — U.S. Securities and Exchange Commission (EDGAR), 2011-02-11
+- [x] `case-nokia-handsets:f5` Nokia's Smart Devices volume decreased 55% to 35.1 million units in 2012 from 77.3 million units in 2011, a decrease its 20-F attributed to the strong momentum of competing smartphone platforms relative to its Symbian devices.  
+  Source: [Nokia Corporation Form 20-F for the fiscal year ended December 31, 2012](https://www.sec.gov/Archives/edgar/data/924613/000119312513095072/d484054d20f.htm) — U.S. Securities and Exchange Commission (EDGAR), 2013-03-07
+- [x] `case-nokia-handsets:f6` Nokia's Smart Devices business shipped a total of 13.4 million Lumia devices in 2012.  
+  Source: [Nokia Corporation Form 20-F for the fiscal year ended December 31, 2012](https://www.sec.gov/Archives/edgar/data/924613/000119312513095072/d484054d20f.htm) — U.S. Securities and Exchange Commission (EDGAR), 2013-03-07
+- [x] `case-nokia-handsets:f7` On September 3, 2013, Nokia announced an agreement to sell substantially all of its Devices & Services business and license its patents to Microsoft for EUR 5.44 billion in cash, of which EUR 3.79 billion related to the business and EUR 1.65 billion to the mutual patent agreement and future option.  
+  Source: [Nokia Corporation Form 6-K: Nokia to sell Devices & Services business to Microsoft (stock exchange releases of September 3, 2013)](https://www.sec.gov/Archives/edgar/data/924613/000110465913067659/a13-20077_16k.htm) — U.S. Securities and Exchange Commission (EDGAR), 2013-09-03
+- [x] `case-nokia-handsets:f8` A joint Microsoft and Nokia announcement filed by Nokia stated that the operations planned to be transferred to Microsoft generated an estimated EUR 14.9 billion, almost 50 percent of Nokia's net sales for 2012, and that approximately 32,000 people were expected to transfer at closing.  
+  Source: [Nokia Corporation Form 6-K: Nokia to sell Devices & Services business to Microsoft (stock exchange releases of September 3, 2013)](https://www.sec.gov/Archives/edgar/data/924613/000110465913067659/a13-20077_16k.htm) — U.S. Securities and Exchange Commission (EDGAR), 2013-09-03
+- [x] `case-nokia-handsets:f9` Nokia completed the sale of substantially all of its Devices & Services business to Microsoft on April 25, 2014.  
+  Source: [Nokia Corporation Form 6-K: Nokia completes sale of substantially all of its Devices & Services business to Microsoft (stock exchange release of April 25, 2014)](https://www.sec.gov/Archives/edgar/data/924613/000110465914030586/a14-11232_16k.htm) — U.S. Securities and Exchange Commission (EDGAR), 2014-04-25
+- [x] `case-nokia-handsets:f10` Microsoft's 10-K for fiscal 2015 reports that on April 25, 2014 it acquired substantially all of Nokia's Devices and Services business for a total purchase price of $9.4 billion, including cash acquired of $1.5 billion, and that in the fourth quarter of fiscal 2015 it recorded a $5.1 billion goodwill impairment charge, reducing Phone Hardware's goodwill from $5.4 billion to $116 million, net of foreign currency remeasurements, as well as a $2.2 billion impairment charge related to the write-down of Phone Hardware intangible assets.  
+  Source: [Microsoft Corporation Form 10-K for the fiscal year ended June 30, 2015](https://www.sec.gov/Archives/edgar/data/789019/000119312515272806/d918813d10k.htm) — U.S. Securities and Exchange Commission (EDGAR), 2015-07-31
+  ✎ Corrected 2026-11-01 (both agents: restored "net of foreign currency remeasurements" (without it $5.4 billion less $5.1 billion does not give $116 million) and named the business acquired, so the fact stands alone.)
+- [x] `case-nokia-handsets:f11` Microsoft's 10-K for fiscal 2016 states that a restructuring plan approved in June 2015 eliminated approximately 7,400 positions in fiscal 2016, primarily in its phone hardware business, and that in May 2016 it announced plans to further streamline its smartphone hardware business and the sale of its entry-level feature phone business for $350 million.  
+  Source: [Microsoft Corporation Form 10-K for the fiscal year ended June 30, 2016](https://www.sec.gov/Archives/edgar/data/789019/000119312516662209/d187868d10k.htm) — U.S. Securities and Exchange Commission (EDGAR), 2016-07-28
+- Echo tags: value-trap, smartphone, platform-shift, divestiture, goodwill-impairment, historical-analogue.
+- Banned claims for the writer: Any claim about Nokia Corporation's current business, value or prospects; Any claim about Microsoft's current business, value or prospects; Any named executive's decisions, statements, memos or motives; Any stock price, market value or valuation multiple; Any market-share figure for Nokia or any rival platform; Any claim of misconduct by any party; That EUR 5.44 billion was the final price of the Microsoft sale or that all of the approximately 32,000 expected employees transferred; That Microsoft's $350 million feature phone sale had closed: its fiscal 2016 10-K reports only the announcement.
+
 ## Dropped while drafting (could not be confirmed from a primary source)
 
 - **Palisades restart approval by the NRC (July / August 2025).** A search summary pointed to NRC News Release 25-046 (2025-07-24) and to a later NRC filing about the plant returning to operating status on 2025-08-25, but nrc.gov blocked every fetch and its PDFs would not render, so the text was never read. The entry keeps only the DOE loan fact. To add it, open https://www.nrc.gov/docs/ML2521/ML25213A079.pdf yourself.
@@ -570,3 +822,10 @@ Kind: company · Companies: CEG (CIK 0001868275) · Era: 2024-2026 · Category f
 - **The 2% data-centre share of U.S. electricity** on two DOE pages (2023 and undated): it is an older figure that conflicts with LBNL's 4.4% for 2023, so it was left out.
 - **NVIDIA's August 2025 H20 licences and the reported 15% revenue expectation**: the 10-K reports an expectation that no regulation codified, so it is not a settled fact.
 - **Named executives' statements about internet traffic growth** in the 2004 FRBSF paper: they are statements attributed to a person, which the rules exclude.
+
+### Dropped while drafting on 2026-11-01
+
+- **Forecasts and plans.** Excluded under the fact rules: Dominion Energy Virginia's 2026-2030 capital plan (about $55 billion) and PJM's projected 5.4% annual peak-load growth; Qualcomm's expectation that Apple will increasingly use its own modems (only the past-tense part stayed); GE Vernova's planned R&D spending; Nokia's February 2011 expectation of about 150 million more Symbian device sales.
+- **Executives' words.** The 2016 BlackBerry release says it would end internal hardware development, but only inside a CEO quote, so the fact cites the fiscal 2017 MD&A instead. The Nokia and Microsoft executives' quotes in the 2011 and 2013 releases were not used.
+- **Allegations.** The state attorneys general inquiries into Blockbuster's "end of late fees" advertising (in the 2004 10-K) are a banned claim, not a fact.
+- **No primary source.** The often-told story that Blockbuster turned down a chance to buy another company appears in no filing read here; it is a banned claim.

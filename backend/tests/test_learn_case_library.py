@@ -6,6 +6,10 @@ have verified each entry. So the loader is pinned to fail closed: an absent file
 library (WARNING), a broken file or an unknown version is an empty library (ERROR), a malformed
 entry is skipped (ERROR naming it), and only a verified + llm_eligible entry with facts is
 usable — `facts_for` gives nothing for any other. A `quotes` key is refused anywhere.
+
+The real file's Value Trap cases and company primers are pinned too: catalog slugs exist in the
+bundle, cases stay resolved and fenced, and no case echo tag can file a live company's piece under
+Value Traps.
 """
 
 from __future__ import annotations
@@ -14,6 +18,8 @@ import copy
 import json
 import logging
 import os
+import re
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
@@ -259,3 +265,110 @@ def test_every_real_usable_entry_names_its_verifier_and_date():
     library = cl.parse_library(_real(), source="real")
     for e in library.usable_entries():
         assert e.verified_by and e.verified_at and e.llm_eligible
+
+
+def test_no_real_fact_cites_fmp():
+    """Facts frozen into a weekly piece never come from FMP (Order Form: no downloadable data)."""
+    for e in _real()["entries"]:
+        for f in e.get("facts") or []:
+            host = urlsplit((f.get("source") or {}).get("url") or "").netloc.lower()
+            assert "financialmodelingprep" not in host, (e.get("id"), f.get("id"))
+
+
+# ── The REAL file's catalog subjects, Value Trap cases and company primers ──
+
+_BACKEND = Path(__file__).resolve().parents[1]
+_BUNDLE = _BACKEND / "data" / "money_moves.json"
+_THEME_MIGRATIONS = ("081_trending_themes.sql", "084_retheme_ticker_baskets.sql")
+_THEME_SLUG_RE = re.compile(r"\(\s*'([a-z0-9-]+)'\s*,|slug\s*=\s*'([a-z0-9-]+)'")
+# A US ticker, lower-cased: 1-5 letters, optionally a class suffix ("brk-b", "brk.b").
+_TICKER_LIKE = re.compile(r"^[a-z]{1,5}([.-][a-z]{1,2})?$")
+
+
+def _bundle_articles():
+    articles = json.loads(_BUNDLE.read_text(encoding="utf-8"))["articles"]
+    slugs = {a["slug"] for a in articles if isinstance(a.get("slug"), str)}
+    assert slugs, f"{_BUNDLE.name} lists no article slugs"  # a vacuous bundle proves nothing
+    return articles, slugs
+
+
+def _theme_slugs():
+    text = "".join((_BACKEND / "database" / "migrations" / name).read_text(encoding="utf-8")
+                   for name in _THEME_MIGRATIONS)
+    slugs = {a or b for a, b in _THEME_SLUG_RE.findall(text)}
+    assert {"silicon-rush", "powering-machine"} <= slugs, sorted(slugs)
+    return slugs
+
+
+def test_every_real_catalog_subject_is_a_slug_in_the_bundle():
+    _, slugs = _bundle_articles()
+    for e in _real()["entries"]:
+        for slug in e.get("catalog_subjects") or []:
+            assert slug in slugs, (e.get("id"), slug)
+
+
+def test_no_real_case_headlines_a_catalog_article_it_does_not_name():
+    """A weekly piece is never about the main subject of a catalog article in the same category
+    (plan §1.5), so a case whose company headlines a catalog article of a category it fits must
+    list that slug in `catalog_subjects` — which is what keeps Kodak, now a hand-written catalog
+    article, out of the library."""
+    articles, _ = _bundle_articles()
+    library = cl.parse_library(_real(), source="real")
+    for e in library.usable_entries(kinds=("case",)):
+        for co in e.companies:
+            short = co.name.split()[0]
+            for a in articles:
+                if (a.get("category") in e.category_fit
+                        and re.search(rf"(?<!\w){re.escape(short)}(?!\w)", a.get("title") or "",
+                                      re.IGNORECASE)):
+                    assert a["slug"] in e.catalog_subjects, (e.id, a["slug"])
+
+
+def test_the_real_value_trap_cases_are_resolved_cited_and_fenced():
+    """The Monday slot's evergreen Value Traps pick is a resolved `case` entry, so the library
+    must hold some. Each is a business-model story with no wrongdoing and no price data: its
+    banned claims rule out misconduct and stock prices, and every company it lists is an SEC
+    filer (the fact sheet drops a figure tied to a company with no CIK)."""
+    library = cl.parse_library(_real(), source="real")
+    cases = library.usable_entries(kinds=("case",))
+    assert len([e for e in cases if "valueTraps" in e.category_fit]) >= 3
+    for e in cases:
+        assert e.status == "resolved", e.id
+        banned = [b.lower() for b in e.banned_claims]
+        assert any("misconduct" in b for b in banned), e.id
+        assert any("stock price" in b for b in banned), e.id
+        assert e.companies and all(co.cik for co in e.companies), e.id
+
+
+def test_no_real_case_echo_tag_can_file_a_live_company_under_value_traps():
+    """`topic.category_for` files a Deep Dive under Value Traps when a resolved case's echo tag
+    equals the candidate key (a theme slug or a ticker), a subject's ticker or a subject's
+    `sic:<code>`. Any of those on a case would put a LIVE company's piece under Value Traps:
+    Nokia's SIC 3663 is also Qualcomm's (a company primer) and Blockbuster's 7841 is Netflix's.
+    Case echo tags stay descriptive words; a `sic:` or ticker tag needs the owner's decision and
+    a change here."""
+    library = cl.parse_library(_real(), source="real")
+    themes = _theme_slugs() | {t for e in library.entries for t in e.themes}
+    tickers = {co.ticker.lower() for e in library.entries for co in e.companies if co.ticker}
+    cases = library.usable_entries(kinds=("case",))
+    assert cases
+    for e in cases:
+        assert e.echo_tags, e.id
+        for tag in e.echo_tags:
+            t = tag.strip().lower()
+            assert not t.startswith("sic:"), (e.id, tag)
+            assert t not in themes, (e.id, tag)
+            assert t not in tickers and not _TICKER_LIKE.match(t), (e.id, tag)
+
+
+def test_every_real_company_primer_names_one_sec_filer_on_a_theme():
+    """A company primer is what lets a single-company Deep Dive run (`company_primer_ciks`), so
+    each names exactly one SEC filer and sits on a theme, and no filer has two primers."""
+    library = cl.parse_library(_real(), source="real")
+    primers = library.usable_entries(kinds=(cl.KIND_COMPANY,))
+    assert primers
+    for e in primers:
+        assert len(e.companies) == 1, e.id
+        assert e.companies[0].cik and e.companies[0].ticker, e.id
+        assert e.themes, e.id
+    assert len(library.company_primer_ciks()) == len(primers)

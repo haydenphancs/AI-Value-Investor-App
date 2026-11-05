@@ -130,9 +130,61 @@ def test_postgrest_semantic_codes_are_not_transient(code):
     assert is_transient_supabase_error(postgrest_error(code)) is False
 
 
-@pytest.mark.parametrize("status", [400, 401, 403, 404, 409, 422])
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
 def test_client_4xx_is_not_transient(status):
     assert is_transient_supabase_error(gateway_error(status)) is False
+
+
+_CLOUDFLARE_DNS_ERROR_BODY = (
+    b"<!doctype html>\n<html><head><title>DNS resolution error | "
+    b"gutlnhsjxrkxvrbqbbqq.supabase.co | Cloudflare</title></head></html>"
+)
+
+
+def test_the_edges_dns_error_page_is_transient():
+    """PYTHON-FASTAPI-3F: Cloudflare answers its DNS resolution error page with status 409.
+
+    The body is not PostgREST JSON, so postgrest raises the int-code shape, which by this
+    module's invariant cannot be PostgREST's own 409."""
+    err = APIError(generate_default_error_message(_FakeResponse(409, _CLOUDFLARE_DNS_ERROR_BODY)))
+    assert err.code == 409 and isinstance(err.code, int), "the shape production raised"
+    assert is_transient_supabase_error(err) is True
+
+
+@pytest.mark.parametrize("code", ["23505", "23503", "409"])
+def test_a_postgrest_conflict_stays_deterministic(code):
+    """PostgREST's own 409 carries a str code. Only the INT 409 is the edge."""
+    assert is_transient_supabase_error(postgrest_error(code)) is False
+
+
+def test_an_http_409_on_a_response_stays_deterministic():
+    """A Storage or other HTTP 409 is a real conflict, not the edge page."""
+    request = httpx.Request("POST", "https://x.supabase.co/storage/v1/object/b/f")
+    err = httpx.HTTPStatusError("conflict", request=request, response=httpx.Response(409))
+    assert is_transient_supabase_error(err) is False
+
+
+def test_the_edges_409_is_retried_but_a_unique_violation_is_not(monkeypatch):
+    monkeypatch.setattr(se.time, "sleep", lambda _s: None)
+    calls = []
+
+    def op():
+        calls.append(1)
+        if len(calls) == 1:
+            raise gateway_error(409)
+        return "ok"
+
+    assert retry_idempotent_sync(op, what="t") == "ok"
+    assert len(calls) == 2
+
+    def unique():
+        calls.append(1)
+        raise postgrest_error("23505")
+
+    calls.clear()
+    with pytest.raises(APIError):
+        retry_idempotent_sync(unique, what="t")
+    assert len(calls) == 1
 
 
 def test_429_is_not_transient():

@@ -124,6 +124,60 @@ async def test_the_report_classifies_every_held_symbol(monkeypatch, caplog):
     assert "USAC" not in error and "USAC" not in warning
 
 
+class _CountingFMP(_FMP):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cik_calls = 0
+
+    async def _make_request(self, endpoint, params=None):
+        self.cik_calls += 1
+        return await super()._make_request(endpoint, params)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", ["isEtf", "isFund"])
+async def test_a_fund_never_gets_a_rename_lead(monkeypatch, caplog, flag):
+    """PYTHON-FASTAPI-55: CRMU, a Leverage Shares ETF, stopped trading and the ERROR named
+    AALG, AAPE, ADIU, AGMI and AMDG as "same CIK now trading". They are other funds of the
+    same trust, and OWNER_TASKS reads that line as a rename, which moves users' rows."""
+    sp.publish_priced_session(SESSION, _session_rows(["AAPL", "AALG", "AAPE"]))
+    fmp = _CountingFMP(
+        {"CRMU": {"exchange": "NASDAQ", "isActivelyTrading": False, "cik": "0001976322", flag: True}},
+        {"0001976322": ["CRMU", "AALG", "AAPE"]},
+    )
+    _install(
+        monkeypatch, held={"CRMU": {"watchlist_items": 1}}, directory={"AAPL": "Apple Inc."},
+        stored={"AAPL": "2026-10-08", "CRMU": "2026-10-06"}, fmp=fmp,
+    )
+    with caplog.at_level(logging.INFO):
+        report = await uh.report_unpriced_holdings(NOW)
+
+    assert list(report["newly"]) == ["CRMU"], "the stop itself is still reported"
+    assert fmp.cik_calls == 0, "no FMP call for a lead that means nothing"
+    assert "same_cik_trading" not in report["newly"]["CRMU"]
+    [error] = _levels(caplog, logging.ERROR)
+    assert "same CIK now trading" not in error and "AALG" not in error
+    assert "a fund, so no rename lead" in error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flags", [{"isEtf": False, "isFund": False}, {"isEtf": None}, {"isEtf": "true"}])
+async def test_only_an_explicit_fund_flag_drops_the_rename_lead(monkeypatch, caplog, flags):
+    """A missing or odd flag keeps the lead: dropping it would hide a real rename."""
+    sp.publish_priced_session(SESSION, _session_rows(["AAPL", "ETX"]))
+    profiles = {"ET": {**PROFILES["ET"], **flags}}
+    fmp = _CountingFMP(profiles, CIKS)
+    _install(
+        monkeypatch, held={"ET": {"watchlist_items": 1}}, directory=DIRECTORY,
+        stored={"AAPL": "2026-10-08", "ET": "2026-10-06"}, fmp=fmp,
+    )
+    with caplog.at_level(logging.INFO):
+        report = await uh.report_unpriced_holdings(NOW)
+
+    assert report["newly"]["ET"]["same_cik_trading"] == ["ETX"]
+    assert fmp.cik_calls == 1
+
+
 @pytest.mark.asyncio
 async def test_one_error_per_stop_per_process_then_warnings(monkeypatch, caplog):
     sp.publish_priced_session(SESSION, _session_rows(["AAPL"]))

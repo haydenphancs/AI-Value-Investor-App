@@ -20,6 +20,7 @@ from datetime import datetime, timezone, timedelta
 
 from app.utils.market_hours import to_utc_instant
 from app.utils.inflight import fail_shared_future
+from app.utils.supabase_errors import is_transient_supabase_error, retry_idempotent_sync
 from typing import List, Dict, Any, Optional, Tuple
 
 from app.database import get_supabase
@@ -1942,10 +1943,16 @@ class NewsCacheService:
                 # the comment below describes for a measured saving of only ~65 KB per refresh
                 # (50 rows x ~1.5 KB, against a 417-row table and a 15-ticker sweeper universe).
                 # Not worth it here; it is worth it everywhere the result is discarded.
-                result = (
-                    self.supabase.table("ticker_news_cache")
-                    .upsert(cache_rows, on_conflict="ticker,external_id")
-                    .execute()
+                # Replay is safe (keyed on ticker + external_id), and this method only ever runs
+                # in a worker thread (`_write_rows_off_loop`), so the retry's sleep blocks no loop.
+                result = retry_idempotent_sync(
+                    lambda: (
+                        self.supabase.table("ticker_news_cache")
+                        .upsert(cache_rows, on_conflict="ticker,external_id")
+                        .execute()
+                    ),
+                    what=f"news cache write {label}",
+                    logger=logger,
                 )
                 # Assign the DB id by external_id match. Postgres does NOT guarantee that
                 # the RETURNING rows come back in VALUES order, so a positional zip could
@@ -1959,9 +1966,11 @@ class NewsCacheService:
                     art["id"] = id_by_ext.get(ext, "")
                 logger.info("Cached %d raw articles for %s", len(cache_rows), label)
             except Exception as e:
-                logger.error(
-                    "Cache insert failed for %s: %s: %s", label, type(e).__name__, e
-                )
+                # Best-effort: the articles still render, under the temp ids below, and the
+                # next cycle writes them. An edge blip that outlived the retries is a WARNING
+                # (PYTHON-FASTAPI-3F); anything else is a real write bug and stays an ERROR.
+                log = logger.warning if is_transient_supabase_error(e) else logger.error
+                log("Cache insert failed for %s: %s: %s", label, type(e).__name__, e)
 
         # Any article the upsert didn't yield an id for → temp fallback (still renders,
         # just not enrichable until the next cache cycle).

@@ -8,7 +8,12 @@ fixing Gemini's per-call voice drift. NO Gemini key needed (reads the committed 
 Voice/pacing (approved 2026-06-24):
   - reference: caydex_voice_achird_v2.wav (single-clip, expressive)
   - exaggeration 0.65 / cfg_weight 0.40  (energetic, human character)
-  - normalized to TARGET_WPM (165 = the Gemini 170 WPM minus 3%)
+  - normalized to TARGET_WPM (165 = the Gemini 170 WPM minus 3%) of SPOKEN words, the tempo clamped to
+    ATEMPO_RANGE — the Railway narrator's own rule (learn_narrator/engines/chatterbox.py, pipeline v2,
+    2026-11-01; the constants are AST-pinned equal by tests/test_learn_narrator_worker.py). Until then
+    this script counted whitespace tokens: a figure-dense text ("$57.0B" is six spoken words) looked
+    slow and was sped up — the published W44 Deep Dive narrated ~25% too fast that way. The spoken
+    form is `learn_narrator.timings.spoken_word_count` (pure stdlib; imported, never copied).
 
 Two generation modes (CLONE_MODE env var):
   - "block" (per-paragraph, APPROVED for rollout): one Chatterbox call per block/card, so the pauses
@@ -52,6 +57,10 @@ from chatterbox.tts import ChatterboxTTS
 
 ROOT = Path(__file__).resolve().parents[1]      # backend/
 REPO = ROOT.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from learn_narrator import timings as tm  # noqa: E402 — pure stdlib (no torch, no app.*)
+
 REF = ROOT / "data/voice_clone/refs/caydex_voice_achird_v2.wav"
 
 EXAG = 0.65            # expressiveness / energy (approved)
@@ -60,6 +69,7 @@ TARGET_WPM = 165       # 170 (Gemini original) - 3%
 SENT_PAUSE = 0.20      # seconds of silence after a sentence (sentence mode only)
 BLOCK_PAUSE = 0.60     # seconds at a paragraph / title->paragraph boundary
 SR = 24000             # Chatterbox sample rate
+ATEMPO_RANGE = (0.80, 1.10)  # the tempo pass's bounds (the narrator's; was 0.5-2.0 before 2026-11-01)
 CACHE = ROOT / "data/voice_clone/_sent_cache"    # per-sentence wav cache
 BLOCK_CACHE = ROOT / "data/voice_clone/_block_cache"  # per-block (per-paragraph) wav cache
 MODE = os.environ.get("CLONE_MODE", "sentence")  # "block" (per-paragraph, approved) or "sentence"
@@ -180,25 +190,30 @@ def gen_block(text: str) -> torch.Tensor:
 def synth_clip(raw_blocks: list[str], out: Path) -> float:
     """One clip from raw block strings. MODE 'block' = one Chatterbox call per block (natural intra-block
     pauses, BLOCK_PAUSE between blocks). MODE 'sentence' = per-sentence calls (SENT_PAUSE within a block,
-    BLOCK_PAUSE between blocks). Both normalize to TARGET_WPM."""
+    BLOCK_PAUSE between blocks). Both normalize to TARGET_WPM of SPOKEN words (`tm.spoken_word_count`),
+    the tempo clamped to ATEMPO_RANGE — the narrator's `assemble_plan`."""
     gen: list[tuple] = []          # (wav, is_block_end) in order
-    words = 0
+    words = 0                      # SPOKEN words ("$574.8 billion" is eight), never whitespace tokens
     speech_samples = 0
     for raw in raw_blocks:
         if MODE == "block":
             w = gen_block(raw)
             gen.append((w, True))
-            words += len(raw.split())
+            words += tm.spoken_word_count(raw)
             speech_samples += w.shape[-1]
         else:
             sents = split_sentences(raw)
             for i, sent in enumerate(sents):
                 w = gen_sentence(sent)
                 gen.append((w, i == len(sents) - 1))
-                words += len(sent.split())
+                words += tm.spoken_word_count(sent)
                 speech_samples += w.shape[-1]
     native_wpm = (words / (speech_samples / SR) * 60) if speech_samples else TARGET_WPM
-    atempo = max(0.5, min(2.0, TARGET_WPM / native_wpm))
+    wanted = TARGET_WPM / native_wpm if native_wpm else 1.0
+    atempo = max(ATEMPO_RANGE[0], min(ATEMPO_RANGE[1], wanted))
+    if atempo != wanted:
+        print(f"    ⚠️  tempo clamped: the pace asks atempo {wanted:.4f} (native {native_wpm:.1f} spoken wpm), "
+              f"applied {atempo:.4f} — check the clip with scripts/verify_learn_voice.py", flush=True)
     # pre-atempo pause lengths so they land at SENT_PAUSE / BLOCK_PAUSE after the tempo pass
     sil_sent = torch.zeros(1, int(round(SENT_PAUSE * atempo * SR)))
     sil_block = torch.zeros(1, int(round(BLOCK_PAUSE * atempo * SR)))

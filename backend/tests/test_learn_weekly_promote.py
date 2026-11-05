@@ -20,11 +20,13 @@ from typing import Any, Dict, List
 
 import pytest
 
+import test_learn_weekly_narration as nt
 from app.config import settings
 from app.services import money_moves_art_style as style
 from app.services.learn_weekly import article_schema as A
 from app.services.learn_weekly import build, cover_art, ledger, narration, publisher
 from app.services.learn_weekly import contracts as C
+from learn_narrator import timings as tm
 
 BACKEND = Path(__file__).resolve().parents[1]
 SCRIPT = BACKEND / "scripts" / "learn_weekly_promote.py"
@@ -97,8 +99,9 @@ def _local(plates=None, manifest: Any = "auto") -> Dict[str, Any]:
     return {"plates": plates, "manifest": manifest, "dir": "/art"}
 
 
-def _timings(draft) -> List[Dict[str, Any]]:
-    """One entry per narrated block, 2 s each with a 1.2 s gap before the closing."""
+def _timings(draft, *, per_word: float = 60 / 160) -> List[Dict[str, Any]]:
+    """One entry per narrated block with a 1.2 s gap before the closing, each sentence `per_word` seconds
+    per spoken word (160 spoken wpm: the cut file sits inside the voice's pace band)."""
     out, t = [], 0.0
     blocks = narration.narration_blocks(draft)
     for b in blocks:
@@ -108,13 +111,14 @@ def _timings(draft) -> List[Dict[str, Any]]:
         start = t
         sent = []
         for s in sentences:
-            sent.append({"text": s, "start": round(t, 3), "end": round(t + 2.0, 3)})
-            t += 2.0
+            d = tm.spoken_word_count(s) * per_word
+            sent.append({"text": s, "start": round(t, 3), "end": round(t + d, 3)})
+            t += d
         out.append({"i": b.i, "start": round(start, 3), "end": round(t, 3), "sentences": sent})
     return out
 
 
-def _piece_job(tag: Any = None, **piece_over):
+def _piece_job(tag: Any = None, *, per_word: float = 60 / 160, **piece_over):
     draft = _draft(tag)
     pid, jid = str(uuid.uuid4()), str(uuid.uuid4())
     piece = {"id": pid, "period_key": "2026-W44:deep_dive", "kind": "deep_dive", "status": C.REHEARSED,
@@ -122,7 +126,7 @@ def _piece_job(tag: Any = None, **piece_over):
              "review_round": 0, "updated_at": "2026-10-31T03:00:36.658374+00:00", "slug": draft["slug"],
              "title": draft["title"], "category": "battles", "validation": {"outcome": "accepted"}}
     piece.update(piece_over)
-    timings = _timings(draft)
+    timings = _timings(draft, per_word=per_word)
     job = {"id": jid, "piece_id": pid, "status": C.JOB_READY, "engine": C.ENGINE_CHATTERBOX,
            "audio_path": OLD_PATH, "audio_bytes": 9_375_595, "duration_seconds": timings[-1]["end"],
            "timings": timings, "script": narration.script_json(narration.narration_blocks(draft)), "checks": {}}
@@ -379,6 +383,35 @@ def test_a_dry_run_writes_nothing(monkeypatch, capsys):
     assert P.main(["--period", "2026-W44:deep_dive", "--publish-at", _when()]) == 0
     assert world.log == []
     assert "dry run — nothing written" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("argv", [[], ["--yes"]])
+def test_a_too_fast_rehearsal_is_refused_before_any_write(monkeypatch, argv):
+    """W44's own pace (191 spoken wpm): the promote stops, dry run or not, and touches nothing — neither
+    the cover art, nor the audio, nor the ledger."""
+    piece, job = _piece_job(per_word=60 / 191)
+    world = _World(monkeypatch, piece, job)
+    with pytest.raises(SystemExit, match=r"pace is outside the voice band: 1[0-9]{2}\.\d spoken words/min"):
+        P.main(["--period", "2026-W44:deep_dive", "--publish-at", _when(), *argv])
+    assert world.log == []
+
+
+def test_a_too_slow_rehearsal_is_refused_too(monkeypatch):
+    piece, job = _piece_job(per_word=60 / 120)
+    world = _World(monkeypatch, piece, job)
+    with pytest.raises(SystemExit, match="pace is outside the voice band"):
+        P.main(["--period", "2026-W44:deep_dive", "--publish-at", _when(), "--yes"])
+    assert world.log == []
+
+
+def test_the_pace_is_judged_on_what_would_go_live():
+    """The promoted text at the trimmed length, by the server's own gate: W44 as it really was is refused,
+    a corrected length of the same words passes, and a kokoro file reads kokoro's band."""
+    live = nt.w44_article(closing=False)
+    seconds = nt.W44["original_duration_seconds"]
+    assert "spoken words/min" in P.pace_refusal(live, engine=C.ENGINE_CHATTERBOX, duration_seconds=seconds)
+    assert P.pace_refusal(live, engine=C.ENGINE_CHATTERBOX, duration_seconds=880.0) is None
+    assert P.pace_refusal(live, engine=C.ENGINE_KOKORO, duration_seconds=seconds) is None
 
 
 def test_yes_trims_uploads_repoints_then_promotes_in_that_order(monkeypatch):

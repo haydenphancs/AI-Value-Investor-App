@@ -85,7 +85,7 @@ def _claim_job(client, engines=("chatterbox",)):
 
 def _complete_body(job, *, path=None, size=None, mutate=None):
     blocks = narration.blocks_from_script(narration.script_json(nt._blocks()))
-    t, end = nt._timings(blocks)
+    t, end = nt._timings(blocks, spw=nt.IN_BAND_SPW)
     if mutate:
         mutate(t)
     sha = "ef" * 32

@@ -49,6 +49,7 @@ from app.services.learn_weekly.errors import (
     LearnNarratorRequestInvalid,
 )
 from app.services.learn_weekly.narration import WorkerClaim
+from learn_narrator import timings as tm
 
 _BACKEND = Path(__file__).resolve().parents[1]
 _CLONE_SCRIPT = _BACKEND / "scripts" / "clone_learn_audio.py"
@@ -269,6 +270,43 @@ async def _claimed(fake, engines=("chatterbox",), now=NOW):
 
 def _blocks(content=None):
     return narration.narration_blocks(content or ARTICLE)
+
+
+#: Seconds per spoken word that put `ARTICLE`'s rendered file inside the chatterbox pace band (≈150
+#: spoken wpm once `_timings`' pauses are counted): `complete` refuses a file outside it.
+IN_BAND_SPW = 0.29
+
+
+def _timings_lasting(blocks, seconds, *, start=0.4, gap=0.6, pause=0.2):
+    """`_timings` stretched so that the table ends at about `seconds`."""
+    sentences = [s for b in blocks for s in narration.sentence_split(b.text)]
+    words = sum(narration.spoken_words(s) for s in sentences)
+    fixed = start + gap * len(blocks) + pause * len(sentences)
+    return _timings(blocks, spw=(seconds - fixed) / words, start=start, gap=gap, pause=pause)
+
+
+#: The W44 Deep Dive's real narration, the regression fixture of the 2026-11-01 pace bug.
+W44 = json.loads((_BACKEND / "tests" / "data" / "learn_w44_narration_script.json").read_text(encoding="utf-8"))
+W44_SLUG = "semiconductor-giants-and-ai-infrastructure-2026-10-30"
+
+
+def w44_article(*, closing: bool = True) -> Dict[str, Any]:
+    """The fixture as an article, so `narration_blocks` gives its blocks back; `closing=False` is the
+    text that went live (the promote cut the last block, the old AI-assisted closing)."""
+    blocks = W44["blocks"] if closing else W44["blocks"][:-1]
+    sections: List[Dict[str, Any]] = []
+    for b in blocks[2:]:
+        if b["role"] == c.ROLE_CONTEXT:
+            sections.append({"title": b["text"], "icon": "doc.text", "content": []})
+        elif b["role"] == c.ROLE_ITEM:
+            content = sections[-1]["content"]
+            if not content or content[-1]["type"] != "bulletList":
+                content.append({"type": "bulletList", "items": []})
+            content[-1]["items"].append(b["text"])
+        else:
+            sections[-1]["content"].append({"type": "paragraph", "text": b["text"]})
+    return {"slug": W44_SLUG, "title": blocks[0]["text"], "subtitle": blocks[1]["text"], "category": "battles",
+            "isFeatured": True, "hasAudioVersion": False, "audioUrl": None, "sections": sections}
 
 
 def _path(sha="ab" * 32):
@@ -994,11 +1032,13 @@ async def test_a_storage_outage_at_upload_is_retryable(fake):
 # ── complete ────────────────────────────────────────────────────────────────────────────────
 
 
-async def _rendered(fake, *, spw=0.36, size=None, mimetype="audio/mp4", sha="ef" * 32):
-    """Claim, 'render' and 'upload': (wire, claim, kwargs for complete)."""
+async def _rendered(fake, *, spw=IN_BAND_SPW, size=None, mimetype="audio/mp4", sha="ef" * 32, content=None,
+                    seconds=None):
+    """Claim, 'render' and 'upload': (wire, claim, kwargs for complete). `seconds` sizes the render to
+    that length instead of `spw`."""
     wire, claim = await _claimed(fake)
-    blocks = _blocks()
-    t, end = _timings(blocks, spw=spw)
+    blocks = _blocks(content)
+    t, end = _timings(blocks, spw=spw) if seconds is None else _timings_lasting(blocks, seconds)
     path = f"audio/weekly/{SLUG}-{sha[:12]}.m4a"
     size = size if size is not None else int(end * 12_000)
     fake.storage.put(path, size, mimetype)
@@ -1137,6 +1177,116 @@ async def test_the_narrator_images_encode_rate_is_accepted(fake, bytes_per_secon
     assert out["status"] == c.JOB_READY
     assert round(fake.row(ledger.JOBS, job["id"])["checks"]["server"]["bytes_per_second"]) == bytes_per_second
     assert fake.row(ledger.PIECES, piece["id"])["status"] == c.READY_FOR_REVIEW
+
+
+# ── the spoken-word pace gate (2026-11-01: "make sure never have the same issue again") ───────
+
+
+def test_the_w44_fixture_is_the_articles_own_narration():
+    """The article helper gives the fixture's text back, block for block, so the tests below judge W44's
+    real words."""
+    assert [b.text for b in _blocks(w44_article())] == [b["text"] for b in W44["blocks"]]
+    assert [b.role for b in _blocks(w44_article())] == [b["role"] for b in W44["blocks"]]
+    assert len(W44["blocks"]) == 65 == len(_blocks(w44_article(closing=False))) + 1
+
+
+def _w44_seconds(wpm: float) -> float:
+    """The length of a W44 render at `wpm` SPOKEN words per minute."""
+    return sum(tm.spoken_word_count(b["text"]) for b in W44["blocks"]) / wpm * 60
+
+
+def test_w44s_original_render_is_outside_the_band_though_its_tokens_looked_fine():
+    blocks, seconds = _blocks(w44_article()), W44["original_duration_seconds"]
+    assert 144.0 <= sum(len(b.text.split()) for b in blocks) / seconds * 60 <= 166.0    # what every check saw
+    problem = narration.spoken_pace_problem("chatterbox", blocks, seconds)
+    assert problem is not None and "191.3 spoken words/min" in problem and "144–166" in problem
+
+
+@pytest.mark.parametrize("wpm", [150.0, 155.0, 160.0])
+def test_a_corrected_w44_render_is_inside_the_band(wpm):
+    assert narration.spoken_pace_problem("chatterbox", _blocks(w44_article()), _w44_seconds(wpm)) is None
+
+
+@pytest.mark.parametrize("engine, wpm, ok", [
+    ("chatterbox", 143.9, False), ("chatterbox", 144.0, True), ("chatterbox", 166.0, True),
+    ("chatterbox", 166.1, False), ("kokoro", 119.9, False), ("kokoro", 120.0, True), ("kokoro", 200.0, True),
+    ("kokoro", 200.1, False), ("unknown", 143.9, False), ("unknown", 155.0, True), ("unknown", 170.0, False),
+])
+def test_the_pace_band_is_per_engine_and_an_unknown_engine_reads_the_strictest(engine, wpm, ok):
+    blocks = _blocks(w44_article())
+    assert (narration.spoken_pace_problem(engine, blocks, _w44_seconds(wpm)) is None) is ok
+
+
+def test_the_pace_gate_rounds_like_the_workers_own_measure():
+    """verify.measure rounds to one place before its band: a file the worker passed at 166.04 must not be
+    refused here, after the upload, by a hair."""
+    assert narration.spoken_pace_problem("chatterbox", _blocks(w44_article()), _w44_seconds(166.04)) is None
+    assert narration.spoken_pace_problem("chatterbox", _blocks(w44_article()), _w44_seconds(166.06))
+
+
+@pytest.mark.parametrize("duration", [None, True, float("nan"), float("inf"), 0, -3.0, "700"])
+def test_an_unreadable_duration_is_a_problem_never_a_pass(duration):
+    assert "cannot be read" in narration.spoken_pace_problem("chatterbox", _blocks(), duration)
+
+
+def test_every_catalog_article_passes_the_pace_gate():
+    """The hand-made catalog is the voice's reference: the gate must accept every article whose audio
+    length it knows (the real clips are measured by tests/test_money_moves_catalog_parity.py)."""
+    checked = [a for a in _articles() if a.get("audioDurationSeconds")]
+    assert len(checked) >= 20
+    problems = {a["slug"]: narration.spoken_pace_problem("chatterbox", narration.narration_blocks(a),
+                                                         a["audioDurationSeconds"]) for a in checked}
+    assert not {k: v for k, v in problems.items() if v}
+
+
+@pytest.mark.asyncio
+async def test_w44s_original_render_is_refused_at_complete_and_ends_the_piece(fake, alerts, caplog):
+    """The stale-worker case the gate exists for: the object is deleted, the round is over at once (the
+    render is seeded, a retry would spend ~1 h on the same file), the owner hears about it, and nothing
+    reaches review."""
+    article = w44_article()
+    piece, job = _media_pending(fake, content=article)
+    wire, claim, kw = await _rendered(fake, content=article, seconds=W44["original_duration_seconds"])
+    with caplog.at_level("ERROR"), pytest.raises(LearnNarratorAssetMismatch) as e:
+        await narration.complete(wire["id"], claim, now=NOW, **kw)
+    assert "spoken words/min" in str(e.value)
+    assert e.value.ids == {"job_id": job["id"], "piece_id": piece["id"], "op": "complete"}
+    assert (narration.AUDIO_BUCKET, kw["path"]) not in fake.storage.objects
+    row = fake.row(ledger.JOBS, job["id"])
+    assert row["status"] == c.JOB_FAILED and row["worker_failures"] == 1 and row["audio_path"] is None
+    assert c.fail_code_of(row["error"]) == narration.PACE_FAIL_CODE in c.DETERMINISTIC_FAIL_CODES
+    assert "spoken words/min" in row["error"]
+    assert fake.row(ledger.PIECES, piece["id"])["status"] == c.FAILED
+    (alert,) = alerts.calls
+    assert alert["reason"].startswith("narration_deterministic_failure: voice_out_of_band")
+    assert job["id"] in caplog.text and piece["id"] in caplog.text and "MISMATCH" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_corrected_w44_render_reaches_review(fake):
+    article = w44_article()
+    piece, job = _media_pending(fake, content=article)
+    wire, claim, kw = await _rendered(fake, content=article, seconds=_w44_seconds(155.0))
+    out = await narration.complete(wire["id"], claim, now=NOW, **kw)
+    assert out["status"] == c.JOB_READY and out["piece_updated"] is True
+    assert fake.row(ledger.PIECES, piece["id"])["status"] == c.READY_FOR_REVIEW
+    assert fake.row(ledger.JOBS, job["id"])["status"] == c.JOB_READY
+
+
+@pytest.mark.asyncio
+async def test_a_bad_object_is_judged_before_the_pace_and_stays_on_the_retry_path(fake):
+    """A bad upload is not a fact of the render: the next attempt may be fine, so it keeps its retry even
+    when the pace would have failed too."""
+    _, job = _media_pending(fake)
+    wire, claim, kw = await _rendered(fake, spw=0.36)                  # 127 spoken wpm: out of band
+    size = int(kw["duration_seconds"] * 9_700)                         # …and the Gemini path's byte rate
+    fake.storage.put(kw["path"], size)
+    kw["size_bytes"] = size
+    with pytest.raises(LearnNarratorAssetMismatch) as e:
+        await narration.complete(wire["id"], claim, now=NOW, **kw)
+    assert "bytes/s" in str(e.value) and "spoken" not in str(e.value)
+    row = fake.row(ledger.JOBS, job["id"])
+    assert row["status"] == c.JOB_QUEUED and c.fail_code_of(row["error"]) == "asset_mismatch"
 
 
 def test_the_kokoro_band_is_looser_and_still_catches_silence():
@@ -1543,6 +1693,42 @@ def test_narration_never_imports_the_scripts_tree_fmp_or_torch():
     assert not any(m.startswith(("scripts", "torch", "torchaudio", "chatterbox", "app.integrations")) for m in mods), mods
     code = _code(_NARRATION)
     assert "fmp" not in code.lower() and "gemini" not in code.lower()
+
+
+def test_the_web_reaches_the_worker_package_only_for_its_pure_spoken_form():
+    """A deliberate crossing of the web → worker line, and its only one: `spoken_pace_problem` needs the
+    words the voice says, counted exactly as the tempo pass counts them. It stays safe only while (1) the
+    import is lazy and in that one function; (2) `timings.py` is stdlib, so the web never loads a model or
+    the worker's dependencies; (3) the package's __init__ runs nothing; (4) the web image carries the
+    package, or the import fails in production on the first completed render."""
+    tree = ast.parse(_NARRATION.read_text(encoding="utf-8"))
+    def imports(node):
+        for n in ast.walk(node):
+            if isinstance(n, ast.ImportFrom) and (n.module or "").split(".")[0] == "learn_narrator":
+                yield (n.module, tuple(a.name for a in n.names))
+            elif isinstance(n, ast.Import):
+                yield from (("import", a.name) for a in n.names if a.name.split(".")[0] == "learn_narrator")
+    found = {f.name: list(imports(f)) for f in ast.walk(tree)
+             if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)) and list(imports(f))}
+    assert found == {"spoken_pace_problem": [("learn_narrator", ("timings",))]}
+    assert not [n for n in tree.body if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                and list(imports(n))], "never at import time"
+
+    package = _BACKEND / "learn_narrator"
+    top = set()
+    for node in ast.parse((package / "timings.py").read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.Import):
+            top |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            top.add((node.module or "").split(".")[0])
+    assert top <= set(sys.stdlib_module_names), top - set(sys.stdlib_module_names)
+    init = ast.parse((package / "__init__.py").read_text(encoding="utf-8")).body
+    assert len(init) == 1 and isinstance(init[0], ast.Expr), "the package __init__ must stay a docstring"
+
+    assert re.search(r"^COPY \. \.\s*$", (_BACKEND / "Dockerfile").read_text(encoding="utf-8"), re.M)
+    ignored = [ln.strip() for ln in (_BACKEND / ".dockerignore").read_text(encoding="utf-8").splitlines()
+               if ln.strip() and not ln.startswith("#")]
+    assert not [ln for ln in ignored if ln.rstrip("/*").startswith("learn_narrator")], ignored
 
 
 def test_storage_calls_only_run_off_the_event_loop():

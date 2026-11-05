@@ -29,7 +29,8 @@ WHAT IT DOES
      `test_the_catalogs_pauses_fit_under_the_silence_cap` bound) and every sentence's seconds per word
      sits in the server's band (`test_the_catalogs_own_narration_passes_the_band`);
    * the file's bytes per second and the pace sit in the catalog voice bands
-     (`test_money_moves_catalog_parity.py`: 11,500–14,000 B/s, 144–166 WPM).
+     (`test_money_moves_catalog_parity.py`: 11,500–14,000 B/s, 144–166 SPOKEN words per minute —
+     `learn_narrator.timings.spoken_word_count`, the narrator's tempo basis since 2026-11-01).
 3. With --yes: downloads the object BYTE FOR BYTE (never re-encoded) and verifies its size, its sha256
    against the content-addressed path and its ffprobe duration; writes
    `backend/data/money_moves_audio/<slug>.m4a` (refusing to overwrite a different file unless --force);
@@ -147,7 +148,8 @@ def read_along_problems(article: Mapping[str, Any]) -> List[str]:
 
 
 def voice_band_problems(article: Mapping[str, Any], audio_bytes: int) -> List[str]:
-    """The catalog parity suite's two fingerprints, from the file size and the authored duration."""
+    """The catalog parity suite's two fingerprints, from the file size and the authored duration (the
+    pace on SPOKEN words, as the suite and the narrator count them)."""
     from app.services.learn_weekly import narration
 
     duration = article.get("audioDurationSeconds")
@@ -157,10 +159,12 @@ def voice_band_problems(article: Mapping[str, Any], audio_bytes: int) -> List[st
     bps = audio_bytes / duration
     if not CLONE_BYTES_PER_SEC[0] <= bps <= CLONE_BYTES_PER_SEC[1]:
         out.append(f"{bps:,.0f} B/s outside the catalog voice band {CLONE_BYTES_PER_SEC}")
-    words = sum(len(b.text.split()) for b in narration.narration_blocks(article))
+    from learn_narrator import timings as tm      # pure stdlib: the narrator's spoken form
+
+    words = sum(tm.spoken_word_count(b.text) for b in narration.narration_blocks(article))
     wpm = words / duration * 60
     if not CLONE_WPM[0] <= wpm <= CLONE_WPM[1]:
-        out.append(f"{wpm:.1f} WPM outside the catalog voice band {CLONE_WPM}")
+        out.append(f"{wpm:.1f} spoken WPM outside the catalog voice band {CLONE_WPM}")
     return out
 
 

@@ -93,7 +93,7 @@ the 4-vCPU bar (the container's cgroup quota is what the worker reads otherwise)
 | A1 | Wall time (render + align) | ≤ 150 min for the ~1,600-word fixture |
 | A2 | Peak RSS of the largest child | ≤ 6 GB |
 | A3 | Blocks | no Chatterbox call ≥ 39.5 s raw; every call 1.8–3.6 spoken words/s (calls under 8 spoken words: 0.9–5.0) after the one re-render |
-| A4 | Voice bands | F0 130–142 Hz, 144–166 wpm, 11.5–14.0 kB/s (12.8 until 2026-10-30: the image's ffmpeg 5.1 encodes 96k at ~12.6–12.9k), −17.5..−14.5 LUFS |
+| A4 | Voice bands | F0 130–142 Hz, 144–166 **spoken** wpm (since 2026-11-01, §6 "Pace"), 11.5–14.0 kB/s (12.8 until 2026-10-30: the image's ffmpeg 5.1 encodes 96k at ~12.6–12.9k), −17.5..−14.5 LUFS |
 | A5 | Blind A/B | **you**: see below |
 | A6 | Read-along | ≥ 98 % of sentences aligned, the table passes the server's checks, block-start error ≤ 0.15 s |
 | exaggeration | Conditioning | `emotion_adv` = 0.65 (the setting really reached the model) |
@@ -147,6 +147,32 @@ articles: `backend/scripts/learn_catalog_narrate.py --slug <slug> --yes` queues 
 no image rebuild), and `backend/scripts/learn_catalog_fetch.py --slug <slug> --yes` pulls the clip and
 read-along once Telegram says READY. Never redeploy this service while a catalog job renders either.
 
+**Re-narrating a PUBLISHED weekly piece (2026-11-01).** ⛔ Not W44: "No W44 re-render (owner approved
+clip B)". Its live clip is the hand-slowed 931 s file the owner approved; a v2 render lands ≈ 871 s, about
+6% faster. This is for a future piece. A published piece cannot get a new round of its own job (the claim
+cancels any job of a published piece), so `backend/scripts/learn_weekly_renarrate.py` uses the catalog path
+keyed by the piece's slug:
+
+1. `--period <key> --enqueue` (dry run) → `--enqueue --yes`: queues the LIVE article's narration as a
+   catalog job (it refuses Thursday 18:00 → Saturday 00:00 ET, the Deep Dive window, and a weekly build
+   in flight, unless `--force`). It prints the expected new length, worked out from the old RENDER's own
+   numbers (`checks.worker.file.duration`, `checks.worker.worker.atempo`), and that length against the live
+   clip separately, because the live file may not be that render (a promote trims it, a hand fix re-times
+   it). It also prints the slowest sentence's projected seconds per word — if that is over the server's
+   1.2 ceiling, the render would fail `timings_invalid`: fix the text first.
+2. Telegram: *"🎙 Weekly re-narration READY: <slug> …"* (a FAILED line names `--enqueue` again; the live
+   article keeps its old audio meanwhile).
+3. `--slug <slug> --swap` (dry run) → `--swap --yes`: checks the live text still matches the render, the
+   object, the timing merge and the catalog gates (in-block pauses < 3 s, seconds per word, bytes/s,
+   SPOKEN-word pace). A render more than 2% SHORTER than the live clip is refused unless `--allow-shorter`:
+   the text is the same, so shorter is faster speech, and the clip it replaces may be one the owner approved
+   by ear. Then ONE fenced update of the live `money_move_articles` row (audio URL = the catalog object's
+   public form, duration, read-along — nothing else) and a fenced mirror onto the piece's draft. The old
+   audio object is kept. Rerunning is safe. The app picks it up within the Money Moves cache TTL (≤ 1 h);
+   probe with `scripts/check_money_moves_published.py`.
+
+Known edge: the live row now points at `audio/catalog/…`, which the 🗑 Unpublish path does not delete
+(it deletes only `audio/weekly/…` objects; it logs an ERROR and leaves the private object).
 
 Exit codes: `0` done / nothing to do / job no longer ours, `1` the job failed (reported to the
 server) or the API failed, `2` configuration or credentials (wrong token → 401/403).
@@ -215,3 +241,34 @@ seed, so the audio is the one a single process would make. All parts share the o
 `render_timeout`. Each part reloads the model (~1–2 min) and logs its peak memory ("render part k …
 peak N MB"), so the margin under the limit is in the log. The bench (§3) renders the same way and
 refuses an `--out` that already holds `parts/` from an earlier run (it would reuse them unrendered).
+
+### Pace on spoken words (Chatterbox pipeline v2, 2026-11-01)
+
+The tempo pass (`engines/chatterbox.assemble_plan`) normalises the raw speech to TARGET_WPM (165) of
+**spoken** words — `timings.spoken_word_count` of each block ("$574.8 billion" is eight words) — and
+clamps the tempo to **0.80–1.10**. v1 counted whitespace tokens, like the old local script: the
+published W44 Deep Dive's 161 figure tokens made its pace look slow, so the whole file was sped up 1.188×
+and narrated ~25% too fast (7.3 syllables/s against the catalog's 5.2). Measured on the catalog's own raw
+renders, the voice speaks ≈182 spoken wpm, so a normal render is slowed to ≈0.91 — never sped up.
+
+* The file's pace band (`verify.py`, 144–166 wpm) is measured on spoken words too; so are
+  `scripts/verify_learn_voice.py`, `scripts/learn_catalog_fetch.py` and the catalog suite. The 23 catalog
+  clips measure 155.8–161.7 spoken wpm (the band did not move). A too-fast W44-style file is now refused
+  (`voice_out_of_band`).
+* **The server judges the same band** (`narration.spoken_pace_problem`, `SPOKEN_WPM_BAND`, pinned equal to
+  `verify.py`), so a stale or wrong worker cannot get a too-fast file to review: `complete` deletes the
+  object, closes the round at once as `voice_out_of_band` (the render is seeded, a retry makes the same
+  file) and answers 409 `LEARN_NARRATOR_ASSET_MISMATCH`. A weekly piece then fails with the loud alert, a
+  catalog job sends its one FAILED line. `scripts/learn_weekly_promote.py` runs the same check on what
+  would go live, before any write.
+* A tempo the pace wants outside 0.80–1.10 is applied at the bound and recorded in the job's
+  `checks.worker.worker` (`atempo_wanted`, `atempo_clamped`; the render logs "tempo clamped" at WARNING).
+  The file then lands off-target and the pace band decides.
+* `PIPELINE_VERSION` is `chatterbox-0.1.7/block/aac96k/v2`: a block saved under v1 (`parts/`) is rendered
+  again, never stitched into a v2 file. The server's `narration.PIPELINE_VERSION` ("learn-narration/v1",
+  the job contract: blocks, split, timing shape) did NOT change — the worker echoes the job's own value,
+  so a queued job is accepted from either worker. A v1 worker's figure-dense render still fails the web's
+  pace band, which is the point.
+* Deploying it: web and narrator go out in the same push. A push touching `backend/learn_narrator/**`
+  redeploys this service (watch path) — push only while no `learn_narration_jobs` row is `in_progress`
+  and outside Thursday 18:00 → Saturday 00:00 ET.

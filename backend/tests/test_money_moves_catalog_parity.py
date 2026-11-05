@@ -16,16 +16,21 @@ being taken through the `generate → align → seed` playbook in
 """
 
 import json
+import os
 import re
 from pathlib import Path
 
 import pytest
 
+from learn_narrator import timings as narrator_timings
+
 _REPO = Path(__file__).resolve().parents[2]
 _FRONTEND_JSON = _REPO / "frontend/ios/ios/Resources/MoneyMoves/money_moves.json"
 _BACKEND_JSON = _REPO / "backend/data/money_moves.json"
 _ART = _REPO / "backend/data/money_moves_art"
-_AUDIO = _REPO / "backend/data/money_moves_audio"
+# The clips are gitignored, so a fresh worktree has none: point CAYDEX_MONEY_MOVES_AUDIO_DIR at the
+# main checkout's backend/data/money_moves_audio to run the clip checks there (read-only).
+_AUDIO = Path(os.environ.get("CAYDEX_MONEY_MOVES_AUDIO_DIR") or _REPO / "backend/data/money_moves_audio")
 _SCRIPTS = _REPO / "backend/scripts"
 
 # Articles deliberately shipped silent. MUST normally be empty: an entry here is a promise to
@@ -46,9 +51,17 @@ _NARRATION_PENDING: set[str] = set()
 # encodes `-b:a 96k` above the local ffmpeg 7.0's ~12.1k (12,629 and 12,888 B/s measured on Railway,
 # 2026-10-24/30), and its pace ceiling is 166 WPM. The 11,500 B/s FLOOR is unchanged on purpose: it is
 # what catches the Gemini voice (~9.7k), and the 144 WPM floor still catches a dragged render.
+#
+# 2026-11-01 (owner: "Re-render on Railway" — the W44 Deep Dive narrated ~25% too fast): the pace is
+# counted in SPOKEN words (`learn_narrator.timings.spoken_word_count`: "$57.0B" is six words, "12.3%"
+# four), the basis the narrator's tempo pass now uses. On whitespace tokens W44 (161 figure tokens,
+# sped up 1.188x) would have read as in band. Measured on all 23 clips (JSON durations; ffprobe agrees
+# within 0.3): 155.8-161.7 spoken WPM (tokens: 150.4-159.2 — the-future-of-digital-finance, the one
+# "re-speeded to 150", is 158.5 spoken: it was never slow, it is figure-dense). The band is UNCHANGED:
+# every clip sits >= 10 WPM above the floor and >= 4 under the ceiling, while a W44-style render (speech
+# at 165 TOKENS/min, i.e. ~25-30% more spoken words per minute) lands far above it.
 _CLONE_BYTES_PER_SEC = (11_500, 14_000)   # -b:a 96k -> ~12.1k (local) / ~12.6-12.9k (narrator); Gemini ~9.7k
-_CLONE_WPM = (144.0, 166.0)               # TARGET_WPM 165 lands ~158 after block pauses;
-                                          # the-future-of-digital-finance was re-speeded to 150
+_CLONE_WPM = (144.0, 166.0)               # SPOKEN wpm: TARGET_WPM 165 lands ~158 after block pauses
 
 
 def _articles(path: Path) -> list[dict]:
@@ -193,9 +206,9 @@ def test_narration_matches_the_investor_journey_voice():
     different narrator mid-catalog, and nothing caught it for a week.
 
     Pitch needs a decoder, so this pins the two proxies that do NOT: the encode (bytes/sec, set
-    by the clone's explicit `-b:a 96k` versus ffmpeg's ~77 kbps default) and the pace (spoken
-    words over the authored duration, `TARGET_WPM`). Both separated the two engines with a wide
-    margin on real data — see the constants above.
+    by the clone's explicit `-b:a 96k` versus ffmpeg's ~77 kbps default) and the pace (SPOKEN
+    words — the narrator's spoken form — over the authored duration, `TARGET_WPM`). Both separated
+    the two engines with a wide margin on real data — see the constants above.
     """
     blocks = _narration_blocks()
     bad: list[str] = []
@@ -209,7 +222,7 @@ def test_narration_matches_the_investor_journey_voice():
             bad.append(f"{slug}: has a clip but no audioDurationSeconds (never aligned)")
             continue
         bps = clip.stat().st_size / dur
-        wpm = sum(len(b.split()) for b in blocks(a)) / dur * 60
+        wpm = sum(narrator_timings.spoken_word_count(b) for b in blocks(a)) / dur * 60
         if not _CLONE_BYTES_PER_SEC[0] <= bps <= _CLONE_BYTES_PER_SEC[1]:
             bad.append(f"{slug}: {bps:.0f} B/s outside clone range {_CLONE_BYTES_PER_SEC}")
         if not _CLONE_WPM[0] <= wpm <= _CLONE_WPM[1]:

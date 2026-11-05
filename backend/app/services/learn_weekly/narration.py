@@ -48,7 +48,9 @@ object — nothing large transits the web process, and the worker holds no Supab
 then verifies the object the way marketing's `run_service._verify_object` does (present, registered
 size, registered content type; a mismatch deletes the object and fails the round; an UNKNOWN size or
 type deletes nothing and is retried), with the bucket as a parameter, plus a bytes-per-second band
-per engine that a truncated or silent encode falls outside of.
+per engine that a truncated or silent encode falls outside of, and a SPOKEN-word pace band per engine
+(`spoken_pace_problem`, the worker's own band judged again: W44's too-fast render passed every check
+counted on written tokens). `learn_narrator.timings` is that one helper's lazy import.
 
 The draft that reaches the owner carries `audioUrl` in the PUBLIC form (the same form
 `seed_money_moves.py` stores — `audio_public_url`), which the content service signs per request.
@@ -137,6 +139,19 @@ BYTES_PER_SECOND_BAND: Mapping[str, Tuple[float, float]] = {
     c.ENGINE_CHATTERBOX: (11_500.0, 14_000.0),
     c.ENGINE_KOKORO: (10_000.0, 14_000.0),
 }
+
+#: The whole file's pace, in SPOKEN words per minute (`spoken_pace_problem`): the worker's own band
+#: (`learn_narrator/verify.py` BANDS[engine]["wpm"], pinned equal by
+#: tests/test_learn_narrator_worker.py), judged again here so that a stale or wrong worker cannot
+#: publish it. The W44 Deep Dive (2026-11-01) passed every check on WRITTEN tokens at 156 wpm while its
+#: 161 figures were spoken ~25% too fast: on spoken words it reads 191 and is refused.
+SPOKEN_WPM_BAND: Mapping[str, Tuple[float, float]] = {
+    c.ENGINE_CHATTERBOX: (144.0, 166.0),
+    c.ENGINE_KOKORO: (120.0, 200.0),
+}
+#: The code a refused pace is recorded under. The worker fails the same way on its own check, and it is
+#: in `contracts.DETERMINISTIC_FAIL_CODES`: the render is seeded, so a retry makes the same file.
+PACE_FAIL_CODE = "voice_out_of_band"
 
 #: Seconds per spoken word, per SENTENCE, in the final (tempo-normalised) audio. 165 wpm ≈ 0.36 s/w.
 #: The floor (0.15) is the dropped-sentence tell: CTC squeezes the tokens of words that were never
@@ -423,6 +438,17 @@ def audio_public_url(path: str) -> str:
     (no client, no I/O), so the publisher can call it anywhere."""
     if not (isinstance(path, str) and _WEEKLY_AUDIO_RE.fullmatch(path)):
         raise ValueError(f"narration: {path!r} is not a weekly narration path")
+    return f"{settings.SUPABASE_URL.rstrip('/')}/storage/v1/object/public/{AUDIO_BUCKET}/{path}"
+
+
+def catalog_audio_public_url(path: str) -> str:
+    """`audio_public_url` for a CATALOG narration object (`audio/catalog/<slug>-<sha12>.m4a`, migration
+    207) — the same PUBLIC form in the same private bucket, which `learn_audio_urls.parse_storage_url`
+    signs per request like any other. Used by `scripts/learn_weekly_renarrate.py`, which re-narrates a
+    PUBLISHED weekly piece through a catalog job keyed by its slug and points the live row at the
+    result. Pure; ValueError on anything but a catalog narration path."""
+    if not is_catalog_audio_path(path):
+        raise ValueError(f"narration: {path!r} is not a catalog narration path")
     return f"{settings.SUPABASE_URL.rstrip('/')}/storage/v1/object/public/{AUDIO_BUCKET}/{path}"
 
 
@@ -871,6 +897,30 @@ def bytes_per_second_problem(engine: str, size_bytes: int, duration_seconds: flo
             f"({size_bytes} bytes over {duration_seconds:.1f} s)")
 
 
+def spoken_pace_problem(engine: str, blocks: Sequence[c.NarrationBlock], duration_seconds: Any) -> Optional[str]:
+    """Why a render of `blocks` that lasts `duration_seconds` is outside `engine`'s SPOKEN-word pace
+    band (`SPOKEN_WPM_BAND`), or None. Pure. An unknown engine reads the strictest band, as
+    `bytes_per_second_problem` does; an unreadable duration is a problem, never a pass. Rounded to one
+    place like `learn_narrator.verify.measure`, so a file the worker passed at the edge is not refused.
+
+    `learn_narrator.timings` is the worker package's PURE stdlib module (no app.*, no model), the same
+    spoken form the tempo pass counts. The web image holds all of backend/ (`COPY . .`), so the import
+    works there; it stays lazy and in this one function so the web never depends on the worker package at
+    start (tests/test_learn_weekly_narration.py pins all of that)."""
+    from learn_narrator import timings as tm
+
+    lo, hi = SPOKEN_WPM_BAND.get(engine, SPOKEN_WPM_BAND[c.ENGINE_CHATTERBOX])
+    if isinstance(duration_seconds, bool) or not isinstance(duration_seconds, (int, float)) \
+            or not math.isfinite(float(duration_seconds)) or float(duration_seconds) <= 0:
+        return f"the pace of a {engine} render cannot be read: duration {duration_seconds!r}"
+    words = sum(tm.spoken_word_count(b.text) for b in blocks)
+    wpm = round(words / float(duration_seconds) * 60, 1)
+    if lo <= wpm <= hi:
+        return None
+    return (f"{wpm:.1f} spoken words/min is outside the {engine} band {lo:.0f}–{hi:.0f} "
+            f"({words} spoken words over {float(duration_seconds):.1f} s)")
+
+
 # ── upload / complete / fail ─────────────────────────────────────────────────────────────────
 
 
@@ -972,7 +1022,10 @@ async def complete(job_id: Any, claim: WorkerClaim, *, path: Any, size_bytes: An
       3. the timing table must pass `validate_timings` (422) — before any Storage I/O;
       4. the object must be in the bucket (409 ASSET_MISSING), with the registered size and type and a
          bytes/s inside the engine's band — else it is DELETED and the round failed (409
-         ASSET_MISMATCH); an unknown size/type deletes nothing (503, retried);
+         ASSET_MISMATCH); an unknown size/type deletes nothing (503, retried). The file's SPOKEN-word
+         pace must sit in the engine's band too (`spoken_pace_problem`): outside it the object is deleted
+         and the same 409 raised, but the job closes `failed` at once as `voice_out_of_band` — a retry
+         would render the same file;
       5. `ledger.complete_job`, then the piece `media_pending → ready_for_review` with the merged
          draft and its new draft_sha256 — fenced on status, `narration_job_id` and the draft it read.
     A CATALOG job (no piece, migration 207) takes the same steps 1-4 against its own
@@ -1051,6 +1104,11 @@ async def complete(job_id: Any, claim: WorkerClaim, *, path: Any, size_bytes: An
         rate = bytes_per_second_problem(str(job.get("engine")), size, duration)
         if rate:
             problems.append(rate)
+    # A pace outside the band is a fact of the finished file: the render is seeded, so unlike a bad
+    # upload a retry would spend ~1 h making the same file. It closes the round at once.
+    pace = None if problems else spoken_pace_problem(str(job.get("engine")), blocks, duration)
+    if pace:
+        problems.append(pace)
     if problems:
         detail = "; ".join(problems)
         logger.error("learn narration complete: job %s (%s round %s) audio MISMATCH at %s: %s — deleting "
@@ -1058,7 +1116,8 @@ async def complete(job_id: Any, claim: WorkerClaim, *, path: Any, size_bytes: An
                      path, detail)
         await asyncio.to_thread(_remove_object_sync, AUDIO_BUCKET, path)
         failed = await ledger.fail_job_outcome(job["id"], claim.attempts, claim.nonce,
-                                               error=f"asset_mismatch: {detail}", now=at)
+                                               error=f"{PACE_FAIL_CODE if pace else 'asset_mismatch'}: {detail}",
+                                               final=pace is not None, now=at)
         await _after_fail_recorded(failed, now=at, op=op)
         raise LearnNarratorAssetMismatch(f"complete: {path} is not what the job registered ({detail}); object "
                                          "deleted, round failed", **ids)
@@ -1321,12 +1380,27 @@ def _round_text(value: Any) -> str:
     return str(value) if isinstance(value, int) and not isinstance(value, bool) else "?"
 
 
+#: A weekly piece's slug ends in its publish date (`build`'s `<title>-YYYY-MM-DD`; no catalog article's
+#: does — tests/test_learn_bundle_isolation.py). A catalog job keyed by such a slug is a RE-NARRATION of
+#: a published weekly piece (`scripts/learn_weekly_renarrate.py`), whose next step is not the fetch.
+_WEEKLY_SLUG_TAIL = re.compile(r"-(?:19|20)\d\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])\Z")
+
+
+def is_weekly_renarration(job: Mapping[str, Any]) -> bool:
+    """Is this catalog job (no piece) the re-narration of a published weekly piece (its slug)?"""
+    slug = job.get("catalog_slug")
+    return job.get("piece_id") is None and isinstance(slug, str) and bool(_WEEKLY_SLUG_TAIL.search(slug))
+
+
 def catalog_ready_text(job: Mapping[str, Any]) -> str:
     """The owner's line for a READY catalog job (plain text, no URL — alerts.notify scrubs it too)."""
     slug = job.get("catalog_slug")
     duration = job.get("duration_seconds")
     ok = isinstance(duration, (int, float)) and not isinstance(duration, bool) and math.isfinite(duration)
     shown = f"{float(duration):.0f}" if ok else "?"
+    if is_weekly_renarration(job):
+        return (f"🎙 Weekly re-narration READY: {slug} ({shown}s, round {_round_text(job.get('round'))}) — run "
+                f"scripts/learn_weekly_renarrate.py --slug {slug} --swap")
     return (f"🎙 Catalog narration READY: {slug} ({shown}s, round {_round_text(job.get('round'))}) — run "
             f"scripts/learn_catalog_fetch.py --slug {slug}")
 
@@ -1337,6 +1411,10 @@ def catalog_failed_text(job: Mapping[str, Any]) -> str:
     error = " ".join(str(job.get("error") or "unspecified").split())[:300]
     rnd = job.get("round")
     nxt = str(rnd + 1) if isinstance(rnd, int) and not isinstance(rnd, bool) else "max + 1"
+    if is_weekly_renarration(job):
+        return (f"🔴 Weekly re-narration FAILED: {slug} round {_round_text(rnd)} — {error}. The live article "
+                f"keeps its current audio. Fix the cause, then re-enqueue (round {nxt}): "
+                f"scripts/learn_weekly_renarrate.py --slug {slug} --enqueue --yes")
     return (f"🔴 Catalog narration FAILED: {slug} round {_round_text(rnd)} — {error}. Fix the cause, then "
             f"re-enqueue (round {nxt}): scripts/learn_catalog_narrate.py --slug {slug} --yes")
 

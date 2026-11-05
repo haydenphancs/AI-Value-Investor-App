@@ -21,7 +21,8 @@ WHAT IT DOES
 ------------
 1. Checks (pure, before any write): the piece is `rehearsed` with `dry_run` true; its READY narration
    job is the one it points at; its last block is exactly a legacy disclosure (nothing else says
-   "AI-assisted"); the job's timing table ends on that block; the publish time is ≥ 10 min away.
+   "AI-assisted"); the job's timing table ends on that block; the publish time is ≥ 10 min away; the
+   audio's SPOKEN-word pace sits in the voice band (`pace_refusal`, the server's own gate).
 2. Trims the audio at the end of the previous sentence + `--pad` (never into the disclosure): ffmpeg
    STREAM COPY (no re-encode), then ffprobe and the narration's bytes-per-second band.
 3. Uploads the trimmed file content-addressed (`narration.weekly_audio_path`, upsert off) — the old
@@ -264,6 +265,20 @@ def promoted_draft(draft: Mapping[str, Any], job_script: Any, *, audio_url: str,
     if "ai-assisted" in A.canonical_json(new).casefold():
         raise SystemExit("the promoted draft still says AI-assisted")
     return new
+
+
+def pace_refusal(draft: Mapping[str, Any], *, engine: Any, duration_seconds: Any) -> Optional[str]:
+    """Why this audio must not go live under this text, or None: the file's SPOKEN-word pace against the
+    voice's band (`narration.spoken_pace_problem`, the server's own gate), judged on what would be
+    published — the promoted text and the trimmed length. A rehearsal rendered before the band existed
+    can sit outside it: W44 went live at 191 spoken wpm because its checks counted written tokens. Pure."""
+    from app.services.learn_weekly import narration
+
+    problem = narration.spoken_pace_problem(str(engine), narration.narration_blocks(draft), duration_seconds)
+    if problem is None:
+        return None
+    return (f"the audio's pace is outside the voice band: {problem}. A file like this sounds rushed (or dragged) "
+            "whatever its other numbers say — re-render it, then promote")
 
 
 def trim_argv(src: str, dst: str, cut: float) -> List[str]:
@@ -804,6 +819,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     _, problem = publisher.build_article_row(dict(piece, draft=preview), preview_job, now=plan["publish_at"])
     if problem:
         raise SystemExit(f"the publisher would refuse it: {problem}")
+    pace = pace_refusal(preview, engine=job.get("engine"), duration_seconds=float(preview_job["duration_seconds"]))
+    if pace:
+        raise SystemExit(f"refusing: {pace}")
     if not args.yes:
         print("dry run — nothing written (add --yes)")
         return 0

@@ -15,6 +15,13 @@ Per engine (`BANDS`):
     wide enough for any natural voice, and a loudness floor/ceiling that only a silent or clipped
     file misses. Pitch is recorded, never enforced. Tighten after the first real Kokoro renders.
 
+The pace is SPOKEN words per minute of the file (`spoken_words`: `timings.spoken_word_count` of every
+narrated block — "$574.8 billion" is eight words, not two), the basis the tempo pass now uses too
+(chatterbox pipeline v2, 2026-11-01). Counted on whitespace tokens, the published W44 Deep Dive (161
+figure tokens, sped up 1.188×) passed this band while it narrated ~25% too fast. The band is unchanged:
+the 23 catalog clips measure 155.8–161.7 spoken wpm (150.4–159.2 on tokens), see
+tests/test_money_moves_catalog_parity.py.
+
 numpy is imported inside `median_f0` only — the parent process calls `measure`, and stays free of
 the heavy stack at import.
 """
@@ -24,7 +31,9 @@ import math
 import re
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+
+from learn_narrator import timings as tm
 
 SR = 16000
 
@@ -105,9 +114,14 @@ def _clean(x: float, places: int) -> Optional[float]:
     return round(float(x), places) if isinstance(x, (int, float)) and math.isfinite(float(x)) else None
 
 
+def spoken_words(blocks: Sequence[Mapping[str, Any]]) -> int:
+    """The words the voice says across the job's `{i, text}` blocks — `measure`'s `words`."""
+    return sum(tm.spoken_word_count(str(b.get("text") or "")) for b in blocks)
+
+
 def measure(path: Path, words: int, *, size_bytes: Optional[int] = None) -> Dict[str, Any]:
-    """The four measurements of a file (`words` = whitespace words of every narrated block, the
-    script's basis). NaN becomes None (JSON has no NaN)."""
+    """The four measurements of a file (`words` = SPOKEN words of every narrated block,
+    `spoken_words`). NaN becomes None (JSON has no NaN)."""
     d = duration(path)
     size = path.stat().st_size if size_bytes is None else size_bytes
     return {

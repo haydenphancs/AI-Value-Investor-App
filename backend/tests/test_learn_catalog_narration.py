@@ -106,9 +106,11 @@ async def _claimed(fake):
     return wire, WorkerClaim(wire["attempts"], wire["claim_nonce"])
 
 
-async def _rendered(fake, *, spw=0.36, sha="ef" * 32, slug=SLUG, bytes_per_second=12_600):
+async def _rendered(fake, *, spw=nt.IN_BAND_SPW, sha="ef" * 32, slug=SLUG, bytes_per_second=12_600, content=None,
+                    seconds=None):
     wire, claim = await _claimed(fake)
-    t, end = nt._timings(nt._blocks(), spw=spw)
+    blocks = nt._blocks(content)
+    t, end = nt._timings(blocks, spw=spw) if seconds is None else nt._timings_lasting(blocks, seconds)
     path = f"audio/catalog/{slug}-{sha[:12]}.m4a"
     size = int(end * bytes_per_second)
     fake.storage.put(path, size)
@@ -313,6 +315,53 @@ async def test_the_catalog_timing_gate_is_the_weekly_one(fake, alerts):
         await narration.complete(wire["id"], claim, now=NOW, **kw)
     assert "s/word" in str(e.value)
     assert len(fake.storage.calls) == calls and alerts.lines == []
+
+
+@pytest.mark.asyncio
+async def test_a_too_fast_catalog_render_is_refused_with_one_alert(fake, alerts):
+    """W44's original render as a catalog job: the object is deleted, the job closes at once (the same
+    seed makes the same file) and the owner gets exactly one FAILED line."""
+    article = nt.w44_article()
+    job = _catalog_job(fake, content=article)
+    wire, claim, kw = await _rendered(fake, content=article, seconds=nt.W44["original_duration_seconds"])
+    with pytest.raises(LearnNarratorAssetMismatch) as e:
+        await narration.complete(wire["id"], claim, now=NOW, **kw)
+    assert "spoken words/min" in str(e.value)
+    assert e.value.ids == {"job_id": job["id"], "catalog_slug": SLUG, "op": "complete"}
+    assert (narration.AUDIO_BUCKET, kw["path"]) not in fake.storage.objects
+    row = fake.row(ledger.JOBS, job["id"])
+    assert row["status"] == c.JOB_FAILED and row["worker_failures"] == 1
+    assert c.fail_code_of(row["error"]) == narration.PACE_FAIL_CODE
+    assert _piece_reads(fake) == [] and alerts.terminal == []
+    (text, loud), = alerts.lines
+    assert loud is True and "Catalog narration FAILED" in text and "voice_out_of_band" in text and SLUG in text
+
+
+@pytest.mark.asyncio
+async def test_a_too_fast_weekly_renarration_says_so_and_the_live_article_keeps_its_audio(fake, alerts):
+    """The same refusal on the path `scripts/learn_weekly_renarrate.py` uses: the catalog job of a weekly
+    slug. It is the line the owner acts on, so it names that script."""
+    article = nt.w44_article(closing=False)
+    _catalog_job(fake, slug=nt.W44_SLUG, content=article)
+    wire, claim, kw = await _rendered(fake, content=article, seconds=719.0, slug=nt.W44_SLUG)
+    with pytest.raises(LearnNarratorAssetMismatch):
+        await narration.complete(wire["id"], claim, now=NOW, **kw)
+    (text, _), = alerts.lines
+    assert "Weekly re-narration FAILED" in text and "keeps its current audio" in text
+    assert f"learn_weekly_renarrate.py --slug {nt.W44_SLUG} --enqueue --yes" in text
+
+
+@pytest.mark.asyncio
+async def test_a_corrected_render_of_the_same_text_is_accepted(fake, alerts):
+    article = nt.w44_article()
+    job = _catalog_job(fake, content=article)
+    wire, claim, kw = await _rendered(fake, content=article, seconds=sum(
+        nt.tm.spoken_word_count(b["text"]) for b in nt.W44["blocks"]) / 155.0 * 60)
+    out = await narration.complete(wire["id"], claim, now=NOW, **kw)
+    assert out["status"] == c.JOB_READY
+    assert fake.row(ledger.JOBS, job["id"])["status"] == c.JOB_READY
+    (text, _), = alerts.lines
+    assert "Catalog narration READY" in text
 
 
 @pytest.mark.asyncio
@@ -523,7 +572,7 @@ def test_a_catalog_job_runs_end_to_end_through_the_internal_api(fake, alerts, mo
     assert r.status_code == 200, r.text
     wire = r.json()["job"]
     hc = {**h, "X-Learn-Claim": f"{wire['attempts']}.{wire['claim_nonce']}"}
-    t, end = nt._timings(nt._blocks())
+    t, end = nt._timings(nt._blocks(), spw=nt.IN_BAND_SPW)
     size, sha = int(end * 12_600), "ef" * 32
     r = client.post(f"{base}/jobs/{wire['id']}/upload", headers=hc,
                     json={"content_type": "audio/mp4", "bytes": size, "sha256": sha})

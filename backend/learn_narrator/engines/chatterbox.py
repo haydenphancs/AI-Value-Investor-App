@@ -40,10 +40,20 @@ whatever its cause. Each finished block is saved at once (`save_block`, under PA
 by any later child of the same job, and every block keeps its own seed (SEED + i), so the audio is
 the one a single process would make.
 
-Assembly (`assemble_plan`, as the script): native wpm over the blocks' whitespace words and raw
-speech samples → atempo = TARGET_WPM / native (clamped 0.5–2.0); pauses (BLOCK_PAUSE between blocks,
+Assembly (`assemble_plan`, as the script): native wpm over the blocks' SPOKEN words
+(`timings.spoken_word_count` of each block's text, `plan_words`) and raw speech samples → atempo =
+TARGET_WPM / native, clamped to ATEMPO_RANGE (0.80–1.10); pauses (BLOCK_PAUSE between blocks,
 SENT_PAUSE inside a split block) inserted BEFORE the tempo pass, so they land at their length after
 it; then ffmpeg atempo + AAC 96k, plus `+faststart` so iOS can start playback before the file is in.
+
+Why SPOKEN words (pipeline v2, 2026-11-01). v1 counted whitespace tokens, like the script. The
+published W44 Deep Dive has 161 figure tokens ("$57.0B", "12.3%") that the voice says as several
+words each, so its native pace LOOKED slow (≈139 tokens/min) and v1 sped the whole file up by 1.188:
+the listener heard ~25% too fast (7.3 syllables/s against the catalog's 5.2). Counting what the voice
+says, the catalog's measured raw pace is ≈182 spoken words/min (atempo ≈0.91), whatever the figures.
+The cap bounds any future miscount: a speed-up past 1.10 is audibly rushed, and the result instead
+lands slower than TARGET_WPM, where the file's pace band (verify.py) fails it loudly. `render` reports
+the unclamped `atempo_wanted` and `atempo_clamped` (into the job's `checks.worker.worker`).
 """
 
 from __future__ import annotations
@@ -64,8 +74,10 @@ from learn_narrator import timings as tm
 logger = logging.getLogger("learn_narrator.chatterbox")
 
 #: Bump with any change to synthesis, the gate, assembly or encoding (written into the m4a and
-#: reported with every job).
-PIPELINE_VERSION = "chatterbox-0.1.7/block/aac96k/v1"
+#: reported with every job). It is also the saved blocks' key (`load_block`): a block saved under
+#: another version is rendered again, never stitched into this one's assembly.
+#: v2 (2026-11-01): the tempo plan counts SPOKEN words and atempo is capped at ATEMPO_RANGE.
+PIPELINE_VERSION = "chatterbox-0.1.7/block/aac96k/v2"
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
 REF_NAME = "caydex_voice_achird_v2"
@@ -103,7 +115,18 @@ SHORT_WPS_BAND: Tuple[float, float] = (0.9, 5.0)
 #: (~128 spoken words) is split. A slower render that still truncates is split reactively (`halves`).
 SPLIT_ESTIMATE_SECONDS = 38.0
 NATURAL_WPS = 3.0
-ATEMPO_RANGE: Tuple[float, float] = (0.5, 2.0)
+#: The tempo pass's bounds (pipeline v2; v1 and the script allowed 0.5–2.0). Chosen from the same 23
+#: raw catalog block renders WPS_BAND was measured on (MEASURED_CATALOG_CALLS in the worker test): their
+#: pooled raw pace is 3.03 spoken words/s = 182 wpm, so a catalog-style render is SLOWED (≈0.91), not
+#: sped up.
+#:   * 1.10 ceiling: full correction down to a native 150 spoken wpm (2.5 w/s, ~17% under that mean).
+#:     W44's 1.188 was a miscount, not a slow voice; anything slower than 2.5 w/s article-wide is a
+#:     stall or a miscount, and rushing it (as W44 was) is the failure listeners hear. Capped, the file
+#:     lands under TARGET_WPM and verify.py's pace band refuses it (`voice_out_of_band`).
+#:   * 0.80 floor: full correction up to a native 206 spoken wpm (3.44 w/s, ~13% over the mean; the
+#:     per-call gate stops any single call above 3.6 w/s). A slow-down past 20% audibly smears the voice
+#:     (atempo's overlap-add), and a render that fast is more likely skipping words than speaking fast.
+ATEMPO_RANGE: Tuple[float, float] = (0.80, 1.10)
 ENCODE_TIMEOUT_SECONDS = 600
 #: Blocks per `render_part` child (see the module docstring). Measured on Railway 2026-10-24: the
 #: loaded model holds ~4.5 GB, then each block adds ~120-170 MB that is never given back (8 GB was
@@ -261,7 +284,7 @@ class Call:
 @dataclass
 class BlockRender:
     i: int
-    words: int
+    words: int                     # whitespace words (render.json's "words", informational only)
     calls: List[Call]
     sr: int = SR
 
@@ -337,26 +360,41 @@ def render_blocks(blocks: Sequence[Mapping[str, Any]], synth: Callable[[str, int
 
 @dataclass(frozen=True)
 class Plan:
-    atempo: float
-    native_wpm: float
+    atempo: float                  # the tempo pass applied (ATEMPO_RANGE-clamped)
+    native_wpm: float              # SPOKEN words per minute of the raw speech
     pause_samples: int             # between blocks (pre-tempo)
     sent_pause_samples: int        # between the calls of one split block (pre-tempo)
     offsets: Tuple[int, ...]       # each block's first sample in the PRE-tempo assembly
     lengths: Tuple[int, ...]       # each block's samples, its inner pauses included
     total_samples: int
+    atempo_wanted: float = 1.0     # TARGET_WPM / native before the clamp
+
+    @property
+    def clamped(self) -> bool:
+        """Did ATEMPO_RANGE change the tempo the pace asked for?"""
+        return abs(self.atempo - self.atempo_wanted) > 1e-9
+
+
+def plan_words(blocks: Sequence[Mapping[str, Any]]) -> List[int]:
+    """The tempo plan's word count per block: the words the voice SAYS (`timings.spoken_word_count`;
+    "$574.8 billion" is eight), never whitespace tokens — see the module docstring (W44)."""
+    return [tm.spoken_word_count(str(b["text"])) for b in blocks]
 
 
 def assemble_plan(lengths: Sequence[Union[int, Sequence[int]]], words: Sequence[int], *,
                   target_wpm: int = TARGET_WPM, sr: int = SR, block_pause: float = BLOCK_PAUSE,
                   sent_pause: float = SENT_PAUSE) -> Plan:
-    """clone_learn_audio.synth_clip's maths: native wpm from whitespace words over the raw SPEECH
-    (pauses excluded), atempo clamped to ATEMPO_RANGE, pauses sized pre-tempo, none after the last.
-    `lengths[b]` is block b's speech samples, or the list of its calls' samples when it was split."""
+    """clone_learn_audio.synth_clip's maths: native wpm from `words` (each block's SPOKEN words —
+    `plan_words`) over the raw SPEECH (pauses excluded), atempo = target / native clamped to
+    ATEMPO_RANGE (the unclamped value kept as `atempo_wanted`), pauses sized pre-tempo, none after
+    the last. `lengths[b]` is block b's speech samples, or the list of its calls' samples when it
+    was split. No speech or no words → atempo 1.0 (nothing to measure, nothing to correct)."""
     parts = [[int(x)] if isinstance(x, int) else [int(y) for y in x] for x in lengths]
     speech = sum(sum(p) for p in parts)
     total_words = sum(int(w) for w in words)
     native_wpm = (total_words / (speech / sr) * 60) if speech else float(target_wpm)
-    atempo = max(ATEMPO_RANGE[0], min(ATEMPO_RANGE[1], target_wpm / native_wpm)) if native_wpm else 1.0
+    wanted = (target_wpm / native_wpm) if native_wpm else 1.0
+    atempo = max(ATEMPO_RANGE[0], min(ATEMPO_RANGE[1], wanted)) if native_wpm else 1.0
     pause = int(round(block_pause * atempo * sr))
     inner = int(round(sent_pause * atempo * sr))
     offsets, block_lengths = [], []
@@ -367,7 +405,7 @@ def assemble_plan(lengths: Sequence[Union[int, Sequence[int]]], words: Sequence[
         block_lengths.append(length)
         t += length + (pause if k < len(parts) - 1 else 0)
     return Plan(atempo=atempo, native_wpm=native_wpm, pause_samples=pause, sent_pause_samples=inner,
-                offsets=tuple(offsets), lengths=tuple(block_lengths), total_samples=t)
+                offsets=tuple(offsets), lengths=tuple(block_lengths), total_samples=t, atempo_wanted=wanted)
 
 
 def final_seconds(raw_samples: int, plan: Plan, sr: int = SR) -> float:
@@ -586,8 +624,13 @@ def render(job: Mapping[str, Any], out_dir: Path, *, threads: int,
                                f"{voice.exaggeration}")
     emotion = emotions[0] if emotions else voice.exaggeration
 
-    plan = assemble_plan([[c.samples for c in b.calls] for b in rendered], [b.words for b in rendered],
+    plan = assemble_plan([[c.samples for c in b.calls] for b in rendered], plan_words(job["blocks"]),
                          target_wpm=voice.target_wpm)
+    if plan.clamped:
+        logger.warning("tempo clamped: the pace asks atempo %.4f (native %.1f spoken wpm, target %d) — applied "
+                       "%.4f (ATEMPO_RANGE %s); the file lands off-target and its pace band decides",
+                       plan.atempo_wanted, plan.native_wpm, voice.target_wpm, plan.atempo, ATEMPO_RANGE)
+        progress(f"tempo clamped: wanted atempo {plan.atempo_wanted:.4f}, applied {plan.atempo:.4f}")
     block_pause = np.zeros(plan.pause_samples, dtype=np.float32)
     inner_pause = np.zeros(plan.sent_pause_samples, dtype=np.float32)
     parts: List[Any] = []
@@ -614,7 +657,9 @@ def render(job: Mapping[str, Any], out_dir: Path, *, threads: int,
         blocks_out.append(rec)
     return {
         "engine": "chatterbox", "pipeline": PIPELINE_VERSION, "sample_rate": SR,
-        "atempo": plan.atempo, "native_wpm": round(plan.native_wpm, 3), "pause_samples": plan.pause_samples,
+        "atempo": plan.atempo, "atempo_wanted": round(plan.atempo_wanted, 5), "atempo_clamped": plan.clamped,
+        "atempo_range": list(ATEMPO_RANGE), "tempo_words": "spoken",
+        "native_wpm": round(plan.native_wpm, 3), "pause_samples": plan.pause_samples,
         "sent_pause_samples": plan.sent_pause_samples,
         "emotion_adv": emotion, "exaggeration": voice.exaggeration, "cfg_weight": voice.cfg_weight,
         "target_wpm": voice.target_wpm, "audio": m4a.name, "render_seconds": round(render_seconds, 1),

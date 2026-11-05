@@ -287,9 +287,10 @@ def test_the_generate_scanner_catches_a_call_without_exaggeration():
     assert "exaggeration" not in {k.arg for k in bad.keywords}
 
 
-@pytest.mark.parametrize("name", ["EXAG", "CFG", "TARGET_WPM", "BLOCK_PAUSE", "SENT_PAUSE", "SR"])
+@pytest.mark.parametrize("name", ["EXAG", "CFG", "TARGET_WPM", "BLOCK_PAUSE", "SENT_PAUSE", "SR", "ATEMPO_RANGE"])
 def test_voice_constants_equal_the_catalog_script(name):
-    """clone_learn_audio.py voiced the catalog (block mode, approved 2026-06-24)."""
+    """clone_learn_audio.py voiced the catalog (block mode, approved 2026-06-24); since 2026-11-01 its
+    tempo clamp is the narrator's too (ATEMPO_RANGE)."""
     script = _literal(SCRIPTS / "clone_learn_audio.py", name)
     worker = _literal(PKG / "engines" / "chatterbox.py", name)
     assert worker == script == getattr(cb, name)
@@ -407,7 +408,7 @@ def test_a_saved_block_that_cannot_be_trusted_is_rendered_again(tmp_path, monkey
     if spoil == "text":
         block = {**block, "text": "Another sentence entirely."}
     elif spoil == "pipeline":
-        monkeypatch.setattr(cb, "PIPELINE_VERSION", "chatterbox-0.1.7/block/aac96k/v2")
+        monkeypatch.setattr(cb, "PIPELINE_VERSION", "chatterbox-0.1.7/block/aac96k/v-next")
     elif spoil == "length":
         b.calls[0].samples += 1
         cb.save_block(tmp_path, b, block["text"], cb.EXAG)
@@ -832,13 +833,14 @@ def test_the_render_loop_fails_a_block_that_fails_twice():
 
 
 def test_assemble_plan_matches_the_script():
-    """synth_clip (block mode): native wpm over whitespace words and raw speech; atempo =
-    TARGET_WPM / native, clamped 0.5-2.0; pauses sized BEFORE the tempo pass; none after the last."""
+    """synth_clip (block mode): native wpm over SPOKEN words and raw speech; atempo =
+    TARGET_WPM / native, clamped to ATEMPO_RANGE; pauses sized BEFORE the tempo pass; none after the last."""
     lengths = [cb.SR * 10, cb.SR * 20, cb.SR * 5]
-    words = [25, 50, 12]
+    words = [28, 55, 14]                       # 166 spoken wpm: inside the clamp
     plan = cb.assemble_plan(lengths, words)
     native = sum(words) / (sum(lengths) / cb.SR) * 60
-    atempo = max(0.5, min(2.0, cb.TARGET_WPM / native))
+    atempo = max(cb.ATEMPO_RANGE[0], min(cb.ATEMPO_RANGE[1], cb.TARGET_WPM / native))
+    assert not plan.clamped and plan.atempo_wanted == pytest.approx(atempo)
     pause = int(round(cb.BLOCK_PAUSE * atempo * cb.SR))
     assert plan.native_wpm == pytest.approx(native)
     assert plan.atempo == pytest.approx(atempo)
@@ -849,9 +851,190 @@ def test_assemble_plan_matches_the_script():
     assert cb.final_seconds(pause, plan) == pytest.approx(cb.BLOCK_PAUSE, abs=1 / cb.SR)
 
 
-@pytest.mark.parametrize("words, seconds, atempo", [(10, 60, 2.0), (1000, 60, 0.5)])
-def test_atempo_is_clamped(words, seconds, atempo):
-    assert cb.assemble_plan([cb.SR * seconds], [words]).atempo == atempo
+@pytest.mark.parametrize("words, seconds, atempo, wanted", [
+    (10, 60, 1.10, 16.5),          # a stall (10 wpm): never sped up past 1.10
+    (130, 60, 1.10, 165 / 130),    # 130 spoken wpm wants 1.27 (W44's token miscount looked like this)
+    (1000, 60, 0.80, 0.165),       # a race: never slowed past 0.80
+])
+def test_atempo_is_clamped_and_the_clamp_is_recorded(words, seconds, atempo, wanted):
+    plan = cb.assemble_plan([cb.SR * seconds], [words])
+    assert plan.atempo == atempo and plan.clamped
+    assert plan.atempo_wanted == pytest.approx(wanted)
+
+
+def test_the_tempo_range_is_the_v2_cap():
+    """Pipeline v2 (2026-11-01): at most 10% faster, at most 20% slower (the module docstring) — and the
+    catalog's own measured raw pace is corrected in full, well inside both bounds."""
+    assert cb.ATEMPO_RANGE == (0.80, 1.10)
+    lo, hi = cb.ATEMPO_RANGE
+    pooled = sum(w for _, w in MEASURED_CATALOG_CALLS) / sum(s for s, _ in MEASURED_CATALOG_CALLS) * 60
+    assert 180 < pooled < 184                                   # 3.03 spoken words/s
+    assert lo + 0.05 < cb.TARGET_WPM / pooled < hi - 0.05       # ≈ 0.91
+    assert not cb.assemble_plan([cb.SR * 60], [round(pooled)]).clamped
+
+
+#: W44-like blocks: the published Deep Dive carries 161 figure tokens the voice says as several words.
+W44_LIKE = [
+    "Semiconductor Giants and AI Infrastructure",
+    "Revenue rose 12.3% to $57.0B in fiscal 2025, while gross margin reached 74.6%.",
+    "Data center sales were $41.1B, up 56% from $26.3B a year earlier.",
+    "Capital spending hit $15.2B in 2024 and is guided to $18.5B, roughly 21% of sales.",
+    "Its three biggest customers bought 36%, 19% and 12% of the 2025 output.",
+    "Inventory climbed to $8.9B, about 117 days of supply, from 92 days in 2023.",
+]
+
+
+def _w44_blocks() -> List[Dict[str, Any]]:
+    return [{"i": i, "text": t, "role": "body"} for i, t in enumerate(W44_LIKE)]
+
+
+def test_a_figure_heavy_render_at_a_natural_pace_is_not_sped_up():
+    """The W44 bug: raw audio speaking at exactly TARGET_WPM SPOKEN words/min. v1 counted whitespace
+    tokens, saw a slow "native" pace and sped the file up ~1.19×; v2 counts what the voice says."""
+    blocks = _w44_blocks()
+    spoken = cb.plan_words(blocks)
+    tokens = [len(b["text"].split()) for b in blocks]
+    assert sum(spoken) > 1.15 * sum(tokens)                         # figures say far more than they show
+    lengths = [int(cb.SR * w * 60 / cb.TARGET_WPM) for w in spoken]  # raw speech at 165 spoken wpm
+    plan = cb.assemble_plan(lengths, spoken)
+    assert plan.atempo == pytest.approx(1.0, abs=0.01) and not plan.clamped
+    v1_wanted = cb.TARGET_WPM / (sum(tokens) / (sum(lengths) / cb.SR) * 60)
+    assert v1_wanted > 1.15                                          # what v1 applied (W44 recorded 1.188)
+    assert cb.assemble_plan(lengths, tokens).atempo == cb.ATEMPO_RANGE[1]  # even a miscount stops at 1.10
+
+
+#: The W44 Deep Dive's REAL narration (job 078b6690…), the same words that shipped too fast.
+W44_SCRIPT = json.loads((BACKEND / "tests" / "data" / "learn_w44_narration_script.json").read_text(encoding="utf-8"))
+
+
+def _w44_raw_lengths() -> List[int]:
+    """Raw speech per block, sized so that the render's WRITTEN-token native pace is exactly what v1 saw
+    (165 / the recorded atempo): the bug's own inputs."""
+    native_tokens_per_minute = cb.TARGET_WPM / W44_SCRIPT["recorded_atempo"]
+    return [int(round(cb.SR * len(b["text"].split()) / native_tokens_per_minute * 60)) for b in W44_SCRIPT["blocks"]]
+
+
+def test_the_w44_fixture_is_figure_dense_enough_to_mean_something():
+    """Vacuity guard: without its figures this script would not have tripped the bug at all."""
+    blocks = W44_SCRIPT["blocks"]
+    tokens = [t for b in blocks for t in b["text"].split()]
+    assert sum(any(ch.isdigit() for ch in t) for t in tokens) >= 150
+    assert sum(cb.plan_words(blocks)) > 1.2 * len(tokens)
+    assert W44_SCRIPT["recorded_atempo"] == pytest.approx(1.188, abs=0.001)
+
+
+def test_the_raw_speech_model_reproduces_w44s_real_render():
+    """The derived inputs give back the file that really shipped (727.494 s), so the next test runs the
+    bug's arithmetic, not a look-alike."""
+    lengths = _w44_raw_lengths()
+    old = cb.assemble_plan(lengths, [len(b["text"].split()) for b in W44_SCRIPT["blocks"]])
+    v1_seconds = sum(lengths) / cb.SR / W44_SCRIPT["recorded_atempo"] + cb.BLOCK_PAUSE * (len(lengths) - 1)
+    assert v1_seconds == pytest.approx(W44_SCRIPT["original_duration_seconds"], abs=2.0)
+    assert old.atempo_wanted == pytest.approx(W44_SCRIPT["recorded_atempo"], rel=1e-3)
+
+
+def test_w44s_real_script_is_never_sped_up_again():
+    """The regression test for 2026-11-01: with the bug's inputs, the written-token maths wants about
+    1.19; the tempo plan the render uses (`plan_words`) stays inside ATEMPO_RANGE, at or under 1.0."""
+    blocks, lengths = W44_SCRIPT["blocks"], _w44_raw_lengths()
+    tokens = [len(b["text"].split()) for b in blocks]
+    native_tokens = sum(tokens) / (sum(lengths) / cb.SR) * 60
+    assert cb.TARGET_WPM / native_tokens == pytest.approx(1.19, abs=0.01)         # the old maths
+    plan = cb.assemble_plan(lengths, cb.plan_words(blocks))
+    assert cb.ATEMPO_RANGE[0] <= plan.atempo <= cb.ATEMPO_RANGE[1] and not plan.clamped
+    assert plan.atempo <= 1.0 and plan.atempo == pytest.approx(0.971, abs=0.005)
+    assert abs(plan.atempo - W44_SCRIPT["recorded_atempo"]) > 0.15
+
+
+def test_w44_rendered_by_v2_lands_in_the_pace_band_and_v1s_file_does_not():
+    blocks, lengths = W44_SCRIPT["blocks"], _w44_raw_lengths()
+    plan = cb.assemble_plan(lengths, cb.plan_words(blocks))
+    spoken = verify.spoken_words(blocks)
+    seconds = sum(lengths) / cb.SR / plan.atempo + cb.BLOCK_PAUSE * (len(lengths) - 1)
+    assert verify.WPM[0] <= spoken / seconds * 60 <= verify.WPM[1]
+    assert spoken / W44_SCRIPT["original_duration_seconds"] * 60 > verify.WPM[1]
+
+
+def test_plan_words_are_the_spoken_form_of_each_block():
+    assert cb.plan_words(_w44_blocks()) == [tm.spoken_word_count(t) for t in W44_LIKE]
+    assert cb.plan_words([{"i": 0, "text": "**Bold** $574.8 billion"}]) == [9]   # markup stripped: 1 + 8
+    assert cb.plan_words([{"i": 0, "text": "—"}]) == [0]
+    assert cb.assemble_plan([cb.SR * 3], [0]).atempo == 1.0          # nothing said: nothing to correct
+
+
+def test_the_pipeline_is_v2_and_a_v1_saved_block_is_never_stitched_in(tmp_path, monkeypatch, caplog):
+    """v2 changed the assembly; a block saved by a v1 child (a job in flight across the deploy) is
+    rendered again, never mixed into a v2 file."""
+    assert cb.PIPELINE_VERSION == "chatterbox-0.1.7/block/aac96k/v2"
+    block = _pt_blocks(1)[0]
+    b = cb.render_blocks([block], _pt_synth([]))[0]
+    with monkeypatch.context() as mp:
+        mp.setattr(cb, "PIPELINE_VERSION", "chatterbox-0.1.7/block/aac96k/v1")
+        cb.save_block(tmp_path, b, block["text"], cb.EXAG)
+    assert cb.load_block(tmp_path, block) is None
+    assert "pipeline 'chatterbox-0.1.7/block/aac96k/v1'" in caplog.text
+
+
+def _fake_assembly(monkeypatch, *, load_model=None) -> List[List[str]]:
+    """cb.render without soundfile, ffmpeg or a model: the WAV write is a stub, the encode is recorded."""
+    import types
+
+    encodes: List[List[str]] = []
+    sf = types.ModuleType("soundfile")
+    sf.write = lambda path, data, sr, subtype=None: Path(path).write_bytes(b"RIFF")
+    monkeypatch.setitem(sys.modules, "soundfile", sf)
+    monkeypatch.setattr(cb, "load_voice_model", load_model or _pt_loader([], []))
+
+    def run(cmd, **kw):
+        encodes.append(cmd)
+        Path(cmd[-1]).write_bytes(b"\x00" * 64)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(cb.subprocess, "run", run)
+    return encodes
+
+
+def test_render_plans_on_spoken_words_and_reports_the_tempo(tmp_path, monkeypatch):
+    """The W44-like job rendered at the catalog's measured raw pace (3.03 spoken words/s): v2 SLOWS it
+    to ≈0.91, as the catalog was, where v1 would have sped it up."""
+    import numpy as np
+
+    def loader(job, *, threads, progress=print):
+        def synth(text, seed):
+            n = int(cb.SR * tm.spoken_word_count(text) / 3.03)
+            return np.zeros(n, dtype=np.float32), n
+        return synth, cb.EXAG
+    job = {"engine": "chatterbox", "voice": {}, "seed": cb.SEED, "blocks": _w44_blocks()}
+    encodes = _fake_assembly(monkeypatch, load_model=loader)
+    out = cb.render(job, tmp_path, threads=1)
+    raw = sum(int(cb.SR * tm.spoken_word_count(t) / 3.03) for t in W44_LIKE) / cb.SR
+    native = sum(cb.plan_words(job["blocks"])) / raw * 60
+    assert out["native_wpm"] == pytest.approx(native, rel=1e-3) and 180 < native < 184
+    assert out["tempo_words"] == "spoken" and out["pipeline"] == cb.PIPELINE_VERSION
+    assert out["atempo_range"] == list(cb.ATEMPO_RANGE)
+    assert out["atempo"] == pytest.approx(cb.TARGET_WPM / native, rel=1e-4) == out["atempo_wanted"]
+    assert out["atempo_clamped"] is False and 0.89 < out["atempo"] < 0.93
+    v1 = cb.TARGET_WPM / (sum(len(t.split()) for t in W44_LIKE) / raw * 60)
+    assert v1 > 1.05                                   # the token count would have SPED UP the same audio
+    (cmd,) = encodes
+    assert cmd[cmd.index("-filter:a") + 1] == f"atempo={out['atempo']:.5f}"
+    assert f"comment={cb.PIPELINE_VERSION}" in cmd
+
+
+def test_render_applies_a_clamped_tempo_and_says_so(tmp_path, monkeypatch, caplog):
+    """7 spoken words in 4 s raw (105 wpm) want atempo 1.57: applied at the 1.10 cap, recorded as
+    clamped, logged at WARNING (the file then lands slow and its pace band decides)."""
+    import numpy as np
+
+    def loader(job, *, threads, progress=print):
+        return (lambda text, seed: (np.zeros(cb.SR * 4, dtype=np.float32), cb.SR * 4)), cb.EXAG
+    job = {"engine": "chatterbox", "voice": {}, "seed": cb.SEED,
+           "blocks": [{"i": 0, "text": "Go now, slowly and very carefully, please.", "role": "body"}]}
+    _fake_assembly(monkeypatch, load_model=loader)
+    with caplog.at_level(logging.WARNING, logger="learn_narrator.chatterbox"):
+        out = cb.render(job, tmp_path, threads=1)
+    assert out["atempo"] == cb.ATEMPO_RANGE[1] and out["atempo_clamped"] is True
+    assert out["atempo_wanted"] == pytest.approx(cb.TARGET_WPM / 105, rel=1e-3)
+    assert "tempo clamped" in caplog.text
 
 
 def test_a_split_block_gets_sentence_pauses_inside_and_block_pauses_around():
@@ -1243,6 +1426,44 @@ def test_the_narrator_images_encode_rate_is_in_band():
         "bytes_per_sec 9700.0 outside (11500, 14000)"]
     assert verify.band_problems("chatterbox", {**real, "bytes_per_sec": 16_000.0}) == [
         "bytes_per_sec 16000.0 outside (11500, 14000)"]
+
+
+def _measured(monkeypatch, blocks, duration):
+    """`verify.measure` of a file of `duration` with the job's SPOKEN words (no ffmpeg: the three
+    decoders are stubbed with in-band values)."""
+    monkeypatch.setattr(verify, "duration", lambda p: duration)
+    monkeypatch.setattr(verify, "median_f0", lambda p: 134.0)
+    monkeypatch.setattr(verify, "lufs", lambda p: -16.0)
+    return verify.measure(Path("narration.m4a"), verify.spoken_words(blocks), size_bytes=int(12_400 * duration))
+
+
+def test_the_pace_band_counts_spoken_words(monkeypatch):
+    """The band v1 checked on whitespace tokens let W44 through: a figure-heavy file whose SPEECH ran at
+    165 tokens/min (sped up 1.188×) read as in band. On spoken words — the tempo pass's own basis now —
+    that file is refused, and the correctly paced re-render passes."""
+    blocks = _w44_blocks()
+    tokens = sum(len(b["text"].split()) for b in blocks)
+    spoken = verify.spoken_words(blocks)
+    assert spoken == sum(tm.spoken_word_count(b["text"]) for b in blocks) and spoken > 1.15 * tokens
+    pauses = cb.BLOCK_PAUSE * (len(blocks) - 1)
+    v1 = tokens / cb.TARGET_WPM * 60 + pauses           # speech at 165 TOKENS/min (the W44 render)
+    v2 = spoken / cb.TARGET_WPM * 60 + pauses           # speech at 165 SPOKEN words/min
+    assert verify.WPM[0] <= tokens / v1 * 60 <= verify.WPM[1]          # what v1's check saw: in band
+    bad = _measured(monkeypatch, blocks, v1)
+    assert bad["wpm"] > verify.WPM[1]
+    assert verify.band_problems("chatterbox", bad) == [f"wpm {bad['wpm']} outside (144.0, 166.0)"]
+    good = _measured(monkeypatch, blocks, v2)
+    assert verify.band_problems("chatterbox", good) == [] and 144.0 <= good["wpm"] <= 166.0
+
+
+def test_the_web_pace_band_agrees_with_the_workers():
+    """`narration.complete` judges the same SPOKEN-word band as `verify.py`: a file the worker passes must
+    not be deleted after its upload, and the server must not be laxer than the worker."""
+    band = _top(_tree(BACKEND / "app" / "services" / "learn_weekly" / "narration.py"), "SPOKEN_WPM_BAND")
+    keys = [ast.unparse(k) for k in band.keys]
+    values = dict(zip(keys, (ast.literal_eval(v) for v in band.values)))
+    assert values == {"c.ENGINE_CHATTERBOX": verify.BANDS["chatterbox"]["wpm"],
+                      "c.ENGINE_KOKORO": verify.BANDS["kokoro"]["wpm"]}
 
 
 def test_the_web_bytes_band_agrees_with_the_workers():
@@ -1740,6 +1961,7 @@ def _synthetic(job: Dict[str, Any], *, collapse: bool = False):
                         "word_coverage": 1.0, "window": [0, 0], "core": [0, 0]})
         off += n + pause
     render = {"engine": job["engine"], "pipeline": "test", "sample_rate": sr, "atempo": 1.0, "audio": "narration.m4a",
+              "atempo_wanted": 1.0, "atempo_clamped": False, "tempo_words": "spoken",
               "emotion_adv": 0.65, "wall_seconds": 12.0, "blocks": rblocks}
     return render, {"model": al.MODEL, "wall_seconds": 3.0, "blocks": ablocks}, off / sr
 
@@ -1851,9 +2073,21 @@ def test_a_good_tick_uploads_and_completes(tmp_path, monkeypatch):
         assert {"i", "raw_seconds", "words_per_sec", "align_coverage", "rerendered"} <= set(b)
     assert payload["checks"]["blocks"][2]["rerendered"] is True
     assert set(payload["checks"]["file"]) >= {"f0_hz", "wpm", "bytes_per_sec", "lufs"}
-    assert seen["words"] == sum(len(t.split()) for t in JOB_TEXTS)
+    assert seen["words"] == sum(tm.spoken_word_count(t) for t in JOB_TEXTS) == verify.spoken_words(_raw_job()["blocks"])
     assert payload["checks"]["worker"]["emotion_adv"] == 0.65
+    worker = payload["checks"]["worker"]
+    assert (worker["atempo"], worker["atempo_wanted"], worker["atempo_clamped"], worker["tempo_words"]) == \
+        (1.0, 1.0, False, "spoken")
     json.dumps(payload, allow_nan=False)   # valid JSON: no NaN anywhere
+
+
+def test_the_tick_measures_the_files_pace_on_spoken_words(tmp_path, monkeypatch):
+    """A figure-dense job: the file's pace is measured on what the voice SAYS, not on tokens."""
+    texts = ["Chips in Numbers", "Revenue rose 12.3% to $57.0B in fiscal 2025.", "Margins reached 74.6% in 2024."]
+    job = _raw_job(blocks=[{"i": i, "text": t, "role": "context" if i == 0 else "body"} for i, t in enumerate(texts)])
+    code, fake, seen = _tick(tmp_path, monkeypatch, job)
+    assert code == 0 and "fail" not in fake.names()
+    assert seen["words"] == sum(tm.spoken_word_count(t) for t in texts) > sum(len(t.split()) for t in texts)
 
 
 def test_kokoro_needs_no_alignment_child(tmp_path, monkeypatch):

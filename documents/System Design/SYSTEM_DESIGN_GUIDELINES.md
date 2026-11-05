@@ -6550,8 +6550,12 @@ the plan is `~/.claude/plans/improve-or-add-wiser-snoopy-sun.md`. Everything is 
   Supabase secret), claims jobs through `/api/v1/internal/learn/*` and uploads through signed URLs
   to the PRIVATE `money-moves-media` bucket. The engine is frozen per job: the catalog's
   Chatterbox voice when the CPU benchmark passes, else Kokoro. Read-along: WAV2VEC2 (MIT) per block
-  or Kokoro's native timestamps — never MMS_FA (CC-BY-NC). The server re-checks size, type, byte
-  rate and the timing table (one span per block, seconds-per-word band) before merging. A failed
+  or Kokoro's native timestamps — never MMS_FA (CC-BY-NC). Chatterbox's tempo pass normalises the raw
+  speech to 165 SPOKEN words per minute (figures counted the way the voice says them) and is capped at
+  0.80–1.10, and the file's pace band counts spoken words too (pipeline v2, 2026-11-01: counting written
+  tokens sped the figure-dense W44 Deep Dive up 1.188×). The server re-checks size, type, byte
+  rate, the spoken-word pace (the worker's band judged again, so a stale worker cannot get a too-fast
+  file to review) and the timing table (one span per block, seconds-per-word band) before merging. A failed
   render is retried (≤ 2 reports per job, ≤ 3 failed rounds per piece) — except a failure judged on
   the finished file (`contracts.DETERMINISTIC_FAIL_CODES`): renders are seeded and encoded bitexact,
   so it ends the job at its first report and opens no round that would render the same file
@@ -6563,7 +6567,12 @@ the plan is `~/.claude/plans/improve-or-add-wiser-snoopy-sun.md`. Everything is 
   ledger reports whether a fail report actually wrote, and a job closed at the lease re-claim cap alerts
   from the claim path), and two local scripts enqueue (`backend/scripts/learn_catalog_narrate.py`,
   refusing the Deep Dive window) and fetch (`backend/scripts/learn_catalog_fetch.py`: byte-exact clip + merged read-along into the article
-  JSON). The worker is unchanged and a source-scan test keeps it job-kind blind.
+  JSON). The worker is unchanged and a source-scan test keeps it job-kind blind. A PUBLISHED weekly
+  piece is re-narrated through the same path keyed by its slug (its own job would be cancelled at claim):
+  `backend/scripts/learn_weekly_renarrate.py` enqueues the live text, then swaps the READY render onto the
+  live row in one fenced update (audio URL, duration, read-along only) and mirrors it onto the piece; the
+  READY / FAILED line recognises the weekly slug. The swap refuses a render shorter than the live clip
+  without an explicit flag: the text is the same, so shorter is faster speech.
 - **Cover art (owner 2026-11-01).** Behind `LEARN_ART_ENABLED`, the build draws one image per piece
   between the accepted draft and its write (`learn_weekly/cover_art.py`, bounded by
   `LEARN_ART_TIMEOUT_SECONDS`, never failing the piece), in the catalog art system shared byte-for-byte

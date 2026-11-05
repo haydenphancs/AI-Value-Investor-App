@@ -20,6 +20,7 @@ import pytest
 from app.services.notification_kinds import KIND_CONGRESS_TRADE, KIND_WHALE_13F
 from app.services.notification_senders.earnings_sender import (
     MIN_SURPRISE,
+    in_result_window,
     result_copy,
     select_results,
     select_upcoming,
@@ -180,6 +181,17 @@ def test_yesterdays_after_close_print_is_still_selected():
 def test_last_weeks_earnings_are_not_re_announced():
     old = _cal(when=TODAY - timedelta(days=6), est=1.0, act=2.0)
     assert select_results([old], TODAY) == []
+
+
+@pytest.mark.parametrize("days_old,kept", [(-1, False), (0, True), (1, True), (2, False), (9, False)])
+def test_the_result_window_is_today_and_calendar_yesterday(days_old, kept):
+    assert in_result_window(TODAY - timedelta(days=days_old), TODAY) is kept
+
+
+def test_the_result_window_is_calendar_days_not_trading_days():
+    monday, friday, sunday = date(2026, 11, 9), date(2026, 11, 6), date(2026, 11, 8)
+    assert not in_result_window(friday, monday), "Friday is the previous trading day, not yesterday"
+    assert in_result_window(sunday, monday)
 
 
 def test_a_row_with_no_actual_yet_is_not_a_result():

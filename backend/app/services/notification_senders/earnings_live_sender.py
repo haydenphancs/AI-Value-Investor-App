@@ -1,7 +1,7 @@
 """Live earnings pushes — sent the moment results land (owner request 2026-10-29).
 
-`earnings_live_service.run_earnings_live_loop` hands this module, every 60 s, the reports
-whose results it SAW land in this process. Two kinds, ONE dedup key per report
+`earnings_live_service.run_earnings_live_loop` hands this module, every 60 s, the WATCHED
+reports whose results it SAW land in this process. Two kinds, ONE dedup key per report
 (`earnings_sender.result_dedup_key`), always sent one after the other in this coroutine —
 never concurrently, so which copy a user gets can never depend on timing:
 
@@ -17,6 +17,11 @@ user with Live Results on gets #1 and is skipped by #2 as a duplicate; a user wi
 Results & Surprises on gets #2; and `run_earnings_notifications`' daily pass later finds
 every key claimed. Preference, master switch, category cap and quiet hours stay the
 dispatcher's job — nothing here decides who is told.
+
+THE WINDOW. Neither kind goes out for a report older than yesterday: the daily pass's own
+rule (`earnings_sender.in_result_window`), which is narrower than the live days around a
+weekend or a holiday. A Friday report FMP fills on Monday lands, keeps its card and its sheet,
+and is marked handled here without a push.
 
 COPY. Informational, never directive (SYSTEM_DESIGN_GUIDELINES §11.7). A lock-screen banner
 sits OUTSIDE the authenticated app, which is all FMP's Order Form licenses for display, so an
@@ -48,6 +53,7 @@ from app.services.notification_kinds import (
 )
 from app.services.notification_senders.earnings_sender import (
     MIN_SURPRISE,
+    in_result_window,
     result_copy,
     result_dedup_key,
     surprise_pct,
@@ -55,8 +61,9 @@ from app.services.notification_senders.earnings_sender import (
 
 logger = logging.getLogger(__name__)
 
-#: Bound one round's fan-out, as `earnings_sender.MAX_SYMBOLS_PER_PASS` does. Anything over
-#: it is picked up on the next 60 s round, while its report is still in the live days.
+#: Bound one round's fan-out, as `earnings_sender.MAX_SYMBOLS_PER_PASS` does. The tick hands over
+#: watched reports only, so this counts sends for them and never the market. Anything over it
+#: is picked up on the next 60 s round, while its report is still inside the result window.
 MAX_SENDS_PER_ROUND = 60
 
 # Once per (symbol, report date) per process. The dedup key is what stops a restart from
@@ -144,15 +151,52 @@ def _prune(now: datetime) -> None:
             done.discard(key)
 
 
+def _to_decide(snapshots: List[LiveSnapshot], today: date) -> List[LiveSnapshot]:
+    """The reports this round still has a decision on, oldest first. One outside the result
+    window is handled here, both kinds at once: no later round has anything left to decide on
+    it, and it reaches neither the cap nor the log again. Its keys leave with the live days,
+    like every other (`_prune`)."""
+    open_reports = []
+    for snap in snapshots:
+        key = (snap.symbol, snap.day)
+        if key in _live_done and key in _surprise_done:
+            continue
+        if in_result_window(snap.day, today):
+            open_reports.append(snap)
+            continue
+        _live_done.add(key)
+        _surprise_done.add(key)
+        logger.info("earnings live push: %s %s is older than yesterday on %s — no push; its "
+                    "card and sheet stay", snap.symbol, snap.day.isoformat(), today.isoformat())
+    return sorted(open_reports, key=lambda s: (s.day, s.symbol))
+
+
+def _still_owed(snap: LiveSnapshot) -> bool:
+    """Would `dispatch_landings` still send for this report? Its gates, for the cap warning."""
+    key = (snap.symbol, snap.day)
+    if settings.EARNINGS_LIVE_PUSH_ENABLED and key not in _live_done:
+        return True
+    if not settings.EARNINGS_LIVE_RESULT_PUSH_ENABLED or key in _surprise_done:
+        return False
+    eps = snap.eps
+    if eps.actual is None or eps.source != SOURCE_FMP:
+        return False
+    surprise = surprise_pct({"epsEstimated": eps.estimate, "epsActual": eps.actual})
+    return surprise is not None and abs(surprise) >= MIN_SURPRISE
+
+
 async def dispatch_landings(snapshots: List[LiveSnapshot], now: datetime) -> Dict[str, int]:
     """Send what each landed report is owed, live kind FIRST. Never raises per report."""
     _prune(now)
     stats = {"live": 0, "result": 0}
     sends = 0
-    for snap in sorted(snapshots, key=lambda s: (s.day, s.symbol)):
+    ordered = _to_decide(snapshots, et_now(now).date())
+    for i, snap in enumerate(ordered):
         if sends >= MAX_SENDS_PER_ROUND:
-            logger.warning("earnings live push: %d landings this round, cap %d — the rest "
-                           "go next round", len(snapshots), MAX_SENDS_PER_ROUND)
+            left = sum(1 for s in ordered[i:] if _still_owed(s))
+            if left:
+                logger.warning("earnings live push: cap %d reached, %d report(s) still owed a "
+                               "push go next round", MAX_SENDS_PER_ROUND, left)
             break
         key = (snap.symbol, snap.day)
         if key not in _live_done:

@@ -23,7 +23,11 @@ What is pinned here, each a way the LIVE card could lie or cost too much:
     like any other;
   * an awaiting card stays up until 12:00 ET on the next trading day and drops once;
   * a report still awaiting never hides an older reported one, on the card or in the sheet
-    opened with no date, which always name the same report.
+    opened with no date, which always name the same report;
+  * the sender gets watched landings only, while the fold stays whole-market: cards and the
+    sheet read every record;
+  * a landing older than yesterday tells nobody, and keeps its card and its sheet;
+  * a failed read of the watched list serves the old list and says so.
 Hermetic: inline fakes for FMP, SEC and the dispatcher; the clock is passed in.
 """
 from __future__ import annotations
@@ -1785,9 +1789,9 @@ def pushes(monkeypatch):
     sender.reset()
 
 
-def _sent_once(day: date) -> List[tuple]:
-    """What INTC's report is owed by the real sender: both kinds, under one key, once."""
-    key = f"earnings_result:INTC:{day.isoformat()}"
+def _sent_once(day: date, symbol: str = "INTC") -> List[tuple]:
+    """What a report is owed by the real sender: both kinds, under one key, once."""
+    key = f"earnings_result:{symbol}:{day.isoformat()}"
     return [(KIND_EARNINGS_LIVE, key), (KIND_EARNINGS_RESULT, key)]
 
 
@@ -2273,3 +2277,166 @@ async def test_the_sheet_refuses_a_date_before_the_window(monkeypatch):
     svc_obj = _sheet_on(monkeypatch, MONDAY)
     with pytest.raises(ValueError, match="2026-11-05"):
         await svc_obj.get_earnings_live("INTC", FRIDAY - timedelta(days=1))
+
+
+# ── the push: watched reports, inside the result window ──────────────────────
+
+_MARKET = [f"A{i:03d}" for i in range(200)] + ["XOM", "ZM"]
+
+
+async def _a_market_landing(monkeypatch, watched: List[str], dispatch=None,
+                            market: List[str] = _MARKET) -> tuple:
+    """`market` pending at 09:00 and filled with a beat by 16:30, through real ticks that know
+    only `watched`. Returns the FMP fake and the last tick's stats."""
+    pending = [_row(symbol, REPORT) for symbol in market]
+    fmp = _FMP({REPORT: pending})
+
+    async def _memo(_fmp, today):
+        return pending if today == REPORT else []
+
+    monkeypatch.setattr(ts, "_cached_earnings_calendar", _memo)
+    monkeypatch.setattr(ts, "_et_today", lambda: REPORT)
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: _Watcher())
+    await els.earnings_live_tick(_et(REPORT, 9), fmp=fmp, watched=watched, dispatch=dispatch)
+    fmp.by_day[REPORT] = [_row(symbol, REPORT, eps=0.60, rev=17.1e9) for symbol in market]
+    _svc()._fetched[REPORT] -= els.EARNINGS_LIVE_HOT_TTL_SECONDS + 1
+    stats = await els.earnings_live_tick(_et(REPORT, 16, 30), fmp=fmp, watched=watched,
+                                         dispatch=dispatch)
+    return fmp, stats
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("watched", [["ZM"], ["zm"]], ids=["upper", "lower"])
+async def test_the_tick_hands_the_sender_only_watched_landings(monkeypatch, watched):
+    seen: List[List[str]] = []
+
+    async def _dispatch(snaps, now):
+        seen.append([s.symbol for s in snaps])
+
+    _, stats = await _a_market_landing(monkeypatch, watched, _dispatch)
+    assert seen[-1] == ["ZM"]
+    assert stats["landed"] == 1
+    assert _svc().snapshot("A000", REPORT, _et(REPORT, 16, 31)) is not None, \
+        "the fold stays whole-market: cards and the sheet read these records"
+
+
+@pytest.mark.asyncio
+async def test_a_watched_report_is_not_queued_behind_the_market_in_one_round(monkeypatch, pushes):
+    await _a_market_landing(monkeypatch, ["ZM"])
+    assert pushes.sent == _sent_once(REPORT, "ZM")
+
+
+@pytest.mark.asyncio
+async def test_a_ticker_past_the_watched_clamp_keeps_its_card_but_gets_no_live_push(
+        monkeypatch, pushes):
+    await _a_market_landing(monkeypatch, ["ZM"], market=["XOM", "ZM"])
+    assert pushes.sent == _sent_once(REPORT, "ZM")
+    (card,) = _svc().recent_snapshots(["XOM"], _et(NEXT, 8))
+    assert (card.symbol, card.day, card.status) == ("XOM", REPORT, els.STATUS_REPORTED)
+
+
+@pytest.mark.asyncio
+async def test_a_ticker_first_watched_after_it_landed_is_told_inside_the_window(monkeypatch, pushes):
+    """An unwatched landing is not used up: a ticker added later is told while its report is
+    inside the window, the reach the daily pass has too."""
+    fmp, _ = await _a_market_landing(monkeypatch, ["ZM"], market=["XOM", "ZM"])
+    await els.earnings_live_tick(_et(REPORT, 16, 40), fmp=fmp, watched=["XOM", "ZM"])
+    assert pushes.sent == _sent_once(REPORT, "ZM") + _sent_once(REPORT, "XOM")
+
+
+async def _a_late_fill(monkeypatch, report: date, filled_on: date) -> tuple:
+    """INTC pending on `report`, and FMP's fill first seen by the real tick on `filled_on`."""
+    pending = [_row("INTC", report)]
+    fmp = _FMP({report: pending})
+
+    async def _memo(_fmp, today):
+        return pending if today == report else []
+
+    monkeypatch.setattr(ts, "_cached_earnings_calendar", _memo)
+    await _real_tick(monkeypatch, fmp, _et(report, 9))
+    fmp.by_day[report] = [_row("INTC", report, eps=0.60, rev=17.1e9)]
+    _svc()._fetched[report] -= els.EARNINGS_LIVE_COLD_TTL_SECONDS + 1
+    now = _et(filled_on, 10)
+    await _real_tick(monkeypatch, fmp, now)
+    return fmp, now
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("report,filled_on,told", [
+    (FRIDAY, SATURDAY, True),
+    (FRIDAY, SUNDAY, False),
+    (FRIDAY, MONDAY, False),
+    (SATURDAY, SUNDAY, True),
+    (SATURDAY, MONDAY, False),
+    (date(2026, 11, 26), date(2026, 11, 27), True),     # dated Thanksgiving, filled Friday
+    (date(2026, 11, 25), date(2026, 11, 27), False),    # the previous trading day, two days back
+], ids=["fri_sat", "fri_sun", "fri_mon", "sat_sun", "sat_mon", "holiday_row", "before_holiday"])
+async def test_a_late_fill_pushes_only_inside_the_result_window_and_always_keeps_its_card(
+        monkeypatch, pushes, report, filled_on, told):
+    fmp, now = await _a_late_fill(monkeypatch, report, filled_on)
+    assert pushes.sent == (_sent_once(report) if told else [])
+    (card,) = _svc().recent_snapshots(["INTC"], now)
+    assert (card.day, card.status, card.eps.actual) == (report, els.STATUS_REPORTED, 0.60)
+    sheet = await _sheet_on(monkeypatch, filled_on).get_earnings_live("INTC", report)
+    assert (sheet.report_date, sheet.status, sheet.eps.actual) == (
+        report.isoformat(), els.STATUS_REPORTED, 0.60)
+    # Handled either way, so the next rounds have nothing left to decide.
+    assert ("INTC", report) in sender._live_done and ("INTC", report) in sender._surprise_done
+    await _real_tick(monkeypatch, fmp, now + timedelta(minutes=1))
+    assert pushes.sent == (_sent_once(report) if told else [])
+
+
+# ── reading the watched list ─────────────────────────────────────────────────
+
+_SENDER_READ = "app.services.notification_senders.earnings_sender._watched_tickers_ranked"
+
+
+def _boom():
+    raise RuntimeError("rpc 520")
+
+
+def _live_logs(caplog) -> List[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == els.__name__]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_watched_read_serves_the_old_list_and_says_so(monkeypatch, caplog):
+    # The callee imports inside the function, so patch the SOURCE module.
+    monkeypatch.setattr(_SENDER_READ, _boom)
+    memo = (time.monotonic() - 3600, ["AAPL"])
+    monkeypatch.setattr(els, "_watched_memo", memo)  # `_reset_all` does not clear it
+    with caplog.at_level(logging.WARNING, logger=els.__name__):
+        assert await els._watched_ranked_cached() == ["AAPL"]
+    rows = _live_logs(caplog)
+    assert len(rows) == 1 and rows[0].levelno == logging.WARNING
+    assert "RuntimeError" in rows[0].getMessage() and "rpc 520" in rows[0].getMessage()
+    assert els._watched_memo is memo, "a failure must not refresh the list's age"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_watched_read_with_no_memo_still_raises(monkeypatch, caplog):
+    monkeypatch.setattr(_SENDER_READ, _boom)
+    monkeypatch.setattr(els, "_watched_memo", None)
+    with caplog.at_level(logging.WARNING, logger=els.__name__):
+        with pytest.raises(RuntimeError):
+            await els._watched_ranked_cached()
+    assert not _live_logs(caplog), "the loop logs this one"
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_watched_memo_is_served_without_a_read(monkeypatch, caplog):
+    monkeypatch.setattr(_SENDER_READ, _boom)
+    monkeypatch.setattr(els, "_watched_memo", (time.monotonic(), ["AAPL"]))
+    with caplog.at_level(logging.WARNING, logger=els.__name__):
+        assert await els._watched_ranked_cached() == ["AAPL"]
+    assert not _live_logs(caplog)
+
+
+@pytest.mark.asyncio
+async def test_a_watched_read_that_recovers_replaces_the_list_quietly(monkeypatch, caplog):
+    monkeypatch.setattr(_SENDER_READ, lambda: ["MSFT"])
+    monkeypatch.setattr(els, "_watched_memo", (time.monotonic() - 3600, ["AAPL"]))
+    with caplog.at_level(logging.WARNING, logger=els.__name__):
+        assert await els._watched_ranked_cached() == ["MSFT"]
+    assert els._watched_memo[1] == ["MSFT"]
+    assert not _live_logs(caplog)

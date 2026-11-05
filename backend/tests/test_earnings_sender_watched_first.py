@@ -224,3 +224,42 @@ def test_a_short_watched_read_is_silent(monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         es._watched_tickers()
     assert not [r for r in caplog.records if "clamp" in r.getMessage()]
+
+
+def test_a_clamped_ranked_read_warns_for_the_live_loop(monkeypatch, caplog):
+    _rpc_with_rows(monkeypatch, es._WATCHED_LOOKUP_LIMIT)
+    with caplog.at_level("WARNING"):
+        out = es._watched_tickers_ranked()
+    assert len(out) == es._WATCHED_LOOKUP_LIMIT
+    hits = [r for r in caplog.records
+            if "clamp" in r.getMessage() and "earnings-live" in r.getMessage()]
+    assert len(hits) == 1
+    assert "no live push" in hits[0].getMessage()
+
+
+def test_a_short_ranked_read_is_silent(monkeypatch, caplog):
+    _rpc_with_rows(monkeypatch, es._WATCHED_LOOKUP_LIMIT - 1)
+    with caplog.at_level("WARNING"):
+        es._watched_tickers_ranked()
+    assert not [r for r in caplog.records if "clamp" in r.getMessage()]
+
+
+def test_the_ranked_clamp_counts_the_raw_rows_not_the_cleaned_list(monkeypatch, caplog):
+    """A full page is the clamp, however many of its rows the cleaning then drops."""
+    rows = [{"ticker": "AAPL"} for _ in range(es._WATCHED_LOOKUP_LIMIT)]
+
+    class _Res:
+        data = rows
+
+    class _Q:
+        def execute(self):
+            return _Res()
+
+    class _SB:
+        def rpc(self, name, params):
+            return _Q()
+
+    monkeypatch.setattr("app.database.get_supabase", lambda: _SB())
+    with caplog.at_level("WARNING"):
+        assert es._watched_tickers_ranked() == ["AAPL"]
+    assert [r for r in caplog.records if "clamp" in r.getMessage()]

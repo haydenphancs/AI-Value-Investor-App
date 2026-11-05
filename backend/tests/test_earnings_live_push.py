@@ -10,13 +10,17 @@ kinds — and the daily 16:00 ET sender — claim the SAME key. What is pinned h
     reaches 1.02 users), and only past `MIN_SURPRISE`;
   * `EARNINGS_LIVE_PUSH_ENABLED` (ships off) holds only the new kind;
   * a lock-screen banner prints an absolute figure only from the company's own release;
-  * each report is dispatched once per process (the 60 s loop re-hands every landing).
+  * each report is dispatched once per process (the 60 s loop re-hands every landing);
+  * neither kind goes out for a report older than yesterday, the daily pass's own window, and
+    such a report is handled once, for good;
+  * the round cap's warning counts the reports still owed a push, nothing else.
 The dispatcher is a recorder — nothing here reaches APNs or Supabase.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 import pytest
@@ -40,9 +44,11 @@ from app.services.notification_kinds import (
     KIND_EARNINGS_RESULT,
     NOTIFICATION_KINDS,
 )
+from app.utils.market_hours import ET
 
 REPORT = date(2026, 10, 29)
 NOW = datetime(2026, 10, 29, 20, 5, tzinfo=timezone.utc)
+FRIDAY, SATURDAY, SUNDAY, MONDAY, TUESDAY = (date(2026, 11, day) for day in (6, 7, 8, 9, 10))
 
 
 def _snap(symbol="INTC", *, eps=None, eps_source=SOURCE_FMP, eps_basis=BASIS_ADJUSTED,
@@ -201,6 +207,209 @@ async def test_a_row_with_both_actuals_at_zero_pushes_nothing(dispatch):
     live.observe_rows(REPORT, [_row(epsActual=0, revenueActual=0)], NOW)
     await sender.dispatch_landings(live.landed_snapshots(NOW), NOW)
     assert dispatch.sent == []
+
+
+# ── the round cap ────────────────────────────────────────────────────────────
+
+
+def _seed_done(snaps, *, surprise=True):
+    for s in snaps:
+        sender._live_done.add((s.symbol, s.day))
+        if surprise:
+            sender._surprise_done.add((s.symbol, s.day))
+
+
+def _warnings(caplog):
+    return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+@pytest.mark.asyncio
+async def test_the_cap_warning_counts_only_the_reports_still_owed(dispatch, monkeypatch, caplog):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+    fresh = [_snap(f"A{i:03d}", eps=0.60, eps_pct=46.34) for i in range(61)]
+    done = [_snap(f"Z{i:03d}", eps=0.42, eps_pct=2.44) for i in range(300)]
+    _seed_done(done)
+    with caplog.at_level(logging.WARNING, logger=sender.__name__):
+        await sender.dispatch_landings(fresh + done, NOW)
+    assert len(dispatch.sent) == 60
+    lines = _warnings(caplog)
+    assert len(lines) == 1 and "1 report(s)" in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_no_cap_warning_when_nothing_is_left(dispatch, monkeypatch, caplog):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+    fresh = [_snap(f"A{i:03d}", eps=0.60, eps_pct=46.34) for i in range(60)]
+    done = [_snap(f"Z{i:03d}", eps=0.42, eps_pct=2.44) for i in range(300)]
+    _seed_done(done)
+    with caplog.at_level(logging.WARNING, logger=sender.__name__):
+        await sender.dispatch_landings(fresh + done, NOW)
+    assert len(dispatch.sent) == 60
+    assert _warnings(caplog) == []
+
+
+@pytest.mark.asyncio
+async def test_no_cap_warning_when_only_reports_waiting_on_fmp_are_left(
+        dispatch, monkeypatch, caplog):
+    """Still open, nothing to send yet: the round stops on them and owes nobody a line."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+    fresh = [_snap(f"A{i:03d}", eps=0.60, eps_pct=46.34) for i in range(60)]
+    waiting = [_snap(f"Z{i:03d}", eps=0.60, eps_source=SOURCE_FILING) for i in range(5)]
+    _seed_done(waiting, surprise=False)
+    with caplog.at_level(logging.WARNING, logger=sender.__name__):
+        await sender.dispatch_landings(fresh + waiting, NOW)
+    assert len(dispatch.sent) == 60
+    assert _warnings(caplog) == []
+
+
+@pytest.mark.asyncio
+async def test_the_cap_warning_skips_reports_waiting_on_fmp(dispatch, monkeypatch, caplog):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+    fresh = [_snap(f"A{i:03d}", eps=0.60, eps_pct=46.34) for i in range(61)]
+    waiting = [_snap(f"Z{i:03d}", eps=0.60, eps_source=SOURCE_FILING) for i in range(300)]
+    _seed_done(waiting, surprise=False)
+    with caplog.at_level(logging.WARNING, logger=sender.__name__):
+        await sender.dispatch_landings(fresh + waiting, NOW)
+    lines = _warnings(caplog)
+    assert len(lines) == 1 and "1 report(s)" in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_the_cap_warning_counts_a_seen_report_whose_fmp_beat_just_arrived(
+        dispatch, monkeypatch, caplog):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+    fresh = [_snap(f"A{i:03d}", eps=0.60, eps_pct=46.34) for i in range(60)]
+    seen = [_snap(f"Z{i:03d}", eps=0.60, eps_pct=46.34) for i in range(5)]
+    _seed_done(seen, surprise=False)
+    with caplog.at_level(logging.WARNING, logger=sender.__name__):
+        await sender.dispatch_landings(fresh + seen, NOW)
+    lines = _warnings(caplog)
+    assert len(lines) == 1 and "5 report(s)" in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_the_cap_warning_with_the_result_flag_off(dispatch, monkeypatch, caplog):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_RESULT_PUSH_ENABLED", False)
+    fresh = [_snap(f"A{i:03d}", eps=0.42, eps_pct=2.44, rev=17.1e9) for i in range(61)]
+    done = [_snap(f"Z{i:03d}", eps=0.42, eps_pct=2.44, rev=17.1e9) for i in range(300)]
+    _seed_done(done, surprise=False)
+    with caplog.at_level(logging.WARNING, logger=sender.__name__):
+        await sender.dispatch_landings(fresh + done, NOW)
+    lines = _warnings(caplog)
+    assert len(lines) == 1 and "1 report(s)" in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_the_cap_warning_counts_reports_not_sends(dispatch, caplog):
+    """With both flags on a beat costs two sends, and the line still counts one report."""
+    fresh = [_snap(f"A{i:03d}", eps=0.60, eps_pct=46.34) for i in range(31)]
+    with caplog.at_level(logging.WARNING, logger=sender.__name__):
+        await sender.dispatch_landings(fresh, NOW)
+    assert len(dispatch.sent) == 60
+    lines = _warnings(caplog)
+    assert len(lines) == 1 and "1 report(s)" in lines[0]
+
+
+# ── the result window ────────────────────────────────────────────────────────
+
+
+def _beat(day: date, symbol: str = "INTC") -> LiveSnapshot:
+    return replace(_snap(symbol, eps=0.60, eps_pct=46.34, rev=17.1e9), day=day)
+
+
+def _noon(day: date) -> datetime:
+    return datetime(day.year, day.month, day.day, 12, tzinfo=ET)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("report,today,told", [
+    (FRIDAY, FRIDAY, True),
+    (FRIDAY, SATURDAY, True),
+    (FRIDAY, SUNDAY, False),
+    (FRIDAY, MONDAY, False),
+    (SATURDAY, SUNDAY, True),
+    (SATURDAY, MONDAY, False),
+    (SUNDAY, MONDAY, True),
+], ids=["same_day", "fri_sat", "fri_sun", "fri_mon", "sat_sun", "sat_mon", "sun_mon"])
+async def test_a_result_push_needs_a_report_from_today_or_calendar_yesterday(
+        dispatch, report, today, told):
+    await sender.dispatch_landings([_beat(report)], _noon(today))
+    expected = [KIND_EARNINGS_LIVE, KIND_EARNINGS_RESULT] if told else []
+    assert [s["kind"] for s in dispatch.sent] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("days_old", [0, 1, 2, 3, 6])
+async def test_the_live_sender_reads_the_daily_passs_window(dispatch, days_old):
+    """One rule, not a copy of it: the two senders agree on every age."""
+    assert sender.in_result_window is daily.in_result_window
+    today = date(2026, 11, 11)
+    report = today - timedelta(days=days_old)
+    row = {"symbol": "INTC", "date": report.isoformat(), "epsEstimated": 0.41, "epsActual": 0.60}
+    await sender.dispatch_landings([_beat(report)], _noon(today))
+    assert bool(dispatch.sent) == bool(daily.select_results([row], today))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("now,told", [
+    (datetime(2026, 11, 8, 4, 59, tzinfo=timezone.utc), True),    # Saturday 23:59 ET
+    (datetime(2026, 11, 8, 5, 0, tzinfo=timezone.utc), False),    # Sunday 00:00 ET
+], ids=["saturday_night_et", "sunday_midnight_et"])
+async def test_the_window_turns_over_at_midnight_et_not_utc(dispatch, now, told):
+    await sender.dispatch_landings([_beat(FRIDAY)], now)
+    assert bool(dispatch.sent) is told
+
+
+@pytest.mark.asyncio
+async def test_a_report_outside_the_window_is_handled_once_and_for_good(dispatch, caplog):
+    snap = _beat(FRIDAY)
+    with caplog.at_level(logging.INFO, logger=sender.__name__):
+        for minute in range(3):
+            await sender.dispatch_landings([snap], _noon(SUNDAY) + timedelta(minutes=minute))
+    assert dispatch.sent == []
+    assert ("INTC", FRIDAY) in sender._live_done and ("INTC", FRIDAY) in sender._surprise_done
+    lines = [r.getMessage() for r in caplog.records]
+    assert len(lines) == 1 and "INTC" in lines[0] and FRIDAY.isoformat() in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_a_report_that_leaves_the_window_gets_no_second_kind(dispatch):
+    """The filing's figure on Saturday told the live kind. FMP's arrives on Sunday: too old for
+    the result kind, whichever kind it would have been."""
+    filed = replace(_snap(eps=0.60, eps_source=SOURCE_FILING, eps_pct=46.34, preliminary=True),
+                    day=FRIDAY)
+    await sender.dispatch_landings([filed], _noon(SATURDAY))
+    assert [s["kind"] for s in dispatch.sent] == [KIND_EARNINGS_LIVE]
+    await sender.dispatch_landings([_beat(FRIDAY)], _noon(SUNDAY))
+    assert [s["kind"] for s in dispatch.sent] == [KIND_EARNINGS_LIVE]
+    assert ("INTC", FRIDAY) in sender._surprise_done
+
+
+@pytest.mark.asyncio
+async def test_a_report_held_back_by_the_cap_past_midnight_is_not_told(dispatch):
+    """The cap defers to the next round, and that round can be the next day."""
+    fresh = [_beat(FRIDAY, f"A{i:03d}") for i in range(31)]
+    late = _noon(SATURDAY).replace(hour=23, minute=59)
+    await sender.dispatch_landings(fresh, late)
+    assert len(dispatch.sent) == 60
+    await sender.dispatch_landings(fresh, _noon(SUNDAY))
+    assert len(dispatch.sent) == 60, "the last report has left the window"
+
+
+@pytest.mark.asyncio
+async def test_reports_outside_the_window_use_none_of_the_round_cap(dispatch, caplog):
+    old = [_beat(FRIDAY, f"A{i:03d}") for i in range(sender.MAX_SENDS_PER_ROUND + 1)]
+    with caplog.at_level(logging.WARNING, logger=sender.__name__):
+        await sender.dispatch_landings(old + [_beat(MONDAY, "ZM")], _noon(MONDAY))
+    assert {s["ticker"] for s in dispatch.sent} == {"ZM"}
+    assert _warnings(caplog) == []
+
+
+@pytest.mark.asyncio
+async def test_the_memory_of_a_report_outside_the_window_stays_bounded(dispatch):
+    await sender.dispatch_landings([_beat(FRIDAY)], _noon(MONDAY))
+    await sender.dispatch_landings([], _noon(TUESDAY))
+    assert not sender._live_done and not sender._surprise_done
 
 
 # ── copy ─────────────────────────────────────────────────────────────────────

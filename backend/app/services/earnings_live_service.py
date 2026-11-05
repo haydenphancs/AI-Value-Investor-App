@@ -820,7 +820,8 @@ class EarningsLiveService:
 
     def landed_snapshots(self, now: datetime) -> List[LiveSnapshot]:
         """Every record of the live days whose results were SEEN landing in this process, as of
-        now. The push sender keeps its own once-per-key bookkeeping, over the same days.
+        now, the whole market's: the tick narrows them to the watched list before the sender.
+        The push sender keeps its own once-per-key bookkeeping, over the same days.
 
         A record already reported when first seen (a restart, a first fetch after the fact)
         is not a landing — the same rule as `earnings_window_service._absorb` — so a deploy
@@ -929,6 +930,7 @@ class EarningsLiveService:
         self.fetches += len(days)
         for day, rows in fetched.items():
             self._fetched[day] = mono
+            # Whole market on purpose: the next-morning card and the sheet read these records.
             self.observe_rows(day, rows, now, fetched=True)
 
     async def _run_once(self, key: Tuple[str, date],
@@ -1114,7 +1116,8 @@ _watched_memo: Optional[Tuple[float, List[str]]] = None
 
 async def _watched_ranked_cached() -> List[str]:
     """`earnings_sender._watched_tickers_ranked`, memoised. A failed read RAISES (the tick is
-    skipped and retried) unless a previous answer is held, which then serves."""
+    skipped and retried, and the loop logs it) unless a previous answer is held, which then
+    serves with a WARNING and stays expired, so the next tick asks again."""
     global _watched_memo
     held = _watched_memo
     if held is not None and time.monotonic() - held[0] < _WATCHED_TTL_SECONDS:
@@ -1123,8 +1126,12 @@ async def _watched_ranked_cached() -> List[str]:
 
     try:
         ranked = await asyncio.to_thread(_watched_tickers_ranked)
-    except Exception:
+    except Exception as e:
         if held is not None:
+            logger.warning(
+                "[earnings-live] watched-list read failed (%s: %s); serving the list from "
+                "%.0f s ago", type(e).__name__, e, time.monotonic() - held[0],
+            )
             return held[1]
         raise
     _watched_memo = (time.monotonic(), ranked)
@@ -1134,7 +1141,7 @@ async def _watched_ranked_cached() -> List[str]:
 async def run_earnings_live_loop() -> None:
     """Background loop (main.py lifespan, with the other notification loops): every 60 s,
     refresh the live days for everyone's watched tickers, run the SEC watch for the ones
-    reporting today, and hand new landings to the push sender. Never dies on an error."""
+    reporting today, and hand their new landings to the push sender. Never dies on an error."""
     await asyncio.sleep(45)
     interval = max(int(settings.EARNINGS_LIVE_INTERVAL_SECONDS), 15)
     while True:
@@ -1198,7 +1205,11 @@ async def earnings_live_tick(
             service.absorb_filing(symbol, today, figures, now)
         stats["filings"] = len(found)
 
-    landed = service.landed_snapshots(now)
+    # Watched reports only, and only here, the one place holding both lists: the sender's cap
+    # and its watcher read per send must not go on the rest of the market. Never narrow the
+    # fold instead, because cards and the sheet read its records.
+    watched_set = {s.upper() for s in watched}
+    landed = [s for s in service.landed_snapshots(now) if s.symbol in watched_set]
     stats["landed"] = len(landed)
     if dispatch is None:
         from app.services.notification_senders.earnings_live_sender import dispatch_landings

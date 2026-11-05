@@ -158,16 +158,25 @@ def select_upcoming(
     return out
 
 
+def in_result_window(report_day: date, today: date) -> bool:
+    """May a result push still go out for a report dated `report_day`? Today and calendar
+    yesterday: an after-close print lands in the evening, and a calendar row can take until
+    the next morning to carry `epsActual`. A wider window would start re-announcing last
+    week's earnings on a slow news day.
+
+    The ONE rule for every result push, this module's daily pass and
+    `earnings_live_sender` alike. Calendar days, never trading days, so a Friday report is
+    out by Sunday. It decides who is told and nothing else: the card and the sheet keep
+    the report.
+    """
+    return report_day in (today, today - timedelta(days=1))
+
+
 def select_results(
     rows: List[Dict[str, Any]], today: date
 ) -> List[Tuple[str, str, float]]:
-    """Rows worth a "beat/missed" notification → (symbol, date, surprise fraction).
-
-    Window is today and yesterday: an after-close print lands in the evening, and a
-    calendar row can take until the next morning to carry `epsActual`. A wider window
-    would start re-announcing last week's earnings on a slow news day.
-    """
-    yesterday = today - timedelta(days=1)
+    """Rows worth a "beat/missed" notification → (symbol, date, surprise fraction), for the
+    reports inside `in_result_window`."""
     out: List[Tuple[str, str, float]] = []
     seen: set[str] = set()
     for row in rows:
@@ -178,7 +187,7 @@ def select_results(
             row_date = date.fromisoformat(when)
         except ValueError:
             continue
-        if row_date not in (today, yesterday):
+        if not in_result_window(row_date, today):
             continue
         surprise = surprise_pct(row)
         if surprise is None or abs(surprise) < MIN_SURPRISE:
@@ -236,15 +245,24 @@ def result_dedup_key(symbol: str, when: str) -> str:
 def _watched_tickers_ranked() -> List[str]:
     """Every ticker at least one user watches, MOST-WATCHED FIRST (the RPC's own order).
 
-    The live loop ranks its SEC budget by it. Same RPC, same 1,000-row clamp and the same
-    RAISE-on-failure contract as `_watched_tickers`, for the same reason: an empty answer is
-    indistinguishable from "nobody watches anything".
+    The live loop ranks its SEC budget by it and pushes only for the tickers on it. Same RPC,
+    same 1,000-row clamp, same warning when the clamp bites and the same RAISE-on-failure
+    contract as `_watched_tickers`, for the same reason: an empty answer is indistinguishable
+    from "nobody watches anything".
     """
     from app.database import get_supabase
 
     rows = get_supabase().rpc(
         "get_top_watchlist_tickers", {"n": _WATCHED_LOOKUP_LIMIT}
     ).execute().data or []
+    if len(rows) >= _WATCHED_LOOKUP_LIMIT:
+        # The raw rows, as in `_watched_tickers`: the clean list below can come up short.
+        logger.warning(
+            "[earnings-live] the watched-ticker read returned %d rows (the %d-row clamp) — "
+            "less-watched tickers get no live push, stay outside the SEC watch and cannot "
+            "keep a day hot",
+            len(rows), _WATCHED_LOOKUP_LIMIT,
+        )
 
     def _count(row: Dict[str, Any]) -> float:
         try:

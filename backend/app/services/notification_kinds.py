@@ -384,7 +384,8 @@ NOTIFICATION_KINDS: Dict[str, NotificationKind] = {
         ),
         # "Live Results" (owner request 2026-10-29): EVERY watched report, the moment any
         # figure lands — EPS and revenue against consensus, whichever is out — where
-        # `earnings_result` above is the surprises-only alert. They share ONE dedup key per
+        # `earnings_result` above is the surprises-only alert. Neither goes out for a report
+        # older than yesterday (`earnings_sender.in_result_window`). They share ONE dedup key per
         # report (`earnings_sender.result_dedup_key`) and `earnings_live_sender` sends this
         # one first, so a user with both toggles on is told once. Same group master, same
         # category cap and thread as its siblings, so the cap and the Earnings master switch

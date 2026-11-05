@@ -19,6 +19,8 @@ What is pinned here, each a way the LIVE card could lie or cost too much:
   * a filing-complete report leaves the SEC watch but keeps asking FMP until FMP confirms it;
   * before 06:00 ET and on a closed day the tick folds what the memo holds and pays for no
     refresh, and the FMP calls of a busy report day and a weekend stay on budget;
+  * a memo row held 12 h opens no record at any fold, so a report FMP moved over a weekend is
+    never a report day: the tick asks FMP first, one round, only when such a row would open one;
   * feed builds and the sheet never fetch — only the loop does;
   * the tick runs the SEC watch only for watched symbols still pending today;
   * one window, `live_days` (every calendar day from the previous trading day through today),
@@ -1613,7 +1615,7 @@ def test_a_ticker_the_own_fetch_left_out_keeps_folding_older_memo_rows():
     """Stamped per record, not per day: a day-wide stamp would starve this ticker."""
     svc = _svc()
     now = _et(REPORT, 16, 35)
-    svc.observe_rows(REPORT, [_row("AAPL", REPORT)], now, stored_at=0.0)
+    svc.observe_rows(REPORT, [_row("AAPL", REPORT)], now, stored_at=time.monotonic())
     svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44)], now, fetched=True)
     memo = [_row("INTC", REPORT, eps=0.40), _row("AAPL", REPORT, eps=1.9)]
     svc.observe_rows(REPORT, memo, now, stored_at=_own_fetch_stamp() - 900)
@@ -1623,10 +1625,11 @@ def test_a_ticker_the_own_fetch_left_out_keeps_folding_older_memo_rows():
 
 @pytest.mark.parametrize("stored_at", [None, 0.0], ids=["unknown_age", "very_old"])
 def test_a_record_with_no_own_fetch_folds_every_memo_row(stored_at):
-    """Before the hot gate opens the memo is the only source there is."""
+    """Before the hot gate opens the memo is the only source there is, however old its row.
+    Only opening a record takes a row of a known, young age."""
     svc = _svc()
     now = _et(REPORT, 5)
-    svc.observe_rows(REPORT, [_row("INTC", REPORT)], now, stored_at=stored_at)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], now, stored_at=time.monotonic())
     svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44)], now, stored_at=stored_at)
     assert svc.snapshot("INTC", REPORT, now).eps.actual == 0.44
 
@@ -2349,6 +2352,255 @@ async def test_a_restart_on_a_monday_asks_each_day_before_today_once():
     await svc.refresh(_et(MONDAY, 1), fmp=fmp, symbols=["INTC"])
     await svc.refresh(_et(MONDAY, 1, 1), fmp=fmp, symbols=["INTC"])
     assert sorted(fmp.calls) == [d.isoformat() for d in (FRIDAY, SATURDAY, SUNDAY)]
+
+
+# ── a row held too long to open a record ─────────────────────────────────────
+
+
+_TWELVE_HOURS = 12 * 3600
+
+
+def _memo_held_for(hours: float) -> None:
+    """Every held day was stored `hours` ago, on the clock the tick reads."""
+    held = ts._earnings_calendar_memo[1]
+    for day, (at, rows) in held.items():
+        held[day] = (at - hours * 3600, rows)
+
+
+def _intc_on(day: date) -> List[dict]:
+    """A calendar day with INTC on it. The unwatched row keeps the day from being empty."""
+    return [_row("ZZZZ", day), _row("INTC", day)]
+
+
+def _fmp_moves_intc(fmp: _FMP, old: date, new: date) -> None:
+    fmp.by_day[old] = [_row("ZZZZ", old)]
+    fmp.by_day[new] = _intc_on(new)
+
+
+def _fmp_can_go_down(fmp: _FMP) -> Dict[str, bool]:
+    """Set `["down"]` and every calendar call fails, counted like any other call."""
+    answer = fmp.get_earnings_calendar
+    state = {"down": False}
+
+    async def _flaky(from_date=None, to_date=None):
+        if state["down"]:
+            fmp.calls.append(from_date)
+            raise RuntimeError("FMP 503")
+        return await answer(from_date=from_date, to_date=to_date)
+
+    fmp.get_earnings_calendar = _flaky
+    return state
+
+
+def _stored_ago(monkeypatch, seconds: Optional[int]) -> Optional[float]:
+    """A stamp exactly `seconds` old on a clock that stands still, or None for an unknown age."""
+    clock = _Clock()
+    monkeypatch.setattr(els, "time", SimpleNamespace(monotonic=clock.monotonic))
+    return None if seconds is None else clock.at - seconds
+
+
+@pytest.mark.parametrize("held,opens", [(None, True), (_TWELVE_HOURS - 1, True),
+                                        (_TWELVE_HOURS, False), (6 * _TWELVE_HOURS, False)],
+                         ids=["unknown_age", "under_the_limit", "at_the_limit", "three_days"])
+def test_a_memo_row_opens_a_record_only_under_twelve_hours_old(monkeypatch, held, opens):
+    svc = _svc()
+    now = _et(MONDAY, 0, 5)
+    svc.observe_rows(MONDAY, [_row("INTC", MONDAY)], now, stored_at=_stored_ago(monkeypatch, held))
+    assert (svc.snapshot("INTC", MONDAY, now) is not None) == opens
+
+
+def test_an_own_fetch_opens_a_record_whatever_stamp_it_is_handed():
+    svc = _svc()
+    now = _et(MONDAY, 9)
+    svc.observe_rows(MONDAY, [_row("INTC", MONDAY)], now, fetched=True,
+                     stored_at=time.monotonic() - 72 * 3600)
+    assert svc.pending_symbols(MONDAY, ["INTC"]) == ["INTC"]
+
+
+def test_rows_too_old_to_open_a_record_say_so_once_per_fold(caplog):
+    with caplog.at_level(logging.WARNING, logger=els.logger.name):
+        _svc().observe_rows(MONDAY, [_row("INTC", MONDAY), _row("AAPL", MONDAY)], _et(MONDAY, 0),
+                            stored_at=time.monotonic() - 72 * 3600)
+    (record,) = caplog.records
+    message = record.getMessage()
+    assert record.levelno == logging.WARNING
+    assert MONDAY.isoformat() in message and "72 h" in message
+    assert "AAPL" in message and "INTC" in message
+
+
+@pytest.mark.parametrize("rows,held,watched,expected", [
+    ([_row("INTC", MONDAY)], _TWELVE_HOURS, ["INTC"], True),
+    ([_row("INTC", MONDAY)], _TWELVE_HOURS, ["intc"], True),
+    ([_row("ZZZZ", MONDAY), _row("INTC", MONDAY)], _TWELVE_HOURS, ["INTC"], True),
+    ([_row("INTC", MONDAY)], _TWELVE_HOURS - 1, ["INTC"], False),
+    ([_row("INTC", MONDAY)], None, ["INTC"], False),
+    ([_row("ZZZZ", MONDAY)], _TWELVE_HOURS, ["INTC"], False),
+    ([_row("INTC", TUESDAY)], _TWELVE_HOURS, ["INTC"], False),
+    ([], _TWELVE_HOURS, ["INTC"], False),
+    (["junk", None, {"symbol": "INTC", "date": "soon"}], _TWELVE_HOURS, ["INTC"], False),
+], ids=["at_the_limit", "lower_case_watchlist", "beside_the_market", "young", "unknown_age",
+        "unwatched", "another_day", "no_rows", "junk_rows"])
+def test_old_rows_would_open_only_a_watched_report_on_that_day(
+        monkeypatch, rows, held, watched, expected):
+    stored_at = _stored_ago(monkeypatch, held)
+    assert _svc().old_rows_would_open(MONDAY, rows, stored_at, watched) is expected
+
+
+def test_old_rows_would_open_nothing_for_a_report_with_a_record(monkeypatch):
+    svc = _svc()
+    rows = [_row("INTC", MONDAY)]
+    svc.observe_rows(MONDAY, rows, _et(MONDAY, 0), fetched=True)
+    stored_at = _stored_ago(monkeypatch, _TWELVE_HOURS)
+    assert svc.old_rows_would_open(MONDAY, rows, stored_at, ["INTC"]) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("at", [_et(MONDAY, 0), _et(SUNDAY, 10)],
+                         ids=["before_six", "closed_day"])
+async def test_old_rows_with_nothing_to_open_cost_no_round(monkeypatch, at):
+    fmp = _FMP(_market(FRIDAY))
+    await _memo_filled_on(monkeypatch, fmp, FRIDAY)
+    _memo_held_for(72)
+    today = els.et_now(at).date()
+    monkeypatch.setattr(ts, "_et_today", lambda: today)
+    _nothing_is_due(today)
+    await _tick(fmp, at, "INTC")
+    assert fmp.calls == []
+
+
+@pytest.mark.asyncio
+async def test_an_open_record_costs_no_round_however_old_the_held_rows(monkeypatch):
+    fmp = _FMP({**_market(FRIDAY), SUNDAY: _intc_on(SUNDAY)})
+    await _memo_filled_on(monkeypatch, fmp, FRIDAY)
+    _memo_held_for(13)
+    monkeypatch.setattr(ts, "_et_today", lambda: SUNDAY)
+    _nothing_is_due(SUNDAY)
+    at = _et(SUNDAY, 4)
+    _svc().observe_rows(SUNDAY, [_row("INTC", SUNDAY)], at, fetched=True)
+    await _tick(fmp, at, "INTC")
+    assert fmp.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("last_trading_day,report,closed_day,new_date", [
+    (FRIDAY, MONDAY, SUNDAY, TUESDAY),
+    (date(2026, 11, 25), date(2026, 11, 27), date(2026, 11, 26), date(2026, 11, 30)),
+], ids=["weekend", "thanksgiving"])
+async def test_a_report_fmp_moved_across_a_closed_day_opens_nothing(
+        monkeypatch, last_trading_day, report, closed_day, new_date):
+    """Nobody opens the app after the move, so the tick is the only reader. The last trading
+    day's rows must not make this a report day: LIVE, the hot fetch, an SEC slot, then a card."""
+    fmp = _FMP({**_market(last_trading_day), report: _intc_on(report)})
+
+    def _script(at: datetime) -> None:
+        if at == _et(closed_day, 12):
+            _fmp_moves_intc(fmp, report, new_date)
+
+    end = _et(new_date, 9)
+    calls = await _calls_per_day(monkeypatch, fmp, _et(last_trading_day, 18), end, ["INTC"],
+                                 _script)
+    assert _svc().snapshot("INTC", report, end) is None
+    assert _svc().recent_snapshots(["INTC"], end) == []
+    assert _svc().snapshot("INTC", new_date, end).status == els.STATUS_LIVE
+    assert calls[report] == 127, "111 for the memo, 15 at midnight, one first look at the closed day"
+
+
+@pytest.mark.asyncio
+async def test_a_closed_day_report_fmp_moved_opens_nothing_on_its_day(monkeypatch):
+    """Sunday's rows were stored on Friday, so a Sunday-dated report has Monday's gap a day
+    earlier, on a day the tick otherwise never pays."""
+    fmp = _FMP({**_market(FRIDAY), SUNDAY: _intc_on(SUNDAY)})
+
+    def _script(at: datetime) -> None:
+        if at == _et(SATURDAY, 12):
+            _fmp_moves_intc(fmp, SUNDAY, MONDAY)
+
+    end = _et(MONDAY, 0)
+    calls = await _calls_per_day(monkeypatch, fmp, _et(FRIDAY, 18), end, ["INTC"], _script)
+    assert _svc().snapshot("INTC", SUNDAY, end) is None
+    assert calls[SUNDAY] == 16, "the round before the fold and Saturday's first look"
+
+
+@pytest.mark.asyncio
+async def test_a_closed_day_report_fmp_kept_pays_one_round_and_goes_hot(monkeypatch):
+    fmp = _FMP({**_market(FRIDAY), SUNDAY: _intc_on(SUNDAY)})
+    end = _et(MONDAY, 0)
+    calls = await _calls_per_day(monkeypatch, fmp, _et(FRIDAY, 18), end, ["INTC"])
+    assert _svc().snapshot("INTC", SUNDAY, end) is not None
+    assert calls[SUNDAY] == 208, "192 hot, 15 for the one round, Saturday's first look"
+
+
+@pytest.mark.asyncio
+async def test_a_monday_with_a_watched_report_pays_one_round_at_midnight(monkeypatch):
+    fmp = _FMP({**_market(FRIDAY), MONDAY: _intc_on(MONDAY)})
+    calls = await _calls_per_day(monkeypatch, fmp, _et(FRIDAY, 18), _et(TUESDAY, 0), ["INTC"])
+    assert calls[MONDAY] == 319, "192 hot, 111 for the memo, 15 at midnight, a first look at Sunday"
+
+
+@pytest.mark.asyncio
+async def test_a_report_fmp_kept_over_the_weekend_still_lands_on_its_overnight_fill(monkeypatch):
+    """The round at midnight sees it pending, as the evening's rows do on any other night."""
+    fmp = _FMP({**_market(FRIDAY), MONDAY: _intc_on(MONDAY)})
+
+    def _script(at: datetime) -> None:
+        if at == _et(MONDAY, 5):
+            fmp.by_day[MONDAY] = [_row("ZZZZ", MONDAY), _row("INTC", MONDAY, eps=0.60, rev=17.1e9)]
+
+    end = _et(MONDAY, 6, 1)
+    await _calls_per_day(monkeypatch, fmp, _et(FRIDAY, 18), end, ["INTC"], _script)
+    assert [(s.symbol, s.day) for s in _svc().landed_snapshots(end)] == [("INTC", MONDAY)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("moved", [True, False], ids=["moved", "kept"])
+async def test_a_failed_midnight_round_opens_nothing_and_the_next_round_decides(monkeypatch, moved):
+    """A failed round serves the rows it held, here Friday's, so the moment FMP blips must not
+    turn them into a report day."""
+    fmp = _FMP({**_market(FRIDAY), MONDAY: _intc_on(MONDAY)})
+    outage = _fmp_can_go_down(fmp)
+    during: List[Optional[els.LiveSnapshot]] = []
+
+    def _script(at: datetime) -> None:
+        if moved and at == _et(SUNDAY, 12):
+            _fmp_moves_intc(fmp, MONDAY, TUESDAY)
+        outage["down"] = _et(MONDAY, 0) <= at < _et(MONDAY, 0, 10)
+        if at == _et(MONDAY, 0, 9):
+            during.append(_svc().snapshot("INTC", MONDAY, at))
+
+    end = _et(MONDAY, 0, 15)
+    calls = await _calls_per_day(monkeypatch, fmp, _et(FRIDAY, 18), end, ["INTC"], _script)
+    assert during == [None]
+    assert (_svc().snapshot("INTC", MONDAY, end) is None) == moved
+    assert calls[MONDAY] == 96, ("one round per 120 s wait, not one per tick: 5 of 15 failed and "
+                                 "one good, with the first look at Sunday beside each")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("door", _DOORS)
+async def test_no_door_opens_a_record_on_rows_a_failed_round_left_old(monkeypatch, door):
+    svc_obj = _door_service(monkeypatch, [_avgo(None)])
+    await ts._cached_earnings_calendar(svc_obj.fmp, REPORT)
+    _memo_held_for(13)
+    _a_day_goes_down(svc_obj.fmp, NEXT)
+    at = _et(REPORT, 9)
+    await _through(door, svc_obj, at, monkeypatch)
+    assert ts._earnings_calendar_retry_after is not None, "the round must have failed"
+    assert _svc().snapshot("AVGO", REPORT, at) is None
+
+
+@pytest.mark.asyncio
+async def test_the_card_and_the_sheet_still_answer_when_old_rows_open_no_record(monkeypatch):
+    """The row is still the best schedule there is, so it still draws a plain card. Only the
+    LIVE state waits for an answer from FMP."""
+    svc_obj = _door_service(monkeypatch, [_avgo(None)])
+    await ts._cached_earnings_calendar(svc_obj.fmp, REPORT)
+    _memo_held_for(13)
+    _a_day_goes_down(svc_obj.fmp, NEXT)
+    monkeypatch.setattr(ts, "datetime", _FrozenDatetime(_et(REPORT, 9)))
+    (card,) = await svc_obj._get_earnings_alerts(["AVGO"])
+    assert (card.ticker, card.earnings_status) == ("AVGO", els.STATUS_UPCOMING)
+    sheet = await svc_obj.get_earnings_live("AVGO")
+    assert (sheet.status, sheet.poll_seconds) == (els.STATUS_UPCOMING, None)
 
 
 @pytest.mark.asyncio

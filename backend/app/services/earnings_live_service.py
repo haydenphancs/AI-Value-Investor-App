@@ -42,9 +42,18 @@ already be gone from the records, or it reads as new on every round.
     30 min, the owner's 2026-10-22 cadence), and every reader folds them in. The tick pays to
     keep that memo fresh only from 06:00 ET to midnight on a trading day
     (`tick_refreshes_memo`): before 06:00 and on a closed day it folds the rows already held
-    and makes no call, unless none are held (a restart). A feed build still refreshes the memo
-    at any hour. The evening's rows for tomorrow are what make an overnight fill a landing at
-    the first read of the morning. This module fetches today ITSELF only while it is HOT.
+    and makes no call, unless none are held (a restart) or a held row is too old to open its
+    record (below). A feed build still refreshes the memo at any hour. The rows first folded
+    at midnight are what make an overnight fill a landing at the first read of the morning.
+    This module fetches today ITSELF only while it is HOT.
+  * A memo row held `EARNINGS_LIVE_HELD_ROWS_MAX_AGE_SECONDS` (12 h) or longer opens no record,
+    at any of the three folds. FMP may have moved the report since, and an open record is a
+    report day (LIVE, the hot fetch, an SEC slot, then a card) that no later answer closes.
+    After a closed day the rows held at midnight are the last trading day's, and a
+    Sunday-dated report's are Friday's. So when a held row that old would open a record
+    (`old_rows_would_open`) the tick asks FMP first, one round. Rows a failed round leaves
+    that old open nothing until a round succeeds, and still fold into a record that exists.
+    A move inside the 12 h, or after the record opened, goes unseen.
   * The days before today are held only here (after-close actuals land overnight, and the
     card must still be there the next morning).
   * HOT = inside `fmp_window_open` (06:00–22:00 ET on the day, 06:00–12:00 ET on the next
@@ -62,8 +71,10 @@ already be gone from the records, or it reads as new on every round.
     192 for today, 108 for the previous day and 111 for the memo. A filing that completes a
     report costs what a pending row costs until FMP confirms it. A weekend day: 12, plus a
     first look at each day before it never asked, and no memo call. A watched report dated on
-    a closed day adds up to 192 on that day. Feed builds add the memo's rounds the tick no
-    longer pays for: ~37 before 06:00 on a trading day and up to ~150 on a closed day.
+    a closed day adds up to 192 on that day. A first fold on rows too old to open a record adds
+    one round, 15 calls: midnight on a Monday with a watched report, or on a Sunday with one of
+    its own. Feed builds add the memo's rounds the tick no longer pays for: ~37 before 06:00 on
+    a trading day and up to ~150 on a closed day.
   * Refreshed by the live loop ONLY (`run_earnings_live_loop`, 60 s). Feed builds and the
     sheet endpoint fold the Tracking memo and read; they never fetch, so the live state adds
     no latency to the feed.
@@ -146,6 +157,9 @@ EARNINGS_LIVE_CLOSED_DAY_TTL_SECONDS = 7200
 #: report shows (`sheet_poll_seconds`).
 EARNINGS_LIVE_POLL_SECONDS = 30
 EARNINGS_LIVE_PRELIMINARY_POLL_SECONDS = 120
+#: A memo row held this long opens no record (THE MEMO in the module docstring). Longer than the
+#: night the tick does not pay for, midnight to 06:00, and shorter than the day a closed day adds.
+EARNINGS_LIVE_HELD_ROWS_MAX_AGE_SECONDS = 12 * 3600
 #: The live window on the report day, in ET hours: [start, end).
 EARNINGS_LIVE_START_HOUR_ET = 6
 EARNINGS_LIVE_END_HOUR_ET = 22
@@ -399,8 +413,8 @@ def fmp_window_open(day: date, n: datetime) -> bool:
 def tick_refreshes_memo(n: datetime) -> bool:
     """PURE. Are these the hours the tick pays to keep the Tracking memo fresh, at `n` (ET)?
     06:00 ET to midnight on a trading day. Past 22:00 the hot fetch has stopped and the memo is
-    what still reads today's late fills. At any other hour the tick folds what the memo holds
-    (THE MEMO in the module docstring)."""
+    what still reads today's late fills. At any other hour the tick folds what the memo holds,
+    unless a held row is too old to open its record (THE MEMO in the module docstring)."""
     return is_trading_day(n.date()) and n.hour >= EARNINGS_LIVE_START_HOUR_ET
 
 
@@ -703,6 +717,13 @@ def _older_than_own_fetch(rec: _Record, stored_at: Optional[float]) -> bool:
     return last is not None and (stored_at is None or stored_at < last)
 
 
+def _too_old_to_open(stored_at: Optional[float]) -> bool:
+    """Has a memo row stored at ``stored_at`` been held too long to open a record (THE MEMO in
+    the module docstring)? A row of unknown age is not in the memo, so this has no say on it."""
+    return (stored_at is not None
+            and time.monotonic() - stored_at >= EARNINGS_LIVE_HELD_ROWS_MAX_AGE_SECONDS)
+
+
 def _settled(actual: Optional[float], estimate: Optional[float],
              pick: Optional[Tuple[Dict[str, Any], float]], rows: List[Dict[str, Any]],
              estimate_of: Callable[[Dict[str, Any]], Optional[float]],
@@ -767,7 +788,9 @@ class EarningsLiveService:
         ``stored_at`` is when the memo stored these rows, on the clock of `_fetched`
         (`tracking_service.earnings_day_stored_at`); an own fetch ignores it. The newest FMP
         answer wins (module docstring): memo rows older than their record's last own fetch are
-        skipped before anything folds, and so are rows of unknown age.
+        skipped before anything folds, and so are rows of unknown age. Memo rows too old to open
+        a record (`_too_old_to_open`) open none, with one WARNING per fold, and still fold into
+        a record that exists.
         """
         wanted = {s.upper() for s in symbols} if symbols is not None else None
         groups: Dict[str, List[Dict[str, Any]]] = {}
@@ -778,9 +801,14 @@ class EarningsLiveService:
             if _row_date(row) == day:
                 groups.setdefault(symbol, []).append(row)
         today = et_now(now).date()
+        too_old = not fetched and _too_old_to_open(stored_at)
+        unopened: List[str] = []
         for symbol, group in groups.items():
             rec = self._records.get((symbol, day))
             if rec is None:
+                if too_old:
+                    unopened.append(symbol)
+                    continue
                 rec = _Record(symbol=symbol, day=day, first_seen_at=now)
                 self._records[(symbol, day)] = rec
             elif not fetched and _older_than_own_fetch(rec, stored_at):
@@ -789,6 +817,28 @@ class EarningsLiveService:
             _note_consensus(rec, ranked)
             self._fold_report(rec, _rows_to_fold(ranked, today), now, fetched=fetched)
             self._note_landing(rec, now)
+        if unopened:
+            logger.warning(
+                "[earnings-live] %s: memo rows held %.0f h opened no record for %d report(s) "
+                "(%s): FMP may have moved them, so the next stored round decides",
+                day.isoformat(), (time.monotonic() - stored_at) / 3600, len(unopened),
+                ", ".join(sorted(unopened)[:5]),
+            )
+
+    def old_rows_would_open(self, day: date, rows: Iterable[Any], stored_at: Optional[float],
+                            symbols: Collection[str]) -> bool:
+        """Are these held rows too old to open a record (`_too_old_to_open`), and does one of
+        them name a watched report on `day` with no record yet? Only then is a round worth
+        paying for: a record that exists takes old rows as it is, and on a closed day with
+        nothing of its own this is what keeps the tick from paying at all."""
+        if not _too_old_to_open(stored_at):
+            return False
+        wanted = {s.upper() for s in symbols}
+        for row in rows:
+            symbol = _row_symbol(row)
+            if symbol in wanted and _row_date(row) == day and (symbol, day) not in self._records:
+                return True
+        return False
 
     def _fold_report(self, rec: _Record, rows: List[Dict[str, Any]], now: datetime,
                      *, fetched: bool) -> None:
@@ -1269,11 +1319,13 @@ async def earnings_live_tick(
 
     # Today's rows ride on the Tracking memo (30 min), the same shared object every feed build
     # reads. Reading it through its front door pays for a round when it is old, so the tick does
-    # that only in `tick_refreshes_memo`, or when it holds no rows for today (a restart).
+    # that only in `tick_refreshes_memo`, when it holds no rows for today (a restart), or when a
+    # held row is too old to open its record. Should that round fail, the fold below refuses the
+    # same rows, so a moment of FMP trouble cannot turn them into a report day.
     stored_at = ts.earnings_day_stored_at(fmp, today)
-    if stored_at is not None and not tick_refreshes_memo(n):
-        calendar, _ = ts._held_earnings_window(fmp, [today])
-    else:
+    calendar, _ = ts._held_earnings_window(fmp, [today])
+    if (stored_at is None or tick_refreshes_memo(n)
+            or service.old_rows_would_open(today, calendar, stored_at, watched)):
         try:
             calendar = await ts._cached_earnings_calendar(fmp, ts._et_today())
         except Exception as e:

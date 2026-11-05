@@ -331,17 +331,17 @@ TABLE_NAME = "ticker_report_cache"
 #     reports cached since Friday's close rebuild, each on its next view. The full backend suite
 #     (minus the Swift-compiling files) ran on this change BEFORE this literal was written. This
 #     ONE bump supersedes every instant above.
-# 2026-11-05 (22:10 UTC = 17:10 ET, the commit time, owner's "Yes, commit"): the report score
+# 2026-11-05 (23:01 UTC = 18:01 ET, after the close; the push, owner's "Yes, push after 6pm"): the report score
 #     inputs behind Berkshire's 39.6. Cached collections carry the old `computed` ROE and CAGRs,
 #     the old insider partials ($0 for a Form 4 row with no price, Class A added 1:1 with Class
 #     B, joint filers counted twice) and the embedded Holders v6 response, and the shared cache
 #     would keep selling reports built on the removed moat dock. Ships with
 #     `_HOLDERS_PAYLOAD_VERSION` 7 and the ownership snapshot's version 5. SCORER_VERSION stays:
 #     the moat pillars did not change. Same rule: a PAST instant, moved to the push time if the
-#     deploy lands later; deploy after the 18:00 ET close so the regeneration costs nothing
-#     extra. The full backend suite ran on this change BEFORE this literal was written. This ONE
-#     bump supersedes every instant above.
-CACHE_SCHEMA_FLOOR = datetime(2026, 11, 5, 22, 10, 0, tzinfo=timezone.utc)
+#     deploy lands later; pushed after the 18:00 ET close so the regeneration costs nothing
+#     extra. The full backend suite ran on this change, on the exact commit, BEFORE this literal
+#     was written. This ONE bump supersedes every instant above.
+CACHE_SCHEMA_FLOOR = datetime(2026, 11, 5, 23, 1, 0, tzinfo=timezone.utc)
 
 # The internal report key carrying the Financials sections a report lost to a degraded
 # upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.

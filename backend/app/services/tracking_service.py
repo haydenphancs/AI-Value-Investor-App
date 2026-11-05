@@ -585,8 +585,9 @@ def earnings_day_stored_at(fmp: Any, day: date) -> Optional[float]:
 
     Monotonic, the clock of the live service's own fetch. This is the rows' own age however
     they were served: a failed or empty round stores nothing, so held rows keep their stamp.
-    Read it straight after `_cached_earnings_calendar`, with no await between, so it belongs
-    to the rows in hand.
+    Read it with no await between it and the rows in hand (`_cached_earnings_calendar`, or
+    `_held_earnings_window` when the live tick folds without paying for a round), so it
+    belongs to those rows.
     """
     entry = _held_earnings_days(fmp).get(day)
     return entry[0] if entry is not None else None

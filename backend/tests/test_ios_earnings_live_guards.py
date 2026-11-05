@@ -7,8 +7,8 @@ screen's contract is:
   * the route: `APIEndpoint.getEarningsLive` is the backend's path, signed-in only;
   * the honesty rule: LIVE is drawn from the SERVER's status, never from date math on the
     device (`LiveNewsHeader`: nothing live on screen, no "Live");
-  * the poll: it stops when the server says the report is no longer live, and its starter
-    cancels before re-arming (two pollers would double the traffic);
+  * the poll: it stops when the server stops asking, and its starter cancels before re-arming
+    (two pollers would double the traffic);
   * the formatting defects the card shipped with ("$-0.25", "$0.0B") stay fixed.
 Every scan is comment-stripped first, so a doc comment naming a removed token cannot satisfy
 or fail it.
@@ -132,7 +132,7 @@ def test_the_status_decoder_falls_back_to_upcoming():
     assert 'case notScheduled = "none"' in src, "a case named `none` collides with Optional"
 
 
-def test_the_sheet_poll_stops_when_the_report_is_no_longer_live():
+def test_the_sheet_poll_stops_when_the_server_stops_asking():
     vm = _code("ViewModels/EarningsLiveViewModel.swift")
     start = vm[vm.index("func start()"): vm.index("func stop()")]
     assert start.index("pollTask?.cancel()") < start.index("pollTask = Task"), (

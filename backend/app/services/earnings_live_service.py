@@ -18,8 +18,8 @@ TWO SOURCES, ONE RECORD PER (symbol, report date).
   Between two FMP answers the NEWEST wins. The Tracking memo can be 30 min behind this
   module's own fetch, so a memo row older than the record's last own fetch is skipped whole at
   all three folds (the tick, the card, the sheet): no reader can put an older answer back. A
-  memo refreshed after the fetch folds as usual: a complete report is no longer fetched, so
-  the memo is how a later FMP correction reaches it.
+  memo refreshed after the fetch folds as usual: a report FMP has confirmed is no longer
+  fetched, so the memo is how a later FMP correction reaches it.
 
 DUPLICATE ROWS. FMP can list one report twice, a stale pending row beside the reported one,
 in either order. One response therefore decides per report, never per row, and a repeat of it
@@ -38,20 +38,32 @@ with the NEWEST dates kept (`fetch_calendar_days`). Calendar days, because a rep
 a weekend or holiday date. This one window holds the records, the push sender's memory and
 every reader, and each refresh prunes to it first: a report the sender has forgotten must
 already be gone from the records, or it reads as new on every round.
-  * Today's rows arrive for free: the Tracking memo (`tracking_service._cached_earnings_
-    calendar`, 30 min, the owner's 2026-10-22 cadence) already holds them, and every reader
-    folds them in. This module fetches today ITSELF only while it is HOT.
+  * Today's rows ride on the Tracking memo (`tracking_service._cached_earnings_calendar`,
+    30 min, the owner's 2026-10-22 cadence), and every reader folds them in. The tick pays to
+    keep that memo fresh only from 06:00 ET to midnight on a trading day
+    (`tick_refreshes_memo`): before 06:00 and on a closed day it folds the rows already held
+    and makes no call, unless none are held (a restart). A feed build still refreshes the memo
+    at any hour. The evening's rows for tomorrow are what make an overnight fill a landing at
+    the first read of the morning. This module fetches today ITSELF only while it is HOT.
   * The days before today are held only here (after-close actuals land overnight, and the
     card must still be there the next morning).
-  * HOT = 06:00–22:00 ET, and a WATCHED row on that day still lacks results — the same gate
-    as `earnings_window_service._hot_due`. The previous trading day stops being hot at 12:00
-    ET, and a closed day between it and today is never hot. Hot days refresh every
-    `EARNINGS_LIVE_HOT_TTL_SECONDS` (5 min). Any other day before today is asked once, then
-    every 30 min while a watched report on it is pending. 5 min and not faster: the filing
-    path supplies the speed, FMP is the confirmation. Cost, worst case: ~190 extra single-day
-    calls on a report day plus ~70 for the previous day's morning, against the Tracking memo's
-    ~150 a day; a closed day adds one call, and at most 48 a day while a watched report on it
-    is pending.
+  * HOT = inside `fmp_window_open` (06:00–22:00 ET on the day, 06:00–12:00 ET on the next
+    trading day), and a WATCHED report on that day still wants FMP (`needs_fmp`): it lacks
+    results, or a figure on show is still the filing's. So a filing ends the SEC watch
+    (`pending_symbols`) but not this: FMP is what confirms it, and on the next morning this
+    fetch is the only way FMP's answer arrives. A weekend morning is not hot, and a closed day
+    is never hot after its own day. Hot days refresh every `EARNINGS_LIVE_HOT_TTL_SECONDS`
+    (5 min). Any other day before today is asked once, then, while a watched report on it
+    still wants FMP, every 30 min, or every 2 h while today is a closed day
+    (`EARNINGS_LIVE_CLOSED_DAY_TTL_SECONDS`). 5 min and not faster: the filing path supplies
+    the speed, FMP is the confirmation.
+  * Cost with nobody opening the app, tick by tick (pinned in the tests). A busy report day,
+    today's and the previous trading day's watched reports wanting FMP all day: 411 calls,
+    192 for today, 108 for the previous day and 111 for the memo. A filing that completes a
+    report costs what a pending row costs until FMP confirms it. A weekend day: 12, plus a
+    first look at each day before it never asked, and no memo call. A watched report dated on
+    a closed day adds up to 192 on that day. Feed builds add the memo's rounds the tick no
+    longer pays for: ~37 before 06:00 on a trading day and up to ~150 on a closed day.
   * Refreshed by the live loop ONLY (`run_earnings_live_loop`, 60 s). Feed builds and the
     sheet endpoint fold the Tracking memo and read; they never fetch, so the live state adds
     no latency to the feed.
@@ -71,6 +83,12 @@ STATUSES (no time of day exists on `/stable` rows, so the window is the report d
   report, else the newest one still up. A company does not report twice in a few days, so a
   pending row beside a reported one is a leftover and never hides the figures. The sheet
   opened with no date takes the same pick, and still answers a report whose card has dropped.
+
+THE SHEET'S POLL (`sheet_poll_seconds`, `poll_seconds` on the wire). 30 s while `live`. 120 s
+while `reported` with a preliminary figure on show, inside `fmp_window_open`: FMP's fill is what
+replaces that figure, and the loop asks at the hot cadence then. None otherwise, past those hours
+too: the record moves too rarely to poll, and the next open reads it. The two rules ship as one,
+or the sheet would poll a record nothing updates.
 
 GUARDS, each a defect found elsewhere in this repo:
   * a dropped-digit EPS (`_earnings_common.eps_digit_shift_suspect`) is held as "checking",
@@ -121,6 +139,13 @@ logger = logging.getLogger(__name__)
 
 EARNINGS_LIVE_HOT_TTL_SECONDS = 300
 EARNINGS_LIVE_COLD_TTL_SECONDS = 1800
+#: The days before today while TODAY is a closed day. A late fill is still worth picking up,
+#: but a row FMP never fills must not run the market-wide fetch through a weekend.
+EARNINGS_LIVE_CLOSED_DAY_TTL_SECONDS = 7200
+#: How often the sheet asks again: while live, and while FMP can still confirm what a reported
+#: report shows (`sheet_poll_seconds`).
+EARNINGS_LIVE_POLL_SECONDS = 30
+EARNINGS_LIVE_PRELIMINARY_POLL_SECONDS = 120
 #: The live window on the report day, in ET hours: [start, end).
 EARNINGS_LIVE_START_HOUR_ET = 6
 EARNINGS_LIVE_END_HOUR_ET = 22
@@ -225,6 +250,8 @@ class LiveSnapshot:
     preliminary: bool
     checked_at: Optional[datetime]
     filing: Optional[FilingFigures]
+    # How often the sheet should ask again (`sheet_poll_seconds`); None when it should not.
+    poll_seconds: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -337,6 +364,46 @@ def is_complete(eps: LiveMetric, revenue: LiveMetric) -> bool:
     return revenue.estimate is None and not revenue.due and not revenue.checking
 
 
+def is_preliminary(eps: LiveMetric, revenue: LiveMetric) -> bool:
+    """Is a figure on show the filing's, not yet replaced by FMP's?"""
+    return SOURCE_FILING in (eps.source, revenue.source)
+
+
+def needs_fmp(eps: LiveMetric, revenue: LiveMetric) -> bool:
+    """Does the loop still want FMP's answer on this report? Until it is complete, and after
+    that while a figure on show is the filing's: only FMP's own figure confirms it, colours a
+    GAAP-only EPS and sends the live result push.
+
+    Never "FMP's fields are empty". That would ask forever about a report with no revenue
+    consensus, and never ask again about a held figure, whose field is full while its
+    correction is what the loop is waiting for.
+    """
+    return not is_complete(eps, revenue) or is_preliminary(eps, revenue)
+
+
+def fmp_window_open(day: date, n: datetime) -> bool:
+    """PURE. Are these the hours the loop asks FMP about `day`'s reports at the hot cadence, if
+    one of them still wants it, at `n` (ET)? 06:00–22:00 ET on the day itself, a closed day
+    included (a report can carry one's date), and 06:00–12:00 ET on the next trading day, when
+    an after-close report fills. A weekend morning is neither, and a closed day's report is
+    never hot again after its own day."""
+    if not EARNINGS_LIVE_START_HOUR_ET <= n.hour < EARNINGS_LIVE_END_HOUR_ET:
+        return False
+    today = n.date()
+    if day == today:
+        return True
+    return (is_trading_day(today) and day == previous_trading_day(today)
+            and n.hour < EARNINGS_LIVE_PREV_DAY_UNTIL_HOUR_ET)
+
+
+def tick_refreshes_memo(n: datetime) -> bool:
+    """PURE. Are these the hours the tick pays to keep the Tracking memo fresh, at `n` (ET)?
+    06:00 ET to midnight on a trading day. Past 22:00 the hot fetch has stopped and the memo is
+    what still reads today's late fills. At any other hour the tick folds what the memo holds
+    (THE MEMO in the module docstring)."""
+    return is_trading_day(n.date()) and n.hour >= EARNINGS_LIVE_START_HOUR_ET
+
+
 def live_status(day: date, today: date, now_et: datetime, eps: LiveMetric,
                 revenue: LiveMetric) -> str:
     """PURE. The status of a report dated `day`, seen at `now_et` (see the module docstring)."""
@@ -352,6 +419,16 @@ def live_status(day: date, today: date, now_et: datetime, eps: LiveMetric,
             return STATUS_REPORTED if any_in else STATUS_AWAITING
         return STATUS_LIVE
     return STATUS_REPORTED if any_in else STATUS_AWAITING
+
+
+def sheet_poll_seconds(status: str, preliminary: bool, day: date, n: datetime) -> Optional[int]:
+    """PURE. How often the sheet should ask again, or None when one answer is the whole story
+    (THE SHEET'S POLL in the module docstring)."""
+    if status == STATUS_LIVE:
+        return EARNINGS_LIVE_POLL_SECONDS
+    if status == STATUS_REPORTED and preliminary and fmp_window_open(day, n):
+        return EARNINGS_LIVE_PRELIMINARY_POLL_SECONDS
+    return None
 
 
 def recent_card_visible(status: str, day: date, now_et: datetime) -> bool:
@@ -371,12 +448,13 @@ def recent_card_visible(status: str, day: date, now_et: datetime) -> bool:
 def snapshot_of(rec: _Record, today: date, now_et: datetime) -> LiveSnapshot:
     eps = eps_metric(rec)
     revenue = revenue_metric(rec)
-    preliminary = SOURCE_FILING in (eps.source, revenue.source)
+    preliminary = is_preliminary(eps, revenue)
+    status = live_status(rec.day, today, now_et, eps, revenue)
     return LiveSnapshot(
-        symbol=rec.symbol, day=rec.day,
-        status=live_status(rec.day, today, now_et, eps, revenue),
+        symbol=rec.symbol, day=rec.day, status=status,
         company_name=rec.company_name, eps=eps, revenue=revenue,
         preliminary=preliminary, checked_at=rec.checked_at, filing=rec.filing,
+        poll_seconds=sheet_poll_seconds(status, preliminary, rec.day, now_et),
     )
 
 
@@ -839,7 +917,9 @@ class EarningsLiveService:
         ]
 
     def pending_symbols(self, day: date, symbols: Iterable[str]) -> List[str]:
-        """The given symbols (order kept) with a record on `day` whose results are incomplete."""
+        """The given symbols (order kept) with a record on `day` whose results are incomplete.
+        This is the SEC watch's list: a filing ends that watch. FMP's fetch reads the wider
+        `_fmp_wanted`."""
         out = []
         for symbol in symbols:
             rec = self._records.get((symbol.upper(), day))
@@ -849,31 +929,35 @@ class EarningsLiveService:
 
     # ── refresh (the live loop only) ───────────────────────────────
 
+    def _fmp_wanted(self, day: date, symbols: Collection[str]) -> bool:
+        """Does a watched report on `day` still want FMP's answer (`needs_fmp`)?"""
+        for symbol in symbols:
+            rec = self._records.get((symbol.upper(), day))
+            if rec is not None and needs_fmp(eps_metric(rec), revenue_metric(rec)):
+                return True
+        return False
+
     def _is_hot(self, day: date, n: datetime, symbols: Collection[str]) -> bool:
-        if not EARNINGS_LIVE_START_HOUR_ET <= n.hour < EARNINGS_LIVE_END_HOUR_ET:
-            return False
-        if day < n.date() and n.hour >= EARNINGS_LIVE_PREV_DAY_UNTIL_HOUR_ET:
-            return False
-        return bool(self.pending_symbols(day, symbols))
+        return fmp_window_open(day, n) and self._fmp_wanted(day, symbols)
 
     def due_days(self, now: datetime, symbols: Collection[str]) -> List[date]:
         """The days this round must fetch, oldest first (see THE MEMO in the docstring)."""
         n = et_now(now)
         *earlier, today = live_days(n.date())
         mono = time.monotonic()
+        cold_ttl = (EARNINGS_LIVE_COLD_TTL_SECONDS if is_trading_day(today)
+                    else EARNINGS_LIVE_CLOSED_DAY_TTL_SECONDS)
         due = []
-        # `earlier[0]` is the previous trading day, the only one of these that can go hot.
         for day in earlier:
             last = self._fetched.get(day)
             if last is None:
                 due.append(day)
-            elif day == earlier[0] and self._is_hot(day, n, symbols):
+            elif self._is_hot(day, n, symbols):
                 if mono - last >= EARNINGS_LIVE_HOT_TTL_SECONDS:
                     due.append(day)
-            elif (self.pending_symbols(day, symbols)
-                  and mono - last >= EARNINGS_LIVE_COLD_TTL_SECONDS):
-                # Outside the hot window a late FMP fill is still worth picking up, slowly — and
-                # once every watched report on that day is complete there is nothing left to ask.
+            elif self._fmp_wanted(day, symbols) and mono - last >= cold_ttl:
+                # Outside the hot window a late FMP fill is still worth picking up, slowly, and
+                # once FMP has confirmed that day's watched reports nothing is left to ask.
                 due.append(day)
         if self._is_hot(today, n, symbols):
             last = self._fetched.get(today)
@@ -1055,10 +1139,11 @@ def live_payload(
         status = STATUS_UPCOMING if report_day >= today else STATUS_AWAITING
         if found is False:
             status = STATUS_NONE
-        preliminary, checked_at, filing = False, None, None
+        preliminary, checked_at, filing, poll_seconds = False, None, None, None
     else:
         eps, revenue, status = snap.eps, snap.revenue, snap.status
         preliminary, checked_at, filing = snap.preliminary, snap.checked_at, snap.filing
+        poll_seconds = snap.poll_seconds
         company_name = snap.company_name or company_name
 
     def _metric(m: LiveMetric) -> Dict[str, Any]:
@@ -1102,7 +1187,7 @@ def live_payload(
         "guidance": guidance,
         "year_ago": year_ago,
         "last_quarters": last_quarters,
-        "poll_seconds": 30 if status == STATUS_LIVE else None,
+        "poll_seconds": poll_seconds,
     }
 
 
@@ -1182,15 +1267,21 @@ async def earnings_live_tick(
     n = et_now(now)
     today = n.date()
 
-    # Today's rows ride on the Tracking memo (30 min) — the same shared object every feed
-    # build reads, so this costs nothing beyond what the feed already spends.
-    try:
-        calendar = await ts._cached_earnings_calendar(fmp, ts._et_today())
-    except Exception as e:
-        calendar = []
-        logger.info("[earnings-live] tracking calendar unavailable (%s: %s)", type(e).__name__, e)
-    service.observe_rows(today, calendar, now, symbols=watched,
-                         stored_at=ts.earnings_day_stored_at(fmp, today))
+    # Today's rows ride on the Tracking memo (30 min), the same shared object every feed build
+    # reads. Reading it through its front door pays for a round when it is old, so the tick does
+    # that only in `tick_refreshes_memo`, or when it holds no rows for today (a restart).
+    stored_at = ts.earnings_day_stored_at(fmp, today)
+    if stored_at is not None and not tick_refreshes_memo(n):
+        calendar, _ = ts._held_earnings_window(fmp, [today])
+    else:
+        try:
+            calendar = await ts._cached_earnings_calendar(fmp, ts._et_today())
+        except Exception as e:
+            calendar = []
+            logger.info("[earnings-live] tracking calendar unavailable (%s: %s)",
+                        type(e).__name__, e)
+        stored_at = ts.earnings_day_stored_at(fmp, today)
+    service.observe_rows(today, calendar, now, symbols=watched, stored_at=stored_at)
 
     before = service.fetches
     await service.refresh(now, fmp=fmp, symbols=watched)

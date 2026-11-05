@@ -17,7 +17,8 @@ Routes:
                                           call (used by the iOS config sheet)
   GET    /tracking/portfolio-insights   → Optional[PortfolioInsightsResponse]
   GET    /tracking/earnings/{ticker}/live → EarningsLiveResponse (the Alerts sheet's
-                                          live results; polled every 30 s while LIVE)
+                                          live results; polled as the response's
+                                          `poll_seconds` asks)
 """
 
 from fastapi import APIRouter, Depends
@@ -515,7 +516,7 @@ async def get_earnings_live(
     ticker: str,
     report_date: Optional[str] = None,
     user: dict = Depends(get_watchlist_identity),
-    # The sheet polls every 30 s while a report is LIVE — 2/min, like the feed.
+    # The sheet polls every 30 s at most, while a report is LIVE — 2/min, like the feed.
     _rate: None = StandardRateLimit,
 ):
     """One report's live results: estimate vs actual for EPS and revenue (each as soon as it

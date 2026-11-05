@@ -249,7 +249,8 @@ class EarningsLiveResponse(BaseModel):
     guidance: Optional[str] = None
     year_ago: Optional[EarningsLiveYearAgoResponse] = None
     last_quarters: List[EarningsLiveQuarterResponse] = Field(default_factory=list)
-    # How often the client should ask again while `status == "live"`; null otherwise.
+    # How often the client should ask again: 30 while `status == "live"`, 120 while a reported
+    # report's preliminary figures can still be confirmed by FMP, null otherwise.
     poll_seconds: Optional[int] = None
 
 

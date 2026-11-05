@@ -8,8 +8,9 @@
 //  out first will be shown right away … red or green for miss or beat".
 //
 //  Each metric row stands alone: Revenue can be in while EPS still reads "Waiting…". While the
-//  report is LIVE the card polls its own endpoint (`EarningsLiveViewModel`); it opens on the
-//  Tracking card's own figures (`fallback`) so it is never blank while the first answer loads.
+//  report is LIVE, or FMP can still confirm its preliminary figures, the card polls its own
+//  endpoint (`EarningsLiveViewModel`); it opens on the Tracking card's own figures (`fallback`)
+//  so it is never blank while the first answer loads.
 //
 //  Honesty rules, each from the server (`earnings_live_service`), rendered as given:
 //    * a figure from the company's own release is marked "Preliminary" with a link to the

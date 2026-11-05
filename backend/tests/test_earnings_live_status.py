@@ -37,6 +37,11 @@ def _filing(**kw) -> FilingFigures:
     return FilingFigures(**base)
 
 
+def _filed(**kw) -> els._Record:
+    """A report complete from the company's own release: preliminary until FMP has it."""
+    return _rec(filing=_filing(revenue=17.1e9, eps_adjusted=0.44), **kw)
+
+
 # ── statuses ─────────────────────────────────────────────────────────────────
 
 
@@ -331,15 +336,155 @@ def test_yoy_growth_needs_two_positive_figures():
 # ── payload ──────────────────────────────────────────────────────────────────
 
 
-def test_the_payload_asks_for_a_poll_only_while_live():
-    snap = els.snapshot_of(_rec(), REPORT, _et(REPORT, 9))
-    live = els.live_payload("INTC", REPORT, snap, company_name=None, eps_estimate=None,
-                            revenue_estimate=None, extras=None, today=REPORT)
+def _sheet(snap, *, found: bool = True) -> dict:
+    return els.live_payload("INTC", REPORT, snap, company_name=None, eps_estimate=None,
+                            revenue_estimate=None, extras=None, today=REPORT, found=found)
+
+
+def test_the_payload_carries_the_snapshots_poll():
+    live = _sheet(els.snapshot_of(_rec(), REPORT, _et(REPORT, 9)))
     assert live["status"] == "live" and live["poll_seconds"] == 30
+    filed = _sheet(els.snapshot_of(_filed(), REPORT, _et(REPORT, 16, 5)))
+    assert filed["status"] == "reported" and filed["poll_seconds"] == 120
     done = els.snapshot_of(_rec(fmp_eps=0.44, fmp_revenue=17.1e9), REPORT, _et(REPORT, 17))
-    reported = els.live_payload("INTC", REPORT, done, company_name=None, eps_estimate=None,
-                                revenue_estimate=None, extras=None, today=REPORT)
-    assert reported["status"] == "reported" and reported["poll_seconds"] is None
+    assert _sheet(done)["status"] == "reported" and _sheet(done)["poll_seconds"] is None
+
+
+def test_a_sheet_with_no_snapshot_never_polls():
+    assert _sheet(None)["poll_seconds"] is None
+    assert _sheet(None, found=False)["poll_seconds"] is None
+
+
+# ── what the loop still asks FMP, and how often the sheet asks again ─────────
+
+FRIDAY, SATURDAY, SUNDAY, MONDAY = (date(2026, 11, 6), date(2026, 11, 7), date(2026, 11, 8),
+                                    date(2026, 11, 9))
+#: The trading day before Thanksgiving, the holiday, and the half day after it.
+WEDNESDAY, THANKSGIVING, BLACK_FRIDAY = (date(2026, 11, 25), date(2026, 11, 26),
+                                         date(2026, 11, 27))
+
+
+def _poll(rec: els._Record, at: datetime):
+    return els.snapshot_of(rec, at.date(), at).poll_seconds
+
+
+def test_a_filing_complete_report_polls_until_fmp_confirms():
+    rec = _filed()
+    snap = els.snapshot_of(rec, REPORT, _et(REPORT, 16, 5))
+    assert (snap.status, snap.preliminary, snap.poll_seconds) == (els.STATUS_REPORTED, True, 120)
+    assert _poll(rec, _et(REPORT, 21, 59)) == 120
+    assert _poll(rec, _et(REPORT, 22)) is None
+    assert _poll(rec, _et(NEXT, 11, 59)) == 120
+    assert _poll(rec, _et(NEXT, 12)) is None
+    confirmed = replace(rec, fmp_eps=0.45, fmp_revenue=17.2e9)
+    snap = els.snapshot_of(confirmed, NEXT, _et(NEXT, 8))
+    assert (snap.preliminary, snap.poll_seconds) == (False, None)
+    assert _poll(_rec(fmp_eps=0.44, fmp_revenue=17.1e9), _et(REPORT, 17)) is None
+
+
+_WINDOW_CASES = [
+    # The report's own day.
+    (REPORT, _et(REPORT, 5, 59), False),
+    (REPORT, _et(REPORT, 6), True),
+    (REPORT, _et(REPORT, 21, 59), True),
+    (REPORT, _et(REPORT, 22), False),
+    # The next trading morning.
+    (REPORT, _et(NEXT, 5, 59), False),
+    (REPORT, _et(NEXT, 6), True),
+    (REPORT, _et(NEXT, 11, 59), True),
+    (REPORT, _et(NEXT, 12), False),
+    # A weekend waits for Monday, however many mornings pass.
+    (FRIDAY, _et(SATURDAY, 8), False),
+    (FRIDAY, _et(SUNDAY, 8), False),
+    (FRIDAY, _et(MONDAY, 5, 59), False),
+    (FRIDAY, _et(MONDAY, 6), True),
+    (FRIDAY, _et(MONDAY, 11, 59), True),
+    (FRIDAY, _et(MONDAY, 12), False),
+    # So does a holiday, and a half day is a trading day.
+    (WEDNESDAY, _et(THANKSGIVING, 8), False),
+    (WEDNESDAY, _et(BLACK_FRIDAY, 8), True),
+    # A closed day's own report is hot on its day and never again.
+    (SATURDAY, _et(SATURDAY, 8), True),
+    (SATURDAY, _et(SUNDAY, 8), False),
+    (SATURDAY, _et(MONDAY, 8), False),
+    (THANKSGIVING, _et(THANKSGIVING, 8), True),
+    (THANKSGIVING, _et(BLACK_FRIDAY, 8), False),
+    # A later date is nobody's window yet.
+    (NEXT, _et(REPORT, 8), False),
+]
+
+
+@pytest.mark.parametrize("day,at,hot", _WINDOW_CASES)
+def test_the_hot_window_is_the_report_day_and_the_next_trading_morning(day, at, hot):
+    assert els.fmp_window_open(day, at) is hot
+
+
+@pytest.mark.parametrize("at,pays", [
+    (_et(REPORT, 0), False),
+    (_et(REPORT, 5, 59), False),
+    (_et(REPORT, 6), True),
+    (_et(REPORT, 22), True),
+    (_et(REPORT, 23, 59), True),
+    (_et(SATURDAY, 10), False),
+    (_et(THANKSGIVING, 10), False),
+    (_et(BLACK_FRIDAY, 10), True),
+])
+def test_the_tick_pays_for_the_memo_from_six_to_midnight_on_a_trading_day(at, pays):
+    assert els.tick_refreshes_memo(at) is pays
+
+
+@pytest.mark.parametrize("day,at,hot", [c for c in _WINDOW_CASES if c[0] <= c[1].date()])
+def test_a_preliminary_report_polls_exactly_while_the_hot_window_is_open(day, at, hot):
+    """Polling past the window would re-read a record nothing is updating."""
+    rec = _filed(day=day)
+    assert els.snapshot_of(rec, at.date(), at).status == els.STATUS_REPORTED
+    assert _poll(rec, at) == (120 if hot else None)
+
+
+def test_a_live_report_polls_at_the_live_pace_with_a_filing_figure_in_or_not():
+    assert _poll(_rec(), _et(REPORT, 9)) == 30
+    part = _rec(filing=_filing(revenue=17.1e9))
+    snap = els.snapshot_of(part, REPORT, _et(REPORT, 16, 5))
+    assert (snap.status, snap.preliminary, snap.poll_seconds) == (els.STATUS_LIVE, True, 30)
+
+
+def test_a_next_morning_report_with_one_filing_figure_and_a_held_one_still_polls():
+    rec = _rec(fmp_eps=0.041, filing=_filing(revenue=17.1e9))
+    snap = els.snapshot_of(rec, NEXT, _et(NEXT, 8))
+    assert (snap.status, snap.preliminary, snap.poll_seconds) == (
+        els.STATUS_REPORTED, True, 120)
+    assert snap.eps.checking is True
+
+
+@pytest.mark.parametrize("rec,at", [
+    (_rec(day=NEXT), _et(REPORT, 12)),
+    (_rec(), _et(REPORT, 5)),
+    (_rec(), _et(NEXT, 8)),
+    (_rec(filing=_filing()), _et(NEXT, 8)),
+], ids=["upcoming", "before_the_window", "awaiting", "a_filing_with_no_figures"])
+def test_a_report_with_nothing_to_confirm_never_polls(rec, at):
+    assert _poll(rec, at) is None
+
+
+@pytest.mark.parametrize("rec,wanted", [
+    (_rec(), True),
+    (_rec(fmp_eps=0.44), True),
+    (_rec(fmp_eps=0.44, fmp_revenue=17.1e9), False),
+    (_filed(), True),
+    (_rec(filing=_filing(revenue=17.1e9, eps_gaap=0.38)), True),
+    (_rec(fmp_eps=0.44, filing=_filing(revenue=17.1e9)), True),
+    (_rec(fmp_revenue=17.1e9, filing=_filing(eps_adjusted=0.44)), True),
+    (_rec(fmp_eps=0.45, fmp_revenue=17.2e9, filing=_filing(revenue=17.1e9, eps_adjusted=0.44)),
+     False),
+    (_rec(revenue_estimate=None, fmp_eps=0.44), False),
+    (_rec(fmp_eps=0.041, fmp_revenue=17.1e9), True),
+    (_rec(fmp_eps=0.44, fmp_revenue=90e9), True),
+    (_rec(fmp_eps=0.041, fmp_revenue=17.1e9, filing=_filing(eps_adjusted=0.44)), True),
+], ids=["pending", "a_due_revenue", "confirmed", "filing_complete", "filing_gaap_only",
+        "filing_revenue_left", "filing_eps_left", "confirmed_over_a_filing",
+        "no_revenue_consensus", "held_eps", "held_revenue", "filing_beside_a_held_eps"])
+def test_fmp_is_wanted_until_every_figure_shown_is_its_own(rec, wanted):
+    assert els.needs_fmp(els.eps_metric(rec), els.revenue_metric(rec)) is wanted
 
 
 def test_a_ticker_with_no_report_in_the_window_answers_none():

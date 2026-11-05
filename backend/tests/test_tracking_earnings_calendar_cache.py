@@ -365,6 +365,40 @@ async def test_the_memo_is_keyed_on_the_client():
 
 
 @pytest.mark.asyncio
+async def test_a_days_stored_at_is_its_own_stamp_and_moves_only_when_that_day_is_refetched():
+    """The live records read this to tell a memo row's age, so each day keeps its own stamp."""
+    fmp = _CalendarFMP()
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    far = _DAY + timedelta(days=3)
+    assert ts.earnings_day_stored_at(fmp, _DAY) == ts._earnings_calendar_memo[1][_DAY][0]
+    _age_memo(ts.EARNINGS_CALENDAR_TTL + 1)                # past the near TTL, not the far one
+    today_was, far_was = ts.earnings_day_stored_at(fmp, _DAY), ts.earnings_day_stored_at(fmp, far)
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    assert ts.earnings_day_stored_at(fmp, _DAY) > today_was
+    assert ts.earnings_day_stored_at(fmp, far) == far_was
+
+
+@pytest.mark.asyncio
+async def test_a_failed_round_leaves_every_days_stored_at_where_it_was():
+    fmp = _CalendarFMP(rows=[_row("AAPL", 0)])
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    _age_memo(ts.EARNINGS_CALENDAR_TTL + 1)
+    was = ts.earnings_day_stored_at(fmp, _DAY)
+    fmp.day_answers[_iso(1)] = [FMPUnavailableException("503")]
+    assert _tickers(await _svc(fmp)._get_earnings_alerts(["AAPL"])) == ["AAPL"]
+    assert ts.earnings_day_stored_at(fmp, _DAY) == was
+
+
+@pytest.mark.asyncio
+async def test_a_day_not_held_for_this_client_has_no_stored_at():
+    assert ts.earnings_day_stored_at(_CalendarFMP(), _DAY) is None, "nothing memoised yet"
+    fmp = _CalendarFMP()
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    assert ts.earnings_day_stored_at(fmp, _DAY + timedelta(days=15)) is None, "outside the window"
+    assert ts.earnings_day_stored_at(_CalendarFMP(), _DAY) is None, "another client's memo"
+
+
+@pytest.mark.asyncio
 async def test_the_shared_rows_are_never_mutated_by_the_alert_builder():
     fmp = _CalendarFMP()
     await _svc(fmp)._get_earnings_alerts(["AAPL", "MSFT"])

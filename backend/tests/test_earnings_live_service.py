@@ -11,6 +11,8 @@ What is pinned here, each a way the LIVE card could lie or cost too much:
   * a repeat of one response decides what its first fold decided, in any row order;
   * a zero revenue is a result only against a tiny consensus with no figure held, and an EPS
     of 0.0 beside a refused revenue is the same unfilled field;
+  * the newest FMP answer wins: a memo row older than a record's last own fetch is skipped at
+    the tick, the card and the sheet, and a memo refreshed after that fetch still folds;
   * the live memo fetches TODAY only while a watched row is pending in 06:00–22:00 ET, and
     the previous trading day at 5 min while hot (until 12:00 ET), else every 30 min;
   * feed builds and the sheet never fetch — only the loop does;
@@ -20,6 +22,7 @@ Hermetic: inline fakes for FMP, SEC and the dispatcher; the clock is passed in.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import itertools
 import logging
 from datetime import date, datetime, timedelta, timezone
@@ -1271,6 +1274,297 @@ async def test_unchanged_rows_with_a_zero_never_land_across_real_ticks(
     assert sent == [[], [], []]
 
 
+# ── the newest FMP answer wins ───────────────────────────────────────────────
+
+_DOORS = ["tick", "card", "sheet"]
+
+
+def _door_service(monkeypatch, rows: List[dict]) -> ts.TrackingService:
+    """The real memo, tick, card and sheet over one fake FMP, with no SEC watch or history."""
+    _no_history(monkeypatch)
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: _Watcher())
+    return _feed_service(monkeypatch, _et(REPORT, 16), rows)
+
+
+def _avgo(eps: Optional[float], eps_est: float = 1.65) -> dict:
+    """No revenue consensus, so EPS alone completes the report."""
+    return _row("AVGO", REPORT, eps=eps, eps_est=eps_est, rev_est=None)
+
+
+async def _tick(fmp: _FMP, at: datetime, symbol: str = "AVGO") -> Dict[str, int]:
+    async def _dispatch(snaps, now):
+        return None
+
+    return await els.earnings_live_tick(at, fmp=fmp, watched=[symbol], dispatch=_dispatch)
+
+
+async def _through(door: str, svc_obj: ts.TrackingService, at: datetime, monkeypatch) -> None:
+    """One fold of the memo through one door."""
+    monkeypatch.setattr(ts, "datetime", _FrozenDatetime(at))
+    if door == "tick":
+        await _tick(svc_obj.fmp, at)
+    elif door == "card":
+        await svc_obj._get_earnings_alerts(["AVGO"])
+    else:
+        await svc_obj.get_earnings_live("AVGO")
+
+
+def _memo_days_expire(*days: date) -> None:
+    """Push held days past the memo's TTL: the next read starts a round for them."""
+    held = ts._earnings_calendar_memo[1]
+    for day in days:
+        at, rows = held[day]
+        held[day] = (at - ts.EARNINGS_CALENDAR_TTL - 1, rows)
+
+
+def _own_fetch_is_due() -> None:
+    _svc()._fetched[REPORT] -= els.EARNINGS_LIVE_HOT_TTL_SECONDS + 1
+
+
+async def _own_fetch_corrects_the_memo(monkeypatch) -> ts.TrackingService:
+    """16:20: the memo stores EPS 0.169, held as a dropped digit. FMP then corrects it to
+    1.69, which only the 16:35 own fetch reads: the memo still holds the 16:20 row."""
+    svc_obj = _door_service(monkeypatch, [_avgo(0.169)])
+    await _tick(svc_obj.fmp, _et(REPORT, 16, 20))
+    assert _svc().snapshot("AVGO", REPORT, _et(REPORT, 16, 20)).eps.checking
+    svc_obj.fmp.by_day[REPORT] = [_avgo(1.69)]
+    _own_fetch_is_due()
+    assert (await _tick(svc_obj.fmp, _et(REPORT, 16, 35)))["fetched"] == 1
+    return svc_obj
+
+
+async def _assert_every_door_reads(svc_obj: ts.TrackingService, at: datetime, monkeypatch,
+                                   eps: float, estimate: float = 1.65) -> None:
+    """The tick's snapshot first: the other two doors fold again on their way to an answer."""
+    monkeypatch.setattr(ts, "datetime", _FrozenDatetime(at))
+    snap = _svc().snapshot("AVGO", REPORT, at)
+    assert (snap.status, snap.eps.actual, snap.eps.estimate, snap.eps.checking) == (
+        els.STATUS_REPORTED, eps, estimate, False)
+    assert snap.checked_at == _et(REPORT, 16, 35), "a memo fold never moves `checked_at`"
+    (card,) = await svc_obj._get_earnings_alerts(["AVGO"])
+    assert (card.earnings_status, card.eps_actual, card.eps_estimate) == (
+        els.STATUS_REPORTED, eps, estimate)
+    sheet = await svc_obj.get_earnings_live("AVGO")
+    assert (sheet.status, sheet.eps.actual, sheet.eps.estimate, sheet.eps.checking) == (
+        els.STATUS_REPORTED, eps, estimate, False)
+    assert sheet.poll_seconds is None
+    assert _svc().pending_symbols(REPORT, ["AVGO"]) == []
+
+
+@pytest.mark.asyncio
+async def test_an_older_memo_row_never_overwrites_a_newer_own_fetch_on_any_door(monkeypatch):
+    svc_obj = await _own_fetch_corrects_the_memo(monkeypatch)
+    at = _et(REPORT, 16, 36)
+    stats = await _tick(svc_obj.fmp, at)
+    assert stats["fetched"] == 0, "complete: the memo is the only fold left in this tick"
+    await _assert_every_door_reads(svc_obj, at, monkeypatch, eps=1.69)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("door", _DOORS)
+async def test_each_door_alone_skips_a_memo_older_than_the_own_fetch(monkeypatch, door):
+    svc_obj = await _own_fetch_corrects_the_memo(monkeypatch)
+    at = _et(REPORT, 16, 36)
+    await _through(door, svc_obj, at, monkeypatch)
+    assert _svc().snapshot("AVGO", REPORT, at).eps.actual == 1.69
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("door", _DOORS)
+async def test_a_memo_refreshed_after_the_own_fetch_wins_once_the_loop_stops_fetching(
+        monkeypatch, door):
+    """A complete report is no longer fetched, so the memo is how a later correction arrives.
+    Filling only what is still empty would freeze 1.69 / 1.65 here, and every door must hand
+    the fold its rows' stamp or this answer reads as being of unknown age."""
+    svc_obj = await _own_fetch_corrects_the_memo(monkeypatch)
+    at = _et(REPORT, 16, 50)
+    assert _svc().due_days(at, ["AVGO"]) == [], "the own fetch has stopped"
+    svc_obj.fmp.by_day[REPORT] = [_avgo(1.72, eps_est=1.70)]
+    _memo_days_expire(REPORT)
+    await _through(door, svc_obj, at, monkeypatch)
+    await _assert_every_door_reads(svc_obj, at, monkeypatch, eps=1.72, estimate=1.70)
+
+
+def _a_day_goes_down(fmp: _FMP, day: date) -> None:
+    """One failed day fails the memo's whole round (`fetch_calendar_days`)."""
+    answer = fmp.get_earnings_calendar
+
+    async def _down(from_date=None, to_date=None):
+        if from_date == day.isoformat():
+            raise RuntimeError("FMP 503")
+        return await answer(from_date=from_date, to_date=to_date)
+
+    fmp.get_earnings_calendar = _down
+
+
+@pytest.mark.asyncio
+async def test_held_memo_rows_after_a_failed_round_stay_older(monkeypatch):
+    """A failed round serves the rows it already held, however old, with the age they had."""
+    svc_obj = await _own_fetch_corrects_the_memo(monkeypatch)
+    _a_day_goes_down(svc_obj.fmp, NEXT)
+    _memo_days_expire(REPORT, NEXT)
+    at = _et(REPORT, 16, 50)
+    await _tick(svc_obj.fmp, at)
+    assert ts._earnings_calendar_retry_after is not None, "the round must have failed"
+    await _assert_every_door_reads(svc_obj, at, monkeypatch, eps=1.69)
+
+
+@pytest.mark.asyncio
+async def test_held_memo_rows_after_an_empty_round_stay_older(monkeypatch):
+    """An empty window is never stored, so the rows served are the old ones too."""
+    svc_obj = await _own_fetch_corrects_the_memo(monkeypatch)
+    svc_obj.fmp.by_day[REPORT] = []
+    _memo_days_expire(REPORT)
+    at = _et(REPORT, 16, 50)
+    await _tick(svc_obj.fmp, at)
+    assert ts._earnings_calendar_retry_after is not None, "the empty round must not be stored"
+    await _assert_every_door_reads(svc_obj, at, monkeypatch, eps=1.69)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("round_fails,expected", [(False, 1.72), (True, 1.69)],
+                         ids=["round_stored", "round_failed"])
+async def test_a_leader_and_its_joiner_fold_under_the_stamp_of_their_own_rows(
+        monkeypatch, round_fails, expected):
+    svc_obj = await _own_fetch_corrects_the_memo(monkeypatch)
+    fmp = svc_obj.fmp
+    fmp.by_day[REPORT] = [_avgo(1.72, eps_est=1.70)]
+    _memo_days_expire(REPORT)
+    release = asyncio.Event()
+    answer = fmp.get_earnings_calendar
+
+    async def _held_open(from_date=None, to_date=None):
+        await release.wait()
+        if round_fails:
+            raise RuntimeError("FMP 503")
+        return await answer(from_date=from_date, to_date=to_date)
+
+    fmp.get_earnings_calendar = _held_open
+    monkeypatch.setattr(ts, "datetime", _FrozenDatetime(_et(REPORT, 16, 50)))
+    leader = asyncio.ensure_future(svc_obj._get_earnings_alerts(["AVGO"]))
+    joiner = asyncio.ensure_future(svc_obj.get_earnings_live("AVGO"))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert ts._earnings_calendar_inflight, "the round must still be open"
+    release.set()
+    (card,), sheet = await asyncio.gather(leader, joiner)
+    assert card.eps_actual == sheet.eps.actual == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("memo_eps", [None, 1.06], ids=["memo_pending", "memo_has_the_figure"])
+async def test_a_sheet_poll_keeps_the_own_fetchs_estimate(monkeypatch, memo_eps):
+    """FMP's estimate is there all day, so a revision alone can split two answers."""
+    _no_history(monkeypatch)
+    svc_obj = _feed_service(monkeypatch, _et(REPORT, 16, 36),
+                            [_row("INTC", REPORT, eps=memo_eps, eps_est=1.00, rev_est=None)])
+    await ts._cached_earnings_calendar(svc_obj.fmp, REPORT)        # the memo is stored first
+    _svc().observe_rows(REPORT, [_row("INTC", REPORT, eps=1.06, eps_est=1.10, rev_est=None)],
+                        _et(REPORT, 16, 35), fetched=True)
+    sheet = await svc_obj.get_earnings_live("INTC")
+    (card,) = await svc_obj._get_earnings_alerts(["INTC"])
+    assert (sheet.eps.estimate, sheet.eps.surprise_pct) == (1.10, -3.64)
+    assert (card.eps_estimate, card.eps_surprise_pct) == (1.10, -3.64)
+
+
+@pytest.mark.asyncio
+async def test_a_sheet_poll_during_the_sec_watch_cannot_change_what_the_push_reads(monkeypatch):
+    """The push reads its snapshot after the SEC await, where any reader can fold."""
+    svc_obj = _door_service(monkeypatch, [_row("INTC", REPORT)])
+    fmp = svc_obj.fmp
+    await _tick(fmp, _et(REPORT, 16), "INTC")                      # seen pending
+    fmp.by_day[REPORT] = [_row("INTC", REPORT, eps=0.60)]
+    _memo_days_expire(REPORT)
+    await ts._cached_earnings_calendar(fmp, REPORT)                # the memo stores 0.60
+    fmp.by_day[REPORT] = [_row("INTC", REPORT, eps=0.44)]          # FMP corrects it
+    _own_fetch_is_due()
+
+    class _SheetPollDuringTheWatch(_Watcher):
+        async def run_once(self, now, symbols, day, *, sec=None, gemini=None):
+            await svc_obj.get_earnings_live("INTC")
+            return await super().run_once(now, symbols, day, sec=sec, gemini=gemini)
+
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: _SheetPollDuringTheWatch())
+    sent: List[els.LiveSnapshot] = []
+
+    async def _dispatch(snaps, now):
+        sent.extend(snaps)
+
+    at = _et(REPORT, 16, 36)
+    monkeypatch.setattr(ts, "datetime", _FrozenDatetime(at))
+    await els.earnings_live_tick(at, fmp=fmp, watched=["INTC"], dispatch=_dispatch)
+    (snap,) = sent
+    assert (snap.eps.actual, snap.eps.surprise_pct) == (0.44, 7.32)
+
+
+def _own_fetch_stamp(symbol: str = "INTC") -> float:
+    return _svc()._records[(symbol, REPORT)].fmp_fetched_mono
+
+
+@pytest.mark.parametrize("offset,folds", [(None, False), (-0.001, False), (0.0, True),
+                                          (0.001, True)],
+                         ids=["unknown_age", "older", "same_moment", "newer"])
+def test_a_memo_row_folds_unless_it_is_older_than_the_records_own_fetch(offset, folds):
+    svc = _svc()
+    now = _et(REPORT, 16, 35)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44)], now, fetched=True)
+    stamp = _own_fetch_stamp()
+    stored_at = None if offset is None else stamp + offset
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.46)], now, stored_at=stored_at)
+    assert svc.snapshot("INTC", REPORT, now).eps.actual == (0.46 if folds else 0.44)
+    assert _own_fetch_stamp() == stamp, "only an own fetch moves the stamp"
+
+
+def test_a_ticker_the_own_fetch_left_out_keeps_folding_older_memo_rows():
+    """Stamped per record, not per day: a day-wide stamp would starve this ticker."""
+    svc = _svc()
+    now = _et(REPORT, 16, 35)
+    svc.observe_rows(REPORT, [_row("AAPL", REPORT)], now, stored_at=0.0)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44)], now, fetched=True)
+    memo = [_row("INTC", REPORT, eps=0.40), _row("AAPL", REPORT, eps=1.9)]
+    svc.observe_rows(REPORT, memo, now, stored_at=_own_fetch_stamp() - 900)
+    assert svc.snapshot("INTC", REPORT, now).eps.actual == 0.44
+    assert svc.snapshot("AAPL", REPORT, now).eps.actual == 1.9
+
+
+@pytest.mark.parametrize("stored_at", [None, 0.0], ids=["unknown_age", "very_old"])
+def test_a_record_with_no_own_fetch_folds_every_memo_row(stored_at):
+    """Before the hot gate opens the memo is the only source there is."""
+    svc = _svc()
+    now = _et(REPORT, 5)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], now, stored_at=stored_at)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44)], now, stored_at=stored_at)
+    assert svc.snapshot("INTC", REPORT, now).eps.actual == 0.44
+
+
+def test_a_skipped_row_moves_nothing_on_the_record():
+    svc = _svc()
+    now = _et(REPORT, 16, 35)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], now, fetched=True)
+    rec = svc._records[("INTC", REPORT)]
+    before = dataclasses.replace(rec)
+    older = dict(_row("INTC", REPORT, rev=0, eps_est=0.35, rev_est=15.9e9), companyName="Old")
+    svc.observe_rows(REPORT, [older], now + timedelta(minutes=1),
+                     stored_at=_own_fetch_stamp() - 1)
+    assert rec == before
+
+
+def test_every_own_fetch_moves_the_line_a_memo_row_must_clear():
+    svc = _svc()
+    now = _et(REPORT, 16, 35)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44)], now, fetched=True)
+    first = _own_fetch_stamp()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.46)], now, stored_at=first)
+    assert svc.snapshot("INTC", REPORT, now).eps.actual == 0.46
+    svc._records[("INTC", REPORT)].fmp_fetched_mono = first - 300     # five minutes ago
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.48)], now, fetched=True, stored_at=0.0)
+    assert svc.snapshot("INTC", REPORT, now).eps.actual == 0.48, "an own fetch always folds"
+    assert _own_fetch_stamp() >= first
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.46)], now,
+                     stored_at=_own_fetch_stamp() - 0.001)
+    assert svc.snapshot("INTC", REPORT, now).eps.actual == 0.48
+
+
 # ── a filing already out at first sight ──────────────────────────────────────
 
 
@@ -1299,7 +1593,9 @@ async def test_a_morning_filing_found_by_a_fresh_process_is_not_a_landing(monkey
         await els.earnings_live_tick(_et(REPORT, 15, minute), fmp=fmp, watched=["INTC"],
                                      dispatch=_dispatch)
     assert _svc().snapshot("INTC", REPORT, _et(REPORT, 15, 1)).eps.actual == 0.45
-    _svc().observe_rows(REPORT, [_row("INTC", REPORT, eps=0.46, rev=17.2e9)], _et(REPORT, 15, 30))
+    # The filing completed the report, so the own fetch has stopped: FMP's fill comes by memo.
+    fmp.by_day[REPORT] = [_row("INTC", REPORT, eps=0.46, rev=17.2e9)]
+    _memo_days_expire(REPORT)
     await els.earnings_live_tick(_et(REPORT, 15, 31), fmp=fmp, watched=["INTC"],
                                  dispatch=_dispatch)
     assert sent == [[], [], []]

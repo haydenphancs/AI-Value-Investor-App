@@ -15,6 +15,11 @@ TWO SOURCES, ONE RECORD PER (symbol, report date).
     the release, every figure a verbatim quote. PRELIMINARY until FMP has the same metric.
   A record is STICKY: a figure, once verified, never goes back to "not out yet", and FMP's
   figure replaces the filing's the moment FMP has one.
+  Between two FMP answers the NEWEST wins. The Tracking memo can be 30 min behind this
+  module's own fetch, so a memo row older than the record's last own fetch is skipped whole at
+  all three folds (the tick, the card, the sheet): no reader can put an older answer back. A
+  memo refreshed after the fetch folds as usual: a complete report is no longer fetched, so
+  the memo is how a later FMP correction reaches it.
 
 DUPLICATE ROWS. FMP can list one report twice, a stale pending row beside the reported one,
 in either order. One response therefore decides per report, never per row, and a repeat of it
@@ -41,7 +46,8 @@ multi-day request is cut at 4,000 rows with the NEWEST dates kept (`fetch_calend
     the confirmation. Cost, worst case: ~190 extra single-day calls on a report day plus ~70
     for the previous day's morning, against the Tracking memo's ~150 a day.
   * Refreshed by the live loop ONLY (`run_earnings_live_loop`, 60 s). Feed builds and the
-    sheet endpoint read; they never fetch, so the live state adds no latency to the feed.
+    sheet endpoint fold the Tracking memo and read; they never fetch, so the live state adds
+    no latency to the feed.
 
 STATUSES (no time of day exists on `/stable` rows, so the window is the report day):
   * `upcoming` — a later date, or today before 06:00 ET with nothing in yet.
@@ -182,6 +188,9 @@ class _Record:
     fmp_revenue: Optional[float] = None
     filing: Optional[FilingFigures] = None
     checked_at: Optional[datetime] = None
+    # Monotonic time of the last own fetch that held this report. Per record, not per day: a
+    # ticker that fetch left out keeps folding the memo. None until a fetch has held it.
+    fmp_fetched_mono: Optional[float] = None
     # When this process first held the record: read against a filing's acceptance time.
     first_seen_at: Optional[datetime] = None
     # Observed WITHOUT results in this process — what makes a later landing a landing.
@@ -575,6 +584,13 @@ def _storable_figures(eps: Optional[float], revenue: Optional[float],
     return eps, stored
 
 
+def _older_than_own_fetch(rec: _Record, stored_at: Optional[float]) -> bool:
+    """Is a memo row stored at ``stored_at`` older than the record's last own fetch? A row of
+    unknown age counts as older: it must never beat an answer of known age."""
+    last = rec.fmp_fetched_mono
+    return last is not None and (stored_at is None or stored_at < last)
+
+
 def _settled(actual: Optional[float], estimate: Optional[float],
              pick: Optional[Tuple[Dict[str, Any], float]], rows: List[Dict[str, Any]],
              estimate_of: Callable[[Dict[str, Any]], Optional[float]],
@@ -619,7 +635,8 @@ class EarningsLiveService:
 
     def observe_rows(self, day: date, rows: Iterable[Any], now: datetime,
                      *, symbols: Optional[Collection[str]] = None,
-                     fetched: bool = False) -> None:
+                     fetched: bool = False,
+                     stored_at: Optional[float] = None) -> None:
         """Fold FMP calendar rows dated `day` into their records. Sticky (module docstring).
 
         Each symbol's rows decide TOGETHER (`_rows_to_fold`, DUPLICATE ROWS in the module
@@ -634,6 +651,11 @@ class EarningsLiveService:
         ``fetched`` is True only for this module's OWN fetch, the one moment the sources were
         actually checked. Rows folded in from the Tracking memo (up to 30 min old) must not move
         `checked_at`, or the sheet would say "updated just now" over a half-hour-old answer.
+
+        ``stored_at`` is when the memo stored these rows, on the clock of `_fetched`
+        (`tracking_service.earnings_day_stored_at`); an own fetch ignores it. The newest FMP
+        answer wins (module docstring): memo rows older than their record's last own fetch are
+        skipped before anything folds, and so are rows of unknown age.
         """
         wanted = {s.upper() for s in symbols} if symbols is not None else None
         groups: Dict[str, List[Dict[str, Any]]] = {}
@@ -649,6 +671,8 @@ class EarningsLiveService:
             if rec is None:
                 rec = _Record(symbol=symbol, day=day, first_seen_at=now)
                 self._records[(symbol, day)] = rec
+            elif not fetched and _older_than_own_fetch(rec, stored_at):
+                continue
             ranked = _ranked_rows(group, today)
             _note_consensus(rec, ranked)
             self._fold_report(rec, _rows_to_fold(ranked, today), now, fetched=fetched)
@@ -659,7 +683,8 @@ class EarningsLiveService:
         """One response's rows for one report, weakest first, into its record: each metric's
         figure is the strongest row's that may be stored (`_settled` settles its estimate).
         The surprise behind a figure keeps the figure's consensus through a later pending row,
-        and the landing is the caller's, once per report."""
+        and the landing is the caller's, once per report. An own fetch also stamps the record,
+        which is the line later memo rows must clear (`observe_rows`)."""
         eps_pick: Optional[Tuple[Dict[str, Any], float]] = None
         revenue_pick: Optional[Tuple[Dict[str, Any], float]] = None
         held_revenue = rec.fmp_revenue
@@ -692,8 +717,10 @@ class EarningsLiveService:
             rec.fmp_eps, rec.eps_estimate, eps_pick, rows, _eps_estimate)
         rec.fmp_revenue, rec.revenue_estimate = _settled(
             rec.fmp_revenue, rec.revenue_estimate, revenue_pick, rows, _revenue_estimate)
-        if fetched and (rec.checked_at is None or now > rec.checked_at):
-            rec.checked_at = now
+        if fetched:
+            rec.fmp_fetched_mono = time.monotonic()
+            if rec.checked_at is None or now > rec.checked_at:
+                rec.checked_at = now
 
     def _note_landing(self, rec: _Record, now: datetime) -> None:
         if has_results(eps_metric(rec), revenue_metric(rec)):
@@ -1112,7 +1139,8 @@ async def earnings_live_tick(
     except Exception as e:
         calendar = []
         logger.info("[earnings-live] tracking calendar unavailable (%s: %s)", type(e).__name__, e)
-    service.observe_rows(today, calendar, now, symbols=watched)
+    service.observe_rows(today, calendar, now, symbols=watched,
+                         stored_at=ts.earnings_day_stored_at(fmp, today))
 
     before = service.fetches
     await service.refresh(now, fmp=fmp, symbols=watched)

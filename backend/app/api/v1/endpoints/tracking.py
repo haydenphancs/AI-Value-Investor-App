@@ -523,7 +523,7 @@ async def get_earnings_live(
     and the last four quarters. Signed-in only: FMP's Order Form licenses display on the
     authenticated app alone (the same wall `/tracking/assets` is behind).
 
-    Read-only — it never makes the live loop's fetches itself, so a poll costs a memo read.
+    It never makes the live loop's fetches itself, so a poll costs a memo read.
     """
     sym = (ticker or "").strip().upper()
     if not _LIVE_TICKER_RE.fullmatch(sym):

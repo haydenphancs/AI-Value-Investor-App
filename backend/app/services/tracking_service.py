@@ -579,6 +579,18 @@ def _held_earnings_days(fmp: Any) -> Dict[date, Tuple[float, List[Dict[str, Any]
     return memo[1]
 
 
+def earnings_day_stored_at(fmp: Any, day: date) -> Optional[float]:
+    """When ``day``'s rows were stored for this client, or None when that day is not held.
+
+    Monotonic, the clock of the live service's own fetch. This is the rows' own age however
+    they were served: a failed or empty round stores nothing, so held rows keep their stamp.
+    Read it straight after `_cached_earnings_calendar`, with no await between, so it belongs
+    to the rows in hand.
+    """
+    entry = _held_earnings_days(fmp).get(day)
+    return entry[0] if entry is not None else None
+
+
 def _earnings_days_due(fmp: Any, days: List[date], today: date) -> List[date]:
     """The window's days that are missing or older than their TTL, oldest first."""
     held = _held_earnings_days(fmp)
@@ -1602,13 +1614,15 @@ class TrackingService:
 
             ticker_set = {t.upper() for t in watchlist_tickers}
             alerts: List[AlertResponse] = []
-            # Live results ride on the same rows: today's are folded into the live records
-            # (read-only for this build — only the live loop ever fetches), so a card shows
-            # a figure the moment either the memo or the company's own filing has one.
+            # Live results ride on the same rows: today's are folded into the shared live
+            # records, skipping any older than a record's last own fetch, so a card shows a
+            # figure the moment either the memo or the company's own filing has one. This
+            # build makes no live fetch: only the live loop does.
             live = get_earnings_live_service() if settings.EARNINGS_LIVE_ENABLED else None
             now = datetime.now(timezone.utc)
             if live is not None:
-                live.observe_rows(today, calendar, now, symbols=ticker_set)
+                live.observe_rows(today, calendar, now, symbols=ticker_set,
+                                  stored_at=earnings_day_stored_at(self.fmp, today))
 
             # One card per report: FMP can list a report twice, and both cards would carry
             # one id on iOS. A non-dict row is skipped there too: the answer is memoised for
@@ -1713,10 +1727,11 @@ class TrackingService:
     ) -> EarningsLiveResponse:
         """`GET /tracking/earnings/{ticker}/live` — one report's live results for the sheet.
 
-        Read-only like the feed: today's rows come from the shared Tracking memo, the
-        previous trading day's from the live loop's records. The report is `requested`
-        when given (it must lie between the previous trading day and today + 14), else
-        today's, else the previous trading day's, else the next one in the window.
+        No live fetch, like the feed: today's rows come from the shared Tracking memo and are
+        folded into the shared live records, skipping any older than a record's last own
+        fetch; the previous trading day's are already in those records. The report is
+        `requested` when given (it must lie between the previous trading day and today + 14),
+        else today's, else the previous trading day's, else the next one in the window.
         """
         sym = symbol.upper()
         today = _et_today()
@@ -1736,7 +1751,8 @@ class TrackingService:
             logger.info("[Tracking] earnings live %s: calendar unavailable (%s: %s)",
                         sym, type(e).__name__, e)
             calendar = []
-        live.observe_rows(today, calendar, now, symbols={sym})
+        live.observe_rows(today, calendar, now, symbols={sym},
+                          stored_at=earnings_day_stored_at(self.fmp, today))
         # The card's pick, so a future pair cannot show one consensus there and another here.
         rows: Dict[date, Dict[str, Any]] = {
             d: entry

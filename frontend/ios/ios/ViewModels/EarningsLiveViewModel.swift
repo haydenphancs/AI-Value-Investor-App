@@ -12,6 +12,7 @@
 //  previous loop first, so re-arming can never leave two pollers running.
 //
 
+import Combine
 import Foundation
 import SwiftUI
 

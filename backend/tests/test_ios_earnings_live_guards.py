@@ -195,3 +195,27 @@ def test_a_result_row_is_hidden_only_for_the_same_report_on_screen():
     upcoming = tab[tab.index("private func duplicatesUpcomingCard("):]
     upcoming = upcoming[: upcoming.index("\n    }")]
     assert "isEarningsResult" not in upcoming, "the upcoming rule must stay ticker-scoped"
+
+
+def test_every_file_using_published_imports_combine():
+    """`SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY` is on, so a file cannot lean on the
+    Combine that `import SwiftUI` drags in: `@Published` / `ObservableObject` need their own
+    `import Combine`. EarningsLiveViewModel shipped without it, written without a compiler."""
+    project = _IOS.parent / "ios.xcodeproj/project.pbxproj"
+    assert "SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES" in project.read_text(
+        encoding="utf-8"
+    ), "the build setting that makes this guard necessary is gone: retire the guard with it"
+    missing = []
+    scanned = 0
+    for path in sorted(_IOS.parent.rglob("*.swift")):
+        code = _code(str(path.relative_to(_IOS))) if _IOS in path.parents else None
+        if code is None:
+            src = re.sub(r"/\*.*?\*/", "", path.read_text(encoding="utf-8"), flags=re.S)
+            code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("//"))
+        if not re.search(r"@Published\b|\bObservableObject\b", code):
+            continue
+        scanned += 1
+        if not re.search(r"^\s*(?:@\w+\s+)?import\s+Combine\b", code, re.M):
+            missing.append(str(path.relative_to(_IOS.parent)))
+    assert scanned >= 40, f"the scan found only {scanned} files: it is not reading the tree"
+    assert not missing, f"these files use @Published/ObservableObject with no import Combine: {missing}"

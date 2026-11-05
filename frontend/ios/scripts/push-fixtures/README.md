@@ -12,11 +12,14 @@ xcrun simctl push "$DEV" com.phan.caydex price_alert_crypto.json
 
 ## What every tap should do
 
-**Every tap opens the notification's DETAIL screen first** — the same screen Tracking → Alerts
-opens for a row: icon, title, the full body, "Received …", then the destination rows
-("Open NVDA", "Read the news", …). Nothing opens the ticker, report or investor screen until
-the user picks one of those rows. That applies to the lock screen, Notification Center, a
-banner (backgrounded, killed or foreground) and the "View" action alike.
+**Every tap but a report's opens the notification's DETAIL screen first** — the same screen
+Tracking → Alerts opens for a row: icon, title, the full body, "Received …", then the destination
+rows ("Open NVDA", "Read the news", …). Nothing opens the ticker or investor screen until the
+user picks one of those rows. That applies to the lock screen, Notification Center, a banner
+(backgrounded, killed or foreground) and the "View" action alike.
+
+**A report opens the REPORT at once** (`AlertDestination.directDestination`), with no detail
+screen.
 
 Every fixture carries a `dedup_key`, as every live sender does. The detail screen shows the
 payload at once and then fetches the full row by that key
@@ -30,7 +33,7 @@ To see the swap, set `dedup_key` to a real key for the signed-in simulator accou
 |---|---|
 | `ticker_move` | the baseline path — banner, tap, DETAIL, then "Open NVDA" → ticker screen |
 | `ticker_move_long_body` | the body arrives at the 180-char banner cut ("…"), as APNs gets it; the full text only comes from the lookup |
-| `research_complete` | `route: "report"` — the detail's first row is "Read the full report", which opens the REPORT (with its persona), not the ticker |
+| `research_complete` | `route: "report"` — the tap opens the REPORT (with its persona), not the ticker and not the detail. Its `report_id` is fake, so this fixture lands on "Report No Longer Available" with Go Back. To see a real report, set `report_id`, `ticker`, `persona` and `dedup_key` to a report the signed-in account owns |
 | `earnings_upcoming` / `earnings_result` | earnings copy + the `earnings` thread groups them; detail offers "See the numbers" |
 | `insider_trade` / `congress_trade` | `interruption-level: passive` (iOS may batch); detail offers the Holders sub-tab |
 | `price_alert_crypto` | **the routing regression**: "Open BTC" must open `CryptoDetailView`. The old handler hardcoded `.stock` and showed stock fundamentals for a coin. |
@@ -51,3 +54,8 @@ xcrun simctl push "$DEV" com.phan.caydex ticker_move.json
 `ContentView`'s `.onChange(of: appState.pendingPushNotification, initial: true)` exists for
 exactly this path. A plain `.onChange` fires only on a change *after* first render, and the
 notification is parked before any view exists.
+
+**Run `research_complete` cold too, with a real report.** A killed app reaches the report screen
+while the session is still `.restoring`, a window a live session never shows. It must say
+"Reconnecting your account…" and then load by itself. It used to be a blank screen with no way out
+(2026-11-05, `tests/test_ios_report_screen_never_blank.py`).

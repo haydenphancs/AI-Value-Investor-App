@@ -33,6 +33,16 @@ class TickerReportViewModel: ObservableObject {
     /// banner over the existing content instead.
     @Published var transientError: String?
 
+    /// The report is still owed, because no session was armed when this screen asked for it.
+    ///
+    /// A cold launch FROM a report-ready push opens this screen while the session is still
+    /// `.restoring` (about half a second on a good network, minutes on a bad one), so
+    /// `loadReport()` cannot fetch yet. That exit used to leave every state false, and the
+    /// screen rendered the bare background: no header, no spinner, no way out, and nothing
+    /// retried once the session arrived. The owner hit it tapping a report push on the lock
+    /// screen on 2026-11-05. The view re-runs `loadReport()` when auth reaches `.authenticated`.
+    @Published private(set) var awaitingSession = false
+
     // AI chat input (bound directly to CaydexAIChatBar in the View). The bar's onSend now seeds
     // the unified full-screen chat (AIChatScreen) with report context — see TickerReportView.
     @Published var aiInputText: String = ""
@@ -131,11 +141,16 @@ class TickerReportViewModel: ObservableObject {
         // same account requirement. Gating only /research/generate would have made that gate
         // cosmetic — this is the other door into the identical spend.
         guard AppActions.shared.isSignedIn else {
+            // Record what is owed BEFORE leaving: this exit must never leave the screen with
+            // nothing to draw. See `awaitingSession`.
+            awaitingSession = true
+            error = nil
             AppActions.shared.requestSignIn(for: "view AI analysis")
             isLoading = false
             return
         }
 
+        awaitingSession = false
         isLoading = true
         error = nil
         transientError = nil

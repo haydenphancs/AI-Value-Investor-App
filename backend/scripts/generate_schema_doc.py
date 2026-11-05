@@ -168,11 +168,15 @@ EXPECTED: dict[str, int] = {
     # Refreshed 2026-11-05 for migration 207 (catalog narration jobs): no new public table.
     #   +2 tables -> storage.bucket_lifecycle_states + storage.lifecycle_abandoned_artifacts, both added
     #                by the Supabase platform (public/fk/policies/rls/functions unchanged).
-    "tables": 158,
-    "public": 117,
+    # Refreshed 2026-11-05 after the owner applied 208 and re-dumping. The snapshot diff held ONLY
+    # 208's objects (no drift). Every delta accounted for:
+    #   -2 tables / -2 public / -2 rls / -2 policies -> daily_briefings, market_insights, each with
+    #                          one service_role policy (fk/functions/enums/views unchanged).
+    "tables": 156,
+    "public": 115,
     "fk": 36,
-    "policies": 124,
-    "rls": 117,
+    "policies": 122,
+    "rls": 115,
     "functions": 58,
     "enums": 14,
     "views": 1,

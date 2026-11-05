@@ -188,7 +188,7 @@ _JOB_STATE = {
 }
 _REGISTRY = {
     "agent_personas", "credit_packs", "plan_credits", "whales", "books", "lessons",
-    "money_move_articles", "daily_briefings", "trending_themes", "sector_benchmarks",
+    "money_move_articles", "trending_themes", "sector_benchmarks",
     "sector_aggregates", "industry_dossier", "industry_moat_benchmarks",
 }
 

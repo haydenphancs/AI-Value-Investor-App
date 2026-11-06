@@ -19,6 +19,8 @@ What is pinned here, each a way the LIVE card could lie or cost too much:
   * a filing-complete report leaves the SEC watch but keeps asking FMP until FMP confirms it;
   * before 06:00 ET and on a closed day the tick folds what the memo holds and pays for no
     refresh, and the FMP calls of a busy report day and a weekend stay on budget;
+  * ticks start exactly a minute apart while each fetch takes a moment, and every cadence still
+    lands on the tick it falls on: 5 min, 30 min, 2 h and the wait after a failed fetch;
   * a memo row held 12 h opens no record at any fold, so a report FMP moved over a weekend is
     never a report day: the tick asks FMP first, one round, only when such a row would open one;
   * feed builds and the sheet never fetch — only the loop does;
@@ -2275,13 +2277,26 @@ class _Clock:
         return self.at
 
 
+#: What one FMP call takes on the stand-in clock. Small, and never zero: a fetch stamps itself when
+#: it returns, and that moment past the tick's start is what a cadence has to survive.
+_FMP_CALL_SECONDS = 0.1
+
+
 async def _calls_per_day(monkeypatch, fmp: _FMP, start: datetime, end: datetime, watched: List[str],
                          on_tick: Optional[Callable[[datetime], None]] = None) -> Dict[date, int]:
-    """Every FMP call the REAL tick makes at the loop's 60 s pace with nobody opening the app,
-    under the ET day it was made on."""
+    """Every FMP call the REAL tick makes at the loop's pace with nobody opening the app, under
+    the ET day it was made on. As in `_forever`, the ticks START exactly 60 s apart, however long
+    their calls took."""
     clock = _Clock()
     monkeypatch.setattr(els, "time", SimpleNamespace(monotonic=clock.monotonic))
     monkeypatch.setattr(ts, "_time", SimpleNamespace(monotonic=clock.monotonic))
+    answer = fmp.get_earnings_calendar
+
+    async def _takes_a_moment(from_date=None, to_date=None):
+        clock.at += _FMP_CALL_SECONDS
+        return await answer(from_date=from_date, to_date=to_date)
+
+    fmp.get_earnings_calendar = _takes_a_moment
 
     async def _dispatch(snaps, now):
         return None
@@ -2289,6 +2304,7 @@ async def _calls_per_day(monkeypatch, fmp: _FMP, start: datetime, end: datetime,
     calls: Dict[date, int] = {}
     at = start
     while at < end:
+        started = clock.at
         today = els.et_now(at).date()
         monkeypatch.setattr(ts, "_et_today", lambda day=today: day)
         if on_tick is not None:
@@ -2297,8 +2313,106 @@ async def _calls_per_day(monkeypatch, fmp: _FMP, start: datetime, end: datetime,
         await els.earnings_live_tick(at, fmp=fmp, watched=watched, dispatch=_dispatch)
         calls[today] = calls.get(today, 0) + len(fmp.calls) - made
         at += timedelta(minutes=1)
-        clock.at += 60
+        clock.at = started + 60
     return calls
+
+
+def _minutes_of_own_fetches(fetched_at: List[int], start: datetime) -> Callable[[datetime], None]:
+    """An `on_tick` that notes the minute before each tick that fetched: `service.fetches` moves
+    only on the module's own fetch, never on a memo round."""
+    last = {"fetches": 0}
+
+    def _note(at: datetime) -> None:
+        now = _svc().fetches
+        if now > last["fetches"]:
+            fetched_at.append(int((at - start).total_seconds() // 60) - 1)
+        last["fetches"] = now
+
+    return _note
+
+
+@pytest.mark.asyncio
+async def test_a_hot_day_is_asked_on_every_fifth_tick_exactly(monkeypatch):
+    """The stamp sits a moment past its tick's start, so the fifth tick after it reads a moment
+    short of 5 min. An exact compare leaves the fetch for the sixth, and FMP's confirmation and
+    its push a minute late on every round. The slack must not bring it to the fourth either."""
+    fmp = _FMP({REPORT: [_row("INTC", REPORT)], PREV: []})
+    start = _et(REPORT, 9)
+    fetched_at: List[int] = []
+    await _calls_per_day(monkeypatch, fmp, start, start + timedelta(minutes=62), ["INTC"],
+                         _minutes_of_own_fetches(fetched_at, start))
+    assert fetched_at == list(range(0, 61, 5))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("today,ttl_minutes", [(REPORT, 30), (SATURDAY, 120)],
+                         ids=["trading_day", "closed_day"])
+async def test_an_earlier_day_is_asked_again_on_the_tick_its_ttl_ends(monkeypatch, today,
+                                                                       ttl_minutes):
+    earlier = previous_trading_day(today)
+    fmp = _FMP({earlier: [_row("INTC", earlier)], today: []})
+    start = _et(today, 14)
+    _svc().observe_rows(earlier, [_row("INTC", earlier)], start, fetched=True)
+    fetched_at: List[int] = []
+    end = start + timedelta(minutes=2 * ttl_minutes + 2)
+    await _calls_per_day(monkeypatch, fmp, start, end, ["INTC"],
+                         _minutes_of_own_fetches(fetched_at, start))
+    assert fetched_at == [0, ttl_minutes, 2 * ttl_minutes]
+
+
+@pytest.mark.parametrize("ttl,today,at", [
+    (els.EARNINGS_LIVE_HOT_TTL_SECONDS, REPORT, _et(REPORT, 9)),
+    (els.EARNINGS_LIVE_COLD_TTL_SECONDS, REPORT, _et(REPORT, 14)),
+    (els.EARNINGS_LIVE_CLOSED_DAY_TTL_SECONDS, SATURDAY, _et(SATURDAY, 14)),
+], ids=["hot", "cold", "closed_day"])
+def test_a_day_comes_due_a_few_seconds_early_and_no_earlier(monkeypatch, ttl, today, at):
+    clock = _Clock()
+    monkeypatch.setattr(els, "time", SimpleNamespace(monotonic=clock.monotonic))
+    svc, earlier = _svc(), previous_trading_day(today)
+    svc.observe_rows(earlier, [_row("INTC", earlier)], at)
+    svc._fetched[today] = clock.at
+    on_time = clock.at - ttl + els._DUE_SLACK_SECONDS
+    svc._fetched[earlier] = on_time
+    assert earlier in svc.due_days(at, ["INTC"])
+    svc._fetched[earlier] = on_time + 0.001
+    assert earlier not in svc.due_days(at, ["INTC"])
+
+
+def test_today_comes_due_a_few_seconds_early_and_no_earlier(monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(els, "time", SimpleNamespace(monotonic=clock.monotonic))
+    at, svc = _et(REPORT, 9), _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], at)
+    svc._fetched[PREV] = clock.at
+    on_time = clock.at - els.EARNINGS_LIVE_HOT_TTL_SECONDS + els._DUE_SLACK_SECONDS
+    svc._fetched[REPORT] = on_time
+    assert svc.due_days(at, ["INTC"]) == [REPORT]
+    svc._fetched[REPORT] = on_time + 0.001
+    assert svc.due_days(at, ["INTC"]) == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_fetch_is_asked_again_on_the_tick_its_wait_ends(monkeypatch):
+    """Its wait counts from when it failed, a moment past the tick. "next try in 120s" in the log
+    must not take 180."""
+    clock = _Clock()
+    monkeypatch.setattr(els, "time", SimpleNamespace(monotonic=clock.monotonic))
+    at, svc = _et(REPORT, 9), _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], at)
+    svc._fetched[PREV] = clock.at
+    asked: List[float] = []
+
+    class _Down(_FMP):
+        async def get_earnings_calendar(self, from_date=None, to_date=None):
+            asked.append(clock.at)
+            clock.at += _FMP_CALL_SECONDS
+            raise RuntimeError("FMP 503")
+
+    started, fmp = clock.at, _Down()
+    for minute in range(4):
+        clock.at = started + 60 * minute
+        await svc.refresh(at, fmp=fmp, symbols=["INTC"])
+    assert [t - started for t in asked] == [0, 120]
 
 
 @pytest.mark.asyncio

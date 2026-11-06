@@ -59,6 +59,7 @@ from app.services._whale_common import (
     sum_amount_bounds,
     format_amount_range,
 )
+from app.services.earnings_filing_service import _DUE_SLACK_SECONDS
 from app.services.earnings_window_service import fetch_calendar_days
 from app.services.earnings_live_service import (
     LiveSnapshot,
@@ -525,6 +526,10 @@ def _downsample(values: List[float], target: int) -> List[float]:
 #   rather than serving its own user a feed with no earnings alerts.
 # * Coherent only within one process — the deploy runs exactly one uvicorn worker
 #   (`tests/test_deploy_command_parity.py`).
+# * The live loop reads this memo on a tick that starts exactly on its minute, and a round
+#   stamps itself when it returns, so a TTL or a wait comes to its end a few seconds early
+#   (`_DUE_SLACK_SECONDS`). An exact compare falls a moment short on that tick and costs a
+#   minute: with nobody opening the app, "30 min" would be 31.
 EARNINGS_CALENDAR_TTL = 1800
 EARNINGS_CALENDAR_FAR_TTL = 6 * 3600
 # Days 0 and 1 (today, tomorrow) are "near".
@@ -599,7 +604,8 @@ def _earnings_days_due(fmp: Any, days: List[date], today: date) -> List[date]:
     now = _time.monotonic()
     return [
         d for d in days
-        if d not in held or now - held[d][0] >= _earnings_day_ttl(d, today)
+        if d not in held
+        or now - held[d][0] >= _earnings_day_ttl(d, today) - _DUE_SLACK_SECONDS
     ]
 
 
@@ -701,7 +707,7 @@ async def _cached_earnings_calendar(fmp: Any, today: date) -> List[Dict[str, Any
     retry = _earnings_calendar_retry_after
     if retry is not None and retry[0] is fmp:
         wait = retry[1] - _time.monotonic()
-        if wait > 0:
+        if wait > _DUE_SLACK_SECONDS:
             why = f"the last round failed; the next round in {wait:.0f} s"
             held_rows = _serve_held_earnings(fmp, days, span, why, logging.INFO)
             if held_rows is None:

@@ -89,6 +89,12 @@ source can hold the other up.
     verifies, stamped with that moment, so the card and the sheet show it mid-round, and its
     push goes out on the next FMP tick, at most a minute later. The tick reads the records the
     FMP tick folded, so a stuck FMP tick leaves it working from the ones already held.
+  Ticks START a minute apart however long they ran, and an FMP fetch stamps itself when it
+  returns, so every FMP cadence comes due a few seconds early (`_DUE_SLACK_SECONDS`): an exact
+  compare falls a moment short on the tick it was meant for, and "every 5 min" becomes every 6.
+  A long round has no minute of rest after it either, so the rest between two attempts at a
+  filing comes from `EarningsFilingWatcher.run_once`, which counts it from the end of the last
+  round that spent one.
 
 STATUSES (no time of day exists on `/stable` rows, so the window is the report day):
   * `upcoming` — a later date, or today before 06:00 ET with nothing in yet.
@@ -150,7 +156,7 @@ from typing import (
 
 from app.config import settings
 from app.services._earnings_common import eps_digit_shift_suspect
-from app.services.earnings_filing_service import FilingFigures
+from app.services.earnings_filing_service import _DUE_SLACK_SECONDS, FilingFigures
 from app.services.earnings_window_service import _row_date, _row_symbol, fetch_calendar_days
 from app.services.updates_materiality import finite
 from app.utils.market_hours import ET, is_trading_day, previous_trading_day
@@ -1006,15 +1012,16 @@ class EarningsLiveService:
         n = et_now(now)
         *earlier, today = live_days(n.date())
         mono = time.monotonic()
+        hot_ttl = EARNINGS_LIVE_HOT_TTL_SECONDS - _DUE_SLACK_SECONDS
         cold_ttl = (EARNINGS_LIVE_COLD_TTL_SECONDS if is_trading_day(today)
-                    else EARNINGS_LIVE_CLOSED_DAY_TTL_SECONDS)
+                    else EARNINGS_LIVE_CLOSED_DAY_TTL_SECONDS) - _DUE_SLACK_SECONDS
         due = []
         for day in earlier:
             last = self._fetched.get(day)
             if last is None:
                 due.append(day)
             elif self._is_hot(day, n, symbols):
-                if mono - last >= EARNINGS_LIVE_HOT_TTL_SECONDS:
+                if mono - last >= hot_ttl:
                     due.append(day)
             elif self._fmp_wanted(day, symbols) and mono - last >= cold_ttl:
                 # Outside the hot window a late FMP fill is still worth picking up, slowly, and
@@ -1022,7 +1029,7 @@ class EarningsLiveService:
                 due.append(day)
         if self._is_hot(today, n, symbols):
             last = self._fetched.get(today)
-            if last is None or mono - last >= EARNINGS_LIVE_HOT_TTL_SECONDS:
+            if last is None or mono - last >= hot_ttl:
                 due.append(today)
         return due
 
@@ -1039,7 +1046,7 @@ class EarningsLiveService:
         return: the days roll with nothing due and during a failure wait too. Never raises (a
         failure keeps the records of the live days)."""
         self._prune(now)
-        if time.monotonic() < self._failed_until:
+        if time.monotonic() < self._failed_until - _DUE_SLACK_SECONDS:
             return
         days = self.due_days(now, symbols)
         if not days:

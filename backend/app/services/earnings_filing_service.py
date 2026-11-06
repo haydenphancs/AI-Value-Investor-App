@@ -82,8 +82,11 @@ _EDGAR_OPEN = (6, 0)
 _EDGAR_CLOSE = (22, 0)
 _FAST_POLL_SECONDS = 60
 _SLOW_POLL_SECONDS = 300
-#: A symbol comes due this much early. Rounds start a minute apart give or take scheduling, and
-#: a round that wakes a moment short of the cadence must not leave the symbol for the next one.
+#: What a loop reads on its minute comes due this much early, here and in the FMP cadences
+#: (`earnings_live_service.due_days`, `tracking_service._earnings_days_due`). Ticks start a minute
+#: apart give or take scheduling, and a stamp taken when a read returned sits past its tick's
+#: start, so an exact compare falls a moment short on the tick it was meant for and loses a whole
+#: minute. Never a throttle's park: that one is SEC's, and is never cut short.
 _DUE_SLACK_SECONDS = 5
 #: Gap between two of OUR SEC calls, so a round of 25 symbols never holds the shared
 #: limiter for long and never bursts against SEC's per-second cap.
@@ -546,8 +549,8 @@ def build_prompt(symbol: str, report_date: date, text: str) -> str:
 
 @dataclass
 class _Watch:
-    # What the poll cadence counts from: the start of the round that read this symbol, or the
-    # end of a read that failed (`_check_one`).
+    # What the poll cadence counts from: the start of the round that read this symbol or, for a
+    # filing waiting on its next attempt, the end of the last round that spent one (`run_once`).
     checked_mono: float = 0.0
     found: Optional[ResultsFiling] = None
     done: bool = False          # extraction finished (figures or a reasoned miss)
@@ -611,8 +614,9 @@ class EarningsFilingWatcher:
 
         `symbols` must already be ordered most-watched first; the round keeps the first
         `EARNINGS_LIVE_SEC_MAX_SYMBOLS`. Never raises: a failure for one symbol costs only
-        that symbol's round, a throttle parks the whole watcher, and a delivery that fails
-        is logged, and that figure is not offered again in this process.
+        that symbol's round, a model that fails rests every filing waiting on a retry, a
+        throttle parks the whole watcher, and a delivery that fails is logged, and that figure
+        is not offered again in this process.
         """
         if not settings.EARNINGS_LIVE_FILINGS_ENABLED or not user_agent_configured():
             return {}
@@ -641,6 +645,7 @@ class EarningsFilingWatcher:
         from app.services.learn_weekly.signals import cik_for
 
         new: Dict[str, FilingFigures] = {}
+        spent = False
         first = True
         for symbol in due:
             key = (symbol, report_day)
@@ -656,6 +661,7 @@ class EarningsFilingWatcher:
             # a stamp per read would leave every symbol but the first short of the cadence at
             # the next round, and each would be read every other minute.
             w.checked_mono = mono
+            attempts = w.attempts
             try:
                 figures = await self._check_one(client, gemini, symbol, cik, report_day, w,
                                                 sleep)
@@ -679,6 +685,7 @@ class EarningsFilingWatcher:
                 logger.warning("[earnings-live-filing] %s: check raised (%s: %s)",
                                symbol, type(e).__name__, e, exc_info=True)
                 continue
+            spent = spent or w.attempts > attempts
             if figures is not None:
                 new[symbol] = figures
                 if on_figures is not None:
@@ -689,6 +696,17 @@ class EarningsFilingWatcher:
                             "[earnings-live-filing] %s %s: figures not delivered (%s: %s)",
                             symbol, report_day.isoformat(), type(e).__name__, e, exc_info=True,
                         )
+        # The loop starts the next round a second behind a long one, so the rest between two
+        # attempts comes from here: a round that spent one moves every filing still waiting on
+        # its next attempt to the end of this round, whichever round it failed in. Counted from
+        # their own rounds, filings that landed apart would take turns with no rest at all, and a
+        # filing out of attempts is never read again. A round that spent none moves nothing, so a
+        # model that has recovered holds no retry back.
+        if spent:
+            ended = time.monotonic()
+            for w in self._watch.values():
+                if w.attempts and not w.done:
+                    w.checked_mono = ended
         return new
 
     async def _check_one(
@@ -713,9 +731,8 @@ class EarningsFilingWatcher:
             w.found, w.done, w.figures = filing, True, figures
         else:
             # Transient (Gemini down): try the same filing again on the next due round,
-            # at most `_MAX_EXTRACT_ATTEMPTS` times. The cadence counts from the end of this
-            # read: the next round starts right behind a stalled one, and that must not spend
-            # the attempts any faster, because a filing out of attempts is never read again.
+            # at most `_MAX_EXTRACT_ATTEMPTS` times. `run_once` moves this stamp to the end of the
+            # round, and a round cut off before its end leaves the read on this one.
             w.attempts += 1
             w.checked_mono = time.monotonic()
             if w.attempts >= _MAX_EXTRACT_ATTEMPTS:

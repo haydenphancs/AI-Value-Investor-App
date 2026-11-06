@@ -10,7 +10,8 @@ days — today's first — was missing (Sentry PYTHON-FASTAPI-4S; live 2026-10-2
   * asks ONE ET day per call (`fetch_calendar_days`: all-or-nothing, rows kept only under
     their own date, a single day at the cap reported at ERROR);
   * memoises each day: today and tomorrow for `EARNINGS_CALENDAR_TTL` (30 min), later days
-    for `EARNINGS_CALENDAR_FAR_TTL` (6 h) — owner decision 2026-10-22, ~150 calls a day;
+    for `EARNINGS_CALENDAR_FAR_TTL` (6 h) — owner decision 2026-10-22, ~150 calls a day —
+    each a few seconds short, so the live tick that reads it on the minute keeps that cadence;
   * stores an empty DAY (weekends) but never an empty WINDOW, a failure or a non-list
     answer (a cached empty reads exactly like "nobody on this watchlist reports this
     fortnight");
@@ -261,7 +262,7 @@ async def test_near_days_refetch_after_30_minutes_far_days_after_6_hours():
     await _svc(fmp)._get_earnings_alerts(["AAPL"])
     assert len(fmp.calls) == 15
 
-    _age_memo(ts.EARNINGS_CALENDAR_TTL - 5)
+    _age_memo(ts.EARNINGS_CALENDAR_TTL - 10)
     await _svc(fmp)._get_earnings_alerts(["AAPL"])
     assert len(fmp.calls) == 15, "nothing is due before 30 minutes"
 
@@ -273,6 +274,32 @@ async def test_near_days_refetch_after_30_minutes_far_days_after_6_hours():
     _age_memo(ts.EARNINGS_CALENDAR_FAR_TTL)
     await _svc(fmp)._get_earnings_alerts(["AAPL"])
     assert len(fmp.calls) == 17 + 15, "after 6 hours every day is due"
+
+
+@pytest.mark.asyncio
+async def test_a_near_day_comes_due_a_few_seconds_early_and_no_earlier():
+    """A round stamps itself when it returns, and the live tick reads this on an exact minute:
+    an exact compare falls a moment short on the 30th tick, and "30 min" becomes 31."""
+    fmp = _CalendarFMP()
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    _age_memo(ts.EARNINGS_CALENDAR_TTL - ts._DUE_SLACK_SECONDS - 1)
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    assert len(fmp.calls) == 15
+    _age_memo(1)
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    assert len(fmp.calls) == 17
+
+
+@pytest.mark.asyncio
+async def test_a_far_day_comes_due_a_few_seconds_early_and_no_earlier():
+    fmp = _CalendarFMP()
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    _age_memo(ts.EARNINGS_CALENDAR_FAR_TTL - ts._DUE_SLACK_SECONDS - 1)
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    assert len(fmp.calls) == 17, "only the near days"
+    _age_memo(1)
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    assert len(fmp.calls) == 30, "and now the 13 others"
 
 
 @pytest.mark.asyncio
@@ -538,6 +565,22 @@ async def test_a_failed_round_serves_the_held_days_and_waits(caplog):
     _end_the_wait()
     await _svc(fmp)._get_earnings_alerts(["AAPL"])
     assert len(fmp.calls) == 19, "after the wait only the due days are asked again"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_rounds_wait_ends_a_few_seconds_early_and_no_earlier():
+    """The wait counts from the failure, a moment past the live tick that made the round: a
+    wait of 120 s must not read as 180 on the tick that was meant to end it."""
+    fmp = _CalendarFMP()
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    _age_memo(ts.EARNINGS_CALENDAR_TTL + 1)
+    held = len(fmp.calls)
+    ts._earnings_calendar_retry_after = (fmp, ts._time.monotonic() + ts._DUE_SLACK_SECONDS + 1)
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    assert len(fmp.calls) == held
+    ts._earnings_calendar_retry_after = (fmp, ts._time.monotonic() + ts._DUE_SLACK_SECONDS - 1)
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    assert len(fmp.calls) == held + 2
 
 
 @pytest.mark.asyncio

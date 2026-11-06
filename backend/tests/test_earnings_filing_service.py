@@ -13,7 +13,8 @@ symbol on a throttle.
 
 So is the round's timing, because the card reads the record while a round runs: a figure is
 handed over the moment it verifies, every symbol of a round comes due again a minute after that
-round started, and a failed read waits its cadence from its own end.
+round started, and a filing waiting on its next attempt rests a cadence from the end of the last
+round that spent one.
 Hermetic: fake SEC client and fake Gemini; `asyncio.sleep` is injected.
 """
 from __future__ import annotations
@@ -23,7 +24,7 @@ import json
 import logging
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
@@ -31,7 +32,7 @@ import app.services.earnings_filing_service as efs
 import app.services.earnings_live_service as els
 import app.services.learn_weekly.signals as signals
 from app.config import settings
-from app.integrations.sec_edgar import SECRateLimitException
+from app.integrations.sec_edgar import SECException, SECRateLimitException
 from app.utils.market_hours import ET
 
 REPORT = date(2026, 10, 29)
@@ -584,6 +585,170 @@ async def test_a_stalled_read_never_delays_the_symbols_behind_it_past_their_own_
     assert watcher._watch[("INTC", REPORT)].checked_mono == clock.at
 
 
+class _Model(_Gemini):
+    """Takes 90 s on the stand-in clock and fails until the clock reaches `until`, then answers.
+    `started` keeps every call as (symbol, when it began)."""
+
+    def __init__(self, clock: _Clock, *, until: float = float("inf")):
+        super().__init__()
+        self.clock, self.until = clock, until
+        self.started: List[Tuple[str, float]] = []
+
+    async def generate_json(self, prompt, **kwargs):
+        self.started.append((prompt.split("ticker: ")[1].split(".")[0], self.clock.at))
+        if self.clock.at < self.until:
+            self.clock.at += 90
+            raise RuntimeError("gemini timed out")
+        return await super().generate_json(prompt, **kwargs)
+
+    def of(self, symbol: str) -> List[float]:
+        return [at for sym, at in self.started if sym == symbol]
+
+
+def _both_filed() -> Dict[str, List[dict]]:
+    return {_CIKS["INTC"]: [_8K], _CIKS["AAPL"]: [_later_filing(_CIKS["AAPL"])]}
+
+
+@pytest.mark.asyncio
+async def test_every_failed_read_of_a_round_waits_its_cadence_from_the_rounds_end(watcher, clock):
+    """Two filings stall one after the other, so the first ended 90 s before the round did and
+    the next round starts a second behind it. Its own end would leave that first filing due at
+    once, and a filing out of attempts is never read again."""
+    sec, gem = _SEC(filings=_both_filed()), _Model(clock)
+
+    async def _round() -> None:
+        await watcher.run_once(_AT_16, ["INTC", "AAPL"], REPORT, sec=sec, gemini=gem,
+                               cik_map=_CIKS, sleep=_no_sleep)
+
+    await _round()
+    ended = clock.at
+    assert gem.of("INTC") == [1_000_000.0] and gem.of("AAPL") == [1_000_090.0]
+    assert {w.checked_mono for w in watcher._watch.values()} == {ended}
+
+    clock.at = ended + 1
+    await _round()
+    assert len(gem.started) == 2, "nothing starts right behind the stall"
+    clock.at = ended + 60 - efs._DUE_SLACK_SECONDS - 0.001
+    await _round()
+    assert len(gem.started) == 2, "a moment short of the cadence and its slack"
+    clock.at = ended + 60
+    await _round()
+    assert [sym for sym, _ in gem.started[2:]] == ["INTC", "AAPL"]
+
+
+@pytest.mark.asyncio
+async def test_a_filing_that_failed_earlier_rests_after_a_later_round_that_spent_an_attempt(
+        watcher, clock):
+    """Filings rarely land together. Counted from their own rounds, two that landed apart take
+    turns, each round right behind the other, and neither ever gets a minute of rest."""
+    sec, gem = _SEC(filings={_CIKS["INTC"]: [_8K]}), _Model(clock)
+
+    async def _round() -> None:
+        await watcher.run_once(_AT_16, ["INTC", "AAPL"], REPORT, sec=sec, gemini=gem,
+                               cik_map=_CIKS, sleep=_no_sleep)
+
+    await _round()
+    clock.at += 1
+    sec.filings[_CIKS["AAPL"]] = [_later_filing(_CIKS["AAPL"])]
+    await _round()
+    ended = clock.at
+    assert [sym for sym, _ in gem.started] == ["INTC", "AAPL"]
+    clock.at = ended + 1
+    await _round()
+    assert len(gem.started) == 2, "INTC failed 92 s ago, but the model failed 1 s ago"
+    clock.at = ended + 60
+    await _round()
+    assert [sym for sym, _ in gem.started[2:]] == ["INTC", "AAPL"]
+
+
+@pytest.mark.asyncio
+async def test_a_round_that_spent_no_attempt_holds_no_retry_back(watcher, clock):
+    """The rest is for a failing model. Once it answers, a waiting filing stays on its time."""
+    sec, gem = _SEC(filings={_CIKS["INTC"]: [_8K]}), _Model(clock)
+
+    async def _round() -> Dict[str, efs.FilingFigures]:
+        return await watcher.run_once(_AT_16, ["INTC", "AAPL"], REPORT, sec=sec, gemini=gem,
+                                      cik_map=_CIKS, sleep=_no_sleep)
+
+    await _round()
+    failed = clock.at
+    gem.until = clock.at
+    clock.at += 1
+    sec.filings[_CIKS["AAPL"]] = [_later_filing(_CIKS["AAPL"])]
+    assert set(await _round()) == {"AAPL"}
+    assert watcher._watch[("INTC", REPORT)].checked_mono == failed
+    clock.at = failed + 60
+    assert set(await _round()) == {"INTC"}
+
+
+@pytest.mark.asyncio
+async def test_a_read_that_spent_no_attempt_keeps_the_rounds_start(watcher, clock):
+    """Only what spent an attempt moves: the round's quiet symbols stay on the minute, and a
+    filing that verified is done either way."""
+    class _SecDown(_SEC):
+        async def get_submissions(self, cik):
+            if cik == _CIKS["MSFT"]:
+                raise SECException("SEC 503")
+            return await super().get_submissions(cik)
+
+    started = clock.at
+    sec = _SecDown(filings={_CIKS["INTC"]: [_8K]})
+    await watcher.run_once(_AT_16, ["INTC", "AAPL", "MSFT"], REPORT, sec=sec, gemini=_Model(clock),
+                           cik_map=_CIKS, sleep=_no_sleep)
+    stamps = {key[0]: w.checked_mono for key, w in watcher._watch.items()}
+    assert stamps == {"INTC": started + 90, "AAPL": started, "MSFT": started}
+
+
+@pytest.mark.asyncio
+async def test_a_throttle_that_ends_a_round_early_still_moves_its_failed_reads(watcher, clock):
+    """The park can be shorter than the cadence, and the last stall still counts."""
+    class _ThrottledLate(_SEC):
+        async def get_submissions(self, cik):
+            if cik == self.throttle_on:
+                clock.at += 30
+            return await super().get_submissions(cik)
+
+    sec = _ThrottledLate(filings={_CIKS["INTC"]: [_8K]}, throttle_on=_CIKS["AAPL"])
+    await watcher.run_once(_AT_16, ["INTC", "AAPL"], REPORT, sec=sec, gemini=_Model(clock),
+                           cik_map=_CIKS, sleep=_no_sleep)
+    assert watcher._watch[("INTC", REPORT)].checked_mono == clock.at
+
+
+@pytest.mark.asyncio
+async def test_a_round_cut_off_keeps_a_failed_read_on_its_own_end(watcher, clock):
+    """The round's end never comes, and a cancel from outside leaves the loop running: without
+    its own stamp the failed read would count from the round's start and go straight again."""
+    reached = asyncio.Event()
+
+    class _Hangs(_SEC):
+        async def get_submissions(self, cik):
+            if cik == _CIKS["AAPL"]:
+                reached.set()
+                await asyncio.Event().wait()
+            return await super().get_submissions(cik)
+
+    sec = _Hangs(filings={_CIKS["INTC"]: [_8K]})
+    round_ = asyncio.create_task(
+        watcher.run_once(_AT_16, ["INTC", "AAPL"], REPORT, sec=sec, gemini=_Model(clock),
+                         cik_map=_CIKS, sleep=_no_sleep))
+    await asyncio.wait_for(reached.wait(), 2.0)
+    round_.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await round_
+    assert watcher._watch[("INTC", REPORT)].checked_mono == 1_000_090.0
+
+
+@pytest.mark.asyncio
+async def test_a_filing_out_of_attempts_is_never_read_again(watcher, clock):
+    sec, gem = _SEC(filings={_CIKS["INTC"]: [_8K]}), _Model(clock)
+    for _ in range(5):
+        await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
+                               sleep=_no_sleep)
+        clock.at += 120
+    assert len(gem.started) == efs._MAX_EXTRACT_ATTEMPTS
+    assert watcher.figures_for("INTC", REPORT) is None
+
+
 # ── the filing tick, on the real watcher ─────────────────────────────────────
 
 
@@ -673,3 +838,91 @@ async def test_a_figure_the_round_could_not_store_is_logged_and_the_round_goes_o
                for r in caplog.records)
     assert live.snapshot("AAPL", REPORT, _AT_16).revenue.actual == 17.1e9
     assert live.snapshot("INTC", REPORT, _AT_16).revenue.actual is None
+
+
+# ── a stalled model on the real loop ─────────────────────────────────────────
+
+
+class _StopLoop(BaseException):
+    """Ends `_forever`, which outlives every `Exception`."""
+
+
+async def _filing_loop_runs(monkeypatch, clock: _Clock, seconds: float, *, symbols: List[str],
+                            sec: _SEC, gemini: _Model) -> List[float]:
+    """The real `_forever` over the real filing tick, on the stand-in clock, for `seconds`.
+    Returns when each round that called the model ended."""
+    monkeypatch.setattr(els, "time", SimpleNamespace(monotonic=clock.monotonic))
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
+    stop_at = clock.at + seconds
+    ended: List[float] = []
+
+    async def earnings_filing_tick(_now):
+        called = len(gemini.started)
+        await els.earnings_filing_tick(_AT_16, watched=symbols, sec=sec, gemini=gemini)
+        if len(gemini.started) > called:
+            ended.append(clock.at)
+
+    async def _rest(wait):
+        clock.at += wait
+        if clock.at >= stop_at:
+            raise _StopLoop
+
+    with pytest.raises(_StopLoop):
+        await els._forever(earnings_filing_tick, 60, sleep=_rest)
+    return ended
+
+
+class _FiledOnTheClock(_SEC):
+    """A filing is on the record from its own moment: `landing` maps a symbol to seconds after
+    the start."""
+
+    def __init__(self, clock: _Clock, landing: Dict[str, float]):
+        super().__init__()
+        self.clock, self.start = clock, clock.at
+        self.landing = {_CIKS[symbol]: at for symbol, at in landing.items()}
+
+    async def get_submissions(self, cik):
+        if self.clock.at - self.start >= self.landing.get(cik, float("inf")):
+            self.filings[cik] = [_later_filing(cik)]
+        return await super().get_submissions(cik)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("landing", [
+    {"INTC": 0, "AAPL": 0, "MSFT": 0},
+    {"INTC": 0, "AAPL": 100, "MSFT": 0},
+    {"INTC": 0, "AAPL": 100, "MSFT": 200},
+    {"INTC": 0, "AAPL": 300, "MSFT": 550},
+], ids=["together", "two_then_one", "a_round_apart", "minutes_apart"])
+async def test_a_retry_never_starts_within_a_minute_of_a_round_that_spent_an_attempt(
+        live, clock, monkeypatch, landing):
+    """The loop starts the next round a second behind a long one, so the rest between attempts
+    has to come from the stamps, for every filing and however they landed."""
+    live.observe_rows(REPORT, [_pending(s) for s in landing], _AT_16)
+    gem = _Model(clock)
+    ended = await _filing_loop_runs(monkeypatch, clock, 3000, symbols=list(landing),
+                                    sec=_FiledOnTheClock(clock, landing), gemini=gem)
+    for symbol in landing:
+        reads = gem.of(symbol)
+        assert len(reads) == efs._MAX_EXTRACT_ATTEMPTS, symbol
+        for retry in reads[1:]:
+            rests = [retry - at for at in ended if at <= retry]
+            assert min(rests) >= 60, (symbol, reads, ended)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stall,landing", [
+    (480, {"INTC": 0, "AAPL": 0}),
+    (660, {"INTC": 0, "AAPL": 0, "MSFT": 0}),
+    (480, {"AAPL": 50, "INTC": 0}),
+], ids=["two_filings", "three_filings", "two_filings_in_rounds_of_their_own"])
+async def test_a_stall_the_filings_can_outlast_loses_none(live, clock, monkeypatch, stall,
+                                                          landing):
+    """Each attempt spent early is a filing lost to a stall that ends a little later, and the
+    first filing is the most-watched."""
+    live.observe_rows(REPORT, [_pending(s) for s in landing], _AT_16)
+    gem = _Model(clock, until=clock.at + stall)
+    await _filing_loop_runs(monkeypatch, clock, 1500, symbols=list(landing),
+                            sec=_FiledOnTheClock(clock, landing), gemini=gem)
+    for symbol in landing:
+        assert live.snapshot(symbol, REPORT, _AT_16).revenue.actual == 17.1e9, symbol

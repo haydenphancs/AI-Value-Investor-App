@@ -64,7 +64,7 @@ def _code_only(src: str) -> str:
         if line.strip().startswith("//"):
             out.append("")
             continue
-        out.append(re.sub(r"\s//.*$", "", line))
+        out.append(re.sub(r"(?<!:)//.*$", "", line))
     return "\n".join(out)
 
 
@@ -800,6 +800,9 @@ def test_every_registered_kind_declares_its_icon():
     body = _balanced(_read(_NOTIF_MODELS), "var iconName: String {")
     missing = sorted(k for k in _registered_kinds() if f'"{k}"' not in body)
     assert not missing, f"notification kinds with no arm in `iconName`: {missing}"
+    assert re.search(r'"earnings_live":\s+return "calendar\.badge\.clock"', body), (
+        "a Live Results row must wear its Earnings group's glyph"
+    )
 
 
 def test_both_detail_screens_use_the_one_destination_row():

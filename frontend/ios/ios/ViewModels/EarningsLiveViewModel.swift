@@ -13,7 +13,8 @@
 //  sheet while the Tracking card behind it updates. That retry is bounded (`maxFailedLoads`),
 //  and a request the server refuses as invalid ends the poll at once, shown answer or not: a
 //  `report_date` can age out under an open sheet, and the 400 it then gets is permanent.
-//  `start()` clears both, so Try Again and a return to the foreground always ask again.
+//  Either way nothing is asking any more, so the card stops saying LIVE (`pollEnded`).
+//  `start()` clears all of it, so Try Again and a return to the foreground always ask again.
 //
 //  Lifecycle mirrors the detail screens' polls (`TickerDetailView`): `start()` on appear and
 //  on `didBecomeActive`, `stop()` on disappear and `willResignActive`. `start()` cancels any
@@ -31,6 +32,10 @@ final class EarningsLiveViewModel: ObservableObject {
     /// and offers Try Again. A failed poll over a shown answer keeps the answer (it is still
     /// the latest truth we have) and tries again next tick.
     @Published private(set) var loadFailed = false
+    /// This loop is over with the report's state unknown: the retry ran out, or the server
+    /// refused the request. Always with `loadFailed`, so the notice's Try Again is on screen.
+    /// Not when the server stops the poll itself: that answer says how the report stands.
+    @Published private(set) var pollEnded = false
 
     let ticker: String
     private let reportDate: String?
@@ -72,6 +77,7 @@ final class EarningsLiveViewModel: ObservableObject {
         guard !isPreview else { return }
         pollTask?.cancel()
         loadFailed = false
+        pollEnded = false
         failedLoads = 0
         refused = false
         pollTask = Task { [weak self] in
@@ -79,7 +85,10 @@ final class EarningsLiveViewModel: ObservableObject {
             while !Task.isCancelled {
                 await self.load()
                 guard !Task.isCancelled else { break }
-                guard let seconds = self.nextPollSeconds else { break }
+                guard let seconds = self.nextPollSeconds else {
+                    self.pollEnded = self.refused || self.live == nil
+                    break
+                }
                 let wait = UInt64(max(seconds, Self.minimumPollSeconds)) * 1_000_000_000
                 try? await Task.sleep(nanoseconds: wait)
             }

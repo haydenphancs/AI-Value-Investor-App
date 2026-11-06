@@ -61,7 +61,10 @@ struct EarningsResultChips: View {
         func say(_ name: String, _ o: EarningsMetricOutcome) -> String {
             guard o.hasLanded else {
                 if o.isChecking { return "\(name) being confirmed" }
-                return status == .live ? "\(name) not out yet" : "\(name) not reported"
+                // The card's own rule (`earningsResultsLine`). Never "not reported": a finished
+                // report can lack one figure in the feed, and the company did report.
+                return status == .live || o.estimate != nil
+                    ? "\(name) not out yet" : "\(name) not available"
             }
             if o.isGAAP { return "\(name) reported on a GAAP basis" }
             switch o.result {

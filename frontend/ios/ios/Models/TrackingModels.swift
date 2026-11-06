@@ -329,6 +329,9 @@ enum AppAlert: Identifiable {
         /// confirmed. The actual above stays nil.
         var epsChecking: Bool = false
         var revenueChecking: Bool = false
+        /// The sheet's own poll gave up, so nothing is checking this report from here and the
+        /// sentence must not wait on it. Set by `AlertDetailView.headerAlert`, never by the wire.
+        var liveCheckEnded: Bool = false
 
         var formattedDay: String { String(day) }
         var formattedMonth: String { month.uppercased() }
@@ -542,7 +545,7 @@ enum AppAlert: Identifiable {
         case .live where !data.hasResults && !data.epsChecking && !data.revenueChecking:
             var sentence = "\(data.ticker) reports today."
             if !data.consensus.isEmpty { sentence += " \(data.consensus)." }
-            return sentence + " Waiting for results…"
+            return data.liveCheckEnded ? sentence : sentence + " Waiting for results…"
         case .live, .reported:
             let lead = data.status == .live
                 ? "\(data.ticker) is reporting."
@@ -551,7 +554,12 @@ enum AppAlert: Identifiable {
             return results.isEmpty ? lead : lead + " " + results
         case .awaiting:
             let when = dateText.isEmpty ? "" : " \(dateText)"
-            return "\(data.ticker)'s\(when) results aren't in yet."
+            // Every figure held and none shown ends as `awaiting`. A held figure exists, so
+            // "aren't in yet" would sit above the sheet's "Confirming…" and contradict it.
+            guard data.epsChecking || data.revenueChecking else {
+                return "\(data.ticker)'s\(when) results aren't in yet."
+            }
+            return "\(data.ticker)'s\(when) results: \(earningsResultsLine(data))"
         }
     }
 

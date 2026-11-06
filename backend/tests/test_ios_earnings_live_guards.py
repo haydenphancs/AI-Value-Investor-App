@@ -11,8 +11,8 @@ screen's contract is:
     pollers would double the traffic), and a failed first load retries by itself, bounded;
   * the route: "See live results" is offered only while the endpoint serves that report;
   * the sheet: its header follows the card's own answer, it claims nothing before the first
-    answer, it says "Waiting…" only while the report is live, and a held figure reads the same
-    on the card and the sheet;
+    answer, it says "Waiting…" only while the report is live, it stops saying LIVE when the
+    device stops asking, and a held figure reads the same on the card and the sheet;
   * the previews: sample figures, no request, and no way into a production path;
   * the formatting defects the card shipped with ("$-0.25", "$0.0B") stay fixed.
 Every scan is comment-stripped first, so a doc comment naming a removed token cannot satisfy
@@ -41,16 +41,27 @@ from app.utils.market_hours import previous_trading_day
 _IOS = Path(__file__).resolve().parents[2] / "frontend/ios/ios"
 
 
-def _code(rel: str) -> str:
-    path = _IOS / rel
-    assert path.exists(), f"missing: {path}"
-    src = re.sub(r"/\*.*?\*/", "", path.read_text(encoding="utf-8"), flags=re.S)
+def _strip_comments(src: str) -> str:
+    """Block comments, whole-line comments and a `//` tail, spaced or glued to the code. The
+    look-behind keeps the `//` of a URL in a string."""
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
     out = []
     for line in src.splitlines():
         if line.strip().startswith("//"):
             continue
-        out.append(re.sub(r"\s//.*$", "", line))
+        out.append(re.sub(r"(?<!:)//.*$", "", line))
     return "\n".join(out)
+
+
+def _code(rel: str) -> str:
+    path = _IOS / rel
+    assert path.exists(), f"missing: {path}"
+    return _strip_comments(path.read_text(encoding="utf-8"))
+
+
+def _norm(code: str) -> str:
+    """One space between tokens, so a pin does not depend on where a call wraps."""
+    return re.sub(r"\s+", " ", code)
 
 
 def _struct_block(src: str, name: str) -> str:
@@ -104,6 +115,20 @@ _CARD = "Views/Organisms/EarningsLiveResultsCard.swift"
 _SCREEN = "Views/Screens/EarningsLiveScreen.swift"
 _DETAIL = "Views/Screens/AlertDetailView.swift"
 _CHIPS = "Views/Molecules/EarningsResultChips.swift"
+_UPDATED = "func updated(with live: EarningsLiveResponse) -> AppAlert.EarningsData {"
+_CARD_INIT = ("init(ticker: String, reportDate: String?, fallback: AppAlert.EarningsData? = nil,\n"
+              "         onAnswer: ((EarningsLiveResponse) -> Void)? = nil,\n"
+              "         onPollEnded: ((Bool) -> Void)? = nil) {")
+
+
+def test_a_comment_cannot_satisfy_a_scan_however_it_is_glued_on():
+    assert _strip_comments("if a {// token") == "if a {"
+    assert _strip_comments("if a { // token") == "if a { "
+    assert _strip_comments("    // token\nlet b = 1") == "let b = 1"
+    assert _strip_comments("let a = 1 /* token */ + 2") == "let a = 1  + 2"
+    url = 'let u = "https://example.test/a"'
+    assert _strip_comments(url) == url, "a URL in a string is code"
+    assert _strip_comments(url + "// token") == url
 
 
 @pytest.mark.parametrize("swift_name,model", [
@@ -131,6 +156,11 @@ def test_the_alert_dto_decodes_every_live_card_key():
     }
     assert live_keys <= set(AlertResponse.model_fields), "backend dropped a live key"
     assert live_keys <= ios, f"AlertDTO is missing {sorted(live_keys - ios)}"
+    dto = _struct_block(_code(_TRACKING_MODELS), "AlertDTO")
+    for key in sorted(live_keys):
+        head, *rest = key.split("_")
+        field = head + "".join(word.capitalize() for word in rest)
+        assert f'case {field} = "{key}"' in dto, f"{key} is decoded into the wrong field"
 
 
 def test_the_feed_response_decodes_the_recent_earnings_list():
@@ -179,15 +209,25 @@ def test_the_sheet_poll_stops_when_the_server_stops_asking():
     assert start.index("pollTask?.cancel()") < start.index("pollTask = Task"), (
         "re-arming leaves the previous poller running"
     )
-    assert "guard let seconds = self.nextPollSeconds else { break }" in start
-    assert "minimumPollSeconds" in start
+    assert "pollTask?.cancel()" in _body(vm, "func stop() {")
+    assert "guard let seconds = self.nextPollSeconds else {" in start
+    loop = _body(start, "while !Task.isCancelled {")
+    assert loop.index("guard !Task.isCancelled else { break }") < loop.index("self.nextPollSeconds"), (
+        "a cancelled load is no answer: it may not end the poll that replaced it"
+    )
+    assert "let wait = UInt64(max(seconds, Self.minimumPollSeconds)) * 1_000_000_000" in loop, (
+        "`minimumPollSeconds` is a floor: a `min` makes it a ceiling"
+    )
+    assert "private static let minimumPollSeconds = 15" in vm, "a malformed cadence hammers the route"
+    assert "try? await Task.sleep(nanoseconds: wait)" in loop, "the retry fires with no wait"
     next_poll = _body(vm, "private var nextPollSeconds: Int? {")
     assert "guard let seconds = live.pollSeconds, seconds > 0 else { return nil }" in next_poll, (
         "a real answer with poll_seconds null must end the poll"
     )
-    card = _code(_CARD)
+    card = _norm(_code(_CARD))
     for hook in (".onAppear { viewModel.start() }", ".onDisappear { viewModel.stop() }",
-                 "willResignActiveNotification", "didBecomeActiveNotification"):
+                 "willResignActiveNotification)) { _ in viewModel.stop() }",
+                 "didBecomeActiveNotification)) { _ in viewModel.start() }"):
         assert hook in card, f"the live card lost its lifecycle hook: {hook}"
 
 
@@ -195,6 +235,48 @@ def test_the_sheet_hosts_the_live_card_without_changing_its_own_signature():
     detail = _code("Views/Screens/AlertDetailView.swift")
     assert "EarningsLiveResultsCard(ticker: data.ticker, reportDate: data.reportDate," in detail
     assert "var onOpen: (AlertDestination) -> Void" in detail
+
+
+def test_the_sheet_opens_on_the_tap_figures_and_the_live_answer_then_wins():
+    """The sheet is never blank while the first answer loads, and from that answer on nothing
+    on it may go on reading the copy taken at the tap."""
+    detail = _norm(_body(_code(_DETAIL),
+                         "private func earningsDetail(_ data: AppAlert.EarningsData) -> some View {"))
+    assert ("fallback: data, onAnswer: { liveAnswer = $0 }, onPollEnded: { liveCheckEnded = $0 })"
+            in detail)
+    card = _code(_CARD)
+    init = _body(card, _CARD_INIT)
+    for stored in ("self.fallback = fallback", "self.onAnswer = onAnswer",
+                   "self.onPollEnded = onPollEnded"):
+        assert stored in init, f"the card drops what its host gave it: {stored}"
+    for opener, order in (
+        ("private var status: EarningsLiveStatus {",
+         "live?.liveStatus ?? fallback?.status ?? .upcoming"),
+        ("private var eps: EarningsMetricOutcome {", "live?.epsOutcome ?? fallback?.epsOutcome"),
+        ("private var revenue: EarningsMetricOutcome {",
+         "live?.revenueOutcome ?? fallback?.revenueOutcome"),
+        ("private var isPreliminary: Bool {",
+         "live?.preliminary ?? fallback?.isPreliminary ?? false"),
+        ("private var checkedAt: Date? {", "live?.checkedDate ?? fallback?.checkedAt"),
+        ("private var companyName: String {", 'live?.companyName ?? fallback?.companyName ?? ""'),
+    ):
+        assert order in _norm(_body(card, opener)), f"the answer must win: {order}"
+
+
+def test_the_report_date_reaches_the_endpoint_from_both_doors():
+    """Drop it anywhere on the way and the server picks a report itself: a Friday report opened
+    on Monday with no held record reads next quarter's estimates."""
+    screen = _body(_code(_SCREEN), "init(ticker: String, reportDate: String?) {")
+    assert "self.card = EarningsLiveResultsCard(ticker: ticker, reportDate: reportDate)" in screen
+    assert ("StateObject(wrappedValue: EarningsLiveViewModel(ticker: ticker, reportDate: reportDate))"
+            in _norm(_body(_code(_CARD), _CARD_INIT)))
+    vm = _code(_VM)
+    assert "self.reportDate = reportDate" in _body(
+        vm, "init(ticker: String, reportDate: String?, apiClient: APIClient = .shared) {")
+    assert "endpoint: .getEarningsLive(ticker: ticker, reportDate: reportDate)," in _body(
+        vm, "private func load() async {")
+    assert 'guard let reportDate, !reportDate.isEmpty else { return nil }' in _code(
+        "Core/Services/APIEndpoint.swift")
 
 
 def test_the_push_offers_live_results_first_and_the_cover_opens_them():
@@ -208,10 +290,14 @@ def test_the_push_offers_live_results_first_and_the_cover_opens_them():
 
 
 def test_the_consensus_formatting_defects_stay_fixed():
-    models = _code("Models/TrackingModels.swift")
-    assert 'String(format: "EPS Est: $%.2f"' not in models, "prints a loss as $-0.25"
-    assert 'String(format: "Rev Est: $%.1fB"' not in models, "prints $23.5M as $0.0B"
     fmt = _code(_MODELS)
+    consensus = _body(
+        fmt, "static func consensusText(epsEstimate: Double?, revenueEstimate: Double?) -> String {")
+    assert '"EPS Est: \\(EarningsFigureFormat.eps(eps))"' in consensus, "prints a loss as $-0.25"
+    assert '"Rev Est: \\(EarningsFigureFormat.revenue(revenue))"' in consensus, "prints $23.5M as $0.0B"
+    for code in (fmt, _code(_TRACKING_MODELS)):
+        assert 'String(format: "EPS Est: $%.2f"' not in code
+        assert 'String(format: "Rev Est: $%.1fB"' not in code
     eps = fmt[fmt.index("static func eps(_ value: Double) -> String"):]
     eps = eps[: eps.index("\n    }")]
     assert 'let sign = value < 0 ? "-" : ""' in eps, "the EPS sign goes after the $ again"
@@ -281,9 +367,15 @@ def test_live_results_are_offered_only_while_the_endpoint_serves_the_report():
 
     helper = _body(_code(_HOURS),
                    "nonisolated static func previousTradingDayKey(at instant: Date = Date()) -> String {")
-    assert "etCalendar" in helper, "the floor is the date in New York, not on the device"
-    assert "previousTradingDay(before:" in helper
-    assert '"%04d-%02d-%02d"' in helper
+    assert "let calendar: Calendar = etCalendar" in helper, (
+        "the floor is the date in New York, not on the device"
+    )
+    # Whole statements: a second walk inside this one offers a date the endpoint refuses.
+    assert ("let day: Date = previousTradingDay(before: calendar.startOfDay(for: instant), "
+            "calendar: calendar)") in helper
+    assert "calendar.dateComponents([.year, .month, .day], from: day)" in helper
+    assert ('return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, '
+            'parts.day ?? 0)') in helper
 
 
 def test_the_route_floor_walks_the_calendar_the_endpoint_refuses_by():
@@ -324,9 +416,15 @@ def test_a_failed_first_load_keeps_trying_and_the_sheet_says_so():
     assert "fallback" not in next_poll.lower(), (
         "a status guessed from the Tracking card would poll a finished report for ever"
     )
+    load = _body(vm, "private func load() async {")
+    assert "loadFailed = false" in load[: load.index("} catch {")], (
+        "a retry that recovers leaves the failure notice under the real answer"
+    )
     card = _code(_CARD)
     body = _body(card, "var body: some View {")
-    assert "if viewModel.loadFailed {" in body
+    notice = _body(body, "if viewModel.loadFailed {")
+    assert "InlineRetryNotice(" in notice
+    assert "onRetry: { viewModel.start() }" in notice, "Try Again must ask again"
     assert "viewModel.loadFailed && fallback == nil" not in card, (
         "the sheet always has a fallback, so this hides the notice from it"
     )
@@ -337,7 +435,10 @@ def test_the_retry_is_bounded_and_a_refusal_ends_the_poll_at_once():
     vm = _code(_VM)
     next_poll = _body(vm, "private var nextPollSeconds: Int? {")
     assert "failedLoads < Self.maxFailedLoads" in next_poll
-    assert re.search(r"private static let maxFailedLoads = \d+\b", vm)
+    bound = re.search(r"private static let maxFailedLoads = (\d+)\b", vm)
+    assert bound and 1 < int(bound.group(1)) <= 40, (
+        "a bound of minutes, not one retry and not years at 30 s a try"
+    )
     assert next_poll.index("if refused { return nil }") < next_poll.index("if let live"), (
         "a refusal must also end a poll running over a shown answer"
     )
@@ -369,8 +470,8 @@ def test_the_sheet_header_reads_the_cards_own_answer():
     assert body.count("Text(headerAlert.title)") == 2
     assert body.count("Text(headerAlert.description)") == 1
     header = _body(detail, "private var headerAlert: AppAlert {")
-    assert "guard case .earnings(let data) = alert, let liveAnswer else { return alert }" in header
-    assert ".earnings(data.updated(with: liveAnswer))" in header
+    assert "guard case .earnings(var data) = alert else { return alert }" in header
+    assert "if let liveAnswer { data = data.updated(with: liveAnswer) }" in header
     assert "switch headerAlert {" in _body(detail, "private var detailContent: some View {"), (
         "the Date and Consensus rows must read the same answer as the header above them"
     )
@@ -390,22 +491,39 @@ def test_the_header_is_rebuilt_from_every_field_it_reads():
     )))
     assert {"status", "epsActual", "revenueActual", "consensus", "reportTime"} <= read, read
     derived = {"formattedMonth": "month", "formattedDay": "day", "hasResults": "epsActual"}
-    fields = {derived.get(name, name) for name in read}
-    updated = _body(_code(_MODELS),
-                    "func updated(with live: EarningsLiveResponse) -> AppAlert.EarningsData {")
-    missing = sorted(f for f in fields | {"revenueEstimate", "epsSurprisePct", "revenueSurprisePct",
-                                          "isPreliminary", "checkedAt", "epsChecking",
-                                          "revenueChecking"}
-                     if f"{f}:" not in updated)
+    # `liveCheckEnded` is no answer's to give: the sheet sets it on this copy (`headerAlert`).
+    fields = {derived.get(name, name) for name in read} - {"liveCheckEnded"}
+    updated = _norm(_body(_code(_MODELS), _UPDATED))
+    missing = sorted(f for f in fields if f"{f}:" not in updated)
     assert not missing, f"updated(with:) leaves the tap's copy of {missing}"
-    assert "consensus: Self.consensusText(" in updated, (
-        "the sentence prints the consensus string, not the estimates beside it"
-    )
+    assert "let answer: EarningsLiveStatus = live.liveStatus" in updated
+    assert "let eps: EarningsMetricOutcome = live.epsOutcome" in updated
+    assert "let revenue: EarningsMetricOutcome = live.revenueOutcome" in updated
+    # Label AND value: with a bare label the tap's own copy would pass, one line under it.
+    for pair in (
+        "ticker: ticker,",
+        "companyName: live.companyName ?? companyName,",
+        "reportTime: sameReport ? reportTime : nil,",
+        "consensus: Self.consensusText(epsEstimate: eps.estimate, revenueEstimate: revenue.estimate),",
+        "status: answer,",
+        "reportDate: live.reportDate,",
+        "epsEstimate: eps.estimate,",
+        "revenueEstimate: revenue.estimate,",
+        "epsActual: eps.actual,",
+        "revenueActual: revenue.actual,",
+        "epsSurprisePct: eps.surprisePct,",
+        "revenueSurprisePct: revenue.surprisePct,",
+        "epsIsGAAP: eps.isGAAP,",
+        "isPreliminary: live.preliminary ?? isPreliminary,",
+        "checkedAt: live.checkedDate ?? checkedAt,",
+        "epsChecking: eps.isChecking,",
+        "revenueChecking: revenue.isChecking )",
+    ):
+        assert pair in updated, f"updated(with:) must copy: {pair}"
 
 
 def test_an_answer_about_another_report_never_repaints_this_ones_figures():
-    updated = _body(_code(_MODELS),
-                    "func updated(with live: EarningsLiveResponse) -> AppAlert.EarningsData {")
+    updated = _norm(_body(_code(_MODELS), _UPDATED))
     assert "let sameReport: Bool = live.reportDate == reportDate" in updated
     assert "if hasResults, answer == .notScheduled || !sameReport { return self }" in updated
     guard_at = updated.index("{ return self }")
@@ -415,10 +533,26 @@ def test_an_answer_about_another_report_never_repaints_this_ones_figures():
     assert "reportTime: sameReport ? reportTime : nil" in updated, (
         "the time of day belongs to the date the card was drawn for"
     )
-    assert "Self.dayAndMonth(of: live.reportDate)" in updated, (
+    # `none` with no figures takes effect, or the header promises a report the card denies.
+    assert ("if answer == .notScheduled { var unscheduled = self "
+            "unscheduled.status = .notScheduled return unscheduled }") in updated
+    assert updated.index("{ return self }") < updated.index("var unscheduled = self"), (
+        "figures on screen outrank `none`"
+    )
+    # A moved report takes its new date, whole, and the copy prints that date.
+    assert "let moved = Self.dayAndMonth(of: live.reportDate)" in updated, (
         "a report that moved must not keep the old date beside the new status"
     )
+    assert "shownDay = moved?.day ?? 0" in updated
+    assert 'shownMonth = moved?.month ?? ""' in updated
+    assert "day: shownDay, month: shownMonth," in updated
     models = _code(_MODELS)
+    day_and_month = _norm(_body(
+        models, "private static func dayAndMonth(of reportDate: String) -> (day: Int, month: String)? {"))
+    assert "guard parts.count == 3, let month = Int(parts[1]), let day = Int(parts[2])," in day_and_month
+    assert "(1...12).contains(month), (1...31).contains(day) else { return nil }" in day_and_month, (
+        "month 13 would index past the table and crash the sheet"
+    )
     table = models[models.index("private static let monthNames"):]
     months = re.findall(r'"([A-Z]{3})"', table[: table.index("]\n")])
     assert months == [m.upper() for m in calendar.month_abbr[1:]], "the feed's month names"
@@ -452,17 +586,33 @@ def test_the_screen_claims_nothing_before_the_first_answer():
     card = _code(_CARD)
     assert "private var hasNothingToShow: Bool { live == nil && fallback == nil }" in card
     body = _body(card, "var body: some View {")
-    assert body.index("if hasNothingToShow") < body.index('metricRow(title: "Revenue"')
+    first = _body(body, "if hasNothingToShow {")
+    assert "metricRow" not in first and "footnote" not in first, "a claim before any answer"
+    after = body[body.index(first) + len(first):]
+    assert after.lstrip().startswith("else if status == .notScheduled {"), (
+        "the rows must be the OTHER branch, or they draw under the spinner"
+    )
+    assert "ProgressView()" in _body(first, "if !viewModel.loadFailed {"), (
+        "a spinner must not turn beside the failure notice"
+    )
     line = _body(card, "private var statusLine: String {")
     assert line.index("if hasNothingToShow") < line.index("switch status")
-    assert "Loading results" in line and "aren't available right now" in line
+    assert ('return viewModel.loadFailed ? "Results aren\'t available right now" '
+            ': "Loading results…"') in line
+    label = _body(card, "private func outcomeLabel(_ outcome: EarningsMetricOutcome) -> some View {")
+    assert "} else if !outcome.hasLanded, status == .live, !viewModel.loadFailed {" in label, (
+        "a row spins only while its figure is on its way and the device is asking"
+    )
     assert "isLoading" not in card and "isLoading" not in _code(_VM)
 
 
 def test_the_footnote_follows_the_eps_basis():
     foot = _body(_code(_CARD), "private var footnote: some View {")
-    assert foot.index("eps.isGAAP") < foot.index("EPS is adjusted (non-GAAP)")
-    assert "This EPS is GAAP" in foot
+    assert re.search(r'let basis: String = eps\.isGAAP\s*\?\s*"This EPS is GAAP.*?"\s*'
+                     r':\s*"EPS is adjusted \(non-GAAP\)', foot), (
+        "the sentence must match the basis the row shows"
+    )
+    assert "Text(basis +" in foot
 
 
 def test_a_metric_is_awaited_only_while_the_report_is_live():
@@ -472,13 +622,12 @@ def test_a_metric_is_awaited_only_while_the_report_is_live():
     actual = _body(card, "private func actualText(_ outcome: EarningsMetricOutcome,\n"
                          "                            format: (Double) -> String) -> String {")
     assert actual.index('"Confirming…"') < actual.index('"Waiting…"')
-    assert 'status == .live ? "Waiting…" : "—"' in actual
+    assert 'return isLiveNow ? "Waiting…" : "—"' in actual
     body = _body(card, "var body: some View {")
     assert re.search(r'if showsRevenueRow \{\s*metricRow\(title: "Revenue"', body)
-    rows = _body(card, "private var showsRevenueRow: Bool {")
-    for term in ("status == .live", "revenue.estimate != nil", "revenue.hasLanded",
-                 "revenue.isChecking"):
-        assert term in rows, f"the Revenue row hides while {term}"
+    rows = _norm(_body(card, "private var showsRevenueRow: Bool {"))
+    assert rows == ("{ status == .live || revenue.estimate != nil || revenue.hasLanded "
+                    "|| revenue.isChecking }"), "the Revenue row must hide only with nothing to say"
 
     chips = _code(_CHIPS)
     value = _body(chips, "private func value(_ outcome: EarningsMetricOutcome) -> String {")
@@ -502,7 +651,12 @@ def test_a_held_figure_reads_the_same_on_the_card_and_the_sheet():
     assert re.search(r"isPreliminary: isPreliminary,\s+isChecking: revenueChecking\)", tracking)
     line = _body(tracking, "static func earningsResultsLine(_ data: EarningsData) -> String {")
     assert 'if checking { return "\\(label) being confirmed" }' in line
-    assert "checking: data.revenueChecking" in line and "checking: data.epsChecking" in line
+    # Each flag on its own metric: crossed, the card names the wrong figure as held.
+    flat = _norm(line)
+    assert ('part("Revenue", data.revenueActual, data.revenueEstimate, '
+            'checking: data.revenueChecking, EarningsFigureFormat.revenue),') in flat
+    assert ('part(epsLabel, data.epsActual, data.epsIsGAAP ? nil : data.epsEstimate, '
+            'checking: data.epsChecking, EarningsFigureFormat.eps),') in flat
     # "being confirmed" is what the push says (`earnings_live_sender._phrase`).
     sentence = _body(tracking, "static func earningsDescription(_ data: EarningsData) -> String {")
     assert "!data.epsChecking && !data.revenueChecking" in sentence, (
@@ -510,6 +664,97 @@ def test_a_held_figure_reads_the_same_on_the_card_and_the_sheet():
     )
     spoken = _body(_code(_CHIPS), "private var spoken: String {")
     assert '"\\(name) being confirmed"' in spoken
+    answer = _code(_MODELS)
+    assert "isChecking: eps.checking ?? false" in _body(answer, "var epsOutcome: EarningsMetricOutcome {")
+    assert "isChecking: revenue.checking ?? false" in _body(
+        answer, "var revenueOutcome: EarningsMetricOutcome {")
+
+
+def test_a_held_figure_is_not_called_absent_once_the_window_has_closed():
+    """Every figure held and none shown reads `awaiting` from 22:00 ET and on later days: the
+    flags must still reach the sentence, or the header says the results aren't in above a row
+    saying "Confirming…"."""
+    sentence = _body(_code(_TRACKING_MODELS),
+                     "static func earningsDescription(_ data: EarningsData) -> String {")
+    arm = sentence[sentence.index("case .awaiting:"):]
+    assert re.search(r"guard data\.epsChecking \|\| data\.revenueChecking else \{\s*"
+                     r"return \"\\\(data\.ticker\)'s\\\(when\) results aren't in yet\.\"\s*\}", arm), (
+        "`aren't in yet` is for a report with nothing held"
+    )
+    assert 'return "\\(data.ticker)\'s\\(when) results: \\(earningsResultsLine(data))"' in arm
+    line = _body(_code(_CARD), "private var statusLine: String {")
+    assert ('return eps.isChecking || revenue.isChecking ? "Results being confirmed" '
+            ': "Results aren\'t in yet"') in _norm(line)
+
+
+def test_the_spoken_chip_says_what_the_card_says():
+    """A report can be finished with one figure missing from the feed: the card says it is not
+    out yet, or nothing. "Not reported" beside that is a false claim about the company, and
+    the rule has to stay the card's (`earningsResultsLine`)."""
+    spoken = _norm(_body(_code(_CHIPS), "private var spoken: String {"))
+    assert 'if o.isChecking { return "\\(name) being confirmed" }' in spoken
+    assert ('return status == .live || o.estimate != nil ? "\\(name) not out yet" '
+            ': "\\(name) not available"') in spoken
+    assert "not reported" not in spoken
+    line = _body(_code(_TRACKING_MODELS),
+                 "static func earningsResultsLine(_ data: EarningsData) -> String {")
+    assert 'data.status == .live || estimate != nil ? "\\(label) not out yet"' in line
+
+
+# ── a poll that has given up ─────────────────────────────────────────────────
+
+
+def test_a_poll_that_gave_up_says_so_and_a_try_again_clears_it():
+    """It ends with no answer once the retries run out, or on a refusal shown answer or not. A
+    poll the server itself stopped is not this: the answer then says how the report stands."""
+    vm = _code(_VM)
+    assert "@Published private(set) var pollEnded = false" in vm
+    start = _body(vm, "func start() {")
+    assert start.index("pollEnded = false") < start.index("pollTask = Task"), (
+        "Try Again and a return to the foreground must draw LIVE again while they ask"
+    )
+    stopped = _norm(_body(start, "guard let seconds = self.nextPollSeconds else {"))
+    assert stopped == "{ self.pollEnded = self.refused || self.live == nil break }"
+
+
+def test_nothing_on_the_sheet_says_live_once_the_device_has_stopped_asking():
+    """`LiveBadge`: LIVE only while it is genuinely being checked. With the retry over, the status
+    the card reads is a last word from before that, and the sheet stays open for as long as
+    the user leaves it."""
+    card = _code(_CARD)
+    assert "private var isLiveNow: Bool { status == .live && !viewModel.pollEnded }" in card
+    assert card.count("LiveBadge()") == 1
+    badge = _body(_body(card, "private var header: some View {"), "if isLiveNow {")
+    assert "LiveBadge()" in badge
+    line = _body(card, "private var statusLine: String {")
+    arm = line[line.index("case .live:"): line.index("case .reported:")]
+    assert arm.index("guard isLiveNow else {") < arm.index("Checking for results")
+    assert 'guard isLiveNow else { return "Latest results aren\'t available right now" }' in arm
+    # The rows: `actualText` is pinned by `test_a_metric_is_awaited_only_while_the_report_is_live`.
+    assert "!viewModel.loadFailed" in _body(
+        card, "private func outcomeLabel(_ outcome: EarningsMetricOutcome) -> some View {")
+    assert re.search(r"loadFailed = live == nil \|\| refused", _code(_VM)), (
+        "an ended poll must always be a failed one, or the row keeps spinning"
+    )
+
+
+def test_the_header_stops_waiting_when_the_card_does():
+    """The header sits right above the card: it may not go on saying "Waiting for results…"."""
+    card = _code(_CARD)
+    hook = _norm(card[card.index(".onChange(of: viewModel.pollEnded)"):])
+    assert hook.startswith(".onChange(of: viewModel.pollEnded) { _, ended in onPollEnded?(ended) }"), (
+        "Bool, not fire-and-forget: Try Again has to take it back"
+    )
+    detail = _code(_DETAIL)
+    assert "@State private var liveCheckEnded = false" in detail
+    header = _body(detail, "private var headerAlert: AppAlert {")
+    assert header.index("data.updated(with: liveAnswer)") < header.index(
+        "data.liveCheckEnded = liveCheckEnded"), "`updated(with:)` builds a fresh copy"
+    tracking = _code(_TRACKING_MODELS)
+    assert "var liveCheckEnded: Bool = false" in tracking
+    sentence = _body(tracking, "static func earningsDescription(_ data: EarningsData) -> String {")
+    assert 'return data.liveCheckEnded ? sentence : sentence + " Waiting for results…"' in sentence
+    assert sentence.count("Waiting for results") == 1
 
 
 # ── the off switch ───────────────────────────────────────────────────────────

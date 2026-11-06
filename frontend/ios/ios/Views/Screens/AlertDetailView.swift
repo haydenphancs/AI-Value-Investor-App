@@ -27,13 +27,17 @@ struct AlertDetailView: View {
 
     /// The newest answer of the results card below.
     @State private var liveAnswer: EarningsLiveResponse? = nil
+    /// The results card's poll gave up: it has stopped saying LIVE, so the header stops waiting.
+    @State private var liveCheckEnded = false
 
     /// The alert as the sheet draws it. `alert` is the copy taken at the tap, and the results
     /// card polls on its own, so the sheet reads the card's answer: the Tracking feed would
     /// leave it up to a minute behind the card after each landing, and for good if a poll failed.
     private var headerAlert: AppAlert {
-        guard case .earnings(let data) = alert, let liveAnswer else { return alert }
-        return .earnings(data.updated(with: liveAnswer))
+        guard case .earnings(var data) = alert else { return alert }
+        if let liveAnswer { data = data.updated(with: liveAnswer) }
+        data.liveCheckEnded = liveCheckEnded
+        return .earnings(data)
     }
 
     var body: some View {
@@ -148,7 +152,8 @@ struct AlertDetailView: View {
             // the backend predates it, and the card would ask about a report nobody watches.
             if data.reportDate != nil {
                 EarningsLiveResultsCard(ticker: data.ticker, reportDate: data.reportDate,
-                                        fallback: data, onAnswer: { liveAnswer = $0 })
+                                        fallback: data, onAnswer: { liveAnswer = $0 },
+                                        onPollEnded: { liveCheckEnded = $0 })
             }
 
             VStack(spacing: AppSpacing.md) {

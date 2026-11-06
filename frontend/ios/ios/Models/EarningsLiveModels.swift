@@ -318,7 +318,8 @@ extension AppAlert.EarningsData {
 
     /// This card as the sheet's newest answer tells it (`AlertDetailView.headerAlert`), so the
     /// header cannot fall behind the results card under it: the card's fields are the copy taken
-    /// at the tap. Every field `AppAlert.title` and `earningsDescription` read comes from here.
+    /// at the tap. Every field `AppAlert.title` and `earningsDescription` read comes from here,
+    /// but `liveCheckEnded`: that is no answer's to give, and the sheet sets it on the result.
     ///
     /// Two answers do not describe the figures this card holds, and neither may take them back:
     /// `none` (the server has no such report right now), and an answer for another date (the

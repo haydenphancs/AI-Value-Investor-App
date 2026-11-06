@@ -20,7 +20,9 @@
 //    * a GAAP EPS is labelled GAAP and never coloured — the consensus is adjusted;
 //    * a figure held by a sanity guard reads "Confirming…", never as a number;
 //    * a metric is awaited only while the report is LIVE: a finished report with no revenue
-//      consensus has stopped waiting for revenue, so it reads "—", or loses the row.
+//      consensus has stopped waiting for revenue, so it reads "—", or loses the row;
+//    * LIVE lasts only while this device is asking: once its poll has given up, the status
+//      left on screen is a last word from before that, so the badge and "Waiting…" go.
 //
 
 import SwiftUI
@@ -31,14 +33,18 @@ struct EarningsLiveResultsCard: View {
     private let fallback: AppAlert.EarningsData?
     /// Each new answer, for a host whose own text reads the same report (`AlertDetailView`).
     private let onAnswer: ((EarningsLiveResponse) -> Void)?
+    /// Whether the poll has given up (`EarningsLiveViewModel.pollEnded`), for the same host.
+    private let onPollEnded: ((Bool) -> Void)?
     @State private var browserLink: BrowserLink?
 
     init(ticker: String, reportDate: String?, fallback: AppAlert.EarningsData? = nil,
-         onAnswer: ((EarningsLiveResponse) -> Void)? = nil) {
+         onAnswer: ((EarningsLiveResponse) -> Void)? = nil,
+         onPollEnded: ((Bool) -> Void)? = nil) {
         _viewModel = StateObject(wrappedValue: EarningsLiveViewModel(ticker: ticker,
                                                                     reportDate: reportDate))
         self.fallback = fallback
         self.onAnswer = onAnswer
+        self.onPollEnded = onPollEnded
     }
 
     #if DEBUG
@@ -47,6 +53,7 @@ struct EarningsLiveResultsCard: View {
         _viewModel = StateObject(wrappedValue: EarningsLiveViewModel(previewing: answer))
         self.fallback = nil
         self.onAnswer = nil
+        self.onPollEnded = nil
     }
     #endif
 
@@ -57,6 +64,10 @@ struct EarningsLiveResultsCard: View {
     private var status: EarningsLiveStatus {
         live?.liveStatus ?? fallback?.status ?? .upcoming
     }
+
+    /// The report reads LIVE and this device is still asking. Anything that claims a check is
+    /// under way reads this, never `status` alone (`LiveBadge`'s honesty rule).
+    private var isLiveNow: Bool { status == .live && !viewModel.pollEnded }
 
     private var eps: EarningsMetricOutcome {
         live?.epsOutcome ?? fallback?.epsOutcome
@@ -134,6 +145,7 @@ struct EarningsLiveResultsCard: View {
         .onChange(of: viewModel.live) { _, answer in
             if let answer { onAnswer?(answer) }
         }
+        .onChange(of: viewModel.pollEnded) { _, ended in onPollEnded?(ended) }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
             viewModel.stop()
         }
@@ -152,7 +164,7 @@ struct EarningsLiveResultsCard: View {
                     .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
                 Spacer(minLength: 0)
-                if status == .live {
+                if isLiveNow {
                     LiveBadge()
                 }
             }
@@ -169,6 +181,7 @@ struct EarningsLiveResultsCard: View {
         }
         switch status {
         case .live:
+            guard isLiveNow else { return "Latest results aren't available right now" }
             if let checkedAt {
                 return "Checking for results · updated \(Self.relative(checkedAt))"
             }
@@ -179,7 +192,8 @@ struct EarningsLiveResultsCard: View {
             }
             return "Reported"
         case .awaiting:
-            return "Results aren't in yet"
+            return eps.isChecking || revenue.isChecking
+                ? "Results being confirmed" : "Results aren't in yet"
         case .upcoming:
             return "Results will appear here the moment they're out"
         case .notScheduled:
@@ -228,7 +242,7 @@ struct EarningsLiveResultsCard: View {
                             format: (Double) -> String) -> String {
         if let actual = outcome.actual { return format(actual) }
         if outcome.isChecking { return "Confirming…" }
-        return status == .live ? "Waiting…" : "—"
+        return isLiveNow ? "Waiting…" : "—"
     }
 
     @ViewBuilder

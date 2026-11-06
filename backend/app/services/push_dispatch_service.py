@@ -1416,7 +1416,8 @@ class PushDispatchService:
         not lost, only the buzz.
 
         A kind with `night_hold_by_default` asks two more things at its wake, in the loop
-        below: is this still the user's night, and what does the report say now.
+        below: is this still the user's night, and what does the report say now. A report that
+        has yet to answer waits and is asked again, never past `MAX_FLUSH_ATTEMPTS` hand-outs.
         """
         stats = {"claimed": 0, "sent": 0, "stale": 0, "no_device": 0,
                  "failed": 0, "suppressed": 0, "requeued": 0}
@@ -1672,11 +1673,28 @@ class PushDispatchService:
                         )
                         continue
                     if wake is not None and not wake.send:
+                        # A figure still being confirmed is no answer, so it does not end the
+                        # row the way a figure that moved does: the buzz would be gone for good
+                        # with FMP's recovery minutes away. The attempts ceiling is the bound,
+                        # and it is the same one a failed try counts against. Checked after the
+                        # gate above, which no later look can change.
+                        attempts = int(row.get("attempts") or 0)
+                        if wake.ask_again_in is not None and attempts < self.MAX_FLUSH_ATTEMPTS:
+                            again = now + wake.ask_again_in
+                            if await asyncio.to_thread(self._hold_again, uid, key, again):
+                                logger.info(
+                                    "push: held row user=%s key=%s has no answer yet, asking "
+                                    "again at %s (hand-out %d of %d)", uid, key,
+                                    again.isoformat(), attempts, self.MAX_FLUSH_ATTEMPTS,
+                                )
+                                stats["requeued"] += 1
+                                continue
+                        why = ("a figure is still being confirmed" if wake.ask_again_in is not None
+                               else "the report no longer says this")
                         stats["suppressed"] = stats.get("suppressed", 0) + 1
                         await asyncio.to_thread(
                             self.mark_state, uid, key, STATE_FAILED,
-                            error="suppressed on flush: the report no longer says this",
-                            sent=False,
+                            error=f"suppressed on flush: {why}", sent=False,
                         )
                         continue
 
@@ -1820,7 +1838,7 @@ class PushDispatchService:
             return True
         except Exception as e:
             logger.warning(
-                "push: could not hold user=%s key=%s until %s (%s: %s) — delivering it now",
+                "push: could not hold user=%s key=%s until %s (%s: %s) — finishing it now",
                 user_id, dedup_key, deliver_after.isoformat(), type(e).__name__, e,
             )
             return False

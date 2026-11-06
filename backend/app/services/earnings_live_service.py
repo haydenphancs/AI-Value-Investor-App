@@ -21,6 +21,10 @@ TWO SOURCES, ONE RECORD PER (symbol, report date).
   a record. A report own fetches ended has none to protect, so its row comes back for a while
   (A REPORT FMP MOVES). A memo refreshed after the fetch folds as usual: a report FMP has
   confirmed is no longer fetched, so the memo is how a later FMP correction reaches it.
+  The daily pass reads FMP for itself and folds what it read as an own fetch, before it tells
+  anyone (`earnings_sender._fold_into_live_records`). It is the other way a correction reaches a
+  report no fetch asks about, and without it a record could be older than the row it overrules
+  at a held push's wake.
 
 DUPLICATE ROWS. FMP can list one report twice, a stale pending row beside the reported one,
 in either order. One response therefore decides per report, never per row, and a repeat of it
@@ -92,9 +96,9 @@ forgotten must never reach it again, or it reads as new on every round.
     its own. Feed builds add the memo's rounds the tick no longer pays for: ~37 before 06:00 on
     a trading day and up to ~150 on a closed day. A blank first look adds up to 11 calls, then
     the slow cadence for as long as FMP leaves that day blank.
-  * Refreshed by the live loop ONLY (`run_earnings_live_loop`, 60 s). Feed builds and the
-    sheet endpoint fold the Tracking memo and read; they never fetch, so the live state adds
-    no latency to the feed.
+  * Fetched by the live loop ONLY (`run_earnings_live_loop`, 60 s); the daily pass's answer
+    folds in too, at no extra call. Feed builds and the sheet endpoint fold the Tracking memo and
+    read; they never fetch, so the live state adds no latency to the feed.
 
 A REPORT FMP MOVES. Each day is judged on its own rows, so a report moved off its date would
 stay there: LIVE with the hot fetch and an SEC slot until 22:00, then a card the next morning
@@ -333,8 +337,9 @@ class _Record:
     fmp_revenue: Optional[float] = None
     filing: Optional[FilingFigures] = None
     checked_at: Optional[datetime] = None
-    # Monotonic time of the last own fetch that held this report. Per record, not per day: a
-    # ticker that fetch left out keeps folding the memo. None until a fetch has held it.
+    # Monotonic time of the last own fetch that held this report, the daily pass's answer
+    # included. Per record, not per day: a ticker that fetch left out keeps folding the memo.
+    # None until a fetch has held it.
     fmp_fetched_mono: Optional[float] = None
     # Monotonic time of the first own fetch that left this report out, of those since one last
     # listed it. Answers that cannot show a report gone do not count (`_end_unlisted`).
@@ -892,9 +897,11 @@ class EarningsLiveService:
         ``symbols`` narrows the fold to those tickers (a feed build passes its user's), so a
         reader never pays for the whole market's rows.
 
-        ``fetched`` is True only for this module's OWN fetch, the one moment the sources were
-        actually checked. Rows folded in from the Tracking memo (up to 30 min old) must not move
-        `checked_at`, or the sheet would say "updated just now" over a half-hour-old answer.
+        ``fetched`` is True only for an answer just read from FMP, the one moment the sources
+        were actually checked: this module's OWN fetch, or the daily pass's
+        (`earnings_sender._fold_into_live_records`). Rows folded in from the Tracking memo (up
+        to 30 min old) must not move `checked_at`, or the sheet would say "updated just now"
+        over a half-hour-old answer.
 
         ``stored_at`` is when the memo stored these rows, on the clock of `_fetched`
         (`tracking_service.earnings_day_stored_at`); an own fetch ignores it. The newest FMP

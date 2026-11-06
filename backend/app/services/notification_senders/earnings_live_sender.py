@@ -24,7 +24,18 @@ A HELD ROW'S TEXT is decided at its wake, not at its landing (`copy_at_wake`): t
 have moved under it for hours, and the flush is what asks. The text comes from the record, a
 surprise the record no longer holds is not buzzed, and the row keeps what the record says so the
 inbox never shows the number the phone was spared. The row's own text stands only when the
-record has nothing to say: it is gone (a restart), or holds no figure.
+record has nothing to say: it is gone (a restart), or holds no figure. A row from the daily pass
+reads the same way: the pass gives the record what it read first, so the record is never the
+older of the two.
+
+A REPORT WITH NO ANSWER YET is not a report that has changed its mind. A figure held as
+"checking" is a figure FMP has yet to confirm, and it can come back right after the wake. So
+instead of ending the row, the wake asks again (`WAKE_ASK_AGAIN`), with the row saying what is
+known meanwhile, and only for a row that would otherwise end. `earnings_result` waits on FMP's own
+EPS, the one figure it may state. `earnings_live` waits only when it has no figure to state at
+all: a revenue beside an EPS in doubt is a true sentence and goes out. The dispatcher bounds it
+(`PushDispatchService.MAX_FLUSH_ATTEMPTS`). A row still without an answer at its last hand-out
+ends unbuzzed, and if FMP recovers later still that report gets no buzz: the bound is the point.
 
 THE WINDOW. Neither kind goes out for a report older than yesterday: the daily pass's own
 rule (`earnings_sender.in_result_window`), which is narrower than the live days around a
@@ -54,7 +65,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 from app.config import settings
@@ -89,6 +100,10 @@ logger = logging.getLogger(__name__)
 #: watched reports only, so this counts sends for them and never the market. Anything over it
 #: is picked up on the next 60 s round, while its report is still inside the result window.
 MAX_SENDS_PER_ROUND = 60
+#: How long a held row with no answer yet waits to ask again (A REPORT WITH NO ANSWER YET). A
+#: report that still wants FMP is read every 5 or 30 min on a trading day, so one wait holds a
+#: read, and the two a row can have reach the 2 h cadence of a closed day.
+WAKE_ASK_AGAIN = timedelta(hours=1)
 
 # Once per (symbol, report date) per process. The dedup key is what stops a restart from
 # re-sending; these sets stop the same process from re-dispatching every 60 s. A key is taken
@@ -155,11 +170,13 @@ def live_copy(snap: LiveSnapshot) -> Tuple[str, str]:
 @dataclass(frozen=True)
 class WakeCopy:
     """What a held result says at its wake. `send` False keeps it off the phone: the text goes
-    to its inbox row alone."""
+    to its inbox row alone. `ask_again_in` says that `send` False is no last word: the report
+    has yet to answer, so the row may wait that long and be read again."""
 
     title: str
     body: str
     send: bool
+    ask_again_in: Optional[timedelta] = None
 
 
 def _result_surprise(snap: LiveSnapshot) -> Optional[float]:
@@ -170,6 +187,12 @@ def _result_surprise(snap: LiveSnapshot) -> Optional[float]:
         return None
     surprise = surprise_pct({"epsEstimated": eps.estimate, "epsActual": eps.actual})
     return surprise if surprise is not None and abs(surprise) >= MIN_SURPRISE else None
+
+
+def _fmp_eps_stands(snap: LiveSnapshot) -> bool:
+    """Is FMP's own EPS on show? `earnings_result` can state no other, so without one the record
+    has not answered it: the figure may be held, or the filing's may stand in for one in doubt."""
+    return snap.eps.actual is not None and snap.eps.source == SOURCE_FMP
 
 
 def _report_of(route: Mapping[str, Any]) -> Optional[Tuple[str, date]]:
@@ -191,6 +214,8 @@ def copy_at_wake(kind: str, route: Mapping[str, Any], now: datetime) -> Optional
     can correct a figure inside the hold and a push must not state a beat the sheet it opens
     calls a miss. `earnings_live` goes out on any figure that stands. A row that no longer goes
     out takes `live_copy`, which can say what `result_copy` cannot: in line, being confirmed.
+    It carries `ask_again_in` when the report has yet to answer (A REPORT WITH NO ANSWER YET in
+    the module docstring), never for a figure that stands and simply no longer clears the bar.
     PURE apart from reading the record, so the flush can call it on the event loop.
     """
     report = _report_of(route)
@@ -206,8 +231,10 @@ def copy_at_wake(kind: str, route: Mapping[str, Any], now: datetime) -> Optional
         surprise = _result_surprise(snap)
         if surprise is not None:
             return WakeCopy(*result_copy(snap.symbol, surprise), send=True)
-        return WakeCopy(*live_copy(snap), send=False)
-    return WakeCopy(*live_copy(snap), send=has_results(eps, revenue))
+        return WakeCopy(*live_copy(snap), send=False,
+                        ask_again_in=None if _fmp_eps_stands(snap) else WAKE_ASK_AGAIN)
+    stands = has_results(eps, revenue)
+    return WakeCopy(*live_copy(snap), send=stands, ask_again_in=None if stands else WAKE_ASK_AGAIN)
 
 
 async def _notify(kind: str, snap: LiveSnapshot, title: str, body: str) -> int:

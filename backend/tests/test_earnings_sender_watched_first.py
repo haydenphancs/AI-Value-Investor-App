@@ -14,6 +14,7 @@ from datetime import timedelta
 import pytest
 
 import app.services.notification_senders.earnings_sender as es
+from app.config import settings
 
 
 def test_only_watched_rows_survive_the_filter():
@@ -86,6 +87,8 @@ async def test_a_watched_read_failure_does_not_stamp_the_day_complete(monkeypatc
     monkeypatch.setattr(mod, "claimed_job", _claim)
     monkeypatch.setattr(mod, "get_fmp_client", lambda: _FMP())
     monkeypatch.setattr(mod, "_dispatch", _no_dispatch)
+    # These rows must not reach the live records, a singleton shared with every later test.
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", False)
 
     class _SB:
         def rpc(self, *a, **k):

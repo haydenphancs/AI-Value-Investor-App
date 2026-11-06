@@ -155,6 +155,10 @@ _SERVICE_ROLE_ONLY: dict[str, tuple[str, ...]] = {
     # Only the backend reads or writes it, as service_role. 205 also adds the origin / finding
     # columns to trillion_club_stakes, whose grants (175) it does not touch.
     "205": ("trillion_club_stake_findings",),
+    # 209: what each company's own earnings release said, kept so a restart neither loses a live
+    # earnings figure nor reads the filing again. Public SEC data, but read only by the backend
+    # (earnings_live_service).
+    "209": ("earnings_filing_cache",),
 }
 
 # Tables that DO grant anon or authenticated on purpose. Each needs the reason; an entry

@@ -14,8 +14,9 @@ TWO SOURCES, ONE RECORD PER (symbol, report date).
   * The company's own 8-K Item 2.02 press release (`earnings_filing_service`): minutes after
     the release, every figure a verbatim quote. PRELIMINARY until FMP has the same metric.
   A record is STICKY: a figure, once verified, never goes back to "not out yet" (only an FMP
-  zero does, GUARDS below), and FMP's figure replaces the filing's the moment FMP has one that
-  passes the guards, unless the filing outranks it (`_filing_outranks_fmp`).
+  zero does, GUARDS below), a restart included (A RESTART below), and FMP's figure replaces the
+  filing's the moment FMP has one that passes the guards, unless the filing outranks it
+  (`_filing_outranks_fmp`).
   Between two FMP answers the NEWEST wins. The Tracking memo can be 30 min behind this
   module's own fetch, so a memo row older than the record's last own fetch is skipped whole at
   all three folds (the tick, the card, the sheet): no reader can put an older answer back over
@@ -136,6 +137,26 @@ source can hold the other up.
   filing comes from `EarningsFilingWatcher.run_once`, which counts it from the end of the last
   round that spent one.
 
+A RESTART. The records are this process's own, but what only a filing says must outlive it: FMP
+may still have no figures, and it never has the outlook or the link. So each filing goes to
+`earnings_filing_cache` (migration 209: figures from SEC filings only, never FMP data) the moment
+it is on its record (`keep_filing`), best effort, and the first thing either tick does in a new
+process is take back what the table holds for the live days (`restore_filings`).
+  * Once per process, and before anything decides, so the filing tick cannot read a filing the
+    table holds, and whichever tick comes second joins the same read.
+  * A restored figure is never a landing, and FMP's fill on it after a restart is none either
+    (`restore_filing`). The daily pass is the net for `earnings_result`, as for any report first
+    seen reported. `earnings_live` has no such net, so a filing read in the minute before a
+    deploy, its push not yet sent, goes without one.
+  * A restored filing is not read again, by SEC or by Gemini, even while its report stays
+    incomplete and pending (`EarningsFilingWatcher.restore`).
+  * A failed read, or a table not there yet, is a WARNING and a retry every
+    `_FAILURE_RETRY_SECONDS`, and until then a restart is what it was before this table: a filing
+    of today's is read again, one of a day before today waits for FMP. Code can deploy before the
+    owner applies the migration. `EARNINGS_LIVE_FILINGS_ENABLED` off restores nothing, so that
+    switch still takes the figures away.
+  * In the first seconds after boot, before the first tick, a card reads what it always did.
+
 STATUSES (no time of day exists on `/stable` rows, so the window is the report day):
   * `upcoming` — a later date, or today before 06:00 ET with nothing in yet.
   * `live`     — today, 06:00–22:00 ET, results not complete. LIVE is drawn ONLY then, and
@@ -222,6 +243,7 @@ from typing import (
     Dict,
     Iterable,
     List,
+    Mapping,
     Optional,
     Sequence,
     Tuple,
@@ -284,11 +306,20 @@ _SOURCES_AGREE = 0.02
 _FEED_FILED_RATIO = (0.2, 5.0)
 #: A filing accepted longer than this before its record was first seen was already out at
 #: first sight, like an FMP row first seen reported. Long enough to cover a deploy gap, so a
-#: deploy inside the release window keeps the landing it can still announce.
+#: release first read just after a deploy keeps the landing it can still announce. One an earlier
+#: process read comes back with no landing at all (`restore_filing`).
 _FILING_LANDING_GRACE = timedelta(minutes=15)
 
 _FETCH_DEADLINE_SECONDS = 20.0
 _FAILURE_RETRY_SECONDS = 120.0
+#: Migration 209. Each call is bounded as well as on a thread, because a tick waits for it and the
+#: tick is what sends the pushes: a stalled Supabase must cost a retry, never the minute.
+_FILING_CACHE_TABLE = "earnings_filing_cache"
+_FILING_CACHE_COLUMNS = ("symbol", "report_date", "accession", "accepted_at", "url", "revenue",
+                         "eps_adjusted", "eps_gaap", "fiscal_period", "guidance",
+                         "revenue_rounding", "eps_rounding", "computed_at")
+_FILING_CACHE_NUMBERS = ("revenue", "eps_adjusted", "eps_gaap", "revenue_rounding", "eps_rounding")
+_FILING_CACHE_DEADLINE_SECONDS = 5.0
 #: History extras (last 4 quarters, the same quarter last year) per (symbol, report date).
 _EXTRAS_TTL_SECONDS = 6 * 3600
 _EXTRAS_FAILURE_TTL_SECONDS = 300
@@ -398,6 +429,17 @@ class HistoryExtras:
     year_ago_revenue: Optional[float]
     year_ago_eps: Optional[float]
     year_ago_eps_comparable: bool
+
+
+@dataclass(frozen=True)
+class HeldFiling:
+    """One `earnings_filing_cache` row read back. `computed_at` is when its figures reached
+    their record, None when the row's time cannot be read."""
+
+    symbol: str
+    day: date
+    figures: FilingFigures
+    computed_at: Optional[datetime]
 
 
 # ── Pure helpers ────────────────────────────────────────────────────
@@ -797,6 +839,70 @@ def _parse_day(value: Any) -> Optional[date]:
         return None
 
 
+def _stored_time(value: Any) -> Optional[datetime]:
+    """A timestamptz as PostgREST writes it, aware, or None when it cannot be read. No offset
+    reads as UTC, the rule of `et_now`: a naive time beside an aware one raises at the next
+    compare, and a fold compares `checked_at` on every fetch."""
+    if not isinstance(value, str):
+        return None
+    try:
+        when = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return when.replace(tzinfo=timezone.utc) if when.tzinfo is None else when
+
+
+def _stored_text(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def filing_cache_row(symbol: str, day: date, figures: FilingFigures,
+                     computed_at: datetime) -> Dict[str, Any]:
+    """PURE. One `earnings_filing_cache` row: every field of the figures, as verified, because
+    a restored record must read as the one that wrote it (`held_filing_from`)."""
+    return {
+        "symbol": symbol.upper(),
+        "report_date": day.isoformat(),
+        "accession": figures.accession,
+        "accepted_at": iso_utc(figures.accepted_at),
+        "url": figures.url,
+        "revenue": figures.revenue,
+        "eps_adjusted": figures.eps_adjusted,
+        "eps_gaap": figures.eps_gaap,
+        "fiscal_period": figures.fiscal_period,
+        "guidance": figures.guidance,
+        "revenue_rounding": figures.revenue_rounding,
+        "eps_rounding": figures.eps_rounding,
+        "computed_at": iso_utc(computed_at),
+    }
+
+
+def held_filing_from(row: Any) -> Optional[HeldFiling]:
+    """PURE. An `earnings_filing_cache` row back as what it was written from, or None when it
+    cannot be trusted. All or nothing for what decides a figure: half a row could show one
+    without the rounding that keeps it honest, and a row with neither a figure nor an outlook is
+    no filing. A time or a label that cannot be read costs only itself."""
+    if not isinstance(row, Mapping):
+        return None
+    symbol, accession = _stored_text(row.get("symbol")), _stored_text(row.get("accession"))
+    day = _parse_day(row.get("report_date"))
+    if symbol is None or accession is None or day is None:
+        return None
+    numbers: Dict[str, Optional[float]] = {}
+    for name in _FILING_CACHE_NUMBERS:
+        numbers[name] = finite(row.get(name))
+        if numbers[name] is None and row.get(name) is not None:
+            return None
+    figures = FilingFigures(
+        accession=accession.strip(), accepted_at=_stored_time(row.get("accepted_at")),
+        url=_stored_text(row.get("url")), fiscal_period=_stored_text(row.get("fiscal_period")),
+        guidance=_stored_text(row.get("guidance")), **numbers,
+    )
+    if not figures.has_figures and figures.guidance is None:
+        return None
+    return HeldFiling(symbol.strip().upper(), day, figures, _stored_time(row.get("computed_at")))
+
+
 def _quarter_result(actual: Optional[float], estimate: Optional[float],
                     has_estimate: Optional[bool]) -> Optional[str]:
     if actual is None:
@@ -1091,11 +1197,62 @@ def _settled(actual: Optional[float], estimate: Optional[float],
     return actual, estimate
 
 
+# ── The filing cache (migration 209) ────────────────────────────────
+
+
+async def _read_held_filings(days: Sequence[date]) -> List[HeldFiling]:
+    """What `earnings_filing_cache` holds for `days`. A failed read RAISES, for the caller to
+    retry. A row that cannot be trusted is left out with a WARNING, and costs only itself."""
+    wanted = [day.isoformat() for day in days]
+
+    def _read() -> List[Any]:
+        from app.database import get_supabase
+
+        res = (get_supabase().table(_FILING_CACHE_TABLE)
+               .select(",".join(_FILING_CACHE_COLUMNS))
+               .in_("report_date", wanted)
+               .execute())
+        return res.data or []
+
+    rows = await asyncio.wait_for(asyncio.to_thread(_read),
+                                  timeout=_FILING_CACHE_DEADLINE_SECONDS)
+    held: List[HeldFiling] = []
+    for row in rows:
+        filing = held_filing_from(row)
+        if filing is not None:
+            held.append(filing)
+            continue
+        named = row if isinstance(row, Mapping) else {}
+        logger.warning("[earnings-live] %s %s: a filing cache row could not be read, left out",
+                       named.get("symbol"), named.get("report_date"))
+    return held
+
+
+async def _store_filing(row: Dict[str, Any]) -> None:
+    """Upsert one `earnings_filing_cache` row. Best effort: the figure is already on its record,
+    and a failed write costs only what a restart would have had before this table."""
+
+    def _write() -> None:
+        from app.database import get_supabase
+
+        (get_supabase().table(_FILING_CACHE_TABLE)
+         .upsert(row, on_conflict="symbol,report_date")
+         .execute())
+
+    try:
+        await asyncio.wait_for(asyncio.to_thread(_write),
+                               timeout=_FILING_CACHE_DEADLINE_SECONDS)
+    except Exception as e:
+        logger.warning("[earnings-live] %s %s: filing not kept (%s: %s), a restart will not find "
+                       "it", row["symbol"], row["report_date"], type(e).__name__, e)
+
+
 # ── The service ─────────────────────────────────────────────────────
 
 
 class EarningsLiveService:
-    """Per-process live state (the deploy runs ONE uvicorn worker, so it is coherent)."""
+    """Per-process live state (the deploy runs ONE uvicorn worker, so it is coherent). What a
+    filing said also sits in `earnings_filing_cache` (A RESTART in the module docstring)."""
 
     def __init__(self) -> None:
         self.reset()
@@ -1111,6 +1268,10 @@ class EarningsLiveService:
         # tests/test_inflight_cancellation_safety.py recognises the join below.
         self._inflight: Dict[Tuple[str, date], asyncio.Future] = {}
         self.fetches = 0
+        # Has this process taken back `earnings_filing_cache`, and when may a failed read try
+        # again (`restore_filings`)?
+        self._filings_restored = False
+        self._restore_retry_at: float = 0.0
 
     # ── folding rows ───────────────────────────────────────────────
 
@@ -1285,6 +1446,72 @@ class EarningsLiveService:
             )
         self._note_landing(rec, now)
 
+    def restore_filing(self, symbol: str, day: date, figures: FilingFigures, now: datetime,
+                       *, checked_at: Optional[datetime] = None) -> None:
+        """A filing an earlier process read for (symbol, day) comes back onto its record, a
+        filing this process already holds staying (the first verified one is kept).
+
+        A restored figure is never a landing, so the landing is closed here rather than left to
+        `_note_landing`: a feed build may already have marked the record seen pending, and FMP's
+        fill would then read as one. It is left open only for a row with no figure, an outlook
+        alone: nothing was restored, and FMP's first figure really is the first. `checked_at`
+        is when the figures reached their record, so the sheet's "updated" stays true.
+        """
+        key = (symbol.upper(), day)
+        rec = self._records.get(key)
+        if rec is None:
+            rec = _Record(symbol=key[0], day=day, first_seen_at=now)
+            self._records[key] = rec
+        if rec.filing is None:
+            rec.filing = figures
+        if checked_at is not None and (rec.checked_at is None or checked_at > rec.checked_at):
+            rec.checked_at = checked_at
+        if figures.has_figures and rec.landed_at is None:
+            rec.landed_at = now
+            rec.landed_from_pending = False
+
+    async def restore_filings(self, now: datetime) -> None:
+        """Take back what `earnings_filing_cache` holds for the live days, once per process, in
+        the first tick of either loop, before it decides anything (A RESTART in the module
+        docstring). Never raises. A failed read tries again `_FAILURE_RETRY_SECONDS` later."""
+        if self._filings_restored or not settings.EARNINGS_LIVE_FILINGS_ENABLED:
+            return
+        if time.monotonic() < self._restore_retry_at - _DUE_SLACK_SECONDS:
+            return
+        await self._run_once(("restore", et_now(now).date()),
+                             lambda: self._restore_filings(now))
+
+    async def _restore_filings(self, now: datetime) -> None:
+        from app.services.earnings_filing_service import get_earnings_filing_watcher
+
+        days = live_days(et_now(now).date())
+        try:
+            held = await _read_held_filings(days)
+            watcher = get_earnings_filing_watcher()
+            for filing in held:
+                self.restore_filing(filing.symbol, filing.day, filing.figures, now,
+                                    checked_at=filing.computed_at)
+                watcher.restore(filing.symbol, filing.day, filing.figures)
+        except Exception as e:
+            self._restore_retry_at = time.monotonic() + _FAILURE_RETRY_SECONDS
+            logger.warning(
+                "[earnings-live] filing restore failed for %s to %s (%s: %s): the records go "
+                "without what the table holds; next try in %.0fs", days[0].isoformat(),
+                days[-1].isoformat(), type(e).__name__, e, _FAILURE_RETRY_SECONDS,
+            )
+            return
+        self._filings_restored = True
+        logger.info("[earnings-live] restored %d filing(s) for %s to %s (%s)", len(held),
+                    days[0].isoformat(), days[-1].isoformat(),
+                    ", ".join(f"{f.symbol} {f.day.isoformat()}" for f in held[:20]))
+
+    async def keep_filing(self, symbol: str, day: date, at: datetime) -> None:
+        """Write what the record holds for (symbol, day) to `earnings_filing_cache`: the record's
+        filing, the first verified one, whatever the round just brought. Never raises."""
+        rec = self._records.get((symbol.upper(), day))
+        if rec is not None and rec.filing is not None:
+            await _store_filing(filing_cache_row(rec.symbol, day, rec.filing, at))
+
     # ── reading ────────────────────────────────────────────────────
 
     def snapshot(self, symbol: str, day: date, now: datetime) -> Optional[LiveSnapshot]:
@@ -1318,8 +1545,9 @@ class EarningsLiveService:
         is not a landing — the same rule as `earnings_window_service._absorb` — so a deploy
         never re-announces a morning's results in the afternoon. The same goes for a filing
         accepted more than `_FILING_LANDING_GRACE` before the record was first seen, even
-        though FMP's row still reads pending (`absorb_filing`). A report whose only figure has
-        since been taken off waits for one to show: a push must have something to report.
+        though FMP's row still reads pending (`absorb_filing`), and for a filing an earlier
+        process read (`restore_filing`). A report whose only figure has since been taken off
+        waits for one to show: a push must have something to report.
         """
         n = et_now(now)
         today = n.date()
@@ -1754,15 +1982,17 @@ async def earnings_filing_tick(
     gemini: Any = None,
 ) -> Dict[str, int]:
     """One SEC round over the watched reports still pending today, from the records the FMP tick
-    folded. Each verified figure goes straight into its record and nothing here sends a push:
-    the next FMP tick does. Every dependency is injectable so the suite never reaches a
+    folded. Each verified figure goes straight into its record, then into
+    `earnings_filing_cache`, and nothing here sends a push: the next FMP tick does. Every
+    dependency is injectable, the table through `get_supabase`, so the suite never reaches a
     network."""
     from app.services.earnings_filing_service import get_earnings_filing_watcher
 
     started = time.monotonic()
+    service = get_earnings_live_service()
+    await service.restore_filings(now)
     if watched is None:
         watched = await _watched_ranked_cached()
-    service = get_earnings_live_service()
     n = et_now(now)
     today = n.date()
     pending_today = service.pending_symbols(today, watched)
@@ -1770,10 +2000,11 @@ async def earnings_filing_tick(
     if not pending_today or n.hour < EARNINGS_LIVE_START_HOUR_ET:
         return stats
 
-    def _absorb(symbol: str, figures: FilingFigures) -> None:
+    async def _absorb(symbol: str, figures: FilingFigures) -> None:
         # The figure's own moment: `checked_at` and the landing must not say a long round's start.
-        service.absorb_filing(symbol, today, figures,
-                              now + timedelta(seconds=time.monotonic() - started))
+        at = now + timedelta(seconds=time.monotonic() - started)
+        service.absorb_filing(symbol, today, figures, at)
+        await service.keep_filing(symbol, today, at)
 
     watcher = get_earnings_filing_watcher()
     watcher.prune(live_days(today))
@@ -1790,11 +2021,14 @@ async def earnings_live_tick(
     watched: Optional[Sequence[str]] = None,
     dispatch: Optional[Callable[[List[LiveSnapshot], datetime], Awaitable[Any]]] = None,
 ) -> Dict[str, int]:
-    """One FMP round: fold the memo, fetch what is due, hand the watched landings to the push
-    sender, the filing tick's among them. Every dependency is injectable so the suite never
-    reaches a network."""
+    """One FMP round: take back what the table holds once per process, fold the memo, fetch what
+    is due, hand the watched landings to the push sender, the filing tick's among them. Every
+    dependency is injectable, the table through `get_supabase`, so the suite never reaches a
+    network."""
     from app.services import tracking_service as ts
 
+    service = get_earnings_live_service()
+    await service.restore_filings(now)
     if fmp is None:
         from app.integrations.fmp import get_fmp_client
 
@@ -1804,7 +2038,6 @@ async def earnings_live_tick(
     stats = {"watched": len(watched), "fetched": 0, "landed": 0}
     if not watched:
         return stats
-    service = get_earnings_live_service()
     n = et_now(now)
     today = n.date()
 

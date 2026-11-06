@@ -35,6 +35,11 @@ here would stop all of them. The watcher therefore:
   * on any throttle, parks EVERY symbol for SEC's Retry-After (or the circuit) and never
     retries sooner.
 Foreign private issuers furnish results on 6-K, not 8-K; they stay FMP-only.
+
+A RESTART. The watch is per process, but what a read verified goes to `earnings_filing_cache` and
+a new process takes it back (`restore`, from `EarningsLiveService.restore_filings`), so a filing
+read once is not read again. Only a filing that gave nothing is read a second time, and any
+filing a failed write left out of the table, or a failed read of it left unrestored.
 """
 
 from __future__ import annotations
@@ -47,7 +52,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app.config import settings
 from app.integrations.sec_edgar import (
@@ -1066,8 +1071,8 @@ class _Watch:
 
 @dataclass
 class EarningsFilingWatcher:
-    """Per-process state of the SEC watch. One instance, driven by the filing loop only
-    (`earnings_live_service.earnings_filing_tick`)."""
+    """Per-process state of the SEC watch, its held filings restored at boot (`restore`). One
+    instance, driven by the filing loop only (`earnings_live_service.earnings_filing_tick`)."""
 
     _watch: Dict[Tuple[str, date], _Watch] = field(default_factory=dict)
     _extracted: Dict[str, Optional[FilingFigures]] = field(default_factory=dict)
@@ -1091,6 +1096,14 @@ class EarningsFilingWatcher:
         w = self._watch.get((symbol.upper(), day))
         return w.figures if w else None
 
+    def restore(self, symbol: str, day: date, figures: FilingFigures) -> None:
+        """Take back a filing an earlier process verified, as if this one had read it. Its watch
+        ends, so a report it left incomplete stays pending with no SEC read, and its accession
+        is known, so the same 8-K under another date costs no model call."""
+        w = self._watch.setdefault((symbol.upper(), day), _Watch())
+        w.done, w.figures = True, figures
+        self._extracted[figures.accession] = figures
+
     def _due(self, key: Tuple[str, date], now_et: datetime, mono: float) -> bool:
         interval = poll_interval_seconds(now_et)
         if interval is None:
@@ -1112,11 +1125,12 @@ class EarningsFilingWatcher:
         gemini: Any = None,
         cik_map: Optional[Mapping[str, str]] = None,
         sleep: Any = asyncio.sleep,
-        on_figures: Optional[Callable[[str, FilingFigures], None]] = None,
+        on_figures: Optional[Callable[[str, FilingFigures], Awaitable[None]]] = None,
     ) -> Dict[str, FilingFigures]:
         """One round for the symbols reporting on `report_day`. Returns NEW figures by symbol,
         and hands each to `on_figures` the moment it verifies: a round is serial, with a model
-        call per filing, so what is read first must not wait for the rest.
+        call per filing, so what is read first must not wait for the rest. It is awaited, so the
+        next read starts only once the figure has been stored as well as shown.
 
         `symbols` must already be ordered most-watched first; the round keeps the first
         `EARNINGS_LIVE_SEC_MAX_SYMBOLS`. Never raises: a failure for one symbol costs only
@@ -1196,7 +1210,7 @@ class EarningsFilingWatcher:
                 new[symbol] = figures
                 if on_figures is not None:
                     try:
-                        on_figures(symbol, figures)
+                        await on_figures(symbol, figures)
                     except Exception as e:
                         logger.warning(
                             "[earnings-live-filing] %s %s: figures not delivered (%s: %s)",
@@ -1226,7 +1240,8 @@ class EarningsFilingWatcher:
             return None
         filing = filings[0]
         if filing.accession in self._extracted:
-            # Read once per accession, ever (a restart is the only re-read).
+            # Read once per accession, ever. A restart keeps that too, for a filing it took back
+            # from `earnings_filing_cache` (`restore`).
             w.found, w.done = filing, True
             w.figures = self._extracted[filing.accession]
             return w.figures

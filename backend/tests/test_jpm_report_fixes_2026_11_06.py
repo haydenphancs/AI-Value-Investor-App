@@ -989,7 +989,7 @@ def test_the_empty_engine_carries_the_key():
 
 def test_the_engine_says_what_its_total_leaves_out():
     assert np_._revenue_engine_basis_note(_engine()) == (
-        "Shares are of $178.6B of segment revenue, after interest paid out. "
+        "The $178.6B total is segment revenue, after interest paid out. "
         "Reported revenue of $279.7B includes that interest."
     )
 
@@ -1000,8 +1000,8 @@ def test_no_other_engine_gets_a_note():
 
 
 @pytest.mark.parametrize("model_text,expected_start", [
-    ("Consumer leads.", "Consumer leads. Shares are of"),
-    (None, "Shares are of"),                   # the field opted out: the total still needs it
+    ("Consumer leads.", "Consumer leads. The $178.6B total is"),
+    (None, "The $178.6B total is"),                   # the field opted out: the total still needs it
 ])
 def test_the_note_survives_an_opt_out(model_text, expected_start):
     shell = {"revenue_engine": _engine()}
@@ -1199,9 +1199,29 @@ def test_the_price_prompt_carries_the_line():
     assert "LAST SESSION" not in np_._price_action_narrative_prompt(BUFFETT, "EVID", {"price_action": quiet})
 
 
-def test_a_probe_headline_is_a_catalyst():
-    tagged = dict(C.NEWS_CATALYST_KEYWORDS)["Legal/Regulatory"]
-    assert "probe" in tagged
+@pytest.mark.parametrize("title,text", [
+    ("Chipmaker ships a new probe card for advanced packaging", ""),
+    ("Medical device maker wins clearance", "The ultrasound probe connects to a tablet."),
+    ("Rocket maker signs a launch contract", "The space probe will reach Jupiter in 2031."),
+    ("Analysts probe deeper into margins on the earnings call", ""),
+    ("Wafer probe demand rises", "Test equipment makers said orders grew."),
+])
+def test_a_probe_that_is_not_an_inquiry_is_no_catalyst(title, text):
+    """The classifier reads the article body too, so the bare word tagged these Legal/Regulatory."""
+    assert C._classify_news_catalyst(title, text) is None
+
+
+@pytest.mark.parametrize("title", [
+    "Democrats plan a probe of JPMorgan's Epstein ties",
+    "EU opens probe into cloud contracts",
+    "Regulators widen probes into bank fees",
+    "Senate probe targets the insurer",
+    "Federal probe reaches the lender",
+    "SEC probe into the accounting continues",
+    "FTC probe of the merger deepens",
+])
+def test_an_inquiry_is_still_a_catalyst(title):
+    assert C._classify_news_catalyst(title, "") == "Legal/Regulatory"
 
 
 @pytest.mark.parametrize("build", [

@@ -2766,15 +2766,16 @@ def _revenue_forecast_basis_note(shell: Dict[str, Any]) -> str:
 
 
 def _revenue_engine_basis_note(re_section: Dict[str, Any]) -> str:
-    """What a lender's Revenue Engine total leaves out, "" for every other company."""
+    """What a lender's Revenue Engine total leaves out, "" for every other company. Builds 12 and
+    13 print that total under a fixed "Total Revenue" header, so the note names the figure."""
     money = re_section.get("reporting_currency")
     total = _fmt_millions_usd(re_section.get("total_revenue"), money, unknown_prefix="")
     gross = _fmt_millions_usd(re_section.get("gross_reported_revenue"), money, unknown_prefix="")
     if not total or not gross:
         return ""
     return (
-        f"Shares are of {total} of segment revenue, after interest paid out. Reported revenue "
-        f"of {gross} includes that interest."
+        f"The {total} total is segment revenue, after interest paid out. Reported revenue of "
+        f"{gross} includes that interest."
     )
 
 

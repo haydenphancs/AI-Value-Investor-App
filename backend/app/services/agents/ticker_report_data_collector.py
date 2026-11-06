@@ -349,7 +349,12 @@ NEWS_CATALYST_KEYWORDS: List[Tuple[str, Tuple[str, ...]]] = [
     # only enforcement actions and court rulings, which are genuine catalysts.
     ("Legal/Regulatory", (
         "sec investigation", "sec charges", "wells notice",
-        "doj probe", "doj investigation", "antitrust", "probe",
+        "doj probe", "doj investigation", "antitrust",
+        # Never a bare "probe": this reads the article body too, so a probe card, an ultrasound
+        # probe or a space probe would read as a legal catalyst.
+        "probe of", "probe into", "probes into", "federal probe", "senate probe",
+        "congressional probe", "house probe", "regulatory probe", "justice department probe",
+        "sec probe", "ftc probe", "antitrust probe",
         "indictment", "indicted", "criminal charges",
         "fraud charges", "charged with fraud",
         "jury verdict", "found liable", "subpoena", "injunction",

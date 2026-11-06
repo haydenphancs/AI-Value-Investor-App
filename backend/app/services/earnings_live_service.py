@@ -112,9 +112,18 @@ they stop listing (`_end_unlisted`): a record goes once they have left its symbo
     the days after today first, at most 14 calls per answer it rests on. Only a reader does:
     nothing here tells the memo a report ended, so a new date's card can take the memo's 6 h to
     appear.
-  A stale row FMP leaves beside the new date is NOT seen: nothing here compares a symbol's
-  dates, because a company reporting EARLIER leaves the later date pending, so the row dated
-  today can be the real one. Nor is a lone leftover row dated today after the company reported.
+  A stale row FMP leaves beside the new date is NOT seen: its status, its SEC slot and its card
+  compare no dates, because a company reporting EARLIER leaves the later date pending, so the row
+  dated today can be the real one. Nor is a lone leftover row dated today after the company
+  reported.
+
+ONE REPORT, TWO DATES. The dedup key carries the report date, so FMP's leftover row one trading
+day after a report would be a second push for it, and the owner's rule is one push per report. A
+record therefore does not land when the same symbol's record on the previous trading day already
+has results (`_note_landing`), which covers FMP filling that row and an 8-K accepted on its day.
+An 8-K accepted the evening before never reaches it (`find_results_filings`). Only the push is
+held: the card and the sheet read the record as usual. A pending row the day before stops nothing,
+so a stale earlier row never costs the true report its push.
 
 TWO LOOPS UNDER ONE TASK (`run_earnings_live_loop`), each on its own 60 s clock, so neither
 source can hold the other up.
@@ -970,12 +979,28 @@ class EarningsLiveService:
                 rec.checked_at = now
 
     def _note_landing(self, rec: _Record, now: datetime) -> None:
+        """Note a record's first results, or that it has none yet. Results land from pending
+        only on a record seen pending, and not beside a report already in the trading day before
+        (ONE REPORT, TWO DATES in the module docstring). Decided here, once: read back later,
+        the earlier record may already have left the live days."""
         if has_results(eps_metric(rec), revenue_metric(rec)):
             if rec.landed_at is None:
                 rec.landed_at = now
-                rec.landed_from_pending = rec.seen_pending
+                rec.landed_from_pending = rec.seen_pending and not self._follows_a_report(rec)
         else:
             rec.seen_pending = True
+
+    def _follows_a_report(self, rec: _Record) -> bool:
+        """Does the same symbol's record on the previous trading day already have results?"""
+        earlier_day = previous_trading_day(rec.day)
+        earlier = self._records.get((rec.symbol, earlier_day))
+        if earlier is None or not has_results(eps_metric(earlier), revenue_metric(earlier)):
+            return False
+        logger.info(
+            "[earnings-live] %s %s: results beside the %s report already in, no second push",
+            rec.symbol, rec.day.isoformat(), earlier_day.isoformat(),
+        )
+        return True
 
     def absorb_filing(self, symbol: str, day: date, figures: FilingFigures,
                       now: datetime) -> None:
@@ -1040,7 +1065,8 @@ class EarningsLiveService:
         is not a landing — the same rule as `earnings_window_service._absorb` — so a deploy
         never re-announces a morning's results in the afternoon. The same goes for a filing
         accepted more than `_FILING_LANDING_GRACE` before the record was first seen, even
-        though FMP's row still reads pending (`absorb_filing`).
+        though FMP's row still reads pending (`absorb_filing`), and for a row that lands beside
+        a report already in the trading day before (`_note_landing`).
         """
         n = et_now(now)
         today = n.date()

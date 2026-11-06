@@ -17,12 +17,15 @@ kinds — and the daily 16:00 ET sender — claim the SAME key. What is pinned h
   * neither kind goes out for a report older than yesterday, the daily pass's own window, and
     such a report is handled once, for good;
   * a round sends oldest first, so the cap cannot run a report out of that window;
-  * the round cap's warning counts the reports still owed a push, nothing else.
+  * the round cap's warning counts the reports still owed a push, nothing else;
+  * one report on two dated rows is told once, under its first date, whichever source fills the
+    second row and across a restart: the real loop runs those, and the key is what they assert.
 The dispatcher is a recorder, or the real one over a fake table where a failed read is the
 point — nothing here reaches APNs or Supabase.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import replace
@@ -32,10 +35,13 @@ from typing import Any, Dict, List
 
 import pytest
 
+import app.services.earnings_filing_service as efs
 import app.services.earnings_live_service as els
+import app.services.learn_weekly.signals as signals
 import app.services.notification_senders.earnings_live_sender as sender
 import app.services.notification_senders.earnings_sender as daily
 import app.services.push_dispatch_service as pds
+import app.services.tracking_service as ts
 from app.config import settings
 from app.services.earnings_live_service import (
     BASIS_ADJUSTED,
@@ -805,3 +811,273 @@ def test_the_copy_is_informational_never_directive():
         text = f"{title} {body}".lower()
         for word in ("buy", "sell", "don't miss", "act now", "position yourself"):
             assert word not in text
+
+
+# ── one report, two dated rows ───────────────────────────────────────────────
+
+OCT_28, OCT_29 = date(2026, 10, 28), date(2026, 10, 29)
+_INTEL_CIK = "0000050863"
+_INTEL_ACC = "0000050863-26-000123"
+_FIRST_PUSH = {"earnings_result:INTC:2026-10-28"}
+_INDEX_PAGE = """<table class="tableFile">
+<tr><th>Seq</th><th>Description</th><th>Document</th><th>Type</th><th>Size</th></tr>
+<tr><td>1</td><td>8-K</td><td><a href="/Archives/edgar/data/50863/a/intc.htm">intc.htm</a></td>
+<td>8-K</td><td>30 KB</td></tr>
+<tr><td>2</td><td>PRESS RELEASE</td><td><a href="/Archives/edgar/data/50863/a/q3.htm">q3.htm</a>
+</td><td>EX-99.1</td><td>90 KB</td></tr>
+</table>"""
+_REVENUE_LINE = "Third-quarter revenue was $17.1 billion, up 25% year-over-year."
+_EPS_LINE = "Non-GAAP earnings per share attributable to Intel was $0.44."
+_RELEASE_TEXT = f"Intel Corporation today reported results. {_REVENUE_LINE} {_EPS_LINE}"
+_READ_FIGURES = json.dumps({
+    "is_quarterly_results": True, "currency": "USD",
+    "revenue": {"value": 17.1, "unit": "billion", "quote": _REVENUE_LINE},
+    "eps_adjusted_diluted": {"value": 0.44, "quote": _EPS_LINE},
+})
+
+
+def _et_time(day: date, hour: int, minute: int = 0) -> datetime:
+    return datetime(day.year, day.month, day.day, hour, minute, tzinfo=ET).astimezone(timezone.utc)
+
+
+def _calendar_row(day: date, *, eps=None, revenue=None) -> Dict[str, Any]:
+    return {"symbol": "INTC", "date": day.isoformat(), "epsActual": eps, "epsEstimated": 0.41,
+            "revenueActual": revenue, "revenueEstimated": 16.6e9, "lastUpdated": day.isoformat()}
+
+
+def _results_8k(*, filed: date, accepted: str) -> Dict[str, Any]:
+    return {"accessionNumber": _INTEL_ACC, "filingDate": filed.isoformat(), "form": "8-K",
+            "items": "2.02,9.01", "primaryDocument": "intc.htm", "acceptanceDateTime": accepted}
+
+
+_EVENING_8K = _results_8k(filed=OCT_29, accepted="2026-10-28T18:05:00.000Z")
+_MORNING_8K = _results_8k(filed=OCT_29, accepted="2026-10-29T08:00:00.000Z")
+
+
+class _Market:
+    """FMP's calendar, SEC's filings and the model at one simulated moment: the one network
+    fake behind the real loop, so a test moves the world and runs a minute."""
+
+    def __init__(self, days=(OCT_28, OCT_29)):
+        self.rows = {day: [_calendar_row(day)] for day in days}
+        self.filings: List[Dict[str, Any]] = []
+        self.model_calls = 0
+
+    def fills(self, day: date, *, eps=0.60, revenue=17.1e9) -> None:
+        self.rows[day] = [_calendar_row(day, eps=eps, revenue=revenue)]
+
+    async def get_earnings_calendar(self, from_date=None, to_date=None):
+        return [dict(row) for row in self.rows.get(date.fromisoformat(from_date), [])]
+
+    async def get_submissions(self, cik):
+        columns: Dict[str, List[Any]] = {
+            key: [] for key in ("accessionNumber", "filingDate", "form", "items",
+                                "primaryDocument", "acceptanceDateTime")}
+        for filing in self.filings:
+            for key, column in columns.items():
+                column.append(filing[key])
+        return {"filings": {"recent": columns}}
+
+    async def get_filing_document(self, cik, accession, document):
+        if document.endswith("-index.htm"):
+            return _INDEX_PAGE
+        return f"<html><body><p>{_RELEASE_TEXT}</p></body></html>"
+
+    async def generate_json(self, prompt, **kwargs):
+        self.model_calls += 1
+        return {"text": _READ_FIGURES, "model": "m", "tokens_used": 10}
+
+
+@pytest.fixture
+def live_loop(dispatch, monkeypatch):
+    """Run minutes of the real FMP tick, filing tick and `dispatch_landings` over a `_Market`,
+    with the recorder as the only dispatcher."""
+    service = EarningsLiveService()
+    watcher = efs.EarningsFilingWatcher()
+    monkeypatch.setattr(els, "get_earnings_live_service", lambda: service)
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: watcher)
+    monkeypatch.setattr(efs, "_CALL_SPACING_SECONDS", 0)
+    monkeypatch.setattr(settings, "SEC_EDGAR_USER_AGENT", "Caydex test@example.com")
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_FILINGS_ENABLED", True)
+
+    async def _ciks(*, sec=None):
+        return {"INTC": _INTEL_CIK}
+
+    # `run_once` imports this inside the function, so it is patched at its source.
+    monkeypatch.setattr(signals, "ticker_cik_map", _ciks)
+
+    async def _minute(market: _Market, at: datetime) -> None:
+        monkeypatch.setattr(ts, "_et_today", lambda: at.astimezone(ET).date())
+        # All three run on real time, and these minutes are not real ones.
+        service._fetched.clear()
+        ts.reset_earnings_calendar_cache()
+        for watch in watcher._watch.values():
+            watch.checked_mono = 0.0
+        await els.earnings_live_tick(at, fmp=market, watched=["INTC"])
+        await els.earnings_filing_tick(at, watched=["INTC"], sec=market, gemini=market)
+        await els.earnings_live_tick(at, fmp=market, watched=["INTC"])
+
+    def _restart() -> None:
+        service.reset()
+        watcher.reset()
+        sender.reset()
+
+    ts.reset_earnings_calendar_cache()
+    yield SimpleNamespace(minute=_minute, restart=_restart, service=service, watcher=watcher)
+    ts.reset_earnings_calendar_cache()
+
+
+def _keys(recorder: _Dispatch) -> set:
+    return {send["dedup_key"] for send in recorder.sent}
+
+
+async def _evening_8k_on_its_day(loop, market: _Market) -> None:
+    await loop.minute(market, _et_time(OCT_28, 16))
+    market.filings.append(_EVENING_8K)
+    await loop.minute(market, _et_time(OCT_28, 18, 6))
+
+
+async def _same_process(loop, market: _Market) -> None:
+    await _evening_8k_on_its_day(loop, market)
+    await loop.minute(market, _et_time(OCT_29, 8))
+
+
+async def _restart_overnight(loop, market: _Market) -> None:
+    await _evening_8k_on_its_day(loop, market)
+    loop.restart()
+    await loop.minute(market, _et_time(OCT_29, 8))
+
+
+async def _fmp_lands_at_five(loop, market: _Market) -> None:
+    await loop.minute(market, _et_time(OCT_28, 16))
+    market.fills(OCT_28)
+    await loop.minute(market, _et_time(OCT_28, 17))
+
+
+async def _fmp_completes_the_first_row_first(loop, market: _Market) -> None:
+    await _fmp_lands_at_five(loop, market)
+    market.filings.append(_EVENING_8K)
+    await loop.minute(market, _et_time(OCT_28, 18, 6))
+    await loop.minute(market, _et_time(OCT_29, 8))
+
+
+async def _an_8k_the_morning_after_fmp_landed(loop, market: _Market) -> None:
+    await _fmp_lands_at_five(loop, market)
+    market.filings.append(_MORNING_8K)
+    await loop.minute(market, _et_time(OCT_29, 8, 1))
+
+
+async def _fmp_fills_the_leftover_row(loop, market: _Market) -> None:
+    await _fmp_lands_at_five(loop, market)
+    await loop.minute(market, _et_time(OCT_29, 8))
+    market.fills(OCT_29)
+    await loop.minute(market, _et_time(OCT_29, 8, 10))
+
+
+async def _an_8k_with_no_acceptance_time(loop, market: _Market) -> None:
+    await loop.minute(market, _et_time(OCT_28, 16))
+    market.filings.append(dict(_EVENING_8K, acceptanceDateTime=""))
+    await loop.minute(market, _et_time(OCT_28, 18, 6))
+    await loop.minute(market, _et_time(OCT_29, 8))
+
+
+_ONE_REPORT = {
+    "same_process": _same_process,
+    "restart_overnight": _restart_overnight,
+    "fmp_completes_the_first_row_first": _fmp_completes_the_first_row_first,
+    "an_8k_the_morning_after_fmp_landed": _an_8k_the_morning_after_fmp_landed,
+    "fmp_fills_the_leftover_row": _fmp_fills_the_leftover_row,
+    "an_8k_with_no_acceptance_time": _an_8k_with_no_acceptance_time,
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("leg", _ONE_REPORT.values(), ids=_ONE_REPORT.keys())
+async def test_one_report_on_two_dated_rows_is_told_once_under_its_first_date(
+        live_loop, dispatch, leg):
+    """FMP's reschedule leftover puts a second, later row beside a report, and the dedup key
+    carries the row's date. The key is what must be asserted, never a count of one: a first
+    date that never landed would leave one push, keyed on the wrong report."""
+    await leg(live_loop, _Market())
+    assert _keys(dispatch) == _FIRST_PUSH
+
+
+@pytest.mark.asyncio
+async def test_with_the_shipped_flags_the_leftover_row_sends_no_second_result_push(
+        live_loop, dispatch, monkeypatch):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+    await _fmp_fills_the_leftover_row(live_loop, _Market())
+    assert _keys(dispatch) == _FIRST_PUSH
+    assert {send["kind"] for send in dispatch.sent} == {KIND_EARNINGS_RESULT}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("leg,model_calls", [
+    (_same_process, 1), (_restart_overnight, 1), (_fmp_completes_the_first_row_first, 0),
+], ids=["same_process", "restart_overnight", "fmp_completes_the_first_row_first"])
+async def test_an_evening_8k_stays_off_the_next_days_row(live_loop, dispatch, leg, model_calls):
+    """A record that opens the next day already has `_FILING_LANDING_GRACE` against this 8-K, so
+    no second push comes of it. The filing still belongs to the day it was accepted: that row
+    must not show the figures, or pay to read them again."""
+    market = _Market()
+    await leg(live_loop, market)
+    leftover = live_loop.service.snapshot("INTC", OCT_29, _et_time(OCT_29, 8, 5))
+    assert leftover.filing is None and leftover.eps.actual is None
+    assert leftover.status == els.STATUS_LIVE
+    assert market.model_calls == model_calls
+
+
+@pytest.mark.asyncio
+async def test_a_lone_row_with_an_evening_8k_is_told_on_its_own_date(live_loop, dispatch):
+    market = _Market(days=(OCT_28,))
+    await _same_process(live_loop, market)
+    assert _keys(dispatch) == _FIRST_PUSH
+    assert market.model_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_pair_with_an_8k_during_the_day_is_told_on_its_first_date(live_loop, dispatch):
+    market = _Market()
+    await live_loop.minute(market, _et_time(OCT_28, 16))
+    market.filings.append(_results_8k(filed=OCT_28, accepted="2026-10-28T16:02:00.000Z"))
+    await live_loop.minute(market, _et_time(OCT_28, 16, 3))
+    await live_loop.minute(market, _et_time(OCT_29, 8))
+    assert _keys(dispatch) == _FIRST_PUSH
+
+
+@pytest.mark.asyncio
+async def test_a_stale_earlier_row_never_stops_the_true_report_the_next_day(live_loop, dispatch):
+    market = _Market()
+    await live_loop.minute(market, _et_time(OCT_28, 16))
+    await live_loop.minute(market, _et_time(OCT_29, 15))
+    market.filings.append(_results_8k(filed=OCT_29, accepted="2026-10-29T16:02:00.000Z"))
+    await live_loop.minute(market, _et_time(OCT_29, 16, 3))
+    assert _keys(dispatch) == {"earnings_result:INTC:2026-10-29"}
+
+
+@pytest.mark.asyncio
+async def test_a_row_fmp_dates_after_an_evening_8k_waits_for_fmps_figure(live_loop, dispatch):
+    """The cost of giving an 8-K to the day it was accepted: this one has no fast path, and its
+    one push comes with FMP's figure."""
+    market = _Market(days=(OCT_29,))
+    market.filings.append(_EVENING_8K)
+    await live_loop.minute(market, _et_time(OCT_29, 8))
+    assert dispatch.sent == [] and market.model_calls == 0
+    market.fills(OCT_29)
+    await live_loop.minute(market, _et_time(OCT_29, 8, 10))
+    assert _keys(dispatch) == {"earnings_result:INTC:2026-10-29"}
+
+
+@pytest.mark.asyncio
+async def test_a_friday_evening_8k_is_told_on_friday_and_never_again_on_monday(live_loop, dispatch):
+    friday, monday = date(2026, 10, 30), date(2026, 11, 2)
+    market = _Market(days=(friday, monday))
+    await live_loop.minute(market, _et_time(friday, 16))
+    market.filings.append(_results_8k(filed=monday, accepted="2026-10-30T18:05:00.000Z"))
+    await live_loop.minute(market, _et_time(friday, 18, 6))
+    assert _keys(dispatch) == {"earnings_result:INTC:2026-10-30"}
+    await live_loop.minute(market, _et_time(monday, 8))
+    market.fills(monday)
+    await live_loop.minute(market, _et_time(monday, 8, 10))
+    assert _keys(dispatch) == {"earnings_result:INTC:2026-10-30"}
+    assert market.model_calls == 1

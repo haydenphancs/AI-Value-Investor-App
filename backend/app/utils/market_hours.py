@@ -221,6 +221,17 @@ def previous_trading_day(d: date) -> date:
     return probe
 
 
+def next_trading_day(d: date) -> date:
+    """The first trading day strictly after ``d``. Bounded as `previous_trading_day` is,
+    for the same reason."""
+    probe = d + timedelta(days=1)
+    for _ in range(10):
+        if is_trading_day(probe):
+            return probe
+        probe += timedelta(days=1)
+    return probe
+
+
 def last_completed_close(now: datetime | None = None) -> datetime:
     """UTC instant of the most recent regular-session close that has ALREADY happened.
 

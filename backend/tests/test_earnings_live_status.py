@@ -15,7 +15,8 @@ import pytest
 
 import app.services.earnings_live_service as els
 from app.services.earnings_filing_service import FilingFigures
-from app.utils.market_hours import ET, is_trading_day, previous_trading_day
+from app.utils import market_hours
+from app.utils.market_hours import ET, is_trading_day, next_trading_day, previous_trading_day
 
 REPORT = date(2026, 10, 29)           # a Thursday, INTC's report day
 NEXT = date(2026, 10, 30)
@@ -501,3 +502,38 @@ def test_the_payload_carries_the_filing_link_and_guidance_only_from_the_release(
     assert payload["filing"]["url"] == "https://sec/idx"
     assert payload["guidance"].startswith("Q4 revenue")
     assert payload["preliminary"] is True
+
+
+@pytest.mark.parametrize("day,following", [
+    (date(2026, 10, 28), date(2026, 10, 29)),    # an ordinary Wednesday
+    (date(2026, 10, 30), date(2026, 11, 2)),     # Friday, over the weekend
+    (date(2026, 10, 31), date(2026, 11, 2)),     # from a Saturday
+    (date(2026, 11, 25), date(2026, 11, 27)),    # over Thanksgiving, to its half day
+    (date(2026, 12, 24), date(2026, 12, 28)),    # over Christmas and the weekend
+    (date(2026, 4, 2), date(2026, 4, 6)),        # over Good Friday and the weekend
+    (date(2026, 1, 16), date(2026, 1, 20)),      # over MLK Day
+    (date(2026, 10, 9), date(2026, 10, 12)),     # Columbus Day: SEC shut, the market open
+    (date(2026, 11, 10), date(2026, 11, 11)),    # Veterans Day, the same
+    (date(2026, 11, 26), date(2026, 11, 27)),    # from a holiday itself
+])
+def test_the_next_trading_day_steps_over_every_closed_day(day, following):
+    assert next_trading_day(day) == following
+    assert is_trading_day(following)
+
+
+def test_the_next_trading_day_sees_an_unscheduled_closure(monkeypatch):
+    monkeypatch.setattr(market_hours, "_OBSERVED_CLOSURES", {(2026, 10, 29)})
+    assert next_trading_day(date(2026, 10, 28)) == date(2026, 10, 30)
+
+
+def test_the_next_trading_day_and_the_previous_one_are_mirrors():
+    for offset in range(800):
+        day = date(2026, 1, 1) + timedelta(days=offset)
+        if is_trading_day(day):
+            assert previous_trading_day(next_trading_day(day)) == day
+
+
+def test_a_calendar_with_no_trading_day_ends_instead_of_hanging(monkeypatch):
+    monkeypatch.setattr(market_hours, "is_trading_day", lambda d: False)
+    day = date(2026, 10, 29)
+    assert next_trading_day(day) == day + timedelta(days=11)

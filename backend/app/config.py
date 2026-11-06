@@ -564,9 +564,11 @@ class Settings(BaseSettings):
     # Loop cadence. The loop is cheap when nothing reports (one memoised calendar read);
     # the FMP and SEC cadences below are what cost anything.
     EARNINGS_LIVE_INTERVAL_SECONDS: int = 60
-    # How many watched tickers' SEC filings are checked per report day, most-watched first.
-    # SEC's limiter (SEC_EDGAR_MAX_RPS) and its 600 s throttle circuit are SHARED with Learn,
-    # the buyback check and the Trillion stake finder, so this stays small.
+    # How many watched tickers' SEC filings are read at a time, most-watched first; the next
+    # ticker takes a freed slot, so every watched ticker reporting today can be read, this many
+    # at a time. SEC's limit is a rate, and SEC's limiter (SEC_EDGAR_MAX_RPS) and its 600 s
+    # throttle circuit are SHARED with Learn, the buyback check and the Trillion stake finder,
+    # so this stays small. The day's ceiling is under SEC LOAD in earnings_filing_service.py.
     EARNINGS_LIVE_SEC_MAX_SYMBOLS: int = 25
     # The model that reads a press release. Flash, at temperature 0 and no thinking budget:
     # this is extraction, and every figure it returns is checked verbatim against the text.

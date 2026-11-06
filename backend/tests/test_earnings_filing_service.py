@@ -15,9 +15,10 @@ reaches the model inside a fence it cannot close, with its footnote marks off th
 on, and a mark printed as a character is never read as a digit or a scale of the number before it.
 
 The SEC side is pinned too, because its limiter and 600 s throttle circuit are SHARED with
-Learn, the buyback check and the Trillion stake finder: the per-day cap, the release-window
-cadence, the stop once the release is read, one extraction per accession, and parking every
-symbol on a throttle.
+Learn, the buyback check and the Trillion stake finder: the cap on tickers at a time, the
+release-window cadence, the stop once the release is read or the record shows a foreign filer, one
+extraction per accession, and parking every symbol on a throttle. So is which report a filing
+belongs to: by the day it was accepted, and a filing date on EDGAR's own calendar.
 
 Each read of a filing settles one of three things. RETRY: the read failed, so the same accession
 goes again on a widening ladder. NOT_RELEASE: it was read and is not the results release, so it is
@@ -42,6 +43,7 @@ import threading
 import time
 import unicodedata
 from datetime import date, datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -3129,6 +3131,66 @@ def test_a_late_evening_filing_dated_the_next_business_day_still_counts():
     assert efs.find_results_filings(_submissions([late]), REPORT)
 
 
+@pytest.mark.parametrize("report,filed", [
+    (date(2026, 10, 30), date(2026, 11, 2)),
+    (date(2026, 11, 25), date(2026, 11, 27)),
+    (date(2026, 11, 10), date(2026, 11, 12)),
+    (date(2026, 10, 9), date(2026, 10, 13)),
+    (date(2026, 1, 16), date(2026, 1, 20)),
+    (date(2026, 12, 24), date(2026, 12, 28)),
+    (date(2026, 4, 2), date(2026, 4, 3)),
+], ids=["friday_to_monday", "over_thanksgiving", "over_veterans_day", "over_columbus_day",
+        "over_mlk_day", "over_christmas", "thursday_to_good_friday"])
+def test_an_evening_filing_dated_the_next_sec_business_day_counts(report, filed):
+    """EDGAR dates a filing accepted after 17:30 ET on its next business day, on the federal
+    calendar: it is open on Good Friday and shut on Columbus and Veterans Day, when the market
+    trades."""
+    evening = dict(_8K, filingDate=filed.isoformat(),
+                   acceptanceDateTime=f"{report.isoformat()}T18:05:00.000Z")
+    (found,) = efs.find_results_filings(_submissions([evening]), report)
+    assert found.filing_date == filed
+
+
+@pytest.mark.parametrize("filed", ["2026-10-28", "2026-11-01", "2026-11-05"],
+                         ids=["a_day_before", "a_day_past_the_window", "a_week_after"])
+def test_a_filing_outside_the_window_is_not_this_report(filed):
+    """No acceptance time here, so the date alone has to refuse it."""
+    outside = dict(_8K, filingDate=filed, acceptanceDateTime="")
+    assert efs.find_results_filings(_submissions([outside]), REPORT) == []
+
+
+def test_an_evening_8k_belongs_to_the_day_it_was_accepted():
+    evening = dict(_8K, filingDate="2026-10-29", acceptanceDateTime="2026-10-28T18:05:00.000Z")
+    assert efs.find_results_filings(_submissions([evening]), date(2026, 10, 28))
+    assert efs.find_results_filings(_submissions([evening]), date(2026, 10, 29)) == []
+
+
+def test_a_friday_evening_8k_is_not_mondays_report():
+    evening = dict(_8K, filingDate="2026-11-02", acceptanceDateTime="2026-10-30T18:05:00.000Z")
+    assert efs.find_results_filings(_submissions([evening]), date(2026, 10, 30))
+    assert efs.find_results_filings(_submissions([evening]), date(2026, 11, 2)) == []
+
+
+def test_the_acceptance_day_is_the_one_on_the_et_calendar():
+    """21:30 ET is already the next day in UTC, the clock the filing's time is held on."""
+    late = dict(_8K, filingDate="2026-10-29", acceptanceDateTime="2026-10-28T21:30:00.000Z")
+    assert efs.find_results_filings(_submissions([late]), date(2026, 10, 29)) == []
+    assert efs.find_results_filings(_submissions([late]), date(2026, 10, 28))
+
+
+def test_a_filing_accepted_first_thing_on_the_report_date_is_that_report():
+    early = dict(_8K, acceptanceDateTime="2026-10-29T06:00:00.000Z")
+    assert efs.find_results_filings(_submissions([early]), REPORT)
+
+
+@pytest.mark.parametrize("accepted", ["", None, 20261029, "2026-10-29", "not a date at all!!"],
+                         ids=["empty", "null", "a_number", "too_short", "garbled"])
+def test_a_filing_with_no_readable_acceptance_time_is_judged_on_its_date(accepted):
+    (found,) = efs.find_results_filings(
+        _submissions([dict(_8K, acceptanceDateTime=accepted)]), REPORT)
+    assert found.accession == ACC and found.accepted_at is None
+
+
 @pytest.mark.parametrize("change", [
     {"form": "10-Q"}, {"items": "7.01,9.01"}, {"filingDate": "2026-10-27"}, {"form": "8-K/A"},
 ])
@@ -3140,6 +3202,40 @@ def test_columns_of_different_lengths_read_as_no_filing():
     data = _submissions([_8K])
     data["filings"]["recent"]["items"].append("2.02")
     assert efs.find_results_filings(data, REPORT) == []
+
+
+def _forms(*forms: Any) -> Dict[str, Any]:
+    return {"filings": {"recent": {"form": list(forms)}}}
+
+
+@pytest.mark.parametrize("forms", [
+    ("6-K",), ("20-F",), ("40-F",), ("6-K/A",), ("20-F/A", "6-K"), (" 6-k ",),
+    ("6-K", "SC 13G", "F-3", 7, None),
+], ids=["a_6k", "a_20f", "a_40f", "an_amended_6k", "an_annual_and_a_6k", "spelled_loosely",
+        "beside_other_forms"])
+def test_a_filer_on_foreign_forms_alone_furnishes_on_6k(forms):
+    assert efs.furnishes_on_6k(_forms(*forms)) is True
+
+
+@pytest.mark.parametrize("forms", [
+    ("6-K", "10-Q"), ("20-F", "10-K"), ("6-K", "8-K"), ("6-K", "10-K/A"), ("6-K", "8-K/A"),
+    ("40-F", "10-Q/A"), ("6-K", "10-KT"), ("6-K", " 10-q "),
+], ids=["a_10q", "a_10k", "an_8k", "an_amended_10k", "an_amended_8k", "an_amended_10q",
+        "a_transition_10k", "spelled_loosely"])
+def test_a_stray_foreign_form_beside_a_domestic_report_is_no_foreign_filer(forms):
+    """Calling a domestic filer foreign costs it the fast path, for one stray form. Keeping a
+    foreign filer costs a poll. So one domestic report decides it."""
+    assert efs.furnishes_on_6k(_forms(*forms)) is False
+
+
+@pytest.mark.parametrize("data", [
+    None, [], "6-K", {}, {"filings": None}, {"filings": {}}, {"filings": {"recent": None}},
+    {"filings": {"recent": {}}}, {"filings": {"recent": {"form": "6-K"}}}, _forms(),
+    _forms("S-1", "424B4", "4"),
+], ids=["none", "a_list", "text", "empty", "no_filings", "empty_filings", "no_recent",
+        "empty_recent", "form_not_a_list", "no_forms", "no_report_of_either_kind"])
+def test_a_record_that_shows_no_foreign_forms_says_no(data):
+    assert efs.furnishes_on_6k(data) is False
 
 
 _INDEX = """<table class="tableFile">
@@ -3356,12 +3452,99 @@ async def test_no_filing_yet_is_checked_again_only_after_the_window_cadence(watc
 
 
 @pytest.mark.asyncio
-async def test_the_daily_cap_keeps_the_most_watched_first(watcher, monkeypatch):
+async def test_the_cap_reads_the_most_watched_first(watcher, monkeypatch):
     monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 2)
     sec = _SEC()
     await watcher.run_once(_AT_16, ["AAPL", "MSFT", "INTC"], REPORT, sec=sec, cik_map=_CIKS,
                            sleep=_no_sleep)
     assert sec.calls == ["sub:0000320193", "sub:0000789019"]
+
+
+@pytest.mark.asyncio
+async def test_a_finished_symbol_gives_its_slot_to_the_next_one(watcher, monkeypatch):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
+    sec = _SEC()
+    for _ in range(2):
+        await watcher.run_once(_AT_16, ["NEWCO", "INTC"], REPORT, sec=sec, cik_map=_CIKS,
+                               sleep=_no_sleep)
+    assert sec.calls == ["sub:0000050863"], "NEWCO has no CIK, so its watch ended in one round"
+
+
+@pytest.mark.asyncio
+async def test_a_symbol_whose_release_is_read_gives_its_slot_while_its_record_stays_open(
+        watcher, monkeypatch):
+    """A release with EPS alone leaves the record pending and on the list, so this is the
+    watcher's own call."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    for _ in range(2):
+        await watcher.run_once(_AT_16, ["INTC", "AAPL"], REPORT, sec=sec, gemini=_Gemini(),
+                               cik_map=_CIKS, sleep=_no_sleep)
+    assert [c for c in sec.calls if c.startswith("sub:")] == ["sub:0000050863", "sub:0000320193"]
+
+
+@pytest.mark.asyncio
+async def test_a_found_release_alone_is_enough_to_free_the_slot(watcher, monkeypatch):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
+    found = efs.ResultsFiling(ACC, REPORT, None, "intc.htm")
+    watcher._watch[("INTC", REPORT)] = efs._Watch(found=found)
+    sec = _SEC()
+    await watcher.run_once(_AT_16, ["INTC", "AAPL"], REPORT, sec=sec, cik_map=_CIKS,
+                           sleep=_no_sleep)
+    assert sec.calls == ["sub:0000320193"]
+
+
+@pytest.mark.asyncio
+async def test_a_symbol_between_two_reads_keeps_its_slot(watcher, monkeypatch):
+    """The cap counts tickers at a time. Cut after the due filter, it would count reads a
+    round, and every ticker on the list would come through on its own minute."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 2)
+    sec = _SEC()
+    for _ in range(2):
+        await watcher.run_once(_AT_16, ["AAPL", "MSFT", "INTC"], REPORT, sec=sec, cik_map=_CIKS,
+                               sleep=_no_sleep)
+    assert sec.calls == ["sub:0000320193", "sub:0000789019"], "both are inside their minute"
+
+
+@pytest.mark.asyncio
+async def test_a_round_never_reads_past_the_cap_with_slots_freed(watcher, monkeypatch):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 2)
+    symbols = ["NEWCO", "OTHER", "AAPL", "MSFT", "INTC"]
+    sec = _SEC()
+    await watcher.run_once(_AT_16, symbols, REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
+    assert sec.calls == [], "two tickers SEC does not list took the round's two slots"
+    for _ in range(3):
+        sec.calls.clear()
+        await watcher.run_once(_AT_16, symbols, REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
+        assert len(sec.calls) <= 2
+        for watch in watcher._watch.values():
+            watch.checked_mono = 0.0                         # the 60 s cadence has passed
+    assert sec.calls == ["sub:0000320193", "sub:0000789019"]
+
+
+@pytest.mark.parametrize("cap", [0, -1])
+@pytest.mark.asyncio
+async def test_a_cap_of_nothing_reads_nothing(watcher, monkeypatch, cap):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", cap)
+    sec = _SEC()
+    await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
+    assert sec.calls == []
+
+
+def test_the_sec_cap_is_not_documented_as_daily():
+    """The cap is how many tickers are read at a time, and a finished one gives up its slot.
+    SEC's limit is a rate, so a daily count would only leave ticker 26 with no fast path."""
+    backend = Path(__file__).resolve().parents[1]
+    sites = (
+        ((backend / "app/services/earnings_filing_service.py").read_text(),
+         "tickers at a time, most-watched first"),
+        ((backend / "app/config.py").read_text(), "read at a time, most-watched first"),
+        (__doc__, "the cap on tickers at a time"),
+    )
+    for text, says_what_it_is in sites:
+        assert says_what_it_is in text
+        for phrase in ("tickers a day", "per report day", "per-day cap"):
+            assert phrase not in text, f"{says_what_it_is!r}'s file says {phrase!r}"
 
 
 @pytest.mark.asyncio
@@ -3505,8 +3688,90 @@ async def test_a_verifier_that_raises_costs_one_read_and_names_the_filing(watche
 @pytest.mark.asyncio
 async def test_a_ticker_sec_does_not_list_falls_back_to_fmp_without_a_call(watcher):
     sec = _SEC()
-    await watcher.run_once(_AT_16, ["ASML"], REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
+    await watcher.run_once(_AT_16, ["NEWCO"], REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
     assert sec.calls == []
+
+
+_ASML_CIK = "0000937966"
+_FOREIGN_CIKS = dict(_CIKS, ASML=_ASML_CIK)
+_6K = dict(_8K, accessionNumber="0000937966-26-000045", form="6-K", items="",
+           primaryDocument="asml.htm")
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_filer_sec_lists_is_read_once_and_frees_its_slot(watcher, monkeypatch,
+                                                                         caplog):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
+    sec = _SEC(filings={_ASML_CIK: [_6K]})
+    with caplog.at_level(logging.INFO, logger=efs.__name__):
+        for _ in range(2):
+            await watcher.run_once(_AT_16, ["ASML", "INTC"], REPORT, sec=sec,
+                                   cik_map=_FOREIGN_CIKS, sleep=_no_sleep)
+    assert sec.calls == [f"sub:{_ASML_CIK}", "sub:0000050863"]
+    assert watcher._watch[("ASML", REPORT)].done is True
+    assert watcher.figures_for("ASML", REPORT) is None
+    rows = [r.getMessage() for r in caplog.records if "result=foreign_filer" in r.getMessage()]
+    assert len(rows) == 1 and "ASML" in rows[0] and REPORT.isoformat() in rows[0]
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_filer_is_not_read_again_on_later_rounds(watcher):
+    sec = _SEC(filings={_ASML_CIK: [_6K]})
+    for _ in range(3):
+        await watcher.run_once(_AT_16, ["ASML"], REPORT, sec=sec, cik_map=_FOREIGN_CIKS,
+                               sleep=_no_sleep)
+        for watch in watcher._watch.values():
+            watch.checked_mono = 0.0                         # the 60 s cadence has passed
+    assert sec.calls == [f"sub:{_ASML_CIK}"]
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_filer_is_asked_about_once_per_report(watcher):
+    """The watch is per report: a filer can change its forms between two."""
+    sec = _SEC(filings={_ASML_CIK: [_6K]})
+    await watcher.run_once(_AT_16, ["ASML"], REPORT, sec=sec, cik_map=_FOREIGN_CIKS,
+                           sleep=_no_sleep)
+    next_day = datetime(2026, 10, 30, 16, 3, tzinfo=ET).astimezone(timezone.utc)
+    await watcher.run_once(next_day, ["ASML"], date(2026, 10, 30), sec=sec,
+                           cik_map=_FOREIGN_CIKS, sleep=_no_sleep)
+    assert sec.calls == [f"sub:{_ASML_CIK}"] * 2
+
+
+@pytest.mark.asyncio
+async def test_a_filer_with_domestic_reports_stays_watched(watcher):
+    """A stray 6-K beside a 10-Q is no foreign filer, and its release may still be to come."""
+    sec = _SEC(filings={_CIKS["INTC"]: [_6K, dict(_6K, form="10-Q")]})
+    await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
+    assert watcher._watch[("INTC", REPORT)].done is False
+    sec.filings[_CIKS["INTC"]].append(_8K)
+    watcher._watch[("INTC", REPORT)].checked_mono = 0.0      # the 60 s cadence has passed
+    found = await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=_Gemini(),
+                                   cik_map=_CIKS, sleep=_no_sleep)
+    assert found["INTC"].revenue == 17.1e9
+
+
+@pytest.mark.asyncio
+async def test_a_record_sec_could_not_serve_keeps_the_symbol_watched(watcher):
+    class _NoRecord(_SEC):
+        async def get_submissions(self, cik):
+            self.calls.append(f"sub:{cik}")
+            return None
+
+    sec = _NoRecord()
+    await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
+    assert watcher._watch[("INTC", REPORT)].done is False
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_filers_read_leaves_the_retry_rests_alone(watcher, clock):
+    """Its one read spends no attempt, so nobody waiting on a retry is held for it."""
+    waiting = efs._Watch(checked_mono=clock.at, retry_gap=60.0, attempts={ACC: 1})
+    watcher._watch[("INTC", REPORT)] = waiting
+    sec = _SEC(filings={_ASML_CIK: [_6K]})
+    await watcher.run_once(_AT_16, ["ASML", "INTC"], REPORT, sec=sec, cik_map=_FOREIGN_CIKS,
+                           sleep=_no_sleep)
+    assert sec.calls == [f"sub:{_ASML_CIK}"]
+    assert waiting.checked_mono == clock.at and waiting.retry_gap == 60.0
 
 
 @pytest.mark.asyncio
@@ -4661,6 +4926,22 @@ async def test_a_figure_is_on_the_record_before_the_next_symbol_is_read(live):
     assert shown == [17.1e9]
     assert stats["filings"] == 2
     assert live.snapshot("AAPL", REPORT, _AT_16).revenue.actual == 17.1e9
+
+
+@pytest.mark.asyncio
+async def test_a_record_left_open_by_its_release_gives_the_next_ticker_its_slot(live, monkeypatch):
+    """A release with no revenue in it leaves the record pending, so the tick keeps handing the
+    ticker over, and the slot still has to go to the next one."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
+    live.observe_rows(REPORT, [_pending("INTC"), _pending("AAPL")], _AT_16)
+    answer = _good_answer()
+    del answer["revenue"]
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    for filings_read in (1, 0):
+        stats = await els.earnings_filing_tick(_AT_16, watched=["INTC", "AAPL"], sec=sec,
+                                               gemini=_Gemini(answer=answer))
+        assert stats == {"watched": 2, "pending": 2, "filings": filings_read}
+    assert [c for c in sec.calls if c.startswith("sub:")] == ["sub:0000050863", "sub:0000320193"]
 
 
 @pytest.mark.asyncio

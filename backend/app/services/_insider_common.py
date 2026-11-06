@@ -291,6 +291,17 @@ _REGION_TAIL_RE = re.compile(
     r"|china|japan|india|uk)[\s.,;]*$",
     re.I,
 )
+# A business line right after the CEO token, again with no punctuation for _SEGMENT_RE: JPMorgan's
+# "CEO CCB", "Co-CEO CIB", "CEO Asset & Wealth Management" ranked as its CEO, filled the five
+# rows of Key Management and left out the CFO and COO (2026-11-06). Named lines only, so a company
+# name after the title ("CEO Consumer Portfolio Services") stays the issuer's CEO.
+_BUSINESS_LINE_RE = re.compile(
+    r"(?:\bceo\b|chief\s+executive(?:\s+officer)?)\s+"
+    r"(?:cib|ccb|awm|asset\s*(?:&|and)\s*wealth|asset\s+management|wealth\s+management"
+    r"|consumer\s*(?:&|and)\s*community|consumer\s+bank|commercial\s+bank|investment\s+bank"
+    r"|corporate\s*(?:&|and)\s*investment)",
+    re.I,
+)
 # Equity share lines, tuned on 11,000 live Form 4 rows (2026-10-03): "Common Stock",
 # "Common Shares", "Ordinary Shares", "Class A Ordinary Stock", Alphabet's "Class C Capital
 # Stock", REIT/trust "Shares of Beneficial Interest", Canadian "Subordinate Voting Shares".
@@ -373,6 +384,7 @@ def is_ceo_role(type_of_owner: object) -> bool:
         and not _SUBORDINATE_RE.search(title)
         and not _SEGMENT_RE.search(title)
         and not _REGION_TAIL_RE.search(title)
+        and not _BUSINESS_LINE_RE.search(title)
     )
 
 

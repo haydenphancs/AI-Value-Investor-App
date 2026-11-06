@@ -12,7 +12,7 @@ Uses google.genai types for Gemini-compatible function declarations.
 
 import logging
 import math
-from typing import Dict, Any, Callable, Awaitable, Optional
+from typing import AbstractSet, Dict, Any, Callable, Awaitable, Optional
 
 import httpx
 from google.genai import types
@@ -410,6 +410,7 @@ def build_tool_handlers(
     *,
     subject_ticker: str = "",
     signal_of_confidence: Any = None,
+    left_out_fields: AbstractSet[str] = frozenset(),
 ) -> Dict[str, Callable[..., Awaitable[Dict[str, Any]]]]:
     """Build async handler functions for each FMP tool.
 
@@ -417,11 +418,23 @@ def build_tool_handlers(
     Confidence build (None when the collector refused or lost it). A cash-flow result for
     that ticker carries the build's checked dividends and buybacks; any other ticker's says
     they were left out ("Dividends and buybacks: never the raw cash-flow lines" above).
+
+    ``left_out_fields``: statement lines this run never hands the model. A financial company's
+    report leaves its debt, gross profit and cash flow out of the score and the evidence, and the
+    tools were the way round that: JPMorgan's findings cited "net debt" (`SCORE_EXCLUDED_FIELDS`).
     """
     subject = _listing_key(subject_ticker)
 
+    def _compress(data: Any, statement: str) -> Dict[str, Any]:
+        result = _compress_financial_data(data, statement)
+        if left_out_fields:
+            for row in result.get("data") or []:
+                for field in left_out_fields:
+                    row.pop(field, None)
+        return result
+
     def _cash_flow_result(ticker: str, data: Any) -> Dict[str, Any]:
-        result = _compress_financial_data(data, "cash_flow")
+        result = _compress(data, "cash_flow")
         if subject and _listing_key(ticker) == subject:
             result["shareholder_returns"] = shareholder_returns_block(
                 signal_of_confidence, _statement_currency(data)
@@ -450,7 +463,7 @@ def build_tool_handlers(
             else:
                 return {"error": f"Unknown statement type: {statement}"}
 
-            return _compress_financial_data(data, statement)
+            return _compress(data, statement)
 
         except Exception as e:
             _log_tool_failure("fetch_quarterly_financials", ticker, e, fmp)
@@ -539,7 +552,7 @@ def build_tool_handlers(
                 return _cash_flow_result(ticker, data)
             else:
                 return {"error": f"Unknown statement type: {statement}"}
-            return _compress_financial_data(data, statement)
+            return _compress(data, statement)
         except Exception as e:
             _log_tool_failure("fetch_extended_financials", ticker, e, fmp)
             return {"error": tool_error_message(e, fmp), "data": []}
@@ -555,6 +568,12 @@ def build_tool_handlers(
         "fetch_extended_financials": fetch_extended_financials,
         "research_complete": research_complete,
     }
+
+
+# The statement lines a financial company's report leaves out (`score_excluded_rows`).
+SCORE_EXCLUDED_FIELDS = frozenset({
+    "grossProfit", "totalDebt", "netDebt", "operatingCashFlow", "freeCashFlow",
+})
 
 
 # ── Data Compression ─────────────────────────────────────────────────────────

@@ -139,6 +139,12 @@ CAPITAL_MARKETS_BROKERS = frozenset({
     "SCHW", "SF", "SIEB", "SNEX", "TIGR", "VIRT", "XP",
 })
 
+# Bank-chartered custody companies FMP files under Asset Management, so they keep their rows
+# (owner decision above). Their revenue is still gross of interest and their consensus net, so
+# the first forecast bar crosses bases as a bank's does: FY2025 STT $22.6B against a $15.9B
+# estimate, NTRS $14.3B against $9.5B, read from FMP 2026-11-05. BK is filed as a bank already.
+GROSS_REVENUE_CUSTODIANS = frozenset({"STT", "NTRS"})
+
 _DASH_RE = re.compile(r"\s*[-–—]\s*")
 _SPACE_RE = re.compile(r"\s+")
 

@@ -16,7 +16,7 @@ NOTE: this is ONLY the short comment under each card. The separate "✨ Insight"
 block (overall_assessment) stays AI-generated and is untouched.
 """
 
-from typing import AbstractSet, List, Optional, Tuple
+from typing import AbstractSet, List, Mapping, Optional, Tuple
 
 # Per-card metric weights — mirror the snapshot services' rating weights so the
 # label anchors on the metric that actually moved the rating (tie-break only).
@@ -62,6 +62,38 @@ _PEER_FREE_VOCAB = {
 }
 
 
+# The Growth phrases state a direction, but their score compares the row with its peers:
+# JPMorgan's FY2025 revenue +3.3% against -0.5% scored 4 and its EPS +1.4% against +18.6% scored
+# 1, so the card read "Rapid Sales Growth, Falling Earnings" (2026-11-06). metric_key -> (the
+# row's value the strong phrase needs to be above, the phrase when it is not, the phrase when a
+# weak score sits on a row above zero, the phrase for a flat row). Values are the row's own
+# printed figure, one decimal: the absolute bands (`_growth_score` with no median) give 4+ only
+# above 10, which prints 10.0 or more, and 2 or less only at or below 0, so the "Peers" phrases
+# are reached only from a real comparison, on every path.
+_GROWTH_ROW_CHECK = {
+    "revenue_growth": (10.0, "Sales Lead Peers", "Sales Lag Peers", "Flat Sales"),
+    "eps_growth": (10.0, "Earnings Lead Peers", "Earnings Lag Peers", "Flat Earnings"),
+    "fcf_growth": (10.0, "Cash Flow Leads Peers", "Cash Flow Lags Peers", "Flat Cash Flow"),
+    "operating_income_growth": (
+        0.1, "Op Profit Leads Peers", "Op Profit Lags Peers", "Flat Operating Profit",
+    ),
+}
+# A falling growth rate does not show cash being burned: that needs the cash flow itself.
+_FCF_DECLINE_PHRASE = "Falling Cash Flow"
+
+
+def _growth_row_phrase(key: str, strong: bool, value: float) -> Optional[str]:
+    """The phrase a Growth row's own value allows, None when the usual phrase is true of it."""
+    floor, leads, lags, flat = _GROWTH_ROW_CHECK[key]
+    if strong:
+        return None if value >= floor else leads
+    if value > 0:
+        return lags
+    if value == 0:
+        return flat
+    return _FCF_DECLINE_PHRASE if key == "fcf_growth" else None
+
+
 def _peer_word(peer_level: Optional[str]) -> str:
     return "Industry" if peer_level == "industry" else "Sector"
 
@@ -101,6 +133,7 @@ def generate_card_verdict(
     *,
     peer_compared: bool = True,
     peer_free_metrics: Optional[AbstractSet[str]] = None,
+    row_values: Optional[Mapping[str, float]] = None,
 ) -> Tuple[str, str]:
     """Return (label, sentiment) for one card.
 
@@ -140,6 +173,10 @@ def generate_card_verdict(
     Stock Exchanges P/E on its absolute bands beside a P/B against the industry. Each of
     them takes its peer-free twin ("Low P/E", not "Cheaper Than Industry"); the card-wide
     words stay as `peer_compared` says. None (the default) changes nothing.
+
+    `row_values` (2026-11-06): the Growth rows' own percentages, keyed by metric. A direction
+    phrase is kept only when its row says the same (`_GROWTH_ROW_CHECK`). The score, the stars
+    and the sentiment do not change. None (the default) changes nothing.
     """
     if star_rating is None or star_rating <= 0:
         return _NOT_RATED
@@ -168,6 +205,10 @@ def generate_card_verdict(
     )
 
     def phrase(key: str, strong: bool) -> str:
+        if row_values is not None and key in row_values and key in _GROWTH_ROW_CHECK:
+            checked = _growth_row_phrase(key, strong, row_values[key])
+            if checked is not None:
+                return checked
         row_peer_free = not peer_compared or (
             peer_free_metrics is not None and key in peer_free_metrics
         )

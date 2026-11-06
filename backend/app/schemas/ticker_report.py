@@ -337,6 +337,10 @@ class RevenueEngineResponse(BaseModel):
     # Set only for a gross stack; with it the shares of reported revenue add to 100%.
     # None otherwise and on older reports (iOS decodes it as Optional).
     intersegment_eliminations: Optional[float] = None
+    # Millions: a lender's reported revenue, set only when `total_revenue` leaves out the
+    # interest that figure includes (JPM FY2025: 178.6B of segments, 279.7B reported). The
+    # analysis note says so in words. None otherwise; older builds ignore the key.
+    gross_reported_revenue: Optional[float] = None
     # The ISO 4217 code the segment figures are reported in (the income statement's
     # `reportedCurrency`: "TWD" for a 20-F filer), never converted. The collector writes only
     # a 3-letter uppercase code (`_currency_code`), else None; None on older reports too.

@@ -45,6 +45,7 @@ from app.integrations.gemini import (
     truncate_tool_result,
 )
 from app.services.agents.fmp_tools import (
+    SCORE_EXCLUDED_FIELDS,
     _scrub,
     build_fmp_tool_declarations,
     build_tool_handlers,
@@ -71,6 +72,7 @@ from app.services.agents.persona_config import PersonaConfig, get_persona_config
 from app.services.agents.ticker_report_data_collector import (
     CollectedTickerData,
     TickerReportDataCollector,
+    _score_excluded,
     build_financial_context,
     record_degraded_section,
 )
@@ -276,6 +278,7 @@ class ResearchAgent:
         # tax withholding) — fmp_tools, "never the raw cash-flow lines".
         handlers = build_tool_handlers(
             self.fmp, subject_ticker=ticker, signal_of_confidence=out.signal_of_confidence,
+            left_out_fields=SCORE_EXCLUDED_FIELDS if _score_excluded(out) else frozenset(),
         )
 
         persona_instruction = (

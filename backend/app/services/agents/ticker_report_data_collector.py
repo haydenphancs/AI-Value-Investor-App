@@ -78,6 +78,8 @@ from app.services.financials_metric_gate import (
     resolve_payment_network,
     resolve_withheld_company_rows,
     score_excluded_rows,
+    GROSS_REVENUE_CUSTODIANS,
+    normalize_ticker,
     trailing_interest_row,
     without_excluded_metrics,
     withheld_company_rows,
@@ -347,7 +349,7 @@ NEWS_CATALYST_KEYWORDS: List[Tuple[str, Tuple[str, ...]]] = [
     # only enforcement actions and court rulings, which are genuine catalysts.
     ("Legal/Regulatory", (
         "sec investigation", "sec charges", "wells notice",
-        "doj probe", "doj investigation", "antitrust",
+        "doj probe", "doj investigation", "antitrust", "probe",
         "indictment", "indicted", "criminal charges",
         "fraud charges", "charged with fraud",
         "jury verdict", "found liable", "subpoena", "injunction",
@@ -3139,6 +3141,7 @@ class TickerReportDataCollector:
             fiscal_year=engine_inputs["fiscal_year"],
             total_revenue=engine_inputs["total_revenue"],
             intersegment_eliminations=engine_inputs["intersegment_eliminations"],
+            gross_reported_revenue=engine_inputs["gross_reported_revenue"],
             reporting_currency=_engine_reporting_currency(
                 out.income, engine_inputs["fiscal_year"], out.ticker,
             ),
@@ -3146,7 +3149,8 @@ class TickerReportDataCollector:
 
         # ── Revenue forecast (projections + CAGR — guidance from AI) ─
         out.revenue_forecast_partial = _build_revenue_forecast_partial(
-            out.estimates, c.get("revenue_cagr"), c.get("eps_cagr"), out.income
+            out.estimates, c.get("revenue_cagr"), c.get("eps_cagr"), out.income,
+            revenue_crosses_basis=_revenue_crosses_basis(out),
         )
 
         # ── Fundamental metrics (4 cards) — deterministic from the
@@ -3619,6 +3623,7 @@ class TickerReportDataCollector:
             # of how many survive scoring.
             n_total_peers=len(out.peer_ranks),
             focal_roic_ttm=out.focal_roic_ttm,
+            roic_comparable=not _score_excluded(out),
         )
         # Coverage note: when one or more pillars fall flat because the industry's real moats
         # live outside the financial-statement lens (mining, banks, insurers, REITs,
@@ -3790,6 +3795,8 @@ class TickerReportDataCollector:
                 dict.fromkeys(_STYLE_SIGNALS_EXCLUDED),
                 excluded_rows=sorted(excluded_rows),
             )
+        if _revenue_gross_of_interest(out):
+            scoring_inputs["_style_signals"]["revenue_gross_of_interest"] = True
 
         # Deterministic, persona-weighted headline score — the SINGLE source
         # of truth for BOTH entry paths (the report endpoint and the research
@@ -5001,8 +5008,11 @@ def _build_hidden_market_signals(
                 "num_sellers": summ.num_sellers,
                 "total_buys_in_millions": round(summ.total_buys_in_millions or 0.0, 2),
                 "total_sells_in_millions": round(summ.total_sells_in_millions or 0.0, 2),
+                # Dollars, but never against the pills above it: at 7 buyers and 7 sellers one
+                # $10M-$25M disclosure band read "Net Buy" over text saying balanced.
                 "net_direction": (
-                    "buy" if net > 0 else "sell" if net < 0 else "balanced"
+                    "balanced" if summ.num_buyers == summ.num_sellers
+                    else "buy" if net > 0 else "sell" if net < 0 else "balanced"
                 ),
                 "period": summ.period_description or "Last 12 Months",
                 "trades": [a.model_dump() for a in recent],
@@ -5981,6 +5991,20 @@ def _build_fundamentals_history(out: "CollectedTickerData") -> Dict[str, Dict[st
     return result
 
 
+_GROWTH_ROW_VALUE_RE = re.compile(r"[+-]?\d[\d,]*(?:\.\d+)?%")
+
+
+def _growth_row_values(metrics: Any) -> Dict[str, float]:
+    """{metric_key: percentage} for the Growth rows that print one ("+3.3%"); "N/M" and "—"
+    print none."""
+    values: Dict[str, float] = {}
+    for m in metrics or []:
+        key, text = getattr(m, "metric_key", None), getattr(m, "value", None)
+        if key and isinstance(text, str) and _GROWTH_ROW_VALUE_RE.fullmatch(text.strip()):
+            values[key] = float(text.strip().rstrip("%").replace(",", ""))
+    return values
+
+
 def _snapshot_to_card(
     title: str,
     snap: Optional[SnapshotItemResponse],
@@ -6093,6 +6117,7 @@ def _snapshot_to_card(
         [(m.metric_key, m.score) for m in snap.metrics],
         peer_compared=peer_compared,
         peer_free_metrics=peer_free_metrics,
+        row_values=_growth_row_values(snap.metrics),
     )
     return {
         "title": title,
@@ -6201,6 +6226,7 @@ def _empty_engine_inputs() -> Dict[str, Any]:
         "fiscal_year": None,
         "total_revenue": None,
         "intersegment_eliminations": None,
+        "gross_reported_revenue": None,
     }
 
 
@@ -6358,7 +6384,20 @@ def _engine_inputs_from_sources(
     tab's `revenueBasis`); the segment sum only when it is not. A gross stack keeps its
     segments AS REPORTED and carries the eliminations so the panel can draw the line that
     makes the shares add to 100%: switching the denominator without that line would show
-    shares summing to 134% with nothing to explain them."""
+    shares summing to 134% with nothing to explain them.
+
+    A lender is the exception (2026-11-06). Its segments are net of interest while FMP's
+    revenue is gross, and the breakdown closes that gap with `_INTEREST_GAP_NAME`. That row
+    is not a revenue source: JPMorgan's was the largest bar, at 36% of "revenue". It leaves
+    the Engine here, the shares are of the segments, as the bank reports them, and the gross
+    figure travels beside them so the report can say what the total leaves out."""
+    from app.services.revenue_breakdown_service import _INTEREST_GAP_NAME
+
+    gross_reported: Optional[float] = None
+    if any(name == _INTEREST_GAP_NAME for name, _ in sources):
+        sources = [row for row in sources if row[0] != _INTEREST_GAP_NAME]
+        gross_reported = _finite_positive(reported_revenue)
+        reported_revenue = None
     gross_sum = sum(v for _, v in sources)
     reported = _finite_positive(reported_revenue)
     basis = reported if reported is not None else gross_sum
@@ -6371,6 +6410,7 @@ def _engine_inputs_from_sources(
         "fiscal_year": fy,
         "total_revenue": basis,
         "intersegment_eliminations": eliminations,
+        "gross_reported_revenue": gross_reported,
     }
 
 
@@ -6413,6 +6453,8 @@ def _raw_engine_inputs(
         reported = _safe_float_opt(matched_income, "revenue")
         sources, eliminations, outcome = _reconcile_segments(
             sources, reported, _explicit_eliminations(seg_rec), ticker=ticker,
+            interest_expense=_safe_float_opt(matched_income, "interestExpense"),
+            interest_income=_safe_float_opt(matched_income, "interestIncome"),
         )
         if outcome in ("thin", "unreconciled"):
             logger.info(
@@ -6571,6 +6613,7 @@ def _build_revenue_engine(
     fiscal_year: Optional[str] = None,
     total_revenue: Optional[float] = None,
     intersegment_eliminations: Optional[float] = None,
+    gross_reported_revenue: Optional[float] = None,
     reporting_currency: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Emit segments in MILLIONS — iOS decides how to render (M / B / T).
@@ -6588,6 +6631,8 @@ def _build_revenue_engine(
     * `total_revenue` is the share denominator: reported revenue when known (see
       `_engine_inputs_from_sources`), else the segment sum.
     * `intersegment_eliminations` (millions, positive) is set only for a gross stack.
+    * `gross_reported_revenue` (millions) is set only when `total_revenue` leaves out the
+      interest a lender's reported revenue includes (`_engine_inputs_from_sources`).
     * `reporting_currency` is the ISO code the values are in (`_engine_reporting_currency`),
       re-guarded here (`_currency_code`) so no caller can put a garbage code on the wire;
       None when unknown.
@@ -6601,6 +6646,7 @@ def _build_revenue_engine(
             "revenue_unit": "Millions",
             "period": period,
             "intersegment_eliminations": None,
+            "gross_reported_revenue": None,
             "reporting_currency": currency,
             "analysis_note": None,  # filled by AI
         }
@@ -6608,6 +6654,7 @@ def _build_revenue_engine(
     gross = sum(s["current_revenue"] for s in segments)
     total = _finite_positive(total_revenue) or gross
     eliminations = _finite_positive(intersegment_eliminations)
+    gross_reported = _finite_positive(gross_reported_revenue)
 
     divisor = 1e6  # always emit in millions
     scaled = []
@@ -6626,6 +6673,9 @@ def _build_revenue_engine(
         "period": period,
         "intersegment_eliminations": (
             round(eliminations / divisor, 2) if eliminations is not None else None
+        ),
+        "gross_reported_revenue": (
+            round(gross_reported / divisor, 2) if gross_reported is not None else None
         ),
         "reporting_currency": currency,
         "analysis_note": None,  # AI fills
@@ -6790,6 +6840,8 @@ def _signed_eps_label(eps: Optional[float]) -> str:
 def _build_annual_timeline(
     income: Optional[List[Dict[str, Any]]],
     estimates: Optional[List[Dict[str, Any]]],
+    *,
+    revenue_crosses_basis: bool = False,
 ) -> List[Dict[str, Any]]:
     """One continuous yearly revenue+EPS series for the Earnings Timeline view:
     the last 5 reported ACTUAL years (is_forecast=False) followed GAPLESSLY by up
@@ -6810,8 +6862,12 @@ def _build_annual_timeline(
     statement's GAAP `epsDiluted`, forecasts are the analyst consensus `epsAvg` (adjusted
     for most filers). The first forecast year's EPS YoY is therefore None — AVGO's GAAP
     $4.77 against a $10.00 consensus read as "+110%" growth — and every row says which
-    basis it is on (`eps_basis`). Revenue is the same basis on both sides and keeps its
-    YoY. A YoY across a missing fiscal year is None too (it would be a 2-year change).
+    basis it is on (`eps_basis`). Revenue is the same basis on both sides and keeps its YoY,
+    except where `revenue_crosses_basis` says it is not: FMP's revenue for a bank is gross of
+    the interest it pays while the consensus is net, so JPMorgan's FY2026 read -25.5% against
+    a true +14.6% (2026-11-06). That first forecast row's revenue YoY is None; later rows are
+    estimate against estimate and keep theirs (`_revenue_crosses_basis`).
+    A YoY across a missing fiscal year is None too (it would be a 2-year change).
 
     Self-contained: its own divisor + YoY, independent of the curated forecast
     window in `_build_revenue_forecast_partial`. Reuses inputs the collector
@@ -6857,6 +6913,8 @@ def _build_annual_timeline(
         # GAAP actual → consensus forecast: not a growth rate (see the docstring).
         crosses_basis = prior is not None and row.is_forecast and not prior.is_forecast
         prior_eps = prior.eps if prior is not None and not crosses_basis else None
+        if crosses_basis and revenue_crosses_basis:
+            prior_rev = None
         rev, eps = row.revenue, row.eps
         series.append({
             "period": str(row.fy),
@@ -6987,6 +7045,8 @@ def _build_revenue_forecast_partial(
     revenue_cagr: Optional[float],
     eps_cagr: Optional[float],
     income: Optional[List[Dict[str, Any]]] = None,
+    *,
+    revenue_crosses_basis: bool = False,
 ) -> Dict[str, Any]:
     # Pick up to 4 forward projections plus the off-screen anchor (FY before
     # "current") for the leftmost bar's YoY chip. With fewer than 4 forward
@@ -7036,8 +7096,12 @@ def _build_revenue_forecast_partial(
             # revenue, only when that is the year before it (a filer behind on its reports
             # would print a multi-year change as YoY, which the timeline refuses too). EPS
             # stays None: a GAAP actual against a consensus figure is not a growth rate
-            # (`crosses_basis`), Berkshire would show about -28%.
-            if anchor is None and last_actual is not None and period == str(last_actual.fy + 1):
+            # (`crosses_basis`), Berkshire would show about -28%. Nor does revenue where it
+            # changes basis too (`_build_annual_timeline`).
+            if (
+                anchor is None and last_actual is not None
+                and period == str(last_actual.fy + 1) and not revenue_crosses_basis
+            ):
                 prior_rev = last_actual.revenue
         else:
             prior_est = sorted_estimates[i - 1]
@@ -7067,7 +7131,9 @@ def _build_revenue_forecast_partial(
         # after the last reported year) for the "Earnings Timeline" sheet —
         # independent of the curated `projections` window above (own divisor +
         # YoY). The module chart keeps using `projections`; the sheet uses this.
-        "annual_timeline": _build_annual_timeline(income, estimates),
+        "annual_timeline": _build_annual_timeline(
+            income, estimates, revenue_crosses_basis=revenue_crosses_basis,
+        ),
         "forecast_analyst_count": _forecast_analyst_count(income, estimates),
         "guidance_quote": None,         # AI fills via Stage A (PR 6)
         "guidance_speaker": None,       # AI fills via Stage A (PR 6)
@@ -10319,6 +10385,8 @@ def _build_competitors(
     peer_ranks: Optional[Dict[str, int]] = None,
     n_total_peers: int = 0,
     focal_roic_ttm: Optional[float] = None,
+    *,
+    roic_comparable: bool = True,
 ) -> List[Dict[str, Any]]:
     """Real competitor list from FMP peer profiles, each row scored by a
     blended directness × financial × moat threat score.
@@ -10477,6 +10545,11 @@ def _build_competitors(
             f"_build_competitors({my_ticker}): no focal TTM ROIC — scoring "
             f"against the focal's ANNUAL ROIC while peers use TTM (mixed periods)"
         )
+    # A bank's invested capital is an arbitrary figure (BAC +$47.6B gives 29.4%, JPM -$551.8B
+    # gives 3.3%), so the gap between two of them measures nothing and pinned BAC at a threat
+    # of 10.0 (2026-11-06). With no focal ROIC every peer takes the absolute path.
+    if not roic_comparable:
+        my_roic_frac = None
     # FMP stopped emitting returnOnEquity on /ratios in late 2025;
     # /key-metrics still carries it. Fall through so the focal isn't
     # under-scored vs peers (who already get ROE via /key-metrics-ttm).
@@ -11032,6 +11105,50 @@ _STYLE_SIGNALS_EXCLUDED = (
 )
 
 
+# Interest paid, as a share of reported revenue, from which a financial company's revenue is
+# read as gross of it. FY2025: JPM 35%, BAC 41%, USB 33%, INDB 27%; PGR 0.3%, TRV 0.9%, MET 1.4%.
+_GROSS_REVENUE_MIN_INTEREST_SHARE = 0.10
+
+
+def _revenue_crosses_basis(out: Any) -> bool:
+    """Whether the last reported year and the first estimate may be on different revenue bases,
+    so no change is read across them. The company type alone decides, never the size of the
+    fall, so a real decline elsewhere still shows."""
+    return bool(_score_excluded(out)) or (
+        normalize_ticker(getattr(out, "ticker", None)) in GROSS_REVENUE_CUSTODIANS
+    )
+
+
+def _revenue_gross_of_interest(out: Any) -> bool:
+    """True when this financial company's reported revenue holds interest that analyst
+    estimates leave out. Narrower than `_score_excluded`: an insurer has no such gap, so the
+    sentence saying so would be false on one. The consensus has to agree: the next year's
+    estimate must sit nearer revenue less interest than revenue, as JPMorgan's $208.4B does
+    between $181.8B and $279.7B. A statement row already net, or a lender whose analysts use
+    the gross figure, stays unmarked. This decides the words only: the chip follows
+    `_revenue_crosses_basis`, so a miss here never brings a cross-basis change back.
+
+    Read on 29 real companies, 2026-11-05: every one marked (JPM BAC WFC C GS MS USB PNC TFC SYF
+    NLY BK HSBC RY, plus STT NTRS) has an estimate 1.01-1.30 times revenue less interest. No
+    insurer, and neither SCHW nor AXP, whose estimates sit at their reported revenue."""
+    if not _revenue_crosses_basis(out):
+        return False
+    income = getattr(out, "income", None)
+    rows = [r for r in (income or []) if isinstance(r, dict)]
+    if not rows:
+        return False
+    latest = max(rows, key=lambda r: str(r.get("date") or ""))
+    revenue = _finite_positive(latest.get("revenue"))
+    interest = _finite_positive(latest.get("interestExpense"))
+    if revenue is None or interest is None:
+        return False
+    if interest < revenue * _GROSS_REVENUE_MIN_INTEREST_SHARE:
+        return False
+    _actuals, forecasts = _annual_timeline_rows(income, getattr(out, "estimates", None))
+    estimate = _finite_positive(forecasts[0].revenue) if forecasts else None
+    return estimate is not None and abs(estimate - (revenue - interest)) < abs(estimate - revenue)
+
+
 def _score_excluded(out: Any) -> frozenset:
     """`score_excluded_rows` for this collection, from the same inputs as `_context_gated_rows`.
     Empty for an operating company, so nothing below changes for one."""
@@ -11324,6 +11441,11 @@ def build_financial_context(out: CollectedTickerData) -> str:
                 f"Rev {_format_money_compact(_est_revenue(est))}, "
                 f"EPS ${_est_eps(est):.2f}"
             )
+        if _revenue_gross_of_interest(out):
+            parts.append(
+                "  Reported revenue above includes interest paid out; these estimates usually "
+                "leave it out. Never compare one with the other."
+            )
 
     # ⚠️ `analyst_is_usable`, not `if out.analyst_analysis`. The response object is ALWAYS
     # present and, since `grades` / `price-target-consensus` went 402, always carries
@@ -11435,7 +11557,16 @@ def build_financial_context(out: CollectedTickerData) -> str:
                 f"(prior year: "
                 f"{_seg_money(prior * 1e6) if prior > 0 else 'n/a'})"
             )
-        if engine.get("total_revenue"):
+        if engine.get("total_revenue") and engine.get("gross_reported_revenue"):
+            parts.append(
+                f"  Segment revenue, after interest paid out: "
+                f"{_seg_money(engine['total_revenue'] * 1e6)}"
+            )
+            parts.append(
+                f"  Reported revenue, including that interest: "
+                f"{_seg_money(engine['gross_reported_revenue'] * 1e6)}"
+            )
+        elif engine.get("total_revenue"):
             parts.append(f"  Total revenue: {_seg_money(engine['total_revenue'] * 1e6)}")
         if engine.get("intersegment_eliminations"):
             parts.append(

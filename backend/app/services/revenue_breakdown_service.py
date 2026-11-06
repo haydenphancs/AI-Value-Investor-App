@@ -172,6 +172,14 @@ _OTHER_THRESHOLD_PCT = 5.0
 _RECONCILE_TOLERANCE = 0.03      # ±3%: ordinary FMP rounding (LMT −0.9%, XOM −2.1%) is left alone
 _MIN_SEGMENT_COVERAGE = 0.50     # below this the "breakdown" is one segment of many — not a breakdown
 _UNALLOCATED_NAME = "Unallocated"
+# A lender's segments are net of interest and FMP's revenue is gross, so the gap is the interest
+# it pays, not revenue nobody allocated: JPMorgan FY2025 $101.2B against $97.9B of interest, BAC
+# about $75B against $78B. It must earn more interest than it pays, so a REIT or a utility whose
+# gap happens to match its interest bill keeps "Unallocated", and so does a lender whose interest
+# income FMP zero-filled.
+_INTEREST_GAP_NAME = "Interest Paid and Other"
+_INTEREST_GAP_MIN_SHARE = 0.10   # interest paid, as a share of reported revenue
+_INTEREST_GAP_TOLERANCE = 0.10   # how far the gap may sit from the interest paid
 _ELIMINATION_RE = re.compile(r"eliminat|intersegment|inter-segment|reconcil|corporate (?:items|adjust)", re.I)
 # "Total …" and the CAT "Reportable Subsegments" line by prefix; "Consolidated" only when
 # it names a total (a segment can be "Consolidated Edison Company of New York"); a bare
@@ -189,7 +197,8 @@ _TOTAL_LIKE_RE = re.compile(
 # exactly "Other" too — a v3 row may still carry the raw spelling, which iOS doubles —
 # and a v3 row may have been stored after a SWALLOWED calendar failure (no next-earnings
 # bound); the calendar is now fetched with raise_errors=True, so that build is degraded.
-_RB_PAYLOAD_VERSION = 4
+# v5 (2026-11-06): a lender's interest gap is named (`_INTEREST_GAP_NAME`), not "Unallocated".
+_RB_PAYLOAD_VERSION = 5
 _VERSION_KEY = "payload_version"
 
 _TOTAL_REVENUE_NAME = "Total Revenue"
@@ -279,15 +288,32 @@ def _explicit_eliminations(record: Dict[str, Any]) -> float:
     return total
 
 
+def _gap_is_interest(
+    gap: float, revenue: float, interest_expense: Optional[float], interest_income: Optional[float],
+) -> bool:
+    """Whether a stack's shortfall from revenue is the interest a lender pays."""
+    if interest_expense is None or interest_income is None or gap <= 0:
+        return False
+    if not math.isfinite(interest_expense) or not math.isfinite(interest_income):
+        return False
+    return (
+        interest_income > interest_expense
+        and interest_expense >= revenue * _INTEREST_GAP_MIN_SHARE
+        and abs(gap - interest_expense) <= interest_expense * _INTEREST_GAP_TOLERANCE
+    )
+
+
 def _reconcile_segments(
     sources: List[RevenueSourceSchema],
     reported_revenue: Optional[float],
     explicit_eliminations: float = 0.0,
     ticker: str = "",
+    interest_expense: Optional[float] = None,
+    interest_income: Optional[float] = None,
 ) -> Tuple[List[RevenueSourceSchema], Optional[float], str]:
     """Fit the segment stack to reported revenue. Returns (sources, eliminations, outcome).
 
-    outcome ∈ {"exact", "gross", "subline", "unallocated", "thin", "unreconciled"}:
+    outcome ∈ {"exact", "gross", "subline", "interest", "unallocated", "thin", "unreconciled"}:
       * within ±3% → untouched ("exact");
       * sum ABOVE revenue → first try dropping a segment whose name is a sub-line of another
         ("Gaming" inside "Client and Gaming" — AMD lands exactly on revenue once it goes);
@@ -295,6 +321,8 @@ def _reconcile_segments(
         `eliminations` (a positive magnitude) for iOS to draw as the first waterfall step
         ("gross"). The segments themselves stay AS REPORTED — INTC's CCG really did sell
         $32.2B — and the eliminations line is what makes the legend add to 100%;
+      * sum BELOW revenue by about the interest paid → the gap is that interest
+        (`_INTEREST_GAP_NAME`), whatever the coverage: a lender's segments are net ("interest");
       * sum BELOW revenue but covering ≥ 50% → an explicit "Unallocated" segment closes
         the gap ("unallocated"). Below 50% the feed listed one segment of many (Ford:
         "Ford Credit" 7%), which is not a breakdown: return [] so the caller falls back to
@@ -337,11 +365,15 @@ def _reconcile_segments(
         return sources, eliminations, "gross"
 
     # ratio < 1
+    gap = reported_revenue - pos_sum
+    if _gap_is_interest(gap, reported_revenue, interest_expense, interest_income):
+        logger.info("[revenue-seg-interest] %s: segments cover %.0f%% of revenue — the gap of "
+                    "%.4g is the %.4g of interest paid", ticker, ratio * 100, gap, interest_expense)
+        return sources + [RevenueSourceSchema(name=_INTEREST_GAP_NAME, value=gap)], None, "interest"
     if ratio < _MIN_SEGMENT_COVERAGE:
         logger.warning("[revenue-seg-thin] %s: segments cover %.0f%% of revenue — not a "
                        "breakdown; falling back to Total Revenue", ticker, ratio * 100)
         return [], None, "thin"
-    gap = reported_revenue - pos_sum
     logger.info("[revenue-seg-unallocated] %s: segments cover %.0f%% of revenue — %.4g unallocated",
                 ticker, ratio * 100, gap)
     return sources + [RevenueSourceSchema(name=_UNALLOCATED_NAME, value=gap)], None, "unallocated"
@@ -791,6 +823,8 @@ class RevenueBreakdownService:
             sources, intersegment_eliminations, outcome = _reconcile_segments(
                 sources, _safe_float_opt(matched_income, "revenue"),
                 _explicit_eliminations(seg_rec), ticker=ticker,
+                interest_expense=_safe_float_opt(matched_income, "interestExpense"),
+                interest_income=_safe_float_opt(matched_income, "interestIncome"),
             )
             if outcome == "thin":
                 # Keep walking: an older year with real coverage beats a single bar. If

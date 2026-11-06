@@ -2679,10 +2679,12 @@ struct RevenueBreakdownDTO: Codable, FinancialsCacheable {
         // segment was coloured identically to "Other".
 
         var sources = revenueSources.enumerated().map { index, source in
-            // "Other" and the backend's "Unallocated" (revenue the segmentation feed did
-            // not cover) are always gray; real segments take the palette in order.
+            // "Other", the backend's "Unallocated" (revenue the segmentation feed did not
+            // cover) and a lender's "Interest Paid and Other" (no segment earned it) are
+            // always gray; real segments take the palette in order.
             let color: Color
-            if source.name == "Other" || source.name == "Unallocated" {
+            if source.name == "Other" || source.name == "Unallocated"
+                || source.name == "Interest Paid and Other" {
                 color = AppColors.growthSectorGray
             } else {
                 color = colorPalette[index % colorPalette.count]

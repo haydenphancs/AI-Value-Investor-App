@@ -1615,6 +1615,16 @@ async def test_undrawable_duplicate_and_surplus_segments_fold_into_other(seed_aa
 
 
 @pytest.mark.asyncio
+async def test_a_lenders_interest_row_is_never_a_segment_on_a_post(seed_aapl):
+    sources = [src("Interest Paid and Other", 40e9), src("iPhone", 100e9), src("Services", 80e9),
+               src("Mac", 60e9), src("iPad", 40e9), src("Wearables", 30e9)]
+    world = money_world(bd=breakdown(revenue_sources=sources))
+    rec = (await run_mm(world.pop("fmp"), **world)).records[0]
+    assert [s.name for s in rec.segments] == ["iPhone", "Services", "Mac", "iPad", "Wearables"]
+    assert rec.other_usd == pytest.approx(40e9)
+
+
+@pytest.mark.asyncio
 async def test_a_posted_fiscal_year_is_skipped_before_any_profile_call(seed_aapl):
     world = money_world()
     fmp = world.pop("fmp")

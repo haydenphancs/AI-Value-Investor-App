@@ -70,7 +70,7 @@ struct RevenueBreakdownInfoSheet: View {
                 explanationRow(
                     color: RevenueSource.iPhoneColor,
                     title: "Left Bar (Stacked)",
-                    description: "Shows all revenue sources stacked, as the company reports them. When segments sell to each other, the stack rises above 100% and a grey \"Intersegment eliminations\" step brings the waterfall back to reported revenue. \"Unallocated\" is revenue the segment data does not cover."
+                    description: "Shows all revenue sources stacked, as the company reports them. When segments sell to each other, the stack rises above 100% and a grey \"Intersegment eliminations\" step brings the waterfall back to reported revenue. \"Unallocated\" is revenue the segment data does not cover. On a lender, \"Interest Paid and Other\" is the interest it pays out, which its reported revenue includes."
                 )
 
                 explanationRow(

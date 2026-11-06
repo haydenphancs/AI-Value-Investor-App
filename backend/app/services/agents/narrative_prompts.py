@@ -611,6 +611,47 @@ def _trend_direction(start: float, now: float) -> str:
     return "flat"
 
 
+def _path_direction(values: List[float]) -> str:
+    """The direction of a whole path, or "uneven" when its two ends do not describe it.
+
+    The two ends alone called JPMorgan's revenue growth (-2, 21, 54, 15, 3.3) "rising" and its
+    ROE (16.4, 12.9, 15.1, 17.0, 15.7) "flat", and the Insight repeated both (2026-11-06). A
+    path is uneven when a flat end hides a wide swing, when the last two years took almost none
+    of the move, when the last step undid more than all of it, or when it reverses at nearly
+    every step with a reversal half the size of the move. A smooth drift, or a rise with one
+    small dip, keeps its direction."""
+    whole = _trend_direction(values[0], values[-1])
+    if len(values) < 3:
+        return whole
+    wide = max(values) - min(values) > abs(values[0]) * 0.15
+    if whole == "flat":
+        return "uneven" if wide else "flat"
+    total = values[-1] - values[0]   # never 0 here: `_trend_direction` called it flat if it were
+    steps = [b - a for a, b in zip(values, values[1:])]
+    if (values[-1] - values[-3]) / total < 0.1:
+        return "uneven"
+    if steps[-1] * total < 0 and abs(steps[-1]) > abs(total):
+        return "uneven"
+    reversals = sum(1 for a, b in zip(steps, steps[1:]) if a * b < 0)
+    against = max((abs(step) for step in steps if step * total < 0), default=0.0)
+    return "uneven" if wide and reversals >= len(steps) - 1 and against * 2 >= abs(total) else whole
+
+
+_CARD_NUMBER_RE = re.compile(r"[+-]?\d[\d,]*(?:\.\d+)?[%x×]?")
+
+
+def _card_latest(m: Dict[str, Any], fiscal_end: float, unit: Optional[str]) -> Optional[str]:
+    """The card's own figure when it reads differently from the path's last fiscal year: the
+    Profitability and Valuation cards are trailing twelve months, the path stops at the fiscal
+    year (ROE 15.7 against 17.91). None for a Growth row, whose card IS that year."""
+    text = m.get("value")
+    if not isinstance(text, str) or not _CARD_NUMBER_RE.fullmatch(text.strip()):
+        return None
+    shown = float(text.strip().rstrip("%x×").replace(",", ""))
+    same = _fmt_trend_value(shown, unit) == _fmt_trend_value(fiscal_end, unit)
+    return None if same else text.strip()
+
+
 def _clean_metric_label(label: str) -> str:
     """Drop the "(… sector avg …)" / "(ROE)" / "(YoY)" parentheticals."""
     return re.sub(r"\s*\([^)]*\)", "", label or "").strip()
@@ -641,11 +682,15 @@ def _metric_trajectory_line(m: Dict[str, Any], peer: str) -> Optional[str]:
         span = len(window) - 1
     if span <= 0:  # duplicate/identical period labels → fall back to the point count
         span = len(window) - 1
+    direction = _path_direction([v for _, v in window])
+    # An uneven path prints every year: its two ends are what misled.
+    shown = window if direction == "uneven" else [window[0], window[-1]]
     line = (
         f"{_clean_metric_label(m.get('label', ''))} "
-        f"{_fmt_trend_value(start_val, unit)}→{_fmt_trend_value(now_val, unit)} "
-        f"over {span}y ({_trend_direction(start_val, now_val)})"
+        + "→".join(_fmt_trend_value(v, unit) for _, v in shown)
+        + f" over {span}y ({direction})"
     )
+    latest = _card_latest(m, now_val, unit)
 
     sector = {
         p.get("period"): p.get("value")
@@ -666,7 +711,7 @@ def _metric_trajectory_line(m: Dict[str, Any], peer: str) -> Optional[str]:
         # so suppress it. The relative gap_start*1.15 test is also unstable when
         # gap_start≈0; gating on a material stance sidesteps that too.
         sec_start = sector.get(start_period)
-        if stance != "in line with" and sec_start is not None:
+        if stance != "in line with" and sec_start is not None and direction != "uneven":
             gap_now = abs(now_val - sec_now)
             gap_start = abs(start_val - sec_start)
             if gap_now > gap_start * 1.15:
@@ -674,7 +719,9 @@ def _metric_trajectory_line(m: Dict[str, Any], peer: str) -> Optional[str]:
             elif gap_now < gap_start * 0.85:
                 seg += " (gap narrowing)"
         line += f", {seg}"
-    return line
+        if latest:
+            line += " at fiscal year-end"
+    return f"{line}, latest {latest}" if latest else line
 
 
 def _fundamentals_trajectory_block(shell: Dict[str, Any]) -> str:
@@ -750,7 +797,9 @@ Make it about the TRAJECTORY, not a single year — the cards now carry multi-ye
 Grounding rules — STRICT:
 1. Any number you cite MUST come verbatim from the "CARD VALUES (AS DISPLAYED TO USER)" block OR the TRAJECTORY block above — both are computed from this report. For a metric's CURRENT value use CARD VALUES; use TRAJECTORY only for its multi-year path / standing vs peers. NEVER invent or recompute a value.
 2. If you reference Altman Z-Score, quote it exactly as shown in the Financial Health card (e.g. "Z-Score of 2.7"), not a separately-computed value from raw inputs.
-3. If a metric shows "—" or "N/A" in the cards, do not invent a number for it — pick a different metric to anchor on."""
+3. If a metric shows "—" or "N/A" in the cards, do not invent a number for it — pick a different metric to anchor on.
+4. A TRAJECTORY line marked (uneven) has no single direction: describe the path it prints or leave it out. Never call it rising, falling, flat or steady.
+5. TRAJECTORY stops at the last fiscal year. Where a line ends with "latest", that is the card's current figure: never give the fiscal-year number as the current level."""
 
 
 # ── Competitor context for the two Stage-B moat prompts and `_digest_moat` ──
@@ -879,6 +928,60 @@ def _has_industry_peer(dim: Dict[str, Any]) -> bool:
         and dr.get("sub_score") is not None
         for dr in (dim.get("drivers") or [])
     )
+
+
+# How far a measured pillar must beat its industry peer to count as an edge: the durability
+# note's own test.
+_MOAT_EDGE_MIN = 1.0
+
+
+def _measured_moat_scores(moat: Any) -> List[Tuple[Dict[str, Any], float]]:
+    """[(pillar, score)] for the measured pillars with a real score."""
+    dims = moat.get("dimensions") if isinstance(moat, dict) else None
+    pairs: List[Tuple[Dict[str, Any], float]] = []
+    for dim in _measured_moat_dims(dims):
+        try:
+            score = float(dim.get("score"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(score):
+            pairs.append((dim, score))
+    return pairs
+
+
+def _moat_is_none(moat: Any) -> bool:
+    """True when the measured pillars fall short of a narrow moat: the rating the moat vital and
+    the durability note both reach. False when no pillar was measured, as nothing was judged."""
+    from app.services.moat_scoring_service import MOAT_RATING_NARROW
+
+    scores = [score for _, score in _measured_moat_scores(moat)]
+    return bool(scores) and max(scores) < MOAT_RATING_NARROW
+
+
+def _moat_verdict_line(moat: Any) -> Optional[str]:
+    """The verdict the durability note writes, for the sections that read the digest. They got
+    the pillars without it, so JPMorgan's bull case called "Brand Power 5.6 (peer 4.7)" a durable
+    competitive advantage beside a moat section saying it has none (2026-11-06). None unless the
+    verdict is "no moat", the contradiction that shipped: a narrow moat and an unmeasured one
+    keep the prompts they had."""
+    from app.services.moat_scoring_service import MOAT_RATING_NARROW
+
+    if not _moat_is_none(moat):
+        return None
+    pairs = _measured_moat_scores(moat)
+    top = max(score for _, score in pairs)
+    edges = [
+        str(dim.get("name", "?")) for dim, score in pairs
+        if _has_industry_peer(dim) and score - float(dim["peer_score"]) >= _MOAT_EDGE_MIN
+    ]
+    line = (
+        f"  Moat verdict: NO MOAT (top measured pillar {top:.1f}, a narrow moat needs "
+        f"{MOAT_RATING_NARROW:.1f}). Never call the moat, the brand or the network durable, "
+        "wide or strong."
+    )
+    if edges:
+        return f"{line} The only moat point allowed: {', '.join(edges)} above its industry peer."
+    return f"{line} No pillar beats its peer by {_MOAT_EDGE_MIN:.1f}, so the moat is no bull point."
 
 
 def _moat_durability_note_prompt(
@@ -1036,6 +1139,17 @@ def _macro_intelligence_brief_prompt(
         f"{f.get('title')} ({f.get('severity')}, {f.get('trend')})"
         for f in factors[:6]
     ) or "no significant macro risks tripping thresholds"
+    exposure_examples = "debt/equity, interest coverage, foreign-revenue %, capex intensity, margin, etc."
+    financial_rule = ""
+    if _excluded_rows_of(shell):
+        # The examples do not fit a bank, EVIDENCE holds no net interest income, and the model
+        # filled the gap with "typically compress net interest margins", which JPMorgan's own
+        # rows run against: its net interest income rose with rates.
+        exposure_examples = "return on equity, net margin, foreign-revenue %, etc."
+        financial_rule = (
+            "\n- This is a financial company and EVIDENCE has no interest-margin figure: never say "
+            "how rates move its margins or net interest income. Say what is exposed, not which way."
+        )
     return f"""Write the Macro "Insight" — a tight read that captures the WHOLE macro backdrop and lands it on how it hits THIS company.
 
 OVERALL THREAT LEVEL: {threat}
@@ -1049,7 +1163,7 @@ LENGTH: Write 2-3 sentences, total under 65 words.
 
 Synthesize the set into a verdict, then make it company-specific:
 - Open by naming the overall threat level and the 1-2 DOMINANT drivers from the factors above — name the real driver (rate policy, a war / tariff / sanctions event, inflation, credit stress, etc.), never a vague "macro headwinds".
-- Then explain how those drivers actually hit THIS business and cite ONE concrete number from EVIDENCE that proves the exposure (debt/equity, interest coverage, foreign-revenue %, capex intensity, margin, etc.).
+- Then explain how those drivers actually hit THIS business and cite ONE concrete number from EVIDENCE that proves the exposure ({exposure_examples}).{financial_rule}
 - If a sentence remains, end with the concrete macro shift that would flip the picture.
 The goal is the company impact — don't just list the factors back."""
 
@@ -1086,6 +1200,31 @@ def _pa_day_label(iso: Any) -> Optional[str]:
     except ValueError:
         return None
     return d.strftime("%b ") + str(d.day)
+
+
+# A session this many of the stock's own daily swings from the last close, named in the prompt
+# whatever the window did. +4.2% and -4.2% cancel over a month, so JPMorgan's -4.2% on the day of
+# its report, on a probe headline, read as a quiet window (z 0.28) and went unmentioned.
+_LAST_SESSION_MIN_SIGMAS = 2.0
+
+
+def _price_action_last_session_line(pa: Dict[str, Any]) -> str:
+    """The last session's move when it is large for this stock, else ""."""
+    prices = pa.get("prices")
+    sigma = _num_or_none_np(pa.get("sigma_daily_pct"))
+    if not isinstance(prices, list) or len(prices) < 2 or sigma is None or sigma <= 0:
+        return ""
+    last, previous = _num_or_none_np(prices[-1]), _num_or_none_np(prices[-2])
+    if last is None or previous is None or previous <= 0:
+        return ""
+    move = (last - previous) / previous * 100.0
+    if abs(move) < sigma * _LAST_SESSION_MIN_SIGMAS:
+        return ""
+    day = _pa_day_label(pa.get("_last_bar"))
+    return (
+        f"\nLAST SESSION: {_pa_dir_pct(move)}{f' on {day}' if day else ''}, large for this stock. "
+        "Say so in Sentence 3, and give its cause only from a headline dated that day."
+    )
 
 
 def _pa_tier(pa: Dict[str, Any]) -> str:
@@ -1398,7 +1537,7 @@ RULES:
 GROUND TRUTH: {ground_truth}
 SIZE: {_price_action_size_line(pa)}
 MARKET: {_price_action_market_line(pa)}
-EARNINGS: {_price_action_earnings_line(pa)}
+EARNINGS: {_price_action_earnings_line(pa)}{_price_action_last_session_line(pa)}
 CATALYST EVENT IN WINDOW: {event_str}
 {headlines_block}{_price_action_report_headlines_block(pa)}{macro_block}
 EVIDENCE:
@@ -1893,6 +2032,31 @@ def _revenue_forecast_insight_prompt(
         "recent actual revenue YoY " + ", ".join(f"{y:+.0f}%" for y in hist_yoys[-3:])
         if hist_yoys else "recent actual history unavailable"
     )
+    hist_line = f"HISTORICAL TREND (for contrast): {hist_str}\n"
+    anchor_line = (
+        "Anchor on ONE concrete projected number; you may sharpen it against the track record "
+        "or the historical trend. Do NOT just list the projections back."
+    )
+    curve_line = (
+        "- Whether the forward curve accelerates or decelerates — and how that reads against "
+        "the recent ACTUAL trend (a sharp step-up vs history is a bolder claim than more of "
+        "the same)."
+    )
+    if _revenue_gross_of_interest(shell):
+        # Reported years and forecast years are two different measures here, so the history
+        # is not "for contrast": the -26%, and the +54% of 2023, are the gap between them.
+        hist_line = ""
+        anchor_line = (
+            "Anchor on ONE concrete projected number; you may sharpen it against the track "
+            "record. The yearly Revenue and Revenue Growth lines in EVIDENCE are reported "
+            "figures: never set them beside a forecast. Do NOT just list the projections back."
+        )
+        curve_line = (
+            "- Whether the forward curve accelerates or decelerates, reading the forecast "
+            "years against each other only. Reported revenue includes interest paid out and "
+            "analyst estimates usually leave it out, so never compare a forecast year with a "
+            "reported year."
+        )
 
     quote_line = (
         f'\nMANAGEMENT GUIDANCE QUOTE: "{guidance_quote}"'
@@ -1923,8 +2087,7 @@ def _revenue_forecast_insight_prompt(
 PROJECTED REVENUE CAGR: {cagr_str}    PROJECTED EPS GROWTH: {eps_str}
 {stance_line}
 EPS BEAT/MISS TRACK RECORD: {track_str}
-HISTORICAL TREND (for contrast): {hist_str}
-FORWARD PROJECTIONS (as charted): {proj_str}{quote_line}
+{hist_line}FORWARD PROJECTIONS (as charted): {proj_str}{quote_line}
 {related}
 EVIDENCE:
 {evidence}
@@ -1935,9 +2098,9 @@ LENGTH: Write 3-4 sentences, total under 70 words. Density over length — every
 
 Focus on the WHY and on whether to BELIEVE it, not just the numbers:
 - What is driving the projected growth (or the slowdown) — name the actual driver, and when the RELATED CONTEXT shows a segment leading or dragging the mix, tie the forward curve to it (e.g. "cloud, already +33% YoY, carries the forward curve"). Think demand, mix shift, margin leverage, pricing, a maturing base, or headwinds.
-- Whether the forward curve accelerates or decelerates — and how that reads against the recent ACTUAL trend (a sharp step-up vs history is a bolder claim than more of the same).
+{curve_line}
 {trust_line}
-Anchor on ONE concrete projected number; you may sharpen it against the track record or the historical trend. Do NOT just list the projections back."""
+{anchor_line}"""
 
 
 def _hidden_market_signals_insight_prompt(
@@ -2322,6 +2485,14 @@ def _valuation_line_for(ws: Dict[str, Any]) -> str:
     return "DCF valuation: n/a"
 
 
+# 13F positions are filed up to 45 days after a quarter ends, so the flow always stops before
+# the latest news. JPMorgan's two years of selling was tied to a probe headline from that day.
+_INSTITUTIONS_TIMING_RULE = (
+    "13F flow ends at the last filed quarter, weeks or months ago: never link it to recent "
+    "news, and never read it as a reaction to a headline."
+)
+
+
 def _institutions_line_for(ws: Dict[str, Any]) -> str:
     """Institutions (13F net informative flow), as the card labels it."""
     smart = ws.get("hedge_fund_smart_money") or {}
@@ -2374,7 +2545,7 @@ EVIDENCE (for catalyst context only — financings, acquisitions, guidance chang
 {_style_block(persona)}
 {_length_brief(2, 45)}
 
-Lead with the institutional signal and cite its concrete number (the net shares){reconcile}. If a specific catalyst sits in the evidence (a financing, acquisition, guidance change), name it. Give the {"synthesis" if caydex else "verdict"} that ties them together — do NOT just restate the lines.
+Lead with the institutional signal and cite its concrete number (the net shares){reconcile}. If a specific catalyst sits in the evidence (a financing, acquisition, guidance change), name it. {_INSTITUTIONS_TIMING_RULE} Give the {"synthesis" if caydex else "verdict"} that ties them together — do NOT just restate the lines.
 
 {_displayed_values_grounding("DISPLAYED VALUES block")}
 The card shows {"the Caydex Fair Value Estimate, " if caydex else ""}the price chart and institutional (13F) flow ONLY. Do not mention analysts, analyst ratings, consensus, price targets, upgrades or downgrades — and do not say that any of them are unavailable, missing or lacking. Write as if that topic does not exist.
@@ -2474,7 +2645,7 @@ EVIDENCE (for catalyst context only — financings, acquisitions, guidance chang
 {_style_block(persona)}
 {_length_brief(2, 45)}
 
-Synthesize the THREE signals — price target, institutions (13F), and rating momentum: where do they AGREE or DIVERGE? Lead with the dominant signal and cite a concrete number from the DISPLAYED VALUES (the target, the upside %, net institutional shares, or an upgrade count). If a specific catalyst sits in the evidence (a financing, acquisition, guidance change), name it. Do NOT just list the three — give the verdict that ties them together.
+Synthesize the THREE signals — price target, institutions (13F), and rating momentum: where do they AGREE or DIVERGE? Lead with the dominant signal and cite a concrete number from the DISPLAYED VALUES (the target, the upside %, net institutional shares, or an upgrade count). If a specific catalyst sits in the evidence (a financing, acquisition, guidance change), name it. {_INSTITUTIONS_TIMING_RULE} Do NOT just list the three — give the verdict that ties them together.
 
 {_displayed_values_grounding("DISPLAYED VALUES block")}
 The analyst-target upside and the DCF valuation are DIFFERENT lenses — do not merge them; if they disagree, that divergence IS worth calling out.{(chr(10) + _CAYDEX_ESTIMATE_RULE) if _caydex_estimate_line(ws) else ""}
@@ -2484,6 +2655,43 @@ If the data doesn't show a clear pattern, write the literal word: NULL"""
 
 
 # ── Job builder: turn a structured shell into a list of jobs ─────────
+
+
+def _revenue_gross_of_interest(shell: Dict[str, Any]) -> bool:
+    """The collector's mark on a lender whose reported revenue holds the interest it pays."""
+    inputs = shell.get("_scoring_inputs")
+    signals = inputs.get("_style_signals") if isinstance(inputs, dict) else None
+    return isinstance(signals, dict) and signals.get("revenue_gross_of_interest") is True
+
+
+def _revenue_forecast_basis_note(shell: Dict[str, Any]) -> str:
+    """Why a lender's forecast bars step away from its reported ones, "" for every other
+    company. The bars stay: the consensus is honest. It says the step "can't be compared",
+    never that it is not a decline, which on a bank whose revenue really falls would be false."""
+    rf = shell.get("revenue_forecast")
+    rows = rf.get("annual_timeline") if isinstance(rf, dict) else None
+    has_both = isinstance(rows, list) and {
+        row.get("is_forecast") for row in rows if isinstance(row, dict)
+    } >= {True, False}
+    if not has_both or not _revenue_gross_of_interest(shell):
+        return ""
+    return (
+        "Reported revenue includes interest paid out; analyst estimates usually leave it out, "
+        "so the first forecast bar can't be compared with the last reported one."
+    )
+
+
+def _revenue_engine_basis_note(re_section: Dict[str, Any]) -> str:
+    """What a lender's Revenue Engine total leaves out, "" for every other company."""
+    money = re_section.get("reporting_currency")
+    total = _fmt_millions_usd(re_section.get("total_revenue"), money, unknown_prefix="")
+    gross = _fmt_millions_usd(re_section.get("gross_reported_revenue"), money, unknown_prefix="")
+    if not total or not gross:
+        return ""
+    return (
+        f"Shares are of {total} of segment revenue, after interest paid out. Reported revenue "
+        f"of {gross} includes that interest."
+    )
 
 
 def _financial_score_note(shell: Dict[str, Any]) -> str:
@@ -2601,11 +2809,20 @@ def build_narrative_jobs(
     # ── revenue_engine.analysis_note ──────────────────────────────────
     re_section = shell.get("revenue_engine")
     if isinstance(re_section, dict) and (re_section.get("segments") or []):
+        # Code-owned: this field may opt out, and the total above it needs the words anyway.
+        engine_note = _revenue_engine_basis_note(re_section)
+
+        def _apply_engine_note(text: Any, _section: Dict[str, Any] = re_section) -> None:
+            _section["analysis_note"] = f"{text} {engine_note}" if text else engine_note
+
         jobs.append(NarrativeJob(
             label="revenue_engine_analysis_note",
             prompt=_revenue_engine_analysis_note_prompt(persona, evidence, shell),
             word_cap=30,  # prompt asks for < 25 words; the cap had been 22 (clipped compliant answers)
-            apply=_setter_for_dict_key(re_section, "analysis_note"),
+            apply=(
+                _apply_engine_note if engine_note
+                else _setter_for_dict_key(re_section, "analysis_note")
+            ),
             fallback_value=FALLBACK["revenue_analysis_note"],
             nullable=True,
         ))
@@ -2613,12 +2830,17 @@ def build_narrative_jobs(
     # ── revenue_forecast.insight ─────────────────────────────────────
     rf = shell.get("revenue_forecast")
     if isinstance(rf, dict):
+        basis_note = _revenue_forecast_basis_note(shell)
         jobs.append(NarrativeJob(
             label="revenue_forecast_insight",
             prompt=_revenue_forecast_insight_prompt(persona, evidence, shell),
             word_cap=90,
             apply=_setter_for_dict_key(rf, "insight"),
-            fallback_value=FALLBACK["revenue_forecast_insight"],
+            fallback_value=(
+                f'{FALLBACK["revenue_forecast_insight"]} {basis_note}'
+                if basis_note else FALLBACK["revenue_forecast_insight"]
+            ),
+            postprocess=(lambda text: f"{text} {basis_note}") if basis_note else None,
         ))
 
     # ── hidden_market_signals.insight ────────────────────────────────
@@ -3518,6 +3740,9 @@ def _digest_moat(report: Dict[str, Any]) -> List[str]:
         dim_strs.append(piece)
     if dim_strs:
         out.append("MOAT (0-10, measured, focal vs industry peer): " + ", ".join(dim_strs))
+    verdict = _moat_verdict_line(moat)
+    if verdict:
+        out.append(verdict)
     estimated = [
         str(d.get("name")) for d in dims
         if isinstance(d, dict) and d.get("source") != "deterministic" and d.get("name")
@@ -3685,12 +3910,18 @@ def build_thesis_synthesis_prompt(
     bull_target: int,
     bear_target: int,
     excluded: bool = False,
+    no_moat: bool = False,
 ) -> str:
     """Prompt that selects the MOST IMPORTANT bull/bear points across every
     Deep Dive module — ranked by decision-impact, grounded in the data,
     diversified so the thesis isn't four fundamental ratios. `bull_target`/
     `bear_target` (2-5 each) are computed from how many module sub-scores read
     strong/weak, so the count tracks the modules rather than defaulting to 3."""
+    moat_rule = (
+        "\n- MOAT: the digest's Moat verdict outranks your lens and method. A bull point may "
+        "not claim a durable, wide or lasting moat or competitive advantage."
+        if no_moat else ""
+    )
     return f"""You are assembling the INVESTMENT THESIS — the Bull Case and Bear Case — for {company_name} ({ticker}) as {persona.display_name}.
 
 Two blocks of FINAL, verified data are below. EVIDENCE carries the fundamentals and sector context; MODULE DIGEST carries the headline verdict of every other Deep Dive module (price movement & catalyst, revenue segments, forward forecast & guidance, insider activity, competitive moat, competitors, macro threat, Wall Street consensus).
@@ -3714,7 +3945,7 @@ SELECTION RULES (strict):
 - Each point ≤22 words, plain English, no hedging, no clichés. Lead with the number/verdict.
 - SELF-CONTAINED — label the SIGNAL, not just the number: each bullet renders alone with NO section header, so name what each figure measures. Write "55 insider sells vs 1 buy", not a bare "55 sells vs 1 buy"; "analyst target +18%", not just "+18%". The reader must be able to tell which Deep Dive signal each point comes from (insider, analyst, moat, guidance, macro, segment, etc.).
 - GROUNDING — STRICT: every number or named verdict you cite MUST appear verbatim in the EVIDENCE or MODULE DIGEST above (e.g. 'Cost Advantage moat 8.5 vs peer 7.0', 'analyst target +18%', 'Extreme -12% move on guidance cut', 'Critical macro threat', '70.51% gross margin', '4.21 D/E'). NEVER invent or recompute a number. A generic point with no concrete number/verdict is NOT acceptable.
-- Never name yourself, the underlying model, or any AI provider.
+- Never name yourself, the underlying model, or any AI provider.{moat_rule}
 
 Return ONLY valid JSON (no markdown fences, no commentary):
 
@@ -3739,6 +3970,59 @@ def _clean_thesis_points(raw: Any) -> List[str]:
             # strip a leading "Insider:" prefix) so they're readable headerless.
             out.append(ensure_insider_label(cleaned))
     return out[:5]
+
+
+# A moat claim in a bull point. The bare nouns follow only the durability words: "Strong Cost
+# Advantage 6.8", "Wide branch network" and "Strong Brand Power" are honest, and the first is the
+# one moat point the verdict line allows. The verdict's own words about the brand and the network
+# are left to the prompt.
+_MOAT_CLAIM_RE = re.compile(
+    r"\b(?:durable|wide|lasting|enduring|sustainable|sustained|entrenched|strong|deep|formidable"
+    r"|robust|solid)[\s-]+(?:\w+[\s-]+){0,2}?(?:moats?|competitive[\s-]+(?:advantages?|edges?))\b"
+    r"|\b(?:durable|lasting|enduring|sustainable|entrenched)[\s-]+(?:\w+[\s-]+){0,2}?"
+    r"(?:advantages?|edges?|franchises?|brands?)\b"
+    r"|\b(?:moats?|competitive[\s-]+(?:advantages?|edges?))\s+(?:is|are|remains?|stays?|looks?)\s+"
+    r"(?:\w+\s+)?(?:durable|wide|strong|lasting|robust|solid)\b",
+    re.I,
+)
+
+
+def _without_moat_claims(points: List[str], ticker: str) -> List[str]:
+    """``points`` without those claiming a moat the report's verdict denies. May return nothing:
+    a synthesized side left empty keeps the Stage A thesis, which `_gate_stage_a_moat_claims`
+    then reads."""
+    kept = [point for point in points if _MOAT_CLAIM_RE.search(point[:600]) is None]
+    if len(kept) < len(points):
+        logger.warning(
+            "[thesis-moat-claim] %s: dropped %d of %d bull point(s) claiming a moat the verdict "
+            "denies", ticker, len(points) - len(kept), len(points),
+        )
+    return kept
+
+
+def _gate_stage_a_moat_claims(report: Dict[str, Any], ticker: str) -> None:
+    """Every way out of the synthesis, a kept Stage A thesis included: Stage A writes before the
+    verdict exists, beside its own AI pillars. A side it would empty stays, at ERROR: an empty
+    side reads as a failed thesis and refunds a 20-credit report over one sentence."""
+    try:
+        thesis = report.get("core_thesis")
+        bull = thesis.get("bull_case") if isinstance(thesis, dict) else None
+        if not isinstance(bull, list) or not _moat_is_none(report.get("moat_competition")):
+            return
+        points = [p for p in bull if isinstance(p, str)]
+        kept = _without_moat_claims(points, ticker)
+        if kept:
+            thesis["bull_case"] = kept
+        elif points:
+            logger.error(
+                "[thesis-moat-claim] %s: every bull point claims a moat the verdict denies; "
+                "keeping them rather than emptying the side", ticker,
+            )
+    except Exception as e:  # noqa: BLE001 — a filter must never cost the report its thesis
+        logger.warning(
+            "[thesis-moat-claim] %s: gate failed (%s: %s), thesis kept as it was",
+            ticker, type(e).__name__, e,
+        )
 
 
 # Signal thresholds on the 0-10 module sub-scores: a dimension is a "strong"
@@ -3802,8 +4086,18 @@ async def synthesize_core_thesis(
     Only overwrites when synthesis yields a COMPLETE thesis (both sides
     non-empty); otherwise the Stage A thesis already on `report` stays as
     the fallback. Never raises — a failed synthesis just leaves the
-    existing thesis untouched.
+    existing thesis untouched, bar a moat claim the verdict denies.
     """
+    await _synthesize_core_thesis(report, persona, gemini, evidence)
+    _gate_stage_a_moat_claims(report, report.get("symbol", "?"))
+
+
+async def _synthesize_core_thesis(
+    report: Dict[str, Any],
+    persona: PersonaConfig,
+    gemini: GeminiClient,
+    evidence: str,
+) -> None:
     ticker = report.get("symbol", "?")
     excluded = bool(_excluded_rows_of(report))
     try:
@@ -3813,9 +4107,10 @@ async def synthesize_core_thesis(
 
         company_name = report.get("company_name") or ticker
         bull_target, bear_target = _thesis_target_counts(report)
+        no_moat = _moat_is_none(report.get("moat_competition"))
         prompt = build_thesis_synthesis_prompt(
             persona, company_name, ticker, evidence, digest,
-            bull_target, bear_target, excluded=excluded,
+            bull_target, bear_target, excluded=excluded, no_moat=no_moat,
         )
         result = await gemini.generate_json(
             prompt=prompt,
@@ -3838,6 +4133,8 @@ async def synthesize_core_thesis(
         bear = _clean_thesis_points(parsed.get("bear_case"))
         if excluded:
             bull, bear = without_excluded_metrics(bull), without_excluded_metrics(bear)
+        if no_moat:
+            bull = _without_moat_claims(bull, ticker)
         if not bull or not bear:
             # An incomplete thesis is worse than the Stage A one — keep it.
             logger.info(

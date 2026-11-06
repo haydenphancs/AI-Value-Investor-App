@@ -95,7 +95,7 @@ struct ReportRevenueEngineSection: View {
 
     private var headerSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.xs) {
-            Text("Total Revenue")
+            Text(data.totalLabel)
                 .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
 

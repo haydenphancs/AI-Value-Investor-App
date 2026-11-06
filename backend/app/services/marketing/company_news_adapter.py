@@ -422,7 +422,7 @@ MONEY_MAP_BAR_TOLERANCE_PT = 0.05
 #: Microsoft FY2026 drew "Other" at $143.7B, 43% of revenue, above its largest segment) —
 #: refused `money_map_mostly_other`, a content refusal.
 MONEY_MAP_MAX_OTHER_SHARE = 0.30
-_MONEY_MAP_REST_NAMES = frozenset({"other", "unallocated"})
+_MONEY_MAP_REST_NAMES = frozenset({"other", "unallocated", "interest paid and other"})
 _SEGMENT_NAME_RE = re.compile(r"[A-Za-z0-9 &.,'+/-]{2,40}")
 
 # ── Drop 2b bounds (each series' FMP / service calls per `candidates()` call) ───

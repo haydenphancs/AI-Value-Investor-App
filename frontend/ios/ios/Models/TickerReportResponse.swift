@@ -525,6 +525,9 @@ struct RevenueEngineDTO: Codable {
     /// ISO 4217 code every figure above is reported in ("TWD" for a 20-F filer), never
     /// converted. Optional: absent on reports cached before 2026-10-08, nil when unknown.
     let reportingCurrency: String?
+    /// Millions: a lender's reported revenue, when `totalRevenue` is the segments' total.
+    /// Optional: set only for a lender, absent on reports built before 2026-11-06.
+    let grossReportedRevenue: Double?
 
     enum CodingKeys: String, CodingKey {
         case segments
@@ -534,6 +537,7 @@ struct RevenueEngineDTO: Codable {
         case analysisNote = "analysis_note"
         case intersegmentEliminations = "intersegment_eliminations"
         case reportingCurrency = "reporting_currency"
+        case grossReportedRevenue = "gross_reported_revenue"
     }
 }
 
@@ -1085,7 +1089,8 @@ extension TickerReportAPIResponse {
             period: revenueEngine.period,
             analysisNote: revenueEngine.analysisNote,
             intersegmentEliminations: revenueEngine.intersegmentEliminations,
-            reportingCurrency: ReportRevenueEngineData.currencyCode(revenueEngine.reportingCurrency)
+            reportingCurrency: ReportRevenueEngineData.currencyCode(revenueEngine.reportingCurrency),
+            grossReportedRevenue: revenueEngine.grossReportedRevenue
         )
 
         // Moat & Competition

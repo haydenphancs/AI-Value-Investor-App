@@ -203,6 +203,12 @@ _SEGMENTS_BASIS = (
     "revenue. Segments can add up to more than revenue when sales between segments are "
     "eliminated in consolidation."
 )
+# A lender's segments are net of the interest it pays and its reported revenue is gross, so the
+# shares are of the segments, as the report's Revenue Engine takes them.
+_LENDER_SEGMENTS_BASIS = (
+    "Revenue by business segment as reported for the fiscal year; shares are of the segments' "
+    "total, which is after interest paid out. Reported revenue also includes that interest."
+)
 _DIVIDENDS_BASIS = (
     "Trailing-twelve-month yields from the cash dividends and buybacks actually paid; dividends "
     "per share by completed fiscal year, newest first, to 4 decimals as the Signal of "
@@ -1473,19 +1479,26 @@ def _segments_block(resp: Any, kf: Optional[Dict[str, Any]]) -> Optional[Dict[st
         if name and value is not None and abs(value) < _MONEY_MAX:
             sources.append((name, value))
     sources.sort(key=lambda it: it[1], reverse=True)
+    # Not a segment: no business earned it (`_INTEREST_GAP_NAME`).
+    from app.services.revenue_breakdown_service import _INTEREST_GAP_NAME
+
+    interest_gap = next((v for name, v in sources if name == _INTEREST_GAP_NAME), None)
+    sources = [row for row in sources if row[0] != _INTEREST_GAP_NAME]
+    share_base = reported if interest_gap is None else sum(v for _, v in sources)
+    share_of = "reported revenue" if interest_gap is None else "segment revenue"
     rows = []
     for name, value in sources[:_SEGMENT_ROWS]:
         text = f"{name}: {_money(value)}"
-        if reported is not None and reported > 0:
-            share = value / reported * 100
+        if share_base is not None and share_base > 0:
+            share = value / share_base * 100
             if math.isfinite(share) and abs(share) < _PCT_MAX:
-                text += f" ({share:.1f}% of reported revenue)"
+                text += f" ({share:.1f}% of {share_of})"
         rows.append(text)
     degraded = _get(resp, "degraded") or []
     if not rows and reported is None:
         return None
     block: Dict[str, Any] = {
-        "basis": _SEGMENTS_BASIS,
+        "basis": _SEGMENTS_BASIS if interest_gap is None else _LENDER_SEGMENTS_BASIS,
         "period": f"FY{fy}" if fy and fy.isdigit() else (fy or "latest fiscal year"),
         "currency": _currency_label(kf),
     }
@@ -1499,6 +1512,10 @@ def _segments_block(resp: Any, kf: Optional[Dict[str, Any]]) -> Optional[Dict[st
         block["segments_note"] = "no segment breakdown was reported for this period"
     if len(sources) > _SEGMENT_ROWS:
         block["more_segments_not_shown"] = len(sources) - _SEGMENT_ROWS
+    if interest_gap is not None and _money(interest_gap):
+        block["interest_paid"] = (
+            f"Reported revenue includes about {_money(interest_gap)} of interest paid and other "
+            "items, which no segment earns")
     elims = _money(_get(resp, "intersegment_eliminations"))
     if elims:
         block["intersegment_eliminations"] = (

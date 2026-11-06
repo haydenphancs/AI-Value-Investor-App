@@ -68,6 +68,13 @@ already be gone from the records, or it reads as new on every round.
     still wants FMP, every 30 min, or every 2 h while today is a closed day
     (`EARNINGS_LIVE_CLOSED_DAY_TTL_SECONDS`). 5 min and not faster: the filing path supplies
     the speed, FMP is the confirmation.
+  * A first look listing nothing on a trading day is no look. A whole market with no report on
+    a trading day is the blip `earnings_window_service._hot_round` refuses too, and with no
+    record to keep the day asked it would never be read again: no figure, no card, no push. So
+    it is asked again every tick. After `EARNINGS_LIVE_BLANK_LOAD_WAIT_SECONDS` (10 min) it
+    counts as read, because a sheet is waiting on it and a day FMP really leaves empty must end,
+    and is then asked at the slow cadence above until it lists something or leaves the window.
+    A closed day's blank is an answer the first time.
   * Cost with nobody opening the app, tick by tick (pinned in the tests). A busy report day,
     today's and the previous trading day's watched reports wanting FMP all day: 411 calls,
     192 for today, 108 for the previous day and 111 for the memo. A filing that completes a
@@ -76,7 +83,8 @@ already be gone from the records, or it reads as new on every round.
     a closed day adds up to 192 on that day. A first fold on rows too old to open a record adds
     one round, 15 calls: midnight on a Monday with a watched report, or on a Sunday with one of
     its own. Feed builds add the memo's rounds the tick no longer pays for: ~37 before 06:00 on
-    a trading day and up to ~150 on a closed day.
+    a trading day and up to ~150 on a closed day. A blank first look adds up to 11 calls, then
+    the slow cadence for as long as FMP leaves that day blank.
   * Refreshed by the live loop ONLY (`run_earnings_live_loop`, 60 s). Feed builds and the
     sheet endpoint fold the Tracking memo and read; they never fetch, so the live state adds
     no latency to the feed.
@@ -157,11 +165,14 @@ or the sheet would poll a record nothing updates.
   One more 30 s, with no record at all: an answer this read could not tell (`recheck`). `none`
 says a day was read and lists no report, and iOS prints that and stops asking, so a day nobody
 has read reads as a report not in yet instead: `upcoming`, or `awaiting` before today, with no
-figures and no extras. From today on that is a day the memo does not hold. Before today it is a
-day the loop has yet to load (`awaits_first_load`), for about a minute after a deploy, when the
-feed draws no card from those days either. Each poll costs a memo read: a failed round makes the
-memo wait 2 min before the next. With EARNINGS_LIVE_ENABLED off no loop runs and none of this
-applies: the sheet reads the memo's row alone, and never polls.
+figures and no extras. From today on that is a day the memo does not hold, or a today it holds
+blank on a trading day, which its next round settles within 30 min. Before today it is a day the
+loop has yet to load (`awaits_first_load`), for about a minute after a deploy, or 10 min if that
+load comes back blank, when the feed draws no card from those days either. A sheet pinned to
+such a day stays on it even with a later row listed: that row may be the next report's, and the
+figures may be one load away. Each poll costs a memo read: a failed round makes the memo wait 2
+min before the next. With EARNINGS_LIVE_ENABLED off no loop runs and none of this applies: the
+sheet reads the memo's row alone, and never polls.
 
 GUARDS, each a defect found elsewhere in this repo:
   * a dropped-digit EPS (`_earnings_common.eps_digit_shift_suspect`) is held as "checking",
@@ -231,6 +242,9 @@ EARNINGS_LIVE_HELD_ROWS_MAX_AGE_SECONDS = 12 * 3600
 #: docstring). Two hot rounds, because one is not enough: a 6-min gap can hold two fetches 5 min
 #: apart.
 EARNINGS_LIVE_UNLISTED_END_SECONDS = 600
+#: How long a first look listing nothing on a trading day stays no answer (THE MEMO in the module
+#: docstring). The same 10 min, for the same blip, and it has an end because a sheet waits on it.
+EARNINGS_LIVE_BLANK_LOAD_WAIT_SECONDS = 600
 #: The live window on the report day, in ET hours: [start, end).
 EARNINGS_LIVE_START_HOUR_ET = 6
 EARNINGS_LIVE_END_HOUR_ET = 22
@@ -831,6 +845,8 @@ class EarningsLiveService:
         self._records: Dict[Tuple[str, date], _Record] = {}
         # Own single-day fetches: day -> monotonic time fetched.
         self._fetched: Dict[date, float] = {}
+        # Days before today FMP has only answered blank: day -> monotonic time of the first.
+        self._blank_since: Dict[date, float] = {}
         self._failed_until: float = 0.0
         self._extras: Dict[Tuple[str, date], Tuple[float, Optional[HistoryExtras]]] = {}
         # Keyed by (round kind, ET date) — the same shape as every other `_inflight` map, so
@@ -1059,9 +1075,10 @@ class EarningsLiveService:
         return self._fetched.get(day)
 
     def awaits_first_load(self, day: date, today: date) -> bool:
-        """Is `day` a live day before `today` this module has not fetched yet? Those are the
-        days `due_days` takes on its first look, whatever is watched, so a reader told to wait
-        for one is told the truth, and one load ends the wait whatever it found. No other day
+        """Is `day` a live day before `today` this module has not read yet? Those are the days
+        `due_days` takes on its first look, whatever is watched, so a reader told to wait for
+        one is told the truth. A load ends the wait unless it lists nothing on a trading day,
+        and that holds it for `EARNINGS_LIVE_BLANK_LOAD_WAIT_SECONDS` at most. No other day
         qualifies: today and later are the memo's to read, and an older day is never loaded,
         so a sheet waiting on one would poll for ever."""
         return day in live_days(today)[:-1] and day not in self._fetched
@@ -1095,9 +1112,11 @@ class EarningsLiveService:
             elif self._is_hot(day, n, symbols):
                 if mono - last >= hot_ttl:
                     due.append(day)
-            elif self._fmp_wanted(day, symbols) and mono - last >= cold_ttl:
+            elif ((self._fmp_wanted(day, symbols) or day in self._blank_since)
+                  and mono - last >= cold_ttl):
                 # Outside the hot window a late FMP fill is still worth picking up, slowly, and
-                # once FMP has confirmed that day's watched reports nothing is left to ask.
+                # once FMP has confirmed that day's watched reports nothing is left to ask. A day
+                # FMP has only answered blank holds no record to want anything, and is asked too.
                 due.append(day)
         if self._is_hot(today, n, symbols):
             last = self._fetched.get(today)
@@ -1110,8 +1129,9 @@ class EarningsLiveService:
         days = set(live_days(et_now(now).date()))
         for key in [k for k in self._records if k[1] not in days]:
             self._records.pop(key, None)
-        for day in [d for d in self._fetched if d not in days]:
-            self._fetched.pop(day, None)
+        for held in (self._fetched, self._blank_since):
+            for day in [d for d in held if d not in days]:
+                held.pop(day, None)
 
     async def refresh(self, now: datetime, *, fmp: Any, symbols: Collection[str]) -> None:
         """Prune, then fetch the due days and fold them in. The prune comes before every early
@@ -1152,11 +1172,35 @@ class EarningsLiveService:
             return
         mono = time.monotonic()
         self.fetches += len(days)
+        today = et_now(now).date()
         for day, rows in fetched.items():
+            if rows:
+                self._blank_since.pop(day, None)
+            elif self._blank_load_says_nothing(day, today, mono):
+                continue
             self._fetched[day] = mono
             # Whole market on purpose: the next-morning card and the sheet read these records.
             self.observe_rows(day, rows, now, fetched=True)
             self._end_unlisted(day, rows)
+
+    def _blank_load_says_nothing(self, day: date, today: date, mono: float) -> bool:
+        """An own fetch listed nothing on `day`. Is that still no answer (THE MEMO in the module
+        docstring)? Only for a first look at a trading day before today, for a while. A day
+        already read has its cadence, and today's blank is no first look: the memo reads today."""
+        if day >= today or day in self._fetched or not is_trading_day(day):
+            return False
+        waited = mono - self._blank_since.setdefault(day, mono)
+        if waited >= EARNINGS_LIVE_BLANK_LOAD_WAIT_SECONDS - _DUE_SLACK_SECONDS:
+            logger.warning(
+                "[earnings-live] %s: FMP still lists nothing on this trading day after %.0f s, "
+                "so it counts as read and the slow cadence asks from here", day.isoformat(), waited,
+            )
+            return False
+        logger.warning(
+            "[earnings-live] %s: FMP's first answer for this trading day came back blank, %.0f s "
+            "so far: not a read, asking again next tick", day.isoformat(), waited,
+        )
+        return True
 
     def _end_unlisted(self, day: date, rows: List[Dict[str, Any]]) -> None:
         """Note the reports on `day` that an own fetch's `rows` leave out and that hold no raw
@@ -1522,9 +1566,14 @@ async def earnings_live_tick(
     if watched is None:
         watched = await _watched_ranked_cached()
     stats = {"watched": len(watched), "fetched": 0, "landed": 0}
-    if not watched:
-        return stats
     service = get_earnings_live_service()
+    before = service.fetches
+    if not watched:
+        # Nothing to fold and nobody to tell, but a sheet can be waiting on a first load whatever
+        # is watched (`awaits_first_load`), and only this round ends that wait.
+        await service.refresh(now, fmp=fmp, symbols=watched)
+        stats["fetched"] = service.fetches - before
+        return stats
     n = et_now(now)
     today = n.date()
 
@@ -1546,7 +1595,6 @@ async def earnings_live_tick(
         stored_at = ts.earnings_day_stored_at(fmp, today)
     service.observe_rows(today, calendar, now, symbols=watched, stored_at=stored_at)
 
-    before = service.fetches
     await service.refresh(now, fmp=fmp, symbols=watched)
     stats["fetched"] = service.fetches - before
 

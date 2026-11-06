@@ -200,6 +200,19 @@ def test_the_route_is_sign_in_only():
     assert getattr(dep, "dependency", None) is get_watchlist_identity
 
 
+def _the_loop_loads(day: date) -> None:
+    """One real refresh, as the live loop runs it, 10:00 ET on `day`."""
+    live = els.get_earnings_live_service()
+    asyncio.run(live.refresh(_et(day, 10), fmp=ts.get_fmp_client(), symbols=["INTC"]))
+
+
+def _the_loop_reads_the_previous_day() -> None:
+    """The first load, with an unwatched row keeping that day from being blank, as a real
+    calendar's trading day is."""
+    ts.get_fmp_client().rows.append(_row("ZZZZ", PREV))
+    _the_loop_loads(REPORT)
+
+
 # A report FMP moved: INTC is listed for today and AAPL for 2026-11-02.
 
 
@@ -211,6 +224,7 @@ def test_a_pinned_sheet_follows_a_report_moved_off_its_date(client):
 @pytest.mark.parametrize("pinned", ["2026-10-28", "2026-10-30", "2026-11-05"],
                          ids=["before_today", "before_the_new_date", "after_the_new_date"])
 def test_a_pinned_date_fmp_no_longer_lists_follows_from_either_side(client, pinned):
+    _the_loop_reads_the_previous_day()
     body = client.get(f"/api/v1/tracking/earnings/AAPL/live?report_date={pinned}").json()
     assert (body["status"], body["report_date"]) == ("upcoming", "2026-11-02")
 
@@ -406,11 +420,6 @@ def test_live_off_answers_the_memo_row_or_none(live_off, ticker, query, status, 
 # next two weeks" on `none`, and its poll stops for good on a null `poll_seconds`.
 
 
-def _the_loop_loads(day: date) -> None:
-    """One real refresh, as the live loop runs it, 10:00 ET on `day`."""
-    live = els.get_earnings_live_service()
-    asyncio.run(live.refresh(_et(day, 10), fmp=ts.get_fmp_client(), symbols=["INTC"]))
-
 
 def _fmp_is_down(monkeypatch) -> None:
     async def _boom(*a, **k):
@@ -440,7 +449,7 @@ def test_the_loops_first_load_ends_the_wait_with_the_report(client, monkeypatch)
 
 
 def test_once_the_day_is_loaded_a_missing_report_still_answers_none(client):
-    _the_loop_loads(REPORT)
+    _the_loop_reads_the_previous_day()
     body = client.get("/api/v1/tracking/earnings/MSFT/live?report_date=2026-10-28").json()
     assert (body["status"], body["report_date"], body["poll_seconds"]) == (
         "none", "2026-10-28", None)
@@ -471,6 +480,60 @@ def test_a_failed_load_keeps_the_previous_day_awaited(client, monkeypatch):
     _the_loop_loads(REPORT)
     body = client.get("/api/v1/tracking/earnings/MSFT/live?report_date=2026-10-28").json()
     assert (body["status"], body["poll_seconds"]) == ("awaiting", 30)
+
+
+def test_a_blank_first_load_of_a_trading_day_keeps_the_sheet_waiting(client, monkeypatch):
+    """A plain 200 `[]`, no outage flag. The other side of the settled closed days above: a
+    market with no report on a trading day is a blip, and it reads nothing."""
+    monkeypatch.setattr(ts, "datetime", _FrozenDatetime(_et(REPORT, 8)))
+    path = "/api/v1/tracking/earnings/INTC/live?report_date=2026-10-28"
+    _the_loop_loads(REPORT)
+    body = client.get(path).json()
+    assert (body["status"], body["report_date"], body["poll_seconds"]) == (
+        "awaiting", "2026-10-28", 30)
+    ts.get_fmp_client().rows.append(_row("INTC", PREV, epsActual=0.44, revenueActual=17.1e9))
+    _the_loop_loads(REPORT)
+    body = client.get(path).json()
+    assert (body["status"], body["poll_seconds"]) == ("reported", None)
+    assert body["eps"]["actual"] == 0.44 and body["revenue"]["actual"] == 17.1e9
+
+
+def test_a_pinned_day_the_loop_has_not_loaded_holds_against_a_later_report(client, monkeypatch):
+    """The stale row a company reporting earlier leaves behind: its consensus is another
+    report's, and the sheet would stop on it for good with the figures one load away."""
+    monkeypatch.setattr(ts, "datetime", _FrozenDatetime(_et(REPORT, 8)))
+    later = _row("MSFT", REPORT + timedelta(days=5), epsEstimated=0.99, revenueEstimated=20e9)
+    ts.get_fmp_client().rows.append(later)
+    path = "/api/v1/tracking/earnings/MSFT/live?report_date=2026-10-28"
+    body = client.get(path).json()
+    assert (body["status"], body["report_date"], body["poll_seconds"]) == (
+        "awaiting", "2026-10-28", 30)
+    assert body["eps"] == _estimate_only(None) and body["revenue"] == _estimate_only(None)
+    ts.get_fmp_client().rows.append(_row("MSFT", PREV, epsActual=0.44, revenueActual=17.1e9))
+    _the_loop_loads(REPORT)
+    body = client.get(path).json()
+    assert (body["status"], body["report_date"], body["poll_seconds"]) == (
+        "reported", "2026-10-28", None)
+    assert body["eps"]["actual"] == 0.44 and body["eps"]["estimate"] == 0.41
+
+
+def test_a_pinned_day_the_loop_has_not_loaded_then_follows_a_report_that_truly_moved(client):
+    path = "/api/v1/tracking/earnings/AAPL/live?report_date=2026-10-28"
+    body = client.get(path).json()
+    assert (body["status"], body["report_date"], body["poll_seconds"]) == (
+        "awaiting", "2026-10-28", 30)
+    _the_loop_reads_the_previous_day()
+    body = client.get(path).json()
+    assert (body["status"], body["report_date"], body["poll_seconds"]) == (
+        "upcoming", "2026-11-02", None)
+    assert body["eps"]["estimate"] == 0.41
+
+
+def test_live_off_a_pinned_previous_day_never_waits(live_off):
+    """Nothing loads it with the switch off, so the sheet follows the memo's row as it did."""
+    body = live_off.get("/api/v1/tracking/earnings/AAPL/live?report_date=2026-10-28").json()
+    assert (body["status"], body["report_date"], body["poll_seconds"]) == (
+        "upcoming", "2026-11-02", None)
 
 
 @pytest.mark.parametrize("query,day", [
@@ -513,6 +576,67 @@ def test_a_cold_empty_window_is_unknown_not_none(client, monkeypatch, extras_cal
     assert extras_calls == []
 
 
+def _a_blank_today(monkeypatch, today: date = REPORT) -> None:
+    """A cold round: today comes back a plain `[]`, while the days after it hold rows."""
+    monkeypatch.setattr(ts, "_et_today", lambda: today)
+    ts.get_fmp_client().rows[:] = [_row("AAPL", today + timedelta(days=4))]
+
+
+@pytest.mark.parametrize("query", ["", "?report_date=2026-10-29"], ids=["no_date", "by_date"])
+def test_a_blank_today_on_a_trading_day_is_unknown_not_none(
+        client, monkeypatch, extras_calls, query):
+    """The memo stores a blank day, and it has no way to tell this one from a blip: a whole
+    market reporting nothing on a trading day is not an answer about INTC."""
+    _a_blank_today(monkeypatch)
+    body = client.get(f"/api/v1/tracking/earnings/INTC/live{query}").json()
+    assert (body["status"], body["report_date"], body["poll_seconds"]) == (
+        "upcoming", "2026-10-29", 30)
+    assert body["eps"] == _estimate_only(None) and body["revenue"] == _estimate_only(None)
+    assert extras_calls == []
+
+
+def test_a_blank_today_ends_with_the_memos_next_round_either_way(client, monkeypatch):
+    _a_blank_today(monkeypatch)
+    for ticker in ("INTC", "ZZZZ"):
+        path = f"/api/v1/tracking/earnings/{ticker}/live?report_date=2026-10-29"
+        assert client.get(path).json()["poll_seconds"] == 30
+    ts.get_fmp_client().rows.append(_row("INTC", REPORT))
+    ts.reset_earnings_calendar_cache()
+    body = client.get("/api/v1/tracking/earnings/INTC/live?report_date=2026-10-29").json()
+    assert body["eps"]["estimate"] == 0.41
+    body = client.get("/api/v1/tracking/earnings/ZZZZ/live?report_date=2026-10-29").json()
+    assert (body["status"], body["poll_seconds"]) == ("none", None)
+
+
+def test_a_blank_today_never_moves_a_pinned_sheet_to_a_later_report(client, monkeypatch):
+    _a_blank_today(monkeypatch)
+    body = client.get("/api/v1/tracking/earnings/AAPL/live?report_date=2026-10-29").json()
+    assert (body["status"], body["report_date"], body["poll_seconds"]) == (
+        "upcoming", "2026-10-29", 30)
+    assert body["eps"] == _estimate_only(None)
+
+
+def test_a_blank_closed_today_is_a_read(client, monkeypatch, extras_calls):
+    """A weekend holds no reports, so its blank is the honest answer."""
+    saturday = date(2026, 10, 31)
+    _a_blank_today(monkeypatch, saturday)
+    body = client.get(f"/api/v1/tracking/earnings/INTC/live?report_date={saturday}").json()
+    assert (body["status"], body["poll_seconds"]) == ("none", None)
+    assert extras_calls == []
+
+
+def test_a_blank_day_after_today_is_a_read(client, extras_calls):
+    """Only today: FMP can honestly list nothing on a trading day a week out."""
+    body = client.get("/api/v1/tracking/earnings/ZZZZ/live?report_date=2026-11-04").json()
+    assert (body["status"], body["poll_seconds"]) == ("none", None)
+
+
+def test_live_off_a_blank_today_answers_none_without_a_poll(live_off, monkeypatch):
+    _a_blank_today(monkeypatch)
+    body = live_off.get("/api/v1/tracking/earnings/INTC/live?report_date=2026-10-29").json()
+    assert (body["status"], body["poll_seconds"]) == ("none", None)
+
+
 def test_a_day_the_memo_read_and_found_empty_stays_none(client, extras_calls):
     body = client.get("/api/v1/tracking/earnings/ZZZZ/live?report_date=2026-11-03").json()
     assert (body["status"], body["poll_seconds"]) == ("none", None)
@@ -532,6 +656,21 @@ def test_a_day_a_failed_round_left_out_is_unknown_and_a_held_day_is_not(client, 
     body = client.get(f"/api/v1/tracking/earnings/ZZZZ/live?report_date={held}").json()
     assert (body["status"], body["report_date"], body["poll_seconds"]) == (
         "none", held.isoformat(), None)
+
+
+def test_a_day_a_failed_round_left_out_holds_a_pinned_sheet_against_a_held_row(
+        client, monkeypatch):
+    """No answer covers that day yet, so nothing says the report left it. AAPL's row is on a day
+    the memo did read, and it is not the report this sheet was opened for."""
+    client.get("/api/v1/tracking/earnings/ZZZZ/live")
+    tomorrow = REPORT + timedelta(days=1)
+    monkeypatch.setattr(ts, "_et_today", lambda: tomorrow)
+    _fmp_is_down(monkeypatch)
+    tail = tomorrow + timedelta(days=14)
+    body = client.get(f"/api/v1/tracking/earnings/AAPL/live?report_date={tail}").json()
+    assert (body["status"], body["report_date"], body["poll_seconds"]) == (
+        "upcoming", tail.isoformat(), 30)
+    assert body["eps"] == _estimate_only(None)
 
 
 def test_the_first_read_after_an_outage_ends_the_recheck_either_way(client, monkeypatch):
@@ -564,6 +703,13 @@ def test_an_outage_never_hides_a_report_held_in_a_record(client, monkeypatch, ex
 def test_a_report_with_a_row_never_rechecks(client):
     body = client.get("/api/v1/tracking/earnings/AAPL/live?report_date=2026-11-02").json()
     assert (body["status"], body["poll_seconds"]) == ("upcoming", None)
+
+
+def test_a_report_with_a_row_and_no_record_builds_its_history(client, extras_calls):
+    """The year-ago block and the last four quarters are on every upcoming sheet: only an
+    answer that found nothing goes without them."""
+    client.get("/api/v1/tracking/earnings/AAPL/live?report_date=2026-11-02")
+    assert extras_calls == [("AAPL", date(2026, 11, 2))]
 
 
 @pytest.mark.parametrize("query", ["", "?report_date=2026-10-29", "?report_date=2026-11-02",

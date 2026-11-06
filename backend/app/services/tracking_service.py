@@ -82,6 +82,7 @@ from app.utils.market_hours import (
     ET,
     SESSION_CLOSED,
     SESSION_REGULAR,
+    is_trading_day,
     last_regular_session,
     session_phase,
 )
@@ -597,6 +598,18 @@ def earnings_day_stored_at(fmp: Any, day: date) -> Optional[float]:
     """
     entry = _held_earnings_days(fmp).get(day)
     return entry[0] if entry is not None else None
+
+
+def _earnings_day_unread(fmp: Any, day: date, today: date) -> bool:
+    """Has no answer told this memo about ``day``, today or later? A day not held has had none:
+    a failed round, a cold window that came back empty, or the day a rollover could not add.
+    A blank today on a trading day is stored like any blank day, and the memo cannot tell it
+    from a blip, but a whole market reporting nothing on a trading day is no answer. Only today:
+    FMP can honestly list nothing on a trading day a week out, and on those the day stands."""
+    entry = _held_earnings_days(fmp).get(day)
+    if entry is None:
+        return True
+    return day == today and not entry[1] and is_trading_day(day)
 
 
 def _earnings_days_due(
@@ -1751,10 +1764,10 @@ class TrackingService:
         fetch; the earlier live days' are already in those records. The report is `requested`
         when given (it must lie between the previous trading day and today + 14), else
         today's, else the one before today its card would name (`newest_report`), else the
-        next one in the window. A `requested` date with neither a record nor a row has moved:
-        the sheet follows the report to its next listed date, and answers `none` only when
-        nothing is listed, since a pinned sheet saying "no report in the next two weeks" beside
-        a row four days out would be false.
+        next one in the window. A `requested` date that has been read and holds neither a record
+        nor a row has moved: the sheet follows the report to its next listed date, and answers
+        `none` only when nothing is listed, since a pinned sheet saying "no report in the next
+        two weeks" beside a row four days out would be false.
 
         A report that left its date had left it by the newest answer held for that date, while
         the days after today can be up to 6 h older (TWO SPEEDS above), and the new date is one
@@ -1762,11 +1775,12 @@ class TrackingService:
         answer: at most once per answer, and only when someone is looking.
 
         `none` says a day was read and lists no report, and iOS stops asking on it, so a day
-        nobody has read is never `none`. From today on that is a day the memo does not hold: a
-        failed round, a cold window that came back empty, or the day a rollover could not add.
-        Before today it is a day the loop has yet to load (`awaits_first_load`), the first
-        minute after a deploy or after midnight. Such an answer reads as a report not in yet,
-        with no extras, and `recheck` makes the sheet ask again until a read settles it.
+        nobody has read is never `none`, and a sheet pinned to one stays on it, past any later
+        row: that row can be the next report's, with the figures one load away. From today on
+        such a day is `_earnings_day_unread`. Before today it is a day the loop has yet to load
+        (`awaits_first_load`), the first minute after a deploy or after midnight. The answer
+        reads as a report not in yet, with no extras, and `recheck` makes the sheet ask again
+        until a read settles it.
 
         With EARNINGS_LIVE_ENABLED off the loop is idle, so nothing live is read, written or
         built: the memo row's consensus is the whole answer, `upcoming` for a row and `none`
@@ -1788,6 +1802,14 @@ class TrackingService:
 
         def _snapshot(d: date) -> Optional[LiveSnapshot]:
             return live.snapshot(sym, d, now) if live is not None else None
+
+        def _unread(d: date) -> bool:
+            """Has nobody read `d` yet? Never so with the loop idle: no read is coming."""
+            if live is None:
+                return False
+            if d < today:
+                return live.awaits_first_load(d, today)
+            return _earnings_day_unread(self.fmp, d, today)
 
         async def _listed(
             later_days_since: Optional[float] = None,
@@ -1817,7 +1839,8 @@ class TrackingService:
 
         def _report_day() -> date:
             if requested is not None:
-                known = requested in rows or _snapshot(requested) is not None
+                known = (requested in rows or _snapshot(requested) is not None
+                         or _unread(requested))
                 return requested if known or not rows else min(rows)
             if today in rows:
                 return today
@@ -1826,7 +1849,7 @@ class TrackingService:
             return min(rows) if rows else today
 
         day = _report_day()
-        if day not in rows and _snapshot(day) is None:
+        if day not in rows and _snapshot(day) is None and not _unread(day):
             # About to say `none`, so the days after today must be as new as the answer that
             # left the report out: the memo's, or for a day before today, which the memo does
             # not hold, the live loop's.
@@ -1842,10 +1865,7 @@ class TrackingService:
         raw_name = row.get("companyName")
         company = raw_name if isinstance(raw_name, str) and raw_name else None
         found = snap is not None or day in rows
-        recheck = live is not None and not found and (
-            day not in _held_earnings_days(self.fmp) if day >= today
-            else live.awaits_first_load(day, today)
-        )
+        recheck = not found and _unread(day)
         if recheck:
             logger.info("[Tracking] earnings live %s: %s has not been read yet, so the sheet "
                         "asks again", sym, day.isoformat())

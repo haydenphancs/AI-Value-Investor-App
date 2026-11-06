@@ -2,9 +2,10 @@
 
 Every string here is one row or one sentence of a public SEC filing (EX-99.1, third quarter 2026),
 as `html_to_text` leaves it: the shapes a model really quotes, which no hand-written sentence
-predicted. A figure must keep passing on these, and the row beside each refusal is the mistake
-the verifier exists to stop: XOM's release has no revenue sentence, and the model filled the slot
-with its earnings. Hermetic: no release, no model answer and no network.
+predicted. A test that needs what stands around a row joins a few rows or a header in front of it.
+A figure must keep passing on these, and the row beside each refusal is the mistake the verifier
+exists to stop: XOM's release has no revenue sentence, and the model filled the slot with its
+earnings. Hermetic: no release, no model answer and no network.
 """
 from __future__ import annotations
 
@@ -350,6 +351,312 @@ def test_a_figure_with_no_share_in_its_label_never_stands_as_gaap():
     assert figures is None and reasons["eps_gaap_diluted"] == "wrong_metric"
 
 
+# ── a quote is read where the release prints it ──────────────────────────────
+#
+# A quote can stop anywhere, and a label or a scale it left behind still decides what its number
+# is. The piece must name the figure on its own, and the row it came from must not say otherwise.
+
+
+def _cut_from(field: str, printed: str, quote: str, value: Any, unit: Optional[str] = None,
+              header: Optional[str] = None):
+    """`quote`, a piece of the row or sentence `printed`, answered for `field`."""
+    node: Dict[str, Any] = {"value": value, "quote": quote}
+    if unit is not None:
+        node["unit"] = unit
+    return _verify(_in_a_release(printed, header), **{field: node})
+
+
+@pytest.mark.parametrize("printed,quote,value", [
+    ("Net pre-tax charges of $56 million, or $0.06 per share, for the quarter",
+     "or $0.06 per share", 0.06),                                                   # MCD
+    ("\u25a0Returning capital directly to shareholders through $7.3 billion of cash dividends, or "
+     "$1.29 per share of common stock.", "or $1.29 per share of common stock.", 1.29),  # PFE
+    ("Adjusted earnings were $17.5 billion, or $4.23 per share.", "or $4.23 per share.", 4.23),
+    ("\u25aaThird-quarter earnings per share (EPS) attributable to Intel was $0.60; non-GAAP EPS "
+     "attributable to Intel was $0.52.", "EPS attributable to Intel was $0.52", 0.52),  # INTC
+    ("Adjusted(3) Diluted EPS 0.87 0.87 \u2014 2.39 2.56 (7%)",
+     "Diluted EPS 0.87 0.87 \u2014 2.39 2.56 (7%)", 0.87),                            # PFE
+    ("Adjusted(3) Diluted EPS $2.95 to $3.05 (previously $2.80 to $3.00)",
+     "Diluted EPS $2.95 to $3.05", 2.95),                                           # PFE
+])
+def test_a_quote_cut_behind_the_words_that_change_it_is_no_gaap_eps(printed, quote, value):
+    figures, reasons = _cut_from("eps_gaap_diluted", printed, quote, value)
+    assert figures is None and reasons["eps_gaap_diluted"] != "ok"
+
+
+@pytest.mark.parametrize("field,printed,quote,value,unit", [
+    ("revenue", "\u2022Total revenue (GAAP) of $14.1B, +16%; adjusted revenue* $13.3B, +18%;",
+     "\u2022Total revenue (GAAP) of $14.1", 14.1, "million"),                         # GE
+    ("revenue", "Revenue was $92.3 billion and increased 19%", "Revenue was $92.3", 92.3,
+     "million"),                                                                    # MSFT
+    ("eps_gaap_diluted", "NET INCOME OF $15.3 BILLION ($5.57 PER SHARE), NET INCOME OF $15.8 "
+     "BILLION ($5.75 PER SHARE) EXCLUDING A SIGNIFICANT ITEM",
+     "PER SHARE), NET INCOME OF $15.8", 15.8, None),                                # JPM
+    ("eps_gaap_diluted", "Net pre-tax charges of $56 million, or $0.06 per share, for the quarter "
+     "and $155 million, or $0.17 per share, for the nine months",
+     "per share, for the quarter and $155", 155, None),                             # MCD
+    ("eps_gaap_diluted", "Net income decreased to $20.7 billion in the third quarter, or $1.89 per "
+     "diluted share, compared with $21.2 billion, or $1.95 per diluted share, in third quarter "
+     "2025.", "per diluted share, compared with $21.2", 21.2, None),                # AMZN
+])
+def test_a_quote_stopped_before_its_scale_word_is_refused(field, printed, quote, value, unit):
+    figures, reasons = _cut_from(field, printed, quote, value, unit)
+    assert figures is None and reasons[field] != "ok"
+
+
+def test_a_quote_stopped_inside_a_range_is_refused():
+    figures, reasons = _cut_from("eps_gaap_diluted", "Net income per share $1.55 - $1.56 $1.13",
+                                 "Net income per share $1.55", 1.55)            # O
+    assert figures is None and reasons["eps_gaap_diluted"] == "wrong_metric"
+
+
+def test_a_quote_that_lost_only_words_with_no_say_still_stands():
+    figures, reasons = _cut_from("eps_gaap_diluted", "Bank of America Reports 3Q26 Net Income of $6.9 "
+                                 "Billion; EPS of $0.91 3Q26 Revenue Up 3% YoY to $30.0 Billion",
+                                 "EPS of $0.91", 0.91)
+    assert figures.eps_gaap == 0.91 and reasons["eps_gaap_diluted"] == "ok"
+
+
+# ── what is no figure of the quarter ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize("field,quote,value", [
+    ("eps_adjusted_diluted",
+     "\u25aaForecasting fourth-quarter 2026 revenue of $15.0 billion to $16.0 billion; forecasting "
+     "fourth-quarter EPS attributable to Intel of $0.10 and non-GAAP EPS attributable to Intel of "
+     "$0.25.", 0.25),                                                               # INTC
+    ("eps_adjusted_diluted", "\u2022Non-GAAP earnings per share of $3.15 to $3.25, including "
+     "slightly more than ten cents related to the 53rd week; and", 3.15),           # SBUX
+    ("eps_adjusted_diluted", "\u2022Non-GAAP earnings per share of $3.15 to $3.25, including "
+     "slightly more than ten cents related to the 53rd week; and", 3.25),           # SBUX
+    ("eps_adjusted_diluted", "Adjusted Earnings of At Least $20.50 Per Share", 20.5),   # UNH
+    ("eps_gaap_diluted", "\u2022 Updated Full Year 2026 Earnings Outlook to At Least $19.50 Per "
+     "Share", 19.5),                                                                # UNH
+    ("eps_adjusted_diluted", "an increase of $0.18 per share to reported EPS from $5.57 to $5.75",
+     5.57),                                                                         # JPM
+])
+def test_a_forecast_or_one_end_of_a_range_is_no_eps_of_the_quarter(field, quote, value):
+    figures, reasons = _eps(field, quote, value)
+    assert figures is None and reasons[field] != "ok"
+
+
+@pytest.mark.parametrize("value", [62.0, 64.0])
+def test_either_end_of_a_range_is_no_revenue(value):
+    figures, reasons = _revenue("Revenues $62.0 to $64.0 billion (previously $60.5 to $62.5 "
+                                "billion)", value, "billion")                       # PFE
+    assert figures is None and reasons["revenue"] != "ok"
+
+
+_PELOTON_HEADER = "Financial Results (dollars in millions) Q2 FY26 Q1 FY27 Low High Y/Y Q/Q"
+_PELOTON_ROW = "Total Revenue $656.5 $559.2 $625.0 $650.0 (3)% 14%"
+
+
+@pytest.mark.parametrize("value", [625.0, 650.0])
+def test_a_cell_of_the_guides_columns_is_no_revenue(value):
+    figures, reasons = _revenue(_PELOTON_ROW, value, "million", _PELOTON_HEADER)
+    assert figures is None and reasons["revenue"] == "wrong_metric"
+
+
+def test_the_cells_in_front_of_the_guides_columns_still_stand():
+    figures, reasons = _revenue(_PELOTON_ROW, 559.2, "million", _PELOTON_HEADER)
+    assert figures.revenue == 559.2e6 and reasons["revenue"] == "ok"
+
+
+@pytest.mark.parametrize("quote,value", [
+    ("The impact of tax benefits related to employee share-based awards was a reduction to "
+     "provision for taxes for the first nine months of 2026 of approximately $975 million, which "
+     "increased diluted EPS by approximately $3.20 and annualized ROE by 1.1 percentage points.",
+     3.2),                                                                          # GS
+    ("For Q3 2026, the net effect of the loss on equity securities of $8.7 billion decreased the "
+     "provision for income tax, net income, and diluted net income per common share by $1.9 "
+     "billion, $6.7 billion, and $0.55, respectively.", 0.55),                      # GOOGL
+    ("which resulted in an increase in net income and diluted earnings per share of $207 million "
+     "and $0.03, respectively.", 0.03),                                             # MSFT
+    ("\u2022Diluted EPS of $3.83 would have increased by $3.57 to $7.40.", 7.4),      # META
+])
+def test_what_a_figure_changed_by_or_would_have_been_is_no_eps(quote, value):
+    figures, reasons = _eps("eps_gaap_diluted", quote, value)
+    assert figures is None and reasons["eps_gaap_diluted"] == "wrong_metric"
+
+
+def test_the_figure_a_what_if_starts_from_still_stands():
+    figures, reasons = _eps("eps_gaap_diluted",
+                            "\u2022Diluted EPS of $3.83 would have increased by $3.57 to $7.40.",
+                            3.83)                                                   # META
+    assert figures.eps_gaap == 3.83 and reasons["eps_gaap_diluted"] == "ok"
+
+
+def test_the_first_of_two_bullets_flattened_together_names_nothing_in_the_second():
+    quote = ("\u2022 Windows OEM and Devices revenue decreased 22% Microsoft returned $10.2 billion "
+             "to shareholders")                                                     # MSFT
+    figures, reasons = _revenue(quote, 10.2, "billion")
+    assert figures is None and reasons["revenue"] == "wrong_metric"
+
+
+@pytest.mark.parametrize("value", [408.0, 15.3])
+def test_what_a_total_is_said_to_include_is_no_revenue(value):
+    quote = ("\u25aaTotal revenue of $423.3 million, up 15.2% versus 2025, including $408.0 million "
+             "of Shack sales and $15.3 million of Licensing revenue.")              # SHAK
+    figures, reasons = _revenue(quote, value, "million")
+    assert figures is None and reasons["revenue"] == "wrong_metric"
+
+
+@pytest.mark.parametrize("field,quote,value", [
+    ("eps_gaap_diluted", "Digital assets unrealized (gain) loss per share, net of tax (0.02) 0.07 "
+     "0.05 0.02 (0.06)", -0.06),                                                    # TSLA
+    ("eps_adjusted_diluted", "Currency impact to Core EPS $ (0.01)", -0.01),        # PG
+])
+def test_a_reconciling_row_is_no_eps(field, quote, value):
+    figures, reasons = _eps(field, quote, value)
+    assert figures is None and reasons[field] == "wrong_metric"
+
+
+@pytest.mark.parametrize("quote,value,unit,header", [
+    ("Sales of investments 10,470 3,262", 10470, "million", "(In millions)"),       # MSFT
+    ("Sales and maturities of investments 219,112 227,563", 219112, "thousand",
+     "(in thousands)"),                                                             # ETSY
+    ("Maturities and sales of marketable securities 20,371 21,820 61,301 88,516", 20371, "million",
+     "(In millions)"),                                                              # GOOGL
+])
+def test_a_cash_flow_row_of_sales_is_no_revenue(quote, value, unit, header):
+    figures, reasons = _revenue(quote, value, unit, header)
+    assert figures is None and reasons["revenue"] == "wrong_metric"
+
+
+# ── a row of a segment or of another period ──────────────────────────────────
+
+
+_GE_SEGMENTS = ("(Dollars in millions) Orders $15,265 $9,645 58 % $45,528 $29,617 54 % Revenue "
+                "10,342 8,521 21 % 28,992 22,830 27 % Orders $4,269 $3,607 18 % $14,581 $10,979 "
+                "33 % Revenue 3,469 3,251 7 % 10,126 8,927 13 %")
+
+
+def test_a_bare_row_the_release_prints_with_another_figure_is_a_segments():
+    row = "Revenue 10,342 8,521 21 % 28,992 22,830 27 %"                            # GE
+    figures, reasons = _verify(f"{_AROUND} {_GE_SEGMENTS}",
+                               revenue={"value": 10342, "unit": "million", "quote": row})
+    assert figures is None and reasons["revenue"] != "ok"
+
+
+def test_the_bare_rows_of_a_segment_table_are_refused_by_their_own_label():
+    row = "Net revenues $7,328.4 $6,901.5 6%"                                       # SBUX
+    text = (f"{_AROUND} ($ in millions) Coffeehouse Count (2)(3) 18,176 18,311 (1)% {row} Operating "
+            "Income $898.4 $308.5 191% Coffeehouse Count (2) 23,431 22,679 3% Net revenues $1,305.8 "
+            "$2,070.9 (37)%")
+    figures, reasons = _verify(text, revenue={"value": 7328.4, "unit": "million", "quote": row})
+    assert figures is None and reasons["revenue"] != "ok"
+
+
+def test_a_bare_row_with_the_same_figure_printed_twice_stands():
+    row = "Revenues $ 7,157 $ 7,078 1 % 1 %"                                        # MCD
+    text = f"{_AROUND} Dollars in millions, except per share data 54 % {row} 12 % {row}"
+    figures, reasons = _verify(text, revenue={"value": 7157, "unit": "million", "quote": row})
+    assert figures.revenue == 7.157e9 and reasons["revenue"] == "ok"
+
+
+def test_a_row_naming_a_segment_is_no_revenue_of_the_company():
+    figures, reasons = _revenue("Agents and Infra Revenue $76,795 $61,672", 76795, "million",
+                                "(In millions)")                                    # MSFT
+    assert figures is None and reasons["revenue"] != "ok"
+
+
+@pytest.mark.parametrize("value", [6.13, 4.8])
+def test_a_cell_behind_a_rate_cell_is_another_group_of_columns(value):
+    figures, reasons = _eps("eps_adjusted_diluted", "Adjusted EPS 2.25 1.66 36 % 6.13 4.80 28 %",
+                            value)                                                  # GE
+    assert figures is None and reasons["eps_adjusted_diluted"] == "wrong_metric"
+
+
+def test_the_cells_in_front_of_a_rate_cell_still_stand():
+    figures, reasons = _eps("eps_adjusted_diluted", "Adjusted EPS 2.25 1.66 36 % 6.13 4.80 28 %",
+                            2.25)                                                   # GE
+    assert figures.eps_adjusted == 2.25 and reasons["eps_adjusted_diluted"] == "ok"
+
+
+# ── prose that is no header ──────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("row,value,prose", [
+    ("Revenue $ 64,601 $ 51,242 26 %", 64601,
+     "WhatsApp further empowered billions around the world."),                      # META
+    ("Total net sales 180,169 201,944 503,538 584,069", 201944,
+     "Announced that Amazon helped U.S. customers save billions\u2014averaging over $1,000 per "
+     "customer each year"),                                                         # AMZN
+    ("Total net sales 180,169 201,944 503,538 584,069", 201944,
+     "Some amounts within this report are rounded to the millions or billions and may not add."),
+])
+def test_a_scale_word_in_prose_leaves_a_release_with_its_one_header(row, value, prose):
+    text = f"{_AROUND} {prose} (in millions, except per share data) {row}"
+    figures, reasons = _verify(text, revenue={"value": value, "unit": "million", "quote": row})
+    assert figures.revenue == value * 1e6 and reasons["revenue"] == "ok"
+
+
+# ── rows that kept their label ───────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("quote,value", [
+    ("Diluted earnings per share1 $0.91 ($0.17) $1.08", 0.91),                      # BAC
+    ("Diluted Net Income Per Share1 $ 0.93 $ 0.86 8", 0.93),                        # KO
+    ("EARNINGS PER COMMON SHARE Basic3 $ 17.24 $ 21.27 $ 12.42 (19) % 39 % Diluted1 $ 17.01 $ "
+     "20.98 $ 12.25 (19) 39", 17.01),                                               # GS
+    ("Net income per share of common stock attributable to common stockholders Basic $ 0.43 $ 0.26 "
+     "$ 0.15 $ 0.34 $ 0.24 Diluted $ 0.39 $ 0.24 $ 0.13 $ 0.32 $ 0.22", 0.22),      # TSLA
+])
+def test_a_row_keeps_its_label_past_a_footnote_and_across_its_cells(quote, value):
+    figures, reasons = _eps("eps_gaap_diluted", quote, value)
+    assert figures.eps_gaap == value and reasons["eps_gaap_diluted"] == "ok"
+
+
+@pytest.mark.parametrize("quote,value", [
+    ("(dollars in millions, except per share data): Three months ended September 30, Nine months "
+     "ended September 30, 2026 2025 2026 2025 Total revenue $ 1,621.6 $ 1,470.6 $ 4,718.0 $ "
+     "4,261.4", 1621.6),                                                            # O
+    ("dollars in millions, except per share/unit data Three Months Ended September 30, Nine Months "
+     "Ended September 30, 2026 2025 2026 2025 Rental and other revenues $ 2,224 $ 2,064 $ 6,544 $ "
+     "6,098 Strategic capital revenues 164 150 567 439 Total revenues 2,388 2,214 7,111 6,537",
+     2388),                                                                         # PLD
+])
+def test_a_table_row_with_its_header_in_the_quote_needs_no_one_scale_in_the_release(quote, value):
+    text = f"{_AROUND} {quote} Consolidated Statements (in thousands, except per share data)"
+    figures, reasons = _verify(text, revenue={"value": value, "unit": "million", "quote": quote})
+    assert figures.revenue == value * 1e6 and reasons["revenue"] == "ok"
+
+
+def test_a_tables_dash_between_two_falling_cells_is_no_range():
+    row = "Revenue $92,279 - $77,673 - 19% - $(309) 19% -"                          # MSFT
+    figures, reasons = _revenue(row, 92279, "million", "($ in millions, except per share amounts)")
+    assert figures.revenue == 92.279e9 and reasons["revenue"] == "ok"
+
+
+def test_the_first_sentence_of_a_release_opens_at_its_dateline():
+    """Its headlines above have no full stop, and they are full of forward words."""
+    sentence = ("MAINTAINS FISCAL YEAR ORGANIC SALES, EPS GROWTH AND CASH RETURN GUIDANCE CINCINNATI, "
+                "October 22, 2026 - The Procter & Gamble Company (NYSE:PG) reported first quarter "
+                "fiscal year 2027 net sales of $23.3 billion, an increase of four percent versus the "
+                "prior year.")                                                      # PG
+    quote = "net sales of $23.3 billion, an increase of four percent versus the prior year."
+    figures, reasons = _cut_from("revenue", sentence, quote, 23.3, "billion")
+    assert figures.revenue == 23.3e9 and reasons["revenue"] == "ok"
+
+
+@pytest.mark.parametrize("quote,value", [
+    ("net sales increased 13% compared with third quarter 2025.", 2025),            # AMZN
+    ("Y/Y net sales growth: North America 11 % 6 % 10 % 11 % International 14 5 12 13", 14),  # AMZN
+    ("Net sales mix: North America 59 % 56 % 59 % 57 % International 23 21 22 21", 23),    # AMZN
+    ("sales $ 74,058 $ 75,296 $ 206,274 $ 224,202", 74058),                         # AMZN
+])
+def test_a_number_only_the_header_scales_must_be_an_amount_in_a_whole_label(quote, value):
+    figures, reasons = _revenue(quote, value, "million", "(in millions)")
+    assert figures is None and reasons["revenue"] != "ok"
+
+
+def test_a_note_under_a_table_speaks_for_no_row():
+    quote = ("Earnings per share attributable to Intel\u2014diluted $0.60 $0.90 down 33% $0.52 $0.23 up "
+             "126% Full reconciliations between GAAP and non-GAAP measures are provided below.")
+    figures, reasons = _eps("eps_gaap_diluted", quote, 0.6)
+    assert figures.eps_gaap == 0.6 and reasons["eps_gaap_diluted"] == "ok"
+
+
 # ── a table with no dollar mark of its own ───────────────────────────────────
 
 
@@ -437,6 +744,17 @@ def test_an_outlook_that_looks_ahead_and_states_a_figure_stands(quote):
 @pytest.mark.parametrize("quote", _NOT_OUTLOOKS)
 def test_commentary_praise_and_pointers_are_no_outlook(quote):
     figures, reasons = _outlook(quote)
+    assert figures is None and reasons["guidance"] == "not_outlook"
+
+
+@pytest.mark.parametrize("quote", [
+    "\u2022Non-GAAP earnings per share of $3.15 to $3.25, including slightly more than ten cents "
+    "related to the 53rd week; and",                                                # SBUX
+    "\u2022North America comparable coffeehouse sales growth of approximately 4.0%;",  # SBUX
+])
+def test_a_line_that_only_a_heading_makes_an_outlook_is_refused(quote):
+    figures, reasons = _verify(f"Fiscal Year 2027 Guidance {quote} \u2022Acme makes things.",
+                               guidance={"quote": quote})
     assert figures is None and reasons["guidance"] == "not_outlook"
 
 

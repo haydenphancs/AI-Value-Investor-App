@@ -794,6 +794,14 @@ def test_every_registered_kind_declares_its_tab_destination():
     )
 
 
+def test_every_registered_kind_declares_its_icon():
+    """A kind with no arm falls to the neutral `app.badge.fill`: a Live Results row in the Earnings
+    group would wear the App Activity glyph beside its `earnings_result` sibling."""
+    body = _balanced(_read(_NOTIF_MODELS), "var iconName: String {")
+    missing = sorted(k for k in _registered_kinds() if f'"{k}"' not in body)
+    assert not missing, f"notification kinds with no arm in `iconName`: {missing}"
+
+
 def test_both_detail_screens_use_the_one_destination_row():
     """Two hand-rolled "open the ticker" rows would drift on the first edit.
 

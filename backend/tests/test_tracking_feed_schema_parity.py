@@ -56,7 +56,7 @@ ALERT_KEYS = {
     # Live earnings results (earnings_live_service), all optional.
     "earnings_status", "report_date", "eps_actual", "revenue_actual",
     "eps_surprise_pct", "revenue_surprise_pct", "eps_basis", "results_preliminary",
-    "results_checked_at",
+    "results_checked_at", "eps_checking", "revenue_checking",
 }
 WHALE_ITEM_KEYS = {
     "ticker", "company_name", "whale_count", "amount", "raw_amount",

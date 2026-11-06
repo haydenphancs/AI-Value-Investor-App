@@ -109,6 +109,18 @@ enum MarketHoursUtil {
         return probe
     }
 
+    /// The trading day before `instant`'s New York date, as "yyyy-MM-dd": the oldest report
+    /// `GET /tracking/earnings/{ticker}/live` still serves (`tracking_service.get_earnings_live`
+    /// answers 400 below it). Holidays are best effort, as in `numbersSessionDay`: a closure the
+    /// backend learns at run time only lowers the server's floor, so this can hide a date it
+    /// would still serve, and never offers one it refuses.
+    nonisolated static func previousTradingDayKey(at instant: Date = Date()) -> String {
+        let calendar: Calendar = etCalendar
+        let day: Date = previousTradingDay(before: calendar.startOfDay(for: instant), calendar: calendar)
+        let parts: DateComponents = calendar.dateComponents([.year, .month, .day], from: day)
+        return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
+    }
+
     /// Check if US markets are in an active trading session.
     ///
     /// Returns `true` during:

@@ -271,6 +271,21 @@ def test_card_fields_carry_the_figures_and_the_preliminary_flag():
     assert fields["revenue_surprise_pct"] == pytest.approx(3.01, abs=0.01)
 
 
+def test_card_fields_say_a_held_figure_is_being_confirmed():
+    """The card reads `eps_actual` None as "not out yet", so the hold has to ride with it, or
+    the card and the sheet tell one report apart."""
+    snap = els.snapshot_of(_rec(fmp_revenue=1.69e9, fmp_eps=0.44), REPORT, _et(REPORT, 16, 5))
+    assert snap.revenue.checking is True and snap.revenue.actual is None
+    fields = els.card_fields(snap, REPORT)
+    assert fields["revenue_checking"] is True and fields["revenue_actual"] is None
+    assert fields["eps_checking"] is False and fields["eps_actual"] == 0.44
+
+
+def test_card_fields_say_nothing_is_held_on_a_report_with_no_figures():
+    fields = els.card_fields(els.snapshot_of(_rec(), REPORT, _et(REPORT, 9)), REPORT)
+    assert fields["eps_checking"] is False and fields["revenue_checking"] is False
+
+
 def test_the_preliminary_flag_is_absent_until_something_landed():
     snap = els.snapshot_of(_rec(), REPORT, _et(REPORT, 9))
     assert els.card_fields(snap, REPORT)["results_preliminary"] is None

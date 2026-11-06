@@ -25,6 +25,17 @@ struct AlertDetailView: View {
 
     @Environment(\.dismiss) private var dismiss
 
+    /// The newest answer of the results card below.
+    @State private var liveAnswer: EarningsLiveResponse? = nil
+
+    /// The alert as the sheet draws it. `alert` is the copy taken at the tap, and the results
+    /// card polls on its own, so the sheet reads the card's answer: the Tracking feed would
+    /// leave it up to a minute behind the card after each landing, and for good if a poll failed.
+    private var headerAlert: AppAlert {
+        guard case .earnings(let data) = alert, let liveAnswer else { return alert }
+        return .earnings(data.updated(with: liveAnswer))
+    }
+
     var body: some View {
         ZStack {
             AppColors.background
@@ -38,11 +49,11 @@ struct AlertDetailView: View {
 
                     // Title & Description
                     VStack(spacing: AppSpacing.sm) {
-                        Text(alert.title)
+                        Text(headerAlert.title)
                             .font(AppTypography.titleCompact)
                             .foregroundColor(AppColors.textPrimary)
 
-                        Text(alert.description)
+                        Text(headerAlert.description)
                             .font(AppTypography.body)
                             .foregroundColor(AppColors.textSecondary)
                             .multilineTextAlignment(.center)
@@ -61,7 +72,7 @@ struct AlertDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
-                Text(alert.title)
+                Text(headerAlert.title)
                     .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
             }
@@ -112,7 +123,7 @@ struct AlertDetailView: View {
 
     @ViewBuilder
     private var detailContent: some View {
-        switch alert {
+        switch headerAlert {
         case .earnings(let data):
             earningsDetail(data)
         case .market(let data):
@@ -133,8 +144,12 @@ struct AlertDetailView: View {
             // Estimate vs actual, each metric the moment it lands (owner request 2026-10-29).
             // It polls its own endpoint while the report is LIVE and opens on this card's own
             // figures, so the sheet is never blank and never a snapshot frozen at the tap.
-            EarningsLiveResultsCard(ticker: data.ticker, reportDate: data.reportDate,
-                                    fallback: data)
+            // A card with no report date has no live results to show: the feature is off, or
+            // the backend predates it, and the card would ask about a report nobody watches.
+            if data.reportDate != nil {
+                EarningsLiveResultsCard(ticker: data.ticker, reportDate: data.reportDate,
+                                        fallback: data, onAnswer: { liveAnswer = $0 })
+            }
 
             VStack(spacing: AppSpacing.md) {
                 detailRow(label: "Ticker", value: data.ticker)

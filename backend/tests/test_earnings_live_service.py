@@ -1132,6 +1132,20 @@ async def test_the_previous_days_cards_come_from_the_live_records(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_held_figure_reaches_the_card_as_a_hold_not_as_a_gap(monkeypatch):
+    """A dropped-digit revenue reads "being confirmed" on the sheet and in the push. The card
+    has to carry the hold too, or it prints "Revenue not out yet" beside them."""
+    live = _svc()
+    live.observe_rows(PREV, [_row("INTC", PREV, eps=0.44, rev=1.69e9)], _et(REPORT, 8))
+    monkeypatch.setattr(ts, "datetime", _FrozenDatetime(_et(REPORT, 8)))
+    svc_obj = ts.TrackingService.__new__(ts.TrackingService)
+    svc_obj.fmp = _FMP()
+    (card,) = await svc_obj._get_recent_earnings_alerts(["INTC"])
+    assert card.revenue_checking is True and card.revenue_actual is None
+    assert card.eps_checking is False and card.eps_actual == 0.44
+
+
+@pytest.mark.asyncio
 async def test_live_off_means_no_recent_cards(monkeypatch):
     from app.config import settings
 

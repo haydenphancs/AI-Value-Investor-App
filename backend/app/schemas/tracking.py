@@ -161,6 +161,8 @@ class AlertResponse(BaseModel):
     #   results_preliminary  True while a shown figure is from the company's release and
     #                        FMP has not confirmed it yet
     #   results_checked_at   ISO-8601 UTC of the last refresh of this report's sources
+    #   *_checking           True while a sanity guard holds that metric's figure: its
+    #                        `*_actual` is None, and it reads "being confirmed", not "not out"
     earnings_status: Optional[str] = None
     report_date: Optional[str] = None
     eps_actual: Optional[float] = None
@@ -170,6 +172,8 @@ class AlertResponse(BaseModel):
     eps_basis: Optional[str] = None
     results_preliminary: Optional[bool] = None
     results_checked_at: Optional[str] = None
+    eps_checking: Optional[bool] = None
+    revenue_checking: Optional[bool] = None
 
     # shared rollup fields (whale_trade, insider_transaction)
     action: Optional[str] = None  # "bought" | "sold"

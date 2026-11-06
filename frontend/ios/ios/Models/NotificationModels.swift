@@ -120,7 +120,8 @@ struct NotificationEventDTO: Decodable, Identifiable, Hashable, Sendable {
         switch kind {
         case "ticker_move":       return "chart.line.uptrend.xyaxis"
         case "earnings_upcoming",
-             "earnings_result":   return "calendar.badge.clock"
+             "earnings_result",
+             "earnings_live":     return "calendar.badge.clock"
         case "insider_trade":     return "person.badge.key.fill"
         case "whale_13f":         return "building.columns.fill"
         case "congress_trade":    return "building.columns.fill"

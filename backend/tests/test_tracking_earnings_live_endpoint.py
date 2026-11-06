@@ -435,10 +435,12 @@ def test_a_failed_calendar_read_is_handled_so_it_warns_and_opens_no_error(
     """A sheet polled through an outage must not open one Sentry issue per read."""
     _calendar_down(monkeypatch)
     with caplog.at_level(logging.WARNING, logger=endpoint.logger.name):
-        client.get("/api/v1/tracking/earnings/INTC/live?report_date=2026-11-02")
+        client.get("/api/v1/tracking/earnings/INTC/live"
+                   "?report_date=2026-11-02%0AFORGED-LOG-LINE")
     assert _logged(caplog) == []
     (line,) = [r.getMessage() for r in caplog.records if r.name == endpoint.logger.name]
     assert "INTC" in line and "2026-11-02" in line
+    assert "FORGED" not in line and "\n" not in line, "the parsed date, never the caller's text"
 
 
 def test_a_failed_calendar_read_still_answers_a_report_a_record_holds(client, monkeypatch):

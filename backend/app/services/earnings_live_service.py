@@ -17,9 +17,10 @@ TWO SOURCES, ONE RECORD PER (symbol, report date).
   figure replaces the filing's the moment FMP has one.
   Between two FMP answers the NEWEST wins. The Tracking memo can be 30 min behind this
   module's own fetch, so a memo row older than the record's last own fetch is skipped whole at
-  all three folds (the tick, the card, the sheet): no reader can put an older answer back. A
-  memo refreshed after the fetch folds as usual: a report FMP has confirmed is no longer
-  fetched, so the memo is how a later FMP correction reaches it.
+  all three folds (the tick, the card, the sheet): no reader can put an older answer back over
+  a record. A report that fetch ended has none to protect, so its row comes back for a while
+  (A REPORT FMP MOVES). A memo refreshed after the fetch folds as usual: a report FMP has
+  confirmed is no longer fetched, so the memo is how a later FMP correction reaches it.
 
 DUPLICATE ROWS. FMP can list one report twice, a stale pending row beside the reported one,
 in either order. One response therefore decides per report, never per row, and a repeat of it
@@ -48,12 +49,13 @@ already be gone from the records, or it reads as new on every round.
     This module fetches today ITSELF only while it is HOT.
   * A memo row held `EARNINGS_LIVE_HELD_ROWS_MAX_AGE_SECONDS` (12 h) or longer opens no record,
     at any of the three folds. FMP may have moved the report since, and an open record is a
-    report day (LIVE, the hot fetch, an SEC slot, then a card) that no later answer closes.
+    report day (LIVE, the hot fetch, an SEC slot, then a card) until a later answer ends it.
     After a closed day the rows held at midnight are the last trading day's, and a
     Sunday-dated report's are Friday's. So when a held row that old would open a record
     (`old_rows_would_open`) the tick asks FMP first, one round. Rows a failed round leaves
     that old open nothing until a round succeeds, and still fold into a record that exists.
-    A move inside the 12 h, or after the record opened, goes unseen.
+    A move inside the 12 h, or after the record opened, is left to this module's own fetch
+    (A REPORT FMP MOVES).
   * The days before today are held only here (after-close actuals land overnight, and the
     card must still be there the next morning).
   * HOT = inside `fmp_window_open` (06:00–22:00 ET on the day, 06:00–12:00 ET on the next
@@ -78,6 +80,29 @@ already be gone from the records, or it reads as new on every round.
   * Refreshed by the live loop ONLY (`run_earnings_live_loop`, 60 s). Feed builds and the
     sheet endpoint fold the Tracking memo and read; they never fetch, so the live state adds
     no latency to the feed.
+
+A REPORT FMP MOVES. Each day is judged on its own rows, so a report moved off its date would
+stay there: LIVE with the hot fetch and an SEC slot until 22:00, then a card the next morning
+saying results are not in for a report that has not happened. So an own fetch ends the reports
+it no longer lists (`_end_unlisted`): a record whose symbol is missing from that day's answer
+goes, unless it holds a raw figure from either source.
+  * A raw figure, never "has results": a figure held as "checking" shows nothing and is still
+    a result, and a company that has reported has reported, whatever the calendar says next.
+  * Only an answer that can show a report is gone. One listing nothing on the day is the
+    transient blip `earnings_window_service._hot_round` refuses too: it would lose that
+    morning's landing, because the record is what carries `seen_pending`. One at FMP's row cap
+    may simply have been cut.
+  * Only an own fetch, never a fold: a fold can be narrowed to one reader's tickers, and the
+    memo can be 30 min old. That age is why today's report does not end at once: the memo's row
+    opens the record again until the memo's next round, and the card, drawn from that same row,
+    keeps its status until then. So it settles within about 35 min on a trading day. On a
+    closed day the tick pays for no memo round, so it waits for the next feed build, or at worst
+    for the row to reach 12 h (`old_rows_would_open`). A day before today has no memo row, so
+    one fetch settles it.
+  * A sheet pinned to the old date follows the report (`tracking_service.get_earnings_live`).
+  A stale row FMP leaves beside the new date is NOT seen: nothing here compares a symbol's
+  dates, because a company reporting EARLIER leaves the later date pending, so the row dated
+  today can be the real one. Nor is a lone leftover row dated today after the company reported.
 
 TWO LOOPS UNDER ONE TASK (`run_earnings_live_loop`), each on its own 60 s clock, so neither
 source can hold the other up.
@@ -157,7 +182,12 @@ from typing import (
 from app.config import settings
 from app.services._earnings_common import eps_digit_shift_suspect
 from app.services.earnings_filing_service import _DUE_SLACK_SECONDS, FilingFigures
-from app.services.earnings_window_service import _row_date, _row_symbol, fetch_calendar_days
+from app.services.earnings_window_service import (
+    _TRUNCATION_ROWS,
+    _row_date,
+    _row_symbol,
+    fetch_calendar_days,
+)
 from app.services.updates_materiality import finite
 from app.utils.market_hours import ET, is_trading_day, previous_trading_day
 
@@ -1084,6 +1114,27 @@ class EarningsLiveService:
             self._fetched[day] = mono
             # Whole market on purpose: the next-morning card and the sheet read these records.
             self.observe_rows(day, rows, now, fetched=True)
+            self._end_unlisted(day, rows)
+
+    def _end_unlisted(self, day: date, rows: List[Dict[str, Any]]) -> None:
+        """Forget the reports on `day` that an own fetch's `rows` no longer list and that hold
+        no raw figure from either source (A REPORT FMP MOVES in the module docstring)."""
+        listed = {symbol for symbol in map(_row_symbol, rows) if symbol}
+        if not listed or len(rows) >= _TRUNCATION_ROWS:
+            return
+        ended = [
+            key for key, rec in self._records.items()
+            if key[1] == day and key[0] not in listed
+            and rec.fmp_eps is None and rec.fmp_revenue is None and rec.filing is None
+        ]
+        for key in ended:
+            del self._records[key]
+        if ended:
+            logger.info(
+                "[earnings-live] %s: FMP's answer no longer lists %d report(s) with no figure, "
+                "ended (%s)", day.isoformat(), len(ended),
+                ", ".join(sorted(symbol for symbol, _ in ended)[:20]),
+            )
 
     async def _run_once(self, key: Tuple[str, date],
                         factory: Callable[[], Awaitable[None]]) -> None:

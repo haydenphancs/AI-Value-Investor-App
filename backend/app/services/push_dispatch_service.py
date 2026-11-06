@@ -31,7 +31,8 @@ Unchanged (each of these is a property with a test behind it):
     be indistinguishable from a broken feature;
   * a count read failure fails OPEN — the dedup key still prevents real repeats;
   * one bad recipient never abandons the rest of the fan-out, and this module never
-    raises into the sweep that called it.
+    raises into the sweep that called it, unless that caller asks to hear about a failed
+    watcher read (`notify_watchers(strict=True)`).
 
 Changed:
   * the cap is PER CATEGORY, not global. It used to count every row in
@@ -103,6 +104,11 @@ STATE_SENT = "sent"
 STATE_NO_DEVICE = "no_device"
 STATE_DRY_RUN = "dry_run"
 STATE_FAILED = "failed"
+
+
+class WatcherLookupFailed(RuntimeError):
+    """`notify_watchers(strict=True)` could not read who watches the ticker. Nobody was told
+    and nothing was claimed, so the caller can safely try again."""
 
 
 def trading_date_et() -> str:
@@ -202,8 +208,9 @@ class PushDispatchService:
 
     # ── who ──────────────────────────────────────────────────────────
 
-    def watchers_of(self, ticker: str) -> List[str]:
-        """User ids watching `ticker`, capped and de-duplicated.
+    def _read_watchers(self, ticker: str) -> List[str]:
+        """User ids watching `ticker`, de-duplicated. RAISES on a failed read: `watchers_of`
+        is the form that does not.
 
         Uses the ticker-leading index added in migration 108; before that this was a
         sequential scan of the whole watchlist table.
@@ -214,25 +221,29 @@ class PushDispatchService:
         # never alerted on ANY event, even the ones who had the toggle on, while ~2/3 of
         # the 500 were then dropped by their own preference. The cap now lands in
         # `_notify_users_inner`, AFTER the preference filter, with a rotating cut.
+        rows = fetch_all_rows(
+            lambda: (
+                self.supabase.table("watchlist_items")
+                .select("user_id")
+                .eq("ticker", ticker.upper())
+            ),
+            # `id`, not `user_id`: OFFSET paging needs a UNIQUE sort key or a row
+            # can straddle the page boundary (`test_postgrest_paging_order_key`).
+            order_by="id", what=f"watchers of {ticker}",
+            max_pages=MAX_AUDIENCE_SCAN_PAGES,
+        )
+        return list(dict.fromkeys(r["user_id"] for r in rows if r.get("user_id")))
+
+    def watchers_of(self, ticker: str) -> List[str]:
+        """`_read_watchers`, with a failed read logged and answered as nobody watching."""
         try:
-            rows = fetch_all_rows(
-                lambda: (
-                    self.supabase.table("watchlist_items")
-                    .select("user_id")
-                    .eq("ticker", ticker.upper())
-                ),
-                # `id`, not `user_id`: OFFSET paging needs a UNIQUE sort key or a row
-                # can straddle the page boundary (`test_postgrest_paging_order_key`).
-                order_by="id", what=f"watchers of {ticker}",
-                max_pages=MAX_AUDIENCE_SCAN_PAGES,
-            )
+            return self._read_watchers(ticker)
         except Exception as e:
             logger.warning(
                 "push: watcher lookup failed for %s (%s: %s) — no alerts this cycle",
                 ticker, type(e).__name__, e,
             )
             return []
-        return list(dict.fromkeys(r["user_id"] for r in rows if r.get("user_id")))
 
     def watchers_of_any(self, tickers: Sequence[str]) -> Dict[str, List[str]]:
         """User id → the subset of `tickers` that user watches, in `tickers` order.
@@ -1308,6 +1319,7 @@ class PushDispatchService:
         data: Optional[Dict[str, Any]] = None,
         kind: Optional[str] = None,
         now: Optional[datetime] = None,
+        strict: bool = False,
     ) -> int:
         """Alert everyone watching `ticker`. Returns how many were actually sent.
 
@@ -1315,12 +1327,19 @@ class PushDispatchService:
         tests did not have to change in the same commit. `preference_key` still selects
         the kind (via the registry's reverse index) for any caller that passes one.
 
-        Never raises: a push failure must not break the sweep that triggered it.
+        Never raises: a push failure must not break the sweep that triggered it. `strict`
+        is the one exception, and only a caller that can try again asks for it: a failed
+        watcher read then raises `WatcherLookupFailed` instead of answering 0, which reads
+        the same as a ticker nobody watches. Only that read: a failed claim or device read
+        after it still comes back as a count.
         """
         resolved = kind or kind_for_preference_key(preference_key) or KIND_TICKER_MOVE
+        read = self._read_watchers if strict else self.watchers_of
         try:
-            users = await asyncio.to_thread(self.watchers_of, ticker)
+            users = await asyncio.to_thread(read, ticker)
         except Exception as e:
+            if strict:
+                raise WatcherLookupFailed(f"{ticker}: {type(e).__name__}: {e}") from e
             # `watchers_of` handles its own errors today, but this method PROMISES
             # never to raise — and it is called from inside the sweeper's generation
             # path, where an escape would mark a successfully generated card as failed.

@@ -11,11 +11,15 @@ kinds — and the daily 16:00 ET sender — claim the SAME key. What is pinned h
   * `EARNINGS_LIVE_PUSH_ENABLED` (ships off) holds only the new kind;
   * a lock-screen banner prints an absolute figure only from the company's own release;
   * each report is dispatched once per process (the 60 s loop re-hands every landing);
+  * a failed watcher read is the one exception: it told nobody, so the key goes back, the round
+    ends there (one failed read a round, however many reports wait) and the next one retries,
+    live kind first;
   * neither kind goes out for a report older than yesterday, the daily pass's own window, and
     such a report is handled once, for good;
   * a round sends oldest first, so the cap cannot run a report out of that window;
   * the round cap's warning counts the reports still owed a push, nothing else.
-The dispatcher is a recorder — nothing here reaches APNs or Supabase.
+The dispatcher is a recorder, or the real one over a fake table where a failed read is the
+point — nothing here reaches APNs or Supabase.
 """
 from __future__ import annotations
 
@@ -23,12 +27,14 @@ import logging
 import re
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, Dict, List
 
 import pytest
 
 import app.services.notification_senders.earnings_live_sender as sender
 import app.services.notification_senders.earnings_sender as daily
+import app.services.push_dispatch_service as pds
 from app.config import settings
 from app.services.earnings_live_service import (
     BASIS_ADJUSTED,
@@ -504,6 +510,221 @@ async def test_the_memory_of_a_report_outside_the_window_stays_bounded(dispatch)
     await sender.dispatch_landings([_beat(FRIDAY)], _noon(MONDAY))
     await sender.dispatch_landings([], _noon(TUESDAY))
     assert not sender._live_done and not sender._surprise_done
+
+
+# ── a failed watcher read ────────────────────────────────────────────────────
+
+
+class _Watchlist:
+    """`watchlist_items`. The page reads numbered in `failing` raise, as an edge 520 does."""
+
+    def __init__(self, failing=(), users=("u1",)):
+        self.failing, self.users, self.reads = set(failing), users, 0
+
+    def table(self, _name):
+        return self
+
+    def select(self, *_):
+        return self
+
+    def eq(self, *_):
+        return self
+
+    def order(self, *_, **__):
+        return self
+
+    def range(self, *_):
+        return self
+
+    def execute(self):
+        self.reads += 1
+        if self.reads in self.failing:
+            raise RuntimeError("520 from the edge")
+        return SimpleNamespace(data=[{"user_id": u} for u in self.users])
+
+
+def _real_dispatcher(monkeypatch, failing=(), *, users=("u1",)):
+    """The real notify_watchers, watchers_of and fetch_all_rows: only the table and the fan-out
+    are fake, so nothing here can pass on a stub's idea of what a failed read does."""
+    svc = object.__new__(pds.PushDispatchService)
+    svc.supabase = _Watchlist(failing, users)
+    svc.sent = []
+
+    async def notify_users(users, *, kind, **_kw):
+        svc.sent.append(kind)
+        return len(users)
+
+    svc.notify_users = notify_users
+    monkeypatch.setattr(pds, "get_push_dispatch_service", lambda: svc)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", True)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_RESULT_PUSH_ENABLED", True)
+    sender.reset()
+    return svc
+
+
+@pytest.fixture
+def clean_sender():
+    sender.reset()
+    yield
+    sender.reset()
+
+
+def _big(symbol: str = "INTC") -> LiveSnapshot:
+    return _snap(symbol, eps=0.60, eps_pct=46.34, rev=17.1e9, rev_pct=3.01)
+
+
+BOTH = [KIND_EARNINGS_LIVE, KIND_EARNINGS_RESULT]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_watcher_read_does_not_use_up_the_reports_push(monkeypatch, clean_sender):
+    svc = _real_dispatcher(monkeypatch, failing=[1])
+    await sender.dispatch_landings([_big()], NOW)
+    assert svc.sent == [], "the result push must not run ahead of a live push still owed"
+    await sender.dispatch_landings([_big()], NOW)
+    assert svc.sent == BOTH
+    await sender.dispatch_landings([_big()], NOW)
+    assert len(svc.sent) == 2, "once delivered, once per process again"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live_on,kinds", [(False, [KIND_EARNINGS_RESULT]), (True, BOTH)],
+                         ids=["result_kind_alone", "both_kinds"])
+async def test_a_failed_watcher_read_ends_the_round_and_the_next_round_retries(
+        monkeypatch, clean_sender, live_on, kinds):
+    svc = _real_dispatcher(monkeypatch, failing=[1])
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", live_on)
+    await sender.dispatch_landings([_big("AAA"), _big("BBB")], NOW)
+    assert svc.sent == [] and svc.supabase.reads == 1, "one failed read, not one per report"
+    for _ in range(3):
+        await sender.dispatch_landings([_big("AAA")], NOW)
+    assert svc.sent == kinds
+
+
+@pytest.mark.asyncio
+async def test_an_outage_costs_one_read_a_round_and_everyone_is_told_once_after_it(
+        monkeypatch, clean_sender):
+    svc = _real_dispatcher(monkeypatch, failing=range(1, 6))
+    reports = [_big("AAA"), _big("BBB")]
+    for round_number in range(1, 6):
+        await sender.dispatch_landings(reports, NOW)
+        assert (svc.sent, svc.supabase.reads) == ([], round_number)
+    for _ in range(3):
+        await sender.dispatch_landings(reports, NOW)
+    assert svc.sent == BOTH + BOTH
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_behind_a_sent_live_push_retries_only_the_result(
+        monkeypatch, clean_sender):
+    svc = _real_dispatcher(monkeypatch, failing=[2])
+    stats = await sender.dispatch_landings([_big()], NOW)
+    assert svc.sent == [KIND_EARNINGS_LIVE] and stats == {"live": 1, "result": 0}
+    stats = await sender.dispatch_landings([_big()], NOW)
+    assert svc.sent == BOTH and stats == {"live": 0, "result": 1}
+    await sender.dispatch_landings([_big()], NOW)
+    assert svc.sent == BOTH and svc.supabase.reads == 3
+
+
+@pytest.mark.asyncio
+async def test_the_reports_ahead_of_a_failed_read_keep_what_they_got(monkeypatch, clean_sender):
+    svc = _real_dispatcher(monkeypatch, failing=[3])
+    reports = [_big("AAA"), _big("BBB"), _big("CCC")]
+    await sender.dispatch_landings(reports, NOW)
+    assert svc.sent == BOTH and svc.supabase.reads == 3, "BBB failed, CCC was never read"
+    await sender.dispatch_landings(reports, NOW)
+    assert svc.sent == BOTH * 3
+
+
+@pytest.mark.asyncio
+async def test_a_read_that_fails_on_a_later_page_tells_nobody_until_it_is_whole(
+        monkeypatch, clean_sender):
+    svc = _real_dispatcher(monkeypatch, failing=[2], users=[f"u{i}" for i in range(1000)])
+    await sender.dispatch_landings([_big()], NOW)
+    assert svc.sent == [] and svc.supabase.reads == 2
+    await sender.dispatch_landings([_big()], NOW)
+    assert svc.sent == BOTH
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_says_which_report_went_back_and_what_is_still_owed(
+        monkeypatch, clean_sender, caplog):
+    _real_dispatcher(monkeypatch, failing=[1])
+    with caplog.at_level(logging.WARNING, logger=sender.logger.name):
+        await sender.dispatch_landings([_big("AAA"), _big("BBB"), _big("CCC")], NOW)
+    (line,) = _warnings(caplog)
+    assert "AAA" in line and REPORT.isoformat() in line and "520 from the edge" in line
+    assert "RuntimeError" in line and "3 report(s) still owed" in line
+
+
+@pytest.mark.asyncio
+async def test_nobody_watching_is_not_a_failed_read(monkeypatch, clean_sender):
+    svc = _real_dispatcher(monkeypatch, users=())
+    for _ in range(3):
+        await sender.dispatch_landings([_big()], NOW)
+    assert svc.sent == [] and svc.supabase.reads == 2, "one read per kind, and the report is done"
+
+
+@pytest.mark.asyncio
+async def test_any_other_failure_keeps_the_key_so_a_bug_cannot_retry_every_minute(
+        monkeypatch, clean_sender):
+    calls = []
+
+    class _Broken:
+        async def notify_watchers(self, **kw):
+            calls.append(kw["kind"])
+            raise ValueError("a bug, not an outage")
+
+    monkeypatch.setattr(pds, "get_push_dispatch_service", lambda: _Broken())
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", True)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_RESULT_PUSH_ENABLED", True)
+    for _ in range(3):
+        await sender.dispatch_landings([_big()], NOW)
+    assert calls == BOTH, "tried once, and the round went on past it"
+
+
+@pytest.mark.asyncio
+async def test_a_report_still_owed_when_its_window_closes_is_let_go(monkeypatch, clean_sender):
+    svc = _real_dispatcher(monkeypatch, failing=[1])
+    await sender.dispatch_landings([_beat(FRIDAY)], _noon(FRIDAY))
+    await sender.dispatch_landings([_beat(FRIDAY)], _noon(MONDAY))
+    assert svc.sent == [] and svc.supabase.reads == 1
+
+
+@pytest.mark.asyncio
+async def test_notify_watchers_raises_only_in_strict_mode(monkeypatch, clean_sender):
+    svc = _real_dispatcher(monkeypatch, failing=[1, 2])
+    kw = dict(ticker="INTC", title="t", body="b", dedup_key="k", kind=KIND_EARNINGS_LIVE)
+    assert await svc.notify_watchers(**kw) == 0
+    with pytest.raises(pds.WatcherLookupFailed) as failed:
+        await svc.notify_watchers(**kw, strict=True)
+    assert "INTC" in str(failed.value) and "RuntimeError" in str(failed.value)
+    assert isinstance(failed.value.__cause__, RuntimeError)
+
+
+@pytest.mark.asyncio
+async def test_a_strict_read_that_works_answers_like_the_default(monkeypatch, clean_sender):
+    svc = _real_dispatcher(monkeypatch, users=("u1", "u2", "u1"))
+    kw = dict(ticker="INTC", title="t", body="b", dedup_key="k", kind=KIND_EARNINGS_LIVE)
+    assert await svc.notify_watchers(**kw, strict=True) == await svc.notify_watchers(**kw) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_default_path_still_reads_through_a_one_argument_watchers_of(
+        monkeypatch, clean_sender):
+    svc = _real_dispatcher(monkeypatch)
+    svc.watchers_of = lambda ticker: ["u1", "u2"]
+    kw = dict(ticker="INTC", title="t", body="b", dedup_key="k", kind=KIND_EARNINGS_LIVE)
+    assert await svc.notify_watchers(**kw) == 2
+    assert svc.supabase.reads == 0
+
+
+def test_watchers_of_still_answers_a_failed_read_with_nobody(monkeypatch, caplog, clean_sender):
+    svc = _real_dispatcher(monkeypatch, failing=[1])
+    with caplog.at_level(logging.WARNING, logger=pds.logger.name):
+        assert svc.watchers_of("INTC") == []
+    assert "no alerts this cycle" in caplog.text and "INTC" in caplog.text
+    assert svc.watchers_of("INTC") == ["u1"]
 
 
 # ── copy ─────────────────────────────────────────────────────────────────────

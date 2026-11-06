@@ -192,3 +192,71 @@ def test_the_route_is_sign_in_only():
     from app.dependencies import get_watchlist_identity
 
     assert getattr(dep, "dependency", None) is get_watchlist_identity
+
+
+# A report FMP moved: INTC is listed for today and AAPL for 2026-11-02.
+
+
+def test_a_pinned_sheet_follows_a_report_moved_off_its_date(client):
+    body = client.get("/api/v1/tracking/earnings/AAPL/live?report_date=2026-10-29").json()
+    assert body["status"] == "upcoming" and body["report_date"] == "2026-11-02"
+
+
+@pytest.mark.parametrize("pinned", ["2026-10-28", "2026-10-30", "2026-11-05"],
+                         ids=["before_today", "before_the_new_date", "after_the_new_date"])
+def test_a_pinned_date_fmp_no_longer_lists_follows_from_either_side(client, pinned):
+    body = client.get(f"/api/v1/tracking/earnings/AAPL/live?report_date={pinned}").json()
+    assert (body["status"], body["report_date"]) == ("upcoming", "2026-11-02")
+
+
+def test_a_moved_report_answers_with_its_nearest_date(client):
+    ts.get_fmp_client().rows.append(_row("AAPL", REPORT + timedelta(days=9)))
+    body = client.get("/api/v1/tracking/earnings/AAPL/live?report_date=2026-10-29").json()
+    assert body["report_date"] == "2026-11-02"
+
+
+def test_a_moved_report_carries_its_new_rows_consensus(client):
+    ts.get_fmp_client().rows[1] = _row("AAPL", REPORT + timedelta(days=4), epsEstimated=1.9,
+                                       companyName="Apple Inc.")
+    body = client.get("/api/v1/tracking/earnings/AAPL/live?report_date=2026-10-29").json()
+    assert (body["eps"]["estimate"], body["company_name"]) == (1.9, "Apple Inc.")
+
+
+def test_a_pinned_date_fmp_still_lists_stays_pinned(client):
+    ts.get_fmp_client().rows.append(_row("AAPL", REPORT + timedelta(days=9)))
+    body = client.get("/api/v1/tracking/earnings/AAPL/live?report_date=2026-11-07").json()
+    assert (body["status"], body["report_date"]) == ("upcoming", "2026-11-07")
+
+
+def test_a_record_keeps_the_sheet_on_its_date_whatever_fmp_lists_now(client):
+    """A record is what this process saw on that date, figures included. Only a date with
+    neither a record nor a row has moved."""
+    els.get_earnings_live_service().observe_rows(
+        PREV, [_row("AAPL", PREV, epsActual=3.1, revenueActual=7e10, epsEstimated=3.0,
+                    revenueEstimated=6.9e10)],
+        datetime(2026, 10, 29, 12, tzinfo=timezone.utc))
+    body = client.get("/api/v1/tracking/earnings/AAPL/live?report_date=2026-10-28").json()
+    assert (body["status"], body["report_date"]) == ("reported", "2026-10-28")
+
+
+def test_a_moved_report_is_followed_past_an_older_report_still_held(client):
+    """The sheet was opened for one report, so it follows that one, never another the unpinned
+    sheet would name."""
+    els.get_earnings_live_service().observe_rows(
+        PREV, [_row("AAPL", PREV)], datetime(2026, 10, 29, 12, tzinfo=timezone.utc))
+    body = client.get("/api/v1/tracking/earnings/AAPL/live?report_date=2026-10-29").json()
+    assert (body["status"], body["report_date"]) == ("upcoming", "2026-11-02")
+
+
+def test_a_pinned_date_with_nothing_listed_still_answers_none(client):
+    body = client.get("/api/v1/tracking/earnings/ZZZZ/live?report_date=2026-10-29").json()
+    assert (body["status"], body["report_date"]) == ("none", "2026-10-29")
+
+
+def test_a_failed_calendar_read_never_moves_a_pinned_sheet(client, monkeypatch):
+    async def _down(fmp, today):
+        raise RuntimeError("FMP 503")
+
+    monkeypatch.setattr(ts, "_cached_earnings_calendar", _down)
+    body = client.get("/api/v1/tracking/earnings/AAPL/live?report_date=2026-11-02").json()
+    assert (body["status"], body["report_date"]) == ("none", "2026-11-02")

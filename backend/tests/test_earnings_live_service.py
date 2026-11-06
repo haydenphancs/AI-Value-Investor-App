@@ -23,6 +23,8 @@ What is pinned here, each a way the LIVE card could lie or cost too much:
     lands on the tick it falls on: 5 min, 30 min, 2 h and the wait after a failed fetch;
   * a memo row held 12 h opens no record at any fold, so a report FMP moved over a weekend is
     never a report day: the tick asks FMP first, one round, only when such a row would open one;
+  * a report an own fetch no longer lists ends, unless a figure from either source is held,
+    and an answer that lists nothing on the day, or sits at FMP's row cap, ends nothing;
   * feed builds and the sheet never fetch — only the loop does;
   * the SEC watch runs on its own loop, only for watched symbols still pending today: each
     figure reaches its record the moment it verifies, stamped with that moment, and a stuck
@@ -57,10 +59,12 @@ import pytest
 
 import app.services.earnings_filing_service as efs
 import app.services.earnings_live_service as els
+import app.services.earnings_window_service as ews
 import app.services.notification_senders.earnings_live_sender as sender
 import app.services.push_dispatch_service as pds
 import app.services.tracking_service as ts
 from app.config import settings
+from app.integrations.fmp import EmptyAfterFailure
 from app.services.notification_kinds import KIND_EARNINGS_LIVE, KIND_EARNINGS_RESULT
 from app.utils import market_hours as mh
 from app.utils.market_hours import ET, previous_trading_day
@@ -1944,6 +1948,28 @@ async def test_a_landing_is_dispatched_once_when_no_fetch_is_due_after_the_day_r
 
 
 @pytest.mark.asyncio
+async def test_a_failed_watcher_read_at_the_landing_tick_is_told_on_the_next_tick(
+        monkeypatch, pushes):
+    """Through the real tick: a landing is handed over every round, so the key coming back is
+    all a retry needs."""
+    send = pushes.notify_watchers
+    failures = [pds.WatcherLookupFailed("INTC: RuntimeError: 520 from the edge")]
+
+    async def _first_read_fails(**kw):
+        if failures:
+            raise failures.pop()
+        return await send(**kw)
+
+    monkeypatch.setattr(pushes, "notify_watchers", _first_read_fails)
+    fmp = await _a_landing(monkeypatch, REPORT)
+    assert pushes.sent == [] and failures == [], "the landing round's read failed"
+    await _real_tick(monkeypatch, fmp, _et(REPORT, 17, 1))
+    assert pushes.sent == _sent_once(REPORT)
+    await _real_tick(monkeypatch, fmp, _et(REPORT, 17, 2))
+    assert pushes.sent == _sent_once(REPORT)
+
+
+@pytest.mark.asyncio
 async def test_old_landings_cannot_fill_the_round_cap(pushes):
     """The sender sends oldest first and stops at its cap, so a report that left the window
     would otherwise hold back today's."""
@@ -2984,6 +3010,263 @@ async def test_the_sheet_refuses_a_date_before_the_window(monkeypatch):
     svc_obj = _sheet_on(monkeypatch, MONDAY)
     with pytest.raises(ValueError, match="2026-11-05"):
         await svc_obj.get_earnings_live("INTC", FRIDAY - timedelta(days=1))
+
+
+# ── a report FMP moved off its date ──────────────────────────────────────────
+
+
+def _left(day: date = REPORT) -> _FMP:
+    """FMP's answer once INTC has left `day`: the day still lists another report."""
+    return _FMP({PREV: [], day: [_row("AAPL", day)]})
+
+
+@pytest.mark.asyncio
+async def test_a_row_gone_from_our_own_fetch_ends_its_figureless_record():
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT), _row("AAPL", REPORT)], _et(REPORT, 9))
+    fmp = _FMP({REPORT: [_row("AAPL", REPORT)], PREV: []})
+    await svc.refresh(_et(REPORT, 9, 5), fmp=fmp, symbols=["INTC", "AAPL"])
+    assert svc.snapshot("INTC", REPORT, _et(REPORT, 9, 5)) is None
+    assert svc.pending_symbols(REPORT, ["INTC"]) == []
+    assert svc.recent_snapshots(["INTC"], _et(NEXT, 8)) == []
+    assert svc.snapshot("AAPL", REPORT, _et(REPORT, 9, 5)).status == els.STATUS_LIVE
+
+
+@pytest.mark.asyncio
+async def test_a_report_with_no_record_left_stops_asking_fmp():
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 9))
+    await svc.refresh(_et(REPORT, 9, 5), fmp=_left(), symbols=["INTC"])
+    svc._fetched[REPORT] -= els.EARNINGS_LIVE_HOT_TTL_SECONDS + 1
+    assert svc.due_days(_et(REPORT, 9, 10), ["INTC"]) == []
+
+
+@pytest.mark.asyncio
+async def test_an_empty_own_fetch_drops_nothing_so_a_landing_survives():
+    svc = _svc()
+    svc.observe_rows(PREV, [_row("INTC", PREV)], _et(REPORT, 8), fetched=True)
+    await svc.refresh(_et(REPORT, 8, 5), fmp=_FMP({}), symbols=["INTC"])
+    svc.observe_rows(PREV, [_row("INTC", PREV, eps=0.44, rev=17.1e9)], _et(REPORT, 9), fetched=True)
+    assert [s.symbol for s in svc.landed_snapshots(_et(REPORT, 9))] == ["INTC"]
+
+
+@pytest.mark.asyncio
+async def test_a_held_figure_survives_its_row_leaving():
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.041)], _et(REPORT, 17))
+    fmp = _FMP({REPORT: [_row("AAPL", REPORT)], PREV: []})
+    await svc.refresh(_et(REPORT, 17, 5), fmp=fmp, symbols=["INTC"])
+    assert svc.snapshot("INTC", REPORT, _et(REPORT, 17, 5)).eps.checking is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("row", [
+    _row("INTC", REPORT, eps=0.44),
+    _row("INTC", REPORT, rev=17.1e9),
+    _row("INTC", REPORT, eps=0.0),
+    _row("INTC", REPORT, rev=0.0, rev_est=30e6),
+], ids=["eps", "revenue", "breakeven_eps", "pre_revenue_zero"])
+async def test_any_figure_from_fmp_keeps_its_record_when_the_row_leaves(row):
+    """A company that reported has reported, whatever FMP lists afterwards. Zero is a figure."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [row], _et(REPORT, 17))
+    await svc.refresh(_et(REPORT, 17, 5), fmp=_left(), symbols=["INTC"])
+    assert svc.snapshot("INTC", REPORT, _et(REPORT, 17, 5)) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_filing_keeps_its_record_when_the_row_leaves():
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 16))
+    svc.absorb_filing("INTC", REPORT, _FILED_GAAP, _et(REPORT, 16, 3))
+    await svc.refresh(_et(REPORT, 16, 5), fmp=_left(), symbols=["INTC"])
+    assert svc.snapshot("INTC", REPORT, _et(REPORT, 16, 5)).eps.actual == 0.38
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [
+    [],
+    [{"date": REPORT.isoformat()}],
+    [{"symbol": "  ", "date": REPORT.isoformat()}],
+    [_row("AAPL", NEXT)],
+], ids=["empty", "no_symbol", "blank_symbol", "another_days_row"])
+async def test_an_answer_that_lists_no_report_on_the_day_drops_nothing(answer):
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 9))
+    await svc.refresh(_et(REPORT, 9, 5), fmp=_FMP({REPORT: answer}), symbols=["INTC"])
+    assert svc.fetches == 2, "the fetch must have gone through"
+    assert svc.pending_symbols(REPORT, ["INTC"]) == ["INTC"]
+
+
+@pytest.mark.asyncio
+async def test_an_answer_at_fmps_row_cap_drops_nothing():
+    """FMP cuts an answer silently at its cap, so a report missing from one proves nothing."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 9))
+    rows = [_row(f"S{i}", REPORT) for i in range(ews._TRUNCATION_ROWS)]
+    await svc.refresh(_et(REPORT, 9, 5), fmp=_FMP({REPORT: rows}), symbols=["INTC"])
+    assert svc.snapshot("S0", REPORT, _et(REPORT, 9, 5)) is not None, "the answer still folds"
+    assert svc.pending_symbols(REPORT, ["INTC"]) == ["INTC"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_round_drops_nothing_even_where_one_day_answered():
+    """`fetch_calendar_days` is all-or-nothing, so a day that answered is not read either."""
+
+    class _PrevIsDown(_FMP):
+        async def get_earnings_calendar(self, from_date=None, to_date=None):
+            if from_date == PREV.isoformat():
+                return EmptyAfterFailure("FMP 503")
+            return await super().get_earnings_calendar(from_date=from_date, to_date=to_date)
+
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 9))
+    await svc.refresh(_et(REPORT, 9, 5), fmp=_PrevIsDown({REPORT: [_row("AAPL", REPORT)]}),
+                      symbols=["INTC"])
+    assert svc.pending_symbols(REPORT, ["INTC"]) == ["INTC"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("listed", [
+    {"symbol": " intc ", "date": REPORT.isoformat()},
+    {"symbol": "INTC", "date": f"{REPORT.isoformat()} 16:00:00"},
+], ids=["lower_case_symbol", "timestamp_date"])
+async def test_a_row_in_another_shape_still_lists_its_report(listed):
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 9))
+    fmp = _FMP({PREV: [], REPORT: [_row("AAPL", REPORT), listed]})
+    await svc.refresh(_et(REPORT, 9, 5), fmp=fmp, symbols=["INTC"])
+    assert svc.pending_symbols(REPORT, ["INTC"]) == ["INTC"]
+
+
+@pytest.mark.asyncio
+async def test_only_the_day_fetched_loses_a_record():
+    svc = _svc()
+    svc.observe_rows(PREV, [_row("INTC", PREV)], _et(REPORT, 9), fetched=True)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 9))
+    svc._fetched[PREV] = time.monotonic()
+    await svc.refresh(_et(REPORT, 9, 5), fmp=_left(), symbols=["INTC"])
+    assert svc.snapshot("INTC", REPORT, _et(REPORT, 9, 5)) is None
+    assert svc.snapshot("INTC", PREV, _et(REPORT, 9, 5)) is not None
+
+
+def test_a_fold_alone_never_ends_a_record():
+    """A fold can be narrowed to one reader's tickers, and the memo can be half an hour old."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT), _row("AAPL", REPORT)], _et(REPORT, 9))
+    svc.observe_rows(REPORT, [_row("AAPL", REPORT)], _et(REPORT, 9, 5), fetched=True)
+    svc.observe_rows(REPORT, [_row("AAPL", REPORT)], _et(REPORT, 9, 6))
+    assert svc.pending_symbols(REPORT, ["INTC"]) == ["INTC"]
+
+
+@pytest.mark.asyncio
+async def test_a_previous_day_report_that_left_its_answer_draws_no_morning_card():
+    """A day before today has no memo row to bring it back, so one fetch settles it."""
+    svc = _svc()
+    svc.observe_rows(PREV, [_row("INTC", PREV), _row("AAPL", PREV)], _et(PREV, 9), fetched=True)
+    assert [s.symbol for s in svc.recent_snapshots(["INTC"], _et(REPORT, 8))] == ["INTC"]
+    await svc.refresh(_et(REPORT, 8), fmp=_left(PREV), symbols=["INTC"])
+    assert svc.recent_snapshots(["INTC"], _et(REPORT, 8)) == []
+
+
+@pytest.mark.asyncio
+async def test_a_row_that_comes_back_opens_its_report_again_and_still_lands():
+    svc = _svc()
+    svc.observe_rows(PREV, [_row("INTC", PREV)], _et(PREV, 9), fetched=True)
+    await svc.refresh(_et(REPORT, 8), fmp=_left(PREV), symbols=["INTC"])
+    assert svc.snapshot("INTC", PREV, _et(REPORT, 8)) is None
+    svc.observe_rows(PREV, [_row("INTC", PREV)], _et(REPORT, 8, 5), fetched=True)
+    svc.observe_rows(PREV, [_row("INTC", PREV, eps=0.44, rev=17.1e9)], _et(REPORT, 8, 10),
+                     fetched=True)
+    assert [s.symbol for s in svc.landed_snapshots(_et(REPORT, 8, 10))] == ["INTC"]
+
+
+@pytest.mark.asyncio
+async def test_a_filing_brings_an_ended_report_back_and_lands():
+    """An 8-K read in the same minute outranks the calendar: the company has reported."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 16))
+    await svc.refresh(_et(REPORT, 16, 1), fmp=_left(), symbols=["INTC"])
+    svc.absorb_filing("INTC", REPORT, _FILED_ADJUSTED, _et(REPORT, 16, 2))
+    assert [s.symbol for s in svc.landed_snapshots(_et(REPORT, 16, 3))] == ["INTC"]
+
+
+@pytest.mark.asyncio
+async def test_an_ended_report_is_logged_with_its_symbol_and_day(caplog):
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT), _row("MSFT", REPORT)], _et(REPORT, 9))
+    with caplog.at_level(logging.INFO, logger=els.logger.name):
+        await svc.refresh(_et(REPORT, 9, 5), fmp=_left(), symbols=["INTC"])
+    (line,) = [r.getMessage() for r in caplog.records if "no longer lists" in r.getMessage()]
+    assert REPORT.isoformat() in line and "INTC" in line and "MSFT" in line
+
+
+@pytest.mark.asyncio
+async def test_no_reader_flickers_while_the_memo_still_holds_a_moved_row(monkeypatch):
+    """The card comes from the memo's row, so until that row goes the record must answer: with
+    none it would drop from LIVE to upcoming and back on every own fetch."""
+    _no_history(monkeypatch)
+    at = _et(REPORT, 9, 5)
+    svc_obj = _feed_service(monkeypatch, at, [_row("ZZZZ", REPORT), _row("INTC", REPORT)])
+    (card,) = await svc_obj._get_earnings_alerts(["INTC"])
+    assert card.earnings_status == els.STATUS_LIVE
+    svc_obj.fmp.by_day[REPORT] = [_row("ZZZZ", REPORT)]
+    await _svc().refresh(at, fmp=svc_obj.fmp, symbols=["INTC"])
+    assert _svc().snapshot("INTC", REPORT, at) is None, "the fetch closed it"
+    (card,) = await svc_obj._get_earnings_alerts(["INTC"])
+    assert card.earnings_status == els.STATUS_LIVE
+    await _svc().refresh(at, fmp=svc_obj.fmp, symbols=["INTC"])
+    sheet = await svc_obj.get_earnings_live("INTC")
+    assert (sheet.status, sheet.report_date) == (els.STATUS_LIVE, REPORT.isoformat())
+
+
+@pytest.mark.asyncio
+async def test_a_report_moved_off_today_ends_its_report_day_once_the_memo_catches_up(monkeypatch):
+    """Nobody opens the app, so the real tick is the only reader. The worst move comes just
+    after a memo round: the row rides on for 30 min, then the next own fetch closes the record."""
+    moved_at = _et(MONDAY, 9, 1)
+    settled_by = moved_at + timedelta(minutes=36)
+    end = _et(MONDAY, 13)
+    fmp = _FMP({**_market(MONDAY), MONDAY: _intc_on(MONDAY)})
+    open_at: List[datetime] = []
+    fetches_when_settled: List[int] = []
+
+    def _script(at: datetime) -> None:
+        if at == moved_at:
+            _fmp_moves_intc(fmp, MONDAY, TUESDAY + timedelta(days=2))
+        if _svc().pending_symbols(MONDAY, ["INTC"]):
+            open_at.append(at)
+        if at == settled_by:
+            fetches_when_settled.append(_svc().fetches)
+
+    await _calls_per_day(monkeypatch, fmp, _et(MONDAY, 6), end, ["INTC"], _script)
+    assert moved_at in open_at, "still a report day when FMP moved it"
+    assert max(open_at) < settled_by
+    assert max(open_at) >= moved_at + timedelta(minutes=25), "the memo rows carry it until then"
+    assert _svc().snapshot("INTC", MONDAY, end) is None
+    assert _svc().recent_snapshots(["INTC"], _et(TUESDAY, 8)) == []
+    assert _svc().fetches == fetches_when_settled[0], "FMP's day is no longer watched"
+
+
+@pytest.mark.asyncio
+async def test_a_closed_day_report_fmp_moved_ends_with_nobody_opening_the_app(monkeypatch):
+    """A closed day pays for no memo round, so the row rides on until it is too old to open the
+    record again. The tick then asks FMP once, and the next own fetch ends it for good."""
+    moved_at = _et(SUNDAY, 9)
+    end = _et(SUNDAY, 13)
+    fmp = _FMP({**_market(FRIDAY), SUNDAY: _intc_on(SUNDAY)})
+    open_at: List[datetime] = []
+
+    def _script(at: datetime) -> None:
+        if at == moved_at:
+            _fmp_moves_intc(fmp, SUNDAY, MONDAY)
+        if _svc().pending_symbols(SUNDAY, ["INTC"]):
+            open_at.append(at)
+
+    await _calls_per_day(monkeypatch, fmp, _et(FRIDAY, 18), end, ["INTC"], _script)
+    assert max(open_at) < _et(SUNDAY, 12, 6), "12 h after the midnight round, then one fetch"
+    assert max(open_at) >= _et(SUNDAY, 11, 55), "a closed day has no memo round before that"
+    assert _svc().snapshot("INTC", SUNDAY, end) is None
 
 
 # ── the push: watched reports, inside the result window ──────────────────────

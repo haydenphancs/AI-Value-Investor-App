@@ -1740,7 +1740,10 @@ class TrackingService:
         fetch; the earlier live days' are already in those records. The report is `requested`
         when given (it must lie between the previous trading day and today + 14), else
         today's, else the one before today its card would name (`newest_report`), else the
-        next one in the window.
+        next one in the window. A `requested` date with neither a record nor a row has moved:
+        the sheet follows the report to its next listed date, and answers `none` only when
+        nothing is listed, since a pinned sheet saying "no report in the next two weeks" beside
+        a row four days out would be false.
         """
         sym = symbol.upper()
         today = _et_today()
@@ -1772,7 +1775,8 @@ class TrackingService:
         held = newest_report(filter(None, (live.snapshot(sym, d, now) for d in earlier)))
 
         if requested is not None:
-            day = requested
+            known = requested in rows or live.snapshot(sym, requested, now) is not None
+            day = requested if known or not rows else min(rows)
         elif today in rows:
             day = today
         elif held is not None:

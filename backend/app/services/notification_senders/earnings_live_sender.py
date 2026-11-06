@@ -24,6 +24,16 @@ weekend or a holiday. A Friday report FMP fills on Monday lands, keeps its card 
 and is marked handled here with nothing further sent: a live push from its filing, if one went
 out inside the window, is all it gets.
 
+A FAILED WATCHER READ. A report's key is taken before its send, and the dispatcher's usual 0
+for a failed read looks like a ticker nobody watches, so one failed read at the landing minute
+would use up the report: no later round sends it, a restart cannot re-land it, and
+`earnings_live` has no daily pass behind it. So `_notify` asks to hear about it (`strict`). The
+read told nobody and claimed nothing, so the key goes back and the next round retries. The
+round ends there: the live kind still goes first, and the tick, which awaits this inline, pays
+for one failed read a round however many reports wait. A failed claim or device read after a
+good watcher read comes back as a count like any other, so it does use up the key; only a
+failed claim leaves `earnings_result` the daily pass.
+
 COPY. Informational, never directive (SYSTEM_DESIGN_GUIDELINES §11.7). A lock-screen banner
 sits OUTSIDE the authenticated app, which is all FMP's Order Form licenses for display, so an
 absolute figure appears only when it comes from the company's own release (a public SEC
@@ -59,6 +69,7 @@ from app.services.notification_senders.earnings_sender import (
     result_dedup_key,
     surprise_pct,
 )
+from app.services.push_dispatch_service import WatcherLookupFailed
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +79,8 @@ logger = logging.getLogger(__name__)
 MAX_SENDS_PER_ROUND = 60
 
 # Once per (symbol, report date) per process. The dedup key is what stops a restart from
-# re-sending; these sets stop the same process from re-dispatching every 60 s.
+# re-sending; these sets stop the same process from re-dispatching every 60 s. A key is taken
+# before its send and comes back only on a failed watcher read (`_give_back`).
 _live_done: Set[Tuple[str, date]] = set()
 _surprise_done: Set[Tuple[str, date]] = set()
 
@@ -139,6 +151,7 @@ async def _notify(kind: str, snap: LiveSnapshot, title: str, body: str) -> int:
         dedup_key=result_dedup_key(snap.symbol, when),
         kind=kind,
         data=ticker_route(kind, snap.symbol, report_date=when),
+        strict=True,
     )
 
 
@@ -188,8 +201,20 @@ def _still_owed(snap: LiveSnapshot) -> bool:
     return surprise is not None and abs(surprise) >= MIN_SURPRISE
 
 
+def _give_back(done: Set[Tuple[str, date]], snap: LiveSnapshot, left: List[LiveSnapshot],
+               error: WatcherLookupFailed) -> None:
+    """A failed watcher read told nobody, so `snap`'s key comes out of `done` for the next round
+    to retry, and `left`, the reports from `snap` on, wait with it (A FAILED WATCHER READ in the
+    module docstring)."""
+    done.discard((snap.symbol, snap.day))
+    logger.warning("earnings live push for %s %s not sent, its watcher read failed (%s): %d "
+                   "report(s) still owed a push go next round", snap.symbol, snap.day.isoformat(),
+                   error, sum(1 for s in left if _still_owed(s)))
+
+
 async def dispatch_landings(snapshots: List[LiveSnapshot], now: datetime) -> Dict[str, int]:
-    """Send what each landed report is owed, live kind FIRST. Never raises per report."""
+    """Send what each landed report is owed, live kind FIRST. Never raises per report, and a
+    failed watcher read ends the round (`_give_back`)."""
     _prune(now)
     stats = {"live": 0, "result": 0}
     sends = 0
@@ -208,7 +233,12 @@ async def dispatch_landings(snapshots: List[LiveSnapshot], now: datetime) -> Dic
                 title, body = live_copy(snap)
                 try:
                     stats["live"] += await _notify(KIND_EARNINGS_LIVE, snap, title, body)
-                except Exception as e:  # `notify_watchers` promises not to raise; belt only
+                except WatcherLookupFailed as e:
+                    _give_back(_live_done, snap, ordered[i:], e)
+                    break
+                except Exception as e:
+                    # Belt only: `notify_watchers` raises nothing else. The key stays taken,
+                    # or a bug here would retry every 60 s for two days.
                     logger.warning("earnings live push for %s failed (%s: %s)",
                                    snap.symbol, type(e).__name__, e)
                 sends += 1
@@ -225,6 +255,9 @@ async def dispatch_landings(snapshots: List[LiveSnapshot], now: datetime) -> Dic
         title, body = result_copy(snap.symbol, surprise)
         try:
             stats["result"] += await _notify(KIND_EARNINGS_RESULT, snap, title, body)
+        except WatcherLookupFailed as e:
+            _give_back(_surprise_done, snap, ordered[i:], e)
+            break
         except Exception as e:
             logger.warning("earnings live result push for %s failed (%s: %s)",
                            snap.symbol, type(e).__name__, e)

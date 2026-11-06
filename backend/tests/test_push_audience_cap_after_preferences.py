@@ -75,7 +75,7 @@ def test_the_selectors_page_the_whole_audience_and_no_longer_cap():
     starved users before anyone read a preference."""
     import inspect
 
-    for fn in (PushDispatchService.watchers_of, PushDispatchService.followers_of_whale):
+    for fn in (PushDispatchService._read_watchers, PushDispatchService.followers_of_whale):
         src = "\n".join(l for l in inspect.getsource(fn).splitlines() if not l.strip().startswith("#"))
         assert "fetch_all_rows(" in src, fn.__name__
         assert "MAX_RECIPIENTS_PER_SCOPE" not in src, fn.__name__

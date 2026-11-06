@@ -174,6 +174,18 @@ def test_the_consensus_formatting_defects_stay_fixed():
     assert 'String(format: "$%.1fM", v / 1_000_000)' in fmt
 
 
+def test_a_filing_figure_the_server_gave_no_verdict_is_never_coloured():
+    """A figure from the company's release that prints no finer than the consensus reaches the
+    device with no surprise. Comparing the two raw values would paint a beat the print cannot
+    show. FMP's own figures are left to the comparison: a beat that rounds to 0.00 stays a beat."""
+    block = _struct_block(_code(_MODELS), "EarningsMetricOutcome")
+    body = block[block.index("var result: EarningsQuarterResult"):block.index("var color: Color")]
+    rule = "if isPreliminary, surprisePct == nil { return .noEstimate }"
+    assert body.index("guard !isGAAP, let estimate else") < body.index(rule)
+    assert body.index(rule) < body.index("actual > estimate")
+    assert "surprisePct == 0" not in body
+
+
 def test_the_poll_keeps_running_for_a_live_card_after_twenty_et():
     vm = _code("ViewModels/TrackingViewModel.swift")
     timer = vm[vm.index("func startPriceRefreshTimer()"): vm.index("func stopPriceRefreshTimer()")]

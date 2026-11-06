@@ -162,6 +162,9 @@ GUARDS, each a defect found elsewhere in this repo:
     within 2% (FMP's dropped-digit revenue, `earnings_service._reconcile_revenue`);
   * a GAAP-only EPS is shown labelled GAAP with no beat/miss — the consensus is adjusted (the
     owner's 2026-09-27 caution, `news_insight_service._earnings_line`);
+  * a filing's revenue is only as exact as its print: "$17.1 billion" is anything from $17.05B
+    to $17.15B, so against a consensus inside that band it shows with no surprise, never a
+    0.0, until FMP's exact figure replaces it;
   * no surprise percentage against an estimate under $0.01 (`earnings_sender.MIN_ABS_ESTIMATE`);
   * a zero revenue from FMP is stored only against a consensus under $100M, with no figure
     held (a pre-revenue name can report nothing): beside a material consensus, or none, it
@@ -410,7 +413,9 @@ def eps_metric(rec: _Record) -> LiveMetric:
 
 def revenue_metric(rec: _Record) -> LiveMetric:
     """FMP first, then the filing. Like `eps_metric`, the plausibility guard falls back to the
-    guard-only estimate; the surprise and the metric's `estimate` never do."""
+    guard-only estimate; the surprise and the metric's `estimate` never do. A filing figure
+    whose rounding covers the estimate carries no verdict: the print cannot say which side of
+    the consensus the true figure is on."""
     est = rec.revenue_estimate
     guard_est = est if est is not None else rec.revenue_guard_estimate
     fmp = rec.fmp_revenue
@@ -427,6 +432,9 @@ def revenue_metric(rec: _Record) -> LiveMetric:
             agrees = other is not None and abs(other - value) <= _SOURCES_AGREE * value
             if not agrees:
                 return LiveMetric(est, checking=True)
+    rounding = rec.filing.revenue_rounding if source == SOURCE_FILING else None
+    if est is not None and rounding is not None and abs(value - est) <= rounding:
+        return LiveMetric(est, value, None, source)
     return LiveMetric(est, value, revenue_surprise_pct(value, est), source)
 
 

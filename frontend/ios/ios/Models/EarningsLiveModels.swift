@@ -66,10 +66,13 @@ struct EarningsMetricOutcome: Equatable {
     var hasLanded: Bool { actual != nil }
 
     /// `.pending` until the figure lands. `.noEstimate` when there is nothing comparable —
-    /// no consensus, or a GAAP figure against an adjusted one.
+    /// no consensus, a GAAP figure against an adjusted one, or a figure from the company's
+    /// release the server sent with no surprise, because the consensus sits inside its
+    /// rounding ("$17.1B" against $17.08B). FMP's exact figure settles that one.
     var result: EarningsQuarterResult {
         guard let actual else { return .pending }
         guard !isGAAP, let estimate else { return .noEstimate }
+        if isPreliminary, surprisePct == nil { return .noEstimate }
         if actual > estimate { return .beat }
         if actual < estimate { return .missed }
         return .matched

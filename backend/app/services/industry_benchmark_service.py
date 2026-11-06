@@ -42,8 +42,9 @@ PMTS) before the top-N cut, with one INFO line naming them. They are never compa
 that median, and it is a lenders' yardstick for the lenders who are. They also leave the
 Financial Services sector pool (5 of ~620 companies, immaterial).
 
-Every run says when a financial industry falls under the peer floor (`_PeerFloorWatch`): its
-companies then read no peer, so the owner is told by name.
+A financial industry never drops an existing cell under the peer floor on one run's word
+(`_PeerFloorWatch`): the stored cell stays and the owner is told by name. Its companies read no
+peer below that floor, so one lost ticker must not cost them a quarter.
 """
 
 import asyncio
@@ -948,10 +949,10 @@ class _FetchTally:
 # Exchanges sits at exactly 10, Insurance - Specialty at 11, Insurance - Brokers at 11-12 and
 # Insurance - Diversified at 13 (production, 2026-11-05). One ticker lost in a run stays under
 # the INCOMPLETE line above, so its cells are rewritten at 9 and the run succeeds: ten large caps
-# go unmeasured until the next quarterly chain, with nothing said. This watch says it.
+# go unmeasured until the next quarterly chain, with nothing said. This watch keeps the stored
+# cell and says so (owner decision 2026-11-06, "Keep same-year cell").
 #
-# What it compares, per watched industry, just before that industry's rows are written (the
-# upsert overwrites the only record of the old sample size):
+# What it compares, per watched industry, just before that industry's rows are written:
 #   * the industries `moat_scoring_service.own_industry_peers` keeps to their own peers: every
 #     named Financial Services industry, plus REIT - Mortgage;
 #   * ANNUAL rows, in the newest PEER_FLOOR_NEWEST_YEARS years this run writes. Annual rows are
@@ -962,24 +963,32 @@ class _FetchTally:
 #     them would teach the owner to ignore the alert. Older years shrink on their own as the
 #     16-year fetch window moves;
 #   * a cell is NEWLY under the floor when this run's n is below it and the stored row a reader
-#     is served today was not. A year with no stored row yet is judged against the newest older
-#     year of that metric, because a company reading that new year as its own has no peer: the
-#     first run after a year completes is when this bites. A stored row no screen serves
-#     (`servable_benchmark_rows`: an early-filers "2026" row) is no baseline.
+#     is served today was not. A stored row no screen serves (`servable_benchmark_rows`: an
+#     early-filers "2026" row) is no baseline.
+# What it does with such a cell:
+#   * the SAME year is stored: the row is not written, so last quarter's cell stands. That is the
+#     same year's median from 10+ companies, so the readers' "never an older year" rule holds.
+#     The kept cell can include a company that has since left, and it stays until a run counts
+#     10 again or its year leaves the window. Every run reports it until then;
+#   * a NEW year has nothing to keep. It is written and judged against the newest older year of
+#     that metric, because a company reading that new year as its own has no peer. The first run
+#     after a year completes is when this bites, and a reader must not fall back to an older year.
 # Not reported, on purpose: an industry already under the floor; a metric that means nothing for
 # the industry (`peer_metric_applicable`: its row is written and never served); a cell under
 # MIN_SAMPLE_SIZE or an industry over the INCOMPLETE line, neither of which is rewritten, so the
 # old row stands.
 #
-# When the stored cells cannot be read, "new" cannot be told from "already under", so every cell
-# under the floor is listed as possibly new: silence is the failure this exists to end. The
-# write is never held up, and nothing here can raise into the run.
+# When the stored cells cannot be read, nothing proves a cell may be overwritten, so every cell
+# under the floor is left unwritten and listed as possibly new. A cell already under stands a
+# quarter longer, which harms nobody. A new year missed this way reads the older year until the
+# next run: a rare double fault, and better than unmeasuring an industry on a guess. Any other
+# failure of the check writes the rows as they came and says so. Nothing here raises into the run.
 #
 # The report comes at the end of the run, before a Skipped or Incomplete is raised (an unsettled
 # run is the likeliest place for a lost ticker): one ERROR line naming every industry, metric and
-# ticker, then one Telegram message. Once that first run has overwritten a cell, a same-day retry
-# reads the 9 as "already under" and stays quiet. So the cells are logged at WARNING before each
-# write (the trail if the process is killed) and a cancelled run flushes its ERROR line.
+# ticker, then one Telegram message. A new-year cell is reported once: the next run reads it as
+# already under. So the cells are logged at WARNING before each write (the trail if the process
+# is killed) and a cancelled run flushes its ERROR line.
 PEER_FLOOR_NEWEST_YEARS = 3
 PEER_FLOOR_ALERT = "peer floor alert"
 _METRIC_CONFIG_BY_NAME: Dict[str, Dict[str, Any]] = {mc["name"]: mc for mc in METRIC_CONFIGS}
@@ -1025,18 +1034,21 @@ def _under_floor_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def _floor_cell(
     row: Dict[str, Any], stored: Optional[Dict[str, Dict[int, int]]],
 ) -> Optional[Dict[str, Any]]:
-    """The cell of an under-floor row when it fell, else None. `stored` None (an unreadable
-    baseline) keeps every row, with `was` None. A metric with no stored year at all is a new
-    metric: nothing it could have fallen from."""
+    """The cell of an under-floor row when it fell, else None. `kept` means the row must not be
+    written: its own year is stored, or `stored` is None (an unreadable baseline), with `was`
+    None. A metric with no stored year at all is a new metric: nothing it could have fallen from."""
     metric, year = row["metric_name"], _year(row["period_label"])
-    cell = {"metric": metric, "year": year, "n": row["sample_size"], "was": None, "was_year": None}
+    cell = {
+        "metric": metric, "year": year, "n": row["sample_size"], "was": None, "was_year": None,
+        "kept": True,
+    }
     if stored is None:
         return cell
     years = stored.get(metric) or {}
     was_year = year if year in years else max((y for y in years if y < year), default=None)
     if was_year is None or years[was_year] < FS_INDUSTRY_PEER_FLOOR:
         return None
-    return {**cell, "was": years[was_year], "was_year": was_year}
+    return {**cell, "was": years[was_year], "was_year": was_year, "kept": was_year == year}
 
 
 def _missing_note(ticker: str, companies: Dict[str, Dict[str, Any]]) -> str:
@@ -1053,29 +1065,39 @@ def _cell_groups(cells: List[Dict[str, Any]]) -> List[str]:
     one lost ticker reads as one clause and not 27 metrics times 3 years of them."""
     by_year: Dict[Tuple[Any, ...], List[str]] = defaultdict(list)
     for c in cells:
-        key = (c["year"], c["n"], c["was"], c["was_year"], c["missing"])
+        key = (c["year"], c["n"], c["was"], c["was_year"], c["kept"], c["missing"])
         by_year[key].append(c["metric"])
     merged: Dict[Tuple[Any, ...], List[int]] = defaultdict(list)
-    for (year, n, was, was_year, missing), metrics in by_year.items():
+    for (year, n, was, was_year, kept, missing), metrics in by_year.items():
         other_year = was_year if was_year not in (None, year) else None
-        merged[(n, was, other_year, missing, tuple(sorted(metrics)))].append(year)
+        merged[(n, was, other_year, kept, missing, tuple(sorted(metrics)))].append(year)
     clauses = []
-    for (n, was, other_year, missing, metrics), years in sorted(
-        merged.items(), key=lambda kv: (-max(kv[1]), kv[0][0], kv[0][4]),
+    for (n, was, other_year, kept, missing, metrics), years in sorted(
+        merged.items(), key=lambda kv: (-max(kv[1]), kv[0][0], kv[0][5]),
     ):
         was_text = "was unknown" if was is None else f"was {was}"
         if other_year is not None:
             was_text += f" in {other_year}"
+        outcome = "written" if not kept else "not written" if was is None else "old cell kept"
         clauses.append(
-            f"{', '.join(str(y) for y in sorted(years))}: {n} companies, {was_text}, "
+            f"{', '.join(str(y) for y in sorted(years))}: {n} companies, {was_text}, {outcome}, "
             f"missing {missing}: {', '.join(metrics)}"
         )
     return clauses
 
 
+def _cells_text(cells: List[Dict[str, Any]]) -> str:
+    """'down to 9 companies on 27 metric(s), 2023-2025', for the Telegram message."""
+    years = sorted({c["year"] for c in cells})
+    span = str(years[0]) if len(years) == 1 else f"{years[0]}-{years[-1]}"
+    metrics = len({c["metric"] for c in cells})
+    return f"down to {min(c['n'] for c in cells)} companies on {metrics} metric(s), {span}"
+
+
 class _PeerFloorWatch:
-    """One run's account of the watched industries' cells that fell under the floor. See the
-    comment above. `check` runs in the write's worker thread, one industry at a time."""
+    """One run's account of the watched industries' cells that fell under the floor, and which
+    of them stay unwritten. See the comment above. `check` runs in the write's worker thread,
+    one industry at a time."""
 
     def __init__(self, mode: str, dry_run: bool) -> None:
         self.mode = mode
@@ -1096,30 +1118,33 @@ class _PeerFloorWatch:
         members_of: Callable[[Dict[str, Any], str, int], Optional[set]],
         sector: str, industry: str, ticker_caps: List[Tuple[str, float]],
         companies: Optional[Dict[str, Dict[str, Any]]], rows: List[Dict[str, Any]],
-    ) -> None:
-        """Compare `rows`, about to be written, with the stored cells. Never raises: this is a
-        report on a write, and the write goes ahead whatever happens here."""
+    ) -> List[Dict[str, Any]]:
+        """Compare `rows`, about to be written, with the stored cells, and return the rows to
+        write. Never raises: a broken check writes `rows` as they came and says so."""
         try:
-            self._check(read_stored, members_of, sector, industry, ticker_caps, companies or {}, rows)
+            return self._check(
+                read_stored, members_of, sector, industry, ticker_caps, companies or {}, rows,
+            )
         except Exception as e:  # noqa: BLE001 — never into the run
             self.unchecked.append(industry)
             logger.error(
                 "industry_benchmark: peer floor check FAILED for %s / %s (%s: %s), so a fall "
-                "under %d companies would go unreported for it. Its rows are still written",
+                "under %d companies would go unreported for it. Its rows are written as computed",
                 sector, industry, type(e).__name__, e, FS_INDUSTRY_PEER_FLOOR, exc_info=True,
             )
+            return rows
 
     def _check(
         self, read_stored: Callable[[str, str], List[Dict[str, Any]]],
         members_of: Callable[[Dict[str, Any], str, int], Optional[set]],
         sector: str, industry: str, ticker_caps: List[Tuple[str, float]],
         companies: Dict[str, Dict[str, Any]], rows: List[Dict[str, Any]],
-    ) -> None:
+    ) -> List[Dict[str, Any]]:
         under = [
             r for r in _under_floor_rows(rows) if peer_metric_applicable(r["metric_name"], industry)
         ]
         if not under:
-            return   # the normal case: no read at all
+            return rows   # the normal case: no read at all
         stored: Optional[Dict[str, Dict[int, int]]] = None
         error: Optional[str] = None
         try:
@@ -1129,12 +1154,13 @@ class _PeerFloorWatch:
             logger.error(
                 "industry_benchmark: could not read the stored cells of %s / %s (%s), so a fall "
                 "under %d companies cannot be told from one already there. Its %d cell(s) under "
-                "the floor will be listed as possibly new",
+                "the floor are not written and will be listed as possibly new",
                 sector, industry, error, FS_INDUSTRY_PEER_FLOOR, len(under), exc_info=True,
             )
-        cells = [c for r in under if (c := _floor_cell(r, stored)) is not None]
-        if not cells:
-            return
+        fell = [(r, c) for r in under if (c := _floor_cell(r, stored)) is not None]
+        if not fell:
+            return rows
+        cells = [c for _, c in fell]
         roster = [t for t, _ in ticker_caps]
         for cell in cells:
             cell["missing"] = self._missing_text(members_of, roster, companies, cell, industry)
@@ -1144,10 +1170,12 @@ class _PeerFloorWatch:
         else:
             self.fallen.append(entry)
         logger.warning(
-            "industry_benchmark: %s / %s — %s %d cell(s) under %d companies: %s",
-            sector, industry, "would write" if self.dry_run else "about to write", len(cells),
-            FS_INDUSTRY_PEER_FLOOR, "; ".join(_cell_groups(cells)),
+            "industry_benchmark: %s / %s — %d cell(s) under %d companies%s: %s",
+            sector, industry, len(cells), FS_INDUSTRY_PEER_FLOOR,
+            " (dry run)" if self.dry_run else "", "; ".join(_cell_groups(cells)),
         )
+        held = {id(r) for r, c in fell if c["kept"]}
+        return [r for r in rows if id(r) not in held]
 
     @staticmethod
     def _missing_text(
@@ -1194,29 +1222,39 @@ class _PeerFloorWatch:
             )
         for e in entries:
             cells = e["cells"]
-            years = sorted({c["year"] for c in cells})
-            metrics = len({c["metric"] for c in cells})
+            kept = [c for c in cells if c["kept"]]
+            written = [c for c in cells if not c["kept"]]
+            if "error" in e:
+                lines.append(
+                    f"{e['industry']}: {_cells_text(kept)}. The stored cells could not be read, "
+                    "so these were not written and the old rows stand. Possibly not new."
+                )
+            elif kept:
+                lines.append(
+                    f"{e['industry']}: {_cells_text(kept)}. Last quarter's cells kept, so its "
+                    "companies keep their peer. This repeats every run until the count is back."
+                )
+            if written:
+                lines.append(
+                    f"{e['industry']}: {_cells_text(written)}. A new year, nothing to keep: "
+                    "companies on that year read no peer until a run brings it back, so their "
+                    "moat is unmeasured and Price unrated."
+                )
             missing = Counter(c["missing"] for c in cells)
             lines.append(
-                f"{e['industry']}: down to {min(c['n'] for c in cells)} companies on {metrics} "
-                f"metric(s), {years[0] if len(years) == 1 else f'{years[0]}-{years[-1]}'}. "
                 f"Missing{' from most' if len(missing) > 1 else ''}: "
                 f"{missing.most_common(1)[0][0]}."
-                + (" Possibly not new: the stored cells could not be read." if "error" in e else "")
             )
         if entries:
-            lines.append(
-                "Those companies read no peer until a run brings it back: moat unmeasured, Price "
-                "unrated. Every metric and ticker is in the Railway log line PEER FLOOR."
-            )
+            lines.append("Every metric and ticker is in the Railway log line PEER FLOOR.")
         if self.unchecked:
             lines.append(f"🔴 Peer floor check failed for: {', '.join(self.unchecked)}.")
         sectors = {e["sector"] for e in entries}
         retried = [s for s in unsettled if s in sectors]
         if retried:
             lines.append(
-                f"This run did not finish {', '.join(retried)}. A retry recomputes it and may "
-                "bring it back, and says nothing if it does."
+                f"This run did not finish {', '.join(retried)}. A retry recomputes it, and says "
+                "nothing if that restores the count."
             )
         return "\n".join(lines)
 
@@ -1229,8 +1267,10 @@ class _PeerFloorWatch:
             )
             return
         logger.error(
-            "PEER FLOOR: %d industr%s under %d companies %s (%s run), so their companies read no "
-            "peer until a run brings them back (moat unmeasured, Price unrated): %s",
+            "PEER FLOOR: %d industr%s under %d companies %s (%s run). An old cell kept stays last "
+            "quarter's, so its companies keep their peer. A cell written is a new year with "
+            "nothing to keep, so companies on that year read no peer until a run brings it back "
+            "(moat unmeasured, Price unrated): %s",
             count, "y" if count == 1 else "ies", FS_INDUSTRY_PEER_FLOOR, how, self.mode,
             self._account(),
         )
@@ -1244,7 +1284,7 @@ class _PeerFloorWatch:
         try:
             if self.dry_run:
                 logger.warning(
-                    "PEER FLOOR (dry run, nothing written): a real run would leave these under "
+                    "PEER FLOOR (dry run, nothing written): a real run would find these under "
                     "%d companies: %s", FS_INDUSTRY_PEER_FLOOR, self._account(),
                 )
                 return
@@ -1278,6 +1318,10 @@ class _PeerFloorWatch:
     def summary(self) -> Dict[str, Any]:
         return {
             "peer_floor_newly_under": {e["industry"]: len(e["cells"]) for e in self.fallen},
+            "peer_floor_cells_kept": {
+                e["industry"]: sum(c["kept"] for c in e["cells"])
+                for e in self.fallen + self.unread if any(c["kept"] for c in e["cells"])
+            },
             "peer_floor_baseline_unread": [e["industry"] for e in self.unread],
             "peer_floor_unchecked": list(self.unchecked),
             "peer_floor_alert_sent": self.alert_sent,
@@ -1633,15 +1677,15 @@ class IndustryBenchmarkService:
         self, sector: str, industry: str,
         values_by_key: Dict[Tuple[str, str, str], List[float]], now: str, dry_run: bool,
         *, marker_last: bool = False,
-        before_write: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+        before_write: Optional[Callable[[List[Dict[str, Any]]], List[Dict[str, Any]]]] = None,
     ) -> int:
         """Build one group's fiscal rows (`_rows_from_values`) and write them (`_emit`).
         `industry=''` is the sector aggregate (pass `marker_last=True`). `before_write` sees
-        the rows while the stored ones still hold the sample sizes they will replace."""
+        the rows while the stored ones are still there, and returns the rows to write."""
         label = f"{sector} / {industry}" if industry else f"{sector} (sector aggregate)"
         rows = self._rows_from_values(sector, industry, values_by_key, now)
         if before_write is not None:
-            before_write(rows)
+            rows = before_write(rows)
         return self._emit(rows, label, dry_run, marker_last=marker_last)
 
     def _write_ttm_group(
@@ -1781,7 +1825,7 @@ class IndustryBenchmarkService:
     def _floor_hook(
         self, watch: Optional[_PeerFloorWatch], sector: str, industry: str,
         ticker_caps: List[Tuple[str, float]], companies: Optional[Dict[str, Dict[str, Any]]],
-    ) -> Optional[Callable[[List[Dict[str, Any]]], None]]:
+    ) -> Optional[Callable[[List[Dict[str, Any]]], List[Dict[str, Any]]]]:
         """`_write_fiscal_group`'s `before_write` for an industry the watch covers."""
         if companies is None or watch is None:
             return None

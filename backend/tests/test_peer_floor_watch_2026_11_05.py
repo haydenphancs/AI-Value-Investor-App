@@ -1,10 +1,12 @@
-"""A financial industry falling under the 10-company peer floor is never silent (2026-11-05).
+"""A financial industry never falls under the 10-company peer floor in silence (2026-11-05).
 
 A Financial Services company reads its own industry's median from 10 companies or has no peer,
 and since the own-industry moat change the moat follows the same rule. Financial - Data & Stock
 Exchanges sits at exactly 10 on production. One ticker lost in a quarterly run stays inside the
-INCOMPLETE line, so its cells are rewritten at 9, the run succeeds, and ten large caps go
-unmeasured until the next chain with nothing said. `_PeerFloorWatch` says it.
+INCOMPLETE line, so its cells were rewritten at 9, the run succeeded, and ten large caps went
+unmeasured until the next chain with nothing said. `_PeerFloorWatch` says it, and since the
+owner's decision of 2026-11-06 ("Keep same-year cell") a year already stored keeps last
+quarter's cell. A new year has nothing to keep, so it is written and reported.
 
 These run the REAL recompute (fetch through upsert) over a fake table, so what the watch reads
 is what the run is about to overwrite. Only FMP, Supabase and Telegram are faked. Also here:
@@ -109,11 +111,17 @@ class _Db:
             }
             self.rows[_key(row)] = row
 
-    def n(self, industry, metric, year):
+    def _row(self, industry, metric, year):
         for row in self.rows.values():
             if (row["industry"], row["metric_name"], row["period_label"]) == (industry, metric, year):
-                return row["sample_size"]
-        return None
+                return row
+        return {}
+
+    def n(self, industry, metric, year):
+        return self._row(industry, metric, year).get("sample_size")
+
+    def computed_at(self, industry, metric, year):
+        return self._row(industry, metric, year).get("computed_at")
 
 
 def _key(row):
@@ -212,19 +220,21 @@ async def test_nine_from_ten_names_industry_metric_and_tickers(monkeypatch, aler
     with caplog.at_level(logging.INFO, logger=_LOGGER):
         summary = await svc.recompute_all(skip_if_fresh_hours=24)
 
-    assert db.n(_EXCH, "gross_margin", "2025") == 9    # the write is not held up
+    assert db.n(_EXCH, "gross_margin", "2025") == 10   # last quarter's cell stands
     lines = _floor_errors(caplog)
     assert len(lines) == 1, "one ERROR line per run"
     line = lines[0]
     assert _EXCH in line and "gross_margin" in line and "2023, 2024, 2025" in line
-    assert "9 companies, was 10" in line and "TRU (rate_limited)" in line
+    assert "9 companies, was 10, old cell kept" in line and "TRU (rate_limited)" in line
     assert all(t in line for t in _ROSTER), "every ticker of the industry is named"
     assert summary["peer_floor_newly_under"] == {_EXCH: 3}
+    assert summary["peer_floor_cells_kept"] == {_EXCH: 3}
     assert summary["peer_floor_alert_sent"] is True
     assert len(alerts) == 1
     text = alerts[0]
     assert _EXCH in text and "TRU (rate_limited)" in text and "down to 9" in text
-    assert "1 metric(s), 2023-2025" in text and "Price unrated" in text
+    assert "1 metric(s), 2023-2025" in text and "keep their peer" in text
+    assert "unmeasured" not in text, "nothing went unmeasured: the cells were kept"
 
 
 @pytest.mark.parametrize("was", [9, 7])
@@ -242,7 +252,7 @@ async def test_an_industry_already_under_the_floor_says_nothing(monkeypatch, ale
 
 @pytest.mark.asyncio
 async def test_a_failed_stored_read_lists_every_cell_as_possibly_new(monkeypatch, alerts, caplog):
-    """"New" cannot be told from "already under", so it says so. The write still happens."""
+    """Nothing proves these may be overwritten, so they stand and the alert says why."""
     db = _Db()
     db.seed(_EXCH, "gross_margin", {y: 10 for y in _YEARS})
     db.read_error = RuntimeError("supabase down")
@@ -250,13 +260,16 @@ async def test_a_failed_stored_read_lists_every_cell_as_possibly_new(monkeypatch
     with caplog.at_level(logging.INFO, logger=_LOGGER):
         summary = await svc.recompute_all(skip_if_fresh_hours=24)
 
-    assert db.n(_EXCH, "gross_margin", "2025") == 9
+    assert db.n(_EXCH, "gross_margin", "2025") == 10
     assert summary["peer_floor_newly_under"] == {}
     assert summary["peer_floor_baseline_unread"] == [_EXCH]
+    assert summary["peer_floor_cells_kept"] == {_EXCH: 3}
     line = _floor_errors(caplog)[0]
-    assert "POSSIBLY NEW" in line and "RuntimeError: supabase down" in line and "was unknown" in line
+    assert "POSSIBLY NEW" in line and "RuntimeError: supabase down" in line
+    assert "was unknown, not written" in line
     assert any("could not read the stored cells" in m for m in _errors(caplog))
     assert len(alerts) == 1 and "Possibly not new" in alerts[0] and _EXCH in alerts[0]
+    assert "old rows stand" in alerts[0]
 
 
 @pytest.mark.asyncio
@@ -277,14 +290,16 @@ async def test_a_failed_fmp_read_names_the_lost_ticker(monkeypatch, alerts, capl
 async def test_two_lost_tickers_stay_inside_the_loss_line_and_are_both_named(monkeypatch, alerts, caplog):
     db = _Db()
     db.seed(_EXCH, "gross_margin", {y: 10 for y in _YEARS})
+    universe = [(_FS, [(_EXCH, _roster()), ("Banks - Regional", _roster([f"B{i}" for i in range(30)]))])]
     lost = {"TRU": _company(failed="rate_limited"), "FDS": _company(failed="unavailable")}
-    svc = _service(db, _exchanges(), lost, monkeypatch)
-    with caplog.at_level(logging.INFO, logger=_LOGGER), pytest.raises(IndustryBenchmarkRecomputeIncomplete):
-        await svc.recompute_all(skip_if_fresh_hours=24)   # 20% of its sector lost: lossy
+    svc = _service(db, universe, lost, monkeypatch)
+    with caplog.at_level(logging.INFO, logger=_LOGGER):
+        await svc.recompute_all(skip_if_fresh_hours=24)
     line = _floor_errors(caplog)[0]
-    assert "8 companies, was 10" in line
+    assert "8 companies, was 10, old cell kept" in line
+    assert db.n(_EXCH, "gross_margin", "2025") == 10
     assert "TRU (rate_limited)" in line and "FDS (unavailable)" in line
-    assert len(alerts) == 1, "reported before the run raises"
+    assert len(alerts) == 1
 
 
 @pytest.mark.asyncio
@@ -295,7 +310,42 @@ async def test_a_new_year_is_judged_against_the_year_before_it(monkeypatch, aler
     svc = _service(db, _exchanges(), {"TRU": _company(years=("2023", "2024"))}, monkeypatch)
     with caplog.at_level(logging.INFO, logger=_LOGGER):
         await svc.recompute_all(skip_if_fresh_hours=24)
-    assert "2025: 9 companies, was 10 in 2024" in _floor_errors(caplog)[0]
+    assert db.n(_EXCH, "gross_margin", "2025") == 9, "a new year has nothing to keep"
+    assert "2025: 9 companies, was 10 in 2024, written" in _floor_errors(caplog)[0]
+    assert len(alerts) == 1 and "A new year, nothing to keep" in alerts[0]
+    assert "Price unrated" in alerts[0] and "keep their peer" not in alerts[0]
+
+
+@pytest.mark.asyncio
+async def test_kept_years_and_a_new_year_in_one_run_are_told_apart(monkeypatch, alerts, caplog):
+    db = _Db()
+    db.seed(_EXCH, "gross_margin", {"2023": 10, "2024": 10})
+    universe = _exchanges()
+    answers = {"TRU": _company(failed="refused")}
+    svc = _service(db, universe, answers, monkeypatch)
+    with caplog.at_level(logging.INFO, logger=_LOGGER):
+        summary = await svc.recompute_all(skip_if_fresh_hours=24)
+    assert (db.n(_EXCH, "gross_margin", "2024"), db.n(_EXCH, "gross_margin", "2025")) == (10, 9)
+    assert summary["peer_floor_newly_under"] == {_EXCH: 3}
+    assert summary["peer_floor_cells_kept"] == {_EXCH: 2}
+    line = _floor_errors(caplog)[0]
+    assert "2023, 2024: 9 companies, was 10, old cell kept" in line
+    assert "2025: 9 companies, was 10 in 2024, written" in line
+    assert "keep their peer" in alerts[0] and "A new year, nothing to keep" in alerts[0]
+
+
+@pytest.mark.asyncio
+async def test_a_company_that_comes_back_rewrites_the_kept_cell(monkeypatch, alerts, caplog):
+    db = _Db()
+    db.seed(_EXCH, "gross_margin", {y: 10 for y in _YEARS}, computed_at=_WRITTEN_AT)
+    answers = {"TRU": _company(failed="refused")}
+    svc = _service(db, _exchanges(), answers, monkeypatch)
+    await svc.recompute_all(skip_if_fresh_hours=24)
+    kept_at = db.computed_at(_EXCH, "gross_margin", "2025")
+    answers.clear()
+    await svc.recompute_all(skip_if_fresh_hours=24)
+    assert kept_at == _WRITTEN_AT and db.computed_at(_EXCH, "gross_margin", "2025") != _WRITTEN_AT
+    assert db.n(_EXCH, "gross_margin", "2025") == 10 and len(alerts) == 1
 
 
 @pytest.mark.asyncio
@@ -325,7 +375,8 @@ def test_a_stored_row_no_screen_serves_is_no_baseline():
     ])
     assert stored == {"gross_margin": {2024: 10}}
     row = {"metric_name": "gross_margin", "period_label": "2025", "sample_size": 9}
-    assert _floor_cell(row, stored)["was_year"] == 2024
+    cell = _floor_cell(row, stored)
+    assert cell["was_year"] == 2024 and cell["kept"] is False, "no served row, so nothing to keep"
 
 
 @pytest.mark.parametrize("bad", [None, True, "10", -1, 10.5])
@@ -361,13 +412,14 @@ def test_a_metric_that_means_nothing_for_the_industry_is_not_read():
     row = {"metric_name": "interest_coverage", "period_type": "annual", "period_label": "2025",
            "sample_size": 9}
     watch = _PeerFloorWatch("fiscal", dry_run=False)
-    watch.check(read, lambda *_a: set(), _FS, "Insurance - Specialty", _roster(), {}, [row])
+    kept = watch.check(read, lambda *_a: set(), _FS, "Insurance - Specialty", _roster(), {}, [row])
+    assert kept == [row], "written as computed: no reader is served it"
     assert reads == [] and watch.fallen == [] and watch.unread == [] and watch.unchecked == []
 
-    # The same fall on a broker, whose interest coverage does mean something, is reported.
+    # The same fall on a broker, whose interest coverage does mean something, is held.
     watch = _PeerFloorWatch("fiscal", dry_run=False)
-    watch.check(read, lambda *_a: set(), _FS, "Insurance - Brokers", _roster(), {}, [row])
-    assert reads == ["Insurance - Brokers"] and len(watch.fallen) == 1
+    kept = watch.check(read, lambda *_a: set(), _FS, "Insurance - Brokers", _roster(), {}, [row])
+    assert kept == [] and reads == ["Insurance - Brokers"] and len(watch.fallen) == 1
 
 
 @pytest.mark.asyncio
@@ -427,8 +479,9 @@ async def test_mortgage_reits_are_watched_because_the_moat_keeps_them_to_their_o
 
 @pytest.mark.asyncio
 async def test_the_stored_cells_are_read_before_they_are_overwritten(monkeypatch, alerts):
+    """Only a new year overwrites anything now, and it must be judged on the older stored year."""
     db = _Db()
-    db.seed(_EXCH, "gross_margin", {y: 10 for y in _YEARS})
+    db.seed(_EXCH, "gross_margin", {"2024": 10})
     svc = _service(db, _exchanges(), {"TRU": _company(failed="refused")}, monkeypatch)
     await svc.recompute_all(skip_if_fresh_hours=24)
     assert db.events[0] == "read" and "upsert" in db.events[1:]
@@ -449,17 +502,31 @@ async def test_a_trail_is_logged_before_the_write_for_a_killed_process(monkeypat
     svc = _service(db, _exchanges(), {"TRU": _company(failed="refused")}, monkeypatch)
     with caplog.at_level(logging.INFO, logger=_LOGGER):
         await svc.recompute_all(skip_if_fresh_hours=24)
-    assert any("about to write 3 cell(s)" in m and "TRU (refused)" in m for m in seen_before_write)
+    assert any(
+        "3 cell(s) under 10 companies" in m and "TRU (refused)" in m for m in seen_before_write
+    )
 
 
 @pytest.mark.asyncio
-async def test_a_same_day_retry_does_not_repeat_the_alert(monkeypatch, alerts, caplog):
+async def test_a_new_year_fall_is_reported_once(monkeypatch, alerts, caplog):
+    db = _Db()
+    db.seed(_EXCH, "gross_margin", {"2023": 10, "2024": 10})
+    svc = _service(db, _exchanges(), {"TRU": _company(years=("2023", "2024"))}, monkeypatch)
+    await svc.recompute_all(skip_if_fresh_hours=24)
+    await svc.recompute_all(skip_if_fresh_hours=24)
+    assert len(alerts) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_kept_cell_is_reported_every_run_until_the_count_is_back(monkeypatch, alerts, caplog):
+    """The stored cell still reads 10, so each run finds the same fall. That is the point: a held
+    cell needs a person, and a silent one would hide a company that left for good."""
     db = _Db()
     db.seed(_EXCH, "gross_margin", {y: 10 for y in _YEARS})
     svc = _service(db, _exchanges(), {"TRU": _company(failed="refused")}, monkeypatch)
     await svc.recompute_all(skip_if_fresh_hours=24)
     await svc.recompute_all(skip_if_fresh_hours=24)
-    assert len(alerts) == 1
+    assert len(alerts) == 2 and db.n(_EXCH, "gross_margin", "2025") == 10
 
 
 @pytest.mark.asyncio
@@ -473,7 +540,7 @@ async def test_a_dry_run_warns_and_tells_nobody(monkeypatch, alerts, caplog):
     assert not _floor_errors(caplog) and alerts == []
     warned = [r.getMessage() for r in caplog.records if "dry run, nothing written" in r.getMessage()]
     assert len(warned) == 1 and _EXCH in warned[0]
-    assert any("would write 3 cell(s)" in r.getMessage() for r in caplog.records)
+    assert any("3 cell(s) under 10 companies (dry run)" in r.getMessage() for r in caplog.records)
     assert summary["peer_floor_newly_under"] == {_EXCH: 3}
 
 
@@ -483,7 +550,11 @@ async def test_a_run_that_raises_still_reports_and_names_a_retried_sector(monkey
     db = _Db()
     db.seed(_EXCH, "gross_margin", {y: 10 for y in _YEARS})
     banks = [f"B{i}" for i in range(30)]
-    universe = [(_FS, [(_EXCH, _roster()), ("Banks - Regional", _roster(banks))])]
+    managers = [f"A{i}" for i in range(30)]
+    universe = [(_FS, [
+        (_EXCH, _roster()), ("Banks - Regional", _roster(banks)),
+        ("Asset Management", _roster(managers)),
+    ])]
     lost = {"TRU": _company(failed="refused")}
     lost.update({t: _company(failed="unavailable") for t in banks[:12]})
     svc = _service(db, universe, lost, monkeypatch)
@@ -617,11 +688,12 @@ async def test_the_named_industries_path_is_watched_too(monkeypatch, alerts, cap
 
 def test_the_grouping_keeps_one_lost_ticker_to_one_clause():
     cells = [
-        {"metric": m, "year": y, "n": 9, "was": 10, "was_year": y, "missing": "TRU (refused)"}
+        {"metric": m, "year": y, "n": 9, "was": 10, "was_year": y, "kept": True,
+         "missing": "TRU (refused)"}
         for m in ("roe", "gross_margin") for y in (2024, 2025)
     ]
     assert ibs._cell_groups(cells) == [
-        "2024, 2025: 9 companies, was 10, missing TRU (refused): gross_margin, roe"
+        "2024, 2025: 9 companies, was 10, old cell kept, missing TRU (refused): gross_margin, roe"
     ]
 
 
@@ -631,7 +703,7 @@ def test_the_alert_text_stays_inside_telegrams_limit_with_many_industries():
         watch.fallen.append({
             "sector": _FS, "industry": f"Industry {i}", "roster": _ROSTER,
             "cells": [{"metric": "roe", "year": 2025, "n": 9, "was": 10, "was_year": 2025,
-                       "missing": "TRU (refused)"}],
+                       "kept": True, "missing": "TRU (refused)"}],
         })
     assert len(owner_alert._fit(watch._telegram_text([]))) <= owner_alert.MAX_ALERT_CHARS
 
@@ -829,3 +901,5 @@ def test_the_refresh_route_quotes_the_measured_time():
 def test_the_owner_task_list_says_what_to_do_about_the_alert():
     text = (_repo() / "documents/OWNER_TASKS.md").read_text()
     assert "Telegram `🔴 Peer floor`, or Railway ERROR `PEER FLOOR`" in text
+    assert '"Keep same-year cell"' in text and "Last quarter's cells kept" in text
+    assert "today the run still rewrites" not in text, "the decision is no longer open"

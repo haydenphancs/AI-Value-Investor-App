@@ -36,11 +36,15 @@ A FAILED WATCHER READ. A report's key is taken before its send, and the dispatch
 for a failed read looks like a ticker nobody watches, so one failed read at the landing minute
 would use up the report: no later round sends it, a restart cannot re-land it, and
 `earnings_live` has no daily pass behind it. So `_notify` asks to hear about it (`strict`). The
-read told nobody and claimed nothing, so the key goes back and the next round retries. The
-round ends there: the live kind still goes first, and the tick, which awaits this inline, pays
-for one failed read a round however many reports wait. A failed read of who holds a neighbouring
-key is the same. A failed claim or device read after those reads comes back as a count like any
-other, so it does use up the key; only a failed claim leaves `earnings_result` the daily pass.
+read told nobody and claimed nothing, so the key goes back and a later round retries. The round
+ends there: the live kind still goes first, and the tick, which awaits this inline, pays for one
+failed read a round however many reports wait. The ticker then goes behind every other report
+until a read of it works (`_went_back`), so one whose read keeps failing holds back nobody, and
+two of them take turns. By ticker, never by report: the read is the ticker's, and a report dated
+twice must stay in date order to go out under its first date. A failed read of who holds a
+neighbouring key is the same. A failed claim or device read after those reads comes back as a
+count like any other, so it does use up the key; only a failed claim leaves `earnings_result`
+the daily pass.
 
 COPY. Informational, never directive (SYSTEM_DESIGN_GUIDELINES §11.7). A lock-screen banner
 sits OUTSIDE the authenticated app, which is all FMP's Order Form licenses for display, so an
@@ -92,12 +96,16 @@ MAX_SENDS_PER_ROUND = 60
 # before its send and comes back only on a failed watcher read (`_give_back`).
 _live_done: Set[Tuple[str, date]] = set()
 _surprise_done: Set[Tuple[str, date]] = set()
+# The tickers a failed watcher read sent to the back of the round, each with the turn it went
+# back on, so the one that has waited longest goes next (A FAILED WATCHER READ in the docstring).
+_went_back: Dict[str, int] = {}
 
 
 def reset() -> None:
     """Forget what was dispatched (tests)."""
     _live_done.clear()
     _surprise_done.clear()
+    _went_back.clear()
 
 
 def _money(value: float, *, revenue: bool) -> str:
@@ -159,7 +167,7 @@ async def _notify(kind: str, snap: LiveSnapshot, title: str, body: str) -> int:
     from app.services.push_dispatch_service import get_push_dispatch_service
 
     when = snap.day.isoformat()
-    return await get_push_dispatch_service().notify_watchers(
+    sent = await get_push_dispatch_service().notify_watchers(
         ticker=snap.symbol,
         title=title,
         body=body,
@@ -169,6 +177,8 @@ async def _notify(kind: str, snap: LiveSnapshot, title: str, body: str) -> int:
         data=ticker_route(kind, snap.symbol, report_date=when),
         strict=True,
     )
+    _went_back.pop(snap.symbol, None)  # the read worked, so the ticker is back in date order
+    return sent
 
 
 def _prune(now: datetime) -> None:
@@ -184,10 +194,12 @@ def _prune(now: datetime) -> None:
 def _to_decide(snapshots: List[LiveSnapshot], today: date) -> List[LiveSnapshot]:
     """The reports this round still has a decision on, oldest first: the oldest leaves the
     result window soonest, so the cap must hold back a newer one instead, and a report dated
-    twice is told under its first date. One already outside
-    the window is handled here, both kinds at once: no later round has anything left to decide
-    on it, and it reaches neither the cap nor the log again. Its keys leave with the live days,
-    like every other (`_prune`)."""
+    twice is told under its first date. The tickers in `_went_back` come after all of them, the
+    one that went back longest ago first: a ticker whose read is failing gives up its place
+    under the cap, and is forgotten here once it has no report left to decide. One already
+    outside the window is handled here, both kinds at once: no later round has anything left to
+    decide on it, and it reaches neither the cap nor the log again. Its keys leave with the live
+    days, like every other (`_prune`)."""
     open_reports = []
     for snap in snapshots:
         key = (snap.symbol, snap.day)
@@ -201,7 +213,10 @@ def _to_decide(snapshots: List[LiveSnapshot], today: date) -> List[LiveSnapshot]
         logger.info("earnings live push: %s %s is older than yesterday on %s — nothing further "
                     "will be sent; its card and sheet stay", snap.symbol, snap.day.isoformat(),
                     today.isoformat())
-    return sorted(open_reports, key=lambda s: (s.day, s.symbol))
+    still_open = {snap.symbol for snap in open_reports}
+    for symbol in [s for s in _went_back if s not in still_open]:
+        del _went_back[symbol]
+    return sorted(open_reports, key=lambda s: (_went_back.get(s.symbol, 0), s.day, s.symbol))
 
 
 def _still_owed(snap: LiveSnapshot) -> bool:
@@ -220,10 +235,11 @@ def _still_owed(snap: LiveSnapshot) -> bool:
 
 def _give_back(done: Set[Tuple[str, date]], snap: LiveSnapshot, left: List[LiveSnapshot],
                error: WatcherLookupFailed) -> None:
-    """A failed watcher read told nobody, so `snap`'s key comes out of `done` for the next round
-    to retry, and `left`, the reports from `snap` on, wait with it (A FAILED WATCHER READ in the
-    module docstring)."""
+    """A failed watcher read told nobody, so `snap`'s key comes out of `done` for a later round
+    to retry, `left`, the reports from `snap` on, wait with it, and its ticker goes behind every
+    other report (A FAILED WATCHER READ in the module docstring)."""
     done.discard((snap.symbol, snap.day))
+    _went_back[snap.symbol] = max(_went_back.values(), default=0) + 1
     logger.warning("earnings live push for %s %s not sent, its watcher read failed (%s): %d "
                    "report(s) still owed a push go next round", snap.symbol, snap.day.isoformat(),
                    error, sum(1 for s in left if _still_owed(s)))

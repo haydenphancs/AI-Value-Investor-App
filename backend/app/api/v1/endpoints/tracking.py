@@ -56,7 +56,11 @@ from app.services.asset_class import (
 )
 from app.services.crypto_names import crypto_display_name
 from app.services.portfolio_insights_service import PortfolioInsightsService
-from app.services.tracking_service import TrackingService, watchlist_is_full
+from app.services.tracking_service import (
+    TrackingService,
+    _ReportDateOutOfWindow,
+    watchlist_is_full,
+)
 from app.utils.supabase_errors import is_transient_supabase_error
 from app.services.price_service import price_source
 from app.utils.supabase_async import sb_exec
@@ -541,9 +545,9 @@ async def get_earnings_live(
             )
     try:
         return await TrackingService().get_earnings_live(sym, requested)
-    except ValueError as e:
+    except _ReportDateOutOfWindow as e:
         return make_error_response(ErrorCode.INVALID_INPUT, message=str(e))
     except Exception as e:
-        logger.error("Earnings live for %s failed: %s: %s", sym, type(e).__name__, e,
-                     exc_info=True)
+        logger.error("Earnings live for %s (report_date=%s) failed: %s: %s", sym, requested,
+                     type(e).__name__, e, exc_info=True)
         return error_response_from_exception(e, step="earnings_live")

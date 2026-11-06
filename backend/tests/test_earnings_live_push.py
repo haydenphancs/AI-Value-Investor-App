@@ -12,8 +12,9 @@ kinds — and the daily 16:00 ET sender — claim the SAME key. What is pinned h
   * a lock-screen banner prints an absolute figure only from the company's own release;
   * each report is dispatched once per process (the 60 s loop re-hands every landing);
   * a failed watcher read is the one exception: it told nobody, so the key goes back, the round
-    ends there (one failed read a round, however many reports wait) and the next one retries,
-    live kind first;
+    ends there (one failed read a round, however many reports wait) and a later one retries,
+    live kind first, with that ticker behind every other report, so one whose read keeps failing
+    holds back nobody;
   * neither kind goes out for a report older than yesterday, the daily pass's own window, and
     such a report is handled once, for good;
   * a round sends oldest first, so the cap cannot run a report out of that window;
@@ -712,6 +713,175 @@ async def test_a_report_still_owed_when_its_window_closes_is_let_go(monkeypatch,
     await sender.dispatch_landings([_beat(FRIDAY)], _noon(FRIDAY))
     await sender.dispatch_landings([_beat(FRIDAY)], _noon(MONDAY))
     assert svc.sent == [] and svc.supabase.reads == 1
+
+
+class _TickerDown(_Watchlist):
+    """`watchlist_items`, with every read of the tickers in `down` failing as an edge 520 does."""
+
+    def __init__(self, *down):
+        super().__init__()
+        self.down, self.ticker, self.failed = set(down), None, []
+
+    def eq(self, _column, ticker):
+        self.ticker = ticker
+        return self
+
+    def execute(self):
+        if self.ticker in self.down:
+            self.failed.append(self.ticker)
+            raise RuntimeError("520 from the edge")
+        return super().execute()
+
+
+def _with_tickers_down(monkeypatch, *down):
+    """The real dispatcher, with what each send was keyed on, in order, in `svc.keys`."""
+    svc = _real_dispatcher(monkeypatch)
+    svc.supabase = _TickerDown(*down)
+    svc.keys = []
+
+    async def notify_users(users, *, kind, dedup_key, **_kw):
+        svc.sent.append(kind)
+        svc.keys.append(dedup_key)
+        return len(users)
+
+    svc.notify_users = notify_users
+    return svc
+
+
+def _told(svc) -> List[str]:
+    """The tickers told, in the order each was first told."""
+    return list(dict.fromkeys(key.split(":")[1] for key in svc.keys))
+
+
+@pytest.mark.asyncio
+async def test_a_ticker_whose_read_always_fails_holds_back_no_report_behind_it(
+        monkeypatch, clean_sender):
+    svc = _with_tickers_down(monkeypatch, "AAA")
+    reports = [_big("AAA"), _big("BBB"), _big("CCC")]
+    await sender.dispatch_landings(reports, NOW)
+    assert svc.keys == [] and svc.supabase.failed == ["AAA"]
+    await sender.dispatch_landings(reports, NOW)
+    assert _told(svc) == ["BBB", "CCC"] and svc.sent == BOTH * 2
+    assert svc.supabase.failed == ["AAA", "AAA"], "one failed read a round, behind the rest"
+
+
+@pytest.mark.asyncio
+async def test_a_ticker_down_costs_one_failed_read_a_round_for_as_long_as_it_lasts(
+        monkeypatch, clean_sender):
+    svc = _with_tickers_down(monkeypatch, "AAA")
+    reports = [_big("AAA"), _big("BBB")]
+    for round_number in range(1, 8):
+        await sender.dispatch_landings(reports, NOW)
+        assert len(svc.supabase.failed) == round_number
+    assert _told(svc) == ["BBB"]
+    svc.supabase.down.clear()
+    await sender.dispatch_landings(reports, NOW)
+    assert _told(svc) == ["BBB", "AAA"] and svc.sent == BOTH * 2
+    await sender.dispatch_landings(reports, NOW)
+    assert svc.sent == BOTH * 2, "once delivered, once per process again"
+
+
+@pytest.mark.asyncio
+async def test_two_tickers_down_take_turns_and_neither_starves_the_other(
+        monkeypatch, clean_sender):
+    svc = _with_tickers_down(monkeypatch, "AAA", "BBB")
+    reports = [_big("AAA"), _big("BBB"), _big("CCC")]
+    for _ in range(5):
+        await sender.dispatch_landings(reports, NOW)
+    assert svc.supabase.failed == ["AAA", "BBB", "AAA", "BBB", "AAA"]
+    assert _told(svc) == ["CCC"]
+    svc.supabase.down.discard("BBB")
+    await sender.dispatch_landings(reports, NOW)
+    assert _told(svc) == ["CCC", "BBB"], "the one that went back longest ago reads first"
+    assert svc.supabase.failed[-1] == "AAA" and len(svc.supabase.failed) == 6
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_of_the_result_kind_sends_the_report_back_too(
+        monkeypatch, clean_sender):
+    svc = _real_dispatcher(monkeypatch, failing=[2])
+    reports = [_big("AAA"), _big("BBB")]
+    await sender.dispatch_landings(reports, NOW)
+    assert svc.sent == [KIND_EARNINGS_LIVE]
+    await sender.dispatch_landings(reports, NOW)
+    assert svc.sent == [KIND_EARNINGS_LIVE, KIND_EARNINGS_LIVE, KIND_EARNINGS_RESULT,
+                        KIND_EARNINGS_RESULT], "BBB goes whole, then AAA's result"
+
+
+@pytest.mark.asyncio
+async def test_a_report_dated_twice_keeps_its_first_date_through_a_failed_read(
+        monkeypatch, clean_sender):
+    """The read is the ticker's, so both rows go back together. Sent back alone, the first row
+    would land behind the leftover row, and the one push would carry the later date."""
+    svc = _ledger_dispatcher(monkeypatch)
+    svc.supabase.failing_reads = 1
+    reports = [replace(_big(), day=REPORT - timedelta(days=1)), _big(), _big("ZZZ")]
+    await sender.dispatch_landings(reports, NOW)
+    assert svc.supabase.rows == []
+    await sender.dispatch_landings(reports, NOW)
+    assert svc.supabase.told == {("u1", "earnings_result:INTC:2026-10-28"),
+                                 ("u1", "earnings_result:ZZZ:2026-10-29")}
+
+
+@pytest.mark.asyncio
+async def test_a_read_that_works_puts_the_ticker_back_in_its_place(monkeypatch, clean_sender):
+    """Here the live kind heals and the result kind is still to come, so the report stays open."""
+    svc = _with_tickers_down(monkeypatch, "AAA")
+    filed = _snap("AAA", rev=17.1e9, rev_source=SOURCE_FILING, preliminary=True)
+    await sender.dispatch_landings([filed, _big("BBB")], NOW)
+    svc.supabase.down.clear()
+    await sender.dispatch_landings([filed, _big("BBB")], NOW)
+    assert _told(svc) == ["BBB", "AAA"]
+    svc.keys.clear()
+    await sender.dispatch_landings([_big("AAA"), _big("CCC")], NOW)
+    assert _told(svc) == ["AAA", "CCC"], "date order again, then the symbol"
+
+
+@pytest.mark.asyncio
+async def test_a_report_sent_back_still_goes_out_behind_a_full_cap(monkeypatch, clean_sender):
+    monkeypatch.setattr(sender, "MAX_SENDS_PER_ROUND", 2)
+    svc = _with_tickers_down(monkeypatch, "AAA")
+    reports = [_big(symbol) for symbol in ("AAA", "BBB", "CCC", "DDD")]
+    await sender.dispatch_landings(reports, NOW)
+    svc.supabase.down.clear()
+    for _ in range(4):
+        await sender.dispatch_landings(reports, NOW)
+    assert _told(svc) == ["BBB", "CCC", "DDD", "AAA"]
+
+
+@pytest.mark.asyncio
+async def test_a_cap_that_stops_the_round_leaves_the_back_of_the_queue_unread(
+        monkeypatch, clean_sender):
+    monkeypatch.setattr(sender, "MAX_SENDS_PER_ROUND", 2)
+    svc = _with_tickers_down(monkeypatch, "AAA")
+    reports = [_big("AAA"), _big("BBB"), _big("CCC")]
+    await sender.dispatch_landings(reports, NOW)
+    await sender.dispatch_landings(reports, NOW)
+    assert _told(svc) == ["BBB"] and svc.supabase.failed == ["AAA"]
+
+
+@pytest.mark.asyncio
+async def test_the_order_forgets_a_ticker_with_nothing_left_to_decide(monkeypatch, clean_sender):
+    _with_tickers_down(monkeypatch, "AAA")
+    await sender.dispatch_landings([_big("AAA")], NOW)
+    assert list(sender._went_back) == ["AAA"]
+    await sender.dispatch_landings([], NOW)
+    assert sender._went_back == {}
+
+
+@pytest.mark.asyncio
+async def test_the_order_forgets_a_report_that_leaves_the_window(monkeypatch, clean_sender):
+    _with_tickers_down(monkeypatch, "INTC")
+    await sender.dispatch_landings([_beat(FRIDAY)], _noon(FRIDAY))
+    assert list(sender._went_back) == ["INTC"]
+    await sender.dispatch_landings([_beat(FRIDAY)], _noon(MONDAY))
+    assert sender._went_back == {}
+
+
+def test_reset_forgets_the_order_too():
+    sender._went_back["AAA"] = 1
+    sender.reset()
+    assert sender._went_back == {}
 
 
 @pytest.mark.asyncio

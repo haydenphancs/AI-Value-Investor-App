@@ -3351,6 +3351,33 @@ def test_the_poll_cadence_follows_the_release_windows(hm, expected):
     assert efs.poll_interval_seconds(now) == expected
 
 
+@pytest.mark.parametrize("day,hm,expected", [
+    (date(2026, 11, 6), (16, 5), 60),
+    (date(2026, 11, 6), (21, 59), 300),
+    (date(2026, 11, 7), (0, 0), None),
+    (date(2026, 11, 7), (6, 0), None),
+    (date(2026, 11, 7), (12, 0), None),
+    (date(2026, 11, 7), (16, 5), None),
+    (date(2026, 11, 7), (21, 59), None),
+    (date(2026, 11, 8), (7, 0), None),
+    (date(2026, 11, 8), (16, 5), None),
+    (date(2026, 11, 9), (5, 59), None),
+    (date(2026, 11, 9), (6, 0), 60),
+], ids=["friday_window", "friday_last_minute", "saturday_midnight", "saturday_open",
+        "saturday_noon", "saturday_window", "saturday_last_minute", "sunday_morning",
+        "sunday_window", "monday_before_the_open", "monday_open"])
+def test_the_poll_cadence_stops_for_the_weekend_because_edgar_accepts_nothing(day, hm, expected):
+    assert efs.poll_interval_seconds(datetime(day.year, day.month, day.day, *hm,
+                                              tzinfo=ET)) == expected
+
+
+@pytest.mark.parametrize("day", [date(2026, 11, 26), date(2026, 11, 11)],
+                         ids=["thanksgiving", "veterans_day_the_market_trades"])
+def test_a_weekday_federal_holiday_stays_polled_because_nothing_here_holds_that_calendar(day):
+    now = datetime(day.year, day.month, day.day, 16, 5, tzinfo=ET)
+    assert efs.poll_interval_seconds(now) == 60
+
+
 # ── the watcher ──────────────────────────────────────────────────────────────
 
 
@@ -3425,7 +3452,7 @@ async def test_a_filing_is_found_extracted_once_and_then_never_polled_again(watc
                                    cik_map=_CIKS, sleep=_no_sleep)
     assert again == {} and gem.calls == 1
     assert sec.calls.count("sub:0000050863") == 1, "found → stop polling"
-    assert watcher.figures_for("INTC", REPORT) is found["INTC"]
+    assert watcher._watch[("INTC", REPORT)].figures is found["INTC"]
 
 
 @pytest.mark.asyncio
@@ -3494,6 +3521,31 @@ async def test_the_exhibit_is_read_off_the_event_loop(watcher, monkeypatch):
                                    sec=_SEC(filings={"0000050863": [_8K]}), sleep=_no_sleep)
     assert found["INTC"].revenue == 17.1e9
     assert threads and threading.get_ident() not in threads
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("day", [date(2026, 11, 7), date(2026, 11, 8)],
+                         ids=["saturday", "sunday"])
+async def test_a_weekend_round_asks_sec_nothing_for_a_report_dated_that_day(watcher, day):
+    """FMP can list a report on a weekend date, and its record then sits on the watch all day."""
+    sec = _SEC(filings={"0000050863": [_8K]})
+    gem = _Gemini()
+    noon = datetime(day.year, day.month, day.day, 12, tzinfo=ET).astimezone(timezone.utc)
+    found = await watcher.run_once(noon, ["INTC"], day, sec=sec, gemini=gem, cik_map=_CIKS,
+                                   sleep=_no_sleep)
+    assert found == {} and sec.calls == [] and gem.calls == 0
+    assert watcher._watch == {}, "nothing was read, so nothing is remembered as read"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("at,day,reads", [
+    (datetime(2026, 11, 7, 1, 0, tzinfo=timezone.utc), date(2026, 11, 6), 1),
+    (datetime(2026, 11, 9, 1, 0, tzinfo=timezone.utc), date(2026, 11, 8), 0),
+], ids=["friday_evening_et_is_saturday_in_utc", "sunday_evening_et_is_monday_in_utc"])
+async def test_the_weekend_is_edgars_own_calendar_not_utcs(watcher, at, day, reads):
+    sec = _SEC()
+    await watcher.run_once(at, ["INTC"], day, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
+    assert len(sec.calls) == reads
 
 
 @pytest.mark.asyncio
@@ -3770,9 +3822,27 @@ async def test_a_foreign_filer_sec_lists_rests_and_frees_its_slot(watcher, monke
             await watcher.run_once(_AT_16, ["ASML", "INTC"], REPORT, sec=sec,
                                    cik_map=_FOREIGN_CIKS, sleep=_no_sleep)
     assert sec.calls == [f"sub:{_ASML_CIK}", "sub:0000050863"]
-    assert watcher.figures_for("ASML", REPORT) is None
+    assert watcher._watch[("ASML", REPORT)].figures is None
     rows = [r.getMessage() for r in caplog.records if "result=foreign_filer" in r.getMessage()]
     assert len(rows) == 1 and "ASML" in rows[0] and REPORT.isoformat() in rows[0]
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_filer_rests_through_a_weekend_with_no_read(watcher, clock):
+    """A rest that ends on a weekend has no read to come due for."""
+    friday, saturday = date(2026, 11, 6), date(2026, 11, 7)
+    sec = _SEC(filings={_ASML_CIK: [_6K]})
+    evening = datetime(2026, 11, 6, 21, 59, tzinfo=ET).astimezone(timezone.utc)
+    await watcher.run_once(evening, ["ASML"], friday, sec=sec, cik_map=_FOREIGN_CIKS,
+                           sleep=_no_sleep)
+    assert len(_subs(sec)) == 1 and watcher._watch[("ASML", friday)].foreign
+    clock.at += efs._FOREIGN_FILER_REST_SECONDS + 60
+    noon = datetime(2026, 11, 7, 12, tzinfo=ET).astimezone(timezone.utc)
+    await watcher.run_once(noon, ["ASML"], saturday, sec=sec, cik_map=_FOREIGN_CIKS,
+                           sleep=_no_sleep)
+    await watcher.run_once(noon, ["ASML"], friday, sec=sec, cik_map=_FOREIGN_CIKS,
+                           sleep=_no_sleep)
+    assert len(_subs(sec)) == 1
 
 
 @pytest.mark.asyncio
@@ -4324,7 +4394,7 @@ async def test_a_filing_out_of_attempts_is_never_read_again(watcher, clock):
                                sleep=_no_sleep)
         clock.at += 1000
     assert len(gem.started) == _reads_allowed()
-    assert watcher.figures_for("INTC", REPORT) is None
+    assert watcher._watch[("INTC", REPORT)].figures is None
 
 
 @pytest.mark.asyncio
@@ -5047,6 +5117,17 @@ async def test_a_figure_is_on_the_record_before_the_next_symbol_is_read(live):
     assert shown == [17.1e9]
     assert stats["filings"] == 2
     assert live.snapshot("AAPL", REPORT, _AT_16).revenue.actual == 17.1e9
+
+
+@pytest.mark.asyncio
+async def test_the_tick_keeps_a_weekend_report_on_its_list_and_asks_sec_nothing(live):
+    saturday = date(2026, 11, 7)
+    noon = datetime(2026, 11, 7, 12, tzinfo=ET).astimezone(timezone.utc)
+    live.observe_rows(saturday, [dict(_pending("INTC"), date=saturday.isoformat())], noon)
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    stats = await els.earnings_filing_tick(noon, watched=["INTC"], sec=sec, gemini=_Gemini())
+    assert stats == {"watched": 1, "pending": 1, "filings": 0}, "FMP can still land it"
+    assert sec.calls == []
 
 
 @pytest.mark.asyncio

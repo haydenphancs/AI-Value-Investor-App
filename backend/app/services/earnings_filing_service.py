@@ -37,7 +37,8 @@ here would stop all of them. The watcher therefore:
     next ticker takes a freed slot, and a ticker still waiting on its release keeps its own,
     unless its record shows foreign forms alone (below);
   * polls each one every minute only inside the two release windows (06:00–09:35 and
-    15:55–18:30 ET), every 5 min otherwise, never outside 06:00–22:00 ET;
+    15:55–18:30 ET), every 5 min otherwise, never outside 06:00–22:00 ET and never on a weekend,
+    when EDGAR accepts nothing, so a report FMP dates on one is FMP's alone;
   * spaces its calls (`_CALL_SPACING_SECONDS`) instead of bursting;
   * stops for a symbol once its release is read;
   * rests a filing whose read failed on a widening ladder (`_EXTRACT_RETRY_GAPS`), with no SEC
@@ -118,7 +119,8 @@ _RELEASE_WINDOWS: Tuple[Tuple[Tuple[int, int], Tuple[int, int]], ...] = (
     ((6, 0), (9, 35)),      # before the open (most BMO releases go out 06:00–08:00)
     ((15, 55), (18, 30)),   # after the close (most AMC releases go out 16:00–16:30)
 )
-#: EDGAR accepts filings 06:00–22:00 ET; outside that there is nothing new to find.
+#: EDGAR accepts filings 06:00–22:00 ET on business days; outside that there is nothing new to
+#: find (`poll_interval_seconds`).
 _EDGAR_OPEN = (6, 0)
 _EDGAR_CLOSE = (22, 0)
 _FAST_POLL_SECONDS = 60
@@ -1413,9 +1415,10 @@ def verify_extraction(
 
 def poll_interval_seconds(now_et: datetime) -> Optional[int]:
     """How often one symbol's submissions may be read at `now_et`, or None outside EDGAR's
-    hours (nothing new can be accepted then)."""
+    hours and on a weekend (nothing new can be accepted then). A weekday federal holiday is
+    polled like any weekday, because `market_hours` keeps the market's calendar, not EDGAR's."""
     hm = (now_et.hour, now_et.minute)
-    if not (_EDGAR_OPEN <= hm < _EDGAR_CLOSE):
+    if now_et.weekday() >= 5 or not (_EDGAR_OPEN <= hm < _EDGAR_CLOSE):
         return None
     for start, end in _RELEASE_WINDOWS:
         if start <= hm < end:
@@ -1491,10 +1494,6 @@ class EarningsFilingWatcher:
             self._watch.pop(key, None)
         if len(self._extracted) > 512:
             self._extracted.clear()
-
-    def figures_for(self, symbol: str, day: date) -> Optional[FilingFigures]:
-        w = self._watch.get((symbol.upper(), day))
-        return w.figures if w else None
 
     def _finished(self, key: Tuple[str, date]) -> bool:
         """Has this report's watch ended? It stays on the caller's list until its record is

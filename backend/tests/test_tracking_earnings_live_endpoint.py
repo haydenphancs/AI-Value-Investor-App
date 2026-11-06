@@ -7,6 +7,7 @@ the "none" answer and the wire keys iOS decodes.
 """
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import List
 
@@ -14,6 +15,7 @@ import pytest
 
 import app.services.earnings_live_service as els
 import app.services.tracking_service as ts
+from app.api.v1.endpoints import tracking as endpoint
 from app.services.earnings_filing_service import FilingFigures
 from app.utils.market_hours import ET
 
@@ -195,6 +197,62 @@ def test_bad_input_is_refused_before_any_read(client, path):
     resp = client.get(path)
     assert resp.status_code == 400, resp.text
     assert resp.json()["error_code"] == "INVALID_INPUT"
+
+
+def test_a_date_outside_the_window_says_which_window(client):
+    resp = client.get("/api/v1/tracking/earnings/INTC/live?report_date=2026-12-31")
+    assert (resp.status_code, resp.json()["error_code"]) == (400, "INVALID_INPUT")
+    assert "2026-12-31 is outside 2026-10-28..2026-11-12" in resp.json()["message"]
+
+
+def _logged(caplog) -> List[logging.LogRecord]:
+    return [r for r in caplog.records
+            if r.name == endpoint.logger.name and r.levelno >= logging.ERROR]
+
+
+def test_a_response_shape_bug_is_logged_and_never_answers_bad_input(client, monkeypatch, caplog):
+    """pydantic's `ValidationError` is a `ValueError`, so a catch of `ValueError` around the
+    service would turn this bug into a 400 blaming the caller, with nothing in the logs."""
+    real = ts.live_payload
+
+    def _no_status(*args, **kwargs):
+        payload = real(*args, **kwargs)
+        del payload["status"]
+        return payload
+
+    monkeypatch.setattr(ts, "live_payload", _no_status)
+    with caplog.at_level(logging.ERROR, logger=endpoint.logger.name):
+        resp = client.get("/api/v1/tracking/earnings/INTC/live")
+    assert resp.status_code >= 500 and resp.json()["error_code"] != "INVALID_INPUT"
+    (line,) = _logged(caplog)
+    assert "INTC" in line.getMessage() and "ValidationError" in line.getMessage()
+    assert line.exc_info, "the stack comes with it"
+
+
+def test_any_other_value_error_from_the_service_reaches_the_logged_branch(
+        client, monkeypatch, caplog):
+    async def _bug(self, symbol, requested=None):
+        raise ValueError("not a date problem")
+
+    monkeypatch.setattr(ts.TrackingService, "get_earnings_live", _bug)
+    with caplog.at_level(logging.ERROR, logger=endpoint.logger.name):
+        resp = client.get("/api/v1/tracking/earnings/INTC/live?report_date=2026-10-29")
+    assert resp.status_code >= 500 and resp.json()["error_code"] != "INVALID_INPUT"
+    (line,) = _logged(caplog)
+    assert "INTC" in line.getMessage() and REPORT.isoformat() in line.getMessage()
+
+
+def test_a_failed_calendar_read_warns_with_the_ticker_and_the_day(client, monkeypatch, caplog):
+    async def _down(fmp, today, *, later_days_since=None):
+        raise RuntimeError("FMP 503")
+
+    monkeypatch.setattr(ts, "_cached_earnings_calendar", _down)
+    with caplog.at_level(logging.WARNING, logger=ts.logger.name):
+        client.get("/api/v1/tracking/earnings/INTC/live")
+    lines = [r.getMessage() for r in caplog.records
+             if r.levelno == logging.WARNING and "calendar unavailable" in r.getMessage()]
+    assert lines and all("INTC" in line and REPORT.isoformat() in line
+                         and "RuntimeError: FMP 503" in line for line in lines)
 
 
 def test_the_route_is_sign_in_only():

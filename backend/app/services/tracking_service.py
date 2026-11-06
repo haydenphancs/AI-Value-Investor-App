@@ -94,6 +94,12 @@ logger = logging.getLogger(__name__)
 _CLASSIFIABLE_ASSET_TYPES = {"stock", "etf"}
 
 
+class _ReportDateOutOfWindow(Exception):
+    """`get_earnings_live` was asked about a date the sheet cannot answer for. A class of its
+    own so the endpoint answers 400 for this alone: pydantic's `ValidationError` is a
+    `ValueError`, and catching that would call a response-shape bug bad input, unlogged."""
+
+
 class WatchlistUnavailableError(Exception):
     """The user's watchlist rows could not be READ from Supabase.
 
@@ -1768,7 +1774,7 @@ class TrackingService:
         if requested is not None and not prev <= requested <= today + timedelta(
             days=_EARNINGS_ALERT_DAYS_AHEAD
         ):
-            raise ValueError(
+            raise _ReportDateOutOfWindow(
                 f"report_date {requested.isoformat()} is outside {prev.isoformat()}.."
                 f"{(today + timedelta(days=_EARNINGS_ALERT_DAYS_AHEAD)).isoformat()}"
             )
@@ -1784,8 +1790,8 @@ class TrackingService:
                     self.fmp, today, later_days_since=later_days_since
                 )
             except Exception as e:
-                logger.info("[Tracking] earnings live %s: calendar unavailable (%s: %s)",
-                            sym, type(e).__name__, e)
+                logger.warning("[Tracking] earnings live %s: calendar unavailable on %s (%s: %s)",
+                               sym, today.isoformat(), type(e).__name__, e)
                 calendar = []
             live.observe_rows(today, calendar, now, symbols={sym},
                               stored_at=earnings_day_stored_at(self.fmp, today))

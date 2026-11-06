@@ -155,7 +155,7 @@ STATUSES (no time of day exists on `/stable` rows, so the window is the report d
   * `upcoming` — a later date, or today before 06:00 ET with nothing in yet.
   * `live`     — today, 06:00–22:00 ET, results not complete. LIVE is drawn ONLY then, and
                  it is true: SEC is checked every minute in the release windows and FMP
-                 every 5 min.
+                 every 5 min. On a weekend, when EDGAR accepts nothing, FMP alone.
   * `reported` — complete (EPS, plus revenue when a revenue estimate exists, shown or
                  guard-only), or the live window ended with at least one figure in.
   * `awaiting` — the window ended with nothing in. "Results not in yet" — never "late", a
@@ -200,6 +200,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from functools import partial
 from typing import (
     Any,
     Awaitable,
@@ -601,11 +602,13 @@ def newest_report(snaps: Iterable[LiveSnapshot]) -> Optional[LiveSnapshot]:
 
 
 def iso_utc(when: Optional[datetime]) -> Optional[str]:
+    """`when` as the wire's ISO-8601 instant, in whole seconds: the loop's clock carries six
+    fractional digits, and iOS's `EarningsLiveDates.parse` reads none or exactly three."""
     if when is None:
         return None
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
-    return when.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return when.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def card_fields(snap: Optional[LiveSnapshot], report_day: date) -> Dict[str, Any]:
@@ -1309,35 +1312,41 @@ class EarningsLiveService:
         # same one). Timing out here must not cancel it for everyone else — it finishes in the
         # background and fills its own cache, which the next request (in 20 s) then reads.
         task = asyncio.ensure_future(loader(key[0]))
-        task.add_done_callback(_consume_result)
+        on_late_end = partial(_consume_result, key)
         try:
             response = await asyncio.wait_for(asyncio.shield(task),
                                               timeout=_EXTRAS_DEADLINE_SECONDS)
             extras = history_extras_from(response, report_day)
             if not list(getattr(response, "degraded", None) or []):
                 ttl = _EXTRAS_TTL_SECONDS
+        except asyncio.CancelledError:
+            # The sheet went away, not the build, and only `_consume_result` is left to read it.
+            task.add_done_callback(on_late_end)
+            raise
         except asyncio.TimeoutError:
+            task.add_done_callback(on_late_end)
             ttl = _EXTRAS_SLOW_RETRY_SECONDS
-            logger.info("[earnings-live] history for %s still building after %.0fs — served "
-                        "without it", key[0], _EXTRAS_DEADLINE_SECONDS)
+            logger.warning("[earnings-live] history for %s %s still building after %.0fs — "
+                           "served without it", key[0], report_day.isoformat(),
+                           _EXTRAS_DEADLINE_SECONDS)
         except Exception as e:
-            logger.info("[earnings-live] history for %s unavailable (%s: %s)",
-                        key[0], type(e).__name__, e)
+            logger.warning("[earnings-live] history for %s %s unavailable (%s: %s) — served "
+                           "without it", key[0], report_day.isoformat(), type(e).__name__, e)
         if len(self._extras) >= _EXTRAS_MAX:
             self._extras.clear()
         self._extras[key] = (time.monotonic() + ttl, extras)
         return extras
 
 
-def _consume_result(task: "asyncio.Future") -> None:
-    """Retrieve a background history build's outcome, so a failure after the caller stopped
-    waiting is logged once at INFO instead of as "Task exception was never retrieved"."""
+def _consume_result(key: Tuple[str, date], task: "asyncio.Future") -> None:
+    """Retrieve a history build's outcome once its caller has stopped waiting, so a failure is
+    logged with its report instead of as "Task exception was never retrieved"."""
     if task.cancelled():
         return
     exc = task.exception()
     if exc is not None:
-        logger.info("[earnings-live] background history build failed (%s: %s)",
-                    type(exc).__name__, exc)
+        logger.warning("[earnings-live] background history build for %s %s failed (%s: %s)",
+                       key[0], key[1].isoformat(), type(exc).__name__, exc)
 
 
 _service: Optional[EarningsLiveService] = None
@@ -1592,8 +1601,8 @@ async def earnings_live_tick(
             calendar = await ts._cached_earnings_calendar(fmp, ts._et_today())
         except Exception as e:
             calendar = []
-            logger.info("[earnings-live] tracking calendar unavailable (%s: %s)",
-                        type(e).__name__, e)
+            logger.warning("[earnings-live] tracking calendar unavailable for %s (%s: %s)",
+                           today.isoformat(), type(e).__name__, e)
         stored_at = ts.earnings_day_stored_at(fmp, today)
     service.observe_rows(today, calendar, now, symbols=watched, stored_at=stored_at)
 

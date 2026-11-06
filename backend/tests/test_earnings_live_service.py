@@ -2107,6 +2107,115 @@ async def test_a_slow_history_build_is_not_cancelled_and_is_read_on_the_next_try
     assert svc._extras[key][0] - __import__("time").monotonic() <= els._EXTRAS_SLOW_RETRY_SECONDS
 
 
+def _warned(caplog) -> List[str]:
+    return [r.getMessage() for r in caplog.records
+            if r.name == els.__name__ and r.levelno == logging.WARNING]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_history_load_warns_once_with_the_report(caplog):
+    async def _boom(sym):
+        raise RuntimeError("FMP 503")
+
+    with caplog.at_level(logging.INFO, logger=els.__name__):
+        assert await _svc().history_extras("intc", REPORT, loader=_boom) is None
+        await asyncio.sleep(0)
+    (line,) = _warned(caplog)
+    assert "INTC" in line and REPORT.isoformat() in line and "RuntimeError: FMP 503" in line
+
+
+@pytest.mark.asyncio
+async def test_a_history_answer_that_cannot_be_read_warns_with_the_report(monkeypatch, caplog):
+    async def _loader(sym):
+        return SimpleNamespace(eps_quarters=[], revenue_quarters=[], degraded=[])
+
+    def _bug(response, report_day):
+        raise KeyError("quarter")
+
+    monkeypatch.setattr(els, "history_extras_from", _bug)
+    with caplog.at_level(logging.INFO, logger=els.__name__):
+        assert await _svc().history_extras("INTC", REPORT, loader=_loader) is None
+    (line,) = _warned(caplog)
+    assert "INTC" in line and REPORT.isoformat() in line and "KeyError" in line
+
+
+@pytest.mark.asyncio
+async def test_a_slow_history_build_warns_with_the_report(monkeypatch, caplog):
+    monkeypatch.setattr(els, "_EXTRAS_DEADLINE_SECONDS", 0.01)
+    release = asyncio.Event()
+
+    async def _slow(sym):
+        await release.wait()
+        return SimpleNamespace(eps_quarters=[], revenue_quarters=[], degraded=[])
+
+    with caplog.at_level(logging.INFO, logger=els.__name__):
+        assert await _svc().history_extras("INTC", REPORT, loader=_slow) is None
+        release.set()
+        await asyncio.sleep(0.01)
+    (line,) = _warned(caplog)
+    assert "INTC" in line and REPORT.isoformat() in line and "still building" in line
+
+
+@pytest.mark.asyncio
+async def test_a_history_build_that_fails_after_the_deadline_says_which_report(
+        monkeypatch, caplog):
+    """Nobody is waiting on it by then, so this line is all that failure ever leaves."""
+    monkeypatch.setattr(els, "_EXTRAS_DEADLINE_SECONDS", 0.01)
+    release = asyncio.Event()
+
+    async def _late(sym):
+        await release.wait()
+        raise RuntimeError("FMP 503")
+
+    with caplog.at_level(logging.INFO, logger=els.__name__):
+        assert await _svc().history_extras("INTC", REPORT, loader=_late) is None
+        release.set()
+        await asyncio.sleep(0.01)
+    slow, failed = _warned(caplog)
+    assert "still building" in slow
+    assert "INTC" in failed and REPORT.isoformat() in failed and "RuntimeError: FMP 503" in failed
+
+
+@pytest.mark.asyncio
+async def test_a_history_build_that_outlives_a_cancelled_sheet_still_reports_its_failure(caplog):
+    """A sheet closed mid-request ends the wait, not the shared build."""
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def _late(sym):
+        started.set()
+        await release.wait()
+        raise RuntimeError("FMP 503")
+
+    with caplog.at_level(logging.INFO, logger=els.__name__):
+        sheet = asyncio.ensure_future(_svc().history_extras("INTC", REPORT, loader=_late))
+        await asyncio.wait_for(started.wait(), 2.0)
+        sheet.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await sheet
+        release.set()
+        await asyncio.sleep(0.01)
+    (line,) = _warned(caplog)
+    assert "INTC" in line and REPORT.isoformat() in line and "RuntimeError: FMP 503" in line
+
+
+@pytest.mark.asyncio
+async def test_a_failed_memo_read_on_the_tick_warns_with_the_day(monkeypatch, caplog):
+    async def _down(fmp, today, *, later_days_since=None):
+        raise RuntimeError("FMP 503")
+
+    async def _dispatch(snaps, now):
+        return None
+
+    monkeypatch.setattr(ts, "_et_today", lambda: REPORT)
+    monkeypatch.setattr(ts, "_cached_earnings_calendar", _down)
+    _svc()
+    with caplog.at_level(logging.INFO, logger=els.__name__):
+        await els.earnings_live_tick(_et(REPORT, 7), fmp=_FMP({}), watched=["INTC"],
+                                     dispatch=_dispatch)
+    (line,) = [m for m in _warned(caplog) if "calendar unavailable" in m]
+    assert REPORT.isoformat() in line and "RuntimeError: FMP 503" in line
+
+
 # ── the live days ────────────────────────────────────────────────────────────
 
 SATURDAY, SUNDAY, MONDAY, TUESDAY = (date(2026, 11, 7), date(2026, 11, 8), date(2026, 11, 9),
@@ -3272,7 +3381,7 @@ async def test_today_s_report_still_leads_the_undated_sheet(monkeypatch):
 @pytest.mark.asyncio
 async def test_the_sheet_refuses_a_date_before_the_window(monkeypatch):
     svc_obj = _sheet_on(monkeypatch, MONDAY)
-    with pytest.raises(ValueError, match="2026-11-05"):
+    with pytest.raises(ts._ReportDateOutOfWindow, match="2026-11-05"):
         await svc_obj.get_earnings_live("INTC", FRIDAY - timedelta(days=1))
 
 

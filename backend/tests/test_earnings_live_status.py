@@ -7,6 +7,7 @@ they are pinned directly, with hand-built records — no clock, no network.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -270,6 +271,40 @@ def test_card_fields_carry_the_figures_and_the_preliminary_flag():
     assert fields["results_preliminary"] is True
     assert fields["results_checked_at"] == "2026-10-29T20:05:00Z"
     assert fields["revenue_surprise_pct"] == pytest.approx(3.01, abs=0.01)
+
+
+#: What `EarningsLiveDates.parse` reads: `ISO8601DateFormatter` takes whole seconds or exactly
+#: three fractional digits, so Python's six would leave the sheet with no "updated" line.
+_WHOLE_SECONDS = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+
+
+@pytest.mark.parametrize("when,expected", [
+    (datetime(2026, 10, 29, 20, 5, 7, tzinfo=timezone.utc), "2026-10-29T20:05:07Z"),
+    (datetime(2026, 10, 29, 20, 5, 7, 123456, tzinfo=timezone.utc), "2026-10-29T20:05:07Z"),
+    (datetime(2026, 10, 29, 20, 5, 7, 1, tzinfo=timezone.utc), "2026-10-29T20:05:07Z"),
+    (datetime(2026, 10, 29, 23, 59, 59, 999999, tzinfo=timezone.utc), "2026-10-29T23:59:59Z"),
+    (datetime(2026, 10, 29, 20, 5, 7, 500000), "2026-10-29T20:05:07Z"),
+    (datetime(2026, 10, 29, 16, 5, 7, 250000, tzinfo=ET), "2026-10-29T20:05:07Z"),
+], ids=["whole_second", "microseconds", "one_microsecond", "never_rounds_into_the_next_day",
+        "naive_reads_as_utc", "another_zone"])
+def test_a_stamp_reaches_the_wire_in_whole_seconds(when, expected):
+    assert els.iso_utc(when) == expected
+
+
+def test_no_stamp_stays_no_stamp():
+    assert els.iso_utc(None) is None
+
+
+def test_the_card_and_the_sheet_carry_the_loops_own_clock_in_whole_seconds():
+    """`checked_at` comes from `datetime.now`, so it almost always has microseconds."""
+    at = datetime(2026, 10, 29, 20, 5, 7, 654321, tzinfo=timezone.utc)
+    rec = _rec(filing=_filing(revenue=17.1e9, accepted_at=at), checked_at=at)
+    snap = els.snapshot_of(rec, REPORT, _et(REPORT, 16, 5))
+    payload = els.live_payload("INTC", REPORT, snap, company_name=None, eps_estimate=None,
+                               revenue_estimate=None, extras=None, today=REPORT)
+    for stamp in (els.card_fields(snap, REPORT)["results_checked_at"], payload["checked_at"],
+                  payload["filing"]["accepted_at"]):
+        assert _WHOLE_SECONDS.fullmatch(stamp), stamp
 
 
 def test_the_preliminary_flag_is_absent_until_something_landed():

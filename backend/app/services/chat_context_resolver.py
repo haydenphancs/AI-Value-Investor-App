@@ -854,7 +854,14 @@ def _moat_figures(report: Dict[str, Any]) -> List[_FigSpec]:
         if tag:
             text += f" ({tag})"
         items.append(text)
-    return [("Moat pillars (score out of 10): ", items, _FIG_MOAT_CAP)]
+    # Every pillar an AI estimate: the card reads "Moat Not Measured", so chat must not grade the
+    # moat from them. A report from before the tags, or with a retired tier, reads as it did.
+    unmeasured = all(src == "ai_legacy" for *_rest, src in rows)
+    head = (
+        "Moat not measured, never grade it. Moat pillars (score out of 10): "
+        if unmeasured else "Moat pillars (score out of 10): "
+    )
+    return [(head, items, _FIG_MOAT_CAP)]
 
 
 def _fig_year(value: Any) -> Optional[int]:

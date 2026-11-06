@@ -679,6 +679,11 @@ def build_context(
         + [0]
     )
     radar_max = 10.0 if 0 < dim_max <= 10 else 100.0
+    # Every pillar an estimate: the app reads "Moat Not Measured", so the PDF prints no peer
+    # figure and no "Industry avg" for what is the AI's guess or the 5.0 placeholder. A company
+    # with one measured pillar keeps both, estimates included, as every report does for
+    # Switching Costs. A report from before the tags, or with a retired tier, keeps its drawing.
+    moat_not_measured = bool(dims) and all(d.get("source") == "ai_legacy" for d in dims)
 
     # Revenue engine — derive % of total + YoY growth per segment.
     engine = data.get("revenue_engine") or {}
@@ -877,7 +882,10 @@ def build_context(
         "shares_trend": pdf_charts.axed_line(ca_shares_items, width=300, height=94, fmt="num"),
         "short_interest": pdf_charts.axed_bars(
             si_bar_items, colors=["#D97706"], width=320, height=104, fmt="num"),
-        "radar": pdf_charts.moat_radar(dims, size=210, max_score=radar_max),
+        "radar": pdf_charts.moat_radar(
+            [{**d, "peer_score": None} for d in dims] if moat_not_measured else dims,
+            size=210, max_score=radar_max,
+        ),
         "institution_flow": pdf_charts.diverging_bars(inst_flow_items, width=330, height=118),
     }
 
@@ -1004,6 +1012,7 @@ def build_context(
             "durability_note": moat.get("durability_note") or "",
             "competitive_insight": moat.get("competitive_insight") or "",
             "radar_max": radar_max,
+            "not_measured": moat_not_measured,
         },
         "macro": {
             "overall_threat_level": (data.get("macro_data") or {}).get("overall_threat_level") or "",

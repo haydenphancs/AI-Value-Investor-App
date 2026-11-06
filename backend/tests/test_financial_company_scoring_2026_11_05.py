@@ -553,15 +553,6 @@ def test_the_operating_path_keeps_its_job():
     assert insight.fallback_value == np_.FALLBACK["overall_assessment_text"]
 
 
-def test_the_moat_note_names_the_real_peers():
-    bank = _out()
-    assert C._moat_peer_note(bank) == "Moat compared with all financial services companies."
-    reit = _out("REIT - Mortgage")
-    reit.profile["sector"] = "Real Estate"
-    assert C._moat_peer_note(reit) == "Moat compared with all real estate companies."
-    assert C._moat_peer_note(_out("Software - Infrastructure")) == ""
-
-
 # ── the versions ─────────────────────────────────────────────────────────────
 
 def test_the_cards_cannot_serve_old_rows():
@@ -777,15 +768,6 @@ def test_a_dcf_upside_does_not_score_a_banks_valuation_on_the_real_path():
     out.computed.update(fair_value=200.0, upside_pct=50.0)
     C.TickerReportDataCollector()._build_sections(out)
     assert out.valuation_vital["score"]["value"] is None
-
-
-def test_the_moat_note_reaches_the_report():
-    import test_ticker_report_schema_parity as parity
-
-    out = parity._make_collected_data()
-    out.profile.update(industry=BANK, sector="Financial Services")
-    report = C.TickerReportDataCollector().assemble_report(out, parity.stage_a_fallback())
-    assert "Moat compared with all financial services companies." in report["moat_competition"]["_coverage_note"]
 
 
 def test_both_overview_fallbacks_are_wired():

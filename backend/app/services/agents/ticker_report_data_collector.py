@@ -3404,6 +3404,7 @@ class TickerReportDataCollector:
         # (A Gemini grounded-research tier sat between the two until
         # 2026-10-02, when Google Search grounding was retired for its terms.)
         from app.services.moat_scoring_service import (
+            own_industry_peers,
             score_moat_dimensions,
             PILLAR_ORDER,
             SCORER_VERSION as MOAT_SCORER_VERSION,
@@ -3425,6 +3426,7 @@ class TickerReportDataCollector:
                 industry_tam=out.industry_tam,
                 transcript=out.transcript or None,
                 ip_intel=out.ip_intel,
+                ticker=out.ticker,
             )
         except Exception as exc:
             # A bug or a data shape, not an outage (a failed sector-median read is caught
@@ -3487,7 +3489,16 @@ class TickerReportDataCollector:
         # cache via `_MOAT_BENCHMARKS_DEGRADED` (the next caller re-reads). A malformed
         # industry name is skipped, never read, so a vendor quirk cannot keep a ticker out
         # of the shared caches for good.
+        # A financial company read against its own industry (`own_industry_peers`) has no peer
+        # for a pillar it was not measured on: the row it would take is built from other
+        # companies on another scale (Brand Power of AmEx would read beside Visa's, of Goldman
+        # beside bitcoin miners'), or is left over from before its industry fell under 10. So
+        # that pillar keeps the AI's own peer, tagged as such, and neither the Insight nor chat
+        # calls it an industry peer. Every other company's overlay stands.
         focal_industry = (out.profile or {}).get("industry")
+        own_industry = own_industry_peers(
+            (out.profile or {}).get("sector"), focal_industry, out.ticker,
+        )
         if isinstance(focal_industry, str) and focal_industry.strip():
             peer_avgs: Any = {}
             try:
@@ -3515,7 +3526,7 @@ class TickerReportDataCollector:
             for dim in merged_dims:
                 name = dim.get("name")
                 ind_avg = peer_avgs.get(name) if isinstance(name, str) else None
-                if ind_avg is not None:
+                if ind_avg is not None and (not own_industry or dim.get("source") == "deterministic"):
                     dim["peer_score"] = ind_avg
                     dim["peer_source"] = MOAT_PEER_SOURCE_INDUSTRY
         moat_dims = _apply_peer_score_baseline(merged_dims)
@@ -3629,10 +3640,13 @@ class TickerReportDataCollector:
             "competitive_insight": (
                 ai_moat.get("competitive_insight") or "Data unavailable for this ticker."
             ),
-            "_coverage_note": " ".join(filter(None, (
-                _build_moat_coverage_note(moat_dims, focal_industry),
-                _moat_peer_note(out),
-            ))),
+            # For a company under `own_industry_peers` an estimate is left out: its fallback
+            # peer says nothing about the industry, so "flat" would be false of it.
+            "_coverage_note": _build_moat_coverage_note(
+                [d for d in moat_dims if d.get("source") == "deterministic"]
+                if own_industry else moat_dims,
+                focal_industry,
+            ),
             # The ORDER MARKER every "most direct first" claim depends on (chat,
             # iOS caption, Stage-B prompts, PDF). Always "threat" / "industry_peers"
             # now: the one directness-ranked list ("direct" / "research") came from
@@ -11016,16 +11030,6 @@ _EXCLUDED_CONTEXT_LINE = (
 _STYLE_SIGNALS_EXCLUDED = (
     "debt_equity", "fcf", "gross_margin", "gross_margin_prev", "roic", "mos_pct",
 )
-
-
-def _moat_peer_note(out: Any) -> str:
-    """Whom a financial company's moat is compared with, "" for every other company. Goes with
-    the own-industry moat. Named from the profile: a mortgage REIT's peers are real estate."""
-    profile = getattr(out, "profile", None)
-    sector = profile.get("sector") if isinstance(profile, dict) else None
-    if not _score_excluded(out) or not isinstance(sector, str) or not sector.strip():
-        return ""
-    return f"Moat compared with all {sector.strip().lower()} companies."
 
 
 def _score_excluded(out: Any) -> frozenset:

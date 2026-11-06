@@ -898,9 +898,9 @@ def _moat_durability_note_prompt(
     # tone when an estimate is the top pillar.
     if not measured:
         strength_hint = (
-            "NOT MEASURED — no moat pillar could be scored from this company's filings. "
-            "Do not call the moat wide, narrow or absent; say its defenses are not yet "
-            "visible in the numbers."
+            "NOT MEASURED — no moat pillar was scored for this company. Do not call the moat "
+            "wide, narrow or absent, do not judge how durable it is, and do not say why it was "
+            "not measured."
         )
     elif max_score >= MOAT_RATING_WIDE:
         strength_hint = (
@@ -958,22 +958,48 @@ def _moat_durability_note_prompt(
         for d in dims
     ) or "none"
 
-    return f"""Write the moat & competitive read for this company — how durable its moat is AND how it competes with its rivals.
+    if measured:
+        task = (
+            "Write the moat & competitive read for this company — how durable its moat is AND "
+            "how it competes with its rivals."
+        )
+        peer_lines = (
+            f"WHERE IT OUT-DEFENDS PEERS (focal vs industry peer avg): {edge_str}\n"
+            f"WHERE IT TRAILS PEERS: {gap_str}\n"
+        )
+        sentences = (
+            "Sentence 1 — judge how durable the moat is (its staying power or the specific "
+            "threat to it); weave the moat-strength tone naturally, don't just restate the "
+            "score.\n"
+            "Sentence 2-3 — how it competes with the named rivals: where its moat out-defends "
+            f"them (use the edge above) and which competitor is the biggest threat ({threat_hint}). "
+            'Name actual competitors, not "peers" in the abstract.'
+        )
+    else:
+        # No measured pillar: nothing above can back an edge, a gap or a durability call, and
+        # "not yet visible in the numbers" is false of a company measured against no peer.
+        task = "Write the competitive read for this company — how it competes with its rivals."
+        peer_lines = ""
+        sentences = (
+            f"Sentences 1-3 — how it competes with the named rivals and which competitor is the "
+            f'biggest threat ({threat_hint}). Name actual competitors, not "peers" in the abstract. '
+            "If none are listed, say only that the moat was not measured and name no company. "
+            "Say nothing else about the moat, whatever a lens above asks."
+        )
+
+    return f"""{task}
 
 TOP MOAT SOURCE: {top_line}
 ALL DIMENSIONS: {all_dims}
 Never present an "AI estimate, not measured" dimension as a strength, an edge or a weakness.
 MOAT STRENGTH: {strength_hint}
-WHERE IT OUT-DEFENDS PEERS (focal vs industry peer avg): {edge_str}
-WHERE IT TRAILS PEERS: {gap_str}
-{competitor_block}
+{peer_lines}{competitor_block}
 
 {_style_block(persona)}
 {_lens_directive(persona, want_metrics=True, excluded=bool(_excluded_rows_of(shell)))}
 LENGTH: Write 2-3 sentences, total under 55 words.
 
-Sentence 1 — judge how durable the moat is (its staying power or the specific threat to it); weave the moat-strength tone naturally, don't just restate the score.
-Sentence 2-3 — how it competes with the named rivals: where its moat out-defends them (use the edge above) and which competitor is the biggest threat ({threat_hint}). Name actual competitors, not "peers" in the abstract."""
+{sentences}"""
 
 
 def _moat_competitive_insight_prompt(
@@ -981,7 +1007,13 @@ def _moat_competitive_insight_prompt(
 ) -> str:
     moat = shell.get("moat_competition", {})
     competitor_block = _competitor_prompt_block(moat)
-    return f"""Summarize the competitive landscape for this stock in one sentence.
+    # The PDF prints this field and never the durability note, so it needs the same guard.
+    dims = [d for d in (moat.get("dimensions") or []) if isinstance(d, dict)]
+    not_measured = "" if _measured_moat_dims(dims) else (
+        "The moat was not measured: do not call it wide, narrow, absent or durable, whatever "
+        "a lens below asks.\n\n"
+    )
+    return f"""{not_measured}Summarize the competitive landscape for this stock in one sentence.
 
 {competitor_block}
 
@@ -2456,8 +2488,7 @@ If the data doesn't show a clear pattern, write the literal word: NULL"""
 
 def _financial_score_note(shell: Dict[str, Any]) -> str:
     """What these cards leave out for a financial company, "" for every other company. It names
-    the rows: revenue growth still counts, and the moat's Brand pillar still reads gross margin
-    until the own-industry moat ships, so "these cards" is the true scope."""
+    the rows: revenue growth still counts, so "these cards" is the true scope."""
     if not _excluded_rows_of(shell):
         return ""
     note = (

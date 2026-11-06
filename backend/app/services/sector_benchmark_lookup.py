@@ -217,8 +217,8 @@ def fs_industry_only(industry: Optional[str], sector: Optional[str]) -> bool:
     2026-10-20, `financials_metric_gate.FS_INDUSTRY_PEER_FLOOR`): its own INDUSTRY median
     from FS_INDUSTRY_PEER_FLOOR (10) companies, else NO peer — never the Financial Services
     SECTOR median. Only when an industry is named: a direct sector read (``industry=""``:
-    competitor scoring, the moat scorer's sector medians, an FS company FMP gives no
-    industry) is unchanged."""
+    competitor scoring, an FS company FMP gives no industry) is unchanged. The moat scorer
+    follows this rule too (`moat_scoring_service.own_industry_peers`, 2026-11-05)."""
     return bool(industry) and is_financial_services_sector(sector)
 
 
@@ -607,6 +607,26 @@ class SectorBenchmarkLookup:
             _log("Sector benchmark with_n lookup failed for %s/%s: %s: %s",
                  sector, period_type, type(e).__name__, e)
             return BenchmarkLookupFailed({m: {} for m in metrics})
+
+    def get_industry_benchmarks_with_n(
+        self,
+        industry: str,
+        metrics: List[str],
+        period_type: str,
+    ) -> Dict[str, Dict[str, Dict[str, float]]]:
+        """`get_sector_benchmarks_with_n` for ONE industry. Thin cells are kept, so a caller
+        following the Financial Services rule can find the industry's newest year BEFORE it
+        judges that year's sample size: a thin newest year is no peer, never an older year.
+        Degrades to `BenchmarkLookupFailed` on a DB error, like `_industry_layer`."""
+        layer = self._industry_layer(industry, metrics, period_type)
+        result: Dict[str, Dict[str, Dict[str, float]]] = {
+            metric: {
+                label: {"median": cell.get("value"), "n": cell.get("n") or 0}
+                for label, cell in (layer.get(metric) or {}).items()
+            }
+            for metric in metrics
+        }
+        return BenchmarkLookupFailed(result) if lookup_failed(layer) else result
 
     # ── Phase 2: industry-first lookup with per-cell sector fallback ─────
 

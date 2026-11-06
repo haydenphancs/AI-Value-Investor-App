@@ -18,6 +18,8 @@ kinds — and the daily 16:00 ET sender — claim the SAME key. What is pinned h
     such a report is handled once, for good;
   * the daily pass keeps the EPS the live path keeps, so a row the fold reads as unfilled never
     goes out at 16:00 ET either;
+  * a row of zeros the filing or a consensus has shown to be unfilled sends no false miss, and a
+    report left with nothing on show sends nothing at all;
   * a round sends oldest first, so the cap cannot run a report out of that window;
   * the round cap's warning counts the reports still owed a push, nothing else.
 The dispatcher is a recorder, or the real one over a fake table where a failed read is the
@@ -248,6 +250,63 @@ def test_a_zero_revenue_past_a_material_consensus_is_never_announced_as_a_miss()
     rec = els._Record("JOBY", REPORT, eps_estimate=-0.2, revenue_estimate=30e6,
                       revenue_guard_estimate=16.6e9, fmp_eps=-0.2, fmp_revenue=0.0)
     assert _revenue_phrase(rec) == "Revenue being confirmed"
+
+
+def test_a_figure_far_off_a_consensus_that_lost_a_digit_is_announced_with_no_percentage():
+    """A x10 slip stays under the 1,000% the copy hides, so it used to read "beat by 911%"."""
+    rec = els._Record("TINY", REPORT, eps_estimate=0.41, revenue_estimate=95e6, fmp_eps=0.44,
+                      fmp_revenue=961e6, filing=_filed_revenue(960e6))
+    assert _revenue_phrase(rec) == "Revenue reported"
+    rec = els._Record("TINY", REPORT, eps_estimate=0.41, revenue_estimate=95e6, fmp_eps=0.44,
+                      filing=_filed_revenue(960e6))
+    assert "beat" in _revenue_phrase(rec), "one source alone keeps its percentage"
+
+
+def test_a_filing_past_fmps_dropped_digit_is_announced_as_the_companys_figure():
+    rec = els._Record("TINY", REPORT, eps_estimate=0.41, revenue_estimate=50e6, fmp_eps=0.44,
+                      fmp_revenue=5.2e6, filing=_filed_revenue(52e6))
+    assert _revenue_phrase(rec) == "Revenue $52.0M (beat consensus by 4%)"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("zeros_first", [False, True], ids=["the_filing_first", "the_row_first"])
+async def test_a_row_of_zeros_beside_a_filing_sends_no_false_miss(dispatch, monkeypatch,
+                                                                  zeros_first):
+    """With the default switches this was the only push the report sent: "EPS missed consensus
+    by 100%", over the $0.44 the company printed."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+
+    def _row(**kw):
+        return {"symbol": "JOBY", "date": REPORT.isoformat(), "epsEstimated": 0.41,
+                "revenueEstimated": 30e6, **kw}
+
+    filing = FilingFigures(accession="0001628280-26-000128", accepted_at=None, url=None,
+                           revenue=33e6, eps_adjusted=0.44)
+    zeros = _row(epsActual=0, revenueActual=0)
+    live = EarningsLiveService()
+    live.observe_rows(REPORT, [_row()], datetime(2026, 10, 29, 13, 0, tzinfo=timezone.utc))
+    if zeros_first:
+        live.observe_rows(REPORT, [zeros], NOW)
+    live.absorb_filing("JOBY", REPORT, filing, NOW)
+    live.observe_rows(REPORT, [zeros], NOW)
+    (snap,) = live.landed_snapshots(NOW)
+    assert (snap.eps.actual, snap.eps.source) == (0.44, SOURCE_FILING)
+    await sender.dispatch_landings([snap], NOW)
+    assert dispatch.sent == [], "the result push waits for FMP's own figure"
+
+
+@pytest.mark.asyncio
+async def test_a_stored_zero_taken_off_leaves_no_push_with_nothing_to_report(dispatch):
+    def _row(**kw):
+        return {"symbol": "JOBY", "date": REPORT.isoformat(), **kw}
+
+    live = EarningsLiveService()
+    live.observe_rows(REPORT, [_row(revenueEstimated=30e6)],
+                      datetime(2026, 10, 29, 13, 0, tzinfo=timezone.utc))
+    live.observe_rows(REPORT, [_row(revenueEstimated=30e6, revenueActual=0)], NOW)
+    live.observe_rows(REPORT, [_row(revenueEstimated=16.6e9)], NOW)
+    await sender.dispatch_landings(live.landed_snapshots(NOW), NOW)
+    assert dispatch.sent == []
 
 
 # ── the daily pass reads an EPS of zero as the live path does ────────────────

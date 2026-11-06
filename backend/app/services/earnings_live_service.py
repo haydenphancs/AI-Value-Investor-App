@@ -13,8 +13,9 @@ TWO SOURCES, ONE RECORD PER (symbol, report date).
     near-live at best.
   * The company's own 8-K Item 2.02 press release (`earnings_filing_service`): minutes after
     the release, every figure a verbatim quote. PRELIMINARY until FMP has the same metric.
-  A record is STICKY: a figure, once verified, never goes back to "not out yet", and FMP's
-  figure replaces the filing's the moment FMP has one that passes the guards.
+  A record is STICKY: a figure, once verified, never goes back to "not out yet" (only an FMP
+  zero does, GUARDS below), and FMP's figure replaces the filing's the moment FMP has one that
+  passes the guards.
   Between two FMP answers the NEWEST wins. The Tracking memo can be 30 min behind this
   module's own fetch, so a memo row older than the record's last own fetch is skipped whole at
   all three folds (the tick, the card, the sheet): no reader can put an older answer back over
@@ -162,10 +163,18 @@ GUARDS, each a defect found elsewhere in this repo:
     agrees within 2% (FMP's dropped-digit revenue, `earnings_service._reconcile_revenue`). Each
     source is judged in turn, FMP first, so a bad FMP figure never hides a sound filing figure,
     and revenue is held as "checking" only when a figure exists and none passes;
-  * a figure that passes only on that agreement shows with no surprise: two sources prove the
-    actual, not the consensus it fell outside, which may be what dropped a digit ("+918%");
-  * a tiny revenue estimate on show that a material consensus has overtaken judges nothing: the
-    material one guards the figure, and it shows with no surprise (`_estimate_overtaken`);
+  * with nothing material to judge them, an FMP revenue more than 5x off the filing's gives way
+    to it, unless a consensus stands behind FMP's figure and none behind the filing's
+    (`_filing_outranks_fmp`, the same ratio as `_reconcile_revenue`). A dropped digit always
+    lands nearer a tiny consensus, so only a consensus inside the band counts;
+  * a figure with a second source beside it and outside 0.5-2x of the estimate on show carries
+    no surprise, at any size of estimate: two sources prove the actual, not the consensus it fell
+    outside, which may be what dropped a digit ("+918%"). A lone figure keeps its percentage:
+    pre-revenue names land far from a tiny consensus all the time;
+  * a tiny revenue estimate on show that a material consensus has overtaken judges nothing and
+    is not printed: the material one guards the figure, and it shows with no surprise. A twin's
+    larger consensus overtakes nothing beside a figure inside its own estimate's band, nor when
+    the two are one consensus either side of the floor (`_estimate_overtaken`);
   * a GAAP-only EPS is shown labelled GAAP with no beat/miss — the consensus is adjusted (the
     owner's 2026-09-27 caution, `news_insight_service._earnings_line`);
   * a filing's figure is only as exact as its print: "$17.1 billion" is anything from $17.05B
@@ -174,12 +183,16 @@ GUARDS, each a defect found elsewhere in this repo:
     until FMP's exact figure replaces it;
   * no surprise percentage against an estimate under $0.01 (`earnings_sender.MIN_ABS_ESTIMATE`);
   * a zero revenue from FMP is stored only against a consensus under $100M, with no figure
-    held (a pre-revenue name can report nothing): beside a material consensus, or none, it
-    is an unfilled field, never a -100% miss and never a landing. It shows only while that
-    holds: a consensus that turns material, or a positive filing figure, takes it off;
+    held, the filing's included (a pre-revenue name can report nothing): beside a material
+    consensus, or none, it is an unfilled field, never a -100% miss and never a landing. It
+    shows only while that holds: a consensus that turns material, or a positive filing figure,
+    takes it off, so a shown zero stays on the SEC watch until its filing has been read
+    (`pending_symbols`), and a report left with nothing on show leaves `landed_snapshots`;
   * a row with an EPS of exactly 0 beside a zero or negative revenue is unfilled as a whole,
-    unless that revenue stands and no EPS is held. Beside a real revenue, or with no revenue
-    on the row, 0 is a real breakeven. The daily push pass asks the same rule
+    unless that revenue stands and no EPS is held, the filing's included. Such a row stored
+    earlier as a real report gives way as a whole to the same later evidence, or to any EPS the
+    filing prints, so both orders end alike (`_fmp_zeros_unfilled`). Beside a real revenue, or
+    with no revenue on the row, 0 is a real breakeven. The daily push pass asks the same rule
     (`eps_is_unfilled`).
 """
 
@@ -253,6 +266,10 @@ _EPS_ROUNDING_SLACK = 1e-9
 _REVENUE_GUARD_MIN_ESTIMATE = 100e6
 _REVENUE_PLAUSIBLE = (0.5, 2.0)
 _SOURCES_AGREE = 0.02
+#: FMP/filing revenue outside this is a digit or unit glitch, not a difference of basis: the
+#: ratio `earnings_service._reconcile_revenue` applies, a copy because that module loads the FMP
+#: client and the database, and `test_the_far_apart_ratio_is_the_financials_tabs_own` pins it.
+_FEED_FILED_RATIO = (0.2, 5.0)
 #: A filing accepted longer than this before its record was first seen was already out at
 #: first sight, like an FMP row first seen reported. Long enough to cover a deploy gap, so a
 #: deploy inside the release window keeps the landing it can still announce.
@@ -291,6 +308,8 @@ BASIS_GAAP = "gaap"
 class LiveMetric:
     """One metric of one report, as shown. `actual` is None while pending OR held."""
 
+    # The consensus to print: None when there is none, or when the code has ruled it out of date
+    # (`_estimate_overtaken`).
     estimate: Optional[float]
     actual: Optional[float] = None
     surprise_pct: Optional[float] = None
@@ -331,7 +350,8 @@ class _Record:
     # The fold runs on every tick and feed build: a refusal is logged once per record.
     revenue_refusal_logged: bool = False
     eps_refusal_logged: bool = False
-    # What the guards last did to this revenue, as logged: a change is logged once.
+    # What the guards last did to this revenue, None after a clean answer: each change is logged
+    # once (`_log_guarded_revenue`).
     revenue_guard_note: Optional[str] = None
 
 
@@ -402,13 +422,15 @@ def eps_metric(rec: _Record) -> LiveMetric:
     """FMP first (adjusted, the consensus's basis), then the filing's adjusted EPS, then the
     filing's GAAP EPS labelled GAAP and never coloured. With no shown estimate the guard reads
     the guard-only one; the surprise and the metric's `estimate` never do. A filing figure whose
-    rounding covers the estimate carries no verdict, as in `revenue_metric`."""
+    rounding covers the estimate carries no verdict, as in `revenue_metric`. FMP's 0 from a row
+    of zeros that turned out unfilled reads as if it never came (`_fmp_zeros_unfilled`), so the
+    filing's figure shows and the result push waits."""
     est = rec.eps_estimate
     guard_est = est if est is not None else rec.eps_guard_estimate
     filing = rec.filing
     gaap = filing.eps_gaap if filing is not None else None
     candidates: List[Tuple[float, str, str]] = []
-    if rec.fmp_eps is not None:
+    if rec.fmp_eps is not None and not _fmp_zeros_unfilled(rec):
         candidates.append((rec.fmp_eps, SOURCE_FMP, BASIS_ADJUSTED))
     if filing is not None and filing.eps_adjusted is not None:
         candidates.append((filing.eps_adjusted, SOURCE_FILING, BASIS_ADJUSTED))
@@ -429,13 +451,16 @@ def eps_metric(rec: _Record) -> LiveMetric:
     return LiveMetric(est)
 
 
+def _near(value: float, estimate: float) -> bool:
+    """Is `value` inside the 0.5-2x band of `estimate`, whatever its size?"""
+    lo, hi = _REVENUE_PLAUSIBLE
+    return estimate > 0 and lo <= value / estimate <= hi
+
+
 def _revenue_in_band(value: float, estimate: Optional[float]) -> bool:
     """Is `value` plausible against `estimate`? With no material consensus nothing can say it
     is not: pre-revenue names land far from a tiny one all the time."""
-    if estimate is None or estimate < _REVENUE_GUARD_MIN_ESTIMATE:
-        return True
-    lo, hi = _REVENUE_PLAUSIBLE
-    return lo <= value / estimate <= hi
+    return estimate is None or estimate < _REVENUE_GUARD_MIN_ESTIMATE or _near(value, estimate)
 
 
 def _revenue_passes(value: float, estimate: Optional[float], other: Optional[float]) -> bool:
@@ -451,47 +476,110 @@ def _revenue_passes(value: float, estimate: Optional[float], other: Optional[flo
     return other is not None and abs(other - value) <= _SOURCES_AGREE * value
 
 
-def _estimate_overtaken(rec: _Record) -> bool:
-    """Is the revenue estimate on show under the guard's floor while the consensus the record
-    last read is not? Then it is out of date, or another row's glitch. An estimate moves only
-    with its own figure, so the material consensus sits in the guard-only field: after a zero
-    was stored against the tiny one, or beside a figure from a row that states a tiny one."""
+def _estimate_overtaken(rec: _Record, value: float) -> bool:
+    """Has a material consensus overtaken the tiny estimate on show, for this figure? An estimate
+    moves only with its own figure, so that consensus sits in the guard-only field: after a zero
+    was stored against the tiny one, or beside a figure from a row that states a tiny one.
+
+    Two things keep the estimate. The two consensus figures inside each other's band are one
+    consensus either side of the floor. A figure inside the estimate's band is borne out by it,
+    so the larger figure is a stale twin, and it must not hold a real small-company result."""
     est, stated = rec.revenue_estimate, rec.revenue_guard_estimate
-    return est is not None and stated is not None and est < _REVENUE_GUARD_MIN_ESTIMATE <= stated
+    return (est is not None and stated is not None and est < _REVENUE_GUARD_MIN_ESTIMATE <= stated
+            and not _near(stated, est) and not _near(value, est))
+
+
+def _guard_estimate(rec: _Record, value: float) -> Optional[float]:
+    """The consensus that judges this figure: the estimate on show, unless it is missing or
+    overtaken, then the guard-only one. A zero reads the larger of the two, as the fold that
+    stored it does, so one stored before the larger figure arrived does not stand on the smaller."""
+    est, stated = rec.revenue_estimate, rec.revenue_guard_estimate
+    if value <= 0 and est is not None and stated is not None:
+        return max(est, stated)
+    return stated if est is None or _estimate_overtaken(rec, value) else est
+
+
+def _far_apart(fmp: Optional[float], filed: Optional[float]) -> bool:
+    """Are two positive revenues further apart than `_FEED_FILED_RATIO`?"""
+    if fmp is None or filed is None or fmp <= 0 or filed <= 0:
+        return False
+    lo, hi = _FEED_FILED_RATIO
+    return not lo <= fmp / filed <= hi
+
+
+def _filing_outranks_fmp(rec: _Record, fmp: Optional[float], filed: Optional[float]) -> bool:
+    """Does the filing go first? Only with the two `_far_apart`, where the band may have nothing
+    to say. The company's own print wins that, unless a consensus stands behind FMP's figure and
+    none behind the filing's: a dropped digit does not land on the consensus by chance, and a
+    release read off a segment line can be this far off, as `_reconcile_revenue` also finds.
+    This only orders the queue: a filing the guard refuses still leaves FMP's figure on show."""
+    if not _far_apart(fmp, filed):
+        return False
+    stated = [c for c in (rec.revenue_estimate, rec.revenue_guard_estimate) if c is not None]
+    return any(_near(filed, c) for c in stated) or not any(_near(fmp, c) for c in stated)
+
+
+def _guards_take_the_verdict(rec: _Record, value: float, other: Optional[float]) -> bool:
+    """Does this figure, with `other` the other source's, show with no surprise? Beside an
+    overtaken estimate; past the band of the consensus that judged it, which only agreement lets
+    through; or, at any size of estimate, outside the band of the estimate on show with a second
+    positive figure beside it. Two sources prove the actual, never the consensus it fell outside,
+    which may be what dropped a digit. A lone figure far from a tiny consensus keeps its
+    percentage."""
+    if _estimate_overtaken(rec, value) or not _revenue_in_band(value, _guard_estimate(rec, value)):
+        return True
+    est = rec.revenue_estimate
+    return est is not None and other is not None and other > 0 and not _near(value, est)
+
+
+def _fmp_zeros_unfilled(rec: _Record) -> bool:
+    """Has a stored row of zeros turned out to be FMP's unfilled shape? `_storable_figures` keeps
+    an EPS of 0 beside a revenue of 0 only as a pre-revenue name's real report, and later
+    evidence undoes that: any figure the filing prints above zero, or a consensus turning
+    material. Both metrics then read as if the row never came, what the fold does when that
+    evidence came first, so one row is never unfilled for revenue and a real -100% for EPS."""
+    if rec.fmp_eps != 0 or rec.fmp_revenue != 0:
+        return False
+    filing = rec.filing
+    if filing is not None and (filing.revenue or filing.eps_adjusted or filing.eps_gaap):
+        return True
+    return not _revenue_passes(0.0, _guard_estimate(rec, 0.0), None)
 
 
 def revenue_metric(rec: _Record) -> LiveMetric:
     """FMP first, then the filing, each judged by `_revenue_passes` beside the other, so a bad
-    FMP figure never hides a sound filing figure. Held only when a figure exists and none
-    passes. Like `eps_metric`, the plausibility guard falls back to the guard-only estimate, and
-    here it also reads that one in place of an overtaken estimate; the surprise and the metric's
-    `estimate` never do.
+    FMP figure never hides a sound filing figure, and the filing first when it outranks a figure
+    far off it that the band cannot judge (`_filing_outranks_fmp`). Held only when a figure
+    exists and none passes. Like `eps_metric`, the plausibility guard falls back to the
+    guard-only estimate, and here it also reads that one in place of an overtaken estimate; the
+    surprise and the metric's `estimate` never do, and an overtaken estimate is not shown.
 
-    Three kinds of figure carry no verdict: one beside an overtaken estimate, one that passes
-    only on agreement, because the consensus it fell outside may be what dropped a digit, and a
-    filing figure whose rounding covers the estimate, because the print cannot say which side
-    of the consensus the true figure is on."""
+    A figure carries no verdict when `_guards_take_the_verdict` says so, or when it is a filing
+    figure whose rounding covers the estimate, because the print cannot say which side of the
+    consensus the true figure is on."""
     est = rec.revenue_estimate
-    overtaken = _estimate_overtaken(rec)
-    guard_est = rec.revenue_guard_estimate if overtaken or est is None else est
-    fmp = rec.fmp_revenue
+    fmp = None if _fmp_zeros_unfilled(rec) else rec.fmp_revenue
     filed = rec.filing.revenue if rec.filing is not None else None
     candidates: List[Tuple[float, str, Optional[float]]] = []
     if fmp is not None:
         candidates.append((fmp, SOURCE_FMP, filed))
     if filed is not None:
         candidates.append((filed, SOURCE_FILING, fmp))
+    if _filing_outranks_fmp(rec, fmp, filed):
+        candidates.reverse()
     for value, source, other in candidates:
-        if not _revenue_passes(value, guard_est, other):
+        if not _revenue_passes(value, _guard_estimate(rec, value), other):
             continue
         rounding = rec.filing.revenue_rounding if source == SOURCE_FILING else None
         within_rounding = est is not None and rounding is not None and abs(value - est) <= rounding
-        if overtaken or within_rounding or not _revenue_in_band(value, guard_est):
-            return LiveMetric(est, value, None, source)
+        if within_rounding or _guards_take_the_verdict(rec, value, other):
+            shown = None if _estimate_overtaken(rec, value) else est
+            return LiveMetric(shown, value, None, source)
         return LiveMetric(est, value, revenue_surprise_pct(value, est), source)
     if candidates:
-        return LiveMetric(est, checking=True)
-    return LiveMetric(est, due=guard_est is not None)
+        overtaken = any(_estimate_overtaken(rec, value) for value, _, _ in candidates)
+        return LiveMetric(None if overtaken else est, checking=True)
+    return LiveMetric(est, due=est is not None or rec.revenue_guard_estimate is not None)
 
 
 def has_results(eps: LiveMetric, revenue: LiveMetric) -> bool:
@@ -506,6 +594,13 @@ def is_complete(eps: LiveMetric, revenue: LiveMetric) -> bool:
     if revenue.actual is not None:
         return True
     return revenue.estimate is None and not revenue.due and not revenue.checking
+
+
+def _zero_awaits_filing(rec: _Record, revenue: LiveMetric) -> bool:
+    """Is a zero revenue on show with the company's release still unread? Small companies can
+    file after the wire release, and only the release can take a zero off, so it must not end
+    the SEC watch. The report stays complete: the status is not this rule's to change."""
+    return revenue.actual == 0 and rec.filing is None
 
 
 def is_preliminary(eps: LiveMetric, revenue: LiveMetric) -> bool:
@@ -840,6 +935,16 @@ def _storable_figures(eps: Optional[float], revenue: Optional[float],
     return eps, stored
 
 
+def _held_figures(rec: _Record) -> Tuple[Optional[float], Optional[float]]:
+    """The (EPS, revenue) a row of zeros must not take back or stand beside: FMP's, else the
+    company's own print."""
+    filing = rec.filing
+    if filing is None:
+        return rec.fmp_eps, rec.fmp_revenue
+    return (rec.fmp_eps or filing.eps_adjusted or filing.eps_gaap,
+            rec.fmp_revenue or filing.revenue)
+
+
 def eps_is_unfilled(eps: Optional[float], row: Dict[str, Any]) -> bool:
     """PURE. Would `_storable_figures` refuse this calendar row's `eps`, read alone with nothing
     held? For the daily push pass (`earnings_sender.select_results`), which has no record behind
@@ -849,23 +954,31 @@ def eps_is_unfilled(eps: Optional[float], row: Dict[str, Any]) -> bool:
     return eps is not None and kept is None
 
 
+def _revenue_guard_outcome(rec: _Record, shown: LiveMetric) -> Optional[str]:
+    """What the guards did to this revenue, in a log's words, or None when it shows as it came.
+    Read from the same rules `revenue_metric` applied, with the same consensus."""
+    fmp, value = rec.fmp_revenue, shown.actual
+    if value is None:
+        return "held" if shown.checking or fmp is not None else None
+    filed = rec.filing.revenue if rec.filing is not None else None
+    if shown.source == SOURCE_FILING and fmp is not None:
+        return "the filing stands in"
+    if shown.source == SOURCE_FMP and _far_apart(fmp, filed):
+        return "the filing is set aside"
+    other = filed if shown.source == SOURCE_FMP else None
+    return "no verdict" if _guards_take_the_verdict(rec, value, other) else None
+
+
 def _log_guarded_revenue(rec: _Record, shown: LiveMetric) -> None:
-    """One WARNING each time the guards' answer on a record changes, so a report's log reads as
-    what happened to it: a figure held, the filing standing in for FMP's, or no verdict because
-    the figure shows on agreement alone or beside an overtaken estimate. Here and not in
-    `revenue_metric`, which is a read that runs on every tick and feed build."""
-    if shown.checking:
-        outcome = "held"
-    elif rec.fmp_revenue is not None and shown.source != SOURCE_FMP:
-        outcome = "the filing stands in"
-    elif shown.actual is not None and (_estimate_overtaken(rec)
-                                       or not _revenue_in_band(shown.actual, shown.estimate)):
-        outcome = "no verdict"
-    else:
-        return
+    """One WARNING each time the guards' answer on a record changes, a clean answer in between
+    included, so a report's log reads as what happened to it. Here and not in `revenue_metric`,
+    which is a read that runs on every tick and feed build."""
+    outcome = _revenue_guard_outcome(rec, shown)
     if outcome == rec.revenue_guard_note:
         return
     rec.revenue_guard_note = outcome
+    if outcome is None:
+        return
     logger.warning(
         "[earnings-live] %s %s: revenue guard: %s (FMP %s, filing %s, consensus %s, largest "
         "stated %s, showing %s)", rec.symbol, rec.day.isoformat(), outcome, rec.fmp_revenue,
@@ -1014,11 +1127,11 @@ class EarningsLiveService:
         report it ends any gap `_end_unlisted` was counting."""
         eps_pick: Optional[Tuple[Dict[str, Any], float]] = None
         revenue_pick: Optional[Tuple[Dict[str, Any], float]] = None
-        held_revenue = rec.fmp_revenue
+        held_eps, held_revenue = _held_figures(rec)
         for row in rows:
             reported_eps = finite(row.get("epsActual"))
             reported_revenue = finite(row.get("revenueActual"))
-            eps, revenue = _storable_figures(reported_eps, reported_revenue, rec.fmp_eps,
+            eps, revenue = _storable_figures(reported_eps, reported_revenue, held_eps,
                                              held_revenue, rec.revenue_guard_estimate)
             if revenue is not None:
                 revenue_pick, held_revenue = (row, revenue), revenue
@@ -1035,7 +1148,7 @@ class EarningsLiveService:
                 rec.eps_refusal_logged = True
                 logger.warning(
                     "[earnings-live] %s %s: FMP EPS %s refused beside revenue %s (holding %s)",
-                    rec.symbol, rec.day.isoformat(), reported_eps, reported_revenue, rec.fmp_eps,
+                    rec.symbol, rec.day.isoformat(), reported_eps, reported_revenue, held_eps,
                 )
             name = row.get("companyName")
             if isinstance(name, str) and name.strip():
@@ -1123,25 +1236,31 @@ class EarningsLiveService:
         is not a landing — the same rule as `earnings_window_service._absorb` — so a deploy
         never re-announces a morning's results in the afternoon. The same goes for a filing
         accepted more than `_FILING_LANDING_GRACE` before the record was first seen, even
-        though FMP's row still reads pending (`absorb_filing`).
+        though FMP's row still reads pending (`absorb_filing`). A report whose only figure has
+        since been taken off waits for one to show: a push must have something to report.
         """
         n = et_now(now)
         today = n.date()
         days = set(live_days(today))
-        return [
+        landed = (
             snapshot_of(rec, today, n)
             for rec in self._records.values()
             if rec.day in days and rec.landed_at is not None and rec.landed_from_pending
-        ]
+        )
+        return [snap for snap in landed if has_results(snap.eps, snap.revenue)]
 
     def pending_symbols(self, day: date, symbols: Iterable[str]) -> List[str]:
-        """The given symbols (order kept) with a record on `day` whose results are incomplete.
-        This is the SEC watch's list: a filing ends that watch. FMP's fetch reads the wider
+        """The given symbols (order kept) with a record on `day` whose results are incomplete,
+        or whose revenue is a zero its filing could still take off (`_zero_awaits_filing`). This
+        is the SEC watch's list: a filing ends that watch. FMP's fetch reads the wider
         `_fmp_wanted`."""
         out = []
         for symbol in symbols:
             rec = self._records.get((symbol.upper(), day))
-            if rec is not None and not is_complete(eps_metric(rec), revenue_metric(rec)):
+            if rec is None:
+                continue
+            revenue = revenue_metric(rec)
+            if not is_complete(eps_metric(rec), revenue) or _zero_awaits_filing(rec, revenue):
                 out.append(symbol.upper())
         return out
 

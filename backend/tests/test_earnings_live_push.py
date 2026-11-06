@@ -13,7 +13,7 @@ kinds — and the daily 16:00 ET sender — claim the SAME key. What is pinned h
     "Keep it off at first", 2026-11-05);
   * the daily 16:00 ET pass reads neither switch, and neither does the wake of a row it held: as
     shipped it is what tells a result, in the words it always used, from 16:00 ET and not before;
-  * what off costs beyond the wait: three kinds of report nobody is told, each with its sheet;
+  * what off costs beyond the wait: the kinds of report nobody is told, each with its sheet;
   * a lock-screen banner prints an absolute figure only from the company's own release;
   * each report is dispatched once per process (the 60 s loop re-hands every landing);
   * a failed watcher read is the one exception: it told nobody, so the key goes back, the round
@@ -62,6 +62,7 @@ from app.services.earnings_filing_service import FilingFigures
 from app.services.earnings_live_service import (
     BASIS_ADJUSTED,
     BASIS_GAAP,
+    EARNINGS_LIVE_UNLISTED_END_SECONDS,
     SOURCE_FILING,
     SOURCE_FMP,
     STATUS_LIVE,
@@ -249,8 +250,8 @@ async def test_a_dropped_digit_eps_never_reaches_a_result_push(dispatch):
 
 @pytest.mark.asyncio
 async def test_a_row_with_both_actuals_at_zero_pushes_nothing(dispatch):
-    """The record refuses FMP's unfilled shape, so the live sender sees no landing and no banner
-    says "EPS missed consensus by 100%"."""
+    """The record refuses FMP's unfilled shape, so the live sender sees no landing and sends no
+    "EPS missed consensus by 100%"."""
     def _row(**kw):
         return {"symbol": "INTC", "date": REPORT.isoformat(), "epsEstimated": 0.41,
                 "revenueEstimated": 16.6e9, **kw}
@@ -1900,9 +1901,10 @@ def test_only_the_live_sender_reads_the_two_push_switches():
 
 # ── what off costs ───────────────────────────────────────────────────────────
 #
-# For most reports the result push being off is a wait for the next pass. These are the three it
-# costs the buzz outright, as `earnings_live_sender`'s docstring says: the pass has its own rules,
-# which the live sender does not share. The sheet keeps every one of them.
+# For most reports the result push being off is a wait for the next pass. These are the kinds it
+# costs the buzz outright, as `earnings_live_sender`'s docstring lists them: the pass has its own
+# rules, which the live sender does not share, and it knows only the rows it read. The sheet keeps
+# every one of them.
 
 THU_1600 = datetime(2026, 11, 12, 16, 0, tzinfo=ET)
 
@@ -2002,6 +2004,103 @@ async def test_off_a_report_past_the_passs_cap_is_told_by_nobody(
     answer = await _tap(monkeypatch, {"ticker": "BBBB", "report_date": TUESDAY.isoformat()},
                         WED_1600)
     assert (answer.status, answer.eps.surprise_pct) == (STATUS_REPORTED, 46.34)
+
+
+def _filled_without_an_estimate(blank: Dict[str, Any]) -> Dict[str, Any]:
+    filled = _fmp_row(TUESDAY, eps=0.60, revenue=17.1e9)
+    del filled["epsEstimated"]
+    return {**filled, **blank}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result_push", [False, True], ids=["as_shipped", "result_push_on"])
+@pytest.mark.parametrize("blank", [{"epsEstimated": None}, {"epsEstimated": float("nan")}, {}],
+                         ids=["null", "nan", "missing"])
+async def test_off_a_filled_row_with_no_estimate_of_its_own_is_told_by_nobody(
+        monkeypatch, clean_sender, live, result_push, blank):
+    """The row was pending with a consensus of 0.41. It fills with none, so the record keeps the
+    0.41 it held and the sheet has a surprise, while the pass has nothing in the row to divide
+    by."""
+    ledger, phones = _Ledger(), _Phones()
+    _dispatcher_over(monkeypatch, ledger, phones)
+    _set_result_push(monkeypatch, result_push)
+    filled = _filled_without_an_estimate(blank)
+
+    live.observe_rows(TUESDAY, [_fmp_row(TUESDAY)], TUE_2005 - timedelta(hours=8), fetched=True)
+    live.observe_rows(TUESDAY, [filled], TUE_2005, fetched=True)
+    await sender.dispatch_landings(live.landed_snapshots(TUE_2005),
+                                   _clock_at(monkeypatch, TUE_2005))
+    stats = await _daily_pass(monkeypatch, _clock_at(monkeypatch, WED_1600), day=TUESDAY,
+                              row=filled)
+
+    assert stats["results"] == 0
+    told = ["EPS beat consensus by 46%. Tap for the full picture."] if result_push else []
+    assert [buzz["body"] for buzz in phones.buzzes] == told and len(ledger.rows) == len(told)
+    answer = await _tap(monkeypatch, {"ticker": "INTC", "report_date": TUESDAY.isoformat()},
+                        WED_1600)
+    assert (answer.status, answer.eps.estimate, answer.eps.actual, answer.eps.surprise_pct) == (
+        STATUS_REPORTED, 0.41, 0.60, 46.34)
+
+
+async def _off_the_calendar(live, day, at) -> List[Dict[str, Any]]:
+    """Two own fetches, the hold apart, over a calendar that lists one other report on `day`. It
+    is pending, so the day is still asked about, and `BBBB`, left out with no figure, shows that
+    these fetches end a report: what outlives them has outlived something. Returns the rows."""
+    listed = {**_fmp_row(day), "symbol": "AAAA"}
+    live.observe_rows(day, [listed, {**_fmp_row(day), "symbol": "BBBB"}], at, fetched=True)
+
+    async def calendar(from_date=None, to_date=None):
+        return [listed] if from_date == day.isoformat() else []
+
+    for _fetch in range(2):
+        live._fetched.pop(day, None)
+        await live.refresh(at, fmp=SimpleNamespace(get_earnings_calendar=calendar),
+                           symbols=["AAAA", "BBBB", "INTC"])
+        for record in live._records.values():
+            if record.unlisted_since is not None:
+                record.unlisted_since -= EARNINGS_LIVE_UNLISTED_END_SECONDS
+    assert live.snapshot("BBBB", day, at) is None
+    return [listed]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result_push", [False, True], ids=["as_shipped", "result_push_on"])
+@pytest.mark.parametrize("taken_back", ["blank_again", "off_the_calendar"])
+async def test_off_a_figure_fmp_takes_back_before_the_pass_is_told_by_nobody(
+        monkeypatch, clean_sender, live, result_push, taken_back):
+    """Filled on Tuesday evening, and by Wednesday's pass blank again or off the calendar. The
+    record keeps a figure through either, so the sheet has it, while the pass knows only what it
+    read."""
+    ledger, phones = _Ledger(), _Phones()
+    _dispatcher_over(monkeypatch, ledger, phones)
+    _set_result_push(monkeypatch, result_push)
+
+    _lands(live, TUE_2005, day=TUESDAY)
+    await sender.dispatch_landings(live.landed_snapshots(TUE_2005),
+                                   _clock_at(monkeypatch, TUE_2005))
+    rows = ([_fmp_row(TUESDAY)] if taken_back == "blank_again"
+            else await _off_the_calendar(live, TUESDAY, TUE_2030))
+    stats = await _daily_pass(monkeypatch, _clock_at(monkeypatch, WED_1600), day=TUESDAY,
+                              rows=rows)
+
+    assert stats["results"] == 0
+    told = ["EPS beat consensus by 46%. Tap for the full picture."] if result_push else []
+    assert [buzz["body"] for buzz in phones.buzzes] == told and len(ledger.rows) == len(told)
+    answer = await _tap(monkeypatch, {"ticker": "INTC", "report_date": TUESDAY.isoformat()},
+                        WED_1600)
+    assert (answer.status, answer.eps.actual, answer.eps.surprise_pct) == (
+        STATUS_REPORTED, 0.60, 46.34)
+
+
+def test_the_senders_list_of_what_off_costs_has_a_line_for_every_kind_pinned_here():
+    """An owner reads that list before leaving the switch off, so a kind pinned above and missing
+    there is a cost nobody was told about. The prose counts none of them: a kind found later
+    must leave no wrong number behind."""
+    doc = sender.__doc__
+    costs = doc[doc.index("With both off"):doc.index("`push_dispatch_service` claims the key")]
+    pinned = [name for name in globals() if name.startswith("test_off_")]
+    assert len(re.findall(r"^  \* ", costs, re.MULTILINE)) == len(pinned)
+    assert not re.search(r"\b(?:two|three|four|five|six|seven) kinds\b", costs, re.IGNORECASE)
 
 
 @pytest.mark.asyncio

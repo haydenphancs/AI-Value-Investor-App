@@ -75,6 +75,7 @@ INTEREST_COVERAGE = "interest_coverage"
 DEBT_TO_EQUITY = "debt_to_equity"
 LIQUIDITY_METRICS = frozenset({CURRENT_RATIO, QUICK_RATIO})
 GATED_METRICS = frozenset({CURRENT_RATIO, QUICK_RATIO, INTEREST_COVERAGE})
+SGA_TO_REVENUE = "sga_to_revenue"
 
 # Current and quick ratio are meaningless for every industry below.
 _NO_LIQUIDITY_INDUSTRIES = frozenset({
@@ -217,15 +218,59 @@ def without_excluded_metrics(points: List[str]) -> List[str]:
     return kept
 
 
+# SG&A / revenue says nothing about these two groups (owner decision 2026-11-06, "Option 2, R&D
+# as is"). They file costs under other lines, underwriting and acquisition for an insurer,
+# operation and maintenance for a utility, so what FMP puts under SG&A is a partial line or a
+# blank. Measured on the FY2025 benchmark universe: blank for 52% of insurers and 51% of
+# utilities, against 18% or less in every other group; 23% and 20% of them flipped between a
+# figure and a blank across 2023-25 (MetLife $6.0B, then 0); and the companies that do report
+# it run from 0.7% to 52% of revenue in Property & Casualty alone. Dropping the blanks from
+# their medians would have scored the rest on whoever FMP filled in that year, and given
+# Selective 10/10 on a 0.7% line. Named lists, not a share-of-blanks test: the two groups sit
+# at about half, so a share test would flip the driver on and off as FMP's fill moved.
+#
+# The utility industries are named as well as the sector so the producer keeps them out of the
+# sector pool (`peer_metric_applicable`). The Utilities row then stays at its stored 0.0, which
+# every scorer reads as no peer. Pooled, it would become 9.66 from 41 half-comparable lines, and
+# a recompute that reached production before this gate did would switch the driver on for 40
+# utilities on the live scorer (UGI 5.0 to 4.2, AES 3.9 to 4.8).
+_NO_SGA_INDUSTRIES = frozenset({
+    "insurance - brokers",
+    "insurance - diversified",
+    "insurance - life",
+    "insurance - property & casualty",
+    "insurance - reinsurance",
+    "insurance - specialty",
+    "diversified utilities",
+    "independent power producers",
+    "regulated electric",
+    "regulated gas",
+    "regulated water",
+    "renewable utilities",
+})
+_NO_SGA_SECTOR = "utilities"
+
+
+def sga_line_applicable(sector: Any, industry: Any) -> bool:
+    """False when SG&A / revenue means nothing for this company: an insurer or a utility, by
+    industry, or a utility by sector, so a new FMP utility industry is caught too. An unknown
+    or empty sector and industry keep the metric."""
+    if industry_key(industry) in _NO_SGA_INDUSTRIES:
+        return False
+    return not (isinstance(sector, str) and sector.strip().casefold() == _NO_SGA_SECTOR)
+
+
 def peer_metric_applicable(metric: str, industry: Optional[str]) -> bool:
     """Whether ``metric`` is meaningful for a company in ``industry`` — an INDUSTRY-level
     answer (the benchmark producer's sector pool and every industry-only caller). Every
-    metric outside `GATED_METRICS` is applicable everywhere. A company in a MIXED industry
-    may still keep the rows: `company_metric_applicable`."""
+    metric outside `GATED_METRICS` and SG&A is applicable everywhere. A company in a MIXED
+    industry may still keep the rows: `company_metric_applicable`."""
     if metric in LIQUIDITY_METRICS:
         return liquidity_ratios_applicable(industry)
     if metric == INTEREST_COVERAGE:
         return interest_coverage_applicable(industry)
+    if metric == SGA_TO_REVENUE:
+        return sga_line_applicable(None, industry)
     return True
 
 

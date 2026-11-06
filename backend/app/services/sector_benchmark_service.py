@@ -41,7 +41,7 @@ from app.utils.supabase_async import sb_exec
 # A margin counts only beside revenue (FMP answers 0 for a company with none). Defined in
 # app.utils.margins so moat scoring and the report collector share it; imported by name
 # here for the TTM producer (`industry_benchmark_service._extract_ttm`) and the tests.
-from app.utils.margins import free_cash_flow_reading, revenue_backed_margin
+from app.utils.margins import free_cash_flow_reading, revenue_backed_margin, sga_reading
 
 logger = logging.getLogger(__name__)
 
@@ -1013,7 +1013,8 @@ def _ratio_pct_from_income(
 ) -> Optional[float]:
     """numerator / revenue as a percentage (×100). Returns None when
     revenue is missing or non-positive. Allows numerator==0 (legitimate
-    signal — e.g., zero R&D for non-tech companies).
+    signal — e.g., zero R&D for non-tech companies); the SG&A caller then drops
+    its 0 (`sga_reading`).
     """
     rev = _safe_float(inc, "revenue")
     if not rev or rev <= 0:
@@ -1093,6 +1094,9 @@ def _compute_ratio_values(
             )
             for year, inc in inc_by_year.items():
                 value = _ratio_pct_from_income(inc, numerator_field)
+                if compute_name == "sga_to_revenue":
+                    # FMP's 0 is a blank line, not a figure. The scorer reads it the same way.
+                    value = sga_reading(value)
                 # Bucket non-None (allows 0 — zero R&D is a legitimate signal).
                 if value is not None and value >= 0:
                     out.setdefault(year, []).append(value)

@@ -41,6 +41,7 @@ from app.services.financials_metric_gate import (
     excluded_from_industry_median,
     industry_key,
     score_excluded_rows,
+    sga_line_applicable,
 )
 from app.services.sector_benchmark_lookup import (
     MATURE_SAMPLE_FLOOR,
@@ -48,7 +49,7 @@ from app.services.sector_benchmark_lookup import (
     get_sector_benchmark_lookup,
     lookup_failed,
 )
-from app.utils.margins import revenue_backed_margin, revenue_scaled_ratio
+from app.utils.margins import revenue_backed_margin, revenue_scaled_ratio, sga_reading
 from app.utils.currency import currency_code
 from app.utils.period_labels import annual_benchmark_key
 
@@ -91,7 +92,9 @@ MOAT_RATING_NARROW = 7.0
 # 2026-11-05 (owner decisions after the Berkshire audit): a financial company is compared with
 # its own industry, not the pooled Financial Services sector (`own_industry_peers`), and Brand
 # Power no longer counts for a company whose gross margin and P/S read N/M.
-SCORER_VERSION = "moat_v1.2026-11-05"
+# 2026-11-06 (owner decision "Option 2, R&D as is"): SG&A no longer counts for an insurer or a
+# utility (`sga_line_applicable`), and FMP's blank SG&A leaves the medians (`sga_reading`).
+SCORER_VERSION = "moat_v1.2026-11-06"
 
 # Below this # of resolved metrics, return None for the pillar so the
 # caller falls back to the legacy AI dimension instead.
@@ -586,6 +589,7 @@ class MoatScoringService:
         )
         results[PILLAR_COST] = self._score_cost_advantage(
             latest_inc, latest_ratios, sector_medians,
+            sga_counts=sga_line_applicable(sector, industry),
         )
         results[PILLAR_INTANGIBLE] = self._score_intangible_assets(
             latest_inc, latest_bs, sector_medians, ip_intel,
@@ -855,9 +859,14 @@ class MoatScoringService:
         latest_inc: Optional[Dict[str, Any]],
         latest_ratios: Optional[Dict[str, Any]],
         medians: Dict[str, Optional[Dict[str, Any]]],
+        *,
+        sga_counts: bool = True,
     ) -> PillarResult:
         """Cost Advantage: operating margin (higher) + asset turnover
         (higher) + SG&A/Revenue (lower is better).
+
+        ``sga_counts`` False (`sga_line_applicable`): an insurer or a utility. The driver stays
+        empty, so the pillar rests on the other two and needs both.
         """
         drivers = [
             _build_higher_better_driver(
@@ -873,8 +882,8 @@ class MoatScoringService:
             ),
             _build_lower_better_driver(
                 "sga_to_revenue",
-                self._sga_to_revenue_pct(latest_inc),
-                medians.get("sga_to_revenue"),
+                self._sga_to_revenue_pct(latest_inc) if sga_counts else None,
+                medians.get("sga_to_revenue") if sga_counts else None,
             ),
         ]
         return _assemble_pillar(PILLAR_COST, drivers)
@@ -999,10 +1008,10 @@ class MoatScoringService:
         if not inc:
             return None
         rev = _safe_float(inc, "revenue")
-        sga = _safe_float(inc, "sellingGeneralAndAdministrativeExpenses")
         # A company with revenue and exactly zero SG&A is FMP's zero-fill for an unreported
         # line, not a reading — and as a lower-is-better driver it scored a perfect 10.0.
-        if not rev or rev <= 0 or sga is None or sga <= 0:
+        sga = sga_reading(_safe_float(inc, "sellingGeneralAndAdministrativeExpenses"))
+        if not rev or rev <= 0 or sga is None:
             return None
         return (sga / rev) * 100.0
 

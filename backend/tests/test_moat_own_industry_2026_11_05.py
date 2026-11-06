@@ -828,7 +828,8 @@ def _berkshire() -> M.MoatScores:
 def test_berkshires_pillars():
     scores = _berkshire()
     assert scores[M.PILLAR_NETWORK].score == 5.2
-    assert scores[M.PILLAR_COST].score == 4.9
+    # 4.9 until SG&A stopped counting for an insurer, 2026-11-06.
+    assert scores[M.PILLAR_COST].score == 5.8
     assert scores[M.PILLAR_BRAND].score is None
     assert scores[M.PILLAR_SWITCHING].score is None
     assert scores[M.PILLAR_INTANGIBLE].score is None
@@ -836,7 +837,7 @@ def test_berkshires_pillars():
 
 def test_berkshires_moat_and_score():
     vital = _vital(_berkshire())
-    assert vital["score"]["value"] == 5.1
+    assert vital["score"]["value"] == 5.6
     assert vital["overall_rating"] == "none"
 
     def row(value):
@@ -855,7 +856,7 @@ def test_berkshires_moat_and_score():
         "financial_health": row(None), "wall_street": row(None),
         "capital_allocation": row(5.2), "_style_signals": signals,
     }}
-    assert scoring.compute_quality_score("warren_buffett", report) == 40.4
+    assert scoring.compute_quality_score("warren_buffett", report) == 43.1
 
 
 # ── the operating path, unchanged ────────────────────────────────────────────
@@ -969,10 +970,11 @@ def test_the_refresh_keeps_a_listed_network_on_its_sector_read(monkeypatch):
 
 
 def test_the_vintage_moved():
-    assert M.SCORER_VERSION == "moat_v1.2026-11-05"
+    assert M.SCORER_VERSION == "moat_v1.2026-11-06"
     assert imb.MODEL_VERSION == M.SCORER_VERSION
     assert imb._MODEL_VERSION_ORDER[-1] == M.SCORER_VERSION
-    assert imb._vintage_rank("moat_v1.2026-10-28") == len(imb._MODEL_VERSION_ORDER) - 2
+    assert imb._vintage_rank("moat_v1.2026-11-05") == len(imb._MODEL_VERSION_ORDER) - 2
+    assert imb._vintage_rank("moat_v1.2026-10-28") == len(imb._MODEL_VERSION_ORDER) - 3
 
 
 def test_a_paid_reuse_refuses_the_old_vintage():

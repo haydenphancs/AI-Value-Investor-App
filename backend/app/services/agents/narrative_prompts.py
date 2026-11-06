@@ -42,7 +42,11 @@ from app.services.financials_metric_gate import names_excluded_metric, without_e
 from app.services.agents.persona_config import PersonaConfig
 # Reuse the headline scorer's per-vital reader so the Bull/Bear point count is
 # driven by the EXACT same 0-10 module substrate that drives the quality score.
-from app.services.agents.persona_scoring import _vital_score
+from app.services.agents.persona_scoring import (
+    _vital_score,
+    score_coverage_note,
+    unrated_score_parts,
+)
 from app.services.report_degradation import _mark_degraded
 from app.utils.peer_wording import peer_worded_metric_name
 from app.utils.currency import currency_code, money_prefix
@@ -569,6 +573,16 @@ def _executive_summary_text_prompt(
     # The METHOD's name, not "a The Growth Hunter investor": the old wording rendered that,
     # and its "fits your style" could come out addressed to the reader (a suitability read).
     method_name = persona.display_name.removeprefix("The ")
+    # The code-owned line after this text says these were not rated. Last in the prompt, because
+    # BNY's first run read "a significant margin of safety" directly above "Valuation ... not rated".
+    unrated = unrated_score_parts(persona.key, shell)
+    unrated_rule = (
+        f"\n\nNOT RATED for this company: {', '.join(unrated)}. Whatever the lines above ask, give "
+        "no verdict on these and imply none. For Valuation: no margin of safety, no cheap, expensive, "
+        "value or opportunity. For Financial Health: no strong or weak balance sheet. For Moat: "
+        "no moat or lasting advantage."
+        if unrated else ""
+    )
     return f"""Write the Executive Summary — a GENERAL, plain-English overview that orients the reader before the detailed sections below.
 
 EVIDENCE:
@@ -582,7 +596,7 @@ Cover, in order:
 2. How it's doing overall — the big-picture trajectory and financial health, in broad strokes.
 3. The report's bottom-line take — the overall verdict in general terms, framed through your lens (how well the company fits the {method_name} method's criteria). This is a characterization, never a buy, sell, or hold call.
 
-Keep it GENERAL — this is the orientation, not the argument. Do NOT dump metrics or list pros/cons; the Bull/Bear case below carries the specific numbers. Use at most ONE light anchor number, and only if it genuinely helps."""
+Keep it GENERAL — this is the orientation, not the argument. Do NOT dump metrics or list pros/cons; the Bull/Bear case below carries the specific numbers. Use at most ONE light anchor number, and only if it genuinely helps.{unrated_rule}"""
 
 
 # ── Fundamentals trajectory digest (for the section Insight) ──────────
@@ -2720,12 +2734,20 @@ def build_narrative_jobs(
     jobs: List[NarrativeJob] = []
 
     # ── executive_summary_text (general overview; bullets removed) ────
+    # Code-owned, on the fallback text too. The summary is what sits directly under the score in
+    # the app and the PDF and leads chat, and the score is what this line qualifies; the
+    # Fundamentals section, where the note below goes, starts collapsed.
+    summary_note = score_coverage_note(persona.key, shell)
     jobs.append(NarrativeJob(
         label="executive_summary_text",
         prompt=_executive_summary_text_prompt(persona, evidence, shell),
         word_cap=80,
         apply=lambda v: shell.__setitem__("executive_summary_text", v),
-        fallback_value=FALLBACK["executive_summary_text"],
+        fallback_value=(
+            f'{FALLBACK["executive_summary_text"]} {summary_note}'
+            if summary_note else FALLBACK["executive_summary_text"]
+        ),
+        postprocess=(lambda text: f"{text} {summary_note}") if summary_note else None,
     ))
 
     # ── overall_assessment.text ───────────────────────────────────────

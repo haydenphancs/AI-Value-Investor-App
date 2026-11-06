@@ -542,7 +542,12 @@ def test_the_note_sits_under_the_cards_on_real_text_and_the_fallback():
 
 
 def test_the_executive_summary_stays_a_company_overview():
-    job = _jobs(_shell())["executive_summary_text"]
+    """The financial line stays under the cards. `tests/test_score_coverage_2026_11_06.py` owns
+    the one line the summary can carry, so every vital is rated here."""
+    vitals = {name: {"score": {"value": 6.0}} for name in scoring.PERSONA_WEIGHTS["warren_buffett"]}
+    shell = _shell()
+    shell["_scoring_inputs"] = {**vitals, **shell["_scoring_inputs"]}
+    job = _jobs(shell)["executive_summary_text"]
     assert job.postprocess is None
     assert job.fallback_value == np_.FALLBACK["executive_summary_text"]
 

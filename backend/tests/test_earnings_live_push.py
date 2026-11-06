@@ -18,8 +18,9 @@ kinds — and the daily 16:00 ET sender — claim the SAME key. What is pinned h
     such a report is handled once, for good;
   * the daily pass keeps the EPS the live path keeps, so a row the fold reads as unfilled never
     goes out at 16:00 ET either;
-  * a row of zeros the filing or a consensus has shown to be unfilled sends no false miss, and a
+  * a row of zeros shown to be unfilled sends no false miss, whatever FMP fills next, and a
     report left with nothing on show sends nothing at all;
+  * a digit off a consensus straddling the guard's floor is never announced as a -90% miss;
   * a round sends oldest first, so the cap cannot run a report out of that window;
   * the round cap's warning counts the reports still owed a push, nothing else.
 The dispatcher is a recorder, or the real one over a fake table where a failed read is the
@@ -307,6 +308,81 @@ async def test_a_stored_zero_taken_off_leaves_no_push_with_nothing_to_report(dis
     live.observe_rows(REPORT, [_row(revenueEstimated=16.6e9)], NOW)
     await sender.dispatch_landings(live.landed_snapshots(NOW), NOW)
     assert dispatch.sent == []
+
+
+def _joby(**kw) -> Dict[str, Any]:
+    return {"symbol": "JOBY", "date": REPORT.isoformat(), "epsEstimated": 0.41,
+            "revenueEstimated": 30e6, **kw}
+
+
+_MORNING = datetime(2026, 10, 29, 19, 0, tzinfo=timezone.utc)
+_ZEROS_AT = datetime(2026, 10, 29, 20, 4, 30, tzinfo=timezone.utc)
+_FILED_AT = datetime(2026, 10, 29, 20, 4, 40, tzinfo=timezone.utc)
+_FILLED_AT = datetime(2026, 10, 29, 20, 40, tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("zeros_first", [False, True], ids=["the_filing_first", "the_row_first"])
+async def test_a_revenue_fill_after_a_row_of_zeros_sends_no_false_miss(dispatch, monkeypatch,
+                                                                       zeros_first):
+    """Default switches, the real folds and the real send: "EPS missed consensus by 100%" went
+    out at 16:40 over the $0.44 on show since 16:05, once FMP filled the revenue alone."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+    filing = FilingFigures(accession="0001628280-26-000130", accepted_at=None, url=None,
+                           revenue=33e6, eps_adjusted=0.44)
+    live = EarningsLiveService()
+    live.observe_rows(REPORT, [_joby()], _MORNING)
+    if zeros_first:
+        live.observe_rows(REPORT, [_joby(epsActual=0, revenueActual=0)], _ZEROS_AT)
+    live.absorb_filing("JOBY", REPORT, filing, _FILED_AT)
+    if not zeros_first:
+        live.observe_rows(REPORT, [_joby(epsActual=0, revenueActual=0)], _FILED_AT)
+    live.observe_rows(REPORT, [_joby(revenueActual=33.2e6)], _FILLED_AT)
+    (snap,) = live.landed_snapshots(_FILLED_AT)
+    assert (snap.eps.actual, snap.eps.source) == (0.44, SOURCE_FILING)
+    await sender.dispatch_landings([snap], _FILLED_AT)
+    assert dispatch.sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_material_consensus_then_a_revenue_fill_sends_no_false_miss(dispatch, monkeypatch):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+    live = EarningsLiveService()
+    live.observe_rows(REPORT, [_joby()], _MORNING)
+    live.observe_rows(REPORT, [_joby(epsActual=0, revenueActual=0)], _ZEROS_AT)
+    live.observe_rows(REPORT, [_joby(revenueEstimated=16.6e9)], _FILED_AT)
+    live.observe_rows(REPORT, [_joby(revenueActual=16.9e9, revenueEstimated=16.6e9)], _FILLED_AT)
+    (snap,) = live.landed_snapshots(_FILLED_AT)
+    assert snap.eps.actual is None
+    await sender.dispatch_landings([snap], _FILLED_AT)
+    assert dispatch.sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_fill_with_no_other_evidence_sends_no_false_miss_either(dispatch, monkeypatch):
+    """The fill alone proves it: a report with a real revenue had no real $0 row."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+    live = EarningsLiveService()
+    live.observe_rows(REPORT, [_joby()], _MORNING)
+    live.observe_rows(REPORT, [_joby(epsActual=0, revenueActual=0)], _ZEROS_AT)
+    live.observe_rows(REPORT, [_joby(revenueActual=33.2e6)], _FILLED_AT)
+    await sender.dispatch_landings(live.landed_snapshots(_FILLED_AT), _FILLED_AT)
+    assert dispatch.sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_digit_off_a_consensus_on_the_floor_is_announced_as_being_confirmed(dispatch):
+    """The real folds and the real send: "Revenue missed consensus by 90%" went out here."""
+    def _row(**kw):
+        return {"symbol": "ABCD", "date": REPORT.isoformat(), "epsEstimated": 0.41, **kw}
+
+    live = EarningsLiveService()
+    live.observe_rows(REPORT, [_row(revenueEstimated=99e6)], _MORNING)
+    live.observe_rows(REPORT, [_row(epsActual=0.44, revenueActual=9.9e6, revenueEstimated=99e6),
+                               _row(revenueEstimated=101e6)], NOW)
+    await sender.dispatch_landings(live.landed_snapshots(NOW), NOW)
+    (live_push,) = [s for s in dispatch.sent if s["kind"] == KIND_EARNINGS_LIVE]
+    assert live_push["body"] == "Revenue being confirmed · EPS beat consensus by 7%."
 
 
 # ── the daily pass reads an EPS of zero as the live path does ────────────────

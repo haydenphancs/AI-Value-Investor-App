@@ -12,8 +12,10 @@ What is pinned here, each a way the LIVE card could lie or cost too much:
   * a zero revenue is a result only against a tiny consensus with no figure held, and an EPS
     of 0.0 beside a refused revenue is the same unfilled field;
   * a bad FMP revenue never hides a sound filing figure or sends a reported report back to live;
-  * a row of zeros reads the same whichever of it and a filing came first, and a shown zero stays
-    on the SEC watch until the filing that can take it off has been read;
+  * a row of zeros reads the same whichever of it and a filing came first, leaves no trace once
+    it gives way, whatever FMP fills next, and a shown zero stays on the SEC watch until the
+    filing that can take it off has been read;
+  * which of two consensus twins FMP touched last never decides a filing figure;
   * the newest FMP answer wins: a memo row older than a record's last own fetch is skipped at
     the tick, the card and the sheet, and a memo refreshed after that fetch still folds;
   * the live memo fetches TODAY only while a watched report still wants FMP in 06:00–22:00 ET,
@@ -1007,6 +1009,198 @@ def test_a_zero_taken_off_before_the_send_is_not_handed_over_until_a_figure_show
     assert snap.revenue.actual == 16.9e9
 
 
+_PENDING = dict(eps_est=0.41, rev_est=30e6)
+_FILED_FULL = dict(revenue=33e6, eps_adjusted=0.44)
+
+
+def _pending_row(**kw) -> dict:
+    return _row("JOBY", REPORT, **{**_PENDING, **kw})
+
+
+def _zeros_step(svc, at) -> None:
+    svc.observe_rows(REPORT, [_pending_row(eps=0, rev=0)], at)
+
+
+def _filing_step(svc, at, figures=None) -> None:
+    svc.absorb_filing("JOBY", REPORT, efs.FilingFigures(
+        accession="0001628280-26-000129", accepted_at=None, url=None,
+        **(figures or _FILED_FULL)), at)
+
+
+def _revenue_fill(svc, at) -> None:
+    svc.observe_rows(REPORT, [_pending_row(rev=33.2e6)], at)
+
+
+def _eps_fill(svc, at) -> None:
+    svc.observe_rows(REPORT, [_pending_row(eps=0.44)], at)
+
+
+@pytest.mark.parametrize("steps", list(itertools.permutations(
+    (_zeros_step, _filing_step, _revenue_fill))), ids=lambda s: "-".join(f.__name__ for f in s))
+def test_a_revenue_only_fill_never_brings_a_row_of_zeros_back_in_any_order(steps):
+    """"EPS missed consensus by 100%" came back over the filing's $0.44 when FMP's next row filled
+    only the revenue: the pair was gone, so nothing said the 0 had been unfilled."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+    for minute, step in enumerate(steps):
+        step(svc, _et(REPORT, 16, minute))
+    snap = svc.snapshot("JOBY", REPORT, _et(REPORT, 17))
+    assert (snap.eps.actual, snap.eps.surprise_pct, snap.eps.source) == (
+        0.44, 7.32, els.SOURCE_FILING)
+    assert (snap.revenue.actual, snap.revenue.source) == (33.2e6, els.SOURCE_FMP)
+    assert (snap.status, snap.preliminary) == (els.STATUS_REPORTED, True)
+
+
+@pytest.mark.parametrize("steps", list(itertools.permutations(
+    (_zeros_step, lambda svc, at: _filing_step(svc, at, dict(eps_adjusted=0.44)), _eps_fill))),
+    ids=lambda s: "-".join(f.__name__ for f in s))
+def test_an_eps_only_fill_never_brings_a_row_of_zeros_back_in_any_order(steps):
+    svc = _svc()
+    svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+    for minute, step in enumerate(steps):
+        step(svc, _et(REPORT, 16, minute))
+    snap = svc.snapshot("JOBY", REPORT, _et(REPORT, 17))
+    assert (snap.eps.actual, snap.eps.source) == (0.44, els.SOURCE_FMP)
+    assert snap.revenue == els.LiveMetric(30e6, due=True), "never revenue 0.0, -100%"
+    assert snap.status == els.STATUS_LIVE
+
+
+def _material_pending(svc, at) -> None:
+    svc.observe_rows(REPORT, [_pending_row(rev_est=16.6e9)], at)
+
+
+def _material_fill(svc, at) -> None:
+    svc.observe_rows(REPORT, [_pending_row(rev=16.9e9, rev_est=16.6e9)], at)
+
+
+@pytest.mark.parametrize("later", [
+    (_filing_step,), (_material_pending,), (_revenue_fill,), (_eps_fill,),
+    (_filing_step, _revenue_fill), (_filing_step, _eps_fill),
+    (_material_pending, _revenue_fill), (_material_pending, _eps_fill),
+    (_material_pending, _material_fill),
+], ids=lambda s: "-".join(f.__name__ for f in s))
+def test_a_row_of_zeros_that_gave_way_leaves_no_trace(later):
+    """Each later step reads exactly as it would had FMP never sent the row. Its zeros and the
+    estimate they stood on go together: "Rev Est: $30.0M" over a $16.6B consensus was that."""
+    outcomes = []
+    for with_zeros in (False, True):
+        svc = els.EarningsLiveService()
+        svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+        if with_zeros:
+            _zeros_step(svc, _et(REPORT, 16))
+        for minute, step in enumerate(later, start=1):
+            step(svc, _et(REPORT, 16, minute))
+        snap = svc.snapshot("JOBY", REPORT, _et(REPORT, 17))
+        outcomes.append((snap.eps, snap.revenue, snap.status, snap.preliminary))
+    assert outcomes[1] == outcomes[0]
+
+
+def test_a_material_consensus_taking_a_row_of_zeros_off_is_the_estimate_shown():
+    svc = _svc()
+    now = _et(REPORT, 17)
+    svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+    _zeros_step(svc, _et(REPORT, 16))
+    _material_pending(svc, _et(REPORT, 16, 5))
+    snap = svc.snapshot("JOBY", REPORT, now)
+    assert (snap.eps, snap.revenue) == (els.LiveMetric(0.41), els.LiveMetric(16.6e9, due=True))
+    payload = els.live_payload("JOBY", REPORT, snap, company_name=None, eps_estimate=None,
+                               revenue_estimate=None, extras=None, today=REPORT)
+    assert payload["revenue"]["estimate"] == 16.6e9
+    assert els.card_fields(snap, REPORT)["revenue_actual"] is None
+
+
+def test_fmps_own_breakeven_beside_a_real_revenue_replaces_a_row_of_zeros():
+    """A real figure on the same row: the 0 stands, this time as what it says."""
+    svc = _svc()
+    now = _et(REPORT, 17)
+    svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+    _zeros_step(svc, _et(REPORT, 16))
+    svc.observe_rows(REPORT, [_pending_row(eps=0, rev=33.2e6)], now)
+    snap = svc.snapshot("JOBY", REPORT, now)
+    assert (snap.eps.actual, snap.revenue.actual) == (0.0, 33.2e6)
+
+
+@pytest.mark.parametrize("later", [dict(eps=0), dict(rev=0), dict()],
+                         ids=["fmp_repeats_its_eps", "fmp_repeats_its_revenue", "a_pending_row"])
+def test_a_row_of_zeros_stands_while_nothing_says_otherwise(later):
+    """A zero FMP says again is no real figure: a pre-revenue report stays what it was."""
+    svc = _svc()
+    now = _et(REPORT, 17)
+    _zeros_step(svc, _et(REPORT, 16))
+    svc.observe_rows(REPORT, [_pending_row(**later)], now)
+    snap = svc.snapshot("JOBY", REPORT, now)
+    assert (snap.eps.actual, snap.revenue.actual) == (0.0, 0.0)
+
+
+def test_a_row_of_zeros_sent_again_after_it_gave_way_stays_refused():
+    svc = _svc()
+    now = _et(REPORT, 17)
+    _zeros_step(svc, _et(REPORT, 16))
+    _revenue_fill(svc, _et(REPORT, 16, 1))
+    _zeros_step(svc, _et(REPORT, 16, 2))
+    rec = svc._records[("JOBY", REPORT)]
+    assert (rec.fmp_eps, rec.fmp_revenue) == (None, 33.2e6)
+    assert svc.snapshot("JOBY", REPORT, now).eps.actual is None
+
+
+@pytest.mark.parametrize("twins,filed,estimate,surprise", [
+    ((60e6, 600e6), 61e6, 60e6, 1.67),
+    ((60e6, 600e6), 590e6, 600e6, -1.67),
+    ((1.66e9, 16.6e9), 1.7e9, 1.66e9, 2.41),
+    ((1.66e9, 16.6e9), 16.9e9, 16.6e9, 1.81),
+    ((30e6, 16.6e9), 31e6, 30e6, 3.33),
+    ((30e6, 16.6e9), 16.9e9, 16.6e9, 1.81),
+    ((5e6, 20e6), 5.1e6, 5e6, 2.0),
+    ((5e6, 20e6), 19e6, 20e6, -5.0),
+], ids=["on_the_smaller_under_the_floor", "on_the_larger_across_the_floor",
+        "on_the_smaller_both_material", "on_the_larger_both_material",
+        "on_the_smaller_far_under_the_floor", "on_the_larger_far_across_the_floor",
+        "on_the_smaller_both_tiny", "on_the_larger_both_tiny"])
+@pytest.mark.parametrize("touched", [("2026-10-20", "2026-10-20"), ("2026-10-20", "2026-10-21"),
+                                     ("2026-10-21", "2026-10-20")],
+                         ids=["a_tie", "the_second_touched_last", "the_first_touched_last"])
+@pytest.mark.parametrize("flip", [False, True], ids=["as_listed", "listed_the_other_way"])
+@pytest.mark.parametrize("filing_first", [False, True], ids=["rows_first", "filing_first"])
+def test_which_twin_fmp_touched_last_never_decides_a_filing_figure(
+        twins, filed, estimate, surprise, touched, flip, filing_first):
+    """The same evidence, the company's own print on one of two consensus figures far apart, used
+    to end in a hold or in +280% for a -5% miss, by which pending row FMP touched last."""
+    rows = [{**_row("TINY", REPORT, rev_est=rev_est), "lastUpdated": when}
+            for rev_est, when in zip(twins, touched)]
+    svc = _svc()
+    now = _et(REPORT, 17)
+    if filing_first:
+        svc.absorb_filing("TINY", REPORT, _filed_revenue(filed), now)
+    svc.observe_rows(REPORT, rows[::-1] if flip else rows, now)
+    if not filing_first:
+        svc.absorb_filing("TINY", REPORT, _filed_revenue(filed), now)
+    snap = svc.snapshot("TINY", REPORT, now)
+    assert snap.revenue == els.LiveMetric(estimate, filed, surprise, els.SOURCE_FILING)
+    assert els.card_fields(snap, REPORT)["revenue_surprise_pct"] == surprise
+
+
+def test_a_filing_beside_fmps_figure_never_moves_that_rows_estimate():
+    """A hold, not a wrong number, and it clears with FMP's correction."""
+    svc = _svc()
+    now = _et(REPORT, 17)
+    rows = [_row("TINY", REPORT, eps=0.44, rev=6.1e6, rev_est=600e6),
+            _row("TINY", REPORT, rev_est=60e6)]
+    svc.observe_rows(REPORT, rows, now)
+    svc.absorb_filing("TINY", REPORT, _filed_revenue(61e6), now)
+    assert svc.snapshot("TINY", REPORT, now).revenue == els.LiveMetric(600e6, checking=True)
+
+
+def test_a_response_with_one_consensus_leaves_no_twin_to_read():
+    """The twin gone from FMP's answer is gone from the record."""
+    svc = _svc()
+    now = _et(REPORT, 17)
+    svc.observe_rows(REPORT, [_row("TINY", REPORT, rev_est=60e6),
+                              _row("TINY", REPORT, rev_est=600e6)], now)
+    svc.observe_rows(REPORT, [_row("TINY", REPORT, rev_est=600e6)], now)
+    svc.absorb_filing("TINY", REPORT, _filed_revenue(61e6), now)
+    assert svc.snapshot("TINY", REPORT, now).revenue == els.LiveMetric(600e6, checking=True)
+
+
 def test_a_refused_revenue_is_logged_once_with_its_symbol_and_day(caplog):
     """The fold runs every minute, and whether FMP ever sends this is exactly what a log
     has to answer."""
@@ -1203,17 +1397,55 @@ def test_a_filing_set_aside_for_fmp_is_logged_once(caplog):
     assert "the filing is set aside" in line and "5200000.0" in line
 
 
-def test_a_row_of_zeros_taken_off_is_logged_as_held(caplog):
+def test_a_row_of_zeros_that_gave_way_is_logged_once_with_what_undid_it(caplog):
     svc = _svc()
     now = _et(REPORT, 17)
     zeros = _row("JOBY", REPORT, eps=0, eps_est=-0.2, rev=0, rev_est=30e6)
     with caplog.at_level(logging.WARNING, logger=els.logger.name):
         svc.observe_rows(REPORT, [zeros], now)
         assert _guard_lines(caplog) == [], "a pre-revenue report, as far as anyone can tell"
-        svc.observe_rows(REPORT, [{**zeros, "epsActual": None, "revenueActual": None,
-                                   "revenueEstimated": 16.6e9}], now)
+        for _ in range(3):
+            svc.observe_rows(REPORT, [{**zeros, "epsActual": None, "revenueActual": None,
+                                       "revenueEstimated": 16.6e9}], now)
     (line,) = _guard_lines(caplog)
-    assert "held" in line
+    assert "JOBY" in line and REPORT.isoformat() in line
+    assert "row of zeros" in line and "16600000000.0" in line
+
+
+def test_a_fill_that_undoes_a_row_of_zeros_is_logged_with_its_figure(caplog):
+    svc = _svc()
+    now = _et(REPORT, 17)
+    with caplog.at_level(logging.WARNING, logger=els.logger.name):
+        _zeros_step(svc, now)
+        _revenue_fill(svc, now)
+    (line,) = _guard_lines(caplog)
+    assert "row of zeros" in line and "33200000.0" in line
+
+
+def test_a_digit_off_one_consensus_is_logged_as_held(caplog):
+    svc = _svc()
+    now = _et(REPORT, 17)
+    rows = [_row("ABCD", REPORT, eps=0.44, rev=9.9e6, rev_est=99e6),
+            _row("ABCD", REPORT, rev_est=101e6)]
+    with caplog.at_level(logging.WARNING, logger=els.logger.name):
+        svc.observe_rows(REPORT, rows, now)
+    (line,) = _guard_lines(caplog)
+    assert "held" in line and "9900000.0" in line and "101000000.0" in line
+
+
+def test_a_filing_reading_another_consensus_is_logged_once(caplog):
+    """The one surprise worked out against a consensus that is not the row FMP touched last, so
+    this line is the only way to tell the two apart afterwards."""
+    svc = _svc()
+    now = _et(REPORT, 17)
+    rows = [_row("TINY", REPORT, rev_est=600e6), _row("TINY", REPORT, rev_est=60e6)]
+    with caplog.at_level(logging.WARNING, logger=els.logger.name):
+        for _ in range(3):
+            svc.observe_rows(REPORT, rows, now)
+            svc.absorb_filing("TINY", REPORT, _filed_revenue(61e6), now)
+    (line,) = _guard_lines(caplog)
+    assert "the filing reads the consensus it sits on" in line
+    assert "61000000.0" in line and "60000000.0" in line and "600000000.0" in line
 
 
 def test_a_stored_zero_is_not_reported_as_refused(caplog):
@@ -1419,6 +1651,22 @@ def test_a_bad_fmp_revenue_with_nothing_material_to_judge_it_never_replaces_the_
     assert svc._fmp_wanted(REPORT, ["TINY"]), "only FMP's own figure confirms it"
 
 
+def test_a_dropped_digit_beside_a_twin_near_the_floor_stays_held_through_the_fold():
+    """The figure reads -90% against its own row's $99M, under the floor, while the twin's $101M
+    says the consensus is material. It is held until FMP corrects it."""
+    svc = _svc()
+    now = _et(REPORT, 17)
+    rows = [_row("ABCD", REPORT, eps=0.44, rev=9.9e6, rev_est=99e6),
+            _row("ABCD", REPORT, rev_est=101e6)]
+    svc.observe_rows(REPORT, [_row("ABCD", REPORT, rev_est=99e6)], _et(REPORT, 9))
+    svc.observe_rows(REPORT, rows, now)
+    snap = svc.snapshot("ABCD", REPORT, now)
+    assert snap.revenue == els.LiveMetric(99e6, checking=True)
+    assert (snap.status, snap.eps.actual) == (els.STATUS_LIVE, 0.44)
+    assert svc._fmp_wanted(REPORT, ["ABCD"]), "FMP's correction is what the loop waits for"
+    assert els.card_fields(snap, REPORT)["revenue_surprise_pct"] is None
+
+
 def test_a_twins_larger_consensus_never_holds_a_small_companys_figure():
     """`test_the_shown_consensus_beats_a_guard_only_one`, under the guard's floor."""
     pair = [_row("TINY", REPORT, eps_est=0.16, rev_est=600e6),
@@ -1458,6 +1706,22 @@ def test_two_sources_beside_a_consensus_that_lost_a_digit_carry_no_percentage():
 
 @pytest.mark.asyncio
 async def test_an_overtaken_estimate_reaches_neither_the_card_nor_the_sheet(monkeypatch):
+    rows = [_row("INTC", REPORT, eps=0.44, rev=16.9e9, rev_est=30e6),
+            _row("INTC", REPORT, rev_est=16.6e9)]
+    svc_obj = _door_service(monkeypatch, rows)
+    at = _et(REPORT, 16, 20)
+    await _tick(svc_obj.fmp, at, "INTC")
+    monkeypatch.setattr(ts, "datetime", _FrozenDatetime(at))
+    (card,) = await svc_obj._get_earnings_alerts(["INTC"])
+    assert (card.revenue_actual, card.revenue_estimate) == (16.9e9, None)
+    sheet = await svc_obj.get_earnings_live("INTC")
+    assert (sheet.revenue.actual, sheet.revenue.estimate, sheet.revenue.surprise_pct) == (
+        16.9e9, None, None)
+
+
+@pytest.mark.asyncio
+async def test_the_consensus_a_filing_reads_reaches_the_card_and_the_sheet(monkeypatch):
+    """The card takes the snapshot's estimate over its own row's, so the two can never differ."""
     rows = [_row("INTC", REPORT, rev_est=30e6), _row("INTC", REPORT, rev_est=16.6e9)]
     svc_obj = _door_service(monkeypatch, rows)
     at = _et(REPORT, 16, 20)
@@ -1465,10 +1729,23 @@ async def test_an_overtaken_estimate_reaches_neither_the_card_nor_the_sheet(monk
     _svc().absorb_filing("INTC", REPORT, _FILED_BESIDE_A_BAD_ROW, at)
     monkeypatch.setattr(ts, "datetime", _FrozenDatetime(at))
     (card,) = await svc_obj._get_earnings_alerts(["INTC"])
-    assert (card.revenue_actual, card.revenue_estimate) == (16.9e9, None)
+    assert (card.revenue_actual, card.revenue_estimate, card.revenue_surprise_pct) == (
+        16.9e9, 16.6e9, 1.81)
     sheet = await svc_obj.get_earnings_live("INTC")
     assert (sheet.revenue.actual, sheet.revenue.estimate, sheet.revenue.surprise_pct) == (
-        16.9e9, None, None)
+        16.9e9, 16.6e9, 1.81)
+
+
+def test_fmp_no_consensus_bears_out_never_replaces_the_figure_sitting_on_one():
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("TINY", REPORT, rev_est=50e6)], _et(REPORT, 9))
+    svc.absorb_filing("TINY", REPORT, _filed_revenue(52e6), _et(REPORT, 16, 3))
+    svc.observe_rows(REPORT, [_row("TINY", REPORT, eps=0.44, rev=11e6, rev_est=50e6)],
+                     _et(REPORT, 16, 30))
+    snap = svc.snapshot("TINY", REPORT, _et(REPORT, 17))
+    assert snap.revenue == els.LiveMetric(50e6, 52e6, 4.0, els.SOURCE_FILING)
+    assert (snap.status, snap.preliminary) == (els.STATUS_REPORTED, True)
+    assert svc._fmp_wanted(REPORT, ["TINY"]), "only FMP's own figure confirms it"
 
 
 def test_a_filing_figure_standing_in_for_a_held_fmp_figure_keeps_the_fetch_on():

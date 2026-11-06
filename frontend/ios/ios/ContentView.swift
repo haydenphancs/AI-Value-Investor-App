@@ -565,6 +565,10 @@ struct ResearchViewWithBinding: View {
             NavigationStack {
                 TickerReportView(report: report)
             }
+            // The screen watches `\.appState` to load once a session is back, and that key
+            // defaults to a throwaway AppState when a chain breaks, so it would wait forever.
+            .environment(appState)
+            .environment(\.appState, appState)
         }
         .fullScreenCover(isPresented: $showProfile) {
             ProfileView()

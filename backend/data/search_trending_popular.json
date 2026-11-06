@@ -1,5 +1,5 @@
 {
-  "_comment": "Curated fallback for the search-screen chips (app/services/search_trending_service.py). Shown, labelled 'Popular', only while too little real activity qualifies for 'Trending searches' / 'Most added'. Changing it needs a backend deploy, not an app update. 'all' feeds Home search, the ticker-search sheet and the Tracking add sheet; 'stocks' feeds the company picker and the Updates 'Add Ticker' sheet (type must be 'stock'). Symbols are FMP spellings: BRK-B, never BRK.B. 'blocked' removes a ticker from every list (abuse, delisting) without an app release.",
+  "_comment": "Curated fallback for the search-screen chips (app/services/search_trending_service.py). Shown, labelled 'Well-known names' by the app, only while too little real activity qualifies for 'Trending searches' / 'Most added'. Changing it needs a backend deploy, not an app update. 'all' feeds Home search, the ticker-search sheet and the Tracking add sheet; 'stocks' feeds the company picker and the Updates 'Add Ticker' sheet (type must be 'stock'). Symbols are FMP spellings: BRK-B, never BRK.B. 'blocked' removes a ticker from every list (abuse, delisting) without an app release.",
   "all": [
     {"symbol": "AAPL", "name": "Apple Inc.", "type": "stock"},
     {"symbol": "NVDA", "name": "NVIDIA Corporation", "type": "stock"},

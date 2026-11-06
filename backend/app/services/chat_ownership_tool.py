@@ -59,7 +59,11 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.services._insider_common import insider_window_cutoff, plain_transaction_phrase
+from app.services._insider_common import (
+    insider_window_cutoff,
+    plain_transaction_phrase,
+    share_class_note,
+)
 from app.services.asset_class import detect_asset_class
 from app.utils.market_hours import ET
 
@@ -111,7 +115,8 @@ _ACTIVITY_BASIS = (
     "open-market purchases and sales only (Form 4 codes P and pure S; grants, exercises, "
     "gifts, tax withholding and conversions excluded); the 3- and 6-month windows are calendar "
     "months, the newest partial; dollars are shares times each trade's price (a sale's are "
-    "proceeds)."
+    "proceeds); a trade filed with no price uses that day's close where one is comparable, an "
+    "estimate the line says it holds."
 )
 _ACTIVITY_UNAVAILABLE = {
     "available": False,
@@ -381,7 +386,7 @@ def _window_trades(activities: List[Any], months: set) -> Dict[str, Any]:
     buyers: set = set()
     sellers: set = set()
     bought_sh = sold_sh = 0.0
-    unpriced = 0
+    unpriced = estimated = 0
     for act in activities:
         kind = getattr(act, "transaction_type", "")
         if kind not in ("Informative Buy", "Informative Sell"):
@@ -396,6 +401,8 @@ def _window_trades(activities: List[Any], months: set) -> Dict[str, Any]:
         value = shares * price if price is not None and price > 0 else None
         if value is None:
             unpriced += 1
+        elif getattr(act, "price_estimated", None) is True:
+            estimated += 1
         name = str(getattr(act, "name", "") or "").strip().lower()
         if kind == "Informative Buy":
             bought_sh += shares
@@ -407,12 +414,12 @@ def _window_trades(activities: List[Any], months: set) -> Dict[str, Any]:
             sellers.add(name)
     return {"bought_sh": bought_sh, "sold_sh": sold_sh, "bought_usd": bought_usd,
             "sold_usd": sold_usd, "buyers": len(buyers), "sellers": len(sellers),
-            "unpriced": unpriced}
+            "unpriced": unpriced, "estimated": estimated}
 
 
 def _window_text(span: str, bought_sh: float, sold_sh: float, bought_usd: Optional[float],
                  sold_usd: Optional[float], buyers: Optional[int], sellers: Optional[int],
-                 unpriced: int = 0) -> str:
+                 unpriced: int = 0, estimated: int = 0) -> str:
     if bought_sh <= 0 and sold_sh <= 0:
         return f"{span}: no open-market purchase or sale was reported"
     parts = []
@@ -433,6 +440,10 @@ def _window_text(span: str, bought_sh: float, sold_sh: float, bought_usd: Option
     elif bought_usd is not None and sold_usd is not None and (bought_usd or sold_usd):
         net = bought_usd - sold_usd
         text += f"; net about {_usd_text(net)} ({'net buying' if net > 0 else 'net selling' if net < 0 else 'even'})"
+    if estimated:
+        # Stated apart from the unpriced note: these ARE in the dollars, as an estimate.
+        text += (f"; {estimated} trade(s) reported no price and are valued at that day's close, "
+                 "so these dollars are an estimate")
     return text
 
 
@@ -440,10 +451,11 @@ def _built_day(resp: Any) -> Optional[datetime]:
     return _built_at(getattr(resp, "ownership_detail", None))
 
 
-def _unpriced_since(activities: List[Any], cutoff: str) -> int:
-    """Open-market trades of the activity list dated on or after `cutoff` (``YYYY-MM-DD``)
-    that reported no price — the ones a dollar total built from priced trades leaves out."""
-    count = 0
+def _price_gaps_since(activities: List[Any], cutoff: str) -> Tuple[int, int]:
+    """(unpriced, estimated) open-market trades of the activity list dated on or after `cutoff`
+    (``YYYY-MM-DD``): those with no value at all, which a dollar total leaves out, and those
+    valued at the trade-date close (`price_estimated`), which it holds."""
+    unpriced = estimated = 0
     for act in activities:
         if getattr(act, "transaction_type", "") not in ("Informative Buy", "Informative Sell"):
             continue
@@ -454,11 +466,15 @@ def _unpriced_since(activities: List[Any], cutoff: str) -> int:
             continue
         price = _finite(getattr(act, "price_at_transaction", None))
         if price is None or price <= 0:
-            count += 1
-    return count
+            unpriced += 1
+        elif getattr(act, "price_estimated", None) is True:
+            estimated += 1
+    return unpriced, estimated
 
 
-def _insider_activity_block(resp: Any, *, note: Optional[str] = None) -> Dict[str, Any]:
+def _insider_activity_block(
+    resp: Any, *, note: Optional[str] = None, symbol: str = "",
+) -> Dict[str, Any]:
     """Open-market buying and selling over 3, 6 and 12 months, from ONE Holders build (`resp`,
     or the insider side of a forced rebuild — `_InsiderView`): share totals from the chart's
     monthly bars (by label — any order, missing months are simply absent), dollars and
@@ -494,6 +510,9 @@ def _insider_activity_block(resp: Any, *, note: Optional[str] = None) -> Dict[st
         now = datetime.now(ET)
         anchor = (now.year, now.month)
     block: Dict[str, Any] = {"available": True, "basis": _ACTIVITY_BASIS}
+    classes = share_class_note(symbol)
+    if classes:
+        block["share_classes"] = classes
     if note:
         block["read_at"] = _et_stamp(built)
         block["note"] = note
@@ -510,7 +529,7 @@ def _insider_activity_block(resp: Any, *, note: Optional[str] = None) -> Dict[st
         span = f"last {count} months ({oldest[1]:02d}/{oldest[0]}-{newest[1]:02d}/{newest[0]})"
         block[f"last_{count}_months"] = _window_text(
             span, bought_sh, sold_sh, trades["bought_usd"], trades["sold_usd"],
-            trades["buyers"], trades["sellers"], trades["unpriced"],
+            trades["buyers"], trades["sellers"], trades["unpriced"], trades["estimated"],
         )
     summary = getattr(recent, "summary", None)
     card = getattr(smart, "summary", None)
@@ -522,10 +541,12 @@ def _insider_activity_block(resp: Any, *, note: Optional[str] = None) -> Dict[st
     # ("2026-10-29 21:00 ET … to 2026-10-30").
     span = "last 12 months (trailing 365 days" + (
         f" to {built_et.date().isoformat()})" if built_et is not None else ")")
-    # The card sums priced trades only (`holders_service`: a trade with no price adds 0);
-    # the trades it left out are counted over the card's own window, as the 3/6 lines do: the
-    # UTC read time, as `holders_service` took the card's cutoff at build (never New York's day).
-    cutoff = insider_window_cutoff(built)
+    # The card sums priced trades and trades valued at their close (`holders_service`), and
+    # carries no dollars at all when a trade has no value. Both kinds are counted over the
+    # card's own window, as the 3/6 lines do: the UTC read time, as `holders_service` took the
+    # card's cutoff at build (never New York's day).
+    unpriced, estimated = _price_gaps_since(activities, insider_window_cutoff(built))
+    has_dollars = bought_usd is not None or sold_usd is not None
     block["last_12_months"] = _window_text(
         span, max(bought_sh, 0.0), max(sold_sh, 0.0),
         bought_usd * 1e6 if bought_usd is not None else None,
@@ -533,8 +554,8 @@ def _insider_activity_block(resp: Any, *, note: Optional[str] = None) -> Dict[st
         _count_or_none(getattr(summary, "num_buyers", None)),
         _count_or_none(getattr(summary, "num_sellers", None)),
         # Only beside dollar figures (an older build's card carries none).
-        _unpriced_since(activities, cutoff)
-        if bought_usd is not None or sold_usd is not None else 0,
+        unpriced if has_dollars else 0,
+        estimated if has_dollars else 0,
     )
     return block
 
@@ -1292,7 +1313,9 @@ async def fetch_ownership(ticker: str, user_tier: Optional[str] = None) -> Dict[
         "resolved_as": _resolved_as(sym),
         "filings_checked_at": _et_stamp(built),
         "insiders": insiders,
-        "insider_activity": _insider_activity_block(activity_source, note=activity_note),
+        "insider_activity": _insider_activity_block(
+            activity_source, note=activity_note, symbol=sym,
+        ),
         "institutions": _institutions_block(resp, degraded),
         "float": _float_block(resp),
         "short_interest": _short_block(short_interest, short_status, resp),

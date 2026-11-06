@@ -55,6 +55,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
+from app.utils.supabase_errors import is_transient_supabase_error, retry_idempotent_sync
 from app.integrations.fmp import FMPRateLimitException, FMPUnavailableException, get_fmp_client
 from app.config import settings
 from app.integrations.fmp_entitlements import is_blocked_symbol
@@ -202,6 +203,27 @@ def _record_failed_fetch_cycle(which: str, target: str) -> None:
         "price_service: close snapshot NOT refreshed: %s batch-eod fetch for %s failed — "
         "stored snapshot kept, the hourly loop retries (failed cycle %d in a row)",
         which, target, _eod_failed_cycles,
+    )
+
+
+def _record_failed_write_cycle(target: str, exc: Exception) -> None:
+    """One ingest cycle ended on a TRANSIENT write failure that outlived the chunk retries.
+
+    The same streak as a failed fetch, so a one-off edge blip (the hourly loop is the next
+    retry) stays a WARNING and only a sustained one reaches ERROR. The wording differs because
+    a write can stop part-way: the chunks already written stand, on the new session.
+    """
+    global _eod_failed_cycles
+    _eod_failed_cycles += 1
+    log = (
+        logger.error if _eod_failed_cycles >= _EOD_FAILED_CYCLES_ESCALATE_AT
+        else logger.warning
+    )
+    log(
+        "price_service: close upsert for %s stopped on a transient Supabase failure "
+        "(%s: %s) — chunks already written stand, the rest keep their stored close, the "
+        "hourly loop retries (failed cycle %d in a row)",
+        target, type(exc).__name__, exc, _eod_failed_cycles,
     )
 
 
@@ -1482,8 +1504,11 @@ class PriceService:
         try:
             written = await asyncio.to_thread(self._upsert_closes, payload)
         except Exception as e:
-            logger.error("price_service: close upsert failed for %s: %s: %s",
-                         latest_date, type(e).__name__, e, exc_info=True)
+            if is_transient_supabase_error(e):
+                _record_failed_write_cycle(latest_date, e)
+            else:
+                logger.error("price_service: close upsert failed for %s: %s: %s",
+                             latest_date, type(e).__name__, e, exc_info=True)
             return 0
 
         _reset_failed_fetch_cycles()        # only a successful write ends a failure streak
@@ -1627,9 +1652,16 @@ class PriceService:
         CHUNK = 1000
         for i in range(0, len(payload), CHUNK):
             chunk = payload[i:i + CHUNK]
-            supabase.table("market_close_snapshot").upsert(
-                chunk, on_conflict="symbol", returning="minimal",
-            ).execute()
+            # Per chunk: a whole-market write is ~74 POSTs, and one Cloudflare 502 on one of
+            # them used to drop every later chunk until the next hourly cycle (PYTHON-FASTAPI-54).
+            # Safe to replay: keyed on `symbol`, so a chunk that did commit converges.
+            retry_idempotent_sync(
+                lambda: supabase.table("market_close_snapshot").upsert(
+                    chunk, on_conflict="symbol", returning="minimal",
+                ).execute(),
+                what=f"close upsert chunk at row {i}",
+                logger=logger,
+            )
             written += len(chunk)
         return written
 

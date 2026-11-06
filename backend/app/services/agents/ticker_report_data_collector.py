@@ -97,7 +97,7 @@ from app.services.price_volatility import (  # noqa: E402  (import-after-import 
     max_session_move,
 )
 from pathlib import Path
-from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Set, Tuple
 
 from app.config import settings
 from app.integrations.fmp import FMPClient, get_fmp_client
@@ -121,18 +121,28 @@ from app.schemas.dcf_fair_value import DcfFairValueResponse
 from app.services._insider_common import (
     INSIDER_MAX_PAGES,
     INSIDER_PAGE_SIZE,
+    INSIDER_VALUE_NOTE,
+    VALUE_ESTIMATED,
+    VALUE_UNPRICED,
     classify_insider_transaction,
     clean_role_title,
+    distinct_trades,
     ensure_insider_label,
     insider_row_date,
+    insider_row_value,
+    insider_split_days,
     insider_window_cutoff,
     is_ceo_role,
     is_equity_line,
     is_informative,
+    needs_close,
     normalize_insider_name,
     prepare_insider_rows,
+    priced_close_lookup,
+    share_class_multiple,
     _normalize_cik,
 )
+from app.services.corporate_actions_service import corporate_actions_source
 from app.services._insider_holdings import (
     insider_holdings_from_rows,
     roster_from_holdings,
@@ -483,6 +493,11 @@ class CollectedTickerData:
     # key-metrics-ttm ROIC → ROCE → ratios-ttm ROCE. None → the scorer falls
     # back to the annual focal ROIC (warns: mixed periods).
     focal_roic_ttm: Optional[float] = None
+    # The focal's /key-metrics-ttm row. ROE and ROA live there, not on /ratios-ttm.
+    focal_km_ttm: Dict[str, Any] = field(default_factory=dict)
+    # Split dates over the insider window, read only when an open-market row has no price
+    # (`needs_close`). None = the lookup failed, so no close may value such a row.
+    insider_split_days: Optional[List[str]] = field(default_factory=list)
     sector_aggregates: Optional[SectorAggregates] = None
     # Pre-computed sector-median HISTORY ({period_type: {sector_metric_name:
     # {period_label: value}}}) for the "*" card metrics, read from the
@@ -899,6 +914,14 @@ def report_degraded_sections(report: Any) -> List[str]:
     if isinstance(raw, (list, tuple)):
         return [str(r) for r in raw if r]
     return [str(raw)] if raw else []
+
+
+def record_degraded_section(report: Dict[str, Any], section: str) -> None:
+    """Add one lost section to a report, keeping any `assemble_report` already recorded. Every
+    shared cache refuses a report that has one; its buyer still gets it."""
+    lost = report_degraded_sections(report)
+    if section not in lost:
+        report[DEGRADED_SECTIONS_KEY] = [*lost, section]
 
 
 # Growth: the FMP leg → the series it feeds (GrowthService._build_growth). A failed leg
@@ -1816,12 +1839,12 @@ class TickerReportDataCollector:
             ("cash_flow_q", self.fmp.get_cash_flow_statement(ticker, "quarter", 40), []),
             ("key_metrics_q", self.fmp.get_key_metrics(ticker, "quarter", 40), []),
             ("ratios_q", self.fmp.get_financial_ratios(ticker, "quarter", 40), []),
-            # Pull 10 years of analyst estimates so we have current FY + 3
-            # future on-screen (4 bars), plus the FY immediately before the
-            # leftmost visible bar as its off-screen YoY anchor. FMP returns
-            # newest-by-date first; sorted-ascending we get past actuals on
-            # the left and forward estimates on the right, which lets the
-            # window helper pick "current = first FY with date >= today".
+            # Pull 10 years of analyst estimates so we have up to 4 forward years
+            # on-screen, plus the FY immediately before the leftmost visible bar
+            # as its off-screen YoY anchor. FMP returns newest-by-date first and
+            # keeps the consensus of years already reported; sorted-ascending
+            # those sit on the left and forward estimates on the right, which lets
+            # the window helper pick "current = first FY with date >= today".
             ("estimates", self.fmp.get_analyst_estimates(ticker, "annual", 10), []),
             ("historical", self.fmp.get_historical_prices(ticker, from_date=hist_from), {}),
             ("news", self.fmp.get_stock_news(ticker, 20), []),
@@ -2231,14 +2254,21 @@ class TickerReportDataCollector:
             self._fetch_peer_ratios(peers)
             if peers else asyncio.sleep(0, result={})
         )
-        # The focal's own TTM key metrics, so its ROIC is the same period as
-        # the peers' (`_fetch_peer_ratios` reads /key-metrics-ttm). One call,
-        # only when there are peers to score — and NEVER by adding the focal
-        # to `peers`, which would shift `n_total_peers` (the directness
-        # denominator) and fetch a profile the scorer then drops.
+        # The focal's own TTM key metrics: its ROIC is the same period as the peers'
+        # (`_fetch_peer_ratios` reads /key-metrics-ttm), and its ROE and ROA the same period
+        # as the Profitability card. One call, only when there are peers to score (with none,
+        # ROE and ROA keep the annual figure) — and NEVER by adding the focal to `peers`,
+        # which would shift `n_total_peers` (the directness denominator) and fetch a profile
+        # the scorer then drops.
         focal_km_ttm_task = (
             self.fmp.get_key_metrics_ttm(ticker)
             if peers else asyncio.sleep(0, result=None)
+        )
+        # `_build_sections` values an open-market Form 4 row with no price at its close, which
+        # is on the wrong share basis before a split. Read only for such a row.
+        insider_splits_task = (
+            insider_split_days(corporate_actions_source(self), ticker)
+            if needs_close(out.insider_trades) else asyncio.sleep(0, result=[])
         )
         sector_agg_task = (
             get_sector_aggregates(sector)
@@ -2299,7 +2329,7 @@ class TickerReportDataCollector:
 
         (
             peer_profiles, peer_ratios, sector_agg, industry_tam, sector_bench,
-            focal_km_ttm,
+            focal_km_ttm, insider_splits,
         ) = await asyncio.gather(
             peer_profiles_task,
             peer_ratios_task,
@@ -2307,6 +2337,7 @@ class TickerReportDataCollector:
             industry_tam_task,
             sector_bench_task,
             focal_km_ttm_task,
+            insider_splits_task,
             return_exceptions=True,
         )
 
@@ -2345,14 +2376,23 @@ class TickerReportDataCollector:
         else:
             out.peer_ratios = peer_ratios or {}
 
+        if isinstance(focal_km_ttm, Exception):
+            logger.warning(
+                f"Collector pass 2: focal key-metrics-ttm failed for {ticker}: "
+                f"{type(focal_km_ttm).__name__}: {focal_km_ttm} — focal ROE, ROA and ROIC "
+                f"fall back to the annual figures, the peer table's ROIC to ratios-ttm"
+            )
+            focal_km_ttm = None
+        out.focal_km_ttm = _first_dict_row(focal_km_ttm)
+        if isinstance(insider_splits, Exception):
+            logger.warning(
+                f"Collector pass 2: insider split lookup failed for {ticker}: "
+                f"{type(insider_splits).__name__}: {insider_splits} — rows with no price stay "
+                f"unvalued"
+            )
+            insider_splits = None
+        out.insider_split_days = insider_splits
         if peers:
-            if isinstance(focal_km_ttm, Exception):
-                logger.warning(
-                    f"Collector pass 2: focal key-metrics-ttm failed for {ticker}: "
-                    f"{type(focal_km_ttm).__name__}: {focal_km_ttm} — focal ROIC "
-                    f"falls back to ratios-ttm, then annual"
-                )
-                focal_km_ttm = None
             out.focal_roic_ttm = _resolve_focal_roic_ttm(
                 focal_km_ttm, out.ratios_ttm,
             )
@@ -2748,12 +2788,18 @@ class TickerReportDataCollector:
             c["gross_margin"] = _pct_or_none(_cur_margin("grossProfitMargin"))
             c["net_margin"] = _pct_or_none(_cur_margin("netProfitMargin"))
             c["operating_margin"] = _pct_or_none(_cur_margin("operatingProfitMargin"))
-            c["roe"] = _pct_or_none(
-                _cur("returnOnEquity") or km0.get("returnOnEquity")
-            )
-            c["roa"] = _pct_or_none(
-                _cur("returnOnAssets") or km0.get("returnOnAssets")
-            )
+            # TTM first, the period the Profitability card scores. /ratios-ttm has no ROE
+            # field, so `_cur` alone fell through to the fiscal year and the Buffett style
+            # score read 9.3% beside a card reading 11.86%. `is None`, never `or`: a real 0.0
+            # or a loss is a reading.
+            km_ttm = getattr(out, "focal_km_ttm", None) or {}
+
+            def _ttm_return(name: str) -> Any:
+                ttm = _finite_or_none(km_ttm.get(f"{name}TTM"))
+                return ttm if ttm is not None else (_cur(name) or km0.get(name))
+
+            c["roe"] = _pct_or_none(_ttm_return("returnOnEquity"))
+            c["roa"] = _pct_or_none(_ttm_return("returnOnAssets"))
             c["pe_ratio"] = _num_or_none(
                 _cur("priceToEarningsRatio", "priceEarningsRatio")
             )
@@ -2818,12 +2864,14 @@ class TickerReportDataCollector:
         # regardless of FMP's response order (newest-first vs oldest-first
         # has flipped historically across endpoint versions).
         if estimates and len(estimates) >= 2:
-            # CAGR spans the 4 visible chart years so the legend caption
+            # CAGR spans the visible chart years (up to 4) so the legend caption
             # matches what the user sees. The off-screen anchor returned
             # by the helper is consumed only by _build_revenue_forecast_
             # partial for the leftmost bar's YoY chip — it must NOT
             # stretch the CAGR span.
-            visible_est, _ = _select_visible_forecast_window(estimates)
+            visible_est, _ = _select_visible_forecast_window(
+                estimates, income=income,
+            )
             n = len(visible_est)
             if n >= 2:
                 est0_rev = _est_revenue(visible_est[0])
@@ -2901,10 +2949,16 @@ class TickerReportDataCollector:
         )
         _km0 = key_metrics[0] if key_metrics else {}
         _r0 = ratios[0] if ratios else {}
+        # `focal_km_ttm`, never `focal_roic_ttm`: that one falls back to ROCE for the peer table.
+        _roic_ttm = _finite_or_none(
+            (getattr(out, "focal_km_ttm", None) or {}).get("returnOnInvestedCapitalTTM")
+        )
         c["roic"] = _pct_or_none(
-            _km0.get("returnOnInvestedCapital")
-            or _r0.get("returnOnInvestedCapital")
-            or _km0.get("roic")
+            _roic_ttm if _roic_ttm is not None else (
+                _km0.get("returnOnInvestedCapital")
+                or _r0.get("returnOnInvestedCapital")
+                or _km0.get("roic")
+            )
         )
 
         out.computed = c
@@ -3025,11 +3079,24 @@ class TickerReportDataCollector:
                 "elsewhere, or a CIK change", out.ticker, sum(foreign.values()),
                 sorted(foreign), issuer_cik,
             )
+        closes = _hist_list(out.historical)
+        close_on = priced_close_lookup(
+            ((row.get("date"), row.get("close")) for row in closes if isinstance(row, dict)),
+            out.insider_split_days,
+            is_adr=profile.get("isAdr") is True,
+        )
         insider_data, insider_vital_partial = _build_insider_sections(
             insider_rows, unavailable=bool(getattr(out, "insider_unavailable", False)),
+            symbol=out.ticker, close_on=close_on,
         )
         out.insider_data_partial = insider_data
         out.insider_vital_partial = insider_vital_partial
+        if insider_vital_partial.get("unpriced_rows") and (
+            not closes or out.insider_split_days is None
+        ):
+            # A read that failed once, not a fact about the company: the insider verdict went
+            # unstated because of it, so this collection must not be shared until the close.
+            out.degraded_sections.append("insider_data:closes_unavailable")
 
         # ── Key management roster ─────────────────────────────────────
         _km_shares_out = (
@@ -3043,6 +3110,7 @@ class TickerReportDataCollector:
             current_price,
             beneficial_owners=out.beneficial_owners,
             shares_outstanding=float(_km_shares_out or 0),
+            symbol=out.ticker,
         )
 
         # ── Price action: deterministic earnings + news-catalyst event ──
@@ -3198,7 +3266,7 @@ class TickerReportDataCollector:
         insider_data = dict(out.insider_data_partial)
         insider_ai = ai.get("insider_analysis") or {}
         insider_data["ownership_note"] = (
-            insider_ai.get("ownership_note")
+            _stage_a_text(insider_ai.get("ownership_note"))
             or insider_data.get("ownership_note")
         )
         # Capital Allocation block (buybacks + dividends) — reuses the same
@@ -3532,45 +3600,27 @@ class TickerReportDataCollector:
             n_total_peers=len(out.peer_ranks),
             focal_roic_ttm=out.focal_roic_ttm,
         )
-        # Coverage-aware insight + durability note: when one or more
-        # pillars fall flat because the industry's real moats live
-        # outside the financial-statement lens (mining, banks, insurers,
-        # REITs, utilities, energy), append a short explanation so the
-        # user understands a low radar corner is industry-normal rather
-        # than a company weakness. The same note is appended to BOTH
-        # the durability note (rendered as "Insight" under the radar)
-        # AND the competitive insight (iOS no longer renders it — its
-        # `competitiveInsightSection` was removed in 5672700d and stays
-        # removed — but the PDF and the report chat still read it).
-        # Suffix is suppressed on the "Data unavailable"
-        # placeholder for each field, since appending to a placeholder
-        # reads awkwardly.
-        ai_competitive_insight = ai_moat.get("competitive_insight")
-        ai_durability_note = ai_moat.get("durability_note")
-        base_competitive_insight = (
-            ai_competitive_insight or "Data unavailable for this ticker."
-        )
-        base_durability_note = (
-            ai_durability_note or "Data unavailable for this ticker."
-        )
-        coverage_note: Optional[str] = None
-        if ai_competitive_insight or ai_durability_note:
-            # Compute once; reuse across both fields. Returns None when
-            # every pillar resolved cleanly, in which case no suffix is
-            # added anywhere.
-            coverage_note = _build_moat_coverage_note(moat_dims, focal_industry)
+        # Coverage note: when one or more pillars fall flat because the industry's real moats
+        # live outside the financial-statement lens (mining, banks, insurers, REITs,
+        # utilities, energy), the user should learn that a low radar corner is
+        # industry-normal rather than a company weakness. Stage A leaves both narrative
+        # fields empty and Stage B overwrites them, so a suffix added here never survived.
+        # The note travels under `_coverage_note` and `build_narrative_jobs` pops it and
+        # appends it to real model text on BOTH fields: the durability note (rendered as
+        # "Insight" under the radar) and the competitive insight (iOS no longer renders it,
+        # its `competitiveInsightSection` was removed in 5672700d, but the PDF and the report
+        # chat still read it). The "Data unavailable" placeholder never gets a suffix.
         moat_competition = {
             "market_dynamics": deterministic_market_dynamics,
             "dimensions": moat_dims,
             "durability_note": (
-                base_durability_note
-                + (coverage_note if (coverage_note and ai_durability_note) else "")
+                ai_moat.get("durability_note") or "Data unavailable for this ticker."
             ),
             "competitors": deterministic_competitors,
             "competitive_insight": (
-                base_competitive_insight
-                + (coverage_note if (coverage_note and ai_competitive_insight) else "")
+                ai_moat.get("competitive_insight") or "Data unavailable for this ticker."
             ),
+            "_coverage_note": _build_moat_coverage_note(moat_dims, focal_industry),
             # The ORDER MARKER every "most direct first" claim depends on (chat,
             # iOS caption, Stage-B prompts, PDF). Always "threat" / "industry_peers"
             # now: the one directness-ranked list ("direct" / "research") came from
@@ -3583,7 +3633,7 @@ class TickerReportDataCollector:
             # (`moat_scoring_service.report_moat_model_is_current`) never re-sells another one.
             "model_version": MOAT_SCORER_VERSION,
         }
-        moat_vital = _derive_moat_vital(moat_dims, deterministic_competitors)
+        moat_vital = _derive_moat_vital(moat_dims)
 
         # ── Macro: deterministic numeric factors merge into AI's qualitative
         # ones. Order of priority (real data wins on category collision):
@@ -3638,7 +3688,7 @@ class TickerReportDataCollector:
             # `measured` = did the AUTHORITATIVE tier actually produce anything? With
             # FRED unconfigured `fred_factors` is empty AND no FRED read happened, so an
             # empty risk set means "not measured", not "nothing tripped".
-            "headline": ai_macro.get("headline") or _fallback_macro_headline(
+            "headline": _stage_a_text(ai_macro.get("headline")) or _fallback_macro_headline(
                 threat_level, risk_factors, measured=macro_measured
             ),
             "risk_factors": risk_factors,
@@ -3790,7 +3840,7 @@ class TickerReportDataCollector:
             # Hard cap at 5 ("never more than 5") — the Stage A prompt targets
             # 2-3, this is the deterministic safety net. Applied before Stage B
             # so only the kept factors get narrative jobs.
-            "critical_factors": list(ai.get("critical_factors") or [])[:5],
+            "critical_factors": _sanitize_stage_a_factors(ai.get("critical_factors")),
 
             "disclaimer_text": DISCLAIMER,
         }
@@ -3959,6 +4009,7 @@ def _safe_cagr(
 def _select_visible_forecast_window(
     estimates: List[Dict[str, Any]],
     today: Optional[date] = None,
+    income: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """Pick the 4 chart-visible projections plus the off-screen anchor.
 
@@ -3969,11 +4020,17 @@ def _select_visible_forecast_window(
     as the YoY anchor for the first bar so the chip on bar 1 has a real
     prior-year baseline.
 
-    Fallback: if FMP didn't return enough forward entries to fill the
-    4-wide window, return the last 4 entries by date with the 5th-from-
-    last as the anchor. This keeps the synthetic test fixtures (which
-    pass 3-entry past-dated lists) producing the same projections count
-    as before.
+    Fewer than 4 forward entries, with reported years known (`income`): only the fiscal years
+    after the last reported one, however few (the newest 4 when a filer is further behind), and
+    no anchor. A reported year is not a forecast: the old fallback kept Berkshire's FY2025
+    consensus as the base of its CAGR, and made TER's revenue CAGR 36.1% against a real 22.8%
+    and GME's EPS CAGR 198.4% against 3.3%. Compared by FISCAL year (`_forecast_fiscal_label`),
+    so a 52/53-week filer cannot slip a reported year through on its date.
+
+    An empty `income` (a failed read): only the entries dated from today on, since no reported
+    year can be told apart. Otherwise, and when `income` is not passed at all, the last 4 by
+    date with the 5th-from-last as the anchor, which keeps the synthetic fixtures' lists
+    producing the same count.
     """
     if not estimates:
         return [], None
@@ -3993,6 +4050,18 @@ def _select_visible_forecast_window(
             sorted_all[first_future - 1] if first_future > 0 else None
         )
         return visible, anchor
+    actuals, _ = _annual_timeline_rows(income, None) if income else ([], [])
+    if actuals:
+        last_actual = actuals[-1]
+
+        def _is_forward(est: Dict[str, Any]) -> bool:
+            label = _forecast_fiscal_label(est, last_actual)
+            return label is not None and label.isdigit() and int(label) > last_actual.fy
+
+        return [e for e in sorted_all if _is_forward(e)][-4:], None
+    if income is not None and first_future is not None:
+        anchor = sorted_all[first_future - 1] if first_future > 0 else None
+        return sorted_all[first_future:], anchor
     visible = sorted_all[-4:]
     anchor = sorted_all[-5] if len(sorted_all) >= 5 else None
     return visible, anchor
@@ -4260,6 +4329,9 @@ def _format_shares_short(v: float) -> str:
         return f"{v / 1e6:.1f}M"
     if v >= 1e3:
         return f"{v / 1e3:.0f}K"
+    if v < 1:
+        # A converted line: 200 Class B shares on a BRK-A report.
+        return f"{v:.2f}"
     return f"{int(v):,}"
 
 
@@ -6876,11 +6948,10 @@ def _build_revenue_forecast_partial(
     eps_cagr: Optional[float],
     income: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    # Pick 4 chart-visible projections (current FY + 3 forward) plus the
-    # off-screen anchor (FY before "current") for the leftmost bar's YoY
-    # chip. Falls back to the last 4 entries when FMP doesn't return
-    # enough forward data — see `_select_visible_forecast_window`.
-    sorted_estimates, anchor = _select_visible_forecast_window(estimates)
+    # Pick up to 4 forward projections plus the off-screen anchor (FY before
+    # "current") for the leftmost bar's YoY chip. With fewer than 4 forward
+    # years there is no anchor — see `_select_visible_forecast_window`.
+    sorted_estimates, anchor = _select_visible_forecast_window(estimates, income=income)
 
     # Pick a single divisor across all bars so they're visually comparable.
     revs = [_est_revenue(est) for est in sorted_estimates]
@@ -6916,11 +6987,18 @@ def _build_revenue_forecast_partial(
         rev = _est_revenue(est)
         eps = _est_eps(est)
         # Prior year is the previous visible projection, or the anchor
-        # for the first visible year. Anchor may be None in tests with
-        # only 3 estimates — first year's YoY then comes back as null.
+        # for the first visible year. With no anchor the first bar reads
+        # against the last reported year, or null when that is not the prior year.
         if i == 0:
             prior_rev = _est_revenue(anchor) if anchor else None
             prior_eps = _est_eps(anchor) if anchor else None
+            # No estimate row before the window: the first bar reads against the last REPORTED
+            # revenue, only when that is the year before it (a filer behind on its reports
+            # would print a multi-year change as YoY, which the timeline refuses too). EPS
+            # stays None: a GAAP actual against a consensus figure is not a growth rate
+            # (`crosses_basis`), Berkshire would show about -28%.
+            if anchor is None and last_actual is not None and period == str(last_actual.fy + 1):
+                prior_rev = last_actual.revenue
         else:
             prior_est = sorted_estimates[i - 1]
             prior_rev = _est_revenue(prior_est)
@@ -6935,8 +7013,8 @@ def _build_revenue_forecast_partial(
             "eps_yoy_pct": _yoy(eps, prior_eps) if eps else None,
             "revenue_analyst_count": _int_or_none(est.get("numAnalystsRevenue")),
             "eps_analyst_count": _int_or_none(est.get("numAnalystsEps")),
-            # FMP `analyst-estimates` is forward-looking only — every entry
-            # is a future-period analyst estimate, never an actual.
+            # The window holds forward fiscal years only, so every entry here
+            # is an analyst estimate, never an actual.
             "is_forecast": True,
         })
 
@@ -6962,6 +7040,8 @@ def _build_insider_sections(
     insider_trades: List[Dict[str, Any]],
     *,
     unavailable: bool = False,
+    symbol: str = "",
+    close_on: Optional[Callable[[str], Optional[float]]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Aggregate the last 12 months of real insider trades.
 
@@ -7016,7 +7096,7 @@ def _build_insider_sections(
             return False
         return date_str >= cutoff
 
-    recent = [t for t in insider_trades if isinstance(t, dict) and _is_in_window(t)]
+    recent = [t for t in distinct_trades(insider_trades) if _is_in_window(t)]
 
     # Match HoldersService Smart Money classification: keep only the issuer's stock
     # (`is_equity_line` — common AND ordinary shares; a "common stock" substring test here
@@ -7040,22 +7120,40 @@ def _build_insider_sections(
         else:  # "Informative Sell"
             sells.append(t)
 
-    def _aggregate(rows: List[Dict[str, Any]]) -> Tuple[float, float]:
+    def _aggregate(rows: List[Dict[str, Any]]) -> Tuple[float, float, bool, int]:
+        """(shares in `symbol`'s class, dollars, any estimated, unpriced row count)."""
         shares = 0.0
         value = 0.0
+        estimated = False
+        unpriced = 0
         for r in rows:
             sh = abs(_safe_float(r, "securitiesTransacted"))
-            pr = _safe_float(r, "price")
-            shares += sh
-            value += sh * pr
-        return shares, value
+            shares += sh * share_class_multiple(symbol, r.get("securityName"))
+            dollars, how = insider_row_value(r, symbol=symbol, close_on=close_on)
+            value += dollars
+            estimated = estimated or how == VALUE_ESTIMATED
+            unpriced += how == VALUE_UNPRICED
+        return shares, value, estimated, unpriced
 
-    buy_shares, buy_value = _aggregate(buys)
-    sell_shares, sell_value = _aggregate(sells)
+    buy_shares, buy_value, buy_estimated, buy_unpriced = _aggregate(buys)
+    sell_shares, sell_value, sell_estimated, sell_unpriced = _aggregate(sells)
+    unpriced_rows = buy_unpriced + sell_unpriced
 
-    # Sentiment from net dollar value (threshold: $100K to ignore noise).
+    def _value_text(value: float, estimated: bool, unpriced: int) -> str:
+        """A filed total prints as itself and `~` marks one with a close in it, so an estimate
+        can never read as a filed figure on the card or in a prompt. A side holding a row
+        nobody can value has no total: a partial sum is a floor, not an estimate."""
+        if unpriced:
+            return "N/A"
+        text = _format_currency_short(value)
+        return f"~{text}" if estimated else text
+
+    # Sentiment from net dollar value (threshold: $100K to ignore noise). A row with no value
+    # is an unknown amount that could flip the sign, so no verdict is stated from a partial sum.
     net = buy_value - sell_value
-    if net > 1e5:
+    if unpriced_rows:
+        sentiment, status, net_label = "neutral", "neutral", "Balanced"
+    elif net > 1e5:
         sentiment, status, net_label = "positive", "good", "Net Buying"
     elif net < -1e5:
         sentiment, status, net_label = "negative", "critical", "Net Selling"
@@ -7067,13 +7165,13 @@ def _build_insider_sections(
             "type": "Buys",
             "count": len(buys),
             "shares": _format_shares_short(buy_shares),
-            "value": _format_currency_short(buy_value),
+            "value": _value_text(buy_value, buy_estimated, buy_unpriced),
         },
         {
             "type": "Sells",
             "count": len(sells),
             "shares": _format_shares_short(sell_shares),
-            "value": _format_currency_short(sell_value),
+            "value": _value_text(sell_value, sell_estimated, sell_unpriced),
         },
     ]
 
@@ -7092,8 +7190,11 @@ def _build_insider_sections(
     # old symmetric `5 + ratio*5` scored every net-seller ~1, dragging 84% of real
     # companies (incl. NVDA/MSFT/every successful name where execs sell vested comp)
     # to the bottom and capping the headline score. No informative transactions in
-    # the window → UNMEASURED (None) so compute_quality_score renormalizes it out.
-    if (buy_value + sell_value) > 0:
+    # the window, or a row that cannot be valued → UNMEASURED (None) so
+    # compute_quality_score renormalizes it out.
+    if unpriced_rows:
+        score = None
+    elif (buy_value + sell_value) > 0:
         ratio = (buy_value - sell_value) / (buy_value + sell_value)
         raw = 5.0 + ratio * 5.0 if ratio >= 0 else 5.0 + ratio * 2.0
         # Defensive: a non-finite raw must DROP OUT (None), never let the
@@ -7109,6 +7210,8 @@ def _build_insider_sections(
         "net_activity": net_label,
         "buy_count": len(buys),
         "sell_count": len(sells),
+        "estimated_value": buy_estimated or sell_estimated,
+        "unpriced_rows": unpriced_rows,
         "key_insight": None,  # AI fills
     }
 
@@ -7194,7 +7297,7 @@ def _key_management_roster(
     ticker = getattr(out, "ticker", "?")
     try:
         if holdings is not None:
-            roster = roster_from_holdings(holdings, include_unknown=True)
+            roster = roster_from_holdings(holdings, include_unknown=True, symbol=out.ticker)
             return roster + _km_unlisted(out, roster, issuer_cik)
         if getattr(out, "insider_unavailable", False):
             logger.warning(
@@ -7215,7 +7318,7 @@ def _key_management_roster(
                 )
                 return []
         built = insider_holdings_from_rows(insider_rows or [])
-        roster = roster_from_holdings(built, include_unknown=True)
+        roster = roster_from_holdings(built, include_unknown=True, symbol=out.ticker)
         return roster + _km_unlisted(out, roster, issuer_cik)
     except Exception:  # noqa: BLE001 — Key Management falls back to its CEO row, never a 500
         logger.exception("[report-key-management] %s: roster derivation FAILED", ticker)
@@ -7255,6 +7358,7 @@ def _build_key_management(
     current_price: float = 0.0,
     beneficial_owners: Optional[List[Dict[str, Any]]] = None,
     shares_outstanding: float = 0.0,
+    symbol: str = "",
 ) -> Dict[str, Any]:
     """Split key management into two sub-sections so the UI can render
     them under separate sub-headers:
@@ -7383,15 +7487,22 @@ def _build_key_management(
             # honest, and never someone else's position.
             filer_key = _filer_key(r.get("owner"))
             override = by_filer_name.get(filer_key) if filer_key else None
+            # `shares` stay in the line's own class for the row's share count. Its value and
+            # percent are in the priced class: Buffett's 188,290 Class A at the BRK-B price
+            # read $109M and 0.0088%. A 13G override names no class, so it is left as filed.
+            multiple = 1.0
             if is_major and override is not None:
                 shares = override["shares"]
                 shares_known = True
                 pct = override["pct"] or None
                 in_top = True
                 matched_filer_keys.add(filer_key)
+            else:
+                multiple = share_class_multiple(symbol, r.get("security"))
+            priced_shares = shares * multiple
 
-            if shares > 0 and current_price > 0:
-                value_str = _format_currency_short(shares * current_price)
+            if priced_shares > 0 and current_price > 0:
+                value_str = _format_currency_short(priced_shares * current_price)
             else:
                 value_str = "—"
 
@@ -7402,9 +7513,14 @@ def _build_key_management(
             # iOS shows it for OFFICERS ("0.43% / 1.0M"); top holders use the
             # 13G beneficial chip (percent_ownership) instead.
             percent_owned = (
-                round(shares / shares_outstanding * 100, 6)
-                if shares_outstanding > 0 and shares > 0 else None
+                round(priced_shares / shares_outstanding * 100, 6)
+                if shares_outstanding > 0 and priced_shares > 0 else None
             )
+            ownership_text = _format_shares_short(shares) if shares_known else "—"
+            if shares_known and multiple != 1.0:
+                # Native count, so name its class: "188K" beside "$163.6B" would not add up.
+                label = str(r.get("security") or "other class").replace(" Common Stock", "")
+                ownership_text = f"{ownership_text} {label}"
             display = r.get("display_name")
             row = {
                 # `roster_from_holdings` rows carry the display name already; normalising it
@@ -7412,7 +7528,7 @@ def _build_key_management(
                 "name": (display.strip() if isinstance(display, str) and display.strip()
                          else normalize_insider_name(r.get("owner"))),
                 "title": cleaned_title,
-                "ownership": _format_shares_short(shares) if shares_known else "—",
+                "ownership": ownership_text,
                 "ownership_value": value_str,
                 "percent_ownership": round(pct, 1) if pct else None,
                 "percent_owned": percent_owned,
@@ -7431,7 +7547,7 @@ def _build_key_management(
                     # Roster rows carry FMP's raw `typeOfOwner` as `title`.
                     ceo=is_ceo_role(r.get("title") or r.get("typeOfOwner")),
                 )
-                row["_shares"] = shares
+                row["_shares"] = priced_shares
                 officers.append(row)
 
     # A 13G filer the Form 4 roster never mentioned is a REAL top holder — the
@@ -8790,7 +8906,7 @@ def _classify_industry_archetype(industry: Optional[str]) -> Optional[str]:
     coverage-note. Returns None when no archetype matches; the caller
     falls back to a generic explanation.
     """
-    if not industry:
+    if not isinstance(industry, str) or not industry:
         return None
     lo = industry.lower()
     for archetype, keywords in _MOAT_ARCHETYPE_KEYWORDS:
@@ -10425,19 +10541,20 @@ def _build_competitors(
     return out
 
 
-def _derive_moat_vital(
-    moat_dims: List[Dict[str, Any]],
-    competitors: Optional[List[Dict[str, Any]]] = None,
-) -> Dict[str, Any]:
+def _derive_moat_vital(moat_dims: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Derive overall_rating (card label), tags, and a continuous 0-10
     `score.value` from the FULL dimension profile.
 
     The score was previously taken from the single MAX dimension, so five
     strong moat walls scored identically to one. It now blends the strongest
-    pillars (a moat is defined by its best walls) while rewarding breadth, and
-    is docked when a competitor poses a high threat. `overall_rating` still
-    reflects the top pillar so the moat card's wide/narrow/none label is
-    unchanged.
+    pillars (a moat is defined by its best walls) while rewarding breadth.
+    `overall_rating` still reflects the top pillar so the moat card's
+    wide/narrow/none label is unchanged.
+
+    No competitor threat dock (removed 2026-11-05). A peer's `threat_level` is 60% its
+    position in FMP's `/stock-peers` list, and that list is A-to-Z, so "high threat" partly
+    meant "sorts early": Berkshire lost a full point for CSX and Duke Energy. A real
+    directness input could bring a dock back; list order never should.
 
     MEASURED pillars only (owner decision 2026-10-28, "Show it, but exclude it from backend
     verdicts"): an `ai_legacy` pillar is an ungrounded Stage A guess — Switching Costs is one
@@ -10480,15 +10597,7 @@ def _derive_moat_vital(
     else:
         composite = ranked[0]
 
-    # Dock the moat when a competitor poses a real threat (erodes durability).
-    threat_penalty = 0.0
-    for cp in (competitors or []):
-        tl = str((cp or {}).get("threat_level") or "").lower()
-        if tl in ("high", "severe", "critical"):
-            threat_penalty = max(threat_penalty, 1.0)
-        elif tl == "elevated":
-            threat_penalty = max(threat_penalty, 0.5)
-    composite = max(0.0, min(10.0, composite - threat_penalty))
+    composite = max(0.0, min(10.0, composite))
     moat_status = (
         "good" if composite >= 7.0
         else "critical" if composite < 4.0
@@ -10778,16 +10887,51 @@ def _derive_macro_vital(
     }
 
 
+def _stage_a_text(value: Any) -> Optional[str]:
+    """A Stage A free-text value, or None. The model can answer any type here, and one wrong
+    type used to fail the whole report at the schema check after Stage B was paid for."""
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _sanitize_stage_a_factors(raw: Any) -> List[Dict[str, Any]]:
+    """Stage A's critical factors in the shape `CriticalFactorResponse` requires, at most 5.
+
+    A factor with no title cannot be written or shown, so it is dropped. Stage B writes
+    `description` and `watch`, and synthesis usually replaces the list, so a missing one is
+    filled, not fatal.
+    """
+    if not isinstance(raw, list):
+        return []
+    factors: List[Dict[str, Any]] = []
+    for factor in raw:
+        if not isinstance(factor, dict) or not _stage_a_text(factor.get("title")):
+            continue
+        factors.append({
+            **factor,
+            "severity": _stage_a_text(factor.get("severity")) or "medium",
+            "description": _stage_a_text(factor.get("description")) or "",
+            "watch": _stage_a_text(factor.get("watch")),
+        })
+    return factors[:5]
+
+
 def _sanitize_thesis(thesis: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Pydantic-safe core_thesis. Bull/bear cap to 5 each (the prompt also
     enforces a signal-driven 2-5 count; this is the post-write defense)."""
     if not isinstance(thesis, dict):
         return {"bull_case": [], "bear_case": []}
+    def _points(raw: Any) -> List[str]:
+        # Only non-empty strings: `{"bull_case": 5}` used to raise TypeError in `list()`,
+        # and a bare string would have become one bullet per character.
+        if not isinstance(raw, list):
+            return []
+        return [p for p in raw if isinstance(p, str) and p.strip()][:5]
+
     # ensure_insider_label: a Stage-A fallback bullet citing insider buy/sell
     # counts ("55 sells vs 1 buy") must say "insider" — these bullets render with
     # no section header, and the Stage-A prompt has no self-labeling rule.
-    bull = [ensure_insider_label(p) for p in list(thesis.get("bull_case") or [])[:5]]
-    bear = [ensure_insider_label(p) for p in list(thesis.get("bear_case") or [])[:5]]
+    bull = [ensure_insider_label(p) for p in _points(thesis.get("bull_case"))]
+    bear = [ensure_insider_label(p) for p in _points(thesis.get("bear_case"))]
     return {"bull_case": bull, "bear_case": bear}
 
 
@@ -11176,6 +11320,8 @@ def build_financial_context(out: CollectedTickerData) -> str:
                 f"\nInsider Activity (12mo): {i.get('sentiment', 'neutral')} "
                 f"— " + ", ".join(tx_strs)
             )
+            if any(str(t.get("value", ""))[:1] == "~" or t.get("value") == "N/A" for t in txns):
+                parts.append(INSIDER_VALUE_NOTE)
 
     if out.revenue_engine_partial.get("segments"):
         # Pre-formatted amounts. The engine's values are MILLIONS, and this header used to

@@ -181,7 +181,7 @@ enum APIEndpoint: Sendable {
     case deletePriceAlert(id: String)
 
     // MARK: - Search chips
-    /// "Trending searches" / "Most added" / "Popular" chips for every search screen's empty
+    /// "Trending searches" / "Most added" / "Well-known names" chips for every search screen's empty
     /// state. Impersonal, cached an hour server-side; fetched by `SearchTrendingStore`.
     case getSearchTrending
     /// A tap on a search RESULT row — never a chip or a recent-search row. Fire-and-forget;
@@ -413,7 +413,6 @@ enum APIEndpoint: Sendable {
     case unfollowWhale(whaleId: String)
 
     // MARK: - Home
-    case getHomeFeed
     case getHomeDashboard
     case getSignalDetail(kind: String, ticker: String)
     case getThemeDetail(slug: String)
@@ -756,8 +755,6 @@ enum APIEndpoint: Sendable {
             return "/api/v1/whales/\(whaleId)/follow"
 
         // Home
-        case .getHomeFeed:
-            return "/api/v1/home/feed"
         case .getHomeDashboard:
             return "/api/v1/home/dashboard"
         case .getSignalDetail(let kind, let ticker):
@@ -1314,7 +1311,7 @@ enum APIEndpoint: Sendable {
 
         // Home, Updates, themes, and the research meta lists.
         case .getUpdatesFeed, .enrichUpdatesNews, .getUpdatesTabs, .getSentimentTrend,
-             .getHomeFeed, .getHomeDashboard,
+             .getHomeDashboard,
              .getThemeDetail,
              // FMP-sourced 13F data + market caps: End-User Display Rights are
              // authenticated-only (auth.md §1a), and the `/home` router requires a session.

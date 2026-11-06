@@ -42,30 +42,33 @@ def test_a_healthy_shell_is_not_degraded():
 
 
 def test_both_stage_a_failure_paths_tag_the_shell():
-    """There are two ways Stage A degrades — an exception, and unparseable JSON. Both must
-    tag, or the untagged one silently keeps the old behaviour."""
+    """There are two ways Stage A degrades — an exception, and unusable answers. Both must
+    tag, or the untagged one silently keeps the old behaviour. Both doors share the helper,
+    so a door must delegate rather than grow a copy of its own. Each path is driven for real
+    in tests/test_stage_a_retry.py."""
     import inspect
 
-    src = inspect.getsource(trs.TickerReportService._generate_stage_a)
+    from app.services.agents import narrative_prompts as np_
+
+    src = inspect.getsource(np_.generate_stage_a_shell)
     # Every `return stage_a_fallback()` must be wrapped.
     assert "return stage_a_fallback()" not in src, (
         "a raw `return stage_a_fallback()` is back — that path will be cached and charged"
     )
     assert src.count("_mark_degraded(stage_a_fallback()") == 2
 
+    door = inspect.getsource(trs.TickerReportService._generate_stage_a)
+    assert "generate_stage_a_shell(" in door and "stage_a_fallback" not in door
 
-def test_the_cache_write_is_gated_on_degradation():
+
+def test_a_degraded_stage_a_returns_before_the_cache_write():
     import inspect
 
     # The build+cache lives in `_generate_uncontended`; `generate_fresh_report` is the
     # dedup wrapper around it.
     src = inspect.getsource(trs.TickerReportService._generate_uncontended)
-    assert "_degraded_reason(shell)" in src
-    gate = src[src.index("_degraded_reason(shell)"):]
-    assert "upsert_cached_report" in gate
-    assert "else:" in gate.split("upsert_cached_report")[0], (
-        "upsert_cached_report must sit in the else-branch of the degraded check"
-    )
+    assert src.index("_degraded_reason(shell)") < src.index("return {REPORT_DEGRADED_KEY")
+    assert src.index("return {REPORT_DEGRADED_KEY") < src.index("upsert_cached_report")
 
 
 def test_the_endpoint_refunds_rather_than_delivering_a_shell():
@@ -102,28 +105,25 @@ def test_deep_path_tags_both_stage_a_failure_paths():
 
     from app.services.agents.research_agent import ResearchAgent
 
-    src = inspect.getsource(ResearchAgent._generate_stage_a)
-    assert "return stage_a_fallback()" not in src, (
+    door = inspect.getsource(ResearchAgent._generate_stage_a)
+    assert "return stage_a_fallback()" not in door, (
         "a raw `return stage_a_fallback()` is back on the DEEP path — that shell will be "
         "sold for 20 credits with no refund and seeded into the shared cache"
     )
-    assert src.count("_mark_degraded(stage_a_fallback()") == 2
+    assert "generate_stage_a_shell(" in door and "stage_a_fallback" not in door
 
 
-def test_deep_path_carries_the_marker_across_assemble_report():
-    """`assemble_report` builds a fresh dict, so the shell-level key does not survive on its
-    own. Without an explicit copy the tag is set and then immediately lost — which looks
-    fixed and behaves exactly as before."""
+def test_deep_path_hands_the_marker_back_under_the_key_the_gate_reads():
+    """The shell's key (`_stage_a_degraded`) is not the report's (`_degraded`), and only the
+    second is read by `generate_report`'s gate. Returning the shell as it is would look
+    fixed and behave exactly as before: charged, completed, cached."""
     import inspect
 
     from app.services.agents.research_agent import ResearchAgent
 
     src = inspect.getsource(ResearchAgent.run)
-    assert "_degraded_reason(shell)" in src
-    seg = src[src.index("assemble_report"):]
-    assert "REPORT_DEGRADED_KEY" in seg, (
-        "run() must copy the degradation marker onto the assembled report"
-    )
+    assert src.index("_degraded_reason(shell)") < src.index("assemble_report")
+    assert "return {REPORT_DEGRADED_KEY: stage_a_degradation}" in src
 
 
 def test_deep_path_raises_before_the_completion_write_and_the_cache_seed():
@@ -174,6 +174,56 @@ def test_degraded_report_error_maps_to_a_typed_error_code_not_a_500():
         ticker="NVDA",
     )
     assert body["error_code"] == ErrorCode.GEMINI_UNAVAILABLE.value
+
+
+@pytest.mark.parametrize("reason, expected", [
+    ("stage_a_unparseable", "REPORT_GENERATION_FAILED"),
+    ("stage_a_malformed", "REPORT_GENERATION_FAILED"),
+    ("report_schema_invalid", "REPORT_GENERATION_FAILED"),
+    ("thesis_empty", "REPORT_GENERATION_FAILED"),
+    ("stage_a_GeminiQuotaError", "GEMINI_UNAVAILABLE"),
+    ("stage_a_GeminiTimeoutError", "GEMINI_UNAVAILABLE"),
+    ("stage_b_outage", "GEMINI_UNAVAILABLE"),
+    ("anything_new", "GEMINI_UNAVAILABLE"),
+    ("", "GEMINI_UNAVAILABLE"),
+    (None, "GEMINI_UNAVAILABLE"),
+])
+def test_a_bad_answer_is_not_reported_as_an_outage(reason, expected):
+    """The model answered; nothing was unavailable. The incident read "engine temporarily
+    unavailable" for one stray character. An unknown reason keeps the old, safe code."""
+    from app.api.error_response import degraded_error_code, error_body_from_exception
+    from app.services.report_degradation import DegradedReportError
+
+    assert degraded_error_code(reason).value == expected
+    if reason is not None:
+        body = error_body_from_exception(
+            DegradedReportError(reason, ticker="NVDA", persona="warren_buffett"), ticker="NVDA",
+        )
+        assert body["error_code"] == expected
+
+
+def test_failure_copy_never_promises_a_refund_it_has_not_made():
+    """Both sentences are stored before the refund RPC runs, and reach the screen verbatim. A
+    refund that then fails would leave them false beside a "Refund pending" chip."""
+    import ast
+    import inspect
+
+    from app.api.error_response import ErrorCode, _USER_MESSAGES
+    from app.services import research_reconciliation_service as rrs
+
+    assert "refund" not in _USER_MESSAGES[ErrorCode.REPORT_TIMED_OUT].lower()
+    # The AST, not the text: Python folds adjacent literals, so a promise split across two
+    # lines (the file's own style) cannot slip past, and comments are not read at all.
+    sweep_copy = [
+        keyword.value.value
+        for node in ast.walk(ast.parse(inspect.getsource(rrs)))
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "make_error_body"
+        for keyword in node.keywords
+        if keyword.arg == "user_message" and isinstance(keyword.value, ast.Constant)
+    ]
+    assert sweep_copy, "anti-vacuity: the sweep's copy must be found"
+    for text in sweep_copy:
+        assert "refund" not in text.lower() and "credit" not in text.lower(), text
 
 
 def test_the_marker_never_reaches_the_ios_decoder():

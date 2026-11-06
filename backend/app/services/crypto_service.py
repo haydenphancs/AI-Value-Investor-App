@@ -632,7 +632,7 @@ def strip_volatile_market_data(data: Any) -> Any:
 
 async def _empty_list() -> list:
     """An already-satisfied awaitable, so a gated-off leg can still sit in the gather
-    without restructuring it (the same shape `home_service._empty_list` uses)."""
+    without restructuring it."""
     return []
 
 

@@ -165,13 +165,13 @@ class _StageAGemini:
     permissive fake cannot notice a call site that stopped passing it.
     """
 
-    def __init__(self, text='{"ok": 1}'):
+    def __init__(self, text='{"quality_score": 50}'):
         self.calls: list = []
         self._text = text
 
     async def generate_json(self, prompt=None, system_instruction=None,
                             model_name=None, response_schema=None,
-                            thinking_budget=None):
+                            thinking_budget=None, usage_tag=None, cache=True):
         self.calls.append({"thinking_budget": thinking_budget})
         return {"text": self._text}
 
@@ -253,7 +253,7 @@ async def test_the_post_assembly_syntheses_are_deliberately_uncapped():
     class _StrictGemini:
         async def generate_json(self, prompt=None, system_instruction=None,
                                 model_name=None, response_schema=None,
-                                thinking_budget=None):
+                                thinking_budget=None, usage_tag=None):
             seen.append(thinking_budget)
             return {"text": "{}"}
 
@@ -295,7 +295,7 @@ async def test_the_critical_factors_synthesis_is_deliberately_uncapped_too():
     class _StrictGemini:
         async def generate_json(self, prompt=None, system_instruction=None,
                                 model_name=None, response_schema=None,
-                                thinking_budget=None):
+                                thinking_budget=None, usage_tag=None):
             seen.append(thinking_budget)
             import json as _json
             return {"text": _json.dumps({"critical_factors": factors})}

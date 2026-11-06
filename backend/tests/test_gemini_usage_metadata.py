@@ -327,6 +327,55 @@ def _usage(total=100, prompt=80, cached=60, output=20):
     )
 
 
+class _Unary:
+    """`generate_content` only, with a finish reason on its one candidate."""
+
+    def __init__(self, text='{"a": 1}', finish="STOP"):
+        self._text, self._finish = text, finish
+
+    async def generate_content(self, *, model, contents, config):
+        return type("R", (), {
+            "text": self._text,
+            "usage_metadata": _usage(),
+            "candidates": [type("C", (), {"finish_reason": self._finish})()],
+        })()
+
+
+def _unary_client(models):
+    c = _client(models=models)
+    c._response_cache = gem._TTLCache(max_size=8, ttl_seconds=3600)
+    return c
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish", ["STOP", "RECITATION", "MAX_TOKENS"])
+async def test_generate_json_logs_its_finish_reason(caplog, finish):
+    """The value was computed five lines below the log line, which printed `finish=-`. That
+    is why nobody can say whether the GOOGL answer was malformed or stopped early."""
+    c = _unary_client(_Unary(finish=finish))
+    with caplog.at_level(logging.INFO, logger="app.integrations.gemini"):
+        out = await c.generate_json("p", usage_tag="report_stage_a:AAPL:x")
+    assert out["finish_reason"] == finish
+    assert f"finish={finish}" in caplog.text
+    assert "tag=report_stage_a:AAPL:x" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_generate_text_logs_its_finish_reason(caplog):
+    c = _unary_client(_Unary(text="Prose.", finish="RECITATION"))
+    with caplog.at_level(logging.INFO, logger="app.integrations.gemini"):
+        await c.generate_text("p")
+    assert "call_site=generate_text " in caplog.text and "finish=RECITATION" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_generate_text_cached_logs_its_finish_reason(caplog):
+    c = _unary_client(_Unary(text="Prose.", finish="SAFETY"))
+    with caplog.at_level(logging.INFO, logger="app.integrations.gemini"):
+        await c.generate_text_cached("p", {"cache": type("H", (), {"name": "cachedContents/x"})()})
+    assert "call_site=generate_text_cached" in caplog.text and "finish=SAFETY" in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_stream_text_logs_usage_on_success(caplog):
     c = _client(models=_Models([

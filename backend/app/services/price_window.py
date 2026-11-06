@@ -9,7 +9,7 @@ It lives HERE, once, because the three ad-hoc precedents each got a different pa
 it wrong:
 
 * **Row order is not a constant.** The RAW FMP response is **newest-first**
-  (`home_service.py` says so in a comment, and it is verified live: index 0 of a
+  (verified live: index 0 of a
   `2026-08-25..2026-09-05` fetch is `2026-09-04`). But `chart_helper._fetch_all_daily`
   **sorts oldest-first** before returning. So the same endpoint reaches different
   callers in opposite orders, and `fmp.py`'s inline 1Y calc reads
@@ -55,7 +55,8 @@ def normalize_history(raw: Any) -> List[Dict[str, Any]]:
     ``{"historical": [...]}`` dict on others. Normalize.
 
     Consolidates three byte-identical private copies (`volatility_cache_service`,
-    `agents/ticker_report_data_collector`, and an inline block in `home_service`).
+    `agents/ticker_report_data_collector`, and an inline block in the since-removed
+    `home_service`).
     """
     if isinstance(raw, list):
         return [r for r in raw if isinstance(r, dict)]

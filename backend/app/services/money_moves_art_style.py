@@ -385,17 +385,14 @@ ARTICLES = {
         "and unmarked"),
 }
 
-# Slugs in ARTICLES whose article is NOT in money_moves.json yet: hand-written articles whose plates
-# were generated on 2026-11-01 before their narration exists, so the bundle does not carry them. Their
-# rows ship now because a missing row sends the next generate run to --auto for a NEW subject, which
-# changes the prompt hash and re-rolls a paid plate. The generator exempts them from its orphan and
-# category checks and never draws them (a bare run walks the bundle's slugs; --only refuses them).
-# Each slug leaves this set the day it joins the bundle (tests/test_money_moves_art_parity.py).
-STAGED_ARTICLES = frozenset({
-    "coca-cola-vs-pepsico",
-    "kodak-inventing-the-future-it-couldnt-sell",
-    "mcdonalds-the-real-estate-empire",
-})
+# Slugs in ARTICLES whose article is NOT in money_moves.json yet. A hand-written article's plates can be
+# generated before its narration exists, so the bundle does not carry it. Its row ships anyway, because
+# a missing row sends the next generate run to --auto for a NEW subject, which changes the prompt hash
+# and re-rolls a paid plate. The generator exempts staged slugs from its orphan and category checks and
+# never draws them (a bare run walks the bundle's slugs; --only refuses them). Each slug leaves this set
+# the day it joins the bundle (tests/test_money_moves_art_parity.py). Empty since 2026-11-05: McDonald's,
+# Coca-Cola vs. PepsiCo and Kodak are in the bundle.
+STAGED_ARTICLES: frozenset[str] = frozenset()
 
 # =============================================================================
 # PLACEHOLDER TOPICS — cards that exist in the iOS catalog but have no article yet.

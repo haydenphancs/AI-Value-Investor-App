@@ -38,7 +38,12 @@ from google.genai import types
 
 from app.integrations.fmp import FMPClient
 from app.integrations.gemini import GeminiClient, _call_with_timeout
-from app.integrations.gemini import _log_gemini_usage, _response_usage, truncate_tool_result
+from app.integrations.gemini import (
+    _log_gemini_usage,
+    _response_finish,
+    _response_usage,
+    truncate_tool_result,
+)
 from app.services.agents.fmp_tools import (
     _scrub,
     build_fmp_tool_declarations,
@@ -48,24 +53,26 @@ from app.services.agents.fmp_tools import (
 from app.services.report_degradation import (
     REPORT_DEGRADED_KEY,
     _degraded_reason,
-    _mark_degraded,
 )
 from app.services.agents.narrative_prompts import (
     build_narrative_jobs,
     build_stage_a_prompt,
-    parse_stage_a_response,
+    STAGE_B_PARTIAL_SECTION,
+    generate_stage_a_shell,
     run_narrative_jobs,
-    stage_a_fallback,
     agentic_thinking_budget,
-    stage_a_thinking_budget,
+    stage_b_is_partial,
+    stage_b_outage_reason,
     synthesize_core_thesis,
     synthesize_critical_factors,
+    thesis_empty_reason,
 )
 from app.services.agents.persona_config import PersonaConfig, get_persona_config
 from app.services.agents.ticker_report_data_collector import (
     CollectedTickerData,
     TickerReportDataCollector,
     build_financial_context,
+    record_degraded_section,
 )
 
 logger = logging.getLogger(__name__)
@@ -191,6 +198,15 @@ class ResearchAgent:
         # ── Phase 3: Stage A (structural shell) ──────────────────────
         shell = await self._generate_stage_a(out, evidence, research_text)
 
+        # A degraded Stage A can never be delivered, so stop here. Carrying on used to cost
+        # 30 s, ~15 Gemini calls and an agent slot for a report that was certain to be
+        # refunded. An untagged degraded report is charged 20 credits, marked completed (the
+        # `except`-only refund never fires) and written to the SHARED cache, so the marker
+        # goes back under REPORT_DEGRADED_KEY, the key `generate_report`'s gate reads.
+        stage_a_degradation = _degraded_reason(shell)
+        if stage_a_degradation:
+            return {REPORT_DEGRADED_KEY: stage_a_degradation}
+
         if progress_cb:
             await progress_cb(75, "Building report...")
 
@@ -202,16 +218,6 @@ class ResearchAgent:
         # (`collector.collect`), and nothing else touches it while the thread runs.
         report = await asyncio.to_thread(self.collector.assemble_report, out, shell)
 
-        # Carry the degradation marker across the merge. `assemble_report` builds a fresh
-        # dict from the real-data sections, so the shell-level key does NOT survive on its
-        # own — and an untagged degraded report is charged 20 credits, marked completed
-        # (so the `except`-only refund never fires) and written to the SHARED cache, where
-        # it is then served free to everyone else and re-sold to the next research buyer.
-        # The direct path has done this since 2026-08-05; this door never did.
-        stage_a_degradation = _degraded_reason(shell)
-        if stage_a_degradation:
-            report[REPORT_DEGRADED_KEY] = stage_a_degradation
-
         # ── Phase 5: Stage B narratives + cross-module thesis synthesis ──
         # Both mutate `report` in place on disjoint keys (Stage B fills
         # per-field prose; synthesize_core_thesis rewrites core_thesis from
@@ -220,12 +226,23 @@ class ResearchAgent:
             await progress_cb(85, "Writing narrative insights...")
 
         jobs = build_narrative_jobs(self.persona, evidence, report)
-        await asyncio.gather(
+        narrative_outcome, _ = await asyncio.gather(
             # Pass `evidence` so Stage B can hoist it into a single Gemini
             # context cache shared across all N parallel narrative calls.
             run_narrative_jobs(jobs, self.gemini, self.persona, evidence),
             synthesize_core_thesis(report, self.persona, self.gemini, evidence),
         )
+
+        # A report that is mostly fallbacks, or has no thesis, is a non-delivery too, and the
+        # only signal of it is here: every failed job already landed on its sentinel and
+        # validates. Below the refund line a run can still have lost too much to share.
+        stage_b_degradation = stage_b_outage_reason(
+            narrative_outcome, ticker=ticker, persona=self.persona.key,
+        ) or thesis_empty_reason(report, ticker=ticker, persona=self.persona.key)
+        if stage_b_degradation:
+            return {REPORT_DEGRADED_KEY: stage_b_degradation}
+        if stage_b_is_partial(narrative_outcome):
+            record_degraded_section(report, STAGE_B_PARTIAL_SECTION)
 
         # Critical Factors — after the thesis so it reads the FINAL bear case;
         # distinct Deep Dive areas + broad watch triggers (Fed / war / earnings
@@ -312,6 +329,7 @@ class ResearchAgent:
                     _log_gemini_usage(
                         _response_usage(response), call_site="research_agentic",
                         model=self.gemini.model_name, tag=f"{ticker}:{self.persona.key}:r1",
+                        finish=_response_finish(response),
                     )
 
                 # Walk parts: handle function calls; collect tool responses
@@ -373,6 +391,7 @@ class ResearchAgent:
                         _response_usage(response), call_site="research_agentic",
                         model=self.gemini.model_name,
                         tag=f"{ticker}:{self.persona.key}:r{round_num + 2}",
+                        finish=_response_finish(response),
                     )
                     continue
 
@@ -476,13 +495,22 @@ class ResearchAgent:
                 prompt=prompt,
                 system_instruction=self.persona.system_prompt,
             )
-            return result.get("text", "Analysis unavailable.")
+            text = result.get("text") or ""
+            if not text.strip():
+                logger.warning(
+                    "[agentic-no-findings] ticker=%s persona=%s finish=%s: the fallback "
+                    "analysis came back blank; Stage A runs without findings",
+                    out.ticker, self.persona.key, result.get("finish_reason") or "-",
+                )
+            return text
         except Exception as e:
+            # Empty, never a sentence: whatever this returns reaches Stage A as "DEEP RESEARCH
+            # FINDINGS" and `full_report`. An empty string leaves the block out.
             logger.error(
-                f"Fallback analysis failed for {out.ticker}: "
-                f"{type(e).__name__}: {e}"
+                "[agentic-no-findings] ticker=%s persona=%s: %s: %s",
+                out.ticker, self.persona.key, type(e).__name__, e,
             )
-            return f"Analysis for {out.ticker} could not be completed."
+            return ""
 
     # ── Phase 3: Stage A (structural shell) ──────────────────────────
 
@@ -504,35 +532,4 @@ class ResearchAgent:
             deep_findings=deep_findings,
         )
 
-        try:
-            # Stage A runs with a thinking cap (SYSTEM_DESIGN_GUIDELINES 9b.7).
-            # MEASURED on MSFT/warren_buffett via scripts/eval_report_thinking.py
-            # (2026-08-27): default 1,715-2,295 thought tokens and 18.1s, versus
-            # 0 and 6.9s at budget 0 — same 11 top-level keys, parseable at every
-            # budget. Thought tokens bill at the OUTPUT rate.
-            #
-            # Its OWN setting, separate from Stage B's, because this is the call
-            # that decides thesis / pros / cons / moat / valuation on a 20-credit
-            # product and "valid JSON with 11 keys" does not certify that the
-            # judgement survived. Set REPORT_STAGE_A_THINKING_BUDGET negative in
-            # the environment to restore the model default without touching
-            # Stage B, and re-run the eval before trusting either way.
-            result = await self.gemini.generate_json(
-                prompt=prompt,
-                system_instruction=self.persona.system_prompt,
-                thinking_budget=stage_a_thinking_budget(),
-            )
-            shell = parse_stage_a_response(result.get("text") or "")
-            if shell is None:
-                logger.error(
-                    f"Stage A returned unparseable JSON for {ticker}; "
-                    f"using honest fallback shell."
-                )
-                return _mark_degraded(stage_a_fallback(), "stage_a_unparseable")
-            return shell
-        except Exception as e:
-            logger.error(
-                f"Stage A generation failed for {ticker}: "
-                f"{type(e).__name__}: {e}"
-            )
-            return _mark_degraded(stage_a_fallback(), f"stage_a_{type(e).__name__}")
+        return await generate_stage_a_shell(self.gemini, self.persona, ticker, prompt)

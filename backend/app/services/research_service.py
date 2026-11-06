@@ -41,6 +41,7 @@ from app.services.report_degradation import (
 from app.services.ticker_report_cache import (
     CACHE_SCHEMA_FLOOR,
     current_close_cycle_start,
+    report_schema_problem,
     upsert_cached_report,
     _normalize_key,
 )
@@ -469,6 +470,23 @@ class ResearchService:
             persona_score = compute_quality_score(persona_key, ticker_report_data)
             ticker_report_data["quality_score"] = persona_score
 
+            # A FRESH run must satisfy the contract before anything is written: iOS decodes
+            # it all-or-nothing, so an invalid report would be kept at 20 credits and fail
+            # every time it is opened. Raising is what refunds it, exactly like a degraded
+            # report. A cached row was checked by `_lookup_shared_cache`.
+            if cached is None:
+                schema_problem = await asyncio.to_thread(
+                    report_schema_problem, ticker_report_data,
+                )
+                if schema_problem:
+                    logger.error(
+                        "[report-schema-invalid] report=%s ticker=%s persona=%s: %s",
+                        report_id, ticker, persona_key, schema_problem,
+                    )
+                    raise DegradedReportError(
+                        "report_schema_invalid", ticker=ticker, persona=persona_key,
+                    )
+
             generation_time = int((datetime.now(timezone.utc) - start).total_seconds())
 
             # Build update payload
@@ -603,7 +621,17 @@ class ResearchService:
             logger.info("Report %s abandoned before its run: %s", report_id, e)
             raise
         except Exception as e:
-            logger.error(f"Report generation failed: {e}", exc_info=True)
+            # A degraded report is handled: its cause logged its own ERROR, and it is refunded
+            # below. Only the unexpected ones page here. The other half of this rule is in
+            # `_run_research_task`; change both together, because Sentry's dedupe drops that
+            # site's event only while this one sends the same exception.
+            degraded_report = isinstance(e, DegradedReportError)
+            logger.log(
+                logging.WARNING if degraded_report else logging.ERROR,
+                "Report generation failed: report=%s ticker=%s persona=%s: %s: %s",
+                report_id, ticker, persona_key, type(e).__name__, e,
+                exc_info=not degraded_report,
+            )
             # The STRUCTURED, REDACTED blob — the same shape `_run_research_task`'s
             # terminal CAS writes — not `str(e)`. Two things were wrong with the raw
             # string: (1) an FMP httpx error carries `…&apikey=<key>` in its URL and
@@ -981,6 +1009,17 @@ class ResearchService:
                             "[report-partial-not-cached] Shared cache row for %s/%s lost "
                             "Financials sections (%s) — treating as a miss rather than "
                             "re-selling it", ticker, persona_key, ", ".join(lost_sections),
+                        )
+                        return None
+                    # This buyer pays 20 credits for the copy, and iOS decodes it
+                    # all-or-nothing. A row that fails the contract is a miss, so they get a
+                    # report that opens. Already off the loop: `_query` runs in a thread.
+                    schema_problem = report_schema_problem(blob)
+                    if schema_problem:
+                        logger.warning(
+                            "Shared cache row for %s/%s fails the report schema (%s) — "
+                            "treating as a miss rather than re-selling it",
+                            ticker, persona_key, schema_problem,
                         )
                         return None
                     return blob

@@ -1745,7 +1745,14 @@ class ChatService:
             result = await self.gemini.generate_json(
                 prompt, system_instruction=system, model_name=settings.CHAT_CHEAP_MODEL,
             )
-            data = json.loads(result.get("text") or "{}")
+            text = result.get("text") or ""
+            if not text.strip():
+                logger.warning(
+                    "Follow-up suggestions came back blank (finish=%s) — skipping",
+                    result.get("finish_reason") or "-",
+                )
+                return []
+            data = json.loads(text)
             raw = data.get("suggestions") or []
             # Dedup case-insensitively, preserving order (duplicate chips collide the iOS
             # `ForEach(id: \.self)`), drop anything the chat would decline, cap at two.
@@ -2790,7 +2797,14 @@ class ChatService:
                 'best first, as JSON: {"indices": [numbers]}.'
             )
             res = await self.gemini.generate_json(prompt, model_name="gemini-2.5-flash-lite")
-            data = json.loads((res.get("text") or "{}") or "{}")
+            text = res.get("text") or ""
+            if not text.strip():
+                logger.warning(
+                    "Chunk rerank came back blank (finish=%s) — using vector order",
+                    res.get("finish_reason") or "-",
+                )
+                return chunks[:top_k]
+            data = json.loads(text)
             picked: List[Dict] = []
             seen: set = set()
             for i in (data.get("indices") or []):

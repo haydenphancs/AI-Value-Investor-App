@@ -223,65 +223,6 @@ enum AlertType: String, Codable {
     }
 }
 
-// MARK: - Daily Briefing Item
-struct DailyBriefingItem: Identifiable, Codable {
-    let id: UUID
-    let type: AlertType
-    let title: String
-    let subtitle: String
-    let date: Date?
-    let badgeText: String?
-
-    var hasDateBadge: Bool {
-        date != nil && badgeText != nil
-    }
-
-    // MARK: Codable
-    enum CodingKeys: String, CodingKey {
-        case type, title, subtitle, date
-        case badgeText = "badge_text"
-    }
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = UUID()
-        self.type = try c.decode(AlertType.self, forKey: .type)
-        self.title = try c.decode(String.self, forKey: .title)
-        self.subtitle = try c.decode(String.self, forKey: .subtitle)
-        // Flexible date parsing from ISO string or null
-        if let dateString = try c.decodeIfPresent(String.self, forKey: .date) {
-            self.date = SharedFormatters.parseISO8601(dateString)
-        } else {
-            self.date = nil
-        }
-        self.badgeText = try c.decodeIfPresent(String.self, forKey: .badgeText)
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(type, forKey: .type)
-        try c.encode(title, forKey: .title)
-        try c.encode(subtitle, forKey: .subtitle)
-        if let d = date {
-            let fmt = ISO8601DateFormatter()
-            try c.encode(fmt.string(from: d), forKey: .date)
-        } else {
-            try c.encodeNil(forKey: .date)
-        }
-        try c.encodeIfPresent(badgeText, forKey: .badgeText)
-    }
-
-    // Manual init (backward compat)
-    init(type: AlertType, title: String, subtitle: String, date: Date?, badgeText: String?) {
-        self.id = UUID()
-        self.type = type
-        self.title = title
-        self.subtitle = subtitle
-        self.date = date
-        self.badgeText = badgeText
-    }
-}
-
 // MARK: - Investor Persona
 /// Analysis styles shown on the Home "recent research" feed.
 ///
@@ -453,21 +394,6 @@ struct ResearchReport: Identifiable, Codable {
         self.fairValue = fairValue
         self.createdAt = createdAt
         self.gradientColors = gradientColors
-    }
-}
-
-// MARK: - Home Feed Response (API DTO)
-struct HomeFeedResponse: Codable {
-    let marketTickers: [MarketTicker]
-    let marketInsight: MarketInsight?
-    let dailyBriefings: [DailyBriefingItem]
-    let recentResearch: [ResearchReport]
-
-    enum CodingKeys: String, CodingKey {
-        case marketTickers = "market_tickers"
-        case marketInsight = "market_insight"
-        case dailyBriefings = "daily_briefings"
-        case recentResearch = "recent_research"
     }
 }
 

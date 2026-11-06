@@ -797,8 +797,6 @@ CURATION: dict[str, TableDoc] = {
              "expires_at"),
         note="Enrichment is per (ticker, article): sharing one cache across tickers "
              "misattributes a summary written for a different company."),
-    "public.market_insights": T("news", key=("headline", "bullet_points", "sentiment")),
-    "public.daily_briefings": T("news", key=("type", "title", "date", "is_active", "priority")),
     "public.trending_themes": T("news",
         # 174 adds tickers_as_of / rotation_enabled / pinned_tickers / blocked_tickers; list
         # them here once 174 is applied and the snapshot is re-dumped (the column-drift

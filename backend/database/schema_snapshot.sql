@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict P0GA9jrxeSGyxsJ2CuOh3aiWxZjB3O8wx5aDe4qqfja3eCYKa8dIaYJKpmMLoCa
+\restrict yBMVRHmWipmlCMLC9Z3ty1IXUB8HFwz3AHCeeuddBBC6d7OIvfzJN4czlxKrrmr
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -8970,45 +8970,6 @@ CREATE TABLE public.crypto_snapshots (
 
 
 --
--- Name: daily_briefings; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.daily_briefings (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    type text DEFAULT 'wiser_trending'::text NOT NULL,
-    title text NOT NULL,
-    subtitle text NOT NULL,
-    date timestamp with time zone,
-    badge_text text,
-    is_active boolean DEFAULT true NOT NULL,
-    priority integer DEFAULT 0 NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT daily_briefings_type_check CHECK ((type = ANY (ARRAY['whales_alert'::text, 'earnings_alert'::text, 'whales_following'::text, 'wiser_trending'::text])))
-);
-
-
---
--- Name: TABLE daily_briefings; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON TABLE public.daily_briefings IS 'Configurable briefing cards for the Home screen daily briefings section';
-
-
---
--- Name: COLUMN daily_briefings.badge_text; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.daily_briefings.badge_text IS 'Optional date badge, e.g. "24\nFEB" for earnings dates';
-
-
---
--- Name: COLUMN daily_briefings.priority; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.daily_briefings.priority IS 'Higher priority items appear first (DESC order)';
-
-
---
 -- Name: dcf_fair_value_cache; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -9855,41 +9816,6 @@ CREATE TABLE public.market_deep_dive_cache (
     report_markdown text NOT NULL,
     cached_at timestamp with time zone DEFAULT now() NOT NULL
 );
-
-
---
--- Name: market_insights; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.market_insights (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    headline text NOT NULL,
-    bullet_points jsonb DEFAULT '[]'::jsonb NOT NULL,
-    sentiment text DEFAULT 'Neutral'::text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT market_insights_sentiment_check CHECK ((sentiment = ANY (ARRAY['Bullish'::text, 'Bearish'::text, 'Neutral'::text])))
-);
-
-
---
--- Name: TABLE market_insights; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON TABLE public.market_insights IS 'AI-generated market summaries for the Home screen insight card';
-
-
---
--- Name: COLUMN market_insights.bullet_points; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.market_insights.bullet_points IS 'JSONB array of strings: ["point 1", "point 2"]';
-
-
---
--- Name: COLUMN market_insights.sentiment; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.market_insights.sentiment IS 'Overall market sentiment: Bullish, Bearish, or Neutral';
 
 
 --
@@ -13536,14 +13462,6 @@ ALTER TABLE ONLY public.crypto_snapshots
 
 
 --
--- Name: daily_briefings daily_briefings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.daily_briefings
-    ADD CONSTRAINT daily_briefings_pkey PRIMARY KEY (id);
-
-
---
 -- Name: dcf_fair_value_cache dcf_fair_value_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -13829,14 +13747,6 @@ ALTER TABLE ONLY public.market_close_snapshot
 
 ALTER TABLE ONLY public.market_deep_dive_cache
     ADD CONSTRAINT market_deep_dive_cache_pkey PRIMARY KEY (symbol, context_hash);
-
-
---
--- Name: market_insights market_insights_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.market_insights
-    ADD CONSTRAINT market_insights_pkey PRIMARY KEY (id);
 
 
 --
@@ -15539,13 +15449,6 @@ CREATE INDEX idx_crypto_snapshots_symbol ON public.crypto_snapshots USING btree 
 
 
 --
--- Name: idx_daily_briefings_active; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_daily_briefings_active ON public.daily_briefings USING btree (is_active, priority DESC) WHERE (is_active = true);
-
-
---
 -- Name: idx_dcf_fair_value_history_ticker_date; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -15788,13 +15691,6 @@ CREATE INDEX idx_lessons_level ON public.lessons USING btree (level, sort_order)
 --
 
 CREATE INDEX idx_market_close_snapshot_trade_date ON public.market_close_snapshot USING btree (trade_date);
-
-
---
--- Name: idx_market_insights_created; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_market_insights_created ON public.market_insights USING btree (created_at DESC);
 
 
 --
@@ -17902,19 +17798,6 @@ CREATE POLICY crypto_snapshots_service_write ON public.crypto_snapshots TO servi
 
 
 --
--- Name: daily_briefings; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.daily_briefings ENABLE ROW LEVEL SECURITY;
-
---
--- Name: daily_briefings daily_briefings_service_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY daily_briefings_service_all ON public.daily_briefings TO service_role USING (true) WITH CHECK (true);
-
-
---
 -- Name: dcf_fair_value_cache; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -18238,19 +18121,6 @@ ALTER TABLE public.market_deep_dive_cache ENABLE ROW LEVEL SECURITY;
 --
 
 CREATE POLICY market_deep_dive_cache_service_write ON public.market_deep_dive_cache TO service_role USING (true) WITH CHECK (true);
-
-
---
--- Name: market_insights; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.market_insights ENABLE ROW LEVEL SECURITY;
-
---
--- Name: market_insights market_insights_service_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY market_insights_service_all ON public.market_insights TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -21032,13 +20902,6 @@ GRANT ALL ON TABLE public.crypto_snapshots TO service_role;
 
 
 --
--- Name: TABLE daily_briefings; Type: ACL; Schema: public; Owner: -
---
-
-GRANT ALL ON TABLE public.daily_briefings TO service_role;
-
-
---
 -- Name: TABLE dcf_fair_value_cache; Type: ACL; Schema: public; Owner: -
 --
 
@@ -21255,13 +21118,6 @@ GRANT ALL ON TABLE public.market_close_snapshot TO service_role;
 --
 
 GRANT ALL ON TABLE public.market_deep_dive_cache TO service_role;
-
-
---
--- Name: TABLE market_insights; Type: ACL; Schema: public; Owner: -
---
-
-GRANT ALL ON TABLE public.market_insights TO service_role;
 
 
 --
@@ -22143,5 +21999,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict P0GA9jrxeSGyxsJ2CuOh3aiWxZjB3O8wx5aDe4qqfja3eCYKa8dIaYJKpmMLoCa
+\unrestrict yBMVRHmWipmlCMLC9Z3ty1IXUB8HFwz3AHCeeuddBBC6d7OIvfzJN4czlxKrrmr
 

@@ -627,6 +627,40 @@ def _cacheable_answer(result: Dict[str, Any]) -> bool:
     return _is_clean_finish(result.get("finish_reason"))
 
 
+def _cacheable_json_answer(result: Dict[str, Any], *, tag: Optional[str] = None) -> bool:
+    """`_cacheable_answer`, and the text really is a JSON object or array.
+
+    JSON mode is not a guarantee: a clean-STOP answer can still break on a stray quote, and
+    that shape passed `_cacheable_answer`. The key is fully deterministic for a prompt with
+    no per-run text (the direct report door's Stage A is one), so one bad sample was replayed
+    for `GEMINI_CACHE_TTL` to every caller of that prompt with no upstream call to show for
+    it: precharge, the same parse failure, refund, again. A re-ask got the same text back.
+
+    Strict on purpose. A wrong refusal costs one extra model call, never a wrong answer, so
+    a fenced answer simply goes uncached. `generate_text` keeps `_cacheable_answer`: its
+    answers are prose.
+    """
+    if not _cacheable_answer(result):
+        return False
+    text = result["text"]
+    try:
+        parsed = json.loads(text)
+    except (ValueError, RecursionError) as e:
+        logger.warning(
+            "[gemini-json-not-cached] tag=%s finish=%s chars=%d: %s: %s",
+            tag or "-", result.get("finish_reason") or "-", len(text), type(e).__name__, e,
+        )
+        return False
+    if not isinstance(parsed, (dict, list)):
+        logger.warning(
+            "[gemini-json-not-cached] tag=%s finish=%s chars=%d: a bare %s, not an object "
+            "or array",
+            tag or "-", result.get("finish_reason") or "-", len(text), type(parsed).__name__,
+        )
+        return False
+    return True
+
+
 def _has_function_call(response: Any) -> bool:
     """Whether the model's turn contains a function-call part (a request for another tool round)."""
     try:
@@ -1442,14 +1476,16 @@ class GeminiClient:
                 what="generate_text",
             )
             usage = _response_usage(response)
+            finish = _response_finish(response)
             _log_gemini_usage(
                 usage, call_site="generate_text", model=model_name or self.model_name,
+                finish=finish,
             )
             result = {
                 "text": _response_text(response),
                 "model": self.model_name,
                 "tokens_used": usage["total"],
-                "finish_reason": _response_finish(response),
+                "finish_reason": finish,
             }
             if _cacheable_answer(result):
                 self._response_cache.set(key, result)
@@ -1646,14 +1682,15 @@ class GeminiClient:
             what="generate_text_cached",
         )
         usage = _response_usage(response)
+        finish = _response_finish(response)
         _log_gemini_usage(
-            usage, call_site="generate_text_cached", model=self.model_name,
+            usage, call_site="generate_text_cached", model=self.model_name, finish=finish,
         )
         return {
             "text": _response_text(response),
             "model": self.model_name,
             "tokens_used": usage["total"],
-            "finish_reason": _response_finish(response),
+            "finish_reason": finish,
         }
 
     async def delete_cache(self, handle: Optional[Dict[str, Any]]) -> None:
@@ -1726,7 +1763,7 @@ class GeminiClient:
         key = _cache_key(*parts)
         cached = self._response_cache.get(key) if cache else None
         if cached is not None:
-            logger.debug("Gemini generate_json cache HIT")
+            logger.info("Gemini generate_json cache HIT tag=%s", usage_tag or "-")
             return _CacheHit(cached)
 
         try:
@@ -1746,17 +1783,18 @@ class GeminiClient:
                 what="generate_json",
             )
             usage = _response_usage(response)
+            finish = _response_finish(response)
             _log_gemini_usage(
                 usage, call_site="generate_json", model=model_name or self.model_name,
-                tag=usage_tag,
+                tag=usage_tag, finish=finish,
             )
             result = {
                 "text": _response_text(response),
                 "model": self.model_name,
                 "tokens_used": usage["total"],
-                "finish_reason": _response_finish(response),
+                "finish_reason": finish,
             }
-            if cache and _cacheable_answer(result):
+            if cache and _cacheable_json_answer(result, tag=usage_tag):
                 self._response_cache.set(key, result)
             return result
         except Exception as e:

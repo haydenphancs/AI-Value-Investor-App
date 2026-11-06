@@ -112,6 +112,13 @@ TRANSIENT_HTTP_STATUS = frozenset(
     }
 )
 
+#: Transient ONLY as an INT ``.code``, the "not a PostgREST response" path. PostgREST's own
+#: 409 is JSON and carries a str SQLSTATE (23505, 23503), which stays deterministic. An int
+#: 409 can only be the edge: Cloudflare serves its "DNS resolution error" page with status
+#: 409 when it briefly cannot resolve the Supabase origin (PYTHON-FASTAPI-3F, 2026-10-31).
+#: Never extended to an httpx ``.response`` status: a Storage 409 is a real conflict.
+EDGE_ONLY_TRANSIENT_STATUS = frozenset({409})
+
 #: Postgres SQLSTATEs worth retrying: connection-lost (class 08) and
 #: "too many connections" (53300). Deliberately EXCLUDES 57014
 #: (statement_timeout) — a retry reproduces the same slow query and doubles load.
@@ -154,6 +161,8 @@ def _classify_one(exc: BaseException) -> bool:
     if code is not None:
         status = _status_from_code(code)
         if status is not None:
+            if isinstance(code, int) and status in EDGE_ONLY_TRANSIENT_STATUS:
+                return True
             return status in TRANSIENT_HTTP_STATUS
         if isinstance(code, str):
             # A SQLSTATE or a PGRST* code. 23505 / PGRST116 / PGRST204 all land
@@ -244,7 +253,8 @@ def is_transient_supabase_error(exc: BaseException) -> bool:
     Explicitly NOT transient — these are deterministic, and retrying a constraint
     violation is a correctness hazard, not just wasted work:
     23505 (unique violation), PGRST116 (no rows), PGRST204 (unknown column /
-    schema drift), every 4xx, and 429 (backpressure).
+    schema drift), every 4xx (except the edge's int 409, ``EDGE_ONLY_TRANSIENT_STATUS``),
+    and 429 (backpressure).
     """
     return _walk_chain(exc, _classify_one)
 

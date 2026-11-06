@@ -36,11 +36,13 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from app.config import settings
 from app.integrations.gemini import GeminiClient
-from app.services._insider_common import ensure_insider_label
+from app.log_redaction import redact_secrets
+from app.services._insider_common import INSIDER_VALUE_NOTE, ensure_insider_label
 from app.services.agents.persona_config import PersonaConfig
 # Reuse the headline scorer's per-vital reader so the Bull/Bear point count is
 # driven by the EXACT same 0-10 module substrate that drives the quality score.
 from app.services.agents.persona_scoring import _vital_score
+from app.services.report_degradation import _mark_degraded
 from app.utils.peer_wording import peer_worded_metric_name
 from app.utils.currency import currency_code, money_prefix
 
@@ -306,12 +308,91 @@ def agentic_thinking_budget() -> Optional[int]:
     return _resolve_budget(getattr(settings, "REPORT_AGENTIC_THINKING_BUDGET", 0))
 
 
+@dataclass(frozen=True)
+class NarrativeRunOutcome:
+    """How one Stage B run ended.
+
+    `required` counts the non-nullable jobs, `fell_back` those that ended on their honest
+    fallback, through a failed call or an empty answer. A nullable field opting out is an
+    answer, not a failure, so nullable jobs count on neither side.
+    """
+    required: int = 0
+    fell_back: int = 0
+
+
+# A report is refunded, not delivered, when Stage B lost at least this share of its required
+# sections and at least this many of them (owner, 2026-11-05: "Half or more"). One or two
+# stray misses still ship with their honest fallback; a report that is mostly "Data
+# unavailable" is a non-delivery, the same bug as a degraded Stage A one stage later.
+STAGE_B_OUTAGE_SHARE = 0.5
+STAGE_B_OUTAGE_MIN_JOBS = 2
+
+
+def stage_b_outage_reason(outcome: Any, *, ticker: str, persona: str) -> Optional[str]:
+    """The degrade reason when a Stage B run lost too much to deliver, else None.
+
+    Anything but a `NarrativeRunOutcome` reads as no outage. This logs the one ERROR for an
+    outage: `DegradedReportError` is a WARNING at its two log sites, so an outage logged
+    nowhere else would raise no Sentry event at all.
+    """
+    if not isinstance(outcome, NarrativeRunOutcome) or outcome.fell_back <= 0:
+        return None
+    share = outcome.fell_back / max(outcome.required, 1)
+    if outcome.fell_back >= STAGE_B_OUTAGE_MIN_JOBS and share >= STAGE_B_OUTAGE_SHARE:
+        logger.error(
+            "[report-stage-b-outage] ticker=%s persona=%s fell_back=%d required=%d: too "
+            "many sections lost, not delivering this report",
+            ticker, persona, outcome.fell_back, outcome.required,
+        )
+        return "stage_b_outage"
+    logger.warning(
+        "[report-stage-b-partial] ticker=%s persona=%s fell_back=%d required=%d: "
+        "delivering with these sections on their fallback",
+        ticker, persona, outcome.fell_back, outcome.required,
+    )
+    return None
+
+
+# Recorded in the report's lost sections for a run below the refund line that still lost two
+# or more. The buyer keeps a report they were billed for, but it is shared with nobody: a hole
+# this size is the same case as a Financials section lost to a degraded upstream build, and a
+# shared cache would serve it free, and re-sell it, until the next close.
+STAGE_B_PARTIAL_SECTION = "stage_b:narratives"
+
+
+def stage_b_is_partial(outcome: Any) -> bool:
+    """A delivered run that lost too much to share. Ask only after `stage_b_outage_reason`."""
+    return (
+        isinstance(outcome, NarrativeRunOutcome)
+        and outcome.fell_back >= STAGE_B_OUTAGE_MIN_JOBS
+    )
+
+
+def thesis_empty_reason(report: Any, *, ticker: str, persona: str) -> Optional[str]:
+    """The degrade reason when the bull or bear case came out empty, else None.
+
+    Stage A's thesis is the fallback for `synthesize_core_thesis`, so a Stage A answer with an
+    unusable thesis plus a failed synthesis left a report with no thesis at all, and nothing
+    downstream checks for that: it validates, bills and caches. An assembled report always
+    holds `core_thesis`, so a missing key is a stub, not an empty thesis.
+    """
+    thesis = report.get("core_thesis") if isinstance(report, dict) else None
+    if not isinstance(thesis, dict) or (thesis.get("bull_case") and thesis.get("bear_case")):
+        return None
+    logger.error(
+        "[report-thesis-empty] ticker=%s persona=%s: no bull or bear case survived, not "
+        "delivering this report",
+        ticker, persona,
+    )
+    return "thesis_empty"
+
+
 async def run_narrative_jobs(
     jobs: List[NarrativeJob],
     gemini: GeminiClient,
     persona: PersonaConfig,
     evidence: str = "",
-) -> None:
+) -> NarrativeRunOutcome:
     """Execute every job in parallel. Each job's result lands in-place
     via `apply`; failures use the job's `fallback_value`.
 
@@ -324,10 +405,14 @@ async def run_narrative_jobs(
     report on its own.
 
     Never raises — even a total Gemini outage just leaves every narrative field
-    on its honest fallback.
+    on its honest fallback. The returned `NarrativeRunOutcome` says how many that was, so
+    the orchestrators can refuse a report that is mostly fallbacks.
     """
     if not jobs:
-        return
+        return NarrativeRunOutcome()
+
+    required = sum(1 for job in jobs if not job.nullable)
+    fell_back = 0
 
     use_cache = bool(evidence) and getattr(
         settings, "GEMINI_CONTEXT_CACHE_ENABLED", True
@@ -346,6 +431,7 @@ async def run_narrative_jobs(
     thinking_budget = narrative_thinking_budget()
 
     async def _one(job: NarrativeJob) -> None:
+        nonlocal fell_back
         try:
             raw: Optional[str] = None
             if cache_handle is not None:
@@ -356,6 +442,14 @@ async def run_narrative_jobs(
                         slim, cache_handle, thinking_budget=thinking_budget,
                     )
                     raw = result.get("text") or ""
+                    if not raw.strip():
+                        # A blank answer raises nothing, but it is a hiccup like any other:
+                        # "only a failure of BOTH paths lands on the honest sentinel".
+                        logger.warning(
+                            f"Cached narrative {job.label} came back blank "
+                            f"(finish={result.get('finish_reason') or '-'}) — inline retry"
+                        )
+                        raw = None
                 except Exception as ce:
                     # Cache-path hiccup → inline retry preserves full quality.
                     logger.warning(
@@ -373,6 +467,8 @@ async def run_narrative_jobs(
 
             cleaned = _post_process(raw, word_cap=job.word_cap)
             if not cleaned:
+                if not job.nullable:
+                    fell_back += 1
                 job.apply(None if job.nullable else job.fallback_value)
                 return
             if job.postprocess is not None:
@@ -389,12 +485,15 @@ async def run_narrative_jobs(
                 f"Stage-B narrative {job.label} failed: "
                 f"{type(e).__name__}: {e}"
             )
+            if not job.nullable:
+                fell_back += 1
             job.apply(job.fallback_value)
 
     try:
         await asyncio.gather(*(_one(j) for j in jobs))
     finally:
         await gemini.delete_cache(cache_handle)
+    return NarrativeRunOutcome(required=required, fell_back=fell_back)
 
 
 # ── Per-field prompt builders ─────────────────────────────────────────
@@ -1693,8 +1792,13 @@ def _revenue_forecast_insight_prompt(
     else:
         proj_str = "no analyst projections available"
 
-    cagr_str = f"{cagr:+.0f}%" if isinstance(cagr, (int, float)) else "n/a"
-    eps_str = f"{eps_growth:+.0f}%" if isinstance(eps_growth, (int, float)) else "n/a"
+    # The wire's `cagr` and `eps_growth` are required floats, so 0.0 is how "no rate" arrives
+    # (one forward year, or a sign change): it must never read as a measured flat outlook.
+    # `chat_context_resolver._stored_growth` reads them the same way.
+    cagr_str = f"{cagr:+.0f}%" if cagr and isinstance(cagr, (int, float)) else "n/a"
+    eps_str = (
+        f"{eps_growth:+.0f}%" if eps_growth and isinstance(eps_growth, (int, float)) else "n/a"
+    )
 
     # EPS beat/miss history (the EPS Track Record) → lets the read weigh the
     # forecast's CREDIBILITY, not just its shape: steady beats back an
@@ -1823,6 +1927,12 @@ def _share_count_change_known(ca: Dict[str, Any]) -> bool:
     return True
 
 
+def _stake_pct(row: Dict[str, Any], key: str) -> float:
+    """A Key Management row's percent, 0.0 when it has none."""
+    value = row.get(key) if isinstance(row, dict) else None
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
+
 def _key_management_insight_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
@@ -1842,11 +1952,16 @@ def _key_management_insight_prompt(
     # error on a $215B founder stake, but it still happened and should
     # be named, not dismissed.
     top_holders = km.get("top_holders") or []
-    major = top_holders[0] if top_holders else None
-    if major:
+    # The largest stake on the card, wherever it sits: a holder with no 13G stays under
+    # `officers`, and an old 13G must not read as dominant beside Buffett's 13.2%.
+    stakes = [(_stake_pct(h, "percent_ownership"), h) for h in top_holders] + [
+        (_stake_pct(o, "percent_owned"), o) for o in km.get("officers") or []
+    ]
+    major_pct, major = max(stakes, key=lambda pair: pair[0], default=(0.0, None))
+    if major and (major_pct >= 5.0 or top_holders):
         anchor_line = (
             f"DOMINANT HOLDER: {major.get('name')} holds "
-            f"{major.get('percent_ownership')}% "
+            f"{str(round(major_pct, 1)) + '% ' if major_pct else ''}"
             f"({major.get('ownership_value')}). Judge recent activity "
             f"against this base — but name the activity, don't dismiss it."
         )
@@ -1986,10 +2101,15 @@ def _insider_key_insight_prompt(
     insider = shell.get("insider_data", {}) or {}
     sentiment = insider.get("sentiment", "neutral")
     txns = insider.get("transactions", [])
+    # A "~" total holds a closing price, and "N/A" has a trade nobody can value. Told only
+    # when one is present, so every other prompt stays byte-identical.
+    estimate_note = (
+        f"\n{INSIDER_VALUE_NOTE}" if "~" in str(txns) or "N/A" in str(txns) else ""
+    )
     return f"""Write the catchy headline takeaway shown next to the insider score.
 
 SENTIMENT: {sentiment}
-TRANSACTIONS: {txns}
+TRANSACTIONS: {txns}{estimate_note}
 
 {_style_block(persona)}
 LENGTH: One short fragment under 15 words. NO period.
@@ -2335,12 +2455,24 @@ def build_narrative_jobs(
     # ── moat: durability + competitive insight ────────────────────────
     moat = shell.get("moat_competition")
     if isinstance(moat, dict):
+        # The explanation for pillars that read flat because of the industry. Added here, as
+        # a postprocess, because these two jobs overwrite both fields: it runs on real model
+        # text only, so the "Data unavailable" fallback never carries a suffix. Popped so the
+        # internal key never reaches a stored report.
+        coverage_note = moat.pop("_coverage_note", None)
+        coverage_suffix = f" {_strip_dashes(coverage_note)}" if coverage_note else ""
+
+        def _append_coverage_note(text: str) -> str:
+            return f"{text}{coverage_suffix}"
+
+        moat_postprocess = _append_coverage_note if coverage_suffix else None
         jobs.append(NarrativeJob(
             label="moat_durability_note",
             prompt=_moat_durability_note_prompt(persona, evidence, shell),
             word_cap=70,
             apply=_setter_for_dict_key(moat, "durability_note"),
             fallback_value=FALLBACK["moat_durability_note"],
+            postprocess=moat_postprocess,
         ))
         jobs.append(NarrativeJob(
             label="moat_competitive_insight",
@@ -2348,6 +2480,7 @@ def build_narrative_jobs(
             word_cap=28,
             apply=_setter_for_dict_key(moat, "competitive_insight"),
             fallback_value=FALLBACK["moat_competitive_insight"],
+            postprocess=moat_postprocess,
         ))
 
     # ── macro: intelligence_brief (the "Insight" — synthesizes the whole
@@ -2569,6 +2702,21 @@ def _setter_with_null(target: Dict[str, Any], key: str) -> Callable[[Any], None]
 # ── Stage A: structural / scoring shell prompt ────────────────────────
 
 
+STAGE_A_GUIDANCE_RULES = '''- revenue_forecast.management_guidance + guidance_quote: STRICT EXTRACTION ONLY from the EARNINGS-CALL TRANSCRIPT EXCERPT above.
+  * Set `management_guidance` to "raised" only when the transcript contains explicit raise language ("we now expect", "we are raising our outlook", "we increased our full-year guidance", "guidance was lifted", etc.).
+  * "lowered" only on explicit cut language ("we are lowering", "we now see", "guidance was reduced", "below prior outlook", etc.).
+  * "maintained" otherwise (including when the transcript didn't mention guidance — this is the safe default).
+  * Do NOT infer status from sentiment, tone, or your training-data knowledge.
+- revenue_forecast.guidance_quote: when management_guidance is "raised" or "lowered", paste the verbatim sentence containing the guidance language (≤ 280 chars, single line, exact transcript words). When "maintained" or no quote available → return null.
+- revenue_forecast.guidance_speaker: when guidance_quote is non-null, set to "CFO" | "CEO" | "IR" based on who said it in the transcript. Null otherwise.
+- revenue_forecast.guidance_period: when guidance_quote is non-null and the speaker referenced a period (e.g. "Q4 2025", "FY 2026", "next quarter"), set to that period string ≤ 30 chars. Null when not specified.
+'''
+STAGE_A_NO_TRANSCRIPT_RULE = (
+    '- revenue_forecast: no earnings-call transcript was supplied. Set management_guidance to '
+    '"maintained" and guidance_quote, guidance_speaker and guidance_period to null.\n'
+)
+
+
 def build_stage_a_prompt(
     persona: PersonaConfig,
     company_name: str,
@@ -2588,6 +2736,13 @@ def build_stage_a_prompt(
         f"\nDEEP RESEARCH FINDINGS (from your earlier tool-driven research):\n"
         f"{deep_findings[:6000]}\n"
         if deep_findings else ""
+    )
+    # The rules for reading guidance out of a transcript, only when one is in the evidence.
+    # With none (transcripts are outside the licence), `_overlay_ai_guidance` records
+    # "unknown" whatever this block says, so the rules only described a file that is not there.
+    guidance_rules = (
+        STAGE_A_GUIDANCE_RULES if "EARNINGS-CALL TRANSCRIPT EXCERPT" in evidence
+        else STAGE_A_NO_TRANSCRIPT_RULE
     )
 
     return f"""You are analyzing {company_name} ({ticker}) as {persona.display_name}.
@@ -2650,17 +2805,11 @@ Return ONLY valid JSON (no markdown fences):
       {{"name": "Intangible Assets","score": 0.0, "peer_score": 5.0}}
     ],
     "durability_note": "",
-    "competitors": [
-      {{"name": "Competitor", "ticker": "TICK", "competitive_score": 0.0, "market_share_percent": 0.0, "threat_level": "low|moderate|high"}}
-    ],
     "competitive_insight": ""
   }},
   "macro_data": {{
     "overall_threat_level": "low|elevated|high|severe|critical",
     "headline": "",
-    "risk_factors": [
-      {{"category": "inflation|interest_rates|geopolitical|currency|regulation|supply_chain|tariffs|energy", "title": "Risk Title", "impact": 0.0, "trend": "improving|stable|worsening", "severity": "low|elevated|high|severe|critical", "description": ""}}
-    ],
     "intelligence_brief": ""
   }},
   "wall_street": {{
@@ -2674,33 +2823,36 @@ Return ONLY valid JSON (no markdown fences):
 RULES:
 - quality_score: integer 0-100 reflecting your conviction on this stock
 - moat dimension scores 0.0-10.0
-- macro impact 0.0-1.0
 - 2-4 bull_case + 2-4 bear_case — count matches the case's strength. Bull and bear can have different counts (e.g. 4 bull + 2 bear when the bull case is rich and the bear thin). Do NOT default to 3 — pick the count that fits the data, not the layout. EACH point MUST cite a concrete number drawn from the CARD VALUES block / evidence (gross margin %, D/E, FCF, P/E, EV/EBITDA, revenue/EPS CAGR, ROE, Altman Z, forecast growth) — i.e. reflect the Deep Dive cards. GROUNDING — STRICT: any number cited MUST appear verbatim in the CARD VALUES block; never invent or recompute; if a metric shows "—"/"N/A", anchor on a different one. A generic point with no number is NOT acceptable.
-- 3-6 macro risk_factors (skip ones that don't materially affect this company)
-- 2-3 critical_factors normally (1 is fine when little is truly worth flagging; 4 only for a genuinely complex situation; NEVER more than 5). Each is a forward-looking thing to MONITOR going forward — a concern paired with what to watch next — NOT a static complaint or a restatement of the bear case. Each factor MUST cover a DIFFERENT area (never two on the same theme): spread across balance-sheet, competitive moat, macro/geopolitical/Fed, growth/forecast, valuation, insider. Make the title a neutral monitor-area name (e.g. "Free Cash Flow", "Competitive Moat", "Fed & Rate Policy", "Geopolitical Exposure", "Growth Durability").
-- 3-5 competitors, ranked by relevance
+- 2-3 critical_factors normally (1 is fine when little is truly worth flagging; 4 only for a genuinely complex situation; NEVER more than 5). Each names a forward-looking area to MONITOR, NOT a static complaint or a restatement of the bear case. Each factor MUST cover a DIFFERENT area (never two on the same theme): spread across balance-sheet, competitive moat, macro/geopolitical/Fed, growth/forecast, valuation, insider. Make the title a neutral monitor-area name (e.g. "Free Cash Flow", "Competitive Moat", "Fed & Rate Policy", "Geopolitical Exposure", "Growth Durability"). Choose only title and severity here: description and watch stay "" exactly as shown.
 - DO NOT include fundamental_metrics or overall_assessment — both are now built deterministically from snapshot services and any AI version is discarded.
-- Leave every "text" / "narrative" / "headline" / "ownership_insight" / "key_insight" / "description" / "watch" / "intelligence_brief" / "competitive_insight" / "durability_note" / "analysis_note" / "guidance_quote" / "ownership_note" / "wall_street_insight" field as the placeholder shown above. Those will be written by a separate prose pass.
-- moat_competition.market_dynamics.concentration AND moat_competition.competitors are RECOMPUTED downstream from real FMP peer + sector data — your values for those fields are discarded. You may still fill them as best-guess for sanity, but accuracy doesn't matter there.
+- Leave every "text" / "narrative" / "headline" / "ownership_insight" / "key_insight" / "description" / "watch" / "intelligence_brief" / "competitive_insight" / "durability_note" / "analysis_note" / "ownership_note" / "wall_street_insight" field as the placeholder shown above. Those will be written by a separate prose pass.
+- moat_competition.market_dynamics.concentration is RECOMPUTED downstream from real FMP peer + sector data — your value is discarded. You may still fill it as a best guess, but accuracy doesn't matter there.
 - moat_competition.market_dynamics.current_tam / future_tam: STRICT EXTRACTION ONLY. Set to a USD-denominated number (e.g. 150000000000 for $150B) **only when the EARNINGS-CALL TRANSCRIPT EXCERPT or the company description above contains an explicit, quoted TAM/addressable-market figure**. Set both to 0 when no figure is disclosed. Do NOT estimate from sector context, competitor data, or your training-data knowledge of the industry. Forced fabrication here is the highest-cost failure mode for this product.
 - moat_competition.market_dynamics.tam_source_quote: when current_tam > 0, paste the verbatim sentence from the transcript / description that contains the figure (≤ 200 chars). When current_tam = 0, return "".
 - moat_competition.market_dynamics.future_year: when future_tam > 0, set to the year in which the projection is stated (e.g. "2030"). Otherwise leave the default.
 - moat_competition.dimensions[*].peer_score: 0-10 estimate of how a typical sector PEER scores on each dimension (not the focal company — that's `score`). Use 5.0 only when you have no basis to differentiate; otherwise raise or lower based on industry norms (e.g., enterprise software peers usually score ~7 on Switching Costs; commodity producers usually score ~2 on Brand Power; semiconductor peers usually score ~7 on Intangible Assets / IP).
-- revenue_forecast.management_guidance + guidance_quote: STRICT EXTRACTION ONLY from the EARNINGS-CALL TRANSCRIPT EXCERPT above.
-  * Set `management_guidance` to "raised" only when the transcript contains explicit raise language ("we now expect", "we are raising our outlook", "we increased our full-year guidance", "guidance was lifted", etc.).
-  * "lowered" only on explicit cut language ("we are lowering", "we now see", "guidance was reduced", "below prior outlook", etc.).
-  * "maintained" otherwise (including when the transcript wasn't supplied or didn't mention guidance — this is the safe default).
-  * Do NOT infer status from sentiment, tone, or your training-data knowledge.
-- revenue_forecast.guidance_quote: when management_guidance is "raised" or "lowered", paste the verbatim sentence containing the guidance language (≤ 280 chars, single line, exact transcript words). When "maintained" or no quote available → return null.
-- revenue_forecast.guidance_speaker: when guidance_quote is non-null, set to "CFO" | "CEO" | "IR" based on who said it in the transcript. Null otherwise.
-- revenue_forecast.guidance_period: when guidance_quote is non-null and the speaker referenced a period (e.g. "Q4 2025", "FY 2026", "next quarter"), set to that period string ≤ 30 chars. Null when not specified.
-- Return raw JSON only — no markdown fences, no commentary
+{guidance_rules}- Return raw JSON only — no markdown fences, no commentary
 """
 
 
-def parse_stage_a_response(raw_text: str) -> Optional[Dict[str, Any]]:
-    """Parse Stage-A output, stripping any code fences. Returns None on
-    failure so the caller can use `stage_a_fallback()`."""
+def parse_stage_a_response(
+    raw_text: str,
+    *,
+    what: str = "Stage-A",
+    ticker: str = "?",
+    persona: str = "?",
+    finish: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Parse one report JSON answer, stripping any code fences. Returns None on failure.
+
+    Used by Stage A and both post-assembly syntheses, so it logs at WARNING and leaves the
+    severity to the caller: Stage A degrades the report, a synthesis keeps what it has.
+    `what` names the call, because a failed synthesis is not a Stage A failure.
+
+    The line carries the finish reason and a bounded excerpt around the break. Without them
+    a stray quote and an early stop look identical: both can read "Expecting ',' delimiter".
+    """
     import json as _json
 
     if not raw_text:
@@ -2717,13 +2869,150 @@ def parse_stage_a_response(raw_text: str) -> Optional[Dict[str, Any]]:
     try:
         parsed = _json.loads(text)
     except _json.JSONDecodeError as e:
-        logger.error(f"Stage-A JSON parse failed: {e}")
+        logger.warning(
+            "[report-json-unparseable] what=%s ticker=%s persona=%s finish=%s chars=%d "
+            "line=%d col=%d pos=%d: %s | around the break: %r",
+            what, ticker, persona, finish or "-", len(text), e.lineno, e.colno, e.pos, e.msg,
+            redact_secrets(text[max(0, e.pos - 120):e.pos + 120]),
+        )
+        return None
+    except RecursionError:
+        logger.warning(
+            "[report-json-unparseable] what=%s ticker=%s persona=%s finish=%s chars=%d: "
+            "nested too deeply to parse",
+            what, ticker, persona, finish or "-", len(text),
+        )
         return None
 
     if not isinstance(parsed, dict):
-        logger.error(f"Stage-A returned non-dict ({type(parsed).__name__})")
+        logger.warning(
+            "[report-json-unparseable] what=%s ticker=%s persona=%s finish=%s chars=%d: "
+            "a %s, not an object",
+            what, ticker, persona, finish or "-", len(text), type(parsed).__name__,
+        )
         return None
     return parsed
+
+
+STAGE_A_TOP_LEVEL_KEYS: Tuple[str, ...] = (
+    "quality_score",
+    "core_thesis",
+    "revenue_forecast",
+    "insider_analysis",
+    "key_management",
+    "price_action",
+    "revenue_engine",
+    "moat_competition",
+    "macro_data",
+    "wall_street",
+    "critical_factors",
+)
+_STAGE_A_OBJECT_SECTIONS: Tuple[str, ...] = tuple(
+    key for key in STAGE_A_TOP_LEVEL_KEYS if key not in ("quality_score", "critical_factors")
+)
+
+
+def stage_a_shell_problem(shell: Dict[str, Any]) -> Optional[str]:
+    """Why a parsed Stage A answer cannot be used as a shell, or None when it can.
+
+    Lives outside `parse_stage_a_response` because the syntheses share that parser and
+    return other shapes. Two failures matter. An answer holding none of the Stage A keys
+    (`{}`, a wrapped `{"report": {...}}`) carries no more than `stage_a_fallback()`, which is
+    refunded, yet it would be billed and cached. A truthy section of the wrong type crashes
+    `assemble_report`, which reads each one as a dict. A SPARSE but real shell is fine:
+    `assemble_report` reads a missing section as "Stage A never answered".
+    """
+    if not any(key in shell for key in STAGE_A_TOP_LEVEL_KEYS):
+        return "no_known_keys"
+    for key in _STAGE_A_OBJECT_SECTIONS:
+        if shell.get(key) and not isinstance(shell[key], dict):
+            return f"{key}_not_object"
+    factors = shell.get("critical_factors")
+    if factors and not (
+        isinstance(factors, list) and all(isinstance(f, dict) for f in factors)
+    ):
+        return "critical_factors_not_objects"
+    return None
+
+
+async def generate_stage_a_shell(
+    gemini: GeminiClient,
+    persona: PersonaConfig,
+    ticker: str,
+    prompt: str,
+) -> Dict[str, Any]:
+    """One Stage A shell for either report door. Never raises.
+
+    An unparseable or wrong-shape answer is re-asked ONCE before the report is given up.
+    Only an exception reaches `async_retry`, and a 200 with bad JSON is not one, so a single
+    bad sample used to end a 20-credit report after the run had spent everything else. The
+    re-ask has the same prompt, temperature and thinking. A raised Gemini error is not
+    re-asked: `async_retry` already spent its budget on it. Two bad answers degrade the report.
+
+    `cache=False` on both asks. A finished report lives in `ticker_report_cache`, so the
+    response cache saves this call almost nothing, and it can hold a valid-JSON answer of the
+    wrong shape for an hour, leaving the re-ask as the only real sample every time.
+
+    Stage A runs with a thinking cap (SYSTEM_DESIGN_GUIDELINES 9b.7). MEASURED on
+    MSFT/warren_buffett via scripts/eval_report_thinking.py (2026-08-27): default
+    1,715-2,295 thought tokens and 18.1s, versus 0 and 6.9s at budget 0 — same 11 top-level
+    keys, parseable at every budget. Thought tokens bill at the OUTPUT rate.
+
+    Its OWN setting, separate from Stage B's, because this is the call that decides thesis
+    / pros / cons / moat / valuation on a 20-credit product and "valid JSON with 11 keys"
+    does not certify that the judgement survived. Set REPORT_STAGE_A_THINKING_BUDGET
+    negative in the environment to restore the model default without touching Stage B, and
+    re-run the eval before trusting either way.
+    """
+    reason = "stage_a_unparseable"
+    problem: Optional[str] = None
+    finish: Optional[str] = None
+    chars = 0
+    try:
+        for attempt in (1, 2):
+            result = await gemini.generate_json(
+                prompt=prompt,
+                system_instruction=persona.system_prompt,
+                thinking_budget=stage_a_thinking_budget(),
+                usage_tag=(
+                    f"report_stage_a{'' if attempt == 1 else '_retry'}:{ticker}:{persona.key}"
+                ),
+                cache=False,
+            )
+            text = result.get("text") or ""
+            finish = result.get("finish_reason")
+            chars = len(text)
+            shell = parse_stage_a_response(
+                text, what="Stage-A", ticker=ticker, persona=persona.key, finish=finish,
+            )
+            problem = "unparseable" if shell is None else stage_a_shell_problem(shell)
+            if problem is None:
+                missing = [key for key in STAGE_A_TOP_LEVEL_KEYS if key not in shell]
+                if missing:
+                    logger.warning(
+                        "[stage-a-sparse] ticker=%s persona=%s missing=%s",
+                        ticker, persona.key, ",".join(missing),
+                    )
+                return shell
+            reason = "stage_a_unparseable" if shell is None else "stage_a_malformed"
+            if attempt == 1:
+                logger.warning(
+                    "[stage-a-retry] ticker=%s persona=%s problem=%s finish=%s chars=%d: "
+                    "asking once more",
+                    ticker, persona.key, problem, finish or "-", chars,
+                )
+        logger.error(
+            "[stage-a-unparseable] ticker=%s persona=%s reason=%s problem=%s finish=%s "
+            "chars=%d: two unusable answers, degrading this report",
+            ticker, persona.key, reason, problem, finish or "-", chars,
+        )
+        return _mark_degraded(stage_a_fallback(), reason)
+    except Exception as e:
+        logger.error(
+            "[stage-a-failed] ticker=%s persona=%s step=stage_a: %s: %s",
+            ticker, persona.key, type(e).__name__, e, exc_info=True,
+        )
+        return _mark_degraded(stage_a_fallback(), f"stage_a_{type(e).__name__}")
 
 
 def stage_a_fallback() -> Dict[str, Any]:
@@ -2926,9 +3215,10 @@ def _digest_forecast(report: Dict[str, Any]) -> List[str]:
     bits: List[str] = []
     cagr = _f_num(rf.get("cagr"), "{:+.1f}")
     eps = _f_num(rf.get("eps_growth"), "{:+.1f}")
-    if cagr is not None:
+    # 0.0 is the required float's "no rate", never a measured flat outlook.
+    if cagr is not None and rf.get("cagr"):
         bits.append(f"revenue CAGR {cagr}%")
-    if eps is not None:
+    if eps is not None and rf.get("eps_growth"):
         bits.append(f"EPS CAGR {eps}%")
     # "unknown" (no transcript on file) is not a stance — the card hides it.
     if rf.get("management_guidance") in ("raised", "maintained", "lowered"):
@@ -2960,6 +3250,8 @@ def _digest_insider(report: Dict[str, Any]) -> List[str]:
         seg = f"INSIDER ({idata.get('timeframe', 'recent')}): {sent or 'n/a'}"
         if tx_strs:
             seg += " — " + ", ".join(tx_strs)
+        if "(~" in seg or "(N/A)" in seg:
+            seg += f". {INSIDER_VALUE_NOTE}"
         out.append(seg)
     ca = idata.get("capital_allocation")
     if isinstance(ca, dict):
@@ -3439,8 +3731,13 @@ async def synthesize_core_thesis(
         result = await gemini.generate_json(
             prompt=prompt,
             system_instruction=persona.system_prompt,
+            usage_tag=f"report_thesis:{ticker}:{persona.key}",
         )
-        parsed = parse_stage_a_response(result.get("text") or "")
+        parsed = parse_stage_a_response(
+            result.get("text") or "",
+            what="Thesis synthesis", ticker=ticker, persona=persona.key,
+            finish=result.get("finish_reason"),
+        )
         if not isinstance(parsed, dict):
             logger.warning(
                 f"Thesis synthesis returned unparseable JSON for {ticker}; "
@@ -3615,8 +3912,13 @@ async def synthesize_critical_factors(
         result = await gemini.generate_json(
             prompt=prompt,
             system_instruction=persona.system_prompt,
+            usage_tag=f"report_factors:{ticker}:{persona.key}",
         )
-        parsed = parse_stage_a_response(result.get("text") or "")
+        parsed = parse_stage_a_response(
+            result.get("text") or "",
+            what="Critical-factors synthesis", ticker=ticker, persona=persona.key,
+            finish=result.get("finish_reason"),
+        )
         if not isinstance(parsed, dict):
             logger.warning(
                 f"Critical-factors synthesis returned unparseable JSON for "

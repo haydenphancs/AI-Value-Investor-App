@@ -8,8 +8,8 @@ wrong exception class:
   * Home Skeptical Money — `price_f = _finite_float(q.get("price")) or 0.0` published a
     `$0.00` row for a halted / just-listed name that cleared the market-cap floor.
   * Legacy `/home/feed` market cards — `float(quote.get("price") or 0)` → a `$0.00 0.00%`
-    card; the S&P headline printed "Markets Trade Sideways Near 0" and called SPY's share
-    price "the S&P 500".
+    card. That route was removed on 2026-11-05, so the guard now covers the live Market
+    Pulse tiles (a good price with an unknown change: `test_market_pulse_change_known.py`).
   * `market_movers_service.get_universe` — a Supabase blip on the close map was cached
     as an all-None universe for the full TTL (a cached failure byte-identical to "the
     snapshot table is empty"), and `_select_all_closes` paginated with `.range()` and
@@ -31,7 +31,6 @@ import pytest
 from app.utils.market_hours import session_trading_date
 
 import app.services.home_dashboard_service as hd
-import app.services.home_service as hs
 import app.services.market_movers_service as mm
 from app.api.error_response import ErrorCode, classify_exception
 from app.integrations.fmp import FMPUnavailableException
@@ -93,80 +92,27 @@ async def test_a_healthy_shorted_name_is_still_published(monkeypatch):
     assert out.entries[0].price == 7.25
 
 
-# ── legacy /home/feed cards ──────────────────────────────────────────────────
-
-class _HomePS:
-    def __init__(self, quote):
-        self.quote = quote
-
-    async def get_quote(self, symbol):
-        return self.quote
-
+# ── Market Pulse tiles ───────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("quote", [
     {"symbol": "SPY", "price": None, "changesPercentage": None},
-    {"symbol": "SPY", "price": 650.0, "changesPercentage": None},
+    {"symbol": "SPY", "price": None, "changesPercentage": 1.0},
     {"symbol": "SPY", "price": 0.0, "changesPercentage": 1.0},
+    {"symbol": "SPY", "price": -1.0, "changesPercentage": 1.0},
 ])
-async def test_a_market_card_with_an_unknown_number_is_dropped_not_zeroed(monkeypatch, quote):
-    monkeypatch.setattr(hs, "price_source", lambda owner=None: _HomePS(quote))
-
-    async def _spark(self, symbol):
-        return []
-
-    monkeypatch.setattr(hs.HomeService, "_get_sparkline", _spark)
-    svc = hs.HomeService()
-    # ⚠️ NO `hasattr` + `pytest.skip`. This used to disable ITSELF on a rename, turning a
-    # missing builder into a silent green for all three parametrised cases — the exact
-    # "a vacuous guard is worse than no guard" shape of `.claude/rules/testing.md` §3.
-    assert hasattr(svc, "_get_market_tickers"), (
-        "HomeService._get_market_tickers is gone — RE-POINT this guard, do not let the "
-        "fabricated-zero sweep quietly stop covering the market cards"
-    )
-    hs._cache.pop("market_tickers", None)
-    cards = await svc._get_market_tickers()
-
-    # ⚠️ AND NO BARE `all(...)`. Both assertions below are vacuously true on an empty list,
-    # so a builder that returned [] for ANY reason — a swallowed exception included —
-    # satisfied them while proving nothing. The control at the end is what makes the
-    # dropped-card assertions mean something.
-    assert all(c.price > 0 for c in cards)
-    assert all(c.symbol != "SPY" for c in cards), "the SPY card was published from an unknown number"
+async def test_a_pulse_tile_with_an_unknown_price_is_dropped_not_zeroed(quote):
+    # `spark` is passed in, so the builder touches neither service state nor the network.
+    svc = hd.HomeDashboardService.__new__(hd.HomeDashboardService)
+    cfg = {"name": "S&P 500 ETF", "type": "etf", "symbol": "SPY"}
+    assert await svc._fetch_pulse_item(cfg, quote, spark=([], 0.0, 1.0)) is None
 
     # CONTROL, in the same test so it cannot drift away from it: with a healthy quote the
-    # SAME builder DOES publish a SPY card. If this stops holding, the assertions above
-    # are passing on an empty list.
-    hs._cache.pop("market_tickers", None)
-    monkeypatch.setattr(
-        hs, "price_source",
-        lambda owner=None: _HomePS({"symbol": "SPY", "price": 651.2, "changesPercentage": 0.8}),
+    # SAME call DOES build the tile. If this stops holding, the drop above proves nothing.
+    tile = await svc._fetch_pulse_item(
+        cfg, {"symbol": "SPY", "price": 651.2, "changesPercentage": 0.8}, spark=([], 0.0, 1.0),
     )
-    healthy = await svc._get_market_tickers()
-    assert healthy, "the builder returns nothing even for a healthy quote — the drop "\
-        "assertions above are vacuous"
-    assert any(c.symbol == "SPY" and c.price > 0 for c in healthy), [c.symbol for c in healthy]
-
-
-@pytest.mark.asyncio
-async def test_the_market_headline_names_the_fund_and_refuses_an_unknown_move(monkeypatch):
-    monkeypatch.setattr(hs, "price_source",
-                        lambda owner=None: _HomePS({"symbol": "SPY", "price": 651.2, "changesPercentage": 0.8}))
-    svc = hs.HomeService()
-    hs._cache.pop("market_insight", None) if hasattr(hs, "_cache") else None
-
-    # Skip the Supabase table read that precedes the fallback.
-    monkeypatch.setattr(hs, "get_supabase", lambda: (_ for _ in ()).throw(RuntimeError("no db")), raising=False)
-    insight = await svc._get_market_insight()
-    assert insight is not None
-    assert "S&P 500 ETF" in insight.headline
-    assert "SPY" in " ".join(insight.bullet_points)
-    assert "651.20" in " ".join(insight.bullet_points)
-
-    hs._cache.pop("market_insight", None) if hasattr(hs, "_cache") else None
-    monkeypatch.setattr(hs, "price_source",
-                        lambda owner=None: _HomePS({"symbol": "SPY", "price": 651.2, "changesPercentage": None}))
-    assert await hs.HomeService()._get_market_insight() is None
+    assert tile is not None and tile.price == 651.2
 
 
 # ── market movers: a close-map outage is served once, not cached ─────────────

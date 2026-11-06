@@ -9,9 +9,11 @@ Plus unit coverage of the pure helpers that back them.
 """
 
 import asyncio
+import logging
 import types
 
 import pytest
+from postgrest.exceptions import APIError, generate_default_error_message
 
 from app.services.news_cache_service import (
     NewsCacheService,
@@ -19,6 +21,7 @@ from app.services.news_cache_service import (
     _sanitize_published_at,
     is_crypto_scope,
 )
+from app.utils import supabase_errors
 from _price_fakes import PriceFromFMPFake
 
 
@@ -200,6 +203,84 @@ def test_bad_published_at_does_not_poison_the_batch():
     assert by_headline["Bad empty"] is None
     assert by_headline["Garbage"] is None
     assert by_headline["None date"] is None
+
+
+# ── the news write: an edge blip is retried, then a WARNING (PYTHON-FASTAPI-3F) ──
+
+
+def _edge_dns_error() -> APIError:
+    """Cloudflare's DNS resolution error page, status 409, not PostgREST JSON."""
+    response = types.SimpleNamespace(
+        status_code=409, content=b"<title>DNS resolution error | Cloudflare</title>",
+    )
+    return APIError(generate_default_error_message(response))
+
+
+class _FlakyNewsTable:
+    """`ticker_news_cache`: the create-only pre-pass always lands, the merge fails `fails` times."""
+
+    def __init__(self, fails, error):
+        self.fails, self.error = fails, error
+        self.merges = 0
+        self._ingest_rows = None
+
+    def table(self, _name):
+        return self
+
+    def upsert(self, rows, **kwargs):
+        self._ingest_rows = None if kwargs.get("ignore_duplicates") else rows
+        return self
+
+    def execute(self):
+        if self._ingest_rows is None:
+            return types.SimpleNamespace(data=[])
+        self.merges += 1
+        if self.merges <= self.fails:
+            raise self.error
+        return types.SimpleNamespace(
+            data=[{"id": f"db-{i}", "external_id": r["external_id"]}
+                  for i, r in enumerate(self._ingest_rows)],
+        )
+
+
+def _write_through(table, monkeypatch):
+    monkeypatch.setattr(supabase_errors.time, "sleep", lambda _s: None)
+    svc = _StubService()
+    svc.supabase = table
+    return svc._build_and_cache_rows("ETHUSD", [_raw("u1", "A")], 50, "ETHUSD", "ETHUSD (refresh)")
+
+
+def test_one_edge_blip_on_the_news_write_is_retried_and_keeps_real_ids(monkeypatch, caplog):
+    table = _FlakyNewsTable(fails=1, error=_edge_dns_error())
+    with caplog.at_level(logging.WARNING):
+        out = _write_through(table, monkeypatch)
+
+    assert table.merges == 2
+    assert out and all(not a["id"].startswith("temp_") for a in out)
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_an_edge_outage_on_the_news_write_is_a_warning_and_still_renders(monkeypatch, caplog):
+    table = _FlakyNewsTable(fails=99, error=_edge_dns_error())
+    with caplog.at_level(logging.WARNING):
+        out = _write_through(table, monkeypatch)
+
+    assert out and all(a["id"].startswith("temp_") for a in out), "the articles still render"
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert [r for r in caplog.records
+            if r.levelno == logging.WARNING and "Cache insert failed for ETHUSD" in r.getMessage()]
+
+
+def test_a_real_news_write_error_stays_an_error_and_is_not_replayed(monkeypatch, caplog):
+    error = APIError({"message": "no column", "code": "PGRST204", "hint": None, "details": None})
+    table = _FlakyNewsTable(fails=99, error=error)
+    with caplog.at_level(logging.WARNING):
+        out = _write_through(table, monkeypatch)
+
+    assert table.merges == 1
+    assert all(a["id"].startswith("temp_") for a in out)
+    assert [r for r in caplog.records
+            if r.levelno == logging.ERROR and "Cache insert failed for ETHUSD" in r.getMessage()]
 
 
 # ── F8: get_cached_bulk stable id tiebreak ────────────────────────────

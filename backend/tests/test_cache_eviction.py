@@ -31,7 +31,6 @@ import pytest
         "app.services.growth_snapshot_service",
         "app.services.health_check_service",
         "app.services.health_snapshot_service",
-        "app.services.home_service",
         "app.services.ownership_snapshot_service",
         "app.services.profit_power_service",
         "app.services.profitability_snapshot_service",

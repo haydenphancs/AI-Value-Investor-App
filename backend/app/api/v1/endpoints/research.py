@@ -59,6 +59,7 @@ from app.services.credit_service import (
     settle_detached,
     settle_off_loop,
 )
+from app.services.report_degradation import DegradedReportError
 from app.services.research_reconciliation_service import (
     REFUND_OUTCOME_COLUMN,
     claim_and_mark_failed,
@@ -1471,10 +1472,14 @@ async def _run_research_task(
         # Include the exception type so future debugging shows e.g.
         # "KeyError: profile" instead of just "profile" — the type is
         # what tells you whether it's an FMP miss, a JSON parse, etc.
-        logger.error(
-            f"Research task failed for {report_id} ({ticker}/{persona_key}): "
-            f"{type(e).__name__}: {e}",
-            exc_info=True,
+        # A degraded report is handled, not unexpected: its cause logged its own ERROR, and
+        # it is refunded below (the same rule as `generate_report`; change both together).
+        degraded_report = isinstance(e, DegradedReportError)
+        logger.log(
+            logging.WARNING if degraded_report else logging.ERROR,
+            "Research task failed for %s (%s/%s): %s: %s",
+            report_id, ticker, persona_key, type(e).__name__, e,
+            exc_info=not degraded_report,
         )
         # Build a structured error blob (error_code, user_message,
         # underlying, etc.) and stash it as JSON in error_message.

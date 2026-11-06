@@ -24,7 +24,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
-from app.services.dcf_report_gate import report_dcf_source_matches
+from pydantic import ValidationError
+
+from app.schemas.ticker_report import TickerReportResponse
+from app.services.dcf_report_gate import report_dcf_source_matches, strip_caydex_if_disabled
 from app.services.report_degradation import GROUNDING_FREE_KEY, report_is_grounding_free
 from app.database import get_supabase
 
@@ -328,7 +331,17 @@ TABLE_NAME = "ticker_report_cache"
 #     reports cached since Friday's close rebuild, each on its next view. The full backend suite
 #     (minus the Swift-compiling files) ran on this change BEFORE this literal was written. This
 #     ONE bump supersedes every instant above.
-CACHE_SCHEMA_FLOOR = datetime(2026, 10, 31, 22, 7, 0, tzinfo=timezone.utc)
+# 2026-11-05 (23:01 UTC = 18:01 ET, after the close; the push, owner's "Yes, push after 6pm"): the report score
+#     inputs behind Berkshire's 39.6. Cached collections carry the old `computed` ROE and CAGRs,
+#     the old insider partials ($0 for a Form 4 row with no price, Class A added 1:1 with Class
+#     B, joint filers counted twice) and the embedded Holders v6 response, and the shared cache
+#     would keep selling reports built on the removed moat dock. Ships with
+#     `_HOLDERS_PAYLOAD_VERSION` 7 and the ownership snapshot's version 5. SCORER_VERSION stays:
+#     the moat pillars did not change. Same rule: a PAST instant, moved to the push time if the
+#     deploy lands later; pushed after the 18:00 ET close so the regeneration costs nothing
+#     extra. The full backend suite ran on this change, on the exact commit, BEFORE this literal
+#     was written. This ONE bump supersedes every instant above.
+CACHE_SCHEMA_FLOOR = datetime(2026, 11, 5, 23, 1, 0, tzinfo=timezone.utc)
 
 # The internal report key carrying the Financials sections a report lost to a degraded
 # upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.
@@ -607,6 +620,31 @@ async def get_cached_report(
     return await asyncio.to_thread(_query)
 
 
+def report_schema_problem(report: Any) -> Optional[str]:
+    """Why a report does not satisfy `TickerReportResponse`, or None when it does.
+
+    SYNC and CPU-bound on a ~200 KB report: call it off the loop. iOS decodes this shape
+    all-or-nothing, so one bad field fails the whole screen, and neither door checked before
+    a report reached a shared cache. Judges the payload a client is served, so the published
+    estimate is dropped first while DCF is off. The message holds field names and types only,
+    never the report's text.
+    """
+    try:
+        TickerReportResponse(**strip_caydex_if_disabled(report))
+    except ValidationError as e:
+        first = e.errors(include_url=False, include_input=False)[:3]
+        return (
+            f"{e.error_count()} field(s): "
+            + "; ".join(
+                f"{'.'.join(str(part) for part in err.get('loc', ()))} ({err.get('type')})"
+                for err in first
+            )
+        )
+    except TypeError as e:
+        return f"{type(e).__name__}: {e}"
+    return None
+
+
 async def upsert_cached_report(
     ticker: str, persona: str, ticker_report_data: Dict[str, Any]
 ) -> None:
@@ -620,6 +658,10 @@ async def upsert_cached_report(
     so writing it buys nothing and only hides the bug. Every report `assemble_report`
     builds from a `_collect_fresh` collection carries it; an unstamped one here means a
     collection from some other producer reached a shared cache.
+
+    REFUSES (ERROR, no write) a report that fails `TickerReportResponse`: one choke point for
+    both doors. The direct door used to validate only AFTER this write, so an invalid report
+    was refunded to its buyer and then answered DATA_INCOMPLETE to everyone until the close.
     """
     ticker, persona = _normalize_key(ticker, persona)
 
@@ -631,6 +673,14 @@ async def upsert_cached_report(
             ticker, persona, GROUNDING_FREE_KEY,
             ticker_report_data.get(GROUNDING_FREE_KEY)
             if isinstance(ticker_report_data, dict) else type(ticker_report_data).__name__,
+        )
+        return
+
+    schema_problem = await asyncio.to_thread(report_schema_problem, ticker_report_data)
+    if schema_problem:
+        logger.error(
+            "[report-schema-invalid] ticker_report_cache write REFUSED for %s/%s: %s",
+            ticker, persona, schema_problem,
         )
         return
 

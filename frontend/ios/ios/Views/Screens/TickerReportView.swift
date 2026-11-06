@@ -70,7 +70,25 @@ struct TickerReportView: View {
                 // the cache). The alert that serves a REFRESH lives inside `reportContent`,
                 // which is not on screen here, so without this branch the screen was blank.
                 unavailableView
+            } else if viewModel.awaitingSession {
+                // A cold launch from a report push lands here while the session restores. The
+                // `.onChange` below loads the report the moment it is back.
+                reconnectingView
+            } else {
+                // UNCONDITIONAL, so this chain cannot render nothing. It has shipped a blank
+                // screen twice, each time through a state with no branch, and a blank cover has
+                // no header and no nav bar, so the user is stuck on it. No known state reaches
+                // this arm: it is what a future one gets instead of an empty screen.
+                errorView("We couldn't open this report. Please try again.")
             }
+        }
+        // `initial: true` for a session that came back before this view first rendered. A plain
+        // `.onChange` would miss it and leave the screen reconnecting for good. Ungated it would
+        // refetch on every auth change; `loadReport()` keeps this entry's own billing rule, so
+        // reopening a report from a notification can never charge.
+        .onChange(of: appState.auth.status, initial: true) { _, status in
+            guard status == .authenticated, viewModel.awaitingSession else { return }
+            viewModel.loadReport()
         }
         .navigationBarHidden(true)
         // The player is the square beside "Ask Cay AI" (`ChatBarAudioControl`) while this report
@@ -100,13 +118,38 @@ struct TickerReportView: View {
     // MARK: - Loading View
 
     private var loadingView: some View {
+        waitingView("Loading report...")
+    }
+
+    private var reconnectingView: some View {
+        waitingView("Reconnecting your account…")
+    }
+
+    /// A spinner with the report header's back control in the same spot. This screen hides the
+    /// nav bar and is usually inside a full-screen cover, so before the header exists there is
+    /// no other way out, and a wait can run for the 30 s request timeout or, while reconnecting,
+    /// for as long as the phone is offline.
+    private func waitingView(_ message: String) -> some View {
         VStack(spacing: AppSpacing.lg) {
             ProgressView()
                 .tint(AppColors.primaryBlue)
                 .scaleEffect(1.2)
-            Text("Loading report...")
+            Text(message)
                 .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(alignment: .topLeading) {
+            Button { dismiss() } label: {
+                Image(systemName: "chevron.down")
+                    .font(AppTypography.iconMedium).fontWeight(.semibold)
+                    .foregroundColor(AppColors.textPrimary)
+                    .frame(width: 36, height: 36)
+                    .hitSlop(reaching: 36)
+            }
+            .accessibilityLabel("Go Back")
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.vertical, AppSpacing.md)
         }
     }
 

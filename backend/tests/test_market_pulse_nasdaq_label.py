@@ -5,7 +5,7 @@ Tester: *"For Nasdaq, remove the composite, keep Nasdaq ETF only."* Developer de
 the Composite tracker, deliberately NOT QQQ (Nasdaq-100) — and the detail screen still
 names the fund in full, which is what this rename must not touch.
 
-The short label lives in THREE server lists plus the iOS mock that mirrors the shipped
+The short label lives in TWO server lists plus the iOS mock that mirrors the shipped
 strip; they drifted independently before, so they are pinned against each other here.
 Category 1 (pure).
 """
@@ -13,7 +13,6 @@ import re
 from pathlib import Path
 
 from app.services import home_dashboard_service as HD
-from app.services import home_service as HS
 from app.services import index_service as IS
 from app.services import widget_movers_service as WM
 
@@ -28,7 +27,6 @@ def _strip_comments(src: str) -> str:
 def _labels():
     return {
         "_PULSE_SYMBOLS": {r["symbol"]: r["name"] for r in HD._PULSE_SYMBOLS},
-        "DEFAULT_MARKET_TICKERS": {r["symbol"]: r["name"] for r in HS.DEFAULT_MARKET_TICKERS},
         "widget _INDEX_SYMBOLS": dict(WM._INDEX_SYMBOLS),
     }
 
@@ -45,14 +43,6 @@ def test_every_short_label_names_an_etf_and_none_says_composite():
                 continue
             assert "ETF" in name, (where, sym, name)       # 2026-09-08: a label names the fund
             assert "Comp" not in name, (where, sym, name)
-
-
-def test_the_two_home_strips_agree_on_every_shared_symbol():
-    pulse, legacy = _labels()["_PULSE_SYMBOLS"], _labels()["DEFAULT_MARKET_TICKERS"]
-    shared = set(pulse) & set(legacy)
-    assert shared >= {"SPY", "ONEQ", "DIA", "GLD"}
-    for sym in shared:
-        assert pulse[sym] == legacy[sym], sym
 
 
 def test_the_ios_mock_mirrors_the_shipped_strip():

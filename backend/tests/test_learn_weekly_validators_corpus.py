@@ -1,4 +1,4 @@
-"""The in-app weekly validators, run over the 23 hand-made Money Moves articles.
+"""The in-app weekly validators, run over the 26 hand-made Money Moves articles.
 
 Plan "Wiser weekly content engine", Phase 0 "Owner fix list" + §1.7 "Corpus test": run the planned
 in-app validator over every bundle block and turn every hit into an OWNER FIX LIST — not into
@@ -61,7 +61,9 @@ BACKEND = Path(__file__).resolve().parents[1]
 MONEY_MOVES = BACKEND / "data" / "money_moves.json"
 
 #: slug → the validator codes its blocks hit. Articles with no hit are absent
-#: (`nvidias-ai-dominance`, `the-home-depot-vs-lowes`).
+#: (`nvidias-ai-dominance`, `the-home-depot-vs-lowes`, and the three hand-written on 2026-11-01:
+#: `mcdonalds-the-real-estate-empire`, `coca-cola-vs-pepsico`,
+#: `kodak-inventing-the-future-it-couldnt-sell`).
 OWNER_FIX_LIST = {
     "amd-vs-intel-the-cpu-wars": {"person_named"},
     "apples-services-revolution": {"block_type", "word_limit"},
@@ -130,7 +132,7 @@ def test_the_corpus_run_matches_the_owner_fix_list():
     articles, blocks, hits, details = _run()
     elapsed = time.perf_counter() - started
     # Anti-vacuity: the whole bundle was read.
-    assert len(articles) == 23, len(articles)
+    assert len(articles) == 26, len(articles)
     assert blocks > 300, blocks
     assert elapsed < 30.0, f"validators took {elapsed:.1f}s over the bundle"
 

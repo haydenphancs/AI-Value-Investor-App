@@ -420,6 +420,7 @@ async def test_shared_cache_lookup_requires_the_stamp(monkeypatch, caplog, stamp
     svc = object.__new__(ResearchService)
     svc.supabase = _chain([{"ticker_report_data": _minimal_report(stamp), "completed_at": _NOW}])
     monkeypatch.setattr(rs, "report_dcf_source_matches", lambda _b: True)
+    monkeypatch.setattr(rs, "report_schema_problem", lambda _b: None)
     with caplog.at_level(logging.WARNING, logger=rs.__name__):
         got = await svc._lookup_shared_cache("AAPL", "warren_buffett")
     assert (got is not None) is served
@@ -451,14 +452,20 @@ async def test_direct_door_legacy_path_requires_the_stamp(monkeypatch, caplog, s
     {"symbol": "AAPL", GROUNDING_FREE_KEY: "true"},
     None,
 ])
-def test_upsert_refuses_an_unstamped_report(fake_db, caplog, report):
+def test_upsert_refuses_an_unstamped_report(fake_db, caplog, monkeypatch, report):
+    def _never(report):
+        raise AssertionError("the stamp gate must refuse first, or this test proves nothing")
+
+    monkeypatch.setattr(trc, "report_schema_problem", _never)
     with caplog.at_level(logging.ERROR, logger=trc.__name__):
         asyncio.run(trc.upsert_cached_report("AAPL", "warren_buffett", report))
     assert fake_db.upserts == []
     assert "REFUSED" in caplog.text and "AAPL/warren_buffett" in caplog.text
+    assert GROUNDING_FREE_KEY in caplog.text
 
 
-def test_upsert_writes_a_stamped_report(fake_db):
+def test_upsert_writes_a_stamped_report(fake_db, monkeypatch):
+    monkeypatch.setattr(trc, "report_schema_problem", lambda report: None)
     asyncio.run(trc.upsert_cached_report("aapl", "Warren_Buffett", {"symbol": "AAPL",
                                                                      GROUNDING_FREE_KEY: True}))
     assert fake_db.upserts == [trc.TABLE_NAME]
@@ -501,7 +508,7 @@ async def test_direct_door_writes_a_servable_row(fake_db, monkeypatch):
         return _stamped_collection(ticker)
 
     async def _stage_a(out, persona, evidence):
-        return stage_a_fallback()           # untagged: a real (non-degraded) shell
+        return _real_shell()                # untagged: a real (non-degraded) shell
 
     monkeypatch.setattr(svc.collector, "collect", _collect)
     svc._generate_stage_a = _stage_a
@@ -516,6 +523,12 @@ async def test_direct_door_writes_a_servable_row(fake_db, monkeypatch):
     assert fake_db.upserts == [trc.TABLE_NAME], "the direct door did not cache its report"
     hit = await trc.get_cached_report("AAPL", "warren_buffett")
     assert hit is not None and hit[GROUNDING_FREE_KEY] is True
+
+
+def _real_shell():
+    """The fallback's shape with a thesis, so the run reads as a real one: a report with no
+    bull or bear case is refused on both doors."""
+    return {**stage_a_fallback(), "core_thesis": {"bull_case": ["a"], "bear_case": ["b"]}}
 
 
 def _deep_service(monkeypatch, shared):
@@ -848,7 +861,7 @@ async def test_the_real_deep_door_run_stores_and_seeds_the_stamp(fake_db, monkey
         return "findings"
 
     async def _stage_a(self, out, evidence, research_text):
-        return stage_a_fallback()
+        return _real_shell()
 
     monkeypatch.setattr(TickerReportDataCollector, "collect", _collect)
     monkeypatch.setattr(ra.ResearchAgent, "_agentic_research", _agentic)

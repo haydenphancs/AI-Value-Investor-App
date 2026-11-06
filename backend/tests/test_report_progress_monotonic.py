@@ -109,7 +109,7 @@ _REPORT = {
     "company_name": "Apple Inc.",
     "executive_summary_text": "ok",
     "executive_summary_bullets": [],
-    "core_thesis": {"bull_case": [], "bear_case": []},
+    "core_thesis": {"bull_case": ["a"], "bear_case": ["b"]},
     "macro_data": {},
     "critical_factors": [],
     "quality_score": 70,
@@ -222,6 +222,7 @@ def _make_agent(monkeypatch, ra_mod, *, gate: asyncio.Event | None = None,
 def _patch_service_module(monkeypatch, rs_mod, agent_factory) -> None:
     monkeypatch.setattr(rs_mod, "ResearchAgent", agent_factory)
     monkeypatch.setattr(rs_mod, "compute_quality_score", lambda persona_key, data: 70)
+    monkeypatch.setattr(rs_mod, "report_schema_problem", lambda report: None)
     monkeypatch.setattr(rs_mod, "upsert_cached_report", AsyncMock())
     # Fresh dedup state per test, restored afterwards: never a bare assignment, which would
     # leak a semaphore bound to this test's event loop into later tests.
@@ -879,7 +880,7 @@ _RESEARCH_CALL = "        research_text = await self._agentic_research(out, evid
 _LOOP_TOP = "        tools = build_fmp_tool_declarations()\n"
 _STAGE_B_CALL = "            run_narrative_jobs(jobs, self.gemini, self.persona, evidence),\n"
 _JOBS = "        jobs = build_narrative_jobs(self.persona, evidence, report)\n"
-_DEGRADED_TAG = "            report[REPORT_DEGRADED_KEY] = stage_a_degradation\n"
+_DEGRADED_TAG = "            return {REPORT_DEGRADED_KEY: stage_a_degradation}\n"
 _ROUND_TICK = '            await self.progress_cb(60, "Research round 1 of 4...")\n'
 
 _GUARD_MUTATIONS = [
@@ -904,9 +905,9 @@ _GUARD_MUTATIONS = [
                (_STAGE_B_CALL, _STAGE_B_CALL.replace("evidence),", "evidence, on_round=_tick),"))],
      _MSG_NESTED),
     # A tick on a branch this run does not take (Stage A is stubbed and never degrades).
-    ("agent", [(_DEGRADED_TAG, _DEGRADED_TAG
-                + "            if progress_cb:\n"
-                + '                await progress_cb(30, "Retrying analysis...")\n')],
+    ("agent", [(_DEGRADED_TAG, "            if progress_cb:\n"
+                + '                await progress_cb(30, "Retrying analysis...")\n'
+                + _DEGRADED_TAG)],
      _MSG_SOURCE_ORDER),
     # A value that differs only on a path this run does not take (20 -> 15 on no findings).
     ("agent", [('progress_cb(55, "Deep research complete, synthesizing...")',

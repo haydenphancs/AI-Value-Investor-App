@@ -419,6 +419,62 @@ async def test_a_degraded_report_is_refunded_before_the_answer_and_the_copy_tell
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("returned_outcome, says_returned", [
+    ({"outcome": "refunded", "refunded": 20, "spendable": 80}, True),
+    (None, False),
+])
+async def test_a_bad_answer_reads_as_a_failed_report_not_an_outage(
+    monkeypatch, returned_outcome, says_returned,
+):
+    credit, _ = _install_fakes(
+        monkeypatch, cached=None, generate_return={"_degraded": "stage_a_unparseable"},
+    )
+    credit.refund_ledgered.return_value = returned_outcome
+    resp = await tr.get_ticker_report("AAPL", "warren_buffett", user=USER)
+    body = json.loads(resp.body)
+    assert resp.status_code == 503 and body["error_code"] == "REPORT_GENERATION_FAILED"
+    assert "unavailable" not in body["user_message"].lower()
+    assert "few minutes" not in body["user_message"], "the very next try usually works"
+    assert ("Your credits were returned" in body["user_message"]) is says_returned
+    if not says_returned:
+        assert "credit" not in body["user_message"].lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", [
+    "stage_a_GeminiTimeoutError", "stage_a_GeminiQuotaError", "stage_a_unparseable",
+])
+async def test_the_degrade_reason_never_reaches_the_client(monkeypatch, reason):
+    """It can name the provider (`stage_a_GeminiTimeoutError`), and `message` goes out
+    verbatim: invariant 7. The reason stays in the server's own log line."""
+    _install_fakes(monkeypatch, cached=None, generate_return={"_degraded": reason})
+    resp = await tr.get_ticker_report("AAPL", "warren_buffett", user=USER)
+    text = resp.body.decode()
+    assert reason not in text and "stage_a" not in text
+    assert "Gemini" not in json.loads(text)["message"]
+
+
+@pytest.mark.asyncio
+async def test_a_bad_cache_row_is_a_miss_not_an_answer(monkeypatch):
+    """FREE PATH 2 used to return DATA_INCOMPLETE until the next close. A MISS, exactly like
+    FREE PATH 1: the request goes on to a real generation."""
+    fresh = {"symbol": "AAPL"}
+    credit, service = _install_fakes(monkeypatch, cached={"broken": True}, generate_return=fresh)
+    calls = []
+
+    def _validate(report, ticker, persona):
+        calls.append(report)
+        return (None, MagicMock(name="error_response")) if report.get("broken") else (report, None)
+
+    monkeypatch.setattr(tr, "_validate_report", _validate)
+    resp = await tr.get_ticker_report("AAPL", "warren_buffett", user=USER)
+    assert resp == fresh
+    assert calls == [{"broken": True}, fresh]
+    credit.precharge.assert_called_once()
+    service.generate_fresh_report.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_direct_door_money_calls_leave_the_loop_thread(monkeypatch):
     """Invariant #6: the precharge and the refund are sync Supabase round trips."""
     loop_thread = threading.get_ident()

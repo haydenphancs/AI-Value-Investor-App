@@ -1,5 +1,6 @@
 """
-Search-screen chips: "Trending searches", "Most added" and the curated "Popular" fallback.
+Search-screen chips: "Trending searches", "Most added" and the curated fallback (section kind
+`popular`, labelled "Well-known names" by the app).
 
 iOS decodes `SearchTrendingResponse` (`Models/SearchTrendingModels.swift`);
 `tests/test_search_trending_schema_parity.py` pins the two sides together.

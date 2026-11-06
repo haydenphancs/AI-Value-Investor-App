@@ -24,10 +24,14 @@ stock", so every "Ordinary Shares" filer (NYAX, STX, TSM, ...) showed Buys 0 bes
 CEO Buys card listing the CEO's purchases.
 """
 
+import logging
 import math
 import re
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from bisect import bisect_right
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_insider_name(raw: Optional[str]) -> str:
@@ -626,6 +630,213 @@ def _finite_number(value: object) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+# Issuers whose share classes are not worth the same, in common units of the cheaper class.
+# One Berkshire Class A converts into 1,500 Class B; a Biglari Class B carries 1/5 of a Class
+# A's economic rights; one Erie Class B converts into 2,400 Class A (10-K; Class B is not
+# listed). Form 4 lines of both classes reach one report, so without this "21 shares" of
+# Class A was added to Class B lines as 21. An issuer not listed here is read 1:1, so a
+# dual-class issuer with another ratio needs a row.
+_CLASS_UNITS: Dict[str, Dict[str, float]] = {
+    "BRK": {"class-a": 1500.0, "class-b": 1.0},
+    "BH": {"class-a": 5.0, "class-b": 1.0},
+    "ERIE": {"class-a": 1.0, "class-b": 2400.0},
+}
+# The report symbol names the class the figures are stated in.
+_SYMBOL_CLASS: Dict[str, Tuple[str, str]] = {
+    "BRK-A": ("BRK", "class-a"),
+    "BRK-B": ("BRK", "class-b"),
+    "BH-A": ("BH", "class-a"),
+    "BH": ("BH", "class-b"),
+    "ERIE": ("ERIE", "class-a"),
+}
+_CLASS_RATIO_TEXT: Dict[str, str] = {
+    "BRK": "1 Class A share equals 1,500 Class B shares",
+    "BH": "1 Class A share equals 5 Class B shares",
+    "ERIE": "1 Class B share equals 2,400 Class A shares",
+}
+_CLASS_LABEL = {"class-a": "Class A", "class-b": "Class B"}
+
+
+def share_class_note(symbol: object) -> Optional[str]:
+    """How to read share totals for an issuer whose classes differ, None for every other."""
+    entry = _SYMBOL_CLASS.get(str(symbol or "").strip().upper())
+    if entry is None:
+        return None
+    family, own_class = entry
+    return (f"Share totals here are stated in {_CLASS_LABEL[own_class]} terms: "
+            f"{_CLASS_RATIO_TEXT[family]}. A person's own holding keeps its filed class.")
+
+
+def share_class_multiple(symbol: object, security_name: object) -> float:
+    """How many shares of `symbol`'s own class one share on this line is worth. 1.0 for an
+    issuer outside `_CLASS_UNITS`, and for a line that names no class (never guess a 1,500x)."""
+    entry = _SYMBOL_CLASS.get(str(symbol or "").strip().upper())
+    if entry is None:
+        return 1.0
+    family, own_class = entry
+    units = _CLASS_UNITS[family]
+    token = _share_class_token(security_name)
+    if token not in units:
+        logger.info("insider: %s line names no known class: %r", symbol, security_name)
+        return 1.0
+    return units[token] / units[own_class]
+
+
+#: How `insider_row_value` reached a row's dollars.
+VALUE_FILED = "filed"
+VALUE_ESTIMATED = "estimated"
+VALUE_UNPRICED = "unpriced"
+#: The nearest close may be this many calendar days before the trade (weekends, halts).
+_CLOSE_MAX_GAP_DAYS = 7
+#: Told to a model wherever an insider total reaches it. Only when one of these marks is there.
+INSIDER_VALUE_NOTE = (
+    "A value starting with ~ is an estimate from closing prices, not a filed figure: say "
+    "\"about\" and never state it as exact. N/A means a trade's value is unknown: state no "
+    "dollar total for that side."
+)
+
+
+def close_lookup(points: Iterable[Tuple[Any, Any]]) -> Callable[[str], Optional[float]]:
+    """`close_on(iso_date)` from (date, close) pairs: the last close on or before that day.
+
+    No forward look: a close after the trade is not its price. A gap of more than a week
+    reads None."""
+    closes: Dict[str, float] = {}
+    for day, close in points:
+        value = _finite_number(close)
+        if isinstance(day, str) and len(day) >= 10 and value is not None and value > 0:
+            closes[day[:10]] = value
+    days = sorted(closes)
+
+    def close_on(iso_date: str) -> Optional[float]:
+        wanted = str(iso_date or "")[:10]
+        index = bisect_right(days, wanted) - 1
+        if index < 0:
+            return None
+        try:
+            gap = date.fromisoformat(wanted) - date.fromisoformat(days[index])
+        except ValueError:
+            return None
+        return closes[days[index]] if gap.days <= _CLOSE_MAX_GAP_DAYS else None
+
+    return close_on
+
+
+def insider_row_value(
+    row: Dict[str, Any],
+    *,
+    symbol: object = "",
+    close_on: Optional[Callable[[str], Optional[float]]] = None,
+) -> Tuple[float, str]:
+    """(dollars, how) for one Form 4 line.
+
+    A line with its own price is shares x price: that price is already per share of the line's
+    own class, so the class multiple must NOT touch it. FMP leaves `price` at 0 on real
+    open-market rows, which read as $0 and hid Berkshire's CEO buying about $15M of Class A.
+    Those use the report symbol's close on the trade date, converted to that symbol's class,
+    and are ESTIMATED: never print one as a filed figure. With no close it is UNPRICED, an
+    unknown amount, so a caller must not state a dollar total or verdict that it could flip.
+    `close_on` comes from `priced_close_lookup`, which refuses a close on another share basis.
+    """
+    shares = abs(_finite_number(row.get("securitiesTransacted")) or 0.0)
+    if shares <= 0:
+        return 0.0, VALUE_FILED
+    price = _finite_number(row.get("price"))
+    if price is not None and price > 0:
+        return shares * price, VALUE_FILED
+    close = close_on(insider_row_date(row)) if close_on is not None else None
+    if close is None or close <= 0:
+        return 0.0, VALUE_UNPRICED
+    return shares * share_class_multiple(symbol, row.get("securityName")) * close, VALUE_ESTIMATED
+
+
+def needs_close(rows: Any) -> bool:
+    """True when an open-market line carries shares but no price, so a close would value it.
+    Uninformative lines (grants, gifts) are never valued, so they never cost a split lookup."""
+    for row in rows if isinstance(rows, (list, tuple)) else []:
+        if not isinstance(row, dict):
+            continue
+        if not is_informative(classify_insider_transaction(row.get("transactionType") or "")):
+            continue
+        price = _finite_number(row.get("price"))
+        if (_finite_number(row.get("securitiesTransacted")) or 0.0) and not (price and price > 0):
+            return True
+    return False
+
+
+async def insider_split_days(source: Any, symbol: str) -> Optional[List[str]]:
+    """Split dates over the insider window, from `corporate_actions_source`. None = could not
+    check, which is never "no split": `priced_close_lookup` then refuses every close."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    try:
+        rows = await source.get_split_rows(symbol, insider_window_cutoff(), today)
+    except Exception as e:  # noqa: BLE001 — a failed lookup degrades to "unpriced", never a guess
+        logger.warning(
+            "[insider-split-lookup] %s: %s: %s — rows with no price stay unvalued",
+            symbol, type(e).__name__, e,
+        )
+        return None
+    if rows is None:
+        logger.warning(
+            "[insider-split-lookup] %s: no answer — rows with no price stay unvalued", symbol,
+        )
+        return None
+    return sorted(str(r.get("date") or "")[:10] for r in rows if isinstance(r, dict))
+
+
+def priced_close_lookup(
+    points: Iterable[Tuple[Any, Any]],
+    split_days: Optional[List[str]],
+    *,
+    is_adr: bool = False,
+) -> Optional[Callable[[str], Optional[float]]]:
+    """`close_on` for a Form 4 line with no price, or None when no close is comparable.
+
+    The closes are split-adjusted and a Form 4 share count is as filed, so a line dated before
+    a split would read 10 times too small after a 10:1 split: it stays unpriced. An ADR's close
+    is per ADS while its Form 4 lines count ordinary shares (TSM 1:5, BABA 1:8), so nothing on
+    an ADR symbol is priced this way, and `split_days` None means the check could not be made.
+    """
+    if is_adr or split_days is None:
+        return None
+    close_on = close_lookup(points)
+    last_split = max(split_days, default="")
+    if not last_split:
+        return close_on
+
+    def after_splits(iso_date: str) -> Optional[float]:
+        return close_on(iso_date) if str(iso_date or "")[:10] >= last_split else None
+
+    return after_splits
+
+
+def distinct_trades(rows: Any) -> List[Dict[str, Any]]:
+    """One row per transaction. Joint filers (a trust and its trustee) each report the same
+    Form 4 line: same issuer, day, code, shares, price, class and post-trade balance, under two
+    reporters, so summing them counted Rollins' $50M purchase as $99.9M. Only a line with a
+    reported balance can be matched, and only across different reporters. The separate rows
+    stay in the feed for each person's holdings; this is for totals and trade lists."""
+    first_reporter: Dict[Tuple[Any, ...], str] = {}
+    out: List[Dict[str, Any]] = []
+    for row in rows if isinstance(rows, (list, tuple)) else []:
+        if not isinstance(row, dict):
+            continue
+        shares = _finite_number(row.get("securitiesTransacted"))
+        balance = _finite_number(row.get("securitiesOwned"))
+        if not shares or balance is None:
+            out.append(row)
+            continue
+        key = (
+            row.get("companyCik") or row.get("symbol"), insider_row_date(row),
+            row.get("transactionType"), abs(shares), _finite_number(row.get("price")),
+            row.get("securityName"), balance,
+        )
+        reporter = str(row.get("reportingCik") or row.get("reportingName") or "")
+        if first_reporter.setdefault(key, reporter) == reporter:
+            out.append(row)
+    return out
 
 
 def _form_type(row: Dict[str, Any]) -> str:

@@ -21,7 +21,8 @@ Its last stored close (`market_close_snapshot.trade_date`) then decides:
     still says it is actively trading. The window, not "exactly one session back", is what
     survives FMP's list dropping the symbol a session late, and a restart. The ERROR names
     the profile's exchange and flag, plus any other symbol under the same SEC CIK that DID
-    trade: that is how a renamed ticker shows up;
+    trade: that is how a renamed ticker shows up. Not for a fund: its CIK is its trust's, so
+    every sibling fund would read as a rename of it (CRMU listed AALG, AAPE, ADIU…);
   • anything older, or no stored close: one WARNING line per session.
 Nothing is written: what to do with users' rows for a moved or renamed symbol is the
 owner's decision (documents/OWNER_TASKS.md).
@@ -144,6 +145,11 @@ async def _lookup(sym: str, priced: Mapping[str, Any]) -> Dict[str, Any]:
     profile = profile if isinstance(profile, dict) else {}
     out["exchange"] = profile.get("exchange")
     out["actively_trading"] = profile.get("isActivelyTrading")
+    if profile.get("isEtf") is True or profile.get("isFund") is True:
+        # A series trust files every fund under ONE CIK, so "same CIK now trading" names
+        # unrelated funds as rename leads, and a rename moves users' rows. No lookup at all.
+        out["is_fund"] = True
+        return out
     cik = profile.get("cik")
     if not isinstance(cik, str) or not cik.strip():
         return out
@@ -172,6 +178,8 @@ def _describe(sym: str, holdings: Dict[str, int], since: Optional[date], info: D
     if "exchange" in info:
         parts.append(f"; profile exchange {info.get('exchange')}, "
                      f"isActivelyTrading {info.get('actively_trading')}")
+    if info.get("is_fund"):
+        parts.append("; a fund, so no rename lead: its CIK is its trust's")
     if info.get("same_cik_trading"):
         parts.append(f"; same CIK now trading: {', '.join(info['same_cik_trading'])}")
     if info.get("lookup_error"):

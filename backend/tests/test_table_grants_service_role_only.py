@@ -74,7 +74,7 @@ _SERVICE_ROLE_ONLY: dict[str, tuple[str, ...]] = {
     # social_mentions_history, 2026-09-11). 169 adds the grant. This replay can only see the
     # REVOKE half; the PRESENCE of the service_role grant is what
     # tests/test_snapshot_grants_parity.py asserts from the privileged dump.
-    "078→169": ("daily_briefings", "market_insights", "social_mentions_history"),
+    "078→169": ("social_mentions_history",),
     # FMP-derived caches, AI output, audit trails, RAG corpus, smart money (164)
     "164": (
         "ai_insight_cache", "company_profile_cache", "competitor_intel_audit",
@@ -178,6 +178,8 @@ _DROPPED: dict[str, str] = {
     "portfolio_holdings": "168", "user_lesson_progress": "168", "user_study_schedules": "168",
     "user_bookmarks": "168", "asset_snapshots": "168", "etf_detail_cache": "168",
     "index_detail_cache": "168", "news_articles": "168",
+    # the two tables only the removed `/home/feed` read; both were empty
+    "daily_briefings": "208", "market_insights": "208",
     # replaced long before the review; their GRANT lines survive only in old migrations
     "snapshot_health_cache": "032", "snapshot_ownership_cache": "032",
     "snapshot_valuation_cache": "032", "user_book_progress": "067",

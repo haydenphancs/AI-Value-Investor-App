@@ -215,6 +215,77 @@ def test_other_pass1_attrs_are_not_marked_by_the_statement_rule():
     assert out.degraded_sections == []
 
 
+def _moat_report(note):
+    return {"moat_competition": {
+        "dimensions": [], "competitors": [], "market_dynamics": None,
+        "durability_note": "", "competitive_insight": "", "_coverage_note": note,
+    }}
+
+
+class _NoteGemini:
+    """Answers every Stage B prompt, or fails the jobs whose prompt holds `fail_on`."""
+
+    def __init__(self, fail_on=None):
+        self.fail_on = fail_on
+
+    async def create_narrative_cache(self, *a, **k):
+        return None
+
+    async def delete_cache(self, handle):
+        return None
+
+    async def generate_text(self, prompt=None, **kwargs):
+        if self.fail_on is not None and self.fail_on in prompt:
+            raise RuntimeError("down")
+        return {"text": "Model prose about the moat."}
+
+
+_NOTE = " Note: Brand Power flat — mining moats are about reserves."
+
+
+def _moat_jobs(report):
+    from app.services.agents import narrative_prompts as np_
+    from app.services.agents.persona_config import get_persona_config
+
+    persona = get_persona_config("warren_buffett")
+    jobs = [j for j in np_.build_narrative_jobs(persona, "EV", report)
+            if j.label in ("moat_durability_note", "moat_competitive_insight")]
+    assert len(jobs) == 2
+    return np_, persona, jobs
+
+
+@pytest.mark.asyncio
+async def test_the_coverage_note_reaches_real_model_text_on_both_fields():
+    """It never reached a delivered report: `assemble_report` added it only when Stage A
+    filled a field Stage A is told to leave empty, and Stage B overwrote both anyway."""
+    report = _moat_report(_NOTE)
+    np_, persona, jobs = _moat_jobs(report)
+    await np_.run_narrative_jobs(jobs, _NoteGemini(), persona)
+    moat = report["moat_competition"]
+    for field in ("durability_note", "competitive_insight"):
+        assert moat[field].startswith("Model prose about the moat.")
+        assert "Note: Brand Power flat" in moat[field]
+        assert "—" not in moat[field], "the house style forbids an em dash"
+    assert "_coverage_note" not in moat, "the internal key must never reach a stored report"
+
+
+@pytest.mark.asyncio
+async def test_the_placeholder_never_carries_the_note():
+    report = _moat_report(_NOTE)
+    np_, persona, jobs = _moat_jobs(report)
+    await np_.run_narrative_jobs(jobs, _NoteGemini(fail_on=""), persona)
+    moat = report["moat_competition"]
+    assert "Note:" not in moat["durability_note"] and "Note:" not in moat["competitive_insight"]
+
+
+@pytest.mark.asyncio
+async def test_no_note_means_no_suffix():
+    report = _moat_report(None)
+    np_, persona, jobs = _moat_jobs(report)
+    await np_.run_narrative_jobs(jobs, _NoteGemini(), persona)
+    assert report["moat_competition"]["durability_note"] == "Model prose about the moat."
+
+
 def test_the_coverage_note_reads_a_real_industry_zero_and_the_baseline_tag():
     """A real industry 0.0 peer is a reading (no longer lifted to 5.0), and "no peer row"
     is the `baseline` tag — never a 5.0 that a real industry average can also be."""

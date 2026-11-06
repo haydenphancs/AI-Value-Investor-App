@@ -22,9 +22,11 @@ from datetime import date
 from typing import Any, Dict, List
 
 import pytest
+from postgrest.exceptions import APIError, generate_default_error_message
 
 import app.services.price_service as ps_module
 from app.services.price_service import PriceService, _cache, _finite
+from app.utils import supabase_errors
 from tests._price_fakes import FakeCoinGecko
 
 
@@ -974,3 +976,130 @@ async def test_a_healthy_prior_session_still_writes(monkeypatch):
     assert await PriceService().refresh_close_snapshot("2026-09-04") == 3
     with_prev = [r for r in captured if r["previous_close"] is not None]
     assert {r["symbol"] for r in with_prev} == {"AAPL", "MSFT"}
+
+
+# ── the close write survives one edge blip (PYTHON-FASTAPI-54) ─────────────────────
+
+def _edge_502() -> APIError:
+    """The real shape: a Cloudflare HTML page postgrest could not parse (an int `.code`)."""
+    response = type("R", (), {"status_code": 502, "content": b"<html>502 Bad Gateway</html>"})()
+    return APIError(generate_default_error_message(response))
+
+
+class _CloseTable:
+    """`market_close_snapshot`, failing the POSTs numbered in `fail_on` (1-based)."""
+
+    def __init__(self, fail_on=(), error=None):
+        self.fail_on, self.error = set(fail_on), error
+        self.posts = 0
+        self.stored: Dict[str, Dict[str, Any]] = {}
+        self._chunk: List[Dict[str, Any]] = []
+
+    def table(self, name):
+        assert name == "market_close_snapshot"
+        return self
+
+    def upsert(self, chunk, on_conflict=None, returning=None):
+        assert on_conflict == "symbol", "the retry is only safe because the write is keyed"
+        self._chunk = chunk
+        return self
+
+    def execute(self):
+        self.posts += 1
+        if self.posts in self.fail_on:
+            raise self.error
+        self.stored.update({r["symbol"]: r for r in self._chunk})
+        return type("R", (), {"data": []})()
+
+
+def _close_payload(n: int) -> List[Dict[str, Any]]:
+    return [{"symbol": f"S{i:05d}", "close": 1.0} for i in range(n)]
+
+
+def test_one_edge_502_does_not_drop_the_rest_of_the_market(monkeypatch):
+    """On 2026-10-26 one 502 on one chunk abandoned every later chunk until the next hour."""
+    table = _CloseTable(fail_on={2}, error=_edge_502())
+    monkeypatch.setattr(ps_module, "get_supabase", lambda: table)
+    monkeypatch.setattr(supabase_errors.time, "sleep", lambda _s: None)
+
+    written = PriceService._upsert_closes(_close_payload(2500))
+
+    assert written == 2500
+    assert len(table.stored) == 2500, "the chunks after the blip landed too"
+    assert table.posts == 4, "3 chunks + the one replay"
+
+
+def test_a_chunk_that_keeps_failing_stops_the_write_and_raises(monkeypatch):
+    table = _CloseTable(fail_on={2, 3, 4}, error=_edge_502())
+    monkeypatch.setattr(ps_module, "get_supabase", lambda: table)
+    monkeypatch.setattr(supabase_errors.time, "sleep", lambda _s: None)
+
+    with pytest.raises(APIError):
+        PriceService._upsert_closes(_close_payload(2500))
+
+    assert table.posts == 4, "1 good chunk + 3 attempts at the failing one"
+    assert len(table.stored) == 1000, "the chunk before it stands; nothing after it is tried"
+
+
+def test_a_real_write_error_is_never_replayed(monkeypatch):
+    error = APIError({"message": "boom", "code": "23514", "hint": None, "details": None})
+    table = _CloseTable(fail_on={1}, error=error)
+    monkeypatch.setattr(ps_module, "get_supabase", lambda: table)
+    monkeypatch.setattr(supabase_errors.time, "sleep", lambda _s: pytest.fail("no retry"))
+
+    with pytest.raises(APIError):
+        PriceService._upsert_closes(_close_payload(10))
+
+    assert table.posts == 1
+
+
+_ONE_SESSION = [
+    {"symbol": "AAPL", "date": "2026-09-04", "close": 319.97, "volume": 1},
+    {"symbol": "MSFT", "date": "2026-09-04", "close": 499.70, "volume": 1},
+]
+
+
+def _failing_upsert(error):
+    def boom(_payload):
+        raise error
+    return staticmethod(boom)
+
+
+@pytest.mark.asyncio
+async def test_an_edge_outage_on_the_write_warns_then_errors_once_sustained(monkeypatch, caplog):
+    """The hourly loop is the retry, so one bad cycle is not a page, but a stuck one is."""
+    _install(monkeypatch, _FakeFMP(eod=_ONE_SESSION))
+    monkeypatch.setattr(PriceService, "_upsert_closes", _failing_upsert(_edge_502()))
+
+    with caplog.at_level(logging.WARNING, logger=ps_module.logger.name):
+        for cycle in range(1, ps_module._EOD_FAILED_CYCLES_ESCALATE_AT):
+            assert await PriceService().refresh_close_snapshot("2026-09-04") == 0
+            assert ps_module._eod_failed_cycles == cycle
+        assert not _records(caplog, logging.ERROR, "close upsert")
+        assert _records(caplog, logging.WARNING, "close upsert for 2026-09-04 stopped")
+
+        assert await PriceService().refresh_close_snapshot("2026-09-04") == 0
+    assert _records(caplog, logging.ERROR, "close upsert for 2026-09-04 stopped")
+
+
+@pytest.mark.asyncio
+async def test_a_real_write_error_is_an_error_at_once_and_not_a_blip(monkeypatch, caplog):
+    error = APIError({"message": "boom", "code": "23514", "hint": None, "details": None})
+    _install(monkeypatch, _FakeFMP(eod=_ONE_SESSION))
+    monkeypatch.setattr(PriceService, "_upsert_closes", _failing_upsert(error))
+
+    with caplog.at_level(logging.WARNING, logger=ps_module.logger.name):
+        assert await PriceService().refresh_close_snapshot("2026-09-04") == 0
+
+    assert _records(caplog, logging.ERROR, "close upsert failed for 2026-09-04")
+    assert ps_module._eod_failed_cycles == 0, "the streak counts blips, not bugs"
+
+
+@pytest.mark.asyncio
+async def test_a_landed_write_ends_a_blip_streak(monkeypatch):
+    _install(monkeypatch, _FakeFMP(eod=_ONE_SESSION))
+    monkeypatch.setattr(ps_module, "_eod_failed_cycles", 2)
+    monkeypatch.setattr(PriceService, "_upsert_closes", staticmethod(lambda p: len(p)))
+
+    assert await PriceService().refresh_close_snapshot("2026-09-04") == 2
+    assert ps_module._eod_failed_cycles == 0

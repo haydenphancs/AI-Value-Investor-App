@@ -1,7 +1,7 @@
 """
 Tracking Service — aggregates watchlist + FMP market data for the Assets tab.
 
-Design (mirrors home_service.py):
+Design:
 - All external calls (FMP, Supabase) run concurrently via asyncio.gather.
 - Each section degrades gracefully: if one data source fails, the rest
   still return so the Assets tab always loads.

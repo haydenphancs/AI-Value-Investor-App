@@ -178,6 +178,69 @@ async def test_batch_enrich_malformed_json_logs_warning_not_error(caplog):
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
+class _Scripted:
+    """Answers each call from a list, counting prompts."""
+
+    def __init__(self, answers):
+        self.answers, self.prompts = list(answers), []
+
+    async def generate_json(self, **kwargs):
+        self.prompts.append(kwargs["prompt"])
+        return {"text": self.answers.pop(0)}
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_batch_is_split_once_not_rebilled_whole(caplog):
+    """A cut or broken answer tends to repeat, and every 15-minute pass re-billed the whole
+    batch for it, exactly the failure the shape-mismatch arm already splits on."""
+    import logging
+
+    from app.services import news_cache_service as ncs
+
+    one = '[{"index": 0, "bullets": ["B"], "sentiment": "neutral", "confidence": 50, "related_tickers": []}]'
+    gem = _Scripted(["[{", one, one])
+    svc = _svc_with_gemini(gem)
+    articles = [{"title": "A", "text": "x"}, {"title": "B", "text": "y"}]
+    with caplog.at_level(logging.WARNING, logger=ncs.logger.name):
+        out = await svc._batch_enrich_articles(articles, ticker="X")
+    assert set(out) == {0, 1}
+    assert len(gem.prompts) == 3, "the batch once, then each half once"
+    assert "splitting the batch once" in caplog.text
+    assert "finish=" in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+@pytest.mark.asyncio
+async def test_a_transport_parse_failure_is_retryable_and_never_split(caplog):
+    """`generate_json` itself raised JSONDecodeError (a cut HTTP body), so no answer exists.
+    It must stay the old {} and bill nothing more. Reading `response` here would crash."""
+    import logging
+
+    from app.services import news_cache_service as ncs
+
+    class _Transport:
+        calls = 0
+
+        async def generate_json(self, **kwargs):
+            _Transport.calls += 1
+            raise json.JSONDecodeError("Expecting value", "", 0)
+
+    svc = _svc_with_gemini(_Transport())
+    with caplog.at_level(logging.WARNING, logger=ncs.logger.name):
+        out = await svc._batch_enrich_articles([{"title": "A"}, {"title": "B"}], ticker="X")
+    assert out == {} and _Transport.calls == 1
+    assert "undecodable body" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_half_stops_at_the_one_split():
+    gem = _Scripted(["[{", "[{", "[{"])
+    out = await _svc_with_gemini(gem)._batch_enrich_articles(
+        [{"title": "A"}, {"title": "B"}], ticker="X",
+    )
+    assert out == {} and len(gem.prompts) == 3
+
+
 @pytest.mark.asyncio
 async def test_batch_enrich_transient_error_logs_warning_not_error(caplog):
     # A transient Gemini capacity condition — quota/429 (typed GeminiQuotaError or

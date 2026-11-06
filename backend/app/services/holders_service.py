@@ -18,7 +18,7 @@ import math
 import re
 import time
 from datetime import date, datetime, timezone, timedelta
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
@@ -32,13 +32,21 @@ from app.services._insider_common import (
     INSIDER_MAX_PAGES,
     INSIDER_PAGE_SIZE,
     _normalize_cik,
+    VALUE_ESTIMATED,
+    VALUE_UNPRICED,
     clean_role_title,
+    distinct_trades,
     insider_row_date,
+    insider_row_value,
+    insider_split_days,
     insider_window_cutoff,
     is_equity_line,
     issuer_roster,
+    needs_close,
     normalize_insider_name,
     prepare_insider_rows,
+    priced_close_lookup,
+    share_class_multiple,
 )
 from app.services._insider_holdings import insider_holdings_from_rows, roster_from_holdings
 from app.services.corporate_actions_service import (
@@ -397,7 +405,10 @@ _SUPABASE_CACHE_TTL_HOURS = 24
 #:     instead of the first raw row per name — a v5 row showed CRWV's Venturo at an RSU line's
 #:     984,380 beside chat's 302,526. The row also carries the float figure chat states
 #:     (`ownership_detail.float_*`) and each congressional disclosure's filing date.
-_HOLDERS_PAYLOAD_VERSION = 6
+#: 7 → (2026-11-05) an open-market row with no price takes the trade-date close (marked
+#:     `price_estimated` / `usd_estimated`), Class A and Class B share one unit on the chart,
+#:     the list and the roster, and a joint Form 4 line counts once.
+_HOLDERS_PAYLOAD_VERSION = 7
 _VERSION_KEY = "payload_version"
 
 #: Below this insider block, `institutions + insiders > 100` is physically impossible
@@ -1083,6 +1094,8 @@ class HoldersService:
         if split_lookup_failed:
             inst_unclassified = True
 
+        # One lookup for the chart and the list, so they value a row with no price the same way.
+        close_on = await self._insider_close_on(ticker, insider_trading, daily_prices)
         recent = self._build_recent_activities(
             institutional_holders, insider_trading, insider_roster, current_price,
             inst_quarter_aggregate=inst_quarter_aggregate,
@@ -1097,10 +1110,14 @@ class HoldersService:
             # it passed while the production path had none.
             split_ratio=inst_split_ratio,
             unclassified_action=inst_unclassified,
+            symbol=ticker,
+            close_on=close_on,
         )
 
         # Build live smart money data
-        insider_sm = self._build_insider_smart_money(insider_trading, monthly_prices, daily_prices)
+        insider_sm = self._build_insider_smart_money(
+            insider_trading, monthly_prices, daily_prices, symbol=ticker, close_on=close_on,
+        )
         hedge_sm = await self._build_hedge_fund_smart_money(ticker, daily_prices)
         congress_sm = self._build_congress_smart_money(
             senate_for_ticker, house_for_ticker, monthly_prices, daily_prices
@@ -1339,8 +1356,10 @@ class HoldersService:
             )
             return []
         try:
-            ranked = roster_from_holdings(holdings)
-            unknown = len(roster_from_holdings(holdings, include_unknown=True)) - len(ranked)
+            ranked = roster_from_holdings(holdings, symbol=ticker)
+            unknown = len(
+                roster_from_holdings(holdings, include_unknown=True, symbol=ticker)
+            ) - len(ranked)
         except Exception:  # noqa: BLE001
             logger.exception("[holders-top-insiders] %s: ranked sheet empty "
                              "(reason=derivation_failed)", ticker)
@@ -1438,7 +1457,7 @@ class HoldersService:
         top_10_institutions = self._build_top_institutions(inst_holders)
         outstanding_shares = _safe_float(profile, "outstandingShares", 0.0)
         top_10_insiders = self._build_top_insiders(
-            top_insiders, current_price, outstanding_shares
+            top_insiders, current_price, outstanding_shares, symbol=ticker,
         )
 
         return ShareholderBreakdownSchema(
@@ -1515,11 +1534,38 @@ class HoldersService:
             ))
         return result
 
+    async def _insider_close_on(
+        self,
+        ticker: str,
+        trades: List[Dict[str, Any]],
+        daily_prices: List[DailyPricePointSchema],
+    ) -> Optional[Callable[[str], Optional[float]]]:
+        """`close_on` for this build's rows with no price (`priced_close_lookup`), None when
+        no row needs one. The profile and split reads happen only for such a row, and a failed
+        read leaves it unvalued: never a close on the wrong share basis."""
+        if not needs_close(trades):
+            return None
+        try:
+            profile = await self.fmp.get_company_profile(ticker)
+        except Exception as e:  # noqa: BLE001 — degrades to unvalued rows, stated as unknown
+            logger.warning(
+                "[holders-insider-close] %s: profile read failed, %s: %s — rows with no price "
+                "stay unvalued", ticker, type(e).__name__, e,
+            )
+            return None
+        row = profile[0] if isinstance(profile, list) and profile else profile
+        is_adr = isinstance(row, dict) and row.get("isAdr") is True
+        split_days = await insider_split_days(corporate_actions_source(self), ticker)
+        return priced_close_lookup(
+            ((dp.date, dp.price) for dp in daily_prices), split_days, is_adr=is_adr,
+        )
+
     def _build_top_insiders(
         self,
         roster: List[Dict[str, Any]],
         current_price: float,
         outstanding_shares: float = 0.0,
+        symbol: str = "",
     ) -> List[TopInsiderSchema]:
         """Rank `roster` (`roster_from_holdings` rows) by holding value, top 10.
 
@@ -1536,6 +1582,8 @@ class HoldersService:
             shares = _safe_float(r, "numberOfShares", 0.0)
             if shares <= 0:
                 continue
+            # In the priced class, the same rule as Key Management, so the two rosters agree.
+            shares *= share_class_multiple(symbol, r.get("security"))
             value_millions = (shares * current_price) / 1_000_000 if current_price > 0 else 0.0
             # Compute ownership % from shares / outstanding shares
             if outstanding_shares > 0 and shares > 0:
@@ -1610,7 +1658,9 @@ class HoldersService:
         senate_trades: Optional[List[Dict[str, Any]]] = None,
         house_trades: Optional[List[Dict[str, Any]]] = None,
         split_ratio: float = 1.0,
+        symbol: str = "",
         unclassified_action: bool = False,
+        close_on: Optional[Callable[[str], Optional[float]]] = None,
     ) -> RecentActivitiesSchema:
         # Build institutional activities (all, before truncation)
         all_inst_activities = self._build_institutional_activities(
@@ -1631,7 +1681,7 @@ class HoldersService:
 
         # Build insider activities — summary from 12-month window, return all for frontend
         all_insider_acts = self._build_insider_activities(
-            insider_trades, insider_roster
+            insider_trades, insider_roster, symbol=symbol, close_on=close_on,
         )
         # Insider summary window = trailing 365 days (day-level), the SAME cutoff
         # the insider flow chart and the report's Insider table use — so the
@@ -1952,6 +2002,8 @@ class HoldersService:
         self,
         trades: List[Dict[str, Any]],
         roster: List[Dict[str, Any]],
+        symbol: str = "",
+        close_on: Optional[Callable[[str], Optional[float]]] = None,
     ) -> List[InsiderActivitySchema]:
         """Convert FMP insider trading data into InsiderActivity entries."""
         # Build a title lookup from roster — keyed on the NORMALIZED name so it
@@ -1967,7 +2019,7 @@ class HoldersService:
             title_map[name.lower()] = title
 
         result = []
-        for tx in trades:
+        for tx in distinct_trades(trades):
             # Only show the issuer's stock (common / ordinary shares), not RSUs, options or
             # warrants. The shared rule: a "common stock" substring test here dropped every
             # "Ordinary Shares" filer (NYAX) and kept "Common Stock Purchase Warrant" rows.
@@ -2009,8 +2061,14 @@ class HoldersService:
 
             # Insider activity is now denominated in SHARES (millions of shares)
             # to match the insider flow chart — Form 4 reports exact share
-            # counts, comparable over time without a price.
-            change_millions = shares / 1_000_000
+            # counts, comparable over time without a price. In the priced class, like the
+            # chart, and the price with it, so shares x price still equals the trade.
+            multiple = share_class_multiple(symbol, tx.get("securityName"))
+            change_millions = shares * multiple / 1_000_000
+            # A row the filing left without a price carries the same close the chart valued it
+            # at, marked, so the list, the chart and chat state one figure.
+            dollars, how = insider_row_value(tx, symbol=symbol, close_on=close_on)
+            price = dollars / (shares * multiple)
 
             # Sign convention: negative for sells
             if "Sell" in classified:
@@ -2040,11 +2098,13 @@ class HoldersService:
                 name=reporting_name,
                 title=title,
                 date=date_str[:10],
-                # 6 dp keeps single-share precision (millions → 1e-6 = 1 share);
-                # 2 dp would zero out small trades (a 200-share sale = 0.0002M).
-                change_in_millions=round(change_millions, 6),  # millions of SHARES
+                # 10 dp keeps a whole share even when converted: 1 Class B share on a BRK-A
+                # report is 1/1500 of a share (6.7e-10M). 2 dp would zero out small trades
+                # (a 200-share sale = 0.0002M).
+                change_in_millions=round(change_millions, 10),  # millions of SHARES
                 transaction_type=classified,
                 price_at_transaction=round(price, 2),
+                price_estimated=True if how == VALUE_ESTIMATED else None,
             ))
 
         # Sort by date descending; caller truncates for display
@@ -2346,6 +2406,8 @@ class HoldersService:
         flow_data: List[SmartMoneyFlowDataPointSchema],
         usd_buy_millions: Optional[float] = None,
         usd_sell_millions: Optional[float] = None,
+        usd_estimated: bool = False,
+        share_digits: int = 2,
     ) -> SmartMoneyFlowSummarySchema:
         """Compute summary from flow data points.
 
@@ -2353,7 +2415,9 @@ class HoldersService:
         dollars for Congress). When dollar totals are supplied — Insider only — they are
         carried alongside and become the verdict: `is_positive` is derived from the
         dollar net so this badge cannot contradict TickerReportView, which has always
-        judged insider sentiment on net dollar value.
+        judged insider sentiment on net dollar value. `share_digits` is 6 when the Insider tab
+        withholds its dollars: the badge then prints this figure, and 2 dp would read a real
+        4,000-share net as 0.
         """
         total_buy = sum(f.buy_volume for f in flow_data)
         total_sell = sum(f.sell_volume for f in flow_data)
@@ -2366,11 +2430,11 @@ class HoldersService:
         # Judge on dollars when we have them, else on the bars' own unit. Compare the
         # ROUNDED value — the one that is actually printed — so the arrow, the colour and
         # the number can never disagree (`round(-0.002, 2)` is `-0.0`, and `-0.0 >= 0`).
-        verdict_value = usd_net if usd_net is not None else round(net, 2)
+        verdict_value = usd_net if usd_net is not None else round(net, share_digits)
         return SmartMoneyFlowSummarySchema(
-            total_net_flow=round(net, 2),
-            total_buy=round(total_buy, 2),
-            total_sell=round(total_sell, 2),
+            total_net_flow=round(net, share_digits),
+            total_buy=round(total_buy, share_digits),
+            total_sell=round(total_sell, share_digits),
             is_positive=verdict_value >= 0,
             period_description="12-Month",
             net_flow_usd_millions=usd_net,
@@ -2380,6 +2444,7 @@ class HoldersService:
             total_sell_usd_millions=(
                 round(usd_sell_millions, 4) if usd_sell_millions is not None else None
             ),
+            usd_estimated=True if usd_estimated and usd_net is not None else None,
         )
 
     # ── Insider Smart Money Tab ───────────────────────────────────
@@ -2389,6 +2454,8 @@ class HoldersService:
         insider_trades: List[Dict[str, Any]],
         monthly_prices: Dict[str, float],
         daily_prices: Optional[List[DailyPricePointSchema]] = None,
+        symbol: str = "",
+        close_on: Optional[Callable[[str], Optional[float]]] = None,
     ) -> SmartMoneyDataSchema:
         """Build insider smart money from individual trade data.
 
@@ -2411,8 +2478,10 @@ class HoldersService:
         # Dollar totals for the VERDICT (see the note at the accumulation below).
         usd_buy_millions = 0.0
         usd_sell_millions = 0.0
+        unpriced_rows = 0
+        estimated_rows = 0
 
-        for tx in insider_trades:
+        for tx in distinct_trades(insider_trades):
             # Only count informative trades (open-market buys/sells).
             # Skip option grants, 10b5-1 plan sales, gifts, tax withholding,
             # and Form 3 initial ownership filings (empty transactionType).
@@ -2454,7 +2523,10 @@ class HoldersService:
             shares = abs(_safe_float(tx, "securitiesTransacted", 0.0))
             if shares <= 0:
                 continue
-            shares_millions = shares / 1_000_000
+            # In the priced class: 21 Berkshire Class A shares are 31,500 Class B.
+            shares_millions = (
+                shares * share_class_multiple(symbol, tx.get("securityName")) / 1_000_000
+            )
 
             # DOLLAR value of the same trade, accumulated in parallel. The BARS stay
             # share-denominated (Form 4 reports exact shares, and a row whose price is
@@ -2467,8 +2539,10 @@ class HoldersService:
             # ticker: buy 1M shares at $1 and sell 100K at $50 is "Net Buy 900K shares"
             # (green) here and "Net Selling / critical" (red) there. Both were defensible
             # in isolation; disagreeing on screen was not.
-            price_at_tx = _safe_float(tx, "price", 0.0)
-            value_millions = (shares * price_at_tx) / 1_000_000 if price_at_tx > 0 else 0.0
+            dollars, how = insider_row_value(tx, symbol=symbol, close_on=close_on)
+            value_millions = dollars / 1_000_000
+            unpriced_rows += how == VALUE_UNPRICED
+            estimated_rows += how == VALUE_ESTIMATED
 
             # Buy vs sell from the transactionType classification (P=Buy /
             # S=Sell) — the SAME rule the report table and the recent-trade list
@@ -2491,13 +2565,13 @@ class HoldersService:
         flow_data = [
             SmartMoneyFlowDataPointSchema(
                 month=m,
-                # 6 dp keeps single-share fidelity (1 share = 1e-6 M). The old
-                # round(,2) zeroed out any month under ~5,000 shares, so a real
-                # small insider buy arrived as 0.0 and rendered as a 0-height
-                # (invisible) bar. iOS floors tiny non-zero bars to a visible
-                # minimum, but only if the value survives to it.
-                buy_volume=round(monthly_flows[m]["buy"], 6),
-                sell_volume=round(monthly_flows[m]["sell"], 6),
+                # 10 dp keeps single-share fidelity (1 share = 1e-6 M), and a converted one
+                # on a BRK-A report (1/1500 of a share). The old round(,2) zeroed out any
+                # month under ~5,000 shares, so a real small insider buy arrived as 0.0 and
+                # rendered as a 0-height (invisible) bar. iOS floors tiny non-zero bars to a
+                # visible minimum, but only if the value survives to it.
+                buy_volume=round(monthly_flows[m]["buy"], 10),
+                sell_volume=round(monthly_flows[m]["sell"], 10),
                 has_activity=(monthly_flows[m]["buy"] > 0 or monthly_flows[m]["sell"] > 0),
             )
             for m in month_keys
@@ -2518,10 +2592,14 @@ class HoldersService:
             price_data=self._build_price_data(monthly_prices, month_keys),
             daily_prices=windowed_daily,
             flow_data=flow_data,
+            # A row with no value is an unknown amount that could flip the dollar verdict, so
+            # the badge falls back to the share bars rather than judging a partial sum.
             summary=self._build_summary(
                 flow_data,
-                usd_buy_millions=usd_buy_millions,
-                usd_sell_millions=usd_sell_millions,
+                usd_buy_millions=None if unpriced_rows else usd_buy_millions,
+                usd_sell_millions=None if unpriced_rows else usd_sell_millions,
+                usd_estimated=estimated_rows > 0,
+                share_digits=6 if unpriced_rows else 2,
             ),
         )
 

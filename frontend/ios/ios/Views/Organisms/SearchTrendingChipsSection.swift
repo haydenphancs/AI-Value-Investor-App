@@ -3,7 +3,8 @@
 //  ios
 //
 //  Organism: the chips every search screen shows before the user types —
-//  "Trending searches · 7 days", "Most added · 7 days", or the curated "Popular" list.
+//  "Trending searches · 7 days", "Most added · 7 days", or the curated "Well-known names"
+//  list.
 //
 //  Placed at the TOP, directly under the search field: two of the five surfaces raise the
 //  keyboard the moment they open, and it covers the bottom half of the screen. Symbol-only
@@ -13,9 +14,10 @@
 //  detail, add to a watchlist, pick a research target), and a chip tap NEVER records a
 //  search pick: the list would feed itself.
 //
-//  Neutral on purpose: no counts, no rank numbers, no "hot"/"top" wording, and a line
-//  saying it is not a recommendation. The lists are general and impersonal (Terms §2), and
-//  "most popular" lists draw gamification criticism when they read as a nudge.
+//  Neutral on purpose: no counts, no rank numbers, no "hot"/"top" wording. The lists are
+//  general and impersonal (Terms §2), and "most popular" lists draw gamification criticism
+//  when they read as a nudge. A list built from activity says so; the curated one has no
+//  caption (owner, 2026-11-05).
 //
 
 import SwiftUI
@@ -47,12 +49,11 @@ struct SearchTrendingChipsSection: View {
         return "\(item.symbol) · \(label)"
     }
 
-    /// Honest about the source: "based on activity" only when a list is actually built
-    /// from activity — the curated fallback is not.
-    private var caption: String {
-        sections.contains(where: \.isLive)
-            ? "Based on activity in Caydex. Not a recommendation."
-            : "Not a recommendation."
+    /// Honest about the source: said once, under the LAST list built from activity. The
+    /// curated fallback is not one, so the line can never sit under it, even when one list is
+    /// live and the curated list follows it.
+    private var captionedSectionID: String? {
+        sections.last(where: \.isLive)?.id
     }
 
     var body: some View {
@@ -60,6 +61,7 @@ struct SearchTrendingChipsSection: View {
         // fetched one in place, and a lazy stack whose child resizes in place can wedge the
         // main thread (see HomeDashboardView.content).
         let ambiguous = ambiguousSymbols
+        let captioned = captionedSectionID
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             ForEach(sections) { section in
                 VStack(alignment: .leading, spacing: AppSpacing.sm) {
@@ -75,13 +77,13 @@ struct SearchTrendingChipsSection: View {
                         onTap: onItemTapped,
                         accessibilityLabel: { $0.accessibilityText }
                     )
-                }
-            }
 
-            if !sections.isEmpty {
-                Text(caption)
-                    .font(AppTypography.captionSmall)
-                    .foregroundColor(AppColors.textMuted)
+                    if section.id == captioned {
+                        Text("Based on activity in Caydex.")
+                            .font(AppTypography.captionSmall)
+                            .foregroundColor(AppColors.textMuted)
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -96,9 +98,17 @@ struct SearchTrendingChipsSection: View {
     .background(AppColors.background)
 }
 
-#Preview("Popular fallback") {
+#Preview("Curated fallback") {
     SearchTrendingChipsSection(sections: SearchTrendingSection.previewPopular, onItemTapped: { _ in })
         .background(AppColors.background)
+}
+
+#Preview("One live list, then the curated one") {
+    SearchTrendingChipsSection(
+        sections: [SearchTrendingSection.previewLive[0]] + SearchTrendingSection.previewPopular,
+        onItemTapped: { _ in }
+    )
+    .background(AppColors.background)
 }
 
 #Preview("Narrow, large text") {

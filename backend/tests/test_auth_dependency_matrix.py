@@ -482,19 +482,29 @@ def test_the_rotatable_guest_budget_is_no_longer_consulted():
 #       -> 46 passed ✅ — the scan reads code, not the prose that narrates the history.
 
 
-def test_the_home_feed_resolves_the_caller_through_the_users_row_like_the_dashboard():
-    """`/home/feed` serves the caller's OWN research reports. A token-only dependency has
-    no eviction — a deleted account's still-valid JWT read its reports for the token's
-    lifetime — so it must resolve the `users` row (`get_watchlist_identity`) exactly as
-    `/home/dashboard` does (F14-5)."""
+def test_the_home_dashboard_resolves_the_caller_through_the_users_row():
+    """`/home/dashboard` serves the caller's OWN watchlist strip. A token-only dependency has
+    no eviction — a deleted account's still-valid JWT would read that data for the token's
+    lifetime — so it must resolve the `users` row (`get_watchlist_identity`) (F14-5)."""
     import inspect
     from app.api.v1.endpoints import home as home_ep
     from app.dependencies import get_watchlist_identity
 
-    for handler in (home_ep.get_home_feed, home_ep.get_home_dashboard):
-        deps = [p.default.dependency for p in inspect.signature(handler).parameters.values()
-                if hasattr(p.default, "dependency")]
-        assert get_watchlist_identity in deps, handler.__name__
+    deps = [p.default.dependency
+            for p in inspect.signature(home_ep.get_home_dashboard).parameters.values()
+            if hasattr(p.default, "dependency")]
+    assert get_watchlist_identity in deps
+
+
+def test_the_legacy_home_feed_stays_removed():
+    """Removed 2026-11-05: the app stopped calling `/home/feed` on 2026-08-19, and its briefing
+    fallback was the last multi-day `earnings-calendar` read — FMP cuts those at 4,000 rows
+    and keeps the NEWEST dates, so the nearest days were the ones lost."""
+    from app.api.v1.endpoints import home as home_ep
+
+    paths = {route.path for route in home_ep.router.routes}
+    assert "/dashboard" in paths, paths     # anti-vacuity: this is the right router
+    assert "/feed" not in paths, paths
 
 
 def test_the_trillion_club_detail_is_strict_and_reads_its_tier_from_the_users_row():

@@ -3224,6 +3224,8 @@ struct SmartMoneyFlowSummaryDTO: Codable {
     let netFlowUsdMillions: Double?
     let totalBuyUsdMillions: Double?
     let totalSellUsdMillions: Double?
+    /// True when those dollars include a trade valued at its close (no price on the filing).
+    let usdEstimated: Bool?
 
     enum CodingKeys: String, CodingKey {
         case totalNetFlow = "total_net_flow"
@@ -3234,6 +3236,7 @@ struct SmartMoneyFlowSummaryDTO: Codable {
         case netFlowUsdMillions = "net_flow_usd_millions"
         case totalBuyUsdMillions = "total_buy_usd_millions"
         case totalSellUsdMillions = "total_sell_usd_millions"
+        case usdEstimated = "usd_estimated"
     }
 
     func toDisplayModel(unit: SmartMoneyFlowUnit = .dollars) -> SmartMoneyFlowSummary {
@@ -3248,7 +3251,8 @@ struct SmartMoneyFlowSummaryDTO: Codable {
             // badge read "nan" and poison every comparison it feeds.
             netFlowUsdMillions: netFlowUsdMillions.finiteOrNil,
             totalBuyUsdMillions: totalBuyUsdMillions.finiteOrNil,
-            totalSellUsdMillions: totalSellUsdMillions.finiteOrNil
+            totalSellUsdMillions: totalSellUsdMillions.finiteOrNil,
+            usdEstimated: usdEstimated == true
         )
     }
 }
@@ -3385,12 +3389,15 @@ struct InsiderActivityDTO: Codable {
     let changeInMillions: Double
     let transactionType: String
     let priceAtTransaction: Double
+    /// True when the price is the trade-date close because the filing showed none.
+    let priceEstimated: Bool?
 
     enum CodingKeys: String, CodingKey {
         case name, title, date
         case changeInMillions = "change_in_millions"
         case transactionType = "transaction_type"
         case priceAtTransaction = "price_at_transaction"
+        case priceEstimated = "price_estimated"
     }
 
     func toDisplayModel() -> InsiderActivity {
@@ -3411,7 +3418,8 @@ struct InsiderActivityDTO: Codable {
             date: parsedDate,
             changeInMillions: changeInMillions,
             transactionType: txType,
-            priceAtTransaction: priceAtTransaction
+            priceAtTransaction: priceAtTransaction,
+            priceEstimated: priceEstimated == true
         )
     }
 }

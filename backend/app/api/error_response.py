@@ -485,9 +485,10 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.REPORT_NOT_READY: (
         "The report is still generating. Try again in a few seconds."
     ),
+    # No word about credits: this reaches the failed row BEFORE the refund runs, and a refund
+    # that fails would leave this sentence false. The chip and the push state the real outcome.
     ErrorCode.REPORT_TIMED_OUT: (
-        "This analysis took too long and was stopped. Your credits have been refunded — "
-        "please try again."
+        "This analysis took too long and was stopped. Please try again."
     ),
     ErrorCode.REPORT_ALREADY_COMPLETED: (
         "This report has already finished. Open it instead of retrying."
@@ -927,6 +928,20 @@ def _learn_exception_code(exc: BaseException) -> Optional[ErrorCode]:
     return None
 
 
+def degraded_error_code(reason: Optional[str]) -> ErrorCode:
+    """The error code for a degraded report, by why it degraded.
+
+    An unusable answer is not an outage: the model replied, and the very next call usually
+    works. Every degrade used to read GEMINI_UNAVAILABLE, so a stray quote in one answer told
+    the user the engine was down and put a provider outage that never happened on dashboards.
+    """
+    from app.services.report_degradation import BAD_ANSWER_REASONS
+
+    if reason in BAD_ANSWER_REASONS:
+        return ErrorCode.REPORT_GENERATION_FAILED
+    return ErrorCode.GEMINI_UNAVAILABLE
+
+
 def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
     """Inspect an exception and return (error_code, default http status).
 
@@ -1072,10 +1087,8 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
     # without this it would fall through to a bare 500 — which on the paid research path
     # means the user sees "Something went wrong" instead of "you have not been charged".
     if "degradedreporterror" in cls:
-        return (
-            ErrorCode.GEMINI_UNAVAILABLE,
-            _DEFAULT_STATUS[ErrorCode.GEMINI_UNAVAILABLE],
-        )
+        code = degraded_error_code(getattr(exc, "reason", None))
+        return (code, _DEFAULT_STATUS[code])
 
     # ── Gemini per-call timeout (app.integrations.gemini.GeminiTimeoutError) ──
     # Matched by NAME, and placed BEFORE both the google/genai module test below and

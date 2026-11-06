@@ -797,10 +797,14 @@ def build_context(
         shares = abs((_num(a.get("change_in_millions")) or 0.0) * 1e6)
         price = _num(a.get("price_at_transaction"))
         value = shares * price if (shares and price) else None
+        value_label = _fmt_amount(value, money=True)
         recent_tx.append({
             **a,
             "shares_label": _fmt_amount(shares) if shares else "—",
-            "value_label": _fmt_amount(value, money=True),
+            # A close stands in for a price the filing did not show: never read as filed.
+            "value_label": (
+                f"~{value_label}" if value and a.get("price_estimated") is True else value_label
+            ),
         })
 
     # Hidden signals.
@@ -941,8 +945,9 @@ def build_context(
             "overall": data.get("overall_assessment") or {},
         },
         "forecast": {
-            "cagr": _num(forecast.get("cagr")),
-            "eps_growth": _num(forecast.get("eps_growth")),
+            # 0.0 is the required float's "no rate": "—" here, never a measured flat outlook.
+            "cagr": _num(forecast.get("cagr")) or None,
+            "eps_growth": _num(forecast.get("eps_growth")) or None,
             # "unknown" = no transcript was read; the template's `or "—"` dash is
             # the honest cell, not a capitalised "Unknown" that reads like a stance.
             "management_guidance": _guidance_for_pdf(forecast.get("management_guidance")),

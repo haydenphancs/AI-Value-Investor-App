@@ -1,0 +1,48 @@
+{
+  "slug": "coca-cola-vs-pepsico",
+  "category": "battles",
+  "treatment": "tech_noir",
+  "subject": "two identical aluminium drinks cans of exactly the same size standing upright side by side, beaded with cold condensation, their ring-pull tabs and rolled rims clearly readable, both bare brushed metal with no printing, colour, label or mark of any kind",
+  "subject_source": "authored",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "16:9",
+  "art_size": "2K",
+  "art_prompt": "Cinematic tech-noir still. The subject is carved out of darkness by a strong coloured rim light with a second opposing kicker on the far side, faint atmospheric haze holding visible shafts of that light, and a wet black glass surface beneath throwing a short soft mirrored reflection. Gentle anamorphic bloom on the brightest specular edges, deep crushed blacks. The saturated colour lives entirely in the LIGHT \u2014 every surface and material stays neutral and unpainted. Photoreal and razor sharp.\n\nSUBJECT: two identical aluminium drinks cans of exactly the same size standing upright side by side, beaded with cold condensation, their ring-pull tabs and rolled rims clearly readable, both bare brushed metal with no printing, colour, label or mark of any kind\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 never cropped so tightly that it becomes an abstract texture or an unidentifiable piece of material. It must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nPALETTE: cold steel-blue on one side against warm amber and old gold on the other, over a neutral ground. Exactly two hues plus neutrals, split so the two halves of the picture are plainly opposed \u2014 the rivalry is carried by the colour. Use three or four colours at most plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal landscape 16:9 frame. ONE single clear idea, calm and uncluttered, never a busy scene. The subject is complete and entirely inside the frame with a clear unbroken margin on all four sides \u2014 nothing touches or is cut by any edge, because this image is shown as a rounded card and anything against an edge reads as a mistake. The background treatment, however, runs fully edge to edge into all four corners with no border, no frame, no vignette and no second card drawn inside the picture.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, handwriting, engraving, embossed lettering, serial numbers, dial numerals, dimension labels, captions, brand names, logos, trademarks, signage or watermarks ANYWHERE in the image \u2014 every card, label, plaque, sheet, screen and printed surface in the picture is completely blank. No human faces, no hands, no people. No real company's product, packaging or identifying mark.",
+  "art_prompt_sha1": "6d803a6d8af9",
+  "art_file": "coca-cola-vs-pepsico.art.jpg",
+  "art_native_width": 2752,
+  "art_native_height": 1536,
+  "masters": {
+    "hero": {
+      "file": "coca-cola-vs-pepsico.hero.jpg",
+      "width": 1206,
+      "height": 678,
+      "sha256": "f63f0136a056f9d6847941305ea9ea44240a2680a4e95a12b790a3a0db9aabaa",
+      "bytes": 65802,
+      "cropped": true
+    },
+    "card": {
+      "file": "coca-cola-vs-pepsico.card.jpg",
+      "width": 640,
+      "height": 360,
+      "sha256": "27bfda4d5afd9ea2270a64654c9252eacbff843fe2e4739826f25c0145d45bab",
+      "bytes": 23449,
+      "cropped": true
+    }
+  },
+  "plate": {
+    "margin_px_fraction": 0.04,
+    "ring_median_luma": 0.0044,
+    "ring_spread": 0.2396,
+    "inner_spread": 0.2948,
+    "edge_activity": 0.813,
+    "mean_luma": 0.0545,
+    "inner_mean_luma": 0.0566,
+    "needs_hairline": false
+  },
+  "uploaded": {
+    "hero": "f63f0136a056f9d6847941305ea9ea44240a2680a4e95a12b790a3a0db9aabaa",
+    "card": "27bfda4d5afd9ea2270a64654c9252eacbff843fe2e4739826f25c0145d45bab"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/money-moves-images/articles/coca-cola-vs-pepsico.hero.jpg"
+}

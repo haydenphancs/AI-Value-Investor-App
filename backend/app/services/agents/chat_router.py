@@ -87,7 +87,17 @@ async def route_question(gemini: Any, user_message: str) -> Dict[str, Any]:
             'Return ONLY JSON: {"specialists": ["lens", ...], "cross_domain": true|false}'
         )
         res = await gemini.generate_json(prompt, system_instruction=_ROUTER_SYSTEM, model_name=_ROUTER_MODEL)
-        data = json.loads((res or {}).get("text") or "{}")
+        text = (res or {}).get("text") or ""
+        if not text.strip():
+            # A blocked or empty answer is a classification that never happened. Reading it
+            # as `{}` reported ["general"] with degraded=False, which `select_model` takes
+            # as proof the turn was classified.
+            logger.warning(
+                "Chat router got a blank answer (finish=%s) — defaulting to general",
+                (res or {}).get("finish_reason") or "-",
+            )
+            return _fallback()
+        data = json.loads(text)
         raw = data.get("specialists") or []
         keys: List[str] = []
         for k in raw:

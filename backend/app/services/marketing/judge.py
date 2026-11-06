@@ -61,7 +61,7 @@ JUDGE_TEMPERATURE = 0.0
 #: image-post fields of 2026-10-09 (`package_fields`): the rubric, the prompt builder and the schema
 #: builder are unchanged, and a package without an image is judged byte for byte as before — the
 #: writer's PROMPT_VERSION records the new field.
-JUDGE_RUBRIC_VERSION = "2026-09-26.9"
+JUDGE_RUBRIC_VERSION = "2026-11-05.1"
 USAGE_TAG = "marketing_judge"
 
 MODE_OFF, MODE_SHADOW, MODE_ENFORCE = "off", "shadow", "enforce"
@@ -159,8 +159,13 @@ SYSTEM_BODY = (
     "off on selling a thriving business just to pocket a quick gain\", \"skip the hot-tip "
     "chase\", \"never bet it all on one name\");\n"
     "- the general principle of spreading money across many companies, including by kind of "
-    "product (\"spread your eggs across many baskets\", \"a single fund can spread your money "
-    "widely\");\n"
+    "product and even as an imperative that names no specific fund, index, amount or moment "
+    "(\"spread your eggs across many baskets\", \"a single fund can spread your money "
+    "widely\", \"share out your savings with broad funds\");\n"
+    "- a general point about how many holdings make sense, that a longer list is not "
+    "automatically sturdier or that a handful you understand is easier to look after, even in a "
+    "garden metaphor, when it names no holding to sell, trim, add to or move money into "
+    "(\"keep a small patch you can tend\");\n"
     "- gardening, sport or travel metaphors for PATIENCE or care that name no trade (\"tend it "
     "gently and let it grow\");\n"
     "- a sentence that describes what an action does without telling the reader to do it "
@@ -220,7 +225,9 @@ SYSTEM_BODY = (
     "carries (\"plenty of households treat a total-market fund as the calm centre of their "
     "plan\" is fine); saying diversification lowers, spreads or cushions risk without removing "
     "it; how diversification works (\"one bad headline barely moves a fund that owns hundreds of "
-    "firms\"); a BUSINESS, its income or its moat called stable, steady or protected; insured "
+    "firms\"); a COMPARISON calling a fund simpler or steadier than single stocks when the same "
+    "sentence says the risk remains (\"a broad basket tends to swing less than one share, yet it "
+    "can still fall\"); a BUSINESS, its income or its moat called stable, steady or protected; insured "
     "cash in a bank account called safe; or a comparison of habits (steady saving versus "
     "reckless guessing).\n\n"
     "judge_disclaimer - says the text is or is not advice or a recommendation, denies or "

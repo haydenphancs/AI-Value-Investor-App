@@ -984,4 +984,7 @@ def main():
 
 
 if __name__ == "__main__":
+    from _cli_flags import check_flags
+
+    check_flags(sys.argv, known={"--force", "--level", "--only", "--recheck", "--style", "--variants"}, doc=__doc__)
     main()

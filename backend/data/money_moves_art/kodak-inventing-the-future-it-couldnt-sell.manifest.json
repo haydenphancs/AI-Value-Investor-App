@@ -1,0 +1,48 @@
+{
+  "slug": "kodak-inventing-the-future-it-couldnt-sell",
+  "category": "valueTraps",
+  "treatment": "found_artefact",
+  "subject": "a single roll of 35mm photographic film in its small metal canister with the film leader curling out of the slot, lying on a darkroom counter beside a few more canisters and loose curled strips of developed film negatives, every canister bare and unmarked",
+  "subject_source": "authored",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "16:9",
+  "art_size": "2K",
+  "art_prompt": "A single physical instant PHOTOGRAPH \u2014 a square print with a thick white border and a wide blank strip along its bottom edge \u2014 lying at a slight angle on a surface that belongs to the subject's own world. The print itself shows the object, sharply and unmistakably. The surface it lies on continues the same subject beyond the print's edges, so the photograph sits inside the scene it depicts. Shallow depth of field: the print is critically sharp, the surroundings fall away. The white bottom strip is COMPLETELY BLANK \u2014 no handwriting, no printing, nothing on it at all.\n\nSUBJECT: a single roll of 35mm photographic film in its small metal canister with the film leader curling out of the slot, lying on a darkroom counter beside a few more canisters and loose curled strips of developed film negatives, every canister bare and unmarked\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 never cropped so tightly that it becomes an abstract texture or an unidentifiable piece of material. It must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nPALETTE: oxblood, rust and burnished copper-red against warm charcoal and aged cream. Rich, dark and restrained \u2014 never bright, never scarlet, never a pure saturated red. Use three or four colours at most plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal landscape 16:9 frame. ONE single clear idea, calm and uncluttered, never a busy scene. The subject is complete and entirely inside the frame with a clear unbroken margin on all four sides \u2014 nothing touches or is cut by any edge, because this image is shown as a rounded card and anything against an edge reads as a mistake. The background treatment, however, runs fully edge to edge into all four corners with no border, no frame, no vignette and no second card drawn inside the picture.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, handwriting, engraving, embossed lettering, serial numbers, dial numerals, dimension labels, captions, brand names, logos, trademarks, signage or watermarks ANYWHERE in the image \u2014 every card, label, plaque, sheet, screen and printed surface in the picture is completely blank. No human faces, no hands, no people. No real company's product, packaging or identifying mark.",
+  "art_prompt_sha1": "e72a0afd0f65",
+  "art_file": "kodak-inventing-the-future-it-couldnt-sell.art.jpg",
+  "art_native_width": 2752,
+  "art_native_height": 1536,
+  "masters": {
+    "hero": {
+      "file": "kodak-inventing-the-future-it-couldnt-sell.hero.jpg",
+      "width": 1206,
+      "height": 678,
+      "sha256": "abac1499aa59033d9ad07690fa8c2ed52783760286c69ea1faf20e2277a37eff",
+      "bytes": 83159,
+      "cropped": true
+    },
+    "card": {
+      "file": "kodak-inventing-the-future-it-couldnt-sell.card.jpg",
+      "width": 640,
+      "height": 360,
+      "sha256": "16a75d60aeba4884d6711d1db9d7e1e9d30dedebb577e06153c43b13958b9788",
+      "bytes": 32451,
+      "cropped": true
+    }
+  },
+  "plate": {
+    "margin_px_fraction": 0.04,
+    "ring_median_luma": 0.0056,
+    "ring_spread": 0.1527,
+    "inner_spread": 0.5347,
+    "edge_activity": 0.286,
+    "mean_luma": 0.0931,
+    "inner_mean_luma": 0.0999,
+    "needs_hairline": false
+  },
+  "uploaded": {
+    "hero": "abac1499aa59033d9ad07690fa8c2ed52783760286c69ea1faf20e2277a37eff",
+    "card": "16a75d60aeba4884d6711d1db9d7e1e9d30dedebb577e06153c43b13958b9788"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/money-moves-images/articles/kodak-inventing-the-future-it-couldnt-sell.hero.jpg"
+}

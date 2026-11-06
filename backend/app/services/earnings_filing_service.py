@@ -52,6 +52,7 @@ import logging
 import re
 import time
 import unicodedata
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from html import unescape
@@ -116,8 +117,9 @@ _EXTRACT_TEXT_CHARS = 40_000
 #: The shortest quote that proves a figure. "EPS of $0.91" is a whole proof, because the printed
 #: number and the label at it carry what the longer floor of the outlook has to.
 _FIGURE_QUOTE_MIN_CHARS = 12
-#: How much of the release a figure's quote can reach for on each side (`_seats_of`), and at how
-#: many of the places a release prints it.
+#: How much of the release a figure's quote can reach for on each side (`_seats_of`), and how many
+#: of the places a release prints it are read. Places, not distinct seats: a release printing one
+#: short quote all the way through has one seat, and a walk to its end holds a thread for seconds.
 _SEAT_BEFORE_CHARS = 240
 _SEAT_BEHIND_CHARS = 120
 _SEATS_READ = 8
@@ -196,8 +198,9 @@ _SYSTEM = (
     "word or % behind it, never starting after the first word of its label, and copying a "
     "negative with its parentheses, the opening one and the closing one included. The release "
     "around the quote is read too, so a word the quote leaves out still counts. Report a level, "
-    "never what a figure changed by, what it would have been, an amount it includes or "
-    "excludes, a forecast, or either end of a range. Every `value` is "
+    "never what a figure changed by, what it beat or missed a forecast by, the figure it is "
+    "compared with, what it would have been, an amount it includes or excludes, a figure only "
+    "\"respectively\" pairs with its label, a forecast, or either end of a range. Every `value` is "
     "the number printed in "
     "its quote: the digits in that quote, never a more exact figure from elsewhere in the "
     "release and never a percentage. A number printed with no decimals, such as $14, must "
@@ -223,8 +226,10 @@ _SYSTEM = (
     "word printed next to it (thousand / million / billion). For a table figure, "
     "`revenue.unit` is the scale printed by the table's header, and the quote does not need to "
     "hold that header in a release that prints one scale only, when the row is the \"Total\" row "
-    "or names the whole company. In a release printing two scales, such as \"in millions, except "
-    "shares in thousands\" or a summary in millions above statements in thousands, a row needs "
+    "or names the whole company. A row naming a part behind its revenue word, such as \"Revenues "
+    "Automotive\" or \"Revenues: Product revenues\", is thrown away. In a release printing two "
+    "scales, such as \"in millions, except shares in thousands\" or a summary in millions above "
+    "statements in thousands, a row needs "
     "its own table's header in the quote: if no sentence prints the figure, the quote runs from "
     "that header through the row. "
     "Use 'units' only for a full dollar amount printed with all its digits, "
@@ -236,8 +241,9 @@ _SYSTEM = (
     "this per-share measure, not another one such as Adjusted EBITDA or earnings before "
     "interest and taxes. A figure the quote does not name that way is thrown away, so never "
     "repeat the GAAP figure there. "
-    "`eps_gaap_diluted` is the GAAP diluted EPS, never the adjusted figure. Each EPS figure is a "
-    "per-share number, quoted with its $ sign or decimal point and no scale word. A loss per "
+    "`eps_gaap_diluted` is the GAAP diluted EPS, never the adjusted figure. Each EPS figure is "
+    "the diluted one, never basic, a per-share number, quoted with its $ sign or decimal point "
+    "and no scale word. A loss per "
     "share is NEGATIVE: its quote either prints "
     "it negative, or names it as a loss beside the number, or calls it negative, and a "
     "positive figure is never taken from a quote that names it as a loss. Omit any figure the "
@@ -729,6 +735,20 @@ _WHOLE_COMPANY_LABEL_RE = re.compile(
     r"[\s\-\u2010-\u2015]+)*",
     re.IGNORECASE,
 )
+#: Behind a revenue word, the only words a row or a sentence of the whole company prints before its
+#: first figure. Closed for the same reason: "Revenues Automotive", "Revenues: Product revenues",
+#: "Sales by Company-owned restaurants", "Revenue excluding foreign exchange effect" and "Net sales
+#: -- TTM" each name something else, and a heading in the quote puts them there.
+_WHOLE_COMPANY_WORDS_BEHIND = frozenset({
+    "revenue", "revenues", "sales", "total", "net", "and", "other", "operating", "income", "gaap",
+    "reported", "as", "unaudited", "was", "were", "is", "are", "of", "for", "in", "the", "quarter",
+    "first", "second", "third", "fourth", "fiscal", "to", "up", "down", "rose", "fell", "grew",
+    "increased", "decreased", "declined",
+})
+_A_WORD_RE = re.compile(r"[A-Za-z]+")
+#: What leaves a label as whole as it found it: a note of letters, "Total Revenue(a)", "Revenues
+#: (b)", and what the figure is net of. A note of digits is no word.
+_NO_PART_OF_THE_LABEL_RE = re.compile(r"\([A-Za-z]{1,3}\)|\bnet\s+of\b[^$\d(]*", re.IGNORECASE)
 #: A row's label opens on a capital, so a quote in lower case is the tail of one: "sales $ 74,058".
 _OPENS_IN_LOWER_CASE_RE = re.compile(r"[^A-Za-z0-9]*[a-z]")
 #: In a label, the word that says this row sums the company. A bare "Revenue" may be a segment's.
@@ -752,24 +772,31 @@ def _is_the_companys_row(quote: str, tok: _Printed, release: str) -> bool:
 
     A sentence or a row with a scale of its own says what it is. A row far from its header does
     not, and the segments' tables print rows just like it: GE's "Revenue 10,342" is one engine
-    business, so a label naming a part is refused, and so is a bare one the release also prints
-    with another first figure. So is a quote opening in lower case, which is the tail of a label,
-    and a number that is no amount at all: a year, or a rate in a table that prints no "%". The
-    model must quote the "Total" row or a sentence. Residual: one segment's row in a release that
-    labels no other segment's the same way stands.
+    business, so a label naming a part is refused, on either side of the revenue word, and so is a
+    bare one the release also prints with another first figure. So is a quote opening in lower
+    case, which is the tail of a label, and a number that is no amount at all: a year, or a rate in
+    a table that prints no "%". The model must quote the "Total" row or a sentence. Residual: one
+    segment's row in a release that labels no other segment's the same way stands.
     """
+    if not _reads_as_a_figure(tok):
+        return False
     word = next((w for w in _METRIC_WORD_RE.finditer(quote, 0, tok.start)
                  if w.lastgroup == "revenue"), None)
     if word is None:    # `_metric_at` speaks to a row with no revenue word
         return True
     front = quote[:word.start()]
-    if (not _reads_as_a_figure(tok) or _OPENS_IN_LOWER_CASE_RE.match(quote) is not None
+    if (_OPENS_IN_LOWER_CASE_RE.match(quote) is not None
             or _WHOLE_COMPANY_LABEL_RE.fullmatch(front) is None):
         return False
-    if _NAMES_A_TOTAL_RE.search(front) is not None:
+    first = next(cell for cell in _numbers_in(quote)
+                 if cell.start >= word.end() and _reads_as_a_figure(cell))
+    behind = _NO_PART_OF_THE_LABEL_RE.sub(" ", quote[word.end():first.start])
+    if any(found.group().lower() not in _WHOLE_COMPANY_WORDS_BEHIND
+           for found in _A_WORD_RE.finditer(behind)):
+        return False
+    if _NAMES_A_TOTAL_RE.search(f"{front} {behind}") is not None:
         return True
     own = _bare_label(f"net {word.group()}" if _NET_RE.search(front) else word.group())
-    first = next(cell for cell in _numbers_in(quote[word.end():]) if _reads_as_a_figure(cell))
     return all(
         _bare_label(row.group("label")) != own
         or float(row.group("cell").replace(",", "")) == first.value
@@ -1066,11 +1093,12 @@ _EXCLUDED_ITEM = (
 _ADJUSTED_MEASURE_RE = re.compile(
     rf"(?P<non_gaap>\bnon{_HYPHEN}(?:gaap|ifrs)(?![A-Za-z]))"
     rf"|(?P<exclusion>\b(?:exclud(?:ing|es?)|excl\.?)\s+(?:\S+\s+){{0,5}}?{_EXCLUDED_ITEM}\b"
-    rf"|\bex{_HYPHEN}items?\b"
+    r"|\bex[\s\-\u00ad\u2010-\u2015]+(?:\S+\s+){0,3}?items?\b"
     rf"|\bbefore\s+(?:(?!{_STATEMENT_LINE})\S+\s+){{0,5}}?{_EXCLUDED_ITEM}\b)"
     rf"|(?P<adjective>{_NOT_THE_ADJUSTED_MEASURE}\b(?:adj(?:usted|\.)?|core|comparable|underlying"
     rf"|normali[sz]ed|ongoing|recurring|distributable|pro{_HYPHEN}forma){_LABEL_FOOTNOTE}\s+"
-    rf"(?:(?:diluted|net|operating|per{_HYPHEN}share|after{_HYPHEN}tax)\s+)*"
+    rf"(?:(?:fully|(?:basic|diluted)\s+(?:and|&)|basic|diluted|continuing|net|operating|operational"
+    rf"|per{_HYPHEN}share|after{_HYPHEN}tax)\s+)*"
     rf"(?:eps|earnings(?!\s+before\s+{_STATEMENT_LINE})"
     rf"|income(?!\s+tax|\s+before\s+{_STATEMENT_LINE})|loss(?:es)?|profit|basis|results?)"
     r"(?![A-Za-z])"
@@ -1128,7 +1156,8 @@ _DOLLAR_COUNTRIES = rf"canadian|australian|{_OTHER_DOLLAR_PLACES}"
 #: amount with a scale. It is narrower than `_FOREIGN_MONEY_RE`, which refuses one quote at the
 #: cheapest doubt: across a release the same doubt would cost every row with no mark, so "Euro 7
 #: emission standards", "in Sterling, Virginia", "12 Canadian stores", "Phase 3 CAD", "1.1 billion
-#: pounds" of copper, "Euro Notes" and "San Jose, CA $ 120.5" are no money here.
+#: pounds" of copper, "Euro Notes" and "San Jose, CA $ 120.5" are no money here. Another country's
+#: dollars count only as a header's, with a scale: "(Canadian dollars in millions)".
 _FOREIGN_RELEASE_RE = re.compile(
     "[€£¥₹₩₪₽₺₫]"
     r"|(?<![A-Za-z.])(?!(?:US|USD|EPS)\$)(?-i:[A-Z]{1,3}|Aus|Can|Cdn|Mex)\$"
@@ -1143,7 +1172,9 @@ _FOREIGN_RELEASE_RE = re.compile(
     rf"|\(\s*in\s+(?:{_FOREIGN_CODES})\b"
     rf"|\b(?:{_FOREIGN_NAMES})\.?\s+(?:in\s+)?(?:{_SCALE_PLURALS})\b"
     rf"|\b(?:{_SCALE_PLURALS})\s+of\s+(?:{_FOREIGN_NAMES})\b"
-    rf"|\(\s*(?:in\s+)?(?:{_SCALE_PLURALS})\s+of\s+pounds\b",
+    rf"|\(\s*(?:in\s+)?(?:{_SCALE_PLURALS})\s+of\s+pounds\b"
+    rf"|\b(?:{_SCALE_PLURALS})\s+of\s+(?:{_DOLLAR_COUNTRIES})\s+dollars?\b"
+    rf"|\b(?:{_DOLLAR_COUNTRIES})\s+dollars?\s*(?:[,(]\s*)?(?:in\s+)?(?:{_SCALE_PLURALS})\b",
     re.IGNORECASE,
 )
 #: What shows a figure is in dollars. The word is plural: "a weak dollar" is commentary. It reads
@@ -1261,9 +1292,13 @@ _NEXT_LINE_RE = re.compile(rf"\s+{_NOT_A_SCALE}{_NOT_JOINING}[A-Z]")
 #: first sentence of a release opens here.
 _DATELINE_RE = re.compile(r"\b20\d\d\s*[-\u2013\u2014]+\s*(?=[A-Z])")
 #: All that may stand between a word and the quote it was cut from: "non-GAAP EPS", "Adjusted(3)
-#: Diluted EPS", "On an adjusted basis: EPS", "Excluding items, EPS". A footnote's digit, never a
-#: cell: a row of numbers is another row.
-_NOTHING_BETWEEN_RE = re.compile(r"[\s,:()*\-\u2013\u2014]*(?:\d{1,2}[\s,:()*\-\u2013\u2014]*)?")
+#: Diluted EPS", "On an adjusted basis: EPS", "Excluding items, EPS", and the words of a label a
+#: cut can land behind: "Non-GAAP Diluted EPS". A footnote's digit, never a cell: a row of numbers
+#: is another row.
+_NOTHING_BETWEEN_RE = re.compile(
+    r"[\s,:()*\-\u2013\u2014]*(?:\d{1,2}[\s,:()*\-\u2013\u2014]*)?"
+    r"(?:(?i:fully|diluted|basic|net|operating)[\s,:()*\-\u2013\u2014]+)*"
+)
 #: Past an abbreviation an all-capitals word goes on ("U.S. GAAP") and a sentence opens with one
 #: capital, a joining word's too ("in the U.S. For the year").
 _NEW_SENTENCE_RE = re.compile(rf"\s+{_NOT_A_SCALE}[A-Z](?![A-Z])")
@@ -1492,6 +1527,8 @@ _HOLDS_ANOTHER_WORD = (
     r"|(?:eps|revenues?|sales)\s+(?:growth|mix)(?=\s*:|\s+[$(\d]|\s*\Z)"
     rf"|shares?{_USED_FOR_A_PER_SHARE}"
     r"|gross\s+profit"
+    r"|(?:currency[\s\-]neutral|constant[\s\-]currency)\s+(?:[\w\-]+\s+){0,3}?"
+    r"(?:revenues?|sales|eps|earnings|income)"
     r"|(?:estimat(?:ed|es?|ing)|consensus)\s+(?:[\w\-]+\s+){0,6}?"
     r"(?:revenues?|sales|eps|earnings|income)"
 )
@@ -1511,7 +1548,7 @@ _OTHER_MEASURES = (
     r"|(?:diluted|basic)\s+shares|shares\s+outstanding"
     rf"|weighted[\s\-]average\s+(?:[\w\-]+\s+){{0,3}}?shares(?:{_USED_FOR_A_PER_SHARE})?"
     r"|guidance|outlook|forecast(?:s|ed)?|estimates?|expectations?|consensus|targets?|expected"
-    r"|range|run[\s\-]rate"
+    r"|range|mid[\s\-]?points?|run[\s\-]rate"
 )
 #: Up to the "per share" a measure of that kind may run on to, which stays that measure's: "book
 #: value per share", "dividends declared per common share". Never past an earnings word.
@@ -1530,7 +1567,7 @@ _TIED_PER_SHARE_RE = re.compile(rf"\s*[()]?\s*(?:{_PER_SHARE})", re.IGNORECASE)
 #: word that starts something else. "$1.2 billion on revenue of" is no revenue, and "$0.09 reflects
 #: a special charge" is no charge.
 _TIE_STOP_RE = re.compile(
-    rf"[,;:!?$(\u2013\u2014{_LIST_GLYPHS}]|\.(?=\s|\Z)|\d[\d,]*\.\d"
+    rf"[,;:!?$()|\u2013\u2014{_LIST_GLYPHS}]|\s-\s|\.(?=\s|\Z)|\d[\d,]*\.\d"
     r"|\b(?:and|or|but|on|from|to|versus|vs|against|with|while|compared|as|at|by|for|after"
     r"|before|up|down|which|that|due|driven|primarily|mainly|reflect\w*|includ\w*|exclud\w*"
     r"|exceed\w*|beat\w*|above|below|ahead|topped|missed|within)\b",
@@ -1544,15 +1581,19 @@ _TIE_LINK_RE = re.compile(r"\s*(?:in|of)\b", re.IGNORECASE)
 _TIE_CHARS = 80
 _TIE_WORDS_LINKED = 4
 _TIE_WORDS_BARE = 2
+#: In front of a number, the words that only say how exact it is.
+_HEDGE = r"(?:approximately|about|nearly|roughly|around|almost)"
+_ABOUT = rf"(?:(?:a|an|the|some|{_HEDGE})\s+)?"
+_HEDGED = rf"(?:\s+{_HEDGE})?"
 #: Around a number, what makes it a change in the metric and not its level: "rose $1.2 billion",
-#: "an increase of $1.2 billion", "an $80 million increase in revenues", any "by $3.20", and a
-#: change given twice, "rose 5%, or $1.2 billion". "More than doubled" says how much, not by what.
+#: "an increase of about $1.2 billion", "an $80 million increase in revenues", any "by $3.20", and
+#: a change given twice, "rose 5%, or $1.2 billion". "More than doubled" says how much, not by what.
 _A_CHANGE_BEFORE_RE = re.compile(
     r"\b(?:growth|increase|decrease|decline|rise|drop|gain|change|improvement|reduction)\s+of"
-    r"[$(\s]*\Z"
+    rf"{_HEDGED}[$(\s]*\Z"
     r"|\b(?:increased|decreased|rose|fell|grew|declined|dropped|climbed|jumped|improved|up|down"
-    r"|higher|lower)[$(\s]*\Z"
-    r"|\bby\s+(?:(?:approximately|about|nearly|roughly|around|almost)\s+)?[$(\s]*\Z"
+    rf"|higher|lower){_HEDGED}[$(\s]*\Z"
+    rf"|\bby{_HEDGED}[$(\s]*\Z"
     r"|(?:%|\bpercent|\bper\s+cent)\s*,?\s*or\s+[$(\s]*\Z",
     re.IGNORECASE,
 )
@@ -1564,12 +1605,42 @@ _A_CHANGE_BEHIND_RE = re.compile(
 #: A cell behind a rate cell is another group of columns: the nine months of "2.25 1.66 36 % 6.13
 #: 4.80 28 %", and whatever follows. A number behind a rate with words between them is a sentence.
 _BEHIND_A_RATE_CELL_RE = re.compile(r"%(?:\s*\))?[$(\s]+(?:\.?\d[^A-Za-z%]*)?\Z")
+#: Right behind what a figure is set against, the figure of another period or of a guide: "compared
+#: to $4.5 billion", "versus $0.40". Set against a level or a rate alike, so the words in front of
+#: it can be any.
+_A_COMPARISON_BEFORE_RE = re.compile(
+    r"\b(?:compar(?:e|es|ed|ing|ison)\s+(?:to|with)|in\s+comparison\s+(?:to|with)|versus|vs\.?"
+    rf"|against|relative\s+to|as\s+opposed\s+to)\s+{_ABOUT}[$(\s]*\Z",
+    re.IGNORECASE,
+)
+#: Right behind a number, what makes it a distance from something: "$0.05 above consensus", "$300
+#: million ahead of guidance". It reads as the level only behind a word that states one
+#: (`_A_LEVEL_STATED_RE`): "Revenue of $1.2 billion above guidance". "Was" states neither, and a
+#: figure with a verdict is worse than one with none.
+_A_DIFFERENCE_BEHIND_RE = re.compile(
+    r"\s*(?:above|below|ahead|better|worse|short\s+of|shy\s+of)\b", re.IGNORECASE,
+)
+_A_LEVEL_STATED_RE = re.compile(
+    rf"\b(?:of|to|at|reach(?:ed|ing)|total(?:ed|led|ing|ling))\s+{_ABOUT}[$(\s]*\Z", re.IGNORECASE,
+)
+#: Right behind a number, a period other than the quarter: "($4.5 billion a year ago)", "and $0.40
+#: last year", "$1,207.6 million for the thirty-nine weeks", "$15.0 billion year to date". Never
+#: three months, or the 12 to 14 weeks a retailer's quarter runs. The period in general stays a
+#: residual (`_metric_at`), but these words leave nothing to read.
+_ANOTHER_PERIOD_BEHIND_RE = re.compile(
+    r"\s*(?:a\s+(?:year|quarter)\s+(?:ago|earlier|before)|last\s+(?:year|quarter)"
+    r"|year[\s\-]to[\s\-]date|ytd\b"
+    r"|(?:in|for|during|over)\s+(?:the\s+|a\s+)?(?:same\b|comparable\b|corresponding\b|prior\b"
+    r"|previous\b|last\b|year[\s\-]ago\b|preceding\b"
+    r"|(?:full|entire|whole|fiscal)[\s\-]+year\b|year\b"
+    r"|(?:first\s+)?(?:(?:six|nine|twelve|6|9|12)[\s\-]+months?\b"
+    r"|(?:twenty[\s\-](?:four|six|seven)|thirty[\s\-](?:six|nine)|forty|fifty[\s\-](?:two|three)"
+    r"|24|26|27|36|39|40|52|53)[\s\-]+weeks?\b)))",
+    re.IGNORECASE,
+)
 #: A number a figure holds or leaves out, with no words of its own, is a piece of it: "excluding
 #: $1.2 billion of fuel", "including $408.0 million of Shack sales and $15.3 million of Licensing
 #: revenue". "Excluding special items $0.46" is a label: its aside has words, then the figure.
-_ABOUT = (
-    r"(?:(?:a|an|the|about|approximately|nearly|roughly|around|almost|some)\s+)?"
-)
 _A_PIECE_OF_IT_RE = re.compile(
     rf"(?:\b(?:exclud|includ)(?:ing|es?|ed)\b|\bexcl\.)\s+{_ABOUT}[$(\s]*"
     rf"(?:\.?\d(?:[^,;]|,(?=\d))*?\b(?:and|or)\s+{_ABOUT}[$(\s]*)?\Z",
@@ -1584,19 +1655,30 @@ _RESPECTIVELY_RE = re.compile(
     re.IGNORECASE,
 )
 _RESPECTIVELY_CHARS = 120
+_THE_WORD_RESPECTIVELY_RE = re.compile(r"\brespectively\b", re.IGNORECASE)
+#: Two numbers of one list, with nothing of their own between them but a tail they share or the
+#: "%" that stands outside a rate's number.
+_JOINS_A_LIST_RE = re.compile(
+    rf"[\s)]*(?:(?:%|percent\b|{_PER_SHARE})\s*)?(?:,\s*(?:and\s+)?|and\s|&)[\s$(]*",
+    re.IGNORECASE,
+)
 #: In front of a number, what makes it a bound or where a change started, never a level. A verdict
 #: against "more than $5 billion" would be made up. "Approximately" and "nearly" still print the
 #: figure.
 _A_BOUND_BEFORE_RE = re.compile(
-    r"\b(?:between|from|at\s+(?:least|most)|(?:more|greater|less|fewer)\s+than|over|above|under"
-    r"|below|exceed(?:s|ed|ing)?|in\s+excess\s+of|(?:of|by)\s+up\s+to)[$(\s]*\Z",
+    rf"\b(?:(?:between|from){_HEDGED}|at\s+(?:least|most)|(?:more|greater|less|fewer)\s+than|over"
+    r"|above|under|below|exceed(?:s|ed|ing)?|in\s+excess\s+of|(?:of|by)\s+up\s+to)[$(\s]*\Z",
     re.IGNORECASE,
 )
-_FROM_BEFORE_RE = re.compile(r"\bfrom[$(\s]*\Z", re.IGNORECASE)
-_BETWEEN_BEFORE_RE = re.compile(r"\bbetween[$(\s]*\Z", re.IGNORECASE)
-#: What joins the two ends of a range. An em dash is a table's empty cell.
-_JOINS_A_RANGE_RE = re.compile(r"[\s)]*(?:to|through|thru|-|\u2013)[\s$(]*", re.IGNORECASE)
-_JOINS_BETWEEN_RE = re.compile(r"[\s)]*and[\s$(]*", re.IGNORECASE)
+_FROM_BEFORE_RE = re.compile(rf"\bfrom{_HEDGED}[$(\s]*\Z", re.IGNORECASE)
+_BETWEEN_BEFORE_RE = re.compile(rf"\bbetween{_HEDGED}[$(\s]*\Z", re.IGNORECASE)
+#: What joins the two ends of a range. A word says so whichever way the two run: a loss prints its
+#: smaller end last. A dash needs them to rise, because a table prints one between two cells. An em
+#: dash is a table's empty cell.
+_JOINS_A_RANGE_RE = re.compile(
+    rf"[\s)]*(?:(?P<word>to|through|thru)\b|-|\u2013)[\s$(]*(?:{_HEDGE}[\s$(]*)?", re.IGNORECASE,
+)
+_JOINS_BETWEEN_RE = re.compile(rf"[\s)]*and[\s$(]*(?:{_HEDGE}[\s$(]*)?", re.IGNORECASE)
 #: How far `_is_a_range_end` looks for the number beside this one.
 _NEIGHBOUR_CHARS = 48
 #: A table's two columns of a guide, and the last two cells of a row under them. Case matters:
@@ -1616,6 +1698,9 @@ _NOT_A_FORECAST_RE = re.compile(
     r"(?:guidance|outlook|forecasts?|projections?|targets?)\b",
     re.IGNORECASE,
 )
+#: What stands in a label where an aside was. A mark, not a space: in "$0.40, excluding special
+#: items, EPS was" the word behind it is no tail of the figure in front of it.
+_WHERE_AN_ASIDE_WAS = " | "
 #: The ";" that stands right before its number leaves the label in front of it the number's own.
 _A_MARK_BEFORE_THE_NUMBER_RE = re.compile(r";[$(\s]*\Z")
 #: A word no longer counts as the label when it sits inside an aside with no commas: "EPS excluding
@@ -1627,7 +1712,7 @@ _INSIDE_AN_ASIDE_RE = re.compile(
     re.IGNORECASE,
 )
 #: In front of a "per share", what makes it the tail of a figure. A footnote or a "(loss)" is none.
-_BEHIND_A_FIGURE_RE = re.compile(r"(?:\d\.\d+|\$\s*\d[\d,.]*)\s*\)?\s*\Z")
+_BEHIND_A_FIGURE_RE = re.compile(r"(?:\d\.\d+|\$\s*\d(?:[\d,.]*\d)?)\s*\)?\s*\Z")
 _FIGURE_CHARS = 24
 #: How far back from a word `_INSIDE_AN_ASIDE_RE` reads.
 _ASIDE_CHARS = 200
@@ -1655,24 +1740,50 @@ _SPLITS_A_LABEL_RE = re.compile(
     r"(?i:\bwe\b)|\bus\b|(?i:\b(?:returned|repurchased|bought|paid|spent|invested|acquired|issued"
     r"|repaid|distributed|declared|borrowed|raised|closed|purchased)\b)"
 )
-#: What hands a label on to the next figure, past the one it already has: "from $1.1 billion to",
-#: "to a record", "to approximately", "$0.40 GAAP and", "and was", ", reaching". "Compared to" hands
-#: it on to a figure of another period, and "relative to" and the like to something else.
-_CARRIES_A_LABEL_ON_RE = re.compile(
+#: Right before a figure, what gives an EPS a second one on another basis: "$0.40 GAAP and", ", or".
+_A_SECOND_FIGURE_RE = re.compile(r"(?:\b(?:and|or)|,)[$(\s]*\Z", re.IGNORECASE)
+#: What takes a label to the level it has not got yet: "from $1.1 billion to", "to a record", "to
+#: approximately", ", reaching", "and was". "Compared to" hands it on to a figure of another period,
+#: and "relative to" and the like to something else.
+_ARRIVES_AT_A_LEVEL_RE = re.compile(
     r"(?:(?<!compared\s)(?<!relative\s)(?<!similar\s)(?<!equal\s)(?<!close\s)(?<!due\s)"
     r"\bto(?:\s+(?:a|an|the)\s+(?:new\s+|all[\s\-]time\s+)?(?:record\s+high|record|high)"
     r"(?:\s+of)?)?"
-    r"(?:\s+(?:approximately|about|nearly|roughly|around|almost))?"
-    r"|\b(?:and|or|was|were|is|are|at|reach(?:ed|ing)|total(?:ed|led|ing|ling))|,)[$(\s]*\Z",
+    r"|\b(?:was|were|is|are|at|reach(?:ed|ing)|total(?:ed|led|ing|ling)))"
+    rf"{_HEDGED}[$(\s]*\Z",
+    re.IGNORECASE,
+)
+#: Behind a level only this gives a label a second figure: the same subject's verb again, in "was
+#: $4.92 on a GAAP basis, and was $4.89" and "$0.40 and excluding special items it was $0.46".
+_THE_SAME_SUBJECTS_VERB_RE = re.compile(
+    r"(?:\b(?:and|but|or)|,)\s*"
+    r"(?:(?:excluding|excl\.|including|before|after)\s+(?:[^\s\d$%,;]+\s+){0,6}?)?"
+    r"(?:(?:it|they)\s+)?(?:was|were|is|are)[$(\s]*\Z",
+    re.IGNORECASE,
+)
+#: In front of what takes a label on, a new subject opened behind its last amount: "and Cloud
+#: reached", "with the stock at", "including Cloud at", "as Asia rose to". The first word is what
+#: tells it from the same subject's verb ("and rose to", "and has reached") and from more of the
+#: label ("per basic and diluted share were", "as reported", "and excluding special items it was").
+_ANOTHER_SUBJECT_RE = re.compile(
+    r"\b(?:and|with|including|led\s+by|as|while)\s+"
+    r"(?!(?:reported|adjusted|diluted|basic|excluding|including|before|after|it|they|then|also"
+    r"|has|have|had|rose|fell|grew|increased|decreased|declined|improved|climbed|jumped|dropped"
+    r"|reached|totaled|totalled)\b)"
+    r"(?:[^\s\d$%,;|]+\s+){1,6}?\Z",
     re.IGNORECASE,
 )
 #: A table's sub-row with nothing but cells behind it: "Basic $ 0.22 $ 0.03 Diluted1 $ 0.19 $ 0.03".
 _A_SUB_ROW_RE = re.compile(r"\b(?:diluted|basic)\d{0,2}[^A-Za-z]*\Z", re.IGNORECASE)
 _A_DIGIT_RE = re.compile(r"\d")
 _A_LETTER_RE = re.compile(r"[A-Za-z]")
-#: The marks `_next_label_at` reads between two EPS figures.
+#: The marks `_next_label_at` reads between two EPS figures. A dash opens a clause only with words
+#: behind it: between cells it is an empty one. A full stop counts in front of any word, because a
+#: release opens a sentence on "non-GAAP" in lower case. An abbreviation's is none.
 _JOINING_WORD_RE = re.compile(r"\b(?:and|or|but|while|versus|vs|compared)\b", re.IGNORECASE)
 _SENTENCE_COMMA_RE = re.compile(r",(?!\s*\d)")
+_A_CLAUSE_DASH_RE = re.compile(r"\s[-\u2013\u2014]\s+(?=[A-Za-z])")
+_A_FULL_STOP_RE = re.compile(r"\.\s+(?=[a-z])")
 _UP_TO_A_FIGURE_RE = re.compile(r"[$(\s]*")
 #: Right behind a figure, a capital is the next row's label, and an opening parenthesis the next
 #: figure's: "$0.46 ($0.40 on a GAAP basis)". Case matters: inside a label a capital is only a
@@ -1689,18 +1800,44 @@ _NAMES_A_BASIS_RE = re.compile(r"(?:basis|results?)\Z", re.IGNORECASE)
 #: Behind a number only this reaches back over it: "$0.46 on a non-GAAP basis". The "non-GAAP
 #: measures" of a note under a table speak for no row.
 _ON_A_BASIS_RE = re.compile(r"\s*basis\b", re.IGNORECASE)
+#: Between a number and an adjusted word behind it, a capital right behind a cell is another row.
+#: A headline in capitals goes on with its own words: "$5.75 PER SHARE) EXCLUDING".
+_A_ROW_BETWEEN_RE = re.compile(r"[\d%)]\s+[A-Z]")
+#: Between a number and an adjusted word behind it, what sends the word to something else: a
+#: pointer at a table, or the note under one. "$ 2.12 (1) Non-GAAP measure." A note in the sentence
+#: reads on.
+_POINTS_ELSEWHERE_BEHIND_RE = re.compile(
+    r"\b(?i:see|refer\w*|reconcil\w*)\b|\(\d{1,2}\)\s+(?=[A-Z])",
+)
 #: All that may stand between a clause's start and a word that covers the clause.
 _OPENS_A_CLAUSE_RE = re.compile(r"[\s,;(\-\u2013\u2014]*(?:on\s+an?\s+)?", re.IGNORECASE)
 #: Two figures with nothing of their own between them.
 _JOINS_A_PAIR_RE = re.compile(r"[\s)]*(?:,\s*and|,|and|&)[\s$(]*", re.IGNORECASE)
 #: "GAAP" with no "non-" on it.
 _A_GAAP_WORD_RE = re.compile(rf"(?<!non)(?<!non[\s\-\u00ad\u2010-\u2015])\bgaap\b", re.IGNORECASE)
+#: Inside a list of labels, the basis that is no adjusted one: "GAAP and adjusted EPS", "Adjusted
+#: and reported EPS". On its own "reported" is the verb: "We reported adjusted EPS of $0.46".
+_THE_REPORTED_BASIS_RE = re.compile(
+    rf"{_A_GAAP_WORD_RE.pattern}|\breported\s+(?:and|&|or)\s|\s(?:and|&|or)\s+reported\b",
+    re.IGNORECASE,
+)
+_THE_ADJUSTED_WORD_RE = re.compile(r"\badj(?:usted|\.)(?![A-Za-z])", re.IGNORECASE)
+_AN_AND_RE = re.compile(r"\band\b|&", re.IGNORECASE)
 #: Right behind a figure, an "adjusted" of its own: "($4.50 adjusted)", "$0.46 adjusted and $0.40
 #: reported". "Adjusted for the stock split" and "adjusted EBITDA" are neither.
 _ADJUSTED_RIGHT_BEHIND_RE = re.compile(
     r"\s*(?:\)\s*)?adj(?:usted)?(?=\s*(?:[,;.)]|\Z|\b(?:and|or|versus|vs|compared|in)\b))",
     re.IGNORECASE,
 )
+#: Which share count a label names. The last word decides, so only "diluted and basic" reads whole.
+_SHARE_COUNT_RE = re.compile(
+    r"\bbasic(?![A-Za-z])|\bdiluted(?![A-Za-z])(?:\s*(?:and|&|/|,)\s*basic(?![A-Za-z]))?",
+    re.IGNORECASE,
+)
+#: What `_left_its_basis_behind` reads past: a comma or an opening parenthesis, and "on a". A ";"
+#: and a dash end what the quote says. Behind an exclusion, a "$" or a decimal is a cell of its own.
+_IN_FRONT_OF_A_BASIS_RE = re.compile(r"[\s,(]*(?:on\s+an?\s+)?", re.IGNORECASE)
+_ITS_OWN_CELL_RE = re.compile(r"[\s(]*(?:\$|\d[\d,]*\.\d)")
 #: Behind a number, how an adjusted EPS of that number reads: "$4.23 adjusted EPS", "$0.46 in
 #: adjusted earnings per share". A next row's "Adjusted net income" is another line.
 _ENDS_ON_AN_EPS_RE = re.compile(r"(?:eps|earnings)\Z", re.IGNORECASE)
@@ -1714,16 +1851,52 @@ def _clause_start(quote: str, tok: _Printed) -> int:
     return start + _sentence_starts(head[start:])[-1]
 
 
-def _label_ended(between: str) -> bool:
+def _is_a_step_to_a_level(text: str, tok: _Printed) -> bool:
+    """Is `tok` a change in the metric, where one started, or a piece of the figure? A label has
+    not reached its level at such a number: "rose $100 million to", "including $100 million from
+    Acme was"."""
+    return (_A_CHANGE_BEFORE_RE.search(text, 0, tok.start) is not None
+            or _A_CHANGE_BEHIND_RE.match(text, tok.end) is not None
+            or _A_PIECE_OF_IT_RE.search(text, 0, tok.start) is not None
+            or _FROM_BEFORE_RE.search(text, 0, tok.start) is not None)
+
+
+def _amounts_in(text: str) -> List[_Printed]:
+    """The numbers of `text` marked as money: a "$" or a scale, never a rate."""
+    return [p for p in _numbers_in(text) if not p.percent and (p.dollar or p.unit is not None)]
+
+
+def _past_a_comparison(between: str) -> bool:
+    """Does `between` hold an amount the label's figure is set against? All that follows it is the
+    comparison's: "$17.01 compared with $12.25 ... and $20.98", "compared with $21.2 billion, or
+    $1.95 per diluted share"."""
+    return any(_A_COMPARISON_BEFORE_RE.search(between, 0, amount.start) is not None
+               for amount in _amounts_in(between))
+
+
+def _another_subject_ahead(between: str) -> bool:
+    """Does a new subject stand in `between`, the text from a label to a number, right before what
+    would take the label on to that number?"""
+    arrival = _ARRIVES_AT_A_LEVEL_RE.search(between)
+    return (arrival is not None
+            and _ANOTHER_SUBJECT_RE.search(between, 0, arrival.start()) is not None)
+
+
+def _label_ended(between: str, *, second_figure: bool) -> bool:
     """Has a label stopped reaching the number, with `between` the text from one to the other?
 
     A label names the first level behind it, past what says how it changed ("rose $100 million, or
     5%, to"), and a table's whole row of cells. Another subject ends it, or a verb spending money
     (`_SPLITS_A_LABEL_RE`). So does a clause that closes behind a figure ("Net sales rose to $201.9
     billion, compared with $180.2 billion") or a new one with no figure yet, and so do words behind
-    an amount ("Revenue was $5 billion versus $1.2 billion"), unless they hand it on
-    (`_CARRIES_A_LABEL_ON_RE`). Residual: this is a list, so a verb it does not name ("Revenue
-    funded $5 billion of stock") leaves the label reaching the number.
+    an amount ("Revenue was $5 billion versus $1.2 billion"), unless they give it a second figure,
+    which only a label that prints two bases takes (`second_figure`, `_A_SECOND_FIGURE_RE`), or
+    take it on to its level (`_ARRIVES_AT_A_LEVEL_RE`). That needs the same subject, and the amount
+    behind them must be a step on the way (`_is_a_step_to_a_level`): at a level the label is spent,
+    and "reached" or "at" is some other thing's. Past the amount it is set against, nothing is the
+    label's (`_past_a_comparison`). Residual: this is a list, so a verb it does not name ("Revenue
+    funded $5 billion of stock") leaves the label reaching the number, and a second figure of an
+    EPS may be another period's.
     """
     if _SPLITS_A_LABEL_RE.search(between) is not None:
         return True
@@ -1734,11 +1907,17 @@ def _label_ended(between: str) -> bool:
         return _NEW_CLAUSE_RE.search(between) is not None
     if _ENDS_A_CLAUSE_RE.search(between, digit.end()) is not None:
         return True
-    if _CARRIES_A_LABEL_ON_RE.search(between) is not None:
+    amounts = _amounts_in(between)
+    if amounts and _past_a_comparison(between):
+        return True
+    if amounts and _A_SECOND_FIGURE_RE.search(between) is not None:
+        return not second_figure
+    if not any(_A_LETTER_RE.search(between, p.end) is not None for p in amounts):
         return False
-    return any(not p.percent and (p.dollar or p.unit is not None)
-               and _A_LETTER_RE.search(between, p.end) is not None
-               for p in _numbers_in(between))
+    if _ARRIVES_AT_A_LEVEL_RE.search(between) is None or _another_subject_ahead(between):
+        return True
+    return (not _is_a_step_to_a_level(between, amounts[-1])
+            and _THE_SAME_SUBJECTS_VERB_RE.search(between) is None)
 
 
 def _labels_before(quote: str, tok: _Printed) -> List[str]:
@@ -1749,12 +1928,25 @@ def _labels_before(quote: str, tok: _Printed) -> List[str]:
     number however far: refusing is the safe side of that doubt."""
     head = quote[_clause_start(quote, tok):tok.start]
     for rule in (_ASIDE_RE, _LAST_ASIDE_RE):
-        head = rule.sub(" ", head)
-    # "$0.06 per share" names that figure, never the next one.
-    words = [word for word in _METRIC_WORD_RE.finditer(head)
-             if word.lastgroup != "per_share"
-             or _BEHIND_A_FIGURE_RE.search(head, max(0, word.start() - _FIGURE_CHARS),
-                                           word.start()) is None]
+        head = rule.sub(_WHERE_AN_ASIDE_WAS, head)
+    # "$0.06 per share" and "$5.0 billion in revenue" name that figure, never the next one. A total
+    # stays: "net income of $1.0 billion, or $0.46 per share".
+    figures = [figure for figure in _numbers_in(head) if _reads_as_a_figure(figure)]
+    ends = [figure.end for figure in figures]
+
+    def _taken(word: "re.Match[str]") -> bool:
+        if word.lastgroup not in ("revenue", "per_share"):
+            return False
+        if (word.lastgroup == "per_share"
+                and _BEHIND_A_FIGURE_RE.search(head, max(0, word.start() - _FIGURE_CHARS),
+                                               word.start()) is not None):
+            return True
+        nearest = bisect_right(ends, word.start()) - 1
+        return nearest >= 0 and any(
+            at == word.start()
+            for _, at in _words_tied_behind(head, figures[nearest].end, figures[nearest]))
+
+    words = [word for word in _METRIC_WORD_RE.finditer(head) if not _taken(word)]
 
     def _own(word: "re.Match[str]") -> bool:
         aside = _INSIDE_AN_ASIDE_RE.search(head, max(0, word.start() - _ASIDE_CHARS), word.start())
@@ -1766,8 +1958,11 @@ def _labels_before(quote: str, tok: _Printed) -> List[str]:
     for word in reversed([word for word in words if _own(word)] or words):
         kind = word.lastgroup
         between = head[word.end():]
-        if ((kind in ("revenue", "per_share") and _label_ended(between))
-                or (kind == "total" and _SPLITS_A_LABEL_RE.search(between) is not None)):
+        if ((kind in ("revenue", "per_share")
+             and _label_ended(between, second_figure=kind == "per_share"))
+                or (kind == "total" and (_SPLITS_A_LABEL_RE.search(between) is not None
+                                         or _another_subject_ahead(between)
+                                         or _past_a_comparison(between)))):
             kind = "ended"
         elif kind == "per_share" and _NAMES_THE_MEASURE_RE.search(word.group()) is None:
             kind = "bare"
@@ -1777,9 +1972,9 @@ def _labels_before(quote: str, tok: _Printed) -> List[str]:
     return labels
 
 
-def _kinds_tied_behind(quote: str, at: int, tok: _Printed) -> List[str]:
-    """The kinds of the metric words tied to `tok` from behind it, reading from `at`: "$2.155
-    billion in revenue", "$1.2 billion of free cash flow".
+def _words_tied_behind(quote: str, at: int, tok: _Printed) -> List[Tuple[str, int]]:
+    """(the kind, the place) of the metric words tied to `tok` from behind it, reading from `at`:
+    "$2.155 billion in revenue", "$1.2 billion of free cash flow".
 
     A table's next row starts on a capital right behind its last cell ("1,210.6 Net income"), so
     words opening on a capital count only behind in/of, or behind a scale printed in capitals,
@@ -1794,7 +1989,7 @@ def _kinds_tied_behind(quote: str, at: int, tok: _Printed) -> List[str]:
         window = window[:stop.start()]
     next_row = window.lstrip()[:1].isupper() and (
         its_own_figure or not any(ch.isupper() for ch in quote[tok.start:tok.end]))
-    kinds = []
+    words = []
     for word in _METRIC_WORD_RE.finditer(window):
         gap = window[:word.start()]
         between = len(gap.split())
@@ -1804,8 +1999,8 @@ def _kinds_tied_behind(quote: str, at: int, tok: _Printed) -> List[str]:
             tied = (between <= _TIE_WORDS_BARE and not next_row
                     and _A_DIGIT_RE.search(gap) is None)
         if tied:
-            kinds.append(word.lastgroup)
-    return kinds
+            words.append((word.lastgroup, at + word.start()))
+    return words
 
 
 def _metric_at(quote: str, tok: _Printed) -> Optional[str]:
@@ -1831,7 +2026,8 @@ def _metric_at(quote: str, tok: _Printed) -> Optional[str]:
     if _is_no_level(quote, tok):
         return None
     per_share = _TIED_PER_SHARE_RE.match(quote, tok.end)
-    behind = _kinds_tied_behind(quote, tok.end if per_share is None else per_share.end(), tok)
+    behind = [kind for kind, _ in _words_tied_behind(
+        quote, tok.end if per_share is None else per_share.end(), tok)]
     labels = _labels_before(quote, tok)
     nearest = labels[0] if labels else None
     if "other" in behind or (per_share is not None and "revenue" in behind):
@@ -1861,49 +2057,97 @@ def _reads_as_a_figure(tok: _Printed) -> bool:
             or (tok.value >= 100 and not 1900 <= tok.value < 2100))
 
 
-def _rises_to(low: _Printed, high: _Printed) -> bool:
-    """Do these two read as the ends of a range? Both amounts, and rising: a table's "-" stands
-    between two cells too ("$92,279 - $77,673 - 19%")."""
-    return (_reads_as_a_figure(low) and _reads_as_a_figure(high)
-            and low.value * _UNIT_SCALE.get(low.unit, 1.0)
-            < high.value * _UNIT_SCALE.get(high.unit, 1.0))
+def _rises_to(low: _Printed, high: _Printed, *, loss: bool) -> bool:
+    """Do these two amounts rise from the first to the second, read as losses when `loss`? Two
+    negatives joined by a dash count either way: a guide prints its ends in both orders, and a
+    table's empty cell between two of them only waits for FMP."""
+    def _signed(tok: _Printed) -> float:
+        dollars = tok.value * _UNIT_SCALE.get(tok.unit, 1.0)
+        return -dollars if tok.negative or loss else dollars
+
+    return (low.negative and high.negative) or _signed(low) < _signed(high)
+
+
+def _ends_of_a_range(
+    text: str, tok: _Printed, low: _Printed, high: _Printed, join: "Optional[re.Match[str]]",
+) -> bool:
+    """Do `low` and `high`, with `join` the match between them, read as the ends of a range? `tok`
+    is whichever of them stands in `text`, where the words around it say if it is a loss. A word
+    joins whichever way they run, and a dash only if they rise: a table prints "-" between two
+    cells too ("$92,279 - $77,673 - 19%")."""
+    if join is None or not (_reads_as_a_figure(low) and _reads_as_a_figure(high)):
+        return False
+    return (join.group("word") is not None
+            or _rises_to(low, high, loss=_reads_as_loss(text, tok)))
 
 
 def _is_a_range_end(text: str, tok: _Printed) -> bool:
     """Is `tok` a bound, one end of a range, or where a change started? "$3.15 to $3.25" is a
-    guide, "at least $20.50" a floor, and in "from $1.1 billion to $1.2 billion" only the second is
-    the level, and in "rose $100 million to $1.2 billion" the first is a change."""
+    guide, "at least $20.50" a floor, "$(0.46) to $(0.40)" a guide of a loss, and in "from $1.1
+    billion to $1.2 billion" only the second is the level, and in "rose $100 million to $1.2
+    billion" the first is a change."""
     if _A_BOUND_BEFORE_RE.search(text, 0, tok.start) is not None:
         return True
-    behind = text[tok.end:tok.end + _NEIGHBOUR_CHARS]
-    following = next(iter(_numbers_in(behind)), None)
-    if (following is not None and _rises_to(tok, following)
-            and _JOINS_A_RANGE_RE.fullmatch(behind, 0, following.start) is not None):
+    # From the number itself: a dash at the start of a window would read as a minus.
+    behind = text[tok.start:tok.end + _NEIGHBOUR_CHARS]
+    ahead = _numbers_in(behind)
+    if len(ahead) > 1 and _ends_of_a_range(
+            text, tok, tok, ahead[1], _JOINS_A_RANGE_RE.fullmatch(behind, ahead[0].end,
+                                                                  ahead[1].start)):
         return True
     front = text[max(0, tok.start - _NEIGHBOUR_CHARS):tok.start]
     low = next(iter(reversed(_numbers_in(front))), None)
-    if low is None or not _rises_to(low, tok):
+    if low is None or not (_reads_as_a_figure(low) and _reads_as_a_figure(tok)):
         return False
     if (_JOINS_BETWEEN_RE.fullmatch(front, low.end) is not None
             and _BETWEEN_BEFORE_RE.search(front, 0, low.start) is not None):
         return True
-    return (_JOINS_A_RANGE_RE.fullmatch(front, low.end) is not None
-            and _FROM_BEFORE_RE.search(front, 0, low.start) is None
-            and _A_CHANGE_BEFORE_RE.search(front, 0, low.start) is None)
+    return (_FROM_BEFORE_RE.search(front, 0, low.start) is None
+            and _A_CHANGE_BEFORE_RE.search(front, 0, low.start) is None
+            and _ends_of_a_range(text, tok, low, tok, _JOINS_A_RANGE_RE.fullmatch(front, low.end)))
+
+
+def _reads_as_a_difference(text: str, tok: _Printed) -> bool:
+    """Is `tok` how far a result stands from something, and no result?"""
+    return (_A_DIFFERENCE_BEHIND_RE.match(text, tok.end) is not None
+            and _A_LEVEL_STATED_RE.search(text, 0, tok.start) is None)
+
+
+def _in_a_respectively_list(text: str, tok: _Printed) -> bool:
+    """Is `tok` one of a list that only "respectively", later in its sentence or earlier in its
+    clause, pairs with its labels? "Net income and revenue were $5.3 billion and $10.7 billion for
+    the quarter, respectively." The neighbour may be a rate. A figure outside the list keeps its
+    label: Etsy's "$692.5 million, with ... increasing 9.1% and 15.0% respectively"."""
+    if _THE_WORD_RESPECTIVELY_RE.search(text) is None:
+        return False
+    start = _clause_start(text, tok)
+    end = min([stop for stop in _sentence_starts(text) if stop > tok.start], default=len(text))
+    if _THE_WORD_RESPECTIVELY_RE.search(text, start, end) is None:
+        return False
+    numbers = [number for number in _numbers_in(text)
+               if number.percent or _reads_as_a_figure(number)]
+    left = next((number for number in reversed(numbers) if number.end <= tok.start), None)
+    right = next((number for number in numbers if number.start >= tok.end), None)
+    return ((left is not None and _JOINS_A_LIST_RE.fullmatch(text, left.end, tok.start) is not None)
+            or (right is not None
+                and _JOINS_A_LIST_RE.fullmatch(text, tok.end, right.start) is not None))
 
 
 def _is_no_level(text: str, tok: _Printed) -> bool:
     """Is `tok` something other than a level of the quarter? A change in the metric, a cell of
-    another group of columns or of a guide's, a piece of the figure, one of a list only
+    another group of columns or of a guide's, a piece of the figure, what it is set against, a
+    figure its own words give to another period, how far it stands from a guide, one of a list only
     "respectively" pairs with its labels, one end of a range, what would have been, or anything a
     forward word earlier in its clause speaks for, commas included: "We expect revenue of $5.0
     billion, EPS of $1.20". Residual: a clause that looks ahead and then reports ("Raised its
     guidance after EPS of $1.20") is refused with the rest."""
-    if (_A_CHANGE_BEFORE_RE.search(text, 0, tok.start) is not None
-            or _A_CHANGE_BEHIND_RE.match(text, tok.end) is not None
+    if (_is_a_step_to_a_level(text, tok)
             or _BEHIND_A_RATE_CELL_RE.search(text, 0, tok.start) is not None
-            or _A_PIECE_OF_IT_RE.search(text, 0, tok.start) is not None
+            or _A_COMPARISON_BEFORE_RE.search(text, 0, tok.start) is not None
+            or _ANOTHER_PERIOD_BEHIND_RE.match(text, tok.end) is not None
+            or _reads_as_a_difference(text, tok)
             or _RESPECTIVELY_RE.match(text, tok.end, tok.end + _RESPECTIVELY_CHARS) is not None
+            or _in_a_respectively_list(text, tok)
             or _is_a_range_end(text, tok)):
         return True
     if (_LOW_HIGH_RE.search(text, 0, tok.start) is not None
@@ -1917,23 +2161,46 @@ def _is_no_level(text: str, tok: _Printed) -> bool:
 def _next_label_at(quote: str, left: _Printed, right: _Printed) -> Optional[int]:
     """Where the words of `right` start, between two EPS figures, or None when nothing shows it.
 
-    The strongest mark decides. A ";" does. Then the last joining word, because the words behind
-    the earlier ones are still the first figure's: "was $4.92 and increased 32% on a GAAP basis,
-    and was $4.89". Then a comma right before the figure, and else the first comma: in "$0.40,
-    excluding special items, EPS was $0.46" the words behind it are the second figure's.
+    The strongest mark decides. A ";" does, and a full stop `_sentence_starts` cannot see, and a
+    dash with words behind it. Then the last joining word, because the words behind the earlier
+    ones are still the first figure's: "was $4.92 and increased 32% on a GAAP basis, and was
+    $4.89". Then a comma right before the figure, and else the first comma: in "$0.40, excluding
+    special items, EPS was $0.46" the words behind it are the second figure's. The "or" right
+    before the second figure is its total's tail: in "$1.52 per share, and non-GAAP net income was
+    $340 million, or $1.72 per share" what splits them stands in front of it, and it splits them
+    only when nothing does. Parentheses that close right on a number are a negative cell of the
+    same row, never the next figure's words: "Core loss per share ($0.34) ($7.47)".
     """
     semicolon = quote.rfind(";", left.end, right.start)
     if semicolon != -1:
         return semicolon
+    for full_stop in _A_FULL_STOP_RE.finditer(quote, left.end, right.start):
+        end = full_stop.start() + 1
+        if _ABBREVIATION_END_RE.search(quote, max(0, end - _ABBREVIATION_CHARS), end) is None:
+            return full_stop.start()
+    dashes = list(_A_CLAUSE_DASH_RE.finditer(quote, left.end, right.start))
+    if dashes:
+        return dashes[-1].start()
     words = list(_JOINING_WORD_RE.finditer(quote, left.end, right.start))
+    stop = right.start
+    tail = None
+    if (words and words[-1].group().lower() == "or"
+            and _UP_TO_A_FIGURE_RE.fullmatch(quote, words[-1].end(), right.start) is not None):
+        tail = words.pop()
+        stop = tail.start()
     if words:
         return words[-1].start()
-    commas = list(_SENTENCE_COMMA_RE.finditer(quote, left.end, right.start))
+    commas = list(_SENTENCE_COMMA_RE.finditer(quote, left.end, stop))
     if commas:
         nearest = commas[-1]
         close = _UP_TO_A_FIGURE_RE.fullmatch(quote, nearest.end(), right.start) is not None
         return nearest.start() if close else commas[0].start()
-    return left.end if _NEXT_ROW_RE.match(quote, left.end, right.start) is not None else None
+    if tail is not None:
+        return tail.start()
+    next_row = _NEXT_ROW_RE.match(quote, left.end, right.start)
+    if next_row is None or (next_row.group().lstrip()[:1] == "(" and right.negative):
+        return None
+    return left.end
 
 
 def _heads_another_measure(text: str, found: "re.Match[str]") -> bool:
@@ -1978,12 +2245,15 @@ def _adjusted_reaches(
 ) -> Optional[bool]:
     """Does the adjusted word `found` speak for the number `tok`, or is that unknowable (None)?
 
-    Behind the number the first joining word ends it: "$0.46 and adjusted operating income rose".
-    In front of it a GAAP word does, and a label of the number's own (`_ends_the_reach`). A phrase
-    that opens the clause, or an "on a non-GAAP basis" behind the number, covers the whole of it.
-    "Non-GAAP" in front of a word like "margin" is that word's, but a list may run on under it:
-    "Non-GAAP gross margin of 54% and EPS of $0.92" cannot say, and the same goes when a measure of
-    its own stands between it and a label with no GAAP word on it.
+    Behind the number the first joining word ends it: "$0.46 and adjusted operating income rose",
+    and so does a pointer at a table or a note under one, or another figure with words in front of
+    it, a basis too: "$1.52, compared with $1.72 on an adjusted basis". A dash opens a clause that
+    may speak for what comes next, and that cannot say, and neither can another row between them.
+    In front of it a GAAP word ends it, and a label of the number's own (`_ends_the_reach`). A
+    phrase that opens the clause, or an "on a non-GAAP basis" behind the number, covers the whole
+    of it. "Non-GAAP" in front of a word like "margin" is that word's, but a list may run on under
+    it: "Non-GAAP gross margin of 54% and EPS of $0.92" cannot say, and the same goes when a
+    measure of its own stands between it and a label with no GAAP word on it.
     """
     kind = found.lastgroup
     basis = (_NAMES_A_BASIS_RE.search(found.group()) is not None if kind == "adjective"
@@ -1991,13 +2261,22 @@ def _adjusted_reaches(
     if kind == "non_gaap" and _closes_another_measure(text, found):
         return False
     if found.start() >= tok.end:
+        between = text[tok.end:found.start()]
+        if _POINTS_ELSEWHERE_BEHIND_RE.search(text, tok.end, found.start() + 1) is not None:
+            return False
+        if _A_CLAUSE_DASH_RE.search(text, tok.end, found.start() + 1) is not None:
+            return None
+        if any(_reads_as_a_figure(figure) and _A_LETTER_RE.search(between, 0, figure.start)
+               for figure in _numbers_in(between)):
+            return False
         if (_ON_A_BASIS_RE.match(text, found.end()) is not None
                 or _ON_A_BASIS_RE.search(found.group()) is not None):
             return True
-        between = text[tok.end:found.start()]
         if (_JOINING_WORD_RE.search(between) is not None
                 or (kind == "non_gaap" and _heads_another_measure(text, found))):
             return False
+        if _A_ROW_BETWEEN_RE.search(between) is not None:
+            return None
         if kind == "adjective":
             return (_LINK_BEHIND_RE.fullmatch(between) is not None
                     and _ENDS_ON_AN_EPS_RE.search(found.group()) is not None)
@@ -2023,6 +2302,24 @@ def _adjusted_reaches(
     return True
 
 
+def _names_two_bases(head: str) -> bool:
+    """Does `head`, the words in front of two figures joined as a pair, name two bases that only
+    their order pairs with them? "GAAP and adjusted EPS", "Diluted EPS and adjusted EPS".
+    "Adjusted earnings per share were" names one, whatever figures it goes on to print."""
+    if (_ADJUSTED_MEASURE_RE.search(head) is None
+            and _THE_ADJUSTED_WORD_RE.search(head) is None):
+        return False
+    if _THE_REPORTED_BASIS_RE.search(head) is not None:
+        return True
+
+    def _names_an_eps(low: int, high: int) -> bool:
+        return any(word.lastgroup in ("per_share", "total")
+                   for word in _METRIC_WORD_RE.finditer(head, low, high))
+
+    return any(_names_an_eps(0, found.start()) and _names_an_eps(found.end(), len(head))
+               for found in _AN_AND_RE.finditer(head))
+
+
 def _adjusted_at(quote: str, tok: _Printed, figures: Sequence[_Printed]) -> Optional[bool]:
     """Is the adjusted measure a quote names this number's? `figures` are the numbers of the quote
     that read as an EPS (`_verified_eps`). True or False, or None when the words cannot say, and
@@ -2036,7 +2333,8 @@ def _adjusted_at(quote: str, tok: _Printed, figures: Sequence[_Printed]) -> Opti
     (`_adjusted_reaches`). A total's figure in front of its per-share one is no EPS, and neither is
     an excluded item's amount, so "Adjusted earnings were $17.5 billion, or $4.23 per share" is one
     label. In "GAAP EPS and adjusted EPS were $0.40 and $0.46" the words of both stand ahead of
-    both numbers and only their order pairs them, so neither number has a basis.
+    both numbers and only their order pairs them, so neither number has a basis
+    (`_names_two_bases`).
     """
     start = _clause_start(quote, tok)
     end = min([at for at in (quote.find(";", tok.end), *_sentence_starts(quote)) if at > tok.start],
@@ -2044,8 +2342,7 @@ def _adjusted_at(quote: str, tok: _Printed, figures: Sequence[_Printed]) -> Opti
     clause = [printed for printed in figures if start <= printed.start < end]
     for left, right in zip(clause, clause[1:]):
         if (tok in (left, right) and _JOINS_A_PAIR_RE.fullmatch(quote, left.end, right.start)
-                and _A_GAAP_WORD_RE.search(quote, start, left.start)
-                and _ADJUSTED_MEASURE_RE.search(quote, start, left.start)):
+                and _names_two_bases(quote[start:left.start])):
             return None
     for left, right in zip(clause, clause[1:]):
         cut = _next_label_at(quote, left, right)
@@ -2064,18 +2361,27 @@ def _adjusted_at(quote: str, tok: _Printed, figures: Sequence[_Printed]) -> Opti
     return None if unknown else False
 
 
+def _reads_as_basic(text: str, tok: _Printed) -> bool:
+    """Does the label of `tok` say basic, and not diluted? Both slots are diluted, and a table
+    prints basic first and a cent away: "Earnings per share: Basic $ 2.11 $ 1.85 Diluted $ 2.10"."""
+    count = None
+    for count in _SHARE_COUNT_RE.finditer(text, _clause_start(text, tok), tok.start):
+        pass
+    return count is not None and count.group().lower() == "basic"
+
+
 def _eps_read(
     text: str, value: Any, *, adjusted: bool, within: Optional[Tuple[int, int]] = None,
 ) -> Tuple[Optional[Tuple[_Printed, float, float]], str]:
     """(the EPS as (the number, dollars, half its last printed digit) or None, the reason) for one
     slot, read in `text`, from the numbers of its span `within`. The print is the one that names
-    the metric and this slot's basis: two can print the same number."""
+    the metric and this slot's basis, on the diluted count: two can print the same number."""
     prints = _eps_prints(text, value, within=within)
     if not prints:
         return None, "value_mismatch"
     figures = [printed for printed in _numbers_in(text)
                if _could_be_an_eps(printed) and _metric_at(text, printed) == "per_share"]
-    named = [p for p in prints if p[0] in figures]
+    named = [p for p in prints if p[0] in figures and not _reads_as_basic(text, p[0])]
     if not named:
         return None, "wrong_metric"
     fits = [p for p in named if _adjusted_at(text, p[0], figures) is adjusted]
@@ -2092,8 +2398,9 @@ class _Seat:
     the start of that sentence in front of it. No more than that: `html_to_text` flattens headlines
     and tables with no stop between them, so a wider read takes in other rows' words: a "GUIDANCE"
     in the headline above a sentence, or the "(Non-GAAP)" of the row before. `lost_measure` and
-    `lost_adjusted` say what the quote cut off right in front of itself, and `under_a_guide` that
-    a table's "Low High" columns stand somewhere above it.
+    `lost_adjusted` say what the quote cut off right in front of itself, `lost_adjusted` also a
+    basis it stopped short of right behind itself (`_left_its_basis_behind`), and `under_a_guide`
+    that a table's "Low High" columns stand somewhere above it.
     """
 
     text: str
@@ -2125,12 +2432,39 @@ def _cut_at(found: "re.Match[str]", boundary: int, shown: str, *, touching: bool
     return touching and _NOTHING_BETWEEN_RE.fullmatch(shown, found.end(), boundary) is not None
 
 
+def _left_its_basis_behind(quote: str, behind: str) -> bool:
+    """Does the text `behind` the quote hold a basis that makes its figure an adjusted one, where a
+    seat's line stops short of it?
+
+    `_NEXT_LINE_RE` ends a line at a capital, because that is where a table's next row or a
+    headline's next line starts, so a headline in capitals loses what its figure is: "NET INCOME OF
+    $15.8 BILLION ($5.75 PER SHARE) EXCLUDING A SIGNIFICANT ITEM". A quote that did not end its
+    sentence is read past that capital, for an exclusion or an "on an adjusted basis" right behind
+    it, in any capitals. A next row is no such word: its own label, or the cells of its own behind
+    an exclusion ("Excluding special items 0.50"). Behind a full stop the words are the next
+    sentence's, and behind a dash the next clause's. Residual: a headline whose figure only a dash
+    sets apart from its exclusion ("$0.46 - Excluding Special Items") is not read.
+    """
+    if quote.rstrip(_CLOSERS)[-1:] in _SENTENCE_ENDS:
+        return False
+    found = _ADJUSTED_MEASURE_RE.match(behind, _IN_FRONT_OF_A_BASIS_RE.match(behind).end())
+    if found is None:
+        return False
+    if found.lastgroup == "exclusion":
+        return _ITS_OWN_CELL_RE.match(behind, found.end()) is None
+    return (found.lastgroup == "adjective" and _NAMES_A_BASIS_RE.search(found.group()) is not None
+            or found.lastgroup == "non_gaap"
+            and _A_BASIS_BEHIND_RE.match(behind, found.end()) is not None)
+
+
 def _seats_of(quote: str, texts: Sequence[str]) -> List[_Seat]:
-    """Where the normalised `quote` sits in `texts`, at most `_SEATS_READ` places."""
+    """Where the normalised `quote` sits in `texts`, read at its first `_SEATS_READ` places."""
     seats: List[_Seat] = []
+    places = 0
     for text in texts:
         at = text.find(quote)
-        while at != -1 and len(seats) < _SEATS_READ:
+        while at != -1 and places < _SEATS_READ:
+            places += 1
             end = at + len(quote)
             before = text[max(0, at - _SEAT_BEFORE_CHARS):at]
             head = ""
@@ -2152,8 +2486,9 @@ def _seats_of(quote: str, texts: Sequence[str]) -> List[_Seat]:
                         for found in _METRIC_WORD_RE.finditer(shown))
                     or any(_cut_at(found, boundary, shown, touching=True)
                            for found in _FORWARD_LOOKING_RE.finditer(shown))),
-                lost_adjusted=any(_cut_at(found, boundary, shown, touching=True)
-                                  for found in _ADJUSTED_MEASURE_RE.finditer(shown)),
+                lost_adjusted=(any(_cut_at(found, boundary, shown, touching=True)
+                                   for found in _ADJUSTED_MEASURE_RE.finditer(shown))
+                               or _left_its_basis_behind(quote, behind)),
                 under_a_guide=_LOW_HIGH_RE.search(before) is not None,
             )
             if seat not in seats:

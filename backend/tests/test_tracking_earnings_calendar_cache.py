@@ -12,6 +12,8 @@ days — today's first — was missing (Sentry PYTHON-FASTAPI-4S; live 2026-10-2
   * memoises each day: today and tomorrow for `EARNINGS_CALENDAR_TTL` (30 min), later days
     for `EARNINGS_CALENDAR_FAR_TTL` (6 h) — owner decision 2026-10-22, ~150 calls a day —
     each a few seconds short, so the live tick that reads it on the minute keeps that cadence;
+  * makes the days after today due when a reader names a moment they must be as new as, which
+    the live sheet does before it says a report is listed nowhere;
   * stores an empty DAY (weekends) but never an empty WINDOW, a failure or a non-list
     answer (a cached empty reads exactly like "nobody on this watchlist reports this
     fortnight");
@@ -300,6 +302,60 @@ async def test_a_far_day_comes_due_a_few_seconds_early_and_no_earlier():
     _age_memo(1)
     await _svc(fmp)._get_earnings_alerts(["AAPL"])
     assert len(fmp.calls) == 30, "and now the 13 others"
+
+
+@pytest.mark.asyncio
+async def test_the_days_after_today_stored_before_a_moment_come_due_and_today_does_not():
+    fmp = _CalendarFMP([_row("AAPL")])
+    await ts._cached_earnings_calendar(fmp, _DAY)
+    _age_memo(60)
+    fmp.calls.clear()
+    await ts._cached_earnings_calendar(fmp, _DAY, later_days_since=ts._time.monotonic() - 1)
+    assert sorted(call[0] for call in fmp.calls) == [_iso(i) for i in range(1, 15)]
+
+
+@pytest.mark.asyncio
+async def test_the_days_after_today_are_asked_for_once_per_moment():
+    fmp = _CalendarFMP([_row("AAPL")])
+    await ts._cached_earnings_calendar(fmp, _DAY)
+    _age_memo(60)
+    since = ts._time.monotonic() - 1
+    await ts._cached_earnings_calendar(fmp, _DAY, later_days_since=since)
+    fmp.calls.clear()
+    await ts._cached_earnings_calendar(fmp, _DAY, later_days_since=since)
+    assert fmp.calls == []
+
+
+@pytest.mark.asyncio
+async def test_days_stored_at_that_very_moment_are_not_due():
+    """One round stamps every day it stores alike, so a day cannot be older than its own round."""
+    fmp = _CalendarFMP([_row("AAPL")])
+    await ts._cached_earnings_calendar(fmp, _DAY)
+    fmp.calls.clear()
+    since = ts.earnings_day_stored_at(fmp, _DAY)
+    await ts._cached_earnings_calendar(fmp, _DAY, later_days_since=since)
+    assert fmp.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_ask_for_the_later_days_keeps_them_and_waits():
+    """A stamp is the rows' real age, and the failed round leaves it, so the next round asks
+    again once the wait ends and not before."""
+    fmp = _CalendarFMP([_row("AAPL")])
+    await ts._cached_earnings_calendar(fmp, _DAY)
+    _age_memo(60)
+    since = ts._time.monotonic() - 1
+    stamp = ts.earnings_day_stored_at(fmp, _DAY + timedelta(days=3))
+    fmp.day_answers[_iso(5)] = [FMPUnavailableException("FMP 503")]
+    rows = await ts._cached_earnings_calendar(fmp, _DAY, later_days_since=since)
+    assert [r["symbol"] for r in rows] == ["AAPL"], "it serves the days it holds"
+    assert ts.earnings_day_stored_at(fmp, _DAY + timedelta(days=3)) == stamp
+    fmp.calls.clear()
+    await ts._cached_earnings_calendar(fmp, _DAY, later_days_since=since)
+    assert fmp.calls == [], "inside the wait"
+    _end_the_wait()
+    await ts._cached_earnings_calendar(fmp, _DAY, later_days_since=since)
+    assert len(fmp.calls) == 14
 
 
 @pytest.mark.asyncio

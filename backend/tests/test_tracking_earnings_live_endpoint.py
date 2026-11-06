@@ -254,7 +254,7 @@ def test_a_pinned_date_with_nothing_listed_still_answers_none(client):
 
 
 def test_a_failed_calendar_read_never_moves_a_pinned_sheet(client, monkeypatch):
-    async def _down(fmp, today):
+    async def _down(fmp, today, *, later_days_since=None):
         raise RuntimeError("FMP 503")
 
     monkeypatch.setattr(ts, "_cached_earnings_calendar", _down)

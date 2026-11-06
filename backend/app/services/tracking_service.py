@@ -505,7 +505,8 @@ def _downsample(values: List[float], target: int) -> List[float]:
 # `EARNINGS_CALENDAR_FAR_TTL` (6 h) — a date that far out rarely moves within hours. That
 # is ~2 calls a round and ~150 a day, not the 720 a 15-call round every 30 min would cost.
 # A day's TTL follows its distance from today at READ time, so at the ET day roll the old
-# day 2 becomes "tomorrow" and is refetched on the near schedule.
+# day 2 becomes "tomorrow" and is refetched on the near schedule. One reader can ask for less
+# old: the live sheet, before it says a report is listed nowhere (`later_days_since`).
 #
 # Tier 1 only, by design: the window moves daily and the rows are a pure function of the
 # upstream, so a Supabase tier would only add a round trip to this memo.
@@ -598,14 +599,18 @@ def earnings_day_stored_at(fmp: Any, day: date) -> Optional[float]:
     return entry[0] if entry is not None else None
 
 
-def _earnings_days_due(fmp: Any, days: List[date], today: date) -> List[date]:
-    """The window's days that are missing or older than their TTL, oldest first."""
+def _earnings_days_due(
+    fmp: Any, days: List[date], today: date, later_days_since: Optional[float] = None
+) -> List[date]:
+    """The window's days that are missing or older than their TTL, oldest first, and the days
+    after today stored before ``later_days_since`` (`_cached_earnings_calendar`)."""
     held = _held_earnings_days(fmp)
     now = _time.monotonic()
     return [
         d for d in days
         if d not in held
         or now - held[d][0] >= _earnings_day_ttl(d, today) - _DUE_SLACK_SECONDS
+        or (later_days_since is not None and d > today and held[d][0] < later_days_since)
     ]
 
 
@@ -663,20 +668,26 @@ async def _fetch_earnings_days(
     return await fetch_calendar_days(_one_day, days)
 
 
-async def _cached_earnings_calendar(fmp: Any, today: date) -> List[Dict[str, Any]]:
+async def _cached_earnings_calendar(
+    fmp: Any, today: date, *, later_days_since: Optional[float] = None
+) -> List[Dict[str, Any]]:
     """The market-wide calendar for ``today`` .. ``today + 14`` (ET), oldest day first:
     memo → join → fetch the days that are due.
 
     A failed or empty round serves the days already held; with none held, a failure
     raises and the caller degrades to no alerts. The rows are SHARED with every other
     caller — read them, never mutate them.
+
+    ``later_days_since`` (a moment on this memo's clock) also makes due the days after today
+    stored before it: for a reader about to say a report is listed nowhere, which must not
+    rest on a day held for hours.
     """
     global _earnings_calendar_memo, _earnings_calendar_retry_after
     days = _earnings_alert_days(today)
     span = f"{days[0].isoformat()}..{days[-1].isoformat()}"
     key = (id(fmp), today)
     while True:
-        due = _earnings_days_due(fmp, days, today)
+        due = _earnings_days_due(fmp, days, today, later_days_since)
         if not due:
             rows, _ = _held_earnings_window(fmp, days)
             logger.debug(
@@ -1744,6 +1755,11 @@ class TrackingService:
         the sheet follows the report to its next listed date, and answers `none` only when
         nothing is listed, since a pinned sheet saying "no report in the next two weeks" beside
         a row four days out would be false.
+
+        A report that left its date had left it by the newest answer held for that date, while
+        the days after today can be up to 6 h older (TWO SPEEDS above), and the new date is one
+        of them. So before saying `none` the sheet asks the memo for the days older than that
+        answer: at most once per answer, and only when someone is looking.
         """
         sym = symbol.upper()
         today = _et_today()
@@ -1758,33 +1774,52 @@ class TrackingService:
             )
         now = datetime.now(timezone.utc)
         live = get_earnings_live_service()
-        try:
-            calendar = await _cached_earnings_calendar(self.fmp, today)
-        except Exception as e:
-            logger.info("[Tracking] earnings live %s: calendar unavailable (%s: %s)",
-                        sym, type(e).__name__, e)
-            calendar = []
-        live.observe_rows(today, calendar, now, symbols={sym},
-                          stored_at=earnings_day_stored_at(self.fmp, today))
-        # The card's pick, so a future pair cannot show one consensus there and another here.
-        rows: Dict[date, Dict[str, Any]] = {
-            d: entry
-            for (_, d), entry in one_row_per_report(calendar, today, symbols={sym}).items()
-            if d is not None
-        }
+
+        async def _listed(
+            later_days_since: Optional[float] = None,
+        ) -> Dict[date, Dict[str, Any]]:
+            """Fold today's rows, and answer this ticker's by date."""
+            try:
+                calendar = await _cached_earnings_calendar(
+                    self.fmp, today, later_days_since=later_days_since
+                )
+            except Exception as e:
+                logger.info("[Tracking] earnings live %s: calendar unavailable (%s: %s)",
+                            sym, type(e).__name__, e)
+                calendar = []
+            live.observe_rows(today, calendar, now, symbols={sym},
+                              stored_at=earnings_day_stored_at(self.fmp, today))
+            # The card's pick, so a future pair cannot show one consensus there and another
+            # here.
+            return {
+                d: entry
+                for (_, d), entry in one_row_per_report(calendar, today, symbols={sym}).items()
+                if d is not None
+            }
+
+        rows = await _listed()
         held = newest_report(filter(None, (live.snapshot(sym, d, now) for d in earlier)))
 
-        if requested is not None:
-            known = requested in rows or live.snapshot(sym, requested, now) is not None
-            day = requested if known or not rows else min(rows)
-        elif today in rows:
-            day = today
-        elif held is not None:
-            day = held.day
-        elif rows:
-            day = min(rows)
-        else:
-            day = today
+        def _report_day() -> date:
+            if requested is not None:
+                known = requested in rows or live.snapshot(sym, requested, now) is not None
+                return requested if known or not rows else min(rows)
+            if today in rows:
+                return today
+            if held is not None:
+                return held.day
+            return min(rows) if rows else today
+
+        day = _report_day()
+        if day not in rows and live.snapshot(sym, day, now) is None:
+            # About to say `none`, so the days after today must be as new as the answer that
+            # left the report out: the memo's, or for a day before today, which the memo does
+            # not hold, the live loop's.
+            answered_at = earnings_day_stored_at(self.fmp, day)
+            logger.info("[Tracking] earnings live %s: nothing listed for %s, reading the days "
+                        "after today as of its newest answer", sym, day.isoformat())
+            rows = await _listed(answered_at if answered_at is not None else live.fetched_at(day))
+            day = _report_day()
         snap = live.snapshot(sym, day, now) if day <= today else None
         row = rows.get(day) or {}
         raw_name = row.get("companyName")

@@ -262,6 +262,19 @@ def test_a_result_row_is_hidden_only_for_the_same_report_on_screen():
     assert "isEarningsResult" not in upcoming, "the upcoming rule must stay ticker-scoped"
 
 
+def test_the_outlook_is_never_cut_on_the_card():
+    """The server prints the company's sentence whole, up to the 400 characters a quote may be, and
+    refuses any quote it would have to shorten. A line limit here would undo that, and a limit on
+    the card's body reaches every text inside it."""
+    src = _code("Views/Organisms/EarningsLiveResultsCard.swift")
+    block = _bracketed(src, "func guidanceBlock")
+    assert "Text(guidance)" in block
+    assert ".fixedSize(horizontal: false, vertical: true)" in block
+    for cut in (".lineLimit", ".truncationMode", ".prefix("):
+        assert cut not in block
+        assert cut not in _bracketed(src, "var body: some View")
+
+
 def test_every_file_using_published_imports_combine():
     """`SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY` is on, so a file cannot lean on the
     Combine that `import SwiftUI` drags in: `@Published` / `ObservableObject` need their own

@@ -11,7 +11,8 @@ WHAT IT DOES, for one watched ticker on its report day:
   1. finds a NEW 8-K carrying item 2.02 in the company's submissions record (filed on the
      report date or the next day — an evening filing after 17:30 ET is dated the next
      business day);
-  2. locates the EX-99.1 document from the filing's index page and reads it as text;
+  2. locates the EX-99.1 document from the filing's index page and reads it as text, with its
+     footnote marks taken off the numbers they hang on (`_drop_footnote_marks`);
   3. asks Gemini for revenue, adjusted EPS, GAAP EPS and the company's outlook, each with a
      VERBATIM quote from the release, which it reads inside a fence the release cannot close
      (`_release_view`);
@@ -21,7 +22,7 @@ WHAT IT DOES, for one watched ticker on its report day:
      and basis. What is stored is the printed number, never Gemini's. Anything else is dropped
      and logged with its reason. A figure the release does not state cannot reach a user.
   5. keeps the outlook only as that verified quote: the company's own sentences, never a word
-     of Gemini's.
+     of Gemini's, and never a piece of a sentence or the rows of a table (`_outlook_problem`).
 
 The result is PRELIMINARY by construction: `earnings_live_service` shows it as "from the
 company's release" until FMP's own figure replaces it, and the existing `earnings_result`
@@ -50,6 +51,7 @@ import time
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from html import unescape
 from html.parser import HTMLParser
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -108,7 +110,8 @@ _MAX_EXTRACT_ATTEMPTS = 3
 #: and the outlook sit at the top of every release; the GAAP-to-non-GAAP reconciliation
 #: tables that follow are not needed to read them.
 _EXTRACT_TEXT_CHARS = 40_000
-#: Decimals an EPS is printed to. A coarser print has no cent to round to: `_Printed.prints`.
+#: Decimals an EPS is printed to. A coarser print has no cent to round to (`_Printed.prints`), and
+#: a finer one is no EPS (`_eps_print`).
 _EPS_DECIMALS = 2
 #: Floating-point room in "is this the same number": 17.1 - 17.05 is 0.05000000000000071.
 _SAME_NUMBER = 1e-9
@@ -205,10 +208,10 @@ _SYSTEM = (
     "`guidance.quote` is the company's own outlook for the next quarter or the year, only when "
     "the release gives one, and the reader sees exactly this text as the company's words: "
     "whole sentences copied character for character, from the first word to the closing "
-    f"punctuation, between {PEG_SPAN_MIN_CHARS} and {PEG_SPAN_MAX_CHARS} characters in all, and "
-    "never a cut one. Never reword it, and never take it from safe-harbor or "
-    "forward-looking-statement language. If whole sentences do not fit that length, leave "
-    "`guidance` out. Set `is_quarterly_results` false when the document is not a "
+    f"punctuation, between {PEG_SPAN_MIN_CHARS} and {PEG_SPAN_MAX_CHARS} characters in all, "
+    "never a cut one and never the rows of a table. Never reword it, and never take it from "
+    "safe-harbor or forward-looking-statement language. If whole sentences do not fit that "
+    "length, leave `guidance` out. Set `is_quarterly_results` false when the document is not a "
     "quarterly results release."
 )
 
@@ -216,7 +219,8 @@ _SYSTEM = (
 @dataclass(frozen=True)
 class FilingFigures:
     """What the company's own release said, after verification. Every figure is the number the
-    release prints, and `guidance` is its own sentences, whitespace collapsed."""
+    release prints, and `guidance` is its own sentences, whitespace collapsed and with no list
+    glyph at either end."""
 
     accession: str
     accepted_at: Optional[datetime]
@@ -391,10 +395,60 @@ def find_ex99_document(index_html: Any) -> Optional[str]:
     return candidates[0][1]
 
 
+#: A run set as a superscript, in the spellings filers use: `<sup>`, a `vertical-align:super`
+#: style, and the relative shift of Workiva's exports ("position:relative;top:-3.5pt"). Every
+#: part is bounded, so a stray "<sup" costs a few hundred characters, never a scan of the file.
+_SUPERSCRIPT_RUN_RE = re.compile(
+    r"<(?P<tag>sup\b|(?:span|font)\b"
+    r"(?=[^<>]{0,2000}?(?:vertical-align\s*:\s*super|(?<![\w-])top\s*:\s*-)))"
+    r"[^<>]{0,2000}>(?P<body>.{0,200}?)</(?P=tag)\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_ANY_TAG_RE = re.compile(r"<[^<>]{0,2000}>")
+#: The printer's marks: asterisk, dagger, double dagger, section sign, pilcrow.
+_FOOTNOTE_SYMBOLS = "*\u2020\u2021\u00a7\u00b6"
+#: What a superscript holds when it is a footnote: a number of one or two digits, one letter, up
+#: to three characters in parentheses, a printer's mark, or a list of those ("1,2", "2(B)", "1-3").
+#: "th" and "TM" are words, 2026 is no note, and a "$" or a "." is part of a figure, as a minus or
+#: a parenthesis standing alone may be.
+_FOOTNOTE_MARKS_RE = re.compile(
+    r"(?=.*?[^\s,;)\-\u2013])"
+    r"(?:[0-9]{1,2}(?![0-9A-Za-z])|[A-Za-z](?![0-9A-Za-z])|\(\s*\w{1,3}\s*\)"
+    rf"|[{_FOOTNOTE_SYMBOLS}]|[\s,;)\-\u2013])+"
+)
+
+
+def _drop_footnote_marks(raw: str) -> str:
+    """`raw` without the superscript runs that hold only a footnote mark.
+
+    `html_to_text` keeps a superscript's text and loses its position, so the mark flattens onto
+    what it hangs on: "$1.08<sup>2</sup>" reads "$1.082", "$2.2<sup>1</sup> billion" reads "$2.21
+    billion", "$2.1<sup>b</sup>" reads as $2.1 billion and "fiscal 2026<sup>1</sup>" as "fiscal
+    20261". Each is a number the release never printed, and a quote of it is verbatim.
+
+    It works on the markup because only the markup can tell a note from a digit, and it lives here
+    because the Learn engine and the stake finder are pinned to `html_to_text`'s answers. Residual:
+    a mark told apart by nothing but a smaller font still flattens. An EPS is then refused
+    (`_eps_print`); a revenue or an outlook cannot be told from a figure printed that way.
+    """
+    def _unless_a_mark(run: "re.Match[str]") -> str:
+        mark = unescape(_ANY_TAG_RE.sub("", run.group("body"))).strip()
+        return "" if mark and _FOOTNOTE_MARKS_RE.fullmatch(mark) else run.group(0)
+
+    return _SUPERSCRIPT_RUN_RE.sub(_unless_a_mark, raw)
+
+
+def _release_text(raw: Any, document: str) -> str:
+    """PURE. The exhibit as the plain text the rest of this module reads: "" when it is no text."""
+    return html_to_text(_drop_footnote_marks(raw) if isinstance(raw, str) else "",
+                        document=document, max_chars=None, log_tag="earnings-live")
+
+
+_SCALE_AFTER_NUMBER = r"thousands?|millions?|billions?|trillions?|bn|mn|mm|mil|[kmb]"
 _NUMBER_IN_QUOTE_RE = re.compile(
     r"(?P<num>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|(?<![\w.,])\.\d+)"
     r"(?:\s*(?P<close>\)))?"
-    r"(?:\s*(?P<unit>thousands?|millions?|billions?|trillions?|bn|mn|mm|mil|[kmb])\b)?"
+    rf"(?:\s*(?P<unit>{_SCALE_AFTER_NUMBER})\b)?"
     r"(?:\s*(?P<close_after_unit>\)))?",
     re.IGNORECASE,
 )
@@ -760,7 +814,9 @@ def _eps_print(quote: str, value: Any) -> Optional[Tuple[float, float]]:
 
     The number must be a per-share print (a "$" or a decimal point, no scale word) that `value`
     rounds to, and a print coarser than a cent must be the value itself: EPS is printed to the
-    cent, so "$1" beside 0.96 is another figure. Its sign comes from that number alone, never
+    cent, so "$1" beside 0.96 is another figure. A print finer than a cent is refused and waits
+    for FMP: it is a dividend rate, or a footnote digit that flattened onto the figure and that
+    would turn a tie with the consensus into a beat. Its sign comes from that number alone, never
     from another figure of the quote: closed parentheses or a touching minus ("(0.46)" is the
     accounting spelling of -0.46), or the words around it (`_reads_as_loss`). A quote cut inside
     its parentheses proves no sign on its own. A `value` with the other sign is refused: getting
@@ -770,7 +826,8 @@ def _eps_print(quote: str, value: Any) -> Optional[Tuple[float, float]]:
     if v is None or abs(v) > 1000:
         return None
     for tok in _closest_prints(quote, abs(v), finest=_EPS_DECIMALS):
-        if tok.unit is not None or not (tok.dollar or tok.decimals):
+        if (tok.unit is not None or not (tok.dollar or tok.decimals)
+                or tok.decimals > _EPS_DECIMALS):
             continue
         loss = tok.negative or _reads_as_loss(quote, tok)
         if tok.cut and not loss:
@@ -789,7 +846,8 @@ def eps_from_quote(quote: str, value: Any) -> Optional[float]:
 
 _HYPHEN = r"[\s\-\u00ad\u2010-\u2015]*"
 #: A footnote inside a label: "Adjusted(3) diluted EPS", "Adjusted* EPS", "Adjusted 1 EPS", and
-#: "Adjusted EPS1", which is what `html_to_text` leaves of a superscript.
+#: "Adjusted EPS1", which is what `html_to_text` leaves of a superscript `_drop_footnote_marks`
+#: cannot recognise.
 _LABEL_FOOTNOTE = r"(?:\s*(?:\(\w{1,3}\)|\d{1,2}|\*+))?"
 #: After a label that ends on "adjusted", any short note: "Diluted EPS, as adjusted (unaudited),".
 _ENDING_NOTE = r"(?:\s*(?:\([^()]{1,40}\)|\d{1,2}|\*+))?"
@@ -888,22 +946,27 @@ _FOREIGN_MONEY_RE = re.compile(
 _DOLLAR_MARK_RE = re.compile(r"\$|\busd(?![A-Za-z])|\bdollars\b", re.IGNORECASE)
 
 
-def _folds_to_a_digit(ch: str) -> bool:
-    """NFKC turns this character into a digit, or into something holding one: "¹", "½", "①"."""
-    return not ch.isascii() and any("0" <= c <= "9" for c in unicodedata.normalize("NFKC", ch))
+def _folds_into_a_figure(ch: str) -> bool:
+    """NFKC writes part of a figure out of this character: a digit or something holding one ("¹",
+    "½", "①"), or a scale ("ᵇ", "ⓑ", "㎜")."""
+    if ch.isascii():
+        return False
+    folded = unicodedata.normalize("NFKC", ch)
+    return folded.lower() in _UNIT_SCALE or any("0" <= c <= "9" for c in folded)
 
 
 def _release_view(text: str) -> str:
     """The release as the model reads it: `neutralize_fences` over `text`, so a release holding
     "<<<END_RELEASE>>>" or its full-width homoglyph cannot close its fence.
 
-    That helper folds with NFKC, which would also write digits the release never printed: a
-    footnote's "$0.48¹" would read "$0.481", and a quote of that would verify against this view.
-    So a character that folds to a digit stays as printed, between neutralised runs. A span holding
-    a Unicode digit is refused (`verify_peg_span`), one stopping short of it stands, and no fence
+    That helper folds with NFKC, which would also write figures the release never printed: a
+    footnote's "$0.48¹" would read "$0.481" and a "$2.1ᵇ" would read "$2.1b", and a quote of that
+    would verify against this view. So a character that folds into a figure stays as printed,
+    between neutralised runs. A span holding a Unicode digit is refused (`verify_peg_span`), a
+    letter held this way is read as no scale, a span stopping short of either stands, and no fence
     can form across one: it is no angle bracket and it stays where it is.
     """
-    held = "".join(ch for ch in set(text) if _folds_to_a_digit(ch))
+    held = "".join(ch for ch in set(text) if _folds_into_a_figure(ch))
     if not held:
         return neutralize_fences(text)
     runs = re.split(f"([{re.escape(held)}])", text)
@@ -917,21 +980,129 @@ def _quote_ok(quote: Any, views: Sequence[Tuple[str, str]]) -> bool:
     )
 
 
-#: After a quote with no closing punctuation, what shows its sentence goes on: a lower-case word, a
-#: number, or a mark that carries a clause or a range on. A capital is the next line of a list or
-#: table, flat in `html_to_text`'s text, and a "." is the sentence's own end.
-_SENTENCE_RUNS_ON = r"\s*[a-z0-9$%,;:(\u2013\u2014-]"
+#: What opens a line of a list, flat in `html_to_text`'s text. Never a dash: "-$0.25" is a minus.
+_LIST_GLYPHS = (
+    "\u2022\u2023\u2043\u2219\u00b7\u25a0\u25a1\u25aa\u25ab\u25b8\u25ba\u25c6\u25c7\u25cb\u25cf"
+    "\u25e6\uf0a7\uf0b7"
+)
+#: A quote mark or bracket behind a sentence's last word. Straight only: the gate reads normalised
+#: text.
+_CLOSERS = "\"')]"
+#: A table's "$" is a cell of its own (`_Printed.glued`), and only a table sets two amounts or two
+#: rates side by side with no word between them.
+_TABLE_CELL_RE = re.compile(
+    r"\$\s+\(?\.?\d|\$\(?\.?\d(?:[\d.,]*\d)?\)?\s+\(?\$|\d%\s+\(?\d[\d.]*%"
+)
+#: What no sentence ends on, whatever comes after it: a mark that carries a clause or a range on,
+#: or a word that needs another.
+_OPEN_END_RE = re.compile(
+    r"(?:[,;:(/&$\u00b1\u2212\-\u2010-\u2015]"
+    r"|\b(?:and|or|but|nor|to|of|for|with|from|by|at|in|on|as|than|the|a|an|per|plus|versus))\Z"
+)
+#: A dot that belongs to its word.
+_ABBREVIATION_END_RE = re.compile(
+    r"(?:\b[a-z]\.){2,}\Z"
+    r"|\b(?:vs|approx|excl|incl|inc|corp|co|ltd|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)\.\Z",
+    re.IGNORECASE,
+)
+#: A "," inside a closing quote mark stands for the speaker's full stop when this comes next.
+_ATTRIBUTION_RE = re.compile(r"\s*(?:said|says|added|stated|commented)\b")
+#: A dot that ends what it follows: "U.S" and "17" go on through theirs.
+_OWN_STOP_RE = re.compile(r"[.!?](?!\w)")
+#: "iPhone" and "eBay" may open a sentence.
+_LOWER_CASE_NEXT_RE = re.compile(r"\s*[a-z](?![a-z]*[A-Z])")
+#: A last word in lower case with nothing behind it: "expects", never "points.".
+_LOWER_CASE_WORD_END_RE = re.compile(r"(?<!\S)[a-z][\w'\-]*\Z")
+#: What may stand right in front of a quote that opens on no capital.
+_SENTENCE_ENDS = f".!?:;{_LIST_GLYPHS}"
+#: Where a line ends. A capital is the next line of a list or a table, set apart by a space: one
+#: touching the quote is the "M" of "$17.5M", and a headline's " Billion" is a number's scale.
+_NOT_A_SCALE = rf"(?!(?i:{_SCALE_AFTER_NUMBER}|percent)\b)"
+_LINE_ENDS_RE = re.compile(rf"\s*(?:\Z|[{_LIST_GLYPHS}])|\s+{_NOT_A_SCALE}[A-Z]")
+#: Past an abbreviation an all-capitals word goes on ("U.S. GAAP") and a sentence opens with one
+#: capital.
+_NEW_SENTENCE_RE = re.compile(rf"\s*(?:\Z|[{_LIST_GLYPHS}])|\s+{_NOT_A_SCALE}[A-Z](?![A-Z])")
+#: How much text on each side of a quote the gate reads.
+_QUOTE_CONTEXT_CHARS = 64
 
 
-def _stops_mid_sentence(quote: str, views: Sequence[Tuple[str, str]]) -> bool:
-    """The sentence goes on after `quote`. A model trimming a long one to fit stops anywhere, and
-    the low end of "$17.5 billion to $18.5 billion" is a verbatim span that reads as the whole
-    outlook. Only the end is judged: a lost opening clause changes no figure."""
-    needle = normalize_peg_text(quote)
-    if needle.rstrip("\"')]").endswith((".", "!", "?")):
+def _is_footnote_mark(ch: str) -> bool:
+    """A mark hung on a word or a number. A digit of another script is a digit, not a mark."""
+    return ch in _FOOTNOTE_SYMBOLS or (_folds_into_a_figure(ch) and not ch.isdecimal())
+
+
+def _sentence_goes_on(needle: str, after: str) -> bool:
+    """Does the sentence go on past `needle`, with `after` the text printed right behind it?
+
+    "!" and "?" close a sentence. A full stop does too, unless a word in lower case follows it, and
+    the dot of an abbreviation only where a new sentence plainly opens. So does a comma inside a
+    closing quote mark, with its attribution behind it. A quote with no closing punctuation stands
+    only where its line ends: this names what may follow, not what may not, because no list of the
+    marks that carry a sentence on can be whole. A footnote mark is no word of the sentence, so the
+    reading starts behind it.
+    """
+    at = 0
+    while at < len(after) and _is_footnote_mark(after[at]):
+        at += 1
+    rest = after[at:]
+    body = needle.rstrip(_CLOSERS)
+    if body.endswith(("!", "?")):
         return False
-    runs_on = re.compile(re.escape(needle) + _SENTENCE_RUNS_ON)
-    return any(runs_on.search(normalized) is not None for _, normalized in views)
+    if body.endswith("."):
+        if _ABBREVIATION_END_RE.search(body):
+            return _NEW_SENTENCE_RE.match(rest) is None
+        return _LOWER_CASE_NEXT_RE.match(rest) is not None
+    if body != needle and body.endswith(",") and _ATTRIBUTION_RE.match(rest):
+        return False
+    if _OPEN_END_RE.search(body):
+        return True
+    if _OWN_STOP_RE.match(rest):
+        return _sentence_goes_on(needle + rest[0], rest[1:])
+    return _LINE_ENDS_RE.match(rest) is None
+
+
+def _opens_mid_sentence(needle: str, before: str) -> bool:
+    """Does `needle` open inside a sentence, with `before` the text printed right in front of it?
+
+    A lower-case word, a number, a "$" or any other mark opens a sentence only right behind the
+    end of another, or a ":" or ";" or a list's glyph ("eBay expects" stands there). A capital may
+    open behind a lost clause ("For the fourth quarter of 2026, Intel expects"), which costs the
+    period and no figure, but not right behind a word in lower case: "no longer expects Q4 revenue"
+    has lost what it says.
+    """
+    closed = before.rstrip().rstrip(_CLOSERS)
+    first = needle.lstrip("\"'")[:1]
+    if first in _LIST_GLYPHS:
+        return False
+    if first.isupper():
+        return _LOWER_CASE_WORD_END_RE.search(closed) is not None
+    return (closed[-1:] not in _SENTENCE_ENDS
+            or _ABBREVIATION_END_RE.search(closed) is not None)
+
+
+def _outlook_problem(quote: str, texts: Sequence[str]) -> Optional[str]:
+    """Why the verbatim `quote` cannot be printed as the company's outlook, as its reason, or None.
+    `texts` are normalised (`normalize_peg_text`), and every place they print it is read.
+
+    A verbatim span can still say what the release does not. A model trimming a long sentence to
+    fit stops anywhere: the low end of "$17.5 billion to $18.5 billion" reads as the whole outlook,
+    and "expects revenue of $18 billion" as the opposite of the "no longer expects" it came from.
+    The rows of a table are verbatim too, and read as nothing a person wrote. Residual: a table of
+    one column reads as a line of a list, and a next line opening on a capital behind a line with
+    no closing punctuation reads as cut when the quote opens there.
+    """
+    needle = normalize_peg_text(quote)
+    if _TABLE_CELL_RE.search(needle):
+        return "table_cell"
+    for text in texts:
+        at = text.find(needle)
+        while at != -1:
+            end = at + len(needle)
+            if (_opens_mid_sentence(needle, text[max(0, at - _QUOTE_CONTEXT_CHARS):at])
+                    or _sentence_goes_on(needle, text[end:end + _QUOTE_CONTEXT_CHARS])):
+                return "cut_sentence"
+            at = text.find(needle, end)
+    return None
 
 
 def unwrap_json(raw: Any) -> Any:
@@ -958,9 +1129,10 @@ def verify_extraction(
 
     `text` is the release as cut for the model, and every quote must be a span of it or of
     `_release_view(text)`, the form the model actually read ("™" reaches it as "TM"; both are the
-    release's words). `release_text` is the whole release when that was cut, for the one check that
-    reads the release itself (`_reads_as_whole_dollars`): a scale header sits wherever the tables
-    do.
+    release's words). `release_text` is the whole release when that was cut, for the two checks
+    that read the release itself: a scale header sits wherever the tables do
+    (`_reads_as_whole_dollars`), and the model's window can end inside the outlook's sentence
+    (`_outlook_problem`).
 
     A figure survives only when its quote is such a span, shows dollars and prints no other
     currency, AND the value rounds to the number that quote prints
@@ -974,17 +1146,18 @@ def verify_extraction(
     with no mark of its own refused too, while a sibling printed in dollars stands: a US
     company can quote a euro note beside its results.
 
-    The outlook is kept only as its verified quote, whole, its whitespace collapsed: the sheet
-    prints it as the company's own words. It is never cut to fit, since a cut can land inside a
-    range: a quote too long to verify, or one the model stopped mid-sentence, drops the outlook.
-    It needs no dollar mark: a "$" in it can only be one the release printed.
+    The outlook is kept only as its verified quote, whole, its whitespace collapsed and a list's
+    glyph off its ends: the sheet prints it as the company's own words. It is never cut to fit,
+    since a cut can land inside a range: a quote too long to verify, a piece of a sentence or the
+    rows of a table drop the outlook (`_outlook_problem`). It needs no dollar mark: a "$" in it can
+    only be one the release printed.
 
     The reasons (`ok` / `no_quote` / `not_verbatim` / `foreign_currency` / `no_dollar_mark` /
-    `value_mismatch` / `not_adjusted` / `cut_sentence` / `absent`) are what the log line reports
-    — never the release text. A currency that is not USD, a blank one included, drops the whole
-    answer: nothing else says what the figures are in. Residual: a release whose only currency
-    words sit outside every quote ("all amounts in Canadian dollars" above a "$" table) depends on
-    the model's `currency`.
+    `value_mismatch` / `not_adjusted` / `cut_sentence` / `table_cell` / `absent`) are what the log
+    line reports — never the release text. A currency that is not USD, a blank one included,
+    drops the whole answer: nothing else says what the figures are in. Residual: a release whose
+    only currency words sit outside every quote ("all amounts in Canadian dollars" above a "$"
+    table) depends on the model's `currency`.
     """
     reasons: Dict[str, str] = {}
     if not isinstance(answer, Mapping):
@@ -1049,11 +1222,14 @@ def verify_extraction(
     guidance = None
     node = _field("guidance")
     if node is not None:
-        if _stops_mid_sentence(node["quote"], views):
-            reasons["guidance"] = "cut_sentence"
-        else:
-            guidance = " ".join(node["quote"].split())
-            reasons["guidance"] = "ok"
+        texts = [normalized for _, normalized in views]
+        if release_text is not None and len(release_text) > len(text):
+            texts += [normalize_peg_text(view)
+                      for view in (release_text, _release_view(release_text))]
+        problem = _outlook_problem(node["quote"], texts)
+        if problem is None:
+            guidance = " ".join(node["quote"].split()).strip(f"{_LIST_GLYPHS} ") or None
+        reasons["guidance"] = problem or ("ok" if guidance else "no_quote")
 
     period = answer.get("fiscal_period")
     period = " ".join(period.split())[:40] if isinstance(period, str) and period.strip() else None
@@ -1303,8 +1479,8 @@ class EarningsFilingWatcher:
             return None, True
         await sleep(_CALL_SPACING_SECONDS)
         raw = await client.get_filing_document(cik, acc, document)
-        release = html_to_text(raw or "", document=document, max_chars=None,
-                               log_tag="earnings-live")
+        # On a thread, like the verifier below: a whole filing takes a noticeable time to read.
+        release = await asyncio.to_thread(_release_text, raw, document)
         if not release:
             logger.info("EARNINGS_LIVE_FILING sym=%s acc=%s result=empty_exhibit", symbol, acc)
             return None, True

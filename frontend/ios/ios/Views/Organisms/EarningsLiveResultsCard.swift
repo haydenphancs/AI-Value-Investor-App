@@ -10,7 +10,8 @@
 //  Each metric row stands alone: Revenue can be in while EPS still reads "Waiting…". While the
 //  report is LIVE, or FMP can still confirm its preliminary figures, the card polls its own
 //  endpoint (`EarningsLiveViewModel`); it opens on the Tracking card's own figures (`fallback`)
-//  so it is never blank while the first answer loads.
+//  so it is never blank while the first answer loads. A tapped push has none, so it waits, and
+//  a failed load says so: a status it does not hold would claim a report is still to come.
 //
 //  Honesty rules, each from the server (`earnings_live_service`), rendered as given:
 //    * a figure from the company's own release is marked "Preliminary" with a link to the
@@ -36,6 +37,11 @@ struct EarningsLiveResultsCard: View {
     // MARK: Unified reads (live answer first, then the card's figures)
 
     private var live: EarningsLiveResponse? { viewModel.live }
+
+    /// The card holds something about this report: an answer, or the Tracking card's figures.
+    /// With neither, `status` below is only its default, and drawing it would promise a report
+    /// still to come, with "Waiting…" on figures that may have been out for days.
+    private var hasReport: Bool { live != nil || fallback != nil }
 
     private var status: EarningsLiveStatus {
         live?.liveStatus ?? fallback?.status ?? .upcoming
@@ -66,7 +72,9 @@ struct EarningsLiveResultsCard: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             header
 
-            if status == .notScheduled {
+            if !hasReport {
+                noAnswerYet
+            } else if status == .notScheduled {
                 Text("No earnings report for \(viewModel.ticker) in the next two weeks.")
                     .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
@@ -84,13 +92,6 @@ struct EarningsLiveResultsCard: View {
 
                 footnote
             }
-
-            if viewModel.loadFailed && fallback == nil {
-                InlineRetryNotice(
-                    message: "Couldn't load the latest results.",
-                    onRetry: { viewModel.start() }
-                )
-            }
         }
         .padding(AppSpacing.lg)
         .cardSurface(cornerRadius: AppCornerRadius.large)
@@ -103,6 +104,19 @@ struct EarningsLiveResultsCard: View {
             viewModel.start()
         }
         .inAppBrowser(link: $browserLink)
+    }
+
+    @ViewBuilder
+    private var noAnswerYet: some View {
+        if viewModel.loadFailed {
+            InlineRetryNotice(
+                message: "Couldn't load the latest results.",
+                onRetry: { viewModel.start() }
+            )
+        } else {
+            ProgressView()
+                .controlSize(.small)
+        }
     }
 
     // MARK: Header
@@ -118,9 +132,11 @@ struct EarningsLiveResultsCard: View {
                     LiveBadge()
                 }
             }
-            Text(statusLine)
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
+            if hasReport {
+                Text(statusLine)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+            }
         }
         .accessibilityElement(children: .combine)
     }
@@ -351,11 +367,19 @@ struct EarningsLiveResultsCard: View {
     }
 
     private var footnote: some View {
-        Text("EPS is adjusted (non-GAAP), the same basis as the consensus estimate. "
-             + "Estimates and confirmed results from FMP.")
+        Text(footnoteText)
             .font(AppTypography.caption)
             .foregroundColor(AppColors.textMuted)
             .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// Its first sentence follows the EPS row above it: a GAAP-only release is not on the
+    /// consensus's basis, which is why that row reads "Not comparable".
+    private var footnoteText: String {
+        let basis = eps.isGAAP
+            ? "This EPS is GAAP; the consensus estimate is adjusted (non-GAAP)."
+            : "EPS is adjusted (non-GAAP), the same basis as the consensus estimate."
+        return basis + " Estimates and confirmed results from FMP."
     }
 }
 

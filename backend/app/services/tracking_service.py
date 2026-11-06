@@ -63,6 +63,7 @@ from app.services.earnings_filing_service import _DUE_SLACK_SECONDS
 from app.services.earnings_window_service import fetch_calendar_days
 from app.services.earnings_live_service import (
     LiveSnapshot,
+    _revenue_estimate,
     card_fields,
     get_earnings_live_service,
     live_days,
@@ -95,7 +96,7 @@ _CLASSIFIABLE_ASSET_TYPES = {"stock", "etf"}
 
 
 class _ReportDateOutOfWindow(Exception):
-    """`get_earnings_live` was asked about a date the sheet cannot answer for. A class of its
+    """`get_earnings_live` was asked about a date past the calendar it reads. A class of its
     own so the endpoint answers 400 for this alone: pydantic's `ValidationError` is a
     `ValueError`, and catching that would call a response-shape bug bad input, unlogged."""
 
@@ -527,7 +528,8 @@ def _downsample(values: List[float], target: int) -> List[float]:
 # * A failed or empty round serves the days already held, however old (a calendar row is
 #   a scheduled date, still true hours later), and the next round waits
 #   `_EARNINGS_CALENDAR_FAILURE_RETRY_SECONDS`, so an FMP outage costs one round per wait,
-#   not one per feed build of every user.
+#   not one per feed build of every user. What it serves says so (`_HeldAfterFailure`): a
+#   held row is still true, but a row NOT held proves nothing.
 # * `_earnings_calendar_inflight` dedups concurrent misses. A joiner is shielded, and a
 #   joiner whose leader was CANCELLED (a client disconnect) takes over the download
 #   rather than serving its own user a feed with no earnings alerts.
@@ -557,6 +559,14 @@ _earnings_calendar_memo: Optional[
 _earnings_calendar_inflight: Dict[Tuple[int, date], asyncio.Future] = {}
 # (client, monotonic time the next round may start) after a failed or empty round.
 _earnings_calendar_retry_after: Optional[Tuple[Any, float]] = None
+
+
+class _HeldAfterFailure(list):
+    """The rows a failed or empty round served, which is all the days held, or none. They read
+    as any list, but `fetch_failed`, as on `integrations.fmp.EmptyAfterFailure`, tells a reader
+    about to say a report is listed nowhere that this answer cannot know that."""
+
+    fetch_failed = True
 
 
 def reset_earnings_calendar_cache() -> None:
@@ -639,7 +649,8 @@ def _held_earnings_window(
 def _serve_held_earnings(
     fmp: Any, days: List[date], span: str, why: str, level: int
 ) -> Optional[List[Dict[str, Any]]]:
-    """The held days of this window after a failed round, or None when none is held.
+    """The held days of this window after a failed round (`_HeldAfterFailure`), or None when
+    none is held.
 
     A day that was never fetched is left out: its alerts are missing, never wrong."""
     rows, missing = _held_earnings_window(fmp, days)
@@ -652,7 +663,7 @@ def _serve_held_earnings(
         span, why, len(rows), len(days) - len(missing), len(days),
         f"; not held: {', '.join(d.isoformat() for d in missing)}" if missing else "",
     )
-    return rows
+    return _HeldAfterFailure(rows)
 
 
 async def _fetch_earnings_days(
@@ -680,9 +691,9 @@ async def _cached_earnings_calendar(
     """The market-wide calendar for ``today`` .. ``today + 14`` (ET), oldest day first:
     memo → join → fetch the days that are due.
 
-    A failed or empty round serves the days already held; with none held, a failure
-    raises and the caller degrades to no alerts. The rows are SHARED with every other
-    caller — read them, never mutate them.
+    A failed or empty round serves the days already held, flagged `fetch_failed`; with none
+    held, a failure raises and the caller degrades to no alerts. The rows are SHARED with
+    every other caller — read them, never mutate them.
 
     ``later_days_since`` (a moment on this memo's clock) also makes due the days after today
     stored before it: for a reader about to say a report is listed nowhere, which must not
@@ -780,9 +791,10 @@ async def _cached_earnings_calendar(
                 span, len(due), elapsed_ms, _EARNINGS_CALENDAR_FAILURE_RETRY_SECONDS,
             )
             # The days held from an earlier round, as every build inside the wait gets.
-            rows = _serve_held_earnings(
+            held_rows = _serve_held_earnings(
                 fmp, days, span, "this round returned no rows", logging.WARNING
-            ) or []
+            )
+            rows = _HeldAfterFailure() if held_rows is None else held_rows
         if not fut.done():
             fut.set_result(rows)
         return rows
@@ -1690,8 +1702,10 @@ class TrackingService:
                     # NaN/Inf/non-numeric alike, and both fields are Optional on the
                     # wire, so an unknown consensus renders as absent rather than as a
                     # fabricated 0.
+                    # A revenue estimate of zero or less is no consensus at all, the record's
+                    # own rule, so a card before the report never prints "$0".
                     eps_est = _finite_or_none(entry.get("epsEstimated"))
-                    rev_est = _finite_or_none(entry.get("revenueEstimated"))
+                    rev_est = _revenue_estimate(entry)
 
                     # One-line description for the card. iOS rebuilds its own
                     # version for the alert card, but keep a sane fallback here.
@@ -1755,44 +1769,62 @@ class TrackingService:
         No live fetch, like the feed: today's rows come from the shared Tracking memo and are
         folded into the shared live records, skipping any older than a record's last own
         fetch; the earlier live days' are already in those records. The report is `requested`
-        when given (it must lie between the previous trading day and today + 14), else
-        today's, else the one before today its card would name (`newest_report`), else the
-        next one in the window. A `requested` date with neither a record nor a row has moved:
-        the sheet follows the report to its next listed date, and answers `none` only when
-        nothing is listed, since a pinned sheet saying "no report in the next two weeks" beside
-        a row four days out would be false.
+        when given, else today's, else the one before today its card would name
+        (`newest_report`), else the next one in the window. A `requested` date with neither a
+        record nor a row has moved: the sheet follows the report to its next listed date, and
+        answers `none` only when nothing is listed, since a pinned sheet saying "no report in
+        the next two weeks" beside a row four days out would be false.
+
+        A `requested` date past today + 14 is refused. One before the live days is not: an
+        inbox row keeps its report date for 90 days and that report's record left with the live
+        days, so a refusal could never turn into an answer. Nothing can be read for that date,
+        so the sheet answers as it would with none.
 
         A report that left its date had left it by the newest answer held for that date, while
         the days after today can be up to 6 h older (TWO SPEEDS above), and the new date is one
         of them. So before saying `none` the sheet asks the memo for the days older than that
         answer: at most once per answer, and only when someone is looking.
+
+        `none` says nothing is listed, and only a read that worked can know that. So when the
+        latest read failed or came back empty (`fetch_failed`) and no record holds the report,
+        this raises `FMPUnavailableException`, the endpoint answers an error and the client
+        retries. A record still answers through an outage, and a row held from before it still
+        does: it is a scheduled date, true hours later.
         """
         sym = symbol.upper()
         today = _et_today()
         earlier = live_days(today)[:-1]
         prev = earlier[0]
-        if requested is not None and not prev <= requested <= today + timedelta(
-            days=_EARNINGS_ALERT_DAYS_AHEAD
-        ):
+        last = today + timedelta(days=_EARNINGS_ALERT_DAYS_AHEAD)
+        if requested is not None and requested > last:
             raise _ReportDateOutOfWindow(
                 f"report_date {requested.isoformat()} is outside {prev.isoformat()}.."
-                f"{(today + timedelta(days=_EARNINGS_ALERT_DAYS_AHEAD)).isoformat()}"
+                f"{last.isoformat()}"
             )
+        if requested is not None and requested < prev:
+            logger.info("[Tracking] earnings live %s: %s has left the live days (from %s), "
+                        "answering as with no date", sym, requested.isoformat(), prev.isoformat())
+            requested = None
         now = datetime.now(timezone.utc)
         live = get_earnings_live_service()
+        read_failed = False
 
         async def _listed(
             later_days_since: Optional[float] = None,
         ) -> Dict[date, Dict[str, Any]]:
-            """Fold today's rows, and answer this ticker's by date."""
+            """Fold today's rows, and answer this ticker's by date. The latest read is the one
+            an answer rests on, so each sets `read_failed`."""
+            nonlocal read_failed
             try:
                 calendar = await _cached_earnings_calendar(
                     self.fmp, today, later_days_since=later_days_since
                 )
+                read_failed = getattr(calendar, "fetch_failed", False)
             except Exception as e:
                 logger.warning("[Tracking] earnings live %s: calendar unavailable on %s (%s: %s)",
                                sym, today.isoformat(), type(e).__name__, e)
                 calendar = []
+                read_failed = True
             live.observe_rows(today, calendar, now, symbols={sym},
                               stored_at=earnings_day_stored_at(self.fmp, today))
             # The card's pick, so a future pair cannot show one consensus there and another
@@ -1831,12 +1863,17 @@ class TrackingService:
         raw_name = row.get("companyName")
         company = raw_name if isinstance(raw_name, str) and raw_name else None
         found = snap is not None or day in rows
+        if read_failed and not found:
+            raise FMPUnavailableException(
+                f"earnings live {sym} {day.isoformat()}: the calendar could not be read and no "
+                f"record holds the report"
+            )
         extras = await live.history_extras(sym, day) if found else None
         payload = live_payload(
             sym, day, snap,
             company_name=company,
             eps_estimate=_finite_or_none(row.get("epsEstimated")),
-            revenue_estimate=_finite_or_none(row.get("revenueEstimated")),
+            revenue_estimate=_revenue_estimate(row),
             extras=extras,
             today=today,
             found=found,

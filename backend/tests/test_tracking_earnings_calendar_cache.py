@@ -432,6 +432,69 @@ async def test_an_empty_round_over_held_days_serves_them_like_the_wait_does(capl
     assert len(fmp.calls) == 17
 
 
+def _failed(rows) -> bool:
+    """What a reader about to say a report is listed nowhere checks."""
+    return getattr(rows, "fetch_failed", False)
+
+
+@pytest.mark.asyncio
+async def test_a_read_says_nothing_of_a_failure_when_none_happened():
+    fmp = _CalendarFMP([_row("AAPL")])
+    assert not _failed(await ts._cached_earnings_calendar(fmp, _DAY))
+    assert not _failed(await ts._cached_earnings_calendar(fmp, _DAY)), "served from memory"
+
+
+@pytest.mark.asyncio
+async def test_the_days_a_failed_round_serves_say_so_and_so_do_those_inside_its_wait():
+    fmp = _CalendarFMP([_row("AAPL")])
+    await ts._cached_earnings_calendar(fmp, _DAY)
+    _age_memo(ts.EARNINGS_CALENDAR_TTL + 1)
+    fmp.day_answers[_iso(0)] = [FMPUnavailableException("FMP 503")]
+    failed = await ts._cached_earnings_calendar(fmp, _DAY)
+    assert _failed(failed) and [r["symbol"] for r in failed] == ["AAPL"]
+    waiting = await ts._cached_earnings_calendar(fmp, _DAY)
+    assert _failed(waiting) and [r["symbol"] for r in waiting] == ["AAPL"]
+    _end_the_wait()
+    assert not _failed(await ts._cached_earnings_calendar(fmp, _DAY)), "the next good round"
+
+
+@pytest.mark.asyncio
+async def test_a_joiner_of_a_failed_round_hears_of_the_failure_too():
+    fmp = _CalendarFMP([_row("AAPL")])
+    await ts._cached_earnings_calendar(fmp, _DAY)
+    _age_memo(ts.EARNINGS_CALENDAR_TTL + 1)
+    fmp.day_answers[_iso(0)] = [FMPUnavailableException("FMP 503")]
+    fmp.release = asyncio.Event()
+    leader = asyncio.ensure_future(ts._cached_earnings_calendar(fmp, _DAY))
+    await fmp.started.wait()
+    joiner = asyncio.ensure_future(ts._cached_earnings_calendar(fmp, _DAY))
+    await asyncio.sleep(0)
+    fmp.release.set()
+    assert _failed(await leader) and _failed(await joiner)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("held", [False, True], ids=["nothing_held", "days_held"])
+async def test_an_empty_round_says_so_with_or_without_days_to_serve(held):
+    fmp = _CalendarFMP([_row("AAPL", 0)] if held else [])
+    if held:
+        await ts._cached_earnings_calendar(fmp, _DAY)
+        _age_memo(ts.EARNINGS_CALENDAR_TTL + 1)
+        fmp.rows = []
+    rows = await ts._cached_earnings_calendar(fmp, _DAY)
+    assert _failed(rows) and [r["symbol"] for r in rows] == (["AAPL"] if held else [])
+
+
+@pytest.mark.asyncio
+async def test_a_held_list_reads_as_a_plain_list_everywhere_else():
+    fmp = _CalendarFMP([_row("AAPL")])
+    await ts._cached_earnings_calendar(fmp, _DAY)
+    _age_memo(ts.EARNINGS_CALENDAR_TTL + 1)
+    fmp.day_answers[_iso(0)] = [FMPUnavailableException("FMP 503")]
+    rows = await ts._cached_earnings_calendar(fmp, _DAY)
+    assert isinstance(rows, list) and rows == [_row("AAPL")]
+
+
 @pytest.mark.asyncio
 async def test_the_memo_is_keyed_on_the_client():
     """One fake's rows never reach another — the strict-xfail reschedule test builds its

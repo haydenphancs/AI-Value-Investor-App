@@ -2728,13 +2728,19 @@ def test_a_rounded_eps_print_gets_no_verdict_inside_its_own_rounding():
     assert metric(None).surprise_pct is None
 
 
-def test_fmp_eps_keeps_its_verdict_beside_a_filing_of_the_same_print():
+def test_fmp_eps_of_the_same_print_replaces_the_filings_and_settles_nothing_either_way():
+    """FMP carries the company's print, so its 0.41 is no closer to the true figure than the
+    release's was, and a colour appearing the moment it lands would be arithmetic on the rounding.
+    Only a figure with finer digits can say."""
     quote = "non-GAAP EPS attributable to Intel was $0.41 in the quarter."
     figures, _ = _verify_in(f"Intel reported. {quote}",
                             eps_adjusted_diluted={"value": 0.41, "quote": quote})
     shown = els.eps_metric(els._Record("INTC", REPORT, eps_estimate=0.4066, fmp_eps=0.41,
                                        filing=figures))
-    assert (shown.source, shown.surprise_pct) == (els.SOURCE_FMP, 0.84)
+    assert (shown.source, shown.surprise_pct) == (els.SOURCE_FMP, None)
+    finer = els.eps_metric(els._Record("INTC", REPORT, eps_estimate=0.4066, fmp_eps=0.4134,
+                                       filing=figures))
+    assert (finer.source, finer.surprise_pct) == (els.SOURCE_FMP, 1.67)
 
 
 def test_a_filing_figure_with_no_recorded_rounding_is_read_as_exact():
@@ -5120,14 +5126,22 @@ async def test_a_figure_is_on_the_record_before_the_next_symbol_is_read(live):
 
 
 @pytest.mark.asyncio
-async def test_the_tick_keeps_a_weekend_report_on_its_list_and_asks_sec_nothing(live):
+async def test_the_tick_keeps_a_weekend_report_on_its_list_and_asks_sec_nothing(live, monkeypatch):
     saturday = date(2026, 11, 7)
     noon = datetime(2026, 11, 7, 12, tzinfo=ET).astimezone(timezone.utc)
     live.observe_rows(saturday, [dict(_pending("INTC"), date=saturday.isoformat())], noon)
     sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    map_reads: List[Any] = []
+
+    async def _map(*, sec=None):
+        map_reads.append(sec)
+        return _CIKS
+
+    # The ticker map is SEC's too, and the fixture's stub never touches `sec`.
+    monkeypatch.setattr(signals, "ticker_cik_map", _map)
     stats = await els.earnings_filing_tick(noon, watched=["INTC"], sec=sec, gemini=_Gemini())
     assert stats == {"watched": 1, "pending": 1, "filings": 0}, "FMP can still land it"
-    assert sec.calls == []
+    assert sec.calls == [] and map_reads == []
 
 
 @pytest.mark.asyncio

@@ -353,3 +353,26 @@ def eps_digit_shift_suspect(actual: Any, estimate: Any, gaap: Any = None) -> boo
         to_feed = abs(math.log10(abs(g / a)))
         return to_estimate + _EPS_GLITCH_TIE_EPSILON < to_feed
     return True
+
+
+# ── A per-share figure printed to the cent ─────────────────────────
+#
+# $0.41 is anything from $0.405 to $0.415, and FMP's consensus carries four decimals, so with
+# the consensus inside that half cent the print cannot say which side of it the true figure is
+# on. An FMP EPS actual to the cent is read as the company's print, so a surprise worked out from
+# it would be arithmetic on a rounded number. Read by every live surface and both result pushes:
+# a filing's EPS carries its own band (`FilingFigures.eps_rounding`) and takes the same decision.
+EPS_CENT_PRINT_ROUNDING = 0.005
+# Floating-point room at the edge of a print's rounding: 0.415 - 0.41 is 0.0050000000000000044.
+EPS_ROUNDING_SLACK = 1e-9
+
+
+def eps_print_covers(actual: Any, estimate: Any) -> bool:
+    """True when `actual` is printed to the cent or coarser and `estimate` sits inside its half
+    cent. A figure with finer digits is not a print, and one EQUAL to the consensus is in line,
+    a verdict the print can give, so neither is covered."""
+    a = _num(actual)
+    e = _num(estimate)
+    if a is None or e is None or a == e or abs(a - round(a, 2)) > EPS_ROUNDING_SLACK:
+        return False
+    return abs(a - e) <= EPS_CENT_PRINT_ROUNDING + EPS_ROUNDING_SLACK

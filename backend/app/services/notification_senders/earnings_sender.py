@@ -42,6 +42,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.integrations.fmp import get_fmp_client
 from app.services._earnings_common import (
     eps_digit_shift_suspect,
+    eps_print_covers,
     parse_fmp_timing,
     timing_sentence,
 )
@@ -115,12 +116,17 @@ def surprise_pct(row: Dict[str, Any]) -> Optional[float]:
     too close to zero to divide by. `finite()` is the shared guard that already caught
     FMP's NaN/Infinity JSON tokens elsewhere in this repo; feeding NaN into a comparison
     silently answers False for every branch and disables the gate.
+
+    None too when the actual is printed to the cent and the consensus sits inside its half
+    cent (`eps_print_covers`): $0.01 against 0.0148 is a 32% miss on paper, and the print
+    cannot say which side of that consensus the company landed on. Both senders read this,
+    so the daily pass never states what the live sender held.
     """
     est = finite(row.get("epsEstimated"))
     act = finite(row.get("epsActual") if "epsActual" in row else row.get("eps"))
     if est is None or act is None:
         return None
-    if abs(est) < MIN_ABS_ESTIMATE:
+    if abs(est) < MIN_ABS_ESTIMATE or eps_print_covers(act, est):
         return None
     return (act - est) / abs(est)
 
@@ -243,13 +249,20 @@ def result_dedup_key(symbol: str, when: str) -> str:
 
 
 def neighbouring_result_keys(symbol: str, when: str) -> List[str]:
-    """The result keys of `symbol`'s reports on the trading days either side of `when`. FMP's
-    leftover row after a reschedule dates one report twice, and a company does not report twice
-    in two days, so a user holding either was told about this report: both senders pass these
-    as `unless_claimed`. Either side, because FMP can fill the two rows in either order."""
+    """The result keys of `symbol`'s reports on every other calendar day from the trading day
+    before `when` through the trading day after it, oldest first. FMP's leftover row after a
+    reschedule dates one report twice, and a company does not report twice in two days, so a
+    user holding one of these was told about this report: both senders pass them as
+    `unless_claimed`.
+
+    Either side, because FMP can fill the two rows in either order, and every calendar day, so
+    the relation runs both ways across a closed day: a report can carry a Saturday's date, and
+    `previous_trading_day` steps over it, so a Monday row would never name it."""
     day = date.fromisoformat(str(when)[:10])
-    return [result_dedup_key(symbol, d.isoformat())
-            for d in (previous_trading_day(day), next_trading_day(day))]
+    first = previous_trading_day(day)
+    span = (next_trading_day(day) - first).days
+    around = (first + timedelta(days=offset) for offset in range(span + 1))
+    return [result_dedup_key(symbol, d.isoformat()) for d in around if d != day]
 
 
 def _watched_tickers_ranked() -> List[str]:
@@ -354,8 +367,8 @@ async def _dispatch(
     The dedup key is keyed on the EARNINGS date, not the run date. That matters twice:
     a re-run on the same day cannot re-buzz, and a company that reschedules its print
     gets a genuinely new key rather than being silently suppressed by yesterday's claim.
-    A claim on the trading day either side does stop a RESULT, for that user alone: that is
-    one report FMP dated twice (`neighbouring_result_keys`). A report nobody was told about
+    A claim out to the trading day either side does stop a RESULT, for that user alone: that
+    is one report FMP dated twice (`neighbouring_result_keys`). A report nobody was told about
     holds no claim, so a reschedule still gets its push.
     """
     if kind == KIND_EARNINGS_RESULT:

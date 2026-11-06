@@ -9,7 +9,10 @@ screen's contract is:
     device (`LiveNewsHeader`: nothing live on screen, no "Live");
   * the poll: it stops when the server stops asking, and its starter cancels before re-arming
     (two pollers would double the traffic);
-  * the formatting defects the card shipped with ("$-0.25", "$0.0B") stay fixed.
+  * the formatting defects the card shipped with ("$-0.25", "$0.0B") stay fixed;
+  * the date parser reads the whole seconds the server sends;
+  * a card with nothing to go on draws no status, and a failed load offers a retry;
+  * the footnote names the basis of the EPS row above it.
 Every scan is comment-stripped first, so a doc comment naming a removed token cannot satisfy
 or fail it.
 """
@@ -79,6 +82,7 @@ def _coding_keys(src: str, name: str) -> set:
 
 
 _MODELS = "Models/EarningsLiveModels.swift"
+_CARD = "Views/Organisms/EarningsLiveResultsCard.swift"
 
 
 @pytest.mark.parametrize("swift_name,model", [
@@ -191,10 +195,10 @@ def test_the_consensus_formatting_defects_stay_fixed():
 
 def test_a_figure_the_server_gave_no_verdict_is_never_coloured():
     """A figure with no surprise beside its consensus is one the server refused to judge: a
-    filing's print that covers the consensus, or a consensus under a cent. Comparing the raw
-    values would paint a verdict the card, the sheet and the push cannot share: the card only
-    has the report-wide preliminary flag, so the rule reads the server's answer and no source.
-    A surprise of 0.0 IS an answer, so a beat that rounds to 0.00 stays a beat."""
+    print that covers the consensus, from either source, or a consensus under a cent. Comparing
+    the raw values would paint a verdict the card, the sheet and the push cannot share: the card
+    only has the report-wide preliminary flag, so the rule reads the server's answer and no
+    source. A surprise of 0.0 IS an answer, so a beat that rounds to 0.00 stays a beat."""
     block = _struct_block(_code(_MODELS), "EarningsMetricOutcome")
     body = block[block.index("var result: EarningsQuarterResult"):block.index("var color: Color")]
     rule = "if surprisePct == nil { return .noEstimate }"
@@ -226,6 +230,47 @@ def test_the_feed_hands_the_card_each_surprise_it_decoded(label, dto_field):
     models = _code("Models/TrackingModels.swift")
     call = _bracketed(models, ".earnings(AppAlert.EarningsData", "(", ")")
     assert re.search(rf"\b{label}:\s*{dto_field}\s*,", call), call
+
+
+def test_the_date_parser_reads_the_whole_seconds_the_server_sends():
+    """`iso_utc` sends "2026-10-29T20:05:00Z". A formatter asking for fractional seconds refuses
+    that, the date comes back nil and "updated N min ago" goes, with no crash and no log."""
+    block = _bracketed(_code(_MODELS), "enum EarningsLiveDates")
+    plain = _bracketed(block, "private static let plain")
+    assert "f.formatOptions = [.withInternetDateTime]" in plain
+    assert re.search(r"return\s+plain\.date\(from:\s*raw\)", _bracketed(block, "func parse("))
+
+
+def test_a_card_with_nothing_to_go_on_draws_no_status_and_a_failed_load_offers_a_retry():
+    """A tapped push opens with no figures of the Tracking card's. `status` then falls to its
+    default, `.upcoming`, so a failed load used to read "Results will appear here the moment
+    they're out", with "Waiting…" on both metrics, about a report already out."""
+    card = _code(_CARD)
+    assert "private var hasReport: Bool { live != nil || fallback != nil }" in card
+    body = _bracketed(card, "var body: some View")
+    assert re.search(r"if !hasReport \{\s*noAnswerYet\s*\} else if status == \.notScheduled \{"
+                     r".*\} else \{.*metricRow\(", body, re.S), body
+    assert "metricRow(" not in _bracketed(body, "if !hasReport")
+    assert "footnote" not in _bracketed(body, "if !hasReport")
+    header = _bracketed(card, "private var header: some View")
+    assert "Text(statusLine)" in _bracketed(header, "if hasReport")
+    assert header.count("statusLine") == 1
+    no_answer = _bracketed(card, "private var noAnswerYet")
+    assert "InlineRetryNotice(" in _bracketed(no_answer, "if viewModel.loadFailed")
+    assert card.count("InlineRetryNotice(") == 1
+
+
+def test_the_footnote_names_the_basis_of_the_eps_row_above_it():
+    """"EPS is adjusted" under a row titled "EPS (GAAP)" is false, and the consensus beside it is
+    still the adjusted one, which is why that row reads "Not comparable"."""
+    card = _code(_CARD)
+    assert "Text(footnoteText)" in _bracketed(card, "private var footnote: some View")
+    text = _bracketed(card, "private var footnoteText: String")
+    assert re.search(r'let basis = eps\.isGAAP\s*\?\s*'
+                     r'"This EPS is GAAP; the consensus estimate is adjusted \(non-GAAP\)\."\s*:\s*'
+                     r'"EPS is adjusted \(non-GAAP\), the same basis as the consensus estimate\."',
+                     text), text
+    assert card.count("the same basis as the consensus estimate") == 1
 
 
 def test_the_colour_word_and_arrow_all_come_from_the_one_verdict():

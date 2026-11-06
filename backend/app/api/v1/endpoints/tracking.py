@@ -37,7 +37,7 @@ from app.api.error_response import (
 from app.config import settings
 from app.database import get_supabase
 from app.dependencies import StandardRateLimit, get_watchlist_identity
-from app.integrations.fmp import get_fmp_client
+from app.integrations.fmp import FMPUnavailableException, get_fmp_client
 from app.schemas.tracking import (
     EarningsLiveResponse,
     TrackingFeedResponse,
@@ -547,6 +547,10 @@ async def get_earnings_live(
         return await TrackingService().get_earnings_live(sym, requested)
     except _ReportDateOutOfWindow as e:
         return make_error_response(ErrorCode.INVALID_INPUT, message=str(e))
+    except FMPUnavailableException as e:
+        # An outage with no record to answer from: handled, retryable and per poll, so a WARNING.
+        logger.warning("Earnings live for %s (report_date=%s) unavailable: %s", sym, requested, e)
+        return error_response_from_exception(e, ticker=sym, step="earnings_live")
     except Exception as e:
         logger.error("Earnings live for %s (report_date=%s) failed: %s: %s", sym, requested,
                      type(e).__name__, e, exc_info=True)

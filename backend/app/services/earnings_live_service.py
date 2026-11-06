@@ -123,13 +123,15 @@ with a date and a dedup key of its own, and the owner's rule is one push per rep
   * The push is the ledger's call, in the dispatcher, for each user
     (`earnings_live_sender`, ONE REPORT, TWO DATES). A landing here decides nothing about it.
   * An 8-K accepted the evening before never reaches the later row (`find_results_filings`).
-  * A record with no figures of its own beside a report already in on the trading day before
-    reads as that report, under its own date (`_Record.report_before`, `snapshot_of`), so the
-    card and the sheet never say LIVE or "not in yet" about results they hold, at any hour and
-    after the report's own record has left the live days. Its own first figure ends that. A
-    pending row the day before stops nothing, so a stale earlier row never costs the true report
-    its card. Only the reading changes: the record stays on the SEC watch and keeps asking FMP,
-    so a true report on that date still lands.
+  * A record with no figures of its own beside a report already in on any day back to the
+    trading day before reads as the nearest such report, under its own date
+    (`_Record.report_before`, `snapshot_of`), so the card and the sheet never say LIVE or "not in
+    yet" about results they hold, at any hour and after the report's own record has left the
+    live days. Every calendar day, because a report can carry a closed day's date and
+    `previous_trading_day` steps over it. Its own first figure ends that. A pending row the day
+    before stops nothing, so a stale earlier row never costs the true report its card. Only the
+    reading changes: the record stays on the SEC watch and keeps asking FMP, so a true report on
+    that date still lands.
   A filing's figures live in this process, so a restart loses them, and until FMP fills, the row
   reads as its own again.
 
@@ -180,10 +182,12 @@ GUARDS, each a defect found elsewhere in this repo:
     within 2% (FMP's dropped-digit revenue, `earnings_service._reconcile_revenue`);
   * a GAAP-only EPS is shown labelled GAAP with no beat/miss — the consensus is adjusted (the
     owner's 2026-09-27 caution, `news_insight_service._earnings_line`);
-  * a filing's figure is only as exact as its print: "$17.1 billion" is anything from $17.05B
-    to $17.15B and "$0.41" anything from $0.405 to $0.415 (FMP's consensus carries four
-    decimals), so against a consensus inside that band it shows with no surprise, never a 0.0,
-    until FMP's exact figure replaces it;
+  * a figure is only as exact as its print: "$17.1 billion" is anything from $17.05B to $17.15B
+    and "$0.41" anything from $0.405 to $0.415 (FMP's consensus carries four decimals), so
+    against a consensus inside that band it shows with no surprise, never a 0.0. A filing's
+    revenue waits for FMP's exact figure. An EPS has none to wait for: FMP carries the same
+    print, so its figure to the cent gets the same band (`eps_print_covers`), and neither result
+    push states a verdict on it. Only a figure equal to the consensus is in line;
   * no surprise percentage against an estimate under $0.01 (`earnings_sender.MIN_ABS_ESTIMATE`);
   * a zero revenue from FMP is stored only against a consensus under $100M, with no figure
     held (a pre-revenue name can report nothing): beside a material consensus, or none, it
@@ -215,7 +219,11 @@ from typing import (
 )
 
 from app.config import settings
-from app.services._earnings_common import eps_digit_shift_suspect
+from app.services._earnings_common import (
+    EPS_ROUNDING_SLACK,
+    eps_digit_shift_suspect,
+    eps_print_covers,
+)
 from app.services.earnings_filing_service import _DUE_SLACK_SECONDS, FilingFigures
 from app.services.earnings_window_service import (
     _TRUNCATION_ROWS,
@@ -256,8 +264,6 @@ EARNINGS_LIVE_PREV_DAY_UNTIL_HOUR_ET = 12
 #: Below this |estimate| no surprise percentage is honest (`earnings_sender.MIN_ABS_ESTIMATE`:
 #: a $0.001 estimate against a $0.40 actual is a 39,900% "surprise").
 MIN_ABS_EPS_ESTIMATE = 0.01
-#: Floating-point room at the edge of an EPS print's rounding: 0.415 - 0.41 is 0.0050000000000000044.
-_EPS_ROUNDING_SLACK = 1e-9
 #: A revenue estimate this large is material enough for the plausibility guard. Smaller
 #: (pre-revenue) companies routinely land far from a tiny consensus, and holding their
 #: figure would hide a real result.
@@ -339,9 +345,9 @@ class _Record:
     seen_pending: bool = False
     landed_at: Optional[datetime] = None
     landed_from_pending: bool = False
-    # The same symbol's record on the trading day before, once it has results: what this record
-    # reads as while it has none (ONE REPORT, TWO DATES). Held here because that record leaves
-    # the live days a day before this one.
+    # The same symbol's nearest record back to the trading day before, once it has results: what
+    # this record reads as while it has none (ONE REPORT, TWO DATES). Held here because that
+    # record leaves the live days before this one.
     report_before: Optional["_Record"] = None
     # The fold runs on every tick and feed build: a refusal is logged once per record.
     revenue_refusal_logged: bool = False
@@ -416,8 +422,9 @@ def revenue_surprise_pct(actual: Optional[float], estimate: Optional[float]) -> 
 def eps_metric(rec: _Record) -> LiveMetric:
     """FMP first (adjusted, the consensus's basis), then the filing's adjusted EPS, then the
     filing's GAAP EPS labelled GAAP and never coloured. With no shown estimate the guard reads
-    the guard-only one; the surprise and the metric's `estimate` never do. A filing figure whose
-    rounding covers the estimate carries no verdict, as in `revenue_metric`."""
+    the guard-only one; the surprise and the metric's `estimate` never do. A figure whose print
+    covers the estimate carries no verdict, as in `revenue_metric`: a filing's by its own
+    rounding, FMP's by `eps_print_covers`, because it carries the same print."""
     est = rec.eps_estimate
     guard_est = est if est is not None else rec.eps_guard_estimate
     filing = rec.filing
@@ -432,11 +439,14 @@ def eps_metric(rec: _Record) -> LiveMetric:
         if eps_digit_shift_suspect(value, guard_est, gaap):
             held = True
             continue
-        rounding = filing.eps_rounding if source == SOURCE_FILING else None
-        if est is not None and rounding is not None \
-                and abs(value - est) <= rounding + _EPS_ROUNDING_SLACK:
-            return LiveMetric(est, value, None, source, basis)
-        return LiveMetric(est, value, eps_surprise_pct(value, est), source, basis)
+        if source == SOURCE_FILING:
+            rounding = filing.eps_rounding
+            covered = (est is not None and rounding is not None
+                       and abs(value - est) <= rounding + EPS_ROUNDING_SLACK)
+        else:
+            covered = eps_print_covers(value, est)
+        surprise = None if covered else eps_surprise_pct(value, est)
+        return LiveMetric(est, value, surprise, source, basis)
     if held:
         return LiveMetric(est, checking=True)
     if gaap is not None:
@@ -567,8 +577,8 @@ def recent_card_visible(status: str, day: date, now_et: datetime) -> bool:
 
 
 def _record_shown(rec: _Record) -> _Record:
-    """The record a report reads from: its own, or with no figures of its own, the report the
-    trading day before (ONE REPORT, TWO DATES in the module docstring)."""
+    """The record a report reads from: its own, or with no figures of its own, the report it
+    noted (ONE REPORT, TWO DATES in the module docstring)."""
     before = rec.report_before
     if (before is None or has_results(eps_metric(rec), revenue_metric(rec))
             or not has_results(eps_metric(before), revenue_metric(before))):
@@ -1023,17 +1033,20 @@ class EarningsLiveService:
             self._note_report_before(rec)
 
     def _note_report_before(self, rec: _Record) -> None:
-        """Keep the same symbol's record on the previous trading day, once it has results (ONE
-        REPORT, TWO DATES in the module docstring). A record gets here on every fold, so a report
-        that lands after its leftover opened is still found, and the reference is what carries it
-        past the day that record is pruned."""
-        earlier = self._records.get((rec.symbol, previous_trading_day(rec.day)))
-        if (earlier is None or earlier is rec.report_before
-                or not has_results(eps_metric(earlier), revenue_metric(earlier))):
+        """Keep the same symbol's nearest record with results, on any calendar day back to the
+        previous trading day (ONE REPORT, TWO DATES in the module docstring). A record gets here
+        on every fold, so a report that lands after its leftover opened is still found, and the
+        reference is what carries it past the day that record is pruned, so finding none changes
+        nothing."""
+        for back in range(1, (rec.day - previous_trading_day(rec.day)).days + 1):
+            earlier = self._records.get((rec.symbol, rec.day - timedelta(days=back)))
+            if earlier is None or not has_results(eps_metric(earlier), revenue_metric(earlier)):
+                continue
+            if earlier is not rec.report_before:
+                rec.report_before = earlier
+                logger.info("[earnings-live] %s %s: no figures of its own, reads as the %s report",
+                            rec.symbol, rec.day.isoformat(), earlier.day.isoformat())
             return
-        rec.report_before = earlier
-        logger.info("[earnings-live] %s %s: no figures of its own, reads as the %s report",
-                    rec.symbol, rec.day.isoformat(), earlier.day.isoformat())
 
     def absorb_filing(self, symbol: str, day: date, figures: FilingFigures,
                       now: datetime) -> None:

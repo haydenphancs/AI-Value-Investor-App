@@ -193,6 +193,60 @@ def test_fmp_eps_is_adjusted_and_carries_its_surprise():
     assert m.surprise_pct == pytest.approx(7.32, abs=0.01)
 
 
+@pytest.mark.parametrize("actual,estimate", [
+    (0.01, 0.0148), (0.41, 0.4134), (0.41, 0.4062), (-0.41, -0.4134), (1.2, 1.2034),
+    (0.41, 0.415), (0.41, 0.405),
+], ids=["a_penny", "above", "below", "a_loss", "one_decimal", "top_of_the_band",
+        "bottom_of_the_band"])
+def test_a_cent_print_from_fmp_has_no_verdict_with_the_consensus_inside_its_half_cent(
+        actual, estimate):
+    """$0.41 is anything from $0.405 to $0.415, whichever source carries it, so the data cannot say
+    which side of a 0.4134 consensus the company landed on."""
+    m = els.eps_metric(_rec(eps_estimate=estimate, fmp_eps=actual))
+    assert (m.actual, m.source, m.surprise_pct) == (actual, els.SOURCE_FMP, None)
+
+
+def test_the_same_print_reads_the_same_from_the_release_and_from_fmp():
+    """No colour flip when FMP replaces the filing's figure with the same number."""
+    filed = els.eps_metric(_rec(eps_estimate=0.4134,
+                                filing=_filing(eps_adjusted=0.41, eps_rounding=0.005)))
+    confirmed = els.eps_metric(_rec(eps_estimate=0.4134, fmp_eps=0.41))
+    assert (filed.actual, filed.surprise_pct) == (confirmed.actual, confirmed.surprise_pct)
+
+
+@pytest.mark.parametrize("actual,estimate,pct", [
+    (0.41, 0.4151, -1.23),                # past the top of the band
+    (0.41, 0.4049, 1.26),                 # past the bottom
+    (0.4134, 0.41, 0.83),                 # finer digits are an exact figure, not a print
+    (0.41, 0.41, 0.0),                    # equal to the consensus is in line
+    (0.60, 0.41, 46.34),
+])
+def test_an_fmp_eps_outside_that_band_keeps_its_verdict(actual, estimate, pct):
+    m = els.eps_metric(_rec(eps_estimate=estimate, fmp_eps=actual))
+    assert m.surprise_pct == pytest.approx(pct, abs=0.01)
+
+
+def test_a_cent_print_with_no_consensus_or_a_tiny_one_stays_as_it_was():
+    assert els.eps_metric(_rec(eps_estimate=None, fmp_eps=0.41)).surprise_pct is None
+    assert els.eps_metric(_rec(eps_estimate=0.004, fmp_eps=0.40)).surprise_pct is None
+
+
+def test_the_band_is_no_data_guard_a_held_figure_stays_held():
+    rec = _rec(eps_estimate=1.65, fmp_eps=0.169)
+    assert els.eps_metric(rec).checking is True
+
+
+def test_the_financials_tab_keeps_its_raw_compare_for_the_same_print():
+    """The Financials tab and the sheet's last four quarters compare the raw figures, so a quarter
+    this band leaves without a verdict on report day reads "Miss -0.8%" there. Pinned so that gap
+    is a choice: it has shipped, its chart reads it, and closing it is the owner's call."""
+    from app.services.earnings_service import _compute_surprise
+
+    assert _compute_surprise(0.41, 0.4134) == -0.82
+    assert els._quarter_result(0.41, 0.4134, True) == "missed"
+    assert els.eps_metric(_rec(eps_estimate=0.4134, fmp_eps=0.41)).surprise_pct is None
+
+
 def test_fmp_replaces_the_filing_figure_the_moment_it_has_one():
     rec = _rec(filing=_filing(eps_adjusted=0.45, revenue=17.0e9))
     assert els.eps_metric(rec).source == els.SOURCE_FILING

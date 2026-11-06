@@ -25,12 +25,12 @@ and is marked handled here with nothing further sent: a live push from its filin
 out inside the window, is all it gets.
 
 ONE REPORT, TWO DATES. FMP's leftover row a trading day from a report lands like any report, and
-the key carries its date, so the ledger decides: a user holding the result key on the trading day
-either side was told about this report and is left out (`earnings_sender.neighbouring_result_keys`,
-`unless_claimed`). Only the ledger knows who heard. It outlives a restart, it answers per user,
-and a report that told nobody, a filing with the live kind off or a landing past the window,
-holds nothing back. `_to_decide`'s oldest-first order is what makes two rows landing in one round
-one push under the first date.
+the key carries its date, so the ledger decides: a user holding the result key on any day out to
+the trading day either side was told about this report and is left out
+(`earnings_sender.neighbouring_result_keys`, `unless_claimed`). Only the ledger knows who heard.
+It outlives a restart, it answers per user, and a report that told nobody, a filing with the live
+kind off or a landing past the window, holds nothing back. `_to_decide`'s oldest-first order is
+what makes two rows landing in one round one push under the first date.
 
 A FAILED WATCHER READ. A report's key is taken before its send, and the dispatcher's usual 0
 for a failed read looks like a ticker nobody watches, so one failed read at the landing minute

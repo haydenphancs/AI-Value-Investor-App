@@ -3,7 +3,7 @@
 Through FastAPI's real serialisation (`response_model`), with the identity overridden and
 every upstream faked: today's row from the Tracking memo, the previous day's from the live
 records, the year-ago / last-4 extras injected. Pins the input wall, the report-day choice,
-the "none" answer and the wire keys iOS decodes.
+the "none" answer, which only a read that worked may give, and the wire keys iOS decodes.
 """
 from __future__ import annotations
 
@@ -191,7 +191,6 @@ def test_an_upcoming_report_in_the_window_is_answered_upcoming(client):
     "/api/v1/tracking/earnings/TOOLONGTICKER1/live",
     "/api/v1/tracking/earnings/INTC/live?report_date=yesterday",
     "/api/v1/tracking/earnings/INTC/live?report_date=2026-12-31",
-    "/api/v1/tracking/earnings/INTC/live?report_date=2026-10-01",
 ])
 def test_bad_input_is_refused_before_any_read(client, path):
     resp = client.get(path)
@@ -199,10 +198,90 @@ def test_bad_input_is_refused_before_any_read(client, path):
     assert resp.json()["error_code"] == "INVALID_INPUT"
 
 
-def test_a_date_outside_the_window_says_which_window(client):
+def test_a_date_past_the_calendar_says_which_window(client):
     resp = client.get("/api/v1/tracking/earnings/INTC/live?report_date=2026-12-31")
     assert (resp.status_code, resp.json()["error_code"]) == (400, "INVALID_INPUT")
     assert "2026-12-31 is outside 2026-10-28..2026-11-12" in resp.json()["message"]
+
+
+def test_the_last_day_of_the_calendar_is_still_answered(client):
+    resp = client.get("/api/v1/tracking/earnings/ZZZZ/live?report_date=2026-11-12")
+    assert (resp.status_code, resp.json()["status"]) == (200, "none")
+
+
+# An inbox row keeps "See live results" and its report date for 90 days, and that report's record
+# leaves with the live days: Thursday the 29th has the 28th and itself.
+
+
+@pytest.mark.parametrize("old", ["2026-10-27", "2026-10-26", "2026-09-01", "2016-01-04"])
+def test_an_old_inbox_row_is_answered_and_never_refused(client, old):
+    """A 400 here is for good: the row's date never comes back into the window, so its Retry can
+    never work, and the screen has no figures of its own to fall back on."""
+    resp = client.get(f"/api/v1/tracking/earnings/ZZZZ/live?report_date={old}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "none", "a report still to come is the one thing it must not say"
+    assert body["poll_seconds"] is None
+
+
+def test_an_old_inbox_row_answers_like_an_open_sheet_when_a_report_is_up(client):
+    """Nothing can be read for the old date, so the sheet says what is true now."""
+    pinned = client.get("/api/v1/tracking/earnings/INTC/live?report_date=2026-10-26").json()
+    opened = client.get("/api/v1/tracking/earnings/INTC/live").json()
+    assert pinned == opened and pinned["report_date"] == "2026-10-29"
+
+
+def test_an_old_inbox_row_is_answered_from_the_report_held_since(client):
+    els.get_earnings_live_service().observe_rows(
+        PREV, [_row("MSFT", PREV, epsActual=3.1, revenueActual=7e10, epsEstimated=3.0,
+                    revenueEstimated=6.9e10)],
+        datetime(2026, 10, 29, 12, tzinfo=timezone.utc))
+    body = client.get("/api/v1/tracking/earnings/MSFT/live?report_date=2026-10-26").json()
+    assert (body["status"], body["report_date"]) == ("reported", "2026-10-28")
+
+
+def test_the_first_day_of_the_live_days_stays_pinned(client):
+    """The floor itself is inside: a report held on it keeps its date."""
+    els.get_earnings_live_service().observe_rows(
+        PREV, [_row("AAPL", PREV, epsActual=3.1, revenueActual=7e10, epsEstimated=3.0,
+                    revenueEstimated=6.9e10)],
+        datetime(2026, 10, 29, 12, tzinfo=timezone.utc))
+    body = client.get("/api/v1/tracking/earnings/AAPL/live?report_date=2026-10-28").json()
+    assert (body["status"], body["report_date"]) == ("reported", "2026-10-28")
+
+
+def test_an_old_inbox_row_during_an_outage_is_an_error_the_client_can_retry(client, monkeypatch):
+    _calendar_down(monkeypatch)
+    resp = client.get("/api/v1/tracking/earnings/ZZZZ/live?report_date=2026-10-26")
+    assert (resp.status_code, resp.json()["error_code"]) == (502, "FMP_UNAVAILABLE")
+
+
+def test_an_old_date_says_so_in_the_log_with_the_parsed_date(client, caplog):
+    with caplog.at_level(logging.INFO, logger=ts.logger.name):
+        client.get("/api/v1/tracking/earnings/ZZZZ/live?report_date=2026-10-26%0AFORGED-LINE")
+    (line,) = [r.getMessage() for r in caplog.records if "left the live days" in r.getMessage()]
+    assert "ZZZZ" in line and "2026-10-26" in line and "FORGED" not in line
+
+
+@pytest.mark.parametrize("estimate", [0, 0.0, -1.0, "0", None])
+def test_a_zero_revenue_estimate_is_no_consensus_on_the_sheet(client, estimate):
+    """A record built from this row would carry none, so the sheet before it must not print
+    "$0", and the EPS consensus beside it still shows."""
+    day = REPORT + timedelta(days=4)
+    ts.get_fmp_client().rows[:] = [
+        _row("JOBY", day, revenueEstimated=estimate, epsEstimated=-0.05),
+        _row("ZZZY", REPORT),
+    ]
+    body = client.get("/api/v1/tracking/earnings/JOBY/live").json()
+    assert (body["status"], body["report_date"]) == ("upcoming", day.isoformat())
+    assert (body["eps"]["estimate"], body["revenue"]["estimate"]) == (-0.05, None)
+
+
+def test_a_real_revenue_estimate_still_shows_on_the_sheet(client):
+    day = REPORT + timedelta(days=4)
+    ts.get_fmp_client().rows[:] = [_row("JOBY", day, revenueEstimated=23.5e6)]
+    body = client.get("/api/v1/tracking/earnings/JOBY/live").json()
+    assert body["revenue"]["estimate"] == 23.5e6
 
 
 def _logged(caplog) -> List[logging.LogRecord]:
@@ -236,10 +315,12 @@ def test_any_other_value_error_from_the_service_reaches_the_logged_branch(
 
     monkeypatch.setattr(ts.TrackingService, "get_earnings_live", _bug)
     with caplog.at_level(logging.ERROR, logger=endpoint.logger.name):
-        resp = client.get("/api/v1/tracking/earnings/INTC/live?report_date=2026-10-29")
+        resp = client.get("/api/v1/tracking/earnings/INTC/live"
+                          "?report_date=2026-10-29%0AFORGED-LOG-LINE")
     assert resp.status_code >= 500 and resp.json()["error_code"] != "INVALID_INPUT"
     (line,) = _logged(caplog)
     assert "INTC" in line.getMessage() and REPORT.isoformat() in line.getMessage()
+    assert "FORGED" not in line.getMessage(), "the parsed date, never the caller's text"
 
 
 def test_a_failed_calendar_read_warns_with_the_ticker_and_the_day(client, monkeypatch, caplog):
@@ -327,10 +408,65 @@ def test_a_pinned_date_with_nothing_listed_still_answers_none(client):
     assert (body["status"], body["report_date"]) == ("none", "2026-10-29")
 
 
+def _calendar_down(monkeypatch) -> None:
+    """The memo's own read fails, as after a restart in an FMP outage: no day of it is held."""
+    async def _down(from_date=None, to_date=None):
+        raise RuntimeError("FMP 503")
+
+    monkeypatch.setattr(ts.get_fmp_client(), "get_earnings_calendar", _down)
+
+
+@pytest.mark.parametrize("query", ["", "?report_date=2026-10-29", "?report_date=2026-11-02"],
+                         ids=["no_date", "today", "a_later_date"])
+def test_a_failed_calendar_read_is_an_error_never_a_report_nobody_scheduled(
+        client, monkeypatch, query):
+    """`none` is "No earnings report in the next two weeks", and this read cannot know that.
+    An error is what shows the card's retry notice."""
+    _calendar_down(monkeypatch)
+    resp = client.get(f"/api/v1/tracking/earnings/INTC/live{query}")
+    body = resp.json()
+    assert (resp.status_code, body["error_code"]) == (502, "FMP_UNAVAILABLE")
+    assert body["user_message"], "the body is the iOS error shape"
+    assert body["details"]["ticker"] == "INTC" and body["details"]["step"] == "earnings_live"
+
+
+def test_a_failed_calendar_read_is_handled_so_it_warns_and_opens_no_error(
+        client, monkeypatch, caplog):
+    """A sheet polled through an outage must not open one Sentry issue per read."""
+    _calendar_down(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger=endpoint.logger.name):
+        client.get("/api/v1/tracking/earnings/INTC/live?report_date=2026-11-02")
+    assert _logged(caplog) == []
+    (line,) = [r.getMessage() for r in caplog.records if r.name == endpoint.logger.name]
+    assert "INTC" in line and "2026-11-02" in line
+
+
+def test_a_failed_calendar_read_still_answers_a_report_a_record_holds(client, monkeypatch):
+    live = els.get_earnings_live_service()
+    live.observe_rows(PREV, [_row("MSFT", PREV, epsActual=3.1, revenueActual=7e10,
+                                  epsEstimated=3.0, revenueEstimated=6.9e10)],
+                      datetime(2026, 10, 29, 12, tzinfo=timezone.utc))
+    _calendar_down(monkeypatch)
+    resp = client.get("/api/v1/tracking/earnings/MSFT/live")
+    assert resp.status_code == 200, resp.text
+    assert (resp.json()["status"], resp.json()["report_date"]) == ("reported", "2026-10-28")
+
+
+def test_the_retry_after_an_outage_finds_the_report(client, monkeypatch):
+    fmp = ts.get_fmp_client()
+    with monkeypatch.context() as outage:
+        _calendar_down(outage)
+        assert client.get("/api/v1/tracking/earnings/AAPL/live").status_code == 502
+    assert fmp.rows, "the outage is over"
+    ts.reset_earnings_calendar_cache()                          # and so is the memo's wait
+    body = client.get("/api/v1/tracking/earnings/AAPL/live").json()
+    assert (body["status"], body["report_date"]) == ("upcoming", "2026-11-02")
+
+
 def test_a_failed_calendar_read_never_moves_a_pinned_sheet(client, monkeypatch):
     async def _down(fmp, today, *, later_days_since=None):
         raise RuntimeError("FMP 503")
 
     monkeypatch.setattr(ts, "_cached_earnings_calendar", _down)
-    body = client.get("/api/v1/tracking/earnings/AAPL/live?report_date=2026-11-02").json()
-    assert (body["status"], body["report_date"]) == ("none", "2026-11-02")
+    resp = client.get("/api/v1/tracking/earnings/AAPL/live?report_date=2026-11-02")
+    assert (resp.status_code, resp.json()["error_code"]) == (502, "FMP_UNAVAILABLE")

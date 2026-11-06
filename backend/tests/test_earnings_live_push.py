@@ -20,9 +20,12 @@ kinds — and the daily 16:00 ET sender — claim the SAME key. What is pinned h
   * a round sends oldest first, so the cap cannot run a report out of that window;
   * the round cap's warning counts the reports still owed a push, nothing else;
   * one report on two dated rows is told once to each user, whichever source fills which row
-    in which order, across a restart, and past the daily pass: the real loop runs those over the
-    real dispatcher and a fake ledger, and the keys it holds are what they assert;
-  * who was told is the ledger's answer, so a report nobody heard about holds nothing back.
+    in which order, across a restart, across a closed day and past the daily pass: the real loop
+    runs those over the real dispatcher and a fake ledger, and the keys it holds are what they
+    assert;
+  * who was told is the ledger's answer, so a report nobody heard about holds nothing back;
+  * a cent print with the consensus inside its half cent has no verdict, so neither kind and no
+    pass states one, and the Financials tab's raw compare is pinned beside it.
 The dispatcher is a recorder, or the real one over a fake table where a failed read or the
 ledger is the point — nothing here reaches APNs or Supabase.
 """
@@ -362,6 +365,7 @@ _BEHIND_THE_CAP = {
     "no_estimate": {"eps": 0.42, "eps_est": None},
     "filing_figure": {"eps": 0.60, "eps_source": SOURCE_FILING, "eps_pct": 46.34},
     "no_eps_yet": {"rev": 17.1e9, "rev_pct": 3.01},
+    "cent_print_inside_its_band": {"eps": 0.01, "eps_est": 0.0148},
 }
 
 
@@ -838,6 +842,51 @@ async def test_a_read_that_works_puts_the_ticker_back_in_its_place(monkeypatch, 
 
 
 @pytest.mark.asyncio
+async def test_a_ticker_down_on_the_older_date_holds_back_no_report_dated_after_it(
+        monkeypatch, clean_sender):
+    """Yesterday's after-close report beside today's is the likeliest shape of this. Date order
+    alone would read that ticker first on every round and tell nobody else."""
+    svc = _with_tickers_down(monkeypatch, "AAA")
+    reports = [replace(_big("AAA"), day=REPORT - timedelta(days=1)), _big("BBB"), _big("CCC")]
+    await sender.dispatch_landings(reports, NOW)
+    assert svc.keys == [] and svc.supabase.failed == ["AAA"]
+    await sender.dispatch_landings(reports, NOW)
+    assert _told(svc) == ["BBB", "CCC"] and svc.sent == BOTH * 2
+    assert svc.supabase.failed == ["AAA", "AAA"], "one failed read a round, behind the rest"
+
+
+def _waiting_on_fmp(symbol: str) -> LiveSnapshot:
+    """A filing's revenue alone: the report stays open for FMP's EPS once its live kind is done,
+    so only a read that works can clear its ticker from the order."""
+    return _snap(symbol, rev=17.1e9, rev_source=SOURCE_FILING, preliminary=True)
+
+
+@pytest.mark.asyncio
+async def test_a_read_that_finds_nobody_watching_still_puts_the_ticker_back(
+        monkeypatch, clean_sender):
+    svc = _with_tickers_down(monkeypatch, "AAA")
+    await sender.dispatch_landings([_waiting_on_fmp("AAA")], NOW)
+    assert list(sender._went_back) == ["AAA"]
+    svc.supabase.down.clear()
+    svc.supabase.users = ()
+    await sender.dispatch_landings([_waiting_on_fmp("AAA")], NOW)
+    assert svc.keys == [] and sender._went_back == {}
+
+
+@pytest.mark.asyncio
+async def test_a_result_read_that_works_puts_the_ticker_back_too(monkeypatch, clean_sender):
+    """The result kind alone, as shipped, with the ticker's second dated row still open."""
+    svc = _with_tickers_down(monkeypatch, "AAA")
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+    reports = [replace(_big("AAA"), day=REPORT - timedelta(days=1)), _waiting_on_fmp("AAA")]
+    await sender.dispatch_landings(reports, NOW)
+    assert list(sender._went_back) == ["AAA"]
+    svc.supabase.down.clear()
+    await sender.dispatch_landings(reports, NOW)
+    assert svc.sent == [KIND_EARNINGS_RESULT] and sender._went_back == {}
+
+
+@pytest.mark.asyncio
 async def test_a_report_sent_back_still_goes_out_behind_a_full_cap(monkeypatch, clean_sender):
     monkeypatch.setattr(sender, "MAX_SENDS_PER_ROUND", 2)
     svc = _with_tickers_down(monkeypatch, "AAA")
@@ -858,6 +907,17 @@ async def test_a_cap_that_stops_the_round_leaves_the_back_of_the_queue_unread(
     await sender.dispatch_landings(reports, NOW)
     await sender.dispatch_landings(reports, NOW)
     assert _told(svc) == ["BBB"] and svc.supabase.failed == ["AAA"]
+
+
+@pytest.mark.asyncio
+async def test_the_order_forgets_a_ticker_done_while_another_report_stays_open(
+        monkeypatch, clean_sender):
+    _with_tickers_down(monkeypatch, "AAA")
+    waiting = _waiting_on_fmp("BBB")
+    await sender.dispatch_landings([_big("AAA"), waiting], NOW)
+    assert list(sender._went_back) == ["AAA"]
+    await sender.dispatch_landings([waiting], NOW)
+    assert sender._went_back == {}
 
 
 @pytest.mark.asyncio
@@ -1365,6 +1425,88 @@ async def test_one_report_on_two_dated_rows_is_told_once_under_its_first_date(
     assert _keys(ledger) == _FIRST_PUSH
 
 
+THANKSGIVING_EVE, THANKSGIVING, BLACK_FRIDAY = (date(2026, 11, day) for day in (25, 26, 27))
+
+
+async def _first_row_lands_then_fmp_fills_the_next(loop, market: _Market, first: date,
+                                                   second: date) -> None:
+    await loop.minute(market, _et_time(first, 8))
+    market.fills(first)
+    await loop.minute(market, _et_time(first, 9))
+    await loop.minute(market, _et_time(second, 7))
+    market.fills(second)
+    await loop.minute(market, _et_time(second, 8))
+
+
+async def _second_row_lands_then_fmp_fills_the_first(loop, market: _Market, first: date,
+                                                     second: date) -> None:
+    await loop.minute(market, _et_time(first, 14))
+    await loop.minute(market, _et_time(second, 8))
+    market.fills(second)
+    await loop.minute(market, _et_time(second, 8, 10))
+    market.fills(first)
+    await loop.minute(market, _et_time(second, 11))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live_kind", [False, True], ids=["shipped_flags", "live_kind_on"])
+@pytest.mark.parametrize("first,second,told", [
+    (SATURDAY, MONDAY, SATURDAY),
+    (SUNDAY, MONDAY, SUNDAY),
+    (SATURDAY, SUNDAY, SATURDAY),
+    (FRIDAY, SATURDAY, FRIDAY),
+    (FRIDAY, SUNDAY, FRIDAY),
+    (THANKSGIVING_EVE, THANKSGIVING, THANKSGIVING_EVE),
+    (THANKSGIVING, BLACK_FRIDAY, THANKSGIVING),
+], ids=["sat_mon", "sun_mon", "sat_sun", "fri_sat", "fri_sun", "wed_holiday", "holiday_fri"])
+async def test_a_report_dated_on_a_closed_day_is_told_once_with_its_first_row_landing_first(
+        live_loop, ledger, monkeypatch, live_kind, first, second, told):
+    """`previous_trading_day` steps over a closed day, so a Monday leftover beside a Saturday
+    report named no key of it. The key is asserted, as in the table above."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", live_kind)
+    await _first_row_lands_then_fmp_fills_the_next(
+        live_loop, _Market(days=(first, second)), first, second)
+    assert _keys(ledger) == {f"earnings_result:INTC:{told.isoformat()}"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live_kind", [False, True], ids=["shipped_flags", "live_kind_on"])
+@pytest.mark.parametrize("first,second", [
+    (FRIDAY, SATURDAY), (SATURDAY, SUNDAY), (THANKSGIVING_EVE, THANKSGIVING),
+], ids=["fri_sat", "sat_sun", "wed_holiday"])
+async def test_a_report_dated_on_a_closed_day_is_told_once_with_its_later_row_landing_first(
+        live_loop, ledger, monkeypatch, live_kind, first, second):
+    """FMP can fill the rows in either order, so the neighbour must be found from both sides. The
+    row FMP filled first is the one told, whichever date it carries."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", live_kind)
+    await _second_row_lands_then_fmp_fills_the_first(
+        live_loop, _Market(days=(first, second)), first, second)
+    assert _keys(ledger) == {f"earnings_result:INTC:{second.isoformat()}"}
+
+
+@pytest.mark.asyncio
+async def test_a_monday_leftover_filled_ahead_of_its_saturday_row_is_the_one_push(
+        live_loop, ledger):
+    """By Monday a Saturday landing is outside the result window, so it tells nobody."""
+    await _second_row_lands_then_fmp_fills_the_first(
+        live_loop, _Market(days=(SATURDAY, MONDAY)), SATURDAY, MONDAY)
+    assert _keys(ledger) == {f"earnings_result:INTC:{MONDAY.isoformat()}"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("report", [SATURDAY, SUNDAY])
+async def test_the_monday_leftover_of_a_weekend_report_reads_as_it_and_never_as_live(
+        live_loop, ledger, report):
+    market = _Market(days=(report, MONDAY))
+    await live_loop.minute(market, _et_time(report, 8))
+    market.fills(report)
+    await live_loop.minute(market, _et_time(report, 9))
+    await live_loop.minute(market, _et_time(MONDAY, 7))
+    card = live_loop.service.snapshot("INTC", MONDAY, _et_time(MONDAY, 7))
+    assert (card.status, card.reads_as) == (STATUS_REPORTED, report)
+    assert (card.eps.actual, card.revenue.actual) == (0.60, 17.1e9)
+
+
 @pytest.mark.asyncio
 async def test_with_the_shipped_flags_the_leftover_row_sends_no_second_result_push(
         live_loop, ledger, monkeypatch):
@@ -1501,16 +1643,106 @@ async def test_a_reports_tomorrow_push_asks_nothing_of_the_ledger(monkeypatch):
     assert len(svc.supabase.rows) == 1
 
 
-@pytest.mark.parametrize("when,before,after", [
-    ("2026-10-28", "2026-10-27", "2026-10-29"),          # an ordinary Wednesday
-    ("2026-10-30", "2026-10-29", "2026-11-02"),          # Friday, over the weekend
-    ("2026-11-02", "2026-10-30", "2026-11-03"),          # Monday, back over the weekend
-    ("2026-11-25", "2026-11-24", "2026-11-27"),          # over Thanksgiving
-    ("2026-10-31", "2026-10-30", "2026-11-02"),          # a Saturday row
+@pytest.mark.parametrize("when,around", [
+    ("2026-10-28", ["2026-10-27", "2026-10-29"]),                            # an ordinary Wednesday
+    ("2026-10-30", ["2026-10-29", "2026-10-31", "2026-11-01", "2026-11-02"]),  # Friday
+    ("2026-11-02", ["2026-10-30", "2026-10-31", "2026-11-01", "2026-11-03"]),  # Monday
+    ("2026-11-25", ["2026-11-24", "2026-11-26", "2026-11-27"]),              # over Thanksgiving
+    ("2026-11-26", ["2026-11-25", "2026-11-27"]),                            # a row dated on it
+    ("2026-10-31", ["2026-10-30", "2026-11-01", "2026-11-02"]),              # a Saturday row
+    ("2026-11-01", ["2026-10-30", "2026-10-31", "2026-11-02"]),              # a Sunday row
 ])
-def test_the_neighbouring_keys_are_the_trading_days_either_side(when, before, after):
+def test_the_neighbouring_keys_are_every_day_out_to_the_trading_day_either_side(when, around):
     assert daily.neighbouring_result_keys("intc", when) == [
-        f"earnings_result:INTC:{before}", f"earnings_result:INTC:{after}"]
+        f"earnings_result:INTC:{day}" for day in around]
+
+
+def test_the_neighbours_run_both_ways_across_every_closed_day_of_the_calendar():
+    """Either side, because FMP can fill the two rows in either order: a row that names another
+    must be named by it, or the second row to land finds nobody told."""
+    days = [date(2026, 1, 1) + timedelta(days=i) for i in range(730)]
+    near = {day: set(daily.neighbouring_result_keys("INTC", day.isoformat())) for day in days}
+    key = {day: daily.result_dedup_key("INTC", day.isoformat()) for day in days}
+    for day in days:
+        assert key[day] not in near[day], "a report never holds itself back"
+        for other in (day + timedelta(days=i) for i in range(1, 9)):
+            if other in near:
+                assert (key[other] in near[day]) == (key[day] in near[other]), (day, other)
+
+
+def test_the_neighbours_of_a_row_stop_at_the_trading_day_either_side():
+    """A company does report again the week after: nothing past those days may hold it back."""
+    keys = daily.neighbouring_result_keys("INTC", "2026-10-28")
+    assert "earnings_result:INTC:2026-10-26" not in keys
+    assert "earnings_result:INTC:2026-10-30" not in keys
+    keys = daily.neighbouring_result_keys("INTC", "2026-11-09")
+    assert "earnings_result:INTC:2026-11-05" not in keys
+    assert "earnings_result:INTC:2026-11-11" not in keys
+
+
+@pytest.mark.asyncio
+async def test_a_user_told_on_a_saturday_is_skipped_by_the_daily_pass_on_monday(monkeypatch):
+    svc = _ledger_dispatcher(monkeypatch, users=("u1", "u2"))
+    svc.supabase.rows.append({"user_id": "u1", "dedup_key": "earnings_result:INTC:2026-11-07",
+                              "kind": KIND_EARNINGS_RESULT})
+    await daily._dispatch(kind=KIND_EARNINGS_RESULT, symbol="INTC", when="2026-11-09",
+                          title="t", body="b")
+    assert svc.supabase.told == {("u1", "earnings_result:INTC:2026-11-07"),
+                                 ("u2", "earnings_result:INTC:2026-11-09")}
+
+
+# ── a cent print inside its half cent ────────────────────────────────────────
+
+
+def _cent_print_rows(**kw) -> Dict[str, Any]:
+    return {"symbol": "INTC", "date": REPORT.isoformat(), "epsEstimated": 0.0148,
+            "revenueEstimated": 16.6e9, **kw}
+
+
+async def _cent_print_lands(*, estimate=0.0148) -> None:
+    """$0.01 lands, seen pending first, through the real fold and the real sender."""
+    live = EarningsLiveService()
+    live.observe_rows(REPORT, [_cent_print_rows(epsEstimated=estimate)],
+                      datetime(2026, 10, 29, 13, tzinfo=timezone.utc))
+    live.observe_rows(REPORT, [_cent_print_rows(epsEstimated=estimate, epsActual=0.01,
+                                                revenueActual=16.6e9)], NOW)
+    await sender.dispatch_landings(live.landed_snapshots(NOW), NOW)
+
+
+@pytest.mark.asyncio
+async def test_a_cent_print_inside_its_half_cent_never_sends_the_result_kind(dispatch, monkeypatch):
+    """$0.01 against 0.0148 is a 32% miss on paper, and the true figure can sit on either side of
+    that consensus. The sender works the surprise out for itself, so it must read the band too."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+    await _cent_print_lands()
+    assert dispatch.sent == []
+    assert ("INTC", REPORT) in sender._surprise_done, "decided, not waiting on another figure"
+
+
+@pytest.mark.asyncio
+async def test_a_cent_print_inside_its_half_cent_is_stated_with_no_verdict(dispatch):
+    await _cent_print_lands()
+    assert [s["kind"] for s in dispatch.sent] == [KIND_EARNINGS_LIVE]
+    assert "EPS reported." in dispatch.sent[0]["body"]
+    assert "missed" not in dispatch.sent[0]["body"].split("·")[1]
+
+
+@pytest.mark.asyncio
+async def test_a_cent_print_just_outside_its_half_cent_still_sends_the_miss(dispatch, monkeypatch):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+    await _cent_print_lands(estimate=0.0151)
+    assert [s["kind"] for s in dispatch.sent] == [KIND_EARNINGS_RESULT]
+    assert "missed consensus by 34%" in dispatch.sent[0]["body"]
+
+
+def test_the_daily_pass_reads_the_same_band_or_it_would_send_what_the_live_sender_held():
+    """The key stays unclaimed, so the 16:00 pass would otherwise state the verdict itself."""
+    inside = _cent_print_rows(epsActual=0.01)
+    outside = _cent_print_rows(epsActual=0.01, epsEstimated=0.0151)
+    assert daily.surprise_pct(inside) is None
+    assert daily.select_results([inside], REPORT) == []
+    assert daily.select_results([outside], REPORT) == [
+        ("INTC", REPORT.isoformat(), pytest.approx(-0.3377, abs=0.0001))]
 
 
 def test_the_read_of_who_was_told_is_batched_and_names_both_columns(monkeypatch):

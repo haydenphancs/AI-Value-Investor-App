@@ -43,10 +43,12 @@ What is pinned here, each a way the LIVE card could lie or cost too much:
   * the sender gets watched landings only, while the fold stays whole-market: cards and the
     sheet read every record;
   * a landing older than yesterday tells nobody, and keeps its card and its sheet;
-  * a row with no figures of its own beside a report already in the trading day before reads as
-    that report, at every hour and past the day that report leaves the live days, never as LIVE
-    or "not in yet", while it stays on the SEC watch and keeps asking FMP;
-  * a failed read of the watched list serves the old list and says so.
+  * a row with no figures of its own beside a report already in on any day back to the trading
+    day before reads as that report, at every hour and past the day that report leaves the live
+    days, never as LIVE or "not in yet", while it stays on the SEC watch and keeps asking FMP;
+  * a failed read of the watched list serves the old list and says so;
+  * a failed or empty calendar read never answers `none`: with no record holding the report the
+    sheet raises, so the client retries, and a read that worked keeps `none`.
 Hermetic: inline fakes for FMP, SEC and the dispatcher; the clock is passed in.
 """
 from __future__ import annotations
@@ -1168,6 +1170,22 @@ async def test_a_duplicate_pair_is_one_card_with_the_reported_rows_estimates(
     assert (card.eps_estimate, card.revenue_estimate) == (0.41, 16.6e9)
     assert (card.eps_surprise_pct, card.revenue_surprise_pct) == (7.32, 3.01)
     assert card.earnings_status == "reported"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("estimate", [0, 0.0, -5e6, "0", True, float("nan")])
+async def test_a_future_card_shows_no_revenue_consensus_for_a_zero_estimate(monkeypatch, estimate):
+    """A record built from this row carries none, so the card before it must not print "$0"."""
+    row = _row("JOBY", NEXT, rev_est=estimate, eps_est=-0.05)
+    (card,) = await _feed_service(monkeypatch, _et(REPORT, 9), [row])._get_earnings_alerts(["JOBY"])
+    assert (card.eps_estimate, card.revenue_estimate) == (-0.05, None)
+
+
+@pytest.mark.asyncio
+async def test_a_future_card_keeps_a_real_revenue_consensus(monkeypatch):
+    row = _row("JOBY", NEXT, rev_est=23.5e6, eps_est=-0.05)
+    (card,) = await _feed_service(monkeypatch, _et(REPORT, 9), [row])._get_earnings_alerts(["JOBY"])
+    assert card.revenue_estimate == 23.5e6
 
 
 @pytest.mark.asyncio
@@ -3327,6 +3345,7 @@ async def test_the_card_and_the_undated_sheet_always_name_the_same_report(
         monkeypatch, friday, saturday, at):
     """A wrong pick here reads "results aren't in yet" under a card that shows the figures."""
     svc_obj = _sheet_on(monkeypatch, at[0])
+    svc_obj.fmp = _FMP(_market(at[0]))
     monkeypatch.setattr(ts, "datetime", _FrozenDatetime(_et(*at)))
     for day, shape in ((FRIDAY, friday), (SATURDAY, saturday)):
         if REPORT_SHAPES[shape] is not None:
@@ -3379,10 +3398,28 @@ async def test_today_s_report_still_leads_the_undated_sheet(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_the_sheet_refuses_a_date_before_the_window(monkeypatch):
+async def test_a_date_before_the_live_days_answers_as_a_sheet_with_no_date(monkeypatch):
+    """Over a weekend the live days reach back to Friday, so Thursday is the first date out."""
     svc_obj = _sheet_on(monkeypatch, MONDAY)
-    with pytest.raises(ts._ReportDateOutOfWindow, match="2026-11-05"):
-        await svc_obj.get_earnings_live("INTC", FRIDAY - timedelta(days=1))
+    svc_obj.fmp = _FMP(_market(MONDAY))
+    sheet = await svc_obj.get_earnings_live("INTC", FRIDAY - timedelta(days=1))
+    assert (sheet.status, sheet.report_date) == (els.STATUS_NONE, MONDAY.isoformat())
+
+
+@pytest.mark.asyncio
+async def test_the_first_of_the_live_days_stays_a_date_of_its_own(monkeypatch):
+    svc_obj = _sheet_on(monkeypatch, MONDAY)
+    svc_obj.fmp = _FMP(_market(MONDAY))
+    sheet = await svc_obj.get_earnings_live("INTC", FRIDAY)
+    assert (sheet.status, sheet.report_date) == (els.STATUS_NONE, FRIDAY.isoformat())
+
+
+@pytest.mark.asyncio
+async def test_the_sheet_refuses_a_date_past_the_calendar(monkeypatch):
+    svc_obj = _sheet_on(monkeypatch, MONDAY)
+    last = MONDAY + timedelta(days=14)
+    with pytest.raises(ts._ReportDateOutOfWindow, match=FRIDAY.isoformat()):
+        await svc_obj.get_earnings_live("INTC", last + timedelta(days=1))
 
 
 # ── a report FMP moved off its date ──────────────────────────────────────────
@@ -3962,6 +3999,108 @@ async def test_a_report_left_out_once_is_logged_with_its_symbol_and_day(caplog):
     assert REPORT.isoformat() in line and "INTC" in line
 
 
+# ── a leftover row across a closed day ───────────────────────────────────────
+
+
+def _reported(svc: els.EarningsLiveService, day: date, at: datetime, *, eps=0.44) -> None:
+    svc.observe_rows(day, [_row("INTC", day, eps=eps, rev=17.1e9)], at)
+
+
+def _empty_row(svc: els.EarningsLiveService, day: date, at: datetime) -> None:
+    svc.observe_rows(day, [_row("INTC", day)], at)
+
+
+@pytest.mark.parametrize("report,leftover", [
+    (SATURDAY, MONDAY), (SUNDAY, MONDAY), (FRIDAY, MONDAY), (SATURDAY, SUNDAY), (FRIDAY, SUNDAY),
+    (FRIDAY, SATURDAY), (date(2026, 11, 26), date(2026, 11, 27)),
+    (date(2026, 11, 25), date(2026, 11, 27)),
+], ids=["sat_mon", "sun_mon", "fri_mon", "sat_sun", "fri_sun", "fri_sat", "holiday_fri",
+        "over_the_holiday"])
+def test_a_row_reads_as_a_report_on_any_day_back_to_the_trading_day_before(report, leftover):
+    svc, at = _svc(), _et(leftover, 8)
+    _reported(svc, report, at)
+    _empty_row(svc, leftover, at)
+    snap = svc.snapshot("INTC", leftover, at)
+    assert snap.reads_as == report
+    assert _figures(snap) == (els.STATUS_REPORTED, 0.44, 17.1e9)
+
+
+def test_the_nearest_report_is_the_one_a_row_reads_as():
+    svc, at = _svc(), _et(MONDAY, 8)
+    _reported(svc, FRIDAY, at, eps=0.44)
+    _reported(svc, SATURDAY, at, eps=0.45)
+    _empty_row(svc, MONDAY, at)
+    snap = svc.snapshot("INTC", MONDAY, at)
+    assert (snap.reads_as, snap.eps.actual) == (SATURDAY, 0.45)
+
+
+def test_a_nearer_pending_row_never_hides_the_report_behind_it():
+    svc, at = _svc(), _et(MONDAY, 8)
+    _reported(svc, FRIDAY, at)
+    _empty_row(svc, SATURDAY, at)
+    _empty_row(svc, MONDAY, at)
+    assert svc.snapshot("INTC", MONDAY, at).reads_as == FRIDAY
+
+
+def test_a_weekend_report_landing_after_its_leftover_opened_is_still_found():
+    svc, at = _svc(), _et(MONDAY, 8)
+    _empty_row(svc, SATURDAY, at)
+    _empty_row(svc, MONDAY, at)
+    assert svc.snapshot("INTC", MONDAY, at).reads_as is None
+    _reported(svc, SATURDAY, at)
+    _empty_row(svc, MONDAY, at)
+    assert svc.snapshot("INTC", MONDAY, at).reads_as == SATURDAY
+
+
+def test_a_nearer_report_landing_later_takes_over_from_the_one_a_row_read_as():
+    svc, at = _svc(), _et(MONDAY, 8)
+    _reported(svc, FRIDAY, at, eps=0.44)
+    _empty_row(svc, SATURDAY, at)
+    _empty_row(svc, MONDAY, at)
+    assert svc.snapshot("INTC", MONDAY, at).reads_as == FRIDAY
+    _reported(svc, SATURDAY, at, eps=0.45)
+    _empty_row(svc, MONDAY, at)
+    snap = svc.snapshot("INTC", MONDAY, at)
+    assert (snap.reads_as, snap.eps.actual) == (SATURDAY, 0.45)
+
+
+def test_a_report_past_the_trading_day_before_is_another_report():
+    """Friday is two trading days from a Tuesday row, so that row speaks for itself."""
+    svc, at = _svc(), _et(TUESDAY, 8)
+    _reported(svc, FRIDAY, at)
+    _empty_row(svc, TUESDAY, at)
+    snap = svc.snapshot("INTC", TUESDAY, at)
+    assert (snap.reads_as, snap.status, snap.eps.actual) == (None, els.STATUS_LIVE, None)
+
+
+def test_a_row_keeps_a_weekend_report_after_its_record_leaves_the_live_days():
+    svc, at = _svc(), _et(MONDAY, 8)
+    _reported(svc, SATURDAY, at)
+    _empty_row(svc, MONDAY, at)
+    tuesday = _et(TUESDAY, 8, 1)
+    svc._prune(tuesday)
+    assert ("INTC", SATURDAY) not in svc._records
+    _empty_row(svc, MONDAY, at)
+    (card,) = svc.recent_snapshots(["INTC"], tuesday)
+    assert card.day == MONDAY
+    assert _figures(card) == (els.STATUS_REPORTED, 0.44, 17.1e9)
+
+
+@pytest.mark.asyncio
+async def test_a_date_past_the_live_days_still_reaches_its_figures_through_the_row_reading_as_it(
+        monkeypatch):
+    """A push carries the first date, Saturday here, and the row dated Monday holds that report
+    after its own record has gone."""
+    svc_obj = _sheet_on(monkeypatch, TUESDAY)
+    svc_obj.fmp = _FMP(_market(TUESDAY))
+    at = _et(MONDAY, 8)
+    _reported(_svc(), SATURDAY, at)
+    _empty_row(_svc(), MONDAY, at)
+    sheet = await svc_obj.get_earnings_live("INTC", SATURDAY)
+    assert (sheet.status, sheet.report_date) == (els.STATUS_REPORTED, MONDAY.isoformat())
+    assert sheet.eps.actual == 0.44
+
+
 # ── the sheet of a report FMP moved ──────────────────────────────────────────
 
 
@@ -4144,10 +4283,11 @@ async def test_a_sheet_about_to_say_none_says_why_it_asks(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
-async def test_a_failed_ask_for_the_later_days_answers_none_and_the_next_read_finds_the_report(
+async def test_a_failed_ask_for_the_later_days_is_an_error_and_the_next_read_finds_the_report(
         monkeypatch):
-    """The sheet still answers, and the memo's wait after a failed round is what the next read
-    has to outlast. An outage is the one way left to read `none` beside a listed report."""
+    """`none` says nothing is listed, and a round that failed cannot know that, even with days
+    held from an earlier one. The client's retry is what finds the report, and the memo's wait
+    after a failed round is what that retry has to outlast."""
     clock = _Clock()
     monkeypatch.setattr(ts, "_time", SimpleNamespace(monotonic=clock.monotonic))
     new = MONDAY + timedelta(days=4)
@@ -4159,14 +4299,84 @@ async def test_a_failed_ask_for_the_later_days_answers_none_and_the_next_read_fi
     await ts._cached_earnings_calendar(svc_obj.fmp, MONDAY)
     state = _fmp_can_go_down(svc_obj.fmp)
     state["down"] = True
-    sheet = await svc_obj.get_earnings_live("INTC", TUESDAY)
-    assert (sheet.status, sheet.report_date) == (els.STATUS_NONE, TUESDAY.isoformat())
+    with pytest.raises(ts.FMPUnavailableException, match=f"INTC {TUESDAY.isoformat()}"):
+        await svc_obj.get_earnings_live("INTC", TUESDAY)
     state["down"] = False
-    sheet = await svc_obj.get_earnings_live("INTC", TUESDAY)
-    assert sheet.status == els.STATUS_NONE, "inside the wait, no round starts"
+    with pytest.raises(ts.FMPUnavailableException):
+        await svc_obj.get_earnings_live("INTC", TUESDAY)        # inside the wait, no round starts
     clock.at += ts._EARNINGS_CALENDAR_FAILURE_RETRY_SECONDS
     sheet = await svc_obj.get_earnings_live("INTC", TUESDAY)
     assert (sheet.status, sheet.report_date) == (els.STATUS_UPCOMING, new.isoformat())
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_with_nothing_held_says_so_and_a_read_that_works_says_none(monkeypatch):
+    """A restart in an outage: the memo holds nothing and raises, and that is the moment a sheet
+    used to tell the user no report was scheduled."""
+    svc_obj = _sheet_on(monkeypatch, MONDAY)
+    svc_obj.fmp = _FMP(_market(MONDAY))
+    state = _fmp_can_go_down(svc_obj.fmp)
+    state["down"] = True
+    with pytest.raises(ts.FMPUnavailableException):
+        await svc_obj.get_earnings_live("ZZZY")
+    state["down"] = False
+    ts.reset_earnings_calendar_cache()                          # the wait is over
+    assert (await svc_obj.get_earnings_live("ZZZY")).status == els.STATUS_NONE
+
+
+@pytest.mark.asyncio
+async def test_a_window_with_no_rows_at_all_is_a_failed_read_never_a_report_nobody_scheduled(
+        monkeypatch):
+    """The memo refuses to store one, because it cannot be told apart from a degraded answer. A
+    sheet taking it for the truth is that same mistake."""
+    svc_obj = _sheet_on(monkeypatch, MONDAY)
+    svc_obj.fmp = _FMP({})
+    with pytest.raises(ts.FMPUnavailableException):
+        await svc_obj.get_earnings_live("INTC")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested", [None, MONDAY], ids=["no_date", "by_date"])
+async def test_a_failed_read_still_answers_a_report_a_record_holds(monkeypatch, requested):
+    svc_obj = _sheet_on(monkeypatch, MONDAY)
+    svc_obj.fmp = _FMP(_market(MONDAY))
+    _svc().observe_rows(MONDAY, [_row("INTC", MONDAY, eps=0.60, rev=17.1e9)], _et(MONDAY, 11))
+    state = _fmp_can_go_down(svc_obj.fmp)
+    state["down"] = True
+    sheet = await svc_obj.get_earnings_live("INTC", requested)
+    assert (sheet.status, sheet.report_date) == (els.STATUS_REPORTED, MONDAY.isoformat())
+    assert sheet.eps.actual == 0.60
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_still_answers_the_report_held_from_before_today(monkeypatch):
+    svc_obj = _sheet_on(monkeypatch, MONDAY)
+    svc_obj.fmp = _FMP(_market(MONDAY))
+    _svc().observe_rows(FRIDAY, [_row("INTC", FRIDAY, eps=0.60, rev=17.1e9)], _et(MONDAY, 11))
+    state = _fmp_can_go_down(svc_obj.fmp)
+    state["down"] = True
+    sheet = await svc_obj.get_earnings_live("INTC")
+    assert (sheet.status, sheet.report_date) == (els.STATUS_REPORTED, FRIDAY.isoformat())
+
+
+@pytest.mark.asyncio
+async def test_a_failed_first_read_cured_by_the_second_keeps_the_answer_of_a_read_that_worked(
+        monkeypatch):
+    """Only the read the answer rests on counts: the second, when the first found nothing."""
+    svc_obj = _sheet_on(monkeypatch, MONDAY)
+    svc_obj.fmp = _FMP(_market(MONDAY))
+    memo = ts._cached_earnings_calendar
+    reads: List[Optional[float]] = []
+
+    async def _fails_once(fmp, today, *, later_days_since=None):
+        reads.append(later_days_since)
+        if len(reads) == 1:
+            raise RuntimeError("FMP 503")
+        return await memo(fmp, today, later_days_since=later_days_since)
+
+    monkeypatch.setattr(ts, "_cached_earnings_calendar", _fails_once)
+    assert (await svc_obj.get_earnings_live("ZZZY")).status == els.STATUS_NONE
+    assert len(reads) == 2
 
 
 # ── the push: watched reports, inside the result window ──────────────────────

@@ -36,15 +36,33 @@ here would stop all of them. The watcher therefore:
   * polls each one every minute only inside the two release windows (06:00–09:35 and
     15:55–18:30 ET), every 5 min otherwise, never outside 06:00–22:00 ET;
   * spaces its calls (`_CALL_SPACING_SECONDS`) instead of bursting;
-  * stops for a symbol once its 8-K is found;
+  * stops for a symbol once its release is read;
+  * rests a filing whose read failed on a widening ladder (`_EXTRACT_RETRY_GAPS`), with no SEC
+    call for that symbol while it rests;
   * on any throttle, parks EVERY symbol for SEC's Retry-After (or the circuit) and never
     retries sooner.
 Foreign private issuers furnish results on 6-K, not 8-K; they stay FMP-only.
+
+WHAT A READ SETTLES (`_Read`). A filing is read until one of three things is known, and only the
+last of them ends the watch for the report:
+  * RETRY: the read failed, which says nothing about the filing. The index or the exhibit could
+    not be read, or the model failed, was cut off or answered off schema. The same accession goes
+    again, up to six reads over about 33 minutes.
+  * NOT_RELEASE: it was read and is not the results release: no EX-99, an exhibit with no text,
+    or the model says so. A morning Item 2.02 can be just that, so the accession is never read
+    again and the watch goes on for the release still to come.
+  * RELEASE: everything else, final: a release whose figures were all refused, and a document
+    SEC will not serve (over the size cap, or a 4xx), which would come back the same every time.
+A filing out of attempts is left like a NOT_RELEASE: nobody knows what it was, so it cannot end
+the watch. Filings are walked newest first, past those two, so a newer Item 2.02 that is not the
+release never hides an older one that is. SEC's own throttle and outage errors say nothing about
+a filing either: they spend no attempt.
 """
 
 from __future__ import annotations
 
 import asyncio
+import enum
 import json
 import logging
 import re
@@ -54,13 +72,15 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from html import unescape
 from html.parser import HTMLParser
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from app.config import settings
+from app.integrations.gemini import _is_clean_finish
 from app.integrations.sec_edgar import (
     SECConfigException,
     SECException,
     SECRateLimitException,
+    SECUnavailableException,
     filing_index_url,
     get_sec_edgar_client,
     normalize_accession,
@@ -102,8 +122,12 @@ _DUE_SLACK_SECONDS = 5
 _CALL_SPACING_SECONDS = 1.0
 #: A throttle with no Retry-After parks the watcher for the client's own circuit length.
 _THROTTLE_PARK_SECONDS = 600.0
-#: A filing whose read failed for a TRANSIENT reason (Gemini down) is retried this many times.
-_MAX_EXTRACT_ATTEMPTS = 3
+#: How long a filing rests after each failed read, in seconds: six reads over about 33 minutes, so
+#: half an hour of outage loses no filing. Counted from the end of the round that spent the
+#: attempt, and never shorter than the symbol's own cadence. The wider gaps are what keep a long
+#: outage cheap on the limiter shared with Learn and the stake finder, and each one outlasts the
+#: quota breaker's 30 s cooldown, so a fail-fast from it rests on this same ladder.
+_EXTRACT_RETRY_GAPS: Tuple[int, ...] = (60, 120, 300, 600, 900)
 
 # ── Extraction ──────────────────────────────────────────────────────
 
@@ -363,28 +387,44 @@ class _IndexTableParser(HTMLParser):
 _DOC_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
+class _IndexUnreadable(Exception):
+    """The page does not list this filing's documents, so it cannot say there is no exhibit. A
+    failed read, never an answer."""
+
+
 def find_ex99_document(index_html: Any) -> Optional[str]:
-    """PURE. The file name of the filing's EX-99.1 (or the first EX-99.x) from its index page.
+    """PURE. The file name of the filing's EX-99.1 (or the first EX-99.x) from its index page, or
+    None when the page lists the 8-K with no EX-99 beside it, so the filing has no release to read.
 
     The index table's "Type" column names each document; the link in the row is the file.
     `ix?doc=` viewer links are unwrapped to the plain document path.
+
+    Raises `_IndexUnreadable` for a page that cannot say that, because "no exhibit" is never asked
+    again: a 404 (the client's None), an empty or unparsable body, a page that does not list the
+    8-K itself, and an exhibit row with no file in it.
     """
     if not isinstance(index_html, str) or not index_html:
-        return None
+        raise _IndexUnreadable("no page")
     parser = _IndexTableParser()
     try:
         parser.feed(index_html[:2_000_000])
-    except Exception:  # a malformed page answers "not found", never a crash in the loop
-        return None
+    except Exception as e:
+        raise _IndexUnreadable(f"unparsable: {type(e).__name__}: {e}") from e
     candidates: List[Tuple[int, str]] = []
+    lists_the_form = False
+    exhibit_listed = False
     for cells, hrefs in parser.rows:
         types = [c.upper() for c in cells]
+        lists_the_form = lists_the_form or "8-K" in types
         rank = None
         if "EX-99.1" in types:
             rank = 0
         elif any(t.startswith("EX-99") for t in types):
             rank = 1
-        if rank is None or not hrefs:
+        if rank is None:
+            continue
+        exhibit_listed = True
+        if not hrefs:
             continue
         href = hrefs[0]
         if "doc=" in href:
@@ -392,10 +432,14 @@ def find_ex99_document(index_html: Any) -> Optional[str]:
         name = href.rsplit("/", 1)[-1].split("?", 1)[0]
         if _DOC_NAME_RE.fullmatch(name):
             candidates.append((rank, name))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda c: c[0])
-    return candidates[0][1]
+    if candidates:
+        candidates.sort(key=lambda c: c[0])
+        return candidates[0][1]
+    if exhibit_listed:
+        raise _IndexUnreadable("an EX-99 row with no file to read")
+    if not lists_the_form:
+        raise _IndexUnreadable("no list of the filing's documents")
+    return None
 
 
 #: A font size that sets a run below the text around it. In points that takes less than 8, the
@@ -1172,7 +1216,7 @@ def unwrap_json(raw: Any) -> Any:
         return None
     try:
         return json.loads(raw["text"])
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError, RecursionError):
         return None
 
 
@@ -1218,12 +1262,19 @@ def verify_extraction(
     included, drops the whole answer: nothing else says what the figures are in. Residual: a
     release whose only currency words sit outside every quote ("all amounts in Canadian dollars"
     above a "$" table) depends on the model's `currency`.
+
+    A whole answer has two more: `not_results` only when `is_quarterly_results` says false, and
+    `off_schema` for anything that says neither, which the caller reads again: no flag is no
+    verdict, and a verdict ends a filing for good.
     """
     reasons: Dict[str, str] = {}
     if not isinstance(answer, Mapping):
         return None, {"answer": "off_schema"}
-    if answer.get("is_quarterly_results") is not True:
+    is_results = answer.get("is_quarterly_results")
+    if is_results is False:
         return None, {"answer": "not_results"}
+    if is_results is not True:
+        return None, {"answer": "off_schema"}
     currency = str(answer.get("currency") or "").strip().upper()
     if currency not in ("USD", "US$", "$", "US DOLLARS", "DOLLARS"):
         return None, {"answer": f"currency_{currency[:8].lower() or 'blank'}"}
@@ -1326,15 +1377,28 @@ def build_prompt(symbol: str, report_date: date, text: str) -> str:
 # ── The watcher ─────────────────────────────────────────────────────
 
 
+class _Read(enum.Enum):
+    """What reading one filing settled (WHAT A READ SETTLES in the module docstring)."""
+
+    RETRY = "retry"
+    NOT_RELEASE = "not_release"
+    RELEASE = "release"
+
+
 @dataclass
 class _Watch:
     # What the poll cadence counts from: the start of the round that read this symbol or, for a
     # filing waiting on its next attempt, the end of the last round that spent one (`run_once`).
     checked_mono: float = 0.0
-    found: Optional[ResultsFiling] = None
-    done: bool = False          # extraction finished (figures or a reasoned miss)
+    found: Optional[ResultsFiling] = None   # the release, once read
+    done: bool = False          # the report is settled: its release was read, or SEC has no CIK
     figures: Optional[FilingFigures] = None
-    attempts: int = 0
+    # Failed reads by accession: a morning filing's never come out of the evening release's.
+    attempts: Dict[str, int] = field(default_factory=dict)
+    # The rest a filing waiting on its next attempt is owed, in seconds. 0 = none is waiting.
+    retry_gap: float = 0.0
+    # Accessions never read again here: not the release, or out of attempts.
+    skipped: Set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -1343,6 +1407,7 @@ class EarningsFilingWatcher:
     (`earnings_live_service.earnings_filing_tick`)."""
 
     _watch: Dict[Tuple[str, date], _Watch] = field(default_factory=dict)
+    # Releases only, by accession: the figures, or None for one with none that verified.
     _extracted: Dict[str, Optional[FilingFigures]] = field(default_factory=dict)
     _parked_until: float = 0.0
     calls: int = 0
@@ -1373,7 +1438,7 @@ class EarningsFilingWatcher:
             return True
         if w.done or w.found is not None:
             return False
-        return mono - w.checked_mono >= interval - _DUE_SLACK_SECONDS
+        return mono - w.checked_mono >= max(interval, w.retry_gap) - _DUE_SLACK_SECONDS
 
     async def run_once(
         self,
@@ -1440,7 +1505,7 @@ class EarningsFilingWatcher:
             # a stamp per read would leave every symbol but the first short of the cadence at
             # the next round, and each would be read every other minute.
             w.checked_mono = mono
-            attempts = w.attempts
+            spent_before = sum(w.attempts.values())
             try:
                 figures = await self._check_one(client, gemini, symbol, cik, report_day, w,
                                                 sleep)
@@ -1464,7 +1529,10 @@ class EarningsFilingWatcher:
                 logger.warning("[earnings-live-filing] %s: check raised (%s: %s)",
                                symbol, type(e).__name__, e, exc_info=True)
                 continue
-            spent = spent or w.attempts > attempts
+            finally:
+                # Here and not after the `try`: the walk can spend an attempt on one filing and
+                # raise on the next.
+                spent = spent or sum(w.attempts.values()) > spent_before
             if figures is not None:
                 new[symbol] = figures
                 if on_figures is not None:
@@ -1484,7 +1552,7 @@ class EarningsFilingWatcher:
         if spent:
             ended = time.monotonic()
             for w in self._watch.values():
-                if w.attempts and not w.done:
+                if w.retry_gap and not w.done:
                     w.checked_mono = ended
         return new
 
@@ -1492,70 +1560,121 @@ class EarningsFilingWatcher:
         self, client: Any, gemini: Any, symbol: str, cik: str, report_day: date, w: _Watch,
         sleep: Any,
     ) -> Optional[FilingFigures]:
+        """Walk the symbol's results filings, newest first, until one settles the report.
+
+        A filing that is not the release, or one out of attempts, says nothing about the report,
+        so the walk goes on past it and the symbol keeps its poll. A failed read ends the walk for
+        this round: whatever failed would fail the next read too, and an older filing must not
+        settle the report while a newer one is undecided.
+        """
         self.calls += 1
+        # The round came due, so the rest is served: only a new failed read owes another. Reset
+        # here and not after the walk, which can raise, and a stale rest would then hold the next
+        # filing's first read or a report still to come to the last rest on the ladder.
+        w.retry_gap = 0.0
         data = await client.get_submissions(cik)
-        filings = find_results_filings(data, report_day)
-        if not filings:
-            return None
-        filing = filings[0]
-        if filing.accession in self._extracted:
-            # Read once per accession, ever (a restart is the only re-read).
-            w.found, w.done = filing, True
-            w.figures = self._extracted[filing.accession]
-            return w.figures
-        figures, final = await self._extract(client, gemini, symbol, cik, report_day, filing,
-                                             sleep)
-        if final:
-            self._extracted[filing.accession] = figures
-            w.found, w.done, w.figures = filing, True, figures
-        else:
-            # Transient (Gemini down): try the same filing again on the next due round,
-            # at most `_MAX_EXTRACT_ATTEMPTS` times. `run_once` moves this stamp to the end of the
-            # round, and a round cut off before its end leaves the read on this one.
-            w.attempts += 1
-            w.checked_mono = time.monotonic()
-            if w.attempts >= _MAX_EXTRACT_ATTEMPTS:
-                self._extracted[filing.accession] = None
+        for filing in find_results_filings(data, report_day):
+            acc = filing.accession
+            if acc in self._extracted:
+                # Read once per accession, ever (a restart is the only re-read). Ahead of the skip:
+                # a failed read was this ticker's, and a release is the filing's, so a second
+                # ticker of the issuer may have read what this one gave up on.
                 w.found, w.done = filing, True
-        return figures
+                w.figures = self._extracted[acc]
+                return w.figures
+            if acc in w.skipped:
+                continue
+            outcome, figures = await self._extract(client, gemini, symbol, cik, report_day,
+                                                   filing, sleep)
+            if outcome is _Read.RELEASE:
+                self._extracted[acc] = figures
+                w.found, w.done, w.figures = filing, True, figures
+                return figures
+            if outcome is _Read.RETRY:
+                # `run_once` moves this stamp to the end of the round, and a round cut off before
+                # its end leaves the read on this one.
+                tries = w.attempts[acc] = w.attempts.get(acc, 0) + 1
+                w.checked_mono = time.monotonic()
+                if tries <= len(_EXTRACT_RETRY_GAPS):
+                    w.retry_gap = float(_EXTRACT_RETRY_GAPS[tries - 1])
+                    logger.info(
+                        "EARNINGS_LIVE_FILING sym=%s day=%s acc=%s result=retry tries=%d rest=%.0fs",
+                        symbol, report_day.isoformat(), acc, tries, w.retry_gap,
+                    )
+                    return None
+                logger.warning(
+                    "EARNINGS_LIVE_FILING sym=%s day=%s acc=%s result=gave_up tries=%d",
+                    symbol, report_day.isoformat(), acc, tries,
+                )
+            w.skipped.add(acc)
+        return None
 
     async def _extract(
         self, client: Any, gemini: Any, symbol: str, cik: str, report_day: date,
         filing: ResultsFiling, sleep: Any,
-    ) -> Tuple[Optional[FilingFigures], bool]:
-        """(figures or None, whether that outcome is final for this accession).
+    ) -> Tuple[_Read, Optional[FilingFigures]]:
+        """Read one filing and say what that settled. Figures come only with RELEASE.
 
-        SEC errors propagate (the caller retries on the next due round); a Gemini failure is
-        NOT final; everything that verification decided is, a raise included: it is pure, so
-        the same text raises again, and every retry would pay for another model call.
+        SEC's throttle, outage and configuration errors propagate: they say nothing about this
+        filing and spend no attempt. Any other SEC error is a refusal of the document itself (over
+        the size cap, or a 4xx), which would come back the same every time, so it is final, like
+        everything verification decides, a raise included: it is pure, so the same text raises
+        again, and every retry would pay for another model call.
         """
         acc = filing.accession
+        day = report_day.isoformat()
         url = filing_index_url(cik, acc)
-        await sleep(_CALL_SPACING_SECONDS)
-        index_html = await client.get_filing_document(cik, acc, f"{acc}-index.htm")
-        document = find_ex99_document(index_html)
-        if document is None:
-            logger.info("EARNINGS_LIVE_FILING sym=%s acc=%s result=no_exhibit", symbol, acc)
-            return None, True
-        await sleep(_CALL_SPACING_SECONDS)
-        raw = await client.get_filing_document(cik, acc, document)
+        try:
+            await sleep(_CALL_SPACING_SECONDS)
+            index_html = await client.get_filing_document(cik, acc, f"{acc}-index.htm")
+            try:
+                document = find_ex99_document(index_html)
+            except _IndexUnreadable as e:
+                logger.warning(
+                    "EARNINGS_LIVE_FILING sym=%s day=%s acc=%s result=index_unreadable (%s)",
+                    symbol, day, acc, e,
+                )
+                return _Read.RETRY, None
+            if document is None:
+                logger.info("EARNINGS_LIVE_FILING sym=%s day=%s acc=%s result=no_exhibit",
+                            symbol, day, acc)
+                return _Read.NOT_RELEASE, None
+            await sleep(_CALL_SPACING_SECONDS)
+            raw = await client.get_filing_document(cik, acc, document)
+        except (SECRateLimitException, SECUnavailableException, SECConfigException):
+            raise
+        except SECException as e:
+            logger.warning(
+                "EARNINGS_LIVE_FILING sym=%s day=%s acc=%s result=document_refused (%s: %s)",
+                symbol, day, acc, type(e).__name__, e,
+            )
+            return _Read.RELEASE, None
+        # A 404 on a document the index lists, or a body with nothing in it: a failed read, like
+        # the index's. An exhibit with content and no text in it is an answer, below.
+        if not isinstance(raw, str) or not raw.strip():
+            logger.warning(
+                "EARNINGS_LIVE_FILING sym=%s day=%s acc=%s result=exhibit_unreadable (%s)",
+                symbol, day, acc, "empty body" if isinstance(raw, str) else "no page",
+            )
+            return _Read.RETRY, None
         # On a thread, like the verifier below: a whole filing takes a noticeable time to read.
         release = await asyncio.to_thread(_release_text, raw, document)
         if not release:
-            logger.info("EARNINGS_LIVE_FILING sym=%s acc=%s result=empty_exhibit", symbol, acc)
-            return None, True
+            logger.info("EARNINGS_LIVE_FILING sym=%s day=%s acc=%s result=empty_exhibit",
+                        symbol, day, acc)
+            return _Read.NOT_RELEASE, None
         text = release[:_EXTRACT_TEXT_CHARS]
         if len(release) > len(text):
             logger.info(
                 "[earnings-live-text-capped] sym=%s acc=%s %d chars cut to %d for the model",
                 symbol, acc, len(release), len(text),
             )
-        model = gemini
-        if model is None:
-            from app.integrations.gemini import get_gemini_client
-
-            model = get_gemini_client()
         try:
+            model = gemini
+            if model is None:
+                from app.integrations.gemini import get_gemini_client
+
+                model = get_gemini_client()
             answer = await model.generate_json(
                 build_prompt(symbol, report_day, text),
                 system_instruction=_SYSTEM,
@@ -1570,10 +1689,17 @@ class EarningsFilingWatcher:
             )
         except Exception as e:
             logger.warning(
-                "EARNINGS_LIVE_FILING sym=%s acc=%s result=gemini_failed (%s)",
-                symbol, acc, type(e).__name__,
+                "EARNINGS_LIVE_FILING sym=%s day=%s acc=%s result=gemini_failed (%s: %s)",
+                symbol, day, acc, type(e).__name__, e,
             )
-            return None, False
+            return _Read.RETRY, None
+        # A blocked or cut answer does not raise, and its text can even parse: it is not the
+        # model's whole answer, so nothing in it may decide this filing.
+        finish = answer.get("finish_reason") if isinstance(answer, Mapping) else None
+        if not _is_clean_finish(finish):
+            logger.warning("EARNINGS_LIVE_FILING sym=%s day=%s acc=%s result=answer_cut finish=%s",
+                           symbol, day, acc, finish)
+            return _Read.RETRY, None
         try:
             # On a thread: it can scan a whole release, and a long one takes a noticeable time.
             figures, reasons = await asyncio.to_thread(
@@ -1583,18 +1709,25 @@ class EarningsFilingWatcher:
         except Exception as e:
             logger.exception(
                 "EARNINGS_LIVE_FILING sym=%s day=%s acc=%s result=verify_failed (%s: %s)",
-                symbol, report_day.isoformat(), acc, type(e).__name__, e,
+                symbol, day, acc, type(e).__name__, e,
             )
-            return None, True
+            return _Read.RELEASE, None
+        verdict = reasons.get("answer")
+        if verdict == "off_schema":
+            logger.warning("EARNINGS_LIVE_FILING sym=%s day=%s acc=%s result=off_schema",
+                           symbol, day, acc)
+            return _Read.RETRY, None
         accepted = (
             filing.accepted_at.astimezone(ET).strftime("%H:%M ET") if filing.accepted_at else "?"
         )
         logger.info(
-            "EARNINGS_LIVE_FILING sym=%s acc=%s accepted=%s %s",
-            symbol, acc, accepted,
+            "EARNINGS_LIVE_FILING sym=%s day=%s acc=%s accepted=%s %s",
+            symbol, day, acc, accepted,
             " ".join(f"{k}={v}" for k, v in sorted(reasons.items())),
         )
-        return figures, True
+        if verdict == "not_results":
+            return _Read.NOT_RELEASE, None
+        return _Read.RELEASE, figures
 
 
 _watcher: Optional[EarningsFilingWatcher] = None

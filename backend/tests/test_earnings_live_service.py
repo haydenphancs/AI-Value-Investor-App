@@ -51,7 +51,8 @@ What is pinned here, each a way the LIVE card could lie or cost too much:
   * a failed read of the watched list serves the old list and says so;
   * a restart keeps what only a filing says: the figures of every live day, the outlook and the
     link, each exactly as verified, restored once per process before a tick decides anything,
-    never as a landing, and a table that fails or is not there yet leaves the old behaviour.
+    never as a landing, and a table that fails or is not there yet leaves the old behaviour;
+  * a row another verifier wrote is no row, so a verifier fix reaches what the table holds.
 Hermetic: inline fakes for FMP, SEC, the dispatcher and `earnings_filing_cache`; the clock is
 passed in.
 """
@@ -60,14 +61,18 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import itertools
+import json
 import logging
+import re
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
 
+import httpx
 import pytest
+from postgrest import SyncPostgrestClient
 
 import app.services.earnings_filing_service as efs
 import app.services.earnings_live_service as els
@@ -81,7 +86,15 @@ from app.services.notification_kinds import KIND_EARNINGS_LIVE, KIND_EARNINGS_RE
 from app.utils import market_hours as mh
 from app.utils.market_hours import ET, previous_trading_day
 
-from _filing_cache_fake import COLUMNS, MIGRATION_SQL, FilingCache
+from _filing_cache_fake import (
+    COLUMN_TYPES,
+    COLUMNS,
+    MIGRATION_SQL,
+    MIGRATION_TEXT,
+    NOT_NULL,
+    PRIMARY_KEY,
+    FilingCache,
+)
 
 REPORT = date(2026, 10, 29)            # Thursday
 PREV = date(2026, 10, 28)              # Wednesday — the previous trading day
@@ -5284,6 +5297,22 @@ async def test_a_row_with_no_figure_leaves_fmps_first_figure_a_landing(cache):
 
 
 @pytest.mark.asyncio
+async def test_a_figure_a_guard_holds_still_closes_the_landing(cache):
+    """The rule reads the row, not the card: a guard needs the consensus, and whether a feed build
+    folded it before the restore is an accident of boot. So any figure on a row closes the
+    landing, in either order, one the card cannot show yet included."""
+    cache.hold(_kept("INTC", REPORT, revenue=40e9, eps_adjusted=None, guidance=None))
+    svc, at = _svc(), _et(REPORT, 17)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], at)
+    await svc.restore_filings(at)
+    snap = svc.snapshot("INTC", REPORT, at)
+    assert snap.revenue.checking and snap.revenue.actual is None, "the band holds $40B"
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.46, rev=17.2e9)],
+                     at + timedelta(minutes=9), fetched=True)
+    assert svc.landed_snapshots(at + timedelta(minutes=10)) == []
+
+
+@pytest.mark.asyncio
 async def test_a_landing_this_process_saw_outlives_a_late_restore(cache):
     """A failed read can put the restore minutes behind the first fold."""
     cache.hold(_kept("INTC", REPORT))
@@ -5347,6 +5376,61 @@ async def test_nobody_watching_or_the_watched_read_failing_does_not_put_the_rest
     _reset_all()
     await els.earnings_live_tick(_et(REPORT, 9, 2), fmp=_FMP(), watched=[])
     assert len(cache.reads) == 2
+    _reset_all()
+    with pytest.raises(RuntimeError):
+        await els.earnings_filing_tick(_et(REPORT, 9, 3))
+    assert len(cache.reads) == 3
+    _reset_all()
+    await els.earnings_filing_tick(_et(REPORT, 9, 4), watched=[])
+    assert len(cache.reads) == 4
+
+
+@pytest.mark.asyncio
+async def test_the_fmp_tick_restores_before_it_folds(monkeypatch, cache):
+    """A feed build saw the report pending, then FMP filled it, all before the first tick. Fold
+    first and that fill is a landing, so a restart sends the push the last process sent."""
+    monkeypatch.setattr(ts, "_et_today", lambda: REPORT)
+    cache.hold(_kept("INTC", REPORT))
+    at = _et(REPORT, 17)
+    _svc().observe_rows(REPORT, [_row("INTC", REPORT)], at)
+    assert _svc()._records[("INTC", REPORT)].seen_pending
+    sent: List[str] = []
+    fmp = _FMP({REPORT: [_row("INTC", REPORT, eps=0.46, rev=17.2e9)], PREV: []})
+    await els.earnings_live_tick(at + timedelta(seconds=45), fmp=fmp, watched=["INTC"],
+                                 dispatch=_collect(sent))
+    assert _svc().snapshot("INTC", REPORT, at).eps.actual == 0.46, "the fill was folded"
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_the_filing_tick_takes_its_list_after_the_restore(monkeypatch, cache):
+    """It can run first in a new process, with only a feed build behind it. A report the table
+    has already completed must be off the list before a round opens on it."""
+    cache.hold(_kept("INTC", REPORT))
+    watcher = _Watcher({"INTC": _morning_filing(accession="other")})
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: watcher)
+    at = _et(REPORT, 16, 30)
+    _svc().observe_rows(REPORT, [_row("INTC", REPORT)], at)
+    assert await els.earnings_filing_tick(at, watched=["INTC"]) == {
+        "watched": 1, "pending": 0, "filings": 0}
+    assert watcher.calls == []
+
+
+@pytest.mark.asyncio
+async def test_what_a_round_stores_is_the_records_filing_not_what_it_brought(monkeypatch, cache):
+    """The card keeps the first verified filing, so the table must too: a restart would otherwise
+    show another filing than the one the card showed. Driven through the tick, because the tick
+    is what stores it."""
+    svc, at = _svc(), _et(REPORT, 16, 3)
+    mine = _morning_filing(accepted_at=_et(REPORT, 16, 2), revenue=None)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], at)
+    svc.absorb_filing("INTC", REPORT, mine, at)
+    assert svc.pending_symbols(REPORT, ["INTC"]) == ["INTC"], "no revenue yet: still on the watch"
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher",
+                        lambda: _Watcher({"INTC": _morning_filing(accession="later", revenue=8e9)}))
+    assert (await els.earnings_filing_tick(at, watched=["INTC"]))["filings"] == 1
+    row = cache.rows[("INTC", REPORT.isoformat())]
+    assert (row["accession"], row["revenue"]) == (mine.accession, None)
 
 
 @pytest.mark.asyncio
@@ -5423,6 +5507,30 @@ async def test_a_table_not_there_yet_leaves_the_old_behaviour_and_a_later_tick_r
 
 
 @pytest.mark.asyncio
+async def test_the_retry_after_a_failed_read_comes_due_on_its_tick(monkeypatch, cache):
+    """A failed read stamps its wait when it returns, past its tick's start, so an exact compare
+    would fall a moment short on the tick it was meant for and lose a whole minute."""
+    clock = _Clock()
+    monkeypatch.setattr(els, "time", SimpleNamespace(monotonic=clock.monotonic))
+    read = cache._read
+
+    def _slow_read(*statement):
+        clock.at += 1.5
+        return read(*statement)
+
+    monkeypatch.setattr(cache, "_read", _slow_read)
+    cache.read_error = RuntimeError("PGRST205: could not find the table")
+    svc, at, started = _svc(), _et(REPORT, 9, 1), clock.at
+    await svc.restore_filings(at)
+    clock.at = started + els._FAILURE_RETRY_SECONDS - 60
+    await svc.restore_filings(at + timedelta(seconds=60))
+    assert len(cache.reads) == 1, "still waiting a tick earlier"
+    clock.at = started + els._FAILURE_RETRY_SECONDS
+    await svc.restore_filings(at + timedelta(seconds=120))
+    assert len(cache.reads) == 2
+
+
+@pytest.mark.asyncio
 async def test_a_write_that_fails_costs_the_table_never_the_figure(monkeypatch, cache, caplog):
     cache.write_error = RuntimeError("PGRST205: could not find the table")
     monkeypatch.setattr(efs, "get_earnings_filing_watcher",
@@ -5448,13 +5556,13 @@ async def test_a_stalled_table_holds_up_neither_tick(monkeypatch, cache, caplog)
     release = threading.Event()
     read, write = cache._read, cache._write
 
-    def _stalled_read(days):
+    def _stalled_read(*statement):
         release.wait(5)
-        return read(days)
+        return read(*statement)
 
-    def _stalled_write(row):
+    def _stalled_write(*statement):
         release.wait(5)
-        return write(row)
+        return write(*statement)
 
     monkeypatch.setattr(cache, "_read", _stalled_read)
     monkeypatch.setattr(cache, "_write", _stalled_write)
@@ -5497,6 +5605,20 @@ async def test_the_sheet_says_when_the_filing_was_read_not_when_the_process_star
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fetched,shown", [((17, 10), (17, 10)), ((16, 1), (16, 3))],
+                         ids=["a_later_fetch_stays", "a_later_filing_moves_it_on"])
+async def test_a_late_restore_moves_the_sheets_time_only_forward(cache, fetched, shown):
+    """A failed read can put the restore behind an own fetch. The sheet must not go back to when
+    the filing was read (16:03), and still says so when that was the later of the two."""
+    cache.hold(_kept("INTC", REPORT))
+    svc, at = _svc(), _et(REPORT, *fetched)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], at, fetched=True)
+    assert svc._records[("INTC", REPORT)].checked_at == at
+    await svc.restore_filings(_et(REPORT, 17, 11))
+    assert svc.snapshot("INTC", REPORT, _et(REPORT, 17, 12)).checked_at == _et(REPORT, *shown)
+
+
+@pytest.mark.asyncio
 async def test_the_table_holds_the_moment_the_figure_arrived_not_the_rounds_start(monkeypatch,
                                                                                  cache):
     clock = _Clock()
@@ -5516,25 +5638,78 @@ async def test_the_table_holds_the_moment_the_figure_arrived_not_the_rounds_star
     assert row["computed_at"] == els.iso_utc(at + timedelta(seconds=90))
 
 
-def test_every_field_of_a_filing_survives_the_table():
+@pytest.mark.asyncio
+async def test_every_field_of_a_filing_survives_the_table(cache):
     """Set every field here: one added to `FilingFigures` and left off the row fails, and the
-    record it comes back into would quietly behave differently after a restart."""
+    record it comes back into would quietly behave differently after a restart. Read back
+    through the real read, so a column it does not name is lost here as well."""
     full = efs.FilingFigures(accession="0000050863-26-000123", accepted_at=_et(PREV, 16, 2),
                              url="https://www.sec.gov/x", revenue=17.1e9, eps_adjusted=0.44,
                              eps_gaap=-0.12, fiscal_period="Q3 2026", guidance=_OUTLOOK,
                              revenue_rounding=5e7, eps_rounding=0.005)
     assert all(getattr(full, f.name) is not None for f in dataclasses.fields(full))
     at = _et(PREV, 16, 3)
-    (row,) = FilingCache([els.filing_cache_row("intc", PREV, full, at)])._read(
-        [PREV.isoformat()]).data
-    assert isinstance(row["revenue"], int), "the wire's own shape: this must be coerced back"
-    assert els.held_filing_from(row) == els.HeldFiling("INTC", PREV, full, at)
+    cache.hold(els.filing_cache_row("intc", PREV, full, at))
+    assert ("INTC", PREV.isoformat()) in cache.rows, "stored under the key the records use"
+    (wire,) = cache._read([PREV.isoformat()], ["revenue", "revenue_rounding"]).data
+    assert isinstance(wire["revenue"], int) and isinstance(wire["revenue_rounding"], int), (
+        "the wire's own shape, and this test is no proof of the coercion without it")
+    (held,) = await els._read_held_filings([PREV])
+    assert held == els.HeldFiling("INTC", PREV, full, at)
+    figures = held.figures
+    for number in (figures.revenue, figures.eps_adjusted, figures.eps_gaap,
+                   figures.revenue_rounding, figures.eps_rounding):
+        assert type(number) is float, "17100000000 == 17.1e9, so the compare above cannot see it"
 
 
 def test_the_row_and_the_read_name_exactly_the_tables_columns():
     """An unknown column fails every write with nothing but a WARNING, so it would go unseen."""
     assert set(els._FILING_CACHE_COLUMNS) == COLUMNS
     assert set(_kept()) == COLUMNS
+
+
+def test_the_tables_key_and_types_are_the_ones_the_code_needs():
+    """Each of these fails only as a WARNING or a quiet loss, so nothing else would show it.
+    A key that is not the `on_conflict` makes Postgres refuse every write (42P10), and a number
+    column that rounds would take the half-cent off `eps_rounding` and bring back a surprise the
+    print cannot back."""
+    assert PRIMARY_KEY == ("symbol", "report_date")
+    assert COLUMN_TYPES == {
+        "symbol": "TEXT", "report_date": "DATE", "accession": "TEXT", "verifier_version": "INTEGER",
+        "accepted_at": "TIMESTAMPTZ", "url": "TEXT", "revenue": "DOUBLE PRECISION",
+        "eps_adjusted": "DOUBLE PRECISION", "eps_gaap": "DOUBLE PRECISION", "fiscal_period": "TEXT",
+        "guidance": "TEXT", "revenue_rounding": "DOUBLE PRECISION",
+        "eps_rounding": "DOUBLE PRECISION", "computed_at": "TIMESTAMPTZ",
+    }
+    assert NOT_NULL == {"symbol", "report_date", "accession", "verifier_version", "computed_at"}
+    assert "verifier_version INTEGER NOT NULL," in " ".join(MIGRATION_SQL.split()), (
+        "no DEFAULT: a write that names no verifier must be refused, never stamped as one")
+
+
+def test_the_migration_is_safe_to_run_twice_and_describes_itself():
+    sql = " ".join(MIGRATION_SQL.split())
+    table = "public.earnings_filing_cache"
+    assert f"CREATE TABLE IF NOT EXISTS {table} (" in sql
+    assert (f"CREATE INDEX IF NOT EXISTS idx_earnings_filing_cache_report_date ON {table} "
+            "(report_date);") in sql
+    assert f'DROP POLICY IF EXISTS "earnings_filing_cache_service_all" ON {table};' in sql
+    assert not re.search(r"CREATE (?:TABLE|INDEX|UNIQUE INDEX) (?!IF NOT EXISTS)", sql)
+    assert sql.count("CREATE POLICY") == sql.count("DROP POLICY IF EXISTS") == 1
+    assert f"COMMENT ON TABLE {table} IS" in sql
+    uncommented = [name for name in COLUMNS if f"COMMENT ON COLUMN {table}.{name} IS" not in sql]
+    assert uncommented == []
+
+
+def test_the_check_in_the_migrations_header_can_see_a_partial_grant():
+    """`has_table_privilege` with a comma list is true when ANY listed privilege is held. That is
+    the right test for a role that must hold none, and no test at all for one that needs all."""
+    check = " ".join(line.lstrip("- ") for line in MIGRATION_TEXT.splitlines()
+                     if "has_table_privilege" in line)
+    for privilege in ("SELECT", "INSERT", "UPDATE"):
+        assert f"has_table_privilege('service_role', c.oid, '{privilege}')" in check
+    assert "'service_role', c.oid, 'SELECT, " not in check
+    for role in ("anon", "authenticated"):
+        assert f"has_table_privilege('{role}', c.oid, 'SELECT, INSERT, UPDATE, DELETE')" in check
 
 
 def test_the_migration_lets_the_backend_in_and_nobody_else():
@@ -5547,6 +5722,79 @@ def test_the_migration_lets_the_backend_in_and_nobody_else():
     assert f"ON {table} FOR ALL TO service_role USING (true) WITH CHECK (true);" in sql
     assert f"REVOKE ALL ON {table} FROM anon, authenticated;" in sql
     assert f"GRANT ALL ON {table} TO service_role;" in sql
+
+
+def _real_client(answer: Callable[[httpx.Request], httpx.Response]) -> SimpleNamespace:
+    """The real PostgREST client over a transport that answers in memory."""
+    client = SyncPostgrestClient(
+        "http://supabase.invalid/rest/v1",
+        http_client=httpx.Client(transport=httpx.MockTransport(answer)))
+    return SimpleNamespace(table=client.from_)
+
+
+@pytest.mark.asyncio
+async def test_the_read_and_the_write_work_through_the_real_client(monkeypatch):
+    """The fake shows what the code asks for, this that the real SDK can ask it and what goes on
+    the wire: a builder call it does not have, or a request PostgREST would refuse, only ever
+    shows as a WARNING every 2 minutes."""
+    seen: List[httpx.Request] = []
+    stored: List[dict] = []
+
+    def _answer(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.method == "POST":
+            stored.append(json.loads(request.content))
+            return httpx.Response(201, json=stored)
+        return httpx.Response(200, json=stored)
+
+    monkeypatch.setattr("app.database.get_supabase", lambda: _real_client(_answer))
+    await els._store_filing(_kept())
+    write = seen[-1]
+    assert write.method == "POST" and write.url.path.endswith("/earnings_filing_cache")
+    assert write.url.params["on_conflict"] == ",".join(PRIMARY_KEY)
+    assert "resolution=merge-duplicates" in write.headers["prefer"]
+    assert set(json.loads(write.content)) == COLUMNS
+
+    held = await els._read_held_filings([PREV, REPORT])
+    read = seen[-1]
+    assert read.method == "GET" and read.url.path.endswith("/earnings_filing_cache")
+    assert set(read.url.params["select"].split(",")) == COLUMNS
+    assert read.url.params["report_date"] == f"in.({PREV.isoformat()},{REPORT.isoformat()})"
+    assert [(h.symbol, h.day, h.figures.revenue) for h in held] == [("INTC", PREV, 17.1e9)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [
+    {"code": "PGRST205", "message": "Could not find the table in the schema cache"},
+    {"code": "42P10", "message": "there is no unique or exclusion constraint matching"},
+], ids=lambda e: e["code"])
+async def test_what_the_real_client_raises_is_a_warning_and_a_retry(monkeypatch, caplog, error):
+    """The table not there yet, or a key that does not match: what the SDK raises for either is
+    no reason to end a tick."""
+    def _answer(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404 if error["code"].startswith("PGRST") else 400, json=error)
+
+    monkeypatch.setattr("app.database.get_supabase", lambda: _real_client(_answer))
+    svc, at = _svc(), _et(REPORT, 9, 1)
+    with caplog.at_level(logging.WARNING, logger=els.__name__):
+        await svc.restore_filings(at)
+        await els._store_filing(_kept())
+    assert svc._filings_restored is False and svc._restore_retry_at > 0
+    lines = [r.getMessage() for r in caplog.records]
+    assert any("filing restore failed" in line and error["code"] in line for line in lines)
+    assert any("not kept" in line and error["code"] in line for line in lines)
+
+
+def test_the_fake_table_has_the_real_clients_shape():
+    """A read with no `.select` raises on the real builder and only a WARNING would say so, so
+    the fake must refuse what the real one has no method for."""
+    table = "earnings_filing_cache"
+    fake = FilingCache().table(table)
+    with SyncPostgrestClient("http://supabase.invalid") as client:
+        real = client.from_(table)
+        for name in ("select", "upsert", "in_"):
+            assert hasattr(real, name) == hasattr(fake, name), name
+        assert hasattr(real.select("symbol"), "in_") and hasattr(fake.select("symbol"), "in_")
 
 
 @pytest.mark.parametrize("change", [
@@ -5568,6 +5816,85 @@ def test_a_row_that_cannot_be_trusted_reads_as_nothing(change):
 @pytest.mark.parametrize("row", [None, "row", 7, ["INTC"]], ids=repr)
 def test_what_is_no_row_at_all_reads_as_nothing(row):
     assert els.held_filing_from(row) is None
+
+
+@pytest.mark.parametrize("stored", [
+    lambda version: version - 1, lambda version: version + 1, lambda version: None,
+    lambda version: str(version), lambda version: True,
+], ids=["older", "newer", "null", "text", "a_bool_that_equals_1"])
+def test_a_row_another_verifier_wrote_reads_as_nothing(stored):
+    """A fix to the verifier cannot reach a figure the table holds, and nothing on the row but
+    this can tell it from a good one. Newer counts as well: a rollback means that build is the
+    one not trusted."""
+    row = dict(_kept(), verifier_version=stored(efs.FILING_VERIFIER_VERSION))
+    assert els.held_filing_from(row) is None
+
+
+def test_a_row_with_no_version_reads_as_nothing():
+    row = {name: value for name, value in _kept().items() if name != "verifier_version"}
+    assert els.held_filing_from(row) is None
+
+
+def test_a_row_says_which_verifier_kept_it_and_that_one_reads_it_back():
+    row = _kept()
+    assert row["verifier_version"] == efs.FILING_VERIFIER_VERSION
+    assert els.held_filing_from(row) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_row_of_another_verifier_is_left_out_as_an_old_row_not_a_bad_one(cache, caplog):
+    """Every row of the last live days after a deploy that moves the version: expected, once per
+    process, and not to be mistaken for a table that holds junk."""
+    cache.hold(_kept("AAPL", PREV))
+    cache.hold(dict(_kept("INTC", PREV), verifier_version=efs.FILING_VERIFIER_VERSION + 1))
+    svc, at = _svc(), _et(REPORT, 9, 1)
+    with caplog.at_level(logging.INFO, logger=els.__name__):
+        await svc.restore_filings(at)
+    assert svc.snapshot("AAPL", PREV, at).eps.actual == 0.44
+    assert svc.snapshot("INTC", PREV, at) is None
+    (line,) = [r for r in caplog.records if "another verifier" in r.getMessage()]
+    assert line.levelno == logging.INFO
+    assert "INTC" in line.getMessage() and PREV.isoformat() in line.getMessage()
+    assert str(efs.FILING_VERIFIER_VERSION + 1) in line.getMessage()
+    assert not [r for r in caplog.records if "could not be read" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_an_answer_that_is_no_row_is_a_bad_row_not_an_old_one(monkeypatch, cache, caplog):
+    """It has no version to read, and calling it one would hide a table that holds junk."""
+    monkeypatch.setattr(cache, "_read", lambda *_: SimpleNamespace(data=["junk", _kept()]))
+    with caplog.at_level(logging.INFO, logger=els.__name__):
+        held = await els._read_held_filings([PREV])
+    assert [h.symbol for h in held] == ["INTC"], "and it costs only itself"
+    (line,) = [r for r in caplog.records if "could not be read" in r.getMessage()]
+    assert line.levelno == logging.WARNING
+    assert not [r for r in caplog.records if "another verifier" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_a_row_of_another_verifier_for_an_earlier_day_waits_for_fmp(monkeypatch, cache):
+    """Nothing reads a filing of a day before today, so its figure goes, as on any restart before
+    this table, and the card says the results are not in. The row is the one a fix refuses, so
+    the card must not fall back on it: a false Miss is the worse of the two."""
+    monkeypatch.setattr(ts, "_et_today", lambda: REPORT)
+    watcher = _Watcher()
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: watcher)
+    cache.hold(dict(_kept("INTC", PREV, eps_adjusted=-0.44),
+                    verifier_version=efs.FILING_VERIFIER_VERSION - 1))
+    at = _et(REPORT, 9, 1)
+    await els.earnings_live_tick(at, fmp=_FMP({PREV: [_row("INTC", PREV)], REPORT: []}),
+                                 watched=["INTC"], dispatch=_collect([]))
+    await els.earnings_filing_tick(at, watched=["INTC"])
+    snap = _svc().snapshot("INTC", PREV, at)
+    assert snap.status == els.STATUS_AWAITING
+    assert (snap.eps.actual, snap.eps.surprise_pct, snap.filing) == (None, None, None)
+    assert watcher.calls == [], "the watch reads today's reports only"
+
+
+def test_a_padded_key_reads_as_the_records_key():
+    """A record is found by its exact symbol, and a filing by its exact accession."""
+    held = els.held_filing_from(dict(_kept(), symbol=" intc ", accession=" 0000050863-26-000123 "))
+    assert (held.symbol, held.figures.accession) == ("INTC", "0000050863-26-000123")
 
 
 def test_a_time_or_a_label_that_cannot_be_read_costs_only_itself():

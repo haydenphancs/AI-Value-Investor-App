@@ -27,7 +27,9 @@ push never uses it (that kind reaches 1.02 users on FMP numbers only).
 SEC LOAD. The limiter (`SEC_EDGAR_MAX_RPS`) and the 600 s throttle circuit are SHARED with
 the Learn pipeline, the buyback check and the Trillion stake finder, so a throttle caused
 here would stop all of them. The watcher therefore:
-  * checks at most `EARNINGS_LIVE_SEC_MAX_SYMBOLS` tickers a day (most-watched first);
+  * checks at most `EARNINGS_LIVE_SEC_MAX_SYMBOLS` tickers a round (most-watched first), a load
+    limit and no daily budget: a report with its figures in leaves the pending list and the next
+    one takes its place, so a busy day reads more filings than that, one model call each;
   * polls each one every minute only inside the two release windows (06:00–09:35 and
     15:55–18:30 ET), every 5 min otherwise, never outside 06:00–22:00 ET;
   * spaces its calls (`_CALL_SPACING_SECONDS`) instead of bursting;
@@ -38,8 +40,9 @@ Foreign private issuers furnish results on 6-K, not 8-K; they stay FMP-only.
 
 A RESTART. The watch is per process, but what a read verified goes to `earnings_filing_cache` and
 a new process takes it back (`restore`, from `EarningsLiveService.restore_filings`), so a filing
-read once is not read again. Only a filing that gave nothing is read a second time, and any
-filing a failed write left out of the table, or a failed read of it left unrestored.
+read once is not read again. Only a filing that gave nothing is read a second time, any filing a
+failed write left out of the table or a failed read of it left unrestored, and one another
+verifier kept (`FILING_VERIFIER_VERSION`), which is how a fix here reaches a filing already held.
 """
 
 from __future__ import annotations
@@ -900,6 +903,18 @@ def unwrap_json(raw: Any) -> Any:
         return json.loads(raw["text"])
     except (json.JSONDecodeError, ValueError):
         return None
+
+
+#: Which verifier kept a stored filing. Every `earnings_filing_cache` row carries it, and a row of
+#: another version reads as no row (`earnings_live_service.held_filing_from`). A fix here cannot
+#: reach a figure the table holds, and nothing on a row tells a misread from a good one, so
+#: without this the deploy that fixes a misread would restore it, and a false outlook, which FMP
+#: never replaces, would stay for its live days. Move it by one with every change to what
+#: `verify_extraction` keeps, or to anything it reads (a test pins the two together:
+#: test_the_verifier_cannot_change_without_its_version_moving), and with any change to `_SYSTEM`
+#: that should reach the filings held. That deploy reads today's pending filings once more; a
+#: restart without one reads nothing.
+FILING_VERIFIER_VERSION = 1
 
 
 def verify_extraction(

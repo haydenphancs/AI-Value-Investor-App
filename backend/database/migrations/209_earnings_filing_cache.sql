@@ -16,6 +16,17 @@
 -- holidays included). A restored filing is not read again, so a restart costs SEC and Gemini
 -- nothing, and a restored figure is never a landing, so a restart announces nothing.
 --
+-- A row is trusted only by the verifier that kept it. `verifier_version` holds
+-- `earnings_filing_service.FILING_VERIFIER_VERSION`, moved with every change to the verifier, and
+-- a row of another version reads as no row. Before this table a same-day deploy read the filing
+-- again with the fixed code. With the table alone a misread would outlive its fix: restored
+-- with no read and nothing on the row to tell it from a good one, a false figure until FMP fills
+-- and a false outlook, which FMP never replaces, for all its live days. So the one deploy that
+-- moves the version costs what any restart cost before: a report of today still pending has its
+-- filing read once more, and any other goes without it until FMP fills. Any other restart reads
+-- nothing. A row wrong for a reason no verifier change covers needs a hand, then a restart:
+--   DELETE FROM public.earnings_filing_cache WHERE symbol = 'XYZ' AND report_date = 'YYYY-MM-DD';
+--
 -- Holds ONLY what the company's own release said: each figure is the number printed in the SEC
 -- filing, verified against a verbatim quote, and the outlook sentence is grounded the same way.
 -- NEVER FMP data: no consensus, no FMP actual, no company name. Those come back from FMP.
@@ -28,9 +39,11 @@
 -- No clean-up job, on purpose. The tables that have one are a different case: ticker_news_cache
 -- holds licensed third-party news text, and news_sentiment_log, search_pick_daily and
 -- social_mentions_history gain rows per article or per ticker every day. This one holds public
--- SEC facts and gains at most EARNINGS_LIVE_SEC_MAX_SYMBOLS (25) rows a day, and only for a
--- filing actually read: about 6,300 rows a year at the very worst, each under 1 KB. Rows past
--- the live days are simply never read.
+-- SEC facts and gains one row per filing actually read, at most one per watched report: the
+-- watched list is clamped at 1,000 tickers and each reports 4 times a year, so about 4,000 rows
+-- a year at the very worst, each under 1 KB. EARNINGS_LIVE_SEC_MAX_SYMBOLS (25) does not bound
+-- this: it limits a round, and a report with its figures in leaves the list for the next one.
+-- Rows past the live days are simply never read.
 --
 -- RLS is service-role ONLY. SEC data is public domain, but every cache table has been
 -- service-role-only since 164: the iOS app has no Supabase client, every reader is the backend's
@@ -56,17 +69,23 @@
 -- the intended guard.
 --
 -- VERIFY (read-only) right after applying → one row: t | f | f | t
+-- A comma list is true when ANY listed privilege is held: right for the two roles that must hold
+-- none, no test at all for the one that needs all three, so that one asks three times. Both table
+-- calls are best effort, so a refused write would show only as a WARNING.
 -- SELECT
 --   c.relrowsecurity,
---   has_table_privilege('anon', c.oid, 'SELECT'),
---   has_table_privilege('authenticated', c.oid, 'SELECT'),
---   has_table_privilege('service_role', c.oid, 'SELECT, INSERT, UPDATE')
+--   has_table_privilege('anon', c.oid, 'SELECT, INSERT, UPDATE, DELETE'),
+--   has_table_privilege('authenticated', c.oid, 'SELECT, INSERT, UPDATE, DELETE'),
+--   has_table_privilege('service_role', c.oid, 'SELECT')
+--     AND has_table_privilege('service_role', c.oid, 'INSERT')
+--     AND has_table_privilege('service_role', c.oid, 'UPDATE')
 -- FROM pg_class c WHERE c.oid = 'public.earnings_filing_cache'::regclass;
 
 CREATE TABLE IF NOT EXISTS public.earnings_filing_cache (
     symbol            TEXT             NOT NULL,
     report_date       DATE             NOT NULL,
     accession         TEXT             NOT NULL,
+    verifier_version  INTEGER          NOT NULL,
     accepted_at       TIMESTAMPTZ,
     url               TEXT,
     revenue           DOUBLE PRECISION,
@@ -88,9 +107,10 @@ COMMENT ON TABLE public.earnings_filing_cache IS
     'FMP can take until the next morning to fill the same figures, and FMP never carries the '
     'outlook or the filing link. One row per (symbol, report date), written when a verified '
     'filing reaches its record and read back once per process for the live days, so a restart '
-    'neither loses a figure nor reads the filing again. Figures from SEC filings only, never '
-    'FMP data. report_date is its TTL: no expires_at and no clean-up job. service_role only. '
-    'Written and read only by app/services/earnings_live_service.py.';
+    'neither loses a figure nor reads the filing again. A row of another verifier_version reads '
+    'as no row. Figures from SEC filings only, never FMP data. report_date is its TTL: no '
+    'expires_at and no clean-up job. service_role only. Written and read only by '
+    'app/services/earnings_live_service.py.';
 
 COMMENT ON COLUMN public.earnings_filing_cache.symbol IS
     'The ticker, upper case, as the live records key it.';
@@ -99,6 +119,9 @@ COMMENT ON COLUMN public.earnings_filing_cache.report_date IS
 COMMENT ON COLUMN public.earnings_filing_cache.accession IS
     'SEC accession number of the 8-K, e.g. 0000050863-26-000123. A restored accession is not '
     'read again.';
+COMMENT ON COLUMN public.earnings_filing_cache.verifier_version IS
+    'earnings_filing_service.FILING_VERIFIER_VERSION when the row was kept. A row of another '
+    'version reads as no row, so a fix to the verifier reaches a filing the table holds.';
 COMMENT ON COLUMN public.earnings_filing_cache.accepted_at IS
     'When EDGAR accepted the filing. NULL when SEC gave no readable time.';
 COMMENT ON COLUMN public.earnings_filing_cache.url IS

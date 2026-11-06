@@ -150,6 +150,11 @@ process is take back what the table holds for the live days (`restore_filings`).
     deploy, its push not yet sent, goes without one.
   * A restored filing is not read again, by SEC or by Gemini, even while its report stays
     incomplete and pending (`EarningsFilingWatcher.restore`).
+  * A row is trusted only by the verifier that kept it (`FILING_VERIFIER_VERSION`), or the deploy
+    that fixes a misread would restore it, with nothing on the row to tell it from a good one.
+    One of another version is no row, so that one deploy costs what a restart cost before the
+    table: a report of today still pending has its filing read once more, and any other goes
+    without it until FMP fills, its outlook and link for good.
   * A failed read, or a table not there yet, is a WARNING and a retry every
     `_FAILURE_RETRY_SECONDS`, and until then a restart is what it was before this table: a filing
     of today's is read again, one of a day before today waits for FMP. Code can deploy before the
@@ -251,7 +256,11 @@ from typing import (
 
 from app.config import settings
 from app.services._earnings_common import eps_digit_shift_suspect
-from app.services.earnings_filing_service import _DUE_SLACK_SECONDS, FilingFigures
+from app.services.earnings_filing_service import (
+    _DUE_SLACK_SECONDS,
+    FILING_VERIFIER_VERSION,
+    FilingFigures,
+)
 from app.services.earnings_window_service import (
     _TRUNCATION_ROWS,
     _row_date,
@@ -315,8 +324,8 @@ _FAILURE_RETRY_SECONDS = 120.0
 #: Migration 209. Each call is bounded as well as on a thread, because a tick waits for it and the
 #: tick is what sends the pushes: a stalled Supabase must cost a retry, never the minute.
 _FILING_CACHE_TABLE = "earnings_filing_cache"
-_FILING_CACHE_COLUMNS = ("symbol", "report_date", "accession", "accepted_at", "url", "revenue",
-                         "eps_adjusted", "eps_gaap", "fiscal_period", "guidance",
+_FILING_CACHE_COLUMNS = ("symbol", "report_date", "accession", "verifier_version", "accepted_at",
+                         "url", "revenue", "eps_adjusted", "eps_gaap", "fiscal_period", "guidance",
                          "revenue_rounding", "eps_rounding", "computed_at")
 _FILING_CACHE_NUMBERS = ("revenue", "eps_adjusted", "eps_gaap", "revenue_rounding", "eps_rounding")
 _FILING_CACHE_DEADLINE_SECONDS = 5.0
@@ -856,14 +865,24 @@ def _stored_text(value: Any) -> Optional[str]:
     return value if isinstance(value, str) and value.strip() else None
 
 
+def _kept_by_this_verifier(row: Mapping[str, Any]) -> bool:
+    """Does this row carry today's `FILING_VERIFIER_VERSION`? A bool is refused by name, because
+    `True == 1`, and a NULL or a missing column is another verifier like any other."""
+    version = row.get("verifier_version")
+    return version == FILING_VERIFIER_VERSION and not isinstance(version, bool)
+
+
 def filing_cache_row(symbol: str, day: date, figures: FilingFigures,
                      computed_at: datetime) -> Dict[str, Any]:
     """PURE. One `earnings_filing_cache` row: every field of the figures, as verified, because
-    a restored record must read as the one that wrote it (`held_filing_from`)."""
+    a restored record must read as the one that wrote it (`held_filing_from`), and which verifier
+    kept them. The figures only ever come from this process's verifier or from a row of the same
+    version, so the stamp is true of them whichever it was."""
     return {
         "symbol": symbol.upper(),
         "report_date": day.isoformat(),
         "accession": figures.accession,
+        "verifier_version": FILING_VERIFIER_VERSION,
         "accepted_at": iso_utc(figures.accepted_at),
         "url": figures.url,
         "revenue": figures.revenue,
@@ -881,8 +900,9 @@ def held_filing_from(row: Any) -> Optional[HeldFiling]:
     """PURE. An `earnings_filing_cache` row back as what it was written from, or None when it
     cannot be trusted. All or nothing for what decides a figure: half a row could show one
     without the rounding that keeps it honest, and a row with neither a figure nor an outlook is
-    no filing. A time or a label that cannot be read costs only itself."""
-    if not isinstance(row, Mapping):
+    no filing. A time or a label that cannot be read costs only itself. A row another verifier
+    kept is no row, whichever way the version moved (`FILING_VERIFIER_VERSION`)."""
+    if not isinstance(row, Mapping) or not _kept_by_this_verifier(row):
         return None
     symbol, accession = _stored_text(row.get("symbol")), _stored_text(row.get("accession"))
     day = _parse_day(row.get("report_date"))
@@ -1202,7 +1222,9 @@ def _settled(actual: Optional[float], estimate: Optional[float],
 
 async def _read_held_filings(days: Sequence[date]) -> List[HeldFiling]:
     """What `earnings_filing_cache` holds for `days`. A failed read RAISES, for the caller to
-    retry. A row that cannot be trusted is left out with a WARNING, and costs only itself."""
+    retry. A row that cannot be trusted is left out with a WARNING, and costs only itself; one
+    another verifier kept is left out too, at INFO, as every deploy that moves the version
+    expects."""
     wanted = [day.isoformat() for day in days]
 
     def _read() -> List[Any]:
@@ -1223,6 +1245,12 @@ async def _read_held_filings(days: Sequence[date]) -> List[HeldFiling]:
             held.append(filing)
             continue
         named = row if isinstance(row, Mapping) else {}
+        if named and not _kept_by_this_verifier(named):
+            logger.info("[earnings-live] %s %s: a filing cache row of another verifier (version "
+                        "%r, this build's is %d) left out", named.get("symbol"),
+                        named.get("report_date"), named.get("verifier_version"),
+                        FILING_VERIFIER_VERSION)
+            continue
         logger.warning("[earnings-live] %s %s: a filing cache row could not be read, left out",
                        named.get("symbol"), named.get("report_date"))
     return held

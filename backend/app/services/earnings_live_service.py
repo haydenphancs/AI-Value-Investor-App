@@ -129,9 +129,10 @@ source can hold the other up.
   Ticks START a minute apart however long they ran, and an FMP fetch stamps itself when it
   returns, so every FMP cadence comes due a few seconds early (`_DUE_SLACK_SECONDS`): an exact
   compare falls a moment short on the tick it was meant for, and "every 5 min" becomes every 6.
-  A long round has no minute of rest after it either, so the rest between two attempts at a
-  filing comes from `EarningsFilingWatcher.run_once`, which counts it from the end of the last
-  round that spent one.
+  A long round has no minute of rest after it either, so `EarningsFilingWatcher.run_once` holds
+  every filing waiting on a retry for a minute after a round that spent an attempt. A filing's
+  own rest counts from the end of its own failed read, so another filing's failures never restart
+  it.
 
 STATUSES (no time of day exists on `/stable` rows, so the window is the report day):
   * `upcoming` — a later date, or today before 06:00 ET with nothing in yet.

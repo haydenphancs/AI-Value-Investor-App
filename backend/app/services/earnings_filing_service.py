@@ -123,10 +123,10 @@ _CALL_SPACING_SECONDS = 1.0
 #: A throttle with no Retry-After parks the watcher for the client's own circuit length.
 _THROTTLE_PARK_SECONDS = 600.0
 #: How long a filing rests after each failed read, in seconds: six reads over about 33 minutes, so
-#: half an hour of outage loses no filing. Counted from the end of the round that spent the
-#: attempt, and never shorter than the symbol's own cadence. The wider gaps are what keep a long
-#: outage cheap on the limiter shared with Learn and the stake finder, and each one outlasts the
-#: quota breaker's 30 s cooldown, so a fail-fast from it rests on this same ladder.
+#: half an hour of outage loses no filing, however many others fail in it. Counted from the end of
+#: the failed read, and never shorter than the symbol's own cadence. The wider gaps are what keep a
+#: long outage cheap on the limiter shared with Learn and the stake finder, and each one outlasts
+#: the quota breaker's 30 s cooldown, so a fail-fast from it rests on this same ladder.
 _EXTRACT_RETRY_GAPS: Tuple[int, ...] = (60, 120, 300, 600, 900)
 
 # ── Extraction ──────────────────────────────────────────────────────
@@ -1387,8 +1387,9 @@ class _Read(enum.Enum):
 
 @dataclass
 class _Watch:
-    # What the poll cadence counts from: the start of the round that read this symbol or, for a
-    # filing waiting on its next attempt, the end of the last round that spent one (`run_once`).
+    # What the wait counts from: the start of the round that read this symbol or, for a filing
+    # waiting on its next attempt, the end of its failed read, moved on no further than leaves a
+    # minute after a round that spent an attempt (`run_once`).
     checked_mono: float = 0.0
     found: Optional[ResultsFiling] = None   # the release, once read
     done: bool = False          # the report is settled: its release was read, or SEC has no CIK
@@ -1399,6 +1400,10 @@ class _Watch:
     retry_gap: float = 0.0
     # Accessions never read again here: not the release, or out of attempts.
     skipped: Set[str] = field(default_factory=set)
+
+    def wait_seconds(self, interval: int) -> float:
+        """How long after `checked_mono` the symbol comes due on a cadence of `interval`."""
+        return max(interval, self.retry_gap)
 
 
 @dataclass
@@ -1438,7 +1443,7 @@ class EarningsFilingWatcher:
             return True
         if w.done or w.found is not None:
             return False
-        return mono - w.checked_mono >= max(interval, w.retry_gap) - _DUE_SLACK_SECONDS
+        return mono - w.checked_mono >= w.wait_seconds(interval) - _DUE_SLACK_SECONDS
 
     async def run_once(
         self,
@@ -1458,9 +1463,9 @@ class EarningsFilingWatcher:
 
         `symbols` must already be ordered most-watched first; the round keeps the first
         `EARNINGS_LIVE_SEC_MAX_SYMBOLS`. Never raises: a failure for one symbol costs only
-        that symbol's round, a model that fails rests every filing waiting on a retry, a
-        throttle parks the whole watcher, and a delivery that fails is logged, and that figure
-        is not offered again in this process.
+        that symbol's round, a round that spends an attempt holds every filing waiting on a
+        retry for a minute, a throttle parks the whole watcher, and a delivery that fails is
+        logged, and that figure is not offered again in this process.
         """
         if not settings.EARNINGS_LIVE_FILINGS_ENABLED or not user_agent_configured():
             return {}
@@ -1543,17 +1548,23 @@ class EarningsFilingWatcher:
                             "[earnings-live-filing] %s %s: figures not delivered (%s: %s)",
                             symbol, report_day.isoformat(), type(e).__name__, e, exc_info=True,
                         )
-        # The loop starts the next round a second behind a long one, so the rest between two
-        # attempts comes from here: a round that spent one moves every filing still waiting on
-        # its next attempt to the end of this round, whichever round it failed in. Counted from
-        # their own rounds, filings that landed apart would take turns with no rest at all, and a
-        # filing out of attempts is never read again. A round that spent none moves nothing, so a
-        # model that has recovered holds no retry back.
+        # The loop starts the next round a second behind a long one, so the minute after a round
+        # that spent an attempt comes from here: every filing waiting on its next attempt holds
+        # until then, whichever round it failed in. Counted from their own reads alone, filings
+        # that landed apart would take turns with no pause at all. That minute is all it adds: the
+        # attempt may be another company's filing failing on its own, which says nothing about
+        # this one, so what is left of a wait stands and none starts over. Restarted, a 15 minute
+        # rest ran past an hour with the model long recovered. A round that spent none moves
+        # nothing. The cadence is this round's, so the round before 15:55 ET can let a retry go
+        # inside that minute. It has still served its own rest, which is what limits its attempts.
         if spent:
             ended = time.monotonic()
+            # Never the fallback: no symbol comes due outside EDGAR's hours.
+            interval = poll_interval_seconds(now_et) or _FAST_POLL_SECONDS
             for w in self._watch.values():
                 if w.retry_gap and not w.done:
-                    w.checked_mono = ended
+                    w.checked_mono = max(w.checked_mono,
+                                         ended + _FAST_POLL_SECONDS - w.wait_seconds(interval))
         return new
 
     async def _check_one(
@@ -1591,8 +1602,8 @@ class EarningsFilingWatcher:
                 w.found, w.done, w.figures = filing, True, figures
                 return figures
             if outcome is _Read.RETRY:
-                # `run_once` moves this stamp to the end of the round, and a round cut off before
-                # its end leaves the read on this one.
+                # The rest counts from here. `run_once` moves this stamp only as far as the minute
+                # after the round, and a round cut off before its end leaves the read on this one.
                 tries = w.attempts[acc] = w.attempts.get(acc, 0) + 1
                 w.checked_mono = time.monotonic()
                 if tries <= len(_EXTRACT_RETRY_GAPS):

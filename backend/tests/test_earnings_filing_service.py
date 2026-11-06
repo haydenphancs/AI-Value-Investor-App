@@ -28,7 +28,7 @@ end the watch for the one that is.
 So is the round's timing, because the card reads the record while a round runs: a figure is
 handed over the moment it verifies, every symbol of a round comes due again a minute after that
 round started, and a filing waiting on its next attempt rests its step of the ladder from the end
-of the last round that spent one.
+of its own failed read, and for at least a minute after any round that spent an attempt.
 Hermetic: fake SEC client and fake Gemini; `asyncio.sleep` is injected.
 """
 from __future__ import annotations
@@ -43,7 +43,7 @@ import time
 import unicodedata
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pytest
 
@@ -3153,6 +3153,7 @@ _INDEX_NO_EXHIBIT = _INDEX.replace("EX-99.1", "EX-10.1")
 _INDEX_EXHIBIT_WITH_NO_FILE = _INDEX.replace(
     '<a href="/Archives/edgar/data/50863/000005086326000123/q3-26earnings.htm">q3-26earnings.htm</a>',
     "q3-26earnings.htm")
+_EXHIBIT_HREF = "/Archives/edgar/data/50863/000005086326000123/q3-26earnings.htm"
 
 
 def test_the_ex991_document_is_located_from_the_index_page():
@@ -3171,7 +3172,11 @@ def test_an_index_that_lists_the_filing_and_no_ex99_answers_none():
     "<html>no table</html>",
     "<table><tr><th>Seq</th><th>Document</th><th>Type</th></tr></table>",
     _INDEX_EXHIBIT_WITH_NO_FILE,
-], ids=["a_404", "empty", "blank", "not_text", "no_table", "header_row_only", "exhibit_with_no_file"])
+    _INDEX.replace(_EXHIBIT_HREF, "javascript:void(0)"),
+    _INDEX.replace(_EXHIBIT_HREF, "/Archives/edgar/data/50863/000005086326000123/"),
+    "<table><tr><td>Form 8-K</td><td>Current report</td></tr></table>",
+], ids=["a_404", "empty", "blank", "not_text", "no_table", "header_row_only", "exhibit_with_no_file",
+        "exhibit_with_a_script_link", "exhibit_with_a_folder_link", "names_the_form_in_passing"])
 def test_a_page_that_cannot_say_the_filing_has_no_exhibit_is_not_read_as_saying_so(page):
     """None means one thing: the filing's documents were listed and no EX-99 is among them.
     Anything else is a failed read, and a failed read is worth another try."""
@@ -3271,6 +3276,7 @@ async def test_a_filing_is_found_extracted_once_and_then_never_polled_again(watc
                                    cik_map=_CIKS, sleep=_no_sleep)
     assert again == {} and gem.calls == 1
     assert sec.calls.count("sub:0000050863") == 1, "found → stop polling"
+    assert watcher.figures_for("INTC", REPORT) is found["INTC"]
 
 
 @pytest.mark.asyncio
@@ -3493,7 +3499,7 @@ async def test_a_verifier_that_raises_costs_one_read_and_names_the_filing(watche
     rows = [r for r in caplog.records if "verify_failed" in r.getMessage()]
     assert len(rows) == 1 and rows[0].exc_info is not None
     assert "INTC" in rows[0].getMessage() and ACC in rows[0].getMessage()
-    assert "KeyError" in rows[0].getMessage()
+    assert REPORT.isoformat() in rows[0].getMessage() and "KeyError" in rows[0].getMessage()
 
 
 @pytest.mark.asyncio
@@ -3634,6 +3640,23 @@ async def test_a_second_ticker_of_one_filing_is_delivered_without_a_second_extra
     await watcher.run_once(_AT_16, ["GOOGL", "GOOG"], REPORT, sec=sec, gemini=gem, cik_map=ciks,
                            sleep=_no_sleep, on_figures=lambda sym, fig: delivered.append(sym))
     assert delivered == ["GOOGL", "GOOG"] and gem.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_second_ticker_ends_its_watch_on_the_memo_and_is_delivered_once(watcher, clock):
+    """Left open, the ticker that took the figures from memory would read SEC every minute and
+    hand the same figures over each time."""
+    ciks = {"GOOGL": "0001652044", "GOOG": "0001652044"}
+    sec, gem = _SEC(filings={"0001652044": [_8K]}), _Gemini()
+    delivered: List[str] = []
+    for _ in range(4):
+        await watcher.run_once(_AT_16, ["GOOG", "GOOGL"], REPORT, sec=sec, gemini=gem, cik_map=ciks,
+                               sleep=_no_sleep, on_figures=lambda sym, fig: delivered.append(sym))
+        clock.at += 60
+    assert delivered == ["GOOG", "GOOGL"] and gem.calls == 1
+    assert sec.calls.count("sub:0001652044") == 2
+    w = watcher._watch[("GOOGL", REPORT)]
+    assert w.done and w.found.accession == ACC and w.figures.eps_adjusted == 0.44
 
 
 @pytest.mark.asyncio
@@ -3824,6 +3847,28 @@ async def test_a_round_that_spent_no_attempt_holds_no_retry_back(watcher, clock)
 
 
 @pytest.mark.asyncio
+async def test_a_read_that_recovers_holds_no_other_filing_back(watcher, clock):
+    """Past failures are not this round's spending: a filing that verifies spent nothing, so a
+    retry whose rest is about to end still goes on time."""
+    sec, gem = _SEC(filings={_CIKS["INTC"]: [_8K]}), _Model(clock, stall=0)
+
+    async def _round() -> Dict[str, efs.FilingFigures]:
+        return await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=gem,
+                                      cik_map=_CIKS, sleep=_no_sleep)
+
+    await _round()
+    assert watcher._watch[("INTC", REPORT)].attempts == {ACC: 1}
+    rest = float(efs._EXTRACT_RETRY_GAPS[-1])
+    waiting = efs._Watch(checked_mono=clock.at + 90 - rest, retry_gap=rest, attempts={_MORNING: 5})
+    watcher._watch[("AAPL", REPORT)] = waiting
+    stamp = waiting.checked_mono
+    gem.until = clock.at
+    clock.at += 60
+    assert set(await _round()) == {"INTC"}
+    assert waiting.checked_mono == stamp
+
+
+@pytest.mark.asyncio
 async def test_a_read_that_spent_no_attempt_keeps_the_rounds_start(watcher, clock):
     """Only what spent an attempt moves: the round's quiet symbols stay on the minute, and a
     filing that verified is done either way."""
@@ -3981,13 +4026,31 @@ def _reads_of(sec: _SEC, document: str) -> int:
     return sec.calls.count(f"doc:{document}")
 
 
-async def _two_rounds(watcher, sec, gem):
-    first = await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
-                                   sleep=_no_sleep)
-    assert first == {}
+async def _first_round(watcher, sec, gem):
+    return await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
+                                  sleep=_no_sleep)
+
+
+async def _next_round(watcher, sec, gem):
     watcher._watch[("INTC", REPORT)].checked_mono = 0.0      # the 60 s cadence has passed
     return await watcher.run_once(_LATER, ["INTC"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
                                   sleep=_no_sleep)
+
+
+async def _two_rounds(watcher, sec, gem):
+    assert await _first_round(watcher, sec, gem) == {}
+    return await _next_round(watcher, sec, gem)
+
+
+async def _fails_once_then_reads(watcher, sec, gem):
+    """`_two_rounds` for a read that failed on the filing's account. Reading it again proves
+    little alone: a raise in the walk also leaves the filing to the next round, but spends no
+    attempt, owes no rest and has no cap, so that read would go every minute until 22:00 ET."""
+    assert await _first_round(watcher, sec, gem) == {}
+    w = watcher._watch[("INTC", REPORT)]
+    assert w.attempts == {ACC: 1} and w.retry_gap == efs._EXTRACT_RETRY_GAPS[0]
+    assert not w.done and w.found is None and not w.skipped
+    return await _next_round(watcher, sec, gem)
 
 
 _GOOD_TEXT = json.dumps(_good_answer())
@@ -4019,7 +4082,7 @@ async def test_a_blocked_empty_or_cut_answer_is_retried_not_final(watcher, answe
     """Only an answer that says false is "not the results". An answer that says nothing about it
     is a failed read: read as a verdict it would end the fast path on one glitch."""
     gem = _Scripted(answer)
-    found = await _two_rounds(watcher, _SEC(filings={"0000050863": [_8K]}), gem)
+    found = await _fails_once_then_reads(watcher, _SEC(filings={"0000050863": [_8K]}), gem)
     assert found["INTC"].eps_adjusted == 0.44 and gem.calls == 2
 
 
@@ -4027,8 +4090,8 @@ async def test_a_blocked_empty_or_cut_answer_is_retried_not_final(watcher, answe
 @pytest.mark.parametrize("suffix", ["-index.htm", "q3-26earnings.htm"])
 async def test_a_404_on_a_listed_document_is_retried_not_final(watcher, suffix):
     gem = _Gemini()
-    found = await _two_rounds(watcher, _ScriptedSEC(suffix, None, filings={"0000050863": [_8K]}),
-                              gem)
+    sec = _ScriptedSEC(suffix, None, filings={"0000050863": [_8K]})
+    found = await _fails_once_then_reads(watcher, sec, gem)
     assert found["INTC"].eps_adjusted == 0.44 and gem.calls == 1
 
 
@@ -4041,8 +4104,8 @@ async def test_a_404_on_a_listed_document_is_retried_not_final(watcher, suffix):
 ], ids=["index_empty", "index_no_table", "exhibit_empty", "exhibit_blank"])
 async def test_a_body_that_says_nothing_is_a_failed_read_not_a_verdict(watcher, suffix, body):
     gem = _Gemini()
-    found = await _two_rounds(watcher, _ScriptedSEC(suffix, body, filings={"0000050863": [_8K]}),
-                              gem)
+    sec = _ScriptedSEC(suffix, body, filings={"0000050863": [_8K]})
+    found = await _fails_once_then_reads(watcher, sec, gem)
     assert found["INTC"].eps_adjusted == 0.44 and gem.calls == 1
 
 
@@ -4050,7 +4113,7 @@ async def test_a_body_that_says_nothing_is_a_failed_read_not_a_verdict(watcher, 
 async def test_an_exhibit_row_with_no_file_is_retried_not_read_as_no_exhibit(watcher):
     gem = _Gemini()
     sec = _ScriptedSEC("-index.htm", _INDEX_EXHIBIT_WITH_NO_FILE, filings={"0000050863": [_8K]})
-    found = await _two_rounds(watcher, sec, gem)
+    found = await _fails_once_then_reads(watcher, sec, gem)
     assert found["INTC"].eps_adjusted == 0.44
 
 
@@ -4091,9 +4154,10 @@ async def test_a_filing_that_is_not_the_release_is_skipped_and_the_watch_goes_on
 @pytest.mark.asyncio
 @pytest.mark.parametrize("answer", [
     _good_answer(currency="EUR"),
+    _good_answer(currency=""),
     _good_answer(revenue=None, eps_gaap_diluted=None, guidance=None,
                  eps_adjusted_diluted={"value": 9.99, "quote": "a quote it never printed at all"}),
-], ids=["foreign_currency", "every_figure_refused"])
+], ids=["foreign_currency", "no_currency", "every_figure_refused"])
 async def test_a_results_release_with_no_figure_in_it_ends_the_watch(watcher, answer):
     sec, gem = _SEC(filings={"0000050863": [_8K]}), _Gemini(answer)
     assert await _two_rounds(watcher, sec, gem) == {}
@@ -4223,15 +4287,23 @@ async def test_a_newest_filing_on_a_retry_holds_the_older_one_until_its_rest_is_
 
 
 @pytest.mark.asyncio
-async def test_a_failed_read_behind_a_skipped_filing_keeps_its_own_count(watcher):
+async def test_a_failed_read_behind_a_skipped_filing_keeps_its_own_count(watcher, clock):
+    """And on every round after it: a newest filing that is not the release must not hide the one
+    behind it, the same way a walk that stopped at the first filing would."""
     newer = dict(_8K, accessionNumber=_MORNING, acceptanceDateTime="2026-10-29T16:04:00.000Z")
     sec = _SEC(filings={"0000050863": [newer, _8K]})
-    assert await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec,
-                                  gemini=_Scripted(_NOT_RESULTS, _BLOCKED), cik_map=_CIKS,
+    gem = _Scripted(_NOT_RESULTS, _BLOCKED)
+    assert await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
                                   sleep=_no_sleep) == {}
     w = watcher._watch[("INTC", REPORT)]
     assert w.skipped == {_MORNING} and w.attempts == {ACC: 1}
     assert w.retry_gap == efs._EXTRACT_RETRY_GAPS[0] and not w.done
+
+    clock.at += efs._EXTRACT_RETRY_GAPS[0]
+    found = await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
+                                   sleep=_no_sleep)
+    assert found["INTC"].eps_adjusted == 0.44 and w.found.accession == ACC
+    assert gem.calls == 3 and _reads_of(sec, f"{_MORNING}-index.htm") == 1
 
 
 @pytest.mark.asyncio
@@ -4400,7 +4472,7 @@ async def test_a_ticker_that_gave_up_on_a_filing_still_takes_its_twins_read(watc
 @pytest.mark.asyncio
 async def test_a_throttle_behind_a_filing_out_of_attempts_still_rests_the_filings_that_wait(
         watcher, clock):
-    """The round spent an attempt before the throttle cut it off, and the rest counts from there
+    """The round spent an attempt before the throttle cut it off, and the minute counts from there
     even when the attempt came from the walk rather than from the symbol's last read."""
     class _Slow(_PerFiling):
         async def get_filing_document(self, cik, acc, document):
@@ -4437,6 +4509,32 @@ async def test_a_symbol_past_its_failed_filing_stays_on_its_poll_while_another_f
     assert watcher._watch[("AAPL", REPORT)].checked_mono == polled
 
 
+_HOLDS = [pytest.param(at, cadence, gap, left, id=f"cadence_{cadence}-gap_{gap}-left_{left}")
+          for at, cadence in ((_AT_16, 60), (_AT_NOON, 300))
+          for gap in efs._EXTRACT_RETRY_GAPS
+          for left in (-1000, 0, 30, 59, 60, 61, 300, 900)
+          if left <= max(cadence, gap)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("at,cadence,gap,left", _HOLDS)
+async def test_a_round_that_spent_an_attempt_holds_a_waiting_filing_for_a_minute_and_no_more(
+        watcher, clock, at, cadence, gap, left):
+    """INTC's own filing failed here, and that says nothing about AAPL's. What is left of AAPL's
+    wait stands, a wait about to end runs on only to the minute after this round, and none starts
+    over: restarted by each other filing's failure, a 15 minute rest ran for 79, long after the
+    model had recovered. The wait is the longer of the cadence and the rest, in either window."""
+    key = ("AAPL", REPORT)
+    watcher._watch[key] = efs._Watch(checked_mono=clock.at + left - max(cadence, gap),
+                                     retry_gap=float(gap), attempts={_MORNING: 1})
+    await watcher.run_once(at, ["INTC"], REPORT, sec=_SEC(filings={_CIKS["INTC"]: [_8K]}),
+                           gemini=_Model(clock, stall=0), cik_map=_CIKS, sleep=_no_sleep)
+    assert watcher._watch[("INTC", REPORT)].attempts == {ACC: 1}, "the round spent one"
+    comes_due = clock.at + max(left, 60) - efs._DUE_SLACK_SECONDS
+    assert not watcher._due(key, at.astimezone(ET), comes_due - 0.001)
+    assert watcher._due(key, at.astimezone(ET), comes_due)
+
+
 @pytest.mark.parametrize("hm,gap,short,on_time", [
     ((16, 3), 900, 894.999, 895),      # the rest is longer than the cadence
     ((12, 0), 60, 294.999, 295),       # the cadence is longer than the rest
@@ -4464,6 +4562,59 @@ async def test_each_outcome_logs_the_symbol_the_day_and_the_accession(watcher, c
     for row in rows:
         assert "sym=INTC" in row and f"day={REPORT.isoformat()}" in row and ACC in row
     assert f"tries={_reads_allowed()}" in gave_up
+
+
+_TOO_LARGE = SECEdgarDocumentTooLargeException("over the cap", limit_bytes=3, size_bytes=9)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sec_for,gem_for,marker,level", [
+    (lambda rows: _ScriptedSEC("-index.htm", None, filings=rows), _Gemini,
+     "result=index_unreadable", logging.WARNING),
+    (lambda rows: _ScriptedSEC("-index.htm", _INDEX_NO_EXHIBIT, filings=rows), _Gemini,
+     "result=no_exhibit", logging.INFO),
+    (lambda rows: _ScriptedSEC("q3-26earnings.htm", None, filings=rows), _Gemini,
+     "result=exhibit_unreadable", logging.WARNING),
+    (lambda rows: _ScriptedSEC("q3-26earnings.htm", _TOO_LARGE, filings=rows), _Gemini,
+     "result=document_refused", logging.WARNING),
+    (lambda rows: _DocSEC("<img src=\"chart.jpg\">", filings=rows), _Gemini,
+     "result=empty_exhibit", logging.INFO),
+    (lambda rows: _SEC(filings=rows), lambda: _Gemini(fail=1),
+     "result=gemini_failed", logging.WARNING),
+    (lambda rows: _SEC(filings=rows), lambda: _Scripted(_BLOCKED),
+     "result=answer_cut finish=SAFETY", logging.WARNING),
+    (lambda rows: _SEC(filings=rows), lambda: _Scripted({"text": "{}", "finish_reason": "STOP"}),
+     "result=off_schema", logging.WARNING),
+    (lambda rows: _SEC(filings=rows), lambda: _Scripted(_BLOCKED),
+     "result=retry tries=1 rest=60s", logging.INFO),
+    (lambda rows: _SEC(filings=rows), lambda: _Scripted(_NOT_RESULTS),
+     "answer=not_results", logging.INFO),
+    (lambda rows: _SEC(filings=rows), _Gemini, "eps_adjusted_diluted=ok", logging.INFO),
+], ids=["index_unreadable", "no_exhibit", "exhibit_unreadable", "document_refused",
+        "empty_exhibit", "gemini_failed", "answer_cut", "off_schema", "retry", "not_results",
+        "release"])
+async def test_every_way_a_read_ends_says_which_filing_on_which_day(watcher, caplog, sec_for,
+                                                                    gem_for, marker, level):
+    """Each failure is diagnosed from this line alone, and a verdict of the model's is on the
+    record too: `accepted=` is the only line that shows what it decided."""
+    with caplog.at_level(logging.INFO, logger=efs.__name__):
+        await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec_for({"0000050863": [_8K]}),
+                               gemini=gem_for(), cik_map=_CIKS, sleep=_no_sleep)
+    (row,) = [r for r in caplog.records if marker in r.getMessage()]
+    assert row.levelno == level
+    assert "sym=INTC" in row.getMessage() and f"acc={ACC}" in row.getMessage()
+    assert f"day={REPORT.isoformat()}" in row.getMessage()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gem_for", [lambda: _Scripted(_NOT_RESULTS), _Gemini],
+                         ids=["not_results", "release"])
+async def test_a_verdict_of_the_models_says_when_the_filing_was_accepted(watcher, caplog, gem_for):
+    with caplog.at_level(logging.INFO, logger=efs.__name__):
+        await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=_SEC(filings={"0000050863": [_8K]}),
+                               gemini=gem_for(), cik_map=_CIKS, sleep=_no_sleep)
+    (row,) = [r.getMessage() for r in caplog.records if "accepted=" in r.getMessage()]
+    assert "accepted=16:02 ET " in row
 
 
 # ── the filing tick, on the real watcher ─────────────────────────────────────
@@ -4691,3 +4842,73 @@ async def test_a_stall_the_filings_can_outlast_loses_none(live, clock, monkeypat
                             sec=_FiledOnTheClock(clock, landing), gemini=gem)
     for symbol in landing:
         assert live.snapshot(symbol, REPORT, _AT_16).revenue.actual == 17.1e9, symbol
+
+
+class _OwnFailures(_Model):
+    """`_Model`, and every read of a `blocked` symbol's filing is blocked, whatever the clock says:
+    a failure of that filing alone, with the model healthy for the rest."""
+
+    def __init__(self, clock: _Clock, *, blocked: Set[str], until: float):
+        super().__init__(clock, until=until, stall=0)
+        self.blocked = blocked
+
+    async def generate_json(self, prompt, **kwargs):
+        symbol = prompt.split("ticker: ")[1].split(".")[0]
+        if symbol in self.blocked:
+            self.started.append((symbol, self.clock.at))
+            return dict(_BLOCKED)
+        return await super().generate_json(prompt, **kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("landing", [
+    {"INTC": 0},
+    {"INTC": 0, "MSFT": 1150},
+    {"INTC": 0, "AAPL": 1900},
+    {"INTC": 0, "AAPL": 1150, "MSFT": 2100},
+    {"INTC": 0, "AAPL": 1900, "MSFT": 3800},
+], ids=["alone", "one_landing_in_its_last_rest", "one_landing_as_it_ends",
+        "two_landing_after_it_rests", "two_landing_after_it_is_read"])
+async def test_a_filing_at_rest_is_read_on_time_while_other_filings_climb_their_ladders(
+        live, clock, monkeypatch, landing):
+    """The model recovers during INTC's last rest. The other filings keep failing on their own,
+    which says nothing about INTC, so INTC is read when its rest ends, and each of them keeps its
+    own ladder. Other companies' failures must never cost it the fast path for an hour."""
+    live.observe_rows(REPORT, [_pending(s) for s in landing], _AT_16)
+    started = clock.at
+    others = set(landing) - {"INTC"}
+    gem = _OwnFailures(clock, blocked=others, until=started + 1100)
+    await _filing_loop_runs(monkeypatch, clock, 7000, symbols=list(landing),
+                            sec=_FiledOnTheClock(clock, landing), gemini=gem)
+    assert [at - started for at in gem.of("INTC")] == [0, 60, 180, 480, 1080, 1980]
+    assert live.snapshot("INTC", REPORT, _AT_16).revenue.actual == 17.1e9
+    for symbol in others:
+        reads = gem.of(symbol)
+        assert [later - read for read, later in zip(reads, reads[1:])] == \
+            list(efs._EXTRACT_RETRY_GAPS), symbol
+        assert live.snapshot(symbol, REPORT, _AT_16).revenue.actual is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("landing", [
+    {"INTC": 0},
+    {"INTC": 0, "AAPL": 0, "MSFT": 0},
+    {"INTC": 0, "AAPL": 100, "MSFT": 200},
+    {"INTC": 0, "AAPL": 300, "MSFT": 550},
+    {"INTC": 0, "AAPL": 650, "MSFT": 1300},
+], ids=["alone", "together", "a_round_apart", "minutes_apart", "ten_minutes_apart"])
+@pytest.mark.parametrize("stall", [0, 30, 90], ids=["fails_at_once", "stalls", "times_out"])
+async def test_no_filing_is_read_ahead_of_its_own_rest_however_the_others_fail(
+        live, clock, monkeypatch, stall, landing):
+    """What leaves half an hour of outage losing no filing, however many fail in it: a filing's
+    rests are its own, so its six reads take over 30 minutes whatever the others do."""
+    live.observe_rows(REPORT, [_pending(s) for s in landing], _AT_16)
+    gem = _Model(clock, stall=stall)
+    await _filing_loop_runs(monkeypatch, clock, 7000, symbols=list(landing),
+                            sec=_FiledOnTheClock(clock, landing), gemini=gem)
+    for symbol in landing:
+        reads = gem.of(symbol)
+        assert len(reads) == _reads_allowed(), symbol
+        for rest, read, later in zip(efs._EXTRACT_RETRY_GAPS, reads, reads[1:]):
+            assert later - (read + stall) >= rest - efs._DUE_SLACK_SECONDS, (symbol, reads)
+        assert reads[-1] - reads[0] >= 1800, (symbol, reads)

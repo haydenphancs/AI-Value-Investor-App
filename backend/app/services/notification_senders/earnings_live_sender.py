@@ -16,7 +16,17 @@ never concurrently, so which copy a user gets can never depend on timing:
 
 With both off, as shipped, this module sends and claims nothing: a landed report keeps its card
 and its sheet, and `run_earnings_notifications`' daily pass, which reads neither switch, tells
-its result at 16:00 ET under the same key, as it always did.
+its result at 16:00 ET under the same key. For most reports the cost of off is that wait, up to a
+day. Three kinds lose the buzz outright, because the pass has rules of its own, and all three
+keep the sheet:
+  * A report FMP fills after the pass on the day after its date. That was the last pass whose
+    window holds it (`in_result_window`), so a Thursday report filled on Friday at 17:05 is told
+    by nobody.
+  * A surprise with the dropped-digit signature that the filing's GAAP EPS clears. The record
+    shows it. The pass reads rows, with no GAAP beside them, and refuses it (`select_results`).
+  * A report past `MAX_SYMBOLS_PER_PASS` on a pass's list. The next day's pass reads the same
+    rows in the same order, so it stays cut, where this module's cap only moves a report to the
+    next round.
 
 `push_dispatch_service` claims the key only for users who pass their toggle and cap, so a
 user with Live Results on gets #1 and is skipped by #2 as a duplicate; a user with only

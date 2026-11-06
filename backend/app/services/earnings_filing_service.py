@@ -26,7 +26,9 @@ push never uses it (that kind reaches 1.02 users on FMP numbers only).
 SEC LOAD. The limiter (`SEC_EDGAR_MAX_RPS`) and the 600 s throttle circuit are SHARED with
 the Learn pipeline, the buyback check and the Trillion stake finder, so a throttle caused
 here would stop all of them. The watcher therefore:
-  * checks at most `EARNINGS_LIVE_SEC_MAX_SYMBOLS` tickers a day (most-watched first);
+  * checks at most `EARNINGS_LIVE_SEC_MAX_SYMBOLS` tickers a round (most-watched first), a load
+    limit and no daily budget: a report with its figures in leaves the pending list and the next
+    one takes its place, so a busy day reads more filings than that, one model call each;
   * polls each one every minute only inside the two release windows (06:00–09:35 and
     15:55–18:30 ET), every 5 min otherwise, never outside 06:00–22:00 ET;
   * spaces its calls (`_CALL_SPACING_SECONDS`) instead of bursting;
@@ -624,7 +626,8 @@ class EarningsFilingWatcher:
         if mono < self._parked_until:
             return {}
         now_et = now.astimezone(ET)
-        # Bounded at boot, on the setting itself: never negative, so this slice is the budget.
+        # Bounded at boot, on the setting itself: never negative, so this slice is the cap. It
+        # comes before the cadence: a ticker between reads keeps its slot from the next one down.
         wanted = [s.upper() for s in symbols][:settings.EARNINGS_LIVE_SEC_MAX_SYMBOLS]
         due = [s for s in wanted if self._due((s, report_day), now_et, mono)]
         if not due:

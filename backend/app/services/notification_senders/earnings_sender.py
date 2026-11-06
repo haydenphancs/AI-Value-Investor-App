@@ -37,6 +37,12 @@ THE LIVE PUSH SWITCHES STOP AT `earnings_live_sender`. This pass reads neither
 this pass is what tells a result; with one on, it finds the key taken for whoever the live send
 reached and tells the rest (`result_dedup_key`).
 
+THIS PASS DECIDES PER ROW, the record per report (`earnings_live_service`, DUPLICATE ROWS). A
+report FMP lists twice with two consensus figures is told from the first row past the bar while
+the record keeps the best-ranked one, so New York's banner can differ from the sheet it opens and
+from a row held for Berlin, whose text comes from the record at its wake. Left as it is: this
+pass stayed as it was when the result push went off, and no captured calendar holds such a pair.
+
 WHAT THIS FILE DELIBERATELY DOES NOT DO
 ---------------------------------------
 It does not decide whether any particular user gets a notification. Preference, group

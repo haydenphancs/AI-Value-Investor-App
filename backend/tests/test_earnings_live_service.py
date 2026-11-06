@@ -2464,11 +2464,12 @@ _FMP_CALL_SECONDS = 0.1
 async def _calls_per_day(monkeypatch, fmp: _FMP, start: datetime, end: datetime, watched: List[str],
                          on_tick: Optional[Callable[[datetime], None]] = None,
                          *, dispatch: Optional[Callable[..., Any]] = None,
-                         after_tick: Optional[Callable[[datetime], Any]] = None) -> Dict[date, int]:
+                         after_tick: Optional[Callable[[datetime], Any]] = None,
+                         interval: int = 60) -> Dict[date, int]:
     """Every FMP call the REAL tick makes at the loop's pace with nobody opening the app, under
-    the ET day it was made on. As in `_forever`, the ticks START exactly 60 s apart, however long
-    their calls took. `dispatch` is the sender, a stand-in unless given; `after_tick` is awaited
-    after each tick, for a reader to look at what it left."""
+    the ET day it was made on. As in `_forever`, the ticks START exactly `interval` seconds
+    apart, however long their calls took. `dispatch` is the sender, a stand-in unless given;
+    `after_tick` is awaited after each tick, for a reader to look at what it left."""
     clock = _Clock()
     monkeypatch.setattr(els, "time", SimpleNamespace(monotonic=clock.monotonic))
     monkeypatch.setattr(ts, "_time", SimpleNamespace(monotonic=clock.monotonic))
@@ -2496,8 +2497,8 @@ async def _calls_per_day(monkeypatch, fmp: _FMP, start: datetime, end: datetime,
         calls[today] = calls.get(today, 0) + len(fmp.calls) - made
         if after_tick is not None:
             await after_tick(at)
-        at += timedelta(minutes=1)
-        clock.at = started + 60
+        at += timedelta(seconds=interval)
+        clock.at = started + interval
     return calls
 
 
@@ -2526,6 +2527,30 @@ async def test_a_hot_day_is_asked_on_every_fifth_tick_exactly(monkeypatch):
     await _calls_per_day(monkeypatch, fmp, start, start + timedelta(minutes=62), ["INTC"],
                          _minutes_of_own_fetches(fetched_at, start))
     assert fetched_at == list(range(0, 61, 5))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interval,gap", [
+    (15, 300), (60, 300), (100, 300), (200, 400), (240, 480), (290, 580), (295, 590), (300, 300),
+])
+async def test_the_hot_read_waits_for_the_first_tick_at_least_295_s_after_the_last(
+        monkeypatch, interval, gap):
+    """FMP is read only on a tick, so the loop's cadence sets the real gap, and the upper half of
+    the range the setting allows stretches it well past 5 min. The comment on
+    `EARNINGS_LIVE_INTERVAL_SECONDS` states this, for whoever moves that number."""
+    fmp = _FMP({REPORT: [_row("INTC", REPORT)], PREV: [_row("ZZZZ", PREV)]})
+    start = _et(REPORT, 9)
+    fetched_at: List[int] = []
+    seen = {"fetches": 0}
+
+    def _note(at: datetime) -> None:
+        if _svc().fetches > seen["fetches"]:
+            fetched_at.append(int((at - start).total_seconds()) - interval)
+        seen["fetches"] = _svc().fetches
+
+    await _calls_per_day(monkeypatch, fmp, start, start + timedelta(seconds=3 * gap + interval + 1),
+                         ["INTC"], _note, interval=interval)
+    assert fetched_at == [0, gap, 2 * gap, 3 * gap]
 
 
 @pytest.mark.asyncio

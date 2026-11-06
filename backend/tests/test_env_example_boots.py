@@ -62,6 +62,32 @@ def test_every_live_earnings_setting_has_a_line_showing_what_ships():
     assert _live_earnings_lines() == declared
 
 
+def _comment_above(name: str) -> str:
+    """The comment lines right above a setting's commented-out line."""
+    lines = ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
+    at = next(i for i, line in enumerate(lines) if line.startswith(f"# {name}="))
+    comment = []
+    for line in reversed(lines[:at]):
+        if not line.startswith("# ") or re.fullmatch(r"# [A-Z_]+=\S+", line):
+            break
+        comment.insert(0, line[2:])
+    return " ".join(comment)
+
+
+def test_the_sec_budget_line_says_it_limits_a_round_and_not_a_day():
+    """An owner sizes this number from its comment. A report with its figures in leaves the list
+    and the next takes its slot, so 25 is no ceiling on the tickers one day reads."""
+    comment = _comment_above("EARNINGS_LIVE_SEC_MAX_SYMBOLS")
+    assert "a round" in comment and "not a daily budget" in comment
+    assert "per report day" not in comment
+
+
+def test_the_result_push_line_says_what_off_can_lose():
+    """Off is more than a wait for 16:00 ET, and the line that switches it must say so."""
+    comment = _comment_above("EARNINGS_LIVE_RESULT_PUSH_ENABLED")
+    assert "16:00 ET" in comment and "earnings_live_sender" in comment
+
+
 def test_no_live_earnings_line_is_active():
     """Active, a copied `.env` would pin today's default past the day it changes."""
     assert not [key for key in _example_values() if key.startswith("EARNINGS_LIVE_")]

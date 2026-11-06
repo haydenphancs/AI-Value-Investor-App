@@ -7,7 +7,7 @@ hallucinated numbers, paraphrased quotes, a wrong scale word, a flipped sign and
 currency are each refused.
 
 The SEC side is pinned too, because its limiter and 600 s throttle circuit are SHARED with
-Learn, the buyback check and the Trillion stake finder: the per-day cap, the release-window
+Learn, the buyback check and the Trillion stake finder: the cap on a round, the release-window
 cadence, the stop once a filing is found, one extraction per accession, and parking every
 symbol on a throttle.
 
@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -300,11 +300,39 @@ async def test_no_filing_yet_is_checked_again_only_after_the_window_cadence(watc
 
 
 @pytest.mark.asyncio
-async def test_the_daily_cap_keeps_the_most_watched_first(watcher, monkeypatch):
+async def test_a_round_keeps_the_most_watched_first(watcher, monkeypatch):
     monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 2)
     sec = _SEC()
     await watcher.run_once(_AT_16, ["AAPL", "MSFT", "INTC"], REPORT, sec=sec, cik_map=_CIKS,
                            sleep=_no_sleep)
+    assert sec.calls == ["sub:0000320193", "sub:0000789019"]
+
+
+@pytest.mark.asyncio
+async def test_a_ticker_between_its_reads_keeps_its_slot_from_the_next_one_down(
+        watcher, monkeypatch, clock):
+    """The cap comes before the cadence. Cut after it, a ticker waiting out its 5 min would hand
+    its slot down the list, and rounds a minute apart would read the tickers the cap keeps off
+    the circuit SEC shares with Learn and the stake finder."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
+    between_the_windows = datetime(2026, 10, 29, 12, 0, tzinfo=ET).astimezone(timezone.utc)
+    sec = _SEC()
+    for minute in range(4):
+        clock.at += 60
+        await watcher.run_once(between_the_windows + timedelta(minutes=minute),
+                               ["AAPL", "MSFT", "INTC"], REPORT, sec=sec, cik_map=_CIKS,
+                               sleep=_no_sleep)
+    assert sec.calls == ["sub:0000320193"]
+
+
+@pytest.mark.asyncio
+async def test_a_report_off_the_pending_list_frees_its_slot_for_the_next(watcher, monkeypatch):
+    """A load limit, not a daily budget: `pending_symbols` drops a report once its figures are
+    in, and the cap applies to what is left. So a day can read more tickers than the cap."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
+    sec = _SEC()
+    for pending in (["AAPL", "MSFT"], ["MSFT"]):
+        await watcher.run_once(_AT_16, pending, REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
     assert sec.calls == ["sub:0000320193", "sub:0000789019"]
 
 

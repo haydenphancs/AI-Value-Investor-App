@@ -558,7 +558,8 @@ class Settings(BaseSettings):
     #     & Surprises") sent the moment results land instead of at the next 16:00 ET run.
     #     Every shipped build has a toggle for that kind, and it still ships OFF (the owner,
     #     2026-11-05: "Keep it off at first"). Off, the daily 16:00 ET pass alone sends it, and
-    #     that pass reads neither push switch (`earnings_sender`).
+    #     that pass reads neither push switch (`earnings_sender`). What off costs, a wait for
+    #     most reports and the buzz for a few, is in `earnings_live_sender`'s docstring.
     #   Neither push buzzes in the night of a user who never set Quiet Hours: the row is
     #   written at once and goes out at 07:00 on their clock (`night_hold_by_default`).
     EARNINGS_LIVE_ENABLED: bool = True
@@ -567,14 +568,16 @@ class Settings(BaseSettings):
     EARNINGS_LIVE_RESULT_PUSH_ENABLED: bool = False
     # Loop cadence, 15-300 s: anything else fails the deploy. The loop is cheap when nothing
     # reports (one memoised calendar read); the FMP and SEC cadences below are what cost
-    # anything. Past 60 s the SEC watch loses its one-minute release windows, and past 300 s
-    # the 5 min hot FMP cadence would stretch too.
+    # anything. Past 60 s the SEC watch loses its one-minute release windows. FMP is read only on
+    # a tick, the first one at least 295 s after the last read, so this number also sets the real
+    # gap of the "5 min" hot read: 60 s gives 300 s, 240 s gives 480 s, 290 s gives 580 s.
     EARNINGS_LIVE_INTERVAL_SECONDS: int = Field(60, ge=15, le=300)
-    # How many watched tickers' SEC filings are checked per report day, most-watched first.
+    # How many watched tickers' SEC filings are checked per round, most-watched first.
     # SEC's limiter (SEC_EDGAR_MAX_RPS) and its 600 s throttle circuit are SHARED with Learn,
     # the buyback check and the Trillion stake finder, so this stays small: 0-50, anything else
-    # fails the deploy. Calls are spaced 1 s apart, so 50 already fills the loop's minute. 0
-    # reads nothing from SEC.
+    # fails the deploy. A load limit, not a daily budget: a report with its figures in leaves
+    # the list and the next takes its place. Calls are spaced 1 s apart, so 50 already fills the
+    # loop's minute. 0 reads nothing from SEC.
     EARNINGS_LIVE_SEC_MAX_SYMBOLS: int = Field(25, ge=0, le=50)
     # The model that reads a press release. Flash, at temperature 0 and no thinking budget:
     # this is extraction, and every figure it returns is checked verbatim against the text.

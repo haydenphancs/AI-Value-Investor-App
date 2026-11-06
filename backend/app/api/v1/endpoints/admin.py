@@ -19,11 +19,15 @@ from app.api.error_response import (
 )
 from app.config import settings
 from app.dependencies import GUEST_USER_ID, get_current_user_or_guest
+from app.utils.postgrest_paging import fetch_all_rows
 from app.utils.supabase_async import sb_exec
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+#: `/industry-moat-benchmarks-status`'s key for a row with no `model_version`.
+UNSTAMPED_MODEL_VERSION = "unstamped"
 
 
 # ── Background work started by the routes below ─────────────────────────────
@@ -803,8 +807,8 @@ async def refresh_industry_moat_benchmarks(
             Default 24. Pass 0 to force a full recompute.
 
     Notes:
-      - With FMP Premium (3000/min) the full 156-industry backfill
-        takes ~60-90 min at the service's tuned concurrency.
+      - The full 156-industry backfill took 14.5 minutes on 2026-10-29,
+        with FMP Premium (3000/min) and the service's tuned concurrency.
       - Progress can be inspected via:
             GET /api/v1/admin/industry-moat-benchmarks-status
       - The same code runs quarterly inside `_run_industry_dossier_job`
@@ -828,7 +832,7 @@ async def refresh_industry_moat_benchmarks(
             "status": "started",
             "message": (
                 "Industry moat benchmark recompute started in background — "
-                "typically ~60-90 minutes at FMP Premium (3000/min). "
+                "about 15 minutes at FMP Premium (3000/min). "
                 "Poll /admin/industry-moat-benchmarks-status for progress."
             ),
             "skip_if_fresh_hours": skip,
@@ -847,12 +851,25 @@ async def industry_moat_benchmarks_status(
     user: dict = Depends(get_current_user_or_guest),
 ):
     """Live progress view for the moat benchmark recompute. Returns row
-    count, distinct industry count, and per-pillar coverage so the
-    operator can watch the backfill fill in.
+    count, distinct industry count, per-pillar coverage and the scorer
+    vintage of every row, so the operator can watch the backfill fill in
+    and confirm a refresh landed.
+
+    `current_model_version` is what a run writes today, `model_version_counts`
+    counts the table's rows by vintage and `industry_model_versions` counts them
+    per industry. `industries_on_older_versions` lists every industry with a row
+    not on the current vintage. It does not reach zero after a full refresh, and
+    that is expected: a row the run cannot rewrite keeps its old stamp (too few
+    scored companies, or a financial industry under 10 companies or with Brand
+    Power on the N/M list). An industry with a current row beside an old one was
+    refreshed. One with no current row was not rewritten at all, which is expected
+    of a financial industry under 10 companies and a sign of a missed industry for
+    any other.
     """
     _authorize_admin(user, x_admin_token)
     try:
         from app.database import get_supabase
+        from app.services.industry_moat_benchmark_service import MODEL_VERSION
 
         sb = get_supabase()
         # Total rows
@@ -861,26 +878,40 @@ async def industry_moat_benchmarks_status(
                     "id", count="exact",
                     )
                 ))
-        # Per-pillar counts
-        rows = (await sb_exec(
-                   sb.table("industry_moat_benchmarks").select(
-                   "industry,pillar_name,sample_size,computed_at",
-                   )
-               ))
+        # Per-pillar counts. Paged: a confirmation must not stop at PostgREST's 1,000 rows.
+        rows = await asyncio.to_thread(
+            fetch_all_rows,
+            lambda: sb.table("industry_moat_benchmarks").select(
+                "industry,pillar_name,sample_size,computed_at,model_version",
+            ),
+            order_by="id",
+            what="industry_moat_benchmarks status",
+        )
         pillar_counts: dict[str, int] = {}
-        industries: set[str] = set()
+        version_counts: dict[str, int] = {}
+        industry_versions: dict[str, dict[str, int]] = {}
         latest_computed: Optional[str] = None
-        for r in rows.data or []:
+        for r in rows:
             pillar_counts[r["pillar_name"]] = pillar_counts.get(r["pillar_name"], 0) + 1
-            industries.add(r["industry"])
+            version = r.get("model_version") or UNSTAMPED_MODEL_VERSION
+            version_counts[version] = version_counts.get(version, 0) + 1
+            per_industry = industry_versions.setdefault(r["industry"], {})
+            per_industry[version] = per_industry.get(version, 0) + 1
             ts = r.get("computed_at")
             if ts and (latest_computed is None or ts > latest_computed):
                 latest_computed = ts
         return {
             "total_rows": total.count,
-            "distinct_industries": len(industries),
+            "distinct_industries": len(industry_versions),
             "pillar_coverage": pillar_counts,
             "latest_computed_at": latest_computed,
+            "current_model_version": MODEL_VERSION,
+            "model_version_counts": version_counts,
+            "industry_model_versions": dict(sorted(industry_versions.items())),
+            "industries_on_older_versions": sorted(
+                industry for industry, versions in industry_versions.items()
+                if set(versions) != {MODEL_VERSION}
+            ),
         }
     except Exception as e:
         logger.error(f"Industry moat benchmark status failed: {e}")

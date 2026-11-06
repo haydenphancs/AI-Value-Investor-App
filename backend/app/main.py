@@ -1545,7 +1545,7 @@ def _last_weekly_ttm_run(now: "datetime") -> "datetime":
 # NEXT anchor (a quarter / a week away). The window is the length of the day the chain
 # owns: the quarterly chain starts 02:00 UTC and its last phase can run past 05:00.
 _SCHEDULED_CATCHUP_WINDOW_HOURS = 20
-# Per-phase claim stale window: longer than the longest phase (moat, 60-90 min), because
+# Per-phase claim stale window: longer than any phase (the moat: 14.5 min on 2026-10-29), because
 # Railway overlaps the old and new instance on a deploy and a 15-minute window (the
 # notification default) would let the new one steal a phase the old one is mid-way through.
 _CHAIN_PHASE_STALE_SECONDS = 3 * 3600
@@ -2018,8 +2018,8 @@ async def _run_industry_dossier_job():
         settled &= medians_settled
 
         # ── Industry moat benchmarks (Peer Avg overlay) @ base + 120 min ──
-        # Heaviest job in the chain (~29k FMP calls on the 2026-10-08 universe, ~50-90
-        # min). Started last, after the medians it scores peers against. It is skipped
+        # Heaviest job in the chain (~29k FMP calls on the 2026-10-08 universe, 14.5 min
+        # on 2026-10-29). Started last, after the medians it scores peers against. It is skipped
         # while the medians phase is unsettled on this pass (left unsettled itself, so
         # the same-day retry runs it once the medians land): scoring against a half-
         # rewritten table, and then being skipped by its own claim on the retry, would

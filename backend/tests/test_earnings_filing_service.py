@@ -2,17 +2,20 @@
 
 The one property everything else rests on: A FIGURE THE RELEASE DOES NOT STATE CANNOT REACH
 A USER. Gemini returns each figure with a quote; a figure survives only when its quote is a
-verbatim span of the release AND the value rounds to the number that quote prints, and that
-printed number is what is kept. Below, hallucinated numbers, paraphrased quotes, a wrong scale
-word, a flipped sign, a GAAP figure called adjusted, a foreign currency and a quote that shows no
-dollars are each refused.
+verbatim span of the release, the value rounds to the number that quote prints AND the quote names
+the metric at that number, and that printed number is what is kept. Below, hallucinated numbers,
+paraphrased quotes, a wrong scale word, a flipped sign, a GAAP figure called adjusted, a foreign
+currency, a figure in a release that shows no dollars and another metric's number are each refused.
+`test_earnings_filing_real_shapes.py` runs the same rules over rows of real releases.
 
 The outlook goes one step further: what the sheet prints is the verified quote itself, the
 company's own sentence, and no word the model wrote reaches a user. A piece of a sentence and the
 rows of a table are refused, since either can be verbatim and still say something the release does
-not, and so is a sentence that only points at figures, which says nothing on the sheet. The release
-reaches the model inside a fence it cannot close, with its footnote marks off the numbers they hang
-on, and a mark printed as a character is never read as a digit or a scale of the number before it.
+not, and so is a sentence that only points at figures, which says nothing on the sheet, and one
+that does not look ahead with a financial figure, however much it sounds like an outlook. The
+release reaches the model inside a fence it cannot close, with its footnote marks off the numbers
+they hang on, and a mark printed as a character is never read as a digit or a scale of the number
+before it.
 
 The SEC side is pinned too, because its limiter and 600 s throttle circuit are SHARED with
 Learn, the buyback check and the Trillion stake finder: the per-day cap, the release-window
@@ -60,6 +63,8 @@ RELEASE = (
     "expects revenue of $17.5 billion to $18.5 billion and non-GAAP EPS of $0.48."
 )
 OUTLOOK = "Intel expects revenue of $17.5 billion to $18.5 billion and non-GAAP EPS of $0.48."
+GAAP_QUOTE = ("Third-quarter GAAP earnings per share (EPS) attributable to Intel was a loss of "
+              "$(0.12);")
 
 
 def _q(start: str, length: int = 0) -> str:
@@ -78,8 +83,7 @@ def _good_answer(**overrides) -> Dict[str, Any]:
                     "quote": "Third-quarter revenue was $17.1 billion, up 25% year-over-year."},
         "eps_adjusted_diluted": {"value": 0.44,
                                  "quote": "non-GAAP EPS attributable to Intel was $0.44."},
-        "eps_gaap_diluted": {"value": -0.12,
-                             "quote": "attributable to Intel was a loss of $(0.12);"},
+        "eps_gaap_diluted": {"value": -0.12, "quote": GAAP_QUOTE},
         "guidance": {"quote": OUTLOOK},
     }
     answer.update(overrides)
@@ -123,8 +127,7 @@ def test_a_scale_word_the_quote_does_not_print_is_refused():
 
 
 def test_a_flipped_sign_is_refused():
-    answer = _good_answer(eps_gaap_diluted={"value": 0.12,
-                                            "quote": "attributable to Intel was a loss of $(0.12);"})
+    answer = _good_answer(eps_gaap_diluted={"value": 0.12, "quote": GAAP_QUOTE})
     figures, reasons = _verify(answer)
     assert figures.eps_gaap is None and reasons["eps_gaap_diluted"] == "value_mismatch"
 
@@ -564,7 +567,7 @@ def test_a_cut_is_seen_at_every_place_the_release_prints_the_quote():
     " As of September 30 Acme held $1 billion.",
 ])
 def test_a_quote_ending_where_its_line_does_stands(after):
-    quote = "Revenue of $17.5 billion to $18.5 billion for the quarter"
+    quote = "Expected revenue of $17.5 billion to $18.5 billion for the quarter"
     figures, reasons = _verify_in(f"Acme reported results. {quote}{after}",
                                   guidance={"quote": quote})
     assert figures.guidance == quote and reasons["guidance"] == "ok"
@@ -729,7 +732,7 @@ def test_a_negation_cannot_be_left_outside_the_quote():
 @pytest.mark.parametrize("sentence", [
     "eBay expects revenue of $17.5 billion to $18.5 billion for the quarter.",
     "2026 revenue is expected to be $17.5 billion to $18.5 billion in all.",
-    "$1.5 billion of buybacks are planned for the fourth quarter of 2026.",
+    "$1.5 billion of buybacks are expected in the fourth quarter of 2026.",
 ])
 def test_a_quote_opening_at_a_sentence_start_may_open_on_anything(before, sentence):
     figures, reasons = _verify_in(f"{before}{sentence}", guidance={"quote": sentence})
@@ -835,8 +838,6 @@ def test_the_rows_of_a_flattened_table_are_never_the_outlook(quote):
     "Acme expects EPS of $0.48, $0.50 and $0.52 in the next three quarters of 2027.",
     "Acme expects revenue up 5%, gross margin up 2% and non-GAAP EPS up 7% in 2027.",
     # An aside in parentheses is prose: it goes on past its first figure.
-    "Diluted earnings per share was $3.51, an increase of 10% (11% in constant currencies).",
-    "Consolidated revenues increased 1% (1% in constant currencies).",
     "For 2027 Acme expects revenue growth of 3% (4% in constant currencies) and stable margins.",
     "Full-year organic sales growth is expected to be about 4% (6% excluding the strike).",
     "Acme expects revenue growth of 3 % (4 % in constant currencies) for the full year.",
@@ -847,6 +848,15 @@ def test_the_rows_of_a_flattened_table_are_never_the_outlook(quote):
 def test_figures_in_a_sentence_are_no_table(quote):
     figures, reasons = _verify_in(f"Acme reported results. {quote}", guidance={"quote": quote})
     assert figures.guidance == quote and reasons["guidance"] == "ok"
+
+
+@pytest.mark.parametrize("quote", [
+    "Diluted earnings per share was $3.51, an increase of 10% (11% in constant currencies).",
+    "Consolidated revenues increased 1% (1% in constant currencies).",
+])
+def test_an_aside_in_a_sentence_about_the_quarter_is_no_table_and_no_outlook(quote):
+    figures, reasons = _verify_in(f"Acme reported results. {quote}", guidance={"quote": quote})
+    assert figures is None and reasons["guidance"] == "not_outlook"
 
 
 def test_a_table_costs_only_the_outlook():
@@ -890,31 +900,40 @@ def test_a_sentence_that_only_points_at_figures_is_no_outlook(quote):
     "Our outlook is as follows: revenue growth of 5 per cent to 7 per cent.",
     "OUR OUTLOOK IS AS FOLLOWS: REVENUE GROWTH OF 5 PERCENT FOR THE FULL YEAR.",
     "Our outlook is as follows: a dividend of $2 a share for all of fiscal 2027.",
-    "Our outlook is as follows: a dividend of 2 dollars a share for all of fiscal 2027.",
     "Our outlook is as follows: EPS of 75 cents to 80 cents for the year ahead.",
+    # "Following" that points at nothing.
+    "Acme expects margins to recover 5% in the following quarter of fiscal 2027.",
+    "Acme expects growth to resume at 5% over the following quarters of fiscal 2027.",
+    "Acme expects growth to resume at 5% in the following calendar year at the latest.",
+    "Acme expects margins to recover 5% in the following period of fiscal 2027.",
+    "Acme expects margins to recover 5% over the following months of fiscal 2027.",
+    # A bare "below" in a sentence that says something, the word in its other sense.
+    "Acme expects fourth-quarter orders to come in 5% below those of the third quarter.",
+])
+def test_a_sentence_that_says_something_is_no_lead_in(quote):
+    figures, reasons = _verify_in(f"Acme reported results. {quote}", guidance={"quote": quote})
+    assert figures.guidance == quote and reasons["guidance"] == "ok"
+
+
+@pytest.mark.parametrize("quote", [
+    # A number with no sign of money on it, in every spelling that is no lead-in.
+    "Our outlook is as follows: a dividend of 2 dollars a share for all of fiscal 2027.",
     "Our outlook is as follows: non-GAAP EPS of 4.05 to 4.25 for the full year.",
     "Our outlook is as follows: revenue of 900 thousand for all of fiscal 2027.",
     "Our outlook is as follows: revenue of 900 million for all of fiscal 2027.",
     "Our outlook is as follows: revenue of 18 billion for all of fiscal 2027.",
     "Our outlook is as follows: assets of 2 trillion at the end of fiscal 2027.",
-    # "Following" that points at nothing.
-    "Acme expects margins to recover in the following quarter of fiscal 2027.",
     "Acme withdrew its outlook for the following quarter, citing the strike.",
-    "Acme will give its outlook for the following fiscal year on its next call.",
-    "Acme expects growth to resume over the following quarters of fiscal 2027.",
-    "Acme expects growth to resume in the following calendar year at the latest.",
-    "Acme expects margins to recover in the following period of fiscal 2027.",
-    "Acme expects margins to recover over the following months of fiscal 2027.",
     "Following the sale of Depop, Acme withdrew its outlook for the full year.",
-    # A bare "below" in a sentence that says something: Snap's, and the word in its other sense.
+    "Acme will give its outlook for the following fiscal year on its next call.",
+    # Snap's bare "below".
     "Snap Inc. will discuss its Q4 2026 outlook during its Q3 2026 Earnings Call (details below) "
     "and in its investor letter available at investor.snap.com.",
     "Snap Inc. will discuss its Q4 2026 outlook on its Q3 2026 Earnings Call (details below).",
-    "Acme expects fourth-quarter orders to come in below those of the third quarter.",
 ])
-def test_a_sentence_that_says_something_is_no_lead_in(quote):
+def test_a_sentence_with_no_figure_to_show_is_no_lead_in_either(quote):
     figures, reasons = _verify_in(f"Acme reported results. {quote}", guidance={"quote": quote})
-    assert figures.guidance == quote and reasons["guidance"] == "ok"
+    assert figures is None and reasons["guidance"] == "not_outlook"
 
 
 @pytest.mark.parametrize("quote", ["our outlook for the fourth quarter of 2026 is as follows:",
@@ -978,7 +997,7 @@ def test_a_minus_at_the_front_of_a_quote_is_never_taken_for_a_list_glyph(sign):
 def test_a_quote_of_nothing_but_glyphs_is_no_outlook():
     quote = "\u2022 " * 25
     figures, reasons = _verify_in(f"Acme reported results. {quote}", guidance={"quote": quote})
-    assert figures is None and reasons["guidance"] == "no_quote"
+    assert figures is None and reasons["guidance"] == "not_outlook"
 
 
 def _at_the_window_edge(printed: str, tail: str) -> Tuple[str, str]:
@@ -1017,8 +1036,8 @@ def test_a_quote_ending_where_the_window_does_stands_when_its_line_ends_there(ta
     assert figures.guidance == _CUT and reasons["guidance"] == "ok"
 
 
-def test_a_digit_free_outlook_is_the_companys_sentence_too():
-    quote = "Acme expects demand to remain strong through the end of the year."
+def test_an_outlook_in_words_is_the_companys_sentence_too():
+    quote = "Acme expects sales to grow two to four percent in the coming year."
     figures, reasons = _verify_in(f"Acme reported results. {quote}", guidance={"quote": quote})
     assert figures.guidance == quote and reasons["guidance"] == "ok"
 
@@ -1102,8 +1121,8 @@ def test_a_quote_copied_as_the_release_prints_it_still_verifies():
 
 
 def test_a_figures_quote_copied_from_the_neutralised_text_still_verifies():
-    release = RELEASE.replace("Third-quarter revenue was", "Third-quarter revenue\u2122 was")
-    quote = "Third-quarter revenueTM was $17.1 billion, up 25% year-over-year."
+    release = RELEASE.replace("Third-quarter revenue was", "Third-quarter Intel\u2122 revenue was")
+    quote = "Third-quarter IntelTM revenue was $17.1 billion, up 25% year-over-year."
     answer = _good_answer(revenue={"value": 17.1, "unit": "billion", "quote": quote})
     figures, reasons = efs.verify_extraction(answer, release, accession=ACC, accepted_at=None,
                                              url="u")
@@ -2991,7 +3010,7 @@ def test_a_sibling_of_a_foreign_figure_never_shows_as_dollars():
 
 
 @pytest.mark.parametrize("quote", [
-    "For the fourth quarter Acme expects revenue of 1.5 billion, the company said.",
+    "For the fourth quarter Acme expects revenue growth of 5 percent, the company said.",
     "For the full year Acme expects revenue growth of 5% to 7%, the company said.",
 ])
 def test_an_outlook_with_no_dollar_mark_shows_as_printed(quote):
@@ -3039,12 +3058,24 @@ def test_a_missing_currency_is_refused_whole_and_the_schema_requires_it():
     assert "currency" in efs.EXTRACTION_SCHEMA["required"]
 
 
+def test_the_prompt_asks_for_no_minimum_length_on_a_figures_quote():
+    figure_rules = efs._SYSTEM[:efs._SYSTEM.index("`guidance.quote`")]
+    assert f"{efs.PEG_SPAN_MIN_CHARS} and" not in figure_rules
+    assert f"between {efs.PEG_SPAN_MIN_CHARS}" not in figure_rules
+    assert f"at most {efs.PEG_SPAN_MAX_CHARS} characters" in figure_rules
+
+
+def test_the_prompt_no_longer_asks_for_a_header_or_a_mark_inside_every_quote():
+    assert "that header must be inside the quote" not in efs._SYSTEM
+    assert "Every revenue and EPS quote must itself show" not in efs._SYSTEM
+
+
 @pytest.mark.parametrize("rule", [
     "closing one included",                     # the sign
     "names it as a loss",
     "the digits in that quote",                 # the printed digits
     "the table's header",                       # the scale
-    "that header must be inside the quote",
+    "the quote does not need to hold that header",      # the release's one header serves a row
     "a full dollar amount printed with all its digits",
     "prefer the sentence that prints the scale word",
     "words naming the measure",                 # the basis
@@ -3052,6 +3083,19 @@ def test_a_missing_currency_is_refused_whole_and_the_schema_requires_it():
     "another currency's mark",
     "with its $ sign or decimal point",         # what an EPS print looks like
     "print one scale only",                     # two scales prove neither
+    "the whole sentence or table row",          # a figure is proved with its label
+    "with the label that names it and every cell between them",     # a dropped cell is no span
+    "The quote must name the metric at its number",     # a number from another metric is refused
+    "revenue, revenues, sales, net sales or turnover",
+    "per share, EPS or earnings per",
+    "needs that heading in its quote",          # a sub-row names nothing alone
+    "Never fill a slot with another figure",
+    "Earnings, net income, profit, EBITDA, cash flow, backlog or bookings are no revenue",
+    "dividend, book value, distribution or FFO is no EPS",
+    "if the release does not state the figure, leave it out",
+    "never the adjusted figure",                # the GAAP slot takes the GAAP number
+    "at this figure",                           # the adjusted word must be this number's
+    "reports in dollars and shows no other currency",   # a row with no mark of its own
     "never a percentage",                       # a rate is no figure
     "must equal `value` exactly",               # a whole number proves only itself
     "fewer than two decimals",                  # nor does a coarse EPS print round
@@ -3081,11 +3125,897 @@ def test_a_missing_currency_is_refused_whole_and_the_schema_requires_it():
     "Never give a sentence that only points at figures printed elsewhere",  # it says nothing
     '"the following guidance", "as follows" or "Below is our outlook"',     # on the sheet
     "copy the sentence that prints them",               # and what to take instead
-    "If whole sentences do not fit that length, leave `guidance` out.",     # never trimmed
+    "If whole sentences do not fit that length,",       # never trimmed
+    "the release gives no such sentence, leave `guidance` out",
+    "It must look ahead",                       # an outlook, not the nearest sentence to one
+    "state a financial figure in the same sentence",
+    "a $ amount, a % or the word percent",
+    "Commentary on the quarter, praise, remarks on the economy and program updates are no outlook",
+    "pointing at a call, webcast or letter",
     f"between {efs.PEG_SPAN_MIN_CHARS} and {efs.PEG_SPAN_MAX_CHARS} characters in all",
 ])
 def test_the_prompt_tells_the_model_every_rule_the_verifier_enforces(rule):
     assert rule in efs._SYSTEM
+
+
+# ── the metric at the number ─────────────────────────────────────────────────
+#
+# A number that is verbatim, in dollars and the right size can still be another metric's: the model
+# fills a slot the release left empty with the nearest figure it finds. So the words naming the
+# metric must stand at the matched number, never just somewhere in the quote.
+
+
+_PRINTS_DOLLARS = "Acme reported results of $1 per unit sold."
+
+
+def _in_dollars(quote: str, **answer):
+    return _verify_in(f"{_PRINTS_DOLLARS} {quote}", **answer)
+
+
+_NOT_REVENUE = [
+    # The nearest metric word is another metric.
+    ("Revenue of $17.1 billion, net income of $1.2 billion in the quarter.", 1.2),
+    ("Net income was $1.2 billion on revenue of $5.0 billion in the quarter.", 1.2),
+    ("Acme earned $1.2 billion on revenue of $5.0 billion in the quarter.", 1.2),
+    ("Revenue rose 5% and adjusted EBITDA was $1.2 billion in the quarter.", 1.2),
+    ("Revenue rose 5% and free cash flow was $1.2 billion in the quarter.", 1.2),
+    ("Revenue rose 5% and backlog reached $1.2 billion in the quarter.", 1.2),
+    ("Revenue rose 5% and operating profit was $1.2 billion in the quarter.", 1.2),
+    ("Revenue rose 5% and bookings were $1.2 billion in the quarter.", 1.2),
+    ("Revenue rose 5% and the dividend was $1.2 billion in the quarter.", 1.2),
+    ("Revenue rose 5% and operating expenses were $1.2 billion in the quarter.", 1.2),
+    ("Revenue rose 5% and gross margin was $1.2 billion in the quarter.", 1.2),
+    ("Revenue rose 5% and net loss was $1.2 billion in the quarter.", 1.2),
+    # Words that hold a revenue word and name something else.
+    ("Cost of sales was $1.2 billion in the quarter.", 1.2),
+    ("Cost of revenue was $1.2 billion in the quarter.", 1.2),
+    ("Costs of revenues were $1.2 billion in the quarter.", 1.2),
+    ("Sales and marketing was $1.2 billion in the quarter.", 1.2),
+    ("Sales & marketing was $1.2 billion in the quarter.", 1.2),
+    ("Marketing and sales were $1.2 billion in the quarter.", 1.2),
+    ("Deferred revenue was $1.2 billion at the end of the quarter.", 1.2),
+    ("Unearned revenue was $1.2 billion at the end of the quarter.", 1.2),
+    ("Annual recurring revenue reached $1.2 billion at the end of the quarter.", 1.2),
+    ("Revenue backlog was $1.2 billion at the end of the quarter.", 1.2),
+    ("Revenue run rate of $1.2 billion at the end of the quarter.", 1.2),
+    ("Net interest income was $1.2 billion in the quarter.", 1.2),
+    ("Noninterest revenue was $1.2 billion in the quarter.", 1.2),
+    ("Non-interest income was $1.2 billion in the quarter.", 1.2),
+    ("Revenue per user was $1.2 billion in the quarter.", 1.2),
+    ("Proceeds from sales of investments were $1.2 billion in the quarter.", 1.2),
+    ("Gains on sales of assets were $1.2 billion in the quarter.", 1.2),
+    ("Sales tax was $1.2 billion in the quarter.", 1.2),
+    ("Revenue sharing was $1.2 billion in the quarter.", 1.2),
+    ("Net sales proceeds were $1.2 billion in the quarter.", 1.2),
+    ("Gross merchandise sales were $1.2 billion in the quarter.", 1.2),
+    ("System-wide sales of $1.2 billion, up 12.8% versus 2025.", 1.2),
+    ("Global Systemwide sales increased 4% to over $1.2 billion in the quarter.", 1.2),
+    ("Comparable sales were $1.2 billion in the third quarter.", 1.2),
+    ("Same-store sales were $1.2 billion in the third quarter.", 1.2),
+    ("Higher sales volume of $1.2 billion and favorable price realization.", 1.2),
+    ("Lower trading revenue and fees \u2013 NII of $1.2 billion in the quarter.", 1.2),
+    # Behind the number.
+    ("Revenue of $5.0 billion and $1.2 billion of free cash flow in the quarter.", 1.2),
+    ("$1.2 billion of operating income on revenue of $5.0 billion in the quarter.", 1.2),
+    ("Revenue of $5.0 billion generated $1.2 billion in net income in the quarter.", 1.2),
+    ("Acme generated $1.2 billion in revenue backlog at the end of the quarter.", 1.2),
+    ("Acme Reports Revenue Of $5.0 Billion And $1.2 Billion Net Income", 1.2),
+    ("Acme Reports Revenue Of $5.0 Billion And $1.2B Net Income", 1.2),
+    # Nothing names it.
+    ("Acme returned $1.2 billion to shareholders in the third quarter.", 1.2),
+    ("Acme ended the third quarter with $1.2 billion on its balance sheet.", 1.2),
+    # Past the end of the label's clause.
+    ("Revenue rose 12%, and we returned $1.2 billion to shareholders.", 1.2),
+    ("Revenue rose 12%. We returned $1.2 billion to shareholders.", 1.2),
+    ("Revenue rose 12%; we returned $1.2 billion to shareholders.", 1.2),
+    ("Offset by lower remarketing sales. $1.2 billion of the total came from Acme.", 1.2),
+    ("•Revenue rose 12% •Returned $1.2 billion to shareholders in the quarter", 1.2),
+    ("Revenue was $5.0 billion, compared with $1.2 billion a year ago.", 1.2),
+    ("Revenue was $5.0 billion and we returned $1.2 billion to shareholders.", 1.2),
+    ("Revenue was $5.0 billion versus $1.2 billion a year ago.", 1.2),
+    ("Revenue was $5.0 billion compared to $1.2 billion a year ago.", 1.2),
+    ("Revenue of $5.0 billion included a benefit of $1.2 billion from currency.", 1.2),
+    ("Revenue including interest income of $1.2 billion rose 5% in the quarter.", 1.2),
+    ("Revenue includes a $1.2 billion tax benefit in the third quarter.", 1.2),
+    # A change, not a level.
+    ("Revenue increased $1.2 billion to $5.0 billion in the quarter.", 1.2),
+    ("Revenue increased by $1.2 billion in the quarter.", 1.2),
+    ("Revenue rose $1.2 billion in the quarter.", 1.2),
+    ("Revenue was up $1.2 billion from a year ago.", 1.2),
+    ("Revenue growth of $1.2 billion in the quarter.", 1.2),
+    ("Acme reported an $1.2 billion increase in revenues in the quarter.", 1.2),
+    ("Revenue was $1.2 billion higher than a year ago in the quarter.", 1.2),
+    # What the company expects.
+    ("We expect revenue of $1.2 billion in the fourth quarter.", 1.2),
+    ("Full-year revenue guidance of $1.2 billion for the coming year.", 1.2),
+    ("Revenue is expected to be $1.2 billion in the fourth quarter.", 1.2),
+    ("Forecasting fourth-quarter 2026 revenue of $1.2 billion to $1.3 billion.", 1.2),
+    ("Guidance with estimated reported sales of $1.2 Billion at the midpoint.", 1.2),
+    ("Revenue in the range of $1.2 billion to $1.3 billion for the fourth quarter.", 1.2),
+]
+
+
+@pytest.mark.parametrize("quote,value", _NOT_REVENUE)
+def test_a_number_its_quote_does_not_name_as_revenue_is_refused(quote, value):
+    figures, reasons = _revenue_of(quote, value)
+    assert figures is None and reasons["revenue"] == "wrong_metric"
+
+
+@pytest.mark.parametrize("measure", [
+    "FCF", "billings", "orders", "RPO", "remaining performance obligations", "ARR", "GMV", "GMS",
+    "TPV", "gross merchandise value", "payment volume", "assets", "AUM", "deposits", "loans",
+    "debt", "liquidity", "capex", "capital expenditures", "repurchases", "buybacks", "tax", "taxes",
+    "headwinds", "tailwinds", "gains", "the forecast", "the target",
+])
+def test_each_other_measure_takes_the_number_from_a_revenue_word_further_away(measure):
+    quote = f"Revenue rose 5% and {measure} came to $1.2 billion in the third quarter."
+    figures, reasons = _revenue_of(quote, 1.2)
+    assert figures is None and reasons["revenue"] == "wrong_metric"
+
+
+@pytest.mark.parametrize("quote", [
+    "Revenue: $1.2 billion in the third quarter",
+    "Revenue – $1.2 billion in the third quarter",
+    "Revenue, $1.2 billion, net loss per share, $0.46",
+    "Revenue for the third quarter was $1.2 billion.",
+    "Revenue, which rose 5%, was $1.2 billion.",
+    "Revenue in the third quarter, up 5% from last year, was $1.2 billion.",
+    "Revenue for the quarter ended September 30, 2026, was $1.2 billion.",
+    "Revenue for the quarter ended September 30, 2026 was $1.2 billion.",
+    "Generated $1.2 billion in revenue in the quarter.",
+    "Acme generated $1.2 billion of total net revenue in the quarter.",
+    "Acme generated $1.2 billion in third-quarter revenue.",
+    "Acme generated $1.2 billion in Q3 2026 revenue.",
+    "Acme generated $1.2 billion of total consolidated net revenue.",
+    "Revenue was $1.2 billion marking another record cash year for Acme.",     # too far to tie
+    "Acme Reports Record $1.2 Billion Revenue For The Quarter",
+    "Acme Reports Record $1.2B Revenue For The Quarter",
+    "Acme Reports Record $1.2 Billion In Revenue For The Quarter",
+    "Excluding currency, revenue was $1.2 billion in the quarter.",
+    "Excluding currency revenue was $1.2 billion in the quarter.",
+    "Revenue excluding the cost of fuel was $1.2 billion in the quarter.",
+    "Revenue before reimbursable costs was $1.2 billion in the quarter.",
+    "Revenue net of excise taxes was $1.2 billion in the quarter.",
+    "Revenue, including a $50 million benefit, was $1.2 billion in the quarter.",
+    "Revenue, net of interest expense, was $1.2 billion in the quarter.",
+    "Revenue before taxes of $1.2 billion in the third quarter",
+    "Revenue of $1.2 billion above the high end of the range in the quarter",
+    "Revenue was up 5%; $1.2 billion in the third quarter",
+    "Sales and other operating revenues of $1.2 billion in the quarter.",
+    "Net sales and revenue of $1.2 billion in the quarter.",
+    "Turnover of $1.2 billion in the third quarter.",
+    "Sales were $1.2 billion in the third quarter.",
+    "Revenue increased from $1.1 billion to $1.2 billion in the quarter.",
+    "Revenue rose to $1.2 billion from $1.1 billion in the quarter.",
+    "Revenue rose 12% and reached $1.2 billion in the quarter.",
+    "Revenue rose 12% to $1.2 billion in the quarter.",
+    "REVENUE OF $1.2 BILLION FOR THE QUARTER",
+    "Net income was $0.2 billion on revenue of $1.2 billion in the quarter.",
+    "Revenue(1) of $1.2 billion in the third quarter",
+    "Revenue* of $1.2 billion in the third quarter",
+    "Revenue2 of $1.2 billion in the third quarter",
+    "Revenue (U.S. GAAP) of $1.2 billion in the third quarter",
+    "Revenue in the U.S. was $1.2 billion in the third quarter.",
+    "Net income of $1.2 billion on revenue of $1.2 billion in the quarter.",   # the second print
+])
+def test_a_number_its_quote_names_as_revenue_stands(quote):
+    figures, reasons = _revenue_of(quote, 1.2)
+    assert figures is not None and figures.revenue == 1.2e9, reasons
+    assert reasons["revenue"] == "ok"
+
+
+_MILLIONS_HEADER = "($ in millions)"
+
+
+@pytest.mark.parametrize("row,value", [
+    ("Total revenue, net of interest expense $ 30,060 $ 28,000", 30060),
+    ("Revenues, net of interest expense 30,060 28,000", 30060),
+    ("Revenues net of interest expense 30,060 28,000", 30060),
+    ("Total revenues and other income 85,294 80,000", 85294),
+    ("Sales and other operating revenues 85,294 80,000", 85294),
+    ("Revenue(1) $ 1,200 $ 1,100", 1200),
+    ("Revenues, net 1,200 1,100", 1200),
+    ("Sales, net of returns 1,200 1,100", 1200),
+    ("Total net revenue 1,210.6 Net income 300.5", 1210.6),     # the next row's label is another's
+    ("Total revenue 1,210 Cost of revenue 300 Gross profit 910", 1210),
+])
+def test_a_table_row_names_revenue_in_its_own_label(row, value):
+    figures, reasons = _revenue_of(row, value, "million",
+                                   text=f"{_PRINTS_DOLLARS} {_MILLIONS_HEADER} {row}")
+    assert figures is not None and figures.revenue == value * 1e6, reasons
+
+
+@pytest.mark.parametrize("row,value", [
+    ("Total revenue 1,210 Cost of revenue 300 Gross profit 910", 300),
+    ("Total revenue 1,210 Cost of revenue 300 Gross profit 910", 910),
+    ("Total net revenue 1,210.6 Net income 300.5", 300.5),
+    ("Sales and marketing 1,200 1,100", 1200),
+    ("Total revenue 1,210 Interest expense 300", 300),
+])
+def test_the_next_rows_number_is_never_revenue(row, value):
+    figures, reasons = _revenue_of(row, value, "million",
+                                   text=f"{_PRINTS_DOLLARS} {_MILLIONS_HEADER} {row}")
+    assert figures is None and reasons["revenue"] == "wrong_metric"
+
+
+def test_the_metric_is_checked_after_the_value():
+    quote = "Net income was $1.2 billion in the third quarter of the year."
+    figures, reasons = _revenue_of(quote, 9.9)
+    assert figures is None and reasons["revenue"] == "value_mismatch"
+
+
+_NOT_EPS = [
+    ("Earnings of $1.00 per share and a dividend of $0.52 per share", 0.52),
+    ("Diluted EPS of $1.00, and a quarterly dividend of $0.52 per share", 0.52),
+    ("The board declared a quarterly dividend of $0.52 per share.", 0.52),
+    ("The board declared a $0.52 per share quarterly dividend.", 0.52),
+    ("Holders received $0.52 per share in dividends.", 0.52),
+    ("Holders received a $0.52 dividend per share.", 0.52),
+    ("Dividends declared per common share $ 0.52 $ 0.50", 0.52),
+    ("Cash dividends per share of $0.52 for the quarter", 0.52),
+    ("Distributions per common unit of $0.52 for the quarter", 0.52),
+    ("Book value per common share $ 45.21 $ 41.10", 45.21),
+    ("Tangible book value per share of $45.21 at quarter end", 45.21),
+    ("Net asset value per share was $45.21 at quarter end", 45.21),
+    ("NAV per share was $45.21 at quarter end", 45.21),
+    ("FFO per diluted share of $1.60 for the quarter", 1.6),
+    ("Core FFO per share of $1.60 for the quarter", 1.6),
+    ("AFFO of $1.60 per diluted share for the quarter", 1.6),
+    ("Funds from operations of $1.60 per diluted share", 1.6),
+    ("Free cash flow of $1.2 billion, or $0.46 per share, in the quarter", 0.46),
+    ("Free cash flow per share was $0.46 in the quarter", 0.46),
+    ("Adjusted EBITDA per share of $0.46 in the quarter", 0.46),
+    ("Revenue per share of $4.60 in the quarter", 4.6),
+    ("Sales of $4.60 per share in the quarter", 4.6),
+    ("Acme reported $4.60 per share of revenue in the quarter", 4.6),
+    ("Diluted EPS of $0.46, compared with $0.31 per diluted share a year ago", 0.31),
+    ("Shares were bought at an average price of $120.45 per share.", 120.45),
+    ("Diluted EPS of $0.46 included a charge of $0.10 per share.", 0.1),
+    ("Diluted EPS included a favorable impact of $0.05 from tariff refunds.", 0.05),
+    ("Diluted EPS included a tax benefit of $0.05 in the third quarter", 0.05),
+    ("Diluted EPS included a $0.05 tax benefit in the third quarter", 0.05),
+    ("Diluted EPS included $0.05 of tax benefits in the third quarter", 0.05),
+    ("Diluted EPS beat the consensus of $0.41 in the third quarter", 0.41),
+    ("Diluted EPS beat the analyst estimate of $0.41 in the third quarter", 0.41),
+    ("Net income of $0.46 in the third quarter", 0.46),         # no share named
+    ("Earnings were $0.46 in the third quarter", 0.46),
+    ("Acme made $0.46 in the third quarter", 0.46),
+    ("Fees as a share of the total were $0.46 in the third quarter", 0.46),
+    ("Diluted $ 0.19 $ 0.03", 0.19),                            # a sub-row with no heading
+    ("EPS rose $0.12 per share to $0.46.", 0.12),               # a change, not a level
+    ("Securities sold in the quarter ($0.18 decrease in EPS) at Acme", 0.18),
+    ("Diluted EPS was $0.05 higher than a year ago in the quarter", 0.05),
+    ("Pre-tax charges of $56 million, or $0.06 per share, for the quarter and $155 million, or "
+     "$0.17 per share, for the nine months.", 0.17),
+    ("EPS of $0.46 3Q26 Dividend of $0.52 Up 3% in the quarter", 0.52),
+    ("Diluted EPS of $3.83 would have increased by $3.57 to $7.40.", 3.57),
+    ("Diluted EPS of $0.46, compared with $0.41 a year ago", 0.41),
+    ("Diluted EPS was $0.46 versus $0.41 a year ago.", 0.41),
+    ("Diluted EPS was $0.46 compared to $0.41 a year ago.", 0.41),
+    ("Diluted EPS $ 1.20 Weighted average diluted shares 48.20", 48.2),
+    ("Diluted EPS $ 1.20 Diluted shares outstanding 48.20", 48.2),
+    ("Per share data: Shares outstanding 48.20 47.90", 48.2),
+    ("Per share data: Basic shares 48.20 47.90", 48.2),
+    ("Per share data: Diluted shares 48.20 47.90", 48.2),
+    ("Per share data: Weighted-average common shares 48.20 47.90", 48.2),
+    ("Gross profit per share of $1.20 in the third quarter", 1.2),
+    ("Fourth-quarter EPS is expected to be $0.50.", 0.5),       # what the company expects
+    ("EPS guidance of $4.05 to $4.25 for the full year", 4.05),
+    ("We expect EPS of $4.05 to $4.25 for the full year", 4.05),
+]
+
+
+@pytest.mark.parametrize("quote,value", _NOT_EPS)
+@pytest.mark.parametrize("field", ["eps_adjusted_diluted", "eps_gaap_diluted"])
+def test_a_number_its_quote_does_not_name_as_eps_is_refused(field, quote, value):
+    figures, reasons = _in_dollars(quote, **{field: {"value": value, "quote": quote}})
+    assert figures is None and reasons[field] == "wrong_metric"
+
+
+@pytest.mark.parametrize("quote,value", [
+    ("Diluted EPS of $0.46 in the third quarter", 0.46),
+    ("Earnings per diluted share of $0.46 in the third quarter", 0.46),
+    ("Earnings per common share were $0.46 in the third quarter", 0.46),
+    ("Earnings per basic and diluted share were $0.46 in the third quarter", 0.46),
+    ("Earnings per fully diluted share were $0.46 in the third quarter", 0.46),
+    ("Net income per Class A common share $ 0.46 $ 0.41", 0.46),
+    ("Net income of $120 million, or $0.46 per share", 0.46),
+    ("Net income of $120 million ($0.46 per diluted share)", 0.46),
+    ("Acme earned $0.46 per diluted share in the third quarter", 0.46),
+    ("Acme earned $0.46 a share in the third quarter", 0.46),
+    ("Acme earned $0.46 a diluted share in the third quarter", 0.46),
+    ("Acme reported $0.46 per share in the third quarter", 0.46),
+    ("Net income of $0.46/share in the third quarter", 0.46),
+    ("Net income (loss) per share of $0.46 in the third quarter", 0.46),
+    ("Net income3 per diluted share of $0.46 in the third quarter", 0.46),
+    ("Earnings of $0.40 per share in Q2 and $0.46 per share in Q3", 0.46),
+    ("Acme reported $0.46 diluted EPS in the third quarter", 0.46),
+    ("Acme reported $0.46 of EPS in the third quarter", 0.46),
+    ("Acme reported $0.46 in earnings per share in the third quarter", 0.46),
+    ("Net income per common unit, diluted $ 0.46 $ 0.41", 0.46),
+    ("Net income per limited partner unit of $0.46 in the quarter", 0.46),
+    ("Earnings per ADS of $0.46 in the third quarter", 0.46),
+    ("Earnings per American Depositary Share of $0.46 in the quarter", 0.46),
+    ("Earnings per ordinary share of $0.46 in the third quarter", 0.46),
+    ("Diluted EPS, which rose 5%, was $0.46 in the third quarter", 0.46),
+    ("Diluted EPS, $0.46, compared with $0.41 a year ago", 0.46),
+    ("Per-share earnings were $0.46 in the third quarter of the year", 0.46),
+    ("Net loss per diluted share of $0.46 in the third quarter", -0.46),
+    ("LPS of $0.46 in the third quarter of the fiscal year 2026", -0.46),
+    ("Revenue rose 5% and diluted EPS was $0.46 in the quarter", 0.46),
+    ("Revenue rose 5% and Acme earned $0.46 per share in the quarter", 0.46),
+    ("Earnings per share: Basic $ 0.22 $ 0.03 Diluted $ 0.19 $ 0.03", 0.19),
+    ("Book value rose 5%, and diluted EPS was $0.46 in the third quarter", 0.46),
+    ("Net income after tax of $120 million, or $0.46 per share", 0.46),
+    ("Third-quarter EPS attributable to Acme was a loss of $(0.46);", -0.46),
+    ("Net income per diluted share; $0.46 in the third quarter", 0.46),
+    ("Bank of America Reports 3Q26 Net Income of $6.9 Billion; EPS of $0.91 3Q26 Revenue Up 3% "
+     "YoY to $30.0 Billion", 0.91),
+])
+def test_a_number_its_quote_names_as_eps_stands(quote, value):
+    figures, reasons = _in_dollars(quote, eps_gaap_diluted={"value": value, "quote": quote})
+    assert figures is not None and figures.eps_gaap == value, reasons
+    assert reasons["eps_gaap_diluted"] == "ok"
+
+
+def test_the_print_the_label_names_is_kept_when_two_print_the_same_number():
+    quote = "A dividend of $0.46 per share and diluted EPS of $0.46 in the third quarter"
+    figures, reasons = _in_dollars(quote, eps_gaap_diluted={"value": 0.46, "quote": quote})
+    assert figures.eps_gaap == 0.46 and reasons["eps_gaap_diluted"] == "ok"
+
+
+# Which basis a number is on, when one quote prints both. The adjusted word must be this number's:
+# an adjusted EPS is what gets a beat or a miss, and a GAAP one is shown as just that.
+_BOTH_BASES = [
+    "GAAP EPS of $0.40 and adjusted EPS of $0.46 in the quarter",
+    "Adjusted EPS of $0.46 and GAAP EPS of $0.40 in the quarter",
+    "Diluted EPS was $0.40 on a GAAP basis and $0.46 on a non-GAAP basis",
+    "Diluted EPS was $0.46 on a non-GAAP basis and $0.40 on a GAAP basis",
+    "Diluted EPS of $0.46 (non-GAAP) and $0.40 (GAAP) in the quarter",
+    "Diluted EPS of $0.40 (GAAP) and $0.46 (non-GAAP) in the quarter",
+    "Diluted EPS: $0.40 GAAP, $0.46 non-GAAP",
+    "Diluted EPS (GAAP) $ 0.40 $ 0.38 Diluted EPS (non-GAAP) $ 0.46 $ 0.41",
+    "EPS was $0.40; excluding special items, EPS was $0.46",
+    "EPS was $0.40 and excluding special items it was $0.46",
+    "Diluted EPS of $0.46 excluding special items and $0.40 including them",
+    "Earnings of $0.40 per share, or $0.46 per share on an adjusted basis",
+    "Adjusted EPS of $0.46, GAAP EPS of $0.40 in the quarter",
+    "GAAP EPS of $0.40, adjusted EPS of $0.46 in the quarter",
+    "Adjusted EPS of $0.46 ($0.40 on a GAAP basis) in the quarter",
+    "EPS of $0.40, excluding special items, EPS was $0.46",
+    "EPS of $0.40 and, excluding special items, EPS was $0.46",
+    "Diluted EPS of $0.46, excluding special items, $0.40 including them",
+    "Diluted EPS was $0.46 and rose 5% on a non-GAAP basis, and was $0.40 on a GAAP basis",
+]
+
+
+@pytest.mark.parametrize("quote", _BOTH_BASES)
+def test_each_basis_stands_on_its_own_number(quote):
+    node = {"quote": quote}
+    figures, reasons = _in_dollars(quote, eps_adjusted_diluted=dict(node, value=0.46),
+                                   eps_gaap_diluted=dict(node, value=0.40))
+    assert (figures.eps_adjusted, figures.eps_gaap) == (0.46, 0.40), reasons
+
+
+@pytest.mark.parametrize("quote", _BOTH_BASES)
+def test_neither_basis_stands_on_the_others_number(quote):
+    node = {"quote": quote}
+    figures, reasons = _in_dollars(quote, eps_adjusted_diluted=dict(node, value=0.40),
+                                   eps_gaap_diluted=dict(node, value=0.46))
+    assert figures is None
+    assert reasons["eps_adjusted_diluted"] == "not_adjusted"
+    assert reasons["eps_gaap_diluted"] == "wrong_metric"
+
+
+@pytest.mark.parametrize("quote", [
+    "Adjusted earnings were $17.5 billion, or $0.46 per share.",
+    "Adjusted net income of $17.5 billion ($0.46 per diluted share) in the quarter",
+    "Excluding special items, diluted EPS was $0.46 in the quarter.",
+    "Diluted EPS was $0.46 excluding special items in the quarter.",
+    "Diluted EPS, excluding a $0.10 per share restructuring charge, was $0.46.",
+    "Non-GAAP diluted EPS 0.50 0.50 0.41 0.33 0.46",
+])
+def test_an_adjusted_figure_in_the_gaap_slot_is_refused_whatever_its_shape(quote):
+    figures, reasons = _in_dollars(quote, eps_gaap_diluted={"value": 0.46, "quote": quote})
+    assert figures is None and reasons["eps_gaap_diluted"] == "wrong_metric"
+
+
+@pytest.mark.parametrize("quote", [
+    "Diluted EPS of $0.46, excluding a charge of $0.10 per share",
+    "Diluted EPS of $0.46, excluding charges of $0.10",
+    "Diluted EPS, excluding a charge of $0.10 and a gain of $0.05, was $0.46.",
+    "Excluding a gain of $0.10 per share, diluted EPS was $0.46 in the quarter.",
+])
+def test_an_excluded_items_amount_is_no_figure_of_its_own(quote):
+    figures, reasons = _in_dollars(quote, eps_adjusted_diluted={"value": 0.46, "quote": quote})
+    assert figures.eps_adjusted == 0.46 and reasons["eps_adjusted_diluted"] == "ok"
+
+
+@pytest.mark.parametrize("quote", [
+    "Non-GAAP gross margin rose and diluted EPS was $0.46 in the quarter.",
+    "Non-GAAP operating margin of 30%; diluted EPS of $0.46 in the quarter",
+    "Non-GAAP EBITDA rose 4% and diluted EPS was $0.46 in the quarter.",
+    "Non-GAAP revenue rose 4% and diluted EPS was $0.46 in the quarter.",
+    "Adjusted EPS rose 5% last year. Diluted EPS was $0.46 in the quarter.",
+    "Adjusted EPS rose 5% last year; diluted EPS was $0.46 in the quarter.",
+    "\u2022Adjusted EPS rose 5% last year \u2022Diluted EPS was $0.46 in the quarter",
+    "Diluted EPS was $0.46 in the quarter. Adjusted EPS rose 5% last year.",
+    "Diluted EPS was $0.46 in the quarter; adjusted EPS rose 5% last year.",
+    "Acme had EPS of $0.40 and non-GAAP items. Diluted EPS was $0.46 in the quarter.",
+])
+def test_an_adjusted_word_outside_the_numbers_own_words_says_nothing_about_it(quote):
+    node = {"value": 0.46, "quote": quote}
+    figures, reasons = _in_dollars(quote, eps_adjusted_diluted=node, eps_gaap_diluted=dict(node))
+    assert reasons["eps_adjusted_diluted"] == "not_adjusted"
+    assert (figures.eps_adjusted, figures.eps_gaap) == (None, 0.46)
+
+
+def test_a_same_number_on_both_bases_fills_both_slots():
+    quote = "Adjusted EPS of $0.46 and GAAP EPS of $0.46 in the third quarter"
+    node = {"value": 0.46, "quote": quote}
+    figures, reasons = _in_dollars(quote, eps_adjusted_diluted=node, eps_gaap_diluted=dict(node))
+    assert (figures.eps_adjusted, figures.eps_gaap) == (0.46, 0.46), reasons
+
+
+# ── the shortest proof of a figure ───────────────────────────────────────────
+
+
+@pytest.mark.parametrize("field,quote,value", [
+    ("eps_gaap_diluted", "EPS of $0.91", 0.91),
+    ("eps_gaap_diluted", "Diluted EPS $0.91", 0.91),
+    ("eps_adjusted_diluted", "Non-GAAP EPS $0.80", 0.8),
+])
+def test_a_short_quote_proves_an_eps(field, quote, value):
+    figures, reasons = _in_dollars(quote, **{field: {"value": value, "quote": quote}})
+    assert figures is not None and reasons[field] == "ok"
+
+
+def test_a_short_quote_proves_a_revenue():
+    quote = "Revenue $1.2B"
+    assert len(quote) < efs.PEG_SPAN_MIN_CHARS
+    figures, reasons = _revenue_of(quote, 1.2)
+    assert figures.revenue == 1.2e9 and reasons["revenue"] == "ok"
+
+
+def test_a_figure_quote_under_the_floor_is_refused():
+    quote = "EPS: $0.91."
+    assert len(quote) == efs._FIGURE_QUOTE_MIN_CHARS - 1
+    figures, reasons = _in_dollars(quote, eps_gaap_diluted={"value": 0.91, "quote": quote})
+    assert figures is None and reasons["eps_gaap_diluted"] == "not_verbatim"
+
+
+def test_a_short_quote_still_never_cuts_a_number():
+    text = f"{_PRINTS_DOLLARS} 3Q26 Adjusted Net Income of $8.1 Billion, Adjusted EPS of $1.082(B)"
+    figures, reasons = _verify_in(text, eps_adjusted_diluted={"value": 1.08,
+                                                              "quote": "Adjusted EPS of $1.08"})
+    assert figures is None and reasons["eps_adjusted_diluted"] == "not_verbatim"
+
+
+def test_a_figure_at_the_ceiling_of_a_quote_still_verifies_and_one_past_it_does_not():
+    head = "Diluted EPS of $0.46 in the third quarter"
+    fits = head + " and" + " the quarter" * ((efs.PEG_SPAN_MAX_CHARS - len(head) - 4) // 12)
+    fits += "." * (efs.PEG_SPAN_MAX_CHARS - len(fits))
+    assert len(fits) == efs.PEG_SPAN_MAX_CHARS
+    figures, reasons = _in_dollars(fits, eps_gaap_diluted={"value": 0.46, "quote": fits})
+    assert figures.eps_gaap == 0.46, reasons
+    figures, reasons = _in_dollars(fits + ".", eps_gaap_diluted={"value": 0.46,
+                                                                 "quote": fits + "."})
+    assert figures is None and reasons["eps_gaap_diluted"] == "not_verbatim"
+
+
+def test_the_outlook_keeps_the_longer_floor():
+    quote = "Acme expects 5% growth."
+    figures, reasons = _verify_in(f"Acme reported results. {quote}", guidance={"quote": quote})
+    assert figures is None and reasons["guidance"] == "not_verbatim"
+
+
+# ── the one scale of a release ───────────────────────────────────────────────
+
+
+_ROW = "Total revenue $ 7,157 $ 7,078 1 % 1 %"
+_ONE_HEADER = f"Results. Dollars in millions, except per share data {_ROW}"
+
+
+def test_a_row_takes_the_one_scale_its_release_prints():
+    figures, reasons = _revenue_of(_ROW, 7157, "million", text=_ONE_HEADER)
+    assert figures.revenue == 7.157e9 and reasons["revenue"] == "ok"
+    assert figures.revenue_rounding == 5e5
+
+
+@pytest.mark.parametrize("unit", ["thousand", "billion", "units", None])
+def test_the_one_scale_must_be_the_one_the_model_named(unit):
+    figures, reasons = _revenue_of(_ROW, 7157, unit, text=_ONE_HEADER)
+    assert figures is None and reasons["revenue"] == "value_mismatch"
+
+
+@pytest.mark.parametrize("second", [
+    "(in thousands, except per share amounts)", "(Billions)", "($B)", "Shares in thousands",
+    "(000s)", "($000)",
+])
+def test_two_scales_in_a_release_prove_neither(second):
+    text = f"{_ONE_HEADER} {second} Other statements."
+    figures, reasons = _revenue_of(_ROW, 7157, "million", text=text)
+    assert figures is None and reasons["revenue"] == "value_mismatch"
+
+
+def test_the_same_header_printed_twice_is_still_one_scale():
+    text = f"{_ONE_HEADER} Dollars in millions {_ROW}"
+    figures, reasons = _revenue_of(_ROW, 7157, "million", text=text)
+    assert figures.revenue == 7.157e9 and reasons["revenue"] == "ok"
+
+
+def test_a_release_with_no_header_proves_no_scale_for_a_row():
+    figures, reasons = _revenue_of(_ROW, 7157, "million", text=f"Acme reported results. {_ROW}")
+    assert figures is None and reasons["revenue"] == "value_mismatch"
+
+
+def test_prose_that_is_no_header_proves_no_scale_for_a_row():
+    text = f"Acme reached millions of customers. {_ROW}"
+    figures, reasons = _revenue_of(_ROW, 7157, "million", text=text)
+    assert figures is None and reasons["revenue"] == "value_mismatch"
+
+
+def test_the_scale_in_the_quote_outranks_the_release():
+    quote = f"(In thousands) {_ROW}"
+    text = f"Dollars in millions. {quote}"
+    figures, reasons = _revenue_of(quote, 7157, "thousand", text=text)
+    assert figures.revenue == 7.157e6 and reasons["revenue"] == "ok"
+    figures, reasons = _revenue_of(quote, 7157, "million", text=text)
+    assert figures is None and reasons["revenue"] == "value_mismatch"
+
+
+def test_the_scale_beside_the_number_outranks_the_release():
+    quote = "Revenue for the third quarter was $17.1 billion, up 25% from a year ago."
+    text = f"Dollars in millions. {quote}"
+    figures, reasons = _revenue_of(quote, 17.1, "billion", text=text)
+    assert figures.revenue == 17.1e9 and reasons["revenue"] == "ok"
+    figures, reasons = _revenue_of(quote, 17.1, "million", text=text)
+    assert figures is None and reasons["revenue"] == "value_mismatch"
+
+
+@pytest.mark.parametrize("row,value", [
+    ("Total Revenue $656.5 $559.2 $625.0 $650.0 (3)% 14%", 559.2),     # cells that touch their $
+    ("Total revenue $559.2", 559.2),                                   # a row of one cell
+    ("Total revenue 559.2 500.1 for the quarter", 559.2),
+    ("Revenue was $7,157 for the third quarter.", 7157),               # too small to be dollars
+])
+def test_a_figure_that_is_no_full_dollar_amount_takes_the_header(row, value):
+    text = f"{_PRINTS_DOLLARS} Dollars in millions. {row}"
+    figures, reasons = _revenue_of(row, value, "million", text=text)
+    assert figures.revenue == value * 1e6 and reasons["revenue"] == "ok"
+
+
+@pytest.mark.parametrize("quote", [
+    "Net sales were $10,181,045 for the third quarter of the year.",
+    "Net sales for the third quarter of the year were $10,181,045",
+])
+def test_a_full_dollar_amount_in_a_sentence_never_takes_a_header(quote):
+    """A $10.2 million quarter read as $10.2 billion, off a table's header far from this sentence."""
+    figures, reasons = _revenue_of(quote, 10181045, "thousand",
+                                   text=f"Statements (in thousands). {quote}")
+    assert figures is None and reasons["revenue"] == "value_mismatch"
+
+
+def test_a_row_cell_of_a_full_dollar_size_takes_the_header():
+    row = "Net sales $ 10,181,045 $ 9,870,212 in total"
+    figures, reasons = _revenue_of(row, 10181045, "thousand", text=f"(In thousands) {row}")
+    assert figures.revenue == 10181045e3 and reasons["revenue"] == "ok"
+
+
+def test_the_header_is_read_in_the_whole_release_past_the_models_window():
+    answer = {"is_quarterly_results": True, "currency": "USD",
+              "revenue": {"value": 7157, "unit": "million", "quote": _ROW}}
+    window = f"Acme reported results. {_ROW}"
+    figures, reasons = efs.verify_extraction(
+        answer, window, accession=ACC, accepted_at=None, url="u",
+        release_text=f"{window} Statements (Dollars in millions) follow.")
+    assert figures.revenue == 7.157e9 and reasons["revenue"] == "ok"
+    figures, reasons = efs.verify_extraction(
+        answer, _ONE_HEADER, accession=ACC, accepted_at=None, url="u",
+        release_text=f"{_ONE_HEADER} Statements (in thousands) follow.")
+    assert figures is None and reasons["revenue"] == "value_mismatch"
+
+
+def test_a_row_with_no_release_to_read_proves_no_scale():
+    assert efs.revenue_from_quote(_ROW, 7157, "million") is None
+    assert efs.revenue_from_quote(_ROW, 7157, "million", release_text=_ONE_HEADER) == 7.157e9
+
+
+# ── a release in dollars ─────────────────────────────────────────────────────
+
+
+_NO_MARK = "Diluted EPS for the quarter 0.46 0.41"
+
+
+@pytest.mark.parametrize("around", [
+    "Acme reported net sales of $1.2 billion.", "Results in USD for the quarter.",
+    "Acme (USD) reported results.",
+])
+def test_a_quote_with_no_mark_stands_in_a_release_that_reads_in_dollars(around):
+    figures, reasons = _verify_in(f"{around} {_NO_MARK}",
+                                  eps_gaap_diluted={"value": 0.46, "quote": _NO_MARK})
+    assert figures.eps_gaap == 0.46 and reasons["eps_gaap_diluted"] == "ok"
+
+
+@pytest.mark.parametrize("around", [
+    "Acme reported results for the quarter.",           # no dollars anywhere
+    "Acme reported a weak dollar for the quarter.",
+    "Acme reported results of 1.2 billion for the quarter.",
+    "U.S. dollars are the reporting currency.",         # says so, prints none
+])
+def test_a_quote_with_no_mark_waits_in_a_release_that_prints_no_dollars(around):
+    figures, reasons = _verify_in(f"{around} {_NO_MARK}",
+                                  eps_gaap_diluted={"value": 0.46, "quote": _NO_MARK})
+    assert figures is None and reasons["eps_gaap_diluted"] == "no_dollar_mark"
+
+
+@pytest.mark.parametrize("around", [
+    "Net sales of $1.2 billion and €300 million of notes.",
+    "Net sales of $1.2 billion. Statements (in millions of euros).",
+    "Net sales of $1.2 billion. Statements (€ in millions).",
+    "Net sales of $1.2 billion. Statements (EUR millions).",
+    "Net sales of C$1.2 billion.",
+    "Net sales of $1.2 billion. All amounts are in Canadian dollars.",
+    "Net sales of £1.2 billion and US$1 of fees.",
+])
+def test_a_quote_with_no_mark_waits_in_a_release_showing_another_currency(around):
+    figures, reasons = _verify_in(f"{around} {_NO_MARK}",
+                                  eps_gaap_diluted={"value": 0.46, "quote": _NO_MARK})
+    assert figures is None and reasons["eps_gaap_diluted"] == "no_dollar_mark"
+
+
+def test_a_foreign_header_past_the_models_window_still_counts():
+    answer = {"is_quarterly_results": True, "currency": "USD",
+              "eps_gaap_diluted": {"value": 0.46, "quote": _NO_MARK}}
+    window = f"Net sales of $1.2 billion. {_NO_MARK}"
+    figures, reasons = efs.verify_extraction(
+        answer, window, accession=ACC, accepted_at=None, url="u",
+        release_text=f"{window} Statements (in millions of euros) follow.")
+    assert figures is None and reasons["eps_gaap_diluted"] == "no_dollar_mark"
+
+
+def test_a_quote_with_a_mark_needs_no_reading_of_the_release():
+    """A US company can quote a euro note beside its results: its "$" figure still stands."""
+    quote = "Diluted EPS for the quarter was $0.46."
+    text = f"We issued €300 million of notes. {quote}"
+    figures, reasons = _verify_in(text, eps_gaap_diluted={"value": 0.46, "quote": quote})
+    assert figures.eps_gaap == 0.46 and reasons["eps_gaap_diluted"] == "ok"
+
+
+def test_a_foreign_quote_stays_refused_in_a_release_that_prints_dollars():
+    quote = "Diluted EPS for the quarter was €0.46."
+    figures, reasons = _in_dollars(quote, eps_gaap_diluted={"value": 0.46, "quote": quote})
+    assert figures is None and reasons["eps_gaap_diluted"] == "foreign_currency"
+
+
+@pytest.mark.parametrize("quote,value,unit", [
+    ("2.3 million digitally-enabled sales, representing 71% of total sales", 2.3, "million"),
+    ("Revenue was 1.2 billion for the third quarter, up 5% from a year ago.", 1.2, "billion"),
+])
+def test_a_number_with_its_own_scale_and_no_mark_is_no_row_of_a_table(quote, value, unit):
+    figures, reasons = _revenue_of(quote, value, unit, text=f"{_PRINTS_DOLLARS} {quote}")
+    assert figures is None and reasons["revenue"] == "no_dollar_mark"
+
+
+def test_a_table_row_with_no_mark_reads_its_scale_and_its_dollars_from_the_release():
+    row = "Total revenues 28,095 24,901 22,387 28,236 28,046"
+    text = f"Net sales of $1.2 billion. ($ in millions) {row}"
+    figures, reasons = _revenue_of(row, 28046, "million", text=text)
+    assert figures.revenue == 28.046e9 and reasons["revenue"] == "ok"
+
+
+def test_the_whole_release_is_read_for_dollars_once(monkeypatch):
+    calls = []
+    real = efs._reads_in_dollars
+    monkeypatch.setattr(efs, "_reads_in_dollars", lambda release: calls.append(1) or real(release))
+    quote = "Diluted EPS for the quarter 0.46 0.41 and adjusted EPS 0.50 0.45 in all"
+    figures, reasons = _in_dollars(quote, eps_gaap_diluted={"value": 0.46, "quote": quote},
+                                   eps_adjusted_diluted={"value": 0.5, "quote": quote})
+    assert (figures.eps_gaap, figures.eps_adjusted) == (0.46, 0.5), reasons
+    assert len(calls) == 1
+
+
+# ── an outlook looks ahead and states a figure ───────────────────────────────
+
+
+def _outlook_in(quote: str, before: str = "Acme reported results.",
+                after: str = "Acme makes things."):
+    return _verify_in(f"{before} {quote} {after}", guidance={"quote": quote})
+
+
+@pytest.mark.parametrize("quote", [
+    "Acme expects revenue growth of 5% to 7% next year.",
+    "Acme is expecting revenue growth of 5% to 7% next year.",
+    "Revenue is expected to grow 5% to 7% next year at Acme.",
+    "Acme forecasts revenue growth of 5% to 7% next year.",
+    "Acme forecast revenue growth of 5% to 7% for next year.",
+    "Forecasting revenue growth of 5% to 7% for the coming year.",
+    "Acme gave guidance of 5% to 7% revenue growth next year.",
+    "Acme updated its outlook to 5% to 7% revenue growth.",
+    "Acme anticipates revenue growth of 5% to 7% next year.",
+    "Anticipating revenue growth of 5% to 7% for the coming year.",
+    "Acme projects revenue growth of 5% to 7% next year.",
+    "Acme projects full-year revenue growth of 5% to 7%.",
+    "Expected revenue growth of 5% to 7% for the coming year.",
+    "Revenue of $5.0 billion is expected for the coming year.",
+    "We project revenue growth of 5% to 7% for the next year.",
+    "Revenue is projected to grow 5% to 7% next year at Acme.",
+    "Our projections call for revenue growth of 5% to 7%.",
+    "Acme is targeting revenue growth of 5% to 7% next year.",
+    "Acme targets revenue growth of 5% to 7% for next year.",
+    "Our target for next year is revenue growth of 5% to 7%.",
+    "Acme raised full-year EPS to a figure of $4.05 to $4.25.",
+    "Raises full year EPS to a figure of $4.05 to $4.25 today.",
+    "Raising fiscal 2027 EPS to a figure of $4.05 to $4.25.",
+    "Revenue will be in the range of $5.0 billion to $5.5 billion.",
+    "Revenue will be in a range of 5% to 7% for the coming year.",
+    "Revenue will land in a range of $5.0 billion to $5.5 billion.",
+])
+def test_a_sentence_that_looks_ahead_with_a_figure_is_an_outlook(quote):
+    figures, reasons = _outlook_in(quote)
+    assert figures.guidance == quote and reasons["guidance"] == "ok"
+
+
+@pytest.mark.parametrize("figure", [
+    "$5 billion", "5%", "5 %", "five percent", "5 percent", "5 per cent", "45 cents",
+    "50 basis points", "$0.45",
+])
+def test_every_way_of_printing_a_financial_figure_counts(figure):
+    quote = f"Acme expects an increase of {figure} for the coming year."
+    figures, reasons = _outlook_in(quote)
+    assert figures.guidance == quote and reasons["guidance"] == "ok"
+
+
+@pytest.mark.parametrize("quote", [
+    # No financial figure.
+    "Acme expects demand to remain strong through the end of the year.",
+    "Acme withdrew its outlook for the rest of the fiscal year.",
+    "Acme expects to deliver 65,000 to 70,000 vehicles next year.",
+    "Acme expects 1.5 billion in revenue for the coming year.",
+    "Acme expects a half-trillion dollar revenue run rate next year.",
+    # Nothing looking ahead.
+    "Revenue grew 12% to $5.0 billion in the quarter, the company said.",
+    "We had a strong quarter, with revenue up 12% from a year ago.",
+    # A word that only looks forward-looking.
+    "Acme raised $1.5 billion in a bond offering during the quarter.",
+    "Acme raised its quarterly dividend by 5% during the quarter.",
+    "Revenue of $5.0 billion was better than expected in the quarter.",
+    "Revenue of $5.0 billion came in as expected for the quarter.",
+    "A higher-than-expected 5% rise in revenue helped the quarter.",
+    "Results exceeded expectations by 5% in the third quarter.",
+    "Revenue of $5.0 billion was better than we expected in the quarter.",
+    "The new plant project cost $2.0 billion to build and open.",
+    "Capital projects of $2.0 billion were completed in the quarter.",
+    "We offer a wide range of products, up 5% in the quarter.",
+    "Target Corporation reported comparable sales up 5% in the quarter.",
+])
+def test_a_sentence_that_is_no_outlook_is_refused(quote):
+    figures, reasons = _outlook_in(quote)
+    assert figures is None and reasons["guidance"] == "not_outlook"
+
+
+@pytest.mark.parametrize("quote", [
+    "We will discuss our outlook for 5% growth on our earnings call.",
+    "Guidance of 5% growth will be shared during the conference call.",
+    "Guidance of $5 billion will be given on the call this afternoon.",
+    "Our outlook for 5% growth is in the webcast at 5:00 p.m. today.",
+    "See our shareholder letter for our outlook of 5% revenue growth.",
+    "Our investor letter gives guidance of 5% revenue growth for 2027.",
+    "Our letter to shareholders gives guidance of 5% revenue growth.",
+    "These forward-looking statements include expected growth of 5%.",
+    "This forward looking statement covers an expected rise of 5%.",
+    "Our safe harbor notice covers an expected revenue rise of 5%.",
+])
+def test_a_pointer_with_a_figure_in_it_is_still_a_pointer(quote):
+    figures, reasons = _outlook_in(quote)
+    assert figures is None and reasons["guidance"] == "not_outlook"
+
+
+def test_the_figure_and_the_look_ahead_must_share_a_sentence():
+    quote = "Revenue grew 12% in the quarter. We expect a strong year ahead for the company."
+    figures, reasons = _outlook_in(quote)
+    assert figures is None and reasons["guidance"] == "not_outlook"
+
+
+@pytest.mark.parametrize("quote", [
+    "We had a strong quarter. We expect revenue of $5.0 billion next year.",
+    "We expect revenue of $5.0 billion next year. We will say more on our earnings call.",
+    "We expect U.S. GAAP revenue of $5.0 billion for the coming year.",
+    "We expect Acme Inc. Revenue of $5.0 billion for the coming year.",
+])
+def test_one_sentence_that_qualifies_shows_the_whole_quote(quote):
+    figures, reasons = _outlook_in(quote)
+    assert figures.guidance == quote and reasons["guidance"] == "ok"
+
+
+def test_a_refused_outlook_never_touches_the_figures():
+    quote = "Intel withdrew its outlook for the rest of the fiscal year."
+    text = f"{RELEASE} {quote}"
+    answer = _good_answer(guidance={"quote": quote})
+    figures, reasons = efs.verify_extraction(answer, text, accession=ACC, accepted_at=None, url="u")
+    assert figures.guidance is None and reasons["guidance"] == "not_outlook"
+    assert (figures.revenue, figures.eps_adjusted, figures.eps_gaap) == (17.1e9, 0.44, -0.12)
+
+
+def test_the_older_outlook_refusals_come_first():
+    """Each older reason says more than "no outlook", and it stays what the log reports."""
+    cut = "For the quarter Acme expects revenue of $17.5 billion"
+    assert _outlook_in(cut, after="to $18.5 billion.")[1]["guidance"] == "cut_sentence"
+    table = "Revenue $ 7,157 $ 7,078 Net income $ 2,486 $ 2,278 in the quarter."
+    assert _outlook_in(table)[1]["guidance"] == "table_cell"
+    assert _outlook_in("Acme introduces the following guidance for the year.")[1]["guidance"] \
+        == "lead_in"
+
+
+# ── hostile text ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("unit", [
+    "per ", "per share ", "excluding ", "a ", "cost of ", "revenue and other ", "$ ", "1, ",
+    "a. b. ", "$1 ", "and ", "earnings per ", "expects ", "sales ", "1.1 ", "( ", ") ", ", ",
+])
+def test_a_quote_as_long_as_it_may_be_is_read_in_a_moment(unit):
+    quote = (unit * 400)[:efs.PEG_SPAN_MAX_CHARS]
+    quote = quote[:-6] + " $1.20"
+    started = time.perf_counter()
+    efs._verified_eps(quote, 1.2, adjusted=True)
+    efs._verified_eps(quote, 1.2, adjusted=False)
+    efs._revenue_prints(quote, 1.2, "billion", release_text=quote)
+    for tok in efs._numbers_in(quote):
+        efs._metric_at(quote, tok)
+    efs._states_an_outlook(quote)
+    assert time.perf_counter() - started < 1.0
+
+
+def test_a_quote_of_nothing_but_equal_figures_is_read_in_a_moment():
+    quote = ("EPS 1.1 " * 60)[:efs.PEG_SPAN_MAX_CHARS].strip()
+    started = time.perf_counter()
+    assert efs._verified_eps(quote, 1.1, adjusted=False)[1] == "ok"
+    assert time.perf_counter() - started < 1.0
+
+
+@pytest.mark.parametrize("unit", [
+    "in ", "1 million ", "$ ", "A$ ", "in millions ", "$ M ", "1 ", "$1 ", "USD ", "euro ",
+])
+def test_a_whole_release_of_hostile_text_is_read_in_a_moment(unit):
+    release = (unit * 300_000)[:efs._RELEASE_READ_CHARS]
+    started = time.perf_counter()
+    efs._release_scale(release)
+    efs._reads_in_dollars(release)
+    assert time.perf_counter() - started < 3.0
+
+
+def test_a_release_too_long_to_read_proves_no_dollars_and_no_scale():
+    row = "Total revenue 7,157 7,078 for the quarter"
+    fits = f"Net sales of $1.2 billion. Dollars in millions. {row} "
+    fits += "x" * (efs._RELEASE_READ_CHARS - len(fits))
+    assert efs._reads_in_dollars(fits) and efs._release_scale(fits) == 1e6
+    assert not efs._reads_in_dollars(fits + "x") and efs._release_scale(fits + "x") is None
+    answer = {"is_quarterly_results": True, "currency": "USD",
+              "revenue": {"value": 7157, "unit": "million", "quote": row}}
+    figures, reasons = efs.verify_extraction(answer, row, accession=ACC, accepted_at=None, url="u",
+                                             release_text=fits + "x")
+    assert figures is None and reasons["revenue"] == "no_dollar_mark"
+
+
+def test_a_row_with_its_own_mark_in_a_release_too_long_to_read_proves_no_scale():
+    row = "Total revenue $ 7,157 $ 7,078 for the quarter"
+    release = f"Dollars in millions. {row} " + "x" * efs._RELEASE_READ_CHARS
+    answer = {"is_quarterly_results": True, "currency": "USD",
+              "revenue": {"value": 7157, "unit": "million", "quote": row}}
+    figures, reasons = efs.verify_extraction(answer, row, accession=ACC, accepted_at=None, url="u",
+                                             release_text=release)
+    assert figures is None and reasons["revenue"] == "value_mismatch"
+
+
+def test_the_whole_release_is_read_for_its_scale_once(monkeypatch):
+    calls = []
+    real = efs._release_scale
+    monkeypatch.setattr(efs, "_release_scale", lambda release: calls.append(1) or real(release))
+    row = "Revenues 0.5 0.5 0.5 0.5 for the quarter"
+    prints = efs._revenue_prints(row, 0.5, "million",
+                                 release_text=f"Net sales of $1. Dollars in millions. {row}")
+    assert len(prints) == 4 and len(calls) == 1
 
 
 # ── the SEC record ───────────────────────────────────────────────────────────

@@ -950,9 +950,10 @@ def test_no_frozen_fill_is_byte_equal_to_its_text_counterpart():
 
 # A member whose VALUE is a fill — `InvestorLevel.fillColor`, `QualityBand.fillColor`,
 # `levelColors`, the whale avatar palette. None of these is reachable by the direct rule:
-# `RatingBadge` inks at :54 while its fill comes from a model 100 lines away, and
-# `TechnicalLevelIndicator` puts its ink AFTER its fill inside a `ZStack`. Those are exactly
-# the sites the user complained about, so without this they have no regression guard at all.
+# `JourneyProgressCard` inks from `track.level.fillInk` while its fill lives on a model in
+# another file, and `TechnicalLevelIndicator` puts its ink AFTER its fill inside a `ZStack`.
+# Those are exactly the shapes the user complained about, so without this they have no
+# regression guard at all.
 _FILL_MEMBER = re.compile(r"\b(?:var|let)\s+(\w*(?:[Ff]illColor|fillColors|levelColors))\b")
 
 
@@ -970,7 +971,6 @@ def test_every_fill_valued_member_has_a_paired_ink_member():
         "Views/Atoms/TechnicalLevelIndicator.swift": [("levelColors", "levelInks")],
         "Views/Screens/WhaleProfileView.swift":      [("backgroundColor", "backgroundInk")],
         "Views/Atoms/UserAvatar.swift":              [("backgroundColor", "backgroundInk")],
-        "Views/Atoms/RatingBadge.swift":             [("backgroundColor", "foregroundInk")],
         # STORED, not computed — `TrendingAnalysis` is a struct assigned at four construction
         # sites rather than an enum switching on itself. The pairing requirement is identical;
         # only `test_a_stored_ink_member_covers_every_family_its_fill_member_spans` can check
@@ -1025,9 +1025,9 @@ _MEMBER_DECL = re.compile(r"^\s*(?:private\s+|static\s+)*(?:var|let)\s+(\w+)\s*:
 def _fill_valued_members(lines) -> dict[str, set]:
     """{memberName: set of canonical fill tokens its body resolves to}.
 
-    This is what makes the user's own three sites guardable at all: `RatingBadge` inks
-    100 lines away from its fill, and `TechnicalLevelIndicator` inks AFTER its fill inside
-    a `ZStack`, so neither is reachable by a backward window over literal tokens.
+    This is what makes those shapes guardable at all: `JourneyProgressCard` inks a whole
+    file away from its fill, and `TechnicalLevelIndicator` inks AFTER its fill inside a
+    `ZStack`, so neither is reachable by a backward window over literal tokens.
     """
     out = {}
     for i, (_, line) in enumerate(lines):
@@ -1107,7 +1107,6 @@ def test_a_paired_ink_member_names_both_inks():
         "Views/Atoms/TechnicalLevelIndicator.swift": ("levelInks",),
         "Views/Screens/WhaleProfileView.swift":      ("backgroundInk",),
         "Views/Atoms/UserAvatar.swift":              ("backgroundInk",),
-        "Views/Atoms/RatingBadge.swift":             ("foregroundInk",),
     }
     problems = []
     for rel, members in expected.items():
@@ -2927,7 +2926,8 @@ def test_tint_scanner_is_not_vacuous():
         "member expansion": found("Views/Molecules/ThinkingProcessCard.swift",
                                   lambda r: r[1] > r[2] and r[3] == "text"),
         # (b) a `ZStack` sibling on a `.fill`ed shape.
-        "zstack": found("Views/Atoms/AlertIconView.swift", lambda r: r[3] == "icon" and r[6]),
+        "zstack": found("Views/Molecules/NextEarningsDateCard.swift",
+                        lambda r: r[3] == "icon" and r[6]),
         # A derived member (`backgroundColor { rating.color.opacity(0.15) }`) through a typed
         # prefix, paired case by case with its ink.
         "derived member": found("Views/Atoms/SnapshotRatingIndicator.swift",

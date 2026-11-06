@@ -175,7 +175,6 @@ _SCROLLER_CARDS = [
     ("Views/Molecules/RelatedTickerCard.swift", "minWidth: 100, maxWidth: 100", "height: 120)"),
     ("Views/Molecules/PersonaCard.swift", "minHeight: cardHeight", "height: cardHeight)"),
     ("Views/Molecules/LessonCard.swift", "minWidth: 160, maxWidth: 160", "height: 150)"),
-    ("Views/Molecules/ResearchCard.swift", "minWidth: 260, maxWidth: 260", "height: 280)"),
     ("Views/Molecules/RelatedMoneyMoveCard.swift",
      "minWidth: Self.coverWidth, maxWidth: Self.coverWidth", "height: 220)"),
 ]
@@ -184,7 +183,6 @@ _SCROLLER_CARDS = [
 _SCROLLER_PARENTS = [
     "Views/Organisms/TickerDetailRelatedSection.swift",
     "Views/Organisms/PersonaSelectionSection.swift",
-    "Views/Organisms/RecentResearchSection.swift",
     "Views/Organisms/InvestorJourneyLevelSection.swift",
     "Views/Organisms/MoneyMoveRelatedArticlesSection.swift",
 ]

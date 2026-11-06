@@ -157,7 +157,7 @@ frontend/ios/
 │   │   │   ├── SentimentBadge.swift
 │   │   │   └── ...
 │   │   ├── Molecules/                        # Composed components
-│   │   │   ├── TickerCard.swift
+│   │   │   ├── MarketPulseCard.swift
 │   │   │   ├── ChatInputBar.swift
 │   │   │   ├── ReportCard.swift
 │   │   │   ├── CreditsBalanceCard.swift
@@ -172,7 +172,7 @@ frontend/ios/
 │   │   │   ├── TickerFinancialsContent.swift
 │   │   │   └── ...
 │   │   └── Screens/                          # Full-page views
-│   │       ├── HomeView.swift
+│   │       ├── HomeDashboardView.swift
 │   │       ├── UpdatesView.swift
 │   │       ├── ResearchView.swift
 │   │       ├── TrackingView.swift
@@ -185,7 +185,7 @@ frontend/ios/
 │   │       └── ...
 │   │
 │   ├── ViewModels/                           # Screen-specific ViewModels
-│   │   ├── HomeViewModel.swift
+│   │   ├── HomeDashboardViewModel.swift
 │   │   ├── UpdatesViewModel.swift
 │   │   ├── ResearchViewModel.swift
 │   │   ├── TrackingViewModel.swift
@@ -258,7 +258,7 @@ RootView (checks auth state)
 RootContainerView (audio player overlay)
     ↓
 ContentView (5-tab CustomTabBar)
-    ├─ Home       → HomeView
+    ├─ Home       → HomeDashboardView
     ├─ Updates    → UpdatesView
     ├─ Research   → ResearchView
     ├─ Tracking   → TrackingView
@@ -269,7 +269,7 @@ ContentView (5-tab CustomTabBar)
 
 | Tab | Screen | Purpose |
 |-----|--------|---------|
-| Home | `HomeView` | Market tickers, AI insights, daily briefings, recent research |
+| Home | `HomeDashboardView` | Market Pulse, Daily Scanners, App-Exclusive Signals, Trending Themes |
 | Updates | `UpdatesView` | News timeline with sentiment analysis filters |
 | Research | `ResearchView` | Generate AI stock analysis in investor personas |
 | Tracking | `TrackingView` | Watchlist, portfolio, diversification metrics |
@@ -690,7 +690,7 @@ All models use explicit `CodingKeys` to map snake_case JSON to camelCase Swift p
 
 | ViewModel | Screen | Key Responsibilities |
 |-----------|--------|---------------------|
-| `HomeViewModel` | HomeView | Market tickers, insights, briefings, recent research |
+| `HomeDashboardViewModel` | HomeDashboardView | Market Pulse, scanners, signals, themes |
 | `UpdatesViewModel` | UpdatesView | News feed with category filters |
 | `ResearchViewModel` | ResearchView | Ticker search, persona selection, report generation |
 | `TrackingViewModel` | TrackingView | Watchlist management, portfolio tracking |
@@ -725,8 +725,8 @@ Badges, labels, indicators, tiny charts:
 ### Molecules — Composed of atoms
 
 Cards, bars, rows, headers:
-- `TickerCard`, `ReportCard`, `CreditsBalanceCard`
-- `ChatInputBar`, `ArticleCalloutBox`, `DailyBriefingRow`
+- `MarketPulseCard`, `ReportCard`, `CreditsBalanceCard`
+- `ChatInputBar`, `ArticleCalloutBox`, `AssetRow`
 - `CommunityInsightRow`, `AnalystActionCard`
 - Chart components: `EarningsChartView`, `SmartMoneyFlowChart`
 
@@ -1034,8 +1034,8 @@ Modern Swift patterns used throughout the codebase:
 The architecture is **additive** — existing code works as-is:
 
 ```swift
-struct HomeContentView: View {
-    @StateObject private var viewModel = HomeViewModel()
+struct UpdatesContentView: View {
+    @StateObject private var viewModel = UpdatesViewModel()
 
     var body: some View {
         // Your existing code

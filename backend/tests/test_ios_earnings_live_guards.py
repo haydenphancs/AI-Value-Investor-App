@@ -50,6 +50,21 @@ def _struct_block(src: str, name: str) -> str:
     return src[start: src.index("\n}", start)]
 
 
+def _bracketed(src: str, marker: str, opener: str = "{", closer: str = "}") -> str:
+    """What the first `opener` after `marker` encloses, found by counting, so a nested type's body
+    and a sibling's never leak into the scan."""
+    start = src.index(opener, src.index(marker))
+    depth = 0
+    for at in range(start, len(src)):
+        if src[at] == opener:
+            depth += 1
+        elif src[at] == closer:
+            depth -= 1
+            if depth == 0:
+                return src[start + 1: at]
+    raise AssertionError(f"no closing {closer} after {marker}")
+
+
 def _coding_keys(src: str, name: str) -> set:
     block = _struct_block(src, name)
     keys = set(re.findall(r'case\s+\w+\s*=\s*"(\w+)"', block))
@@ -187,6 +202,30 @@ def test_a_figure_the_server_gave_no_verdict_is_never_coloured():
     assert body.index(rule) < body.index("actual > estimate")
     assert "surprisePct == 0" not in body
     assert "isPreliminary" not in body, "the card and the sheet pass this flag differently"
+
+
+@pytest.mark.parametrize("rel,scope,outcome,passed", [
+    (_MODELS, "extension EarningsLiveResponse", "var epsOutcome", "eps.surprisePct"),
+    (_MODELS, "extension EarningsLiveResponse", "var revenueOutcome", "revenue.surprisePct"),
+    ("Models/TrackingModels.swift", "struct EarningsData", "var epsOutcome", "epsSurprisePct"),
+    ("Models/TrackingModels.swift", "struct EarningsData", "var revenueOutcome",
+     "revenueSurprisePct"),
+])
+def test_each_outcome_is_handed_its_own_surprise(rel, scope, outcome, passed):
+    """`EarningsMetricOutcome.result` reads the surprise as the server's answer, so a nil here turns
+    every figure of that surface into a grey "In", with nothing else to show it."""
+    body = _bracketed(_bracketed(_code(rel), scope), outcome)
+    assert re.search(rf"\bsurprisePct:\s*{re.escape(passed)}\s*[,)]", body), body
+
+
+@pytest.mark.parametrize("label,dto_field", [
+    ("epsSurprisePct", "epsSurprisePct"),
+    ("revenueSurprisePct", "revenueSurprisePct"),
+])
+def test_the_feed_hands_the_card_each_surprise_it_decoded(label, dto_field):
+    models = _code("Models/TrackingModels.swift")
+    call = _bracketed(models, ".earnings(AppAlert.EarningsData", "(", ")")
+    assert re.search(rf"\b{label}:\s*{dto_field}\s*,", call), call
 
 
 def test_the_colour_word_and_arrow_all_come_from_the_one_verdict():

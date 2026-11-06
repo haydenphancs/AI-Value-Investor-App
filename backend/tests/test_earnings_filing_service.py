@@ -214,6 +214,12 @@ _NEGATIVE_IMPACT = ("Diluted EPS, which had a negative impact of $0.02 from curr
                     "in the third quarter.")
 
 
+def _signs(quote: str, magnitude: float, *, loss: bool) -> List[Tuple[str, float, Optional[float]]]:
+    """Both rows of one quote: the sign the print proves keeps it, the other one is refused."""
+    kept = -magnitude if loss else magnitude
+    return [(quote, kept, kept), (quote, -kept, None)]
+
+
 @pytest.mark.parametrize("quote,value,expected", [
     # The number the model picked decides, never another figure of the same quote.
     (_INTEL_BOTH, -0.13, None),
@@ -389,6 +395,245 @@ _NEGATIVE_IMPACT = ("Diluted EPS, which had a negative impact of $0.02 from curr
     ("a range of $0.40 - $0.44 per diluted share", 0.44, 0.44),
     ("EPS rose 5%-$0.25 was the gain", 0.25, 0.25),
     ("EPS(1)-$0.25 for the third quarter", 0.25, 0.25),
+    # A clause ends at its verb: what the sentence goes on to state is the figure's own.
+    *_signs("Earnings excluding special items were a loss of $450 million, or $0.42 per share, "
+            "in the third quarter", 0.42, loss=True),
+    *_signs("Adjusted earnings excluding special items were a loss of $0.46 per diluted share in "
+            "the third quarter.", 0.46, loss=True),
+    *_signs("Income before income taxes was a loss of $0.46 per diluted share for the third "
+            "quarter of 2026.", 0.46, loss=True),
+    *_signs("Earnings including discontinued operations were a net loss of $0.46 per diluted "
+            "share in the quarter.", 0.46, loss=True),
+    *_signs("Net income before special items was a loss of $0.42 per share in the third quarter "
+            "of fiscal 2026", 0.42, loss=True),
+    *_signs("Earnings excluding items amounted to a net loss for the period of $0.46 per share "
+            "in the quarter", 0.46, loss=True),
+    *_signs("Earnings excluding items came to a net loss in the quarter, at $0.46 per share, it "
+            "said", 0.46, loss=True),
+    *[row for verb in ("was", "were", "is", "are", "had", "amounted to", "resulted in", "came to",
+                       "totaled", "totalled", "showed", "swung to", "turned to", "narrowed to",
+                       "widened to")
+      for row in _signs(f"Earnings excluding items {verb} a net loss in the quarter, at $0.46 per "
+                        "share", 0.46, loss=True)],
+    # So does a sentence: the words after its full stop are not the clause's.
+    *_signs("Adjusted results exclude special items. Net loss was $0.46 per share in the third "
+            "quarter", 0.46, loss=True),
+    # A loss the words give this very number is no aside, with or without a verb before it.
+    *_signs("Operating income rose 3% in the quarter. Excluding the charge the net loss per share "
+            "was $0.46 for the period.", 0.46, loss=True),
+    *_signs("Excluding special items the net loss was $0.46 per share in the third quarter",
+            0.46, loss=True),
+    *_signs("In the third quarter excluding special items the net loss was $0.46 per share",
+            0.46, loss=True),
+    *_signs("The company said excluding special items the net loss was $0.46 per share",
+            0.46, loss=True),
+    *_signs("Earnings fell, and excluding special items the net loss was $0.46 per share",
+            0.46, loss=True),
+    *_signs("Operating income rose 3% in the quarter. Excluding the charge the net loss was $0.46 "
+            "per share.", 0.46, loss=True),
+    *_signs("Excluding special items net income was $0.46 per share in the third quarter",
+            0.46, loss=False),
+    *_signs("Income fell and excluding the charge the net loss per share was $0.46 in the quarter",
+            0.46, loss=True),
+    *_signs("Income fell and excluding the charge the net loss of US$0.46 per share widened",
+            0.46, loss=True),
+    *_signs("Income fell and excluding the charge the net loss of USD 0.46 per share widened",
+            0.46, loss=True),
+    *_signs("Income fell and excluding the charge the net loss of U.S. $0.46 per share widened",
+            0.46, loss=True),
+    *_signs("Excluding the charge the net loss of $0.46 per diluted share was narrower than a year "
+            "ago", 0.46, loss=True),
+    *_signs("Excluding the charge the net loss of US$0.46 per diluted share was narrower than a "
+            "year ago", 0.46, loss=True),
+    *_signs("Excluding the charge the net loss of 0.46 dollars per share was narrower than a year "
+            "ago", 0.46, loss=True),
+    *_signs("Excluding the charge the net loss of $120 million, or $0.46 per share, narrowed from "
+            "a year ago", 0.46, loss=True),
+    *_signs("Excluding the charge the net loss of $120 million ($0.46 per share) narrowed from a "
+            "year ago", 0.46, loss=True),
+    *_signs("Excluding the charge the net loss of $120 million and $0.46 per share narrowed from a "
+            "year ago", 0.46, loss=True),
+    # An aside holding the figure's own loss keeps it when "or" ties the number to that loss.
+    *_signs("Results for the quarter, including a net loss of $120 million, or $0.46 per share, "
+            "reflected the charge", 0.46, loss=True),
+    # With a measure before it the clause qualifies that measure, or a comma closes it.
+    *_signs("Diluted EPS excluding the loss was $0.46 in the third quarter of the year",
+            0.46, loss=False),
+    *_signs("Diluted EPS rose 1.5% excluding the loss on a sale and was $0.46 in the third quarter",
+            0.46, loss=False),
+    *_signs("Core FFO excluding the loss on debt was $0.46 per share in the third quarter",
+            0.46, loss=False),
+    *_signs("Adjusted profit excluding the loss on debt was $0.46 per share in the third quarter",
+            0.46, loss=False),
+    *_signs("Per-share figures excluding the loss on debt were $0.46 in the third quarter",
+            0.46, loss=False),
+    *_signs("Excluding the loss on a sale, results were $0.46 per share in the third quarter",
+            0.46, loss=False),
+    # Any direction word such a clause holds is the clause's, the worst one being a profit.
+    *_signs("Net loss including income from a sale was $0.46 per share in the third quarter",
+            0.46, loss=True),
+    *_signs("Net loss excluding earnings from affiliates was $0.46 per share in the third quarter",
+            0.46, loss=True),
+    *_signs("Net loss before the profit on a sale was $0.46 per share in the third quarter",
+            0.46, loss=True),
+    *_signs("Diluted EPS excluding income from a sale was $0.46 per share in the third quarter",
+            0.46, loss=False),
+    # But a loss with an amount of its own, inside the clause, is the clause's.
+    *_signs("Diluted EPS including a loss of $0.10 per share from the sale was $0.46 in the third "
+            "quarter", 0.46, loss=False),
+    *_signs("Diluted EPS net of a loss of $0.10 per share from the sale was $0.46 in the third "
+            "quarter", 0.46, loss=False),
+    # "Gains and losses" points neither way.
+    *_signs("Adjusted net income excluding investment gains and losses of $120 million, or $0.46 "
+            "per share, rose", 0.46, loss=False),
+    *_signs("Adjusted net income excluding gains or losses of $120 million, or $0.46 per share, "
+            "rose", 0.46, loss=False),
+    *_signs("Adjusted net income excluding losses and gains of $120 million, or $0.46 per share, "
+            "rose", 0.46, loss=False),
+    *_signs("Net investment gains and losses were $0.46 per share in the third quarter of the year",
+            0.46, loss=False),
+    *_signs("Net investment gains/losses were $0.46 per share in the third quarter of the year",
+            0.46, loss=False),
+    *_signs("Net investment losses and gains were $0.46 per share in the third quarter of the year",
+            0.46, loss=False),
+    *_signs("Net investment losses or gains were $0.46 per share in the third quarter of the year",
+            0.46, loss=False),
+    # "Negative" said of the figure, apart from its number.
+    *_signs("Earnings per share were negative at $0.46 in the third quarter of the fiscal year "
+            "2026.", 0.46, loss=True),
+    *_signs("Diluted EPS was negative in the third quarter, at $0.46 per share, the company said "
+            "today.", 0.46, loss=True),
+    *_signs("Diluted earnings per share turned negative, to $0.46 from $0.31 a year earlier in the "
+            "quarter.", 0.46, loss=True),
+    *_signs("Diluted EPS remained negative at $0.46 in the third quarter of the fiscal year 2026.",
+            0.46, loss=True),
+    *_signs("Diluted EPS went negative at $0.46 in the third quarter of the fiscal year 2026.",
+            0.46, loss=True),
+    *_signs("Diluted EPS stayed negative at $0.46 in the third quarter of the fiscal year 2026.",
+            0.46, loss=True),
+    *_signs("Diluted EPS is negative at $0.46 in the third quarter of the fiscal year 2026.",
+            0.46, loss=True),
+    *_signs("Earnings per share are negative at $0.46 in the third quarter of the fiscal year.",
+            0.46, loss=True),
+    # An aside is an aside whatever opens it: a comma right before the verb closes one.
+    *_signs("Adjusted EPS, after a loss of $0.02 from currency, was $0.46 for the third quarter of "
+            "2026.", 0.46, loss=False),
+    *_signs("Adjusted EPS, after adding back the net loss on sale, was $0.46 for the third quarter "
+            "of 2026.", 0.46, loss=False),
+    *_signs("Adjusted EPS, excl. the loss on debt extinguishment, was $0.46 for the third quarter "
+            "of 2026.", 0.46, loss=False),
+    *_signs("Adjusted EPS, compared with a loss of $0.12 a year ago, was $0.46 in the third quarter",
+            0.46, loss=False),
+    *_signs("Adjusted EPS, despite a loss on the sale, was $0.46 in the third quarter of the year",
+            0.46, loss=False),
+    *_signs("Net loss, compared with a profit a year ago, was $0.46 per share in the third quarter",
+            0.46, loss=True),
+    *_signs("Adjusted EPS, compared with a loss a year ago, came in at $0.46 in the third quarter",
+            0.46, loss=False),
+    *_signs("Adjusted EPS, compared with a loss a year ago, came to $0.46 in the third quarter",
+            0.46, loss=False),
+    *_signs("Adjusted EPS, compared with a loss a year ago, totaled $0.46 in the third quarter",
+            0.46, loss=False),
+    *_signs("Adjusted EPS, compared with a loss a year ago, totalled $0.46 in the third quarter",
+            0.46, loss=False),
+    *_signs("Adjusted EPS, compared with a loss a year ago, amounted to $0.46 in the third quarter",
+            0.46, loss=False),
+    *_signs("Adjusted EPS, compared with a loss a year ago, reached $0.46 in the third quarter",
+            0.46, loss=False),
+    *_signs("Adjusted EPS, compared with a loss a year ago, stood at $0.46 in the third quarter",
+            0.46, loss=False),
+    *_signs("Adjusted EPS, compared with a loss a year ago, were $0.46 in the third quarter",
+            0.46, loss=False),
+    *_signs("Adjusted EPS, compared with a loss a year ago, is $0.46 in the third quarter",
+            0.46, loss=False),
+    *_signs("Adjusted earnings, compared with a loss a year ago, are $0.46 in the third quarter",
+            0.46, loss=False),
+    *_signs("Adjusted earnings per share, compared with a loss a year ago, of $0.46 in the quarter",
+            0.46, loss=False),
+    *_signs("Net loss per share, up from earnings of $0.12 a year ago, of $0.46 in the third "
+            "quarter", 0.46, loss=True),
+    *_signs("Earnings, which were hurt by a loss on a sale, in the third quarter were $0.46 per "
+            "share", 0.46, loss=False),
+    *_signs("Net loss, which was narrowed by income from a sale, in the third quarter was $0.46 "
+            "per share", 0.46, loss=True),
+    *_signs("Earnings, after a net loss on a sale, in the third quarter were $0.46 per share",
+            0.46, loss=False),
+    *_signs("Earnings, net of a loss on a sale, in the third quarter were $0.46 per share",
+            0.46, loss=False),
+    *_signs("Earnings, excl. a loss on a sale, in the third quarter were $0.46 per share",
+            0.46, loss=False),
+    *_signs("Earnings, exclusive of a loss on a sale, in the third quarter were $0.46 per share",
+            0.46, loss=False),
+    *_signs("Earnings, inclusive of a loss on a sale, in the third quarter were $0.46 per share",
+            0.46, loss=False),
+    *_signs("Earnings, before a loss on a sale, in the third quarter were $0.46 per share",
+            0.46, loss=False),
+    # The same asides with no commas.
+    *_signs("Adjusted EPS net of the loss on sale of the business was $0.46 for the third quarter "
+            "of 2026.", 0.46, loss=False),
+    *_signs("Adjusted EPS exclusive of the loss on sale was $0.46 for the third quarter of 2026.",
+            0.46, loss=False),
+    *_signs("Adjusted EPS inclusive of the loss on sale was $0.46 for the third quarter of 2026.",
+            0.46, loss=False),
+    *_signs("Adjusted EPS after the loss on sale was $0.46 for the third quarter of 2026.",
+            0.46, loss=False),
+    *_signs("Adjusted EPS excl. the loss on sale was $0.46 for the third quarter of 2026.",
+            0.46, loss=False),
+    *_signs("Diluted EPS excluding the U.S. tax loss on a sale was $0.46 in the third quarter",
+            0.46, loss=False),
+    *_signs("Diluted EPS excluding the previously reported loss on a sale was $0.46 in the quarter",
+            0.46, loss=False),
+    *_signs("Diluted EPS excluding the recorded loss on a sale was $0.46 in the third quarter",
+            0.46, loss=False),
+    *_signs("Diluted EPS excluding the incurred losses on a sale was $0.46 in the third quarter",
+            0.46, loss=False),
+    # With nothing left to name a direction, the stripped clause still names none.
+    *_signs("Adjusted results excluding the loss on sale were $0.46 per diluted share in the "
+            "quarter.", 0.46, loss=False),
+    *_signs("Adjusted results, after a loss on sale, were $0.46 per diluted share in the quarter.",
+            0.46, loss=False),
+    # A loss with its own number, left behind by "from ... to".
+    *_signs("Adjusted EPS improved from a loss of $0.12 to $0.46 in the third quarter of fiscal "
+            "year 2026.", 0.46, loss=False),
+    *_signs("Adjusted EPS improved from a prior-year net loss of $0.12 per share to $0.46 in the "
+            "third quarter", 0.46, loss=False),
+    *_signs("Adjusted EPS improved from a loss of $0.12 a year ago to $0.46 in the third quarter",
+            0.46, loss=False),
+    *_signs("Adjusted EPS swung from a net loss of $1,234.56 to $0.46 in the third quarter", 0.46,
+            loss=False),
+    *_signs("Adjusted EPS improved from a loss of $0.12 to a loss of $0.06 in the third quarter",
+            0.06, loss=True),
+    *_signs("Net loss narrowed from $0.60 to $0.46 per share in the third quarter of the year",
+            0.46, loss=True),
+    *_signs("Loss per share narrowed from a loss of $0.60 a year ago to $0.46 in the third quarter",
+            0.46, loss=True),
+    *_signs("Per-share results narrowed from a loss of $0.60 to $0.46 in the third quarter",
+            0.46, loss=True),
+    *_signs("Per-share results widened from a loss of $0.12 to $0.46 in the third quarter",
+            0.46, loss=True),
+    *_signs("Per-share results deepened from a loss of $0.12 to $0.46 in the third quarter",
+            0.46, loss=True),
+    # A next-row label, in a table of any casing. A headline's loss is still the number's.
+    *_signs("Earnings per share from continuing operations, adjusted $ 0.46 Loss per share from "
+            "discontinued operations (0.03)", 0.46, loss=False),
+    *_signs("Earnings per share, as adjusted $ 0.46 Net loss per share from discontinued "
+            "operations (0.03)", 0.46, loss=False),
+    *_signs("Earnings Per Share, As Adjusted $ 0.46 Loss Per Share From Discontinued Operations "
+            "(0.03)", 0.46, loss=False),
+    *_signs("EARNINGS PER SHARE, AS ADJUSTED $ 0.46 LOSS PER SHARE FROM DISCONTINUED OPERATIONS "
+            "(0.03)", 0.46, loss=False),
+    *_signs("Earnings per share as adjusted $0.46 Loss per share from discontinued operations "
+            "(0.03)", 0.46, loss=False),
+    *_signs("Earnings per share in dollars, adjusted 0.46 Loss per share attributable to others "
+            "(0.03)", 0.46, loss=False),
+    *_signs("Acme reports $0.46 Loss Per Diluted Share From Continuing Operations for the Quarter",
+            0.46, loss=True),
+    *_signs("Acme reports $0.46 Net Loss per Share for the Third Quarter of the Year", 0.46,
+            loss=True),
+    *_signs("Acme reports $0.46 Loss per Share for the Third Quarter of the Year", 0.46, loss=True),
+    # With no verb, a comma may just be a list.
+    *_signs("Revenue, $1.2 billion, net loss per share, $0.46 for the quarter of the year",
+            0.46, loss=True),
 ])
 def test_the_sign_is_read_from_the_matched_number(quote, value, expected):
     assert efs.eps_from_quote(quote, value) == expected
@@ -399,6 +644,16 @@ def test_a_loss_word_nearest_the_number_refuses_a_figure_for_another_measure():
     quote = "GAAP net loss was $0.12 per share, $0.44 on a non-GAAP basis"
     assert efs.eps_from_quote(quote, 0.44) is None
     assert efs.eps_from_quote(quote, -0.12) == -0.12
+
+
+def test_a_comma_free_clause_opening_the_sentence_leaves_its_loss_standing():
+    """Accepted over-refusal, pinned so it is a choice: with no measure before the clause and no
+    comma after it, the loss may be the sentence's subject. Reading it as an aside would call a
+    printed loss a profit, so a real profit written this way drops and FMP fills it."""
+    quote = "Excluding the loss on a sale results were $0.46 per share in the third quarter"
+    assert efs.eps_from_quote(quote, 0.46) is None
+    quote = "Excluding the loss of $1,234 on a sale results were $0.46 per share in the quarter"
+    assert efs.eps_from_quote(quote, 0.46) is None, "the comma of a number closes no clause"
 
 
 @pytest.mark.parametrize("quote,value", [
@@ -844,6 +1099,53 @@ def test_a_million_dollars_is_the_smallest_whole_dollar_figure():
     assert efs.revenue_from_quote(quote, 1000000, "units", release_text=quote) == 1e6
 
 
+_ROW_OF_CELLS = ("Net sales $ 10,181,045 $ 9,870,110 Cost of sales 7,000,000 for the third "
+                 "quarter of the year")
+
+
+@pytest.mark.parametrize("header", [
+    "(in 1000s)", "(in 1000's)", "($1000s)", "($ in 1000s)", "(1,000s)", "(1000s)",
+    "(in 1,000 dollars)", "(in 1000 dollars)", "(thousand USD)", "(million USD)", "(thousand $)",
+    "(million $)", "(USD 000)", "($,000)", "(in mln)", "($ mln)", "(USD mln)", "(in bln)",
+    "($ bln)", "(in bil.)", "(in thou.)", "(Thousand)",
+    # No list of headers can be whole, which is why the row's own shape decides.
+    "(Expressed in thousands of US funds)", "(thousand-dollar units)", "",
+])
+def test_a_table_row_is_never_read_as_whole_dollars_whatever_its_header_says(header):
+    text = f"Acme reported results. STATEMENTS {header} Three months ended. {_ROW_OF_CELLS}"
+    figures, reasons = _revenue_of(_ROW_OF_CELLS, 10181045, "units", text=text)
+    assert figures is None and reasons["revenue"] == "value_mismatch"
+
+
+@pytest.mark.parametrize("quote", [
+    # The next cell, in each spelling a table has.
+    "Net sales for the three months ended in September $10,181,045 $9,870,110",
+    "Net sales for the three months ended in September $10,181,045 9,870,110",
+    "Net sales for the three months ended in September $10,181,045 (9,870,110)",
+    "Net sales for the three months ended in September $10,181,045 5%",
+    "Net sales for the three months ended in September $10,181,045 +5%",
+    # The next row's label.
+    "Net sales for the three months ended $10,181,045 Cost of sales for the period",
+    # A "$" cell of its own: `html_to_text` leaves the space, and a sentence never has one.
+    "Net sales for the three months ended in September $ 10,181,045",
+    "Net sales $ 10,181,045 for the three months ended in the third quarter",
+])
+def test_a_number_in_the_shape_of_a_table_cell_is_never_whole_dollars(quote):
+    figures, reasons = _revenue_of(quote, 10181045, "units")
+    assert figures is None and reasons["revenue"] == "value_mismatch"
+
+
+@pytest.mark.parametrize("tail", [
+    "", ".", ", up 12% from a year ago.", "; gross margin was 40%.", ": a record for the company.",
+    " for the third quarter of the year.", " in the third quarter.",
+    " compared with $41,000,000 a year ago.", " (up 12% from a year ago).", " ( up 12% ).",
+])
+def test_a_whole_dollar_figure_written_in_a_sentence_stands(tail):
+    quote = f"Total revenue for the third quarter of the year was $48,250,123{tail}"
+    figures, reasons = _revenue_of(quote, 48250123, "units")
+    assert figures.revenue == 48250123.0 and reasons["revenue"] == "ok"
+
+
 def test_whole_dollars_are_refused_with_no_release_to_read():
     quote = "Total revenue for the third quarter was $48,250,123, up 12% from a year ago."
     assert efs.revenue_from_quote(quote, 48250123, "units") is None
@@ -888,6 +1190,40 @@ _GAAP_ONLY_SENTENCES = [
     "Operating income rose 4% and diluted earnings per share were $0.46 in the quarter.",
     "Operating income of $1.2 billion rose 4% and diluted EPS was $0.46 in the quarter.",
     "The adjusted income tax rate was 21% and diluted EPS was $0.46 in the quarter.",
+    # Earnings before net interest is still EBIT.
+    "Earnings before net interest expense and income taxes rose 4% and diluted EPS was $0.46.",
+    "EBIT (earnings before net interest expense, income taxes) rose and diluted EPS was $0.46.",
+    "EBITDA (earnings before net interest expense, income taxes, depreciation and amortization) rose and diluted EPS was $0.46.",
+    "Adjusted earnings before net interest expense and income taxes rose and diluted EPS was $0.46.",
+    "Earnings before net financing costs and income taxes rose 4% and diluted EPS was $0.46.",
+    "Earnings before finance costs and income taxes rose 4% and diluted EPS was $0.46 in the quarter.",
+    "EBITDA (earnings before non-cash interest, taxes, depreciation and amortization) rose and diluted EPS was $0.46.",
+    "Earnings before net interest and the amortization of intangibles rose and diluted EPS was $0.46.",
+    "Operating income before depreciation and amortization rose 4% and diluted EPS was $0.46.",
+    "Adjusted income before income taxes rose 4% and diluted EPS was $0.46 in the quarter.",
+    "Income before other expenses rose 4% and diluted EPS was $0.46 in the quarter ended.",
+    "Income before other operating expenses rose 4% and diluted EPS was $0.46 in the quarter.",
+    "Income before other income (expense) rose 4% and diluted EPS was $0.46 in the quarter.",
+    "Income before other (income) expense rose 4% and diluted EPS was $0.46 in the quarter.",
+    # A footnote never turns another measure's "Adjusted" into this figure's.
+    "Net income of $120 million, or $0.46 per diluted share, Adjusted (1) EBITDA of $300 million.",
+    "Net income of $120 million, or $0.46 per diluted share, Adjusted(1) EBITDA of $300 million.",
+    "Net income of $120 million, or $0.46 per diluted share, Adjusted (a) EBITDA of $300 million.",
+    "Net income of $120 million, or $0.46 per diluted share, Adjusted (see below) EBITDA of $300 million.",
+    "Net income of $120 million, or $0.46 per diluted share, Adjusted1 EBITDA of $300 million.",
+    "Net income of $120 million, or $0.46 per diluted share, Adjusted 1 EBITDA of $300 million.",
+    "Net income of $120 million, or $0.46 per diluted share, Adjusted* EBITDA of $300 million.",
+    "Net income of $120 million, or $0.46 per diluted share, Adjusted * EBITDA of $300 million.",
+    "Net income of $120 million, or $0.46 per diluted share, Adjusted EBITDA(1) of $300 million.",
+    # An "adjusted" that names no result, spelled with a space too.
+    "Split adjusted diluted EPS of $0.46 compared with $0.31 a year ago, the company said.",
+    "Non adjusted diluted EPS of $0.46 compared with $0.31 a year ago, the company said.",
+    "Un-adjusted diluted EPS of $0.46 compared with $0.31 a year ago, the company said.",
+    "Pre-adjusted diluted EPS of $0.46 compared with $0.31 a year ago, the company said.",
+    "Risk-adjusted income rose 4% and diluted EPS was $0.46 in the third quarter of the year.",
+    "Non-core earnings fell 4% and diluted EPS was $0.46 in the third quarter of the year.",
+    # A label that runs on past "adjusted" into something else.
+    "Diluted EPS, adjusted per the new accounting standard, was $0.46 in the third quarter.",
 ]
 _ADJUSTED_LABELS = [
     "non-GAAP EPS attributable to Intel was $0.46.",
@@ -954,6 +1290,33 @@ _ADJUSTED_LABELS = [
     "Diluted earnings per share as adjusted are $0.46 in the third quarter.",
     "Diluted earnings, as adjusted, were $0.46 per share in the third quarter.",
     "Net income, as adjusted, was $0.46 per diluted share in the third quarter.",
+    # A dash joining a heading to its label, and an adjustment named by its compound.
+    "Third quarter 2026 highlights\u2014Adjusted EPS of $0.46, up 7% from a year ago in the period.",
+    "Third quarter 2026 highlights\u2013Adjusted EPS of $0.46, up 7% from a year ago in the period.",
+    "Third quarter 2026 highlights -Adjusted EPS of $0.46, up 7% from a year ago in the period.",
+    "FX-adjusted EPS of $0.46, up 7% from a year ago in the period, the company said.",
+    "Tax-adjusted EPS of $0.46, up 7% from a year ago in the period, the company said.",
+    # A label that runs on after "adjusted", naming no other measure.
+    "Net income as adjusted per diluted share of $0.46 for the third quarter of fiscal 2026.",
+    "Earnings as adjusted per share of $0.46 for the third quarter of fiscal 2026.",
+    "Diluted EPS as adjusted rose 7% to $0.46 for the third quarter of fiscal 2026.",
+    "Diluted EPS as adjusted fell 7% to $0.46 for the third quarter of fiscal 2026.",
+    "Diluted EPS as adjusted grew 7% to $0.46 for the third quarter of fiscal 2026.",
+    "Diluted EPS as adjusted increased 7% to $0.46 for the third quarter of fiscal 2026.",
+    "Diluted EPS as adjusted decreased 7% to $0.46 for the third quarter of fiscal 2026.",
+    "Diluted EPS as adjusted declined 7% to $0.46 for the third quarter of fiscal 2026.",
+    "Diluted EPS as adjusted improved 7% to $0.46 for the third quarter of fiscal 2026.",
+    "Diluted EPS as adjusted totaled $0.46 for the third quarter of fiscal 2026, it said.",
+    # A footnote set off by a space.
+    "Adjusted * EPS of $0.46 for the third quarter of the fiscal year 2026, the company said.",
+    "Adjusted 1 EPS of $0.46 for the third quarter of the fiscal year 2026, the company said.",
+    # A word that only ends like "non-" or "un-" takes nothing away.
+    "Sun adjusted EPS of $0.46 for the third quarter of the fiscal year 2026, the company said.",
+    "Canon adjusted EPS of $0.46 for the third quarter of the fiscal year 2026, the company said.",
+    "Diluted EPS, as adjusted (1), of $0.46 was up 7% from a year ago in the quarter.",
+    "Diluted EPS, as adjusted 1, of $0.46 was up 7% from a year ago in the quarter.",
+    "Diluted EPS, as adjusted (unaudited), was $0.46 in the third quarter of the fiscal year.",
+    "Diluted EPS, as adjusted (see the reconciliation below), was $0.46 in the third quarter.",
 ]
 _ADJUSTED_LOSS_MARKED = [
     "Adjusted after-tax income per diluted share was $0.46 in the third quarter.",
@@ -1023,6 +1386,28 @@ def test_each_adjusted_word_names_the_measure_through_each_modifier(lead, modifi
     assert figures.eps_adjusted == 0.46 and reasons["eps_adjusted_diluted"] == "ok"
 
 
+@pytest.mark.parametrize("quote", [
+    "Diluted EPS before restructuring expenses was $0.46 in the third quarter of the year.",
+    "Earnings per share before acquisition expense were $0.46 in the third quarter of the year.",
+    "Net income before merger expenses was $0.46 per diluted share in the third quarter.",
+    "Net income before other merger expenses was $0.46 per diluted share in the third quarter.",
+    "Diluted EPS before certain tax-related items was $0.46 in the third quarter of the year.",
+    "Diluted EPS before certain interest-related charges was $0.46 in the third quarter.",
+    "Diluted EPS before other items was $0.46 in the third quarter of the fiscal year.",
+])
+def test_an_exclusion_that_is_no_line_of_the_statement_names_the_measure(quote):
+    figures, reasons = _verify_in(f"Acme reported results. {quote}",
+                                  eps_adjusted_diluted={"value": 0.46, "quote": quote})
+    assert figures.eps_adjusted == 0.46 and reasons["eps_adjusted_diluted"] == "ok"
+
+
+def test_a_figure_right_after_adjusted_ends_the_label_at_any_size():
+    quote = "Diluted EPS adjusted 123.46, up $0.05 from a year ago in the third quarter."
+    figures, reasons = _verify_in(f"Acme reported results. {quote}",
+                                  eps_adjusted_diluted={"value": 123.46, "quote": quote})
+    assert figures.eps_adjusted == 123.46 and reasons["eps_adjusted_diluted"] == "ok"
+
+
 def test_a_starred_label_names_the_measure():
     quote = "Adjusted* diluted EPS of $0.46 was up 12% from a year ago, the company said."
     figures, reasons = _verify_in(f"Acme reported results. {quote}",
@@ -1036,6 +1421,9 @@ def test_a_starred_label_names_the_measure():
     "Adjusted losses of $0.46 per share narrowed from a year ago, it said.",
     "Non-GAAP net loss per share was $(0.46) in the third quarter.",
     "Operating earnings of $(0.46) per share, compared with $0.41 a year ago, it said.",
+    "Diluted EPS as adjusted ($0.46) for the third quarter of fiscal 2026, it said today.",
+    "Diluted EPS as adjusted (0.46) in dollars for the third quarter of fiscal 2026, it said.",
+    "Diluted EPS as adjusted (.46) in dollars for the third quarter of fiscal 2026, it said.",
 ])
 def test_an_adjusted_loss_names_its_measure_too(quote):
     figures, reasons = _verify_in(f"Acme reported results. {quote}",
@@ -1196,6 +1584,21 @@ def test_a_rounded_print_is_announced_without_a_verdict():
     "1.2 billion shekels", "1.2 billion shekel", "1.2 billion sterling", "1.2 billion yuan",
     "1.2 trillion yen", "1.2bn euros", "1.2 mn euros", "1.2 mm euros", "1.2 mil euros",
     "1.2m euros", "1.2 thousand euros", "1.2 million euros",
+    # Beside the number, in a code, in parentheses or in a dollar of another country.
+    "$1.2 billion CDN", "$1.2 billion Cdn", "$1.2 billion (CAD)", "$1.2 billion (Cdn)",
+    "$1.2 billion (CDN)", "$1.2 billion ( EUR )", "$1.2 billion (AUD)",
+    "$1.2 billion Hong Kong dollar equivalent", "$1.2 billion Singapore dollar equivalent",
+    "$1.2 billion New Zealand dollars", "$1.2 billion Taiwan dollar equivalent",
+    "$1.2 billion New Taiwan dollar equivalent",
+    # The country's letters set apart from the "$".
+    "CAN $1.2 billion", "CA $1.2 billion", "AU $1.2 billion", "HK $1.2 billion", "NZ $1.2 billion",
+    "SG $1.2 billion", "MX $1.2 billion", "NT $1.2 billion", "Mex $1.2 billion", "MEX $1.2 billion",
+    "Canadian $1.2 billion", "Australian $1.2 billion", "Hong Kong $1.2 billion",
+    "Singapore $1.2 billion", "New Zealand $1.2 billion", "New Taiwan $1.2 billion",
+    "Taiwan $1.2 billion",
+    # A code touching its "$", with or without a space.
+    "CAD $1.2 billion", "AUD$1.2 billion", "HKD$1.2 billion", "NZD $1.2 billion",
+    "SGD$1.2 billion", "MXN$1.2 billion", "TWD$1.2 billion",
 ])
 def test_a_figure_printed_in_another_currency_is_refused(printed):
     quote = f"Revenue for the third quarter was {printed}, up from a year ago in all regions."
@@ -1204,8 +1607,10 @@ def test_a_figure_printed_in_another_currency_is_refused(printed):
 
 
 @pytest.mark.parametrize("mark", list("€£¥₹₩₪₽₺₫") + [
-    "A$", "AU$", "C$", "CA$", "CAD$", "CAN$", "Can$", "CDN$", "Cdn$", "HK$", "MX$", "NT$", "NZ$",
-    "R$", "S$", "SG$",
+    "A$", "AU$", "C$", "CA$", "CAD$", "CAN$", "Can$", "CDN$", "Cdn$", "HK$", "Mex$", "MEX$", "MX$",
+    "NT$", "NZ$", "R$", "S$", "SG$", "Aus$",
+    # Capitals touching a "$" need no list: these are on none.
+    "RD$", "AR$", "ARS$", "CLP$", "COP$", "TT$", "J$", "B$", "BZ$", "N$",
 ])
 def test_each_foreign_mark_is_refused_on_a_figure(mark):
     quote = f"Revenue for the third quarter was {mark}1.2 billion, up from a year ago in all regions."
@@ -1214,8 +1619,8 @@ def test_each_foreign_mark_is_refused_on_a_figure(mark):
 
 
 @pytest.mark.parametrize("code", [
-    "EUR", "GBP", "JPY", "CAD", "AUD", "CHF", "CNY", "RMB", "HKD", "INR", "KRW", "SEK", "NOK",
-    "DKK", "SGD", "NZD", "MXN", "BRL", "ILS", "NIS", "PLN", "TWD", "ZAR",
+    "EUR", "GBP", "JPY", "CAD", "CDN", "AUD", "CHF", "CNY", "RMB", "HKD", "INR", "KRW", "SEK",
+    "NOK", "DKK", "SGD", "NZD", "MXN", "BRL", "ILS", "NIS", "PLN", "TWD", "ZAR",
 ])
 def test_each_foreign_code_is_refused_on_either_side_and_in_a_header(code):
     for printed in (f"{code} 1.2 billion", f"{code}1.2 billion", f"$1.2 billion {code}"):
@@ -1249,10 +1654,23 @@ def test_each_foreign_word_is_refused_in_a_header(word):
     "(New Zealand dollars in millions, except per share data)",
     "(New Taiwan dollars in millions, except per share data)",
     "(Taiwan dollars in millions, except per share data)",
+    # Its "$" in the header, its code touching the "$", or a dotted "Cdn.".
+    "(CAD$ in millions)", "(AUD$ in millions)", "(CAD $ in millions)", "(HKD$ in thousands)",
+    "(Canadian $ in millions)", "(Australian $ in millions)", "(Hong Kong $ in millions)",
+    "(In Cdn. millions)", "(In Cdn millions)", "(CDN millions)", "(in CDN, except per share data)",
+    "(Cdn. millions)", "(Cdn. in millions)",
+    "(CDN dollars in millions)", "(Cdn. dollars in millions)", "(HK dollars in millions)",
+    "(NT dollars in millions)",
 ])
 def test_a_header_naming_another_dollar_is_refused(header):
     quote = f"{header} Revenues $ 3,660 $ 3,500 for the third quarter"
     figures, reasons = _revenue_of(quote, 3660, "million")
+    assert figures is None and reasons["revenue"] == "foreign_currency"
+
+
+def test_a_foreign_mark_in_prose_before_a_figure_refuses_it():
+    quote = "Revenue in CAD$ for the third quarter was $ 1,234 million, up from a year ago in the period"
+    figures, reasons = _revenue_of(quote, 1234, "million")
     assert figures is None and reasons["revenue"] == "foreign_currency"
 
 
@@ -1265,7 +1683,10 @@ def test_a_header_naming_another_dollar_is_refused(header):
     "Revenue of $1.2 billion, up 4% in AUD patients treated in the third quarter of the year.",
     "PS5 revenue of $1.2 billion rose 4% in the third quarter of the fiscal year, it said.",
     "Revenue for the third quarter was a$1.2 billion record, up from a year ago in all regions.",
-    "CA $1.2 billion was the revenue of the Sunnyvale unit in the third quarter of the year.",
+    "A $1.2 billion quarter of revenue, up from a year ago in all regions, the company said.",
+    "REVENUE OF $1.2 BILLION, UP FROM A YEAR AGO IN ALL REGIONS, THE COMPANY SAID ON THURSDAY.",
+    "Revenue from our Singapore unit of $1.2 billion rose 4% in the third quarter of the year.",
+    "Revenue of $1.2 billion Singapore sales included, up 4% in the third quarter of the year.",
 ])
 def test_a_currency_named_as_a_topic_refuses_no_dollar_figure(quote):
     figures, reasons = _revenue_of(quote, 1.2)
@@ -1284,7 +1705,8 @@ def test_a_share_class_letter_is_no_currency(quote):
 
 @pytest.mark.parametrize("printed", [
     "$1.2 billion", "US$1.2 billion", "U.S.$1.2 billion", "USD 1.2 billion", "USD1.2 billion",
-    "$1.2 billion USD", "$1.2 billion U.S. dollars",
+    "$1.2 billion USD", "$1.2 billion U.S. dollars", "US $1.2 billion", "U.S. $1.2 billion",
+    "USD $1.2 billion", "USD$1.2 billion", "$1.2 billion (USD)", "$1.2 billion (US)",
 ])
 def test_a_figure_printed_in_us_dollars_stands(printed):
     quote = f"Revenue for the third quarter was {printed}, up from a year ago in all regions."
@@ -1421,6 +1843,11 @@ def test_a_missing_currency_is_refused_whole_and_the_schema_requires_it():
     "the opening one and the closing one",      # a quote cut inside them proves no sign
     "at least $1,000,000",                      # what whole dollars take
     "prints no scale header",
+    "written out in a sentence",                # a table cell is never whole dollars
+    "calls it negative",                        # a loss said in words
+    "CAD$",                                     # a code touching its "$"
+    "HK $",                                     # the letters set apart from it
+    "earnings before interest and taxes",       # the basis is never EBIT's
 ])
 def test_the_prompt_tells_the_model_every_rule_the_verifier_enforces(rule):
     assert rule in efs._SYSTEM
@@ -1640,7 +2067,7 @@ class _DocSEC(_SEC):
         return f"<html><body><p>{self.body}</p></body></html>"
 
 
-_WHOLE_ROW = "Financial highlights for the third quarter: Net sales $ 10,181,045 for the period."
+_WHOLE_ROW = "Financial highlights for the third quarter: Net sales were $10,181,045 for the period."
 _WHOLE_ANSWER = {"is_quarterly_results": True, "currency": "USD",
                  "revenue": {"value": 10181045, "unit": "units", "quote": _WHOLE_ROW}}
 

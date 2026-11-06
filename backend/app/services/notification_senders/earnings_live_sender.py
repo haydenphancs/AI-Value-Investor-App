@@ -103,11 +103,17 @@ def _money(value: float, *, revenue: bool) -> str:
 
 
 def _vs_consensus(m: LiveMetric) -> Optional[str]:
+    """The verdict the card and the sheet show (`EarningsMetricOutcome.result`): a surprise that
+    rounds to 0.00 on a figure off the consensus is still a beat or a miss, and only a figure
+    equal to the consensus is in line."""
     if m.surprise_pct is None:
         return None
-    if m.surprise_pct == 0:
+    direction = m.surprise_pct
+    if direction == 0 and m.actual is not None and m.estimate is not None:
+        direction = m.actual - m.estimate
+    if direction == 0:
         return "in line with consensus"
-    verb = "beat" if m.surprise_pct > 0 else "missed"
+    verb = "beat" if direction > 0 else "missed"
     pct = abs(m.surprise_pct)
     if pct >= 1000 or pct < 0.5:
         # A near-zero consensus makes the percentage explode; a sub-1% one rounds to "0%".

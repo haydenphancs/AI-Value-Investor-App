@@ -32,6 +32,7 @@ from typing import Any, Dict, List
 
 import pytest
 
+import app.services.earnings_live_service as els
 import app.services.notification_senders.earnings_live_sender as sender
 import app.services.notification_senders.earnings_sender as daily
 import app.services.push_dispatch_service as pds
@@ -761,6 +762,40 @@ def test_an_exploding_percentage_is_not_printed():
     _, body = sender.live_copy(_snap(eps=0.23, eps_pct=2200.0, eps_est=0.01, rev=17.1e9,
                                      rev_pct=3.01))
     assert "EPS beat consensus." in body
+
+
+def test_a_surprise_that_rounds_to_zero_keeps_the_verdict_the_card_shows():
+    """`EarningsMetricOutcome.result` compares the figures once the server gave a surprise, so a
+    surprise that rounds to 0.00 on a figure off the consensus is a beat or a miss on the card and
+    on the sheet. "In line" is for a figure equal to the consensus, there and here."""
+    estimate = 17_100_000_000.0
+    for actual, verdict in ((17_100_500_000.0, "beat consensus"),
+                            (17_099_500_000.0, "missed consensus"),
+                            (estimate, "in line with consensus")):
+        pct = els.revenue_surprise_pct(actual, estimate)
+        assert pct == 0.0
+        _, body = sender.live_copy(_snap(rev=actual, rev_est=estimate, rev_pct=pct))
+        assert body.startswith(f"Revenue {verdict} ·"), body
+    for actual, verdict in ((1000.01, "beat consensus"), (999.99, "missed consensus"),
+                            (1000.0, "in line with consensus")):
+        pct = els.eps_surprise_pct(actual, 1000.0)
+        assert pct == 0.0
+        _, body = sender.live_copy(_snap(eps=actual, eps_est=1000.0, eps_pct=pct))
+        assert body.endswith(f"EPS {verdict}."), body
+    # A loss wider than a negative consensus is a miss, as the card compares it.
+    pct = els.eps_surprise_pct(-1000.01, -1000.0)
+    assert pct == 0.0
+    _, body = sender.live_copy(_snap(eps=-1000.01, eps_est=-1000.0, eps_pct=pct))
+    assert body.endswith("EPS missed consensus."), body
+
+
+def test_a_filing_figure_keeps_its_print_beside_a_verdict_that_rounds_to_zero():
+    estimate = 17_100_000_000.0
+    pct = els.revenue_surprise_pct(17_100_500_000.0, estimate)
+    snap = _snap(rev=17_100_500_000.0, rev_source=SOURCE_FILING, rev_est=estimate, rev_pct=pct,
+                 preliminary=True)
+    _, body = sender.live_copy(snap)
+    assert body.startswith("Revenue $17.1B (beat consensus) ·"), body
 
 
 def test_the_copy_is_informational_never_directive():

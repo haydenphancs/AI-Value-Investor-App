@@ -171,26 +171,30 @@ _SYSTEM = (
     "release and never a percentage. A number printed with no decimals, such as $14, must "
     "equal `value` exactly, and so must an EPS printed with fewer than two decimals. "
     "`currency` is always given: the ISO code of the currency the release reports in. A "
-    "quote printing another currency's mark, name or code (€, £, ¥, C$, A$, HK$, EUR, euros, "
-    "pesos, Canadian dollars) is thrown away, even when `currency` is USD. Every revenue and "
-    "EPS quote must itself show the figure is in dollars: a $ sign, USD or the word dollars. "
+    "quote printing another currency's mark, name or code (€, £, ¥, C$, A$, HK$, HK $, CAD$, "
+    "EUR, euros, pesos, Canadian dollars) is thrown away, even when `currency` is USD. Every "
+    "revenue and EPS quote must itself show the figure is in dollars: a $ sign, USD or the word "
+    "dollars. "
     "For revenue, prefer the sentence that prints the scale word next to the number. "
     "`revenue.value` is the number as printed in that quote and `revenue.unit` the scale "
     "word printed next to it (thousand / million / billion). For a table figure, "
     "`revenue.unit` is the scale printed by the table's header, and that header must be "
     "inside the quote and print one scale only: \"in millions, except shares in thousands\" "
     "proves neither. Use 'units' only for a full dollar amount printed with all its digits, "
-    "at least $1,000,000, in a release that prints no scale header, and never for a table "
-    "figure. `eps_adjusted_diluted` is the non-GAAP / adjusted diluted "
+    "at least $1,000,000, written out in a sentence with the $ touching the number, in a "
+    "release that prints no scale header, and never for a table figure. "
+    "`eps_adjusted_diluted` is the non-GAAP / adjusted diluted "
     "earnings per share for the quarter, and its quote must include the words naming the "
     "measure (such as non-GAAP, adjusted, core, comparable or excluding items): this "
-    "per-share measure, not another one such as Adjusted EBITDA. A figure the quote does "
-    "not name that way is thrown away, so never repeat the GAAP figure there. "
+    "per-share measure, not another one such as Adjusted EBITDA or earnings before interest "
+    "and taxes. A figure the quote does not name that way is thrown away, so never repeat the "
+    "GAAP figure there. "
     "`eps_gaap_diluted` is the GAAP diluted EPS. Each EPS figure is a per-share number, "
     "quoted with its $ sign or decimal point and no scale word. A loss per share is "
     "NEGATIVE: its quote either prints "
-    "it negative or names it as a loss beside the number, and a positive figure is never "
-    "taken from a quote that names it as a loss. Omit any figure the release does not state. "
+    "it negative, or names it as a loss beside the number, or calls it negative, and a "
+    "positive figure is never taken from a quote that names it as a loss. Omit any figure the "
+    "release does not state. "
     "`guidance.text` is ONE plain sentence of the company's own outlook for the next quarter "
     "or the year, only when the release gives one, and `guidance.quote` is the verbatim "
     "passage it restates. Set `is_quarterly_results` false when the document is not a "
@@ -403,6 +407,9 @@ class _Printed:
     # quote ends right after it, or ")" with no "(" open before it.
     cut: bool
     dollar: bool              # a "$" stands in front of it
+    # That "$" touches the digits, as in a sentence. A table's "$" is a cell of its own, which
+    # `html_to_text` leaves a space behind ("Net sales $ 10,181,045").
+    glued: bool
     decimals: int             # digits printed after the point
     percent: bool             # a rate, never a figure
     start: int
@@ -460,6 +467,7 @@ def _numbers_in(quote: str) -> List[_Printed]:
             cut=(opened and not closed and not quote[m.end():].strip())
                 or (closed and not opened and not open_before),
             dollar=dollar,
+            glued=quote[:m.start()].endswith("$"),
             decimals=len(num.partition(".")[2]),
             percent=_PERCENT_AFTER_RE.match(quote, m.end()) is not None,
             start=m.start(),
@@ -522,6 +530,9 @@ _QUOTE_SCALE_RE = re.compile(
     rf"|{_SHORT_SCALE}",
     re.IGNORECASE,
 )
+#: After a figure, what says a sentence goes on: punctuation, a word in lower case, the end of the
+#: quote. Case matters: a capital is the next row's label.
+_SENTENCE_GOES_ON_RE = re.compile(r"\s*(?:[,.;:)]|\(?\s*[a-z]|\Z)")
 
 
 def _quote_scale(quote: str) -> Optional[float]:
@@ -535,12 +546,19 @@ def _quote_scale(quote: str) -> Optional[float]:
     return scales.pop() if len(scales) == 1 else None
 
 
-def _reads_as_whole_dollars(tok: _Printed, release_text: Optional[str]) -> bool:
-    """A number with no scale in its quote: whole dollars only for a "$" amount of at least
-    $1M, in a release that prints no scale header at all. A table cell is the same shape, and
-    its header can sit far outside the quote ("Net sales $ 10,181,045" under "(In thousands)")."""
+def _reads_as_whole_dollars(quote: str, tok: _Printed, release_text: Optional[str]) -> bool:
+    """A number with no scale in its quote: whole dollars only for an amount of at least $1M
+    written out in a sentence, in a release that prints no scale header at all.
+
+    A table's header can sit far outside its row's quote, and no list of its spellings is whole,
+    so the header check only backs up the shape of the number. A sentence sets "$" against the
+    digits and carries on after them (`_SENTENCE_GOES_ON_RE`). A table cell has its "$" apart, and
+    the next cell or row label comes after it. A real whole-dollar table is refused with the rest
+    and waits for FMP: a $10.2B quarter read as $10.2M is the worse mistake.
+    """
     return (
-        tok.dollar and tok.value >= _WHOLE_DOLLARS_MIN
+        tok.value >= _WHOLE_DOLLARS_MIN and tok.glued
+        and _SENTENCE_GOES_ON_RE.match(quote, tok.end) is not None
         and isinstance(release_text, str) and _SCALE_HEADER_RE.search(release_text) is None
     )
 
@@ -571,7 +589,7 @@ def _revenue_print(
             printed_scale = _UNIT_SCALE.get(tok.unit)
         elif header is not None:
             printed_scale = header
-        elif _reads_as_whole_dollars(tok, release_text):
+        elif _reads_as_whole_dollars(quote, tok, release_text):
             printed_scale = 1.0
         else:
             continue
@@ -596,61 +614,137 @@ def revenue_from_quote(
 _LOSS_QUALIFIERS = r"(?:(?:adjusted|diluted|basic|net|operating|gaap|non[\s\-]?gaap)\s+){0,3}"
 #: Right after the number, a loss is this number's. A table flattened by `html_to_text` puts the
 #: next row's label there too ("$ 0.46 Loss on sale of business 0.03"), and a label is capitalised,
-#: so a capitalised loss counts only when "per" ties it to a share.
+#: so a capitalised loss counts only when "per" ties it to a share, as in a headline ("$0.46 Net
+#: Loss per Share"), and never on a table cell (`_reads_as_loss`). The discontinued business is
+#: always another line of the table.
 _LOSS_AFTER_RE = re.compile(
     r"\s*(?:"
     rf"(?i:(?:per|a)\s+(?:\w+\s+){{0,3}}?share\s+{_LOSS_QUALIFIERS}loss(?:es)?\b)"
-    rf"|(?i:(?:in\s+)?{_LOSS_QUALIFIERS}loss(?:es)?\s+per\b)"
+    rf"|(?i:(?:in\s+)?{_LOSS_QUALIFIERS}loss(?:es)?\s+per\b"
+    r"(?!\s+(?:\w+\s+){1,3}?from\s+discontinued\b))"
     r"|(?:in\s+)?(?:(?:adjusted|diluted|basic|net|operating|GAAP|non[\s\-]?GAAP)\s+){0,3}"
     r"loss(?:es)?\b"
     r")"
 )
 _CLOSED_PARENS_RE = re.compile(r"\([^()]*\)")
+#: What opens an aside about another figure. "excl." ends on its dot, so it takes no `\b`.
+_ASIDE_OPENS = (
+    r"(?:(?:excluding|excludes?|excluded|including|includes?|included|before|after|net\s+of"
+    r"|exclusive\s+of|inclusive\s+of)\b|excl\.)"
+)
 #: ", excluding special items," or ", which reflected a charge," inside a label. A "," inside a
-#: number does not end it.
+#: number does not end it, and neither does one that ties the number to the aside: ", including a
+#: net loss of $120 million, or $0.46 per share".
 _ASIDE_RE = re.compile(
-    r",\s*(?:which|that|excluding|excludes?|excluded|including|includes?|included)\b"
-    r"(?:[^,;]|,(?=\d))*,",
+    rf",\s*(?:(?:which|that)\b|{_ASIDE_OPENS})(?:[^,;]|,(?=\d))*,"
+    r"(?!\s*(?:or|and)\s+[$(\s]*\Z)",
     re.IGNORECASE,
 )
-#: The same aside with no commas, up to the loss it names: "EPS excluding the loss on debt
-#: extinguishment was". It stops at punctuation: "Excluding these items, the net loss" is the
-#: figure's own label.
-_LOSS_CLAUSE_RE = re.compile(
-    r"\b(?:excluding|excludes?|excluded|including|includes?|included|before)\s+"
-    r"(?:[^\s,;:]+\s+){0,6}?loss(?:es)?\b",
+#: A comma never splits a subject from its verb, so one right before "was $0.46" closes an aside,
+#: whatever opened it: "Adjusted EPS, compared with a loss of $0.12 a year ago, was $0.46". With no
+#: verb it may be a list: "Revenue, $1.2 billion, net loss per share, $0.46".
+_LAST_ASIDE_RE = re.compile(
+    r",(?:[^,;]|,(?=\d))*,"
+    r"(?=\s*(?:was|were|is|are|of|came\s+(?:in\s+)?(?:at|to)|totall?ed|amounted\s+to|reached"
+    r"|stood\s+at)\s+[$(\s]*\Z)",
     re.IGNORECASE,
 )
-#: "Negative" speaks to a figure only right before its number or its name: "a negative impact of
-#: $0.02" is about something else.
+#: "Gains and losses" points neither way.
+_GAINS_AND_LOSSES_RE = re.compile(
+    r"\bgains?\s*(?:and|or|/)\s*loss(?:es)?\b|\bloss(?:es)?\s*(?:and|or|/)\s*gains?\b",
+    re.IGNORECASE,
+)
+#: A direction the words give this very number, so no aside can hold it, with or without a verb
+#: before it: "the net loss per share was", "the net loss of $0.46", and the two spellings that
+#: follow a total with its per-share figure: "the net loss of $120 million, or $0.46", "... ($0.46".
+_DIRECTION_OF_THIS_NUMBER = (
+    r"(?:\s+per\b"
+    r"|\s+of\s+(?:u\.?s\.?d?\s*)?[$(\s]*"
+    r"(?:[\d.,]+\s*(?:[a-z]+\s*)?\)?\s*(?:,?\s*(?:or|and)\s+|\()[$(\s]*)?\Z)"
+)
+#: The same aside with no commas, up to the direction word it holds: "EPS excluding the loss on
+#: debt extinguishment was", "Net loss including income from a sale was". It holds no more than its
+#: own words. Punctuation ends it ("Excluding these items, the net loss"), and so do a verb
+#: ("Earnings excluding special items were a loss") and a full stop on a word in lower case (a
+#: dotted "U.S." goes on), past which the words are the figure's own again. A word with its own
+#: amount stays in it ("including a loss of $0.10 per share from the sale was $0.46"), unless that
+#: is this number (`_DIRECTION_OF_THIS_NUMBER`).
+_ASIDE_WITH_NO_COMMAS_RE = re.compile(
+    rf"\b{_ASIDE_OPENS}\s+"
+    r"(?:(?!(?:was|were|is|are|had|amounted|resulted|came|totaled|totalled|showed|swung|turned"
+    r"|narrowed|widened)\b)"
+    r"[^\s,;:]+(?-i:(?<![a-z]\.))\s+){0,6}?"
+    rf"(?:loss(?:es)?|income|earnings|profits?)\b(?!{_DIRECTION_OF_THIS_NUMBER})",
+    re.IGNORECASE,
+)
+#: Before such a clause, in its own part of the sentence, the measure it qualifies, or a "which"
+#: pointing back at one. With neither, it opens the sentence and what it reaches is the sentence's
+#: subject: "Excluding special items the net loss was $0.46". A decimal point ends nothing.
+_MEASURE_BEFORE_RE = re.compile(
+    r"\b(?:eps|a?ffo|earnings|income|profits?|loss(?:es)?|results?|shares?)\b"
+    r"(?:[^,;:.]|\.(?=\d))*\Z"
+    r"|\b(?:which|that)\s+\Z",
+    re.IGNORECASE,
+)
+#: A comma of the sentence, not one inside a number.
+_COMMA_RE = re.compile(r",(?!\d)")
+#: "from a loss of $0.12 to $0.46": that loss has its number, and this one is what came after it.
+#: "Net loss narrowed from $0.60 to $0.46" names no loss inside the span, and a loss that narrows
+#: or widens is still one, so both stay losses.
+_FROM_A_LOSS_RE = re.compile(
+    r"(?<!narrowed\s)(?<!widened\s)(?<!deepened\s)"
+    r"\bfrom\s+(?:[^\s,;]+\s+){0,4}?loss(?:es)?\b(?:[^,;]|,(?=\d))*?\bto\b",
+    re.IGNORECASE,
+)
+#: "Negative" speaks to a figure only right before its number, right before its name, or as what
+#: the figure "was" with no number of its own after it: "a negative impact of $0.02" is about
+#: something else, and so is the free cash flow in "was negative $120 million, or $0.46 per share".
 _SIGN_WORD_RE = re.compile(
     r"\b(?P<loss>loss(?:es)?\b|lost\b|lps\b|negative(?=[\s$(]*\Z)"
-    r"|negative\s+(?:(?:adjusted|diluted)\s+)*(?:eps|earnings)\b)"
+    r"|negative\s+(?:(?:adjusted|diluted)\s+)*(?:eps|earnings)\b"
+    r"|(?:was|were|is|are|turned|went|remained|stayed)\s+negative\b(?!\s*[$(]))"
     r"|\b(?:income\b(?!\s+tax)|earned\b|earnings\b|profits?\b|eps\b)",
     re.IGNORECASE,
 )
 
 
+def _label_of(text: str) -> str:
+    """`text` without what names another figure: its asides, and a loss it has left behind. A
+    clause with no commas counts as an aside when it qualifies a measure or a comma closes it.
+    With neither, reading it as one could call a printed loss a profit, so it stands."""
+    for rule in (_GAINS_AND_LOSSES_RE, _ASIDE_RE, _LAST_ASIDE_RE):
+        text = rule.sub(" ", text)
+
+    def _drop(clause: "re.Match[str]") -> str:
+        qualifies = (_MEASURE_BEFORE_RE.search(text, 0, clause.start()) is not None
+                     or _COMMA_RE.search(text, clause.end()) is not None)
+        return " " if qualifies else clause.group(0)
+
+    return _FROM_A_LOSS_RE.sub(" ", _ASIDE_WITH_NO_COMMAS_RE.sub(_drop, text))
+
+
 def _reads_as_loss(quote: str, tok: _Printed) -> bool:
     """Do the words of `quote` call the number `tok` a loss?
 
-    Loss straight after the number does ("$0.25 loss per share"). Otherwise the last word that
-    names a direction before it decides, back to the last ";". A "(loss)" inside a label says
-    the line can go either way ("earnings (loss) per share was $0.46"), and an aside or a tax
-    line names another figure, so neither counts, unless nothing else names a direction
-    ("Net (loss) per share of $0.46").
+    Loss straight after the number does ("$0.25 loss per share"), unless it starts the next row's
+    label: a table cell has no "$" touching it, and a label starts on a capital. Otherwise the
+    last word that names a direction before it decides, back to the last ";". An aside, a tax
+    line or a "(loss)" inside a label name no direction for this figure: "(loss)" says the line
+    can go either way ("earnings (loss) per share was $0.46"). It counts only when nothing else
+    names one ("Net (loss) per share of $0.46"). An aside never does: "Adjusted results excluding
+    the loss on sale were $0.46" names no direction at all.
     """
-    if _LOSS_AFTER_RE.match(quote, tok.end):
+    after = _LOSS_AFTER_RE.match(quote, tok.end)
+    if after is not None and (tok.glued or not after.group().lstrip()[:1].isupper()):
         return True
     before = quote[:tok.start]
     before = before[before.rfind(";") + 1:]
     label, removed = before, 1
     while removed:
         label, removed = _CLOSED_PARENS_RE.subn(" ", label)
-    label = _LOSS_CLAUSE_RE.sub(" ", _ASIDE_RE.sub(" ", label))
-    words = list(_SIGN_WORD_RE.finditer(label))
+    words = list(_SIGN_WORD_RE.finditer(_label_of(label)))
     if not words:
-        words = list(_SIGN_WORD_RE.finditer(before))
+        words = list(_SIGN_WORD_RE.finditer(_label_of(before)))
     return bool(words) and words[-1].group("loss") is not None
 
 
@@ -688,39 +782,64 @@ def eps_from_quote(quote: str, value: Any) -> Optional[float]:
 
 
 _HYPHEN = r"[\s\-\u00ad\u2010-\u2015]*"
-#: A footnote inside a label: "Adjusted(3) diluted EPS", "Adjusted* EPS", and "Adjusted EPS1",
-#: which is what `html_to_text` leaves of a superscript.
-_LABEL_FOOTNOTE = r"(?:\s*\(\w{1,3}\)|\d{1,2}|\*+)?"
-#: Where a label that ends on "adjusted" stops. A measure after it means the word was that
-#: measure's: "or $0.46 per diluted share, Adjusted EBITDA of $300 million".
-_LABEL_END = r"(?=\s*(?:[,;:.)$(\d]|\Z|(?:of|was|were|is|are)\b))"
+#: A footnote inside a label: "Adjusted(3) diluted EPS", "Adjusted* EPS", "Adjusted 1 EPS", and
+#: "Adjusted EPS1", which is what `html_to_text` leaves of a superscript.
+_LABEL_FOOTNOTE = r"(?:\s*(?:\(\w{1,3}\)|\d{1,2}|\*+))?"
+#: After a label that ends on "adjusted", any short note: "Diluted EPS, as adjusted (unaudited),".
+_ENDING_NOTE = r"(?:\s*(?:\([^()]{1,40}\)|\d{1,2}|\*+))?"
+#: Where a label that ends on "adjusted" stops: punctuation, its figure, "per diluted share" or a
+#: verb. It fails closed: anything else, a measure above all, means the word was that measure's
+#: ("or $0.46 per diluted share, Adjusted EBITDA of $300 million"). A footnote changes nothing, so
+#: a figure here takes a "$" or a decimal point, and "(1)" and "1" are no figure.
+_LABEL_END = (
+    r"(?=\s*(?:[,;:.)$]|\d*\.\d|\(\s*(?:\$|\d*\.\d)|\Z"
+    r"|(?:of|was|were|is|are|rose|fell|grew|increased|decreased|declined|improved|totaled"
+    r"|totalled)\b"
+    r"|per\s+(?:\S+\s+){0,2}?share\b))"
+)
+#: An "adjusted" naming no result: "split-adjusted", "non-adjusted", "risk-adjusted income". Any
+#: other compound does ("FX-adjusted EPS"), and any other dash only joins two words
+#: ("highlights—Adjusted EPS"). A dash and a space read the same, so "split adjusted" counts too.
+_NOT_THE_ADJUSTED_MEASURE = "".join(
+    rf"(?<!\b{word}[\s\-\u00ad\u2010-\u2015])" for word in ("split", "risk", "non", "pre", "un")
+)
+#: Lines of the statement, which no exclusion runs through: interest and tax spell EBIT, with
+#: depreciation EBITDA, and "before income taxes" and "before other expenses" are lines of their
+#: own, whatever noun the sentence reaches next. "Tax-related items" are no such line.
+_STATEMENT_LINE = (
+    r"(?:(?:net\s+)?(?:interest|financ\w+|depreciation|(?:income\s+)?tax(?:es)?)"
+    r"|other\s+(?:operating\s+)?\(?(?:income|expenses?))(?![\w\-])"
+)
+_EXCLUDED_ITEM = (
+    r"(?:items?|charges?|costs?|expenses?|benefits?|gains?|loss(?:es)?|impacts?|effects?"
+    r"|adjustments?|impairments?|restructuring|amortization|compensation)"
+)
 #: The words that name an adjusted measure, each tied to the measure, so "the comparable
 #: quarter", "core business", "adjusted for the stock split", "split-adjusted EPS" and "Adjusted
 #: EBITDA" name none. Operating earnings are tied to a share: "operating income rose 4%" is
-#: another line of the statement. "Before interest" spells EBIT and EBITDA, and "before income
-#: taxes" a line of the statement, whatever noun the sentence reaches next.
+#: another line of the statement.
 _ADJUSTED_MEASURE_RE = re.compile(
     rf"\bnon{_HYPHEN}(?:gaap|ifrs)(?![A-Za-z])"
-    r"|\b(?:excluding|before(?!\s+(?:interest|(?:income\s+)?tax(?:es)?)\b))\s+"
-    r"(?:\S+\s+){0,5}?"
-    r"(?:items?|charges?|costs?|expenses?|benefits?|gains?|loss(?:es)?|impacts?|effects?"
-    r"|adjustments?|impairments?|restructuring|amortization|compensation)\b"
-    r"|(?<![\-\u00ad\u2010-\u2015])\b(?:adj(?:usted|\.)?|core|comparable|underlying"
+    rf"|\bexcluding\s+(?:\S+\s+){{0,5}}?{_EXCLUDED_ITEM}\b"
+    rf"|\bbefore\s+(?:(?!{_STATEMENT_LINE})\S+\s+){{0,5}}?{_EXCLUDED_ITEM}\b"
+    rf"|{_NOT_THE_ADJUSTED_MEASURE}\b(?:adj(?:usted|\.)?|core|comparable|underlying"
     rf"|normali[sz]ed|pro{_HYPHEN}forma){_LABEL_FOOTNOTE}\s+"
     rf"(?:(?:diluted|net|operating|per{_HYPHEN}share|after{_HYPHEN}tax)\s+)*"
-    r"(?:eps|earnings(?!\s+before\s+interest)|income(?!\s+tax)|loss(?:es)?|profit|basis)"
+    rf"(?:eps|earnings(?!\s+before\s+{_STATEMENT_LINE})"
+    rf"|income(?!\s+tax|\s+before\s+{_STATEMENT_LINE})|loss(?:es)?|profit|basis)"
     r"(?![A-Za-z])"
     r"|\boperating\s+(?:diluted\s+)?eps(?![A-Za-z])"
     rf"|\boperating\s+(?:earnings|income){_LABEL_FOOTNOTE}\s+"
     r"(?:of\s+[$(\s]*[\d.,]+\s*\)?\s+)?per\b"
     r"|\b(?:eps|share|diluted|earnings|income|operations)(?:\d{1,2}|\*+)?"
-    r"[\s,:(\-\u2010-\u2015]*(?:as\s+)?adjusted(?:\d{1,2}|\*+)?(?![A-Za-z0-9])"
+    rf"[\s,:(\-\u2010-\u2015]*(?:as\s+)?adjusted{_ENDING_NOTE}(?![A-Za-z0-9])"
     rf"{_LABEL_END}",
     re.IGNORECASE,
 )
 
 _FOREIGN_CODES = (
-    "EUR|GBP|JPY|CAD|AUD|CHF|CNY|RMB|HKD|INR|KRW|SEK|NOK|DKK|SGD|NZD|MXN|BRL|ILS|NIS|PLN|TWD|ZAR"
+    "EUR|GBP|JPY|CAD|CDN|AUD|CHF|CNY|RMB|HKD|INR|KRW|SEK|NOK|DKK|SGD|NZD|MXN|BRL|ILS|NIS|PLN|TWD"
+    "|ZAR"
 )
 _FOREIGN_WORDS = (
     r"euros?|yen|yuan|renminbi|(?:indian\s+)?rupees?|(?:mexican\s+)?pesos?|(?:swiss\s+)?francs?"
@@ -728,30 +847,38 @@ _FOREIGN_WORDS = (
 )
 _FOREIGN_NAMES = f"{_FOREIGN_CODES}|{_FOREIGN_WORDS}"
 _SCALE_AFTER_DIGIT = r"(?:\s*(?:thousand|million|billion|trillion|bn|mn|mm|mil|[kmb])\b)?"
-#: Another currency printed beside a number, or named by a table's header. Letters touching a "$"
-#: are listed, because "US$", "U.S.$" and a label glued to its figure ("EPS$0.46") are all
-#: dollars. A code alone refuses nothing: "CAD software" and "AUD patients" are no money, so it
-#: counts only beside a digit or a scale. The same goes for a bare name, "a weaker euro" being
-#: commentary on a dollar figure, and a singular "Canadian dollar" too.
+_OTHER_DOLLAR_PLACES = r"hong\s+kong|singapore|new\s+zealand|(?:new\s+)?taiwan"
+#: Another currency printed beside a number, or named by a table's header. Capitals touching a
+#: "$" are another country's, whichever it is, unless they are "US", "USD" or the label glued to
+#: its figure ("EPS$0.46"); "U.S.$" ends on a dot and "a$1.2 billion" is a typo. Set apart from
+#: the "$" they are listed, leaving out what is also a word: "A $1.2 billion quarter" and "REVENUE
+#: OF $1.2 BILLION" are English, while "CA $1.2 billion" reads as the money even though a state
+#: has those letters, the refusal being the cheap side of that doubt. A code alone refuses
+#: nothing: "CAD software" and "AUD patients" are no money, so it counts only beside a "$", a
+#: digit or a scale. The same goes for a bare name, "a weaker euro" being commentary on a dollar
+#: figure, and a singular "Canadian dollar" too, unless a figure comes right before it.
 _FOREIGN_MONEY_RE = re.compile(
     "[€£¥₹₩₪₽₺₫]"
-    r"|(?<![A-Za-z.])(?-i:A|AU|C|CA|CAN|Can|CDN|Cdn|HK|MX|NT|NZ|R|S|SG)\$"
-    r"|(?<![A-Za-z.])(?-i:CDN|Cdn)\.?\s\$"
+    r"|(?<![A-Za-z.])(?!(?:US|USD|EPS)\$)(?-i:[A-Z]{1,3}|Aus|Can|Cdn|Mex)\$"
+    r"|(?<![A-Za-z.])(?-i:AU|CA|CAN|CDN|Cdn|HK|Mex|MEX|MX|NT|NZ|SG)\.?\s\$"
     r"|(?<![A-Za-z.])(?<!class\s)(?<!series\s)(?-i:C)\s\$"
+    rf"|\b(?:{_FOREIGN_CODES})\s?\$"
     rf"|\b(?:{_FOREIGN_NAMES})\s?\$?\s?\.?\d"
-    rf"|\d{_SCALE_AFTER_DIGIT}\s*(?:{_FOREIGN_NAMES})\b"
+    rf"|\d{_SCALE_AFTER_DIGIT}\s*\(?\s*(?:{_FOREIGN_NAMES})\b"
     rf"|\d{_SCALE_AFTER_DIGIT}\s+pounds?\b(?!\s+of\b)"
     rf"|\d{_SCALE_AFTER_DIGIT}\s+(?:canadian|australian)\b"
+    rf"|\d{_SCALE_AFTER_DIGIT}\s+(?:{_OTHER_DOLLAR_PLACES})\s+dollars?\b"
     r"|\b(?-i:Ps|Rs)\.?\s?\d"
-    r"|\b(?:canadian|australian|hong\s+kong|singapore|new\s+zealand|(?:new\s+)?taiwan)\s+dollars\b"
+    rf"|\b(?:canadian|australian|cdn\.?|hk|nt|{_OTHER_DOLLAR_PLACES})(?:\s+dollars\b|\s*\$)"
     rf"|\bin\s+(?:{_FOREIGN_WORDS})\b"
     rf"|\(\s*in\s+(?:{_FOREIGN_CODES})\b"
-    rf"|\b(?:{_FOREIGN_NAMES})\s+(?:in\s+)?(?:thousands|millions|billions)\b"
+    rf"|\b(?:{_FOREIGN_NAMES})\.?\s+(?:in\s+)?(?:thousands|millions|billions)\b"
     rf"|\b(?:thousands|millions|billions)\s+of\s+(?:{_FOREIGN_NAMES})\b",
     re.IGNORECASE,
 )
-#: What shows a figure is in dollars. Another country's dollars are refused above, so a mark that
-#: gets this far is the US's. The word is plural: "a weak dollar" is commentary.
+#: What shows a figure is in dollars. The word is plural: "a weak dollar" is commentary. It reads
+#: a mark as the US's only because `_FOREIGN_MONEY_RE` found no other: that list is what refuses
+#: another country's dollars, and it can never be whole (`verify_extraction`'s residual).
 _DOLLAR_MARK_RE = re.compile(r"\$|\busd(?![A-Za-z])|\bdollars\b", re.IGNORECASE)
 
 

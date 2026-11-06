@@ -45,6 +45,7 @@ from app.services._earnings_common import (
     parse_fmp_timing,
     timing_sentence,
 )
+from app.services.earnings_live_service import eps_is_unfilled
 from app.services.earnings_window_service import fetch_calendar_days
 from app.services.notification_jobs import JOB_EARNINGS, claimed_job
 from app.services.notification_kinds import (
@@ -176,7 +177,8 @@ def select_results(
     rows: List[Dict[str, Any]], today: date
 ) -> List[Tuple[str, str, float]]:
     """Rows worth a "beat/missed" notification → (symbol, date, surprise fraction), for the
-    reports inside `in_result_window`."""
+    reports inside `in_result_window`. A row passed over leaves the next one for its symbol
+    free to speak."""
     out: List[Tuple[str, str, float]] = []
     seen: set[str] = set()
     for row in rows:
@@ -200,6 +202,15 @@ def select_results(
             logger.warning(
                 "earnings notifications: %s %s EPS %s vs estimate %s has the dropped-digit "
                 "signature — no result alert", sym, when, act, row.get("epsEstimated"),
+            )
+            continue
+        # An EPS of 0 beside a revenue of 0 is FMP's unfilled row, not a "-100% miss". The live
+        # path's own rule, which keeps a real breakeven and a pre-revenue name's zero report.
+        if eps_is_unfilled(act, row):
+            logger.warning(
+                "earnings notifications: %s %s EPS %s beside revenue %s (consensus %s) is an "
+                "unfilled row — no result alert", sym, when, act, row.get("revenueActual"),
+                row.get("revenueEstimated"),
             )
             continue
         seen.add(sym)

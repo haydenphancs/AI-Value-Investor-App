@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
+from itertools import product
 from types import SimpleNamespace
 
 import pytest
@@ -246,6 +247,203 @@ def test_a_small_company_revenue_is_never_held_against_a_tiny_consensus():
     assert m.actual == 1e6 and not m.checking
 
 
+def test_a_held_fmp_revenue_falls_back_to_a_sane_filing_figure():
+    """FMP's dropped digit must not hide the company's own number."""
+    m = els.revenue_metric(_rec(fmp_revenue=1.69e9, filing=_filing(revenue=16.9e9)))
+    assert (m.actual, m.source, m.checking) == (16.9e9, els.SOURCE_FILING, False)
+    assert m.surprise_pct == pytest.approx(1.81, abs=0.01), "in the band, so a real comparison"
+
+
+@pytest.mark.parametrize("filed", [90e9, 40e9, 8.2e9], ids=["far_high", "just_high", "just_low"])
+def test_a_revenue_is_held_when_neither_source_passes(filed):
+    m = els.revenue_metric(_rec(fmp_revenue=1.69e9, filing=_filing(revenue=filed)))
+    assert m == els.LiveMetric(16.6e9, checking=True)
+
+
+def test_a_sound_fmp_revenue_keeps_its_place_ahead_of_a_sound_filing_figure():
+    m = els.revenue_metric(_rec(fmp_revenue=16.0e9, filing=_filing(revenue=17.1e9)))
+    assert (m.actual, m.source) == (16.0e9, els.SOURCE_FMP)
+
+
+@pytest.mark.parametrize("value,shown", [(5e9, True), (4.99e9, False), (20e9, True),
+                                         (20.01e9, False)])
+def test_the_plausibility_band_keeps_its_edges(value, shown):
+    m = els.revenue_metric(_rec(revenue_estimate=10e9, fmp_revenue=value))
+    assert (m.actual is not None, m.checking) == (shown, not shown)
+
+
+@pytest.mark.parametrize("est,fmp,filed", [
+    (1.66e9, 16.9e9, 16.9e9),      # a dropped digit in the estimate: was +918%
+    (166e9, 16.9e9, 17.0e9),       # an added one: was -90%
+    (16.6e9, 40.0e9, 40.2e9),      # a true result this far off is shown too, with no percentage
+], ids=["estimate_dropped_a_digit", "estimate_added_a_digit", "far_above_the_estimate"])
+def test_a_figure_that_passes_only_on_agreement_carries_no_surprise(est, fmp, filed):
+    """Two sources prove the actual, not the consensus it failed against: that consensus may be
+    the glitch, as `earnings_service._reconcile_revenue` found, and +918% is not a result."""
+    rec = _rec(revenue_estimate=est, fmp_revenue=fmp, filing=_filing(revenue=filed))
+    m = els.revenue_metric(rec)
+    assert (m.actual, m.source, m.surprise_pct, m.checking) == (fmp, els.SOURCE_FMP, None, False)
+    assert m.estimate == est
+
+
+def test_a_figure_in_the_band_keeps_its_surprise_when_the_sources_also_agree():
+    m = els.revenue_metric(_rec(fmp_revenue=17.1e9, filing=_filing(revenue=17.1e9)))
+    assert m.surprise_pct == pytest.approx(3.01, abs=0.01)
+
+
+def test_a_guard_only_consensus_never_licenses_a_surprise_against_the_shown_one():
+    """The shown consensus judges the figure. Read beside the guard-only one, $16.9B would pass
+    and print +918% against the $1.66B on show."""
+    rec = _rec(revenue_estimate=1.66e9, revenue_guard_estimate=16.6e9, fmp_revenue=16.9e9)
+    assert els.revenue_metric(rec) == els.LiveMetric(1.66e9, checking=True)
+
+
+@pytest.mark.parametrize("fmp,filed,shown,source", [
+    (40.0e9, 40.8e9, 40.0e9, els.SOURCE_FMP),
+    (40.0e9, 40.81e9, 40.81e9, els.SOURCE_FILING),
+    (40.0e9, 40.9e9, None, None),
+], ids=["at_the_edge", "only_the_filings_two_percent_reaches", "past_it"])
+def test_each_source_is_judged_against_the_other_from_its_own_figure(fmp, filed, shown, source):
+    m = els.revenue_metric(_rec(fmp_revenue=fmp, filing=_filing(revenue=filed)))
+    assert (m.actual, m.source, m.surprise_pct) == (shown, source, None)
+    assert m.checking is (shown is None)
+
+
+def test_a_filing_figure_behind_a_held_fmp_figure_keeps_its_rounding_rule():
+    """A print cannot say which side of a consensus inside its own rounding the true figure is."""
+    print_ = _filing(revenue=17.1e9, revenue_rounding=5e7)
+    m = els.revenue_metric(_rec(revenue_estimate=17.08e9, fmp_revenue=1.71e9, filing=print_))
+    assert (m.actual, m.source, m.surprise_pct) == (17.1e9, els.SOURCE_FILING, None)
+    m = els.revenue_metric(_rec(revenue_estimate=16.6e9, fmp_revenue=1.71e9, filing=print_))
+    assert (m.actual, m.surprise_pct) == (17.1e9, pytest.approx(3.01, abs=0.01))
+
+
+def test_the_rounding_rule_never_reaches_an_fmp_figure_that_won():
+    print_ = _filing(revenue=17.1e9, revenue_rounding=5e7)
+    m = els.revenue_metric(_rec(revenue_estimate=17.08e9, fmp_revenue=17.06e9, filing=print_))
+    assert (m.source, m.surprise_pct) == (els.SOURCE_FMP, -0.12)
+
+
+def test_a_zero_revenue_is_held_at_the_metric():
+    assert els.revenue_metric(_rec(fmp_revenue=0.0)) == els.LiveMetric(16.6e9, checking=True)
+
+
+@pytest.mark.parametrize("est,shown", [(30e6, True), (99.9e6, True), (100e6, False)])
+def test_a_zero_shows_only_under_the_floor_the_fold_stores_it_by(est, shown):
+    m = els.revenue_metric(_rec(revenue_estimate=est, fmp_revenue=0.0))
+    assert (m.actual == 0.0, m.checking) == (shown, not shown)
+
+
+def test_a_zero_with_no_consensus_at_all_does_not_show():
+    m = els.revenue_metric(_rec(revenue_estimate=None, fmp_revenue=0.0))
+    assert (m.actual, m.checking) == (None, True)
+
+
+def test_a_consensus_turning_material_takes_a_stored_zero_off():
+    """The zero was stored against the tiny consensus it came with, and an estimate moves only
+    with a figure, so `revenue_estimate` stays tiny: only the guard-only figure knows."""
+    rec = _rec(revenue_estimate=30e6, revenue_guard_estimate=16.6e9, fmp_revenue=0.0)
+    assert els.revenue_metric(rec) == els.LiveMetric(30e6, checking=True)
+
+
+@pytest.mark.parametrize("rec", [
+    _rec(revenue_estimate=30e6, revenue_guard_estimate=16.6e9, fmp_revenue=0.0,
+         filing=_filing(revenue=16.9e9)),
+    _rec(revenue_estimate=30e6, revenue_guard_estimate=16.6e9, filing=_filing(revenue=16.9e9)),
+], ids=["behind_a_zero_taken_off", "with_no_fmp_figure"])
+def test_a_filing_figure_is_never_measured_against_an_overtaken_estimate(rec):
+    """$16.9B against the $30M a zero left on the record is +56,233%: the zero stepping aside
+    must not swap one false number for another."""
+    m = els.revenue_metric(rec)
+    assert (m.actual, m.source, m.surprise_pct) == (16.9e9, els.SOURCE_FILING, None)
+
+
+def test_a_figure_from_a_row_with_a_tiny_estimate_is_guarded_by_its_twins_consensus():
+    """Any material consensus means a real business, whichever row FMP filled."""
+    rec = _rec(revenue_estimate=30e6, revenue_guard_estimate=16.6e9, fmp_revenue=16.9e9)
+    m = els.revenue_metric(rec)
+    assert (m.actual, m.surprise_pct, m.checking) == (16.9e9, None, False)
+    rec = _rec(revenue_estimate=30e6, revenue_guard_estimate=16.6e9, fmp_revenue=1e6)
+    assert els.revenue_metric(rec) == els.LiveMetric(30e6, checking=True)
+
+
+@pytest.mark.parametrize("est,stated,overtaken", [
+    (99.9e6, 100e6, True), (99.9e6, 99.8e6, False), (100e6, 16.6e9, False), (30e6, None, False),
+    (None, 16.6e9, False),
+])
+def test_only_a_tiny_estimate_under_a_material_consensus_is_overtaken(est, stated, overtaken):
+    rec = _rec(revenue_estimate=est, revenue_guard_estimate=stated)
+    assert els._estimate_overtaken(rec) is overtaken
+
+
+def test_a_tiny_consensus_that_stays_tiny_still_judges_its_own_figure():
+    rec = _rec(revenue_estimate=30e6, revenue_guard_estimate=31e6, fmp_revenue=2e6)
+    assert els.revenue_metric(rec).surprise_pct == pytest.approx(-93.33, abs=0.01)
+
+
+@pytest.mark.parametrize("est", [30e6, 16.6e9], ids=["tiny_consensus", "material_consensus"])
+def test_a_zero_gives_way_to_a_positive_filing_figure(est):
+    filed = est * 1.1
+    m = els.revenue_metric(_rec(revenue_estimate=est, fmp_revenue=0.0,
+                                filing=_filing(revenue=filed)))
+    assert (m.actual, m.source, m.checking) == (filed, els.SOURCE_FILING, False)
+
+
+def test_two_zeros_are_not_an_agreement():
+    rec = _rec(fmp_revenue=0.0, filing=_filing(revenue=0.0))
+    assert els.revenue_metric(rec) == els.LiveMetric(16.6e9, checking=True)
+
+
+def test_a_positive_figure_is_never_read_as_contradicted_by_a_zero():
+    m = els.revenue_metric(_rec(revenue_estimate=30e6, fmp_revenue=2e6,
+                                filing=_filing(revenue=0.0)))
+    assert (m.actual, m.source) == (2e6, els.SOURCE_FMP)
+
+
+def test_a_negative_revenue_never_shows_whatever_the_consensus():
+    m = els.revenue_metric(_rec(revenue_estimate=30e6, fmp_revenue=-5e6))
+    assert m == els.LiveMetric(30e6, checking=True)
+
+
+_REVENUES = [None, 0.0, 1e6, 1.69e9, 8.2e9, 16.9e9, 17.1e9, 33.2e9, 40e9]
+
+
+def test_no_mix_of_sources_and_consensus_shows_a_wrong_revenue():
+    """Whatever the two sources and the two consensus figures say. What this cannot name is
+    which figure wins, and the cases above pin that; what it pins is that nothing here prints
+    a number the guards exist to stop."""
+    floor = els._REVENUE_GUARD_MIN_ESTIMATE
+    for est, guard, fmp, filed, rounding in product(
+            [None, 30e6, 99.9e6, 100e6, 1.66e9, 16.6e9], [None, 30e6, 16.6e9],
+            _REVENUES, _REVENUES, [None, 5e7]):
+        filing = None if filed is None else _filing(revenue=filed, revenue_rounding=rounding)
+        m = els.revenue_metric(_rec(revenue_estimate=est, revenue_guard_estimate=guard,
+                                    fmp_revenue=fmp, filing=filing))
+        case = (est, guard, fmp, filed, rounding, m)
+        any_figure = fmp is not None or filed is not None
+        judged_by = est if est is not None else guard
+        assert m.estimate == est, case
+        assert m.checking is (any_figure and m.actual is None), case
+        assert m.due is (not any_figure and judged_by is not None), case
+        if m.actual is None:
+            assert m.surprise_pct is None and m.source is None, case
+            continue
+        assert m.actual == (fmp if m.source == els.SOURCE_FMP else filed), case
+        if m.actual == 0:
+            assert max(est or 0, guard or 0, filed or 0) < floor and not filed, case
+            assert judged_by is not None, case
+        if m.surprise_pct is not None:
+            assert not (est < floor and guard is not None and guard >= floor), case
+            assert est < floor or -50 <= m.surprise_pct <= 100, case
+
+
+def test_a_bad_fmp_revenue_leaves_a_filing_complete_report_reported():
+    rec = _rec(fmp_revenue=1.69e9, filing=_filing(revenue=16.9e9, eps_adjusted=0.44))
+    snap = els.snapshot_of(rec, REPORT, _et(REPORT, 17))
+    assert snap.status == els.STATUS_REPORTED and snap.preliminary is True
+    assert els.card_fields(snap, REPORT)["revenue_actual"] == 16.9e9
+
+
 def test_a_zero_eps_is_a_real_breakeven_report():
     m = els.eps_metric(_rec(eps_estimate=-0.02, fmp_eps=0.0))
     assert m.actual == 0.0
@@ -480,9 +678,11 @@ def test_a_report_with_nothing_to_confirm_never_polls(rec, at):
     (_rec(fmp_eps=0.041, fmp_revenue=17.1e9), True),
     (_rec(fmp_eps=0.44, fmp_revenue=90e9), True),
     (_rec(fmp_eps=0.041, fmp_revenue=17.1e9, filing=_filing(eps_adjusted=0.44)), True),
+    (_rec(fmp_eps=0.44, fmp_revenue=1.69e9, filing=_filing(revenue=16.9e9)), True),
 ], ids=["pending", "a_due_revenue", "confirmed", "filing_complete", "filing_gaap_only",
         "filing_revenue_left", "filing_eps_left", "confirmed_over_a_filing",
-        "no_revenue_consensus", "held_eps", "held_revenue", "filing_beside_a_held_eps"])
+        "no_revenue_consensus", "held_eps", "held_revenue", "filing_beside_a_held_eps",
+        "filing_beside_a_held_revenue"])
 def test_fmp_is_wanted_until_every_figure_shown_is_its_own(rec, wanted):
     assert els.needs_fmp(els.eps_metric(rec), els.revenue_metric(rec)) is wanted
 

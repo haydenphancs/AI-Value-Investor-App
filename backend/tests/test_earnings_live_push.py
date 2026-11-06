@@ -16,6 +16,8 @@ kinds — and the daily 16:00 ET sender — claim the SAME key. What is pinned h
     live kind first;
   * neither kind goes out for a report older than yesterday, the daily pass's own window, and
     such a report is handled once, for good;
+  * the daily pass keeps the EPS the live path keeps, so a row the fold reads as unfilled never
+    goes out at 16:00 ET either;
   * a round sends oldest first, so the cap cannot run a report out of that window;
   * the round cap's warning counts the reports still owed a push, nothing else.
 The dispatcher is a recorder, or the real one over a fake table where a failed read is the
@@ -37,6 +39,7 @@ import app.services.notification_senders.earnings_live_sender as sender
 import app.services.notification_senders.earnings_sender as daily
 import app.services.push_dispatch_service as pds
 from app.config import settings
+from app.services.earnings_filing_service import FilingFigures
 from app.services.earnings_live_service import (
     BASIS_ADJUSTED,
     BASIS_GAAP,
@@ -216,6 +219,53 @@ async def test_a_row_with_both_actuals_at_zero_pushes_nothing(dispatch):
     live.observe_rows(REPORT, [_row(epsActual=0, revenueActual=0)], NOW)
     await sender.dispatch_landings(live.landed_snapshots(NOW), NOW)
     assert dispatch.sent == []
+
+
+def _revenue_phrase(rec: els._Record) -> str:
+    snap = els.snapshot_of(rec, REPORT, datetime(2026, 10, 29, 17, 0, tzinfo=ET))
+    return sender.live_copy(snap)[1].split(" · ")[0]
+
+
+def _filed_revenue(value: float) -> FilingFigures:
+    return FilingFigures(accession="0000050863-26-000123", accepted_at=None, url=None,
+                         revenue=value)
+
+
+def test_a_figure_shown_on_agreement_is_announced_with_no_percentage():
+    """+918% against a dropped-digit consensus is the worst place to print it."""
+    rec = els._Record("INTC", REPORT, eps_estimate=0.41, revenue_estimate=1.66e9, fmp_eps=0.44,
+                      fmp_revenue=16.9e9, filing=_filed_revenue(16.9e9))
+    assert _revenue_phrase(rec) == "Revenue reported"
+
+
+def test_a_held_fmp_revenue_announces_the_companys_own_figure():
+    rec = els._Record("INTC", REPORT, eps_estimate=0.41, revenue_estimate=16.6e9, fmp_eps=0.44,
+                      fmp_revenue=1.69e9, filing=_filed_revenue(16.9e9))
+    assert _revenue_phrase(rec) == "Revenue $16.9B (beat consensus by 2%)"
+
+
+def test_a_zero_revenue_past_a_material_consensus_is_never_announced_as_a_miss():
+    rec = els._Record("JOBY", REPORT, eps_estimate=-0.2, revenue_estimate=30e6,
+                      revenue_guard_estimate=16.6e9, fmp_eps=-0.2, fmp_revenue=0.0)
+    assert _revenue_phrase(rec) == "Revenue being confirmed"
+
+
+# ── the daily pass reads an EPS of zero as the live path does ────────────────
+
+
+@pytest.mark.parametrize("eps,rev,rev_est", [
+    (0, 0, 16.6e9), (0, -5e6, 16.6e9), (0, 0, None), (0, 0, 0), (0, 0, 100e6),
+    (0, 0, 99.9e6), (0, 0, 30e6), (0, 17.1e9, 16.6e9), (0, None, 16.6e9), (0.60, 0, 16.6e9),
+])
+def test_the_daily_pass_and_the_live_path_keep_the_same_eps(eps, rev, rev_est):
+    """One rule, not a copy of it: what the fold refuses never reaches the 16:00 ET banner, and
+    what it keeps is still told."""
+    row = {"symbol": "INTC", "date": REPORT.isoformat(), "epsEstimated": 0.41, "epsActual": eps,
+           "revenueActual": rev, "revenueEstimated": rev_est}
+    live = EarningsLiveService()
+    live.observe_rows(REPORT, [row], NOW)
+    kept = live.snapshot("INTC", REPORT, NOW).eps.actual
+    assert bool(daily.select_results([row], REPORT)) == (kept is not None)
 
 
 # ── the round cap ────────────────────────────────────────────────────────────

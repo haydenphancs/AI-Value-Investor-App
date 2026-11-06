@@ -182,6 +182,33 @@ def test_the_window_stays_whole_and_never_moves_back_on_the_holiday_table():
         previous_floor = days[0]
 
 
+@pytest.mark.parametrize("today,first", [
+    (date(2026, 10, 29), date(2026, 10, 27)),       # an ordinary Thursday
+    (date(2026, 10, 31), date(2026, 10, 29)),       # a Saturday: Friday, and the day before it
+    (date(2026, 11, 9), date(2026, 11, 5)),         # a Monday: back past the weekend to Thursday
+    (date(2026, 11, 10), date(2026, 11, 6)),        # a Tuesday: Monday, then past the weekend
+    (date(2026, 11, 27), date(2026, 11, 24)),       # the Friday after Thanksgiving
+])
+def test_the_sheet_days_reach_one_trading_day_past_the_live_days(today, first):
+    days = els.sheet_days(today)
+    assert days == [first + timedelta(days=i) for i in range((today - first).days + 1)]
+    assert days[-len(els.live_days(today)):] == els.live_days(today)
+
+
+def test_the_sheet_days_stay_whole_and_cover_two_days_back_on_every_calendar_day():
+    """Two days back is as far as a held result can wake from its report: the result window
+    closes a day after the report, and the longest night ends the next morning."""
+    previous_floor = None
+    for today in _every_day_2026_to_2028():
+        days = els.sheet_days(today)
+        assert days[0] == previous_trading_day(previous_trading_day(today))
+        assert days[-1] == today
+        assert all(b - a == timedelta(days=1) for a, b in zip(days, days[1:]))
+        assert days[0] <= today - timedelta(days=2)
+        assert previous_floor is None or days[0] >= previous_floor
+        previous_floor = days[0]
+
+
 # ── per-metric figures and their guards ──────────────────────────────────────
 
 

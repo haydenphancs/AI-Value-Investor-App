@@ -171,7 +171,9 @@ def quiet_hours_never_set(preferences: Optional[Mapping[str, Any]]) -> bool:
     a null or a nested value is none, the same fallback `_coerce_toggle` gives it.
 
     A failed preference read arrives here as an empty blob and also reads as never set: nothing
-    says otherwise, and a late buzz costs less than a wrong one at 3am.
+    says otherwise, and a late buzz costs less than a wrong one at 3am. That parks the row on ET,
+    so the flush reads the blob again and, on a good read, holds it once more on the user's own
+    clock (`PushDispatchService.flush_deferred`).
     """
     raw = (preferences or {}).get(PREF_QUIET_ENABLED)
     return not isinstance(raw, (bool, int, float, str))

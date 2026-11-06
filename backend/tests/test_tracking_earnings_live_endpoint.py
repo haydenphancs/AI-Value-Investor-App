@@ -725,6 +725,57 @@ def test_the_off_switch_wins_over_an_unknown_answer(live_off, monkeypatch, extra
     assert extras_calls == []
 
 
-def test_a_date_before_the_previous_trading_day_is_still_refused(client):
-    resp = client.get("/api/v1/tracking/earnings/MSFT/live?report_date=2026-10-27")
+def test_a_date_before_the_sheet_days_is_still_refused(client):
+    resp = client.get("/api/v1/tracking/earnings/MSFT/live?report_date=2026-10-26")
     assert resp.status_code == 400 and resp.json()["error_code"] == "INVALID_INPUT"
+    assert "2026-10-27" in resp.json()["message"], "it names the first day it does take"
+
+
+# ── the day after the live days, for a push held overnight ───────────────────
+
+OLDER = date(2026, 10, 27)
+OLDER_PATH = "/api/v1/tracking/earnings/MSFT/live?report_date=2026-10-27"
+
+
+def test_a_report_a_trading_day_past_the_live_days_still_answers_its_figures(client):
+    """A result held for the morning can wake here, and the push opens this date."""
+    assert OLDER < els.live_days(REPORT)[0]
+    at = datetime(2026, 10, 27, 22, tzinfo=timezone.utc)
+    els.get_earnings_live_service().observe_rows(
+        OLDER, [_row("MSFT", OLDER, epsActual=3.1, revenueActual=7e10, epsEstimated=3.0,
+                     revenueEstimated=6.9e10)], at, fetched=True)
+    resp = client.get(OLDER_PATH)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert (body["status"], body["report_date"]) == ("reported", "2026-10-27")
+    assert body["eps"]["actual"] == 3.1 and body["revenue"]["actual"] == 7e10
+    assert body["poll_seconds"] is None
+
+
+def test_with_no_date_the_sheet_never_reaches_past_the_live_days(client):
+    """Only a date asks for that day: it holds no card, so nothing else may open it."""
+    at = datetime(2026, 10, 27, 22, tzinfo=timezone.utc)
+    els.get_earnings_live_service().observe_rows(
+        OLDER, [_row("MSFT", OLDER, epsActual=3.1, revenueActual=7e10)], at, fetched=True)
+    body = client.get("/api/v1/tracking/earnings/MSFT/live").json()
+    assert (body["status"], body["eps"]["actual"]) == ("none", None)
+
+
+def test_after_a_restart_that_day_waits_for_its_first_look_and_never_says_none(client):
+    """The record went with the process. `none` would tell someone just buzzed that results are
+    out that INTC has no report, so the sheet asks again, and the loop's next round answers."""
+    body = client.get(OLDER_PATH).json()
+    assert (body["status"], body["poll_seconds"]) == ("awaiting", els.EARNINGS_LIVE_POLL_SECONDS)
+    assert body["report_date"] == "2026-10-27"
+
+
+def test_a_first_look_that_found_nothing_on_that_day_is_a_plain_none(client):
+    live = els.get_earnings_live_service()
+    live._fetched[OLDER] = 1.0
+    body = client.get(OLDER_PATH).json()
+    assert (body["status"], body["poll_seconds"]) == ("none", None)
+
+
+def test_with_the_loop_off_that_day_is_a_plain_none(live_off):
+    body = live_off.get(OLDER_PATH).json()
+    assert (body["status"], body["poll_seconds"]) == ("none", None)

@@ -36,9 +36,16 @@ anything folds (`_note_consensus`) and kept GUARD-ONLY. The sanity guards, the z
 THE MEMO. The live days (`live_days`): every calendar day from the previous trading day
 through today, one single-day calendar call each — a multi-day request is cut at 4,000 rows
 with the NEWEST dates kept (`fetch_calendar_days`). Calendar days, because a report can carry
-a weekend or holiday date. This one window holds the records, the push sender's memory and
-every reader, and each refresh prunes to it first: a report the sender has forgotten must
-already be gone from the records, or it reads as new on every round.
+a weekend or holiday date. This one window holds the push sender's memory and every reader but
+the sheet, and `landed_snapshots` hands over nothing outside it: a report the sender has
+forgotten must never reach it again, or it reads as new on every round.
+  * A record outlives the live days by one trading day (`sheet_days`), for the sheet and the
+    wake of a held push alone. A result held for a user's morning can wake the day after its
+    report left the live days, a late Friday fill of Thursday's report at Saturday 07:00, and
+    the push it wakes opens that report by date. No card and no landing reads such a day, no
+    cadence fetches it, and each refresh prunes to `sheet_days` first. A restart inside the night
+    leaves it unread, so a sheet asking for it puts one look on the loop's next round
+    (`sheet_asked`): only someone looking pays for that call.
   * Today's rows ride on the Tracking memo (`tracking_service._cached_earnings_calendar`,
     30 min, the owner's 2026-10-22 cadence), and every reader folds them in. The tick pays to
     keep that memo fresh only from 06:00 ET to midnight on a trading day
@@ -168,10 +175,11 @@ has read reads as a report not in yet instead: `upcoming`, or `awaiting` before 
 figures and no extras. From today on that is a day the memo does not hold, or a today it holds
 blank on a trading day, which its next round settles within 30 min. Before today it is a day the
 loop has yet to load (`awaits_first_load`), for about a minute after a deploy, or 10 min if that
-load comes back blank, when the feed draws no card from those days either. A sheet pinned to
-such a day stays on it even with a later row listed: that row may be the next report's, and the
-figures may be one load away. Each poll costs a memo read: a failed round makes the memo wait 2
-min before the next. With EARNINGS_LIVE_ENABLED off no loop runs and none of this applies: the
+load comes back blank, when the feed draws no card from those days either; a day past the live
+days waits the same way from the moment a sheet asks for it. A sheet pinned to such a day stays
+on it even with a later row listed: that row may be the next report's, and the figures may be
+one load away. Each poll costs a memo read: a failed round makes the memo wait 2 min before the
+next. With EARNINGS_LIVE_ENABLED off no loop runs and none of this applies: the
 sheet reads the memo's row alone, and never polls.
 
 GUARDS, each a defect found elsewhere in this repo:
@@ -207,6 +215,7 @@ from typing import (
     List,
     Optional,
     Sequence,
+    Set,
     Tuple,
 )
 
@@ -383,11 +392,21 @@ def et_now(now: datetime) -> datetime:
 
 
 def live_days(today: date) -> List[date]:
-    """The one window of the live state: every calendar day from the previous trading day
-    through ``today``, oldest first (THE MEMO in the module docstring). Never just those two
-    days: `previous_trading_day` steps over a weekend or holiday, and a report dated on one
-    would drop out the day after, while the sheet still accepts its date."""
+    """The window of the live state: every calendar day from the previous trading day through
+    ``today``, oldest first (THE MEMO in the module docstring). Never just those two days:
+    `previous_trading_day` steps over a weekend or holiday, and a report dated on one would drop
+    out the day after, while the sheet still accepts its date. `sheet_days` is this and one
+    trading day more."""
     first = previous_trading_day(today)
+    return [first + timedelta(days=i) for i in range((today - first).days + 1)]
+
+
+def sheet_days(today: date) -> List[date]:
+    """`live_days` and one trading day before them, oldest first: the days a record stays
+    readable and the sheet takes a date. A result held for a user's morning can wake the day
+    after its report left the live days, and the push it wakes opens that report (THE MEMO in
+    the module docstring)."""
+    first = previous_trading_day(previous_trading_day(today))
     return [first + timedelta(days=i) for i in range((today - first).days + 1)]
 
 
@@ -847,6 +866,8 @@ class EarningsLiveService:
         self._fetched: Dict[date, float] = {}
         # Days before today FMP has only answered blank: day -> monotonic time of the first.
         self._blank_since: Dict[date, float] = {}
+        # Days past the live days a sheet opened with no read here (`sheet_asked`).
+        self._sheet_asked: Set[date] = set()
         self._failed_until: float = 0.0
         self._extras: Dict[Tuple[str, date], Tuple[float, Optional[HistoryExtras]]] = {}
         # Keyed by (round kind, ET date) — the same shape as every other `_inflight` map, so
@@ -1075,13 +1096,24 @@ class EarningsLiveService:
         return self._fetched.get(day)
 
     def awaits_first_load(self, day: date, today: date) -> bool:
-        """Is `day` a live day before `today` this module has not read yet? Those are the days
-        `due_days` takes on its first look, whatever is watched, so a reader told to wait for
-        one is told the truth. A load ends the wait unless it lists nothing on a trading day,
-        and that holds it for `EARNINGS_LIVE_BLANK_LOAD_WAIT_SECONDS` at most. No other day
-        qualifies: today and later are the memo's to read, and an older day is never loaded,
-        so a sheet waiting on one would poll for ever."""
-        return day in live_days(today)[:-1] and day not in self._fetched
+        """Is `day` a live day before `today`, or a day a sheet asked for (`sheet_asked`), this
+        module has not read yet? Those are the days `due_days` takes on its first look, whatever
+        is watched, so a reader told to wait for one is told the truth. A load ends the wait
+        unless it lists nothing on a trading day, and that holds it for
+        `EARNINGS_LIVE_BLANK_LOAD_WAIT_SECONDS` at most. No other day qualifies: today and later
+        are the memo's to read, and an older day is never loaded, so a sheet waiting on one
+        would poll for ever."""
+        return ((day in live_days(today)[:-1] or day in self._sheet_asked)
+                and day not in self._fetched)
+
+    def sheet_asked(self, day: date, today: date) -> None:
+        """A sheet opened `day`. Nothing loads a day past the live days by itself, so one this
+        process never read (a restart inside the night a push was held through) goes on the
+        loop's next round. A first look only, and one a day at most: a day rolling out of the
+        live days keeps its `_fetched`, and `sheet_days` bounds the rest."""
+        if (day in sheet_days(today) and day not in live_days(today)
+                and day not in self._fetched):
+            self._sheet_asked.add(day)
 
     # ── refresh (the live loop only) ───────────────────────────────
 
@@ -1104,7 +1136,7 @@ class EarningsLiveService:
         hot_ttl = EARNINGS_LIVE_HOT_TTL_SECONDS - _DUE_SLACK_SECONDS
         cold_ttl = (EARNINGS_LIVE_COLD_TTL_SECONDS if is_trading_day(today)
                     else EARNINGS_LIVE_CLOSED_DAY_TTL_SECONDS) - _DUE_SLACK_SECONDS
-        due = []
+        due = sorted(day for day in self._sheet_asked if day not in self._fetched)
         for day in earlier:
             last = self._fetched.get(day)
             if last is None:
@@ -1125,13 +1157,14 @@ class EarningsLiveService:
         return due
 
     def _prune(self, now: datetime) -> None:
-        """Forget every day outside the live days."""
-        days = set(live_days(et_now(now).date()))
+        """Forget every day outside `sheet_days`, the window a record stays readable in."""
+        days = set(sheet_days(et_now(now).date()))
         for key in [k for k in self._records if k[1] not in days]:
             self._records.pop(key, None)
         for held in (self._fetched, self._blank_since):
             for day in [d for d in held if d not in days]:
                 held.pop(day, None)
+        self._sheet_asked &= days
 
     async def refresh(self, now: datetime, *, fmp: Any, symbols: Collection[str]) -> None:
         """Prune, then fetch the due days and fold them in. The prune comes before every early

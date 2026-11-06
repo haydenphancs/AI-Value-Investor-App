@@ -69,6 +69,7 @@ from app.services.earnings_live_service import (
     live_payload,
     newest_report,
     one_row_per_report,
+    sheet_days,
 )
 from app.services._earnings_common import (
     parse_fmp_timing,
@@ -1762,12 +1763,14 @@ class TrackingService:
         No live fetch, like the feed: today's rows come from the shared Tracking memo and are
         folded into the shared live records, skipping any older than a record's last own
         fetch; the earlier live days' are already in those records. The report is `requested`
-        when given (it must lie between the previous trading day and today + 14), else
+        when given (it must lie between the first of `sheet_days` and today + 14), else
         today's, else the one before today its card would name (`newest_report`), else the
-        next one in the window. A `requested` date that has been read and holds neither a record
-        nor a row has moved: the sheet follows the report to its next listed date, and answers
-        `none` only when nothing is listed, since a pinned sheet saying "no report in the next
-        two weeks" beside a row four days out would be false.
+        next one in the window. `sheet_days` reach one trading day past the live days because a
+        held push can wake on that day, and opens its report by date. A `requested` date that
+        has been read and holds neither a record nor a row has moved: the sheet follows the
+        report to its next listed date, and answers `none` only when nothing is listed, since a
+        pinned sheet saying "no report in the next two weeks" beside a row four days out would
+        be false.
 
         A report that left its date had left it by the newest answer held for that date, while
         the days after today can be up to 6 h older (TWO SPEEDS above), and the new date is one
@@ -1778,7 +1781,8 @@ class TrackingService:
         nobody has read is never `none`, and a sheet pinned to one stays on it, past any later
         row: that row can be the next report's, with the figures one load away. From today on
         such a day is `_earnings_day_unread`. Before today it is a day the loop has yet to load
-        (`awaits_first_load`), the first minute after a deploy or after midnight. The answer
+        (`awaits_first_load`), the first minute after a deploy or after midnight, or a day past
+        the live days a restart left unread and this answer has just asked for. The answer
         reads as a report not in yet, with no extras, and `recheck` makes the sheet ask again
         until a read settles it.
 
@@ -1789,16 +1793,18 @@ class TrackingService:
         sym = symbol.upper()
         today = _et_today()
         earlier = live_days(today)[:-1]
-        prev = earlier[0]
-        if requested is not None and not prev <= requested <= today + timedelta(
+        floor = sheet_days(today)[0]
+        if requested is not None and not floor <= requested <= today + timedelta(
             days=_EARNINGS_ALERT_DAYS_AHEAD
         ):
             raise ValueError(
-                f"report_date {requested.isoformat()} is outside {prev.isoformat()}.."
+                f"report_date {requested.isoformat()} is outside {floor.isoformat()}.."
                 f"{(today + timedelta(days=_EARNINGS_ALERT_DAYS_AHEAD)).isoformat()}"
             )
         now = datetime.now(timezone.utc)
         live = get_earnings_live_service() if settings.EARNINGS_LIVE_ENABLED else None
+        if live is not None and requested is not None:
+            live.sheet_asked(requested, today)
 
         def _snapshot(d: date) -> Optional[LiveSnapshot]:
             return live.snapshot(sym, d, now) if live is not None else None

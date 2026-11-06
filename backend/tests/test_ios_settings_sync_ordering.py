@@ -200,16 +200,63 @@ def test_notify_timezone_is_never_written_back_from_the_server(code):
     )
 
 
-def test_the_device_timezone_is_refreshed_outside_the_quiet_hours_screen(code):
-    """It used to be written ONLY by `NotificationSettingsViewModel.writeQuietTimes()`, so a
-    user who never opened that card never sent one and the backend fell back to ET — for their
-    cap roll as well as their quiet window."""
+def _observer(configure: str, notification: str) -> str:
+    """The closure `configure` registers for `notification`."""
+    anchor = f"forName: {notification},"
+    assert anchor in configure, f"configure no longer observes {notification}"
+    rest = configure[configure.index(anchor):]
+    return _braced_block(rest, rest[: rest.index("{") + 1])
+
+
+def _assert_every_user_sends_a_timezone(code: str) -> None:
     assert "func refreshDeviceTimezone()" in code
     body = _braced_block(code, "func refreshDeviceTimezone() {")
     assert "TimeZone.current.identifier" in body
-    assert "NSSystemTimeZoneDidChange" in code, (
+    configure = _braced_block(code, "func configure(appState: AppState) {")
+    foreground = _observer(configure, "UIApplication.willEnterForegroundNotification")
+    zone_change = _observer(configure, ".NSSystemTimeZoneDidChange")
+    assert "refreshDeviceTimezone()" in foreground, (
+        "coming back to the foreground no longer refreshes the zone, so a flight is missed"
+    )
+    assert "refreshDeviceTimezone()" in zone_change, (
         "nothing reacts to the OS timezone changing, so a user who flies keeps the old zone"
     )
+    direct = configure.replace(foreground, "").replace(zone_change, "")
+    assert "refreshDeviceTimezone()" in direct, (
+        "launch no longer sends the zone, so a user who never opens the quiet-hours card has "
+        "none, and results wait for 07:00 on ET instead of on their own clock"
+    )
+
+
+def test_the_device_timezone_is_refreshed_outside_the_quiet_hours_screen(code):
+    """It used to be written ONLY by `NotificationSettingsViewModel.writeQuietTimes()`, so a
+    user who never opened that card never sent one and the backend fell back to ET — for their
+    cap roll as well as their quiet window, and now for the night hold on earnings results."""
+    _assert_every_user_sends_a_timezone(code)
+
+
+def test_every_launch_reaches_the_zone_refresh():
+    """`configure` is the first caller above, so an app that stopped calling it stops them all."""
+    app = _SRC.parents[2] / "iosApp.swift"
+    assert "SettingsSyncManager.shared.configure(appState: appState)" in _code_only(
+        app.read_text(encoding="utf-8")
+    ), "the app no longer configures SettingsSyncManager at launch"
+
+
+@pytest.mark.parametrize("gone,why", [
+    (0, "coming back to the foreground"),
+    (1, "nothing reacts to the OS timezone changing"),
+    (2, "launch no longer sends the zone"),
+], ids=["foreground", "zone_change", "launch"])
+def test_the_timezone_guard_fails_when_any_of_the_three_callers_goes(code, gone, why):
+    configure = _braced_block(code, "func configure(appState: AppState) {")
+    parts = configure.split("refreshDeviceTimezone()")
+    assert len(parts) == 4, "configure must call it from exactly these three places"
+    kept = ["refreshDeviceTimezone()"] * 3
+    kept[gone] = ""
+    mutated = "".join(part + call for part, call in zip(parts, kept + [""]))
+    with pytest.raises(AssertionError, match=why):
+        _assert_every_user_sends_a_timezone(code.replace(configure, mutated))
 
 
 # ── anti-vacuity ─────────────────────────────────────────────────────────────

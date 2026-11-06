@@ -213,7 +213,10 @@ class NotificationKind:
     # a result at any hour, so without this a default-settings watcher could be buzzed at
     # 02:30. It is the ordinary deferral: the inbox row is written at once, the 24/7 flush
     # buzzes at the wake, and a dedup key shared by two kinds still gives one push. A Quiet
-    # Hours toggle the user did touch always wins, off included.
+    # Hours toggle the user did touch always wins, off included. Such a kind's wake also asks
+    # again: the flush holds a row once more on a good read that puts it in the user's night,
+    # and takes its text from `earnings_live_sender.copy_at_wake`, so a third kind here needs
+    # copy there too (with none, it keeps the row's text).
     night_hold_by_default: bool = False
 
     def __post_init__(self) -> None:
@@ -565,6 +568,12 @@ LEGACY_PREFERENCE_DEFAULTS: Dict[str, bool] = {
 # an absent notify_* key mean?", which is the contract the iOS parity test pins. Leaving
 # it out let the two sides disagree about a key that ships OFF, and an off-by-default
 # key that the backend thinks is on is the exact failure this whole map exists to stop.
+#
+# One thing this map cannot say. Absent and a stored False both DISPLAY as off, and for the
+# ordinary window they ARE the same, but an absent key also means the user never answered,
+# which `quiet_hours_never_set` reads for `night_hold_by_default` kinds. So the client must
+# keep leaving the key out until the toggle is touched (`SettingsSyncManager.currentBlob()`),
+# which `tests/test_ios_settings_push_paths.py` pins.
 DELIVERY_PREFERENCE_DEFAULTS: Dict[str, bool] = {
     PREF_QUIET_ENABLED: False,
 }

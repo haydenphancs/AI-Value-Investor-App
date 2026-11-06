@@ -9,7 +9,9 @@ the user is awake and buzzes for the nine they are asleep, and every symptom of 
 ("I never get alerts") points at the sender, not at this file.
 """
 
+import re
 from datetime import datetime, time, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -18,6 +20,10 @@ from app.services import quiet_hours as qh
 
 ET = ZoneInfo("America/New_York")
 TOKYO = ZoneInfo("Asia/Tokyo")
+_SETTINGS_SCREEN = (
+    Path(__file__).resolve().parents[2]
+    / "frontend" / "ios" / "ios" / "Views" / "Screens" / "NotificationsSettingsView.swift"
+)
 
 
 def _win(start="22:00", end="07:00", enabled=True):
@@ -121,11 +127,49 @@ def test_any_readable_toggle_is_an_answer(raw):
     assert qh.quiet_hours_never_set({qh.PREF_QUIET_ENABLED: raw}) is False
 
 
-def test_the_night_hold_is_the_window_the_settings_screen_opens_on():
-    """One default pair of hours, so the hold cannot drift from what Quiet Hours shows."""
+def _settings_screen_hours(src: str) -> dict:
+    """`preferenceStringDefaults` as the Swift declares it, comments gone: the comment above the
+    map talks about these keys too."""
+    code = "\n".join(line.split("//")[0] for line in src.splitlines())
+    declared = code.index("=", code.index("static let preferenceStringDefaults"))
+    block = code[code.index("[", declared): code.index("]", declared) + 1]
+    return dict(re.findall(r'"(\w+)":\s*"([^"]*)"', block))
+
+
+def _assert_the_hold_is_the_screens_window(screen: dict) -> None:
+    assert screen == {
+        qh.PREF_QUIET_START: qh.DEFAULT_QUIET_START,
+        qh.PREF_QUIET_END: qh.DEFAULT_QUIET_END,
+    }, "the hold's hours are no longer the ones the Quiet Hours screen opens on"
     assert qh.NIGHT_HOLD_WINDOW == qh.resolve_window({qh.PREF_QUIET_ENABLED: True})
     assert qh.NIGHT_HOLD_WINDOW.enabled is True
+    assert (qh.NIGHT_HOLD_WINDOW.start, qh.NIGHT_HOLD_WINDOW.end) == (
+        qh.parse_hhmm(screen[qh.PREF_QUIET_START]), qh.parse_hhmm(screen[qh.PREF_QUIET_END]),
+    )
+
+
+def test_the_night_hold_is_the_window_the_settings_screen_opens_on():
+    """One default pair of hours, read from the screen itself, so the hold cannot drift from
+    what Quiet Hours shows the user who goes to look."""
+    if not _SETTINGS_SCREEN.exists():
+        pytest.skip(f"{_SETTINGS_SCREEN} not present")
+    _assert_the_hold_is_the_screens_window(
+        _settings_screen_hours(_SETTINGS_SCREEN.read_text(encoding="utf-8"))
+    )
     assert (qh.NIGHT_HOLD_WINDOW.start, qh.NIGHT_HOLD_WINDOW.end) == (time(22, 0), time(7, 0))
+
+
+@pytest.mark.parametrize("old,new", [
+    ('"notify_quiet_start": "22:00"', '"notify_quiet_start": "23:00"'),
+    ('"notify_quiet_end": "07:00"', '"notify_quiet_end": "08:00"'),
+], ids=["start", "end"])
+def test_the_window_guard_fails_when_the_screen_moves(old, new):
+    if not _SETTINGS_SCREEN.exists():
+        pytest.skip(f"{_SETTINGS_SCREEN} not present")
+    src = _SETTINGS_SCREEN.read_text(encoding="utf-8")
+    assert old in src
+    with pytest.raises(AssertionError, match="the Quiet Hours screen opens on"):
+        _assert_the_hold_is_the_screens_window(_settings_screen_hours(src.replace(old, new)))
 
 
 def test_start_equals_end_is_treated_as_disabled():

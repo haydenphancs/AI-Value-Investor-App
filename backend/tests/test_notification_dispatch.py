@@ -22,6 +22,7 @@ from app.services.push_service import PushOutcome
 
 from app.config import settings
 from app.services import quiet_hours as qh
+from app.services.notification_senders import earnings_live_sender
 from app.services.notification_kinds import (
     KIND_EARNINGS_LIVE,
     KIND_EARNINGS_RESULT,
@@ -951,6 +952,44 @@ async def test_the_flush_does_NOT_re_check_quiet_hours():
 
     stats = await svc.flush_deferred()
     assert stats["sent"] == 1, "a flushed row must not be re-deferred"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", sorted(set(NOTIFICATION_KINDS) - set(NIGHT_KINDS)))
+async def test_every_other_kind_is_flushed_word_for_word_with_no_second_hold(key, monkeypatch):
+    """The wake's two extra questions belong to the night-hold kinds. A row of any other kind,
+    still inside the user's window on a good read and on its first hand-out, with a route naming
+    a report, goes out as it was written."""
+    def _never(*args, **kwargs):
+        raise AssertionError(f"{key} must not reach this")
+
+    kind = get_kind(key)
+    push = _FakePush()
+    svc = _svc(push)
+    svc._claim_due = lambda limit: [{
+        "user_id": "u1", "dedup_key": "k", "kind": key, "title": "T", "body": "B",
+        "route": {"ticker": "INTC", "report_date": "2026-10-29"}, "attempts": 1,
+        "claimed_at": datetime.now(timezone.utc).isoformat(),
+    }]
+    svc._devices_bulk = lambda ids: {"u1": [{"token": "t", "environment": "sandbox"}]}
+    svc.unread_counts_bulk = lambda ids: {"u1": 0}
+    svc._preferences_bulk = lambda ids: {"u1": {
+        kind.preference_key: True,
+        qh.PREF_QUIET_ENABLED: True,
+        qh.PREF_QUIET_START: "00:01",
+        qh.PREF_QUIET_END: "23:59",
+        qh.PREF_TIMEZONE: "America/New_York",
+    }}
+    svc._category_counts_bulk = lambda ids, category, cutoffs: {uid: 0 for uid in ids}
+    svc.mark_state = lambda *a, **k: None
+    svc._hold_again = _never
+    svc._rewrite_text = _never
+    monkeypatch.setattr(earnings_live_sender, "copy_at_wake", _never)
+
+    stats = await svc.flush_deferred()
+
+    assert (stats["sent"], stats["requeued"], stats["failed"]) == (1, 0, 0)
+    assert (push.calls[0]["title"], push.calls[0]["body"]) == ("T", "B")
 
 
 # ── the flush charges the cap against the RIGHT clock ────────────────────────

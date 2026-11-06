@@ -20,6 +20,12 @@ dispatcher's job — nothing here decides who is told. That includes the hour: b
 `night_hold_by_default`, so a landing in the night of a user who never set Quiet Hours is
 claimed at once and buzzes at 07:00 on their clock.
 
+A HELD ROW'S TEXT is decided at its wake, not at its landing (`copy_at_wake`): the record can
+have moved under it for hours, and the flush is what asks. The text comes from the record, a
+surprise the record no longer holds is not buzzed, and the row keeps what the record says so the
+inbox never shows the number the phone was spared. The row's own text stands only when the
+record has nothing to say: it is gone (a restart), or holds no figure.
+
 THE WINDOW. Neither kind goes out for a report older than yesterday: the daily pass's own
 rule (`earnings_sender.in_result_window`), which is narrower than the live days around a
 weekend or a holiday. A Friday report FMP fills on Monday lands, keeps its card and its sheet,
@@ -47,8 +53,9 @@ document); an FMP-sourced figure is stated as beat/missed by a percentage, the s
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 from app.config import settings
 from app.services.earnings_live_service import (
@@ -58,6 +65,8 @@ from app.services.earnings_live_service import (
     LiveMetric,
     LiveSnapshot,
     et_now,
+    get_earnings_live_service,
+    has_results,
     live_days,
 )
 from app.services.notification_kinds import (
@@ -143,6 +152,64 @@ def live_copy(snap: LiveSnapshot) -> Tuple[str, str]:
     return f"{snap.symbol} results are out", body
 
 
+@dataclass(frozen=True)
+class WakeCopy:
+    """What a held result says at its wake. `send` False keeps it off the phone: the text goes
+    to its inbox row alone."""
+
+    title: str
+    body: str
+    send: bool
+
+
+def _result_surprise(snap: LiveSnapshot) -> Optional[float]:
+    """The surprise an `earnings_result` push may state for this report, or None: FMP's own
+    adjusted EPS, an honest percentage, past `MIN_SURPRISE`."""
+    eps = snap.eps
+    if eps.actual is None or eps.source != SOURCE_FMP:
+        return None
+    surprise = surprise_pct({"epsEstimated": eps.estimate, "epsActual": eps.actual})
+    return surprise if surprise is not None and abs(surprise) >= MIN_SURPRISE else None
+
+
+def _report_of(route: Mapping[str, Any]) -> Optional[Tuple[str, date]]:
+    """The (symbol, report date) a stored route names, or None."""
+    symbol, raw_day = route.get("ticker"), route.get("report_date")
+    if not isinstance(symbol, str) or not symbol or not isinstance(raw_day, str):
+        return None
+    try:
+        return symbol, date.fromisoformat(raw_day[:10])
+    except ValueError:
+        return None
+
+
+def copy_at_wake(kind: str, route: Mapping[str, Any], now: datetime) -> Optional[WakeCopy]:
+    """What a held row of `kind`, stored with `route`, says now, from the record as it stands
+    (A HELD ROW'S TEXT in the module docstring), or None to keep the row's own text.
+
+    `earnings_result` goes out only on what would start it now (`_result_surprise`), since FMP
+    can correct a figure inside the hold and a push must not state a beat the sheet it opens
+    calls a miss. `earnings_live` goes out on any figure that stands. A row that no longer goes
+    out takes `live_copy`, which can say what `result_copy` cannot: in line, being confirmed.
+    PURE apart from reading the record, so the flush can call it on the event loop.
+    """
+    report = _report_of(route)
+    if report is None or kind not in (KIND_EARNINGS_LIVE, KIND_EARNINGS_RESULT):
+        return None
+    snap = get_earnings_live_service().snapshot(*report, now)
+    if snap is None:
+        return None
+    eps, revenue = snap.eps, snap.revenue
+    if not (has_results(eps, revenue) or eps.checking or revenue.checking):
+        return None
+    if kind == KIND_EARNINGS_RESULT:
+        surprise = _result_surprise(snap)
+        if surprise is not None:
+            return WakeCopy(*result_copy(snap.symbol, surprise), send=True)
+        return WakeCopy(*live_copy(snap), send=False)
+    return WakeCopy(*live_copy(snap), send=has_results(eps, revenue))
+
+
 async def _notify(kind: str, snap: LiveSnapshot, title: str, body: str) -> int:
     from app.services.push_dispatch_service import get_push_dispatch_service
 
@@ -197,11 +264,7 @@ def _still_owed(snap: LiveSnapshot) -> bool:
         return True
     if not settings.EARNINGS_LIVE_RESULT_PUSH_ENABLED or key in _surprise_done:
         return False
-    eps = snap.eps
-    if eps.actual is None or eps.source != SOURCE_FMP:
-        return False
-    surprise = surprise_pct({"epsEstimated": eps.estimate, "epsActual": eps.actual})
-    return surprise is not None and abs(surprise) >= MIN_SURPRISE
+    return _result_surprise(snap) is not None
 
 
 def _give_back(done: Set[Tuple[str, date]], snap: LiveSnapshot, left: List[LiveSnapshot],

@@ -80,6 +80,19 @@ Hand mutations run (each one KILLED — the named guard failed with its intended
   M32 NotificationSettingsViewModel: setQuietStart's push dropped
   M33 NotificationSettingsViewModel: setQuietHoursEnabled pushes via `asyncAfter`
   M34 SettingsSyncManager: the un-hydrated branch of `push()` no longer marks the change
+  M35 SettingsSyncManager: `currentBlob()` stamps every bool, touched or not
+  M36 SettingsSyncManager: `currentBlob()` always stamps the Quiet Hours key
+  M37 NotificationSettingsViewModel: `load()` seeds the key when the screen opens
+  M38 NotificationsSettingsView: the screen writes the key itself
+  M39 NotificationSettingsViewModel: the toggle's own setter stops writing the key
+  M40 AppDelegate-style `register(defaults:)` of the key, written in the screen
+  M41 NotificationSettingsViewModel: `load()` calls the setter
+
+6. The night hold (owner decision 2026-11-05, "Hold until 7 AM") reads an ABSENT
+   `notify_quiet_hours_enabled` differently from a stored false: absent means the user never
+   answered, so results wait for 07:00, and a stored false is their answer, so they buzz at
+   02:30. Both draw as Off on the screen, so a client that sent the false for someone who never
+   touched it would wake them, with no error anywhere and no backend test able to see it.
 """
 
 from __future__ import annotations
@@ -479,6 +492,50 @@ def test_push_marks_an_unhydrated_change_before_returning():
     )
 
 
+# ── 3b. an untouched Quiet Hours toggle stays absent ─────────────────────────
+
+_QUIET_TOGGLE = '"notify_quiet_hours_enabled"'
+_QUIET_SETTER = "func setQuietHoursEnabled(_ value: Bool)"
+# `set`, `setValue`, `setObject`, or a `register(defaults:)` that would make the key read as set.
+_QUIET_TOGGLE_WRITE = re.compile(r'\.(?:set\w*|register)\s*\([^\n]*"notify_quiet_hours_enabled"')
+
+
+def test_an_untouched_quiet_hours_toggle_stays_out_of_the_blob():
+    """The next PUT carries `currentBlob()`, so a false stamped here is a stored answer."""
+    blob = _block_after(_code(_SYNC), "private func currentBlob()")
+    assert "for key in Self.boolKeys where defaults.object(forKey: key) != nil" in blob, (
+        "currentBlob() stamps a bool nobody touched, and an untouched Quiet Hours toggle reaches "
+        "the backend as an explicit off: earnings results then buzz at 02:30"
+    )
+    assert _QUIET_TOGGLE not in blob, (
+        "currentBlob() names the Quiet Hours key, so it is sent whether or not it was touched"
+    )
+
+
+def test_only_the_quiet_hours_toggle_itself_writes_its_key():
+    """Opening the screen must not count as an answer: it reads the key and defaults to off."""
+    vm = _code(_NOTIF_VM)
+    setter = _block_after(vm, _QUIET_SETTER)
+    assert f"defaults.set(value, forKey: {_QUIET_TOGGLE})" in setter, (
+        "setQuietHoursEnabled no longer writes the key, so a user's answer never reaches the "
+        "server"
+    )
+
+    writers, callers = [], []
+    for path in sorted(_IOS.rglob("*.swift")):
+        src = _strip_comments(path.read_text(encoding="utf-8"))
+        if path.resolve() == _NOTIF_VM.resolve():
+            start, end = _spans(src, _QUIET_SETTER)
+            src = (src[:start] + src[end:]).replace(_QUIET_SETTER, "")
+        if _QUIET_TOGGLE_WRITE.search(src):
+            writers.append(str(path.relative_to(_IOS)))
+        callers += [str(path.relative_to(_IOS))] * src.count("setQuietHoursEnabled(")
+    assert not writers, f"notify_quiet_hours_enabled is written outside its setter: {writers}"
+    assert callers == ["Views/Screens/NotificationsSettingsView.swift"], (
+        f"setQuietHoursEnabled is called from outside the toggle's own binding: {callers}"
+    )
+
+
 # ── 4. Journey narration honours Default Speed ───────────────────────────────
 
 def test_play_clip_sets_default_rate_from_the_stored_speed():
@@ -675,6 +732,40 @@ _MUTATIONS = [
      "            print(\"ℹ️ [Settings] push deferred (not hydrated)",
      test_push_marks_an_unhydrated_change_before_returning,
      "push()'s un-hydrated branch no longer records the change as unsaved"),
+    ("M35", _SYNC, "for key in Self.boolKeys where defaults.object(forKey: key) != nil {",
+     "for key in Self.boolKeys {", test_an_untouched_quiet_hours_toggle_stays_out_of_the_blob,
+     "currentBlob() stamps a bool nobody touched"),
+    ("M36", _SYNC, "        for key in Self.stringKeys {\n            guard var value",
+     '        blob["notify_quiet_hours_enabled"] = '
+     '.bool(defaults.bool(forKey: "notify_quiet_hours_enabled"))\n'
+     "        for key in Self.stringKeys {\n            guard var value",
+     test_an_untouched_quiet_hours_toggle_stays_out_of_the_blob,
+     "currentBlob() names the Quiet Hours key"),
+    ("M37", _NOTIF_VM, "        quietStart = Self.time(from: defaults.string(",
+     '        defaults.set(quietHoursEnabled, forKey: "notify_quiet_hours_enabled")\n'
+     "        quietStart = Self.time(from: defaults.string(",
+     test_only_the_quiet_hours_toggle_itself_writes_its_key,
+     "notify_quiet_hours_enabled is written outside its setter"),
+    ("M38", _NOTIF_VIEW, "    static let preferenceStringDefaults",
+     '    static func seed() { UserDefaults.standard.set(false, '
+     'forKey: "notify_quiet_hours_enabled") }\n'
+     "    static let preferenceStringDefaults",
+     test_only_the_quiet_hours_toggle_itself_writes_its_key,
+     "notify_quiet_hours_enabled is written outside its setter"),
+    ("M39", _NOTIF_VM, 'defaults.set(value, forKey: "notify_quiet_hours_enabled")', "",
+     test_only_the_quiet_hours_toggle_itself_writes_its_key,
+     "setQuietHoursEnabled no longer writes the key"),
+    ("M40", _NOTIF_VIEW, "    static let preferenceStringDefaults",
+     '    static func seed() { UserDefaults.standard.register(defaults: '
+     '["notify_quiet_hours_enabled": false]) }\n'
+     "    static let preferenceStringDefaults",
+     test_only_the_quiet_hours_toggle_itself_writes_its_key,
+     "notify_quiet_hours_enabled is written outside its setter"),
+    ("M41", _NOTIF_VM, "        quietStart = Self.time(from: defaults.string(",
+     "        setQuietHoursEnabled(quietHoursEnabled)\n"
+     "        quietStart = Self.time(from: defaults.string(",
+     test_only_the_quiet_hours_toggle_itself_writes_its_key,
+     "setQuietHoursEnabled is called from outside the toggle's own binding"),
 ]
 
 

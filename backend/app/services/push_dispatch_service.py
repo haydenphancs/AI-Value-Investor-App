@@ -13,7 +13,8 @@ decisions that determine whether a notification is welcome or an uninstall:
   4. **When.** Quiet hours DEFER a notification; they never drop it. The ledger row
      is written either way, so the inbox has it immediately and only the buzz waits. A
      kind with `night_hold_by_default` is deferred the same way for a user who never set
-     them, across the default night on that user's clock.
+     them, across the default night on that user's clock, and its wake asks twice more
+     what the landing could not know: the user's own clock, and the report as it stands.
   5. **Once.** A unique claim in `notification_events` (migration 119) inserted BEFORE
      the send, so a retry, a re-trip of the same scope, or two overlapping Railway
      instances cannot produce a second buzz.
@@ -51,7 +52,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
 from app.config import settings
@@ -69,6 +70,9 @@ from app.services.notification_kinds import (
 from app.services.push_service import LEDGER_BODY_LIMIT, PushService, truncate_for_banner
 
 from app.utils.postgrest_paging import PAGE_SIZE, fetch_all_rows
+
+if TYPE_CHECKING:
+    from app.services.notification_senders.earnings_live_sender import WakeCopy
 
 logger = logging.getLogger(__name__)
 
@@ -1410,6 +1414,9 @@ class PushDispatchService:
         and never sent. A 14-hour-late "AAPL moved 8%" is misinformation, not a
         notification — and the INBOX row survives either way, so the information is
         not lost, only the buzz.
+
+        A kind with `night_hold_by_default` asks two more things at its wake, in the loop
+        below: is this still the user's night, and what does the report say now.
         """
         stats = {"claimed": 0, "sent": 0, "stale": 0, "no_device": 0,
                  "failed": 0, "suppressed": 0, "requeued": 0}
@@ -1615,11 +1622,48 @@ class PushDispatchService:
                         category_sent_today=charged[budget_key],
                     )
 
-                    # Re-run preference + cap ONLY. Quiet hours are deliberately NOT
-                    # re-checked: this row is being flushed precisely because its window
-                    # ended, and asking again would re-defer it forever on a window that
-                    # spans the flush.
+                    # Re-run preference + cap, and quiet hours ONLY for a night-hold kind's
+                    # first wake. Every other row is NOT held again: it is being flushed
+                    # precisely because its window ended, and asking again would re-defer it
+                    # forever on a window that spans the flush.
+                    #
+                    # A night-hold row gets one more hold, because its first wake can be on the
+                    # wrong clock: a failed read at the landing parked it on ET, whose 07:00 is
+                    # the small hours further west, or the user has flown since. Only on this
+                    # flush's own good read (an empty blob says nothing about where they are),
+                    # and only on the row's first hand-out, which is what bounds it: the claim
+                    # RPC counts `attempts`, so a held row comes back as the second and goes
+                    # out whatever the clock says then. If the hold cannot be written the row
+                    # is delivered, the cost of the row stuck at `pending` being a lost alert.
                     gate = self.decide(recipient, nkind, now)
+                    if (
+                        gate.deliver_after is not None
+                        and nkind.night_hold_by_default
+                        and preferences.get(uid) is not None
+                        and int(row.get("attempts") or 0) <= 1
+                        and await asyncio.to_thread(
+                            self._hold_again, uid, key, gate.deliver_after
+                        )
+                    ):
+                        stats["requeued"] += 1
+                        continue
+
+                    route = row.get("route") if isinstance(row.get("route"), dict) else {}
+                    title, body = row.get("title") or "", row.get("body") or ""
+                    # The text was frozen at the landing and a report's figures can move under
+                    # it. Read before the gate below, because the inbox shows a row that is
+                    # never buzzed too.
+                    wake = None
+                    if nkind.night_hold_by_default:
+                        wake = self._wake_copy(nkind, route, now)
+                    if wake is not None and (wake.title, wake.body) != (title, body):
+                        logger.info(
+                            "push: held row user=%s key=%s moved under its text: %r -> %r "
+                            "(buzz=%s)", uid, key, body, wake.body, wake.send,
+                        )
+                        title, body = wake.title, wake.body
+                        await asyncio.to_thread(self._rewrite_text, uid, key, title, body)
+
                     if not gate.send and gate.deliver_after is None:
                         stats["suppressed"] = stats.get("suppressed", 0) + 1
                         await asyncio.to_thread(
@@ -1627,13 +1671,20 @@ class PushDispatchService:
                             error=f"suppressed on flush: {gate.reason}", sent=False,
                         )
                         continue
+                    if wake is not None and not wake.send:
+                        stats["suppressed"] = stats.get("suppressed", 0) + 1
+                        await asyncio.to_thread(
+                            self.mark_state, uid, key, STATE_FAILED,
+                            error="suppressed on flush: the report no longer says this",
+                            sent=False,
+                        )
+                        continue
 
-                    route = row.get("route") if isinstance(row.get("route"), dict) else {}
                     delivery_started = True
                     delivered = await self._deliver(
                         recipient, nkind,
-                        title=row.get("title") or "",
-                        body=row.get("body") or "",
+                        title=title,
+                        body=body,
                         dedup_key=key,
                         route=route,
                     )
@@ -1714,6 +1765,65 @@ class PushDispatchService:
 
         logger.info("push: quiet-hours flush %s", stats)
         return stats
+
+    def _wake_copy(
+        self, kind: NotificationKind, route: Dict[str, Any], now: datetime
+    ) -> "Optional[WakeCopy]":
+        """The sender's text for a held row at its wake, or None to keep the row's own.
+
+        Imported here because the sender imports this module. A failure keeps the row's own
+        text, as a record that is gone does: a bug in the re-read must not cost the buzz, and
+        retrying it every minute would only repeat the bug.
+        """
+        try:
+            from app.services.notification_senders.earnings_live_sender import copy_at_wake
+
+            return copy_at_wake(kind.key, route, now)
+        except Exception as e:
+            logger.warning(
+                "push: could not re-read the report behind a held %s for %s %s (%s: %s) — "
+                "sending the row's own text",
+                kind.key, route.get("ticker"), route.get("report_date"), type(e).__name__, e,
+            )
+            return None
+
+    def _rewrite_text(self, user_id: str, dedup_key: str, title: str, body: str) -> None:
+        """Put a held row's new text on its ledger row, which is what the inbox draws. Best-effort
+        like `mark_state`, and the phone gets the new text either way."""
+        try:
+            (
+                self.supabase.table(TABLE)
+                .update({"title": title, "body": truncate_for_banner(body, LEDGER_BODY_LIMIT)})
+                .eq("user_id", user_id)
+                .eq("dedup_key", dedup_key)
+                .execute()
+            )
+        except Exception as e:
+            logger.warning(
+                "push: could not rewrite the held row for user=%s key=%s (%s: %s) — the inbox "
+                "keeps its old text",
+                user_id, dedup_key, type(e).__name__, e,
+            )
+
+    def _hold_again(self, user_id: str, dedup_key: str, deliver_after: datetime) -> bool:
+        """Put a claimed row back to wake at `deliver_after`. False = it is still `pending`, and
+        the caller must finish it now: nothing else would ever pick it up."""
+        try:
+            (
+                self.supabase.table(TABLE)
+                .update({"push_state": STATE_DEFERRED, "deliver_after": deliver_after.isoformat()})
+                .eq("user_id", user_id)
+                .eq("dedup_key", dedup_key)
+                .eq("push_state", STATE_PENDING)
+                .execute()
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                "push: could not hold user=%s key=%s until %s (%s: %s) — delivering it now",
+                user_id, dedup_key, deliver_after.isoformat(), type(e).__name__, e,
+            )
+            return False
 
     # How long a cancelled flush waits for an in-flight `claim_due_notifications` RPC
     # to hand back what it claimed, so the rows can be returned before the process

@@ -50,7 +50,8 @@ What is pinned here, each a way the LIVE card could lie or cost too much:
   * the sender gets watched landings only, while the fold stays whole-market: cards and the
     sheet read every record;
   * a landing older than yesterday tells nobody, and keeps its card and its sheet;
-  * a failed read of the watched list serves the old list and says so.
+  * a failed read of the watched list serves the old list and says so;
+  * a bad cadence or SEC budget fails the deploy, and both loops run on the cadence that passed.
 Hermetic: inline fakes for FMP, SEC and the dispatcher; the clock is passed in.
 """
 from __future__ import annotations
@@ -61,10 +62,12 @@ import itertools
 import logging
 import time
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
 
 import pytest
+from pydantic import ValidationError
 
 import app.services.earnings_filing_service as efs
 import app.services.earnings_live_service as els
@@ -72,7 +75,7 @@ import app.services.earnings_window_service as ews
 import app.services.notification_senders.earnings_live_sender as sender
 import app.services.push_dispatch_service as pds
 import app.services.tracking_service as ts
-from app.config import settings
+from app.config import Settings, settings
 from app.integrations.fmp import EmptyAfterFailure
 from app.services.notification_kinds import KIND_EARNINGS_LIVE, KIND_EARNINGS_RESULT
 from app.utils import market_hours as mh
@@ -4822,6 +4825,51 @@ async def test_with_the_feature_off_neither_loop_ticks(monkeypatch):
     await _run_loops(monkeypatch, live=_tick, filing=_tick, until=until, sleep=_sleep,
                      enabled=False)
     assert ticked == []
+
+
+@pytest.mark.asyncio
+async def test_both_loops_rest_for_the_configured_cadence(monkeypatch):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_INTERVAL_SECONDS", 120)
+    until = asyncio.Event()
+    ran = {"live": 0, "filing": 0}
+    waits: List[float] = []
+
+    async def _sleep(seconds):
+        waits.append(seconds)
+        await asyncio.sleep(0)
+
+    def _tick(name):
+        async def _run(now):
+            ran[name] += 1
+            if min(ran.values()) >= 2:
+                until.set()
+        return _run
+
+    await _run_loops(monkeypatch, live=_tick("live"), filing=_tick("filing"), until=until,
+                     sleep=_sleep)
+    assert waits[0] == 45
+    waits.remove(els._FILING_LOOP_DELAY_SECONDS)
+    assert len(waits) > 2 and {round(wait) for wait in waits[1:]} == {120}
+
+
+@pytest.mark.parametrize("name, default, low, high", [
+    ("EARNINGS_LIVE_INTERVAL_SECONDS", 60, 15, 300),
+    ("EARNINGS_LIVE_SEC_MAX_SYMBOLS", 25, 0, 50),
+])
+def test_a_bad_cadence_or_sec_budget_fails_the_deploy(monkeypatch, name, default, low, high):
+    """`Field(ge, le)`: Railway keeps the old deployment and the error names the variable, where
+    an unchecked 500 symbols is an 8-minute round on the SEC circuit that Learn and the stake
+    finder share. From the example file, so no real `.env` is read and none can mask a value."""
+    example = Path(__file__).resolve().parents[1] / ".env.example"
+    assert Settings.model_fields[name].default == default and low <= default <= high
+    for bad in (low - 1, high + 1, -1, 10 ** 30, "abc", "20.5", "true", ""):
+        monkeypatch.setenv(name, str(bad))
+        with pytest.raises(ValidationError) as e:
+            Settings(_env_file=example)
+        assert [err["loc"] for err in e.value.errors()] == [(name,)], bad
+    for ok in (low, default, high):
+        monkeypatch.setenv(name, str(ok))
+        assert getattr(Settings(_env_file=example), name) == ok
 
 
 class _StopLoop(BaseException):

@@ -1,14 +1,18 @@
 """Live earnings pushes: two kinds, one dedup key per report, live kind first.
 
-The owner's rule (2026-10-29): a new "Live Results" toggle, "Results & Surprises" stays and is
-now sent live too, and NOBODY GETS TWO PUSHES FOR ONE REPORT. That holds because
+The owner's rule (2026-10-29): a new "Live Results" toggle, "Results & Surprises" stays and can
+be sent live too, and NOBODY GETS TWO PUSHES FOR ONE REPORT. That holds because
 `push_dispatch_service` claims a key only for users who pass their toggle and cap, and both
 kinds — and the daily 16:00 ET sender — claim the SAME key. What is pinned here:
   * both live kinds and the daily sender use one key (`result_dedup_key`);
   * `earnings_live` goes FIRST, sequentially, then `earnings_result`;
   * `earnings_result` is sent on FMP's adjusted EPS only, never on a filing figure (it
     reaches 1.02 users), and only past `MIN_SURPRISE`;
-  * `EARNINGS_LIVE_PUSH_ENABLED` (ships off) holds only the new kind;
+  * `EARNINGS_LIVE_PUSH_ENABLED` holds only the new kind and `EARNINGS_LIVE_RESULT_PUSH_ENABLED`
+    only the live sending of the existing one, and both ship off (on the second, the owner's
+    "Keep it off at first", 2026-11-05);
+  * the daily 16:00 ET pass reads neither switch: as shipped it is what tells a result, in the
+    words it always used;
   * a lock-screen banner prints an absolute figure only from the company's own release;
   * each report is dispatched once per process (the 60 s loop re-hands every landing);
   * a failed watcher read is the one exception: it told nobody, so the key goes back, the round
@@ -48,7 +52,7 @@ import app.services.notification_senders.earnings_live_sender as sender
 import app.services.notification_senders.earnings_sender as daily
 import app.services.push_dispatch_service as pds
 import app.services.tracking_service as ts
-from app.config import settings
+from app.config import Settings, settings
 from app.services import quiet_hours as qh
 from app.services.earnings_filing_service import FilingFigures
 from app.services.earnings_live_service import (
@@ -122,11 +126,11 @@ def test_the_new_kind_is_registered_beside_its_siblings():
     assert live.expiration_hours == 4
 
 
-def test_the_push_flag_ships_off_and_the_result_flag_on():
-    from app.config import Settings
-
+def test_both_live_push_switches_ship_off():
+    """The declared defaults, not this machine's environment. Live Results waits for the release
+    with its toggle; on the result push, the owner's "Keep it off at first" (2026-11-05)."""
     assert Settings.model_fields["EARNINGS_LIVE_PUSH_ENABLED"].default is False
-    assert Settings.model_fields["EARNINGS_LIVE_RESULT_PUSH_ENABLED"].default is True
+    assert Settings.model_fields["EARNINGS_LIVE_RESULT_PUSH_ENABLED"].default is False
 
 
 def test_one_key_for_both_live_kinds_and_the_daily_sender():
@@ -367,8 +371,8 @@ async def test_the_cap_warning_counts_reports_not_sends(dispatch, caplog):
                          ids=["in_line", "near_zero_estimate"])
 async def test_no_cap_warning_for_new_reports_with_nothing_to_send(
         dispatch, monkeypatch, caplog, eps, estimate):
-    """The shipped flags, on reports this process has not decided yet: the round stops on them
-    and the next one sends nothing for them. The near-zero estimate has no honest surprise."""
+    """The result kind alone, on reports this process has not decided yet: the round stops on
+    them and the next one sends nothing for them. The near-zero estimate has no honest surprise."""
     monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
     fresh = [_snap(f"A{i:03d}", eps=0.60, eps_pct=46.34) for i in range(60)]
     quiet = [_snap(f"Z{i:03d}", eps=eps, eps_est=estimate) for i in range(5)]
@@ -393,7 +397,7 @@ _BEHIND_THE_CAP = {
 @pytest.mark.asyncio
 @pytest.mark.parametrize("shape", list(_BEHIND_THE_CAP.values()), ids=list(_BEHIND_THE_CAP))
 @pytest.mark.parametrize("live,result", [(False, True), (True, False), (True, True)],
-                         ids=["shipped", "result_off", "both_on"])
+                         ids=["live_off", "result_off", "both_on"])
 @pytest.mark.parametrize("told_live", [False, True], ids=["new", "told_live"])
 async def test_the_cap_warning_says_what_the_next_round_sends(
         dispatch, monkeypatch, caplog, shape, live, result, told_live):
@@ -1063,6 +1067,7 @@ async def test_the_16_00_et_pass_tells_each_watcher_on_their_own_clock(monkeypat
         "tokyo_said_off": {qh.PREF_TIMEZONE: "Asia/Tokyo", qh.PREF_QUIET_ENABLED: False},
     }
     svc = _dispatcher_over(monkeypatch, ledger, phones, prefs=prefs, users=tuple(prefs))
+    _flags_as_shipped(monkeypatch)
 
     pass_time = _clock_at(monkeypatch, datetime(2026, 10, 29, 16, 0, tzinfo=ET))
     stats = await _daily_pass(monkeypatch, pass_time)
@@ -1145,6 +1150,157 @@ async def test_a_daytime_landing_goes_out_at_once_as_before(monkeypatch, clean_s
     assert [r["push_state"] for r in ledger.rows] == ["sent"]
 
 
+# ── as shipped: the 16:00 ET pass tells the result, as it always did ─────────
+#
+# With both push switches off nothing is sent live, so the daily pass is what tells a result. It
+# must not notice: it reads neither switch. `_PASS_SENDS` is what the pass sent for
+# `_PASS_CALENDAR` before the result switch went off, word for word, and it stays the answer
+# whichever way the switches stand.
+
+THU_1700 = datetime(2026, 10, 29, 17, 0, tzinfo=ET)
+
+#: A Friday's calendar: tomorrow's heads-up, today's miss, yesterday's beat, a surprise under the
+#: bar, and a beat nobody watches.
+_PASS_CALENDAR = {
+    "2026-10-31": [{"symbol": "NVDA", "date": "2026-10-31", "time": "amc", "epsEstimated": 1.0,
+                    "epsActual": None}],
+    "2026-10-30": [{"symbol": "MSFT", "date": "2026-10-30", "time": "amc", "epsEstimated": 2.0,
+                    "epsActual": 1.5},
+                   {"symbol": "AAPL", "date": "2026-10-30", "time": "bmo", "epsEstimated": 1.0,
+                    "epsActual": 1.02}],
+    "2026-10-29": [{"symbol": "INTC", "date": "2026-10-29", "time": "amc", "epsEstimated": 0.41,
+                    "epsActual": 0.60},
+                   {"symbol": "ZZZZ", "date": "2026-10-29", "time": "amc", "epsEstimated": 1.0,
+                    "epsActual": 2.0}],
+}
+
+
+def _pass_send(symbol: str, day: str, kind: str, title: str, body: str) -> Dict[str, Any]:
+    return {"ticker": symbol, "title": title, "body": body, "kind": kind,
+            "dedup_key": f"{kind}:{symbol}:{day}",
+            "data": {"route": "ticker", "ticker": symbol, "asset_type": "stock",
+                     "tab": "financials", "report_date": day}}
+
+
+_PASS_SENDS = [
+    _pass_send("NVDA", "2026-10-31", "earnings_upcoming", "NVDA reports earnings",
+               "NVDA is scheduled to report tomorrow after market close."),
+    _pass_send("MSFT", "2026-10-30", "earnings_result", "MSFT earnings are out",
+               "EPS missed consensus by 25%. Tap for the full picture."),
+    _pass_send("INTC", "2026-10-29", "earnings_result", "INTC earnings are out",
+               "EPS beat consensus by 46%. Tap for the full picture."),
+]
+
+
+async def _pass_over_the_calendar(monkeypatch):
+    """The real pass at Friday 16:00 ET over `_PASS_CALENDAR`: its counts and its claim."""
+    run = SimpleNamespace(success=False, notified=0)
+
+    @contextlib.asynccontextmanager
+    async def claimed(_job):
+        yield run
+
+    async def calendar(from_date=None, to_date=None):
+        return [dict(row) for row in _PASS_CALENDAR.get(from_date, [])]
+
+    monkeypatch.setattr(daily, "claimed_job", claimed)
+    monkeypatch.setattr(daily, "get_fmp_client",
+                        lambda: SimpleNamespace(get_earnings_calendar=calendar))
+    monkeypatch.setattr(daily, "_watched_tickers", lambda: {"NVDA", "MSFT", "AAPL", "INTC"})
+    return await daily.run_earnings_notifications(now=FRI_1600), run
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live_push", [False, True], ids=["live_off", "live_on"])
+@pytest.mark.parametrize("result_push", [False, True], ids=["result_off", "result_on"])
+async def test_the_16_00_pass_says_the_same_whichever_way_the_switches_stand(
+        monkeypatch, clean_sender, live, live_push, result_push):
+    """Every word, key and route it sends, and nothing else: no `strict`, which would end the
+    whole pass on one failed watcher read, and the same counts on the job's claim."""
+    rec = _Dispatch()
+    monkeypatch.setattr(daily, "get_push_dispatch_service", lambda: rec)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", live_push)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_RESULT_PUSH_ENABLED", result_push)
+
+    stats, run = await _pass_over_the_calendar(monkeypatch)
+
+    assert rec.sent == _PASS_SENDS
+    assert stats == {"upcoming": 1, "results": 2, "symbols": 3}
+    assert (run.success, run.notified) == (True, 3)
+
+
+def test_the_pass_keeps_its_hour():
+    assert Settings.model_fields["EARNINGS_NOTIFY_HOUR_ET"].default == 16
+
+
+@pytest.mark.asyncio
+async def test_as_shipped_a_landing_claims_nothing_and_the_16_00_pass_tells_it(
+        monkeypatch, clean_sender, live):
+    """Thursday's result lands at 17:00 and no row is claimed: the key has to stay free, or the
+    pass would find it taken and nobody would hear. Friday's pass tells it, once, and neither the
+    sender's later rounds nor a pass run again add anything."""
+    ledger, phones = _Ledger(), _Phones()
+    _dispatcher_over(monkeypatch, ledger, phones)
+    _flags_as_shipped(monkeypatch)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
+
+    landed = _lands(live, _clock_at(monkeypatch, THU_1700))
+    assert [s.symbol for s in landed] == ["INTC"], "the sender must be handed a real landing"
+    stats = await sender.dispatch_landings(landed, THU_1700)
+    assert stats == {"live": 0, "result": 0}
+    assert ledger.rows == [] and phones.buzzes == []
+
+    assert (await _daily_pass(monkeypatch, _clock_at(monkeypatch, FRI_1600)))["results"] == 1
+    (row,) = ledger.rows
+    (buzz,) = phones.buzzes
+    assert (row["kind"], row["dedup_key"], row["push_state"]) == (
+        KIND_EARNINGS_RESULT, "earnings_result:INTC:2026-10-29", "sent")
+    assert (buzz["title"], buzz["body"]) == (
+        "INTC earnings are out", "EPS beat consensus by 46%. Tap for the full picture.")
+    assert buzz["data"]["report_date"] == "2026-10-29"
+
+    await sender.dispatch_landings(live.landed_snapshots(FRI_1600), FRI_1600)
+    await _daily_pass(monkeypatch, FRI_1600)
+    assert len(ledger.rows) == len(phones.buzzes) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_result_push_switched_on_later_finds_what_the_pass_told(
+        monkeypatch, clean_sender, live):
+    """The switch goes on with a redeploy: a fresh process, a report the pass already told, and
+    the one key between them."""
+    ledger, phones = _Ledger(), _Phones()
+    _dispatcher_over(monkeypatch, ledger, phones)
+    _flags_as_shipped(monkeypatch)
+    await _daily_pass(monkeypatch, _clock_at(monkeypatch, FRI_1600))
+    assert len(phones.buzzes) == 1
+
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_RESULT_PUSH_ENABLED", True)
+    sender.reset()
+    await sender.dispatch_landings([_big()], FRI_1600)
+    assert len(ledger.rows) == len(phones.buzzes) == 1
+
+
+@pytest.mark.asyncio
+async def test_as_shipped_a_busy_round_sends_nothing_warns_of_nothing_and_still_forgets(
+        dispatch, monkeypatch, caplog):
+    """Nothing is ever decided with both off, so every report stays open for its whole window. It
+    must stay quiet there: past the round cap there is nothing owed, and the memory still ends
+    with the live days."""
+    _flags_as_shipped(monkeypatch)
+    many = [_snap(f"A{i:03d}", eps=0.60, eps_pct=46.34)
+            for i in range(sender.MAX_SENDS_PER_ROUND + 5)]
+    with caplog.at_level(logging.WARNING, logger=sender.__name__):
+        await sender.dispatch_landings(many, NOW)
+        await sender.dispatch_landings(many, NOW)
+    assert dispatch.sent == [] and _warnings(caplog) == []
+    assert len(sender._live_done) == len(many)
+
+    await sender.dispatch_landings([], datetime(2026, 11, 3, 15, 0, tzinfo=timezone.utc))
+    assert not sender._live_done and not sender._surprise_done
+
+
 # ── what a held result says and opens ────────────────────────────────────────
 #
 # The row is written at the landing and its buzz goes out hours later, so two things can have
@@ -1213,9 +1369,16 @@ async def _tap(monkeypatch, route, at):
                                          date.fromisoformat(route["report_date"]))
 
 
-def _shipped_flags(monkeypatch):
-    """The kind that ships on: `earnings_live` waits for the release with its toggle."""
+def _result_kind_alone(monkeypatch):
+    """`earnings_result` sent live on its own, `earnings_live` held for the release with its
+    toggle. Over `_dispatcher_over`, which turns both on."""
     monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+
+
+def _flags_as_shipped(monkeypatch):
+    """Both push switches at their declared defaults, over whatever a fixture set."""
+    for name in ("EARNINGS_LIVE_PUSH_ENABLED", "EARNINGS_LIVE_RESULT_PUSH_ENABLED"):
+        monkeypatch.setattr(settings, name, Settings.model_fields[name].default)
 
 
 async def _flush_until_settled(svc, ledger, monkeypatch):
@@ -1243,7 +1406,7 @@ async def test_the_screen_a_held_push_opens_answers_its_figures(
     report has left the live days, and the buzz's first destination must still open."""
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones)
-    _shipped_flags(monkeypatch)
+    _result_kind_alone(monkeypatch)
     day = previous_trading_day(landing.date())
 
     await sender.dispatch_landings(_lands(live, landing, day=day),
@@ -1270,7 +1433,7 @@ async def test_a_daily_pass_held_for_europe_opens_at_its_wake(
     ledger, phones = _Ledger(), _Phones()
     prefs = {"u1": {qh.PREF_TIMEZONE: zone}}
     svc = _dispatcher_over(monkeypatch, ledger, phones, prefs=prefs)
-    _shipped_flags(monkeypatch)
+    _flags_as_shipped(monkeypatch)
     monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
     tuesday = date(2026, 11, 10)
 
@@ -1327,7 +1490,7 @@ async def test_a_buzz_at_the_wake_says_what_the_record_says_then(
     sheet all say the corrected figure, with no number left over from the landing."""
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones)
-    _shipped_flags(monkeypatch)
+    _result_kind_alone(monkeypatch)
 
     await sender.dispatch_landings(_lands(live, THU_2210), _clock_at(monkeypatch, THU_2210))
     (row,) = ledger.rows
@@ -1355,7 +1518,7 @@ async def test_a_surprise_the_record_no_longer_holds_is_never_buzzed(
         monkeypatch, clean_sender, live, eps, wakes, why):
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones)
-    _shipped_flags(monkeypatch)
+    _result_kind_alone(monkeypatch)
 
     await sender.dispatch_landings(_lands(live, THU_2210), _clock_at(monkeypatch, THU_2210))
     _fmp_says(live, THU_2340, eps=eps)
@@ -1377,7 +1540,7 @@ async def test_a_surprise_the_record_no_longer_holds_is_never_buzzed(
 async def test_a_small_surprise_reads_as_what_it_is_in_the_inbox(monkeypatch, clean_sender, live):
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones)
-    _shipped_flags(monkeypatch)
+    _result_kind_alone(monkeypatch)
 
     await sender.dispatch_landings(_lands(live, THU_2210), _clock_at(monkeypatch, THU_2210))
     _fmp_says(live, THU_2340, eps=0.41)
@@ -1389,7 +1552,7 @@ async def test_a_small_surprise_reads_as_what_it_is_in_the_inbox(monkeypatch, cl
 
 @pytest.mark.asyncio
 async def test_a_live_row_says_what_has_landed_by_the_wake(monkeypatch, clean_sender, live):
-    """The kind that ships off. Revenue landed at night, FMP's EPS came later still."""
+    """`earnings_live`. Revenue landed at night, FMP's EPS came later still."""
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones)
 
@@ -1433,7 +1596,7 @@ async def test_a_record_that_holds_nothing_leaves_the_rows_own_text(
     Neither says anything against the row, which a figure did land to write."""
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones)
-    _shipped_flags(monkeypatch)
+    _result_kind_alone(monkeypatch)
 
     await sender.dispatch_landings(_lands(live, THU_2210), _clock_at(monkeypatch, THU_2210))
     live.reset()
@@ -1466,7 +1629,7 @@ async def test_a_broken_re_read_costs_the_new_text_never_the_buzz(
         monkeypatch, clean_sender, caplog):
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones)
-    _shipped_flags(monkeypatch)
+    _result_kind_alone(monkeypatch)
 
     def _boom(*a, **k):
         raise RuntimeError("record exploded")
@@ -1490,7 +1653,7 @@ async def test_a_failed_text_write_still_sends_the_new_text(
     the number the record has left."""
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones)
-    _shipped_flags(monkeypatch)
+    _result_kind_alone(monkeypatch)
     await sender.dispatch_landings(_lands(live, THU_2210), _clock_at(monkeypatch, THU_2210))
     _fmp_says(live, THU_2340, eps=0.30)
 
@@ -1515,7 +1678,7 @@ async def test_a_row_the_cap_stops_at_the_wake_still_loses_its_stale_number(
         monkeypatch, clean_sender, live):
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones)
-    _shipped_flags(monkeypatch)
+    _result_kind_alone(monkeypatch)
     await sender.dispatch_landings(_lands(live, THU_2210), _clock_at(monkeypatch, THU_2210))
     _fmp_says(live, THU_2340, eps=0.30)
 
@@ -1583,7 +1746,7 @@ async def test_a_pass_row_is_not_dropped_by_a_record_older_than_the_pass(
     nothing reads that day again. FMP then says 0.60, which the pass reads on Wednesday."""
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones, prefs=TO_BERLIN, users=tuple(TO_BERLIN))
-    _shipped_flags(monkeypatch)
+    _result_kind_alone(monkeypatch)
     await sender.dispatch_landings(_lands(live, TUE_2005, eps=0.40, day=TUESDAY),
                                    _clock_at(monkeypatch, TUE_2005))
     assert ledger.rows == []
@@ -1602,7 +1765,7 @@ async def test_the_sheet_a_pass_buzz_opens_says_what_the_buzz_said(
         monkeypatch, clean_sender, live):
     ledger, phones = _Ledger(), _Phones()
     _dispatcher_over(monkeypatch, ledger, phones)
-    _shipped_flags(monkeypatch)
+    _flags_as_shipped(monkeypatch)
     _lands(live, TUE_2005, eps=0.40, day=TUESDAY)
 
     await _daily_pass(monkeypatch, _clock_at(monkeypatch, WED_1600), day=TUESDAY,
@@ -1620,7 +1783,7 @@ async def test_two_watchers_of_one_pass_never_get_opposite_directions(
     FMP says 0.60. One text for both, never a beat in New York and a miss in Berlin."""
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones, prefs=TO_BERLIN, users=tuple(TO_BERLIN))
-    _shipped_flags(monkeypatch)
+    _flags_as_shipped(monkeypatch)
     assert _fmp_says(live, TUE_2030, eps=0.30, day=TUESDAY) == []
 
     await _pass_then_wake(monkeypatch, svc, phones, ledger, WED_1600, day=TUESDAY)
@@ -1637,7 +1800,7 @@ async def test_a_pass_row_outlives_a_record_that_held_only_the_filing(
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones,
                            prefs={"tokyo": {qh.PREF_TIMEZONE: "Asia/Tokyo"}}, users=("tokyo",))
-    _shipped_flags(monkeypatch)
+    _flags_as_shipped(monkeypatch)
     friday_noon = datetime(2026, 11, 6, 12, 0, tzinfo=ET)
     live.observe_rows(FRIDAY, [_fmp_row(FRIDAY)], friday_noon, fetched=True)
     live.absorb_filing("INTC", FRIDAY, FilingFigures(
@@ -1658,7 +1821,7 @@ async def test_rows_read_before_the_pass_cannot_put_the_older_figure_back(
     than the pass, and the newest FMP answer wins, as it does over an own fetch."""
     ledger, phones = _Ledger(), _Phones()
     _dispatcher_over(monkeypatch, ledger, phones)
-    _shipped_flags(monkeypatch)
+    _flags_as_shipped(monkeypatch)
     wednesday = WED_1600.date()
     _lands(live, WED_1550, eps=0.40, day=wednesday)
     # Stored after the loop's last fetch, so that fetch alone would let this row in.
@@ -1817,7 +1980,7 @@ async def test_a_figure_being_confirmed_at_the_wake_is_asked_about_again(
     the true one, and the inbox, the sheet and the daily pass agree with it."""
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones)
-    _shipped_flags(monkeypatch)
+    _result_kind_alone(monkeypatch)
     await sender.dispatch_landings(_lands(live, THU_2210), _clock_at(monkeypatch, THU_2210))
     _fmp_says(live, THU_2340, eps=0.041)
 
@@ -1852,7 +2015,7 @@ async def test_a_figure_that_settles_on_a_small_surprise_ends_the_row_then(
     """Asking again is for an answer, and this is one: no buzz, and the row says so."""
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones)
-    _shipped_flags(monkeypatch)
+    _result_kind_alone(monkeypatch)
     await sender.dispatch_landings(_lands(live, THU_2210), _clock_at(monkeypatch, THU_2210))
     _fmp_says(live, THU_2340, eps=0.041)
     _clock_at(monkeypatch, FRI_0700)
@@ -1874,7 +2037,7 @@ async def test_a_figure_never_confirmed_ends_the_row_without_a_buzz(
     """The hold has an end. The row keeps saying what is known, and never the doubted number."""
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones)
-    _shipped_flags(monkeypatch)
+    _result_kind_alone(monkeypatch)
     await sender.dispatch_landings(_lands(live, THU_2210), _clock_at(monkeypatch, THU_2210))
     _fmp_says(live, THU_2340, eps=0.041)
 
@@ -1894,7 +2057,7 @@ async def test_a_row_that_spent_a_hand_out_on_the_clock_still_gets_its_look(
     doubt at that wake has had no second look yet."""
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones)
-    _shipped_flags(monkeypatch)
+    _result_kind_alone(monkeypatch)
     _read_fails_once(svc, {qh.PREF_TIMEZONE: "America/Los_Angeles"})
     await sender.dispatch_landings(_lands(live, FRI_0230 - timedelta(hours=4)),
                                    _clock_at(monkeypatch, FRI_0230 - timedelta(hours=4)))
@@ -1921,7 +2084,7 @@ async def test_fmps_figure_in_doubt_with_the_filing_on_show_is_no_answer_either(
     still goes out on FMP's own figure alone, which is the one in doubt."""
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones)
-    _shipped_flags(monkeypatch)
+    _result_kind_alone(monkeypatch)
     await sender.dispatch_landings(_lands(live, THU_2210), _clock_at(monkeypatch, THU_2210))
     live.absorb_filing("INTC", REPORT, FilingFigures(
         accession="a", accepted_at=None, url=None, eps_adjusted=0.60), THU_2340)
@@ -1958,7 +2121,7 @@ async def test_a_revenue_in_doubt_does_not_touch_an_eps_surprise(monkeypatch, cl
     """The surprise is an EPS sentence. A revenue the guard holds has no say in it."""
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones)
-    _shipped_flags(monkeypatch)
+    _result_kind_alone(monkeypatch)
     await sender.dispatch_landings(_lands(live, THU_2210), _clock_at(monkeypatch, THU_2210))
     _fmp_says(live, THU_2340, revenue=1.71e9)
     assert live.snapshot("INTC", REPORT, THU_2340).revenue.checking is True
@@ -1973,7 +2136,7 @@ async def test_a_row_the_cap_stops_is_not_held_for_a_figure(monkeypatch, clean_s
     """It would not go out whatever the figure says, so no hour of waiting can change anything."""
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones)
-    _shipped_flags(monkeypatch)
+    _result_kind_alone(monkeypatch)
     await sender.dispatch_landings(_lands(live, THU_2210), _clock_at(monkeypatch, THU_2210))
     _fmp_says(live, THU_2340, eps=0.041)
 
@@ -1992,7 +2155,7 @@ async def test_a_hold_for_a_figure_that_cannot_be_written_ends_the_row_instead_o
     """Nothing re-reads a row left at `pending`. It ends here, with no buzz, and the log says so."""
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones)
-    _shipped_flags(monkeypatch)
+    _result_kind_alone(monkeypatch)
     await sender.dispatch_landings(_lands(live, THU_2210), _clock_at(monkeypatch, THU_2210))
     _fmp_says(live, THU_2340, eps=0.041)
 
@@ -2019,7 +2182,7 @@ async def test_a_restart_inside_the_hold_never_buzzes_the_doubted_number(
     """The record is gone, so the row's own text goes out. It no longer holds the 46%."""
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones)
-    _shipped_flags(monkeypatch)
+    _result_kind_alone(monkeypatch)
     await sender.dispatch_landings(_lands(live, THU_2210), _clock_at(monkeypatch, THU_2210))
     _fmp_says(live, THU_2340, eps=0.041)
     _clock_at(monkeypatch, FRI_0700)

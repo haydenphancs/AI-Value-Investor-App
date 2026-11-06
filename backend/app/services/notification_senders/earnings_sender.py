@@ -32,6 +32,11 @@ row held for Berlin's morning, whose text comes from the record at its wake
 (`earnings_live_sender.copy_at_wake`), would be dropped or reversed by the older figure. So a
 record is never older than a row it can overrule (`_fold_into_live_records`).
 
+THE LIVE PUSH SWITCHES STOP AT `earnings_live_sender`. This pass reads neither
+`EARNINGS_LIVE_PUSH_ENABLED` nor `EARNINGS_LIVE_RESULT_PUSH_ENABLED`. Both ship off, so as shipped
+this pass is what tells a result; with one on, it finds the key taken for whoever the live send
+reached and tells the rest (`result_dedup_key`).
+
 WHAT THIS FILE DELIBERATELY DOES NOT DO
 ---------------------------------------
 It does not decide whether any particular user gets a notification. Preference, group
@@ -278,8 +283,9 @@ def result_copy(symbol: str, surprise: float) -> Tuple[str, str]:
 
 def result_dedup_key(symbol: str, when: str) -> str:
     """The ONE key a report's result alert is claimed under — whichever sender gets there
-    first. `earnings_live_sender` claims it for both `earnings_live` and the live-timed
-    `earnings_result`, and this module's daily pass finds it taken, so nobody is told twice.
+    first. While its switches are on, `earnings_live_sender` claims it for both `earnings_live`
+    and the live-timed `earnings_result`, and this module's daily pass then finds it taken, so
+    nobody is told twice.
     Keyed on the EARNINGS date (see `_dispatch`)."""
     return f"{KIND_EARNINGS_RESULT}:{symbol.upper()}:{str(when)[:10]}"
 

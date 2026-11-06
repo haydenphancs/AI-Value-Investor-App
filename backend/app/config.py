@@ -543,8 +543,8 @@ class Settings(BaseSettings):
 
     # Live earnings results (owner request 2026-10-29) — `earnings_live_service`. The
     # Tracking card goes LIVE on report day, its sheet shows estimate vs actual the moment
-    # each figure lands, and a push goes out when results land. Four switches, so each part
-    # can be turned off without a deploy of the others:
+    # each figure lands, and a push can go out when results land. Four switches, so each part
+    # can be set without a deploy of the others:
     #   * EARNINGS_LIVE_ENABLED — the live state itself: the 60 s loop that refreshes the
     #     previous trading day through today, the card fields, `recent_earnings_alerts` and
     #     `GET /tracking/earnings/{ticker}/live`. Off = the card is as it was (estimates).
@@ -556,20 +556,26 @@ class Settings(BaseSettings):
     #     to gate on, so it is switched on once the release with the toggle is installed.
     #   * EARNINGS_LIVE_RESULT_PUSH_ENABLED — the EXISTING `earnings_result` push ("Results
     #     & Surprises") sent the moment results land instead of at the next 16:00 ET run.
-    #     That kind has a toggle in every shipped build, so it ships ON.
+    #     Every shipped build has a toggle for that kind, and it still ships OFF (the owner,
+    #     2026-11-05: "Keep it off at first"). Off, the daily 16:00 ET pass alone sends it, and
+    #     that pass reads neither push switch (`earnings_sender`).
     #   Neither push buzzes in the night of a user who never set Quiet Hours: the row is
     #   written at once and goes out at 07:00 on their clock (`night_hold_by_default`).
     EARNINGS_LIVE_ENABLED: bool = True
     EARNINGS_LIVE_FILINGS_ENABLED: bool = True
     EARNINGS_LIVE_PUSH_ENABLED: bool = False
-    EARNINGS_LIVE_RESULT_PUSH_ENABLED: bool = True
-    # Loop cadence. The loop is cheap when nothing reports (one memoised calendar read);
-    # the FMP and SEC cadences below are what cost anything.
-    EARNINGS_LIVE_INTERVAL_SECONDS: int = 60
+    EARNINGS_LIVE_RESULT_PUSH_ENABLED: bool = False
+    # Loop cadence, 15-300 s: anything else fails the deploy. The loop is cheap when nothing
+    # reports (one memoised calendar read); the FMP and SEC cadences below are what cost
+    # anything. Past 60 s the SEC watch loses its one-minute release windows, and past 300 s
+    # the 5 min hot FMP cadence would stretch too.
+    EARNINGS_LIVE_INTERVAL_SECONDS: int = Field(60, ge=15, le=300)
     # How many watched tickers' SEC filings are checked per report day, most-watched first.
     # SEC's limiter (SEC_EDGAR_MAX_RPS) and its 600 s throttle circuit are SHARED with Learn,
-    # the buyback check and the Trillion stake finder, so this stays small.
-    EARNINGS_LIVE_SEC_MAX_SYMBOLS: int = 25
+    # the buyback check and the Trillion stake finder, so this stays small: 0-50, anything else
+    # fails the deploy. Calls are spaced 1 s apart, so 50 already fills the loop's minute. 0
+    # reads nothing from SEC.
+    EARNINGS_LIVE_SEC_MAX_SYMBOLS: int = Field(25, ge=0, le=50)
     # The model that reads a press release. Flash, at temperature 0 and no thinking budget:
     # this is extraction, and every figure it returns is checked verbatim against the text.
     EARNINGS_LIVE_EXTRACT_MODEL: str = "gemini-2.5-flash"

@@ -1535,7 +1535,7 @@ async def run_earnings_live_loop(
     holds up the other. Cancelling the spawned task cancels both, through `gather`, and it ends
     only once both have unwound."""
     await sleep(45)
-    interval = max(int(settings.EARNINGS_LIVE_INTERVAL_SECONDS), 15)
+    interval = settings.EARNINGS_LIVE_INTERVAL_SECONDS  # bounded at boot, on the setting itself
 
     async def _filing_loop() -> None:
         await sleep(_FILING_LOOP_DELAY_SECONDS)

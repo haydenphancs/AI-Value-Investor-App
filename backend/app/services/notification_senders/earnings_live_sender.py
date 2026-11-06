@@ -10,12 +10,18 @@ never concurrently, so which copy a user gets can never depend on timing:
   2. `earnings_result` ("Results & Surprises"): the existing kind and copy (`result_copy`),
      sent the moment FMP's adjusted EPS exists and its surprise clears `MIN_SURPRISE` —
      instead of at the next 16:00 ET run. FMP numbers ONLY: this kind reaches 1.02 users,
-     and a figure read from a filing is preliminary.
+     and a figure read from a filing is preliminary. Held by
+     `EARNINGS_LIVE_RESULT_PUSH_ENABLED` (ships off: the owner's "Keep it off at first",
+     2026-11-05).
+
+With both off, as shipped, this module sends and claims nothing: a landed report keeps its card
+and its sheet, and `run_earnings_notifications`' daily pass, which reads neither switch, tells
+its result at 16:00 ET under the same key, as it always did.
 
 `push_dispatch_service` claims the key only for users who pass their toggle and cap, so a
 user with Live Results on gets #1 and is skipped by #2 as a duplicate; a user with only
-Results & Surprises on gets #2; and `run_earnings_notifications`' daily pass later finds
-every key claimed. Preference, master switch, category cap and quiet hours stay the
+Results & Surprises on gets #2; and the daily pass later finds the key taken for both.
+Preference, master switch, category cap and quiet hours stay the
 dispatcher's job — nothing here decides who is told. That includes the hour: both kinds carry
 `night_hold_by_default`, so a landing in the night of a user who never set Quiet Hours is
 claimed at once and buzzes at 07:00 on their clock.

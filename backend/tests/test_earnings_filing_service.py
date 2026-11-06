@@ -309,6 +309,15 @@ async def test_the_daily_cap_keeps_the_most_watched_first(watcher, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_budget_of_zero_reads_nothing_from_sec(watcher, monkeypatch):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 0)
+    sec = _SEC()
+    assert await watcher.run_once(_AT_16, ["AAPL", "MSFT"], REPORT, sec=sec, cik_map=_CIKS,
+                                  sleep=_no_sleep) == {}
+    assert sec.calls == []
+
+
+@pytest.mark.asyncio
 async def test_a_throttle_parks_every_symbol_and_stops_the_round(watcher):
     sec = _SEC(throttle_on="0000320193")
     await watcher.run_once(_AT_16, ["AAPL", "MSFT"], REPORT, sec=sec, cik_map=_CIKS,

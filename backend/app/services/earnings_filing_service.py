@@ -624,8 +624,8 @@ class EarningsFilingWatcher:
         if mono < self._parked_until:
             return {}
         now_et = now.astimezone(ET)
-        cap = max(0, int(settings.EARNINGS_LIVE_SEC_MAX_SYMBOLS))
-        wanted = [s.upper() for s in symbols][:cap]
+        # Bounded at boot, on the setting itself: never negative, so this slice is the budget.
+        wanted = [s.upper() for s in symbols][:settings.EARNINGS_LIVE_SEC_MAX_SYMBOLS]
         due = [s for s in wanted if self._due((s, report_day), now_et, mono)]
         if not due:
             return {}

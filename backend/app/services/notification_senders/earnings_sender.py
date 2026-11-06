@@ -39,6 +39,7 @@ import logging
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.config import settings
 from app.integrations.fmp import get_fmp_client
 from app.services._earnings_common import (
     eps_digit_shift_suspect,
@@ -359,8 +360,11 @@ async def _dispatch(
         # The registry supplies the tab, so `earnings_result` lands on Financials
         # rather than making the user hunt for the numbers the alert is about. The report
         # date lets a result row open THAT report's live results and stand in for the same
-        # report's card (`AlertDestination.Target.earningsLive`).
-        data=ticker_route(kind, symbol, report_date=when),
+        # report's card (`AlertDestination.Target.earningsLive`). With live results off there
+        # are none to open, and the sheet would answer estimates under the announced figures.
+        data=ticker_route(
+            kind, symbol, report_date=when if settings.EARNINGS_LIVE_ENABLED else None,
+        ),
     )
 
 

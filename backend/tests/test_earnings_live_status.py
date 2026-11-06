@@ -493,6 +493,38 @@ def test_a_ticker_with_no_report_in_the_window_answers_none():
     assert payload["status"] == els.STATUS_NONE
 
 
+@pytest.mark.parametrize("day,status", [
+    (REPORT, els.STATUS_UPCOMING),
+    (NEXT, els.STATUS_UPCOMING),
+    (REPORT - timedelta(days=1), els.STATUS_AWAITING),
+], ids=["today", "later", "before_today"])
+def test_an_answer_this_read_could_not_tell_is_never_none_and_asks_again(day, status):
+    payload = els.live_payload("INTC", day, None, company_name=None, eps_estimate=None,
+                               revenue_estimate=None, extras=None, today=REPORT, found=False,
+                               recheck=True)
+    assert payload["status"] == status
+    assert payload["poll_seconds"] == els.EARNINGS_LIVE_POLL_SECONDS
+
+
+@pytest.mark.parametrize("found,status", [(True, els.STATUS_UPCOMING), (False, els.STATUS_NONE)],
+                         ids=["found", "not_found"])
+def test_an_answer_this_read_could_tell_never_asks_again(found, status):
+    payload = els.live_payload("INTC", REPORT, None, company_name=None, eps_estimate=None,
+                               revenue_estimate=None, extras=None, today=REPORT, found=found)
+    assert (payload["status"], payload["poll_seconds"]) == (status, None)
+
+
+@pytest.mark.parametrize("snap,poll", [
+    (els.snapshot_of(_rec(fmp_eps=0.44, fmp_revenue=17.1e9), REPORT, _et(REPORT, 17)), None),
+    (els.snapshot_of(_rec(), REPORT, _et(REPORT, 9)), els.EARNINGS_LIVE_POLL_SECONDS),
+    (els.snapshot_of(_filed(), REPORT, _et(REPORT, 17)), els.EARNINGS_LIVE_PRELIMINARY_POLL_SECONDS),
+], ids=["reported", "live", "preliminary"])
+def test_a_record_keeps_its_own_status_and_poll_whatever_recheck_says(snap, poll):
+    payload = els.live_payload("INTC", REPORT, snap, company_name=None, eps_estimate=None,
+                               revenue_estimate=None, extras=None, today=REPORT, recheck=True)
+    assert (payload["status"], payload["poll_seconds"]) == (snap.status, poll)
+
+
 def test_the_payload_carries_the_filing_link_and_guidance_only_from_the_release():
     rec = _rec(filing=_filing(revenue=17.1e9, guidance="Q4 revenue of $13.3–14.3 billion."))
     snap = els.snapshot_of(rec, REPORT, _et(REPORT, 16, 5))

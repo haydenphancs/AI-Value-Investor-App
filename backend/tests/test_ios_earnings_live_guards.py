@@ -140,6 +140,10 @@ def test_the_sheet_poll_stops_when_the_server_stops_asking():
     )
     assert "guard let seconds = self.live?.pollSeconds, seconds > 0 else { break }" in start
     assert "minimumPollSeconds" in start
+    assert "tatus" not in start, (
+        "the server's cadence alone decides: an `upcoming` or `awaiting` answer on a day nobody "
+        "has read carries a poll, and a sheet that reads the status would stop on it"
+    )
     card = _code("Views/Organisms/EarningsLiveResultsCard.swift")
     for hook in (".onAppear { viewModel.start() }", ".onDisappear { viewModel.stop() }",
                  "willResignActiveNotification", "didBecomeActiveNotification"):

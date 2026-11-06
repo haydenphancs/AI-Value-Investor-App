@@ -516,7 +516,8 @@ async def get_earnings_live(
     ticker: str,
     report_date: Optional[str] = None,
     user: dict = Depends(get_watchlist_identity),
-    # The sheet polls every 30 s at most, while a report is LIVE — 2/min, like the feed.
+    # The sheet polls every 30 s at most, while a report is LIVE or its day has not been read
+    # yet — 2/min, like the feed.
     _rate: None = StandardRateLimit,
 ):
     """One report's live results: estimate vs actual for EPS and revenue (each as soon as it

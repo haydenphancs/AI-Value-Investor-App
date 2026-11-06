@@ -154,6 +154,14 @@ while `reported` with a preliminary figure on show, inside `fmp_window_open`: FM
 replaces that figure, and the loop asks at the hot cadence then. None otherwise, past those hours
 too: the record moves too rarely to poll, and the next open reads it. The two rules ship as one,
 or the sheet would poll a record nothing updates.
+  One more 30 s, with no record at all: an answer this read could not tell (`recheck`). `none`
+says a day was read and lists no report, and iOS prints that and stops asking, so a day nobody
+has read reads as a report not in yet instead: `upcoming`, or `awaiting` before today, with no
+figures and no extras. From today on that is a day the memo does not hold. Before today it is a
+day the loop has yet to load (`awaits_first_load`), for about a minute after a deploy, when the
+feed draws no card from those days either. Each poll costs a memo read: a failed round makes the
+memo wait 2 min before the next. With EARNINGS_LIVE_ENABLED off no loop runs and none of this
+applies: the sheet reads the memo's row alone, and never polls.
 
 GUARDS, each a defect found elsewhere in this repo:
   * a dropped-digit EPS (`_earnings_common.eps_digit_shift_suspect`) is held as "checking",
@@ -212,8 +220,8 @@ EARNINGS_LIVE_COLD_TTL_SECONDS = 1800
 #: The days before today while TODAY is a closed day. A late fill is still worth picking up,
 #: but a row FMP never fills must not run the market-wide fetch through a weekend.
 EARNINGS_LIVE_CLOSED_DAY_TTL_SECONDS = 7200
-#: How often the sheet asks again: while live, and while FMP can still confirm what a reported
-#: report shows (`sheet_poll_seconds`).
+#: How often the sheet asks again: while live, while FMP can still confirm what a reported report
+#: shows (`sheet_poll_seconds`), and on an answer a read could not tell (`live_payload`).
 EARNINGS_LIVE_POLL_SECONDS = 30
 EARNINGS_LIVE_PRELIMINARY_POLL_SECONDS = 120
 #: A memo row held this long opens no record (THE MEMO in the module docstring). Longer than the
@@ -1050,6 +1058,14 @@ class EarningsLiveService:
         Tracking memo stamps its days with, or None when none has."""
         return self._fetched.get(day)
 
+    def awaits_first_load(self, day: date, today: date) -> bool:
+        """Is `day` a live day before `today` this module has not fetched yet? Those are the
+        days `due_days` takes on its first look, whatever is watched, so a reader told to wait
+        for one is told the truth, and one load ends the wait whatever it found. No other day
+        qualifies: today and later are the memo's to read, and an older day is never loaded,
+        so a sheet waiting on one would poll for ever."""
+        return day in live_days(today)[:-1] and day not in self._fetched
+
     # ── refresh (the live loop only) ───────────────────────────────
 
     def _fmp_wanted(self, day: date, symbols: Collection[str]) -> bool:
@@ -1292,16 +1308,21 @@ def live_payload(
     extras: Optional[HistoryExtras],
     today: date,
     found: bool = True,
+    recheck: bool = False,
 ) -> Dict[str, Any]:
     """The `EarningsLiveResponse` fields. A report with no record yet (a future date, or the
-    loop has not seen it) still carries its consensus and its status."""
+    loop has not seen it) still carries its consensus and its status. `found` False answers
+    `none`, unless `recheck` says this read could not tell: then it reads as a report not in
+    yet and the sheet asks again (THE SHEET'S POLL in the module docstring). A record has its
+    own status and poll, so `recheck` has no say over one."""
     if snap is None:
         eps = LiveMetric(eps_estimate)
         revenue = LiveMetric(revenue_estimate)
         status = STATUS_UPCOMING if report_day >= today else STATUS_AWAITING
-        if found is False:
+        if found is False and not recheck:
             status = STATUS_NONE
-        preliminary, checked_at, filing, poll_seconds = False, None, None, None
+        preliminary, checked_at, filing = False, None, None
+        poll_seconds = EARNINGS_LIVE_POLL_SECONDS if recheck else None
     else:
         eps, revenue, status = snap.eps, snap.revenue, snap.status
         preliminary, checked_at, filing = snap.preliminary, snap.checked_at, snap.filing

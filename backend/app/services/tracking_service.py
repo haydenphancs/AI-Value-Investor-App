@@ -1760,6 +1760,17 @@ class TrackingService:
         the days after today can be up to 6 h older (TWO SPEEDS above), and the new date is one
         of them. So before saying `none` the sheet asks the memo for the days older than that
         answer: at most once per answer, and only when someone is looking.
+
+        `none` says a day was read and lists no report, and iOS stops asking on it, so a day
+        nobody has read is never `none`. From today on that is a day the memo does not hold: a
+        failed round, a cold window that came back empty, or the day a rollover could not add.
+        Before today it is a day the loop has yet to load (`awaits_first_load`), the first
+        minute after a deploy or after midnight. Such an answer reads as a report not in yet,
+        with no extras, and `recheck` makes the sheet ask again until a read settles it.
+
+        With EARNINGS_LIVE_ENABLED off the loop is idle, so nothing live is read, written or
+        built: the memo row's consensus is the whole answer, `upcoming` for a row and `none`
+        for no row, and no poll, because nothing a poll could wait for is coming.
         """
         sym = symbol.upper()
         today = _et_today()
@@ -1773,7 +1784,10 @@ class TrackingService:
                 f"{(today + timedelta(days=_EARNINGS_ALERT_DAYS_AHEAD)).isoformat()}"
             )
         now = datetime.now(timezone.utc)
-        live = get_earnings_live_service()
+        live = get_earnings_live_service() if settings.EARNINGS_LIVE_ENABLED else None
+
+        def _snapshot(d: date) -> Optional[LiveSnapshot]:
+            return live.snapshot(sym, d, now) if live is not None else None
 
         async def _listed(
             later_days_since: Optional[float] = None,
@@ -1787,8 +1801,9 @@ class TrackingService:
                 logger.info("[Tracking] earnings live %s: calendar unavailable (%s: %s)",
                             sym, type(e).__name__, e)
                 calendar = []
-            live.observe_rows(today, calendar, now, symbols={sym},
-                              stored_at=earnings_day_stored_at(self.fmp, today))
+            if live is not None:
+                live.observe_rows(today, calendar, now, symbols={sym},
+                                  stored_at=earnings_day_stored_at(self.fmp, today))
             # The card's pick, so a future pair cannot show one consensus there and another
             # here.
             return {
@@ -1798,11 +1813,11 @@ class TrackingService:
             }
 
         rows = await _listed()
-        held = newest_report(filter(None, (live.snapshot(sym, d, now) for d in earlier)))
+        held = newest_report(filter(None, map(_snapshot, earlier)))
 
         def _report_day() -> date:
             if requested is not None:
-                known = requested in rows or live.snapshot(sym, requested, now) is not None
+                known = requested in rows or _snapshot(requested) is not None
                 return requested if known or not rows else min(rows)
             if today in rows:
                 return today
@@ -1811,21 +1826,30 @@ class TrackingService:
             return min(rows) if rows else today
 
         day = _report_day()
-        if day not in rows and live.snapshot(sym, day, now) is None:
+        if day not in rows and _snapshot(day) is None:
             # About to say `none`, so the days after today must be as new as the answer that
             # left the report out: the memo's, or for a day before today, which the memo does
             # not hold, the live loop's.
             answered_at = earnings_day_stored_at(self.fmp, day)
+            if answered_at is None and live is not None:
+                answered_at = live.fetched_at(day)
             logger.info("[Tracking] earnings live %s: nothing listed for %s, reading the days "
                         "after today as of its newest answer", sym, day.isoformat())
-            rows = await _listed(answered_at if answered_at is not None else live.fetched_at(day))
+            rows = await _listed(answered_at)
             day = _report_day()
-        snap = live.snapshot(sym, day, now) if day <= today else None
+        snap = _snapshot(day) if day <= today else None
         row = rows.get(day) or {}
         raw_name = row.get("companyName")
         company = raw_name if isinstance(raw_name, str) and raw_name else None
         found = snap is not None or day in rows
-        extras = await live.history_extras(sym, day) if found else None
+        recheck = live is not None and not found and (
+            day not in _held_earnings_days(self.fmp) if day >= today
+            else live.awaits_first_load(day, today)
+        )
+        if recheck:
+            logger.info("[Tracking] earnings live %s: %s has not been read yet, so the sheet "
+                        "asks again", sym, day.isoformat())
+        extras = await live.history_extras(sym, day) if live is not None and found else None
         payload = live_payload(
             sym, day, snap,
             company_name=company,
@@ -1834,6 +1858,7 @@ class TrackingService:
             extras=extras,
             today=today,
             found=found,
+            recheck=recheck,
         )
         return EarningsLiveResponse(**payload)
 

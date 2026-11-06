@@ -115,6 +115,23 @@ def test_one_key_for_both_live_kinds_and_the_daily_sender():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [KIND_EARNINGS_RESULT, daily.KIND_EARNINGS_UPCOMING])
+@pytest.mark.parametrize("enabled,report_date", [(True, "2026-10-29"), (False, None)],
+                         ids=["live_on", "live_off"])
+async def test_the_daily_sender_names_the_report_only_while_live_results_exist(
+        monkeypatch, kind, enabled, report_date):
+    """A route with no date offers no live results, and with the switch off none exist: the
+    sheet would answer estimates under a push announcing the figures."""
+    rec = _Dispatch()
+    monkeypatch.setattr(daily, "get_push_dispatch_service", lambda: rec)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", enabled)
+    await daily._dispatch(kind=kind, symbol="INTC", when="2026-10-29", title="t", body="b")
+    (sent,) = rec.sent
+    assert sent["data"].get("report_date") == report_date
+    assert sent["data"]["ticker"] == "INTC" and "2026-10-29" in sent["dedup_key"]
+
+
+@pytest.mark.asyncio
 async def test_the_live_kind_goes_first_then_the_surprise_under_the_same_key(dispatch):
     await sender.dispatch_landings([_snap(eps=0.60, eps_pct=46.34, rev=17.1e9, rev_pct=3.01)], NOW)
     kinds = [s["kind"] for s in dispatch.sent]

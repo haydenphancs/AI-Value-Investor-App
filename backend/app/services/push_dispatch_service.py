@@ -107,8 +107,9 @@ STATE_FAILED = "failed"
 
 
 class WatcherLookupFailed(RuntimeError):
-    """`notify_watchers(strict=True)` could not read who watches the ticker. Nobody was told
-    and nothing was claimed, so the caller can safely try again."""
+    """`notify_watchers(strict=True)` could not read who watches the ticker, or which of them
+    hold a key in `unless_claimed`. Nobody was told and nothing was claimed, so the caller can
+    safely try again."""
 
 
 def trading_date_et() -> str:
@@ -308,6 +309,28 @@ class PushDispatchService:
     # the routing path by the next person who needed an asset type — so it is gone
     # rather than merely unused. `detect_asset_class` (pure) plus `_is_etf`
     # (FMP-sourced, server-written) answer the same question without trusting a client.
+
+    def _holders_of(self, user_ids: Sequence[str], dedup_keys: Sequence[str]) -> set:
+        """Which of `user_ids` hold a ledger row under any of `dedup_keys`, whatever its state:
+        a row is a user told, or about to be. RAISES on a failed read, because an empty answer
+        reads the same as "nobody was told".
+
+        Reads the `(user_id, dedup_key)` unique index. One read per `_BATCH` users stays far
+        under PostgREST's 1,000-row clamp while the caller names a few keys.
+        """
+        holders: set = set()
+        keys = list(dedup_keys)
+        for chunk in _chunks(list(user_ids)):
+            rows = (
+                self.supabase.table(TABLE)
+                .select("user_id")
+                .in_("user_id", list(chunk))
+                .in_("dedup_key", keys)
+                .execute()
+                .data
+            ) or []
+            holders.update(r["user_id"] for r in rows if r.get("user_id"))
+        return holders
 
     def _is_etf(self, ticker: str) -> bool:
         """Does the locally cached company profile say this symbol is a fund?
@@ -1320,6 +1343,7 @@ class PushDispatchService:
         kind: Optional[str] = None,
         now: Optional[datetime] = None,
         strict: bool = False,
+        unless_claimed: Sequence[str] = (),
     ) -> int:
         """Alert everyone watching `ticker`. Returns how many were actually sent.
 
@@ -1330,8 +1354,12 @@ class PushDispatchService:
         Never raises: a push failure must not break the sweep that triggered it. `strict`
         is the one exception, and only a caller that can try again asks for it: a failed
         watcher read then raises `WatcherLookupFailed` instead of answering 0, which reads
-        the same as a ticker nobody watches. Only that read: a failed claim or device read
-        after it still comes back as a count.
+        the same as a ticker nobody watches. Only that read and the one below: a failed claim
+        or device read after them still comes back as a count.
+
+        `unless_claimed` names other dedup keys for the same event. A watcher already holding
+        one was told and is left out, without a row of their own, so the claim below is never
+        what stops them. A read that fails sends nothing, for the reason a failed claim does.
         """
         resolved = kind or kind_for_preference_key(preference_key) or KIND_TICKER_MOVE
         read = self._read_watchers if strict else self.watchers_of
@@ -1350,6 +1378,27 @@ class PushDispatchService:
             return 0
         if not users:
             return 0
+        if unless_claimed:
+            try:
+                told = await asyncio.to_thread(self._holders_of, users, unless_claimed)
+            except Exception as e:
+                if strict:
+                    raise WatcherLookupFailed(
+                        f"{ticker}: who holds {list(unless_claimed)}: {type(e).__name__}: {e}"
+                    ) from e
+                logger.warning(
+                    "push: read of who holds %s failed for %s (%s: %s) — no alerts this cycle",
+                    list(unless_claimed), ticker, type(e).__name__, e,
+                )
+                return 0
+            if told:
+                logger.info(
+                    "push: kind=%s key=%s %s: %d of %d watcher(s) already told under %s",
+                    resolved, dedup_key, ticker, len(told), len(users), list(unless_claimed),
+                )
+                users = [u for u in users if u not in told]
+                if not users:
+                    return 0
 
         route = dict(data or {})
         route.setdefault("ticker", ticker.upper())

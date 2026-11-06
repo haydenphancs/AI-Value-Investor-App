@@ -54,7 +54,7 @@ from app.services.notification_kinds import (
 )
 from app.services.push_dispatch_service import get_push_dispatch_service
 from app.services.updates_materiality import finite
-from app.utils.market_hours import ET
+from app.utils.market_hours import ET, next_trading_day, previous_trading_day
 
 logger = logging.getLogger(__name__)
 
@@ -242,6 +242,16 @@ def result_dedup_key(symbol: str, when: str) -> str:
     return f"{KIND_EARNINGS_RESULT}:{symbol.upper()}:{str(when)[:10]}"
 
 
+def neighbouring_result_keys(symbol: str, when: str) -> List[str]:
+    """The result keys of `symbol`'s reports on the trading days either side of `when`. FMP's
+    leftover row after a reschedule dates one report twice, and a company does not report twice
+    in two days, so a user holding either was told about this report: both senders pass these
+    as `unless_claimed`. Either side, because FMP can fill the two rows in either order."""
+    day = date.fromisoformat(str(when)[:10])
+    return [result_dedup_key(symbol, d.isoformat())
+            for d in (previous_trading_day(day), next_trading_day(day))]
+
+
 def _watched_tickers_ranked() -> List[str]:
     """Every ticker at least one user watches, MOST-WATCHED FIRST (the RPC's own order).
 
@@ -344,16 +354,22 @@ async def _dispatch(
     The dedup key is keyed on the EARNINGS date, not the run date. That matters twice:
     a re-run on the same day cannot re-buzz, and a company that reschedules its print
     gets a genuinely new key rather than being silently suppressed by yesterday's claim.
+    A claim on the trading day either side does stop a RESULT, for that user alone: that is
+    one report FMP dated twice (`neighbouring_result_keys`). A report nobody was told about
+    holds no claim, so a reschedule still gets its push.
     """
     if kind == KIND_EARNINGS_RESULT:
         dedup_key = result_dedup_key(symbol, when)
+        unless_claimed = neighbouring_result_keys(symbol, when)
     else:
         dedup_key = f"{kind}:{symbol}:{when}"
+        unless_claimed = []
     return await get_push_dispatch_service().notify_watchers(
         ticker=symbol,
         title=title,
         body=body,
         dedup_key=dedup_key,
+        unless_claimed=unless_claimed,
         kind=kind,
         # FLAT SCALARS ONLY (iOS AnyCodable yields "" for anything nested).
         # The registry supplies the tab, so `earnings_result` lands on Financials

@@ -16,9 +16,10 @@ on, and a mark printed as a character is never read as a digit or a scale of the
 
 The SEC side is pinned too, because its limiter and 600 s throttle circuit are SHARED with
 Learn, the buyback check and the Trillion stake finder: the cap on tickers at a time, the
-release-window cadence, the stop once the release is read or the record shows a foreign filer, one
-extraction per accession, and parking every symbol on a throttle. So is which report a filing
-belongs to: by the day it was accepted, and a filing date on EDGAR's own calendar.
+release-window cadence, the stop once the release is read, the rest with no slot while a record
+shows foreign forms alone, one extraction per accession, and parking every symbol on a throttle.
+So is which report a filing belongs to: by the day it was accepted, and a filing date on EDGAR's
+own calendar.
 
 Each read of a filing settles one of three things. RETRY: the read failed, so the same accession
 goes again on a widening ladder. NOT_RELEASE: it was read and is not the results release, so it is
@@ -42,7 +43,7 @@ import re
 import threading
 import time
 import unicodedata
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -3139,22 +3140,74 @@ def test_a_late_evening_filing_dated_the_next_business_day_still_counts():
     (date(2026, 1, 16), date(2026, 1, 20)),
     (date(2026, 12, 24), date(2026, 12, 28)),
     (date(2026, 4, 2), date(2026, 4, 3)),
+    (date(2027, 12, 30), date(2028, 1, 3)),
+    (date(2028, 11, 9), date(2028, 11, 13)),
 ], ids=["friday_to_monday", "over_thanksgiving", "over_veterans_day", "over_columbus_day",
-        "over_mlk_day", "over_christmas", "thursday_to_good_friday"])
+        "over_mlk_day", "over_christmas", "thursday_to_good_friday",
+        "over_new_years_day_observed_on_a_trading_friday",
+        "over_veterans_day_observed_on_a_trading_friday"])
 def test_an_evening_filing_dated_the_next_sec_business_day_counts(report, filed):
     """EDGAR dates a filing accepted after 17:30 ET on its next business day, on the federal
     calendar: it is open on Good Friday and shut on Columbus and Veterans Day, when the market
-    trades."""
+    trades. A Saturday holiday shuts it on the Friday too, and the market trades that Friday."""
     evening = dict(_8K, filingDate=filed.isoformat(),
                    acceptanceDateTime=f"{report.isoformat()}T18:05:00.000Z")
     (found,) = efs.find_results_filings(_submissions([evening]), report)
     assert found.filing_date == filed
 
 
-@pytest.mark.parametrize("filed", ["2026-10-28", "2026-11-01", "2026-11-05"],
+def _nth_weekday(year: int, month: int, weekday: int, nth: int) -> date:
+    first = date(year, month, 1)
+    return first + timedelta(days=(weekday - first.weekday()) % 7 + 7 * (nth - 1))
+
+
+def _federal_holidays(year: int) -> Set[date]:
+    """5 U.S.C. 6103, with its observance rule: a Saturday holiday on the Friday before, a Sunday
+    one on the Monday after."""
+    fixed = {date(year, 1, 1), date(year, 6, 19), date(year, 7, 4), date(year, 11, 11),
+             date(year, 12, 25)}
+    observed = {
+        day + timedelta(days={5: -1, 6: 1}.get(day.weekday(), 0)) for day in fixed}
+    last_monday_of_may = next(
+        date(year, 5, d) for d in range(31, 24, -1) if date(year, 5, d).weekday() == 0)
+    return observed | {
+        _nth_weekday(year, 1, 0, 3), _nth_weekday(year, 2, 0, 3), last_monday_of_may,
+        _nth_weekday(year, 9, 0, 1), _nth_weekday(year, 10, 0, 2), _nth_weekday(year, 11, 3, 4),
+    }
+
+
+def test_every_evening_filing_on_the_federal_calendar_counts():
+    """Every evening EDGAR takes a filing, for as long as the market's holiday table runs."""
+    closed = set().union(*(_federal_holidays(year) for year in range(2026, 2030)))
+
+    def _open(day: date) -> bool:
+        return day.weekday() < 5 and day not in closed
+
+    day, missed = date(2026, 1, 1), []
+    while day.year < 2029:
+        if _open(day):
+            filed = day + timedelta(days=1)
+            while not _open(filed):
+                filed += timedelta(days=1)
+            evening = dict(_8K, filingDate=filed.isoformat(),
+                           acceptanceDateTime=f"{day.isoformat()}T18:05:00.000Z")
+            if not efs.find_results_filings(_submissions([evening]), day):
+                missed.append((day, filed))
+        day += timedelta(days=1)
+    assert missed == []
+
+
+def test_the_federal_calendar_above_is_the_real_one():
+    assert {date(2027, 12, 31), date(2028, 11, 10), date(2026, 7, 3)} <= (
+        _federal_holidays(2027) | _federal_holidays(2028) | _federal_holidays(2026))
+    assert date(2026, 4, 3) not in _federal_holidays(2026), "EDGAR works Good Friday"
+
+
+@pytest.mark.parametrize("filed", ["2026-10-28", "2026-11-03", "2026-11-05"],
                          ids=["a_day_before", "a_day_past_the_window", "a_week_after"])
 def test_a_filing_outside_the_window_is_not_this_report(filed):
-    """No acceptance time here, so the date alone has to refuse it."""
+    """No acceptance time here, so the date alone has to refuse it. The window ends on the second
+    trading day after the report, the Monday here."""
     outside = dict(_8K, filingDate=filed, acceptanceDateTime="")
     assert efs.find_results_filings(_submissions([outside]), REPORT) == []
 
@@ -3698,9 +3751,18 @@ _6K = dict(_8K, accessionNumber="0000937966-26-000045", form="6-K", items="",
            primaryDocument="asml.htm")
 
 
+_FOREIGN_FIRST_8K = dict(_8K, accessionNumber="0000937966-26-000046",
+                         acceptanceDateTime="2026-10-29T07:02:00.000Z")
+_AT_6 = datetime(2026, 10, 29, 6, 1, tzinfo=ET).astimezone(timezone.utc)
+_AT_7 = datetime(2026, 10, 29, 7, 40, tzinfo=ET).astimezone(timezone.utc)
+
+
+def _subs(sec: _SEC) -> List[str]:
+    return [c for c in sec.calls if c.startswith("sub:")]
+
+
 @pytest.mark.asyncio
-async def test_a_foreign_filer_sec_lists_is_read_once_and_frees_its_slot(watcher, monkeypatch,
-                                                                         caplog):
+async def test_a_foreign_filer_sec_lists_rests_and_frees_its_slot(watcher, monkeypatch, caplog):
     monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
     sec = _SEC(filings={_ASML_CIK: [_6K]})
     with caplog.at_level(logging.INFO, logger=efs.__name__):
@@ -3708,25 +3770,84 @@ async def test_a_foreign_filer_sec_lists_is_read_once_and_frees_its_slot(watcher
             await watcher.run_once(_AT_16, ["ASML", "INTC"], REPORT, sec=sec,
                                    cik_map=_FOREIGN_CIKS, sleep=_no_sleep)
     assert sec.calls == [f"sub:{_ASML_CIK}", "sub:0000050863"]
-    assert watcher._watch[("ASML", REPORT)].done is True
     assert watcher.figures_for("ASML", REPORT) is None
     rows = [r.getMessage() for r in caplog.records if "result=foreign_filer" in r.getMessage()]
     assert len(rows) == 1 and "ASML" in rows[0] and REPORT.isoformat() in rows[0]
 
 
 @pytest.mark.asyncio
-async def test_a_foreign_filer_is_not_read_again_on_later_rounds(watcher):
+async def test_a_foreign_filer_is_not_read_again_inside_its_rest(watcher, clock):
     sec = _SEC(filings={_ASML_CIK: [_6K]})
-    for _ in range(3):
+    for _ in range(int(efs._FOREIGN_FILER_REST_SECONDS / 60) - 1):
         await watcher.run_once(_AT_16, ["ASML"], REPORT, sec=sec, cik_map=_FOREIGN_CIKS,
                                sleep=_no_sleep)
-        for watch in watcher._watch.values():
-            watch.checked_mono = 0.0                         # the 60 s cadence has passed
+        clock.at += 60
     assert sec.calls == [f"sub:{_ASML_CIK}"]
 
 
 @pytest.mark.asyncio
-async def test_a_foreign_filer_is_asked_about_once_per_report(watcher):
+async def test_a_filers_first_8k_after_foreign_forms_is_still_read(watcher, clock):
+    """A filer leaving foreign status shows foreign forms alone until its first domestic form,
+    and its earnings release can be that form."""
+    sec = _SEC(filings={_ASML_CIK: [_6K]})
+    await watcher.run_once(_AT_6, ["ASML"], REPORT, sec=sec, cik_map=_FOREIGN_CIKS,
+                           sleep=_no_sleep)
+    sec.filings[_ASML_CIK].append(_FOREIGN_FIRST_8K)
+    clock.at += efs._FOREIGN_FILER_REST_SECONDS
+    found = await watcher.run_once(_AT_7, ["ASML"], REPORT, sec=sec, gemini=_Gemini(),
+                                   cik_map=_FOREIGN_CIKS, sleep=_no_sleep)
+    assert found["ASML"].revenue == 17.1e9
+    assert len(_subs(sec)) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_filers_rest_is_kept_for_as_long_as_the_record_shows_nothing_else(
+        watcher, clock, caplog):
+    sec = _SEC(filings={_ASML_CIK: [_6K]})
+    rest = efs._FOREIGN_FILER_REST_SECONDS
+    with caplog.at_level(logging.INFO, logger=efs.__name__):
+        for _ in range(3):
+            await watcher.run_once(_AT_16, ["ASML"], REPORT, sec=sec, cik_map=_FOREIGN_CIKS,
+                                   sleep=_no_sleep)
+            clock.at += rest
+    assert sec.calls == [f"sub:{_ASML_CIK}"] * 3
+    rows = [r.getMessage() for r in caplog.records if "result=foreign_filer" in r.getMessage()]
+    assert len(rows) == 1, "said once per report, however many reads it rests between"
+
+
+@pytest.mark.asyncio
+async def test_a_filer_whose_record_shows_a_domestic_form_goes_back_to_the_minute(watcher, clock):
+    sec = _SEC(filings={_ASML_CIK: [_6K]})
+    await watcher.run_once(_AT_16, ["ASML"], REPORT, sec=sec, cik_map=_FOREIGN_CIKS,
+                           sleep=_no_sleep)
+    sec.filings[_ASML_CIK].append(dict(_6K, form="10-Q"))
+    clock.at += efs._FOREIGN_FILER_REST_SECONDS
+    await watcher.run_once(_AT_16, ["ASML"], REPORT, sec=sec, cik_map=_FOREIGN_CIKS,
+                           sleep=_no_sleep)
+    clock.at += 60
+    await watcher.run_once(_AT_16, ["ASML"], REPORT, sec=sec, cik_map=_FOREIGN_CIKS,
+                           sleep=_no_sleep)
+    assert len(_subs(sec)) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_round_stays_within_the_cap_when_a_rest_ends(watcher, clock, monkeypatch):
+    """A rest over puts the foreign filer back in its rank, and the ticker it displaces waits a
+    round. Nothing it does can make a round read past the cap."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 2)
+    symbols = ["ASML", "AAPL", "MSFT", "INTC"]
+    sec = _SEC(filings={_ASML_CIK: [_6K]})
+    for minute in range(int(efs._FOREIGN_FILER_REST_SECONDS / 60) * 2 + 1):
+        sec.calls.clear()
+        await watcher.run_once(_AT_16, symbols, REPORT, sec=sec, cik_map=_FOREIGN_CIKS,
+                               sleep=_no_sleep)
+        assert len(_subs(sec)) <= 2, f"minute {minute}"
+        clock.at += 60
+    assert not watcher._watch[("ASML", REPORT)].done
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_filer_is_asked_about_on_each_report(watcher):
     """The watch is per report: a filer can change its forms between two."""
     sec = _SEC(filings={_ASML_CIK: [_6K]})
     await watcher.run_once(_AT_16, ["ASML"], REPORT, sec=sec, cik_map=_FOREIGN_CIKS,

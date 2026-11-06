@@ -105,6 +105,22 @@ def test_without_a_date_the_previous_trading_days_report_is_chosen_when_today_ha
     assert body["report_date"] == "2026-10-28" and body["status"] == "reported"
 
 
+@pytest.mark.parametrize("query", ["", "?report_date=2026-10-29"], ids=["no_date", "by_date"])
+def test_a_leftover_row_answers_with_the_report_the_trading_day_before(client, query):
+    """Today's row has nothing on it and the report came out yesterday, so the sheet must not
+    say the results are not in."""
+    live = els.get_earnings_live_service()
+    at = datetime(2026, 10, 29, 12, tzinfo=timezone.utc)
+    live.observe_rows(PREV, [_row("INTC", PREV)], at)
+    live.absorb_filing("INTC", PREV, FilingFigures(
+        accession="0000050863-26-000123", accepted_at=at - timedelta(hours=14),
+        url="https://www.sec.gov/idx", revenue=17.1e9, eps_adjusted=0.44), at)
+    body = client.get(f"/api/v1/tracking/earnings/INTC/live{query}").json()
+    assert (body["report_date"], body["status"]) == ("2026-10-29", "reported")
+    assert (body["eps"]["actual"], body["revenue"]["actual"]) == (0.44, 17.1e9)
+    assert body["preliminary"] is True and body["filing"]["url"] == "https://www.sec.gov/idx"
+
+
 @pytest.mark.parametrize("query", ["", "?report_date=2026-10-24"], ids=["no_date", "by_date"])
 def test_a_report_dated_on_a_closed_day_is_answered_on_the_next_trading_day(
         client, monkeypatch, query):

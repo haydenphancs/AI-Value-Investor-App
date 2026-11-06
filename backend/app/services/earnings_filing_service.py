@@ -9,8 +9,8 @@ release as Exhibit 99.1, normally in the same minute it goes out on the wire.
 
 WHAT IT DOES, for one watched ticker on its report day:
   1. finds a NEW 8-K carrying item 2.02 in the company's submissions record, accepted on or
-     after the report date and dated no later than the day after the next trading day: an
-     evening filing after 17:30 ET is dated EDGAR's next business day, on the federal calendar
+     after the report date and dated no later than the second trading day after it: an evening
+     filing after 17:30 ET is dated EDGAR's next business day, on the federal calendar
      (`find_results_filings`);
   2. locates the EX-99.1 document from the filing's index page and reads it as text, with its
      footnote marks taken off the numbers they hang on (`_drop_footnote_marks`);
@@ -34,7 +34,8 @@ SEC LOAD. The limiter (`SEC_EDGAR_MAX_RPS`) and the 600 s throttle circuit are S
 the Learn pipeline, the buyback check and the Trillion stake finder, so a throttle caused
 here would stop all of them. The watcher therefore:
   * reads at most `EARNINGS_LIVE_SEC_MAX_SYMBOLS` tickers at a time, most-watched first; the
-    next ticker takes a freed slot, and a ticker still waiting on its release keeps its own;
+    next ticker takes a freed slot, and a ticker still waiting on its release keeps its own,
+    unless its record shows foreign forms alone (below);
   * polls each one every minute only inside the two release windows (06:00–09:35 and
     15:55–18:30 ET), every 5 min otherwise, never outside 06:00–22:00 ET;
   * spaces its calls (`_CALL_SPACING_SECONDS`) instead of bursting;
@@ -49,8 +50,10 @@ a time. A day's ceiling is 25 x 488 rounds = 12,200 submissions reads (370 round
 windows, 118 outside them). On top of that, each read of a filing takes two document reads and
 one Gemini call, and a filing gets at most six reads.
 Foreign private issuers furnish results on 6-K, not 8-K, and they stay FMP-only. SEC lists most
-of them under a CIK, so the first read of their record shows it and ends that report's watch
-(`furnishes_on_6k`).
+of them under a CIK, so a read of their record shows it (`furnishes_on_6k`), and the ticker then
+rests `_FOREIGN_FILER_REST_SECONDS` between reads with no slot. The watch never ends on that: a
+filer leaving foreign status reads the same until its first domestic form, and that form can be
+the very release being watched for.
 
 WHAT A READ SETTLES (`_Read`). A filing is read until one of three things is known, and only the
 last of them ends the watch for the report:
@@ -142,6 +145,10 @@ _EXTRACT_RETRY_GAPS: Tuple[int, ...] = (60, 120, 300, 600, 900)
 #: family.
 _FOREIGN_FORMS: Tuple[str, ...] = ("20-F", "40-F", "6-K")
 _DOMESTIC_FORMS: Tuple[str, ...] = ("10-K", "10-Q", "8-K")
+#: How long a ticker whose record shows foreign forms alone rests between reads, with no slot under
+#: the cap. Short enough that a first 8-K still beats FMP, which takes 1–3 h, and at most 33 reads
+#: a day for a ticker that will almost always stay on 6-K.
+_FOREIGN_FILER_REST_SECONDS = 1800
 
 # ── Extraction ──────────────────────────────────────────────────────
 
@@ -321,12 +328,13 @@ def find_results_filings(data: Any, report_date: date) -> List[ResultsFiling]:
     """PURE. The 8-K filings carrying item 2.02 that belong to the report dated `report_date`,
     newest first, from one submissions record (`filings.recent`, parallel arrays).
 
-    Its filing date runs from `report_date` through the day after the next trading day. A
-    filing accepted after 17:30 ET is dated EDGAR's next business day, and EDGAR keeps the
-    federal calendar, not the NYSE's: it works Good Friday, and it is shut on Columbus and
-    Veterans Day, which push a Friday evening's filing to the Tuesday. So this is a range, never
-    a set of trading days. Its far end is harmless: the watcher only asks about today, so a
-    later date can only be such an evening filing.
+    Its filing date runs from `report_date` through the second trading day after it. A filing
+    accepted after 17:30 ET is dated EDGAR's next business day, and EDGAR keeps the federal
+    calendar, not the NYSE's: it works Good Friday, and it is shut on Columbus and Veterans Day
+    and on the Friday before a Saturday holiday, all of which the market trades through. A
+    Friday evening's filing can so be dated the Tuesday, and a Thursday evening's the Monday. So
+    this is a range, never a set of trading days. Its far end is harmless: the watcher only asks
+    about today, so a later date can only be such an evening filing.
 
     It must also have been accepted on `report_date` or later, on the ET calendar. A filing's
     date can be the morning after the evening it was accepted, so that morning's row, a
@@ -353,7 +361,7 @@ def find_results_filings(data: Any, report_date: date) -> List[ResultsFiling]:
         return []
     accepted = recent.get("acceptanceDateTime")
     accepted = accepted if isinstance(accepted, list) and len(accepted) == n else [None] * n
-    last_day = next_trading_day(report_date) + timedelta(days=1)
+    last_day = next_trading_day(next_trading_day(report_date))
     out: List[ResultsFiling] = []
     for i in range(n):
         if str(cols["form"][i] or "").strip().upper() != "8-K":
@@ -381,12 +389,15 @@ def find_results_filings(data: Any, report_date: date) -> List[ResultsFiling]:
 
 
 def furnishes_on_6k(data: Any) -> bool:
-    """PURE. Does one submissions record show a filer that will never put its results on an
-    8-K? True when `filings.recent.form` holds a 20-F, 40-F or 6-K and no 10-K, 10-Q or 8-K.
+    """PURE. Does one submissions record show foreign forms alone? True when
+    `filings.recent.form` holds a 20-F, 40-F or 6-K and no 10-K, 10-Q or 8-K.
 
     One domestic report outweighs any number of foreign forms. A stray 6-K on a domestic filer
     must not cost it the fast path, and a filer wrongly kept is only polled until its record
     completes. A record that cannot be read says False for the same reason.
+
+    It describes the record, not the filer's future: one leaving foreign status answers True until
+    its first domestic form. So a True rests a ticker and never ends its watch.
     """
     filings = data.get("filings") if isinstance(data, Mapping) else None
     recent = filings.get("recent") if isinstance(filings, Mapping) else None
@@ -1439,7 +1450,7 @@ class _Watch:
     # minute after a round that spent an attempt (`run_once`).
     checked_mono: float = 0.0
     found: Optional[ResultsFiling] = None   # the release, once read
-    # The report is settled: its release was read, SEC has no CIK, or it furnishes on 6-K.
+    # The report is settled: its release was read, or SEC has no CIK.
     done: bool = False
     figures: Optional[FilingFigures] = None
     # Failed reads by accession: a morning filing's never come out of the evening release's.
@@ -1448,10 +1459,13 @@ class _Watch:
     retry_gap: float = 0.0
     # Accessions never read again here: not the release, or out of attempts.
     skipped: Set[str] = field(default_factory=set)
+    # The last read showed foreign forms alone (`furnishes_on_6k`): it rests, with no slot.
+    foreign: bool = False
 
     def wait_seconds(self, interval: int) -> float:
         """How long after `checked_mono` the symbol comes due on a cadence of `interval`."""
-        return max(interval, self.retry_gap)
+        rest = _FOREIGN_FILER_REST_SECONDS if self.foreign else 0
+        return max(interval, self.retry_gap, rest)
 
 
 @dataclass
@@ -1497,6 +1511,15 @@ class EarningsFilingWatcher:
             return True
         return mono - w.checked_mono >= w.wait_seconds(interval) - _DUE_SLACK_SECONDS
 
+    def _holds_a_slot(self, key: Tuple[str, date], now_et: datetime, mono: float) -> bool:
+        """Does this report count against the cap this round? Not once its watch has ended, and
+        not while a foreign filer rests: it has no read coming, and the slot can serve a ticker
+        that does. Its rest over, it stands in its rank like any other."""
+        w = self._watch.get(key)
+        if w is not None and w.foreign:
+            return self._due(key, now_et, mono)
+        return not self._finished(key)
+
     async def run_once(
         self,
         now: datetime,
@@ -1514,8 +1537,8 @@ class EarningsFilingWatcher:
         call per filing, so what is read first must not wait for the rest.
 
         `symbols` must already be ordered most-watched first; the round keeps the first
-        `EARNINGS_LIVE_SEC_MAX_SYMBOLS` whose watch has not ended, due or not, so a ticker
-        between two reads keeps its slot and a round can never read past the cap. Never raises:
+        `EARNINGS_LIVE_SEC_MAX_SYMBOLS` that hold a slot (`_holds_a_slot`), due or not, so a ticker
+        between two reads keeps it and a round can never read past the cap. Never raises:
         a failure for one symbol costs only that symbol's round, a round that spends an attempt
         holds every filing waiting on a retry for a minute, a throttle parks the whole watcher,
         and a delivery that fails is logged, and that figure is not offered again in this
@@ -1528,8 +1551,9 @@ class EarningsFilingWatcher:
             return {}
         now_et = now.astimezone(ET)
         cap = max(0, int(settings.EARNINGS_LIVE_SEC_MAX_SYMBOLS))
-        unfinished = [s for s in map(str.upper, symbols) if not self._finished((s, report_day))]
-        wanted = unfinished[:cap]
+        holding = [s for s in map(str.upper, symbols)
+                   if self._holds_a_slot((s, report_day), now_et, mono)]
+        wanted = holding[:cap]
         due = [s for s in wanted if self._due((s, report_day), now_et, mono)]
         if not due:
             return {}
@@ -1632,7 +1656,7 @@ class EarningsFilingWatcher:
         so the walk goes on past it and the symbol keeps its poll. A failed read ends the walk for
         this round: whatever failed would fail the next read too, and an older filing must not
         settle the report while a newer one is undecided. A record with nothing to walk that
-        shows a foreign filer settles it too: its release will never be an 8-K.
+        shows foreign forms alone says nothing about the report either, and rests the symbol.
         """
         self.calls += 1
         # The round came due, so the rest is served: only a new failed read owes another. Reset
@@ -1641,11 +1665,11 @@ class EarningsFilingWatcher:
         w.retry_gap = 0.0
         data = await client.get_submissions(cik)
         filings = find_results_filings(data, report_day)
-        if not filings and furnishes_on_6k(data):
-            w.done = True
-            logger.info("EARNINGS_LIVE_FILING sym=%s day=%s result=foreign_filer",
-                        symbol, report_day.isoformat())
-            return None
+        foreign = not filings and furnishes_on_6k(data)
+        if foreign and not w.foreign:
+            logger.info("EARNINGS_LIVE_FILING sym=%s day=%s result=foreign_filer rest=%ds",
+                        symbol, report_day.isoformat(), _FOREIGN_FILER_REST_SECONDS)
+        w.foreign = foreign
         for filing in filings:
             acc = filing.accession
             if acc in self._extracted:

@@ -112,18 +112,26 @@ they stop listing (`_end_unlisted`): a record goes once they have left its symbo
     the days after today first, at most 14 calls per answer it rests on. Only a reader does:
     nothing here tells the memo a report ended, so a new date's card can take the memo's 6 h to
     appear.
-  A stale row FMP leaves beside the new date is NOT seen: its status, its SEC slot and its card
-  compare no dates, because a company reporting EARLIER leaves the later date pending, so the row
-  dated today can be the real one. Nor is a lone leftover row dated today after the company
-  reported.
+  A stale row FMP leaves beside the new date is NOT seen while nothing is in: its status, its SEC
+  slot and its card compare no dates, because a company reporting EARLIER leaves the later date
+  pending, so the row dated today can be the real one. Nor is a lone leftover row dated today
+  after the company reported. A leftover beside a report already in is told apart: ONE REPORT,
+  TWO DATES.
 
-ONE REPORT, TWO DATES. The dedup key carries the report date, so FMP's leftover row one trading
-day after a report would be a second push for it, and the owner's rule is one push per report. A
-record therefore does not land when the same symbol's record on the previous trading day already
-has results (`_note_landing`), which covers FMP filling that row and an 8-K accepted on its day.
-An 8-K accepted the evening before never reaches it (`find_results_filings`). Only the push is
-held: the card and the sheet read the record as usual. A pending row the day before stops nothing,
-so a stale earlier row never costs the true report its push.
+ONE REPORT, TWO DATES. FMP's leftover row one trading day after a report is a record of its own,
+with a date and a dedup key of its own, and the owner's rule is one push per report.
+  * The push is the ledger's call, in the dispatcher, for each user
+    (`earnings_live_sender`, ONE REPORT, TWO DATES). A landing here decides nothing about it.
+  * An 8-K accepted the evening before never reaches the later row (`find_results_filings`).
+  * A record with no figures of its own beside a report already in on the trading day before
+    reads as that report, under its own date (`_Record.report_before`, `snapshot_of`), so the
+    card and the sheet never say LIVE or "not in yet" about results they hold, at any hour and
+    after the report's own record has left the live days. Its own first figure ends that. A
+    pending row the day before stops nothing, so a stale earlier row never costs the true report
+    its card. Only the reading changes: the record stays on the SEC watch and keeps asking FMP,
+    so a true report on that date still lands.
+  A filing's figures live in this process, so a restart loses them, and until FMP fills, the row
+  reads as its own again.
 
 TWO LOOPS UNDER ONE TASK (`run_earnings_live_loop`), each on its own 60 s clock, so neither
 source can hold the other up.
@@ -330,6 +338,10 @@ class _Record:
     seen_pending: bool = False
     landed_at: Optional[datetime] = None
     landed_from_pending: bool = False
+    # The same symbol's record on the trading day before, once it has results: what this record
+    # reads as while it has none (ONE REPORT, TWO DATES). Held here because that record leaves
+    # the live days a day before this one.
+    report_before: Optional["_Record"] = None
     # The fold runs on every tick and feed build: a refusal is logged once per record.
     revenue_refusal_logged: bool = False
     eps_refusal_logged: bool = False
@@ -348,6 +360,8 @@ class LiveSnapshot:
     filing: Optional[FilingFigures]
     # How often the sheet should ask again (`sheet_poll_seconds`); None when it should not.
     poll_seconds: Optional[int] = None
+    # The date of the report these figures are, when it is not `day` (ONE REPORT, TWO DATES).
+    reads_as: Optional[date] = None
 
 
 @dataclass(frozen=True)
@@ -551,23 +565,39 @@ def recent_card_visible(status: str, day: date, now_et: datetime) -> bool:
     return not is_trading_day(today) or now_et.hour < EARNINGS_LIVE_PREV_DAY_UNTIL_HOUR_ET
 
 
+def _record_shown(rec: _Record) -> _Record:
+    """The record a report reads from: its own, or with no figures of its own, the report the
+    trading day before (ONE REPORT, TWO DATES in the module docstring)."""
+    before = rec.report_before
+    if (before is None or has_results(eps_metric(rec), revenue_metric(rec))
+            or not has_results(eps_metric(before), revenue_metric(before))):
+        return rec
+    return before
+
+
 def snapshot_of(rec: _Record, today: date, now_et: datetime) -> LiveSnapshot:
-    eps = eps_metric(rec)
-    revenue = revenue_metric(rec)
+    """One report as the readers see it, under its own date. Its status and its poll follow the
+    record it reads from, whose day is the one those rules are about."""
+    shown = _record_shown(rec)
+    eps = eps_metric(shown)
+    revenue = revenue_metric(shown)
     preliminary = is_preliminary(eps, revenue)
-    status = live_status(rec.day, today, now_et, eps, revenue)
+    status = live_status(shown.day, today, now_et, eps, revenue)
     return LiveSnapshot(
         symbol=rec.symbol, day=rec.day, status=status,
-        company_name=rec.company_name, eps=eps, revenue=revenue,
-        preliminary=preliminary, checked_at=rec.checked_at, filing=rec.filing,
-        poll_seconds=sheet_poll_seconds(status, preliminary, rec.day, now_et),
+        company_name=rec.company_name or shown.company_name, eps=eps, revenue=revenue,
+        preliminary=preliminary, checked_at=shown.checked_at, filing=shown.filing,
+        poll_seconds=sheet_poll_seconds(status, preliminary, shown.day, now_et),
+        reads_as=shown.day if shown is not rec else None,
     )
 
 
 def newest_report(snaps: Iterable[LiveSnapshot]) -> Optional[LiveSnapshot]:
     """PURE. Which of one symbol's reports from before today it shows, given in any order: the
-    newest reported one, else the newest (see STATUSES in the module docstring)."""
-    return max(snaps, key=lambda s: (s.status == STATUS_REPORTED, s.day), default=None)
+    newest reported one, else the newest (see STATUSES in the module docstring). A row reading as
+    a report is dated by that report and gives way to it, so the card keeps the true date."""
+    return max(snaps, key=lambda s: (s.status == STATUS_REPORTED, s.reads_as or s.day,
+                                     s.reads_as is None), default=None)
 
 
 def iso_utc(when: Optional[datetime]) -> Optional[str]:
@@ -980,27 +1010,27 @@ class EarningsLiveService:
 
     def _note_landing(self, rec: _Record, now: datetime) -> None:
         """Note a record's first results, or that it has none yet. Results land from pending
-        only on a record seen pending, and not beside a report already in the trading day before
-        (ONE REPORT, TWO DATES in the module docstring). Decided here, once: read back later,
-        the earlier record may already have left the live days."""
+        only on a record seen pending. A record with none also notes the report it reads as."""
         if has_results(eps_metric(rec), revenue_metric(rec)):
             if rec.landed_at is None:
                 rec.landed_at = now
-                rec.landed_from_pending = rec.seen_pending and not self._follows_a_report(rec)
+                rec.landed_from_pending = rec.seen_pending
         else:
             rec.seen_pending = True
+            self._note_report_before(rec)
 
-    def _follows_a_report(self, rec: _Record) -> bool:
-        """Does the same symbol's record on the previous trading day already have results?"""
-        earlier_day = previous_trading_day(rec.day)
-        earlier = self._records.get((rec.symbol, earlier_day))
-        if earlier is None or not has_results(eps_metric(earlier), revenue_metric(earlier)):
-            return False
-        logger.info(
-            "[earnings-live] %s %s: results beside the %s report already in, no second push",
-            rec.symbol, rec.day.isoformat(), earlier_day.isoformat(),
-        )
-        return True
+    def _note_report_before(self, rec: _Record) -> None:
+        """Keep the same symbol's record on the previous trading day, once it has results (ONE
+        REPORT, TWO DATES in the module docstring). A record gets here on every fold, so a report
+        that lands after its leftover opened is still found, and the reference is what carries it
+        past the day that record is pruned."""
+        earlier = self._records.get((rec.symbol, previous_trading_day(rec.day)))
+        if (earlier is None or earlier is rec.report_before
+                or not has_results(eps_metric(earlier), revenue_metric(earlier))):
+            return
+        rec.report_before = earlier
+        logger.info("[earnings-live] %s %s: no figures of its own, reads as the %s report",
+                    rec.symbol, rec.day.isoformat(), earlier.day.isoformat())
 
     def absorb_filing(self, symbol: str, day: date, figures: FilingFigures,
                       now: datetime) -> None:
@@ -1065,8 +1095,7 @@ class EarningsLiveService:
         is not a landing — the same rule as `earnings_window_service._absorb` — so a deploy
         never re-announces a morning's results in the afternoon. The same goes for a filing
         accepted more than `_FILING_LANDING_GRACE` before the record was first seen, even
-        though FMP's row still reads pending (`absorb_filing`), and for a row that lands beside
-        a report already in the trading day before (`_note_landing`).
+        though FMP's row still reads pending (`absorb_filing`).
         """
         n = et_now(now)
         today = n.date()

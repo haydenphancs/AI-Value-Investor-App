@@ -18,13 +18,16 @@ kinds — and the daily 16:00 ET sender — claim the SAME key. What is pinned h
     such a report is handled once, for good;
   * a round sends oldest first, so the cap cannot run a report out of that window;
   * the round cap's warning counts the reports still owed a push, nothing else;
-  * one report on two dated rows is told once, under its first date, whichever source fills the
-    second row and across a restart: the real loop runs those, and the key is what they assert.
-The dispatcher is a recorder, or the real one over a fake table where a failed read is the
-point — nothing here reaches APNs or Supabase.
+  * one report on two dated rows is told once to each user, whichever source fills which row
+    in which order, across a restart, and past the daily pass: the real loop runs those over the
+    real dispatcher and a fake ledger, and the keys it holds are what they assert;
+  * who was told is the ledger's answer, so a report nobody heard about holds nothing back.
+The dispatcher is a recorder, or the real one over a fake table where a failed read or the
+ledger is the point — nothing here reaches APNs or Supabase.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -522,14 +525,27 @@ async def test_the_memory_of_a_report_outside_the_window_stays_bounded(dispatch)
 # ── a failed watcher read ────────────────────────────────────────────────────
 
 
+class _NobodyTold:
+    """`notification_events`, read for who holds a neighbouring key: nobody here."""
+
+    def select(self, *_):
+        return self
+
+    def in_(self, *_):
+        return self
+
+    def execute(self):
+        return SimpleNamespace(data=[])
+
+
 class _Watchlist:
     """`watchlist_items`. The page reads numbered in `failing` raise, as an edge 520 does."""
 
     def __init__(self, failing=(), users=("u1",)):
         self.failing, self.users, self.reads = set(failing), users, 0
 
-    def table(self, _name):
-        return self
+    def table(self, name):
+        return self if name == "watchlist_items" else _NobodyTold()
 
     def select(self, *_):
         return self
@@ -888,10 +904,111 @@ class _Market:
         return {"text": _READ_FIGURES, "model": "m", "tokens_used": 10}
 
 
+class _UniqueViolation(Exception):
+    code = "23505"
+
+
+class _LedgerQuery:
+    """One read or write of `_Ledger`."""
+
+    def __init__(self, ledger: "_Ledger", table: str):
+        self.ledger, self.table_name = ledger, table
+        self.wanted: Dict[str, Any] = {}
+        self.row = None
+
+    def select(self, *_):
+        return self
+
+    def eq(self, column, value):
+        self.wanted[column] = {value}
+        return self
+
+    def order(self, *_, **__):
+        return self
+
+    def range(self, *_):
+        return self
+
+    def in_(self, column, values):
+        self.wanted[column] = set(values)
+        return self
+
+    def insert(self, row):
+        self.row = row
+        return self
+
+    def execute(self):
+        return self.ledger.answer(self)
+
+
+class _Ledger:
+    """`watchlist_items` and `notification_events`: one row per (user, key), a second one refused
+    as Postgres refuses it, and `failing_reads` reads of who holds a key raising as an edge 520
+    does."""
+
+    def __init__(self, users=("u1",)):
+        self.users, self.rows, self.failing_reads, self.reads = users, [], 0, []
+
+    def table(self, name):
+        return _LedgerQuery(self, name)
+
+    def answer(self, query: _LedgerQuery):
+        if query.table_name == "watchlist_items":
+            return SimpleNamespace(data=[{"user_id": u} for u in self.users])
+        if query.row is not None:
+            if any(r["user_id"] == query.row["user_id"]
+                   and r["dedup_key"] == query.row["dedup_key"] for r in self.rows):
+                raise _UniqueViolation("duplicate key")
+            self.rows.append(query.row)
+            return SimpleNamespace(data=[query.row])
+        self.reads.append(dict(query.wanted))
+        if self.failing_reads:
+            self.failing_reads -= 1
+            raise RuntimeError("520 from the edge")
+        return SimpleNamespace(data=[
+            {"user_id": row["user_id"]} for row in self.rows
+            if all(row.get(column) in values for column, values in query.wanted.items())
+        ])
+
+    @property
+    def told(self) -> set:
+        return {(row["user_id"], row["dedup_key"]) for row in self.rows}
+
+
+def _ledger_dispatcher(monkeypatch, *, users=("u1",), prefs=None) -> pds.PushDispatchService:
+    """The real notify_watchers, fan-out, preference check and claim over a `_Ledger`: only the
+    table, the bulk reads behind a recipient and APNs are fake."""
+    svc = object.__new__(pds.PushDispatchService)
+    svc.supabase = _Ledger(users)
+    svc._push = SimpleNamespace(enabled=True)
+    svc.resolve_route_asset_type = lambda *_: None
+    svc.resolve_recipients = lambda ids, kind, now: {
+        uid: pds._Recipient(user_id=uid, preferences=(prefs or {}).get(uid, {})) for uid in ids
+    }
+
+    async def _deliver(recipient, kind, **_kw):
+        return True
+
+    svc._deliver = _deliver
+    monkeypatch.setattr(pds, "get_push_dispatch_service", lambda: svc)
+    monkeypatch.setattr(daily, "get_push_dispatch_service", lambda: svc)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", True)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_RESULT_PUSH_ENABLED", True)
+    sender.reset()
+    return svc
+
+
 @pytest.fixture
-def live_loop(dispatch, monkeypatch):
+def ledger(monkeypatch):
+    yield _ledger_dispatcher(monkeypatch).supabase
+    sender.reset()
+
+
+@pytest.fixture
+def live_loop(ledger, monkeypatch):
     """Run minutes of the real FMP tick, filing tick and `dispatch_landings` over a `_Market`,
-    with the recorder as the only dispatcher."""
+    with the real dispatcher over a `_Ledger`. Each minute starts the Tracking memo afresh unless
+    it keeps it, as a minute of the 30 it lives for does."""
     service = EarningsLiveService()
     watcher = efs.EarningsFilingWatcher()
     monkeypatch.setattr(els, "get_earnings_live_service", lambda: service)
@@ -906,11 +1023,12 @@ def live_loop(dispatch, monkeypatch):
     # `run_once` imports this inside the function, so it is patched at its source.
     monkeypatch.setattr(signals, "ticker_cik_map", _ciks)
 
-    async def _minute(market: _Market, at: datetime) -> None:
+    async def _minute(market: _Market, at: datetime, *, keep_memo: bool = False) -> None:
         monkeypatch.setattr(ts, "_et_today", lambda: at.astimezone(ET).date())
         # All three run on real time, and these minutes are not real ones.
         service._fetched.clear()
-        ts.reset_earnings_calendar_cache()
+        if not keep_memo:
+            ts.reset_earnings_calendar_cache()
         for watch in watcher._watch.values():
             watch.checked_mono = 0.0
         await els.earnings_live_tick(at, fmp=market, watched=["INTC"])
@@ -922,13 +1040,26 @@ def live_loop(dispatch, monkeypatch):
         watcher.reset()
         sender.reset()
 
+    async def _daily_pass(market: _Market, at: datetime) -> None:
+        @contextlib.asynccontextmanager
+        async def _claim(_job):
+            yield SimpleNamespace(success=False, notified=0)
+
+        monkeypatch.setattr(daily, "claimed_job", _claim)
+        monkeypatch.setattr(daily, "get_fmp_client", lambda: market)
+        monkeypatch.setattr(daily, "_watched_tickers", lambda: {"INTC"})
+        await daily.run_earnings_notifications(at)
+
     ts.reset_earnings_calendar_cache()
-    yield SimpleNamespace(minute=_minute, restart=_restart, service=service, watcher=watcher)
+    yield SimpleNamespace(minute=_minute, restart=_restart, daily_pass=_daily_pass,
+                          service=service, watcher=watcher)
     ts.reset_earnings_calendar_cache()
 
 
-def _keys(recorder: _Dispatch) -> set:
-    return {send["dedup_key"] for send in recorder.sent}
+def _keys(ledger: _Ledger) -> set:
+    """The result keys held. The daily pass also says "reports tomorrow", under its own key."""
+    return {row["dedup_key"] for row in ledger.rows
+            if row["dedup_key"].startswith(KIND_EARNINGS_RESULT)}
 
 
 async def _evening_8k_on_its_day(loop, market: _Market) -> None:
@@ -946,6 +1077,26 @@ async def _restart_overnight(loop, market: _Market) -> None:
     await _evening_8k_on_its_day(loop, market)
     loop.restart()
     await loop.minute(market, _et_time(OCT_29, 8))
+
+
+async def _restart_then_fmp_fills_the_leftover_row(loop, market: _Market) -> None:
+    await _restart_overnight(loop, market)
+    market.fills(OCT_29)
+    await loop.minute(market, _et_time(OCT_29, 8, 10))
+
+
+async def _restart_then_fmp_fills_both_rows_the_later_first(loop, market: _Market) -> None:
+    await _restart_then_fmp_fills_the_leftover_row(loop, market)
+    market.fills(OCT_28)
+    await loop.minute(market, _et_time(OCT_29, 9))
+
+
+async def _restart_at_nine_then_fmp_fills_the_leftover_row(loop, market: _Market) -> None:
+    await _same_process(loop, market)
+    loop.restart()
+    await loop.minute(market, _et_time(OCT_29, 9))
+    market.fills(OCT_29)
+    await loop.minute(market, _et_time(OCT_29, 9, 10))
 
 
 async def _fmp_lands_at_five(loop, market: _Market) -> None:
@@ -974,6 +1125,38 @@ async def _fmp_fills_the_leftover_row(loop, market: _Market) -> None:
     await loop.minute(market, _et_time(OCT_29, 8, 10))
 
 
+async def _a_restart_before_fmp_fills_the_leftover_row(loop, market: _Market) -> None:
+    await _fmp_lands_at_five(loop, market)
+    loop.restart()
+    await loop.minute(market, _et_time(OCT_29, 8))
+    market.fills(OCT_29)
+    await loop.minute(market, _et_time(OCT_29, 8, 10))
+
+
+async def _the_daily_pass_finds_the_leftover_row_filled(loop, market: _Market) -> None:
+    await _fmp_fills_the_leftover_row(loop, market)
+    await loop.daily_pass(market, _et_time(OCT_29, 16))
+
+
+async def _the_daily_pass_tells_the_first_row_and_fmp_fills_the_second(loop, market: _Market):
+    await loop.minute(market, _et_time(OCT_28, 15))
+    market.fills(OCT_28)
+    loop.restart()                                     # so the live path never saw it land
+    await loop.minute(market, _et_time(OCT_28, 15, 30))
+    await loop.daily_pass(market, _et_time(OCT_28, 16))
+    await loop.minute(market, _et_time(OCT_29, 8))
+    market.fills(OCT_29)
+    await loop.minute(market, _et_time(OCT_29, 8, 10))
+
+
+async def _both_rows_fill_between_two_fetches(loop, market: _Market) -> None:
+    await loop.minute(market, _et_time(OCT_28, 16))
+    await loop.minute(market, _et_time(OCT_29, 7))
+    market.fills(OCT_28)
+    market.fills(OCT_29)
+    await loop.minute(market, _et_time(OCT_29, 7, 5), keep_memo=True)
+
+
 async def _an_8k_with_no_acceptance_time(loop, market: _Market) -> None:
     await loop.minute(market, _et_time(OCT_28, 16))
     market.filings.append(dict(_EVENING_8K, acceptanceDateTime=""))
@@ -984,9 +1167,19 @@ async def _an_8k_with_no_acceptance_time(loop, market: _Market) -> None:
 _ONE_REPORT = {
     "same_process": _same_process,
     "restart_overnight": _restart_overnight,
+    "restart_then_fmp_fills_the_leftover_row": _restart_then_fmp_fills_the_leftover_row,
+    "restart_then_fmp_fills_both_rows_the_later_first":
+        _restart_then_fmp_fills_both_rows_the_later_first,
+    "restart_at_nine_then_fmp_fills_the_leftover_row":
+        _restart_at_nine_then_fmp_fills_the_leftover_row,
     "fmp_completes_the_first_row_first": _fmp_completes_the_first_row_first,
     "an_8k_the_morning_after_fmp_landed": _an_8k_the_morning_after_fmp_landed,
     "fmp_fills_the_leftover_row": _fmp_fills_the_leftover_row,
+    "a_restart_before_fmp_fills_the_leftover_row": _a_restart_before_fmp_fills_the_leftover_row,
+    "the_daily_pass_finds_the_leftover_row_filled": _the_daily_pass_finds_the_leftover_row_filled,
+    "the_daily_pass_tells_the_first_row_and_fmp_fills_the_second":
+        _the_daily_pass_tells_the_first_row_and_fmp_fills_the_second,
+    "both_rows_fill_between_two_fetches": _both_rows_fill_between_two_fetches,
     "an_8k_with_no_acceptance_time": _an_8k_with_no_acceptance_time,
 }
 
@@ -994,90 +1187,298 @@ _ONE_REPORT = {
 @pytest.mark.asyncio
 @pytest.mark.parametrize("leg", _ONE_REPORT.values(), ids=_ONE_REPORT.keys())
 async def test_one_report_on_two_dated_rows_is_told_once_under_its_first_date(
-        live_loop, dispatch, leg):
+        live_loop, ledger, leg):
     """FMP's reschedule leftover puts a second, later row beside a report, and the dedup key
     carries the row's date. The key is what must be asserted, never a count of one: a first
     date that never landed would leave one push, keyed on the wrong report."""
     await leg(live_loop, _Market())
-    assert _keys(dispatch) == _FIRST_PUSH
+    assert _keys(ledger) == _FIRST_PUSH
 
 
 @pytest.mark.asyncio
 async def test_with_the_shipped_flags_the_leftover_row_sends_no_second_result_push(
-        live_loop, dispatch, monkeypatch):
+        live_loop, ledger, monkeypatch):
     monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
     await _fmp_fills_the_leftover_row(live_loop, _Market())
-    assert _keys(dispatch) == _FIRST_PUSH
-    assert {send["kind"] for send in dispatch.sent} == {KIND_EARNINGS_RESULT}
+    assert _keys(ledger) == _FIRST_PUSH
+    assert {row["kind"] for row in ledger.rows} == {KIND_EARNINGS_RESULT}
+
+
+@pytest.mark.asyncio
+async def test_with_the_shipped_flags_the_rows_filling_later_first_are_one_push(
+        live_loop, ledger, monkeypatch):
+    """The first row's 8-K told nobody, so the row FMP filled is the one told, whichever date
+    it carries, and the row FMP fills after it finds that user already told."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+    await _restart_then_fmp_fills_both_rows_the_later_first(live_loop, _Market())
+    assert _keys(ledger) == {"earnings_result:INTC:2026-10-29"}
+
+
+@pytest.mark.asyncio
+async def test_a_report_nobody_heard_about_holds_nothing_back(live_loop, ledger, monkeypatch):
+    """A filing alone tells nobody with the live kind off, so FMP's figure on the later row is
+    the report's only push, and it goes out at that minute, not at the 16:00 pass."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+    market = _Market()
+    await live_loop.minute(market, _et_time(OCT_28, 16))
+    market.filings.append(_results_8k(filed=OCT_28, accepted="2026-10-28T16:02:00.000Z"))
+    await live_loop.minute(market, _et_time(OCT_28, 16, 3))
+    await live_loop.minute(market, _et_time(OCT_29, 8))
+    assert ledger.rows == []
+    market.fills(OCT_29)
+    await live_loop.minute(market, _et_time(OCT_29, 8, 10))
+    assert _keys(ledger) == {"earnings_result:INTC:2026-10-29"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live_kind,eps", [(True, 0.42), (True, 0.60), (False, 0.60)],
+                         ids=["live_kind_alone", "live_kind_and_a_surprise", "shipped_flags"])
+async def test_a_stale_friday_row_filled_on_monday_never_costs_mondays_push(
+        live_loop, ledger, monkeypatch, live_kind, eps):
+    """Friday's landing is older than yesterday, so it told nobody, and the true report on
+    Monday is the push. It goes out when the rows land, with no daily pass behind the live kind."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", live_kind)
+    friday, monday = date(2026, 10, 30), date(2026, 11, 2)
+    market = _Market(days=(friday, monday))
+    await live_loop.minute(market, _et_time(friday, 16))
+    await live_loop.minute(market, _et_time(monday, 8))
+    market.fills(friday, eps=eps)
+    market.fills(monday, eps=eps)
+    await live_loop.minute(market, _et_time(monday, 9, 5), keep_memo=True)
+    assert _keys(ledger) == {"earnings_result:INTC:2026-11-02"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("figure", [{"eps": 0.60, "revenue": None}, {"eps": None, "revenue": 17e9}],
+                         ids=["eps_alone", "revenue_alone"])
+async def test_a_report_told_on_one_figure_was_told(live_loop, ledger, figure):
+    market = _Market()
+    await live_loop.minute(market, _et_time(OCT_28, 16))
+    market.fills(OCT_28, **figure)
+    await live_loop.minute(market, _et_time(OCT_28, 17))
+    await live_loop.minute(market, _et_time(OCT_29, 8))
+    market.fills(OCT_29)
+    await live_loop.minute(market, _et_time(OCT_29, 8, 10))
+    assert _keys(ledger) == _FIRST_PUSH
+
+
+@pytest.mark.asyncio
+async def test_each_user_hears_of_the_report_once_on_whichever_row_reached_them(
+        monkeypatch, live_loop):
+    """Who was told is per user. u2 takes Results & Surprises alone, so the 8-K told only u1, and
+    FMP's figure on the leftover row is u2's one push."""
+    svc = _ledger_dispatcher(
+        monkeypatch, users=("u1", "u2"), prefs={"u2": {"notify_earnings_live": False}})
+    await _restart_then_fmp_fills_the_leftover_row(live_loop, _Market())
+    assert svc.supabase.told == {("u1", "earnings_result:INTC:2026-10-28"),
+                                 ("u2", "earnings_result:INTC:2026-10-29")}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_of_who_was_told_goes_back_for_the_next_round(monkeypatch, caplog):
+    svc = _ledger_dispatcher(monkeypatch)
+    svc.supabase.rows.append({"user_id": "u1", "dedup_key": "earnings_result:INTC:2026-10-28",
+                              "kind": KIND_EARNINGS_RESULT})
+    svc.supabase.failing_reads = 1
+    with caplog.at_level(logging.WARNING, logger=sender.logger.name):
+        await sender.dispatch_landings([_big()], NOW)
+    assert any("INTC" in line and "520 from the edge" in line for line in _warnings(caplog))
+    assert ("INTC", REPORT) not in sender._live_done, "the key went back"
+    reads = len(svc.supabase.reads)
+    await sender.dispatch_landings([_big()], NOW)
+    assert len(svc.supabase.reads) > reads
+    assert svc.supabase.told == {("u1", "earnings_result:INTC:2026-10-28")}
+
+
+@pytest.mark.asyncio
+async def test_a_report_nobody_heard_about_goes_out_after_a_failed_read(monkeypatch):
+    svc = _ledger_dispatcher(monkeypatch)
+    svc.supabase.failing_reads = 1
+    await sender.dispatch_landings([_big()], NOW)
+    assert svc.supabase.rows == []
+    await sender.dispatch_landings([_big()], NOW)
+    assert svc.supabase.told == {("u1", "earnings_result:INTC:2026-10-29")}
+
+
+@pytest.mark.asyncio
+async def test_the_daily_pass_tells_nobody_on_a_failed_read_of_who_was_told(monkeypatch, caplog):
+    svc = _ledger_dispatcher(monkeypatch)
+    svc.supabase.failing_reads = 1
+    with caplog.at_level(logging.WARNING, logger=pds.logger.name):
+        sent = await daily._dispatch(kind=KIND_EARNINGS_RESULT, symbol="INTC", when="2026-10-29",
+                                     title="t", body="b")
+    assert sent == 0 and svc.supabase.rows == []
+    assert any("INTC" in line and "520 from the edge" in line for line in _warnings(caplog))
+
+
+@pytest.mark.asyncio
+async def test_a_user_told_on_the_neighbouring_date_is_skipped_by_the_daily_pass(monkeypatch):
+    svc = _ledger_dispatcher(monkeypatch, users=("u1", "u2"))
+    svc.supabase.rows.append({"user_id": "u1", "dedup_key": "earnings_result:INTC:2026-10-28",
+                              "kind": KIND_EARNINGS_RESULT})
+    await daily._dispatch(kind=KIND_EARNINGS_RESULT, symbol="INTC", when="2026-10-29",
+                          title="t", body="b")
+    assert svc.supabase.told == {("u1", "earnings_result:INTC:2026-10-28"),
+                                 ("u2", "earnings_result:INTC:2026-10-29")}
+
+
+@pytest.mark.asyncio
+async def test_a_reports_tomorrow_push_asks_nothing_of_the_ledger(monkeypatch):
+    svc = _ledger_dispatcher(monkeypatch)
+    await daily._dispatch(kind=daily.KIND_EARNINGS_UPCOMING, symbol="INTC", when="2026-10-29",
+                          title="t", body="b")
+    assert svc.supabase.reads == []
+    assert len(svc.supabase.rows) == 1
+
+
+@pytest.mark.parametrize("when,before,after", [
+    ("2026-10-28", "2026-10-27", "2026-10-29"),          # an ordinary Wednesday
+    ("2026-10-30", "2026-10-29", "2026-11-02"),          # Friday, over the weekend
+    ("2026-11-02", "2026-10-30", "2026-11-03"),          # Monday, back over the weekend
+    ("2026-11-25", "2026-11-24", "2026-11-27"),          # over Thanksgiving
+    ("2026-10-31", "2026-10-30", "2026-11-02"),          # a Saturday row
+])
+def test_the_neighbouring_keys_are_the_trading_days_either_side(when, before, after):
+    assert daily.neighbouring_result_keys("intc", when) == [
+        f"earnings_result:INTC:{before}", f"earnings_result:INTC:{after}"]
+
+
+def test_the_read_of_who_was_told_is_batched_and_names_both_columns(monkeypatch):
+    svc = _ledger_dispatcher(monkeypatch)
+    svc.supabase.rows.append({"user_id": "u450", "dedup_key": "k1"})
+    users = [f"u{i}" for i in range(451)]
+    assert svc._holders_of(users, ["k1", "k2"]) == {"u450"}
+    assert [len(read["user_id"]) for read in svc.supabase.reads] == [200, 200, 51]
+    assert all(read["dedup_key"] == {"k1", "k2"} for read in svc.supabase.reads)
+
+
+@pytest.mark.asyncio
+async def test_with_nothing_held_a_send_reaches_everyone_it_would_have(monkeypatch):
+    svc = _ledger_dispatcher(monkeypatch, users=("u1", "u2"))
+    sent = await svc.notify_watchers(
+        ticker="INTC", title="t", body="b", dedup_key="k", kind=KIND_EARNINGS_RESULT,
+        data={"ticker": "INTC"}, unless_claimed=["k0"])
+    assert sent == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["deferred", "pending", "sent", "no_device", "failed"])
+async def test_a_row_in_any_state_is_a_user_told(monkeypatch, state):
+    """A push waiting out quiet hours still goes out, and a row is what the inbox shows."""
+    svc = _ledger_dispatcher(monkeypatch)
+    svc.supabase.rows.append({"user_id": "u1", "dedup_key": "k0", "push_state": state})
+    sent = await svc.notify_watchers(
+        ticker="INTC", title="t", body="b", dedup_key="k", kind=KIND_EARNINGS_RESULT,
+        data={"ticker": "INTC"}, unless_claimed=["k0"])
+    assert sent == 0
+
+
+@pytest.mark.asyncio
+async def test_a_send_with_everyone_told_says_so_and_ends(monkeypatch, caplog):
+    svc = _ledger_dispatcher(monkeypatch)
+    svc.supabase.rows.append({"user_id": "u1", "dedup_key": "k0"})
+    with caplog.at_level(logging.INFO, logger=pds.logger.name):
+        sent = await svc.notify_watchers(
+            ticker="INTC", title="t", body="b", dedup_key="k", kind=KIND_EARNINGS_RESULT,
+            data={"ticker": "INTC"}, unless_claimed=["k0"])
+    assert sent == 0 and svc.supabase.told == {("u1", "k0")}
+    (line,) = [r.getMessage() for r in caplog.records if "already told" in r.getMessage()]
+    assert "INTC" in line and "k0" in line
+
+
+@pytest.mark.asyncio
+async def test_a_strict_send_raises_on_a_failed_read_of_who_was_told(monkeypatch):
+    svc = _ledger_dispatcher(monkeypatch)
+    svc.supabase.failing_reads = 1
+    with pytest.raises(pds.WatcherLookupFailed, match="520 from the edge"):
+        await svc.notify_watchers(ticker="INTC", title="t", body="b", dedup_key="k",
+                                  kind=KIND_EARNINGS_RESULT, unless_claimed=["k0"], strict=True)
+    assert svc.supabase.rows == []
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("leg,model_calls", [
     (_same_process, 1), (_restart_overnight, 1), (_fmp_completes_the_first_row_first, 0),
 ], ids=["same_process", "restart_overnight", "fmp_completes_the_first_row_first"])
-async def test_an_evening_8k_stays_off_the_next_days_row(live_loop, dispatch, leg, model_calls):
-    """A record that opens the next day already has `_FILING_LANDING_GRACE` against this 8-K, so
-    no second push comes of it. The filing still belongs to the day it was accepted: that row
-    must not show the figures, or pay to read them again."""
+async def test_an_evening_8k_stays_off_the_next_days_record(live_loop, ledger, leg, model_calls):
+    """The filing belongs to the day it was accepted: that row's record must not hold it, or pay
+    to read it again."""
     market = _Market()
     await leg(live_loop, market)
-    leftover = live_loop.service.snapshot("INTC", OCT_29, _et_time(OCT_29, 8, 5))
-    assert leftover.filing is None and leftover.eps.actual is None
-    assert leftover.status == els.STATUS_LIVE
+    leftover = live_loop.service._records[("INTC", OCT_29)]
+    assert leftover.filing is None and leftover.fmp_eps is None
     assert market.model_calls == model_calls
 
 
 @pytest.mark.asyncio
-async def test_a_lone_row_with_an_evening_8k_is_told_on_its_own_date(live_loop, dispatch):
+async def test_the_leftover_row_beside_an_evening_8k_reads_as_that_report(live_loop, ledger):
+    market = _Market()
+    await _same_process(live_loop, market)
+    card = live_loop.service.snapshot("INTC", OCT_29, _et_time(OCT_29, 8, 5))
+    assert card.status == els.STATUS_REPORTED and card.preliminary is True
+    assert (card.eps.actual, card.revenue.actual) == (0.44, 17.1e9)
+
+
+@pytest.mark.asyncio
+async def test_after_a_restart_the_leftover_row_has_no_report_to_read_as(live_loop, ledger):
+    """A filing's figures live in this process, so a restart loses them until FMP fills, and the
+    row says what it knows: nothing yet, never a figure it no longer holds."""
+    await _restart_overnight(live_loop, _Market())
+    card = live_loop.service.snapshot("INTC", OCT_29, _et_time(OCT_29, 8, 5))
+    assert card.status == els.STATUS_LIVE and card.eps.actual is None
+
+
+@pytest.mark.asyncio
+async def test_a_lone_row_with_an_evening_8k_is_told_on_its_own_date(live_loop, ledger):
     market = _Market(days=(OCT_28,))
     await _same_process(live_loop, market)
-    assert _keys(dispatch) == _FIRST_PUSH
+    assert _keys(ledger) == _FIRST_PUSH
     assert market.model_calls == 1
 
 
 @pytest.mark.asyncio
-async def test_a_pair_with_an_8k_during_the_day_is_told_on_its_first_date(live_loop, dispatch):
+async def test_a_pair_with_an_8k_during_the_day_is_told_on_its_first_date(live_loop, ledger):
     market = _Market()
     await live_loop.minute(market, _et_time(OCT_28, 16))
     market.filings.append(_results_8k(filed=OCT_28, accepted="2026-10-28T16:02:00.000Z"))
     await live_loop.minute(market, _et_time(OCT_28, 16, 3))
     await live_loop.minute(market, _et_time(OCT_29, 8))
-    assert _keys(dispatch) == _FIRST_PUSH
+    assert _keys(ledger) == _FIRST_PUSH
 
 
 @pytest.mark.asyncio
-async def test_a_stale_earlier_row_never_stops_the_true_report_the_next_day(live_loop, dispatch):
+async def test_a_stale_earlier_row_never_stops_the_true_report_the_next_day(live_loop, ledger):
     market = _Market()
     await live_loop.minute(market, _et_time(OCT_28, 16))
     await live_loop.minute(market, _et_time(OCT_29, 15))
     market.filings.append(_results_8k(filed=OCT_29, accepted="2026-10-29T16:02:00.000Z"))
     await live_loop.minute(market, _et_time(OCT_29, 16, 3))
-    assert _keys(dispatch) == {"earnings_result:INTC:2026-10-29"}
+    assert _keys(ledger) == {"earnings_result:INTC:2026-10-29"}
 
 
 @pytest.mark.asyncio
-async def test_a_row_fmp_dates_after_an_evening_8k_waits_for_fmps_figure(live_loop, dispatch):
+async def test_a_row_fmp_dates_after_an_evening_8k_waits_for_fmps_figure(live_loop, ledger):
     """The cost of giving an 8-K to the day it was accepted: this one has no fast path, and its
     one push comes with FMP's figure."""
     market = _Market(days=(OCT_29,))
     market.filings.append(_EVENING_8K)
     await live_loop.minute(market, _et_time(OCT_29, 8))
-    assert dispatch.sent == [] and market.model_calls == 0
+    assert ledger.rows == [] and market.model_calls == 0
     market.fills(OCT_29)
     await live_loop.minute(market, _et_time(OCT_29, 8, 10))
-    assert _keys(dispatch) == {"earnings_result:INTC:2026-10-29"}
+    assert _keys(ledger) == {"earnings_result:INTC:2026-10-29"}
 
 
 @pytest.mark.asyncio
-async def test_a_friday_evening_8k_is_told_on_friday_and_never_again_on_monday(live_loop, dispatch):
+async def test_a_friday_evening_8k_is_told_on_friday_and_never_again_on_monday(live_loop, ledger):
     friday, monday = date(2026, 10, 30), date(2026, 11, 2)
     market = _Market(days=(friday, monday))
     await live_loop.minute(market, _et_time(friday, 16))
     market.filings.append(_results_8k(filed=monday, accepted="2026-10-30T18:05:00.000Z"))
     await live_loop.minute(market, _et_time(friday, 18, 6))
-    assert _keys(dispatch) == {"earnings_result:INTC:2026-10-30"}
+    assert _keys(ledger) == {"earnings_result:INTC:2026-10-30"}
     await live_loop.minute(market, _et_time(monday, 8))
     market.fills(monday)
     await live_loop.minute(market, _et_time(monday, 8, 10))
-    assert _keys(dispatch) == {"earnings_result:INTC:2026-10-30"}
+    assert _keys(ledger) == {"earnings_result:INTC:2026-10-30"}
     assert market.model_calls == 1

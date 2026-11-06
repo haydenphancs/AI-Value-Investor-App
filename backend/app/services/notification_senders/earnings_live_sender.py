@@ -24,15 +24,23 @@ weekend or a holiday. A Friday report FMP fills on Monday lands, keeps its card 
 and is marked handled here with nothing further sent: a live push from its filing, if one went
 out inside the window, is all it gets.
 
+ONE REPORT, TWO DATES. FMP's leftover row a trading day from a report lands like any report, and
+the key carries its date, so the ledger decides: a user holding the result key on the trading day
+either side was told about this report and is left out (`earnings_sender.neighbouring_result_keys`,
+`unless_claimed`). Only the ledger knows who heard. It outlives a restart, it answers per user,
+and a report that told nobody, a filing with the live kind off or a landing past the window,
+holds nothing back. `_to_decide`'s oldest-first order is what makes two rows landing in one round
+one push under the first date.
+
 A FAILED WATCHER READ. A report's key is taken before its send, and the dispatcher's usual 0
 for a failed read looks like a ticker nobody watches, so one failed read at the landing minute
 would use up the report: no later round sends it, a restart cannot re-land it, and
 `earnings_live` has no daily pass behind it. So `_notify` asks to hear about it (`strict`). The
 read told nobody and claimed nothing, so the key goes back and the next round retries. The
 round ends there: the live kind still goes first, and the tick, which awaits this inline, pays
-for one failed read a round however many reports wait. A failed claim or device read after a
-good watcher read comes back as a count like any other, so it does use up the key; only a
-failed claim leaves `earnings_result` the daily pass.
+for one failed read a round however many reports wait. A failed read of who holds a neighbouring
+key is the same. A failed claim or device read after those reads comes back as a count like any
+other, so it does use up the key; only a failed claim leaves `earnings_result` the daily pass.
 
 COPY. Informational, never directive (SYSTEM_DESIGN_GUIDELINES §11.7). A lock-screen banner
 sits OUTSIDE the authenticated app, which is all FMP's Order Form licenses for display, so an
@@ -65,6 +73,7 @@ from app.services.notification_kinds import (
 from app.services.notification_senders.earnings_sender import (
     MIN_SURPRISE,
     in_result_window,
+    neighbouring_result_keys,
     result_copy,
     result_dedup_key,
     surprise_pct,
@@ -155,6 +164,7 @@ async def _notify(kind: str, snap: LiveSnapshot, title: str, body: str) -> int:
         title=title,
         body=body,
         dedup_key=result_dedup_key(snap.symbol, when),
+        unless_claimed=neighbouring_result_keys(snap.symbol, when),
         kind=kind,
         data=ticker_route(kind, snap.symbol, report_date=when),
         strict=True,
@@ -173,7 +183,8 @@ def _prune(now: datetime) -> None:
 
 def _to_decide(snapshots: List[LiveSnapshot], today: date) -> List[LiveSnapshot]:
     """The reports this round still has a decision on, oldest first: the oldest leaves the
-    result window soonest, so the cap must hold back a newer one instead. One already outside
+    result window soonest, so the cap must hold back a newer one instead, and a report dated
+    twice is told under its first date. One already outside
     the window is handled here, both kinds at once: no later round has anything left to decide
     on it, and it reaches neither the cap nor the log again. Its keys leave with the live days,
     like every other (`_prune`)."""

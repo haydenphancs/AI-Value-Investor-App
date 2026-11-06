@@ -43,8 +43,9 @@ What is pinned here, each a way the LIVE card could lie or cost too much:
   * the sender gets watched landings only, while the fold stays whole-market: cards and the
     sheet read every record;
   * a landing older than yesterday tells nobody, and keeps its card and its sheet;
-  * a row landing beside a report already in the trading day before tells nobody either, a
-    decision taken once, at the landing, which leaves its figures on show;
+  * a row with no figures of its own beside a report already in the trading day before reads as
+    that report, at every hour and past the day that report leaves the live days, never as LIVE
+    or "not in yet", while it stays on the SEC watch and keeps asking FMP;
   * a failed read of the watched list serves the old list and says so.
 Hermetic: inline fakes for FMP, SEC and the dispatcher; the clock is passed in.
 """
@@ -1311,94 +1312,222 @@ def _landed_days(svc: els.EarningsLiveService, now: datetime, symbol: str = "INT
     return sorted(s.day for s in svc.landed_snapshots(now) if s.symbol == symbol)
 
 
-def test_a_row_landing_after_the_report_the_trading_day_before_is_no_landing():
+def _leftover_beside_a_report(svc: els.EarningsLiveService, at: datetime, *, eps=0.44,
+                              rev=17.1e9) -> None:
+    """INTC's report in on PREV, and FMP's leftover row dated REPORT with nothing on it."""
+    svc.observe_rows(PREV, [_row("INTC", PREV, eps=eps, rev=rev)], at)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], at)
+
+
+def _figures(snap: els.LiveSnapshot) -> tuple:
+    return snap.status, snap.eps.actual, snap.revenue.actual
+
+
+@pytest.mark.asyncio
+async def test_todays_card_for_a_leftover_row_shows_the_report_and_no_live_label(monkeypatch):
+    monkeypatch.setattr(ts, "_et_today", lambda: REPORT)
+    fmp = _FMP({REPORT: [_row("INTC", REPORT)]})
+    svc_obj = ts.TrackingService.__new__(ts.TrackingService)
+    svc_obj.fmp = fmp
+    _svc().observe_rows(PREV, [_row("INTC", PREV, eps=0.44, rev=17.1e9)], _et(REPORT, 8))
+    monkeypatch.setattr(ts, "datetime", _FrozenDatetime(_et(REPORT, 8, 5)))
+    (card,) = await svc_obj._get_earnings_alerts(["INTC"])
+    assert card.earnings_status == "reported" and card.report_date == "2026-10-29"
+    assert (card.eps_actual, card.revenue_actual) == (0.44, 17.1e9)
+
+
+@pytest.mark.asyncio
+async def test_a_reported_card_and_its_leftover_row_keep_the_reports_date(monkeypatch):
+    """A symbol draws one card from before today, and a leftover on a closed day beside its
+    report must not take it from the report."""
+    _svc().observe_rows(FRIDAY, [_row("INTC", FRIDAY, eps=0.44, rev=17.1e9)], _et(FRIDAY, 17))
+    _svc().observe_rows(SATURDAY, [_row("INTC", SATURDAY)], _et(SATURDAY, 9))
+    monkeypatch.setattr(ts, "datetime", _FrozenDatetime(_et(MONDAY, 8)))
+    svc_obj = ts.TrackingService.__new__(ts.TrackingService)
+    svc_obj.fmp = _FMP()
+    (card,) = await svc_obj._get_recent_earnings_alerts(["INTC"])
+    assert card.report_date == FRIDAY.isoformat() and card.eps_actual == 0.44
+
+
+@pytest.mark.parametrize("order", ["report_first", "leftover_first"])
+def test_the_pick_of_a_card_does_not_depend_on_the_order_it_is_given(order):
+    report = els.LiveSnapshot("INTC", FRIDAY, els.STATUS_REPORTED, "Intel", els.LiveMetric(0.41),
+                              els.LiveMetric(1e9), False, None, None)
+    leftover = dataclasses.replace(report, day=SATURDAY, reads_as=FRIDAY)
+    snaps = [report, leftover] if order == "report_first" else [leftover, report]
+    assert els.newest_report(snaps) is report
+
+
+def test_a_newer_report_of_its_own_still_beats_a_row_reading_as_an_older_one():
+    older = els.LiveSnapshot("INTC", FRIDAY, els.STATUS_REPORTED, "Intel", els.LiveMetric(0.41),
+                             els.LiveMetric(1e9), False, None, None)
+    carried = dataclasses.replace(older, day=SATURDAY, reads_as=FRIDAY)
+    newer = dataclasses.replace(older, day=SUNDAY)
+    assert els.newest_report([carried, newer, older]) is newer
+
+
+def test_two_rows_landing_both_land_and_the_ledger_decides_who_hears():
+    """Who was told is not a record's to know: a filing can tell nobody, and a restart forgets.
+    The dispatcher's ledger answers it (test_earnings_live_push.py)."""
     svc, at = _svc(), _et(REPORT, 8)
     svc.observe_rows(PREV, [_row("INTC", PREV)], at)
     svc.observe_rows(REPORT, [_row("INTC", REPORT)], at)
     svc.observe_rows(PREV, [_row("INTC", PREV, eps=0.44, rev=17.1e9)], at)
-    assert _landed_days(svc, at) == [PREV]
     svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], at)
-    assert _landed_days(svc, at) == [PREV]
+    assert _landed_days(svc, at) == [PREV, REPORT]
 
 
-def test_the_row_that_is_no_landing_keeps_its_figures_on_show():
-    """The rule is about who is told. The card and the sheet read the record as they did."""
+@pytest.mark.parametrize("hour,minute", [(5, 0), (8, 5), (15, 0), (22, 31)])
+def test_a_row_with_nothing_on_it_reads_as_the_report_the_trading_day_before(hour, minute):
+    svc, at = _svc(), _et(REPORT, hour, minute)
+    _leftover_beside_a_report(svc, at)
+    assert _figures(svc.snapshot("INTC", REPORT, at)) == (els.STATUS_REPORTED, 0.44, 17.1e9)
+
+
+def test_the_row_keeps_the_report_after_its_record_leaves_the_live_days():
+    """The morning after, the report's own record is gone, and this card is all that is left. It
+    must not say the results are not in."""
     svc, at = _svc(), _et(REPORT, 8)
-    svc.observe_rows(PREV, [_row("INTC", PREV, eps=0.44, rev=17.1e9)], at)
-    svc.observe_rows(REPORT, [_row("INTC", REPORT)], at)
-    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], at)
-    snap = svc.snapshot("INTC", REPORT, at)
-    assert (snap.eps.actual, snap.revenue.actual) == (0.44, 17.1e9)
-    assert snap.status == els.STATUS_REPORTED
-
-
-def test_a_filing_landing_after_the_report_the_trading_day_before_is_no_landing():
-    svc, at = _svc(), _et(REPORT, 8)
-    svc.observe_rows(PREV, [_row("INTC", PREV, eps=0.44, rev=17.1e9)], at)
-    svc.observe_rows(REPORT, [_row("INTC", REPORT)], at)
-    figures = efs.FilingFigures(accession="0000050863-26-000123", accepted_at=at, url=None,
-                                revenue=17.1e9, eps_adjusted=0.45)
-    svc.absorb_filing("INTC", REPORT, figures, at)
-    assert _landed_days(svc, at) == []
-    assert svc.snapshot("INTC", REPORT, at).revenue.actual == 17.1e9
-
-
-def test_a_report_seen_as_already_in_stops_the_row_after_it_too():
-    """A restart reads the first row as reported, which is no landing. Its report is still in,
-    so the row after it has nothing to announce."""
-    svc, at = _svc(), _et(REPORT, 8)
-    svc.observe_rows(PREV, [_row("INTC", PREV, eps=0.44, rev=17.1e9)], at)
-    svc.observe_rows(REPORT, [_row("INTC", REPORT)], at)
-    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], at)
-    assert svc.landed_snapshots(at) == []
-
-
-def test_that_decision_outlives_the_record_it_read():
-    """Taken once, at the landing. Read back later, it would see the day before pruned from the
-    live days, and send the push it stopped."""
-    svc, at = _svc(), _et(REPORT, 8)
-    svc.observe_rows(PREV, [_row("INTC", PREV, eps=0.44, rev=17.1e9)], at)
-    svc.observe_rows(REPORT, [_row("INTC", REPORT)], at)
-    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], at)
-    next_morning = _et(NEXT, 8)
+    _leftover_beside_a_report(svc, at)
+    next_morning = _et(NEXT, 8, 1)
     svc._prune(next_morning)
     assert ("INTC", PREV) not in svc._records and ("INTC", REPORT) in svc._records
-    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], next_morning)
-    assert svc.landed_snapshots(next_morning) == []
+    (card,) = svc.recent_snapshots(["INTC"], next_morning)
+    assert card.day == REPORT
+    assert _figures(card) == (els.STATUS_REPORTED, 0.44, 17.1e9)
+
+
+def test_a_row_carrying_a_report_is_still_up_at_noon_the_next_day():
+    svc, at = _svc(), _et(REPORT, 8)
+    _leftover_beside_a_report(svc, at)
+    afternoon = _et(NEXT, 12, 30)
+    svc._prune(afternoon)
+    (card,) = svc.recent_snapshots(["INTC"], afternoon)
+    assert card.status == els.STATUS_REPORTED
+
+
+@pytest.mark.parametrize("figures,shown", [
+    ({"eps": 0.44, "rev": None}, (els.STATUS_REPORTED, 0.44, None)),
+    ({"eps": None, "rev": 17.1e9}, (els.STATUS_REPORTED, None, 17.1e9)),
+], ids=["eps_alone", "revenue_alone"])
+def test_a_report_with_one_figure_in_is_a_report_in(figures, shown):
+    svc, at = _svc(), _et(REPORT, 8)
+    _leftover_beside_a_report(svc, at, **figures)
+    assert _figures(svc.snapshot("INTC", REPORT, at)) == shown
+
+
+def test_a_filing_the_day_before_is_a_report_in_and_it_stays_preliminary():
+    svc, at = _svc(), _et(REPORT, 8)
+    svc.observe_rows(PREV, [_row("INTC", PREV)], at)
+    filing = efs.FilingFigures(accession="0000050863-26-000123", accepted_at=_et(PREV, 18, 5),
+                               url="https://sec/idx", revenue=17.1e9, eps_adjusted=0.44)
+    svc.absorb_filing("INTC", PREV, filing, _et(PREV, 18, 6))
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], at)
+    snap = svc.snapshot("INTC", REPORT, at)
+    assert _figures(snap) == (els.STATUS_REPORTED, 0.44, 17.1e9)
+    assert snap.preliminary is True and snap.filing is filing
+    assert snap.checked_at == _et(PREV, 18, 6)
+
+
+def test_the_estimate_beside_the_figure_is_the_reports_own():
+    """A surprise is never worked out against another row's consensus."""
+    svc, at = _svc(), _et(REPORT, 8)
+    svc.observe_rows(PREV, [_row("INTC", PREV, eps=0.44, rev=17.1e9, eps_est=0.41)], at)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps_est=0.50)], at)
+    snap = svc.snapshot("INTC", REPORT, at)
+    assert snap.eps.estimate == 0.41 and snap.eps.surprise_pct == 7.32
+
+
+def test_the_sheets_poll_follows_the_report_it_reads_as():
+    svc, at = _svc(), _et(REPORT, 8)
+    svc.observe_rows(PREV, [_row("INTC", PREV)], at)
+    filing = efs.FilingFigures(accession="0000050863-26-000123", accepted_at=_et(PREV, 18, 5),
+                               url=None, revenue=17.1e9, eps_adjusted=0.44)
+    svc.absorb_filing("INTC", PREV, filing, _et(PREV, 18, 6))
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], at)
+    assert svc.snapshot("INTC", REPORT, at).poll_seconds == els.EARNINGS_LIVE_PRELIMINARY_POLL_SECONDS
+    assert svc.snapshot("INTC", REPORT, _et(REPORT, 13)).poll_seconds is None
+
+
+def test_the_rows_own_figure_replaces_the_report_it_read_as():
+    svc, at = _svc(), _et(REPORT, 8)
+    _leftover_beside_a_report(svc, at)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.50)], at)
+    snap = svc.snapshot("INTC", REPORT, at)
+    assert (snap.eps.actual, snap.revenue.actual) == (0.50, None)
+    assert snap.status == els.STATUS_LIVE
+
+
+def test_the_rows_own_filing_replaces_the_report_it_read_as():
+    svc, at = _svc(), _et(REPORT, 16, 5)
+    _leftover_beside_a_report(svc, at)
+    figures = efs.FilingFigures(accession="0000050863-26-000124", accepted_at=at, url=None,
+                                revenue=18.2e9, eps_adjusted=0.51)
+    svc.absorb_filing("INTC", REPORT, figures, at)
+    assert _figures(svc.snapshot("INTC", REPORT, at)) == (els.STATUS_REPORTED, 0.51, 18.2e9)
+
+
+def test_only_the_reading_changes_the_row_stays_on_the_watch_and_keeps_asking_fmp():
+    """A true report on this date must still land."""
+    svc, at = _svc(), _et(REPORT, 8)
+    _leftover_beside_a_report(svc, at)
+    assert svc.pending_symbols(REPORT, ["INTC"]) == ["INTC"]
+    assert svc._fmp_wanted(REPORT, ["INTC"]) is True
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], at)
+    assert _landed_days(svc, at) == [REPORT]
+
+
+def test_a_report_landing_after_its_leftover_opened_is_found_on_the_next_fold():
+    svc, at = _svc(), _et(REPORT, 8)
+    svc.observe_rows(PREV, [_row("INTC", PREV)], at)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], at)
+    assert svc.snapshot("INTC", REPORT, at).status == els.STATUS_LIVE
+    svc.observe_rows(PREV, [_row("INTC", PREV, eps=0.44, rev=17.1e9)], at)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], at + timedelta(minutes=1))
+    assert _figures(svc.snapshot("INTC", REPORT, at)) == (els.STATUS_REPORTED, 0.44, 17.1e9)
 
 
 def test_a_pending_row_the_day_before_stops_nothing():
     svc, at = _svc(), _et(REPORT, 16, 30)
     svc.observe_rows(PREV, [_row("INTC", PREV)], at)
     svc.observe_rows(REPORT, [_row("INTC", REPORT)], at)
+    assert svc.snapshot("INTC", REPORT, at).status == els.STATUS_LIVE
     svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], at)
     assert _landed_days(svc, at) == [REPORT]
 
 
 def test_a_figure_held_the_day_before_is_no_report_in_yet():
-    """A dropped-digit figure shows nothing, so nobody has been told."""
+    """A dropped-digit figure shows nothing, so there is nothing to read as."""
     svc, at = _svc(), _et(REPORT, 16, 30)
     svc.observe_rows(PREV, [_row("INTC", PREV, eps=0.041)], at)
     assert svc.snapshot("INTC", PREV, at).eps.checking
     svc.observe_rows(REPORT, [_row("INTC", REPORT)], at)
-    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], at)
-    assert REPORT in _landed_days(svc, at)
+    snap = svc.snapshot("INTC", REPORT, at)
+    assert snap.status == els.STATUS_LIVE and snap.eps.actual is None
+
+
+def test_a_report_a_guard_takes_back_is_no_report_in_any_more():
+    """Read at the moment of asking too: a later consensus can hold the figure it landed on."""
+    svc, at = _svc(), _et(REPORT, 8)
+    _leftover_beside_a_report(svc, at, eps=None, rev=17.1e9)
+    assert svc.snapshot("INTC", REPORT, at).revenue.actual == 17.1e9
+    svc._records[("INTC", PREV)].revenue_estimate = 90e9
+    snap = svc.snapshot("INTC", REPORT, at)
+    assert snap.status == els.STATUS_LIVE and snap.revenue.actual is None
 
 
 def test_another_companys_report_the_day_before_stops_nothing():
     svc, at = _svc(), _et(REPORT, 16, 30)
     svc.observe_rows(PREV, [_row("AAPL", PREV, eps=1.9, rev=1e11)], at)
     svc.observe_rows(REPORT, [_row("INTC", REPORT)], at)
-    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], at)
-    assert _landed_days(svc, at) == [REPORT]
+    assert svc.snapshot("INTC", REPORT, at).status == els.STATUS_LIVE
 
 
 def test_a_report_two_trading_days_back_is_another_report():
     svc, at = _svc(), _et(NEXT, 16, 30)
     svc.observe_rows(PREV, [_row("INTC", PREV, eps=0.44, rev=17.1e9)], at)
     svc.observe_rows(NEXT, [_row("INTC", NEXT)], at)
-    svc.observe_rows(NEXT, [_row("INTC", NEXT, eps=0.44, rev=17.1e9)], at)
-    assert _landed_days(svc, at) == [NEXT]
+    assert svc.snapshot("INTC", NEXT, at).status == els.STATUS_LIVE
 
 
 def test_the_trading_day_before_a_monday_is_the_friday():
@@ -1406,20 +1535,26 @@ def test_the_trading_day_before_a_monday_is_the_friday():
     svc, at = _svc(), _et(monday, 8)
     svc.observe_rows(friday, [_row("INTC", friday, eps=0.44, rev=17.1e9)], at)
     svc.observe_rows(monday, [_row("INTC", monday)], at)
-    svc.observe_rows(monday, [_row("INTC", monday, eps=0.44, rev=17.1e9)], at)
-    assert _landed_days(svc, at) == []
+    assert _figures(svc.snapshot("INTC", monday, at)) == (els.STATUS_REPORTED, 0.44, 17.1e9)
 
 
-def test_a_landing_held_back_says_so_once(caplog):
+def test_a_row_reading_as_a_report_says_so_once(caplog):
     svc, at = _svc(), _et(REPORT, 8)
     svc.observe_rows(PREV, [_row("INTC", PREV, eps=0.44, rev=17.1e9)], at)
-    svc.observe_rows(REPORT, [_row("INTC", REPORT)], at)
     with caplog.at_level(logging.INFO, logger=els.logger.name):
         for _ in range(3):
-            svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], at)
-    rows = [r.getMessage() for r in caplog.records if "no second push" in r.getMessage()]
+            svc.observe_rows(REPORT, [_row("INTC", REPORT)], at)
+    rows = [r.getMessage() for r in caplog.records if "reads as" in r.getMessage()]
     assert len(rows) == 1 and "INTC" in rows[0] and REPORT.isoformat() in rows[0]
     assert PREV.isoformat() in rows[0]
+
+
+def test_the_row_takes_the_companys_name_from_the_report_when_it_has_none():
+    svc, at = _svc(), _et(REPORT, 8)
+    svc.observe_rows(PREV, [dict(_row("INTC", PREV, eps=0.44, rev=17.1e9),
+                                 companyName="Intel Corporation")], at)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], at)
+    assert svc.snapshot("INTC", REPORT, at).company_name == "Intel Corporation"
 
 
 @pytest.mark.asyncio
@@ -3107,12 +3242,14 @@ async def test_a_report_still_awaiting_never_hides_an_older_reported_one_in_the_
 
 @pytest.mark.asyncio
 async def test_a_dated_sheet_still_answers_the_report_it_asked_for(monkeypatch):
-    """The card that was on screen before the older report filled still opens its own date."""
+    """The card that was on screen before the older report filled still opens its own date, and
+    what it opens is the report: a day that has one in beside it is not "not in yet"."""
     svc_obj = _sheet_on(monkeypatch, SUNDAY)
     _svc().observe_rows(FRIDAY, [_row("INTC", FRIDAY, eps=0.44, rev=17.1e9)], _et(FRIDAY, 17))
     _svc().observe_rows(SATURDAY, [_row("INTC", SATURDAY)], _et(SATURDAY, 9))
     sheet = await svc_obj.get_earnings_live("INTC", SATURDAY)
-    assert (sheet.report_date, sheet.status) == (SATURDAY.isoformat(), els.STATUS_AWAITING)
+    assert (sheet.report_date, sheet.status, sheet.eps.actual) == (
+        SATURDAY.isoformat(), els.STATUS_REPORTED, 0.44)
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,8 @@
 There is no XCTest target, so the iOS half of the feature is pinned here, the way every other
 screen's contract is:
   * the wire: `EarningsLiveResponse` and its nested DTOs mirror the backend models key for
-    key; `AlertDTO` and `TrackingFeedResponse` carry the new feed keys;
+    key; `AlertDTO` and `TrackingFeedResponse` carry the new feed keys, and each
+    reaches the card;
   * the route: `APIEndpoint.getEarningsLive` is the backend's path, signed-in only;
   * the honesty rule: LIVE is drawn from the SERVER's status, never from date math on the
     device (`LiveNewsHeader`: nothing live on screen, no "Live");
@@ -14,7 +15,8 @@ screen's contract is:
     answer, it says "Waiting…" only while the report is live, it stops saying LIVE when the
     device stops asking, and a held figure reads the same on the card and the sheet;
   * the previews: sample figures, no request, and no way into a production path;
-  * the formatting defects the card shipped with ("$-0.25", "$0.0B") stay fixed.
+  * the formatting defects the card shipped with ("$-0.25", "$0.0B") stay fixed;
+  * the figures: each sits under its own label, and a beat and a miss never swap.
 Every scan is comment-stripped first, so a doc comment naming a removed token cannot satisfy
 or fail it.
 """
@@ -36,6 +38,7 @@ from app.schemas.tracking import (
     EarningsLiveYearAgoResponse,
     TrackingFeedResponse,
 )
+from app.services.earnings_live_service import _quarter_result
 from app.utils.market_hours import previous_trading_day
 
 _IOS = Path(__file__).resolve().parents[2] / "frontend/ios/ios"
@@ -163,6 +166,21 @@ def test_the_alert_dto_decodes_every_live_card_key():
         assert f'case {field} = "{key}"' in dto, f"{key} is decoded into the wrong field"
 
 
+def test_the_feed_row_reaches_the_card_field_by_field():
+    """A decoded key proves nothing until it reaches the card. A `report_date` lost here takes the
+    results card off the sheet with no error, and a lost status reads every report as upcoming."""
+    dto = _norm(_body(_code(_TRACKING_MODELS), "func toAppAlert() -> AppAlert {"))
+    assert ('return .earnings(AppAlert.EarningsData( ticker: ticker ?? "", '
+            'companyName: companyName ?? "", reportTime: mappedTime, consensus: consensus, '
+            'day: day ?? 0, month: month ?? "", status: EarningsLiveStatus(wire: earningsStatus), '
+            'reportDate: reportDate, epsEstimate: epsEstimate, revenueEstimate: revenueEstimate, '
+            'epsActual: epsActual, revenueActual: revenueActual, epsSurprisePct: epsSurprisePct, '
+            'revenueSurprisePct: revenueSurprisePct, epsIsGAAP: epsBasis == "gaap", '
+            'isPreliminary: resultsPreliminary ?? false, '
+            'checkedAt: EarningsLiveDates.parse(resultsCheckedAt), '
+            'epsChecking: epsChecking ?? false, revenueChecking: revenueChecking ?? false ))') in dto
+
+
 def test_the_feed_response_decodes_the_recent_earnings_list():
     ios = _coding_keys(_code("Models/TrackingModels.swift"), "TrackingFeedResponse")
     assert ios == set(TrackingFeedResponse.model_fields)
@@ -220,9 +238,11 @@ def test_the_sheet_poll_stops_when_the_server_stops_asking():
     )
     assert "private static let minimumPollSeconds = 15" in vm, "a malformed cadence hammers the route"
     assert "try? await Task.sleep(nanoseconds: wait)" in loop, "the retry fires with no wait"
-    next_poll = _body(vm, "private var nextPollSeconds: Int? {")
-    assert "guard let seconds = live.pollSeconds, seconds > 0 else { return nil }" in next_poll, (
-        "a real answer with poll_seconds null must end the poll"
+    next_poll = _norm(_body(vm, "private var nextPollSeconds: Int? {"))
+    assert ("if let live { guard let seconds = live.pollSeconds, seconds > 0 else { return nil } "
+            "return seconds }") in next_poll, (
+        "poll_seconds null must end the poll, and any other value is the cadence: 120 s while "
+        "FMP confirms a reported report must not turn into the retry's 30 s"
     )
     card = _norm(_code(_CARD))
     for hook in (".onAppear { viewModel.start() }", ".onDisappear { viewModel.stop() }",
@@ -417,7 +437,9 @@ def test_a_failed_first_load_keeps_trying_and_the_sheet_says_so():
         "a status guessed from the Tracking card would poll a finished report for ever"
     )
     load = _body(vm, "private func load() async {")
-    assert "loadFailed = false" in load[: load.index("} catch {")], (
+    answered = load[: load.index("} catch {")]
+    assert "live = response" in answered, "the card reads nothing but `live`"
+    assert "loadFailed = false" in answered, (
         "a retry that recovers leaves the failure notice under the real answer"
     )
     card = _code(_CARD)
@@ -434,7 +456,7 @@ def test_the_retry_is_bounded_and_a_refusal_ends_the_poll_at_once():
     """A report_date ages out under an open sheet, and the 400 it then gets is permanent."""
     vm = _code(_VM)
     next_poll = _body(vm, "private var nextPollSeconds: Int? {")
-    assert "failedLoads < Self.maxFailedLoads" in next_poll
+    assert "guard loadFailed, failedLoads < Self.maxFailedLoads else { return nil }" in next_poll
     bound = re.search(r"private static let maxFailedLoads = (\d+)\b", vm)
     assert bound and 1 < int(bound.group(1)) <= 40, (
         "a bound of minutes, not one retry and not years at 30 s a try"
@@ -469,9 +491,14 @@ def test_the_sheet_header_reads_the_cards_own_answer():
     assert "Text(alert.title)" not in body and "Text(alert.description)" not in body
     assert body.count("Text(headerAlert.title)") == 2
     assert body.count("Text(headerAlert.description)") == 1
-    header = _body(detail, "private var headerAlert: AppAlert {")
-    assert "guard case .earnings(var data) = alert else { return alert }" in header
-    assert "if let liveAnswer { data = data.updated(with: liveAnswer) }" in header
+    # The whole getter, down to what it returns: the answer written onto a local copy reaches
+    # nothing unless that copy is what the sheet draws.
+    assert _norm(_body(detail, "private var headerAlert: AppAlert {")) == (
+        "{ guard case .earnings(var data) = alert else { return alert } "
+        "if let liveAnswer { data = data.updated(with: liveAnswer) } "
+        "data.liveCheckEnded = liveCheckEnded "
+        "return .earnings(data) }"
+    )
     assert "switch headerAlert {" in _body(detail, "private var detailContent: some View {"), (
         "the Date and Consensus rows must read the same answer as the header above them"
     )
@@ -499,53 +526,74 @@ def test_the_header_is_rebuilt_from_every_field_it_reads():
     assert "let answer: EarningsLiveStatus = live.liveStatus" in updated
     assert "let eps: EarningsMetricOutcome = live.epsOutcome" in updated
     assert "let revenue: EarningsMetricOutcome = live.revenueOutcome" in updated
-    # Label AND value: with a bare label the tap's own copy would pass, one line under it.
-    for pair in (
-        "ticker: ticker,",
-        "companyName: live.companyName ?? companyName,",
-        "reportTime: sameReport ? reportTime : nil,",
-        "consensus: Self.consensusText(epsEstimate: eps.estimate, revenueEstimate: revenue.estimate),",
-        "status: answer,",
-        "reportDate: live.reportDate,",
-        "epsEstimate: eps.estimate,",
-        "revenueEstimate: revenue.estimate,",
-        "epsActual: eps.actual,",
-        "revenueActual: revenue.actual,",
-        "epsSurprisePct: eps.surprisePct,",
-        "revenueSurprisePct: revenue.surprisePct,",
-        "epsIsGAAP: eps.isGAAP,",
-        "isPreliminary: live.preliminary ?? isPreliminary,",
-        "checkedAt: live.checkedDate ?? checkedAt,",
-        "epsChecking: eps.isChecking,",
-        "revenueChecking: revenue.isChecking )",
-    ):
-        assert pair in updated, f"updated(with:) must copy: {pair}"
+    # The whole call, never label-and-value pairs: `epsEstimate: eps.estimate,` also matches the
+    # `consensusText(...)` argument just above it, so a pair cannot see a stale estimate.
+    assert updated[updated.index("return AppAlert.EarningsData("):] == (
+        "return AppAlert.EarningsData( ticker: ticker, "
+        "companyName: live.companyName ?? companyName, "
+        "reportTime: sameReport ? reportTime : nil, "
+        "consensus: Self.consensusText(epsEstimate: eps.estimate, revenueEstimate: revenue.estimate), "
+        "day: shownDay, month: shownMonth, status: answer, reportDate: live.reportDate, "
+        "epsEstimate: eps.estimate, revenueEstimate: revenue.estimate, "
+        "epsActual: eps.actual, revenueActual: revenue.actual, "
+        "epsSurprisePct: eps.surprisePct, revenueSurprisePct: revenue.surprisePct, "
+        "epsIsGAAP: eps.isGAAP, isPreliminary: live.preliminary ?? isPreliminary, "
+        "checkedAt: live.checkedDate ?? checkedAt, "
+        "epsChecking: eps.isChecking, revenueChecking: revenue.isChecking ) }"
+    ), "updated(with:) must copy every field from the answer, each to its own label"
+
+
+def test_each_metric_reads_its_own_figures():
+    """The card, the chips and the header all read these. A crossed field prints one metric's
+    figure under the other's name, and a lost basis colours a GAAP EPS as a beat or a miss."""
+    answer = _code(_MODELS)
+    assert _norm(_body(answer, "var epsOutcome: EarningsMetricOutcome {")) == (
+        "{ EarningsMetricOutcome( estimate: eps.estimate, actual: eps.actual, "
+        'surprisePct: eps.surprisePct, isPreliminary: eps.source == "filing", '
+        'isGAAP: eps.basis == "gaap", isChecking: eps.checking ?? false ) }'
+    )
+    assert _norm(_body(answer, "var revenueOutcome: EarningsMetricOutcome {")) == (
+        "{ EarningsMetricOutcome( estimate: revenue.estimate, actual: revenue.actual, "
+        'surprisePct: revenue.surprisePct, isPreliminary: revenue.source == "filing", '
+        "isChecking: revenue.checking ?? false ) }"
+    )
+    feed = _code(_TRACKING_MODELS)
+    assert _norm(_body(feed, "var epsOutcome: EarningsMetricOutcome {")) == (
+        "{ EarningsMetricOutcome(estimate: epsEstimate, actual: epsActual, "
+        "surprisePct: epsSurprisePct, isPreliminary: isPreliminary, "
+        "isGAAP: epsIsGAAP, isChecking: epsChecking) }"
+    )
+    assert _norm(_body(feed, "var revenueOutcome: EarningsMetricOutcome {")) == (
+        "{ EarningsMetricOutcome(estimate: revenueEstimate, actual: revenueActual, "
+        "surprisePct: revenueSurprisePct, isPreliminary: isPreliminary, "
+        "isChecking: revenueChecking) }"
+    )
 
 
 def test_an_answer_about_another_report_never_repaints_this_ones_figures():
     updated = _norm(_body(_code(_MODELS), _UPDATED))
-    assert "let sameReport: Bool = live.reportDate == reportDate" in updated
-    assert "if hasResults, answer == .notScheduled || !sameReport { return self }" in updated
-    guard_at = updated.index("{ return self }")
-    assert guard_at < updated.index("return AppAlert.EarningsData("), (
-        "figures already shown must be kept before anything is copied"
+    # Every statement before the copy, conditions and order included: a branch can be switched
+    # off with all its statements still in place, so naming the statements proves nothing.
+    assert updated[: updated.index("return AppAlert.EarningsData(")] == (
+        "{ let answer: EarningsLiveStatus = live.liveStatus "
+        "let sameReport: Bool = live.reportDate == reportDate "
+        # Figures on screen outrank `none` and another date, before anything is copied.
+        "if hasResults, answer == .notScheduled || !sameReport { return self } "
+        # `none` with no figures takes effect, or the header promises a report the card denies.
+        "if answer == .notScheduled { var unscheduled = self "
+        "unscheduled.status = .notScheduled return unscheduled } "
+        # A moved report takes its new date, whole, or the old date sits by the new status. Any
+        # other answer keeps the card's own, or the Date row reads "OCT 0".
+        "var shownDay: Int = day var shownMonth: String = month "
+        "if !sameReport { let moved = Self.dayAndMonth(of: live.reportDate) "
+        'shownDay = moved?.day ?? 0 shownMonth = moved?.month ?? "" } '
+        "let eps: EarningsMetricOutcome = live.epsOutcome "
+        "let revenue: EarningsMetricOutcome = live.revenueOutcome "
     )
     assert "reportTime: sameReport ? reportTime : nil" in updated, (
         "the time of day belongs to the date the card was drawn for"
     )
-    # `none` with no figures takes effect, or the header promises a report the card denies.
-    assert ("if answer == .notScheduled { var unscheduled = self "
-            "unscheduled.status = .notScheduled return unscheduled }") in updated
-    assert updated.index("{ return self }") < updated.index("var unscheduled = self"), (
-        "figures on screen outrank `none`"
-    )
-    # A moved report takes its new date, whole, and the copy prints that date.
-    assert "let moved = Self.dayAndMonth(of: live.reportDate)" in updated, (
-        "a report that moved must not keep the old date beside the new status"
-    )
-    assert "shownDay = moved?.day ?? 0" in updated
-    assert 'shownMonth = moved?.month ?? ""' in updated
-    assert "day: shownDay, month: shownMonth," in updated
+    assert "day: shownDay, month: shownMonth," in updated, "the copy prints the date chosen above"
     models = _code(_MODELS)
     day_and_month = _norm(_body(
         models, "private static func dayAndMonth(of reportDate: String) -> (day: Int, month: String)? {"))
@@ -574,6 +622,23 @@ def test_no_scheduled_report_has_its_own_sentence():
     arm = body[body.index("case .notScheduled:"): body.index("case .live where")]
     assert "no earnings report" in arm
     assert "reports earnings" not in arm
+
+
+def test_the_header_says_what_the_card_under_it_shows():
+    """Its title and sentence are rebuilt from each answer, so the words have to follow the
+    status and the figures, or the header goes on saying "Waiting" above a landed result."""
+    tracking = _code(_TRACKING_MODELS)
+    sentence = _norm(_body(tracking,
+                           "static func earningsDescription(_ data: EarningsData) -> String {"))
+    assert ("case .live where !data.hasResults && !data.epsChecking && !data.revenueChecking:"
+            in sentence), "`Waiting for results…` is for a report with nothing in and nothing held"
+    assert ('let lead = data.status == .live ? "\\(data.ticker) is reporting." '
+            ': (dateText.isEmpty ? "\\(data.ticker) reported." '
+            ': "\\(data.ticker) reported \\(dateText).")') in sentence
+    assert 'return results.isEmpty ? lead : lead + " " + results' in sentence
+    title = _norm(_body(tracking, "var title: String {"))
+    assert 'case .reported, .awaiting: return "Earnings Results"' in title
+    assert 'case .upcoming, .live, .notScheduled: return "Earnings Alert"' in title
 
 
 # ── the sheet before its first answer ────────────────────────────────────────
@@ -615,6 +680,91 @@ def test_the_footnote_follows_the_eps_basis():
     assert "Text(basis +" in foot
 
 
+def test_a_gaap_eps_is_labelled_and_never_compared():
+    """The consensus is adjusted, so a GAAP figure beside it is neither a beat nor a miss."""
+    card = _code(_CARD)
+    assert ('metricRow(title: eps.isGAAP ? "EPS (GAAP)" : "EPS (adjusted)", outcome: eps, '
+            "format: EarningsFigureFormat.eps)") in _norm(_body(card, "var body: some View {"))
+    label = _body(card, "private func outcomeLabel(_ outcome: EarningsMetricOutcome) -> some View {")
+    assert 'Text("Not comparable")' in _body(label, "if outcome.isGAAP, outcome.hasLanded {")
+    models = _code(_MODELS)
+    assert "guard !isGAAP, let estimate else { return .noEstimate }" in _body(
+        models, "var result: EarningsQuarterResult {")
+    assert "guard let pct = surprisePct, pct.isFinite, !isGAAP else { return nil }" in _body(
+        models, "var surpriseText: String? {")
+    line = _body(_code(_TRACKING_MODELS),
+                 "static func earningsResultsLine(_ data: EarningsData) -> String {")
+    assert 'let epsLabel = data.epsIsGAAP ? "GAAP EPS" : "EPS"' in line
+    chips = _code(_CHIPS)
+    assert 'if outcome.isGAAP { return "GAAP" }' in _body(
+        chips, "private func value(_ outcome: EarningsMetricOutcome) -> String {")
+    assert 'if o.isGAAP { return "\\(name) reported on a GAAP basis" }' in _body(
+        chips, "private var spoken: String {")
+
+
+def test_a_beat_and_a_miss_stay_the_right_way_round_in_every_signal():
+    """The owner's rule: "red or green for miss or beat". The verdict, its colour, its word, its
+    arrow and VoiceOver are separate switches, so one flipped arm calls a miss a beat with
+    everything around it still reading correctly."""
+    models = _code(_MODELS)
+    assert _norm(_body(models, "var result: EarningsQuarterResult {")) == (
+        "{ guard let actual else { return .pending } "
+        "guard !isGAAP, let estimate else { return .noEstimate } "
+        "if actual > estimate { return .beat } if actual < estimate { return .missed } "
+        "return .matched }"
+    )
+    for opener, arms in (
+        ("var color: Color {",
+         "case .beat: return AppColors.gain case .missed: return AppColors.loss"),
+        ("var word: String? {", 'case .beat: return "Beat" case .missed: return "Miss"'),
+        ("var arrowSymbol: String? {",
+         "case .beat: return AppSentiment.symbolName(isPositive: true) "
+         "case .missed: return AppSentiment.symbolName(isPositive: false)"),
+    ):
+        assert arms in _norm(_body(models, opener)), f"flipped: {opener}"
+    spoken = _norm(_body(_code(_CHIPS), "private var spoken: String {"))
+    assert 'case .beat: return "\\(name) beat ' in spoken
+    assert 'case .missed: return "\\(name) missed ' in spoken
+    assert 'return say("Earnings per share", eps) + ". " + say("Revenue", revenue) + "."' in spoken
+
+
+def test_the_last_quarters_read_the_words_the_backend_sends():
+    """Anything unmatched reads as no estimate, with no error: a word renamed on either side
+    turns every dot grey."""
+    quarters = _norm(_body(_code(_MODELS), (
+        "var quarterResults: "
+        "[(quarter: String, result: EarningsQuarterResult, surprisePct: Double?)] {")))
+    assert (f'case "{_quarter_result(2.0, 1.0, True)}": result = .beat '
+            f'case "{_quarter_result(1.0, 2.0, True)}": result = .missed '
+            f'case "{_quarter_result(1.0, 1.0, True)}": result = .matched '
+            "default: result = .noEstimate") in quarters
+    assert _quarter_result(1.0, None, None) == "no_estimate", "the arm `default` stands in for"
+
+
+def test_each_figure_sits_under_its_own_label():
+    card = _code(_CARD)
+    row = _norm(_body(card, "private func metricRow(title: String, outcome: EarningsMetricOutcome,\n"
+                            "                           format: (Double) -> String) -> some View {"))
+    assert ('figure(label: "Estimate", value: outcome.estimate.map(format) ?? "—", '
+            "color: AppColors.textSecondary)") in row
+    assert ('figure(label: "Actual", value: actualText(outcome, format: format), '
+            "color: outcome.hasLanded ? outcome.color : AppColors.textMuted, "
+            "emphasized: outcome.hasLanded)") in row, "a figure not out yet has no beat colour"
+    actual = _body(card, "private func actualText(_ outcome: EarningsMetricOutcome,\n"
+                         "                            format: (Double) -> String) -> String {")
+    assert "if let actual = outcome.actual { return format(actual) }" in actual
+    chips = _body(_code(_CHIPS), "var body: some View {")
+    assert 'chip(label: "EPS", outcome: eps)' in chips
+    assert 'chip(label: "REV", outcome: revenue)' in chips
+
+
+def test_a_preliminary_figure_is_marked_and_links_its_filing():
+    """It is the company's own number, not yet FMP's, and the card says so."""
+    card = _code(_CARD)
+    assert "if isPreliminary { preliminaryNote }" in _body(card, "var body: some View {")
+    assert "if let url = live?.filingURL {" in _body(card, "private var preliminaryNote: some View {")
+
+
 def test_a_metric_is_awaited_only_while_the_report_is_live():
     """A report the server finished with no revenue consensus has stopped waiting for revenue,
     so nothing on screen may go on saying it is on its way."""
@@ -624,7 +774,8 @@ def test_a_metric_is_awaited_only_while_the_report_is_live():
     assert actual.index('"Confirming…"') < actual.index('"Waiting…"')
     assert 'return isLiveNow ? "Waiting…" : "—"' in actual
     body = _body(card, "var body: some View {")
-    assert re.search(r'if showsRevenueRow \{\s*metricRow\(title: "Revenue"', body)
+    assert re.search(r'if showsRevenueRow \{\s*metricRow\(title: "Revenue", outcome: revenue,'
+                     r'\s+format: EarningsFigureFormat\.revenue\)', body)
     rows = _norm(_body(card, "private var showsRevenueRow: Bool {"))
     assert rows == ("{ status == .live || revenue.estimate != nil || revenue.hasLanded "
                     "|| revenue.isChecking }"), "the Revenue row must hide only with nothing to say"

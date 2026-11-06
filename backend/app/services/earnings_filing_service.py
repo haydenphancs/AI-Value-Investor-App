@@ -22,7 +22,8 @@ WHAT IT DOES, for one watched ticker on its report day:
      and basis. What is stored is the printed number, never Gemini's. Anything else is dropped
      and logged with its reason. A figure the release does not state cannot reach a user.
   5. keeps the outlook only as that verified quote: the company's own sentences, never a word
-     of Gemini's, and never a piece of a sentence or the rows of a table (`_outlook_problem`).
+     of Gemini's, and never a piece of a sentence, the rows of a table or a sentence that only
+     points at figures (`_outlook_problem`).
 
 The result is PRELIMINARY by construction: `earnings_live_service` shows it as "from the
 company's release" until FMP's own figure replaces it, and the existing `earnings_result`
@@ -210,7 +211,9 @@ _SYSTEM = (
     "whole sentences copied character for character, from the first word to the closing "
     f"punctuation, between {PEG_SPAN_MIN_CHARS} and {PEG_SPAN_MAX_CHARS} characters in all, "
     "never a cut one and never the rows of a table. Never reword it, and never take it from "
-    "safe-harbor or forward-looking-statement language. If whole sentences do not fit that "
+    "safe-harbor or forward-looking-statement language. Never give a sentence that only points "
+    "at figures printed elsewhere, such as \"the following guidance\", \"as follows\" or \"Below "
+    "is our outlook\": copy the sentence that prints them. If whole sentences do not fit that "
     "length, leave `guidance` out. Set `is_quarterly_results` false when the document is not a "
     "quarterly results release."
 )
@@ -395,14 +398,28 @@ def find_ex99_document(index_html: Any) -> Optional[str]:
     return candidates[0][1]
 
 
-#: A run set as a superscript, in the spellings filers use: `<sup>`, a `vertical-align:super`
-#: style, and the relative shift of Workiva's exports ("position:relative;top:-3.5pt"). Every
-#: part is bounded, so a stray "<sup" costs a few hundred characters, never a scan of the file.
+#: A font size that sets a run below the text around it. In points that takes less than 8, the
+#: size whole tables are set in.
+_SMALLER_FONT = (
+    r"font-size\s*:\s*(?:\d{1,2}(?:\.\d+)?\s*%|[1-7](?:\.\d+)?\s*pt|0?\.\d+\s*r?em"
+    r"|smaller|x{1,2}-small)"
+)
+#: A run set as a superscript, in the spellings filers use: `<sup>`, or an inline tag carrying a
+#: `vertical-align:super` style or the relative shift of Workiva's exports ("position:relative;
+#: top:-3.5pt"). `vertical-align:top` counts only with a smaller font: on its own it is how a table
+#: cell's content sits. A block tag is never a run. What a run holds is short text and the tags
+#: around it, and a tag's length is no part of the text's bound, so a long style inside a run
+#: leaves its mark in reach. Every part is bounded, so a stray "<sup" costs a short read past it,
+#: never a scan of the file.
 _SUPERSCRIPT_RUN_RE = re.compile(
-    r"<(?P<tag>sup\b|(?:span|font)\b"
-    r"(?=[^<>]{0,2000}?(?:vertical-align\s*:\s*super|(?<![\w-])top\s*:\s*-)))"
-    r"[^<>]{0,2000}>(?P<body>.{0,200}?)</(?P=tag)\s*>",
-    re.IGNORECASE | re.DOTALL,
+    r"<(?P<tag>sup\b|(?:span|font|a|b|i|em|strong|small|u)\b(?:"
+    r"(?=[^<>]{0,2000}?(?:vertical-align\s*:\s*super|(?<![\w-])top\s*:\s*-))"
+    r"|(?=[^<>]{0,2000}?vertical-align\s*:\s*(?:text-)?top\b)"
+    rf"(?=[^<>]{{0,2000}}?{_SMALLER_FONT})"
+    r"))"
+    r"[^<>]{0,2000}>(?P<body>[^<>]{0,200}(?:<[^<>]{0,2000}>[^<>]{0,200}){0,8}?)"
+    r"</(?P=tag)\s*>",
+    re.IGNORECASE,
 )
 _ANY_TAG_RE = re.compile(r"<[^<>]{0,2000}>")
 #: The printer's marks: asterisk, dagger, double dagger, section sign, pilcrow.
@@ -428,8 +445,10 @@ def _drop_footnote_marks(raw: str) -> str:
 
     It works on the markup because only the markup can tell a note from a digit, and it lives here
     because the Learn engine and the stake finder are pinned to `html_to_text`'s answers. Residual:
-    a mark told apart by nothing but a smaller font still flattens. An EPS is then refused
-    (`_eps_print`); a revenue or an outlook cannot be told from a figure printed that way.
+    a mark told apart by nothing but a smaller font, or by `vertical-align:top` at a size
+    `_SMALLER_FONT` does not read, or raised in a spelling `_SUPERSCRIPT_RUN_RE` does not read,
+    still flattens. An EPS is then refused (`_eps_print`); a revenue or an outlook cannot be told
+    from a figure printed that way.
     """
     def _unless_a_mark(run: "re.Match[str]") -> str:
         mark = unescape(_ANY_TAG_RE.sub("", run.group("body"))).strip()
@@ -989,15 +1008,21 @@ _LIST_GLYPHS = (
 #: text.
 _CLOSERS = "\"')]"
 #: A table's "$" is a cell of its own (`_Printed.glued`), and only a table sets two amounts or two
-#: rates side by side with no word between them.
+#: rates side by side with no word between them. A negative second cell is in parentheses that
+#: close right on its number ("$354 ($4,781)", "3.9 % (6.5 %)", "1.5 % (20.5) %"). Parentheses that
+#: go on past it are an aside: "10% (11% in constant currencies)", "$4.25 ($4.50 adjusted)".
 _TABLE_CELL_RE = re.compile(
-    r"\$\s+\(?\.?\d|\$\(?\.?\d(?:[\d.,]*\d)?\)?\s+\(?\$|\d%\s+\(?\d[\d.]*%"
+    r"\$\s+\(?\.?\d"
+    r"|\$\(?\.?\d(?:[\d.,]*\d)?\)?\s+(?:\$|\(\$[\d.,]*\d\s*\))"
+    r"|[\d)]\s?%\s+(?:\d[\d.]*\s?%|\(\d[\d.]*(?:\s?%\s*\)|\)\s?%))"
 )
+#: The words that carry a sentence on past them.
+_JOINING_WORDS = "and|or|but|nor|to|through|of|for|with|from|by|at|in|on|as|than|per|plus|versus"
 #: What no sentence ends on, whatever comes after it: a mark that carries a clause or a range on,
-#: or a word that needs another.
+#: or a word that needs another, in any capitals but "A", which also ends "Class A".
 _OPEN_END_RE = re.compile(
     r"(?:[,;:(/&$\u00b1\u2212\-\u2010-\u2015]"
-    r"|\b(?:and|or|but|nor|to|of|for|with|from|by|at|in|on|as|than|the|a|an|per|plus|versus))\Z"
+    rf"|\b(?:(?i:{_JOINING_WORDS}|the|an|both|its|our|their)|a))\Z"
 )
 #: A dot that belongs to its word.
 _ABBREVIATION_END_RE = re.compile(
@@ -1015,13 +1040,36 @@ _LOWER_CASE_NEXT_RE = re.compile(r"\s*[a-z](?![a-z]*[A-Z])")
 _LOWER_CASE_WORD_END_RE = re.compile(r"(?<!\S)[a-z][\w'\-]*\Z")
 #: What may stand right in front of a quote that opens on no capital.
 _SENTENCE_ENDS = f".!?:;{_LIST_GLYPHS}"
-#: Where a line ends. A capital is the next line of a list or a table, set apart by a space: one
-#: touching the quote is the "M" of "$17.5M", and a headline's " Billion" is a number's scale.
+#: What ends a line for certain: the text, or the next line's glyph.
+_LINE_STOPS_RE = re.compile(rf"\s*(?:\Z|[{_LIST_GLYPHS}])")
+#: What may end a line and may also qualify the word after it. In "increasing adjusted EPS guidance
+#: by $0.06" the capital behind it is that word, not the next line. "(non-GAAP)" is closed.
+_QUALIFIER_END_RE = re.compile(r"\b(?i:adjusted|diluted|non-gaap)\Z")
+#: The next line otherwise. A capital is the next line of a list or a table, set apart by a space:
+#: one touching the quote is the "M" of "$17.5M", a headline's " Billion" is a number's scale, and
+#: its " To $18.5" or " AND EPS" is a joining word capitalised with the rest of the line. Before a
+#: word in lower case that word opens a sentence instead: " For the full year", " In addition".
 _NOT_A_SCALE = rf"(?!(?i:{_SCALE_AFTER_NUMBER}|percent)\b)"
-_LINE_ENDS_RE = re.compile(rf"\s*(?:\Z|[{_LIST_GLYPHS}])|\s+{_NOT_A_SCALE}[A-Z]")
+_NOT_JOINING = rf"(?!(?i:{_JOINING_WORDS})\b(?!\s+[a-z]))"
+_NEXT_LINE_RE = re.compile(rf"\s+{_NOT_A_SCALE}{_NOT_JOINING}[A-Z]")
 #: Past an abbreviation an all-capitals word goes on ("U.S. GAAP") and a sentence opens with one
-#: capital.
-_NEW_SENTENCE_RE = re.compile(rf"\s*(?:\Z|[{_LIST_GLYPHS}])|\s+{_NOT_A_SCALE}[A-Z](?![A-Z])")
+#: capital, a joining word's too ("in the U.S. For the year").
+_NEW_SENTENCE_RE = re.compile(rf"\s+{_NOT_A_SCALE}[A-Z](?![A-Z])")
+#: A sentence that only points at figures printed somewhere else: the following guidance, as
+#: follows, below is, the table below. "The following" is also a time, "in the following quarter",
+#: and a bare "below" a word like any other: "(details below)", "below last year's".
+_POINTS_ELSEWHERE_RE = re.compile(
+    r"\bthe\s+following\b"
+    r"(?!\s+(?:(?:fiscal|calendar)\s+)?(?:year|quarter|period|month)s?\b"
+    r"(?!\s+(?:\d|guidance|outlook)))"
+    r"|\bas\s+follows\b|\bbelow\s+(?:is|are)\b|\btables?\s+below\b|\bbelow\.?\Z",
+    re.IGNORECASE,
+)
+#: What prints a figure. A year or a quarter's name does not, and "per cent" ends on "cent".
+_PRINTS_A_FIGURE_RE = re.compile(
+    r"[$%]|\d\.\d|\b(?:percent|cents?|dollars?|thousand|million|billion|trillion)\b",
+    re.IGNORECASE,
+)
 #: How much text on each side of a quote the gate reads.
 _QUOTE_CONTEXT_CHARS = 64
 
@@ -1039,7 +1087,7 @@ def _sentence_goes_on(needle: str, after: str) -> bool:
     closing quote mark, with its attribution behind it. A quote with no closing punctuation stands
     only where its line ends: this names what may follow, not what may not, because no list of the
     marks that carry a sentence on can be whole. A footnote mark is no word of the sentence, so the
-    reading starts behind it.
+    reading starts behind it. What this cannot see is in `_outlook_problem`'s residual.
     """
     at = 0
     while at < len(after) and _is_footnote_mark(after[at]):
@@ -1050,7 +1098,7 @@ def _sentence_goes_on(needle: str, after: str) -> bool:
         return False
     if body.endswith("."):
         if _ABBREVIATION_END_RE.search(body):
-            return _NEW_SENTENCE_RE.match(rest) is None
+            return not (_LINE_STOPS_RE.match(rest) or _NEW_SENTENCE_RE.match(rest))
         return _LOWER_CASE_NEXT_RE.match(rest) is not None
     if body != needle and body.endswith(",") and _ATTRIBUTION_RE.match(rest):
         return False
@@ -1058,7 +1106,9 @@ def _sentence_goes_on(needle: str, after: str) -> bool:
         return True
     if _OWN_STOP_RE.match(rest):
         return _sentence_goes_on(needle + rest[0], rest[1:])
-    return _LINE_ENDS_RE.match(rest) is None
+    if _LINE_STOPS_RE.match(rest):
+        return False
+    return _QUALIFIER_END_RE.search(needle) is not None or _NEXT_LINE_RE.match(rest) is None
 
 
 def _opens_mid_sentence(needle: str, before: str) -> bool:
@@ -1066,9 +1116,9 @@ def _opens_mid_sentence(needle: str, before: str) -> bool:
 
     A lower-case word, a number, a "$" or any other mark opens a sentence only right behind the
     end of another, or a ":" or ";" or a list's glyph ("eBay expects" stands there). A capital may
-    open behind a lost clause ("For the fourth quarter of 2026, Intel expects"), which costs the
-    period and no figure, but not right behind a word in lower case: "no longer expects Q4 revenue"
-    has lost what it says.
+    open behind a lost clause ("For the fourth quarter of 2026, Intel expects"), which costs what
+    that clause said, the period here and a figure if it printed one, but not right behind a word
+    in lower case: "no longer expects Q4 revenue" has lost what it says.
     """
     closed = before.rstrip().rstrip(_CLOSERS)
     first = needle.lstrip("\"'")[:1]
@@ -1087,9 +1137,17 @@ def _outlook_problem(quote: str, texts: Sequence[str]) -> Optional[str]:
     A verbatim span can still say what the release does not. A model trimming a long sentence to
     fit stops anywhere: the low end of "$17.5 billion to $18.5 billion" reads as the whole outlook,
     and "expects revenue of $18 billion" as the opposite of the "no longer expects" it came from.
-    The rows of a table are verbatim too, and read as nothing a person wrote. Residual: a table of
-    one column reads as a line of a list, and a next line opening on a capital behind a line with
-    no closing punctuation reads as cut when the quote opens there.
+    The rows of a table are verbatim too, and read as nothing a person wrote, and a whole sentence
+    that only points at figures ("the following guidance", "Below is our outlook") leaves the sheet
+    saying that they exist, with the figures in lines it never shows.
+
+    Residual: a table of one column reads as a line of a list, and a next line opening on a capital
+    behind a line with no closing punctuation reads as cut when the quote opens there. The other
+    way round, a quote with no closing punctuation that stops right before a capitalised word, on
+    a last word none of these lists names, reads as a line that ended ("we now expect" before
+    " Reality Labs losses to rise"), and whatever the sentence printed past it is lost, figures
+    included. The prompt forbids that cut, but this gate cannot see it. A word list cannot be whole,
+    so a sentence pointing at figures in other words stands too.
     """
     needle = normalize_peg_text(quote)
     if _TABLE_CELL_RE.search(needle):
@@ -1102,6 +1160,8 @@ def _outlook_problem(quote: str, texts: Sequence[str]) -> Optional[str]:
                     or _sentence_goes_on(needle, text[end:end + _QUOTE_CONTEXT_CHARS])):
                 return "cut_sentence"
             at = text.find(needle, end)
+    if _POINTS_ELSEWHERE_RE.search(needle) and _PRINTS_A_FIGURE_RE.search(needle) is None:
+        return "lead_in"
     return None
 
 
@@ -1148,16 +1208,16 @@ def verify_extraction(
 
     The outlook is kept only as its verified quote, whole, its whitespace collapsed and a list's
     glyph off its ends: the sheet prints it as the company's own words. It is never cut to fit,
-    since a cut can land inside a range: a quote too long to verify, a piece of a sentence or the
-    rows of a table drop the outlook (`_outlook_problem`). It needs no dollar mark: a "$" in it can
-    only be one the release printed.
+    since a cut can land inside a range: a quote too long to verify, a piece of a sentence, the
+    rows of a table or a sentence that only points at figures drop the outlook
+    (`_outlook_problem`). It needs no dollar mark: a "$" in it can only be one the release printed.
 
     The reasons (`ok` / `no_quote` / `not_verbatim` / `foreign_currency` / `no_dollar_mark` /
-    `value_mismatch` / `not_adjusted` / `cut_sentence` / `table_cell` / `absent`) are what the log
-    line reports — never the release text. A currency that is not USD, a blank one included,
-    drops the whole answer: nothing else says what the figures are in. Residual: a release whose
-    only currency words sit outside every quote ("all amounts in Canadian dollars" above a "$"
-    table) depends on the model's `currency`.
+    `value_mismatch` / `not_adjusted` / `cut_sentence` / `table_cell` / `lead_in` / `absent`) are
+    what the log line reports — never the release text. A currency that is not USD, a blank one
+    included, drops the whole answer: nothing else says what the figures are in. Residual: a
+    release whose only currency words sit outside every quote ("all amounts in Canadian dollars"
+    above a "$" table) depends on the model's `currency`.
     """
     reasons: Dict[str, str] = {}
     if not isinstance(answer, Mapping):

@@ -793,6 +793,9 @@ def _overall_assessment_text_prompt(
     )
     trajectory = _fundamentals_trajectory_block(shell)
     trajectory_block = f"{trajectory}\n\n" if trajectory else ""
+    pb_premium = _pb_premium_line(cards) if _excluded_rows_of(shell) else None
+    if pb_premium:
+        trajectory_block += f"{pb_premium.strip()}\n\n"
     return f"""Write the overall quality read for the Fundamentals & Growth section — the whole-picture verdict across all four cards.
 
 CONTEXT: Average rating {avg}/5 {across} ({strong} strong, {weak} weak).
@@ -1303,7 +1306,24 @@ def _eps_num(v: Any) -> Optional[str]:
     return f
 
 
-def _price_action_earnings_line(pa: Dict[str, Any]) -> str:
+def _statement_eps_differs(shell: Optional[Dict[str, Any]], eps_actual: Any) -> bool:
+    """True when the Growth chart's newest quarter prints another EPS than the earnings feed.
+    The feed's actual is what estimates are measured against; the chart is diluted EPS from the
+    income statement (JPM Q3 '26: 5.75 and 5.57). The chart may stop a quarter short of a fresh
+    report, and that only adds a label that is still true. Which basis the feed uses can't be
+    told from the data, so nothing here ever calls it adjusted."""
+    chart = shell.get("growth_chart") if isinstance(shell, dict) else None
+    rows = chart.get("eps_quarterly") if isinstance(chart, dict) else None
+    newest = rows[-1] if isinstance(rows, list) and rows else None
+    value = newest.get("value") if isinstance(newest, dict) else None
+    numbers = (value, eps_actual)
+    if not all(isinstance(n, (int, float)) and not isinstance(n, bool) and math.isfinite(n)
+               for n in numbers):
+        return False
+    return abs(value - eps_actual) >= 0.005
+
+
+def _price_action_earnings_line(pa: Dict[str, Any], shell: Optional[Dict[str, Any]] = None) -> str:
     ec = pa.get("_earnings") if isinstance(pa.get("_earnings"), dict) else None
     if not ec:
         if pa.get("_earnings_unavailable"):
@@ -1342,6 +1362,12 @@ def _price_action_earnings_line(pa: Dict[str, Any]) -> str:
         else:
             verdict = "in line"
         parts.append(f"EPS {eps_a} vs {eps_e} estimate ({verdict}).")
+        if _statement_eps_differs(shell, ec.get("eps_actual")):
+            parts.append(
+                f"{eps_a} is the figure estimates are measured against. The Growth chart shows "
+                f"the income statement's EPS, which differs, so if you give {eps_a}, follow it "
+                'with the words "on the basis estimates use".'
+            )
     rev = ec.get("revenue_result")
     rsp = _f_num(abs(ec["revenue_surprise_pct"]), "{:.1f}") if isinstance(
         ec.get("revenue_surprise_pct"), (int, float)) else None
@@ -1551,7 +1577,7 @@ RULES:
 GROUND TRUTH: {ground_truth}
 SIZE: {_price_action_size_line(pa)}
 MARKET: {_price_action_market_line(pa)}
-EARNINGS: {_price_action_earnings_line(pa)}{_price_action_last_session_line(pa)}
+EARNINGS: {_price_action_earnings_line(pa, shell)}{_price_action_last_session_line(pa)}
 CATALYST EVENT IN WINDOW: {event_str}
 {headlines_block}{_price_action_report_headlines_block(pa)}{macro_block}
 EVIDENCE:
@@ -1971,6 +1997,27 @@ Use the YoY numbers above — don't invent them, don't restate them as a list.{n
 Name what is shifting (or what is concentrated) and what it means for the business."""
 
 
+def _latest_vs_forward_rule(rf: Dict[str, Any]) -> str:
+    """Which two years "accelerates or decelerates" is read from, "" when the first forecast
+    year has no comparable change. Left to the three recent actuals, the model compared with the
+    oldest and largest of them: JPM's +54%, then +15%, then +3%, read as a slowdown into +4%."""
+    rows = [row for row in (rf.get("annual_timeline") or []) if isinstance(row, dict)]
+    reported = [row for row in rows if not row.get("is_forecast")]
+    forecast = [row for row in rows if row.get("is_forecast")]
+    if not reported or not forecast:
+        return ""
+    latest, first = reported[-1], forecast[0]
+    changes = (latest.get("revenue_yoy_pct"), first.get("revenue_yoy_pct"))
+    if not all(isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c)
+               for c in changes):
+        return ""
+    return (
+        f"Judge that from the latest actual year ({latest.get('period')}: {changes[0]:+.0f}%) "
+        f"against the first forecast year ({first.get('period')}: {changes[1]:+.0f}%), not from "
+        "older years."
+    )
+
+
 def _revenue_forecast_insight_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
@@ -2056,7 +2103,11 @@ def _revenue_forecast_insight_prompt(
         "the recent ACTUAL trend (a sharp step-up vs history is a bolder claim than more of "
         "the same)."
     )
-    if _revenue_gross_of_interest(shell):
+    latest_vs_forward = _latest_vs_forward_rule(rf)
+    if latest_vs_forward:
+        curve_line = f"{curve_line} {latest_vs_forward}"
+    gross_of_interest = _revenue_gross_of_interest(shell)
+    if gross_of_interest or _revenue_basis_unclear(shell):
         # Reported years and forecast years are two different measures here, so the history
         # is not "for contrast": the -26%, and the +54% of 2023, are the gap between them.
         hist_line = ""
@@ -2065,11 +2116,16 @@ def _revenue_forecast_insight_prompt(
             "record. The yearly Revenue and Revenue Growth lines in EVIDENCE are reported "
             "figures: never set them beside a forecast. Do NOT just list the projections back."
         )
+        basis_reason = (
+            "Reported revenue includes interest paid out and analyst estimates usually leave "
+            "it out"
+            if gross_of_interest else
+            "Analyst estimates may be on a different revenue basis from reported revenue"
+        )
         curve_line = (
             "- Whether the forward curve accelerates or decelerates, reading the forecast "
-            "years against each other only. Reported revenue includes interest paid out and "
-            "analyst estimates usually leave it out, so never compare a forecast year with a "
-            "reported year."
+            f"years against each other only. {basis_reason}, so never compare a forecast year "
+            "with a reported year."
         )
 
     quote_line = (
@@ -2111,7 +2167,7 @@ EVIDENCE:
 LENGTH: Write 3-4 sentences, total under 70 words. Density over length — every clause must earn its place; do not pad to hit the count.
 
 Focus on the WHY and on whether to BELIEVE it, not just the numbers:
-- What is driving the projected growth (or the slowdown) — name the actual driver, and when the RELATED CONTEXT shows a segment leading or dragging the mix, tie the forward curve to it (e.g. "cloud, already +33% YoY, carries the forward curve"). Think demand, mix shift, margin leverage, pricing, a maturing base, or headwinds.
+- What is driving the projected growth (or the slowdown) — name the actual driver, and when the RELATED CONTEXT shows a segment leading or dragging the mix, say what it did (e.g. "cloud grew 33% last year"). That is a past result: there is no segment estimate, so never say a segment is expected to lead, contribute to or carry the forecast. Think demand, mix shift, margin leverage, pricing, a maturing base, or headwinds.
 {curve_line}
 {trust_line}
 {anchor_line}"""
@@ -2678,6 +2734,13 @@ def _revenue_gross_of_interest(shell: Dict[str, Any]) -> bool:
     return isinstance(signals, dict) and signals.get("revenue_gross_of_interest") is True
 
 
+def _revenue_basis_unclear(shell: Dict[str, Any]) -> bool:
+    """The collector's mark on a lender whose estimates don't show which revenue they use."""
+    inputs = shell.get("_scoring_inputs")
+    signals = inputs.get("_style_signals") if isinstance(inputs, dict) else None
+    return isinstance(signals, dict) and signals.get("revenue_basis_unclear") is True
+
+
 def _revenue_forecast_basis_note(shell: Dict[str, Any]) -> str:
     """Why a lender's forecast bars step away from its reported ones, "" for every other
     company. The bars stay: the consensus is honest. It says the step "can't be compared",
@@ -2687,12 +2750,19 @@ def _revenue_forecast_basis_note(shell: Dict[str, Any]) -> str:
     has_both = isinstance(rows, list) and {
         row.get("is_forecast") for row in rows if isinstance(row, dict)
     } >= {True, False}
-    if not has_both or not _revenue_gross_of_interest(shell):
+    if not has_both:
         return ""
-    return (
-        "Reported revenue includes interest paid out; analyst estimates usually leave it out, "
-        "so the first forecast bar can't be compared with the last reported one."
-    )
+    if _revenue_gross_of_interest(shell):
+        return (
+            "Reported revenue includes interest paid out; analyst estimates usually leave it "
+            "out, so the first forecast bar can't be compared with the last reported one."
+        )
+    if _revenue_basis_unclear(shell):
+        return (
+            "Analyst estimates may be on a different revenue basis from reported revenue, so "
+            "the first forecast bar can't be compared with the last reported one."
+        )
+    return ""
 
 
 def _revenue_engine_basis_note(re_section: Dict[str, Any]) -> str:
@@ -3499,6 +3569,68 @@ def _digest_revenue_engine(report: Dict[str, Any]) -> List[str]:
     return out
 
 
+#: "P/B (1.47x sector avg 1.66)" on the wire, "industry avg" once peer-worded.
+_PEER_MULTIPLE_RE = re.compile(r"\((\d+(?:\.\d+)?)x (?:sector|industry) avg\b")
+#: How far P/B's premium may sit above ROE's and still be the same premium.
+_PB_MATCHES_ROE_RATIO = 1.10
+#: A Growth row's printed rate, and how close a history point must sit to be that rate: both
+#: are rounded to one decimal, so the same rate can differ by 0.1.
+_GROWTH_RATE_RE = re.compile(r"[+-]?\d[\d,]*(?:\.\d+)?%")
+_GROWTH_RATE_MATCH = 0.15
+
+
+def _growth_row_year(metric: Dict[str, Any]) -> Optional[str]:
+    """The fiscal year whose rate a Growth row prints, None when that can't be shown. The card is
+    annual on purpose, and without the year a thesis read a rate ten months old as today's ("if
+    EPS growth moderates from +1.4%", beside +46.9% in the latest quarters). The printed rate and
+    `annual_history` are built apart, and the snapshot is cached for a day, so the year comes
+    from the point that holds the printed rate: a "—" row, or a rate no point holds, stays plain."""
+    text = metric.get("value")
+    if not isinstance(text, str) or not _GROWTH_RATE_RE.fullmatch(text.strip()):
+        return None
+    shown = float(text.strip().rstrip("%").replace(",", ""))
+    years = []
+    for point in metric.get("annual_history") or []:
+        if not isinstance(point, dict):
+            continue
+        year, value = str(point.get("period")).strip(), point.get("value")
+        if not (year.isdigit() and len(year) == 4):
+            continue
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        if abs(value - shown) < _GROWTH_RATE_MATCH:
+            years.append(year)
+    return max(years) if years else None
+
+
+def _growth_year_tag(card_title: Any, metric: Dict[str, Any]) -> str:
+    year = _growth_row_year(metric) if card_title == "Growth" else None
+    return f" FY{year}" if year else ""
+
+
+def _pb_premium_line(cards: Any) -> Optional[str]:
+    """For a covered financial whose P/B premium is its ROE premium, the rule that stops one fact
+    counting on both sides: JPM's bull case cited ROE at 1.42x peers while its bear case called
+    P/B at 1.47x "stretched". None when either multiple is missing, or P/B has no premium, or the
+    return does not beat peers: a premium on an average return is the case for "stretched"."""
+    multiples: Dict[str, float] = {}
+    for card in cards if isinstance(cards, list) else []:
+        for metric in (card.get("metrics") or []) if isinstance(card, dict) else []:
+            label = str(metric.get("label") or "") if isinstance(metric, dict) else ""
+            found = _PEER_MULTIPLE_RE.search(label)
+            if found and label.startswith("P/B"):
+                multiples["pb"] = float(found.group(1))
+            elif found and "(ROE)" in label:
+                multiples["roe"] = float(found.group(1))
+    pb, roe = multiples.get("pb"), multiples.get("roe")
+    if pb is None or roe is None or pb <= 1.0 or roe <= 1.0 or pb > roe * _PB_MATCHES_ROE_RATIO:
+        return None
+    return (
+        f"  P/B is {pb:.2f}x peers and ROE is {roe:.2f}x peers: the premium matches the higher "
+        "return, so never call the valuation stretched or overvalued on P/B."
+    )
+
+
 def _digest_fundamentals(report: Dict[str, Any]) -> List[str]:
     """Fundamentals & Growth (cards + overall) — sector-relative framing lives
     in EVIDENCE; here we give the card values + the headline rollup."""
@@ -3513,8 +3645,8 @@ def _digest_fundamentals(report: Dict[str, Any]) -> List[str]:
         # industry's here, as the EVIDENCE block does (`app/utils/peer_wording.py`). The
         # model-only renames ("Insider Ownership" = 100 − free float) ride the same helper.
         mstr = ", ".join(
-            f"{report_model_metric_name(SimpleNamespace(name=m.get('label', '?'), peer_level=m.get('peer_level')))} "
-            f"{m.get('value', '?')}"
+            f"{report_model_metric_name(SimpleNamespace(name=m.get('label', '?'), peer_level=m.get('peer_level')))}"
+            f"{_growth_year_tag(c.get('title'), m)} {m.get('value', '?')}"
             for m in (c.get("metrics") or [])
             if isinstance(m, dict) and not (excluded and names_excluded_metric(m.get("label")))
         )
@@ -3529,6 +3661,9 @@ def _digest_fundamentals(report: Dict[str, Any]) -> List[str]:
         card_strs.append(f"{c.get('title', '?')}{star_s} [{mstr}]")
     if card_strs:
         out.append("FUNDAMENTALS & GROWTH: " + " | ".join(card_strs))
+    pb_premium = _pb_premium_line(report.get("fundamental_metrics")) if excluded else None
+    if pb_premium:
+        out.append(pb_premium)
     oa = report.get("overall_assessment") or {}
     avg = _f_num(oa.get("average_rating"), "{:.1f}")
     if avg is not None:

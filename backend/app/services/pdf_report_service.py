@@ -23,12 +23,14 @@ import logging
 import math
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from app.services import pdf_charts
 from app.utils.currency import currency_code
+from app.utils.peer_wording import peer_worded_metric_name
 from app.utils.period_labels import (
     fiscal_year_months,
     fiscal_year_note,
@@ -135,6 +137,24 @@ def _persona_display(agent: dict) -> str:
             return label
     last = name.split()[-1]
     return name if last.lower() == "agent" else f"{last} Agent"
+
+
+def _peer_worded_cards(cards: Any) -> list:
+    """The Fundamentals cards with an industry median named as the industry's. The wire keeps
+    "sector avg" whatever the group, for shipped iOS builds, and `peer_level` says whose median
+    it is. Copies, because the stored report is frozen."""
+    worded = []
+    for card in cards if isinstance(cards, list) else []:
+        if not isinstance(card, dict):
+            continue
+        metrics = [
+            {**m, "label": peer_worded_metric_name(
+                SimpleNamespace(name=m.get("label"), peer_level=m.get("peer_level"))
+            )} if isinstance(m, dict) else m
+            for m in (card.get("metrics") or [])
+        ]
+        worded.append({**card, "metrics": metrics})
+    return worded
 
 
 def _guidance_for_pdf(value: Any) -> str:
@@ -949,7 +969,7 @@ def build_context(
             "reporting_currency": currency_code(engine.get("reporting_currency")),
         },
         "fundamentals": {
-            "cards": data.get("fundamental_metrics") or [],
+            "cards": _peer_worded_cards(data.get("fundamental_metrics")),
             "overall": data.get("overall_assessment") or {},
         },
         "forecast": {

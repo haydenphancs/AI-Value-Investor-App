@@ -3797,6 +3797,8 @@ class TickerReportDataCollector:
             )
         if _revenue_gross_of_interest(out):
             scoring_inputs["_style_signals"]["revenue_gross_of_interest"] = True
+        elif _revenue_basis_unclear(out):
+            scoring_inputs["_style_signals"]["revenue_basis_unclear"] = True
 
         # Deterministic, persona-weighted headline score — the SINGLE source
         # of truth for BOTH entry paths (the report endpoint and the research
@@ -11119,6 +11121,27 @@ def _revenue_crosses_basis(out: Any) -> bool:
     )
 
 
+def _lender_revenue_read(out: Any) -> Optional[Tuple[float, float, float]]:
+    """(reported revenue, interest paid, next year's estimate) for a financial company whose
+    interest is a real share of its reported revenue, else None."""
+    if not _revenue_crosses_basis(out):
+        return None
+    income = getattr(out, "income", None)
+    rows = [r for r in (income or []) if isinstance(r, dict)]
+    if not rows:
+        return None
+    latest = max(rows, key=lambda r: str(r.get("date") or ""))
+    revenue = _finite_positive(latest.get("revenue"))
+    interest = _finite_positive(latest.get("interestExpense"))
+    if revenue is None or interest is None:
+        return None
+    if interest < revenue * _GROSS_REVENUE_MIN_INTEREST_SHARE:
+        return None
+    _actuals, forecasts = _annual_timeline_rows(income, getattr(out, "estimates", None))
+    estimate = _finite_positive(forecasts[0].revenue) if forecasts else None
+    return None if estimate is None else (revenue, interest, estimate)
+
+
 def _revenue_gross_of_interest(out: Any) -> bool:
     """True when this financial company's reported revenue holds interest that analyst
     estimates leave out. Narrower than `_score_excluded`: an insurer has no such gap, so the
@@ -11131,22 +11154,19 @@ def _revenue_gross_of_interest(out: Any) -> bool:
     Read on 29 real companies, 2026-11-05: every one marked (JPM BAC WFC C GS MS USB PNC TFC SYF
     NLY BK HSBC RY, plus STT NTRS) has an estimate 1.01-1.30 times revenue less interest. No
     insurer, and neither SCHW nor AXP, whose estimates sit at their reported revenue."""
-    if not _revenue_crosses_basis(out):
+    read = _lender_revenue_read(out)
+    if read is None:
         return False
-    income = getattr(out, "income", None)
-    rows = [r for r in (income or []) if isinstance(r, dict)]
-    if not rows:
-        return False
-    latest = max(rows, key=lambda r: str(r.get("date") or ""))
-    revenue = _finite_positive(latest.get("revenue"))
-    interest = _finite_positive(latest.get("interestExpense"))
-    if revenue is None or interest is None:
-        return False
-    if interest < revenue * _GROSS_REVENUE_MIN_INTEREST_SHARE:
-        return False
-    _actuals, forecasts = _annual_timeline_rows(income, getattr(out, "estimates", None))
-    estimate = _finite_positive(forecasts[0].revenue) if forecasts else None
-    return estimate is not None and abs(estimate - (revenue - interest)) < abs(estimate - revenue)
+    revenue, interest, estimate = read
+    return abs(estimate - (revenue - interest)) < abs(estimate - revenue)
+
+
+def _revenue_basis_unclear(out: Any) -> bool:
+    """True for a lender with a real interest line whose estimates don't sit nearer revenue less
+    interest. Their chip is gone too, and "estimates leave interest out" can't be said of them:
+    Ally's $9.1B sits almost midway between $5.7B and $12.2B, Capital One's $64.0B nearer its
+    reported $69.3B. So the sentence says only that the two may differ."""
+    return _lender_revenue_read(out) is not None and not _revenue_gross_of_interest(out)
 
 
 def _score_excluded(out: Any) -> frozenset:
@@ -11446,6 +11466,11 @@ def build_financial_context(out: CollectedTickerData) -> str:
                 "  Reported revenue above includes interest paid out; these estimates usually "
                 "leave it out. Never compare one with the other."
             )
+        elif _revenue_basis_unclear(out):
+            parts.append(
+                "  These estimates may be on a different revenue basis from reported revenue "
+                "above. Never compare one with the other."
+            )
 
     # ⚠️ `analyst_is_usable`, not `if out.analyst_analysis`. The response object is ALWAYS
     # present and, since `grades` / `price-target-consensus` went 402, always carries
@@ -11633,7 +11658,10 @@ def _format_snapshot_card_values(out: "CollectedTickerData") -> str:
             continue
         rating = int(snap.rating or 0)
         # 0 = not rated (no peer comparison), never "0 out of 5" to the model.
-        rendered.append(f"\n{title} ({rating}/5):" if rating > 0 else f"\n{title} (unrated):")
+        rated = f"{rating}/5" if rating > 0 else "unrated"
+        # The Growth rows are annual on purpose; the other cards are TTM.
+        period = ", latest full fiscal year" if title == "Growth" else ""
+        rendered.append(f"\n{title} ({rated}{period}):")
         for m in snap.metrics:
             if excluded_rows and getattr(m, "metric_key", None) == DEBT_TO_EQUITY:
                 continue

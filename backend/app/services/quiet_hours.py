@@ -14,6 +14,10 @@ Two ideas here, and they are separate on purpose:
     it is DEFERRED, never dropped: the ledger row is written either way, so the inbox
     shows it immediately and only the buzz waits.
 
+Quiet hours ship OFF, with one exception a kind asks for by name
+(`NotificationKind.night_hold_by_default`): for a user who never set them, that kind keeps
+`NIGHT_HOLD_WINDOW` on the user's own clock. A user who switched them off has answered.
+
 This module is pure so every DST and wraparound case below is testable with no clock,
 no database and no network.
 
@@ -79,6 +83,15 @@ def parse_hhmm(raw: Any) -> Optional[time]:
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         return None
     return time(hour=hour, minute=minute)
+
+
+#: The default hours as a window: what the settings screen shows before Quiet Hours is touched,
+#: and what a kind with `NotificationKind.night_hold_by_default` keeps for that user.
+NIGHT_HOLD_WINDOW = QuietWindow(
+    enabled=True,
+    start=parse_hhmm(DEFAULT_QUIET_START),
+    end=parse_hhmm(DEFAULT_QUIET_END),
+)
 
 
 def resolve_timezone(preferences: Optional[Mapping[str, Any]]) -> ZoneInfo:
@@ -147,6 +160,21 @@ def resolve_window(preferences: Optional[Mapping[str, Any]]) -> QuietWindow:
         return QuietWindow(enabled=False, start=None, end=None)
 
     return QuietWindow(enabled=True, start=start, end=end)
+
+
+def quiet_hours_never_set(preferences: Optional[Mapping[str, Any]]) -> bool:
+    """True when nothing readable says the user ever touched the Quiet Hours toggle.
+
+    The client omits a key nobody touched (`SettingsSyncManager.currentBlob()`) and writes this
+    one the first time the toggle flips, so switching Quiet Hours on and off again leaves an
+    explicit off, which is an answer. Every type `resolve_window` reads counts as an answer;
+    a null or a nested value is none, the same fallback `_coerce_toggle` gives it.
+
+    A failed preference read arrives here as an empty blob and also reads as never set: nothing
+    says otherwise, and a late buzz costs less than a wrong one at 3am.
+    """
+    raw = (preferences or {}).get(PREF_QUIET_ENABLED)
+    return not isinstance(raw, (bool, int, float, str))
 
 
 def is_within(window: QuietWindow, now_local: datetime) -> bool:

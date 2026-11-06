@@ -557,6 +557,8 @@ class Settings(BaseSettings):
     #   * EARNINGS_LIVE_RESULT_PUSH_ENABLED — the EXISTING `earnings_result` push ("Results
     #     & Surprises") sent the moment results land instead of at the next 16:00 ET run.
     #     That kind has a toggle in every shipped build, so it ships ON.
+    #   Neither push buzzes in the night of a user who never set Quiet Hours: the row is
+    #   written at once and goes out at 07:00 on their clock (`night_hold_by_default`).
     EARNINGS_LIVE_ENABLED: bool = True
     EARNINGS_LIVE_FILINGS_ENABLED: bool = True
     EARNINGS_LIVE_PUSH_ENABLED: bool = False

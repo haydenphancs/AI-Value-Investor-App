@@ -89,7 +89,8 @@ def test_a_fixed_offset_zone_still_works():
 # ── window resolution ────────────────────────────────────────────────────────
 
 def test_absent_master_toggle_means_never_quiet():
-    """The shipped default. A user who never opened the screen is never deferred."""
+    """The shipped default. Only a kind with `night_hold_by_default` defers such a user, and
+    it asks for that by name in `decide`: this window stays off."""
     assert qh.resolve_window({}).enabled is False
     assert qh.resolve_window(None).enabled is False
 
@@ -104,6 +105,27 @@ def test_a_truthy_master_toggle_is_on(raw):
     """A STRING "false" must not read as True. `bool("false")` is True in Python, and
     nothing between here and the database enforces the value's type."""
     assert qh.resolve_window({qh.PREF_QUIET_ENABLED: raw}).enabled is True
+
+
+@pytest.mark.parametrize("prefs", [
+    None, {}, {qh.PREF_QUIET_ENABLED: None}, {qh.PREF_QUIET_ENABLED: []},
+    {qh.PREF_QUIET_ENABLED: {"on": True}}, {qh.PREF_QUIET_START: "23:00"},
+])
+def test_quiet_hours_count_as_never_set_with_no_readable_toggle(prefs):
+    assert qh.quiet_hours_never_set(prefs) is True
+
+
+@pytest.mark.parametrize("raw", [False, True, "false", "true", "", 0, 1, 0.0])
+def test_any_readable_toggle_is_an_answer(raw):
+    """`resolve_window` reads every one of these. An off among them is the user's own."""
+    assert qh.quiet_hours_never_set({qh.PREF_QUIET_ENABLED: raw}) is False
+
+
+def test_the_night_hold_is_the_window_the_settings_screen_opens_on():
+    """One default pair of hours, so the hold cannot drift from what Quiet Hours shows."""
+    assert qh.NIGHT_HOLD_WINDOW == qh.resolve_window({qh.PREF_QUIET_ENABLED: True})
+    assert qh.NIGHT_HOLD_WINDOW.enabled is True
+    assert (qh.NIGHT_HOLD_WINDOW.start, qh.NIGHT_HOLD_WINDOW.end) == (time(22, 0), time(7, 0))
 
 
 def test_start_equals_end_is_treated_as_disabled():

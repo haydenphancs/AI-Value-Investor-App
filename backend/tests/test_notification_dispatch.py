@@ -13,7 +13,7 @@ once a second kind existed:
 No Supabase, no APNs.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -23,11 +23,14 @@ from app.services.push_service import PushOutcome
 from app.config import settings
 from app.services import quiet_hours as qh
 from app.services.notification_kinds import (
+    KIND_EARNINGS_LIVE,
+    KIND_EARNINGS_RESULT,
     KIND_EARNINGS_UPCOMING,
     KIND_INSIDER_TRADE,
     KIND_PRICE_ALERT,
     KIND_RESEARCH_COMPLETE,
     KIND_TICKER_MOVE,
+    NOTIFICATION_KINDS,
     get_kind,
 )
 from app.services.push_dispatch_service import (
@@ -236,6 +239,183 @@ def test_an_unusable_timezone_still_produces_a_decision():
     assert d.reason == "quiet_hours"
 
 
+# ── the night hold ───────────────────────────────────────────────────────────
+#
+# Owner decision 2026-11-05, "Hold until 7 AM". An earnings result used to go out only from the
+# 16:00 ET run; sent live, a fill FMP folds at 02:30 ET would buzz a default-settings watcher in
+# bed. So these two kinds keep the default night for anyone who never set Quiet Hours, on that
+# user's own clock. Everything else about quiet hours stays: the row is parked and the inbox has
+# it now. A toggle the user did flip to off is their answer, and no other kind changes.
+
+NIGHT_KINDS = (KIND_EARNINGS_RESULT, KIND_EARNINGS_LIVE)
+NY_ONLY = {qh.PREF_TIMEZONE: "America/New_York"}
+SMALL_HOURS_ET = datetime(2026, 10, 30, 2, 30, tzinfo=ET).astimezone(timezone.utc)
+
+
+def _et(hour, minute=0):
+    return datetime(2026, 10, 30, hour, minute, tzinfo=ET).astimezone(timezone.utc)
+
+
+def test_earnings_results_wait_for_morning_when_quiet_hours_were_never_set():
+    svc = _svc()
+    night = datetime(2026, 10, 30, 2, 30, tzinfo=ET).astimezone(timezone.utc)
+    noon = datetime(2026, 10, 30, 12, 0, tzinfo=ET).astimezone(timezone.utc)
+    for key in ("earnings_result", "earnings_live"):
+        d = svc.decide(_recipient(preferences={qh.PREF_TIMEZONE: "America/New_York"}), get_kind(key), night)
+        assert (d.send, d.reason) == (False, "quiet_hours")
+        assert d.deliver_after.astimezone(ET).hour == 7
+    # The user's own clock: 15:30 in Tokyo is daytime.
+    tokyo = {qh.PREF_TIMEZONE: "Asia/Tokyo"}
+    assert svc.decide(_recipient(preferences=tokyo), get_kind("earnings_result"), night).send is True
+    # An explicit Quiet Hours off is honoured.
+    off = {qh.PREF_QUIET_ENABLED: False}
+    assert svc.decide(_recipient(preferences=off), get_kind("earnings_result"), night).send is True
+    # Other kinds and daytime are unchanged.
+    assert svc.decide(_recipient(preferences={}), get_kind(KIND_TICKER_MOVE), night).send is True
+    assert svc.decide(_recipient(preferences={}), get_kind("earnings_result"), noon).send is True
+
+
+@pytest.mark.parametrize("key", NIGHT_KINDS)
+@pytest.mark.parametrize("hour,minute,held", [
+    (21, 59, False), (22, 0, True), (6, 59, True), (7, 0, False),
+])
+def test_the_hold_runs_from_22_00_up_to_but_not_including_07_00(key, hour, minute, held):
+    """Half-open, like every quiet window: a result landing at exactly 07:00 goes out."""
+    d = _svc().decide(_recipient(preferences=NY_ONLY), get_kind(key), _et(hour, minute))
+    assert d.send is (not held)
+    assert (d.deliver_after is not None) is held
+
+
+@pytest.mark.parametrize("zone", [
+    "Asia/Tokyo", "Europe/Berlin", "Asia/Kolkata", "Australia/Sydney", "America/Denver",
+])
+def test_the_hold_ends_at_7_on_the_users_own_clock(zone):
+    tz = ZoneInfo(zone)
+    late = datetime(2026, 10, 29, 23, 30, tzinfo=tz).astimezone(timezone.utc)
+    d = _svc().decide(
+        _recipient(preferences={qh.PREF_TIMEZONE: zone}), get_kind(KIND_EARNINGS_RESULT), late,
+    )
+    wake = d.deliver_after.astimezone(tz)
+    assert d.reason == "quiet_hours"
+    assert (wake.date(), wake.hour, wake.minute) == (date(2026, 10, 30), 7, 0)
+
+
+def test_the_hold_keeps_the_wall_clock_across_a_daylight_saving_change():
+    """Clocks go back at 02:00 on Nov 1 2026 in New York, so that night is 10 hours long."""
+    late = datetime(2026, 10, 31, 22, 30, tzinfo=ET).astimezone(timezone.utc)
+    d = _svc().decide(_recipient(preferences=NY_ONLY), get_kind(KIND_EARNINGS_LIVE), late)
+    assert d.deliver_after == datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
+    assert d.deliver_after.astimezone(ET).hour == 7
+
+
+@pytest.mark.parametrize("prefs", [
+    {}, {qh.PREF_TIMEZONE: "Mars/Olympus"}, {qh.PREF_TIMEZONE: ""}, {qh.PREF_TIMEZONE: 5},
+], ids=["absent", "unknown", "blank", "wrong_type"])
+def test_with_no_usable_timezone_the_hold_runs_on_ET(prefs):
+    d = _svc().decide(_recipient(preferences=prefs), get_kind(KIND_EARNINGS_RESULT), SMALL_HOURS_ET)
+    assert d.reason == "quiet_hours"
+    assert d.deliver_after == datetime(2026, 10, 30, 11, 0, tzinfo=timezone.utc)
+
+
+def test_a_failed_preference_read_errs_toward_a_late_buzz():
+    """The read failed, so nothing says this user ever turned Quiet Hours off. A hold costs them
+    a few hours and the flush re-reads their settings; a wrong buzz wakes them."""
+    svc = _svc()
+    svc._preferences_bulk = lambda ids: {"u1": None}
+    svc._devices_bulk = lambda ids: {}
+    svc.unread_counts_bulk = lambda ids: {}
+    svc._category_counts_bulk = lambda ids, category, cutoffs: {}
+    kind = get_kind(KIND_EARNINGS_RESULT)
+
+    recipient = svc.resolve_recipients(["u1"], kind, SMALL_HOURS_ET)["u1"]
+    assert recipient.preferences_known is False
+    d = svc.decide(recipient, kind, SMALL_HOURS_ET)
+    assert d.reason == "quiet_hours"
+    assert d.deliver_after == datetime(2026, 10, 30, 11, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("key", NIGHT_KINDS)
+@pytest.mark.parametrize("stored", [False, "false", "off", "0", 0])
+def test_an_explicit_quiet_hours_off_is_honoured_however_it_is_stored(key, stored):
+    prefs = {**NY_ONLY, qh.PREF_QUIET_ENABLED: stored}
+    d = _svc().decide(_recipient(preferences=prefs), get_kind(key), SMALL_HOURS_ET)
+    assert (d.send, d.reason, d.deliver_after) == (True, "ok", None)
+
+
+@pytest.mark.parametrize("stored", [None, [], {"on": False}])
+def test_a_null_or_unreadable_toggle_is_no_answer_so_the_hold_stays(stored):
+    """A null or a nested value states nothing, so it means what an absent key means, the same
+    fallback `_coerce_toggle` gives every other toggle."""
+    prefs = {**NY_ONLY, qh.PREF_QUIET_ENABLED: stored}
+    d = _svc().decide(_recipient(preferences=prefs), get_kind(KIND_EARNINGS_RESULT), SMALL_HOURS_ET)
+    assert d.reason == "quiet_hours"
+
+
+def test_the_users_own_window_replaces_the_hold():
+    prefs = {
+        **NY_ONLY, qh.PREF_QUIET_ENABLED: True,
+        qh.PREF_QUIET_START: "23:00", qh.PREF_QUIET_END: "06:00",
+    }
+    svc, kind = _svc(), get_kind(KIND_EARNINGS_RESULT)
+    assert svc.decide(_recipient(preferences=prefs), kind, _et(22, 30)).send is True
+    assert svc.decide(_recipient(preferences=prefs), kind, _et(6, 30)).send is True
+    d = svc.decide(_recipient(preferences=prefs), kind, SMALL_HOURS_ET)
+    assert d.deliver_after.astimezone(ET).hour == 6
+
+
+def test_a_window_the_user_switched_on_and_broke_is_not_replaced_by_the_hold():
+    """Start equal to end reads as off, and the settings screen says so. The toggle was touched,
+    so the hold, which is only for people who never touched it, does not apply."""
+    prefs = {
+        **NY_ONLY, qh.PREF_QUIET_ENABLED: True,
+        qh.PREF_QUIET_START: "22:00", qh.PREF_QUIET_END: "22:00",
+    }
+    d = _svc().decide(_recipient(preferences=prefs), get_kind(KIND_EARNINGS_RESULT), SMALL_HOURS_ET)
+    assert (d.send, d.reason) == (True, "ok")
+
+
+def test_hours_stored_without_the_toggle_do_not_move_the_hold():
+    prefs = {**NY_ONLY, qh.PREF_QUIET_START: "23:30", qh.PREF_QUIET_END: "05:00"}
+    svc, kind = _svc(), get_kind(KIND_EARNINGS_RESULT)
+    assert svc.decide(_recipient(preferences=prefs), kind, _et(22, 30)).reason == "quiet_hours"
+    d = svc.decide(_recipient(preferences=prefs), kind, _et(5, 30))
+    assert d.deliver_after == datetime(2026, 10, 30, 11, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("key", NIGHT_KINDS)
+def test_a_toggle_or_the_cap_still_decides_first_and_parks_nothing(key):
+    """A held row would use the user's dedup slot for something they will never be told."""
+    svc, kind = _svc(), get_kind(key)
+    for preference in (kind.preference_key, kind.master_preference_key):
+        d = svc.decide(_recipient(preferences={preference: False}), kind, SMALL_HOURS_ET)
+        assert (d.reason, d.deliver_after) == (f"preference_off:{preference}", None)
+    d = svc.decide(_recipient(category_sent_today=4), kind, SMALL_HOURS_ET)
+    assert (d.reason, d.deliver_after) == ("cap_reached:earnings:4", None)
+
+
+def test_broken_hold_math_fails_to_NOT_QUIET(monkeypatch):
+    """The rule for all of step 3: a bug must not queue every result forever."""
+    def _boom(*a, **k):
+        raise RuntimeError("wraparound exploded")
+
+    monkeypatch.setattr(qh, "is_within", _boom)
+    d = _svc().decide(_recipient(preferences=NY_ONLY), get_kind(KIND_EARNINGS_LIVE), SMALL_HOURS_ET)
+    assert (d.send, d.reason) == (True, "ok")
+
+
+@pytest.mark.parametrize("key", sorted(set(NOTIFICATION_KINDS) - set(NIGHT_KINDS)))
+@pytest.mark.parametrize("now", [SMALL_HOURS_ET, _et(23, 30), NOON_ET], ids=["0230", "2330", "noon"])
+def test_every_other_kind_treats_an_untouched_toggle_as_never_quiet(key, now):
+    """The hold belongs to the two result kinds. A kind that ships off is opted in here so that
+    the decision reaches the quiet-hours step."""
+    svc, kind = _svc(), get_kind(key)
+    prefs = {kind.preference_key: True}
+    untouched = svc.decide(_recipient(preferences=prefs), kind, now)
+    said_off = svc.decide(_recipient(preferences={**prefs, qh.PREF_QUIET_ENABLED: False}), kind, now)
+    assert (untouched.send, untouched.reason, untouched.deliver_after) == (True, "ok", None)
+    assert untouched == said_off
+
+
 # ── delivery ─────────────────────────────────────────────────────────────────
 
 def _wire(svc, *, claims=None, states=None, recipients):
@@ -361,6 +541,22 @@ async def test_a_deferred_notification_is_claimed_and_parked_not_sent():
     assert len(claims) == 1
     assert claims[0][2]["push_state"] == STATE_DEFERRED
     assert claims[0][2]["deliver_after"] is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", NIGHT_KINDS)
+async def test_a_held_result_is_parked_at_once_so_the_inbox_has_it(key):
+    push = _FakePush()
+    svc = _svc(push)
+    claims = []
+    _wire(svc, claims=claims, recipients=[_recipient(preferences=NY_ONLY)])
+
+    sent = await svc.notify_users(["u1"], kind=key, title="T", body="B",
+                                  dedup_key="k", now=SMALL_HOURS_ET)
+    assert sent == 0 and push.calls == []
+    ((_uid, _key, claim),) = claims
+    assert (claim["kind"], claim["push_state"]) == (key, STATE_DEFERRED)
+    assert claim["deliver_after"] == datetime(2026, 10, 30, 11, 0, tzinfo=timezone.utc)
 
 
 @pytest.mark.asyncio

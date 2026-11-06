@@ -16,13 +16,16 @@ never concurrently, so which copy a user gets can never depend on timing:
 user with Live Results on gets #1 and is skipped by #2 as a duplicate; a user with only
 Results & Surprises on gets #2; and `run_earnings_notifications`' daily pass later finds
 every key claimed. Preference, master switch, category cap and quiet hours stay the
-dispatcher's job — nothing here decides who is told.
+dispatcher's job — nothing here decides who is told. That includes the hour: both kinds carry
+`night_hold_by_default`, so a landing in the night of a user who never set Quiet Hours is
+claimed at once and buzzes at 07:00 on their clock.
 
 THE WINDOW. Neither kind goes out for a report older than yesterday: the daily pass's own
 rule (`earnings_sender.in_result_window`), which is narrower than the live days around a
 weekend or a holiday. A Friday report FMP fills on Monday lands, keeps its card and its sheet,
 and is marked handled here with nothing further sent: a live push from its filing, if one went
-out inside the window, is all it gets.
+out inside the window, is all it gets. The rule decides what starts: a row claimed inside the
+window is the dispatcher's, and still goes out at its wake if the report has aged past it.
 
 A FAILED WATCHER READ. A report's key is taken before its send, and the dispatcher's usual 0
 for a failed read looks like a ticker nobody watches, so one failed read at the landing minute

@@ -17,18 +17,23 @@ kinds — and the daily 16:00 ET sender — claim the SAME key. What is pinned h
   * neither kind goes out for a report older than yesterday, the daily pass's own window, and
     such a report is handled once, for good;
   * a round sends oldest first, so the cap cannot run a report out of that window;
-  * the round cap's warning counts the reports still owed a push, nothing else.
-The dispatcher is a recorder, or the real one over a fake table where a failed read is the
-point — nothing here reaches APNs or Supabase.
+  * the round cap's warning counts the reports still owed a push, nothing else;
+  * a result landing in a default-settings user's night waits for 07:00 on their clock, the row
+    claimed at once, one buzz at the wake, across both kinds and the daily pass, through a
+    restart and past the window above.
+The dispatcher is a recorder, or the real one over a fake table where a failed read or the
+ledger is the point — nothing here reaches APNs or Supabase.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -36,6 +41,7 @@ import app.services.notification_senders.earnings_live_sender as sender
 import app.services.notification_senders.earnings_sender as daily
 import app.services.push_dispatch_service as pds
 from app.config import settings
+from app.services import quiet_hours as qh
 from app.services.earnings_live_service import (
     BASIS_ADJUSTED,
     BASIS_GAAP,
@@ -52,6 +58,7 @@ from app.services.notification_kinds import (
     KIND_EARNINGS_RESULT,
     NOTIFICATION_KINDS,
 )
+from app.services.push_service import PushOutcome
 from app.utils.market_hours import ET
 
 REPORT = date(2026, 10, 29)
@@ -745,6 +752,358 @@ def test_watchers_of_still_answers_a_failed_read_with_nobody(monkeypatch, caplog
 
 
 # ── copy ─────────────────────────────────────────────────────────────────────
+
+
+# ── the night hold, end to end ───────────────────────────────────────────────
+#
+# Owner decision 2026-11-05, "Hold until 7 AM". The hold itself is `decide`'s, pinned in
+# test_notification_dispatch.py. What is pinned here is that the rest of the path carries it:
+# the real sender, notify_watchers, claim, flush and daily pass, on a fake ledger with the
+# table's UNIQUE and the claim RPC's WHERE, and a clock the test moves.
+
+FRI_0230 = datetime(2026, 10, 30, 2, 30, tzinfo=ET)     # INTC reported Thursday, after the close
+FRI_0700 = datetime(2026, 10, 30, 7, 0, tzinfo=ET)
+FRI_NOON = datetime(2026, 10, 30, 12, 0, tzinfo=ET)
+FRI_1600 = datetime(2026, 10, 30, 16, 0, tzinfo=ET)
+FRI_2330 = datetime(2026, 10, 30, 23, 30, tzinfo=ET)
+SAT_0700 = datetime(2026, 10, 31, 7, 0, tzinfo=ET)
+IN_NEW_YORK = {qh.PREF_TIMEZONE: "America/New_York"}
+
+
+class _Duplicate(Exception):
+    code = "23505"
+
+
+class _Update:
+    def __init__(self, rows, patch):
+        self.rows, self.patch, self.filters = rows, patch, {}
+
+    def eq(self, column, value):
+        self.filters[column] = value
+        return self
+
+    def execute(self):
+        for row in self.rows:
+            if all(row.get(c) == v for c, v in self.filters.items()):
+                row.update(self.patch)
+
+
+class _Ledger:
+    """`notification_events`: UNIQUE (user_id, dedup_key) and `claim_due_notifications`
+    (migration 119), so the real claim, stamp and flush run against them."""
+
+    def __init__(self):
+        self.rows: List[Dict[str, Any]] = []
+
+    def table(self, name):
+        assert name == pds.TABLE
+        return self
+
+    def insert(self, row):
+        def execute():
+            if any((r["user_id"], r["dedup_key"]) == (row["user_id"], row["dedup_key"])
+                   for r in self.rows):
+                raise _Duplicate("duplicate key value violates unique constraint")
+            self.rows.append({"attempts": 0, **row})
+        return SimpleNamespace(execute=execute)
+
+    def update(self, patch):
+        return _Update(self.rows, patch)
+
+    def rpc(self, name, params):
+        assert name == "claim_due_notifications"
+        due = [r for r in self.rows
+               if r["push_state"] == "deferred" and r.get("deliver_after")
+               and _stamp(r["deliver_after"]) <= _stamp(params["p_now"])]
+        due = sorted(due, key=lambda r: _stamp(r["deliver_after"]))[:max(params["p_limit"], 0)]
+        for row in due:
+            row.update(push_state="pending", attempts=row["attempts"] + 1)
+        return SimpleNamespace(execute=lambda: SimpleNamespace(data=[dict(r) for r in due]))
+
+    def sent_counts(self, ids, category, cutoffs):
+        return {uid: sum(1 for r in self.rows
+                         if r["user_id"] == uid and r["category"] == category
+                         and r.get("sent_at") and _stamp(r["sent_at"]) >= cutoffs[uid])
+                for uid in ids}
+
+    def of(self, user):
+        return [r for r in self.rows if r["user_id"] == user]
+
+
+def _stamp(value: str) -> datetime:
+    return datetime.fromisoformat(value)
+
+
+class _Phones:
+    enabled = True
+
+    def __init__(self):
+        self.buzzes: List[Dict[str, Any]] = []
+
+    async def send_to_user(self, user_id, **kw):
+        self.buzzes.append({"user_id": user_id, **kw})
+        return PushOutcome(attempted=1, accepted=1)
+
+    def of(self, user):
+        return [b for b in self.buzzes if b["user_id"] == user]
+
+
+def _clock_at(monkeypatch, instant: datetime) -> datetime:
+    """Move the dispatcher's clock. `notify_watchers` and the flush read the time themselves, so
+    without this these tests would pass or fail by the hour they run."""
+    class _Moved(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant.astimezone(tz or timezone.utc)
+
+    monkeypatch.setattr(pds, "datetime", _Moved)
+    return instant
+
+
+def _dispatcher_over(monkeypatch, ledger, phones, *, prefs=None, users=("u1",)):
+    """The real dispatcher. Only the reads that are not the point here are fixed: the preferences
+    blob of each user (never set means `{}`), one device each, and an unread count of nothing."""
+    blobs = prefs if prefs is not None else {u: dict(IN_NEW_YORK) for u in users}
+    svc = object.__new__(pds.PushDispatchService)
+    svc.supabase, svc._push = ledger, phones
+    svc._read_watchers = lambda ticker: list(users)
+    svc._preferences_bulk = lambda ids: {u: blobs.get(u, {}) for u in ids}
+    svc._devices_bulk = lambda ids: {u: [{"token": f"t-{u}", "environment": "sandbox"}] for u in ids}
+    svc.unread_counts_bulk = lambda ids: {u: 0 for u in ids}
+    svc._category_counts_bulk = ledger.sent_counts
+    svc.resolve_route_asset_type = lambda ticker, current: None
+    monkeypatch.setattr(pds, "get_push_dispatch_service", lambda: svc)
+    monkeypatch.setattr(daily, "get_push_dispatch_service", lambda: svc)
+    monkeypatch.setattr(settings, "PUSH_DRY_RUN", False)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", True)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_RESULT_PUSH_ENABLED", True)
+    sender.reset()
+    return svc
+
+
+async def _daily_pass(monkeypatch, now, *, day=REPORT, symbol="INTC"):
+    """The real 16:00 ET pass over one calendar row beating consensus by 46%."""
+    @contextlib.asynccontextmanager
+    async def claimed(_job):
+        yield SimpleNamespace(success=False, notified=0)
+
+    async def calendar(from_date=None, to_date=None):
+        row = {"symbol": symbol, "date": day.isoformat(), "time": "amc",
+               "epsEstimated": 0.41, "epsActual": 0.60}
+        return [row] if from_date == day.isoformat() else []
+
+    monkeypatch.setattr(daily, "claimed_job", claimed)
+    monkeypatch.setattr(daily, "get_fmp_client",
+                        lambda: SimpleNamespace(get_earnings_calendar=calendar))
+    monkeypatch.setattr(daily, "_watched_tickers", lambda: {symbol})
+    return await daily.run_earnings_notifications(now=now)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restart", [False, True], ids=["same_process", "restart_in_the_night"])
+async def test_a_night_landing_buzzes_once_at_7_and_nobody_is_told_twice(
+        monkeypatch, clean_sender, restart):
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+
+    night = _clock_at(monkeypatch, FRI_0230)
+    await sender.dispatch_landings([_big()], night)
+
+    assert phones.buzzes == [], "a default-settings watcher must not be buzzed at 02:30"
+    (row,) = ledger.rows
+    assert (row["kind"], row["push_state"]) == (KIND_EARNINGS_LIVE, "deferred"), (
+        "the live kind claims the key at once, so the inbox has the row and the second kind "
+        "finds it taken"
+    )
+    assert _stamp(row["deliver_after"]) == FRI_0700
+
+    if restart:
+        svc = _dispatcher_over(monkeypatch, ledger, phones)
+
+    _clock_at(monkeypatch, FRI_0700 - timedelta(seconds=1))
+    assert (await svc.flush_deferred())["claimed"] == 0
+    assert phones.buzzes == []
+
+    _clock_at(monkeypatch, FRI_0700)
+    stats = await svc.flush_deferred()
+    assert (stats["sent"], stats["failed"], stats["stale"]) == (1, 0, 0)
+    (buzz,) = phones.buzzes
+    assert buzz["user_id"] == "u1" and buzz["data"]["kind"] == KIND_EARNINGS_LIVE
+    assert buzz["title"] == "INTC results are out"
+    assert row["push_state"] == "sent" and row["sent_at"]
+
+    assert (await svc.flush_deferred())["claimed"] == 0, "a sent row must not be claimed again"
+    _clock_at(monkeypatch, FRI_1600)
+    await _daily_pass(monkeypatch, FRI_1600)
+    await sender.dispatch_landings([_big()], FRI_1600)
+    assert len(phones.buzzes) == 1 and len(ledger.rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_with_live_results_switched_off_the_surprise_kind_is_what_waits(
+        monkeypatch, clean_sender):
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+
+    await sender.dispatch_landings([_big()], _clock_at(monkeypatch, FRI_0230))
+    assert phones.buzzes == [] and [r["kind"] for r in ledger.rows] == [KIND_EARNINGS_RESULT]
+
+    _clock_at(monkeypatch, FRI_0700)
+    await svc.flush_deferred()
+    (buzz,) = phones.buzzes
+    assert buzz["data"]["kind"] == KIND_EARNINGS_RESULT
+    assert buzz["body"].startswith("EPS beat consensus by 46%")
+
+
+@pytest.mark.asyncio
+async def test_a_result_after_22_00_for_a_report_already_told_stays_one_push(
+        monkeypatch, clean_sender):
+    """The filing's figure went out at 21:59. FMP's adjusted EPS arrives at 22:01, inside the
+    hold: the parked claim hits the same key and leaves nothing to wake."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+
+    thursday_2159 = _clock_at(monkeypatch, datetime(2026, 10, 29, 21, 59, tzinfo=ET))
+    await sender.dispatch_landings([_snap(rev=17.1e9, rev_source=SOURCE_FILING)], thursday_2159)
+    assert [b["data"]["kind"] for b in phones.buzzes] == [KIND_EARNINGS_LIVE]
+
+    thursday_2201 = _clock_at(monkeypatch, datetime(2026, 10, 29, 22, 1, tzinfo=ET))
+    await sender.dispatch_landings([_big()], thursday_2201)
+    assert len(ledger.rows) == 1 and ledger.rows[0]["push_state"] == "sent"
+
+    _clock_at(monkeypatch, FRI_0700)
+    assert (await svc.flush_deferred())["claimed"] == 0
+    assert len(phones.buzzes) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_night_is_each_watchers_own_and_a_stated_off_is_kept(monkeypatch, clean_sender):
+    ledger, phones = _Ledger(), _Phones()
+    prefs = {
+        "held": dict(IN_NEW_YORK),
+        "said_off": {**IN_NEW_YORK, qh.PREF_QUIET_ENABLED: False},
+        "tokyo": {qh.PREF_TIMEZONE: "Asia/Tokyo"},      # 15:30 there
+        "unknown_zone": {},                             # falls back to ET
+    }
+    svc = _dispatcher_over(monkeypatch, ledger, phones, prefs=prefs, users=tuple(prefs))
+
+    await sender.dispatch_landings([_big()], _clock_at(monkeypatch, FRI_0230))
+
+    assert sorted(b["user_id"] for b in phones.buzzes) == ["said_off", "tokyo"]
+    assert {u: ledger.of(u)[0]["push_state"] for u in prefs} == {
+        "held": "deferred", "said_off": "sent", "tokyo": "sent", "unknown_zone": "deferred",
+    }
+    assert all(len(ledger.of(u)) == 1 for u in prefs)
+
+    _clock_at(monkeypatch, FRI_0700)
+    await svc.flush_deferred()
+    assert sorted(b["user_id"] for b in phones.buzzes) == sorted(prefs)
+
+
+@pytest.mark.asyncio
+async def test_a_row_already_held_outlives_the_older_than_yesterday_rule(monkeypatch, clean_sender):
+    """Thursday's report lands in Friday's night, inside the window. At Saturday's 07:00 wake it
+    is two days old: too old to START a push, and nothing may take back one already owed."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+
+    await sender.dispatch_landings([_big()], _clock_at(monkeypatch, FRI_2330))
+    (row,) = ledger.rows
+    assert row["push_state"] == "deferred" and _stamp(row["deliver_after"]) == SAT_0700
+
+    _clock_at(monkeypatch, SAT_0700)
+    assert daily.in_result_window(REPORT, SAT_0700.date()) is False, "the case is not the case"
+    # The tick hands the report over again after a restart, and the window closes it for good.
+    sender.reset()
+    await sender.dispatch_landings([_big()], SAT_0700)
+    assert row["push_state"] == "deferred" and phones.buzzes == []
+
+    stats = await svc.flush_deferred()
+    assert (stats["sent"], stats["suppressed"], stats["stale"]) == (1, 0, 0)
+    assert len(phones.buzzes) == 1 and len(ledger.rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_16_00_et_pass_tells_each_watcher_on_their_own_clock(monkeypatch, clean_sender):
+    """The pass runs at one instant: the afternoon in New York, 05:00 the next day in Tokyo and
+    22:00 in Helsinki. It tells the first now and holds the other two for their own 07:00."""
+    ledger, phones = _Ledger(), _Phones()
+    prefs = {
+        "ny": dict(IN_NEW_YORK),
+        "tokyo": {qh.PREF_TIMEZONE: "Asia/Tokyo"},
+        "helsinki": {qh.PREF_TIMEZONE: "Europe/Helsinki"},
+        "tokyo_said_off": {qh.PREF_TIMEZONE: "Asia/Tokyo", qh.PREF_QUIET_ENABLED: False},
+    }
+    svc = _dispatcher_over(monkeypatch, ledger, phones, prefs=prefs, users=tuple(prefs))
+
+    pass_time = _clock_at(monkeypatch, datetime(2026, 10, 29, 16, 0, tzinfo=ET))
+    stats = await _daily_pass(monkeypatch, pass_time)
+
+    assert stats["results"] == 2, "the pass counts the buzzes it sent, never a parked row"
+    assert sorted(b["user_id"] for b in phones.buzzes) == ["ny", "tokyo_said_off"]
+    tokyo, helsinki = ledger.of("tokyo")[0], ledger.of("helsinki")[0]
+    assert (tokyo["kind"], tokyo["push_state"]) == (KIND_EARNINGS_RESULT, "deferred")
+    tokyo_wake = _stamp(tokyo["deliver_after"]).astimezone(ZoneInfo("Asia/Tokyo"))
+    helsinki_wake = _stamp(helsinki["deliver_after"]).astimezone(ZoneInfo("Europe/Helsinki"))
+    assert (tokyo_wake.date(), tokyo_wake.hour) == (date(2026, 10, 30), 7)
+    assert (helsinki_wake.date(), helsinki_wake.hour) == (date(2026, 10, 30), 7)
+
+    _clock_at(monkeypatch, _stamp(tokyo["deliver_after"]))
+    await svc.flush_deferred()
+    assert sorted(b["user_id"] for b in phones.buzzes) == ["ny", "tokyo", "tokyo_said_off"]
+
+    _clock_at(monkeypatch, _stamp(helsinki["deliver_after"]))
+    await svc.flush_deferred()
+    assert len(phones.of("helsinki")) == 1 and len(phones.buzzes) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_night_of_reports_still_stops_at_the_daily_cap(monkeypatch, clean_sender):
+    """Parked rows have used none of the 4/day budget, so the wake is where the cap bites: four
+    buzzes, and the rest stay readable in the inbox with the reason on the row."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+    reports = [_big(f"T{i}") for i in range(6)]
+
+    await sender.dispatch_landings(reports, _clock_at(monkeypatch, FRI_0230))
+    assert len(ledger.rows) == 6 and phones.buzzes == []
+
+    _clock_at(monkeypatch, FRI_0700)
+    stats = await svc.flush_deferred()
+
+    assert (stats["sent"], stats["suppressed"]) == (4, 2)
+    assert len(phones.buzzes) == 4
+    capped = [r for r in ledger.rows if r["push_state"] == "failed"]
+    assert len(capped) == 2
+    assert all("cap_reached:earnings:4" in r["last_error"] for r in capped)
+
+
+@pytest.mark.asyncio
+async def test_a_held_row_is_not_held_again_by_a_user_who_changed_timezone(
+        monkeypatch, clean_sender):
+    """The row was due at New York's 07:00. Its owner has since landed in Honolulu, where that is
+    01:00. It goes out: asking the hold again at every wake could park it for good."""
+    ledger, phones = _Ledger(), _Phones()
+    prefs = {"u1": dict(IN_NEW_YORK)}
+    svc = _dispatcher_over(monkeypatch, ledger, phones, prefs=prefs)
+
+    await sender.dispatch_landings([_big()], _clock_at(monkeypatch, FRI_0230))
+    prefs["u1"] = {qh.PREF_TIMEZONE: "Pacific/Honolulu"}
+
+    _clock_at(monkeypatch, FRI_0700)
+    assert (await svc.flush_deferred())["sent"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_daytime_landing_goes_out_at_once_as_before(monkeypatch, clean_sender):
+    ledger, phones = _Ledger(), _Phones()
+    _dispatcher_over(monkeypatch, ledger, phones)
+
+    await sender.dispatch_landings([_big()], _clock_at(monkeypatch, FRI_NOON))
+    (buzz,) = phones.buzzes
+    assert buzz["data"]["kind"] == KIND_EARNINGS_LIVE
+    assert [r["push_state"] for r in ledger.rows] == ["sent"]
 
 
 def test_fmp_figures_are_stated_as_beat_or_miss_never_as_numbers():

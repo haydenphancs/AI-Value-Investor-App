@@ -11,7 +11,9 @@ decisions that determine whether a notification is welcome or an uninstall:
      default (`notification_kinds.preference_defaults`).
   3. **How many.** A per-CATEGORY daily ceiling counted in the user's OWN timezone.
   4. **When.** Quiet hours DEFER a notification; they never drop it. The ledger row
-     is written either way, so the inbox has it immediately and only the buzz waits.
+     is written either way, so the inbox has it immediately and only the buzz waits. A
+     kind with `night_hold_by_default` is deferred the same way for a user who never set
+     them, across the default night on that user's clock.
   5. **Once.** A unique claim in `notification_events` (migration 119) inserted BEFORE
      the send, so a retry, a re-trip of the same scope, or two overlapping Railway
      instances cannot produce a second buzz.
@@ -860,11 +862,15 @@ class PushDispatchService:
             return Decision(uid, False, f"cap_reached:{kind.category}:{cap}")
 
         # 3. Quiet hours DEFER; they never drop. The ledger row is still written, so
-        #    the in-app inbox shows it immediately — only the buzz waits.
+        #    the in-app inbox shows it immediately — only the buzz waits. A night-hold kind
+        #    keeps the default night for a user who never set them; a toggle they did touch
+        #    is their answer, off included.
         if kind.respects_quiet_hours:
             try:
                 tz = qh.resolve_timezone(prefs)
                 window = qh.resolve_window(prefs)
+                if kind.night_hold_by_default and qh.quiet_hours_never_set(prefs):
+                    window = qh.NIGHT_HOLD_WINDOW
                 if qh.is_within(window, now.astimezone(tz)):
                     wake = qh.next_end_utc(window, now, tz)
                     if wake is not None:

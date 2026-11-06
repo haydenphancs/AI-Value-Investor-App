@@ -39,6 +39,7 @@ from app.schemas.profit_power import ProfitPowerDataPointSchema, ProfitPowerResp
 from app.services.financials_metric_gate import (
     comparable_peer_metrics,
     resolve_payment_network,
+    score_excluded_rows,
     trailing_interest_row,
 )
 from app.services.sector_benchmark_lookup import (
@@ -96,7 +97,10 @@ _DEGRADED_CACHE_TTL = 60
 #     a Financial Services company with an industry gets its OWN industry's line from 10
 #     companies per period, or no line — never the sector's (owner decision 2026-10-20). A v8
 #     row drew LLY's peer net margin as a flat 0.0% line.
-_PP_PAYLOAD_VERSION = 9
+# v10 (2026-11-05): a company with `score_excluded_rows` has no gross or FCF margin line: a
+#     bank's gross margin is FMP's arithmetic on gross interest income, and the chart and chat
+#     must not state what the card's row calls N/M. A v9 row drew them.
+_PP_PAYLOAD_VERSION = 10
 _VERSION_KEY = "payload_version"
 
 # The margin whose peer line the live Profit Power card draws (and Cay AI quotes): its
@@ -702,6 +706,7 @@ class ProfitPowerService:
         bench_metrics = comparable_peer_metrics(
             _MARGIN_BENCHMARK_METRICS, industry, network=network,
         )
+        margins_left_out = bool(score_excluded_rows(industry, network=network, ticker=ticker))
         benchmarks_annual: Dict[str, Dict[str, float]] = {}
         benchmarks_quarterly: Dict[str, Dict[str, float]] = {}
         # Peer level of the value each benchmark cell SHOWS, per metric and period.
@@ -817,14 +822,14 @@ class ProfitPowerService:
                 k = p.get("_match_period", p["period"])
                 schemas.append(ProfitPowerDataPointSchema(
                     period=p["period"],
-                    gross_margin=p["gross_margin"],
+                    gross_margin=None if margins_left_out else p["gross_margin"],
                     operating_margin=p["operating_margin"],
-                    fcf_margin=p["fcf_margin"],
+                    fcf_margin=None if margins_left_out else p["fcf_margin"],
                     net_margin=p["net_margin"],
                     sector_average_net_margin=_pct(net_b, k),
-                    sector_average_gross_margin=_pct(gross_b, k),
+                    sector_average_gross_margin=None if margins_left_out else _pct(gross_b, k),
                     sector_average_operating_margin=_pct(op_b, k),
-                    sector_average_fcf_margin=_pct(fcf_b, k),
+                    sector_average_fcf_margin=None if margins_left_out else _pct(fcf_b, k),
                 ))
             return schemas
 

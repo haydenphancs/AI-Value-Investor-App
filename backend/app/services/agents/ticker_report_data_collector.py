@@ -63,9 +63,11 @@ from app.utils.margins import revenue_backed_margin
 from app.utils.period_labels import annual_benchmark_key, calendar_quarter_key
 from app.services.financials_metric_gate import (
     CURRENT_RATIO,
+    DEBT_TO_EQUITY,
     GATED_METRICS,
     INTEREST_COVERAGE,
     QUICK_RATIO,
+    SCORE_EXCLUDED_ROWS,
     company_metric_applicable,
     comparable_peer_metrics,
     excluded_from_industry_median,
@@ -75,7 +77,9 @@ from app.services.financials_metric_gate import (
     peer_metric_applicable,
     resolve_payment_network,
     resolve_withheld_company_rows,
+    score_excluded_rows,
     trailing_interest_row,
+    without_excluded_metrics,
     withheld_company_rows,
 )
 from app.services._earnings_common import eps_digit_shift_suspect
@@ -2999,8 +3003,13 @@ class TickerReportDataCollector:
         }
 
         # ── Valuation vital ───────────────────────────────────────────
+        # A DCF rests on free cash flow, so it never stands in for a financial company's
+        # unrated Price card.
         out.valuation_vital = _build_valuation_vital(
-            current_price, fair_value, upside, out.snap_valuation
+            current_price,
+            None if _score_excluded(out) else fair_value,
+            None if _score_excluded(out) else upside,
+            out.snap_valuation,
         )
 
         # ── Financial health vital ────────────────────────────────────
@@ -3620,7 +3629,10 @@ class TickerReportDataCollector:
             "competitive_insight": (
                 ai_moat.get("competitive_insight") or "Data unavailable for this ticker."
             ),
-            "_coverage_note": _build_moat_coverage_note(moat_dims, focal_industry),
+            "_coverage_note": " ".join(filter(None, (
+                _build_moat_coverage_note(moat_dims, focal_industry),
+                _moat_peer_note(out),
+            ))),
             # The ORDER MARKER every "most direct first" claim depends on (chat,
             # iOS caption, Stage-B prompts, PDF). Always "threat" / "industry_peers"
             # now: the one directness-ranked list ("direct" / "research") came from
@@ -3755,6 +3767,15 @@ class TickerReportDataCollector:
             ),
             "mos_pct": _c.get("upside_pct"),
         }
+        excluded_rows = _score_excluded(out)
+        if excluded_rows:
+            # What the cards show as N/M does not steer the score through the style nudge.
+            # D/E too: a bank's flips with its funding and nearly every insurer earns the
+            # same bonus (owner decision 2026-11-05: same rule for all of them).
+            scoring_inputs["_style_signals"].update(
+                dict.fromkeys(_STYLE_SIGNALS_EXCLUDED),
+                excluded_rows=sorted(excluded_rows),
+            )
 
         # Deterministic, persona-weighted headline score — the SINGLE source
         # of truth for BOTH entry paths (the report endpoint and the research
@@ -3794,7 +3815,9 @@ class TickerReportDataCollector:
 
             "_scoring_inputs": scoring_inputs,
 
-            "core_thesis": _sanitize_thesis(ai.get("core_thesis")),
+            "core_thesis": _sanitize_thesis(
+                ai.get("core_thesis"), drop_excluded=bool(excluded_rows),
+            ),
 
             # fundamental_metrics is now collector-derived (matches the
             # snapshot data the user sees in TickerDetailView's
@@ -5995,8 +6018,11 @@ def _snapshot_to_card(
         md: Dict[str, Any] = {"label": m.name, "value": m.value, "trend": None}
         if getattr(m, "peer_level", None) in ("industry", "sector"):
             md["peer_level"] = m.peer_level   # for the model prompts' peer wording
-        # Attach tap-to-expand history when we have a series for this metric.
-        hk = _resolve_history_key(m.name)
+        # Attach tap-to-expand history when we have a series for this metric. Never on a row
+        # `score_excluded_rows` shows as "N/M": the history would print the multiple.
+        hk = None if (
+            m.value == "N/M" and getattr(m, "metric_key", None) in SCORE_EXCLUDED_ROWS
+        ) else _resolve_history_key(m.name)
         h = history_lookup.get(hk) if (hk and history_lookup) else None
         if h is not None:
             md["history_key"] = hk
@@ -10915,9 +10941,12 @@ def _sanitize_stage_a_factors(raw: Any) -> List[Dict[str, Any]]:
     return factors[:5]
 
 
-def _sanitize_thesis(thesis: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _sanitize_thesis(
+    thesis: Optional[Dict[str, Any]], *, drop_excluded: bool = False,
+) -> Dict[str, Any]:
     """Pydantic-safe core_thesis. Bull/bear cap to 5 each (the prompt also
-    enforces a signal-driven 2-5 count; this is the post-write defense)."""
+    enforces a signal-driven 2-5 count; this is the post-write defense).
+    `drop_excluded`: no bullet leans on a measure the score left out."""
     if not isinstance(thesis, dict):
         return {"bull_case": [], "bear_case": []}
     def _points(raw: Any) -> List[str]:
@@ -10925,7 +10954,8 @@ def _sanitize_thesis(thesis: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         # and a bare string would have become one bullet per character.
         if not isinstance(raw, list):
             return []
-        return [p for p in raw if isinstance(p, str) and p.strip()][:5]
+        points = [p for p in raw if isinstance(p, str) and p.strip()][:5]
+        return without_excluded_metrics(points) if drop_excluded else points
 
     # ensure_insider_label: a Stage-A fallback bullet citing insider buy/sell
     # counts ("55 sells vs 1 buy") must say "insider" — these bullets render with
@@ -10972,6 +11002,41 @@ _CONTEXT_GATED_NAMES: Tuple[Tuple[str, str], ...] = (
 
 _GATE_NOT_MEANINGFUL = "not_meaningful"
 _GATE_WITHHELD = "withheld"
+
+
+# Stated where the figures would be, and digit-free, as `_gated_context_lines`: silence invites
+# the model to recall one. P/E, P/B, margins and returns stay in the evidence.
+_EXCLUDED_CONTEXT_LINE = (
+    "P/S, P/FCF, EV/EBITDA, gross margin, operating and free cash flow, total debt and "
+    "debt-to-equity DO NOT APPLY to a company in this industry: its deposits, reserves and "
+    "funding drive them. Do not cite them or call them a strength or a weakness."
+)
+# `_style_signals` a company with `score_excluded_rows` leaves out.
+# `mos_pct` too: it is a DCF's upside, and a DCF is built on free cash flow.
+_STYLE_SIGNALS_EXCLUDED = (
+    "debt_equity", "fcf", "gross_margin", "gross_margin_prev", "roic", "mos_pct",
+)
+
+
+def _moat_peer_note(out: Any) -> str:
+    """Whom a financial company's moat is compared with, "" for every other company. Goes with
+    the own-industry moat. Named from the profile: a mortgage REIT's peers are real estate."""
+    profile = getattr(out, "profile", None)
+    sector = profile.get("sector") if isinstance(profile, dict) else None
+    if not _score_excluded(out) or not isinstance(sector, str) or not sector.strip():
+        return ""
+    return f"Moat compared with all {sector.strip().lower()} companies."
+
+
+def _score_excluded(out: Any) -> frozenset:
+    """`score_excluded_rows` for this collection, from the same inputs as `_context_gated_rows`.
+    Empty for an operating company, so nothing below changes for one."""
+    profile = getattr(out, "profile", None)
+    return score_excluded_rows(
+        profile.get("industry") if isinstance(profile, dict) else None,
+        network=getattr(out, "non_lender_member", False) is True,
+        ticker=getattr(out, "ticker", None),
+    )
 
 
 def _context_gated_rows(out: Any) -> Dict[str, str]:
@@ -11127,11 +11192,18 @@ def build_financial_context(out: CollectedTickerData) -> str:
     parts.append(
         f"Earnings Yield: {_fmt_pct_or_na(ey) if ey is not None else 'N/A — negative or missing earnings'}"
     )
-    parts.append(f"Gross Margin: {_fmt_pct_or_na(c.get('gross_margin'))}")
+    # Re-decided here like the gate below: a figure the score leaves out must not reach the
+    # model at all, or it comes back as a bull or bear point.
+    excluded_rows = _score_excluded(out)
+    if not excluded_rows:
+        parts.append(f"Gross Margin: {_fmt_pct_or_na(c.get('gross_margin'))}")
     parts.append(f"Net Margin: {_fmt_pct_or_na(c.get('net_margin'))}")
     parts.append(f"Operating Margin: {_fmt_pct_or_na(c.get('operating_margin'))}")
     parts.append(f"ROE: {_fmt_pct_or_na(c.get('roe'))}")
-    parts.append(f"D/E: {_fmt_or_na(c.get('debt_equity'))}")
+    if excluded_rows:
+        parts.append(_EXCLUDED_CONTEXT_LINE)
+    else:
+        parts.append(f"D/E: {_fmt_or_na(c.get('debt_equity'))}")
     # The gate is re-decided HERE, not trusted from `computed`: a collection cached before
     # `_compute_metrics` dropped the gated values still carries FMP's raw ratio.
     gated = _context_gated_rows(out)
@@ -11198,15 +11270,18 @@ def build_financial_context(out: CollectedTickerData) -> str:
         b = balance[0]
         cur = b.get("reportedCurrency")
         parts.append(f"\nTotal Assets: {_format_money_compact(b.get('totalAssets', 0), cur)}")
-        parts.append(f"Total Debt: {_format_money_compact(b.get('totalDebt', 0), cur)}")
+        if not excluded_rows:
+            parts.append(f"Total Debt: {_format_money_compact(b.get('totalDebt', 0), cur)}")
         parts.append(f"Cash: {_format_money_compact(b.get('cashAndCashEquivalents', 0), cur)}")
 
     if cash_flow:
         cf = cash_flow[0]
         cur = cf.get("reportedCurrency")
-        parts.append(
-            f"\nOperating CF: {_format_money_compact(cf.get('operatingCashFlow', 0), cur)}")
-        parts.append(f"Free CF: {_format_money_compact(cf.get('freeCashFlow', 0), cur)}")
+        # Both, or neither: JPM's capex reads 0, so its operating cash flow IS the free one.
+        if not excluded_rows:
+            parts.append(
+                f"\nOperating CF: {_format_money_compact(cf.get('operatingCashFlow', 0), cur)}")
+            parts.append(f"Free CF: {_format_money_compact(cf.get('freeCashFlow', 0), cur)}")
         # No "Buybacks:" line from the raw annual row (removed 2026-10-22): FMP's
         # `commonStockRepurchased` is sometimes employee tax withholding or preferred
         # redemptions (INTC, META, AMD, JPM). The report's capital-allocation block carries
@@ -11233,8 +11308,9 @@ def build_financial_context(out: CollectedTickerData) -> str:
             # different prose, and only the second is true.
             return "N/A" if v is None else f"{v:.2f}"
         parts.append(f"\nP/E: {_mult(_pe)}")
-        parts.append(f"EV/EBITDA: {_mult(_ev)}")
-        parts.append(f"P/FCF: {_mult(_pfcf)}")
+        if not excluded_rows:
+            parts.append(f"EV/EBITDA: {_mult(_ev)}")
+            parts.append(f"P/FCF: {_mult(_pfcf)}")
 
     if estimates:
         parts.append("\nAnalyst Estimates:")
@@ -11415,6 +11491,7 @@ def _format_snapshot_card_values(out: "CollectedTickerData") -> str:
     # of this module (ticker_data_cache, widget_movers_service) would load it too.
     from app.services.agents.narrative_prompts import report_model_metric_name
 
+    excluded_rows = _score_excluded(out)
     rendered: List[str] = []
     for title, snap in snaps:
         if snap is None or not snap.metrics:
@@ -11423,6 +11500,8 @@ def _format_snapshot_card_values(out: "CollectedTickerData") -> str:
         # 0 = not rated (no peer comparison), never "0 out of 5" to the model.
         rendered.append(f"\n{title} ({rating}/5):" if rating > 0 else f"\n{title} (unrated):")
         for m in snap.metrics:
+            if excluded_rows and getattr(m, "metric_key", None) == DEBT_TO_EQUITY:
+                continue
             # The wire name says "sector avg" / "vs sector" for every median (shipped iOS
             # strips the suffix by that word); `peer_level` names whose median it is. The
             # 1.1 card calls an industry median "industry avg", so the model must too, or

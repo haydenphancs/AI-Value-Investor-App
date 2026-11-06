@@ -223,6 +223,7 @@ def _vital_score(
 # (gm − gm_prev), not a level, so it is intentionally left full-strength.
 
 STYLE_FIT_CAP: float = 10.0   # max |adjustment| in score points
+_PARTIAL_MIN_SUBS = 2         # distinct signals a financial company's style nudge needs
 
 
 def _lin(value: Optional[float], bad: float, good: float) -> Optional[float]:
@@ -268,6 +269,9 @@ def style_fit_adjustment(persona_key: str, signals: Optional[Dict[str, Any]]) ->
         f = float(v)
         return f if math.isfinite(f) else None   # NaN/inf → absent
 
+    # A company with `score_excluded_rows`: the collector leaves its leverage, cash-flow and
+    # gross-margin signals out, so fewer subs remain to average.
+    partial = bool(signals.get("excluded_rows"))
     roe = num("roe"); roic = num("roic"); de = num("debt_equity")
     # NEGATIVE debt_equity = NEGATIVE shareholder equity = a DISTRESS signal, not
     # "very low debt". A "lower is better" _lin(de, ...) would map de<0 to +1.0 (a
@@ -300,7 +304,9 @@ def style_fit_adjustment(persona_key: str, signals: Optional[Dict[str, Any]]) ->
     elif persona_key == "cathie_wood":
         subs.append(_lin(rev_g, 20.0, 40.0))        # trailing growth
         subs.append(_lin(rev_cagr, 15.0, 30.0))     # forward CAGR
-        if rev_cagr is not None and rev_g is not None:
+        # Not for a financial company: analysts' revenue and FMP's gross interest income are
+        # on different bases, so the difference has no meaning.
+        if rev_cagr is not None and rev_g is not None and not partial:
             subs.append(_clamp(_lin(rev_cagr - rev_g, -15.0, 15.0), -0.5, 0.5))  # acceleration
         if gm is not None and gm_prev is not None:
             subs.append(_clamp(_lin(gm - gm_prev, -3.0, 3.0), -0.4, 0.4))        # margin trend
@@ -341,6 +347,12 @@ def style_fit_adjustment(persona_key: str, signals: Optional[Dict[str, Any]]) ->
         subs.append(_clamp(_lin(fcf_yield, 0.03, 0.09), -0.5, 0.5))  # real free-cash yield
     else:
         return 0.0
+
+    if partial:
+        # One signal is not a persona's read: Burry's P/E alone would swing ±10 points. (Lynch's
+        # doubled PEG needs growth, which is its own signal, so it cannot pass alone.)
+        if sum(s is not None for s in subs) < _PARTIAL_MIN_SUBS:
+            return 0.0
 
     return round(_avg_present(subs) * STYLE_FIT_CAP, 2)
 

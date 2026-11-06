@@ -38,6 +38,7 @@ from app.config import settings
 from app.integrations.gemini import GeminiClient
 from app.log_redaction import redact_secrets
 from app.services._insider_common import INSIDER_VALUE_NOTE, ensure_insider_label
+from app.services.financials_metric_gate import names_excluded_metric, without_excluded_metrics
 from app.services.agents.persona_config import PersonaConfig
 # Reuse the headline scorer's per-vital reader so the Bull/Bear point count is
 # driven by the EXACT same 0-10 module substrate that drives the quality score.
@@ -119,6 +120,28 @@ def _style_block(persona: PersonaConfig) -> str:
     )
 
 
+def _excluded_rows_of(shell: Dict[str, Any]) -> List[str]:
+    """The `score_excluded_rows` the collector recorded for this report, [] for every other."""
+    inputs = shell.get("_scoring_inputs") if isinstance(shell, dict) else None
+    signals = inputs.get("_style_signals") if isinstance(inputs, dict) else None
+    rows = signals.get("excluded_rows") if isinstance(signals, dict) else None
+    return rows if isinstance(rows, list) else []
+
+
+# What steers a persona towards a measure that says nothing about a bank or an insurer.
+_EXCLUDED_LENS_RE = re.compile(
+    r"debt|lever|net cash|interest coverage|gross margin|free cash flow|FCF|owner earnings",
+    re.I,
+)
+
+
+def _lens_items(items: Any, excluded: bool, limit: int) -> List[str]:
+    """The first ``limit`` of a persona's priorities, skipping those a financial company's
+    score leaves out, so the next ones move up."""
+    usable = [i for i in items if not (excluded and _EXCLUDED_LENS_RE.search(i))]
+    return usable[:limit]
+
+
 def _lens_directive(
     persona: PersonaConfig,
     *,
@@ -126,6 +149,7 @@ def _lens_directive(
     want_bear: bool = False,
     want_metrics: bool = True,
     want_flags: bool = False,
+    excluded: bool = False,
 ) -> str:
     """Compact, persona-specific steering built from the structured style fields
     (bull/bear priorities, signature metrics, red flags). Injected ONLY into the
@@ -134,17 +158,21 @@ def _lens_directive(
     analytical — never a buy/sell directive. Returns "" when the persona carries
     no structured fields (fallback safety)."""
     lines = []
-    if want_bull and persona.bull_priority:
-        lines.append("Lead the bull read with: " + "; ".join(persona.bull_priority[:3]) + ".")
-    if want_bear and persona.bear_priority:
-        lines.append("Lead the bear read with: " + "; ".join(persona.bear_priority[:3]) + ".")
-    if want_metrics and persona.key_metrics:
+    bull = _lens_items(persona.bull_priority or [], excluded, 3)
+    bear = _lens_items(persona.bear_priority or [], excluded, 3)
+    metrics = _lens_items(persona.key_metrics or [], excluded, 4)
+    flags = _lens_items(persona.red_flags or [], excluded, 3)
+    if want_bull and bull:
+        lines.append("Lead the bull read with: " + "; ".join(bull) + ".")
+    if want_bear and bear:
+        lines.append("Lead the bear read with: " + "; ".join(bear) + ".")
+    if want_metrics and metrics:
         lines.append(
             "When a number fits, anchor on one of your signature metrics: "
-            + ", ".join(persona.key_metrics[:4]) + "."
+            + ", ".join(metrics) + "."
         )
-    if want_flags and persona.red_flags:
-        lines.append("Give weight to your red flags: " + "; ".join(persona.red_flags[:3]) + ".")
+    if want_flags and flags:
+        lines.append("Give weight to your red flags: " + "; ".join(flags) + ".")
     if not lines:
         return ""
     return (
@@ -650,6 +678,7 @@ def _metric_trajectory_line(m: Dict[str, Any], peer: str) -> Optional[str]:
 
 
 def _fundamentals_trajectory_block(shell: Dict[str, Any]) -> str:
+    excluded = bool(_excluded_rows_of(shell))
     cards = shell.get("fundamental_metrics") or []
     lines: List[str] = []
     for card in cards:
@@ -659,6 +688,8 @@ def _fundamentals_trajectory_block(shell: Dict[str, Any]) -> str:
         metric_lines: List[str] = []
         for m in (card.get("metrics") or []):
             if not isinstance(m, dict):
+                continue
+            if excluded and names_excluded_metric(m.get("label")):
                 continue
             # The line is ONE peer group, named by its own level when the report carries
             # it (2026-10-07); the card-wide word only for reports frozen before that.
@@ -938,7 +969,7 @@ WHERE IT TRAILS PEERS: {gap_str}
 {competitor_block}
 
 {_style_block(persona)}
-{_lens_directive(persona, want_metrics=True)}
+{_lens_directive(persona, want_metrics=True, excluded=bool(_excluded_rows_of(shell)))}
 LENGTH: Write 2-3 sentences, total under 55 words.
 
 Sentence 1 — judge how durable the moat is (its staying power or the specific threat to it); weave the moat-strength tone naturally, don't just restate the score.
@@ -1867,7 +1898,7 @@ EVIDENCE:
 {evidence}
 
 {_style_block(persona)}
-{_lens_directive(persona, want_metrics=True)}
+{_lens_directive(persona, want_metrics=True, excluded=bool(_excluded_rows_of(shell)))}
 LENGTH: Write 3-4 sentences, total under 70 words. Density over length — every clause must earn its place; do not pad to hit the count.
 
 Focus on the WHY and on whether to BELIEVE it, not just the numbers:
@@ -2423,6 +2454,23 @@ If the data doesn't show a clear pattern, write the literal word: NULL"""
 # ── Job builder: turn a structured shell into a list of jobs ─────────
 
 
+def _financial_score_note(shell: Dict[str, Any]) -> str:
+    """What these cards leave out for a financial company, "" for every other company. It names
+    the rows: revenue growth still counts, and the moat's Brand pillar still reads gross margin
+    until the own-industry moat ships, so "these cards" is the true scope."""
+    if not _excluded_rows_of(shell):
+        return ""
+    note = (
+        "P/S, P/FCF, EV/EBITDA, gross margin and FCF growth do not fit financial companies, so "
+        "these cards do not score them."
+    )
+    inputs = shell.get("_scoring_inputs") or {}
+    health = inputs.get("financial_health") if isinstance(inputs, dict) else None
+    score = health.get("score") if isinstance(health, dict) else None
+    measured = isinstance(score, dict) and score.get("value") is not None
+    return note if measured else f"{note} Financial Health is not rated."
+
+
 def build_narrative_jobs(
     persona: PersonaConfig,
     evidence: str,
@@ -2444,12 +2492,18 @@ def build_narrative_jobs(
     # ── overall_assessment.text ───────────────────────────────────────
     if isinstance(shell.get("overall_assessment"), dict):
         oa = shell["overall_assessment"]
+        # Code-owned, under the cards it explains, and on the fallback text too.
+        score_note = _financial_score_note(shell)
         jobs.append(NarrativeJob(
             label="overall_assessment_text",
             prompt=_overall_assessment_text_prompt(persona, evidence, shell),
             word_cap=90,
             apply=_setter_for_dict_key(oa, "text"),
-            fallback_value=FALLBACK["overall_assessment_text"],
+            fallback_value=(
+                f'{FALLBACK["overall_assessment_text"]} {score_note}'
+                if score_note else FALLBACK["overall_assessment_text"]
+            ),
+            postprocess=(lambda text: f"{text} {score_note}") if score_note else None,
         ))
 
     # ── moat: durability + competitive insight ────────────────────────
@@ -3173,6 +3227,7 @@ def _digest_revenue_engine(report: Dict[str, Any]) -> List[str]:
 def _digest_fundamentals(report: Dict[str, Any]) -> List[str]:
     """Fundamentals & Growth (cards + overall) — sector-relative framing lives
     in EVIDENCE; here we give the card values + the headline rollup."""
+    excluded = bool(_excluded_rows_of(report))
     out: List[str] = []
     card_strs: List[str] = []
     for c in (report.get("fundamental_metrics") or []):
@@ -3185,7 +3240,8 @@ def _digest_fundamentals(report: Dict[str, Any]) -> List[str]:
         mstr = ", ".join(
             f"{report_model_metric_name(SimpleNamespace(name=m.get('label', '?'), peer_level=m.get('peer_level')))} "
             f"{m.get('value', '?')}"
-            for m in (c.get("metrics") or []) if isinstance(m, dict)
+            for m in (c.get("metrics") or [])
+            if isinstance(m, dict) and not (excluded and names_excluded_metric(m.get("label")))
         )
         # A card rated 0 is NOT rated (a bank's / insurer's Financial Health card keeps one
         # comparable row, 2026-10-07): "Health 0/5" would read as the worst possible score to
@@ -3597,6 +3653,7 @@ def build_thesis_synthesis_prompt(
     digest: str,
     bull_target: int,
     bear_target: int,
+    excluded: bool = False,
 ) -> str:
     """Prompt that selects the MOST IMPORTANT bull/bear points across every
     Deep Dive module — ranked by decision-impact, grounded in the data,
@@ -3614,7 +3671,7 @@ MODULE DIGEST (final verdicts the user sees in each Deep Dive section — verifi
 {digest}
 
 PERSONA LENS: {persona.narrative_lens or "your investment philosophy"}
-{_lens_directive(persona, want_bull=True, want_bear=True, want_metrics=True)}
+{_lens_directive(persona, want_bull=True, want_bear=True, want_metrics=True, excluded=excluded)}
 
 YOUR JOB — think hard, then surface ONLY the most important points:
 Pick the {bull_target} STRONGEST reasons to OWN this stock (bull_case) and the {bear_target} STRONGEST reasons to AVOID/worry about it (bear_case). Imagine a portfolio manager with 30 seconds: what actually moves the buy/hold/sell decision?
@@ -3717,6 +3774,7 @@ async def synthesize_core_thesis(
     existing thesis untouched.
     """
     ticker = report.get("symbol", "?")
+    excluded = bool(_excluded_rows_of(report))
     try:
         digest = build_module_digest(report)
         if not digest.strip():
@@ -3726,7 +3784,7 @@ async def synthesize_core_thesis(
         bull_target, bear_target = _thesis_target_counts(report)
         prompt = build_thesis_synthesis_prompt(
             persona, company_name, ticker, evidence, digest,
-            bull_target, bear_target,
+            bull_target, bear_target, excluded=excluded,
         )
         result = await gemini.generate_json(
             prompt=prompt,
@@ -3747,6 +3805,8 @@ async def synthesize_core_thesis(
 
         bull = _clean_thesis_points(parsed.get("bull_case"))
         bear = _clean_thesis_points(parsed.get("bear_case"))
+        if excluded:
+            bull, bear = without_excluded_metrics(bull), without_excluded_metrics(bear)
         if not bull or not bear:
             # An incomplete thesis is worse than the Stage A one — keep it.
             logger.info(
@@ -3808,6 +3868,7 @@ def build_critical_factors_prompt(
     digest: str,
     bear_block: str,
     macro_watch: str,
+    excluded: bool = False,
 ) -> str:
     """Prompt that picks the 2-3 most important forward-looking things to
     MONITOR — each on a DISTINCT Deep Dive area, with a real, varied watch
@@ -3829,7 +3890,7 @@ MACRO / GEOPOLITICAL (current threat level + active risk factors — rates, infl
 {macro_watch}
 
 PERSONA LENS: {persona.narrative_lens or "your investment philosophy"}
-{_lens_directive(persona, want_flags=True, want_metrics=False)}
+{_lens_directive(persona, want_flags=True, want_metrics=False, excluded=excluded)}
 
 Produce 2-3 critical factors. STRICT rules:
 - DIVERSITY — each factor MUST cover a DIFFERENT area. NEVER two on the same theme (do NOT give two debt / free-cash-flow factors). Spread across the areas that actually matter here: balance-sheet / fundamentals · competitive moat · macro / geopolitical / Fed · growth / forecast · valuation / Wall-Street · insider activity · price / catalyst. Pick the 2-3 most decision-relevant DISTINCT areas.
@@ -3908,6 +3969,7 @@ async def synthesize_critical_factors(
         company_name = report.get("company_name") or ticker
         prompt = build_critical_factors_prompt(
             persona, company_name, ticker, evidence, digest, bear_block, macro_watch,
+            excluded=bool(_excluded_rows_of(report)),
         )
         result = await gemini.generate_json(
             prompt=prompt,

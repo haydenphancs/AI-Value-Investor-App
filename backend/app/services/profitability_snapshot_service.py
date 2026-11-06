@@ -31,6 +31,7 @@ from app.services.asset_class import profile_is_fund
 from app.services.financials_metric_gate import (
     comparable_peer_metrics,
     resolve_payment_network,
+    score_excluded_rows,
 )
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup, lookup_failed
 from app.services.sector_benchmark_service import _normalize_sector
@@ -163,7 +164,9 @@ _inflight: Dict[str, asyncio.Future] = {}
 # 5 (2026-10-21): the Financial Services peer rule (own industry from 10 companies, else
 #     no peer — never the sector median; owner decision 2026-10-20). A v4 row of a small FS
 #     industry compared its margins and ROE with the bank-dominated sector.
-_SNAPSHOT_PAYLOAD_VERSION = 5
+# 6 (2026-11-05): `score_excluded_rows`: a bank's, an insurer's or a lender's gross margin
+#     reads "N/M" and does not count. A v5 row counted it.
+_SNAPSHOT_PAYLOAD_VERSION = 6
 _VERSION_KEY = "_schema_v"
 
 # ── Ticker validation ────────────────────────────────────────────
@@ -853,10 +856,13 @@ class ProfitabilitySnapshotService:
                 cur_bench, cur_levels = {}, {}
                 degraded.append("benchmarks")
 
+        excluded_rows = score_excluded_rows(industry, network=network, ticker=ticker)
+
         def _row(label: str, key: str, value: Optional[float], weight: float):
             """(metric, (score, weight)) for one row. A fiscal-year fallback is shown but
-            neither compared nor scored; ROE on negative / zero equity reads "N/M"."""
-            if key == "roe" and equity_state is not None:
+            neither compared nor scored; ROE on negative / zero equity reads "N/M", and so
+            does a row that means nothing for this business (`score_excluded_rows`)."""
+            if key in excluded_rows or (key == "roe" and equity_state is not None):
                 return SnapshotMetricResponse(
                     name=label, value=_NOT_MEANINGFUL, metric_key=key, score=None,
                 ), (None, weight)

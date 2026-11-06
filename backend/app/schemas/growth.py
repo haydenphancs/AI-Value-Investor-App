@@ -17,6 +17,9 @@ class GrowthDataPointSchema(BaseModel):
 
 class GrowthResponse(BaseModel):
     symbol: str
+    # The profile's FMP industry, for the Growth card's `score_excluded_rows`. None on a failed
+    # profile leg. Optional: the app does not read it.
+    industry: Optional[str] = None
     eps_annual: List[GrowthDataPointSchema]
     eps_quarterly: List[GrowthDataPointSchema]
     revenue_annual: List[GrowthDataPointSchema]

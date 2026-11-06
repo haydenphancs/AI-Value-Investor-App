@@ -242,7 +242,9 @@ async def test_the_full_context_with_the_real_health_card(monkeypatch, ticker, i
         bs=bs, income=nv._quarters(*nv._NETWORKS["V"]), bench=nv._FB_BENCH)
     snap, _degraded = await svc._compute_with_status(ticker)
     ctx = _context(_collected(ticker, industry, network=kept, snap_health=snap))
-    assert "CARD VALUES" in ctx and "Debt-to-Equity" in ctx
+    assert "CARD VALUES" in ctx
+    # A bank's D/E stays on its card but leaves the model's block (`score_excluded_rows`).
+    assert ("Debt-to-Equity" in ctx) is kept
     if kept:
         numbered = _GATED_VALUE.findall(ctx)
         assert len(numbered) == 4, numbered       # the raw line + the card's three rows

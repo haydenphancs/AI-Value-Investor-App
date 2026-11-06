@@ -118,6 +118,27 @@ _NO_LIQUIDITY_INDUSTRIES = frozenset({
 # watch exactly this ratio (review 2026-10-07: the first gate dropped it for them).
 _NO_COVERAGE_INDUSTRIES = _NO_LIQUIDITY_INDUSTRIES - frozenset({"insurance - brokers"})
 
+# Snapshot `metric_key`s that say nothing about a bank, an insurer, a lender or a broker-dealer
+# (`score_excluded_rows`). Not `GATED_METRICS`: those rows are omitted and kept out of the
+# sector pool, these are shown as "N/M" and only stop counting.
+SCORE_EXCLUDED_ROWS = frozenset({"ps", "pfcf", "ev_ebitda", "gross_margin", "fcf_growth"})
+# `_NO_COVERAGE_INDUSTRIES` minus the asset managers (owner decision 2026-11-05): a fee
+# business's cash flow tracks its earnings. BlackRock's FCF / net income held 0.64-0.85 over
+# five years, JPMorgan's ran -2.6 to +2.8. Lender-like names filed there (ARCC) keep the
+# rows; there is no list because FMP's fields cannot separate them.
+_SCORE_EXCLUDED_INDUSTRIES = frozenset(
+    key for key in _NO_COVERAGE_INDUSTRIES if not key.startswith("asset management")
+)
+# FMP files bitcoin miners (MARA, RIOT), crypto treasuries (NAKA, BMNR), trading venues (MKTX,
+# TW, MIAX) and advisers beside the brokers here, and nothing in its fields separates them. So
+# in this one industry the list is the only way in: a name not on it keeps every row, as it
+# always has. Companies that hold customer funds or a trading book, read 2026-11-05.
+_BROKER_LIST_INDUSTRIES = frozenset({"financial - capital markets"})
+CAPITAL_MARKETS_BROKERS = frozenset({
+    "BGC", "COHN", "ETOR", "FUTU", "GS", "HOOD", "JEF", "LPLA", "MRX", "MS", "NMR", "OPY",
+    "SCHW", "SF", "SIEB", "SNEX", "TIGR", "VIRT", "XP",
+})
+
 _DASH_RE = re.compile(r"\s*[-–—]\s*")
 _SPACE_RE = re.compile(r"\s+")
 
@@ -138,6 +159,56 @@ def liquidity_ratios_applicable(industry: Optional[str]) -> bool:
 def interest_coverage_applicable(industry: Optional[str]) -> bool:
     """False when interest coverage means nothing for this industry."""
     return industry_key(industry) not in _NO_COVERAGE_INDUSTRIES
+
+
+def score_excluded_rows(
+    industry: Optional[str], *, network: Optional[bool] = False, ticker: Any = None,
+) -> frozenset:
+    """The snapshot rows that do not count for a company in ``industry``.
+
+    Deposits and policy reserves are the raw material of these businesses, so free cash flow
+    swings with them, EBITDA has no meaning, and a bank's revenue from FMP is gross interest
+    income. These rows read "N/M", score nothing and never vote; the rows left are
+    renormalized. Insurance brokers, exchanges and asset managers are fee businesses and keep
+    every row, and so does a listed non-lender member (``network``). An unknown or empty
+    industry keeps every row: a failed profile read stays a degraded build, never a verdict.
+
+    Banks, insurers (Berkshire through its FMP industry, no ticker rule), lenders, broker-dealers
+    (`CAPITAL_MARKETS_BROKERS`), mortgage companies and financial conglomerates. Owner decisions
+    2026-11-05."""
+    key = industry_key(industry)
+    if network is True or key not in _SCORE_EXCLUDED_INDUSTRIES:
+        return frozenset()
+    if key in _BROKER_LIST_INDUSTRIES and normalize_ticker(ticker) not in CAPITAL_MARKETS_BROKERS:
+        return frozenset()
+    return SCORE_EXCLUDED_ROWS
+
+
+# The measures `score_excluded_rows` leaves out, and debt-to-equity, as words in model text.
+_EXCLUDED_METRIC_RE = re.compile(
+    r"\bP/S\b|\bP/FCF\b|\bEV/EBITDA\b|\bprice[- ]to[- ](?:sales|free cash flow)\b"
+    r"|\bgross (?:profit )?margins?\b|\b(?:free|operating) cash flow\b|\b[FO]CF\b"
+    r"|\bdebt[- ]to[- ]equity\b|\bD/E\b|\b(?:total|net) debt\b|\bleverage\b",
+    re.I,
+)
+
+
+def names_excluded_metric(text: Any) -> bool:
+    """True when ``text`` names a measure that does not count for a financial company."""
+    return isinstance(text, str) and _EXCLUDED_METRIC_RE.search(text[:600]) is not None
+
+
+def without_excluded_metrics(points: List[str]) -> List[str]:
+    """``points`` without those naming a left-out measure. All of them is left as it is, with a
+    WARNING: a thesis side emptied here would refund the whole report over one word."""
+    kept = [point for point in points if not names_excluded_metric(point)]
+    if points and not kept:
+        logger.warning(
+            "[score-excluded-text] every one of %d point(s) names a left-out measure; "
+            "keeping them rather than emptying the side", len(points),
+        )
+        return points
+    return kept
 
 
 def peer_metric_applicable(metric: str, industry: Optional[str]) -> bool:

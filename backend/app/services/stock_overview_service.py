@@ -2567,6 +2567,16 @@ class StockOverviewService:
         inc0 = income_annual[0] if income_annual else {}
         inc1 = income_annual[1] if len(income_annual) > 1 else {}
         bs = balance_annual[0] if balance_annual else {}
+
+        def _excluded_rows() -> frozenset:
+            """`score_excluded_rows`, for the degraded fallback cards only."""
+            from app.services.financials_metric_gate import (
+                resolve_payment_network,
+                score_excluded_rows,
+            )
+            return score_excluded_rows(industry, network=resolve_payment_network(
+                ticker, industry, None, source="overview_fallback",
+            ), ticker=ticker)
         cf0 = cashflow_annual[0] if cashflow_annual else {}
         cf1 = cashflow_annual[1] if len(cashflow_annual) > 1 else {}
 
@@ -2580,7 +2590,9 @@ class StockOverviewService:
         if growth_snapshot is not None:
             snapshots.append(growth_snapshot)
         else:
-            snapshots.append(self._build_growth_snapshot(inc0, inc1, cf0, cf1, km, key_metrics))
+            snapshots.append(self._build_growth_snapshot(
+                inc0, inc1, cf0, cf1, km, key_metrics, excluded_rows=_excluded_rows(),
+            ))
 
         # 3. Price / Valuation (use cached sector-relative snapshot if available)
         if valuation_snapshot is not None:
@@ -2589,7 +2601,7 @@ class StockOverviewService:
             # Degraded fallback: the multiples only, no peer comparison or score (its
             # ratios are ANNUAL — see `_build_valuation_snapshot`).
             snapshots.append(self._build_valuation_snapshot(
-                fr, km, cf0, inc0, bs, profile or {},
+                fr, km, cf0, inc0, bs, profile or {}, excluded_rows=_excluded_rows(),
             ))
 
         # 4. Financial Health (use cached sector-relative snapshot if available)
@@ -2705,7 +2717,7 @@ class StockOverviewService:
 
     def _build_growth_snapshot(
         self, inc0: Dict, inc1: Dict, cf0: Dict, cf1: Dict,
-        km: Dict, key_metrics: List[Dict],
+        km: Dict, key_metrics: List[Dict], excluded_rows: frozenset = frozenset(),
     ) -> SnapshotItemResponse:
         def _yoy_growth(curr: Dict, prev: Dict, key: str) -> Optional[float]:
             c = _safe_float(curr, key)
@@ -2723,7 +2735,8 @@ class StockOverviewService:
         if eps_curr and eps_prev and eps_prev != 0:
             eps_growth = ((eps_curr - eps_prev) / abs(eps_prev)) * 100
 
-        fcf_growth = _yoy_growth(cf0, cf1, "freeCashFlow")
+        fcf_excluded = "fcf_growth" in excluded_rows
+        fcf_growth = None if fcf_excluded else _yoy_growth(cf0, cf1, "freeCashFlow")
         op_growth = _yoy_growth(inc0, inc1, "operatingIncome")
 
         # Rating based on average of available growths
@@ -2750,7 +2763,10 @@ class StockOverviewService:
         metrics = [
             SnapshotMetricResponse(name="Revenue Growth (YoY)", value=_fmt_growth(rev_growth)),
             SnapshotMetricResponse(name="EPS Growth", value=_fmt_growth(eps_growth)),
-            SnapshotMetricResponse(name="Free Cash Flow Growth (YoY)", value=_fmt_growth(fcf_growth)),
+            SnapshotMetricResponse(
+                name="Free Cash Flow Growth (YoY)",
+                value="N/M" if fcf_excluded else _fmt_growth(fcf_growth),
+            ),
             SnapshotMetricResponse(name="Operating Income Growth", value=_fmt_growth(op_growth)),
         ]
         return SnapshotItemResponse(
@@ -2760,6 +2776,7 @@ class StockOverviewService:
 
     def _build_valuation_snapshot(
         self, fr: Dict, km: Dict, cf: Dict, inc: Dict, bs: Dict, profile: Dict,
+        excluded_rows: frozenset = frozenset(),
     ) -> SnapshotItemResponse:
         """DEGRADED fallback for the Price card: the multiples, with NO peer comparison
         and NO score.
@@ -2785,6 +2802,7 @@ class StockOverviewService:
         """
         card = build_price_snapshot(
             fr=fr, km=km, cf=cf, inc=inc, bs=bs, profile=profile, bench={},
+            excluded_rows=excluded_rows,
         )
         return card.model_copy(update={
             "rating": 0,

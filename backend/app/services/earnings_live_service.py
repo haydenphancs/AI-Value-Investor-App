@@ -162,9 +162,10 @@ GUARDS, each a defect found elsewhere in this repo:
     within 2% (FMP's dropped-digit revenue, `earnings_service._reconcile_revenue`);
   * a GAAP-only EPS is shown labelled GAAP with no beat/miss — the consensus is adjusted (the
     owner's 2026-09-27 caution, `news_insight_service._earnings_line`);
-  * a filing's revenue is only as exact as its print: "$17.1 billion" is anything from $17.05B
-    to $17.15B, so against a consensus inside that band it shows with no surprise, never a
-    0.0, until FMP's exact figure replaces it;
+  * a filing's figure is only as exact as its print: "$17.1 billion" is anything from $17.05B
+    to $17.15B and "$0.41" anything from $0.405 to $0.415 (FMP's consensus carries four
+    decimals), so against a consensus inside that band it shows with no surprise, never a 0.0,
+    until FMP's exact figure replaces it;
   * no surprise percentage against an estimate under $0.01 (`earnings_sender.MIN_ABS_ESTIMATE`);
   * a zero revenue from FMP is stored only against a consensus under $100M, with no figure
     held (a pre-revenue name can report nothing): beside a material consensus, or none, it
@@ -236,6 +237,8 @@ EARNINGS_LIVE_PREV_DAY_UNTIL_HOUR_ET = 12
 #: Below this |estimate| no surprise percentage is honest (`earnings_sender.MIN_ABS_ESTIMATE`:
 #: a $0.001 estimate against a $0.40 actual is a 39,900% "surprise").
 MIN_ABS_EPS_ESTIMATE = 0.01
+#: Floating-point room at the edge of an EPS print's rounding: 0.415 - 0.41 is 0.0050000000000000044.
+_EPS_ROUNDING_SLACK = 1e-9
 #: A revenue estimate this large is material enough for the plausibility guard. Smaller
 #: (pre-revenue) companies routinely land far from a tiny consensus, and holding their
 #: figure would hide a real result.
@@ -388,7 +391,8 @@ def revenue_surprise_pct(actual: Optional[float], estimate: Optional[float]) -> 
 def eps_metric(rec: _Record) -> LiveMetric:
     """FMP first (adjusted, the consensus's basis), then the filing's adjusted EPS, then the
     filing's GAAP EPS labelled GAAP and never coloured. With no shown estimate the guard reads
-    the guard-only one; the surprise and the metric's `estimate` never do."""
+    the guard-only one; the surprise and the metric's `estimate` never do. A filing figure whose
+    rounding covers the estimate carries no verdict, as in `revenue_metric`."""
     est = rec.eps_estimate
     guard_est = est if est is not None else rec.eps_guard_estimate
     filing = rec.filing
@@ -403,6 +407,10 @@ def eps_metric(rec: _Record) -> LiveMetric:
         if eps_digit_shift_suspect(value, guard_est, gaap):
             held = True
             continue
+        rounding = filing.eps_rounding if source == SOURCE_FILING else None
+        if est is not None and rounding is not None \
+                and abs(value - est) <= rounding + _EPS_ROUNDING_SLACK:
+            return LiveMetric(est, value, None, source, basis)
         return LiveMetric(est, value, eps_surprise_pct(value, est), source, basis)
     if held:
         return LiveMetric(est, checking=True)

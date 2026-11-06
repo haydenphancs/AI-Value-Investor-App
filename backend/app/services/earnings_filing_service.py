@@ -15,10 +15,10 @@ WHAT IT DOES, for one watched ticker on its report day:
   3. asks Gemini for revenue, adjusted EPS, GAAP EPS and guidance — each with a VERBATIM
      quote from the release;
   4. keeps a figure only when its quote is a verbatim span of the release
-     (`filing_text.verify_peg_span`, the Learn engine's checker) AND Gemini's value rounds
-     to the number printed in that quote, read with its own sign, scale and basis. What is
-     stored is the printed number, never Gemini's. Anything else is dropped and logged with
-     its reason. A figure the release does not state cannot reach a user.
+     (`filing_text.verify_peg_span`, the Learn engine's checker) that shows dollars AND
+     Gemini's value rounds to the number printed in that quote, read with its own sign, scale
+     and basis. What is stored is the printed number, never Gemini's. Anything else is dropped
+     and logged with its reason. A figure the release does not state cannot reach a user.
 
 The result is PRELIMINARY by construction: `earnings_live_service` shows it as "from the
 company's release" until FMP's own figure replaces it, and the existing `earnings_result`
@@ -107,6 +107,10 @@ _EXTRACT_TEXT_CHARS = 40_000
 #: sentence restates the quote and may round. A revenue or EPS figure has no such room: its value
 #: must round to the digits printed (`_Printed.prints`).
 _VALUE_TOLERANCE = 0.005
+#: Decimals an EPS is printed to. A coarser print has no cent to round to: `_Printed.prints`.
+_EPS_DECIMALS = 2
+#: Floating-point room in "is this the same number": 17.1 - 17.05 is 0.05000000000000071.
+_SAME_NUMBER = 1e-9
 #: Past this, a value from the model is no figure. Also what keeps inf, and a 400-digit JSON
 #: integer, away from `float()` and `round()`.
 _MAX_MODEL_NUMBER = 1e15
@@ -117,8 +121,8 @@ _WHOLE_DOLLARS_MIN = 1_000_000
 _GUIDANCE_MAX_CHARS = 320
 
 _UNIT_SCALE = {
-    "thousand": 1e3, "thousands": 1e3, "k": 1e3,
-    "million": 1e6, "millions": 1e6, "mn": 1e6, "mm": 1e6, "m": 1e6,
+    "thousand": 1e3, "thousands": 1e3, "thous": 1e3, "k": 1e3,
+    "million": 1e6, "millions": 1e6, "mn": 1e6, "mm": 1e6, "mil": 1e6, "m": 1e6,
     "billion": 1e9, "billions": 1e9, "bn": 1e9, "b": 1e9,
     "trillion": 1e12, "trillions": 1e12,
 }
@@ -161,22 +165,30 @@ _SYSTEM = (
     "every figure, `quote` must be copied character for character from the release: "
     f"between {PEG_SPAN_MIN_CHARS} and {PEG_SPAN_MAX_CHARS} characters, containing the "
     "number exactly as printed, never cutting a number in half, and copying a negative "
-    "with its parentheses, closing one included. Every `value` is the number printed in "
+    "with its parentheses, the opening one and the closing one included. Every `value` is "
+    "the number printed in "
     "its quote: the digits in that quote, never a more exact figure from elsewhere in the "
-    "release. `currency` is always given: the ISO code of the currency the release reports "
-    "in. A quote printing another currency's mark (€, £, ¥, C$, A$, HK$, or a code such as "
-    "EUR beside the number) is thrown away, even when `currency` is USD. For revenue, "
-    "prefer the sentence that prints the scale word next to the number. `revenue.value` is "
-    "the number as printed in that quote and `revenue.unit` the scale word printed next to "
-    "it (thousand / million / billion). For a table figure, `revenue.unit` is the scale "
-    "printed by the table's header, and that header must be inside the quote. Use 'units' "
-    "only for a full dollar amount printed with all its digits, never for a table figure. "
-    "`eps_adjusted_diluted` is the non-GAAP / adjusted diluted earnings per share for the "
-    "quarter, and its quote must include the words naming the measure (such as non-GAAP, "
-    "adjusted, core, comparable or excluding items). A figure the quote does not name that "
-    "way is thrown away, so never repeat the GAAP figure there. `eps_gaap_diluted` is the "
-    "GAAP diluted EPS. Each EPS figure is a per-share number, quoted with its $ sign or "
-    "decimal point and no scale word. A loss per share is NEGATIVE: its quote either prints "
+    "release and never a percentage. A number printed with no decimals, such as $14, must "
+    "equal `value` exactly, and so must an EPS printed with fewer than two decimals. "
+    "`currency` is always given: the ISO code of the currency the release reports in. A "
+    "quote printing another currency's mark, name or code (€, £, ¥, C$, A$, HK$, EUR, euros, "
+    "pesos, Canadian dollars) is thrown away, even when `currency` is USD. Every revenue and "
+    "EPS quote must itself show the figure is in dollars: a $ sign, USD or the word dollars. "
+    "For revenue, prefer the sentence that prints the scale word next to the number. "
+    "`revenue.value` is the number as printed in that quote and `revenue.unit` the scale "
+    "word printed next to it (thousand / million / billion). For a table figure, "
+    "`revenue.unit` is the scale printed by the table's header, and that header must be "
+    "inside the quote and print one scale only: \"in millions, except shares in thousands\" "
+    "proves neither. Use 'units' only for a full dollar amount printed with all its digits, "
+    "at least $1,000,000, in a release that prints no scale header, and never for a table "
+    "figure. `eps_adjusted_diluted` is the non-GAAP / adjusted diluted "
+    "earnings per share for the quarter, and its quote must include the words naming the "
+    "measure (such as non-GAAP, adjusted, core, comparable or excluding items): this "
+    "per-share measure, not another one such as Adjusted EBITDA. A figure the quote does "
+    "not name that way is thrown away, so never repeat the GAAP figure there. "
+    "`eps_gaap_diluted` is the GAAP diluted EPS. Each EPS figure is a per-share number, "
+    "quoted with its $ sign or decimal point and no scale word. A loss per share is "
+    "NEGATIVE: its quote either prints "
     "it negative or names it as a loss beside the number, and a positive figure is never "
     "taken from a quote that names it as a loss. Omit any figure the release does not state. "
     "`guidance.text` is ONE plain sentence of the company's own outlook for the next quarter "
@@ -198,10 +210,12 @@ class FilingFigures:
     eps_gaap: Optional[float] = None
     fiscal_period: Optional[str] = None
     guidance: Optional[str] = None
-    # Half the last digit `revenue` was printed to, in dollars: "$17.1 billion" is any figure
-    # within $50M of it, so a consensus inside that band is neither beaten nor missed. Read by
-    # `earnings_live_service.revenue_metric`; never on the wire.
+    # Half the last digit a figure was printed to, in dollars: "$17.1 billion" is any figure
+    # within $50M of it and "$0.41" any within half a cent, so a consensus inside that band is
+    # neither beaten nor missed. Read by `earnings_live_service.revenue_metric` and `eps_metric`;
+    # never on the wire. A GAAP EPS carries no verdict, so it needs none.
     revenue_rounding: Optional[float] = None
+    eps_rounding: Optional[float] = None
 
     @property
     def has_figures(self) -> bool:
@@ -364,7 +378,7 @@ def find_ex99_document(index_html: Any) -> Optional[str]:
 _NUMBER_IN_QUOTE_RE = re.compile(
     r"(?P<num>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|(?<![\w.,])\.\d+)"
     r"(?:\s*(?P<close>\)))?"
-    r"(?:\s*(?P<unit>thousands?|millions?|billions?|trillions?|bn|mn|mm|[kmb])\b)?"
+    r"(?:\s*(?P<unit>thousands?|millions?|billions?|trillions?|bn|mn|mm|mil|[kmb])\b)?"
     r"(?:\s*(?P<close_after_unit>\)))?",
     re.IGNORECASE,
 )
@@ -374,6 +388,8 @@ _MINUS_CHARS = "-\u2212\u2013"
 _LEAD_CHARS = "$(" + _MINUS_CHARS
 #: A minus touches its number, past a "$" at most: "- $0.46" is a label's dash.
 _TOUCHING_MINUS_RE = re.compile(rf"[{_MINUS_CHARS}](?:\$\s*)?\Z")
+#: After a number, what makes it a rate.
+_PERCENT_AFTER_RE = re.compile(r"\s*(?:%|percent(?:age)?\b|per\s+cent\b)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -383,15 +399,30 @@ class _Printed:
     value: float              # the magnitude
     unit: Optional[str]       # the scale word beside it, lower case
     negative: bool            # closed parentheses, or a minus touching the number
-    cut: bool                 # "(" and the quote ends right after it: it proves neither sign
+    # One half of its parentheses is outside the quote, so it proves neither sign: "(" and the
+    # quote ends right after it, or ")" with no "(" open before it.
+    cut: bool
     dollar: bool              # a "$" stands in front of it
     decimals: int             # digits printed after the point
+    percent: bool             # a rate, never a figure
     start: int
     end: int
 
-    def prints(self, v: float) -> bool:
-        """Does `v` round to the digits printed? 13.653 prints as "13.7"; 13.70 is not "13.65"."""
-        return abs(self.value - v) <= 0.5 * 10 ** -self.decimals + 1e-9
+    @property
+    def half_digit(self) -> float:
+        """Half the last digit printed. A float power: a number with 320 decimals is garbage,
+        and an integer one would raise."""
+        return 0.5 * 10.0 ** -self.decimals
+
+    def prints(self, v: float, *, finest: int = 1) -> bool:
+        """Does `v` round to the digits printed? 13.653 prints as "13.7"; 13.70 is not "13.65".
+
+        Below `finest` decimals a print must BE the value. "$14 billion" beside 13.7 is another
+        figure, a backlog, and with the room to round it would be stored in the figure's place.
+        """
+        if self.decimals < finest:
+            return abs(self.value - v) <= _SAME_NUMBER
+        return abs(self.value - v) <= self.half_digit + _SAME_NUMBER
 
 
 def _marks_before(quote: str, start: int) -> Tuple[bool, bool, bool]:
@@ -421,24 +452,29 @@ def _numbers_in(quote: str) -> List[_Printed]:
         dollar, opened, minus = _marks_before(quote, m.start())
         closed = bool(m.group("close") or m.group("close_after_unit"))
         unit = m.group("unit")
+        open_before = quote.count("(", 0, m.start()) > quote.count(")", 0, m.start())
         out.append(_Printed(
             value=float(num.replace(",", "")),
             unit=unit.lower() if unit else None,
             negative=minus or (opened and closed),
-            cut=opened and not closed and not quote[m.end():].strip(),
+            cut=(opened and not closed and not quote[m.end():].strip())
+                or (closed and not opened and not open_before),
             dollar=dollar,
             decimals=len(num.partition(".")[2]),
+            percent=_PERCENT_AFTER_RE.match(quote, m.end()) is not None,
             start=m.start(),
             end=m.end(),
         ))
     return out
 
 
-def _closest_prints(quote: str, v: float) -> List[_Printed]:
-    """The numbers of `quote` that `v` rounds to, the closest only. Rounding must never let a
-    coarser print stand in for the figure: 1.20 also rounds to the "$1" dividend beside "$1.20",
-    and the print kept is what reaches a user. Equal prints all stay, for the sign to choose."""
-    prints = [tok for tok in _numbers_in(quote) if tok.prints(v)]
+def _closest_prints(quote: str, v: float, *, finest: int = 1) -> List[_Printed]:
+    """The numbers of `quote` that `v` rounds to (`_Printed.prints`), the closest only, and never
+    a percentage. Rounding must not let another number stand in for the figure: 1.204 also rounds
+    to the "1.2" beside "$1.20", and the print kept is what reaches a user. Equal prints all
+    stay, for the sign to choose."""
+    prints = [tok for tok in _numbers_in(quote)
+              if not tok.percent and tok.prints(v, finest=finest)]
     closest = min((abs(tok.value - v) for tok in prints), default=0.0)
     return [tok for tok in prints if abs(tok.value - v) == closest]
 
@@ -459,12 +495,19 @@ def _close(a: float, b: float) -> bool:
     return abs(a - b) <= _VALUE_TOLERANCE * abs(b)
 
 
-#: A table's scale in the shapes other than a plural word: "(dollars in million)", "($M)",
-#: "(000's)", "($000)".
+#: A table's scale in the shapes other than a plural word: "(dollars in million)",
+#: "(in $ million)", "(in mm)", "(in thous.)", "($M)", "(US$ thousand)", "(USD M)",
+#: "(thousand dollars)", "(000's)", "($000)", "(US$'000)", "(000 omitted)", "(in 000)",
+#: "(in 1,000s)". Each sits where no number can: a figure's own scale word follows its digits.
+#: "in M&A" and "in K-12" are no scale.
+_SCALE_WORDS = r"thousand|thous|million|billion|mm?|mn|mil|bn?|k"
 _SHORT_SCALE = (
-    r"\bin\s+(?P<single>thousand|million|billion)\b"
-    r"|\$\s*(?P<short>k|mm?|mn|bn?)\b"
-    r"|(?P<zeros>(?<![\d,.])000['\u2019]?s\b|\$\s*000\b|\(\s*000\s*\))"
+    rf"\bin\s+(?P<single>{_SCALE_WORDS})\b(?![&\-\u2010-\u2015])"
+    rf"|\$\s*(?P<short>{_SCALE_WORDS})\b"
+    rf"|\busd\s+(?P<code>{_SCALE_WORDS})\b"
+    r"|(?<![\d.,]\s)\b(?P<named>thousand|million|billion)\s+(?:u\.?s\.?\s*)?dollars\b"
+    r"|(?P<zeros>(?<![\d,.])000['\u2019]?s\b|['\u2019]000\b|\$\s*000\b|\(\s*000\s*\)"
+    r"|(?<![\d,.])000\s+omitted\b|\bin\s+000\b|\bin\s+1,000['\u2019]?s\b)"
 )
 #: Anywhere in a release, a sign that its bare numbers may be scaled. Wider than a real header
 #: on purpose: a stray "millions of customers" only sends a whole-dollar figure to FMP.
@@ -482,10 +525,11 @@ _QUOTE_SCALE_RE = re.compile(
 
 
 def _quote_scale(quote: str) -> Optional[float]:
-    """The ONE scale a table header inside `quote` prints. None with no header, and with two
-    different scales: neither can be told to be the number's."""
+    """The ONE scale a table header inside `quote` prints. None with no header, with two
+    different scales, neither of which can be told to be the number's, and with a word case
+    folding matched that is in no table ("MİLLİONS")."""
     scales = {
-        1e3 if m.lastgroup == "zeros" else _UNIT_SCALE[m.group(m.lastgroup).lower()]
+        1e3 if m.lastgroup == "zeros" else _UNIT_SCALE.get(m.group(m.lastgroup).lower())
         for m in _QUOTE_SCALE_RE.finditer(quote)
     }
     return scales.pop() if len(scales) == 1 else None
@@ -524,7 +568,7 @@ def _revenue_print(
         if tok.value <= 0 or tok.negative or tok.cut:
             continue
         if tok.unit is not None:
-            printed_scale = _UNIT_SCALE[tok.unit]
+            printed_scale = _UNIT_SCALE.get(tok.unit)
         elif header is not None:
             printed_scale = header
         elif _reads_as_whole_dollars(tok, release_text):
@@ -533,7 +577,7 @@ def _revenue_print(
             continue
         if printed_scale == scale:
             # Whole dollars: 17.1 * 1e9 is 17100000000.000002 in floating point.
-            return float(round(tok.value * scale)), scale / (2 * 10 ** tok.decimals)
+            return float(round(tok.value * scale)), scale * tok.half_digit
     return None
 
 
@@ -547,18 +591,41 @@ def revenue_from_quote(
     return printed[0] if printed is not None else None
 
 
+#: Between a number and its loss: "$0.46 adjusted loss", "$0.46 diluted net loss". A closed list,
+#: because "$0.46 compared with a loss of $0.12" is another year's figure.
+_LOSS_QUALIFIERS = r"(?:(?:adjusted|diluted|basic|net|operating|gaap|non[\s\-]?gaap)\s+){0,3}"
+#: Right after the number, a loss is this number's. A table flattened by `html_to_text` puts the
+#: next row's label there too ("$ 0.46 Loss on sale of business 0.03"), and a label is capitalised,
+#: so a capitalised loss counts only when "per" ties it to a share.
 _LOSS_AFTER_RE = re.compile(
-    r"\s*(?:(?:per|a)\s+(?:\w+\s+){0,3}?share\s+)?(?:net\s+)?loss(?:es)?\b", re.IGNORECASE,
+    r"\s*(?:"
+    rf"(?i:(?:per|a)\s+(?:\w+\s+){{0,3}}?share\s+{_LOSS_QUALIFIERS}loss(?:es)?\b)"
+    rf"|(?i:(?:in\s+)?{_LOSS_QUALIFIERS}loss(?:es)?\s+per\b)"
+    r"|(?:in\s+)?(?:(?:adjusted|diluted|basic|net|operating|GAAP|non[\s\-]?GAAP)\s+){0,3}"
+    r"loss(?:es)?\b"
+    r")"
 )
 _CLOSED_PARENS_RE = re.compile(r"\([^()]*\)")
-#: ", excluding special items," inside a label. A "," inside a number does not end it.
+#: ", excluding special items," or ", which reflected a charge," inside a label. A "," inside a
+#: number does not end it.
 _ASIDE_RE = re.compile(
-    r",\s*(?:which\s+|that\s+)?(?:excluding|excludes?|excluded|including|includes?|included)\b"
+    r",\s*(?:which|that|excluding|excludes?|excluded|including|includes?|included)\b"
     r"(?:[^,;]|,(?=\d))*,",
     re.IGNORECASE,
 )
+#: The same aside with no commas, up to the loss it names: "EPS excluding the loss on debt
+#: extinguishment was". It stops at punctuation: "Excluding these items, the net loss" is the
+#: figure's own label.
+_LOSS_CLAUSE_RE = re.compile(
+    r"\b(?:excluding|excludes?|excluded|including|includes?|included|before)\s+"
+    r"(?:[^\s,;:]+\s+){0,6}?loss(?:es)?\b",
+    re.IGNORECASE,
+)
+#: "Negative" speaks to a figure only right before its number or its name: "a negative impact of
+#: $0.02" is about something else.
 _SIGN_WORD_RE = re.compile(
-    r"\b(?P<loss>loss(?:es)?|lost|lps|negative(?:\s+(?:diluted\s+)?(?:eps|earnings))?)\b"
+    r"\b(?P<loss>loss(?:es)?\b|lost\b|lps\b|negative(?=[\s$(]*\Z)"
+    r"|negative\s+(?:(?:adjusted|diluted)\s+)*(?:eps|earnings)\b)"
     r"|\b(?:income\b(?!\s+tax)|earned\b|earnings\b|profits?\b|eps\b)",
     re.IGNORECASE,
 )
@@ -580,26 +647,29 @@ def _reads_as_loss(quote: str, tok: _Printed) -> bool:
     label, removed = before, 1
     while removed:
         label, removed = _CLOSED_PARENS_RE.subn(" ", label)
-    words = list(_SIGN_WORD_RE.finditer(_ASIDE_RE.sub(" ", label)))
+    label = _LOSS_CLAUSE_RE.sub(" ", _ASIDE_RE.sub(" ", label))
+    words = list(_SIGN_WORD_RE.finditer(label))
     if not words:
         words = list(_SIGN_WORD_RE.finditer(before))
     return bool(words) and words[-1].group("loss") is not None
 
 
-def eps_from_quote(quote: str, value: Any) -> Optional[float]:
-    """The EPS as the quote prints it, with the sign the print proves, else None.
+def _eps_print(quote: str, value: Any) -> Optional[Tuple[float, float]]:
+    """The printed EPS as (dollars, half its last printed digit), with the sign the print
+    proves, or None.
 
     The number must be a per-share print (a "$" or a decimal point, no scale word) that `value`
-    rounds to. Its sign comes from that number alone, never from another figure of the quote:
-    closed parentheses or a touching minus ("(0.46)" is the accounting spelling of -0.46), or
-    the words around it (`_reads_as_loss`). A quote cut before its ")" proves no sign on its
-    own. A `value` with the other sign is refused: getting the sign wrong turns a beat into a
-    miss.
+    rounds to, and a print coarser than a cent must be the value itself: EPS is printed to the
+    cent, so "$1" beside 0.96 is another figure. Its sign comes from that number alone, never
+    from another figure of the quote: closed parentheses or a touching minus ("(0.46)" is the
+    accounting spelling of -0.46), or the words around it (`_reads_as_loss`). A quote cut inside
+    its parentheses proves no sign on its own. A `value` with the other sign is refused: getting
+    the sign wrong turns a beat into a miss.
     """
     v = _model_number(value)
     if v is None or abs(v) > 1000:
         return None
-    for tok in _closest_prints(quote, abs(v)):
+    for tok in _closest_prints(quote, abs(v), finest=_EPS_DECIMALS):
         if tok.unit is not None or not (tok.dollar or tok.decimals):
             continue
         loss = tok.negative or _reads_as_loss(quote, tok)
@@ -607,43 +677,82 @@ def eps_from_quote(quote: str, value: Any) -> Optional[float]:
             continue
         if v != 0 and (v < 0) != loss:
             continue
-        return (-tok.value if loss else tok.value) or 0.0   # never -0.0
+        return (-tok.value if loss else tok.value) or 0.0, tok.half_digit   # never -0.0
     return None
 
 
+def eps_from_quote(quote: str, value: Any) -> Optional[float]:
+    """The EPS in dollars as the quote prints it (`_eps_print`), else None."""
+    printed = _eps_print(quote, value)
+    return printed[0] if printed is not None else None
+
+
 _HYPHEN = r"[\s\-\u00ad\u2010-\u2015]*"
+#: A footnote inside a label: "Adjusted(3) diluted EPS", "Adjusted* EPS", and "Adjusted EPS1",
+#: which is what `html_to_text` leaves of a superscript.
+_LABEL_FOOTNOTE = r"(?:\s*\(\w{1,3}\)|\d{1,2}|\*+)?"
+#: Where a label that ends on "adjusted" stops. A measure after it means the word was that
+#: measure's: "or $0.46 per diluted share, Adjusted EBITDA of $300 million".
+_LABEL_END = r"(?=\s*(?:[,;:.)$(\d]|\Z|(?:of|was|were|is|are)\b))"
 #: The words that name an adjusted measure, each tied to the measure, so "the comparable
-#: quarter", "core business", "adjusted for the stock split" and "Adjusted EBITDA" name none. A
-#: footnote may sit inside the label: "Adjusted(3) diluted EPS".
+#: quarter", "core business", "adjusted for the stock split", "split-adjusted EPS" and "Adjusted
+#: EBITDA" name none. Operating earnings are tied to a share: "operating income rose 4%" is
+#: another line of the statement. "Before interest" spells EBIT and EBITDA, and "before income
+#: taxes" a line of the statement, whatever noun the sentence reaches next.
 _ADJUSTED_MEASURE_RE = re.compile(
-    rf"\bnon{_HYPHEN}(?:gaap|ifrs)\b"
-    r"|\b(?:excluding|before)\s+(?:\S+\s+){0,5}?"
-    r"(?:items?|charges?|costs?|gains?|loss(?:es)?|impacts?|effects?|adjustments?|amortization"
-    r"|compensation)\b"
-    r"|\b(?:adj(?:usted|\.)?|core|comparable|underlying|normali[sz]ed"
-    rf"|pro{_HYPHEN}forma)(?:\s*(?:\(\w{{1,3}}\)|\d{{1,2}}|\*+))?\s+"
-    rf"(?:(?:diluted|net|operating|per{_HYPHEN}share)\s+)*"
-    r"(?:eps|earnings|income|loss(?:es)?|profit|basis)\b"
-    r"|\boperating\s+(?:diluted\s+)?(?:eps\b|earnings\s+per\b)"
-    r"|\b(?:eps|share|diluted|earnings|income)[\s,:(\-\u2010-\u2015]*"
-    r"(?:as\s+)?adjusted\b(?!\s+(?:for|to)\b)",
+    rf"\bnon{_HYPHEN}(?:gaap|ifrs)(?![A-Za-z])"
+    r"|\b(?:excluding|before(?!\s+(?:interest|(?:income\s+)?tax(?:es)?)\b))\s+"
+    r"(?:\S+\s+){0,5}?"
+    r"(?:items?|charges?|costs?|expenses?|benefits?|gains?|loss(?:es)?|impacts?|effects?"
+    r"|adjustments?|impairments?|restructuring|amortization|compensation)\b"
+    r"|(?<![\-\u00ad\u2010-\u2015])\b(?:adj(?:usted|\.)?|core|comparable|underlying"
+    rf"|normali[sz]ed|pro{_HYPHEN}forma){_LABEL_FOOTNOTE}\s+"
+    rf"(?:(?:diluted|net|operating|per{_HYPHEN}share|after{_HYPHEN}tax)\s+)*"
+    r"(?:eps|earnings(?!\s+before\s+interest)|income(?!\s+tax)|loss(?:es)?|profit|basis)"
+    r"(?![A-Za-z])"
+    r"|\boperating\s+(?:diluted\s+)?eps(?![A-Za-z])"
+    rf"|\boperating\s+(?:earnings|income){_LABEL_FOOTNOTE}\s+"
+    r"(?:of\s+[$(\s]*[\d.,]+\s*\)?\s+)?per\b"
+    r"|\b(?:eps|share|diluted|earnings|income|operations)(?:\d{1,2}|\*+)?"
+    r"[\s,:(\-\u2010-\u2015]*(?:as\s+)?adjusted(?:\d{1,2}|\*+)?(?![A-Za-z0-9])"
+    rf"{_LABEL_END}",
     re.IGNORECASE,
 )
 
 _FOREIGN_CODES = (
-    "EUR|GBP|JPY|CAD|AUD|CHF|CNY|RMB|HKD|INR|KRW|SEK|NOK|DKK|SGD|NZD|MXN|BRL|ILS|TWD|ZAR"
+    "EUR|GBP|JPY|CAD|AUD|CHF|CNY|RMB|HKD|INR|KRW|SEK|NOK|DKK|SGD|NZD|MXN|BRL|ILS|NIS|PLN|TWD|ZAR"
 )
-_SCALE_AFTER_DIGIT = r"(?:\s*(?i:thousand|million|billion|bn|mn)\b)?"
-#: Another currency printed beside a number. Letters touching a "$" are listed, because "US$",
-#: "U.S.$" and a label glued to its figure ("EPS$0.46") are all dollars.
+_FOREIGN_WORDS = (
+    r"euros?|yen|yuan|renminbi|(?:indian\s+)?rupees?|(?:mexican\s+)?pesos?|(?:swiss\s+)?francs?"
+    r"|kron[aeo]r?|zlotys?|shekels?|sterling|british\s+pounds?"
+)
+_FOREIGN_NAMES = f"{_FOREIGN_CODES}|{_FOREIGN_WORDS}"
+_SCALE_AFTER_DIGIT = r"(?:\s*(?:thousand|million|billion|trillion|bn|mn|mm|mil|[kmb])\b)?"
+#: Another currency printed beside a number, or named by a table's header. Letters touching a "$"
+#: are listed, because "US$", "U.S.$" and a label glued to its figure ("EPS$0.46") are all
+#: dollars. A code alone refuses nothing: "CAD software" and "AUD patients" are no money, so it
+#: counts only beside a digit or a scale. The same goes for a bare name, "a weaker euro" being
+#: commentary on a dollar figure, and a singular "Canadian dollar" too.
 _FOREIGN_MONEY_RE = re.compile(
     "[€£¥₹₩₪₽₺₫]"
-    r"|(?<![A-Za-z.])(?:A|AU|C|CA|CAD|CAN|Can|CDN|Cdn|HK|MX|NT|NZ|R|S|SG)\$"
-    rf"|\b(?:{_FOREIGN_CODES})\s?\$?\s?\.?\d"
-    rf"|\d{_SCALE_AFTER_DIGIT}\s*(?:{_FOREIGN_CODES})\b"
-    rf"|\d{_SCALE_AFTER_DIGIT}\s+(?i:euros?|yen|yuan|renminbi|rupees?"
-    r"|(?:canadian|australian|hong\s+kong|singapore)\s+dollars?)\b"
+    r"|(?<![A-Za-z.])(?-i:A|AU|C|CA|CAN|Can|CDN|Cdn|HK|MX|NT|NZ|R|S|SG)\$"
+    r"|(?<![A-Za-z.])(?-i:CDN|Cdn)\.?\s\$"
+    r"|(?<![A-Za-z.])(?<!class\s)(?<!series\s)(?-i:C)\s\$"
+    rf"|\b(?:{_FOREIGN_NAMES})\s?\$?\s?\.?\d"
+    rf"|\d{_SCALE_AFTER_DIGIT}\s*(?:{_FOREIGN_NAMES})\b"
+    rf"|\d{_SCALE_AFTER_DIGIT}\s+pounds?\b(?!\s+of\b)"
+    rf"|\d{_SCALE_AFTER_DIGIT}\s+(?:canadian|australian)\b"
+    r"|\b(?-i:Ps|Rs)\.?\s?\d"
+    r"|\b(?:canadian|australian|hong\s+kong|singapore|new\s+zealand|(?:new\s+)?taiwan)\s+dollars\b"
+    rf"|\bin\s+(?:{_FOREIGN_WORDS})\b"
+    rf"|\(\s*in\s+(?:{_FOREIGN_CODES})\b"
+    rf"|\b(?:{_FOREIGN_NAMES})\s+(?:in\s+)?(?:thousands|millions|billions)\b"
+    rf"|\b(?:thousands|millions|billions)\s+of\s+(?:{_FOREIGN_NAMES})\b",
+    re.IGNORECASE,
 )
+#: What shows a figure is in dollars. Another country's dollars are refused above, so a mark that
+#: gets this far is the US's. The word is plural: "a weak dollar" is commentary.
+_DOLLAR_MARK_RE = re.compile(r"\$|\busd(?![A-Za-z])|\bdollars\b", re.IGNORECASE)
 
 
 def _quote_ok(quote: Any, text: str, normalized: str) -> bool:
@@ -668,20 +777,32 @@ def verify_extraction(
     accession: str,
     accepted_at: Optional[datetime],
     url: Optional[str],
+    release_text: Optional[str] = None,
 ) -> Tuple[Optional[FilingFigures], Dict[str, str]]:
     """PURE. Gemini's answer → the figures that survive verification, plus a reason per field.
 
-    A figure survives only when its quote is a verbatim span of `text` printing no other
-    currency AND the value rounds to the number that quote prints (`revenue_from_quote` /
-    `eps_from_quote`), and that printed number is what is kept. An adjusted EPS must also
-    name its measure in its quote. A figure that does not stays out of `eps_gaap` too: an
-    unmarked table row may be a real non-GAAP figure, so calling it GAAP would be a guess, and
-    the EPS shows GAAP only if the GAAP figure verified on its own.
+    `text` is what the model read, and every quote must be a span of it. `release_text` is the
+    whole release when that was cut, for the one check that reads the release itself
+    (`_reads_as_whole_dollars`): a scale header sits wherever the tables do.
 
-    The reasons (`ok` / `no_quote` / `not_verbatim` / `foreign_currency` / `value_mismatch` /
-    `not_adjusted` / `absent`) are what the log line reports — never the release text. A
-    currency that is not USD, a blank one included, drops the whole answer: nothing else says
-    what the figures are in.
+    A figure survives only when its quote is a verbatim span of `text` that shows dollars and
+    prints no other currency, AND the value rounds to the number that quote prints
+    (`_revenue_print` / `_eps_print`), and that printed number is what is kept. An adjusted EPS
+    must also name its measure in its quote. A figure that does not stays out of `eps_gaap`
+    too: an unmarked table row may be a real non-GAAP figure, so calling it GAAP would be a
+    guess, and the EPS shows GAAP only if the GAAP figure verified on its own.
+
+    The dollar mark is what the list of other currencies cannot be: complete. A figure with
+    none shows nothing a "$" on the card could rest on, so one foreign field leaves a sibling
+    with no mark of its own refused too, while a sibling printed in dollars stands: a US
+    company can quote a euro note beside its results.
+
+    The reasons (`ok` / `no_quote` / `not_verbatim` / `foreign_currency` / `no_dollar_mark` /
+    `value_mismatch` / `not_adjusted` / `absent`) are what the log line reports — never the
+    release text. A currency that is not USD, a blank one included, drops the whole answer:
+    nothing else says what the figures are in. Residual: a release whose only currency words
+    sit outside every quote ("all amounts in Canadian dollars" above a "$" table) depends on
+    the model's `currency`.
     """
     reasons: Dict[str, str] = {}
     if not isinstance(answer, Mapping):
@@ -709,29 +830,36 @@ def verify_extraction(
             return None
         return node
 
+    def _figure(name: str) -> Optional[Mapping[str, Any]]:
+        node = _field(name)
+        if node is not None and _DOLLAR_MARK_RE.search(node["quote"]) is None:
+            reasons[name] = "no_dollar_mark"
+            return None
+        return node
+
     revenue = revenue_rounding = None
-    node = _field("revenue")
+    node = _figure("revenue")
     if node is not None:
         printed = _revenue_print(node["quote"], node.get("value"), node.get("unit"),
-                                 release_text=text)
+                                 release_text=text if release_text is None else release_text)
         if printed is not None:
             revenue, revenue_rounding = printed
         reasons["revenue"] = "ok" if printed is not None else "value_mismatch"
 
-    eps_adj = None
-    node = _field("eps_adjusted_diluted")
+    eps_adj = eps_rounding = None
+    node = _figure("eps_adjusted_diluted")
     if node is not None:
-        eps_adj = eps_from_quote(node["quote"], node.get("value"))
-        if eps_adj is None:
+        printed = _eps_print(node["quote"], node.get("value"))
+        if printed is None:
             reasons["eps_adjusted_diluted"] = "value_mismatch"
         elif _ADJUSTED_MEASURE_RE.search(node["quote"]) is None:
-            eps_adj = None
             reasons["eps_adjusted_diluted"] = "not_adjusted"
         else:
+            eps_adj, eps_rounding = printed
             reasons["eps_adjusted_diluted"] = "ok"
 
     eps_gaap = None
-    node = _field("eps_gaap_diluted")
+    node = _figure("eps_gaap_diluted")
     if node is not None:
         eps_gaap = eps_from_quote(node["quote"], node.get("value"))
         reasons["eps_gaap_diluted"] = "ok" if eps_gaap is not None else "value_mismatch"
@@ -745,6 +873,8 @@ def verify_extraction(
             reasons["guidance"] = "not_verbatim"
         elif _FOREIGN_MONEY_RE.search(g_quote):
             reasons["guidance"] = "foreign_currency"
+        elif "$" in g_text and _DOLLAR_MARK_RE.search(g_quote) is None:
+            reasons["guidance"] = "no_dollar_mark"
         elif not _guidance_numbers_grounded(g_text, g_quote):
             reasons["guidance"] = "value_mismatch"
         else:
@@ -759,6 +889,7 @@ def verify_extraction(
         accession=accession, accepted_at=accepted_at, url=url,
         revenue=revenue, eps_adjusted=eps_adj, eps_gaap=eps_gaap,
         fiscal_period=period, guidance=guidance, revenue_rounding=revenue_rounding,
+        eps_rounding=eps_rounding,
     )
     return (figures if figures.has_figures or guidance else None), reasons
 
@@ -995,7 +1126,8 @@ class EarningsFilingWatcher:
         """(figures or None, whether that outcome is final for this accession).
 
         SEC errors propagate (the caller retries on the next due round); a Gemini failure is
-        NOT final; everything that verification decided is.
+        NOT final; everything that verification decided is, a raise included: it is pure, so
+        the same text raises again, and every retry would pay for another model call.
         """
         acc = filing.accession
         url = filing_index_url(cik, acc)
@@ -1007,11 +1139,17 @@ class EarningsFilingWatcher:
             return None, True
         await sleep(_CALL_SPACING_SECONDS)
         raw = await client.get_filing_document(cik, acc, document)
-        text = html_to_text(raw or "", document=document, max_chars=_EXTRACT_TEXT_CHARS,
-                            log_tag="earnings-live")
-        if not text:
+        release = html_to_text(raw or "", document=document, max_chars=None,
+                               log_tag="earnings-live")
+        if not release:
             logger.info("EARNINGS_LIVE_FILING sym=%s acc=%s result=empty_exhibit", symbol, acc)
             return None, True
+        text = release[:_EXTRACT_TEXT_CHARS]
+        if len(release) > len(text):
+            logger.info(
+                "[earnings-live-text-capped] sym=%s acc=%s %d chars cut to %d for the model",
+                symbol, acc, len(release), len(text),
+            )
         model = gemini
         if model is None:
             from app.integrations.gemini import get_gemini_client
@@ -1036,9 +1174,18 @@ class EarningsFilingWatcher:
                 symbol, acc, type(e).__name__,
             )
             return None, False
-        figures, reasons = verify_extraction(
-            unwrap_json(answer), text, accession=acc, accepted_at=filing.accepted_at, url=url,
-        )
+        try:
+            # On a thread: it can scan a whole release, and a long one takes a noticeable time.
+            figures, reasons = await asyncio.to_thread(
+                verify_extraction, unwrap_json(answer), text, accession=acc,
+                accepted_at=filing.accepted_at, url=url, release_text=release,
+            )
+        except Exception as e:
+            logger.exception(
+                "EARNINGS_LIVE_FILING sym=%s day=%s acc=%s result=verify_failed (%s: %s)",
+                symbol, report_day.isoformat(), acc, type(e).__name__, e,
+            )
+            return None, True
         accepted = (
             filing.accepted_at.astimezone(ET).strftime("%H:%M ET") if filing.accepted_at else "?"
         )

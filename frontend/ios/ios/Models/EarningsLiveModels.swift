@@ -66,13 +66,15 @@ struct EarningsMetricOutcome: Equatable {
     var hasLanded: Bool { actual != nil }
 
     /// `.pending` until the figure lands. `.noEstimate` when there is nothing comparable —
-    /// no consensus, a GAAP figure against an adjusted one, or a figure from the company's
-    /// release the server sent with no surprise, because the consensus sits inside its
-    /// rounding ("$17.1B" against $17.08B). FMP's exact figure settles that one.
+    /// no consensus, a GAAP figure against an adjusted one, or a figure the server sent with
+    /// no surprise: it judges every figure, and that is its answer for a release print whose
+    /// rounding covers the consensus ("$17.1B" against $17.08B, which FMP's exact figure
+    /// settles) and for a consensus under a cent. Read here, not from the raw values, so the
+    /// card, the sheet and the push give one verdict. A surprise of 0.0 is an answer.
     var result: EarningsQuarterResult {
         guard let actual else { return .pending }
         guard !isGAAP, let estimate else { return .noEstimate }
-        if isPreliminary, surprisePct == nil { return .noEstimate }
+        if surprisePct == nil { return .noEstimate }
         if actual > estimate { return .beat }
         if actual < estimate { return .missed }
         return .matched

@@ -174,16 +174,30 @@ def test_the_consensus_formatting_defects_stay_fixed():
     assert 'String(format: "$%.1fM", v / 1_000_000)' in fmt
 
 
-def test_a_filing_figure_the_server_gave_no_verdict_is_never_coloured():
-    """A figure from the company's release that prints no finer than the consensus reaches the
-    device with no surprise. Comparing the two raw values would paint a beat the print cannot
-    show. FMP's own figures are left to the comparison: a beat that rounds to 0.00 stays a beat."""
+def test_a_figure_the_server_gave_no_verdict_is_never_coloured():
+    """A figure with no surprise beside its consensus is one the server refused to judge: a
+    filing's print that covers the consensus, or a consensus under a cent. Comparing the raw
+    values would paint a verdict the card, the sheet and the push cannot share: the card only
+    has the report-wide preliminary flag, so the rule reads the server's answer and no source.
+    A surprise of 0.0 IS an answer, so a beat that rounds to 0.00 stays a beat."""
     block = _struct_block(_code(_MODELS), "EarningsMetricOutcome")
     body = block[block.index("var result: EarningsQuarterResult"):block.index("var color: Color")]
-    rule = "if isPreliminary, surprisePct == nil { return .noEstimate }"
+    rule = "if surprisePct == nil { return .noEstimate }"
     assert body.index("guard !isGAAP, let estimate else") < body.index(rule)
     assert body.index(rule) < body.index("actual > estimate")
     assert "surprisePct == 0" not in body
+    assert "isPreliminary" not in body, "the card and the sheet pass this flag differently"
+
+
+def test_the_colour_word_and_arrow_all_come_from_the_one_verdict():
+    block = _struct_block(_code(_MODELS), "EarningsMetricOutcome")
+    for name, end in (("var color: Color", "var word: String?"),
+                      ("var word: String?", "var surpriseText: String?"),
+                      ("var arrowSymbol: String?", None)):
+        start = block.index(name)
+        body = block[start: block.index(end) if end else len(block)]
+        assert "switch result {" in body, f"{name} works its own verdict out"
+        assert "actual" not in body and "estimate" not in body, f"{name} compares raw figures"
 
 
 def test_the_poll_keeps_running_for_a_live_card_after_twenty_et():

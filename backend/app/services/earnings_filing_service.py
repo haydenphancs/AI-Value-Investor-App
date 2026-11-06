@@ -43,6 +43,8 @@ a new process takes it back (`restore`, from `EarningsLiveService.restore_filing
 read once is not read again. Only a filing that gave nothing is read a second time, any filing a
 failed write left out of the table or a failed read of it left unrestored, and one another
 verifier kept (`FILING_VERIFIER_VERSION`), which is how a fix here reaches a filing already held.
+Each of those only while its report is today's, still pending, and the watch is open (06:00–22:00
+ET), and after 22:00 ET it waits for FMP like any other.
 """
 
 from __future__ import annotations
@@ -912,8 +914,10 @@ def unwrap_json(raw: Any) -> Any:
 #: never replaces, would stay for its live days. Move it by one with every change to what
 #: `verify_extraction` keeps, or to anything it reads (a test pins the two together:
 #: test_the_verifier_cannot_change_without_its_version_moving), and with any change to `_SYSTEM`
-#: that should reach the filings held. That deploy reads today's pending filings once more; a
-#: restart without one reads nothing.
+#: that should reach the filings held. That deploy reads today's pending filings once more while
+#: the SEC watch is open (06:00–22:00 ET), and after 22:00 ET they wait for FMP like any other: no
+#: figure until FMP fills, no outlook or link at all. A restart without one reads no filing the
+#: table gives back.
 FILING_VERIFIER_VERSION = 1
 
 

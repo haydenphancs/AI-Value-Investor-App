@@ -14,9 +14,9 @@ TWO SOURCES, ONE RECORD PER (symbol, report date).
   * The company's own 8-K Item 2.02 press release (`earnings_filing_service`): minutes after
     the release, every figure a verbatim quote. PRELIMINARY until FMP has the same metric.
   A record is STICKY: a figure, once verified, never goes back to "not out yet" (only an FMP
-  zero does, GUARDS below), a restart included (A RESTART below), and FMP's figure replaces the
-  filing's the moment FMP has one that passes the guards, unless the filing outranks it
-  (`_filing_outranks_fmp`).
+  zero does, GUARDS below), a restart included unless the table cannot give the filing back (A
+  RESTART below), and FMP's figure replaces the filing's the moment FMP has one that passes the
+  guards, unless the filing outranks it (`_filing_outranks_fmp`).
   Between two FMP answers the NEWEST wins. The Tracking memo can be 30 min behind this
   module's own fetch, so a memo row older than the record's last own fetch is skipped whole at
   all three folds (the tick, the card, the sheet): no reader can put an older answer back over
@@ -143,7 +143,7 @@ may still have no figures, and it never has the outlook or the link. So each fil
 it is on its record (`keep_filing`), best effort, and the first thing either tick does in a new
 process is take back what the table holds for the live days (`restore_filings`).
   * Once per process, and before anything decides, so the filing tick cannot read a filing the
-    table holds, and whichever tick comes second joins the same read.
+    table gives back, and whichever tick comes second joins the same read.
   * A restored figure is never a landing, and FMP's fill on it after a restart is none either
     (`restore_filing`). The daily pass is the net for `earnings_result`, as for any report first
     seen reported. `earnings_live` has no such net, so a filing read in the minute before a
@@ -153,13 +153,15 @@ process is take back what the table holds for the live days (`restore_filings`).
   * A row is trusted only by the verifier that kept it (`FILING_VERIFIER_VERSION`), or the deploy
     that fixes a misread would restore it, with nothing on the row to tell it from a good one.
     One of another version is no row, so that one deploy costs what a restart cost before the
-    table: a report of today still pending has its filing read once more, and any other goes
-    without it until FMP fills, its outlook and link for good.
+    table: a report of today still pending has its filing read once more while the SEC watch is
+    open (06:00–22:00 ET), and after 22:00 ET it waits for FMP like any other: no figure until
+    FMP fills, no outlook or link at all.
   * A failed read, or a table not there yet, is a WARNING and a retry every
-    `_FAILURE_RETRY_SECONDS`, and until then a restart is what it was before this table: a filing
-    of today's is read again, one of a day before today waits for FMP. Code can deploy before the
-    owner applies the migration. `EARNINGS_LIVE_FILINGS_ENABLED` off restores nothing, so that
-    switch still takes the figures away.
+    `_FAILURE_RETRY_SECONDS`, and until then a restart is what it was before this table: a report
+    of today still pending has its filing read again while the SEC watch is open (06:00–22:00
+    ET), and after 22:00 ET it waits for FMP like any other. Code can deploy before the owner
+    applies the migration. `EARNINGS_LIVE_FILINGS_ENABLED` off restores nothing, so that switch
+    still takes the figures away.
   * In the first seconds after boot, before the first tick, a card reads what it always did.
 
 STATUSES (no time of day exists on `/stable` rows, so the window is the report day):

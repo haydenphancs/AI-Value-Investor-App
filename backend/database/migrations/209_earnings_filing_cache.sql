@@ -13,18 +13,21 @@
 -- One row per (symbol, report_date), written by `earnings_live_service` the moment a verified
 -- filing is on its record, and read back once per process, by whichever live tick runs first,
 -- for the live days only (`live_days`: the previous trading day through today, weekends and
--- holidays included). A restored filing is not read again, so a restart costs SEC and Gemini
--- nothing, and a restored figure is never a landing, so a restart announces nothing.
+-- holidays included). A restored filing is not read again, so it costs SEC and Gemini nothing,
+-- and a restored figure is never a landing, so it announces nothing.
 --
 -- A row is trusted only by the verifier that kept it. `verifier_version` holds
 -- `earnings_filing_service.FILING_VERIFIER_VERSION`, moved with every change to the verifier, and
--- a row of another version reads as no row. Before this table a same-day deploy read the filing
--- again with the fixed code. With the table alone a misread would outlive its fix: restored
--- with no read and nothing on the row to tell it from a good one, a false figure until FMP fills
--- and a false outlook, which FMP never replaces, for all its live days. So the one deploy that
--- moves the version costs what any restart cost before: a report of today still pending has its
--- filing read once more, and any other goes without it until FMP fills. Any other restart reads
--- nothing. A row wrong for a reason no verifier change covers needs a hand, then a restart:
+-- a row of another version reads as no row. Before this table a deploy during the SEC watch read
+-- that day's pending filings again with the fixed code. With the table alone a misread would
+-- outlive its fix: restored with no read and nothing on the row to tell it from a good one, a
+-- false figure until FMP fills and a false outlook, which FMP never replaces, for all its live
+-- days. So the one deploy that moves the version costs what any restart cost before: a report of
+-- today still pending has its filing read once more while the SEC watch is open (06:00-22:00 ET),
+-- and after 22:00 ET it waits for FMP like any other: no figure until FMP fills, no outlook or
+-- link at all. Any other restart reads no filing the table gives back. One with no row, because
+-- it gave nothing or a write failed, is read again by each new process, on the same terms. A row
+-- wrong for a reason no verifier change covers needs a hand, then a restart:
 --   DELETE FROM public.earnings_filing_cache WHERE symbol = 'XYZ' AND report_date = 'YYYY-MM-DD';
 --
 -- Holds ONLY what the company's own release said: each figure is the number printed in the SEC
@@ -39,7 +42,7 @@
 -- No clean-up job, on purpose. The tables that have one are a different case: ticker_news_cache
 -- holds licensed third-party news text, and news_sentiment_log, search_pick_daily and
 -- social_mentions_history gain rows per article or per ticker every day. This one holds public
--- SEC facts and gains one row per filing actually read, at most one per watched report: the
+-- SEC facts and gains one row per filing actually read, one per (symbol, report date): the
 -- watched list is clamped at 1,000 tickers and each reports 4 times a year, so about 4,000 rows
 -- a year at the very worst, each under 1 KB. EARNINGS_LIVE_SEC_MAX_SYMBOLS (25) does not bound
 -- this: it limits a round, and a report with its figures in leaves the list for the next one.
@@ -121,7 +124,7 @@ COMMENT ON COLUMN public.earnings_filing_cache.accession IS
     'read again.';
 COMMENT ON COLUMN public.earnings_filing_cache.verifier_version IS
     'earnings_filing_service.FILING_VERIFIER_VERSION when the row was kept. A row of another '
-    'version reads as no row, so a fix to the verifier reaches a filing the table holds.';
+    'version reads as no row, so what an older verifier kept never comes back after a fix.';
 COMMENT ON COLUMN public.earnings_filing_cache.accepted_at IS
     'When EDGAR accepted the filing. NULL when SEC gave no readable time.';
 COMMENT ON COLUMN public.earnings_filing_cache.url IS

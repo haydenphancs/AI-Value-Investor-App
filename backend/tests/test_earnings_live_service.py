@@ -52,7 +52,7 @@ What is pinned here, each a way the LIVE card could lie or cost too much:
   * a restart keeps what only a filing says: the figures of every live day, the outlook and the
     link, each exactly as verified, restored once per process before a tick decides anything,
     never as a landing, and a table that fails or is not there yet leaves the old behaviour;
-  * a row another verifier wrote is no row, so a verifier fix reaches what the table holds.
+  * a row another verifier wrote is no row, so what it kept never comes back after a fix.
 Hermetic: inline fakes for FMP, SEC, the dispatcher and `earnings_filing_cache`; the clock is
 passed in.
 """

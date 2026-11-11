@@ -17,6 +17,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
+from app.services.earnings_live_service import eps_is_unfilled
 from app.services.notification_kinds import KIND_CONGRESS_TRADE, KIND_WHALE_13F
 from app.services.notification_senders.earnings_sender import (
     MIN_SURPRISE,
@@ -192,6 +193,63 @@ def test_the_result_window_is_calendar_days_not_trading_days():
     monday, friday, sunday = date(2026, 11, 9), date(2026, 11, 6), date(2026, 11, 8)
     assert not in_result_window(friday, monday), "Friday is the previous trading day, not yesterday"
     assert in_result_window(sunday, monday)
+
+
+def _with_revenue(row, rev, rev_est):
+    return {**row, "revenueActual": rev, "revenueEstimated": rev_est}
+
+
+@pytest.mark.parametrize("rev,rev_est", [
+    (0, 16.6e9), (-5e6, 16.6e9), (0, None), (0, 0), (0, 100e6),
+], ids=["zero", "negative", "no_consensus", "zero_consensus", "at_the_floor"])
+@pytest.mark.parametrize("est", [0.41, -0.30], ids=["read_as_a_miss", "read_as_a_beat"])
+def test_an_eps_of_zero_beside_a_refused_revenue_is_no_result(rev, rev_est, est):
+    """FMP's unfilled shape. A row with nothing in it must not go out as "missed by 100%"."""
+    row = _with_revenue(_cal(when=TODAY, est=est, act=0), rev, rev_est)
+    assert surprise_pct(row) in (-1.0, 1.0), "the arithmetic alone would send it"
+    assert select_results([row], TODAY) == []
+
+
+@pytest.mark.parametrize("act,est,rev,rev_est,surprise", [
+    (0, -0.02, 0, 30e6, 1.0),               # a pre-revenue name can report exactly nothing
+    (0, -0.02, 0, 99.9e6, 1.0),             # the fold's own floor
+    (0, -0.02, 17.1e9, 16.6e9, 1.0),        # a real breakeven beside a real revenue
+    (0, 0.41, None, 16.6e9, -1.0),          # with no revenue on the row it is one too
+    (0.60, 0.41, 0, 16.6e9, 0.4634),        # an unfilled revenue says nothing about the EPS
+    (0.60, 0.41, None, None, 0.4634),
+], ids=["tiny_consensus", "under_the_floor", "real_revenue", "no_revenue", "real_eps",
+        "plain_row"])
+def test_every_other_row_still_sends_as_it_did(act, est, rev, rev_est, surprise):
+    row = _with_revenue(_cal(when=TODAY, est=est, act=act), rev, rev_est)
+    (picked,) = select_results([row], TODAY)
+    assert picked[:2] == ("AAPL", TODAY.isoformat())
+    assert picked[2] == pytest.approx(surprise, abs=1e-4)
+
+
+@pytest.mark.parametrize("zero_first", [True, False])
+def test_an_unfilled_row_leaves_its_reported_twin_to_speak(zero_first):
+    zero = _with_revenue(_cal(when=TODAY, est=0.41, act=0), 0, 16.6e9)
+    real = _with_revenue(_cal(when=TODAY, est=0.41, act=0.60), 17.1e9, 16.6e9)
+    (picked,) = select_results([zero, real] if zero_first else [real, zero], TODAY)
+    assert picked[2] == pytest.approx(0.4634, abs=1e-4)
+
+
+def test_the_legacy_eps_key_is_read_the_same_way():
+    row = {"symbol": "AAPL", "date": TODAY.isoformat(), "epsEstimated": 0.41, "eps": 0,
+           "revenueActual": 0, "revenueEstimated": 16.6e9}
+    assert select_results([row], TODAY) == []
+
+
+def test_a_row_with_no_eps_is_not_an_unfilled_eps():
+    assert not eps_is_unfilled(None, {"revenueActual": 0, "revenueEstimated": 16.6e9})
+
+
+def test_an_unfilled_row_is_logged_with_its_symbol_and_day(caplog):
+    row = _with_revenue(_cal(when=TODAY, est=0.41, act=0), 0, 16.6e9)
+    with caplog.at_level("WARNING", logger="app.services.notification_senders.earnings_sender"):
+        select_results([row], TODAY)
+    (line,) = [r.getMessage() for r in caplog.records]
+    assert "AAPL" in line and TODAY.isoformat() in line
 
 
 def test_a_row_with_no_actual_yet_is_not_a_result():

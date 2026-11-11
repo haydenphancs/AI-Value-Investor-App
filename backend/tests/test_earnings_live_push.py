@@ -17,6 +17,11 @@ kinds — and the daily 16:00 ET sender — claim the SAME key. What is pinned h
     holds back nobody;
   * neither kind goes out for a report older than yesterday, the daily pass's own window, and
     such a report is handled once, for good;
+  * the daily pass keeps the EPS the live path keeps, so a row the fold reads as unfilled never
+    goes out at 16:00 ET either;
+  * a row of zeros shown to be unfilled sends no false miss, whatever FMP fills next, and a
+    report left with nothing on show sends nothing at all;
+  * a digit off a consensus straddling the guard's floor is never announced as a -90% miss;
   * a round sends oldest first, so the cap cannot run a report out of that window;
   * the round cap's warning counts the reports still owed a push, nothing else;
   * one report on two dated rows is told once to each user, whichever source fills which row
@@ -50,6 +55,7 @@ import app.services.notification_senders.earnings_sender as daily
 import app.services.push_dispatch_service as pds
 import app.services.tracking_service as ts
 from app.config import settings
+from app.services.earnings_filing_service import FilingFigures
 from app.services.earnings_live_service import (
     BASIS_ADJUSTED,
     BASIS_GAAP,
@@ -229,6 +235,185 @@ async def test_a_row_with_both_actuals_at_zero_pushes_nothing(dispatch):
     live.observe_rows(REPORT, [_row(epsActual=0, revenueActual=0)], NOW)
     await sender.dispatch_landings(live.landed_snapshots(NOW), NOW)
     assert dispatch.sent == []
+
+
+def _revenue_phrase(rec: els._Record) -> str:
+    snap = els.snapshot_of(rec, REPORT, datetime(2026, 10, 29, 17, 0, tzinfo=ET))
+    return sender.live_copy(snap)[1].split(" · ")[0]
+
+
+def _filed_revenue(value: float) -> FilingFigures:
+    return FilingFigures(accession="0000050863-26-000123", accepted_at=None, url=None,
+                         revenue=value)
+
+
+def test_a_figure_shown_on_agreement_is_announced_with_no_percentage():
+    """+918% against a dropped-digit consensus is the worst place to print it."""
+    rec = els._Record("INTC", REPORT, eps_estimate=0.41, revenue_estimate=1.66e9, fmp_eps=0.44,
+                      fmp_revenue=16.9e9, filing=_filed_revenue(16.9e9))
+    assert _revenue_phrase(rec) == "Revenue reported"
+
+
+def test_a_held_fmp_revenue_announces_the_companys_own_figure():
+    rec = els._Record("INTC", REPORT, eps_estimate=0.41, revenue_estimate=16.6e9, fmp_eps=0.44,
+                      fmp_revenue=1.69e9, filing=_filed_revenue(16.9e9))
+    assert _revenue_phrase(rec) == "Revenue $16.9B (beat consensus by 2%)"
+
+
+def test_a_zero_revenue_past_a_material_consensus_is_never_announced_as_a_miss():
+    rec = els._Record("JOBY", REPORT, eps_estimate=-0.2, revenue_estimate=30e6,
+                      revenue_guard_estimate=16.6e9, fmp_eps=-0.2, fmp_revenue=0.0)
+    assert _revenue_phrase(rec) == "Revenue being confirmed"
+
+
+def test_a_figure_far_off_a_consensus_that_lost_a_digit_is_announced_with_no_percentage():
+    """A x10 slip stays under the 1,000% the copy hides, so it used to read "beat by 911%"."""
+    rec = els._Record("TINY", REPORT, eps_estimate=0.41, revenue_estimate=95e6, fmp_eps=0.44,
+                      fmp_revenue=961e6, filing=_filed_revenue(960e6))
+    assert _revenue_phrase(rec) == "Revenue reported"
+    rec = els._Record("TINY", REPORT, eps_estimate=0.41, revenue_estimate=95e6, fmp_eps=0.44,
+                      filing=_filed_revenue(960e6))
+    assert "beat" in _revenue_phrase(rec), "one source alone keeps its percentage"
+
+
+def test_a_filing_past_fmps_dropped_digit_is_announced_as_the_companys_figure():
+    rec = els._Record("TINY", REPORT, eps_estimate=0.41, revenue_estimate=50e6, fmp_eps=0.44,
+                      fmp_revenue=5.2e6, filing=_filed_revenue(52e6))
+    assert _revenue_phrase(rec) == "Revenue $52.0M (beat consensus by 4%)"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("zeros_first", [False, True], ids=["the_filing_first", "the_row_first"])
+async def test_a_row_of_zeros_beside_a_filing_sends_no_false_miss(dispatch, monkeypatch,
+                                                                  zeros_first):
+    """With the default switches this was the only push the report sent: "EPS missed consensus
+    by 100%", over the $0.44 the company printed."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+
+    def _row(**kw):
+        return {"symbol": "JOBY", "date": REPORT.isoformat(), "epsEstimated": 0.41,
+                "revenueEstimated": 30e6, **kw}
+
+    filing = FilingFigures(accession="0001628280-26-000128", accepted_at=None, url=None,
+                           revenue=33e6, eps_adjusted=0.44)
+    zeros = _row(epsActual=0, revenueActual=0)
+    live = EarningsLiveService()
+    live.observe_rows(REPORT, [_row()], datetime(2026, 10, 29, 13, 0, tzinfo=timezone.utc))
+    if zeros_first:
+        live.observe_rows(REPORT, [zeros], NOW)
+    live.absorb_filing("JOBY", REPORT, filing, NOW)
+    live.observe_rows(REPORT, [zeros], NOW)
+    (snap,) = live.landed_snapshots(NOW)
+    assert (snap.eps.actual, snap.eps.source) == (0.44, SOURCE_FILING)
+    await sender.dispatch_landings([snap], NOW)
+    assert dispatch.sent == [], "the result push waits for FMP's own figure"
+
+
+@pytest.mark.asyncio
+async def test_a_stored_zero_taken_off_leaves_no_push_with_nothing_to_report(dispatch):
+    def _row(**kw):
+        return {"symbol": "JOBY", "date": REPORT.isoformat(), **kw}
+
+    live = EarningsLiveService()
+    live.observe_rows(REPORT, [_row(revenueEstimated=30e6)],
+                      datetime(2026, 10, 29, 13, 0, tzinfo=timezone.utc))
+    live.observe_rows(REPORT, [_row(revenueEstimated=30e6, revenueActual=0)], NOW)
+    live.observe_rows(REPORT, [_row(revenueEstimated=16.6e9)], NOW)
+    await sender.dispatch_landings(live.landed_snapshots(NOW), NOW)
+    assert dispatch.sent == []
+
+
+def _joby(**kw) -> Dict[str, Any]:
+    return {"symbol": "JOBY", "date": REPORT.isoformat(), "epsEstimated": 0.41,
+            "revenueEstimated": 30e6, **kw}
+
+
+_MORNING = datetime(2026, 10, 29, 19, 0, tzinfo=timezone.utc)
+_ZEROS_AT = datetime(2026, 10, 29, 20, 4, 30, tzinfo=timezone.utc)
+_FILED_AT = datetime(2026, 10, 29, 20, 4, 40, tzinfo=timezone.utc)
+_FILLED_AT = datetime(2026, 10, 29, 20, 40, tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("zeros_first", [False, True], ids=["the_filing_first", "the_row_first"])
+async def test_a_revenue_fill_after_a_row_of_zeros_sends_no_false_miss(dispatch, monkeypatch,
+                                                                       zeros_first):
+    """Default switches, the real folds and the real send: "EPS missed consensus by 100%" went
+    out at 16:40 over the $0.44 on show since 16:05, once FMP filled the revenue alone."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+    filing = FilingFigures(accession="0001628280-26-000130", accepted_at=None, url=None,
+                           revenue=33e6, eps_adjusted=0.44)
+    live = EarningsLiveService()
+    live.observe_rows(REPORT, [_joby()], _MORNING)
+    if zeros_first:
+        live.observe_rows(REPORT, [_joby(epsActual=0, revenueActual=0)], _ZEROS_AT)
+    live.absorb_filing("JOBY", REPORT, filing, _FILED_AT)
+    if not zeros_first:
+        live.observe_rows(REPORT, [_joby(epsActual=0, revenueActual=0)], _FILED_AT)
+    live.observe_rows(REPORT, [_joby(revenueActual=33.2e6)], _FILLED_AT)
+    (snap,) = live.landed_snapshots(_FILLED_AT)
+    assert (snap.eps.actual, snap.eps.source) == (0.44, SOURCE_FILING)
+    await sender.dispatch_landings([snap], _FILLED_AT)
+    assert dispatch.sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_material_consensus_then_a_revenue_fill_sends_no_false_miss(dispatch, monkeypatch):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+    live = EarningsLiveService()
+    live.observe_rows(REPORT, [_joby()], _MORNING)
+    live.observe_rows(REPORT, [_joby(epsActual=0, revenueActual=0)], _ZEROS_AT)
+    live.observe_rows(REPORT, [_joby(revenueEstimated=16.6e9)], _FILED_AT)
+    live.observe_rows(REPORT, [_joby(revenueActual=16.9e9, revenueEstimated=16.6e9)], _FILLED_AT)
+    (snap,) = live.landed_snapshots(_FILLED_AT)
+    assert snap.eps.actual is None
+    await sender.dispatch_landings([snap], _FILLED_AT)
+    assert dispatch.sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_fill_with_no_other_evidence_sends_no_false_miss_either(dispatch, monkeypatch):
+    """The fill alone proves it: a report with a real revenue had no real $0 row."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
+    live = EarningsLiveService()
+    live.observe_rows(REPORT, [_joby()], _MORNING)
+    live.observe_rows(REPORT, [_joby(epsActual=0, revenueActual=0)], _ZEROS_AT)
+    live.observe_rows(REPORT, [_joby(revenueActual=33.2e6)], _FILLED_AT)
+    await sender.dispatch_landings(live.landed_snapshots(_FILLED_AT), _FILLED_AT)
+    assert dispatch.sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_digit_off_a_consensus_on_the_floor_is_announced_as_being_confirmed(dispatch):
+    """The real folds and the real send: "Revenue missed consensus by 90%" went out here."""
+    def _row(**kw):
+        return {"symbol": "ABCD", "date": REPORT.isoformat(), "epsEstimated": 0.41, **kw}
+
+    live = EarningsLiveService()
+    live.observe_rows(REPORT, [_row(revenueEstimated=99e6)], _MORNING)
+    live.observe_rows(REPORT, [_row(epsActual=0.44, revenueActual=9.9e6, revenueEstimated=99e6),
+                               _row(revenueEstimated=101e6)], NOW)
+    await sender.dispatch_landings(live.landed_snapshots(NOW), NOW)
+    (live_push,) = [s for s in dispatch.sent if s["kind"] == KIND_EARNINGS_LIVE]
+    assert live_push["body"] == "Revenue being confirmed · EPS beat consensus by 7%."
+
+
+# ── the daily pass reads an EPS of zero as the live path does ────────────────
+
+
+@pytest.mark.parametrize("eps,rev,rev_est", [
+    (0, 0, 16.6e9), (0, -5e6, 16.6e9), (0, 0, None), (0, 0, 0), (0, 0, 100e6),
+    (0, 0, 99.9e6), (0, 0, 30e6), (0, 17.1e9, 16.6e9), (0, None, 16.6e9), (0.60, 0, 16.6e9),
+])
+def test_the_daily_pass_and_the_live_path_keep_the_same_eps(eps, rev, rev_est):
+    """One rule, not a copy of it: what the fold refuses never reaches the 16:00 ET banner, and
+    what it keeps is still told."""
+    row = {"symbol": "INTC", "date": REPORT.isoformat(), "epsEstimated": 0.41, "epsActual": eps,
+           "revenueActual": rev, "revenueEstimated": rev_est}
+    live = EarningsLiveService()
+    live.observe_rows(REPORT, [row], NOW)
+    kept = live.snapshot("INTC", REPORT, NOW).eps.actual
+    assert bool(daily.select_results([row], REPORT)) == (kept is not None)
 
 
 # ── the round cap ────────────────────────────────────────────────────────────

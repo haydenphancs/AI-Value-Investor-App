@@ -70,6 +70,16 @@ A filing out of attempts is left like a NOT_RELEASE: nobody knows what it was, s
 the watch. Filings are walked newest first, past those two, so a newer Item 2.02 that is not the
 release never hides an older one that is. SEC's own throttle and outage errors say nothing about
 a filing either: they spend no attempt.
+
+Foreign private issuers furnish results on 6-K, not 8-K; they stay FMP-only.
+
+A RESTART. The watch is per process, but what a read verified goes to `earnings_filing_cache` and
+a new process takes it back (`restore`, from `EarningsLiveService.restore_filings`), so a filing
+read once is not read again. Only a filing that gave nothing is read a second time, any filing a
+failed write left out of the table or a failed read of it left unrestored, and one another
+verifier kept (`FILING_VERIFIER_VERSION`), which is how a fix here reaches a filing already held.
+Each of those only while its report is today's, still pending, and the watch is open (06:00–22:00
+ET), and after 22:00 ET it waits for FMP like any other.
 """
 
 from __future__ import annotations
@@ -85,7 +95,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from html import unescape
 from html.parser import HTMLParser
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from app.config import settings
 from app.integrations.gemini import _is_clean_finish
@@ -1280,6 +1290,20 @@ def unwrap_json(raw: Any) -> Any:
         return None
 
 
+#: Which verifier kept a stored filing. Every `earnings_filing_cache` row carries it, and a row of
+#: another version reads as no row (`earnings_live_service.held_filing_from`). A fix here cannot
+#: reach a figure the table holds, and nothing on a row tells a misread from a good one, so
+#: without this the deploy that fixes a misread would restore it, and a false outlook, which FMP
+#: never replaces, would stay for its live days. Move it by one with every change to what
+#: `verify_extraction` keeps, or to anything it reads (a test pins the two together:
+#: test_the_verifier_cannot_change_without_its_version_moving), and with any change to `_SYSTEM`
+#: that should reach the filings held. That deploy reads today's pending filings once more while
+#: the SEC watch is open (06:00–22:00 ET), and after 22:00 ET they wait for FMP like any other: no
+#: figure until FMP fills, no outlook or link at all. A restart without one reads no filing the
+#: table gives back.
+FILING_VERIFIER_VERSION = 1
+
+
 def verify_extraction(
     answer: Any,
     text: str,
@@ -1473,8 +1497,8 @@ class _Watch:
 
 @dataclass
 class EarningsFilingWatcher:
-    """Per-process state of the SEC watch. One instance, driven by the filing loop only
-    (`earnings_live_service.earnings_filing_tick`)."""
+    """Per-process state of the SEC watch, its held filings restored at boot (`restore`). One
+    instance, driven by the filing loop only (`earnings_live_service.earnings_filing_tick`)."""
 
     _watch: Dict[Tuple[str, date], _Watch] = field(default_factory=dict)
     # Releases only, by accession: the figures, or None for one with none that verified.
@@ -1500,6 +1524,14 @@ class EarningsFilingWatcher:
         complete, so this is what frees its slot."""
         w = self._watch.get(key)
         return w is not None and (w.done or w.found is not None)
+
+    def restore(self, symbol: str, day: date, figures: FilingFigures) -> None:
+        """Take back a filing an earlier process verified, as if this one had read it. Its watch
+        ends, so a report it left incomplete stays pending with no SEC read, and its accession
+        is known, so the same 8-K under another date costs no model call."""
+        w = self._watch.setdefault((symbol.upper(), day), _Watch())
+        w.done, w.figures = True, figures
+        self._extracted[figures.accession] = figures
 
     def _due(self, key: Tuple[str, date], now_et: datetime, mono: float) -> bool:
         interval = poll_interval_seconds(now_et)
@@ -1529,11 +1561,12 @@ class EarningsFilingWatcher:
         gemini: Any = None,
         cik_map: Optional[Mapping[str, str]] = None,
         sleep: Any = asyncio.sleep,
-        on_figures: Optional[Callable[[str, FilingFigures], None]] = None,
+        on_figures: Optional[Callable[[str, FilingFigures], Awaitable[None]]] = None,
     ) -> Dict[str, FilingFigures]:
         """One round for the symbols reporting on `report_day`. Returns NEW figures by symbol,
         and hands each to `on_figures` the moment it verifies: a round is serial, with a model
-        call per filing, so what is read first must not wait for the rest.
+        call per filing, so what is read first must not wait for the rest. It is awaited, so the
+        next read starts only once the figure has been stored as well as shown.
 
         `symbols` must already be ordered most-watched first; the round keeps the first
         `EARNINGS_LIVE_SEC_MAX_SYMBOLS` that hold a slot (`_holds_a_slot`), due or not, so a ticker
@@ -1620,7 +1653,7 @@ class EarningsFilingWatcher:
                 new[symbol] = figures
                 if on_figures is not None:
                     try:
-                        on_figures(symbol, figures)
+                        await on_figures(symbol, figures)
                     except Exception as e:
                         logger.warning(
                             "[earnings-live-filing] %s %s: figures not delivered (%s: %s)",
@@ -1672,9 +1705,10 @@ class EarningsFilingWatcher:
         for filing in filings:
             acc = filing.accession
             if acc in self._extracted:
-                # Read once per accession, ever (a restart is the only re-read). Ahead of the skip:
-                # a failed read was this ticker's, and a release is the filing's, so a second
-                # ticker of the issuer may have read what this one gave up on.
+                # Read once per accession, ever. A restart keeps that too, for a filing it took back
+                # from `earnings_filing_cache` (`restore`). Ahead of the skip: a failed read was this
+                # ticker's, and a release is the filing's, so a second ticker of the issuer may have
+                # read what this one gave up on.
                 w.found, w.done = filing, True
                 w.figures = self._extracted[acc]
                 return w.figures

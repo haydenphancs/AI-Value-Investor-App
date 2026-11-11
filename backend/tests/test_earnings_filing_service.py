@@ -31,11 +31,17 @@ So is the round's timing, because the card reads the record while a round runs: 
 handed over the moment it verifies, every symbol of a round comes due again a minute after that
 round started, and a filing waiting on its next attempt rests its step of the ladder from the end
 of its own failed read, and for at least a minute after any round that spent an attempt.
+
+And so is what a verifier fix can reach: a filing an older verifier kept is read again while its
+report is today's, pending and the watch open, or else dropped, never restored, and the verifier
+cannot change without its version moving.
 Hermetic: fake SEC client and fake Gemini; `asyncio.sleep` is injected.
 """
 from __future__ import annotations
 
+import ast
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -64,7 +70,10 @@ from app.integrations.sec_edgar import (
     SECUnavailableException,
 )
 from app.schemas.tracking import EarningsLiveResponse
+from app.utils import filing_text
 from app.utils.market_hours import ET
+
+from _filing_cache_fake import MIGRATION_TEXT, FilingCache
 
 REPORT = date(2026, 10, 29)
 ACC = "0000050863-26-000123"
@@ -4022,6 +4031,15 @@ def _later_filing(cik: str) -> dict:
     return dict(_8K, accessionNumber=f"{cik}-26-000001")
 
 
+def _collect(delivered: List[str]):
+    """An `on_figures` that notes who was handed a figure."""
+
+    async def _deliver(symbol, figures):
+        delivered.append(symbol)
+
+    return _deliver
+
+
 @pytest.mark.asyncio
 async def test_each_figure_is_delivered_the_moment_it_verifies(watcher):
     sec = _SEC(filings={_CIKS["INTC"]: [_8K], _CIKS["AAPL"]: [_later_filing(_CIKS["AAPL"])]})
@@ -4036,7 +4054,7 @@ async def test_each_figure_is_delivered_the_moment_it_verifies(watcher):
 
     found = await watcher.run_once(_AT_16, ["INTC", "AAPL"], REPORT, sec=sec, gemini=_Gem(),
                                    cik_map=_CIKS, sleep=_no_sleep,
-                                   on_figures=lambda sym, fig: delivered.append(sym))
+                                   on_figures=_collect(delivered))
     assert seen == [["INTC"]], "the second read starts with the first figure already out"
     assert delivered == ["INTC", "AAPL"]
     assert set(found) == {"INTC", "AAPL"}, "the round still reports what it found"
@@ -4049,7 +4067,7 @@ async def test_a_delivery_that_raises_stays_inside_the_round_and_says_which_repo
     gem = _Gemini()
     calls: List[str] = []
 
-    def _raises(symbol, figures):
+    async def _raises(symbol, figures):
         calls.append(symbol)
         raise ValueError("record refused")
 
@@ -4071,13 +4089,13 @@ async def test_a_failed_read_delivers_nothing_and_a_later_one_delivers_once(watc
     delivered: List[str] = []
     assert await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
                                   sleep=_no_sleep,
-                                  on_figures=lambda sym, fig: delivered.append(sym)) == {}
+                                  on_figures=_collect(delivered)) == {}
     assert delivered == []
     watcher._watch[("INTC", REPORT)].checked_mono = 0.0      # the 60 s cadence has passed
     for _ in range(2):
         await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
                                sleep=_no_sleep,
-                               on_figures=lambda sym, fig: delivered.append(sym))
+                               on_figures=_collect(delivered))
     assert delivered == ["INTC"]
 
 
@@ -4087,7 +4105,7 @@ async def test_a_refused_release_delivers_nothing(watcher):
     delivered: List[str] = []
     await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec,
                            gemini=_Gemini(answer={"is_quarterly_results": False}), cik_map=_CIKS,
-                           sleep=_no_sleep, on_figures=lambda sym, fig: delivered.append(sym))
+                           sleep=_no_sleep, on_figures=_collect(delivered))
     assert delivered == []
 
 
@@ -4100,7 +4118,7 @@ async def test_a_second_ticker_of_one_filing_is_delivered_without_a_second_extra
     gem = _Gemini()
     delivered: List[str] = []
     await watcher.run_once(_AT_16, ["GOOGL", "GOOG"], REPORT, sec=sec, gemini=gem, cik_map=ciks,
-                           sleep=_no_sleep, on_figures=lambda sym, fig: delivered.append(sym))
+                           sleep=_no_sleep, on_figures=_collect(delivered))
     assert delivered == ["GOOGL", "GOOG"] and gem.calls == 1
 
 
@@ -5089,8 +5107,16 @@ def _pending(symbol: str) -> dict:
 
 
 @pytest.fixture
-def live(watcher, monkeypatch):
-    """The real live service over the real watcher, with SEC and Gemini faked."""
+def cache(monkeypatch) -> FilingCache:
+    """`earnings_filing_cache`, which outlives a deploy. Empty, it keeps the ticks offline."""
+    held = FilingCache()
+    monkeypatch.setattr("app.database.get_supabase", lambda: held)
+    return held
+
+
+@pytest.fixture
+def live(watcher, cache, monkeypatch):
+    """The real live service over the real watcher, with SEC, Gemini and the table faked."""
     svc = els.get_earnings_live_service()
     svc.reset()
     monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: watcher)
@@ -5203,6 +5229,416 @@ async def test_a_figure_the_round_could_not_store_is_logged_and_the_round_goes_o
                for r in caplog.records)
     assert live.snapshot("AAPL", REPORT, _AT_16).revenue.actual == 17.1e9
     assert live.snapshot("INTC", REPORT, _AT_16).revenue.actual is None
+
+
+# ── a restart, on the real watcher ───────────────────────────────────────────
+
+
+def _deploy(live, watcher) -> None:
+    """The process goes, with its records and the watcher's memory. The table stays."""
+    live.reset()
+    watcher.reset()
+
+
+_LATER = _AT_16 + timedelta(minutes=10)
+
+
+@pytest.mark.asyncio
+async def test_a_restored_filing_is_never_read_again_while_its_report_stays_incomplete(live,
+                                                                                      watcher):
+    """A release with no revenue leaves the report incomplete, so it stays on the SEC watch's
+    list. Only the closed watch keeps SEC and Gemini away, and the filing tick runs first here:
+    no FMP tick has run in the new process, only a feed build."""
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    gem = _Gemini(answer=_good_answer(revenue=None))
+    live.observe_rows(REPORT, [_pending("INTC")], _AT_16)
+    await els.earnings_filing_tick(_AT_16, watched=["INTC"], sec=sec, gemini=gem)
+    read = list(sec.calls)
+    assert gem.calls == 1 and any(c.startswith("doc:") for c in read)
+
+    _deploy(live, watcher)
+    live.observe_rows(REPORT, [_pending("INTC")], _LATER)
+    stats = await els.earnings_filing_tick(_LATER, watched=["INTC"], sec=sec, gemini=gem)
+
+    assert stats == {"watched": 1, "pending": 1, "filings": 0}
+    assert sec.calls == read, "no SEC read at all, the submissions included"
+    assert gem.calls == 1
+    snap = live.snapshot("INTC", REPORT, _LATER)
+    assert snap.eps.actual == 0.44 and snap.filing.guidance is not None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_restore_reads_the_filing_again_as_a_restart_always_did(live, watcher,
+                                                                              cache):
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    gem = _Gemini()
+    live.observe_rows(REPORT, [_pending("INTC")], _AT_16)
+    await els.earnings_filing_tick(_AT_16, watched=["INTC"], sec=sec, gemini=gem)
+
+    _deploy(live, watcher)
+    cache.read_error = RuntimeError("PGRST205: could not find the table")
+    live.observe_rows(REPORT, [_pending("INTC")], _LATER)
+    await els.earnings_filing_tick(_LATER, watched=["INTC"], sec=sec, gemini=gem)
+    assert gem.calls == 2
+    assert live.snapshot("INTC", REPORT, _LATER).eps.actual == 0.44
+
+
+@pytest.mark.asyncio
+async def test_a_held_accession_costs_no_model_call_under_another_date(live, cache):
+    """FMP moved the report a day on, so the new date's watch reads the submissions and finds
+    the same 8-K. The figures come from what is held: the release is not read again."""
+    day_before = REPORT - timedelta(days=1)
+    held = efs.FilingFigures(accession=ACC, accepted_at=None, url="u", revenue=17.1e9,
+                             eps_adjusted=0.44, guidance="Intel expects growth.")
+    cache.hold(els.filing_cache_row("INTC", day_before, held, _AT_16))
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    gem = _Gemini()
+    live.observe_rows(REPORT, [_pending("INTC")], _LATER)
+    await els.earnings_filing_tick(_LATER, watched=["INTC"], sec=sec, gemini=gem)
+    assert sec.calls == [f"sub:{_CIKS['INTC']}"] and gem.calls == 0
+    assert live.snapshot("INTC", REPORT, _LATER).eps.actual == 0.44
+    assert ("INTC", REPORT.isoformat()) in cache.rows, "kept under the new date too"
+
+
+@pytest.mark.asyncio
+async def test_a_figure_is_in_the_table_before_the_next_symbol_is_read(live, cache):
+    """A round can run for minutes with a model call per filing, and a deploy can end it at any
+    point: what was read first must not wait for the rest."""
+    live.observe_rows(REPORT, [_pending("INTC"), _pending("AAPL")], _AT_16)
+    reached = asyncio.Event()
+    kept: List[List[str]] = []
+
+    class _Hangs(_SEC):
+        async def get_submissions(self, cik):
+            if cik == _CIKS["AAPL"]:
+                kept.append([symbol for symbol, _ in cache.rows])
+                reached.set()
+                await asyncio.Event().wait()
+            return await super().get_submissions(cik)
+
+    sec = _Hangs(filings={_CIKS["INTC"]: [_8K]})
+    tick = asyncio.create_task(
+        els.earnings_filing_tick(_AT_16, watched=["INTC", "AAPL"], sec=sec, gemini=_Gemini()))
+    await asyncio.wait_for(reached.wait(), 2.0)
+    tick.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await tick
+    assert kept == [["INTC"]]
+    row = cache.rows[("INTC", REPORT.isoformat())]
+    assert (row["accession"], row["revenue"], row["eps_adjusted"]) == (ACC, 17.1e9, 0.44)
+    assert row["revenue_rounding"] == 5e7 and row["eps_rounding"] == 0.005
+
+
+@pytest.mark.asyncio
+async def test_a_restored_watch_is_closed_and_its_accession_is_known(watcher):
+    figures = efs.FilingFigures(accession=ACC, accepted_at=None, url=None, eps_adjusted=0.44)
+    watcher._extracted[ACC] = None        # this process's own read of it yielded nothing
+    watcher.restore("intc", REPORT, figures)
+    assert watcher._watch[("INTC", REPORT)].figures is figures
+    assert watcher._extracted[ACC] is figures, "a figure verified once outranks a miss since"
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    assert await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=_Gemini(),
+                                  cik_map=_CIKS, sleep=_no_sleep) == {}
+    assert sec.calls == []
+    watcher.prune([REPORT + timedelta(days=1)])
+    assert ("INTC", REPORT) not in watcher._watch, "it leaves with its day"
+
+
+@pytest.mark.asyncio
+async def test_the_cap_limits_a_round_not_a_day_so_a_filing_in_frees_its_place(live, cache,
+                                                                               monkeypatch):
+    """What the cap holds down is the load on SEC's shared limiter. A report with its figures in
+    leaves the pending list and the next one takes its place, so a day can read more filings than
+    the cap, and the table gains a row for each."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
+    live.observe_rows(REPORT, [_pending("INTC"), _pending("AAPL")], _AT_16)
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K], _CIKS["AAPL"]: [_later_filing(_CIKS["AAPL"])]})
+    gem = _Gemini()
+    first = await els.earnings_filing_tick(_AT_16, watched=["INTC", "AAPL"], sec=sec, gemini=gem)
+    assert (first["pending"], first["filings"]) == (2, 1)
+    assert [symbol for symbol, _ in cache.rows] == ["INTC"], "one report, the most watched"
+    second = await els.earnings_filing_tick(_AT_16 + timedelta(minutes=1),
+                                            watched=["INTC", "AAPL"], sec=sec, gemini=gem)
+    assert (second["pending"], second["filings"]) == (1, 1)
+    assert [symbol for symbol, _ in cache.rows] == ["INTC", "AAPL"] and gem.calls == 2
+
+
+# ── a verifier fix, and what the table holds ─────────────────────────────────
+
+
+_OLD_OUTLOOK = "Intel expects revenue of $17.5 billion to $18.5 billion."
+
+
+def _kept_by_an_older_verifier(day: date = REPORT, **figures) -> dict:
+    """INTC's row as a build before a verifier fix left it, nothing else about it wrong."""
+    held = dict(accession=ACC, accepted_at=_AT_16, url="https://www.sec.gov/x", revenue=17.1e9,
+                eps_adjusted=0.44, eps_gaap=-0.12, fiscal_period="Q3 2026", guidance=_OLD_OUTLOOK,
+                revenue_rounding=5e7, eps_rounding=0.005)
+    held.update(figures)
+    return dict(els.filing_cache_row("INTC", day, efs.FilingFigures(**held), _AT_16),
+                verifier_version=efs.FILING_VERIFIER_VERSION - 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("misread", [{"eps_adjusted": -0.44}, {"revenue": 1.71e9}],
+                         ids=["a_lost_sign", "a_lost_digit"])
+async def test_a_deploy_that_fixes_the_verifier_reaches_a_figure_the_table_holds(
+        live, watcher, cache, misread):
+    """Before the table a deploy during the watch read a pending filing again with the fixed
+    code. Restoring this row instead would show the false figure with no way to tell it from a
+    good one, and the outlook, which FMP never replaces, for all its live days. Read once more,
+    then spared."""
+    cache.hold(_kept_by_an_older_verifier(**misread))
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    gem = _Gemini()
+    live.observe_rows(REPORT, [_pending("INTC")], _LATER)
+    await els.earnings_filing_tick(_LATER, watched=["INTC"], sec=sec, gemini=gem)
+
+    snap = live.snapshot("INTC", REPORT, _LATER)
+    assert (snap.eps.actual, snap.eps.surprise_pct) == (0.44, 7.32), "never a red Miss"
+    assert snap.revenue.actual == 17.1e9
+    read = list(sec.calls)
+    assert any(c.startswith("doc:") for c in read) and gem.calls == 1
+
+    row = cache.rows[("INTC", REPORT.isoformat())]
+    assert row["verifier_version"] == efs.FILING_VERIFIER_VERSION
+    assert (row["eps_adjusted"], row["revenue"]) == (0.44, 17.1e9)
+
+    _deploy(live, watcher)
+    live.observe_rows(REPORT, [_pending("INTC")], _LATER)
+    await els.earnings_filing_tick(_LATER, watched=["INTC"], sec=sec, gemini=gem)
+    assert sec.calls == read and gem.calls == 1, "a restart reads no filing it was given back"
+    assert live.snapshot("INTC", REPORT, _LATER).eps.actual == 0.44
+
+
+@pytest.mark.asyncio
+async def test_a_figure_the_fixed_verifier_refuses_leaves_the_card(live, cache):
+    """No figure, never the older build's. Only what today's verifier keeps goes back in."""
+    cache.hold(_kept_by_an_older_verifier(revenue=1.71e9))
+    gem = _Gemini(answer=_good_answer(revenue=None))
+    live.observe_rows(REPORT, [_pending("INTC")], _LATER)
+    await els.earnings_filing_tick(_LATER, watched=["INTC"],
+                                   sec=_SEC(filings={_CIKS["INTC"]: [_8K]}), gemini=gem)
+    snap = live.snapshot("INTC", REPORT, _LATER)
+    assert snap.revenue.actual is None and snap.eps.actual == 0.44
+    row = cache.rows[("INTC", REPORT.isoformat())]
+    assert row["revenue"] is None and row["verifier_version"] == efs.FILING_VERIFIER_VERSION
+
+
+@pytest.mark.asyncio
+async def test_a_release_the_fixed_verifier_refuses_whole_shows_nothing_and_stays_unrestored(
+        live, watcher, cache):
+    """Nothing to write, so the old row stays, and it stays unread: each new process reads that
+    filing once, as it would one that gave nothing."""
+    cache.hold(_kept_by_an_older_verifier())
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    gem = _Gemini(answer={"is_quarterly_results": False})
+    for _ in range(2):
+        live.observe_rows(REPORT, [_pending("INTC")], _LATER)
+        await els.earnings_filing_tick(_LATER, watched=["INTC"], sec=sec, gemini=gem)
+        snap = live.snapshot("INTC", REPORT, _LATER)
+        assert (snap.eps.actual, snap.revenue.actual, snap.filing) == (None, None, None)
+        _deploy(live, watcher)
+    assert gem.calls == 2
+    assert cache.writes == []
+
+
+@pytest.mark.asyncio
+async def test_a_report_fmp_completed_goes_without_an_older_verifiers_outlook(live, cache):
+    """A complete report is off the SEC watch, so nothing reads its filing again, and a sentence
+    no fix can reach is worth less than none. FMP's figures stand, and no SEC or model call is
+    made for it."""
+    cache.hold(_kept_by_an_older_verifier())
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    gem = _Gemini()
+    done = dict(_pending("INTC"), epsActual=0.46, revenueActual=17.2e9)
+    live.observe_rows(REPORT, [done], _LATER, fetched=True)
+    stats = await els.earnings_filing_tick(_LATER, watched=["INTC"], sec=sec, gemini=gem)
+    assert stats == {"watched": 1, "pending": 0, "filings": 0}
+    assert sec.calls == [] and gem.calls == 0
+    snap = live.snapshot("INTC", REPORT, _LATER)
+    assert (snap.eps.actual, snap.revenue.actual, snap.filing) == (0.46, 17.2e9, None)
+
+
+def _on_the_report_day(hour: int, minute: int = 0) -> datetime:
+    return datetime(2026, 10, 29, hour, minute, tzinfo=ET).astimezone(timezone.utc)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hour, minute", [(16, 30), (21, 59)], ids=["afternoon", "last_minute"])
+async def test_a_version_move_reads_a_pending_filing_while_the_watch_is_open(live, cache, hour,
+                                                                             minute):
+    """What a version move costs depends on the hour it deploys, so this and the next test are
+    what the sentences on the version say."""
+    cache.hold(_kept_by_an_older_verifier())
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    gem = _Gemini()
+    at = _on_the_report_day(hour, minute)
+    live.observe_rows(REPORT, [_pending("INTC")], at)
+    await els.earnings_filing_tick(at, watched=["INTC"], sec=sec, gemini=gem)
+    assert (len(sec.calls), gem.calls) == (3, 1)
+    assert live.snapshot("INTC", REPORT, at).eps.actual == 0.44
+    assert cache.rows[("INTC", REPORT.isoformat())]["verifier_version"] == (
+        efs.FILING_VERIFIER_VERSION)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hour, minute", [(22, 0), (22, 30), (23, 59)],
+                         ids=["the_close", "an_evening_deploy", "before_midnight"])
+async def test_a_version_move_after_the_watch_closes_leaves_a_pending_report_to_fmp(live, cache,
+                                                                                    hour, minute):
+    """EDGAR takes nothing after 22:00 ET, so the watch has stopped, and by the morning the report
+    is a day before today, off the watch for good. It reads as results not in, never as the row
+    the move refused, and FMP's fill brings the figures back but not the outlook or the link."""
+    cache.hold(_kept_by_an_older_verifier())
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    gem = _Gemini()
+    night = _on_the_report_day(hour, minute)
+    morning = datetime(2026, 10, 30, 9, 1, tzinfo=ET).astimezone(timezone.utc)
+    for at in (night, morning):
+        live.observe_rows(REPORT, [_pending("INTC")], at)
+        await els.earnings_filing_tick(at, watched=["INTC"], sec=sec, gemini=gem)
+        assert (sec.calls, gem.calls, cache.writes) == ([], 0, [])
+        snap = live.snapshot("INTC", REPORT, at)
+        assert snap.status == els.STATUS_AWAITING
+        assert (snap.eps.actual, snap.revenue.actual, snap.filing) == (None, None, None)
+
+    filled = dict(_pending("INTC"), epsActual=0.46, revenueActual=17.2e9)
+    live.observe_rows(REPORT, [filled], morning, fetched=True)
+    snap = live.snapshot("INTC", REPORT, morning)
+    assert snap.status == els.STATUS_REPORTED
+    assert (snap.eps.actual, snap.revenue.actual, snap.filing) == (0.46, 17.2e9, None)
+    assert (sec.calls, gem.calls) == ([], 0)
+
+
+@pytest.mark.asyncio
+async def test_a_filing_that_gave_nothing_has_no_row_so_each_new_process_reads_it_once(
+        live, watcher, cache, clock):
+    """No version moved, and a restart still reads this one: the table can only give back what
+    a read kept. Once per process, however many rounds it runs. A filing that is not the release
+    ends no watch (the release may still come), so each later round still asks for the record."""
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    gem = _Gemini(answer={"is_quarterly_results": False})
+    for process in (1, 2):
+        live.observe_rows(REPORT, [_pending("INTC")], _LATER)
+        for round_ in range(3):
+            clock.at += 300
+            await els.earnings_filing_tick(_LATER + timedelta(minutes=5 * round_),
+                                           watched=["INTC"], sec=sec, gemini=gem)
+        documents = [c for c in sec.calls if not c.startswith("sub:")]
+        assert (len(documents), gem.calls) == (2 * process, process)
+        assert len(sec.calls) - len(documents) == 3 * process, "one record read a round"
+        assert cache.writes == []
+        _deploy(live, watcher)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_restore_after_the_watch_closes_leaves_the_report_to_fmp(live, watcher,
+                                                                                cache):
+    """A failed read is the restart there was before the table, the watch's hours included. The
+    figure went with the process, and nothing can read it back before FMP fills."""
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    gem = _Gemini()
+    live.observe_rows(REPORT, [_pending("INTC")], _AT_16)
+    await els.earnings_filing_tick(_AT_16, watched=["INTC"], sec=sec, gemini=gem)
+    read = list(sec.calls)
+
+    _deploy(live, watcher)
+    cache.read_error = RuntimeError("PGRST205: could not find the table")
+    night = _on_the_report_day(22, 30)
+    live.observe_rows(REPORT, [_pending("INTC")], night)
+    await els.earnings_filing_tick(night, watched=["INTC"], sec=sec, gemini=gem)
+    assert sec.calls == read and gem.calls == 1
+    snap = live.snapshot("INTC", REPORT, night)
+    assert snap.status == els.STATUS_AWAITING and snap.eps.actual is None
+
+
+_FILING_SOURCE = Path(efs.__file__).read_text(encoding="utf-8")
+_LIVE_SOURCE = Path(els.__file__).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("source, pattern", [
+    (_FILING_SOURCE, r"^#: Which verifier kept.*?(?=^FILING_VERIFIER_VERSION)"),
+    (_FILING_SOURCE, r"^A RESTART\. The watch is per process.*?(?=^\"\"\")"),
+    (_LIVE_SOURCE, r"^  \* A row is trusted only by the verifier.*?(?=^  \* )"),
+    (_LIVE_SOURCE, r"^  \* A failed read, or a table not there yet.*?(?=^  \* )"),
+    (MIGRATION_TEXT, r"^-- A row is trusted only by the verifier.*?(?=^--$)"),
+], ids=["the_constant", "the_watchers_docstring", "the_version_bullet", "the_failed_read_bullet",
+        "the_migration"])
+def test_what_says_a_filing_is_read_again_names_the_hours_the_watch_keeps(source, pattern):
+    """Whoever moves the version times the deploy from these, each bounded to its own passage so
+    the same words elsewhere prove nothing. No figure test can see a sentence, and one that drops
+    the hours reads as if any time on the report day were safe, when the evening's deploy goes
+    without the filing and the afternoon's does not."""
+    found = re.search(pattern, source, flags=re.S | re.M)
+    assert found is not None, f"no passage matches {pattern!r}: this guard has gone blind"
+    text = re.sub(r"(?m)^(?:#:|--)", "", found.group(0)).replace("\u2013", "-")
+    text = " ".join(text.split())
+    opens, closes = (f"{hour:02d}:{minute:02d}" for hour, minute in (efs._EDGAR_OPEN,
+                                                                     efs._EDGAR_CLOSE))
+    assert f"({opens}-{closes} ET)" in text
+    assert f"after {closes} ET" in text
+    assert "reads nothing" not in text
+
+
+def _no_docstrings(node: ast.AST) -> ast.AST:
+    for inner in ast.walk(node):
+        if isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            first = inner.body[0]
+            if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)):
+                inner.body = inner.body[1:] or [ast.Pass()]
+    return node
+
+
+def _verifier_source() -> Dict[str, str]:
+    """`verify_extraction` and every module-level name it reaches, by name, as code: a comment or
+    a docstring is no change to what the verifier keeps. Its own module first, then the one it
+    takes "verbatim" from."""
+    top: Dict[str, ast.AST] = {}
+    for module in (filing_text, efs):
+        for node in ast.parse(Path(module.__file__).read_text(encoding="utf-8")).body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                top[node.name] = node
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        top[target.id] = node
+    reached: Dict[str, str] = {}
+    waiting = ["verify_extraction"]
+    while waiting:
+        name = waiting.pop()
+        if name in reached or name not in top:
+            continue
+        reached[name] = ast.unparse(_no_docstrings(top[name]))
+        waiting.extend(inner.id for inner in ast.walk(top[name])
+                       if isinstance(inner, ast.Name))
+    return reached
+
+
+#: `FILING_VERIFIER_VERSION` and the verifier it stands for, pinned together.
+_VERIFIER_PIN = (1, "2e2f3b24a1d2cdee716d22c5bb22f843a3e0bae1fe754f38d79b70ccfe9b6029")
+
+
+def test_the_verifier_cannot_change_without_its_version_moving():
+    """A row of another version reads as no row, so what the old code kept does not come back. A
+    fix with the version left alone reaches nothing: the row comes back on every restart, looking
+    exactly like a good one. The constant is only as good as the memory of whoever edits the
+    verifier, so this test does the remembering."""
+    source = _verifier_source()
+    for name in ("_revenue_print", "_eps_print", "_Printed", "_numbers_in", "_reads_as_loss",
+                 "_FOREIGN_MONEY_RE", "_DOLLAR_MARK_RE", "_ADJUSTED_MEASURE_RE", "_quote_ok",
+                 "_outlook_problem", "eps_from_quote", "verify_peg_span", "normalize_peg_text"):
+        assert name in source, f"the walk no longer reaches {name}: this guard has gone blind"
+    assert "EarningsFilingWatcher" not in source and "poll_interval_seconds" not in source
+    text = "\n".join(source[name] for name in sorted(source))
+    printed = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    assert (efs.FILING_VERIFIER_VERSION, printed) == _VERIFIER_PIN, (
+        "the verifier changed. Move FILING_VERIFIER_VERSION in earnings_filing_service.py by one, "
+        "so no row the old code kept comes back, then pin _VERIFIER_PIN to (<the new version>, "
+        f"\"{printed}\"). Before the first deploy of migration 209 nothing is held, so the pin "
+        "alone moves.")
 
 
 # ── a stalled model on the real loop ─────────────────────────────────────────

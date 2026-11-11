@@ -13,8 +13,10 @@ TWO SOURCES, ONE RECORD PER (symbol, report date).
     near-live at best.
   * The company's own 8-K Item 2.02 press release (`earnings_filing_service`): minutes after
     the release, every figure a verbatim quote. PRELIMINARY until FMP has the same metric.
-  A record is STICKY: a figure, once verified, never goes back to "not out yet", and FMP's
-  figure replaces the filing's the moment FMP has one.
+  A record is STICKY: a figure, once verified, never goes back to "not out yet" (only an FMP
+  zero does, GUARDS below), a restart included unless the table cannot give the filing back (A
+  RESTART below), and FMP's figure replaces the filing's the moment FMP has one that passes the
+  guards, unless the filing outranks it (`_filing_outranks_fmp`).
   Between two FMP answers the NEWEST wins. The Tracking memo can be 30 min behind this
   module's own fetch, so a memo row older than the record's last own fetch is skipped whole at
   all three folds (the tick, the card, the sheet): no reader can put an older answer back over
@@ -31,7 +33,9 @@ metric has no FMP actual, so a surprise is never worked out against another row'
 The card and the sheet read the same pick (`one_row_per_report`).
   A row left out still counts as evidence: the consensus every row states is read before
 anything folds (`_note_consensus`) and kept GUARD-ONLY. The sanity guards, the zero rules and
-"is a revenue still due" read it; a surprise, the card and the sheet never do.
+"is a revenue still due" read it; a surprise, the card and the sheet never do, with one exception:
+a filing figure has no row of its own, so with no FMP figure for the metric it reads the stated
+consensus it sits on (`_record_for_filing`).
 
 THE MEMO. The live days (`live_days`): every calendar day from the previous trading day
 through today, one single-day calendar call each — a multi-day request is cut at 4,000 rows
@@ -153,6 +157,33 @@ source can hold the other up.
   own rest counts from the end of its own failed read, so another filing's failures never restart
   it.
 
+A RESTART. The records are this process's own, but what only a filing says must outlive it: FMP
+may still have no figures, and it never has the outlook or the link. So each filing goes to
+`earnings_filing_cache` (migration 209: figures from SEC filings only, never FMP data) the moment
+it is on its record (`keep_filing`), best effort, and the first thing either tick does in a new
+process is take back what the table holds for the live days (`restore_filings`).
+  * Once per process, and before anything decides, so the filing tick cannot read a filing the
+    table gives back, and whichever tick comes second joins the same read.
+  * A restored figure is never a landing, and FMP's fill on it after a restart is none either
+    (`restore_filing`). The daily pass is the net for `earnings_result`, as for any report first
+    seen reported. `earnings_live` has no such net, so a filing read in the minute before a
+    deploy, its push not yet sent, goes without one.
+  * A restored filing is not read again, by SEC or by Gemini, even while its report stays
+    incomplete and pending (`EarningsFilingWatcher.restore`).
+  * A row is trusted only by the verifier that kept it (`FILING_VERIFIER_VERSION`), or the deploy
+    that fixes a misread would restore it, with nothing on the row to tell it from a good one.
+    One of another version is no row, so that one deploy costs what a restart cost before the
+    table: a report of today still pending has its filing read once more while the SEC watch is
+    open (06:00–22:00 ET), and after 22:00 ET it waits for FMP like any other: no figure until
+    FMP fills, no outlook or link at all.
+  * A failed read, or a table not there yet, is a WARNING and a retry every
+    `_FAILURE_RETRY_SECONDS`, and until then a restart is what it was before this table: a report
+    of today still pending has its filing read again while the SEC watch is open (06:00–22:00
+    ET), and after 22:00 ET it waits for FMP like any other. Code can deploy before the owner
+    applies the migration. `EARNINGS_LIVE_FILINGS_ENABLED` off restores nothing, so that switch
+    still takes the figures away.
+  * In the first seconds after boot, before the first tick, a card reads what it always did.
+
 STATUSES (no time of day exists on `/stable` rows, so the window is the report day):
   * `upcoming` — a later date, or today before 06:00 ET with nothing in yet.
   * `live`     — today, 06:00–22:00 ET, results not complete. LIVE is drawn ONLY then, and
@@ -178,8 +209,29 @@ or the sheet would poll a record nothing updates.
 GUARDS, each a defect found elsewhere in this repo:
   * a dropped-digit EPS (`_earnings_common.eps_digit_shift_suspect`) is held as "checking",
     never shown as a -90% miss;
-  * a revenue more than 2x off a material consensus is held unless the other source agrees
-    within 2% (FMP's dropped-digit revenue, `earnings_service._reconcile_revenue`);
+  * a revenue more than 2x off a material consensus does not show unless the other source
+    agrees within 2% (FMP's dropped-digit revenue, `earnings_service._reconcile_revenue`). Each
+    source is judged in turn, FMP first, so a figure the band refuses never hides a sound one,
+    and revenue is held as "checking" only when a figure exists and none passes;
+  * the filing goes first when a stated consensus bears it out and none bears out FMP's figure,
+    at any gap short of agreement, and when FMP's revenue is more than 5x off it, unless a
+    consensus stands behind FMP's figure and none behind the filing's (`_filing_outranks_fmp`,
+    the same ratio as `_reconcile_revenue`). A dropped digit always lands nearer a tiny
+    consensus, so only a consensus inside the band counts. Under 5x with no consensus to judge
+    them FMP keeps its place: nothing there can say which figure is the bad one;
+  * a figure with a second source beside it and outside 0.5-2x of the estimate on show carries
+    no surprise, at any size of estimate: two sources prove the actual, not the consensus it fell
+    outside, which may be what dropped a digit ("+918%"). A lone figure keeps its percentage:
+    pre-revenue names land far from a tiny consensus all the time;
+  * a tiny revenue estimate on show that a material consensus has overtaken judges nothing and
+    is not printed: the material one guards the figure, and it shows with no surprise. A twin's
+    larger consensus overtakes nothing beside a figure inside its own estimate's band. Two figures
+    inside each other's band are one consensus either side of the floor, which judges as it would
+    alone, and stays printed, until a figure is more than 5x off the larger: that figure is held
+    (`_estimate_overtaken`);
+  * a filing figure with no FMP figure beside it reads whichever stated consensus it sits on
+    when the estimate on show does not bear it out, so the same evidence decides alike whichever
+    twin FMP touched last (`_record_for_filing`);
   * a GAAP-only EPS is shown labelled GAAP with no beat/miss — the consensus is adjusted (the
     owner's 2026-09-27 caution, `news_insight_service._earnings_line`);
   * a figure is only as exact as its print: "$17.1 billion" is anything from $17.05B to $17.15B
@@ -190,11 +242,19 @@ GUARDS, each a defect found elsewhere in this repo:
     push states a verdict on it. Only a figure equal to the consensus is in line;
   * no surprise percentage against an estimate under $0.01 (`earnings_sender.MIN_ABS_ESTIMATE`);
   * a zero revenue from FMP is stored only against a consensus under $100M, with no figure
-    held (a pre-revenue name can report nothing): beside a material consensus, or none, it
-    is an unfilled field, never a -100% miss and never a landing;
+    held, the filing's included (a pre-revenue name can report nothing): beside a material
+    consensus, or none, it is an unfilled field, never a -100% miss and never a landing. It
+    shows only while that holds: a consensus that turns material, or a positive filing figure,
+    takes it off, so a shown zero stays on the SEC watch until its filing has been read
+    (`pending_symbols`), and a report left with nothing on show leaves `landed_snapshots`;
   * a row with an EPS of exactly 0 beside a zero or negative revenue is unfilled as a whole,
-    unless that revenue stands and no EPS is held. Beside a real revenue, or with no revenue
-    on the row, 0 is a real breakeven.
+    unless that revenue stands and no EPS is held, the filing's included. Such a row stored
+    earlier as a real report gives way as a whole to the same later evidence, to any EPS the
+    filing prints (`_fmp_zeros_unfilled`), or to a real figure from FMP for either field. The next
+    fold then drops both zeros (`_zeros_gave_way`), so neither comes back with a later fill, the
+    estimates they stood on can move, and the record ends as if the row had never come, in either
+    order. Beside a real revenue, or with no revenue on the row, 0 is a real breakeven. The daily
+    push pass asks the same rule (`eps_is_unfilled`).
 """
 
 from __future__ import annotations
@@ -202,7 +262,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from functools import partial
 from typing import (
@@ -213,6 +273,7 @@ from typing import (
     Dict,
     Iterable,
     List,
+    Mapping,
     Optional,
     Sequence,
     Tuple,
@@ -224,7 +285,11 @@ from app.services._earnings_common import (
     eps_digit_shift_suspect,
     eps_print_covers,
 )
-from app.services.earnings_filing_service import _DUE_SLACK_SECONDS, FilingFigures
+from app.services.earnings_filing_service import (
+    _DUE_SLACK_SECONDS,
+    FILING_VERIFIER_VERSION,
+    FilingFigures,
+)
 from app.services.earnings_window_service import (
     _TRUNCATION_ROWS,
     _row_date,
@@ -270,13 +335,27 @@ MIN_ABS_EPS_ESTIMATE = 0.01
 _REVENUE_GUARD_MIN_ESTIMATE = 100e6
 _REVENUE_PLAUSIBLE = (0.5, 2.0)
 _SOURCES_AGREE = 0.02
+#: A revenue outside this of another figure for it is a digit or unit glitch, not a difference
+#: of basis: the ratio `earnings_service._reconcile_revenue` applies, a copy because that module
+#: loads the FMP client and the database (pinned equal by a test of the same name as the ratio's:
+#: `test_the_far_apart_ratio_is_the_financials_tabs_own`).
+_FEED_FILED_RATIO = (0.2, 5.0)
 #: A filing accepted longer than this before its record was first seen was already out at
 #: first sight, like an FMP row first seen reported. Long enough to cover a deploy gap, so a
-#: deploy inside the release window keeps the landing it can still announce.
+#: release first read just after a deploy keeps the landing it can still announce. One an earlier
+#: process read comes back with no landing at all (`restore_filing`).
 _FILING_LANDING_GRACE = timedelta(minutes=15)
 
 _FETCH_DEADLINE_SECONDS = 20.0
 _FAILURE_RETRY_SECONDS = 120.0
+#: Migration 209. Each call is bounded as well as on a thread, because a tick waits for it and the
+#: tick is what sends the pushes: a stalled Supabase must cost a retry, never the minute.
+_FILING_CACHE_TABLE = "earnings_filing_cache"
+_FILING_CACHE_COLUMNS = ("symbol", "report_date", "accession", "verifier_version", "accepted_at",
+                         "url", "revenue", "eps_adjusted", "eps_gaap", "fiscal_period", "guidance",
+                         "revenue_rounding", "eps_rounding", "computed_at")
+_FILING_CACHE_NUMBERS = ("revenue", "eps_adjusted", "eps_gaap", "revenue_rounding", "eps_rounding")
+_FILING_CACHE_DEADLINE_SECONDS = 5.0
 #: History extras (last 4 quarters, the same quarter last year) per (symbol, report date).
 _EXTRAS_TTL_SECONDS = 6 * 3600
 _EXTRAS_FAILURE_TTL_SECONDS = 300
@@ -308,6 +387,8 @@ BASIS_GAAP = "gaap"
 class LiveMetric:
     """One metric of one report, as shown. `actual` is None while pending OR held."""
 
+    # The consensus to print: None when there is none, or when the code has ruled it out of date
+    # (`_estimate_out_of_date`). A filing figure prints the one it reads (`_record_for_filing`).
     estimate: Optional[float]
     actual: Optional[float] = None
     surprise_pct: Optional[float] = None
@@ -329,6 +410,8 @@ class _Record:
     # GUARD-ONLY (`_note_consensus`): what the latest response stated, from ANY of its rows.
     eps_guard_estimate: Optional[float] = None
     revenue_guard_estimate: Optional[float] = None
+    # The smallest revenue figure it stated, for a filing figure only (`_record_for_filing`).
+    revenue_smallest_estimate: Optional[float] = None
     fmp_eps: Optional[float] = None
     fmp_revenue: Optional[float] = None
     filing: Optional[FilingFigures] = None
@@ -352,6 +435,9 @@ class _Record:
     # The fold runs on every tick and feed build: a refusal is logged once per record.
     revenue_refusal_logged: bool = False
     eps_refusal_logged: bool = False
+    # What the guards last did to this revenue, None after a clean answer: each change is logged
+    # once (`_log_guarded_revenue`).
+    revenue_guard_note: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -385,6 +471,17 @@ class HistoryExtras:
     year_ago_revenue: Optional[float]
     year_ago_eps: Optional[float]
     year_ago_eps_comparable: bool
+
+
+@dataclass(frozen=True)
+class HeldFiling:
+    """One `earnings_filing_cache` row read back. `computed_at` is when its figures reached
+    their record, None when the row's time cannot be read."""
+
+    symbol: str
+    day: date
+    figures: FilingFigures
+    computed_at: Optional[datetime]
 
 
 # ── Pure helpers ────────────────────────────────────────────────────
@@ -424,13 +521,15 @@ def eps_metric(rec: _Record) -> LiveMetric:
     filing's GAAP EPS labelled GAAP and never coloured. With no shown estimate the guard reads
     the guard-only one; the surprise and the metric's `estimate` never do. A figure whose print
     covers the estimate carries no verdict, as in `revenue_metric`: a filing's by its own
-    rounding, FMP's by `eps_print_covers`, because it carries the same print."""
+    rounding, FMP's by `eps_print_covers`, because it carries the same print. FMP's 0 from a row
+    of zeros that turned out unfilled reads as if it never came (`_fmp_zeros_unfilled`), so the
+    filing's figure shows and the result push waits."""
     est = rec.eps_estimate
     guard_est = est if est is not None else rec.eps_guard_estimate
     filing = rec.filing
     gaap = filing.eps_gaap if filing is not None else None
     candidates: List[Tuple[float, str, str]] = []
-    if rec.fmp_eps is not None:
+    if rec.fmp_eps is not None and not _fmp_zeros_unfilled(rec):
         candidates.append((rec.fmp_eps, SOURCE_FMP, BASIS_ADJUSTED))
     if filing is not None and filing.eps_adjusted is not None:
         candidates.append((filing.eps_adjusted, SOURCE_FILING, BASIS_ADJUSTED))
@@ -454,31 +553,179 @@ def eps_metric(rec: _Record) -> LiveMetric:
     return LiveMetric(est)
 
 
-def revenue_metric(rec: _Record) -> LiveMetric:
-    """FMP first, then the filing. Like `eps_metric`, the plausibility guard falls back to the
-    guard-only estimate; the surprise and the metric's `estimate` never do. A filing figure
-    whose rounding covers the estimate carries no verdict: the print cannot say which side of
-    the consensus the true figure is on."""
+def _near(value: float, estimate: float) -> bool:
+    """Is `value` inside the 0.5-2x band of `estimate`, whatever its size?"""
+    lo, hi = _REVENUE_PLAUSIBLE
+    return estimate > 0 and lo <= value / estimate <= hi
+
+
+def _revenue_in_band(value: float, estimate: Optional[float]) -> bool:
+    """Is `value` plausible against `estimate`? With no material consensus nothing can say it
+    is not: pre-revenue names land far from a tiny one all the time."""
+    return estimate is None or estimate < _REVENUE_GUARD_MIN_ESTIMATE or _near(value, estimate)
+
+
+def _sources_agree(value: float, other: Optional[float]) -> bool:
+    """Is `other`, the other source's figure, within `_SOURCES_AGREE` of `value`?"""
+    return other is not None and abs(other - value) <= _SOURCES_AGREE * value
+
+
+def _revenue_passes(value: float, estimate: Optional[float], other: Optional[float]) -> bool:
+    """May this source's `value` show, with `other` the other source's figure? In the band, or
+    within `_SOURCES_AGREE` of the other source. A zero is neither, and two zeros agree on
+    nothing: it stands only against a consensus under the guard's floor, with no positive
+    figure beside it (GUARDS in the module docstring)."""
+    if value <= 0:
+        return (value == 0 and estimate is not None
+                and estimate < _REVENUE_GUARD_MIN_ESTIMATE and not other)
+    return _revenue_in_band(value, estimate) or _sources_agree(value, other)
+
+
+def _estimate_overtaken(rec: _Record, value: float) -> bool:
+    """Has a material consensus overtaken the tiny estimate on show, for this figure? An estimate
+    moves only with its own figure, so that consensus sits in the guard-only field: after a zero
+    was stored against the tiny one, or beside a figure from a row that states a tiny one.
+
+    Two things keep the estimate. A figure inside the estimate's band is borne out by it, so the
+    larger figure is a stale twin, and it must not hold a real small-company result. The two
+    consensus figures inside each other's band are one consensus either side of the floor, which
+    judges as it would alone, until the figure is `_far_apart` from the larger: a digit off a
+    consensus that size is the slip the guard exists for, whichever row FMP put it on."""
+    est, stated = rec.revenue_estimate, rec.revenue_guard_estimate
+    if est is None or stated is None or not est < _REVENUE_GUARD_MIN_ESTIMATE <= stated:
+        return False
+    if _near(value, est):
+        return False
+    return not _near(stated, est) or _far_apart(value, stated)
+
+
+def _estimate_out_of_date(rec: _Record, value: float) -> bool:
+    """Must the estimate on show not be printed beside this figure? It is overtaken, and by a
+    different consensus: its other half either side of the floor judges the figure, but that says
+    nothing against the estimate, so it stays."""
+    return (_estimate_overtaken(rec, value)
+            and not _near(rec.revenue_guard_estimate, rec.revenue_estimate))
+
+
+def _record_for_filing(rec: _Record, value: float) -> _Record:
+    """The record a filing figure reads against. With no FMP figure for the metric the estimate
+    on show is only the row FMP touched last, and it may move (DUPLICATE ROWS in the module
+    docstring). So when it does not bear this figure out and another stated consensus does, that
+    one stands in for this figure alone, and which twin FMP touched last decides nothing. An FMP
+    figure, a zero aside, keeps its own row's estimate, or its lack of one. A figure the estimate
+    on show does bear out stays with it, even if a twin would too: only `lastUpdated` can choose
+    between two consensus figures that close."""
     est = rec.revenue_estimate
-    guard_est = est if est is not None else rec.revenue_guard_estimate
-    fmp = rec.fmp_revenue
+    if rec.fmp_revenue or (est is not None and _near(value, est)):
+        return rec
+    for stated in (rec.revenue_smallest_estimate, rec.revenue_guard_estimate):
+        if stated is not None and _near(value, stated):
+            return replace(rec, revenue_estimate=stated)
+    return rec
+
+
+def _guard_estimate(rec: _Record, value: float) -> Optional[float]:
+    """The consensus that judges this figure: the estimate on show, unless it is missing or
+    overtaken, then the guard-only one. A zero reads the larger of the two, as the fold that
+    stored it does, so one stored before the larger figure arrived does not stand on the smaller."""
+    est, stated = rec.revenue_estimate, rec.revenue_guard_estimate
+    if value <= 0 and est is not None and stated is not None:
+        return max(est, stated)
+    return stated if est is None or _estimate_overtaken(rec, value) else est
+
+
+def _far_apart(value: Optional[float], other: Optional[float]) -> bool:
+    """Are two positive revenues further apart than `_FEED_FILED_RATIO`?"""
+    if value is None or other is None or value <= 0 or other <= 0:
+        return False
+    lo, hi = _FEED_FILED_RATIO
+    return not lo <= value / other <= hi
+
+
+def _filing_outranks_fmp(rec: _Record, fmp: Optional[float], filed: Optional[float]) -> bool:
+    """Does the filing go first? Whenever a stated consensus bears it out and none bears out FMP's
+    figure, at any gap short of agreement: a figure that far from the consensus must not replace
+    one sitting on it, as in `_reconcile_revenue`. And with the two `_far_apart`, where the band
+    may have nothing to say, unless a consensus stands behind FMP's figure alone: a dropped digit
+    does not land on the consensus by chance, and a release read off a segment line can be this
+    far off. Under 5x with nothing to judge them FMP keeps its place. This only orders the queue:
+    a filing the guard refuses still leaves FMP's figure on show."""
+    if fmp is None or filed is None or min(fmp, filed) <= 0 or _sources_agree(fmp, filed):
+        return False
+    stated = [c for c in (rec.revenue_estimate, rec.revenue_guard_estimate) if c is not None]
+    filing_borne_out = any(_near(filed, c) for c in stated)
+    fmp_borne_out = any(_near(fmp, c) for c in stated)
+    if _far_apart(fmp, filed):
+        return filing_borne_out or not fmp_borne_out
+    return filing_borne_out and not fmp_borne_out
+
+
+def _guards_take_the_verdict(rec: _Record, value: float, other: Optional[float]) -> bool:
+    """Does this figure, with `other` the other source's, show with no surprise? Beside an
+    overtaken estimate; past the band of the consensus that judged it, which only agreement lets
+    through; or, at any size of estimate, outside the band of the estimate on show with a second
+    positive figure beside it. Two sources prove the actual, never the consensus it fell outside,
+    which may be what dropped a digit. A lone figure far from a tiny consensus keeps its
+    percentage."""
+    if _estimate_overtaken(rec, value) or not _revenue_in_band(value, _guard_estimate(rec, value)):
+        return True
+    est = rec.revenue_estimate
+    return est is not None and other is not None and other > 0 and not _near(value, est)
+
+
+def _fmp_zeros_unfilled(rec: _Record) -> bool:
+    """Has a stored row of zeros turned out to be FMP's unfilled shape? `_storable_figures` keeps
+    an EPS of 0 beside a revenue of 0 only as a pre-revenue name's real report, and later
+    evidence undoes that: any figure the filing prints above zero, or a consensus turning
+    material. Both metrics then read as if the row never came, what the fold does when that
+    evidence came first, so one row is never unfilled for revenue and a real -100% for EPS. The
+    next fold makes that true of the record (`_zeros_gave_way`)."""
+    if rec.fmp_eps != 0 or rec.fmp_revenue != 0:
+        return False
+    filing = rec.filing
+    if filing is not None and (filing.revenue or filing.eps_adjusted or filing.eps_gaap):
+        return True
+    return not _revenue_passes(0.0, _guard_estimate(rec, 0.0), None)
+
+
+def revenue_metric(rec: _Record) -> LiveMetric:
+    """FMP first, then the filing, each judged by `_revenue_passes` beside the other, so a figure
+    the band refuses never hides a sound one, and the filing first when it outranks FMP's
+    (`_filing_outranks_fmp`). Held only when a figure exists and none passes. Like `eps_metric`,
+    the plausibility guard falls back to the guard-only estimate, and here it also reads that one
+    in place of an overtaken estimate; the surprise and the metric's `estimate` never do, and an
+    estimate out of date is not shown. The one exception is a filing figure with another stated
+    consensus to read (`_record_for_filing`).
+
+    A figure carries no verdict when `_guards_take_the_verdict` says so, or when it is a filing
+    figure whose rounding covers the estimate, because the print cannot say which side of the
+    consensus the true figure is on."""
+    est = rec.revenue_estimate
+    fmp = None if _fmp_zeros_unfilled(rec) else rec.fmp_revenue
     filed = rec.filing.revenue if rec.filing is not None else None
+    candidates: List[Tuple[float, str, Optional[float]]] = []
     if fmp is not None:
-        value, source, other = fmp, SOURCE_FMP, filed
-    elif filed is not None:
-        value, source, other = filed, SOURCE_FILING, None
-    else:
-        return LiveMetric(est, due=guard_est is not None)
-    if guard_est is not None and guard_est >= _REVENUE_GUARD_MIN_ESTIMATE and value > 0:
-        lo, hi = _REVENUE_PLAUSIBLE
-        if not lo <= value / guard_est <= hi:
-            agrees = other is not None and abs(other - value) <= _SOURCES_AGREE * value
-            if not agrees:
-                return LiveMetric(est, checking=True)
-    rounding = rec.filing.revenue_rounding if source == SOURCE_FILING else None
-    if est is not None and rounding is not None and abs(value - est) <= rounding:
-        return LiveMetric(est, value, None, source)
-    return LiveMetric(est, value, revenue_surprise_pct(value, est), source)
+        candidates.append((fmp, SOURCE_FMP, filed))
+    if filed is not None:
+        candidates.append((filed, SOURCE_FILING, fmp))
+    if _filing_outranks_fmp(rec, fmp, filed):
+        candidates.reverse()
+    for value, source, other in candidates:
+        judged = _record_for_filing(rec, value) if source == SOURCE_FILING else rec
+        if not _revenue_passes(value, _guard_estimate(judged, value), other):
+            continue
+        read = judged.revenue_estimate
+        rounding = rec.filing.revenue_rounding if source == SOURCE_FILING else None
+        within_rounding = (read is not None and rounding is not None
+                           and abs(value - read) <= rounding)
+        if within_rounding or _guards_take_the_verdict(judged, value, other):
+            shown = None if _estimate_out_of_date(judged, value) else read
+            return LiveMetric(shown, value, None, source)
+        return LiveMetric(read, value, revenue_surprise_pct(value, read), source)
+    if candidates:
+        out_of_date = any(_estimate_out_of_date(rec, value) for value, _, _ in candidates)
+        return LiveMetric(None if out_of_date else est, checking=True)
+    return LiveMetric(est, due=est is not None or rec.revenue_guard_estimate is not None)
 
 
 def has_results(eps: LiveMetric, revenue: LiveMetric) -> bool:
@@ -493,6 +740,13 @@ def is_complete(eps: LiveMetric, revenue: LiveMetric) -> bool:
     if revenue.actual is not None:
         return True
     return revenue.estimate is None and not revenue.due and not revenue.checking
+
+
+def _zero_awaits_filing(rec: _Record, revenue: LiveMetric) -> bool:
+    """Is a zero revenue on show with the company's release still unread? Small companies can
+    file after the wire release, and only the release can take a zero off, so it must not end
+    the SEC watch. The report stays complete: the status is not this rule's to change."""
+    return revenue.actual == 0 and rec.filing is None
 
 
 def is_preliminary(eps: LiveMetric, revenue: LiveMetric) -> bool:
@@ -647,6 +901,81 @@ def _parse_day(value: Any) -> Optional[date]:
         return date.fromisoformat(raw)
     except ValueError:
         return None
+
+
+def _stored_time(value: Any) -> Optional[datetime]:
+    """A timestamptz as PostgREST writes it, aware, or None when it cannot be read. No offset
+    reads as UTC, the rule of `et_now`: a naive time beside an aware one raises at the next
+    compare, and a fold compares `checked_at` on every fetch."""
+    if not isinstance(value, str):
+        return None
+    try:
+        when = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return when.replace(tzinfo=timezone.utc) if when.tzinfo is None else when
+
+
+def _stored_text(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _kept_by_this_verifier(row: Mapping[str, Any]) -> bool:
+    """Does this row carry today's `FILING_VERIFIER_VERSION`? A bool is refused by name, because
+    `True == 1`, and a NULL or a missing column is another verifier like any other."""
+    version = row.get("verifier_version")
+    return version == FILING_VERIFIER_VERSION and not isinstance(version, bool)
+
+
+def filing_cache_row(symbol: str, day: date, figures: FilingFigures,
+                     computed_at: datetime) -> Dict[str, Any]:
+    """PURE. One `earnings_filing_cache` row: every field of the figures, as verified, because
+    a restored record must read as the one that wrote it (`held_filing_from`), and which verifier
+    kept them. The figures only ever come from this process's verifier or from a row of the same
+    version, so the stamp is true of them whichever it was."""
+    return {
+        "symbol": symbol.upper(),
+        "report_date": day.isoformat(),
+        "accession": figures.accession,
+        "verifier_version": FILING_VERIFIER_VERSION,
+        "accepted_at": iso_utc(figures.accepted_at),
+        "url": figures.url,
+        "revenue": figures.revenue,
+        "eps_adjusted": figures.eps_adjusted,
+        "eps_gaap": figures.eps_gaap,
+        "fiscal_period": figures.fiscal_period,
+        "guidance": figures.guidance,
+        "revenue_rounding": figures.revenue_rounding,
+        "eps_rounding": figures.eps_rounding,
+        "computed_at": iso_utc(computed_at),
+    }
+
+
+def held_filing_from(row: Any) -> Optional[HeldFiling]:
+    """PURE. An `earnings_filing_cache` row back as what it was written from, or None when it
+    cannot be trusted. All or nothing for what decides a figure: half a row could show one
+    without the rounding that keeps it honest, and a row with neither a figure nor an outlook is
+    no filing. A time or a label that cannot be read costs only itself. A row another verifier
+    kept is no row, whichever way the version moved (`FILING_VERIFIER_VERSION`)."""
+    if not isinstance(row, Mapping) or not _kept_by_this_verifier(row):
+        return None
+    symbol, accession = _stored_text(row.get("symbol")), _stored_text(row.get("accession"))
+    day = _parse_day(row.get("report_date"))
+    if symbol is None or accession is None or day is None:
+        return None
+    numbers: Dict[str, Optional[float]] = {}
+    for name in _FILING_CACHE_NUMBERS:
+        numbers[name] = finite(row.get(name))
+        if numbers[name] is None and row.get(name) is not None:
+            return None
+    figures = FilingFigures(
+        accession=accession.strip(), accepted_at=_stored_time(row.get("accepted_at")),
+        url=_stored_text(row.get("url")), fiscal_period=_stored_text(row.get("fiscal_period")),
+        guidance=_stored_text(row.get("guidance")), **numbers,
+    )
+    if not figures.has_figures and figures.guidance is None:
+        return None
+    return HeldFiling(symbol.strip().upper(), day, figures, _stored_time(row.get("computed_at")))
 
 
 def _quarter_result(actual: Optional[float], estimate: Optional[float],
@@ -809,13 +1138,15 @@ def _note_consensus(rec: _Record, ranked: List[Dict[str, Any]]) -> None:
     folds, so a row left out of the fold still counts and every fold of the response judges
     alike. EPS takes the best row's. Revenue takes the largest: any material consensus in the
     response means a real business, whichever row FMP touched last, and a zero beside it is
-    unfilled. A response stating none keeps the last one."""
+    unfilled. It takes the smallest too, for a filing figure sitting on that one
+    (`_record_for_filing`). A response stating none keeps the last one."""
     eps = [value for value in map(_eps_estimate, ranked) if value is not None]
     revenue = [value for value in map(_revenue_estimate, ranked) if value is not None]
     if eps:
         rec.eps_guard_estimate = eps[-1]
     if revenue:
         rec.revenue_guard_estimate = max(revenue)
+        rec.revenue_smallest_estimate = min(revenue)
 
 
 def _storable_revenue(actual: Optional[float], held: Optional[float],
@@ -843,6 +1174,69 @@ def _storable_figures(eps: Optional[float], revenue: Optional[float],
     if eps == 0 and revenue is not None and revenue <= 0 and (stored is None or held_eps):
         return None, None
     return eps, stored
+
+
+def _held_figures(rec: _Record) -> Tuple[Optional[float], Optional[float]]:
+    """The (EPS, revenue) a row of zeros must not take back or stand beside: FMP's, else the
+    company's own print."""
+    filing = rec.filing
+    if filing is None:
+        return rec.fmp_eps, rec.fmp_revenue
+    return (rec.fmp_eps or filing.eps_adjusted or filing.eps_gaap,
+            rec.fmp_revenue or filing.revenue)
+
+
+def _zeros_gave_way(rec: _Record, *picks: Optional[Tuple[Dict[str, Any], float]]) -> bool:
+    """Is the stored row of zeros over, with this response's `picks` about to fold? It is once
+    `_fmp_zeros_unfilled` says so, or once FMP has a real figure for either field: a row half of
+    which was never real was never a report. Left in the record the other zero would read as a
+    real -100% beside that figure, because nothing could tell it from a real one any more."""
+    filled = any(pick is not None and pick[1] != 0 for pick in picks)
+    return rec.fmp_eps == 0 and rec.fmp_revenue == 0 and (filled or _fmp_zeros_unfilled(rec))
+
+
+def eps_is_unfilled(eps: Optional[float], row: Dict[str, Any]) -> bool:
+    """PURE. Would `_storable_figures` refuse this calendar row's `eps`, read alone with nothing
+    held? For the daily push pass (`earnings_sender.select_results`), which has no record behind
+    it: a row the fold reads as unfilled must not go out as a -100% miss at 16:00 ET either."""
+    revenue = finite(row.get("revenueActual"))
+    kept, _ = _storable_figures(eps, revenue, None, None, _revenue_estimate(row))
+    return eps is not None and kept is None
+
+
+def _revenue_guard_outcome(rec: _Record, shown: LiveMetric) -> Optional[str]:
+    """What the guards did to this revenue, in a log's words, or None when it shows as it came.
+    Read from the same rules `revenue_metric` applied, with the same consensus."""
+    fmp, value = rec.fmp_revenue, shown.actual
+    if value is None:
+        return "held" if shown.checking or fmp is not None else None
+    filed = rec.filing.revenue if rec.filing is not None else None
+    if shown.source == SOURCE_FILING and fmp is not None:
+        return "the filing stands in"
+    if shown.source == SOURCE_FMP and _far_apart(fmp, filed):
+        return "the filing is set aside"
+    if shown.source == SOURCE_FILING and shown.estimate not in (None, rec.revenue_estimate):
+        return "the filing reads the consensus it sits on"
+    other = filed if shown.source == SOURCE_FMP else None
+    return "no verdict" if _guards_take_the_verdict(rec, value, other) else None
+
+
+def _log_guarded_revenue(rec: _Record, shown: LiveMetric) -> None:
+    """One WARNING each time the guards' answer on a record changes, a clean answer in between
+    included, so a report's log reads as what happened to it. Here and not in `revenue_metric`,
+    which is a read that runs on every tick and feed build."""
+    outcome = _revenue_guard_outcome(rec, shown)
+    if outcome == rec.revenue_guard_note:
+        return
+    rec.revenue_guard_note = outcome
+    if outcome is None:
+        return
+    logger.warning(
+        "[earnings-live] %s %s: revenue guard: %s (FMP %s, filing %s, consensus %s, stated %s to "
+        "%s, showing %s against %s)", rec.symbol, rec.day.isoformat(), outcome, rec.fmp_revenue,
+        rec.filing.revenue if rec.filing is not None else None, rec.revenue_estimate,
+        rec.revenue_smallest_estimate, rec.revenue_guard_estimate, shown.actual, shown.estimate,
+    )
 
 
 def _older_than_own_fetch(rec: _Record, stored_at: Optional[float]) -> bool:
@@ -878,11 +1272,70 @@ def _settled(actual: Optional[float], estimate: Optional[float],
     return actual, estimate
 
 
+# ── The filing cache (migration 209) ────────────────────────────────
+
+
+async def _read_held_filings(days: Sequence[date]) -> List[HeldFiling]:
+    """What `earnings_filing_cache` holds for `days`. A failed read RAISES, for the caller to
+    retry. A row that cannot be trusted is left out with a WARNING, and costs only itself; one
+    another verifier kept is left out too, at INFO, as every deploy that moves the version
+    expects."""
+    wanted = [day.isoformat() for day in days]
+
+    def _read() -> List[Any]:
+        from app.database import get_supabase
+
+        res = (get_supabase().table(_FILING_CACHE_TABLE)
+               .select(",".join(_FILING_CACHE_COLUMNS))
+               .in_("report_date", wanted)
+               .execute())
+        return res.data or []
+
+    rows = await asyncio.wait_for(asyncio.to_thread(_read),
+                                  timeout=_FILING_CACHE_DEADLINE_SECONDS)
+    held: List[HeldFiling] = []
+    for row in rows:
+        filing = held_filing_from(row)
+        if filing is not None:
+            held.append(filing)
+            continue
+        named = row if isinstance(row, Mapping) else {}
+        if named and not _kept_by_this_verifier(named):
+            logger.info("[earnings-live] %s %s: a filing cache row of another verifier (version "
+                        "%r, this build's is %d) left out", named.get("symbol"),
+                        named.get("report_date"), named.get("verifier_version"),
+                        FILING_VERIFIER_VERSION)
+            continue
+        logger.warning("[earnings-live] %s %s: a filing cache row could not be read, left out",
+                       named.get("symbol"), named.get("report_date"))
+    return held
+
+
+async def _store_filing(row: Dict[str, Any]) -> None:
+    """Upsert one `earnings_filing_cache` row. Best effort: the figure is already on its record,
+    and a failed write costs only what a restart would have had before this table."""
+
+    def _write() -> None:
+        from app.database import get_supabase
+
+        (get_supabase().table(_FILING_CACHE_TABLE)
+         .upsert(row, on_conflict="symbol,report_date")
+         .execute())
+
+    try:
+        await asyncio.wait_for(asyncio.to_thread(_write),
+                               timeout=_FILING_CACHE_DEADLINE_SECONDS)
+    except Exception as e:
+        logger.warning("[earnings-live] %s %s: filing not kept (%s: %s), a restart will not find "
+                       "it", row["symbol"], row["report_date"], type(e).__name__, e)
+
+
 # ── The service ─────────────────────────────────────────────────────
 
 
 class EarningsLiveService:
-    """Per-process live state (the deploy runs ONE uvicorn worker, so it is coherent)."""
+    """Per-process live state (the deploy runs ONE uvicorn worker, so it is coherent). What a
+    filing said also sits in `earnings_filing_cache` (A RESTART in the module docstring)."""
 
     def __init__(self) -> None:
         self.reset()
@@ -898,6 +1351,10 @@ class EarningsLiveService:
         # tests/test_inflight_cancellation_safety.py recognises the join below.
         self._inflight: Dict[Tuple[str, date], asyncio.Future] = {}
         self.fetches = 0
+        # Has this process taken back `earnings_filing_cache`, and when may a failed read try
+        # again (`restore_filings`)?
+        self._filings_restored = False
+        self._restore_retry_at: float = 0.0
 
     # ── folding rows ───────────────────────────────────────────────
 
@@ -980,16 +1437,18 @@ class EarningsLiveService:
         """One response's rows for one report, weakest first, into its record: each metric's
         figure is the strongest row's that may be stored (`_settled` settles its estimate).
         The surprise behind a figure keeps the figure's consensus through a later pending row,
-        and the landing is the caller's, once per report. An own fetch also stamps the record,
-        which is the line later memo rows must clear (`observe_rows`), and having listed the
-        report it ends any gap `_end_unlisted` was counting."""
+        and the landing is the caller's, once per report. A row of zeros that has given way
+        (`_zeros_gave_way`) leaves the record first, with both its zeros, so from here on the
+        record is the one that row never reached and its estimates can move again. An own fetch
+        also stamps the record, which is the line later memo rows must clear (`observe_rows`),
+        and having listed the report it ends any gap `_end_unlisted` was counting."""
         eps_pick: Optional[Tuple[Dict[str, Any], float]] = None
         revenue_pick: Optional[Tuple[Dict[str, Any], float]] = None
-        held_revenue = rec.fmp_revenue
+        held_eps, held_revenue = _held_figures(rec)
         for row in rows:
             reported_eps = finite(row.get("epsActual"))
             reported_revenue = finite(row.get("revenueActual"))
-            eps, revenue = _storable_figures(reported_eps, reported_revenue, rec.fmp_eps,
+            eps, revenue = _storable_figures(reported_eps, reported_revenue, held_eps,
                                              held_revenue, rec.revenue_guard_estimate)
             if revenue is not None:
                 revenue_pick, held_revenue = (row, revenue), revenue
@@ -1006,11 +1465,20 @@ class EarningsLiveService:
                 rec.eps_refusal_logged = True
                 logger.warning(
                     "[earnings-live] %s %s: FMP EPS %s refused beside revenue %s (holding %s)",
-                    rec.symbol, rec.day.isoformat(), reported_eps, reported_revenue, rec.fmp_eps,
+                    rec.symbol, rec.day.isoformat(), reported_eps, reported_revenue, held_eps,
                 )
             name = row.get("companyName")
             if isinstance(name, str) and name.strip():
                 rec.company_name = name.strip()
+        if _zeros_gave_way(rec, eps_pick, revenue_pick):
+            logger.warning(
+                "[earnings-live] %s %s: revenue guard: FMP's row of zeros gave way (this answer "
+                "EPS %s, revenue %s; filing %s; consensus %s, largest stated %s)",
+                rec.symbol, rec.day.isoformat(), eps_pick and eps_pick[1],
+                revenue_pick and revenue_pick[1], rec.filing is not None,
+                rec.revenue_estimate, rec.revenue_guard_estimate,
+            )
+            rec.fmp_eps = rec.fmp_revenue = None
         rec.fmp_eps, rec.eps_estimate = _settled(
             rec.fmp_eps, rec.eps_estimate, eps_pick, rows, _eps_estimate)
         rec.fmp_revenue, rec.revenue_estimate = _settled(
@@ -1024,7 +1492,9 @@ class EarningsLiveService:
     def _note_landing(self, rec: _Record, now: datetime) -> None:
         """Note a record's first results, or that it has none yet. Results land from pending
         only on a record seen pending. A record with none also notes the report it reads as."""
-        if has_results(eps_metric(rec), revenue_metric(rec)):
+        revenue = revenue_metric(rec)
+        _log_guarded_revenue(rec, revenue)
+        if has_results(eps_metric(rec), revenue):
             if rec.landed_at is None:
                 rec.landed_at = now
                 rec.landed_from_pending = rec.seen_pending
@@ -1078,6 +1548,72 @@ class EarningsLiveService:
             )
         self._note_landing(rec, now)
 
+    def restore_filing(self, symbol: str, day: date, figures: FilingFigures, now: datetime,
+                       *, checked_at: Optional[datetime] = None) -> None:
+        """A filing an earlier process read for (symbol, day) comes back onto its record, a
+        filing this process already holds staying (the first verified one is kept).
+
+        A restored figure is never a landing, so the landing is closed here rather than left to
+        `_note_landing`: a feed build may already have marked the record seen pending, and FMP's
+        fill would then read as one. It is left open only for a row with no figure, an outlook
+        alone: nothing was restored, and FMP's first figure really is the first. `checked_at`
+        is when the figures reached their record, so the sheet's "updated" stays true.
+        """
+        key = (symbol.upper(), day)
+        rec = self._records.get(key)
+        if rec is None:
+            rec = _Record(symbol=key[0], day=day, first_seen_at=now)
+            self._records[key] = rec
+        if rec.filing is None:
+            rec.filing = figures
+        if checked_at is not None and (rec.checked_at is None or checked_at > rec.checked_at):
+            rec.checked_at = checked_at
+        if figures.has_figures and rec.landed_at is None:
+            rec.landed_at = now
+            rec.landed_from_pending = False
+
+    async def restore_filings(self, now: datetime) -> None:
+        """Take back what `earnings_filing_cache` holds for the live days, once per process, in
+        the first tick of either loop, before it decides anything (A RESTART in the module
+        docstring). Never raises. A failed read tries again `_FAILURE_RETRY_SECONDS` later."""
+        if self._filings_restored or not settings.EARNINGS_LIVE_FILINGS_ENABLED:
+            return
+        if time.monotonic() < self._restore_retry_at - _DUE_SLACK_SECONDS:
+            return
+        await self._run_once(("restore", et_now(now).date()),
+                             lambda: self._restore_filings(now))
+
+    async def _restore_filings(self, now: datetime) -> None:
+        from app.services.earnings_filing_service import get_earnings_filing_watcher
+
+        days = live_days(et_now(now).date())
+        try:
+            held = await _read_held_filings(days)
+            watcher = get_earnings_filing_watcher()
+            for filing in held:
+                self.restore_filing(filing.symbol, filing.day, filing.figures, now,
+                                    checked_at=filing.computed_at)
+                watcher.restore(filing.symbol, filing.day, filing.figures)
+        except Exception as e:
+            self._restore_retry_at = time.monotonic() + _FAILURE_RETRY_SECONDS
+            logger.warning(
+                "[earnings-live] filing restore failed for %s to %s (%s: %s): the records go "
+                "without what the table holds; next try in %.0fs", days[0].isoformat(),
+                days[-1].isoformat(), type(e).__name__, e, _FAILURE_RETRY_SECONDS,
+            )
+            return
+        self._filings_restored = True
+        logger.info("[earnings-live] restored %d filing(s) for %s to %s (%s)", len(held),
+                    days[0].isoformat(), days[-1].isoformat(),
+                    ", ".join(f"{f.symbol} {f.day.isoformat()}" for f in held[:20]))
+
+    async def keep_filing(self, symbol: str, day: date, at: datetime) -> None:
+        """Write what the record holds for (symbol, day) to `earnings_filing_cache`: the record's
+        filing, the first verified one, whatever the round just brought. Never raises."""
+        rec = self._records.get((symbol.upper(), day))
+        if rec is not None and rec.filing is not None:
+            await _store_filing(filing_cache_row(rec.symbol, day, rec.filing, at))
+
     # ── reading ────────────────────────────────────────────────────
 
     def snapshot(self, symbol: str, day: date, now: datetime) -> Optional[LiveSnapshot]:
@@ -1111,25 +1647,32 @@ class EarningsLiveService:
         is not a landing — the same rule as `earnings_window_service._absorb` — so a deploy
         never re-announces a morning's results in the afternoon. The same goes for a filing
         accepted more than `_FILING_LANDING_GRACE` before the record was first seen, even
-        though FMP's row still reads pending (`absorb_filing`).
+        though FMP's row still reads pending (`absorb_filing`), and for a filing an earlier
+        process read (`restore_filing`). A report whose only figure has since been taken off
+        waits for one to show: a push must have something to report.
         """
         n = et_now(now)
         today = n.date()
         days = set(live_days(today))
-        return [
+        landed = (
             snapshot_of(rec, today, n)
             for rec in self._records.values()
             if rec.day in days and rec.landed_at is not None and rec.landed_from_pending
-        ]
+        )
+        return [snap for snap in landed if has_results(snap.eps, snap.revenue)]
 
     def pending_symbols(self, day: date, symbols: Iterable[str]) -> List[str]:
-        """The given symbols (order kept) with a record on `day` whose results are incomplete.
-        This is the SEC watch's list: a filing ends that watch. FMP's fetch reads the wider
+        """The given symbols (order kept) with a record on `day` whose results are incomplete,
+        or whose revenue is a zero its filing could still take off (`_zero_awaits_filing`). This
+        is the SEC watch's list: a filing ends that watch. FMP's fetch reads the wider
         `_fmp_wanted`."""
         out = []
         for symbol in symbols:
             rec = self._records.get((symbol.upper(), day))
-            if rec is not None and not is_complete(eps_metric(rec), revenue_metric(rec)):
+            if rec is None:
+                continue
+            revenue = revenue_metric(rec)
+            if not is_complete(eps_metric(rec), revenue) or _zero_awaits_filing(rec, revenue):
                 out.append(symbol.upper())
         return out
 
@@ -1547,15 +2090,17 @@ async def earnings_filing_tick(
     gemini: Any = None,
 ) -> Dict[str, int]:
     """One SEC round over the watched reports still pending today, from the records the FMP tick
-    folded. Each verified figure goes straight into its record and nothing here sends a push:
-    the next FMP tick does. Every dependency is injectable so the suite never reaches a
+    folded. Each verified figure goes straight into its record, then into
+    `earnings_filing_cache`, and nothing here sends a push: the next FMP tick does. Every
+    dependency is injectable, the table through `get_supabase`, so the suite never reaches a
     network."""
     from app.services.earnings_filing_service import get_earnings_filing_watcher
 
     started = time.monotonic()
+    service = get_earnings_live_service()
+    await service.restore_filings(now)
     if watched is None:
         watched = await _watched_ranked_cached()
-    service = get_earnings_live_service()
     n = et_now(now)
     today = n.date()
     pending_today = service.pending_symbols(today, watched)
@@ -1563,10 +2108,11 @@ async def earnings_filing_tick(
     if not pending_today or n.hour < EARNINGS_LIVE_START_HOUR_ET:
         return stats
 
-    def _absorb(symbol: str, figures: FilingFigures) -> None:
+    async def _absorb(symbol: str, figures: FilingFigures) -> None:
         # The figure's own moment: `checked_at` and the landing must not say a long round's start.
-        service.absorb_filing(symbol, today, figures,
-                              now + timedelta(seconds=time.monotonic() - started))
+        at = now + timedelta(seconds=time.monotonic() - started)
+        service.absorb_filing(symbol, today, figures, at)
+        await service.keep_filing(symbol, today, at)
 
     watcher = get_earnings_filing_watcher()
     watcher.prune(live_days(today))
@@ -1583,11 +2129,14 @@ async def earnings_live_tick(
     watched: Optional[Sequence[str]] = None,
     dispatch: Optional[Callable[[List[LiveSnapshot], datetime], Awaitable[Any]]] = None,
 ) -> Dict[str, int]:
-    """One FMP round: fold the memo, fetch what is due, hand the watched landings to the push
-    sender, the filing tick's among them. Every dependency is injectable so the suite never
-    reaches a network."""
+    """One FMP round: take back what the table holds once per process, fold the memo, fetch what
+    is due, hand the watched landings to the push sender, the filing tick's among them. Every
+    dependency is injectable, the table through `get_supabase`, so the suite never reaches a
+    network."""
     from app.services import tracking_service as ts
 
+    service = get_earnings_live_service()
+    await service.restore_filings(now)
     if fmp is None:
         from app.integrations.fmp import get_fmp_client
 
@@ -1597,7 +2146,6 @@ async def earnings_live_tick(
     stats = {"watched": len(watched), "fetched": 0, "landed": 0}
     if not watched:
         return stats
-    service = get_earnings_live_service()
     n = et_now(now)
     today = n.date()
 

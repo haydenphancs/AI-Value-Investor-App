@@ -4,7 +4,8 @@
 //
 //  Molecule: the earnings card's trailing results — one small capsule per metric, "EPS ▲ 7.3%"
 //  and "REV ▼ 2.1%", replacing the date badge once any figure has landed. Each metric is
-//  independent: whichever is out first shows first, the other reads "…" until it lands.
+//  independent: whichever is out first shows first, the other reads "…" while the report is
+//  LIVE or a guard holds its figure, and "—" once nothing more is on its way.
 //
 //  Green / red from `EarningsMetricOutcome.color` (text-safe `gain` / `loss`), and never
 //  colour alone: the ▲ / ▼ glyph and, for VoiceOver, the words "beat" / "missed".
@@ -15,6 +16,7 @@ import SwiftUI
 struct EarningsResultChips: View {
     let eps: EarningsMetricOutcome
     let revenue: EarningsMetricOutcome
+    let status: EarningsLiveStatus
 
     var body: some View {
         VStack(alignment: .trailing, spacing: AppSpacing.xs) {
@@ -47,9 +49,9 @@ struct EarningsResultChips: View {
     }
 
     /// The percentage when there is one; "GAAP" / "In" when the figure is out but not
-    /// comparable; "…" while it is not out (or held for confirmation).
+    /// comparable; "…" while it is on its way (or held for confirmation); else "—".
     private func value(_ outcome: EarningsMetricOutcome) -> String {
-        guard outcome.hasLanded else { return "…" }
+        guard outcome.hasLanded else { return status == .live || outcome.isChecking ? "…" : "—" }
         if outcome.isGAAP { return "GAAP" }
         if let text = outcome.surpriseText { return text }
         return outcome.word ?? "In"
@@ -57,7 +59,13 @@ struct EarningsResultChips: View {
 
     private var spoken: String {
         func say(_ name: String, _ o: EarningsMetricOutcome) -> String {
-            guard o.hasLanded else { return "\(name) not out yet" }
+            guard o.hasLanded else {
+                if o.isChecking { return "\(name) being confirmed" }
+                // The card's own rule (`earningsResultsLine`). Never "not reported": a finished
+                // report can lack one figure in the feed, and the company did report.
+                return status == .live || o.estimate != nil
+                    ? "\(name) not out yet" : "\(name) not available"
+            }
             if o.isGAAP { return "\(name) reported on a GAAP basis" }
             switch o.result {
             case .beat: return "\(name) beat \(o.surpriseText.map { "by \($0)" } ?? "")"
@@ -74,11 +82,13 @@ struct EarningsResultChips: View {
     VStack(spacing: 16) {
         EarningsResultChips(
             eps: EarningsMetricOutcome(estimate: 0.41, actual: 0.44, surprisePct: 7.32),
-            revenue: EarningsMetricOutcome(estimate: 16.6e9, actual: nil, surprisePct: nil)
+            revenue: EarningsMetricOutcome(estimate: 16.6e9, actual: nil, surprisePct: nil),
+            status: .live
         )
         EarningsResultChips(
             eps: EarningsMetricOutcome(estimate: 0.41, actual: 0.30, surprisePct: -26.8),
-            revenue: EarningsMetricOutcome(estimate: 16.6e9, actual: 17.1e9, surprisePct: 3.01)
+            revenue: EarningsMetricOutcome(estimate: 16.6e9, actual: 17.1e9, surprisePct: 3.01),
+            status: .reported
         )
     }
     .padding()

@@ -121,11 +121,12 @@ struct EarningsMetricOutcome: Equatable {
 
 /// Dollar figures for earnings. NOT `CompactNumberFormat`: that one drops to whole units at
 /// 10+ for chart axes, which would print a $17.1B actual against a $16.6B estimate as
-/// "17B vs 17B" — the one comparison this screen exists to make.
+/// "17B vs 17B" — the one comparison this screen exists to make. `nonisolated`: pure string
+/// formatting, and `eps` / `revenue` are passed around as plain `(Double) -> String` values.
 enum EarningsFigureFormat {
 
     /// "$0.41", "-$0.25" (the sign before the dollar — "$-0.25" is how the old card read).
-    static func eps(_ value: Double) -> String {
+    nonisolated static func eps(_ value: Double) -> String {
         guard value.isFinite else { return "—" }
         let sign = value < 0 ? "-" : ""
         return sign + String(format: "$%.2f", abs(value))
@@ -133,7 +134,7 @@ enum EarningsFigureFormat {
 
     /// "$17.1B", "$113.4B", "$523.4M", "$950K". One decimal at every scale so two nearby
     /// figures stay distinguishable; small pre-revenue estimates read "$23.5M", not "$0.0B".
-    static func revenue(_ value: Double) -> String {
+    nonisolated static func revenue(_ value: Double) -> String {
         guard value.isFinite else { return "—" }
         let sign = value < 0 ? "-" : ""
         let v = abs(value)
@@ -153,7 +154,7 @@ enum EarningsFigureFormat {
     }
 
     /// "+24.8%" / "-3.1%" for a year-over-year change.
-    static func growth(_ pct: Double) -> String {
+    nonisolated static func growth(_ pct: Double) -> String {
         guard pct.isFinite else { return "—" }
         let sign = pct > 0 ? "+" : (pct < 0 ? "-" : "")
         return sign + String(format: "%.1f%%", abs(pct))
@@ -276,6 +277,114 @@ extension EarningsLiveResponse {
             }
             return (quarter: q.quarter, result: result, surprisePct: q.surprisePct)
         }
+    }
+}
+
+#if DEBUG
+extension EarningsLiveResponse {
+    /// SAMPLE DATA for `#Preview` only: an invented company with invented figures. DEBUG-only,
+    /// because sample market data must never reach a production path (`ios-swiftui.md`).
+    static let sampleData = EarningsLiveResponse(
+        ticker: "SMPL",
+        companyName: "Sample Company (sample data)",
+        reportDate: "2026-10-29",
+        status: "live",
+        checkedAt: "2026-10-29T20:05:00Z",
+        preliminary: true,
+        eps: EarningsLiveMetricDTO(estimate: 0.41, actual: nil, surprisePct: nil,
+                                   source: nil, basis: nil, checking: nil),
+        revenue: EarningsLiveMetricDTO(estimate: 16.6e9, actual: 17.1e9, surprisePct: 3.01,
+                                       source: "filing", basis: nil, checking: false),
+        filing: EarningsLiveFilingDTO(url: nil, acceptedAt: "2026-10-29T20:02:00Z"),
+        guidance: nil,
+        yearAgo: nil,
+        lastQuarters: nil,
+        pollSeconds: 30
+    )
+}
+#endif
+
+// MARK: - The sheet's header
+
+extension AppAlert.EarningsData {
+
+    /// "EPS Est: $1.00 · Rev Est: $20.0B", or empty when neither estimate is known.
+    /// `EarningsFigureFormat`, not `%.2f` / `%.1fB`: those printed a loss estimate as "$-0.25"
+    /// and a pre-revenue company's $23.5M consensus as "$0.0B".
+    static func consensusText(epsEstimate: Double?, revenueEstimate: Double?) -> String {
+        var parts: [String] = []
+        if let eps = epsEstimate {
+            parts.append("EPS Est: \(EarningsFigureFormat.eps(eps))")
+        }
+        if let revenue = revenueEstimate {
+            parts.append("Rev Est: \(EarningsFigureFormat.revenue(revenue))")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// This card as the sheet's newest answer tells it (`AlertDetailView.headerAlert`), so the
+    /// header cannot fall behind the results card under it: the card's fields are the copy taken
+    /// at the tap. Every field `AppAlert.title` and `earningsDescription` read comes from here,
+    /// but `liveCheckEnded`: that is no answer's to give, and the sheet sets it on the result.
+    ///
+    /// Two answers do not describe the figures this card holds, and neither may take them back:
+    /// `none` (the server has no such report right now), and an answer for another date (the
+    /// sheet follows a report that moved). Without figures, each is the truth to show: `none`
+    /// has its own sentence, and a moved report takes the new date with it, leaving behind the
+    /// time of day, which belonged to the old one.
+    func updated(with live: EarningsLiveResponse) -> AppAlert.EarningsData {
+        let answer: EarningsLiveStatus = live.liveStatus
+        let sameReport: Bool = live.reportDate == reportDate
+        if hasResults, answer == .notScheduled || !sameReport { return self }
+        if answer == .notScheduled {
+            var unscheduled = self
+            unscheduled.status = .notScheduled
+            return unscheduled
+        }
+
+        var shownDay: Int = day
+        var shownMonth: String = month
+        if !sameReport {
+            let moved = Self.dayAndMonth(of: live.reportDate)
+            shownDay = moved?.day ?? 0
+            shownMonth = moved?.month ?? ""
+        }
+        let eps: EarningsMetricOutcome = live.epsOutcome
+        let revenue: EarningsMetricOutcome = live.revenueOutcome
+        return AppAlert.EarningsData(
+            ticker: ticker,
+            companyName: live.companyName ?? companyName,
+            reportTime: sameReport ? reportTime : nil,
+            consensus: Self.consensusText(epsEstimate: eps.estimate,
+                                          revenueEstimate: revenue.estimate),
+            day: shownDay,
+            month: shownMonth,
+            status: answer,
+            reportDate: live.reportDate,
+            epsEstimate: eps.estimate,
+            revenueEstimate: revenue.estimate,
+            epsActual: eps.actual,
+            revenueActual: revenue.actual,
+            epsSurprisePct: eps.surprisePct,
+            revenueSurprisePct: revenue.surprisePct,
+            epsIsGAAP: eps.isGAAP,
+            isPreliminary: live.preliminary ?? isPreliminary,
+            checkedAt: live.checkedDate ?? checkedAt,
+            epsChecking: eps.isChecking,
+            revenueChecking: revenue.isChecking
+        )
+    }
+
+    private static let monthNames: [String] = [
+        "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+    ]
+
+    /// "2026-11-09" as the feed's `day` and `month` (9, "NOV"), or nil for anything else.
+    private static func dayAndMonth(of reportDate: String) -> (day: Int, month: String)? {
+        let parts = reportDate.split(separator: "-")
+        guard parts.count == 3, let month = Int(parts[1]), let day = Int(parts[2]),
+              (1...12).contains(month), (1...31).contains(day) else { return nil }
+        return (day: day, month: monthNames[month - 1])
     }
 }
 

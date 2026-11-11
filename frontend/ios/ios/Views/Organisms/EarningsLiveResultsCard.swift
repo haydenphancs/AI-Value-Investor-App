@@ -7,17 +7,22 @@
 //  "the result will show right away … compare results for estimate vs actual … whatever comes
 //  out first will be shown right away … red or green for miss or beat".
 //
-//  Each metric row stands alone: Revenue can be in while EPS still reads "Waiting…". While the
-//  report is LIVE, or FMP can still confirm its preliminary figures, the card polls its own
-//  endpoint (`EarningsLiveViewModel`); it opens on the Tracking card's own figures (`fallback`)
-//  so it is never blank while the first answer loads. A tapped push has none, so it waits, and
-//  a failed load says so: a status it does not hold would claim a report is still to come.
+//  Each metric row stands alone: while the report is LIVE, Revenue can be in while EPS still
+//  reads "Waiting…". While the report is LIVE, or FMP can still confirm its preliminary figures,
+//  the card polls its own endpoint (`EarningsLiveViewModel`). In the sheet it opens on the
+//  Tracking card's own figures (`fallback`), so it is never blank while the first answer loads.
+//  A tapped push has no such figures: until the first answer the card says it is loading and
+//  claims nothing about the report, which the push has just said is out.
 //
 //  Honesty rules, each from the server (`earnings_live_service`), rendered as given:
 //    * a figure from the company's own release is marked "Preliminary" with a link to the
 //      filing, until FMP's figure replaces it;
 //    * a GAAP EPS is labelled GAAP and never coloured — the consensus is adjusted;
-//    * a figure held by a sanity guard reads "Confirming…", never as a number.
+//    * a figure held by a sanity guard reads "Confirming…", never as a number;
+//    * a metric is awaited only while the report is LIVE: a finished report with no revenue
+//      consensus has stopped waiting for revenue, so it reads "—", or loses the row;
+//    * LIVE lasts only while this device is asking: once its poll has given up, the status
+//      left on screen is a last word from before that, so the badge and "Waiting…" go.
 //
 
 import SwiftUI
@@ -26,26 +31,43 @@ struct EarningsLiveResultsCard: View {
     @StateObject private var viewModel: EarningsLiveViewModel
     /// The Tracking card's own figures — what is shown until the first answer arrives.
     private let fallback: AppAlert.EarningsData?
+    /// Each new answer, for a host whose own text reads the same report (`AlertDetailView`).
+    private let onAnswer: ((EarningsLiveResponse) -> Void)?
+    /// Whether the poll has given up (`EarningsLiveViewModel.pollEnded`), for the same host.
+    private let onPollEnded: ((Bool) -> Void)?
     @State private var browserLink: BrowserLink?
 
-    init(ticker: String, reportDate: String?, fallback: AppAlert.EarningsData? = nil) {
+    init(ticker: String, reportDate: String?, fallback: AppAlert.EarningsData? = nil,
+         onAnswer: ((EarningsLiveResponse) -> Void)? = nil,
+         onPollEnded: ((Bool) -> Void)? = nil) {
         _viewModel = StateObject(wrappedValue: EarningsLiveViewModel(ticker: ticker,
                                                                     reportDate: reportDate))
         self.fallback = fallback
+        self.onAnswer = onAnswer
+        self.onPollEnded = onPollEnded
     }
+
+    #if DEBUG
+    /// Previews only: draws `answer` and never calls the network.
+    init(previewing answer: EarningsLiveResponse) {
+        _viewModel = StateObject(wrappedValue: EarningsLiveViewModel(previewing: answer))
+        self.fallback = nil
+        self.onAnswer = nil
+        self.onPollEnded = nil
+    }
+    #endif
 
     // MARK: Unified reads (live answer first, then the card's figures)
 
     private var live: EarningsLiveResponse? { viewModel.live }
 
-    /// The card holds something about this report: an answer, or the Tracking card's figures.
-    /// With neither, `status` below is only its default, and drawing it would promise a report
-    /// still to come, with "Waiting…" on figures that may have been out for days.
-    private var hasReport: Bool { live != nil || fallback != nil }
-
     private var status: EarningsLiveStatus {
         live?.liveStatus ?? fallback?.status ?? .upcoming
     }
+
+    /// The report reads LIVE and this device is still asking. Anything that claims a check is
+    /// under way reads this, never `status` alone (`LiveBadge`'s honesty rule).
+    private var isLiveNow: Bool { status == .live && !viewModel.pollEnded }
 
     private var eps: EarningsMetricOutcome {
         live?.epsOutcome ?? fallback?.epsOutcome
@@ -66,20 +88,36 @@ struct EarningsLiveResultsCard: View {
         return name.isEmpty ? viewModel.ticker : name
     }
 
+    /// No answer yet and no card figures to open on: the tapped push, before its first answer.
+    /// Read from the data, never a loading flag, which is still false on the first frame.
+    private var hasNothingToShow: Bool { live == nil && fallback == nil }
+
+    /// A finished report with no revenue consensus and no revenue figure: nothing to compare,
+    /// and the server has stopped waiting for one (`is_complete`). While LIVE one can still land.
+    private var showsRevenueRow: Bool {
+        status == .live || revenue.estimate != nil || revenue.hasLanded || revenue.isChecking
+    }
+
     // MARK: Body
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             header
 
-            if !hasReport {
-                noAnswerYet
+            if hasNothingToShow {
+                if !viewModel.loadFailed {
+                    ProgressView()
+                        .controlSize(.small)
+                }
             } else if status == .notScheduled {
                 Text("No earnings report for \(viewModel.ticker) in the next two weeks.")
                     .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
             } else {
-                metricRow(title: "Revenue", outcome: revenue, format: EarningsFigureFormat.revenue)
+                if showsRevenueRow {
+                    metricRow(title: "Revenue", outcome: revenue,
+                              format: EarningsFigureFormat.revenue)
+                }
                 metricRow(title: eps.isGAAP ? "EPS (GAAP)" : "EPS (adjusted)", outcome: eps,
                           format: EarningsFigureFormat.eps)
 
@@ -92,11 +130,22 @@ struct EarningsLiveResultsCard: View {
 
                 footnote
             }
+
+            if viewModel.loadFailed {
+                InlineRetryNotice(
+                    message: "Couldn't load the latest results.",
+                    onRetry: { viewModel.start() }
+                )
+            }
         }
         .padding(AppSpacing.lg)
         .cardSurface(cornerRadius: AppCornerRadius.large)
         .onAppear { viewModel.start() }
         .onDisappear { viewModel.stop() }
+        .onChange(of: viewModel.live) { _, answer in
+            if let answer { onAnswer?(answer) }
+        }
+        .onChange(of: viewModel.pollEnded) { _, ended in onPollEnded?(ended) }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
             viewModel.stop()
         }
@@ -104,19 +153,6 @@ struct EarningsLiveResultsCard: View {
             viewModel.start()
         }
         .inAppBrowser(link: $browserLink)
-    }
-
-    @ViewBuilder
-    private var noAnswerYet: some View {
-        if viewModel.loadFailed {
-            InlineRetryNotice(
-                message: "Couldn't load the latest results.",
-                onRetry: { viewModel.start() }
-            )
-        } else {
-            ProgressView()
-                .controlSize(.small)
-        }
     }
 
     // MARK: Header
@@ -128,22 +164,24 @@ struct EarningsLiveResultsCard: View {
                     .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
                 Spacer(minLength: 0)
-                if status == .live {
+                if isLiveNow {
                     LiveBadge()
                 }
             }
-            if hasReport {
-                Text(statusLine)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-            }
+            Text(statusLine)
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
         }
         .accessibilityElement(children: .combine)
     }
 
     private var statusLine: String {
+        if hasNothingToShow {
+            return viewModel.loadFailed ? "Results aren't available right now" : "Loading results…"
+        }
         switch status {
         case .live:
+            guard isLiveNow else { return "Latest results aren't available right now" }
             if let checkedAt {
                 return "Checking for results · updated \(Self.relative(checkedAt))"
             }
@@ -154,7 +192,8 @@ struct EarningsLiveResultsCard: View {
             }
             return "Reported"
         case .awaiting:
-            return "Results aren't in yet"
+            return eps.isChecking || revenue.isChecking
+                ? "Results being confirmed" : "Results aren't in yet"
         case .upcoming:
             return "Results will appear here the moment they're out"
         case .notScheduled:
@@ -202,7 +241,8 @@ struct EarningsLiveResultsCard: View {
     private func actualText(_ outcome: EarningsMetricOutcome,
                             format: (Double) -> String) -> String {
         if let actual = outcome.actual { return format(actual) }
-        return outcome.isChecking ? "Confirming…" : "Waiting…"
+        if outcome.isChecking { return "Confirming…" }
+        return isLiveNow ? "Waiting…" : "—"
     }
 
     @ViewBuilder
@@ -221,7 +261,7 @@ struct EarningsLiveResultsCard: View {
                     .font(AppTypography.captionEmphasis)
             }
             .foregroundColor(outcome.color)
-        } else if !outcome.hasLanded, status == .live {
+        } else if !outcome.hasLanded, status == .live, !viewModel.loadFailed {
             ProgressView()
                 .controlSize(.small)
         }
@@ -367,35 +407,22 @@ struct EarningsLiveResultsCard: View {
     }
 
     private var footnote: some View {
-        Text(footnoteText)
+        let basis: String = eps.isGAAP
+            ? "This EPS is GAAP; the consensus is adjusted, so the two are not compared. "
+            : "EPS is adjusted (non-GAAP), the same basis as the consensus estimate. "
+        return Text(basis + "Estimates and confirmed results from FMP.")
             .font(AppTypography.caption)
             .foregroundColor(AppColors.textMuted)
             .fixedSize(horizontal: false, vertical: true)
     }
-
-    /// Its first sentence follows the EPS row above it: a GAAP-only release is not on the
-    /// consensus's basis, which is why that row reads "Not comparable".
-    private var footnoteText: String {
-        let basis = eps.isGAAP
-            ? "This EPS is GAAP; the consensus estimate is adjusted (non-GAAP)."
-            : "EPS is adjusted (non-GAAP), the same basis as the consensus estimate."
-        return basis + " Estimates and confirmed results from FMP."
-    }
 }
 
+#if DEBUG
 #Preview {
     ScrollView {
-        EarningsLiveResultsCard(
-            ticker: "INTC",
-            reportDate: "2026-10-29",
-            fallback: AppAlert.EarningsData(
-                ticker: "INTC", companyName: "Intel", reportTime: nil,
-                consensus: "EPS Est: $0.41 · Rev Est: $16.6B", day: 29, month: "OCT",
-                status: .live, epsEstimate: 0.41, revenueEstimate: 16.6e9,
-                revenueActual: 17.1e9, revenueSurprisePct: 3.01, isPreliminary: true
-            )
-        )
-        .padding()
+        EarningsLiveResultsCard(previewing: .sampleData)
+            .padding()
     }
     .background(AppColors.background)
 }
+#endif

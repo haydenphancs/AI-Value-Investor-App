@@ -12,9 +12,22 @@ import SwiftUI
 
 struct EarningsLiveScreen: View {
     let ticker: String
-    let reportDate: String?
+    private let card: EarningsLiveResultsCard
 
     @Environment(\.dismiss) private var dismiss
+
+    init(ticker: String, reportDate: String?) {
+        self.ticker = ticker
+        self.card = EarningsLiveResultsCard(ticker: ticker, reportDate: reportDate)
+    }
+
+    #if DEBUG
+    /// Previews only: draws `answer` and never calls the network.
+    init(previewing answer: EarningsLiveResponse) {
+        self.ticker = answer.ticker
+        self.card = EarningsLiveResultsCard(previewing: answer)
+    }
+    #endif
 
     var body: some View {
         ZStack {
@@ -22,7 +35,7 @@ struct EarningsLiveScreen: View {
                 .ignoresSafeArea()
 
             ScrollView(showsIndicators: false) {
-                EarningsLiveResultsCard(ticker: ticker, reportDate: reportDate)
+                card
                     .padding(.horizontal, AppSpacing.lg)
                     .padding(.vertical, AppSpacing.xl)
             }
@@ -43,8 +56,10 @@ struct EarningsLiveScreen: View {
     }
 }
 
+#if DEBUG
 #Preview {
     NavigationStack {
-        EarningsLiveScreen(ticker: "INTC", reportDate: "2026-10-29")
+        EarningsLiveScreen(previewing: .sampleData)
     }
 }
+#endif

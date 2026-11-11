@@ -35,7 +35,8 @@ struct AlertCardView: View {
             // Once any figure is in, the result is what matters, not the date (which the
             // subtitle still states). Before that, the date badge as always.
             if data.hasResults {
-                EarningsResultChips(eps: data.epsOutcome, revenue: data.revenueOutcome)
+                EarningsResultChips(eps: data.epsOutcome, revenue: data.revenueOutcome,
+                                    status: data.status)
             } else {
                 EventDateBadge(day: data.formattedDay, month: data.formattedMonth)
             }

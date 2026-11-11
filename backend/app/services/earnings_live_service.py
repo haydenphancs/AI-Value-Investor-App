@@ -937,6 +937,8 @@ def card_fields(snap: Optional[LiveSnapshot], report_day: date) -> Dict[str, Any
         eps_basis=snap.eps.basis,
         results_preliminary=snap.preliminary if has_results(snap.eps, snap.revenue) else None,
         results_checked_at=iso_utc(snap.checked_at),
+        eps_checking=snap.eps.checking,
+        revenue_checking=snap.revenue.checking,
     )
     return fields
 

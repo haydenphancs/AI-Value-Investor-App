@@ -26,8 +26,8 @@ struct AlertDestination: Identifiable, Hashable {
         case ticker(symbol: String, assetType: MarketTickerType, destination: TickerDestination)
         case whale(id: String)
         case report(ticker: String, persona: String?, reportId: String?)
-        /// One report's live results (`EarningsLiveScreen`). `reportDate` is "YYYY-MM-DD", or
-        /// nil to let the server choose (an older notification row carries no date).
+        /// One report's live results (`EarningsLiveScreen`). `reportDate` is "YYYY-MM-DD".
+        /// `destinations(for:)` offers this only for a row with a date the endpoint still serves.
         case earningsLive(ticker: String, reportDate: String?)
     }
 
@@ -126,8 +126,14 @@ extension AlertDestination {
 
         // An earnings result leads with its own live results — the figures the banner was
         // about, estimate vs actual — before the ticker screen.
-        if isEarningsResult(item.kind) {
-            let reportDate = route["report_date"].flatMap { $0.isEmpty ? nil : $0 }
+        //
+        // ONLY while the endpoint serves that report. It answers 400 for a date before the
+        // previous trading day (`MarketHoursUtil.previousTradingDayKey`), on a row the inbox
+        // keeps for 90 days, and a row with no date would be answered with some other report.
+        // Both keep "Open" and "See the numbers", which show that quarter's figures. Keyed on
+        // the route's date, never `createdAt`: a pushed copy's `createdAt` is its delivery time.
+        if isEarningsResult(item.kind), let reportDate = route["report_date"],
+           reportDate >= MarketHoursUtil.previousTradingDayKey() {
             out.append(AlertDestination(
                 label: "See live results",
                 systemImage: "bolt.horizontal.circle",

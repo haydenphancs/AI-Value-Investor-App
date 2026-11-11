@@ -240,7 +240,7 @@ class EarningsLiveResponse(BaseModel):
     ticker: str
     company_name: Optional[str] = None
     report_date: str
-    status: str                         # "upcoming" | "live" | "reported" | "awaiting"
+    status: str                         # "upcoming" | "live" | "reported" | "awaiting" | "none"
     checked_at: Optional[str] = None
     preliminary: bool = False
     eps: EarningsLiveMetricResponse
@@ -249,8 +249,9 @@ class EarningsLiveResponse(BaseModel):
     guidance: Optional[str] = None
     year_ago: Optional[EarningsLiveYearAgoResponse] = None
     last_quarters: List[EarningsLiveQuarterResponse] = Field(default_factory=list)
-    # How often the client should ask again: 30 while `status == "live"`, 120 while a reported
-    # report's preliminary figures can still be confirmed by FMP, null otherwise.
+    # How often the client should ask again: 30 while `status == "live"`, and on an `upcoming` or
+    # `awaiting` answer for a day nobody has read yet, 120 while a reported report's preliminary
+    # figures can still be confirmed by FMP, null otherwise.
     poll_seconds: Optional[int] = None
 
 

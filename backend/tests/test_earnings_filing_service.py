@@ -26,6 +26,9 @@ goes again on a widening ladder. NOT_RELEASE: it was read and is not the results
 never read again and the watch goes on. RELEASE: final for the report, even with no figure in it.
 A glitch must never cost a report its fast path, and a filing that is not the release must never
 end the watch for the one that is.
+Learn, the buyback check and the Trillion stake finder: the cap on a round, the release-window
+cadence, the stop once a filing is found, one extraction per accession, and parking every
+symbol on a throttle.
 
 So is the round's timing, because the card reads the record while a round runs: a figure is
 handed over the moment it verifies, every symbol of a round comes due again a minute after that
@@ -3615,6 +3618,23 @@ async def test_a_found_release_alone_is_enough_to_free_the_slot(watcher, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_a_ticker_between_its_reads_keeps_its_slot_from_the_next_one_down(
+        watcher, monkeypatch, clock):
+    """The cap comes before the cadence. Cut after it, a ticker waiting out its 5 min would hand
+    its slot down the list, and rounds a minute apart would read the tickers the cap keeps off
+    the circuit SEC shares with Learn and the stake finder."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
+    between_the_windows = datetime(2026, 10, 29, 12, 0, tzinfo=ET).astimezone(timezone.utc)
+    sec = _SEC()
+    for minute in range(4):
+        clock.at += 60
+        await watcher.run_once(between_the_windows + timedelta(minutes=minute),
+                               ["AAPL", "MSFT", "INTC"], REPORT, sec=sec, cik_map=_CIKS,
+                               sleep=_no_sleep)
+    assert sec.calls == ["sub:0000320193"]
+
+
+@pytest.mark.asyncio
 async def test_a_symbol_between_two_reads_keeps_its_slot(watcher, monkeypatch):
     """The cap counts tickers at a time. Cut after the due filter, it would count reads a
     round, and every ticker on the list would come through on its own minute."""
@@ -3665,6 +3685,26 @@ def test_the_sec_cap_is_not_documented_as_daily():
         assert says_what_it_is in text
         for phrase in ("tickers a day", "per report day", "per-day cap"):
             assert phrase not in text, f"{says_what_it_is!r}'s file says {phrase!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_report_off_the_pending_list_frees_its_slot_for_the_next(watcher, monkeypatch):
+    """A load limit, not a daily budget: `pending_symbols` drops a report once its figures are
+    in, and the cap applies to what is left. So a day can read more tickers than the cap."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
+    sec = _SEC()
+    for pending in (["AAPL", "MSFT"], ["MSFT"]):
+        await watcher.run_once(_AT_16, pending, REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
+    assert sec.calls == ["sub:0000320193", "sub:0000789019"]
+
+
+@pytest.mark.asyncio
+async def test_a_budget_of_zero_reads_nothing_from_sec(watcher, monkeypatch):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 0)
+    sec = _SEC()
+    assert await watcher.run_once(_AT_16, ["AAPL", "MSFT"], REPORT, sec=sec, cik_map=_CIKS,
+                                  sleep=_no_sleep) == {}
+    assert sec.calls == []
 
 
 @pytest.mark.asyncio

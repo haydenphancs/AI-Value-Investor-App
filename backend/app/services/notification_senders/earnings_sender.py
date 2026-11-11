@@ -25,6 +25,24 @@ Two passes over those rows:
 Scheduled after the close (16:00 ET) because that is when both halves are true at once:
 tomorrow's calendar is settled, and today's after-close prints have started landing.
 
+WHAT THE PASS READS REACHES THE LIVE RECORDS, BEFORE IT TELLS ANYONE. It asks FMP for itself, and
+the live loop stops asking about a report once it is complete, so these rows can be newer than
+the record. Told from such a row, New York's banner and the sheet it opens would disagree, and a
+row held for Berlin's morning, whose text comes from the record at its wake
+(`earnings_live_sender.copy_at_wake`), would be dropped or reversed by the older figure. So a
+record is never older than a row it can overrule (`_fold_into_live_records`).
+
+THE LIVE PUSH SWITCHES STOP AT `earnings_live_sender`. This pass reads neither
+`EARNINGS_LIVE_PUSH_ENABLED` nor `EARNINGS_LIVE_RESULT_PUSH_ENABLED`. Both ship off, so as shipped
+this pass is what tells a result; with one on, it finds the key taken for whoever the live send
+reached and tells the rest (`result_dedup_key`).
+
+THIS PASS DECIDES PER ROW, the record per report (`earnings_live_service`, DUPLICATE ROWS). A
+report FMP lists twice with two consensus figures is told from the first row past the bar while
+the record keeps the best-ranked one, so New York's banner can differ from the sheet it opens and
+from a row held for Berlin, whose text comes from the record at its wake. Left as it is: this
+pass stayed as it was when the result push went off, and no captured calendar holds such a pair.
+
 WHAT THIS FILE DELIBERATELY DOES NOT DO
 ---------------------------------------
 It does not decide whether any particular user gets a notification. Preference, group
@@ -39,6 +57,7 @@ import logging
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.config import settings
 from app.integrations.fmp import get_fmp_client
 from app.services._earnings_common import (
     eps_digit_shift_suspect,
@@ -46,7 +65,7 @@ from app.services._earnings_common import (
     parse_fmp_timing,
     timing_sentence,
 )
-from app.services.earnings_live_service import eps_is_unfilled
+from app.services.earnings_live_service import eps_is_unfilled, get_earnings_live_service
 from app.services.earnings_window_service import fetch_calendar_days
 from app.services.notification_jobs import JOB_EARNINGS, claimed_job
 from app.services.notification_kinds import (
@@ -173,8 +192,8 @@ def in_result_window(report_day: date, today: date) -> bool:
 
     The ONE rule for every result push, this module's daily pass and
     `earnings_live_sender` alike. Calendar days, never trading days, so a Friday report is
-    out by Sunday. It decides who is told and nothing else: the card and the sheet keep
-    the report.
+    out by Sunday. It decides who is told, and so which of a pass's rows speak about a result
+    (`_fold_into_live_records`), and nothing else: the card and the sheet keep the report.
     """
     return report_day in (today, today - timedelta(days=1))
 
@@ -224,6 +243,39 @@ def select_results(
     return out
 
 
+def _fold_into_live_records(
+    by_day: Dict[date, List[Dict[str, Any]]], today: date, now: Optional[datetime]
+) -> None:
+    """Give the live records what this pass just read (the module docstring has why), for the
+    days a result can come from: tomorrow is read for the upcoming pass, and an actual on a date
+    not reached yet is garbage. It is a real FMP answer, so it folds as one: the sheet's
+    "updated" moves, and memo rows from before it can no longer put an older figure back.
+
+    Called the moment the fetch returns: a later await would let an own fetch's newer answer in
+    underneath this one. With live results off no loop runs to prune a record, and nothing reads
+    one.
+
+    A failure costs the sheet, never the pass: nobody is told less because of it, and a held row
+    then wakes on the record as it stood.
+    """
+    if not settings.EARNINGS_LIVE_ENABLED:
+        return
+    at = now or datetime.now(ET)
+    live = get_earnings_live_service()
+    for day, rows in by_day.items():
+        if not in_result_window(day, today):
+            continue
+        try:
+            live.observe_rows(day, rows, at, fetched=True)
+        except Exception as e:
+            logger.warning(
+                "earnings notifications: could not fold %d calendar row(s) for %s into the live "
+                "records (%s: %s) — the pass goes on, and a result held on that day wakes on "
+                "the record as it stood",
+                len(rows), day.isoformat(), type(e).__name__, e, exc_info=True,
+            )
+
+
 def upcoming_copy(symbol: str, timing: str) -> Tuple[str, str]:
     """Title/body for a "reports soon" notification.
 
@@ -253,8 +305,9 @@ def result_copy(symbol: str, surprise: float) -> Tuple[str, str]:
 
 def result_dedup_key(symbol: str, when: str) -> str:
     """The ONE key a report's result alert is claimed under — whichever sender gets there
-    first. `earnings_live_sender` claims it for both `earnings_live` and the live-timed
-    `earnings_result`, and this module's daily pass finds it taken, so nobody is told twice.
+    first. While its switches are on, `earnings_live_sender` claims it for both `earnings_live`
+    and the live-timed `earnings_result`, and this module's daily pass then finds it taken, so
+    nobody is told twice.
     Keyed on the EARNINGS date (see `_dispatch`)."""
     return f"{KIND_EARNINGS_RESULT}:{symbol.upper()}:{str(when)[:10]}"
 
@@ -399,8 +452,11 @@ async def _dispatch(
         # The registry supplies the tab, so `earnings_result` lands on Financials
         # rather than making the user hunt for the numbers the alert is about. The report
         # date lets a result row open THAT report's live results and stand in for the same
-        # report's card (`AlertDestination.Target.earningsLive`).
-        data=ticker_route(kind, symbol, report_date=when),
+        # report's card (`AlertDestination.Target.earningsLive`). With live results off there
+        # are none to open, and the sheet would answer estimates under the announced figures.
+        data=ticker_route(
+            kind, symbol, report_date=when if settings.EARNINGS_LIVE_ENABLED else None,
+        ),
     )
 
 
@@ -437,6 +493,7 @@ async def run_earnings_notifications(now: Optional[datetime] = None) -> Dict[str
         # each row only under its own date.
         days = [today + timedelta(days=1), today, today - timedelta(days=1)]
         by_day = await fetch_calendar_days(get_fmp_client().get_earnings_calendar, days)
+        _fold_into_live_records(by_day, today, now)
         rows = [row for d in days for row in by_day.get(d, [])]
 
         if not rows:

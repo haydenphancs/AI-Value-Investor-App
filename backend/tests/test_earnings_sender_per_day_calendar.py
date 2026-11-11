@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 import app.services.notification_senders.earnings_sender as es
+from app.config import settings
 from app.integrations.fmp import FMPUnavailableException
 
 # 21:00 UTC on 2026-11-05 = 16:00 EST: the run's ET day is Nov 5.
@@ -85,6 +86,8 @@ def _wire(monkeypatch, fmp: _FMP, watched: set) -> tuple:
     monkeypatch.setattr(es, "get_fmp_client", lambda: fmp)
     monkeypatch.setattr(es, "_dispatch", _dispatch)
     monkeypatch.setattr(es, "_watched_tickers", _watched)
+    # These calendars must not reach the live records, a singleton shared with every later test.
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", False)
     return run, dispatched, watched_reads
 
 

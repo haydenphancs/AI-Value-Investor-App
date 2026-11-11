@@ -10,19 +10,61 @@ never concurrently, so which copy a user gets can never depend on timing:
   2. `earnings_result` ("Results & Surprises"): the existing kind and copy (`result_copy`),
      sent the moment FMP's adjusted EPS exists and its surprise clears `MIN_SURPRISE` —
      instead of at the next 16:00 ET run. FMP numbers ONLY: this kind reaches 1.02 users,
-     and a figure read from a filing is preliminary.
+     and a figure read from a filing is preliminary. Held by
+     `EARNINGS_LIVE_RESULT_PUSH_ENABLED` (ships off: the owner's "Keep it off at first",
+     2026-11-05).
+
+With both off, as shipped, this module sends and claims nothing: a landed report keeps its card
+and its sheet, and `run_earnings_notifications`' daily pass, which reads neither switch, tells
+its result at 16:00 ET under the same key. For most reports the cost of off is that wait, up to a
+day. Some lose the buzz outright, because the pass has rules of its own and knows only the rows
+it read. These are the kinds known, and each keeps the sheet:
+  * A report FMP fills after the pass on the day after its date. That was the last pass whose
+    window holds it (`in_result_window`), so a Thursday report filled on Friday at 17:05 is told
+    by nobody.
+  * A surprise with the dropped-digit signature that the filing's GAAP EPS clears. The record
+    shows it. The pass reads rows, with no GAAP beside them, and refuses it (`select_results`).
+  * A report past `MAX_SYMBOLS_PER_PASS` on a pass's list. The next day's pass reads the same
+    rows in the same order, so it stays cut, where this module's cap only moves a report to the
+    next round.
+  * A filled row with no estimate of its own. The record keeps the estimate it held, so the sheet
+    shows a surprise, and the pass has nothing in the row to divide by (`surprise_pct`).
+  * A figure FMP takes back before the pass reads it, the row blank again or off the calendar.
+    The record keeps a figure through either, so the sheet still shows it, and the pass reads no
+    result to tell.
+No captured calendar shows FMP doing either of the last two: they follow from the rules.
 
 `push_dispatch_service` claims the key only for users who pass their toggle and cap, so a
 user with Live Results on gets #1 and is skipped by #2 as a duplicate; a user with only
-Results & Surprises on gets #2; and `run_earnings_notifications`' daily pass later finds
-every key claimed. Preference, master switch, category cap and quiet hours stay the
-dispatcher's job — nothing here decides who is told.
+Results & Surprises on gets #2; and the daily pass later finds the key taken for both.
+Preference, master switch, category cap and quiet hours stay the
+dispatcher's job — nothing here decides who is told. That includes the hour: both kinds carry
+`night_hold_by_default`, so a landing in the night of a user who never set Quiet Hours is
+claimed at once and buzzes at 07:00 on their clock.
+
+A HELD ROW'S TEXT is decided at its wake, not at its landing (`copy_at_wake`): the record can
+have moved under it for hours, and the flush is what asks. The text comes from the record, a
+surprise the record no longer holds is not buzzed, and the row keeps what the record says so the
+inbox never shows the number the phone was spared. The row's own text stands only when the
+record has nothing to say: it is gone (a restart), or holds no figure. A row from the daily pass
+reads the same way: the pass gives the record what it read first, so the record is never the
+older of the two.
+
+A REPORT WITH NO ANSWER YET is not a report that has changed its mind. A figure held as
+"checking" is a figure FMP has yet to confirm, and it can come back right after the wake. So
+instead of ending the row, the wake asks again (`WAKE_ASK_AGAIN`), with the row saying what is
+known meanwhile, and only for a row that would otherwise end. `earnings_result` waits on FMP's own
+EPS, the one figure it may state. `earnings_live` waits only when it has no figure to state at
+all: a revenue beside an EPS in doubt is a true sentence and goes out. The dispatcher bounds it
+(`PushDispatchService.MAX_FLUSH_ATTEMPTS`). A row still without an answer at its last hand-out
+ends unbuzzed, and if FMP recovers later still that report gets no buzz: the bound is the point.
 
 THE WINDOW. Neither kind goes out for a report older than yesterday: the daily pass's own
 rule (`earnings_sender.in_result_window`), which is narrower than the live days around a
 weekend or a holiday. A Friday report FMP fills on Monday lands, keeps its card and its sheet,
 and is marked handled here with nothing further sent: a live push from its filing, if one went
-out inside the window, is all it gets.
+out inside the window, is all it gets. The rule decides what starts: a row claimed inside the
+window is the dispatcher's, and still goes out at its wake if the report has aged past it.
 
 ONE REPORT, TWO DATES. FMP's leftover row a trading day from a report lands like any report, and
 the key carries its date, so the ledger decides: a user holding the result key on any day out to
@@ -56,8 +98,9 @@ document); an FMP-sourced figure is stated as beat/missed by a percentage, the s
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
-from typing import Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 from app.config import settings
 from app.services.earnings_live_service import (
@@ -67,6 +110,8 @@ from app.services.earnings_live_service import (
     LiveMetric,
     LiveSnapshot,
     et_now,
+    get_earnings_live_service,
+    has_results,
     live_days,
 )
 from app.services.notification_kinds import (
@@ -90,6 +135,10 @@ logger = logging.getLogger(__name__)
 #: watched reports only, so this counts sends for them and never the market. Anything over it
 #: is picked up on the next 60 s round, while its report is still inside the result window.
 MAX_SENDS_PER_ROUND = 60
+#: How long a held row with no answer yet waits to ask again (A REPORT WITH NO ANSWER YET). A
+#: report that still wants FMP is read every 5 or 30 min on a trading day, so one wait holds a
+#: read, and the two a row can have reach the 2 h cadence of a closed day.
+WAKE_ASK_AGAIN = timedelta(hours=1)
 
 # Once per (symbol, report date) per process. The dedup key is what stops a restart from
 # re-sending; these sets stop the same process from re-dispatching every 60 s. A key is taken
@@ -163,6 +212,76 @@ def live_copy(snap: LiveSnapshot) -> Tuple[str, str]:
     return f"{snap.symbol} results are out", body
 
 
+@dataclass(frozen=True)
+class WakeCopy:
+    """What a held result says at its wake. `send` False keeps it off the phone: the text goes
+    to its inbox row alone. `ask_again_in` says that `send` False is no last word: the report
+    has yet to answer, so the row may wait that long and be read again."""
+
+    title: str
+    body: str
+    send: bool
+    ask_again_in: Optional[timedelta] = None
+
+
+def _result_surprise(snap: LiveSnapshot) -> Optional[float]:
+    """The surprise an `earnings_result` push may state for this report, or None: FMP's own
+    adjusted EPS, an honest percentage, past `MIN_SURPRISE`."""
+    eps = snap.eps
+    if eps.actual is None or eps.source != SOURCE_FMP:
+        return None
+    surprise = surprise_pct({"epsEstimated": eps.estimate, "epsActual": eps.actual})
+    return surprise if surprise is not None and abs(surprise) >= MIN_SURPRISE else None
+
+
+def _fmp_eps_stands(snap: LiveSnapshot) -> bool:
+    """Is FMP's own EPS on show? `earnings_result` can state no other, so without one the record
+    has not answered it: the figure may be held, or the filing's may stand in for one in doubt."""
+    return snap.eps.actual is not None and snap.eps.source == SOURCE_FMP
+
+
+def _report_of(route: Mapping[str, Any]) -> Optional[Tuple[str, date]]:
+    """The (symbol, report date) a stored route names, or None."""
+    symbol, raw_day = route.get("ticker"), route.get("report_date")
+    if not isinstance(symbol, str) or not symbol or not isinstance(raw_day, str):
+        return None
+    try:
+        return symbol, date.fromisoformat(raw_day[:10])
+    except ValueError:
+        return None
+
+
+def copy_at_wake(kind: str, route: Mapping[str, Any], now: datetime) -> Optional[WakeCopy]:
+    """What a held row of `kind`, stored with `route`, says now, from the record as it stands
+    (A HELD ROW'S TEXT in the module docstring), or None to keep the row's own text.
+
+    `earnings_result` goes out only on what would start it now (`_result_surprise`), since FMP
+    can correct a figure inside the hold and a push must not state a beat the sheet it opens
+    calls a miss. `earnings_live` goes out on any figure that stands. A row that no longer goes
+    out takes `live_copy`, which can say what `result_copy` cannot: in line, being confirmed.
+    It carries `ask_again_in` when the report has yet to answer (A REPORT WITH NO ANSWER YET in
+    the module docstring), never for a figure that stands and simply no longer clears the bar.
+    PURE apart from reading the record, so the flush can call it on the event loop.
+    """
+    report = _report_of(route)
+    if report is None or kind not in (KIND_EARNINGS_LIVE, KIND_EARNINGS_RESULT):
+        return None
+    snap = get_earnings_live_service().snapshot(*report, now)
+    if snap is None:
+        return None
+    eps, revenue = snap.eps, snap.revenue
+    if not (has_results(eps, revenue) or eps.checking or revenue.checking):
+        return None
+    if kind == KIND_EARNINGS_RESULT:
+        surprise = _result_surprise(snap)
+        if surprise is not None:
+            return WakeCopy(*result_copy(snap.symbol, surprise), send=True)
+        return WakeCopy(*live_copy(snap), send=False,
+                        ask_again_in=None if _fmp_eps_stands(snap) else WAKE_ASK_AGAIN)
+    stands = has_results(eps, revenue)
+    return WakeCopy(*live_copy(snap), send=stands, ask_again_in=None if stands else WAKE_ASK_AGAIN)
+
+
 async def _notify(kind: str, snap: LiveSnapshot, title: str, body: str) -> int:
     from app.services.push_dispatch_service import get_push_dispatch_service
 
@@ -226,11 +345,7 @@ def _still_owed(snap: LiveSnapshot) -> bool:
         return True
     if not settings.EARNINGS_LIVE_RESULT_PUSH_ENABLED or key in _surprise_done:
         return False
-    eps = snap.eps
-    if eps.actual is None or eps.source != SOURCE_FMP:
-        return False
-    surprise = surprise_pct({"epsEstimated": eps.estimate, "epsActual": eps.actual})
-    return surprise is not None and abs(surprise) >= MIN_SURPRISE
+    return _result_surprise(snap) is not None
 
 
 def _give_back(done: Set[Tuple[str, date]], snap: LiveSnapshot, left: List[LiveSnapshot],

@@ -64,6 +64,7 @@ def _worst_case_row() -> dict:
         "route": None,              # JSONB null
         "claimed_at": None,
         "read_at": None,
+        "sent_at": None,
         "push_state": None,
     }
 
@@ -128,6 +129,90 @@ def test_the_ios_decoder_expects_exactly_these_inbox_keys():
         f"iOS decodes {sorted(missing)} but the backend never emits them — a "
         f"non-optional field that is absent is a decode CRASH, not a nil"
     )
+
+
+def test_a_sent_row_says_when_it_went_out():
+    """Held overnight, it is decided at 03:30 UTC and buzzes at 11:00. The two are different
+    facts, and a user reading "Received" means the second."""
+    service = object.__new__(NotificationInboxService)
+    row = {**_worst_case_row(), "claimed_at": "2026-10-30T03:30:00+00:00",
+           "sent_at": "2026-10-30T11:00:00+00:00", "push_state": "sent"}
+    dto = service._to_response(row)
+    assert dto.created_at == "2026-10-30T03:30:00+00:00"
+    assert dto.sent_at == "2026-10-30T11:00:00+00:00"
+    assert service._to_response(_worst_case_row()).sent_at is None, "never delivered"
+
+
+def test_both_inbox_reads_select_the_send_time():
+    """A fake row carries every column, so only the column list shows the read asks for it.
+    Without it the DTO stays None on every row and nothing fails."""
+    from app.services import notification_inbox_service as inbox
+
+    assert "sent_at" in inbox._COLUMNS
+    assert all(key in inbox._COLUMNS for key in _worst_case_row())
+    src = Path(inbox.__file__).read_text()
+    assert src.count(".select(_COLUMNS)") == 2 and 'select("id, kind' not in src
+
+
+def _swift_code(path: Path) -> str:
+    """`path` with comments gone: they name the fields this guards."""
+    src = re.sub(r"/\*.*?\*/", "", path.read_text(), flags=re.DOTALL)
+    return "\n".join(line.split("//")[0] for line in src.splitlines())
+
+
+def _declaration(src: str, anchor: str) -> str:
+    """The brace-balanced body after `anchor`."""
+    start = src.index("{", src.index(anchor))
+    depth = 0
+    for i in range(start, len(src)):
+        depth += {"{": 1, "}": -1}.get(src[i], 0)
+        if depth == 0:
+            return src[start: i + 1]
+    raise AssertionError(f"unbalanced block after {anchor!r}")
+
+
+def _ios_time_guard(models: str, detail: str) -> None:
+    received = _declaration(models, "var receivedAt: String")
+    assert "wasDelivered" in received, "a row never delivered has no send time to prefer"
+    assert re.search(r"return\s+sentAt\b", received), "receivedAt no longer reads the send time"
+    assert re.search(r"return\s+createdAt\b", received), "receivedAt lost its older-server fallback"
+    relative = _declaration(models, "var relativeTime: String")
+    assert "receivedAt" in relative and "createdAt" not in relative, (
+        "the Alerts row reads the decision time, so a 07:00 buzz reads as 8h old"
+    )
+    absolute = _declaration(detail, "private func absoluteTime(")
+    assert "event.receivedAt" in absolute and "createdAt" not in absolute, (
+        '"Received" prints the decision time, hours before the phone buzzed'
+    )
+
+
+def test_ios_tells_the_user_when_the_phone_was_told():
+    """iOS is optional here: an older server sends no `sent_at`, and `createdAt` stands in."""
+    assert re.search(r"let sentAt: String\?", _swift()), "sent_at must be optional on iOS"
+    detail = REPO / "frontend/ios/ios/Views/Screens/NotificationDetailView.swift"
+    _ios_time_guard(_swift_code(MODELS), _swift_code(detail))
+
+
+@pytest.mark.parametrize("old,new,why", [
+    ("guard wasDelivered, let sentAt,", "guard let sentAt,", "wasDelivered"),
+    ("from: receivedAt)", "from: createdAt)", "reads the decision time"),
+    ("return sentAt", "return createdAt", "receivedAt no longer reads"),
+])
+def test_the_time_guard_fails_on_each_way_of_losing_it(old, new, why):
+    models = _swift_code(MODELS)
+    detail = _swift_code(REPO / "frontend/ios/ios/Views/Screens/NotificationDetailView.swift")
+    _ios_time_guard(models, detail)
+    assert old in models
+    with pytest.raises(AssertionError, match=why):
+        _ios_time_guard(models.replace(old, new), detail)
+
+
+def test_the_time_guard_reads_the_detail_screen():
+    models = _swift_code(MODELS)
+    detail = _swift_code(REPO / "frontend/ios/ios/Views/Screens/NotificationDetailView.swift")
+    assert "parse(event.receivedAt)" in detail
+    with pytest.raises(AssertionError, match="Received"):
+        _ios_time_guard(models, detail.replace("parse(event.receivedAt)", "parse(event.createdAt)"))
 
 
 def test_the_ios_list_wrapper_matches():

@@ -70,6 +70,7 @@ from app.services.earnings_live_service import (
     live_payload,
     newest_report,
     one_row_per_report,
+    sheet_days,
 )
 from app.services._earnings_common import (
     parse_fmp_timing,
@@ -83,6 +84,7 @@ from app.utils.market_hours import (
     ET,
     SESSION_CLOSED,
     SESSION_REGULAR,
+    is_trading_day,
     last_regular_session,
     session_phase,
 )
@@ -613,6 +615,18 @@ def earnings_day_stored_at(fmp: Any, day: date) -> Optional[float]:
     """
     entry = _held_earnings_days(fmp).get(day)
     return entry[0] if entry is not None else None
+
+
+def _earnings_day_unread(fmp: Any, day: date, today: date) -> bool:
+    """Has no answer told this memo about ``day``, today or later? A day not held has had none:
+    a failed round, a cold window that came back empty, or the day a rollover could not add.
+    A blank today on a trading day is stored like any blank day, and the memo cannot tell it
+    from a blip, but a whole market reporting nothing on a trading day is no answer. Only today:
+    FMP can honestly list nothing on a trading day a week out, and on those the day stands."""
+    entry = _held_earnings_days(fmp).get(day)
+    if entry is None:
+        return True
+    return day == today and not entry[1] and is_trading_day(day)
 
 
 def _earnings_days_due(
@@ -1769,64 +1783,76 @@ class TrackingService:
         No live fetch, like the feed: today's rows come from the shared Tracking memo and are
         folded into the shared live records, skipping any older than a record's last own
         fetch; the earlier live days' are already in those records. The report is `requested`
-        when given, else today's, else the one before today its card would name
-        (`newest_report`), else the next one in the window. A `requested` date with neither a
-        record nor a row has moved: the sheet follows the report to its next listed date, and
-        answers `none` only when nothing is listed, since a pinned sheet saying "no report in
-        the next two weeks" beside a row four days out would be false.
-
-        A `requested` date past today + 14 is refused. One before the live days is not: an
-        inbox row keeps its report date for 90 days and that report's record left with the live
-        days, so a refusal could never turn into an answer. Nothing can be read for that date,
-        so the sheet answers as it would with none.
+        when given (it must lie between the first of `sheet_days` and today + 14), else
+        today's, else the one before today its card would name (`newest_report`), else the
+        next one in the window. `sheet_days` reach one trading day past the live days because a
+        held push can wake on that day, and opens its report by date. A `requested` date that
+        has been read and holds neither a record nor a row has moved: the sheet follows the
+        report to its next listed date, and answers `none` only when nothing is listed, since a
+        pinned sheet saying "no report in the next two weeks" beside a row four days out would
+        be false.
 
         A report that left its date had left it by the newest answer held for that date, while
         the days after today can be up to 6 h older (TWO SPEEDS above), and the new date is one
         of them. So before saying `none` the sheet asks the memo for the days older than that
         answer: at most once per answer, and only when someone is looking.
 
-        `none` says nothing is listed, and only a read that worked can know that. So when the
-        latest read failed or came back empty (`fetch_failed`) and no record holds the report,
-        this raises `FMPUnavailableException`, the endpoint answers an error and the client
-        retries. A record still answers through an outage, and a row held from before it still
-        does: it is a scheduled date, true hours later.
+        `none` says a day was read and lists no report, and iOS stops asking on it, so a day
+        nobody has read is never `none`, and a sheet pinned to one stays on it, past any later
+        row: that row can be the next report's, with the figures one load away. From today on
+        such a day is `_earnings_day_unread`. Before today it is a day the loop has yet to load
+        (`awaits_first_load`), the first minute after a deploy or after midnight, or a day past
+        the live days a restart left unread and this answer has just asked for. The answer
+        reads as a report not in yet, with no extras, and `recheck` makes the sheet ask again
+        until a read settles it.
+
+        With EARNINGS_LIVE_ENABLED off the loop is idle, so nothing live is read, written or
+        built: the memo row's consensus is the whole answer, `upcoming` for a row and `none`
+        for no row, and no poll, because nothing a poll could wait for is coming.
         """
         sym = symbol.upper()
         today = _et_today()
         earlier = live_days(today)[:-1]
-        prev = earlier[0]
-        last = today + timedelta(days=_EARNINGS_ALERT_DAYS_AHEAD)
-        if requested is not None and requested > last:
+        floor = sheet_days(today)[0]
+        if requested is not None and not floor <= requested <= today + timedelta(
+            days=_EARNINGS_ALERT_DAYS_AHEAD
+        ):
             raise _ReportDateOutOfWindow(
-                f"report_date {requested.isoformat()} is outside {prev.isoformat()}.."
-                f"{last.isoformat()}"
+                f"report_date {requested.isoformat()} is outside {floor.isoformat()}.."
+                f"{(today + timedelta(days=_EARNINGS_ALERT_DAYS_AHEAD)).isoformat()}"
             )
-        if requested is not None and requested < prev:
-            logger.info("[Tracking] earnings live %s: %s has left the live days (from %s), "
-                        "answering as with no date", sym, requested.isoformat(), prev.isoformat())
-            requested = None
         now = datetime.now(timezone.utc)
-        live = get_earnings_live_service()
-        read_failed = False
+        live = get_earnings_live_service() if settings.EARNINGS_LIVE_ENABLED else None
+        if live is not None and requested is not None:
+            live.sheet_asked(requested, today)
+
+        def _snapshot(d: date) -> Optional[LiveSnapshot]:
+            return live.snapshot(sym, d, now) if live is not None else None
+
+        def _unread(d: date) -> bool:
+            """Has nobody read `d` yet? Never so with the loop idle: no read is coming."""
+            if live is None:
+                return False
+            if d < today:
+                return live.awaits_first_load(d, today)
+            return _earnings_day_unread(self.fmp, d, today)
 
         async def _listed(
             later_days_since: Optional[float] = None,
         ) -> Dict[date, Dict[str, Any]]:
-            """Fold today's rows, and answer this ticker's by date. The latest read is the one
-            an answer rests on, so each sets `read_failed`."""
-            nonlocal read_failed
+            """Fold today's rows, and answer this ticker's by date. A failed read answers from
+            the days already held; a day nobody has read is `_unread`, never `none`."""
             try:
                 calendar = await _cached_earnings_calendar(
                     self.fmp, today, later_days_since=later_days_since
                 )
-                read_failed = getattr(calendar, "fetch_failed", False)
             except Exception as e:
                 logger.warning("[Tracking] earnings live %s: calendar unavailable on %s (%s: %s)",
                                sym, today.isoformat(), type(e).__name__, e)
                 calendar = []
-                read_failed = True
-            live.observe_rows(today, calendar, now, symbols={sym},
-                              stored_at=earnings_day_stored_at(self.fmp, today))
+            if live is not None:
+                live.observe_rows(today, calendar, now, symbols={sym},
+                                  stored_at=earnings_day_stored_at(self.fmp, today))
             # The card's pick, so a future pair cannot show one consensus there and another
             # here.
             return {
@@ -1836,11 +1862,12 @@ class TrackingService:
             }
 
         rows = await _listed()
-        held = newest_report(filter(None, (live.snapshot(sym, d, now) for d in earlier)))
+        held = newest_report(filter(None, map(_snapshot, earlier)))
 
         def _report_day() -> date:
             if requested is not None:
-                known = requested in rows or live.snapshot(sym, requested, now) is not None
+                known = (requested in rows or _snapshot(requested) is not None
+                         or _unread(requested))
                 return requested if known or not rows else min(rows)
             if today in rows:
                 return today
@@ -1849,26 +1876,27 @@ class TrackingService:
             return min(rows) if rows else today
 
         day = _report_day()
-        if day not in rows and live.snapshot(sym, day, now) is None:
+        if day not in rows and _snapshot(day) is None and not _unread(day):
             # About to say `none`, so the days after today must be as new as the answer that
             # left the report out: the memo's, or for a day before today, which the memo does
             # not hold, the live loop's.
             answered_at = earnings_day_stored_at(self.fmp, day)
+            if answered_at is None and live is not None:
+                answered_at = live.fetched_at(day)
             logger.info("[Tracking] earnings live %s: nothing listed for %s, reading the days "
                         "after today as of its newest answer", sym, day.isoformat())
-            rows = await _listed(answered_at if answered_at is not None else live.fetched_at(day))
+            rows = await _listed(answered_at)
             day = _report_day()
-        snap = live.snapshot(sym, day, now) if day <= today else None
+        snap = _snapshot(day) if day <= today else None
         row = rows.get(day) or {}
         raw_name = row.get("companyName")
         company = raw_name if isinstance(raw_name, str) and raw_name else None
         found = snap is not None or day in rows
-        if read_failed and not found:
-            raise FMPUnavailableException(
-                f"earnings live {sym} {day.isoformat()}: the calendar could not be read and no "
-                f"record holds the report"
-            )
-        extras = await live.history_extras(sym, day) if found else None
+        recheck = not found and _unread(day)
+        if recheck:
+            logger.info("[Tracking] earnings live %s: %s has not been read yet, so the sheet "
+                        "asks again", sym, day.isoformat())
+        extras = await live.history_extras(sym, day) if live is not None and found else None
         payload = live_payload(
             sym, day, snap,
             company_name=company,
@@ -1877,6 +1905,7 @@ class TrackingService:
             extras=extras,
             today=today,
             found=found,
+            recheck=recheck,
         )
         return EarningsLiveResponse(**payload)
 

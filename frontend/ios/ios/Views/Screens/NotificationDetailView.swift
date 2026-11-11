@@ -184,7 +184,7 @@ struct NotificationDetailView: View {
     /// An ABSOLUTE timestamp, deliberately — the row already shows "2h ago". A detail screen that
     /// repeated the relative time would add a line and no information.
     private func absoluteTime(_ event: NotificationEventDTO) -> String {
-        guard let date = NotificationDetailView.parse(event.createdAt) else {
+        guard let date = NotificationDetailView.parse(event.receivedAt) else {
             return event.relativeTime
         }
         return NotificationDetailView.display.string(from: date)

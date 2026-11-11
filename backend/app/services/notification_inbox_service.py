@@ -47,6 +47,9 @@ UNREAD_PROBE_CAP = 200
 # `push_state` values that mean the buzz genuinely went out.
 _DELIVERED = {"sent"}
 
+# The columns `_to_response` reads, for both read paths.
+_COLUMNS = "id, kind, category, title, body, route, claimed_at, read_at, sent_at, push_state"
+
 
 class NotificationInboxUnavailable(Exception):
     """The inbox could not be read.
@@ -182,6 +185,7 @@ class NotificationInboxService:
                 route=self._flatten_route(row.get("route")),
                 created_at=_iso(row.get("claimed_at")) or "",
                 read_at=_iso(row.get("read_at")),
+                sent_at=_iso(row.get("sent_at")),
                 delivery_state=row.get("push_state") or "sent",
             )
         except Exception as e:
@@ -211,7 +215,7 @@ class NotificationInboxService:
         try:
             query = (
                 self.supabase.table(TABLE)
-                .select("id, kind, category, title, body, route, claimed_at, read_at, push_state")
+                .select(_COLUMNS)
                 .eq("user_id", user_id)
                 .order("claimed_at", desc=True)
                 # `claimed_at` is not unique (a fan-out writes many rows in the same
@@ -291,7 +295,7 @@ class NotificationInboxService:
         try:
             rows = (
                 self.supabase.table(TABLE)
-                .select("id, kind, category, title, body, route, claimed_at, read_at, push_state")
+                .select(_COLUMNS)
                 .eq("user_id", user_id)
                 .eq("dedup_key", dedup_key)
                 .limit(1)

@@ -1968,6 +1968,27 @@ async def test_lead_numbers_never_leak_nan_inf_or_bool(resolver, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_chat_reads_the_score_coverage_line_beside_the_score(resolver, monkeypatch):
+    """The line ends the Executive Summary, which the lead caps. The longest stored summary is
+    491 characters, and a summary at the top of the Stage B word cap still keeps the line."""
+    from app.services.agents.persona_scoring import PERSONA_WEIGHTS, score_coverage_note
+
+    vitals = {name: {"score": {"value": None}} for name in PERSONA_WEIGHTS["warren_buffett"]}
+    vitals.update({
+        name: {"score": {"value": 6.0}}
+        for name in ("profitability", "capital_allocation", "revenue", "insider", "forecast", "macro")
+    })
+    note = score_coverage_note("warren_buffett", {"_scoring_inputs": vitals})
+    assert note
+    summary = " ".join(["financials"] * 60)
+    report = {"company_name": "X", "quality_score": 70.3,
+              "executive_summary_text": f"{summary} {note}"}
+    block = await _resolve_report(resolver, monkeypatch, report, ref="X|warren_buffett")
+    assert note in block
+    assert block.index("Overall quality score: 70/100.") < block.index(note)
+
+
+@pytest.mark.asyncio
 async def test_the_fenced_text_no_longer_invites_the_report_lacks_it(resolver, monkeypatch):
     block = await _resolve_report(resolver, monkeypatch, _avgo_shaped_report())
     assert "Report data the user can see (an excerpt; long sections are shortened):" in block

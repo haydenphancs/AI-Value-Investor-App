@@ -24,7 +24,7 @@ removed; `_scoring_inputs` is stripped from every client response.
 """
 
 import math
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # ── Per-Persona Weight Vectors ──────────────────────────────────────
@@ -162,6 +162,19 @@ _HEALTH_SCALE: Dict[str, float] = {
 }
 
 
+def _score_number(value: Any) -> Optional[float]:
+    """`value` as a float, or None for anything that is not a real number. A bool is an int to
+    Python, `min(10.0, nan)` is 10.0 (a corrupted vital would score top marks and count as
+    rated), and an int past float range raises."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _vital_score(
     vitals: Dict[str, Any], vital_name: str
 ) -> Optional[float]:
@@ -179,25 +192,35 @@ def _vital_score(
     # Preferred path: continuous numeric score (new reports, every vital).
     score_obj = vital.get("score")
     if isinstance(score_obj, dict):
-        value = score_obj.get("value")
-        if isinstance(value, (int, float)):
-            return float(value)
         # An explicit `score` dict whose value is None is a DELIBERATE
         # "unmeasured" signal from the builder (no analyst coverage, no
         # forward estimates, no insider trades, no DCF/snapshot). Return None
         # so compute_quality_score renormalizes this dimension out — do NOT
         # fall through to the legacy string scale (that bridge is only for old
         # reports that carry no `score` dict at all).
-        return None
+        return _score_number(score_obj.get("value"))
 
     # Back-compat: derive 0-10 from the status/label string fields.
+    def label(key: str) -> str:
+        text = vital.get(key)
+        return text.lower() if isinstance(text, str) else ""
+
     if vital_name == "valuation":
-        return _VALUATION_SCALE.get((vital.get("status") or "").lower())
+        return _VALUATION_SCALE.get(label("status"))
     if vital_name == "moat":
-        return _MOAT_SCALE.get((vital.get("overall_rating") or "").lower())
+        return _MOAT_SCALE.get(label("overall_rating"))
     if vital_name == "financial_health":
-        return _HEALTH_SCALE.get((vital.get("level") or "").lower())
+        return _HEALTH_SCALE.get(label("level"))
     return None
+
+
+def _vitals_of(report: Any) -> Dict[str, Any]:
+    """The report's per-dimension scores: `_scoring_inputs`, or the legacy "key_vitals" on a
+    report cached before the key was renamed. {} when neither is a dict."""
+    if not isinstance(report, dict):
+        return {}
+    vitals = report.get("_scoring_inputs") or report.get("key_vitals")
+    return vitals if isinstance(vitals, dict) else {}
 
 
 # ── Persona Style-Fit Adjustment ────────────────────────────────────
@@ -223,6 +246,7 @@ def _vital_score(
 # (gm − gm_prev), not a level, so it is intentionally left full-strength.
 
 STYLE_FIT_CAP: float = 10.0   # max |adjustment| in score points
+_PARTIAL_MIN_SUBS = 2         # distinct signals a financial company's style nudge needs
 
 
 def _lin(value: Optional[float], bad: float, good: float) -> Optional[float]:
@@ -268,6 +292,9 @@ def style_fit_adjustment(persona_key: str, signals: Optional[Dict[str, Any]]) ->
         f = float(v)
         return f if math.isfinite(f) else None   # NaN/inf → absent
 
+    # A company with `score_excluded_rows`: the collector leaves its leverage, cash-flow and
+    # gross-margin signals out, so fewer subs remain to average.
+    partial = bool(signals.get("excluded_rows"))
     roe = num("roe"); roic = num("roic"); de = num("debt_equity")
     # NEGATIVE debt_equity = NEGATIVE shareholder equity = a DISTRESS signal, not
     # "very low debt". A "lower is better" _lin(de, ...) would map de<0 to +1.0 (a
@@ -300,7 +327,9 @@ def style_fit_adjustment(persona_key: str, signals: Optional[Dict[str, Any]]) ->
     elif persona_key == "cathie_wood":
         subs.append(_lin(rev_g, 20.0, 40.0))        # trailing growth
         subs.append(_lin(rev_cagr, 15.0, 30.0))     # forward CAGR
-        if rev_cagr is not None and rev_g is not None:
+        # Not for a financial company: analysts' revenue and FMP's gross interest income are
+        # on different bases, so the difference has no meaning.
+        if rev_cagr is not None and rev_g is not None and not partial:
             subs.append(_clamp(_lin(rev_cagr - rev_g, -15.0, 15.0), -0.5, 0.5))  # acceleration
         if gm is not None and gm_prev is not None:
             subs.append(_clamp(_lin(gm - gm_prev, -3.0, 3.0), -0.4, 0.4))        # margin trend
@@ -342,6 +371,12 @@ def style_fit_adjustment(persona_key: str, signals: Optional[Dict[str, Any]]) ->
     else:
         return 0.0
 
+    if partial:
+        # One signal is not a persona's read: Burry's P/E alone would swing ±10 points. (Lynch's
+        # doubled PEG needs growth, which is its own signal, so it cannot pass alone.)
+        if sum(s is not None for s in subs) < _PARTIAL_MIN_SUBS:
+            return 0.0
+
     return round(_avg_present(subs) * STYLE_FIT_CAP, 2)
 
 
@@ -377,13 +412,7 @@ def compute_quality_score(
     returns a Buffett-default.
     """
     weights = PERSONA_WEIGHTS.get(persona_key, _EQUAL_WEIGHTS)
-    # `_scoring_inputs` is the internal per-dimension score layer; the legacy
-    # "key_vitals" fallback covers reports cached before the key was renamed.
-    vitals = (
-        ticker_report_data.get("_scoring_inputs")
-        or ticker_report_data.get("key_vitals")
-        or {}
-    )
+    vitals = _vitals_of(ticker_report_data)
 
     weighted_sum = 0.0
     present_weight = 0.0
@@ -412,3 +441,77 @@ def compute_quality_score(
 
     # Clip, round to one decimal so iOS sees stable, non-jittering numbers.
     return round(max(0.0, min(100.0, overall)), 1)
+
+
+# ── Score coverage ──────────────────────────────────────────────────
+#
+# `compute_quality_score` renormalizes over whatever was measured, so a headline built on a
+# third of a style's weight prints exactly like one built on all of it. A company with no peer
+# group loses Moat, Valuation and Financial Health together: BNY read 70 (Strong) under the
+# Buffett weights with 42% of them rated. The score stays; the report says so (owner decision
+# 2026-11-06, "Short line under 75%"). Measured 2026-11-05: a normal report rates 93-97% (no
+# report has carried `wall_street` since 2026-09-02), JPM and Berkshire 77-78%, and the five
+# no-peer companies measured 34-70%, so 75% separates them cleanly.
+
+SCORE_COVERAGE_FLOOR: float = 0.75
+
+# What a reader calls each vital. `wall_street` is left out on purpose: it is missing from every
+# report and has no card, so naming it tells the reader nothing about this company.
+_VITAL_READER_NAMES: Dict[str, str] = {
+    "moat": "Moat",
+    "financial_health": "Financial Health",
+    "valuation": "Valuation",
+    "profitability": "Profitability",
+    "capital_allocation": "Capital Allocation",
+    "revenue": "Revenue",
+    "forecast": "Forecast",
+    "insider": "Insider Activity",
+    "macro": "Macro",
+}
+_COVERAGE_NAMES_SHOWN = 3
+
+
+def _thin_score(persona_key: str, report: Any) -> Optional[Tuple[float, List[str]]]:
+    """(the share of this style's weight that is rated, what a reader calls the unrated parts,
+    largest first), or None for a score at or above `SCORE_COVERAGE_FLOOR` and for a report with
+    no scores to judge. Reads each vital through `_vital_score`, so rated here means exactly what
+    the score counted."""
+    vitals = _vitals_of(report)
+    if not vitals:
+        return None
+    weights = PERSONA_WEIGHTS.get(persona_key, _EQUAL_WEIGHTS)
+    unrated = sorted(
+        (name for name in weights if _vital_score(vitals, name) is None),
+        key=lambda name: -weights[name],
+    )
+    rated = sum(weight for name, weight in weights.items() if name not in unrated)
+    if rated >= SCORE_COVERAGE_FLOOR:
+        return None
+    return rated, [_VITAL_READER_NAMES[name] for name in unrated if name in _VITAL_READER_NAMES]
+
+
+def unrated_score_parts(persona_key: str, report: Any) -> List[str]:
+    """Every unrated part of a thin score, largest first; [] when the score is not thin."""
+    thin = _thin_score(persona_key, report)
+    return thin[1] if thin else []
+
+
+def score_coverage_note(persona_key: str, report: Any) -> str:
+    """The code-owned line for a report whose score rests on under `SCORE_COVERAGE_FLOOR` of this
+    style's weight, "" otherwise. It names the largest unrated parts for THIS style, so the line
+    belongs to one persona's report."""
+    thin = _thin_score(persona_key, report)
+    if thin is None:
+        return ""
+    rated, parts = thin
+    if rated <= 0.0:
+        # The deep door prints 0 here and the direct door the Stage A figure.
+        return "None of what this style weighs could be rated, so this score is not a rating of the company."
+
+    line = f"This score rests on {rated:.0%} of what this style weighs."
+    names = parts[:_COVERAGE_NAMES_SHOWN]
+    if not names:
+        return line
+    if len(names) == 1:
+        return f"{line} {names[0]} is not rated."
+    return f"{line} {', '.join(names[:-1])} and {names[-1]} are not rated."

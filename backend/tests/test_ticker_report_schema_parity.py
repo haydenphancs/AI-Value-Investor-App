@@ -112,6 +112,10 @@ class _StubBenchmarkLookup:
     def get_sector_benchmarks_with_n(self, sector, metrics, period_type="annual"):
         return {m: {} for m in metrics}
 
+    # The same read for a financial company (`moat_scoring_service.own_industry_peers`).
+    def get_industry_benchmarks_with_n(self, industry, metrics, period_type="annual"):
+        return {m: {} for m in metrics}
+
     def get_benchmarks(self, *a, **k):
         return {}
 

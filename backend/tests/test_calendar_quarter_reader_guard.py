@@ -27,6 +27,7 @@ _LOOKUP_METHODS = frozenset({
     "get_benchmark_values",
     "get_sector_benchmarks",
     "get_sector_benchmarks_with_n",
+    "get_industry_benchmarks_with_n",
 })
 
 

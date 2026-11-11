@@ -134,7 +134,7 @@ async def test_a_claimed_phase_runs_once_and_records_success(monkeypatch):
     assert ran == [1]
     assert calls == [("job_x", m._CHAIN_PHASE_STALE_SECONDS)]
     assert outcomes == [("job_x", True)]
-    assert m._CHAIN_PHASE_STALE_SECONDS >= 2 * 3600, "must outlast the 60-90 min moat phase"
+    assert m._CHAIN_PHASE_STALE_SECONDS >= 2 * 3600, "must outlast every phase of the chain"
 
 
 def _today_utc():

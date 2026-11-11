@@ -3,7 +3,9 @@
 Replaces the Gemini Stage A `moat_competition.dimensions[*].score` (an
 ungrounded LLM judgment) with sector-relative percentile-based scoring
 grounded in real FMP financials + the existing `sector_benchmarks` long-
-format median table + the `industry_dossier` HHI / lifecycle data.
+format median table + the `industry_dossier` HHI / lifecycle data. A financial company is
+compared with its OWN industry instead (`own_industry_peers`, 2026-11-05); every other
+company with its sector.
 
 Per-pillar scoring formula:
     score = mean(score_from_median_ratio(metric_i)) over metrics that resolved
@@ -34,12 +36,20 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.services.financials_metric_gate import (
+    FS_INDUSTRY_PEER_FLOOR,
+    excluded_from_industry_median,
+    industry_key,
+    score_excluded_rows,
+    sga_line_applicable,
+)
 from app.services.sector_benchmark_lookup import (
     MATURE_SAMPLE_FLOOR,
+    fs_industry_only,
     get_sector_benchmark_lookup,
     lookup_failed,
 )
-from app.utils.margins import revenue_backed_margin, revenue_scaled_ratio
+from app.utils.margins import revenue_backed_margin, revenue_scaled_ratio, sga_reading
 from app.utils.currency import currency_code
 from app.utils.period_labels import annual_benchmark_key
 
@@ -79,7 +89,12 @@ MOAT_RATING_NARROW = 7.0
 # and is scored on a gentler slope; Network Effects needs a company input; P/S counts only
 # with a positive gross margin; Intangible Assets needs both sector-relative inputs; an
 # exact-zero SG&A and a non-finite input are no reading.
-SCORER_VERSION = "moat_v1.2026-10-28"
+# 2026-11-05 (owner decisions after the Berkshire audit): a financial company is compared with
+# its own industry, not the pooled Financial Services sector (`own_industry_peers`), and Brand
+# Power no longer counts for a company whose gross margin and P/S read N/M.
+# 2026-11-06 (owner decision "Option 2, R&D as is"): SG&A no longer counts for an insurer or a
+# utility (`sga_line_applicable`), and FMP's blank SG&A leaves the medians (`sga_reading`).
+SCORER_VERSION = "moat_v1.2026-11-06"
 
 # Below this # of resolved metrics, return None for the pillar so the
 # caller falls back to the legacy AI dimension instead.
@@ -141,6 +156,23 @@ _CONFIDENCE_LOW = "low"        # <2 — service returns None instead
 # the newest year with n >= 20, else n >= 10, whatever the company's own year.
 # Incomplete years never arrive here: the lookup hides an annual row computed less than
 # 75 days after its year ended (`sector_benchmark_lookup.servable_benchmark_rows`).
+#
+# Own-industry peers (owner decisions 2026-11-05: "All financials", "Unmeasured"). A financial
+# company follows the rule every card follows since 2026-10-20 (`fs_industry_only`): its own
+# industry's median from FS_INDUSTRY_PEER_FLOOR (10) companies, else no peer. The newest year
+# at or before the company's, per metric as on the cards, decides alone: a thin one is no peer,
+# never an older year. With no peer the median-anchored drivers stay unmeasured, which is a
+# state of the company and never a neutral 5.0: the pillar falls to the AI estimate, which the
+# moat vital does not count, and the moat leaves the score. On 2026-11-05 data Insurance -
+# Diversified pools 13, and Banks, Conglomerates, Mortgages, Reinsurance and Investment Banking
+# are under 10. An unmeasured pillar takes no industry peer average either (the collector's
+# overlay): that row was built from other companies, on a scale this one was not read on.
+#
+# Mortgage REITs join them: filed under Real Estate, so `fs_industry_only` misses them, but on
+# the N/M list with the lenders (Annaly's yardstick is not an equity REIT).
+_OWN_INDUSTRY_OUTSIDE_FS = frozenset({"reit - mortgage"})
+# The two `score_excluded_rows` keys Brand Power is built from.
+_BRAND_POWER_ROWS = frozenset({"gross_margin", "ps"})
 
 
 def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
@@ -270,11 +302,16 @@ def _pick_year_at_or_before(
     year_to_payload: Dict[str, Dict[str, Any]],
     target_year: Any,
     floor: int = MATURE_SAMPLE_FLOOR,
+    *,
+    newest_only: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """The sector median a focal value from `target_year` is compared with: that year's
     when it holds at least `floor` companies, else the newest OLDER year that does.
     Never a newer year, never a thinner cell. None when `target_year` is not a year
     (the company's record has no usable date) or no year qualifies.
+
+    ``newest_only`` (the Financial Services rule): only the newest year at or before
+    `target_year` is judged, so a thin one is no peer rather than an older thicker year.
 
     Returned shape: {"median": float, "period": str, "n": int}.
     """
@@ -289,7 +326,7 @@ def _pick_year_at_or_before(
         ),
         reverse=True,
     )
-    for _year, label in candidates:
+    for _year, label in (candidates[:1] if newest_only else candidates):
         payload = year_to_payload.get(label)
         if not isinstance(payload, dict):
             continue
@@ -307,6 +344,30 @@ def _older_key(*keys: str) -> str:
     two statements is compared with no year newer than either of them."""
     years = [k for k in keys if _year_of(k) is not None]
     return min(years, key=int) if years else ""
+
+
+def own_industry_peers(sector: Any, industry: Any, ticker: Any) -> bool:
+    """True when this company's medians are its OWN industry's, under the Financial Services
+    rule (the comment above `_OWN_INDUSTRY_OUTSIDE_FS`). False for an unnamed industry, which
+    keeps its sector read like every other caller of `fs_industry_only`, and for a listed
+    non-lender of a mixed industry (owner decision 2026-11-05, "Leave them as today"): the
+    Credit Services median is built from lenders only, so it was never Visa's peer group
+    (`excluded_from_industry_median`), and five names are too few for a payments one."""
+    key = industry_key(industry)
+    if not key or excluded_from_industry_median(ticker, industry):
+        return False
+    return fs_industry_only(key, sector) or key in _OWN_INDUSTRY_OUTSIDE_FS
+
+
+def _brand_power_counts(industry: Any, ticker: Any) -> bool:
+    """False when gross margin or P/S reads N/M for this company (owner decision 2026-11-05,
+    "Stop counting it"): a measure the cards say means nothing never votes for a pillar. A
+    listed non-lender keeps both: the curated list stands here, as it does on the cards when no
+    income row reached the check (`resolve_payment_network`)."""
+    excluded = score_excluded_rows(
+        industry, network=excluded_from_industry_median(ticker, industry), ticker=ticker,
+    )
+    return not _BRAND_POWER_ROWS & excluded
 
 
 def _canonical_sector(sector: Any) -> str:
@@ -380,6 +441,8 @@ def _focal_revenue_yoy(
 class MetricDriver:
     metric: str
     focal: Optional[float]
+    # The peer median: the company's own industry's for a financial company
+    # (`own_industry_peers`), its sector's otherwise. The wire name is older than that rule.
     sector_median: Optional[float]
     sub_score: Optional[float]   # 0-10 contribution; None if didn't resolve
     period_used: Optional[str] = None       # e.g. "2025" — which year's median we selected
@@ -447,6 +510,7 @@ class MoatScoringService:
         industry_tam: Optional[Any] = None,   # IndustryDossier or None
         transcript: Optional[str] = None,     # Phase 3B — earnings-call text for NRR / user-count extraction
         ip_intel: Optional[Dict[str, Any]] = None,  # Phase 3C — USPTO patents + FDA approvals
+        ticker: Optional[str] = None,  # else the profile's `symbol`; decides `own_industry_peers`
     ) -> MoatScores:
         """Score all five pillars. Returns a `MoatScores` dict keyed by pillar name
         (its ``lookup_failed`` flag says whether the sector-median read failed).
@@ -481,12 +545,21 @@ class MoatScoringService:
             "deferred_revenue_to_revenue": _older_key(bs_year, inc_year),
         }
 
-        # Resolve sector medians for every metric in one Supabase call.
-        sector_medians, medians_failed = self._fetch_sector_medians(
-            sector=sector,
-            metrics=list(target_years),
-            target_years=target_years,
-        )
+        # Resolve the peer medians for every metric in one Supabase call.
+        if ticker is None and isinstance(profile, dict):
+            ticker = profile.get("symbol")
+        if own_industry_peers(sector, industry, ticker):
+            sector_medians, medians_failed = self._fetch_own_industry_medians(
+                industry=industry,
+                metrics=list(target_years),
+                target_years=target_years,
+            )
+        else:
+            sector_medians, medians_failed = self._fetch_sector_medians(
+                sector=sector,
+                metrics=list(target_years),
+                target_years=target_years,
+            )
 
         # Phase 3B — extract NRR + user-count from the earnings transcript
         # once and reuse across pillars. Pure regex, no LLM cost.
@@ -512,10 +585,11 @@ class MoatScoringService:
             income, industry_tam, sector_medians, transcript_sig, inc_year,
         )
         results[PILLAR_BRAND] = self._score_brand_power(
-            latest_ratios, sector_medians,
+            latest_ratios, sector_medians, counts=_brand_power_counts(industry, ticker),
         )
         results[PILLAR_COST] = self._score_cost_advantage(
             latest_inc, latest_ratios, sector_medians,
+            sga_counts=sga_line_applicable(sector, industry),
         )
         results[PILLAR_INTANGIBLE] = self._score_intangible_assets(
             latest_inc, latest_bs, sector_medians, ip_intel,
@@ -572,6 +646,57 @@ class MoatScoringService:
                 continue
             out[metric] = _pick_year_at_or_before(
                 year_to_payload, target_years.get(metric) or "",
+            )
+        return out, failed
+
+    def _fetch_own_industry_medians(
+        self,
+        industry: str,
+        metrics: List[str],
+        target_years: Dict[str, str],
+    ) -> Tuple[Dict[str, Optional[Dict[str, Any]]], bool]:
+        """`_fetch_sector_medians` for a company under `own_industry_peers`: its industry's
+        median from FS_INDUSTRY_PEER_FLOOR companies in the newest year at or before its own,
+        else None. ``failed`` is True for a raising lookup or a `BenchmarkLookupFailed` answer,
+        never for an industry too small to have a median: that company is unmeasured, and a
+        report of it stays shareable."""
+        out: Dict[str, Optional[Dict[str, Any]]] = {m: None for m in metrics}
+        name = industry.strip()
+        try:
+            benchmarks = self._lookup.get_industry_benchmarks_with_n(
+                name, metrics, period_type="annual",
+            )
+        except Exception as exc:
+            logger.warning(
+                "moat_scoring: own-industry benchmark lookup raised for industry=%r: %s: %s — "
+                "every median-anchored driver is unscored; flagged so the report is not "
+                "shared-cached", name, type(exc).__name__, exc,
+            )
+            return out, True
+        if not isinstance(benchmarks, dict):
+            logger.warning(
+                "moat_scoring: own-industry benchmark lookup for industry=%r answered %s, not "
+                "a mapping — treated as a failed read", name, type(benchmarks).__name__,
+            )
+            return out, True
+        failed = lookup_failed(benchmarks)
+        if failed:
+            logger.warning(
+                "moat_scoring: own-industry benchmark read FAILED for industry=%r — scored "
+                "with what loaded; flagged so the report is not shared-cached", name,
+            )
+        for metric in metrics:
+            year_to_payload = benchmarks.get(metric) or {}
+            if not isinstance(year_to_payload, dict) or not year_to_payload:
+                continue
+            out[metric] = _pick_year_at_or_before(
+                year_to_payload, target_years.get(metric) or "",
+                FS_INDUSTRY_PEER_FLOOR, newest_only=True,
+            )
+        if not failed and not any(out.values()):
+            logger.info(
+                "moat_scoring: industry=%r has no median from %d companies — its "
+                "median-anchored drivers stay unmeasured", name, FS_INDUSTRY_PEER_FLOOR,
             )
         return out, failed
 
@@ -695,6 +820,8 @@ class MoatScoringService:
         self,
         latest_ratios: Optional[Dict[str, Any]],
         medians: Dict[str, Optional[Dict[str, Any]]],
+        *,
+        counts: bool = True,
     ) -> PillarResult:
         """Brand Power: gross margin percentile + P/S percentile (the
         market pays for brand). Both higher = better.
@@ -703,6 +830,9 @@ class MoatScoringService:
         decision 2026-10-28): selling below cost shows no pricing power, and its multiple is
         a bet on a tiny revenue base — JOBY's 204× P/S (revenue $53M, gross margin −30%)
         scored 10/10 and lifted Brand Power to 5.0. The driver still shows the figure.
+
+        ``counts`` False (`_brand_power_counts`): neither figure scores, so the pillar is
+        unmeasured and falls to the AI estimate the moat vital does not count.
         """
         gross_margin = self._gross_margin_ratio(latest_ratios)
         ps_driver = _build_higher_better_driver(
@@ -719,6 +849,9 @@ class MoatScoringService:
             ),
             ps_driver,
         ]
+        if not counts:
+            for driver in drivers:
+                driver.sub_score = None
         return _assemble_pillar(PILLAR_BRAND, drivers)
 
     def _score_cost_advantage(
@@ -726,9 +859,14 @@ class MoatScoringService:
         latest_inc: Optional[Dict[str, Any]],
         latest_ratios: Optional[Dict[str, Any]],
         medians: Dict[str, Optional[Dict[str, Any]]],
+        *,
+        sga_counts: bool = True,
     ) -> PillarResult:
         """Cost Advantage: operating margin (higher) + asset turnover
         (higher) + SG&A/Revenue (lower is better).
+
+        ``sga_counts`` False (`sga_line_applicable`): an insurer or a utility. The driver stays
+        empty, so the pillar rests on the other two and needs both.
         """
         drivers = [
             _build_higher_better_driver(
@@ -744,8 +882,8 @@ class MoatScoringService:
             ),
             _build_lower_better_driver(
                 "sga_to_revenue",
-                self._sga_to_revenue_pct(latest_inc),
-                medians.get("sga_to_revenue"),
+                self._sga_to_revenue_pct(latest_inc) if sga_counts else None,
+                medians.get("sga_to_revenue") if sga_counts else None,
             ),
         ]
         return _assemble_pillar(PILLAR_COST, drivers)
@@ -870,10 +1008,10 @@ class MoatScoringService:
         if not inc:
             return None
         rev = _safe_float(inc, "revenue")
-        sga = _safe_float(inc, "sellingGeneralAndAdministrativeExpenses")
         # A company with revenue and exactly zero SG&A is FMP's zero-fill for an unreported
         # line, not a reading — and as a lower-is-better driver it scored a perfect 10.0.
-        if not rev or rev <= 0 or sga is None or sga <= 0:
+        sga = sga_reading(_safe_float(inc, "sellingGeneralAndAdministrativeExpenses"))
+        if not rev or rev <= 0 or sga is None:
             return None
         return (sga / rev) * 100.0
 
@@ -1042,6 +1180,7 @@ def score_moat_dimensions(
     industry_tam: Optional[Any] = None,
     transcript: Optional[str] = None,
     ip_intel: Optional[Dict[str, Any]] = None,
+    ticker: Optional[str] = None,
 ) -> MoatScores:
     """Module-level convenience for the data collector (``lookup_failed(result)`` tells
     a failed sector-median read from a sector with no rows)."""
@@ -1049,5 +1188,5 @@ def score_moat_dimensions(
         sector=sector, industry=industry, profile=profile,
         income=income, balance=balance, ratios=ratios,
         industry_tam=industry_tam, transcript=transcript,
-        ip_intel=ip_intel,
+        ip_intel=ip_intel, ticker=ticker,
     )

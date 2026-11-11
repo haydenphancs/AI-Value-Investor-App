@@ -84,6 +84,10 @@ def lookup_threads(monkeypatch) -> List[tuple]:
     monkeypatch.setattr(
         cls, "get_sector_benchmarks_with_n", _recorder("get_sector_benchmarks_with_n", _empty_sector),
     )
+    monkeypatch.setattr(
+        cls, "get_industry_benchmarks_with_n",
+        _recorder("get_industry_benchmarks_with_n", _empty_sector),
+    )
     instance = cls.__new__(cls)
     instance.supabase = None
     monkeypatch.setattr(sbl, "_lookup", instance)

@@ -147,6 +147,13 @@ struct ReportRevenueEngineData {
     /// when unknown and on reports cached before 2026-10-08. `var` with a default for the
     /// same reason as `intersegmentEliminations`.
     var reportingCurrency: String? = nil
+    /// Millions: a lender's reported revenue, set only when `totalRevenue` is the segments'
+    /// total and leaves out the interest that figure includes (JPMorgan FY2025: $178.6B of
+    /// segments, $279.7B reported). nil for every other company and on older reports.
+    var grossReportedRevenue: Double? = nil
+
+    /// The header's label: a lender's total is not its reported revenue.
+    var totalLabel: String { grossReportedRevenue == nil ? "Total Revenue" : "Segment Revenue" }
 
     /// The eliminations line, when there is one to draw (finite and positive).
     var hasEliminations: Bool {

@@ -78,6 +78,24 @@ def free_cash_flow_reading(value: Optional[float]) -> Optional[float]:
     return value
 
 
+def sga_reading(value: Optional[float]) -> Optional[float]:
+    """SG&A (a total, or its share of revenue) that can be a real figure, else None.
+
+    FMP writes 0 for a company whose statements do not use that line, so an exact 0 is a
+    blank: every one of the 209 FY2025 zeros in the benchmark universe also has blank G&A and
+    selling lines, Progressive reads 0 on $87.6B of revenue and $11.6B of operating costs, and
+    MetLife reads $6.0B for FY2024 and 0 for FY2025 (measured 2026-11-06). No company with
+    revenue spends nothing on selling and administration, so the median and the company side
+    share this rule: counted as 0%, six blanks took the Insurance - Diversified median from
+    7.78% to 4.45%, and scored against that median a blank would read as a perfect 10. A
+    negative or non-finite value is no reading either. `researchAndDevelopmentExpenses` does
+    NOT follow this rule: a company can have no R&D, and both sides read its 0 as a figure.
+    """
+    if value is None or not math.isfinite(value) or value <= 0:
+        return None
+    return value
+
+
 def revenue_scaled_ratio(value: Optional[float]) -> Optional[float]:
     """Price-to-sales or asset turnover, else None: both are positive whenever the company
     has revenue (price / revenue per share; revenue / assets), so FMP's 0 (no revenue) or a

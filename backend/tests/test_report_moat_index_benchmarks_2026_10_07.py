@@ -516,9 +516,9 @@ def _svc(lookup):
     return svc
 
 
-def _brand(svc, ratios_date, sector="Technology"):
+def _brand(svc, ratios_date, sector="Technology", industry="Software"):
     return svc.score(
-        sector=sector, industry="Software", profile={},
+        sector=sector, industry=industry, profile={},
         income=[], balance=[],
         ratios=[{"date": ratios_date, "grossProfitMargin": 0.80, "priceToSalesRatio": 8.0}],
         industry_tam=None,
@@ -582,8 +582,9 @@ def test_a_52_53_week_year_ending_jan_3_is_its_prior_year():
     ("Technology", "Technology"),
 ])
 def test_moat_reads_the_canonical_sector_name(raw, canonical):
+    # No industry named, so "Financials" stays on the sector read (own-industry since 2026-11-05).
     lookup = _MoatLookup({})
-    _brand(_svc(lookup), "2025-12-31", sector=raw)
+    _brand(_svc(lookup), "2025-12-31", sector=raw, industry="")
     assert lookup.sectors == [canonical]
 
 

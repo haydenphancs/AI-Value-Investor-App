@@ -75,6 +75,7 @@ INTEREST_COVERAGE = "interest_coverage"
 DEBT_TO_EQUITY = "debt_to_equity"
 LIQUIDITY_METRICS = frozenset({CURRENT_RATIO, QUICK_RATIO})
 GATED_METRICS = frozenset({CURRENT_RATIO, QUICK_RATIO, INTEREST_COVERAGE})
+SGA_TO_REVENUE = "sga_to_revenue"
 
 # Current and quick ratio are meaningless for every industry below.
 _NO_LIQUIDITY_INDUSTRIES = frozenset({
@@ -118,6 +119,33 @@ _NO_LIQUIDITY_INDUSTRIES = frozenset({
 # watch exactly this ratio (review 2026-10-07: the first gate dropped it for them).
 _NO_COVERAGE_INDUSTRIES = _NO_LIQUIDITY_INDUSTRIES - frozenset({"insurance - brokers"})
 
+# Snapshot `metric_key`s that say nothing about a bank, an insurer, a lender or a broker-dealer
+# (`score_excluded_rows`). Not `GATED_METRICS`: those rows are omitted and kept out of the
+# sector pool, these are shown as "N/M" and only stop counting.
+SCORE_EXCLUDED_ROWS = frozenset({"ps", "pfcf", "ev_ebitda", "gross_margin", "fcf_growth"})
+# `_NO_COVERAGE_INDUSTRIES` minus the asset managers (owner decision 2026-11-05): a fee
+# business's cash flow tracks its earnings. BlackRock's FCF / net income held 0.64-0.85 over
+# five years, JPMorgan's ran -2.6 to +2.8. Lender-like names filed there (ARCC) keep the
+# rows; there is no list because FMP's fields cannot separate them.
+_SCORE_EXCLUDED_INDUSTRIES = frozenset(
+    key for key in _NO_COVERAGE_INDUSTRIES if not key.startswith("asset management")
+)
+# FMP files bitcoin miners (MARA, RIOT), crypto treasuries (NAKA, BMNR), trading venues (MKTX,
+# TW, MIAX) and advisers beside the brokers here, and nothing in its fields separates them. So
+# in this one industry the list is the only way in: a name not on it keeps every row, as it
+# always has. Companies that hold customer funds or a trading book, read 2026-11-05.
+_BROKER_LIST_INDUSTRIES = frozenset({"financial - capital markets"})
+CAPITAL_MARKETS_BROKERS = frozenset({
+    "BGC", "COHN", "ETOR", "FUTU", "GS", "HOOD", "JEF", "LPLA", "MRX", "MS", "NMR", "OPY",
+    "SCHW", "SF", "SIEB", "SNEX", "TIGR", "VIRT", "XP",
+})
+
+# Bank-chartered custody companies FMP files under Asset Management, so they keep their rows
+# (owner decision above). Their revenue is still gross of interest and their consensus net, so
+# the first forecast bar crosses bases as a bank's does: FY2025 STT $22.6B against a $15.9B
+# estimate, NTRS $14.3B against $9.5B, read from FMP 2026-11-05. BK is filed as a bank already.
+GROSS_REVENUE_CUSTODIANS = frozenset({"STT", "NTRS"})
+
 _DASH_RE = re.compile(r"\s*[-–—]\s*")
 _SPACE_RE = re.compile(r"\s+")
 
@@ -140,15 +168,109 @@ def interest_coverage_applicable(industry: Optional[str]) -> bool:
     return industry_key(industry) not in _NO_COVERAGE_INDUSTRIES
 
 
+def score_excluded_rows(
+    industry: Optional[str], *, network: Optional[bool] = False, ticker: Any = None,
+) -> frozenset:
+    """The snapshot rows that do not count for a company in ``industry``.
+
+    Deposits and policy reserves are the raw material of these businesses, so free cash flow
+    swings with them, EBITDA has no meaning, and a bank's revenue from FMP is gross interest
+    income. These rows read "N/M", score nothing and never vote; the rows left are
+    renormalized. Insurance brokers, exchanges and asset managers are fee businesses and keep
+    every row, and so does a listed non-lender member (``network``). An unknown or empty
+    industry keeps every row: a failed profile read stays a degraded build, never a verdict.
+
+    Banks, insurers (Berkshire through its FMP industry, no ticker rule), lenders, broker-dealers
+    (`CAPITAL_MARKETS_BROKERS`), mortgage companies and financial conglomerates. Owner decisions
+    2026-11-05."""
+    key = industry_key(industry)
+    if network is True or key not in _SCORE_EXCLUDED_INDUSTRIES:
+        return frozenset()
+    if key in _BROKER_LIST_INDUSTRIES and normalize_ticker(ticker) not in CAPITAL_MARKETS_BROKERS:
+        return frozenset()
+    return SCORE_EXCLUDED_ROWS
+
+
+# The measures `score_excluded_rows` leaves out, and debt-to-equity, as words in model text.
+_EXCLUDED_METRIC_RE = re.compile(
+    r"\bP/S\b|\bP/FCF\b|\bEV/EBITDA\b|\bprice[- ]to[- ](?:sales|free cash flow)\b"
+    r"|\bgross (?:profit )?margins?\b|\b(?:free|operating) cash flow\b|\b[FO]CF\b"
+    r"|\bdebt[- ]to[- ]equity\b|\bD/E\b|\b(?:total|net) debt\b|\bleverage\b",
+    re.I,
+)
+
+
+def names_excluded_metric(text: Any) -> bool:
+    """True when ``text`` names a measure that does not count for a financial company."""
+    return isinstance(text, str) and _EXCLUDED_METRIC_RE.search(text[:600]) is not None
+
+
+def without_excluded_metrics(points: List[str]) -> List[str]:
+    """``points`` without those naming a left-out measure. All of them is left as it is, with a
+    WARNING: a thesis side emptied here would refund the whole report over one word."""
+    kept = [point for point in points if not names_excluded_metric(point)]
+    if points and not kept:
+        logger.warning(
+            "[score-excluded-text] every one of %d point(s) names a left-out measure; "
+            "keeping them rather than emptying the side", len(points),
+        )
+        return points
+    return kept
+
+
+# SG&A / revenue says nothing about these two groups (owner decision 2026-11-06, "Option 2, R&D
+# as is"). They file costs under other lines, underwriting and acquisition for an insurer,
+# operation and maintenance for a utility, so what FMP puts under SG&A is a partial line or a
+# blank. Measured on the FY2025 benchmark universe: blank for 52% of insurers and 51% of
+# utilities, against 18% or less in every other group; 23% and 20% of them flipped between a
+# figure and a blank across 2023-25 (MetLife $6.0B, then 0); and the companies that do report
+# it run from 0.7% to 52% of revenue in Property & Casualty alone. Dropping the blanks from
+# their medians would have scored the rest on whoever FMP filled in that year, and given
+# Selective 10/10 on a 0.7% line. Named lists, not a share-of-blanks test: the two groups sit
+# at about half, so a share test would flip the driver on and off as FMP's fill moved.
+#
+# The utility industries are named as well as the sector so the producer keeps them out of the
+# sector pool (`peer_metric_applicable`). The Utilities row then stays at its stored 0.0, which
+# every scorer reads as no peer. Pooled, it would become 9.66 from 41 half-comparable lines, and
+# a recompute that reached production before this gate did would switch the driver on for 40
+# utilities on the live scorer (UGI 5.0 to 4.2, AES 3.9 to 4.8).
+_NO_SGA_INDUSTRIES = frozenset({
+    "insurance - brokers",
+    "insurance - diversified",
+    "insurance - life",
+    "insurance - property & casualty",
+    "insurance - reinsurance",
+    "insurance - specialty",
+    "diversified utilities",
+    "independent power producers",
+    "regulated electric",
+    "regulated gas",
+    "regulated water",
+    "renewable utilities",
+})
+_NO_SGA_SECTOR = "utilities"
+
+
+def sga_line_applicable(sector: Any, industry: Any) -> bool:
+    """False when SG&A / revenue means nothing for this company: an insurer or a utility, by
+    industry, or a utility by sector, so a new FMP utility industry is caught too. An unknown
+    or empty sector and industry keep the metric."""
+    if industry_key(industry) in _NO_SGA_INDUSTRIES:
+        return False
+    return not (isinstance(sector, str) and sector.strip().casefold() == _NO_SGA_SECTOR)
+
+
 def peer_metric_applicable(metric: str, industry: Optional[str]) -> bool:
     """Whether ``metric`` is meaningful for a company in ``industry`` — an INDUSTRY-level
     answer (the benchmark producer's sector pool and every industry-only caller). Every
-    metric outside `GATED_METRICS` is applicable everywhere. A company in a MIXED industry
-    may still keep the rows: `company_metric_applicable`."""
+    metric outside `GATED_METRICS` and SG&A is applicable everywhere. A company in a MIXED
+    industry may still keep the rows: `company_metric_applicable`."""
     if metric in LIQUIDITY_METRICS:
         return liquidity_ratios_applicable(industry)
     if metric == INTEREST_COVERAGE:
         return interest_coverage_applicable(industry)
+    if metric == SGA_TO_REVENUE:
+        return sga_line_applicable(None, industry)
     return True
 
 

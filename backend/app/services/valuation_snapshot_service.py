@@ -41,6 +41,7 @@ from app.services.entitlements import (
 from app.services.financials_metric_gate import (
     comparable_peer_metrics,
     resolve_payment_network,
+    score_excluded_rows,
 )
 from app.services.sector_benchmark_lookup import (
     fs_industry_only,
@@ -112,7 +113,10 @@ _CACHE_TTL = 300  # 5 minutes
 #     peer — never the sector median; owner decision 2026-10-20), and an FS card with fewer
 #     than two judged multiples is unrated (`peers_withheld`). A v8 row of JPM scored its
 #     EV/EBITDA against the Financial Services sector (Banks - Diversified n=19 then).
-_SNAPSHOT_PAYLOAD_VERSION = 9
+# 10 (2026-11-05): `score_excluded_rows`: a bank's, an insurer's or a lender's P/S, P/FCF and
+#     EV/EBITDA read "N/M" and do not vote, and P/E and P/B carry the card. A v9 row counted
+#     them.
+_SNAPSHOT_PAYLOAD_VERSION = 10
 _VERSION_KEY = "_schema_v"
 # Which DCF a cached row carries: True = the Caydex Fair Value Estimate (`caydex_estimate`),
 # False/absent = FMP's model (`dcf`). A row that disagrees with settings.DCF_ENABLED is rebuilt,
@@ -757,6 +761,11 @@ class ValuationSnapshotService:
         network = resolve_payment_network(
             ticker, industry, None, source="valuation_snapshot",
         )
+        excluded_rows = score_excluded_rows(industry, network=network, ticker=ticker)
+        if excluded_rows:
+            # These legs feed only the rows shown as N/M: losing one must not cost a bank its
+            # Price card, as `_QUARTERLY_ONLY_LEGS` does for the Growth card.
+            degraded = [leg for leg in degraded if leg not in _LEGS_FOR_EXCLUDED_ROWS]
         # No "earnings_yield": the card's yield row compares against 1 / the P/E median (v8).
         bench_metrics = comparable_peer_metrics(
             ["pe_ratio", "ps_ratio", "pb_ratio", "pfcf_ratio", "ev_ebitda"],
@@ -814,6 +823,7 @@ class ValuationSnapshotService:
             # FS industry is left with P/E on its own bands — one multiple is no rating.
             # Not on a FAILED lookup: an outage says nothing about whether peers exist, and
             # that build is served degraded (never stored), scored as before.
+            excluded_rows=excluded_rows,
             peers_withheld=network is True or (
                 fs_industry_only(industry, sector) and "benchmarks" not in degraded
             ),
@@ -921,6 +931,9 @@ def dcf_estimate_from_row(row: Any) -> Optional[DcfEstimateResponse]:
 
 
 
+_NOT_MEANINGFUL = "N/M"
+_LEGS_FOR_EXCLUDED_ROWS = frozenset({"cash_flow", "income", "balance_sheet"})
+
 #: The Price card of a company whose peer medians were withheld (`peers_withheld`) is rated
 #: only when at least this many multiples were actually judged (NET-4, 2026-10-09). With
 #: the medians withheld only P/E can be judged, so a listed non-lender member's card is
@@ -950,6 +963,7 @@ def build_price_snapshot(
     bench_levels: Optional[Dict[str, Optional[str]]] = None,
     ticker: str = "?",
     peers_withheld: bool = False,
+    excluded_rows: frozenset = frozenset(),
 ) -> SnapshotItemResponse:
     """Ratios + benchmark medians -> the "Price" snapshot card.
 
@@ -1284,7 +1298,34 @@ def build_price_snapshot(
     rating = max(1, min(5, round(weighted)))
     weighted_score: Optional[float] = round(weighted, 3)
 
-    if peers_withheld:
+    if excluded_rows:
+        # `score_excluded_rows`: only a multiple that means something for this business votes.
+        # No neutral 3 for what is left out, or for a negative P/E or a P/B with no median:
+        # the rows left are renormalized, and fewer than two is no rating.
+        parts = [
+            (score, weight)
+            for key, value, score, weight in (
+                ("pe", pe, score_pe, 0.25),
+                ("pb", pb, score_pb, 0.15),
+                ("ps", ps, score_ps, 0.15),
+                ("pfcf", pfcf, score_pfcf, 0.20),
+                ("ev_ebitda", ev_ebitda, score_ev, 0.25),
+            )
+            if key not in excluded_rows and value is not None and value > 0 and score is not None
+        ]
+        if len(parts) >= _MIN_JUDGED_FOR_RATING:
+            weighted = sum(score * weight for score, weight in parts) / sum(w for _, w in parts)
+            rating = max(1, min(5, round(weighted)))
+            weighted_score = round(weighted, 3)
+        else:
+            logger.info(
+                "[valuation-unrated] ticker=%s judged=%d of the rows that apply to this "
+                "industry (`score_excluded_rows`): fewer than %d — rating 0, no weighted_score",
+                ticker, len(parts), _MIN_JUDGED_FOR_RATING,
+            )
+            rating = 0
+            weighted_score = None
+    elif peers_withheld:
         # How many multiples were actually JUDGED (never a neutral vote): P/E on its own
         # bands when positive; the other four only beside a usable median.
         judged = sum((
@@ -1320,15 +1361,22 @@ def build_price_snapshot(
             peer_level=level if level in ("industry", "sector") else None,
         )
 
+    def _not_scored(label, key):
+        """A row that means nothing for this business: a bare name, no peer line, no score."""
+        return SnapshotMetricResponse(name=label, value=_NOT_MEANINGFUL, metric_key=key, score=None)
+
     metrics = [
         _metric("P/E", "pe", "pe_ratio", pe, _fmt_ratio(pe),
                 score_pe if pe is not None else None),
         _metric("P/B", "pb", "pb_ratio", pb, _fmt_ratio(pb),
                 score_pb if pb is not None else None),
+        _not_scored("P/S", "ps") if "ps" in excluded_rows else
         _metric("P/S", "ps", "ps_ratio", ps, _fmt_ratio(ps),
                 score_ps if ps is not None else None),
+        _not_scored("P/FCF", "pfcf") if "pfcf" in excluded_rows else
         _metric("P/FCF", "pfcf", "pfcf_ratio", pfcf, _fmt_pfcf(pfcf, km, cf),
                 score_pfcf if pfcf is not None else None),
+        _not_scored("EV/EBITDA", "ev_ebitda") if "ev_ebitda" in excluded_rows else
         _metric("EV/EBITDA", "ev_ebitda", "ev_ebitda", ev_ebitda, _fmt_ratio(ev_ebitda),
                 score_ev if ev_ebitda is not None else None),
         # Earnings Yield: informational — not part of the composite

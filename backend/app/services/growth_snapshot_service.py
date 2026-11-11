@@ -27,6 +27,7 @@ from app.schemas.stock_overview import (
     snapshot_build_time,
     with_cached_build_time,
 )
+from app.services.financials_metric_gate import resolve_payment_network, score_excluded_rows
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +119,9 @@ _inflight: Dict[str, asyncio.Future] = {}
 #     scored +15.7% operating-income growth 2/5 against the lenders' +24.6%.
 # 5 (2026-10-21; Growth is v7): the Financial Services peer rule (owner decision
 #     2026-10-20). A v4 row of a small FS industry scored against the sector's growth.
-_SNAPSHOT_PAYLOAD_VERSION = 5
+# 6 (2026-11-05): `score_excluded_rows`: a bank's, an insurer's or a lender's FCF growth reads
+#     "N/M" and does not count. A v5 row counted it.
+_SNAPSHOT_PAYLOAD_VERSION = 6
 _VERSION_KEY = "_schema_v"
 
 # GrowthService legs this card does NOT read: it scores only the newest ANNUAL point of
@@ -416,6 +419,20 @@ class GrowthSnapshotService:
         score_fcf = _growth_score(fcf_growth, sector_fcf)
         score_op = _growth_score(op_growth, sector_op)
 
+        # `score_excluded_rows`: cash flow means nothing for a bank's or an insurer's growth.
+        # `GrowthResponse.industry` is None on a failed profile leg, which is a degraded build.
+        industry = getattr(growth, "industry", None)
+        excluded_rows = score_excluded_rows(
+            industry,
+            network=resolve_payment_network(ticker, industry, None, source="growth_snapshot"),
+            ticker=ticker,
+        )
+        fcf_excluded = "fcf_growth" in excluded_rows
+        if fcf_excluded:
+            fcf_growth = None
+            # The one row that leg feeds is a fixed N/M: its loss costs this card nothing.
+            degraded = [leg for leg in degraded if leg != "annual_cashflow"]
+
         if all(v is None for v in (rev_growth, eps_growth, fcf_growth, op_growth)):
             degraded.append("no_values")
 
@@ -449,6 +466,9 @@ class GrowthSnapshotService:
                                    metric_key="revenue_growth", score=score_rev if rev_growth is not None else None),
             SnapshotMetricResponse(name="EPS Growth", value=_fmt_growth(eps_growth),
                                    metric_key="eps_growth", score=score_eps if eps_growth is not None else None),
+            SnapshotMetricResponse(name="Free Cash Flow Growth (YoY)", value="N/M",
+                                   metric_key="fcf_growth", score=None)
+            if fcf_excluded else
             SnapshotMetricResponse(name="Free Cash Flow Growth (YoY)", value=_fmt_growth(fcf_growth),
                                    metric_key="fcf_growth", score=score_fcf if fcf_growth is not None else None),
             SnapshotMetricResponse(name="Operating Income Growth", value=_fmt_growth(op_growth),

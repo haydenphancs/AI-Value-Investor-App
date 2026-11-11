@@ -5,7 +5,8 @@ Why one: Telegram's limit is per CHAT, not per caller — the Bot API FAQ: "In a
 more than one message per second" — and its flood control (a 429 with `retry_after`) closes the chat for
 every sender at once. Four sweeps send to that one chat from the web process: the marketing review sweep
 (`review_service.review_cycle`), the publish feed (`publish_feed.feed_cycle`), the run-health / weekly digest
-reports (`digest_service`) and the Learn weekly review (`app/services/learn_weekly/`, wave B). Until
+reports (`digest_service`) and the Learn weekly review (`app/services/learn_weekly/`, wave B), and one-off
+job alerts come through `services/owner_alert.py`. Until
 2026-10-22 each built its OWN `_Pacer`, so the feed's first message could follow the review sweep's last one
 at once, and a Learn sweep running beside them would not have been spaced at all. The flood back-off was
 already one module global (`review_service._rate_limited_until`) read by all three; it lives here now, and

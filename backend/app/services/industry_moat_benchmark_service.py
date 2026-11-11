@@ -151,11 +151,21 @@ _LOSS_INDUSTRIES_LOGGED = 10
 # scores 5pp per point; Network Effects needs a company input; P/S counts only with a positive
 # gross margin; Intangible Assets needs both sector-relative inputs. Rows of the four older
 # vintages stay served, named pending, until the admin refresh after the deploy.
+# 2026-11-05 ("moat_v1.2026-11-05"): a financial company is scored against its own industry,
+# and Brand Power stops counting where gross margin and P/S read N/M. Operating companies score
+# the same. A financial industry's row this vintage cannot rewrite (under 10 companies, or Brand
+# Power on the N/M list) stays in the table, unread: the report's overlay gives an unmeasured
+# pillar of such a company no industry average, this quarter or any later one.
+# 2026-11-06 ("moat_v1.2026-11-06"): SG&A no longer counts for an insurer or a utility, so their
+# Cost Advantage rests on operating margin and asset turnover. Every other company scores the
+# same until the medians are next rebuilt without FMP's blanks. Rows of the older vintages stay
+# served, named pending, until the refresh after the deploy.
 MODEL_VERSION = SCORER_VERSION
 # Every vintage the lookup knows, oldest first; a row stamped with anything else (or
 # nothing) ranks below all of them.
 _MODEL_VERSION_ORDER = (
     "moat_v1.2026-05", "moat_v1.2026-10", "moat_v1.2026-10-11", "moat_v1.2026-10-22",
+    "moat_v1.2026-10-28", "moat_v1.2026-11-05",
     MODEL_VERSION,
 )
 TABLE_NAME = "industry_moat_benchmarks"
@@ -436,6 +446,7 @@ class IndustryMoatBenchmarkService:
                 ratios=_safe(ratios),
                 industry_tam=industry_tam,
                 transcript=transcript_str,
+                ticker=ticker,
             )
         except Exception as exc:
             logger.debug(

@@ -38,9 +38,8 @@ ContentView.swift               -> Main tab container (custom tab bar) with 5 ta
 ================================================================================
 
 HOME TAB:
-  HomeView.swift                -> Market tickers row, AI market insights card,
-                                   daily briefing alerts, recent research reports,
-                                   "New Analysis" button
+  HomeDashboardView.swift       -> Market Pulse, Daily Scanners, App-Exclusive Signals,
+                                   Trending Themes
 
 UPDATES TAB:
   UpdatesView.swift             -> Live news timeline, filterable by ticker/market,
@@ -131,7 +130,7 @@ Core/ViewModels/BaseViewModel.swift -> Shared ViewModel base class
 VIEW MODELS (Business Logic)
 ================================================================================
 
-HomeViewModel.swift             -> Market tickers, insights, briefings, recent research
+HomeDashboardViewModel.swift    -> Market Pulse, scanners, signals, themes
 UpdatesViewModel.swift          -> News feed, filters, grouped news by time
 ResearchViewModel.swift         -> Ticker search, persona selection, report generation
 TickerDetailViewModel.swift     -> Stock detail data loading
@@ -152,8 +151,8 @@ PriceActionViewModel.swift      -> Price/technical data
 DATA MODELS (28 model files)
 ================================================================================
 
-HomeModels.swift                -> MarketTicker, MarketInsight, DailyBriefingItem,
-                                   HomeTab, InvestorPersona, ResearchReport
+HomeModels.swift                -> MarketTickerType, MarketTicker, MarketSentiment,
+                                   HomeTab
 TickerDetailModels.swift        -> Stock detail, key stats, company profile
 TickerReportModels.swift        -> Full AI report structure (thesis, fundamentals, etc.)
 TickerNewsModels.swift          -> News for a specific ticker
@@ -213,7 +212,7 @@ Views/Atoms/ (128 files)        -> Smallest UI pieces:
 
 Views/Molecules/ (176 files)    -> Composed components:
                                    Cards, rows, bars, headers, sheets, selectors
-                                   Examples: TickerCard, ChatInputBar, EarningsChartView,
+                                   Examples: MarketPulseCard, ChatInputBar, EarningsChartView,
                                    SearchBar, ReportCard, SmartMoneyFlowChart
 
 Views/Organisms/ (99 files)     -> Full sections/panels:

@@ -661,7 +661,8 @@ _METRIC_PEER_SUFFIX = re.compile(
 _LEAD_OWNED_SECTION_KEYS: Dict[str, frozenset] = {
     "moat_competition": frozenset({"dimensions"}),
     "revenue_engine": frozenset({"segments", "period", "revenue_unit", "total_revenue",
-                                 "intersegment_eliminations", "reporting_currency", "currency"}),
+                                 "intersegment_eliminations", "gross_reported_revenue",
+                                 "reporting_currency", "currency"}),
     "revenue_forecast": frozenset({"cagr", "eps_growth", "beat_summary", "forecast_analyst_count"}),
     "key_management": frozenset({"officers", "top_holders"}),
     "wall_street_consensus": frozenset({"caydex_fair_value"}),
@@ -854,7 +855,14 @@ def _moat_figures(report: Dict[str, Any]) -> List[_FigSpec]:
         if tag:
             text += f" ({tag})"
         items.append(text)
-    return [("Moat pillars (score out of 10): ", items, _FIG_MOAT_CAP)]
+    # Every pillar an AI estimate: the card reads "Moat Not Measured", so chat must not grade the
+    # moat from them. A report from before the tags, or with a retired tier, reads as it did.
+    unmeasured = all(src == "ai_legacy" for *_rest, src in rows)
+    head = (
+        "Moat not measured, never grade it. Moat pillars (score out of 10): "
+        if unmeasured else "Moat pillars (score out of 10): "
+    )
+    return [(head, items, _FIG_MOAT_CAP)]
 
 
 def _fig_year(value: Any) -> Optional[int]:
@@ -966,7 +974,12 @@ def _segment_figures(report: Dict[str, Any]) -> List[_FigSpec]:
     money = (_currency_code(eng.get("reporting_currency")) or _currency_code(eng.get("currency"))
              or "reporting currency")
     head_bits.append(f"{unit} of {money}" if unit else f"amounts in {money}")
-    if total is not None:
+    gross = _fig_float(eng.get("gross_reported_revenue"))
+    gross = gross if gross is not None and gross > 0 else None
+    if total is not None and gross is not None:
+        head_bits.append(f"% = share of segment revenue {_fig_amount(total)}, after interest paid out")
+        head_bits.append(f"reported revenue of {_fig_amount(gross)} includes that interest")
+    elif total is not None:
         head_bits.append(f"% = share of total revenue {_fig_amount(total)}")
     elim = _fig_float(eng.get("intersegment_eliminations"))
     if elim is not None and elim > 0:

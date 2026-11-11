@@ -341,7 +341,16 @@ TABLE_NAME = "ticker_report_cache"
 #     deploy lands later; pushed after the 18:00 ET close so the regeneration costs nothing
 #     extra. The full backend suite ran on this change, on the exact commit, BEFORE this literal
 #     was written. This ONE bump supersedes every instant above.
-CACHE_SCHEMA_FLOOR = datetime(2026, 11, 5, 23, 1, 0, tzinfo=timezone.utc)
+# 2026-11-06 (02:54 UTC = 21:54 ET on the 5th, after the close; the push, owner's "Yes,
+#     push"): financial-company scoring (`score_excluded_rows`). Cached collections carry the
+#     old cards, style signals and model evidence of banks, insurers and lenders, and the
+#     shared cache would keep selling reports that counted P/FCF and EV/EBITDA for them.
+#     Ships with Valuation 10, Profitability 6, Growth card 6, Growth 8 and Profit Power 10.
+#     SCORER_VERSION stays: the moat pillars did not change. Same rule: a PAST instant, moved
+#     to the push time if the deploy lands later. The full backend suite ran on this change,
+#     on the exact commit, BEFORE this literal was written. This ONE bump supersedes every
+#     instant above.
+CACHE_SCHEMA_FLOOR = datetime(2026, 11, 6, 2, 54, 0, tzinfo=timezone.utc)
 
 # The internal report key carrying the Financials sections a report lost to a degraded
 # upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.

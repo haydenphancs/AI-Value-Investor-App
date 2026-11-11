@@ -32,6 +32,7 @@ from app.schemas.growth import GrowthDataPointSchema, GrowthResponse
 from app.services.financials_metric_gate import (
     comparable_peer_metrics,
     resolve_payment_network,
+    score_excluded_rows,
     trailing_interest_row,
 )
 from app.services.sector_benchmark_lookup import (
@@ -78,7 +79,11 @@ _CACHE_TTL = 300  # 5 minutes
 # 7 (2026-10-21): the Financial Services peer rule (own industry line from 10 companies per
 #     period, else no line — never the sector's; owner decision 2026-10-20). A v6 row of a
 #     small FS industry drew the Financial Services sector's growth line.
-_GROWTH_PAYLOAD_VERSION = 7
+# 8 (2026-11-05): carries the profile's `industry`, which the Growth card needs for
+#     `score_excluded_rows`. A v7 row has none, so a bank's would count FCF growth for 24 h.
+#     Its FCF series is also empty for a company with `score_excluded_rows`: a bank's FCF
+#     growth is a deposit swing, and the chart must not show what the row calls N/M.
+_GROWTH_PAYLOAD_VERSION = 8
 _VERSION_KEY = "payload_version"
 
 
@@ -794,6 +799,8 @@ class GrowthService:
         network = resolve_payment_network(
             ticker, industry, trailing_interest_row(quarterly_income), source="growth",
         )
+        if "fcf_growth" in score_excluded_rows(industry, network=network, ticker=ticker):
+            fcf_annual_points, fcf_quarterly_points = [], []
         all_yoy_metrics = comparable_peer_metrics(
             [
                 "eps_yoy", "revenue_yoy", "net_income_yoy",
@@ -907,6 +914,7 @@ class GrowthService:
 
         response = GrowthResponse(
             symbol=ticker,
+            industry=industry or None,
             eps_annual=_to_schemas(eps_annual_points, "eps_yoy", benchmarks_annual),
             eps_quarterly=_to_schemas(eps_quarterly_points, "eps_yoy", benchmarks_quarterly),
             revenue_annual=_to_schemas(rev_annual_points, "revenue_yoy", benchmarks_annual),

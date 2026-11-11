@@ -63,9 +63,11 @@ from app.utils.margins import revenue_backed_margin
 from app.utils.period_labels import annual_benchmark_key, calendar_quarter_key
 from app.services.financials_metric_gate import (
     CURRENT_RATIO,
+    DEBT_TO_EQUITY,
     GATED_METRICS,
     INTEREST_COVERAGE,
     QUICK_RATIO,
+    SCORE_EXCLUDED_ROWS,
     company_metric_applicable,
     comparable_peer_metrics,
     excluded_from_industry_median,
@@ -75,7 +77,11 @@ from app.services.financials_metric_gate import (
     peer_metric_applicable,
     resolve_payment_network,
     resolve_withheld_company_rows,
+    score_excluded_rows,
+    GROSS_REVENUE_CUSTODIANS,
+    normalize_ticker,
     trailing_interest_row,
+    without_excluded_metrics,
     withheld_company_rows,
 )
 from app.services._earnings_common import eps_digit_shift_suspect
@@ -344,6 +350,11 @@ NEWS_CATALYST_KEYWORDS: List[Tuple[str, Tuple[str, ...]]] = [
     ("Legal/Regulatory", (
         "sec investigation", "sec charges", "wells notice",
         "doj probe", "doj investigation", "antitrust",
+        # Never a bare "probe": this reads the article body too, so a probe card, an ultrasound
+        # probe or a space probe would read as a legal catalyst.
+        "probe of", "probe into", "probes into", "federal probe", "senate probe",
+        "congressional probe", "house probe", "regulatory probe", "justice department probe",
+        "sec probe", "ftc probe", "antitrust probe",
         "indictment", "indicted", "criminal charges",
         "fraud charges", "charged with fraud",
         "jury verdict", "found liable", "subpoena", "injunction",
@@ -2999,8 +3010,13 @@ class TickerReportDataCollector:
         }
 
         # ── Valuation vital ───────────────────────────────────────────
+        # A DCF rests on free cash flow, so it never stands in for a financial company's
+        # unrated Price card.
         out.valuation_vital = _build_valuation_vital(
-            current_price, fair_value, upside, out.snap_valuation
+            current_price,
+            None if _score_excluded(out) else fair_value,
+            None if _score_excluded(out) else upside,
+            out.snap_valuation,
         )
 
         # ── Financial health vital ────────────────────────────────────
@@ -3130,6 +3146,7 @@ class TickerReportDataCollector:
             fiscal_year=engine_inputs["fiscal_year"],
             total_revenue=engine_inputs["total_revenue"],
             intersegment_eliminations=engine_inputs["intersegment_eliminations"],
+            gross_reported_revenue=engine_inputs["gross_reported_revenue"],
             reporting_currency=_engine_reporting_currency(
                 out.income, engine_inputs["fiscal_year"], out.ticker,
             ),
@@ -3137,7 +3154,8 @@ class TickerReportDataCollector:
 
         # ── Revenue forecast (projections + CAGR — guidance from AI) ─
         out.revenue_forecast_partial = _build_revenue_forecast_partial(
-            out.estimates, c.get("revenue_cagr"), c.get("eps_cagr"), out.income
+            out.estimates, c.get("revenue_cagr"), c.get("eps_cagr"), out.income,
+            revenue_crosses_basis=_revenue_crosses_basis(out),
         )
 
         # ── Fundamental metrics (4 cards) — deterministic from the
@@ -3395,6 +3413,7 @@ class TickerReportDataCollector:
         # (A Gemini grounded-research tier sat between the two until
         # 2026-10-02, when Google Search grounding was retired for its terms.)
         from app.services.moat_scoring_service import (
+            own_industry_peers,
             score_moat_dimensions,
             PILLAR_ORDER,
             SCORER_VERSION as MOAT_SCORER_VERSION,
@@ -3416,6 +3435,7 @@ class TickerReportDataCollector:
                 industry_tam=out.industry_tam,
                 transcript=out.transcript or None,
                 ip_intel=out.ip_intel,
+                ticker=out.ticker,
             )
         except Exception as exc:
             # A bug or a data shape, not an outage (a failed sector-median read is caught
@@ -3478,7 +3498,16 @@ class TickerReportDataCollector:
         # cache via `_MOAT_BENCHMARKS_DEGRADED` (the next caller re-reads). A malformed
         # industry name is skipped, never read, so a vendor quirk cannot keep a ticker out
         # of the shared caches for good.
+        # A financial company read against its own industry (`own_industry_peers`) has no peer
+        # for a pillar it was not measured on: the row it would take is built from other
+        # companies on another scale (Brand Power of AmEx would read beside Visa's, of Goldman
+        # beside bitcoin miners'), or is left over from before its industry fell under 10. So
+        # that pillar keeps the AI's own peer, tagged as such, and neither the Insight nor chat
+        # calls it an industry peer. Every other company's overlay stands.
         focal_industry = (out.profile or {}).get("industry")
+        own_industry = own_industry_peers(
+            (out.profile or {}).get("sector"), focal_industry, out.ticker,
+        )
         if isinstance(focal_industry, str) and focal_industry.strip():
             peer_avgs: Any = {}
             try:
@@ -3506,7 +3535,7 @@ class TickerReportDataCollector:
             for dim in merged_dims:
                 name = dim.get("name")
                 ind_avg = peer_avgs.get(name) if isinstance(name, str) else None
-                if ind_avg is not None:
+                if ind_avg is not None and (not own_industry or dim.get("source") == "deterministic"):
                     dim["peer_score"] = ind_avg
                     dim["peer_source"] = MOAT_PEER_SOURCE_INDUSTRY
         moat_dims = _apply_peer_score_baseline(merged_dims)
@@ -3599,6 +3628,7 @@ class TickerReportDataCollector:
             # of how many survive scoring.
             n_total_peers=len(out.peer_ranks),
             focal_roic_ttm=out.focal_roic_ttm,
+            roic_comparable=not _score_excluded(out),
         )
         # Coverage note: when one or more pillars fall flat because the industry's real moats
         # live outside the financial-statement lens (mining, banks, insurers, REITs,
@@ -3620,7 +3650,13 @@ class TickerReportDataCollector:
             "competitive_insight": (
                 ai_moat.get("competitive_insight") or "Data unavailable for this ticker."
             ),
-            "_coverage_note": _build_moat_coverage_note(moat_dims, focal_industry),
+            # For a company under `own_industry_peers` an estimate is left out: its fallback
+            # peer says nothing about the industry, so "flat" would be false of it.
+            "_coverage_note": _build_moat_coverage_note(
+                [d for d in moat_dims if d.get("source") == "deterministic"]
+                if own_industry else moat_dims,
+                focal_industry,
+            ),
             # The ORDER MARKER every "most direct first" claim depends on (chat,
             # iOS caption, Stage-B prompts, PDF). Always "threat" / "industry_peers"
             # now: the one directness-ranked list ("direct" / "research") came from
@@ -3755,6 +3791,19 @@ class TickerReportDataCollector:
             ),
             "mos_pct": _c.get("upside_pct"),
         }
+        excluded_rows = _score_excluded(out)
+        if excluded_rows:
+            # What the cards show as N/M does not steer the score through the style nudge.
+            # D/E too: a bank's flips with its funding and nearly every insurer earns the
+            # same bonus (owner decision 2026-11-05: same rule for all of them).
+            scoring_inputs["_style_signals"].update(
+                dict.fromkeys(_STYLE_SIGNALS_EXCLUDED),
+                excluded_rows=sorted(excluded_rows),
+            )
+        if _revenue_gross_of_interest(out):
+            scoring_inputs["_style_signals"]["revenue_gross_of_interest"] = True
+        elif _revenue_basis_unclear(out):
+            scoring_inputs["_style_signals"]["revenue_basis_unclear"] = True
 
         # Deterministic, persona-weighted headline score — the SINGLE source
         # of truth for BOTH entry paths (the report endpoint and the research
@@ -3794,7 +3843,9 @@ class TickerReportDataCollector:
 
             "_scoring_inputs": scoring_inputs,
 
-            "core_thesis": _sanitize_thesis(ai.get("core_thesis")),
+            "core_thesis": _sanitize_thesis(
+                ai.get("core_thesis"), drop_excluded=bool(excluded_rows),
+            ),
 
             # fundamental_metrics is now collector-derived (matches the
             # snapshot data the user sees in TickerDetailView's
@@ -4964,8 +5015,11 @@ def _build_hidden_market_signals(
                 "num_sellers": summ.num_sellers,
                 "total_buys_in_millions": round(summ.total_buys_in_millions or 0.0, 2),
                 "total_sells_in_millions": round(summ.total_sells_in_millions or 0.0, 2),
+                # Dollars, but never against the pills above it: at 7 buyers and 7 sellers one
+                # $10M-$25M disclosure band read "Net Buy" over text saying balanced.
                 "net_direction": (
-                    "buy" if net > 0 else "sell" if net < 0 else "balanced"
+                    "balanced" if summ.num_buyers == summ.num_sellers
+                    else "buy" if net > 0 else "sell" if net < 0 else "balanced"
                 ),
                 "period": summ.period_description or "Last 12 Months",
                 "trades": [a.model_dump() for a in recent],
@@ -5944,6 +5998,20 @@ def _build_fundamentals_history(out: "CollectedTickerData") -> Dict[str, Dict[st
     return result
 
 
+_GROWTH_ROW_VALUE_RE = re.compile(r"[+-]?\d[\d,]*(?:\.\d+)?%")
+
+
+def _growth_row_values(metrics: Any) -> Dict[str, float]:
+    """{metric_key: percentage} for the Growth rows that print one ("+3.3%"); "N/M" and "—"
+    print none."""
+    values: Dict[str, float] = {}
+    for m in metrics or []:
+        key, text = getattr(m, "metric_key", None), getattr(m, "value", None)
+        if key and isinstance(text, str) and _GROWTH_ROW_VALUE_RE.fullmatch(text.strip()):
+            values[key] = float(text.strip().rstrip("%").replace(",", ""))
+    return values
+
+
 def _snapshot_to_card(
     title: str,
     snap: Optional[SnapshotItemResponse],
@@ -5995,8 +6063,11 @@ def _snapshot_to_card(
         md: Dict[str, Any] = {"label": m.name, "value": m.value, "trend": None}
         if getattr(m, "peer_level", None) in ("industry", "sector"):
             md["peer_level"] = m.peer_level   # for the model prompts' peer wording
-        # Attach tap-to-expand history when we have a series for this metric.
-        hk = _resolve_history_key(m.name)
+        # Attach tap-to-expand history when we have a series for this metric. Never on a row
+        # `score_excluded_rows` shows as "N/M": the history would print the multiple.
+        hk = None if (
+            m.value == "N/M" and getattr(m, "metric_key", None) in SCORE_EXCLUDED_ROWS
+        ) else _resolve_history_key(m.name)
         h = history_lookup.get(hk) if (hk and history_lookup) else None
         if h is not None:
             md["history_key"] = hk
@@ -6053,6 +6124,7 @@ def _snapshot_to_card(
         [(m.metric_key, m.score) for m in snap.metrics],
         peer_compared=peer_compared,
         peer_free_metrics=peer_free_metrics,
+        row_values=_growth_row_values(snap.metrics),
     )
     return {
         "title": title,
@@ -6161,6 +6233,7 @@ def _empty_engine_inputs() -> Dict[str, Any]:
         "fiscal_year": None,
         "total_revenue": None,
         "intersegment_eliminations": None,
+        "gross_reported_revenue": None,
     }
 
 
@@ -6318,7 +6391,20 @@ def _engine_inputs_from_sources(
     tab's `revenueBasis`); the segment sum only when it is not. A gross stack keeps its
     segments AS REPORTED and carries the eliminations so the panel can draw the line that
     makes the shares add to 100%: switching the denominator without that line would show
-    shares summing to 134% with nothing to explain them."""
+    shares summing to 134% with nothing to explain them.
+
+    A lender is the exception (2026-11-06). Its segments are net of interest while FMP's
+    revenue is gross, and the breakdown closes that gap with `_INTEREST_GAP_NAME`. That row
+    is not a revenue source: JPMorgan's was the largest bar, at 36% of "revenue". It leaves
+    the Engine here, the shares are of the segments, as the bank reports them, and the gross
+    figure travels beside them so the report can say what the total leaves out."""
+    from app.services.revenue_breakdown_service import _INTEREST_GAP_NAME
+
+    gross_reported: Optional[float] = None
+    if any(name == _INTEREST_GAP_NAME for name, _ in sources):
+        sources = [row for row in sources if row[0] != _INTEREST_GAP_NAME]
+        gross_reported = _finite_positive(reported_revenue)
+        reported_revenue = None
     gross_sum = sum(v for _, v in sources)
     reported = _finite_positive(reported_revenue)
     basis = reported if reported is not None else gross_sum
@@ -6331,6 +6417,7 @@ def _engine_inputs_from_sources(
         "fiscal_year": fy,
         "total_revenue": basis,
         "intersegment_eliminations": eliminations,
+        "gross_reported_revenue": gross_reported,
     }
 
 
@@ -6373,6 +6460,8 @@ def _raw_engine_inputs(
         reported = _safe_float_opt(matched_income, "revenue")
         sources, eliminations, outcome = _reconcile_segments(
             sources, reported, _explicit_eliminations(seg_rec), ticker=ticker,
+            interest_expense=_safe_float_opt(matched_income, "interestExpense"),
+            interest_income=_safe_float_opt(matched_income, "interestIncome"),
         )
         if outcome in ("thin", "unreconciled"):
             logger.info(
@@ -6531,6 +6620,7 @@ def _build_revenue_engine(
     fiscal_year: Optional[str] = None,
     total_revenue: Optional[float] = None,
     intersegment_eliminations: Optional[float] = None,
+    gross_reported_revenue: Optional[float] = None,
     reporting_currency: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Emit segments in MILLIONS — iOS decides how to render (M / B / T).
@@ -6548,6 +6638,8 @@ def _build_revenue_engine(
     * `total_revenue` is the share denominator: reported revenue when known (see
       `_engine_inputs_from_sources`), else the segment sum.
     * `intersegment_eliminations` (millions, positive) is set only for a gross stack.
+    * `gross_reported_revenue` (millions) is set only when `total_revenue` leaves out the
+      interest a lender's reported revenue includes (`_engine_inputs_from_sources`).
     * `reporting_currency` is the ISO code the values are in (`_engine_reporting_currency`),
       re-guarded here (`_currency_code`) so no caller can put a garbage code on the wire;
       None when unknown.
@@ -6561,6 +6653,7 @@ def _build_revenue_engine(
             "revenue_unit": "Millions",
             "period": period,
             "intersegment_eliminations": None,
+            "gross_reported_revenue": None,
             "reporting_currency": currency,
             "analysis_note": None,  # filled by AI
         }
@@ -6568,6 +6661,7 @@ def _build_revenue_engine(
     gross = sum(s["current_revenue"] for s in segments)
     total = _finite_positive(total_revenue) or gross
     eliminations = _finite_positive(intersegment_eliminations)
+    gross_reported = _finite_positive(gross_reported_revenue)
 
     divisor = 1e6  # always emit in millions
     scaled = []
@@ -6586,6 +6680,9 @@ def _build_revenue_engine(
         "period": period,
         "intersegment_eliminations": (
             round(eliminations / divisor, 2) if eliminations is not None else None
+        ),
+        "gross_reported_revenue": (
+            round(gross_reported / divisor, 2) if gross_reported is not None else None
         ),
         "reporting_currency": currency,
         "analysis_note": None,  # AI fills
@@ -6750,6 +6847,8 @@ def _signed_eps_label(eps: Optional[float]) -> str:
 def _build_annual_timeline(
     income: Optional[List[Dict[str, Any]]],
     estimates: Optional[List[Dict[str, Any]]],
+    *,
+    revenue_crosses_basis: bool = False,
 ) -> List[Dict[str, Any]]:
     """One continuous yearly revenue+EPS series for the Earnings Timeline view:
     the last 5 reported ACTUAL years (is_forecast=False) followed GAPLESSLY by up
@@ -6770,8 +6869,12 @@ def _build_annual_timeline(
     statement's GAAP `epsDiluted`, forecasts are the analyst consensus `epsAvg` (adjusted
     for most filers). The first forecast year's EPS YoY is therefore None — AVGO's GAAP
     $4.77 against a $10.00 consensus read as "+110%" growth — and every row says which
-    basis it is on (`eps_basis`). Revenue is the same basis on both sides and keeps its
-    YoY. A YoY across a missing fiscal year is None too (it would be a 2-year change).
+    basis it is on (`eps_basis`). Revenue is the same basis on both sides and keeps its YoY,
+    except where `revenue_crosses_basis` says it is not: FMP's revenue for a bank is gross of
+    the interest it pays while the consensus is net, so JPMorgan's FY2026 read -25.5% against
+    a true +14.6% (2026-11-06). That first forecast row's revenue YoY is None; later rows are
+    estimate against estimate and keep theirs (`_revenue_crosses_basis`).
+    A YoY across a missing fiscal year is None too (it would be a 2-year change).
 
     Self-contained: its own divisor + YoY, independent of the curated forecast
     window in `_build_revenue_forecast_partial`. Reuses inputs the collector
@@ -6817,6 +6920,8 @@ def _build_annual_timeline(
         # GAAP actual → consensus forecast: not a growth rate (see the docstring).
         crosses_basis = prior is not None and row.is_forecast and not prior.is_forecast
         prior_eps = prior.eps if prior is not None and not crosses_basis else None
+        if crosses_basis and revenue_crosses_basis:
+            prior_rev = None
         rev, eps = row.revenue, row.eps
         series.append({
             "period": str(row.fy),
@@ -6947,6 +7052,8 @@ def _build_revenue_forecast_partial(
     revenue_cagr: Optional[float],
     eps_cagr: Optional[float],
     income: Optional[List[Dict[str, Any]]] = None,
+    *,
+    revenue_crosses_basis: bool = False,
 ) -> Dict[str, Any]:
     # Pick up to 4 forward projections plus the off-screen anchor (FY before
     # "current") for the leftmost bar's YoY chip. With fewer than 4 forward
@@ -6996,8 +7103,12 @@ def _build_revenue_forecast_partial(
             # revenue, only when that is the year before it (a filer behind on its reports
             # would print a multi-year change as YoY, which the timeline refuses too). EPS
             # stays None: a GAAP actual against a consensus figure is not a growth rate
-            # (`crosses_basis`), Berkshire would show about -28%.
-            if anchor is None and last_actual is not None and period == str(last_actual.fy + 1):
+            # (`crosses_basis`), Berkshire would show about -28%. Nor does revenue where it
+            # changes basis too (`_build_annual_timeline`).
+            if (
+                anchor is None and last_actual is not None
+                and period == str(last_actual.fy + 1) and not revenue_crosses_basis
+            ):
                 prior_rev = last_actual.revenue
         else:
             prior_est = sorted_estimates[i - 1]
@@ -7027,7 +7138,9 @@ def _build_revenue_forecast_partial(
         # after the last reported year) for the "Earnings Timeline" sheet —
         # independent of the curated `projections` window above (own divisor +
         # YoY). The module chart keeps using `projections`; the sheet uses this.
-        "annual_timeline": _build_annual_timeline(income, estimates),
+        "annual_timeline": _build_annual_timeline(
+            income, estimates, revenue_crosses_basis=revenue_crosses_basis,
+        ),
         "forecast_analyst_count": _forecast_analyst_count(income, estimates),
         "guidance_quote": None,         # AI fills via Stage A (PR 6)
         "guidance_speaker": None,       # AI fills via Stage A (PR 6)
@@ -10279,6 +10392,8 @@ def _build_competitors(
     peer_ranks: Optional[Dict[str, int]] = None,
     n_total_peers: int = 0,
     focal_roic_ttm: Optional[float] = None,
+    *,
+    roic_comparable: bool = True,
 ) -> List[Dict[str, Any]]:
     """Real competitor list from FMP peer profiles, each row scored by a
     blended directness × financial × moat threat score.
@@ -10437,6 +10552,11 @@ def _build_competitors(
             f"_build_competitors({my_ticker}): no focal TTM ROIC — scoring "
             f"against the focal's ANNUAL ROIC while peers use TTM (mixed periods)"
         )
+    # A bank's invested capital is an arbitrary figure (BAC +$47.6B gives 29.4%, JPM -$551.8B
+    # gives 3.3%), so the gap between two of them measures nothing and pinned BAC at a threat
+    # of 10.0 (2026-11-06). With no focal ROIC every peer takes the absolute path.
+    if not roic_comparable:
+        my_roic_frac = None
     # FMP stopped emitting returnOnEquity on /ratios in late 2025;
     # /key-metrics still carries it. Fall through so the focal isn't
     # under-scored vs peers (who already get ROE via /key-metrics-ttm).
@@ -10915,9 +11035,12 @@ def _sanitize_stage_a_factors(raw: Any) -> List[Dict[str, Any]]:
     return factors[:5]
 
 
-def _sanitize_thesis(thesis: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _sanitize_thesis(
+    thesis: Optional[Dict[str, Any]], *, drop_excluded: bool = False,
+) -> Dict[str, Any]:
     """Pydantic-safe core_thesis. Bull/bear cap to 5 each (the prompt also
-    enforces a signal-driven 2-5 count; this is the post-write defense)."""
+    enforces a signal-driven 2-5 count; this is the post-write defense).
+    `drop_excluded`: no bullet leans on a measure the score left out."""
     if not isinstance(thesis, dict):
         return {"bull_case": [], "bear_case": []}
     def _points(raw: Any) -> List[str]:
@@ -10925,7 +11048,8 @@ def _sanitize_thesis(thesis: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         # and a bare string would have become one bullet per character.
         if not isinstance(raw, list):
             return []
-        return [p for p in raw if isinstance(p, str) and p.strip()][:5]
+        points = [p for p in raw if isinstance(p, str) and p.strip()][:5]
+        return without_excluded_metrics(points) if drop_excluded else points
 
     # ensure_insider_label: a Stage-A fallback bullet citing insider buy/sell
     # counts ("55 sells vs 1 buy") must say "insider" — these bullets render with
@@ -10972,6 +11096,93 @@ _CONTEXT_GATED_NAMES: Tuple[Tuple[str, str], ...] = (
 
 _GATE_NOT_MEANINGFUL = "not_meaningful"
 _GATE_WITHHELD = "withheld"
+
+
+# Stated where the figures would be, and digit-free, as `_gated_context_lines`: silence invites
+# the model to recall one. P/E, P/B, margins and returns stay in the evidence.
+_EXCLUDED_CONTEXT_LINE = (
+    "P/S, P/FCF, EV/EBITDA, gross margin, operating and free cash flow, total debt and "
+    "debt-to-equity DO NOT APPLY to a company in this industry: its deposits, reserves and "
+    "funding drive them. Do not cite them or call them a strength or a weakness."
+)
+# `_style_signals` a company with `score_excluded_rows` leaves out.
+# `mos_pct` too: it is a DCF's upside, and a DCF is built on free cash flow.
+_STYLE_SIGNALS_EXCLUDED = (
+    "debt_equity", "fcf", "gross_margin", "gross_margin_prev", "roic", "mos_pct",
+)
+
+
+# Interest paid, as a share of reported revenue, from which a financial company's revenue is
+# read as gross of it. FY2025: JPM 35%, BAC 41%, USB 33%, INDB 27%; PGR 0.3%, TRV 0.9%, MET 1.4%.
+_GROSS_REVENUE_MIN_INTEREST_SHARE = 0.10
+
+
+def _revenue_crosses_basis(out: Any) -> bool:
+    """Whether the last reported year and the first estimate may be on different revenue bases,
+    so no change is read across them. The company type alone decides, never the size of the
+    fall, so a real decline elsewhere still shows."""
+    return bool(_score_excluded(out)) or (
+        normalize_ticker(getattr(out, "ticker", None)) in GROSS_REVENUE_CUSTODIANS
+    )
+
+
+def _lender_revenue_read(out: Any) -> Optional[Tuple[float, float, float]]:
+    """(reported revenue, interest paid, next year's estimate) for a financial company whose
+    interest is a real share of its reported revenue, else None."""
+    if not _revenue_crosses_basis(out):
+        return None
+    income = getattr(out, "income", None)
+    rows = [r for r in (income or []) if isinstance(r, dict)]
+    if not rows:
+        return None
+    latest = max(rows, key=lambda r: str(r.get("date") or ""))
+    revenue = _finite_positive(latest.get("revenue"))
+    interest = _finite_positive(latest.get("interestExpense"))
+    if revenue is None or interest is None:
+        return None
+    if interest < revenue * _GROSS_REVENUE_MIN_INTEREST_SHARE:
+        return None
+    _actuals, forecasts = _annual_timeline_rows(income, getattr(out, "estimates", None))
+    estimate = _finite_positive(forecasts[0].revenue) if forecasts else None
+    return None if estimate is None else (revenue, interest, estimate)
+
+
+def _revenue_gross_of_interest(out: Any) -> bool:
+    """True when this financial company's reported revenue holds interest that analyst
+    estimates leave out. Narrower than `_score_excluded`: an insurer has no such gap, so the
+    sentence saying so would be false on one. The consensus has to agree: the next year's
+    estimate must sit nearer revenue less interest than revenue, as JPMorgan's $208.4B does
+    between $181.8B and $279.7B. A statement row already net, or a lender whose analysts use
+    the gross figure, stays unmarked. This decides the words only: the chip follows
+    `_revenue_crosses_basis`, so a miss here never brings a cross-basis change back.
+
+    Read on 29 real companies, 2026-11-05: every one marked (JPM BAC WFC C GS MS USB PNC TFC SYF
+    NLY BK HSBC RY, plus STT NTRS) has an estimate 1.01-1.30 times revenue less interest. No
+    insurer, and neither SCHW nor AXP, whose estimates sit at their reported revenue."""
+    read = _lender_revenue_read(out)
+    if read is None:
+        return False
+    revenue, interest, estimate = read
+    return abs(estimate - (revenue - interest)) < abs(estimate - revenue)
+
+
+def _revenue_basis_unclear(out: Any) -> bool:
+    """True for a lender with a real interest line whose estimates don't sit nearer revenue less
+    interest. Their chip is gone too, and "estimates leave interest out" can't be said of them:
+    Ally's $9.1B sits almost midway between $5.7B and $12.2B, Capital One's $64.0B nearer its
+    reported $69.3B. So the sentence says only that the two may differ."""
+    return _lender_revenue_read(out) is not None and not _revenue_gross_of_interest(out)
+
+
+def _score_excluded(out: Any) -> frozenset:
+    """`score_excluded_rows` for this collection, from the same inputs as `_context_gated_rows`.
+    Empty for an operating company, so nothing below changes for one."""
+    profile = getattr(out, "profile", None)
+    return score_excluded_rows(
+        profile.get("industry") if isinstance(profile, dict) else None,
+        network=getattr(out, "non_lender_member", False) is True,
+        ticker=getattr(out, "ticker", None),
+    )
 
 
 def _context_gated_rows(out: Any) -> Dict[str, str]:
@@ -11127,11 +11338,18 @@ def build_financial_context(out: CollectedTickerData) -> str:
     parts.append(
         f"Earnings Yield: {_fmt_pct_or_na(ey) if ey is not None else 'N/A — negative or missing earnings'}"
     )
-    parts.append(f"Gross Margin: {_fmt_pct_or_na(c.get('gross_margin'))}")
+    # Re-decided here like the gate below: a figure the score leaves out must not reach the
+    # model at all, or it comes back as a bull or bear point.
+    excluded_rows = _score_excluded(out)
+    if not excluded_rows:
+        parts.append(f"Gross Margin: {_fmt_pct_or_na(c.get('gross_margin'))}")
     parts.append(f"Net Margin: {_fmt_pct_or_na(c.get('net_margin'))}")
     parts.append(f"Operating Margin: {_fmt_pct_or_na(c.get('operating_margin'))}")
     parts.append(f"ROE: {_fmt_pct_or_na(c.get('roe'))}")
-    parts.append(f"D/E: {_fmt_or_na(c.get('debt_equity'))}")
+    if excluded_rows:
+        parts.append(_EXCLUDED_CONTEXT_LINE)
+    else:
+        parts.append(f"D/E: {_fmt_or_na(c.get('debt_equity'))}")
     # The gate is re-decided HERE, not trusted from `computed`: a collection cached before
     # `_compute_metrics` dropped the gated values still carries FMP's raw ratio.
     gated = _context_gated_rows(out)
@@ -11198,15 +11416,18 @@ def build_financial_context(out: CollectedTickerData) -> str:
         b = balance[0]
         cur = b.get("reportedCurrency")
         parts.append(f"\nTotal Assets: {_format_money_compact(b.get('totalAssets', 0), cur)}")
-        parts.append(f"Total Debt: {_format_money_compact(b.get('totalDebt', 0), cur)}")
+        if not excluded_rows:
+            parts.append(f"Total Debt: {_format_money_compact(b.get('totalDebt', 0), cur)}")
         parts.append(f"Cash: {_format_money_compact(b.get('cashAndCashEquivalents', 0), cur)}")
 
     if cash_flow:
         cf = cash_flow[0]
         cur = cf.get("reportedCurrency")
-        parts.append(
-            f"\nOperating CF: {_format_money_compact(cf.get('operatingCashFlow', 0), cur)}")
-        parts.append(f"Free CF: {_format_money_compact(cf.get('freeCashFlow', 0), cur)}")
+        # Both, or neither: JPM's capex reads 0, so its operating cash flow IS the free one.
+        if not excluded_rows:
+            parts.append(
+                f"\nOperating CF: {_format_money_compact(cf.get('operatingCashFlow', 0), cur)}")
+            parts.append(f"Free CF: {_format_money_compact(cf.get('freeCashFlow', 0), cur)}")
         # No "Buybacks:" line from the raw annual row (removed 2026-10-22): FMP's
         # `commonStockRepurchased` is sometimes employee tax withholding or preferred
         # redemptions (INTC, META, AMD, JPM). The report's capital-allocation block carries
@@ -11233,8 +11454,9 @@ def build_financial_context(out: CollectedTickerData) -> str:
             # different prose, and only the second is true.
             return "N/A" if v is None else f"{v:.2f}"
         parts.append(f"\nP/E: {_mult(_pe)}")
-        parts.append(f"EV/EBITDA: {_mult(_ev)}")
-        parts.append(f"P/FCF: {_mult(_pfcf)}")
+        if not excluded_rows:
+            parts.append(f"EV/EBITDA: {_mult(_ev)}")
+            parts.append(f"P/FCF: {_mult(_pfcf)}")
 
     if estimates:
         parts.append("\nAnalyst Estimates:")
@@ -11243,6 +11465,16 @@ def build_financial_context(out: CollectedTickerData) -> str:
                 f"  {est.get('date', '?')}: "
                 f"Rev {_format_money_compact(_est_revenue(est))}, "
                 f"EPS ${_est_eps(est):.2f}"
+            )
+        if _revenue_gross_of_interest(out):
+            parts.append(
+                "  Reported revenue above includes interest paid out; these estimates usually "
+                "leave it out. Never compare one with the other."
+            )
+        elif _revenue_basis_unclear(out):
+            parts.append(
+                "  These estimates may be on a different revenue basis from reported revenue "
+                "above. Never compare one with the other."
             )
 
     # ⚠️ `analyst_is_usable`, not `if out.analyst_analysis`. The response object is ALWAYS
@@ -11355,7 +11587,16 @@ def build_financial_context(out: CollectedTickerData) -> str:
                 f"(prior year: "
                 f"{_seg_money(prior * 1e6) if prior > 0 else 'n/a'})"
             )
-        if engine.get("total_revenue"):
+        if engine.get("total_revenue") and engine.get("gross_reported_revenue"):
+            parts.append(
+                f"  Segment revenue, after interest paid out: "
+                f"{_seg_money(engine['total_revenue'] * 1e6)}"
+            )
+            parts.append(
+                f"  Reported revenue, including that interest: "
+                f"{_seg_money(engine['gross_reported_revenue'] * 1e6)}"
+            )
+        elif engine.get("total_revenue"):
             parts.append(f"  Total revenue: {_seg_money(engine['total_revenue'] * 1e6)}")
         if engine.get("intersegment_eliminations"):
             parts.append(
@@ -11415,14 +11656,20 @@ def _format_snapshot_card_values(out: "CollectedTickerData") -> str:
     # of this module (ticker_data_cache, widget_movers_service) would load it too.
     from app.services.agents.narrative_prompts import report_model_metric_name
 
+    excluded_rows = _score_excluded(out)
     rendered: List[str] = []
     for title, snap in snaps:
         if snap is None or not snap.metrics:
             continue
         rating = int(snap.rating or 0)
         # 0 = not rated (no peer comparison), never "0 out of 5" to the model.
-        rendered.append(f"\n{title} ({rating}/5):" if rating > 0 else f"\n{title} (unrated):")
+        rated = f"{rating}/5" if rating > 0 else "unrated"
+        # The Growth rows are annual on purpose; the other cards are TTM.
+        period = ", latest full fiscal year" if title == "Growth" else ""
+        rendered.append(f"\n{title} ({rated}{period}):")
         for m in snap.metrics:
+            if excluded_rows and getattr(m, "metric_key", None) == DEBT_TO_EQUITY:
+                continue
             # The wire name says "sector avg" / "vs sector" for every median (shipped iOS
             # strips the suffix by that word); `peer_level` names whose median it is. The
             # 1.1 card calls an industry median "industry avg", so the model must too, or

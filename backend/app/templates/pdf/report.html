@@ -482,13 +482,13 @@
   <table class="two-col">
     <td class="col-l">
       {% if charts.radar %}<div class="chart-wrap">{{ charts.radar | safe }}</div>
-      <div class="chart-legend"><span class="sw" style="background:#1E40AF"></span>{{ symbol }}<span class="sw" style="background:#94A3B8"></span>Industry avg</div>{% else %}<div class="no-data">Moat dimensions unavailable.</div>{% endif %}
+      <div class="chart-legend"><span class="sw" style="background:#1E40AF"></span>{{ symbol }}{% if not moat.not_measured %}<span class="sw" style="background:#94A3B8"></span>Industry avg{% endif %}</div>{% else %}<div class="no-data">Moat dimensions unavailable.</div>{% endif %}
     </td>
     <td class="col-r">
       <div class="sub-h">Moat Dimensions</div>
-      {% if moat.dimensions %}<table class="kv"><thead><tr><th>Pillar</th><th class="r">{{ symbol }}</th><th class="r">Peer</th></tr></thead><tbody>
-      {% for d in moat.dimensions %}<tr><td class="name">{{ d.name }}</td><td class="r">{{ "%.1f"|format(d.score) }}</td><td class="r muted">{{ "%.1f"|format(d.peer_score) }}</td></tr>{% endfor %}
-      </tbody></table>{% endif %}
+      {% if moat.dimensions %}<table class="kv"><thead><tr><th>Pillar</th><th class="r">{{ symbol }}</th>{% if not moat.not_measured %}<th class="r">Peer</th>{% endif %}</tr></thead><tbody>
+      {% for d in moat.dimensions %}<tr><td class="name">{{ d.name }}</td><td class="r">{{ "%.1f"|format(d.score) }}</td>{% if not moat.not_measured %}<td class="r muted">{{ "%.1f"|format(d.peer_score) }}</td>{% endif %}</tr>{% endfor %}
+      </tbody></table>{% if moat.not_measured %}<div class="no-data">Moat not measured. These are estimates, not scores from filings.</div>{% endif %}{% endif %}
     </td>
   </table>
   {# Owner decisions 2026-10-22: growth over its real span; a measured Census row shows its stored

@@ -1202,12 +1202,29 @@ def test_the_release_windows_are_the_sec_watchs_own(at, window):
 
 
 def test_the_named_windows_read_the_sec_watchs_bounds_morning_first():
+    """The SEC watch's own constant, never a copy of its values: a window moved there must move
+    FMP's 3 min with it."""
     from app.services import earnings_filing_service as efs
 
     assert len(efs._RELEASE_WINDOWS) == 2
-    assert els._RELEASE_WINDOW_BOUNDS == {els.RELEASE_WINDOW_MORNING: ((6, 0), (9, 35)),
-                                          els.RELEASE_WINDOW_CLOSE: ((15, 55), (18, 30))}
+    assert efs._RELEASE_WINDOWS[0] < efs._RELEASE_WINDOWS[1], "the morning one first"
+    assert list(els._RELEASE_WINDOW_BOUNDS) == [els.RELEASE_WINDOW_MORNING,
+                                                els.RELEASE_WINDOW_CLOSE]
+    assert tuple(els._RELEASE_WINDOW_BOUNDS.values()) == efs._RELEASE_WINDOWS
     assert efs.EarningsFilingWatcher().release_windows("INTC") == els._BOTH_WINDOWS
+
+
+def test_every_minute_of_a_weekday_falls_in_the_same_window_for_fmp_and_for_sec():
+    from app.services import earnings_filing_service as efs
+
+    names = (els.RELEASE_WINDOW_MORNING, els.RELEASE_WINDOW_CLOSE)
+    at = _et(REPORT, 0)
+    while at < _et(REPORT + timedelta(days=1), 0):
+        n = els.et_now(at)
+        sec = [name for name, (start, end) in zip(names, efs._RELEASE_WINDOWS)
+               if start <= (n.hour, n.minute) < end]
+        assert els.release_window_at(n) == (sec[0] if sec else None), n
+        at += timedelta(minutes=1)
 
 
 def _held_since(at: datetime, stored: datetime) -> float:
@@ -1247,8 +1264,7 @@ def test_the_tick_pays_for_the_memo_from_six_and_from_half_past_three_on_a_tradi
 @pytest.mark.parametrize("at", [_et(REPORT, 0), _et(REPORT, 12), _et(REPORT, 23),
                                 _et(SATURDAY, 3), _et(SUNDAY, 10)])
 def test_the_tick_reads_the_memo_whenever_it_holds_no_rows_for_today(at):
-    """A restart, or a day no round reached: a Sunday, after Friday's rounds held Friday and
-    Saturday."""
+    """A restart, or a day no round has stored yet (each one failed)."""
     assert els.tick_refreshes_memo(at, None) is True
 
 

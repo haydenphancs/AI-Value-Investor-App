@@ -623,6 +623,68 @@ async def test_the_fetch_logs_its_days_rows_and_elapsed_time(caplog):
                for m in infos), infos
 
 
+# ── the live tick's round: today and tomorrow alone ───────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_near_only_round_pays_for_today_and_tomorrow_and_keeps_the_later_days():
+    """The live tick reads today and holds tomorrow for the night. The later days stay as held,
+    for a feed build to refresh when someone looks, and the answer is still the whole window."""
+    fmp = _CalendarFMP([_row("AAPL", 0), _row("MSFT", 1), _row("NVDA", 5)])
+    await ts._cached_earnings_calendar(fmp, _DAY)
+    _age_memo(ts.EARNINGS_CALENDAR_FAR_TTL + 1)
+    later = ts.earnings_day_stored_at(fmp, _DAY + timedelta(days=5))
+    fmp.calls.clear()
+    rows = await ts._cached_earnings_calendar(fmp, _DAY, near_only=True)
+    assert sorted(call[0] for call in fmp.calls) == [_iso(0), _iso(1)]
+    assert sorted(r["symbol"] for r in rows) == ["AAPL", "MSFT", "NVDA"]
+    assert ts.earnings_day_stored_at(fmp, _DAY + timedelta(days=5)) == later, "left as held"
+    fmp.calls.clear()
+    await ts._cached_earnings_calendar(fmp, _DAY)
+    assert len(fmp.calls) == 13, "a feed build still pays for the later days"
+
+
+@pytest.mark.asyncio
+async def test_a_near_only_round_on_a_cold_memo_holds_today_and_tomorrow_alone():
+    fmp = _CalendarFMP([_row("AAPL", 0), _row("MSFT", 1), _row("NVDA", 5)])
+    rows = await ts._cached_earnings_calendar(fmp, _DAY, near_only=True)
+    assert sorted(call[0] for call in fmp.calls) == [_iso(0), _iso(1)]
+    assert sorted(r["symbol"] for r in rows) == ["AAPL", "MSFT"]
+    assert sorted(ts._earnings_calendar_memo[1]) == [_DAY, _DAY + timedelta(days=1)]
+
+
+@pytest.mark.asyncio
+async def test_a_near_only_round_pays_for_nothing_while_today_and_tomorrow_are_fresh():
+    """However old the later days are: they are not this round's to refresh."""
+    fmp = _CalendarFMP([_row("AAPL", 0), _row("NVDA", 5)])
+    await ts._cached_earnings_calendar(fmp, _DAY)
+    held = ts._earnings_calendar_memo[1]
+    for day in _WINDOW[2:]:
+        at, day_rows = held[day]
+        held[day] = (at - ts.EARNINGS_CALENDAR_FAR_TTL - 1, day_rows)
+    fmp.calls.clear()
+    rows = await ts._cached_earnings_calendar(fmp, _DAY, near_only=True)
+    assert fmp.calls == []
+    assert sorted(r["symbol"] for r in rows) == ["AAPL", "NVDA"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("later_held,stored", [(True, True), (False, False)],
+                         ids=["beside_later_days_held", "with_nothing_else_held"])
+async def test_an_empty_near_only_round_is_stored_only_beside_rows_it_holds(later_held, stored):
+    """The memo's own rule: an empty window cannot be told from a degraded one, and the window
+    answered is every day held."""
+    fmp = _CalendarFMP([_row("NVDA", 5)] if later_held else [])
+    if later_held:
+        await ts._cached_earnings_calendar(fmp, _DAY)
+        _age_memo(ts.EARNINGS_CALENDAR_TTL + 1)
+    before = ts.earnings_day_stored_at(fmp, _DAY)
+    rows = await ts._cached_earnings_calendar(fmp, _DAY, near_only=True)
+    assert [r["symbol"] for r in rows] == (["NVDA"] if later_held else [])
+    assert (ts._earnings_calendar_retry_after is None) is stored
+    assert (ts.earnings_day_stored_at(fmp, _DAY) != before) is stored
+
+
 # ── failures: nothing memoised, the held days served, one round per wait ──────
 
 

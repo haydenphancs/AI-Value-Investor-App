@@ -700,7 +700,8 @@ async def _fetch_earnings_days(
 
 
 async def _cached_earnings_calendar(
-    fmp: Any, today: date, *, later_days_since: Optional[float] = None
+    fmp: Any, today: date, *, later_days_since: Optional[float] = None,
+    near_only: bool = False,
 ) -> List[Dict[str, Any]]:
     """The market-wide calendar for ``today`` .. ``today + 14`` (ET), oldest day first:
     memo → join → fetch the days that are due.
@@ -712,6 +713,12 @@ async def _cached_earnings_calendar(
     ``later_days_since`` (a moment on this memo's clock) also makes due the days after today
     stored before it: for a reader about to say a report is listed nowhere, which must not
     rest on a day held for hours.
+
+    ``near_only`` pays for today and tomorrow alone (`_EARNINGS_NEAR_DAYS`) and leaves the later
+    days as they are held, while the answer is still every held day of the window: the live
+    tick's round, which reads today and holds tomorrow for the night
+    (`earnings_live_service.earnings_live_tick`). A feed build keeps the later days fresh when
+    someone looks, and one that joins such a round is served them as they are held.
     """
     global _earnings_calendar_memo, _earnings_calendar_retry_after
     days = _earnings_alert_days(today)
@@ -719,6 +726,8 @@ async def _cached_earnings_calendar(
     key = (id(fmp), today)
     while True:
         due = _earnings_days_due(fmp, days, today, later_days_since)
+        if near_only:
+            due = [d for d in due if (d - today).days < _EARNINGS_NEAR_DAYS]
         if not due:
             rows, _ = _held_earnings_window(fmp, days)
             logger.debug(

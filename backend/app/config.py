@@ -569,8 +569,9 @@ class Settings(BaseSettings):
     # Loop cadence, 15-300 s: anything else fails the deploy. The loop is cheap when nothing
     # reports (one memoised calendar read); the FMP and SEC cadences below are what cost
     # anything. Past 60 s the SEC watch loses its one-minute release windows. FMP is read only on
-    # a tick, the first one at least 295 s after the last read, so this number also sets the real
-    # gap of the "5 min" hot read: 60 s gives 300 s, 240 s gives 480 s, 290 s gives 580 s.
+    # a tick, the first one at least 175 s after the last read in a release window, so this
+    # number also sets the real gap of the "3 min" read: 60 s gives 180 s, 100 s gives 200 s,
+    # 120 s gives 240 s, and anything from 175 s up is one read a tick.
     EARNINGS_LIVE_INTERVAL_SECONDS: int = Field(60, ge=15, le=300)
     # How many watched tickers' SEC filings are read at a time, most-watched first; the next
     # ticker takes a freed slot, so every watched ticker reporting today can be read, this many

@@ -606,10 +606,11 @@ async def lifespan(app: FastAPI):
         from app.services.price_alert_service import run_price_alert_loop
         _spawn(run_price_alert_loop(), "price_alerts")
         # Live earnings results (owner request 2026-10-29): every 60 s, the previous trading
-        # day and today for everyone's watched tickers — FMP at a 5-min hot cadence, the
-        # company's own 8-K on SEC in the release windows — feeding the Tracking LIVE card
-        # and the live `earnings_live` / `earnings_result` pushes. In this family because it
-        # CLAIMS `notification_events` rows, exactly like the senders above.
+        # day and today for everyone's watched tickers — FMP every 3 min in a release window
+        # and every 15 min outside, the company's own 8-K on SEC in the release windows —
+        # feeding the Tracking LIVE card and the live `earnings_live` / `earnings_result`
+        # pushes. In this family because it CLAIMS `notification_events` rows, exactly like
+        # the senders above.
         from app.services.earnings_live_service import run_earnings_live_loop
         _spawn(run_earnings_live_loop(), "earnings_live")
 

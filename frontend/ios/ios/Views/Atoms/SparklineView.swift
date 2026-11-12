@@ -12,8 +12,9 @@ import SwiftUI
 /// A muted continuation of a sparkline on a wider time axis — the Holdings row's after-hours
 /// trading. Generic: the atom knows nothing about sessions. The main series is drawn inside the
 /// first `regularShare` of the width (its own `spanFrom`/`spanTo` scaled into it) and this
-/// series continues from its last point up to `spanTo` of the width, in one gray tone.
+/// series runs from that `regularShare` mark up to `spanTo` of the width, in one gray tone.
 struct SparklineTail: Equatable {
+    /// Evenly TIMED values (the server samples a clock grid), not merely evenly indexed.
     let data: [Double]
     /// The main series' share of the axis.
     let regularShare: Double
@@ -279,17 +280,27 @@ struct SparklineView: View {
 
     // MARK: - Tail
 
-    /// The tail as points: the series' last point, then the tail's values evenly spread from
-    /// there to `spanTo` of the width, on the series' own y-scale. `[]` without a tail.
+    /// The tail as points on the series' own y-scale. It starts at the bell — `regularShare` of
+    /// the width — and its values are evenly timed from there to `spanTo`, value j at
+    /// (j + 1) / count of that run. On a normal day the series ends at the bell and the tail
+    /// continues from its last point. When the series ends early (a stock halted at 14:30
+    /// that trades again only after hours), the gap up to the bell stays EMPTY and the gray
+    /// starts at the bell, at the series' last price — gray is after-hours only (owner,
+    /// 2026-11-11: "the green/red is during market, after that is a gray color"). Starting
+    /// at the series' last point instead drew gray over the halted session. `[]` without a
+    /// tail.
     private func tailPoints(after last: CGPoint, plot: CGRect,
                             minValue: Double, range: Double) -> [CGPoint] {
         guard let tail = drawableTail else { return [] }
+        let bellX: CGFloat = plot.minX + plot.width * CGFloat(tail.regularShare)
         let endX: CGFloat = plot.minX + plot.width * CGFloat(tail.spanTo)
-        let run: CGFloat = max(endX - last.x, 0)
+        // Half a point of slack: the series' end is the same mark computed another way.
+        let start: CGPoint = last.x >= bellX - 0.5 ? last : CGPoint(x: bellX, y: last.y)
+        let run: CGFloat = max(endX - start.x, 0)
         let count = CGFloat(tail.data.count)
-        var result: [CGPoint] = [last]
+        var result: [CGPoint] = [start]
         for (index, value) in tail.data.enumerated() {
-            let x: CGFloat = last.x + run * CGFloat(index + 1) / count
+            let x: CGFloat = start.x + run * CGFloat(index + 1) / count
             let level: CGFloat = CGFloat((value - minValue) / range)
             result.append(CGPoint(x: x, y: plot.maxY - level * plot.height))
         }
@@ -358,6 +369,18 @@ struct SparklineView: View {
             isPositive: true,
             referencePrice: 100,
             tail: SparklineTail(data: [107.5, 106.8, 107.2, 106.1], regularShare: 0.619, spanTo: 0.95)
+        )
+        .frame(width: 120, height: 40)
+
+        // Halted at 14:30, trading again only after hours: an empty gap up to the bell, then
+        // the gray tail — flat at the halted price until the first after-hours trade (18:30).
+        SparklineView(
+            data: [100, 98, 102, 105, 103, 104],
+            isPositive: true,
+            referencePrice: 100,
+            spanTo: 0.782,
+            tail: SparklineTail(data: [104, 104, 104, 104, 112, 113, 111, 112],
+                                regularShare: 0.619, spanTo: 1.0)
         )
         .frame(width: 120, height: 40)
 

@@ -1044,6 +1044,12 @@ async def fetch_extended_bars(
     )
 
 
+# FMP's `extended=true` bars run to 19:55 ET after a 16:00 close — four hours of
+# after-hours trading (a 13:00 half-day's after-hours ends at 17:00, the same four
+# hours; iOS `TradingDayHelper.SessionWindow.extendedHalfDay`).
+_AFTER_HOURS_MINUTES = 4 * 60
+
+
 def latest_extended_print(bars: Any) -> Optional[Dict[str, Any]]:
     """The newest pre-market / after-hours print after the last regular-session bar.
 
@@ -1059,41 +1065,47 @@ def latest_extended_print(bars: Any) -> Optional[Dict[str, Any]]:
     OWN stamp (FMP's ET wall clock), never by the clock now: at 05:00 Monday, before
     any pre-market trade, the newest print is still Friday's after-hours one, and it
     says so.
+
+    A bar of the session's own day at or past its after-hours close (20:00; a half-day's
+    17:00) is not a print: the gray tail (`after_hours_series`) stops there, so the chip
+    stops there too and the two always quote the same bar. FMP served no such bar on the
+    2025-11-28 and 2025-12-24 half-days (their bars end at 16:55; checked 2026-11-12); the
+    bound makes the agreement hold by construction rather than by the feed's habits.
     """
     if not isinstance(bars, list):
         return None
     last_regular: Optional[int] = None
+    window: Optional[Tuple[int, int]] = None
+    day = ""
     for idx, bar in enumerate(bars):
         if not isinstance(bar, dict):
             continue
         stamp = bar.get("date")
         minute = _bar_minute_of_day(stamp)
-        window = _session_window(stamp, extended_hours=False)
-        if minute is None or window is None:
+        bar_window = _session_window(stamp, extended_hours=False)
+        if minute is None or bar_window is None:
             continue
-        if window[0] <= minute < window[1]:
-            last_regular = idx
-    if last_regular is None:
+        if bar_window[0] <= minute < bar_window[1]:
+            last_regular, window, day = idx, bar_window, str(stamp)[:10]
+    if last_regular is None or window is None:
         return None
+    after_hours_close = window[1] + _AFTER_HOURS_MINUTES
     for bar in reversed(bars[last_regular + 1:]):
         if not isinstance(bar, dict):
             continue
-        minute = _bar_minute_of_day(bar.get("date"))
+        stamp = bar.get("date")
+        minute = _bar_minute_of_day(stamp)
         close = _finite_or_none(bar.get("close"))
         if minute is None or close is None or close <= 0:
             continue
+        if str(stamp)[:10] == day and minute >= after_hours_close:
+            continue  # past the session's after-hours: the tail ends before it
         session = (
             WIRE_STATUS_PRE_MARKET if minute < _REGULAR_OPEN_MINUTE
             else WIRE_STATUS_AFTER_HOURS
         )
         return {"price": close, "session": session}
     return None
-
-
-# FMP's `extended=true` bars run to 19:55 ET after a 16:00 close — four hours of
-# after-hours trading (a 13:00 half-day's after-hours ends at 17:00, the same four
-# hours; iOS `TradingDayHelper.SessionWindow.extendedHalfDay`).
-_AFTER_HOURS_MINUTES = 4 * 60
 
 
 def after_hours_series(
@@ -1105,11 +1117,12 @@ def after_hours_series(
 
     ``bars`` is `fetch_extended_bars` output (oldest first, normalised). Returns::
 
-        {"closes": [...],          # after-hours closes, oldest first, raw (the caller
-                                   #   downsamples and rounds them like the sparkline)
+        {"closes": [...],          # one close per `interval_minutes` slot from the bell to
+                                   #   the last after-hours bar, oldest first, raw (the
+                                   #   caller samples and rounds them like the sparkline)
          "regular_share": r,       # the regular session's share of the open → after-hours
                                    #   close axis: 390 / 630 ≈ 0.619 (half-day 210 / 450)
-         "span_to": t}             # where the last after-hours bar ENDS on that axis
+         "span_to": t}             # where the last after-hours slot ENDS on that axis
 
     or None when there is no regular bar to hang the tail on or nothing traded after it.
 
@@ -1117,11 +1130,20 @@ def after_hours_series(
     from the open to the end of after-hours, the regular line keeps its share of it, and
     the gray tail grows with the clock exactly as the regular line does during the day.
 
+    On a clock grid, so every point sits at its own time: slot k covers [bell + k·step,
+    bell + (k+1)·step) and holds the close of the newest bar in it. A slot nobody traded in
+    keeps the price before it, and a tail whose first trade comes after the bell starts
+    flat at the session's last regular close. Without the grid a thin tape (bars at 16:00,
+    16:05, 16:10 and 19:55) was spread evenly, drawing the 16:10 trade near 19:00, and iOS
+    hangs the tail at the bell (`SparklineView.tailPoints`), so the grid must start there.
+
     Only that session's OWN after-hours: before the open the window also holds today's
     pre-market bars, and those are left out (owner: before the open the card keeps
     "yesterday's after-hours"; the ☀ chip carries the pre-market move). The bell comes
     from `_session_window`, so a half-day's 13:00-17:00 trading is after-hours too.
     """
+    if interval_minutes <= 0:
+        raise ValueError(f"after_hours_series: interval_minutes must be positive, got {interval_minutes}")
     if not isinstance(bars, list):
         return None
     last_regular: Optional[int] = None
@@ -1143,8 +1165,10 @@ def after_hours_series(
     open_minute, close_minute = window
     tail_close = close_minute + _AFTER_HOURS_MINUTES
     axis = tail_close - open_minute
-    closes: List[float] = []
-    last_minute: Optional[int] = None
+    step = interval_minutes
+    slot_count = -(-(tail_close - close_minute) // step)  # ceil: a ragged step keeps its last slot
+    slots: List[Optional[float]] = [None] * slot_count
+    last_slot = -1
     for bar in bars[last_regular + 1:]:
         if not isinstance(bar, dict):
             continue
@@ -1156,14 +1180,27 @@ def after_hours_series(
         if minute is None or close is None or close <= 0:
             continue
         if close_minute <= minute < tail_close:
-            closes.append(close)
-            last_minute = minute
-    if not closes or last_minute is None or axis <= 0:
+            slot = (minute - close_minute) // step
+            slots[slot] = close  # oldest first, so the slot keeps its newest bar
+            last_slot = max(last_slot, slot)
+    if last_slot < 0 or axis <= 0:
         return None
 
-    step = interval_minutes if interval_minutes > 0 else 0
+    # Carry each price forward over the slots nobody traded in, starting from the
+    # session's last regular close (normalised, so positive; a bad one falls back to the
+    # first after-hours close below).
+    regular_close = _finite_or_none(bars[last_regular].get("close"))
+    carried: Optional[float] = regular_close if regular_close is not None and regular_close > 0 else None
+    closes_or_gaps: List[Optional[float]] = []
+    for value in slots[: last_slot + 1]:
+        if value is not None:
+            carried = value
+        closes_or_gaps.append(carried)
+    first_print = next(v for v in closes_or_gaps if v is not None)
+    closes: List[float] = [first_print if v is None else v for v in closes_or_gaps]
+
     regular_share = (close_minute - open_minute) / axis
-    span_to = min((last_minute + step - open_minute) / axis, 1.0)
+    span_to = min((close_minute + (last_slot + 1) * step - open_minute) / axis, 1.0)
     return {
         "closes": closes,
         "regular_share": round(regular_share, 4),

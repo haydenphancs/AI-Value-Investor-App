@@ -51,6 +51,8 @@ _SPARK = "Views/Atoms/SparklineView.swift"
 
 
 def _strip_comments(src: str) -> str:
+    # Block comments first: a `/* … */` copy of a guarded line must not stand in for the code.
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
     out = []
     for line in src.splitlines():
         if line.strip().startswith("//") or line.strip().startswith("///"):
@@ -264,6 +266,45 @@ def tail_gate(src: Dict[str, str]) -> None:
     assert call and "tail: afterHoursTail" in call.group(1), "the row no longer passes the tail"
 
 
+def tail_starts_at_bell(src: Dict[str, str]) -> None:
+    """2026-11-12 review: the tail hung off the series' LAST point, so a stock halted at 14:30
+    that traded again only after hours drew gray across the halted 14:30-16:00 session. Gray
+    is after-hours only: the tail starts at the bell (`regularShare`) and its points are
+    spaced from there; a series that ends early leaves the gap before the bell empty."""
+    points = _block(src[_SPARK], "private func tailPoints(")
+    assert "let bellX: CGFloat = plot.minX + plot.width * CGFloat(tail.regularShare)" in points, (
+        "the tail no longer finds the bell"
+    )
+    assert "let start: CGPoint = last.x >= bellX - 0.5 ? last : CGPoint(x: bellX, y: last.y)" in points, (
+        "a series that ends before the bell must not be joined to the tail by a gray stroke "
+        "over regular-session time"
+    )
+    assert "var result: [CGPoint] = [start]" in points
+    assert "let endX: CGFloat = plot.minX + plot.width * CGFloat(tail.spanTo)" in points
+    assert "let run: CGFloat = max(endX - start.x, 0)" in points
+    assert "let count = CGFloat(tail.data.count)" in points, (
+        "point j sits at (j + 1) / count of the run, the instant the server sampled it for; a "
+        "fencepost count (count - 1) pushes the end dot past spanTo"
+    )
+    assert "let x: CGFloat = start.x + run * CGFloat(index + 1) / count" in points, (
+        "the tail's points must be spaced from the bell, matching the server's clock sampling "
+        "(tracking_service._sample_on_clock)"
+    )
+    # Negative checks (2026-11-12 review: presence alone let one added line rejoin the halted
+    # point to the bell). The series' last point may only decide where the tail starts…
+    uses_last = [ln.strip() for ln in points.splitlines() if re.search(r"\blast\b", ln)]
+    assert uses_last == [
+        "let start: CGPoint = last.x >= bellX - 0.5 ? last : CGPoint(x: bellX, y: last.y)"
+    ], f"the series' last point leaks into the tail beyond its start: {uses_last}"
+    assert ".insert(" not in points, "nothing may be put in front of the tail's start"
+    # …and the Canvas strokes the tail only, never a segment joined to the series' end.
+    body = _block(src[_SPARK], "var body: some View")
+    strokes = re.findall(r"strokeTail\(([^,]*),", body)
+    assert strokes and set(strokes) == {"tailLine"}, (
+        f"a gray stroke must be the tail alone, never joined to the series: {strokes}"
+    )
+
+
 def tail_tone(src: Dict[str, str]) -> None:
     spark = _strip_comments(src[_SPARK])
     assert "private static let tailTone = AppColors.textMuted" in spark, (
@@ -288,6 +329,7 @@ GUARDS: Dict[str, Callable[[Dict[str, str]], None]] = {
     "tail_wire_parity": tail_wire_parity,
     "tail_drawable": tail_drawable,
     "tail_gate": tail_gate,
+    "tail_starts_at_bell": tail_starts_at_bell,
     "tail_tone": tail_tone,
 }
 
@@ -326,6 +368,18 @@ MUTATIONS = [
      "regularShare > 0 && spanTo <= 1"),
     ("tail_gate", _ROW, "        guard Self.isOutsideRegularSession else { return nil }\n", ""),
     ("tail_gate", _ROW, "                        tail: afterHoursTail\n", "                        tail: nil\n"),
+    ("tail_starts_at_bell", _SPARK, "? last : CGPoint(x: bellX, y: last.y)", "? last : last"),
+    ("tail_starts_at_bell", _SPARK, "var result: [CGPoint] = [start]", "var result: [CGPoint] = [last]"),
+    ("tail_starts_at_bell", _SPARK, "let x: CGFloat = start.x + run * CGFloat(index + 1) / count",
+     "let x: CGFloat = last.x + run * CGFloat(index + 1) / count"),
+    ("tail_starts_at_bell", _SPARK, "let count = CGFloat(tail.data.count)",
+     "let count = CGFloat(max(tail.data.count - 1, 1))"),
+    ("tail_starts_at_bell", _SPARK, "let endX: CGFloat = plot.minX + plot.width * CGFloat(tail.spanTo)",
+     "let endX: CGFloat = plot.maxX"),
+    ("tail_starts_at_bell", _SPARK, "        var result: [CGPoint] = [start]\n",
+     "        var result: [CGPoint] = [start]\n        if start != last { result.insert(last, at: 0) }\n"),
+    ("tail_starts_at_bell", _SPARK, "strokeTail(tailLine, in: &context)\n                        let tailEnd",
+     "strokeTail([lastPoint] + tailLine, in: &context)\n                        let tailEnd"),
     ("tail_tone", _SPARK, "private static let tailTone = AppColors.textMuted",
      "private static let tailTone = AppColors.bullish"),
 ]

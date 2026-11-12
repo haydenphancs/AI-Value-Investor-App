@@ -479,6 +479,23 @@ def _downsample(values: List[float], target: int) -> List[float]:
 _AFTER_HOURS_SPARK_POINTS = 20
 
 
+def _sample_on_clock(values: List[float], target: int) -> List[float]:
+    """At most *target* points of an evenly TIMED series, each the value as of the moment
+    iOS draws it.
+
+    The tail is one close per five-minute slot (`chart_helper.after_hours_series`), and iOS
+    spreads `count` points evenly from the bell to the tail's end, point j at (j + 1) / count
+    of that run (`SparklineView.tailPoints`). So point j takes the close of the last slot
+    that has ENDED by then: slot ⌊(j + 1)·n / count⌋ − 1. The last point is the last slot,
+    the chip's own print. `_downsample` picks by index from the first point instead, which
+    would draw each sampled close up to a slot early.
+    """
+    n = len(values)
+    if n <= target:
+        return values
+    return [values[(j + 1) * n // target - 1] for j in range(target)]
+
+
 def _after_hours_tail(
     tail: Any, sparkline: List[float]
 ) -> Tuple[List[float], Optional[float], Optional[float]]:
@@ -489,9 +506,11 @@ def _after_hours_tail(
     print. All three or none: a tail only makes sense hung off a drawn session line (≥ 2
     points), on an axis where the session ends before the tail does
     (0 < regular_share < span_to <= 1). Every close is re-checked finite and positive —
-    Starlette renders with allow_nan=False, so one NaN would 500 the whole feed. Rounded
-    at least as finely as the session line, so the two share one y-scale on iOS without
-    the tail snapping to coarser steps.
+    Starlette renders with allow_nan=False, so one NaN would 500 the whole feed. A bad one
+    takes the price before it (the first good one when it leads) instead of being dropped:
+    each close is a clock slot, and dropping one would pull every later point a slot early.
+    Rounded at least as finely as the session line, so the two share one y-scale on iOS
+    without the tail snapping to coarser steps.
     """
     none: Tuple[List[float], Optional[float], Optional[float]] = ([], None, None)
     if not isinstance(tail, dict) or len(sparkline) < 2:
@@ -503,10 +522,17 @@ def _after_hours_tail(
         return none
     if not (0.0 < share < span_to <= 1.0):
         return none
-    closes = [c for c in (_finite_or_none(v) for v in raw) if c is not None and c > 0]
-    if not closes:
+    checked = [c if c is not None and c > 0 else None for c in (_finite_or_none(v) for v in raw)]
+    first_good = next((c for c in checked if c is not None), None)
+    if first_good is None:
         return none
-    sampled = _downsample(closes, _AFTER_HOURS_SPARK_POINTS)
+    closes: List[float] = []
+    carried = first_good
+    for c in checked:
+        if c is not None:
+            carried = c
+        closes.append(carried)
+    sampled = _sample_on_clock(closes, _AFTER_HOURS_SPARK_POINTS)
     digits = max(sparkline_precision(sampled), sparkline_precision(sparkline))
     return [round(c, digits) for c in sampled], round(share, 4), round(span_to, 4)
 

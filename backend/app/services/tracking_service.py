@@ -534,7 +534,8 @@ def _downsample(values: List[float], target: int) -> List[float]:
 #   held row is still true, but a row NOT held proves nothing.
 # * `_earnings_calendar_inflight` dedups concurrent misses. A joiner is shielded, and a
 #   joiner whose leader was CANCELLED (a client disconnect) takes over the download
-#   rather than serving its own user a feed with no earnings alerts.
+#   rather than serving its own user a feed with no earnings alerts. One whose leader
+#   stored fewer days than it needs (the live tick's `near_only` round) pays for the rest.
 # * Coherent only within one process — the deploy runs exactly one uvicorn worker
 #   (`tests/test_deploy_command_parity.py`).
 # * The live loop reads this memo on a tick that starts exactly on its minute, and a round
@@ -660,6 +661,23 @@ def _held_earnings_window(
     return rows, missing
 
 
+def _near_only_due(
+    fmp: Any, days: List[date], today: date, due: List[date]
+) -> List[date]:
+    """What a ``near_only`` round pays for out of the window's ``due`` days: today and tomorrow
+    alone, while a day it leaves as held lists a row. Otherwise every due day.
+
+    The round answers every held day of the window, and an answer with no row is the empty
+    window this memo never stores. A blank today and tomorrow (a weekend, a market holiday)
+    with no other held day listing anyone would be that answer: the live tick would pay for it
+    again after every wait, all day, and a feed build inside a wait would serve no earnings
+    alert. So that round pays for every due day instead, as a feed build does: the whole window
+    after a restart, and again once the days it last read whole have rolled past."""
+    near = [d for d in due if (d - today).days < _EARNINGS_NEAR_DAYS]
+    kept, _ = _held_earnings_window(fmp, [d for d in days if d not in near])
+    return near if kept else due
+
+
 def _serve_held_earnings(
     fmp: Any, days: List[date], span: str, why: str, level: int
 ) -> Optional[List[Dict[str, Any]]]:
@@ -700,7 +718,8 @@ async def _fetch_earnings_days(
 
 
 async def _cached_earnings_calendar(
-    fmp: Any, today: date, *, later_days_since: Optional[float] = None
+    fmp: Any, today: date, *, later_days_since: Optional[float] = None,
+    near_only: bool = False,
 ) -> List[Dict[str, Any]]:
     """The market-wide calendar for ``today`` .. ``today + 14`` (ET), oldest day first:
     memo → join → fetch the days that are due.
@@ -712,6 +731,18 @@ async def _cached_earnings_calendar(
     ``later_days_since`` (a moment on this memo's clock) also makes due the days after today
     stored before it: for a reader about to say a report is listed nowhere, which must not
     rest on a day held for hours.
+
+    ``near_only`` pays for today and tomorrow alone (`_EARNINGS_NEAR_DAYS`) and leaves the later
+    days as they are held, while the answer is still every held day of the window: the live
+    tick's round, which reads today and holds tomorrow for the night
+    (`earnings_live_service.earnings_live_tick`). While no day it leaves as held lists anyone,
+    after a restart for one, it pays for every due day instead (`_near_only_due`). A feed build
+    keeps the later days fresh when someone looks.
+
+    A reader that joins a round in flight takes its answer only when it failed or came back
+    empty. A round that stored its days may have paid for fewer than this reader's own (a
+    ``near_only`` one, or one older than ``later_days_since``), so the joiner works out its due
+    days again and is served from memory, or pays for the rest itself.
     """
     global _earnings_calendar_memo, _earnings_calendar_retry_after
     days = _earnings_alert_days(today)
@@ -719,6 +750,8 @@ async def _cached_earnings_calendar(
     key = (id(fmp), today)
     while True:
         due = _earnings_days_due(fmp, days, today, later_days_since)
+        if near_only:
+            due = _near_only_due(fmp, days, today, due)
         if not due:
             rows, _ = _held_earnings_window(fmp, days)
             logger.debug(
@@ -732,7 +765,7 @@ async def _cached_earnings_calendar(
         try:
             # `shield`: a joiner that is itself cancelled must not cancel the download
             # every other caller is waiting on.
-            return await asyncio.shield(inflight)
+            joined = await asyncio.shield(inflight)
         except _InflightLeaderCancelled:
             # The leader's request went away mid-download. Take over instead of serving
             # this user a feed with no earnings alerts for someone else's disconnect.
@@ -745,6 +778,12 @@ async def _cached_earnings_calendar(
                 "over the download", span,
             )
             continue
+        if getattr(joined, "fetch_failed", False):
+            # The round failed or came back empty: this reader hears the same, and the
+            # wait that round set holds for it too.
+            return joined
+        # The round stored its days, which need not be all of this reader's: work them out
+        # again (the docstring).
 
     retry = _earnings_calendar_retry_after
     if retry is not None and retry[0] is fmp:

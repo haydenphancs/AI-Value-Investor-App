@@ -24,8 +24,8 @@ REPORT = date(2026, 10, 29)           # a Thursday, INTC's report day
 NEXT = date(2026, 10, 30)
 
 
-def _et(day: date, hour: int, minute: int = 0) -> datetime:
-    return datetime(day.year, day.month, day.day, hour, minute, tzinfo=ET)
+def _et(day: date, hour: int, minute: int = 0, second: int = 0) -> datetime:
+    return datetime(day.year, day.month, day.day, hour, minute, second, tzinfo=ET)
 
 
 def _rec(**kw) -> els._Record:
@@ -1133,8 +1133,10 @@ def test_a_filing_complete_report_polls_until_fmp_confirms():
     assert (snap.status, snap.preliminary, snap.poll_seconds) == (els.STATUS_REPORTED, True, 120)
     assert _poll(rec, _et(REPORT, 21, 59)) == 120
     assert _poll(rec, _et(REPORT, 22)) is None
-    assert _poll(rec, _et(NEXT, 11, 59)) == 120
-    assert _poll(rec, _et(NEXT, 12)) is None
+    assert _poll(rec, _et(NEXT, 5, 59)) is None
+    assert _poll(rec, _et(NEXT, 12)) == 120, "the loop still asks FMP all the next day"
+    assert _poll(rec, _et(NEXT, 21, 59)) == 120
+    assert _poll(rec, _et(NEXT, 22)) is None
     confirmed = replace(rec, fmp_eps=0.45, fmp_revenue=17.2e9)
     snap = els.snapshot_of(confirmed, NEXT, _et(NEXT, 8))
     assert (snap.preliminary, snap.poll_seconds) == (False, None)
@@ -1147,18 +1149,22 @@ _WINDOW_CASES = [
     (REPORT, _et(REPORT, 6), True),
     (REPORT, _et(REPORT, 21, 59), True),
     (REPORT, _et(REPORT, 22), False),
-    # The next trading morning.
+    # The next trading day, the same hours.
     (REPORT, _et(NEXT, 5, 59), False),
     (REPORT, _et(NEXT, 6), True),
-    (REPORT, _et(NEXT, 11, 59), True),
-    (REPORT, _et(NEXT, 12), False),
+    (REPORT, _et(NEXT, 12), True),
+    (REPORT, _et(NEXT, 21, 59), True),
+    (REPORT, _et(NEXT, 22), False),
+    # Never the day after that.
+    (REPORT - timedelta(days=1), _et(NEXT, 8), False),
     # A weekend waits for Monday, however many mornings pass.
     (FRIDAY, _et(SATURDAY, 8), False),
     (FRIDAY, _et(SUNDAY, 8), False),
     (FRIDAY, _et(MONDAY, 5, 59), False),
     (FRIDAY, _et(MONDAY, 6), True),
-    (FRIDAY, _et(MONDAY, 11, 59), True),
-    (FRIDAY, _et(MONDAY, 12), False),
+    (FRIDAY, _et(MONDAY, 12), True),
+    (FRIDAY, _et(MONDAY, 21, 59), True),
+    (FRIDAY, _et(MONDAY, 22), False),
     # So does a holiday, and a half day is a trading day.
     (WEDNESDAY, _et(THANKSGIVING, 8), False),
     (WEDNESDAY, _et(BLACK_FRIDAY, 8), True),
@@ -1174,27 +1180,114 @@ _WINDOW_CASES = [
 
 
 @pytest.mark.parametrize("day,at,hot", _WINDOW_CASES)
-def test_the_hot_window_is_the_report_day_and_the_next_trading_morning(day, at, hot):
+def test_the_report_day_pace_runs_on_the_day_and_on_the_next_trading_day(day, at, hot):
     assert els.fmp_window_open(day, at) is hot
 
 
-@pytest.mark.parametrize("at,pays", [
-    (_et(REPORT, 0), False),
-    (_et(REPORT, 5, 59), False),
-    (_et(REPORT, 6), True),
-    (_et(REPORT, 22), True),
-    (_et(REPORT, 23, 59), True),
-    (_et(SATURDAY, 10), False),
-    (_et(THANKSGIVING, 10), False),
-    (_et(BLACK_FRIDAY, 10), True),
+@pytest.mark.parametrize("at,window", [
+    (_et(REPORT, 5, 59), None),
+    (_et(REPORT, 6), els.RELEASE_WINDOW_MORNING),
+    (_et(REPORT, 9, 34), els.RELEASE_WINDOW_MORNING),
+    (_et(REPORT, 9, 35), None),
+    (_et(REPORT, 15, 54), None),
+    (_et(REPORT, 15, 55), els.RELEASE_WINDOW_CLOSE),
+    (_et(REPORT, 18, 29), els.RELEASE_WINDOW_CLOSE),
+    (_et(REPORT, 18, 30), None),
+    (_et(SATURDAY, 16), els.RELEASE_WINDOW_CLOSE),
 ])
-def test_the_tick_pays_for_the_memo_from_six_to_midnight_on_a_trading_day(at, pays):
-    assert els.tick_refreshes_memo(at) is pays
+def test_the_release_windows_are_the_sec_watchs_own(at, window):
+    """FMP's 3 min and SEC's minute run on one clock, or the two sources would disagree about
+    when a report is due."""
+    assert els.release_window_at(at) == window
+
+
+def test_the_named_windows_read_the_sec_watchs_bounds_morning_first():
+    """The SEC watch's own constant, never a copy of its values: a window moved there must move
+    FMP's 3 min with it."""
+    from app.services import earnings_filing_service as efs
+
+    assert len(efs._RELEASE_WINDOWS) == 2
+    assert efs._RELEASE_WINDOWS[0] < efs._RELEASE_WINDOWS[1], "the morning one first"
+    assert list(els._RELEASE_WINDOW_BOUNDS) == [els.RELEASE_WINDOW_MORNING,
+                                                els.RELEASE_WINDOW_CLOSE]
+    assert tuple(els._RELEASE_WINDOW_BOUNDS.values()) == efs._RELEASE_WINDOWS
+    assert efs.EarningsFilingWatcher().release_windows("INTC") == els._BOTH_WINDOWS
+
+
+def test_every_minute_of_a_weekday_falls_in_the_same_window_for_fmp_and_for_sec():
+    from app.services import earnings_filing_service as efs
+
+    names = (els.RELEASE_WINDOW_MORNING, els.RELEASE_WINDOW_CLOSE)
+    at = _et(REPORT, 0)
+    while at < _et(REPORT + timedelta(days=1), 0):
+        n = els.et_now(at)
+        sec = [name for name, (start, end) in zip(names, efs._RELEASE_WINDOWS)
+               if start <= (n.hour, n.minute) < end]
+        assert els.release_window_at(n) == (sec[0] if sec else None), n
+        at += timedelta(minutes=1)
+
+
+def _held_since(at: datetime, stored: datetime) -> float:
+    return (at - stored).total_seconds()
+
+
+_YESTERDAY_AT_1530 = _et(REPORT - timedelta(days=1), 15, 30)
+
+
+@pytest.mark.parametrize("at,stored,pays", [
+    # Before the morning round the rows held from yesterday's 15:30 round are what folds.
+    (_et(REPORT, 0), _YESTERDAY_AT_1530, False),
+    (_et(REPORT, 5, 59), _YESTERDAY_AT_1530, False),
+    # The first tick from 06:00, and only until a round has stored the rows.
+    (_et(REPORT, 6), _YESTERDAY_AT_1530, True),
+    (_et(REPORT, 9), _YESTERDAY_AT_1530, True),
+    (_et(REPORT, 6, 1), _et(REPORT, 6, 0, 1), False),
+    (_et(REPORT, 15, 29), _et(REPORT, 6, 0, 1), False),
+    # A feed build that stored them after 06:00 already paid for it.
+    (_et(REPORT, 7), _et(REPORT, 6, 40), False),
+    # The first tick from 15:30, before the close window.
+    (_et(REPORT, 15, 30), _et(REPORT, 6, 0, 1), True),
+    (_et(REPORT, 15, 31), _et(REPORT, 15, 30, 1), False),
+    # Nothing after that round: after 22:00 nothing live is fetched.
+    (_et(REPORT, 22), _et(REPORT, 15, 30, 1), False),
+    (_et(REPORT, 23, 59), _et(REPORT, 15, 30, 1), False),
+    # A closed day pays for no round, the half day after Thanksgiving does.
+    (_et(SATURDAY, 10), _et(FRIDAY, 15, 30), False),
+    (_et(THANKSGIVING, 10), _et(WEDNESDAY, 15, 30), False),
+    (_et(BLACK_FRIDAY, 10), _et(THANKSGIVING, 0), True),
+])
+def test_the_tick_pays_for_the_memo_from_six_and_from_half_past_three_on_a_trading_day(
+        at, stored, pays):
+    assert els.tick_refreshes_memo(at, _held_since(at, stored)) is pays
+
+
+@pytest.mark.parametrize("at", [_et(REPORT, 0), _et(REPORT, 12), _et(REPORT, 23),
+                                _et(SATURDAY, 3), _et(SUNDAY, 10)])
+def test_the_tick_reads_the_memo_whenever_it_holds_no_rows_for_today(at):
+    """A restart, or a day no round has stored yet (each one failed)."""
+    assert els.tick_refreshes_memo(at, None) is True
+
+
+@pytest.mark.parametrize("at,since", [
+    (_et(REPORT, 5, 59), None),
+    (_et(REPORT, 6), _et(REPORT, 6)),
+    (_et(REPORT, 15, 29), _et(REPORT, 6)),
+    (_et(REPORT, 15, 30), _et(REPORT, 15, 30)),
+    (_et(REPORT, 23, 59), _et(REPORT, 15, 30)),
+    (_et(SUNDAY, 12), None),
+    (_et(date(2026, 3, 9), 6, 30), _et(date(2026, 3, 9), 6)),
+    (_et(date(2026, 11, 2), 16), _et(date(2026, 11, 2), 15, 30)),
+], ids=["before_six", "six", "half_past_three_less_a_minute", "half_past_three", "late",
+        "a_closed_day", "the_monday_after_clocks_go_forward", "the_monday_after_they_go_back"])
+def test_the_memo_rounds_count_from_their_own_wall_clock_moment(at, since):
+    """Both clock changes fall on a Sunday, which pays for no round, so the day after each one
+    must still count its rounds from its own 06:00 and 15:30."""
+    assert els.memo_round_since(at) == since
 
 
 @pytest.mark.parametrize("day,at,hot", [c for c in _WINDOW_CASES if c[0] <= c[1].date()])
-def test_a_preliminary_report_polls_exactly_while_the_hot_window_is_open(day, at, hot):
-    """Polling past the window would re-read a record nothing is updating."""
+def test_a_preliminary_report_polls_exactly_while_the_loop_still_asks_fmp(day, at, hot):
+    """Polling past those hours would re-read a record nothing is updating."""
     rec = _filed(day=day)
     assert els.snapshot_of(rec, at.date(), at).status == els.STATUS_REPORTED
     assert _poll(rec, at) == (120 if hot else None)

@@ -2945,6 +2945,13 @@ class EarningsFilingWatcher:
         w.done, w.figures = True, figures
         self._extracted[figures.accession] = figures
 
+    def release_windows(self, symbol: str) -> frozenset:
+        """The release windows `symbol`'s company puts its results out in, by name ("morning",
+        "close"), read by the FMP cadence (`earnings_live_service._fmp_cadence`). This is the
+        both-windows answer: nothing here learns a company's own window yet, and a company
+        nothing is known about counts as both."""
+        return frozenset({"morning", "close"})
+
     def _due(self, key: Tuple[str, date], now_et: datetime, mono: float) -> bool:
         interval = poll_interval_seconds(now_et)
         if interval is None or self._finished(key):

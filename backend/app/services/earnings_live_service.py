@@ -17,7 +17,7 @@ TWO SOURCES, ONE RECORD PER (symbol, report date).
   zero does, GUARDS below), a restart included unless the table cannot give the filing back (A
   RESTART below), and FMP's figure replaces the filing's the moment FMP has one that passes the
   guards, unless the filing outranks it (`_filing_outranks_fmp`).
-  Between two FMP answers the NEWEST wins. The Tracking memo can be 30 min behind this
+  Between two FMP answers the NEWEST wins. The Tracking memo can be hours behind this
   module's own fetch, so a memo row older than the record's last own fetch is skipped whole at
   all three folds (the tick, the card, the sheet): no reader can put an older answer back over
   a record. A report own fetches ended has none to protect, so its row comes back for a while
@@ -55,34 +55,51 @@ forgotten must never reach it again, or it reads as new on every round.
     leaves it unread, so a sheet asking for it puts one look on the loop's next round
     (`sheet_asked`): only someone looking pays for that call.
   * Today's rows ride on the Tracking memo (`tracking_service._cached_earnings_calendar`,
-    30 min, the owner's 2026-10-22 cadence), and every reader folds them in. The tick pays to
-    keep that memo fresh only from 06:00 ET to midnight on a trading day
-    (`tick_refreshes_memo`): before 06:00 and on a closed day it folds the rows already held
-    and makes no call, unless none are held (a restart) or a held row is too old to open its
-    record (below). A feed build still refreshes the memo at any hour. The rows first folded
-    at midnight are what make an overnight fill a landing at the first read of the morning.
-    This module fetches today ITSELF only while it is HOT.
+    30 min, the owner's 2026-10-22 cadence), and every reader folds them in. The tick pays the
+    memo a round only for its own needs (`tick_refreshes_memo`, the owner's rule of 2026-11-11):
+    on a trading day once from 06:00 ET (who reports today) and once from 15:30 ET (a report
+    added or moved since, before the close window, and tomorrow's rows to hold for the night);
+    and at any hour when no row of today is held (a restart, or a closed day no round reached),
+    when a held row is too old to open its record (below), and when its own fetches have ended a
+    watched report the held rows still list (A REPORT FMP MOVES). Each round pays for today and
+    tomorrow alone (`near_only`) while another day the memo holds lists anyone, and otherwise
+    for every due day: the whole window after a restart and, with nobody looking, about once a
+    fortnight, when the days it last read whole have rolled past. Read alone, a blank today and
+    tomorrow (a weekend, a holiday) would be the empty window the memo never stores, paid for
+    again every 2 min. At any other hour it folds the rows already held and makes no call. A
+    feed build still refreshes the memo at any hour, the later days included, as before this
+    feature. The rows first folded at midnight are what make an overnight fill a landing at the
+    first read of the morning: after 22:00 nothing live is fetched, so the previous trading
+    day's read at 06:00 finds a record seen pending, and the night hold keeps its push for
+    07:00. This module fetches today ITSELF only at the report-day pace (below).
   * A memo row held `EARNINGS_LIVE_HELD_ROWS_MAX_AGE_SECONDS` (12 h) or longer opens no record,
     at any of the three folds. FMP may have moved the report since, and an open record is a
-    report day (LIVE, the hot fetch, an SEC slot, then a card) until a later answer ends it.
-    After a closed day the rows held at midnight are the last trading day's, and a
-    Sunday-dated report's are Friday's. So when a held row that old would open a record
-    (`old_rows_would_open`) the tick asks FMP first, one round. Rows a failed round leaves
-    that old open nothing until a round succeeds, and still fold into a record that exists.
-    A move inside the 12 h, or after the record opened, is left to this module's own fetch
-    (A REPORT FMP MOVES).
+    report day (LIVE, FMP's fetch, an SEC slot, then a card) until a later answer ends it.
+    After a closed day the rows held at midnight can be days old (Monday's: no round reads them
+    over the weekend). So when a held row that old would open a record (`old_rows_would_open`)
+    the tick asks FMP first, one round. Rows a failed round leaves that old open nothing until a
+    round succeeds, and still fold into a record that exists. A move inside the 12 h, or after
+    the record opened, is left to this module's own fetch (A REPORT FMP MOVES).
   * The days before today are held only here (after-close actuals land overnight, and the
     card must still be there the next morning).
-  * HOT = inside `fmp_window_open` (06:00–22:00 ET on the day, 06:00–12:00 ET on the next
-    trading day), and a WATCHED report on that day still wants FMP (`needs_fmp`): it lacks
-    results, or a figure on show is still the filing's. So a filing ends the SEC watch
-    (`pending_symbols`) but not this: FMP is what confirms it, and on the next morning this
-    fetch is the only way FMP's answer arrives. A weekend morning is not hot, and a closed day
-    is never hot after its own day. Hot days refresh every `EARNINGS_LIVE_HOT_TTL_SECONDS`
-    (5 min). Any other day before today is asked once, then, while a watched report on it
-    still wants FMP, every 30 min, or every 2 h while today is a closed day
-    (`EARNINGS_LIVE_CLOSED_DAY_TTL_SECONDS`). 5 min and not faster: the filing path supplies
-    the speed, FMP is the confirmation.
+  * THE REPORT-DAY PACE (`_fmp_cadence`, the owner's design of 2026-11-11: "around the time of
+    market open and close, it is 3 minutes"). A day is asked about only while a WATCHED report
+    on it still wants FMP (`needs_fmp`): it lacks results, or a figure on show is still the
+    filing's. So a filing ends the SEC watch (`pending_symbols`) but not this: FMP is what
+    confirms it, and on the next morning this fetch is the only way FMP's answer arrives. Inside
+    `fmp_window_open` (06:00–22:00 ET on the day, a closed day included, and the same hours on
+    the next trading day) it is asked every 3 min (`EARNINGS_LIVE_WINDOW_TTL_SECONDS`) inside a
+    release window one of those reports counts, and every 15 min
+    (`EARNINGS_LIVE_OUTSIDE_WINDOW_TTL_SECONDS`) otherwise. The windows are the SEC watch's own
+    (06:00–09:35 and 15:55–18:30 ET, `release_window_at`). On its own day a report counts its
+    company's (`EarningsFilingWatcher.release_windows`: both while nothing is known), and on the
+    next trading day the morning one alone, whatever its own: its release is behind it, and the
+    morning is when FMP fills overnight results. Nothing outside those hours, and nothing on a
+    day with no watched report still waiting. Any other day before today, a report dated on a
+    closed day or every day while today is a closed one, is asked once, then, while a watched
+    report on it still wants FMP, every 30 min, or every 2 h while today is a closed day
+    (`EARNINGS_LIVE_CLOSED_DAY_TTL_SECONDS`), at any hour. 3 min and not faster: the filing path
+    supplies the speed, FMP is the confirmation.
   * A first look listing nothing on a trading day is no look. A whole market with no report on
     a trading day is the blip `earnings_window_service._hot_round` refuses too, and with no
     record to keep the day asked it would never be read again: no figure, no card, no push. So
@@ -90,33 +107,49 @@ forgotten must never reach it again, or it reads as new on every round.
     counts as read, because a sheet is waiting on it and a day FMP really leaves empty must end,
     and is then asked at the slow cadence above until it lists something or leaves the window.
     A closed day's blank is an answer the first time.
-  * Cost with nobody opening the app, tick by tick (pinned in the tests). A busy report day,
-    today's and the previous trading day's watched reports wanting FMP all day: 411 calls,
-    192 for today, 108 for the previous day and 111 for the memo. A filing that completes a
-    report costs what a pending row costs until FMP confirms it. A weekend day: 12, plus a
-    first look at each day before it never asked, and no memo call. A watched report dated on
-    a closed day adds up to 192 on that day. A first fold on rows too old to open a record adds
-    one round, 15 calls: midnight on a Monday with a watched report, or on a Sunday with one of
-    its own. Feed builds add the memo's rounds the tick no longer pays for: ~37 before 06:00 on
-    a trading day and up to ~150 on a closed day. A blank first look adds up to 11 calls, then
+  * Cost with nobody opening the app, both loops walked minute by minute (pinned in the
+    tests), SEC at the watch's own cadence (every minute in the windows, every 5 min outside
+    them, until a release is read):
+      - a day of after-close reports, today's and the previous trading day's, FMP filling each
+        at 08:00 the next morning, each company's window known: 151 FMP calls (106 for today,
+        41 for the previous day, 4 for the memo) and 304 SEC reads;
+      - a mixed day, a morning reporter beside those: 199 FMP calls and 337 SEC reads;
+      - either of those two with nothing known of any company's window, both counting (what
+        `EarningsFilingWatcher.release_windows` answers then): 208 FMP calls, today's
+        after-close company asked every 3 min across the morning window too, and SEC as above;
+      - the worst day, today's and the previous day's watched reports waiting all day, nothing
+        known of their windows and no release on SEC: 288 FMP calls (163, 121, 4) and 488 SEC
+        reads;
+      - a trading day with no watched report: 5 FMP calls (the memo's two rounds and a first
+        look at the previous trading day) and no SEC read;
+      - a weekend: 1 FMP call a day, a first look at the day before (the memo holds both
+        days' rows), and no SEC read, EDGAR accepting nothing then.
+    The memo is also read whole, 13 calls more, after a restart and about once a fortnight
+    (THE MEMO above). A filing that completes a report costs what a pending row costs until FMP
+    confirms it. A Friday report FMP never fills makes it 12 calls on Saturday and 13 on Sunday
+    (every 2 h), and adds 121 on Monday. A watched report dated on a closed day adds up to 163
+    on that day. A first fold on rows too old to open a record adds one round, 2 calls:
+    midnight on a Monday with a watched report. Feed builds pay for the memo's other rounds
+    when someone looks, up to its own ~150 a day. A blank first look adds up to 11 calls, then
     the slow cadence for as long as FMP leaves that day blank.
   * Fetched by the live loop ONLY (`run_earnings_live_loop`, 60 s); the daily pass's answer
     folds in too, at no extra call. Feed builds and the sheet endpoint fold the Tracking memo and
     read; they never fetch, so the live state adds no latency to the feed.
 
 A REPORT FMP MOVES. Each day is judged on its own rows, so a report moved off its date would
-stay there: LIVE with the hot fetch and an SEC slot until 22:00, then a card the next morning
+stay there: LIVE with FMP's fetch and an SEC slot until 22:00, then a card the next morning
 saying results are not in for a report that has not happened. So own fetches end the reports
 they stop listing (`_end_unlisted`): a record goes once they have left its symbol out for
 `EARNINGS_LIVE_UNLISTED_END_SECONDS` (10 min), unless it holds a raw figure from either source.
   * Never on one answer. A short answer looks exactly like a move, and it hits every report
     with no figure on the day at once, while the record is what carries `seen_pending` and keeps
     the day asked (`_fmp_wanted`). A day before today has no memo row to reopen it, so a report
-    ended by mistake is never read again: no figure, no card, no push. 10 min, not two fetches:
-    two hot fetches 5 min apart fit inside a 6-min gap. At the slower cadences it comes to two.
-    A longer gap still ends it, because a move has to end. A report that then comes back filled
-    is first seen reported, with no landing, and a day before today is asked again only for
-    another report.
+    ended by mistake is never read again: no figure, no card, no push. 10 min, not a count of
+    fetches: three fetches 3 min apart fit inside a 7-min gap. At the slower cadences it comes
+    to two. A longer gap still ends it, because a move has to end. A report that then comes back
+    filled is first seen reported, with no landing, and a day before today is asked again only
+    for another report. Today's comes back with the next answer folded here that lists it: a
+    memo round (the tick's 15:30 one, or a reader's) or the daily pass's read.
   * A raw figure, never "has results": a figure held as "checking" shows nothing and is still
     a result, and a company that has reported has reported, whatever the calendar says next.
   * Only an answer that can show a report is gone. One listing nothing on the day is the
@@ -124,17 +157,20 @@ they stop listing (`_end_unlisted`): a record goes once they have left its symbo
     may simply have been cut. Neither starts the 10 min or breaks them: only a fetch that lists
     the report does that.
   * Only an own fetch, never a fold: a fold can be narrowed to one reader's tickers, and the
-    memo can be 30 min old. That age is why today's report does not end at once: the memo's row
-    opens the record again until the memo's next round, and the card, drawn from that same row,
-    keeps its status until then. So it settles within about 45 min on a trading day. On a
-    closed day the tick pays for no memo round, so it waits for the next feed build, or at worst
-    for the row to reach 12 h (`old_rows_would_open`). A day before today has no memo row, so
-    the 10 min settle it.
+    memo can be hours old. That age is why today's report does not end at once: the memo's row
+    opens the record again until a memo round leaves it out, and the card, drawn from that same
+    row, keeps its status until then. So once its own fetches have ended a watched report the
+    held rows still list (`ended_since`), the tick asks the memo for a round, on any day, and
+    the memo pays for it once those rows are due: it settles within about 45 min, and within
+    about 15 when the rows are older than the memo's 30 min. Each report's latest end counts, so
+    a second one moved later that day owes its own round. A report nobody watches owes none:
+    only a sheet opened on it folds its row back, and that sheet's read of the memo pays for
+    the round. A day before today has no memo row, so the 10 min settle it.
   * A sheet pinned to the old date follows the report (`tracking_service.get_earnings_live`). The
     new date can sit on a memo day held for hours, so a sheet about to answer `none` asks for
-    the days after today first, at most 14 calls per answer it rests on. Only a reader does:
-    nothing here tells the memo a report ended, so a new date's card can take the memo's 6 h to
-    appear.
+    the days after today first, at most 14 calls per answer it rests on. Only a reader does: the
+    tick's round reads today and tomorrow alone, bar its rare reads of the whole window, so a new
+    date's card further out can take the memo's 6 h to appear.
   A stale row FMP leaves beside the new date is NOT seen while nothing is in: its status, its SEC
   slot and its card compare no dates, because a company reporting EARLIER leaves the later date
   pending, so the row dated today can be the real one. Nor is a lone leftover row dated today
@@ -170,7 +206,7 @@ source can hold the other up.
     FMP tick folded, so a stuck FMP tick leaves it working from the ones already held.
   Ticks START a minute apart however long they ran, and an FMP fetch stamps itself when it
   returns, so every FMP cadence comes due a few seconds early (`_DUE_SLACK_SECONDS`): an exact
-  compare falls a moment short on the tick it was meant for, and "every 5 min" becomes every 6.
+  compare falls a moment short on the tick it was meant for, and "every 3 min" becomes every 4.
   A long round has no minute of rest after it either, so `EarningsFilingWatcher.run_once` holds
   every filing waiting on a retry for a minute after a round that spent an attempt. A filing's
   own rest counts from the end of its own failed read, so another filing's failures never restart
@@ -206,8 +242,9 @@ process is take back what the table holds for the live days (`restore_filings`).
 STATUSES (no time of day exists on `/stable` rows, so the window is the report day):
   * `upcoming` — a later date, or today before 06:00 ET with nothing in yet.
   * `live`     — today, 06:00–22:00 ET, results not complete. LIVE is drawn ONLY then, and
-                 it is true: SEC is checked every minute in the release windows and FMP
-                 every 5 min. On a weekend, when EDGAR accepts nothing, FMP alone.
+                 it is true: SEC is checked every minute in the release windows, and FMP
+                 every 3 min in the windows its company uses and every 15 min otherwise. On
+                 a weekend, when EDGAR accepts nothing, FMP alone.
   * `reported` — complete (EPS, plus revenue when a revenue estimate exists, shown or
                  guard-only), or the live window ended with at least one figure in.
   * `awaiting` — the window ended with nothing in. "Results not in yet" — never "late", a
@@ -221,7 +258,7 @@ STATUSES (no time of day exists on `/stable` rows, so the window is the report d
 
 THE SHEET'S POLL (`sheet_poll_seconds`, `poll_seconds` on the wire). 30 s while `live`. 120 s
 while `reported` with a preliminary figure on show, inside `fmp_window_open`: FMP's fill is what
-replaces that figure, and the loop asks at the hot cadence then. None otherwise, past those hours
+replaces that figure, and the loop is still asking FMP then. None otherwise, past those hours
 too: the record moves too rarely to poll, and the next open reads it. The two rules ship as one,
 or the sheet would poll a record nothing updates.
   One more 30 s, with no record at all: an answer this read could not tell (`recheck`). `none`
@@ -319,6 +356,7 @@ from app.services._earnings_common import (
 )
 from app.services.earnings_filing_service import (
     _DUE_SLACK_SECONDS,
+    _RELEASE_WINDOWS,
     FILING_VERIFIER_VERSION,
     FilingFigures,
 )
@@ -335,21 +373,36 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ───────────────────────────────────────────────────────
 
-EARNINGS_LIVE_HOT_TTL_SECONDS = 300
+#: The report-day pace (`_fmp_cadence`, the owner's design of 2026-11-11: "around the time of
+#: market open and close, it is 3 minutes"): every 3 min inside a release window one of the day's
+#: still-waiting watched reports counts, every 15 min otherwise, inside `fmp_window_open`.
+EARNINGS_LIVE_WINDOW_TTL_SECONDS = 180
+EARNINGS_LIVE_OUTSIDE_WINDOW_TTL_SECONDS = 900
+#: Any other day before today while today is a trading day: a report dated on a closed day, and a
+#: day FMP has only answered blank (`due_days`).
 EARNINGS_LIVE_COLD_TTL_SECONDS = 1800
 #: The days before today while TODAY is a closed day. A late fill is still worth picking up,
 #: but a row FMP never fills must not run the market-wide fetch through a weekend.
 EARNINGS_LIVE_CLOSED_DAY_TTL_SECONDS = 7200
+#: The release windows by the names `EarningsFilingWatcher.release_windows` answers in, on the SEC
+#: watch's own ET bounds (`earnings_filing_service._RELEASE_WINDOWS`, the morning one first), so
+#: the two sources keep one clock.
+RELEASE_WINDOW_MORNING = "morning"
+RELEASE_WINDOW_CLOSE = "close"
+_RELEASE_WINDOW_BOUNDS: Dict[str, Tuple[Tuple[int, int], Tuple[int, int]]] = dict(
+    zip((RELEASE_WINDOW_MORNING, RELEASE_WINDOW_CLOSE), _RELEASE_WINDOWS))
+#: What a company nothing is known about counts: both windows.
+_BOTH_WINDOWS = frozenset(_RELEASE_WINDOW_BOUNDS)
 #: How often the sheet asks again: while live, while FMP can still confirm what a reported report
 #: shows (`sheet_poll_seconds`), and on an answer a read could not tell (`live_payload`).
 EARNINGS_LIVE_POLL_SECONDS = 30
 EARNINGS_LIVE_PRELIMINARY_POLL_SECONDS = 120
 #: A memo row held this long opens no record (THE MEMO in the module docstring). Longer than the
-#: night the tick does not pay for, midnight to 06:00, and shorter than the day a closed day adds.
+#: 8.5 h the 15:30 round's rows of tomorrow are held when the midnight fold opens that day's
+#: records, and shorter than the day a closed day adds.
 EARNINGS_LIVE_HELD_ROWS_MAX_AGE_SECONDS = 12 * 3600
 #: How long own fetches must leave a report out before it ends (A REPORT FMP MOVES in the module
-#: docstring). Two hot rounds, because one is not enough: a 6-min gap can hold two fetches 5 min
-#: apart.
+#: docstring). A time, not a count of fetches: a 7-min gap can hold three fetches 3 min apart.
 EARNINGS_LIVE_UNLISTED_END_SECONDS = 600
 #: How long a first look listing nothing on a trading day stays no answer (THE MEMO in the module
 #: docstring). The same 10 min, for the same blip, and it has an end because a sheet waits on it.
@@ -357,9 +410,12 @@ EARNINGS_LIVE_BLANK_LOAD_WAIT_SECONDS = 600
 #: The live window on the report day, in ET hours: [start, end).
 EARNINGS_LIVE_START_HOUR_ET = 6
 EARNINGS_LIVE_END_HOUR_ET = 22
-#: The previous trading day stays hot until this ET hour, and an `awaiting` card stays up until
-#: this ET hour on the first trading day after its report.
+#: An `awaiting` card stays up until this ET hour on the first trading day after its report.
 EARNINGS_LIVE_PREV_DAY_UNTIL_HOUR_ET = 12
+#: When the tick owes the Tracking memo a round on a trading day, as ET (hour, minute)
+#: (`tick_refreshes_memo`): who reports today, then, before the close window, a report added or
+#: moved since and tomorrow's rows to hold for the night.
+_MEMO_ROUNDS_ET: Tuple[Tuple[int, int], ...] = ((EARNINGS_LIVE_START_HOUR_ET, 0), (15, 30))
 
 #: Below this |estimate| no surprise percentage is honest (`earnings_sender.MIN_ABS_ESTIMATE`:
 #: a $0.001 estimate against a $0.40 actual is a 39,900% "surprise").
@@ -812,27 +868,57 @@ def needs_fmp(eps: LiveMetric, revenue: LiveMetric) -> bool:
     return not is_complete(eps, revenue) or is_preliminary(eps, revenue)
 
 
+def asked_in_report_hours(day: date, today: date) -> bool:
+    """PURE. Is `day` asked about at the report-day pace today, and in `fmp_window_open`'s hours
+    only: today itself, and the previous trading day while today is a trading day? Any other day
+    before today is asked at the slow pace, at any hour (`EarningsLiveService.due_days`)."""
+    return day == today or (is_trading_day(today) and day == previous_trading_day(today))
+
+
 def fmp_window_open(day: date, n: datetime) -> bool:
-    """PURE. Are these the hours the loop asks FMP about `day`'s reports at the hot cadence, if
-    one of them still wants it, at `n` (ET)? 06:00–22:00 ET on the day itself, a closed day
-    included (a report can carry one's date), and 06:00–12:00 ET on the next trading day, when
-    an after-close report fills. A weekend morning is neither, and a closed day's report is
-    never hot again after its own day."""
+    """PURE. Are these the hours the loop asks FMP about `day`'s reports at the report-day pace
+    (`EarningsLiveService._fmp_cadence`), if one of them still wants it, at `n` (ET)?
+    06:00–22:00 ET on the day itself, a closed day included (a report can carry one's date), and
+    the same hours on the next trading day, when an after-close report fills. A weekend is
+    neither, and a closed day's report is never asked at this pace again after its own day."""
     if not EARNINGS_LIVE_START_HOUR_ET <= n.hour < EARNINGS_LIVE_END_HOUR_ET:
         return False
-    today = n.date()
-    if day == today:
+    return asked_in_report_hours(day, n.date())
+
+
+def release_window_at(n: datetime) -> Optional[str]:
+    """PURE. The release window `n` (ET) falls in, by name, or None outside both."""
+    hm = (n.hour, n.minute)
+    for name, (start, end) in _RELEASE_WINDOW_BOUNDS.items():
+        if start <= hm < end:
+            return name
+    return None
+
+
+def memo_round_since(n: datetime) -> Optional[datetime]:
+    """PURE. The latest moment of `_MEMO_ROUNDS_ET` at or before `n` (ET) on its day, or None
+    before the first one and on a closed day."""
+    if not is_trading_day(n.date()):
+        return None
+    since = None
+    for hour, minute in _MEMO_ROUNDS_ET:
+        at = n.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if at <= n:
+            since = at
+    return since
+
+
+def tick_refreshes_memo(n: datetime, stored_ago: Optional[float]) -> bool:
+    """PURE. Does the tick pay for a memo round at `n` (ET), with today's rows held for
+    `stored_ago` seconds (None when none are held)? Always while none are held: a restart, or a
+    day no round reached. Otherwise only on a trading day, once from 06:00 ET and once from 15:30
+    ET: while the rows were stored before the latest of those moments. So no round after the
+    15:30 one, and after 22:00 nothing live is fetched (THE MEMO in the module docstring). The
+    tick has two more reasons of its own (`earnings_live_tick`)."""
+    if stored_ago is None:
         return True
-    return (is_trading_day(today) and day == previous_trading_day(today)
-            and n.hour < EARNINGS_LIVE_PREV_DAY_UNTIL_HOUR_ET)
-
-
-def tick_refreshes_memo(n: datetime) -> bool:
-    """PURE. Are these the hours the tick pays to keep the Tracking memo fresh, at `n` (ET)?
-    06:00 ET to midnight on a trading day. Past 22:00 the hot fetch has stopped and the memo is
-    what still reads today's late fills. At any other hour the tick folds what the memo holds,
-    unless a held row is too old to open its record (THE MEMO in the module docstring)."""
-    return is_trading_day(n.date()) and n.hour >= EARNINGS_LIVE_START_HOUR_ET
+    since = memo_round_since(n)
+    return since is not None and stored_ago > (n - since).total_seconds()
 
 
 def live_status(day: date, today: date, now_et: datetime, eps: LiveMetric,
@@ -1395,6 +1481,11 @@ class EarningsLiveService:
         self._fetched: Dict[date, float] = {}
         # Days before today FMP has only answered blank: day -> monotonic time of the first.
         self._blank_since: Dict[date, float] = {}
+        # Reports own fetches ended: day -> {symbol: monotonic time of its latest end}
+        # (`ended_since`).
+        self._ended_at: Dict[date, Dict[str, float]] = {}
+        # (symbol, day) whose release windows could not be read, logged once each.
+        self._windows_unreadable: Set[Tuple[str, date]] = set()
         # Days past the live days a sheet opened with no read here (`sheet_asked`).
         self._sheet_asked: Set[date] = set()
         self._failed_until: float = 0.0
@@ -1427,9 +1518,9 @@ class EarningsLiveService:
 
         ``fetched`` is True only for an answer just read from FMP, the one moment the sources
         were actually checked: this module's OWN fetch, or the daily pass's
-        (`earnings_sender._fold_into_live_records`). Rows folded in from the Tracking memo (up
-        to 30 min old) must not move `checked_at`, or the sheet would say "updated just now"
-        over a half-hour-old answer.
+        (`earnings_sender._fold_into_live_records`). Rows folded in from the Tracking memo (they
+        can be hours old) must not move `checked_at`, or the sheet would say "updated just now"
+        over an old answer.
 
         ``stored_at`` is when the memo stored these rows, on the clock of `_fetched`
         (`tracking_service.earnings_day_stored_at`); an own fetch ignores it. The newest FMP
@@ -1757,23 +1848,74 @@ class EarningsLiveService:
 
     # ── refresh (the live loop only) ───────────────────────────────
 
-    def _fmp_wanted(self, day: date, symbols: Collection[str]) -> bool:
-        """Does a watched report on `day` still want FMP's answer (`needs_fmp`)?"""
+    def _waiting(self, day: date, symbols: Collection[str]) -> Iterable[str]:
+        """The watched reports on `day` that still want FMP's answer (`needs_fmp`), by symbol,
+        in the order watched, one at a time."""
         for symbol in symbols:
             rec = self._records.get((symbol.upper(), day))
             if rec is not None and needs_fmp(eps_metric(rec), revenue_metric(rec)):
-                return True
-        return False
+                yield rec.symbol
 
-    def _is_hot(self, day: date, n: datetime, symbols: Collection[str]) -> bool:
-        return fmp_window_open(day, n) and self._fmp_wanted(day, symbols)
+    def _fmp_wanted(self, day: date, symbols: Collection[str]) -> bool:
+        """Does a watched report on `day` still want FMP's answer (`needs_fmp`)?"""
+        return any(True for _ in self._waiting(day, symbols))
+
+    def ended_since(self, day: date, stored_at: Optional[float],
+                    symbols: Collection[str]) -> bool:
+        """Have own fetches ended a watched report on `day` (one of `symbols`) since the memo
+        stored its rows of that day at `stored_at` (A REPORT FMP MOVES in the module docstring)?
+        Those rows still list it, and open its record again at every fold until a round no
+        longer lists it. Only a watched one: the tick folds the watched alone and a feed build
+        its user's watchlist, so another company's comes back only on a sheet someone opens,
+        whose own read of the memo pays for the round. A company nobody watches costs nothing
+        (the owner, 2026-11-11)."""
+        ended = self._ended_at.get(day)
+        if not ended or stored_at is None:
+            return False
+        return any(ended.get(symbol.upper(), stored_at) > stored_at for symbol in symbols)
+
+    def _release_windows(self, symbol: str, day: date) -> frozenset:
+        """The windows `symbol`'s company releases in (`EarningsFilingWatcher.release_windows`).
+        Both when the answer names neither or cannot be read: a cadence must never go slower than
+        what is known allows, and an error there must not stop FMP's reads. The cadence asks on
+        every tick, so a failed read is logged once per report."""
+        from app.services.earnings_filing_service import get_earnings_filing_watcher
+
+        try:
+            named = frozenset(get_earnings_filing_watcher().release_windows(symbol)) & _BOTH_WINDOWS
+        except Exception as e:
+            if (symbol, day) not in self._windows_unreadable:
+                self._windows_unreadable.add((symbol, day))
+                logger.warning("[earnings-live] %s %s: release windows unreadable (%s: %s), both "
+                               "count", symbol, day.isoformat(), type(e).__name__, e,
+                               exc_info=True)
+            return _BOTH_WINDOWS
+        return named or _BOTH_WINDOWS
+
+    def _fmp_cadence(self, day: date, n: datetime, symbols: Collection[str]) -> Optional[int]:
+        """How often the loop asks FMP about `day` at `n` (ET), in seconds, or None when the
+        report-day pace asks nothing: outside `fmp_window_open`, or with no watched report on the
+        day still wanting FMP. 3 min inside a release window one of those reports counts, 15 min
+        otherwise (THE REPORT-DAY PACE in the module docstring). On its own day a report counts
+        its company's windows, and on the next trading day the morning one alone, whatever its
+        own: its release is behind it, and the morning is when FMP fills overnight results."""
+        if not fmp_window_open(day, n) or not self._fmp_wanted(day, symbols):
+            return None
+        window = release_window_at(n)
+        if day < n.date():
+            counted = window == RELEASE_WINDOW_MORNING
+        else:
+            counted = window is not None and any(
+                window in self._release_windows(symbol, day)
+                for symbol in self._waiting(day, symbols))
+        return (EARNINGS_LIVE_WINDOW_TTL_SECONDS if counted
+                else EARNINGS_LIVE_OUTSIDE_WINDOW_TTL_SECONDS)
 
     def due_days(self, now: datetime, symbols: Collection[str]) -> List[date]:
         """The days this round must fetch, oldest first (see THE MEMO in the docstring)."""
         n = et_now(now)
         *earlier, today = live_days(n.date())
         mono = time.monotonic()
-        hot_ttl = EARNINGS_LIVE_HOT_TTL_SECONDS - _DUE_SLACK_SECONDS
         cold_ttl = (EARNINGS_LIVE_COLD_TTL_SECONDS if is_trading_day(today)
                     else EARNINGS_LIVE_CLOSED_DAY_TTL_SECONDS) - _DUE_SLACK_SECONDS
         due = sorted(day for day in self._sheet_asked if day not in self._fetched)
@@ -1781,18 +1923,24 @@ class EarningsLiveService:
             last = self._fetched.get(day)
             if last is None:
                 due.append(day)
-            elif self._is_hot(day, n, symbols):
-                if mono - last >= hot_ttl:
+                continue
+            cadence = self._fmp_cadence(day, n, symbols)
+            if cadence is not None:
+                if mono - last >= cadence - _DUE_SLACK_SECONDS:
                     due.append(day)
-            elif ((self._fmp_wanted(day, symbols) or day in self._blank_since)
+            elif ((day in self._blank_since
+                   or (not asked_in_report_hours(day, today) and self._fmp_wanted(day, symbols)))
                   and mono - last >= cold_ttl):
-                # Outside the hot window a late FMP fill is still worth picking up, slowly, and
+                # Off the report-day pace a late FMP fill is still worth picking up, slowly, and
                 # once FMP has confirmed that day's watched reports nothing is left to ask. A day
                 # FMP has only answered blank holds no record to want anything, and is asked too.
+                # The previous trading day's reports are not: before 06:00 they wait for that
+                # morning's read, and after 22:00 their day is over.
                 due.append(day)
-        if self._is_hot(today, n, symbols):
+        cadence = self._fmp_cadence(today, n, symbols)
+        if cadence is not None:
             last = self._fetched.get(today)
-            if last is None or mono - last >= hot_ttl:
+            if last is None or mono - last >= cadence - _DUE_SLACK_SECONDS:
                 due.append(today)
         return due
 
@@ -1801,10 +1949,11 @@ class EarningsLiveService:
         days = set(sheet_days(et_now(now).date()))
         for key in [k for k in self._records if k[1] not in days]:
             self._records.pop(key, None)
-        for held in (self._fetched, self._blank_since):
+        for held in (self._fetched, self._blank_since, self._ended_at):
             for day in [d for d in held if d not in days]:
                 held.pop(day, None)
         self._sheet_asked &= days
+        self._windows_unreadable = {key for key in self._windows_unreadable if key[1] in days}
 
     async def refresh(self, now: datetime, *, fmp: Any, symbols: Collection[str]) -> None:
         """Prune, then fetch the due days and fold them in. The prune comes before every early
@@ -1881,7 +2030,9 @@ class EarningsLiveService:
         `EARNINGS_LIVE_UNLISTED_END_SECONDS` ago (A REPORT FMP MOVES in the module docstring).
         One fetch only starts that clock: the record it keeps is what keeps the day asked and
         remembers the report was seen pending. The fold before this one stopped the clock of
-        every report these rows list."""
+        every report these rows list. Each end is stamped under its day and symbol, the latest
+        one kept, for the tick to ask the memo again when the report is watched
+        (`ended_since`)."""
         listed = {symbol for symbol in map(_row_symbol, rows) if symbol}
         if not listed or len(rows) >= _TRUNCATION_ROWS:
             return
@@ -1900,6 +2051,7 @@ class EarningsLiveService:
                 ended.append(symbol)
         for symbol in ended:
             del self._records[(symbol, day)]
+            self._ended_at.setdefault(day, {})[symbol] = mono
         if left_out:
             logger.info(
                 "[earnings-live] %s: FMP's answer left out %d report(s) with no figure, asking "
@@ -2264,15 +2416,20 @@ async def earnings_live_tick(
 
     # Today's rows ride on the Tracking memo (30 min), the same shared object every feed build
     # reads. Reading it through its front door pays for a round when it is old, so the tick does
-    # that only in `tick_refreshes_memo`, when it holds no rows for today (a restart), or when a
-    # held row is too old to open its record. Should that round fail, the fold below refuses the
-    # same rows, so a moment of FMP trouble cannot turn them into a report day.
+    # that only for its own reasons: `tick_refreshes_memo` (no rows held for today, or the 06:00
+    # and 15:30 ET rounds of a trading day), a held row too old to open its record, and a watched
+    # report own fetches have ended since the rows were stored. Its round pays for today and
+    # tomorrow alone, unless no other held day lists anyone (`near_only`). Should that round
+    # fail, the fold below refuses the same rows, so a moment of FMP trouble cannot turn them
+    # into a report day.
     stored_at = ts.earnings_day_stored_at(fmp, today)
     calendar, _ = ts._held_earnings_window(fmp, [today])
-    if (stored_at is None or tick_refreshes_memo(n)
-            or service.old_rows_would_open(today, calendar, stored_at, watched)):
+    stored_ago = None if stored_at is None else time.monotonic() - stored_at
+    if (tick_refreshes_memo(n, stored_ago)
+            or service.old_rows_would_open(today, calendar, stored_at, watched)
+            or service.ended_since(today, stored_at, watched)):
         try:
-            calendar = await ts._cached_earnings_calendar(fmp, ts._et_today())
+            calendar = await ts._cached_earnings_calendar(fmp, ts._et_today(), near_only=True)
         except Exception as e:
             calendar = []
             logger.warning("[earnings-live] tracking calendar unavailable for %s (%s: %s)",

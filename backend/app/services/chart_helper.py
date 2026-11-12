@@ -1090,6 +1090,87 @@ def latest_extended_print(bars: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+# FMP's `extended=true` bars run to 19:55 ET after a 16:00 close — four hours of
+# after-hours trading (a 13:00 half-day's after-hours ends at 17:00, the same four
+# hours; iOS `TradingDayHelper.SessionWindow.extendedHalfDay`).
+_AFTER_HOURS_MINUTES = 4 * 60
+
+
+def after_hours_series(
+    bars: Any, *, interval_minutes: int = 5
+) -> Optional[Dict[str, Any]]:
+    """The after-hours trading of the LAST regular session, for the Holdings sparkline's
+    gray tail (owner, 2026-11-11: "green/red is during market, after that is a gray color
+    like an extend chart").
+
+    ``bars`` is `fetch_extended_bars` output (oldest first, normalised). Returns::
+
+        {"closes": [...],          # after-hours closes, oldest first, raw (the caller
+                                   #   downsamples and rounds them like the sparkline)
+         "regular_share": r,       # the regular session's share of the open → after-hours
+                                   #   close axis: 390 / 630 ≈ 0.619 (half-day 210 / 450)
+         "span_to": t}             # where the last after-hours bar ENDS on that axis
+
+    or None when there is no regular bar to hang the tail on or nothing traded after it.
+
+    Time-scaled, not index-scaled (owner's choice): the card's axis after the close runs
+    from the open to the end of after-hours, the regular line keeps its share of it, and
+    the gray tail grows with the clock exactly as the regular line does during the day.
+
+    Only that session's OWN after-hours: before the open the window also holds today's
+    pre-market bars, and those are left out (owner: before the open the card keeps
+    "yesterday's after-hours"; the ☀ chip carries the pre-market move). The bell comes
+    from `_session_window`, so a half-day's 13:00-17:00 trading is after-hours too.
+    """
+    if not isinstance(bars, list):
+        return None
+    last_regular: Optional[int] = None
+    window: Optional[Tuple[int, int]] = None
+    day = ""
+    for idx, bar in enumerate(bars):
+        if not isinstance(bar, dict):
+            continue
+        stamp = bar.get("date")
+        minute = _bar_minute_of_day(stamp)
+        bar_window = _session_window(stamp, extended_hours=False)
+        if minute is None or bar_window is None:
+            continue
+        if bar_window[0] <= minute < bar_window[1]:
+            last_regular, window, day = idx, bar_window, str(stamp)[:10]
+    if last_regular is None or window is None:
+        return None
+
+    open_minute, close_minute = window
+    tail_close = close_minute + _AFTER_HOURS_MINUTES
+    axis = tail_close - open_minute
+    closes: List[float] = []
+    last_minute: Optional[int] = None
+    for bar in bars[last_regular + 1:]:
+        if not isinstance(bar, dict):
+            continue
+        stamp = bar.get("date")
+        if not isinstance(stamp, str) or stamp[:10] != day:
+            continue  # a later day's pre-market: not this session's tail
+        minute = _bar_minute_of_day(stamp)
+        close = _finite_or_none(bar.get("close"))
+        if minute is None or close is None or close <= 0:
+            continue
+        if close_minute <= minute < tail_close:
+            closes.append(close)
+            last_minute = minute
+    if not closes or last_minute is None or axis <= 0:
+        return None
+
+    step = interval_minutes if interval_minutes > 0 else 0
+    regular_share = (close_minute - open_minute) / axis
+    span_to = min((last_minute + step - open_minute) / axis, 1.0)
+    return {
+        "closes": closes,
+        "regular_share": round(regular_share, 4),
+        "span_to": round(span_to, 4),
+    }
+
+
 def _filter_regular_hours(prices: List[Dict]) -> List[Dict]:
     """Keep only data points within regular US market hours (09:30–16:00 ET)."""
     from zoneinfo import ZoneInfo

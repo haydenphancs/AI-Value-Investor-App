@@ -49,7 +49,20 @@ struct AssetsListSection: View {
     // self-sizing frame.
     private let rowGap: CGFloat = AppSpacing.sm
 
+    /// Whether any card in this list can show a pre-market / after-hours chip right now. The
+    /// whole list then reserves the after-hours price column, so the cards with a chip and
+    /// the cards without one (a coin, a ticker with no print) keep the same column — and the
+    /// same chart x. Outside the session with no print anywhere, the regular column stays.
+    private var extendedMoveIsPossible: Bool {
+        AssetRow.isOutsideRegularSession && assets.contains { $0.extendedSession != nil }
+    }
+
     var body: some View {
+        // Read ONCE per render and captured: the List builds its cells lazily, so a clock read
+        // inside the row closure could answer differently for cells built a moment apart
+        // across the 09:30 / 16:00 bell — two column widths in one list.
+        let reservesExtendedMove = extendedMoveIsPossible
+
         // Assets List with swipe-to-delete. The PortfolioHeaderBar above
         // already shows the active portfolio name + "..." menu (which is where
         // sorting now lives); this section is just the rows.
@@ -60,7 +73,8 @@ struct AssetsListSection: View {
                         asset: asset,
                         onTap: { onAssetTapped?(asset) },
                         changeDisplayMode: changeDisplayMode,
-                        onToggleChangeDisplay: onToggleChangeDisplay
+                        onToggleChangeDisplay: onToggleChangeDisplay,
+                        reservesExtendedMove: reservesExtendedMove
                     )
                     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                         if allowsRemoval {
@@ -110,7 +124,8 @@ struct AssetsListSection: View {
     /// Lives in `.background`, so it never affects the List's own layout.
     private var rowHeightProbe: some View {
         AssetRow(asset: assets.first ?? Self.measurementSample,
-                 changeDisplayMode: changeDisplayMode)
+                 changeDisplayMode: changeDisplayMode,
+                 reservesExtendedMove: extendedMoveIsPossible)
             // The probe lives in the List's `.background`, which spans the FULL
             // width -- the real rows are inset by `listRowInsets` on both sides.
             // That 32pt did not matter while the ticker column was a hard 80pt

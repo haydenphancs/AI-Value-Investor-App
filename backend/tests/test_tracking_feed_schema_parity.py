@@ -43,6 +43,11 @@ ASSET_KEYS = {
     # null in the regular session and on rows with no extended session. iOS decodes
     # them leniently as `Double?` / `String?` and draws the chip only when all are set.
     "extended_price", "extended_change_percent", "extended_session",
+    # The sparkline's gray after-hours tail (2026-11-11): a list (empty, never null) and
+    # two Optional fractions, all set or all empty. iOS decodes them leniently
+    # (`[Double]?` filtered finite, `Double?`) and draws the tail only when all three are
+    # usable, outside the regular session.
+    "extended_sparkline", "extended_regular_share", "extended_span_to",
     # The star date (2026-10-31): `watchlist_items.added_at` as UTC
     # "YYYY-MM-DDTHH:MM:SS.mmmZ", the Holdings "Date Added" sort key. Optional; iOS
     # decodes it leniently as `String?` (TrackedAssetDTO `addedAt`).
@@ -235,6 +240,15 @@ def test_the_extended_print_is_absent_by_default():
     dumped = TrackedAssetResponse(ticker="ORCL", company_name="Oracle").model_dump()
     for key in ("extended_price", "extended_change_percent", "extended_session"):
         assert key in dumped and dumped[key] is None, key
+
+
+def test_the_after_hours_tail_is_empty_by_default():
+    """No tail: an EMPTY list (a JSON `null` list would fail a strict Swift decode) and
+    two nulls — never 0.0 fractions the client could draw as a zero-width axis."""
+    dumped = TrackedAssetResponse(ticker="ORCL", company_name="Oracle").model_dump()
+    assert dumped["extended_sparkline"] == []
+    assert dumped["extended_regular_share"] is None
+    assert dumped["extended_span_to"] is None
 
 
 def test_required_asset_fields_are_never_null_on_the_wire():

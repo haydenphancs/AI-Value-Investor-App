@@ -98,6 +98,27 @@ struct TrackedAsset: Identifiable {
     /// When the ticker joined the watchlist (`added_at` on the wire) — the "Date Added" sort
     /// key, never drawn. Nil from an older backend or an unreadable date (sorts last).
     var addedAt: Date? = nil
+    /// The after-hours trading of the session `sparklineData` shows, drawn GRAY after the
+    /// green/red line (owner, 2026-11-11), on a time axis from the open to the end of
+    /// after-hours: the session line takes `extendedRegularShare` of it and the tail ends at
+    /// `extendedSpanTo`. Empty / nil in the regular session, for coins (24/7, never gray),
+    /// and from an older backend. Read through `afterHoursTail`, which checks the three
+    /// together.
+    var extendedSparkline: [Double] = []
+    var extendedRegularShare: Double? = nil
+    var extendedSpanTo: Double? = nil
+
+    /// The gray tail, when all three parts are usable: a non-empty finite series and an axis
+    /// on which the session ends before the tail does (0 < share < spanTo <= 1). Anything
+    /// else draws no tail rather than a guessed one.
+    var afterHoursTail: SparklineTail? {
+        let data = extendedSparkline.filter(\.isFinite)
+        guard !data.isEmpty,
+              let share = extendedRegularShare, share.isFinite,
+              let spanTo = extendedSpanTo, spanTo.isFinite,
+              share > 0, share < spanTo, spanTo <= 1 else { return nil }
+        return SparklineTail(data: data, regularShare: share, spanTo: spanTo)
+    }
 
     /// Signed zero collapsed to +0 — see `PriceChangeLabel.normalizedChange`.
     /// `-0.0` (what a barely-negative move rounds to) satisfies `>= 0` yet still
@@ -722,6 +743,12 @@ struct TrackedAssetDTO: Codable, Identifiable {
     let extendedPrice: Double?
     let extendedChangePercent: Double?
     let extendedSession: String?
+    /// The sparkline's gray after-hours tail (`extended_sparkline` / `extended_regular_share` /
+    /// `extended_span_to`). Optional on the wire: an older backend sends no keys, and every
+    /// row in the regular session, every coin and every row without a chip sends [] / null.
+    let extendedSparkline: [Double]
+    let extendedRegularShare: Double?
+    let extendedSpanTo: Double?
     /// When the ticker joined the watchlist, as the backend's UTC-milliseconds ISO string.
     /// Optional: an older backend sends no key, and saved snapshots predate it.
     let addedAt: String?
@@ -745,6 +772,9 @@ struct TrackedAssetDTO: Codable, Identifiable {
         case extendedPrice = "extended_price"
         case extendedChangePercent = "extended_change_percent"
         case extendedSession = "extended_session"
+        case extendedSparkline = "extended_sparkline"
+        case extendedRegularShare = "extended_regular_share"
+        case extendedSpanTo = "extended_span_to"
         case addedAt = "added_at"
     }
 
@@ -796,6 +826,9 @@ struct TrackedAssetDTO: Codable, Identifiable {
         extendedPrice = lenient(Double.self, .extendedPrice).finiteOrNil
         extendedChangePercent = lenient(Double.self, .extendedChangePercent).finiteOrNil
         extendedSession = lenient(String.self, .extendedSession)
+        extendedSparkline = (lenient([Double].self, .extendedSparkline) ?? []).filter(\.isFinite)
+        extendedRegularShare = lenient(Double.self, .extendedRegularShare).finiteOrNil
+        extendedSpanTo = lenient(Double.self, .extendedSpanTo).finiteOrNil
         addedAt = lenient(String.self, .addedAt)
     }
 
@@ -829,7 +862,10 @@ struct TrackedAssetDTO: Codable, Identifiable {
             // An unknown session string (a newer backend) maps to nil, which hides the chip
             // rather than guessing a glyph.
             extendedSession: extendedSession.flatMap(ExtendedSession.init(rawValue:)),
-            addedAt: HoldingsSort.parseAddedAt(addedAt)
+            addedAt: HoldingsSort.parseAddedAt(addedAt),
+            extendedSparkline: extendedSparkline,
+            extendedRegularShare: extendedRegularShare,
+            extendedSpanTo: extendedSpanTo
         )
     }
 }

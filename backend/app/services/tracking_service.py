@@ -20,6 +20,7 @@ from app.integrations.fmp import get_fmp_client, FMPClient, FMPUnavailableExcept
 from app.integrations.fmp_entitlements import is_blocked_symbol
 from app.services.chart_helper import (
     FULL_SPAN,
+    after_hours_series,
     fetch_extended_bars,
     fetch_sparkline_bars,
     intraday_span,
@@ -471,6 +472,43 @@ def _downsample(values: List[float], target: int) -> List[float]:
     step = (len(values) - 1) / (target - 1)
     idxs = sorted({round(i * step) for i in range(target)} | {0, len(values) - 1})
     return [values[i] for i in idxs]
+
+
+# At most this many points in the after-hours tail: it covers at most four hours (48
+# five-minute bars) drawn in ~40% of an 80pt chart, against the session's 30 in ~60%.
+_AFTER_HOURS_SPARK_POINTS = 20
+
+
+def _after_hours_tail(
+    tail: Any, sparkline: List[float]
+) -> Tuple[List[float], Optional[float], Optional[float]]:
+    """``(closes, regular_share, span_to)`` for one row's gray after-hours tail, or
+    ``([], None, None)``.
+
+    ``tail`` is `chart_helper.after_hours_series` output, carried on the row's extended
+    print. All three or none: a tail only makes sense hung off a drawn session line (≥ 2
+    points), on an axis where the session ends before the tail does
+    (0 < regular_share < span_to <= 1). Every close is re-checked finite and positive —
+    Starlette renders with allow_nan=False, so one NaN would 500 the whole feed. Rounded
+    at least as finely as the session line, so the two share one y-scale on iOS without
+    the tail snapping to coarser steps.
+    """
+    none: Tuple[List[float], Optional[float], Optional[float]] = ([], None, None)
+    if not isinstance(tail, dict) or len(sparkline) < 2:
+        return none
+    share = _finite_or_none(tail.get("regular_share"))
+    span_to = _finite_or_none(tail.get("span_to"))
+    raw = tail.get("closes")
+    if share is None or span_to is None or not isinstance(raw, list):
+        return none
+    if not (0.0 < share < span_to <= 1.0):
+        return none
+    closes = [c for c in (_finite_or_none(v) for v in raw) if c is not None and c > 0]
+    if not closes:
+        return none
+    sampled = _downsample(closes, _AFTER_HOURS_SPARK_POINTS)
+    digits = max(sparkline_precision(sampled), sparkline_precision(sparkline))
+    return [round(c, digits) for c in sampled], round(share, 4), round(span_to, 4)
 
 
 # ── Market-wide earnings calendar (process-wide, Tier 1 only) ─────────
@@ -1133,6 +1171,12 @@ class TrackingService:
                 ext_change: Optional[float] = None
                 if ext_price is not None and ext_price > 0 and price_f is not None and price_f > 0:
                     ext_change = _finite_or_none((ext_price - price_f) / price_f * 100.0)
+                # The sparkline's gray after-hours tail — only beside a chip, so a row
+                # never draws extended trading it does not also state as a number.
+                tail_closes, tail_share, tail_to = (
+                    _after_hours_tail(ext.get("after_hours"), sparkline)
+                    if ext_change is not None else ([], None, None)
+                )
 
                 # Holding info — these columns live on watchlist_items and
                 # are populated by the Portfolio Insights config sheet. iOS
@@ -1181,6 +1225,9 @@ class TrackingService:
                         extended_session=(
                             ext.get("session") if ext_change is not None else None
                         ),
+                        extended_sparkline=tail_closes,
+                        extended_regular_share=tail_share,
+                        extended_span_to=tail_to,
                         # The STAR date (`watchlist_items.added_at`, never rewritten), the
                         # Holdings "Date Added" sort key. Never raises: an unreadable value
                         # is None + a WARNING, never this row's `except` below.
@@ -1544,6 +1591,12 @@ class TrackingService:
                     )
                     return ticker, None
             found = latest_extended_print(bars)
+            # The same bars also hold the session's after-hours trading: the Holdings
+            # sparkline's gray tail (`chart_helper.after_hours_series`), at no extra call.
+            # Cached WITH the print, so the two always describe the same read.
+            tail = after_hours_series(bars) if found is not None else None
+            if tail is not None:
+                found = {**found, "after_hours": tail}
             _extended_cache_set(ticker, tag, found)
             return ticker, found
 

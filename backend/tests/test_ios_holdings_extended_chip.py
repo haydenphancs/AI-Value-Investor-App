@@ -10,9 +10,19 @@ owner ruled out a taller card. Pinned here, each guard broken once in memory by 
   whole_or_nothing `ViewThatFits` with a zero-size fallback: on a phone too narrow for chip and
                    day change together the chip is left out, never squeezed into "…";
   priority         the price button is offered its width FIRST (`.layoutPriority(1)`), so the
-                   fit is measured against the space really left after the 200pt navigation
-                   side — at equal priority it was offered half the row and the row overflowed
-                   its card on a 375pt phone; the chip yields to the day change (`-1`);
+                   column is min(row - the 176pt navigation floor, the column cap) — at equal
+                   priority the stack sizes the column first with half the row, it takes its
+                   whole cap, and on a 375pt phone the row overflows its card; the chip yields
+                   to the day change (`-1`);
+  stable_fit       the change line AND the chip's slot fill their width (2026-11-11). Hugging
+                   their content, a card was SIZED with the chip and then re-offered exactly
+                   chip + day change when placed; the chip's fit test landed a float step short
+                   and it vanished from a box already sized for it — ORCL, ACHR, NVDA, PLUG,
+                   MRVL, INTC drew no chip and their price and change sat ~25pt left of the
+                   edge, centred in the chip-sized box;
+  reserved_room    the list reserves the after-hours column outside New York's regular session
+                   (the same rule as the chip's own gate), so a card with no print keeps the
+                   same column as the cards with one;
   same_height      the chip's 10pt text sits on the 13pt change line (the day change keeps the
                    default size), so `AssetsListSection`'s height probe is still exact;
   new_york_gate    a snapshot-painted chip hides once the bell rings, by New York's clock
@@ -37,6 +47,7 @@ _IOS = Path(__file__).resolve().parents[2] / "frontend/ios/ios"
 _ROW = "Views/Molecules/AssetRow.swift"
 _LABEL = "Views/Atoms/PriceChangeLabel.swift"
 _MODELS = "Models/TrackingModels.swift"
+_SPARK = "Views/Atoms/SparklineView.swift"
 
 
 def _strip_comments(src: str) -> str:
@@ -65,7 +76,8 @@ def _block(src: str, header: str) -> str:
 
 
 def _sources() -> Dict[str, str]:
-    return {rel: (_IOS / rel).read_text(encoding="utf-8") for rel in (_ROW, _LABEL, _MODELS)}
+    return {rel: (_IOS / rel).read_text(encoding="utf-8")
+            for rel in (_ROW, _LABEL, _MODELS, _SPARK)}
 
 
 # ── the guards ────────────────────────────────────────────────────────────────
@@ -155,6 +167,114 @@ def voiceover(src: Dict[str, str]) -> None:
     )
 
 
+def _after_block(src: str, header: str) -> str:
+    """The text right after the brace-balanced block that starts at ``header`` (``src`` is
+    already comment-stripped), leading whitespace dropped."""
+    start = src.index(header)
+    open_brace = src.index("{", start)
+    depth = 0
+    for i in range(open_brace, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[i + 1:].lstrip()
+    raise AssertionError(f"unbalanced braces after {header!r}")
+
+
+def stable_fit(src: Dict[str, str]) -> None:
+    body = _block(src[_ROW], "var body: some View")
+    assert _after_block(body, "HStack(spacing: 0) {").startswith(
+        ".frame(maxWidth: .infinity, alignment: .trailing)"
+    ), (
+        "the change line hugs its content again: the column is then re-offered exactly chip + "
+        "day change when it is placed, and the chip can drop from a box sized for it"
+    )
+    chip = _block(src[_ROW], "private var extendedMoveChip: some View")
+    assert re.search(
+        r"\}\s*\.frame\(maxWidth: \.infinity, alignment: \.trailing\)\s*\.layoutPriority\(-1\)", chip
+    ), (
+        "the chip's slot must FILL what the day change leaves (then yield with -1), so its "
+        "width is never recomputed by subtraction when the line is placed"
+    )
+
+
+def reserved_room(src: Dict[str, str]) -> None:
+    gate = _block(src[_ROW], "static var isOutsideRegularSession: Bool")
+    assert "if case .open? = MarketHoursUtil.liveSessionStatus() { return false }" in gate, (
+        "the list's reservation must follow the chip's own New York gate"
+    )
+    assert "return true" in gate
+    modifier = _block(src[_ROW], "struct HoldingsPriceColumn: ViewModifier")
+    assert "reservesExtendedMove ? AssetRow.extendedPriceColumnWidth : 0" in modifier, (
+        "the column no longer widens for the chip, so after hours the chip has no room"
+    )
+
+
+
+# ── the sparkline's gray after-hours tail (2026-11-11) ────────────────────────
+#
+# Owner: "after market close, the chart will have a gray color ... the green/red is during
+# market, after that is a gray color like an extend chart ... for crypto, it should not have
+# gray because they are 24h." The backend sends the tail (`extended_sparkline`,
+# `extended_regular_share`, `extended_span_to`; test_tracking_extended_print.py §6).
+
+_TAIL_KEYS = {"extendedSparkline": "extended_sparkline",
+              "extendedRegularShare": "extended_regular_share",
+              "extendedSpanTo": "extended_span_to"}
+
+
+def tail_wire_parity(src: Dict[str, str]) -> None:
+    from app.schemas.tracking import TrackedAssetResponse
+    dto = _block(src[_MODELS], "struct TrackedAssetDTO")
+    for case, key in _TAIL_KEYS.items():
+        assert key in TrackedAssetResponse.model_fields, f"the backend lost {key}"
+        assert f'case {case} = "{key}"' in dto, f"CodingKeys lost {key}"
+    assert "(lenient([Double].self, .extendedSparkline) ?? []).filter(\\.isFinite)" in dto, (
+        "the tail must decode leniently and drop non-finite points — a strict decode of one "
+        "bad value would blank the whole Holdings list"
+    )
+    assert "lenient(Double.self, .extendedRegularShare).finiteOrNil" in dto
+    assert "lenient(Double.self, .extendedSpanTo).finiteOrNil" in dto
+    for case in _TAIL_KEYS:
+        assert f"{case}: {case}" in dto, f"toTrackedAsset() drops {case}"
+
+
+def tail_drawable(src: Dict[str, str]) -> None:
+    model = _block(src[_MODELS], "var afterHoursTail: SparklineTail?")
+    assert "share > 0, share < spanTo, spanTo <= 1" in model, (
+        "a tail is drawn only on an axis where the session ends before the tail does"
+    )
+    tail = _block(src[_SPARK], "struct SparklineTail: Equatable")
+    assert "regularShare > 0 && regularShare < spanTo && spanTo <= 1" in tail, (
+        "the atom must refuse an unusable tail itself, whoever its caller is"
+    )
+
+
+def tail_gate(src: Dict[str, str]) -> None:
+    gate = _block(src[_ROW], "private var afterHoursTail: SparklineTail?")
+    assert "guard Self.isOutsideRegularSession else { return nil }" in gate, (
+        "a saved snapshot painted after the bell would draw yesterday's after-hours over the "
+        "new day's line — the tail follows the chip's New York gate"
+    )
+    assert "return asset.afterHoursTail" in gate
+    body = _block(src[_ROW], "var body: some View")
+    call = re.search(r"SparklineView\((.*?)\n\s*\)", body, re.S)
+    assert call and "tail: afterHoursTail" in call.group(1), "the row no longer passes the tail"
+
+
+def tail_tone(src: Dict[str, str]) -> None:
+    spark = _strip_comments(src[_SPARK])
+    assert "private static let tailTone = AppColors.textMuted" in spark, (
+        "the tail must be NEUTRAL gray: green or red would read as a gain or loss the "
+        "session line did not make"
+    )
+    stroke = _block(src[_SPARK], "private func strokeTail(")
+    assert ".color(Self.tailTone)" in stroke
+    assert "AppColors.bullish" not in stroke and "AppColors.bearish" not in stroke
+
+
 GUARDS: Dict[str, Callable[[Dict[str, str]], None]] = {
     "wire_parity": wire_parity,
     "whole_or_nothing": whole_or_nothing,
@@ -163,6 +283,12 @@ GUARDS: Dict[str, Callable[[Dict[str, str]], None]] = {
     "new_york_gate": new_york_gate,
     "glyph": glyph,
     "voiceover": voiceover,
+    "stable_fit": stable_fit,
+    "reserved_room": reserved_room,
+    "tail_wire_parity": tail_wire_parity,
+    "tail_drawable": tail_drawable,
+    "tail_gate": tail_gate,
+    "tail_tone": tail_tone,
 }
 
 
@@ -186,6 +312,22 @@ MUTATIONS = [
      "Image(systemName: (isPositive"),
     ("voiceover", _ROW, "\\(changeAccessibilityValue)\\(extendedAccessibilityValue)",
      "\\(changeAccessibilityValue)"),
+    ("stable_fit", _ROW, "                    .frame(maxWidth: .infinity, alignment: .trailing)\n", ""),
+    ("stable_fit", _ROW, ".frame(maxWidth: .infinity, alignment: .trailing)\n            .layoutPriority(-1)",
+     ".layoutPriority(-1)"),
+    ("reserved_room", _ROW, "if case .open? = MarketHoursUtil.liveSessionStatus() { return false }",
+     "if case .preMarket? = MarketHoursUtil.liveSessionStatus() { return false }"),
+    ("reserved_room", _ROW, "reservesExtendedMove ? AssetRow.extendedPriceColumnWidth : 0", "0"),
+    ("tail_wire_parity", _MODELS, 'case extendedSpanTo = "extended_span_to"',
+     'case extendedSpanTo = "extended_span_end"'),
+    ("tail_wire_parity", _MODELS, "            extendedSparkline: extendedSparkline,\n", ""),
+    ("tail_drawable", _MODELS, "share > 0, share < spanTo, spanTo <= 1", "share > 0, spanTo <= 1"),
+    ("tail_drawable", _SPARK, "regularShare > 0 && regularShare < spanTo && spanTo <= 1",
+     "regularShare > 0 && spanTo <= 1"),
+    ("tail_gate", _ROW, "        guard Self.isOutsideRegularSession else { return nil }\n", ""),
+    ("tail_gate", _ROW, "                        tail: afterHoursTail\n", "                        tail: nil\n"),
+    ("tail_tone", _SPARK, "private static let tailTone = AppColors.textMuted",
+     "private static let tailTone = AppColors.bullish"),
 ]
 
 

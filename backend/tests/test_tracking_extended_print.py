@@ -231,7 +231,12 @@ async def test_only_rows_with_an_extended_session_cost_a_call(clock):
         now=_AFTER_HOURS,
     )
     assert sorted(c[0] for c in fmp.calls) == ["AAPL", "BTC", "SPY"]
-    assert out["AAPL"] == {"price": 102.5, "session": "after_hours"}
+    # The print, plus the same bars' after-hours tail (one 17:00 bar after a 15:55 close).
+    assert out["AAPL"] == {
+        "price": 102.5,
+        "session": "after_hours",
+        "after_hours": {"closes": [102.5], "regular_share": 0.619, "span_to": round(455 / 630, 4)},
+    }
     assert set(out) == {"AAPL", "BTC", "SPY"}
 
 
@@ -319,17 +324,19 @@ class _FakeSupabase:
         return _FakeTable(self._w if name == "watchlist_items" else [])
 
 
-async def _feed_with(monkeypatch, quotes: Dict[str, Dict], prints: Dict[str, Dict]):
+async def _feed_with(monkeypatch, quotes: Dict[str, Dict], prints: Dict[str, Dict],
+                     sparklines: Dict[str, tuple] = None):
     watchlist = [{"id": i, "ticker": t, "company_name": t, "asset_type": "stock",
                   "sector": "Technology"} for i, t in enumerate(["AAPL", "MSFT", "NVDA"])]
     monkeypatch.setattr(ts, "get_supabase", lambda: _FakeSupabase(watchlist))
 
     async def _quotes(self, tickers): return quotes
     async def _nothing(self, *a, **k): return {}
+    async def _sparks(self, *a, **k): return sparklines or {}
     async def _no_list(self, *a, **k): return []
     async def _backfill(self, user_id, wl): return None
     async def _prints(self, tickers, asset_types=None): return prints
-    for name, fn in [("_get_batch_quotes", _quotes), ("_get_all_sparklines", _nothing),
+    for name, fn in [("_get_batch_quotes", _quotes), ("_get_all_sparklines", _sparks),
                      ("_get_earnings_alerts", _no_list), ("_get_whale_trade_alerts", _no_list),
                      ("_get_analyst_rating_alerts", _no_list),
                      ("_get_insider_transaction_alerts", _no_list),
@@ -383,3 +390,186 @@ async def test_an_unchanged_print_is_a_positive_zero(monkeypatch):
     )
     move = rows["AAPL"].extended_change_percent
     assert move == 0.0 and math.copysign(1.0, move) == 1.0
+
+
+# ── 6. the sparkline's gray after-hours tail (2026-11-11) ────────────────────
+#
+# Owner: "after market close, the chart will have a gray color ... the green/red is during
+# market, after that is a gray color like an extend chart ... for crypto, it should not
+# have gray because they are 24h." Time-scaled: the axis runs from the open to the end of
+# after-hours, so the session line keeps 390/630 of it; before the open the tail stays the
+# LAST session's after-hours (today's pre-market moves only the ☀ chip).
+
+from app.services.chart_helper import after_hours_series  # noqa: E402
+
+_SHARE = round(390 / 630, 4)
+
+
+def test_the_tail_is_the_sessions_after_hours_on_a_time_axis():
+    bars = _bars("2026-10-29", ("04:00", 99.0), ("09:30", 100.0), ("15:55", 101.0),
+                 ("16:00", 102.0), ("17:00", 103.0), ("19:55", 104.0))
+    tail = after_hours_series(bars)
+    assert tail == {"closes": [102.0, 103.0, 104.0], "regular_share": _SHARE, "span_to": 1.0}
+
+
+def test_the_tail_grows_with_the_clock():
+    """At 16:30 the tail ends a third of the way into after-hours, not at the edge."""
+    bars = _bars("2026-10-29", ("09:30", 100.0), ("15:55", 101.0), ("16:25", 102.0))
+    tail = after_hours_series(bars)
+    assert tail["span_to"] == round((16 * 60 + 30 - 570) / 630, 4)
+    assert _SHARE < tail["span_to"] < 1.0
+
+
+def test_a_half_day_tail_runs_from_13_00_to_17_00():
+    bars = _bars("2026-11-27", ("09:30", 1.0), ("12:55", 2.0), ("13:00", 3.0),
+                 ("16:55", 4.0), ("17:00", 5.0))
+    tail = after_hours_series(bars)
+    assert tail["closes"] == [3.0, 4.0], "17:00 is past the half-day's after-hours"
+    assert tail["regular_share"] == round(210 / 450, 4)
+    assert tail["span_to"] == 1.0
+
+
+def test_before_the_open_the_tail_is_still_the_last_sessions():
+    """Monday 07:00: Friday's after-hours is the tail; Monday's pre-market is not in it."""
+    bars = (_bars("2026-10-30", ("09:30", 2.0), ("15:55", 3.0), ("17:00", 4.0))
+            + _bars("2026-11-02", ("04:05", 6.0), ("06:55", 7.0)))
+    tail = after_hours_series(bars)
+    assert tail["closes"] == [4.0]
+    assert latest_extended_print(bars)["session"] == "pre_market", "the chip still says ☀"
+
+
+@pytest.mark.parametrize(
+    "bars",
+    [
+        _bars("2026-10-29", ("09:30", 2.0), ("15:55", 3.0)),    # nothing after the bell
+        _bars("2026-10-29", ("04:00", 1.0), ("08:00", 2.0)),    # no regular bar to hang it on
+        (_bars("2026-10-30", ("09:30", 2.0), ("15:55", 3.0))    # only today's pre-market
+         + _bars("2026-11-02", ("04:05", 6.0))),
+        [],
+        None,
+        "garbage",
+    ],
+)
+def test_no_tail(bars):
+    assert after_hours_series(bars) is None
+
+
+def test_unusable_tail_rows_are_skipped_not_fatal():
+    bars = _bars("2026-10-29", ("15:55", 3.0), ("16:30", 4.0)) + [
+        {"date": "2026-10-29 17:00:00", "close": float("nan")},
+        {"date": "2026-10-29 17:05:00", "close": 0},
+        {"date": "2026-10-29 17:10:00", "close": float("inf")},
+        "not a row",
+        {"date": None, "close": 9.0},
+        {"date": "2026-10-29", "close": 9.0},   # a daily stamp has no time of day
+    ]
+    tail = after_hours_series(bars)
+    assert tail["closes"] == [4.0]
+    assert tail["span_to"] == round((16 * 60 + 35 - 570) / 630, 4), "the skipped rows move nothing"
+
+
+@pytest.mark.asyncio
+async def test_the_service_caches_the_tail_with_its_print(clock):
+    fmp = _RecordingFMP(_SESSION)
+    svc = _svc(fmp)
+    first = await svc._get_extended_prints(["AAPL"], {}, now=_AFTER_HOURS)
+    second = await svc._get_extended_prints(["AAPL"], {}, now=_AFTER_HOURS)
+    assert len(fmp.calls) == 1
+    assert first["AAPL"]["after_hours"] == second["AAPL"]["after_hours"]
+
+
+@pytest.mark.asyncio
+async def test_a_coin_never_gets_a_tail(clock):
+    fmp = _RecordingFMP(_SESSION)
+    out = await _svc(fmp)._get_extended_prints(
+        ["BTCUSD"], {"BTCUSD": "crypto"}, now=_AFTER_HOURS)
+    assert out == {} and fmp.calls == [], "a 24/7 coin has no extended session to fetch"
+
+
+# The merge: the tail rides beside the chip, over a drawn session line, all three or none.
+
+_TAIL = {"closes": [349.0, 349.1, 349.2], "regular_share": _SHARE, "span_to": 0.75}
+_LINE = {"AAPL": ([340.0, 345.0, 348.91], 0.0, 1.0), "MSFT": ([401.0, 400.0], 0.0, 1.0),
+         "NVDA": ([180.0, 181.0], 0.0, 1.0)}
+
+
+@pytest.mark.asyncio
+async def test_the_tail_rides_beside_the_chip(monkeypatch):
+    rows = await _feed_with(
+        monkeypatch,
+        quotes={"AAPL": {"price": 348.91, "changePercentage": 1.48}},
+        prints={"AAPL": {"price": 349.2, "session": "after_hours", "after_hours": _TAIL}},
+        sparklines=_LINE,
+    )
+    aapl = rows["AAPL"]
+    assert aapl.extended_sparkline == [349.0, 349.1, 349.2]
+    assert (aapl.extended_regular_share, aapl.extended_span_to) == (_SHARE, 0.75)
+    assert aapl.sparkline_data == [340.0, 345.0, 348.91], "the session line is untouched"
+    assert (aapl.spark_from, aapl.spark_to) == (0.0, 1.0), "older clients keep their axis"
+
+
+@pytest.mark.asyncio
+async def test_no_chip_or_no_line_means_no_tail(monkeypatch):
+    """NVDA: a tail but no quote, so no chip. MSFT: a chip and a tail but no drawn line."""
+    rows = await _feed_with(
+        monkeypatch,
+        quotes={"MSFT": {"price": 400.0, "changePercentage": -0.5}},
+        prints={"NVDA": {"price": 190.0, "session": "after_hours", "after_hours": _TAIL},
+                "MSFT": {"price": 398.0, "session": "after_hours", "after_hours": _TAIL}},
+        sparklines={"NVDA": _LINE["NVDA"], "MSFT": ([400.0], 0.0, 1.0)},
+    )
+    for ticker in ("MSFT", "NVDA"):
+        row = rows[ticker]
+        assert (row.extended_sparkline, row.extended_regular_share, row.extended_span_to) == (
+            [], None, None), ticker
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        {"closes": [1.0], "regular_share": 0.0, "span_to": 0.7},            # no session share
+        {"closes": [1.0], "regular_share": 0.7, "span_to": 0.7},            # tail ends at the bell
+        {"closes": [1.0], "regular_share": 0.6, "span_to": 1.2},            # past the axis
+        {"closes": [1.0], "regular_share": float("nan"), "span_to": 0.7},
+        {"closes": [float("nan"), 0, -1], "regular_share": 0.6, "span_to": 0.7},
+        {"closes": "1,2", "regular_share": 0.6, "span_to": 0.7},
+        {"regular_share": 0.6, "span_to": 0.7},
+        "garbage",
+        None,
+    ],
+)
+def test_a_malformed_tail_is_dropped_whole(tail):
+    assert ts._after_hours_tail(tail, [1.0, 2.0]) == ([], None, None)
+
+
+def test_a_long_tail_is_downsampled_keeping_its_last_print():
+    closes = [100.0 + i / 100 for i in range(48)]
+    out, share, span_to = ts._after_hours_tail(
+        {"closes": closes, "regular_share": _SHARE, "span_to": 1.0}, [99.0, 100.0])
+    assert len(out) == ts._AFTER_HOURS_SPARK_POINTS
+    assert out[0] == closes[0] and out[-1] == closes[-1], "the end must match the chip's price"
+    assert (share, span_to) == (_SHARE, 1.0)
+
+
+def test_a_tail_is_rounded_at_least_as_finely_as_its_line():
+    """A $0.20 holding: the line keeps 4 places, so the tail must not snap to 2."""
+    line = [0.2012, 0.2034, 0.2051]
+    out, _, _ = ts._after_hours_tail(
+        {"closes": [0.20555, 0.20612], "regular_share": _SHARE, "span_to": 0.8}, line)
+    assert out == [round(0.20555, ts.sparkline_precision(line)),
+                   round(0.20612, ts.sparkline_precision(line))]
+    assert out[0] != out[1]
+
+
+@pytest.mark.asyncio
+async def test_a_feed_with_a_tail_serialises_without_nan(monkeypatch):
+    import json
+    rows = await _feed_with(
+        monkeypatch,
+        quotes={"AAPL": {"price": 348.91, "changePercentage": 1.48}},
+        prints={"AAPL": {"price": 349.2, "session": "after_hours",
+                         "after_hours": {**_TAIL, "closes": [349.0, float("nan"), 349.2]}}},
+        sparklines=_LINE,
+    )
+    assert rows["AAPL"].extended_sparkline == [349.0, 349.2]
+    json.dumps(rows["AAPL"].model_dump(), allow_nan=False)

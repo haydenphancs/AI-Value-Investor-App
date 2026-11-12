@@ -71,6 +71,18 @@ class TrackedAssetResponse(BaseModel):
     extended_price: Optional[float] = None
     extended_change_percent: Optional[float] = None
     extended_session: Optional[str] = None
+    # The after-hours trading of the session `sparkline_data` shows, drawn GRAY after the
+    # green/red line (owner, 2026-11-11). Time-scaled: once the bell has rung the card's
+    # axis runs from the open to the end of after-hours (20:00 ET; 17:00 after a half-day),
+    # `extended_regular_share` is the regular session's share of it (≈ 0.619) — the
+    # session line shrinks into it — and the tail ends at `extended_span_to`. All three or
+    # none ([] / None / None), and only beside a chip (`extended_change_percent` set).
+    # Never for crypto (no extended session). Before the open the tail is still the LAST
+    # session's after-hours; today's pre-market moves only the ☀ chip. `spark_from` /
+    # `spark_to` keep their meaning, so older clients draw exactly what they did.
+    extended_sparkline: List[float] = Field(default_factory=list)
+    extended_regular_share: Optional[float] = None
+    extended_span_to: Optional[float] = None
     # When the ticker was STARRED: `watchlist_items.added_at`, written once by the add and
     # never rewritten (a group reorder rewrites `portfolio_items`, not this). The Holdings
     # "Date Added" sort reads it — `portfolio_items.position` was the stored order, not a

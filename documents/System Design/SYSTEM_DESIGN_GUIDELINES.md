@@ -3695,9 +3695,21 @@ hid every card over an empty window. Now:
     "Joby, which fell 8%", "wiped 8% off …") or when it is within max(1, 25% of) the live move — pages
     are kept all ET day while the move drifts — unless a company metric OWNS it by position
     (`_metric_owner`). A metric on the LEFT owns it only through a closed allow-list of METRIC verbs
-    standing between them ("deliveries fell 15%", "revenue grew", "cut", "reported", "totaled"…), a
-    metric verb governing it ("lowered its revenue forecast by 10%") or a change-noun compound
-    ("revenue growth of 8%"); any other word — "drove", "caused", "led to", a noun like "miss" —
+    standing between them ("deliveries fell 15%", "revenue grew", "cut", "reported", "totaled"…, also
+    after an auxiliary or "to": "expects revenue to grow 8%"), a verbless "up/down" ("deliveries down
+    8%"), a metric verb governing it as its DIRECT object ("lowered its revenue forecast for 2026 by
+    10%", "raised its stake in Joby Aviation to 15%" — never through a preposition: "dropped on
+    earnings in heavy trading by 8%" is the stock's move) or a change-noun compound ("revenue growth
+    of 8%"). On the verbless up/down path, a metric after ANY preposition (after, on, ahead, into,
+    before, following, amid, post, despite, over — within three words, no punctuation between) is
+    never the owner, whatever stands before the preposition: "Joby stock after earnings down 8%",
+    "The eVTOL maker after earnings down 8%" and "The company on weak guidance down 8%" are the
+    stock's move. A narrower rule (only "stock"/"shares"/a name before the preposition) let those
+    through and was reverted (owner: "Yes, undo the low fix"). KNOWN LIMITS, failing closed (the
+    point is dropped, the card still written): an honest "Post-merger / Over the quarter / On
+    constant currency revenue up N%" on a day the stock moved about N%; and a metric reached through
+    a preposition after its verb — "Joby cut the number of jobs by 8%", "lowered its outlook on
+    revenue by 8%" — loses its owner to the direct-object rule near the move. Any other word — "drove", "caused", "led to", a noun like "miss" —
     leaves the metric the CAUSE, with no list of those words, and never across a clause break. On the
     RIGHT: "a 10% discount", "an 8% decline in revenue" — but not the stock's own "trades at an 8%
     discount to yesterday's close"; a loss only as "net/operating/… loss". KNOWN LIMIT (owner 2026-11-13: "One
@@ -3734,10 +3746,15 @@ hid every card over an empty window. Now:
     refused 27 of 27 invented lines (12 tuned, 15 held out: invented causes and events, a reused move
     size, "three aircraft", and both contradiction cases below); end to end, the real writer + checks
     + judge wrote 38 of 40 honest page sets (the 2 refusals: takeaways the judge would not support,
-    even after the repair). Judged ALONE, the judge accepts only 21 of 73 REVIEWER-written cards and
-    some honest probe headlines ("…slides a year", "trims … as Dubai launch slips"): a link between
-    two page facts must now be stated by a page, and those hand-written lines draw links (or "what to
-    watch" framings) the writer rule forbids. Residual: a small invented detail can pass
+    even after the repair). Judged ALONE, the judge accepts only 21 of 73 REVIEWER-written cards:
+    mostly their takeaways (line C), which draw links between page facts that no page states, or
+    "what to watch" framings — both now refused by the C rubric and forbidden by the writer rule. It
+    also refused two honest probe HEADLINES ("…slides a year", "trims … as Dubai launch slips"). The
+    C-only LINK rule does not reach a headline, but the rubric's general clause does — it applies to
+    EVERY line, H included: a line is not supported when it "gives a cause or reason the pages do not
+    give". "trims … as Dubai launch slips" links two page facts with an "as" no page states, and the
+    judge read "slides a year" the same way despite the rubric's own example; both are that clause
+    applied strictly, not a separate headline rule. Residual: a small invented detail can pass
     ("voluntarily pulling" a drug), and some takeaways are mildly interpretive ("signals strong
     support").
   A Title-Cased headline takes the one retry in sentence case. Mixed cards are unchanged and never call

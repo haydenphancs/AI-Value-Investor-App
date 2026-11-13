@@ -3256,10 +3256,14 @@ def _by_to_path_ok(path: Sequence[str]) -> bool:
 def _verb_before_owner(left: Sequence[str], i: int) -> bool:
     """Whether a metric verb governs the metric at ``left[i]`` from its left ("lowered its 2026
     revenue forecast | by 10%", "raised its stake | to 15%"): up to 3 modifier words, then the
-    verb. ``left`` is nearest-first. Pure."""
+    verb. ``left`` is nearest-first. The metric must be the verb's DIRECT object: a preposition
+    between them ("dropped ON earnings … by 8%") makes the metric the cause of the stock's move,
+    never the figure's owner (post-commit review of 02211bd2). Pure."""
     for token in left[i + 1:i + 5]:
         low = token.lower()
         if not low[:1].isalpha() or low in _OWNER_BLOCKERS:
+            return False
+        if low in _OBJECT_PREPOSITIONS or low in _OWNER_PREPS:
             return False
         if low in _METRIC_VERBS:
             return low not in _STATE_VERBS

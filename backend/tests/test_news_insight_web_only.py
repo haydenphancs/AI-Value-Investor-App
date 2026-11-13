@@ -2546,3 +2546,121 @@ async def test_a_judge_dropped_point_is_logged_even_after_a_judged_repair(caplog
     card = await _run(_Svc(gem), [DUBAI, OFFERING])
     assert card is not None and second not in card["bullets"]
     assert any("written without 1 point(s)" in r.getMessage() for r in caplog.records)
+
+
+# ── post-commit review of 02211bd2 (2026-11-13, owner: "Yes, fix both") ─────
+
+@pytest.mark.parametrize("title", [
+    "The air taxi maker dropped on earnings in heavy trading by 8% after the Dubai delay",
+    "The air taxi maker fell on guidance in late trading by 8% after the Dubai delay",
+    "The air taxi maker slid on revenue worries in heavy trading by 8% after the Dubai delay",
+])
+def test_a_verb_through_a_preposition_never_makes_the_cause_an_owner(title):
+    i = title.index("8%")
+    assert nis._metric_owner(title, i, i + 2) is None, title
+
+
+@pytest.mark.parametrize("title", [
+    "The air taxi maker dropped on earnings in heavy trading by 8% after the Dubai delay",
+    "The air taxi maker fell on guidance in late trading by 8% after the Dubai delay",
+])
+@pytest.mark.parametrize("point", [
+    STAFF_POINT, "Joby cut its guidance by 8% after the Dubai delay.",
+])
+@pytest.mark.asyncio
+async def test_a_cause_through_a_preposition_never_vouches_near_the_move(title, point):
+    page = {**SLIDE, "title": title,
+            "snippet": DELAY_SNIPPET + " Joby will cut staff and its guidance after the Dubai delay."}
+    card = await _run_q(_Svc(_Gemini(_card(points=(point, HONEST_POINT),
+                         conclusion="The Dubai launch now turns on certification work."))),
+                        [page], -8.0)
+    assert card is not None and point not in card["bullets"], card and card["bullets"]
+
+
+def test_a_direct_object_metric_still_owns_its_by_or_to_figure():
+    for t in ("Archer Aviation lowered its revenue forecast for 2026 by 8%, saying",
+              "Toyota raised its stake in Joby Aviation to 8%",
+              "Joby lowered its guidance by 8%"):
+        i = t.index("8%")
+        assert nis._metric_owner(t, i, i + 2) is not None, t
+
+
+STOCK_MOVE_SHAPES = [
+    "Joby stock after earnings down 8%",
+    "Joby shares after earnings down 8% on Wednesday",
+    "Joby on weak guidance down 8% Wednesday",
+    "Joby post-earnings down 8%",
+    "The air taxi maker dropped on earnings in heavy trading by 8% after the Dubai delay",
+    "The air taxi maker fell on its guidance in early trading by 8%",
+    "The air taxi maker plunged on earnings for the session by 8%",
+    "Joby tumbled on its outlook in early trading by 8% on Wednesday",
+]
+
+
+@pytest.mark.parametrize("text", STOCK_MOVE_SHAPES)
+def test_a_stocks_move_never_gets_a_metric_owner(text):
+    i = text.index("8%")
+    assert nis._metric_owner(text, i, i + 2) is None, text
+
+
+@pytest.mark.asyncio
+async def test_the_stocks_move_in_a_snippet_never_vouches_for_a_guidance_cut():
+    page = {**SLIDE, "title": "Joby delays its Dubai air taxi launch to 2027",
+            # Not "Joby tumbled…": price_claims would strip that before the owner rule runs.
+            "snippet": "The air taxi maker tumbled on its outlook in early trading by 8% on Wednesday. "
+                       "Joby will cut its guidance after the Dubai delay. " + DELAY_SNIPPET}
+    point = "Joby cut its guidance by 8% after the Dubai delay."
+    card = await _run_q(_Svc(_Gemini(_card(points=(point, HONEST_POINT),
+                         conclusion="The Dubai launch now turns on certification work."))),
+                        [page], -8.0)
+    assert card is not None and point not in card["bullets"], card and card["bullets"]
+
+
+
+# ── owner decision "Yes, undo the low fix" (2026-11-13) ─────────────────────
+# 02211bd2's stricter skip is restored: on the verbless up/down path, a metric after ANY
+# preposition is never the owner, whatever stands before the preposition. The narrower rule
+# (only "stock"/"shares"/a capitalised name before it) let these through (14/14 written).
+
+REOPENED_STOCK_MOVES = [
+    "The eVTOL maker after earnings down 8%",
+    "Shares of the company after earnings down 8%",
+    "Joby Aviation Inc. after earnings down 8%",
+    "Joby Aviation (JOBY) after earnings down 8%",
+    "joby after earnings down 8%",
+    "The air taxi maker on weak guidance down 8% Wednesday",
+    "The company on weak guidance down 8%",
+]
+
+
+@pytest.mark.parametrize("where", ["title", "snippet"])
+@pytest.mark.parametrize("shape", REOPENED_STOCK_MOVES)
+@pytest.mark.asyncio
+async def test_any_preposition_before_a_verbless_move_keeps_it_the_stocks(shape, where):
+    extra = " Joby will cut staff after the Dubai delay."
+    if where == "title":
+        page = {**SLIDE, "title": shape, "snippet": DELAY_SNIPPET + extra}
+    else:
+        page = {**SLIDE, "title": "Joby delays its Dubai air taxi launch to 2027",
+                "snippet": shape + ". " + DELAY_SNIPPET + extra}
+    card = await _run_q(_Svc(_Gemini(_card(points=(STAFF_POINT, HONEST_POINT),
+                         conclusion="The Dubai launch now turns on certification work."))),
+                        [page], -8.0)
+    assert card is not None and STAFF_POINT not in card["bullets"], card and card["bullets"]
+
+
+# KNOWN LIMIT (SYSTEM_DESIGN_GUIDELINES §9b.10a, owner: "Yes, undo the low fix"): an honest metric
+# after a sentence-opening phrase ("Post-merger …", "Over the quarter …") loses its owner on a
+# move-sized day, so the point is DROPPED — failing closed: the card is still written.
+@pytest.mark.parametrize("title,point", [
+    ("Post-merger revenue up 8% at Joby", "Joby post-merger revenue rose 8%."),
+    ("Over the quarter revenue up 8% at Joby", "Joby revenue rose 8% over the quarter."),
+])
+@pytest.mark.asyncio
+async def test_known_limit_an_honest_metric_after_a_phrase_fails_closed(title, point):
+    page = {**SLIDE, "title": title, "snippet": DELAY_SNIPPET}
+    card = await _run_q(_Svc(_Gemini(_card(points=(point, HONEST_POINT),
+                         conclusion="The Dubai launch now turns on certification work."))),
+                        [page], 8.0)
+    assert card is not None, "the card must still be written"
+    assert point not in card["bullets"] and HONEST_POINT in card["bullets"]

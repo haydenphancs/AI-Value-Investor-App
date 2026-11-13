@@ -148,6 +148,12 @@ _INFLIGHT_MODULES = [
     # BaseException arm), and `test_earnings_window_service.py` proves both at
     # runtime.
     "earnings_window_service.py",
+    # Added 2026-10-29 with live earnings results: the live loop's single-day calendar
+    # refresh (the previous trading day and today) sits behind a future keyed on
+    # (round, ET date), so a second round started while one is fetching joins it rather than
+    # firing another. Same shape as `earnings_window_service._run_once`: the joiner is
+    # shielded and the leader resolves the future on every exit, including cancellation.
+    "earnings_live_service.py",
     # Added 2026-10-01 with the zero-placeholder self-heal: one bounded live TAM compute
     # per (industry, sector) is shared by every report collecting that industry, and a
     # report cancelled mid-collect must not cancel it for the rest

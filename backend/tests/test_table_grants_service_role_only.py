@@ -155,6 +155,10 @@ _SERVICE_ROLE_ONLY: dict[str, tuple[str, ...]] = {
     # Only the backend reads or writes it, as service_role. 205 also adds the origin / finding
     # columns to trillion_club_stakes, whose grants (175) it does not touch.
     "205": ("trillion_club_stake_findings",),
+    # 209: what each company's own earnings release said, kept so a restart neither loses a live
+    # earnings figure nor reads the filing again. Public SEC data, but read only by the backend
+    # (earnings_live_service).
+    "209": ("earnings_filing_cache",),
 }
 
 # Tables that DO grant anon or authenticated on purpose. Each needs the reason; an entry
@@ -183,6 +187,8 @@ _DROPPED: dict[str, str] = {
     # replaced long before the review; their GRANT lines survive only in old migrations
     "snapshot_health_cache": "032", "snapshot_ownership_cache": "032",
     "snapshot_valuation_cache": "032", "user_book_progress": "067",
+    # 026 folded both into the unified snapshot cache; 021 and 022 had no GRANT line at all
+    "snapshot_profitability_cache": "026", "snapshot_growth_cache": "026",
 }
 
 _RE_REVOKE = re.compile(
@@ -330,6 +336,20 @@ def test_no_table_is_in_two_lists():
     assert not both, f"contradictory classification: {sorted(both)}"
     both = _all_service_role_only() & set(_DROPPED)
     assert not both, f"dropped tables must not also be declared service-role-only: {sorted(both)}"
+
+
+def test_every_table_a_migration_creates_is_classified():
+    """The rule at the top of `_SERVICE_ROLE_ONLY`: a table in neither list is a failure. Without
+    this a new table is checked only if someone remembers to list it, and leaving it off is what
+    a forgotten REVOKE looks like: every other test here reads the lists, not the migrations."""
+    _, created, _, _ = _replay()
+    known = _all_service_role_only() | set(_CLIENT_ACCESS_BY_DESIGN) | set(_DROPPED)
+    unclassified = sorted(f"{table} ({num:03d})" for table, num in created.items()
+                          if table not in known)
+    assert not unclassified, (
+        "table(s) a migration creates that no list here names: add each to _SERVICE_ROLE_ONLY, or "
+        f"to _CLIENT_ACCESS_BY_DESIGN with a reason, or to _DROPPED: {unclassified}"
+    )
 
 
 def test_new_cache_tables_never_reuse_the_public_read_template():

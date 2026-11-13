@@ -10,7 +10,10 @@ days — today's first — was missing (Sentry PYTHON-FASTAPI-4S; live 2026-10-2
   * asks ONE ET day per call (`fetch_calendar_days`: all-or-nothing, rows kept only under
     their own date, a single day at the cap reported at ERROR);
   * memoises each day: today and tomorrow for `EARNINGS_CALENDAR_TTL` (30 min), later days
-    for `EARNINGS_CALENDAR_FAR_TTL` (6 h) — owner decision 2026-10-22, ~150 calls a day;
+    for `EARNINGS_CALENDAR_FAR_TTL` (6 h) — owner decision 2026-10-22, ~150 calls a day —
+    each a few seconds short, so the live tick that reads it on the minute keeps that cadence;
+  * makes the days after today due when a reader names a moment they must be as new as, which
+    the live sheet does before it says a report is listed nowhere;
   * stores an empty DAY (weekends) but never an empty WINDOW, a failure or a non-list
     answer (a cached empty reads exactly like "nobody on this watchlist reports this
     fortnight");
@@ -18,7 +21,11 @@ days — today's first — was missing (Sentry PYTHON-FASTAPI-4S; live 2026-10-2
     next round, so an outage costs one round per wait, not one per feed build;
   * collapses concurrent misses to one round; a joiner whose leader was CANCELLED (a
     client disconnect) TAKES OVER — it never serves its own user a feed with no earnings
-    alerts (that feed is then cached for 30 s and saved by the iOS snapshot);
+    alerts (that feed is then cached for 30 s and saved by the iOS snapshot) — and one whose
+    leader stored fewer days than it needs (the live tick's today-and-tomorrow round) pays
+    for the rest rather than serve a window with a day missing;
+  * lets the live tick pay for today and tomorrow alone, but reads the whole window when no
+    other held day lists anyone, so a restart on a weekend or a holiday stores its answer;
   * is keyed on the client object, so one fake's rows never reach another.
 
 Hermetic: every client is an inline fake; the module state is reset around each test and
@@ -261,7 +268,7 @@ async def test_near_days_refetch_after_30_minutes_far_days_after_6_hours():
     await _svc(fmp)._get_earnings_alerts(["AAPL"])
     assert len(fmp.calls) == 15
 
-    _age_memo(ts.EARNINGS_CALENDAR_TTL - 5)
+    _age_memo(ts.EARNINGS_CALENDAR_TTL - 10)
     await _svc(fmp)._get_earnings_alerts(["AAPL"])
     assert len(fmp.calls) == 15, "nothing is due before 30 minutes"
 
@@ -273,6 +280,86 @@ async def test_near_days_refetch_after_30_minutes_far_days_after_6_hours():
     _age_memo(ts.EARNINGS_CALENDAR_FAR_TTL)
     await _svc(fmp)._get_earnings_alerts(["AAPL"])
     assert len(fmp.calls) == 17 + 15, "after 6 hours every day is due"
+
+
+@pytest.mark.asyncio
+async def test_a_near_day_comes_due_a_few_seconds_early_and_no_earlier():
+    """A round stamps itself when it returns, and the live tick reads this on an exact minute:
+    an exact compare falls a moment short on the 30th tick, and "30 min" becomes 31."""
+    fmp = _CalendarFMP()
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    _age_memo(ts.EARNINGS_CALENDAR_TTL - ts._DUE_SLACK_SECONDS - 1)
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    assert len(fmp.calls) == 15
+    _age_memo(1)
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    assert len(fmp.calls) == 17
+
+
+@pytest.mark.asyncio
+async def test_a_far_day_comes_due_a_few_seconds_early_and_no_earlier():
+    fmp = _CalendarFMP()
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    _age_memo(ts.EARNINGS_CALENDAR_FAR_TTL - ts._DUE_SLACK_SECONDS - 1)
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    assert len(fmp.calls) == 17, "only the near days"
+    _age_memo(1)
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    assert len(fmp.calls) == 30, "and now the 13 others"
+
+
+@pytest.mark.asyncio
+async def test_the_days_after_today_stored_before_a_moment_come_due_and_today_does_not():
+    fmp = _CalendarFMP([_row("AAPL")])
+    await ts._cached_earnings_calendar(fmp, _DAY)
+    _age_memo(60)
+    fmp.calls.clear()
+    await ts._cached_earnings_calendar(fmp, _DAY, later_days_since=ts._time.monotonic() - 1)
+    assert sorted(call[0] for call in fmp.calls) == [_iso(i) for i in range(1, 15)]
+
+
+@pytest.mark.asyncio
+async def test_the_days_after_today_are_asked_for_once_per_moment():
+    fmp = _CalendarFMP([_row("AAPL")])
+    await ts._cached_earnings_calendar(fmp, _DAY)
+    _age_memo(60)
+    since = ts._time.monotonic() - 1
+    await ts._cached_earnings_calendar(fmp, _DAY, later_days_since=since)
+    fmp.calls.clear()
+    await ts._cached_earnings_calendar(fmp, _DAY, later_days_since=since)
+    assert fmp.calls == []
+
+
+@pytest.mark.asyncio
+async def test_days_stored_at_that_very_moment_are_not_due():
+    """One round stamps every day it stores alike, so a day cannot be older than its own round."""
+    fmp = _CalendarFMP([_row("AAPL")])
+    await ts._cached_earnings_calendar(fmp, _DAY)
+    fmp.calls.clear()
+    since = ts.earnings_day_stored_at(fmp, _DAY)
+    await ts._cached_earnings_calendar(fmp, _DAY, later_days_since=since)
+    assert fmp.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_ask_for_the_later_days_keeps_them_and_waits():
+    """A stamp is the rows' real age, and the failed round leaves it, so the next round asks
+    again once the wait ends and not before."""
+    fmp = _CalendarFMP([_row("AAPL")])
+    await ts._cached_earnings_calendar(fmp, _DAY)
+    _age_memo(60)
+    since = ts._time.monotonic() - 1
+    stamp = ts.earnings_day_stored_at(fmp, _DAY + timedelta(days=3))
+    fmp.day_answers[_iso(5)] = [FMPUnavailableException("FMP 503")]
+    rows = await ts._cached_earnings_calendar(fmp, _DAY, later_days_since=since)
+    assert [r["symbol"] for r in rows] == ["AAPL"], "it serves the days it holds"
+    assert ts.earnings_day_stored_at(fmp, _DAY + timedelta(days=3)) == stamp
+    fmp.calls.clear()
+    await ts._cached_earnings_calendar(fmp, _DAY, later_days_since=since)
+    assert fmp.calls == [], "inside the wait"
+    _end_the_wait()
+    await ts._cached_earnings_calendar(fmp, _DAY, later_days_since=since)
+    assert len(fmp.calls) == 14
 
 
 @pytest.mark.asyncio
@@ -349,6 +436,83 @@ async def test_an_empty_round_over_held_days_serves_them_like_the_wait_does(capl
     assert len(fmp.calls) == 17
 
 
+def _failed(rows) -> bool:
+    """What a reader about to say a report is listed nowhere checks."""
+    return getattr(rows, "fetch_failed", False)
+
+
+@pytest.mark.asyncio
+async def test_a_read_says_nothing_of_a_failure_when_none_happened():
+    fmp = _CalendarFMP([_row("AAPL")])
+    assert not _failed(await ts._cached_earnings_calendar(fmp, _DAY))
+    assert not _failed(await ts._cached_earnings_calendar(fmp, _DAY)), "served from memory"
+
+
+@pytest.mark.asyncio
+async def test_the_days_a_failed_round_serves_say_so_and_so_do_those_inside_its_wait():
+    fmp = _CalendarFMP([_row("AAPL")])
+    await ts._cached_earnings_calendar(fmp, _DAY)
+    _age_memo(ts.EARNINGS_CALENDAR_TTL + 1)
+    fmp.day_answers[_iso(0)] = [FMPUnavailableException("FMP 503")]
+    failed = await ts._cached_earnings_calendar(fmp, _DAY)
+    assert _failed(failed) and [r["symbol"] for r in failed] == ["AAPL"]
+    waiting = await ts._cached_earnings_calendar(fmp, _DAY)
+    assert _failed(waiting) and [r["symbol"] for r in waiting] == ["AAPL"]
+    _end_the_wait()
+    assert not _failed(await ts._cached_earnings_calendar(fmp, _DAY)), "the next good round"
+
+
+@pytest.mark.asyncio
+async def test_a_joiner_of_a_failed_round_hears_of_the_failure_too():
+    fmp = _CalendarFMP([_row("AAPL")])
+    await ts._cached_earnings_calendar(fmp, _DAY)
+    _age_memo(ts.EARNINGS_CALENDAR_TTL + 1)
+    fmp.day_answers[_iso(0)] = [FMPUnavailableException("FMP 503")]
+    fmp.release = asyncio.Event()
+    leader = asyncio.ensure_future(ts._cached_earnings_calendar(fmp, _DAY))
+    await fmp.started.wait()
+    joiner = asyncio.ensure_future(ts._cached_earnings_calendar(fmp, _DAY))
+    await asyncio.sleep(0)
+    fmp.release.set()
+    assert _failed(await leader) and _failed(await joiner)
+
+
+@pytest.mark.asyncio
+async def test_a_joiner_of_an_empty_round_with_nothing_held_hears_what_its_leader_does():
+    """An answer, flagged, never an exception the leader did not raise."""
+    fmp = _CalendarFMP([], gated=True)
+    leader = asyncio.ensure_future(ts._cached_earnings_calendar(fmp, _DAY, near_only=True))
+    await asyncio.wait_for(fmp.started.wait(), 2.0)
+    joiner = asyncio.ensure_future(ts._cached_earnings_calendar(fmp, _DAY))
+    await asyncio.sleep(0.01)
+    fmp.release.set()
+    led, joined = await asyncio.wait_for(asyncio.gather(leader, joiner), 2.0)
+    assert _failed(led) and _failed(joined) and list(led) == list(joined) == []
+    assert _rounds(fmp) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("held", [False, True], ids=["nothing_held", "days_held"])
+async def test_an_empty_round_says_so_with_or_without_days_to_serve(held):
+    fmp = _CalendarFMP([_row("AAPL", 0)] if held else [])
+    if held:
+        await ts._cached_earnings_calendar(fmp, _DAY)
+        _age_memo(ts.EARNINGS_CALENDAR_TTL + 1)
+        fmp.rows = []
+    rows = await ts._cached_earnings_calendar(fmp, _DAY)
+    assert _failed(rows) and [r["symbol"] for r in rows] == (["AAPL"] if held else [])
+
+
+@pytest.mark.asyncio
+async def test_a_held_list_reads_as_a_plain_list_everywhere_else():
+    fmp = _CalendarFMP([_row("AAPL")])
+    await ts._cached_earnings_calendar(fmp, _DAY)
+    _age_memo(ts.EARNINGS_CALENDAR_TTL + 1)
+    fmp.day_answers[_iso(0)] = [FMPUnavailableException("FMP 503")]
+    rows = await ts._cached_earnings_calendar(fmp, _DAY)
+    assert isinstance(rows, list) and rows == [_row("AAPL")]
+
+
 @pytest.mark.asyncio
 async def test_the_memo_is_keyed_on_the_client():
     """One fake's rows never reach another — the strict-xfail reschedule test builds its
@@ -362,6 +526,40 @@ async def test_the_memo_is_keyed_on_the_client():
 
     c = _CalendarFMP(day_answers={_iso(0): [FMPUnavailableException("503")]})
     assert await _svc(c)._get_earnings_alerts(["AAPL", "NVDA"]) == []
+
+
+@pytest.mark.asyncio
+async def test_a_days_stored_at_is_its_own_stamp_and_moves_only_when_that_day_is_refetched():
+    """The live records read this to tell a memo row's age, so each day keeps its own stamp."""
+    fmp = _CalendarFMP()
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    far = _DAY + timedelta(days=3)
+    assert ts.earnings_day_stored_at(fmp, _DAY) == ts._earnings_calendar_memo[1][_DAY][0]
+    _age_memo(ts.EARNINGS_CALENDAR_TTL + 1)                # past the near TTL, not the far one
+    today_was, far_was = ts.earnings_day_stored_at(fmp, _DAY), ts.earnings_day_stored_at(fmp, far)
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    assert ts.earnings_day_stored_at(fmp, _DAY) > today_was
+    assert ts.earnings_day_stored_at(fmp, far) == far_was
+
+
+@pytest.mark.asyncio
+async def test_a_failed_round_leaves_every_days_stored_at_where_it_was():
+    fmp = _CalendarFMP(rows=[_row("AAPL", 0)])
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    _age_memo(ts.EARNINGS_CALENDAR_TTL + 1)
+    was = ts.earnings_day_stored_at(fmp, _DAY)
+    fmp.day_answers[_iso(1)] = [FMPUnavailableException("503")]
+    assert _tickers(await _svc(fmp)._get_earnings_alerts(["AAPL"])) == ["AAPL"]
+    assert ts.earnings_day_stored_at(fmp, _DAY) == was
+
+
+@pytest.mark.asyncio
+async def test_a_day_not_held_for_this_client_has_no_stored_at():
+    assert ts.earnings_day_stored_at(_CalendarFMP(), _DAY) is None, "nothing memoised yet"
+    fmp = _CalendarFMP()
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    assert ts.earnings_day_stored_at(fmp, _DAY + timedelta(days=15)) is None, "outside the window"
+    assert ts.earnings_day_stored_at(_CalendarFMP(), _DAY) is None, "another client's memo"
 
 
 @pytest.mark.asyncio
@@ -443,6 +641,101 @@ async def test_the_fetch_logs_its_days_rows_and_elapsed_time(caplog):
                for m in infos), infos
 
 
+# ── the live tick's round: today and tomorrow alone ───────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_near_only_round_pays_for_today_and_tomorrow_and_keeps_the_later_days():
+    """The live tick reads today and holds tomorrow for the night. The later days stay as held,
+    for a feed build to refresh when someone looks, and the answer is still the whole window."""
+    fmp = _CalendarFMP([_row("AAPL", 0), _row("MSFT", 1), _row("NVDA", 5)])
+    await ts._cached_earnings_calendar(fmp, _DAY)
+    _age_memo(ts.EARNINGS_CALENDAR_FAR_TTL + 1)
+    later = ts.earnings_day_stored_at(fmp, _DAY + timedelta(days=5))
+    fmp.calls.clear()
+    rows = await ts._cached_earnings_calendar(fmp, _DAY, near_only=True)
+    assert sorted(call[0] for call in fmp.calls) == [_iso(0), _iso(1)]
+    assert sorted(r["symbol"] for r in rows) == ["AAPL", "MSFT", "NVDA"]
+    assert ts.earnings_day_stored_at(fmp, _DAY + timedelta(days=5)) == later, "left as held"
+    fmp.calls.clear()
+    await ts._cached_earnings_calendar(fmp, _DAY)
+    assert len(fmp.calls) == 13, "a feed build still pays for the later days"
+
+
+@pytest.mark.asyncio
+async def test_a_near_only_round_on_a_memo_holding_nothing_else_reads_the_whole_window_once():
+    """A restart: no day beside today and tomorrow is held, so the round reads the window whole,
+    as a feed build would, and the next one pays for today and tomorrow alone."""
+    fmp = _CalendarFMP([_row("AAPL", 0), _row("MSFT", 1), _row("NVDA", 5)])
+    rows = await ts._cached_earnings_calendar(fmp, _DAY, near_only=True)
+    assert sorted(call[0] for call in fmp.calls) == [_iso(i) for i in range(15)]
+    assert sorted(r["symbol"] for r in rows) == ["AAPL", "MSFT", "NVDA"]
+    assert sorted(ts._earnings_calendar_memo[1]) == _WINDOW
+    _age_memo(ts.EARNINGS_CALENDAR_FAR_TTL + 1)
+    fmp.calls.clear()
+    await ts._cached_earnings_calendar(fmp, _DAY, near_only=True)
+    assert sorted(call[0] for call in fmp.calls) == [_iso(0), _iso(1)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("held", ["nothing", "blank_later_days"])
+async def test_a_blank_today_and_tomorrow_with_no_other_row_held_still_store_a_near_only_round(
+        held):
+    """A Saturday restart, or one on Christmas Day: FMP lists nobody on today or tomorrow, and
+    Monday's reports are the alerts. Read near-only, the answer would be the empty window this
+    memo never stores: the live tick would pay for it again after every wait, all day, and every
+    feed build inside a wait would serve no earnings alert. So such a round reads every due day
+    of the window, and its answer is stored."""
+    fmp = _CalendarFMP([_row("AAPL", 2), _row("NVDA", 3)])
+    if held == "blank_later_days":
+        # Later days held blank, an earlier window's whose rows have rolled out: they give the
+        # round's answer no row either.
+        ts._earnings_calendar_memo = (fmp, {d: (ts._time.monotonic(), []) for d in _WINDOW[5:]})
+        _age_memo(ts.EARNINGS_CALENDAR_FAR_TTL + 1)
+    rows = await ts._cached_earnings_calendar(fmp, _DAY, near_only=True)
+    assert sorted(r["symbol"] for r in rows) == ["AAPL", "NVDA"]
+    assert len(fmp.calls) == 15
+    assert ts._earnings_calendar_retry_after is None, "an answer, not a failure"
+    assert ts.earnings_day_stored_at(fmp, _DAY) is not None, "today is held, blank"
+    fmp.calls.clear()
+    alerts = await _svc(fmp)._get_earnings_alerts(["AAPL", "NVDA"])
+    assert sorted(_tickers(alerts)) == ["AAPL", "NVDA"]
+    await ts._cached_earnings_calendar(fmp, _DAY, near_only=True)
+    assert fmp.calls == [], "held now: the next reads pay nothing"
+
+
+@pytest.mark.asyncio
+async def test_a_near_only_round_pays_for_nothing_while_today_and_tomorrow_are_fresh():
+    """However old the later days are: they are not this round's to refresh."""
+    fmp = _CalendarFMP([_row("AAPL", 0), _row("NVDA", 5)])
+    await ts._cached_earnings_calendar(fmp, _DAY)
+    held = ts._earnings_calendar_memo[1]
+    for day in _WINDOW[2:]:
+        at, day_rows = held[day]
+        held[day] = (at - ts.EARNINGS_CALENDAR_FAR_TTL - 1, day_rows)
+    fmp.calls.clear()
+    rows = await ts._cached_earnings_calendar(fmp, _DAY, near_only=True)
+    assert fmp.calls == []
+    assert sorted(r["symbol"] for r in rows) == ["AAPL", "NVDA"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("later_held,stored", [(True, True), (False, False)],
+                         ids=["beside_later_days_held", "with_nothing_else_held"])
+async def test_an_empty_near_only_round_is_stored_only_beside_rows_it_holds(later_held, stored):
+    """The memo's own rule: an empty window cannot be told from a degraded one, and the window
+    answered is every day held."""
+    fmp = _CalendarFMP([_row("NVDA", 5)] if later_held else [])
+    if later_held:
+        await ts._cached_earnings_calendar(fmp, _DAY)
+        _age_memo(ts.EARNINGS_CALENDAR_TTL + 1)
+    before = ts.earnings_day_stored_at(fmp, _DAY)
+    rows = await ts._cached_earnings_calendar(fmp, _DAY, near_only=True)
+    assert [r["symbol"] for r in rows] == (["NVDA"] if later_held else [])
+    assert (ts._earnings_calendar_retry_after is None) is stored
+    assert (ts.earnings_day_stored_at(fmp, _DAY) != before) is stored
+
+
 # ── failures: nothing memoised, the held days served, one round per wait ──────
 
 
@@ -507,6 +800,22 @@ async def test_a_failed_round_serves_the_held_days_and_waits(caplog):
 
 
 @pytest.mark.asyncio
+async def test_a_failed_rounds_wait_ends_a_few_seconds_early_and_no_earlier():
+    """The wait counts from the failure, a moment past the live tick that made the round: a
+    wait of 120 s must not read as 180 on the tick that was meant to end it."""
+    fmp = _CalendarFMP()
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    _age_memo(ts.EARNINGS_CALENDAR_TTL + 1)
+    held = len(fmp.calls)
+    ts._earnings_calendar_retry_after = (fmp, ts._time.monotonic() + ts._DUE_SLACK_SECONDS + 1)
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    assert len(fmp.calls) == held
+    ts._earnings_calendar_retry_after = (fmp, ts._time.monotonic() + ts._DUE_SLACK_SECONDS - 1)
+    await _svc(fmp)._get_earnings_alerts(["AAPL"])
+    assert len(fmp.calls) == held + 2
+
+
+@pytest.mark.asyncio
 async def test_a_failure_with_part_of_the_window_held_serves_that_part(monkeypatch, caplog):
     fmp = _CalendarFMP()
     await _svc(fmp)._get_earnings_alerts(["AAPL"])
@@ -549,6 +858,51 @@ async def test_concurrent_misses_collapse_to_one_round():
     assert len(fmp.calls) == 15 and _rounds(fmp) == 1, fmp.calls
     assert all(_tickers(r) == ["AAPL"] for r in results)
     assert ts._earnings_calendar_inflight == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("memo", ["after_the_day_roll", "after_a_restart"])
+async def test_a_feed_build_that_joins_the_live_ticks_round_still_gets_every_alert(
+        monkeypatch, memo):
+    """The live tick's round can read today and tomorrow alone. A feed build that joins it must
+    not take that answer for its own: a later day the memo does not hold (the window's new last
+    day, after the day rolls) would be missing from a list nothing flags, which is cached 30 s for
+    that user and kept in the iOS snapshot. So a joiner works out its own due days again once the
+    round it joined has stored its days."""
+    fmp = _CalendarFMP([_row("MSFT", 1), _row("AAPL", 3), _row("NVDA", 15)])
+    today = _DAY
+    if memo == "after_the_day_roll":
+        await ts._cached_earnings_calendar(fmp, _DAY)
+        today = _DAY + timedelta(days=1)
+        monkeypatch.setattr(ts, "_et_today", lambda: today)
+        _age_memo(ts.EARNINGS_CALENDAR_TTL + 1)
+    fmp.calls.clear()
+    fmp.release, fmp.started = asyncio.Event(), asyncio.Event()
+    tick = asyncio.create_task(ts._cached_earnings_calendar(fmp, today, near_only=True))
+    await asyncio.wait_for(fmp.started.wait(), 2.0)
+    feed = asyncio.create_task(_svc(fmp)._get_earnings_alerts(["MSFT", "AAPL", "NVDA"]))
+    await asyncio.sleep(0.01)
+    assert _rounds(fmp) == 1, "the build joins the tick's round"
+    fmp.release.set()
+    alerts = await asyncio.wait_for(feed, 2.0)
+    await asyncio.wait_for(tick, 2.0)
+    listed = ["AAPL", "MSFT", "NVDA"] if memo == "after_the_day_roll" else ["AAPL", "MSFT"]
+    assert sorted(_tickers(alerts)) == listed
+
+
+@pytest.mark.asyncio
+async def test_the_live_ticks_read_joining_a_feed_builds_round_pays_for_nothing_more():
+    """Its own days are among the whole window's, so working them out again finds none due."""
+    fmp = _CalendarFMP(gated=True)
+    feed = asyncio.create_task(_svc(fmp)._get_earnings_alerts(["AAPL"]))
+    await asyncio.wait_for(fmp.started.wait(), 2.0)
+    tick = asyncio.create_task(ts._cached_earnings_calendar(fmp, _DAY, near_only=True))
+    await asyncio.sleep(0.01)
+    fmp.release.set()
+    alerts, rows = await asyncio.wait_for(asyncio.gather(feed, tick), 2.0)
+    assert _tickers(alerts) == ["AAPL"]
+    assert sorted(r["symbol"] for r in rows) == ["AAPL", "MSFT"]
+    assert len(fmp.calls) == 15 and _rounds(fmp) == 1
 
 
 @pytest.mark.asyncio

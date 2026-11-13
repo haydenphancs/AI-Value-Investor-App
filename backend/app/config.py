@@ -541,6 +541,50 @@ class Settings(BaseSettings):
     # notifies on every cycle. Matches `price_alert_engine.evaluate_alert`'s own default.
     PRICE_ALERT_REARM_PCT: float = 0.005
 
+    # Live earnings results (owner request 2026-10-29) — `earnings_live_service`. The
+    # Tracking card goes LIVE on report day, its sheet shows estimate vs actual the moment
+    # each figure lands, and a push can go out when results land. Four switches, so each part
+    # can be set without a deploy of the others:
+    #   * EARNINGS_LIVE_ENABLED — the live state itself: the 60 s loop that refreshes the
+    #     previous trading day through today, the card fields, `recent_earnings_alerts` and
+    #     `GET /tracking/earnings/{ticker}/live`. Off = the card is as it was (estimates).
+    #   * EARNINGS_LIVE_FILINGS_ENABLED — the fast path: the company's own 8-K Item 2.02
+    #     press release read from SEC EDGAR and Gemini-extracted, every figure a verbatim
+    #     quote. Inert while SEC_EDGAR_USER_AGENT is blank (the client refuses before I/O).
+    #   * EARNINGS_LIVE_PUSH_ENABLED — the NEW `earnings_live` push ("Live Results" toggle).
+    #     Ships OFF: 1.02 has no toggle for it, and `device_tokens` carries no app version
+    #     to gate on, so it is switched on once the release with the toggle is installed.
+    #   * EARNINGS_LIVE_RESULT_PUSH_ENABLED — the EXISTING `earnings_result` push ("Results
+    #     & Surprises") sent the moment results land instead of at the next 16:00 ET run.
+    #     Every shipped build has a toggle for that kind, and it still ships OFF (the owner,
+    #     2026-11-05: "Keep it off at first"). Off, the daily 16:00 ET pass alone sends it, and
+    #     that pass reads neither push switch (`earnings_sender`). What off costs, a wait for
+    #     most reports and the buzz for a few, is in `earnings_live_sender`'s docstring.
+    #   Neither push buzzes in the night of a user who never set Quiet Hours: the row is
+    #   written at once and goes out at 07:00 on their clock (`night_hold_by_default`).
+    EARNINGS_LIVE_ENABLED: bool = True
+    EARNINGS_LIVE_FILINGS_ENABLED: bool = True
+    EARNINGS_LIVE_PUSH_ENABLED: bool = False
+    EARNINGS_LIVE_RESULT_PUSH_ENABLED: bool = False
+    # Loop cadence, 15-300 s: anything else fails the deploy. The loop is cheap when nothing
+    # reports (one memoised calendar read); the FMP and SEC cadences below are what cost
+    # anything. Past 60 s the SEC watch loses its one-minute release windows. FMP is read only on
+    # a tick, the first one at least 175 s after the last read in a release window, so this
+    # number also sets the real gap of the "3 min" read: 60 s gives 180 s, 100 s gives 200 s,
+    # 120 s gives 240 s, and anything from 175 s up is one read a tick.
+    EARNINGS_LIVE_INTERVAL_SECONDS: int = Field(60, ge=15, le=300)
+    # How many watched tickers' SEC filings are read at a time, most-watched first; the next
+    # ticker takes a freed slot, so every watched ticker reporting today can be read, this many
+    # at a time. SEC's limit is a rate, and SEC's limiter (SEC_EDGAR_MAX_RPS) and its 600 s
+    # throttle circuit are SHARED with Learn, the buyback check and the Trillion stake finder,
+    # so this stays small: 0-50, anything else fails the deploy. Calls are spaced 1 s apart, so
+    # 50 already fills the loop's minute. 0 reads nothing from SEC. The day's ceiling is under
+    # SEC LOAD in earnings_filing_service.py.
+    EARNINGS_LIVE_SEC_MAX_SYMBOLS: int = Field(25, ge=0, le=50)
+    # The model that reads a press release. Flash, at temperature 0 and no thinking budget:
+    # this is extraction, and every figure it returns is checked verbatim against the text.
+    EARNINGS_LIVE_EXTRACT_MODEL: str = "gemini-2.5-flash"
+
     # Gemini quota (429) handling. Instead of skipping retries on a rate-limit
     # error, back off and retry a bounded number of times — paired with the
     # agent-run semaphore this recovers transient 429s rather than degrading a

@@ -47,6 +47,9 @@ struct NotificationEventDTO: Decodable, Identifiable, Hashable, Sendable {
     let route: [String: String]
     let createdAt: String
     let readAt: String?
+    /// When the buzz went out. Hours after `createdAt` for a row held overnight, and nil for a
+    /// row never delivered or an older server. Read `receivedAt`, not this.
+    let sentAt: String?
     /// `sent` | `deferred` | `no_device` | `dry_run` | `failed` | `pending`.
     /// Surfaced so "I never got it" is answerable inside the app rather than from logs.
     let deliveryState: String
@@ -55,6 +58,7 @@ struct NotificationEventDTO: Decodable, Identifiable, Hashable, Sendable {
         case id, kind, category, title, body, route
         case createdAt = "created_at"
         case readAt = "read_at"
+        case sentAt = "sent_at"
         case deliveryState = "delivery_state"
     }
 
@@ -67,6 +71,7 @@ struct NotificationEventDTO: Decodable, Identifiable, Hashable, Sendable {
         body = try c.decodeIfPresent(String.self, forKey: .body) ?? ""
         createdAt = try c.decodeIfPresent(String.self, forKey: .createdAt) ?? ""
         readAt = try c.decodeIfPresent(String.self, forKey: .readAt)
+        sentAt = try c.decodeIfPresent(String.self, forKey: .sentAt)
         deliveryState = try c.decodeIfPresent(String.self, forKey: .deliveryState) ?? "sent"
         route = (try? c.decode([String: RouteScalar].self, forKey: .route))?
             .compactMapValues(\.stringValue) ?? [:]
@@ -96,6 +101,14 @@ struct NotificationEventDTO: Decodable, Identifiable, Hashable, Sendable {
     /// seeing here FIRST, which is worth saying in the UI.
     var wasDelivered: Bool { deliveryState == "sent" }
 
+    /// When the phone got this: the send time once it went out, else when it was decided. A
+    /// row held overnight is decided at 23:30 and buzzes at 07:00, so reading `createdAt` here
+    /// would show a 07:00 buzz as eight hours old.
+    var receivedAt: String {
+        guard wasDelivered, let sentAt, !sentAt.isEmpty else { return createdAt }
+        return sentAt
+    }
+
     /// Where a tap should land.
     var destination: NotificationRoute { NotificationRoute(payload: route) }
 
@@ -120,7 +133,8 @@ struct NotificationEventDTO: Decodable, Identifiable, Hashable, Sendable {
         switch kind {
         case "ticker_move":       return "chart.line.uptrend.xyaxis"
         case "earnings_upcoming",
-             "earnings_result":   return "calendar.badge.clock"
+             "earnings_result",
+             "earnings_live":     return "calendar.badge.clock"
         case "insider_trade":     return "person.badge.key.fill"
         case "whale_13f":         return "building.columns.fill"
         case "congress_trade":    return "building.columns.fill"
@@ -169,8 +183,8 @@ struct NotificationEventDTO: Decodable, Identifiable, Hashable, Sendable {
     }
 
     var relativeTime: String {
-        guard let date = NotificationEventDTO.isoFormatter.date(from: createdAt)
-                ?? NotificationEventDTO.isoFormatterNoFraction.date(from: createdAt)
+        guard let date = NotificationEventDTO.isoFormatter.date(from: receivedAt)
+                ?? NotificationEventDTO.isoFormatterNoFraction.date(from: receivedAt)
         else { return "" }
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .abbreviated
@@ -240,6 +254,7 @@ extension NotificationEventDTO {
         self.route = route
         self.createdAt = createdAt
         self.readAt = readAt
+        self.sentAt = nil
         self.deliveryState = deliveryState
     }
 }

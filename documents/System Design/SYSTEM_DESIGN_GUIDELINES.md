@@ -194,6 +194,18 @@ Since 2026-10-28 it also serves the Trillion Club stake finder (`app/services/tr
 (`SECEdgarFullTextThrottled`, which stops only the full-text stage) while still honouring the
 shared one. Full-text search is undocumented, so it is used for discovery only: every fact a row
 carries is read from the filing document itself.
+Since 2026-10-29 it also serves live earnings results (§11.8): `app/services/earnings_filing_service.py`
+reads a watched company's submissions record (`get_submissions`) and, for a new 8-K carrying Item 2.02,
+the filing's index page and its EX-99.1 press release (`get_filing_document`, at the default cap), with
+tickers mapped to CIKs through the Learn weekly engine's company-tickers map
+(`app/services/learn_weekly/signals.py::ticker_cik_map`). It shares the per-process pacing and the
+10-minute circuit with the Learn weekly engine, the buyback check and the stake finder, so it reads at
+most `EARNINGS_LIVE_SEC_MAX_SYMBOLS` (25) tickers at a time, spaces its calls 1 s apart and, on a
+throttle, parks every ticker for SEC's Retry-After. The same service is a new **Gemini** caller: one
+`generate_json` call per read of a release (`EARNINGS_LIVE_EXTRACT_MODEL`, Flash at temperature 0 with
+no thinking budget, never cached), whose answer is data only: a figure reaches a user only as the
+number printed in a quote verified against the release, and the outlook only as that quote, never
+in the model's words.
 **No Google Search grounding** (retired 2026-10-02). Gemini's `google_search` tool is not used
 anywhere: the Gemini API Additional Terms let a grounded answer be shown only to the end user who
 sent the prompt, together with Google's Search Suggestions, unmodified, and never cached, stored or
@@ -1232,26 +1244,46 @@ turn a row from too old a session into "change unknown", never a multi-session m
 since 2026-10-22).** The Tracking feed's earnings alerts used to download FMP's whole 15-day
 `earnings-calendar` on every feed build, to keep the few rows on one user's watchlist. The window
 is the same for everyone, so `tracking_service._cached_earnings_calendar` memoises it, keyed on the
-client object, with an `_inflight` future: a joiner is shielded, and a joiner whose leader was
-cancelled takes the download over instead of serving a feed with no alerts. Since 2026-10-22 it
-asks ONE ET day per call (`earnings_window_service.fetch_calendar_days`): the single 15-day request
+client object, with an `_inflight` future: a joiner is shielded, a joiner whose leader was
+cancelled takes the download over instead of serving a feed with no alerts, and a joiner whose
+leader stored fewer days than it needs (the live tick's near-only round, below) pays for the rest
+itself. Since 2026-10-22 it asks ONE ET day per call
+(`earnings_window_service.fetch_calendar_days`): the single 15-day request
 hit FMP's silent 4,000-row cap, which keeps the NEWEST dates, and in season came back holding only
 the last three days (§10). Each day is memoised at two speeds (owner decision 2026-10-22): today
 and tomorrow for 30 min (`EARNINGS_CALENDAR_TTL`), later days for 6 h (`EARNINGS_CALENDAR_FAR_TTL`),
 about 150 calls a day. An empty day is stored (weekends); an empty window, a non-list answer or a
-failure never is. A failed or empty round serves the days already held and waits 120 s before the
-next one, so an outage costs one round per wait, not one per feed build. A Supabase tier would
-only add a round trip to a memo of a pure upstream function. Each round logs `earnings calendar …
-fetched N of 15 days in M ms` at INFO; a single day at the cap is logged at ERROR by
-`fetch_calendar_days`. The same pass moved the feed's sector backfill into its main gather and fetches
-each holdings sparkline over two trading days (`chart_helper.fetch_sparkline_bars`), not the
-detail chart's ten calendar days.
+failure never is. A failed or empty round serves the days already held (a calendar row is a
+scheduled date, still true hours later) and makes the next round wait 120 s, so an outage costs
+one round per wait, not one per feed build. What it serves is flagged `fetch_failed`
+(`_HeldAfterFailure`), and a reader that joined that round takes it as its own answer. A Supabase
+tier would only add a round trip to a memo of a pure upstream function. Each round logs
+`earnings calendar … fetched N of 15 days in M ms` at INFO; a single day at the cap is logged at
+ERROR by
+`fetch_calendar_days`. Live earnings results (§11.8) read today's rows from this memo at every
+fold (the live tick, a feed build's cards, the live sheet), and the live tick pays it rounds of
+its own, only for its own needs (`earnings_live_service.tick_refreshes_memo`): on a trading day
+once from 06:00 ET (who reports today) and once from 15:30 ET (a report added or moved since, and
+tomorrow's rows to hold for the night), and at any hour after a restart (no row of today held),
+when a held row is too old to open its record (12 h), or when its own fetches have ended a watched
+report the held rows still list. At any other hour it folds the rows already held and makes no
+call. Its round pays for today and tomorrow alone (`near_only`) while another day the memo holds
+lists anyone; a round that would come back empty (a blank today and tomorrow, the empty window the
+memo never stores) pays for every due day instead: the whole window after a restart and, with
+nobody looking, about once a fortnight, when the days it last read whole have rolled past. A feed
+build still refreshes the memo at any hour, the later days included. The live sheet, about to
+answer that a report is listed nowhere, first asks for the days after today stored before that
+day's newest answer (`later_days_since`): at most 14 calls an answer, and only while someone is
+looking. The days before today are not in this memo: the live loop fetches them itself
+(`earnings_live_service.live_days`). The same pass moved the feed's sector backfill into its main
+gather and fetches each holdings sparkline over two trading days
+(`chart_helper.fetch_sparkline_bars`), not the detail chart's ten calendar days.
 
 **Tier 1 only: the Assets tab's extended-hours print (2026-10-30).** A holdings row's price is the
 screener's regular-session price (at 07:00 ET on a Monday it still reports Friday's close) and FMP's
 `aftermarket-quote` is outside the licence, so the pre-market / after-hours move comes from the
-licensed `extended=true` 5-minute bars: `app/services/tracking_service.py::_get_extended_prints`, the
-feed gather's last member, reads the newest bar after the last regular one
+licensed `extended=true` 5-minute bars: `app/services/tracking_service.py::_get_extended_prints`, a
+member of the feed gather, reads the newest bar after the last regular one
 (`app/services/chart_helper.py::fetch_extended_bars`, from `market_hours.last_regular_session`
 through today, both on New York's calendar; `app/services/chart_helper.py::latest_extended_print`,
 half-day aware) and the merge measures it from the row's own price. It is held per ticker in
@@ -2007,17 +2039,17 @@ grounding, §2 "No Google Search grounding"; a stored `tam_scope='global'` row r
 
 ### 7.4 Scheduled background jobs (the lifespan loops)
 
-Everything scheduled runs INSIDE the one web process: 28 tasks started by
-`app/main.py::_spawn` — 26 loops and two one-shots (the whale profile pre-warm and the Home
+Everything scheduled runs INSIDE the one web process: 29 tasks started by
+`app/main.py::_spawn` — 27 loops and two one-shots (the whale profile pre-warm and the Home
 boot warm), plus the Telegram webhook registration when the review bot is configured — and two
 Railway cron services (the marketing worker, §12.2; the Learn narrator, §12.18). There is
 no pg_cron, no edge function, no Celery, and no iOS `BGTaskScheduler`. Two facts decide
 whether any of it runs:
 
 - **`ENVIRONMENT` gates every loop.** Unless it is `"development"` (the Settings default —
-  a laptop), all 28 start; in development only the notification trio can run, and only
-  behind `RUN_NOTIFICATION_JOBS_LOCALLY`. Railway must therefore set `ENVIRONMENT`, or
-  refunds, subscription expiry and every push silently stop.
+  a laptop), all 29 start; in development only the notification loops (the trio and live
+  earnings, §11.8) can run, and only behind `RUN_NOTIFICATION_JOBS_LOCALLY`. Railway must
+  therefore set `ENVIRONMENT`, or refunds, subscription expiry and every push silently stop.
 - **Exactly ONE uvicorn worker** (`test_deploy_command_parity.py`). Most loops are unclaimed
   and are safe only because of that; the daily/weekly/quarterly ones hold a day-keyed claim
   in `notification_job_state` (migrations 120/147), stamped with the CLAIM's time so a run
@@ -2044,7 +2076,8 @@ whether any of it runs:
 | Trillion Club daily / weekly / stake finder (§3 item 5: reconcile first, then the members' own 13D/13Gs, then full-text search; the Monday run also re-checks published machine rows) | 07:00 ET every day / Monday 08:00 ET / 18:30 ET every day (boot +480 s; claim stale after 3,600 s; each attempt cancelled after 3,000 s; 3 attempts a day, hourly) | `TRILLION_CLUB_JOBS_ENABLED` (**off**); the finder also needs `TRILLION_CLUB_STAKE_FINDER_ENABLED` (**off**), `SEC_EDGAR_USER_AGENT` and the review bot; kill switch row `trillion_club_stake_finder` |
 | Wiser weekly engine (§12.18): cache sync, Thursday topic card (`learn_weekly_topic`, day claim), Friday 07:00 ET auto-pick, build (lease per piece, every tick), narration sweep, Telegram review, publish / expiry, Friday 15:00 ET deadman (`learn_weekly_deadman`, day claim) | a tick every 5 min | `LEARN_WEEKLY_ENABLED`, `LEARN_DEEP_DIVE_ENABLED` (**off**); every piece dry-run while `LEARN_WEEKLY_DRY_RUN` (**on**); build kill switch `learn_weekly_build` |
 | marketing publisher (+ the Telegram review sweep and publish feed, §12.9-§12.10, then four day-keyed jobs, §12.11: measure `marketing_metrics_daily` 06:00 ET; run health `marketing_run_health` on a posting day at the run hour + `MARKETING_MAX_RUN_ATTEMPTS`, capped at 23:00 (22:00 ET by default), and `marketing_run_health_final` the day after at the run hour (16:00 ET by default; the run hour is `MARKETING_RUN_HOUR_ET`, the web's mirror of the worker's); the weekly digest `marketing_digest_weekly` Monday 09:00 ET, Tuesday catch-up) / link-hit flush | 10 min, woken at once by an Approve or a confirmed Retract / 60 s | expiry, auto-approved posts back to review, and confirmed retracts: always; reconcile: `MARKETING_ENABLED` (**off**), any queued post with an adapter (billed X reads; it never resends under dry run); publishing: `MARKETING_ENABLED` and a platform listed in `MARKETING_PUBLISH_PLATFORMS` with its credentials (none by default); the review sweep, feed and both run-health checks: the `MARKETING_TELEGRAM_*` settings (unset = off); measure: `MARKETING_ENABLED` and `MARKETING_METRICS_ENABLED` (**off**); digest: the review bot and `MARKETING_DIGEST_ENABLED` (**off**) / — |
-| push dispatch, scheduled senders, price alerts | 60 s / hourly wake (earnings 16:00, smart money 18:00, profile match 19:00 ET) / 60 s | the notification trio (§11.4) |
+| push dispatch, scheduled senders, price alerts | 60 s, but 1 s after a flush that claimed a full `NOTIFICATION_DISPATCH_BATCH` (100) and settled at least one row of it, since more are due now (a night hold's 07:00 wakes a whole time zone at once); always 60 s after a failed flush / hourly wake (earnings 16:00, smart money 18:00, profile match 19:00 ET) / 60 s | the notification trio (§11.4) |
+| live earnings (§11.8): two forever-loops under one task (`run_earnings_live_loop`), the first tick of either in a new process taking back `earnings_filing_cache` (migration 209). The FMP tick, for everyone's watched tickers: folds the Tracking memo, paying it a round only at 06:00 and 15:30 ET on a trading day, after a restart, for a held row too old to open its record, or for a report its own fetches ended (§7.1); asks FMP about a report day only while a watched report on it still wants FMP — every 3 min inside a release window (06:00–09:35 or 15:55–18:30 ET) that one of that day's waiting watched companies uses, every 15 min otherwise, 06:00–22:00 ET, nothing after on that day; the previous trading day's reports the same way from 06:00 ET on the next trading day, with only the morning window counted (the owner's design, 2026-11-11); any other day before today (a report dated on a closed day, or every day while today is closed) every 30 min, or every 2 h while today is closed, at any hour, while a watched report on it still wants FMP; and a first look at a live day before today it has not read, whatever is watched (§11.8 Costs); then the `earnings_live` / live-timed `earnings_result` pushes. The filing tick reads each watched company reporting today on SEC every minute inside its own release windows and in EDGAR's last minute (21:59 ET), every 15 min otherwise, 06:00–22:00 ET, never on a weekend, 25 tickers at a time, most-watched first, and at most 25 submissions reads a minute, each read counted at its round's start (§11.8 Costs) | 60 s each (`EARNINGS_LIVE_INTERVAL_SECONDS`, 15–300) | `EARNINGS_LIVE_ENABLED` (on), `EARNINGS_LIVE_FILINGS_ENABLED` (on; inert without `SEC_EDGAR_USER_AGENT`), `EARNINGS_LIVE_PUSH_ENABLED` (**off**), `EARNINGS_LIVE_RESULT_PUSH_ENABLED` (**off**) |
 
 A quarterly or weekly phase that does not complete is retried inside the same run's 20-hour
 catch-up window (30 min apart, at most 3 times); phases that already ran are skipped by
@@ -5008,8 +5041,9 @@ already failed in production:
 | every VISIBLE toggle has a registered kind | 12 of the original 13 toggles wrote a preference nothing read, so their UI had to be hidden |
 | every REGISTERED kind has a visible toggle | push shipped 2026-08-01 with the screen hidden — users got alerts with no in-app opt-out, only iOS Settings, which kills every type at once and never re-prompts |
 
-Shipped kinds — **ten**: `ticker_move`, `research_complete`, `research_failed`,
-`earnings_upcoming`, `earnings_result`, `insider_trade`, `whale_13f` (ships **off**),
+Shipped kinds — **eleven**: `ticker_move`, `research_complete`, `research_failed`,
+`earnings_upcoming`, `earnings_result`, `earnings_live` (its push ships **off** behind
+`EARNINGS_LIVE_PUSH_ENABLED`, §11.8), `insider_trade`, `whale_13f` (ships **off**),
 `congress_trade`, `price_alert`, `profile_match` (ships **off** — derived from stated
 preferences, so it must be opt-in, and the sender additionally refuses any profile without
 `consented_at`).
@@ -5020,7 +5054,10 @@ preferences, so it must be opt-in, and the sender additionally refuses any profi
              → quiet hours (DEFER, never drop) → dedup claim → APNs POST
 
 * The **cap is checked BEFORE the claim** so a suppressed alert does not burn that
-  key's dedup slot and silently cost the user tomorrow's alert too.
+  key's dedup slot and silently cost the user tomorrow's alert too. One exception: a
+  night-hold kind (§11.5) held past the user's midnight buzzes on a later day, so it is
+  claimed whatever the landing day's count, and the flush applies the cap of the day it
+  goes out on.
 * The **claim is an INSERT before the send** (`UNIQUE(user_id, dedup_key)`), so a
   retry, a re-trip, or two overlapping Railway instances cannot double-buzz. A failed
   claim round-trip means DO NOT SEND: if we cannot prove an alert is unsent, we don't
@@ -5043,7 +5080,8 @@ Migration 089 exists because two of these were mixed once already.
 | Sender | Schedule | FMP cost | Claim |
 |---|---|---|---|
 | report ready | inline, after the conditional completion write | 0 | dedup key only |
-| earnings (upcoming + result) | hourly wake, acts after 16:00 ET | **1 call/day** (one market-wide window serves both passes) | `claim_notification_job` |
+| earnings (upcoming + result) | hourly wake, acts after 16:00 ET | **3 calls/day**, one market-wide calendar day each for yesterday, today and tomorrow, serving both passes; what it reads also folds into the live records before it tells anyone (§11.8) | `claim_notification_job` |
+| live earnings (`earnings_live`, then the live-timed `earnings_result`; §11.8) — both switches ship **off** | the live loop's FMP tick, every 60 s: `earnings_live` on the first round after a watched report's first figure lands (a filing's figure on the next FMP tick), `earnings_result` once FMP's own adjusted EPS stands past the 5% bar; only for a report dated today or yesterday (`earnings_sender.in_result_window`), at most 60 sends a round | 0 of its own: it reads the records the live loop keeps (§11.8 Costs) | the dedup key `earnings_result:{SYM}:{date}` (`earnings_sender.result_dedup_key`), shared by both kinds and the daily pass, and a user holding the key of the same symbol's report on another day out to the trading day either side is left out (`earnings_sender.neighbouring_result_keys`) — one push per report |
 | insider Form 4 | hourly wake, acts after 18:00 ET | ~200/day (top-200 watchlist) | same job |
 | whale 13F + congress | same job, phase 2 | 0 (reads `whale_trades`) | `last_cursor` high-water mark |
 | price alerts | 60s — every rule while the market is active (04:00–20:00 ET), crypto-only rules while it is closed | 1 batch-quote/cycle | none — the dedup key is the lock |
@@ -5094,17 +5132,86 @@ never drop" into "drop" for any window longer than that. A perfectly ordinary 20
 binned every quiet-hours-respecting alert. The bound now applies to how late a row is against
 its own due time, which is the thing that actually makes a notification misinformation.
 
+**The night hold** (owner decision 2026-11-05: "Hold until 7 AM (Recommended)"). FMP can fill
+a result at any hour, so `earnings_result` and `earnings_live` carry `night_hold_by_default`:
+for a user who never set Quiet Hours, a landing between 22:00 and 07:00 on the user's own clock
+(`quiet_hours.NIGHT_HOLD_WINDOW`, the settings screen's default hours, in their
+`notify_timezone`) is claimed at once and parked until 07:00, the ordinary deferral above.
+"Never set" means the `notify_quiet_hours_enabled` key is absent
+(`quiet_hours.quiet_hours_never_set`), which is why the client leaves an untouched key out of
+what it syncs (`SettingsSyncManager.currentBlob()`); a Quiet Hours toggle the user did touch
+always wins, off included. Four rules come with it (`PushDispatchService.decide`,
+`PushDispatchService.flush_deferred`):
+
+- **The cap of the day it goes out on.** A night-hold row held past the user's midnight is
+  claimed whatever the landing day's count (§11.2), and the flush applies the cap of the day it
+  wakes on; a row capped there stays in the inbox, unbuzzed.
+- **A failed settings read parks it.** With the preference read failed the user's clock is
+  unknown, and ET's daytime is the night from Berlin to Tokyo, so a night-hold row that would
+  go out at once is parked for the next flush instead (reason `preferences_unread`), which reads
+  the settings again and judges it on the user's own clock; a second failed read sends it then.
+  In ET's own night it is parked to ET's 07:00. Such a park claims the report's key on a guess,
+  which the wake settles (§11.6).
+- **The wake asks twice more**: the user's clock, and the report as it stands. On the flush's
+  own good read, a row whose wake falls in the user's night (a park on ET's clock, a user who has
+  flown) is held again, on its first hand-out that judged the user's clock. A hand-out that
+  judged nothing spends no hold (`_last_hand_out_unjudged`): a look booked with the settings
+  unread, and a flush a redeploy cut off, which also gives back the hand-out the claim counted.
+  That holds up to the `MAX_FLUSH_ATTEMPTS`-th (3) hand-out. A hold, or a look booked, on a good
+  read leaves the row's note as it was, so a row an earlier hand-out left unjudged can be held on
+  a later hand-out too, up to the 3rd, if the user's clock has moved since. A row held at the 3rd
+  comes back once more and goes out whatever the clock says then. And its text is decided at the
+  wake, not at the landing (`earnings_live_sender.copy_at_wake`): the record can move for hours
+  under a held row, so a surprise the record no longer holds is not buzzed and the inbox row takes
+  what the record says; a figure still being confirmed is no answer, so the row asks again an hour
+  later (`WAKE_ASK_AGAIN`), with the live loop reading the report just before that look. A look is
+  booked only before the `MAX_FLUSH_ATTEMPTS`-th hand-out, and never into the user's night when
+  the flush read their settings (with them unread it keeps its hour, and that look's own read
+  may hold it); a row still unanswered at its last hand-out ends unbuzzed. A row an earlier wake
+  left waiting keeps waiting for FMP's answer: it is never sent in that wake's words, a restart
+  included (an `earnings_result` row by its title, an `earnings_live` row by words that state no
+  figure, which no landing writes). So does a row whose figure the record has taken off since its
+  landing (an FMP zero its row of zeros showed unfilled), held in words that state no figure, also
+  once an own fetch has ended that record (`ended_after_a_figure`). The one gap: a restart between
+  the landing and the wake. The new process never held the zero, so its record says nothing
+  against the row, and the row goes out in its landing's words (recorded residual).
+- **A row read in the app before its wake ends unbuzzed** (`push_state='failed'`, `last_error`
+  "suppressed on flush: read in the app before its wake", no `sent_at`, nothing charged to the
+  cap). A mark-all, which the app sends when the Alerts screen comes on screen, leaves a held row
+  unread (`NotificationInboxService.mark_read`); only a row opened by its id or key is stamped.
+
+The inbox response carries `sent_at`, when the buzz went out, which is the time the phone
+showed; the inbox stays ordered by the claim (`created_at`), so a build that reads only
+`created_at` shows a held row at its landing time.
+
 ### 11.6 Verification without a device
 
 `notification_events` records one row per notification the dispatcher tried to DELIVER —
 including ones deferred by quiet hours, or that found no registered device — so "did it fire,
-and what happened to it" is a SQL query. Layered:
+and what happened to it" is a SQL query, except for a held night-hold row the flush deletes or
+changes into another kind (below). Layered:
 
 ⚠️ **Two verdicts deliberately write NO row**: `preference_off:*` and `cap_reached:*`. That is
 required by §11.2 — a suppressed alert must not burn its dedup slot and cost the user
 tomorrow's alert too — but it means the two most likely answers to "why didn't I get it?" are
 *not* in the table. They survive only in the dispatcher's aggregate log line. Use
-`POST /admin/notifications/preview`, which reports a per-user verdict and writes nothing.
+`POST /admin/notifications/preview`, which reports a per-user verdict and writes nothing. Both
+are verdicts at the landing: a night-hold row held past the user's midnight meets its cap at the
+wake, where the flush ends it in the inbox (`suppressed on flush: cap_reached…`), and a third
+verdict, `preferences_unread`, does write a row: it parks one (§11.5).
+
+⚠️ **A held night-hold row can leave the ledger, or change kind, at its wake**
+(`PushDispatchService.flush_deferred`). `earnings_live` and `earnings_result` share one key per
+report with the daily pass, so a held row whose kind the user's settings turn off at its wake —
+claimed on a guess after a failed settings read at the landing, or with the toggle changed during
+the night — would keep that key from the kind the user does take. Such an `earnings_live` row
+goes on as `earnings_result`, rewritten in place (kind, category, title, body and route), when
+`EARNINGS_LIVE_RESULT_PUSH_ENABLED` is on, the record holds a surprise that push would start now,
+and the user takes that kind (`earnings_live_sender.instead_at_wake`); any other such row is
+DELETED, which frees the key. Neither leaves more than an INFO line
+(`push: held <kind> row user=… key=… is off at its wake (…) — it goes on as earnings_result…`,
+or `… — deleted, so the report's key is free…`), and the flush's stats count them as `rekinded`
+and `released`.
 
 ⚠️ **The app-icon badge counts `sent` rows only**, while the in-app inbox lists every row
 whatever its `push_state`. A badge is a promise that something is on the phone; the inbox is
@@ -5125,6 +5232,350 @@ practice, and the FCA measured an 11% trading-volume increase from push alone. C
 therefore **informational, never directive**, and every template lives in the registry
 or one sender module so the whole surface is auditable in one place. Every category is
 individually opt-out-able in-app, and frequency is capped per category.
+
+### 11.8 Live earnings results (2026-10-29)
+
+Owner request on INTC's report day: the Tracking → Alerts → Upcoming earnings card goes LIVE on
+report day, its sheet shows estimate vs actual for EPS and revenue the moment EACH lands (green
+beat, red miss, the surprise percentage), plus the same quarter last year, the last four
+quarters and the company's outlook, and a push goes out when results land, behind a new
+"Live Results" toggle. Owner decisions (2026-10-29): FMP plus the company-filing fast path; the
+push with its own toggle, on by default; all three extras. The toggle is on by default, but both
+push switches ship off (Push). The later decisions are quoted where they apply. Apart from a small
+floor (Costs), its costs fall only on WATCHED companies (the owner's design, 2026-11-11): on their
+report day and, while FMP has yet to confirm a report, the next trading day and any closed day
+between.
+
+**Two sources, one record per (symbol, report date)** (`earnings_live_service`). FMP's
+`earnings-calendar` already carries `epsActual` / `revenueActual` beside the estimates (adjusted
+EPS, the consensus's own basis) but fills them some time after a release, from minutes to hours (in a 2026-11-12 dry run, three
+releases 1–18 min after their 8-K was read and one not within 2 h 20 min), an after-close report
+can wait until the next morning, and its rows carry no time of day. The company's own release is
+public within minutes as an 8-K Item 2.02 with the press release as EX-99.1, so
+`earnings_filing_service` finds it in the company's SEC submissions record
+(`find_results_filings`: a new Item 2.02 8-K accepted on or after the report date, on the ET
+calendar), reads the exhibit as text with its footnote marks taken off the numbers, and asks
+Gemini for revenue, adjusted and GAAP EPS and the outlook, each with a VERBATIM quote, the release
+inside a fence it cannot close. A figure is kept ONLY when its quote is a verbatim span of the
+release (`filing_text.verify_peg_span`, the Learn engine's checker), it is in dollars, the model's
+value rounds to the number printed in that quote, read with its own sign, scale and basis, and the
+quote names the metric at that number as a level of the quarter (`_metric_at`). An EPS is refused
+as well when the words of its label leave its sign open, naming both a loss and a profit
+(`_words_point_both_ways`), and when it is the figure of an item a clause leaves out or takes in
+(`_tied_to_an_excluded_item`). A revenue's quote proves the metric, not its scope: the revenue of
+an item a clause leaves out or takes in, or of a segment, can pass, with only the prompt and the
+consensus band (Guards) behind it. What is stored is the PRINTED number, never the model's. The
+outlook is kept only as that verified quote, whole: the company's own sentences, never a word of
+the model's (owner decision 2026-11-05: "Company's own sentence (Recommended)"), and never a piece
+of a sentence, the rows or headings of a table (a guide's Current and Prior columns included), a
+quote that runs on past its full stop into a heading or a row, or a sentence that only points at
+figures or does not look ahead with one (`_outlook_problem`). The word lists behind these rules
+cannot be whole, so a few shapes still pass or are refused wrongly (the rules' docstrings list
+them). Anything else is dropped and logged with its reason, never with the release text
+(`EARNINGS_LIVE_FILING sym=… day=… acc=… accepted=… revenue=ok|not_verbatim|value_mismatch|…`;
+`verify_extraction` lists the reasons, and a currency other than USD refuses the whole answer).
+SEC's `acceptanceDateTime` is UTC, as its "Z" says (30 real Item 2.02 filings either side of the
+2026-11-01 clock change bear it out), and the log prints it in ET (`accepted=HH:MM ET`,
+`_parse_accepted`); a stamp that names no clock reads as no time. A foreign private issuer
+furnishes its results on 6-K and stays FMP-only.
+
+**Which source shows.** A filing figure is PRELIMINARY ("from the company's release", with a link
+to the filing) until FMP has the same metric: FMP's figure replaces it the moment FMP has one that
+passes the guards, unless the filing outranks it (`_filing_outranks_fmp`, Guards). A record is
+sticky: a verified figure never goes back to "not out yet" (only an FMP zero does, Guards), a
+restart included while the filing table holds it. Between two FMP answers the NEWEST wins: a
+Tracking-memo row older than the record's last own fetch is skipped whole at all three folds (the
+tick, the card, the sheet), and the daily pass folds what it read as an own fetch before it tells
+anyone. FMP can list one report twice (a stale pending row beside the reported one, in either
+order), so one answer decides per report, never per row: each metric's actual comes from one row
+with that row's own estimate. Once a metric has an FMP actual, its estimate moves only together
+with an actual; before that, it follows each answer's best row, so a surprise is never worked out
+against another row's consensus. The card and the sheet read the same pick
+(`one_row_per_report`), one card per (symbol, date), and a card with a record shows the record's
+estimates, as the sheet does; the daily pass reads each report from the row the record takes its
+EPS from (`eps_row_per_report`).
+
+**Statuses and the sheet's poll** (no row carries a time of day, so the window is the report
+day, ET):
+
+- `upcoming` — a later date, or today before 06:00 ET with nothing in yet;
+- `live` — today, 06:00–22:00 ET, results incomplete, and before 06:00 too once a figure is in,
+  though nothing is read at the report-day pace until 06:00. From 06:00 the red LIVE label is
+  true: SEC is read every minute in the company's own release windows (in a burst of releases
+  the most-watched first, the others waiting their turn) and FMP every 3 min in a window its
+  company uses (Costs); on a weekend, when EDGAR accepts nothing, FMP alone;
+- `reported` — complete (EPS, plus revenue when any revenue consensus exists), or the window
+  ended with a figure in;
+- `awaiting` — the window ended with nothing in: "results not in yet", never "late" (FMP lag and
+  reschedule duplicates make that misleading). The card stays up until 12:00 ET on the first
+  trading day after its report, so a Friday card stays until Monday noon;
+- `none` — the sheet asked about a ticker with nothing listed in the window.
+
+A symbol draws ONE card from the days before today: its newest reported report, else the newest
+one still up (`newest_report`); the sheet opened with no date takes the same pick. The sheet asks
+again as `poll_seconds` says (`sheet_poll_seconds`): 30 s while `live`; 120 s while `reported` with
+a preliminary figure on show, during the hours FMP is still asked (`fmp_window_open`); 30 s for a
+record still wanting FMP whose day the loop has yet to load (`awaits_first_load`); null otherwise.
+A day nobody has read is never `none`, which iOS prints and stops asking on: it answers
+`upcoming`, or `awaiting` before today, with no figures and a 30 s recheck, and a calendar outage
+answers the same, never a 502. With `EARNINGS_LIVE_ENABLED` off the loop idles: the sheet returns
+the memo row's consensus alone and never polls, and the cards carry no `report_date`, so iOS shows
+no results card.
+
+**A report FMP moves.** Own fetches end a report they stop listing once they have left it out for
+10 min (`_end_unlisted`), never on one answer (a short answer looks exactly like a move) and never
+while the record holds a raw figure from either source; a report moved off today settles within
+about 45 min, and a sheet pinned to the old date follows the report to its next listed date. A
+memo row held 12 h or longer opens no record (FMP may have moved the report since, and an open
+record is a report day: LIVE, FMP's fetch, an SEC slot, then a card), so a tick about to open one
+on rows that old pays the memo a round first (`old_rows_would_open`). A record with no figures of
+its own beside a report already in, on any calendar day back to the trading day before, reads as
+that report under its own date (`_Record.report_before`), so a leftover row never says LIVE about
+results its report holds.
+
+**Guards**, each a defect found elsewhere in this repo:
+
+- a dropped-digit EPS (`eps_digit_shift_suspect`) is held as "checking", never a -90% miss;
+- a revenue more than 2x off a material (≥ $100M) consensus does not show unless the other source
+  agrees within 2%. Each source is judged in turn, FMP first, so a figure the band refuses never
+  hides a sound one, and revenue reads "checking" only when a figure exists and none passes;
+- the filing goes first when a stated consensus bears it out and none bears out FMP's figure, and
+  when FMP's revenue is more than 5x off it unless only FMP's figure has a consensus behind it
+  (`_filing_outranks_fmp`, the Financials tab's own ratio); under 5x with no consensus to judge
+  them, FMP keeps its place;
+- a revenue with a second source beside it and outside 0.5–2x of the estimate on show carries no
+  surprise (two sources prove the actual, not the consensus it fell outside), and a tiny estimate a
+  material consensus has overtaken judges nothing;
+- a filing figure with no FMP figure beside it reads the stated consensus it sits on, else the
+  largest held (`_record_for_filing`), so the same evidence decides alike whichever twin row FMP
+  touched last;
+- a GAAP-only EPS is labelled GAAP and never coloured, the consensus being adjusted (the owner's
+  2026-09-27 caution, `news_insight_service._earnings_line`);
+- a figure is only as exact as its print: "$17.1 billion" is anything from $17.05B to $17.15B and
+  "$0.41" anything from $0.405 to $0.415, so against a consensus inside that band it shows with no
+  surprise, never a 0.0 (a filing's revenue by its own rounding, a filing's EPS by the band of its
+  own print, `eps_band_covers`, and FMP's EPS by its cent, `eps_print_covers`). An EPS EQUAL to the
+  consensus is in line, a verdict any print can give, so it reads 0.0 ("in line") from either
+  source. No surprise percentage is shown against an estimate under $0.01;
+- FMP's zeros are its unfilled fields. A zero revenue counts only against a consensus under $100M
+  with no other figure held (a pre-revenue name can report nothing), and a row with an EPS of
+  exactly 0 beside a zero or negative revenue is unfilled as a whole unless that revenue stands
+  (`_fmp_zeros_unfilled`). An unfilled zero is never a -100% miss and never a landing, a zero that
+  gives way leaves the record as if it never came, and once FMP has shown its zeros for a report, a
+  zero it sends with nothing real beside it is that field unfilled (`_lone_zero`). So that the
+  record reads the same wherever the company's release falls, a zero revenue held from before the
+  release leaves the record once the release's revenue is there (`_release_takes_zero_revenue_off`),
+  and a pair of zeros whose revenue only the release kept off is judged as FMP's answers alone
+  would have left it (`EarningsLiveService._without_release`). Answers that send a report's fields
+  as zeros a row or an answer at a time can still, in a few shapes, end on another figure,
+  consensus or verdict depending on where the release falls (`earnings_live_service`'s docstring).
+
+The daily pass reads the same dropped-digit guard and the same print band (`select_results`,
+`surprise_pct`).
+
+**A restart: the filing table, `earnings_filing_cache`** (owner decision 2026-11-05: "Add the table
+(Recommended)"). The records live in the process, but what only a filing says must outlive a
+deploy: FMP may still have
+no figures, and it never has the outlook or the link. So each verified filing goes to
+`earnings_filing_cache` the moment it is on its record (`keep_filing`: best effort, bounded, on a
+thread; figures from SEC filings only, never FMP data; service-role only), and the first tick of
+either loop in a new process takes back what the table holds for every day a record stays
+readable, the live days and the trading day before them (`sheet_days`, `restore_filings`): once,
+before anything decides. A restored figure is never a landing, and its filing is never read again
+by SEC or Gemini. A row is trusted only by the verifier that kept it (`FILING_VERIFIER_VERSION`):
+one of another version reads as no row, so the deploy that ships a verifier fix reads a filing of
+today still pending once more while the SEC watch is open. A record given back for a day past the
+live days puts one FMP look on the next round (`sheet_asked`), since the table holds no consensus.
+The table is migration `database/migrations/209_earnings_filing_cache.sql`, applied by the owner
+by hand (never by Claude) before the deploy and checked with the read-only VERIFY query in its
+header. The code tolerates either order: with the table missing, or a read failed, each restore
+logs a WARNING and tries again every 120 s, and a restart behaves as it did before the table (a
+report of today still pending has its filing read again while the SEC watch is open, and after
+22:00 ET waits for FMP). `EARNINGS_LIVE_FILINGS_ENABLED` off restores nothing. A filing read in the
+minute before a deploy, its `earnings_live` push not yet sent, goes without one; `earnings_result`
+has the daily pass behind it.
+
+**The daily 16:00 ET pass follows the record** (owner decision 2026-11-11: "Follow the record
+(Recommended)"). `run_earnings_notifications` reads FMP for itself, and the live loop stops asking
+about a report once FMP has confirmed it, so the pass's rows can be newer than a record. It
+therefore folds what it read into the live records before it tells anyone
+(`_fold_into_live_records`), so New York's banner, the sheet it opens and a row held for a later
+wake say one thing. It reads each report from the row the record takes its EPS from
+(`eps_row_per_report`), whichever row FMP lists first, and tells a report FMP lists more than once,
+or whose EPS is 0, as the record reads it, and only with an EPS this answer gave the record
+(`record_surprise`, the live sender's own rule). With no record to follow (live results off, or
+that day's fold failed) it reads the row alone. Its dropped-digit guard reads no GAAP EPS, so a
+~10x surprise only the filing's GAAP EPS backs is told to nobody while the live result push is off
+(owner decision 2026-11-11: "Keep it quiet (Recommended)"). The pass reads neither push switch: as
+shipped it is what tells a result, and with one on it finds the key taken for whoever the live send
+reached and tells the rest. A failed read of who to tell for one send (`WatcherLookupFailed`, a
+result or an upcoming one) costs that ticker this wake only: the pass tells every other ticker,
+then raises, so the day stays open and the next hourly wake tells the rest, the ledger keeping
+anyone this wake told from a second buzz (`run.notified` keeps what the failed wake did send).
+Neither it nor the live sender starts a push for a report older than yesterday
+(`earnings_sender.in_result_window`, calendar days, so a Friday report is out by Sunday); the card
+and the sheet keep the report.
+
+**Push** (`earnings_live_sender`, handed the watched landings by the FMP tick every 60 s). Two
+kinds, ONE dedup key per report (`earnings_sender.result_dedup_key`), sent one after the other in
+one coroutine, live first:
+
+- `earnings_live` ("Live Results", `notify_earnings_live`, on by default under the Earnings master,
+  with the same category cap and thread as its siblings): every watched report, the first time any
+  figure lands. Behind `EARNINGS_LIVE_PUSH_ENABLED`, which ships **off**: a build without the Live
+  Results toggle cannot turn the new kind off, and `device_tokens` carries no app version to gate
+  on, so with the switch on a user of such a build could stop it only with the Earnings master
+  switch. The toggle ships in the first App Store build that carries it, and the switch goes on
+  only once that build is widely installed (OWNER_TASKS).
+- `earnings_result` ("Results & Surprises"), sent live instead of at the next 16:00 ET pass once
+  FMP's own adjusted EPS stands and its surprise clears 5% — FMP numbers only, never a filing
+  figure. Behind `EARNINGS_LIVE_RESULT_PUSH_ENABLED`, which ships **off** too (owner decision
+  2026-11-05: "Keep it off at first (Recommended)"), though every shipped build has its toggle.
+
+With both off, as shipped, the sender sends and claims nothing, and the daily pass tells each
+result at 16:00 ET under the same key: for most reports the cost of off is that wait, and the few it
+costs a buzz outright are listed in `earnings_live_sender`'s docstring. With either on:
+
+- One push per report. A user with Live Results on gets the live kind and is skipped by the result
+  kind as a duplicate, a user with only Results & Surprises on gets the result kind, and the daily
+  pass finds the key taken. FMP's leftover row can date one report twice, so a user holding the
+  result key of the same symbol on any other day out to the trading day either side was told, and
+  is left out (`earnings_sender.neighbouring_result_keys`, passed as `unless_claimed` by both
+  senders): only the ledger knows who heard, per user and across a restart.
+- A landing is a landing only when this process saw the record pending first. A report first seen
+  reported (a restart, a first fetch after the fact), a filing accepted more than 15 min before the
+  record was first seen, and a filing restored from the table are none, so a deploy never
+  re-announces a morning's results in the afternoon. A filing's figure goes out on the next FMP
+  tick, up to a minute after it verifies.
+- Who is told stays the dispatcher's call (preference, master switch, cap, quiet hours; §11.2).
+  Both kinds carry `night_hold_by_default` (§11.5). The claim is taken for users who pass their
+  toggle and cap, but a night-hold row held past the user's midnight meets its cap at the wake,
+  and a failed settings read claims a night-hold kind on a guess, which the wake settles (§11.6).
+- A failed watcher read gives the report's key back and ends the round
+  (`notify_watchers(strict=True)` raises `WatcherLookupFailed`), and the ticker goes behind every
+  other report until a read of it works; a failed claim or device read after that read is not
+  retried. At most 60 sends a round (`MAX_SENDS_PER_ROUND`), oldest report first, so a report dated
+  twice goes out under its first date. Tickers past the 1,000-row watched read get no live push,
+  with a WARNING.
+- Copy is informational (§11.7). A lock-screen banner sits outside the authenticated app, which is
+  all FMP's Order Form licenses, so an absolute figure appears only from the company's own release
+  (a public SEC document). An FMP figure is never stated as a number: it is stated against
+  consensus (beat, missed or in line, with a percentage when an honest one prints), or as
+  "reported" when no honest verdict exists, and a figure a guard holds reads "being confirmed"
+  (`live_copy`; `result_copy` states only an EPS beat or miss by its percentage). A held row's
+  text is decided at its wake (§11.5).
+
+**Wire.** `AlertResponse` gained eleven optional keys (`earnings_status`, `report_date`,
+`eps_actual`, `revenue_actual`, `eps_surprise_pct`, `revenue_surprise_pct`, `eps_basis`,
+`results_preliminary`, `results_checked_at`, `eps_checking`, `revenue_checking`), null on every
+other row. The cards from before today (reported, or awaiting until 12:00 ET on the next trading
+day) ride in the new `TrackingFeedResponse.recent_earnings_alerts` — NOT in `alerts`, where a
+shipped build would draw a past-dated "reports earnings on OCT 29" card under Upcoming.
+`GET /tracking/earnings/{ticker}/live` (`EarningsLiveResponse`, signed-in only — the FMP display
+licence) serves the sheet, with an optional `report_date`: a date before the first of `sheet_days`
+(two trading days back, so a result held for a user's morning still opens its report) or after
+today + 14 answers 400 `INVALID_INPUT`. It never makes the live loop's fetches: it folds the
+Tracking memo into the shared records and reads, so a poll costs a memo read. The extras come once
+per (symbol, report date) from `earnings_service.get_earnings` (6 h; 5 min after a failure), so the
+sheet and the Financials tab can never disagree about a quarter; the outlook and the filing link
+come from the record. A result push's route carries `report_date` (`notification_kinds.ticker_route`).
+iOS: `frontend/ios/ios/Models/EarningsLiveModels.swift`; `EarningsLiveResultsCard` with
+`EarningsLiveViewModel`, which polls as `poll_seconds` asks, asks again every 30 s for up to 10 min
+when a first load fails, ends at once on a 400 or a 404, stops on disappear and background, and
+stops saying LIVE once its poll has given up; the `LiveBadge` atom on `ActivityRow`;
+`EarningsResultChips`; and "See live results" (`AlertDestination.Target.earningsLive` →
+`EarningsLiveScreen`), leading a result push or inbox row whose report date the endpoint still
+serves (`MarketHoursUtil.liveResultsFloorKey`, the first `sheet_days` day). The Alerts list hides a
+result row while the same report's card is on screen LIVE or showing its final result. The Tracking
+tab's 30 s poll builds the whole feed only while a price on the tab can move (04:00–20:00 ET on a
+trading day, or a round-the-clock holding: `MarketHoursUtil.shouldRefreshPrices`). Otherwise,
+while a card in the Alerts list is LIVE, it asks each LIVE card's own
+`GET /tracking/earnings/{ticker}/live` by its report date, never the feed: at most 8 cards a
+round, taking turns (`TrackingViewModel.refreshLiveEarningsCards`, sharing the per-user limit with
+the sheet). An answer that settles the card's own report (`live`, `reported`, or any status with no
+`poll_seconds`) is written onto the card; one the server could not settle yet (`poll_seconds` set)
+leaves it LIVE for the next round; a report that moved to another date or left the calendar
+(`none`), and a 404 or a 400, hand that round to one feed build, since which cards stand is then
+the feed's to say.
+
+**Costs.** Only the live loop asks FMP at the paces below. Feed builds, the sheet and the Tracking
+poll's asks about LIVE cards read through the Tracking memo, which pays its own rounds (§7.1), and
+the sheet's route adds up to 14 calls when it is about to answer `none` (`later_days_since`), its
+extras (`earnings_service.get_earnings`, once per report for 6 h), and one look on the loop's next
+round for a day past the live days the loop has not read (`sheet_asked`). So outside price hours a
+viewer's Tracking tab costs one route read per LIVE card every 30 s (at most 8 a round), with no
+FMP call once the memo and the report's extras are warm, plus one feed build when a report moves
+under a LIVE card or its route refuses it.
+
+- **FMP**, at the report-day pace (`_fmp_cadence`, the owner's design of 2026-11-11). A report day
+  is asked about only while a watched report on it still wants FMP (`needs_fmp`: it lacks results,
+  or a figure on show is still the filing's): every 3 min inside a release window (06:00–09:35 or
+  15:55–18:30 ET) that one of that day's waiting watched companies uses, learned from its own past
+  8-K Item 2.02 acceptance times (both while unknown), and every 15 min otherwise, 06:00–22:00 ET,
+  nothing after; the previous trading day's reports the same way from 06:00 ET on the next trading
+  day, with only the morning window counted. Any other day before today (a report dated on a closed
+  day, or every day while today is a closed one) is asked once, then, while a watched report on it
+  still wants FMP, every 30 min, or every 2 h while today is a closed day, at any hour. A report FMP
+  has confirmed whole is not asked again. Walked minute by minute with nobody opening the app
+  (pinned in the tests): a day of after-close reports, today's and the previous trading day's, FMP
+  filling each at 08:00 the next morning and each company's window known, costs 151 FMP calls and
+  53 SEC reads; a mixed day with a morning reporter, 199 and 86; either of those with no company's
+  window known, 208 FMP calls and 253 or 286 SEC reads; the worst day (both days' watched reports
+  waiting all day, no window known, no release on SEC), 288 and 409; a trading day with no watched
+  report, 5 FMP calls (the memo's two rounds and a first look at the previous trading day); a
+  weekend, 1 a day. A Friday report FMP never fills makes the weekend 12 calls on Saturday and 13
+  on Sunday (every 2 h, at any hour), and adds 121 on Monday. On top: 13 calls for a whole-window
+  memo read (§7.1); a watched report dated on a closed day, up to 163 that day; a blank first look
+  on a trading day, up to 11; one read before each look of a held push that asks again
+  (`read_before_look`, shared by looks under a tick apart); and one look per day past the live
+  days a restart gave a filing back for. Feed builds pay for the memo's other rounds when someone
+  looks, up to its own ~150 a day.
+- **SEC**: at most `EARNINGS_LIVE_SEC_MAX_SYMBOLS` (25) tickers at a time, most-watched first — a
+  limit on the rate, not the day: the next ticker takes a freed slot, so every watched ticker
+  reporting today can be read. A ticker keeps for the day the place the day's first list gave it,
+  wherever a later list puts it (tickers watched as often trade places in it, and a company can
+  gain watchers on its report day), and a ticker that joins the day's list later goes ahead of
+  every ticker already placed that the list ranks below it (`_placed`). A ticker still waiting on
+  its release keeps its slot between reads, except inside a release window its own company does
+  not use, where it holds one only in the round its read is due (`_holds_a_slot`), so the slot
+  serves the window's own companies meanwhile. However often the loop runs, a round reads no more
+  submissions than the cap less the reads of the rounds that started in the minute before it
+  (`_forget_reads_a_minute_back`). A read counts at its round's start, not when it is made, so a
+  round a model call has stretched can put its later reads into the same 60 s as the next round's,
+  and one 60 s can then hold up to about twice the cap. Each ticker with a slot is read
+  every minute inside its own company's windows and in EDGAR's last minute (21:59 ET), every 15
+  min otherwise, 06:00–22:00 ET, never on a weekend. A round is serial and reads in place order;
+  after a model call, once the round has run into the loop's next tick, it gives way to a ticker
+  it read before that is due again: it stops, and the next round starts at the top
+  (`_gives_way_for`; never when a ticker it would leave would not be due then, its window or
+  EDGAR's day having closed). So in a burst of releases the most-watched are read every minute and
+  the others wait: a release the most-watched company files just after its read waits for one
+  model call, not for every release placed below it. Calls are spaced 1 s apart, a ticker stops
+  once its release is read, and a throttle parks every ticker for SEC's Retry-After (or the 600 s
+  circuit), shared with the Learn weekly engine, the buyback check and the Trillion stake finder.
+  At the loop's 60 s, a company releasing at 16:05 ET costs 51 submissions reads on its report
+  day, a day's ceiling is 25 × 409 = 10,225 submissions reads for tickers whose records do not
+  say, and a ticker of one window is read at most 209 times (after the close) or 265 (before the
+  open). An interval with a multiple in 55–59 s (19, 28, 29 or 55–59 s) reads LESS once more
+  than half the cap's tickers are in their windows: the reads of the rounds before still fill the
+  minute's count, so some rounds read nothing, and those tickers are read about every 76–118 s. A ticker SEC's map lists under no company is FMP-only for the day, said once in the log, at
+  WARNING for a ticker written as a US listing (letters alone), which has lost the fast path; one
+  whose record shows foreign forms alone (20-F, 40-F, 6-K) rests 30 min between reads with no slot.
+- **Gemini**: one call per read of a filing, beside two document reads
+  (`EARNINGS_LIVE_EXTRACT_MODEL`, Flash, temperature 0, no thinking budget, never cached). A failed
+  read (an index or exhibit that cannot be read, a model failure or a model step past its
+  deadline, a blocked, cut or off-schema answer) rests on a widening ladder and is read again, at
+  most six reads a filing (`_EXTRACT_RETRY_GAPS`: about 33 min inside its company's windows, about
+  75 outside); SEC's own throttle and outage errors spend no attempt. A read's model step may take
+  at most `GEMINI_REQUEST_TIMEOUT_SECONDS` + 15 s (`_model_deadline_seconds`), because a round is
+  serial and every ticker behind the read waits on it; a round of several filings can still run
+  for minutes.
+
+**What only a real report day can prove.** The suite walks both loops minute by minute and reads
+real filing shapes (`tests/test_earnings_filing_real_shapes.py`), but it cannot prove FMP's fill
+lag and row order, Railway's timing from an 8-K to a figure on the card, one push per report in
+production, the Preliminary-to-FMP flip on a device, or SEC's limits shared with the 18:30 ET stake
+finder.
 
 ---
 
@@ -6692,7 +7143,7 @@ backend/
 │   ├── database.py               # get_supabase(); raw SDK, no ORM
 │   ├── dependencies.py           # NOT app/api/v1/dependencies.py
 │   ├── log_redaction.py
-│   └── main.py                   # lifespan, middleware, 28 supervised background tasks (§7.4)
+│   └── main.py                   # lifespan, middleware, 29 supervised background tasks (§7.4)
 ├── database/
 │   ├── migrations/               # NNN_*.sql, applied by hand
 │   └── schema_snapshot.sql       # pg_dump --schema-only of live Supabase
@@ -6794,7 +7245,7 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | 2026-10-24 | Chips, chip equipment, advertising and internet content show the WORLDWIDE market instead of US industry revenue (§7.3 global rows): a published government estimate licensed for commercial re-use (European Commission COM(2026) 504, EU JRC141323 CC BY 4.0, US ITC Pub. 5643), geometric between its stated points, the last rate extended ≤ 3 years with no mark on the card ("Replace with global", "Global rate", "$1T in 2026", "option 2, but no need to mark or note", "Chips + chip equipment", "Ads + internet") | Owner, on the NVIDIA card's "US industry revenue $119B → $140B": "for seminconductor, it should be … projected to reach over $1.01 trillion to $1.03 trillion by 2031", then "find me a way to show TAM free with similar value" for "mostly technology". Those $1.0T-by-2031 figures were paid market-research releases on 2021–22 data; the industry's own statistics put 2026 alone at ~$1.5–1.7T and are copyrighted | Quote WSTS / SIA / Gartner / Statista directly (copyright, permission needed); the $1.01–1.03T market-research figure (outdated, paid); show only to the source's last year (2030 / 2029); keep the US row and add a global line beside it; global for software / telecom / hardware (no reusable source: MIC excludes its third-party charts, GSMA internal use, ITU non-commercial) |
 | 2026-10-28 | Moat radar audit (`moat_scoring_service.SCORER_VERSION` = `moat_v1.2026-10-28`): revenue growth is a Network Effects reading only off a prior year of at least $10M (in dollars, through a rounded per-currency rate for non-USD filers; a currency without one is no reading) and inside the producer's ±500% clamp, paired exactly as the sector median, at 5pp per score point (+25pp = 10); Network Effects is measured only with a COMPANY input (growth or user count), never on the industry HHI + lifecycle alone; P/S counts toward Brand Power only with a positive gross margin; Intangible Assets is measured only when both sector-relative inputs resolve (patents / FDA then join the average); an exact-zero SG&A and a non-finite input are no reading. A pillar no tier scored is DROPPED (never the old fabricated 0.0 / peer 5.0); every pillar carries `peer_source` (industry / ai_estimate / baseline); the moat vital, persona scoring and the Insight's edges/gaps use measured pillars against industry peers only (never a pillar scored with a focal-only input — patents, FDA, transcript figures — the peer averages never fetch), and Cay AI's report grounding quotes "vs peers" only for an industry peer; a scorer exception is logged with its stack, never recorded as degraded (it repeats on every rebuild); the moat block is stamped with the scorer vintage and the paid reuse door never re-sells another one; a transient annual-statement fetch failure keeps the collection out of every shared cache | JOBY read Network Effects 6.3 ('Primary Driver') off 39,183% growth from a $136K year, Brand Power 5.0 off a 204× P/S at a −30% gross margin, and an Insight claiming those 'edges'; revenue growth pinned at 10/10 in 7 of the 10 reports cached 2026-10-15..28; Switching Costs is an AI estimate on every report (its transcript input is unlicensed) and 'Peer Avg' was a 5.0 placeholder in ~110-147 of 149 industries | An absolute revenue floor alone (misses $53M JOBY's P/S); capping P/S at 200 (P/S 10 vs 2.47 already scores 10); dropping AI pillars from the radar (owner chose to show them, labelled, and keep them out of the verdicts); iOS labels this round (owner: backend now, iOS later) |
 | 2026-10-28 | Updates Insights jump mode (§9b.10a): a ticker JUMPING in the current session (Unusual/Extreme, `jump_band`) gets 6 extra card refreshes in the gate AND the claim RPC, its `ticker_move` alert whatever happened to the card (equities; coins stay coupled), its FMP news every 5 minutes (≤12 extra pulls/day) and, for equities, a Brave web search for the reason whose pages feed the card (a fenced block, a one-shot gate trigger, never the fingerprint) and lead its Sources; the card — shared, and served until a newer card replaces it — may hold text and links from those pages (owner: "i pick option 2, i don't think we break any terms"; Sources: "i need to show the source link so users can click to read them"; cap: "Jump reserve only"; Ask Cay: "Yes, Ask Cay reads it", audits skipped); `UPDATES_JUMP_WEB_SEARCH_ENABLED` off also withholds stored web cards; Privacy §3/§4 and Terms §7 dated October 28, 2026 | TestFlight ORCL +12% (2026-10-28): the card had spent its 10/day cap at 13:24 ET, before the jump; FMP had the press release in `ticker_news_cache` 16 minutes after it went out, but the card could not refresh and the move alert never fired (it was sent only from inside a regeneration); 17 of 39 scopes were capped that day | Brave with a written storage licence first (Enterprise; owner declined to wait); Claude's web search tool (a new vendor); per-viewer read-time search (breaks the cache-only read path, needs consent v4 and an iOS release); raising the ordinary cap for everyone; web results in the fingerprint; reviving `price_move` / a "Why it moved" row (iOS release); chat's market-figure scrub on card inputs (drops the reason); SEC 8-K detection |
-| 2026-10-30 | Tracking → Assets shows the pre-market / after-hours move as a chip on the change line, left of the day change (`☾ +0.08%  ▲ +1.48%`; ☀ before the open), measured from the row's own regular-session price and read from the licensed `historical-chart/5min?extended=true` bars (`tracking_service._get_extended_prints`, the feed gather's last member: never in the regular session, never for a coin, an index or a licence-blocked symbol; a session-tagged per-ticker cache, 60 s live and 15 min closed). The last after-hours print stays overnight and at weekends until 04:00 ET pre-market (owner: "Keep last AH price"); 5-minute bars (owner: "5-minute bars"); the chip shows whole or not at all (`ViewThatFits`), so the card is no taller (owner: "i don't want to increase the height of the card") — on a 375pt phone it usually does not fit and only VoiceOver reads it | Owner, on the Assets tab at 4:56 PM ET: "do we have price after hours to show?" Nothing in the app showed one: the screener and the profile carry the regular-session price only, and FMP's `aftermarket-quote` is the unpurchased "Real-time Market Data" package (402) — but the Extended Hours toggle's bars already held every pre-market and after-hours trade | A third line under the price (taller cards); the after-hours price as the row's main number (Robinhood-style); the after-hours price in place of the company name (names hidden 4 PM-9:30 AM and all weekend); the after-hours PRICE in the chip (does not fit beside the day change on 375-393pt phones); 1-minute bars (about 5x the FMP data per call); buying "Real-time Market Data" for batch real-time after-hours quotes in one call (the switch if a real-time print is ever needed) |
+| 2026-10-30 | Tracking → Assets shows the pre-market / after-hours move as a chip on the change line, left of the day change (`☾ +0.08%  ▲ +1.48%`; ☀ before the open), measured from the row's own regular-session price and read from the licensed `historical-chart/5min?extended=true` bars (`tracking_service._get_extended_prints`, a member of the feed gather: never in the regular session, never for a coin, an index or a licence-blocked symbol; a session-tagged per-ticker cache, 60 s live and 15 min closed). The last after-hours print stays overnight and at weekends until 04:00 ET pre-market (owner: "Keep last AH price"); 5-minute bars (owner: "5-minute bars"); the chip shows whole or not at all (`ViewThatFits`), so the card is no taller (owner: "i don't want to increase the height of the card") — on a 375pt phone it usually does not fit and only VoiceOver reads it | Owner, on the Assets tab at 4:56 PM ET: "do we have price after hours to show?" Nothing in the app showed one: the screener and the profile carry the regular-session price only, and FMP's `aftermarket-quote` is the unpurchased "Real-time Market Data" package (402) — but the Extended Hours toggle's bars already held every pre-market and after-hours trade | A third line under the price (taller cards); the after-hours price as the row's main number (Robinhood-style); the after-hours price in place of the company name (names hidden 4 PM-9:30 AM and all weekend); the after-hours PRICE in the chip (does not fit beside the day change on 375-393pt phones); 1-minute bars (about 5x the FMP data per call); buying "Real-time Market Data" for batch real-time after-hours quotes in one call (the switch if a real-time print is ever needed) |
 | 2026-10-30 | The Updates Insights card's headline is the FIRST answer for a move on the widget and in Ask Cay AI: `attribute` runs `detect_news_lean` before the dated detectors (earnings, analyst, classified news, group). Its gate is unchanged (agreeing sentiment, an Unusual move, no after-close card on a report day, a usable headline), so a card that fails it still falls through to them, and a dated win never carries the withheld lean (`web_assisted`). When the card wins, `cause.note` keeps the industry arithmetic, "moved with it" included. A new run reaches the tile while the app is open: storing a card drops the cached widget payloads that read its scope (`WidgetMoversService.forget_payloads_for`; a build that raced the write is served but not kept), and the app refreshes when the Updates screen fetches an AI card newer than the stored tile's `as_of` for the Holdings head mover or the market (`WidgetRefreshService.insightCardArrived`, a content change past the 60 s throttle) | Holdings tile, INTC −30.60% on 2026-10-30: it printed "INTC beat EPS estimates by 27.8%, reported after yesterday's close." while the Updates card read "Intel's weak PC outlook and guidance overshadows strong data center results" (Bearish, 15 min old). The earnings detector ran first, so the card that passed every gate was never consulted. Owner: "i need the widget to show it out. right after the Insight has new content or a new run" | Putting the card ahead of a CONTRADICTING dated cause only (a beat under a fall): a miss under a fall would still hide the card the owner asked to see. Relaxing the agreement or Unusual gate (the ACHR bug). A holdings-capable widget token or silent pushes so a CLOSED app updates the tile: the Holdings tile still changes only when the app runs |
 | 2026-10-31 | The report's Recent Price Movement section separates SIZE from CAUSE (`price_volatility.effective_tier`, `_build_price_action`, `_price_action_narrative_prompt`): a move of 20%+ over its window, or a 10%+ session in it, is at least Notable however volatile the stock (the "Normal range" sub-label is then hidden); the reason hunt also runs whenever an earnings report falls in or after the window; the prompt gets the report's EPS and revenue against estimates (the same FMP earnings-calendar call, `get_earning_calendar_full`), where it sits against the chart's last close, and the S&P 500 (SPY, the macro fetch's series) over the same days; a guard swaps an insight that says "routine / normal range / not a fundamental change" on such a card for a fact sentence. The σ estimator and the Updates tiers are unchanged | Intel −20.6% in 30 days into its Oct 29 report, σ ≈ 5%/day → z 0.87 "Typical"; no earnings or news scan ran below z 1 and the Typical prompt forced "routine trading … not a fundamental change in the business". Owner decisions: "Floor 20% / 10%", "AI context only", "Flag it in the insight", "Hide it when floored", "Report only" | A different σ (excluding the window: z 0.83; MAD: z 0.99 — neither fixes it, and both shift every stock); the floor in the Updates gate (re-bills cards, changes widget tiers); showing the S&P line on the card (needs an app release) |
 | 2026-11-05 | A malformed Stage A answer no longer ends a report. Both doors share `generate_stage_a_shell`, which re-asks once and uses no response cache; `generate_json` never caches non-JSON text (`_cacheable_json_answer`); a degraded Stage A stops before `assemble_report`; a Stage B run that lost at least half of its required sections and at least two is refunded, not delivered (owner: "Half or more"), and one that lost two or more below that line is delivered but never shared; a report with no bull or bear case is refunded; every fresh report passes `TickerReportResponse` before anything is written; one incident logs one ERROR, with a constant template. The Stage A prompt no longer asks for the macro `risk_factors` or `competitors` lists (`assemble_report` never read them), its critical factors say `description` and `watch` stay empty, and guidance rules appear only when a transcript is in the evidence (owner: "Clean up now, with eval"). Measured on GOOGL, MSFT, KO, 3 runs each, the same evidence before and after: 9 of 9 parsed both ways, output 1,506 → 933 tokens, 6.9 → 4.4 s, Switching Costs held (8.3→8.0, 9.0→9.0, 4.3→4.3), prose in the blank factor fields 5 of 9 runs → 0 of 9 | GOOGL / warren_buffett, 2026-11-05: `Expecting ',' delimiter: line 167 column 126 (char 4971)` on 1,598 output tokens, the only Stage A failure in 64 reports over 90 days. The run spent 30 s and ~15 more Gemini calls on a report already certain to be refunded, the cached broken answer would have replayed for an hour on the direct door, and one incident opened three Sentry issues. The cause is unproven (neither the text nor the finish reason was logged), but a normal answer puts `critical_factors` at lines 157-183, with its longest lines the `watch` fields the model filled against the prompt's own "leave blank" rule, so the break most likely sat in discarded prose | `response_schema` (a mistake fails every report, and hermetic tests cannot see Gemini's 400s). Local JSON repair (guesses at model text inside a paid judgement). Lowering temperature or adding thinking (nothing ties the failure to either). A no-double-quote prompt rule (added only if a logged excerpt shows that cause) |

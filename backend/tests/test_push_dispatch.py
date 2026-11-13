@@ -772,9 +772,9 @@ def test_the_watcher_lookup_no_longer_selects_the_poisoned_column():
     import inspect
     from app.services.push_dispatch_service import PushDispatchService as _PDS
 
-    body = inspect.getsource(_PDS.watchers_of)
+    body = inspect.getsource(_PDS._read_watchers)
     assert 'select("user_id")' in body, (
-        "watchers_of still fetches asset_type for a consumer that no longer exists"
+        "the watcher read still fetches asset_type for a consumer that no longer exists"
     )
 
 

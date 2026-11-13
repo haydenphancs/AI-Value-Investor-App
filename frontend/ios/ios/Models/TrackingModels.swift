@@ -328,8 +328,49 @@ enum AppAlert: Identifiable {
         let day: Int
         let month: String
 
+        // ── Live results (`earnings_live_service`) ──────────────────────────────
+        // `var` with defaults so every existing call site (previews, sample data) still
+        // compiles, and an older backend that sends none of these reads as `.upcoming` —
+        // the card this build used to draw.
+        var status: EarningsLiveStatus = .upcoming
+        /// "YYYY-MM-DD" — `day`/`month` carry no year. Sent to the live endpoint.
+        var reportDate: String? = nil
+        var epsEstimate: Double? = nil
+        var revenueEstimate: Double? = nil
+        var epsActual: Double? = nil
+        var revenueActual: Double? = nil
+        var epsSurprisePct: Double? = nil
+        var revenueSurprisePct: Double? = nil
+        /// The EPS shown is GAAP (only the company's release had it): never coloured.
+        var epsIsGAAP: Bool = false
+        /// A shown figure is from the company's own release, not yet confirmed by FMP.
+        var isPreliminary: Bool = false
+        var checkedAt: Date? = nil
+        /// A sanity guard holds this metric's figure: it exists, and is not shown until it is
+        /// confirmed. The actual above stays nil.
+        var epsChecking: Bool = false
+        var revenueChecking: Bool = false
+        /// The sheet's own poll gave up, so nothing is checking this report from here and the
+        /// sentence must not wait on it. Set by `AlertDetailView.headerAlert`, never by the wire.
+        var liveCheckEnded: Bool = false
+
         var formattedDay: String { String(day) }
         var formattedMonth: String { month.uppercased() }
+
+        var epsOutcome: EarningsMetricOutcome {
+            EarningsMetricOutcome(estimate: epsEstimate, actual: epsActual,
+                                  surprisePct: epsSurprisePct, isPreliminary: isPreliminary,
+                                  isGAAP: epsIsGAAP, isChecking: epsChecking)
+        }
+
+        var revenueOutcome: EarningsMetricOutcome {
+            EarningsMetricOutcome(estimate: revenueEstimate, actual: revenueActual,
+                                  surprisePct: revenueSurprisePct, isPreliminary: isPreliminary,
+                                  isChecking: revenueChecking)
+        }
+
+        /// Any figure is in — the card trades its date badge for the result chips.
+        var hasResults: Bool { epsActual != nil || revenueActual != nil }
     }
 
     struct MarketData: Identifiable {
@@ -439,7 +480,11 @@ enum AppAlert: Identifiable {
 
     var title: String {
         switch self {
-        case .earnings: return "Earnings Alert"
+        case .earnings(let data):
+            switch data.status {
+            case .reported, .awaiting: return "Earnings Results"
+            case .upcoming, .live, .notScheduled: return "Earnings Alert"
+            }
         case .market: return "Market"
         case .whaleTrade(let data):
             return data.action == .bought ? "Whales Bought" : "Whales Sold"
@@ -452,18 +497,7 @@ enum AppAlert: Identifiable {
     var description: String {
         switch self {
         case .earnings(let data):
-            var pieces: [String] = ["\(data.ticker) reports earnings"]
-            if !data.formattedMonth.isEmpty && data.day > 0 {
-                pieces.append("on \(data.formattedMonth) \(data.formattedDay)")
-            }
-            if let timing = data.reportTime {
-                pieces.append(timing.displayText)
-            }
-            var sentence = pieces.joined(separator: " ") + "."
-            if !data.consensus.isEmpty {
-                sentence += " \(data.consensus)"
-            }
-            return sentence
+            return AppAlert.earningsDescription(data)
         case .market(let data):
             return data.description
         case .whaleTrade(let data):
@@ -512,6 +546,78 @@ enum AppAlert: Identifiable {
         case .analystRating: return AppColors.alertOrange
         case .insiderTransaction(let data): return data.action.color
         }
+    }
+
+    /// The card's sentence for one earnings report, by status. Results are stated as
+    /// "actual vs estimate", whichever metric has landed first.
+    static func earningsDescription(_ data: EarningsData) -> String {
+        let dateText = (!data.formattedMonth.isEmpty && data.day > 0)
+            ? "\(data.formattedMonth) \(data.formattedDay)" : ""
+        switch data.status {
+        case .upcoming:
+            var pieces: [String] = ["\(data.ticker) reports earnings"]
+            if !dateText.isEmpty { pieces.append("on \(dateText)") }
+            if let timing = data.reportTime { pieces.append(timing.displayText) }
+            var sentence = pieces.joined(separator: " ") + "."
+            if !data.consensus.isEmpty { sentence += " \(data.consensus)" }
+            return sentence
+        case .notScheduled:
+            return "\(data.ticker) has no earnings report in the next two weeks."
+        case .live where !data.hasResults && !data.epsChecking && !data.revenueChecking:
+            var sentence = "\(data.ticker) reports today."
+            if !data.consensus.isEmpty { sentence += " \(data.consensus)." }
+            return data.liveCheckEnded ? sentence : sentence + " Waiting for results…"
+        case .live, .reported:
+            let lead = data.status == .live
+                ? "\(data.ticker) is reporting."
+                : (dateText.isEmpty ? "\(data.ticker) reported." : "\(data.ticker) reported \(dateText).")
+            let results: String = earningsResultsLine(data)
+            return results.isEmpty ? lead : lead + " " + results
+        case .awaiting:
+            let when = dateText.isEmpty ? "" : " \(dateText)"
+            // Every figure held and none shown ends as `awaiting`. A held figure exists, so
+            // "aren't in yet" would sit above the sheet's "Confirming…" and contradict it.
+            guard data.epsChecking || data.revenueChecking else {
+                return "\(data.ticker)'s\(when) results aren't in yet."
+            }
+            return "\(data.ticker)'s\(when) results: \(earningsResultsLine(data))"
+        }
+    }
+
+    /// "Revenue $17.1B vs $16.6B est · EPS $0.44 vs $0.41 est". A metric not out yet says so, a
+    /// held one says it is being confirmed (the push's own words), and a metric nothing is
+    /// coming for says nothing: a finished report with no consensus for it (`is_complete`).
+    /// Each pair in its row's format, so a beat never reads "$2.5B vs $2.5B est".
+    static func earningsResultsLine(_ data: EarningsData) -> String {
+        func part(_ label: String, _ actual: Double?, _ estimate: Double?, checking: Bool,
+                  _ format: (Double) -> String) -> String? {
+            guard let actual else {
+                if checking { return "\(label) being confirmed" }
+                return data.status == .live || estimate != nil ? "\(label) not out yet" : nil
+            }
+            guard let estimate else { return "\(label) \(format(actual))" }
+            return "\(label) \(format(actual)) vs \(format(estimate)) est"
+        }
+        let epsLabel = data.epsIsGAAP ? "GAAP EPS" : "EPS"
+        let parts: [String?] = [
+            part("Revenue", data.revenueActual, data.revenueEstimate,
+                 checking: data.revenueChecking,
+                 EarningsFigureFormat.revenueRow(actual: data.revenueActual,
+                                                 estimate: data.revenueEstimate,
+                                                 beatOrMiss: data.revenueOutcome.isBeatOrMiss)),
+            part(epsLabel, data.epsActual, data.epsIsGAAP ? nil : data.epsEstimate,
+                 checking: data.epsChecking,
+                 EarningsFigureFormat.epsRow(actual: data.epsActual, estimate: data.epsEstimate,
+                                             beatOrMiss: data.epsOutcome.isBeatOrMiss)),
+        ]
+        return parts.compactMap { $0 }.joined(separator: " · ")
+    }
+
+    /// True while the report is LIVE — the card draws the red label, and the Tracking poll
+    /// keeps asking about it, through its own route, once no price on the tab can move.
+    var isLiveEarnings: Bool {
+        if case .earnings(let data) = self { return data.status == .live }
+        return false
     }
 
     /// Join tickers with truncation ("AAPL, CRM and 2 more").
@@ -638,6 +744,15 @@ struct DiversificationScore: Identifiable {
 struct TrackingFeedResponse: Codable {
     let assets: [TrackedAssetDTO]
     let alerts: [AlertDTO]
+    /// The previous trading day's earnings cards (reported, or awaiting until 12:00 ET), so an
+    /// after-close report is still on screen with its results the next morning. Optional: an
+    /// older backend does not send it. Same `AlertDTO` shape (type "earnings").
+    let recentEarningsAlerts: [AlertDTO]?
+
+    enum CodingKeys: String, CodingKey {
+        case assets, alerts
+        case recentEarningsAlerts = "recent_earnings_alerts"
+    }
 }
 
 // MARK: - Portfolio Insights DTO
@@ -887,6 +1002,19 @@ struct AlertDTO: Codable, Identifiable {
     let epsEstimate: Double?
     let revenueEstimate: Double?
 
+    // live earnings results (all optional; absent on every non-earnings row)
+    let earningsStatus: String?
+    let reportDate: String?
+    let epsActual: Double?
+    let revenueActual: Double?
+    let epsSurprisePct: Double?
+    let revenueSurprisePct: Double?
+    let epsBasis: String?
+    let resultsPreliminary: Bool?
+    let resultsCheckedAt: String?
+    let epsChecking: Bool?
+    let revenueChecking: Bool?
+
     // shared rollup
     let action: String?
     let totalAmount: String?
@@ -904,6 +1032,17 @@ struct AlertDTO: Codable, Identifiable {
         case reportTime = "report_time"
         case epsEstimate = "eps_estimate"
         case revenueEstimate = "revenue_estimate"
+        case earningsStatus = "earnings_status"
+        case reportDate = "report_date"
+        case epsActual = "eps_actual"
+        case revenueActual = "revenue_actual"
+        case epsSurprisePct = "eps_surprise_pct"
+        case revenueSurprisePct = "revenue_surprise_pct"
+        case epsBasis = "eps_basis"
+        case resultsPreliminary = "results_preliminary"
+        case resultsCheckedAt = "results_checked_at"
+        case epsChecking = "eps_checking"
+        case revenueChecking = "revenue_checking"
         case action
         case totalAmount = "total_amount"
         case timeWindowLabel = "time_window_label"
@@ -922,15 +1061,8 @@ struct AlertDTO: Codable, Identifiable {
             default:            mappedTime = nil
             }
 
-            var consensusParts: [String] = []
-            if let eps = epsEstimate {
-                consensusParts.append(String(format: "EPS Est: $%.2f", eps))
-            }
-            if let rev = revenueEstimate {
-                let revB = rev / 1_000_000_000
-                consensusParts.append(String(format: "Rev Est: $%.1fB", revB))
-            }
-            let consensus = consensusParts.joined(separator: " · ")
+            let consensus = AppAlert.EarningsData.consensusText(epsEstimate: epsEstimate,
+                                                                revenueEstimate: revenueEstimate)
 
             return .earnings(AppAlert.EarningsData(
                 ticker: ticker ?? "",
@@ -938,7 +1070,20 @@ struct AlertDTO: Codable, Identifiable {
                 reportTime: mappedTime,
                 consensus: consensus,
                 day: day ?? 0,
-                month: month ?? ""
+                month: month ?? "",
+                status: EarningsLiveStatus(wire: earningsStatus),
+                reportDate: reportDate,
+                epsEstimate: epsEstimate,
+                revenueEstimate: revenueEstimate,
+                epsActual: epsActual,
+                revenueActual: revenueActual,
+                epsSurprisePct: epsSurprisePct,
+                revenueSurprisePct: revenueSurprisePct,
+                epsIsGAAP: epsBasis == "gaap",
+                isPreliminary: resultsPreliminary ?? false,
+                checkedAt: EarningsLiveDates.parse(resultsCheckedAt),
+                epsChecking: epsChecking ?? false,
+                revenueChecking: revenueChecking ?? false
             ))
         case "whale_trade":
             let items = (whaleTradeItems ?? []).map { $0.toItem() }

@@ -165,7 +165,8 @@ class NotificationKind:
     # category rather than by ticker keeps a busy day as one collapsible stack per
     # topic instead of N stacks of one.
     thread_id: str
-    # Whether this kind may be held during the user's quiet hours.
+    # Whether this kind may be held during the user's quiet hours. See `night_hold_by_default`
+    # for the kinds held even when the user never set them.
     respects_quiet_hours: bool
     # What the iOS router switches on to pick a destination screen.
     route_kind: str
@@ -207,6 +208,22 @@ class NotificationKind:
     # none at all. Getting those two backwards would silently drop pushes to any device
     # that happened to be offline for a second.
     expiration_hours: Optional[int] = None
+    # Hold for morning even when the user NEVER set Quiet Hours (owner decision 2026-11-05,
+    # "Hold until 7 AM"): `quiet_hours.NIGHT_HOLD_WINDOW` on the user's own clock. FMP can fill
+    # a result at any hour, so without this a default-settings watcher could be buzzed at
+    # 02:30. It is the ordinary deferral: the inbox row is written at once, the 24/7 flush
+    # buzzes at the wake, and a dedup key shared by two kinds still gives one push. A Quiet
+    # Hours toggle the user did touch always wins, off included. Such a kind's wake also asks
+    # again: the flush holds a row once more on a good read that puts it in the user's night,
+    # and takes its text from `earnings_live_sender.copy_at_wake`, so a third kind here needs
+    # copy there too (with none, it keeps the row's text). At the landing it changes two more
+    # things (`PushDispatchService.decide`): a hold past the user's midnight meets the cap of the
+    # day it wakes on, and a failed preference read waits for the next flush instead of buzzing
+    # on ET's clock. At the wake, a row the user's settings turn off goes on as the kind sharing its
+    # key when the user takes that one and its sender would start it now
+    # (`earnings_live_sender.instead_at_wake`), and is otherwise deleted rather than ended, because
+    # these kinds share their key (`PushDispatchService.flush_deferred`).
+    night_hold_by_default: bool = False
 
     def __post_init__(self) -> None:
         # Fail at IMPORT, not at send time. A typo'd level would otherwise surface as a
@@ -253,6 +270,13 @@ class NotificationKind:
                 f"{self.expiration_hours!r}. 0 is NOT 'no expiry' — it tells APNs to "
                 f"try once and discard."
             )
+        if self.night_hold_by_default and not self.respects_quiet_hours:
+            # `decide` never reaches the hold for such a kind, so the flag would look like a
+            # promise and do nothing.
+            raise ValueError(
+                f"NotificationKind {self.key!r}: night_hold_by_default needs "
+                f"respects_quiet_hours=True; a kind that bypasses quiet hours is never held"
+            )
         if not self.preference_key.startswith("notify_"):
             # `user_settings_service._KNOWN_KEY_PREFIXES` only accepts `notify_*`, so a
             # key without the prefix is silently dropped by `sanitize_preferences` and
@@ -270,6 +294,7 @@ KIND_RESEARCH_COMPLETE = "research_complete"
 KIND_RESEARCH_FAILED = "research_failed"
 KIND_EARNINGS_UPCOMING = "earnings_upcoming"
 KIND_EARNINGS_RESULT = "earnings_result"
+KIND_EARNINGS_LIVE = "earnings_live"
 KIND_INSIDER_TRADE = "insider_trade"
 KIND_WHALE_13F = "whale_13f"
 KIND_CONGRESS_TRADE = "congress_trade"
@@ -380,6 +405,34 @@ NOTIFICATION_KINDS: Dict[str, NotificationKind] = {
             route_tab=TAB_FINANCIALS,
             # The surprise is measured against a consensus and a price that both move.
             expiration_hours=4,
+            night_hold_by_default=True,
+        ),
+        # "Live Results" (owner request 2026-10-29): EVERY watched report, the moment any
+        # figure lands — EPS and revenue against consensus, whichever is out — where
+        # `earnings_result` above is the surprises-only alert. A landing in the small hours waits
+        # for the user's morning (`night_hold_by_default`). Neither goes out for a report older
+        # than yesterday (`earnings_sender.in_result_window`), a rule on STARTING a push: a row
+        # already held is still delivered. They share ONE dedup key per report
+        # (`earnings_sender.result_dedup_key`) and `earnings_live_sender` sends this one
+        # first, so a user with both toggles on is told once. Same group master, same
+        # category cap and thread as its siblings, so the cap and the Earnings master switch
+        # govern all three together.
+        NotificationKind(
+            key=KIND_EARNINGS_LIVE,
+            preference_key="notify_earnings_live",
+            master_preference_key="notify_earnings_alerts",
+            default_on=True,
+            category=CATEGORY_EARNINGS,
+            interruption_level=LEVEL_ACTIVE,
+            thread_id="earnings",
+            respects_quiet_hours=True,
+            route_kind="ticker",
+            label="Live earnings results",
+            route_tab=TAB_FINANCIALS,
+            # A "results are out" banner is news for the evening it lands in, not the next
+            # afternoon; the inbox row keeps it either way.
+            expiration_hours=4,
+            night_hold_by_default=True,
         ),
         # Smart-money kinds are PASSIVE and get apns-priority 5: a Form 4 filed this
         # evening is information, not an interruption. iOS is allowed to batch them for
@@ -514,12 +567,19 @@ LEGACY_PREFERENCE_DEFAULTS: Dict[str, bool] = {
 # They carry the `notify_` prefix because that prefix is what makes a key syncable at
 # all (`user_settings_service._KNOWN_KEY_PREFIXES`), not because they name a
 # notification type — no `NotificationKind` references them, and `preference_enabled`
-# never consults them. `quiet_hours.resolve_window` reads this one directly.
+# never consults them. `quiet_hours.resolve_window` and `quiet_hours.quiet_hours_never_set`
+# read this one directly.
 #
 # Declared here anyway so `preference_defaults()` stays the single answer to "what does
 # an absent notify_* key mean?", which is the contract the iOS parity test pins. Leaving
 # it out let the two sides disagree about a key that ships OFF, and an off-by-default
 # key that the backend thinks is on is the exact failure this whole map exists to stop.
+#
+# One thing this map cannot say. Absent and a stored False both DISPLAY as off, and for the
+# ordinary window they ARE the same, but an absent key also means the user never answered,
+# which `quiet_hours_never_set` reads for `night_hold_by_default` kinds. So the client must
+# keep leaving the key out until the toggle is touched (`SettingsSyncManager.currentBlob()`),
+# which `tests/test_ios_settings_push_paths.py` pins.
 DELIVERY_PREFERENCE_DEFAULTS: Dict[str, bool] = {
     PREF_QUIET_ENABLED: False,
 }
@@ -582,6 +642,7 @@ def ticker_route(
     *,
     asset_type: Optional[str] = None,
     whale_id: Optional[str] = None,
+    report_date: Optional[str] = None,
 ) -> Dict[str, str]:
     """Build the `route` payload for a notification that opens an asset screen.
 
@@ -645,6 +706,11 @@ def ticker_route(
     # equity screen.
     if whale_id:
         route["whale_id"] = str(whale_id)
+    # The report an earnings alert is ABOUT ("YYYY-MM-DD"), so the detail screen can open
+    # that report's live results (`AlertDestination.Target.earningsLive`). Additive, for the
+    # same reason as `whale_id` above: the iOS route map ignores names it does not know.
+    if report_date:
+        route["report_date"] = str(report_date)[:10]
     return route
 
 

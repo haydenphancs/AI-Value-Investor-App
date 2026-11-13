@@ -1,0 +1,461 @@
+//
+//  EarningsLiveResultsCard.swift
+//  ios
+//
+//  Organism: one report's results against consensus — the top of the Earnings Alert sheet and
+//  the whole of `EarningsLiveScreen` (a tapped live-results push). Owner request 2026-10-29:
+//  "the result will show right away … compare results for estimate vs actual … whatever comes
+//  out first will be shown right away … red or green for miss or beat".
+//
+//  Each metric row stands alone: while the report is LIVE, Revenue can be in while EPS still
+//  reads "Waiting…". While the report is LIVE, or FMP can still confirm its preliminary figures,
+//  the card polls its own endpoint (`EarningsLiveViewModel`). In the sheet it opens on the
+//  Tracking card's own figures (`fallback`), so it is never blank while the first answer loads.
+//  A tapped push has no such figures: until the first answer the card says it is loading and
+//  claims nothing about the report, which the push has just said is out.
+//
+//  Honesty rules, each from the server (`earnings_live_service`), rendered as given:
+//    * a figure from the company's own release is marked "Preliminary" with a link to the
+//      filing, until FMP's figure replaces it;
+//    * a GAAP EPS is labelled GAAP and never coloured — the consensus is adjusted;
+//    * a figure held by a sanity guard reads "Confirming…", never as a number;
+//    * a metric is awaited only while the report is LIVE: a finished report with no revenue
+//      consensus has stopped waiting for revenue, so it reads "—", or loses the row;
+//    * LIVE lasts only while this device is asking: once its poll has given up, the status
+//      left on screen is a last word from before that, so the badge and "Waiting…" go.
+//
+
+import SwiftUI
+
+struct EarningsLiveResultsCard: View {
+    @StateObject private var viewModel: EarningsLiveViewModel
+    /// The Tracking card's own figures — what is shown until the first answer arrives.
+    private let fallback: AppAlert.EarningsData?
+    /// Each new answer, for a host whose own text reads the same report (`AlertDetailView`).
+    private let onAnswer: ((EarningsLiveResponse) -> Void)?
+    /// Whether the poll has given up (`EarningsLiveViewModel.pollEnded`), for the same host.
+    private let onPollEnded: ((Bool) -> Void)?
+    @State private var browserLink: BrowserLink?
+
+    init(ticker: String, reportDate: String?, fallback: AppAlert.EarningsData? = nil,
+         onAnswer: ((EarningsLiveResponse) -> Void)? = nil,
+         onPollEnded: ((Bool) -> Void)? = nil) {
+        _viewModel = StateObject(wrappedValue: EarningsLiveViewModel(ticker: ticker,
+                                                                    reportDate: reportDate))
+        self.fallback = fallback
+        self.onAnswer = onAnswer
+        self.onPollEnded = onPollEnded
+    }
+
+    #if DEBUG
+    /// Previews only: draws `answer` and never calls the network.
+    init(previewing answer: EarningsLiveResponse) {
+        _viewModel = StateObject(wrappedValue: EarningsLiveViewModel(previewing: answer))
+        self.fallback = nil
+        self.onAnswer = nil
+        self.onPollEnded = nil
+    }
+    #endif
+
+    // MARK: Unified reads (live answer first, then the card's figures)
+
+    private var live: EarningsLiveResponse? { viewModel.live }
+
+    private var status: EarningsLiveStatus {
+        live?.liveStatus ?? fallback?.status ?? .upcoming
+    }
+
+    /// The report reads LIVE and this device is still asking. Anything that claims a check is
+    /// under way reads this, never `status` alone (`LiveBadge`'s honesty rule).
+    private var isLiveNow: Bool { status == .live && !viewModel.pollEnded }
+
+    private var eps: EarningsMetricOutcome {
+        live?.epsOutcome ?? fallback?.epsOutcome
+            ?? EarningsMetricOutcome(estimate: nil, actual: nil, surprisePct: nil)
+    }
+
+    private var revenue: EarningsMetricOutcome {
+        live?.revenueOutcome ?? fallback?.revenueOutcome
+            ?? EarningsMetricOutcome(estimate: nil, actual: nil, surprisePct: nil)
+    }
+
+    private var isPreliminary: Bool { live?.preliminary ?? fallback?.isPreliminary ?? false }
+
+    private var checkedAt: Date? { live?.checkedDate ?? fallback?.checkedAt }
+
+    private var companyName: String {
+        let name = live?.companyName ?? fallback?.companyName ?? ""
+        return name.isEmpty ? viewModel.ticker : name
+    }
+
+    /// No answer yet and no card figures to open on: the tapped push, before its first answer.
+    /// Read from the data, never a loading flag, which is still false on the first frame.
+    private var hasNothingToShow: Bool { live == nil && fallback == nil }
+
+    /// A finished report with no revenue consensus and no revenue figure: nothing to compare,
+    /// and the server has stopped waiting for one (`is_complete`). While LIVE one can still land.
+    private var showsRevenueRow: Bool {
+        status == .live || revenue.estimate != nil || revenue.hasLanded || revenue.isChecking
+    }
+
+    // MARK: Body
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            header
+
+            if hasNothingToShow {
+                if !viewModel.loadFailed {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            } else if status == .notScheduled {
+                Text("No earnings report for \(viewModel.ticker) in the next two weeks.")
+                    .font(AppTypography.bodySmall)
+                    .foregroundColor(AppColors.textSecondary)
+            } else {
+                if showsRevenueRow {
+                    metricRow(title: "Revenue", outcome: revenue,
+                              format: EarningsFigureFormat.revenueRow(actual: revenue.actual,
+                                                                      estimate: revenue.estimate,
+                                                                      beatOrMiss: revenue.isBeatOrMiss))
+                }
+                metricRow(title: eps.isGAAP ? "EPS (GAAP)" : "EPS (adjusted)", outcome: eps,
+                          format: EarningsFigureFormat.epsRow(actual: eps.actual,
+                                                              estimate: eps.estimate,
+                                                              beatOrMiss: eps.isBeatOrMiss))
+
+                if isPreliminary { preliminaryNote }
+                if let yearAgo = live?.yearAgo { yearAgoBlock(yearAgo) }
+                if let quarters = live?.quarterResults, !quarters.isEmpty {
+                    lastQuartersBlock(quarters)
+                }
+                if let guidance = live?.guidance, !guidance.isEmpty { guidanceBlock(guidance) }
+
+                footnote
+            }
+
+            if viewModel.loadFailed {
+                InlineRetryNotice(
+                    message: "Couldn't load the latest results.",
+                    onRetry: { viewModel.start() }
+                )
+            }
+        }
+        .padding(AppSpacing.lg)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
+        .onAppear { viewModel.start() }
+        .onDisappear { viewModel.stop() }
+        .onChange(of: viewModel.live) { _, answer in
+            if let answer { onAnswer?(answer) }
+        }
+        .onChange(of: viewModel.pollEnded) { _, ended in onPollEnded?(ended) }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            viewModel.stop()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            viewModel.start()
+        }
+        .inAppBrowser(link: $browserLink)
+    }
+
+    // MARK: Header
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.xs) {
+            HStack(spacing: AppSpacing.sm) {
+                Text("Results vs. estimates")
+                    .font(AppTypography.bodyEmphasis)
+                    .foregroundColor(AppColors.textPrimary)
+                Spacer(minLength: 0)
+                if isLiveNow {
+                    LiveBadge()
+                }
+            }
+            Text(statusLine)
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var statusLine: String {
+        if hasNothingToShow {
+            return viewModel.loadFailed ? "Results aren't available right now" : "Loading results…"
+        }
+        switch status {
+        case .live:
+            guard isLiveNow else { return "Latest results aren't available right now" }
+            if let checkedAt {
+                return "Checking for results · updated \(Self.relative(checkedAt))"
+            }
+            return "Checking for results as they come out"
+        case .reported:
+            if let accepted = live?.acceptedDate {
+                return "Released \(EarningsLiveDates.etTime(accepted))"
+            }
+            return "Reported"
+        case .awaiting:
+            return eps.isChecking || revenue.isChecking
+                ? "Results being confirmed" : "Results aren't in yet"
+        case .upcoming:
+            return "Results will appear here the moment they're out"
+        case .notScheduled:
+            return "Nothing scheduled"
+        }
+    }
+
+    private static func relative(_ date: Date) -> String {
+        let seconds = max(0, Date().timeIntervalSince(date))
+        if seconds < 60 { return "just now" }
+        let minutes = Int(seconds / 60)
+        if minutes < 60 { return "\(minutes) min ago" }
+        return "\(minutes / 60) h ago"
+    }
+
+    // MARK: Metric rows
+
+    private func metricRow(title: String, outcome: EarningsMetricOutcome,
+                           format: (Double) -> String) -> some View {
+        VStack(alignment: .leading, spacing: AppSpacing.xs) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title)
+                    .font(AppTypography.bodySmallEmphasis)
+                    .foregroundColor(AppColors.textPrimary)
+                Spacer(minLength: AppSpacing.sm)
+                outcomeLabel(outcome)
+            }
+            HStack(spacing: AppSpacing.lg) {
+                figure(label: "Estimate", value: outcome.estimate.map(format) ?? "—",
+                       color: AppColors.textSecondary)
+                figure(label: "Actual", value: actualText(outcome, format: format),
+                       color: outcome.hasLanded ? outcome.color : AppColors.textMuted,
+                       emphasized: outcome.hasLanded)
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(AppSpacing.md)
+        .background(
+            RoundedRectangle(cornerRadius: AppCornerRadius.medium, style: .continuous)
+                .fill(AppColors.cardBackgroundLight)
+        )
+        .accessibilityElement(children: .combine)
+    }
+
+    private func actualText(_ outcome: EarningsMetricOutcome,
+                            format: (Double) -> String) -> String {
+        if let actual = outcome.actual { return format(actual) }
+        if outcome.isChecking { return "Confirming…" }
+        return isLiveNow ? "Waiting…" : "—"
+    }
+
+    @ViewBuilder
+    private func outcomeLabel(_ outcome: EarningsMetricOutcome) -> some View {
+        if outcome.isGAAP, outcome.hasLanded {
+            Text("Not comparable")
+                .font(AppTypography.captionEmphasis)
+                .foregroundColor(AppColors.textMuted)
+        } else if let word = outcome.word {
+            HStack(spacing: 3) {
+                if let arrow = outcome.arrowSymbol {
+                    Image(systemName: arrow)
+                        .font(.system(size: 9, weight: .bold))
+                }
+                Text([word, outcome.surpriseText].compactMap { $0 }.joined(separator: " "))
+                    .font(AppTypography.captionEmphasis)
+            }
+            .foregroundColor(outcome.color)
+        } else if !outcome.hasLanded, status == .live, !viewModel.loadFailed {
+            ProgressView()
+                .controlSize(.small)
+        }
+    }
+
+    private func figure(label: String, value: String, color: Color,
+                        emphasized: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+            Text(value)
+                .font(emphasized ? AppTypography.bodyEmphasis : AppTypography.body)
+                .foregroundColor(color)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+    }
+
+    // MARK: Preliminary
+
+    private var preliminaryNote: some View {
+        HStack(alignment: .top, spacing: AppSpacing.sm) {
+            Image(systemName: "doc.text")
+                .font(AppTypography.iconSmall)
+                .foregroundColor(AppColors.caution)
+            VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                Text(preliminaryText)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let url = live?.filingURL {
+                    Button {
+                        openExternal(url, into: &browserLink)
+                    } label: {
+                        Text("View the filing")
+                            .font(AppTypography.captionEmphasis)
+                            .foregroundColor(AppColors.primaryBlue)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private var preliminaryText: String {
+        var text = "Preliminary · read from \(companyName)'s own press release (SEC 8-K)"
+        if let accepted = live?.acceptedDate {
+            text += ", filed \(EarningsLiveDates.etTime(accepted))"
+        }
+        return text + ". It updates when FMP confirms the figures."
+    }
+
+    // MARK: Extras
+
+    private func yearAgoBlock(_ yearAgo: EarningsLiveYearAgoDTO) -> some View {
+        VStack(alignment: .leading, spacing: AppSpacing.xs) {
+            Text(yearAgo.quarter.map { "Vs. the same quarter last year (\($0))" }
+                 ?? "Vs. the same quarter last year")
+                .font(AppTypography.bodySmallEmphasis)
+                .foregroundColor(AppColors.textPrimary)
+            if let rev = yearAgo.revenue {
+                yearAgoLine(label: "Revenue", then: EarningsFigureFormat.revenue(rev),
+                            growth: yearAgo.revenueGrowthPct)
+            }
+            if let eps = yearAgo.eps {
+                yearAgoLine(label: "EPS", then: EarningsFigureFormat.eps(eps),
+                            growth: yearAgo.epsGrowthPct)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func yearAgoLine(label: String, then: String, growth: Double?) -> some View {
+        HStack {
+            Text(label)
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textMuted)
+            Spacer()
+            Text("\(then) a year ago")
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+            if let growth {
+                Text(EarningsFigureFormat.growth(growth))
+                    .font(AppTypography.bodySmallEmphasis)
+                    .foregroundColor(growth >= 0 ? AppColors.gain : AppColors.loss)
+            }
+        }
+    }
+
+    private func lastQuartersBlock(
+        _ quarters: [(quarter: String, result: EarningsQuarterResult, surprisePct: Double?)]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            // A recent listing can have only one reported quarter before this report.
+            Text(quarters.count == 1 ? "Last quarter" : "Last \(quarters.count) quarters")
+                .font(AppTypography.bodySmallEmphasis)
+                .foregroundColor(AppColors.textPrimary)
+            // Top-aligned: a caption that wraps at a large text size keeps its dot level with
+            // the others.
+            HStack(alignment: .top, spacing: 0) {
+                ForEach(Array(quarters.enumerated()), id: \.offset) { _, q in
+                    VStack(spacing: AppSpacing.xs) {
+                        EarningsResultDot(result: q.result, size: 12)
+                        Text(q.quarter)
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                            .lineLimit(1)
+                        Text(Self.quarterCaption(q.result, q.surprisePct))
+                            .font(AppTypography.captionEmphasis)
+                            .foregroundColor(q.result.dotColor)
+                            .multilineTextAlignment(.center)
+                            .lineLimit(2)
+                            .minimumScaleFactor(0.8)
+                    }
+                    .frame(maxWidth: .infinity)
+                    // The verdict in words for VoiceOver too: combined, the column read only its
+                    // caption's size, the same "<0.1%" for a beat and a miss.
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(Self.quarterSpoken(q.quarter, q.result, q.surprisePct))
+                }
+            }
+        }
+    }
+
+    /// The caption under one quarter's dot: the verdict in words, then how far ("Beat +7.3%",
+    /// "Miss -26.8%"). The word carries the direction, never the colour alone: a one-cent beat
+    /// and a one-cent miss on a $35 consensus are both under 0.05%, and both sizes read "<0.1%".
+    private static func quarterCaption(_ result: EarningsQuarterResult, _ pct: Double?) -> String {
+        switch result {
+        case .noEstimate, .pending: return "—"
+        case .matched: return "In line"
+        case .beat, .missed:
+            let word: String = result == .beat ? "Beat" : "Miss"
+            guard let pct, pct.isFinite else { return word }
+            return word + " " + EarningsQuarterData.surpriseText(pct, isMatch: false)
+        }
+    }
+
+    /// What VoiceOver reads for one quarter: "Q3 '25: missed by 26.8%". The size is the caption's
+    /// own with its sign dropped, since the verb says which way (`EarningsResultChips.spoken`).
+    private static func quarterSpoken(_ quarter: String, _ result: EarningsQuarterResult,
+                                      _ pct: Double?) -> String {
+        var by: String = ""
+        if let pct, pct.isFinite {
+            let text: String = EarningsQuarterData.surpriseText(pct, isMatch: false)
+            by = " by " + String(text.drop(while: { $0 == "+" || $0 == "-" }))
+        }
+        switch result {
+        case .beat: return "\(quarter): beat\(by)"
+        case .missed: return "\(quarter): missed\(by)"
+        case .matched: return "\(quarter): in line"
+        case .noEstimate: return "\(quarter): no analyst consensus"
+        case .pending: return "\(quarter): not reported yet"
+        }
+    }
+
+    private func guidanceBlock(_ guidance: String) -> some View {
+        VStack(alignment: .leading, spacing: AppSpacing.xs) {
+            Text("Outlook")
+                .font(AppTypography.bodySmallEmphasis)
+                .foregroundColor(AppColors.textPrimary)
+            Text(guidance)
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("From the company's release")
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var footnote: some View {
+        let basis: String = eps.isGAAP
+            ? "This EPS is GAAP; the consensus is adjusted, so the two are not compared. "
+            : "EPS is adjusted (non-GAAP), the same basis as the consensus estimate. "
+        return Text(basis + "Estimates and confirmed results from FMP.")
+            .font(AppTypography.caption)
+            .foregroundColor(AppColors.textMuted)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+#if DEBUG
+#Preview {
+    ScrollView {
+        EarningsLiveResultsCard(previewing: .sampleData)
+            .padding()
+    }
+    .background(AppColors.background)
+}
+#endif

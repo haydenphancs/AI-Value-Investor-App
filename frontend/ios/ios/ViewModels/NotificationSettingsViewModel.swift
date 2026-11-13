@@ -96,6 +96,14 @@ final class NotificationSettingsViewModel: ObservableObject {
                     title: "Reporting Tomorrow",
                     subtitle: "A heads-up the day before a company you track reports"
                 ),
+                // Owner request 2026-10-29. Every report, the moment its first figure lands;
+                // the row below stays for people who only want the big surprises. One push
+                // per report either way: both kinds share one dedup key server-side.
+                NotificationToggleSpec(
+                    key: "notify_earnings_live",
+                    title: "Live Results",
+                    subtitle: "The moment a company you track reports: EPS and revenue vs. estimates"
+                ),
                 NotificationToggleSpec(
                     key: "notify_earnings_surprises",
                     title: "Results & Surprises",

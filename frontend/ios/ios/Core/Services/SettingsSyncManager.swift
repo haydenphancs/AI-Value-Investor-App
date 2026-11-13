@@ -65,6 +65,7 @@ final class SettingsSyncManager {
     /// deliberately synced with no kind behind them.
     static let boolKeys: [String] = [
         "notify_earnings_alerts", "notify_earnings_surprises", "notify_earnings_upcoming",
+        "notify_earnings_live",
         "notify_market_alerts", "notify_market_macro", "notify_market_volatility", "notify_market_sector",
         "notify_smart_money", "notify_smart_money_whale", "notify_smart_money_insider",
         "notify_smart_money_institutional",

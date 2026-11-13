@@ -12,7 +12,7 @@ Design:
 import asyncio
 import math
 import time as _time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any, Tuple
 import logging
 
@@ -38,6 +38,7 @@ from app.utils.supabase_errors import retry_idempotent_async
 from app.schemas.tracking import (
     TrackedAssetResponse,
     AlertResponse,
+    EarningsLiveResponse,
     TrackingFeedResponse,
     WhaleTradeItemResponse,
     AnalystRatingItemResponse,
@@ -59,7 +60,19 @@ from app.services._whale_common import (
     sum_amount_bounds,
     format_amount_range,
 )
+from app.services.earnings_filing_service import _DUE_SLACK_SECONDS
 from app.services.earnings_window_service import fetch_calendar_days
+from app.services.earnings_live_service import (
+    LiveSnapshot,
+    _revenue_estimate,
+    card_fields,
+    get_earnings_live_service,
+    live_days,
+    live_payload,
+    newest_report,
+    one_row_per_report,
+    sheet_days,
+)
 from app.services._earnings_common import (
     parse_fmp_timing,
     timing_sentence,
@@ -72,6 +85,7 @@ from app.utils.market_hours import (
     ET,
     SESSION_CLOSED,
     SESSION_REGULAR,
+    is_trading_day,
     last_regular_session,
     session_phase,
 )
@@ -82,6 +96,12 @@ logger = logging.getLogger(__name__)
 #: Everything else (crypto, indices, commodities, FX) has no sector by construction, so
 #: leaving it in the backfill's "missing" set re-queries it on every single request.
 _CLASSIFIABLE_ASSET_TYPES = {"stock", "etf"}
+
+
+class _ReportDateOutOfWindow(Exception):
+    """`get_earnings_live` was asked about a date past the calendar it reads. A class of its
+    own so the endpoint answers 400 for this alone: pydantic's `ValidationError` is a
+    `ValueError`, and catching that would call a response-shape bug bad input, unlogged."""
 
 
 class WatchlistUnavailableError(Exception):
@@ -558,7 +578,8 @@ def _after_hours_tail(
 # `EARNINGS_CALENDAR_FAR_TTL` (6 h) — a date that far out rarely moves within hours. That
 # is ~2 calls a round and ~150 a day, not the 720 a 15-call round every 30 min would cost.
 # A day's TTL follows its distance from today at READ time, so at the ET day roll the old
-# day 2 becomes "tomorrow" and is refetched on the near schedule.
+# day 2 becomes "tomorrow" and is refetched on the near schedule. One reader can ask for less
+# old: the live sheet, before it says a report is listed nowhere (`later_days_since`).
 #
 # Tier 1 only, by design: the window moves daily and the rows are a pure function of the
 # upstream, so a Supabase tier would only add a round trip to this memo.
@@ -573,12 +594,18 @@ def _after_hours_tail(
 # * A failed or empty round serves the days already held, however old (a calendar row is
 #   a scheduled date, still true hours later), and the next round waits
 #   `_EARNINGS_CALENDAR_FAILURE_RETRY_SECONDS`, so an FMP outage costs one round per wait,
-#   not one per feed build of every user.
+#   not one per feed build of every user. What it serves says so (`_HeldAfterFailure`): a
+#   held row is still true, but a row NOT held proves nothing.
 # * `_earnings_calendar_inflight` dedups concurrent misses. A joiner is shielded, and a
 #   joiner whose leader was CANCELLED (a client disconnect) takes over the download
-#   rather than serving its own user a feed with no earnings alerts.
+#   rather than serving its own user a feed with no earnings alerts. One whose leader
+#   stored fewer days than it needs (the live tick's `near_only` round) pays for the rest.
 # * Coherent only within one process — the deploy runs exactly one uvicorn worker
 #   (`tests/test_deploy_command_parity.py`).
+# * The live loop reads this memo on a tick that starts exactly on its minute, and a round
+#   stamps itself when it returns, so a TTL or a wait comes to its end a few seconds early
+#   (`_DUE_SLACK_SECONDS`). An exact compare falls a moment short on that tick and costs a
+#   minute: with nobody opening the app, "30 min" would be 31.
 EARNINGS_CALENDAR_TTL = 1800
 EARNINGS_CALENDAR_FAR_TTL = 6 * 3600
 # Days 0 and 1 (today, tomorrow) are "near".
@@ -599,6 +626,14 @@ _earnings_calendar_memo: Optional[
 _earnings_calendar_inflight: Dict[Tuple[int, date], asyncio.Future] = {}
 # (client, monotonic time the next round may start) after a failed or empty round.
 _earnings_calendar_retry_after: Optional[Tuple[Any, float]] = None
+
+
+class _HeldAfterFailure(list):
+    """The rows a failed or empty round served, which is all the days held, or none. They read
+    as any list, but `fetch_failed`, as on `integrations.fmp.EmptyAfterFailure`, tells a reader
+    about to say a report is listed nowhere that this answer cannot know that."""
+
+    fetch_failed = True
 
 
 def reset_earnings_calendar_cache() -> None:
@@ -634,13 +669,43 @@ def _held_earnings_days(fmp: Any) -> Dict[date, Tuple[float, List[Dict[str, Any]
     return memo[1]
 
 
-def _earnings_days_due(fmp: Any, days: List[date], today: date) -> List[date]:
-    """The window's days that are missing or older than their TTL, oldest first."""
+def earnings_day_stored_at(fmp: Any, day: date) -> Optional[float]:
+    """When ``day``'s rows were stored for this client, or None when that day is not held.
+
+    Monotonic, the clock of the live service's own fetch. This is the rows' own age however
+    they were served: a failed or empty round stores nothing, so held rows keep their stamp.
+    Read it with no await between it and the rows in hand (`_cached_earnings_calendar`, or
+    `_held_earnings_window` when the live tick folds without paying for a round), so it
+    belongs to those rows.
+    """
+    entry = _held_earnings_days(fmp).get(day)
+    return entry[0] if entry is not None else None
+
+
+def _earnings_day_unread(fmp: Any, day: date, today: date) -> bool:
+    """Has no answer told this memo about ``day``, today or later? A day not held has had none:
+    a failed round, a cold window that came back empty, or the day a rollover could not add.
+    A blank today on a trading day is stored like any blank day, and the memo cannot tell it
+    from a blip, but a whole market reporting nothing on a trading day is no answer. Only today:
+    FMP can honestly list nothing on a trading day a week out, and on those the day stands."""
+    entry = _held_earnings_days(fmp).get(day)
+    if entry is None:
+        return True
+    return day == today and not entry[1] and is_trading_day(day)
+
+
+def _earnings_days_due(
+    fmp: Any, days: List[date], today: date, later_days_since: Optional[float] = None
+) -> List[date]:
+    """The window's days that are missing or older than their TTL, oldest first, and the days
+    after today stored before ``later_days_since`` (`_cached_earnings_calendar`)."""
     held = _held_earnings_days(fmp)
     now = _time.monotonic()
     return [
         d for d in days
-        if d not in held or now - held[d][0] >= _earnings_day_ttl(d, today)
+        if d not in held
+        or now - held[d][0] >= _earnings_day_ttl(d, today) - _DUE_SLACK_SECONDS
+        or (later_days_since is not None and d > today and held[d][0] < later_days_since)
     ]
 
 
@@ -660,10 +725,28 @@ def _held_earnings_window(
     return rows, missing
 
 
+def _near_only_due(
+    fmp: Any, days: List[date], today: date, due: List[date]
+) -> List[date]:
+    """What a ``near_only`` round pays for out of the window's ``due`` days: today and tomorrow
+    alone, while a day it leaves as held lists a row. Otherwise every due day.
+
+    The round answers every held day of the window, and an answer with no row is the empty
+    window this memo never stores. A blank today and tomorrow (a weekend, a market holiday)
+    with no other held day listing anyone would be that answer: the live tick would pay for it
+    again after every wait, all day, and a feed build inside a wait would serve no earnings
+    alert. So that round pays for every due day instead, as a feed build does: the whole window
+    after a restart, and again once the days it last read whole have rolled past."""
+    near = [d for d in due if (d - today).days < _EARNINGS_NEAR_DAYS]
+    kept, _ = _held_earnings_window(fmp, [d for d in days if d not in near])
+    return near if kept else due
+
+
 def _serve_held_earnings(
     fmp: Any, days: List[date], span: str, why: str, level: int
 ) -> Optional[List[Dict[str, Any]]]:
-    """The held days of this window after a failed round, or None when none is held.
+    """The held days of this window after a failed round (`_HeldAfterFailure`), or None when
+    none is held.
 
     A day that was never fetched is left out: its alerts are missing, never wrong."""
     rows, missing = _held_earnings_window(fmp, days)
@@ -676,7 +759,7 @@ def _serve_held_earnings(
         span, why, len(rows), len(days) - len(missing), len(days),
         f"; not held: {', '.join(d.isoformat() for d in missing)}" if missing else "",
     )
-    return rows
+    return _HeldAfterFailure(rows)
 
 
 async def _fetch_earnings_days(
@@ -698,20 +781,41 @@ async def _fetch_earnings_days(
     return await fetch_calendar_days(_one_day, days)
 
 
-async def _cached_earnings_calendar(fmp: Any, today: date) -> List[Dict[str, Any]]:
+async def _cached_earnings_calendar(
+    fmp: Any, today: date, *, later_days_since: Optional[float] = None,
+    near_only: bool = False,
+) -> List[Dict[str, Any]]:
     """The market-wide calendar for ``today`` .. ``today + 14`` (ET), oldest day first:
     memo → join → fetch the days that are due.
 
-    A failed or empty round serves the days already held; with none held, a failure
-    raises and the caller degrades to no alerts. The rows are SHARED with every other
-    caller — read them, never mutate them.
+    A failed or empty round serves the days already held, flagged `fetch_failed`; with none
+    held, a failure raises and the caller degrades to no alerts. The rows are SHARED with
+    every other caller — read them, never mutate them.
+
+    ``later_days_since`` (a moment on this memo's clock) also makes due the days after today
+    stored before it: for a reader about to say a report is listed nowhere, which must not
+    rest on a day held for hours.
+
+    ``near_only`` pays for today and tomorrow alone (`_EARNINGS_NEAR_DAYS`) and leaves the later
+    days as they are held, while the answer is still every held day of the window: the live
+    tick's round, which reads today and holds tomorrow for the night
+    (`earnings_live_service.earnings_live_tick`). While no day it leaves as held lists anyone,
+    after a restart for one, it pays for every due day instead (`_near_only_due`). A feed build
+    keeps the later days fresh when someone looks.
+
+    A reader that joins a round in flight takes its answer only when it failed or came back
+    empty. A round that stored its days may have paid for fewer than this reader's own (a
+    ``near_only`` one, or one older than ``later_days_since``), so the joiner works out its due
+    days again and is served from memory, or pays for the rest itself.
     """
     global _earnings_calendar_memo, _earnings_calendar_retry_after
     days = _earnings_alert_days(today)
     span = f"{days[0].isoformat()}..{days[-1].isoformat()}"
     key = (id(fmp), today)
     while True:
-        due = _earnings_days_due(fmp, days, today)
+        due = _earnings_days_due(fmp, days, today, later_days_since)
+        if near_only:
+            due = _near_only_due(fmp, days, today, due)
         if not due:
             rows, _ = _held_earnings_window(fmp, days)
             logger.debug(
@@ -725,7 +829,7 @@ async def _cached_earnings_calendar(fmp: Any, today: date) -> List[Dict[str, Any
         try:
             # `shield`: a joiner that is itself cancelled must not cancel the download
             # every other caller is waiting on.
-            return await asyncio.shield(inflight)
+            joined = await asyncio.shield(inflight)
         except _InflightLeaderCancelled:
             # The leader's request went away mid-download. Take over instead of serving
             # this user a feed with no earnings alerts for someone else's disconnect.
@@ -738,11 +842,17 @@ async def _cached_earnings_calendar(fmp: Any, today: date) -> List[Dict[str, Any
                 "over the download", span,
             )
             continue
+        if getattr(joined, "fetch_failed", False):
+            # The round failed or came back empty: this reader hears the same, and the
+            # wait that round set holds for it too.
+            return joined
+        # The round stored its days, which need not be all of this reader's: work them out
+        # again (the docstring).
 
     retry = _earnings_calendar_retry_after
     if retry is not None and retry[0] is fmp:
         wait = retry[1] - _time.monotonic()
-        if wait > 0:
+        if wait > _DUE_SLACK_SECONDS:
             why = f"the last round failed; the next round in {wait:.0f} s"
             held_rows = _serve_held_earnings(fmp, days, span, why, logging.INFO)
             if held_rows is None:
@@ -798,9 +908,10 @@ async def _cached_earnings_calendar(fmp: Any, today: date) -> List[Dict[str, Any
                 span, len(due), elapsed_ms, _EARNINGS_CALENDAR_FAILURE_RETRY_SECONDS,
             )
             # The days held from an earlier round, as every build inside the wait gets.
-            rows = _serve_held_earnings(
+            held_rows = _serve_held_earnings(
                 fmp, days, span, "this round returned no rows", logging.WARNING
-            ) or []
+            )
+            rows = _HeldAfterFailure() if held_rows is None else held_rows
         if not fut.done():
             fut.set_result(rows)
         return rows
@@ -845,6 +956,23 @@ async def _cached_earnings_calendar(fmp: Any, today: date) -> List[Dict[str, Any
     finally:
         if _earnings_calendar_inflight.get(key) is fut:
             _earnings_calendar_inflight.pop(key, None)
+
+
+def _recent_earnings_alert(snap: LiveSnapshot) -> AlertResponse:
+    """One earnings card from before today, in the same shape `_get_earnings_alerts` builds."""
+    month = snap.day.strftime("%b").upper()
+    return AlertResponse(
+        type="earnings",
+        ticker=snap.symbol,
+        company_name=snap.company_name or snap.symbol,
+        title="Earnings Alert",
+        description=f"{snap.symbol} reported earnings on {month} {snap.day.day}.",
+        day=snap.day.day,
+        month=month,
+        eps_estimate=snap.eps.estimate,
+        revenue_estimate=snap.revenue.estimate,
+        **card_fields(snap, snap.day),
+    )
 
 
 # ── Service ─────────────────────────────────────────────────────────
@@ -1038,7 +1166,7 @@ class TrackingService:
         # `widget_movers_service._industries` does: it is ticker-keyed, already warm,
         # and gives every user the same answer for the same stock.
         #
-        # It runs INSIDE the gather below (its 7th, last member), not before it: awaited
+        # It runs INSIDE the gather below (its 7th member), not before it: awaited
         # serially it put one ~100 ms Supabase read in front of every build while any
         # equity/ETF row lacked a sector (common for ETFs). That is safe because
         #   * it only MUTATES `sector`/`country` on the watchlist dicts, which nothing in
@@ -1067,8 +1195,9 @@ class TrackingService:
         # The pre-market / after-hours print, also one FMP call per ticker (outside the
         # regular session only), so it takes the capped subset like the sparklines.
         extended_task = self._get_extended_prints(fanout, asset_types)
+        recent_earnings_task = self._get_recent_earnings_alerts(tickers)
 
-        # ⚠️ Positions are load-bearing: results[0..5] and [7] are unpacked by index below and
+        # ⚠️ Positions are load-bearing: results[0..5], [7] and [8] are unpacked by index below and
         # `section_names` is indexed by position. A new member goes LAST, with its name
         # appended to `section_names`.
         results = await asyncio.gather(
@@ -1080,6 +1209,7 @@ class TrackingService:
             insider_task,
             backfill_task,
             extended_task,
+            recent_earnings_task,
             return_exceptions=True,
         )
 
@@ -1104,6 +1234,9 @@ class TrackingService:
         extended_map: Dict[str, Dict[str, Any]] = (
             results[7] if not isinstance(results[7], BaseException) else {}
         )
+        recent_earnings_alerts: List[AlertResponse] = (
+            results[8] if not isinstance(results[8], BaseException) else []
+        )
 
         section_names = [
             "batch_quotes",
@@ -1117,6 +1250,8 @@ class TrackingService:
             "sector_backfill",
             # results[7]: a raise only costs the rows their extended-hours print.
             "extended_prints",
+            # results[8]: a raise only costs the previous day's earnings cards.
+            "recent_earnings_alerts",
         ]
         for idx, res in enumerate(results):
             if isinstance(res, BaseException):
@@ -1281,7 +1416,9 @@ class TrackingService:
                     )
                 )
 
-        feed = TrackingFeedResponse(assets=assets, alerts=alerts)
+        feed = TrackingFeedResponse(
+            assets=assets, alerts=alerts, recent_earnings_alerts=recent_earnings_alerts,
+        )
         # Don't PIN a fully-degraded feed. If the quote fan-out resolved nothing at
         # all, every row carries a placeholder price; caching that for the full TTL
         # makes one transient FMP blip look like a 30-second outage on the tab and
@@ -1639,33 +1776,39 @@ class TrackingService:
             # One call per ET day, memoised market-wide (`_cached_earnings_calendar`:
             # today and tomorrow for 30 min, later days for 6 h); the rows are shared
             # with every other build, so this loop only reads them.
-            calendar = await _cached_earnings_calendar(self.fmp, _et_today())
+            today = _et_today()
+            calendar = await _cached_earnings_calendar(self.fmp, today)
             if not calendar:
                 return []
 
             ticker_set = {t.upper() for t in watchlist_tickers}
             alerts: List[AlertResponse] = []
+            # Live results ride on the same rows: today's are folded into the shared live
+            # records, skipping any older than a record's last own fetch, so a card shows a
+            # figure the moment either the memo or the company's own filing has one. This
+            # build makes no live fetch: only the live loop does.
+            live = get_earnings_live_service() if settings.EARNINGS_LIVE_ENABLED else None
+            now = datetime.now(timezone.utc)
+            if live is not None:
+                live.observe_rows(today, calendar, now, symbols=ticker_set,
+                                  stored_at=earnings_day_stored_at(self.fmp, today))
 
-            for entry in calendar:
-                # One malformed row must not cost every alert: the answer is memoised
-                # for 30 min, so an `AttributeError` here would blank every user's
-                # earnings alerts for that long.
-                if not isinstance(entry, dict):
-                    continue
+            # One card per report: FMP can list a report twice, and both cards would carry
+            # one id on iOS. A non-dict row is skipped there too: the answer is memoised for
+            # 30 min, so an `AttributeError` here would blank every user's earnings alerts
+            # for that long.
+            reports = one_row_per_report(calendar, today, symbols=ticker_set)
+            for (symbol, _), entry in reports.items():
                 # A malformed DICT row (a non-str field, anything that raises below)
                 # costs only that row — never the whole section. The memo would keep an
                 # all-or-nothing failure for 30 min.
-                symbol = "?"
                 try:
-                    symbol = str(entry.get("symbol") or "").upper()
-                    if symbol not in ticker_set:
-                        continue
-
                     # Parse date for day/month. A non-str date is treated as absent
                     # (strptime would raise TypeError, which `except ValueError` misses).
                     date_str = entry.get("date")
                     day = None
                     month = None
+                    row_day: Optional[date] = None
                     if isinstance(date_str, str) and date_str:
                         try:
                             # [:10]: FMP sometimes sends a full timestamp, which
@@ -1673,6 +1816,7 @@ class TrackingService:
                             dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
                             day = dt.day
                             month = dt.strftime("%b").upper()
+                            row_day = dt.date()
                         except ValueError:
                             pass
 
@@ -1690,8 +1834,10 @@ class TrackingService:
                     # NaN/Inf/non-numeric alike, and both fields are Optional on the
                     # wire, so an unknown consensus renders as absent rather than as a
                     # fabricated 0.
+                    # A revenue estimate of zero or less is no consensus at all, the record's
+                    # own rule, so a card before the report never prints "$0".
                     eps_est = _finite_or_none(entry.get("epsEstimated"))
-                    rev_est = _finite_or_none(entry.get("revenueEstimated"))
+                    rev_est = _revenue_estimate(entry)
 
                     # One-line description for the card. iOS rebuilds its own
                     # version for the alert card, but keep a sane fallback here.
@@ -1710,6 +1856,15 @@ class TrackingService:
                     raw_name = entry.get("companyName")
                     company_name = raw_name if isinstance(raw_name, str) and raw_name else symbol
 
+                    live_fields: Dict[str, Any] = {}
+                    if live is not None and row_day is not None:
+                        snap = live.snapshot(symbol, row_day, now) if row_day <= today else None
+                        live_fields = card_fields(snap, row_day)
+                        if snap is not None:
+                            # The surprise came from the record's estimates: show those, as
+                            # the sheet does. In this block only: `snap` is not reset per row.
+                            eps_est, rev_est = snap.eps.estimate, snap.revenue.estimate
+
                     alerts.append(
                         AlertResponse(
                             type="earnings",
@@ -1722,6 +1877,7 @@ class TrackingService:
                             report_time=report_time,
                             eps_estimate=eps_est,
                             revenue_estimate=rev_est,
+                            **live_fields,
                         )
                     )
                 except Exception as e:
@@ -1736,6 +1892,154 @@ class TrackingService:
         except Exception as exc:
             logger.warning("Earnings alerts failed: %s", exc)
             return []
+
+    async def get_earnings_live(
+        self, symbol: str, requested: Optional[date] = None
+    ) -> EarningsLiveResponse:
+        """`GET /tracking/earnings/{ticker}/live` — one report's live results for the sheet.
+
+        No live fetch, like the feed: today's rows come from the shared Tracking memo and are
+        folded into the shared live records, skipping any older than a record's last own
+        fetch; the earlier live days' are already in those records. The report is `requested`
+        when given (it must lie between the first of `sheet_days` and today + 14), else
+        today's, else the one before today its card would name (`newest_report`), else the
+        next one in the window. `sheet_days` reach one trading day past the live days because a
+        held push can wake on that day, and opens its report by date. A `requested` date that
+        has been read and holds neither a record nor a row has moved: the sheet follows the
+        report to its next listed date, and answers `none` only when nothing is listed, since a
+        pinned sheet saying "no report in the next two weeks" beside a row four days out would
+        be false.
+
+        A report that left its date had left it by the newest answer held for that date, while
+        the days after today can be up to 6 h older (TWO SPEEDS above), and the new date is one
+        of them. So before saying `none` the sheet asks the memo for the days older than that
+        answer: at most once per answer, and only when someone is looking.
+
+        `none` says a day was read and lists no report, and iOS stops asking on it, so a day
+        nobody has read is never `none`, and a sheet pinned to one stays on it, past any later
+        row: that row can be the next report's, with the figures one load away. From today on
+        such a day is `_earnings_day_unread`. Before today it is a day the loop has yet to load
+        (`awaits_first_load`), the first minute after a deploy or after midnight, or a day past
+        the live days a restart left unread and this answer has just asked for. The answer
+        reads as a report not in yet, with no extras, and `recheck` makes the sheet ask again
+        until a read settles it.
+
+        With EARNINGS_LIVE_ENABLED off the loop is idle, so nothing live is read, written or
+        built: the memo row's consensus is the whole answer, `upcoming` for a row and `none`
+        for no row, and no poll, because nothing a poll could wait for is coming.
+        """
+        sym = symbol.upper()
+        today = _et_today()
+        earlier = live_days(today)[:-1]
+        floor = sheet_days(today)[0]
+        if requested is not None and not floor <= requested <= today + timedelta(
+            days=_EARNINGS_ALERT_DAYS_AHEAD
+        ):
+            raise _ReportDateOutOfWindow(
+                f"report_date {requested.isoformat()} is outside {floor.isoformat()}.."
+                f"{(today + timedelta(days=_EARNINGS_ALERT_DAYS_AHEAD)).isoformat()}"
+            )
+        now = datetime.now(timezone.utc)
+        live = get_earnings_live_service() if settings.EARNINGS_LIVE_ENABLED else None
+        if live is not None and requested is not None:
+            live.sheet_asked(requested, today)
+
+        def _snapshot(d: date) -> Optional[LiveSnapshot]:
+            return live.snapshot(sym, d, now) if live is not None else None
+
+        def _unread(d: date) -> bool:
+            """Has nobody read `d` yet? Never so with the loop idle: no read is coming."""
+            if live is None:
+                return False
+            if d < today:
+                return live.awaits_first_load(d, today)
+            return _earnings_day_unread(self.fmp, d, today)
+
+        async def _listed(
+            later_days_since: Optional[float] = None,
+        ) -> Dict[date, Dict[str, Any]]:
+            """Fold today's rows, and answer this ticker's by date. A failed read answers from
+            the days already held; a day nobody has read is `_unread`, never `none`."""
+            try:
+                calendar = await _cached_earnings_calendar(
+                    self.fmp, today, later_days_since=later_days_since
+                )
+            except Exception as e:
+                logger.warning("[Tracking] earnings live %s: calendar unavailable on %s (%s: %s)",
+                               sym, today.isoformat(), type(e).__name__, e)
+                calendar = []
+            if live is not None:
+                live.observe_rows(today, calendar, now, symbols={sym},
+                                  stored_at=earnings_day_stored_at(self.fmp, today))
+            # The card's pick, so a future pair cannot show one consensus there and another
+            # here.
+            return {
+                d: entry
+                for (_, d), entry in one_row_per_report(calendar, today, symbols={sym}).items()
+                if d is not None
+            }
+
+        rows = await _listed()
+        held = newest_report(filter(None, map(_snapshot, earlier)))
+
+        def _report_day() -> date:
+            if requested is not None:
+                known = (requested in rows or _snapshot(requested) is not None
+                         or _unread(requested))
+                return requested if known or not rows else min(rows)
+            if today in rows:
+                return today
+            if held is not None:
+                return held.day
+            return min(rows) if rows else today
+
+        day = _report_day()
+        if day not in rows and _snapshot(day) is None and not _unread(day):
+            # About to say `none`, so the days after today must be as new as the answer that
+            # left the report out: the memo's, or for a day before today, which the memo does
+            # not hold, the live loop's.
+            answered_at = earnings_day_stored_at(self.fmp, day)
+            if answered_at is None and live is not None:
+                answered_at = live.fetched_at(day)
+            logger.info("[Tracking] earnings live %s: nothing listed for %s, reading the days "
+                        "after today as of its newest answer", sym, day.isoformat())
+            rows = await _listed(answered_at)
+            day = _report_day()
+        snap = _snapshot(day) if day <= today else None
+        row = rows.get(day) or {}
+        raw_name = row.get("companyName")
+        company = raw_name if isinstance(raw_name, str) and raw_name else None
+        found = snap is not None or day in rows
+        recheck = not found and _unread(day)
+        if recheck:
+            logger.info("[Tracking] earnings live %s: %s has not been read yet, so the sheet "
+                        "asks again", sym, day.isoformat())
+        extras = await live.history_extras(sym, day) if live is not None and found else None
+        payload = live_payload(
+            sym, day, snap,
+            company_name=company,
+            eps_estimate=_finite_or_none(row.get("epsEstimated")),
+            revenue_estimate=_revenue_estimate(row),
+            extras=extras,
+            today=today,
+            found=found,
+            recheck=recheck,
+        )
+        return EarningsLiveResponse(**payload)
+
+    async def _get_recent_earnings_alerts(
+        self, watchlist_tickers: List[str]
+    ) -> List[AlertResponse]:
+        """The earnings cards from before today — `recent_earnings_alerts`.
+
+        Read-only: the live loop holds those days' rows (`earnings_live_service`), and with
+        the loop off (EARNINGS_LIVE_ENABLED, or local dev) there are simply none.
+        """
+        if not settings.EARNINGS_LIVE_ENABLED or not watchlist_tickers:
+            return []
+        now = datetime.now(timezone.utc)
+        snaps = get_earnings_live_service().recent_snapshots(watchlist_tickers, now)
+        return [_recent_earnings_alert(s) for s in snaps]
 
     # ── Whale Trade Alerts ──────────────────────────────────────────
 

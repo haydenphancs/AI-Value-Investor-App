@@ -707,10 +707,10 @@ _HEAL_WATCHLIST = [
 ]
 
 
-def _stub_sections(monkeypatch, *, backfill, quotes=None, extended=None):
-    """Stub the six data sections, the backfill and the extended-hours prints; the
-    watchlist read stays REAL (against `_FakeSupabase`), so the order watchlist → gather
-    is exercised."""
+def _stub_sections(monkeypatch, *, backfill, quotes=None, extended=None, recent=None):
+    """Stub the six data sections, the backfill, the extended-hours prints and the previous
+    day's earnings cards; the watchlist read stays REAL (against `_FakeSupabase`), so the
+    order watchlist → gather is exercised."""
     async def _quotes(self, tickers):
         if quotes is not None:
             return await quotes(tickers)
@@ -721,12 +721,14 @@ def _stub_sections(monkeypatch, *, backfill, quotes=None, extended=None):
     async def _analyst(self, tickers): return []
     async def _insider(self, tickers, asset_types=None): return []
     async def _no_extended(self, tickers, asset_types=None): return {}
+    async def _no_recent(self, tickers): return []
     for name, fn in [("_get_batch_quotes", _quotes), ("_get_all_sparklines", _spark),
                      ("_get_earnings_alerts", _earn), ("_get_whale_trade_alerts", _whale),
                      ("_get_analyst_rating_alerts", _analyst),
                      ("_get_insider_transaction_alerts", _insider),
                      ("_backfill_classification", backfill),
-                     ("_get_extended_prints", extended or _no_extended)]:
+                     ("_get_extended_prints", extended or _no_extended),
+                     ("_get_recent_earnings_alerts", recent or _no_recent)]:
         monkeypatch.setattr(TrackingService, name, fn)
 
 
@@ -814,8 +816,8 @@ async def test_a_raising_backfill_does_not_cost_the_feed(monkeypatch, caplog):
 
 @pytest.mark.asyncio
 async def test_a_raising_extended_print_does_not_cost_the_feed(monkeypatch, caplog):
-    """The extended-hours print is results[7], the gather's LAST member. A raise costs
-    the rows their print and nothing else: every row is served with its regular price,
+    """The extended-hours print is results[7]. A raise costs the rows their print and
+    nothing else: every row is served with its regular price,
     the feed is cached, and the ERROR names `extended_prints` (a missing name in
     `section_names` would raise IndexError in the logging loop instead)."""
     monkeypatch.setattr(ts, "get_supabase", lambda: _FakeSupabase(_watchlist_copy()))
@@ -836,6 +838,53 @@ async def test_a_raising_extended_print_does_not_cost_the_feed(monkeypatch, capl
     assert any("extended_prints" in m and "u-extended-boom" in m and "RuntimeError" in m
                for m in errors), errors
     assert ts._feed_cache_get("u-extended-boom") is feed
+
+
+@pytest.mark.asyncio
+async def test_a_raising_recent_earnings_section_does_not_cost_the_feed(monkeypatch, caplog):
+    """The previous day's earnings cards are results[8], the gather's LAST member. Main and
+    this feature both claimed results[7] at the merge: read at the wrong position these cards
+    would be the extended-print dict (a ValidationError) and a dropped name would raise
+    IndexError in the logging loop. A raise costs those cards and nothing else."""
+    monkeypatch.setattr(ts, "get_supabase", lambda: _FakeSupabase(_watchlist_copy()))
+
+    async def _backfill(self, user_id, watchlist): return None
+    async def _recent(self, tickers):
+        raise RuntimeError("recent cards exploded")
+
+    _stub_sections(monkeypatch, backfill=_backfill, recent=_recent)
+    with caplog.at_level(logging.ERROR, logger=ts.logger.name):
+        feed = await TrackingService().get_tracking_feed("u-recent-boom")
+
+    assert [a.ticker for a in feed.assets] == ["AAPL", "SPY"]
+    assert all(a.price_known and a.price == 10.0 for a in feed.assets)
+    assert feed.recent_earnings_alerts == []
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert any("recent_earnings_alerts" in m and "u-recent-boom" in m and "RuntimeError" in m
+               for m in errors), errors
+    assert ts._feed_cache_get("u-recent-boom") is feed
+
+
+@pytest.mark.asyncio
+async def test_the_extended_prints_and_the_recent_cards_each_reach_their_own_field(monkeypatch):
+    """Both sections answering: the print lands on the row and the card on the feed field, so
+    a swap of results[7] and results[8] cannot pass."""
+    monkeypatch.setattr(ts, "get_supabase", lambda: _FakeSupabase(_watchlist_copy()))
+
+    async def _backfill(self, user_id, watchlist): return None
+    async def _extended(self, tickers, asset_types=None):
+        return {"AAPL": {"price": 11.0, "session": "pre_market"}}
+    card = ts.AlertResponse(type="earnings", title="Earnings Alert", description="AAPL reported.",
+                            ticker="AAPL")
+    async def _recent(self, tickers):
+        return [card]
+
+    _stub_sections(monkeypatch, backfill=_backfill, extended=_extended, recent=_recent)
+    feed = await TrackingService().get_tracking_feed("u-both-sections")
+
+    assert feed.recent_earnings_alerts == [card]
+    aapl = next(a for a in feed.assets if a.ticker == "AAPL")
+    assert aapl.extended_price == 11.0 and aapl.extended_session == "pre_market"
 
 
 @pytest.mark.asyncio

@@ -109,6 +109,25 @@ enum MarketHoursUtil {
         return probe
     }
 
+    /// The oldest report date `GET /tracking/earnings/{ticker}/live` still serves, as
+    /// "yyyy-MM-dd": TWO trading days before `instant`'s New York date, the first of the
+    /// backend's `sheet_days` (`tracking_service.get_earnings_live` answers 400 below it). The
+    /// first of the live days, then the trading day before it: a result held for the user's
+    /// morning can wake the trading day after its report left the live days, and the push it
+    /// wakes must still open that report.
+    ///
+    /// Holidays are best effort, as in `numbersSessionDay`: a closure the backend learns at run
+    /// time only moves the server's floor earlier, so this can hide a date the server still
+    /// serves, and never offers one it refuses.
+    nonisolated static func liveResultsFloorKey(at instant: Date = Date()) -> String {
+        let calendar: Calendar = etCalendar
+        let today: Date = calendar.startOfDay(for: instant)
+        let firstLiveDay: Date = previousTradingDay(before: today, calendar: calendar)
+        let day: Date = previousTradingDay(before: firstLiveDay, calendar: calendar)
+        let parts: DateComponents = calendar.dateComponents([.year, .month, .day], from: day)
+        return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
+    }
+
     /// Check if US markets are in an active trading session.
     ///
     /// Returns `true` during:

@@ -10,9 +10,19 @@ owner ruled out a taller card. Pinned here, each guard broken once in memory by 
   whole_or_nothing `ViewThatFits` with a zero-size fallback: on a phone too narrow for chip and
                    day change together the chip is left out, never squeezed into "…";
   priority         the price button is offered its width FIRST (`.layoutPriority(1)`), so the
-                   fit is measured against the space really left after the 200pt navigation
-                   side — at equal priority it was offered half the row and the row overflowed
-                   its card on a 375pt phone; the chip yields to the day change (`-1`);
+                   column is min(row - the 176pt navigation floor, the column cap) — at equal
+                   priority the stack sizes the column first with half the row, it takes its
+                   whole cap, and on a 375pt phone the row overflows its card; the chip yields
+                   to the day change (`-1`);
+  stable_fit       the change line AND the chip's slot fill their width (2026-11-11). Hugging
+                   their content, a card was SIZED with the chip and then re-offered exactly
+                   chip + day change when placed; the chip's fit test landed a float step short
+                   and it vanished from a box already sized for it — ORCL, ACHR, NVDA, PLUG,
+                   MRVL, INTC drew no chip and their price and change sat ~25pt left of the
+                   edge, centred in the chip-sized box;
+  reserved_room    the list reserves the after-hours column outside New York's regular session
+                   (the same rule as the chip's own gate), so a card with no print keeps the
+                   same column as the cards with one;
   same_height      the chip's 10pt text sits on the 13pt change line (the day change keeps the
                    default size), so `AssetsListSection`'s height probe is still exact;
   new_york_gate    a snapshot-painted chip hides once the bell rings, by New York's clock
@@ -37,9 +47,12 @@ _IOS = Path(__file__).resolve().parents[2] / "frontend/ios/ios"
 _ROW = "Views/Molecules/AssetRow.swift"
 _LABEL = "Views/Atoms/PriceChangeLabel.swift"
 _MODELS = "Models/TrackingModels.swift"
+_SPARK = "Views/Atoms/SparklineView.swift"
 
 
 def _strip_comments(src: str) -> str:
+    # Block comments first: a `/* … */` copy of a guarded line must not stand in for the code.
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
     out = []
     for line in src.splitlines():
         if line.strip().startswith("//") or line.strip().startswith("///"):
@@ -65,7 +78,8 @@ def _block(src: str, header: str) -> str:
 
 
 def _sources() -> Dict[str, str]:
-    return {rel: (_IOS / rel).read_text(encoding="utf-8") for rel in (_ROW, _LABEL, _MODELS)}
+    return {rel: (_IOS / rel).read_text(encoding="utf-8")
+            for rel in (_ROW, _LABEL, _MODELS, _SPARK)}
 
 
 # ── the guards ────────────────────────────────────────────────────────────────
@@ -155,6 +169,153 @@ def voiceover(src: Dict[str, str]) -> None:
     )
 
 
+def _after_block(src: str, header: str) -> str:
+    """The text right after the brace-balanced block that starts at ``header`` (``src`` is
+    already comment-stripped), leading whitespace dropped."""
+    start = src.index(header)
+    open_brace = src.index("{", start)
+    depth = 0
+    for i in range(open_brace, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[i + 1:].lstrip()
+    raise AssertionError(f"unbalanced braces after {header!r}")
+
+
+def stable_fit(src: Dict[str, str]) -> None:
+    body = _block(src[_ROW], "var body: some View")
+    assert _after_block(body, "HStack(spacing: 0) {").startswith(
+        ".frame(maxWidth: .infinity, alignment: .trailing)"
+    ), (
+        "the change line hugs its content again: the column is then re-offered exactly chip + "
+        "day change when it is placed, and the chip can drop from a box sized for it"
+    )
+    chip = _block(src[_ROW], "private var extendedMoveChip: some View")
+    assert re.search(
+        r"\}\s*\.frame\(maxWidth: \.infinity, alignment: \.trailing\)\s*\.layoutPriority\(-1\)", chip
+    ), (
+        "the chip's slot must FILL what the day change leaves (then yield with -1), so its "
+        "width is never recomputed by subtraction when the line is placed"
+    )
+
+
+def reserved_room(src: Dict[str, str]) -> None:
+    gate = _block(src[_ROW], "static var isOutsideRegularSession: Bool")
+    assert "if case .open? = MarketHoursUtil.liveSessionStatus() { return false }" in gate, (
+        "the list's reservation must follow the chip's own New York gate"
+    )
+    assert "return true" in gate
+    modifier = _block(src[_ROW], "struct HoldingsPriceColumn: ViewModifier")
+    assert "reservesExtendedMove ? AssetRow.extendedPriceColumnWidth : 0" in modifier, (
+        "the column no longer widens for the chip, so after hours the chip has no room"
+    )
+
+
+
+# ── the sparkline's gray after-hours tail (2026-11-11) ────────────────────────
+#
+# Owner: "after market close, the chart will have a gray color ... the green/red is during
+# market, after that is a gray color like an extend chart ... for crypto, it should not have
+# gray because they are 24h." The backend sends the tail (`extended_sparkline`,
+# `extended_regular_share`, `extended_span_to`; test_tracking_extended_print.py §6).
+
+_TAIL_KEYS = {"extendedSparkline": "extended_sparkline",
+              "extendedRegularShare": "extended_regular_share",
+              "extendedSpanTo": "extended_span_to"}
+
+
+def tail_wire_parity(src: Dict[str, str]) -> None:
+    from app.schemas.tracking import TrackedAssetResponse
+    dto = _block(src[_MODELS], "struct TrackedAssetDTO")
+    for case, key in _TAIL_KEYS.items():
+        assert key in TrackedAssetResponse.model_fields, f"the backend lost {key}"
+        assert f'case {case} = "{key}"' in dto, f"CodingKeys lost {key}"
+    assert "(lenient([Double].self, .extendedSparkline) ?? []).filter(\\.isFinite)" in dto, (
+        "the tail must decode leniently and drop non-finite points — a strict decode of one "
+        "bad value would blank the whole Holdings list"
+    )
+    assert "lenient(Double.self, .extendedRegularShare).finiteOrNil" in dto
+    assert "lenient(Double.self, .extendedSpanTo).finiteOrNil" in dto
+    for case in _TAIL_KEYS:
+        assert f"{case}: {case}" in dto, f"toTrackedAsset() drops {case}"
+
+
+def tail_drawable(src: Dict[str, str]) -> None:
+    model = _block(src[_MODELS], "var afterHoursTail: SparklineTail?")
+    assert "share > 0, share < spanTo, spanTo <= 1" in model, (
+        "a tail is drawn only on an axis where the session ends before the tail does"
+    )
+    tail = _block(src[_SPARK], "struct SparklineTail: Equatable")
+    assert "regularShare > 0 && regularShare < spanTo && spanTo <= 1" in tail, (
+        "the atom must refuse an unusable tail itself, whoever its caller is"
+    )
+
+
+def tail_gate(src: Dict[str, str]) -> None:
+    gate = _block(src[_ROW], "private var afterHoursTail: SparklineTail?")
+    assert "guard Self.isOutsideRegularSession else { return nil }" in gate, (
+        "a saved snapshot painted after the bell would draw yesterday's after-hours over the "
+        "new day's line — the tail follows the chip's New York gate"
+    )
+    assert "return asset.afterHoursTail" in gate
+    body = _block(src[_ROW], "var body: some View")
+    call = re.search(r"SparklineView\((.*?)\n\s*\)", body, re.S)
+    assert call and "tail: afterHoursTail" in call.group(1), "the row no longer passes the tail"
+
+
+def tail_starts_at_bell(src: Dict[str, str]) -> None:
+    """2026-11-12 review: the tail hung off the series' LAST point, so a stock halted at 14:30
+    that traded again only after hours drew gray across the halted 14:30-16:00 session. Gray
+    is after-hours only: the tail starts at the bell (`regularShare`) and its points are
+    spaced from there; a series that ends early leaves the gap before the bell empty."""
+    points = _block(src[_SPARK], "private func tailPoints(")
+    assert "let bellX: CGFloat = plot.minX + plot.width * CGFloat(tail.regularShare)" in points, (
+        "the tail no longer finds the bell"
+    )
+    assert "let start: CGPoint = last.x >= bellX - 0.5 ? last : CGPoint(x: bellX, y: last.y)" in points, (
+        "a series that ends before the bell must not be joined to the tail by a gray stroke "
+        "over regular-session time"
+    )
+    assert "var result: [CGPoint] = [start]" in points
+    assert "let endX: CGFloat = plot.minX + plot.width * CGFloat(tail.spanTo)" in points
+    assert "let run: CGFloat = max(endX - start.x, 0)" in points
+    assert "let count = CGFloat(tail.data.count)" in points, (
+        "point j sits at (j + 1) / count of the run, the instant the server sampled it for; a "
+        "fencepost count (count - 1) pushes the end dot past spanTo"
+    )
+    assert "let x: CGFloat = start.x + run * CGFloat(index + 1) / count" in points, (
+        "the tail's points must be spaced from the bell, matching the server's clock sampling "
+        "(tracking_service._sample_on_clock)"
+    )
+    # Negative checks (2026-11-12 review: presence alone let one added line rejoin the halted
+    # point to the bell). The series' last point may only decide where the tail starts…
+    uses_last = [ln.strip() for ln in points.splitlines() if re.search(r"\blast\b", ln)]
+    assert uses_last == [
+        "let start: CGPoint = last.x >= bellX - 0.5 ? last : CGPoint(x: bellX, y: last.y)"
+    ], f"the series' last point leaks into the tail beyond its start: {uses_last}"
+    assert ".insert(" not in points, "nothing may be put in front of the tail's start"
+    # …and the Canvas strokes the tail only, never a segment joined to the series' end.
+    body = _block(src[_SPARK], "var body: some View")
+    strokes = re.findall(r"strokeTail\(([^,]*),", body)
+    assert strokes and set(strokes) == {"tailLine"}, (
+        f"a gray stroke must be the tail alone, never joined to the series: {strokes}"
+    )
+
+
+def tail_tone(src: Dict[str, str]) -> None:
+    spark = _strip_comments(src[_SPARK])
+    assert "private static let tailTone = AppColors.textMuted" in spark, (
+        "the tail must be NEUTRAL gray: green or red would read as a gain or loss the "
+        "session line did not make"
+    )
+    stroke = _block(src[_SPARK], "private func strokeTail(")
+    assert ".color(Self.tailTone)" in stroke
+    assert "AppColors.bullish" not in stroke and "AppColors.bearish" not in stroke
+
+
 GUARDS: Dict[str, Callable[[Dict[str, str]], None]] = {
     "wire_parity": wire_parity,
     "whole_or_nothing": whole_or_nothing,
@@ -163,6 +324,13 @@ GUARDS: Dict[str, Callable[[Dict[str, str]], None]] = {
     "new_york_gate": new_york_gate,
     "glyph": glyph,
     "voiceover": voiceover,
+    "stable_fit": stable_fit,
+    "reserved_room": reserved_room,
+    "tail_wire_parity": tail_wire_parity,
+    "tail_drawable": tail_drawable,
+    "tail_gate": tail_gate,
+    "tail_starts_at_bell": tail_starts_at_bell,
+    "tail_tone": tail_tone,
 }
 
 
@@ -186,6 +354,34 @@ MUTATIONS = [
      "Image(systemName: (isPositive"),
     ("voiceover", _ROW, "\\(changeAccessibilityValue)\\(extendedAccessibilityValue)",
      "\\(changeAccessibilityValue)"),
+    ("stable_fit", _ROW, "                    .frame(maxWidth: .infinity, alignment: .trailing)\n", ""),
+    ("stable_fit", _ROW, ".frame(maxWidth: .infinity, alignment: .trailing)\n            .layoutPriority(-1)",
+     ".layoutPriority(-1)"),
+    ("reserved_room", _ROW, "if case .open? = MarketHoursUtil.liveSessionStatus() { return false }",
+     "if case .preMarket? = MarketHoursUtil.liveSessionStatus() { return false }"),
+    ("reserved_room", _ROW, "reservesExtendedMove ? AssetRow.extendedPriceColumnWidth : 0", "0"),
+    ("tail_wire_parity", _MODELS, 'case extendedSpanTo = "extended_span_to"',
+     'case extendedSpanTo = "extended_span_end"'),
+    ("tail_wire_parity", _MODELS, "            extendedSparkline: extendedSparkline,\n", ""),
+    ("tail_drawable", _MODELS, "share > 0, share < spanTo, spanTo <= 1", "share > 0, spanTo <= 1"),
+    ("tail_drawable", _SPARK, "regularShare > 0 && regularShare < spanTo && spanTo <= 1",
+     "regularShare > 0 && spanTo <= 1"),
+    ("tail_gate", _ROW, "        guard Self.isOutsideRegularSession else { return nil }\n", ""),
+    ("tail_gate", _ROW, "                        tail: afterHoursTail\n", "                        tail: nil\n"),
+    ("tail_starts_at_bell", _SPARK, "? last : CGPoint(x: bellX, y: last.y)", "? last : last"),
+    ("tail_starts_at_bell", _SPARK, "var result: [CGPoint] = [start]", "var result: [CGPoint] = [last]"),
+    ("tail_starts_at_bell", _SPARK, "let x: CGFloat = start.x + run * CGFloat(index + 1) / count",
+     "let x: CGFloat = last.x + run * CGFloat(index + 1) / count"),
+    ("tail_starts_at_bell", _SPARK, "let count = CGFloat(tail.data.count)",
+     "let count = CGFloat(max(tail.data.count - 1, 1))"),
+    ("tail_starts_at_bell", _SPARK, "let endX: CGFloat = plot.minX + plot.width * CGFloat(tail.spanTo)",
+     "let endX: CGFloat = plot.maxX"),
+    ("tail_starts_at_bell", _SPARK, "        var result: [CGPoint] = [start]\n",
+     "        var result: [CGPoint] = [start]\n        if start != last { result.insert(last, at: 0) }\n"),
+    ("tail_starts_at_bell", _SPARK, "strokeTail(tailLine, in: &context)\n                        let tailEnd",
+     "strokeTail([lastPoint] + tailLine, in: &context)\n                        let tailEnd"),
+    ("tail_tone", _SPARK, "private static let tailTone = AppColors.textMuted",
+     "private static let tailTone = AppColors.bullish"),
 ]
 
 

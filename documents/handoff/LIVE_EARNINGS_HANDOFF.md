@@ -22,14 +22,14 @@ to `main` (owner, 2026-11-05).
   The main folder holds other work in progress: never check out, stash or reset there.
 - **Not pushed, no PR.** `origin` has only the first commit (`28a7438`) and the first handoff
   (`3028ac7`). Everything since is local: the fix rounds, the FMP cadence redesign, and `origin/main`
-  merged up to `3be74338`.
-- **Uncommitted.** The work since the evening of 2026-11-11 is staged in the worktree, not
-  committed: SEC's clock read as UTC, per-company SEC windows, the 16:00 ET pass following the
-  live record, the verifier and live-service leftovers, the test-only items, the fixes for the 13
-  defects the first review of the whole change confirmed and the 20 the second one confirmed,
-  then on 2026-11-13 the filing verifier's four repair rounds and a held push that is no longer
-  buzzed with a figure its record has taken off (§7). Claude commits and pushes nothing; the owner
-  does ("just don't commit and push, i will do this part").
+  merged up to `f9e1c985` (§8).
+- **Committed on 2026-11-13.** Claude made two commits on the owner's go-ahead ("you can commit
+  after you done"): first the work since the evening of 2026-11-11 (SEC's clock read as UTC,
+  per-company SEC windows, the 16:00 ET pass following the live record, the verifier and
+  live-service leftovers, the test-only items, the fixes for the 13 defects the first review of the
+  whole change confirmed and the 20 the second one confirmed, then the filing verifier's four repair
+  rounds of 2026-11-13 and a held push that is no longer buzzed with a figure its record has taken
+  off, §7), then the merge of `origin/main`'s newer commits (§8). The owner pushes.
 - **Backend:** built and tested (§5), not deployed. Both push flags ship off. Migration 209 is not
   applied; the owner applies it by hand (§8).
 - **iOS:** builds green (§5), not released. 1.03 (build 14) was cut from `main` without this work:
@@ -259,18 +259,18 @@ Settings → Notifications → Earnings → "Live Results", on by default, synce
 
 ## 5. What is verified, and how
 
-- **Backend tests.** The 38-file targeted list (§9) passed on the staged tree with every fix in:
-  12,142 tests, exit 0, no blocked network call (2026-11-13; 12,006 before the fourth verifier
-  round). Each code fix came with a test that failed before it, except the FMP cadence redesign,
-  written together with its tests and cost walks; the test-only items and the new source-scan
-  guards were checked by hand mutation. The full suite passed on one export of the exact staged
-  tree, the Swift-harness files first under the build slot: every test passed, exit 0, no blocked
-  network call (2026-11-13; the counts and the tree id are in Claude's final report, and
-  `git write-tree` in the worktree must print that id before the commit).
+- **Backend tests.** The 38-file targeted list (§9) passed on the merged tree, every fix in: 12,143
+  tests, exit 0, no blocked network call (2026-11-13). Each code fix came with a test that failed
+  before it, except the FMP cadence redesign, written together with its tests and cost walks; the
+  test-only items and the new source-scan guards were checked by hand mutation. The full suite
+  passed on one export of the merged tree, the Swift-harness files first under the build slot: every
+  test passed, exit 0, no blocked network call (2026-11-13; the counts and the tree ids are in
+  Claude's final report).
 - **iOS.** The canonical build passed on 2026-11-05, on 2026-11-11 (22:37 MT, the merged lanes, no
-  warnings in the feature's files) and on 2026-11-12 (13:25 MT, with the iOS fixes, the branch's
-  last Swift change); nothing changed since touches Swift. There is no XCTest target: the Swift
-  behaviour is pinned by source-scan guards (`tests/test_ios_earnings_live_guards.py` and others).
+  warnings in the feature's files), on 2026-11-12 (13:25 MT, with the iOS fixes, the branch's last
+  Swift change) and on 2026-11-13 with `origin/main`'s newer commits merged in (they change Swift).
+  There is no XCTest target: the Swift behaviour is pinned by source-scan guards
+  (`tests/test_ios_earnings_live_guards.py` and others).
 - **Real releases.** 30 real Q3 2026 EX-99.1 releases were replayed twice through the real model and
   verifier. The second replay (2026-11-11, the current prompt): revenue verified on 23 of 29 and EPS
   on 28 of 29, every one correct; the outlook shown for 11, one of them ETSY's flattened table row,
@@ -484,44 +484,44 @@ Not done when this was written:
 
 ## 8. Next steps
 
-Before the owner commits (Claude), done on 2026-11-13:
+Claude, done on 2026-11-13:
 
 1. The last verifier and watcher repairs landed; the targeted list (§9) and the replay of the
    stored answers passed again.
 2. The filing verifier's fourth repair round (§7) was staged on top, through the same checks.
-3. The final gate on the staged tree: the full suite on one export of the exact tree (§5), with no
-   iOS build needed, as no Swift changed after the last green one. Claude gave the owner the
-   tested tree id: `git write-tree` in the worktree must print it before the commit, or the gate
-   is open again.
+3. The gate on the staged tree: the full suite on one export of the exact tree (§5), with no iOS
+   build needed, as no Swift changed after the last green one. Then committed, on the owner's
+   go-ahead ("you can commit after you done").
+4. `origin/main`'s newer commits merged on top and committed: `3be74338..f9e1c985`, the Holdings
+   after-hours tail, a news retry and an OWNER_TASKS note. They change 5 files this branch changes
+   too (`tracking_service.py`, `schemas/tracking.py`, `test_tracking_feed_schema_parity.py`,
+   `TrackingModels.swift`, `OWNER_TASKS.md`), and the merge had no conflict. The full suite on one
+   export of the merged tree and one canonical iOS build passed before the merge commit. Local
+   `main`'s unpushed `1eaf9740` (Updates web-only cards) is not in it: it comes with the next merge
+   once it is on `origin`.
 
 The owner, in this order. The list to follow is OWNER_TASKS → "Live earnings results": it holds
 every condition, the log lines and the queries. In short:
 
-4. Commit and push the branch. Then bring in `main`'s newer commits before the PR: `main` moved 4
-   commits after this branch last merged it (`3be74338..f9e1c985`: the Holdings after-hours tail and
-   a news retry). They change 5 files this branch changes too (`tracking_service.py`,
-   `schemas/tracking.py`, `test_tracking_feed_schema_parity.py`, `TrackingModels.swift`,
-   `OWNER_TASKS.md`). A scratch three-way merge of those 5 was clean on 2026-11-13, and the
-   tracking, holdings and live-earnings tests passed on it (1,119). After the merge, run the
-   targeted list (§9) and one canonical iOS build: those commits touch Swift.
-5. Before the deploy, apply `backend/database/migrations/209_earnings_filing_cache.sql` by hand in
+5. Push the branch.
+6. Before the deploy, apply `backend/database/migrations/209_earnings_filing_cache.sql` by hand in
    Supabase Studio and run the VERIFY query in its header (one row: `t | f | f | t`). Then ask
    Claude for the bookkeeping its header lists (schema re-dump, test lists, atlas).
-6. Decide the PR. Before the merge, ask Claude to remove `documents/handoff/` from the branch in its
+7. Decide the PR. Before the merge, ask Claude to remove `documents/handoff/` from the branch in its
    own commit.
-7. Merge into `main` only once 1.03 is approved in App Store Connect (every archive of `main` made
+8. Merge into `main` only once 1.03 is approved in App Store Connect (every archive of `main` made
    after the merge carries this work, so a second 1.03 build after a rejection would ship it), and
    outside 15:55–18:30 ET on a report day (and 06:00–09:35 ET on a day a watched company reports
    before the open). Railway deploys `main`, so the merge is the deploy, and every later redeploy
    keeps the same windows.
-8. On the first report day, read the logs OWNER_TASKS lists, and from about 17:00 ET, once the
+9. On the first report day, read the logs OWNER_TASKS lists, and from about 17:00 ET, once the
    16:00 ET pass has run, run its one-push check.
-9. Only then set `EARNINGS_LIVE_RESULT_PUSH_ENABLED=true` on the Railway web service and redeploy,
-   outside those windows (after 18:30 ET on a report day): the setting takes effect only with the
-   redeploy. Run the check again on the next report day.
-10. Ship the first App Store build that carries the Live Results row; before submitting, check its
+10. Only then set `EARNINGS_LIVE_RESULT_PUSH_ENABLED=true` on the Railway web service and redeploy,
+    outside those windows (after 18:30 ET on a report day): the setting takes effect only with the
+    redeploy. Run the check again on the next report day.
+11. Ship the first App Store build that carries the Live Results row; before submitting, check its
     TestFlight build on a report day.
-11. Only once that build is widely installed, set `EARNINGS_LIVE_PUSH_ENABLED=true` and redeploy,
+12. Only once that build is widely installed, set `EARNINGS_LIVE_PUSH_ENABLED=true` and redeploy,
     outside the same windows.
 
 ## 9. Commands

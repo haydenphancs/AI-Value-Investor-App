@@ -2234,8 +2234,26 @@ class NewsCacheService:
             results = await asyncio.gather(*update_tasks, return_exceptions=True)
             success_count = sum(1 for r in results if not isinstance(r, Exception))
             for j, r in enumerate(results):
-                if isinstance(r, Exception):
-                    logger.error(f"Failed to update enrichment for article {update_indices[j]}: {r}")
+                if not isinstance(r, Exception):
+                    continue
+                # Not fatal either way: the caller already holds the enriched row and the
+                # label is logged; the row just stays ai_processed=false and is re-enriched
+                # by a later pass (one extra news-model call). A transient Supabase blip that
+                # outlived `_update_enrichment_row`'s retries is a WARNING; anything else
+                # (schema drift, a constraint) is a real bug and keeps ERROR + the stack.
+                row_id = needs_enrichment[update_indices[j]].get("id")
+                if is_transient_supabase_error(r):
+                    logger.warning(
+                        "news enrichment: cache update for %s row %s failed after retries "
+                        "(%s: %s) — row stays unprocessed and will be re-enriched later",
+                        ticker, row_id, type(r).__name__, r,
+                    )
+                else:
+                    logger.error(
+                        "news enrichment: cache update for %s row %s failed (%s: %s) — "
+                        "row stays unprocessed and will be re-enriched later",
+                        ticker, row_id, type(r).__name__, r, exc_info=r,
+                    )
         else:
             success_count = 0
 
@@ -2257,11 +2275,23 @@ class NewsCacheService:
 
         ``scope=MARKET_SCOPE`` (the Market's rows): the write also drops the shared
         page-0 memory, from the worker thread once the UPDATE has finished.
+
+        Retried on a transient Supabase failure (Sentry PYTHON-FASTAPI-59: the gateway
+        closed a pooled keep-alive connection as we reused it — "Server disconnected
+        without sending a response"). Safe to replay: an UPDATE by id to fixed values.
+        `_do` always runs in a worker thread, so the retry's backoff sleep blocks no loop.
+        The query is built in `_do` itself and only its `.execute` is retried (a postgrest
+        builder re-sends the same request on each call): the Market writer guards in
+        `tests/test_market_news_relevance_wiring.py` read the write, and the wrapper's
+        argument, there.
         """
         def _do() -> None:
-            self.supabase.table("ticker_news_cache").update(
+            query = self.supabase.table("ticker_news_cache").update(
                 update_data
-            ).eq("id", row_id).execute()
+            ).eq("id", row_id)
+            retry_idempotent_sync(
+                query.execute, what=f"news enrichment update {row_id}", logger=logger,
+            )
 
         if scope == MARKET_SCOPE:
             await self._market_write_off_loop("Market enrichment update", _do)

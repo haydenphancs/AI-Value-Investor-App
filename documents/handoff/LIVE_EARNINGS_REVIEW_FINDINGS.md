@@ -21,7 +21,7 @@
 >   of its own (6 low gaps confirmed, all fixed). What stays open is in `LIVE_EARNINGS_HANDOFF.md`
 >   §7: the shapes the verifier's last recheck found (medium and low; none in the 34 stored real
 >   releases) and the recorded residuals.
-> * None of these fixes was committed when this was written; the owner commits them.
+> * These fixes were committed on 2026-11-13, on the owner's go-ahead.
 >
 > Their full results, every finding with its trace and its fix, are kept outside git, in
 > `.claude/session-state/live-earnings-pause-2026-11-06/` on the owner's Mac (`.claude/` is

@@ -39,6 +39,12 @@ _ROW = _IOS / "Views/Molecules/AssetRow.swift"
 _SKELETON = _IOS / "Views/Molecules/TrackedAssetsSkeleton.swift"
 _SCREEN = _IOS / "Views/Screens/TrackingView.swift"
 _MODELS = _IOS / "Models/TrackingModels.swift"
+_SECTION = _IOS / "Views/Organisms/AssetsListSection.swift"
+
+# Anchored on the ticker column's OWN frame. The price column's fill frames also say
+# `maxWidth: .infinity` (2026-11-11), so a file-wide substring check stayed green with the
+# ticker column's maxWidth deleted.
+_TICKER_COLUMN_RE = re.compile(r"\.frame\(minWidth: Self\.tickerColumnMinWidth,\s*maxWidth: \.infinity")
 
 
 def _strip_comments(src: str) -> str:
@@ -82,9 +88,9 @@ def test_the_ticker_column_is_not_hard_pinned():
     assert ".frame(minWidth: Self.tickerColumnMinWidth" in src, (
         "the column lost its minWidth floor"
     )
-    assert "maxWidth: .infinity" in src, (
-        "without maxWidth the column takes only its ideal width and the freed space goes "
-        "back to the chart"
+    assert _TICKER_COLUMN_RE.search(src), (
+        "the ticker column lost its `maxWidth: .infinity` — without it the column takes only "
+        "its ideal width and the freed space goes back to the chart"
     )
 
 
@@ -145,13 +151,19 @@ def test_the_skeleton_reads_the_rows_constants_rather_than_copying_them():
     assert ".frame(width: 80" not in src, "a hardcoded 80 is back in the skeleton"
 
 
-def test_the_skeleton_spacer_matches_the_row():
-    row_gap = _strip_comments(_ROW.read_text()).count("Spacer(minLength: AppSpacing.sm)")
-    skel_gap = _strip_comments(_SKELETON.read_text()).count("Spacer(minLength: AppSpacing.sm)")
-    assert row_gap == 1 and skel_gap == 1, (
-        f"the placeholder's trailing gap must match the real row's (row={row_gap}, "
-        f"skeleton={skel_gap}). They were 8pt vs 12pt before this."
+def test_no_spacer_after_the_chart_in_the_row_or_the_skeleton():
+    """Owner, 2026-11-11: "i want the ticker and its name longer, so some companies has
+    longer name can be seen." The navigation side used to end in `Spacer(minLength: sm)`,
+    8pt+ of empty space after the chart that the names could never use. With it gone the
+    ticker column's `maxWidth: .infinity` takes all the slack and the chart sits one gap
+    from the price column. The skeleton mirrors it (it once carried 8pt vs 12pt and the
+    list jumped on load)."""
+    row_body = _decl_block(_ROW.read_text(), "var body: some View")
+    skel_row = _decl_block(_SKELETON.read_text(), "private var row")
+    assert "Spacer(" not in row_body, (
+        "a Spacer is back in the row: it takes slack the company names need"
     )
+    assert "Spacer(" not in skel_row, "the skeleton must match the real row (no Spacer)"
 
 
 def test_the_skeleton_is_inset_like_every_other_section():
@@ -214,6 +226,30 @@ def test_the_scanners_are_not_vacuous():
         "TrackedAssetsSkeleton()\n} else if",
     ) is None, "the skeleton-padding regex matches a bare call, so that test is vacuous"
 
+    # The ticker check must not be satisfied by the price column's fill frame.
+    decoy = (
+        ".frame(minWidth: Self.tickerColumnMinWidth,\n"
+        "       alignment: .leading)\n"
+        ".frame(maxWidth: .infinity, alignment: .trailing)\n"
+    )
+    assert _TICKER_COLUMN_RE.search(decoy) is None, (
+        "the ticker-column regex matches a maxWidth on ANOTHER frame, so it is vacuous"
+    )
+
+
+def test_the_ticker_column_check_bites_on_the_real_file():
+    """Delete the ticker column's `maxWidth: .infinity,` from the real source: the price
+    column's fill frames still say `maxWidth: .infinity`, and the check must still fail."""
+    src = _strip_comments(_ROW.read_text())
+    anchor = "                           maxWidth: .infinity,\n"
+    assert src.count(anchor) == 1, "mutation anchor drifted: the ticker column's maxWidth line"
+    mutated = src.replace(anchor, "")
+    assert "maxWidth: .infinity" in mutated, (
+        "the decoy premise is gone (no other maxWidth: .infinity in the row) — fine, but then "
+        "this test no longer proves anything; re-check it"
+    )
+    assert _TICKER_COLUMN_RE.search(mutated) is None
+
 
 # ── 5. Regressions found by the adversarial review of this change ─────
 #
@@ -262,3 +298,156 @@ def test_the_skeletons_name_bar_fills_the_column_instead_of_overflowing_it():
         "the name bar should fill the column (`width: nil` takes bar()'s maxWidth "
         "branch), so it tracks the column at every device width"
     )
+
+
+# ── 6. One price column per list, whatever each card holds ────────────
+#
+# Tracking -> Assets -> Holdings, after hours (2026-11-11, iPhone 17 Pro): the cards did not
+# line up. Each card sized its price column from its OWN numbers (the price Button had no
+# width), and the navigation side — ticker column, chart, Spacer — got the rest, so the chart
+# started at x = inner - 120 - column on every card: ~108-118pt columns on cards with an
+# after-hours chip, ~72pt on ETHUSD, whose chart sat ~40pt further right. Six cards also lost
+# their chip and drew price and change ~25pt short of the edge (see the `stable_fit` guard in
+# test_ios_holdings_extended_chip.py).
+#
+# The fix gives every card the same column: `.frame(minWidth: 0, maxWidth: cap, alignment:
+# .trailing)`. With BOTH bounds a frame takes the width it is offered clamped to them,
+# whatever its content, and `.layoutPriority(1)` offers every card the same (row - 176pt
+# navigation floor). `minWidth: 0` is load-bearing: with `maxWidth` alone the frame hugs a
+# narrower child again. The cap is 88pt (scaled) in the regular session and 128pt when the
+# list can show a chip — one answer per LIST, never per card.
+
+
+def _column_sources() -> dict:
+    return {"row": _ROW.read_text(), "section": _SECTION.read_text(),
+            "skeleton": _SKELETON.read_text()}
+
+
+def _toggle_and_navigation(row_src: str):
+    body = _decl_block(row_src, "var body: some View")
+    second = body.index("Button {", body.index("Button {") + 1)
+    return body[second:], body[:second]
+
+
+def content_independent_column(src: dict) -> None:
+    modifier = _decl_block(src["row"], "struct HoldingsPriceColumn: ViewModifier")
+    assert re.search(r"\.frame\(\s*minWidth: 0,\s*maxWidth: max\(regularWidth,", modifier), (
+        "the price column is no longer clamped with BOTH bounds. With maxWidth alone the frame "
+        "takes its content's width when that is narrower, and every card's column — and with "
+        "it the chart's x — depends on that card's numbers again."
+    )
+    assert "alignment: .trailing" in modifier, "price and change must sit flush right"
+    assert "@ScaledMetric(relativeTo: .headline)" in modifier and "AssetRow.priceColumnWidth" in modifier, (
+        "the regular width must scale on headingSmall's curve (.headline) from the row's constant"
+    )
+    toggle, navigation = _toggle_and_navigation(src["row"])
+    assert ".holdingsPriceColumn(reservesExtendedMove: reservesExtendedMove)" in toggle, (
+        "the price column is not sized by HoldingsPriceColumn"
+    )
+    assert "holdingsPriceColumn" not in navigation
+    assert ".frame(width:" not in toggle, (
+        "a hard width on the price column is also its MINIMUM: above 119pt it pushes a 375pt "
+        "phone's row past its card (navigation floor 176 + 16 + column > 311)"
+    )
+
+
+def column_constants(src: dict) -> None:
+    row = _strip_comments(src["row"])
+
+    def const(name: str) -> float:
+        m = re.search(rf"static let {name}: CGFloat = (\d+(?:\.\d+)?)", row)
+        assert m, f"AssetRow.{name} not found — this scan has drifted"
+        return float(m.group(1))
+
+    ticker, spark = const("tickerColumnMinWidth"), const("sparklineWidth")
+    regular, extended = const("priceColumnWidth"), const("extendedPriceColumnWidth")
+    # AppSpacing.lg (16) between the navigation side's two children and before the price
+    # column; 64 = list insets + card padding.
+    # No Spacer after the chart since 2026-11-11 (see the no-Spacer test above).
+    navigation_floor = ticker + 16 + spark
+    offer_375 = (375 - 64) - 16 - navigation_floor
+    assert regular <= offer_375, (
+        f"priceColumnWidth {regular} exceeds what a 375pt phone can offer ({offer_375}) — that "
+        "phone's column is then clamped below the regular width"
+    )
+    assert regular <= extended, "the after-hours column must not be narrower than the regular one"
+    assert (regular, extended) == (88.0, 128.0), (
+        f"the column widths changed ({regular}, {extended}). 88 fits '$98,765.43' unshrunk and a "
+        "BRK-A price inside its 0.85 scale factor; 128 fits a double-digit chip beside a "
+        "double-digit day change. Re-derive both (the doc comments on the constants) and check "
+        "the 'Column alignment' preview before changing this pin."
+    )
+
+
+def one_answer_per_list(src: dict) -> None:
+    section_body = _decl_block(src["section"], "var body: some View")
+    assert "let reservesExtendedMove = extendedMoveIsPossible" in section_body, (
+        "the list no longer reads the session ONCE per render"
+    )
+    assert section_body.index("let reservesExtendedMove = extendedMoveIsPossible") < section_body.index("List {")
+    section = _strip_comments(src["section"])
+    assert section.count("reservesExtendedMove: reservesExtendedMove") == 1, (
+        "the visible rows must get the ONE captured answer — a per-cell read of the clock can "
+        "give two column widths in one list across the bell"
+    )
+    probe = _decl_block(src["section"], "private var rowHeightProbe")
+    assert "reservesExtendedMove: extendedMoveIsPossible" in probe, (
+        "the height probe must lay out the same column as the rows it stands in for"
+    )
+    gate = _decl_block(src["section"], "private var extendedMoveIsPossible: Bool")
+    assert "AssetRow.isOutsideRegularSession" in gate and "extendedSession != nil" in gate
+    row_body = _decl_block(src["row"], "var body: some View")
+    assert "MarketHoursUtil" not in row_body and "isOutsideRegularSession" not in row_body, (
+        "a card decides its own column from the clock again — the list must decide once"
+    )
+
+
+def skeleton_column(src: dict) -> None:
+    row = _decl_block(src["skeleton"], "private var row")
+    assert ".holdingsPriceColumn(reservesExtendedMove: AssetRow.isOutsideRegularSession)" in row, (
+        "the skeleton's price bars no longer take the real column, so the placeholder chart "
+        "lands somewhere else and the list jumps when data arrives"
+    )
+    assert ".layoutPriority(1)" in row, "without the row's priority the skeleton column is sized differently"
+
+
+COLUMN_GUARDS = {
+    "content_independent_column": content_independent_column,
+    "column_constants": column_constants,
+    "one_answer_per_list": one_answer_per_list,
+    "skeleton_column": skeleton_column,
+}
+
+
+@pytest.mark.parametrize("name", sorted(COLUMN_GUARDS))
+def test_column_guard_holds(name):
+    COLUMN_GUARDS[name](_column_sources())
+
+
+COLUMN_MUTATIONS = [
+    ("content_independent_column", "row", "            minWidth: 0,\n", ""),
+    ("content_independent_column", "row",
+     "                .holdingsPriceColumn(reservesExtendedMove: reservesExtendedMove)\n", ""),
+    ("column_constants", "row", "static let priceColumnWidth: CGFloat = 88",
+     "static let priceColumnWidth: CGFloat = 100"),
+    ("one_answer_per_list", "section", "reservesExtendedMove: reservesExtendedMove",
+     "reservesExtendedMove: AssetRow.isOutsideRegularSession"),
+    ("one_answer_per_list", "section", "                 reservesExtendedMove: extendedMoveIsPossible)",
+     "                 reservesExtendedMove: false)"),
+    ("skeleton_column", "skeleton",
+     "            .holdingsPriceColumn(reservesExtendedMove: AssetRow.isOutsideRegularSession)\n", ""),
+]
+
+
+@pytest.mark.parametrize("name,key,old,new", COLUMN_MUTATIONS,
+                         ids=[f"{m[0]}:{m[2].strip()[:28]}" for m in COLUMN_MUTATIONS])
+def test_every_column_guard_kills_its_mutation(name, key, old, new):
+    src = _column_sources()
+    assert src[key].count(old) == 1, f"mutation anchor drifted: {old!r}"
+    src[key] = src[key].replace(old, new)
+    with pytest.raises(AssertionError):
+        COLUMN_GUARDS[name](src)
+
+
+def test_every_column_guard_has_a_mutation():
+    assert {m[0] for m in COLUMN_MUTATIONS} == set(COLUMN_GUARDS)

@@ -9,6 +9,28 @@
 
 import SwiftUI
 
+/// A muted continuation of a sparkline on a wider time axis — the Holdings row's after-hours
+/// trading. Generic: the atom knows nothing about sessions. The main series is drawn inside the
+/// first `regularShare` of the width (its own `spanFrom`/`spanTo` scaled into it) and this
+/// series runs from that `regularShare` mark up to `spanTo` of the width, in one gray tone.
+struct SparklineTail: Equatable {
+    /// Evenly TIMED values (the server samples a clock grid), not merely evenly indexed.
+    let data: [Double]
+    /// The main series' share of the axis.
+    let regularShare: Double
+    /// Where the tail ends on the axis.
+    let spanTo: Double
+
+    /// Usable only as a real continuation: finite points, and an axis on which the main
+    /// series ends before the tail does (0 < regularShare < spanTo <= 1). Anything else draws
+    /// the main series exactly as it was drawn before tails existed.
+    var isDrawable: Bool {
+        !data.isEmpty && data.allSatisfy(\.isFinite)
+            && regularShare.isFinite && spanTo.isFinite
+            && regularShare > 0 && regularShare < spanTo && spanTo <= 1
+    }
+}
+
 struct SparklineView: View {
     let data: [Double]
     let isPositive: Bool
@@ -35,6 +57,19 @@ struct SparklineView: View {
     /// caller with no session information (previews, `MarketTicker`) is unchanged.
     var spanFrom: Double = 0
     var spanTo: Double = 1
+    /// A gray continuation after the series (see ``SparklineTail``) — the Holdings row's
+    /// after-hours trading. Nil (every other caller) draws exactly what it drew before.
+    var tail: SparklineTail? = nil
+
+    /// The tail's tone: muted, so it reads as "after the session", never as a gain or a loss.
+    /// A TEXT token (≥ 4.5:1 on a card), so it also clears the 3:1 bar a chart stroke needs —
+    /// the detail chart's extended-hours shading uses the same token.
+    private static let tailTone = AppColors.textMuted
+
+    private var drawableTail: SparklineTail? {
+        guard let tail, tail.isDrawable else { return nil }
+        return tail
+    }
 
     // 2.5pt radius = a 5pt dot (was 6pt). It only has to mark where the series
     // ends; on a 22pt Market Pulse tile the larger one read as a bullet. Kept in
@@ -57,8 +92,13 @@ struct SparklineView: View {
                 // first point. Included in the scale so the dotted line is always
                 // visible even if price never traded back to it.
                 let referenceValue = referencePrice ?? data[0]
-                let minValue = min(data.min() ?? 0, referenceValue)
-                let maxValue = max(data.max() ?? 1, referenceValue)
+                // The tail shares the y-scale, so a late move past the session's range
+                // still fits on the card.
+                let tailData: [Double] = drawableTail?.data ?? []
+                let seriesMin: Double = min(data.min() ?? 0, tailData.min() ?? (data.min() ?? 0))
+                let seriesMax: Double = max(data.max() ?? 1, tailData.max() ?? (data.max() ?? 1))
+                let minValue = min(seriesMin, referenceValue)
+                let maxValue = max(seriesMax, referenceValue)
                 let range = max(maxValue - minValue, .ulpOfOne)
                 // Reserve room for the end dot, which is centred ON the last
                 // point. The y-scale sends the series minimum to the very bottom
@@ -73,8 +113,11 @@ struct SparklineView: View {
                 // `SparklineGeometry` so the two primitives can't disagree about
                 // what an unusable span means (both fall back to full width).
                 let span = SparklineGeometry.clampedSpan(from: spanFrom, to: spanTo)
-                let originX = plot.minX + plot.width * span.from
-                let stepX = (plot.width * (span.to - span.from)) / CGFloat(data.count - 1)
+                // With a tail the axis is wider (open → end of after-hours), so the series'
+                // own span is scaled into the first `regularShare` of the width.
+                let share: CGFloat = CGFloat(drawableTail?.regularShare ?? 1)
+                let originX = plot.minX + plot.width * span.from * share
+                let stepX = (plot.width * (span.to - span.from) * share) / CGFloat(data.count - 1)
 
                 let points: [CGPoint] = data.enumerated().map { index, value in
                     let x = originX + CGFloat(index) * stepX
@@ -88,6 +131,8 @@ struct SparklineView: View {
 
                 let lastPoint = points.last!
                 let endIsAbove = data.last! >= referenceValue
+                let tailLine: [CGPoint] = tailPoints(after: lastPoint, plot: plot,
+                                                     minValue: minValue, range: range)
 
                 if !showReference {
                     // Single tone, no reference, no split — the series' own direction.
@@ -111,9 +156,14 @@ struct SparklineView: View {
                                                             lineWidth: lineWidth,
                                                             dash: [3, 2])
                         )
-                        let dotRect = CGRect(x: lastPoint.x - dotRadius, y: lastPoint.y - dotRadius,
+                        if tailLine.count > 1 {
+                            strokeTail(tailLine, in: &context)
+                        }
+                        let endPoint = tailLine.last ?? lastPoint
+                        let dotRect = CGRect(x: endPoint.x - dotRadius, y: endPoint.y - dotRadius,
                                              width: dotRadius * 2, height: dotRadius * 2)
-                        context.fill(Path(ellipseIn: dotRect), with: .color(tone))
+                        context.fill(Path(ellipseIn: dotRect),
+                                     with: .color(tailLine.count > 1 ? Self.tailTone : tone))
                         _ = size
                     }
                 } else {
@@ -198,6 +248,16 @@ struct SparklineView: View {
                         )
                     }
 
+                    // --- Gray after-hours tail, then the dot at ITS end ---
+                    if tailLine.count > 1 {
+                        strokeTail(tailLine, in: &context)
+                        let tailEnd = tailLine[tailLine.count - 1]
+                        let tailDot = CGRect(x: tailEnd.x - dotRadius, y: tailEnd.y - dotRadius,
+                                             width: dotRadius * 2, height: dotRadius * 2)
+                        context.fill(Path(ellipseIn: tailDot), with: .color(Self.tailTone))
+                        return
+                    }
+
                     // --- End dot: filled when above the reference, hollow when below ---
                     let dotRect = CGRect(
                         x: lastPoint.x - dotRadius,
@@ -216,6 +276,43 @@ struct SparklineView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Tail
+
+    /// The tail as points on the series' own y-scale. It starts at the bell — `regularShare` of
+    /// the width — and its values are evenly timed from there to `spanTo`, value j at
+    /// (j + 1) / count of that run. On a normal day the series ends at the bell and the tail
+    /// continues from its last point. When the series ends early (a stock halted at 14:30
+    /// that trades again only after hours), the gap up to the bell stays EMPTY and the gray
+    /// starts at the bell, at the series' last price — gray is after-hours only (owner,
+    /// 2026-11-11: "the green/red is during market, after that is a gray color"). Starting
+    /// at the series' last point instead drew gray over the halted session. `[]` without a
+    /// tail.
+    private func tailPoints(after last: CGPoint, plot: CGRect,
+                            minValue: Double, range: Double) -> [CGPoint] {
+        guard let tail = drawableTail else { return [] }
+        let bellX: CGFloat = plot.minX + plot.width * CGFloat(tail.regularShare)
+        let endX: CGFloat = plot.minX + plot.width * CGFloat(tail.spanTo)
+        // Half a point of slack: the series' end is the same mark computed another way.
+        let start: CGPoint = last.x >= bellX - 0.5 ? last : CGPoint(x: bellX, y: last.y)
+        let run: CGFloat = max(endX - start.x, 0)
+        let count = CGFloat(tail.data.count)
+        var result: [CGPoint] = [start]
+        for (index, value) in tail.data.enumerated() {
+            let x: CGFloat = start.x + run * CGFloat(index + 1) / count
+            let level: CGFloat = CGFloat((value - minValue) / range)
+            result.append(CGPoint(x: x, y: plot.maxY - level * plot.height))
+        }
+        return result
+    }
+
+    private func strokeTail(_ points: [CGPoint], in context: inout GraphicsContext) {
+        context.stroke(
+            buildLinePath(points: points),
+            with: .color(Self.tailTone),
+            style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round)
+        )
     }
 
     // MARK: - Path Builders
@@ -262,6 +359,28 @@ struct SparklineView: View {
         SparklineView(
             data: [100, 95, 92, 98, 96, 102, 105, 99, 103, 108],
             isPositive: true
+        )
+        .frame(width: 120, height: 40)
+
+        // After the close: the session in green/red, then the after-hours tail in gray,
+        // 7:30 PM ET on the open → 8 PM axis.
+        SparklineView(
+            data: [100, 98, 102, 105, 103, 108],
+            isPositive: true,
+            referencePrice: 100,
+            tail: SparklineTail(data: [107.5, 106.8, 107.2, 106.1], regularShare: 0.619, spanTo: 0.95)
+        )
+        .frame(width: 120, height: 40)
+
+        // Halted at 14:30, trading again only after hours: an empty gap up to the bell, then
+        // the gray tail — flat at the halted price until the first after-hours trade (18:30).
+        SparklineView(
+            data: [100, 98, 102, 105, 103, 104],
+            isPositive: true,
+            referencePrice: 100,
+            spanTo: 0.782,
+            tail: SparklineTail(data: [104, 104, 104, 104, 112, 113, 111, 112],
+                                regularShare: 0.619, spanTo: 1.0)
         )
         .frame(width: 120, height: 40)
 

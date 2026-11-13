@@ -10,10 +10,10 @@
 //  screen stating something false about the user's own money. (Captured on device before this
 //  change, under the LoadingOverlay that has since been removed.)
 //
-//  Mirrors `AssetRow`'s geometry — flexible ticker block, pinned sparkline, trailing price —
-//  so the real rows replace these without the list jumping. The two widths are READ FROM
-//  `AssetRow` rather than copied: this file previously carried a literal duplicate of its
-//  hardcoded 80, and diverged the moment the row was rebalanced.
+//  Mirrors `AssetRow`'s geometry — flexible ticker block, pinned sparkline, trailing price
+//  column — so the real rows replace these without the list jumping. The widths are READ FROM
+//  `AssetRow` (and its `holdingsPriceColumn` modifier) rather than copied: this file previously
+//  carried a literal duplicate of its hardcoded 80, and diverged the moment the row was rebalanced.
 //
 
 import SwiftUI
@@ -64,14 +64,18 @@ struct TrackedAssetsSkeleton: View {
                    maxWidth: .infinity,
                    alignment: .leading)
 
+            // No Spacer after the chart, like the real row: the ticker column takes the slack.
             bar(width: AssetRow.sparklineWidth, height: 32)
-
-            Spacer(minLength: AppSpacing.sm)
 
             VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
                 bar(width: 64, height: 14)
                 bar(width: 44, height: 10)
             }
+            // The real row's price column — same modifier, same priority — so the placeholder
+            // chart sits where the real chart lands. No assets yet, so the session alone
+            // decides; a crypto-only list after hours narrows once when its data arrives.
+            .holdingsPriceColumn(reservesExtendedMove: AssetRow.isOutsideRegularSession)
+            .layoutPriority(1)
         }
         .padding(.vertical, AppSpacing.md)
         .padding(.horizontal, AppSpacing.lg)

@@ -231,7 +231,14 @@ async def test_only_rows_with_an_extended_session_cost_a_call(clock):
         now=_AFTER_HOURS,
     )
     assert sorted(c[0] for c in fmp.calls) == ["AAPL", "BTC", "SPY"]
-    assert out["AAPL"] == {"price": 102.5, "session": "after_hours"}
+    # The print, plus the same bars' after-hours tail (one 17:00 bar after a 15:55 close): on
+    # the clock grid, 16:00-17:00 untraded stays at the 101.0 close, then the 17:00 print.
+    assert out["AAPL"] == {
+        "price": 102.5,
+        "session": "after_hours",
+        "after_hours": {"closes": [101.0] * 12 + [102.5], "regular_share": 0.619,
+                        "span_to": round(455 / 630, 4)},
+    }
     assert set(out) == {"AAPL", "BTC", "SPY"}
 
 
@@ -319,17 +326,19 @@ class _FakeSupabase:
         return _FakeTable(self._w if name == "watchlist_items" else [])
 
 
-async def _feed_with(monkeypatch, quotes: Dict[str, Dict], prints: Dict[str, Dict]):
+async def _feed_with(monkeypatch, quotes: Dict[str, Dict], prints: Dict[str, Dict],
+                     sparklines: Dict[str, tuple] = None):
     watchlist = [{"id": i, "ticker": t, "company_name": t, "asset_type": "stock",
                   "sector": "Technology"} for i, t in enumerate(["AAPL", "MSFT", "NVDA"])]
     monkeypatch.setattr(ts, "get_supabase", lambda: _FakeSupabase(watchlist))
 
     async def _quotes(self, tickers): return quotes
     async def _nothing(self, *a, **k): return {}
+    async def _sparks(self, *a, **k): return sparklines or {}
     async def _no_list(self, *a, **k): return []
     async def _backfill(self, user_id, wl): return None
     async def _prints(self, tickers, asset_types=None): return prints
-    for name, fn in [("_get_batch_quotes", _quotes), ("_get_all_sparklines", _nothing),
+    for name, fn in [("_get_batch_quotes", _quotes), ("_get_all_sparklines", _sparks),
                      ("_get_earnings_alerts", _no_list), ("_get_whale_trade_alerts", _no_list),
                      ("_get_analyst_rating_alerts", _no_list),
                      ("_get_insider_transaction_alerts", _no_list),
@@ -383,3 +392,290 @@ async def test_an_unchanged_print_is_a_positive_zero(monkeypatch):
     )
     move = rows["AAPL"].extended_change_percent
     assert move == 0.0 and math.copysign(1.0, move) == 1.0
+
+
+# ── 6. the sparkline's gray after-hours tail (2026-11-11) ────────────────────
+#
+# Owner: "after market close, the chart will have a gray color ... the green/red is during
+# market, after that is a gray color like an extend chart ... for crypto, it should not
+# have gray because they are 24h." Time-scaled: the axis runs from the open to the end of
+# after-hours, so the session line keeps 390/630 of it; before the open the tail stays the
+# LAST session's after-hours (today's pre-market moves only the ☀ chip).
+
+from app.services.chart_helper import after_hours_series  # noqa: E402
+
+_SHARE = round(390 / 630, 4)
+
+
+def test_the_tail_is_the_sessions_after_hours_on_a_time_axis():
+    """One close per five-minute slot from the bell: 16:00 → slot 0, 17:00 → slot 12, 19:55 →
+    slot 47; the slots between keep the price before them."""
+    bars = _bars("2026-10-29", ("04:00", 99.0), ("09:30", 100.0), ("15:55", 101.0),
+                 ("16:00", 102.0), ("17:00", 103.0), ("19:55", 104.0))
+    tail = after_hours_series(bars)
+    assert tail == {"closes": [102.0] * 12 + [103.0] * 35 + [104.0],
+                    "regular_share": _SHARE, "span_to": 1.0}
+
+
+def test_the_tail_grows_with_the_clock():
+    """At 16:30 the tail ends a third of the way into after-hours, not at the edge."""
+    bars = _bars("2026-10-29", ("09:30", 100.0), ("15:55", 101.0), ("16:25", 102.0))
+    tail = after_hours_series(bars)
+    assert tail["span_to"] == round((16 * 60 + 30 - 570) / 630, 4)
+    assert _SHARE < tail["span_to"] < 1.0
+    assert tail["closes"] == [101.0] * 5 + [102.0], (
+        "16:00-16:25 untraded: flat at the session's last close, then the 16:25 print"
+    )
+
+
+def test_a_half_day_tail_runs_from_13_00_to_17_00():
+    bars = _bars("2026-11-27", ("09:30", 1.0), ("12:55", 2.0), ("13:00", 3.0),
+                 ("16:55", 4.0), ("17:00", 5.0))
+    tail = after_hours_series(bars)
+    assert tail["closes"] == [3.0] * 47 + [4.0]
+    assert 5.0 not in tail["closes"], "17:00 is past the half-day's after-hours"
+    assert tail["regular_share"] == round(210 / 450, 4)
+    assert tail["span_to"] == 1.0
+
+
+def test_before_the_open_the_tail_is_still_the_last_sessions():
+    """Monday 07:00: Friday's after-hours is the tail; Monday's pre-market is not in it."""
+    bars = (_bars("2026-10-30", ("09:30", 2.0), ("15:55", 3.0), ("17:00", 4.0))
+            + _bars("2026-11-02", ("04:05", 6.0), ("06:55", 7.0)))
+    tail = after_hours_series(bars)
+    assert tail["closes"] == [3.0] * 12 + [4.0]
+    assert 6.0 not in tail["closes"] and 7.0 not in tail["closes"]
+    assert latest_extended_print(bars)["session"] == "pre_market", "the chip still says ☀"
+
+
+@pytest.mark.parametrize(
+    "bars",
+    [
+        _bars("2026-10-29", ("09:30", 2.0), ("15:55", 3.0)),    # nothing after the bell
+        _bars("2026-10-29", ("04:00", 1.0), ("08:00", 2.0)),    # no regular bar to hang it on
+        (_bars("2026-10-30", ("09:30", 2.0), ("15:55", 3.0))    # only today's pre-market
+         + _bars("2026-11-02", ("04:05", 6.0))),
+        [],
+        None,
+        "garbage",
+    ],
+)
+def test_no_tail(bars):
+    assert after_hours_series(bars) is None
+
+
+def test_unusable_tail_rows_are_skipped_not_fatal():
+    bars = _bars("2026-10-29", ("15:55", 3.0), ("16:30", 4.0)) + [
+        {"date": "2026-10-29 17:00:00", "close": float("nan")},
+        {"date": "2026-10-29 17:05:00", "close": 0},
+        {"date": "2026-10-29 17:10:00", "close": float("inf")},
+        "not a row",
+        {"date": None, "close": 9.0},
+        {"date": "2026-10-29", "close": 9.0},   # a daily stamp has no time of day
+    ]
+    tail = after_hours_series(bars)
+    assert tail["closes"] == [3.0] * 6 + [4.0]
+    assert tail["span_to"] == round((16 * 60 + 35 - 570) / 630, 4), "the skipped rows move nothing"
+
+
+@pytest.mark.asyncio
+async def test_the_service_caches_the_tail_with_its_print(clock):
+    fmp = _RecordingFMP(_SESSION)
+    svc = _svc(fmp)
+    first = await svc._get_extended_prints(["AAPL"], {}, now=_AFTER_HOURS)
+    second = await svc._get_extended_prints(["AAPL"], {}, now=_AFTER_HOURS)
+    assert len(fmp.calls) == 1
+    assert first["AAPL"]["after_hours"] == second["AAPL"]["after_hours"]
+
+
+@pytest.mark.asyncio
+async def test_a_coin_never_gets_a_tail(clock):
+    fmp = _RecordingFMP(_SESSION)
+    out = await _svc(fmp)._get_extended_prints(
+        ["BTCUSD"], {"BTCUSD": "crypto"}, now=_AFTER_HOURS)
+    assert out == {} and fmp.calls == [], "a 24/7 coin has no extended session to fetch"
+
+
+# The merge: the tail rides beside the chip, over a drawn session line, all three or none.
+
+_TAIL = {"closes": [349.0, 349.1, 349.2], "regular_share": _SHARE, "span_to": 0.75}
+_LINE = {"AAPL": ([340.0, 345.0, 348.91], 0.0, 1.0), "MSFT": ([401.0, 400.0], 0.0, 1.0),
+         "NVDA": ([180.0, 181.0], 0.0, 1.0)}
+
+
+@pytest.mark.asyncio
+async def test_the_tail_rides_beside_the_chip(monkeypatch):
+    rows = await _feed_with(
+        monkeypatch,
+        quotes={"AAPL": {"price": 348.91, "changePercentage": 1.48}},
+        prints={"AAPL": {"price": 349.2, "session": "after_hours", "after_hours": _TAIL}},
+        sparklines=_LINE,
+    )
+    aapl = rows["AAPL"]
+    assert aapl.extended_sparkline == [349.0, 349.1, 349.2]
+    assert (aapl.extended_regular_share, aapl.extended_span_to) == (_SHARE, 0.75)
+    assert aapl.sparkline_data == [340.0, 345.0, 348.91], "the session line is untouched"
+    assert (aapl.spark_from, aapl.spark_to) == (0.0, 1.0), "older clients keep their axis"
+
+
+@pytest.mark.asyncio
+async def test_no_chip_or_no_line_means_no_tail(monkeypatch):
+    """NVDA: a tail but no quote, so no chip. MSFT: a chip and a tail but no drawn line."""
+    rows = await _feed_with(
+        monkeypatch,
+        quotes={"MSFT": {"price": 400.0, "changePercentage": -0.5}},
+        prints={"NVDA": {"price": 190.0, "session": "after_hours", "after_hours": _TAIL},
+                "MSFT": {"price": 398.0, "session": "after_hours", "after_hours": _TAIL}},
+        sparklines={"NVDA": _LINE["NVDA"], "MSFT": ([400.0], 0.0, 1.0)},
+    )
+    for ticker in ("MSFT", "NVDA"):
+        row = rows[ticker]
+        assert (row.extended_sparkline, row.extended_regular_share, row.extended_span_to) == (
+            [], None, None), ticker
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        {"closes": [1.0], "regular_share": 0.0, "span_to": 0.7},            # no session share
+        {"closes": [1.0], "regular_share": 0.7, "span_to": 0.7},            # tail ends at the bell
+        {"closes": [1.0], "regular_share": 0.6, "span_to": 1.2},            # past the axis
+        {"closes": [1.0], "regular_share": float("nan"), "span_to": 0.7},
+        {"closes": [float("nan"), 0, -1], "regular_share": 0.6, "span_to": 0.7},
+        {"closes": "1,2", "regular_share": 0.6, "span_to": 0.7},
+        {"regular_share": 0.6, "span_to": 0.7},
+        "garbage",
+        None,
+    ],
+)
+def test_a_malformed_tail_is_dropped_whole(tail):
+    assert ts._after_hours_tail(tail, [1.0, 2.0]) == ([], None, None)
+
+
+def test_a_long_tail_is_sampled_on_the_clock_ending_at_its_last_print():
+    closes = [100.0 + i / 100 for i in range(48)]
+    out, share, span_to = ts._after_hours_tail(
+        {"closes": closes, "regular_share": _SHARE, "span_to": 1.0}, [99.0, 100.0])
+    assert len(out) == ts._AFTER_HOURS_SPARK_POINTS
+    assert out[-1] == closes[-1], "the end must match the chip's price"
+    assert out == [closes[(j + 1) * 48 // 20 - 1] for j in range(20)]
+    assert (share, span_to) == (_SHARE, 1.0)
+
+
+def test_a_tail_is_rounded_at_least_as_finely_as_its_line():
+    """A $0.20 holding: the line keeps 4 places, so the tail must not snap to 2."""
+    line = [0.2012, 0.2034, 0.2051]
+    out, _, _ = ts._after_hours_tail(
+        {"closes": [0.20555, 0.20612], "regular_share": _SHARE, "span_to": 0.8}, line)
+    assert out == [round(0.20555, ts.sparkline_precision(line)),
+                   round(0.20612, ts.sparkline_precision(line))]
+    assert out[0] != out[1]
+
+
+@pytest.mark.asyncio
+async def test_a_feed_with_a_tail_serialises_without_nan(monkeypatch):
+    import json
+    rows = await _feed_with(
+        monkeypatch,
+        quotes={"AAPL": {"price": 348.91, "changePercentage": 1.48}},
+        prints={"AAPL": {"price": 349.2, "session": "after_hours",
+                         "after_hours": {**_TAIL, "closes": [349.0, float("nan"), 349.2]}}},
+        sparklines=_LINE,
+    )
+    assert rows["AAPL"].extended_sparkline == [349.0, 349.0, 349.2], (
+        "the bad slot keeps the price before it; dropping it would pull 349.2 a slot early"
+    )
+    json.dumps(rows["AAPL"].model_dump(), allow_nan=False)
+
+
+# ── 7. the tail's clock and the chip's bound (2026-11-12 review) ─────────────
+#
+# Two edge cases from the pre-push review. (a) The tail's points were spaced by index from
+# wherever the session line ended: a thin tape (16:00, 16:05, 16:10, 19:55) drew the 16:10
+# trade near 19:00, and a stock halted at 14:30 that traded again only after hours drew gray
+# across the halted session. The tail is now one close per five-minute slot from the bell,
+# sampled at the very x iOS draws each point (`_sample_on_clock`), and iOS hangs it at the bell
+# (test_ios_holdings_extended_chip.py `tail_starts_at_bell`). (b) The chip took any bar after
+# the bell while the tail stopped at the after-hours close (20:00; a half-day's 17:00); they now
+# share the bound. FMP's bars end at 16:55 on a half-day (checked 2026-11-12), so (b) holds by
+# construction, not by the feed's habits.
+
+
+def test_the_chip_stops_where_the_tail_stops_on_a_half_day():
+    bars = _bars("2026-11-27", ("09:30", 1.0), ("12:55", 2.0), ("13:00", 8.0),
+                 ("16:55", 9.0), ("17:00", 10.0), ("19:55", 11.0))
+    assert latest_extended_print(bars) == {"price": 9.0, "session": "after_hours"}
+    assert after_hours_series(bars)["closes"][-1] == 9.0, "the gray end dot quotes the chip"
+
+
+def test_a_bar_at_the_after_hours_close_is_not_a_print():
+    bars = _bars("2026-10-29", ("09:30", 2.0), ("15:55", 3.0), ("19:55", 4.0), ("20:00", 5.0))
+    assert latest_extended_print(bars) == {"price": 4.0, "session": "after_hours"}
+    assert after_hours_series(bars)["closes"][-1] == 4.0
+
+
+def test_the_bound_is_the_sessions_own_day_only():
+    """Monday's pre-market is a print even though its day is not Friday's: the bound reads the
+    after-hours of the LAST session, it does not cap the clock."""
+    bars = (_bars("2026-10-30", ("09:30", 2.0), ("15:55", 3.0), ("20:05", 4.0))
+            + _bars("2026-11-02", ("04:05", 6.0)))
+    assert latest_extended_print(bars) == {"price": 6.0, "session": "pre_market"}
+    bars = _bars("2026-10-30", ("09:30", 2.0), ("15:55", 3.0), ("20:05", 4.0))
+    assert latest_extended_print(bars) is None, "nothing inside Friday's after-hours"
+
+
+def test_a_thin_tape_sits_at_its_own_times():
+    bars = _bars("2026-10-29", ("09:30", 100.0), ("15:55", 101.0),
+                 ("16:00", 1.0), ("16:05", 2.0), ("16:10", 3.0), ("19:55", 4.0))
+    closes = after_hours_series(bars)["closes"]
+    assert closes == [1.0, 2.0] + [3.0] * 45 + [4.0]
+    out, _, _ = ts._after_hours_tail(
+        {"closes": closes, "regular_share": _SHARE, "span_to": 1.0}, [100.0, 101.0])
+    # iOS draws point j at (j + 1) / 20 of the run: j = 14 is 19:00, where the price is still
+    # the 16:10 trade's — the old index spread drew the 16:10 trade itself there.
+    assert out[14] == 3.0 and out[-2] == 3.0 and out[-1] == 4.0
+    assert out[0] == 2.0, "16:12 is drawn at the 16:05 slot's close, the last that had ended"
+
+
+def test_a_tail_after_a_halt_starts_flat_at_the_halted_price():
+    """Halted at 14:30, trading again at 17:00: 16:00-17:00 is flat at the last regular price
+    (nothing traded), never a slope from the halt to the first after-hours trade."""
+    bars = _bars("2026-10-29", ("09:30", 9.0), ("14:30", 10.0),
+                 ("17:00", 14.0), ("17:05", 14.2), ("19:55", 14.1))
+    closes = after_hours_series(bars)["closes"]
+    assert closes[:12] == [10.0] * 12
+    assert closes[12:14] == [14.0, 14.2] and closes[-1] == 14.1 and len(closes) == 48
+
+
+def test_clock_sampling_takes_each_points_as_of_price():
+    """Point j is drawn at (j + 1) / T of the run; its slot is the last one ENDED by then."""
+    target = ts._AFTER_HOURS_SPARK_POINTS
+    for n in range(target + 1, 49):
+        picked = ts._sample_on_clock(list(range(n)), target)
+        assert len(picked) == target and picked[-1] == n - 1
+        assert all(a < b for a, b in zip(picked, picked[1:])), n
+        for j, slot in enumerate(picked):
+            drawn_at = (j + 1) / target
+            assert (slot + 1) / n <= drawn_at < (slot + 2) / n, (n, j, slot)
+    assert ts._sample_on_clock([1.0, 2.0], target) == [1.0, 2.0]
+
+
+def test_a_bad_close_keeps_the_price_before_it():
+    out, _, _ = ts._after_hours_tail(
+        {"closes": [float("nan"), 2.0, -1, 3.0], "regular_share": _SHARE, "span_to": 0.7},
+        [1.0, 2.0])
+    assert out == [2.0, 2.0, 2.0, 3.0], "a leading bad close takes the first good one"
+
+
+def test_a_ragged_step_keeps_its_last_slot():
+    """A step that does not divide four hours: the partial last slot exists (ceil), and the
+    tail's end is clamped to the axis."""
+    bars = _bars("2026-10-29", ("09:30", 1.0), ("15:55", 2.0), ("19:59", 3.0))
+    tail = after_hours_series(bars, interval_minutes=7)
+    assert len(tail["closes"]) == 35 and tail["closes"][-1] == 3.0
+    assert tail["span_to"] == 1.0
+
+
+def test_a_non_positive_interval_is_a_loud_error():
+    with pytest.raises(ValueError):
+        after_hours_series(_bars("2026-10-29", ("15:55", 2.0), ("16:00", 3.0)), interval_minutes=0)

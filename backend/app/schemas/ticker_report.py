@@ -74,8 +74,20 @@ class DeepDiveMetricResponse(BaseModel):
     sector_quarterly_level: Optional[str] = None
     # Whose median the "sector avg" in `label` is ("industry" | "sector"; the wire label
     # keeps the word "sector" for shipped iOS builds). Lets the report's model prompts name
-    # an industry median as the industry's (2026-10-08). Optional; iOS ignores it.
+    # an industry median as the industry's (2026-10-08), and is the peer word of the
+    # drill-down's "Current" legend line (iOS 1.03 build 15+; older builds ignore it).
     peer_level: Optional[str] = None
+    # The card row's OWN comparison, as numbers (owner decision 2026-11-13): the drill-down
+    # legend's second line, "Current (TTM) 18.21x · Industry 29.32x · 0.62× vs industry",
+    # coloured by `current_score` exactly as the card judged the row. Display units (a
+    # percent row in percentage points). `current_value` is None where the row prints no
+    # comparable number ("—", "Neg.", "N/A"); `current_peer_median` is the median `label`
+    # prints, and `current_score` rides with it (None = unscored, drawn neutral). Present
+    # only on a charted row (one with history). Optional and additive: legacy reports and
+    # older app builds decode unchanged — a report without them shows the period line only.
+    current_value: Optional[float] = None
+    current_peer_median: Optional[float] = None
+    current_score: Optional[int] = None
 
 
 class DeepDiveMetricCardResponse(BaseModel):

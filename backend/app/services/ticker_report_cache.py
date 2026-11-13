@@ -350,7 +350,16 @@ TABLE_NAME = "ticker_report_cache"
 #     to the push time if the deploy lands later. The full backend suite ran on this change,
 #     on the exact commit, BEFORE this literal was written. This ONE bump supersedes every
 #     instant above.
-CACHE_SCHEMA_FLOOR = datetime(2026, 11, 6, 2, 54, 0, tzinfo=timezone.utc)
+# 2026-11-13 (23:42 UTC = 18:42 ET, after the close; the push, owner's "Yes, push now"): the
+#     drill-down's two-line legend (owner decision 2026-11-13). Cached collections carry the annual peer lines with the TTM median drawn
+#     as the current calendar year's point (ORCL's closed FY2026 read "1.42× vs industry"
+#     against today's median) and card rows without `current_value` / `current_peer_median`
+#     / `current_score`, so a report frozen from them would keep the mispaired line and never
+#     show the "Current (TTM)" line. Ships with Valuation 11 and Financial Health 10.
+#     SCORER_VERSION stays: no score changes. Same rule: a PAST instant, moved to the push
+#     time if the deploy lands later. The full backend suite ran on this change, on the exact
+#     commit, BEFORE it was pushed. This ONE bump supersedes every instant above.
+CACHE_SCHEMA_FLOOR = datetime(2026, 11, 13, 23, 42, 0, tzinfo=timezone.utc)
 
 # The internal report key carrying the Financials sections a report lost to a degraded
 # upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.

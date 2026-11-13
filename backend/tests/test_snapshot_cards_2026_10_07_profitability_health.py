@@ -421,7 +421,8 @@ def _row(json_data, age=timedelta(hours=2)):
     # 7 (2026-10-08): payment networks keep their liquidity rows, on absolute bands.
     # 8 (2026-10-09, NET-5): TREE / PMTS join; WU's curated withheld rows.
     # 9 (2026-10-21): the Financial Services peer rule.
-    ("app.services.health_snapshot_service", "HealthSnapshotService", "Financial Health", 9),
+    # 10 (2026-11-13): `numeric_value` / `peer_median` on each row.
+    ("app.services.health_snapshot_service", "HealthSnapshotService", "Financial Health", 10),
 ])
 def test_version_bump_rebuilds_old_rows_and_keeps_the_build_time(
     modname, clsname, category, current,

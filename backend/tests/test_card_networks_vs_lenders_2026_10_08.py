@@ -745,20 +745,22 @@ async def test_the_fallback_still_compares_an_operating_company(monkeypatch):
     assert by["debt_to_equity"].score == 4 and by["debt_to_equity"].peer_level == "industry"
 
 
-def test_the_snapshot_payload_version_is_9_and_older_rows_rebuild():
+def test_the_snapshot_payload_version_is_10_and_older_rows_rebuild():
     """A v5 row of V is the unrated D/E-only card; a v6 row may be the first cut's (an
     unlisted lender with the three rows, or V's D/E compared with lenders); a v7 row of WU
     may carry its made-up rows (2026-10-09); a v8 row of a small Financial Services
-    industry compared D/E with the sector (2026-10-21). All rebuild. Mutation: leaving the
-    version at 7 serves WU's."""
-    assert hs._SNAPSHOT_PAYLOAD_VERSION == 9
+    industry compared D/E with the sector (2026-10-21); a v9 row carries no
+    `numeric_value` / `peer_median` (2026-11-13: the drill-down's "Current" legend line).
+    All rebuild. Mutation: leaving the version at 7 serves WU's; at 9, a row without the
+    current comparison."""
+    assert hs._SNAPSHOT_PAYLOAD_VERSION == 10
     body = SnapshotItemResponse(category="Financial Health", rating=0, metrics=[],
                                 computed_at="2026-10-08T09:15:00Z").model_dump()
     svc = hs.HealthSnapshotService.__new__(hs.HealthSnapshotService)
-    for old in (5, 6, 7, 8):
+    for old in (5, 6, 7, 8, 9):
         svc.supabase = sph._Supabase([sph._row({**body, hs._VERSION_KEY: old})[0]])
         assert svc._check_supabase_cache("V") is None, f"a v{old} row was served"
-    svc.supabase = sph._Supabase([sph._row({**body, hs._VERSION_KEY: 9})[0]])
+    svc.supabase = sph._Supabase([sph._row({**body, hs._VERSION_KEY: 10})[0]])
     assert svc._check_supabase_cache("V") is not None
 
 
@@ -882,24 +884,6 @@ def _pass_two_out(ticker: str, income_q: Any, industry: Any, sector: Any):
     return out
 
 
-async def _history_for(monkeypatch, *, ticker, income_q, industry=CREDIT, sector=FS):
-    """The REAL pass 2 (`_fetch_dependent`): the real `_fetch_sector_benchmark_history`
-    over the round-4 lookup (industry lines + mature industry TTM cells for the four
-    metrics), then the company verdict over `income_q`; every other leg stubbed."""
-    series = r4._sector_lines(level="industry")
-    ttm = {m: r4._cell(1.5, "industry", n=60) for m in _ABSOLUTE}
-    lookup = r4._Lookup(series, ttm)
-    monkeypatch.setattr("app.services.sector_benchmark_lookup.get_sector_benchmark_lookup",
-                        lambda: lookup)
-    _stub_pass_two_legs(monkeypatch)
-    coll = C.TickerReportDataCollector.__new__(C.TickerReportDataCollector)
-    coll.fmp = None
-    out = _pass_two_out(ticker, income_q, industry, sector)
-    await coll._fetch_dependent(out)
-    assert out.degraded_sections == []
-    return out.sector_benchmark_history
-
-
 class _CountingLookup(r4._Lookup):
     """The round-4 lookup, recording every read (period type) it answers."""
 
@@ -916,16 +900,47 @@ class _CountingLookup(r4._Lookup):
         return super().get_benchmarks(industry, sector, metrics, period_type)
 
 
+# The only line reads the drill-down makes since 2026-11-13 (owner: "Replace it"): annual
+# and calendar-quarter. No TTM read — the TTM median is no longer drawn as a current point.
+_LINE_READS = ("annual", C.CALENDAR_QUARTER_PERIOD_TYPE)
+
+
+def _industry_lookup() -> _CountingLookup:
+    """Industry annual + calendar-quarter lines for the four metrics, AND a mature industry
+    TTM cell for each — the table a pre-2026-11-13 collector drew a current-year point
+    from, so a test over it proves no such point is read or drawn."""
+    return _CountingLookup(r4._sector_lines(level="industry"),
+                           {m: r4._cell(1.5, "industry", n=60) for m in _ABSOLUTE})
+
+
+async def _history_for(monkeypatch, *, ticker, income_q, industry=CREDIT, sector=FS,
+                       lookup: Optional[_CountingLookup] = None):
+    """The REAL pass 2 (`_fetch_dependent`): the real `_fetch_sector_benchmark_history`
+    over the round-4 lookup (`_industry_lookup`, unless one is passed), then the company
+    verdict over `income_q`; every other leg stubbed. Whatever is read, it is only the
+    annual and calendar-quarter lines (never a TTM read)."""
+    lookup = lookup if lookup is not None else _industry_lookup()
+    monkeypatch.setattr("app.services.sector_benchmark_lookup.get_sector_benchmark_lookup",
+                        lambda: lookup)
+    _stub_pass_two_legs(monkeypatch)
+    coll = C.TickerReportDataCollector.__new__(C.TickerReportDataCollector)
+    coll.fmp = None
+    out = _pass_two_out(ticker, income_q, industry, sector)
+    await coll._fetch_dependent(out)
+    assert out.degraded_sections == []
+    assert set(lookup.reads) <= set(_LINE_READS), lookup.reads
+    return out.sector_benchmark_history
+
+
 @pytest.mark.asyncio
 async def test_the_drill_down_withholds_a_networks_four_lines(monkeypatch, caplog):
     """V's current-ratio, quick-ratio, interest-coverage AND D/E lines (and every other
-    line, and their TTM points) are withheld — its cards compare no metric with the
-    industry median. Since 2026-10-09 (spec D1) pass 2 asks the gate BEFORE the read, so
-    for V the benchmark lookup is never even called (no failed read can degrade the
-    build). Through the real pass 2. Mutation: the read made anyway (the lookup records
-    it), or the verdict resolved after the read."""
-    lookup = _CountingLookup(r4._sector_lines(level="industry"),
-                             {m: r4._cell(1.5, "industry", n=60) for m in _ABSOLUTE})
+    line) are withheld — its cards compare no metric with the industry median. Since
+    2026-10-09 (spec D1) pass 2 asks the gate BEFORE the read, so for V the benchmark
+    lookup is never even called (no failed read can degrade the build). Through the real
+    pass 2. Mutation: the read made anyway (the lookup records it), or the verdict
+    resolved after the read; for the lender control, a TTM read made again (2026-11-13)."""
+    lookup = _industry_lookup()
     monkeypatch.setattr("app.services.sector_benchmark_lookup.get_sector_benchmark_lookup",
                         lambda: lookup)
     _stub_pass_two_legs(monkeypatch)
@@ -944,25 +959,28 @@ async def test_the_drill_down_withholds_a_networks_four_lines(monkeypatch, caplo
     assert not [r for r in caplog.records if "step=peer_line_gate" in r.getMessage()]
     assert "step=report_peer_lines" in _gate_logs(caplog)
 
-    # Control: a lender of the same industry IS read (all three reads), the fetch's
-    # industry gate withholds only the three liquidity / coverage lines, and its D/E
-    # line stays (no company-level withholding).
+    # Control: a lender of the same industry IS read (both line reads — annual and
+    # calendar-quarter, no TTM read since 2026-11-13), the fetch's industry gate withholds
+    # only the three liquidity / coverage lines (on both granularities), and its D/E line
+    # stays (no company-level withholding), ending at its last complete year.
     caplog.clear()
     lookup.reads.clear()
     out = _pass_two_out("COF", _quarters(*_LENDERS["COF"]), CREDIT, FS)
     with caplog.at_level(logging.INFO):
         await coll._fetch_dependent(out)
-    assert sorted(lookup.reads) == sorted(["annual", C.CALENDAR_QUARTER_PERIOD_TYPE, "ttm"])
+    assert sorted(lookup.reads) == sorted(_LINE_READS)
     assert out.non_lender_member is False and out.degraded_sections == []
     industry_gate = [r.getMessage() for r in caplog.records
                      if "step=peer_line_gate:" in r.getMessage()]
     assert len(industry_gate) == 1
     assert "annual:current_ratio[mixed_industry]" in industry_gate[0]
-    assert "ttm:interest_coverage[mixed_industry]" in industry_gate[0]
+    assert "quarterly:interest_coverage[mixed_industry]" in industry_gate[0]
+    assert "ttm:" not in industry_gate[0]               # no TTM cell is read to withhold
     assert "debt_to_equity" not in industry_gate[0]      # the fetch knows no company
     assert not [r for r in caplog.records if "step=peer_line_gate_network" in r.getMessage()]
     assert not [r for r in caplog.records if "no peer read" in r.getMessage()]
-    assert "debt_to_equity" in out.sector_benchmark_history["annual"]
+    assert out.sector_benchmark_history["annual"]["debt_to_equity"] == {"2024": 1.3,
+                                                                       "2025": 1.4}
 
 
 @pytest.mark.asyncio
@@ -973,13 +991,24 @@ async def test_the_drill_down_withholds_a_networks_four_lines(monkeypatch, caplo
 ])
 async def test_the_drill_down_keeps_a_gated_members_de_line(monkeypatch, ticker, income_q):
     """A gated member's card compares D/E with its industry, so the drill-down draws that
-    line (the three liquidity lines stay withheld). Mutation: withholding every Credit
-    Services D/E line, or reading the data instead of the list."""
-    hist = await _history_for(monkeypatch, ticker=ticker, income_q=income_q)
+    line, annual and quarterly, from ONE peer group (the three liquidity lines stay
+    withheld on both). Since 2026-11-13 (owner: "Replace it") the annual line ends at its
+    last complete year: the lookup offers a mature industry TTM cell, and it is neither
+    read nor drawn as the current year's point. Mutation: withholding every Credit
+    Services D/E line, reading the data instead of the list, or the TTM point (and its
+    read) put back."""
+    lookup = _industry_lookup()
+    hist = await _history_for(monkeypatch, ticker=ticker, income_q=income_q, lookup=lookup)
+    assert sorted(lookup.reads) == sorted(_LINE_READS)
     for metric in _GATED:
-        assert metric not in hist["annual"], metric
-    assert hist["annual"]["debt_to_equity"] == {"2024": 1.3, "2025": 1.4, r4._cur_year(): 1.5}
+        for granularity in ("annual", "quarterly"):
+            assert metric not in hist[granularity], (metric, granularity)
+            assert metric not in hist["levels"][granularity], (metric, granularity)
+    assert hist["annual"]["debt_to_equity"] == {"2024": 1.3, "2025": 1.4}
+    assert r4._cur_year() not in hist["annual"]["debt_to_equity"]
     assert hist["levels"]["annual"]["debt_to_equity"] == "industry"
+    assert hist["quarterly"]["debt_to_equity"] == {"Q2'26": 1.2}
+    assert hist["levels"]["quarterly"]["debt_to_equity"] == "industry"
 
 
 @pytest.mark.asyncio

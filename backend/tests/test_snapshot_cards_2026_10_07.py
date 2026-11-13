@@ -450,7 +450,8 @@ def test_valuation_cache_hit_keeps_the_original_build_time(monkeypatch):
     (payload,) = writer.supabase.upserts
     # 7 (2026-10-09, NET-4): a listed non-lender member's Price card is peer-free.
     # 8 (2026-10-09): Earnings Yield = 1 / the card's displayed P/E.
-    assert payload["response_json"][vss._VERSION_KEY] == vss._SNAPSHOT_PAYLOAD_VERSION == 10
+    # 11 (2026-11-13): `numeric_value` / `peer_median` on each metric.
+    assert payload["response_json"][vss._VERSION_KEY] == vss._SNAPSHOT_PAYLOAD_VERSION == 11
     assert payload["response_json"]["computed_at"] == "2026-10-07T10:00:00Z"
     assert payload["response_json"]["metrics"][0]["peer_level"] is None   # the key travels
 
@@ -471,7 +472,8 @@ def test_a_row_without_computed_at_takes_its_cached_at(monkeypatch):
     assert "computed_at" not in row["response_json"], "the SDK's row must not be mutated"
 
 
-@pytest.mark.parametrize("version", [None, 4, 5])
+# 10: the last version before `numeric_value` / `peer_median` (2026-11-13).
+@pytest.mark.parametrize("version", [None, 4, 5, 10])
 def test_a_pre_fix_valuation_row_is_rebuilt(monkeypatch, version):
     monkeypatch.setattr(vss.settings, "DCF_ENABLED", False)
     body = _price(fr={"priceToEarningsRatioTTM": 20.0}).model_dump()

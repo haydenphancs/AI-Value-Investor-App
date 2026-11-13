@@ -108,6 +108,7 @@ struct FundamentalsHistorySheet: View {
                             .id("\(m.id.uuidString)-\(period.rawValue)")
                             .animation(.easeInOut(duration: 0.25), value: selectedMetricID)
                         legendAndDelta(m)
+                        ttmNote(m)
                         omissionNote(m)
                     } else {
                         Text("No history available.")
@@ -174,12 +175,26 @@ struct FundamentalsHistorySheet: View {
 
     // MARK: - Header (current value)
 
+    /// The word for the card row's own figure, and the ONLY place "Current" is spelled
+    /// (owner decision 2026-11-13: "Current" means now, never a closed year or quarter).
+    /// Valuation rows are FMP trailing-twelve-month multiples; Health rows are the latest
+    /// balance-sheet readings (D/E, current and quick ratio), so they say no "(TTM)"; a Growth
+    /// card (here only when the report has no growth chart) shows its latest fiscal year's
+    /// rates, which are neither current nor TTM.
+    private var currentPrefix: String {
+        switch card.title {
+        case "Health": return "Current"
+        case "Growth": return "Latest"
+        default: return "Current (TTM)"
+        }
+    }
+
     private func header(_ m: DeepDiveMetric) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(m.historyTitle)
                 .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
-            Text("Current: \(currentValueText(m.value))")
+            Text("\(currentPrefix): \(currentValueText(m.value))")
                 .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
         }
@@ -234,27 +249,53 @@ struct FundamentalsHistorySheet: View {
         points(m).last(where: { $0.value != nil })
     }
 
-    /// The current value is negative/undefined (the card shows "Neg."/"N/A"/"—") —
-    /// e.g. P/FCF when free cash flow is negative. Mirrors omissionNote's check.
-    private func currentIsUndefined(_ m: DeepDiveMetric) -> Bool {
-        let v = m.value.lowercased()
-        return v.contains("neg") || v.contains("n/a") || m.value == "—"
+    /// A closed period's legend name: "FY2025" on Annual (the axis reads "2025"; the "FY"
+    /// says it is the company's fiscal year, which for ORCL ends in May), the quarter label
+    /// ("Q4 '26") on Quarterly. Never "Current" — that word is the TTM line's.
+    private func periodLabel(_ label: String) -> String {
+        period == .annual ? "FY\(label)" : label
     }
 
-    /// The most recent industry/sector value (the "current" benchmark), regardless
-    /// of whether the company has a value that period.
-    private func currentIndustry(_ m: DeepDiveMetric) -> Double? {
-        sectorPoints(m).last(where: { $0.value != nil })?.value
+    /// Line 2 (owner decision 2026-11-13): the card row's OWN comparison — the value and the
+    /// exact median the card printed (`currentValue` / `currentPeerMedian`), so it matches the
+    /// card to the digit. Reads no period, series or line level, so it is the same on both
+    /// tabs. nil on a report generated before 2026-11-13, which carries no median: such a
+    /// report shows the period line only (the label is never parsed — it rounds the median
+    /// and omits the ratios the card refused to print).
+    private func currentLineText(_ m: DeepDiveMetric) -> String? {
+        guard let median = m.currentPeerMedian else { return nil }
+        let peer = currentPeerWord(m)
+        let shown = m.currentValue.map { Self.format($0, unit: m.historyUnit) }
+            ?? currentValueText(m.value)
+        var text = "\(currentPrefix) \(shown) · \(peer) \(Self.format(median, unit: m.historyUnit))"
+        if let value = m.currentValue, value > 0, median > 0 {
+            // A ratio that rounds to "0.00×" says nothing (a 0.02% yield against 5.00%):
+            // the card's own label leaves it out too, and the colour still carries the verdict.
+            let ratio = String(format: "%.2f×", value / median)
+            if ratio != "0.00×" {
+                text += " · \(ratio) vs \(peer.lowercased())"
+            }
+        } else if m.currentValue == nil {
+            text += " · N/A vs \(peer.lowercased())"
+        }
+        return text
     }
 
-    /// Delta line when the CURRENT value is undefined: stay "all about the current" —
-    /// echo the header's state, show the current industry, and N/A for the multiple
-    /// (no meaningful ratio against a negative/undefined value).
-    private func undefinedCurrentText(_ m: DeepDiveMetric) -> String {
-        let state = currentValueText(m.value)
-        guard let ind = currentIndustry(m) else { return "Current: \(state)" }
-        let peer = peerWord(m)
-        return "Current: \(state) · \(peer) \(Self.format(ind, unit: m.historyUnit)) · N/A vs \(peer.lowercased())"
+    /// The group of the median line 2 quotes: the row's own `peerLevel`, else the card's.
+    private func currentPeerWord(_ m: DeepDiveMetric) -> String {
+        (m.peerLevel ?? card.peerGroupLevel) == "industry" ? "Industry" : "Sector"
+    }
+
+    /// Line 2's colour is the card's own verdict on the row (owner: "Match the card"): the
+    /// score it gave (>= 4 good, <= 2 bad) — never the bare side of the median, which would
+    /// paint red a P/E the card calls in line. Neutral on an unrated card or an unscored
+    /// row; muted when there is no current number to judge.
+    private func currentLineColor(_ m: DeepDiveMetric) -> Color {
+        guard m.currentValue != nil else { return AppColors.textMuted }
+        guard card.starRating > 0, let score = m.currentScore else { return AppColors.textPrimary }
+        if score >= 4 { return AppColors.gain }
+        if score <= 2 { return AppColors.loss }
+        return AppColors.textPrimary
     }
 
     /// "Industry" or "Sector": the group THIS metric's line (for the selected period) is
@@ -314,10 +355,16 @@ struct FundamentalsHistorySheet: View {
                 }
             }
             if let tz = MetricThresholdZones.forHistoryKey(m.historyKey) {
-                // Absolute-threshold metric (Altman Z): show the current zone verdict
-                // + the threshold caption in place of an industry comparison.
-                if let z = Double(m.value) ?? latestCompanyPoint(m)?.value {
-                    Text("Current: \(m.value) · \(tz.zoneLabel(z))")
+                // Absolute-threshold metric (Altman Z): show the zone verdict + the threshold
+                // caption in place of an industry comparison. Only the card's own figure is
+                // "Current"; with none, the newest charted period names its own zone.
+                if let z = Double(m.value) {
+                    Text("\(currentPrefix): \(m.value) · \(tz.zoneLabel(z))")
+                        .font(AppTypography.bodySmall)
+                        .foregroundColor(tz.zoneColor(z))
+                        .multilineTextAlignment(.center)
+                } else if let lc = latestCompanyPoint(m), let z = lc.value {
+                    Text("\(periodLabel(lc.period)) \(Self.format(z, unit: m.historyUnit)) · \(tz.zoneLabel(z))")
                         .font(AppTypography.bodySmall)
                         .foregroundColor(tz.zoneColor(z))
                         .multilineTextAlignment(.center)
@@ -326,30 +373,29 @@ struct FundamentalsHistorySheet: View {
                     .font(AppTypography.labelSmall)
                     .foregroundColor(AppColors.textMuted)
                     .multilineTextAlignment(.center)
-            } else if currentIsUndefined(m) {
-                // The CURRENT ratio is negative/undefined (header shows "Negative"),
-                // so there's no like-for-like comparison: mirror the current state,
-                // show the current industry value, and N/A for the multiple — instead
-                // of quoting a stale older period the user would misread as "now".
-                Text(undefinedCurrentText(m))
-                    .font(AppTypography.bodySmall)
-                    .foregroundColor(AppColors.textMuted)
-                    .multilineTextAlignment(.center)
-            } else if let pair {
-                // The period, never "Current": the header's figure is trailing twelve months
-                // and this pair is a closed year or quarter (JPMorgan's D/E read 3.32 above
-                // "Current 2.60x", and on the opposite side of its peers).
-                Text(deltaText(prefix: pair.period,
-                               company: pair.company, sector: pair.sector, unit: m.historyUnit,
-                               peer: peerWord(m)))
-                    .font(AppTypography.bodySmall)
-                    .foregroundColor(deltaColor(m))
-                    .multilineTextAlignment(.center)
-            } else if let lc = latestCompanyPoint(m), let v = lc.value {
-                Text("\(lc.period) \(Self.format(v, unit: m.historyUnit)) · Company only")
-                    .font(AppTypography.bodySmall)
-                    .foregroundColor(AppColors.textMuted)
-                    .multilineTextAlignment(.center)
+            } else {
+                // Line 1: a closed year or quarter against the SAME period's peer median
+                // (`sectorPair`), named by its period — "Current" belongs to line 2 alone.
+                if let pair {
+                    Text(deltaText(prefix: periodLabel(pair.period),
+                                   company: pair.company, sector: pair.sector, unit: m.historyUnit,
+                                   peer: peerWord(m)))
+                        .font(AppTypography.bodySmall)
+                        .foregroundColor(deltaColor(m))
+                        .multilineTextAlignment(.center)
+                } else if let lc = latestCompanyPoint(m), let v = lc.value {
+                    Text("\(periodLabel(lc.period)) \(Self.format(v, unit: m.historyUnit)) · Company only")
+                        .font(AppTypography.bodySmall)
+                        .foregroundColor(AppColors.textMuted)
+                        .multilineTextAlignment(.center)
+                }
+                // Line 2: today's figure against the median the card compared it with.
+                if usesLineChart, let current = currentLineText(m) {
+                    Text(current)
+                        .font(AppTypography.bodySmall)
+                        .foregroundColor(currentLineColor(m))
+                        .multilineTextAlignment(.center)
+                }
             }
         }
         .padding(.vertical, AppSpacing.sm)
@@ -359,6 +405,37 @@ struct FundamentalsHistorySheet: View {
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                 .fill(AppColors.cardBackgroundLight)
         )
+    }
+
+    /// What "TTM" means, on the Valuation sheet only (owner decision 2026-11-13): the header
+    /// and line 2 are trailing-twelve-month multiples at the report's price, while every
+    /// chart point is priced at its own period's end — the reason the two can sit far apart
+    /// (ORCL: 18.21 now against 41.8x for FY2026, after the price fell by half). The owner's
+    /// sentence names earnings (P/E); each multiple names its own denominator (review
+    /// 2026-11-13), and P/B, whose "TTM" is the latest book value, says so.
+    @ViewBuilder
+    private func ttmNote(_ m: DeepDiveMetric) -> some View {
+        if card.title == "Valuation" {
+            HStack(alignment: .top, spacing: 5) {
+                Image(systemName: "info.circle")
+                    .font(AppTypography.labelSmall)
+                Text(ttmNoteText(m))
+                    .font(AppTypography.labelSmall)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .foregroundColor(AppColors.textMuted)
+        }
+    }
+
+    private func ttmNoteText(_ m: DeepDiveMetric) -> String {
+        let pricing = "at the price when the report was made. Chart points use each period's own price."
+        switch m.historyKey {
+        case "pb":        return "For P/B, TTM means the latest book value, \(pricing)"
+        case "ps":        return "TTM = the last 12 months of sales, \(pricing)"
+        case "pfcf":      return "TTM = the last 12 months of free cash flow, \(pricing)"
+        case "ev_ebitda": return "TTM = the last 12 months of EBITDA, \(pricing)"
+        default:          return "TTM = the last 12 months of earnings, \(pricing)"
+        }
     }
 
     /// A ratio can be undefined for a period (e.g. P/FCF when free cash flow
@@ -404,42 +481,91 @@ struct FundamentalsHistorySheet: View {
     }
 }
 
-#Preview {
-    let annual = (2015...2024).map {
-        MetricHistoryPoint(period: String($0), value: 30 + Double($0 - 2015) * 1.5)
-    }
-    let sectorAnnual = (2015...2024).map {
-        MetricHistoryPoint(period: String($0), value: 22 + Double($0 - 2015) * 0.4)
+// ORCL shape (fiscal year ends May): the industry line ends at its last complete year, so
+// line 1 compares FY2025 with FY2025, and line 2 is today's TTM against the card's median.
+#Preview("Valuation") {
+    let years = ["2021", "2022", "2023", "2024", "2025", "2026"]
+    let pe: [Double?] = [17.04, 28.88, 33.63, 30.76, 37.11, 41.78]
+    let pfcf: [Double?] = [22.0, 25.4, 30.1, nil, nil, nil]
+    let industryPE: [Double?] = [31.8, 26.8, 33.0, 29.7, 27.3, nil]
+    let industryPFCF: [Double?] = [24.0, 23.5, 26.1, 28.0, 31.4, nil]
+    let series: ([Double?]) -> [MetricHistoryPoint] = { values in
+        zip(years, values).map { MetricHistoryPoint(period: $0, value: $1) }
     }
     let card = DeepDiveMetricCard(
-        title: "Profitability",
+        title: "Valuation",
         starRating: 4,
         metrics: [
             DeepDiveMetric(
-                label: "Gross Margin (1.2x sector avg 38%)",
-                value: "46.9%",
+                label: "P/E (0.62x sector avg 29.3)",
+                value: "18.21",
                 trend: nil,
-                historyKey: "gross_margin",
-                historyUnit: "percent",
-                annualHistory: annual,
-                quarterlyHistory: nil,
-                sectorAnnualHistory: sectorAnnual,
-                sectorQuarterlyHistory: nil
+                historyKey: "pe",
+                historyUnit: "x",
+                annualHistory: series(pe),
+                sectorAnnualHistory: series(industryPE),
+                sectorAnnualLevel: "industry",
+                currentValue: 18.2068,
+                currentPeerMedian: 29.3172,
+                currentScore: 5,
+                peerLevel: "industry"
             ),
             DeepDiveMetric(
-                label: "Net Margin",
-                value: "26.9%",
+                label: "P/FCF (sector avg 31.4)",
+                value: "Neg.",
                 trend: nil,
-                historyKey: "net_margin",
-                historyUnit: "percent",
-                annualHistory: annual.map {
-                    MetricHistoryPoint(period: $0.period, value: ($0.value ?? 0) * 0.6)
-                },
-                quarterlyHistory: nil
+                historyKey: "pfcf",
+                historyUnit: "x",
+                annualHistory: series(pfcf),
+                sectorAnnualHistory: series(industryPFCF),
+                sectorAnnualLevel: "industry",
+                currentPeerMedian: 31.4,
+                currentScore: 3,
+                peerLevel: "industry"
             ),
         ],
-        qualityLabel: "A Cash Machine",
-        qualitySentiment: "positive"
+        qualityLabel: "Fairly priced",
+        qualitySentiment: "neutral",
+        peerGroupLevel: "industry"
+    )
+    FundamentalsHistorySheet(card: card)
+}
+
+// An unrated Health card: no verdict colour on either line; Altman Z keeps its zone line.
+#Preview("Health, unrated") {
+    let years = ["2021", "2022", "2023", "2024", "2025"]
+    let de = years.enumerated().map { MetricHistoryPoint(period: $1, value: 1.1 + Double($0) * 0.1) }
+    let peerDE = years.map { MetricHistoryPoint(period: $0, value: 0.9) }
+    let z = years.enumerated().map { MetricHistoryPoint(period: $1, value: 2.4 + Double($0) * 0.2) }
+    let card = DeepDiveMetricCard(
+        title: "Health",
+        starRating: 0,
+        metrics: [
+            DeepDiveMetric(
+                label: "Debt-to-Equity (vs sector 0.90)",
+                value: "1.52",
+                trend: nil,
+                historyKey: "debt_to_equity",
+                historyUnit: "x",
+                annualHistory: de,
+                sectorAnnualHistory: peerDE,
+                currentValue: 1.52,
+                currentPeerMedian: 0.9,
+                currentScore: 2
+            ),
+            DeepDiveMetric(
+                label: "Altman Z-Score",
+                value: "3.25",
+                trend: nil,
+                historyKey: "altman_z",
+                historyUnit: "score",
+                annualHistory: z,
+                currentValue: 3.25
+            ),
+        ],
+        qualityLabel: "Data unavailable",
+        qualitySentiment: "neutral",
+        peerGroupLevel: "sector"
     )
     FundamentalsHistorySheet(card: card)
 }

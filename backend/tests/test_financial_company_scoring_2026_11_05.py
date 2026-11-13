@@ -562,7 +562,8 @@ def test_the_operating_path_keeps_its_job():
 
 def test_the_cards_cannot_serve_old_rows():
     from app.services import growth_service as gs
-    assert vss._SNAPSHOT_PAYLOAD_VERSION == 10
+    # 11 (2026-11-13): `numeric_value` / `peer_median` on each Price metric.
+    assert vss._SNAPSHOT_PAYLOAD_VERSION == 11
     assert ps._SNAPSHOT_PAYLOAD_VERSION == 6
     assert gss._SNAPSHOT_PAYLOAD_VERSION == 6
     assert gs._GROWTH_PAYLOAD_VERSION == 8

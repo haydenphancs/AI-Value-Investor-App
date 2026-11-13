@@ -190,6 +190,14 @@ struct DeepDiveMetricDTO: Codable {
     // the drill-down keeps the card-wide word.
     let sectorAnnualLevel: String?
     let sectorQuarterlyLevel: String?
+    // The card row's OWN comparison, as numbers (2026-11-13): the drill-down legend's
+    // "Current" line. Display units (a percent row in percentage points). `peerLevel` is the
+    // level of `currentPeerMedian` ("industry" | "sector"). All optional — reports generated
+    // before 2026-11-13 have none, and the drill-down then shows the period line only.
+    let currentValue: Double?
+    let currentPeerMedian: Double?
+    let currentScore: Int?
+    let peerLevel: String?
 
     enum CodingKeys: String, CodingKey {
         case label, value, trend
@@ -201,6 +209,10 @@ struct DeepDiveMetricDTO: Codable {
         case sectorQuarterlyHistory = "sector_quarterly_history"
         case sectorAnnualLevel = "sector_annual_level"
         case sectorQuarterlyLevel = "sector_quarterly_level"
+        case currentValue = "current_value"
+        case currentPeerMedian = "current_peer_median"
+        case currentScore = "current_score"
+        case peerLevel = "peer_level"
     }
 }
 
@@ -920,7 +932,11 @@ extension TickerReportAPIResponse {
                         sectorAnnualHistory: mapPoints(m.sectorAnnualHistory),
                         sectorQuarterlyHistory: mapPoints(m.sectorQuarterlyHistory),
                         sectorAnnualLevel: m.sectorAnnualLevel,
-                        sectorQuarterlyLevel: m.sectorQuarterlyLevel
+                        sectorQuarterlyLevel: m.sectorQuarterlyLevel,
+                        currentValue: m.currentValue,
+                        currentPeerMedian: m.currentPeerMedian,
+                        currentScore: m.currentScore,
+                        peerLevel: m.peerLevel
                     )
                 },
                 qualityLabel: card.qualityLabel,

@@ -374,6 +374,14 @@ struct DeepDiveMetric: Identifiable {
     // older reports → the drill-down uses the card's `peerGroupLevel`.
     let sectorAnnualLevel: String?
     let sectorQuarterlyLevel: String?
+    // The card row's own comparison (2026-11-13), for the drill-down's "Current" legend
+    // line: the value and the exact median the card printed, and the score it gave the row
+    // (>= 4 good, <= 2 bad, else in line). `peerLevel` names that median's group. nil on
+    // older reports → the drill-down shows the period line only.
+    let currentValue: Double?
+    let currentPeerMedian: Double?
+    let currentScore: Int?
+    let peerLevel: String?
 
     init(
         label: String,
@@ -386,7 +394,11 @@ struct DeepDiveMetric: Identifiable {
         sectorAnnualHistory: [MetricHistoryPoint]? = nil,
         sectorQuarterlyHistory: [MetricHistoryPoint]? = nil,
         sectorAnnualLevel: String? = nil,
-        sectorQuarterlyLevel: String? = nil
+        sectorQuarterlyLevel: String? = nil,
+        currentValue: Double? = nil,
+        currentPeerMedian: Double? = nil,
+        currentScore: Int? = nil,
+        peerLevel: String? = nil
     ) {
         self.label = label
         self.value = value
@@ -399,6 +411,10 @@ struct DeepDiveMetric: Identifiable {
         self.sectorQuarterlyHistory = sectorQuarterlyHistory
         self.sectorAnnualLevel = sectorAnnualLevel
         self.sectorQuarterlyLevel = sectorQuarterlyLevel
+        self.currentValue = currentValue
+        self.currentPeerMedian = currentPeerMedian
+        self.currentScore = currentScore
+        self.peerLevel = peerLevel
     }
 
     /// True when a sector-average series exists for this metric (the "*"

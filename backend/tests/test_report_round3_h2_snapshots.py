@@ -13,7 +13,8 @@ Pins, each failing on the code before this round:
             recording it; "cash_flow" (a raised leg) still blocks.
   * P6/P23 — a FAILED sector-history benchmark read (not an empty one) records
             "sector_history:benchmarks", keeping the collection and report out of the
-            shared caches; what loaded is kept for this caller.
+            shared caches; what loaded is kept for this caller. Since 2026-11-13 the
+            history is two reads (annual, calendar quarter) — no TTM read.
   * P24 — the growth snapshot card (annual series only) no longer inherits the
             quarterly-only legs of a growth build.
   * P25 — the valuation snapshot payload version is bumped, so a pre-deploy v4 row is
@@ -330,7 +331,10 @@ async def test_a_failed_calendar_quarter_read_is_flagged_and_the_annual_line_kep
     metric = C._SECTOR_HISTORY_METRIC_NAMES[0]
     sbl, requested = _real_lookup(
         monkeypatch, fail_period_types={CALENDAR_QUARTER_PERIOD_TYPE},
-        rows_by_period={"annual": [_row(metric, "2023", 11.0)]},
+        # A TTM row is on offer: since 2026-11-13 ("Replace it") it is never read, so the
+        # annual line ends at its last complete year instead of a TTM current-year point.
+        rows_by_period={"annual": [_row(metric, "2023", 11.0)],
+                        "ttm": [_row(metric, "TTM", 99.0)]},
     )
     try:
         coll = C.TickerReportDataCollector.__new__(C.TickerReportDataCollector)
@@ -338,9 +342,12 @@ async def test_a_failed_calendar_quarter_read_is_flagged_and_the_annual_line_kep
         assert lookup_failed(hist), (
             "a Supabase error on the calendar-quarter read reads like 'no rows' again"
         )
-        assert hist["annual"][metric]["2023"] == 11.0, "what loaded must be kept"
+        assert hist["annual"][metric] == {"2023": 11.0}, (
+            "what loaded must be kept, and the line ends at its last complete year"
+        )
         assert all(v == {} for v in hist["quarterly"].values())
-        assert set(requested) == {"annual", CALENDAR_QUARTER_PERIOD_TYPE, "ttm"}
+        assert set(requested) == {"annual", CALENDAR_QUARTER_PERIOD_TYPE}
+        assert "ttm" not in requested, "no TTM read is made (owner decision 2026-11-13)"
         assert "quarterly" not in requested, "never the legacy fiscal-keyed rows"
     finally:
         _clear_lookup_cache(sbl)
@@ -361,13 +368,21 @@ async def test_a_clean_empty_read_is_not_a_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_failed_ttm_read_is_flagged_too(monkeypatch):
-    sbl, _requested = _real_lookup(monkeypatch, fail_period_types={"ttm"})
+async def test_a_failed_annual_read_is_flagged_and_the_quarter_line_kept(monkeypatch):
+    """The annual read's Supabase error (flagged inside the REAL lookup, not raised) is a
+    failure too. There is no TTM read to fail since 2026-11-13."""
+    metric = C._SECTOR_HISTORY_METRIC_NAMES[0]
+    sbl, requested = _real_lookup(
+        monkeypatch, fail_period_types={"annual"},
+        rows_by_period={CALENDAR_QUARTER_PERIOD_TYPE: [_row(metric, "Q2'24", 9.0)]},
+    )
     try:
         coll = C.TickerReportDataCollector.__new__(C.TickerReportDataCollector)
-        assert lookup_failed(
-            await coll._fetch_sector_benchmark_history(_R3_INDUSTRY, "Technology")
-        )
+        hist = await coll._fetch_sector_benchmark_history(_R3_INDUSTRY, "Technology")
+        assert lookup_failed(hist), "a Supabase error on the annual read reads like 'no rows'"
+        assert all(v == {} for v in hist["annual"].values())
+        assert hist["quarterly"][metric] == {"Q2'24": 9.0}, "what loaded must be kept"
+        assert set(requested) == {"annual", CALENDAR_QUARTER_PERIOD_TYPE}
     finally:
         _clear_lookup_cache(sbl)
 
@@ -607,14 +622,19 @@ def test_a_pre_deploy_v4_valuation_row_is_rebuilt():
     import app.services.valuation_snapshot_service as vss
 
     # 7 since 2026-10-09 (NET-4: a listed non-lender member's Price card is peer-free);
-    # 8 the same day (Earnings Yield = 1 / the card's displayed P/E).
-    assert vss._SNAPSHOT_PAYLOAD_VERSION == 10
+    # 8 the same day (Earnings Yield = 1 / the card's displayed P/E); 11 since 2026-11-13
+    # (`numeric_value` / `peer_median` on each metric).
+    assert vss._SNAPSHOT_PAYLOAD_VERSION == 11
     svc = vss.ValuationSnapshotService.__new__(vss.ValuationSnapshotService)
     row = {"category": "Price", "rating": 3, "full_report_available": True, "metrics": [],
            vss._DCF_SOURCE_KEY: bool(settings.DCF_ENABLED)}
     svc.supabase = _FakeSnapshotTable({**row, vss._VERSION_KEY: 4})
     assert svc._check_supabase_cache("AAPL") is None, (
         "a v4 row may be heuristic-only from a swallowed lookup failure; it must be rebuilt"
+    )
+    svc.supabase = _FakeSnapshotTable({**row, vss._VERSION_KEY: 10})
+    assert svc._check_supabase_cache("AAPL") is None, (
+        "a v10 row has no numeric_value / peer_median; it must be rebuilt"
     )
     svc.supabase = _FakeSnapshotTable({**row, vss._VERSION_KEY: vss._SNAPSHOT_PAYLOAD_VERSION})
     assert svc._check_supabase_cache("AAPL") is not None, "the current version is served"

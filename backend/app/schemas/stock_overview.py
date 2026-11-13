@@ -38,6 +38,18 @@ class SnapshotMetricResponse(BaseModel):
     # this field swaps in the industry wording when it says "industry". None whenever the
     # name prints no peer median. Optional and additive: older builds ignore it.
     peer_level: Optional[str] = None
+    # The row's own comparison as NUMBERS (2026-11-13), for the report drill-down's
+    # "Current" legend line, which must match the card's verdict to the digit. Both are in
+    # DISPLAY units: a multiple as is, a percent row in percentage points (Earnings Yield
+    # 5.49, not 0.0549). `numeric_value` is the number `name`'s "N.NNx" ratio divides (or,
+    # where the label withholds a ratio that would print "0.00x", the number the row prints:
+    # a "0.02%" yield) — None whenever the row prints no comparable number ("—", "Neg.",
+    # "N/A", "N/M", "below 0.01%"). `peer_median` is the exact (unrounded) median `name` prints — None exactly
+    # when `name` prints none. `peer_level` set implies `peer_median` set, never the reverse
+    # (a median whose cell carries no known level still prints). Optional and additive: the
+    # Financials-tab decoder and legacy cached rows have neither.
+    numeric_value: Optional[float] = None
+    peer_median: Optional[float] = None
 
 
 # Wire format of `SnapshotItemResponse.computed_at`: ISO-8601 UTC to the second with a

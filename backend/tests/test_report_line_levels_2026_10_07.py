@@ -6,6 +6,10 @@ from the SECTOR (the industry's positive-P/E count is thin) under an "Industry A
 legend. The collector now carries each line's level to the report
 (`DeepDiveMetricResponse.sector_annual_level` / `sector_quarterly_level`, optional), and
 iOS reads it before the card word. Hermetic: a fake lookup, no network.
+
+2026-11-13 (owner, "Replace it"): the collector reads exactly two lines, annual and
+calendar quarter, and no TTM cell. Every annual line ends at its last served complete
+period; a TTM median never becomes a current-year point and never names a line's group.
 """
 
 from __future__ import annotations
@@ -17,11 +21,13 @@ import pytest
 from app.schemas.ticker_report import DeepDiveMetricResponse
 from app.services.agents import ticker_report_data_collector as C
 from app.services.sector_benchmark_lookup import CALENDAR_QUARTER_PERIOD_TYPE as CQ
+from app.services.sector_benchmark_lookup import lookup_failed
 
 def _cur_year() -> str:
-    """The year the collector labels its TTM point with, read when the TEST runs — as the
-    collector reads it (a function-scoped `datetime.now(timezone.utc).year`, so there is no
-    module clock to freeze). An import-time constant broke whenever a full-suite run
+    """The current calendar year, read when the TEST runs. Until 2026-11-13 the collector
+    drew the TTM median as this year's annual peer point; it no longer does (owner decision
+    2026-11-13, "Replace it"), so the tests assert this label never appears on a line. Read
+    at call time, never at import: an import-time constant broke whenever a full-suite run
     crossed New Year between collection and execution."""
     return str(datetime.now(timezone.utc).year)
 
@@ -31,25 +37,48 @@ def _cell(value, level, n=40):
 
 
 class _Lookup:
-    """Series cells per period type; a TTM cell per metric through get_benchmarks."""
+    """Series cells per period type. It ALSO serves a TTM cell per metric — what the real
+    lookup would answer if asked — and records every read, so a test proves the collector
+    never asks for one (a TTM cell must neither become a point nor name a line's group)."""
 
     def __init__(self, series, ttm):
         self.series, self.ttm = series, ttm
+        self.reads: list[tuple[str, str]] = []
 
     def get_benchmark_series(self, industry, sector, metrics, period_type):
+        self.reads.append(("get_benchmark_series", period_type))
+        if period_type == "ttm":
+            return {m: ({"TTM": dict(self.ttm[m])} if m in self.ttm else {}) for m in metrics}
         src = self.series.get(period_type, {})
         return {m: {k: dict(v) for k, v in src.get(m, {}).items()} for m in metrics}
 
     def get_benchmarks(self, industry, sector, metrics, period_type):
-        assert period_type == "ttm"
-        return {m: ({"TTM": dict(self.ttm[m])} if m in self.ttm else {}) for m in metrics}
+        self.reads.append(("get_benchmarks", period_type))
+        if period_type == "ttm":
+            return {m: ({"TTM": dict(self.ttm[m])} if m in self.ttm else {}) for m in metrics}
+        src = self.series.get(period_type, {})
+        return {m: {k: dict(v) for k, v in src.get(m, {}).items()} for m in metrics}
 
 
 async def _history(monkeypatch, series, ttm):
+    hist, _lookup = await _history_and_lookup(monkeypatch, series, ttm)
+    return hist
+
+
+async def _history_and_lookup(monkeypatch, series, ttm):
     lookup = _Lookup(series, ttm)
     monkeypatch.setattr("app.services.sector_benchmark_lookup.get_sector_benchmark_lookup", lambda: lookup)
     coll = C.TickerReportDataCollector.__new__(C.TickerReportDataCollector)
-    return await coll._fetch_sector_benchmark_history("Beverages - Non-Alcoholic", "Consumer Defensive")
+    hist = await coll._fetch_sector_benchmark_history("Beverages - Non-Alcoholic", "Consumer Defensive")
+    return hist, lookup
+
+
+def _assert_two_line_reads_only(lookup):
+    """Exactly the annual line and the calendar-quarter line, each through the one-group
+    series reader; no TTM read on either reader, no per-period merge."""
+    assert sorted(lookup.reads) == sorted(
+        [("get_benchmark_series", "annual"), ("get_benchmark_series", CQ)]
+    ), lookup.reads
 
 
 @pytest.mark.asyncio
@@ -68,19 +97,60 @@ async def test_each_line_carries_its_own_group(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_ttm_point_that_is_the_whole_line_names_its_group(monkeypatch):
-    hist = await _history(monkeypatch, {"annual": {}, CQ: {}},
-                          ttm={"pe_ratio": _cell(20.56, "sector", n=140)})
-    assert hist["annual"]["pe_ratio"] == {_cur_year(): 20.56}
-    assert hist["levels"]["annual"]["pe_ratio"] == "sector"
+async def test_an_otherwise_empty_line_gets_no_point_and_no_level_from_a_ttm_cell(monkeypatch):
+    """2026-11-13 ("Replace it"): a metric with no served annual or quarterly period draws
+    NO peer line, even when a TTM median exists. It used to become a one-point line at the
+    current year, labelled with the TTM cell's group."""
+    hist, lookup = await _history_and_lookup(
+        monkeypatch, {"annual": {}, CQ: {}}, ttm={"pe_ratio": _cell(20.56, "sector", n=140)})
+    _assert_two_line_reads_only(lookup)
+    assert not lookup_failed(hist), "an empty answer is not a failed read"
+    for tag in ("annual", "quarterly"):
+        assert hist[tag].get("pe_ratio", {}) == {}, (tag, hist[tag].get("pe_ratio"))
+        assert hist["levels"][tag].get("pe_ratio") is None, (tag, hist["levels"][tag])
+    assert not any(20.56 in line.values() for line in hist["annual"].values())
 
 
 @pytest.mark.asyncio
-async def test_a_ttm_point_of_another_group_never_relabels_the_line(monkeypatch):
-    series = {"annual": {"pe_ratio": {"2025": _cell(24.0, "industry")}}, CQ: {}}
-    hist = await _history(monkeypatch, series, ttm={"pe_ratio": _cell(20.56, "sector", n=140)})
-    assert _cur_year() not in hist["annual"]["pe_ratio"]
-    assert hist["levels"]["annual"]["pe_ratio"] == "industry"
+async def test_a_line_ends_at_its_last_complete_year_and_keeps_its_own_group(monkeypatch):
+    """2026-11-13: the annual line is exactly its served complete years. A mature TTM cell of
+    the line's OWN group (the case the old rule drew as the current year's point) adds no
+    point, and one of another group neither adds a point nor relabels the line."""
+    series = {
+        "annual": {
+            "pe_ratio": {"2024": _cell(22.0, "industry"), "2025": _cell(24.0, "industry")},
+            "gross_margin": {"2024": _cell(0.41, "industry"), "2025": _cell(0.42, "industry")},
+        },
+        CQ: {"pe_ratio": {"Q2'26": _cell(23.0, "industry")}},
+    }
+    ttm = {
+        "pe_ratio": _cell(20.56, "industry", n=140),      # same group as the line
+        "gross_margin": _cell(0.39, "sector", n=140),     # another group
+    }
+    hist, lookup = await _history_and_lookup(monkeypatch, series, ttm=ttm)
+    _assert_two_line_reads_only(lookup)
+    assert not lookup_failed(hist)
+    assert hist["annual"]["pe_ratio"] == {"2024": 22.0, "2025": 24.0}
+    assert hist["annual"]["gross_margin"] == {"2024": 0.41, "2025": 0.42}
+    for metric in ("pe_ratio", "gross_margin"):
+        assert _cur_year() not in hist["annual"][metric]
+        assert hist["levels"]["annual"][metric] == "industry"
+    # The quarterly line is its own read, untouched by the TTM cell too.
+    assert hist["quarterly"]["pe_ratio"] == {"Q2'26": 23.0}
+    assert hist["levels"]["quarterly"]["pe_ratio"] == "industry"
+
+
+@pytest.mark.asyncio
+async def test_a_line_whose_cells_name_two_groups_names_none(monkeypatch):
+    """One peer group per line: cells from two populations give the line no level (the
+    legend then falls back to the card word), and no TTM cell is read to break the tie."""
+    series = {"annual": {"pe_ratio": {"2024": _cell(22.0, "sector"), "2025": _cell(24.0, "industry")}},
+              CQ: {}}
+    hist, lookup = await _history_and_lookup(
+        monkeypatch, series, ttm={"pe_ratio": _cell(20.56, "industry", n=140)})
+    _assert_two_line_reads_only(lookup)
+    assert hist["annual"]["pe_ratio"] == {"2024": 22.0, "2025": 24.0}
+    assert hist["levels"]["annual"]["pe_ratio"] is None
 
 
 def test_the_card_metric_carries_the_line_levels():

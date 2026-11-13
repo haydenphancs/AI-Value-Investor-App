@@ -7,8 +7,10 @@
    52/53-week year ending Jan 1-7 drew the NEXT year's peer median.
 2. The drill-down's peer LINES read the per-period merge (`get_benchmarks`), so a line
    switched population wherever an industry's n crossed 20. They now read
-   `get_benchmark_series` (one peer group per metric line). The current-year TTM point is
-   drawn only when it is mature AND from the line's own peer group (or the line is empty).
+   `get_benchmark_series` (one peer group per metric line). The current-year TTM point
+   this round drew only from the line's own peer group is gone since the owner decision of
+   2026-11-13 ("Replace it"): no TTM read is made and every line ends at its last served
+   complete period, whatever group (or no group) a mature TTM cell belongs to.
 3. A failed industry moat peer-average read (`get_pillar_benchmarks`) fell silently into the
    5.0 baseline and was shared-cached. It now rides the report's degraded sections.
 4. `_narrow_profit_power` stripped the peer fields but kept `peer_group_levels`.
@@ -47,6 +49,7 @@ from test_report_moat_index_benchmarks_2026_10_07 import (  # noqa: F401
     _collector,
     _cur_year,
     _install,
+    _period_types_read,
     _real_lookup,
     _RecordingLookup,
     _row,
@@ -139,7 +142,7 @@ def test_the_quarterly_key_is_unchanged():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 2. One peer group per drill-down line; the TTM point only on its own group's line
+# 2. One peer group per drill-down line; no TTM point on any line
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -196,13 +199,15 @@ async def test_a_sector_ttm_point_is_never_put_on_an_industry_line(monkeypatch, 
     """Industry line (mature at its newest year); industry TTM thin → the card's current
     value is the SECTOR TTM. The industry line ends at its last complete year."""
     sector, industry = f"Sec-{tag}", f"Ind-{tag}"
-    lookup, _ = _real_lookup(monkeypatch, [
+    lookup, fake = _real_lookup(monkeypatch, [
         _row(sector, industry, "pe_ratio", "annual", str(_DONE_YEAR), 28.0, 25, _DONE_COMPUTED),
         _row(sector, industry, "pe_ratio", "ttm", "TTM", 35.0, 13, _FRESH),
         _row(sector, "", "pe_ratio", "ttm", "TTM", 22.0, 300, _FRESH),
     ])
     hist = await _collector()._fetch_sector_benchmark_history(industry, sector)
     assert hist["annual"]["pe_ratio"] == {str(_DONE_YEAR): 28.0}
+    assert hist["levels"]["annual"]["pe_ratio"] == "industry"
+    assert "ttm" not in _period_types_read(fake)
     card = lookup.get_current_benchmarks(industry, sector, ["pe_ratio"])["pe_ratio"]
     assert (card["value"], card["level"]) == (22.0, "sector")
 
@@ -212,7 +217,7 @@ async def test_an_industry_ttm_point_is_never_put_on_a_sector_line(monkeypatch, 
     """Thin industry in the annual history (sector line), but the weekly TTM job reached
     20 industry members: the industry TTM is the card's value, not the line's point."""
     sector, industry = f"Sec-{tag}", f"Ind-{tag}"
-    _real_lookup(monkeypatch, [
+    _, fake = _real_lookup(monkeypatch, [
         _row(sector, industry, "pe_ratio", "annual", str(_DONE_YEAR), 30.0, 10, _DONE_COMPUTED),
         _row(sector, "", "pe_ratio", "annual", str(_DONE_YEAR), 18.0, 300, _DONE_COMPUTED),
         _row(sector, industry, "pe_ratio", "ttm", "TTM", 33.0, MATURE_SAMPLE_FLOOR, _FRESH),
@@ -220,44 +225,38 @@ async def test_an_industry_ttm_point_is_never_put_on_a_sector_line(monkeypatch, 
     ])
     hist = await _collector()._fetch_sector_benchmark_history(industry, sector)
     assert hist["annual"]["pe_ratio"] == {str(_DONE_YEAR): 18.0}
+    assert hist["levels"]["annual"]["pe_ratio"] == "sector"
+    assert "ttm" not in _period_types_read(fake)
 
 
 @pytest.mark.asyncio
-async def test_a_same_group_ttm_point_is_drawn(monkeypatch, tag):
+@pytest.mark.parametrize("line_drawn", [True, False])
+async def test_even_a_same_group_mature_ttm_is_never_drawn(monkeypatch, tag, line_drawn):
+    """Before 2026-11-13 a mature TTM cell from the line's own peer group was drawn as the
+    current calendar year's point — and on an EMPTY line it was the whole line. Now the
+    sector line (thin industry) ends at its last complete year, an empty line stays
+    empty, and the lookup is never asked for TTM rows."""
     sector, industry = f"Sec-{tag}", f"Ind-{tag}"
-    _real_lookup(monkeypatch, [
-        _row(sector, industry, "pe_ratio", "annual", str(_DONE_YEAR), 30.0, 10, _DONE_COMPUTED),
-        _row(sector, "", "pe_ratio", "annual", str(_DONE_YEAR), 18.0, 300, _DONE_COMPUTED),
+    rows = [
         _row(sector, industry, "pe_ratio", "ttm", "TTM", 33.0, 13, _FRESH),
         _row(sector, "", "pe_ratio", "ttm", "TTM", 21.0, 300, _FRESH),
-    ])
+    ]
+    if line_drawn:
+        rows += [
+            _row(sector, industry, "pe_ratio", "annual", str(_DONE_YEAR), 30.0, 10,
+                 _DONE_COMPUTED),
+            _row(sector, "", "pe_ratio", "annual", str(_DONE_YEAR), 18.0, 300, _DONE_COMPUTED),
+        ]
+    _, fake = _real_lookup(monkeypatch, rows)
     hist = await _collector()._fetch_sector_benchmark_history(industry, sector)
-    assert hist["annual"]["pe_ratio"] == {str(_DONE_YEAR): 18.0, _cur_year(): 21.0}
-
-
-@pytest.mark.parametrize(
-    "ttm_cell, line, line_level, fits",
-    [
-        # an empty line: the TTM point is the whole line
-        ({"value": 20.0, "level": "sector", "n": 99}, None, None, True),
-        ({"value": 20.0, "level": "sector", "n": 99}, {}, None, True),
-        ({"value": 20.0, "level": "industry", "n": 99}, {"2024": None}, None, True),
-        ({"value": 20.0, "level": "industry", "n": 99}, {"2024": float("nan")}, None, True),
-        ({"value": 20.0, "level": None, "n": 99}, {}, None, True),
-        # a drawn line: same group only
-        ({"value": 20.0, "level": "sector", "n": 99}, {"2024": 18.0}, "sector", True),
-        ({"value": 20.0, "level": "industry", "n": 99}, {"2024": 18.0}, "industry", True),
-        ({"value": 20.0, "level": "industry", "n": 99}, {"2024": 18.0}, "sector", False),
-        ({"value": 20.0, "level": "sector", "n": 99}, {"2024": 18.0}, "industry", False),
-        ({"value": 20.0, "level": "sector", "n": 99}, {"2024": 18.0}, None, False),  # mixed
-        ({"value": 20.0, "n": 99}, {"2024": 18.0}, "sector", False),               # no level
-        ({"value": 20.0, "level": "peers", "n": 99}, {"2024": 18.0}, "peers", False),
-        ("junk", {"2024": 18.0}, "sector", False),
-        ({"value": 20.0, "level": "sector", "n": 99}, "junk", "sector", True),
-    ],
-)
-def test_ttm_point_fits_line(ttm_cell, line, line_level, fits):
-    assert C._ttm_point_fits_line(ttm_cell, line, line_level) is fits
+    assert not lookup_failed(hist)
+    line = hist["annual"]["pe_ratio"]
+    assert line == ({str(_DONE_YEAR): 18.0} if line_drawn else {})
+    assert _cur_year() not in line
+    assert hist["levels"]["annual"]["pe_ratio"] == ("sector" if line_drawn else None)
+    asked = _period_types_read(fake)
+    assert "ttm" not in asked, asked
+    assert set(asked) == {"annual", CALENDAR_QUARTER_PERIOD_TYPE}, asked
 
 
 class _SeriesAndMerged:
@@ -329,14 +328,27 @@ def test_a_malformed_level_reads_as_no_level_never_as_a_failure():
 
 
 @pytest.mark.asyncio
-async def test_a_failed_series_read_flags_the_history(monkeypatch, tag):
+@pytest.mark.parametrize("failing", ["annual", CALENDAR_QUARTER_PERIOD_TYPE])
+async def test_a_failed_series_read_flags_the_history(monkeypatch, tag, failing):
+    """A failed annual OR calendar-quarter series read flags the whole history
+    (`BenchmarkLookupFailed`, so the collection stays out of the shared caches) and keeps
+    the line that loaded. The failed line stays empty: the merged reader — which used to
+    serve the TTM cell that filled an empty annual line — is never called."""
+    yy = str(_DONE_YEAR)[-2:]
+    calls: List[str] = []
+
     class _Lookup:
         def get_benchmark_series(self, industry, sector, metrics, period_type):
-            if period_type == "annual":
+            calls.append(f"series:{period_type}")
+            if period_type == failing:
                 return BenchmarkLookupFailed({m: {} for m in metrics})
-            return {m: {} for m in metrics}
+            if period_type == "annual":
+                return {"pe_ratio": {str(_DONE_YEAR): {"value": 18.0, "level": "sector",
+                                                       "n": 300}}}
+            return {"pe_ratio": {f"Q4'{yy}": {"value": 17.0, "level": "sector", "n": 300}}}
 
         def get_benchmarks(self, industry, sector, metrics, period_type):
+            calls.append(f"merged:{period_type}")
             return {"pe_ratio": {"TTM": {"value": 20.0, "level": "sector", "n": 300}}}
 
     import app.services.sector_benchmark_lookup as sbl
@@ -344,8 +356,16 @@ async def test_a_failed_series_read_flags_the_history(monkeypatch, tag):
     monkeypatch.setattr(sbl, "get_sector_benchmark_lookup", lambda: _Lookup())
     hist = await _collector()._fetch_sector_benchmark_history(f"Ind-{tag}", f"Sec-{tag}")
     assert lookup_failed(hist)
-    # The annual line loaded nothing, so the TTM point is the whole (one-group) line.
-    assert hist["annual"]["pe_ratio"] == {_cur_year(): 20.0}
+    assert sorted(calls) == sorted(
+        ["series:annual", f"series:{CALENDAR_QUARTER_PERIOD_TYPE}"]), calls
+    failed_tag, kept_tag, kept = (
+        ("annual", "quarterly", {f"Q4'{yy}": 17.0}) if failing == "annual"
+        else ("quarterly", "annual", {str(_DONE_YEAR): 18.0})
+    )
+    assert hist[failed_tag]["pe_ratio"] == {}, "no TTM point fills a failed line"
+    assert hist[kept_tag]["pe_ratio"] == kept
+    assert hist["levels"][kept_tag]["pe_ratio"] == "sector"
+    assert _cur_year() not in hist["annual"]["pe_ratio"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -76,9 +76,10 @@ _CACHE_TTL = 300  # 5 minutes
 # version has no such window — a row is either the current shape or it is not, whenever
 # it was written. **Bump it whenever these strings change shape.**
 #
-# Forward-safe in both directions: an OLD build reading a NEW row passes the extra key
-# into `SnapshotItemResponse(**json_data)`, which raises, and the surrounding `except`
-# turns that into a rebuild. Nothing crashes; the worst case is one recomputation.
+# Forward-safe in both directions: an OLD build reading a NEW row rejects it on the version
+# check before it parses anything (and a row that got past it would only have its extra keys
+# ignored — Pydantic's default `extra="ignore"` — not raise). Nothing crashes; the worst
+# case is one recomputation.
 #
 # 2 (2026-08-26): negative multiples render "Neg." (undefined) instead of "—" (unknown).
 # 3 (2026-08-26): EV/EBITDA reads `enterpriseValueMultipleTTM` — the key `/stable`
@@ -116,7 +117,11 @@ _CACHE_TTL = 300  # 5 minutes
 # 10 (2026-11-05): `score_excluded_rows`: a bank's, an insurer's or a lender's P/S, P/FCF and
 #     EV/EBITDA read "N/M" and do not vote, and P/E and P/B carry the card. A v9 row counted
 #     them.
-_SNAPSHOT_PAYLOAD_VERSION = 10
+# 11 (2026-11-13, owner decision): each metric carries its comparison as numbers —
+#     `numeric_value` and `peer_median`, in display units — for the report drill-down's
+#     "Current (TTM)" legend line. A v10 row has neither, and a report built from it would
+#     freeze without that line.
+_SNAPSHOT_PAYLOAD_VERSION = 11
 _VERSION_KEY = "_schema_v"
 # Which DCF a cached row carries: True = the Caydex Fair Value Estimate (`caydex_estimate`),
 # False/absent = FMP's model (`dcf`). A row that disagrees with settings.DCF_ENABLED is rebuilt,
@@ -1349,16 +1354,36 @@ def build_price_snapshot(
             rating = 0
             weighted_score = None
 
-    def _metric(label, key, bench_key, value, display, score, pct=False, median=_FROM_BENCH):
+    def _metric(label, key, bench_key, value, display, score, pct=False, median=_FROM_BENCH,
+                shown=_FROM_BENCH):
         # `median` overrides the bench cell (the yield row passes 1 / the P/E median, None
         # included); `bench_key` still names the cell whose peer level the label prints.
         median = _median(bench_key) if median is _FROM_BENCH else median
         ctx = (_sector_ctx_pct if pct else _sector_ctx)(value, median)
         # `peer_level` is the level of the median the label PRINTS — None when it prints none.
         level = levels.get(bench_key) if ctx else None
+        # The same comparison as NUMBERS, in display units (a percent row ×100): exactly the
+        # median `ctx` printed and the value its "N.NNx" divides, so the report drill-down's
+        # "Current" line reproduces the label's ratio and the row's score to the digit. No
+        # ctx → no median; a missing, non-finite or non-positive value ("—", "Neg.", "N/A",
+        # a yield too small to print) → no value, while the printed median stays. `shown`
+        # overrides the value when the label withholds its ratio but the row still prints a
+        # number (the yield row: a yield whose ratio rounds to 0.00 prints "0.02%").
+        scale = 100.0 if pct else 1.0
+        if shown is not _FROM_BENCH:
+            value = shown
+        peer_median = None
+        if ctx:
+            usable = median if pct else _usable_median(median)
+            peer_median = usable * scale if usable is not None else None
+        numeric_value = (
+            value * scale
+            if value is not None and math.isfinite(value) and value > 0 else None
+        )
         return SnapshotMetricResponse(
             name=_metric_name(label, ctx), value=display, metric_key=key, score=score,
             peer_level=level if level in ("industry", "sector") else None,
+            numeric_value=numeric_value, peer_median=peer_median,
         )
 
     def _not_scored(label, key):
@@ -1386,7 +1411,8 @@ def build_price_snapshot(
         # level. A yield too small to print ("below 0.01%"), or one whose multiple would print
         # "0.00x" (a P/E in the thousands), carries no "N.NNx" — only the median.
         _metric("Earnings Yield", "earnings_yield", "pe_ratio", ey_vs_median, ey_display, None,
-                pct=True, median=ey_median),
+                pct=True, median=ey_median,
+                shown=ey if ey is not None and ey_display[:1].isdigit() else None),
     ]
 
     return SnapshotItemResponse(

@@ -6,8 +6,11 @@ annual / calendar-quarter row only once its period is complete (computed >= peri
 (`sector_benchmark_lookup.merge_peer_cells`). These are the readers that sat beside it:
 
 1. The Fundamentals drill-down pinned the current year's peer point to ANY TTM median —
-   a 13-company industry included. It now takes only a mature TTM cell (n >= 20), the
-   same cell the Overview card shows (`get_current_benchmarks`), and never a growth metric.
+   a 13-company industry included. 2026-10-07 narrowed it to a mature TTM cell; since the
+   owner decision of 2026-11-13 ("Replace it") no TTM point is drawn at all: the history
+   makes exactly two reads (annual, calendar quarter), every line ends at its last served
+   complete period, and the current comparison rides each card row
+   (`current_value` / `current_peer_median`).
 2. Competitor scoring took ``max(period_label)`` of the raw annual map with no floor: the
    partial current year, from the early filers. It now reads `get_current_benchmarks`
    (sector TTM, else the newest complete mature year).
@@ -73,11 +76,11 @@ _FRESH = (_NOW - timedelta(days=2)).isoformat()
 
 
 def _cur_year() -> str:
-    """The year the collector labels its TTM point with, read when the TEST runs — as the
-    collector reads it (a function-scoped `datetime.now(timezone.utc).year`, so there is no
-    module clock to freeze). The old import-time constant failed two tests here, and two in
-    the round-2 suite, whenever a full-suite run crossed New Year between collection and
-    execution — and turned the "not in" asserts below vacuous."""
+    """The current calendar year — the key the collector used to label its TTM point with
+    (removed 2026-11-13) and the key a partial current-year cohort carries — read when the
+    TEST runs. The old import-time constant failed two tests here, and two in the round-2
+    suite, whenever a full-suite run crossed New Year between collection and execution —
+    and turned the "not in" asserts below vacuous."""
     return str(datetime.now(timezone.utc).year)
 
 
@@ -168,55 +171,70 @@ def _collector():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 1. Drill-down: the current-year point is a MATURE TTM median, equal to the card's
+# 1. Drill-down: no TTM point — every peer line ends at its last complete period
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+def _period_types_read(fake: _FakeSupabase) -> List[Any]:
+    """Every ``period_type`` the REAL lookup asked the fake table for, in order."""
+    return [q.get("period_type") for q in fake.log]
+
+
 @pytest.mark.asyncio
-async def test_a_mature_industry_ttm_is_the_current_year_point_and_equals_the_card(
+async def test_a_mature_industry_ttm_is_never_read_and_the_line_ends_at_its_last_complete_year(
     monkeypatch, tag,
 ):
+    """Owner 2026-11-13 ("Replace it"): a mature industry TTM (n=25, the cell the Overview
+    card shows) used to be drawn as the current calendar year's annual point. The line now
+    ends at its last served complete year, and the history never asks for TTM rows."""
     sector, industry = f"Sec-{tag}", f"Ind-{tag}"
-    lookup, _ = _real_lookup(monkeypatch, [
+    lookup, fake = _real_lookup(monkeypatch, [
         _row(sector, industry, "pe_ratio", "ttm", "TTM", 31.0, 25, _FRESH),
         _row(sector, "", "pe_ratio", "ttm", "TTM", 22.0, 300, _FRESH),
         _row(sector, industry, "pe_ratio", "annual", str(_DONE_YEAR), 28.0, 25, _DONE_COMPUTED),
     ])
     hist = await _collector()._fetch_sector_benchmark_history(industry, sector)
+    asked = _period_types_read(fake)
     assert not lookup_failed(hist)
     annual = hist["annual"]["pe_ratio"]
-    assert annual[_cur_year()] == 31.0
-    assert annual[str(_DONE_YEAR)] == 28.0, "history keeps its own complete year"
+    assert annual == {str(_DONE_YEAR): 28.0}, "history keeps its own complete year, and only it"
+    assert _cur_year() not in annual
+    assert hist["levels"]["annual"]["pe_ratio"] == "industry"
+    assert sbl.TTM_PERIOD_TYPE not in asked, asked
+    assert set(asked) == {"annual", sbl.CALENDAR_QUARTER_PERIOD_TYPE}, asked
+    # The TTM median still exists — as the card's current comparison, never on the line.
     card = lookup.get_current_benchmarks(industry, sector, ["pe_ratio"])["pe_ratio"]
-    assert card["value"] == annual[_cur_year()], (
-        "the drill-down's newest peer point must be the Overview card's value"
-    )
+    assert card["value"] == 31.0 and 31.0 not in annual.values()
 
 
 @pytest.mark.asyncio
-async def test_ko_shape_thin_industry_ttm_injects_the_sector_ttm_and_hides_the_partial_year(
+async def test_ko_shape_a_mature_sector_ttm_draws_no_point_and_the_partial_year_stays_hidden(
     monkeypatch, tag,
 ):
     """KO on 2026-10-07: Beverages TTM n=13 (thin), Consumer Defensive TTM mature, and a
-    partial current-year sector cohort (n=39) computed during the year. The point is the
-    sector TTM; the partial cohort never reaches the chart."""
+    partial current-year sector cohort (n=39) computed during the year. Neither reaches the
+    chart: no TTM read is made (it used to inject the sector TTM), and the partial cohort is
+    never served. The sector TTM is still the card's current value."""
     sector, industry = f"Sec-{tag}", f"Ind-{tag}"
-    lookup, _ = _real_lookup(monkeypatch, [
+    lookup, fake = _real_lookup(monkeypatch, [
         _row(sector, industry, "pe_ratio", "ttm", "TTM", 35.0, 13, _FRESH),
         _row(sector, "", "pe_ratio", "ttm", "TTM", 20.6, 140, _FRESH),
         _row(sector, "", "pe_ratio", "annual", _cur_year(), 99.0, 39, _during_this_year()),
     ])
     hist = await _collector()._fetch_sector_benchmark_history(industry, sector)
-    assert hist["annual"]["pe_ratio"][_cur_year()] == 20.6
+    asked = _period_types_read(fake)
+    assert not lookup_failed(hist)
+    assert hist["annual"]["pe_ratio"] == {}, "neither the sector TTM nor the partial year"
+    assert sbl.TTM_PERIOD_TYPE not in asked, asked
     card = lookup.get_current_benchmarks(industry, sector, ["pe_ratio"])["pe_ratio"]
     assert (card["value"], card["level"]) == (20.6, "sector")
 
 
 @pytest.mark.asyncio
 async def test_a_thin_ttm_on_both_levels_leaves_the_current_year_blank(monkeypatch, tag):
-    """No mature TTM: nothing is injected (never a 13-company median, never an older year
-    restated as this one). The card falls back to the newest complete mature year, which
-    the chart already draws at THAT year."""
+    """No current-year point (never a 13-company median, never an older year restated as
+    this one, never the partial cohort). The card falls back to the newest complete mature
+    year, which the chart already draws at THAT year."""
     sector, industry = f"Sec-{tag}", f"Ind-{tag}"
     lookup, _ = _real_lookup(monkeypatch, [
         _row(sector, industry, "pe_ratio", "ttm", "TTM", 35.0, 13, _FRESH),
@@ -233,97 +251,82 @@ async def test_a_thin_ttm_on_both_levels_leaves_the_current_year_blank(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_a_stale_ttm_row_is_never_injected(monkeypatch, tag):
-    """A 22-day-old TTM row belongs to a group the weekly job no longer writes."""
+@pytest.mark.parametrize("age_days", [2, 22])
+async def test_a_fresh_or_stale_ttm_row_never_reaches_the_line(monkeypatch, tag, age_days):
+    """A TTM row alone draws nothing, fresh or (22 days old) a zombie group's."""
     sector, industry = f"Sec-{tag}", f"Ind-{tag}"
-    _real_lookup(monkeypatch, [
+    _, fake = _real_lookup(monkeypatch, [
         _row(sector, "", "pe_ratio", "ttm", "TTM", 22.0, 300,
-             (_NOW - timedelta(days=22)).isoformat()),
+             (_NOW - timedelta(days=age_days)).isoformat()),
     ])
     hist = await _collector()._fetch_sector_benchmark_history(industry, sector)
-    assert _cur_year() not in hist["annual"].get("pe_ratio", {})
+    assert not lookup_failed(hist)
+    assert hist["annual"]["pe_ratio"] == {}
+    assert sbl.TTM_PERIOD_TYPE not in _period_types_read(fake)
 
 
 @pytest.mark.asyncio
-async def test_a_failed_ttm_read_is_flagged_and_injects_nothing(monkeypatch, tag):
-    class _Lookup:
+@pytest.mark.parametrize("failing", ["annual", sbl.CALENDAR_QUARTER_PERIOD_TYPE])
+@pytest.mark.parametrize("mode", ["failed", "raises"])
+async def test_a_failed_line_read_is_flagged_and_keeps_the_other_line(
+    monkeypatch, tag, failing, mode,
+):
+    """Exactly two reads, each flagged on failure (a `BenchmarkLookupFailed` answer or a
+    raise): the history is a `BenchmarkLookupFailed`, so the collection is kept out of the
+    shared caches, and the line that loaded is kept. No TTM read is attempted (it used to
+    be the third), so nothing fills the failed line."""
+    yy = str(_DONE_YEAR)[-2:]
+    calls: List[str] = []
+
+    class _Lookup:  # the merged reader only (an older double): `_read_peer_line`'s fallback
         def get_benchmarks(self, industry, sector, metrics, period_type):
-            if period_type == "ttm":
+            calls.append(period_type)
+            if period_type == failing:
+                if mode == "raises":
+                    raise RuntimeError("Server disconnected")
                 return BenchmarkLookupFailed({m: {} for m in metrics})
-            return {"pe_ratio": {str(_DONE_YEAR): {"value": 18.0, "level": "sector", "n": 99}}}
+            if period_type == "annual":
+                return {"pe_ratio": {str(_DONE_YEAR): {"value": 18.0, "level": "sector", "n": 99}}}
+            return {"pe_ratio": {f"Q4'{yy}": {"value": 17.0, "level": "sector", "n": 99}}}
 
     monkeypatch.setattr(sbl, "get_sector_benchmark_lookup", lambda: _Lookup())
     hist = await _collector()._fetch_sector_benchmark_history(f"Ind-{tag}", f"Sec-{tag}")
     assert lookup_failed(hist)
-    assert hist["annual"]["pe_ratio"] == {str(_DONE_YEAR): 18.0}
+    assert sorted(calls) == sorted(["annual", sbl.CALENDAR_QUARTER_PERIOD_TYPE]), calls
+    failed_tag, kept_tag, kept = (
+        ("annual", "quarterly", {f"Q4'{yy}": 17.0}) if failing == "annual"
+        else ("quarterly", "annual", {str(_DONE_YEAR): 18.0})
+    )
+    assert hist[kept_tag]["pe_ratio"] == kept
+    assert hist["levels"][kept_tag]["pe_ratio"] == "sector"
+    assert not hist[failed_tag].get("pe_ratio"), "a failed read draws nothing"
+    assert _cur_year() not in hist["annual"].get("pe_ratio", {})
 
 
 @pytest.mark.parametrize(
-    "metric, cell, expected",
+    "answer, flat, failed",
     [
-        ("pe_ratio", {"value": 22.0, "n": MATURE_SAMPLE_FLOOR}, 22.0),     # boundary in
-        ("pe_ratio", {"value": 22.0, "n": MATURE_SAMPLE_FLOOR - 1}, None),  # boundary out
-        ("pe_ratio", {"value": 22.0}, None),                                # n unknown
-        ("pe_ratio", {"value": 22.0, "n": None}, None),
-        ("pe_ratio", {"value": 22.0, "n": True}, None),                     # bool is not a count
-        ("pe_ratio", {"value": 22.0, "n": float("nan")}, None),
-        ("pe_ratio", {"value": 22.0, "n": float("inf")}, None),
-        ("pe_ratio", {"value": float("nan"), "n": 300}, None),
-        ("pe_ratio", {"value": float("inf"), "n": 300}, None),
-        ("pe_ratio", {"value": None, "n": 300}, None),
-        ("pe_ratio", {"value": "abc", "n": 300}, None),
-        ("pe_ratio", {"value": -3.0, "n": 300}, -3.0),                      # real negative median kept
-        ("pe_ratio", None, None),
-        ("pe_ratio", "22", None),
-        ("revenue_yoy", {"value": 5.0, "n": 300}, None),                    # never a growth metric
-        ("eps_qoq", {"value": 5.0, "n": 300}, None),
-        ("fcf_growth", {"value": 5.0, "n": 300}, None),
+        ({"pe_ratio": {"2024": 20.0}, "roe": "junk"}, {"pe_ratio": {"2024": 20.0}}, False),
+        (BenchmarkLookupFailed({"pe_ratio": {}}), {"pe_ratio": {}}, True),
+        (None, {}, True),
+        ([], {}, True),
     ],
 )
-def test_mature_ttm_value_outliers(metric, cell, expected):
-    assert C._mature_ttm_value(metric, cell) == expected
+def test_a_flat_only_lookup_keeps_its_failure_flag(answer, flat, failed):
+    """A lookup exposing only the flat reader: the line loads with no levels (a flat reader
+    cannot name a peer group), and a failed read stays flagged through it — the flat view's
+    plain-dict rebuild used to drop the flag."""
+    asked: List[str] = []
 
-
-@pytest.mark.parametrize(
-    "answer, failed",
-    [
-        ({"pe_ratio": {"TTM": 20.0}}, False),
-        (BenchmarkLookupFailed({"pe_ratio": {}}), True),
-        (None, True),
-    ],
-)
-def test_a_flat_only_lookup_yields_no_ttm_cell_but_keeps_its_failure(answer, failed):
-    """A flat reader cannot say how many companies a median holds: inject nothing."""
     class _FlatOnly:
         def get_benchmark_values(self, industry, sector, metrics, period_type):
-            assert period_type == "ttm"
+            asked.append(period_type)
             return answer
 
-    cells, got = C._read_ttm_peer_cells(_FlatOnly(), "I", "S", ["pe_ratio"])
-    assert cells == {}
-    assert got is failed
-
-
-def test_read_ttm_peer_cells_tolerates_malformed_cells():
-    class _Rich:
-        def get_benchmarks(self, industry, sector, metrics, period_type):
-            return {
-                "pe_ratio": {"TTM": {"value": 20.0, "n": 30}},
-                "pb_ratio": {"ttm": {"value": 3.0, "n": 30}},   # another label spelling
-                "ps_ratio": {"TTM": "junk"},
-                "roe": "junk",
-            }
-
-    cells, failed = C._read_ttm_peer_cells(_Rich(), "I", "S", ["pe_ratio"])
-    assert failed is False
-    assert cells == {"pe_ratio": {"value": 20.0, "n": 30}, "pb_ratio": {"value": 3.0, "n": 30}}
-
-
-def test_no_drill_down_metric_is_a_growth_metric_today():
-    """The TTM injection is for LEVEL metrics; if a growth metric is ever added to the
-    sector-history list, `_mature_ttm_value` already refuses it."""
-    assert not [m for m in C._SECTOR_HISTORY_METRIC_NAMES
-                if m.endswith(C._NO_TTM_POINT_SUFFIXES)]
+    got = C._read_peer_line(_FlatOnly(), "I", "S", ["pe_ratio"], "annual")
+    assert got == (flat, {}, failed)
+    assert got[2] is failed
+    assert asked == ["annual"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════

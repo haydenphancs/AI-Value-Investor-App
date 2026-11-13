@@ -92,7 +92,9 @@ _CACHE_TTL = 300  # 5 minutes
 # 9 (2026-10-21): the Financial Services peer rule (own industry from 10 companies, else no
 #     peer — never the sector median; owner decision 2026-10-20). A v8 fallback row of a
 #     small FS industry compared D/E with the bank-dominated sector.
-_SNAPSHOT_PAYLOAD_VERSION = 9
+# 10 (2026-11-13, owner decision): each row carries `numeric_value` and `peer_median` (the
+#     report drill-down's "Current" legend line). A v9 row has neither.
+_SNAPSHOT_PAYLOAD_VERSION = 10
 _VERSION_KEY = "_schema_v"
 
 
@@ -259,6 +261,26 @@ def _peer_level(level: Any, value: Optional[float], comparison_value: Optional[f
     if not _compared(value, comparison_value):
         return None
     return level if level in ("industry", "sector") else None
+
+
+def _finite(x: Any) -> Optional[float]:
+    """``x`` as a finite float, else None (a bool is not a number here)."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return None
+    return float(x) if math.isfinite(x) else None
+
+
+def _row_numbers(
+    value: Optional[float], comparison_value: Optional[float],
+) -> Dict[str, Optional[float]]:
+    """`numeric_value` / `peer_median` for a row (2026-11-13): the value the row prints and
+    the median its name prints, as numbers — for the report drill-down's "Current" legend
+    line. The median only under the same rule that prints it (`_compared`), so the line
+    never shows a median the card did not compare against. A negative value stays (an
+    interest coverage below zero is a real reading the card prints)."""
+    numeric_value = _finite(value)
+    peer_median = _finite(comparison_value) if _compared(value, comparison_value) else None
+    return {"numeric_value": numeric_value, "peer_median": peer_median}
 
 
 def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
@@ -687,6 +709,7 @@ class HealthSnapshotService:
                     peer_level=_peer_level(
                         getattr(m, "peer_level", None), m.value, m.comparison_value,
                     ),
+                    **_row_numbers(m.value, m.comparison_value),
                 ))
 
             # Z-Score for the rating blend
@@ -817,6 +840,7 @@ class HealthSnapshotService:
                     # An "—" row scores nothing (`_zscore_rating(None)` is the neutral
                     # blend anchor, not a reading of this company).
                     score=_zscore_rating(z_score) if z_score is not None else None,
+                    **_row_numbers(z_score, None),
                 ))
             z_rating = _zscore_rating(z_score)
 
@@ -850,6 +874,7 @@ class HealthSnapshotService:
                 value=_fmt_value("debt_to_equity", de),
                 metric_key="debt_to_equity",
                 peer_level=_peer_level(fb_levels.get("debt_to_equity"), de, sector_de),
+                **_row_numbers(de, sector_de),
                 score=_row_score(DEBT_TO_EQUITY, de, sector_de, lower_is_better=True),
             ))
 
@@ -902,6 +927,7 @@ class HealthSnapshotService:
                     value=_fmt_value("current_ratio", cr),
                     metric_key="current_ratio",
                     peer_level=_peer_level(fb_levels.get("current_ratio"), cr, sector_cr),
+                    **_row_numbers(cr, sector_cr),
                     score=_row_score("current_ratio", cr, sector_cr),
                 ))
 
@@ -921,6 +947,7 @@ class HealthSnapshotService:
                     value=_fmt_value("interest_coverage", ic),
                     metric_key="interest_coverage",
                     peer_level=_peer_level(fb_levels.get("interest_coverage"), ic, sector_ic),
+                    **_row_numbers(ic, sector_ic),
                     score=_row_score("interest_coverage", ic, sector_ic),
                 ))
 
@@ -938,6 +965,7 @@ class HealthSnapshotService:
                     value=_fmt_value("quick_ratio", qr),
                     metric_key="quick_ratio",
                     peer_level=_peer_level(fb_levels.get("quick_ratio"), qr, sector_qr),
+                    **_row_numbers(qr, sector_qr),
                     score=_row_score("quick_ratio", qr, sector_qr),
                 ))
 

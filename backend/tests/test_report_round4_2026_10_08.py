@@ -7,7 +7,10 @@ FS     (FS-GUARD-1 / RPT3-3 / XC-1) The drill-down drew the Financial Services S
        of current ratio, quick ratio and interest coverage for SPGI / ICE / CME (a thin
        industry falls to the sector line) and pinned the sector TTM point onto it — the
        comparison the Health card refuses. Permanent: what is left of that sector for
-       these metrics is shells, exchanges and developers.
+       these metrics is shells, exchanges and developers. Since 2026-11-13 (owner:
+       "Replace it") no TTM point is drawn on ANY line: the fetch makes exactly two reads
+       (annual + calendar quarter) and every line ends at its last complete period, so an
+       empty or withheld line stays empty instead of taking a TTM median as its line.
 VITAL  (R3-CARDS-1) An unrated bank Health card (one comparable row) with no Altman Z
        handed the persona health factor to the absolute D/E-band + FCF-sign fallback:
        D/E 2.9 and a negative FCF read 2.5 "critical" in every persona's headline score.
@@ -36,12 +39,13 @@ from app.utils import supabase_errors
 from app.services.agents import ticker_report_data_collector as C
 from app.services.agents.persona_scoring import _vital_score, compute_quality_score
 from app.services.sector_benchmark_lookup import CALENDAR_QUARTER_PERIOD_TYPE as CQ
+from app.services.sector_benchmark_lookup import BenchmarkLookupFailed, lookup_failed
 
 def _cur_year() -> str:
-    """The year the collector labels its TTM point with, read when the TEST runs — as the
-    collector reads it (a function-scoped `datetime.now(timezone.utc).year`, so there is no
-    module clock to freeze). An import-time constant broke whenever a full-suite run
-    crossed New Year between collection and execution."""
+    """The year the collector USED to label its TTM point with (removed 2026-11-13), read
+    when the TEST runs, so the tests can assert that no line carries it. An import-time
+    constant broke whenever a full-suite run crossed New Year between collection and
+    execution."""
     return str(datetime.now(timezone.utc).year)
 
 
@@ -99,29 +103,57 @@ def _cell(value, level, n=40):
 
 
 class _Lookup:
-    """Series cells per period type; one TTM cell per metric through get_benchmarks."""
+    """Series cells per period type, plus one TTM cell per metric the lookup COULD serve
+    (`get_benchmarks(..., "ttm")` / `get_current_benchmarks`), so a TTM read would find a
+    point to draw. Every call is recorded. ``raise_on`` / ``fail_on`` name the series
+    period types whose read raises / answers a `BenchmarkLookupFailed`."""
 
-    def __init__(self, series, ttm):
+    def __init__(self, series, ttm, *, raise_on=(), fail_on=()):
         self.series, self.ttm = series, ttm
+        self.raise_on, self.fail_on = set(raise_on), set(fail_on)
+        self.calls: List[tuple] = []
 
     def get_benchmark_series(self, industry, sector, metrics, period_type):
+        self.calls.append(("get_benchmark_series", period_type))
+        if period_type in self.raise_on:
+            raise RuntimeError(f"supabase read failed ({period_type})")
+        if period_type in self.fail_on:
+            return BenchmarkLookupFailed({m: {} for m in metrics})
         src = self.series.get(period_type, {})
         return {m: {k: dict(v) for k, v in src.get(m, {}).items()} for m in metrics}
 
     def get_benchmarks(self, industry, sector, metrics, period_type):
-        assert period_type == "ttm"
+        self.calls.append(("get_benchmarks", period_type))
         return {m: ({"TTM": dict(self.ttm[m])} if m in self.ttm else {}) for m in metrics}
 
     def get_current_benchmarks(self, industry, sector, metrics):
+        self.calls.append(("get_current_benchmarks", None))
         return {m: dict(self.ttm[m]) for m in metrics if m in self.ttm}
 
 
-async def _history(monkeypatch, series, ttm, *, industry, sector):
-    lookup = _Lookup(series, ttm)
+# The drill-down fetch's whole conversation with the lookup (owner decision 2026-11-13,
+# "Replace it"): the annual line and the calendar-quarter line. No TTM read of any kind.
+_LINE_READS = sorted([("get_benchmark_series", "annual"), ("get_benchmark_series", CQ)],
+                     key=repr)
+
+
+async def _history(monkeypatch, series, ttm, *, industry, sector, **lookup_kw):
+    lookup = _Lookup(series, ttm, **lookup_kw)
     monkeypatch.setattr("app.services.sector_benchmark_lookup.get_sector_benchmark_lookup",
                         lambda: lookup)
     coll = C.TickerReportDataCollector.__new__(C.TickerReportDataCollector)
-    return await coll._fetch_sector_benchmark_history(industry, sector)
+    hist = await coll._fetch_sector_benchmark_history(industry, sector)
+    # Exactly the two line reads, in either order (they run concurrently).
+    assert sorted(lookup.calls, key=repr) == _LINE_READS, lookup.calls
+    return hist
+
+
+def _assert_no_current_year_point(hist):
+    """No annual line carries a point at the current calendar year: every line ends at
+    its last complete period (the fixtures' newest annual period is 2025)."""
+    cur = _cur_year()
+    for metric, line in hist["annual"].items():
+        assert cur not in line, (metric, line)
 
 
 _GATED = ("current_ratio", "quick_ratio", "interest_coverage")
@@ -147,28 +179,57 @@ async def test_a_kept_fs_company_gets_no_sector_liquidity_or_coverage_line(monke
     with caplog.at_level(logging.INFO, logger=C.logger.name):
         hist = await _history(monkeypatch, _sector_lines(), _mature_sector_ttm(),
                               industry=_EXCHANGES, sector=sector)
+    assert not lookup_failed(hist), "a clean read is not flagged"
     for metric in _GATED:
         for granularity in ("annual", "quarterly"):
             assert metric not in hist[granularity], (metric, granularity)
             assert metric not in hist["levels"][granularity], (metric, granularity)
-    # D/E is the company's honest comparison: its sector line stays, with the TTM point.
-    assert hist["annual"]["debt_to_equity"] == {"2024": 1.3, "2025": 1.4, _cur_year(): 1.5}
+    # D/E is the company's honest comparison: its sector line stays, ending at its last
+    # complete year — the mature sector TTM median the lookup holds is not drawn as the
+    # current year's point (owner decision 2026-11-13).
+    assert hist["annual"]["debt_to_equity"] == {"2024": 1.3, "2025": 1.4}
     assert hist["levels"]["annual"]["debt_to_equity"] == "sector"
     assert hist["quarterly"]["debt_to_equity"] == {"Q2'26": 1.2}
+    assert hist["levels"]["quarterly"]["debt_to_equity"] == "sector"
+    _assert_no_current_year_point(hist)
     gate_logs = [r.getMessage() for r in caplog.records if "peer_line_gate" in r.getMessage()]
-    assert len(gate_logs) == 1 and "annual:current_ratio[financial_services_sector]" in gate_logs[0]
-    assert "ttm:interest_coverage[financial_services_sector]" in gate_logs[0]
+    assert len(gate_logs) == 1, gate_logs
+    for metric in _GATED:
+        for tag in ("annual", "quarterly"):
+            assert f"{tag}:{metric}[financial_services_sector]" in gate_logs[0], (tag, metric)
+    # No TTM cell is read, so none is gated and none is logged as another group's point.
+    assert "ttm:" not in gate_logs[0]
+    assert not [r for r in caplog.records if "TTM point" in r.getMessage()]
 
 
 @pytest.mark.asyncio
-async def test_an_empty_line_never_takes_the_fs_sector_ttm_point(monkeypatch):
-    """Without the guard, `_ttm_point_fits_line` lets a mature TTM point become an empty
-    line's WHOLE line — the bank-pooled sector median, back by another door."""
+@pytest.mark.parametrize("industry,sector", [(_EXCHANGES, "Financial Services"),
+                                             ("Software - Infrastructure", "Technology")])
+async def test_an_empty_line_stays_empty_with_no_ttm_fill(monkeypatch, industry, sector):
+    """An empty annual and quarterly answer, while the lookup holds a mature sector TTM
+    median for every metric: no line becomes a one-point TTM line. Until 2026-11-13 a
+    mature TTM point could be an empty line's WHOLE line (`_ttm_point_fits_line`), which
+    for a gated FS metric was the bank-pooled sector median back by another door; now no
+    TTM point is drawn at all, in any sector."""
+    hist = await _history(monkeypatch, {"annual": {}, CQ: {}}, _mature_sector_ttm(),
+                          industry=industry, sector=sector)
+    for tag in ("annual", "quarterly"):
+        assert not any(line for line in hist[tag].values()), (tag, hist[tag])
+        assert not any(hist["levels"][tag].values()), (tag, hist["levels"][tag])
+    assert hist["annual"].get("debt_to_equity", {}) == {}
+
+
+@pytest.mark.asyncio
+async def test_an_empty_gated_fs_line_is_withheld_not_kept_empty(monkeypatch):
+    """The FS gate still reads an empty line's unknown level as the sector's: the gated
+    metrics are dropped outright (line and level), D/E stays as an empty line."""
     hist = await _history(monkeypatch, {"annual": {}, CQ: {}}, _mature_sector_ttm(),
                           industry=_EXCHANGES, sector="Financial Services")
     for metric in _GATED:
-        assert metric not in hist["annual"] and metric not in hist["levels"]["annual"]
-    assert hist["annual"]["debt_to_equity"] == {_cur_year(): 1.5}
+        for tag in ("annual", "quarterly"):
+            assert metric not in hist[tag] and metric not in hist["levels"][tag], (tag, metric)
+    assert hist["annual"]["debt_to_equity"] == {}
+    assert hist["levels"]["annual"]["debt_to_equity"] is None
 
 
 @pytest.mark.asyncio
@@ -183,23 +244,32 @@ async def test_an_fs_line_of_unknown_level_is_withheld(monkeypatch):
 @pytest.mark.asyncio
 async def test_the_industrys_own_line_is_kept_for_a_kept_fs_industry(monkeypatch):
     series = {"annual": {"interest_coverage": {"2024": _cell(18.0, "industry", 22),
-                                               "2025": _cell(19.0, "industry", 22)}}, CQ: {}}
+                                               "2025": _cell(19.0, "industry", 22)}},
+              CQ: {"interest_coverage": {"Q2'26": _cell(17.5, "industry", 22)}}}
     ttm = {"interest_coverage": _cell(20.0, "industry", 22)}
     hist = await _history(monkeypatch, series, ttm, industry=_EXCHANGES,
                           sector="Financial Services")
-    assert hist["annual"]["interest_coverage"] == {"2024": 18.0, "2025": 19.0, _cur_year(): 20.0}
+    # The industry's own line, ending at its last complete year (no 20.0 TTM point).
+    assert hist["annual"]["interest_coverage"] == {"2024": 18.0, "2025": 19.0}
     assert hist["levels"]["annual"]["interest_coverage"] == "industry"
+    assert hist["quarterly"]["interest_coverage"] == {"Q2'26": 17.5}
+    assert hist["levels"]["quarterly"]["interest_coverage"] == "industry"
+    _assert_no_current_year_point(hist)
 
 
 @pytest.mark.asyncio
-async def test_a_dropped_sector_line_may_take_the_industrys_own_ttm_point(monkeypatch):
-    """The withheld line is the SECTOR's; a mature INDUSTRY TTM median is the company's own
-    peers (the Health card compares against it too), so it may stand as the line."""
+async def test_a_dropped_sector_line_stays_dropped_with_no_ttm_fill(monkeypatch):
+    """The withheld line is the SECTOR's. Until 2026-11-13 a mature INDUSTRY TTM median
+    (the company's own peers) could stand in as the whole line; no TTM point is drawn now,
+    so the withheld line stays withheld — the drill-down draws no peer line for it."""
     ttm = {"current_ratio": _cell(1.1, "industry", 21)}
     hist = await _history(monkeypatch, _sector_lines(), ttm, industry=_EXCHANGES,
                           sector="Financial Services")
-    assert hist["annual"]["current_ratio"] == {_cur_year(): 1.1}
-    assert hist["levels"]["annual"]["current_ratio"] == "industry"
+    for tag in ("annual", "quarterly"):
+        assert "current_ratio" not in hist[tag], tag
+        assert "current_ratio" not in hist["levels"][tag], tag
+    assert hist["annual"]["debt_to_equity"] == {"2024": 1.3, "2025": 1.4}
+    _assert_no_current_year_point(hist)
 
 
 @pytest.mark.asyncio
@@ -225,9 +295,36 @@ async def test_a_gated_industry_gets_no_line_for_a_metric_it_omits(monkeypatch, 
 async def test_every_other_sector_keeps_its_sector_lines(monkeypatch, sector, industry):
     hist = await _history(monkeypatch, _sector_lines(), _mature_sector_ttm(),
                           industry=industry, sector=sector)
+    for metric in (*_GATED, "debt_to_equity"):
+        # The sector line, ending at its last complete year (no 1.5 TTM point).
+        assert hist["annual"][metric] == {"2024": 1.3, "2025": 1.4}, metric
+        assert hist["levels"]["annual"][metric] == "sector", metric
+        assert hist["quarterly"][metric] == {"Q2'26": 1.2}, metric
+        assert hist["levels"]["quarterly"][metric] == "sector", metric
+    _assert_no_current_year_point(hist)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("broken,how", [("annual", "raise"), (CQ, "raise"),
+                                        ("annual", "flag"), (CQ, "flag")])
+async def test_a_failed_line_read_is_flagged_and_the_other_line_still_gated(monkeypatch,
+                                                                            broken, how):
+    """A read that raises or answers a `BenchmarkLookupFailed` flags the whole history (so
+    the collection stays out of the shared caches), keeps the other line, and still gates
+    it: the FS sector liquidity / coverage lines never ride a degraded result."""
+    kw = {"raise_on": {broken}} if how == "raise" else {"fail_on": {broken}}
+    hist = await _history(monkeypatch, _sector_lines(), _mature_sector_ttm(),
+                          industry=_EXCHANGES, sector="Financial Services", **kw)
+    assert isinstance(hist, BenchmarkLookupFailed) and lookup_failed(hist)
+    broken_tag, kept_tag = (("annual", "quarterly") if broken == "annual"
+                            else ("quarterly", "annual"))
+    expected = {"annual": {"2024": 1.3, "2025": 1.4}, "quarterly": {"Q2'26": 1.2}}
+    assert hist[kept_tag]["debt_to_equity"] == expected[kept_tag]
+    assert hist["levels"][kept_tag]["debt_to_equity"] == "sector"
+    assert not any(hist[broken_tag].values()), hist[broken_tag]   # nothing from the failure
     for metric in _GATED:
-        assert hist["annual"][metric] == {"2024": 1.3, "2025": 1.4, _cur_year(): 1.5}
-        assert hist["levels"]["annual"][metric] == "sector"
+        assert metric not in hist[kept_tag] and metric not in hist["levels"][kept_tag]
+    _assert_no_current_year_point(hist)
 
 
 @pytest.mark.asyncio

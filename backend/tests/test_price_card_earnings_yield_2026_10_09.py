@@ -184,7 +184,8 @@ def test_a_large_upstream_gap_is_logged_at_info_and_a_small_one_is_not(caplog):
 
 
 def test_the_payload_version_rebuilds_pre_change_rows():
-    assert vss._SNAPSHOT_PAYLOAD_VERSION == 10
+    # 11 (2026-11-13): `numeric_value` / `peer_median` on each metric.
+    assert vss._SNAPSHOT_PAYLOAD_VERSION == 11
 
 
 @pytest.mark.parametrize("pe", [20000.0, 15000.0, 9999.99])

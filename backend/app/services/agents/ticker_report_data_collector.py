@@ -52,12 +52,9 @@ import httpx
 # here under the original names so `_build_price_action` is unchanged.
 from app.services.sector_benchmark_lookup import (
     CALENDAR_QUARTER_PERIOD_TYPE,
-    MATURE_SAMPLE_FLOOR,
-    TTM_PERIOD_TYPE,
     BenchmarkLookupFailed,
     fs_industry_only,
     lookup_failed,
-    peer_floor,
 )
 from app.utils.margins import revenue_backed_margin
 from app.utils.period_labels import annual_benchmark_key, calendar_quarter_key
@@ -1302,88 +1299,11 @@ def _read_sector_history(
     return flat, failed
 
 
-def _read_ttm_peer_cells(
-    lookup: Any, industry: str, sector: str, metrics: List[str],
-) -> Tuple[Dict[str, Dict[str, Any]], bool]:
-    """The merged TTM peer cell per metric (``{metric: {value, level, n, ...}}``) and
-    whether the read FAILED. Rich cells, not `_read_sector_history`'s flat values: the
-    drill-down injects a TTM median only when it is mature, and only the cell knows its
-    sample size. A lookup exposing only the flat reader (a test double) cannot say, so it
-    yields no cell — nothing is injected — while its failure flag is still honoured.
-    Synchronous: run it via `to_thread`."""
-    rich_reader = getattr(lookup, "get_benchmarks", None)
-    if not callable(rich_reader):
-        raw = lookup.get_benchmark_values(industry, sector, metrics, TTM_PERIOD_TYPE)
-        return {}, (not isinstance(raw, dict)) or lookup_failed(raw)
-    raw = rich_reader(industry, sector, metrics, TTM_PERIOD_TYPE)
-    if not isinstance(raw, dict):
-        return {}, True
-    cells: Dict[str, Dict[str, Any]] = {}
-    for metric, periods in raw.items():
-        if not isinstance(periods, dict):
-            continue
-        # One TTM cell per metric (period_label "TTM"); tolerate another label spelling.
-        cell = periods.get("TTM")
-        if not isinstance(cell, dict):
-            cell = next((c for c in periods.values() if isinstance(c, dict)), None)
-        if cell is not None:
-            cells[metric] = cell
-    return cells, lookup_failed(raw)
-
-
-# Drill-down metrics that must never take the TTM point: a growth rate's TTM median is
-# not the same quantity as a fiscal-year YoY (and the TTM job computes none today).
-_NO_TTM_POINT_SUFFIXES = ("_yoy", "_qoq", "_growth")
-
-
-def _mature_ttm_value(
-    metric: str, cell: Any, floor: int = MATURE_SAMPLE_FLOOR,
-) -> Optional[float]:
-    """The TTM median the drill-down pins as the current year's peer point, or None.
-
-    Exactly the first two tiers of `SectorBenchmarkLookup.get_current_benchmarks` (the
-    merged TTM cell, used only when it holds at least `floor` companies — the lookup's
-    `peer_floor`: MATURE_SAMPLE_FLOOR, or 10 for a Financial Services industry), so the
-    chart's newest peer point is the Overview card's value whenever the card shows a TTM
-    median. A thin TTM cell (KO: Beverages, n=13) is never injected; the card then falls
-    back to a complete annual year, which the chart already draws at that year.
-    """
-    if any(metric.endswith(suffix) for suffix in _NO_TTM_POINT_SUFFIXES):
-        return None
-    if not isinstance(cell, dict):
-        return None
-    value = _finite_or_none(cell.get("value"))
-    n = _finite_or_none(cell.get("n"))
-    if value is None or n is None:
-        return None
-    return value if n >= floor else None
-
-
-def _ttm_point_fits_line(
-    ttm_cell: Any, line: Any, line_level: Optional[str],
-) -> bool:
-    """Whether the mature TTM median may be drawn as the current year's point of a peer
-    line, so the line stays ONE population (decision 2026-10-07):
-
-      * the line draws nothing yet → yes: the point is the whole line, one peer group;
-      * else only when the TTM cell's level ("industry"/"sector") is the line's level.
-        An industry TTM point is never put on a sector line (a thin industry's line
-        whose TTM job reached 20 companies) nor a sector TTM point on an industry line
-        (a mature industry whose TTM cell is thin); an unknown level on either side is
-        not drawn. The line then simply ends at its last complete year.
-    """
-    values = line.values() if isinstance(line, dict) else ()
-    if not any(_finite_or_none(v) is not None for v in values):
-        return True
-    ttm_level = ttm_cell.get("level") if isinstance(ttm_cell, dict) else None
-    return ttm_level in ("industry", "sector") and ttm_level == line_level
-
-
 def _withheld_peer_line_reason(
     metric: str, line_level: Optional[str], industry: Any, sector: Any,
     *, network: bool = False,
 ) -> Optional[str]:
-    """Why a drill-down peer line (or TTM point) of ``metric`` is never drawn, or None.
+    """Why a drill-down peer line of ``metric`` is never drawn, or None.
 
     ``network`` is the company's `financials_metric_gate.resolve_payment_network` verdict
     (True only for a listed non-lender member — `NON_LENDER_MEMBERS`: a payment network or
@@ -1436,8 +1356,7 @@ def _withhold_payment_network_lines(
     history: Any, *, network: bool, industry: Any, sector: Any, ticker: str,
 ) -> None:
     """Withhold, IN PLACE, every drill-down peer line a listed non-lender member's cards
-    never compare — since 2026-10-09 (NET-4) EVERY line and every TTM point injected into
-    one, on top of the liquidity / coverage lines `_fetch_sector_benchmark_history` already
+    never compare — since 2026-10-09 (NET-4) EVERY line, on top of the liquidity / coverage lines `_fetch_sector_benchmark_history` already
     withheld for the whole mixed industry (the Credit Services median is a lenders'
     yardstick). Pass 2 applies it after that fetch, which gates without a company verdict
     (it knows no ticker). ``network`` is
@@ -2463,8 +2382,19 @@ class TickerReportDataCollector:
         fail-closed default: not a non-lender member). A listed non-lender member
         (`NON_LENDER_MEMBERS`) is never read at all: `_fetch_dependent` asks
         `comparable_peer_metrics` first, which leaves it nothing to compare; should a read
-        land for one, pass 2's `_withhold_payment_network_lines` withholds every line and
-        TTM point of it (this method knows no ticker)."""
+        land for one, pass 2's `_withhold_payment_network_lines` withholds every line of it
+        (this method knows no ticker).
+
+        No TTM point (owner decision 2026-11-13, "Replace it", superseding 2026-06-24's "keep
+        fiscal history line + TTM current point"): every line ends at its last served
+        complete period. The TTM median used to be drawn as the current calendar year's
+        annual point; a stored current-year row is never served before year end + 75 days,
+        so the only company that ever had a point there was an off-calendar filer whose
+        fiscal year had already CLOSED (ORCL May, MSFT June, AAPL September, NVDA January),
+        and the legend compared that closed year's ratio with today's median (ORCL: "1.42×
+        vs industry" in red, against 0.62× TTM to TTM, the card's own verdict). The current
+        comparison is now the drill-down legend's second line, carried on each card row as
+        `current_value` / `current_peer_median` (`_snapshot_to_card`)."""
         from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
         from app.services.sector_benchmark_service import _normalize_sector
 
@@ -2475,13 +2405,11 @@ class TickerReportDataCollector:
         lookup = get_sector_benchmark_lookup()
         metrics = list(_SECTOR_HISTORY_METRIC_NAMES)
         # Annual and calendar-quarter LINES (`_read_peer_line`: one peer group per metric;
-        # an incomplete period is never served), plus the TTM current-snapshot cells
-        # (`_read_ttm_peer_cells`: the merged single value the Overview card shows) to pin
-        # the chart's current-year point. Each read reports whether it FAILED, which the
-        # flat `get_benchmark_values` view cannot: it rebuilt a plain dict and dropped the
-        # `BenchmarkLookupFailed` flag, so a Supabase error read like "no rows" and the
+        # an incomplete period is never served). Each read reports whether it FAILED, which
+        # the flat `get_benchmark_values` view cannot: it rebuilt a plain dict and dropped
+        # the `BenchmarkLookupFailed` flag, so a Supabase error read like "no rows" and the
         # report froze a missing sector line into every shared cache (round 3, P6/P23).
-        period_types = ("annual", CALENDAR_QUARTER_PERIOD_TYPE, TTM_PERIOD_TYPE)
+        period_types = ("annual", CALENDAR_QUARTER_PERIOD_TYPE)
         reads = await asyncio.gather(
             asyncio.to_thread(_read_peer_line, lookup, industry, sector, metrics, "annual"),
             # Calendar-quarter rows (migration 184), joined by `_history_period_id`.
@@ -2489,7 +2417,6 @@ class TickerReportDataCollector:
                 _read_peer_line, lookup, industry, sector, metrics,
                 CALENDAR_QUARTER_PERIOD_TYPE,
             ),
-            asyncio.to_thread(_read_ttm_peer_cells, lookup, industry, sector, metrics),
             return_exceptions=True,
         )
         failed_reads: List[str] = []
@@ -2508,16 +2435,14 @@ class TickerReportDataCollector:
                 failed_reads.append(period_type)
         annual, annual_levels = loaded.get("annual", ({}, {}))
         quarterly, quarterly_levels = loaded.get(CALENDAR_QUARTER_PERIOD_TYPE, ({}, {}))
-        (ttm_cells,) = loaded.get(TTM_PERIOD_TYPE, ({},))
 
         # Liquidity / coverage lines the Health card never compares against
         # (`_withheld_peer_line_reason`): a Financial Services SECTOR median of current
         # ratio, quick ratio or interest coverage (SPGI, ICE, CME: thin industries fall to
         # the sector line), a metric meaningless for the company's own industry, or ANY
         # line of these metrics in a mixed industry (V's industry line pools lenders). The
-        # line AND its level go, and no TTM point is injected in their place below — an
-        # empty line would otherwise take the sector TTM point as its whole line. (Every
-        # line of a listed non-lender member goes in pass 2 — it is not read at all:
+        # line AND its level go. (Every line of a listed non-lender member goes in pass 2 —
+        # it is not read at all:
         # `_fetch_dependent`; `_withhold_payment_network_lines` is the backstop.)
         withheld: List[str] = []
         for tag, line, line_levels in (
@@ -2535,43 +2460,6 @@ class TickerReportDataCollector:
                 ):
                     withheld.append(f"{tag}:{metric}[{reason}]")
 
-        # "Keep history + TTM current": the CURRENT calendar year's annual point is the
-        # TTM median — a full rolling 12 months. The stored annual cell of the current
-        # year is never served (its year has not ended + 75 days), so this never
-        # overwrites a real row. Only a MATURE TTM cell is injected (`_mature_ttm_value`,
-        # the same rule as the Overview card's current benchmark); a thin one leaves the
-        # current year blank. And only onto a line of the SAME peer group
-        # (`_ttm_point_fits_line`): an industry TTM point on a sector line, or the
-        # reverse, would make the line's last step a change of population. A company
-        # whose latest period isn't the current year aligns to its own fiscal point, so
-        # the injected point is simply unused for it. `_read_peer_line` returns fresh
-        # dicts → safe to mutate. Annual only (quarterly multiples are single-quarter
-        # scale; an annual-scale TTM would mix scales).
-        from datetime import datetime, timezone
-        cur_year = str(datetime.now(timezone.utc).year)
-        other_group: List[str] = []
-        ttm_floor = peer_floor(industry, sector)
-        for metric, cell in ttm_cells.items():
-            value = _mature_ttm_value(metric, cell, ttm_floor)
-            if value is None:
-                continue
-            reason = _withheld_peer_line_reason(metric, cell.get("level"), industry, sector)
-            if reason is not None:
-                withheld.append(f"ttm:{metric}[{reason}]")
-                continue
-            if not _ttm_point_fits_line(cell, annual.get(metric), annual_levels.get(metric)):
-                other_group.append(f"{metric}({cell.get('level')}≠{annual_levels.get(metric)})")
-                continue
-            annual.setdefault(metric, {})[cur_year] = value
-            # The point may be the whole line (an otherwise empty line): name its group.
-            if annual_levels.get(metric) is None and cell.get("level") in ("industry", "sector"):
-                annual_levels[metric] = cell["level"]
-        if other_group:
-            logger.info(
-                "[report-sector-history] industry=%r sector=%r: no %s TTM point on %s — "
-                "the TTM median is another peer group's than the line's; the line ends at "
-                "its last complete year", industry, sector, cur_year, ", ".join(other_group),
-            )
         if withheld:
             logger.info(
                 "[report-sector-history] industry=%r sector=%r step=peer_line_gate: "
@@ -5525,8 +5413,7 @@ _SECTOR_METRIC_BY_HISTORY_KEY: Dict[str, str] = {
 # history_key → the sector_benchmarks metric whose line it is the RECIPROCAL of. Earnings yield
 # is sector-compared on the valuation card, and since Price-card payload v8 (owner decision
 # 2026-10-09) that comparison is 1 / P/E against 1 / the P/E median. Its drill-down peer line is
-# the same: 100 / the P/E line of the same period and peer group (the injected TTM point
-# included), never the STORED earnings_yield medians (net income ÷ market cap — a few percent off
+# the same: 100 / the P/E line of the same period and peer group, never the STORED earnings_yield medians (net income ÷ market cap — a few percent off
 # median 1/P/E where preferred dividends are common), which are no longer read. Withholding the
 # P/E line withholds this one with it. (Odd peer counts: median(1/P/E) = 1/median(P/E) exactly.)
 _RECIPROCAL_SECTOR_LINE_BY_HISTORY_KEY: Dict[str, str] = {
@@ -6012,6 +5899,34 @@ def _growth_row_values(metrics: Any) -> Dict[str, float]:
     return values
 
 
+def _current_comparison(m: Any, rows: Any) -> Dict[str, Any]:
+    """The drill-down's "Current" legend line for one card row (owner decision 2026-11-13):
+    ``current_value`` / ``current_peer_median`` / ``current_score``, from the row's own
+    `numeric_value` / `peer_median` / `score` — the comparison the card itself printed and
+    scored, so the line can never disagree with the card. Keys are emitted only when they
+    hold a finite number (a NaN would 500 the report and cannot be stored in jsonb); the
+    median and the score travel together. Earnings Yield is unscored by design, so it takes
+    the P/E row's score: its median is 1 / the P/E row's usable median and its value 1 / the
+    displayed P/E, so the P/E bands judge it exactly (cheap P/E = high yield = good).
+    A snapshot cached before these fields existed yields nothing — period line only."""
+    out: Dict[str, Any] = {}
+    value = _finite_or_none(getattr(m, "numeric_value", None))
+    if value is not None:
+        out["current_value"] = value
+    median = _finite_or_none(getattr(m, "peer_median", None))
+    if median is None:
+        return out
+    out["current_peer_median"] = median
+    score = getattr(m, "score", None)
+    if getattr(m, "metric_key", None) == "earnings_yield":
+        pe_row = next(
+            (r for r in (rows or []) if getattr(r, "metric_key", None) == "pe"), None)
+        score = getattr(pe_row, "score", None) if pe_row is not None else None
+    if isinstance(score, int) and not isinstance(score, bool):
+        out["current_score"] = score
+    return out
+
+
 def _snapshot_to_card(
     title: str,
     snap: Optional[SnapshotItemResponse],
@@ -6084,6 +5999,7 @@ def _snapshot_to_card(
                 md["sector_quarterly_history"] = h["sector_quarterly"]
                 if h.get("sector_quarterly_level"):
                     md["sector_quarterly_level"] = h["sector_quarterly_level"]
+            md.update(_current_comparison(m, snap.metrics))
         metrics.append(md)
     if extra_metrics:
         metrics.extend(extra_metrics)
